@@ -1,0 +1,20 @@
+# encryption_key: 32-byte AES key used for all at-rest secret encryption.
+# Covers: webhook signing secrets in fused_workspace_configs, auth credential
+# encryption throughout the Registry, and connect session state signing.
+# Override in production via the FUSED_ENCRYPTION_KEY environment variable.
+# Generate a secure key: openssl rand -base64 32
+encryption_key: "opensync-default-encrypt-key-32b"
+database:
+  url: "postgres://opensync:password@localhost:5432/opensync?sslmode=disable"
+ui_url: "http://localhost:5173"
+
+engine:
+  registry_endpoint: "http://127.0.0.1:8080/graphql"
+  account_id: "engine-default-account"
+  worker_counts:
+    mcp_analytics: 2
+    webhook_config: 2
+    webhook_analytics: 2
+
+observability:
+  otel_target: "localhost:4317"
