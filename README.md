@@ -1,6 +1,8 @@
 <div align="center">
   <h1>Fused Engine</h1>
-  <p>The high-performance Data Plane for Fused</p>
+  <p>The high-performance Data Plane for <a href="https://usefused.com">Fused</a></p>
+  <br />
+  <a href="https://usefused.com"><strong>Explore usefused.com</strong></a>
 </div>
 
 ---
@@ -64,7 +66,7 @@ Flags:
   -h, --help                 help for start
       --license-key string   License Key for Registry handshake
       --port string          HTTP port for API and UI (default "8081")
-      --ui-url string        URL for the UI (overrides engine.yaml)
+      --webhook-port string  Dedicated HTTP port for Webhook Ingress (optional)
 
 Global Flags:
       --config string   Path to configuration file (default "engine.yaml")
