@@ -16,7 +16,7 @@ For businesses, this zero-trust architecture means your engineering teams can mo
 ## Features
 - **Zero-Trust Execution**: Process webhooks and MCP requests inside your own VPC.
 - **Embedded NATS JetStream**: Instantly and reliably queues incoming webhooks and broadcasts WebSocket events without requiring an external NATS cluster or Redis instance to be deployed alongside it.
-- **Headless Mode**: An ultra-lightweight Docker variant (`fused-alpine`) optimized for serverless and Kubernetes deployments.
+- **Headless Mode**: An ultra-lightweight Docker variant (`ghcr.io/usefused/fused:alpine`) optimized for serverless and Kubernetes deployments.
 - **Resilient**: Fully caches execution metadata locally to withstand network partitions.
 
 ## Prerequisites
@@ -39,7 +39,8 @@ mv fused-engine /usr/local/bin/
 For containerized environments, we provide both full and slim/alpine images. The Alpine image is optimized for maximum performance and minimal footprint.
 
 ```bash
-docker pull ghcr.io/usefused/engine:latest
+docker pull ghcr.io/usefused/fused:latest
+docker pull ghcr.io/usefused/fused:alpine
 ```
 
 ## Quick Start
@@ -58,7 +59,7 @@ fused-engine start
 By default, the Engine will automatically detect that no external NATS cluster is configured and will boot its embedded NATS server on port `4222`. It will spin up the REST API on port `8081`, and the SDK gRPC connection on port `50051`.
 
 ### Docker Compose Example (with UI)
-Our full Docker image (`latest`) bundles both the Engine and the Admin Dashboard. A basic Docker Compose setup looks like this:
+Our full Docker image (`latest`) bundles both the Engine and the Admin Dashboard. The headless image (`alpine`) runs the same Engine API without the embedded UI.
 
 ```yaml
 version: '3.8'
@@ -73,10 +74,9 @@ services:
       - "5432:5432"
 
   engine:
-    image: ghcr.io/usefused/engine:latest
+    image: ghcr.io/usefused/fused:latest
     ports:
-      - "3000:3000"   # Admin Dashboard
-      - "8081:8081"   # Engine API
+      - "8081:8081"   # Engine API and embedded Admin Dashboard
       - "50051:50051" # SDK gRPC
     environment:
       - FUSED_DATABASE_URL=postgres://fused:password@postgres:5432/fused?sslmode=disable
@@ -85,7 +85,11 @@ services:
       - postgres
 ```
 
-Once running, you can access the Admin Dashboard at `http://localhost:3000`.
+Once running, you can access the Admin Dashboard and Engine API at `http://localhost:8081`.
+
+## Use the Engine with `fused-cli`
+
+Install `fused-cli` from the [CLI releases](https://github.com/Usefused/cli/releases), then point it at this Engine with `fused-cli config set engine-url <engine-url>`.
 
 ## Configuration
 
@@ -101,7 +105,7 @@ FUSED_DATABASE_URL="postgres://fused:password@localhost:5432/fused?sslmode=disab
 FUSED_LICENSE_KEY="<provided-by-fused>"
 
 # Tell the Engine where the Admin UI is hosted to configure CORS properly.
-# (Defaults to http://localhost:3000 in Docker, or you can use the --ui-url flag)
+# (Defaults to the embedded Engine UI on http://localhost:8081, or you can use the --ui-url flag)
 FUSED_UI_URL="https://admin.your-company.com"
 
 # (Optional) If you have a separate external NATS cluster, set this to override the embedded server.
@@ -128,13 +132,4 @@ Flags:
 
 Global Flags:
       --config string   Path to configuration file (default "engine.yaml")
-```
-
-## Connecting from `fused-cli`
-
-Once the Engine is running, you can connect your CLI to it to apply workspace configurations:
-
-```bash
-fused-cli config set engine-url http://localhost:8081
-fused-cli config set api-key <your-api-key>
 ```
