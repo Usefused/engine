@@ -4,13 +4,17 @@
 # Override in production via the FUSED_ENCRYPTION_KEY environment variable.
 # Generate a secure key: openssl rand -base64 32
 encryption_key: "opensync-default-encrypt-key-32b"
+
+# database.url: Postgres connection string for the Engine's data store.
+# Override in production via FUSED_DATABASE_URL or DATABASE_URL environment variable.
 database:
   url: "postgres://opensync:password@localhost:5432/opensync?sslmode=disable"
 ui_url: "http://localhost:5173"
 
 engine:
-  registry_endpoint: "http://127.0.0.1:8080/graphql"
-  account_id: "engine-default-account"
+  # license_key: License key for Registry handshake (authentication and entitlements).
+  # Override in production via FUSED_LICENSE_KEY environment variable.
+  # If omitted, Engine runs in Local Mode (offline, catalogue search disabled).
   worker_counts:
     mcp_analytics: 2
     webhook_config: 2
