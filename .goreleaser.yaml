@@ -3,9 +3,8 @@ project_name: fused
 
 before:
   hooks:
-    - bash -c 'cd runtime/mcp && npm ci && npm run build'
-    - bash -c 'cd ui && npm ci && npm run build'
-    - bash -c 'rm -rf ui-build && cp -R ui/build/client ui-build'
+    - make runtime-mcp-build
+    - make embed-ui
 
 builds:
   - id: fused-engine
