@@ -37,14 +37,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_PAT }}
 
-      - name: Generate engine release notes
-        run: scripts/generate-engine-release-notes.sh release-notes.md
-
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v5
         with:
           version: '~> v2'
-          args: release --clean --release-notes release-notes.md
+          args: release --clean
         env:
           # Use the PAT to push releases to the target repository (Usefused/engine)
           GITHUB_TOKEN: ${{ secrets.GHCR_PAT }}
