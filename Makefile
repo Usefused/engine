@@ -4,10 +4,10 @@ VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo "0.1.0")
 COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo "dev")
 IMAGE_NAME ?= ghcr.io/usefused/engine
 
-build: embed-ui
+build: embed-ui runtime-mcp-build
 	go build -ldflags="-s -w -X github.com/Usefused/engine/cmd/engine/cmd.Version=$(VERSION) -X github.com/Usefused/engine/cmd/engine/cmd.BuildHash=$(COMMIT)" -o fused-engine ./cmd/engine
 
-build-headless:
+build-headless: runtime-mcp-build
 	go build -tags headless -ldflags="-s -w -X github.com/Usefused/engine/cmd/engine/cmd.Version=$(VERSION) -X github.com/Usefused/engine/cmd/engine/cmd.BuildHash=$(COMMIT)" -o fused-engine-headless ./cmd/engine
 
 ui-install:

@@ -35,6 +35,7 @@ Cloud license key. See [Commercial Use](COMMERCIAL-USE.md).
 
 - **PostgreSQL 16+**
 - **Fused License Key** (Provided by your Fused onboarding contact)
+- **Node.js 18+** (Required in your `$PATH` *only* if you are running the bare binary and plan to use MCP functionality. Docker images already include it.)
 
 ## Installation
 

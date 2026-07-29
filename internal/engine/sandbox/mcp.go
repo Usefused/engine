@@ -20,6 +20,7 @@ import (
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/shared/messaging"
+	"github.com/Usefused/engine/runtime"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -185,7 +186,15 @@ func buildMCPCommand(ctx context.Context, sessionID string, fixture *Fixture) (*
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.CommandContext(ctx, "node", sharedRuntimeEntrypointPath())
+	
+	entrypoint := sharedRuntimeEntrypointPath()
+	if entrypoint == "" {
+		entrypoint = filepath.Join(sessionTmpDir, "bundle.js")
+		if err := os.WriteFile(entrypoint, runtime.MCPSharedRuntimeBundle, 0600); err != nil {
+			return nil, fmt.Errorf("write mcp bundle: %w", err)
+		}
+	}
+	cmd := exec.CommandContext(ctx, "node", entrypoint)
 
 	cmd.Env = []string{
 		// Memory limits — keep the Node process lean.
@@ -215,7 +224,7 @@ func sharedRuntimeEntrypointPath() string {
 	if p := os.Getenv("FUSED_SHARED_RUNTIME_PATH"); p != "" {
 		return p
 	}
-	return filepath.Join("runtime", "mcp", "dist", "server.js")
+	return ""
 }
 
 // prepareSessionFixture loads the SDK's scope and derives its own MCP
