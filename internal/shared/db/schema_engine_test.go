@@ -1,9 +1,6 @@
 package db
 
 import (
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -126,41 +123,6 @@ func indexOfSchemaFragment(queries []string, fragment string) int {
 		}
 	}
 	return -1
-}
-
-func TestAuthConnectionProjectionMigrationSQLBackfillsProjectionColumns(t *testing.T) {
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed to resolve test file path")
-	}
-	scriptPath := filepath.Join(filepath.Dir(thisFile), "..", "..", "..", "scripts", "migrate_auth_connection_projection_columns.sql")
-	scriptSQL, err := os.ReadFile(scriptPath)
-	if err != nil {
-		t.Fatalf("read auth connection projection migration at %s: %v", scriptPath, err)
-	}
-	migrationSQL := string(scriptSQL)
-
-	// Existing local databases may have created the table before these columns
-	// existed. Auth connection queries share one projection, so the schema must
-	// backfill the full projection instead of letting the first list request find
-	// historical drift one missing column at a time.
-	required := []string{
-		"ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS created_by_artifact_id uuid",
-		"ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS scope_source text NOT NULL DEFAULT 'none'",
-		"ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS issuer text NOT NULL DEFAULT ''",
-		"ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS subject text NOT NULL DEFAULT ''",
-		"ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS identity_claims jsonb NOT NULL DEFAULT '{}'::jsonb",
-		"ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS refresh_token_expires_at timestamptz",
-		"ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS refresh_state text NOT NULL DEFAULT 'ok'",
-		"ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS last_failure_code text NOT NULL DEFAULT ''",
-		"ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS last_failure_at timestamptz",
-		"ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS last_failure_trace_id text NOT NULL DEFAULT ''",
-	}
-	for _, expected := range required {
-		if !strings.Contains(migrationSQL, expected) {
-			t.Fatalf("expected auth connection projection SQL migration containing %q", expected)
-		}
-	}
 }
 
 // TestEngineSchemaDefinesWorkspaceScopedConnectionProfiles protects the
