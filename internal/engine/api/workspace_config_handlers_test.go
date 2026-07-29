@@ -2687,7 +2687,7 @@ func TestWorkspaceConfigApplyHandler_FirstApplyDoesNotRemoveUnmanagedServices(t 
 	r := chi.NewRouter()
 	r.Post("/workspace/config/apply", WorkspaceConfigApplyHandler(configStore, s, &mockRegistryClient{name: "test"}, testMasterKey))
 
-	body := []byte(fmt.Sprintf(`{"plan_id": "%s", "source_hash": "abc"}`, planID))
+	body := fmt.Appendf(nil, `{"plan_id": "%s", "source_hash": "abc"}`, planID)
 	req := httptest.NewRequest(http.MethodPost, "/workspace/config/apply", bytes.NewReader(body))
 	req.Header.Set("X-API-Key", "fsk_test")
 
@@ -2715,7 +2715,7 @@ func TestWorkspaceConfigApplyHandler_EnablesVersionsInConfigOrder(t *testing.T) 
 			SourceHash:      "abc",
 			BaseGeneration:  0,
 			Status:          store.ConfigPlanStatusPending,
-			ResolvedPayload: []byte(fmt.Sprintf(`{"services":{"okta":{"service_id":"%s","versions":["2026-06-01","2026-08-01","2026-07-01"],"resolved_versions":[{"version":"2026-06-01","service_version_id":"%s"},{"version":"2026-08-01","service_version_id":"%s"},{"version":"2026-07-01","service_version_id":"%s"}]}}}`, svcID, uuid.NewString(), uuid.NewString(), uuid.NewString())),
+			ResolvedPayload: fmt.Appendf(nil, `{"services":{"okta":{"service_id":"%s","versions":["2026-06-01","2026-08-01","2026-07-01"],"resolved_versions":[{"version":"2026-06-01","service_version_id":"%s"},{"version":"2026-08-01","service_version_id":"%s"},{"version":"2026-07-01","service_version_id":"%s"}]}}}`, svcID, uuid.NewString(), uuid.NewString(), uuid.NewString()),
 		},
 		state: &store.ConfigState{ConfigKey: "workspace", Generation: 0},
 	}
@@ -2723,7 +2723,7 @@ func TestWorkspaceConfigApplyHandler_EnablesVersionsInConfigOrder(t *testing.T) 
 	r := chi.NewRouter()
 	r.Post("/workspace/config/apply", WorkspaceConfigApplyHandler(configStore, s, &mockRegistryClient{name: "test"}, testMasterKey))
 
-	body := []byte(fmt.Sprintf(`{"plan_id": "%s", "source_hash": "abc"}`, planID))
+	body := fmt.Appendf(nil, `{"plan_id": "%s", "source_hash": "abc"}`, planID)
 	req := httptest.NewRequest(http.MethodPost, "/workspace/config/apply", bytes.NewReader(body))
 	req.Header.Set("X-API-Key", "fsk_test")
 
@@ -2768,7 +2768,7 @@ func TestWorkspaceConfigApplyHandler_AppliesOwnedServicePublicChange(t *testing.
 	r := chi.NewRouter()
 	r.Post("/workspace/config/apply", WorkspaceConfigApplyHandler(configStore, s, verifier, testMasterKey))
 
-	body := []byte(fmt.Sprintf(`{"plan_id": "%s", "source_hash": "abc"}`, planID))
+	body := fmt.Appendf(nil, `{"plan_id": "%s", "source_hash": "abc"}`, planID)
 	req := httptest.NewRequest(http.MethodPost, "/workspace/config/apply", bytes.NewReader(body))
 	req.Header.Set("X-API-Key", "fsk_test")
 
@@ -2821,7 +2821,7 @@ func TestWorkspaceConfigApplyHandler_AppliesVersionPublicAndExecutionPolicyChang
 	r := chi.NewRouter()
 	r.Post("/workspace/config/apply", WorkspaceConfigApplyHandler(configStore, s, verifier, testMasterKey))
 
-	body := []byte(fmt.Sprintf(`{"plan_id": "%s", "source_hash": "abc"}`, planID))
+	body := fmt.Appendf(nil, `{"plan_id": "%s", "source_hash": "abc"}`, planID)
 	req := httptest.NewRequest(http.MethodPost, "/workspace/config/apply", bytes.NewReader(body))
 	req.Header.Set("X-API-Key", "fsk_test")
 
@@ -2864,20 +2864,20 @@ func TestWorkspaceConfigApplyHandler_VersionForceRemovalCreatesNotification(t *t
 			SourceHash:      "abc",
 			BaseGeneration:  1,
 			Status:          store.ConfigPlanStatusPending,
-			ResolvedPayload: []byte(fmt.Sprintf(`{"services":{"okta":{"service_id":"%s","versions":["2026-08-01"],"resolved_versions":[{"version":"2026-08-01","service_version_id":"%s"}]}}}`, svcID, uuid.NewString())),
-			Actions:         []byte(fmt.Sprintf(`[{"id":"disable_service_version:%s:2026-07-01","type":"disable_service_version","service_id":"%s","version":"2026-07-01","decision":"force_remove","impacted_sdk_configs":["sdk:test"]}]`, svcID, svcID)),
+			ResolvedPayload: fmt.Appendf(nil, `{"services":{"okta":{"service_id":"%s","versions":["2026-08-01"],"resolved_versions":[{"version":"2026-08-01","service_version_id":"%s"}]}}}`, svcID, uuid.NewString()),
+			Actions:         fmt.Appendf(nil, `[{"id":"disable_service_version:%s:2026-07-01","type":"disable_service_version","service_id":"%s","version":"2026-07-01","decision":"force_remove","impacted_sdk_configs":["sdk:test"]}]`, svcID, svcID),
 		},
 		state: &store.ConfigState{
 			ConfigKey:        "workspace",
 			Generation:       1,
-			ManagedResources: []byte(fmt.Sprintf(`{"%s":{"service_id":"%s","versions":["2026-07-01","2026-08-01"]}}`, svcID, svcID)),
+			ManagedResources: fmt.Appendf(nil, `{"%s":{"service_id":"%s","versions":["2026-07-01","2026-08-01"]}}`, svcID, svcID),
 		},
 	}
 
 	r := chi.NewRouter()
 	r.Post("/workspace/config/apply", WorkspaceConfigApplyHandler(configStore, s, &mockRegistryClient{name: "test"}, testMasterKey))
 
-	body := []byte(fmt.Sprintf(`{"plan_id": "%s", "source_hash": "abc"}`, planID))
+	body := fmt.Appendf(nil, `{"plan_id": "%s", "source_hash": "abc"}`, planID)
 	req := httptest.NewRequest(http.MethodPost, "/workspace/config/apply", bytes.NewReader(body))
 	req.Header.Set("X-API-Key", "fsk_test")
 
