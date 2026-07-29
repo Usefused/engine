@@ -336,7 +336,7 @@ func SDKWebSocketHandler(configStore store.ConfigRepository, s store.Store, nats
 
 		msgMap := make(map[string]*nats.Msg)
 		filterSubjects := buildFilterSubjects(accountID, webhookLabel, validEvents)
-		
+
 		sub, err := setupWebhookConsumer(ctx, thread, natsClient.JS, accountID, initMsg.ReceiverName, filterSubjects, natsClient, conn, msgMap)
 		if err != nil {
 			return
