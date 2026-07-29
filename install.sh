@@ -1,9 +1,9 @@
 #!/bin/bash
 set -e
 
-# Fused Engine & CLI Installation Script
+# Fused Engine Installation Script
 # This script detects the OS and Architecture, downloads the latest Engine release from GitHub,
-# installs the `fused-engine` binary, and then automatically installs the `fused-cli`.
+# and installs the `fused-engine` binary.
 
 REPO="Usefused/engine"
 BINARY="fused-engine"
@@ -46,9 +46,9 @@ fi
 
 echo "=> Installing Fused Engine version ${TARGET_VERSION}"
 
-# Construct the download URL based on GoReleaser naming convention
-# Example: fused-engine_Linux_arm64.tar.gz
-TAR_NAME="${BINARY}_${OS}_${ARCH}.tar.gz"
+# Construct the download URL based on GoReleaser naming convention.
+# Example: fused_Linux_arm64.tar.gz
+TAR_NAME="fused_${OS}_${ARCH}.tar.gz"
 DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${TARGET_VERSION}/${TAR_NAME}"
 
 # Create a temporary directory
@@ -72,10 +72,5 @@ cd - > /dev/null
 rm -rf "$TMP_DIR"
 
 echo "=> Fused Engine installed successfully!"
-
-# Now install the CLI
-echo "=> Proceeding to install the Fused CLI..."
-curl -sSL https://raw.githubusercontent.com/Usefused/cli/main/install.sh | bash
-
-echo "=> Full installation complete!"
-echo "=> Run 'fused-engine start' or 'fused-cli --help' to get started."
+echo "=> Install fused-cli separately from https://github.com/Usefused/cli/releases when you need the CLI."
+echo "=> Run 'fused-engine start' to get started."

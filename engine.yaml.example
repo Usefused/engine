@@ -1,20 +1,23 @@
 # encryption_key: 32-byte AES key used for all at-rest secret encryption.
 # Covers: webhook signing secrets in fused_workspace_configs, auth credential
-# encryption throughout the Registry, and connect session state signing.
-# Override in production via the FUSED_ENCRYPTION_KEY environment variable.
+# encryption in Engine-local storage, and connect session state signing.
+#
+# SECURITY WARNING: this default is publicly known (it's committed to a
+# public repo) -- anyone can use it to decrypt secrets encrypted with it.
+# Never use it beyond local/throwaway dev. Override in production via the
+# FUSED_ENCRYPTION_KEY environment variable.
 # Generate a secure key: openssl rand -base64 32
-encryption_key: "opensync-default-encrypt-key-32b"
+encryption_key: "fused-default-encrypt-key-32b"
 
 # database.url: Postgres connection string for the Engine's data store.
 # Override in production via FUSED_DATABASE_URL or DATABASE_URL environment variable.
 database:
-  url: "postgres://opensync:password@localhost:5432/opensync?sslmode=disable"
+  url: "postgres://fused:password@localhost:5432/fused?sslmode=disable"
 ui_url: "http://localhost:5173"
 
 engine:
   # license_key: License key for Registry handshake (authentication and entitlements).
   # Override in production via FUSED_LICENSE_KEY environment variable.
-  # If omitted, Engine runs in Local Mode (offline, catalogue search disabled).
   worker_counts:
     mcp_analytics: 2
     webhook_config: 2

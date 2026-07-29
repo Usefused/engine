@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1
+
+FROM alpine:3.23 AS engine-runtime
+
+WORKDIR /app
+
+# Node and npm remain part of the runtime because MCP sessions execute in
+# isolated Node processes and initialize their shared runtime dependencies.
+RUN apk upgrade --no-cache && \
+    apk add --no-cache bash nodejs npm su-exec nats-server tini
+
+# GoReleaser copies the selected binary to the root context. Headless release
+# images pass ENGINE_BINARY=fused-engine-headless but keep /app/fused-engine as
+# the in-container command name.
+ARG ENGINE_BINARY=fused-engine
+COPY ${ENGINE_BINARY} /app/fused-engine
+COPY engine.yaml /app/engine.yaml
+COPY entrypoint.sh /app/entrypoint.sh
+COPY runtime /app/runtime
+RUN cd /app/runtime/mcp && npm ci --omit=dev
+
+RUN addgroup -S fused && adduser -S -G fused fused && \
+    mkdir -p /app/data/sandboxes && \
+    chown -R fused:fused /app
+
+EXPOSE 8081 50051
+
+ENTRYPOINT ["/sbin/tini", "--", "/app/entrypoint.sh"]
+CMD ["/app/fused-engine", "start"]

@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.0'
+          cache-dependency-path: go.sum
+
+      - name: Boundary guards
+        run: |
+          set -euo pipefail
+          ! rg -n '"github.com/fused/integration-registry|"github.com/Usefused/engine/internal/registry|"github.com/Usefused/engine/cmd/registry' --glob '*.go'
+          ! rg -n 'func InitRegistryPostgres|func initRegistrySchema|func registrySchemaQueries' internal/shared/db
+
+      - name: Build headless
+        run: go build -tags headless -o /tmp/fused-engine-headless ./cmd/engine
+
+      - name: Test headless
+        run: go test -tags headless ./...
+
+      - name: Prepare embedded UI
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+          cache: npm
+          cache-dependency-path: |
+            ui/package-lock.json
+            runtime/mcp/package-lock.json
+
+      - name: Test MCP runtime
+        run: |
+          cd runtime/mcp
+          npm ci
+          npm run typecheck
+          npm test
+          npm run build
+
+      - name: Build UI
+        run: |
+          cd ui
+          npm ci
+          npm run build
+
+      - name: Build embedded
+        run: |
+          rm -rf ui-build
+          cp -R ui/build/client ui-build
+          go build -o /tmp/fused-engine ./cmd/engine
+
+      - name: Test embedded
+        run: go test ./...
+
+      - name: Build Docker images
+        run: |
+          docker build --target full -t fused-engine:test .
+          docker build --target headless -t fused-engine:test-headless .
+
+      - name: GoReleaser config
+        uses: goreleaser/goreleaser-action@v5
+        with:
+          version: '~> v2'
+          args: check

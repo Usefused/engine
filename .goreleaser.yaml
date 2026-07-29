@@ -1,0 +1,183 @@
+version: 2
+project_name: fused
+
+before:
+  hooks:
+    - bash -c 'cd runtime/mcp && npm ci && npm run build'
+    - bash -c 'cd ui && npm ci && npm run build'
+    - bash -c 'rm -rf ui-build && cp -R ui/build/client ui-build'
+
+builds:
+  - id: fused-engine
+    main: ./cmd/engine
+    binary: fused-engine
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/Usefused/engine/cmd/engine/cmd.Version={{.Version}} -X github.com/Usefused/engine/cmd/engine/cmd.BuildHash={{.FullCommit}}
+
+  - id: fused-engine-headless
+    main: ./cmd/engine
+    binary: fused-engine-headless
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    tags:
+      - headless
+    ldflags:
+      - -s -w -X github.com/Usefused/engine/cmd/engine/cmd.Version={{.Version}} -X github.com/Usefused/engine/cmd/engine/cmd.BuildHash={{.FullCommit}}
+
+dockers:
+  # The full engine image
+  - id: engine-full
+    use: buildx
+    goos: linux
+    goarch: amd64
+    image_templates:
+      - "ghcr.io/usefused/engine:{{ .Tag }}"
+      - "ghcr.io/usefused/engine:latest"
+      - "ghcr.io/usefused/engine:{{ .Tag }}-amd64"
+    ids:
+      - fused-engine
+    dockerfile: Dockerfile.goreleaser
+    extra_files:
+      - engine.yaml
+      - entrypoint.sh
+      - runtime/
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.source=https://github.com/usefused/engine"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+
+  - id: engine-full-arm64
+    use: buildx
+    goos: linux
+    goarch: arm64
+    image_templates:
+      - "ghcr.io/usefused/engine:{{ .Tag }}-arm64"
+    ids:
+      - fused-engine
+    dockerfile: Dockerfile.goreleaser
+    extra_files:
+      - engine.yaml
+      - entrypoint.sh
+      - runtime/
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.source=https://github.com/usefused/engine"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+
+  # The headless engine image uses the same runtime contract without embedding UI assets.
+  - id: engine-slim
+    use: buildx
+    goos: linux
+    goarch: amd64
+    image_templates:
+      - "ghcr.io/usefused/engine:{{ .Tag }}-headless"
+      - "ghcr.io/usefused/engine:headless"
+      - "ghcr.io/usefused/engine:{{ .Tag }}-headless-amd64"
+    ids:
+      - fused-engine-headless
+    dockerfile: Dockerfile.goreleaser
+    extra_files:
+      - engine.yaml
+      - entrypoint.sh
+      - runtime/
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--build-arg=ENGINE_BINARY=fused-engine-headless"
+      - "--label=org.opencontainers.image.source=https://github.com/usefused/engine"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+
+  - id: engine-slim-arm64
+    use: buildx
+    goos: linux
+    goarch: arm64
+    image_templates:
+      - "ghcr.io/usefused/engine:{{ .Tag }}-headless-arm64"
+    ids:
+      - fused-engine-headless
+    dockerfile: Dockerfile.goreleaser
+    extra_files:
+      - engine.yaml
+      - entrypoint.sh
+      - runtime/
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--build-arg=ENGINE_BINARY=fused-engine-headless"
+      - "--label=org.opencontainers.image.source=https://github.com/usefused/engine"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+
+docker_manifests:
+  - name_template: "ghcr.io/usefused/engine:{{ .Tag }}"
+    image_templates:
+      - "ghcr.io/usefused/engine:{{ .Tag }}-amd64"
+      - "ghcr.io/usefused/engine:{{ .Tag }}-arm64"
+  - name_template: "ghcr.io/usefused/engine:latest"
+    image_templates:
+      - "ghcr.io/usefused/engine:{{ .Tag }}-amd64"
+      - "ghcr.io/usefused/engine:{{ .Tag }}-arm64"
+  - name_template: "ghcr.io/usefused/engine:{{ .Tag }}-headless"
+    image_templates:
+      - "ghcr.io/usefused/engine:{{ .Tag }}-headless-amd64"
+      - "ghcr.io/usefused/engine:{{ .Tag }}-headless-arm64"
+  - name_template: "ghcr.io/usefused/engine:headless"
+    image_templates:
+      - "ghcr.io/usefused/engine:{{ .Tag }}-headless-amd64"
+      - "ghcr.io/usefused/engine:{{ .Tag }}-headless-arm64"
+
+archives:
+  - id: fused-engine-archive
+    ids:
+      - fused-engine
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+  - id: fused-engine-headless-archive
+    ids:
+      - fused-engine-headless
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_headless_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+release:
+  github:
+    owner: Usefused
+    name: engine

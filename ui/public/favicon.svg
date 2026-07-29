@@ -1,0 +1,18 @@
+<svg width="32" height="32" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- White background box -->
+  <rect width="512" height="512" rx="64" fill="#FFFFFF" />
+  
+  <!-- Favicon version of the stylized cursive "F" -->
+  <path d="M 100 160 C 200 80, 360 80, 460 160" 
+        stroke="#000000" 
+        stroke-width="80" 
+        stroke-linecap="round" />
+  <path d="M 320 120 C 270 280, 220 400, 180 500" 
+        stroke="#000000" 
+        stroke-width="80" 
+        stroke-linecap="round" />
+  <path d="M 140 320 L 360 300" 
+        stroke="#000000" 
+        stroke-width="80" 
+        stroke-linecap="round" />
+</svg>
