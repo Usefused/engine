@@ -105,6 +105,10 @@ func init() {
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
+	if msg == "no rows in result set" {
+		status = http.StatusNotFound
+		msg = "resource not found"
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, msg)))
