@@ -1,4 +1,4 @@
-.PHONY: build build-headless ui-install build-ui embed-ui runtime-mcp-build run run-headless test test-headless tidy proto-gen release-local release docker-build docker-build-headless
+.PHONY: build build-headless ui-install build-ui embed-ui runtime-mcp-build run run-headless test test-headless tidy proto-gen release-local release release-with-tag docker-build docker-build-headless
 
 VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo "0.1.0")
 COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo "dev")
@@ -54,6 +54,12 @@ release-local:
 
 release:
 	goreleaser release --clean
+
+release-with-tag:
+	@if [ -z "$(VERSION)" ]; then echo "VERSION is required, e.g. make release-with-tag VERSION=v0.2.0"; exit 1; fi
+	@git tag -a $(VERSION) -m "Release $(VERSION)"
+	@git push origin $(VERSION)
+	@goreleaser release --clean
 
 docker-build:
 	docker build --target full --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t $(IMAGE_NAME):$(VERSION) .

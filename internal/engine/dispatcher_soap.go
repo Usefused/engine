@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 
-	xj "github.com/basgys/goxml2json"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
+	xj "github.com/basgys/goxml2json"
 	"github.com/tiaguinho/gosoap"
 )
 
