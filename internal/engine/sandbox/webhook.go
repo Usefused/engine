@@ -1,0 +1,453 @@
+package sandbox
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/nats-io/nats.go"
+	"github.com/tidwall/gjson"
+
+	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/engine/webhookid"
+	"github.com/Usefused/engine/internal/engine/webhookverify"
+	"github.com/Usefused/engine/internal/shared/observability"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+)
+
+// webhookConfigStore is the minimal slice of store.Store the ingress path
+// needs -- mirrors idempotencyStore's pattern (idempotency_cache.go) of
+// depending on a narrow interface wired via a package-level setter, rather
+// than threading a full store.Store through the HTTP handler chain.
+type webhookConfigStore interface {
+	GetWorkspaceWebhookBySlug(ctx context.Context, slug string) (*store.WorkspaceWebhook, error)
+}
+
+var globalWebhookConfigStore webhookConfigStore
+
+// SetWebhookConfigStore wires the store used to resolve inbound webhook
+// slugs. Called once at boot (see cmd/engine/cmd/start.go), alongside
+// SetIdempotencyStore. Until this is called, every inbound webhook 404s.
+func SetWebhookConfigStore(s webhookConfigStore) {
+	globalWebhookConfigStore = s
+}
+
+// webhookConfig holds the resolved configuration for a webhook integration,
+// denormalized from fused_workspace_webhooks at apply time (see
+// engine_owned_webhooks_plan.md) so ingress never needs to look anything up
+// beyond the one indexed row this came from.
+type webhookConfig struct {
+	AccountID           string
+	ServiceID           string
+	EventExtractionPath string
+	AuthType            string
+	AuthLocation        string
+	AuthKeyName         string
+	SignatureHeader     string
+	VerificationHeaders []string
+	// SecretRef is the registration's bucket.<name>.secret.<key> reference
+	// (plan item 4) -- resolved against the referenced bucket's generic
+	// named-secret store at verification time, not stored/decrypted here.
+	SecretRef string
+	// Label is the registration's identity (store.WorkspaceWebhook.Label --
+	// a kind: webhook artifact's own name; see plans/plan-webhook-kind.md).
+	// Published into the NATS subject alongside service/event so two
+	// registrations on the same service that happen to produce the same
+	// event name stay on distinct subjects -- without this, any WS
+	// subscriber listening on that service+event received every matching
+	// delivery regardless of which registration it came from (the isolation
+	// bug plan-webhook-kind.md's NATS/WS section describes).
+	Label string
+}
+
+// webhookIngressHandler processes incoming webhook requests.
+//
+// An OTEL thread is opened for every inbound request because each webhook
+// represents an externally-triggered execution (provider → Fused → customer).
+// Internal infrastructure calls (the config store read) are not traced here
+// — only the user/agent-visible execution boundary gets a thread.
+func webhookIngressHandler(w http.ResponseWriter, r *http.Request) {
+	urlSlug := chi.URLParam(r, "urlSlug")
+	if urlSlug == "" {
+		// URL slug must be provided to identify the integration.
+		writeError(w, http.StatusBadRequest, "urlSlug required")
+		return
+	}
+
+	// Plunk/Stripe appends event names to the slug, normalize to the fixed
+	// token width. This must be a fixed-width cut, never a delimiter search:
+	// the nanoid alphabet itself includes '-', the same character separating
+	// the token from its decorative "-serviceSlug" suffix, so "find the
+	// first '-'" would truncate a legitimate token early.
+	if len(urlSlug) > webhookid.SlugLength {
+		urlSlug = urlSlug[:webhookid.SlugLength]
+	}
+
+	// Open an OTEL span for the full ingress lifecycle.
+	ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.webhook.ingest", trace.WithAttributes(
+		attribute.String("slug", urlSlug),
+	))
+	defer span.End()
+
+	body, err := parseWebhookPayload(r)
+	if err != nil {
+		span.SetStatus(codes.Error, "parse error: "+err.Error())
+		writeError(w, http.StatusBadRequest, "invalid request payload")
+		return
+	}
+
+	config, err := fetchWebhookConfig(ctx, urlSlug)
+	if err != nil {
+		if errors.Is(err, store.ErrWorkspaceWebhookNotFound) {
+			span.SetStatus(codes.Error, "webhook not found")
+			writeError(w, http.StatusNotFound, "webhook not found")
+			return
+		}
+		fmt.Printf("fetchWebhookConfig failed: %v\n", err)
+		span.SetStatus(codes.Error, "config fetch failed: "+err.Error())
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	// Attach account/service identifiers once the config is resolved.
+	span.SetAttributes(
+		attribute.String("account_id", config.AccountID),
+		attribute.String("service_id", config.ServiceID),
+	)
+
+	if !validateWebhookAuth(ctx, w, r, body, config) {
+		span.SetStatus(codes.Error, "auth rejected")
+		return
+	}
+
+	eventName := extractEventName(r, body, config)
+	if eventName == "" {
+		publishRejection(config.AccountID, config.ServiceID, "UNKNOWN", "failed to extract event name", len(body))
+		span.SetStatus(codes.Error, "failed to extract event name")
+		writeError(w, http.StatusBadRequest, "failed to extract event name using configured extraction path")
+		return
+	}
+
+	span.SetAttributes(attribute.String("event_name", eventName))
+
+	_, pubSpan := otel.Tracer("engine").Start(ctx, "engine.webhook.publish")
+	publishWebhookEvent(w, r, body, urlSlug, eventName, config)
+	pubSpan.SetStatus(codes.Ok, "published")
+	pubSpan.End()
+
+	span.SetStatus(codes.Ok, "webhook ingested")
+}
+
+// parseWebhookPayload reads the request payload, adapting for form data or JSON.
+func parseWebhookPayload(r *http.Request) ([]byte, error) {
+	contentType := r.Header.Get("Content-Type")
+
+	// If it's a GET request, encode the URL query parameters as JSON.
+	if r.Method == http.MethodGet {
+		return queryOrFormToJSON(r.URL.Query())
+	}
+
+	// If it's URL encoded form data, parse the form and convert to JSON.
+	if strings.HasPrefix(contentType, "application/x-www-form-urlencoded") {
+		if err := r.ParseForm(); err != nil {
+			return nil, fmt.Errorf("failed to parse form data")
+		}
+		return queryOrFormToJSON(r.Form)
+	}
+
+	// Fallback to reading the raw body (typically for application/json).
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read body")
+	}
+
+	// If body is empty but query parameters exist on POST/PUT, use the query params.
+	if len(body) == 0 && len(r.URL.Query()) > 0 {
+		return queryOrFormToJSON(r.URL.Query())
+	}
+
+	return body, nil
+}
+
+// fetchWebhookConfig resolves an inbound webhook slug against the Engine's
+// own fused_workspace_webhooks table -- a single indexed Postgres read that
+// replaces the old NATS-to-Registry round trip (engine_owned_webhooks_plan.md,
+// Task 6). No cache layer sits in front of this: a local indexed read is
+// already as cheap as the in-memory cache it replaces was trying to save a
+// network hop for, and dropping the cache means a slug rotation or a
+// registration's removal takes effect immediately instead of within a TTL
+// window.
+func fetchWebhookConfig(ctx context.Context, urlSlug string) (*webhookConfig, error) {
+	if globalWebhookConfigStore == nil {
+		return nil, fmt.Errorf("webhook store not configured")
+	}
+	ww, err := globalWebhookConfigStore.GetWorkspaceWebhookBySlug(ctx, urlSlug)
+	if err != nil {
+		return nil, err
+	}
+	return &webhookConfig{
+		AccountID:           ww.AccountID.String(),
+		ServiceID:           ww.ServiceID.String(),
+		EventExtractionPath: ww.EventExtractionPath,
+		AuthType:            ww.AuthType,
+		AuthLocation:        ww.AuthLocation,
+		AuthKeyName:         ww.AuthKeyName,
+		SignatureHeader:     ww.SignatureHeader,
+		VerificationHeaders: ww.VerificationHeaders,
+		SecretRef:           ww.SecretRef,
+		Label:               ww.Label,
+	}, nil
+}
+
+// validateWebhookAuth delegates signature verification to the webhookverify
+// package — a standalone, zero-dependency trust component (S6.1). The handler
+// retains HTTP response writing so the verifier stays pure and testable.
+//
+// Complexity: 1 (verify call) + 1 (result check) = 2
+func validateWebhookAuth(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte, config *webhookConfig) bool {
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.webhook.verify")
+	defer span.End()
+
+	var signingSecret string
+	if config.AuthType != "" && config.AuthType != "none" {
+		secret, err := globalSecretResolver.GetWebhookSecret(ctx, uuid.MustParse(config.AccountID), config.SecretRef)
+		if err != nil {
+			span.SetStatus(codes.Error, "failed to resolve webhook secret")
+			publishRejection(config.AccountID, config.ServiceID, "UNKNOWN", "internal config error", len(body))
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return false
+		}
+		signingSecret = secret
+	}
+
+	result := webhookverify.Verify(r, body, webhookverify.Config{
+		AuthType:            config.AuthType,
+		AuthLocation:        config.AuthLocation,
+		AuthKeyName:         config.AuthKeyName,
+		SignatureHeader:     config.SignatureHeader,
+		SigningSecret:       signingSecret,
+		VerificationHeaders: config.VerificationHeaders,
+	})
+
+	observability.WebhookVerify.Add(ctx, 1)
+
+	if result.OK {
+		span.SetStatus(codes.Ok, "verified")
+		return true
+	}
+
+	span.SetStatus(codes.Error, result.Reason)
+	publishRejection(config.AccountID, config.ServiceID, "", result.Reason, len(body))
+	writeError(w, http.StatusUnauthorized, result.Reason)
+	return false
+}
+
+// extractEventName resolves the event name from the request using the configured JSON path or header.
+func extractEventName(r *http.Request, body []byte, config *webhookConfig) string {
+	if config.EventExtractionPath != "" {
+		// Composite paths are joined with "+", e.g. "body.eventType+body.action".
+		// Each segment is extracted independently and the values are joined with ".".
+		segments := strings.Split(config.EventExtractionPath, "+")
+		isComposite := len(segments) > 1
+		var parts []string
+		for _, seg := range segments {
+			val := extractSegmentValue(r, body, seg)
+
+			// For composite paths every segment must resolve — a partial match
+			// would produce an ambiguous event name and route incorrectly.
+			if val == "" && isComposite {
+				return ""
+			}
+			if val != "" {
+				parts = append(parts, val)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, ".")
+		}
+	}
+
+	// Fallback to the URL parameter 'eventName' if no path matches.
+	eventName := chi.URLParam(r, "eventName")
+	if eventName == "" {
+		eventName = "RAW"
+	}
+	return eventName
+}
+
+func extractSegmentValue(r *http.Request, body []byte, seg string) string {
+	seg = strings.TrimSpace(seg)
+	switch {
+	case strings.HasPrefix(seg, "header."):
+		return r.Header.Get(seg[7:])
+	case strings.HasPrefix(seg, "body."):
+		return gjson.GetBytes(body, seg[5:]).String()
+	case strings.HasPrefix(seg, "query."):
+		return r.URL.Query().Get(seg[6:])
+	default:
+		slog.WarnContext(r.Context(), "unrecognized event extraction prefix", slog.String("segment", seg))
+		return ""
+	}
+}
+
+// webhookPublishFunc is the NATS publish hook for webhook events. It is a
+// package-level var so tests can substitute a no-op without a real NATS server.
+// Production wires in the real JetStream publish via Init.
+var webhookPublishFunc = func(msg *nats.Msg) error {
+	_, err := globalNATSClient.PublishMsgJS(msg)
+	return err
+}
+
+// publishWebhookEvent builds the NATS payload and publishes it synchronously.
+func publishWebhookEvent(w http.ResponseWriter, r *http.Request, body []byte, urlSlug, eventName string, config *webhookConfig) {
+	downstreamPayload := buildDownstreamPayload(r, body, urlSlug, eventName)
+	eventData, _ := json.Marshal(downstreamPayload)
+
+	msgID := uuid.New().String()
+	// Subject layout: webhooks.<account>.<service>.<label>.<event>. label is
+	// inserted between service and event (not appended after) so every
+	// existing fixed-position parse of this subject only needs a shifted
+	// index, not a rewrite -- see websocket_handler.go's consumer callback,
+	// which parses this same layout on the receiving end.
+	subject := fmt.Sprintf("webhooks.%s.%s.%s.%s", config.AccountID, config.ServiceID, subjectSafeLabel(config.Label), eventName)
+
+	natsMsg := nats.NewMsg(subject)
+	natsMsg.Data = eventData
+	natsMsg.Header.Set("X-Webhook-Msg-ID", msgID)
+	natsMsg.Header.Set("X-Webhook-Start-Time", time.Now().Format(time.RFC3339Nano))
+
+	// Synchronous wait for NATS JetStream ACK to ensure delivery.
+	if err := webhookPublishFunc(natsMsg); err != nil {
+		slog.ErrorContext(r.Context(), "Failed to publish webhook to NATS JetStream", slog.Any("error", err), slog.String("subject", subject))
+		writeError(w, http.StatusInternalServerError, "failed to publish event: "+err.Error())
+		return
+	}
+
+	publishAnalyticsIngestion(msgID, eventName, len(eventData), config)
+
+	if shouldObserveWebhookSchema() {
+		publishSchemaObservation(body, eventName, config)
+	}
+
+	slog.InfoContext(r.Context(), "Webhook received, validated, and published to NATS", slog.String("service_id", config.ServiceID), slog.String("event", eventName))
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"ok"}`))
+}
+
+// subjectSafeLabel guards the NATS subject's fixed segment positions: "." is
+// the subject delimiter, and a kind: webhook artifact's name (the label) has
+// no character restriction today, so a literal "." in a name would otherwise
+// shift every downstream positional parse. websocket_handler.go's
+// FilterSubjects construction must apply this exact same substitution when
+// it resolves an SDK/MCP's attached label, or a name containing "." would
+// never match its own published subject.
+func subjectSafeLabel(label string) string {
+	return strings.ReplaceAll(label, ".", "-")
+}
+
+func shouldObserveWebhookSchema() bool {
+	return os.Getenv("FUSED_ENV") != "development"
+}
+
+// buildDownstreamPayload constructs the payload struct representing the normalized webhook request.
+func buildDownstreamPayload(r *http.Request, body []byte, urlSlug, eventName string) map[string]any {
+	headers := make(map[string]string)
+	for k, v := range r.Header {
+		if len(v) > 0 {
+			headers[k] = strings.Join(v, ", ")
+		}
+	}
+
+	queryParams := make(map[string]any)
+	for k, v := range r.URL.Query() {
+		if len(v) == 1 {
+			queryParams[k] = v[0]
+		} else if len(v) > 1 {
+			queryParams[k] = v
+		}
+	}
+
+	var jsonBody any
+	// If we can parse the body as JSON, do so. Otherwise stringify it.
+	if r.Method != http.MethodGet && len(body) > 0 {
+		if err := json.Unmarshal(body, &jsonBody); err != nil {
+			jsonBody = string(body)
+		}
+	}
+
+	return map[string]any{
+		"body":    jsonBody,
+		"headers": headers,
+		"query":   queryParams,
+		"path": map[string]string{
+			"urlSlug":   urlSlug,
+			"eventName": eventName,
+		},
+	}
+}
+
+// publishAnalyticsIngestion records a successful webhook ingestion in analytics.
+func publishAnalyticsIngestion(msgID, eventName string, payloadSize int, config *webhookConfig) {
+	// Guard: analytics is best-effort; a nil NATS client (e.g. in unit tests)
+	// must never crash the ingress handler.
+	if globalNATSClient == nil || globalNATSClient.JS == nil {
+		return
+	}
+	analyticsPayload, _ := json.Marshal(map[string]any{
+		"msg_id":       msgID,
+		"account_id":   config.AccountID,
+		"service_id":   config.ServiceID,
+		"event_name":   eventName,
+		"status":       "ingested",
+		"payload_size": payloadSize,
+		"timestamp":    time.Now(),
+	})
+	globalNATSClient.PublishJS("webhook.analytics.ingested", analyticsPayload)
+}
+
+// publishRejection records an aborted/rejected webhook in analytics.
+func publishRejection(configAccountID, configServiceID, eventName, errorReason string, payloadSize int) {
+	if globalNATSClient == nil || globalNATSClient.JS == nil || configAccountID == "" || configServiceID == "" {
+		return
+	}
+	if eventName == "" {
+		eventName = "UNKNOWN"
+	}
+	msgID := uuid.New().String()
+	analyticsPayload, _ := json.Marshal(map[string]any{
+		"msg_id":       msgID,
+		"account_id":   configAccountID,
+		"service_id":   configServiceID,
+		"event_name":   eventName,
+		"status":       "rejected",
+		"error_reason": errorReason,
+		"payload_size": payloadSize,
+		"timestamp":    time.Now(),
+	})
+	globalNATSClient.PublishJS("webhook.analytics.rejected", analyticsPayload)
+}
+
+// queryOrFormToJSON converts URL query params or URL-encoded forms into JSON data.
+func queryOrFormToJSON(values map[string][]string) ([]byte, error) {
+	data := make(map[string]any)
+	for k, v := range values {
+		if len(v) == 1 {
+			data[k] = v[0]
+		} else if len(v) > 1 {
+			data[k] = v
+		}
+	}
+	return json.Marshal(data)
+}

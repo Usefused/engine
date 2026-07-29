@@ -1,0 +1,85 @@
+import { useEffect, useRef, useState } from "react";
+import { Bell } from "lucide-react";
+import { Link } from "@remix-run/react";
+import { getApiKey } from "~/lib/session";
+import { useWorkspaceNotifications } from "./useWorkspaceNotifications";
+import { NotificationList } from "./NotificationList";
+
+// General notification surface: a bell + panel mounted once in the shared
+// layout (integrations.tsx), independent of the sidebar -- mirrors
+// FloatingCredits' self-contained fixed-position pattern. Badge = pending
+// count; panel lists pending+acknowledged (dismissed items are hidden and
+// gone for good, per the two-tier read/dismiss model). The panel itself is
+// a preview -- capped to PANEL_LIMIT rows so it doesn't grow into an
+// unusably tall dropdown; "View all" links to the full /integrations/
+// notifications page for anything past that.
+const PANEL_LIMIT = 6;
+
+export function NotificationBell() {
+  const [open, setOpen] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const { unresolved, pendingCount, serviceRefs, markRead, dismiss } = useWorkspaceNotifications();
+
+  useEffect(() => {
+    if (!open) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [open]);
+
+  if (!getApiKey()) return null;
+
+  const previewItems = unresolved.slice(0, PANEL_LIMIT);
+  const hasMore = unresolved.length > PANEL_LIMIT;
+
+  return (
+    <div ref={panelRef} className="fixed top-12 right-20 z-20">
+      <button
+        data-track="toggle_notification_bell"
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        className="relative flex items-center justify-center w-8 h-8 rounded-lg select-none
+          border border-slate-200/50 backdrop-blur-md bg-white/75 shadow-sm hover:shadow hover:bg-white/85
+          transition-shadow duration-200 cursor-pointer"
+        aria-label="Notifications"
+      >
+        <Bell className="w-3.5 h-3.5 text-slate-600" />
+        {pendingCount > 0 && (
+          <span className="absolute -top-1 -right-1 flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full bg-red-500 text-white text-[10px] font-bold leading-none">
+            {pendingCount > 9 ? "9+" : pendingCount}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <div className="absolute right-0 mt-2 w-[420px] max-h-[75vh] flex flex-col rounded-xl border border-slate-200 bg-white shadow-2xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between shrink-0">
+            <span className="text-base font-semibold text-slate-900">Notifications</span>
+            {pendingCount > 0 && (
+              <span className="text-xs font-medium text-slate-500">{pendingCount} unread</span>
+            )}
+          </div>
+          <div className="overflow-y-auto">
+            <NotificationList
+              items={previewItems}
+              serviceRefs={serviceRefs}
+              onMarkRead={markRead}
+              onDismiss={dismiss}
+            />
+          </div>
+          <Link
+            to="/integrations/notifications"
+            onClick={() => setOpen(false)}
+            className="shrink-0 block text-center px-4 py-3 text-sm font-medium text-blue-600 hover:bg-slate-50 border-t border-slate-100 transition-colors"
+          >
+            {hasMore ? `View all ${unresolved.length} notifications` : "View all notifications"}
+          </Link>
+        </div>
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,93 @@
+{
+  "_comment": "Spike fixture (Task 2, sprint/lighter_mcp_runtime_spike_plan.md). Stands in for real IntegrationObject rows pulled from a registered service -- no live DB access was available to source this from an actual account's data, so these two operations are modeled on GitHub's public REST API shape (well-known, stable, publicly documented) rather than copied from a verified registered service. Swap this file for a real export before Task 7's live end-to-end proof; the shape (operation_id, method, path, parameters[].in, request_body, responses) is what both search_docs and call() read, so a real export only needs to match this same shape, not this file's contents.",
+  "operations": [
+    {
+      "operation_id": "github.listRepos",
+      "service_id": "00000000-0000-0000-0000-000000000001",
+      "name": "List user repositories",
+      "description": "List public repositories for the specified GitHub user.",
+      "method": "GET",
+      "path": "/users/{username}/repos",
+      "parameters": [
+        {
+          "name": "username",
+          "in": "path",
+          "required": true,
+          "type": "string",
+          "description": "The handle for the GitHub user account."
+        },
+        {
+          "name": "per_page",
+          "in": "query",
+          "required": false,
+          "type": "integer",
+          "description": "Number of results per page (max 100)."
+        }
+      ],
+      "request_body": null,
+      "responses": {
+        "200": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "integer" },
+              "name": { "type": "string" },
+              "full_name": { "type": "string" },
+              "html_url": { "type": "string" },
+              "owner": {
+                "type": "object",
+                "properties": {
+                  "login": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "operation_id": "github.getRepo",
+      "service_id": "00000000-0000-0000-0000-000000000001",
+      "name": "Get a repository",
+      "description": "Get a single repository by owner and repository name.",
+      "method": "GET",
+      "path": "/repos/{owner}/{repo}",
+      "parameters": [
+        {
+          "name": "owner",
+          "in": "path",
+          "required": true,
+          "type": "string",
+          "description": "The account owner of the repository."
+        },
+        {
+          "name": "repo",
+          "in": "path",
+          "required": true,
+          "type": "string",
+          "description": "The name of the repository."
+        }
+      ],
+      "request_body": null,
+      "responses": {
+        "200": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "integer" },
+            "name": { "type": "string" },
+            "full_name": { "type": "string" },
+            "html_url": { "type": "string" },
+            "description": { "type": "string" },
+            "owner": {
+              "type": "object",
+              "properties": {
+                "login": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

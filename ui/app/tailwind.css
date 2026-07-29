@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+@layer base {
+  button:not(:disabled),
+  a[href] {
+    cursor: pointer;
+  }
+
+  button:not(:disabled) *,
+  a[href] *,
+  svg,
+  svg * {
+    cursor: inherit;
+  }
+
+  button:disabled,
+  input:disabled,
+  select:disabled,
+  textarea:disabled {
+    cursor: not-allowed;
+  }
+
+  /* Keep read-only table text from flickering between pointer and text cursors while rows re-render. */
+  table td,
+  table th {
+    cursor: default;
+  }
+
+  tr.cursor-pointer,
+  tr.cursor-pointer td,
+  tr.cursor-pointer th,
+  tr.cursor-pointer p,
+  tr.cursor-pointer span,
+  tr.cursor-pointer div,
+  tr.cursor-pointer svg,
+  tr.cursor-pointer svg * {
+    cursor: pointer;
+  }
+
+  tr.cursor-pointer button:not(:disabled),
+  tr.cursor-pointer a[href],
+  tr.cursor-pointer input:not(:disabled),
+  tr.cursor-pointer select:not(:disabled),
+  tr.cursor-pointer textarea:not(:disabled),
+  tr.cursor-pointer label,
+  tr.cursor-pointer [role="button"] {
+    cursor: pointer;
+  }
+}
