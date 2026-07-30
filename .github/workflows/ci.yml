@@ -25,7 +25,7 @@ jobs:
       - name: Prepare embedded UI
         uses: actions/setup-node@v4
         with:
-          node-version: '22.12.0'
+          node-version: '24.x'
           cache: npm
           cache-dependency-path: |
             ui/package-lock.json

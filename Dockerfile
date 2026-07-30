@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM node:22-alpine AS ui-builder
+FROM node:24-alpine AS ui-builder
 
 WORKDIR /app
 
@@ -10,7 +10,7 @@ RUN npm ci
 COPY ui/ ./
 RUN npm rebuild && NODE_OPTIONS="--max-old-space-size=1536" npm run build
 
-FROM node:22-alpine AS mcp-runtime-builder
+FROM node:24-alpine AS mcp-runtime-builder
 
 WORKDIR /app/runtime/mcp
 
@@ -46,14 +46,14 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-s -w -X github.com/Usefused/engine/cmd/engine/cmd.Version=${VERSION} -X github.com/Usefused/engine/cmd/engine/cmd.BuildHash=${COMMIT}" \
     -o /out/fused-engine ./cmd/engine
 
-FROM alpine:3.23 AS engine-runtime-base
+FROM node:24-alpine AS engine-runtime-base
 
 WORKDIR /app
 
 # Node and npm remain part of the slim runtime because MCP sessions execute in
 # isolated Node processes and initialize their shared runtime dependencies.
 RUN apk upgrade --no-cache && \
-    apk add --no-cache bash nodejs npm su-exec nats-server tini
+    apk add --no-cache bash su-exec nats-server tini
 
 COPY --from=engine-base /app/runtime /app/runtime
 COPY --from=mcp-runtime-builder /app/runtime/mcp/dist /app/runtime/mcp/dist

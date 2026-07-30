@@ -90,7 +90,7 @@ export FUSED_LICENSE_KEY="<provided-by-fused>"
 fused-engine start
 ```
 
-By default, the Engine will automatically detect that no external NATS cluster is configured and will boot its embedded NATS server on port `4222`. It will spin up the REST API on port `8081`, and the SDK gRPC connection on port `50051`. The Registry endpoint defaults to Fused Cloud; only set `FUSED_REGISTRY_ENDPOINT` when Fused support asks you to use a different endpoint.
+By default, the Engine will automatically detect that no external NATS cluster is configured and will boot its embedded NATS server on port `4222`. It will spin up the REST API on port `8081`, and the SDK gRPC connection on port `50051`. The Engine always talks to the Fused Cloud Registry -- there's nothing to configure here.
 
 ### Docker Compose Example (with UI)
 Our full Docker image (`latest`) bundles both the Engine and the Admin Dashboard. The headless image (`headless`) runs the same Engine API without the embedded UI.
@@ -151,9 +151,6 @@ FUSED_UI_URL="https://admin.your-company.com"
 # OpenTelemetry configuration for distributed tracing
 OTEL_SERVICE_NAME="engine"
 OTEL_EXPORTER_OTLP_ENDPOINT="http://jaeger:4318"
-
-# Optional: override the Fused Cloud Registry endpoint only when directed by Fused support.
-# FUSED_REGISTRY_ENDPOINT="https://registry.usefused.com/graphql"
 ```
 
 ### CLI Flags
