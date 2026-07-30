@@ -870,5 +870,14 @@ func engineMigrationQueries() []string {
 		// plans/plan-service-changelog.md) -- NULL for every row until that first
 		// transition happens, same optional/audit-only shape as created_by.
 		`ALTER TABLE fused_workspace_notifications ADD COLUMN IF NOT EXISTS resolved_by uuid;`,
+
+		// base_url was added to fused_workspace_execution_policies' CREATE
+		// TABLE statement above, but CREATE TABLE IF NOT EXISTS is a no-op on
+		// any database that already ran the old schema -- same failure mode
+		// documented at the top of this function. Those databases never got
+		// the column, so UpsertWorkspaceExecutionPolicyOverride's INSERT
+		// (which always lists base_url) fails with "column base_url does not
+		// exist", surfaced to the CLI as a generic 500 on workspace apply.
+		`ALTER TABLE fused_workspace_execution_policies ADD COLUMN IF NOT EXISTS base_url text;`,
 	}
 }

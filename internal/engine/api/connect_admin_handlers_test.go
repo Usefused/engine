@@ -36,6 +36,57 @@ func TestConnectAdminHandlers_ConfigLifecycle(t *testing.T) {
 	assertConnectConfigResponse(t, rr.Body.Bytes(), fixture)
 }
 
+// TestConnectAdminHandlers_GetReturnsSavedConfig proves a caller can check
+// whether a bucket's connect config was actually set without resending
+// anything -- the same safe projection the upsert response already returns.
+func TestConnectAdminHandlers_GetReturnsSavedConfig(t *testing.T) {
+	fixture := newConnectAdminFixture()
+	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	seedConnectConfig(t, router, fixture)
+
+	req := httptest.NewRequest(http.MethodGet, fixture.configPath(), nil)
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("get status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	assertConnectConfigResponse(t, rr.Body.Bytes(), fixture)
+}
+
+// TestConnectAdminHandlers_GetMissingConfigReturnsNotFound proves an unset
+// bucket+service pair reports 404 rather than a zero-value config that could
+// be mistaken for "registered but empty".
+func TestConnectAdminHandlers_GetMissingConfigReturnsNotFound(t *testing.T) {
+	fixture := newConnectAdminFixture()
+	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+
+	req := httptest.NewRequest(http.MethodGet, fixture.configPath(), nil)
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for a never-set connect config, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestConnectAdminHandlers_GetRequiresBucketOwnership mirrors the upsert
+// path's ownership check -- a bucket ID that doesn't resolve must fail
+// before ever touching GetConnectConfig, the same as it does for writes.
+func TestConnectAdminHandlers_GetRequiresBucketOwnership(t *testing.T) {
+	fixture := newConnectAdminFixture()
+	fixture.store.bucketErr = store.ErrBucketNotFound
+	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+
+	req := httptest.NewRequest(http.MethodGet, fixture.configPath(), nil)
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected bucket ownership failure as 404, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestConnectAdminHandlers_BucketOwnershipRequired(t *testing.T) {
 	fixture := newConnectAdminFixture()
 	fixture.store.bucketErr = store.ErrBucketNotFound
@@ -95,6 +146,144 @@ func TestConnectAdminHandlers_RejectsOAuth2AuthType(t *testing.T) {
 	if fixture.store.savedConfig != nil {
 		t.Fatal("oauth2 connect config payload must not be persisted")
 	}
+}
+
+// TestConnectAdminHandlers_PartialUpdatePreservesUnspecifiedFields proves the
+// core promise of the partial-update path: rotating just redirect_uri must
+// not require resending client_id/client_secret, and the values that were
+// never sent the second time must still decrypt back to what they originally
+// were -- not be blanked, not silently regenerated.
+func TestConnectAdminHandlers_PartialUpdatePreservesUnspecifiedFields(t *testing.T) {
+	fixture := newConnectAdminFixture()
+	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+
+	create := httptest.NewRequest(http.MethodPut, fixture.configPath(), bytes.NewReader([]byte(`{
+		"auth_type":"oauth",
+		"client_id":"client-id",
+		"client_secret":"client-secret",
+		"redirect_uri":"https://engine.example.com/connect/callback"
+	}`)))
+	create.Header.Set("X-API-Key", "test-key")
+	createRR := httptest.NewRecorder()
+	router.ServeHTTP(createRR, create)
+	if createRR.Code != http.StatusOK {
+		t.Fatalf("create status = %d body=%s", createRR.Code, createRR.Body.String())
+	}
+
+	update := httptest.NewRequest(http.MethodPut, fixture.configPath(), bytes.NewReader([]byte(`{
+		"redirect_uri":"https://engine.example.com/connect/new-callback"
+	}`)))
+	update.Header.Set("X-API-Key", "test-key")
+	updateRR := httptest.NewRecorder()
+	router.ServeHTTP(updateRR, update)
+	if updateRR.Code != http.StatusOK {
+		t.Fatalf("update status = %d body=%s", updateRR.Code, updateRR.Body.String())
+	}
+
+	saved := fixture.store.savedConfig
+	if saved.RedirectURI != "https://engine.example.com/connect/new-callback" {
+		t.Fatalf("expected redirect_uri to change, got %q", saved.RedirectURI)
+	}
+	clientID, clientSecret := decryptSavedConnectConfig(t, saved, fixture.masterKey)
+	if clientID != "client-id" || clientSecret != "client-secret" {
+		t.Fatalf("expected client_id/client_secret to survive an update that never sent them, got id=%q secret=%q", clientID, clientSecret)
+	}
+}
+
+// TestConnectAdminHandlers_UpdateWithoutExistingConfigStillRequiresAllFields
+// guards the create/update split itself: a partial payload against a bucket
+// with no connect config yet must fail the same way full creation always
+// did, not silently create a config with a blank client_id/client_secret.
+func TestConnectAdminHandlers_UpdateWithoutExistingConfigStillRequiresAllFields(t *testing.T) {
+	fixture := newConnectAdminFixture()
+	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+
+	req := httptest.NewRequest(http.MethodPut, fixture.configPath(), bytes.NewReader([]byte(`{
+		"redirect_uri":"https://engine.example.com/connect/callback"
+	}`)))
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected first-time partial payload to be rejected, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if fixture.store.savedConfig != nil {
+		t.Fatal("a rejected first-time payload must not create a config")
+	}
+}
+
+// TestConnectAdminHandlers_UpdateRejectsEmptyPayload proves an update with no
+// fields at all fails loudly instead of a no-op 200 that would leave a caller
+// unsure whether their change took effect.
+func TestConnectAdminHandlers_UpdateRejectsEmptyPayload(t *testing.T) {
+	fixture := newConnectAdminFixture()
+	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	seedConnectConfig(t, router, fixture)
+
+	req := httptest.NewRequest(http.MethodPut, fixture.configPath(), bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected empty update payload to be rejected, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestConnectAdminHandlers_UpdateRejectsBlankedOutSecret proves an explicit
+// empty string is treated as an invalid attempt to blank a credential, not
+// as "leave it unchanged" -- that meaning is reserved for omitting the field
+// entirely.
+func TestConnectAdminHandlers_UpdateRejectsBlankedOutSecret(t *testing.T) {
+	fixture := newConnectAdminFixture()
+	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	seedConnectConfig(t, router, fixture)
+
+	req := httptest.NewRequest(http.MethodPut, fixture.configPath(), bytes.NewReader([]byte(`{"client_secret":""}`)))
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected blanked-out client_secret to be rejected, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// seedConnectConfig creates a full connect config via the same HTTP path the
+// other tests exercise, so update-path tests start from realistic encrypted
+// state rather than hand-constructing a store.ConnectConfig.
+func seedConnectConfig(t *testing.T, router http.Handler, fixture connectAdminFixture) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPut, fixture.configPath(), bytes.NewReader([]byte(`{
+		"auth_type":"oauth",
+		"client_id":"client-id",
+		"client_secret":"client-secret",
+		"redirect_uri":"https://engine.example.com/connect/callback"
+	}`)))
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("seed create status = %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// decryptSavedConnectConfig round-trips the same way runtime dispatch would,
+// so tests assert on what a real caller would actually get back rather than
+// on ciphertext shape.
+func decryptSavedConnectConfig(t *testing.T, cfg *store.ConnectConfig, masterKey []byte) (clientID, clientSecret string) {
+	t.Helper()
+	dek, err := store.UnwrapDEK(masterKey, cfg.EncryptedDEK)
+	if err != nil {
+		t.Fatalf("unwrap dek: %v", err)
+	}
+	clientID, err = store.DecryptWithDEK(dek, cfg.EncryptedClientID)
+	if err != nil {
+		t.Fatalf("decrypt client_id: %v", err)
+	}
+	clientSecret, err = store.DecryptWithDEK(dek, cfg.EncryptedClientSecret)
+	if err != nil {
+		t.Fatalf("decrypt client_secret: %v", err)
+	}
+	return clientID, clientSecret
 }
 
 func TestConnectAdminHandlers_ListAndDeleteConnections(t *testing.T) {

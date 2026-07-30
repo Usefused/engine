@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -17,12 +18,17 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
+// connectConfigUpsertPayload fields are pointers so a partial update (e.g.
+// rotating just redirect_uri) can distinguish "not provided, leave
+// unchanged" (nil) from "provided as blank" (empty string, a validation
+// error) -- see resolveConnectConfigFields for how omitted fields are
+// carried forward from the existing row instead of being required every call.
 type connectConfigUpsertPayload struct {
-	AuthType     string `json:"auth_type"`
-	Enabled      *bool  `json:"enabled"`
-	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"`
-	RedirectURI  string `json:"redirect_uri"`
+	AuthType     *string `json:"auth_type"`
+	Enabled      *bool   `json:"enabled"`
+	ClientID     *string `json:"client_id"`
+	ClientSecret *string `json:"client_secret"`
+	RedirectURI  *string `json:"redirect_uri"`
 }
 
 type connectConfigResponse struct {
@@ -76,17 +82,43 @@ func UpsertConnectConfigHandler(s store.Store, masterKey []byte) http.HandlerFun
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
-		if msg := validateConnectConfigPayload(&payload); msg != "" {
+
+		// Read-before-write: a partial update (e.g. just rotating redirect_uri)
+		// needs the existing encrypted client_id/client_secret to carry forward
+		// unchanged, and there is no other way to "not touch" an encrypted
+		// column -- the admin response never returns decrypted values (see
+		// connectConfigResponse), so a caller cannot resend what it was never
+		// given back. One read, one write below; never a loop over rows.
+		existing, err := s.GetConnectConfig(ctx, call.bucketID, call.serviceID)
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to load existing connect config", slog.Any("error", err))
+			http.Error(w, "failed to load existing connect config", http.StatusInternalServerError)
+			return
+		}
+
+		payload.normalize()
+		if msg := validateConnectConfigPayload(&payload, existing); msg != "" {
 			http.Error(w, msg, http.StatusBadRequest)
 			return
 		}
-		cfg, err := encryptConnectConfig(call.bucketID, call.serviceID, payload, masterKey)
+
+		resolved, err := resolveConnectConfigFields(payload, existing, masterKey)
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to resolve connect config fields", slog.Any("error", err))
+			http.Error(w, "failed to resolve existing connect config", http.StatusInternalServerError)
+			return
+		}
+		cfg, err := encryptConnectConfig(call.bucketID, call.serviceID, resolved, masterKey)
 		if err != nil {
 			http.Error(w, "failed to encrypt connect config", http.StatusInternalServerError)
 			return
 		}
 
-		span.SetAttributes(connectAdminAttrs("connect_config.upsert", call)...)
+		// Create vs. update is recorded for audit only as which action ran --
+		// never the field values -- so a trail exists ("was a new OAuth app
+		// registered, or an existing one rotated") without ever putting a
+		// credential anywhere near telemetry.
+		span.SetAttributes(connectAdminAttrs(connectConfigUpsertAction(existing), call)...)
 		saved, err := s.UpsertConnectConfig(ctx, cfg)
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to upsert connect config", slog.Any("error", err))
@@ -94,6 +126,43 @@ func UpsertConnectConfigHandler(s store.Store, masterKey []byte) http.HandlerFun
 			return
 		}
 		writeConnectJSON(w, http.StatusOK, projectConnectConfig(saved))
+	}
+}
+
+// connectConfigUpsertAction names the OTEL action distinctly for create vs.
+// update so an audit trail can tell them apart at a glance.
+func connectConfigUpsertAction(existing *store.ConnectConfig) string {
+	if existing == nil {
+		return "connect_config.create"
+	}
+	return "connect_config.update"
+}
+
+// GetConnectConfigHandler is a plain read -- no state changes, so unlike
+// UpsertConnectConfigHandler it carries no OTEL audit span; the CODE
+// REQUIREMENT to trace user/agent-triggered execution applies to mutations,
+// which this is not. It reuses the exact same safe projection
+// (projectConnectConfig) the upsert response already returns, so a caller
+// checking "did my last `connect set` actually take effect" sees the
+// identical shape either way -- never a decrypted client_id/client_secret,
+// only auth_type/enabled/redirect_uri plus has_client_id/has_client_secret.
+func GetConnectConfigHandler(s store.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		call, ok := resolveConnectAdminCall(w, r, s)
+		if !ok {
+			return
+		}
+		cfg, err := s.GetConnectConfig(r.Context(), call.bucketID, call.serviceID)
+		if err != nil {
+			slog.ErrorContext(r.Context(), "failed to load connect config", slog.Any("error", err))
+			http.Error(w, "failed to load connect config", http.StatusInternalServerError)
+			return
+		}
+		if cfg == nil {
+			http.Error(w, "connect config not found", http.StatusNotFound)
+			return
+		}
+		writeConnectJSON(w, http.StatusOK, projectConnectConfig(cfg))
 	}
 }
 
@@ -169,49 +238,184 @@ func resolveBucketAdminCall(w http.ResponseWriter, r *http.Request, s store.Stor
 	return bucketAdminCall{bucketID: bucketID}, true
 }
 
-func encryptConnectConfig(bucketID, serviceID uuid.UUID, payload connectConfigUpsertPayload, masterKey []byte) (store.ConnectConfig, error) {
+// resolvedConnectConfigFields holds the fully-resolved plaintext values --
+// merged from whatever the caller provided plus whatever survives from the
+// existing row -- right before re-encryption. Keeping this as its own type
+// (rather than reusing connectConfigUpsertPayload, whose fields are pointers
+// for partial-update purposes) means encryptConnectConfig never has to
+// re-derive "was this provided" logic; that question is answered exactly
+// once, in resolveConnectConfigFields.
+type resolvedConnectConfigFields struct {
+	AuthType     string
+	Enabled      bool
+	ClientID     string
+	ClientSecret string
+	RedirectURI  string
+}
+
+func encryptConnectConfig(bucketID, serviceID uuid.UUID, resolved resolvedConnectConfigFields, masterKey []byte) (store.ConnectConfig, error) {
+	// A fresh DEK is generated on every save, including partial updates that
+	// only touch redirect_uri -- simpler than trying to reuse the prior DEK,
+	// and re-encrypting an unchanged plaintext under a new DEK is exactly as
+	// safe as leaving it alone.
 	wrappedDEK, dek, err := store.WrapDEK(masterKey)
 	if err != nil {
 		return store.ConnectConfig{}, err
 	}
-	encryptedClientID, err := store.EncryptWithDEK(dek, payload.ClientID)
+	encryptedClientID, err := store.EncryptWithDEK(dek, resolved.ClientID)
 	if err != nil {
 		return store.ConnectConfig{}, err
 	}
-	encryptedClientSecret, err := store.EncryptWithDEK(dek, payload.ClientSecret)
+	encryptedClientSecret, err := store.EncryptWithDEK(dek, resolved.ClientSecret)
 	if err != nil {
 		return store.ConnectConfig{}, err
 	}
 	return store.ConnectConfig{
 		BucketID:              bucketID,
 		ServiceID:             serviceID,
-		AuthType:              payload.AuthType,
-		Enabled:               connectConfigEnabled(payload),
+		AuthType:              resolved.AuthType,
+		Enabled:               resolved.Enabled,
 		EncryptedDEK:          wrappedDEK,
 		EncryptedClientID:     encryptedClientID,
 		EncryptedClientSecret: encryptedClientSecret,
-		RedirectURI:           payload.RedirectURI,
+		RedirectURI:           resolved.RedirectURI,
 	}, nil
 }
 
-// validateConnectConfigPayload normalizes the public admin vocabulary before
-// validation so persisted connect config never stores imported OpenAPI names.
-func validateConnectConfigPayload(payload *connectConfigUpsertPayload) string {
-	payload.AuthType = canonicalWorkspaceStaticAuthType(payload.AuthType)
-	payload.ClientID = strings.TrimSpace(payload.ClientID)
-	payload.ClientSecret = strings.TrimSpace(payload.ClientSecret)
-	payload.RedirectURI = strings.TrimSpace(payload.RedirectURI)
+// resolveConnectConfigFields merges whatever the caller explicitly sent over
+// whatever the existing row (if any) already had, so a caller can rotate one
+// field without needing to know or resend the others. existing is nil on
+// first-time creation; validateConnectConfigPayload has already guaranteed
+// every field is present in that case, so there is nothing to merge.
+func resolveConnectConfigFields(payload connectConfigUpsertPayload, existing *store.ConnectConfig, masterKey []byte) (resolvedConnectConfigFields, error) {
+	resolved, err := existingConnectConfigFields(existing, masterKey)
+	if err != nil {
+		return resolvedConnectConfigFields{}, err
+	}
+	if payload.AuthType != nil {
+		resolved.AuthType = *payload.AuthType
+	}
+	if payload.Enabled != nil {
+		resolved.Enabled = *payload.Enabled
+	} else if existing == nil {
+		resolved.Enabled = true
+	}
+	if payload.ClientID != nil {
+		resolved.ClientID = *payload.ClientID
+	}
+	if payload.ClientSecret != nil {
+		resolved.ClientSecret = *payload.ClientSecret
+	}
+	if payload.RedirectURI != nil {
+		resolved.RedirectURI = *payload.RedirectURI
+	}
+	return resolved, nil
+}
 
-	if !isSupportedConnectAuthType(payload.AuthType) {
+// existingConnectConfigFields decrypts a prior row's client_id/client_secret
+// so an update that omits them can carry the values forward unchanged. The
+// admin API never returns decrypted values to a caller (see
+// connectConfigResponse's HasClientID/HasClientSecret flags), so this is the
+// only place that can recover them. Returns the zero value, not an error,
+// when there is nothing to carry forward.
+func existingConnectConfigFields(existing *store.ConnectConfig, masterKey []byte) (resolvedConnectConfigFields, error) {
+	if existing == nil {
+		return resolvedConnectConfigFields{}, nil
+	}
+	dek, err := store.UnwrapDEK(masterKey, existing.EncryptedDEK)
+	if err != nil {
+		return resolvedConnectConfigFields{}, fmt.Errorf("unwrap existing connect config dek: %w", err)
+	}
+	clientID, err := store.DecryptWithDEK(dek, existing.EncryptedClientID)
+	if err != nil {
+		return resolvedConnectConfigFields{}, fmt.Errorf("decrypt existing client_id: %w", err)
+	}
+	clientSecret, err := store.DecryptWithDEK(dek, existing.EncryptedClientSecret)
+	if err != nil {
+		return resolvedConnectConfigFields{}, fmt.Errorf("decrypt existing client_secret: %w", err)
+	}
+	return resolvedConnectConfigFields{
+		AuthType:     existing.AuthType,
+		Enabled:      existing.Enabled,
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		RedirectURI:  existing.RedirectURI,
+	}, nil
+}
+
+// normalize trims and canonicalizes only the fields the caller actually
+// provided. A nil field must stay nil through this step -- that is what lets
+// validateConnectConfigPayload tell "omitted, leave unchanged" apart from an
+// explicit empty string, which is a validation error either way.
+func (p *connectConfigUpsertPayload) normalize() {
+	if p.AuthType != nil {
+		canonical := canonicalWorkspaceStaticAuthType(strings.TrimSpace(*p.AuthType))
+		p.AuthType = &canonical
+	}
+	p.ClientID = trimPtr(p.ClientID)
+	p.ClientSecret = trimPtr(p.ClientSecret)
+	p.RedirectURI = trimPtr(p.RedirectURI)
+}
+
+// trimPtr trims a provided value without collapsing "not provided" (nil)
+// into "provided as blank" -- the two must stay distinguishable through
+// normalization for partial-update validation to work.
+func trimPtr(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*value)
+	return &trimmed
+}
+
+// validateConnectConfigPayload enforces shape rules that differ by whether a
+// config already exists: creating one needs every field (there is nothing to
+// fall back to), while updating one only needs whichever fields the caller
+// actually sent -- GetConnectConfig's read plus resolveConnectConfigFields'
+// merge supplies the rest.
+func validateConnectConfigPayload(payload *connectConfigUpsertPayload, existing *store.ConnectConfig) string {
+	if existing == nil {
+		return validateConnectConfigCreate(payload)
+	}
+	return validateConnectConfigUpdate(payload)
+}
+
+func validateConnectConfigCreate(payload *connectConfigUpsertPayload) string {
+	if payload.AuthType == nil || !isSupportedConnectAuthType(*payload.AuthType) {
 		return "unsupported auth_type"
 	}
-	if payload.ClientID == "" {
+	if payload.ClientID == nil || *payload.ClientID == "" {
 		return "client_id is required"
 	}
-	if payload.ClientSecret == "" {
+	if payload.ClientSecret == nil || *payload.ClientSecret == "" {
 		return "client_secret is required"
 	}
-	if !isHTTPRedirectURI(payload.RedirectURI) {
+	if payload.RedirectURI == nil || !isHTTPRedirectURI(*payload.RedirectURI) {
+		return "redirect_uri must be an absolute http or https URL"
+	}
+	return ""
+}
+
+// validateConnectConfigUpdate requires at least one field so a no-op PUT
+// cannot silently "succeed" and confuse a caller checking whether their
+// change took effect; every other rule only applies to a field that was
+// actually provided; the rest are left to resolveConnectConfigFields to
+// carry forward from the existing row.
+func validateConnectConfigUpdate(payload *connectConfigUpsertPayload) string {
+	if payload.AuthType == nil && payload.ClientID == nil && payload.ClientSecret == nil &&
+		payload.RedirectURI == nil && payload.Enabled == nil {
+		return "update requires at least one of auth_type, client_id, client_secret, redirect_uri, or enabled"
+	}
+	if payload.AuthType != nil && !isSupportedConnectAuthType(*payload.AuthType) {
+		return "unsupported auth_type"
+	}
+	if payload.ClientID != nil && *payload.ClientID == "" {
+		return "client_id cannot be blanked out -- omit it to leave unchanged"
+	}
+	if payload.ClientSecret != nil && *payload.ClientSecret == "" {
+		return "client_secret cannot be blanked out -- omit it to leave unchanged"
+	}
+	if payload.RedirectURI != nil && !isHTTPRedirectURI(*payload.RedirectURI) {
 		return "redirect_uri must be an absolute http or https URL"
 	}
 	return ""
@@ -310,13 +514,6 @@ func writeConnectJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
-}
-
-func connectConfigEnabled(payload connectConfigUpsertPayload) bool {
-	if payload.Enabled == nil {
-		return true
-	}
-	return *payload.Enabled
 }
 
 func connectAdminAttrs(action string, call connectAdminCall) []attribute.KeyValue {

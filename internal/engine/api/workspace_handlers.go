@@ -58,6 +58,7 @@ func WorkspaceHandler(s store.Store, verifier ServiceVerifier, masterKey []byte)
 	r.Delete("/buckets/{id}/values", DeleteBucketValueHandler(s))
 
 	r.Put("/buckets/{bucket_id}/services/{service_id}/connect-config", UpsertConnectConfigHandler(s, masterKey))
+	r.Get("/buckets/{bucket_id}/services/{service_id}/connect-config", GetConnectConfigHandler(s))
 	r.Post("/buckets/{bucket_id}/services/{service_id}/connect/sessions", StartConnectSessionHandler(s, verifier, masterKey))
 	r.Delete("/buckets/{bucket_id}/auth/connections/{connection_id}", DeleteAuthConnectionHandler(s))
 	r.Get("/connect/callback", ConnectCallbackHandler(s, verifier, masterKey))
