@@ -1,13 +1,13 @@
 # syntax=docker/dockerfile:1
 
-FROM alpine:3.23 AS engine-runtime
+FROM node:24-alpine AS engine-runtime
 
 WORKDIR /app
 
 # Node and npm remain part of the runtime because MCP sessions execute in
 # isolated Node processes and initialize their shared runtime dependencies.
 RUN apk upgrade --no-cache && \
-    apk add --no-cache bash nodejs npm su-exec nats-server tini
+    apk add --no-cache bash su-exec nats-server tini
 
 # GoReleaser copies the selected binary to the root context. Headless release
 # images pass ENGINE_BINARY=fused-engine-headless but keep /app/fused-engine as
