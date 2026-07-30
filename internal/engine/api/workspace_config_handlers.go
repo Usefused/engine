@@ -3419,7 +3419,7 @@ func prepareWorkspaceProfile(svc workspaceDesiredService, material workspaceConn
 		return errors.New("connection profile payload does not match planned revision hash")
 	}
 	profile := store.WorkspaceConnectionProfile{
-		ServiceVersionID: selected.VersionID, AuthType: declarativeProfile.AuthType, Layer: "override",
+		ServiceID: svc.ServiceID, ServiceVersionID: selected.VersionID, AuthType: declarativeProfile.AuthType, Layer: "override",
 		ProfileRevision: nextLocalProfileRevision(current), ProfileHash: hash,
 		Provenance: "workspace", ProfileSnapshot: snapshot,
 	}
