@@ -37,7 +37,6 @@ type ConfigPlanRequest struct {
 type ConfigApplyRequest struct {
 	PlanID           string                              `json:"plan_id"`
 	SourceHash       string                              `json:"source_hash"`
-	ConnectMaterials map[string]workspaceConnectMaterial `json:"connect_materials,omitempty"`
 	AuthMaterials    map[string]workspaceAuthMaterial    `json:"auth_materials,omitempty"`
 	ProfileMaterials map[string]workspaceConnectMaterial `json:"profile_materials,omitempty"`
 	// BucketSecretMaterials carries the resolved values for
@@ -83,8 +82,7 @@ type workspaceConfigBucket struct {
 }
 
 type workspaceConfigBucketService struct {
-	Auth    *WorkspaceAuthConfig    `json:"auth,omitempty"`
-	Connect *WorkspaceConnectConfig `json:"connect,omitempty"`
+	Auth *WorkspaceAuthConfig `json:"auth,omitempty"`
 }
 
 type workspaceConfigService struct {
@@ -239,24 +237,6 @@ type WorkspaceAuthConfig struct {
 	Key      string `json:"key,omitempty"`
 }
 
-// WorkspaceConnectConfig is bucket-owned service material only: the OAuth/OIDC
-// client application, its enabled state, and its redirect target. It carries
-// no profile fields -- a connection profile is workspace+service_version+
-// auth_type scoped (see workspaceConfigConnectionProfileIntent) and must
-// resolve and reconcile independently of whether this material exists, per
-// Agreed Product Rules 11-12.
-type WorkspaceConnectConfig struct {
-	Bucket          string            `json:"bucket,omitempty"`
-	AuthType        string            `json:"auth_type"`
-	Enabled         *bool             `json:"enabled,omitempty"`
-	ClientID        string            `json:"client_id"`
-	ClientIDEnv     string            `json:"client_id_env,omitempty"`
-	ClientSecret    string            `json:"client_secret"`
-	ClientSecretEnv string            `json:"client_secret_env,omitempty"`
-	RedirectURI     string            `json:"redirect_uri"`
-	Injections      []InjectionConfig `json:"injections,omitempty"`
-}
-
 type InjectionConfig struct {
 	Value    string `json:"value"`
 	Location string `json:"location"`
@@ -367,7 +347,6 @@ type workspaceDesiredBucketServiceConfig struct {
 	ServiceKey string
 	ServiceID  uuid.UUID
 	Auth       *WorkspaceAuthConfig
-	Connect    *WorkspaceConnectConfig
 }
 
 // explicit reports whether the workspace author named a specific profile
@@ -702,7 +681,6 @@ func WorkspaceConfigApplyHandler(configStore store.ConfigRepository, s store.Sto
 			planID:           planID,
 			sourceHash:       req.SourceHash,
 			masterKey:        masterKey,
-			connectMats:      req.ConnectMaterials,
 			authMats:         req.AuthMaterials,
 			profileMats:      req.ProfileMaterials,
 			bucketSecretMats: req.BucketSecretMaterials,
@@ -755,7 +733,6 @@ type workspaceApplyCall struct {
 	planID           uuid.UUID
 	sourceHash       string
 	masterKey        []byte
-	connectMats      map[string]workspaceConnectMaterial
 	authMats         map[string]workspaceAuthMaterial
 	profileMats      map[string]workspaceConnectMaterial
 	bucketSecretMats map[string]string
@@ -779,7 +756,7 @@ func executeWorkspaceConfigApply(
 	if err := validateWorkspaceRemovalDecisions(plan, desired, previousManaged); err != nil {
 		return nil, err
 	}
-	appliedWebhooks, err := applyWorkspaceConfig(ctx, s, verifier, call.apiKey, call.accountID, desired, previousManaged, call.connectMats, call.authMats, call.profileMats, call.bucketSecretMats, call.masterKey)
+	appliedWebhooks, err := applyWorkspaceConfig(ctx, s, verifier, call.apiKey, call.accountID, desired, previousManaged, call.authMats, call.profileMats, call.bucketSecretMats, call.masterKey)
 	if err != nil {
 		return nil, workspaceApplyError(ctx, err)
 	}
@@ -1390,30 +1367,6 @@ func parseWorkspaceConfig(raw json.RawMessage) (workspaceDesiredState, error) {
 	}
 	out.BucketServiceConfigs = bucketConfigs
 
-	// If any bucket has injections for a service, ensure that service has
-	// at least one profile intent to hold those synthetic bindings.
-	for _, bsc := range out.BucketServiceConfigs {
-		if bsc.Connect == nil || len(bsc.Connect.Injections) == 0 {
-			continue
-		}
-		svc, ok := out.Services[bsc.ServiceID]
-		if !ok {
-			continue
-		}
-		// Injections will be mapped to bindings in prepareWorkspaceProfile.
-		// If the service has no profiles requested, create a synthetic one.
-		if len(svc.ConnectionProfiles) == 0 {
-			svc.ConnectionProfiles = append(svc.ConnectionProfiles, workspaceDesiredConnectionProfile{
-				AuthType:  "none",
-				Version:   svc.Versions[0],
-				VersionID: svc.VersionIDs[svc.Versions[0]],
-				Profile: &connectionprofile.Profile{
-					AuthType: "none",
-				},
-			})
-			out.Services[bsc.ServiceID] = svc
-		}
-	}
 	bucketSecrets, err := normalizeWorkspaceBucketSecrets(doc.Buckets)
 	if err != nil {
 		return workspaceDesiredState{}, err
@@ -1521,13 +1474,10 @@ func normalizeWorkspaceBuckets(buckets map[string]workspaceConfigBucket, configu
 			if _, ok := configured[serviceKey]; !ok {
 				return nil, fmt.Errorf("workspace bucket %q references unapproved service %q", name, serviceKey)
 			}
-			if err := validateWorkspaceConnectConfigIntent(serviceKey, serviceConfig.Connect); err != nil {
-				return nil, err
-			}
 			if err := validateWorkspaceAuthConfigIntent(serviceKey, serviceConfig.Auth); err != nil {
 				return nil, err
 			}
-			out = append(out, workspaceDesiredBucketServiceConfig{BucketName: name, ServiceKey: serviceKey, ServiceID: service.ServiceID, Auth: serviceConfig.Auth, Connect: serviceConfig.Connect})
+			out = append(out, workspaceDesiredBucketServiceConfig{BucketName: name, ServiceKey: serviceKey, ServiceID: service.ServiceID, Auth: serviceConfig.Auth})
 		}
 	}
 	return out, nil
@@ -1535,8 +1485,8 @@ func normalizeWorkspaceBuckets(buckets map[string]workspaceConfigBucket, configu
 
 // normalizeWorkspaceBucketSecrets validates and flattens every bucket's
 // generic Secrets map into the desired-state list, enforcing the same
-// $ENV-only discipline as bucket Auth/Connect material (Secrets never carries
-// a literal value past this point -- resolution happens out-of-band at apply
+// $ENV-only discipline as bucket Auth material (Secrets never carries a
+// literal value past this point -- resolution happens out-of-band at apply
 // time via ConfigApplyRequest.BucketSecretMaterials).
 func normalizeWorkspaceBucketSecrets(buckets map[string]workspaceConfigBucket) ([]workspaceDesiredBucketSecret, error) {
 	var out []workspaceDesiredBucketSecret
@@ -1656,91 +1606,6 @@ func validateWorkspaceAuthEnvRefs(key, authType string, values ...string) error 
 		}
 	}
 	return nil
-}
-
-// validateWorkspaceConnectIntent validates bucket-owned service material only.
-// Connection profile intent is validated independently by
-// normalizeWorkspaceConnectionProfileIntent -- a service may declare either,
-// both, or neither, and neither declaration may require the other.
-func validateWorkspaceConnectConfigIntent(key string, connect *WorkspaceConnectConfig) error {
-	if connect == nil {
-		return nil
-	}
-	if !isSupportedConnectAuthType(strings.TrimSpace(connect.AuthType)) {
-		return fmt.Errorf("service %q connect has unsupported auth_type", key)
-	}
-	if !isHTTPRedirectURI(strings.TrimSpace(connect.RedirectURI)) {
-		return fmt.Errorf("service %q connect redirect_uri must be an absolute http or https URL", key)
-	}
-	return validateWorkspaceConnectClientMaterial(key, connect)
-}
-
-// validateWorkspaceConnectClientMaterial keeps OAuth app credential validation
-// separate from URL/auth-type checks because this is the secret-handling branch.
-func validateWorkspaceConnectClientMaterial(key string, connect *WorkspaceConnectConfig) error {
-	if strings.TrimSpace(connect.ClientIDEnv) != "" || strings.TrimSpace(connect.ClientSecretEnv) != "" {
-		return fmt.Errorf("service %q connect must use client_id/client_secret with $ENV references, not *_env fields", key)
-	}
-	if strings.TrimSpace(connect.ClientID) == "" {
-		return fmt.Errorf("service %q connect requires client_id", key)
-	}
-	return validateWorkspaceConnectClientSecret(key, connect.ClientSecret)
-}
-
-// validateWorkspaceConnectClientSecret keeps a literal value out of a
-// committed file: only $ENV (resolved locally by the CLI at apply time) or
-// the ambient bucket-secret shorthand (resolved server-side at apply time,
-// see resolveWorkspaceConnectBucketSecretRefs) are accepted. The bucket-ref
-// path is the escape hatch from requiring this secret to be re-supplied via
-// local environment on every single apply -- set it once as a bucket secret
-// instead, the same way a static `auth` credential already works.
-func validateWorkspaceConnectClientSecret(key, clientSecret string) error {
-	value := strings.TrimSpace(clientSecret)
-	if value == "" {
-		return fmt.Errorf("service %q connect requires client_secret: $ENV or ${bucket.secret.<key>}", key)
-	}
-	if isWorkspaceEnvRef(value) {
-		return nil
-	}
-	if _, ok := ambientWorkspaceBucketSecretKey(value); ok {
-		return nil
-	}
-	if looksLikeWorkspaceConnectBucketTag(value) {
-		return fmt.Errorf("service %q connect client_secret must reference this config's own bucket via ${bucket.secret.<key>} -- a named bucket like ${bucket.<name>.secret.<key>} is valid only in a kind: webhook secret", key)
-	}
-	return fmt.Errorf("service %q connect must use client_secret: $ENV or ${bucket.secret.<key>}, not an inline value", key)
-}
-
-// looksLikeWorkspaceConnectBucketTag reports whether value is shaped like any
-// ${bucket...} reference at all (named or shorthand), without judging which
-// specific shape -- used to tell "this needs a clear bucket-tag rejection
-// message" apart from "this isn't a bucket reference at all" (a literal, or
-// a $ENV placeholder already substituted).
-func looksLikeWorkspaceConnectBucketTag(value string) bool {
-	inner, ok := secretref.SingleTag(value)
-	return ok && strings.HasPrefix(inner, "bucket.")
-}
-
-// ambientWorkspaceBucketSecretKey accepts only the ambient shorthand
-// (${bucket.secret.<key>}) and returns the fused_workspace_secrets KeyName it
-// maps to. A connect config already belongs to one specific bucket --
-// resolveWorkspaceConnectBucket resolves it before this ever runs -- so
-// unlike kind: webhook (which has no caller-selected bucket to fall back on
-// and therefore needs the named form), the named form here would only ever
-// mean "read a secret out of a different bucket than the one this connect
-// config lives in," which is rejected the same way SDK/MCP injections reject
-// a named bucket. Shared by validation (shape only) and resolution (the
-// actual fetch) so both agree on one rule.
-func ambientWorkspaceBucketSecretKey(value string) (string, bool) {
-	inner, ok := secretref.SingleTag(value)
-	if !ok {
-		return "", false
-	}
-	parts := strings.Split(inner, ".")
-	if len(parts) == 3 && parts[0] == "bucket" && parts[1] == "secret" && parts[2] != "" {
-		return secretref.KeyPrefix + parts[2], true
-	}
-	return "", false
 }
 
 func resolveWorkspaceServiceVisibility(
@@ -2695,23 +2560,18 @@ func applyWorkspaceConfig(
 	accountID uuid.UUID,
 	desired workspaceDesiredState,
 	previousManaged map[uuid.UUID]workspaceManagedService,
-	connectMats map[string]workspaceConnectMaterial,
 	authMats map[string]workspaceAuthMaterial,
 	profileMats map[string]workspaceConnectMaterial,
 	bucketSecretMats map[string]string,
 	masterKey []byte,
 ) ([]appliedWorkspaceWebhook, error) {
-	// Bucket-owned material and workspace connection profiles are two
-	// independent plans (see the plan's "Workspace Plan And Apply"): each is
-	// prepared, validated, and reconciled by its own code path so neither can
-	// gate or imply the other. prepareWorkspaceConnectConfigs never consults
-	// profile intent, and prepareWorkspaceProfilePlan never consults bucket
-	// material -- their only shared input is $ENV binding material, which both
-	// may need to resolve.
-	connectConfigs, err := prepareWorkspaceConnectConfigs(ctx, s, desired, connectMats, masterKey)
-	if err != nil {
-		return nil, err
-	}
+	// Bucket-owned OAuth app registration (fused-cli connect <slug> set) and
+	// workspace connection profiles are independent plans (see the plan's
+	// "Workspace Plan And Apply"): profile reconciliation never consults
+	// bucket material, and bucket material is no longer a workspace apply
+	// concern at all -- it's an immediate admin action against its own
+	// endpoint (connect_admin_handlers.go), not something this apply plans,
+	// validates, or reconciles.
 	profilePlan, err := prepareWorkspaceProfilePlan(ctx, s, verifier, apiKey, desired, profileMats)
 	if err != nil {
 		return nil, err
@@ -2722,7 +2582,7 @@ func applyWorkspaceConfig(
 	}
 	// Generic bucket secrets are a third independent plan, same reasoning as
 	// the comment above: no service dimension at all, so they can't gate or
-	// be gated by service-scoped auth/connect material.
+	// be gated by service-scoped auth material.
 	bucketSecrets, err := prepareWorkspaceBucketSecrets(ctx, s, desired, bucketSecretMats, masterKey)
 	if err != nil {
 		return nil, err
@@ -2736,7 +2596,7 @@ func applyWorkspaceConfig(
 	if err := upsertWorkspaceBucketSecrets(ctx, s, bucketSecrets); err != nil {
 		return nil, err
 	}
-	applied, err := upsertDesiredWorkspaceServices(ctx, s, verifier, apiKey, accountID, desired, connectConfigs, authSecrets)
+	applied, err := upsertDesiredWorkspaceServices(ctx, s, verifier, apiKey, accountID, desired, authSecrets)
 	if err != nil {
 		return nil, err
 	}
@@ -2753,7 +2613,6 @@ func upsertDesiredWorkspaceServices(
 	apiKey string,
 	accountID uuid.UUID,
 	desired workspaceDesiredState,
-	connectConfigs map[string]workspaceConnectApplyPlan,
 	authSecrets map[string]workspaceAuthApplyPlan,
 ) ([]appliedWorkspaceWebhook, error) {
 	// applied is always empty now -- kept in this function's return type only
@@ -2798,9 +2657,6 @@ func upsertDesiredWorkspaceServices(
 		// (still part of this function's and the caller's signature) but is
 		// never populated by this loop anymore.
 
-		if err := upsertPreparedWorkspaceConnectConfig(ctx, s, svc, connectConfigs); err != nil {
-			return nil, err
-		}
 		// Connection profile reconciliation is intentionally not here: it is
 		// batched once across the whole apply by reconcileWorkspaceProfilePlan,
 		// not once per service inside this loop (see applyWorkspaceConfig).
@@ -3176,16 +3032,6 @@ func canonicalWorkspaceImportedAuthType(authType string) string {
 	}
 }
 
-// workspaceConnectApplyPlan is bucket-owned Connect material only. It carries
-// no profile fields: reconciling a bucket's client credentials must never
-// gate or imply reconciling that service's connection profile, and vice
-// versa (Agreed Product Rules 11-12; see workspaceProfilePlan).
-type workspaceConnectApplyPlan struct {
-	BucketID  uuid.UUID
-	ServiceID uuid.UUID
-	Config    store.ConnectConfig
-}
-
 type workspaceProfileReplacement = store.WorkspaceProfileReplacement
 
 type workspaceVersionProfile struct {
@@ -3212,34 +3058,6 @@ type workspaceProfilePlan struct {
 }
 
 type workspaceConnectBucketCache map[string]*store.Bucket
-
-// prepareWorkspaceConnectConfigs resolves bucket-owned Connect material only.
-// It never reads or validates connection-profile intent -- that is
-// prepareWorkspaceProfilePlan's independent responsibility -- so a service
-// with no bucket material declared is simply absent from the returned map,
-// and never blocks that service's profile from being planned.
-func prepareWorkspaceConnectConfigs(
-	ctx context.Context,
-	s store.Store,
-
-	desired workspaceDesiredState,
-	materials map[string]workspaceConnectMaterial,
-	masterKey []byte,
-) (map[string]workspaceConnectApplyPlan, error) {
-	out := map[string]workspaceConnectApplyPlan{}
-	buckets := workspaceConnectBucketCache{}
-	for _, item := range desired.BucketServiceConfigs {
-		if item.Connect == nil {
-			continue
-		}
-		plan, err := prepareWorkspaceConnectConfig(ctx, s, desired.Services[item.ServiceID], item, materials, buckets, masterKey)
-		if err != nil {
-			return nil, err
-		}
-		out[workspaceBucketMaterialKey(item.BucketName, item.ServiceKey)] = plan
-	}
-	return out, nil
-}
 
 // prepareWorkspaceProfilePlan resolves and validates every workspace
 // connection profile intent across the whole desired state, independently of
@@ -3279,16 +3097,13 @@ func prepareWorkspaceProfilePlan(
 	}
 	var plan workspaceProfilePlan
 
-	// Map injections per service
-	injectionsByService := map[uuid.UUID][]InjectionConfig{}
-	for _, bsc := range desired.BucketServiceConfigs {
-		if bsc.Connect != nil && len(bsc.Connect.Injections) > 0 {
-			injectionsByService[bsc.ServiceID] = append(injectionsByService[bsc.ServiceID], bsc.Connect.Injections...)
-		}
-	}
-
+	// Literal binding injections had only ever been sourced from bucket-owned
+	// Connect.Injections (workspace.yaml's connect: block, now removed -- see
+	// fused-cli connect <slug> set). prepareWorkspaceServiceProfilePlan still
+	// accepts an injections list so a future non-bucket source can populate
+	// it without another signature change, but there is none today.
 	for _, svc := range sortedDesiredServices(desired) {
-		if err := prepareWorkspaceServiceProfilePlan(svc, materials[svc.Key], injectionsByService[svc.ServiceID], contracts, current, &plan); err != nil {
+		if err := prepareWorkspaceServiceProfilePlan(svc, materials[svc.Key], nil, contracts, current, &plan); err != nil {
 			return workspaceProfilePlan{}, err
 		}
 	}
@@ -3447,91 +3262,6 @@ func resolvedWorkspaceProfileRefs(desired workspaceDesiredState) ([]sandbox.Conn
 // contract cannot accidentally satisfy another version's apply-time check.
 func resolvedProfileIdentityKey(profileID string, versionID uuid.UUID) string {
 	return profileID + "\x00" + versionID.String()
-}
-
-// prepareWorkspaceConnectConfig resolves bucket state before encryption so the
-// apply path can upsert config without leaking client credentials to OTEL.
-// Connect client material remains bucket-scoped even though the connection
-// profile it pairs with is now workspace-scoped -- a profile reset never
-// needs to re-resolve or pin bucket identity, unlike the old model.
-func prepareWorkspaceConnectConfig(ctx context.Context, s store.Store, svc workspaceDesiredService, item workspaceDesiredBucketServiceConfig, materials map[string]workspaceConnectMaterial, buckets workspaceConnectBucketCache, masterKey []byte) (workspaceConnectApplyPlan, error) {
-	bucket, err := resolveWorkspaceConnectBucket(ctx, s, item.BucketName, buckets)
-	if err != nil {
-		return workspaceConnectApplyPlan{}, err
-	}
-	resolved := workspaceConnectConfigWithMaterial(item, materials)
-	if err := resolveWorkspaceConnectBucketSecretRefs(ctx, s, &resolved, bucket, masterKey); err != nil {
-		return workspaceConnectApplyPlan{}, err
-	}
-	cfg, err := encryptedWorkspaceConnectConfig(bucket.ID, svc.ServiceID, &resolved, masterKey)
-	if err != nil {
-		return workspaceConnectApplyPlan{}, err
-	}
-	return workspaceConnectApplyPlan{BucketID: bucket.ID, ServiceID: svc.ServiceID, Config: cfg}, nil
-}
-
-// resolveWorkspaceConnectBucketSecretRefs replaces any ${bucket.secret.<key>}
-// reference in ClientID/ClientSecret with its decrypted value so
-// encryptedWorkspaceConnectConfig always re-encrypts a literal -- storage and
-// every downstream decrypt path (OAuth flow start, token refresh) stay
-// unchanged. Resolved once per apply, the same timing as the existing $ENV
-// path, so rotating the underlying bucket secret takes effect on the connect
-// config's next apply. bucket is the config's own bucket, already resolved
-// by resolveWorkspaceConnectBucket -- passed in rather than re-looked-up so
-// this never issues a second bucket query for a bucket the caller already
-// has in hand.
-func resolveWorkspaceConnectBucketSecretRefs(ctx context.Context, s store.Store, connect *WorkspaceConnectConfig, bucket *store.Bucket, masterKey []byte) error {
-	clientID, err := resolveWorkspaceBucketSecretIfReferenced(ctx, s, connect.ClientID, bucket, masterKey)
-	if err != nil {
-		return fmt.Errorf("connect client_id: %w", err)
-	}
-	connect.ClientID = clientID
-	clientSecret, err := resolveWorkspaceBucketSecretIfReferenced(ctx, s, connect.ClientSecret, bucket, masterKey)
-	if err != nil {
-		return fmt.Errorf("connect client_secret: %w", err)
-	}
-	connect.ClientSecret = clientSecret
-	return nil
-}
-
-// resolveWorkspaceBucketSecretIfReferenced passes any non-bucket-tag value
-// through unchanged (a literal client_id, or a $ENV placeholder already
-// substituted by workspaceConnectConfigWithMaterial). An ambient
-// ${bucket.secret.<key>} tag resolves against bucket, the connect config's
-// own already-known bucket -- see ambientWorkspaceBucketSecretKey for why the
-// named form is rejected rather than honored here.
-func resolveWorkspaceBucketSecretIfReferenced(ctx context.Context, s store.Store, value string, bucket *store.Bucket, masterKey []byte) (string, error) {
-	keyName, ok := ambientWorkspaceBucketSecretKey(value)
-	if !ok {
-		if looksLikeWorkspaceConnectBucketTag(value) {
-			return "", fmt.Errorf("%q must reference this config's own bucket via ${bucket.secret.<key>} -- a named bucket like ${bucket.<name>.secret.<key>} is valid only in a kind: webhook secret", value)
-		}
-		return value, nil
-	}
-	sec, err := s.GetSecret(ctx, bucket.ID, uuid.Nil, keyName)
-	if err != nil {
-		return "", fmt.Errorf("fetch bucket secret: %w", err)
-	}
-	if sec == nil {
-		return "", fmt.Errorf("bucket %q has no secret named %q", bucket.Name, strings.TrimPrefix(keyName, secretref.KeyPrefix))
-	}
-	return decryptWorkspaceBucketSecret(sec, masterKey)
-}
-
-// decryptWorkspaceBucketSecret mirrors sandbox.secretResolver's expiry-then-
-// decrypt discipline for stored bucket secrets, duplicated here rather than
-// exported cross-package since this is the only place in the API package
-// that ever reads a bucket secret's value back out (everything else here
-// only ever writes one -- see fused-bucket's "never the value itself").
-func decryptWorkspaceBucketSecret(sec *store.WorkspaceSecret, masterKey []byte) (string, error) {
-	if sec.ExpiresAt != nil && sec.ExpiresAt.Before(time.Now().UTC()) {
-		return "", fmt.Errorf("bucket secret %q expired at %s", sec.KeyName, sec.ExpiresAt.Format(time.RFC3339))
-	}
-	dek, err := store.UnwrapDEK(masterKey, sec.EncryptedDEK)
-	if err != nil {
-		return "", fmt.Errorf("unwrap bucket secret DEK: %w", err)
-	}
-	return store.DecryptWithDEK(dek, sec.EncryptedValue)
 }
 
 // prepareWorkspaceServiceProfilePlan applies preservation and reset rules to
@@ -3793,22 +3523,6 @@ func resolvedInlineWorkspaceProfile(profile connectionprofile.Profile, values ma
 	return resolved, nil
 }
 
-// workspaceConnectConfigWithMaterial replaces plan-safe env placeholders with
-// apply-time material while preserving literal non-secret config values.
-func workspaceConnectConfigWithMaterial(item workspaceDesiredBucketServiceConfig, materials map[string]workspaceConnectMaterial) WorkspaceConnectConfig {
-	resolved := *item.Connect
-	material := materials[workspaceBucketMaterialKey(item.BucketName, item.ServiceKey)]
-	// Material replaces absent or plan-safe references but never an explicit literal ID.
-	if strings.TrimSpace(resolved.ClientID) == "" || isWorkspaceEnvRef(resolved.ClientID) {
-		resolved.ClientID = material.ClientID
-	}
-	// Secrets follow the same rule so source config cannot be overwritten unexpectedly.
-	if strings.TrimSpace(resolved.ClientSecret) == "" || isWorkspaceEnvRef(resolved.ClientSecret) {
-		resolved.ClientSecret = material.ClientSecret
-	}
-	return resolved
-}
-
 // isWorkspaceEnvRef lets Engine accept plan-safe `$ENV` placeholders while
 // still rejecting literal client secrets before they can enter config state.
 func isWorkspaceEnvRef(value string) bool {
@@ -3847,30 +3561,6 @@ func validWorkspaceEnvName(name string) string {
 // and underscore may start, digits may follow, and nothing invokes a shell.
 func validWorkspaceEnvNameRune(index int, r rune) bool {
 	return r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || index > 0 && r >= '0' && r <= '9'
-}
-
-// upsertPreparedWorkspaceConnectConfig emits only identifiers and auth family
-// to OTEL; encrypted client material stays in storage, not telemetry.
-func upsertPreparedWorkspaceConnectConfig(ctx context.Context, s store.Store, svc workspaceDesiredService, plans map[string]workspaceConnectApplyPlan) error {
-	for _, plan := range plans {
-		if plan.ServiceID != svc.ServiceID {
-			continue
-		}
-		// Connection profiles are reconciled separately, once for the whole apply
-		// (see reconcileWorkspaceProfilePlan) -- this function writes bucket-owned
-		// Connect material only, so it never gates or is gated by profile state.
-		if _, err := s.UpsertConnectConfig(ctx, plan.Config); err != nil {
-			return fmt.Errorf("upsert connect config for service %s: %w", svc.ServiceID, err)
-		}
-		_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.connect_config_upserted")
-		span.SetAttributes(
-			attribute.String("bucket_id", plan.BucketID.String()),
-			attribute.String("service_id", svc.ServiceID.String()),
-			attribute.String("auth_type", plan.Config.AuthType),
-		)
-		span.End()
-	}
-	return nil
 }
 
 // workspaceBucketMaterialKey aligns CLI and Engine apply payloads without
@@ -3918,24 +3608,6 @@ func workspaceConnectBucketName(bucketName string) string {
 		return "default"
 	}
 	return name
-}
-
-func encryptedWorkspaceConnectConfig(bucketID, serviceID uuid.UUID, input *WorkspaceConnectConfig, masterKey []byte) (store.ConnectConfig, error) {
-	payload := connectConfigUpsertPayload{
-		AuthType:     input.AuthType,
-		Enabled:      input.Enabled,
-		ClientID:     input.ClientID,
-		ClientSecret: input.ClientSecret,
-		RedirectURI:  input.RedirectURI,
-	}
-	if msg := validateConnectConfigPayload(&payload); msg != "" {
-		return store.ConnectConfig{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: msg}
-	}
-	cfg, err := encryptConnectConfig(bucketID, serviceID, payload, masterKey)
-	if err != nil {
-		return store.ConnectConfig{}, fmt.Errorf("encrypt connect config for service %s: %w", serviceID, err)
-	}
-	return cfg, nil
 }
 
 // resolveWebhookAuthShape fetches a service's webhook signing/verification

@@ -333,8 +333,9 @@ func (f connectRuntimeFixture) startPath() string {
 // catch DEK/ciphertext shape changes in connect config storage.
 func encryptedRuntimeConnectConfig(t *testing.T, fixture connectAdminFixture) store.ConnectConfig {
 	t.Helper()
-	cfg, err := encryptConnectConfig(fixture.bucketID, fixture.serviceID, connectConfigUpsertPayload{
+	cfg, err := encryptConnectConfig(fixture.bucketID, fixture.serviceID, resolvedConnectConfigFields{
 		AuthType:     "oidc",
+		Enabled:      true,
 		ClientID:     "client-id",
 		ClientSecret: "client-secret",
 		RedirectURI:  "https://engine.example.com/workspace/connect/callback",
@@ -342,7 +343,6 @@ func encryptedRuntimeConnectConfig(t *testing.T, fixture connectAdminFixture) st
 	if err != nil {
 		t.Fatalf("encrypt connect config: %v", err)
 	}
-	cfg.Enabled = true
 	return cfg
 }
 

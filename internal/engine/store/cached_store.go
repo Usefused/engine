@@ -542,6 +542,38 @@ func (s *cachedStore) workspaceConnectSyncStore() (WorkspaceConnectSyncStore, er
 	return delegate, nil
 }
 
+func (s *cachedStore) workspaceExecutionPolicyStore() (WorkspaceExecutionPolicyStore, error) {
+	delegate, ok := s.Store.(WorkspaceExecutionPolicyStore)
+	if !ok {
+		return nil, errors.New("workspace execution policy store is unavailable")
+	}
+	return delegate, nil
+}
+
+func (s *cachedStore) UpsertWorkspaceExecutionPolicyOverride(ctx context.Context, override WorkspaceExecutionPolicyOverride) (*WorkspaceExecutionPolicyOverride, error) {
+	delegate, err := s.workspaceExecutionPolicyStore()
+	if err != nil {
+		return nil, err
+	}
+	return delegate.UpsertWorkspaceExecutionPolicyOverride(ctx, override)
+}
+
+func (s *cachedStore) GetEffectiveWorkspaceExecutionPolicyOverride(ctx context.Context, serviceID, serviceVersionID uuid.UUID) (*WorkspaceExecutionPolicyOverride, error) {
+	delegate, err := s.workspaceExecutionPolicyStore()
+	if err != nil {
+		return nil, err
+	}
+	return delegate.GetEffectiveWorkspaceExecutionPolicyOverride(ctx, serviceID, serviceVersionID)
+}
+
+func (s *cachedStore) ResetWorkspaceExecutionPolicyOverride(ctx context.Context, serviceID uuid.UUID, serviceVersionID *uuid.UUID) error {
+	delegate, err := s.workspaceExecutionPolicyStore()
+	if err != nil {
+		return err
+	}
+	return delegate.ResetWorkspaceExecutionPolicyOverride(ctx, serviceID, serviceVersionID)
+}
+
 func (s *cachedStore) serviceContractSnapshotStore() (ServiceContractSnapshotStore, error) {
 	delegate, ok := s.Store.(ServiceContractSnapshotStore)
 	if !ok {
