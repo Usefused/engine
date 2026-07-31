@@ -86,38 +86,37 @@ type workspaceConfigBucketService struct {
 }
 
 type workspaceConfigService struct {
-	ServiceID        string                           `json:"service_id"`
-	ServiceName      string                           `json:"service_name,omitempty"`
-	Public           *bool                            `json:"public,omitempty"`
-	Versions         []string                         `json:"versions,omitempty"`
-	ResolvedVersions []workspaceConfigResolvedVersion `json:"resolved_versions,omitempty"`
+	ServiceID   string `json:"service_id"`
+	ServiceName string `json:"service_name,omitempty"`
+	Public      *bool  `json:"public,omitempty"`
+	// Versions is one entry per enabled version: its identity (Version, plus
+	// the Engine-resolved ServiceVersionID once known), any per-version
+	// override of Public/ExecutionPolicy, and the connection profiles scoped
+	// to it. This replaces the old sibling resolved_versions/version_policies/
+	// connection_profiles lists, each of which carried its own repeated
+	// `version` field.
+	Versions []workspaceConfigServiceVersion `json:"versions,omitempty"`
 	// runtime_config.webhooks (RuntimeConfig) was removed with no backward
 	// compatibility once kind: webhook shipped -- see
 	// plans/plan-webhook-kind.md.
 	// ExecutionPolicy carries rate-limit/retry settings and an optional public
 	// flag. When public=true and the workspace owns the service, the Engine
 	// publishes the settings to the Registry during apply so all SDK consumers
-	// inherit these provider-declared limits.
+	// inherit these provider-declared limits. It is the default applied to
+	// every version in Versions unless that version sets its own override.
 	ExecutionPolicy *workspaceExecutionPolicy `json:"execution_policy,omitempty"`
-	// VersionPolicies carries per-version public/execution_policy overrides,
-	// distinct from the service-level Public/ExecutionPolicy fields above. A
-	// version not listed here inherits no override -- its visibility and
-	// execution policy are simply left alone by apply.
-	VersionPolicies []workspaceConfigVersionPolicy `json:"version_policies,omitempty"`
-	// ConnectionProfiles declares this service's routing-recipe intent,
-	// independent of RuntimeConfig.Connect. Keeping profile intent and bucket
-	// material as separate lists is what lets "Attach that baseline when its
-	// service version is activated, independently of whether any bucket has
-	// configured Connect credentials yet" and "Adding service-keyed material to
-	// a bucket does not activate ... that service" both hold: neither list can
-	// gate the other's resolution or reconciliation.
-	ConnectionProfiles []workspaceConfigConnectionProfileIntent `json:"connection_profiles,omitempty"`
 }
 
-// workspaceConfigVersionPolicy mirrors cli/internal/configfile.WorkspaceVersionPolicy
+// workspaceConfigServiceVersion mirrors cli/internal/configfile.WorkspaceServiceVersion
 // in the Engine, the same way workspaceExecutionPolicy mirrors ExecutionPolicy.
-type workspaceConfigVersionPolicy struct {
+type workspaceConfigServiceVersion struct {
 	Version string `json:"version"`
+	// ServiceVersionID is the Engine-resolved immutable ID for Version. At
+	// plan time this may arrive empty (or absent) and get filled in by
+	// resolveWorkspaceServiceVersions; the CLI then persists and replays the
+	// resolved value at apply time so apply never needs a fresh registry
+	// lookup that could drift under a reused version label.
+	ServiceVersionID string `json:"service_version_id,omitempty"`
 	// Public controls Registry-level visibility for just this version via
 	// UpdateServiceVersionPublicStatus (owner only). Distinct from
 	// ExecutionPolicy.Public, which controls whether this version's
@@ -125,6 +124,14 @@ type workspaceConfigVersionPolicy struct {
 	// visible.
 	Public          *bool                     `json:"public,omitempty"`
 	ExecutionPolicy *workspaceExecutionPolicy `json:"execution_policy,omitempty"`
+	// ConnectionProfiles declares this version's routing-recipe intent,
+	// independent of RuntimeConfig.Connect. Keeping profile intent and bucket
+	// material as separate lists is what lets "Attach that baseline when its
+	// service version is activated, independently of whether any bucket has
+	// configured Connect credentials yet" and "Adding service-keyed material to
+	// a bucket does not activate ... that service" both hold: neither list can
+	// gate the other's resolution or reconciliation.
+	ConnectionProfiles []workspaceConfigConnectionProfileIntent `json:"connection_profiles,omitempty"`
 }
 
 // workspaceExecutionPolicy mirrors cli/internal/configfile.ExecutionPolicy in
@@ -196,12 +203,12 @@ type webhookVerifyConfig struct {
 	VerificationHeaders []string `json:"verification_headers,omitempty"`
 }
 
-// workspaceConfigConnectionProfileIntent is one workspace + service_version +
-// auth_type routing decision. Resolved and Ambiguous are Engine-populated
-// during plan resolution and rejected if a caller supplies them -- see
-// rejectConfiguredResolvedProfiles.
+// workspaceConfigConnectionProfileIntent is one auth_type routing decision,
+// scoped to whichever workspaceConfigServiceVersion it's nested under --
+// service_version identity comes from that parent, not from this struct.
+// Resolved and Ambiguous are Engine-populated during plan resolution and
+// rejected if a caller supplies them -- see rejectConfiguredResolvedProfiles.
 type workspaceConfigConnectionProfileIntent struct {
-	Version   string                     `json:"version"`
 	AuthType  string                     `json:"auth_type"`
 	ProfileID string                     `json:"profile_id,omitempty"`
 	Profile   *connectionprofile.Profile `json:"profile,omitempty"`
@@ -219,11 +226,6 @@ type workspaceConfigConnectionProfileIntent struct {
 	// Reason is a safe, non-secret explanation surfaced in plan warnings when
 	// Ambiguous is true (e.g. "multiple public connection profiles match").
 	Reason string `json:"reason,omitempty"`
-}
-
-type workspaceConfigResolvedVersion struct {
-	Version          string `json:"version"`
-	ServiceVersionID string `json:"service_version_id"`
 }
 
 type WorkspaceAuthConfig struct {
@@ -304,18 +306,20 @@ type workspaceDesiredService struct {
 	Versions        []string
 	VersionIDs      map[string]uuid.UUID
 	ExecutionPolicy *workspaceExecutionPolicy
-	// VersionPolicies is normalized from workspaceConfigService's identically
-	// named field, with each entry's VersionID resolved the same way
+	// VersionPolicies is normalized from each workspaceConfigServiceVersion
+	// entry's own Public/ExecutionPolicy override (present only when that
+	// version set either one), with VersionID resolved the same way
 	// ConnectionProfiles' Version is resolved to VersionID below.
 	VersionPolicies []workspaceDesiredVersionPolicy
-	// ConnectionProfiles is normalized from workspaceConfigService's identically
-	// named field. It is resolved and reconciled by a code path that never
-	// consults RuntimeConfig.Connect, keeping the two plans independent.
+	// ConnectionProfiles is flattened from every workspaceConfigServiceVersion
+	// entry's own nested ConnectionProfiles list. It is resolved and
+	// reconciled by a code path that never consults RuntimeConfig.Connect,
+	// keeping the two plans independent.
 	ConnectionProfiles []workspaceDesiredConnectionProfile
 }
 
-// workspaceDesiredVersionPolicy is the normalized, version-pinned form of
-// workspaceConfigVersionPolicy.
+// workspaceDesiredVersionPolicy is the normalized, version-pinned form of a
+// workspaceConfigServiceVersion entry's own Public/ExecutionPolicy override.
 type workspaceDesiredVersionPolicy struct {
 	Version         string
 	VersionID       uuid.UUID
@@ -1001,6 +1005,9 @@ func resolveWorkspaceConnectionProfiles(ctx context.Context, resolver any, apiKe
 	}
 	requests, targets, err := workspaceConnectionProfileRequests(doc.Services)
 	if err != nil || len(requests) == 0 {
+		// Either building the batch failed outright, or no intent in this
+		// document actually needs Registry resolution (all inline profiles
+		// or resets) -- either way there's no batch call to make.
 		return err
 	}
 	profileResolver, ok := resolver.(ConnectionProfileResolver)
@@ -1018,9 +1025,15 @@ func resolveWorkspaceConnectionProfiles(ctx context.Context, resolver any, apiKe
 // accepting them from source config would bypass Registry eligibility checks.
 func rejectConfiguredResolvedProfiles(services map[string]workspaceConfigService) error {
 	for key, service := range services {
-		for _, intent := range service.ConnectionProfiles {
-			if intent.Resolved != nil || intent.Ambiguous {
-				return fmt.Errorf("service %q connection profile resolved/ambiguous fields are read-only", key)
+		for _, version := range service.Versions {
+			for _, intent := range version.ConnectionProfiles {
+				// These two fields are only ever written by
+				// attachResolvedWorkspaceProfiles during plan resolution --
+				// an operator submitting either directly would be forging a
+				// resolution outcome Registry never actually granted.
+				if intent.Resolved != nil || intent.Ambiguous {
+					return fmt.Errorf("service %q connection profile resolved/ambiguous fields are read-only", key)
+				}
 			}
 		}
 	}
@@ -1028,11 +1041,13 @@ func rejectConfiguredResolvedProfiles(services map[string]workspaceConfigService
 }
 
 // workspaceProfileRequestTarget positionally links one Registry batch entry
-// back to the exact intent slot it should populate.
+// back to the exact intent slot it should populate -- two levels deep now
+// that connection profiles are nested under their owning version entry.
 type workspaceProfileRequestTarget struct {
-	ServiceKey string
-	Index      int
-	Version    string
+	ServiceKey   string
+	VersionIndex int
+	ProfileIndex int
+	Version      string
 }
 
 // attachResolvedWorkspaceProfiles pins the selected immutable revision beside
@@ -1042,22 +1057,33 @@ type workspaceProfileRequestTarget struct {
 func attachResolvedWorkspaceProfiles(doc *workspaceConfigDocument, requests []sandbox.ConnectionProfileRef, targets []workspaceProfileRequestTarget, grouped map[string][]sandbox.ConnectionProfileRevision) error {
 	for index, target := range targets {
 		service := doc.Services[target.ServiceKey]
-		intent := service.ConnectionProfiles[target.Index]
+		version := service.Versions[target.VersionIndex]
+		intent := version.ConnectionProfiles[target.ProfileIndex]
 		selection, err := selectWorkspaceConnectionProfile(intent.ProfileID, grouped[connectionProfileRefKey(requests[index])])
 		if err != nil {
-			return fmt.Errorf("service %q connection profile for version %s auth_type %s: %w", target.ServiceKey, intent.Version, intent.AuthType, err)
+			return fmt.Errorf("service %q connection profile for version %s auth_type %s: %w", target.ServiceKey, target.Version, intent.AuthType, err)
 		}
 		if selection.Profile != nil {
+			// A single unambiguous (or explicitly requested) profile was
+			// found -- pin its immutable revision so apply can verify
+			// nothing drifted between plan and apply.
 			resolved := workspaceResolvedConnectionProfile{
 				ProfileID: selection.Profile.ProfileID.String(), Revision: selection.Profile.Revision,
 				ProfileHash: selection.Profile.ProfileHash, Provenance: selection.Profile.Provenance, Config: selection.Profile.Config,
 			}
 			intent.Resolved = &resolved
 		} else if selection.Unresolved {
+			// Multiple safe candidates matched with no explicit profile_id
+			// to disambiguate -- record this in the plan as data for the
+			// operator to resolve, not a hard failure.
 			intent.Ambiguous = true
 			intent.Reason = selection.Reason
 		}
-		service.ConnectionProfiles[target.Index] = intent
+		// Neither branch: zero candidates matched, so the intent is left
+		// untouched (no Resolved, not Ambiguous) -- apply surfaces that
+		// absence on its own if the version actually needs a profile.
+		version.ConnectionProfiles[target.ProfileIndex] = intent
+		service.Versions[target.VersionIndex] = version
 		doc.Services[target.ServiceKey] = service
 	}
 	return nil
@@ -1067,7 +1093,9 @@ func attachResolvedWorkspaceProfiles(doc *workspaceConfigDocument, requests []sa
 // every intent needing Registry resolution (i.e. neither an inline profile
 // body nor a reset) and keeps positional targets for attaching results. This
 // is entirely independent of RuntimeConfig.Connect -- a service can request
-// profile resolution with no bucket material declared at all.
+// profile resolution with no bucket material declared at all. The owning
+// version's ServiceVersionID is used directly (resolveWorkspaceServiceVersions
+// already ran) instead of a separate resolved_versions lookup.
 func workspaceConnectionProfileRequests(services map[string]workspaceConfigService) ([]sandbox.ConnectionProfileRef, []workspaceProfileRequestTarget, error) {
 	keys := make([]string, 0, len(services))
 	for key := range services {
@@ -1078,30 +1106,27 @@ func workspaceConnectionProfileRequests(services map[string]workspaceConfigServi
 	targets := make([]workspaceProfileRequestTarget, 0)
 	for _, key := range keys {
 		service := services[key]
-		for index, intent := range service.ConnectionProfiles {
-			if intent.Profile != nil || intent.Reset {
-				continue
+		for versionIndex, version := range service.Versions {
+			for profileIndex, intent := range version.ConnectionProfiles {
+				// An inline profile body needs no Registry lookup at all, and
+				// a reset intent is clearing an override rather than
+				// selecting one -- neither belongs in the resolution batch.
+				if intent.Profile != nil || intent.Reset {
+					continue
+				}
+				versionID, err := uuid.Parse(strings.TrimSpace(version.ServiceVersionID))
+				if err != nil {
+					// resolveWorkspaceServiceVersions must have already run
+					// and written a real ID here -- an unparsable one means
+					// this version's identity was never actually resolved.
+					return nil, nil, fmt.Errorf("service %q connection profile: version %s has no resolved service_version_id", key, version.Version)
+				}
+				refs = append(refs, sandbox.ConnectionProfileRef{ServiceVersionID: versionID, AuthType: canonicalConnectAuthType(intent.AuthType)})
+				targets = append(targets, workspaceProfileRequestTarget{ServiceKey: key, VersionIndex: versionIndex, ProfileIndex: profileIndex, Version: version.Version})
 			}
-			versionID, err := resolvedServiceVersionID(service, intent.Version)
-			if err != nil {
-				return nil, nil, fmt.Errorf("service %q connection profile: %w", key, err)
-			}
-			refs = append(refs, sandbox.ConnectionProfileRef{ServiceVersionID: versionID, AuthType: canonicalConnectAuthType(intent.AuthType)})
-			targets = append(targets, workspaceProfileRequestTarget{ServiceKey: key, Index: index, Version: intent.Version})
 		}
 	}
 	return refs, targets, nil
-}
-
-// resolvedServiceVersionID looks up the exact pinned service_version_id
-// already resolved for a version string, without a second Registry round trip.
-func resolvedServiceVersionID(service workspaceConfigService, version string) (uuid.UUID, error) {
-	for _, resolved := range service.ResolvedVersions {
-		if resolved.Version == version {
-			return uuid.Parse(resolved.ServiceVersionID)
-		}
-	}
-	return uuid.Nil, fmt.Errorf("version %s has no resolved service_version_id", version)
 }
 
 // groupEligibleProfiles indexes the batched response by exact version/auth
@@ -1199,10 +1224,15 @@ func resolveWorkspaceServiceSlugs(ctx context.Context, resolver any, apiKey stri
 
 func resolveWorkspaceServiceVersions(ctx context.Context, resolver any, apiKey string, doc *workspaceConfigDocument) error {
 	if len(doc.Services) == 0 {
+		// Nothing to resolve -- an empty services map is a valid (if
+		// pointless) plan, not an error.
 		return nil
 	}
 	verifier, ok := resolver.(ServiceVerifier)
 	if !ok || verifier == nil {
+		// The concrete resolver passed in doesn't implement version
+		// verification (e.g. a test double built for a narrower interface) --
+		// fail clearly rather than silently skipping resolution.
 		return errors.New("workspace service version resolution is unavailable")
 	}
 	refs := explicitWorkspaceVersionRefs(doc.Services)
@@ -1216,11 +1246,16 @@ func resolveWorkspaceServiceVersions(ctx context.Context, resolver any, apiKey s
 		return err
 	}
 	for key, svc := range doc.Services {
-		if len(uniqueTrimmed(svc.Versions)) == 0 {
+		// No versions declared at all means "give me whatever Registry's
+		// latest public version is right now" -- resolve and attach exactly
+		// one version rather than treating an empty list as an error.
+		if len(uniqueTrimmedServiceVersionNames(svc.Versions)) == 0 {
 			if err := attachLatestWorkspaceServiceVersion(key, &svc, latestVersions); err != nil {
 				return err
 			}
 		} else if err := attachResolvedWorkspaceVersions(key, &svc, versionIDs); err != nil {
+			// One or more explicit versions were declared -- resolve each by
+			// exact name instead of substituting the latest.
 			return err
 		}
 		doc.Services[key] = svc
@@ -1228,14 +1263,27 @@ func resolveWorkspaceServiceVersions(ctx context.Context, resolver any, apiKey s
 	return nil
 }
 
+// uniqueTrimmedServiceVersionNames projects and dedupes the bare version
+// names off svc.Versions, mirroring what uniqueTrimmed(svc.Versions) did
+// back when Versions was still a flat []string.
+func uniqueTrimmedServiceVersionNames(versions []workspaceConfigServiceVersion) []string {
+	names := make([]string, 0, len(versions))
+	for _, v := range versions {
+		names = append(names, v.Version)
+	}
+	return uniqueTrimmed(names)
+}
+
 func explicitWorkspaceVersionRefs(services map[string]workspaceConfigService) []sandbox.ServiceVersionRef {
 	var refs []sandbox.ServiceVersionRef
 	for _, svc := range services {
 		serviceID, err := uuid.Parse(strings.TrimSpace(svc.ServiceID))
 		if err != nil {
+			// No resolved ServiceID yet (slug resolution runs before this) --
+			// nothing to batch for this service until that identity exists.
 			continue
 		}
-		for _, version := range uniqueTrimmed(svc.Versions) {
+		for _, version := range uniqueTrimmedServiceVersionNames(svc.Versions) {
 			refs = append(refs, sandbox.ServiceVersionRef{ServiceID: serviceID, Version: version})
 		}
 	}
@@ -1257,7 +1305,9 @@ func resolveLatestWorkspaceServiceVersions(ctx context.Context, verifier Service
 func workspaceServicesMissingVersions(services map[string]workspaceConfigService) []uuid.UUID {
 	ids := make([]uuid.UUID, 0, len(services))
 	for _, svc := range services {
-		if len(uniqueTrimmed(svc.Versions)) != 0 {
+		// A service with explicit versions already declared doesn't need a
+		// "latest" lookup -- only an empty Versions list does.
+		if len(uniqueTrimmedServiceVersionNames(svc.Versions)) != 0 {
 			continue
 		}
 		if id, err := uuid.Parse(strings.TrimSpace(svc.ServiceID)); err == nil {
@@ -1279,25 +1329,62 @@ func attachLatestWorkspaceServiceVersion(key string, svc *workspaceConfigService
 	serviceID, _ := uuid.Parse(strings.TrimSpace(svc.ServiceID))
 	ref := latest[serviceID]
 	if ref.Version == "" || ref.ServiceVersionID == uuid.Nil {
+		// Registry has nothing public to fall back to -- fail the plan
+		// rather than silently leaving this service with zero versions.
 		return fmt.Errorf("service %q has no latest public version", key)
 	}
-	svc.Versions = []string{ref.Version}
-	svc.ResolvedVersions = []workspaceConfigResolvedVersion{{Version: ref.Version, ServiceVersionID: ref.ServiceVersionID.String()}}
+	// Replaces Versions outright (there was nothing here to preserve
+	// overrides for -- an empty Versions list can't carry any).
+	svc.Versions = []workspaceConfigServiceVersion{{Version: ref.Version, ServiceVersionID: ref.ServiceVersionID.String()}}
 	return nil
 }
 
+// attachResolvedWorkspaceVersions rebuilds Versions in trimmed/deduped
+// identity order while preserving each entry's own Public/ExecutionPolicy/
+// ConnectionProfiles overrides (workspaceConfigServiceVersionsByName), only
+// overwriting the identity fields (Version/ServiceVersionID) this resolution
+// pass owns.
 func attachResolvedWorkspaceVersions(key string, svc *workspaceConfigService, ids map[uuid.UUID]map[string]uuid.UUID) error {
 	serviceID, _ := uuid.Parse(strings.TrimSpace(svc.ServiceID))
-	svc.Versions = uniqueTrimmed(svc.Versions)
-	svc.ResolvedVersions = make([]workspaceConfigResolvedVersion, 0, len(svc.Versions))
-	for _, version := range svc.Versions {
+	names := uniqueTrimmedServiceVersionNames(svc.Versions)
+	byName := workspaceConfigServiceVersionsByName(svc.Versions)
+	resolved := make([]workspaceConfigServiceVersion, 0, len(names))
+	for _, version := range names {
 		versionID := ids[serviceID][version]
 		if versionID == uuid.Nil {
+			// The explicit version name doesn't exist for this service in
+			// Registry -- fail the plan rather than silently dropping it.
 			return fmt.Errorf("service %q version %s has no exact service_version_id", key, version)
 		}
-		svc.ResolvedVersions = append(svc.ResolvedVersions, workspaceConfigResolvedVersion{Version: version, ServiceVersionID: versionID.String()})
+		// Start from the original entry so its Public/ExecutionPolicy/
+		// ConnectionProfiles overrides survive; only identity is overwritten.
+		entry := byName[version]
+		entry.Version = version
+		entry.ServiceVersionID = versionID.String()
+		resolved = append(resolved, entry)
 	}
+	svc.Versions = resolved
 	return nil
+}
+
+// workspaceConfigServiceVersionsByName indexes each version entry by its
+// trimmed name (first entry wins on a user-repeated version) so a rebuild of
+// Versions can carry forward Public/ExecutionPolicy/ConnectionProfiles
+// without needing to touch them directly.
+func workspaceConfigServiceVersionsByName(versions []workspaceConfigServiceVersion) map[string]workspaceConfigServiceVersion {
+	byName := make(map[string]workspaceConfigServiceVersion, len(versions))
+	for _, v := range versions {
+		name := strings.TrimSpace(v.Version)
+		// Duplicate version names should have already been rejected by
+		// validation upstream, but if one somehow reaches here, keep the
+		// first entry deterministically rather than letting later entries
+		// silently clobber earlier overrides.
+		if _, exists := byName[name]; exists {
+			continue
+		}
+		byName[name] = v
+	}
+	return byName
 }
 
 func unresolvedWorkspaceServiceSlugs(services map[string]workspaceConfigService) []string {
@@ -1393,28 +1480,27 @@ func validateWorkspaceConfigDocument(doc workspaceConfigDocument) error {
 func normalizeWorkspaceService(key string, svc workspaceConfigService) (workspaceDesiredService, error) {
 	rawID := strings.TrimSpace(svc.ServiceID)
 	if rawID == "" {
+		// resolveWorkspaceServiceSlugs writes ServiceID back onto the doc
+		// keyed by slug -- but if that step was skipped (e.g. the key was
+		// already a UUID), fall back to treating the map key itself as the ID.
 		rawID = strings.TrimSpace(key)
 	}
 	serviceID, err := uuid.Parse(rawID)
 	if err != nil {
 		return workspaceDesiredService{}, fmt.Errorf("service %q requires a valid service_id", key)
 	}
-	versions := uniqueTrimmed(svc.Versions)
-	if len(versions) == 0 {
+	if len(svc.Versions) == 0 {
+		// Plan-time resolution (resolveWorkspaceServiceVersions) always
+		// populates at least one version, even for an originally-empty list --
+		// reaching normalize with none means that step never ran or failed
+		// silently, so treat it as a hard error rather than a no-op service.
 		return workspaceDesiredService{}, fmt.Errorf("service %q requires at least one version", key)
 	}
-	versionIDs, err := resolvedWorkspaceVersionIDs(key, svc.ResolvedVersions)
+	versions, versionIDs, err := normalizeWorkspaceServiceVersionIdentities(key, svc.Versions)
 	if err != nil {
 		return workspaceDesiredService{}, err
 	}
-	if err := ensureResolvedWorkspaceVersions(key, versions, versionIDs); err != nil {
-		return workspaceDesiredService{}, err
-	}
-	profiles, err := normalizeWorkspaceConnectionProfileIntents(key, svc.ConnectionProfiles, versions, versionIDs)
-	if err != nil {
-		return workspaceDesiredService{}, err
-	}
-	versionPolicies, err := normalizeWorkspaceVersionPolicies(key, svc.VersionPolicies, versions, versionIDs)
+	profiles, err := normalizeWorkspaceServiceConnectionProfiles(key, svc.Versions, versionIDs)
 	if err != nil {
 		return workspaceDesiredService{}, err
 	}
@@ -1426,36 +1512,70 @@ func normalizeWorkspaceService(key string, svc workspaceConfigService) (workspac
 		Versions:           versions,
 		VersionIDs:         versionIDs,
 		ExecutionPolicy:    svc.ExecutionPolicy,
-		VersionPolicies:    versionPolicies,
+		VersionPolicies:    normalizeWorkspaceVersionPolicies(svc.Versions, versionIDs),
 		ConnectionProfiles: profiles,
 	}, nil
 }
 
-// normalizeWorkspaceVersionPolicies validates and normalizes one service's
-// per-version public/execution_policy overrides, mirroring
-// normalizeWorkspaceConnectionProfileIntents: each entry must reference an
-// enabled version, and a version may appear at most once.
-func normalizeWorkspaceVersionPolicies(key string, items []workspaceConfigVersionPolicy, versions []string, versionIDs map[string]uuid.UUID) ([]workspaceDesiredVersionPolicy, error) {
-	if len(items) == 0 {
-		return nil, nil
-	}
+// normalizeWorkspaceServiceVersionIdentities validates and dedupes the
+// service's enabled version names and resolves each to its Engine
+// service_version_id, mirroring what resolvedWorkspaceVersionIDs +
+// ensureResolvedWorkspaceVersions used to do against the separate
+// resolved_versions sibling list -- identity now travels with each Versions
+// entry directly instead.
+func normalizeWorkspaceServiceVersionIdentities(key string, items []workspaceConfigServiceVersion) ([]string, map[string]uuid.UUID, error) {
+	versions := make([]string, 0, len(items))
+	versionIDs := map[string]uuid.UUID{}
 	seen := map[string]bool{}
-	out := make([]workspaceDesiredVersionPolicy, 0, len(items))
 	for _, item := range items {
 		version := strings.TrimSpace(item.Version)
-		if !containsString(versions, version) {
-			return nil, fmt.Errorf("service %q version_policies version %s is not an enabled version", key, version)
+		if version == "" {
+			return nil, nil, fmt.Errorf("service %q versions entry requires a version", key)
 		}
 		if seen[version] {
-			return nil, fmt.Errorf("service %q has duplicate version_policies for version %s", key, version)
+			// Each version now owns its own overrides directly, so a repeat
+			// would mean two conflicting sets of overrides for one identity --
+			// reject rather than silently picking one.
+			return nil, nil, fmt.Errorf("service %q has duplicate version %s", key, version)
 		}
 		seen[version] = true
+		versions = append(versions, version)
+		versionID, err := uuid.Parse(strings.TrimSpace(item.ServiceVersionID))
+		if err != nil {
+			// Plan-time resolution should have already written a real ID
+			// here -- an unparsable one means apply is being run against an
+			// unplanned or stale document.
+			return nil, nil, fmt.Errorf("service %q version %s is missing service_version_id", key, version)
+		}
+		versionIDs[version] = versionID
+	}
+	return versions, versionIDs, nil
+}
+
+// normalizeWorkspaceVersionPolicies projects each version's own
+// Public/ExecutionPolicy override (when it set either) into the flat
+// per-version-policy list the rest of the pipeline already expects. A
+// version can't reference an unenabled version or repeat itself anymore --
+// nesting makes both cases structurally unrepresentable -- so this can no
+// longer fail the way it once could against the separate version_policies
+// sibling list.
+func normalizeWorkspaceVersionPolicies(items []workspaceConfigServiceVersion, versionIDs map[string]uuid.UUID) []workspaceDesiredVersionPolicy {
+	out := make([]workspaceDesiredVersionPolicy, 0, len(items))
+	for _, item := range items {
+		// A version with neither field set has nothing to override -- skip it
+		// so the desired-state policy list only carries entries that
+		// genuinely deviate from the service-level default, not one
+		// boilerplate row per enabled version.
+		if item.Public == nil && item.ExecutionPolicy == nil {
+			continue
+		}
+		version := strings.TrimSpace(item.Version)
 		out = append(out, workspaceDesiredVersionPolicy{
 			Version: version, VersionID: versionIDs[version],
 			Public: item.Public, ExecutionPolicy: item.ExecutionPolicy,
 		})
 	}
-	return out, nil
+	return out
 }
 
 // normalizeWorkspaceBuckets attaches bucket-owned credential intent to already
@@ -1519,23 +1639,35 @@ func workspaceDesiredServicesByKey(services map[uuid.UUID]workspaceDesiredServic
 // service's independent profile intent list. It is deliberately decoupled
 // from RuntimeConfig.Connect: a service can declare connection profile intent
 // with no bucket material at all, and vice versa (Agreed Product Rules 11-12).
-func normalizeWorkspaceConnectionProfileIntents(key string, items []workspaceConfigConnectionProfileIntent, versions []string, versionIDs map[string]uuid.UUID) ([]workspaceDesiredConnectionProfile, error) {
-	if len(items) == 0 {
-		return nil, nil
-	}
+// normalizeWorkspaceServiceConnectionProfiles flattens each version's nested
+// ConnectionProfiles into the single per-service list the rest of the
+// pipeline already expects, injecting that version's own identity into each
+// entry since an intent no longer carries its own `version` field -- it's
+// implied by which workspaceConfigServiceVersion it's nested under.
+func normalizeWorkspaceServiceConnectionProfiles(key string, items []workspaceConfigServiceVersion, versionIDs map[string]uuid.UUID) ([]workspaceDesiredConnectionProfile, error) {
 	seen := map[string]bool{}
-	out := make([]workspaceDesiredConnectionProfile, 0, len(items))
-	for _, item := range items {
-		desired, err := normalizeWorkspaceConnectionProfileIntent(key, item, versions, versionIDs)
-		if err != nil {
-			return nil, err
+	out := make([]workspaceDesiredConnectionProfile, 0)
+	for _, versionItem := range items {
+		// Most enabled versions won't declare any profile intent at all --
+		// skip straight past them rather than looping zero times below.
+		if len(versionItem.ConnectionProfiles) == 0 {
+			continue
 		}
-		dedupeKey := desired.VersionID.String() + "\x00" + desired.AuthType
-		if seen[dedupeKey] {
-			return nil, fmt.Errorf("service %q has duplicate connection_profiles for version %s auth_type %s", key, desired.Version, desired.AuthType)
+		version := strings.TrimSpace(versionItem.Version)
+		for _, item := range versionItem.ConnectionProfiles {
+			desired, err := normalizeWorkspaceConnectionProfileIntent(key, version, item, versionIDs)
+			if err != nil {
+				return nil, err
+			}
+			dedupeKey := desired.VersionID.String() + "\x00" + desired.AuthType
+			if seen[dedupeKey] {
+				// Two intents for the same version+auth_type would make "which
+				// one actually applies" ambiguous -- reject outright.
+				return nil, fmt.Errorf("service %q has duplicate connection_profiles for version %s auth_type %s", key, desired.Version, desired.AuthType)
+			}
+			seen[dedupeKey] = true
+			out = append(out, desired)
 		}
-		seen[dedupeKey] = true
-		out = append(out, desired)
 	}
 	return out, nil
 }
@@ -1544,18 +1676,22 @@ func normalizeWorkspaceConnectionProfileIntents(key string, items []workspaceCon
 // exclusivity and structural rules as the old Connect-embedded profile intent
 // (validateWorkspaceConnectProfileIntent), now scoped to one version/auth
 // tuple instead of implicitly fanning across every version a service enables.
-func normalizeWorkspaceConnectionProfileIntent(key string, item workspaceConfigConnectionProfileIntent, versions []string, versionIDs map[string]uuid.UUID) (workspaceDesiredConnectionProfile, error) {
-	version := strings.TrimSpace(item.Version)
-	if !containsString(versions, version) {
-		return workspaceDesiredConnectionProfile{}, fmt.Errorf("service %q connection_profiles version %s is not an enabled version", key, version)
-	}
+// version/versionIDs come from the owning workspaceConfigServiceVersion entry
+// -- an intent itself no longer carries a `version` field, and nesting makes
+// "references an unenabled version" structurally unrepresentable, so there's
+// no equivalent of the old containsString check to run here anymore.
+func normalizeWorkspaceConnectionProfileIntent(key, version string, item workspaceConfigConnectionProfileIntent, versionIDs map[string]uuid.UUID) (workspaceDesiredConnectionProfile, error) {
 	authType := connectionprofile.CanonicalAuthType(item.AuthType)
 	if !isSupportedConnectAuthType(authType) {
 		return workspaceDesiredConnectionProfile{}, fmt.Errorf("service %q connection_profiles has unsupported auth_type", key)
 	}
 	if item.Reset && (item.Profile != nil || strings.TrimSpace(item.ProfileID) != "") {
+		// Reset means "clear whatever override exists" -- combining it with a
+		// concrete profile/profile_id would be a self-contradictory intent.
 		return workspaceDesiredConnectionProfile{}, fmt.Errorf("service %q connection_profiles reset cannot include profile or profile_id", key)
 	}
+	// An inline profile body needs its own auth_type/shape validation; a bare
+	// profile_id selection or a reset has nothing further to check here.
 	if item.Profile != nil {
 		if connectionprofile.CanonicalAuthType(item.Profile.AuthType) != authType {
 			return workspaceDesiredConnectionProfile{}, fmt.Errorf("service %q connection profile auth_type must match its auth_type", key)
@@ -1877,27 +2013,6 @@ func workspaceActionsWithoutIDs(actions []workspacePlanAction, suppressed map[st
 		}
 	}
 	return kept
-}
-
-func ensureResolvedWorkspaceVersions(key string, versions []string, ids map[string]uuid.UUID) error {
-	for _, version := range versions {
-		if ids[version] == uuid.Nil {
-			return fmt.Errorf("service %q version %s is missing service_version_id", key, version)
-		}
-	}
-	return nil
-}
-
-func resolvedWorkspaceVersionIDs(key string, versions []workspaceConfigResolvedVersion) (map[string]uuid.UUID, error) {
-	out := map[string]uuid.UUID{}
-	for _, version := range versions {
-		versionID, err := uuid.Parse(strings.TrimSpace(version.ServiceVersionID))
-		if err != nil {
-			return nil, fmt.Errorf("service %q resolved version %s requires a valid service_version_id", key, version.Version)
-		}
-		out[strings.TrimSpace(version.Version)] = versionID
-	}
-	return out, nil
 }
 
 func normalizeWorkspaceDeprecations(items []workspaceConfigDeprecation, out map[uuid.UUID][]workspaceDeprecation) error {

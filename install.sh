@@ -7,7 +7,7 @@ set -e
 
 REPO="Usefused/engine"
 BINARY="fused-engine"
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="${HOME}/.local/bin"
 
 # Detect OS
 OS="$(uname -s)"
@@ -62,10 +62,16 @@ curl -sL -o "${TAR_NAME}" "${DOWNLOAD_URL}"
 echo "=> Extracting archive..."
 tar -xzf "${TAR_NAME}"
 
+# Ensure the install directory exists
+mkdir -p "${INSTALL_DIR}"
+
 # Move the binary to the install directory
-echo "=> Installing to ${INSTALL_DIR}/${BINARY} (requires sudo)..."
-sudo mv "${BINARY}" "${INSTALL_DIR}/${BINARY}"
-sudo chmod +x "${INSTALL_DIR}/${BINARY}"
+echo "=> Installing to ${INSTALL_DIR}/${BINARY}..."
+mv "${BINARY}" "${INSTALL_DIR}/${BINARY}"
+chmod +x "${INSTALL_DIR}/${BINARY}"
+
+echo "=> Note: Installed to ${INSTALL_DIR} to avoid requiring sudo."
+echo "=> If you prefer a system-wide installation, you can move it to /usr/local/bin using sudo."
 
 # Clean up
 cd - > /dev/null
@@ -74,3 +80,11 @@ rm -rf "$TMP_DIR"
 echo "=> Fused Engine installed successfully!"
 echo "=> Install fused-cli separately from https://github.com/Usefused/cli/releases when you need the CLI."
 echo "=> Run 'fused-engine start' to get started."
+
+# Verify the install directory is on PATH
+if ! echo ":${PATH}:" | grep -q ":${INSTALL_DIR}:"; then
+    echo ""
+    echo "WARNING: ${INSTALL_DIR} is not in your PATH."
+    echo "Add the following line to your ~/.bashrc or ~/.zshrc and restart your terminal:"
+    echo "  export PATH=\"\$PATH:${INSTALL_DIR}\""
+fi

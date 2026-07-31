@@ -169,7 +169,7 @@ func runEngine() {
 
 	webhookSrv := startWebhookServer(ctx, r)
 	srv := startEngineHTTPServer(ctx, r)
-	grpcServer := startEngineGRPCServer(ctx, engineStore, registryClient, masterKey)
+	grpcServer := startEngineGRPCServer(ctx, engineStore, registryClient, masterKey, configStore, natsClient)
 
 	waitForEngineShutdown(ctx, cancel, srv, webhookSrv, grpcServer)
 }
@@ -456,12 +456,9 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	secretResolver := sandbox.NewSecretResolver(deps.engineStore, deps.masterKey)
 
 	sandbox.InitSandbox(r, deps.natsClient, deps.cfg, deps.localObjectCache, tokenValidator, secretResolver, port)
-	// configStore (constructed above, alongside the changelog poller) is
-	// also needed here by SDKWebSocketHandler -- resolving a connecting
-	// SDK/MCP's webhook_attachment label (see resolveWebhookAttachmentLabel
-	// in websocket_handler.go) requires reading the same fused_config_states
-	// table the config routes use.
-	r.Get("/sdks/ws", api.SDKWebSocketHandler(deps.configStore, deps.engineStore, deps.natsClient, tokenValidator))
+	// Webhook delivery to SDKs/MCPs is gRPC-only now (EngineGRPCServer's
+	// SubscribeWebhooks, see webhook_grpc_handler.go) -- the old wss://.../sdks/ws
+	// WebSocket route has been retired rather than kept running alongside it.
 	r.Mount("/workspace", api.WorkspaceHandler(deps.engineStore, deps.registryClient, deps.masterKey))
 
 	// Mount the config routes
@@ -525,7 +522,7 @@ func serveHTTPServer(ctx context.Context, srv *http.Server, startMessage string,
 	}
 }
 
-func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, masterKey []byte) *grpc.Server {
+func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient) *grpc.Server {
 	lis, err := net.Listen("tcp", ":"+grpcPort)
 	if err != nil {
 		slog.ErrorContext(ctx, "Failed to listen for gRPC", slog.Any("error", err))
@@ -533,7 +530,11 @@ func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registr
 	}
 
 	grpcServer := grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()))
-	enginev1.RegisterEngineServiceServer(grpcServer, api.NewEngineGRPCServer(engineStore, registryClient, masterKey))
+	// configStore/natsClient are threaded through so SubscribeWebhooks (the
+	// gRPC replacement for /sdks/ws -- see webhook_grpc_handler.go) can reuse
+	// the exact same NATS JetStream durable-consumer setup and
+	// webhook_attachment label resolution the WS handler already has below.
+	enginev1.RegisterEngineServiceServer(grpcServer, api.NewEngineGRPCServer(engineStore, registryClient, masterKey, configStore, natsClient))
 
 	go serveGRPCServer(ctx, grpcServer, lis)
 	return grpcServer

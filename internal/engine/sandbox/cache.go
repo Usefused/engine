@@ -316,7 +316,17 @@ func (c *LocalObjectCache) GetOrFetchServiceMetadata(ctx context.Context, artifa
 
 	if exists && entry != nil {
 		engine.RecordExecutionTiming(ctx, "service_metadata_cache_hit", 0)
-		return entry, nil
+		// Apply execution_policy overrides (base_url, rate_limit, etc.) at read
+		// time so a workspace apply that changes these fields takes effect
+		// immediately without requiring a cache eviction or Engine restart.
+		// The cached entry itself is intentionally left unmodified so repeated
+		// reads don't accumulate stacked overrides.
+		svcUUID, err := uuid.Parse(serviceID)
+		if err != nil {
+			return entry, nil
+		}
+		versionID, _ := parseServiceVersionID(version)
+		return c.applyExecutionPolicyOverride(ctx, svcUUID, versionID, entry), nil
 	}
 
 	return nil, fmt.Errorf("service metadata not found in connection cache")
@@ -493,6 +503,9 @@ func (c *LocalObjectCache) applyExecutionPolicyOverride(ctx context.Context, ser
 		// bindingBaseURL, SDK request building) already just reads
 		// metadata.BaseURL with no override-awareness of its own needed.
 		overridden.BaseURL = *override.BaseURL
+		// We must also clear the servers list so resolveRuntimeEnvironment
+		// doesn't prioritize an original IsDefault server over the override.
+		overridden.Servers = nil
 	}
 	if override.IncomingWebhookConfig != nil {
 		overridden.IncomingWebhookConfig = override.IncomingWebhookConfig

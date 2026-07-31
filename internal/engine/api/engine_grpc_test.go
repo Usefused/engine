@@ -17,7 +17,10 @@ import (
 // as REST/GraphQL instead of minting provider URLs client-side.
 func TestEngineGRPCStartConnectSessionCreatesAuthorizationURL(t *testing.T) {
 	fixture := newConnectRuntimeFixture(t)
-	srv := NewEngineGRPCServer(fixture.store, fixture.verifier, fixture.masterKey)
+	// configStore/natsClient are nil: this test only exercises StartConnectSession,
+	// which (like GetConnection/ListConnectionResources) never touches the
+	// webhook-only fields SubscribeWebhooks added to EngineGRPCServer.
+	srv := NewEngineGRPCServer(fixture.store, fixture.verifier, fixture.masterKey, nil, nil)
 	ctx := grpcTestContext()
 	artifactID := attachConnectTestArtifact(&fixture)
 
@@ -74,7 +77,9 @@ func TestEngineGRPCGetConnectionReturnsMetadataOnly(t *testing.T) {
 			EncryptedAccessToken: "encrypted-access-token",
 		}},
 	}
-	srv := NewEngineGRPCServer(s, &mockVerifier{}, []byte("12345678901234567890123456789012"))
+	// configStore/natsClient are nil -- see the identical note above; this
+	// test only exercises GetConnection.
+	srv := NewEngineGRPCServer(s, &mockVerifier{}, []byte("12345678901234567890123456789012"), nil, nil)
 
 	resp, err := srv.GetConnection(grpcTestContext(), &enginev1.GetConnectionRequest{ConnectionId: connectionID.String()})
 	if err != nil {

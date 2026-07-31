@@ -512,6 +512,8 @@ func prepareRequestParts(srv *models.Service, obj *models.IntegrationObject, par
 	reqURL = mapParameters(reqURL, obj, params, queryParams, headerParams, bodyParams)
 	applyDefaultBindings(&reqURL, queryParams, headerParams, bodyParams, bucketValues)
 	applyForcedBindings(&reqURL, queryParams, headerParams, bodyParams, bucketValues)
+
+	slog.Info("DISPATCH DEBUG", slog.Any("headers", headerParams), slog.Any("bucketValues", bucketValues))
 	reqURL = appendQueryParams(reqURL, queryParams)
 
 	bodyReader, err := buildRequestBody(obj, srv, headerParams, bodyParams)

@@ -126,12 +126,16 @@ func TestResolveWorkspaceConnectionProfilesBatchesAndSelectsSoleMatch(t *testing
 	resolver := &workspaceProfileResolver{profiles: []sandbox.ConnectionProfileRevision{profileA, profileB}}
 	doc := workspaceConfigDocument{Services: map[string]workspaceConfigService{
 		"a": {
-			ResolvedVersions:   []workspaceConfigResolvedVersion{{Version: "v1", ServiceVersionID: versionA.String()}},
-			ConnectionProfiles: []workspaceConfigConnectionProfileIntent{{Version: "v1", AuthType: "oauth"}},
+			Versions: []workspaceConfigServiceVersion{{
+				Version: "v1", ServiceVersionID: versionA.String(),
+				ConnectionProfiles: []workspaceConfigConnectionProfileIntent{{AuthType: "oauth"}},
+			}},
 		},
 		"b": {
-			ResolvedVersions:   []workspaceConfigResolvedVersion{{Version: "v2", ServiceVersionID: versionB.String()}},
-			ConnectionProfiles: []workspaceConfigConnectionProfileIntent{{Version: "v2", AuthType: "oidc"}},
+			Versions: []workspaceConfigServiceVersion{{
+				Version: "v2", ServiceVersionID: versionB.String(),
+				ConnectionProfiles: []workspaceConfigConnectionProfileIntent{{AuthType: "oidc"}},
+			}},
 		},
 	}}
 	if err := resolveWorkspaceConnectionProfiles(context.Background(), resolver, "api-key", &doc); err != nil {
@@ -140,7 +144,7 @@ func TestResolveWorkspaceConnectionProfilesBatchesAndSelectsSoleMatch(t *testing
 	if resolver.calls != 1 || len(resolver.refs) != 2 {
 		t.Fatalf("expected one batched profile lookup, calls=%d refs=%#v", resolver.calls, resolver.refs)
 	}
-	resolvedA, resolvedB := doc.Services["a"].ConnectionProfiles[0].Resolved, doc.Services["b"].ConnectionProfiles[0].Resolved
+	resolvedA, resolvedB := doc.Services["a"].Versions[0].ConnectionProfiles[0].Resolved, doc.Services["b"].Versions[0].ConnectionProfiles[0].Resolved
 	if resolvedA == nil || resolvedA.ProfileID != profileA.ProfileID.String() || resolvedB == nil || resolvedB.ProfileID != profileB.ProfileID.String() {
 		t.Fatalf("sole profiles were not attached: %#v", doc.Services)
 	}
@@ -155,9 +159,9 @@ func TestResolveWorkspaceConnectionProfilesCoversEveryConfiguredVersion(t *testi
 	resolver := &workspaceProfileResolver{profiles: profiles}
 	doc := workspaceConfigDocument{Services: map[string]workspaceConfigService{
 		"multi": {
-			ResolvedVersions: []workspaceConfigResolvedVersion{{Version: "v1", ServiceVersionID: first.String()}, {Version: "v2", ServiceVersionID: second.String()}},
-			ConnectionProfiles: []workspaceConfigConnectionProfileIntent{
-				{Version: "v1", AuthType: "oauth"}, {Version: "v2", AuthType: "oauth"},
+			Versions: []workspaceConfigServiceVersion{
+				{Version: "v1", ServiceVersionID: first.String(), ConnectionProfiles: []workspaceConfigConnectionProfileIntent{{AuthType: "oauth"}}},
+				{Version: "v2", ServiceVersionID: second.String(), ConnectionProfiles: []workspaceConfigConnectionProfileIntent{{AuthType: "oauth"}}},
 			},
 		},
 	}}
@@ -165,9 +169,11 @@ func TestResolveWorkspaceConnectionProfilesCoversEveryConfiguredVersion(t *testi
 		t.Fatalf("resolveWorkspaceConnectionProfiles: %v", err)
 	}
 	resolvedCount := 0
-	for _, intent := range doc.Services["multi"].ConnectionProfiles {
-		if intent.Resolved != nil {
-			resolvedCount++
+	for _, version := range doc.Services["multi"].Versions {
+		for _, intent := range version.ConnectionProfiles {
+			if intent.Resolved != nil {
+				resolvedCount++
+			}
 		}
 	}
 	if len(resolver.refs) != 2 || resolvedCount != 2 {
@@ -202,8 +208,10 @@ func TestWorkspaceProfileDetachSkipsRegistryResolution(t *testing.T) {
 	versionID := uuid.New()
 	services := map[string]workspaceConfigService{
 		"jira": {
-			ResolvedVersions:   []workspaceConfigResolvedVersion{{Version: "v1", ServiceVersionID: versionID.String()}},
-			ConnectionProfiles: []workspaceConfigConnectionProfileIntent{{Version: "v1", AuthType: "oauth", Reset: true}},
+			Versions: []workspaceConfigServiceVersion{{
+				Version: "v1", ServiceVersionID: versionID.String(),
+				ConnectionProfiles: []workspaceConfigConnectionProfileIntent{{AuthType: "oauth", Reset: true}},
+			}},
 		},
 	}
 	refs, targets, err := workspaceConnectionProfileRequests(services)
@@ -591,8 +599,8 @@ func automaticProfilePlanScenario(explicit bool) (workspaceDesiredState, workspa
 // replacement and deletion mutually exclusive at the backend boundary.
 func TestValidateWorkspaceConnectProfileIntentRejectsConflictingDetach(t *testing.T) {
 	versionID := uuid.New()
-	item := workspaceConfigConnectionProfileIntent{Version: "v1", AuthType: "oauth", Reset: true, ProfileID: uuid.NewString()}
-	if _, err := normalizeWorkspaceConnectionProfileIntent("jira", item, []string{"v1"}, map[string]uuid.UUID{"v1": versionID}); err == nil {
+	item := workspaceConfigConnectionProfileIntent{AuthType: "oauth", Reset: true, ProfileID: uuid.NewString()}
+	if _, err := normalizeWorkspaceConnectionProfileIntent("jira", "v1", item, map[string]uuid.UUID{"v1": versionID}); err == nil {
 		t.Fatal("detach with profile_id was accepted")
 	}
 }
@@ -880,7 +888,7 @@ func TestWorkspaceConfigPlanHandler(t *testing.T) {
 			"services": {
 				"managed": {
 					"service_id": "` + managedSvcID.String() + `",
-					"versions": ["2026-07-01"]
+					"versions": [{"version": "2026-07-01"}]
 				}
 			}
 		}
@@ -976,10 +984,10 @@ func TestWorkspaceConfigPlanHandler_ResolvesServiceSlugsInOneBatch(t *testing.T)
 			"kind": "workspace",
 			"services": {
 				"okta": {
-					"versions": ["2026-07-01"]
+					"versions": [{"version": "2026-07-01"}]
 				},
 				"github": {
-					"versions": ["2026-06-15"]
+					"versions": [{"version": "2026-06-15"}]
 				}
 			}
 		}
@@ -1089,7 +1097,7 @@ func TestWorkspaceConfigPlanHandler_RejectsPublicForNonOwnedService(t *testing.T
 				"@producer/service": {
 					"service_id": "` + svcID.String() + `",
 					"public": true,
-					"versions": ["2026-07-01"]
+					"versions": [{"version": "2026-07-01"}]
 				}
 			}
 		}
@@ -1133,7 +1141,7 @@ func TestWorkspaceConfigPlanHandler_PlansOwnedServicePublicChange(t *testing.T) 
 				"stripe": {
 					"service_id": "` + svcID.String() + `",
 					"public": true,
-					"versions": ["2026-07-01"]
+					"versions": [{"version": "2026-07-01"}]
 				}
 			}
 		}
@@ -1182,8 +1190,7 @@ func TestWorkspaceConfigPlanHandler_RejectsVersionPublicForNonOwnedService(t *te
 			"services": {
 				"@producer/service": {
 					"service_id": "` + svcID.String() + `",
-					"versions": ["2026-07-01"],
-					"version_policies": [{"version": "2026-07-01", "public": true}]
+					"versions": [{"version": "2026-07-01", "public": true}]
 				}
 			}
 		}
@@ -1226,8 +1233,7 @@ func TestWorkspaceConfigPlanHandler_PlansVersionPublicAndExecutionPolicyChange(t
 			"services": {
 				"stripe": {
 					"service_id": "` + svcID.String() + `",
-					"versions": ["2026-07-01"],
-					"version_policies": [{
+					"versions": [{
 						"version": "2026-07-01",
 						"public": false,
 						"execution_policy": {"public": true, "rate_limit": {"strategy": "fixed", "requests_per_second": 5, "requests_per_minute": 300}}
@@ -1485,11 +1491,11 @@ func sortedUUIDStrings(ids []uuid.UUID) []string {
 
 func assertResolvedWorkspaceVersion(t *testing.T, svc workspaceConfigService, version string, versionID uuid.UUID) {
 	t.Helper()
-	if len(svc.Versions) != 1 || svc.Versions[0] != version {
+	if len(svc.Versions) != 1 || svc.Versions[0].Version != version {
 		t.Fatalf("expected version %s, got %#v", version, svc.Versions)
 	}
-	if len(svc.ResolvedVersions) != 1 || svc.ResolvedVersions[0].ServiceVersionID != versionID.String() {
-		t.Fatalf("expected resolved version ID %s, got %#v", versionID, svc.ResolvedVersions)
+	if svc.Versions[0].ServiceVersionID != versionID.String() {
+		t.Fatalf("expected resolved version ID %s, got %#v", versionID, svc.Versions)
 	}
 }
 
@@ -1506,8 +1512,7 @@ func TestWorkspaceConfigApplyHandler(t *testing.T) {
 		"services": {
 			"svc": {
 				"service_id": "` + svcID.String() + `",
-				"versions": ["2026-08-01"],
-				"resolved_versions": [{"version":"2026-08-01","service_version_id":"` + uuid.NewString() + `"}]
+				"versions": [{"version":"2026-08-01","service_version_id":"` + uuid.NewString() + `"}]
 			}
 		}
 	}`)
@@ -1670,8 +1675,7 @@ func workspaceTestServicePayload(svcID uuid.UUID) map[string]any {
 func workspaceTestServiceEntry(svcID uuid.UUID) map[string]any {
 	return map[string]any{
 		"service_id": svcID.String(),
-		"versions":   []string{"2026-08-01"},
-		"resolved_versions": []map[string]string{{
+		"versions": []map[string]string{{
 			"version": "2026-08-01", "service_version_id": uuid.NewString(),
 		}},
 	}
@@ -2074,7 +2078,7 @@ func runWorkspaceRemovalApplyWithStore(t *testing.T, svcID uuid.UUID, decision s
 			ConfigType:      store.ConfigTypeWorkspace,
 			SourceHash:      "abc",
 			BaseGeneration:  3,
-			ResolvedPayload: json.RawMessage(`{"kind":"workspace","services":{"replacement":{"service_id":"` + uuid.NewString() + `","versions":["2026-08-01"],"resolved_versions":[{"version":"2026-08-01","service_version_id":"` + uuid.NewString() + `"}]}}}`),
+			ResolvedPayload: json.RawMessage(`{"kind":"workspace","services":{"replacement":{"service_id":"` + uuid.NewString() + `","versions":[{"version":"2026-08-01","service_version_id":"` + uuid.NewString() + `"}]}}}`),
 			Actions:         actions,
 			Blockers:        blockers,
 		},
@@ -2356,7 +2360,7 @@ func TestWorkspaceConfigApplyHandler_EnablesVersionsInConfigOrder(t *testing.T) 
 			SourceHash:      "abc",
 			BaseGeneration:  0,
 			Status:          store.ConfigPlanStatusPending,
-			ResolvedPayload: fmt.Appendf(nil, `{"services":{"okta":{"service_id":"%s","versions":["2026-06-01","2026-08-01","2026-07-01"],"resolved_versions":[{"version":"2026-06-01","service_version_id":"%s"},{"version":"2026-08-01","service_version_id":"%s"},{"version":"2026-07-01","service_version_id":"%s"}]}}}`, svcID, uuid.NewString(), uuid.NewString(), uuid.NewString()),
+			ResolvedPayload: fmt.Appendf(nil, `{"services":{"okta":{"service_id":"%s","versions":[{"version":"2026-06-01","service_version_id":"%s"},{"version":"2026-08-01","service_version_id":"%s"},{"version":"2026-07-01","service_version_id":"%s"}]}}}`, svcID, uuid.NewString(), uuid.NewString(), uuid.NewString()),
 		},
 		state: &store.ConfigState{ConfigKey: "workspace", Generation: 0},
 	}
@@ -2385,7 +2389,7 @@ func TestWorkspaceConfigApplyHandler_AppliesOwnedServicePublicChange(t *testing.
 	versionID := uuid.New()
 
 	s := &workspaceTestStore{accountID: uuid.New()}
-	resolved := []byte(`{"services":{"stripe":{"service_id":"` + svcID.String() + `","public":true,"versions":["2026-07-01"],"resolved_versions":[{"version":"2026-07-01","service_version_id":"` + versionID.String() + `"}]}}}`)
+	resolved := []byte(`{"services":{"stripe":{"service_id":"` + svcID.String() + `","public":true,"versions":[{"version":"2026-07-01","service_version_id":"` + versionID.String() + `"}]}}}`)
 	actions := []byte(`[{"id":"set_service_public:` + svcID.String() + `","type":"set_service_public","service_id":"` + svcID.String() + `","public":true}]`)
 	configStore := &mockConfigStore{
 		plan: &store.ConfigPlan{
@@ -2432,9 +2436,7 @@ func TestWorkspaceConfigApplyHandler_AppliesVersionPublicAndExecutionPolicyChang
 	s := &workspaceTestStore{accountID: uuid.New()}
 	resolved := []byte(`{"services":{"stripe":{` +
 		`"service_id":"` + svcID.String() + `",` +
-		`"versions":["2026-07-01"],` +
-		`"resolved_versions":[{"version":"2026-07-01","service_version_id":"` + versionID.String() + `"}],` +
-		`"version_policies":[{"version":"2026-07-01","public":false,"execution_policy":{"public":true,"rate_limit":{"strategy":"fixed","requests_per_second":5,"requests_per_minute":300}}}]` +
+		`"versions":[{"version":"2026-07-01","service_version_id":"` + versionID.String() + `","public":false,"execution_policy":{"public":true,"rate_limit":{"strategy":"fixed","requests_per_second":5,"requests_per_minute":300}}}]` +
 		`}}}`)
 	actions := []byte(`[` +
 		`{"id":"set_service_version_private:` + svcID.String() + `:2026-07-01","type":"set_service_version_private","service_id":"` + svcID.String() + `","version":"2026-07-01","public":false},` +
@@ -2505,7 +2507,7 @@ func TestWorkspaceConfigApplyHandler_VersionForceRemovalCreatesNotification(t *t
 			SourceHash:      "abc",
 			BaseGeneration:  1,
 			Status:          store.ConfigPlanStatusPending,
-			ResolvedPayload: fmt.Appendf(nil, `{"services":{"okta":{"service_id":"%s","versions":["2026-08-01"],"resolved_versions":[{"version":"2026-08-01","service_version_id":"%s"}]}}}`, svcID, uuid.NewString()),
+			ResolvedPayload: fmt.Appendf(nil, `{"services":{"okta":{"service_id":"%s","versions":[{"version":"2026-08-01","service_version_id":"%s"}]}}}`, svcID, uuid.NewString()),
 			Actions:         fmt.Appendf(nil, `[{"id":"disable_service_version:%s:2026-07-01","type":"disable_service_version","service_id":"%s","version":"2026-07-01","decision":"force_remove","impacted_sdk_configs":["sdk:test"]}]`, svcID, svcID),
 		},
 		state: &store.ConfigState{
