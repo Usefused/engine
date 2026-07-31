@@ -827,11 +827,6 @@ func engineMigrationQueries() []string {
 		`DROP INDEX IF EXISTS idx_fused_workspace_secrets_lookup;`,
 		`ALTER TABLE fused_workspace_secrets DROP COLUMN IF EXISTS artifact_id CASCADE;`,
 
-		// To safely apply NOT NULL constraint and unique index, we truncate if we must,
-		// but since it's just local dev DBs and one row, we can just let NOT NULL fail
-		// if they don't backfill. Let's truncate to be safe so `make run-engine` doesn't crash
-		// on existing dirty rows.
-		`TRUNCATE TABLE fused_workspace_secrets CASCADE;`,
 		`ALTER TABLE fused_workspace_secrets ALTER COLUMN bucket_id SET NOT NULL;`,
 		`ALTER TABLE fused_workspace_secrets ADD CONSTRAINT uq_workspace_secrets UNIQUE (bucket_id, service_id, key_name);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_workspace_secrets_lookup ON fused_workspace_secrets(bucket_id, service_id);`,

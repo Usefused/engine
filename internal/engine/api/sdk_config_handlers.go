@@ -1702,6 +1702,10 @@ func validateArtifactBucketReadiness(ctx context.Context, s store.Store, bucketN
 	for _, secret := range secretMetas {
 		secretKeys[secret.ServiceID.String()+"\x00"+secret.KeyName] = true
 	}
+	fmt.Printf("DEBUG: loaded %d secrets from bucket %s\n", len(secretMetas), bucket.ID)
+	for k := range secretKeys {
+		fmt.Printf("DEBUG: secretKey available: %q\n", k)
+	}
 	missing := make([]string, 0)
 	for _, selection := range selections {
 		authType := canonicalWorkspaceStaticAuthType(selection.AuthType)
@@ -1712,7 +1716,9 @@ func validateArtifactBucketReadiness(ctx context.Context, s store.Store, bucketN
 			continue
 		}
 		for _, key := range artifactRequiredSecretKeys(selection, authType) {
-			if !secretKeys[selection.ServiceID.String()+"\x00"+key] {
+			checkKey := selection.ServiceID.String() + "\x00" + key
+			fmt.Printf("DEBUG: Checking key: %q, exists: %v\n", checkKey, secretKeys[checkKey])
+			if !secretKeys[checkKey] {
 				missing = append(missing, selection.ServiceID.String()+" ("+authType+":"+key+")")
 			}
 		}
@@ -1948,13 +1954,56 @@ func validateConcreteReturnedSelection(planned, returned models.SDKSelection) er
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_scope_selection_mismatch"}
 	}
 	if len(planned.EndpointIDs) > 0 && !sameUUIDSet(planned.EndpointIDs, returned.EndpointIDs) {
-		return workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_scope_selection_mismatch"}
+		missing := []string{}
+		retMap := make(map[uuid.UUID]bool)
+		for _, id := range returned.EndpointIDs {
+			retMap[id] = true
+		}
+		var required []string
+		for _, id := range planned.EndpointIDs {
+			required = append(required, id.String())
+			if !retMap[id] {
+				missing = append(missing, id.String())
+			}
+		}
+
+		return sdkScopeSelectionMismatchError{
+			Detail: struct {
+				Reason         string
+				ServiceID      uuid.UUID
+				MissingScopes  []string
+				RequiredScopes []string
+			}{
+				Reason:         "endpoint_id_drift",
+				ServiceID:      planned.ServiceID,
+				MissingScopes:  missing,
+				RequiredScopes: required,
+			},
+		}
 	}
 	if len(planned.WebhookIDs) > 0 && !sameUUIDSet(planned.WebhookIDs, returned.WebhookIDs) {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_scope_selection_mismatch"}
 	}
 	return nil
 }
+
+type sdkScopeSelectionMismatchError struct {
+	Detail struct {
+		Reason         string
+		ServiceID      uuid.UUID
+		MissingScopes  []string
+		RequiredScopes []string
+	}
+}
+
+func (e sdkScopeSelectionMismatchError) Error() string {
+	return "sdk_scope_selection_mismatch"
+}
+
+func (e sdkScopeSelectionMismatchError) Unwrap() error {
+	return workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_scope_selection_mismatch"}
+}
+
 
 func hasDuplicateUUID(ids []uuid.UUID) bool {
 	seen := map[uuid.UUID]bool{}

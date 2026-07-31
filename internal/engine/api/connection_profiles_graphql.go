@@ -395,6 +395,7 @@ func compileProfileBindings(profile connectionprofile.Profile, owner store.Works
 			return nil, errors.New("profile binding contains an unresolved value")
 		}
 		binding := store.WorkspaceConnectionBinding{
+			ServiceID: owner.ServiceID, ServiceVersionID: owner.ServiceVersionID,
 			TargetLocation: configured.Location, TargetName: configured.Name,
 			OperationIDs: configured.Operations, Mode: configured.Mode, Provenance: owner.Provenance,
 			SourceProfileRevision: &owner.ProfileRevision,

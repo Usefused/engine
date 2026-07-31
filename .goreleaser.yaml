@@ -177,6 +177,12 @@ archives:
           - zip
 
 release:
+  # Retrying a release on the same tag (e.g. a CI re-run after a partial
+  # failure) re-uploads every asset -- without this, GitHub's API rejects
+  # each one with 422 "already_exists" since the previous attempt already
+  # attached them. GoReleaser only pays the extra API cost to check/replace
+  # when an upload actually 422s, so this is a no-op on a clean first run.
+  replace_existing_artifacts: true
   github:
     owner: Usefused
     name: engine

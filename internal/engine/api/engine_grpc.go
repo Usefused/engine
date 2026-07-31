@@ -7,9 +7,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/auth"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/messaging"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -24,17 +26,28 @@ type EngineGRPCServer struct {
 	store     store.Store
 	verifier  ServiceVerifier
 	masterKey []byte
+	// configStore and natsClient are only needed by SubscribeWebhooks
+	// (webhook_grpc_handler.go) -- resolving a connecting SDK/MCP's
+	// webhook_attachment label and bridging to the NATS JetStream durable
+	// consumer/queue-group that already backs the WS webhook path
+	// (websocket_handler.go's identical setupWebhookConsumer logic).
+	configStore    store.ConfigRepository
+	natsClient     *messaging.NATSClient
+	tokenValidator auth.TokenValidator
 }
 
 // NewEngineGRPCServer composes the existing sandbox execution server with
 // Engine-local auth management dependencies so SDK RPCs and UI GraphQL can
 // share the same connect/session helpers.
-func NewEngineGRPCServer(s store.Store, verifier ServiceVerifier, masterKey []byte) *EngineGRPCServer {
+func NewEngineGRPCServer(s store.Store, verifier ServiceVerifier, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient) *EngineGRPCServer {
 	return &EngineGRPCServer{
-		runtime:   sandbox.NewEngineGRPCServer(),
-		store:     s,
-		verifier:  verifier,
-		masterKey: masterKey,
+		runtime:        sandbox.NewEngineGRPCServer(),
+		store:          s,
+		verifier:       verifier,
+		masterKey:      masterKey,
+		configStore:    configStore,
+		natsClient:     natsClient,
+		tokenValidator: auth.NewTokenValidator(s),
 	}
 }
 
@@ -229,6 +242,20 @@ func grpcAPIKey(ctx context.Context) string {
 	}
 	if vals := md.Get("authorization"); len(vals) > 0 {
 		return strings.TrimPrefix(vals[0], "Bearer ")
+	}
+	return ""
+}
+
+// grpcArtifactID reads the x-artifact-id call metadata SubscribeWebhooks
+// authenticates with -- the gRPC-metadata equivalent of the WS path's
+// X-Artifact-ID header (authenticateWebSocket in websocket_handler.go).
+func grpcArtifactID(ctx context.Context) string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ""
+	}
+	if vals := md.Get("x-artifact-id"); len(vals) > 0 {
+		return vals[0]
 	}
 	return ""
 }

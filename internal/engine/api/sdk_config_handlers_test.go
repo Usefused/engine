@@ -889,6 +889,57 @@ func TestValidateGeneratedScopeSelectionsRejectsDuplicateAndExplicitIDDrift(t *t
 	}
 }
 
+// TestValidateGeneratedScopeSelectionsAttachesStructuredMismatchDetail guards
+// the observability fix that motivated sdkScopeSelectionMismatchError: a
+// production incident showed the engine.sdk_scope.persist trace span logging
+// only outcome:"validation_failed" with no missing_scopes/required_scopes
+// payload, making the failure undiagnosable from Jaeger alone. This proves
+// two things stay true together: (1) errors.As(err, &workspaceConfigHTTPError{})
+// still finds the exact same 409/"sdk_scope_selection_mismatch" the HTTP
+// layer has always returned (writeSDKConfigError/writeWorkspaceConfigError
+// depend on this), and (2) errors.As(err, &sdkScopeSelectionMismatchError{})
+// finds the structured Detail a trace span needs -- specifically that
+// MissingScopes names the exact endpoint ID the plan required but generation
+// didn't return, not just "something didn't match."
+func TestValidateGeneratedScopeSelectionsAttachesStructuredMismatchDetail(t *testing.T) {
+	serviceID := uuid.New()
+	serviceVersionID := uuid.New()
+	requiredEndpoint := uuid.New()
+	returnedEndpoint := uuid.New()
+	planned := []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID, EndpointIDs: []uuid.UUID{requiredEndpoint}}}
+	returned := []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID, EndpointIDs: []uuid.UUID{returnedEndpoint}}}
+
+	err := validateGeneratedScopeSelections(planned, returned)
+	if err == nil {
+		t.Fatal("expected endpoint drift to be rejected")
+	}
+
+	var httpErr workspaceConfigHTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("expected errors.As to still find workspaceConfigHTTPError, got %v", err)
+	}
+	if httpErr.status != http.StatusConflict || httpErr.message != "sdk_scope_selection_mismatch" {
+		t.Fatalf("expected unchanged 409/sdk_scope_selection_mismatch, got status=%d message=%q", httpErr.status, httpErr.message)
+	}
+
+	var mismatch sdkScopeSelectionMismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("expected errors.As to find sdkScopeSelectionMismatchError, got %v", err)
+	}
+	if mismatch.Detail.Reason != "endpoint_id_drift" {
+		t.Fatalf("expected reason endpoint_id_drift, got %q", mismatch.Detail.Reason)
+	}
+	if mismatch.Detail.ServiceID != serviceID {
+		t.Fatalf("expected detail scoped to service %s, got %s", serviceID, mismatch.Detail.ServiceID)
+	}
+	if len(mismatch.Detail.MissingScopes) != 1 || mismatch.Detail.MissingScopes[0] != requiredEndpoint.String() {
+		t.Fatalf("expected missing_scopes to name the exact required-but-absent endpoint %s, got %#v", requiredEndpoint, mismatch.Detail.MissingScopes)
+	}
+	if len(mismatch.Detail.RequiredScopes) != 1 || mismatch.Detail.RequiredScopes[0] != requiredEndpoint.String() {
+		t.Fatalf("expected required_scopes to list what the plan pinned, got %#v", mismatch.Detail.RequiredScopes)
+	}
+}
+
 func TestExecuteSDKConfigApplyDeletesNewScopeWhenFinalizationFails(t *testing.T) {
 	serviceID := uuid.New()
 	serviceVersionID := uuid.New()

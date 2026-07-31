@@ -31,6 +31,21 @@ service EngineService {
   // ListConnectionResources returns non-sensitive tenant routing metadata for
   // an opaque connection owned by one of the authenticated SDK's buckets.
   rpc ListConnectionResources(ListConnectionResourcesRequest) returns (ListConnectionResourcesResponse);
+
+  // SubscribeWebhooks opens a durable, receiver-scoped inbound event stream
+  // over the same channel used for Execute -- replacing the separate
+  // wss://.../sdks/ws WebSocket transport. Auth (x-api-key + x-artifact-id)
+  // travels as call metadata, same as every other RPC on this service, not
+  // as fields on the first message. The client sends exactly one
+  // WebhookSubscribe message first (receiver name + subscribed event types),
+  // then zero or more WebhookAck/WebhookNack messages as it processes pushed
+  // events. The server pushes WebhookEvent messages for any event matching
+  // an active subscription and redelivers un-acked events with backoff --
+  // this is a transport change only: durability/retry/queue-group fan-out is
+  // unchanged, owned by the Engine's NATS JetStream durable consumer keyed
+  // on receiver_name (see websocket_handler.go's setupWebhookConsumer,
+  // ported as-is onto this stream in the gRPC handler).
+  rpc SubscribeWebhooks(stream WebhookClientMessage) returns (stream WebhookServerMessage);
 }
 
 message ConnectRequest {
@@ -152,4 +167,50 @@ message ConnectionResource {
   bool is_default = 7;
   string created_at = 8;
   string updated_at = 9;
+}
+
+message WebhookClientMessage {
+  oneof payload {
+    WebhookSubscribe subscribe = 1;
+    WebhookAck ack = 2;
+    WebhookNack nack = 3;
+  }
+}
+
+message WebhookSubscribe {
+  // receiver_name is the durable NATS consumer/queue-group identity
+  // (accountID + "-" + receiver_name server-side) -- intentionally
+  // independent of artifact_id/the Connect session, so the same named
+  // receiver can resume across reconnects and multiple processes can share
+  // one receiver_name for queue-group fan-out. Auth (artifact_id + token)
+  // is carried as x-api-key/x-artifact-id call metadata instead of fields
+  // here, matching every other RPC on this service.
+  string receiver_name = 1;
+  repeated string events = 2;
+}
+
+message WebhookAck {
+  string event_id = 1;
+}
+
+message WebhookNack {
+  string event_id = 1;
+  string reason = 2; // optional, for observability
+}
+
+message WebhookServerMessage {
+  oneof payload {
+    WebhookSubscribeAck subscribed = 1; // confirms the subscription took effect
+    WebhookEvent event = 2;
+  }
+}
+
+message WebhookSubscribeAck {
+  string receiver_name = 1;
+}
+
+message WebhookEvent {
+  string id = 1;
+  string event = 2;
+  bytes payload = 3; // JSON-encoded {body, headers, query, params, path} -- same shape as today's WS frame
 }
