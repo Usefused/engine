@@ -189,6 +189,23 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "failed to bind service contract revisions"}
 	}
 	selections = attachSDKServiceVersionIDs(selections, bindings)
+	
+	// Resolve EndpointIDs for MCP so the scope is strictly tied to immutable endpoint IDs
+	for i, sel := range selections {
+		if len(sel.OperationNames) > 0 && len(sel.EndpointIDs) == 0 {
+			endpoints, err := registryClient.FetchEndpointsByNames(ctx, sel.ServiceID, sel.ServiceVersionID, sel.OperationNames)
+			if err != nil {
+				return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: fmt.Sprintf("failed to resolve operations for service %s: %v", sel.ServiceID, err)}
+			}
+			if len(endpoints) != len(sel.OperationNames) {
+				return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: fmt.Sprintf("some requested operations were not found for service %s", sel.ServiceID)}
+			}
+			for _, ep := range endpoints {
+				selections[i].EndpointIDs = append(selections[i].EndpointIDs, ep.ID)
+			}
+		}
+	}
+
 	desiredState, err := canonicalArtifactState(stateDoc)
 	if err != nil {
 		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to canonicalize mcp config"}
