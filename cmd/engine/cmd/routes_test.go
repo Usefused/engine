@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/api"
 	"github.com/Usefused/engine/internal/engine/store"
 )
@@ -44,16 +45,38 @@ func newTestEngineAndRegistry(t *testing.T) (engineURL string, gotPath, gotAPIKe
 	}))
 	t.Cleanup(registryMock.Close)
 
-	proxy := api.NewRegistryProxy(registryMock.URL)
+	proxy := api.NewRegistryProxy(registryMock.URL, "fsk_registry_license")
 	s := &stubStore{accountID: uuid.New()}
 
 	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			next.ServeHTTP(w, request.WithContext(accesscontrol.ContextWithActor(request.Context(), ownerTestActor(t))))
+		})
+	})
 	registerProxyRoutes(r, proxy, s)
 
 	engine := httptest.NewServer(r)
 	t.Cleanup(engine.Close)
 
 	return engine.URL, gotPath, gotAPIKey
+}
+
+func ownerTestActor(t *testing.T) accesscontrol.Actor {
+	t.Helper()
+	workspaceID := uuid.New()
+	grants := make([]accesscontrol.Grant, 0, len(accesscontrol.AllPermissions()))
+	for _, permission := range accesscontrol.AllPermissions() {
+		grants = append(grants, accesscontrol.Grant{
+			Permission: permission,
+			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID},
+		})
+	}
+	snapshot, err := accesscontrol.NewAuthorizationSnapshot(1, grants...)
+	if err != nil {
+		t.Fatalf("owner authorization snapshot: %v", err)
+	}
+	return accesscontrol.Actor{AccountID: uuid.New(), WorkspaceID: workspaceID, SubjectID: uuid.New(), Authorization: snapshot}
 }
 
 func TestRegisterProxyRoutes_GraphQLForwardsToRegistry(t *testing.T) {
@@ -74,8 +97,8 @@ func TestRegisterProxyRoutes_GraphQLForwardsToRegistry(t *testing.T) {
 	if *gotPath != "/graphql" {
 		t.Errorf("expected Registry to receive /graphql, got %q", *gotPath)
 	}
-	if *gotAPIKey != "fsk_test_key" {
-		t.Errorf("expected Registry to receive the original API key unchanged, got %q", *gotAPIKey)
+	if *gotAPIKey != "fsk_registry_license" {
+		t.Errorf("expected Registry to receive the Engine licence key, got %q", *gotAPIKey)
 	}
 }
 
@@ -117,8 +140,8 @@ func TestRegisterProxyRoutes_RESTPathsForwardToRegistry(t *testing.T) {
 			if *gotPath != tt.expectPath {
 				t.Errorf("expected Registry to receive %q, got %q", tt.expectPath, *gotPath)
 			}
-			if *gotAPIKey != "fsk_test_key" {
-				t.Errorf("expected Registry to receive the original API key, got %q", *gotAPIKey)
+			if *gotAPIKey != "fsk_registry_license" {
+				t.Errorf("expected Registry to receive the Engine licence key, got %q", *gotAPIKey)
 			}
 		})
 	}

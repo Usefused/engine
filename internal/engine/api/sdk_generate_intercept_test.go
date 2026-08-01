@@ -93,7 +93,8 @@ func TestFirstUnactivatedSelection_AllActivated_NotBlocked(t *testing.T) {
 	}
 	body := []byte(`{"selections":[{"service_id":"` + svcA.String() + `","service_version_id":"` + versionA.String() + `"},{"service_id":"` + svcB.String() + `","service_version_id":"` + versionB.String() + `"}]}`)
 
-	_, blocked, err := firstUnactivatedSelection(context.Background(), s, uuid.New(), body)
+	accountID := uuid.New()
+	_, blocked, err := firstUnactivatedSelection(controlTestContext(context.Background(), accountID), s, accountID, body)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -114,7 +115,8 @@ func TestFirstUnactivatedSelection_OneNotActivated_Blocked(t *testing.T) {
 	}
 	body := []byte(`{"selections":[{"service_id":"` + svcA.String() + `","service_version_id":"` + versionA.String() + `"},{"service_id":"` + svcB.String() + `","service_version_id":"` + versionB.String() + `"}]}`)
 
-	blockedSelection, blocked, err := firstUnactivatedSelection(context.Background(), s, uuid.New(), body)
+	accountID := uuid.New()
+	blockedSelection, blocked, err := firstUnactivatedSelection(controlTestContext(context.Background(), accountID), s, accountID, body)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -131,7 +133,8 @@ func TestFirstUnactivatedSelection_MissingServiceVersionID_Blocked(t *testing.T)
 	s := &sdkGenerateGateMockStore{workspaceID: uuid.New(), activated: map[uuid.UUID]bool{svcA: true}}
 	body := []byte(`{"selections":[{"service_id":"` + svcA.String() + `"}]}`)
 
-	blockedSelection, blocked, err := firstUnactivatedSelection(context.Background(), s, uuid.New(), body)
+	accountID := uuid.New()
+	blockedSelection, blocked, err := firstUnactivatedSelection(controlTestContext(context.Background(), accountID), s, accountID, body)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -151,7 +154,8 @@ func TestFirstUnactivatedSelection_DisabledServiceVersion_Blocked(t *testing.T) 
 	}
 	body := []byte(`{"selections":[{"service_id":"` + svcA.String() + `","service_version_id":"` + requestedVersion.String() + `"}]}`)
 
-	blockedSelection, blocked, err := firstUnactivatedSelection(context.Background(), s, uuid.New(), body)
+	accountID := uuid.New()
+	blockedSelection, blocked, err := firstUnactivatedSelection(controlTestContext(context.Background(), accountID), s, accountID, body)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -246,7 +250,8 @@ func TestFirstUnactivatedSelection_ActivationCheckError_ReturnsError(t *testing.
 	s := &sdkGenerateGateMockStore{workspaceID: uuid.New(), activationErr: errors.New("db unavailable")}
 	body := []byte(`{"selections":[{"service_id":"` + svcA.String() + `","service_version_id":"` + versionA.String() + `"}]}`)
 
-	_, _, err := firstUnactivatedSelection(context.Background(), s, uuid.New(), body)
+	accountID := uuid.New()
+	_, _, err := firstUnactivatedSelection(controlTestContext(context.Background(), accountID), s, accountID, body)
 	if err == nil {
 		t.Fatal("expected an error when IsWorkspaceServiceEnabled fails")
 	}
@@ -267,6 +272,7 @@ func TestRESTProxyHandler_SDKGenerate_BlocksUnactivatedService(t *testing.T) {
 	body := `{"selections":[{"service_id":"` + svcA.String() + `","service_name":"Stripe Billing","service_slug":"stripe-billing"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/sdks/generate", bytes.NewBufferString(body))
 	req.Header.Set("X-API-Key", "fsk_valid")
+	req = controlTestRequest(req, accountID)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
@@ -298,6 +304,7 @@ func TestRESTProxyHandler_SDKGenerate_ForwardsWhenAllActivated(t *testing.T) {
 	body := `{"selections":[{"service_id":"` + svcA.String() + `","service_version_id":"` + versionA.String() + `"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/sdks/generate", bytes.NewBufferString(body))
 	req.Header.Set("X-API-Key", "fsk_valid")
+	req = controlTestRequest(req, accountID)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)

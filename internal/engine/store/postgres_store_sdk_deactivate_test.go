@@ -37,6 +37,7 @@ func TestPostgresStore_DeactivateReactivateSDK(t *testing.T) {
 	accountID := uuid.New()
 	workspaceID := uuid.New()
 	artifactID := uuid.New()
+	ownerTeamID := seedArtifactOwnerTeam(t, ctx, pool)
 
 	if _, err := pool.Exec(ctx, "DELETE FROM fused_workspaces"); err != nil {
 		t.Fatalf("clean workspace: %v", err)
@@ -47,6 +48,7 @@ func TestPostgresStore_DeactivateReactivateSDK(t *testing.T) {
 	if err := s.SaveArtifactScope(ctx, ArtifactScope{
 		AccountID:          accountID,
 		ArtifactID:         artifactID,
+		OwnerTeamID:        ownerTeamID,
 		Selections:         []byte("[]"),
 		ScopeSchemaVersion: 1,
 	}); err != nil {

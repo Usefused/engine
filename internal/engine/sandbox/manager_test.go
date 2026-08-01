@@ -161,18 +161,6 @@ func (m *mockStore) IsWorkspaceServiceEnabled(ctx context.Context, serviceID uui
 	return false, nil
 }
 
-func (m *mockStore) UpsertWorkspaceWebhook(ctx context.Context, webhook store.WorkspaceWebhook) (*store.WorkspaceWebhook, error) {
-	return nil, nil
-}
-
-func (m *mockStore) RemoveWorkspaceWebhook(ctx context.Context, serviceID uuid.UUID, label string) error {
-	return nil
-}
-
-func (m *mockStore) PruneWorkspaceWebhooks(ctx context.Context, serviceID uuid.UUID, keepLabels []string) ([]string, error) {
-	return nil, nil
-}
-
 func (m *mockStore) GetWorkspaceWebhookBySlug(ctx context.Context, slug string) (*store.WorkspaceWebhook, error) {
 	return nil, store.ErrWorkspaceWebhookNotFound
 }
@@ -251,10 +239,6 @@ func (m *mockStore) BatchCreateWebhookEvents(ctx context.Context, events []model
 }
 
 func (m *mockStore) BatchCreateEngineExecutionEvents(ctx context.Context, events []models.EngineExecutionEvent) error {
-	return nil
-}
-
-func (m *mockStore) BootstrapAPIKey(ctx context.Context, accountID uuid.UUID, keyHash string) error {
 	return nil
 }
 

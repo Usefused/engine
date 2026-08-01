@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
@@ -15,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type mcpConfigApplyResult struct {
@@ -25,6 +27,7 @@ type mcpConfigApplyResult struct {
 	Name           string
 	Version        string
 	SourceHash     string
+	Scope          store.ArtifactScope
 }
 
 // MCPConfigPlanHandler owns desired-state validation for Engine-projected MCP
@@ -34,8 +37,8 @@ func MCPConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.mcp_config.plan")
 		defer span.End()
-		accountID, err := resolveWorkspaceActor(ctx, s, r)
-		if err != nil {
+		actor, ok := accesscontrol.ActorFromContext(ctx)
+		if !ok {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
 			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"})
 			return
@@ -47,7 +50,7 @@ func MCPConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 		}
 		setSDKConfigSpanAttributes(span, req.ConfigKey, doc)
 		result, err := createMCPConfigPlan(ctx, configStore, s, registryClient, sdkPlanCall{
-			apiKey: r.Header.Get("X-API-Key"), accountID: accountID,
+			apiKey: r.Header.Get("X-API-Key"), accountID: actor.AccountID, actor: actor,
 			request: req, document: doc,
 		})
 		if err != nil {
@@ -58,8 +61,10 @@ func MCPConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 		span.SetAttributes(attribute.String("outcome", "success"), attribute.String("plan_id", result.plan.ID.String()))
 		writeJSON(w, map[string]any{
 			"plan_id": result.plan.ID.String(), "config_key": result.plan.ConfigKey,
-			"source_hash": result.plan.SourceHash, "base_generation": result.plan.BaseGeneration,
-			"summary": result.summary, "notifications": result.notifications,
+			"owner_team_id": result.plan.OwnerTeamID,
+			"source_hash":   result.plan.SourceHash, "base_generation": result.plan.BaseGeneration,
+			"required_permissions": result.plan.RequiredPermissions,
+			"summary":              result.summary, "notifications": result.notifications,
 		})
 	}
 }
@@ -70,8 +75,8 @@ func MCPConfigApplyHandler(configStore store.ConfigRepository, s store.Store, re
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.mcp_config.apply")
 		defer span.End()
-		accountID, err := resolveWorkspaceActor(ctx, s, r)
-		if err != nil {
+		actor, ok := accesscontrol.ActorFromContext(ctx)
+		if !ok {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
 			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"})
 			return
@@ -81,9 +86,14 @@ func MCPConfigApplyHandler(configStore store.ConfigRepository, s store.Store, re
 			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()})
 			return
 		}
+		planRevision, ok := AuthorizedPlanRevisionFromContext(ctx)
+		if !ok {
+			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"})
+			return
+		}
 		result, err := executeMCPConfigApply(ctx, configStore, s, registryClient, sdkApplyCall{
-			apiKey: r.Header.Get("X-API-Key"), accountID: accountID,
-			planID: planID, sourceHash: req.SourceHash,
+			apiKey: r.Header.Get("X-API-Key"), accountID: actor.AccountID, actor: actor,
+			planID: planID, planRevision: planRevision, sourceHash: req.SourceHash,
 		})
 		if err != nil {
 			span.SetStatus(codes.Error, "mcp config apply failed")
@@ -154,23 +164,26 @@ func validateArtifactConfigDocument(doc sdkConfigDocument, kind string) error {
 	if strings.TrimSpace(doc.Bucket) == "" {
 		return fmt.Errorf("%s config requires exactly one bucket", kind)
 	}
-	if kind == "mcp" && strings.TrimSpace(doc.Language) != "" {
-		return errors.New("mcp config must not set language")
-	}
-	if kind == "mcp" {
-		for name, service := range doc.Services {
-			// WebhooksSelectAll is checked alongside Webhooks -- it's the
-			// webhook-only counterpart to SelectAll (see
-			// models.SDKSelection.WebhookSelectAll's doc comment) added
-			// alongside webhook_attachment, and mirrors the CLI's own
-			// validateArtifactServices check (cli/internal/configfile/parser.go),
-			// which already rejects both for MCP.
-			if len(service.Webhooks) > 0 || service.WebhooksSelectAll {
-				return fmt.Errorf("mcp service %s cannot select webhooks", name)
-			}
-		}
+	if err := validateMCPArtifactRestrictions(doc, kind); err != nil {
+		return err
 	}
 	return validateArtifactServiceDocs(doc.Services)
+}
+
+func validateMCPArtifactRestrictions(doc sdkConfigDocument, kind string) error {
+	if kind != "mcp" {
+		return nil
+	}
+	if strings.TrimSpace(doc.Language) != "" {
+		return errors.New("mcp config must not set language")
+	}
+	for name, service := range doc.Services {
+		// MCP is operation-only; webhook attachment belongs to SDK artifacts.
+		if len(service.Webhooks) > 0 || service.WebhooksSelectAll {
+			return fmt.Errorf("mcp service %s cannot select webhooks", name)
+		}
+	}
+	return nil
 }
 
 // createMCPConfigPlan resolves service versions, operations, and auth policy
@@ -180,7 +193,14 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	if err != nil {
 		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to fetch config state"}
 	}
-	selections, services, resolved, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current))
+	ownerTeamID, bucket, err := resolveArtifactPlanOwnerAndBucket(
+		ctx, configStore, s, call.request.ConfigKey, current, call.request.OwnerTeamID, call.document.Bucket,
+	)
+	if err != nil {
+		return sdkPlanResult{}, err
+	}
+	call.request.OwnerTeamID = ownerTeamID
+	selections, services, resolved, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current), bucket.ID)
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
@@ -189,53 +209,84 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "failed to bind service contract revisions"}
 	}
 	selections = attachSDKServiceVersionIDs(selections, bindings)
-	
-	// Resolve EndpointIDs for MCP so the scope is strictly tied to immutable endpoint IDs
-	for i, sel := range selections {
-		if len(sel.OperationNames) > 0 && len(sel.EndpointIDs) == 0 {
-			endpoints, err := registryClient.FetchEndpointsByNames(ctx, sel.ServiceID, sel.ServiceVersionID, sel.OperationNames)
-			if err != nil {
-				return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: fmt.Sprintf("failed to resolve operations for service %s: %v", sel.ServiceID, err)}
-			}
-			if len(endpoints) != len(sel.OperationNames) {
-				return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: fmt.Sprintf("some requested operations were not found for service %s", sel.ServiceID)}
-			}
-			for _, ep := range endpoints {
-				selections[i].EndpointIDs = append(selections[i].EndpointIDs, ep.ID)
-			}
-		}
+
+	selections, err = resolveMCPEndpointIDs(ctx, registryClient, selections)
+	if err != nil {
+		return sdkPlanResult{}, err
 	}
 
-	desiredState, err := canonicalArtifactState(stateDoc)
+	desiredState, err := validateMCPDesiredState(stateDoc, current)
 	if err != nil {
-		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to canonicalize mcp config"}
+		return sdkPlanResult{}, err
 	}
+	payload := artifactResolvedPayload{
+		Selections: selections, ContractBindings: bindings, BucketID: bucket.ID,
+	}
+	resolvedPayload, _ := json.Marshal(payload)
+	requiredPermissions, requiredCount, err := artifactPlanRequiredPermissionsWithBuckets(
+		ctx, current, serviceNamesFromResolved(resolved), []store.Bucket{*bucket}, call.document.Name,
+	)
+	if err != nil {
+		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to compute required permissions"}
+	}
+	if err := preflightArtifactOwnership(ctx, s, call.actor, *ownerTeamID, existingArtifactID(current), requiredPermissions); err != nil {
+		return sdkPlanResult{}, err
+	}
+	plan, err := configStore.CreateConfigPlan(ctx, store.CreateConfigPlanParams{
+		ConfigKey: call.request.ConfigKey, ConfigType: store.ConfigTypeMCP,
+		OwnerTeamID: call.request.OwnerTeamID,
+		SourceHash:  call.request.SourceHash, BaseGeneration: currentGeneration(current), Actions: []byte("[]"),
+		DesiredState: desiredState, ResolvedPayload: resolvedPayload, Blockers: []byte("[]"), Warnings: []byte("[]"),
+		RequiredPermissions: requiredPermissions,
+		CreatedBy:           call.accountID, SupersedeExisting: true,
+	})
+	if err != nil {
+		return sdkPlanResult{}, configPlanSaveHTTPError(err)
+	}
+	trace.SpanFromContext(ctx).SetAttributes(attribute.Int("required_permissions_count", requiredCount))
+	return sdkPlanResult{plan: plan, summary: map[string]any{"create_mcp": current == nil, "services": services}, notifications: collectSDKPlanNotifications(ctx, configStore, registryClient, call, resolved)}, nil
+}
+
+func validateMCPDesiredState(state sdkConfigDocument, current *store.ConfigState) ([]byte, error) {
+	desiredState, err := canonicalArtifactState(state)
+	if err != nil {
+		return nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to canonicalize mcp config"}
+	}
+	// The version identity is immutable, but source formatting and set order
+	// are not part of the artifact contract and must remain idempotent.
 	if current != nil && !sameCanonicalArtifactState(current.DesiredState, desiredState) {
-		// The version identity is immutable, but source formatting and set order
-		// are not part of the artifact contract and must remain idempotent.
-		return sdkPlanResult{}, workspaceConfigHTTPError{
+		return nil, workspaceConfigHTTPError{
 			status:  http.StatusConflict,
 			message: "artifact_version_immutable: mcp version already applied with different content; bump version to change scope",
 		}
 	}
-	payload := artifactResolvedPayload{Selections: selections, ContractBindings: bindings}
-	resolvedPayload, _ := json.Marshal(payload)
-	plan, err := configStore.CreateConfigPlan(ctx, store.CreateConfigPlanParams{
-		ConfigKey: call.request.ConfigKey, ConfigType: store.ConfigTypeMCP,
-		SourceHash: call.request.SourceHash, BaseGeneration: currentGeneration(current), Actions: []byte("[]"),
-		DesiredState: desiredState, ResolvedPayload: resolvedPayload, Blockers: []byte("[]"), Warnings: []byte("[]"),
-		CreatedBy: call.accountID, SupersedeExisting: true,
-	})
-	if err != nil {
-		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to save plan"}
+	return desiredState, nil
+}
+
+func resolveMCPEndpointIDs(ctx context.Context, registryClient sandbox.RegistryClient, selections []models.SDKSelection) ([]models.SDKSelection, error) {
+	for index := range selections {
+		selection := &selections[index]
+		if len(selection.OperationNames) == 0 || len(selection.EndpointIDs) > 0 {
+			continue
+		}
+		endpoints, err := registryClient.FetchEndpointsByNames(ctx, selection.ServiceID, selection.ServiceVersionID, selection.OperationNames)
+		if err != nil {
+			return nil, workspaceConfigHTTPError{status: http.StatusBadRequest, message: fmt.Sprintf("failed to resolve operations for service %s", selection.ServiceID)}
+		}
+		if len(endpoints) != len(selection.OperationNames) {
+			return nil, workspaceConfigHTTPError{status: http.StatusBadRequest, message: fmt.Sprintf("some requested operations were not found for service %s", selection.ServiceID)}
+		}
+		for _, endpoint := range endpoints {
+			selection.EndpointIDs = append(selection.EndpointIDs, endpoint.ID)
+		}
 	}
-	return sdkPlanResult{plan: plan, summary: map[string]any{"create_mcp": current == nil, "services": services}, notifications: collectSDKPlanNotifications(ctx, configStore, registryClient, call, resolved)}, nil
+	return selections, nil
 }
 
 // executeMCPConfigApply persists only an Engine scope and one-time execution
 // token; MCP intentionally has no generated package or archive artifact.
 func executeMCPConfigApply(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkApplyCall) (mcpConfigApplyResult, error) {
-	plan, err := loadArtifactPlanForApply(ctx, configStore, call, store.ConfigTypeMCP)
+	plan, err := loadAuthorizedArtifactPlanForApply(ctx, configStore, s, call, store.ConfigTypeMCP)
 	if err != nil {
 		return mcpConfigApplyResult{}, err
 	}
@@ -255,25 +306,21 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 	}
 	runtimeID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(plan.ConfigKey))
 	selections, _ := json.Marshal(payload.Selections)
-	token, created, err := persistArtifactScope(ctx, s, persistArtifactScopeParams{
-		accountID: call.accountID, artifactID: runtimeID, bucketName: doc.Bucket,
+	scope, err := artifactScopeForApply(persistArtifactScopeParams{
+		accountID: call.accountID, artifactID: runtimeID, ownerTeamID: planOwnerTeamID(plan), bucketID: payload.BucketID, bucketName: doc.Bucket,
 		selections: selections, scopeSchemaVersion: models.ArtifactScopeSchemaVersion,
 		kind: "mcp", name: doc.Name, version: doc.Version, configKey: plan.ConfigKey,
 	})
 	if err != nil {
 		return mcpConfigApplyResult{}, err
 	}
-	if err := s.ReactivateSDK(ctx, call.accountID, runtimeID); err != nil {
-		rollbackNewArtifactScope(ctx, s, call.accountID, runtimeID, created)
-		return mcpConfigApplyResult{}, sdkLifecycleStoreError(err, "failed to activate mcp server")
-	}
-	if err := persistMCPConfigApply(ctx, configStore, call, plan, runtimeID); err != nil {
-		rollbackNewArtifactScope(ctx, s, call.accountID, runtimeID, created)
+	token, _, err := applyArtifactConfigScope(ctx, configStore, s, call, plan, scope, doc.Bucket)
+	if err != nil {
 		return mcpConfigApplyResult{}, err
 	}
 	return mcpConfigApplyResult{
 		RuntimeID: runtimeID, ExecutionToken: token, ConfigKey: plan.ConfigKey,
-		Name: doc.Name, Version: doc.Version, SourceHash: plan.SourceHash,
+		Name: doc.Name, Version: doc.Version, SourceHash: plan.SourceHash, Scope: scope,
 	}, nil
 }
 
@@ -290,36 +337,23 @@ func sameCanonicalArtifactState(existing, candidate []byte) bool {
 
 // loadArtifactPlanForApply rejects superseded identity or generation data
 // before any runtime state is changed.
-func loadArtifactPlanForApply(ctx context.Context, configStore store.ConfigRepository, call sdkApplyCall, expected store.ConfigType) (*store.ConfigPlan, error) {
+func loadArtifactPlanForApply(ctx context.Context, configStore store.ConfigRepository, call sdkApplyCall, expected store.ConfigType) (*store.ConfigPlan, *store.ConfigState, error) {
 	plan, err := configStore.GetConfigPlan(ctx, call.planID)
 	if err != nil {
-		return nil, planFetchHTTPError(err)
+		return nil, nil, planFetchHTTPError(err)
 	}
 	if plan.Status != store.ConfigPlanStatusPending || plan.ConfigType != expected || call.sourceHash != plan.SourceHash {
-		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "plan_stale_or_mismatched"}
+		return nil, nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "plan_stale_or_mismatched"}
+	}
+	if call.planRevision <= 0 || plan.Revision != call.planRevision {
+		return nil, nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "plan_revision_changed"}
 	}
 	state, err := configStore.GetConfigState(ctx, plan.ConfigKey)
 	if err != nil {
-		return nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to fetch config state"}
+		return nil, nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to fetch config state"}
 	}
 	if currentGeneration(state) != plan.BaseGeneration {
-		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "plan_stale"}
+		return nil, nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "plan_stale"}
 	}
-	return plan, nil
-}
-
-// persistMCPConfigApply uses the repository's transaction boundary so desired
-// state and plan completion cannot disagree after a partial database failure.
-func persistMCPConfigApply(ctx context.Context, configStore store.ConfigRepository, call sdkApplyCall, plan *store.ConfigPlan, runtimeID uuid.UUID) error {
-	if _, err := configStore.ApplyConfigPlan(ctx, store.ApplyConfigPlanParams{
-		State: store.UpsertConfigStateParams{
-			ConfigKey: plan.ConfigKey, ConfigType: store.ConfigTypeMCP,
-			SourceHash: plan.SourceHash, DesiredState: plan.DesiredState, ManagedResources: []byte("{}"),
-			LatestResourceID: &runtimeID, UpdatedBy: call.accountID,
-		},
-		PlanID: call.planID, BaseGeneration: plan.BaseGeneration,
-	}); err != nil {
-		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to apply mcp config state"}
-	}
-	return nil
+	return plan, state, nil
 }

@@ -19,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"github.com/Usefused/engine/internal/engine/sandbox"
@@ -28,6 +27,13 @@ import (
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 )
+
+type requiredPermissionResponse struct {
+	Permission   string    `json:"permission"`
+	ResourceType string    `json:"resource_type"`
+	ResourceID   uuid.UUID `json:"resource_id"`
+	DisplayName  string    `json:"display_name"`
+}
 
 func TestResolvedInlineWorkspaceProfileUsesApplyMaterial(t *testing.T) {
 	profile := connectionprofile.Profile{
@@ -671,23 +677,45 @@ func (r *workspaceProfileResolver) FetchEligibleConnectionProfiles(_ context.Con
 // masterKey []byte -- matches the convention already used by
 // workspace_handlers_test.go's dummyMasterKey.
 var testMasterKey = []byte("12345678901234567890123456789012")
+var testArtifactOwnerTeamID = uuid.MustParse("00000000-0000-0000-0000-000000000001")
 
 type mockConfigStore struct {
-	state         *store.ConfigState
-	states        []store.ConfigState
-	plan          *store.ConfigPlan
-	err           error
-	upsertErr     error
-	markErr       error
-	markApplied   bool
-	createdPlan   *store.CreateConfigPlanParams
-	upserted      *store.UpsertConfigStateParams
-	notifications []store.WorkspaceNotification
-	createdNotes  []store.CreateWorkspaceNotificationParams
+	state             *store.ConfigState
+	states            []store.ConfigState
+	plan              *store.ConfigPlan
+	err               error
+	upsertErr         error
+	markErr           error
+	markApplied       bool
+	createdPlan       *store.CreateConfigPlanParams
+	upserted          *store.UpsertConfigStateParams
+	notifications     []store.WorkspaceNotification
+	createdNotes      []store.CreateWorkspaceNotificationParams
+	ownerTeamID       uuid.UUID
+	artifactApply     *store.ApplyArtifactConfigPlanParams
+	artifactApplyErr  error
+	artifactScopeSink func(store.ArtifactScope) error
+	webhookApply      *store.ApplyWebhookConfigPlanParams
+	webhookResult     *store.ApplyWebhookConfigPlanResult
+	webhookErr        error
+	applyLeaseID      uuid.UUID
+	renewLeaseErr     error
+	renewLeaseCalled  chan struct{}
 }
 
 func (m *mockConfigStore) GetConfigState(ctx context.Context, configKey string) (*store.ConfigState, error) {
 	return m.state, m.err
+}
+
+func (m *mockConfigStore) GetConfigStatesByKeys(_ context.Context, configKeys []string) (map[string]store.ConfigState, error) {
+	result := make(map[string]store.ConfigState, len(configKeys))
+	for _, state := range m.states {
+		result[state.ConfigKey] = state
+	}
+	if m.state != nil {
+		result[m.state.ConfigKey] = *m.state
+	}
+	return result, m.err
 }
 
 func (m *mockConfigStore) ListConfigStates(ctx context.Context, configType store.ConfigType) ([]store.ConfigState, error) {
@@ -709,44 +737,207 @@ func (m *mockConfigStore) ApplyConfigPlan(ctx context.Context, params store.Appl
 	if err != nil {
 		return state, err
 	}
-	if _, err := m.MarkConfigPlanApplied(ctx, params.PlanID); err != nil {
-		return state, err
+	if m.markErr != nil {
+		return state, m.markErr
 	}
+	m.markApplied = true
 	return state, nil
+}
+
+func (m *mockConfigStore) ApplyArtifactConfigPlan(ctx context.Context, params store.ApplyArtifactConfigPlanParams) (*store.ApplyArtifactConfigPlanResult, error) {
+	m.artifactApply = &params
+	if m.artifactApplyErr != nil {
+		return nil, m.artifactApplyErr
+	}
+	state, err := m.ApplyConfigPlan(ctx, params.Plan)
+	if err != nil {
+		return nil, err
+	}
+	if m.artifactScopeSink != nil {
+		if err := m.artifactScopeSink(params.Scope); err != nil {
+			return nil, err
+		}
+	}
+	created := m.state == nil || m.state.LatestResourceID == nil
+	return &store.ApplyArtifactConfigPlanResult{State: state, ScopeCreated: created}, nil
+}
+
+func (m *mockConfigStore) ApplyWebhookConfigPlan(ctx context.Context, params store.ApplyWebhookConfigPlanParams) (*store.ApplyWebhookConfigPlanResult, error) {
+	m.webhookApply = &params
+	if m.webhookErr != nil {
+		return nil, m.webhookErr
+	}
+	registrations := append([]store.WorkspaceWebhook(nil), params.Registrations...)
+	for i := range registrations {
+		if registrations[i].ID == uuid.Nil {
+			registrations[i].ID = uuid.New()
+		}
+	}
+	m.upserted = &params.Plan.State
+	m.markApplied = true
+	result := &store.ApplyWebhookConfigPlanResult{State: m.state, Registrations: registrations}
+	m.webhookResult = result
+	return result, m.err
 }
 
 func (m *mockConfigStore) CreateConfigPlan(ctx context.Context, params store.CreateConfigPlanParams) (*store.ConfigPlan, error) {
 	m.createdPlan = &params
 	if m.plan == nil {
 		m.plan = &store.ConfigPlan{
-			ID:              uuid.New(),
-			ConfigKey:       params.ConfigKey,
-			ConfigType:      params.ConfigType,
-			SourceHash:      params.SourceHash,
-			BaseGeneration:  params.BaseGeneration,
-			Status:          store.ConfigPlanStatusPending,
-			Actions:         params.Actions,
-			DesiredState:    params.DesiredState,
-			ResolvedPayload: params.ResolvedPayload,
+			ID:                  uuid.New(),
+			Revision:            1,
+			ConfigKey:           params.ConfigKey,
+			ConfigType:          params.ConfigType,
+			OwnerTeamID:         params.OwnerTeamID,
+			SourceHash:          params.SourceHash,
+			BaseGeneration:      params.BaseGeneration,
+			Status:              store.ConfigPlanStatusPending,
+			Actions:             params.Actions,
+			DesiredState:        params.DesiredState,
+			ResolvedPayload:     params.ResolvedPayload,
+			RequiredPermissions: params.RequiredPermissions,
+		}
+	}
+	if m.plan.OwnerTeamID == nil {
+		m.plan.OwnerTeamID = params.OwnerTeamID
+	}
+	return m.plan, m.err
+}
+
+func (m *mockConfigStore) ResolveArtifactOwnerTeam(context.Context, string) (uuid.UUID, error) {
+	if m.ownerTeamID != uuid.Nil {
+		return m.ownerTeamID, nil
+	}
+	if m.plan != nil && m.plan.OwnerTeamID != nil {
+		return *m.plan.OwnerTeamID, nil
+	}
+	if m.createdPlan != nil && m.createdPlan.OwnerTeamID != nil {
+		return *m.createdPlan.OwnerTeamID, nil
+	}
+	return uuid.Nil, store.ErrConfigPlanNotFound
+}
+
+func (m *mockConfigStore) GetConfigPlan(ctx context.Context, planID uuid.UUID) (*store.ConfigPlan, error) {
+	if m.plan != nil && m.plan.Revision == 0 {
+		m.plan.Revision = 1
+	}
+	if m.plan != nil && m.plan.ConfigType != store.ConfigTypeWorkspace {
+		if m.plan.OwnerTeamID == nil {
+			owner := testArtifactOwnerTeamID
+			m.plan.OwnerTeamID = &owner
+		}
+		if len(m.plan.RequiredPermissions) == 0 {
+			m.plan.RequiredPermissions = json.RawMessage(`[{"permission":"artifact.read","resource_type":"artifact","resource_id":"00000000-0000-0000-0000-000000000002"}]`)
 		}
 	}
 	return m.plan, m.err
 }
 
-func (m *mockConfigStore) GetConfigPlan(ctx context.Context, planID uuid.UUID) (*store.ConfigPlan, error) {
-	return m.plan, m.err
-}
-
-func (m *mockConfigStore) ReplaceConfigPlanActions(ctx context.Context, planID uuid.UUID, actions json.RawMessage, actorID uuid.UUID) (*store.ConfigPlan, error) {
-	return m.plan, m.err
-}
-
-func (m *mockConfigStore) MarkConfigPlanApplied(ctx context.Context, planID uuid.UUID) (*store.ConfigPlan, error) {
-	m.markApplied = true
-	if m.markErr != nil {
-		return m.plan, m.markErr
+func (m *mockConfigStore) ReplaceConfigPlanActions(ctx context.Context, planID uuid.UUID, actions, requiredPermissions json.RawMessage, actorID uuid.UUID) (*store.ConfigPlan, error) {
+	if m.plan != nil {
+		m.plan.Actions = actions
+		m.plan.RequiredPermissions = requiredPermissions
+		m.plan.Revision++
 	}
 	return m.plan, m.err
+}
+
+func (m *mockConfigStore) ReserveConfigPlanApply(_ context.Context, _ uuid.UUID, expectedRevision int) (*store.ConfigPlanApplyLease, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if expectedRevision <= 0 {
+		return nil, store.ErrConfigPlanRevisionMismatch
+	}
+	if m.applyLeaseID != uuid.Nil {
+		return nil, store.ErrConfigPlanApplyInProgress
+	}
+	m.applyLeaseID = uuid.New()
+	return &store.ConfigPlanApplyLease{ID: m.applyLeaseID, ExpiresAt: time.Now().Add(time.Minute)}, nil
+}
+
+func (m *mockConfigStore) RenewConfigPlanApply(_ context.Context, _ uuid.UUID, _ int, leaseID uuid.UUID) (*store.ConfigPlanApplyLease, error) {
+	if m.renewLeaseCalled != nil {
+		select {
+		case m.renewLeaseCalled <- struct{}{}:
+		default:
+		}
+	}
+	if m.renewLeaseErr != nil {
+		return nil, m.renewLeaseErr
+	}
+	if m.applyLeaseID != leaseID {
+		return nil, store.ErrConfigPlanRevisionMismatch
+	}
+	return &store.ConfigPlanApplyLease{ID: leaseID, ExpiresAt: time.Now().Add(time.Minute)}, nil
+}
+
+func (m *mockConfigStore) ReleaseConfigPlanApply(_ context.Context, _ uuid.UUID, _ int, leaseID uuid.UUID) error {
+	if m.applyLeaseID == leaseID {
+		m.applyLeaseID = uuid.Nil
+	}
+	return nil
+}
+
+func TestWorkspaceApplyLeaseContextIgnoresClientCancellationButIsBounded(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	cancelParent()
+	ctx, cancel := workspaceApplyLeaseContextWithTimeout(parent, &mockConfigStore{}, uuid.New(), 1, uuid.New(), 10*time.Millisecond)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		t.Fatalf("apply context inherited client cancellation: %v", ctx.Err())
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("apply context error = %v, want deadline", ctx.Err())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("bounded apply context did not reach its deadline")
+	}
+}
+
+func TestWorkspaceApplyLeaseContextCancelsWhenRenewalIsLost(t *testing.T) {
+	called := make(chan struct{}, 1)
+	configStore := &mockConfigStore{renewLeaseErr: store.ErrConfigPlanRevisionMismatch, renewLeaseCalled: called}
+	ctx, cancel := workspaceApplyLeaseContextWithTiming(context.Background(), configStore, uuid.New(), 3, uuid.New(), time.Second, time.Millisecond, 50*time.Millisecond)
+	defer cancel()
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("lease renewal was not attempted")
+	}
+	select {
+	case <-ctx.Done():
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			t.Fatalf("apply context error = %v, want cancellation after lease loss", ctx.Err())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("apply context remained live after lease renewal failed")
+	}
+}
+
+func TestWorkspaceApplyKeepsLeaseWhenFinalOutcomeIsUnknown(t *testing.T) {
+	planID := uuid.New()
+	configStore := &mockConfigStore{
+		plan: &store.ConfigPlan{
+			ID: planID, ConfigKey: "workspace:unknown", ConfigType: store.ConfigTypeWorkspace,
+			SourceHash: "source", Status: store.ConfigPlanStatusPending, Revision: 1,
+			Actions: json.RawMessage(`[]`), ResolvedPayload: json.RawMessage(`{"services":{},"buckets":{}}`),
+		},
+		markErr: errors.New("commit outcome unavailable"),
+	}
+	_, err := executeWorkspaceConfigApply(context.Background(), configStore, &workspaceTestStore{}, &mockVerifier{}, workspaceApplyCall{
+		accountID: uuid.New(), planID: planID, planRevision: 1, sourceHash: "source",
+	})
+	if err == nil {
+		t.Fatal("expected finalization failure")
+	}
+	if configStore.applyLeaseID == uuid.Nil {
+		t.Fatal("ambiguous apply failure released its fencing lease")
+	}
 }
 
 func (m *mockConfigStore) CreateWorkspaceNotification(ctx context.Context, params store.CreateWorkspaceNotificationParams) (*store.WorkspaceNotification, error) {
@@ -878,7 +1069,7 @@ func TestWorkspaceConfigPlanHandler(t *testing.T) {
 	}}})
 	configStore := &mockConfigStore{state: &store.ConfigState{Generation: 7, ManagedResources: managed}}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/plan", WorkspaceConfigPlanHandler(configStore, s, &mockRegistryClient{}))
 
 	body := []byte(`{
@@ -915,7 +1106,8 @@ func TestWorkspaceConfigPlanHandler(t *testing.T) {
 func decodeWorkspacePlanSummaryResponse(t *testing.T, body *bytes.Buffer) workspacePlanSummary {
 	t.Helper()
 	var resp struct {
-		Summary workspacePlanSummary `json:"summary"`
+		Summary             workspacePlanSummary         `json:"summary"`
+		RequiredPermissions []requiredPermissionResponse `json:"required_permissions"`
 	}
 	if err := json.NewDecoder(body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -975,7 +1167,7 @@ func TestWorkspaceConfigPlanHandler_ResolvesServiceSlugsInOneBatch(t *testing.T)
 	}
 	configStore := &mockConfigStore{}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/plan", WorkspaceConfigPlanHandler(configStore, s, verifier))
 
 	body := []byte(`{
@@ -1031,7 +1223,7 @@ func TestWorkspaceConfigPlanHandler_ResolvesOmittedVersionsInOneBatch(t *testing
 	s := &workspaceTestStore{accountID: uuid.New()}
 	configStore := &mockConfigStore{}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/plan", WorkspaceConfigPlanHandler(configStore, s, verifier))
 
 	body := []byte(`{
@@ -1086,7 +1278,7 @@ func TestWorkspaceConfigPlanHandler_RejectsPublicForNonOwnedService(t *testing.T
 	s := &workspaceTestStore{accountID: uuid.New()}
 	configStore := &mockConfigStore{}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/plan", WorkspaceConfigPlanHandler(configStore, s, verifier))
 
 	body := []byte(`{
@@ -1130,7 +1322,7 @@ func TestWorkspaceConfigPlanHandler_PlansOwnedServicePublicChange(t *testing.T) 
 	s := &workspaceTestStore{accountID: uuid.New()}
 	configStore := &mockConfigStore{}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/plan", WorkspaceConfigPlanHandler(configStore, s, verifier))
 
 	body := []byte(`{
@@ -1156,7 +1348,8 @@ func TestWorkspaceConfigPlanHandler_PlansOwnedServicePublicChange(t *testing.T) 
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 	var resp struct {
-		Summary workspacePlanSummary `json:"summary"`
+		Summary             workspacePlanSummary         `json:"summary"`
+		RequiredPermissions []requiredPermissionResponse `json:"required_permissions"`
 	}
 	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -1164,6 +1357,18 @@ func TestWorkspaceConfigPlanHandler_PlansOwnedServicePublicChange(t *testing.T) 
 	if !hasWorkspaceAction(resp.Summary.Actions, "set_service_public", svcID.String()) {
 		t.Fatalf("expected set_service_public action, got %#v", resp.Summary.Actions)
 	}
+	if !hasRequiredPermission(resp.RequiredPermissions, "service.manage", "service", svcID) {
+		t.Fatalf("expected service.manage preview, got %#v", resp.RequiredPermissions)
+	}
+}
+
+func hasRequiredPermission(permissions []requiredPermissionResponse, permission, resourceType string, resourceID uuid.UUID) bool {
+	for _, item := range permissions {
+		if item.Permission == permission && item.ResourceType == resourceType && item.ResourceID == resourceID {
+			return true
+		}
+	}
+	return false
 }
 
 func TestWorkspaceConfigPlanHandler_RejectsVersionPublicForNonOwnedService(t *testing.T) {
@@ -1180,7 +1385,7 @@ func TestWorkspaceConfigPlanHandler_RejectsVersionPublicForNonOwnedService(t *te
 	s := &workspaceTestStore{accountID: uuid.New()}
 	configStore := &mockConfigStore{}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/plan", WorkspaceConfigPlanHandler(configStore, s, verifier))
 
 	body := []byte(`{
@@ -1223,7 +1428,7 @@ func TestWorkspaceConfigPlanHandler_PlansVersionPublicAndExecutionPolicyChange(t
 	s := &workspaceTestStore{accountID: uuid.New()}
 	configStore := &mockConfigStore{}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/plan", WorkspaceConfigPlanHandler(configStore, s, verifier))
 
 	body := []byte(`{
@@ -1300,7 +1505,7 @@ func TestWorkspaceConfigPlanHandler_BlocksRemovingServiceUsedBySDK(t *testing.T)
 		}},
 	}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/plan", WorkspaceConfigPlanHandler(configStore, s, &mockRegistryClient{}))
 
 	body := []byte(`{"source_hash":"abc","config":{"kind":"workspace","services":{}}}`)
@@ -1360,7 +1565,7 @@ func TestWorkspaceConfigPlanHandler_ReadsArtifactScopesInOneBatch(t *testing.T) 
 		},
 	}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/plan", WorkspaceConfigPlanHandler(configStore, s, &mockRegistryClient{}))
 	body := []byte(`{"source_hash":"abc","config":{"kind":"workspace","services":{}}}`)
 	req := httptest.NewRequest(http.MethodPost, "/workspace/config/plan", bytes.NewReader(body))
@@ -1403,7 +1608,7 @@ func TestWorkspaceConfigPlanHandler_FailsClosedOnScopeBatchError(t *testing.T) {
 		states: []store.ConfigState{{ConfigKey: "sdk:security", ConfigType: store.ConfigTypeSDK, LatestResourceID: &artifactID}},
 	}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/plan", WorkspaceConfigPlanHandler(configStore, s, &mockRegistryClient{}))
 	req := httptest.NewRequest(http.MethodPost, "/workspace/config/plan", bytes.NewReader([]byte(`{"source_hash":"abc","config":{"kind":"workspace","services":{}}}`)))
 	req.Header.Set("X-API-Key", "fsk_test")
@@ -1442,7 +1647,7 @@ func TestWorkspaceConfigPlanHandler_DeprecationDirectiveKeepsImpactedService(t *
 		}},
 	}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/plan", WorkspaceConfigPlanHandler(configStore, s, &mockRegistryClient{}))
 
 	body := []byte(`{
@@ -1533,7 +1738,7 @@ func TestWorkspaceConfigApplyHandler(t *testing.T) {
 		},
 	}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/apply", WorkspaceConfigApplyHandler(configStore, s, &mockRegistryClient{name: "test"}, testMasterKey))
 
 	body := []byte(`{"plan_id": "` + planID.String() + `", "source_hash": "abc"}`)
@@ -1554,6 +1759,21 @@ func TestWorkspaceConfigApplyHandler(t *testing.T) {
 	}
 	if configStore.upserted == nil || string(configStore.upserted.ManagedResources) == "" {
 		t.Fatalf("expected applied managed resources to be stored, got %#v", configStore.upserted)
+	}
+}
+
+func TestLoadWorkspacePlanForApplyRejectsRevisionDifferentFromAuthorizationSnapshot(t *testing.T) {
+	plan := &store.ConfigPlan{
+		ID: uuid.New(), ConfigKey: "workspace", ConfigType: store.ConfigTypeWorkspace,
+		Status: store.ConfigPlanStatusPending, SourceHash: "abc", Revision: 2,
+	}
+	configStore := &mockConfigStore{plan: plan}
+	_, _, err := loadWorkspacePlanForApply(context.Background(), configStore, workspaceApplyCall{
+		planID: plan.ID, planRevision: 1, sourceHash: plan.SourceHash,
+	})
+	var httpErr workspaceConfigHTTPError
+	if !errors.As(err, &httpErr) || httpErr.status != http.StatusConflict || httpErr.message != "plan_revision_changed" {
+		t.Fatalf("revision mismatch error = %#v, want 409 plan_revision_changed", err)
 	}
 }
 
@@ -1581,7 +1801,7 @@ func TestWorkspaceConfigApplyHandler_UpsertsBasicAuthSecretsFromRuntimeConfig(t 
 		},
 	}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/apply", WorkspaceConfigApplyHandler(configStore, s, verifier, testMasterKey))
 	req := httptest.NewRequest(http.MethodPost, "/workspace/config/apply", bytes.NewReader(workspaceBasicAuthApplyRequest(planID)))
 	req.Header.Set("X-API-Key", "fsk_test")
@@ -1624,7 +1844,7 @@ func TestWorkspaceConfigApplyHandler_UpsertsMTLSAuthSecretsFromRuntimeConfig(t *
 		},
 	}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/apply", WorkspaceConfigApplyHandler(configStore, s, verifier, testMasterKey))
 	req := httptest.NewRequest(http.MethodPost, "/workspace/config/apply", bytes.NewReader(workspaceMTLSAuthApplyRequest(planID, certPEM, keyPEM)))
 	req.Header.Set("X-API-Key", "fsk_test")
@@ -1869,7 +2089,7 @@ func TestWorkspaceConfigApplyHandler_DeprecationDirectiveDoesNotRemoveService(t 
 			ResolvedPayload: payload,
 		},
 	}
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/apply", WorkspaceConfigApplyHandler(configStore, s, &mockRegistryClient{name: "test"}, testMasterKey))
 
 	body := []byte(`{"plan_id": "` + planID.String() + `", "source_hash": "abc"}`)
@@ -2005,7 +2225,7 @@ func mountWorkspaceNotificationsGraphQLTestHandler(t *testing.T, configStore sto
 	if err != nil {
 		t.Fatalf("newMCPGraphQLSchema() error = %v", err)
 	}
-	return mcpGraphQLHandler(schema, s)
+	return withGraphQLTestOwner(t, s, mcpGraphQLHandler(schema))
 }
 
 func workspaceNotificationsGraphQLData(t *testing.T, h http.HandlerFunc) map[string]any {
@@ -2083,7 +2303,7 @@ func runWorkspaceRemovalApplyWithStore(t *testing.T, svcID uuid.UUID, decision s
 			Blockers:        blockers,
 		},
 	}
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/apply", WorkspaceConfigApplyHandler(configStore, s, &mockRegistryClient{name: "test"}, testMasterKey))
 
 	body := []byte(`{"plan_id": "` + planID.String() + `", "source_hash": "abc"}`)
@@ -2139,6 +2359,19 @@ func (m *mockRegistryClient) FetchServiceMetadata(_ context.Context, serviceID u
 		return m.serviceMetadata, nil
 	}
 	return &fusedobject.ServiceMetadata{ID: serviceID}, nil
+}
+
+func (m *mockRegistryClient) FetchServiceMetadataBatch(_ context.Context, refs []sandbox.ServiceMetadataRef) (map[string]*fusedobject.ServiceMetadata, error) {
+	m.fetchMetadataCalls++
+	result := make(map[string]*fusedobject.ServiceMetadata, len(refs))
+	for _, ref := range refs {
+		metadata := m.serviceMetadata
+		if metadata == nil {
+			metadata = &fusedobject.ServiceMetadata{ID: ref.ServiceID}
+		}
+		result[sandbox.ServiceMetadataRefKey(ref)] = metadata
+	}
+	return result, nil
 }
 
 func (m *mockRegistryClient) FetchServiceVersionAuthConfigs(_ context.Context, refs []sandbox.ServiceVersionRef, _ string) ([]sandbox.ServiceVersionAuthConfigs, error) {
@@ -2329,7 +2562,7 @@ func TestWorkspaceConfigApplyHandler_FirstApplyDoesNotRemoveUnmanagedServices(t 
 		state: &store.ConfigState{ConfigKey: "workspace", Generation: 0},
 	}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/apply", WorkspaceConfigApplyHandler(configStore, s, &mockRegistryClient{name: "test"}, testMasterKey))
 
 	body := fmt.Appendf(nil, `{"plan_id": "%s", "source_hash": "abc"}`, planID)
@@ -2365,7 +2598,7 @@ func TestWorkspaceConfigApplyHandler_EnablesVersionsInConfigOrder(t *testing.T) 
 		state: &store.ConfigState{ConfigKey: "workspace", Generation: 0},
 	}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/apply", WorkspaceConfigApplyHandler(configStore, s, &mockRegistryClient{name: "test"}, testMasterKey))
 
 	body := fmt.Appendf(nil, `{"plan_id": "%s", "source_hash": "abc"}`, planID)
@@ -2410,7 +2643,7 @@ func TestWorkspaceConfigApplyHandler_AppliesOwnedServicePublicChange(t *testing.
 		},
 	}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/apply", WorkspaceConfigApplyHandler(configStore, s, verifier, testMasterKey))
 
 	body := fmt.Appendf(nil, `{"plan_id": "%s", "source_hash": "abc"}`, planID)
@@ -2461,7 +2694,7 @@ func TestWorkspaceConfigApplyHandler_AppliesVersionPublicAndExecutionPolicyChang
 		},
 	}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/apply", WorkspaceConfigApplyHandler(configStore, s, verifier, testMasterKey))
 
 	body := fmt.Appendf(nil, `{"plan_id": "%s", "source_hash": "abc"}`, planID)
@@ -2517,7 +2750,7 @@ func TestWorkspaceConfigApplyHandler_VersionForceRemovalCreatesNotification(t *t
 		},
 	}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/workspace/config/apply", WorkspaceConfigApplyHandler(configStore, s, &mockRegistryClient{name: "test"}, testMasterKey))
 
 	body := fmt.Appendf(nil, `{"plan_id": "%s", "source_hash": "abc"}`, planID)

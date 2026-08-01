@@ -124,7 +124,7 @@ func firstUnactivatedSelection(ctx context.Context, s store.Store, accountID uui
 		return sdkGenerateSelection{}, false, nil
 	}
 
-	wsErr := s.VerifyWorkspaceOwner(ctx, accountID)
+	wsErr := verifyWorkspaceActor(ctx, accountID)
 	if wsErr != nil {
 		return req.Selections[0], true, nil
 	}

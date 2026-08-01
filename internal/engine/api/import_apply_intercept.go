@@ -130,7 +130,7 @@ func decodeAutoRegistrationResponse(ctx context.Context, body []byte) (importApp
 }
 
 func activateImportedService(ctx context.Context, s store.Store, contractFetcher RuntimeContractFetcher, accountID uuid.UUID, apiKey string, resp importApplyResponse, audit autoRegistrationAudit) autoRegistrationAudit {
-	if err := s.VerifyWorkspaceOwner(ctx, accountID); err != nil {
+	if err := verifyWorkspaceActor(ctx, accountID); err != nil {
 		slog.ErrorContext(ctx, "auto-register: resolve Engine workspace failed", slog.Any("error", err))
 		audit.outcome, audit.err = "workspace_lookup_failed", err
 		return audit

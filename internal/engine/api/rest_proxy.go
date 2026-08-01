@@ -34,8 +34,8 @@ var RESTProxyMountPaths = []string{
 }
 
 // RESTProxyHandler validates the caller's API key the same way
-// GraphQLProxyHandler does, then forwards the request to the Registry
-// unchanged. Mounted at each path in RESTProxyMountPaths.
+// GraphQLProxyHandler does, then forwards through the licence-identity proxy.
+// Mounted at each path in RESTProxyMountPaths.
 func RESTProxyHandler(proxy Forwarder, s store.Store, enforcers ...*enginemiddleware.RuntimeEnforcer) http.HandlerFunc {
 	return RESTProxyHandlerWithRuntimeContracts(proxy, s, nil, enforcers...)
 }
@@ -43,8 +43,7 @@ func RESTProxyHandler(proxy Forwarder, s store.Store, enforcers ...*enginemiddle
 func RESTProxyHandlerWithRuntimeContracts(proxy Forwarder, s store.Store, contractFetcher RuntimeContractFetcher, enforcers ...*enginemiddleware.RuntimeEnforcer) http.HandlerFunc {
 	enforcer := firstRuntimeEnforcer(enforcers)
 	return func(w http.ResponseWriter, r *http.Request) {
-		apiKey := r.Header.Get("X-API-Key")
-		accountID, err := validateAPIKey(r.Context(), s, apiKey)
+		accountID, err := controlActorAccount(r.Context())
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return

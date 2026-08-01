@@ -31,7 +31,7 @@ func MountConfigRoutes(r chi.Router, configStore store.ConfigRepository, s store
 		// there would either be shadowed by the proxy or collide with it.
 		r.Post("/{id}/activate", ActivateSDKHandler(s))
 		r.Post("/{id}/deactivate", DeactivateSDKHandler(s))
-		r.Delete("/{id}", DeleteSDKHandler(s))
+		r.Delete("/{id}", DeleteSDKHandler(s, proxy))
 	})
 
 	// MCP uses the same desired-state contract and resolver as SDK configs,

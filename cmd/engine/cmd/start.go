@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 
 	backend "github.com/Usefused/engine"
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/api"
 	"github.com/Usefused/engine/internal/engine/auth"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
@@ -41,6 +42,7 @@ import (
 
 var (
 	port        string
+	grpcHost    string
 	grpcPort    string
 	webhookPort string
 	uiURL       string
@@ -79,6 +81,7 @@ var startCmd = &cobra.Command{
 func init() {
 	RootCmd.AddCommand(startCmd)
 	startCmd.Flags().StringVar(&port, "port", "8081", "HTTP port for API and UI")
+	startCmd.Flags().StringVar(&grpcHost, "grpc-host", "127.0.0.1", "gRPC listen host")
 	startCmd.Flags().StringVar(&grpcPort, "grpc-port", "50051", "gRPC port for SDK connections")
 	startCmd.Flags().StringVar(&webhookPort, "webhook-port", "", "Dedicated HTTP port for Webhook Ingress (optional)")
 	startCmd.Flags().StringVar(&uiURL, "ui-url", "", "URL for the UI (overrides engine.yaml)")
@@ -112,7 +115,9 @@ func runEngine() {
 
 	engineWorkers := startEngineWorkers(ctx, engineStore, natsClient, cfg)
 
-	entitlement := bootstrapRegistryIdentity(ctx, engineStore, registryClient, envLicense)
+	entitlement, authorizationRevision := bootstrapRegistryIdentity(ctx, engineStore, registryClient, envLicense)
+	controlAuthenticator := newControlAuthenticator(ctx, engineStore, authorizationRevision)
+	startAuthorizationRevisionPolling(ctx, engineStore, controlAuthenticator)
 	engineWorkers.usageCounter = startEngineUsageCounter(ctx, engineStore, entitlement)
 	startEngineHeartbeat(ctx, registryClient, entitlement)
 	usageFlushWorker := startEngineUsageReporting(ctx, engineStore, registryClient, entitlement)
@@ -147,7 +152,7 @@ func runEngine() {
 	localObjectCache := sandbox.NewLocalObjectCache(engineStore, registryClient)
 	subscribeCacheInvalidation(natsClient, localObjectCache)
 
-	registryProxy := api.NewRegistryProxy(cfg.Engine.RegistryEndpoint)
+	registryProxy := api.NewRegistryProxy(cfg.Engine.RegistryEndpoint, envLicense)
 	// localObjectCache, not registryClient directly, so rate_limit/retry_config
 	// enforcement reads the cached runtime contract snapshot (falling back to
 	// a live Registry call only when no snapshot exists yet) instead of
@@ -165,6 +170,7 @@ func runEngine() {
 		runtimeEnforcer:  runtimeEnforcer,
 		configStore:      configStore,
 		masterKey:        masterKey,
+		controlAuth:      controlAuthenticator,
 	})
 
 	webhookSrv := startWebhookServer(ctx, r)
@@ -254,7 +260,7 @@ func startEngineUsageCounter(ctx context.Context, engineStore store.Store, entit
 	return usageCounterWorker
 }
 
-func bootstrapRegistryIdentity(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, envLicense string) models.RuntimeEntitlement {
+func bootstrapRegistryIdentity(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, envLicense string) (models.RuntimeEntitlement, int64) {
 	slog.InfoContext(ctx, "FUSED_LICENSE_KEY present. Attempting Registry Handshake...")
 	handshake, err := registryClient.HandshakeWithEntitlements(ctx)
 	if err != nil {
@@ -277,9 +283,14 @@ func bootstrapRegistryIdentity(ctx context.Context, engineStore store.Store, reg
 		os.Exit(1)
 	}
 
-	err = engineStore.BootstrapAPIKey(ctx, accUUID, envLicense)
+	accessRepository, ok := engineStore.(accesscontrol.BootstrapRepository)
+	if !ok {
+		slog.ErrorContext(ctx, "FATAL: Engine store does not support access-control bootstrap")
+		os.Exit(1)
+	}
+	accessBootstrap, err := accesscontrol.BootstrapOwner(ctx, accessRepository, accUUID, envLicense)
 	if err != nil {
-		slog.ErrorContext(ctx, "FATAL: Failed to cache Registry-issued API key in local Postgres", slog.Any("error", err))
+		slog.ErrorContext(ctx, "FATAL: Failed to initialize bootstrap Owner access", slog.Any("error", err))
 		os.Exit(1)
 	}
 	entitlement := handshake.Entitlements.Normalized()
@@ -288,13 +299,39 @@ func bootstrapRegistryIdentity(ctx context.Context, engineStore store.Store, reg
 			slog.WarnContext(ctx, "Failed to persist Registry entitlement bundle", slog.Any("error", err))
 		}
 	}
-	slog.InfoContext(ctx, "Successfully initialized Engine workspace and API key",
+	slog.InfoContext(ctx, "Successfully initialized Engine workspace and bootstrap Owner",
 		slog.String("account", accountIDStr),
 		slog.String("workspace", wsName),
 		slog.String("plan", entitlement.Plan),
 		slog.String("usage_reporting", entitlement.UsageReporting),
+		slog.Int64("authorization_revision", accessBootstrap.Revision),
 	)
-	return entitlement
+	return entitlement, accessBootstrap.Revision
+}
+
+func newControlAuthenticator(ctx context.Context, engineStore store.Store, revision int64) *accesscontrol.Authenticator {
+	loader, ok := engineStore.(accesscontrol.PrincipalLoader)
+	if !ok {
+		slog.ErrorContext(ctx, "FATAL: Engine store does not support control authentication")
+		os.Exit(1)
+	}
+	authenticator, err := accesscontrol.NewAuthenticator(loader, revision, accesscontrol.AuthenticatorOptions{})
+	if err != nil {
+		slog.ErrorContext(ctx, "FATAL: Failed to initialize control authenticator", slog.Any("error", err))
+		os.Exit(1)
+	}
+	return authenticator
+}
+
+func startAuthorizationRevisionPolling(ctx context.Context, engineStore store.Store, authenticator *accesscontrol.Authenticator) {
+	loader, ok := engineStore.(accesscontrol.AuthorizationRevisionLoader)
+	if !ok {
+		slog.ErrorContext(ctx, "FATAL: Engine store does not support authorization revision loading")
+		os.Exit(1)
+	}
+	go accesscontrol.PollAuthorizationRevisions(ctx, loader, authenticator, 5*time.Second, func(err error) {
+		slog.WarnContext(ctx, "Failed to refresh authorization revision", slog.Any("error", err))
+	})
 }
 
 func startEngineHeartbeat(ctx context.Context, registryClient *sandbox.HTTPRegistryClient, entitlement models.RuntimeEntitlement) {
@@ -413,13 +450,14 @@ type engineRouterDeps struct {
 	runtimeEnforcer  *enginemiddleware.RuntimeEnforcer
 	configStore      store.ConfigRepository
 	masterKey        []byte
+	controlAuth      *accesscontrol.Authenticator
 }
 
 func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	// Router
 	r := chi.NewRouter()
+	r.Use(discardInboundRequestID)
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(apimiddleware.CORS(deps.cfg.UIURL))
 	// Embedded SPA assets are many small JS/CSS chunks; compressing here keeps
@@ -432,6 +470,10 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	// are both SPA routes and Registry API routes, so the request shape decides.
 	uiFS := backend.GetUIFS()
 	r.Use(api.EmbeddedUIMiddleware(uiFS))
+	auditRecorder, _ := deps.engineStore.(accesscontrol.AuditRecorder)
+	r.Use(controlActorMiddlewareWithAudit(deps.controlAuth, auditRecorder))
+	r.Use(controlGraphQLAuditMiddleware(auditRecorder))
+	r.Use(controlAuthorizationMiddlewareWithAudit(accesscontrol.SnapshotAuthorizer{}, newControlRequirementResolver(deps.engineStore, deps.configStore), auditRecorder))
 
 	registerProxyRoutesWithRuntimeContracts(r, deps.registryProxy, deps.engineStore, deps.registryClient, deps.runtimeEnforcer)
 
@@ -459,15 +501,12 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	// Webhook delivery to SDKs/MCPs is gRPC-only now (EngineGRPCServer's
 	// SubscribeWebhooks, see webhook_grpc_handler.go) -- the old wss://.../sdks/ws
 	// WebSocket route has been retired rather than kept running alongside it.
-	r.Mount("/workspace", api.WorkspaceHandler(deps.engineStore, deps.registryClient, deps.masterKey))
-
-	// Mount the config routes
-	api.MountConfigRoutes(r, deps.configStore, deps.engineStore, deps.registryClient, deps.registryProxy, deps.registryClient, deps.masterKey)
+	registerNativeRESTControlRoutes(r, deps)
 
 	// Engine-native MCP GraphQL surface (list/deploy/kill/reactivate/delete +
 	// analytics) -- a distinct endpoint from POST /graphql, which is a pure
 	// Registry forward-proxy with no resolvers of its own (graphql_proxy.go).
-	if err := api.MountMCPGraphQLRoute(r, deps.configStore, deps.engineStore, deps.registryClient, deps.registryClient, deps.masterKey); err != nil {
+	if err := api.MountMCPGraphQLRoute(r, deps.configStore, deps.engineStore, deps.registryClient, deps.registryClient, deps.masterKey, deps.controlAuth); err != nil {
 		slog.Error("failed to mount mcp graphql route", slog.Any("error", err))
 		os.Exit(1)
 	}
@@ -481,6 +520,15 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	return r
 }
 
+// Request IDs are audit identifiers, so they must be generated inside Engine
+// rather than copied from a caller-controlled header that may contain secrets.
+func discardInboundRequestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Del(middleware.RequestIDHeader)
+		next.ServeHTTP(w, r)
+	})
+}
+
 func startWebhookServer(ctx context.Context, r chi.Router) *http.Server {
 	if webhookPort == "" || webhookPort == port {
 		sandbox.InitWebhookRoutes(r)
@@ -489,16 +537,23 @@ func startWebhookServer(ctx context.Context, r chi.Router) *http.Server {
 
 	wr := chi.NewRouter()
 	wr.Use(middleware.RequestID)
-	wr.Use(middleware.RealIP)
 	wr.Use(middleware.Recoverer)
 	sandbox.InitWebhookRoutes(wr)
 
-	webhookSrv := &http.Server{
-		Addr:    ":" + webhookPort,
-		Handler: wr,
-	}
+	webhookSrv := newWebhookHTTPServer(wr)
 	go serveHTTPServer(ctx, webhookSrv, "Starting Dedicated Webhook Server", slog.String("port", webhookPort), "Webhook Server failed")
 	return webhookSrv
+}
+
+func newWebhookHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              ":" + webhookPort,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 }
 
 func startEngineHTTPServer(ctx context.Context, r chi.Router) *http.Server {
@@ -523,7 +578,8 @@ func serveHTTPServer(ctx context.Context, srv *http.Server, startMessage string,
 }
 
 func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient) *grpc.Server {
-	lis, err := net.Listen("tcp", ":"+grpcPort)
+	listenAddress := engineGRPCListenAddress(grpcHost, grpcPort)
+	lis, err := net.Listen("tcp", listenAddress)
 	if err != nil {
 		slog.ErrorContext(ctx, "Failed to listen for gRPC", slog.Any("error", err))
 		os.Exit(1)
@@ -536,12 +592,19 @@ func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registr
 	// webhook_attachment label resolution the WS handler already has below.
 	enginev1.RegisterEngineServiceServer(grpcServer, api.NewEngineGRPCServer(engineStore, registryClient, masterKey, configStore, natsClient))
 
-	go serveGRPCServer(ctx, grpcServer, lis)
+	go serveGRPCServer(ctx, grpcServer, lis, listenAddress)
 	return grpcServer
 }
 
-func serveGRPCServer(ctx context.Context, grpcServer *grpc.Server, lis net.Listener) {
-	slog.InfoContext(ctx, "Starting Engine gRPC Server", slog.String("port", grpcPort))
+func engineGRPCListenAddress(host, port string) string {
+	if strings.TrimSpace(host) == "" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
+}
+
+func serveGRPCServer(ctx context.Context, grpcServer *grpc.Server, lis net.Listener, listenAddress string) {
+	slog.InfoContext(ctx, "Starting Engine gRPC Server", slog.String("address", listenAddress))
 	if err := grpcServer.Serve(lis); err != nil {
 		slog.ErrorContext(ctx, "gRPC Server failed", slog.Any("error", err))
 		os.Exit(1)

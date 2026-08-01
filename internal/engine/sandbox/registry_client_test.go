@@ -18,13 +18,14 @@ func TestFetchServiceVersionAuthConfigsUsesGraphQLBatch(t *testing.T) {
 	versionID := uuid.New()
 	var requestBody graphqlQuery
 	client := &HTTPRegistryClient{
-		endpoint: "https://registry.example/graphql",
+		endpoint:   "https://registry.example/graphql",
+		licenseKey: "engine-license-key",
 		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 			if request.Method != http.MethodPost || request.URL.Path != "/graphql" {
 				t.Fatalf("expected GraphQL POST, got %s %s", request.Method, request.URL.Path)
 			}
-			if request.Header.Get("X-API-Key") != "fsk_test" {
-				t.Fatalf("caller API key was not forwarded")
+			if request.Header.Get("X-API-Key") != "engine-license-key" || request.Header.Get("Authorization") != "Bearer engine-license-key" {
+				t.Fatalf("Registry did not receive only the Engine licence identity")
 			}
 			if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
 				t.Fatalf("decode request: %v", err)
@@ -54,6 +55,34 @@ func TestFetchServiceVersionAuthConfigsUsesGraphQLBatch(t *testing.T) {
 	}
 }
 
+func TestFetchServiceMetadataBatchUsesOneAliasedGraphQLRequest(t *testing.T) {
+	first, second := uuid.New(), uuid.New()
+	requestCount := 0
+	var requestBody graphqlQuery
+	client := &HTTPRegistryClient{
+		endpoint: "https://registry.example/graphql", licenseKey: "engine-license-key",
+		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			requestCount++
+			if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			body := `{"data":{"s0":{"id":"` + first.String() + `","event_extraction_path":"event.type"},"s1":{"id":"` + second.String() + `","incoming_webhook_config":{"auth_type":"hmac_signature"}}}}`
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		})},
+	}
+	refs := []ServiceMetadataRef{{ServiceID: first, Version: "v1"}, {ServiceID: second, Version: "v2"}}
+	metadata, err := client.FetchServiceMetadataBatch(context.Background(), refs)
+	if err != nil {
+		t.Fatalf("FetchServiceMetadataBatch: %v", err)
+	}
+	if requestCount != 1 || !strings.Contains(requestBody.Query, "s0: service") || !strings.Contains(requestBody.Query, "s1: service") {
+		t.Fatalf("requests=%d query=%q, want one aliased batch", requestCount, requestBody.Query)
+	}
+	if metadata[ServiceMetadataRefKey(refs[0])].EventExtractionPath != "event.type" || metadata[ServiceMetadataRefKey(refs[1])].IncomingWebhookConfig.AuthType != "hmac_signature" {
+		t.Fatalf("unexpected batched metadata: %#v", metadata)
+	}
+}
+
 func TestFetchRuntimeContractUsesBundledGraphQLProjection(t *testing.T) {
 	serviceID := uuid.New()
 	serviceVersionID := uuid.New()
@@ -64,8 +93,8 @@ func TestFetchRuntimeContractUsesBundledGraphQLProjection(t *testing.T) {
 		endpoint:   "https://registry.example/graphql",
 		licenseKey: "engine-license-key",
 		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-			if request.Header.Get("X-API-Key") != "user-api-key" {
-				t.Fatalf("caller API key was not forwarded, got %q", request.Header.Get("X-API-Key"))
+			if request.Header.Get("X-API-Key") != "engine-license-key" || request.Header.Get("Authorization") != "Bearer engine-license-key" {
+				t.Fatalf("Registry auth = %q / %q", request.Header.Get("X-API-Key"), request.Header.Get("Authorization"))
 			}
 			if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
 				t.Fatalf("decode request: %v", err)
@@ -130,8 +159,8 @@ func TestFetchRuntimeContractsUsesSingleAliasedGraphQLRequest(t *testing.T) {
 		licenseKey: "engine-license-key",
 		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 			requestCount++
-			if request.Header.Get("X-API-Key") != "user-api-key" {
-				t.Fatalf("caller API key was not forwarded")
+			if request.Header.Get("X-API-Key") != "engine-license-key" || request.Header.Get("Authorization") != "Bearer engine-license-key" {
+				t.Fatalf("Registry did not receive only the Engine licence identity")
 			}
 			if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
 				t.Fatalf("decode request: %v", err)
@@ -193,7 +222,8 @@ func TestFetchConnectionProfileContractsUsesGraphQLBatch(t *testing.T) {
 	first, second := uuid.New(), uuid.New()
 	var requestBody graphqlQuery
 	client := &HTTPRegistryClient{
-		endpoint: "https://registry.example/graphql",
+		endpoint:   "https://registry.example/graphql",
+		licenseKey: "engine-license-key",
 		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 			if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
 				t.Fatalf("decode request: %v", err)
@@ -327,8 +357,8 @@ func TestUpdateServicePublicUsesGraphQLMutation(t *testing.T) {
 	if err := client.UpdateServicePublic(context.Background(), serviceID, true, "user-key"); err != nil {
 		t.Fatalf("UpdateServicePublic: %v", err)
 	}
-	if gotKey != "user-key" {
-		t.Fatalf("expected forwarded user API key, got %q", gotKey)
+	if gotKey != "engine-license-key" {
+		t.Fatalf("expected Engine licence key, got %q", gotKey)
 	}
 	if !strings.Contains(gotQuery, "mutation UpdateServicePublic") || !strings.Contains(gotQuery, "updateServicePublic") {
 		t.Fatalf("expected updateServicePublic mutation, got %s", gotQuery)
@@ -475,8 +505,8 @@ func TestFetchLatestServiceVersions_SendsAllIDsInOneGraphQLRequest(t *testing.T)
 	if requestCount != 1 {
 		t.Fatalf("expected one GraphQL request, got %d", requestCount)
 	}
-	if gotAPIKey != "user-supplied-api-key" {
-		t.Fatalf("expected caller API key, got %q", gotAPIKey)
+	if gotAPIKey != "engine-license-key" {
+		t.Fatalf("expected Engine licence key, got %q", gotAPIKey)
 	}
 	if !strings.Contains(gotQuery, "latestServiceVersions") {
 		t.Fatalf("expected latestServiceVersions query, got %s", gotQuery)
@@ -529,8 +559,8 @@ func TestResolveServiceIDsBySlugs_SendsBatchedInputsInOneRequest(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("expected one Registry request, got %d", calls)
 	}
-	if gotAPIKey != "user-supplied-api-key" {
-		t.Fatalf("expected caller API key, got %q", gotAPIKey)
+	if gotAPIKey != "engine-license-key" {
+		t.Fatalf("expected Engine licence key, got %q", gotAPIKey)
 	}
 	if !strings.Contains(gotQuery, "serviceIdsBySlugs") {
 		t.Fatalf("expected the batched serviceIdsBySlugs query, got %s", gotQuery)

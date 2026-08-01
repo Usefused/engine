@@ -130,7 +130,7 @@ func parseAddServiceRequest(r *http.Request) (addServiceRequest, uuid.UUID, erro
 func addServiceHandler(s store.Store, verifier ServiceVerifier) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		apiKey := r.Header.Get("X-API-Key")
-		accountID, err := validateAPIKey(r.Context(), s, apiKey)
+		accountID, err := controlActorAccount(r.Context())
 		if err != nil {
 			http.Error(w, `{"error":"invalid API key"}`, http.StatusUnauthorized)
 			return
@@ -142,7 +142,7 @@ func addServiceHandler(s store.Store, verifier ServiceVerifier) http.HandlerFunc
 			return
 		}
 
-		if err := s.VerifyWorkspaceOwner(r.Context(), accountID); err != nil {
+		if err := verifyWorkspaceActor(r.Context(), accountID); err != nil {
 			slog.ErrorContext(r.Context(), "addServiceHandler: workspace not found for account", slog.Any("error", err))
 			http.Error(w, `{"error":"workspace not found"}`, http.StatusInternalServerError)
 			return
@@ -177,8 +177,8 @@ type addServiceCall struct {
 	versionID uuid.UUID
 }
 
-// verifyAndActivateService confirms the service is real (via the Registry,
-// using the caller's own API key so Registry-side visibility rules apply),
+// verifyAndActivateService confirms the service is real via the Registry.
+// The Registry client replaces local caller credentials with FUSED_LICENSE_KEY,
 // then records the workspace service using the Registry's own name for the service
 // rather than trusting whatever the client sent in the request body.
 //
@@ -388,8 +388,7 @@ func listedServiceIDs(services []store.WorkspaceService) []uuid.UUID {
 // a workspace-wide admin action with compliance-level audit requirements.
 func removeServiceHandler(s store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		apiKey := r.Header.Get("X-API-Key")
-		accountID, err := validateAPIKey(r.Context(), s, apiKey)
+		accountID, err := controlActorAccount(r.Context())
 		if err != nil {
 			http.Error(w, `{"error":"invalid API key"}`, http.StatusUnauthorized)
 			return
@@ -402,7 +401,7 @@ func removeServiceHandler(s store.Store) http.HandlerFunc {
 			return
 		}
 
-		if err := s.VerifyWorkspaceOwner(r.Context(), accountID); err != nil {
+		if err := verifyWorkspaceActor(r.Context(), accountID); err != nil {
 			http.Error(w, `{"error":"workspace not found"}`, http.StatusInternalServerError)
 			return
 		}

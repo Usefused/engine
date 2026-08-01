@@ -54,6 +54,16 @@ func NewCachedStore(delegate Store, nc *messaging.NATSClient) Store {
 	return cs
 }
 
+func (s *cachedStore) LoadDefaultBucketID(ctx context.Context) (uuid.UUID, error) {
+	loader, ok := s.Store.(interface {
+		LoadDefaultBucketID(context.Context) (uuid.UUID, error)
+	})
+	if !ok {
+		return uuid.Nil, errors.New("store does not support default bucket lookup")
+	}
+	return loader.LoadDefaultBucketID(ctx)
+}
+
 func (s *cachedStore) UpsertSecret(ctx context.Context, secret WorkspaceSecret) error {
 	err := s.Store.UpsertSecret(ctx, secret)
 	if err == nil {
@@ -104,6 +114,20 @@ func (s *cachedStore) SaveArtifactScope(ctx context.Context, scope ArtifactScope
 		s.nc.Conn.Publish("engine.cache.invalidate.sdk_scope."+scope.ArtifactID.String(), nil)
 	}
 	return err
+}
+
+func (s *cachedStore) DeleteArtifactScope(ctx context.Context, accountID, artifactID uuid.UUID) error {
+	err := s.Store.DeleteArtifactScope(ctx, accountID, artifactID)
+	if err == nil && s.nc != nil && s.nc.Conn != nil {
+		s.nc.Conn.Publish("engine.cache.invalidate.sdk_scope."+artifactID.String(), nil)
+	}
+	return err
+}
+
+func (s *cachedStore) NotifyArtifactScopeChanged(_ context.Context, artifactID uuid.UUID) {
+	if s.nc != nil && s.nc.Conn != nil {
+		s.nc.Conn.Publish("engine.cache.invalidate.sdk_scope."+artifactID.String(), nil)
+	}
 }
 
 // IsWorkspaceServiceVersionActive forwards the exact SQL lookup rather than
@@ -187,28 +211,6 @@ func (s *cachedStore) RevokeSDKToken(ctx context.Context, artifactID uuid.UUID, 
 		s.nc.Conn.Publish("engine.cache.invalidate.token."+artifactID.String(), nil)
 	}
 	return err
-}
-
-// GetAccountByAPIKey intercepts API key lookups to avoid hammering the DB
-// on every single API request, fulfilling the high-frequency read requirement.
-func (s *cachedStore) GetAccountByAPIKey(ctx context.Context, apiKey string) (uuid.UUID, error) {
-	step := observability.ThreadFromContext(ctx).Step("Cache: GetAccountByAPIKey")
-
-	key := "api_key:" + apiKey
-	if val, ok := s.cache.Get(key); ok {
-		step.Success(ctx)
-		return val.(uuid.UUID), nil
-	}
-
-	step.SubStep("Cache miss, querying DB", nil)
-	id, err := s.Store.GetAccountByAPIKey(ctx, apiKey)
-	if err == nil {
-		s.cache.Set(key, id, 5*time.Minute)
-		step.Success(ctx)
-	} else {
-		step.Error(ctx, err)
-	}
-	return id, err
 }
 
 func (s *cachedStore) VerifyWorkspaceOwner(ctx context.Context, accountID uuid.UUID) error {
@@ -564,6 +566,14 @@ func (s *cachedStore) GetEffectiveWorkspaceExecutionPolicyOverride(ctx context.C
 		return nil, err
 	}
 	return delegate.GetEffectiveWorkspaceExecutionPolicyOverride(ctx, serviceID, serviceVersionID)
+}
+
+func (s *cachedStore) GetEffectiveWorkspaceExecutionPolicyOverrides(ctx context.Context, refs []WorkspaceExecutionPolicyRef) (map[WorkspaceExecutionPolicyRef]*WorkspaceExecutionPolicyOverride, error) {
+	delegate, ok := s.Store.(WorkspaceExecutionPolicyBatchStore)
+	if !ok {
+		return nil, errors.New("workspace execution policy batch store is unavailable")
+	}
+	return delegate.GetEffectiveWorkspaceExecutionPolicyOverrides(ctx, refs)
 }
 
 func (s *cachedStore) ResetWorkspaceExecutionPolicyOverride(ctx context.Context, serviceID uuid.UUID, serviceVersionID *uuid.UUID) error {

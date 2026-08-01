@@ -14,7 +14,7 @@ import (
 func TestUpsertBucketValueHandler_UnknownBucketReturnsNotFound(t *testing.T) {
 	fixture := newBucketValueFixture()
 	fixture.store.bucketErr = store.ErrBucketNotFound
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	body := bytes.NewReader([]byte(`{
 		"service_id":"` + fixture.serviceID.String() + `",
@@ -37,7 +37,7 @@ func TestUpsertBucketValueHandler_UnknownBucketReturnsNotFound(t *testing.T) {
 
 func TestUpsertBucketValueHandler_Success(t *testing.T) {
 	fixture := newBucketValueFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	body := bytes.NewReader([]byte(`{
 		"service_id":"` + fixture.serviceID.String() + `",
@@ -62,7 +62,7 @@ func TestUpsertBucketValueHandler_Success(t *testing.T) {
 // cannot bypass connection-profile host allowlisting.
 func TestUpsertBucketValueHandlerRejectsHostOverride(t *testing.T) {
 	fixture := newBucketValueFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 	body := bytes.NewReader([]byte(`{"service_id":"` + fixture.serviceID.String() + `","key_name":"","location":"base_url","value":"https://attacker.example"}`))
 	req := httptest.NewRequest(http.MethodPut, "/workspace/buckets/"+fixture.bucketID.String()+"/values", body)
 	req.Header.Set("X-API-Key", "test-key")
@@ -77,7 +77,7 @@ func TestUpsertBucketValueHandlerRejectsHostOverride(t *testing.T) {
 // from replacing credentials or transport-owned headers.
 func TestUpsertBucketValueHandlerRejectsProtectedHeader(t *testing.T) {
 	fixture := newBucketValueFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 	body := bytes.NewReader([]byte(`{"service_id":"` + fixture.serviceID.String() + `","key_name":"Authorization","location":"header","value":"Bearer unsafe"}`))
 	req := httptest.NewRequest(http.MethodPut, "/workspace/buckets/"+fixture.bucketID.String()+"/values", body)
 	req.Header.Set("X-API-Key", "test-key")
@@ -94,7 +94,7 @@ func TestUpsertBucketValueHandlerRejectsProtectedHeader(t *testing.T) {
 func TestDeleteBucketValueHandler_UnknownBucketReturnsNotFound(t *testing.T) {
 	fixture := newBucketValueFixture()
 	fixture.store.bucketErr = store.ErrBucketNotFound
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	req := httptest.NewRequest(http.MethodDelete, "/workspace/buckets/"+fixture.bucketID.String()+"/values?bucket_id="+uuid.NewString()+"&service_id="+fixture.serviceID.String()+"&key_name=region", nil)
 	req.Header.Set("X-API-Key", "test-key")
@@ -111,7 +111,7 @@ func TestDeleteBucketValueHandler_UnknownBucketReturnsNotFound(t *testing.T) {
 
 func TestDeleteBucketValueHandler_Success(t *testing.T) {
 	fixture := newBucketValueFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	req := httptest.NewRequest(http.MethodDelete, "/workspace/buckets/"+fixture.bucketID.String()+"/values?bucket_id="+fixture.bucketID.String()+"&service_id="+fixture.serviceID.String()+"&key_name=region", nil)
 	req.Header.Set("X-API-Key", "test-key")

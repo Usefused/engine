@@ -18,8 +18,8 @@ func registerProxyRoutes(r chi.Router, proxy api.Forwarder, s store.Store, enfor
 
 func registerProxyRoutesWithRuntimeContracts(r chi.Router, proxy api.Forwarder, s store.Store, contractFetcher api.RuntimeContractFetcher, enforcers ...*enginemiddleware.RuntimeEnforcer) {
 	enforcer := firstRuntimeEnforcer(enforcers)
-	// Proxy routes -- forwarded to Registry using the caller's API key.
-	// Engine validates the key first; Registry resolves account identity.
+	// Proxy routes authenticate locally, then RegistryProxy replaces inbound
+	// auth with the Engine's licensed workspace identity.
 	r.Post("/graphql", api.GraphQLProxyHandler(proxy, s, enforcer))
 
 	restHandler := api.RESTProxyHandlerWithRuntimeContracts(proxy, s, contractFetcher, enforcer)

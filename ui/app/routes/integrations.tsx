@@ -1,10 +1,10 @@
 import { useEffect } from "react";
 import { Outlet, useNavigate, useLocation, useRouteLoaderData } from "@remix-run/react";
 import { CreditBanner } from "~/components/CreditBanner";
-import { FloatingCredits } from "~/components/FloatingCredits";
 import { NotificationBell } from "~/components/notifications/NotificationBell";
 import { clearApiKey } from "~/lib/session";
 import { IntegrationsSidebar } from "~/components/layout/IntegrationsSidebar";
+import { CurrentActorAccessProvider } from "~/components/access/CurrentActorAccess";
 
 export default function IntegrationsLayout() {
   const navigate = useNavigate();
@@ -13,7 +13,7 @@ export default function IntegrationsLayout() {
   const isAuth = rootData?.isAuth ?? false;
 
   useEffect(() => {
-    const isAuthenticatedStaticRoute = [
+    const isAuthenticatedStaticRoute = location.pathname.startsWith("/integrations/access/") || [
       "/integrations/buckets",
       "/integrations/credits",
       "/integrations/mcp",
@@ -39,18 +39,20 @@ export default function IntegrationsLayout() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col md:flex-row bg-slate-50">
-      <IntegrationsSidebar isAuth={isAuth} handleSignOut={handleSignOut} />
+    <CurrentActorAccessProvider isAuth={isAuth}>
+      <div className="min-h-screen flex flex-col md:flex-row bg-slate-50">
+        <IntegrationsSidebar isAuth={isAuth} handleSignOut={handleSignOut} />
 
-      {/* Main content */}
-      <main className="flex-1 min-w-0 overflow-y-auto">
-        <CreditBanner />
-        <div className="max-w-6xl mx-auto px-4 md:px-8 py-8 w-full">
-          <Outlet />
-        </div>
-      </main>
-      {/* {isAuth && <FloatingCredits />} */}
-      {isAuth && <NotificationBell />}
-    </div>
+        {/* Main content */}
+        <main className="flex-1 min-w-0 overflow-y-auto">
+          <CreditBanner />
+          <div className="max-w-6xl mx-auto px-4 md:px-8 py-8 w-full">
+            <Outlet />
+          </div>
+        </main>
+        {/* {isAuth && <FloatingCredits />} */}
+        {isAuth && <NotificationBell />}
+      </div>
+    </CurrentActorAccessProvider>
   );
 }

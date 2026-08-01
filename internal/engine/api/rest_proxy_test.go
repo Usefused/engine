@@ -18,6 +18,7 @@ func TestRESTProxy_POST_EmitsOTELSpan(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/integrations", bytes.NewBufferString(`{"name":"stripe"}`))
 	req.Header.Set("X-API-Key", "fsk_valid")
+	req = controlTestRequest(req, s.accountID)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
@@ -42,6 +43,7 @@ func TestRESTProxy_GET_NoSpan(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/integrations/svc-123", nil)
 	req.Header.Set("X-API-Key", "fsk_valid")
+	req = controlTestRequest(req, s.accountID)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)

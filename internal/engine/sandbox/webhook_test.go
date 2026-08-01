@@ -56,15 +56,15 @@ func (s *stubWebhookConfigStore) set(slug string, ww *store.WorkspaceWebhook) {
 var testWebhookConfigStore = &stubWebhookConfigStore{}
 
 type webhookMockSecretResolver struct {
-	secrets map[string]string // key: "<accountID>:<secretRef>"
+	secrets map[string]string // key: "<accountID>:<bucketID>:<secretRef>"
 }
 
 func (m *webhookMockSecretResolver) ResolveExecutionCredentials(_ context.Context, request CredentialRequest) (map[string]any, []store.BucketValue, error) {
 	return request.Passthrough, nil, nil
 }
 
-func (m *webhookMockSecretResolver) GetWebhookSecret(ctx context.Context, accountID uuid.UUID, secretRef string) (string, error) {
-	key := accountID.String() + ":" + secretRef
+func (m *webhookMockSecretResolver) GetWebhookSecret(ctx context.Context, accountID, bucketID uuid.UUID, secretRef string) (string, error) {
+	key := accountID.String() + ":" + bucketID.String() + ":" + secretRef
 	return m.secrets[key], nil
 }
 
@@ -79,6 +79,7 @@ func seedConfig(slug string, cfg *webhookConfig, signingSecret string) {
 	accID := uuid.New()
 	svcID := uuid.New()
 	const secretRef = "${bucket.default.secret.test-label}"
+	secretBucketID := uuid.New()
 	ww := &store.WorkspaceWebhook{
 		AccountID:           accID,
 		ServiceID:           svcID,
@@ -92,7 +93,8 @@ func seedConfig(slug string, cfg *webhookConfig, signingSecret string) {
 	}
 	if signingSecret != "" {
 		ww.SecretRef = secretRef
-		key := accID.String() + ":" + secretRef
+		ww.SecretBucketID = &secretBucketID
+		key := accID.String() + ":" + secretBucketID.String() + ":" + secretRef
 		testSecretResolver.secrets[key] = signingSecret
 	}
 	testWebhookConfigStore.set(slug, ww)

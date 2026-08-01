@@ -1,9 +1,10 @@
 # Registry Contract
 
-Fused Engine is a source-available, licensed runtime. The Fused Cloud Registry remains the control plane and
-source of truth for catalogue data, account binding, and user authorization.
-Engine treats Registry as a remote dependency only; it must not import Registry
-packages or initialize Registry-owned tables.
+Fused Engine is a source-available, licensed runtime. The Fused Cloud Registry
+remains the source of truth for catalogue data, account binding, and
+entitlements. Engine owns workspace-local identity and authorization. It treats
+Registry as a remote dependency only; it must not import Registry packages or
+initialize Registry-owned tables.
 
 ## Configuration
 
@@ -20,7 +21,7 @@ trailing `/graphql` when it needs REST endpoints such as
 `FUSED_LICENSE_KEY` is required at startup. Without it, Engine exits before
 serving traffic.
 
-Engine uses the license key for Engine-owned background calls:
+Engine uses the license key for all Registry calls:
 
 - startup handshake with `/api/engine/handshake`
 - signed heartbeat checks with `/api/engine/heartbeat`
@@ -28,11 +29,13 @@ Engine uses the license key for Engine-owned background calls:
 - runtime contract fetches used to execute configured SDK/MCP calls
 - metadata fetches used to populate local runtime caches
 - catalogue search and service operation lookups
+- locally authorized control requests proxied to Registry
 
-User/API requests that are proxied to Registry keep the caller's own
-`X-API-Key`. Engine validates local access before proxying where needed, but it
-does not replace the caller key with the license key for Registry-owned user
-operations.
+At startup, the same key creates or reconciles the workspace's local bootstrap
+Owner. Engine stores only its cryptographic hash in the local credential table.
+Future personal user and service-account credentials remain local: after Engine
+authentication and authorization, proxy code strips the inbound credential and
+injects `FUSED_LICENSE_KEY` for the Registry request.
 
 ## Registry-Owned Data
 
@@ -43,6 +46,10 @@ Registry owns:
 - service versions and version revisions
 - integration objects and generated SDK metadata
 - import/apply and SDK generation workflows
+- SDK archive lifecycle: `DELETE /sdks/{artifact_id}` is idempotent; Registry
+  returns success when retired and `404` when already absent. Engine treats
+  both as retired, but preserves its local runtime/config references on any
+  other Registry status so the caller can retry safely.
 - published drift/changelog metadata
 - provider-owned baseline connection profile revisions
 
@@ -92,7 +99,8 @@ safe accounting path without inventing billing decisions in Engine.
 Engine owns local runtime state in its Postgres database:
 
 - licensed workspace mirror from the startup handshake
-- local API key cache
+- local subjects, credentials, roles, team bindings, and authorization revision
+- secret-safe local authorization audit events
 - buckets, bucket values, secrets, and webhook configs
 - SDK scope bindings and service contract snapshots
 - service changelog cache and workspace notifications
@@ -113,11 +121,12 @@ Engine calls Registry for these classes of work:
   contracts, version revisions, auth configs, and connection profile contracts.
 - Workspace configuration: verify service/version references, resolve slugs,
   materialize runtime contract snapshots, and publish allowed configuration
-  changes through caller-authenticated Registry endpoints.
+  changes using the Engine licence identity after local authorization.
 - Changelog/drift: poll Registry for service changelog entries and drift
   snapshots so Engine can create workspace-local notifications.
-- Proxy routes: forward Registry-owned GraphQL and REST requests, preserving the
-  caller API key.
+- Proxy routes: forward Registry-owned GraphQL and REST requests after local
+  authorization, replacing any local caller credential with the Engine licence
+  identity.
 - Generation/import intercepts: proxy Registry generation/import requests while
   materializing the Engine-local runtime state needed by the workspace.
 

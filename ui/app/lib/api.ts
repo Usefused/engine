@@ -1,5 +1,11 @@
 import { getApiKey, clearApiKey } from "./session";
 import type { ServiceAuthOption } from "./service-auth";
+import {
+  APIRequestError,
+  isAuthenticationFailure,
+  normalizeAPIErrorPayload,
+  type APIErrorPayload,
+} from "./authorization-error";
 
 // When served as an embedded SPA from the engine, BACKEND_URL is set to ""
 // (explicitly empty) in root.tsx so all API calls are relative to the engine's
@@ -8,14 +14,24 @@ import type { ServiceAuthOption } from "./service-auth";
 // AFTER React renders and injects the <script>window.ENV = {...}</script> tag.
 function getBaseURL(): string {
   if (typeof window !== "undefined") {
-    const envUrl = (window as any).ENV?.BACKEND_URL;
+    // env.js is loaded by the document shell before Remix starts. Reading its
+    // stable value avoids relying on a client-inserted script, which browsers
+    // do not execute, and keeps embedded requests on the current Engine origin.
+    const runtimeWindow = window as Window & {
+      __FUSED_ENV?: { BACKEND_URL?: string };
+      ENV?: { BACKEND_URL?: string };
+    };
+    const envUrl =
+      runtimeWindow.__FUSED_ENV?.BACKEND_URL ??
+      runtimeWindow.ENV?.BACKEND_URL;
     if (envUrl !== undefined && envUrl !== null) return envUrl; // "" → relative, "https://…" → absolute
   }
   if (typeof process !== "undefined" && process.env.BACKEND_URL != null) {
     return process.env.BACKEND_URL;
   }
-  // Fallback: the engine runs on :8081 in both embedded and local-dev mode.
-  return "http://localhost:8081";
+  // Embedded builds are same-origin. Local development can still provide an
+  // explicit BACKEND_URL through env.js or the process environment.
+  return "";
 }
 /** @deprecated prefer getBaseURL() which reads window.ENV lazily */
 export const BASE = getBaseURL();
@@ -40,25 +56,27 @@ async function req<T>(
 
   const data = await res.json().catch(() => ({}));
 
-  if (res.status === 401 || res.status === 403) {
-    if (
-      data.error === "invalid API key" ||
-      data.error === "missing X-API-Key header"
-    ) {
-      clearApiKey();
-      if (
-        typeof window !== "undefined" &&
-        window.location.pathname !== "/login" &&
-        window.location.pathname !== "/"
-      ) {
-        window.location.href = "/login";
-      }
-    }
-  }
+  const errorPayload = normalizeAPIErrorPayload(data);
+  handleAuthenticationFailure(res.status, errorPayload);
 
-  if (!res.ok)
-    throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`);
+  if (!res.ok) throw new APIRequestError(res.status, errorPayload);
   return data as T;
+}
+
+function handleAuthenticationFailure(
+  status: number,
+  payload: APIErrorPayload
+): void {
+  if (!isAuthenticationFailure(status, payload)) return;
+  clearApiKey();
+  if (shouldRedirectToLogin()) window.location.href = "/login";
+}
+
+function shouldRedirectToLogin(): boolean {
+  if (typeof window === "undefined") return false;
+  return (
+    window.location.pathname !== "/login" && window.location.pathname !== "/"
+  );
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -657,6 +675,17 @@ export const api = {
         throw new Error(res.errors[0].message);
       return res.data;
     }),
+
+  artifactConfig: {
+    plan: <T>(kind: "sdk" | "mcp" | "webhook", input: {
+      owner_team_id: string;
+      config_key: string;
+      source_hash: string;
+      config: Record<string, unknown>;
+    }) => req<T>(`/${kind}-config/plan`, { method: "POST", body: JSON.stringify(input) }),
+    apply: <T>(kind: "sdk" | "mcp" | "webhook", input: { plan_id: string; source_hash: string }) =>
+      req<T>(`/${kind}-config/apply`, { method: "POST", body: JSON.stringify(input) }),
+  },
 
   integrations: {
     planImport: (input: {

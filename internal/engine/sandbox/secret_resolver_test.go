@@ -168,7 +168,7 @@ func TestGetWebhookSecret_ResolvesExplicitBucketReference(t *testing.T) {
 	}
 	resolver := NewSecretResolver(mockStore, masterKey)
 
-	got, err := resolver.GetWebhookSecret(ctx, uuid.New(), "${bucket.prod.secret.webhook_signing}")
+	got, err := resolver.GetWebhookSecret(ctx, uuid.New(), prodBucketID, "${bucket.prod.secret.webhook_signing}")
 	if err != nil {
 		t.Fatalf("GetWebhookSecret: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestGetWebhookSecret_ShorthandResolvesDefaultBucket(t *testing.T) {
 	}
 	resolver := NewSecretResolver(mockStore, masterKey)
 
-	got, err := resolver.GetWebhookSecret(ctx, uuid.New(), "${bucket.secret.webhook_signing}")
+	got, err := resolver.GetWebhookSecret(ctx, uuid.New(), defaultBucketID, "${bucket.secret.webhook_signing}")
 	if err != nil {
 		t.Fatalf("GetWebhookSecret: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestGetWebhookSecret_EmptyRefReturnsEmptyWithoutStoreAccess(t *testing.T) {
 	mockStore := &resolverMockStore{verifyWorkspaceOwner: errors.New("must not be called")}
 	resolver := NewSecretResolver(mockStore, []byte("12345678901234567890123456789012"))
 
-	got, err := resolver.GetWebhookSecret(context.Background(), uuid.New(), "")
+	got, err := resolver.GetWebhookSecret(context.Background(), uuid.New(), uuid.Nil, "")
 	if err != nil {
 		t.Fatalf("GetWebhookSecret: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestGetWebhookSecret_RejectsMalformedStoredReference(t *testing.T) {
 	mockStore := &resolverMockStore{}
 	resolver := NewSecretResolver(mockStore, []byte("12345678901234567890123456789012"))
 
-	_, err := resolver.GetWebhookSecret(context.Background(), uuid.New(), "not-a-valid-reference")
+	_, err := resolver.GetWebhookSecret(context.Background(), uuid.New(), uuid.New(), "not-a-valid-reference")
 	if err == nil {
 		t.Fatal("expected an error for a malformed stored secret reference")
 	}
@@ -246,7 +246,7 @@ func TestGetWebhookSecret_PropagatesWorkspaceOwnerFailure(t *testing.T) {
 	mockStore := &resolverMockStore{verifyWorkspaceOwner: errors.New("not the workspace owner")}
 	resolver := NewSecretResolver(mockStore, []byte("12345678901234567890123456789012"))
 
-	_, err := resolver.GetWebhookSecret(context.Background(), uuid.New(), "${bucket.prod.secret.webhook_signing}")
+	_, err := resolver.GetWebhookSecret(context.Background(), uuid.New(), uuid.New(), "${bucket.prod.secret.webhook_signing}")
 	if err == nil {
 		t.Fatal("expected workspace owner verification failure to propagate")
 	}
@@ -257,10 +257,11 @@ func TestGetWebhookSecret_PropagatesWorkspaceOwnerFailure(t *testing.T) {
 // string rather than an error -- the caller (validateWebhookAuth) decides
 // what an empty signing secret means for verification.
 func TestGetWebhookSecret_NoStoredSecretReturnsEmpty(t *testing.T) {
-	mockStore := &resolverMockStore{bucketsByName: map[string]*store.Bucket{"prod": {ID: uuid.New(), Name: "prod"}}}
+	bucketID := uuid.New()
+	mockStore := &resolverMockStore{bucketsByName: map[string]*store.Bucket{"prod": {ID: bucketID, Name: "prod"}}}
 	resolver := NewSecretResolver(mockStore, []byte("12345678901234567890123456789012"))
 
-	got, err := resolver.GetWebhookSecret(context.Background(), uuid.New(), "${bucket.prod.secret.never_configured}")
+	got, err := resolver.GetWebhookSecret(context.Background(), uuid.New(), bucketID, "${bucket.prod.secret.never_configured}")
 	if err != nil {
 		t.Fatalf("GetWebhookSecret: %v", err)
 	}
@@ -277,7 +278,7 @@ func TestGetWebhookSecret_RejectsEnvKindReference(t *testing.T) {
 	mockStore := &resolverMockStore{bucketsByName: map[string]*store.Bucket{"prod": {ID: uuid.New(), Name: "prod"}}}
 	resolver := NewSecretResolver(mockStore, []byte("12345678901234567890123456789012"))
 
-	_, err := resolver.GetWebhookSecret(context.Background(), uuid.New(), "${bucket.prod.env.webhook_signing}")
+	_, err := resolver.GetWebhookSecret(context.Background(), uuid.New(), uuid.New(), "${bucket.prod.env.webhook_signing}")
 	if err == nil {
 		t.Fatal("expected an error for an env-kind reference on a signing-secret field")
 	}
@@ -292,9 +293,31 @@ func TestGetWebhookSecret_RejectsOldBracketlessFormat(t *testing.T) {
 	mockStore := &resolverMockStore{bucketsByName: map[string]*store.Bucket{"prod": {ID: uuid.New(), Name: "prod"}}}
 	resolver := NewSecretResolver(mockStore, []byte("12345678901234567890123456789012"))
 
-	_, err := resolver.GetWebhookSecret(context.Background(), uuid.New(), "bucket.prod.secret.webhook_signing")
+	_, err := resolver.GetWebhookSecret(context.Background(), uuid.New(), uuid.New(), "bucket.prod.secret.webhook_signing")
 	if err == nil {
 		t.Fatal("expected an error for the old bracket-less reference format")
+	}
+}
+
+func TestGetWebhookSecretDoesNotSubstituteRecreatedBucketName(t *testing.T) {
+	masterKey := []byte("12345678901234567890123456789012")
+	originalID, replacementID := uuid.New(), uuid.New()
+	wrappedOriginal, originalDEK, _ := store.WrapDEK(masterKey)
+	originalValue, _ := store.EncryptWithDEK(originalDEK, "original-secret")
+	wrappedReplacement, replacementDEK, _ := store.WrapDEK(masterKey)
+	replacementValue, _ := store.EncryptWithDEK(replacementDEK, "replacement-secret")
+	mockStore := &resolverMockStore{
+		// The current name points elsewhere; runtime must ignore it.
+		bucketsByName: map[string]*store.Bucket{"prod": {ID: replacementID, Name: "prod"}},
+		secrets: []store.WorkspaceSecret{
+			{WorkspaceSecretMeta: store.WorkspaceSecretMeta{BucketID: originalID, ServiceID: uuid.Nil, KeyName: "secret:signing"}, EncryptedDEK: wrappedOriginal, EncryptedValue: originalValue},
+			{WorkspaceSecretMeta: store.WorkspaceSecretMeta{BucketID: replacementID, ServiceID: uuid.Nil, KeyName: "secret:signing"}, EncryptedDEK: wrappedReplacement, EncryptedValue: replacementValue},
+		},
+	}
+	resolver := NewSecretResolver(mockStore, masterKey)
+	got, err := resolver.GetWebhookSecret(context.Background(), uuid.New(), originalID, "${bucket.prod.secret.signing}")
+	if err != nil || got != "original-secret" {
+		t.Fatalf("immutable bucket lookup = %q, %v", got, err)
 	}
 }
 
@@ -866,9 +889,6 @@ func (m *resolverMockStore) GetSecrets(ctx context.Context, bucketID, serviceID 
 }
 
 func (m *resolverMockStore) LinkBucketToSDK(ctx context.Context, artifactID, bucketID uuid.UUID) error {
-	return nil
-}
-func (m *resolverMockStore) UnlinkBucketFromSDK(ctx context.Context, artifactID, bucketID uuid.UUID) error {
 	return nil
 }
 func (m *resolverMockStore) ListBucketsForSDK(ctx context.Context, artifactID uuid.UUID) ([]store.Bucket, error) {

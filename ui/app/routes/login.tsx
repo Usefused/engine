@@ -1,5 +1,5 @@
 import { useState, useEffect, type FormEvent } from "react";
-import { useNavigate, Link, useSearchParams, type MetaFunction } from "@remix-run/react";
+import { Link, useSearchParams, type MetaFunction } from "@remix-run/react";
 import { Logo } from "~/components/Logo";
 
 export const meta: MetaFunction = ({ matches }) => {
@@ -11,19 +11,19 @@ export const meta: MetaFunction = ({ matches }) => {
 };
 import { CreditBanner } from "~/components/CreditBanner";
 import { setApiKey, clearApiKey, isAuthenticated } from "~/lib/session";
+import { safeInternalPath } from "~/lib/safe-navigation";
 import { api } from "~/lib/api";
 
 export default function Login() {
-  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const next = searchParams.get("next") || "/integrations";
+  const next = safeInternalPath(searchParams.get("next"));
   const [key, setKey] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (isAuthenticated()) window.location.replace(next);
-  }, []);
+  }, [next]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -35,7 +35,11 @@ export default function Login() {
     // authenticated endpoint. /health has no auth so it can't validate the key.
     setApiKey(key.trim());
     try {
-      await api.graphql("query { sdks { total } }");
+      // Every workspace role has account.read, while artifact.read is
+      // intentionally resource-scoped for Viewer and absent for Builder.
+      // Using the account endpoint validates authentication without turning
+      // an unrelated permission into a login prerequisite.
+      await api.getAccount();
       window.location.href = next;
     } catch (err: unknown) {
       // Clear the invalid key so it doesn't persist in sessionStorage.

@@ -55,7 +55,7 @@ func (e refreshHTTPError) Error() string {
 
 func RefreshServiceContractHandler(s store.Store, fetcher RuntimeContractFetcher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		accountID, err := validateAPIKey(r.Context(), s, r.Header.Get("X-API-Key"))
+		accountID, err := controlActorAccount(r.Context())
 		if err != nil {
 			http.Error(w, `{"error":"invalid API key"}`, http.StatusUnauthorized)
 			return
@@ -65,7 +65,7 @@ func RefreshServiceContractHandler(s store.Store, fetcher RuntimeContractFetcher
 			writeRefreshServiceContractError(w, err)
 			return
 		}
-		if err := s.VerifyWorkspaceOwner(r.Context(), accountID); err != nil {
+		if err := verifyWorkspaceActor(r.Context(), accountID); err != nil {
 			writeRefreshServiceContractError(w, refreshHTTPError{status: http.StatusInternalServerError, message: "workspace not found"})
 			return
 		}

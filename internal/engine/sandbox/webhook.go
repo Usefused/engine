@@ -57,10 +57,10 @@ type webhookConfig struct {
 	AuthKeyName         string
 	SignatureHeader     string
 	VerificationHeaders []string
-	// SecretRef is the registration's bucket.<name>.secret.<key> reference
-	// (plan item 4) -- resolved against the referenced bucket's generic
-	// named-secret store at verification time, not stored/decrypted here.
-	SecretRef string
+	// SecretBucketID is the immutable apply-time binding used for runtime
+	// lookup; SecretRef supplies only its validated secret key.
+	SecretBucketID uuid.UUID
+	SecretRef      string
 	// Label is the registration's identity (store.WorkspaceWebhook.Label --
 	// a kind: webhook artifact's own name; see plans/plan-webhook-kind.md).
 	// Published into the NATS subject alongside service/event so two
@@ -115,8 +115,9 @@ func webhookIngressHandler(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "webhook not found")
 			return
 		}
-		fmt.Printf("fetchWebhookConfig failed: %v\n", err)
-		span.SetStatus(codes.Error, "config fetch failed: "+err.Error())
+		// Database errors can include statement values, so keep ingress telemetry
+		// useful without copying the underlying error into stdout or span data.
+		span.SetStatus(codes.Error, "config fetch failed")
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -197,6 +198,10 @@ func fetchWebhookConfig(ctx context.Context, urlSlug string) (*webhookConfig, er
 	if err != nil {
 		return nil, err
 	}
+	var secretBucketID uuid.UUID
+	if ww.SecretBucketID != nil {
+		secretBucketID = *ww.SecretBucketID
+	}
 	return &webhookConfig{
 		AccountID:           ww.AccountID.String(),
 		ServiceID:           ww.ServiceID.String(),
@@ -206,6 +211,7 @@ func fetchWebhookConfig(ctx context.Context, urlSlug string) (*webhookConfig, er
 		AuthKeyName:         ww.AuthKeyName,
 		SignatureHeader:     ww.SignatureHeader,
 		VerificationHeaders: ww.VerificationHeaders,
+		SecretBucketID:      secretBucketID,
 		SecretRef:           ww.SecretRef,
 		Label:               ww.Label,
 	}, nil
@@ -222,7 +228,7 @@ func validateWebhookAuth(ctx context.Context, w http.ResponseWriter, r *http.Req
 
 	var signingSecret string
 	if config.AuthType != "" && config.AuthType != "none" {
-		secret, err := globalSecretResolver.GetWebhookSecret(ctx, uuid.MustParse(config.AccountID), config.SecretRef)
+		secret, err := globalSecretResolver.GetWebhookSecret(ctx, uuid.MustParse(config.AccountID), config.SecretBucketID, config.SecretRef)
 		if err != nil {
 			span.SetStatus(codes.Error, "failed to resolve webhook secret")
 			publishRejection(config.AccountID, config.ServiceID, "UNKNOWN", "internal config error", len(body))

@@ -134,6 +134,7 @@ func TestHTTPRegistryClient_HandshakeDefaultsEntitlementsForOlderRegistry(t *tes
 	defer os.Unsetenv("FUSED_ENV")
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertRegistryLicenseHeaders(t, r, "valid_license_key")
 		_ = json.NewEncoder(w).Encode(map[string]string{"account_id": "acc", "workspace_name": "Workspace"})
 	}))
 	defer ts.Close()
@@ -158,10 +159,7 @@ func TestHTTPRegistryClient_SendHeartbeat(t *testing.T) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		if r.Header.Get("Authorization") != "Bearer valid_license_key" {
-			http.Error(w, "invalid license key", http.StatusUnauthorized)
-			return
-		}
+		assertRegistryLicenseHeaders(t, r, "valid_license_key")
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatalf("read body: %v", err)
@@ -202,6 +200,7 @@ func TestHTTPRegistryClient_SendUsageReports(t *testing.T) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
+		assertRegistryLicenseHeaders(t, r, "valid_license_key")
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatalf("read body: %v", err)
@@ -235,6 +234,13 @@ func TestHTTPRegistryClient_SendUsageReports(t *testing.T) {
 	}
 	if !sawUsage {
 		t.Fatal("expected usage report request")
+	}
+}
+
+func assertRegistryLicenseHeaders(t *testing.T, request *http.Request, licenseKey string) {
+	t.Helper()
+	if request.Header.Get("Authorization") != "Bearer "+licenseKey || request.Header.Get("X-API-Key") != licenseKey {
+		t.Fatalf("Registry auth headers = %q / %q", request.Header.Get("Authorization"), request.Header.Get("X-API-Key"))
 	}
 }
 

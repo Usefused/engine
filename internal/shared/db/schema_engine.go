@@ -38,6 +38,169 @@ func engineSchemaQueries() []string {
 			CHECK (singleton_key = 1)
 		);`,
 
+		// Control-plane subjects are deliberately independent of Registry
+		// accounts. The Engine authenticates these local principals before it
+		// uses its own licence identity for outbound Registry requests.
+		`CREATE TABLE IF NOT EXISTS fused_subjects (
+			id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			kind         text NOT NULL,
+			display_name text NOT NULL,
+			status       text NOT NULL DEFAULT 'active',
+			created_at   timestamptz NOT NULL DEFAULT NOW(),
+			updated_at   timestamptz NOT NULL DEFAULT NOW(),
+			CONSTRAINT chk_fused_subjects_kind
+				CHECK (kind IN ('bootstrap', 'user', 'service_account', 'artifact')),
+			CONSTRAINT chk_fused_subjects_status
+				CHECK (status IN ('invited', 'active', 'suspended', 'archived'))
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_subjects_status
+		ON fused_subjects(status, id);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_subjects_bootstrap
+		ON fused_subjects(kind) WHERE kind = 'bootstrap';`,
+
+		// User identity is an Engine-local projection over the canonical subject.
+		// Display casing is preserved separately from the normalized unique key.
+		`CREATE TABLE IF NOT EXISTS fused_users (
+			subject_id       uuid PRIMARY KEY REFERENCES fused_subjects(id) ON DELETE CASCADE,
+			email_normalized text NOT NULL UNIQUE,
+			email_display    text NOT NULL,
+			created_at       timestamptz NOT NULL DEFAULT NOW(),
+			updated_at       timestamptz NOT NULL DEFAULT NOW(),
+			CONSTRAINT chk_fused_users_email_normalized CHECK (email_normalized <> ''),
+			CONSTRAINT chk_fused_users_email_display CHECK (email_display <> '')
+		);`,
+
+		// Team rows and memberships exist before their management API so the
+		// effective-grants query has one stable direct-plus-team shape from its
+		// first release. CRUD is layered on without replacing authentication.
+		`CREATE TABLE IF NOT EXISTS fused_teams (
+			id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			name        text NOT NULL,
+			slug        text NOT NULL UNIQUE,
+			description text NOT NULL DEFAULT '',
+			status      text NOT NULL DEFAULT 'active',
+			created_at  timestamptz NOT NULL DEFAULT NOW(),
+			updated_at  timestamptz NOT NULL DEFAULT NOW(),
+			CONSTRAINT chk_fused_teams_status
+				CHECK (status IN ('active', 'archived'))
+		);`,
+		`CREATE TABLE IF NOT EXISTS fused_team_memberships (
+			team_id               uuid NOT NULL REFERENCES fused_teams(id) ON DELETE CASCADE,
+			member_subject_id     uuid NOT NULL REFERENCES fused_subjects(id) ON DELETE CASCADE,
+			membership_role       text NOT NULL DEFAULT 'member',
+			created_by_subject_id uuid REFERENCES fused_subjects(id) ON DELETE SET NULL,
+			created_at            timestamptz NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (team_id, member_subject_id),
+			CONSTRAINT chk_fused_team_memberships_role
+				CHECK (membership_role IN ('member', 'manager'))
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_team_memberships_member
+		ON fused_team_memberships(member_subject_id, team_id);`,
+
+		// Raw control credentials are never stored. Authentication hashes an
+		// inbound key and performs a point lookup against this table.
+		`CREATE TABLE IF NOT EXISTS fused_control_credentials (
+			id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			subject_id   uuid NOT NULL REFERENCES fused_subjects(id) ON DELETE RESTRICT,
+			key_hash     text NOT NULL UNIQUE,
+			key_prefix   text NOT NULL,
+			name         text NOT NULL,
+			expires_at   timestamptz,
+			last_used_at timestamptz,
+			revoked_at   timestamptz,
+			created_at   timestamptz NOT NULL DEFAULT NOW()
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_control_credentials_active_hash
+		ON fused_control_credentials(key_hash) WHERE revoked_at IS NULL;`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_control_credentials_subject_recent
+		ON fused_control_credentials(subject_id, created_at DESC, id);`,
+
+		// Roles are stable permission bundles. A binding determines both the
+		// principal (or team) receiving the role and its resource boundary.
+		`CREATE TABLE IF NOT EXISTS fused_roles (
+			id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			slug         text NOT NULL UNIQUE,
+			display_name text NOT NULL,
+			scope_type   text NOT NULL,
+			system_role  boolean NOT NULL DEFAULT false,
+			created_at   timestamptz NOT NULL DEFAULT NOW(),
+			CONSTRAINT chk_fused_roles_scope_type
+				CHECK (scope_type IN ('workspace', 'service', 'bucket', 'artifact'))
+		);`,
+		`CREATE TABLE IF NOT EXISTS fused_role_permissions (
+			role_id    uuid NOT NULL REFERENCES fused_roles(id) ON DELETE CASCADE,
+			permission text NOT NULL,
+			PRIMARY KEY (role_id, permission),
+			CONSTRAINT chk_fused_role_permissions_name CHECK (permission <> '')
+		);`,
+		`CREATE TABLE IF NOT EXISTS fused_role_bindings (
+			id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			subject_type          text NOT NULL,
+			subject_id            uuid NOT NULL,
+			role_id               uuid NOT NULL REFERENCES fused_roles(id) ON DELETE CASCADE,
+			resource_type         text NOT NULL,
+			resource_id           uuid NOT NULL,
+			created_by_subject_id uuid REFERENCES fused_subjects(id) ON DELETE SET NULL,
+			created_at            timestamptz NOT NULL DEFAULT NOW(),
+			CONSTRAINT chk_fused_role_bindings_subject_type
+				CHECK (subject_type IN ('subject', 'team')),
+			CONSTRAINT chk_fused_role_bindings_resource_type
+				CHECK (resource_type IN ('workspace', 'service', 'bucket', 'artifact')),
+			CONSTRAINT uq_fused_role_binding
+				UNIQUE (subject_type, subject_id, role_id, resource_type, resource_id)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_role_bindings_subject_scope
+		ON fused_role_bindings(subject_type, subject_id, resource_type, resource_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_role_bindings_resource
+		ON fused_role_bindings(resource_type, resource_id);`,
+
+		// A singleton revision lets every process invalidate complete effective
+		// authorization snapshots without querying Postgres per permission.
+		`CREATE TABLE IF NOT EXISTS fused_authorization_state (
+			singleton_key smallint PRIMARY KEY DEFAULT 1,
+			revision      bigint NOT NULL DEFAULT 1,
+			updated_at    timestamptz NOT NULL DEFAULT NOW(),
+			CHECK (singleton_key = 1),
+			CHECK (revision > 0)
+		);`,
+		`INSERT INTO fused_authorization_state (singleton_key, revision)
+		VALUES (1, 1)
+		ON CONFLICT (singleton_key) DO NOTHING;`,
+
+		// Authorization audit events contain identifiers and sanitized metadata,
+		// never request bodies, credentials, tokens, or provider secret values.
+		`CREATE TABLE IF NOT EXISTS fused_audit_events (
+			id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			occurred_at         timestamptz NOT NULL DEFAULT NOW(),
+			actor_subject_id    uuid REFERENCES fused_subjects(id) ON DELETE SET NULL,
+			actor_credential_id uuid REFERENCES fused_control_credentials(id) ON DELETE SET NULL,
+			action              text NOT NULL,
+			permission          text,
+			resource_type       text,
+			resource_id         uuid,
+			request_id          text NOT NULL DEFAULT '',
+			trace_id            text NOT NULL DEFAULT '',
+			method              text NOT NULL DEFAULT '',
+			path                text NOT NULL DEFAULT '',
+			outcome             text NOT NULL,
+			status_code         integer NOT NULL DEFAULT 0,
+			reason_code         text NOT NULL DEFAULT '',
+			source_ip           text NOT NULL DEFAULT '',
+			user_agent          text NOT NULL DEFAULT '',
+			missing_requirements jsonb NOT NULL DEFAULT '[]'::jsonb,
+			metadata            jsonb NOT NULL DEFAULT '{}'::jsonb,
+			CONSTRAINT chk_fused_audit_events_outcome
+				CHECK (outcome IN ('attempted', 'allowed', 'denied', 'succeeded', 'failed')),
+			CONSTRAINT chk_fused_audit_events_resource_type
+				CHECK (resource_type IS NULL OR resource_type IN ('workspace', 'service', 'bucket', 'artifact')),
+			CONSTRAINT chk_fused_audit_events_status_code
+				CHECK (status_code BETWEEN 0 AND 599)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_audit_events_occurred_at
+		ON fused_audit_events(occurred_at DESC, id);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_audit_events_actor
+		ON fused_audit_events(actor_subject_id, occurred_at DESC);`,
+
 		// Buckets
 		`CREATE TABLE IF NOT EXISTS fused_buckets (
 			id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -172,22 +335,12 @@ func engineSchemaQueries() []string {
 		`CREATE INDEX IF NOT EXISTS idx_fused_connect_sessions_expires
 		ON fused_connect_sessions(expires_at);`,
 
-		// API Keys
-		`CREATE TABLE IF NOT EXISTS fused_api_keys (
-			id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-			account_id uuid NOT NULL,
-			key_hash text UNIQUE NOT NULL,
-			name text NOT NULL,
-			created_at timestamp with time zone DEFAULT NOW(),
-			last_used_at timestamp with time zone
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_api_keys_account ON fused_api_keys(account_id);`,
-
 		// SDK Scopes
 		`CREATE TABLE IF NOT EXISTS fused_artifact_scopes (
 			id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 			account_id uuid NOT NULL,
 			artifact_id uuid UNIQUE NOT NULL,
+			owner_team_id uuid NOT NULL REFERENCES fused_teams(id) ON DELETE RESTRICT,
 			scope_schema_version integer NOT NULL DEFAULT 1,
 			selections jsonb NOT NULL,
 			deactivated_at timestamptz,
@@ -198,8 +351,7 @@ func engineSchemaQueries() []string {
 			kind text NOT NULL DEFAULT 'sdk',
 			-- name is an optional user-supplied label (CLI --name flag, or a
 			-- workspace config's name); reactivate-only activate calls never
-			-- set it, so it can be NULL for scopes created before this column
-			-- existed or that were only ever reactivated.
+			-- set it, so it can be NULL for scopes that were only reactivated.
 			name text,
 			version text,
 			config_key text
@@ -440,22 +592,16 @@ func engineSchemaQueries() []string {
 			signature_header      text NOT NULL DEFAULT '',
 			verification_headers  text[] NOT NULL DEFAULT '{}',
 			event_extraction_path text NOT NULL DEFAULT '',
-			-- secret_ref stores a canonical ${bucket.<name>.secret.<key>}
-			-- reference instead of a literal signing secret -- the actual
-			-- value lives in fused_workspace_secrets under the referenced
-			-- bucket's generic named-secret namespace. Empty means "no
-			-- signing secret configured".
+			-- The canonical reference preserves the configured key while the
+			-- immutable bucket ID prevents delete/recreate of the same name from
+			-- silently redirecting webhook verification to another team's bucket.
 			secret_ref            text NOT NULL DEFAULT '',
-			-- owning_config_key is NULL for a registration created the legacy
-			-- way (workspace apply's runtime_config.webhooks). A kind: webhook
-			-- artifact apply sets this to its own config_key (see
-			-- plans/plan-webhook-kind.md) so (a) workspace apply's prune never
-			-- deletes or fights over a row it doesn't own, and (b)
-			-- (service_id, label) uniqueness for kind: webhook artifacts can be
-			-- enforced as "this pair belongs to config_key X" rather than a
-			-- silent overwrite when two different artifacts both target the
-			-- same service+name.
-			owning_config_key     text,
+			secret_bucket_id      uuid REFERENCES fused_buckets(id) ON DELETE RESTRICT,
+			CHECK ((secret_ref = '' AND secret_bucket_id IS NULL)
+				OR (secret_ref <> '' AND secret_bucket_id IS NOT NULL)),
+			-- Every registration is owned by exactly one kind: webhook config.
+			-- Ownership is immutable through the conflict-qualified batch upsert.
+			owning_config_key     text NOT NULL CHECK (owning_config_key <> ''),
 			created_at            timestamptz DEFAULT NOW(),
 			updated_at            timestamptz DEFAULT NOW(),
 			UNIQUE(service_id, label),
@@ -471,6 +617,7 @@ func engineSchemaQueries() []string {
 			id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 			config_key        text NOT NULL,
 			config_type       text NOT NULL CHECK (config_type IN ('workspace', 'sdk', 'mcp', 'webhook')),
+			owner_team_id     uuid REFERENCES fused_teams(id) ON DELETE RESTRICT,
 			source_hash       text NOT NULL,
 			generation        integer NOT NULL DEFAULT 1 CHECK (generation >= 1),
 			desired_state     jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -479,8 +626,26 @@ func engineSchemaQueries() []string {
 			updated_by        uuid,
 			created_at        timestamptz DEFAULT NOW(),
 			updated_at        timestamptz DEFAULT NOW(),
-			UNIQUE(config_key)
+			UNIQUE(config_key),
+			CONSTRAINT chk_fused_config_states_owner_team CHECK (
+				(config_type = 'workspace' AND owner_team_id IS NULL) OR
+				(config_type IN ('sdk', 'mcp', 'webhook') AND owner_team_id IS NOT NULL)
+			)
 		);`,
+		`CREATE OR REPLACE FUNCTION fused_reject_config_identity_change()
+		RETURNS trigger AS $$
+		BEGIN
+			IF OLD.config_type IS DISTINCT FROM NEW.config_type
+			   OR OLD.owner_team_id IS DISTINCT FROM NEW.owner_team_id THEN
+				RAISE EXCEPTION 'config type and owner team are immutable' USING ERRCODE = '23514';
+			END IF;
+			RETURN NEW;
+		END;
+		$$ LANGUAGE plpgsql;`,
+		`DROP TRIGGER IF EXISTS trg_fused_config_identity_immutable ON fused_config_states;`,
+		`CREATE TRIGGER trg_fused_config_identity_immutable
+		BEFORE UPDATE ON fused_config_states
+		FOR EACH ROW EXECUTE FUNCTION fused_reject_config_identity_change();`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_config_states_workspace_type
 		ON fused_config_states(config_type);`,
 
@@ -491,6 +656,7 @@ func engineSchemaQueries() []string {
 			id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 			config_key       text NOT NULL,
 			config_type      text NOT NULL CHECK (config_type IN ('workspace', 'sdk', 'mcp', 'webhook')),
+			owner_team_id    uuid REFERENCES fused_teams(id) ON DELETE RESTRICT,
 			source_hash      text NOT NULL,
 			base_generation  integer NOT NULL DEFAULT 0 CHECK (base_generation >= 0),
 			status           text NOT NULL DEFAULT 'pending'
@@ -500,14 +666,23 @@ func engineSchemaQueries() []string {
 			resolved_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
 			blockers         jsonb NOT NULL DEFAULT '[]'::jsonb,
 			warnings         jsonb NOT NULL DEFAULT '[]'::jsonb,
+			required_permissions jsonb NOT NULL,
 			revision         integer NOT NULL DEFAULT 1 CHECK (revision >= 1),
+			apply_lease_id   uuid,
+			apply_lease_expires_at timestamptz,
 			created_by       uuid,
 			created_at       timestamptz DEFAULT NOW(),
 			applied_at       timestamptz,
-			superseded_at    timestamptz
+			superseded_at    timestamptz,
+			CONSTRAINT chk_fused_config_plans_owner_team CHECK (
+				(config_type = 'workspace' AND owner_team_id IS NULL) OR
+				(config_type IN ('sdk', 'mcp', 'webhook') AND owner_team_id IS NOT NULL)
+			)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_config_plans_workspace_key_created
 		ON fused_config_plans(config_key, created_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_config_plans_owner_status
+		ON fused_config_plans(owner_team_id, status, created_at DESC);`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_fused_config_plans_one_pending
 		ON fused_config_plans(config_key)
 		WHERE status = 'pending';`,
@@ -789,11 +964,9 @@ func engineMigrationQueries() []string {
 		ON fused_artifact_scopes(account_id, kind, name, version)
 		WHERE name IS NOT NULL AND version IS NOT NULL;`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_artifact_scopes_account_kind ON fused_artifact_scopes(account_id, kind, created_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_artifact_scopes_owner_kind ON fused_artifact_scopes(owner_team_id, kind, created_at DESC, artifact_id);`,
 
 		`ALTER TABLE fused_workspace_services ADD COLUMN IF NOT EXISTS service_slug text;`,
-		// Existing installations may still carry the two-kind checks from the
-		// original SDK-only config implementation. Recreate them explicitly so
-		// kind=mcp can be planned and applied without a manual schema edit.
 
 		// These historical entries used to backfill fused_bucket_bindings
 		// (materializing fused_bucket_values rows and stripping untrusted
@@ -838,16 +1011,6 @@ func engineMigrationQueries() []string {
 		// dropped first because they FK to attachments.
 		`DROP TABLE IF EXISTS fused_bucket_bindings;`,
 		`DROP TABLE IF EXISTS fused_bucket_profile_attachments;`,
-
-		// kind: webhook (plans/plan-webhook-kind.md) is a fourth config_type,
-		// and its registrations need to be distinguishable from the legacy
-		// runtime_config.webhooks path on the same fused_workspace_webhooks
-		// table -- see this table's owning_config_key column comment above.
-		`ALTER TABLE fused_config_states DROP CONSTRAINT IF EXISTS fused_config_states_config_type_check;`,
-		`ALTER TABLE fused_config_states ADD CONSTRAINT fused_config_states_config_type_check CHECK (config_type IN ('workspace', 'sdk', 'mcp', 'webhook'));`,
-		`ALTER TABLE fused_config_plans DROP CONSTRAINT IF EXISTS fused_config_plans_config_type_check;`,
-		`ALTER TABLE fused_config_plans ADD CONSTRAINT fused_config_plans_config_type_check CHECK (config_type IN ('workspace', 'sdk', 'mcp', 'webhook'));`,
-		`ALTER TABLE fused_workspace_webhooks ADD COLUMN IF NOT EXISTS owning_config_key text;`,
 
 		// fused_workspace_notifications' severity column was originally
 		// created CHECK (severity IN ('breaking')) -- Phase 3 of the service

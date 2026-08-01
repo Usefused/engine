@@ -16,7 +16,6 @@ import (
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
 
@@ -318,7 +317,7 @@ func newConnectRuntimeFixture(t *testing.T) connectRuntimeFixture {
 // buildConnectRuntimeRouter mounts the real workspace routes so tests cover
 // chi params and auth middleware behavior, not just handler internals.
 func buildConnectRuntimeRouter(f connectRuntimeFixture) http.Handler {
-	r := chi.NewRouter()
+	r := newControlTestRouter(f.store.accountID)
 	r.Mount("/workspace", WorkspaceHandler(f.store, f.verifier, f.masterKey))
 	return r
 }

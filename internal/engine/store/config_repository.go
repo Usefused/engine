@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
+	"github.com/Usefused/engine/internal/shared/secretref"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -82,13 +84,20 @@ const (
 )
 
 var (
-	ErrConfigKeyRequired        = errors.New("config key is required")
-	ErrConfigHashRequired       = errors.New("source hash is required")
-	ErrConfigTypeInvalid        = errors.New("config type must be workspace, sdk, mcp, or webhook")
-	ErrConfigJSONInvalid        = errors.New("config JSON payload is invalid")
-	ErrConfigJSONObjectRequired = errors.New("config JSON payload must be an object")
-	ErrConfigJSONArrayRequired  = errors.New("config JSON payload must be an array")
-	ErrConfigPlanNotFound       = errors.New("config plan not found")
+	ErrConfigKeyRequired           = errors.New("config key is required")
+	ErrConfigHashRequired          = errors.New("source hash is required")
+	ErrConfigTypeInvalid           = errors.New("config type must be workspace, sdk, mcp, or webhook")
+	ErrConfigJSONInvalid           = errors.New("config JSON payload is invalid")
+	ErrConfigJSONObjectRequired    = errors.New("config JSON payload must be an object")
+	ErrConfigJSONArrayRequired     = errors.New("config JSON payload must be an array")
+	ErrRequiredPermissions         = errors.New("required permissions must contain at least one valid permission scope")
+	ErrOwnerTeamRequired           = errors.New("owner team is required for artifact plans")
+	ErrOwnerTeamUnexpected         = errors.New("owner team is not valid for workspace plans")
+	ErrConfigPlanNotFound          = errors.New("config plan not found")
+	ErrConfigStateIdentityMismatch = errors.New("config type and owner team are immutable")
+	ErrConfigOwnerTeamInactive     = errors.New("config owner team is not active")
+	ErrConfigPlanRevisionMismatch  = errors.New("config plan revision changed")
+	ErrConfigPlanApplyInProgress   = errors.New("config plan apply is in progress")
 	// ErrWorkspaceNotificationStatusInvalid guards
 	// UpdateWorkspaceNotificationStatus's only two valid targets -- 'pending'
 	// is set exclusively at creation (CreateWorkspaceNotification), never a
@@ -105,6 +114,7 @@ type ConfigState struct {
 	ID               uuid.UUID       `json:"id"`
 	ConfigKey        string          `json:"config_key"`
 	ConfigType       ConfigType      `json:"config_type"`
+	OwnerTeamID      *uuid.UUID      `json:"owner_team_id,omitempty"`
 	SourceHash       string          `json:"source_hash"`
 	Generation       int             `json:"generation"`
 	DesiredState     json.RawMessage `json:"desired_state"`
@@ -116,22 +126,24 @@ type ConfigState struct {
 }
 
 type ConfigPlan struct {
-	ID              uuid.UUID        `json:"id"`
-	ConfigKey       string           `json:"config_key"`
-	ConfigType      ConfigType       `json:"config_type"`
-	SourceHash      string           `json:"source_hash"`
-	BaseGeneration  int              `json:"base_generation"`
-	Status          ConfigPlanStatus `json:"status"`
-	Actions         json.RawMessage  `json:"actions"`
-	DesiredState    json.RawMessage  `json:"desired_state"`
-	ResolvedPayload json.RawMessage  `json:"resolved_payload"`
-	Blockers        json.RawMessage  `json:"blockers"`
-	Warnings        json.RawMessage  `json:"warnings"`
-	Revision        int              `json:"revision"`
-	CreatedBy       uuid.UUID        `json:"created_by"`
-	CreatedAt       time.Time        `json:"created_at"`
-	AppliedAt       *time.Time       `json:"applied_at,omitempty"`
-	SupersededAt    *time.Time       `json:"superseded_at,omitempty"`
+	ID                  uuid.UUID        `json:"id"`
+	ConfigKey           string           `json:"config_key"`
+	ConfigType          ConfigType       `json:"config_type"`
+	OwnerTeamID         *uuid.UUID       `json:"owner_team_id,omitempty"`
+	SourceHash          string           `json:"source_hash"`
+	BaseGeneration      int              `json:"base_generation"`
+	Status              ConfigPlanStatus `json:"status"`
+	Actions             json.RawMessage  `json:"actions"`
+	DesiredState        json.RawMessage  `json:"desired_state"`
+	ResolvedPayload     json.RawMessage  `json:"resolved_payload"`
+	Blockers            json.RawMessage  `json:"blockers"`
+	Warnings            json.RawMessage  `json:"warnings"`
+	RequiredPermissions json.RawMessage  `json:"required_permissions"`
+	Revision            int              `json:"revision"`
+	CreatedBy           uuid.UUID        `json:"created_by"`
+	CreatedAt           time.Time        `json:"created_at"`
+	AppliedAt           *time.Time       `json:"applied_at,omitempty"`
+	SupersededAt        *time.Time       `json:"superseded_at,omitempty"`
 }
 
 type WorkspaceNotification struct {
@@ -158,6 +170,7 @@ type WorkspaceNotification struct {
 type UpsertConfigStateParams struct {
 	ConfigKey        string
 	ConfigType       ConfigType
+	OwnerTeamID      *uuid.UUID
 	SourceHash       string
 	DesiredState     json.RawMessage
 	ManagedResources json.RawMessage
@@ -177,40 +190,84 @@ type CreateWorkspaceNotificationParams struct {
 }
 
 type CreateConfigPlanParams struct {
-	ConfigKey         string
-	ConfigType        ConfigType
-	SourceHash        string
-	BaseGeneration    int
-	Actions           json.RawMessage
-	DesiredState      json.RawMessage
-	ResolvedPayload   json.RawMessage
-	Blockers          json.RawMessage
-	Warnings          json.RawMessage
-	CreatedBy         uuid.UUID
-	SupersedeExisting bool
+	ConfigKey           string
+	ConfigType          ConfigType
+	OwnerTeamID         *uuid.UUID
+	SourceHash          string
+	BaseGeneration      int
+	Actions             json.RawMessage
+	DesiredState        json.RawMessage
+	ResolvedPayload     json.RawMessage
+	Blockers            json.RawMessage
+	Warnings            json.RawMessage
+	RequiredPermissions json.RawMessage
+	CreatedBy           uuid.UUID
+	SupersedeExisting   bool
 }
 
 // ApplyConfigPlanParams keeps the desired-state write and plan transition
 // together so a failed apply cannot leave either record claiming success on
 // its own.
 type ApplyConfigPlanParams struct {
-	State          UpsertConfigStateParams
-	PlanID         uuid.UUID
-	BaseGeneration int
+	State            UpsertConfigStateParams
+	PlanID           uuid.UUID
+	BaseGeneration   int
+	ExpectedRevision int
+	ApplyLeaseID     uuid.UUID
+}
+
+type ConfigPlanApplyLease struct {
+	ID        uuid.UUID
+	ExpiresAt time.Time
+}
+
+// ApplyArtifactConfigPlanParams makes runtime scope creation and config-plan
+// finalization one database operation. TokenHash is generated by the API so
+// the raw credential never crosses into persistence or telemetry.
+type ApplyArtifactConfigPlanParams struct {
+	Plan                 ApplyConfigPlanParams
+	Scope                ArtifactScope
+	AuthorizedBucketName string
+	TokenHash            string
+	TokenName            string
+	Activate             bool
+}
+
+type ApplyArtifactConfigPlanResult struct {
+	State        *ConfigState
+	ScopeCreated bool
+}
+
+// ApplyWebhookConfigPlanParams places the complete Engine-owned webhook
+// reconciliation behind one PostgreSQL transaction. Service metadata and
+// secret references are resolved before this call; no external work runs
+// while the owner-team and config rows are locked.
+type ApplyWebhookConfigPlanParams struct {
+	Plan           ApplyConfigPlanParams
+	Registrations  []WorkspaceWebhook
+	KeepServiceIDs []uuid.UUID
+}
+
+type ApplyWebhookConfigPlanResult struct {
+	State         *ConfigState
+	Registrations []WorkspaceWebhook
 }
 
 type ConfigRepository interface {
 	GetConfigState(ctx context.Context, configKey string) (*ConfigState, error)
+	GetConfigStatesByKeys(ctx context.Context, configKeys []string) (map[string]ConfigState, error)
+	ResolveArtifactOwnerTeam(ctx context.Context, configKey string) (uuid.UUID, error)
 	ListConfigStates(ctx context.Context, configType ConfigType) ([]ConfigState, error)
 	UpsertConfigState(ctx context.Context, params UpsertConfigStateParams) (*ConfigState, error)
 	CreateConfigPlan(ctx context.Context, params CreateConfigPlanParams) (*ConfigPlan, error)
 	GetConfigPlan(ctx context.Context, planID uuid.UUID) (*ConfigPlan, error)
-	ReplaceConfigPlanActions(ctx context.Context, planID uuid.UUID, actions json.RawMessage, actorID uuid.UUID) (*ConfigPlan, error)
+	ReplaceConfigPlanActions(ctx context.Context, planID uuid.UUID, actions, requiredPermissions json.RawMessage, actorID uuid.UUID) (*ConfigPlan, error)
+	ReserveConfigPlanApply(ctx context.Context, planID uuid.UUID, expectedRevision int) (*ConfigPlanApplyLease, error)
+	RenewConfigPlanApply(ctx context.Context, planID uuid.UUID, expectedRevision int, leaseID uuid.UUID) (*ConfigPlanApplyLease, error)
+	ReleaseConfigPlanApply(ctx context.Context, planID uuid.UUID, expectedRevision int, leaseID uuid.UUID) error
 	ApplyConfigPlan(ctx context.Context, params ApplyConfigPlanParams) (*ConfigState, error)
-	// MarkConfigPlanApplied only closes a pending plan after apply execution.
-	// Freshness checks belong in the apply service before external mutations run,
-	// because successful apply records config state after the side effects finish.
-	MarkConfigPlanApplied(ctx context.Context, planID uuid.UUID) (*ConfigPlan, error)
+	ApplyArtifactConfigPlan(ctx context.Context, params ApplyArtifactConfigPlanParams) (*ApplyArtifactConfigPlanResult, error)
+	ApplyWebhookConfigPlan(ctx context.Context, params ApplyWebhookConfigPlanParams) (*ApplyWebhookConfigPlanResult, error)
 	CreateWorkspaceNotification(ctx context.Context, params CreateWorkspaceNotificationParams) (*WorkspaceNotification, error)
 	ListWorkspaceNotifications(ctx context.Context, status WorkspaceNotificationStatus) ([]WorkspaceNotification, error)
 	// ListUnresolvedWorkspaceNotificationsPage, CountUnresolvedWorkspaceNotifications,
@@ -243,7 +300,7 @@ func (r *postgresConfigRepository) GetConfigState(ctx context.Context, configKey
 	}
 
 	row := r.db.QueryRow(ctx, `
-		SELECT id, config_key, config_type, source_hash, generation,
+		SELECT id, config_key, config_type, owner_team_id, source_hash, generation,
 		       desired_state, managed_resources, latest_resource_id, updated_by,
 		       created_at, updated_at
 		FROM fused_config_states
@@ -252,12 +309,56 @@ func (r *postgresConfigRepository) GetConfigState(ctx context.Context, configKey
 	return scanConfigState(row)
 }
 
+func (r *postgresConfigRepository) GetConfigStatesByKeys(ctx context.Context, configKeys []string) (map[string]ConfigState, error) {
+	states := make(map[string]ConfigState, len(configKeys))
+	if len(configKeys) == 0 {
+		return states, nil
+	}
+	rows, err := r.db.Query(ctx, `
+		SELECT id, config_key, config_type, owner_team_id, source_hash, generation,
+		       desired_state, managed_resources, latest_resource_id, updated_by, created_at, updated_at
+		FROM fused_config_states WHERE config_key = ANY($1)
+	`, configKeys)
+	if err != nil {
+		return nil, fmt.Errorf("GetConfigStatesByKeys: query: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		state, err := scanConfigState(rows)
+		if err != nil {
+			return nil, err
+		}
+		states[state.ConfigKey] = *state
+	}
+	return states, rows.Err()
+}
+
+// ResolveArtifactOwnerTeam gives every artifact kind, including webhooks that
+// have no runtime scope row, one SQL-owned immutable ownership lookup.
+func (r *postgresConfigRepository) ResolveArtifactOwnerTeam(ctx context.Context, configKey string) (uuid.UUID, error) {
+	if strings.TrimSpace(configKey) == "" {
+		return uuid.Nil, ErrConfigKeyRequired
+	}
+	var ownerTeamID uuid.UUID
+	err := r.db.QueryRow(ctx, `
+		SELECT owner_team_id FROM fused_config_states
+		WHERE config_key = $1 AND config_type IN ('sdk', 'mcp', 'webhook')
+	`, strings.TrimSpace(configKey)).Scan(&ownerTeamID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, ErrConfigPlanNotFound
+	}
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("resolve artifact owner team: %w", err)
+	}
+	return ownerTeamID, nil
+}
+
 func (r *postgresConfigRepository) ListConfigStates(ctx context.Context, configType ConfigType) ([]ConfigState, error) {
 	if !validConfigType(configType) {
 		return nil, ErrConfigTypeInvalid
 	}
 	rows, err := r.db.Query(ctx, `
-		SELECT id, config_key, config_type, source_hash, generation,
+		SELECT id, config_key, config_type, owner_team_id, source_hash, generation,
 		       desired_state, managed_resources, latest_resource_id, updated_by,
 		       created_at, updated_at
 		FROM fused_config_states
@@ -295,7 +396,13 @@ func (r *postgresConfigRepository) UpsertConfigState(ctx context.Context, params
 // closes the race between an apply-time freshness check and final persistence
 // without holding a transaction open during external generation work.
 func (r *postgresConfigRepository) ApplyConfigPlan(ctx context.Context, params ApplyConfigPlanParams) (*ConfigState, error) {
-	if err := validateStateParams(&params.State); err != nil {
+	if params.ExpectedRevision <= 0 {
+		return nil, ErrConfigPlanRevisionMismatch
+	}
+	if params.State.ConfigType == ConfigTypeWorkspace && params.ApplyLeaseID == uuid.Nil {
+		return nil, ErrConfigPlanApplyInProgress
+	}
+	if err := validateConfigIdentity(params.State.ConfigKey, params.State.ConfigType, params.State.SourceHash); err != nil {
 		return nil, err
 	}
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.config_plan.apply")
@@ -307,8 +414,21 @@ func (r *postgresConfigRepository) ApplyConfigPlan(ctx context.Context, params A
 		return nil, fmt.Errorf("ApplyConfigPlan: begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	return applyConfigPlanTx(ctx, tx, params)
+}
 
+func applyConfigPlanTx(ctx context.Context, tx pgx.Tx, params ApplyConfigPlanParams) (*ConfigState, error) {
 	if err := lockConfigGeneration(ctx, tx, params); err != nil {
+		return nil, err
+	}
+	ownerTeamID, err := loadApplyOwnerTeam(ctx, tx, params)
+	if err != nil {
+		return nil, err
+	}
+	// Apply ownership is read from the locked plan. A request cannot replace
+	// the team selected and authorized during planning.
+	params.State.OwnerTeamID = ownerTeamID
+	if err := validateStateParams(&params.State); err != nil {
 		return nil, err
 	}
 	state, err := upsertConfigState(ctx, tx, params.State)
@@ -324,6 +444,332 @@ func (r *postgresConfigRepository) ApplyConfigPlan(ctx context.Context, params A
 	return state, nil
 }
 
+// ApplyWebhookConfigPlan atomically publishes webhook registrations and the
+// config state that owns them. The team row is locked before config state,
+// matching ArchiveTeam's serialization order and preventing an archive from
+// committing between the ownership check and state publication.
+func (r *postgresConfigRepository) ApplyWebhookConfigPlan(ctx context.Context, params ApplyWebhookConfigPlanParams) (*ApplyWebhookConfigPlanResult, error) {
+	if params.Plan.ExpectedRevision <= 0 {
+		return nil, ErrConfigPlanRevisionMismatch
+	}
+	if err := validateWebhookApplyParams(&params); err != nil {
+		return nil, err
+	}
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.config_plan.webhook_apply")
+	defer span.End()
+	span.SetAttributes(configAttrs(params.Plan.State.ConfigKey, ConfigTypeWebhook)...)
+	span.SetAttributes(attribute.Int("webhook.registrations", len(params.Registrations)))
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("ApplyWebhookConfigPlan: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	return applyWebhookConfigPlanTx(ctx, tx, params)
+}
+
+func applyWebhookConfigPlanTx(ctx context.Context, tx pgx.Tx, params ApplyWebhookConfigPlanParams) (*ApplyWebhookConfigPlanResult, error) {
+	if err := lockActiveWebhookOwnerTeam(ctx, tx, params.Plan); err != nil {
+		return nil, err
+	}
+	if err := lockConfigGeneration(ctx, tx, params.Plan); err != nil {
+		return nil, err
+	}
+	ownerTeamID, err := loadApplyOwnerTeam(ctx, tx, params.Plan)
+	if err != nil {
+		return nil, err
+	}
+	params.Plan.State.OwnerTeamID = ownerTeamID
+
+	saved, err := reconcileWebhookRegistrations(ctx, tx, params)
+	if err != nil {
+		return nil, err
+	}
+	state, err := upsertConfigState(ctx, tx, params.Plan.State)
+	if err != nil {
+		return nil, err
+	}
+	if err := markConfigPlanApplied(ctx, tx, params.Plan); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("ApplyWebhookConfigPlan: commit: %w", err)
+	}
+	return &ApplyWebhookConfigPlanResult{State: state, Registrations: saved}, nil
+}
+
+func validateWebhookApplyParams(params *ApplyWebhookConfigPlanParams) error {
+	if params.Plan.State.ConfigType != ConfigTypeWebhook {
+		return ErrConfigTypeInvalid
+	}
+	if err := validateStateParams(&params.Plan.State); err != nil {
+		return err
+	}
+	identities := make(map[string]struct{}, len(params.Registrations))
+	for i := range params.Registrations {
+		registration := &params.Registrations[i]
+		if err := validateWebhookRegistration(*registration, params.Plan.State.ConfigKey); err != nil {
+			return err
+		}
+		if registration.VerificationHeaders == nil {
+			registration.VerificationHeaders = []string{}
+		}
+		identity := registration.ServiceID.String() + "\x00" + registration.Label
+		if _, duplicate := identities[identity]; duplicate {
+			return ErrWorkspaceWebhookDuplicate
+		}
+		identities[identity] = struct{}{}
+	}
+	if params.KeepServiceIDs == nil {
+		params.KeepServiceIDs = []uuid.UUID{}
+	}
+	return nil
+}
+
+func validateWebhookRegistration(registration WorkspaceWebhook, configKey string) error {
+	if registration.OwningConfigKey != configKey {
+		return ErrConfigStateIdentityMismatch
+	}
+	if registration.ServiceID == uuid.Nil || registration.ServiceVersionID == uuid.Nil {
+		return ErrWorkspaceWebhookNotFound
+	}
+	if strings.TrimSpace(registration.Label) == "" || strings.TrimSpace(registration.Slug) == "" {
+		return ErrWorkspaceWebhookNotFound
+	}
+	if err := validateWebhookSecretBinding(registration); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateWebhookSecretBinding(registration WorkspaceWebhook) error {
+	// A signing reference without its immutable bucket identity (or vice
+	// versa) would make runtime verification ambiguous, so malformed rows are
+	// rejected before the transaction touches registrations.
+	if (strings.TrimSpace(registration.SecretRef) == "") != (registration.SecretBucketID == nil) {
+		return ErrWorkspaceWebhookNotFound
+	}
+	if registration.SecretBucketID == nil {
+		return nil
+	}
+	ref, err := secretref.Parse(registration.SecretRef)
+	if *registration.SecretBucketID == uuid.Nil || err != nil || ref.Kind != secretref.KindSecret {
+		return ErrWorkspaceWebhookNotFound
+	}
+	return nil
+}
+
+func lockActiveWebhookOwnerTeam(ctx context.Context, tx pgx.Tx, params ApplyConfigPlanParams) error {
+	var ownerTeamID uuid.UUID
+	err := tx.QueryRow(ctx, `
+		SELECT plan.owner_team_id
+		FROM fused_config_plans plan
+		WHERE plan.id = $1 AND plan.config_key = $2 AND plan.config_type = 'webhook'
+		  AND plan.source_hash = $3 AND plan.base_generation = $4
+		  AND plan.status = 'pending' AND plan.revision = $5
+	`, params.PlanID, params.State.ConfigKey, params.State.SourceHash, params.BaseGeneration, params.ExpectedRevision).Scan(&ownerTeamID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrConfigPlanNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("ApplyWebhookConfigPlan: load owner team: %w", err)
+	}
+	var active bool
+	err = tx.QueryRow(ctx, `SELECT status = 'active' FROM fused_teams WHERE id = $1 FOR UPDATE`, ownerTeamID).Scan(&active)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrConfigOwnerTeamInactive
+	}
+	if err != nil {
+		return fmt.Errorf("ApplyWebhookConfigPlan: lock owner team: %w", err)
+	}
+	if !active {
+		return ErrConfigOwnerTeamInactive
+	}
+	return nil
+}
+
+func reconcileWebhookRegistrations(ctx context.Context, tx pgx.Tx, params ApplyWebhookConfigPlanParams) ([]WorkspaceWebhook, error) {
+	saved, err := upsertWorkspaceWebhooks(ctx, tx, params.Registrations)
+	if err != nil {
+		return nil, fmt.Errorf("ApplyWebhookConfigPlan: upsert registration: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM fused_workspace_webhooks
+		WHERE owning_config_key = $1 AND NOT (service_id = ANY($2::uuid[]))
+	`, params.Plan.State.ConfigKey, params.KeepServiceIDs); err != nil {
+		return nil, fmt.Errorf("ApplyWebhookConfigPlan: prune registrations: %w", err)
+	}
+	return saved, nil
+}
+
+// ApplyArtifactConfigPlan commits the runtime and its desired-state pointer in
+// one transaction. SDK callers must carry the database lease acquired before
+// Registry generation, so only that reviewed plan revision can finalize.
+func (r *postgresConfigRepository) ApplyArtifactConfigPlan(ctx context.Context, params ApplyArtifactConfigPlanParams) (*ApplyArtifactConfigPlanResult, error) {
+	if params.Plan.ExpectedRevision <= 0 {
+		return nil, ErrConfigPlanRevisionMismatch
+	}
+	if params.Plan.State.ConfigType == ConfigTypeSDK && params.Plan.ApplyLeaseID == uuid.Nil {
+		return nil, ErrConfigPlanApplyInProgress
+	}
+	if err := validateArtifactApplyParams(params); err != nil {
+		return nil, err
+	}
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.config_plan.apply_artifact")
+	defer span.End()
+	span.SetAttributes(configAttrs(params.Plan.State.ConfigKey, params.Plan.State.ConfigType)...)
+	span.SetAttributes(attribute.String("artifact_id", params.Scope.ArtifactID.String()))
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("ApplyArtifactConfigPlan: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := lockAuthorizationState(ctx, tx); err != nil {
+		return nil, err
+	}
+	result, err := applyArtifactConfigPlanTx(ctx, tx, &params)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("ApplyArtifactConfigPlan: commit: %w", err)
+	}
+	return result, nil
+}
+
+func applyArtifactConfigPlanTx(ctx context.Context, tx pgx.Tx, params *ApplyArtifactConfigPlanParams) (*ApplyArtifactConfigPlanResult, error) {
+	if err := prepareArtifactApplyTx(ctx, tx, params); err != nil {
+		return nil, err
+	}
+	created, err := persistArtifactRuntimeTx(ctx, tx, *params)
+	if err != nil {
+		return nil, err
+	}
+	state, err := upsertConfigState(ctx, tx, params.Plan.State)
+	if err != nil {
+		return nil, err
+	}
+	if err := markConfigPlanApplied(ctx, tx, params.Plan); err != nil {
+		return nil, err
+	}
+	return &ApplyArtifactConfigPlanResult{State: state, ScopeCreated: created}, nil
+}
+
+func prepareArtifactApplyTx(ctx context.Context, tx pgx.Tx, params *ApplyArtifactConfigPlanParams) error {
+	if err := lockConfigGeneration(ctx, tx, params.Plan); err != nil {
+		return err
+	}
+	ownerTeamID, err := loadApplyOwnerTeam(ctx, tx, params.Plan)
+	if err != nil {
+		return err
+	}
+	if ownerTeamID == nil || *ownerTeamID != params.Scope.OwnerTeamID {
+		return ErrArtifactOwnerTeamMismatch
+	}
+	if err := verifyAuthorizedArtifactBucketTx(ctx, tx, params.Scope.BucketID, params.AuthorizedBucketName); err != nil {
+		return err
+	}
+	params.Plan.State.OwnerTeamID = ownerTeamID
+	return validateStateParams(&params.Plan.State)
+}
+
+func verifyAuthorizedArtifactBucketTx(ctx context.Context, tx pgx.Tx, bucketID uuid.UUID, bucketName string) error {
+	var present bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM fused_buckets WHERE id = $1 AND name = $2
+		)
+	`, bucketID, strings.TrimSpace(bucketName)).Scan(&present)
+	if err != nil {
+		return fmt.Errorf("ApplyArtifactConfigPlan: verify bucket identity: %w", err)
+	}
+	if !present {
+		return ErrSDKBucketImmutable
+	}
+	return nil
+}
+
+func persistArtifactRuntimeTx(ctx context.Context, tx pgx.Tx, params ApplyArtifactConfigPlanParams) (bool, error) {
+	created, err := saveArtifactScopeTx(ctx, tx, params.Scope, normalizedArtifactKind(params.Scope.Kind))
+	if err != nil {
+		return false, err
+	}
+	if created {
+		if err := insertArtifactTokenTx(ctx, tx, params); err != nil {
+			return false, err
+		}
+	}
+	if params.Activate {
+		if _, err := tx.Exec(ctx, `UPDATE fused_artifact_scopes SET deactivated_at = NULL WHERE artifact_id = $1`, params.Scope.ArtifactID); err != nil {
+			return false, fmt.Errorf("ApplyArtifactConfigPlan: activate scope: %w", err)
+		}
+	}
+	return created, nil
+}
+
+func validateArtifactApplyParams(params ApplyArtifactConfigPlanParams) error {
+	if err := validateConfigIdentity(params.Plan.State.ConfigKey, params.Plan.State.ConfigType, params.Plan.State.SourceHash); err != nil {
+		return err
+	}
+	if params.Plan.State.ConfigType != ConfigTypeSDK && params.Plan.State.ConfigType != ConfigTypeMCP {
+		return ErrConfigTypeInvalid
+	}
+	if err := validateArtifactApplyScopeIdentity(params.Scope, params.AuthorizedBucketName); err != nil {
+		return err
+	}
+	if strings.TrimSpace(params.TokenHash) == "" || strings.TrimSpace(params.TokenName) == "" {
+		return errors.New("artifact token identity is required")
+	}
+	return nil
+}
+
+func validateArtifactApplyScopeIdentity(scope ArtifactScope, bucketName string) error {
+	if scope.AccountID == uuid.Nil || scope.ArtifactID == uuid.Nil || scope.OwnerTeamID == uuid.Nil {
+		return errors.New("artifact scope identity is required")
+	}
+	if scope.BucketID == uuid.Nil || strings.TrimSpace(bucketName) == "" {
+		return errors.New("authorized artifact bucket identity is required")
+	}
+	return nil
+}
+
+func normalizedArtifactKind(kind string) string {
+	if kind == "" {
+		return "sdk"
+	}
+	return kind
+}
+
+func insertArtifactTokenTx(ctx context.Context, tx pgx.Tx, params ApplyArtifactConfigPlanParams) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO fused_artifact_tokens (artifact_id, token_hash, name)
+		VALUES ($1, $2, $3)
+	`, params.Scope.ArtifactID, params.TokenHash, params.TokenName)
+	if err != nil {
+		return fmt.Errorf("ApplyArtifactConfigPlan: create token: %w", err)
+	}
+	return nil
+}
+
+func loadApplyOwnerTeam(ctx context.Context, tx pgx.Tx, params ApplyConfigPlanParams) (*uuid.UUID, error) {
+	var ownerTeamID *uuid.UUID
+	err := tx.QueryRow(ctx, `
+		SELECT owner_team_id FROM fused_config_plans
+		WHERE id = $1 AND config_key = $2 AND config_type = $3
+			AND source_hash = $4 AND base_generation = $5 AND status = 'pending'
+			AND revision = $6
+		FOR UPDATE
+	`, params.PlanID, params.State.ConfigKey, params.State.ConfigType, params.State.SourceHash, params.BaseGeneration, params.ExpectedRevision).Scan(&ownerTeamID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrConfigPlanRevisionMismatch
+	}
+	if err != nil {
+		return nil, fmt.Errorf("ApplyConfigPlan: load owner team: %w", err)
+	}
+	return ownerTeamID, nil
+}
+
 type configQueryRower interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
@@ -333,12 +779,11 @@ type configQueryRower interface {
 func upsertConfigState(ctx context.Context, q configQueryRower, params UpsertConfigStateParams) (*ConfigState, error) {
 	row := q.QueryRow(ctx, `
 		INSERT INTO fused_config_states (
-			config_key, config_type, source_hash, desired_state,
+			config_key, config_type, owner_team_id, source_hash, desired_state,
 			managed_resources, latest_resource_id, updated_by
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (config_key) DO UPDATE SET
-			config_type = EXCLUDED.config_type,
 			source_hash = EXCLUDED.source_hash,
 			generation = fused_config_states.generation + 1,
 			desired_state = EXCLUDED.desired_state,
@@ -346,12 +791,21 @@ func upsertConfigState(ctx context.Context, q configQueryRower, params UpsertCon
 			latest_resource_id = EXCLUDED.latest_resource_id,
 			updated_by = EXCLUDED.updated_by,
 			updated_at = NOW()
-		RETURNING id, config_key, config_type, source_hash, generation,
+		WHERE fused_config_states.config_type = EXCLUDED.config_type
+		  AND fused_config_states.owner_team_id IS NOT DISTINCT FROM EXCLUDED.owner_team_id
+		RETURNING id, config_key, config_type, owner_team_id, source_hash, generation,
 		          desired_state, managed_resources, latest_resource_id, updated_by,
 		          created_at, updated_at
-	`, params.ConfigKey, params.ConfigType, params.SourceHash, params.DesiredState,
+	`, params.ConfigKey, params.ConfigType, params.OwnerTeamID, params.SourceHash, params.DesiredState,
 		params.ManagedResources, params.LatestResourceID, params.UpdatedBy)
-	return scanConfigState(row)
+	state, err := scanConfigState(row)
+	if err != nil {
+		return nil, err
+	}
+	if state == nil {
+		return nil, ErrConfigStateIdentityMismatch
+	}
+	return state, nil
 }
 
 // lockConfigGeneration serializes applies for one config key and fails if a
@@ -384,14 +838,16 @@ func markConfigPlanApplied(ctx context.Context, tx pgx.Tx, params ApplyConfigPla
 		SET status = 'applied', applied_at = NOW()
 		WHERE id = $1 AND config_key = $2
 		  AND config_type = $3 AND source_hash = $4 AND base_generation = $5
+		  AND revision = $6
+		  AND (config_type NOT IN ('workspace', 'sdk') OR apply_lease_id = $7)
 		  AND status = 'pending'
 	`, params.PlanID, params.State.ConfigKey, params.State.ConfigType,
-		params.State.SourceHash, params.BaseGeneration)
+		params.State.SourceHash, params.BaseGeneration, params.ExpectedRevision, nullableApplyLease(params.ApplyLeaseID))
 	if err != nil {
 		return fmt.Errorf("ApplyConfigPlan: mark applied: %w", err)
 	}
 	if result.RowsAffected() != 1 {
-		return fmt.Errorf("ApplyConfigPlan: plan is stale or mismatched")
+		return ErrConfigPlanRevisionMismatch
 	}
 	return nil
 }
@@ -400,15 +856,20 @@ func (r *postgresConfigRepository) CreateConfigPlan(ctx context.Context, params 
 	if err := validatePlanParams(&params); err != nil {
 		return nil, err
 	}
+	_, requiredCount, _ := normalizeRequiredPermissions(params.RequiredPermissions)
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.config_plan.create")
 	defer span.End()
-	span.SetAttributes(configAttrs(params.ConfigKey, params.ConfigType)...)
+	attrs := append(configAttrs(params.ConfigKey, params.ConfigType), attribute.Int("required_permissions_count", requiredCount))
+	span.SetAttributes(attrs...)
 
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("CreateConfigPlan: begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	if err := validatePlanOwnerConsistency(ctx, tx, params); err != nil {
+		return nil, err
+	}
 
 	if params.SupersedeExisting {
 		if err := supersedePendingPlans(ctx, tx, params.ConfigKey); err != nil {
@@ -425,52 +886,169 @@ func (r *postgresConfigRepository) CreateConfigPlan(ctx context.Context, params 
 	return plan, nil
 }
 
+func validatePlanOwnerConsistency(ctx context.Context, tx pgx.Tx, params CreateConfigPlanParams) error {
+	var existingType ConfigType
+	var existingOwnerTeamID *uuid.UUID
+	err := tx.QueryRow(ctx, `
+		SELECT config_type, owner_team_id FROM fused_config_states WHERE config_key = $1 FOR UPDATE
+	`, params.ConfigKey).Scan(&existingType, &existingOwnerTeamID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("CreateConfigPlan: lock current ownership: %w", err)
+	}
+	if existingType != params.ConfigType || !equalOptionalUUID(existingOwnerTeamID, params.OwnerTeamID) {
+		return ErrArtifactOwnerTeamMismatch
+	}
+	return nil
+}
+
+func equalOptionalUUID(left, right *uuid.UUID) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
 func (r *postgresConfigRepository) GetConfigPlan(ctx context.Context, planID uuid.UUID) (*ConfigPlan, error) {
 	row := r.db.QueryRow(ctx, selectConfigPlanSQL()+` WHERE id = $1`, planID)
 	return scanConfigPlan(row)
 }
 
-func (r *postgresConfigRepository) ReplaceConfigPlanActions(ctx context.Context, planID uuid.UUID, actions json.RawMessage, actorID uuid.UUID) (*ConfigPlan, error) {
+func (r *postgresConfigRepository) ReplaceConfigPlanActions(ctx context.Context, planID uuid.UUID, actions, requiredPermissions json.RawMessage, actorID uuid.UUID) (*ConfigPlan, error) {
 	normalized, err := normalizeJSONArray(actions)
+	if err != nil {
+		return nil, err
+	}
+	requiredPermissions, requiredCount, err := normalizeRequiredPermissions(requiredPermissions)
 	if err != nil {
 		return nil, err
 	}
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.config_plan.actions_replace")
 	defer span.End()
-	span.SetAttributes(attribute.String("plan_id", planID.String()), attribute.String("actor_id", actorID.String()))
-
-	row := r.db.QueryRow(ctx, selectConfigPlanSQL()+`
-		WHERE id = $1 AND status = $2
-		`, planID, ConfigPlanStatusPending)
-	if _, err := scanConfigPlan(row); err != nil {
-		return nil, err
-	}
-
-	row = r.db.QueryRow(ctx, `
-		UPDATE fused_config_plans
-		SET actions = $2, revision = revision + 1
-		WHERE id = $1 AND status = 'pending'
-		RETURNING id, config_key, config_type, source_hash, base_generation,
-		          status, actions, desired_state, resolved_payload, blockers, warnings, revision,
-		          created_by, created_at, applied_at, superseded_at
-	`, planID, normalized)
-	return scanConfigPlan(row)
-}
-
-func (r *postgresConfigRepository) MarkConfigPlanApplied(ctx context.Context, planID uuid.UUID) (*ConfigPlan, error) {
-	ctx, span := otel.Tracer("engine").Start(ctx, "engine.config_plan.mark_applied")
-	defer span.End()
-	span.SetAttributes(attribute.String("plan_id", planID.String()))
+	span.SetAttributes(
+		attribute.String("plan_id", planID.String()),
+		attribute.String("actor_id", actorID.String()),
+		attribute.Int("required_permissions_count", requiredCount),
+	)
 
 	row := r.db.QueryRow(ctx, `
 		UPDATE fused_config_plans
-		SET status = 'applied', applied_at = NOW()
+		SET actions = $2, required_permissions = $3, revision = revision + 1
 		WHERE id = $1 AND status = 'pending'
-		RETURNING id, config_key, config_type, source_hash, base_generation,
-		          status, actions, desired_state, resolved_payload, blockers, warnings, revision,
+		  AND (apply_lease_id IS NULL OR apply_lease_expires_at <= NOW())
+		RETURNING id, config_key, config_type, owner_team_id, source_hash, base_generation,
+		          status, actions, desired_state, resolved_payload, blockers, warnings, required_permissions, revision,
 		          created_by, created_at, applied_at, superseded_at
-	`, planID)
-	return scanConfigPlan(row)
+	`, planID, normalized, requiredPermissions)
+	plan, err := scanConfigPlan(row)
+	if !errors.Is(err, pgx.ErrNoRows) && !errors.Is(err, ErrConfigPlanNotFound) {
+		return plan, err
+	}
+	current, getErr := r.GetConfigPlan(ctx, planID)
+	if getErr != nil {
+		return nil, getErr
+	}
+	if current.Status == ConfigPlanStatusPending {
+		return nil, ErrConfigPlanApplyInProgress
+	}
+	return nil, ErrConfigPlanNotFound
+}
+
+const (
+	configPlanApplyLeaseTTL        = 15 * time.Minute
+	configPlanApplyLeaseTTLSeconds = int64(configPlanApplyLeaseTTL / time.Second)
+)
+
+// ReserveConfigPlanApply pins the exact reviewed revision before any external
+// workspace side effect. Expiry makes a crashed Engine recoverable without an
+// operator clearing database state.
+func (r *postgresConfigRepository) ReserveConfigPlanApply(ctx context.Context, planID uuid.UUID, expectedRevision int) (*ConfigPlanApplyLease, error) {
+	if expectedRevision <= 0 {
+		return nil, ErrConfigPlanRevisionMismatch
+	}
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.config_plan.apply_reserve")
+	defer span.End()
+	span.SetAttributes(attribute.String("user_action", "config.apply.reserve"), attribute.String("plan_id", planID.String()), attribute.Int("revision", expectedRevision))
+	lease := &ConfigPlanApplyLease{ID: uuid.New()}
+	// PostgreSQL owns both the eligibility check and expiry calculation so an
+	// Engine host with a skewed clock cannot steal or prolong an apply lease.
+	err := r.db.QueryRow(ctx, `
+		UPDATE fused_config_plans
+		SET apply_lease_id = $3,
+		    apply_lease_expires_at = NOW() + ($4 * INTERVAL '1 second')
+		WHERE id = $1 AND revision = $2 AND status = 'pending'
+		  AND (apply_lease_id IS NULL OR apply_lease_expires_at <= NOW())
+		RETURNING apply_lease_expires_at
+	`, planID, expectedRevision, lease.ID, configPlanApplyLeaseTTLSeconds).Scan(&lease.ExpiresAt)
+	if err == nil {
+		return lease, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("ReserveConfigPlanApply: %w", err)
+	}
+	plan, getErr := r.GetConfigPlan(ctx, planID)
+	if getErr != nil {
+		return nil, getErr
+	}
+	if plan.Status == ConfigPlanStatusPending && plan.Revision == expectedRevision {
+		return nil, ErrConfigPlanApplyInProgress
+	}
+	return nil, ErrConfigPlanRevisionMismatch
+}
+
+// RenewConfigPlanApply keeps a live apply fenced while a slow Registry call is
+// in flight. Once a lease has expired it cannot be revived: a replacement may
+// already have acquired the right to change the reviewed revision.
+func (r *postgresConfigRepository) RenewConfigPlanApply(ctx context.Context, planID uuid.UUID, expectedRevision int, leaseID uuid.UUID) (*ConfigPlanApplyLease, error) {
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.config_plan.apply_renew")
+	defer span.End()
+	span.SetAttributes(attribute.String("user_action", "config.apply.renew"), attribute.String("plan_id", planID.String()), attribute.Int("revision", expectedRevision))
+	lease := &ConfigPlanApplyLease{ID: leaseID}
+	// Keep renewal on the same database clock used by the fencing predicate.
+	err := r.db.QueryRow(ctx, `
+		UPDATE fused_config_plans
+		SET apply_lease_expires_at = NOW() + ($4 * INTERVAL '1 second')
+		WHERE id = $1 AND revision = $2 AND status = 'pending'
+		  AND apply_lease_id = $3 AND apply_lease_expires_at > NOW()
+		RETURNING apply_lease_expires_at
+	`, planID, expectedRevision, leaseID, configPlanApplyLeaseTTLSeconds).Scan(&lease.ExpiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrConfigPlanRevisionMismatch
+	}
+	if err != nil {
+		return nil, fmt.Errorf("RenewConfigPlanApply: %w", err)
+	}
+	return lease, nil
+}
+
+// ReleaseConfigPlanApply is intentionally idempotent. Callers release after
+// pre-external failures or a proven final commit; once external execution has
+// begun, failed/cancelled applies retain the lease until recovery expiry.
+func (r *postgresConfigRepository) ReleaseConfigPlanApply(ctx context.Context, planID uuid.UUID, expectedRevision int, leaseID uuid.UUID) error {
+	if expectedRevision <= 0 || leaseID == uuid.Nil {
+		return nil
+	}
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.config_plan.apply_release")
+	defer span.End()
+	span.SetAttributes(attribute.String("user_action", "config.apply.release"), attribute.String("plan_id", planID.String()), attribute.Int("revision", expectedRevision))
+	_, err := r.db.Exec(ctx, `
+		UPDATE fused_config_plans
+		SET apply_lease_id = NULL, apply_lease_expires_at = NULL
+		WHERE id = $1 AND revision = $2 AND apply_lease_id = $3
+	`, planID, expectedRevision, leaseID)
+	if err != nil {
+		return fmt.Errorf("ReleaseConfigPlanApply: %w", err)
+	}
+	return nil
+}
+
+func nullableApplyLease(id uuid.UUID) any {
+	if id == uuid.Nil {
+		return nil
+	}
+	return id
 }
 
 // workspaceNotificationDedupeMatchSQL is CreateWorkspaceNotification's
@@ -726,7 +1304,10 @@ func validateStateParams(params *UpsertConfigStateParams) error {
 		return err
 	}
 	params.ManagedResources, err = normalizeJSONObject(params.ManagedResources)
-	return err
+	if err != nil {
+		return err
+	}
+	return validateConfigOwnerTeam(params.ConfigType, params.OwnerTeamID)
 }
 
 func validatePlanParams(params *CreateConfigPlanParams) error {
@@ -750,7 +1331,35 @@ func validatePlanParams(params *CreateConfigPlanParams) error {
 		return err
 	}
 	params.Warnings, err = normalizeJSONArray(params.Warnings)
+	if err != nil {
+		return err
+	}
+	if err := validateConfigOwnerTeam(params.ConfigType, params.OwnerTeamID); err != nil {
+		return err
+	}
+	params.RequiredPermissions, _, err = normalizeRequiredPermissions(params.RequiredPermissions)
 	return err
+}
+
+func validateConfigOwnerTeam(configType ConfigType, ownerTeamID *uuid.UUID) error {
+	if configType == ConfigTypeWorkspace {
+		if ownerTeamID != nil {
+			return ErrOwnerTeamUnexpected
+		}
+		return nil
+	}
+	if ownerTeamID == nil || *ownerTeamID == uuid.Nil {
+		return ErrOwnerTeamRequired
+	}
+	return nil
+}
+
+func normalizeRequiredPermissions(raw json.RawMessage) (json.RawMessage, int, error) {
+	canonical, requirements, err := accesscontrol.NormalizeRequiredPermissions(raw)
+	if err != nil || len(requirements) == 0 {
+		return nil, 0, ErrRequiredPermissions
+	}
+	return canonical, len(requirements), nil
 }
 
 func validateConfigIdentity(configKey string, configType ConfigType, sourceHash string) error {
@@ -801,11 +1410,28 @@ func normalizeJSONArray(raw json.RawMessage) (json.RawMessage, error) {
 }
 
 func supersedePendingPlans(ctx context.Context, tx pgx.Tx, configKey string) error {
-	_, err := tx.Exec(ctx, `
+	var planID uuid.UUID
+	var activelyLeased bool
+	err := tx.QueryRow(ctx, `
+		SELECT id, apply_lease_id IS NOT NULL AND apply_lease_expires_at > NOW()
+		FROM fused_config_plans
+		WHERE config_key = $1 AND status = 'pending'
+		FOR UPDATE
+	`, configKey).Scan(&planID, &activelyLeased)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("CreateConfigPlan: lock pending plan: %w", err)
+	}
+	if activelyLeased {
+		return ErrConfigPlanApplyInProgress
+	}
+	_, err = tx.Exec(ctx, `
 		UPDATE fused_config_plans
 		SET status = 'superseded', superseded_at = NOW()
-		WHERE config_key = $1 AND status = 'pending'
-	`, configKey)
+		WHERE id = $1 AND status = 'pending'
+	`, planID)
 	if err != nil {
 		return fmt.Errorf("CreateConfigPlan: supersede pending plans: %w", err)
 	}
@@ -815,15 +1441,15 @@ func supersedePendingPlans(ctx context.Context, tx pgx.Tx, configKey string) err
 func insertConfigPlan(ctx context.Context, tx pgx.Tx, params CreateConfigPlanParams) (*ConfigPlan, error) {
 	row := tx.QueryRow(ctx, `
 		INSERT INTO fused_config_plans (
-			config_key, config_type, source_hash, base_generation,
-			actions, desired_state, resolved_payload, blockers, warnings, created_by
+			config_key, config_type, owner_team_id, source_hash, base_generation,
+			actions, desired_state, resolved_payload, blockers, warnings, required_permissions, created_by
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		RETURNING id, config_key, config_type, source_hash, base_generation,
-		          status, actions, desired_state, resolved_payload, blockers, warnings, revision,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		RETURNING id, config_key, config_type, owner_team_id, source_hash, base_generation,
+		          status, actions, desired_state, resolved_payload, blockers, warnings, required_permissions, revision,
 		          created_by, created_at, applied_at, superseded_at
-	`, params.ConfigKey, params.ConfigType, params.SourceHash, params.BaseGeneration,
-		params.Actions, params.DesiredState, params.ResolvedPayload, params.Blockers, params.Warnings, params.CreatedBy)
+	`, params.ConfigKey, params.ConfigType, params.OwnerTeamID, params.SourceHash, params.BaseGeneration,
+		params.Actions, params.DesiredState, params.ResolvedPayload, params.Blockers, params.Warnings, params.RequiredPermissions, params.CreatedBy)
 	plan, err := scanConfigPlan(row)
 	if err != nil {
 		return nil, fmt.Errorf("CreateConfigPlan: insert: %w", err)
@@ -835,7 +1461,7 @@ func scanConfigState(row pgx.Row) (*ConfigState, error) {
 	var state ConfigState
 	var latestResourceID *uuid.UUID
 	if err := row.Scan(
-		&state.ID, &state.ConfigKey, &state.ConfigType, &state.SourceHash,
+		&state.ID, &state.ConfigKey, &state.ConfigType, &state.OwnerTeamID, &state.SourceHash,
 		&state.Generation, &state.DesiredState, &state.ManagedResources, &latestResourceID,
 		&state.UpdatedBy, &state.CreatedAt, &state.UpdatedAt,
 	); err != nil {
@@ -852,9 +1478,9 @@ func scanConfigPlan(row pgx.Row) (*ConfigPlan, error) {
 	var plan ConfigPlan
 	var appliedAt, supersededAt sql.NullTime
 	if err := row.Scan(
-		&plan.ID, &plan.ConfigKey, &plan.ConfigType, &plan.SourceHash,
+		&plan.ID, &plan.ConfigKey, &plan.ConfigType, &plan.OwnerTeamID, &plan.SourceHash,
 		&plan.BaseGeneration, &plan.Status, &plan.Actions, &plan.DesiredState, &plan.ResolvedPayload,
-		&plan.Blockers, &plan.Warnings, &plan.Revision, &plan.CreatedBy, &plan.CreatedAt,
+		&plan.Blockers, &plan.Warnings, &plan.RequiredPermissions, &plan.Revision, &plan.CreatedBy, &plan.CreatedAt,
 		&appliedAt, &supersededAt,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -888,8 +1514,8 @@ func nullableTime(value sql.NullTime) *time.Time {
 
 func selectConfigPlanSQL() string {
 	return `
-		SELECT id, config_key, config_type, source_hash, base_generation,
-		       status, actions, desired_state, resolved_payload, blockers, warnings, revision,
+		SELECT id, config_key, config_type, owner_team_id, source_hash, base_generation,
+		       status, actions, desired_state, resolved_payload, blockers, warnings, required_permissions, revision,
 		       created_by, created_at, applied_at, superseded_at
 		FROM fused_config_plans`
 }

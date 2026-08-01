@@ -150,11 +150,11 @@ func UpsertSecretsHandler(s store.Store, masterKey []byte) http.HandlerFunc {
 // secretAdminWorkspace is shared by single and batch writes so credential
 // handlers do not drift on authorization or workspace-resolution semantics.
 func secretAdminWorkspace(ctx context.Context, s store.Store, r *http.Request) (int, string, bool) {
-	accountID, err := validateAPIKey(ctx, s, r.Header.Get("X-API-Key"))
+	accountID, err := controlActorAccount(ctx)
 	if err != nil {
 		return http.StatusUnauthorized, "unauthorized", false
 	}
-	if err := s.VerifyWorkspaceOwner(ctx, accountID); err != nil {
+	if err := verifyWorkspaceActor(ctx, accountID); err != nil {
 		return http.StatusInternalServerError, "failed to resolve workspace", false
 	}
 	return http.StatusOK, "", true
@@ -391,14 +391,13 @@ func DeleteSecretHandler(s store.Store) http.HandlerFunc {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.secrets.delete")
 		defer span.End()
 
-		apiKey := r.Header.Get("X-API-Key")
-		accountID, err := validateAPIKey(ctx, s, apiKey)
+		accountID, err := controlActorAccount(ctx)
 		if err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		if err := s.VerifyWorkspaceOwner(ctx, accountID); err != nil {
+		if err := verifyWorkspaceActor(ctx, accountID); err != nil {
 			http.Error(w, "failed to resolve workspace", http.StatusInternalServerError)
 			return
 		}

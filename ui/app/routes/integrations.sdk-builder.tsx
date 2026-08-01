@@ -10,46 +10,19 @@ export const meta: MetaFunction = ({ matches }) => {
   ];
 };
 import { api, type Service, type IntegrationObject, BASE } from "~/lib/api";
+import {
+  listArtifactBuildSelectors,
+  listArtifactOwningTeams,
+  planAndApplyArtifact,
+} from "~/lib/artifact-builder";
+import type { ArtifactBuildSelector, ArtifactOwningTeam } from "~/lib/artifact-builder-contract";
 import { getApiKey } from "~/lib/session";
 import { useToast } from "~/components/Toast";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import { Download, CheckSquare, Square, ChevronDown, ChevronRight, Search, Code, Server, AlertTriangle, Loader2, X, ChevronLeft, Copy, Check } from "lucide-react";
 import EndpointSelectionList from "~/components/EndpointSelectionList";
 import WebhookSelectionList from "~/components/WebhookSelectionList";
-
-const SERVICES_QUERY = `
-  query($page: Int!, $limit: Int!) {
-    services(page: $page, limit: $limit) {
-      data {
-        id name slug canonical_ref provider { name handle } description base_url endpoint_count webhook_count
-        incoming_webhook_config { auth_type }
-        resources { id name }
-      }
-      total
-    }
-  }
-`;
-
-const PUBLIC_SERVICES_QUERY = `
-  query($q: String!) {
-    searchServices(q: $q) {
-      id name slug canonical_ref provider { name handle } description base_url endpoint_count webhook_count
-      incoming_webhook_config { auth_type }
-      resources { id name }
-    }
-  }
-`;
-
-const SELECTED_SERVICE_QUERY = `
-  query($id: String!) {
-    service(id: $id) {
-      id name slug canonical_ref provider { name handle } description base_url endpoint_count webhook_count
-      incoming_webhook_config { auth_type }
-      resources { id name }
-      webhooks { id name description method }
-    }
-  }
-`;
+import { ArtifactOwnerControls } from "~/components/access/ArtifactOwnerControls";
 
 export const clientLoader = async ({ request }: any) => {
   const token = getApiKey();
@@ -58,31 +31,9 @@ export const clientLoader = async ({ request }: any) => {
     return redirect(`/login?next=${encodeURIComponent(url.pathname + url.search)}`);
   }
 
-  const q = url.searchParams.get("q");
-  const selectedService = url.searchParams.get("serviceId") || url.searchParams.get("service") || url.searchParams.get("slug");
-
-  try {
-    if (q) {
-      const res = await api.graphql<{ searchServices: any[] }>(
-        PUBLIC_SERVICES_QUERY, { q }, token || undefined
-      );
-      return { services: res.searchServices, total: res.searchServices.length, isAuth: !!token };
-    }
-
-    if (selectedService) {
-      const res = await api.graphql<{ service: any | null }>(
-        SELECTED_SERVICE_QUERY, { id: selectedService }, token || undefined
-      );
-      return { services: res.service ? [res.service] : [], total: res.service ? 1 : 0, isAuth: !!token };
-    }
-
-    const res = await api.graphql<{ services: { data: any[]; total: number } }>(
-      SERVICES_QUERY, { page: 1, limit: 20 }, token
-    );
-    return { services: res.services.data, total: res.services.total, isAuth: true };
-  } catch {
-    return { services: [], total: 0, isAuth: !!token };
-  }
+  // Team-aware selectors are Engine-owned and depend on the user's chosen
+  // owner. Do not broad-load Registry services before that choice exists.
+  return { services: [], total: 0, isAuth: true };
 };
 
 type ServiceData = {
@@ -92,10 +43,63 @@ type ServiceData = {
   serviceVersions: any[];
 };
 
+type ArtifactSelection = {
+  service_id: string;
+  service_name?: string;
+  service_slug?: string;
+  select_all: boolean;
+  endpoint_ids: string[];
+  webhook_ids: string[];
+  service_version_id?: string;
+};
+
+function artifactServicesConfig(selections: ArtifactSelection[], services: ServiceData[]): Record<string, unknown> {
+  return Object.fromEntries(selections.map((selection) => artifactServiceEntry(selection, services)));
+}
+
+function artifactServiceEntry(selection: ArtifactSelection, services: ServiceData[]): [string, Record<string, unknown>] {
+  const service = services.find((item) => item.service.id === selection.service_id);
+  return [artifactSelectionKey(selection), {
+    version: service?.serviceVersions.find((version) => version.id === selection.service_version_id)?.name,
+    operations: artifactOperations(selection, service),
+    webhooks: artifactWebhooks(selection, service),
+    select_all: selection.select_all,
+  }];
+}
+
+function artifactSelectionKey(selection: ArtifactSelection): string {
+  return selection.service_slug || selection.service_name || selection.service_id;
+}
+
+function artifactOperations(selection: ArtifactSelection, service?: ServiceData): string[] {
+  if (selection.select_all) return [];
+  const selected = new Set(selection.endpoint_ids);
+  return (service?.integrations || []).filter((endpoint) => selected.has(endpoint.id)).map((endpoint) => endpoint.name);
+}
+
+function artifactWebhooks(selection: ArtifactSelection, service?: ServiceData): string[] {
+  const selected = new Set(selection.webhook_ids);
+  return (service?.webhooks || []).filter((webhook) => selected.has(webhook.id)).map((webhook) => webhook.name);
+}
+
 const capitalizeFirstLetter = (value?: string | null) => {
   if (!value) return "";
   return value.charAt(0).toUpperCase() + value.slice(1);
 };
+
+async function loadRegistryServicesByIDs(serviceIds: string[]): Promise<Service[]> {
+  if (serviceIds.length === 0) return [];
+  const response = await api.graphql<{ servicesByIds: Service[] }>(`
+    query ArtifactBuilderServices($serviceIds: [String!]!) {
+      servicesByIds(serviceIds: $serviceIds) {
+        id name slug canonical_ref provider { name handle } description base_url endpoint_count webhook_count
+        event_extraction_path incoming_webhook_config { auth_type }
+        resources { id name }
+      }
+    }
+  `, { serviceIds });
+  return response.servicesByIds || [];
+}
 
 // AddSelectedServiceToWorkspaceButton is Task 7's inline activation CTA
 // (engine_workspace_registration_plan.md): mirrors integrations.$id.tsx's
@@ -151,7 +155,7 @@ function AddSelectedServiceToWorkspaceButton({
 
 export default function SdkBuilder() {
   const toast = useToast();
-  const loaderData = useLoaderData<typeof loader>();
+  const loaderData = useLoaderData<typeof clientLoader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const isAuth = loaderData.isAuth;
@@ -160,9 +164,7 @@ export default function SdkBuilder() {
     ? loaderData.services[0]?.id
     : undefined;
 
-  const [data, setData] = useState<ServiceData[]>(() =>
-    (loaderData.services || []).map((s: any) => ({ service: s, integrations: [], webhooks: s.webhooks || [], serviceVersions: [] }))
-  );
+  const [data, setData] = useState<ServiceData[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -205,8 +207,12 @@ export default function SdkBuilder() {
   const [workspaceServiceIds, setWorkspaceServiceIds] = useState<Set<string>>(new Set());
 
   const [sdkName, setSdkName] = useState("");
-  const [sdkDescription, setSdkDescription] = useState("");
   const [artifactVersion, setArtifactVersion] = useState("1.0.0");
+  const [ownerTeams, setOwnerTeams] = useState<ArtifactOwningTeam[]>([]);
+  const [ownerTeamId, setOwnerTeamId] = useState("");
+  const [availableBuckets, setAvailableBuckets] = useState<ArtifactBuildSelector[]>([]);
+  const [bucketId, setBucketId] = useState("");
+  const [webhookAttachment, setWebhookAttachment] = useState("");
   const [generating, setGenerating] = useState(false);
   const [generateStatus, setGenerateStatus] = useState("");
   const [mcpDeployment, setMcpDeployment] = useState<{ id: string; url: string; token: string } | null>(null);
@@ -271,7 +277,6 @@ export default function SdkBuilder() {
         const targetSdk = sdkRes.sdks.items.find((s: any) => s.id === upgradeFrom);
         if (targetSdk) {
           setSdkName(targetSdk.name || "");
-          setSdkDescription(targetSdk.description || "");
           if (targetSdk.version) {
             const parts = targetSdk.version.split('.');
             if (parts.length >= 2 && !isNaN(Number(parts[1]))) {
@@ -371,43 +376,20 @@ export default function SdkBuilder() {
     });
   };
 
-  async function loadData(pageNum: number) {
+  async function loadData(pageNum: number, search = "") {
+    if (!ownerTeamId) {
+      processResponse([], 0);
+      return;
+    }
     setLoading(true);
     setError("");
     try {
       const limit = 20;
-      const queryStr = `
-        query($page: Int!, $limit: Int!) {
-          services(page: $page, limit: $limit) {
-            data {
-              id
-              name
-              slug
-              description
-              event_extraction_path
-              base_url
-              endpoint_count
-              webhook_count
-              incoming_webhook_config { auth_type }
-              resources { id name }
-            }
-            total
-          }
-        }
-      `;
-      let servicesData: any[] = [];
-      let total = 0;
-      if (isAuth) {
-        const response = await api.graphql<{ services: { data: any[], total: number } }>(queryStr, { page: pageNum, limit });
-        servicesData = response.services.data || [];
-        total = response.services.total || 0;
-      } else {
-        const response = await api.graphql<{ searchServices: any[] }>(PUBLIC_SERVICES_QUERY, { q: "" });
-        servicesData = response.searchServices || [];
-        total = servicesData.length;
-      }
+      const selectors = await listArtifactBuildSelectors(ownerTeamId, "SERVICE", search, limit, (pageNum - 1) * limit);
+      const servicesData = await loadRegistryServicesByIDs(selectors.items.map((item) => item.resource_id));
+      const total = selectors.total;
       processResponse(servicesData, total);
-      setTotalPages(isAuth ? Math.ceil(total / limit) || 1 : 1);
+      setTotalPages(Math.ceil(total / limit) || 1);
     } catch (err: any) {
       setError(err.message || "Failed to load services");
     } finally {
@@ -416,7 +398,6 @@ export default function SdkBuilder() {
   }
 
   async function runSearch(q: string) {
-    if (!q.trim()) return;
     setSearchParams(prev => {
       const next = new URLSearchParams(prev);
       next.set("q", q);
@@ -429,26 +410,7 @@ export default function SdkBuilder() {
     setSearching(true);
     setError("");
     try {
-      const queryStr = `
-        query($q: String!) {
-          searchServices(q: $q) {
-            id
-            name
-            slug
-            description
-            event_extraction_path
-            base_url
-            endpoint_count
-            webhook_count
-            incoming_webhook_config { auth_type }
-            resources { id name }
-          }
-        }
-      `;
-      const response = await api.graphql<{ searchServices: any[] }>(queryStr, { q });
-      const servicesData = response.searchServices || [];
-      processResponse(servicesData, servicesData.length);
-      setTotalPages(1);
+      await loadData(1, q.trim());
     } catch (err: any) {
       setError(err.message || "Failed to search services");
     } finally {
@@ -484,22 +446,43 @@ export default function SdkBuilder() {
       next.set("page", "1");
       return next;
     }, { replace: true });
-    loadData(1);
+    loadData(1, "");
   }
 
-  // Initialise totalPages from loader data
+  // Load only teams the actor may choose as an owner. This query intentionally
+  // exposes no bindings or roles, so builders do not need access.read.
   useEffect(() => {
-    const total = loaderData.total || 0;
-    setTotalItems(total);
-    setTotalPages(isAuth ? Math.ceil(total / 20) || 1 : 1);
+    listArtifactOwningTeams()
+      .then((page) => {
+        setOwnerTeams(page.items);
+        setOwnerTeamId((current) => current || page.items[0]?.id || "");
+      })
+      .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Could not load owning teams."));
   }, []);
 
-  // Re-fetch when page changes (skip page 1 — already loaded by the server)
   useEffect(() => {
-    if (isAuth && !query && page > 1) {
-      loadData(page);
+    if (!ownerTeamId) {
+      setAvailableBuckets([]);
+      setBucketId("");
+      processResponse([], 0);
+      return;
     }
-  }, [page, isAuth]);
+    setPage(1);
+    Promise.all([
+      loadData(1, query.trim()),
+      listArtifactBuildSelectors(ownerTeamId, "BUCKET", "", 100, 0),
+    ]).then(([, bucketPage]) => {
+      setAvailableBuckets(bucketPage.items);
+      setBucketId((current) => bucketPage.items.some((bucket) => bucket.resource_id === current) ? current : bucketPage.items[0]?.resource_id || "");
+    }).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Could not load team access."));
+  }, [ownerTeamId]);
+
+  // Re-fetch authorized services when page changes.
+  useEffect(() => {
+    if (ownerTeamId && page > 1) {
+      loadData(page, query.trim());
+    }
+  }, [page, ownerTeamId]);
 
   // Which services are already tracked in this account's workspace --
   // loaded once, best-effort. The Engine (not the Registry) owns this, so a
@@ -727,6 +710,7 @@ export default function SdkBuilder() {
       : (selections[service.id]?.size || 0);
     return acc + endpointCount + (webhookSelections[service.id]?.size || 0);
   }, 0);
+  const totalSelectedWebhooks = Object.values(webhookSelections).reduce((total, selected) => total + selected.size, 0);
   const totalSelectedServices = data.filter(({ service, webhooks }) =>
     selectAllServices.has(service.id) ||
     (selections[service.id]?.size || 0) > 0 ||
@@ -848,6 +832,21 @@ export default function SdkBuilder() {
       return;
     }
 
+    if (!ownerTeamId) {
+      toast.warning("Choose the team that will own this SDK or MCP server.");
+      return;
+    }
+    const selectedBucket = availableBuckets.find((bucket) => bucket.resource_id === bucketId);
+    if (!selectedBucket) {
+      toast.warning("Choose a bucket available to both you and the owning team.");
+      return;
+    }
+    const hasWebhookSelections = selectionPayload.some((selection) => selection.webhook_ids.length > 0);
+    if (hasWebhookSelections && !webhookAttachment.trim()) {
+      toast.warning("Enter the webhook bundle that supplies the selected events.");
+      return;
+    }
+
     if (generationMode === "sdk" && isDuplicate) {
       const confirmed = await toast.confirm(`An SDK with name "${sdkName.trim()}" and version "${artifactVersion.trim()}" already exists. Generating it again will overwrite the existing package file. Are you sure you want to continue?`);
       if (!confirmed) {
@@ -858,53 +857,29 @@ export default function SdkBuilder() {
     setGenerating(true);
     setGenerateStatus("Starting generation...");
     try {
+      const services = artifactServicesConfig(selectionPayload, data);
+      const config: Record<string, unknown> = {
+        apiVersion: "fused/v1",
+        kind: generationMode,
+        name: sdkName.trim(),
+        version: artifactVersion.trim(),
+        bucket: selectedBucket.display_name,
+        services,
+      };
+      if (generationMode === "sdk") config.language = language;
+      if (hasWebhookSelections) config.webhook_attachment = webhookAttachment.trim();
+
       if (generationMode === "mcp") {
         setGenerateStatus("Deploying MCP server...");
-        const services = Object.fromEntries(selectionPayload.map(sel => {
-          const svcData = data.find(item => item.service.id === sel.service_id);
-          const selectedVersion = svcData?.serviceVersions?.find((version: any) => version.id === sel.service_version_id);
-          const selectedIDs = new Set(sel.endpoint_ids);
-          const operations = sel.select_all
-            ? []
-            : (svcData?.integrations || []).filter(endpoint => selectedIDs.has(endpoint.id)).map(endpoint => endpoint.name);
-          return [sel.service_slug || sel.service_name || sel.service_id, {
-            version: selectedVersion?.name,
-            operations,
-            select_all: sel.select_all,
-          }];
-        }));
-        const config = {
-          apiVersion: "fused/v1",
-          kind: "mcp",
-          name: sdkName.trim(),
-          version: artifactVersion.trim(),
-          bucket: "default",
-          services,
-        };
-        const result = await api.mcpGraphql<{ deployMcpServer: { id: string; mcp_url: string; execution_token: string } }>(
-          `mutation($config: EngineJSON!) {
-            deployMcpServer(config: $config) { id mcp_url execution_token }
-          }`,
-          { config },
-        );
+        const result = await planAndApplyArtifact<{ artifact_id: string; mcp_url: string; execution_token?: string }>("mcp", ownerTeamId, config);
         await syncWorkspacePinsAfterGenerate(selectionPayload);
-        setMcpDeployment({ id: result.deployMcpServer.id, url: result.deployMcpServer.mcp_url, token: result.deployMcpServer.execution_token });
+        setMcpDeployment({ id: result.artifact_id, url: result.mcp_url, token: result.execution_token || "" });
         setGenerateStatus("MCP server deployed");
         return;
       }
 
-      // reuse the payload already built above
-
-      const res = await api.sdks.generateAsync(
-        sdkName,
-        sdkDescription,
-        artifactVersion,
-        targetType,
-        language,
-        selectionPayload,
-        false,
-        upgradeFrom || undefined,
-      );
+      setGenerateStatus("Planning and generating SDK...");
+      const res = await planAndApplyArtifact<{ job_id: string }>("sdk", ownerTeamId, config);
 
       const ctrl = new AbortController();
       const processGenerationStreamEvent = (
@@ -1011,7 +986,7 @@ export default function SdkBuilder() {
               <button
                 data-track="search_services"
                 type="submit"
-                disabled={searching}
+                disabled={searching || !ownerTeamId}
                 className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 disabled:opacity-50 cursor-pointer"
                 title="Search"
               >
@@ -1045,10 +1020,10 @@ export default function SdkBuilder() {
               {filteredData.length === 0 ? (
                 <div className="text-center py-12 text-slate-400 bg-white rounded-xl border border-dashed border-slate-200">
                   <p className="font-medium text-slate-600">
-                    {query ? "No services found matching your search." : "No services yet."}
+                    {!ownerTeamId ? "Choose an owning team to see available services." : query ? "No available services match your search." : "No shared services are available."}
                   </p>
                   <p className="mt-1 text-sm">
-                    Search for a service to get started, including pre-curated popular services.
+                    {ownerTeamId ? "Ask an access administrator to give both you and the team access." : "Ownership determines which services and buckets can be selected."}
                   </p>
                 </div>
               ) : (
@@ -1061,9 +1036,6 @@ export default function SdkBuilder() {
                   const serviceEndpointCount = service.endpoint_count || integrations.length || 0;
                   const serviceWebhookCount = service.webhook_count || webhooks.length || 0;
                   const totalSelectedItems = (isSelectAll ? serviceEndpointCount : (selectedSet?.size || 0)) + selectedWebhookSet.size;
-                  const allSelected = isLoaded && isSelectAll && selectedWebhookSet.size === serviceWebhookCount;
-                  const someSelected = totalSelectedItems > 0 && !allSelected;
-
                   return (
                     <div key={service.id} className="bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow">
                       <div 
@@ -1169,10 +1141,8 @@ export default function SdkBuilder() {
                                   </div>
                                 )}
 
-                                {/* Webhooks section -- hidden entirely in MCP mode: deployMcpServer
-                                    (internal/engine/api/mcp_graphql.go) has no webhook_ids
-                                    argument, so selecting one here would silently do nothing. */}
-                                {generationMode !== "mcp" && (
+                                {/* SDK and MCP now share the same Engine plan
+                                    contract, including webhook bundle selections. */}
                                   <>
                                     <div
                                       onClick={() => hasWebhooks && toggleSection(service.id, "webhooks")}
@@ -1222,7 +1192,6 @@ export default function SdkBuilder() {
                                       </div>
                                     )}
                                   </>
-                                )}
                               </div>
                             );
                           })()}
@@ -1294,6 +1263,7 @@ export default function SdkBuilder() {
                 toolname="generate_sdk"
                 tooldescription="Generate a native SDK or MCP server based on the selected endpoints. Requires name and version."
               >
+                <ArtifactOwnerControls ownerTeams={ownerTeams} ownerTeamId={ownerTeamId} buckets={availableBuckets} bucketId={bucketId} onOwnerTeamChange={setOwnerTeamId} onBucketChange={setBucketId} />
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1.5">{generationMode === "mcp" ? "Server Name" : "Package Name"}</label>
                   <input
@@ -1310,15 +1280,17 @@ export default function SdkBuilder() {
                   />
                 </div>
                 
-                {generationMode === "sdk" && <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Description (Optional)</label>
-                  <textarea
-                    rows={2}
-                    placeholder="Internal unified API client"
-                    value={sdkDescription}
-                    onChange={e => setSdkDescription(e.target.value)}
-                    className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all bg-slate-50 focus:bg-white resize-none"
+                {totalSelectedWebhooks > 0 && <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Webhook bundle</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="customer-events"
+                    value={webhookAttachment}
+                    onChange={(event) => setWebhookAttachment(event.target.value)}
+                    className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm bg-white"
                   />
+                  <p className="mt-1.5 text-xs text-slate-500">Name of the team-owned webhook configuration that supplies these events.</p>
                 </div>}
                 
                 <div>
@@ -1459,7 +1431,7 @@ export default function SdkBuilder() {
                   <button
                     data-track="generate_sdk_or_mcp"
                     type="submit"
-                    disabled={generating || totalSelected === 0 || !sdkName.trim() || totalSelectedServices > 10 || unactivatedSelectedServiceIds.length > 0}
+                    disabled={generating || totalSelected === 0 || !sdkName.trim() || !ownerTeamId || !bucketId || totalSelectedServices > 10 || unactivatedSelectedServiceIds.length > 0}
                     className={`w-full py-3 px-4 ${generationMode === 'mcp' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-blue-600 hover:bg-blue-700'} disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl shadow-sm hover:shadow transition-all flex items-center justify-center gap-2 active:scale-[0.98]`}
                   >
                     {generating ? (

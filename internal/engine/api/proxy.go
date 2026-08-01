@@ -17,7 +17,8 @@ import (
 // handling) lives, so GraphQL and REST proxy handlers don't each reimplement
 // it -- that's the DRY boundary this file exists to enforce.
 type RegistryProxy struct {
-	target *url.URL
+	target     *url.URL
+	licenseKey string
 }
 
 // NewRegistryProxy builds a proxy targeting the Registry's base URL.
@@ -27,7 +28,7 @@ type RegistryProxy struct {
 // stripped so one proxy instance can serve both /graphql and REST paths --
 // mirroring the same trailing-suffix trim registry_client.go already does
 // when it derives the handshake URL from the same config value.
-func NewRegistryProxy(registryEndpoint string) *RegistryProxy {
+func NewRegistryProxy(registryEndpoint, licenseKey string) *RegistryProxy {
 	base := strings.TrimSuffix(registryEndpoint, "/graphql")
 
 	target, err := url.Parse(base)
@@ -41,18 +42,15 @@ func NewRegistryProxy(registryEndpoint string) *RegistryProxy {
 		target = &url.URL{}
 	}
 
-	return &RegistryProxy{target: target}
+	return &RegistryProxy{target: target, licenseKey: licenseKey}
 }
 
 // Forward relays r to the Registry and copies the Registry's response
 // (status, headers, body) back to w unchanged. stripPrefix, if non-empty, is
 // removed from the outgoing request path before forwarding.
 //
-// The caller's original X-API-Key header is left untouched: the Registry
-// owns identity resolution for its own endpoints, and Engine-side key
-// validation (done by callers of Forward, before they call it) only gates
-// whether the request reaches this point -- it doesn't replace the
-// Registry's own auth check.
+// Local caller credentials stop at Engine. Registry sees only the licensed
+// workspace identity after Engine has authenticated and authorized the actor.
 func (p *RegistryProxy) Forward(w http.ResponseWriter, r *http.Request, stripPrefix string) {
 	proxy := p.newReverseProxy(stripPrefix)
 	proxy.ModifyResponse = func(res *http.Response) error {
@@ -113,6 +111,10 @@ func (p *RegistryProxy) newReverseProxy(stripPrefix string) *httputil.ReversePro
 		// without this the Registry would see the Engine's inbound Host
 		// instead of its own -- breaking any Host-based routing on that side.
 		req.Host = targetHost
+		// Personal and service-account credentials are Engine-local. Removing
+		// both accepted inbound forms prevents them becoming Registry identity.
+		req.Header.Set("Authorization", "Bearer "+p.licenseKey)
+		req.Header.Set("X-API-Key", p.licenseKey)
 		// X-Forwarded-For is intentionally NOT set here: httputil.ReverseProxy
 		// already appends the client IP to it in ServeHTTP itself (has done so
 		// since early Go versions), so adding it in the Director would double
@@ -131,6 +133,11 @@ func stripCORSHeaders(res *http.Response) {
 	res.Header.Del("Access-Control-Expose-Headers")
 	res.Header.Del("Access-Control-Allow-Credentials")
 	res.Header.Del("Access-Control-Max-Age")
+	// Registry authentication is an internal Engine concern. Even a malformed
+	// upstream response must not reflect the licence into a local client.
+	res.Header.Del("Authorization")
+	res.Header.Del("Proxy-Authorization")
+	res.Header.Del("X-API-Key")
 }
 
 // Forwarder is the subset of RegistryProxy's behavior the proxy handlers

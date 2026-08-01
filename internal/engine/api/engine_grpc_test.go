@@ -2,14 +2,20 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/auth"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 // TestEngineGRPCStartConnectSessionCreatesAuthorizationURL covers the
@@ -17,12 +23,18 @@ import (
 // as REST/GraphQL instead of minting provider URLs client-side.
 func TestEngineGRPCStartConnectSessionCreatesAuthorizationURL(t *testing.T) {
 	fixture := newConnectRuntimeFixture(t)
+	artifactID := attachConnectTestArtifact(&fixture)
+	runtimeStore := &grpcRuntimeStore{
+		Store:      fixture.store,
+		accountID:  fixture.store.accountID,
+		artifactID: artifactID,
+		scope:      fixture.store.artifactScopes[artifactID],
+	}
 	// configStore/natsClient are nil: this test only exercises StartConnectSession,
 	// which (like GetConnection/ListConnectionResources) never touches the
 	// webhook-only fields SubscribeWebhooks added to EngineGRPCServer.
-	srv := NewEngineGRPCServer(fixture.store, fixture.verifier, fixture.masterKey, nil, nil)
-	ctx := grpcTestContext()
-	artifactID := attachConnectTestArtifact(&fixture)
+	srv := NewEngineGRPCServer(runtimeStore, fixture.verifier, fixture.masterKey, nil, nil)
+	ctx := grpcTestContext(artifactID)
 
 	resp, err := srv.StartConnectSession(ctx, &enginev1.StartConnectSessionRequest{
 		BucketId:            fixture.bucketID.String(),
@@ -77,11 +89,24 @@ func TestEngineGRPCGetConnectionReturnsMetadataOnly(t *testing.T) {
 			EncryptedAccessToken: "encrypted-access-token",
 		}},
 	}
+	artifactID := uuid.New()
+	selections, err := json.Marshal([]models.SDKSelection{{ServiceID: serviceID}})
+	if err != nil {
+		t.Fatalf("marshal selections: %v", err)
+	}
+	runtimeStore := &grpcRuntimeStore{
+		Store:      s,
+		accountID:  s.accountID,
+		artifactID: artifactID,
+		scope: &store.ArtifactScope{
+			AccountID: s.accountID, ArtifactID: artifactID, BucketID: bucketID, Selections: selections,
+		},
+	}
 	// configStore/natsClient are nil -- see the identical note above; this
 	// test only exercises GetConnection.
-	srv := NewEngineGRPCServer(s, &mockVerifier{}, []byte("12345678901234567890123456789012"), nil, nil)
+	srv := NewEngineGRPCServer(runtimeStore, &mockVerifier{}, []byte("12345678901234567890123456789012"), nil, nil)
 
-	resp, err := srv.GetConnection(grpcTestContext(), &enginev1.GetConnectionRequest{ConnectionId: connectionID.String()})
+	resp, err := srv.GetConnection(grpcTestContext(artifactID), &enginev1.GetConnectionRequest{ConnectionId: connectionID.String()})
 	if err != nil {
 		t.Fatalf("GetConnection() error = %v", err)
 	}
@@ -91,10 +116,56 @@ func TestEngineGRPCGetConnectionReturnsMetadataOnly(t *testing.T) {
 	if strings.Contains(resp.String(), "encrypted-access-token") {
 		t.Fatalf("connection response leaked encrypted token material: %s", resp.String())
 	}
+	controlCredentialContext := metadata.NewIncomingContext(context.Background(), metadata.Pairs(
+		"x-api-key", "fused_control_credential",
+		"x-artifact-id", artifactID.String(),
+	))
+	_, err = srv.GetConnection(controlCredentialContext, &enginev1.GetConnectionRequest{ConnectionId: connectionID.String()})
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("control credential error = %v, want Unauthenticated", err)
+	}
+
+	otherSelections, err := json.Marshal([]models.SDKSelection{{ServiceID: uuid.New()}})
+	if err != nil {
+		t.Fatalf("marshal other selections: %v", err)
+	}
+	runtimeStore.scope.Selections = otherSelections
+	resp, err = srv.GetConnection(grpcTestContext(artifactID), &enginev1.GetConnectionRequest{ConnectionId: connectionID.String()})
+	if err != nil || resp.GetFound() {
+		t.Fatalf("cross-service GetConnection = (%#v, %v), want hidden", resp, err)
+	}
+	_, err = srv.ListConnectionResources(grpcTestContext(artifactID), &enginev1.ListConnectionResourcesRequest{ConnectionId: connectionID.String()})
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("cross-service ListConnectionResources error = %v, want NotFound", err)
+	}
 }
 
-func grpcTestContext() context.Context {
+func grpcTestContext(artifactID uuid.UUID) context.Context {
 	// Tests mirror generated SDK metadata so handler auth is exercised without
 	// standing up a real gRPC listener.
-	return metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-api-key", "fsk_test"))
+	return metadata.NewIncomingContext(context.Background(), metadata.Pairs(
+		"x-api-key", "fsk_test",
+		"x-artifact-id", artifactID.String(),
+	))
+}
+
+type grpcRuntimeStore struct {
+	store.Store
+	accountID  uuid.UUID
+	artifactID uuid.UUID
+	scope      *store.ArtifactScope
+}
+
+func (s *grpcRuntimeStore) ValidateToken(_ context.Context, artifactID uuid.UUID, tokenHash string) (uuid.UUID, error) {
+	if artifactID != s.artifactID || tokenHash != auth.HashToken("fsk_test") {
+		return uuid.Nil, errors.New("unauthorized")
+	}
+	return s.accountID, nil
+}
+
+func (s *grpcRuntimeStore) GetArtifactScope(_ context.Context, artifactID uuid.UUID) (*store.ArtifactScope, error) {
+	if artifactID != s.artifactID || s.scope == nil {
+		return nil, store.ErrArtifactScopeNotFound
+	}
+	return s.scope, nil
 }

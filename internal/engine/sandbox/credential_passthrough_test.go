@@ -265,6 +265,6 @@ func (m *mockSecretResolver) ResolveExecutionCredentials(_ context.Context, requ
 	return out, nil, nil
 }
 
-func (m *mockSecretResolver) GetWebhookSecret(ctx context.Context, accountID uuid.UUID, secretRef string) (string, error) {
+func (m *mockSecretResolver) GetWebhookSecret(ctx context.Context, accountID, bucketID uuid.UUID, secretRef string) (string, error) {
 	return "", nil
 }

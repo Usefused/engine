@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
@@ -27,7 +28,7 @@ func TestSetWorkspaceConnectionProfileValidatesAndMaterializesAtomically(t *test
 	registry := &profileRegistryClient{operations: []fusedobject.Endpoint{{
 		Name: "getAccessibleResources", Method: "GET",
 	}}}
-	ctx := context.WithValue(context.Background(), mcpGraphQLActorContextKey, mcpGraphQLActor{accountID: accountID})
+	ctx := profileGraphQLTestContext(accountID)
 	args := map[string]interface{}{
 		"service_id":         serviceID.String(),
 		"service_version_id": versionID.String(), "version": "2026-07-01", "auth_type": "oauth",
@@ -72,7 +73,7 @@ func TestSetWorkspaceConnectionProfileRejectsInactiveVersion(t *testing.T) {
 	profileStore := &profileGraphQLStore{serviceID: serviceID}
 	verifier := &profileVerifier{metadata: &fusedobject.ServiceMetadata{ID: serviceID, ServiceVersionID: versionID}}
 	registry := &profileRegistryClient{}
-	ctx := context.WithValue(context.Background(), mcpGraphQLActorContextKey, mcpGraphQLActor{accountID: accountID})
+	ctx := profileGraphQLTestContext(accountID)
 	args := map[string]interface{}{
 		"service_id": serviceID.String(), "service_version_id": versionID.String(),
 		"version": "2026-07-01", "auth_type": "oauth",
@@ -81,6 +82,11 @@ func TestSetWorkspaceConnectionProfileRejectsInactiveVersion(t *testing.T) {
 	if _, err := setWorkspaceConnectionProfile(graphql.ResolveParams{Context: ctx, Args: args}, profileStore, verifier, registry); err == nil {
 		t.Fatal("expected inactive service version to be rejected")
 	}
+}
+
+func profileGraphQLTestContext(accountID uuid.UUID) context.Context {
+	ctx := context.WithValue(context.Background(), mcpGraphQLActorContextKey, mcpGraphQLActor{accountID: accountID})
+	return accesscontrol.ContextWithActor(ctx, accesscontrol.Actor{AccountID: accountID, WorkspaceID: uuid.New()})
 }
 
 type profileGraphQLStore struct {

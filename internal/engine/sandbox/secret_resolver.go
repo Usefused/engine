@@ -33,13 +33,10 @@ const connectedAuthRefreshWindow = 5 * time.Minute
 
 type SecretResolver interface {
 	ResolveExecutionCredentials(ctx context.Context, request CredentialRequest) (map[string]any, []store.BucketValue, error)
-	// GetWebhookSecret resolves a single webhook signing secret from its
-	// ${bucket.<name>.secret.<key>} reference (see internal/shared/secretref)
-	// without loading all credentials for any service. secretRef is the
-	// WorkspaceWebhook row's own SecretRef, resolved at registration time --
-	// there is no per-service or per-label lookup anymore, since the secret
-	// belongs to the referenced bucket, not to this webhook registration.
-	GetWebhookSecret(ctx context.Context, accountID uuid.UUID, secretRef string) (string, error)
+	// GetWebhookSecret resolves one signing secret through the immutable
+	// bucket ID captured at apply. secretRef supplies only the validated key;
+	// its bucket name is never trusted for runtime lookup.
+	GetWebhookSecret(ctx context.Context, accountID, bucketID uuid.UUID, secretRef string) (string, error)
 }
 
 // connectedAuthFailureRecorder is intentionally narrower than SecretResolver;
@@ -963,17 +960,19 @@ func credentialString(credentials map[string]any, key string) string {
 // secretRef is a ${bucket.<name>.secret.<key>} reference (plan item 4,
 // bracketed grammar shared with connectionprofile's ${resource.*}
 // expressions -- see internal/shared/secretref) -- stored verbatim on the
-// WorkspaceWebhook row at registration time, not a
-// per-service or per-label key, since the secret belongs to whichever bucket
-// the reference names, independent of which service or registration reads
-// it. An empty secretRef means the registration has no signing secret
-// configured; the caller decides what that means for verification.
-func (r *secretResolver) GetWebhookSecret(ctx context.Context, accountID uuid.UUID, secretRef string) (string, error) {
+// WorkspaceWebhook row alongside its resolved immutable bucket ID. The
+// reference supplies the key only: its human-readable bucket name can never
+// redirect runtime lookup. An empty ref and zero bucket ID mean no signing
+// secret is configured; the caller decides what that means for verification.
+func (r *secretResolver) GetWebhookSecret(ctx context.Context, accountID, bucketID uuid.UUID, secretRef string) (string, error) {
 	ctx, span := otel.Tracer("engine").Start(ctx, "GetWebhookSecret")
 	defer span.End()
 
-	if strings.TrimSpace(secretRef) == "" {
+	if strings.TrimSpace(secretRef) == "" && bucketID == uuid.Nil {
 		return "", nil
+	}
+	if strings.TrimSpace(secretRef) == "" || bucketID == uuid.Nil {
+		return "", errors.New("stored webhook secret binding is incomplete")
 	}
 	if err := r.db.VerifyWorkspaceOwner(ctx, accountID); err != nil {
 		return "", fmt.Errorf("failed to get workspace ID: %w", err)
@@ -987,16 +986,11 @@ func (r *secretResolver) GetWebhookSecret(ctx context.Context, accountID uuid.UU
 	// secret resolved against is the first thing worth knowing when a
 	// delivery fails signature checks for reasons that aren't obvious from
 	// the provider's response alone. Key/value are never attached to spans.
-	span.SetAttributes(attribute.String("bucket", ref.Bucket))
-
-	bucket, err := r.db.GetBucketByName(ctx, ref.Bucket)
-	if err != nil {
-		return "", fmt.Errorf("failed to load bucket %q for webhook secret: %w", ref.Bucket, err)
-	}
+	span.SetAttributes(attribute.String("bucket_id", bucketID.String()))
 
 	// Bucket secrets are not service-scoped (see prepareWorkspaceBucketSecrets),
 	// so the lookup key is service_id = uuid.Nil, exactly as they were stored.
-	sec, err := r.db.GetSecret(ctx, bucket.ID, uuid.Nil, ref.SecretKeyName())
+	sec, err := r.db.GetSecret(ctx, bucketID, uuid.Nil, ref.SecretKeyName())
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch webhook secret: %w", err)
 	}

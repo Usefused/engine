@@ -26,7 +26,8 @@ func TestFetchServiceChangelogSinceSendsRFC3339SinceAndParsesRows(t *testing.T) 
 
 	var requestBody graphqlQuery
 	client := &HTTPRegistryClient{
-		endpoint: "https://registry.example/graphql",
+		endpoint:   "https://registry.example/graphql",
+		licenseKey: "engine-license-key",
 		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 			if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
 				t.Fatalf("decode request: %v", err)
@@ -87,7 +88,8 @@ func TestFetchServiceChangelogSinceSendsRFC3339SinceAndParsesRows(t *testing.T) 
 // error instead.
 func TestFetchServiceChangelogSinceRejectsMalformedID(t *testing.T) {
 	client := &HTTPRegistryClient{
-		endpoint: "https://registry.example/graphql",
+		endpoint:   "https://registry.example/graphql",
+		licenseKey: "engine-license-key",
 		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 			body := `{"data":{"serviceChangelogSince":[{"id":"not-a-uuid","service_id":"` + uuid.New().String() + `",
 				"config_type":"version","changelog_type":"new","created_at":"2026-07-21T00:00:00Z"}]}}`

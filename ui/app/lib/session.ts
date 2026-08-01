@@ -1,18 +1,33 @@
-import Cookies from "js-cookie";
-
 const KEY = "fused_api_key";
+let inMemoryKey: string | null = null;
 
 export function getApiKey(): string | null {
   if (typeof window === "undefined") return null;
-  return Cookies.get(KEY) || null;
+  try {
+    return window.sessionStorage.getItem(KEY) || inMemoryKey;
+  } catch {
+    return inMemoryKey;
+  }
 }
 
 export function setApiKey(key: string): void {
-  Cookies.set(KEY, key, { expires: 30, path: "/" });
+  inMemoryKey = key;
+  try {
+    window.sessionStorage.setItem(KEY, key);
+  } catch {
+    // The in-memory fallback keeps the current tab usable when browser policy
+    // disables storage without extending credential lifetime beyond this page.
+  }
 }
 
 export function clearApiKey(): void {
-  Cookies.remove(KEY, { path: "/" });
+  inMemoryKey = null;
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.removeItem(KEY);
+  } catch {
+    // Clearing the in-memory copy is sufficient when storage is unavailable.
+  }
 }
 
 export function isAuthenticated(): boolean {

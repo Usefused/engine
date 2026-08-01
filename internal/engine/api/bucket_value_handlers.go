@@ -27,14 +27,13 @@ func UpsertBucketValueHandler(s store.Store) http.HandlerFunc {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.bucketvalues.upsert")
 		defer span.End()
 
-		apiKey := r.Header.Get("X-API-Key")
-		accountID, err := validateAPIKey(ctx, s, apiKey)
+		accountID, err := controlActorAccount(ctx)
 		if err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		if err := s.VerifyWorkspaceOwner(ctx, accountID); err != nil {
+		if err := verifyWorkspaceActor(ctx, accountID); err != nil {
 			http.Error(w, "failed to resolve workspace", http.StatusInternalServerError)
 			return
 		}
@@ -90,14 +89,13 @@ func DeleteBucketValueHandler(s store.Store) http.HandlerFunc {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.bucketvalues.delete")
 		defer span.End()
 
-		apiKey := r.Header.Get("X-API-Key")
-		accountID, err := validateAPIKey(ctx, s, apiKey)
+		accountID, err := controlActorAccount(ctx)
 		if err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		if err := s.VerifyWorkspaceOwner(ctx, accountID); err != nil {
+		if err := verifyWorkspaceActor(ctx, accountID); err != nil {
 			http.Error(w, "failed to resolve workspace", http.StatusInternalServerError)
 			return
 		}

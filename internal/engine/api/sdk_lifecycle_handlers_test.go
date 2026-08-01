@@ -14,11 +14,11 @@ import (
 	"github.com/Usefused/engine/internal/shared/models"
 )
 
-func mountSDKLifecycleRoutes(s store.Store) chi.Router {
-	r := chi.NewRouter()
+func mountSDKLifecycleRoutes(s *workspaceTestStore) chi.Router {
+	r := newControlTestRouter(s.accountID)
 	r.Post("/sdk-config/{id}/activate", ActivateSDKHandler(s))
 	r.Post("/sdk-config/{id}/deactivate", DeactivateSDKHandler(s))
-	r.Delete("/sdk-config/{id}", DeleteSDKHandler(s))
+	r.Delete("/sdk-config/{id}", DeleteSDKHandler(s, &mockForwarder{}))
 	return r
 }
 
@@ -211,9 +211,33 @@ func TestDeleteSDKHandler_DeletesScope(t *testing.T) {
 	if _, stillExists := s.mockScopes[artifactID]; stillExists {
 		t.Fatal("expected the scope to be gone after delete")
 	}
+	second := httptest.NewRecorder()
+	r.ServeHTTP(second, req.Clone(req.Context()))
+	if second.Code != http.StatusOK || len(s.deletedScopes) != 1 {
+		t.Fatalf("repeated delete = %d deletes=%d, want idempotent 200/1", second.Code, len(s.deletedScopes))
+	}
 }
 
-func TestDeleteSDKHandler_UnknownSDKReturns404(t *testing.T) {
+func TestDeleteSDKHandlerPreservesLocalStateWhenRegistryRetirementFails(t *testing.T) {
+	accountID, artifactID := uuid.New(), uuid.New()
+	s := &workspaceTestStore{accountID: accountID, mockScopes: map[uuid.UUID]*store.ArtifactScope{
+		artifactID: {AccountID: accountID, ArtifactID: artifactID, Kind: "sdk"},
+	}}
+	proxy := &recordingForwarder{status: http.StatusServiceUnavailable, body: `{"error":"registry unavailable"}`}
+	router := newControlTestRouter(accountID)
+	router.Delete("/sdk-config/{id}", DeleteSDKHandler(s, proxy))
+	request := httptest.NewRequest(http.MethodDelete, "/sdk-config/"+artifactID.String(), nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 body=%s", response.Code, response.Body.String())
+	}
+	if len(s.deletedScopes) != 0 || s.mockScopes[artifactID] == nil {
+		t.Fatalf("Registry failure changed local state: deleted=%#v scopes=%#v", s.deletedScopes, s.mockScopes)
+	}
+}
+
+func TestDeleteSDKHandler_UnknownSDKIsIdempotent(t *testing.T) {
 	s := &workspaceTestStore{accountID: uuid.New()}
 	r := mountSDKLifecycleRoutes(s)
 
@@ -223,8 +247,8 @@ func TestDeleteSDKHandler_UnknownSDKReturns404(t *testing.T) {
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("expected 404, got %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected idempotent 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 	if len(s.deletedScopes) != 0 {
 		t.Fatalf("must not attempt to delete a scope that doesn't exist, got %#v", s.deletedScopes)

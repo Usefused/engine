@@ -15,12 +15,65 @@ func TestEngineSchemaDefinesCurrentConfigColumnsDirectly(t *testing.T) {
 		"resolved_payload jsonb NOT NULL DEFAULT '{}'::jsonb",
 		"blockers         jsonb NOT NULL DEFAULT '[]'::jsonb",
 		"warnings         jsonb NOT NULL DEFAULT '[]'::jsonb",
+		"required_permissions jsonb NOT NULL",
 		"revision         integer NOT NULL DEFAULT 1",
 	}
 	for _, expected := range required {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("expected current schema containing %q", expected)
 		}
+	}
+}
+
+func TestEngineSchemaDefinesOwnedWebhooksWithoutCompatibilityMigration(t *testing.T) {
+	schema := strings.Join(engineSchemaQueries(), "\n")
+	if !strings.Contains(schema, "owning_config_key     text NOT NULL CHECK (owning_config_key <> '')") {
+		t.Fatal("clean webhook schema must require an owning config key")
+	}
+	for _, required := range []string{
+		"secret_bucket_id      uuid REFERENCES fused_buckets(id) ON DELETE RESTRICT",
+		"CHECK ((secret_ref = '' AND secret_bucket_id IS NULL)",
+	} {
+		if !strings.Contains(schema, required) {
+			t.Fatalf("clean webhook schema must contain immutable secret binding %q", required)
+		}
+	}
+	migrations := strings.Join(engineMigrationQueries(), "\n")
+	for _, legacy := range []string{"fused_workspace_webhooks ADD COLUMN", "fused_config_states_config_type_check", "fused_config_plans_config_type_check"} {
+		if strings.Contains(migrations, legacy) {
+			t.Fatalf("webhook clean-cutover contract retained compatibility migration %q", legacy)
+		}
+	}
+}
+
+func TestEngineSchemaEnforcesImmutableConfigIdentity(t *testing.T) {
+	joined := strings.Join(engineSchemaQueries(), "\n")
+	for _, expected := range []string{
+		"fused_reject_config_identity_change",
+		"OLD.config_type IS DISTINCT FROM NEW.config_type",
+		"OLD.owner_team_id IS DISTINCT FROM NEW.owner_team_id",
+		"trg_fused_config_identity_immutable",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("expected immutable config identity schema containing %q", expected)
+		}
+	}
+}
+
+func TestEngineSchemaAllowsAttemptedAuditOutcome(t *testing.T) {
+	joined := strings.Join(engineSchemaQueries(), "\n")
+	if !strings.Contains(joined, "'attempted', 'allowed', 'denied', 'succeeded', 'failed'") {
+		t.Fatal("current audit schema must distinguish attempted from allowed")
+	}
+	if strings.Contains(strings.Join(engineMigrationQueries(), "\n"), "attempted") {
+		t.Fatal("attempted audit outcome belongs in the clean schema, not a legacy migration")
+	}
+}
+
+func TestEngineSchemaDoesNotBackfillRequiredPermissions(t *testing.T) {
+	migrations := strings.Join(engineMigrationQueries(), "\n")
+	if strings.Contains(migrations, "required_permissions") {
+		t.Fatal("required_permissions belongs in the clean schema, not legacy migrations")
 	}
 }
 
@@ -241,7 +294,7 @@ func TestEngineSchemaContainsNoLegacyPersistence(t *testing.T) {
 	joined := strings.Join(engineSchemaQueries(), "\n")
 	forbidden := []string{
 		"fused_accounts",
-		"fused_users",
+		"fused_api_keys",
 		"fused_workspace_configs",
 		"ALTER TABLE",
 		"DROP TABLE",

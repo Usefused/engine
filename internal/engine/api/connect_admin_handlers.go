@@ -218,12 +218,12 @@ func resolveConnectAdminCall(w http.ResponseWriter, r *http.Request, s store.Sto
 }
 
 func resolveBucketAdminCall(w http.ResponseWriter, r *http.Request, s store.Store) (bucketAdminCall, bool) {
-	accountID, err := validateAPIKey(r.Context(), s, r.Header.Get("X-API-Key"))
+	accountID, err := controlActorAccount(r.Context())
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return bucketAdminCall{}, false
 	}
-	if err := s.VerifyWorkspaceOwner(r.Context(), accountID); err != nil {
+	if err := verifyWorkspaceActor(r.Context(), accountID); err != nil {
 		http.Error(w, "failed to resolve workspace", http.StatusInternalServerError)
 		return bucketAdminCall{}, false
 	}

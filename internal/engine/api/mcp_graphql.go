@@ -12,11 +12,14 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/google/uuid"
 	"github.com/graphql-go/graphql"
 	"github.com/graphql-go/handler"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
@@ -50,7 +53,12 @@ type mcpGraphQLContextKey string
 const (
 	mcpGraphQLActorContextKey mcpGraphQLContextKey = "mcp_graphql_actor"
 	mcpGraphQLRequestKey      mcpGraphQLContextKey = "mcp_graphql_request"
+	mcpGraphQLRevisionSinkKey mcpGraphQLContextKey = "mcp_graphql_revision_sink"
 )
+
+type authorizationRevisionSink interface {
+	SetRevision(int64) bool
+}
 
 // mcpGraphQLActor is the authenticated caller, resolved once per request
 // (mirroring resolveWorkspaceActor's single call per REST handler) rather
@@ -76,35 +84,54 @@ func requestFromContext(ctx context.Context) *http.Request {
 // MountMCPGraphQLRoute registers the Engine-native MCP GraphQL endpoint.
 func MountMCPGraphQLRoute(mux interface {
 	Post(pattern string, handlerFn http.HandlerFunc)
-}, configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient, masterKey []byte) error {
+}, configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient, masterKey []byte, revisionSinks ...authorizationRevisionSink) error {
 	schema, err := newMCPGraphQLSchema(configStore, s, verifier, registryClient, masterKey)
 	if err != nil {
 		return fmt.Errorf("build mcp graphql schema: %w", err)
 	}
-	mux.Post("/engine/graphql", mcpGraphQLHandler(schema, s))
+	slugResolver, _ := registryClient.(sdkServiceSlugResolver)
+	resources := graphQLAuthorizationResources{store: s, configStore: configStore, slugResolver: slugResolver, revisionSink: firstAuthorizationRevisionSink(revisionSinks)}
+	mux.Post("/engine/graphql", mcpGraphQLHandler(schema, resources))
 	return nil
 }
 
-// mcpGraphQLHandler wraps graphql-go's own handler with one auth check per
-// request, mirroring resolveWorkspaceActor's use everywhere else in this
-// package.
-func mcpGraphQLHandler(schema graphql.Schema, s store.Store) http.HandlerFunc {
+// mcpGraphQLHandler consumes the Actor hydrated by the control middleware and
+// authorizes the complete operation before graphql-go invokes any resolver.
+func mcpGraphQLHandler(schema graphql.Schema, resourceResolvers ...graphQLAuthorizationResources) http.HandlerFunc {
 	isDev := os.Getenv("FUSED_ENV") == "development"
 	h := handler.New(&handler.Config{Schema: &schema, Pretty: isDev, GraphiQL: isDev})
+	resources := firstGraphQLAuthorizationResources(resourceResolvers)
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
 		authStart := time.Now()
-		accountID, err := resolveWorkspaceActor(r.Context(), s, r)
+		actor, ok := accesscontrol.ActorFromContext(r.Context())
 		authDur := time.Since(authStart)
-		if err != nil {
+		if !ok {
 			setEngineGraphQLServerTiming(w.Header(), engineGraphQLTiming{auth: authDur, total: time.Since(start)})
-			http.Error(w, `{"error":"invalid API key or workspace not found"}`, http.StatusUnauthorized)
+			accesscontrol.WriteAuthorizationError(w, accesscontrol.ErrAuthenticationRequired)
 			return
 		}
-		ctx := context.WithValue(r.Context(), mcpGraphQLActorContextKey, mcpGraphQLActor{accountID: accountID})
+
+		authorizationStart := time.Now()
+		plan, err := authorizeEngineGraphQL(r, &schema, actor, resources, isDev)
+		// Publish the exact resolved authorization plan to an outer audit
+		// middleware even when authorization denies the operation.
+		accesscontrol.CaptureRequiredPermissions(r.Context(), plan.requirements)
+		accesscontrol.CaptureMissingPermissions(r.Context(), accesscontrol.MissingRequirements(err))
+		authorizationDur := time.Since(authorizationStart)
+		if err != nil {
+			setEngineGraphQLServerTiming(w.Header(), engineGraphQLTiming{auth: authDur, authorize: authorizationDur, total: time.Since(start)})
+			writeEngineGraphQLAuthorizationError(w, err)
+			return
+		}
+		ctx := context.WithValue(r.Context(), mcpGraphQLActorContextKey, mcpGraphQLActor{accountID: actor.AccountID})
 		ctx = context.WithValue(ctx, mcpGraphQLRequestKey, r)
+		if resources.revisionSink != nil {
+			ctx = context.WithValue(ctx, mcpGraphQLRevisionSinkKey, resources.revisionSink)
+		}
+		ctx = context.WithValue(ctx, graphQLResolvedConnectionsContextKey{}, plan.resolvedConnections)
 		// One auth-config cache per HTTP request so workspaceServices and
 		// workspaceServicePage (or any future field needing the same
 		// per-service auth options) share a single batched Registry call
@@ -116,27 +143,137 @@ func mcpGraphQLHandler(schema graphql.Schema, s store.Store) http.HandlerFunc {
 		h.ServeHTTP(bw, r.WithContext(ctx))
 		execDur := time.Since(execStart)
 		setEngineGraphQLServerTiming(bw.Header(), engineGraphQLTiming{
-			auth:    authDur,
-			execute: execDur,
-			total:   time.Since(start),
+			auth:      authDur,
+			authorize: authorizationDur,
+			execute:   execDur,
+			total:     time.Since(start),
 		})
 		bw.flushTo(w)
 	}
 }
 
+func firstAuthorizationRevisionSink(values []authorizationRevisionSink) authorizationRevisionSink {
+	if len(values) == 0 {
+		return nil
+	}
+	return values[0]
+}
+
 type engineGraphQLTiming struct {
-	auth    time.Duration
-	execute time.Duration
-	total   time.Duration
+	auth      time.Duration
+	authorize time.Duration
+	execute   time.Duration
+	total     time.Duration
 }
 
 func setEngineGraphQLServerTiming(header http.Header, timing engineGraphQLTiming) {
 	parts := []string{serverTimingMetric("engine_auth", timing.auth)}
+	if timing.authorize > 0 {
+		parts = append(parts, serverTimingMetric("engine_authz", timing.authorize))
+	}
 	if timing.execute > 0 {
 		parts = append(parts, serverTimingMetric("engine_graphql", timing.execute))
 	}
 	parts = append(parts, serverTimingMetric("engine_total", timing.total))
 	header.Set("Server-Timing", strings.Join(parts, ", "))
+}
+
+func authorizeEngineGraphQL(r *http.Request, schema *graphql.Schema, actor accesscontrol.Actor, resources graphQLAuthorizationResources, allowIntrospection bool) (graphQLAuthorizationPlan, error) {
+	ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.graphql.authorization")
+	defer span.End()
+	body, err := readAndRestoreBody(r)
+	if err != nil {
+		recordGraphQLAuthorizationSpan(span, graphQLAuthorizationPlan{}, "invalid")
+		return graphQLAuthorizationPlan{}, fmt.Errorf("%w: read body", errInvalidGraphQLRequest)
+	}
+	plan, err := buildGraphQLAuthorizationPlanWithOptions(schema, body, actor.WorkspaceID, allowIntrospection)
+	if err == nil {
+		if limitErr := accesscontrol.ValidateAuditableRequirementCount(plan.requirements); limitErr != nil {
+			err = fmt.Errorf("%w: %v", errInvalidGraphQLRequest, limitErr)
+		}
+	}
+	if err == nil {
+		// Static gates run before resource lookups so an obviously unauthorized
+		// deployment cannot probe bucket names or trigger Registry resolution.
+		err = authorizeGraphQLPlan(ctx, actor, plan)
+	}
+	if err == nil {
+		err = resolveDynamicGraphQLResources(ctx, &plan, resources, actor.WorkspaceID, r.Header.Get("X-API-Key"))
+	}
+	if err == nil {
+		if limitErr := accesscontrol.ValidateAuditableRequirementCount(plan.requirements); limitErr != nil {
+			err = fmt.Errorf("%w: %v", errInvalidGraphQLRequest, limitErr)
+		}
+	}
+	if err == nil {
+		err = authorizeGraphQLPlan(ctx, actor, plan)
+	}
+	outcome := "allowed"
+	if err != nil {
+		outcome = "denied"
+	}
+	recordGraphQLAuthorizationSpan(span, plan, outcome)
+	return plan, err
+}
+
+func resolveDynamicGraphQLResources(ctx context.Context, plan *graphQLAuthorizationPlan, resources graphQLAuthorizationResources, workspaceID uuid.UUID, apiKey string) error {
+	deploymentRequirements, err := resources.resolveDeployments(ctx, workspaceID, plan.deployments, apiKey)
+	if err != nil {
+		return err
+	}
+	connectionRequirements, connections, err := resources.resolveConnections(ctx, plan.connections)
+	if err != nil {
+		return err
+	}
+	plan.mergeRequirements(deploymentRequirements)
+	plan.mergeRequirements(connectionRequirements)
+	plan.resolvedConnections = connections
+	return nil
+}
+
+func firstGraphQLAuthorizationResources(values []graphQLAuthorizationResources) graphQLAuthorizationResources {
+	if len(values) == 0 {
+		return graphQLAuthorizationResources{}
+	}
+	return values[0]
+}
+
+func authorizeGraphQLPlan(ctx context.Context, actor accesscontrol.Actor, plan graphQLAuthorizationPlan) error {
+	authorizer := accesscontrol.SnapshotAuthorizer{}
+	if err := authorizer.CheckAll(ctx, actor, plan.requirements...); err != nil {
+		return err
+	}
+	for _, request := range plan.scopes {
+		scope, err := authorizer.Scope(ctx, actor, request.permission, request.resource)
+		if err != nil {
+			return err
+		}
+		if !scope.All && len(scope.IDs) == 0 {
+			return &accesscontrol.PermissionDeniedError{Missing: []accesscontrol.Requirement{{
+				Permission: request.permission,
+				Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: actor.WorkspaceID},
+			}}}
+		}
+	}
+	return nil
+}
+
+func recordGraphQLAuthorizationSpan(span trace.Span, plan graphQLAuthorizationPlan, outcome string) {
+	span.SetAttributes(
+		attribute.String("engine.authorization.outcome", outcome),
+		attribute.Int("engine.authorization.requirements", len(plan.requirements)),
+		attribute.Int("engine.graphql.root_fields", plan.rootFields),
+	)
+}
+
+func writeEngineGraphQLAuthorizationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errInvalidGraphQLRequest) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_graphql_request"})
+		return
+	}
+	accesscontrol.WriteAuthorizationError(w, err)
 }
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -214,6 +351,17 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 		// in GraphQL validation errors, so keep it aligned with that surface.
 		Name: "EngineQuery",
 		Fields: graphql.Fields{
+			"currentActorAccess":         currentActorAccessGraphQLField(),
+			"accessExplanation":          accessExplanationGraphQLField(s),
+			"auditEvents":                auditEventsGraphQLField(s),
+			"artifactBuildSelectors":     artifactBuildSelectorsGraphQLField(s),
+			"artifactOwningTeams":        artifactOwningTeamsGraphQLField(s),
+			"users":                      usersGraphQLField(s),
+			"user":                       userGraphQLField(s),
+			"userEffectiveAccess":        userEffectiveAccessGraphQLField(s),
+			"teamMembers":                teamMembersGraphQLField(s),
+			"teams":                      teamsGraphQLField(s),
+			"team":                       teamGraphQLField(s),
 			"workspaceConnectionProfile": workspaceConnectionProfileGraphQLField(s),
 			"workspaceConnectConfigs":    workspaceConnectConfigsGraphQLField(s),
 			"mcpServers":                 mcpServersField(s),
@@ -245,6 +393,24 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 	mutation := graphql.NewObject(graphql.ObjectConfig{
 		Name: "EngineMutation",
 		Fields: graphql.Fields{
+			"createUser":                        createUserGraphQLField(s),
+			"updateUser":                        updateUserGraphQLField(s),
+			"suspendUser":                       suspendUserGraphQLField(s),
+			"reactivateUser":                    reactivateUserGraphQLField(s),
+			"addTeamMember":                     addTeamMemberGraphQLField(s),
+			"removeTeamMember":                  removeTeamMemberGraphQLField(s),
+			"issueUserCredential":               issueUserCredentialGraphQLField(s),
+			"revokeUserCredential":              revokeUserCredentialGraphQLField(s),
+			"createTeam":                        createTeamGraphQLField(s),
+			"updateTeam":                        updateTeamGraphQLField(s),
+			"archiveTeam":                       archiveTeamGraphQLField(s),
+			"setTeamWorkspaceRole":              setTeamWorkspaceRoleGraphQLField(s),
+			"grantTeamServiceAccess":            grantTeamServiceAccessGraphQLField(s),
+			"revokeTeamServiceAccess":           revokeTeamServiceAccessGraphQLField(s),
+			"grantTeamBucketAccess":             grantTeamBucketAccessGraphQLField(s),
+			"revokeTeamBucketAccess":            revokeTeamBucketAccessGraphQLField(s),
+			"grantTeamArtifactAccess":           grantTeamArtifactAccessGraphQLField(s),
+			"revokeTeamArtifactAccess":          revokeTeamArtifactAccessGraphQLField(s),
 			"setWorkspaceConnectionProfile":     setWorkspaceConnectionProfileGraphQLField(s, verifier, registryClient),
 			"resetWorkspaceConnectionProfile":   resetWorkspaceConnectionProfileGraphQLField(s),
 			"updateWorkspaceNotificationStatus": updateWorkspaceNotificationStatusGraphQLField(configStore),
@@ -261,7 +427,14 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"refreshMissingServiceContracts":    refreshMissingServiceContractsGraphQLField(s, registryBatchRuntimeContractFetcher(registryClient)),
 		},
 	})
-	return graphql.NewSchema(graphql.SchemaConfig{Query: query, Mutation: mutation})
+	schema, err := graphql.NewSchema(graphql.SchemaConfig{Query: query, Mutation: mutation})
+	if err != nil {
+		return graphql.Schema{}, err
+	}
+	if err := validateGraphQLAuthorizationPolicy(&schema, engineGraphQLPolicy); err != nil {
+		return graphql.Schema{}, err
+	}
+	return schema, nil
 }
 
 func registryBatchRuntimeContractFetcher(registryClient sandbox.RegistryClient) BatchRuntimeContractFetcher {
@@ -288,7 +461,11 @@ func mcpServersField(s store.Store) *graphql.Field {
 			if limit <= 0 {
 				limit = 10
 			}
-			scopes, total, err := s.ListMCPScopesByAccount(p.Context, actor.accountID, limit, offset)
+			authorized, err := graphQLAuthorizedScope(p.Context, accesscontrol.PermissionArtifactRead, accesscontrol.ResourceArtifact)
+			if err != nil {
+				return nil, err
+			}
+			scopes, total, err := s.ListAuthorizedMCPScopesByAccount(p.Context, actor.accountID, authorized, limit, offset)
 			if err != nil {
 				return nil, fmt.Errorf("list mcp servers: %w", err)
 			}
@@ -299,6 +476,14 @@ func mcpServersField(s store.Store) *graphql.Field {
 			return map[string]interface{}{"items": items, "total": total}, nil
 		},
 	}
+}
+
+func graphQLAuthorizedScope(ctx context.Context, permission accesscontrol.Permission, resource accesscontrol.ResourceType) (accesscontrol.AuthorizedScope, error) {
+	actor, ok := accesscontrol.ActorFromContext(ctx)
+	if !ok {
+		return accesscontrol.AuthorizedScope{}, accesscontrol.ErrAuthenticationRequired
+	}
+	return (accesscontrol.SnapshotAuthorizer{}).Scope(ctx, actor, permission, resource)
 }
 
 // ─── mcpServerByName(name, version) ────────────────────────────────────────
@@ -439,7 +624,8 @@ func deployMCPServerField(configStore store.ConfigRepository, s store.Store, reg
 	return &graphql.Field{
 		Type: mcpServerType,
 		Args: graphql.FieldConfigArgument{
-			"config": &graphql.ArgumentConfig{Type: graphql.NewNonNull(engineJSONType)},
+			"config":        &graphql.ArgumentConfig{Type: graphql.NewNonNull(engineJSONType)},
+			"owner_team_id": &graphql.ArgumentConfig{Type: graphql.ID},
 		},
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 			actor, err := actorFromContext(p.Context)
@@ -457,6 +643,14 @@ func deployMCPServerField(configStore store.ConfigRepository, s store.Store, reg
 			if err := validateArtifactConfigDocument(doc, "mcp"); err != nil {
 				return nil, err
 			}
+			ownerTeamID, err := optionalGraphQLUUIDArg(p, "owner_team_id")
+			if err != nil {
+				return nil, err
+			}
+			controlActor, ok := accesscontrol.ActorFromContext(p.Context)
+			if !ok {
+				return nil, accesscontrol.ErrAuthenticationRequired
+			}
 			hash := sha256.Sum256(raw)
 			configKey := fmt.Sprintf("mcp:%s:%s", doc.Name, doc.Version)
 			request := requestFromContext(p.Context)
@@ -465,24 +659,20 @@ func deployMCPServerField(configStore store.ConfigRepository, s store.Store, reg
 				apiKey = request.Header.Get("X-API-Key")
 			}
 			planResult, err := createMCPConfigPlan(p.Context, configStore, s, registryClient, sdkPlanCall{
-				apiKey: apiKey, accountID: actor.accountID,
-				request: SDKConfigPlanRequest{ConfigKey: configKey, SourceHash: fmt.Sprintf("sha256:%x", hash), Config: raw}, document: doc,
+				apiKey: apiKey, accountID: actor.accountID, actor: controlActor,
+				request: SDKConfigPlanRequest{ConfigKey: configKey, SourceHash: fmt.Sprintf("sha256:%x", hash), OwnerTeamID: ownerTeamID, Config: raw}, document: doc,
 			})
 			if err != nil {
 				return nil, err
 			}
 			result, err := executeMCPConfigApply(p.Context, configStore, s, registryClient, sdkApplyCall{
-				apiKey: apiKey, accountID: actor.accountID,
-				planID: planResult.plan.ID, sourceHash: planResult.plan.SourceHash,
+				apiKey: apiKey, accountID: actor.accountID, actor: controlActor,
+				planID: planResult.plan.ID, planRevision: planResult.plan.Revision, sourceHash: planResult.plan.SourceHash,
 			})
 			if err != nil {
 				return nil, err
 			}
-			scope, err := s.GetArtifactScope(p.Context, result.RuntimeID)
-			if err != nil {
-				return nil, fmt.Errorf("load deployed mcp server: %w", err)
-			}
-			fields := mcpServerFields(request, *scope)
+			fields := mcpServerFields(request, result.Scope)
 			fields["execution_token"] = result.ExecutionToken
 			return fields, nil
 		},

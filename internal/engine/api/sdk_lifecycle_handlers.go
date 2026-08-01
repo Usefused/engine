@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -45,7 +46,7 @@ func ActivateSDKHandler(s store.Store) http.HandlerFunc {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.sdk_lifecycle.activate")
 		defer span.End()
 
-		accountID, err := resolveWorkspaceActor(ctx, s, r)
+		accountID, err := resolveWorkspaceActor(ctx)
 		if err != nil {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
 			http.Error(w, `{"error":"invalid API key or workspace not found"}`, http.StatusUnauthorized)
@@ -116,7 +117,7 @@ func DeactivateSDKHandler(s store.Store) http.HandlerFunc {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.sdk_lifecycle.deactivate")
 		defer span.End()
 
-		accountID, err := resolveWorkspaceActor(ctx, s, r)
+		accountID, err := resolveWorkspaceActor(ctx)
 		if err != nil {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
 			http.Error(w, `{"error":"invalid API key or workspace not found"}`, http.StatusUnauthorized)
@@ -158,12 +159,12 @@ func DeactivateSDKHandler(s store.Store) http.HandlerFunc {
 // artifact_id FKs -- see schema_engine.go -- so no separate token-revoke or
 // bucket-unlink loop is needed here), then best-effort removes the sandbox's
 // on-disk working directory.
-func DeleteSDKHandler(s store.Store) http.HandlerFunc {
+func DeleteSDKHandler(s store.Store, proxy Forwarder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.sdk_lifecycle.delete")
 		defer span.End()
 
-		accountID, err := resolveWorkspaceActor(ctx, s, r)
+		accountID, err := resolveWorkspaceActor(ctx)
 		if err != nil {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
 			http.Error(w, `{"error":"invalid API key or workspace not found"}`, http.StatusUnauthorized)
@@ -176,10 +177,28 @@ func DeleteSDKHandler(s store.Store) http.HandlerFunc {
 		}
 		span.SetAttributes(attribute.String("artifact_id", artifactID.String()))
 
-		if err := ensureArtifactScopeOwnedBy(ctx, s, accountID, artifactID); err != nil {
-			span.SetAttributes(attribute.String("outcome", "failed"))
-			writeSDKConfigError(w, err)
+		scope, err := s.GetArtifactScope(ctx, artifactID)
+		if errors.Is(err, store.ErrArtifactScopeNotFound) {
+			span.SetAttributes(attribute.String("outcome", "already_deleted"))
+			writeJSON(w, sdkLifecycleResponse{Status: "deleted", ArtifactID: artifactID.String()})
 			return
+		}
+		if err != nil {
+			span.SetAttributes(attribute.String("outcome", "failed"))
+			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to load sdk scope"})
+			return
+		}
+		if scope.AccountID != accountID {
+			span.SetAttributes(attribute.String("outcome", "denied"))
+			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusForbidden, message: "sdk scope owner mismatch"})
+			return
+		}
+		if scope.Kind != "mcp" {
+			if err := retireRegistrySDK(ctx, proxy, artifactID); err != nil {
+				span.SetAttributes(attribute.String("outcome", "registry_retire_failed"))
+				writeSDKConfigError(w, err)
+				return
+			}
 		}
 		if err := s.DeleteArtifactScope(ctx, accountID, artifactID); err != nil {
 			span.SetAttributes(attribute.String("outcome", "failed"))
@@ -198,6 +217,22 @@ func DeleteSDKHandler(s store.Store) http.HandlerFunc {
 		span.SetAttributes(attribute.String("outcome", "success"))
 		writeJSON(w, sdkLifecycleResponse{Status: "deleted", ArtifactID: artifactID.String()})
 	}
+}
+
+func retireRegistrySDK(ctx context.Context, proxy Forwarder, artifactID uuid.UUID) error {
+	if proxy == nil {
+		return workspaceConfigHTTPError{status: http.StatusBadGateway, message: "registry lifecycle unavailable"}
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, "/sdks/"+artifactID.String(), nil)
+	if err != nil {
+		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to create registry lifecycle request"}
+	}
+	recorder := httptest.NewRecorder()
+	proxy.Forward(recorder, request, "")
+	if recorder.Code >= http.StatusOK && recorder.Code < http.StatusMultipleChoices || recorder.Code == http.StatusNotFound {
+		return nil
+	}
+	return sdkProxyError{status: recorder.Code, body: recorder.Body.Bytes()}
 }
 
 func parseArtifactIDParam(r *http.Request) (uuid.UUID, error) {
