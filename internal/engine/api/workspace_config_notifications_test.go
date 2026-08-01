@@ -242,7 +242,7 @@ func buildNotificationGraphQLHandler(t *testing.T, s store.Store, configStore st
 	if err != nil {
 		t.Fatalf("newMCPGraphQLSchema() error = %v", err)
 	}
-	return mcpGraphQLHandler(schema, s)
+	return withGraphQLTestOwner(t, s, mcpGraphQLHandler(schema))
 }
 
 func TestUpdateWorkspaceNotificationStatusMutation_MarksAcknowledged(t *testing.T) {

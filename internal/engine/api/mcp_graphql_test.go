@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
@@ -41,11 +42,42 @@ func mountMCPGraphQLTestHandler(t *testing.T, s store.Store) http.HandlerFunc {
 
 func mountMCPGraphQLTestHandlerWithRegistry(t *testing.T, s store.Store, registry sandbox.RegistryClient) http.HandlerFunc {
 	t.Helper()
-	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, &mockVerifier{}, registry, []byte("12345678901234567890123456789012"))
+	configStore := &mockConfigStore{}
+	if fixture, ok := s.(*workspaceTestStore); ok {
+		configStore.artifactScopeSink = func(scope store.ArtifactScope) error {
+			return fixture.SaveArtifactScope(context.Background(), scope)
+		}
+	}
+	schema, err := newMCPGraphQLSchema(configStore, s, &mockVerifier{}, registry, []byte("12345678901234567890123456789012"))
 	if err != nil {
 		t.Fatalf("newMCPGraphQLSchema() error = %v", err)
 	}
-	return mcpGraphQLHandler(schema, s)
+	slugResolver, _ := registry.(sdkServiceSlugResolver)
+	return withGraphQLTestOwner(t, s, mcpGraphQLHandler(schema, graphQLAuthorizationResources{store: s, configStore: configStore, slugResolver: slugResolver}))
+}
+
+func withGraphQLTestOwner(t *testing.T, s store.Store, next http.HandlerFunc) http.HandlerFunc {
+	t.Helper()
+	accountID := uuid.New()
+	if fixture, ok := s.(*workspaceTestStore); ok {
+		accountID = fixture.accountID
+	}
+	workspaceID := uuid.New()
+	grants := make([]accesscontrol.Grant, 0, len(accesscontrol.AllPermissions()))
+	for _, permission := range accesscontrol.AllPermissions() {
+		grants = append(grants, accesscontrol.Grant{
+			Permission: permission,
+			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID},
+		})
+	}
+	snapshot, err := accesscontrol.NewAuthorizationSnapshot(1, grants...)
+	if err != nil {
+		t.Fatalf("build test authorization snapshot: %v", err)
+	}
+	actor := accesscontrol.Actor{AccountID: accountID, WorkspaceID: workspaceID, SubjectID: uuid.New(), Authorization: snapshot}
+	return func(w http.ResponseWriter, r *http.Request) {
+		next(w, r.WithContext(accesscontrol.ContextWithActor(r.Context(), actor)))
+	}
 }
 
 func doMCPGraphQLRequest(t *testing.T, h http.HandlerFunc, query string) map[string]any {
@@ -81,7 +113,11 @@ func doMCPGraphQLRequestWithVariables(t *testing.T, h http.HandlerFunc, query st
 
 func TestMCPGraphQLHandler_RejectsUnauthenticated(t *testing.T) {
 	s := &workspaceTestStore{workspaceErr: errWorkspaceNotFoundForTest{}}
-	h := mountMCPGraphQLTestHandler(t, s)
+	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"))
+	if err != nil {
+		t.Fatalf("newMCPGraphQLSchema() error = %v", err)
+	}
+	h := mcpGraphQLHandler(schema)
 
 	req := httptest.NewRequest(http.MethodPost, "/engine/graphql", strings.NewReader(`{"query":"query { mcpServers(limit:1,offset:0) { total } }"}`))
 	rr := httptest.NewRecorder()
@@ -367,7 +403,7 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newMCPGraphQLSchema() error = %v", err)
 	}
-	h := mcpGraphQLHandler(schema, s)
+	h := withGraphQLTestOwner(t, s, mcpGraphQLHandler(schema))
 
 	query := `query {
 		bucketSummary(bucket_id: "` + attachedBucketID.String() + `") { id name secret_count value_count }
@@ -668,8 +704,8 @@ func TestDeployMcpServer_CreatesActiveScopeWithNameAndKind(t *testing.T) {
 	}}
 	h := mountMCPGraphQLTestHandlerWithRegistry(t, s, registry)
 
-	query := `mutation($config: EngineJSON!) {
-		deployMcpServer(config: $config) {
+	query := `mutation($config: EngineJSON!,$owner:ID!) {
+		deployMcpServer(config: $config,owner_team_id:$owner) {
 			id
 			name
 			version
@@ -677,7 +713,7 @@ func TestDeployMcpServer_CreatesActiveScopeWithNameAndKind(t *testing.T) {
 			mcp_url
 		}
 	}`
-	data := doMCPGraphQLRequestWithVariables(t, h, query, map[string]any{"config": map[string]any{
+	data := doMCPGraphQLRequestWithVariables(t, h, query, map[string]any{"owner": testArtifactOwnerTeamID.String(), "config": map[string]any{
 		"apiVersion": "fused/v1", "kind": "mcp", "name": "stripe-mcp", "version": "1.0.0", "bucket": "default",
 		"services": map[string]any{"Stripe": map[string]any{"version": "2026-07-01", "operations": []string{"listCharges"}}},
 	}})
@@ -700,7 +736,7 @@ func TestDeployMcpServer_CreatesActiveScopeWithNameAndKind(t *testing.T) {
 	if len(s.savedScopes) != 1 {
 		t.Fatalf("expected one saved scope, got %#v", s.savedScopes)
 	}
-	if s.savedScopes[0].kind != "mcp" || s.savedScopes[0].accountID != accountID {
+	if s.savedScopes[0].kind != "mcp" || s.savedScopes[0].accountID != accountID || s.savedScopes[0].ownerTeamID != testArtifactOwnerTeamID {
 		t.Errorf("expected kind=mcp for accountID %s, got %#v", accountID, s.savedScopes[0])
 	}
 }
@@ -725,13 +761,13 @@ func TestDeployMcpServer_SelectAllSkipsEndpointIds(t *testing.T) {
 	}}
 	h := mountMCPGraphQLTestHandlerWithRegistry(t, s, registry)
 
-	query := `mutation($config: EngineJSON!) {
-		deployMcpServer(config: $config) {
+	query := `mutation($config: EngineJSON!,$owner:ID!) {
+		deployMcpServer(config: $config,owner_team_id:$owner) {
 			id
 			active
 		}
 	}`
-	doMCPGraphQLRequestWithVariables(t, h, query, map[string]any{"config": map[string]any{
+	doMCPGraphQLRequestWithVariables(t, h, query, map[string]any{"owner": testArtifactOwnerTeamID.String(), "config": map[string]any{
 		"apiVersion": "fused/v1", "kind": "mcp", "name": "stripe-mcp", "version": "1.0.0", "bucket": "default",
 		"services": map[string]any{"Stripe": map[string]any{"version": "2026-07-01", "operations": []string{}, "select_all": true}},
 	}})

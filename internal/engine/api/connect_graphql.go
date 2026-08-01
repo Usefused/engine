@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/connectresource"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
@@ -482,7 +483,11 @@ func resolveBucketSummaryPage(p graphql.ResolveParams, s store.Store, limit, off
 		attribute.Int("limit", limit),
 		attribute.Int("offset", offset),
 	)
-	return s.ListBucketSummaries(ctx, limit, offset)
+	authorized, err := graphQLAuthorizedScope(p.Context, accesscontrol.PermissionBucketRead, accesscontrol.ResourceBucket)
+	if err != nil {
+		return nil, 0, err
+	}
+	return s.ListAuthorizedBucketSummaries(ctx, authorized, limit, offset)
 }
 
 func bucketPageArgs(p graphql.ResolveParams) (int, int) {
@@ -511,7 +516,11 @@ func workspaceServicesGraphQLField(s store.Store, verifier ServiceVerifier) *gra
 				return nil, err
 			}
 			span.SetAttributes(attribute.String("account_id", actor.accountID.String()))
-			services, err := s.ListWorkspaceServices(ctx, graphQLStringListArg(p, "names"))
+			authorized, err := graphQLAuthorizedScope(ctx, accesscontrol.PermissionServiceRead, accesscontrol.ResourceService)
+			if err != nil {
+				return nil, err
+			}
+			services, err := s.ListAuthorizedWorkspaceServices(ctx, authorized, graphQLStringListArg(p, "names"))
 			if err != nil {
 				return nil, fmt.Errorf("list workspace services: %w", err)
 			}
@@ -550,7 +559,11 @@ func workspaceServicePageGraphQLField(s store.Store, verifier ServiceVerifier) *
 
 			limit, offset := bucketPageArgs(p)
 
-			services, total, err := s.ListWorkspaceServicesPage(ctx, graphQLStringListArg(p, "names"), limit, offset)
+			authorized, err := graphQLAuthorizedScope(ctx, accesscontrol.PermissionServiceRead, accesscontrol.ResourceService)
+			if err != nil {
+				return nil, err
+			}
+			services, total, err := s.ListAuthorizedWorkspaceServicesPage(ctx, authorized, graphQLStringListArg(p, "names"), limit, offset)
 			if err != nil {
 				return nil, fmt.Errorf("list workspace services page: %w", err)
 			}
@@ -800,7 +813,11 @@ func sdkBucketsGraphQLField(s store.Store) *graphql.Field {
 				attribute.String("account_id", actor.accountID.String()),
 				attribute.String("artifact_id", artifactID.String()),
 			)
-			buckets, err := s.ListBucketsForSDK(ctx, artifactID)
+			authorized, err := graphQLAuthorizedScope(ctx, accesscontrol.PermissionBucketRead, accesscontrol.ResourceBucket)
+			if err != nil {
+				return nil, err
+			}
+			buckets, err := s.ListAuthorizedBucketsForSDK(ctx, artifactID, authorized)
 			if err != nil {
 				return nil, fmt.Errorf("list sdk buckets: %w", err)
 			}
@@ -826,7 +843,11 @@ func bucketSDKPageGraphQLField(s store.Store) *graphql.Field {
 				attribute.Int("limit", limit),
 				attribute.Int("offset", offset),
 			)
-			scopes, total, err := s.ListArtifactScopesForBucket(ctx, bucketID, limit, offset)
+			authorized, err := graphQLAuthorizedScope(ctx, accesscontrol.PermissionArtifactRead, accesscontrol.ResourceArtifact)
+			if err != nil {
+				return nil, err
+			}
+			scopes, total, err := s.ListAuthorizedArtifactScopesForBucket(ctx, bucketID, authorized, limit, offset)
 			if err != nil {
 				return nil, fmt.Errorf("list bucket sdks: %w", err)
 			}
@@ -858,7 +879,11 @@ func bucketServicePageGraphQLField(s store.Store) *graphql.Field {
 			if search != "" {
 				span.SetAttributes(attribute.String("search", search))
 			}
-			services, total, err := s.ListBucketServiceSummaries(ctx, bucketID, search, limit, offset)
+			authorized, err := graphQLAuthorizedScope(ctx, accesscontrol.PermissionServiceRead, accesscontrol.ResourceService)
+			if err != nil {
+				return nil, err
+			}
+			services, total, err := s.ListAuthorizedBucketServiceSummaries(ctx, bucketID, authorized, search, limit, offset)
 			if err != nil {
 				return nil, fmt.Errorf("list bucket services: %w", err)
 			}
@@ -1146,7 +1171,7 @@ func connectionResourcesGraphQLField(s store.Store) *graphql.Field {
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.connection_resources.list")
 			defer span.End()
-			connection, err := ownedGraphQLConnection(ctx, p, s)
+			connection, err := ownedGraphQLConnection(ctx, p)
 			if err != nil {
 				return nil, err
 			}
@@ -1172,7 +1197,7 @@ func setDefaultConnectionResourceGraphQLField(s store.Store) *graphql.Field {
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.connection_resources.set_default")
 			defer span.End()
-			connection, err := ownedGraphQLConnection(ctx, p, s)
+			connection, err := ownedGraphQLConnection(ctx, p)
 			if err != nil {
 				return nil, err
 			}
@@ -1201,7 +1226,7 @@ func rediscoverConnectionResourcesGraphQLField(s store.Store, verifier ServiceVe
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.connection_resources.rediscover")
 			defer span.End()
-			connection, err := ownedGraphQLConnection(ctx, p, s)
+			connection, err := ownedGraphQLConnection(ctx, p)
 			if err != nil {
 				return nil, err
 			}
@@ -1283,25 +1308,21 @@ func connectionDiscoveryContract(ctx context.Context, s store.Store, verifier Se
 	return metadata, endpoint, auth, nil
 }
 
-// ownedGraphQLConnection centralizes workspace scoping for every resource
-// operation so opaque IDs never bypass bucket ownership.
-func ownedGraphQLConnection(ctx context.Context, p graphql.ResolveParams, s store.Store) (*store.AuthConnection, error) {
+type graphQLResolvedConnectionsContextKey struct{}
+
+// ownedGraphQLConnection reuses the authorization preflight's batch lookup.
+// Resolvers cannot broaden an opaque connection ID into an unscoped DB read.
+func ownedGraphQLConnection(ctx context.Context, p graphql.ResolveParams) (*store.AuthConnection, error) {
 	connectionID, err := requiredGraphQLUUIDArg(p, "connection_id")
 	if err != nil {
 		return nil, err
 	}
-	bucketIDs, err := actorBucketIDs(p, s)
-	if err != nil {
-		return nil, err
-	}
-	connection, err := s.GetAuthConnectionByIDForBuckets(ctx, connectionID, bucketIDs)
-	if err != nil {
-		return nil, fmt.Errorf("get auth connection: %w", err)
-	}
-	if connection == nil {
+	connections, _ := ctx.Value(graphQLResolvedConnectionsContextKey{}).(map[uuid.UUID]store.AuthConnection)
+	connection, ok := connections[connectionID]
+	if !ok {
 		return nil, errors.New("auth connection not found")
 	}
-	return connection, nil
+	return &connection, nil
 }
 
 // upsertSecretsGraphQLField gives the UI a GraphQL mutation while reusing the
@@ -1664,24 +1685,6 @@ func authConnectionDeleteArgs(p graphql.ResolveParams, s store.Store) (bucketAdm
 	return bucketAdminCall{bucketID: bucketID}, connectionID, nil
 }
 
-// actorBucketIDs reduces connection lookup scope to buckets owned by the
-// authenticated workspace before querying by opaque connection ID.
-func actorBucketIDs(p graphql.ResolveParams, s store.Store) ([]uuid.UUID, error) {
-	_, err := actorFromContext(p.Context)
-	if err != nil {
-		return nil, err
-	}
-	buckets, err := s.ListBuckets(p.Context)
-	if err != nil {
-		return nil, fmt.Errorf("list buckets: %w", err)
-	}
-	ids := make([]uuid.UUID, 0, len(buckets))
-	for _, bucket := range buckets {
-		ids = append(ids, bucket.ID)
-	}
-	return ids, nil
-}
-
 // requiredGraphQLUUIDArg normalizes ID parsing so malformed IDs fail before
 // they can reach Store methods as zero UUIDs.
 func requiredGraphQLUUIDArg(p graphql.ResolveParams, name string) (uuid.UUID, error) {
@@ -2041,7 +2044,7 @@ func projectGraphQLWorkspaceWebhooks(webhooks []store.WorkspaceWebhook) []map[st
 	for _, webhook := range webhooks {
 		items = append(items, map[string]interface{}{
 			"label": webhook.Label, "slug": webhook.Slug, "created_at": formatGraphQLTime(webhook.CreatedAt),
-			"signature": webhookSignatureStatus(webhook.SecretRef),
+			"signature": webhookSignatureStatus(webhook.SecretBucketID),
 		})
 	}
 	return items
@@ -2050,8 +2053,8 @@ func projectGraphQLWorkspaceWebhooks(webhooks []store.WorkspaceWebhook) []map[st
 // webhookSignatureStatus never surfaces SecretRef itself -- only whether one
 // is configured -- so this GraphQL field can never leak a bucket secret
 // reference to a client that only asked "is this signed."
-func webhookSignatureStatus(secretRef string) string {
-	if strings.TrimSpace(secretRef) == "" {
+func webhookSignatureStatus(secretBucketID *uuid.UUID) string {
+	if secretBucketID == nil || *secretBucketID == uuid.Nil {
 		return "none"
 	}
 	return "set"

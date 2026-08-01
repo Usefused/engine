@@ -28,12 +28,14 @@ func TestPostgresStore_GetMCPScopeByName(t *testing.T) {
 
 	s := NewPostgresStore(pool)
 	accountID := uuid.New()
+	ownerTeamID := seedArtifactOwnerTeam(t, ctx, pool)
 
 	// Create version 0.1.0
 	artifactID1 := uuid.New()
 	err = s.SaveArtifactScope(ctx, ArtifactScope{
 		AccountID:          accountID,
 		ArtifactID:         artifactID1,
+		OwnerTeamID:        ownerTeamID,
 		ScopeSchemaVersion: 1,
 		Selections:         []byte("{}"),
 		Kind:               "mcp",
@@ -50,6 +52,7 @@ func TestPostgresStore_GetMCPScopeByName(t *testing.T) {
 	err = s.SaveArtifactScope(ctx, ArtifactScope{
 		AccountID:          accountID,
 		ArtifactID:         artifactID2,
+		OwnerTeamID:        ownerTeamID,
 		ScopeSchemaVersion: 1,
 		Selections:         []byte("{}"),
 		Kind:               "mcp",

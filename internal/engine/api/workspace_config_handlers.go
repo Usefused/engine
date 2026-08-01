@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/Usefused/engine/internal/shared/observability"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -23,6 +22,7 @@ import (
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
+	"github.com/Usefused/engine/internal/shared/observability"
 	"github.com/Usefused/engine/internal/shared/secretref"
 )
 
@@ -252,21 +252,6 @@ type workspaceResolvedConnectionProfile struct {
 	ProfileHash string                    `json:"profile_hash"`
 	Provenance  string                    `json:"provenance"`
 	Config      connectionprofile.Profile `json:"config"`
-}
-
-// WebhookConfig is a plain secret-ref carrier shared by upsertOneWorkspaceWebhook's
-// callers -- kind: webhook's apply step (webhook_config_handlers.go) is now
-// the only one, since the legacy runtime_config.webhooks path this type used
-// to decode was removed with no backward compatibility (see
-// plans/plan-webhook-kind.md).
-//
-// Secret is a "bucket.<name>.secret.<key>" reference
-// (internal/shared/secretref) into the generic bucket-scoped named-secret
-// store populated by buckets.<name>.secrets.<key>, never a value the Engine
-// encrypts and stores itself. Empty means no signing secret is configured
-// for this registration.
-type WebhookConfig struct {
-	Secret string `json:"secret,omitempty"`
 }
 
 type workspaceConfigDeprecation struct {
@@ -506,7 +491,7 @@ func WorkspaceConfigPlanHandler(configStore store.ConfigRepository, s store.Stor
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.workspace_config.plan")
 		defer span.End()
 
-		accountID, err := resolveWorkspaceActor(ctx, s, r)
+		accountID, err := resolveWorkspaceActor(ctx)
 		if err != nil {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
 			http.Error(w, `{"error":"invalid API key or workspace not found"}`, http.StatusUnauthorized)
@@ -519,73 +504,89 @@ func WorkspaceConfigPlanHandler(configStore store.ConfigRepository, s store.Stor
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
 			return
 		}
-		resolvedConfig, desired, err := resolveWorkspacePlanConfig(ctx, verifier, r.Header.Get("X-API-Key"), req.Config)
-		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
-			return
-		}
-		configKey := workspaceConfigKey(req.ConfigKey)
-
-		currentState, err := configStore.GetConfigState(ctx, configKey)
-		if err != nil {
-			slog.ErrorContext(ctx, "WorkspaceConfigPlanHandler: GetConfigState error", slog.Any("error", err))
-			http.Error(w, `{"error":"failed to fetch config state"}`, http.StatusInternalServerError)
-			return
-		}
-		currentWorkspace, err := loadCurrentWorkspaceState(ctx, s)
-		if err != nil {
-			http.Error(w, `{"error":"failed to load workspace state"}`, http.StatusInternalServerError)
-			return
-		}
-
-		previousManaged, err := parseManagedWorkspaceResources(currentState)
-		if err != nil {
-			http.Error(w, `{"error":"invalid managed workspace state"}`, http.StatusInternalServerError)
-			return
-		}
-		summary, err := buildWorkspacePlanSummary(ctx, configStore, s, verifier, r.Header.Get("X-API-Key"), desired, currentWorkspace, previousManaged)
+		result, err := createWorkspaceConfigPlan(ctx, configStore, s, verifier, r.Header.Get("X-API-Key"), accountID, req)
 		if err != nil {
 			writeWorkspaceConfigError(w, err)
 			return
 		}
-		actionsJSON, _ := json.Marshal(summary.Actions)
-		blockersJSON, _ := json.Marshal(summary.Blockers)
-		warningsJSON, _ := json.Marshal(summary.Warnings)
 
-		baseGeneration := 0
-		if currentState != nil {
-			baseGeneration = currentState.Generation
-		}
-		plan, err := configStore.CreateConfigPlan(ctx, store.CreateConfigPlanParams{
-			ConfigKey:         configKey,
-			ConfigType:        store.ConfigTypeWorkspace,
-			SourceHash:        req.SourceHash,
-			BaseGeneration:    baseGeneration,
-			Actions:           actionsJSON,
-			ResolvedPayload:   resolvedConfig,
-			Blockers:          blockersJSON,
-			Warnings:          warningsJSON,
-			CreatedBy:         accountID,
-			SupersedeExisting: true,
-		})
-		if err != nil {
-			slog.ErrorContext(ctx, "WorkspaceConfigPlanHandler: CreateConfigPlan error", slog.Any("error", err))
-			http.Error(w, `{"error":"failed to save plan"}`, http.StatusInternalServerError)
-			return
-		}
-
-		notifications := collectWorkspacePlanNotifications(ctx, configStore, workspaceServiceVersionsMap(desired))
-
-		span.SetAttributes(attribute.String("plan_id", plan.ID.String()), attribute.String("outcome", "success"))
+		span.SetAttributes(
+			attribute.String("plan_id", result.plan.ID.String()),
+			attribute.Int("required_permissions_count", result.requiredCount),
+			attribute.String("outcome", "success"),
+		)
 		writeJSON(w, map[string]any{
-			"plan_id":         plan.ID.String(),
-			"config_key":      plan.ConfigKey,
-			"source_hash":     plan.SourceHash,
-			"base_generation": plan.BaseGeneration,
-			"summary":         summary,
-			"notifications":   notifications,
+			"plan_id":              result.plan.ID.String(),
+			"config_key":           result.plan.ConfigKey,
+			"source_hash":          result.plan.SourceHash,
+			"base_generation":      result.plan.BaseGeneration,
+			"required_permissions": result.plan.RequiredPermissions,
+			"summary":              result.summary,
+			"notifications":        result.notifications,
 		})
 	}
+}
+
+type workspaceConfigPlanResult struct {
+	plan          *store.ConfigPlan
+	summary       workspacePlanSummary
+	notifications notificationInbox
+	requiredCount int
+}
+
+func createWorkspaceConfigPlan(ctx context.Context, configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, apiKey string, accountID uuid.UUID, req ConfigPlanRequest) (workspaceConfigPlanResult, error) {
+	resolvedConfig, desired, err := resolveWorkspacePlanConfig(ctx, verifier, apiKey, req.Config)
+	if err != nil {
+		return workspaceConfigPlanResult{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
+	}
+	configKey := workspaceConfigKey(req.ConfigKey)
+	currentState, err := configStore.GetConfigState(ctx, configKey)
+	if err != nil {
+		return workspaceConfigPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to fetch config state"}
+	}
+	currentWorkspace, err := loadCurrentWorkspaceState(ctx, s)
+	if err != nil {
+		return workspaceConfigPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to load workspace state"}
+	}
+	previousManaged, err := parseManagedWorkspaceResources(currentState)
+	if err != nil {
+		return workspaceConfigPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "invalid managed workspace state"}
+	}
+	summary, err := buildWorkspacePlanSummary(ctx, configStore, s, verifier, apiKey, desired, currentWorkspace, previousManaged)
+	if err != nil {
+		return workspaceConfigPlanResult{}, err
+	}
+	return persistWorkspaceConfigPlan(ctx, configStore, accountID, req, configKey, resolvedConfig, desired, currentState, summary)
+}
+
+func persistWorkspaceConfigPlan(ctx context.Context, configStore store.ConfigRepository, accountID uuid.UUID, req ConfigPlanRequest, configKey string, resolvedConfig []byte, desired workspaceDesiredState, currentState *store.ConfigState, summary workspacePlanSummary) (workspaceConfigPlanResult, error) {
+	actionsJSON, _ := json.Marshal(summary.Actions)
+	blockersJSON, _ := json.Marshal(summary.Blockers)
+	warningsJSON, _ := json.Marshal(summary.Warnings)
+	requiredPermissions, requiredCount, err := workspacePlanRequiredPermissions(ctx, actionsJSON)
+	if err != nil {
+		return workspaceConfigPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to compute required permissions"}
+	}
+	plan, err := configStore.CreateConfigPlan(ctx, store.CreateConfigPlanParams{
+		ConfigKey: configKey, ConfigType: store.ConfigTypeWorkspace, SourceHash: req.SourceHash,
+		BaseGeneration: currentGeneration(currentState), Actions: actionsJSON, ResolvedPayload: resolvedConfig,
+		Blockers: blockersJSON, Warnings: warningsJSON, RequiredPermissions: requiredPermissions,
+		CreatedBy: accountID, SupersedeExisting: true,
+	})
+	if err != nil {
+		return workspaceConfigPlanResult{}, configPlanSaveHTTPError(err)
+	}
+	return workspaceConfigPlanResult{
+		plan: plan, summary: summary, requiredCount: requiredCount,
+		notifications: collectWorkspacePlanNotifications(ctx, configStore, workspaceServiceVersionsMap(desired)),
+	}, nil
+}
+
+func configPlanSaveHTTPError(err error) workspaceConfigHTTPError {
+	if errors.Is(err, store.ErrConfigPlanApplyInProgress) {
+		return workspaceConfigHTTPError{status: http.StatusConflict, message: "config apply is in progress"}
+	}
+	return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to save plan"}
 }
 
 // collectWorkspacePlanNotifications gathers Engine-local notifications
@@ -665,7 +666,7 @@ func WorkspaceConfigApplyHandler(configStore store.ConfigRepository, s store.Sto
 		thread := observability.ThreadFromContext(ctx)
 		step := thread.Step("engine.workspace_config.apply")
 
-		accountID, err := resolveWorkspaceActor(ctx, s, r)
+		accountID, err := resolveWorkspaceActor(ctx)
 		if err != nil {
 			step.AddContext(map[string]any{"outcome": "unauthorized"}).Error(ctx, err)
 			http.Error(w, `{"error":"invalid API key or workspace not found"}`, http.StatusUnauthorized)
@@ -679,10 +680,17 @@ func WorkspaceConfigApplyHandler(configStore store.ConfigRepository, s store.Sto
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
 			return
 		}
+		planRevision, ok := AuthorizedPlanRevisionFromContext(ctx)
+		if !ok {
+			step.AddContext(map[string]any{"outcome": "authorization_snapshot_missing"}).Error(ctx, errors.New("authorized plan revision unavailable"))
+			http.Error(w, `{"error":"authorized plan revision unavailable"}`, http.StatusForbidden)
+			return
+		}
 		appliedWebhooks, err := executeWorkspaceConfigApply(ctx, configStore, s, verifier, workspaceApplyCall{
 			apiKey:           r.Header.Get("X-API-Key"),
 			accountID:        accountID,
 			planID:           planID,
+			planRevision:     planRevision,
 			sourceHash:       req.SourceHash,
 			masterKey:        masterKey,
 			authMats:         req.AuthMaterials,
@@ -735,6 +743,7 @@ type workspaceApplyCall struct {
 	apiKey           string
 	accountID        uuid.UUID
 	planID           uuid.UUID
+	planRevision     int
 	sourceHash       string
 	masterKey        []byte
 	authMats         map[string]workspaceAuthMaterial
@@ -753,6 +762,12 @@ func executeWorkspaceConfigApply(
 	if err != nil {
 		return nil, err
 	}
+	lease, err := configStore.ReserveConfigPlanApply(ctx, plan.ID, call.planRevision)
+	if err != nil {
+		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "plan_apply_in_progress_or_revision_changed"}
+	}
+	leaseGuard := workspaceApplyLeaseGuard{configStore: configStore, planID: plan.ID, revision: call.planRevision, leaseID: lease.ID, releasable: true}
+	defer leaseGuard.release()
 	desired, previousManaged, err := workspaceApplyInputs(plan, currentState)
 	if err != nil {
 		return nil, err
@@ -760,53 +775,138 @@ func executeWorkspaceConfigApply(
 	if err := validateWorkspaceRemovalDecisions(plan, desired, previousManaged); err != nil {
 		return nil, err
 	}
-	appliedWebhooks, err := applyWorkspaceConfig(ctx, s, verifier, call.apiKey, call.accountID, desired, previousManaged, call.authMats, call.profileMats, call.bucketSecretMats, call.masterKey)
+	// Once external execution begins we finish independently of client
+	// cancellation. Otherwise a dropped connection after an accepted Registry
+	// mutation would release the lease and make a duplicate retry look safe.
+	applyCtx, stopLease := workspaceApplyLeaseContext(ctx, configStore, plan.ID, call.planRevision, lease.ID)
+	defer stopLease()
+	// From the first Registry/local mutation onward, failures can represent a
+	// partial or unknown outcome. Keep the reservation until crash-recovery
+	// expiry unless the final database commit proves the apply completed.
+	leaseGuard.releasable = false
+	appliedWebhooks, err := applyWorkspaceConfig(applyCtx, s, verifier, call.apiKey, call.accountID, desired, previousManaged, call.authMats, call.profileMats, call.bucketSecretMats, call.masterKey)
 	if err != nil {
 		return nil, workspaceApplyError(ctx, err)
 	}
+	if err := applyWorkspaceRegistryActions(applyCtx, verifier, call, plan, currentState); err != nil {
+		return nil, err
+	}
+	if err := applyWorkspacePolicyActions(applyCtx, s, verifier, call, plan, desired); err != nil {
+		return nil, err
+	}
+	if err := createWorkspaceRemovalNotifications(applyCtx, configStore, call, plan); err != nil {
+		return nil, err
+	}
+	if err := persistWorkspaceConfigApply(applyCtx, configStore, call, plan, desired, previousManaged, lease.ID); err != nil {
+		return nil, err
+	}
+	leaseGuard.releasable = true
+	return appliedWebhooks, nil
+}
+
+type workspaceApplyLeaseGuard struct {
+	configStore store.ConfigRepository
+	planID      uuid.UUID
+	revision    int
+	leaseID     uuid.UUID
+	releasable  bool
+}
+
+func (guard *workspaceApplyLeaseGuard) release() {
+	if guard.releasable {
+		releaseWorkspaceApplyLease(guard.configStore, guard.planID, guard.revision, guard.leaseID)
+	}
+}
+
+func applyWorkspaceRegistryActions(ctx context.Context, verifier ServiceVerifier, call workspaceApplyCall, plan *store.ConfigPlan, currentState *store.ConfigState) error {
 	if err := archiveRemovedOwnedServices(ctx, verifier, call, plan); err != nil {
 		slog.ErrorContext(ctx, "WorkspaceConfigApplyHandler: registry archive failed", slog.Any("error", err))
-		return nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to archive owned services in registry"}
+		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to archive owned services in registry"}
 	}
 	if err := applyDeprecationActions(ctx, verifier, call, plan, currentState); err != nil {
 		slog.ErrorContext(ctx, "WorkspaceConfigApplyHandler: deprecation apply failed", slog.Any("error", err))
-		return nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to apply deprecation actions"}
+		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to apply deprecation actions"}
 	}
 	if err := applyWorkspaceVisibilityActions(ctx, verifier, call, plan); err != nil {
 		slog.ErrorContext(ctx, "WorkspaceConfigApplyHandler: visibility apply failed", slog.Any("error", err))
-		return nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to apply workspace service visibility"}
+		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to apply workspace service visibility"}
 	}
 	if err := applyWorkspaceVersionVisibilityActions(ctx, verifier, call, plan); err != nil {
 		slog.ErrorContext(ctx, "WorkspaceConfigApplyHandler: version visibility apply failed", slog.Any("error", err))
-		return nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to apply workspace service version visibility"}
+		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to apply workspace service version visibility"}
 	}
+	return nil
+}
+
+func applyWorkspacePolicyActions(ctx context.Context, s store.Store, verifier ServiceVerifier, call workspaceApplyCall, plan *store.ConfigPlan, desired workspaceDesiredState) error {
 	if err := applyWorkspaceExecutionPolicyPublishActions(ctx, verifier, call, plan, desired); err != nil {
 		slog.ErrorContext(ctx, "WorkspaceConfigApplyHandler: execution policy publish failed", slog.Any("error", err))
-		return nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to publish workspace execution policy"}
+		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to publish workspace execution policy"}
 	}
 	if err := applyWorkspaceVersionExecutionPolicyPublishActions(ctx, verifier, call, plan, desired); err != nil {
 		slog.ErrorContext(ctx, "WorkspaceConfigApplyHandler: version execution policy publish failed", slog.Any("error", err))
-		return nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to publish workspace version execution policy"}
+		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to publish workspace version execution policy"}
 	}
 	if err := applyWorkspaceExecutionPolicyLocalActions(ctx, s, plan, desired); err != nil {
 		slog.ErrorContext(ctx, "WorkspaceConfigApplyHandler: local execution policy apply failed", slog.Any("error", err))
-		return nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to apply local workspace execution policy"}
+		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to apply local workspace execution policy"}
 	}
 	if err := applyWorkspaceVersionExecutionPolicyLocalActions(ctx, s, plan, desired); err != nil {
 		slog.ErrorContext(ctx, "WorkspaceConfigApplyHandler: local version execution policy apply failed", slog.Any("error", err))
-		return nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to apply local workspace version execution policy"}
+		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to apply local workspace version execution policy"}
 	}
 	if err := applyWorkspaceConnectionProfilePublishActions(ctx, verifier, s, call, plan, desired); err != nil {
 		slog.ErrorContext(ctx, "WorkspaceConfigApplyHandler: connection profile publish failed", slog.Any("error", err))
-		return nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to publish workspace connection profile"}
+		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to publish workspace connection profile"}
 	}
-	if err := createWorkspaceRemovalNotifications(ctx, configStore, call, plan); err != nil {
-		return nil, err
+	return nil
+}
+
+const workspaceApplyExecutionTimeout = 10 * time.Minute
+
+func workspaceApplyLeaseContext(parent context.Context, configStore store.ConfigRepository, planID uuid.UUID, revision int, leaseID uuid.UUID) (context.Context, context.CancelFunc) {
+	return workspaceApplyLeaseContextWithTimeout(parent, configStore, planID, revision, leaseID, workspaceApplyExecutionTimeout)
+}
+
+func workspaceApplyLeaseContextWithTimeout(parent context.Context, configStore store.ConfigRepository, planID uuid.UUID, revision int, leaseID uuid.UUID, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return workspaceApplyLeaseContextWithTiming(parent, configStore, planID, revision, leaseID, timeout, 5*time.Minute, 5*time.Second)
+}
+
+func workspaceApplyLeaseContextWithTiming(parent context.Context, configStore store.ConfigRepository, planID uuid.UUID, revision int, leaseID uuid.UUID, timeout, renewInterval, renewTimeout time.Duration) (context.Context, context.CancelFunc) {
+	// Preserve tracing/request values but not client cancellation once Registry
+	// execution starts. A hard upper bound prevents abandoned downstream calls
+	// from keeping an Engine goroutine and lease alive indefinitely.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), timeout)
+	go func() {
+		ticker := time.NewTicker(renewInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				renewCtx, renewCancel := context.WithTimeout(context.Background(), renewTimeout)
+				_, err := configStore.RenewConfigPlanApply(renewCtx, planID, revision, leaseID)
+				renewCancel()
+				if err != nil {
+					slog.ErrorContext(ctx, "WorkspaceConfigApplyHandler: apply lease lost", slog.Any("error", err))
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return ctx, cancel
+}
+
+func releaseWorkspaceApplyLease(configStore store.ConfigRepository, planID uuid.UUID, revision int, leaseID uuid.UUID) {
+	// Cleanup must survive request cancellation so a failed client connection
+	// does not block a safe retry until the crash-recovery expiry.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := configStore.ReleaseConfigPlanApply(ctx, planID, revision, leaseID); err != nil {
+		slog.ErrorContext(ctx, "WorkspaceConfigApplyHandler: release apply lease failed", slog.Any("error", err))
 	}
-	if err := persistWorkspaceConfigApply(ctx, configStore, call, plan, desired, previousManaged); err != nil {
-		return nil, err
-	}
-	return appliedWebhooks, nil
 }
 
 func workspaceApplyError(ctx context.Context, err error) error {
@@ -825,6 +925,9 @@ func loadWorkspacePlanForApply(ctx context.Context, configStore store.ConfigRepo
 	}
 	if err := validateWorkspacePlanForApply(plan, call.sourceHash); err != nil {
 		return nil, nil, workspaceConfigHTTPError{status: http.StatusConflict, message: err.Error()}
+	}
+	if call.planRevision <= 0 || plan.Revision != call.planRevision {
+		return nil, nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "plan_revision_changed"}
 	}
 	currentState, err := configStore.GetConfigState(ctx, plan.ConfigKey)
 	if err != nil {
@@ -927,11 +1030,14 @@ func persistWorkspaceConfigApply(
 	plan *store.ConfigPlan,
 	desired workspaceDesiredState,
 	previousManaged map[uuid.UUID]workspaceManagedService,
+	applyLeaseID uuid.UUID,
 ) error {
 	managedJSON, _ := json.Marshal(managedResourcesAfterApply(desired, previousManaged))
 	if _, err := configStore.ApplyConfigPlan(ctx, store.ApplyConfigPlanParams{
-		PlanID:         call.planID,
-		BaseGeneration: plan.BaseGeneration,
+		PlanID:           call.planID,
+		BaseGeneration:   plan.BaseGeneration,
+		ExpectedRevision: call.planRevision,
+		ApplyLeaseID:     applyLeaseID,
 		State: store.UpsertConfigStateParams{
 			ConfigKey:        plan.ConfigKey,
 			ConfigType:       store.ConfigTypeWorkspace,
@@ -3725,72 +3831,15 @@ func workspaceConnectBucketName(bucketName string) string {
 	return name
 }
 
-// resolveWebhookAuthShape fetches a service's webhook signing/verification
-// shape (IncomingWebhookConfig, EventExtractionPath) once -- used by kind:
-// webhook's plan/apply steps (webhook_config_handlers.go). Every label/name
-// registered against the same service shares this one shape; only each
-// registration's own signing secret differs.
-func resolveWebhookAuthShape(ctx context.Context, s store.Store, verifier ServiceVerifier, serviceID uuid.UUID, version string, serviceVersionID uuid.UUID) (fusedobject.IncomingWebhookConfig, string, error) {
-	metadata, err := verifier.FetchServiceMetadata(ctx, serviceID, version)
-	if err != nil {
-		return fusedobject.IncomingWebhookConfig{}, "", fmt.Errorf("fetch webhook auth shape for service %s: %w", serviceID, err)
-	}
-	var authShape fusedobject.IncomingWebhookConfig
-	eventExtractionPath := metadata.EventExtractionPath
-	if metadata.IncomingWebhookConfig != nil {
-		authShape = *metadata.IncomingWebhookConfig
-	}
-	// A workspace-local execution_policy override (set for a service this
-	// workspace doesn't own, or hasn't published) wins per-field over the
-	// Registry-sourced value here too -- same precedence as
-	// cache.go's applyExecutionPolicyOverride, just applied at apply-time
-	// instead of read-time since webhook ingress denormalizes this onto
-	// fused_workspace_webhooks once per apply rather than resolving it per
-	// inbound request.
-	if overrideStore, ok := s.(executionPolicyOverrideStore); ok {
-		override, err := overrideStore.GetEffectiveWorkspaceExecutionPolicyOverride(ctx, serviceID, serviceVersionID)
-		if err != nil {
-			slog.WarnContext(ctx, "workspace execution policy override lookup failed, using registry-sourced webhook config",
-				slog.String("service_id", serviceID.String()), slog.Any("error", err))
-		} else if override != nil {
-			if override.EventExtractionPath != nil {
-				eventExtractionPath = *override.EventExtractionPath
-			}
-			if override.IncomingWebhookConfig != nil {
-				authShape = *override.IncomingWebhookConfig
-			}
-		}
-	}
-	return authShape, eventExtractionPath, nil
-}
-
-// upsertOneWorkspaceWebhook is kind: webhook's apply step
-// (webhook_config_handlers.go). owningConfigKey is always that artifact's own
-// config_key now -- runtime_config.webhooks (which used to call this with a
-// nil owningConfigKey) was removed with no backward compatibility, see
-// plans/plan-webhook-kind.md and store.WorkspaceWebhook.OwningConfigKey's doc
-// comment.
-func upsertOneWorkspaceWebhook(
-	ctx context.Context,
-	s store.Store,
-	serviceID, serviceVersionID uuid.UUID,
-	label string,
-	cfg WebhookConfig,
-	authShape fusedobject.IncomingWebhookConfig,
-	eventExtractionPath string,
-	owningConfigKey *string,
-	buckets workspaceConnectBucketCache,
-) (*store.WorkspaceWebhook, error) {
-	secretRef, err := resolvedWorkspaceWebhookSecretRef(ctx, s, cfg.Secret, buckets)
-	if err != nil {
-		return nil, fmt.Errorf("webhook %q: %w", label, err)
-	}
-
+// prepareWorkspaceWebhookRegistration is deliberately persistence-free so
+// batch artifact preparation can build every row without database calls in
+// its service loop.
+func prepareWorkspaceWebhookRegistration(serviceID, serviceVersionID uuid.UUID, label, secretRef string, secretBucketID *uuid.UUID, authShape fusedobject.IncomingWebhookConfig, eventExtractionPath, owningConfigKey string) (store.WorkspaceWebhook, error) {
 	slug, err := webhookid.Generate()
 	if err != nil {
-		return nil, fmt.Errorf("generate webhook slug for %q: %w", label, err)
+		return store.WorkspaceWebhook{}, fmt.Errorf("generate webhook slug for %q: %w", label, err)
 	}
-	saved, err := s.UpsertWorkspaceWebhook(ctx, store.WorkspaceWebhook{
+	return store.WorkspaceWebhook{
 		ServiceID:           serviceID,
 		ServiceVersionID:    serviceVersionID,
 		Label:               label,
@@ -3802,69 +3851,19 @@ func upsertOneWorkspaceWebhook(
 		VerificationHeaders: authShape.VerificationHeaders,
 		EventExtractionPath: eventExtractionPath,
 		SecretRef:           secretRef,
+		SecretBucketID:      secretBucketID,
 		OwningConfigKey:     owningConfigKey,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("upsert webhook %q: %w", label, err)
-	}
+	}, nil
+}
 
+func emitWebhookAppliedSpan(ctx context.Context, saved store.WorkspaceWebhook) {
 	_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.webhook_upserted")
 	span.SetAttributes(
-		attribute.String("service_id", serviceID.String()),
-		attribute.String("label", label),
+		attribute.String("service_id", saved.ServiceID.String()),
+		attribute.String("label", saved.Label),
 		attribute.String("webhook_id", saved.ID.String()),
 	)
 	span.End()
-	return saved, nil
-}
-
-// resolvedWorkspaceWebhookSecretRef validates a webhook registration's
-// ${bucket.<name>.secret.<key>} reference (plan item 4) against the bucket
-// actually existing before the row is written, so a typo'd bucket name fails
-// apply immediately instead of surfacing as an internal error on the first
-// inbound delivery. It intentionally never touches fused_workspace_secrets
-// itself -- the referenced value is owned and populated independently by
-// buckets.<name>.secrets.<key> (prepareWorkspaceBucketSecrets); this only
-// confirms the bucket side of the reference resolves. An empty raw value
-// means "no signing secret configured", unchanged from the old
-// SigningSecret-empty case.
-func resolvedWorkspaceWebhookSecretRef(ctx context.Context, s store.Store, raw string, buckets workspaceConnectBucketCache) (string, error) {
-	if strings.TrimSpace(raw) == "" {
-		return "", nil
-	}
-	ref, err := secretref.Parse(raw)
-	if err != nil {
-		return "", workspaceConfigHTTPError{status: http.StatusBadRequest, message: fmt.Sprintf("webhook secret %q is invalid: %s", raw, err.Error())}
-	}
-	if _, err := resolveWorkspaceConnectBucket(ctx, s, ref.Bucket, buckets); err != nil {
-		return "", err
-	}
-	return ref.String(), nil
-}
-
-// pruneStaleWorkspaceWebhooks removes any registration for serviceID whose
-// label isn't in keepLabels and emits one OTEL span per removal -- same
-// granularity removeManagedWorkspaceVersions already uses for version
-// removal, so a webhook disappearing from the audit trail is exactly as
-// visible as a version being disabled. It no longer touches
-// fused_workspace_secrets: a webhook's secret_ref is a reference into a
-// bucket secret owned and lifecycle-managed by buckets.<name>.secrets, not a
-// value this registration owns, so removing the registration must not delete
-// a secret other registrations (or services) may still reference.
-func pruneStaleWorkspaceWebhooks(ctx context.Context, s store.Store, serviceID uuid.UUID, keepLabels []string) error {
-	removed, err := s.PruneWorkspaceWebhooks(ctx, serviceID, keepLabels)
-	if err != nil {
-		return fmt.Errorf("prune stale webhooks for service %s: %w", serviceID, err)
-	}
-	for _, label := range removed {
-		_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.webhook_removed")
-		span.SetAttributes(
-			attribute.String("service_id", serviceID.String()),
-			attribute.String("label", label),
-		)
-		span.End()
-	}
-	return nil
 }
 
 // applyDeprecationActions pushes deprecation directives from the plan to the
@@ -4676,13 +4675,6 @@ func removeManagedWorkspaceService(
 	if err := s.RemoveWorkspaceService(ctx, serviceID); err != nil && !errors.Is(err, store.ErrWorkspaceServiceNotFound) {
 		return err
 	}
-	// A removed service's webhook registrations have nowhere to belong --
-	// prune all of them (empty keepLabels), same reconciliation call the
-	// still-kept-but-webhooks-edited path uses, just with nothing to keep.
-	if err := pruneStaleWorkspaceWebhooks(ctx, s, serviceID, nil); err != nil {
-		return err
-	}
-
 	_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.service_removed")
 	span.SetAttributes(
 		attribute.String("service_id", serviceID.String()),
@@ -4950,19 +4942,10 @@ func validateWorkspacePlanForApply(plan *store.ConfigPlan, sourceHash string) er
 	return nil
 }
 
-// resolveWorkspaceActor authenticates the caller's API key and verifies the
-// resolved account owns the Engine's singleton workspace, returning just the
-// accountID -- Engine is mono-workspace, so there is no separate workspaceID
-// for callers to carry around anymore.
-func resolveWorkspaceActor(ctx context.Context, s store.Store, r *http.Request) (uuid.UUID, error) {
-	accountID, err := validateAPIKey(ctx, s, r.Header.Get("X-API-Key"))
-	if err != nil {
-		return uuid.Nil, err
-	}
-	if err := s.VerifyWorkspaceOwner(ctx, accountID); err != nil {
-		return uuid.Nil, err
-	}
-	return accountID, nil
+// resolveWorkspaceActor returns the identity resolved once by the control
+// middleware. It deliberately has no request or store fallback.
+func resolveWorkspaceActor(ctx context.Context) (uuid.UUID, error) {
+	return controlActorAccount(ctx)
 }
 
 func planFetchHTTPError(err error) error {

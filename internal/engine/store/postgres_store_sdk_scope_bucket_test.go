@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/shared/db"
 	"github.com/google/uuid"
 )
@@ -46,6 +47,111 @@ func TestPostgresStore_ArtifactScopeBucketResolution(t *testing.T) {
 	})
 }
 
+func TestPostgresStore_DeleteBucketPreservesArtifactBindingInvariant(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("Skipping Postgres store test: DATABASE_URL not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	f := newArtifactScopeBucketFixture(t, ctx, dbURL)
+
+	boundBucket, err := f.store.GetBucket(ctx, f.bucketID)
+	if err != nil {
+		t.Fatalf("GetBucket: %v", err)
+	}
+	if err := f.store.DeleteBucket(ctx, boundBucket.Name, boundBucket.ID); !errors.Is(err, ErrBucketBound) {
+		t.Fatalf("DeleteBucket(bound) = %v, want ErrBucketBound", err)
+	}
+	scope, err := f.store.GetArtifactScope(ctx, f.sdkWithBucket)
+	if err != nil || scope.BucketID != f.bucketID {
+		t.Fatalf("bound delete changed scope: scope=%#v err=%v", scope, err)
+	}
+
+	if _, err := f.store.db.Exec(ctx, `UPDATE fused_buckets SET is_default = true WHERE id = $1`, f.secondBucketID); err != nil {
+		t.Fatalf("mark default: %v", err)
+	}
+	defaultBucket, _ := f.store.GetBucket(ctx, f.secondBucketID)
+	if err := f.store.DeleteBucket(ctx, defaultBucket.Name, defaultBucket.ID); !errors.Is(err, ErrDefaultBucketProtected) {
+		t.Fatalf("DeleteBucket(default) = %v, want ErrDefaultBucketProtected", err)
+	}
+}
+
+func TestPostgresStore_DeleteUnboundBucketReconcilesAccessState(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("Skipping Postgres store test: DATABASE_URL not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	f := newArtifactScopeBucketFixture(t, ctx, dbURL)
+	bucket, err := f.store.GetBucket(ctx, f.secondBucketID)
+	if err != nil {
+		t.Fatalf("GetBucket: %v", err)
+	}
+	if _, err := f.store.db.Exec(ctx, `
+		INSERT INTO fused_role_bindings (subject_type, subject_id, role_id, resource_type, resource_id)
+		SELECT 'team', $1, id, 'bucket', $2 FROM fused_roles WHERE slug = $3 AND scope_type = 'bucket'
+	`, f.ownerTeamID, f.secondBucketID, accesscontrol.RoleBucketUser); err != nil {
+		t.Fatalf("seed bucket binding: %v", err)
+	}
+	var before int64
+	if err := f.store.db.QueryRow(ctx, `SELECT revision FROM fused_authorization_state WHERE singleton_key = 1`).Scan(&before); err != nil {
+		t.Fatalf("load revision: %v", err)
+	}
+	if err := f.store.DeleteBucket(ctx, bucket.Name, bucket.ID); err != nil {
+		t.Fatalf("DeleteBucket(unbound): %v", err)
+	}
+	if _, err := f.store.GetBucket(ctx, f.secondBucketID); !errors.Is(err, ErrBucketNotFound) {
+		t.Fatalf("deleted bucket lookup = %v", err)
+	}
+	var bindings int
+	var after int64
+	if err := f.store.db.QueryRow(ctx, `SELECT COUNT(*) FROM fused_role_bindings WHERE resource_type = 'bucket' AND resource_id = $1`, f.secondBucketID).Scan(&bindings); err != nil {
+		t.Fatalf("count bindings: %v", err)
+	}
+	if err := f.store.db.QueryRow(ctx, `SELECT revision FROM fused_authorization_state WHERE singleton_key = 1`).Scan(&after); err != nil {
+		t.Fatalf("load updated revision: %v", err)
+	}
+	if bindings != 0 || after <= before {
+		t.Fatalf("access state not reconciled: bindings=%d revision=%d before=%d", bindings, after, before)
+	}
+	var auditRows int
+	if err := f.store.db.QueryRow(ctx, `SELECT COUNT(*) FROM fused_audit_events WHERE action = 'bucket.delete' AND resource_id = $1`, f.secondBucketID).Scan(&auditRows); err != nil || auditRows != 1 {
+		t.Fatalf("bucket delete audit rows=%d err=%v", auditRows, err)
+	}
+}
+
+func TestPostgresStore_DeleteBucketRejectsSameNameReplacement(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("Skipping Postgres store test: DATABASE_URL not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	f := newArtifactScopeBucketFixture(t, ctx, dbURL)
+	original, err := f.store.GetBucket(ctx, f.secondBucketID)
+	if err != nil {
+		t.Fatalf("GetBucket: %v", err)
+	}
+	replacementID := uuid.New()
+	if _, err := f.store.db.Exec(ctx, `DELETE FROM fused_buckets WHERE id = $1`, original.ID); err != nil {
+		t.Fatalf("remove original bucket: %v", err)
+	}
+	if _, err := f.store.db.Exec(ctx, `INSERT INTO fused_buckets (id, name) VALUES ($1, $2)`, replacementID, original.Name); err != nil {
+		t.Fatalf("seed same-name replacement: %v", err)
+	}
+
+	err = f.store.DeleteBucket(ctx, original.Name, original.ID)
+	if !errors.Is(err, ErrBucketNotFound) {
+		t.Fatalf("DeleteBucket(stale identity) = %v, want ErrBucketNotFound", err)
+	}
+	current, err := f.store.GetBucket(ctx, replacementID)
+	if err != nil || current.Name != original.Name {
+		t.Fatalf("replacement bucket changed: bucket=%#v err=%v", current, err)
+	}
+}
+
 type artifactScopeBucketFixture struct {
 	ctx              context.Context
 	store            *postgresStore
@@ -54,6 +160,7 @@ type artifactScopeBucketFixture struct {
 	secondBucketID   uuid.UUID
 	sdkWithBucket    uuid.UUID
 	sdkWithoutBucket uuid.UUID
+	ownerTeamID      uuid.UUID
 }
 
 func newArtifactScopeBucketFixture(t *testing.T, ctx context.Context, dbURL string) artifactScopeBucketFixture {
@@ -73,9 +180,9 @@ func newArtifactScopeBucketFixture(t *testing.T, ctx context.Context, dbURL stri
 		sdkWithBucket:    uuid.New(),
 		sdkWithoutBucket: uuid.New(),
 	}
+	f.ownerTeamID = seedArtifactOwnerTeam(t, ctx, f.store.db)
 	cleanAndSeedArtifactScopeBuckets(t, f)
 	seedArtifactScopes(t, f)
-	linkArtifactScopeBucket(t, f)
 	return f
 }
 
@@ -113,6 +220,8 @@ func artifactScopeBucketFixtureScopes(f artifactScopeBucketFixture) []ArtifactSc
 		{
 			AccountID:          f.accountID,
 			ArtifactID:         f.sdkWithBucket,
+			OwnerTeamID:        f.ownerTeamID,
+			BucketID:           f.bucketID,
 			Selections:         []byte("[]"),
 			ScopeSchemaVersion: 1,
 			Name:               "prod sdk",
@@ -122,24 +231,10 @@ func artifactScopeBucketFixtureScopes(f artifactScopeBucketFixture) []ArtifactSc
 		{
 			AccountID:          f.accountID,
 			ArtifactID:         f.sdkWithoutBucket,
+			OwnerTeamID:        f.ownerTeamID,
 			Selections:         []byte("[]"),
 			ScopeSchemaVersion: 1,
 		},
-	}
-}
-
-func linkArtifactScopeBucket(t *testing.T, f artifactScopeBucketFixture) {
-	t.Helper()
-	// The unlinked SDK below exercises the LEFT JOIN's NULL case, proving
-	// missing bucket rows resolve to zero UUIDs rather than being filtered out.
-	if err := f.store.LinkBucketToSDK(f.ctx, f.sdkWithBucket, f.bucketID); err != nil {
-		t.Fatalf("LinkBucketToSDK failed: %v", err)
-	}
-	if err := f.store.LinkBucketToSDK(f.ctx, f.sdkWithBucket, f.bucketID); err != nil {
-		t.Fatalf("idempotent LinkBucketToSDK failed: %v", err)
-	}
-	if err := f.store.LinkBucketToSDK(f.ctx, f.sdkWithBucket, f.secondBucketID); !errors.Is(err, ErrSDKBucketImmutable) {
-		t.Fatalf("second bucket link error = %v, want ErrSDKBucketImmutable", err)
 	}
 }
 

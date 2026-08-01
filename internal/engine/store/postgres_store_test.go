@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/shared/db"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
@@ -64,36 +65,24 @@ func TestPostgresStore(t *testing.T) {
 		})
 	})
 
-	t.Run("GetAccountByAPIKey", func(t *testing.T) {
-		// key_hash is UNIQUE -- a fixed literal collided with a leftover row
-		// from a previous run against a reused (not freshly recreated)
-		// test database, since this test never cleans up after itself.
-		// Suffixing with a fresh UUID makes the test repeatable regardless
-		// of what's already in the table.
-		apiKey := "fsk_test_key_" + uuid.NewString()
-		_, err := pool.Exec(ctx, "INSERT INTO fused_api_keys (account_id, key_hash, name) VALUES ($1, $2, $3)", accountID, apiKey, "Test Key")
-		if err != nil {
-			t.Fatalf("failed to insert test api key: %v", err)
+	t.Run("LoadDefaultBucketID", func(t *testing.T) {
+		loader, ok := s.(interface {
+			LoadDefaultBucketID(context.Context) (uuid.UUID, error)
+		})
+		if !ok {
+			t.Fatal("store does not expose default bucket point lookup")
 		}
-
-		fetchedAccountID, err := s.GetAccountByAPIKey(ctx, apiKey)
-		if err != nil {
-			t.Fatalf("failed to get account by api key: %v", err)
-		}
-		if fetchedAccountID != accountID {
-			t.Errorf("expected %s, got %s", accountID, fetchedAccountID)
-		}
-
-		_, err = s.GetAccountByAPIKey(ctx, "invalid_key")
-		if err == nil {
-			t.Errorf("expected error for invalid key, got nil")
+		bucketID, err := loader.LoadDefaultBucketID(ctx)
+		if err != nil || bucketID == uuid.Nil {
+			t.Fatalf("LoadDefaultBucketID = %s, %v", bucketID, err)
 		}
 	})
 
 	t.Run("GetSDKAccountID", func(t *testing.T) {
 		artifactID := uuid.New()
+		ownerTeamID := seedArtifactOwnerTeam(t, ctx, pool)
 		// token_hash is UNIQUE too -- same reasoning as key_hash above.
-		_, err := pool.Exec(ctx, "INSERT INTO fused_artifact_scopes (account_id, artifact_id, selections) VALUES ($1, $2, $3)", accountID, artifactID, "[]")
+		_, err := pool.Exec(ctx, "INSERT INTO fused_artifact_scopes (account_id, artifact_id, owner_team_id, selections) VALUES ($1, $2, $3, $4)", accountID, artifactID, ownerTeamID, "[]")
 		if err != nil {
 			t.Fatalf("failed to insert test sdk: %v", err)
 		}
@@ -151,8 +140,8 @@ func TestBootstrapWorkspace_RegistryOwnsAccountAndEngineIsSingleton(t *testing.T
 	if wsID == uuid.Nil {
 		t.Error("expected a non-nil workspace ID")
 	}
-	if err := s.BootstrapAPIKey(ctx, freshAccountID, "registry-issued-key"); err != nil {
-		t.Fatalf("BootstrapAPIKey: %v", err)
+	if _, err := accesscontrol.BootstrapOwner(ctx, s.(accesscontrol.BootstrapRepository), freshAccountID, "registry-issued-key"); err != nil {
+		t.Fatalf("BootstrapOwner: %v", err)
 	}
 
 	var accountTableExists bool
@@ -161,6 +150,13 @@ func TestBootstrapWorkspace_RegistryOwnsAccountAndEngineIsSingleton(t *testing.T
 	}
 	if accountTableExists {
 		t.Fatal("Engine must not contain a Registry account projection table")
+	}
+	var legacyAPIKeyTableExists bool
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('public.fused_api_keys') IS NOT NULL`).Scan(&legacyAPIKeyTableExists); err != nil {
+		t.Fatalf("check legacy API-key table: %v", err)
+	}
+	if legacyAPIKeyTableExists {
+		t.Fatal("Engine must not contain the removed fused_api_keys table")
 	}
 
 	_, err = s.BootstrapWorkspace(ctx, uuid.New(), "Second Workspace")
@@ -243,13 +239,12 @@ func runtimeReportingTestStore(t *testing.T) (context.Context, context.CancelFun
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 
 	pool, err := db.InitEnginePostgres(ctx, dbURL)
 	if err != nil {
+		cancel()
 		t.Fatalf("failed to connect to DB: %v", err)
 	}
-	defer pool.Close()
 
 	s := NewPostgresStore(pool)
 	if _, err := pool.Exec(ctx, "DELETE FROM fused_runtime_entitlements; DELETE FROM fused_engine_usage_counter_reports"); err != nil {

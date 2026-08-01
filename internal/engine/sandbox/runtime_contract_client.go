@@ -26,7 +26,7 @@ func (c *HTTPRegistryClient) FetchRuntimeContract(ctx context.Context, serviceID
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("FetchRuntimeContract: request failed: %w", err)
 	}
@@ -57,7 +57,7 @@ func (c *HTTPRegistryClient) FetchRuntimeContracts(ctx context.Context, versions
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("FetchRuntimeContracts: request failed: %w", err)
 	}

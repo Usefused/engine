@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
@@ -66,11 +66,13 @@ type workspaceTestStore struct {
 	listWorkspaceServicesCalls int
 	savedScopes                []sdkSaveParams
 	saveScopeErr               error
+	linkBucketCalls            int
 	existingScopeHash          string
 	existingScopeAccount       uuid.UUID
 	existingScopeVersion       int
 	existingScope              []byte
 	mockScopes                 map[uuid.UUID]*store.ArtifactScope
+	listMCPScopesCalls         int
 	// mcpAnalyticsDashboard/mcpAnalyticsErr drive GetMCPAnalyticsDashboard for
 	// mcp_graphql_test.go; nil dashboard with nil err returns an empty one.
 	mcpAnalyticsDashboard *models.MCPAnalyticsDashboard
@@ -87,15 +89,6 @@ type workspaceTestStore struct {
 	sdkReactivateErr       error
 	deactivatedArtifactIDs []uuid.UUID
 	reactivatedArtifactIDs []uuid.UUID
-	// webhook registration capture/injection -- see UpsertWorkspaceWebhook,
-	// RemoveWorkspaceWebhook, PruneWorkspaceWebhooks below.
-	upsertedWebhooks     []store.WorkspaceWebhook
-	upsertWebhookErr     error
-	removedWebhookLabels []string
-	removeWebhookErr     error
-	prunedWebhookCalls   [][]string
-	prunedWebhookLabels  []string
-	pruneWebhookErr      error
 	// listWorkspaceWebhooksResult/Err let GraphQL tests drive webhook
 	// visibility reads without a real DB.
 	listWorkspaceWebhooksResult []store.WorkspaceWebhook
@@ -107,56 +100,46 @@ type workspaceTestStore struct {
 	bucketsByID                 map[uuid.UUID]*store.Bucket
 	// secretsByKey/secretLookupKeys/secretLookupErr back GetSecret -- used by
 	// the connect client_id/client_secret ${bucket...} bucket-ref apply tests.
-	secretsByKey                map[string]*store.WorkspaceSecret
-	secretLookupKeys            []string
-	secretLookupErr             error
-	getMCPScopeByNameFunc       func(ctx context.Context, accountID uuid.UUID, name, version string) (*store.ArtifactScope, error)
-	buckets                     []store.Bucket
-	bucketSummaries             []store.BucketSummary
-	sdkBuckets                  map[uuid.UUID][]store.Bucket
-	artifactScopesForBucket     map[uuid.UUID][]store.ArtifactScope
-	bucketServiceSummaries      map[uuid.UUID][]store.BucketServiceSummary
-	bucketValues                map[uuid.UUID][]store.BucketValue
-	secretMetas                 map[uuid.UUID][]store.WorkspaceSecretMeta
-	upsertedSecrets             []store.WorkspaceSecret
-	bucketLookupNames           []string
-	bucketLookupErr             error
-	upsertedConnectConfigs      []store.ConnectConfig
-	upsertConnectConfigErr      error
-	connectConfigs              map[string]*store.ConnectConfig
-	serviceConnectConfigs       []store.ConnectConfig
-	workspaceConnectConfigs     []store.WorkspaceConnectConfig
-	workspaceConnectProfiles    []store.WorkspaceConnectionProfile
-	bucketConnectSummaries      map[uuid.UUID]*store.BucketConnectSummary
-	authConnections             []store.AuthConnection
-	connectionResources         map[uuid.UUID][]store.ConnectionResource
-	defaultConnectionResourceID uuid.UUID
-	deletedAuthConnections      []uuid.UUID
-	deletedSecretKeys           []string
-	createdConnectSessions      []store.ConnectSession
-	sdkTokens                   []store.SDKToken
-	// kind: webhook's own store methods (webhook_config_handlers_test.go) --
-	// separate from the legacy prunedWebhookCalls/prunedWebhookLabels above,
-	// which drive the *service-scoped* PruneWorkspaceWebhooks the old
-	// runtime_config.webhooks path used.
-	prunedOwnedCalls       []prunedOwnedWebhooksCall
-	pruneOwnedWebhooksErr  error
-	pruneOwnedWebhooksResp []uuid.UUID
-	webhookOwnersByLabel   map[uuid.UUID]*string
-	webhookOwnersErr       error
-}
-
-// prunedOwnedWebhooksCall captures one PruneOwnedWorkspaceWebhooks
-// invocation so a test can assert both which artifact's rows were pruned and
-// which service IDs it was told to keep.
-type prunedOwnedWebhooksCall struct {
-	owningConfigKey string
-	keepServiceIDs  []uuid.UUID
+	secretsByKey                 map[string]*store.WorkspaceSecret
+	secretLookupKeys             []string
+	secretLookupErr              error
+	getMCPScopeByNameFunc        func(ctx context.Context, accountID uuid.UUID, name, version string) (*store.ArtifactScope, error)
+	buckets                      []store.Bucket
+	bucketSummaries              []store.BucketSummary
+	sdkBuckets                   map[uuid.UUID][]store.Bucket
+	artifactScopesForBucket      map[uuid.UUID][]store.ArtifactScope
+	bucketServiceSummaries       map[uuid.UUID][]store.BucketServiceSummary
+	bucketValues                 map[uuid.UUID][]store.BucketValue
+	secretMetas                  map[uuid.UUID][]store.WorkspaceSecretMeta
+	upsertedSecrets              []store.WorkspaceSecret
+	bucketLookupNames            []string
+	bucketBatchLookupNames       [][]string
+	bucketBatchLookupErr         error
+	bucketLookupErr              error
+	upsertedConnectConfigs       []store.ConnectConfig
+	upsertConnectConfigErr       error
+	connectConfigs               map[string]*store.ConnectConfig
+	serviceConnectConfigs        []store.ConnectConfig
+	workspaceConnectConfigs      []store.WorkspaceConnectConfig
+	workspaceConnectProfiles     []store.WorkspaceConnectionProfile
+	bucketConnectSummaries       map[uuid.UUID]*store.BucketConnectSummary
+	authConnections              []store.AuthConnection
+	getAuthConnectionsByIDsCalls int
+	connectionResources          map[uuid.UUID][]store.ConnectionResource
+	defaultConnectionResourceID  uuid.UUID
+	deletedAuthConnections       []uuid.UUID
+	deletedSecretKeys            []string
+	createdConnectSessions       []store.ConnectSession
+	sdkTokens                    []store.SDKToken
+	// kind: webhook's ownership-conflict lookup controls.
+	webhookOwnersByLabel map[uuid.UUID]string
+	webhookOwnersErr     error
 }
 
 type sdkSaveParams struct {
 	accountID          uuid.UUID
 	artifactID         uuid.UUID
+	ownerTeamID        uuid.UUID
 	selections         []byte
 	scopeSchemaVersion int
 	kind               string
@@ -321,6 +304,22 @@ func (m *mockVerifier) FetchServiceMetadata(_ context.Context, serviceID uuid.UU
 	return &fusedobject.ServiceMetadata{ID: serviceID}, nil
 }
 
+func (m *mockVerifier) FetchServiceMetadataBatch(_ context.Context, refs []sandbox.ServiceMetadataRef) (map[string]*fusedobject.ServiceMetadata, error) {
+	m.fetchMetadataCalls++
+	if m.fetchMetadataErr != nil {
+		return nil, m.fetchMetadataErr
+	}
+	result := make(map[string]*fusedobject.ServiceMetadata, len(refs))
+	for _, ref := range refs {
+		metadata := m.serviceMetadata
+		if metadata == nil {
+			metadata = &fusedobject.ServiceMetadata{ID: ref.ServiceID}
+		}
+		result[sandbox.ServiceMetadataRefKey(ref)] = metadata
+	}
+	return result, nil
+}
+
 func (m *runtimeContractVerifier) FetchRuntimeContract(ctx context.Context, serviceID, serviceVersionID uuid.UUID, version, apiKey string) (*store.ServiceContractSnapshot, error) {
 	m.runtimeContractArgs = append(m.runtimeContractArgs, runtimeContractFetchArgs{
 		serviceID: serviceID, serviceVersionID: serviceVersionID, version: version, apiKey: apiKey,
@@ -373,8 +372,8 @@ func (m *mockVerifier) FetchServiceVisibility(_ context.Context, serviceIDs []uu
 	return out, nil
 }
 
-func buildWorkspaceRouter(s store.Store, verifier ServiceVerifier) http.Handler {
-	r := chi.NewRouter()
+func buildWorkspaceRouter(s *workspaceTestStore, verifier ServiceVerifier) http.Handler {
+	r := newControlTestRouter(s.accountID)
 	dummyMasterKey := []byte("12345678901234567890123456789012")
 	r.Mount("/workspace", WorkspaceHandler(s, verifier, dummyMasterKey))
 	return r
@@ -491,6 +490,41 @@ func (s *workspaceTestStore) ListWorkspaceServices(ctx context.Context, names []
 	return s.workspaceServices, nil
 }
 
+func (s *workspaceTestStore) ListAuthorizedWorkspaceServices(ctx context.Context, scope accesscontrol.AuthorizedScope, names []string) ([]store.WorkspaceService, error) {
+	services, err := s.ListWorkspaceServices(ctx, names)
+	if err != nil || scope.All {
+		return services, err
+	}
+	return filterTestWorkspaceServices(services, scope.IDs), nil
+}
+
+func (s *workspaceTestStore) ResolveWorkspaceServiceIDsByKeys(ctx context.Context, keys []string) (map[string]uuid.UUID, error) {
+	resolved := make(map[string]uuid.UUID)
+	for _, key := range keys {
+		for _, service := range s.workspaceServices {
+			if service.ServiceSlug == key || service.ServiceName == key {
+				resolved[key] = service.ServiceID
+				break
+			}
+		}
+	}
+	return resolved, nil
+}
+
+func filterTestWorkspaceServices(services []store.WorkspaceService, ids []uuid.UUID) []store.WorkspaceService {
+	allowed := make(map[uuid.UUID]struct{}, len(ids))
+	for _, id := range ids {
+		allowed[id] = struct{}{}
+	}
+	filtered := make([]store.WorkspaceService, 0, len(services))
+	for _, service := range services {
+		if _, ok := allowed[service.ServiceID]; ok {
+			filtered = append(filtered, service)
+		}
+	}
+	return filtered
+}
+
 // ListWorkspaceServicesPage mirrors postgresStore's ListWorkspaceServicesPage
 // semantics (workspace_store.go) closely enough for GraphQL resolver tests:
 // filter by service_name when names is non-empty, then page the (already
@@ -521,35 +555,20 @@ func (s *workspaceTestStore) ListWorkspaceServicesPage(ctx context.Context, name
 	return filtered[offset:end], total, nil
 }
 
+func (s *workspaceTestStore) ListAuthorizedWorkspaceServicesPage(ctx context.Context, scope accesscontrol.AuthorizedScope, names []string, limit, offset int) ([]store.WorkspaceService, int, error) {
+	if scope.All {
+		return s.ListWorkspaceServicesPage(ctx, names, limit, offset)
+	}
+	filtered := filterTestWorkspaceServices(s.workspaceServices, scope.IDs)
+	original := s.workspaceServices
+	s.workspaceServices = filtered
+	defer func() { s.workspaceServices = original }()
+	return s.ListWorkspaceServicesPage(ctx, names, limit, offset)
+}
+
 func (s *workspaceTestStore) RemoveWorkspaceService(ctx context.Context, serviceID uuid.UUID) error {
 	s.removedWorkspaceServices = append(s.removedWorkspaceServices, serviceID)
 	return s.deactivateErr
-}
-
-func (s *workspaceTestStore) UpsertWorkspaceWebhook(ctx context.Context, webhook store.WorkspaceWebhook) (*store.WorkspaceWebhook, error) {
-	s.upsertedWebhooks = append(s.upsertedWebhooks, webhook)
-	if s.upsertWebhookErr != nil {
-		return nil, s.upsertWebhookErr
-	}
-	saved := webhook
-	saved.ID = uuid.New()
-	return &saved, nil
-}
-
-func (s *workspaceTestStore) RemoveWorkspaceWebhook(ctx context.Context, serviceID uuid.UUID, label string) error {
-	s.removedWebhookLabels = append(s.removedWebhookLabels, label)
-	return s.removeWebhookErr
-}
-
-// PruneWorkspaceWebhooks is called unconditionally by
-// upsertWorkspaceServiceWebhooks for every service on every apply (see
-// workspace_config_handlers.go), even when that service has no webhooks
-// configured -- so this stub must always succeed by default rather than
-// panicking on the embedded zero-value store.Store, or every workspace apply
-// test in this package (not just webhook-specific ones) would break.
-func (s *workspaceTestStore) PruneWorkspaceWebhooks(ctx context.Context, serviceID uuid.UUID, keepLabels []string) ([]string, error) {
-	s.prunedWebhookCalls = append(s.prunedWebhookCalls, keepLabels)
-	return s.prunedWebhookLabels, s.pruneWebhookErr
 }
 
 func (s *workspaceTestStore) GetWorkspaceWebhookBySlug(ctx context.Context, slug string) (*store.WorkspaceWebhook, error) {
@@ -1091,8 +1110,8 @@ func TestRemoveService_NotFound_404(t *testing.T) {
 // r.Context().Value("workspaceID") -- a context key nothing in the Engine's
 // router chain (cmd/engine/cmd/start.go) ever sets, unlike their sibling
 // handlers in this same file (addServiceHandler/removeServiceHandler),
-// which resolve it via validateAPIKey +
-// GetWorkspaceIDForAccount. That meant both handlers always returned 401
+// which resolve it from the authenticated local Actor. That meant both
+// handlers always returned 401
 // Unauthorized in production, no matter how valid the caller's API key was --
 // this code path had no test coverage, which is how it went unnoticed. These
 // tests guard the fix: both handlers now resolve workspaceID the same way
@@ -1106,14 +1125,11 @@ func (s *workspaceTestStore) BatchCreateEngineExecutionEvents(ctx context.Contex
 	return nil
 }
 
-func (s *workspaceTestStore) BootstrapAPIKey(ctx context.Context, accountID uuid.UUID, keyHash string) error {
-	return nil
-}
-
 func (s *workspaceTestStore) SaveArtifactScope(ctx context.Context, scope store.ArtifactScope) error {
 	s.savedScopes = append(s.savedScopes, sdkSaveParams{
 		accountID:          scope.AccountID,
 		artifactID:         scope.ArtifactID,
+		ownerTeamID:        scope.OwnerTeamID,
 		selections:         append([]byte(nil), scope.Selections...),
 		scopeSchemaVersion: scope.ScopeSchemaVersion,
 		kind:               scope.Kind,
@@ -1181,10 +1197,37 @@ func (s *workspaceTestStore) GetMCPScopeByName(ctx context.Context, accountID uu
 // newest-first by CreatedAt, mirroring postgresStore's real query closely
 // enough for mcp_graphql_test.go's list resolver tests.
 func (s *workspaceTestStore) ListMCPScopesByAccount(ctx context.Context, accountID uuid.UUID, limit, offset int) ([]store.ArtifactScope, int, error) {
+	s.listMCPScopesCalls++
 	var matched []store.ArtifactScope
 	for _, scope := range s.mockScopes {
 		if scope.AccountID == accountID && scope.Kind == "mcp" {
 			matched = append(matched, *scope)
+		}
+	}
+	sort.Slice(matched, func(i, j int) bool { return matched[i].CreatedAt.After(matched[j].CreatedAt) })
+	total := len(matched)
+	if offset >= total {
+		return nil, total, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return matched[offset:end], total, nil
+}
+
+func (s *workspaceTestStore) ListAuthorizedMCPScopesByAccount(ctx context.Context, accountID uuid.UUID, scope accesscontrol.AuthorizedScope, limit, offset int) ([]store.ArtifactScope, int, error) {
+	if scope.All {
+		return s.ListMCPScopesByAccount(ctx, accountID, limit, offset)
+	}
+	allowed := make(map[uuid.UUID]struct{}, len(scope.IDs))
+	for _, id := range scope.IDs {
+		allowed[id] = struct{}{}
+	}
+	var matched []store.ArtifactScope
+	for _, artifact := range s.mockScopes {
+		if _, ok := allowed[artifact.ArtifactID]; ok && artifact.AccountID == accountID && artifact.Kind == "mcp" {
+			matched = append(matched, *artifact)
 		}
 	}
 	sort.Slice(matched, func(i, j int) bool { return matched[i].CreatedAt.After(matched[j].CreatedAt) })
@@ -1323,7 +1366,46 @@ func (s *workspaceTestStore) GetBucketByName(ctx context.Context, name string) (
 		}
 		return nil, store.ErrBucketNotFound
 	}
-	return &store.Bucket{ID: uuid.New(), Name: name, IsDefault: name == "default"}, nil
+	return &store.Bucket{ID: workspaceTestBucketID(name), Name: name, IsDefault: name == "default"}, nil
+}
+
+func workspaceTestBucketID(name string) uuid.UUID {
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("workspace-test-bucket:"+name))
+}
+
+func (s *workspaceTestStore) GetBucketsByNames(ctx context.Context, names []string) ([]store.Bucket, error) {
+	s.bucketBatchLookupNames = append(s.bucketBatchLookupNames, append([]string(nil), names...))
+	if s.bucketBatchLookupErr != nil {
+		return nil, s.bucketBatchLookupErr
+	}
+	byName := make(map[string]store.Bucket, len(s.buckets))
+	for _, bucket := range s.buckets {
+		byName[bucket.Name] = bucket
+	}
+	for name, bucket := range s.bucketsByName {
+		if bucket != nil {
+			copy := *bucket
+			if copy.Name == "" {
+				copy.Name = name
+			}
+			byName[name] = copy
+		}
+	}
+	buckets := make([]store.Bucket, 0, len(names))
+	for _, name := range names {
+		if bucket, ok := byName[name]; ok {
+			buckets = append(buckets, bucket)
+			continue
+		}
+		if s.bucketsByName == nil {
+			buckets = append(buckets, store.Bucket{ID: uuid.New(), Name: name, IsDefault: name == "default"})
+		}
+	}
+	return buckets, nil
+}
+
+func (s *workspaceTestStore) GetEffectiveWorkspaceExecutionPolicyOverrides(context.Context, []store.WorkspaceExecutionPolicyRef) (map[store.WorkspaceExecutionPolicyRef]*store.WorkspaceExecutionPolicyOverride, error) {
+	return map[store.WorkspaceExecutionPolicyRef]*store.WorkspaceExecutionPolicyOverride{}, nil
 }
 
 // GetSecret keys purely by KeyName (ignoring bucketID/serviceID) since these
@@ -1358,6 +1440,31 @@ func (s *workspaceTestStore) ListBucketSummaries(ctx context.Context, limit, off
 	return s.bucketSummaries[offset:end], total, nil
 }
 
+func (s *workspaceTestStore) ListAuthorizedBucketSummaries(ctx context.Context, scope accesscontrol.AuthorizedScope, limit, offset int) ([]store.BucketSummary, int, error) {
+	if scope.All {
+		return s.ListBucketSummaries(ctx, limit, offset)
+	}
+	allowed := make(map[uuid.UUID]struct{}, len(scope.IDs))
+	for _, id := range scope.IDs {
+		allowed[id] = struct{}{}
+	}
+	filtered := make([]store.BucketSummary, 0, len(s.bucketSummaries))
+	for _, summary := range s.bucketSummaries {
+		if _, ok := allowed[summary.ID]; ok {
+			filtered = append(filtered, summary)
+		}
+	}
+	total := len(filtered)
+	if offset >= total {
+		return nil, total, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return filtered[offset:end], total, nil
+}
+
 func (s *workspaceTestStore) GetBucketSummary(ctx context.Context, bucketID uuid.UUID) (*store.BucketSummary, error) {
 	for _, summary := range s.bucketSummaries {
 		if summary.ID == bucketID {
@@ -1389,6 +1496,7 @@ func (s *workspaceTestStore) CreateBucket(ctx context.Context, name string, isDe
 }
 
 func (s *workspaceTestStore) LinkBucketToSDK(ctx context.Context, artifactID, bucketID uuid.UUID) error {
+	s.linkBucketCalls++
 	return nil
 }
 
@@ -1399,8 +1507,38 @@ func (s *workspaceTestStore) ListBucketsForSDK(ctx context.Context, artifactID u
 	return nil, nil
 }
 
+func (s *workspaceTestStore) ListAuthorizedBucketsForSDK(ctx context.Context, artifactID uuid.UUID, scope accesscontrol.AuthorizedScope) ([]store.Bucket, error) {
+	buckets, err := s.ListBucketsForSDK(ctx, artifactID)
+	if err != nil || scope.All {
+		return buckets, err
+	}
+	allowed := testUUIDSet(scope.IDs)
+	var filtered []store.Bucket
+	for _, bucket := range buckets {
+		if _, ok := allowed[bucket.ID]; ok {
+			filtered = append(filtered, bucket)
+		}
+	}
+	return filtered, nil
+}
+
 func (s *workspaceTestStore) ListArtifactScopesForBucket(ctx context.Context, bucketID uuid.UUID, limit, offset int) ([]store.ArtifactScope, int, error) {
 	items, total := pageArtifactScopes(s.artifactScopesForBucket[bucketID], limit, offset)
+	return items, total, nil
+}
+
+func (s *workspaceTestStore) ListAuthorizedArtifactScopesForBucket(ctx context.Context, bucketID uuid.UUID, scope accesscontrol.AuthorizedScope, limit, offset int) ([]store.ArtifactScope, int, error) {
+	if scope.All {
+		return s.ListArtifactScopesForBucket(ctx, bucketID, limit, offset)
+	}
+	allowed := testUUIDSet(scope.IDs)
+	var filtered []store.ArtifactScope
+	for _, artifact := range s.artifactScopesForBucket[bucketID] {
+		if _, ok := allowed[artifact.ArtifactID]; ok {
+			filtered = append(filtered, artifact)
+		}
+	}
+	items, total := pageArtifactScopes(filtered, limit, offset)
 	return items, total, nil
 }
 
@@ -1488,6 +1626,29 @@ func (s *workspaceTestStore) ListBucketServiceSummaries(ctx context.Context, buc
 	return items, total, nil
 }
 
+func (s *workspaceTestStore) ListAuthorizedBucketServiceSummaries(ctx context.Context, bucketID uuid.UUID, scope accesscontrol.AuthorizedScope, search string, limit, offset int) ([]store.BucketServiceSummary, int, error) {
+	if scope.All {
+		return s.ListBucketServiceSummaries(ctx, bucketID, search, limit, offset)
+	}
+	allowed := testUUIDSet(scope.IDs)
+	var filtered []store.BucketServiceSummary
+	for _, service := range s.bucketServiceSummaries[bucketID] {
+		if _, ok := allowed[service.ServiceID]; ok {
+			filtered = append(filtered, service)
+		}
+	}
+	items, total := pageBucketServiceSummaries(filterBucketServiceSummaries(filtered, search), limit, offset)
+	return items, total, nil
+}
+
+func testUUIDSet(ids []uuid.UUID) map[uuid.UUID]struct{} {
+	set := make(map[uuid.UUID]struct{}, len(ids))
+	for _, id := range ids {
+		set[id] = struct{}{}
+	}
+	return set
+}
+
 // ListAuthConnections mirrors Store filtering inside the fixture only; the real
 // Postgres implementation keeps these filters in SQL.
 func (s *workspaceTestStore) ListAuthConnections(ctx context.Context, bucketID uuid.UUID, serviceID *uuid.UUID, endUserRef string) ([]store.AuthConnection, error) {
@@ -1532,6 +1693,18 @@ func (s *workspaceTestStore) GetAuthConnectionByIDForBuckets(ctx context.Context
 		}
 	}
 	return nil, nil
+}
+
+func (s *workspaceTestStore) GetAuthConnectionsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]store.AuthConnection, error) {
+	s.getAuthConnectionsByIDsCalls++
+	allowed := testUUIDSet(ids)
+	connections := make(map[uuid.UUID]store.AuthConnection, len(ids))
+	for _, connection := range s.authConnections {
+		if _, ok := allowed[connection.ID]; ok {
+			connections[connection.ID] = connection
+		}
+	}
+	return connections, nil
 }
 
 // DeleteAuthConnection records the deleted ID only when the bucket matches,

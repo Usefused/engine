@@ -43,7 +43,7 @@ func forwardIntegrationDeleteWithWorkspaceCleanup(proxy Forwarder, s store.Store
 	serviceIDStr := strings.TrimPrefix(r.URL.Path, "/integrations/")
 	serviceID, parseErr := uuid.Parse(serviceIDStr)
 
-	wsErr := s.VerifyWorkspaceOwner(ctx, accountID)
+	wsErr := verifyWorkspaceActor(ctx, accountID)
 
 	proxy.ForwardAndInspect(rec, r.WithContext(ctx), "", func(body []byte) {
 		// Only clean up the workspace if the Registry confirmed the deletion.

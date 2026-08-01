@@ -12,12 +12,13 @@ import (
 )
 
 var (
-	ErrUnauthorized = errors.New("unauthorized: invalid token or license key")
+	ErrUnauthorized = errors.New("unauthorized: invalid SDK token")
 )
 
 type TokenValidator interface {
 	// Validate resolves a token string to an AccountID, given the SDK ID context.
-	// The token can either be the specific SDK token, or an Account-level API key.
+	// Control-plane credentials do not cross this runtime boundary; only a token
+	// issued for the selected artifact is accepted.
 	Validate(ctx context.Context, artifactID uuid.UUID, token string) (uuid.UUID, error)
 }
 

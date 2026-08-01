@@ -25,7 +25,7 @@ func ConfigPlanActionsHandler(configStore store.ConfigRepository, s store.Store)
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.config_plan.update_actions")
 		defer span.End()
 
-		accountID, err := resolveWorkspaceActor(ctx, s, r)
+		accountID, err := resolveWorkspaceActor(ctx)
 		if err != nil {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
 			http.Error(w, `{"error":"invalid API key or workspace not found"}`, http.StatusUnauthorized)
@@ -51,8 +51,18 @@ func ConfigPlanActionsHandler(configStore store.ConfigRepository, s store.Store)
 			req.Actions = []byte("[]")
 		}
 
-		plan, err := configStore.ReplaceConfigPlanActions(ctx, planID, req.Actions, uuid.Nil)
+		requiredPermissions, requiredCount, err := requiredPermissionsFromContext(ctx, req.Actions)
 		if err != nil {
+			http.Error(w, `{"error":"required permission snapshot unavailable"}`, http.StatusInternalServerError)
+			return
+		}
+
+		plan, err := configStore.ReplaceConfigPlanActions(ctx, planID, req.Actions, requiredPermissions, accountID)
+		if err != nil {
+			if errors.Is(err, store.ErrConfigPlanApplyInProgress) {
+				http.Error(w, `{"error":"plan apply is in progress"}`, http.StatusConflict)
+				return
+			}
 			if errors.Is(err, store.ErrConfigPlanNotFound) {
 				http.Error(w, `{"error":"plan not found or not pending"}`, http.StatusNotFound)
 				return
@@ -62,13 +72,17 @@ func ConfigPlanActionsHandler(configStore store.ConfigRepository, s store.Store)
 			return
 		}
 
-		span.SetAttributes(attribute.String("outcome", "success"))
+		span.SetAttributes(
+			attribute.Int("required_permissions_count", requiredCount),
+			attribute.String("outcome", "success"),
+		)
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":   "updated",
-			"plan_id":  plan.ID.String(),
-			"revision": plan.Revision,
+			"status":               "updated",
+			"plan_id":              plan.ID.String(),
+			"revision":             plan.Revision,
+			"required_permissions": plan.RequiredPermissions,
 		})
 	}
 }

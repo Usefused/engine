@@ -7,6 +7,8 @@ import (
 	"testing"
 )
 
+const testRegistryLicense = "fsk_registry_license"
+
 // TestForward_RewritesHost verifies that the Host header seen by the Registry
 // is the Registry's own host, not whatever Host the browser sent to the Engine.
 // Without this, a naive reverse proxy would forward the Engine's Host header,
@@ -19,7 +21,7 @@ func TestForward_RewritesHost(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	proxy := NewRegistryProxy(backend.URL)
+	proxy := NewRegistryProxy(backend.URL, testRegistryLicense)
 
 	req := httptest.NewRequest(http.MethodGet, "/graphql", nil)
 	req.Host = "engine.internal:8081"
@@ -33,27 +35,47 @@ func TestForward_RewritesHost(t *testing.T) {
 	}
 }
 
-// TestForward_PreservesAPIKey verifies X-API-Key is forwarded byte-for-byte.
-// The Registry owns identity resolution for its own endpoints; the Engine
-// must not mutate, strip, or re-derive the key before relaying it.
-func TestForward_PreservesAPIKey(t *testing.T) {
-	var gotKey string
+// TestForward_InjectsLicenseIdentity verifies local credentials stop at the
+// Engine and only the licensed workspace identity reaches Registry.
+func TestForward_InjectsLicenseIdentity(t *testing.T) {
+	var gotKey, gotAuthorization string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotKey = r.Header.Get("X-API-Key")
+		gotAuthorization = r.Header.Get("Authorization")
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer backend.Close()
 
-	proxy := NewRegistryProxy(backend.URL)
+	proxy := NewRegistryProxy(backend.URL, testRegistryLicense)
 
 	req := httptest.NewRequest(http.MethodGet, "/integrations/svc-123", nil)
-	req.Header.Set("X-API-Key", "fsk_original_unmodified_key")
+	req.Header.Set("X-API-Key", "fsk_local_personal_key")
+	req.Header.Set("Authorization", "Bearer local-personal-key")
 	rec := httptest.NewRecorder()
 
 	proxy.Forward(rec, req, "")
 
-	if gotKey != "fsk_original_unmodified_key" {
-		t.Errorf("expected X-API-Key to pass through unchanged, got %q", gotKey)
+	if gotKey != testRegistryLicense || gotAuthorization != "Bearer "+testRegistryLicense {
+		t.Errorf("Registry auth = X-API-Key %q, Authorization %q", gotKey, gotAuthorization)
+	}
+}
+
+func TestForward_StripsSensitiveRegistryResponseHeaders(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Authorization", "Bearer must-not-leak")
+		w.Header().Set("Proxy-Authorization", "must-not-leak")
+		w.Header().Set("X-API-Key", "must-not-leak")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	proxy := NewRegistryProxy(backend.URL, testRegistryLicense)
+	recorder := httptest.NewRecorder()
+	proxy.Forward(recorder, httptest.NewRequest(http.MethodGet, "/account", nil), "")
+	for _, header := range []string{"Authorization", "Proxy-Authorization", "X-API-Key"} {
+		if got := recorder.Header().Get(header); got != "" {
+			t.Fatalf("response header %s leaked %q", header, got)
+		}
 	}
 }
 
@@ -77,7 +99,7 @@ func TestForward_PropagatesStatusCode(t *testing.T) {
 			}))
 			defer backend.Close()
 
-			proxy := NewRegistryProxy(backend.URL)
+			proxy := NewRegistryProxy(backend.URL, testRegistryLicense)
 
 			req := httptest.NewRequest(http.MethodPost, "/graphql", nil)
 			rec := httptest.NewRecorder()
@@ -105,7 +127,7 @@ func TestForwardAndInspect_PassesBodyThroughUnchangedAndInvokesOnSuccess(t *test
 	}))
 	defer backend.Close()
 
-	proxy := NewRegistryProxy(backend.URL)
+	proxy := NewRegistryProxy(backend.URL, testRegistryLicense)
 	req := httptest.NewRequest(http.MethodPost, "/integrations/import/apply", nil)
 	rec := httptest.NewRecorder()
 
@@ -144,7 +166,7 @@ func TestForwardAndInspect_SkipsOnSuccessForNonSuccessStatus(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	proxy := NewRegistryProxy(backend.URL)
+	proxy := NewRegistryProxy(backend.URL, testRegistryLicense)
 	req := httptest.NewRequest(http.MethodPost, "/integrations/import/apply", nil)
 	rec := httptest.NewRecorder()
 

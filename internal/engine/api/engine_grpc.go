@@ -2,8 +2,8 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -12,6 +12,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/messaging"
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -82,13 +83,16 @@ func (s *EngineGRPCServer) StartConnectSession(ctx context.Context, req *enginev
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.grpc.connect_session.start")
 	defer span.End()
 
-	call, err := s.connectAdminCallFromGRPC(ctx, req.GetBucketId(), req.GetServiceId())
+	call, artifactID, err := s.authenticatedConnectCallFromGRPC(ctx, req.GetBucketId(), req.GetServiceId())
 	if err != nil {
 		return nil, grpcConnectError(err)
 	}
 	createdByArtifactID, err := optionalUUIDValue(req.GetCreatedByArtifactId())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "created_by_artifact_id must be a valid UUID")
+	}
+	if createdByArtifactID != uuid.Nil && createdByArtifactID != artifactID {
+		return nil, status.Error(codes.PermissionDenied, "created_by_artifact_id must match the authenticated artifact")
 	}
 	endUserRef := strings.TrimSpace(req.GetEndUserRef())
 	if endUserRef == "" {
@@ -102,7 +106,7 @@ func (s *EngineGRPCServer) StartConnectSession(ctx context.Context, req *enginev
 	if err != nil {
 		return nil, grpcConnectError(err)
 	}
-	response, err := createConnectSession(ctx, s.store, call, endUserRef, createdByArtifactID, returnURL, req.GetResourceInput(), req.GetScopes(), resolved, s.masterKey)
+	response, err := createConnectSession(ctx, s.store, call, endUserRef, artifactID, returnURL, req.GetResourceInput(), req.GetScopes(), resolved, s.masterKey)
 	if err != nil {
 		return nil, grpcConnectError(err)
 	}
@@ -120,15 +124,15 @@ func (s *EngineGRPCServer) GetConnection(ctx context.Context, req *enginev1.GetC
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "connection_id must be a valid UUID")
 	}
-	bucketIDs, err := s.actorBucketIDsFromGRPC(ctx)
+	scope, err := s.authenticateArtifactFromGRPC(ctx)
 	if err != nil {
 		return nil, grpcConnectError(err)
 	}
-	conn, err := s.store.GetAuthConnectionByIDForBuckets(ctx, connectionID, bucketIDs)
+	conn, err := s.store.GetAuthConnectionByIDForBuckets(ctx, connectionID, []uuid.UUID{scope.BucketID})
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to get auth connection")
 	}
-	if conn == nil {
+	if conn == nil || !artifactScopeSelectsService(scope.Selections, conn.ServiceID) {
 		return &enginev1.GetConnectionResponse{Found: false}, nil
 	}
 	return &enginev1.GetConnectionResponse{Found: true, Connection: projectProtoAuthConnection(*conn)}, nil
@@ -143,15 +147,15 @@ func (s *EngineGRPCServer) ListConnectionResources(ctx context.Context, req *eng
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "connection_id must be a valid UUID")
 	}
-	bucketIDs, err := s.actorBucketIDsFromGRPC(ctx)
+	scope, err := s.authenticateArtifactFromGRPC(ctx)
 	if err != nil {
 		return nil, grpcConnectError(err)
 	}
-	connection, err := s.store.GetAuthConnectionByIDForBuckets(ctx, connectionID, bucketIDs)
+	connection, err := s.store.GetAuthConnectionByIDForBuckets(ctx, connectionID, []uuid.UUID{scope.BucketID})
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to resolve auth connection")
 	}
-	if connection == nil {
+	if connection == nil || !artifactScopeSelectsService(scope.Selections, connection.ServiceID) {
 		return nil, status.Error(codes.NotFound, "auth connection not found")
 	}
 	resources, err := s.store.ListConnectionResources(ctx, connectionID)
@@ -162,72 +166,56 @@ func (s *EngineGRPCServer) ListConnectionResources(ctx context.Context, req *eng
 	return &enginev1.ListConnectionResourcesResponse{Resources: projectProtoConnectionResources(resources)}, nil
 }
 
-// connectAdminCallFromGRPC normalizes the two IDs every connect mutation needs
-// before entering the shared connect runtime helpers.
-func (s *EngineGRPCServer) connectAdminCallFromGRPC(ctx context.Context, bucketIDRaw, serviceIDRaw string) (connectAdminCall, error) {
-	bucketCall, err := s.bucketAdminCallFromGRPC(ctx, bucketIDRaw)
+// authenticatedConnectCallFromGRPC binds a runtime call to the immutable
+// artifact scope authenticated by x-artifact-id plus its SDK token.
+func (s *EngineGRPCServer) authenticatedConnectCallFromGRPC(ctx context.Context, bucketIDRaw, serviceIDRaw string) (connectAdminCall, uuid.UUID, error) {
+	scope, err := s.authenticateArtifactFromGRPC(ctx)
 	if err != nil {
-		return connectAdminCall{}, err
-	}
-	serviceID, err := uuid.Parse(strings.TrimSpace(serviceIDRaw))
-	if err != nil {
-		return connectAdminCall{}, status.Error(codes.InvalidArgument, "service_id must be a valid UUID")
-	}
-	return connectAdminCall{bucketID: bucketCall.bucketID, serviceID: serviceID}, nil
-}
-
-// bucketAdminCallFromGRPC authenticates the SDK token and proves bucket
-// ownership before a gRPC caller can create or inspect bucket-attached auth.
-func (s *EngineGRPCServer) bucketAdminCallFromGRPC(ctx context.Context, bucketIDRaw string) (bucketAdminCall, error) {
-	err := s.workspaceFromGRPC(ctx)
-	if err != nil {
-		return bucketAdminCall{}, err
+		return connectAdminCall{}, uuid.Nil, err
 	}
 	bucketID, err := uuid.Parse(strings.TrimSpace(bucketIDRaw))
 	if err != nil {
-		return bucketAdminCall{}, status.Error(codes.InvalidArgument, "bucket_id must be a valid UUID")
+		return connectAdminCall{}, uuid.Nil, status.Error(codes.InvalidArgument, "bucket_id must be a valid UUID")
 	}
-	// Bucket ownership is checked before connect mutations so SDK-created
-	// sessions cannot target auth material outside the caller's workspace.
-	if _, err := s.store.GetBucket(ctx, bucketID); err != nil {
-		if errors.Is(err, store.ErrBucketNotFound) {
-			return bucketAdminCall{}, status.Error(codes.NotFound, "bucket not found")
+	serviceID, err := uuid.Parse(strings.TrimSpace(serviceIDRaw))
+	if err != nil {
+		return connectAdminCall{}, uuid.Nil, status.Error(codes.InvalidArgument, "service_id must be a valid UUID")
+	}
+	if scope.BucketID != bucketID || !artifactScopeSelectsService(scope.Selections, serviceID) {
+		return connectAdminCall{}, uuid.Nil, status.Error(codes.PermissionDenied, "artifact scope does not allow this bucket and service")
+	}
+	return connectAdminCall{bucketID: bucketID, serviceID: serviceID}, scope.ArtifactID, nil
+}
+
+// authenticateArtifactFromGRPC deliberately avoids control credentials: SDK
+// runtime identity is the artifact ID plus a token issued for that artifact.
+func (s *EngineGRPCServer) authenticateArtifactFromGRPC(ctx context.Context) (*store.ArtifactScope, error) {
+	artifactID, err := uuid.Parse(strings.TrimSpace(grpcArtifactID(ctx)))
+	if err != nil {
+		return nil, status.Error(codes.Unauthenticated, "artifact authentication is required")
+	}
+	accountID, err := s.tokenValidator.Validate(ctx, artifactID, grpcAPIKey(ctx))
+	if err != nil {
+		return nil, status.Error(codes.Unauthenticated, "artifact authentication failed")
+	}
+	scope, err := s.store.GetArtifactScope(ctx, artifactID)
+	if err != nil || scope.AccountID != accountID || scope.ArtifactID != artifactID || scope.BucketID == uuid.Nil || scope.DeactivatedAt != nil {
+		return nil, status.Error(codes.PermissionDenied, "artifact scope is unavailable")
+	}
+	return scope, nil
+}
+
+func artifactScopeSelectsService(raw []byte, serviceID uuid.UUID) bool {
+	var selections []models.SDKSelection
+	if err := json.Unmarshal(raw, &selections); err != nil {
+		return false
+	}
+	for _, selection := range selections {
+		if selection.ServiceID == serviceID {
+			return true
 		}
-		return bucketAdminCall{}, fmt.Errorf("resolve bucket: %w", err)
 	}
-	return bucketAdminCall{bucketID: bucketID}, nil
-}
-
-// workspaceFromGRPC validates the metadata token once and verifies the
-// resolved account owns the Engine's singleton workspace.
-func (s *EngineGRPCServer) workspaceFromGRPC(ctx context.Context) error {
-	token := grpcAPIKey(ctx)
-	accountID, err := validateAPIKey(ctx, s.store, token)
-	if err != nil {
-		return status.Error(codes.Unauthenticated, "unauthorized")
-	}
-	if err := s.store.VerifyWorkspaceOwner(ctx, accountID); err != nil {
-		return status.Error(codes.Internal, "failed to resolve workspace")
-	}
-	return nil
-}
-
-// actorBucketIDsFromGRPC scopes opaque connection-id lookup to buckets owned
-// by the caller instead of trusting the caller to provide a bucket id.
-func (s *EngineGRPCServer) actorBucketIDsFromGRPC(ctx context.Context) ([]uuid.UUID, error) {
-	err := s.workspaceFromGRPC(ctx)
-	if err != nil {
-		return nil, err
-	}
-	buckets, err := s.store.ListBuckets(ctx)
-	if err != nil {
-		return nil, status.Error(codes.Internal, "failed to list buckets")
-	}
-	bucketIDs := make([]uuid.UUID, 0, len(buckets))
-	for _, bucket := range buckets {
-		bucketIDs = append(bucketIDs, bucket.ID)
-	}
-	return bucketIDs, nil
+	return false
 }
 
 // grpcAPIKey accepts both native gRPC metadata and bearer-style edge metadata

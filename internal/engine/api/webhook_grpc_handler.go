@@ -140,9 +140,9 @@ func (s *EngineGRPCServer) SubscribeWebhooks(stream enginev1.EngineService_Subsc
 // carried as gRPC metadata instead so this RPC authenticates exactly like
 // every other one on EngineGRPCServer (see grpcAPIKey in engine_grpc.go)
 // rather than via fields on the first stream message. auth.TokenValidator's
-// Validate is the right tool here per auth.go's own doc comment: it's scoped
-// to exactly this artifactID+token shape, unlike the account-level
-// validateAPIKey used by the REST/GraphQL proxy handlers.
+// Validate is the right tool here per auth.go's own doc comment: it is scoped
+// to exactly this artifactID+token shape, unlike the account-level local
+// access middleware used by the REST/GraphQL proxy handlers.
 func (s *EngineGRPCServer) authenticateWebhookSubscribe(ctx context.Context) (uuid.UUID, uuid.UUID, error) {
 	artifactIDStr := strings.TrimSpace(grpcArtifactID(ctx))
 	if artifactIDStr == "" {

@@ -15,7 +15,7 @@ import (
 func TestUpsertSecretHandler_UnknownBucketReturnsNotFound(t *testing.T) {
 	fixture := newSecretsFixture()
 	fixture.store.bucketErr = store.ErrBucketNotFound
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	body := bytes.NewReader([]byte(`{
 		"service_id":"` + fixture.serviceID.String() + `",
@@ -39,7 +39,7 @@ func TestUpsertSecretHandler_UnknownBucketReturnsNotFound(t *testing.T) {
 
 func TestUpsertSecretHandler_DefaultBucketWhenOmitted(t *testing.T) {
 	fixture := newSecretsFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	body := bytes.NewReader([]byte(`{
 		"service_id":"` + fixture.serviceID.String() + `",
@@ -65,7 +65,7 @@ func TestUpsertSecretHandler_DefaultBucketWhenOmitted(t *testing.T) {
 
 func TestUpsertSecretHandler_RejectsSingleMTLSSecret(t *testing.T) {
 	fixture := newSecretsFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	body := bytes.NewReader([]byte(`{
 		"service_id":"` + fixture.serviceID.String() + `",
@@ -88,7 +88,7 @@ func TestUpsertSecretHandler_RejectsSingleMTLSSecret(t *testing.T) {
 
 func TestUpsertSecretHandler_RejectsSingleBasicSecret(t *testing.T) {
 	fixture := newSecretsFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	body := bytes.NewReader([]byte(`{
 		"service_id":"` + fixture.serviceID.String() + `",
@@ -111,7 +111,7 @@ func TestUpsertSecretHandler_RejectsSingleBasicSecret(t *testing.T) {
 
 func TestUpsertSecretsHandler_StoresMTLSPairAtomically(t *testing.T) {
 	fixture := newSecretsFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 	cert, key := workspaceTestMTLSPair(t)
 
 	body := bytes.NewReader([]byte(`{
@@ -139,7 +139,7 @@ func TestUpsertSecretsHandler_StoresMTLSPairAtomically(t *testing.T) {
 
 func TestUpsertSecretsHandler_RejectsIncompleteBasicPair(t *testing.T) {
 	fixture := newSecretsFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	body := bytes.NewReader([]byte(`{
 		"secrets":[
@@ -161,7 +161,7 @@ func TestUpsertSecretsHandler_RejectsIncompleteBasicPair(t *testing.T) {
 
 func TestUpsertSecretsHandler_RejectsInvalidMTLSPair(t *testing.T) {
 	fixture := newSecretsFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	body := bytes.NewReader([]byte(`{
 		"secrets":[
@@ -185,7 +185,7 @@ func TestUpsertSecretsHandler_RejectsInvalidMTLSPair(t *testing.T) {
 func TestDeleteSecretHandler_UnknownBucketReturnsNotFound(t *testing.T) {
 	fixture := newSecretsFixture()
 	fixture.store.bucketErr = store.ErrBucketNotFound
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	req := httptest.NewRequest(http.MethodDelete, "/workspace/secrets?service_id="+fixture.serviceID.String()+"&key_name=Authorization&bucket_id="+uuid.NewString(), nil)
 	req.Header.Set("X-API-Key", "test-key")
@@ -206,7 +206,7 @@ func TestDeleteSecretHandler_UnknownBucketReturnsNotFound(t *testing.T) {
 // default bucket UpsertSecretHandler would use.
 func TestDeleteSecretHandler_DefaultBucketWhenOmitted(t *testing.T) {
 	fixture := newSecretsFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	req := httptest.NewRequest(http.MethodDelete, "/workspace/secrets?service_id="+fixture.serviceID.String()+"&key_name=Authorization", nil)
 	req.Header.Set("X-API-Key", "test-key")
@@ -223,7 +223,7 @@ func TestDeleteSecretHandler_DefaultBucketWhenOmitted(t *testing.T) {
 
 func TestDeleteSecretHandler_ExplicitBucketID(t *testing.T) {
 	fixture := newSecretsFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	req := httptest.NewRequest(http.MethodDelete, "/workspace/secrets?service_id="+fixture.serviceID.String()+"&key_name=Authorization&bucket_id="+fixture.otherBucketID.String(), nil)
 	req.Header.Set("X-API-Key", "test-key")

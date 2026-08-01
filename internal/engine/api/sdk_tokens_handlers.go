@@ -21,8 +21,7 @@ func GenerateSDKTokenHandler(s store.Store) http.HandlerFunc {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.sdk_tokens.generate")
 		defer span.End()
 
-		apiKey := r.Header.Get("X-API-Key")
-		_, err := validateAPIKey(ctx, s, apiKey)
+		_, err := controlActorAccount(ctx)
 		if err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -72,8 +71,7 @@ func RevokeSDKTokenHandler(s store.Store) http.HandlerFunc {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.sdk_tokens.revoke")
 		defer span.End()
 
-		apiKey := r.Header.Get("X-API-Key")
-		_, err := validateAPIKey(ctx, s, apiKey)
+		_, err := controlActorAccount(ctx)
 		if err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return

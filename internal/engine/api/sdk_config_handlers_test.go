@@ -5,14 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
@@ -75,6 +78,15 @@ func TestArtifactResolvedPayloadHasNoTarget(t *testing.T) {
 	}
 }
 
+func resolvedDefaultBucketPayload(t *testing.T, request GenerateSDKRequest) json.RawMessage {
+	t.Helper()
+	payload, err := json.Marshal(resolvedSDKPayload(request, workspaceTestBucketID("default")))
+	if err != nil {
+		t.Fatalf("marshal resolved SDK payload: %v", err)
+	}
+	return payload
+}
+
 func TestValidateArtifactBucketReadinessReportsEveryMissingOAuthService(t *testing.T) {
 	bucketID := uuid.New()
 	first, second := uuid.New(), uuid.New()
@@ -83,7 +95,7 @@ func TestValidateArtifactBucketReadinessReportsEveryMissingOAuthService(t *testi
 			"production": {ID: bucketID},
 		},
 	}
-	err := validateArtifactBucketReadiness(context.Background(), s, "production", []models.SDKSelection{
+	err := validateArtifactBucketReadiness(context.Background(), s, bucketID, []models.SDKSelection{
 		{ServiceID: first, AuthType: "oauth"}, {ServiceID: second, AuthType: "oidc"},
 	})
 	if err == nil || !strings.Contains(err.Error(), first.String()) || !strings.Contains(err.Error(), second.String()) {
@@ -218,11 +230,12 @@ func TestSDKConfigPlanHandler_UsesOperations(t *testing.T) {
 		serviceID.String() + "|2026-07-01": {ServiceID: serviceID, Version: "2026-07-01", ServiceVersionID: serviceVersionID, Revision: 1},
 	}}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/sdk-config/plan", SDKConfigPlanHandler(configStore, s, registryClient))
 
 	body := []byte(`{
 		"source_hash": "abc",
+		"owner_team_id":"00000000-0000-0000-0000-000000000001",
 		"config_key": "sdk:security:1.0.0",
 		"config": {
 			"apiVersion": "fused/v1",
@@ -261,6 +274,25 @@ func TestSDKConfigPlanHandler_UsesOperations(t *testing.T) {
 	if resolved.Selections[0].ServiceID != serviceID {
 		t.Fatalf("expected service %s, got %s", serviceID, resolved.Selections[0].ServiceID)
 	}
+	var response struct {
+		RequiredPermissions []requiredPermissionResponse `json:"required_permissions"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode plan response: %v", err)
+	}
+	if !hasRequiredPermission(response.RequiredPermissions, "service.consume", "service", serviceID) {
+		t.Fatalf("expected service.consume preview, got %#v", response.RequiredPermissions)
+	}
+	if configStore.createdPlan == nil || configStore.createdPlan.OwnerTeamID == nil || *configStore.createdPlan.OwnerTeamID != testArtifactOwnerTeamID {
+		t.Fatalf("persisted owner team = %#v", configStore.createdPlan)
+	}
+	var persisted []requiredPermissionResponse
+	if err := json.Unmarshal(configStore.createdPlan.RequiredPermissions, &persisted); err != nil {
+		t.Fatalf("decode persisted permissions: %v", err)
+	}
+	if !hasRequiredPermission(persisted, "service.consume", "service", serviceID) {
+		t.Fatalf("expected persisted service.consume, got %#v", persisted)
+	}
 }
 
 // TestSDKConfigPlanHandler_RejectsUnregisteredWebhookAttachment is the
@@ -285,11 +317,12 @@ func TestSDKConfigPlanHandler_RejectsUnregisteredWebhookAttachment(t *testing.T)
 		serviceID.String() + "|2026-07-01": {ServiceID: serviceID, Version: "2026-07-01", ServiceVersionID: serviceVersionID, Revision: 1},
 	}}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/sdk-config/plan", SDKConfigPlanHandler(configStore, s, registryClient))
 
 	body := []byte(`{
 		"source_hash": "abc",
+		"owner_team_id":"00000000-0000-0000-0000-000000000001",
 		"config_key": "sdk:security:1.0.0",
 		"config": {
 			"apiVersion": "fused/v1",
@@ -331,9 +364,10 @@ func TestSDKConfigPlanHandler_FailsClosedWithoutBatchVersionResolver(t *testing.
 			serviceID: {{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID}},
 		},
 	}
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/sdk-config/plan", SDKConfigPlanHandler(&mockConfigStore{}, s, nil))
-	body := []byte(`{"source_hash":"config-hash","config_key":"sdk:security:1.0.0","config":{"apiVersion":"fused/v1","kind":"sdk","name":"security","version":"1.0.0","language":"typescript","bucket":"default","services":{"okta":{"version":"1.0","operations":["listLogEvents"]}}}}`)
+	body := []byte(`{"source_hash":"config-hash",
+		"owner_team_id":"00000000-0000-0000-0000-000000000001","config_key":"sdk:security:1.0.0","config":{"apiVersion":"fused/v1","kind":"sdk","name":"security","version":"1.0.0","language":"typescript","bucket":"default","services":{"okta":{"version":"1.0","operations":["listLogEvents"]}}}}`)
 	req := httptest.NewRequest(http.MethodPost, "/sdk-config/plan", bytes.NewReader(body))
 	req.Header.Set("X-API-Key", "fsk_test")
 	rr := httptest.NewRecorder()
@@ -355,9 +389,10 @@ func TestSDKConfigPlanBindsSelectedContractRevision(t *testing.T) {
 		serviceID.String() + "|1.0": {ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "spec-hash-3"},
 	}}
 	configStore := &mockConfigStore{}
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/sdk-config/plan", SDKConfigPlanHandler(configStore, s, registry))
-	body := []byte(`{"source_hash":"config-hash","config_key":"sdk:security:1.0.0","config":{"apiVersion":"fused/v1","kind":"sdk","name":"security","version":"1.0.0","language":"typescript","bucket":"default","services":{"okta":{"version":"1.0","operations":["listLogEvents"]}}}}`)
+	body := []byte(`{"source_hash":"config-hash",
+		"owner_team_id":"00000000-0000-0000-0000-000000000001","config_key":"sdk:security:1.0.0","config":{"apiVersion":"fused/v1","kind":"sdk","name":"security","version":"1.0.0","language":"typescript","bucket":"default","services":{"okta":{"version":"1.0","operations":["listLogEvents"]}}}}`)
 	req := httptest.NewRequest(http.MethodPost, "/sdk-config/plan", bytes.NewReader(body))
 	req.Header.Set("X-API-Key", "fsk_test")
 	rr := httptest.NewRecorder()
@@ -398,9 +433,10 @@ func TestSDKConfigPlanBatchesVersionResolutionForMultipleServices(t *testing.T) 
 		githubID.String() + "|2.0": {ServiceID: githubID, Version: "2.0", ServiceVersionID: githubVersionID, Revision: 2, SourceHash: "github-hash"},
 	}}
 	configStore := &mockConfigStore{}
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/sdk-config/plan", SDKConfigPlanHandler(configStore, s, registry))
-	body := []byte(`{"source_hash":"config-hash","config_key":"sdk:security:1.0.0","config":{"apiVersion":"fused/v1","kind":"sdk","name":"security","version":"1.0.0","language":"typescript","bucket":"default","services":{"okta":{"version":"1.0","operations":["listLogEvents"]},"github":{"version":"2.0","operations":["listRepos"]}}}}`)
+	body := []byte(`{"source_hash":"config-hash",
+		"owner_team_id":"00000000-0000-0000-0000-000000000001","config_key":"sdk:security:1.0.0","config":{"apiVersion":"fused/v1","kind":"sdk","name":"security","version":"1.0.0","language":"typescript","bucket":"default","services":{"okta":{"version":"1.0","operations":["listLogEvents"]},"github":{"version":"2.0","operations":["listRepos"]}}}}`)
 	req := httptest.NewRequest(http.MethodPost, "/sdk-config/plan", bytes.NewReader(body))
 	req.Header.Set("X-API-Key", "fsk_test")
 	rr := httptest.NewRecorder()
@@ -448,7 +484,7 @@ func TestExecuteSDKConfigApplyRejectsStaleContractBeforeGeneration(t *testing.T)
 	serviceVersionID := uuid.New()
 	workspaceID := uuid.New()
 	planID := uuid.New()
-	payload, _ := json.Marshal(GenerateSDKRequest{
+	payload := resolvedDefaultBucketPayload(t, GenerateSDKRequest{
 		Selections:       []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID}},
 		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "old-hash"}},
 	})
@@ -467,7 +503,7 @@ func TestExecuteSDKConfigApplyRejectsStaleContractBeforeGeneration(t *testing.T)
 	}}
 	proxy := &recordingForwarder{}
 	_, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
-		apiKey: "fsk_test", planID: planID, sourceHash: "config-hash",
+		apiKey: "fsk_test", planID: planID, planRevision: 1, sourceHash: "config-hash",
 	})
 	if err == nil || err.Error() != "contract_revision_stale" {
 		t.Fatalf("expected stale contract conflict, got %v", err)
@@ -482,7 +518,7 @@ func TestExecuteSDKConfigApplyRejectsPinnedVersionRemovedBeforeGeneration(t *tes
 	serviceVersionID := uuid.New()
 	workspaceID := uuid.New()
 	planID := uuid.New()
-	payload, _ := json.Marshal(GenerateSDKRequest{
+	payload := resolvedDefaultBucketPayload(t, GenerateSDKRequest{
 		Selections:       []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID}},
 		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"}},
 	})
@@ -502,7 +538,7 @@ func TestExecuteSDKConfigApplyRejectsPinnedVersionRemovedBeforeGeneration(t *tes
 	}}
 	proxy := &recordingForwarder{}
 	_, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
-		apiKey: "fsk_test", planID: planID, sourceHash: "config-hash",
+		apiKey: "fsk_test", planID: planID, planRevision: 1, sourceHash: "config-hash",
 	})
 	if err == nil || !strings.Contains(err.Error(), "version 1.0") {
 		t.Fatalf("expected removed version conflict, got %v", err)
@@ -519,7 +555,7 @@ func TestExecuteSDKConfigApplyRejectsUnpinnedSelection(t *testing.T) {
 	serviceID := uuid.New()
 	workspaceID := uuid.New()
 	planID := uuid.New()
-	payload, _ := json.Marshal(GenerateSDKRequest{
+	payload := resolvedDefaultBucketPayload(t, GenerateSDKRequest{
 		Selections:       []models.SDKSelection{{ServiceID: serviceID}},
 		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", Revision: 3, SourceHash: "hash"}},
 	})
@@ -530,7 +566,7 @@ func TestExecuteSDKConfigApplyRejectsUnpinnedSelection(t *testing.T) {
 	s := &workspaceTestStore{workspaceID: workspaceID}
 	proxy := &recordingForwarder{}
 	_, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, &mockRegistryClient{}, sdkApplyCall{
-		apiKey: "fsk_test", planID: planID, sourceHash: "config-hash",
+		apiKey: "fsk_test", planID: planID, planRevision: 1, sourceHash: "config-hash",
 	})
 	if err == nil || !strings.Contains(err.Error(), "missing service_version_id") {
 		t.Fatalf("expected unpinned selection conflict, got %v", err)
@@ -543,6 +579,42 @@ func TestExecuteSDKConfigApplyRejectsUnpinnedSelection(t *testing.T) {
 	}
 }
 
+func TestExecuteSDKConfigApplyRejectsSameNameBucketReplacementBeforeGeneration(t *testing.T) {
+	serviceID, serviceVersionID := uuid.New(), uuid.New()
+	planID, authorizedBucketID := uuid.New(), uuid.New()
+	payload, err := json.Marshal(resolvedSDKPayload(GenerateSDKRequest{
+		Selections:       []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID}},
+		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"}},
+	}, authorizedBucketID))
+	if err != nil {
+		t.Fatalf("marshal resolved payload: %v", err)
+	}
+	configStore := &mockConfigStore{plan: &store.ConfigPlan{
+		ID: planID, ConfigKey: "sdk:security", ConfigType: store.ConfigTypeSDK, SourceHash: "config-hash",
+		BaseGeneration: 0, Status: store.ConfigPlanStatusPending, DesiredState: json.RawMessage(`{"bucket":"default"}`), ResolvedPayload: payload,
+	}}
+	s := &workspaceTestStore{
+		bucketsByName: map[string]*store.Bucket{"default": {ID: uuid.New(), Name: "default"}},
+		workspaceServiceVersions: map[uuid.UUID][]store.WorkspaceServiceVersion{
+			serviceID: {{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID}},
+		},
+	}
+	registry := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
+		serviceID.String() + "|1.0": {ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"},
+	}}
+	proxy := &recordingForwarder{}
+
+	_, err = executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
+		apiKey: "fsk_test", planID: planID, planRevision: 1, sourceHash: "config-hash",
+	})
+	if err == nil || !strings.Contains(err.Error(), "bucket identity changed") {
+		t.Fatalf("same-name replacement error = %v", err)
+	}
+	if proxy.forwardCalled || proxy.forwardAndInspectCalled || configStore.artifactApply != nil {
+		t.Fatal("stale bucket identity must stop before Registry or local persistence mutation")
+	}
+}
+
 func TestExecuteSDKConfigApplyPersistsEngineScopeBeforeMarkingApplied(t *testing.T) {
 	serviceID := uuid.New()
 	serviceVersionID := uuid.New()
@@ -550,8 +622,8 @@ func TestExecuteSDKConfigApplyPersistsEngineScopeBeforeMarkingApplied(t *testing
 	workspaceID := uuid.New()
 	accountID := uuid.New()
 	planID := uuid.New()
-	artifactID := uuid.New()
-	payload, _ := json.Marshal(GenerateSDKRequest{
+	artifactID := stableArtifactIDForPlan(planID)
+	payload := resolvedDefaultBucketPayload(t, GenerateSDKRequest{
 		Selections:       []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID, OperationNames: []string{"listLogEvents"}}},
 		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"}},
 	})
@@ -571,7 +643,7 @@ func TestExecuteSDKConfigApplyPersistsEngineScopeBeforeMarkingApplied(t *testing
 	proxy := &recordingForwarder{body: `{"artifact_id":"` + artifactID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + endpointID.String() + `"]}]}`}
 
 	result, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
-		apiKey: "fsk_test", accountID: accountID, planID: planID, sourceHash: "config-hash",
+		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
 	})
 	if err != nil {
 		t.Fatalf("expected apply success, got %v", err)
@@ -579,17 +651,17 @@ func TestExecuteSDKConfigApplyPersistsEngineScopeBeforeMarkingApplied(t *testing
 	if !configStore.markApplied {
 		t.Fatal("expected plan marked applied after Engine scope persistence")
 	}
-	if len(s.savedScopes) != 1 {
-		t.Fatalf("expected one Engine scope save, got %#v", s.savedScopes)
+	if configStore.artifactApply == nil {
+		t.Fatal("expected one atomic artifact config apply")
 	}
-	saved := s.savedScopes[0]
-	if saved.accountID != accountID || saved.artifactID != artifactID {
+	saved := configStore.artifactApply.Scope
+	if saved.AccountID != accountID || saved.ArtifactID != artifactID {
 		t.Fatalf("unexpected saved scope identity: %#v", saved)
 	}
 	if result.ExecutionToken == "" {
 		t.Fatal("expected Engine to return the one-time execution token")
 	}
-	assertSavedScopeEndpointSelection(t, saved.selections, endpointID)
+	assertSavedScopeEndpointSelection(t, saved.Selections, endpointID)
 }
 
 func assertSavedScopeEndpointSelection(t *testing.T, payload []byte, endpointID uuid.UUID) {
@@ -608,13 +680,13 @@ func TestExecuteSDKConfigApplyDoesNotMarkAppliedWhenScopePersistenceFails(t *tes
 	serviceVersionID := uuid.New()
 	workspaceID := uuid.New()
 	planID := uuid.New()
-	artifactID := uuid.New()
+	artifactID := stableArtifactIDForPlan(planID)
 	accountID := uuid.New()
-	payload, _ := json.Marshal(GenerateSDKRequest{
+	payload := resolvedDefaultBucketPayload(t, GenerateSDKRequest{
 		Selections:       []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID}},
 		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"}},
 	})
-	configStore := &mockConfigStore{plan: &store.ConfigPlan{
+	configStore := &mockConfigStore{artifactApplyErr: errors.New("scope db down"), plan: &store.ConfigPlan{
 		ID: planID, ConfigKey: "sdk:security", ConfigType: store.ConfigTypeSDK, SourceHash: "config-hash",
 		BaseGeneration: 0, Status: store.ConfigPlanStatusPending, DesiredState: json.RawMessage(`{"bucket":"default"}`), ResolvedPayload: payload,
 	}}
@@ -631,13 +703,300 @@ func TestExecuteSDKConfigApplyDoesNotMarkAppliedWhenScopePersistenceFails(t *tes
 	proxy := &recordingForwarder{body: `{"artifact_id":"` + artifactID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
 
 	_, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
-		apiKey: "fsk_test", accountID: accountID, planID: planID, sourceHash: "config-hash",
+		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
 	})
 	if err == nil {
 		t.Fatal("expected apply to fail when Engine scope persistence fails")
 	}
 	if configStore.markApplied {
 		t.Fatal("plan must not be marked applied when Engine scope persistence fails")
+	}
+	if len(proxy.forwardMethods) != 2 || proxy.forwardMethods[1] != http.MethodDelete || proxy.forwardPaths[1] != "/sdks/"+artifactID.String() {
+		t.Fatalf("new Registry artifact was not compensated after persistence failure: methods=%v paths=%v", proxy.forwardMethods, proxy.forwardPaths)
+	}
+}
+
+func TestExecuteSDKConfigApplyDoesNotDeleteExistingArtifactWhenPersistenceFails(t *testing.T) {
+	serviceID, serviceVersionID := uuid.New(), uuid.New()
+	planID, accountID, artifactID := uuid.New(), uuid.New(), uuid.New()
+	payload := resolvedDefaultBucketPayload(t, GenerateSDKRequest{
+		Selections:       []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID}},
+		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"}},
+	})
+	configStore := &mockConfigStore{artifactApplyErr: errors.New("scope db down"), state: &store.ConfigState{LatestResourceID: &artifactID}, plan: &store.ConfigPlan{
+		ID: planID, ConfigKey: "sdk:security", ConfigType: store.ConfigTypeSDK, SourceHash: "config-hash",
+		Status: store.ConfigPlanStatusPending, DesiredState: json.RawMessage(`{"bucket":"default"}`), ResolvedPayload: payload,
+	}}
+	s := &workspaceTestStore{workspaceServiceVersions: map[uuid.UUID][]store.WorkspaceServiceVersion{
+		serviceID: {{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID}},
+	}}
+	registry := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
+		serviceID.String() + "|1.0": {ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"},
+	}}
+	proxy := &recordingForwarder{body: `{"artifact_id":"` + artifactID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
+
+	_, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
+		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
+	})
+	if err == nil {
+		t.Fatal("expected persistence failure")
+	}
+	if len(proxy.forwardMethods) != 1 || proxy.forwardMethods[0] != http.MethodPost {
+		t.Fatalf("existing Registry artifact must not be deleted: methods=%v paths=%v", proxy.forwardMethods, proxy.forwardPaths)
+	}
+}
+
+func TestExecuteSDKConfigApplyRetainsLeaseWhenCompensationIsUnconfirmed(t *testing.T) {
+	serviceID, serviceVersionID := uuid.New(), uuid.New()
+	planID, accountID := uuid.New(), uuid.New()
+	artifactID := stableArtifactIDForPlan(planID)
+	payload := resolvedDefaultBucketPayload(t, GenerateSDKRequest{
+		Selections:       []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID}},
+		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"}},
+	})
+	configStore := &mockConfigStore{artifactApplyErr: errors.New("scope db down"), plan: &store.ConfigPlan{
+		ID: planID, ConfigKey: "sdk:security", ConfigType: store.ConfigTypeSDK, SourceHash: "config-hash",
+		Status: store.ConfigPlanStatusPending, DesiredState: json.RawMessage(`{"bucket":"default"}`), ResolvedPayload: payload,
+	}}
+	s := &workspaceTestStore{workspaceServiceVersions: map[uuid.UUID][]store.WorkspaceServiceVersion{
+		serviceID: {{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID}},
+	}}
+	registry := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
+		serviceID.String() + "|1.0": {ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"},
+	}}
+	proxy := &recordingForwarder{
+		statuses: []int{http.StatusOK, http.StatusGatewayTimeout},
+		body:     `{"artifact_id":"` + artifactID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`,
+	}
+	call := sdkApplyCall{apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash"}
+
+	if _, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, call); err == nil {
+		t.Fatal("expected persistence failure")
+	}
+	if configStore.applyLeaseID == uuid.Nil {
+		t.Fatal("unconfirmed Registry delete released the recovery lease")
+	}
+	methodsAfterFailure := len(proxy.forwardMethods)
+	if _, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, call); err == nil || !strings.Contains(err.Error(), "plan_apply_in_progress") {
+		t.Fatalf("retry error = %v, want active plan lease", err)
+	}
+	if len(proxy.forwardMethods) != methodsAfterFailure {
+		t.Fatalf("fenced retry reached Registry: methods=%v", proxy.forwardMethods)
+	}
+}
+
+type sdkGenerationAmbiguityFixture struct {
+	configStore *mockConfigStore
+	engineStore *workspaceTestStore
+	registry    *mockRegistryClient
+	call        sdkApplyCall
+}
+
+func newSDKGenerationAmbiguityFixture(t *testing.T) sdkGenerationAmbiguityFixture {
+	t.Helper()
+	serviceID, serviceVersionID := uuid.New(), uuid.New()
+	planID, accountID := uuid.New(), uuid.New()
+	payload := resolvedDefaultBucketPayload(t, GenerateSDKRequest{
+		Selections:       []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID}},
+		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"}},
+	})
+	return sdkGenerationAmbiguityFixture{
+		configStore: &mockConfigStore{plan: &store.ConfigPlan{
+			ID: planID, ConfigKey: "sdk:security", ConfigType: store.ConfigTypeSDK, SourceHash: "config-hash",
+			Status: store.ConfigPlanStatusPending, DesiredState: json.RawMessage(`{"bucket":"default"}`), ResolvedPayload: payload,
+		}},
+		engineStore: &workspaceTestStore{workspaceServiceVersions: map[uuid.UUID][]store.WorkspaceServiceVersion{
+			serviceID: {{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID}},
+		}},
+		registry: &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
+			serviceID.String() + "|1.0": {ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"},
+		}},
+		call: sdkApplyCall{apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash"},
+	}
+}
+
+func TestExecuteSDKConfigApplyRetainsLeaseForAmbiguousGenerationResponse(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "gateway timeout", status: http.StatusGatewayTimeout, body: `{"error":"upstream timeout"}`},
+		{name: "malformed success", status: http.StatusOK, body: `not-json`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newSDKGenerationAmbiguityFixture(t)
+			proxy := &recordingForwarder{status: test.status, body: test.body}
+
+			if _, err := executeSDKConfigApply(context.Background(), fixture.configStore, fixture.engineStore, proxy, fixture.registry, fixture.call); err == nil {
+				t.Fatal("expected ambiguous Registry generation failure")
+			}
+			if fixture.configStore.applyLeaseID == uuid.Nil {
+				t.Fatal("ambiguous generation response released the recovery lease")
+			}
+			if _, err := executeSDKConfigApply(context.Background(), fixture.configStore, fixture.engineStore, proxy, fixture.registry, fixture.call); err == nil || !strings.Contains(err.Error(), "plan_apply_in_progress") {
+				t.Fatalf("retry error = %v, want active plan lease", err)
+			}
+			if len(proxy.forwardMethods) != 1 {
+				t.Fatalf("fenced retry reached Registry: methods=%v", proxy.forwardMethods)
+			}
+		})
+	}
+}
+
+type serializedSDKApplyStore struct {
+	*mockConfigStore
+	mutex      sync.Mutex
+	applyCalls int
+}
+
+func (s *serializedSDKApplyStore) GetConfigState(ctx context.Context, configKey string) (*store.ConfigState, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	return s.mockConfigStore.GetConfigState(ctx, configKey)
+}
+
+func (s *serializedSDKApplyStore) ApplyArtifactConfigPlan(_ context.Context, params store.ApplyArtifactConfigPlanParams) (*store.ApplyArtifactConfigPlanResult, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	s.applyCalls++
+	if s.applyCalls > 1 {
+		return nil, errors.New("simulated losing persistence race")
+	}
+	resourceID := *params.Plan.State.LatestResourceID
+	s.state = &store.ConfigState{ConfigKey: params.Plan.State.ConfigKey, LatestResourceID: &resourceID}
+	return &store.ApplyArtifactConfigPlanResult{State: s.state, ScopeCreated: true}, nil
+}
+
+func TestExecuteSDKConfigApplyConcurrentFirstApplyPreservesWinnerArtifact(t *testing.T) {
+	serviceID, serviceVersionID := uuid.New(), uuid.New()
+	planID, accountID := uuid.New(), uuid.New()
+	artifactID := stableArtifactIDForPlan(planID)
+	payload := resolvedDefaultBucketPayload(t, GenerateSDKRequest{
+		Selections:       []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID}},
+		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"}},
+	})
+	configStore := &serializedSDKApplyStore{mockConfigStore: &mockConfigStore{plan: &store.ConfigPlan{
+		ID: planID, ConfigKey: "sdk:security", ConfigType: store.ConfigTypeSDK, SourceHash: "config-hash",
+		Status: store.ConfigPlanStatusPending, DesiredState: json.RawMessage(`{"bucket":"default"}`), ResolvedPayload: payload,
+	}}}
+	s := &workspaceTestStore{workspaceServiceVersions: map[uuid.UUID][]store.WorkspaceServiceVersion{
+		serviceID: {{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID}},
+	}}
+	registry := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
+		serviceID.String() + "|1.0": {ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"},
+	}}
+	proxy := &recordingForwarder{body: `{"artifact_id":"` + artifactID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
+	call := sdkApplyCall{apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash"}
+
+	start := make(chan struct{})
+	errorsSeen := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			_, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, call)
+			errorsSeen <- err
+		}()
+	}
+	close(start)
+	var successes, failures int
+	for range 2 {
+		if <-errorsSeen == nil {
+			successes++
+		} else {
+			failures++
+		}
+	}
+	if successes != 1 || failures != 1 {
+		t.Fatalf("successes=%d failures=%d", successes, failures)
+	}
+	for _, method := range proxy.forwardMethods {
+		if method == http.MethodDelete {
+			t.Fatalf("losing concurrent apply deleted the winner artifact: methods=%v paths=%v", proxy.forwardMethods, proxy.forwardPaths)
+		}
+	}
+}
+
+func TestExecuteSDKConfigApplyCompensatesPendingGenerationFailure(t *testing.T) {
+	serviceID, serviceVersionID := uuid.New(), uuid.New()
+	planID, accountID := uuid.New(), uuid.New()
+	artifactID := stableArtifactIDForPlan(planID)
+	payload := resolvedDefaultBucketPayload(t, GenerateSDKRequest{
+		Selections:       []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID}},
+		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"}},
+	})
+	configStore := &mockConfigStore{plan: &store.ConfigPlan{
+		ID: planID, ConfigKey: "sdk:security", ConfigType: store.ConfigTypeSDK, SourceHash: "config-hash",
+		Status: store.ConfigPlanStatusPending, DesiredState: json.RawMessage(`{"bucket":"default"}`), ResolvedPayload: payload,
+	}}
+	s := &workspaceTestStore{workspaceServiceVersions: map[uuid.UUID][]store.WorkspaceServiceVersion{
+		serviceID: {{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID}},
+	}}
+	registry := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
+		serviceID.String() + "|1.0": {ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"},
+	}}
+	pending := `{"artifact_id":"` + artifactID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"pending","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`
+	proxy := &recordingForwarder{bodies: []string{pending, "data: {\"type\":\"error\",\"message\":\"generation failed\"}\n\n", ""}}
+
+	_, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
+		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
+	})
+	if err == nil {
+		t.Fatal("expected pending generation failure")
+	}
+	wantMethods := []string{http.MethodPost, http.MethodGet, http.MethodDelete}
+	if strings.Join(proxy.forwardMethods, ",") != strings.Join(wantMethods, ",") {
+		t.Fatalf("stream failure compensation methods=%v paths=%v", proxy.forwardMethods, proxy.forwardPaths)
+	}
+}
+
+func TestCompensateNewRegistryArtifactOutlivesCallerCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	artifactID := uuid.New()
+	proxy := &recordingForwarder{}
+
+	compensateNewRegistryArtifact(ctx, proxy, sdkGenerationResult{
+		SDKGenerationResult: models.SDKGenerationResult{ArtifactID: artifactID},
+		createdForPlan:      true,
+	})
+
+	if len(proxy.forwardMethods) != 1 || proxy.forwardMethods[0] != http.MethodDelete {
+		t.Fatalf("canceled caller did not trigger cleanup: methods=%v", proxy.forwardMethods)
+	}
+	if proxy.forwardContextErrors[0] != nil {
+		t.Fatalf("cleanup inherited caller cancellation: %v", proxy.forwardContextErrors[0])
+	}
+}
+
+func TestRunSDKGenerationDoesNotLogRegistryResponseBody(t *testing.T) {
+	const sensitiveMarker = "credential-should-not-enter-logs"
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+
+	_, err := runSDKGeneration(context.Background(), &recordingForwarder{
+		status: http.StatusBadRequest,
+		body:   `{"error":"` + sensitiveMarker + `"}`,
+	}, "fsk_test", json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("expected Registry generation error")
+	}
+	if strings.Contains(logs.String(), sensitiveMarker) {
+		t.Fatalf("Registry response body leaked into logs: %s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "status=400") || !strings.Contains(logs.String(), "response_bytes=") {
+		t.Fatalf("expected fixed failure metadata, got %q", logs.String())
+	}
+}
+
+func TestArtifactApplyPersistenceErrorMapsImmutableBucketConflict(t *testing.T) {
+	err := artifactApplyPersistenceError(context.Background(), store.ErrSDKBucketImmutable, uuid.New())
+	var httpErr workspaceConfigHTTPError
+	if !errors.As(err, &httpErr) || httpErr.status != http.StatusConflict || httpErr.message != "artifact bucket assignment is immutable" {
+		t.Fatalf("immutable bucket error = %#v", err)
 	}
 }
 
@@ -646,13 +1005,13 @@ func TestExecuteSDKConfigApplyReusesExistingScopeCredentialOnRetry(t *testing.T)
 	serviceVersionID := uuid.New()
 	workspaceID := uuid.New()
 	planID := uuid.New()
-	artifactID := uuid.New()
+	artifactID := stableArtifactIDForPlan(planID)
 	accountID := uuid.New()
-	payload, _ := json.Marshal(GenerateSDKRequest{
+	payload := resolvedDefaultBucketPayload(t, GenerateSDKRequest{
 		Selections:       []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID}},
 		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"}},
 	})
-	configStore := &mockConfigStore{plan: &store.ConfigPlan{
+	configStore := &mockConfigStore{state: &store.ConfigState{LatestResourceID: &artifactID}, plan: &store.ConfigPlan{
 		ID: planID, ConfigKey: "sdk:security", ConfigType: store.ConfigTypeSDK, SourceHash: "config-hash",
 		BaseGeneration: 0, Status: store.ConfigPlanStatusPending, DesiredState: json.RawMessage(`{"bucket":"default"}`), ResolvedPayload: payload,
 	}}
@@ -668,7 +1027,7 @@ func TestExecuteSDKConfigApplyReusesExistingScopeCredentialOnRetry(t *testing.T)
 	proxy := &recordingForwarder{body: `{"artifact_id":"` + artifactID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
 
 	result, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
-		apiKey: "fsk_test", accountID: accountID, planID: planID, sourceHash: "config-hash",
+		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
 	})
 	if err != nil {
 		t.Fatalf("expected retry apply success, got %v", err)
@@ -686,13 +1045,13 @@ func TestExecuteSDKConfigApplyRejectsExistingScopeOwnedByAnotherAccount(t *testi
 	serviceVersionID := uuid.New()
 	workspaceID := uuid.New()
 	planID := uuid.New()
-	artifactID := uuid.New()
+	artifactID := stableArtifactIDForPlan(planID)
 	accountID := uuid.New()
-	payload, _ := json.Marshal(GenerateSDKRequest{
+	payload := resolvedDefaultBucketPayload(t, GenerateSDKRequest{
 		Selections:       []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID}},
 		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"}},
 	})
-	configStore := &mockConfigStore{plan: &store.ConfigPlan{
+	configStore := &mockConfigStore{artifactApplyErr: store.ErrArtifactOwnerTeamMismatch, plan: &store.ConfigPlan{
 		ID: planID, ConfigKey: "sdk:security", ConfigType: store.ConfigTypeSDK, SourceHash: "config-hash",
 		BaseGeneration: 0, Status: store.ConfigPlanStatusPending, DesiredState: json.RawMessage(`{"bucket":"default"}`), ResolvedPayload: payload,
 	}}
@@ -709,7 +1068,7 @@ func TestExecuteSDKConfigApplyRejectsExistingScopeOwnedByAnotherAccount(t *testi
 	proxy := &recordingForwarder{body: `{"artifact_id":"` + artifactID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
 
 	_, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
-		apiKey: "fsk_test", accountID: accountID, planID: planID, sourceHash: "config-hash",
+		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
 	})
 	if err == nil {
 		t.Fatal("expected cross-account existing scope reuse to fail")
@@ -719,25 +1078,24 @@ func TestExecuteSDKConfigApplyRejectsExistingScopeOwnedByAnotherAccount(t *testi
 	}
 }
 
-func TestExecuteSDKConfigApplyTransientScopeReadFailureDoesNotIssueCredential(t *testing.T) {
+func TestExecuteSDKConfigApplyAtomicPersistenceFailureDoesNotFinalize(t *testing.T) {
 	serviceID := uuid.New()
 	serviceVersionID := uuid.New()
 	workspaceID := uuid.New()
 	planID := uuid.New()
-	artifactID := uuid.New()
+	artifactID := stableArtifactIDForPlan(planID)
 	accountID := uuid.New()
-	payload, _ := json.Marshal(GenerateSDKRequest{
+	payload := resolvedDefaultBucketPayload(t, GenerateSDKRequest{
 		Selections:       []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID}},
 		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"}},
 	})
-	configStore := &mockConfigStore{plan: &store.ConfigPlan{
+	configStore := &mockConfigStore{artifactApplyErr: errors.New("db temporarily unavailable"), plan: &store.ConfigPlan{
 		ID: planID, ConfigKey: "sdk:security", ConfigType: store.ConfigTypeSDK, SourceHash: "config-hash",
 		BaseGeneration: 0, Status: store.ConfigPlanStatusPending, DesiredState: json.RawMessage(`{"bucket":"default"}`), ResolvedPayload: payload,
 	}}
 	s := &workspaceTestStore{
 		workspaceID:              workspaceID,
 		accountID:                accountID,
-		getScopeErr:              errors.New("db temporarily unavailable"),
 		workspaceServiceVersions: map[uuid.UUID][]store.WorkspaceServiceVersion{serviceID: {{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID}}},
 	}
 	registry := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
@@ -746,13 +1104,24 @@ func TestExecuteSDKConfigApplyTransientScopeReadFailureDoesNotIssueCredential(t 
 	proxy := &recordingForwarder{body: `{"artifact_id":"` + artifactID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
 
 	_, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
-		apiKey: "fsk_test", accountID: accountID, planID: planID, sourceHash: "config-hash",
+		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
 	})
 	if err == nil {
 		t.Fatal("expected transient scope read error to fail closed")
 	}
-	if len(s.savedScopes) != 0 {
-		t.Fatalf("transient read error must not create/overwrite scope, got %#v", s.savedScopes)
+	if configStore.markApplied || len(s.savedScopes) != 0 {
+		t.Fatalf("failed atomic persistence must not finalize or use legacy scope writes: applied=%v saved=%#v", configStore.markApplied, s.savedScopes)
+	}
+}
+
+func TestValidateRegistryArtifactIdentityRejectsReplacement(t *testing.T) {
+	expected := uuid.New()
+	payload, _ := json.Marshal(GenerateSDKRequest{ArtifactID: expected})
+	if err := validateRegistryArtifactIdentity(payload, expected); err != nil {
+		t.Fatalf("matching artifact identity rejected: %v", err)
+	}
+	if err := validateRegistryArtifactIdentity(payload, uuid.New()); err == nil || !strings.Contains(err.Error(), "artifact_id_mismatch") {
+		t.Fatalf("replacement artifact identity was not rejected: %v", err)
 	}
 }
 
@@ -761,9 +1130,9 @@ func TestExecuteSDKConfigApplyPendingGenerationFinalizesScopeAfterCompletion(t *
 	serviceVersionID := uuid.New()
 	workspaceID := uuid.New()
 	planID := uuid.New()
-	artifactID := uuid.New()
+	artifactID := stableArtifactIDForPlan(planID)
 	accountID := uuid.New()
-	payload, _ := json.Marshal(GenerateSDKRequest{
+	payload := resolvedDefaultBucketPayload(t, GenerateSDKRequest{
 		Selections:       []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID}},
 		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"}},
 	})
@@ -785,7 +1154,7 @@ func TestExecuteSDKConfigApplyPendingGenerationFinalizesScopeAfterCompletion(t *
 	proxy := &recordingForwarder{bodies: []string{pending, complete}}
 
 	result, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
-		apiKey: "fsk_test", accountID: accountID, planID: planID, sourceHash: "config-hash",
+		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
 	})
 	if err != nil {
 		t.Fatalf("pending generation should finalize after completion, got %v", err)
@@ -793,8 +1162,8 @@ func TestExecuteSDKConfigApplyPendingGenerationFinalizesScopeAfterCompletion(t *
 	if result.Status != models.SDKGenerationStatusComplete {
 		t.Fatalf("expected complete result, got %#v", result)
 	}
-	if len(s.savedScopes) != 1 || !configStore.markApplied {
-		t.Fatalf("completed generation must save scope and mark applied, saved=%#v applied=%v", s.savedScopes, configStore.markApplied)
+	if configStore.artifactApply == nil || !configStore.markApplied {
+		t.Fatalf("completed generation must atomically save scope and mark applied, apply=%#v applied=%v", configStore.artifactApply, configStore.markApplied)
 	}
 	if configStore.upserted == nil || configStore.upserted.LatestResourceID == nil || *configStore.upserted.LatestResourceID != artifactID {
 		t.Fatalf("expected latest resource id %s, got %#v", artifactID, configStore.upserted)
@@ -802,7 +1171,8 @@ func TestExecuteSDKConfigApplyPendingGenerationFinalizesScopeAfterCompletion(t *
 }
 
 func TestDecodeSDKConfigPlanRejectsRemovedMCPTarget(t *testing.T) {
-	body := []byte(`{"source_hash":"config-hash","config_key":"sdk:stripe:1.0.0","config":{"apiVersion":"fused/v1","kind":"sdk","name":"stripe","version":"1.0.0","language":"typescript","target":"mcp","services":{}}}`)
+	body := []byte(`{"source_hash":"config-hash",
+		"owner_team_id":"00000000-0000-0000-0000-000000000001","config_key":"sdk:stripe:1.0.0","config":{"apiVersion":"fused/v1","kind":"sdk","name":"stripe","version":"1.0.0","language":"typescript","target":"mcp","services":{}}}`)
 	req := httptest.NewRequest(http.MethodPost, "/sdk-config/plan", bytes.NewReader(body))
 
 	_, _, err := decodeSDKConfigPlanRequest(req)
@@ -812,7 +1182,8 @@ func TestDecodeSDKConfigPlanRejectsRemovedMCPTarget(t *testing.T) {
 }
 
 func TestDecodeSDKConfigPlanRejectsConfigKeyMismatch(t *testing.T) {
-	body := []byte(`{"source_hash":"config-hash","config_key":"sdk:stripe","config":{"apiVersion":"fused/v1","kind":"sdk","name":"stripe","version":"1.0.0","language":"typescript","bucket":"default","services":{"stripe":{"version":"1.0.0","select_all":true}}}}`)
+	body := []byte(`{"source_hash":"config-hash",
+		"owner_team_id":"00000000-0000-0000-0000-000000000001","config_key":"sdk:stripe","config":{"apiVersion":"fused/v1","kind":"sdk","name":"stripe","version":"1.0.0","language":"typescript","bucket":"default","services":{"stripe":{"version":"1.0.0","select_all":true}}}}`)
 	req := httptest.NewRequest(http.MethodPost, "/sdk-config/plan", bytes.NewReader(body))
 
 	_, _, err := decodeSDKConfigPlanRequest(req)
@@ -829,9 +1200,9 @@ func TestTerminalSDKGenerationEventAcceptsComplete(t *testing.T) {
 }
 
 func TestTerminalSDKGenerationEventRejectsError(t *testing.T) {
-	body := []byte(`data: {"type":"error","message":"generation failed"}` + "\n\n")
-	if err := terminalSDKGenerationEvent(body); err == nil || !strings.Contains(err.Error(), "generation failed") {
-		t.Fatalf("expected stream error to propagate, got %v", err)
+	body := []byte(`data: {"type":"error","message":"sensitive upstream detail"}` + "\n\n")
+	if err := terminalSDKGenerationEvent(body); err == nil || err.Error() != "sdk_generation_failed" {
+		t.Fatalf("expected fixed stream error, got %v", err)
 	}
 }
 
@@ -940,14 +1311,14 @@ func TestValidateGeneratedScopeSelectionsAttachesStructuredMismatchDetail(t *tes
 	}
 }
 
-func TestExecuteSDKConfigApplyDeletesNewScopeWhenFinalizationFails(t *testing.T) {
+func TestExecuteSDKConfigApplyHasNoCompensatingDeleteWhenAtomicFinalizationFails(t *testing.T) {
 	serviceID := uuid.New()
 	serviceVersionID := uuid.New()
 	workspaceID := uuid.New()
 	planID := uuid.New()
-	artifactID := uuid.New()
+	artifactID := stableArtifactIDForPlan(planID)
 	accountID := uuid.New()
-	payload, _ := json.Marshal(GenerateSDKRequest{
+	payload := resolvedDefaultBucketPayload(t, GenerateSDKRequest{
 		Selections:       []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID}},
 		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"}},
 	})
@@ -966,13 +1337,13 @@ func TestExecuteSDKConfigApplyDeletesNewScopeWhenFinalizationFails(t *testing.T)
 	proxy := &recordingForwarder{body: `{"artifact_id":"` + artifactID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
 
 	_, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
-		apiKey: "fsk_test", accountID: accountID, planID: planID, sourceHash: "config-hash",
+		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
 	})
 	if err == nil {
 		t.Fatal("expected finalization failure")
 	}
-	if len(s.deletedScopes) != 1 || s.deletedScopes[0] != artifactID {
-		t.Fatalf("expected newly saved scope to be compensated, got %#v", s.deletedScopes)
+	if len(s.deletedScopes) != 0 {
+		t.Fatalf("atomic apply must roll back without a compensating delete, got %#v", s.deletedScopes)
 	}
 }
 
@@ -981,9 +1352,9 @@ func TestExecuteSDKConfigApplyRejectsRegistryScopeMismatch(t *testing.T) {
 	serviceVersionID := uuid.New()
 	workspaceID := uuid.New()
 	planID := uuid.New()
-	artifactID := uuid.New()
+	artifactID := stableArtifactIDForPlan(planID)
 	accountID := uuid.New()
-	payload, _ := json.Marshal(GenerateSDKRequest{
+	payload := resolvedDefaultBucketPayload(t, GenerateSDKRequest{
 		Selections:       []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID}},
 		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"}},
 	})
@@ -1004,7 +1375,7 @@ func TestExecuteSDKConfigApplyRejectsRegistryScopeMismatch(t *testing.T) {
 	proxy := &recordingForwarder{body: `{"artifact_id":"` + artifactID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + otherVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
 
 	_, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
-		apiKey: "fsk_test", accountID: accountID, planID: planID, sourceHash: "config-hash",
+		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
 	})
 	if err == nil || !strings.Contains(err.Error(), "scope") {
 		t.Fatalf("expected Registry scope mismatch to fail, got %v", err)
@@ -1040,11 +1411,12 @@ func TestSDKConfigPlanHandler_ResolvesServiceSlugAgainstWorkspaceActivation(t *t
 	configStore := &mockConfigStore{}
 	registryClient := &mockRegistryClient{slugIDs: map[string]uuid.UUID{"e2e_sdk_team_service": serviceID}}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/sdk-config/plan", SDKConfigPlanHandler(configStore, s, registryClient))
 
 	body := []byte(`{
 		"source_hash": "abc",
+		"owner_team_id":"00000000-0000-0000-0000-000000000001",
 		"config_key": "sdk:security:1.0.0",
 		"config": {
 			"apiVersion": "fused/v1",
@@ -1102,11 +1474,12 @@ func TestSDKConfigPlanHandler_BatchesVersionLookups(t *testing.T) {
 		},
 	}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/sdk-config/plan", SDKConfigPlanHandler(&mockConfigStore{}, s, &mockRegistryClient{}))
 
 	body := []byte(`{
 		"source_hash": "abc",
+		"owner_team_id":"00000000-0000-0000-0000-000000000001",
 		"config_key": "sdk:security:1.0.0",
 		"config": {
 			"apiVersion": "fused/v1",
@@ -1158,11 +1531,12 @@ func TestSDKConfigPlanHandler_BatchesOperationValidation(t *testing.T) {
 	}
 	registryClient := &mockRegistryClient{}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/sdk-config/plan", SDKConfigPlanHandler(&mockConfigStore{}, s, registryClient))
 
 	body := []byte(`{
 		"source_hash": "abc",
+		"owner_team_id":"00000000-0000-0000-0000-000000000001",
 		"config_key": "sdk:security:1.0.0",
 		"config": {
 			"apiVersion": "fused/v1",
@@ -1250,11 +1624,12 @@ func TestSDKConfigPlanHandler_ReturnsRelevantNotifications(t *testing.T) {
 		}},
 	}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/sdk-config/plan", SDKConfigPlanHandler(configStore, s, registryClient))
 
 	body := []byte(`{
 		"source_hash": "abc",
+		"owner_team_id":"00000000-0000-0000-0000-000000000001",
 		"config_key": "sdk:security:1.0.0",
 		"config": {
 			"apiVersion": "fused/v1",
@@ -1317,11 +1692,12 @@ func TestSDKConfigPlanHandler_RejectsLegacyEndpoints(t *testing.T) {
 		},
 	}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Post("/sdk-config/plan", SDKConfigPlanHandler(&mockConfigStore{}, s, nil))
 
 	body := []byte(`{
 		"source_hash": "abc",
+		"owner_team_id":"00000000-0000-0000-0000-000000000001",
 		"config_key": "sdk:security:1.0.0",
 		"config": {
 			"apiVersion": "fused/v1",
@@ -1383,7 +1759,7 @@ func TestSDKConfigDownloadHandler_BlocksRemovedVersion(t *testing.T) {
 	}
 	proxy := &mockForwarder{}
 
-	r := chi.NewRouter()
+	r := newControlTestRouter(s.accountID)
 	r.Get("/sdk-config/{name}/download", SDKConfigDownloadHandler(configStore, s, proxy))
 
 	req := httptest.NewRequest(http.MethodGet, "/sdk-config/security/download", nil)
@@ -1397,6 +1773,88 @@ func TestSDKConfigDownloadHandler_BlocksRemovedVersion(t *testing.T) {
 	}
 	if proxy.called {
 		t.Fatal("download must not proxy when the SDK config references a removed version")
+	}
+}
+
+func TestSDKConfigDownloadHandlerRequiresExactArtifactRead(t *testing.T) {
+	artifactID := uuid.New()
+	accountID, workspaceID := uuid.New(), uuid.New()
+	configStore := &mockConfigStore{state: &store.ConfigState{
+		ConfigKey: "sdk:security", LatestResourceID: &artifactID, DesiredState: json.RawMessage(`{}`),
+	}}
+	for _, test := range []struct {
+		name       string
+		grants     []accesscontrol.Grant
+		wantStatus int
+		wantProxy  bool
+	}{
+		{name: "unshared viewer denied", grants: []accesscontrol.Grant{{Permission: accesscontrol.PermissionWorkspaceRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}}}, wantStatus: http.StatusForbidden},
+		{name: "shared reader allowed", grants: []accesscontrol.Grant{{Permission: accesscontrol.PermissionArtifactRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceArtifact, ID: artifactID}}}, wantStatus: http.StatusOK, wantProxy: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot, err := accesscontrol.NewAuthorizationSnapshot(1, test.grants...)
+			if err != nil {
+				t.Fatalf("snapshot: %v", err)
+			}
+			actor := accesscontrol.Actor{AccountID: accountID, WorkspaceID: workspaceID, SubjectID: uuid.New(), Authorization: snapshot}
+			proxy := &mockForwarder{}
+			router := chi.NewRouter()
+			router.Get("/sdk-config/{name}/download", SDKConfigDownloadHandler(configStore, &workspaceTestStore{accountID: accountID}, proxy))
+			request := httptest.NewRequest(http.MethodGet, "/sdk-config/security/download", nil)
+			request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), actor))
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != test.wantStatus || proxy.called != test.wantProxy {
+				t.Fatalf("status/proxy = %d/%v, want %d/%v body=%s", response.Code, proxy.called, test.wantStatus, test.wantProxy, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestArtifactApplyRejectsPlanRevisionChangedAfterAuthorization(t *testing.T) {
+	for _, configType := range []store.ConfigType{store.ConfigTypeSDK, store.ConfigTypeMCP, store.ConfigTypeWebhook} {
+		t.Run(string(configType), func(t *testing.T) {
+			plan := &store.ConfigPlan{
+				ID: uuid.New(), ConfigKey: string(configType) + ":revision-drift", ConfigType: configType,
+				Status: store.ConfigPlanStatusPending, SourceHash: "source", Revision: 2,
+			}
+			configStore := &mockConfigStore{plan: plan}
+			call := sdkApplyCall{planID: plan.ID, planRevision: 1, sourceHash: plan.SourceHash}
+			var err error
+			if configType == store.ConfigTypeSDK {
+				_, _, err = loadSDKPlanForApply(context.Background(), configStore, call)
+			} else {
+				_, _, err = loadArtifactPlanForApply(context.Background(), configStore, call, configType)
+			}
+			var httpErr workspaceConfigHTTPError
+			if !errors.As(err, &httpErr) || httpErr.status != http.StatusConflict || httpErr.message != "plan_revision_changed" {
+				t.Fatalf("revision drift error = %#v, want 409 plan_revision_changed", err)
+			}
+		})
+	}
+}
+
+func TestArtifactApplyHandlersRejectMissingAuthorizedPlanRevision(t *testing.T) {
+	tests := []struct {
+		name    string
+		handler http.Handler
+	}{
+		{name: "sdk", handler: SDKConfigApplyHandler(nil, nil, nil)},
+		{name: "mcp", handler: MCPConfigApplyHandler(nil, nil, nil)},
+		{name: "webhook", handler: WebhookConfigApplyHandler(nil, nil, nil, nil)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/"+test.name+"-config/apply", strings.NewReader(`{"plan_id":"`+uuid.NewString()+`"}`))
+			request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), accesscontrol.Actor{AccountID: uuid.New()}))
+			response := httptest.NewRecorder()
+
+			test.handler.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "authorized plan revision unavailable") {
+				t.Fatalf("missing revision response = %d %s", response.Code, response.Body.String())
+			}
+		})
 	}
 }
 

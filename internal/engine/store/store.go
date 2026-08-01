@@ -7,15 +7,17 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 )
 
 var (
 	ErrArtifactScopeNotFound        = errors.New("sdk scope not found")
-	ErrArtifactScopeOwnerMismatch   = errors.New("sdk scope owner mismatch")
 	ErrSDKBucketImmutable           = errors.New("sdk bucket assignment is immutable")
 	ErrBucketNotFound               = errors.New("bucket not found")
+	ErrBucketBound                  = errors.New("bucket is bound to an artifact")
+	ErrDefaultBucketProtected       = errors.New("default bucket cannot be deleted")
 	ErrAuthConnectionNotFound       = errors.New("auth connection not found")
 	ErrConnectSessionUnavailable    = errors.New("connect session not found or already used")
 	ErrInvalidEncryptedAuthMaterial = errors.New("invalid encrypted auth material")
@@ -31,8 +33,11 @@ var (
 )
 
 type ArtifactScope struct {
-	AccountID          uuid.UUID
-	ArtifactID         uuid.UUID
+	AccountID  uuid.UUID
+	ArtifactID uuid.UUID
+	// OwnerTeamID controls management authority only. Runtime execution keeps
+	// using the artifact's immutable bucket and token identities.
+	OwnerTeamID        uuid.UUID
 	BucketID           uuid.UUID
 	Selections         []byte
 	ScopeSchemaVersion int
@@ -268,6 +273,15 @@ type WorkspaceExecutionPolicyOverride struct {
 	UpdatedAt time.Time
 }
 
+type WorkspaceExecutionPolicyRef struct {
+	ServiceID        uuid.UUID
+	ServiceVersionID uuid.UUID
+}
+
+type WorkspaceExecutionPolicyBatchStore interface {
+	GetEffectiveWorkspaceExecutionPolicyOverrides(ctx context.Context, refs []WorkspaceExecutionPolicyRef) (map[WorkspaceExecutionPolicyRef]*WorkspaceExecutionPolicyOverride, error)
+}
+
 // WorkspaceExecutionPolicyStore is kept separate from Store for the same
 // staged-rollout reason as WorkspaceProfileStore: the consolidated
 // resolution point (and the plan-action wiring that writes overrides) can
@@ -416,9 +430,6 @@ type Store interface {
 	// successful Registry handshake. It is idempotent for the owning account
 	// and returns ErrWorkspaceOwnerMismatch for any other account.
 	BootstrapWorkspace(ctx context.Context, accountID uuid.UUID, name string) (uuid.UUID, error)
-	// BootstrapAPIKey caches a Registry-issued credential. It never provisions
-	// an account; Registry's admin setup API owns account and key creation.
-	BootstrapAPIKey(ctx context.Context, accountID uuid.UUID, apiKey string) error
 	// AddWorkspaceServiceVersion captures
 	// the cached service name (for offline resilience) and the account that
 	// triggered the add (for the compliance audit trail).
@@ -449,13 +460,13 @@ type Store interface {
 	DeactivateSDK(ctx context.Context, accountID, artifactID uuid.UUID) error
 	ReactivateSDK(ctx context.Context, accountID, artifactID uuid.UUID) error
 	GetSDKAccountID(ctx context.Context, artifactID uuid.UUID) (uuid.UUID, error)
-	GetAccountByAPIKey(ctx context.Context, apiKey string) (uuid.UUID, error)
 	// ListMCPScopesByAccount is the read side of the MCP servers list page:
 	// paginated kind='mcp' scopes for accountID, newest first, plus the total
 	// count. Mirrors the Registry's removed sdks(target_type: "mcp") GraphQL
 	// query, but scoped to Engine-native scopes (SaveArtifactScope's kind column)
 	// instead of Registry-generated SDK rows.
 	ListMCPScopesByAccount(ctx context.Context, accountID uuid.UUID, limit, offset int) ([]ArtifactScope, int, error)
+	ListAuthorizedMCPScopesByAccount(ctx context.Context, accountID uuid.UUID, scope accesscontrol.AuthorizedScope, limit, offset int) ([]ArtifactScope, int, error)
 
 	// GetMCPScopeByName looks up a specific MCP server by name, and optionally
 	// by version. If version is empty, it returns the most recently created one.
@@ -479,16 +490,17 @@ type Store interface {
 	ListBuckets(ctx context.Context) ([]Bucket, error)
 	GetBucketsByNames(ctx context.Context, names []string) ([]Bucket, error)
 	ListBucketSummaries(ctx context.Context, limit, offset int) ([]BucketSummary, int, error)
+	ListAuthorizedBucketSummaries(ctx context.Context, scope accesscontrol.AuthorizedScope, limit, offset int) ([]BucketSummary, int, error)
 	GetBucketSummary(ctx context.Context, bucketID uuid.UUID) (*BucketSummary, error)
 	GetBucket(ctx context.Context, bucketID uuid.UUID) (*Bucket, error)
 	GetBucketByName(ctx context.Context, name string) (*Bucket, error)
-	DeleteBucket(ctx context.Context, name string) error
+	DeleteBucket(ctx context.Context, name string, authorizedBucketID uuid.UUID) error
 
 	// SDK Bucket Link methods
-	LinkBucketToSDK(ctx context.Context, artifactID, bucketID uuid.UUID) error
-	UnlinkBucketFromSDK(ctx context.Context, artifactID, bucketID uuid.UUID) error
 	ListBucketsForSDK(ctx context.Context, artifactID uuid.UUID) ([]Bucket, error)
+	ListAuthorizedBucketsForSDK(ctx context.Context, artifactID uuid.UUID, scope accesscontrol.AuthorizedScope) ([]Bucket, error)
 	ListArtifactScopesForBucket(ctx context.Context, bucketID uuid.UUID, limit, offset int) ([]ArtifactScope, int, error)
+	ListAuthorizedArtifactScopesForBucket(ctx context.Context, bucketID uuid.UUID, scope accesscontrol.AuthorizedScope, limit, offset int) ([]ArtifactScope, int, error)
 
 	// Bucket Value methods
 	UpsertBucketValue(ctx context.Context, val BucketValue) error
@@ -527,6 +539,7 @@ type Store interface {
 	UpsertAuthConnection(ctx context.Context, conn AuthConnection) (*AuthConnection, error)
 	GetAuthConnection(ctx context.Context, bucketID, serviceID uuid.UUID, endUserRef string) (*AuthConnection, error)
 	GetAuthConnectionByIDForBuckets(ctx context.Context, id uuid.UUID, bucketIDs []uuid.UUID) (*AuthConnection, error)
+	GetAuthConnectionsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]AuthConnection, error)
 	ListAuthConnections(ctx context.Context, bucketID uuid.UUID, serviceID *uuid.UUID, endUserRef string) ([]AuthConnection, error)
 	ListAuthConnectionsPage(ctx context.Context, bucketID uuid.UUID, serviceID *uuid.UUID, endUserRef string, limit, offset int) ([]AuthConnection, int, error)
 	DeleteAuthConnection(ctx context.Context, bucketID, id uuid.UUID) error
@@ -553,11 +566,15 @@ type Store interface {
 	// ListWorkspaceServices returns all services the workspace has added.
 	// Used heavily internally when pagination is unnecessary.
 	ListWorkspaceServices(ctx context.Context, names []string) ([]WorkspaceService, error)
+	ListAuthorizedWorkspaceServices(ctx context.Context, scope accesscontrol.AuthorizedScope, names []string) ([]WorkspaceService, error)
 
 	// ListWorkspaceServicesPage returns a paginated slice of workspace services
 	// along with the total count matching the names filter.
 	ListWorkspaceServicesPage(ctx context.Context, names []string, limit, offset int) ([]WorkspaceService, int, error)
+	ListAuthorizedWorkspaceServicesPage(ctx context.Context, scope accesscontrol.AuthorizedScope, names []string, limit, offset int) ([]WorkspaceService, int, error)
+	ResolveWorkspaceServiceIDsByKeys(ctx context.Context, keys []string) (map[string]uuid.UUID, error)
 	ListBucketServiceSummaries(ctx context.Context, bucketID uuid.UUID, search string, limit, offset int) ([]BucketServiceSummary, int, error)
+	ListAuthorizedBucketServiceSummaries(ctx context.Context, bucketID uuid.UUID, scope accesscontrol.AuthorizedScope, search string, limit, offset int) ([]BucketServiceSummary, int, error)
 	// RemoveWorkspaceService removes the workspace-service row.
 	// Returns ErrWorkspaceServiceNotFound if no such row exists.
 	RemoveWorkspaceService(ctx context.Context, serviceID uuid.UUID) error
@@ -567,43 +584,20 @@ type Store interface {
 	// workspace gate; engine_workspace_registration_plan.md, Task 2).
 	IsWorkspaceServiceEnabled(ctx context.Context, serviceID uuid.UUID) (bool, error)
 
-	// UpsertWorkspaceWebhook creates or updates one webhook ingress
-	// registration, keyed on (workspace_id, service_id, label). See
-	// WorkspaceWebhook's doc comment for why the slug never changes on an
-	// update.
-	UpsertWorkspaceWebhook(ctx context.Context, webhook WorkspaceWebhook) (*WorkspaceWebhook, error)
-	// RemoveWorkspaceWebhook deletes one registration. Returns
-	// ErrWorkspaceWebhookNotFound if no such row exists.
-	RemoveWorkspaceWebhook(ctx context.Context, serviceID uuid.UUID, label string) error
-	// PruneWorkspaceWebhooks deletes every registration for the service whose
-	// label is not in keepLabels, returning the labels actually removed so
-	// the caller can emit one audit span per removal.
-	PruneWorkspaceWebhooks(ctx context.Context, serviceID uuid.UUID, keepLabels []string) ([]string, error)
 	// GetWorkspaceWebhookBySlug is the Engine's webhook ingress lookup -- the
 	// single indexed read that replaces the old NATS-to-Registry round trip.
 	GetWorkspaceWebhookBySlug(ctx context.Context, slug string) (*WorkspaceWebhook, error)
 	// ListWorkspaceWebhooks returns every registration a workspace holds for
 	// one service, for CLI/visibility output.
 	ListWorkspaceWebhooks(ctx context.Context, serviceID uuid.UUID) ([]WorkspaceWebhook, error)
-	// PruneOwnedWorkspaceWebhooks deletes every registration owned by
-	// owningConfigKey (a kind: webhook artifact's own config_key) whose
-	// service_id is not in keepServiceIDs, in one query -- the kind: webhook
-	// analogue of PruneWorkspaceWebhooks, scoped by owning artifact instead
-	// of by a single service, since one artifact's apply can add/remove
-	// services from its own services map. Never touches a legacy
-	// (owning_config_key IS NULL) row or another artifact's rows. Returns
-	// the service IDs actually removed.
-	PruneOwnedWorkspaceWebhooks(ctx context.Context, owningConfigKey string, keepServiceIDs []uuid.UUID) ([]uuid.UUID, error)
 	// WorkspaceWebhookOwnersByLabel resolves, in one query, which config_key
 	// (if any) already owns the (service_id, label) pair for every service in
 	// serviceIDs -- used by kind: webhook's plan step to detect a conflict
-	// (another artifact, or a legacy runtime_config.webhooks registration,
-	// already claiming this artifact's name for one of its services) without
+	// (another artifact already claiming this artifact's name for one of its
+	// services) without
 	// a query per service. A service_id absent from the returned map has no
-	// existing registration for this label at all. A present entry with a
-	// nil *string means a legacy (owning_config_key IS NULL) row already
-	// holds that label.
-	WorkspaceWebhookOwnersByLabel(ctx context.Context, serviceIDs []uuid.UUID, label string) (map[uuid.UUID]*string, error)
+	// existing registration for this label at all.
+	WorkspaceWebhookOwnersByLabel(ctx context.Context, serviceIDs []uuid.UUID, label string) (map[uuid.UUID]string, error)
 
 	InsertMCPAnalytics(ctx context.Context, analytics *models.MCPAnalytics) error
 	UpsertMCPSession(ctx context.Context, session *models.MCPSession) error

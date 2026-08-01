@@ -16,21 +16,14 @@ import (
 type deleteInterceptMockStore struct {
 	store.Store
 	accountID uuid.UUID
-	wsErr     error
 
-	removeCalls      int
-	verifyOwnerCalls int
-	lastServiceID    uuid.UUID
-	removeErr        error
+	removeCalls   int
+	lastServiceID uuid.UUID
+	removeErr     error
 }
 
 func (m *deleteInterceptMockStore) GetAccountByAPIKey(_ context.Context, _ string) (uuid.UUID, error) {
 	return m.accountID, nil
-}
-
-func (m *deleteInterceptMockStore) VerifyWorkspaceOwner(_ context.Context, _ uuid.UUID) error {
-	m.verifyOwnerCalls++
-	return m.wsErr
 }
 
 func (m *deleteInterceptMockStore) RemoveWorkspaceService(_ context.Context, serviceID uuid.UUID) error {
@@ -94,6 +87,7 @@ func TestDeleteIntercept_CleanupCalledOnSuccess(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/integrations/"+svcID.String(), nil)
 	req.Header.Set("X-API-Key", "fsk_valid")
+	req = controlTestRequest(req, s.accountID)
 	rec := httptest.NewRecorder()
 
 	forwardIntegrationDeleteWithWorkspaceCleanup(fwd, s, rec, req, s.accountID)
@@ -116,6 +110,7 @@ func TestDeleteIntercept_NoCleanupOnRegistryFailure(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/integrations/"+uuid.New().String(), nil)
 	req.Header.Set("X-API-Key", "fsk_valid")
+	req = controlTestRequest(req, s.accountID)
 	rec := httptest.NewRecorder()
 
 	forwardIntegrationDeleteWithWorkspaceCleanup(fwd, s, rec, req, s.accountID)
@@ -125,10 +120,7 @@ func TestDeleteIntercept_NoCleanupOnRegistryFailure(t *testing.T) {
 	}
 }
 
-func TestDeleteIntercept_VerifiesWorkspaceOwnerBeforeCleanup(t *testing.T) {
-	// Regression guard: workspace ownership must actually be checked
-	// (VerifyWorkspaceOwner called) before RemoveWorkspaceService runs, not
-	// skipped entirely.
+func TestDeleteIntercept_RequiresAuthenticatedActorBeforeCleanup(t *testing.T) {
 	svcID := uuid.New()
 	s := &deleteInterceptMockStore{
 		accountID: uuid.New(),
@@ -141,10 +133,7 @@ func TestDeleteIntercept_VerifiesWorkspaceOwnerBeforeCleanup(t *testing.T) {
 
 	forwardIntegrationDeleteWithWorkspaceCleanup(fwd, s, rec, req, s.accountID)
 
-	if s.verifyOwnerCalls != 1 {
-		t.Errorf("expected VerifyWorkspaceOwner called once, got %d", s.verifyOwnerCalls)
-	}
-	if s.removeCalls != 1 {
-		t.Errorf("expected RemoveWorkspaceService called once, got %d", s.removeCalls)
+	if s.removeCalls != 0 {
+		t.Errorf("expected no cleanup without an authenticated Actor, got %d", s.removeCalls)
 	}
 }

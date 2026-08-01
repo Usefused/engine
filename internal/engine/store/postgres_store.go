@@ -2,8 +2,6 @@ package store
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -11,7 +9,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/shared/models"
 )
 
@@ -28,52 +30,48 @@ func NewPostgresStore(db *pgxpool.Pool) Store {
 func (s *postgresStore) BootstrapWorkspace(ctx context.Context, accountID uuid.UUID, name string) (uuid.UUID, error) {
 	ownerID, err := s.getSingletonWorkspace(ctx)
 	if err == nil {
-		if err := s.ensureDefaultBucket(ctx); err != nil {
-			return uuid.Nil, err
-		}
-		if err := validateWorkspaceOwner(accountID, ownerID); err != nil {
-			return uuid.Nil, err
-		}
-		var wsID uuid.UUID
-		if err := s.db.QueryRow(ctx, "SELECT id FROM fused_workspaces LIMIT 1").Scan(&wsID); err != nil {
-			return uuid.Nil, fmt.Errorf("fetch workspace ID: %w", err)
-		}
-		return wsID, nil
+		return s.finishWorkspaceBootstrap(ctx, accountID, ownerID)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, fmt.Errorf("load Engine workspace: %w", err)
 	}
+	if err := s.insertSingletonWorkspace(ctx, accountID, name); err != nil {
+		return uuid.Nil, fmt.Errorf("create Engine workspace: %w", err)
+	}
+	// ON CONFLICT may mean a concurrent startup won the singleton insert.
+	// Reloading the owner prevents a process authenticated as another Registry
+	// account from accepting the winner's local workspace.
+	ownerID, err = s.getSingletonWorkspace(ctx)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("load created Engine workspace: %w", err)
+	}
+	return s.finishWorkspaceBootstrap(ctx, accountID, ownerID)
+}
 
-	insertQuery := `
+func (s *postgresStore) insertSingletonWorkspace(ctx context.Context, accountID uuid.UUID, name string) error {
+	_, err := s.db.Exec(ctx, `
 		INSERT INTO fused_workspaces (name, account_id, slug, singleton_key)
 		VALUES ($1, $2, $3, 1)
 		ON CONFLICT (singleton_key) DO NOTHING
-		`
-	_, err = s.db.Exec(ctx, insertQuery, name, accountID, accountID.String())
-	if err == nil {
-		if err := s.ensureDefaultBucket(ctx); err != nil {
-			return uuid.Nil, err
-		}
-		var wsID uuid.UUID
-		if err := s.db.QueryRow(ctx, "SELECT id FROM fused_workspaces LIMIT 1").Scan(&wsID); err != nil {
-			return uuid.Nil, fmt.Errorf("fetch workspace ID: %w", err)
-		}
-		return wsID, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, fmt.Errorf("create Engine workspace: %w", err)
-	}
+	`, name, accountID, accountID.String())
+	return err
+}
 
-	// A concurrent startup won the singleton insert. Load the winner and
-	// verify that both processes authenticated as the same Registry account.
-	ownerID, err = s.getSingletonWorkspace(ctx)
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("load concurrently created Engine workspace: %w", err)
+func (s *postgresStore) finishWorkspaceBootstrap(ctx context.Context, accountID, ownerID uuid.UUID) (uuid.UUID, error) {
+	if err := validateWorkspaceOwner(accountID, ownerID); err != nil {
+		return uuid.Nil, err
 	}
+	// Ownership must be established before bootstrap performs any local write;
+	// a Registry identity for another account must not mutate this singleton
+	// workspace as part of a failed startup.
 	if err := s.ensureDefaultBucket(ctx); err != nil {
 		return uuid.Nil, err
 	}
-	return uuid.Nil, validateWorkspaceOwner(accountID, ownerID)
+	var workspaceID uuid.UUID
+	if err := s.db.QueryRow(ctx, "SELECT id FROM fused_workspaces WHERE singleton_key = 1").Scan(&workspaceID); err != nil {
+		return uuid.Nil, fmt.Errorf("fetch workspace ID: %w", err)
+	}
+	return workspaceID, nil
 }
 
 func (s *postgresStore) ensureDefaultBucket(ctx context.Context) error {
@@ -89,17 +87,15 @@ func (s *postgresStore) ensureDefaultBucket(ctx context.Context) error {
 	return nil
 }
 
-func (s *postgresStore) BootstrapAPIKey(ctx context.Context, accountID uuid.UUID, apiKey string) error {
-	hash := sha256.Sum256([]byte(apiKey))
-	hashedKey := hex.EncodeToString(hash[:])
-
-	query := `
-		INSERT INTO fused_api_keys (account_id, key_hash, name)
-		VALUES ($1, $2, 'Engine License Key')
-		ON CONFLICT (key_hash) DO NOTHING
-	`
-	_, err := s.db.Exec(ctx, query, accountID, hashedKey)
-	return err
+// LoadDefaultBucketID is a point lookup for authorization policy resolution;
+// it avoids loading every bucket and filtering in the HTTP layer.
+func (s *postgresStore) LoadDefaultBucketID(ctx context.Context) (uuid.UUID, error) {
+	var bucketID uuid.UUID
+	err := s.db.QueryRow(ctx, `SELECT id FROM fused_buckets WHERE is_default = true LIMIT 1`).Scan(&bucketID)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("load default bucket ID: %w", err)
+	}
+	return bucketID, nil
 }
 
 func (s *postgresStore) getSingletonWorkspace(ctx context.Context) (uuid.UUID, error) {
@@ -144,24 +140,201 @@ func (s *postgresStore) SaveArtifactScope(ctx context.Context, scope ArtifactSco
 	if kind == "" {
 		kind = "sdk"
 	}
-	query := `
-		INSERT INTO fused_artifact_scopes (account_id, artifact_id, scope_schema_version, selections, kind, name, version, config_key)
-		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''))
-		ON CONFLICT (artifact_id) DO UPDATE SET
-			selections = EXCLUDED.selections,
-			scope_schema_version = EXCLUDED.scope_schema_version,
-			kind = EXCLUDED.kind,
-			name = COALESCE(EXCLUDED.name, fused_artifact_scopes.name),
-			version = COALESCE(EXCLUDED.version, fused_artifact_scopes.version),
-			config_key = COALESCE(EXCLUDED.config_key, fused_artifact_scopes.config_key)
-		WHERE fused_artifact_scopes.account_id = EXCLUDED.account_id
-	`
-	tag, err := s.db.Exec(ctx, query, scope.AccountID, scope.ArtifactID, scope.ScopeSchemaVersion, scope.Selections, kind, scope.Name, scope.Version, scope.ConfigKey)
+	if scope.OwnerTeamID == uuid.Nil {
+		return ErrOwnerTeamRequired
+	}
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.artifact.scope.persist")
+	defer span.End()
+	span.SetAttributes(attribute.String("artifact_id", scope.ArtifactID.String()), attribute.String("team_id", scope.OwnerTeamID.String()))
+	tx, err := s.db.Begin(ctx)
 	if err != nil {
+		return fmt.Errorf("save artifact scope: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := lockAuthorizationState(ctx, tx); err != nil {
 		return err
 	}
+	if _, err := saveArtifactScopeTx(ctx, tx, scope, kind); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("save artifact scope: commit: %w", err)
+	}
+	return nil
+}
+
+func saveArtifactScopeTx(ctx context.Context, tx pgx.Tx, scope ArtifactScope, kind string) (bool, error) {
+	if err := validateArtifactOwnerTeam(ctx, tx, scope.OwnerTeamID); err != nil {
+		return false, err
+	}
+	created, err := insertArtifactScopeTx(ctx, tx, scope, kind)
+	if err != nil {
+		return false, err
+	}
+	if !created {
+		if err := updateArtifactScopeTx(ctx, tx, scope, kind); err != nil {
+			return false, err
+		}
+	}
+	// Scope insert/update and immutable bucket selection share one transaction.
+	if err := validateArtifactBucketAssignment(ctx, tx, scope.ArtifactID, scope.BucketID, created); err != nil {
+		return false, err
+	}
+	if err := linkArtifactBucketTx(ctx, tx, scope.ArtifactID, scope.BucketID); err != nil {
+		return false, err
+	}
+	bindingChanged, err := ensureArtifactOwnerBinding(ctx, tx, scope.OwnerTeamID, scope.ArtifactID)
+	if err != nil {
+		return false, err
+	}
+	revision, err := bumpAuthorizationRevision(ctx, tx, bindingChanged)
+	if err != nil {
+		return false, err
+	}
+	if err := auditArtifactScopeSave(ctx, tx, scope, revision, created); err != nil {
+		return false, err
+	}
+	return created, nil
+}
+
+func insertArtifactScopeTx(ctx context.Context, tx pgx.Tx, scope ArtifactScope, kind string) (bool, error) {
+	var created bool
+	err := tx.QueryRow(ctx, `
+		INSERT INTO fused_artifact_scopes (account_id, artifact_id, owner_team_id, scope_schema_version, selections, kind, name, version, config_key)
+		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''))
+		ON CONFLICT (artifact_id) DO NOTHING
+		RETURNING true
+	`, scope.AccountID, scope.ArtifactID, scope.OwnerTeamID, scope.ScopeSchemaVersion, scope.Selections, kind, scope.Name, scope.Version, scope.ConfigKey).Scan(&created)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("insert artifact scope: %w", err)
+	}
+	return created, nil
+}
+
+func updateArtifactScopeTx(ctx context.Context, tx pgx.Tx, scope ArtifactScope, kind string) error {
+	tag, err := tx.Exec(ctx, `
+		UPDATE fused_artifact_scopes SET
+			selections = $9,
+			scope_schema_version = $4,
+			kind = $5,
+			name = COALESCE(NULLIF($6, ''), name),
+			version = COALESCE(NULLIF($7, ''), version),
+			config_key = COALESCE(NULLIF($8, ''), config_key)
+		WHERE artifact_id = $2 AND account_id = $1 AND owner_team_id = $3
+	`, scope.AccountID, scope.ArtifactID, scope.OwnerTeamID, scope.ScopeSchemaVersion, kind, scope.Name, scope.Version, scope.ConfigKey, scope.Selections)
+	if err != nil {
+		return fmt.Errorf("update artifact scope: %w", err)
+	}
 	if tag.RowsAffected() == 0 {
-		return ErrArtifactScopeOwnerMismatch
+		return ErrArtifactOwnerTeamMismatch
+	}
+	return nil
+}
+
+func validateArtifactBucketAssignment(ctx context.Context, tx pgx.Tx, artifactID, bucketID uuid.UUID, created bool) error {
+	var existingBucketID uuid.UUID
+	err := tx.QueryRow(ctx, `SELECT bucket_id FROM fused_artifact_buckets WHERE artifact_id = $1 FOR UPDATE`, artifactID).Scan(&existingBucketID)
+	if err == nil {
+		if bucketID == uuid.Nil || existingBucketID != bucketID {
+			return ErrSDKBucketImmutable
+		}
+		return nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("validate artifact bucket assignment: %w", err)
+	}
+	// Absence is part of the immutable value for an existing scope. Only a
+	// newly created artifact may choose its initial optional bucket assignment.
+	if !created {
+		if bucketID != uuid.Nil {
+			return ErrSDKBucketImmutable
+		}
+		return nil
+	}
+	if bucketID == uuid.Nil {
+		return nil
+	}
+	var bucketExists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM fused_buckets WHERE id = $1)`, bucketID).Scan(&bucketExists); err != nil {
+		return fmt.Errorf("validate artifact bucket: %w", err)
+	}
+	if !bucketExists {
+		return ErrBucketNotFound
+	}
+	return nil
+}
+
+func linkArtifactBucketTx(ctx context.Context, tx pgx.Tx, artifactID, bucketID uuid.UUID) error {
+	if bucketID == uuid.Nil {
+		return nil
+	}
+	var linkedBucketID uuid.UUID
+	err := tx.QueryRow(ctx, `
+		INSERT INTO fused_artifact_buckets (artifact_id, bucket_id) VALUES ($1, $2)
+		ON CONFLICT (artifact_id) DO UPDATE SET bucket_id = fused_artifact_buckets.bucket_id
+		WHERE fused_artifact_buckets.bucket_id = EXCLUDED.bucket_id
+		RETURNING bucket_id
+	`, artifactID, bucketID).Scan(&linkedBucketID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrSDKBucketImmutable
+	}
+	if err != nil {
+		return fmt.Errorf("link artifact bucket: %w", err)
+	}
+	return nil
+}
+
+func validateArtifactOwnerTeam(ctx context.Context, tx pgx.Tx, ownerTeamID uuid.UUID) error {
+	var status TeamStatus
+	if err := tx.QueryRow(ctx, `SELECT status FROM fused_teams WHERE id = $1 FOR UPDATE`, ownerTeamID).Scan(&status); errors.Is(err, pgx.ErrNoRows) {
+		return ErrTeamNotFound
+	} else if err != nil {
+		return fmt.Errorf("load artifact owner team: %w", err)
+	}
+	if status != TeamStatusActive {
+		return ErrTeamArchived
+	}
+	return nil
+}
+
+func ensureArtifactOwnerBinding(ctx context.Context, tx pgx.Tx, teamID, artifactID uuid.UUID) (bool, error) {
+	var inserted, roleExists bool
+	err := tx.QueryRow(ctx, `
+		WITH role AS (SELECT id FROM fused_roles WHERE slug = $3 AND scope_type = 'artifact'), inserted AS (
+			INSERT INTO fused_role_bindings (subject_type, subject_id, role_id, resource_type, resource_id)
+			SELECT 'team', $1, role.id, 'artifact', $2 FROM role
+			ON CONFLICT (subject_type, subject_id, role_id, resource_type, resource_id) DO NOTHING
+			RETURNING true
+		)
+		SELECT COALESCE((SELECT true FROM inserted), false), EXISTS (SELECT 1 FROM role)
+	`, teamID, artifactID, accesscontrol.RoleArtifactManager).Scan(&inserted, &roleExists)
+	if err != nil {
+		return false, fmt.Errorf("ensure artifact owner binding: %w", err)
+	}
+	if !roleExists {
+		return false, errors.New("artifact manager role is unavailable")
+	}
+	return inserted, nil
+}
+
+func auditArtifactScopeSave(ctx context.Context, tx pgx.Tx, scope ArtifactScope, revision int64, created bool) error {
+	actor, _ := accesscontrol.ActorFromContext(ctx)
+	permission := accesscontrol.PermissionArtifactManage
+	if created {
+		permission = accesscontrol.PermissionArtifactCreate
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO fused_audit_events (actor_subject_id, actor_credential_id, action, permission,
+			resource_type, resource_id, trace_id, outcome, metadata)
+		VALUES ($1, $2, 'artifact.scope.persist', $3, 'artifact', $4, $5, 'succeeded',
+			jsonb_build_object('team_id', $6::text, 'authorization_revision', $7::bigint, 'changed', true))
+	`, nullableUUID(actor.SubjectID), nullableUUID(actor.CredentialID), permission, scope.ArtifactID,
+		trace.SpanFromContext(ctx).SpanContext().TraceID().String(), scope.OwnerTeamID.String(), revision)
+	if err != nil {
+		return fmt.Errorf("audit artifact scope save: %w", err)
 	}
 	return nil
 }
@@ -169,14 +342,14 @@ func (s *postgresStore) SaveArtifactScope(ctx context.Context, scope ArtifactSco
 // artifactScopeSelectColumns is shared by GetArtifactScope/ListArtifactScopes/
 // ListMCPScopesByAccount so their SELECT lists and Scan order can't drift
 // apart from each other.
-const artifactScopeSelectColumns = "s.account_id, s.artifact_id, b.bucket_id, s.scope_schema_version, s.selections, s.deactivated_at, s.kind, s.name, s.version, s.config_key, s.created_at"
+const artifactScopeSelectColumns = "s.account_id, s.artifact_id, s.owner_team_id, b.bucket_id, s.scope_schema_version, s.selections, s.deactivated_at, s.kind, s.name, s.version, s.config_key, s.created_at"
 
 func scanArtifactScope(row pgx.Row) (*ArtifactScope, error) {
 	var scope ArtifactScope
 	var bucketID *uuid.UUID
 	var name *string
 	var version, configKey *string
-	if err := row.Scan(&scope.AccountID, &scope.ArtifactID, &bucketID, &scope.ScopeSchemaVersion, &scope.Selections, &scope.DeactivatedAt, &scope.Kind, &name, &version, &configKey, &scope.CreatedAt); err != nil {
+	if err := row.Scan(&scope.AccountID, &scope.ArtifactID, &scope.OwnerTeamID, &bucketID, &scope.ScopeSchemaVersion, &scope.Selections, &scope.DeactivatedAt, &scope.Kind, &name, &version, &configKey, &scope.CreatedAt); err != nil {
 		return nil, err
 	}
 	if bucketID != nil {
@@ -277,8 +450,18 @@ func (s *postgresStore) ListArtifactScopes(ctx context.Context, artifactIDs []uu
 // -- this list is paginated in tens/hundreds of rows per account, not a scale
 // where the extra round trip matters).
 func (s *postgresStore) ListMCPScopesByAccount(ctx context.Context, accountID uuid.UUID, limit, offset int) ([]ArtifactScope, int, error) {
+	return s.ListAuthorizedMCPScopesByAccount(ctx, accountID, accesscontrol.AuthorizedScope{All: true}, limit, offset)
+}
+
+func (s *postgresStore) ListAuthorizedMCPScopesByAccount(ctx context.Context, accountID uuid.UUID, scope accesscontrol.AuthorizedScope, limit, offset int) ([]ArtifactScope, int, error) {
+	if !scope.All && len(scope.IDs) == 0 {
+		return nil, 0, nil
+	}
 	var total int
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM fused_artifact_scopes WHERE account_id = $1 AND kind = 'mcp'`, accountID).Scan(&total); err != nil {
+	if err := s.db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM fused_artifact_scopes
+		WHERE account_id = $1 AND kind = 'mcp' AND ($2 OR artifact_id = ANY($3::uuid[]))`,
+		accountID, scope.All, scope.IDs).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	if total == 0 {
@@ -290,10 +473,11 @@ func (s *postgresStore) ListMCPScopesByAccount(ctx context.Context, accountID uu
 		FROM fused_artifact_scopes s
 		LEFT JOIN fused_artifact_buckets b ON s.artifact_id = b.artifact_id
 		WHERE s.account_id = $1 AND s.kind = 'mcp'
+		  AND ($2 OR s.artifact_id = ANY($3::uuid[]))
 		ORDER BY s.created_at DESC
-		LIMIT $2 OFFSET $3
+		LIMIT $4 OFFSET $5
 	`
-	rows, err := s.db.Query(ctx, query, accountID, limit, offset)
+	rows, err := s.db.Query(ctx, query, accountID, scope.All, scope.IDs, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -337,8 +521,73 @@ func (s *postgresStore) GetMCPScopeByName(ctx context.Context, accountID uuid.UU
 }
 
 func (s *postgresStore) DeleteArtifactScope(ctx context.Context, accountID uuid.UUID, artifactID uuid.UUID) error {
-	_, err := s.db.Exec(ctx, `DELETE FROM fused_artifact_scopes WHERE account_id = $1 AND artifact_id = $2`, accountID, artifactID)
-	return err
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("delete artifact scope: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := lockAuthorizationState(ctx, tx); err != nil {
+		return err
+	}
+	if err := deleteArtifactScopeTx(ctx, tx, accountID, artifactID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func deleteArtifactScopeTx(ctx context.Context, tx pgx.Tx, accountID, artifactID uuid.UUID) error {
+	var configKey *string
+	err := tx.QueryRow(ctx, `SELECT config_key FROM fused_artifact_scopes WHERE account_id = $1 AND artifact_id = $2 FOR UPDATE`, accountID, artifactID).Scan(&configKey)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("delete artifact scope: lock: %w", err)
+	}
+	if err := deleteArtifactConfigRefsTx(ctx, tx, artifactID, configKey); err != nil {
+		return err
+	}
+	return deleteArtifactRowsTx(ctx, tx, accountID, artifactID)
+}
+
+func deleteArtifactConfigRefsTx(ctx context.Context, tx pgx.Tx, artifactID uuid.UUID, configKey *string) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM fused_config_states WHERE latest_resource_id = $1`, artifactID); err != nil {
+		return fmt.Errorf("delete artifact config state: %w", err)
+	}
+	if configKey != nil {
+		if _, err := tx.Exec(ctx, `
+			UPDATE fused_config_plans SET status = 'superseded', superseded_at = NOW()
+			WHERE config_key = $1 AND status = 'pending'
+		`, *configKey); err != nil {
+			return fmt.Errorf("supersede artifact config plans: %w", err)
+		}
+	}
+	return nil
+}
+
+func deleteArtifactRowsTx(ctx context.Context, tx pgx.Tx, accountID, artifactID uuid.UUID) error {
+	bindingTag, err := tx.Exec(ctx, `DELETE FROM fused_role_bindings WHERE resource_type = 'artifact' AND resource_id = $1`, artifactID)
+	if err != nil {
+		return fmt.Errorf("delete artifact bindings: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM fused_artifact_scopes WHERE account_id = $1 AND artifact_id = $2`, accountID, artifactID); err != nil {
+		return fmt.Errorf("delete artifact scope: %w", err)
+	}
+	revision, err := bumpAuthorizationRevision(ctx, tx, bindingTag.RowsAffected() > 0)
+	if err != nil {
+		return err
+	}
+	actor, _ := accesscontrol.ActorFromContext(ctx)
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO fused_audit_events (actor_subject_id, actor_credential_id, action, permission,
+			resource_type, resource_id, trace_id, outcome, metadata)
+		VALUES ($1, $2, 'artifact.delete', $3, 'artifact', $4, $5, 'succeeded',
+			jsonb_build_object('authorization_revision', $6::bigint, 'changed', true))
+	`, nullableUUID(actor.SubjectID), nullableUUID(actor.CredentialID), accesscontrol.PermissionArtifactManage,
+		artifactID, trace.SpanFromContext(ctx).SpanContext().TraceID().String(), revision); err != nil {
+		return fmt.Errorf("audit artifact delete: %w", err)
+	}
+	return nil
 }
 
 func (s *postgresStore) GetSDKAccountID(ctx context.Context, artifactID uuid.UUID) (uuid.UUID, error) {
@@ -349,18 +598,6 @@ func (s *postgresStore) GetSDKAccountID(ctx context.Context, artifactID uuid.UUI
 			return uuid.Nil, errors.New("sdk not found")
 		}
 		return uuid.Nil, fmt.Errorf("query sdk account error: %w", err)
-	}
-	return accountID, nil
-}
-
-func (s *postgresStore) GetAccountByAPIKey(ctx context.Context, apiKey string) (uuid.UUID, error) {
-	var accountID uuid.UUID
-	err := s.db.QueryRow(ctx, "SELECT account_id FROM fused_api_keys WHERE key_hash = $1", apiKey).Scan(&accountID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return uuid.Nil, errors.New("api key not found")
-		}
-		return uuid.Nil, fmt.Errorf("query api key account error: %w", err)
 	}
 	return accountID, nil
 }
@@ -376,11 +613,7 @@ func (s *postgresStore) ValidateToken(ctx context.Context, artifactID uuid.UUID,
 		SELECT s.account_id
 		FROM fused_artifact_scopes s
 		WHERE s.artifact_id = $1
-		AND (
-			EXISTS (SELECT 1 FROM updated_sdk_token)
-			OR
-			EXISTS (SELECT 1 FROM fused_api_keys k WHERE k.key_hash = $2 AND k.account_id = s.account_id)
-		)
+		AND EXISTS (SELECT 1 FROM updated_sdk_token)
 	`
 	var accountID uuid.UUID
 	err := s.db.QueryRow(ctx, query, artifactID, tokenHash).Scan(&accountID)

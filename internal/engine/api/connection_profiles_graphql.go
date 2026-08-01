@@ -77,7 +77,7 @@ func workspaceConnectionProfileGraphQLField(s store.Store) *graphql.Field {
 			if err != nil {
 				return nil, err
 			}
-			if err := s.VerifyWorkspaceOwner(p.Context, actor.accountID); err != nil {
+			if err := verifyWorkspaceActor(p.Context, actor.accountID); err != nil {
 				return nil, err
 			}
 			profileStore, err := engineProfileStore(s)
@@ -134,7 +134,7 @@ func resetWorkspaceConnectionProfileGraphQLField(s store.Store) *graphql.Field {
 			if err != nil {
 				return nil, err
 			}
-			if err := s.VerifyWorkspaceOwner(ctx, actor.accountID); err != nil {
+			if err := verifyWorkspaceActor(ctx, actor.accountID); err != nil {
 				return nil, err
 			}
 			profileStore, err := engineProfileStore(s)
@@ -177,7 +177,7 @@ func setWorkspaceConnectionProfile(p graphql.ResolveParams, s store.Store, verif
 		span.SetAttributes(attribute.String("outcome", "invalid"))
 		return nil, err
 	}
-	if err := s.VerifyWorkspaceOwner(ctx, actor.accountID); err != nil {
+	if err := verifyWorkspaceActor(ctx, actor.accountID); err != nil {
 		return nil, err
 	}
 	if err := verifyWorkspaceServiceVersionActive(ctx, s, identity.serviceID, identity.versionID); err != nil {

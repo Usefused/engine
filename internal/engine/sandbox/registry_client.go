@@ -152,7 +152,7 @@ func (c *HTTPRegistryClient) FetchConnectionProfileContracts(ctx context.Context
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 		req.Header.Set("X-API-Key", apiKey)
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch connection profile contracts: %w", err)
 	}
@@ -200,7 +200,7 @@ func (c *HTTPRegistryClient) FetchEligibleConnectionProfiles(ctx context.Context
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 		req.Header.Set("X-API-Key", apiKey)
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch eligible connection profiles: %w", err)
 	}
@@ -257,19 +257,16 @@ var ErrServiceNotFound = errors.New("service not found in registry")
 // endpoints). Used by the Engine's "Add to Workspace" flow, which only needs
 // to know the service exists and what it's called -- not its whole definition.
 //
-// apiKey is the requesting user's own API key, not the Engine's shared
-// license key: forwarding it means the Registry's own visibility rules
-// (private/public, ownership) apply for this specific account, exactly as
-// they would for any other request that account makes -- same principle as
-// the GraphQL proxy in internal/engine/api forwarding the original key
-// unchanged (Registry owns identity/authorization resolution).
+// The API-key argument is retained at this service boundary because callers
+// also use it for local authorization. HTTPRegistryClient.do always replaces
+// it with FUSED_LICENSE_KEY before the request crosses into Registry.
 func (c *HTTPRegistryClient) VerifyServiceExists(ctx context.Context, serviceID uuid.UUID, apiKey string) (string, string, string, uuid.UUID, error) {
 	req, err := c.buildVerifyServiceRequest(ctx, serviceID, apiKey)
 	if err != nil {
 		return "", "", "", uuid.Nil, err
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return "", "", "", uuid.Nil, fmt.Errorf("VerifyServiceExists: request failed: %w", err)
 	}
@@ -402,7 +399,7 @@ func (c *HTTPRegistryClient) FetchServiceVisibility(ctx context.Context, service
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-API-Key", apiKey)
-	response, err := c.httpClient.Do(request)
+	response, err := c.do(request)
 	if err != nil {
 		return nil, fmt.Errorf("FetchServiceVisibility: request failed: %w", err)
 	}
@@ -458,7 +455,7 @@ func (c *HTTPRegistryClient) UpdateServicePublic(ctx context.Context, serviceID 
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-API-Key", apiKey)
-	response, err := c.httpClient.Do(request)
+	response, err := c.do(request)
 	if err != nil {
 		return fmt.Errorf("UpdateServicePublic: request failed: %w", err)
 	}
@@ -502,7 +499,7 @@ func (c *HTTPRegistryClient) PublishServiceExecutionPolicy(ctx context.Context, 
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-API-Key", apiKey)
-	response, err := c.httpClient.Do(request)
+	response, err := c.do(request)
 	if err != nil {
 		return fmt.Errorf("PublishServiceExecutionPolicy: request failed: %w", err)
 	}
@@ -536,7 +533,7 @@ func (c *HTTPRegistryClient) UpdateServiceVersionPublic(ctx context.Context, ser
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-API-Key", apiKey)
-	response, err := c.httpClient.Do(request)
+	response, err := c.do(request)
 	if err != nil {
 		return fmt.Errorf("UpdateServiceVersionPublic: request failed: %w", err)
 	}
@@ -579,7 +576,7 @@ func (c *HTTPRegistryClient) PublishServiceVersionExecutionPolicy(ctx context.Co
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-API-Key", apiKey)
-	response, err := c.httpClient.Do(request)
+	response, err := c.do(request)
 	if err != nil {
 		return fmt.Errorf("PublishServiceVersionExecutionPolicy: request failed: %w", err)
 	}
@@ -622,7 +619,7 @@ func (c *HTTPRegistryClient) PublishConnectionProfile(ctx context.Context, servi
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-API-Key", apiKey)
-	response, err := c.httpClient.Do(request)
+	response, err := c.do(request)
 	if err != nil {
 		return nil, fmt.Errorf("PublishConnectionProfile: request failed: %w", err)
 	}
@@ -685,7 +682,7 @@ func (c *HTTPRegistryClient) ResolveServiceIDsBySlugs(ctx context.Context, slugs
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", apiKey)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("ResolveServiceIDsBySlugs: request failed: %w", err)
 	}
@@ -766,7 +763,7 @@ func (c *HTTPRegistryClient) ValidateSDKSelections(ctx context.Context, selectio
 		req.Header.Set("X-API-Key", c.licenseKey)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("ValidateSDKSelections: request failed: %w", err)
 	}
@@ -861,6 +858,19 @@ type HTTPRegistryClient struct {
 	sfGroup singleflight.Group
 }
 
+func (c *HTTPRegistryClient) do(request *http.Request) (*http.Response, error) {
+	if c.licenseKey == "" {
+		return nil, errors.New("Registry licence identity is unavailable")
+	}
+	outbound := request.Clone(request.Context())
+	outbound.Header = request.Header.Clone()
+	// Every Registry call uses the licensed workspace identity. Caller-owned
+	// control credentials are local to Engine and must never cross this boundary.
+	outbound.Header.Set("Authorization", "Bearer "+c.licenseKey)
+	outbound.Header.Set("X-API-Key", c.licenseKey)
+	return c.httpClient.Do(outbound)
+}
+
 func NewHTTPRegistryClient(endpoint, licenseKey string) *HTTPRegistryClient {
 	if os.Getenv("FUSED_ENV") != "development" && strings.HasPrefix(strings.ToLower(endpoint), "http://") {
 		slog.Error("FATAL: Engine is configured with an insecure http:// Registry URL in production. LicenseKey would be transmitted in plaintext. Set FUSED_ENV=development to override.")
@@ -911,7 +921,7 @@ func (c *HTTPRegistryClient) FetchServiceVersionRevisions(ctx context.Context, r
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-API-Key", apiKey)
-	response, err := c.httpClient.Do(request)
+	response, err := c.do(request)
 	if err != nil {
 		return nil, err
 	}
@@ -950,7 +960,7 @@ func (c *HTTPRegistryClient) FetchServiceVersionAuthConfigs(ctx context.Context,
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-API-Key", apiKey)
-	response, err := c.httpClient.Do(request)
+	response, err := c.do(request)
 	if err != nil {
 		return nil, fmt.Errorf("FetchServiceVersionAuthConfigs: request failed: %w", err)
 	}
@@ -1001,7 +1011,7 @@ func (c *HTTPRegistryClient) FetchServiceVersionIDs(ctx context.Context, refs []
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-API-Key", apiKey)
-	response, err := c.httpClient.Do(request)
+	response, err := c.do(request)
 	if err != nil {
 		return nil, err
 	}
@@ -1047,7 +1057,7 @@ func (c *HTTPRegistryClient) FetchLatestServiceVersions(ctx context.Context, ser
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-API-Key", apiKey)
-	response, err := c.httpClient.Do(request)
+	response, err := c.do(request)
 	if err != nil {
 		return nil, fmt.Errorf("FetchLatestServiceVersions: request failed: %w", err)
 	}
@@ -1095,7 +1105,7 @@ func (c *HTTPRegistryClient) DeprecateServiceVersion(ctx context.Context, servic
 		return fmt.Errorf("DeprecateServiceVersion: create request: %w", err)
 	}
 	req.Header.Set("X-API-Key", apiKey)
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("DeprecateServiceVersion: request failed: %w", err)
 	}
@@ -1117,7 +1127,7 @@ func (c *HTTPRegistryClient) ArchiveService(ctx context.Context, serviceID uuid.
 		return fmt.Errorf("ArchiveService: create request: %w", err)
 	}
 	req.Header.Set("X-API-Key", apiKey)
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("ArchiveService: request failed: %w", err)
 	}
@@ -1145,6 +1155,88 @@ type graphqlResponse struct {
 	} `json:"errors"`
 }
 
+type ServiceMetadataRef struct {
+	ServiceID uuid.UUID
+	Version   string
+}
+
+func ServiceMetadataRefKey(ref ServiceMetadataRef) string {
+	return ref.ServiceID.String() + ":" + ref.Version
+}
+
+// FetchServiceMetadataBatch reads the webhook-relevant metadata for every
+// selected service in one GraphQL operation. Aliases keep this compatible
+// with the Registry's existing singular service field.
+func (c *HTTPRegistryClient) FetchServiceMetadataBatch(ctx context.Context, refs []ServiceMetadataRef) (map[string]*fusedobject.ServiceMetadata, error) {
+	if len(refs) == 0 {
+		return map[string]*fusedobject.ServiceMetadata{}, nil
+	}
+	req, err := c.buildServiceMetadataBatchRequest(ctx, refs)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, fmt.Errorf("FetchServiceMetadataBatch: execute: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("FetchServiceMetadataBatch: registry returned %d: %s", resp.StatusCode, body)
+	}
+	return decodeServiceMetadataBatch(resp.Body, refs)
+}
+
+func (c *HTTPRegistryClient) buildServiceMetadataBatchRequest(ctx context.Context, refs []ServiceMetadataRef) (*http.Request, error) {
+	var declarations, fields strings.Builder
+	variables := make(map[string]interface{}, len(refs)*2)
+	for i, ref := range refs {
+		if i > 0 {
+			declarations.WriteString(", ")
+		}
+		fmt.Fprintf(&declarations, "$id%d: String!, $version%d: String!", i, i)
+		fmt.Fprintf(&fields, "s%d: service(id: $id%d, version: $version%d) { id name event_extraction_path incoming_webhook_config { auth_type auth_location auth_key_name signature_header verification_headers } }\n", i, i, i)
+		variables[fmt.Sprintf("id%d", i)] = ref.ServiceID.String()
+		variables[fmt.Sprintf("version%d", i)] = ref.Version
+	}
+	payload, err := json.Marshal(graphqlQuery{Query: "query WebhookMetadata(" + declarations.String() + ") {\n" + fields.String() + "}", Variables: variables})
+	if err != nil {
+		return nil, fmt.Errorf("FetchServiceMetadataBatch: marshal: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("FetchServiceMetadataBatch: request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.licenseKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.licenseKey)
+		req.Header.Set("X-API-Key", c.licenseKey)
+	}
+	return req, nil
+}
+
+func decodeServiceMetadataBatch(body io.Reader, refs []ServiceMetadataRef) (map[string]*fusedobject.ServiceMetadata, error) {
+	var response graphqlResponse
+	if err := json.NewDecoder(body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("FetchServiceMetadataBatch: decode: %w", err)
+	}
+	if len(response.Errors) > 0 {
+		return nil, fmt.Errorf("FetchServiceMetadataBatch: graphql: %s", response.Errors[0].Message)
+	}
+	result := make(map[string]*fusedobject.ServiceMetadata, len(refs))
+	for i, ref := range refs {
+		var metadata *fusedobject.ServiceMetadata
+		if err := json.Unmarshal(response.Data[fmt.Sprintf("s%d", i)], &metadata); err != nil {
+			return nil, fmt.Errorf("FetchServiceMetadataBatch: decode service %s: %w", ref.ServiceID, err)
+		}
+		if metadata == nil {
+			return nil, fmt.Errorf("FetchServiceMetadataBatch: service %s not found", ref.ServiceID)
+		}
+		result[ServiceMetadataRefKey(ref)] = metadata
+	}
+	return result, nil
+}
+
 func (c *HTTPRegistryClient) FetchServiceMetadata(ctx context.Context, serviceID uuid.UUID, version string) (*fusedobject.ServiceMetadata, error) {
 	// Collapse concurrent identical fetches: multiple SDK connections arriving
 	// at the same time for the same (serviceID, version) share one outbound
@@ -1166,7 +1258,7 @@ func (c *HTTPRegistryClient) fetchServiceMetadata(ctx context.Context, serviceID
 		return nil, err
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
@@ -1282,7 +1374,7 @@ func (c *HTTPRegistryClient) fetchEndpointsByNames(ctx context.Context, serviceI
 		return nil, err
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
@@ -1371,7 +1463,7 @@ func (c *HTTPRegistryClient) fetchServiceOperations(ctx context.Context, service
 		return nil, err
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
@@ -1423,7 +1515,7 @@ func (c *HTTPRegistryClient) HandshakeWithEntitlements(ctx context.Context) (Eng
 	}
 	req.Header.Set("Authorization", "Bearer "+c.licenseKey)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return EngineHandshakeResult{}, fmt.Errorf("handshake request failed: %w", err)
 	}
@@ -1472,7 +1564,7 @@ func (c *HTTPRegistryClient) SendHeartbeat(ctx context.Context, engineVersion, e
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Engine-Signature", c.signRegistryPayload(body))
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("heartbeat: request failed: %w", err)
 	}
@@ -1509,7 +1601,7 @@ func (c *HTTPRegistryClient) SendUsageReports(ctx context.Context, engineVersion
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Engine-Signature", c.signRegistryPayload(body))
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("usage reports: request failed: %w", err)
 	}
@@ -1718,7 +1810,7 @@ func (c *HTTPRegistryClient) SearchCatalogue(ctx context.Context, searchQuery st
 		req.Header.Set("X-API-Key", token)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
@@ -1795,7 +1887,7 @@ func (c *HTTPRegistryClient) FetchDriftSnapshots(ctx context.Context, serviceID 
 		req.Header.Set("X-API-Key", c.licenseKey)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
@@ -1839,7 +1931,7 @@ func (c *HTTPRegistryClient) FetchDriftSnapshotsForServices(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
@@ -1930,7 +2022,7 @@ func (c *HTTPRegistryClient) FetchServiceChangelogSince(ctx context.Context, ser
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}

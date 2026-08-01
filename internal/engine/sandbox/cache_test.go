@@ -97,18 +97,6 @@ func (m *mockCacheDB) IsWorkspaceServiceEnabled(ctx context.Context, serviceID u
 	return false, nil
 }
 
-func (m *mockCacheDB) UpsertWorkspaceWebhook(ctx context.Context, webhook store.WorkspaceWebhook) (*store.WorkspaceWebhook, error) {
-	return nil, nil
-}
-
-func (m *mockCacheDB) RemoveWorkspaceWebhook(ctx context.Context, serviceID uuid.UUID, label string) error {
-	return nil
-}
-
-func (m *mockCacheDB) PruneWorkspaceWebhooks(ctx context.Context, serviceID uuid.UUID, keepLabels []string) ([]string, error) {
-	return nil, nil
-}
-
 func (m *mockCacheDB) GetWorkspaceWebhookBySlug(ctx context.Context, slug string) (*store.WorkspaceWebhook, error) {
 	return nil, store.ErrWorkspaceWebhookNotFound
 }
@@ -577,10 +565,6 @@ func (m *mockCacheDB) BatchCreateWebhookEvents(ctx context.Context, events []mod
 }
 
 func (m *mockCacheDB) BatchCreateEngineExecutionEvents(ctx context.Context, events []models.EngineExecutionEvent) error {
-	return nil
-}
-
-func (m *mockCacheDB) BootstrapAPIKey(ctx context.Context, accountID uuid.UUID, keyHash string) error {
 	return nil
 }
 

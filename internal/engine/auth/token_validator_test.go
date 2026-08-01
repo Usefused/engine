@@ -12,13 +12,9 @@ import (
 )
 
 // mockStore only needs to fake ValidateToken -- that's the sole store method
-// Validate() calls (token_validator.go:38). SDK-token-vs-account-API-key
-// resolution, and the "API key belongs to a different account" check, both
-// live inside the real ValidateToken's single SQL query now (see
-// postgres_store.go's ValidateToken: one query joins fused_artifact_tokens and
-// fused_api_keys, scoped by the account that owns artifactID) -- they're no
-// longer separate steps orchestrated here, so the mock doesn't model them
-// as separate calls either.
+// Validate() calls (token_validator.go:38). The real query accepts only an SDK
+// token bound to artifactID; control-plane credentials never enter runtime
+// authentication.
 type mockStore struct {
 	store.Store
 	validateTokenFn func(ctx context.Context, artifactID uuid.UUID, tokenHash string) (uuid.UUID, error)
@@ -36,10 +32,8 @@ func TestTokenValidator(t *testing.T) {
 	artifactID := uuid.New()
 	accountID := uuid.New()
 	sdkToken := "fused_sdk_test_token"
-	apiKey := "fsk_test_api_key"
 
 	hashedSDKToken := HashToken(sdkToken)
-	hashedAPIKey := HashToken(apiKey)
 
 	tests := []struct {
 		name          string
@@ -63,36 +57,6 @@ func TestTokenValidator(t *testing.T) {
 			},
 			expectedErr:   nil,
 			expectedAccID: accountID,
-		},
-		{
-			// Real ValidateToken also matches an account-level API key hash,
-			// scoped to whichever account owns artifactID.
-			name:  "Valid API Key Fallback",
-			token: apiKey,
-			mock: &mockStore{
-				validateTokenFn: func(ctx context.Context, id uuid.UUID, hash string) (uuid.UUID, error) {
-					if id == artifactID && hash == hashedAPIKey {
-						return accountID, nil
-					}
-					return uuid.Nil, errors.New("not found")
-				},
-			},
-			expectedErr:   nil,
-			expectedAccID: accountID,
-		},
-		{
-			// An API key that resolves to a different account than artifactID
-			// belongs to never matches the real query's account-scoped join
-			// -- zero rows, same as any other unrecognized token.
-			name:  "API Key Belongs To Different Account",
-			token: apiKey,
-			mock: &mockStore{
-				validateTokenFn: func(ctx context.Context, id uuid.UUID, hash string) (uuid.UUID, error) {
-					return uuid.Nil, errors.New("not found")
-				},
-			},
-			expectedErr:   ErrUnauthorized,
-			expectedAccID: uuid.Nil,
 		},
 		{
 			name:  "Invalid Token",

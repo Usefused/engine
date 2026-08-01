@@ -28,10 +28,12 @@ func TestPostgresStore_SDKTokens(t *testing.T) {
 	s := NewPostgresStore(pool)
 	accountID := uuid.New()
 	artifactID := uuid.New()
+	ownerTeamID := seedArtifactOwnerTeam(t, ctx, pool)
 
 	err = s.SaveArtifactScope(ctx, ArtifactScope{
 		AccountID:          accountID,
 		ArtifactID:         artifactID,
+		OwnerTeamID:        ownerTeamID,
 		Selections:         []byte("[]"),
 		ScopeSchemaVersion: 1,
 	})

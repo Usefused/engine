@@ -2,10 +2,10 @@ package api
 
 import (
 	"bytes"
+	"container/list"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -20,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	enginemiddleware "github.com/Usefused/engine/internal/engine/middleware"
 	"github.com/Usefused/engine/internal/engine/store"
 )
@@ -33,12 +34,15 @@ import (
 // The cache is created once per GraphQLProxyHandler invocation (i.e. once per
 // server startup) and lives for the lifetime of the process.
 type proxyResponseCache struct {
-	mu      sync.RWMutex
-	entries map[string]proxyCacheEntry
-	ttl     time.Duration
+	mu       sync.Mutex
+	entries  map[string]*list.Element
+	order    *list.List
+	ttl      time.Duration
+	capacity int
 }
 
 type proxyCacheEntry struct {
+	key       string
 	body      []byte
 	status    int
 	expiresAt time.Time
@@ -46,35 +50,61 @@ type proxyCacheEntry struct {
 
 func newProxyResponseCache(ttl time.Duration) *proxyResponseCache {
 	return &proxyResponseCache{
-		entries: make(map[string]proxyCacheEntry),
-		ttl:     ttl,
+		entries:  make(map[string]*list.Element, 1024),
+		order:    list.New(),
+		ttl:      ttl,
+		capacity: 1024,
 	}
 }
 
 func (c *proxyResponseCache) get(key string) (proxyCacheEntry, bool) {
-	c.mu.RLock()
-	e, ok := c.entries[key]
-	c.mu.RUnlock()
-	if !ok || time.Now().After(e.expiresAt) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	element, ok := c.entries[key]
+	if !ok {
 		return proxyCacheEntry{}, false
 	}
-	return e, true
+	entry := element.Value.(proxyCacheEntry)
+	if time.Now().After(entry.expiresAt) {
+		c.remove(element)
+		return proxyCacheEntry{}, false
+	}
+	c.order.MoveToFront(element)
+	return entry, true
 }
 
 func (c *proxyResponseCache) set(key string, status int, body []byte) {
-	e := proxyCacheEntry{body: body, status: status, expiresAt: time.Now().Add(c.ttl)}
+	e := proxyCacheEntry{key: key, body: append([]byte(nil), body...), status: status, expiresAt: time.Now().Add(c.ttl)}
 	c.mu.Lock()
-	c.entries[key] = e
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+	if element, ok := c.entries[key]; ok {
+		element.Value = e
+		c.order.MoveToFront(element)
+		return
+	}
+	c.entries[key] = c.order.PushFront(e)
+	if c.order.Len() > c.capacity {
+		c.remove(c.order.Back())
+	}
 }
 
-// proxyCacheKey hashes the raw request body together with the accountID so
-// that different accounts' responses never alias each other, and two queries
-// with different body bytes always get separate cache entries.
-func proxyCacheKey(body []byte, accountID uuid.UUID) string {
+func (c *proxyResponseCache) remove(element *list.Element) {
+	if element == nil {
+		return
+	}
+	entry := element.Value.(proxyCacheEntry)
+	delete(c.entries, entry.key)
+	c.order.Remove(element)
+}
+
+// proxyCacheKey partitions Registry responses by local subject and access
+// revision so differently scoped users in one workspace never share results.
+func proxyCacheKey(body []byte, actor accesscontrol.Actor) string {
 	h := sha256.New()
 	h.Write(body)
-	h.Write([]byte(accountID.String()))
+	h.Write([]byte(actor.AccountID.String()))
+	h.Write([]byte(actor.SubjectID.String()))
+	h.Write([]byte(strconv.FormatInt(actor.Authorization.Revision, 10)))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -118,8 +148,8 @@ func copyHeaders(dst, src http.Header) {
 	}
 }
 
-// GraphQLProxyHandler validates the caller's API key against the Engine's
-// own store, then forwards POST /graphql to the Registry unchanged.
+// GraphQLProxyHandler validates the caller's API key against the Engine's own
+// store, then forwards POST /graphql through the licence-identity proxy.
 //
 // Why validate here instead of letting the Registry reject bad keys: the
 // Registry is an internal service and should not be a public auth boundary
@@ -134,8 +164,7 @@ func GraphQLProxyHandler(proxy Forwarder, s store.Store, enforcers ...*enginemid
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		apiKey := r.Header.Get("X-API-Key")
-		accountID, err := validateAPIKey(r.Context(), s, apiKey)
+		accountID, err := controlActorAccount(r.Context())
 		authDur := time.Since(start)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
@@ -152,7 +181,16 @@ func GraphQLProxyHandler(proxy Forwarder, s store.Store, enforcers ...*enginemid
 			return
 		}
 
-		if !isMutation(body) {
+		operation, err := authorizeRegistryGraphQLOperation(r.Context(), body)
+		if err != nil {
+			if !errors.Is(err, errInvalidRegistryGraphQLRequest) {
+				accesscontrol.WriteAuthorizationError(w, err)
+				return
+			}
+			http.Error(w, `{"error":"invalid GraphQL operation"}`, http.StatusBadRequest)
+			return
+		}
+		if operation != "mutation" {
 			forwardGraphQLRead(enforcer, proxy, cache, w, r, accountID, body, authDur, start)
 			return
 		}
@@ -163,8 +201,8 @@ func GraphQLProxyHandler(proxy Forwarder, s store.Store, enforcers ...*enginemid
 
 func forwardGraphQLRead(enforcer *enginemiddleware.RuntimeEnforcer, proxy Forwarder, cache *proxyResponseCache, w http.ResponseWriter, r *http.Request, accountID uuid.UUID, body []byte, authDur time.Duration, start time.Time) {
 	cacheStart := time.Now()
-	cacheKey := proxyCacheKey(body, accountID)
-	if entry, ok := cache.get(cacheKey); ok {
+	cacheKey, cacheable := graphQLRequestCacheKey(r.Context(), body)
+	if entry, ok := cache.get(cacheKey); cacheable && ok {
 		timing := graphQLProxyTiming{auth: authDur, cache: time.Since(cacheStart), total: time.Since(start), hit: true}
 		writeGraphQLCacheHit(w, entry, timing)
 		return
@@ -176,9 +214,17 @@ func forwardGraphQLRead(enforcer *enginemiddleware.RuntimeEnforcer, proxy Forwar
 	timing := graphQLProxyTiming{auth: authDur, cache: time.Since(cacheStart), registry: time.Since(registryStart), total: time.Since(start)}
 	setGraphQLServerTiming(bw.Header(), timing)
 	bw.flushTo(w)
-	if bw.status == http.StatusOK {
+	if cacheable && bw.status == http.StatusOK {
 		cache.set(cacheKey, bw.status, bw.body.Bytes())
 	}
+}
+
+func graphQLRequestCacheKey(ctx context.Context, body []byte) (string, bool) {
+	actor, ok := accesscontrol.ActorFromContext(ctx)
+	if !ok {
+		return "", false
+	}
+	return proxyCacheKey(body, actor), true
 }
 
 func writeGraphQLCacheHit(w http.ResponseWriter, entry proxyCacheEntry, timing graphQLProxyTiming) {
@@ -249,20 +295,4 @@ func readAndRestoreBody(r *http.Request) ([]byte, error) {
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	return body, nil
-}
-
-// isMutation reports whether a GraphQL request body's query is a mutation.
-// GraphQL's shorthand query syntax (`{ field }`) is only valid for queries,
-// so any operation that isn't explicitly typed with a leading keyword is a
-// read -- checking for an explicit "mutation" keyword is sufficient here
-// without pulling in a full GraphQL parser just to classify traffic.
-func isMutation(body []byte) bool {
-	var payload struct {
-		Query string `json:"query"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return false
-	}
-	trimmed := strings.TrimSpace(payload.Query)
-	return strings.HasPrefix(strings.ToLower(trimmed), "mutation")
 }

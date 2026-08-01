@@ -1,15 +1,21 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"log/slog"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 )
 
 type CreateBucketPayload struct {
@@ -22,14 +28,13 @@ func CreateBucketHandler(s store.Store) http.HandlerFunc {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.buckets.create")
 		defer span.End()
 
-		apiKey := r.Header.Get("X-API-Key")
-		accountID, err := validateAPIKey(ctx, s, apiKey)
+		accountID, err := controlActorAccount(ctx)
 		if err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		if err := s.VerifyWorkspaceOwner(ctx, accountID); err != nil {
+		if err := verifyWorkspaceActor(ctx, accountID); err != nil {
 			http.Error(w, "failed to resolve workspace", http.StatusInternalServerError)
 			return
 		}
@@ -61,14 +66,13 @@ func DeleteBucketHandler(s store.Store) http.HandlerFunc {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.buckets.delete")
 		defer span.End()
 
-		apiKey := r.Header.Get("X-API-Key")
-		accountID, err := validateAPIKey(ctx, s, apiKey)
+		accountID, err := controlActorAccount(ctx)
 		if err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		if err := s.VerifyWorkspaceOwner(ctx, accountID); err != nil {
+		if err := verifyWorkspaceActor(ctx, accountID); err != nil {
 			http.Error(w, "failed to resolve workspace", http.StatusInternalServerError)
 			return
 		}
@@ -79,14 +83,13 @@ func DeleteBucketHandler(s store.Store) http.HandlerFunc {
 			return
 		}
 
-		bucket, err := s.GetBucketByName(ctx, name)
+		bucketID, err := authorizedBucketDeleteID(ctx)
 		if err != nil {
-			slog.ErrorContext(ctx, "failed to resolve bucket before delete", slog.Any("error", err))
-			http.Error(w, "failed to resolve bucket", http.StatusInternalServerError)
+			http.Error(w, "authorized bucket identity unavailable", http.StatusForbidden)
 			return
 		}
-		span.SetAttributes(attribute.String("bucket_id", bucket.ID.String()))
-		summary, err := s.GetBucketConnectSummary(ctx, bucket.ID)
+		span.SetAttributes(attribute.String("bucket_id", bucketID.String()))
+		summary, err := s.GetBucketConnectSummary(ctx, bucketID)
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to inspect bucket connect usage", slog.Any("error", err))
 			http.Error(w, "failed to inspect bucket usage", http.StatusInternalServerError)
@@ -96,12 +99,37 @@ func DeleteBucketHandler(s store.Store) http.HandlerFunc {
 			span.SetAttributes(attribute.Int("connected_user_count", summary.ConnectedUserCount))
 		}
 
-		if err := s.DeleteBucket(ctx, name); err != nil {
-			slog.ErrorContext(ctx, "failed to delete bucket", slog.Any("error", err))
-			http.Error(w, "failed to delete bucket", http.StatusInternalServerError)
+		if err := s.DeleteBucket(ctx, name, bucketID); err != nil {
+			writeDeleteBucketError(ctx, w, span, err)
 			return
 		}
 
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func authorizedBucketDeleteID(ctx context.Context) (uuid.UUID, error) {
+	requirements, ok := accesscontrol.RequiredPermissionsFromContext(ctx)
+	if !ok {
+		return uuid.Nil, accesscontrol.ErrPolicyDenied
+	}
+	for _, requirement := range requirements {
+		if requirement.Permission == accesscontrol.PermissionBucketManage && requirement.Resource.Type == accesscontrol.ResourceBucket && requirement.Resource.ID != uuid.Nil {
+			return requirement.Resource.ID, nil
+		}
+	}
+	return uuid.Nil, accesscontrol.ErrPolicyDenied
+}
+
+func writeDeleteBucketError(ctx context.Context, w http.ResponseWriter, span trace.Span, err error) {
+	switch {
+	case errors.Is(err, store.ErrBucketBound), errors.Is(err, store.ErrDefaultBucketProtected):
+		span.SetAttributes(attribute.String("outcome", "conflict"))
+		http.Error(w, err.Error(), http.StatusConflict)
+	case errors.Is(err, store.ErrBucketNotFound):
+		http.Error(w, "bucket not found", http.StatusNotFound)
+	default:
+		slog.ErrorContext(ctx, "failed to delete bucket", slog.Any("error", err))
+		http.Error(w, "failed to delete bucket", http.StatusInternalServerError)
 	}
 }

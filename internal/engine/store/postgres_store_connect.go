@@ -196,6 +196,26 @@ func (s *postgresStore) GetAuthConnectionByIDForBuckets(ctx context.Context, id 
 	return conn, err
 }
 
+func (s *postgresStore) GetAuthConnectionsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]AuthConnection, error) {
+	if len(ids) == 0 {
+		return map[uuid.UUID]AuthConnection{}, nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT `+authConnectionColumns+` FROM fused_auth_connections WHERE id = ANY($1::uuid[])`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	connections := make(map[uuid.UUID]AuthConnection, len(ids))
+	for rows.Next() {
+		connection, err := scanAuthConnection(rows)
+		if err != nil {
+			return nil, err
+		}
+		connections[connection.ID] = *connection
+	}
+	return connections, rows.Err()
+}
+
 func (s *postgresStore) ListAuthConnections(ctx context.Context, bucketID uuid.UUID, serviceID *uuid.UUID, endUserRef string) ([]AuthConnection, error) {
 	query := `
 		SELECT ` + authConnectionColumns + `

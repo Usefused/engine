@@ -325,6 +325,7 @@ type dispatchProfileFixture struct {
 	outOfScopeServiceID uuid.UUID
 	outOfScopeVersionID uuid.UUID
 	artifactID          uuid.UUID
+	ownerTeamID         uuid.UUID
 	epID                uuid.UUID
 	endUserRef          string
 	connectionID        uuid.UUID
@@ -338,7 +339,11 @@ func setupDispatchProfileFixture(t *testing.T, ctx context.Context, pool *pgxpoo
 		workspaceID: workspaceID, accountID: accountID, ownsWorkspace: ownsWorkspace,
 		bucketID: uuid.New(), serviceID: uuid.New(), versionID: uuid.New(),
 		outOfScopeServiceID: uuid.New(), outOfScopeVersionID: uuid.New(),
-		artifactID: uuid.New(), epID: uuid.New(), endUserRef: "dispatch-profile-user",
+		artifactID: uuid.New(), ownerTeamID: uuid.New(), epID: uuid.New(), endUserRef: "dispatch-profile-user",
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO fused_teams (id, name, slug) VALUES ($1, $2, $3)`,
+		f.ownerTeamID, "Dispatch profile owner", "dispatch-profile-owner-"+f.ownerTeamID.String()); err != nil {
+		t.Fatalf("seed active artifact owner team: %v", err)
 	}
 
 	// fused_buckets dropped its workspace_id column during the mono-workspace
@@ -363,8 +368,8 @@ func setupDispatchProfileFixture(t *testing.T, ctx context.Context, pool *pgxpoo
 	if err != nil {
 		t.Fatalf("marshal sdk scope selections: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO fused_artifact_scopes (account_id, artifact_id, selections) VALUES ($1, $2, $3)`,
-		f.accountID, f.artifactID, selectionsJSON); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO fused_artifact_scopes (account_id, artifact_id, owner_team_id, selections) VALUES ($1, $2, $3, $4)`,
+		f.accountID, f.artifactID, f.ownerTeamID, selectionsJSON); err != nil {
 		t.Fatalf("seed sdk scope: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO fused_artifact_buckets (artifact_id, bucket_id) VALUES ($1, $2)`, f.artifactID, f.bucketID); err != nil {
@@ -496,7 +501,6 @@ func (f *dispatchProfileFixture) cleanup() {
 	ctx := context.Background()
 	if f.ownsWorkspace {
 		_, _ = f.pool.Exec(ctx, `DELETE FROM fused_workspaces WHERE id = $1`, f.workspaceID)
-		return
 	}
 	_, _ = f.pool.Exec(ctx, `DELETE FROM fused_artifact_scopes WHERE artifact_id = $1`, f.artifactID)
 	_, _ = f.pool.Exec(ctx, `DELETE FROM fused_buckets WHERE id = $1`, f.bucketID)
@@ -506,6 +510,7 @@ func (f *dispatchProfileFixture) cleanup() {
 		f.serviceID, f.outOfScopeServiceID)
 	_, _ = f.pool.Exec(ctx, `DELETE FROM fused_workspace_services WHERE service_id IN ($1, $2)`,
 		f.serviceID, f.outOfScopeServiceID)
+	_, _ = f.pool.Exec(ctx, `DELETE FROM fused_teams WHERE id = $1`, f.ownerTeamID)
 }
 
 // dispatchProfileWorkspace reuses the Engine singleton workspace when present

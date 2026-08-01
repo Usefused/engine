@@ -12,6 +12,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 )
 
 type WorkspaceService struct {
@@ -161,6 +163,56 @@ func (s *postgresStore) ListWorkspaceServices(
 	return services, rows.Err()
 }
 
+func (s *postgresStore) ListAuthorizedWorkspaceServices(ctx context.Context, scope accesscontrol.AuthorizedScope, names []string) ([]WorkspaceService, error) {
+	if !scope.All && len(scope.IDs) == 0 {
+		return nil, nil
+	}
+	query := listWorkspaceServicesSQL + `
+		WHERE ($1 OR s.service_id = ANY($2::uuid[]))
+		  AND (COALESCE(cardinality($3::text[]), 0) = 0 OR COALESCE(s.service_name, '') = ANY($3::text[]))
+		ORDER BY s.created_at DESC`
+	rows, err := s.db.Query(ctx, query, scope.All, scope.IDs, names)
+	if err != nil {
+		return nil, fmt.Errorf("ListAuthorizedWorkspaceServices: query: %w", err)
+	}
+	defer rows.Close()
+	var services []WorkspaceService
+	for rows.Next() {
+		service, err := scanWorkspaceService(rows)
+		if err != nil {
+			return nil, err
+		}
+		services = append(services, service)
+	}
+	return services, rows.Err()
+}
+
+func (s *postgresStore) ResolveWorkspaceServiceIDsByKeys(ctx context.Context, keys []string) (map[string]uuid.UUID, error) {
+	if len(keys) == 0 {
+		return map[string]uuid.UUID{}, nil
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT DISTINCT ON (input.key) input.key, service.service_id
+		FROM unnest($1::text[]) AS input(key)
+		JOIN fused_workspace_services service
+		  ON service.service_slug = input.key OR service.service_name = input.key
+		ORDER BY input.key, service.created_at DESC`, keys)
+	if err != nil {
+		return nil, fmt.Errorf("ResolveWorkspaceServiceIDsByKeys: query: %w", err)
+	}
+	defer rows.Close()
+	resolved := make(map[string]uuid.UUID, len(keys))
+	for rows.Next() {
+		var key string
+		var serviceID uuid.UUID
+		if err := rows.Scan(&key, &serviceID); err != nil {
+			return nil, fmt.Errorf("ResolveWorkspaceServiceIDsByKeys: scan: %w", err)
+		}
+		resolved[key] = serviceID
+	}
+	return resolved, rows.Err()
+}
+
 // ListWorkspaceServicesPage pushes pagination to the DB to avoid pulling all services into memory.
 // It uses two queries (COUNT and SELECT) to satisfy the total items and the data for the given page.
 // The same WHERE clause logic is shared between the two queries via listWorkspaceServicesQuery.
@@ -232,13 +284,66 @@ func (s *postgresStore) ListWorkspaceServicesPage(ctx context.Context, names []s
 	return services, total, rows.Err()
 }
 
+func (s *postgresStore) ListAuthorizedWorkspaceServicesPage(ctx context.Context, scope accesscontrol.AuthorizedScope, names []string, limit, offset int) ([]WorkspaceService, int, error) {
+	if !scope.All && len(scope.IDs) == 0 {
+		return nil, 0, nil
+	}
+	const where = ` WHERE ($1 OR s.service_id = ANY($2::uuid[]))
+		AND (COALESCE(cardinality($3::text[]), 0) = 0 OR COALESCE(s.service_name, '') = ANY($3::text[]))`
+	var total int
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM fused_workspace_services s`+where, scope.All, scope.IDs, names).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("ListAuthorizedWorkspaceServicesPage count: %w", err)
+	}
+	if total == 0 {
+		return nil, 0, nil
+	}
+	query := `WITH paged_services AS (
+		SELECT id, service_id, service_slug, service_name, added_by, created_at
+		FROM fused_workspace_services s` + where + `
+		ORDER BY created_at DESC LIMIT $4 OFFSET $5
+	)
+	SELECT s.id, s.service_id, COALESCE(s.service_slug, ''),
+	       COALESCE(latest.version, ''),
+	       COALESCE(latest.service_version_id, '00000000-0000-0000-0000-000000000000'::uuid),
+	       COALESCE(s.service_name, ''),
+	       COALESCE(s.added_by, '00000000-0000-0000-0000-000000000000'::uuid), s.created_at
+	FROM paged_services s
+	JOIN LATERAL (
+		SELECT version, service_version_id FROM fused_workspace_service_versions
+		WHERE service_id = s.service_id AND status <> 'deprecated'
+		ORDER BY enabled_at DESC, id DESC LIMIT 1
+	) latest ON true
+	ORDER BY s.created_at DESC`
+	rows, err := s.db.Query(ctx, query, scope.All, scope.IDs, names, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("ListAuthorizedWorkspaceServicesPage query: %w", err)
+	}
+	defer rows.Close()
+	var services []WorkspaceService
+	for rows.Next() {
+		service, err := scanWorkspaceService(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		services = append(services, service)
+	}
+	return services, total, rows.Err()
+}
+
 func (s *postgresStore) ListBucketServiceSummaries(ctx context.Context, bucketID uuid.UUID, search string, limit, offset int) ([]BucketServiceSummary, int, error) {
+	return s.ListAuthorizedBucketServiceSummaries(ctx, bucketID, accesscontrol.AuthorizedScope{All: true}, search, limit, offset)
+}
+
+func (s *postgresStore) ListAuthorizedBucketServiceSummaries(ctx context.Context, bucketID uuid.UUID, scope accesscontrol.AuthorizedScope, search string, limit, offset int) ([]BucketServiceSummary, int, error) {
+	if !scope.All && len(scope.IDs) == 0 {
+		return nil, 0, nil
+	}
 	search = strings.TrimSpace(search)
 	var total int
-	if err := s.db.QueryRow(ctx, bucketServiceSummaryCountSQL, bucketID, search).Scan(&total); err != nil {
+	if err := s.db.QueryRow(ctx, bucketServiceSummaryCountSQL, bucketID, scope.All, scope.IDs, search).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("ListBucketServiceSummaries: count: %w", err)
 	}
-	rows, err := s.db.Query(ctx, bucketServiceSummaryPageSQL, bucketID, search, limit, offset)
+	rows, err := s.db.Query(ctx, bucketServiceSummaryPageSQL, bucketID, scope.All, scope.IDs, search, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("ListBucketServiceSummaries: query: %w", err)
 	}
@@ -450,7 +555,7 @@ func listWorkspaceServicesQuery(names []string) (string, []any) {
 	query := listWorkspaceServicesSQL
 	var args []any
 	if len(names) > 0 {
-		query += " WHERE COALESCE(s.service_name, '') = ANY($1)"
+		query += " WHERE COALESCE(s.service_name, '') = ANY($1) OR COALESCE(s.service_slug, '') = ANY($1)"
 		args = append(args, names)
 	}
 	return query + " ORDER BY s.created_at DESC", args
@@ -522,13 +627,13 @@ const listWorkspaceServicesSQL = `
 // Bucket service summaries aggregate context across all resources linked to a bucket.
 const bucketServiceIDsSQL = `
 	WITH bucket_service_ids AS (
-		SELECT service_id FROM fused_workspace_secrets WHERE bucket_id = $1
+		SELECT service_id FROM fused_workspace_secrets WHERE bucket_id = $1 AND ($2 OR service_id = ANY($3::uuid[]))
 		UNION
-		SELECT service_id FROM fused_connect_configs WHERE bucket_id = $1
+		SELECT service_id FROM fused_connect_configs WHERE bucket_id = $1 AND ($2 OR service_id = ANY($3::uuid[]))
 		UNION
-		SELECT service_id FROM fused_auth_connections WHERE bucket_id = $1
+		SELECT service_id FROM fused_auth_connections WHERE bucket_id = $1 AND ($2 OR service_id = ANY($3::uuid[]))
 		UNION
-		SELECT service_id FROM fused_bucket_values WHERE bucket_id = $1
+		SELECT service_id FROM fused_bucket_values WHERE bucket_id = $1 AND ($2 OR service_id = ANY($3::uuid[]))
 	)`
 
 const bucketServiceSummaryCountSQL = bucketServiceIDsSQL + `
@@ -536,9 +641,9 @@ const bucketServiceSummaryCountSQL = bucketServiceIDsSQL + `
 	FROM bucket_service_ids ids
 	LEFT JOIN fused_workspace_services ws
 	  ON ws.service_id = ids.service_id
-	WHERE $2 = ''
-	   OR COALESCE(ws.service_name, '') ILIKE '%' || $2 || '%'
-	   OR ids.service_id::text ILIKE '%' || $2 || '%'`
+	WHERE $4 = ''
+	   OR COALESCE(ws.service_name, '') ILIKE '%' || $4 || '%'
+	   OR ids.service_id::text ILIKE '%' || $4 || '%'`
 
 const bucketServiceSummaryPageSQL = bucketServiceIDsSQL + `,
 	secret_counts AS (
@@ -578,11 +683,11 @@ const bucketServiceSummaryPageSQL = bucketServiceIDsSQL + `,
 	LEFT JOIN value_counts ON value_counts.service_id = ids.service_id
 	LEFT JOIN connect_config_counts ON connect_config_counts.service_id = ids.service_id
 	LEFT JOIN connected_user_counts ON connected_user_counts.service_id = ids.service_id
-	WHERE $2 = ''
-	   OR COALESCE(ws.service_name, '') ILIKE '%' || $2 || '%'
-	   OR ids.service_id::text ILIKE '%' || $2 || '%'
+	WHERE $4 = ''
+	   OR COALESCE(ws.service_name, '') ILIKE '%' || $4 || '%'
+	   OR ids.service_id::text ILIKE '%' || $4 || '%'
 	ORDER BY COALESCE(ws.service_name, ''), ids.service_id
-	LIMIT $3 OFFSET $4`
+	LIMIT $5 OFFSET $6`
 
 const listWorkspaceServiceVersionsSQL = `
 	SELECT id, service_id, version, service_version_id, status,

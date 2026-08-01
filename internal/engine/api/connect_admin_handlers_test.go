@@ -11,13 +11,12 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/store"
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
 
 func TestConnectAdminHandlers_ConfigLifecycle(t *testing.T) {
 	fixture := newConnectAdminFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	body := bytes.NewReader([]byte(`{
 		"auth_type":"oauth",
@@ -41,7 +40,7 @@ func TestConnectAdminHandlers_ConfigLifecycle(t *testing.T) {
 // anything -- the same safe projection the upsert response already returns.
 func TestConnectAdminHandlers_GetReturnsSavedConfig(t *testing.T) {
 	fixture := newConnectAdminFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 	seedConnectConfig(t, router, fixture)
 
 	req := httptest.NewRequest(http.MethodGet, fixture.configPath(), nil)
@@ -59,7 +58,7 @@ func TestConnectAdminHandlers_GetReturnsSavedConfig(t *testing.T) {
 // be mistaken for "registered but empty".
 func TestConnectAdminHandlers_GetMissingConfigReturnsNotFound(t *testing.T) {
 	fixture := newConnectAdminFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	req := httptest.NewRequest(http.MethodGet, fixture.configPath(), nil)
 	req.Header.Set("X-API-Key", "test-key")
@@ -76,7 +75,7 @@ func TestConnectAdminHandlers_GetMissingConfigReturnsNotFound(t *testing.T) {
 func TestConnectAdminHandlers_GetRequiresBucketOwnership(t *testing.T) {
 	fixture := newConnectAdminFixture()
 	fixture.store.bucketErr = store.ErrBucketNotFound
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	req := httptest.NewRequest(http.MethodGet, fixture.configPath(), nil)
 	req.Header.Set("X-API-Key", "test-key")
@@ -90,7 +89,7 @@ func TestConnectAdminHandlers_GetRequiresBucketOwnership(t *testing.T) {
 func TestConnectAdminHandlers_BucketOwnershipRequired(t *testing.T) {
 	fixture := newConnectAdminFixture()
 	fixture.store.bucketErr = store.ErrBucketNotFound
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	req := httptest.NewRequest(http.MethodPut, fixture.configPath(), bytes.NewReader([]byte(`{
 		"auth_type":"oauth",
@@ -108,7 +107,7 @@ func TestConnectAdminHandlers_BucketOwnershipRequired(t *testing.T) {
 
 func TestConnectAdminHandlers_RejectsInvalidConfigPayload(t *testing.T) {
 	fixture := newConnectAdminFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	req := httptest.NewRequest(http.MethodPut, fixture.configPath(), bytes.NewReader([]byte(`{
 		"auth_type":"api_key",
@@ -129,7 +128,7 @@ func TestConnectAdminHandlers_RejectsInvalidConfigPayload(t *testing.T) {
 
 func TestConnectAdminHandlers_RejectsOAuth2AuthType(t *testing.T) {
 	fixture := newConnectAdminFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	req := httptest.NewRequest(http.MethodPut, fixture.configPath(), bytes.NewReader([]byte(`{
 		"auth_type":"oauth2",
@@ -155,7 +154,7 @@ func TestConnectAdminHandlers_RejectsOAuth2AuthType(t *testing.T) {
 // were -- not be blanked, not silently regenerated.
 func TestConnectAdminHandlers_PartialUpdatePreservesUnspecifiedFields(t *testing.T) {
 	fixture := newConnectAdminFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	create := httptest.NewRequest(http.MethodPut, fixture.configPath(), bytes.NewReader([]byte(`{
 		"auth_type":"oauth",
@@ -196,7 +195,7 @@ func TestConnectAdminHandlers_PartialUpdatePreservesUnspecifiedFields(t *testing
 // did, not silently create a config with a blank client_id/client_secret.
 func TestConnectAdminHandlers_UpdateWithoutExistingConfigStillRequiresAllFields(t *testing.T) {
 	fixture := newConnectAdminFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	req := httptest.NewRequest(http.MethodPut, fixture.configPath(), bytes.NewReader([]byte(`{
 		"redirect_uri":"https://engine.example.com/connect/callback"
@@ -217,7 +216,7 @@ func TestConnectAdminHandlers_UpdateWithoutExistingConfigStillRequiresAllFields(
 // unsure whether their change took effect.
 func TestConnectAdminHandlers_UpdateRejectsEmptyPayload(t *testing.T) {
 	fixture := newConnectAdminFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 	seedConnectConfig(t, router, fixture)
 
 	req := httptest.NewRequest(http.MethodPut, fixture.configPath(), bytes.NewReader([]byte(`{}`)))
@@ -235,7 +234,7 @@ func TestConnectAdminHandlers_UpdateRejectsEmptyPayload(t *testing.T) {
 // entirely.
 func TestConnectAdminHandlers_UpdateRejectsBlankedOutSecret(t *testing.T) {
 	fixture := newConnectAdminFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 	seedConnectConfig(t, router, fixture)
 
 	req := httptest.NewRequest(http.MethodPut, fixture.configPath(), bytes.NewReader([]byte(`{"client_secret":""}`)))
@@ -288,7 +287,7 @@ func decryptSavedConnectConfig(t *testing.T, cfg *store.ConnectConfig, masterKey
 
 func TestConnectAdminHandlers_ListAndDeleteConnections(t *testing.T) {
 	fixture := newConnectAdminFixture()
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 	connectionID := uuid.New()
 	fixture.store.connections = []store.AuthConnection{{
 		ID:                    connectionID,
@@ -320,7 +319,7 @@ func TestConnectAdminHandlers_ListAndDeleteConnections(t *testing.T) {
 func TestConnectAdminHandlers_DeleteMissingConnectionReturnsNotFound(t *testing.T) {
 	fixture := newConnectAdminFixture()
 	fixture.store.deleteErr = store.ErrAuthConnectionNotFound
-	router := buildConnectAdminRouter(fixture.store, fixture.masterKey)
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
 	req := httptest.NewRequest(http.MethodDelete, "/workspace/buckets/"+fixture.bucketID.String()+"/auth/connections/"+uuid.NewString(), nil)
 	req.Header.Set("X-API-Key", "test-key")
@@ -382,8 +381,8 @@ func newConnectAdminFixture() connectAdminFixture {
 	}
 }
 
-func buildConnectAdminRouter(s store.Store, masterKey []byte) http.Handler {
-	r := chi.NewRouter()
+func buildConnectAdminRouter(s store.Store, accountID uuid.UUID, masterKey []byte) http.Handler {
+	r := newControlTestRouter(accountID)
 	r.Mount("/workspace", WorkspaceHandler(s, &mockVerifier{}, masterKey))
 	return r
 }

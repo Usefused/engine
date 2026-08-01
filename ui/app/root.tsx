@@ -1,27 +1,15 @@
 import {
   Links,
-  Meta,
   Outlet,
   Scripts,
   ScrollRestoration,
   useLoaderData,
-  type MetaFunction,
 } from "@remix-run/react";
 import { useEffect } from "react";
 import { track } from "~/lib/analytics";
 import type { LinksFunction } from "@remix-run/node";
 import "./tailwind.css";
 import { ToastProvider } from "~/components/Toast";
-
-export const meta: MetaFunction = () => {
-  return [
-    { title: "Fused" },
-    { name: "description", content: "Fused helps teams manage API integrations at usefused.com — generate typed SDKs, webhook receivers, and MCP servers from any API spec in minutes." },
-    { name: "robots", content: "index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" },
-    { name: "author", content: "Fused" },
-    { name: "theme-color", content: "#ffffff" },
-  ];
-};
 
 export const links: LinksFunction = () => [
   { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
@@ -48,20 +36,14 @@ export async function clientLoader() {
 }
 
 export function HydrateFallback() {
+  // Engine's static shell owns the document. Hydrating only #app prevents
+  // route-specific head/preload changes from invalidating SPA hydration.
   return (
-    <html lang="en" className="h-full bg-slate-50">
-      <head>
-        <meta charSet="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <Meta />
-        <Links />
-      </head>
-      <body className="h-full flex items-center justify-center">
-        <div className="text-slate-500">Loading...</div>
-        <script src="/env.js" suppressHydrationWarning />
-        <Scripts />
-      </body>
-    </html>
+    <>
+      <Links />
+      <div className="h-full" />
+      <Scripts />
+    </>
   );
 }
 
@@ -122,45 +104,32 @@ export default function App() {
   }, []);
 
   return (
-    <html lang="en" className="h-full bg-slate-50">
-      <head>
-        <meta charSet="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <Meta />
-        <Links />
-      </head>
-      <body className="h-full">
+    <>
+      <Links />
+      <div className="h-full">
         <ToastProvider>
           <Outlet />
         </ToastProvider>
-        <ScrollRestoration />
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `window.ENV = ${JSON.stringify(data.ENV)}`,
-          }}
-        />
-        <Scripts />
-      </body>
-    </html>
+      </div>
+      <ScrollRestoration />
+      <Scripts />
+    </>
   );
 }
 
 export function ErrorBoundary() {
   return (
-    <html lang="en" className="h-full bg-slate-50">
-      <head>
-        <meta charSet="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <Meta />
-        <Links />
-      </head>
-      <body className="h-full flex items-center justify-center">
-        <div className="text-center">
-          <h1 className="text-2xl font-semibold text-slate-800 mb-2">Something went wrong</h1>
-          <a href="/" className="text-blue-600 underline">Go home</a>
+    <>
+      <Links />
+      <div className="h-full">
+        <div className="h-full flex items-center justify-center text-center">
+          <div>
+            <h1 className="text-2xl font-semibold text-slate-800 mb-2">Something went wrong</h1>
+            <a href="/" className="text-blue-600 underline">Go home</a>
+          </div>
         </div>
-        <Scripts />
-      </body>
-    </html>
+      </div>
+      <Scripts />
+    </>
   );
 }

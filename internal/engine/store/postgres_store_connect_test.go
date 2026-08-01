@@ -371,6 +371,7 @@ type connectAuthFixture struct {
 	bucketB       uuid.UUID
 	serviceID     uuid.UUID
 	artifactID    uuid.UUID
+	ownerTeamID   uuid.UUID
 	accountID     uuid.UUID
 	ownsWorkspace bool
 }
@@ -390,16 +391,18 @@ func setupConnectAuthStore(t *testing.T) connectAuthFixture {
 		cancel()
 		t.Fatalf("failed to connect to DB: %v", err)
 	}
-	accountID, ownsWorkspace := connectAuthWorkspace(t, ctx, pool)
+	workspaceID, accountID, ownsWorkspace := connectAuthWorkspace(t, ctx, pool)
 	fixture := connectAuthFixture{
 		ctx:           ctx,
 		cancel:        cancel,
 		pool:          pool,
 		store:         NewPostgresStore(pool),
+		workspaceID:   workspaceID,
 		bucketA:       uuid.New(),
 		bucketB:       uuid.New(),
 		serviceID:     uuid.New(),
 		artifactID:    uuid.New(),
+		ownerTeamID:   seedArtifactOwnerTeam(t, ctx, pool),
 		accountID:     accountID,
 		ownsWorkspace: ownsWorkspace,
 	}
@@ -419,34 +422,37 @@ func setupConnectAuthStore(t *testing.T) connectAuthFixture {
 func connectAuthWorkspace(t *testing.T, ctx context.Context, pool interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-}) (uuid.UUID, bool) {
+}) (uuid.UUID, uuid.UUID, bool) {
 	t.Helper()
-	var accountID uuid.UUID
-	err := pool.QueryRow(ctx, `SELECT account_id FROM fused_workspaces LIMIT 1`).Scan(&accountID)
+	var workspaceID, accountID uuid.UUID
+	err := pool.QueryRow(ctx, `SELECT id, account_id FROM fused_workspaces LIMIT 1`).Scan(&workspaceID, &accountID)
 	if err == nil {
-		return accountID, false
+		return workspaceID, accountID, false
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("load connect auth workspace: %v", err)
 	}
 	accountID = uuid.New()
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO fused_workspaces (name, account_id, slug, singleton_key) VALUES ($3, $2, $4, 1)
-	`, accountID, "Connect Auth Workspace", "connect-auth-"+uuid.NewString()); err != nil {
+	err = pool.QueryRow(ctx, `
+		INSERT INTO fused_workspaces (name, account_id, slug, singleton_key) VALUES ($1, $2, $3, 1)
+		RETURNING id
+	`, "Connect Auth Workspace", accountID, "connect-auth-"+uuid.NewString()).Scan(&workspaceID)
+	if err != nil {
 		t.Fatalf("seed connect auth workspace: %v", err)
 	}
-	return accountID, true
+	return workspaceID, accountID, true
 }
 
 // cleanupConnectAuthFixture preserves a reused workspace while relying on
 // foreign keys to remove every connection row owned by the test buckets.
 func cleanupConnectAuthFixture(db execer, fixture connectAuthFixture) {
 	ctx := context.Background()
+	_, _ = db.Exec(ctx, `DELETE FROM fused_artifact_scopes WHERE artifact_id = $1`, fixture.artifactID)
+	_, _ = db.Exec(ctx, `DELETE FROM fused_teams WHERE id = $1`, fixture.ownerTeamID)
 	if fixture.ownsWorkspace {
 		_, _ = db.Exec(ctx, `DELETE FROM fused_workspaces WHERE id = $1`, fixture.workspaceID)
 		return
 	}
-	_, _ = db.Exec(ctx, `DELETE FROM fused_artifact_scopes WHERE artifact_id = $1`, fixture.artifactID)
 	_, _ = db.Exec(ctx, `DELETE FROM fused_buckets WHERE id = $1 OR id = $2`, fixture.bucketA, fixture.bucketB)
 	_, _ = db.Exec(ctx, `DELETE FROM fused_workspace_services WHERE service_id = $1`, fixture.serviceID)
 }
@@ -465,8 +471,8 @@ func seedConnectAuthFixture(t *testing.T, db execer, f connectAuthFixture) {
 		t.Fatalf("seed connect auth buckets: %v", err)
 	}
 	if _, err := db.Exec(f.ctx, `
-		INSERT INTO fused_artifact_scopes (account_id, artifact_id, selections) VALUES ($1, $2, '[]')
-	`, f.accountID, f.artifactID); err != nil {
+		INSERT INTO fused_artifact_scopes (account_id, artifact_id, owner_team_id, selections) VALUES ($1, $2, $3, '[]')
+	`, f.accountID, f.artifactID, f.ownerTeamID); err != nil {
 		t.Fatalf("seed connect auth sdk scope: %v", err)
 	}
 	if _, err := db.Exec(f.ctx, `
@@ -680,6 +686,14 @@ func assertCrossBucketDeleteBlocked(t *testing.T, f connectAuthFixture, connID u
 
 func assertConnectionListAndRefreshQuery(t *testing.T, f connectAuthFixture, connAID, connBID uuid.UUID) {
 	t.Helper()
+	connectionsByID, err := f.store.GetAuthConnectionsByIDs(f.ctx, []uuid.UUID{connAID, connBID, connAID})
+	if err != nil {
+		t.Fatalf("GetAuthConnectionsByIDs: %v", err)
+	}
+	if len(connectionsByID) != 2 || connectionsByID[connAID].ID != connAID || connectionsByID[connBID].ID != connBID {
+		t.Fatalf("batched connections = %#v, want both requested IDs once", connectionsByID)
+	}
+
 	serviceFilter := f.serviceID
 	listed, err := f.store.ListAuthConnections(f.ctx, f.bucketA, &serviceFilter, "user_123")
 	if err != nil {

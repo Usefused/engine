@@ -3,10 +3,15 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
 )
 
@@ -76,8 +81,15 @@ func (s *postgresStore) GetBucketsByNames(ctx context.Context, names []string) (
 }
 
 func (s *postgresStore) ListBucketSummaries(ctx context.Context, limit, offset int) ([]BucketSummary, int, error) {
+	return s.ListAuthorizedBucketSummaries(ctx, accesscontrol.AuthorizedScope{All: true}, limit, offset)
+}
+
+func (s *postgresStore) ListAuthorizedBucketSummaries(ctx context.Context, scope accesscontrol.AuthorizedScope, limit, offset int) ([]BucketSummary, int, error) {
+	if !scope.All && len(scope.IDs) == 0 {
+		return nil, 0, nil
+	}
 	var total int
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM fused_buckets`).Scan(&total); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM fused_buckets WHERE $1 OR id = ANY($2::uuid[])`, scope.All, scope.IDs).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	if total == 0 {
@@ -104,10 +116,11 @@ func (s *postgresStore) ListBucketSummaries(ctx context.Context, limit, offset i
 			FROM fused_auth_connections
 			GROUP BY bucket_id
 		) user_counts ON user_counts.bucket_id = b.id
+		WHERE $1 OR b.id = ANY($2::uuid[])
 		ORDER BY b.is_default DESC, b.updated_at DESC, b.created_at DESC
-		LIMIT $1 OFFSET $2
+		LIMIT $3 OFFSET $4
 	`
-	rows, err := s.db.Query(ctx, query, limit, offset)
+	rows, err := s.db.Query(ctx, query, scope.All, scope.IDs, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -207,14 +220,98 @@ func (s *postgresStore) GetBucketByName(ctx context.Context, name string) (*Buck
 	return &b, nil
 }
 
-func (s *postgresStore) DeleteBucket(ctx context.Context, name string) error {
-	query := `DELETE FROM fused_buckets WHERE name = $1 AND is_default = false`
-	tag, err := s.db.Exec(ctx, query, name)
+func (s *postgresStore) DeleteBucket(ctx context.Context, name string, authorizedBucketID uuid.UUID) error {
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.bucket.delete")
+	defer span.End()
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("delete bucket: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := lockAuthorizationState(ctx, tx); err != nil {
+		return err
+	}
+	bucketID, err := deleteBucketTx(ctx, tx, name, authorizedBucketID)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return errors.New("bucket not found or is default")
+	span.SetAttributes(attribute.String("bucket_id", bucketID.String()))
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("delete bucket: commit: %w", err)
+	}
+	return nil
+}
+
+func deleteBucketTx(ctx context.Context, tx pgx.Tx, name string, authorizedBucketID uuid.UUID) (uuid.UUID, error) {
+	bucketID, err := lockAuthorizedBucketForDelete(ctx, tx, name, authorizedBucketID)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if err := ensureBucketUnbound(ctx, tx, bucketID); err != nil {
+		return uuid.Nil, err
+	}
+	bindingTag, err := tx.Exec(ctx, `DELETE FROM fused_role_bindings WHERE resource_type = 'bucket' AND resource_id = $1`, bucketID)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("delete bucket: remove role bindings: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM fused_buckets WHERE id = $1`, bucketID); err != nil {
+		return uuid.Nil, fmt.Errorf("delete bucket: remove bucket: %w", err)
+	}
+	revision, err := bumpAuthorizationRevision(ctx, tx, bindingTag.RowsAffected() > 0)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if err := auditBucketDelete(ctx, tx, bucketID, revision); err != nil {
+		return uuid.Nil, err
+	}
+	return bucketID, nil
+}
+
+func lockAuthorizedBucketForDelete(ctx context.Context, tx pgx.Tx, name string, authorizedBucketID uuid.UUID) (uuid.UUID, error) {
+	var bucketID uuid.UUID
+	var isDefault bool
+	err := tx.QueryRow(ctx, `SELECT id, is_default FROM fused_buckets WHERE name = $1 FOR UPDATE`, name).Scan(&bucketID, &isDefault)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, ErrBucketNotFound
+	}
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("delete bucket: lock: %w", err)
+	}
+	// The route authorized this immutable ID. A same-name replacement must not
+	// inherit that decision while the request is in flight.
+	if bucketID != authorizedBucketID {
+		return uuid.Nil, ErrBucketNotFound
+	}
+	if isDefault {
+		return uuid.Nil, ErrDefaultBucketProtected
+	}
+	return bucketID, nil
+}
+
+func ensureBucketUnbound(ctx context.Context, tx pgx.Tx, bucketID uuid.UUID) error {
+	var bound bool
+	if err := tx.QueryRow(ctx, `SELECT
+		EXISTS (SELECT 1 FROM fused_artifact_buckets WHERE bucket_id = $1)
+		OR EXISTS (SELECT 1 FROM fused_workspace_webhooks WHERE secret_bucket_id = $1)`, bucketID).Scan(&bound); err != nil {
+		return fmt.Errorf("delete bucket: inspect artifact bindings: %w", err)
+	}
+	if bound {
+		return ErrBucketBound
+	}
+	return nil
+}
+
+func auditBucketDelete(ctx context.Context, tx pgx.Tx, bucketID uuid.UUID, revision int64) error {
+	actor, _ := accesscontrol.ActorFromContext(ctx)
+	_, err := tx.Exec(ctx, `
+		INSERT INTO fused_audit_events (actor_subject_id, actor_credential_id, action, permission,
+			resource_type, resource_id, trace_id, outcome, metadata)
+		VALUES ($1, $2, 'bucket.delete', $3, 'bucket', $4, $5, 'succeeded',
+			jsonb_build_object('authorization_revision', $6::bigint, 'changed', true))
+	`, nullableUUID(actor.SubjectID), nullableUUID(actor.CredentialID), accesscontrol.PermissionBucketManage,
+		bucketID, trace.SpanFromContext(ctx).SpanContext().TraceID().String(), revision)
+	if err != nil {
+		return fmt.Errorf("audit bucket delete: %w", err)
 	}
 	return nil
 }
@@ -370,36 +467,22 @@ func (s *postgresStore) DeleteBucketValue(ctx context.Context, bucketID uuid.UUI
 	return err
 }
 
-func (s *postgresStore) LinkBucketToSDK(ctx context.Context, artifactID, bucketID uuid.UUID) error {
-	// The no-op update makes linking the same bucket idempotent in one query,
-	// while the WHERE clause rejects attempts to retarget an existing artifact.
-	var linkedBucketID uuid.UUID
-	err := s.db.QueryRow(ctx, `
-		INSERT INTO fused_artifact_buckets (artifact_id, bucket_id) VALUES ($1, $2)
-		ON CONFLICT (artifact_id) DO UPDATE SET bucket_id = fused_artifact_buckets.bucket_id
-		WHERE fused_artifact_buckets.bucket_id = EXCLUDED.bucket_id
-		RETURNING bucket_id`, artifactID, bucketID).Scan(&linkedBucketID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrSDKBucketImmutable
-	}
-	return err
-}
-
-func (s *postgresStore) UnlinkBucketFromSDK(ctx context.Context, artifactID, bucketID uuid.UUID) error {
-	query := `DELETE FROM fused_artifact_buckets WHERE artifact_id = $1 AND bucket_id = $2`
-	_, err := s.db.Exec(ctx, query, artifactID, bucketID)
-	return err
-}
-
 func (s *postgresStore) ListBucketsForSDK(ctx context.Context, artifactID uuid.UUID) ([]Bucket, error) {
+	return s.ListAuthorizedBucketsForSDK(ctx, artifactID, accesscontrol.AuthorizedScope{All: true})
+}
+
+func (s *postgresStore) ListAuthorizedBucketsForSDK(ctx context.Context, artifactID uuid.UUID, scope accesscontrol.AuthorizedScope) ([]Bucket, error) {
+	if !scope.All && len(scope.IDs) == 0 {
+		return nil, nil
+	}
 	query := `
 		SELECT b.id, b.name, b.is_default, b.created_at, b.updated_at
 		FROM fused_buckets b
 		JOIN fused_artifact_buckets sb ON b.id = sb.bucket_id
-		WHERE sb.artifact_id = $1
+		WHERE sb.artifact_id = $1 AND ($2 OR b.id = ANY($3::uuid[]))
 		ORDER BY b.created_at ASC
 	`
-	rows, err := s.db.Query(ctx, query, artifactID)
+	rows, err := s.db.Query(ctx, query, artifactID, scope.All, scope.IDs)
 	if err != nil {
 		return nil, err
 	}
@@ -417,19 +500,26 @@ func (s *postgresStore) ListBucketsForSDK(ctx context.Context, artifactID uuid.U
 }
 
 func (s *postgresStore) ListArtifactScopesForBucket(ctx context.Context, bucketID uuid.UUID, limit, offset int) ([]ArtifactScope, int, error) {
+	return s.ListAuthorizedArtifactScopesForBucket(ctx, bucketID, accesscontrol.AuthorizedScope{All: true}, limit, offset)
+}
+
+func (s *postgresStore) ListAuthorizedArtifactScopesForBucket(ctx context.Context, bucketID uuid.UUID, scope accesscontrol.AuthorizedScope, limit, offset int) ([]ArtifactScope, int, error) {
+	if !scope.All && len(scope.IDs) == 0 {
+		return nil, 0, nil
+	}
 	var total int
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM fused_artifact_buckets WHERE bucket_id = $1`, bucketID).Scan(&total); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM fused_artifact_buckets WHERE bucket_id = $1 AND ($2 OR artifact_id = ANY($3::uuid[]))`, bucketID, scope.All, scope.IDs).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	query := `
 		SELECT ` + artifactScopeSelectColumns + `
 		FROM fused_artifact_scopes s
 		JOIN fused_artifact_buckets b ON s.artifact_id = b.artifact_id
-		WHERE b.bucket_id = $1
+		WHERE b.bucket_id = $1 AND ($2 OR s.artifact_id = ANY($3::uuid[]))
 		ORDER BY s.created_at DESC
-		LIMIT $2 OFFSET $3
+		LIMIT $4 OFFSET $5
 	`
-	rows, err := s.db.Query(ctx, query, bucketID, limit, offset)
+	rows, err := s.db.Query(ctx, query, bucketID, scope.All, scope.IDs, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}

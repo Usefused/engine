@@ -86,6 +86,51 @@ func (s *postgresStore) GetEffectiveWorkspaceExecutionPolicyOverride(ctx context
 	return override, err
 }
 
+func (s *postgresStore) GetEffectiveWorkspaceExecutionPolicyOverrides(ctx context.Context, refs []WorkspaceExecutionPolicyRef) (map[WorkspaceExecutionPolicyRef]*WorkspaceExecutionPolicyOverride, error) {
+	result := make(map[WorkspaceExecutionPolicyRef]*WorkspaceExecutionPolicyOverride, len(refs))
+	if len(refs) == 0 {
+		return result, nil
+	}
+	serviceIDs := make([]uuid.UUID, len(refs))
+	versionIDs := make([]uuid.UUID, len(refs))
+	for i, ref := range refs {
+		serviceIDs[i], versionIDs[i] = ref.ServiceID, ref.ServiceVersionID
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT input.service_id, input.service_version_id,
+		       policy.id, policy.service_id, policy.service_version_id,
+		       policy.rate_limit, policy.retry_config, policy.pagination,
+		       policy.event_extraction_path, policy.incoming_webhook_config,
+		       policy.base_url, policy.created_at, policy.updated_at
+		FROM unnest($1::uuid[], $2::uuid[]) AS input(service_id, service_version_id)
+		JOIN LATERAL (
+			SELECT * FROM fused_workspace_execution_policies candidate
+			WHERE candidate.service_id = input.service_id
+			  AND (candidate.service_version_id = input.service_version_id OR candidate.service_version_id IS NULL)
+			ORDER BY candidate.service_version_id NULLS LAST LIMIT 1
+		) policy ON TRUE`, serviceIDs, versionIDs)
+	if err != nil {
+		return nil, fmt.Errorf("GetEffectiveWorkspaceExecutionPolicyOverrides: query: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ref WorkspaceExecutionPolicyRef
+		var override WorkspaceExecutionPolicyOverride
+		var rateLimit, retryConfig, pagination, incomingWebhookConfig []byte
+		if err := rows.Scan(&ref.ServiceID, &ref.ServiceVersionID,
+			&override.ID, &override.ServiceID, &override.ServiceVersionID,
+			&rateLimit, &retryConfig, &pagination, &override.EventExtractionPath,
+			&incomingWebhookConfig, &override.BaseURL, &override.CreatedAt, &override.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if err := decodeWorkspaceExecutionPolicyJSON(&override, rateLimit, retryConfig, pagination, incomingWebhookConfig); err != nil {
+			return nil, err
+		}
+		result[ref] = &override
+	}
+	return result, rows.Err()
+}
+
 // ResetWorkspaceExecutionPolicyOverride deletes exactly the tier identified
 // by serviceVersionID (nil for the service-default row), leaving the other
 // tier -- if any -- untouched.
@@ -117,19 +162,26 @@ func scanWorkspaceExecutionPolicyOverride(row interface{ Scan(...any) error }) (
 	if err != nil {
 		return nil, err
 	}
-	if err := unmarshalIfPresent(rateLimit, &override.RateLimit); err != nil {
-		return nil, fmt.Errorf("decode rate_limit: %w", err)
-	}
-	if err := unmarshalIfPresent(retryConfig, &override.RetryConfig); err != nil {
-		return nil, fmt.Errorf("decode retry_config: %w", err)
-	}
-	if err := unmarshalIfPresent(pagination, &override.Pagination); err != nil {
-		return nil, fmt.Errorf("decode pagination: %w", err)
-	}
-	if err := unmarshalIfPresent(incomingWebhookConfig, &override.IncomingWebhookConfig); err != nil {
-		return nil, fmt.Errorf("decode incoming_webhook_config: %w", err)
+	if err := decodeWorkspaceExecutionPolicyJSON(&override, rateLimit, retryConfig, pagination, incomingWebhookConfig); err != nil {
+		return nil, err
 	}
 	return &override, nil
+}
+
+func decodeWorkspaceExecutionPolicyJSON(override *WorkspaceExecutionPolicyOverride, rateLimit, retryConfig, pagination, incomingWebhookConfig []byte) error {
+	if err := unmarshalIfPresent(rateLimit, &override.RateLimit); err != nil {
+		return fmt.Errorf("decode rate_limit: %w", err)
+	}
+	if err := unmarshalIfPresent(retryConfig, &override.RetryConfig); err != nil {
+		return fmt.Errorf("decode retry_config: %w", err)
+	}
+	if err := unmarshalIfPresent(pagination, &override.Pagination); err != nil {
+		return fmt.Errorf("decode pagination: %w", err)
+	}
+	if err := unmarshalIfPresent(incomingWebhookConfig, &override.IncomingWebhookConfig); err != nil {
+		return fmt.Errorf("decode incoming_webhook_config: %w", err)
+	}
+	return nil
 }
 
 // unmarshalIfPresent leaves dst (a **T field) nil when the stored column was
