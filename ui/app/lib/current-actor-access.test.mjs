@@ -41,7 +41,8 @@ test("access routes gate reads before mounting data loaders and gate management 
     assert.match(route, /WorkspacePermissionGate permission="access\.read"/);
     assert.match(route, /hasWorkspacePermission\(access, "access\.manage"\)/);
   }
-  assert.match(people, /canManage && <InvitePersonForm/);
+  assert.match(people, /canManage && <AddPersonForm/);
+  assert.match(people, /if \(status === "INVITED"\) return "Sign-in key required"/);
 	assert.match(people, /hasWorkspacePermission\(access, "account\.manage"\)/);
 	assert.match(people, /setSelectedOwnerProtected\(user\.owner_protected\)/);
 	assert.match(people, /canManageOwners \|\| !selectedOwnerProtected/);

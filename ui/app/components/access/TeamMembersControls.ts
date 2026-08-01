@@ -20,7 +20,7 @@ export function TeamMembersControls(props: TeamMembersControlsProps): ReactEleme
   return createElement("section", { className: "mt-6 rounded-lg border border-slate-200 overflow-hidden", "data-component": "team-members-controls" },
     createElement("div", { className: "bg-slate-50 px-4 py-3 border-b border-slate-200" },
       createElement("h3", { className: "text-sm font-semibold text-slate-900" }, "People"),
-      createElement("p", { className: "text-xs text-slate-500 mt-0.5" }, "Add by email. A new person is invited automatically.")),
+      createElement("p", { className: "text-xs text-slate-500 mt-0.5" }, "Add by email. If they are new, a person record is created without sending an email. They need a personal key to sign in.")),
     createElement("form", { onSubmit: submit, className: "grid gap-2 p-4 sm:grid-cols-[1fr_130px_auto] border-b border-slate-100" },
       createElement("input", { type: "email", value: email, onChange: (event) => setEmail(event.target.value), disabled: props.disabled, required: true, placeholder: "person@example.com", "aria-label": "Member email", className: "rounded-lg border border-slate-300 px-3 py-2 text-sm" }),
       createElement("select", { value: role, onChange: (event: ChangeEvent<HTMLSelectElement>) => setRole(event.target.value as TeamMembershipRole), disabled: props.disabled, "aria-label": "Membership role", className: "rounded-lg border border-slate-300 px-2 py-2 text-sm" },
