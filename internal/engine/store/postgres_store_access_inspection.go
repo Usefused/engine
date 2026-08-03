@@ -82,6 +82,9 @@ requester_principals(subject_type, subject_id) AS (
 	JOIN fused_subjects subject ON subject.id = membership.member_subject_id AND subject.status = 'active'
 	JOIN fused_teams team ON team.id = membership.team_id AND team.status = 'active'
 	WHERE membership.member_subject_id = $1
+	UNION ALL
+	SELECT 'workspace'::text, workspace.id FROM workspace
+	JOIN fused_subjects subject ON subject.id = $1 AND subject.status = 'active'
 ), requester_grants AS (
 	SELECT permission.permission, binding.resource_type, binding.resource_id
 	FROM requester_principals principal
@@ -100,6 +103,9 @@ requester_principals(subject_type, subject_id) AS (
 	JOIN fused_subjects subject ON subject.id = membership.member_subject_id AND subject.status = 'active'
 	JOIN fused_teams team ON team.id = membership.team_id AND team.status = 'active'
 	WHERE membership.member_subject_id = $2
+	UNION ALL
+	SELECT 'workspace'::text, workspace.id FROM workspace
+	JOIN fused_subjects subject ON subject.id = $2 AND subject.status = 'active'
 ), matching AS (
 	SELECT principal.subject_type, principal.subject_id, team.name, role.slug, binding.resource_type, binding.resource_id
 	FROM target_principals principal

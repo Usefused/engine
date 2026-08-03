@@ -31,6 +31,14 @@ func (s *cachedStore) GetTeam(ctx context.Context, teamID uuid.UUID) (Team, erro
 	return repository.GetTeam(ctx, teamID)
 }
 
+func (s *cachedStore) GetTeamBySlug(ctx context.Context, slug string) (Team, error) {
+	repository, err := s.teamRepository()
+	if err != nil {
+		return Team{}, err
+	}
+	return repository.GetTeamBySlug(ctx, slug)
+}
+
 func (s *cachedStore) ListTeams(ctx context.Context, options TeamListOptions) ([]Team, int, error) {
 	repository, err := s.teamRepository()
 	if err != nil {

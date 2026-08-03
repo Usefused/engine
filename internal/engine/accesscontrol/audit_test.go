@@ -43,6 +43,21 @@ func TestAuditEventValidation(t *testing.T) {
 	}
 }
 
+func TestSanitizeAuditMetadataAllowsArtifactOwnerIdentity(t *testing.T) {
+	ownerID := uuid.NewString()
+	metadata, err := SanitizeAuditMetadata(map[string]any{
+		"owner_type": "team",
+		"owner_id":   ownerID,
+		"changed":    true,
+	})
+	if err != nil {
+		t.Fatalf("sanitize artifact owner metadata: %v", err)
+	}
+	if metadata["owner_type"] != "team" || metadata["owner_id"] != ownerID {
+		t.Fatalf("artifact owner metadata = %#v", metadata)
+	}
+}
+
 func TestAuditEventBoundsMissingRequirements(t *testing.T) {
 	resource := ResourceRef{Type: ResourceWorkspace, ID: uuid.New()}
 	missing := make([]Requirement, MaxAuditMissingRequirements)

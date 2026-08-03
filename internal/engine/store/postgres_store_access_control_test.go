@@ -11,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
-	"github.com/Usefused/engine/internal/shared/db"
 )
 
 func TestPostgresAccessControlBootstrapAndAuthentication(t *testing.T) {
@@ -137,6 +136,107 @@ func TestPostgresAccessControlBootstrapAndAuthentication(t *testing.T) {
 	event.Metadata = map[string]any{"api_key": "must-not-persist"}
 	if err := repository.RecordAuthorizationAudit(ctx, event); !errors.Is(err, accesscontrol.ErrUnsafeAuditMetadata) {
 		t.Fatalf("unsafe audit error = %v", err)
+	}
+}
+
+func TestPostgresWorkspaceShareGrantsUsersAndOwningTeamsBoundedUse(t *testing.T) {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("DATABASE_URL not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool := isolatedBootstrapPool(t, ctx, databaseURL)
+	defer pool.Close()
+	repository := NewPostgresStore(pool).(*postgresStore)
+
+	accountID := uuid.New()
+	workspaceID, err := repository.BootstrapWorkspace(ctx, accountID, "Workspace share test")
+	if err != nil {
+		t.Fatalf("BootstrapWorkspace: %v", err)
+	}
+	owner, err := accesscontrol.BootstrapOwner(ctx, repository, accountID, "test-control-credential-workspace-share")
+	if err != nil {
+		t.Fatalf("BootstrapOwner: %v", err)
+	}
+	actor := MutationActor{SubjectID: owner.SubjectID, CredentialID: owner.CredentialID, RequestID: "workspace-share-integration", TraceID: "0123456789abcdef0123456789abcdef"}
+	userResult, err := repository.CreateUser(ctx, CreateUserInput{Email: "staff@example.com", DisplayName: "Staff", Actor: actor})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	credential, err := repository.IssueUserControlCredential(ctx, IssueCredentialInput{UserID: userResult.User.ID, Name: "test", Actor: actor})
+	if err != nil {
+		t.Fatalf("IssueUserControlCredential: %v", err)
+	}
+	teamResult, err := repository.CreateTeam(ctx, TeamMutation{Name: "Applications", Slug: "applications", Actor: actor})
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	if _, err := repository.AddTeamMember(ctx, TeamMemberMutation{TeamID: teamResult.Team.ID, UserID: userResult.User.ID, Role: MembershipRoleMember, Actor: actor}); err != nil {
+		t.Fatalf("AddTeamMember: %v", err)
+	}
+	if _, err := repository.AddTeamBinding(ctx, TeamBindingMutation{TeamID: teamResult.Team.ID, RoleSlug: accesscontrol.RoleBuilder,
+		Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}, Actor: actor}); err != nil {
+		t.Fatalf("AddTeamBinding(builder): %v", err)
+	}
+	bucket, err := repository.CreateBucket(ctx, "company", false)
+	if err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	requirements := []accesscontrol.Requirement{
+		{Permission: accesscontrol.PermissionArtifactCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
+		{Permission: accesscontrol.PermissionBucketUse, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: bucket.ID}},
+	}
+	before, err := repository.PreflightArtifactOwnership(ctx, ArtifactOwnershipPreflight{ActorSubjectID: userResult.User.ID, OwnerTeamID: teamResult.Team.ID, Requirements: requirements})
+	if err != nil || before.Allowed {
+		t.Fatalf("pre-share decision = %#v, %v; want denied", before, err)
+	}
+
+	grant, err := repository.GrantWorkspaceShare(ctx, WorkspaceShareMutation{Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: bucket.ID}, Actor: actor})
+	if err != nil || !grant.Changed || grant.Share.RoleSlug != accesscontrol.RoleBucketUser {
+		t.Fatalf("GrantWorkspaceShare = %#v, %v", grant, err)
+	}
+	idempotent, err := repository.GrantWorkspaceShare(ctx, WorkspaceShareMutation{Resource: grant.Share.Resource, Actor: actor})
+	if err != nil || idempotent.Changed {
+		t.Fatalf("idempotent GrantWorkspaceShare = %#v, %v", idempotent, err)
+	}
+	principal, err := repository.LoadControlPrincipal(ctx, accesscontrol.HashControlCredential(credential.RawKey))
+	if err != nil {
+		t.Fatalf("LoadControlPrincipal: %v", err)
+	}
+	snapshot, err := accesscontrol.NewAuthorizationSnapshot(principal.Revision, principal.EffectiveGrants...)
+	if err != nil {
+		t.Fatalf("NewAuthorizationSnapshot: %v", err)
+	}
+	bucketRequirement := requirements[1]
+	if err := (accesscontrol.SnapshotAuthorizer{}).CheckAll(ctx, accesscontrol.Actor{Authorization: snapshot}, bucketRequirement); err != nil {
+		t.Fatalf("workspace-shared bucket permission: %v", err)
+	}
+	after, err := repository.PreflightArtifactOwnership(ctx, ArtifactOwnershipPreflight{ActorSubjectID: userResult.User.ID, OwnerTeamID: teamResult.Team.ID, Requirements: requirements})
+	if err != nil || !after.Allowed || len(after.ActorMissing) != 0 || len(after.TeamMissing) != 0 {
+		t.Fatalf("post-share decision = %#v, %v; want allowed", after, err)
+	}
+	shares, total, err := repository.ListWorkspaceShares(ctx, WorkspaceShareListOptions{Limit: 20})
+	if err != nil || total != 1 || len(shares) != 1 || shares[0].Resource.ID != bucket.ID {
+		t.Fatalf("ListWorkspaceShares = %#v/%d, %v", shares, total, err)
+	}
+	inactiveArtifactID := uuid.New()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO fused_artifact_scopes
+			(account_id, artifact_id, owner_subject_id, scope_schema_version, selections, kind, name, version, deactivated_at)
+		VALUES ($1, $2, $3, 1, '[]', 'sdk', 'Retired SDK', '1.0.0', NOW())
+	`, accountID, inactiveArtifactID, owner.SubjectID); err != nil {
+		t.Fatalf("insert inactive artifact: %v", err)
+	}
+	_, err = repository.GrantWorkspaceShare(ctx, WorkspaceShareMutation{
+		Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceArtifact, ID: inactiveArtifactID}, Actor: actor,
+	})
+	if !errors.Is(err, ErrInvalidWorkspaceShare) {
+		t.Fatalf("inactive artifact share error = %v, want ErrInvalidWorkspaceShare", err)
+	}
+	var auditCount int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM fused_audit_events WHERE action = 'workspace.share.grant' AND resource_id = $1`, bucket.ID).Scan(&auditCount); err != nil || auditCount != 2 {
+		t.Fatalf("workspace share audit count = %d, %v; want one changed and one idempotent attempt", auditCount, err)
 	}
 }
 
@@ -360,32 +460,9 @@ func accessControlTestRepository(t *testing.T) (context.Context, context.CancelF
 		t.Skip("DATABASE_URL not set")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	pool, err := db.InitEnginePostgres(ctx, dbURL)
-	if err != nil {
-		cancel()
-		t.Fatalf("InitEnginePostgres: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `
-		DELETE FROM fused_config_plans;
-		DELETE FROM fused_config_states;
-		DELETE FROM fused_artifact_buckets;
-		DELETE FROM fused_artifact_tokens;
-		DELETE FROM fused_artifact_scopes;
-		DELETE FROM fused_audit_events;
-		DELETE FROM fused_role_bindings;
-		DELETE FROM fused_role_permissions;
-		DELETE FROM fused_control_credentials;
-		DELETE FROM fused_team_memberships;
-		DELETE FROM fused_teams;
-		DELETE FROM fused_roles;
-		DELETE FROM fused_users;
-		DELETE FROM fused_subjects;
-		DELETE FROM fused_workspaces;
-		UPDATE fused_authorization_state SET revision = 1, updated_at = NOW() WHERE singleton_key = 1;
-	`); err != nil {
-		pool.Close()
-		cancel()
-		t.Fatalf("reset access-control tables: %v", err)
-	}
+	// Access-control tests mutate nearly every authorization table. A dedicated
+	// schema keeps those decisions deterministic without erasing a developer's
+	// local workspace or coupling this suite to legacy table state.
+	pool := isolatedBootstrapPool(t, ctx, dbURL)
 	return ctx, cancel, pool, NewPostgresStore(pool).(*postgresStore)
 }

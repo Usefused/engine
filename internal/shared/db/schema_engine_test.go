@@ -51,12 +51,50 @@ func TestEngineSchemaEnforcesImmutableConfigIdentity(t *testing.T) {
 	for _, expected := range []string{
 		"fused_reject_config_identity_change",
 		"OLD.config_type IS DISTINCT FROM NEW.config_type",
+		"OLD.owner_subject_id IS DISTINCT FROM NEW.owner_subject_id",
 		"OLD.owner_team_id IS DISTINCT FROM NEW.owner_team_id",
 		"trg_fused_config_identity_immutable",
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("expected immutable config identity schema containing %q", expected)
 		}
+	}
+}
+
+func TestEngineSchemaRequiresExactlyOneArtifactOwner(t *testing.T) {
+	schema := strings.Join(engineSchemaQueries(), "\n")
+	for _, expected := range []string{
+		"owner_subject_id  uuid REFERENCES fused_subjects(id) ON DELETE RESTRICT",
+		"(owner_subject_id IS NOT NULL)::int + (owner_team_id IS NOT NULL)::int = 1",
+		"idx_fused_artifact_scopes_subject_owner_kind",
+		"idx_fused_config_plans_subject_owner_status",
+	} {
+		if !strings.Contains(schema, expected) {
+			t.Fatalf("clean schema must contain subject-or-team ownership rule %q", expected)
+		}
+	}
+	if strings.Contains(strings.Join(engineMigrationQueries(), "\n"), "owner_subject_id") {
+		t.Fatal("subject ownership belongs in the clean schema, not a legacy migration")
+	}
+}
+
+func TestEngineSchemaUsesKindScopedHumanArtifactIdentity(t *testing.T) {
+	schema := strings.Join(engineSchemaQueries(), "\n")
+	if !strings.Contains(schema, "ON fused_artifact_scopes(kind, lower(name), COALESCE(version, ''))") {
+		t.Fatal("clean schema must bound SDK and MCP identities independently by name and version")
+	}
+	if !strings.Contains(schema, "idx_fused_artifact_reference_latest") {
+		t.Fatal("clean schema must index latest active artifact resolution")
+	}
+}
+
+func TestEngineSchemaSupportsWorkspaceResourcePrincipalsWithoutLegacyMigration(t *testing.T) {
+	schema := strings.Join(engineSchemaQueries(), "\n")
+	if !strings.Contains(schema, "subject_type IN ('subject', 'team', 'workspace')") {
+		t.Fatal("clean schema must allow workspace-wide resource bindings")
+	}
+	if strings.Contains(strings.Join(engineMigrationQueries(), "\n"), "chk_fused_role_bindings_subject_type") {
+		t.Fatal("workspace principals belong in the clean schema, not a legacy migration")
 	}
 }
 

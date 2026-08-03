@@ -125,6 +125,40 @@ Once running, you can access the Admin Dashboard and Engine API at `http://local
 
 Install `fused-cli` from the [CLI releases](https://github.com/Usefused/cli/releases), then point it at this Engine with `fused-cli config set engine-url <engine-url>`.
 
+`FUSED_LICENSE_KEY` is also the bootstrap Owner credential for a new local
+workspace. Small teams can use it directly without first configuring RBAC.
+When personal or service credentials are introduced, set them through
+`FUSED_API_KEY`; the CLI prefers that attributable credential over the license
+key for local Engine commands. Engine continues to use the license key for its
+own Registry traffic, so Registry and local user identity do not need to match.
+
+SDK and MCP lifecycle commands are deliberately separate:
+
+```bash
+# Generate and optionally download a typed code package.
+fused-cli sdk plan -f .fused/sdks/customer-support.yaml
+fused-cli sdk apply -f .fused/sdks/customer-support.yaml --download
+
+# Deploy an Engine-hosted MCP server. This does not produce downloadable code.
+fused-cli mcp plan -f .fused/mcps/customer-support.yaml
+fused-cli mcp apply -f .fused/mcps/customer-support.yaml
+```
+
+Plans default to personal ownership. Pass an owning team slug when a central
+team should manage the SDK, MCP server, or webhook, for example
+`fused-cli sdk plan --owner-team platform`. Ownership is fixed by the plan and
+cannot be changed during apply; workspace-wide use is granted separately, so a
+centrally owned SDK or MCP server can be used broadly without making every
+workspace member its manager.
+
+SDK and MCP names resolve within their own kind, so both may use the same
+`name@version`. Full UUIDs are also verified against the requested kind rather
+than bypassing that boundary. The access-control API still calls their shared
+RBAC/storage resource `artifact`; that internal label does not merge the SDK
+and MCP product surfaces. If a generic access command sees the same identity in
+both kinds, use the full UUID shown by `fused-cli sdk list` or `fused-cli mcp
+list`.
+
 ## Configuration
 
 You can configure the Engine via a YAML configuration file (`engine.yaml`), environment variables, or CLI flags. CLI Flags always take the highest precedence.

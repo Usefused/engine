@@ -13,7 +13,7 @@ import (
 
 var (
 	ErrArtifactOwnershipDenied      = errors.New("artifact ownership authorization denied")
-	ErrArtifactOwnerTeamMismatch    = errors.New("artifact owner team is immutable")
+	ErrArtifactOwnerMismatch        = errors.New("artifact owner is immutable")
 	ErrInvalidArtifactAccessRequest = errors.New("invalid artifact access request")
 )
 
@@ -61,6 +61,11 @@ type ActorTeamSelectorQuery struct {
 	Offset         int
 }
 
+type ArtifactOwningTeamReferenceQuery struct {
+	ActorSubjectID uuid.UUID
+	Reference      string
+}
+
 type ArtifactOwningTeam struct {
 	ID   uuid.UUID
 	Name string
@@ -76,6 +81,7 @@ type ArtifactAccessRepository interface {
 	PreflightArtifactOwnership(context.Context, ArtifactOwnershipPreflight) (ArtifactOwnershipDecision, error)
 	ListArtifactBuildSelectors(context.Context, ArtifactSelectorQuery) (ArtifactSelectorPage, error)
 	ListArtifactOwningTeams(context.Context, ActorTeamSelectorQuery) (ArtifactOwningTeamPage, error)
+	ResolveArtifactOwningTeamReference(context.Context, ArtifactOwningTeamReferenceQuery) (uuid.UUID, error)
 }
 
 func validateOwnershipPreflight(input ArtifactOwnershipPreflight) error {
@@ -97,7 +103,7 @@ func validateOwnershipPreflight(input ArtifactOwnershipPreflight) error {
 }
 
 func validateSelectorQuery(input ArtifactSelectorQuery) error {
-	if input.ActorSubjectID == uuid.Nil || input.OwnerTeamID == uuid.Nil || input.Limit < 1 || input.Limit > 200 || input.Offset < 0 {
+	if input.ActorSubjectID == uuid.Nil || input.Limit < 1 || input.Limit > 200 || input.Offset < 0 {
 		return ErrInvalidArtifactAccessRequest
 	}
 	if input.ResourceType != accesscontrol.ResourceService && input.ResourceType != accesscontrol.ResourceBucket {
@@ -114,6 +120,13 @@ func validateOwningTeamQuery(input ActorTeamSelectorQuery) error {
 		return ErrInvalidArtifactAccessRequest
 	}
 	if strings.TrimSpace(input.Search) != input.Search || len(input.Search) > 100 {
+		return ErrInvalidArtifactAccessRequest
+	}
+	return nil
+}
+
+func validateOwningTeamReferenceQuery(input ArtifactOwningTeamReferenceQuery) error {
+	if input.ActorSubjectID == uuid.Nil || strings.TrimSpace(input.Reference) != input.Reference || input.Reference == "" || len(input.Reference) > 100 {
 		return ErrInvalidArtifactAccessRequest
 	}
 	return nil

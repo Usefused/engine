@@ -40,6 +40,10 @@ func (s *postgresStore) LoadControlPrincipal(ctx context.Context, credentialHash
 			FROM authenticated actor
 			JOIN fused_team_memberships membership ON membership.member_subject_id = actor.subject_id
 			JOIN fused_teams team ON team.id = membership.team_id AND team.status = 'active'
+			UNION ALL
+			-- Workspace shares are another principal so cached authorization still
+			-- resolves the complete permission set in one database round trip.
+			SELECT 'workspace'::text, workspace_id FROM authenticated
 		), effective_grants AS (
 			SELECT DISTINCT permission.permission, binding.resource_type, binding.resource_id
 			FROM principals principal

@@ -23,7 +23,7 @@ func (s *postgresStore) IssueUserControlCredential(ctx context.Context, input Is
 	if err != nil {
 		return IssuedControlCredential{}, recordTeamSpanError(span, err)
 	}
-	tx, err := s.beginTeamMutation(ctx, input.Actor)
+	tx, err := s.beginAccessMutation(ctx, input.Actor)
 	if err != nil {
 		return IssuedControlCredential{}, recordTeamSpanError(span, err)
 	}
@@ -91,7 +91,7 @@ func (s *postgresStore) RevokeUserControlCredential(ctx context.Context, userID,
 	if userID == uuid.Nil || credentialID == uuid.Nil || validateMutationActor(actor) != nil {
 		return CredentialMutationResult{}, ErrInvalidControlCredential
 	}
-	tx, err := s.beginTeamMutation(ctx, actor)
+	tx, err := s.beginAccessMutation(ctx, actor)
 	if err != nil {
 		return CredentialMutationResult{}, recordTeamSpanError(span, err)
 	}

@@ -14,6 +14,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 )
 
 type leaseQueryCall struct {
@@ -222,6 +224,35 @@ func TestConfigRepositoryPostgres(t *testing.T) {
 	}
 
 	repo := NewPostgresConfigRepository(pool)
+	bootstrapRepository, ok := store.(accesscontrol.BootstrapRepository)
+	if !ok {
+		t.Fatal("postgres store does not support bootstrap ownership")
+	}
+	bootstrap, err := accesscontrol.BootstrapOwner(ctx, bootstrapRepository, accountID, "fsk_config_subject_"+uuid.NewString())
+	if err != nil {
+		t.Fatalf("BootstrapOwner: %v", err)
+	}
+	t.Run("subject-owned artifact plan applies atomically", func(t *testing.T) {
+		configKey := "mcp:subject-owned:" + uuid.NewString()
+		plan, err := repo.CreateConfigPlan(ctx, CreateConfigPlanParams{
+			ConfigKey: configKey, ConfigType: ConfigTypeMCP, OwnerSubjectID: &bootstrap.SubjectID,
+			SourceHash: "sha256:subject-owner", RequiredPermissions: requiredPermissions, CreatedBy: accountID,
+		})
+		if err != nil {
+			t.Fatalf("CreateConfigPlan(subject): %v", err)
+		}
+		artifactID := uuid.New()
+		state, err := repo.ApplyConfigPlan(ctx, ApplyConfigPlanParams{
+			State:  UpsertConfigStateParams{ConfigKey: configKey, ConfigType: ConfigTypeMCP, SourceHash: plan.SourceHash, LatestResourceID: &artifactID, UpdatedBy: accountID},
+			PlanID: plan.ID, BaseGeneration: plan.BaseGeneration, ExpectedRevision: plan.Revision,
+		})
+		if err != nil {
+			t.Fatalf("ApplyConfigPlan(subject): %v", err)
+		}
+		if state.OwnerSubjectID == nil || *state.OwnerSubjectID != bootstrap.SubjectID || state.OwnerTeamID != nil {
+			t.Fatalf("applied subject owner = %#v", state)
+		}
+	})
 	t.Run("database rejects an empty webhook owner", func(t *testing.T) {
 		_, err := pool.Exec(ctx, `
 			INSERT INTO fused_workspace_webhooks
@@ -381,18 +412,14 @@ func TestConfigRepositoryPostgres(t *testing.T) {
 		if state.ConfigType != ConfigTypeMCP || state.LatestResourceID == nil || *state.LatestResourceID != runtimeID || state.OwnerTeamID == nil || *state.OwnerTeamID != ownerTeamID {
 			t.Fatalf("unexpected applied state: %#v", state)
 		}
-		resolvedOwner, err := repo.ResolveArtifactOwnerTeam(ctx, plan.ConfigKey)
-		if err != nil || resolvedOwner != ownerTeamID {
-			t.Fatalf("ResolveArtifactOwnerTeam = %s, %v", resolvedOwner, err)
-		}
 		otherTeamID := uuid.New()
 		if _, err := pool.Exec(ctx, `INSERT INTO fused_teams (id, name, slug) VALUES ($1, 'Other owners', $2)`, otherTeamID, "other-owners-"+otherTeamID.String()); err != nil {
 			t.Fatalf("create other owner team: %v", err)
 		}
 		_, err = repo.CreateConfigPlan(ctx, CreateConfigPlanParams{ConfigKey: plan.ConfigKey, ConfigType: ConfigTypeMCP,
 			OwnerTeamID: &otherTeamID, SourceHash: "sha256:forged-owner", RequiredPermissions: requiredPermissions, CreatedBy: accountID, SupersedeExisting: true})
-		if !errors.Is(err, ErrArtifactOwnerTeamMismatch) {
-			t.Fatalf("owner replacement error = %v, want ErrArtifactOwnerTeamMismatch", err)
+		if !errors.Is(err, ErrArtifactOwnerMismatch) {
+			t.Fatalf("owner replacement error = %v, want ErrArtifactOwnerMismatch", err)
 		}
 	})
 
@@ -957,7 +984,7 @@ func TestConfigRepositoryPostgres(t *testing.T) {
 			Registrations:  []WorkspaceWebhook{{ServiceID: serviceID, ServiceVersionID: uuid.New(), Label: "archived", Slug: "archived-" + uuid.NewString(), OwningConfigKey: ownerKey}},
 			KeepServiceIDs: []uuid.UUID{serviceID},
 		})
-		if !errors.Is(err, ErrConfigOwnerTeamInactive) {
+		if !errors.Is(err, ErrConfigOwnerInactive) {
 			t.Fatalf("ApplyWebhookConfigPlan error = %v, want inactive owner", err)
 		}
 		var count int

@@ -55,6 +55,43 @@ func TestFetchServiceVersionAuthConfigsUsesGraphQLBatch(t *testing.T) {
 	}
 }
 
+func TestPublishExecutionPoliciesUseRegistryRESTOrigin(t *testing.T) {
+	serviceID := uuid.New()
+	requests := make([]string, 0, 2)
+	client := &HTTPRegistryClient{
+		endpoint:   "https://registry.example/graphql/",
+		licenseKey: "engine-license-key",
+		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			requests = append(requests, request.URL.Path)
+			if request.Method != http.MethodPut || request.Header.Get("X-API-Key") != "engine-license-key" {
+				t.Fatalf("unexpected policy request: %s %s", request.Method, request.Header.Get("X-API-Key"))
+			}
+			return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Header: make(http.Header)}, nil
+		})},
+	}
+
+	if err := client.PublishServiceExecutionPolicy(context.Background(), serviceID, map[string]any{"allow": true}, "user-api-key"); err != nil {
+		t.Fatalf("PublishServiceExecutionPolicy() error = %v", err)
+	}
+	if err := client.PublishServiceVersionExecutionPolicy(context.Background(), serviceID, "2026-08-03", map[string]any{"allow": true}, "user-api-key"); err != nil {
+		t.Fatalf("PublishServiceVersionExecutionPolicy() error = %v", err)
+	}
+	want := []string{
+		"/integrations/" + serviceID.String() + "/execution-policy",
+		"/integrations/" + serviceID.String() + "/versions/2026-08-03/execution-policy",
+	}
+	if len(requests) != len(want) || requests[0] != want[0] || requests[1] != want[1] {
+		t.Fatalf("policy paths = %#v, want %#v", requests, want)
+	}
+}
+
+func TestRegistryBaseURLPreservesNonGraphQLBasePath(t *testing.T) {
+	client := &HTTPRegistryClient{endpoint: "https://registry.example/api"}
+	if got := client.registryBaseURL(); got != "https://registry.example/api" {
+		t.Fatalf("registryBaseURL() = %q", got)
+	}
+}
+
 func TestFetchServiceMetadataBatchUsesOneAliasedGraphQLRequest(t *testing.T) {
 	first, second := uuid.New(), uuid.New()
 	requestCount := 0

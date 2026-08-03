@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"errors"
+
+	"github.com/google/uuid"
 )
 
 func (s *cachedStore) artifactAccessRepository() (ArtifactAccessRepository, error) {
@@ -35,6 +37,14 @@ func (s *cachedStore) ListArtifactOwningTeams(ctx context.Context, input ActorTe
 		return ArtifactOwningTeamPage{}, err
 	}
 	return repository.ListArtifactOwningTeams(ctx, input)
+}
+
+func (s *cachedStore) ResolveArtifactOwningTeamReference(ctx context.Context, input ArtifactOwningTeamReferenceQuery) (uuid.UUID, error) {
+	repository, err := s.artifactAccessRepository()
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return repository.ResolveArtifactOwningTeamReference(ctx, input)
 }
 
 func (s *cachedStore) ExplainAccess(ctx context.Context, input AccessExplanationQuery) (AccessExplanation, error) {

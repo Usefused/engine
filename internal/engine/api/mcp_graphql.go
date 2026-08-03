@@ -141,6 +141,14 @@ func mcpGraphQLHandler(schema graphql.Schema, resourceResolvers ...graphQLAuthor
 		execStart := time.Now()
 		bw := newBufferedResponseWriter()
 		h.ServeHTTP(bw, r.WithContext(ctx))
+		if len(plan.deployments) > 0 {
+			revisionLoader, _ := resources.store.(accesscontrol.AuthorizationRevisionLoader)
+			if revisionLoader != nil && resources.revisionSink != nil {
+				// A deployment can create its owner binding. Publish that revision
+				// before the response allows an immediate follow-up request.
+				syncAuthorizationRevision(ctx, revisionLoader, resources.revisionSink)
+			}
+		}
 		execDur := time.Since(execStart)
 		setEngineGraphQLServerTiming(bw.Header(), engineGraphQLTiming{
 			auth:      authDur,
@@ -352,6 +360,9 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 		Name: "EngineQuery",
 		Fields: graphql.Fields{
 			"currentActorAccess":         currentActorAccessGraphQLField(),
+			"artifact":                   artifactGraphQLField(s),
+			"artifactServices":           artifactServicesGraphQLField(s),
+			"artifacts":                  artifactsGraphQLField(s),
 			"accessExplanation":          accessExplanationGraphQLField(s),
 			"auditEvents":                auditEventsGraphQLField(s),
 			"artifactBuildSelectors":     artifactBuildSelectorsGraphQLField(s),
@@ -362,6 +373,10 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"teamMembers":                teamMembersGraphQLField(s),
 			"teams":                      teamsGraphQLField(s),
 			"team":                       teamGraphQLField(s),
+			"workspaceShares":            workspaceSharesGraphQLField(s),
+			"bucketReference":            bucketReferenceGraphQLField(s),
+			"serviceReference":           serviceReferenceGraphQLField(s),
+			"artifactReference":          artifactReferenceGraphQLField(s),
 			"workspaceConnectionProfile": workspaceConnectionProfileGraphQLField(s),
 			"workspaceConnectConfigs":    workspaceConnectConfigsGraphQLField(s),
 			"mcpServers":                 mcpServersField(s),
@@ -411,6 +426,10 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"revokeTeamBucketAccess":            revokeTeamBucketAccessGraphQLField(s),
 			"grantTeamArtifactAccess":           grantTeamArtifactAccessGraphQLField(s),
 			"revokeTeamArtifactAccess":          revokeTeamArtifactAccessGraphQLField(s),
+			"grantWorkspaceBucketAccess":        grantWorkspaceBucketAccessGraphQLField(s),
+			"revokeWorkspaceBucketAccess":       revokeWorkspaceBucketAccessGraphQLField(s),
+			"grantWorkspaceArtifactAccess":      grantWorkspaceArtifactAccessGraphQLField(s),
+			"revokeWorkspaceArtifactAccess":     revokeWorkspaceArtifactAccessGraphQLField(s),
 			"setWorkspaceConnectionProfile":     setWorkspaceConnectionProfileGraphQLField(s, verifier, registryClient),
 			"resetWorkspaceConnectionProfile":   resetWorkspaceConnectionProfileGraphQLField(s),
 			"updateWorkspaceNotificationStatus": updateWorkspaceNotificationStatusGraphQLField(configStore),
@@ -624,8 +643,8 @@ func deployMCPServerField(configStore store.ConfigRepository, s store.Store, reg
 	return &graphql.Field{
 		Type: mcpServerType,
 		Args: graphql.FieldConfigArgument{
-			"config":        &graphql.ArgumentConfig{Type: graphql.NewNonNull(engineJSONType)},
-			"owner_team_id": &graphql.ArgumentConfig{Type: graphql.ID},
+			"config":     &graphql.ArgumentConfig{Type: graphql.NewNonNull(engineJSONType)},
+			"owner_team": &graphql.ArgumentConfig{Type: graphql.String},
 		},
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 			actor, err := actorFromContext(p.Context)
@@ -643,10 +662,7 @@ func deployMCPServerField(configStore store.ConfigRepository, s store.Store, reg
 			if err := validateArtifactConfigDocument(doc, "mcp"); err != nil {
 				return nil, err
 			}
-			ownerTeamID, err := optionalGraphQLUUIDArg(p, "owner_team_id")
-			if err != nil {
-				return nil, err
-			}
+			ownerTeamSlug := strings.TrimSpace(graphQLArgString(p, "owner_team"))
 			controlActor, ok := accesscontrol.ActorFromContext(p.Context)
 			if !ok {
 				return nil, accesscontrol.ErrAuthenticationRequired
@@ -660,7 +676,7 @@ func deployMCPServerField(configStore store.ConfigRepository, s store.Store, reg
 			}
 			planResult, err := createMCPConfigPlan(p.Context, configStore, s, registryClient, sdkPlanCall{
 				apiKey: apiKey, accountID: actor.accountID, actor: controlActor,
-				request: SDKConfigPlanRequest{ConfigKey: configKey, SourceHash: fmt.Sprintf("sha256:%x", hash), OwnerTeamID: ownerTeamID, Config: raw}, document: doc,
+				request: SDKConfigPlanRequest{ConfigKey: configKey, SourceHash: fmt.Sprintf("sha256:%x", hash), OwnerTeamSlug: ownerTeamSlug, Config: raw}, document: doc,
 			})
 			if err != nil {
 				return nil, err

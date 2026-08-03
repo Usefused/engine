@@ -195,7 +195,12 @@ func (s *postgresStore) ResolveWorkspaceServiceIDsByKeys(ctx context.Context, ke
 		SELECT DISTINCT ON (input.key) input.key, service.service_id
 		FROM unnest($1::text[]) AS input(key)
 		JOIN fused_workspace_services service
-		  ON service.service_slug = input.key OR service.service_name = input.key
+		  ON service.service_name = input.key
+		  OR service.service_slug = input.key
+		  OR service.service_slug = CASE
+			WHEN input.key LIKE '@%/%' THEN split_part(input.key, '/', 2)
+			ELSE input.key
+		  END
 		ORDER BY input.key, service.created_at DESC`, keys)
 	if err != nil {
 		return nil, fmt.Errorf("ResolveWorkspaceServiceIDsByKeys: query: %w", err)
@@ -555,7 +560,18 @@ func listWorkspaceServicesQuery(names []string) (string, []any) {
 	query := listWorkspaceServicesSQL
 	var args []any
 	if len(names) > 0 {
-		query += " WHERE COALESCE(s.service_name, '') = ANY($1) OR COALESCE(s.service_slug, '') = ANY($1)"
+		// Registry references may be account-qualified while this singleton
+		// workspace stores the verified bare slug. Normalize each requested key
+		// inside the one SQL query so authorization cannot drift or become N+1.
+		query += ` WHERE EXISTS (
+			SELECT 1 FROM unnest($1::text[]) AS input(key)
+			WHERE COALESCE(s.service_name, '') = input.key
+			   OR COALESCE(s.service_slug, '') = input.key
+			   OR COALESCE(s.service_slug, '') = CASE
+				 WHEN input.key LIKE '@%/%' THEN split_part(input.key, '/', 2)
+				 ELSE input.key
+			   END
+		)`
 		args = append(args, names)
 	}
 	return query + " ORDER BY s.created_at DESC", args

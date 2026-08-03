@@ -36,7 +36,7 @@ func TestMCPConfigPlanResponseIncludesExactApplyPermissions(t *testing.T) {
 	router.Post("/mcp-config/plan", MCPConfigPlanHandler(configStore, s, registryClient))
 	body := []byte(`{
 		"source_hash":"abc",
-		"owner_team_id":"00000000-0000-0000-0000-000000000001","config_key":"mcp:security:1.0.0",
+		"owner_team":"platform","config_key":"mcp:security:1.0.0",
 		"config":{"apiVersion":"fused/v1","kind":"mcp","name":"security","version":"1.0.0","bucket":"default","services":{"okta":{"version":"2026-07-01","select_all":true}}}
 	}`)
 	response := httptest.NewRecorder()

@@ -11,7 +11,7 @@ import {
 test("uses exact owner-team and authorized selector GraphQL contracts", () => {
   assert.match(ARTIFACT_BUILDER_OPERATIONS.owningTeams, /artifactOwningTeams\(search: \$search, limit: \$limit, offset: \$offset\)/);
   assert.match(ARTIFACT_BUILDER_OPERATIONS.owningTeams, /items \{ id name slug \}/);
-  assert.match(ARTIFACT_BUILDER_OPERATIONS.selectors, /\$ownerTeamId: ID!/);
+	assert.match(ARTIFACT_BUILDER_OPERATIONS.selectors, /\$ownerTeamId: ID/);
   assert.match(ARTIFACT_BUILDER_OPERATIONS.selectors, /\$resourceType: ArtifactSelectorResourceType!/);
   assert.match(ARTIFACT_BUILDER_OPERATIONS.selectors, /artifactBuildSelectors\(owner_team_id: \$ownerTeamId, resource_type: \$resourceType, search: \$search, limit: \$limit, offset: \$offset\)/);
   for (const field of ["resource_type", "resource_id", "display_name"]) {
@@ -29,21 +29,27 @@ test("derives plan identity without embedding ownership in declarative config", 
 
 test("places ownership only on plan intent and makes apply owner-proof", () => {
   const config = { name: "support", version: "1.2.0", services: {} };
-  const planned = artifactPlanInput("sdk", " team-1 ", "sha256:abc", config);
-  assert.deepEqual(planned, {
-    owner_team_id: "team-1",
+	const planned = artifactPlanInput("sdk", " support ", "sha256:abc", config);
+	assert.deepEqual(planned, {
+		owner_team: "support",
     config_key: "sdk:support:1.2.0",
     source_hash: "sha256:abc",
     config,
   });
 
-  const applied = artifactApplyInput({
-    plan_id: "plan-1",
-    owner_team_id: "team-1",
+	const applied = artifactApplyInput({
+		plan_id: "plan-1",
+		owner_type: "team",
     config_key: "sdk:support:1.2.0",
     source_hash: "sha256:abc",
     summary: {},
   });
   assert.deepEqual(applied, { plan_id: "plan-1", source_hash: "sha256:abc" });
-  assert.equal("owner_team_id" in applied, false);
+	assert.equal("owner_team" in applied, false);
+
+	assert.deepEqual(artifactPlanInput("sdk", "", "sha256:abc", config), {
+		config_key: "sdk:support:1.2.0",
+		source_hash: "sha256:abc",
+		config,
+	});
 });

@@ -99,7 +99,7 @@ func userGraphQLField(s store.Store) *graphql.Field {
 		Type: userGraphQLType,
 		Args: graphql.FieldConfigArgument{"id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.ID)}},
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			userID, err := requiredGraphQLUUIDArg(p, "id")
+			userID, err := requiredGraphQLResourceReference(p, s, "id", store.ReferenceUser, uuid.Nil)
 			if err != nil {
 				return nil, err
 			}
@@ -121,7 +121,7 @@ func userEffectiveAccessGraphQLField(s store.Store) *graphql.Field {
 		Type: userEffectiveAccessGraphQLType,
 		Args: graphql.FieldConfigArgument{"user_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.ID)}},
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			userID, err := requiredGraphQLUUIDArg(p, "user_id")
+			userID, err := requiredGraphQLResourceReference(p, s, "user_id", store.ReferenceUser, uuid.Nil)
 			if err != nil {
 				return nil, err
 			}
@@ -150,7 +150,7 @@ func teamMembersGraphQLField(s store.Store) *graphql.Field {
 			"offset":  &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 0},
 		},
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			teamID, err := requiredGraphQLUUIDArg(p, "team_id")
+			teamID, err := requiredGraphQLResourceReference(p, s, "team_id", store.ReferenceTeam, uuid.Nil)
 			if err != nil {
 				return nil, err
 			}
@@ -184,7 +184,7 @@ func updateUserGraphQLField(s store.Store) *graphql.Field {
 		"id":    &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.ID)},
 		"input": &graphql.ArgumentConfig{Type: graphql.NewNonNull(updateUserGraphQLInput)},
 	}, "user.update", s, func(p graphql.ResolveParams, repository store.UserRepository, actor store.MutationActor) (interface{}, int64, bool, error) {
-		userID, err := requiredGraphQLUUIDArg(p, "id")
+		userID, err := requiredGraphQLResourceReference(p, repository, "id", store.ReferenceUser, uuid.Nil)
 		if err != nil {
 			return nil, 0, false, err
 		}
@@ -216,7 +216,7 @@ func userStatusMutationGraphQLField(s store.Store, action string, mutate userSta
 	return userMutationField(userMutationPayloadGraphQLType, graphql.FieldConfigArgument{
 		"id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.ID)},
 	}, action, s, func(p graphql.ResolveParams, repository store.UserRepository, actor store.MutationActor) (interface{}, int64, bool, error) {
-		userID, err := requiredGraphQLUUIDArg(p, "id")
+		userID, err := requiredGraphQLResourceReference(p, repository, "id", store.ReferenceUser, uuid.Nil)
 		if err != nil {
 			return nil, 0, false, err
 		}
@@ -231,7 +231,7 @@ func addTeamMemberGraphQLField(s store.Store) *graphql.Field {
 		"email":           &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
 		"membership_role": &graphql.ArgumentConfig{Type: teamMembershipRoleGraphQLEnum, DefaultValue: "member"},
 	}, "team.member.add", s, func(p graphql.ResolveParams, repository store.UserRepository, actor store.MutationActor) (interface{}, int64, bool, error) {
-		teamID, err := requiredGraphQLUUIDArg(p, "team_id")
+		teamID, err := requiredGraphQLResourceReference(p, repository, "team_id", store.ReferenceTeam, uuid.Nil)
 		if err != nil {
 			return nil, 0, false, err
 		}
@@ -248,11 +248,11 @@ func removeTeamMemberGraphQLField(s store.Store) *graphql.Field {
 		"team_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.ID)},
 		"user_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.ID)},
 	}, "team.member.remove", s, func(p graphql.ResolveParams, repository store.UserRepository, actor store.MutationActor) (interface{}, int64, bool, error) {
-		teamID, err := requiredGraphQLUUIDArg(p, "team_id")
+		teamID, err := requiredGraphQLResourceReference(p, repository, "team_id", store.ReferenceTeam, uuid.Nil)
 		if err != nil {
 			return nil, 0, false, err
 		}
-		userID, err := requiredGraphQLUUIDArg(p, "user_id")
+		userID, err := requiredGraphQLResourceReference(p, repository, "user_id", store.ReferenceUser, uuid.Nil)
 		if err != nil {
 			return nil, 0, false, err
 		}
@@ -266,7 +266,7 @@ func issueUserCredentialGraphQLField(s store.Store) *graphql.Field {
 		"user_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.ID)},
 		"name":    &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
 	}, "user.credential.issue", s, func(p graphql.ResolveParams, repository store.UserRepository, actor store.MutationActor) (interface{}, int64, bool, error) {
-		userID, err := requiredGraphQLUUIDArg(p, "user_id")
+		userID, err := requiredGraphQLResourceReference(p, repository, "user_id", store.ReferenceUser, uuid.Nil)
 		if err != nil {
 			return nil, 0, false, err
 		}
@@ -282,11 +282,11 @@ func revokeUserCredentialGraphQLField(s store.Store) *graphql.Field {
 		"user_id":       &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.ID)},
 		"credential_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.ID)},
 	}, "user.credential.revoke", s, func(p graphql.ResolveParams, repository store.UserRepository, actor store.MutationActor) (interface{}, int64, bool, error) {
-		userID, err := requiredGraphQLUUIDArg(p, "user_id")
+		userID, err := requiredGraphQLResourceReference(p, repository, "user_id", store.ReferenceUser, uuid.Nil)
 		if err != nil {
 			return nil, 0, false, err
 		}
-		credentialID, err := requiredGraphQLUUIDArg(p, "credential_id")
+		credentialID, err := requiredGraphQLResourceReference(p, repository, "credential_id", store.ReferenceCredential, userID)
 		if err != nil {
 			return nil, 0, false, err
 		}
@@ -315,7 +315,7 @@ func userMutationField(resultType graphql.Output, args graphql.FieldConfigArgume
 		if err != nil {
 			return nil, userGraphQLError(recordUserMutationError(span, err))
 		}
-		invalidateTeamAuthorization(ctx, revision, changed, nil)
+		invalidateAuthorizationRevision(ctx, revision, changed, nil)
 		span.SetAttributes(attribute.String("outcome", "success"), attribute.Bool("engine.access.changed", changed))
 		return payload, nil
 	}}
@@ -391,6 +391,9 @@ var userGraphQLErrorMessages = []struct {
 }
 
 func userGraphQLError(err error) error {
+	if errors.Is(err, store.ErrResourceReferenceNotFound) {
+		return resourceReferenceGraphQLError(err)
+	}
 	if errors.Is(err, errEmptyUserPatch) {
 		return errEmptyUserPatch
 	}

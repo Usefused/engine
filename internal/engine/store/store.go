@@ -35,8 +35,10 @@ var (
 type ArtifactScope struct {
 	AccountID  uuid.UUID
 	ArtifactID uuid.UUID
-	// OwnerTeamID controls management authority only. Runtime execution keeps
-	// using the artifact's immutable bucket and token identities.
+	// Exactly one owner is set. Subject ownership is the safe default derived
+	// from the authenticated actor; team ownership is an explicit sharing
+	// decision resolved from a stable team slug by the Engine.
+	OwnerSubjectID     uuid.UUID
 	OwnerTeamID        uuid.UUID
 	BucketID           uuid.UUID
 	Selections         []byte

@@ -235,7 +235,7 @@ func TestSDKConfigPlanHandler_UsesOperations(t *testing.T) {
 
 	body := []byte(`{
 		"source_hash": "abc",
-		"owner_team_id":"00000000-0000-0000-0000-000000000001",
+		"owner_team":"platform",
 		"config_key": "sdk:security:1.0.0",
 		"config": {
 			"apiVersion": "fused/v1",
@@ -283,8 +283,8 @@ func TestSDKConfigPlanHandler_UsesOperations(t *testing.T) {
 	if !hasRequiredPermission(response.RequiredPermissions, "service.consume", "service", serviceID) {
 		t.Fatalf("expected service.consume preview, got %#v", response.RequiredPermissions)
 	}
-	if configStore.createdPlan == nil || configStore.createdPlan.OwnerTeamID == nil || *configStore.createdPlan.OwnerTeamID != testArtifactOwnerTeamID {
-		t.Fatalf("persisted owner team = %#v", configStore.createdPlan)
+	if configStore.createdPlan == nil || configStore.createdPlan.OwnerSubjectID != nil || configStore.createdPlan.OwnerTeamID == nil || *configStore.createdPlan.OwnerTeamID != testArtifactOwnerTeamID {
+		t.Fatalf("persisted team slug owner = %#v", configStore.createdPlan)
 	}
 	var persisted []requiredPermissionResponse
 	if err := json.Unmarshal(configStore.createdPlan.RequiredPermissions, &persisted); err != nil {
@@ -322,7 +322,7 @@ func TestSDKConfigPlanHandler_RejectsUnregisteredWebhookAttachment(t *testing.T)
 
 	body := []byte(`{
 		"source_hash": "abc",
-		"owner_team_id":"00000000-0000-0000-0000-000000000001",
+		"owner_team":"platform",
 		"config_key": "sdk:security:1.0.0",
 		"config": {
 			"apiVersion": "fused/v1",
@@ -367,7 +367,7 @@ func TestSDKConfigPlanHandler_FailsClosedWithoutBatchVersionResolver(t *testing.
 	r := newControlTestRouter(s.accountID)
 	r.Post("/sdk-config/plan", SDKConfigPlanHandler(&mockConfigStore{}, s, nil))
 	body := []byte(`{"source_hash":"config-hash",
-		"owner_team_id":"00000000-0000-0000-0000-000000000001","config_key":"sdk:security:1.0.0","config":{"apiVersion":"fused/v1","kind":"sdk","name":"security","version":"1.0.0","language":"typescript","bucket":"default","services":{"okta":{"version":"1.0","operations":["listLogEvents"]}}}}`)
+		"owner_team":"platform","config_key":"sdk:security:1.0.0","config":{"apiVersion":"fused/v1","kind":"sdk","name":"security","version":"1.0.0","language":"typescript","bucket":"default","services":{"okta":{"version":"1.0","operations":["listLogEvents"]}}}}`)
 	req := httptest.NewRequest(http.MethodPost, "/sdk-config/plan", bytes.NewReader(body))
 	req.Header.Set("X-API-Key", "fsk_test")
 	rr := httptest.NewRecorder()
@@ -392,7 +392,7 @@ func TestSDKConfigPlanBindsSelectedContractRevision(t *testing.T) {
 	r := newControlTestRouter(s.accountID)
 	r.Post("/sdk-config/plan", SDKConfigPlanHandler(configStore, s, registry))
 	body := []byte(`{"source_hash":"config-hash",
-		"owner_team_id":"00000000-0000-0000-0000-000000000001","config_key":"sdk:security:1.0.0","config":{"apiVersion":"fused/v1","kind":"sdk","name":"security","version":"1.0.0","language":"typescript","bucket":"default","services":{"okta":{"version":"1.0","operations":["listLogEvents"]}}}}`)
+		"owner_team":"platform","config_key":"sdk:security:1.0.0","config":{"apiVersion":"fused/v1","kind":"sdk","name":"security","version":"1.0.0","language":"typescript","bucket":"default","services":{"okta":{"version":"1.0","operations":["listLogEvents"]}}}}`)
 	req := httptest.NewRequest(http.MethodPost, "/sdk-config/plan", bytes.NewReader(body))
 	req.Header.Set("X-API-Key", "fsk_test")
 	rr := httptest.NewRecorder()
@@ -436,7 +436,7 @@ func TestSDKConfigPlanBatchesVersionResolutionForMultipleServices(t *testing.T) 
 	r := newControlTestRouter(s.accountID)
 	r.Post("/sdk-config/plan", SDKConfigPlanHandler(configStore, s, registry))
 	body := []byte(`{"source_hash":"config-hash",
-		"owner_team_id":"00000000-0000-0000-0000-000000000001","config_key":"sdk:security:1.0.0","config":{"apiVersion":"fused/v1","kind":"sdk","name":"security","version":"1.0.0","language":"typescript","bucket":"default","services":{"okta":{"version":"1.0","operations":["listLogEvents"]},"github":{"version":"2.0","operations":["listRepos"]}}}}`)
+		"owner_team":"platform","config_key":"sdk:security:1.0.0","config":{"apiVersion":"fused/v1","kind":"sdk","name":"security","version":"1.0.0","language":"typescript","bucket":"default","services":{"okta":{"version":"1.0","operations":["listLogEvents"]},"github":{"version":"2.0","operations":["listRepos"]}}}}`)
 	req := httptest.NewRequest(http.MethodPost, "/sdk-config/plan", bytes.NewReader(body))
 	req.Header.Set("X-API-Key", "fsk_test")
 	rr := httptest.NewRecorder()
@@ -1051,7 +1051,7 @@ func TestExecuteSDKConfigApplyRejectsExistingScopeOwnedByAnotherAccount(t *testi
 		Selections:       []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID}},
 		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"}},
 	})
-	configStore := &mockConfigStore{artifactApplyErr: store.ErrArtifactOwnerTeamMismatch, plan: &store.ConfigPlan{
+	configStore := &mockConfigStore{artifactApplyErr: store.ErrArtifactOwnerMismatch, plan: &store.ConfigPlan{
 		ID: planID, ConfigKey: "sdk:security", ConfigType: store.ConfigTypeSDK, SourceHash: "config-hash",
 		BaseGeneration: 0, Status: store.ConfigPlanStatusPending, DesiredState: json.RawMessage(`{"bucket":"default"}`), ResolvedPayload: payload,
 	}}
@@ -1172,7 +1172,7 @@ func TestExecuteSDKConfigApplyPendingGenerationFinalizesScopeAfterCompletion(t *
 
 func TestDecodeSDKConfigPlanRejectsRemovedMCPTarget(t *testing.T) {
 	body := []byte(`{"source_hash":"config-hash",
-		"owner_team_id":"00000000-0000-0000-0000-000000000001","config_key":"sdk:stripe:1.0.0","config":{"apiVersion":"fused/v1","kind":"sdk","name":"stripe","version":"1.0.0","language":"typescript","target":"mcp","services":{}}}`)
+		"owner_team":"platform","config_key":"sdk:stripe:1.0.0","config":{"apiVersion":"fused/v1","kind":"sdk","name":"stripe","version":"1.0.0","language":"typescript","target":"mcp","services":{}}}`)
 	req := httptest.NewRequest(http.MethodPost, "/sdk-config/plan", bytes.NewReader(body))
 
 	_, _, err := decodeSDKConfigPlanRequest(req)
@@ -1183,7 +1183,7 @@ func TestDecodeSDKConfigPlanRejectsRemovedMCPTarget(t *testing.T) {
 
 func TestDecodeSDKConfigPlanRejectsConfigKeyMismatch(t *testing.T) {
 	body := []byte(`{"source_hash":"config-hash",
-		"owner_team_id":"00000000-0000-0000-0000-000000000001","config_key":"sdk:stripe","config":{"apiVersion":"fused/v1","kind":"sdk","name":"stripe","version":"1.0.0","language":"typescript","bucket":"default","services":{"stripe":{"version":"1.0.0","select_all":true}}}}`)
+		"owner_team":"platform","config_key":"sdk:stripe","config":{"apiVersion":"fused/v1","kind":"sdk","name":"stripe","version":"1.0.0","language":"typescript","bucket":"default","services":{"stripe":{"version":"1.0.0","select_all":true}}}}`)
 	req := httptest.NewRequest(http.MethodPost, "/sdk-config/plan", bytes.NewReader(body))
 
 	_, _, err := decodeSDKConfigPlanRequest(req)
@@ -1416,7 +1416,7 @@ func TestSDKConfigPlanHandler_ResolvesServiceSlugAgainstWorkspaceActivation(t *t
 
 	body := []byte(`{
 		"source_hash": "abc",
-		"owner_team_id":"00000000-0000-0000-0000-000000000001",
+		"owner_team":"platform",
 		"config_key": "sdk:security:1.0.0",
 		"config": {
 			"apiVersion": "fused/v1",
@@ -1479,7 +1479,7 @@ func TestSDKConfigPlanHandler_BatchesVersionLookups(t *testing.T) {
 
 	body := []byte(`{
 		"source_hash": "abc",
-		"owner_team_id":"00000000-0000-0000-0000-000000000001",
+		"owner_team":"platform",
 		"config_key": "sdk:security:1.0.0",
 		"config": {
 			"apiVersion": "fused/v1",
@@ -1536,7 +1536,7 @@ func TestSDKConfigPlanHandler_BatchesOperationValidation(t *testing.T) {
 
 	body := []byte(`{
 		"source_hash": "abc",
-		"owner_team_id":"00000000-0000-0000-0000-000000000001",
+		"owner_team":"platform",
 		"config_key": "sdk:security:1.0.0",
 		"config": {
 			"apiVersion": "fused/v1",
@@ -1629,7 +1629,7 @@ func TestSDKConfigPlanHandler_ReturnsRelevantNotifications(t *testing.T) {
 
 	body := []byte(`{
 		"source_hash": "abc",
-		"owner_team_id":"00000000-0000-0000-0000-000000000001",
+		"owner_team":"platform",
 		"config_key": "sdk:security:1.0.0",
 		"config": {
 			"apiVersion": "fused/v1",
@@ -1697,7 +1697,7 @@ func TestSDKConfigPlanHandler_RejectsLegacyEndpoints(t *testing.T) {
 
 	body := []byte(`{
 		"source_hash": "abc",
-		"owner_team_id":"00000000-0000-0000-0000-000000000001",
+		"owner_team":"platform",
 		"config_key": "sdk:security:1.0.0",
 		"config": {
 			"apiVersion": "fused/v1",

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -66,8 +67,8 @@ func TestPostgresArtifactOwnershipSelectorsDiagnosticsAndAudit(t *testing.T) {
 	if err := repository.SaveArtifactScope(actorCtx, ArtifactScope{AccountID: accountID, ArtifactID: artifactID, OwnerTeamID: teamA.ID, BucketID: bucketID, Selections: []byte(`["old"]`), ScopeSchemaVersion: 1, Kind: "sdk", Name: "shared"}); err != nil {
 		t.Fatalf("SaveArtifactScope: %v", err)
 	}
-	if err := repository.SaveArtifactScope(actorCtx, ArtifactScope{AccountID: accountID, ArtifactID: artifactID, OwnerTeamID: teamB.ID, Selections: []byte("[]"), ScopeSchemaVersion: 1}); !errors.Is(err, ErrArtifactOwnerTeamMismatch) {
-		t.Fatalf("owner change error = %v, want ErrArtifactOwnerTeamMismatch", err)
+	if err := repository.SaveArtifactScope(actorCtx, ArtifactScope{AccountID: accountID, ArtifactID: artifactID, OwnerTeamID: teamB.ID, Selections: []byte("[]"), ScopeSchemaVersion: 1}); !errors.Is(err, ErrArtifactOwnerMismatch) {
+		t.Fatalf("owner change error = %v, want ErrArtifactOwnerMismatch", err)
 	}
 	if _, err := repository.ArchiveTeam(ctx, teamA.ID, mutationActor); err == nil {
 		t.Fatal("expected active artifact ownership to block team archive")
@@ -109,6 +110,90 @@ func TestPostgresArtifactOwnershipSelectorsDiagnosticsAndAudit(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM fused_config_states WHERE latest_resource_id = $1`, artifactID).Scan(&configStates); err != nil || configStates != 0 {
 		t.Fatalf("artifact config references after delete = %d, %v", configStates, err)
 	}
+}
+
+func TestPostgresArtifactScopeSupportsSubjectOwner(t *testing.T) {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("DATABASE_URL not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool := isolatedBootstrapPool(t, ctx, databaseURL)
+	defer pool.Close()
+	repository := NewPostgresStore(pool).(*postgresStore)
+
+	accountID := uuid.New()
+	if _, err := repository.BootstrapWorkspace(ctx, accountID, "Subject-owned artifact test"); err != nil {
+		t.Fatalf("BootstrapWorkspace: %v", err)
+	}
+	bootstrap, err := accesscontrol.BootstrapOwner(ctx, repository, accountID, "fsk_subject_owner_"+uuid.NewString())
+	if err != nil {
+		t.Fatalf("BootstrapOwner: %v", err)
+	}
+	serviceID, bucketID := seedArtifactSelectorResources(t, ctx, repository, accountID)
+	servicePage, err := repository.ListArtifactBuildSelectors(ctx, ArtifactSelectorQuery{ActorSubjectID: bootstrap.SubjectID, ResourceType: accesscontrol.ResourceService, Limit: 10})
+	if err != nil || servicePage.Total != 1 || len(servicePage.Items) != 1 || servicePage.Items[0].Resource.ID != serviceID {
+		t.Fatalf("personal service selectors = %#v, %v", servicePage, err)
+	}
+	bucketPage, err := repository.ListArtifactBuildSelectors(ctx, ArtifactSelectorQuery{ActorSubjectID: bootstrap.SubjectID, ResourceType: accesscontrol.ResourceBucket, Limit: 10})
+	if err != nil || !selectorPageContains(bucketPage, bucketID) {
+		t.Fatalf("personal bucket selectors = %#v, %v", bucketPage, err)
+	}
+	artifactID := uuid.New()
+	actorCtx := accesscontrol.ContextWithActor(ctx, accesscontrol.Actor{SubjectID: bootstrap.SubjectID, CredentialID: bootstrap.CredentialID})
+	scope := ArtifactScope{AccountID: accountID, ArtifactID: artifactID, OwnerSubjectID: bootstrap.SubjectID, Selections: []byte("[]"), ScopeSchemaVersion: 2, Kind: "sdk", Name: "personal"}
+	if err := repository.SaveArtifactScope(actorCtx, scope); err != nil {
+		t.Fatalf("SaveArtifactScope(subject): %v", err)
+	}
+	stored, err := repository.GetArtifactScope(ctx, artifactID)
+	if err != nil || stored.OwnerSubjectID != bootstrap.SubjectID || stored.OwnerTeamID != uuid.Nil {
+		t.Fatalf("stored subject owner = %#v, %v", stored, err)
+	}
+	var bindingCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM fused_role_bindings binding
+		JOIN fused_roles role ON role.id = binding.role_id
+		WHERE binding.subject_type = 'subject' AND binding.subject_id = $1
+		  AND binding.resource_type = 'artifact' AND binding.resource_id = $2
+		  AND role.slug = $3
+	`, bootstrap.SubjectID, artifactID, accesscontrol.RoleArtifactManager).Scan(&bindingCount); err != nil || bindingCount != 1 {
+		t.Fatalf("subject artifact-manager binding count = %d, %v", bindingCount, err)
+	}
+	mutationActor := MutationActor{SubjectID: bootstrap.SubjectID, CredentialID: bootstrap.CredentialID, RequestID: "subject-owner-test", TraceID: "0123456789abcdef0123456789abcdef"}
+	other, err := repository.CreateUser(ctx, CreateUserInput{Email: "other-owner@example.com", DisplayName: "Other Owner", Actor: mutationActor})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE fused_subjects SET status = 'active' WHERE id = $1`, other.User.ID); err != nil {
+		t.Fatalf("activate other owner: %v", err)
+	}
+	if err := repository.SaveArtifactScope(actorCtx, ArtifactScope{AccountID: accountID, ArtifactID: artifactID, OwnerSubjectID: other.User.ID, Selections: []byte("[]"), ScopeSchemaVersion: 2}); !errors.Is(err, ErrArtifactOwnerMismatch) {
+		t.Fatalf("subject owner replacement error = %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE fused_subjects SET status = 'suspended' WHERE id = $1`, bootstrap.SubjectID); err != nil {
+		t.Fatalf("suspend subject owner: %v", err)
+	}
+	if err := repository.SaveArtifactScope(actorCtx, scope); err != nil {
+		t.Fatalf("administrator-manageable suspended owner scope: %v", err)
+	}
+	newArtifact := scope
+	newArtifact.ArtifactID = uuid.New()
+	// Use a new logical identity so the assertion reaches the suspended-owner
+	// authorization fence instead of the independent name/version constraint.
+	newArtifact.Name = "new-personal"
+	if err := repository.SaveArtifactScope(actorCtx, newArtifact); !errors.Is(err, accesscontrol.ErrAuthenticationRequired) {
+		t.Fatalf("new artifact with suspended owner error = %v", err)
+	}
+}
+
+func selectorPageContains(page ArtifactSelectorPage, resourceID uuid.UUID) bool {
+	for _, item := range page.Items {
+		if item.Resource.ID == resourceID {
+			return true
+		}
+	}
+	return false
 }
 
 func assertSuspendedRequesterFailsClosed(t *testing.T, ctx context.Context, repository *postgresStore, pool interface {
@@ -268,6 +353,15 @@ func bindArtifactBuildResources(t *testing.T, ctx context.Context, repository *p
 
 func assertArtifactSelectors(t *testing.T, ctx context.Context, repository *postgresStore, actorID, teamAID, teamBID, serviceID, bucketID uuid.UUID) {
 	t.Helper()
+	resolvedTeamID, err := repository.ResolveArtifactOwningTeamReference(ctx, ArtifactOwningTeamReferenceQuery{ActorSubjectID: actorID, Reference: "team-a"})
+	if err != nil || resolvedTeamID != teamAID {
+		t.Fatalf("authorized owning-team reference = %s, %v", resolvedTeamID, err)
+	}
+	for _, reference := range []string{"team-b", teamBID.String(), "missing-team"} {
+		if _, err := repository.ResolveArtifactOwningTeamReference(ctx, ArtifactOwningTeamReferenceQuery{ActorSubjectID: actorID, Reference: reference}); !errors.Is(err, ErrResourceReferenceNotFound) {
+			t.Fatalf("ineligible owning-team reference %q error = %v", reference, err)
+		}
+	}
 	servicePage, err := repository.ListArtifactBuildSelectors(ctx, ArtifactSelectorQuery{ActorSubjectID: actorID, OwnerTeamID: teamAID, ResourceType: accesscontrol.ResourceService, Limit: 1})
 	if err != nil || servicePage.Total != 1 || len(servicePage.Items) != 1 || servicePage.Items[0].Resource.ID != serviceID {
 		t.Fatalf("service selector = %#v, %v", servicePage, err)

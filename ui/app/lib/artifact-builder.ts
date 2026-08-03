@@ -23,7 +23,7 @@ export async function listArtifactBuildSelectors(
   offset = 0,
 ): Promise<ArtifactBuildSelectorPage> {
   const data = await api.mcpGraphql<{ artifactBuildSelectors: ArtifactBuildSelectorPage }>(ARTIFACT_BUILDER_OPERATIONS.selectors, {
-    ownerTeamId,
+	ownerTeamId: ownerTeamId || null,
     resourceType,
     search,
     limit,
@@ -34,19 +34,19 @@ export async function listArtifactBuildSelectors(
 
 export async function planArtifact(
   kind: ArtifactKind,
-  ownerTeamId: string,
+  ownerTeamSlug: string,
   config: Record<string, unknown>,
 ): Promise<ArtifactPlanResponse> {
   const sourceHash = await sha256JSON(config);
-  return api.artifactConfig.plan<ArtifactPlanResponse>(kind, artifactPlanInput(kind, ownerTeamId, sourceHash, config));
+	return api.artifactConfig.plan<ArtifactPlanResponse>(kind, artifactPlanInput(kind, ownerTeamSlug, sourceHash, config));
 }
 
 export async function applyArtifact<T>(kind: ArtifactKind, plan: ArtifactPlanResponse): Promise<T> {
   return api.artifactConfig.apply<T>(kind, artifactApplyInput(plan));
 }
 
-export async function planAndApplyArtifact<T>(kind: ArtifactKind, ownerTeamId: string, config: Record<string, unknown>): Promise<T> {
-  const plan = await planArtifact(kind, ownerTeamId, config);
+export async function planAndApplyArtifact<T>(kind: ArtifactKind, ownerTeamSlug: string, config: Record<string, unknown>): Promise<T> {
+	const plan = await planArtifact(kind, ownerTeamSlug, config);
   return applyArtifact<T>(kind, plan);
 }
 

@@ -16,6 +16,7 @@ const (
 	RoleBucketUser      = "bucket-user"
 	RoleBucketManager   = "bucket-manager"
 	RoleArtifactReader  = "artifact-reader"
+	RoleArtifactUser    = "artifact-user"
 	RoleArtifactManager = "artifact-manager"
 )
 
@@ -54,6 +55,7 @@ var builtInRoles = []RoleDefinition{
 			PermissionConnectionRead,
 			PermissionConnectionManage,
 			PermissionArtifactRead,
+			PermissionArtifactUse,
 			PermissionArtifactCreate,
 			PermissionArtifactManage,
 			PermissionArtifactTokensManage,
@@ -142,11 +144,21 @@ var builtInRoles = []RoleDefinition{
 		Permissions: []Permission{PermissionArtifactRead},
 	},
 	{
+		Slug:        RoleArtifactUser,
+		DisplayName: "Artifact user",
+		ScopeType:   ResourceArtifact,
+		Permissions: []Permission{
+			PermissionArtifactRead,
+			PermissionArtifactUse,
+		},
+	},
+	{
 		Slug:        RoleArtifactManager,
 		DisplayName: "Artifact manager",
 		ScopeType:   ResourceArtifact,
 		Permissions: []Permission{
 			PermissionArtifactRead,
+			PermissionArtifactUse,
 			PermissionArtifactManage,
 			PermissionArtifactTokensManage,
 		},
