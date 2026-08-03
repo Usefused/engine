@@ -23,7 +23,7 @@ func (s *postgresStore) CreateTeam(ctx context.Context, input TeamMutation) (Tea
 	if err := validateTeamMutation(input); err != nil {
 		return TeamMutationResult{}, recordTeamSpanError(span, err)
 	}
-	tx, err := s.beginTeamMutation(ctx, input.Actor)
+	tx, err := s.beginAccessMutation(ctx, input.Actor)
 	if err != nil {
 		return TeamMutationResult{}, recordTeamSpanError(span, err)
 	}
@@ -88,6 +88,29 @@ func (s *postgresStore) GetTeam(ctx context.Context, teamID uuid.UUID) (Team, er
 	return teams[0], nil
 }
 
+func (s *postgresStore) GetTeamBySlug(ctx context.Context, slug string) (Team, error) {
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.access.team.get_by_slug")
+	defer span.End()
+	if err := validateTeamSlug(slug); err != nil {
+		return Team{}, ErrTeamNotFound
+	}
+	// Artifact ownership only needs identity and status. The unique slug index
+	// makes this a single bounded lookup without loading unrelated bindings.
+	var team Team
+	err := s.db.QueryRow(ctx, `
+		SELECT id, name, slug, description, status, created_at, updated_at
+		FROM fused_teams WHERE slug = $1
+	`, slug).Scan(&team.ID, &team.Name, &team.Slug, &team.Description, &team.Status, &team.CreatedAt, &team.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Team{}, ErrTeamNotFound
+	}
+	if err != nil {
+		return Team{}, recordTeamSpanError(span, fmt.Errorf("get team by slug: %w", err))
+	}
+	team.Bindings = []TeamBinding{}
+	return team, nil
+}
+
 func (s *postgresStore) ListTeams(ctx context.Context, options TeamListOptions) ([]Team, int, error) {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.access.team.list")
 	defer span.End()
@@ -143,7 +166,7 @@ func (s *postgresStore) UpdateTeam(ctx context.Context, teamID uuid.UUID, patch 
 	if err := validateTeamPatch(patch); err != nil {
 		return TeamMutationResult{}, recordTeamSpanError(span, err)
 	}
-	tx, err := s.beginTeamMutation(ctx, patch.Actor)
+	tx, err := s.beginAccessMutation(ctx, patch.Actor)
 	if err != nil {
 		return TeamMutationResult{}, recordTeamSpanError(span, err)
 	}
@@ -213,7 +236,7 @@ func (s *postgresStore) ArchiveTeam(ctx context.Context, teamID uuid.UUID, actor
 	if teamID == uuid.Nil {
 		return TeamMutationResult{}, ErrTeamNotFound
 	}
-	tx, err := s.beginTeamMutation(ctx, actor)
+	tx, err := s.beginAccessMutation(ctx, actor)
 	if err != nil {
 		return TeamMutationResult{}, recordTeamSpanError(span, err)
 	}
@@ -318,7 +341,7 @@ func (s *postgresStore) ClearTeamWorkspaceRole(ctx context.Context, teamID, work
 	if teamID == uuid.Nil || workspaceID == uuid.Nil {
 		return TeamBindingMutationResult{}, recordTeamSpanError(span, ErrInvalidTeamBinding)
 	}
-	tx, err := s.beginTeamMutation(ctx, actor)
+	tx, err := s.beginAccessMutation(ctx, actor)
 	if err != nil {
 		return TeamBindingMutationResult{}, recordTeamSpanError(span, err)
 	}
@@ -419,7 +442,7 @@ func (s *postgresStore) mutateTeamBinding(ctx context.Context, input TeamBinding
 	if err := validateTeamBindingMutation(input); err != nil {
 		return TeamBindingMutationResult{}, recordTeamSpanError(span, err)
 	}
-	tx, err := s.beginTeamMutation(ctx, input.Actor)
+	tx, err := s.beginAccessMutation(ctx, input.Actor)
 	if err != nil {
 		return TeamBindingMutationResult{}, recordTeamSpanError(span, err)
 	}
@@ -587,13 +610,13 @@ func writeTeamBinding(ctx context.Context, tx pgx.Tx, binding *TeamBinding, role
 	return changed, nil
 }
 
-func (s *postgresStore) beginTeamMutation(ctx context.Context, actor MutationActor) (pgx.Tx, error) {
+func (s *postgresStore) beginAccessMutation(ctx context.Context, actor MutationActor) (pgx.Tx, error) {
 	if err := validateMutationActor(actor); err != nil {
 		return nil, err
 	}
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("begin team mutation: %w", err)
+		return nil, fmt.Errorf("begin access mutation: %w", err)
 	}
 	var valid bool
 	err = tx.QueryRow(ctx, `
@@ -609,7 +632,7 @@ func (s *postgresStore) beginTeamMutation(ctx context.Context, actor MutationAct
 	if err != nil || !valid {
 		_ = tx.Rollback(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("validate team mutation actor: %w", err)
+			return nil, fmt.Errorf("validate access mutation actor: %w", err)
 		}
 		return nil, ErrInvalidMutationActor
 	}

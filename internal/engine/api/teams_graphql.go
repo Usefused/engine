@@ -117,6 +117,7 @@ var teamArtifactAccessLevelGraphQLEnum = graphql.NewEnum(graphql.EnumConfig{
 	Name: "TeamArtifactAccessLevel",
 	Values: graphql.EnumValueConfigMap{
 		"READER":  &graphql.EnumValueConfig{Value: "reader"},
+		"USER":    &graphql.EnumValueConfig{Value: "user"},
 		"MANAGER": &graphql.EnumValueConfig{Value: "manager"},
 	},
 })
@@ -150,7 +151,7 @@ func teamGraphQLField(s store.Store) *graphql.Field {
 		Type: teamGraphQLType,
 		Args: graphql.FieldConfigArgument{"id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.ID)}},
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			id, err := requiredGraphQLUUIDArg(p, "id")
+			id, err := requiredGraphQLResourceReference(p, s, "id", store.ReferenceTeam, uuid.Nil)
 			if err != nil {
 				return nil, err
 			}
@@ -190,7 +191,7 @@ func updateTeamGraphQLField(s store.Store) *graphql.Field {
 		"id":    &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.ID)},
 		"input": &graphql.ArgumentConfig{Type: graphql.NewNonNull(updateTeamGraphQLInput)},
 	}, "team.update", s, func(p graphql.ResolveParams, repository store.TeamRepository, actor store.MutationActor) (interface{}, error) {
-		id, err := requiredGraphQLUUIDArg(p, "id")
+		id, err := requiredGraphQLResourceReference(p, repository, "id", store.ReferenceTeam, uuid.Nil)
 		if err != nil {
 			return nil, err
 		}
@@ -207,12 +208,12 @@ func archiveTeamGraphQLField(s store.Store) *graphql.Field {
 	return teamMutationField(teamMutationPayloadGraphQLType, graphql.FieldConfigArgument{
 		"id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.ID)},
 	}, "team.archive", s, func(p graphql.ResolveParams, repository store.TeamRepository, actor store.MutationActor) (interface{}, error) {
-		id, err := requiredGraphQLUUIDArg(p, "id")
+		id, err := requiredGraphQLResourceReference(p, repository, "id", store.ReferenceTeam, uuid.Nil)
 		if err != nil {
 			return nil, err
 		}
 		result, err := repository.ArchiveTeam(p.Context, id, actor)
-		invalidateTeamAuthorization(p.Context, result.AuthorizationRevision, result.Changed, err)
+		invalidateAuthorizationRevision(p.Context, result.AuthorizationRevision, result.Changed, err)
 		return projectTeamMutationResult(result), err
 	})
 }
@@ -228,17 +229,17 @@ func setTeamWorkspaceRoleGraphQLField(s store.Store) *graphql.Field {
 }
 
 func resolveTeamWorkspaceRole(p graphql.ResolveParams, repository store.TeamRepository, actor store.MutationActor) (interface{}, error) {
-	teamID, err := requiredGraphQLUUIDArg(p, "team_id")
+	teamID, err := requiredGraphQLResourceReference(p, repository, "team_id", store.ReferenceTeam, uuid.Nil)
 	if err != nil {
 		return nil, err
 	}
-	workspaceID, err := teamBindingResourceID(p, accesscontrol.ResourceWorkspace, "")
+	workspaceID, err := teamBindingResourceID(p, repository, accesscontrol.ResourceWorkspace, "")
 	if err != nil {
 		return nil, err
 	}
 	role, _ := p.Args["role"].(string)
 	result, err := mutateTeamWorkspaceRole(p.Context, repository, teamID, workspaceID, role, actor)
-	invalidateTeamAuthorization(p.Context, result.AuthorizationRevision, result.Changed, err)
+	invalidateAuthorizationRevision(p.Context, result.AuthorizationRevision, result.Changed, err)
 	return projectTeamBindingMutationResult(result), err
 }
 
@@ -278,8 +279,12 @@ func revokeTeamArtifactAccessGraphQLField(s store.Store) *graphql.Field {
 
 func teamArtifactAccessGraphQLField(s store.Store, action string, add bool) *graphql.Field {
 	role := func(p graphql.ResolveParams) string {
-		if level, _ := p.Args["level"].(string); level == "manager" {
+		level, _ := p.Args["level"].(string)
+		if level == "manager" {
 			return accesscontrol.RoleArtifactManager
+		}
+		if level == "user" {
+			return accesscontrol.RoleArtifactUser
 		}
 		return accesscontrol.RoleArtifactReader
 	}
@@ -305,17 +310,17 @@ func teamBindingMutationField(s store.Store, action string, resourceType accessc
 		args["level"] = &graphql.ArgumentConfig{Type: graphql.NewNonNull(levelType)}
 	}
 	return teamMutationField(teamBindingMutationPayloadGraphQLType, args, action, s, func(p graphql.ResolveParams, repository store.TeamRepository, actor store.MutationActor) (interface{}, error) {
-		teamID, err := requiredGraphQLUUIDArg(p, "team_id")
+		teamID, err := requiredGraphQLResourceReference(p, repository, "team_id", store.ReferenceTeam, uuid.Nil)
 		if err != nil {
 			return nil, err
 		}
-		resourceID, err := teamBindingResourceID(p, resourceType, resourceArgument)
+		resourceID, err := teamBindingResourceID(p, repository, resourceType, resourceArgument)
 		if err != nil {
 			return nil, err
 		}
 		mutation := store.TeamBindingMutation{TeamID: teamID, RoleSlug: role(p), Resource: accesscontrol.ResourceRef{Type: resourceType, ID: resourceID}, Actor: actor}
 		result, err := mutateTeamBinding(p.Context, repository, mutation, add)
-		invalidateTeamAuthorization(p.Context, result.AuthorizationRevision, result.Changed, err)
+		invalidateAuthorizationRevision(p.Context, result.AuthorizationRevision, result.Changed, err)
 		return projectTeamBindingMutationResult(result), err
 	})
 }
@@ -410,7 +415,7 @@ func optionalGraphQLString(input map[string]interface{}, key string) *string {
 	return &text
 }
 
-func teamBindingResourceID(p graphql.ResolveParams, resourceType accesscontrol.ResourceType, argument string) (uuid.UUID, error) {
+func teamBindingResourceID(p graphql.ResolveParams, source any, resourceType accesscontrol.ResourceType, argument string) (uuid.UUID, error) {
 	if resourceType == accesscontrol.ResourceWorkspace {
 		actor, ok := accesscontrol.ActorFromContext(p.Context)
 		if !ok {
@@ -418,7 +423,11 @@ func teamBindingResourceID(p graphql.ResolveParams, resourceType accesscontrol.R
 		}
 		return actor.WorkspaceID, nil
 	}
-	return requiredGraphQLUUIDArg(p, argument)
+	kind, err := referenceKindForResource(resourceType)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return requiredGraphQLResourceReference(p, source, argument, kind, uuid.Nil)
 }
 
 func mutateTeamBinding(ctx context.Context, repository store.TeamRepository, mutation store.TeamBindingMutation, add bool) (store.TeamBindingMutationResult, error) {
@@ -428,7 +437,7 @@ func mutateTeamBinding(ctx context.Context, repository store.TeamRepository, mut
 	return repository.RemoveTeamBinding(ctx, mutation)
 }
 
-func invalidateTeamAuthorization(ctx context.Context, revision int64, changed bool, err error) {
+func invalidateAuthorizationRevision(ctx context.Context, revision int64, changed bool, err error) {
 	// The transaction has already committed when this runs. Advance the
 	// process-local revision immediately so the next request cannot reuse an
 	// authorization snapshot that predates the binding change.
@@ -513,6 +522,8 @@ func graphQLTeamTime(value time.Time) string {
 
 func teamGraphQLError(err error) error {
 	switch {
+	case errors.Is(err, store.ErrResourceReferenceNotFound):
+		return resourceReferenceGraphQLError(err)
 	case errors.Is(err, errEmptyTeamPatch):
 		return errEmptyTeamPatch
 	case errors.Is(err, store.ErrTeamNotFound):

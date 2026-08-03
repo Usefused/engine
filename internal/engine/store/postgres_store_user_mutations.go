@@ -23,7 +23,7 @@ func (s *postgresStore) CreateUser(ctx context.Context, input CreateUserInput) (
 	if err != nil {
 		return UserMutationResult{}, recordTeamSpanError(span, err)
 	}
-	tx, err := s.beginTeamMutation(ctx, input.Actor)
+	tx, err := s.beginAccessMutation(ctx, input.Actor)
 	if err != nil {
 		return UserMutationResult{}, recordTeamSpanError(span, err)
 	}
@@ -98,7 +98,7 @@ func (s *postgresStore) UpdateUser(ctx context.Context, userID uuid.UUID, patch 
 	if err != nil {
 		return UserMutationResult{}, recordTeamSpanError(span, err)
 	}
-	tx, err := s.beginTeamMutation(ctx, patch.Actor)
+	tx, err := s.beginAccessMutation(ctx, patch.Actor)
 	if err != nil {
 		return UserMutationResult{}, recordTeamSpanError(span, err)
 	}
@@ -209,7 +209,7 @@ func (s *postgresStore) setUserStatus(ctx context.Context, userID uuid.UUID, tar
 	if userID == uuid.Nil || (target != UserStatusSuspended && target != UserStatusActive) {
 		return UserMutationResult{}, ErrInvalidUser
 	}
-	tx, err := s.beginTeamMutation(ctx, actor)
+	tx, err := s.beginAccessMutation(ctx, actor)
 	if err != nil {
 		return UserMutationResult{}, recordTeamSpanError(span, err)
 	}

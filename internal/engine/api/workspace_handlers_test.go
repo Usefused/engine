@@ -66,6 +66,7 @@ type workspaceTestStore struct {
 	listWorkspaceServicesCalls int
 	savedScopes                []sdkSaveParams
 	saveScopeErr               error
+	authorizationRevision      int64
 	linkBucketCalls            int
 	existingScopeHash          string
 	existingScopeAccount       uuid.UUID
@@ -134,6 +135,13 @@ type workspaceTestStore struct {
 	// kind: webhook's ownership-conflict lookup controls.
 	webhookOwnersByLabel map[uuid.UUID]string
 	webhookOwnersErr     error
+}
+
+func (s *workspaceTestStore) GetTeamBySlug(_ context.Context, slug string) (store.Team, error) {
+	if slug == "" {
+		return store.Team{}, store.ErrTeamNotFound
+	}
+	return store.Team{ID: testArtifactOwnerTeamID, Name: "Platform", Slug: slug, Status: store.TeamStatusActive}, nil
 }
 
 type sdkSaveParams struct {
@@ -1136,6 +1144,7 @@ func (s *workspaceTestStore) SaveArtifactScope(ctx context.Context, scope store.
 		name:               scope.Name,
 	})
 	if s.saveScopeErr == nil {
+		_, alreadyExists := s.mockScopes[scope.ArtifactID]
 		// Mirror the real store's round-trip: a save-then-get (e.g. the mcp
 		// GraphQL deploy resolver, mcp_graphql.go) must see what was just
 		// saved. DeactivatedAt is deliberately preserved rather than reset --
@@ -1151,8 +1160,16 @@ func (s *workspaceTestStore) SaveArtifactScope(ctx context.Context, scope store.
 			saved.CreatedAt = time.Now()
 		}
 		s.mockScopes[scope.ArtifactID] = &saved
+		if !alreadyExists {
+			// A new scope also creates its owner binding in the real transaction.
+			s.authorizationRevision++
+		}
 	}
 	return s.saveScopeErr
+}
+
+func (s *workspaceTestStore) LoadAuthorizationRevision(context.Context) (int64, error) {
+	return s.authorizationRevision, nil
 }
 
 func (s *workspaceTestStore) GetArtifactScope(ctx context.Context, artifactID uuid.UUID) (*store.ArtifactScope, error) {
@@ -1227,6 +1244,30 @@ func (s *workspaceTestStore) ListAuthorizedMCPScopesByAccount(ctx context.Contex
 	var matched []store.ArtifactScope
 	for _, artifact := range s.mockScopes {
 		if _, ok := allowed[artifact.ArtifactID]; ok && artifact.AccountID == accountID && artifact.Kind == "mcp" {
+			matched = append(matched, *artifact)
+		}
+	}
+	sort.Slice(matched, func(i, j int) bool { return matched[i].CreatedAt.After(matched[j].CreatedAt) })
+	total := len(matched)
+	if offset >= total {
+		return nil, total, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return matched[offset:end], total, nil
+}
+
+func (s *workspaceTestStore) ListAuthorizedArtifactScopesByAccount(_ context.Context, accountID uuid.UUID, scope accesscontrol.AuthorizedScope, kind string, limit, offset int) ([]store.ArtifactScope, int, error) {
+	allowed := make(map[uuid.UUID]struct{}, len(scope.IDs))
+	for _, id := range scope.IDs {
+		allowed[id] = struct{}{}
+	}
+	var matched []store.ArtifactScope
+	for _, artifact := range s.mockScopes {
+		_, permitted := allowed[artifact.ArtifactID]
+		if artifact.AccountID == accountID && (kind == "" || artifact.Kind == kind) && (scope.All || permitted) {
 			matched = append(matched, *artifact)
 		}
 	}

@@ -35,10 +35,14 @@ import (
 )
 
 type SDKConfigPlanRequest struct {
-	ConfigKey   string          `json:"config_key"`
-	SourceHash  string          `json:"source_hash"`
-	OwnerTeamID *uuid.UUID      `json:"owner_team_id,omitempty"`
-	Config      json.RawMessage `json:"config"`
+	ConfigKey     string          `json:"config_key"`
+	SourceHash    string          `json:"source_hash"`
+	OwnerTeamSlug string          `json:"owner_team,omitempty"`
+	Config        json.RawMessage `json:"config"`
+	// Owner IDs are resolved by the Engine. They are deliberately excluded
+	// from the wire contract so people use stable team slugs, never UUIDs.
+	OwnerSubjectID *uuid.UUID `json:"-"`
+	OwnerTeamID    *uuid.UUID `json:"-"`
 }
 
 type SDKConfigApplyRequest struct {
@@ -201,7 +205,7 @@ func SDKConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 		span.SetAttributes(attribute.String("plan_id", result.plan.ID.String()), attribute.String("outcome", "success"))
 		writeJSON(w, map[string]any{
 			"plan_id":              result.plan.ID.String(),
-			"owner_team_id":        result.plan.OwnerTeamID,
+			"owner_type":           planOwnerType(result.plan),
 			"config_key":           result.plan.ConfigKey,
 			"source_hash":          result.plan.SourceHash,
 			"base_generation":      result.plan.BaseGeneration,
@@ -277,7 +281,7 @@ func SDKConfigApplyHandler(configStore store.ConfigRepository, s store.Store, pr
 // before Registry lookups or plan persistence can occur.
 func decodeSDKConfigPlanRequest(r *http.Request) (SDKConfigPlanRequest, sdkConfigDocument, error) {
 	var req SDKConfigPlanRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeOneStrictJSON(r.Body, &req); err != nil {
 		return req, sdkConfigDocument{}, errors.New("invalid request body")
 	}
 	if strings.TrimSpace(req.SourceHash) == "" {
@@ -305,7 +309,11 @@ func decodeSDKConfigPlanRequest(r *http.Request) (SDKConfigPlanRequest, sdkConfi
 // decodeArtifactConfigJSON rejects misspelled and obsolete fields at the
 // Engine boundary; otherwise a valid-looking plan could silently omit policy.
 func decodeArtifactConfigJSON(raw []byte, target *sdkConfigDocument) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
+	return decodeOneStrictJSON(bytes.NewReader(raw), target)
+}
+
+func decodeOneStrictJSON(reader io.Reader, target any) error {
+	decoder := json.NewDecoder(reader)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return err
@@ -553,13 +561,13 @@ func createSDKConfigPlan(
 	if err != nil {
 		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to fetch config state"}
 	}
-	ownerTeamID, bucket, err := resolveArtifactPlanOwnerAndBucket(
-		ctx, configStore, s, call.request.ConfigKey, currentState, call.request.OwnerTeamID, call.document.Bucket,
+	owner, bucket, err := resolveArtifactPlanOwnerAndBucket(
+		ctx, s, currentState, call.actor, call.request.OwnerTeamSlug, call.document.Bucket,
 	)
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
-	call.request.OwnerTeamID = ownerTeamID
+	call.request.OwnerSubjectID, call.request.OwnerTeamID = owner.subjectID, owner.teamID
 	selections, services, resolvedServices, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(currentState), bucket.ID)
 	if err != nil {
 		return sdkPlanResult{}, err
@@ -578,12 +586,13 @@ func createSDKConfigPlan(
 	if err != nil {
 		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to compute required permissions"}
 	}
-	if err := preflightArtifactOwnership(ctx, s, call.actor, *ownerTeamID, existingArtifactID(currentState), requiredPermissions); err != nil {
+	if err := preflightArtifactOwnership(ctx, s, call.actor, owner, existingArtifactID(currentState), requiredPermissions); err != nil {
 		return sdkPlanResult{}, err
 	}
 	plan, err := configStore.CreateConfigPlan(ctx, store.CreateConfigPlanParams{
 		ConfigKey:           call.request.ConfigKey,
 		ConfigType:          store.ConfigTypeSDK,
+		OwnerSubjectID:      call.request.OwnerSubjectID,
 		OwnerTeamID:         call.request.OwnerTeamID,
 		SourceHash:          call.request.SourceHash,
 		BaseGeneration:      currentGeneration(currentState),
@@ -610,22 +619,21 @@ func createSDKConfigPlan(
 
 func resolveArtifactPlanOwnerAndBucket(
 	ctx context.Context,
-	configStore store.ConfigRepository,
 	s store.Store,
-	configKey string,
 	current *store.ConfigState,
-	requestedOwnerTeamID *uuid.UUID,
+	actor accesscontrol.Actor,
+	requestedOwnerTeamSlug string,
 	bucketName string,
-) (*uuid.UUID, *store.Bucket, error) {
-	ownerTeamID, err := resolveArtifactPlanOwnerTeam(ctx, configStore, configKey, current, requestedOwnerTeamID)
+) (artifactOwner, *store.Bucket, error) {
+	owner, err := resolveArtifactPlanOwner(ctx, s, current, actor, requestedOwnerTeamSlug)
 	if err != nil {
-		return nil, nil, err
+		return artifactOwner{}, nil, err
 	}
 	bucket, err := resolveArtifactBucket(ctx, s, bucketName)
 	if err != nil {
-		return nil, nil, err
+		return artifactOwner{}, nil, err
 	}
-	return ownerTeamID, bucket, nil
+	return owner, bucket, nil
 }
 
 func resolveSDKSelections(
@@ -1981,6 +1989,7 @@ func artifactRequiredSecretKeys(selection models.SDKSelection, authType string) 
 type persistArtifactScopeParams struct {
 	accountID          uuid.UUID
 	artifactID         uuid.UUID
+	ownerSubjectID     uuid.UUID
 	ownerTeamID        uuid.UUID
 	bucketID           uuid.UUID
 	bucketName         string
@@ -2001,6 +2010,7 @@ func artifactScopeForApply(p persistArtifactScopeParams) (store.ArtifactScope, e
 	return store.ArtifactScope{
 		AccountID:          p.accountID,
 		ArtifactID:         p.artifactID,
+		OwnerSubjectID:     p.ownerSubjectID,
 		OwnerTeamID:        p.ownerTeamID,
 		BucketID:           p.bucketID,
 		Selections:         p.selections,
@@ -2033,6 +2043,7 @@ func applyGeneratedArtifactScope(
 	return applyArtifactConfigPlan(ctx, configStore, s, call, plan, persistArtifactScopeParams{
 		accountID:          call.accountID,
 		artifactID:         result.ArtifactID,
+		ownerSubjectID:     planOwnerSubjectID(plan),
 		ownerTeamID:        planOwnerTeamID(plan),
 		bucketID:           payload.BucketID,
 		bucketName:         doc.Bucket,
@@ -2105,6 +2116,20 @@ func planOwnerTeamID(plan *store.ConfigPlan) uuid.UUID {
 		return uuid.Nil
 	}
 	return *plan.OwnerTeamID
+}
+
+func planOwnerSubjectID(plan *store.ConfigPlan) uuid.UUID {
+	if plan == nil || plan.OwnerSubjectID == nil {
+		return uuid.Nil
+	}
+	return *plan.OwnerSubjectID
+}
+
+func planOwnerType(plan *store.ConfigPlan) string {
+	if plan != nil && plan.OwnerTeamID != nil {
+		return "team"
+	}
+	return "subject"
 }
 
 func validateSDKGenerationResult(payload json.RawMessage, call sdkApplyCall, result models.SDKGenerationResult) error {

@@ -20,6 +20,45 @@ import (
 	"github.com/Usefused/engine/internal/shared/models"
 )
 
+type artifactReferenceGraphQLTestStore struct {
+	*workspaceTestStore
+	references   map[string]uuid.UUID
+	services     []store.ArtifactServiceSummary
+	lastQuery    store.ResourceReferenceQuery
+	referenceErr error
+}
+
+func (s *artifactReferenceGraphQLTestStore) ListArtifactServiceSummaries(_ context.Context, _ uuid.UUID) ([]store.ArtifactServiceSummary, error) {
+	return s.services, nil
+}
+
+func (s *artifactReferenceGraphQLTestStore) ResolveResourceReference(_ context.Context, query store.ResourceReferenceQuery) (uuid.UUID, error) {
+	s.lastQuery = query
+	if s.referenceErr != nil {
+		return uuid.Nil, s.referenceErr
+	}
+	id, ok := s.references[query.Value]
+	if !ok {
+		return uuid.Nil, store.ErrResourceReferenceNotFound
+	}
+	return id, nil
+}
+
+func TestArtifactReferenceGraphQLSerializesSafeErrorCode(t *testing.T) {
+	fixture := &workspaceTestStore{accountID: uuid.New()}
+	s := &artifactReferenceGraphQLTestStore{workspaceTestStore: fixture, referenceErr: store.ErrResourceReferenceAmbiguous}
+	h := mountMCPGraphQLTestHandler(t, s)
+	req := httptest.NewRequest(http.MethodPost, "/engine/graphql", strings.NewReader(`{"query":"query { artifactReference(reference: \"support\") { id } }"}`))
+	req.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	h(response, req)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":"FUSED_RESOURCE_AMBIGUOUS"`) {
+		t.Fatalf("response = %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestFetchWorkspaceServiceAuthOptions_PropagatesRegistryFailure(t *testing.T) {
 	serviceID := uuid.New()
 	verifier := &mockVerifier{authConfigErr: errors.New("registry unavailable")}
@@ -41,6 +80,10 @@ func mountMCPGraphQLTestHandler(t *testing.T, s store.Store) http.HandlerFunc {
 }
 
 func mountMCPGraphQLTestHandlerWithRegistry(t *testing.T, s store.Store, registry sandbox.RegistryClient) http.HandlerFunc {
+	return mountMCPGraphQLTestHandlerWithRegistryAndSink(t, s, registry, nil)
+}
+
+func mountMCPGraphQLTestHandlerWithRegistryAndSink(t *testing.T, s store.Store, registry sandbox.RegistryClient, revisionSink authorizationRevisionSink) http.HandlerFunc {
 	t.Helper()
 	configStore := &mockConfigStore{}
 	if fixture, ok := s.(*workspaceTestStore); ok {
@@ -53,7 +96,7 @@ func mountMCPGraphQLTestHandlerWithRegistry(t *testing.T, s store.Store, registr
 		t.Fatalf("newMCPGraphQLSchema() error = %v", err)
 	}
 	slugResolver, _ := registry.(sdkServiceSlugResolver)
-	return withGraphQLTestOwner(t, s, mcpGraphQLHandler(schema, graphQLAuthorizationResources{store: s, configStore: configStore, slugResolver: slugResolver}))
+	return withGraphQLTestOwner(t, s, mcpGraphQLHandler(schema, graphQLAuthorizationResources{store: s, configStore: configStore, slugResolver: slugResolver, revisionSink: revisionSink}))
 }
 
 func withGraphQLTestOwner(t *testing.T, s store.Store, next http.HandlerFunc) http.HandlerFunc {
@@ -702,10 +745,11 @@ func TestDeployMcpServer_CreatesActiveScopeWithNameAndKind(t *testing.T) {
 	registry := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
 		serviceID.String() + "|2026-07-01": {ServiceID: serviceID, Version: "2026-07-01", ServiceVersionID: serviceVersionID, Revision: 1},
 	}}
-	h := mountMCPGraphQLTestHandlerWithRegistry(t, s, registry)
+	revisionSink := &revisionSyncSinkStub{}
+	h := mountMCPGraphQLTestHandlerWithRegistryAndSink(t, s, registry, revisionSink)
 
-	query := `mutation($config: EngineJSON!,$owner:ID!) {
-		deployMcpServer(config: $config,owner_team_id:$owner) {
+	query := `mutation($config: EngineJSON!,$owner:String!) {
+		deployMcpServer(config: $config,owner_team:$owner) {
 			id
 			name
 			version
@@ -713,7 +757,7 @@ func TestDeployMcpServer_CreatesActiveScopeWithNameAndKind(t *testing.T) {
 			mcp_url
 		}
 	}`
-	data := doMCPGraphQLRequestWithVariables(t, h, query, map[string]any{"owner": testArtifactOwnerTeamID.String(), "config": map[string]any{
+	data := doMCPGraphQLRequestWithVariables(t, h, query, map[string]any{"owner": "platform", "config": map[string]any{
 		"apiVersion": "fused/v1", "kind": "mcp", "name": "stripe-mcp", "version": "1.0.0", "bucket": "default",
 		"services": map[string]any{"Stripe": map[string]any{"version": "2026-07-01", "operations": []string{"listCharges"}}},
 	}})
@@ -739,6 +783,9 @@ func TestDeployMcpServer_CreatesActiveScopeWithNameAndKind(t *testing.T) {
 	if s.savedScopes[0].kind != "mcp" || s.savedScopes[0].accountID != accountID || s.savedScopes[0].ownerTeamID != testArtifactOwnerTeamID {
 		t.Errorf("expected kind=mcp for accountID %s, got %#v", accountID, s.savedScopes[0])
 	}
+	if revisionSink.revision != s.authorizationRevision || revisionSink.revision == 0 {
+		t.Errorf("authorization revision = %d, want committed revision %d", revisionSink.revision, s.authorizationRevision)
+	}
 }
 
 // TestDeployMcpServer_SelectAllSkipsEndpointIds mirrors how the SDK
@@ -761,13 +808,13 @@ func TestDeployMcpServer_SelectAllSkipsEndpointIds(t *testing.T) {
 	}}
 	h := mountMCPGraphQLTestHandlerWithRegistry(t, s, registry)
 
-	query := `mutation($config: EngineJSON!,$owner:ID!) {
-		deployMcpServer(config: $config,owner_team_id:$owner) {
+	query := `mutation($config: EngineJSON!,$owner:String!) {
+		deployMcpServer(config: $config,owner_team:$owner) {
 			id
 			active
 		}
 	}`
-	doMCPGraphQLRequestWithVariables(t, h, query, map[string]any{"owner": testArtifactOwnerTeamID.String(), "config": map[string]any{
+	doMCPGraphQLRequestWithVariables(t, h, query, map[string]any{"owner": "platform", "config": map[string]any{
 		"apiVersion": "fused/v1", "kind": "mcp", "name": "stripe-mcp", "version": "1.0.0", "bucket": "default",
 		"services": map[string]any{"Stripe": map[string]any{"version": "2026-07-01", "operations": []string{}, "select_all": true}},
 	}})
@@ -817,6 +864,66 @@ func TestMcpServers_ListsOnlyMCPKindScopesForAccount(t *testing.T) {
 	item := items[0].(map[string]any)
 	if item["id"] != mcpID.String() || item["name"] != "stripe-mcp" {
 		t.Errorf("unexpected item: %#v", item)
+	}
+}
+
+func TestArtifacts_ListsSDKAndMCPScopesForAccount(t *testing.T) {
+	accountID, otherAccountID := uuid.New(), uuid.New()
+	sdkID, mcpID, hiddenID := uuid.New(), uuid.New(), uuid.New()
+	s := &workspaceTestStore{accountID: accountID, mockScopes: map[uuid.UUID]*store.ArtifactScope{
+		sdkID:    {AccountID: accountID, ArtifactID: sdkID, Kind: "sdk", Name: "support", Version: "1.0.0", CreatedAt: time.Now()},
+		mcpID:    {AccountID: accountID, ArtifactID: mcpID, Kind: "mcp", Name: "support-agent", Version: "2.0.0", CreatedAt: time.Now().Add(-time.Minute)},
+		hiddenID: {AccountID: otherAccountID, ArtifactID: hiddenID, Kind: "sdk", Name: "other-workspace", Version: "1.0.0", CreatedAt: time.Now().Add(-time.Hour)},
+	}}
+	h := mountMCPGraphQLTestHandler(t, s)
+	data := doMCPGraphQLRequest(t, h, `query { artifacts(limit: 20, offset: 0) { total items { id name version kind active } } }`)
+	page := data["artifacts"].(map[string]any)
+	if page["total"] != float64(2) {
+		t.Fatalf("artifact total = %#v, want 2", page["total"])
+	}
+	items := page["items"].([]any)
+	if len(items) != 2 || items[0].(map[string]any)["kind"] != "sdk" || items[1].(map[string]any)["kind"] != "mcp" {
+		t.Fatalf("unexpected artifact items: %#v", items)
+	}
+}
+
+func TestArtifact_ResolvesHumanReferenceToEngineScope(t *testing.T) {
+	accountID, artifactID := uuid.New(), uuid.New()
+	fixture := &workspaceTestStore{accountID: accountID, mockScopes: map[uuid.UUID]*store.ArtifactScope{
+		artifactID: {AccountID: accountID, ArtifactID: artifactID, Kind: "sdk", Name: "support", Version: "2.0.0", CreatedAt: time.Now()},
+	}}
+	s := &artifactReferenceGraphQLTestStore{workspaceTestStore: fixture, references: map[string]uuid.UUID{"support@2.0.0": artifactID}}
+	h := mountMCPGraphQLTestHandler(t, s)
+	data := doMCPGraphQLRequest(t, h, `query { artifact(reference: "support@2.0.0", kind: "sdk") { id name version kind active } }`)
+	artifact := data["artifact"].(map[string]any)
+	if artifact["id"] != artifactID.String() || artifact["name"] != "support" || artifact["kind"] != "sdk" {
+		t.Fatalf("unexpected artifact: %#v", artifact)
+	}
+	if s.lastQuery.ArtifactKind != "sdk" {
+		t.Fatalf("artifact lookup kind = %q, want sdk", s.lastQuery.ArtifactKind)
+	}
+}
+
+func TestArtifactServices_UsesOnePermissionScopedArtifactLookup(t *testing.T) {
+	accountID, artifactID, serviceID := uuid.New(), uuid.New(), uuid.New()
+	fixture := &workspaceTestStore{accountID: accountID, mockScopes: map[uuid.UUID]*store.ArtifactScope{
+		artifactID: {AccountID: accountID, ArtifactID: artifactID, Kind: "mcp", Name: "support", Version: "2.0.0"},
+	}}
+	s := &artifactReferenceGraphQLTestStore{
+		workspaceTestStore: fixture,
+		references:         map[string]uuid.UUID{"support": artifactID},
+		services: []store.ArtifactServiceSummary{{
+			ServiceID: serviceID, ServiceSlug: "github", ServiceName: "GitHub", Version: "2026-08-01", SelectAll: true,
+		}},
+	}
+	h := mountMCPGraphQLTestHandler(t, s)
+	data := doMCPGraphQLRequest(t, h, `query { artifactServices(reference: "support", kind: "mcp") { service_id service_slug version select_all endpoint_count } }`)
+	services := data["artifactServices"].([]any)
+	if len(services) != 1 || services[0].(map[string]any)["service_slug"] != "github" {
+		t.Fatalf("unexpected artifact services: %#v", services)
+	}
+	if s.lastQuery.ArtifactKind != "mcp" {
+		t.Fatalf("artifact services lookup kind = %q, want mcp", s.lastQuery.ArtifactKind)
 	}
 }
 

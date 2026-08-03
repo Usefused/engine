@@ -2848,7 +2848,7 @@ func upsertDesiredWorkspaceServices(
 		}
 
 		firstVersion := svc.Versions[0]
-		if err := s.AddWorkspaceServiceVersion(ctx, svc.ServiceID, "", firstVersion, svc.VersionIDs[firstVersion], serviceName, accountID); err != nil {
+		if err := s.AddWorkspaceServiceVersion(ctx, svc.ServiceID, workspaceServiceSlug(svc.Key), firstVersion, svc.VersionIDs[firstVersion], serviceName, accountID); err != nil {
 			return nil, err
 		}
 
@@ -2886,6 +2886,23 @@ func upsertDesiredWorkspaceServices(
 		}
 	}
 	return applied, nil
+}
+
+func workspaceServiceSlug(key string) string {
+	key = strings.TrimSpace(key)
+	if _, err := uuid.Parse(key); err == nil {
+		return ""
+	}
+	// Provider qualification is Registry routing metadata. Engine is scoped to
+	// one Registry account, so persisting only the verified bare slug keeps the
+	// local lookup stable without importing cross-account identity semantics.
+	if strings.HasPrefix(key, "@") {
+		parts := strings.SplitN(key, "/", 2)
+		if len(parts) == 2 {
+			return strings.TrimSpace(parts[1])
+		}
+	}
+	return key
 }
 
 type workspaceAuthApplyPlan struct {

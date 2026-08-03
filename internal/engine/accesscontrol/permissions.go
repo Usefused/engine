@@ -24,6 +24,7 @@ const (
 	PermissionConnectionRead          Permission = "connection.read"
 	PermissionConnectionManage        Permission = "connection.manage"
 	PermissionArtifactRead            Permission = "artifact.read"
+	PermissionArtifactUse             Permission = "artifact.use"
 	PermissionArtifactCreate          Permission = "artifact.create"
 	PermissionArtifactManage          Permission = "artifact.manage"
 	PermissionArtifactTokensManage    Permission = "artifact.tokens.manage"
@@ -58,6 +59,7 @@ var (
 		PermissionConnectionRead,
 		PermissionConnectionManage,
 		PermissionArtifactRead,
+		PermissionArtifactUse,
 		PermissionArtifactCreate,
 		PermissionArtifactManage,
 		PermissionArtifactTokensManage,

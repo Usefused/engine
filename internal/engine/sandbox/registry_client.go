@@ -492,7 +492,7 @@ func (c *HTTPRegistryClient) PublishServiceExecutionPolicy(ctx context.Context, 
 	if err != nil {
 		return fmt.Errorf("PublishServiceExecutionPolicy: marshal body: %w", err)
 	}
-	url := c.endpoint + "/integrations/" + serviceID.String() + "/execution-policy"
+	url := c.registryBaseURL() + "/integrations/" + serviceID.String() + "/execution-policy"
 	request, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("PublishServiceExecutionPolicy: create request: %w", err)
@@ -569,7 +569,7 @@ func (c *HTTPRegistryClient) PublishServiceVersionExecutionPolicy(ctx context.Co
 	if err != nil {
 		return fmt.Errorf("PublishServiceVersionExecutionPolicy: marshal body: %w", err)
 	}
-	url := c.endpoint + "/integrations/" + serviceID.String() + "/versions/" + version + "/execution-policy"
+	url := c.registryBaseURL() + "/integrations/" + serviceID.String() + "/versions/" + version + "/execution-policy"
 	request, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("PublishServiceVersionExecutionPolicy: create request: %w", err)
@@ -1140,7 +1140,9 @@ func (c *HTTPRegistryClient) ArchiveService(ctx context.Context, serviceID uuid.
 }
 
 func (c *HTTPRegistryClient) registryBaseURL() string {
-	return strings.TrimSuffix(c.endpoint, "/graphql")
+	// Registry clients share one configured GraphQL URL, while lifecycle and
+	// policy publishers call REST routes on the same origin.
+	return strings.TrimSuffix(strings.TrimRight(c.endpoint, "/"), "/graphql")
 }
 
 type graphqlQuery struct {

@@ -61,6 +61,28 @@ func TestAdminCannotManageAccountOrBilling(t *testing.T) {
 	}
 }
 
+func TestWorkspaceShareRolesCannotManageSharedResources(t *testing.T) {
+	tests := []struct {
+		role      string
+		allows    Permission
+		forbidden []Permission
+	}{
+		{role: RoleBucketUser, allows: PermissionBucketUse, forbidden: []Permission{PermissionBucketManage, PermissionCredentialsManage}},
+		{role: RoleArtifactUser, allows: PermissionArtifactUse, forbidden: []Permission{PermissionArtifactManage, PermissionArtifactTokensManage}},
+	}
+	for _, test := range tests {
+		role := roleBySlug(t, test.role)
+		if !roleHasPermission(role, test.allows) {
+			t.Fatalf("workspace share role %q is missing %q", test.role, test.allows)
+		}
+		for _, permission := range test.forbidden {
+			if roleHasPermission(role, permission) {
+				t.Fatalf("workspace share role %q unexpectedly grants %q", test.role, permission)
+			}
+		}
+	}
+}
+
 func TestValidateRoleDefinitionRejectsInvalidDefinitions(t *testing.T) {
 	tests := []RoleDefinition{
 		{},

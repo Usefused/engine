@@ -1,13 +1,16 @@
 package api
 
 import (
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/go-chi/chi/v5"
 )
 
 // MountConfigRoutes attaches all the config-as-code endpoints to the main Engine router.
-func MountConfigRoutes(r chi.Router, configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, proxy Forwarder, registryClient sandbox.RegistryClient, masterKey []byte) {
+func MountConfigRoutes(r chi.Router, configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, proxy Forwarder, registryClient sandbox.RegistryClient, masterKey []byte, revisionSinks ...authorizationRevisionSink) {
+	revisionSink := firstAuthorizationRevisionSink(revisionSinks)
+	revisionLoader, _ := s.(accesscontrol.AuthorizationRevisionLoader)
 	// Workspace config routes (mounted alongside the existing /workspace routes)
 	r.Route("/workspace/config", func(r chi.Router) {
 		r.Post("/plan", WorkspaceConfigPlanHandler(configStore, s, verifier))
@@ -22,7 +25,7 @@ func MountConfigRoutes(r chi.Router, configStore store.ConfigRepository, s store
 	// SDK config routes
 	r.Route("/sdk-config", func(r chi.Router) {
 		r.Post("/plan", SDKConfigPlanHandler(configStore, s, registryClient))
-		r.Post("/apply", SDKConfigApplyHandler(configStore, s, proxy, registryClient))
+		r.Post("/apply", authorizationRevisionSyncHandler(revisionLoader, revisionSink, SDKConfigApplyHandler(configStore, s, proxy, registryClient)))
 		r.Get("/{name}/download", SDKConfigDownloadHandler(configStore, s, proxy))
 
 		// SDK/MCP lifecycle routes. Deliberately under /sdk-config, not
@@ -38,7 +41,7 @@ func MountConfigRoutes(r chi.Router, configStore store.ConfigRepository, s store
 	// but its apply executor creates an Engine runtime instead of source code.
 	r.Route("/mcp-config", func(r chi.Router) {
 		r.Post("/plan", MCPConfigPlanHandler(configStore, s, registryClient))
-		r.Post("/apply", MCPConfigApplyHandler(configStore, s, registryClient))
+		r.Post("/apply", authorizationRevisionSyncHandler(revisionLoader, revisionSink, MCPConfigApplyHandler(configStore, s, registryClient)))
 	})
 
 	// kind: webhook (plans/plan-webhook-kind.md) -- completely Engine-owned,

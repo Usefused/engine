@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
@@ -13,30 +14,80 @@ import (
 	"github.com/Usefused/engine/internal/engine/store"
 )
 
-func resolveArtifactPlanOwnerTeam(ctx context.Context, configStore store.ConfigRepository, configKey string, current *store.ConfigState, requested *uuid.UUID) (*uuid.UUID, error) {
-	if current == nil {
-		if requested == nil || *requested == uuid.Nil {
-			return nil, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "owner_team_id is required for a new artifact"}
-		}
-		owner := *requested
-		return &owner, nil
-	}
-	owner, err := configStore.ResolveArtifactOwnerTeam(ctx, configKey)
-	if err != nil || owner == uuid.Nil {
-		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "artifact owner is unavailable"}
-	}
-	// Ownership is immutable after the first apply. An omitted value means
-	// "keep the existing owner"; a supplied mismatch is never interpreted as a transfer.
-	if requested != nil && *requested != owner {
-		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "artifact owner team is immutable"}
-	}
-	return &owner, nil
+type artifactOwner struct {
+	subjectID *uuid.UUID
+	teamID    *uuid.UUID
+	teamSlug  string
 }
 
-func preflightArtifactOwnership(ctx context.Context, s store.Store, actor accesscontrol.Actor, ownerTeamID uuid.UUID, existingArtifactID *uuid.UUID, rawRequirements []byte) error {
+type teamSlugResolver interface {
+	GetTeamBySlug(context.Context, string) (store.Team, error)
+}
+
+func resolveArtifactPlanOwner(ctx context.Context, s store.Store, current *store.ConfigState, actor accesscontrol.Actor, requestedTeamSlug string) (artifactOwner, error) {
+	requestedTeamSlug = strings.TrimSpace(requestedTeamSlug)
+	if requestedTeamSlug != "" {
+		teamRepository, ok := s.(teamSlugResolver)
+		if !ok {
+			return artifactOwner{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "team ownership is unavailable"}
+		}
+		team, err := teamRepository.GetTeamBySlug(ctx, requestedTeamSlug)
+		if err != nil || team.Status != store.TeamStatusActive {
+			return artifactOwner{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "owner team was not found or is archived"}
+		}
+		owner := artifactOwner{teamID: uuidPointer(team.ID), teamSlug: team.Slug}
+		if current != nil && !ownerMatchesState(owner, current) {
+			return artifactOwner{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "artifact owner is immutable"}
+		}
+		return owner, nil
+	}
+	if current != nil {
+		return artifactOwnerFromState(current)
+	}
+	if actor.SubjectID == uuid.Nil {
+		return artifactOwner{}, accesscontrol.ErrAuthenticationRequired
+	}
+	// New artifacts belong to the authenticated subject unless the caller
+	// explicitly selects a team by slug.
+	return artifactOwner{subjectID: uuidPointer(actor.SubjectID)}, nil
+}
+
+func artifactOwnerFromState(state *store.ConfigState) (artifactOwner, error) {
+	if state == nil || (state.OwnerSubjectID == nil) == (state.OwnerTeamID == nil) {
+		return artifactOwner{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "artifact owner is unavailable"}
+	}
+	return artifactOwner{subjectID: state.OwnerSubjectID, teamID: state.OwnerTeamID}, nil
+}
+
+func ownerMatchesState(owner artifactOwner, state *store.ConfigState) bool {
+	if state == nil {
+		return true
+	}
+	return equalOptionalUUID(owner.subjectID, state.OwnerSubjectID) && equalOptionalUUID(owner.teamID, state.OwnerTeamID)
+}
+
+func equalOptionalUUID(left, right *uuid.UUID) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func uuidPointer(value uuid.UUID) *uuid.UUID {
+	copy := value
+	return &copy
+}
+
+func preflightArtifactOwnership(ctx context.Context, s store.Store, actor accesscontrol.Actor, owner artifactOwner, existingArtifactID *uuid.UUID, rawRequirements []byte) error {
 	requirements, err := accesscontrol.UnmarshalRequiredPermissions(rawRequirements)
 	if err != nil || len(requirements) == 0 {
 		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "artifact permission snapshot is unavailable"}
+	}
+	if owner.subjectID != nil {
+		return preflightSubjectArtifactOwnership(ctx, actor, *owner.subjectID, existingArtifactID, requirements)
+	}
+	if owner.teamID == nil {
+		return workspaceConfigHTTPError{status: http.StatusConflict, message: "artifact owner is unavailable"}
 	}
 	repository, ok := s.(store.ArtifactAccessRepository)
 	if !ok {
@@ -45,7 +96,7 @@ func preflightArtifactOwnership(ctx context.Context, s store.Store, actor access
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.artifact.ownership_preflight")
 	defer span.End()
 	decision, err := repository.PreflightArtifactOwnership(ctx, store.ArtifactOwnershipPreflight{
-		ActorSubjectID: actor.SubjectID, OwnerTeamID: ownerTeamID, ExistingArtifactID: existingArtifactID, Requirements: requirements,
+		ActorSubjectID: actor.SubjectID, OwnerTeamID: *owner.teamID, ExistingArtifactID: existingArtifactID, Requirements: requirements,
 	})
 	if err != nil {
 		span.RecordError(err)
@@ -73,11 +124,34 @@ func preflightArtifactOwnership(ctx context.Context, s store.Store, actor access
 	return &accesscontrol.PermissionDeniedError{Missing: deduplicateArtifactRequirements(missing)}
 }
 
+func preflightSubjectArtifactOwnership(ctx context.Context, actor accesscontrol.Actor, ownerSubjectID uuid.UUID, existingArtifactID *uuid.UUID, requirements []accesscontrol.Requirement) error {
+	authorizer := accesscontrol.SnapshotAuthorizer{}
+	if err := authorizer.CheckAll(ctx, actor, requirements...); err != nil {
+		return err
+	}
+	if actor.SubjectID == ownerSubjectID {
+		return nil
+	}
+	if existingArtifactID == nil {
+		// A pending personal create must not become a bearer capability: knowing its
+		// plan receipt cannot let another Builder create a resource for that person.
+		return accesscontrol.ErrPolicyDenied
+	}
+	// Explicit artifact managers may maintain a personally owned resource without
+	// changing its immutable owner. The outer route enforces the same boundary;
+	// repeating it here keeps direct handler use and future transports fail-closed.
+	return authorizer.CheckAll(ctx, actor, accesscontrol.Requirement{
+		Permission: accesscontrol.PermissionArtifactManage,
+		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceArtifact, ID: *existingArtifactID},
+	})
+}
+
 func preflightStoredArtifactPlan(ctx context.Context, s store.Store, actor accesscontrol.Actor, plan *store.ConfigPlan, current *store.ConfigState) error {
-	if plan == nil || plan.OwnerTeamID == nil || *plan.OwnerTeamID == uuid.Nil {
+	if plan == nil {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "artifact owner is unavailable"}
 	}
-	return preflightArtifactOwnership(ctx, s, actor, *plan.OwnerTeamID, existingArtifactID(current), plan.RequiredPermissions)
+	owner := artifactOwner{subjectID: plan.OwnerSubjectID, teamID: plan.OwnerTeamID}
+	return preflightArtifactOwnership(ctx, s, actor, owner, existingArtifactID(current), plan.RequiredPermissions)
 }
 
 func existingArtifactID(current *store.ConfigState) *uuid.UUID {

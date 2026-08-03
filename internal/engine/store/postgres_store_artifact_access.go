@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -153,6 +154,24 @@ func (s *postgresStore) ListArtifactOwningTeams(ctx context.Context, input Actor
 	return page, rows.Err()
 }
 
+func (s *postgresStore) ResolveArtifactOwningTeamReference(ctx context.Context, input ArtifactOwningTeamReferenceQuery) (uuid.UUID, error) {
+	if err := validateOwningTeamReferenceQuery(input); err != nil {
+		return uuid.Nil, err
+	}
+	exactID, _ := uuid.Parse(input.Reference)
+	var teamID uuid.UUID
+	err := s.db.QueryRow(ctx, artifactOwningTeamReferenceSQL, input.ActorSubjectID, exactID, input.Reference).Scan(&teamID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Existing-but-ineligible and unknown references intentionally share one
+		// result so team slugs cannot become an authorization side channel.
+		return uuid.Nil, ErrResourceReferenceNotFound
+	}
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("resolve artifact owning team reference: %w", err)
+	}
+	return teamID, nil
+}
+
 const artifactOwnershipPreflightSQL = `
 WITH requested AS (
 	SELECT DISTINCT permission, resource_type, resource_id
@@ -171,6 +190,8 @@ WITH requested AS (
 	SELECT 'team'::text, membership.team_id FROM actor
 	JOIN fused_team_memberships membership ON membership.member_subject_id = actor.id
 	JOIN fused_teams team ON team.id = membership.team_id AND team.status = 'active'
+	UNION ALL
+	SELECT 'workspace'::text, workspace.id FROM workspace JOIN actor ON actor.active
 ), actor_grants AS (
 	SELECT DISTINCT permission.permission, binding.resource_type, binding.resource_id
 	FROM actor_principals principal
@@ -181,6 +202,14 @@ WITH requested AS (
 	SELECT DISTINCT permission.permission, binding.resource_type, binding.resource_id
 	FROM owning_team team
 	JOIN fused_role_bindings binding ON binding.subject_type = 'team' AND binding.subject_id = team.id
+	JOIN fused_roles role ON role.id = binding.role_id AND role.scope_type = binding.resource_type
+	JOIN fused_role_permissions permission ON permission.role_id = binding.role_id
+	UNION
+	-- Workspace shares make a resource eligible for every owning team without
+	-- transferring the owner's management authority to those teams.
+	SELECT DISTINCT permission.permission, binding.resource_type, binding.resource_id
+	FROM workspace
+	JOIN fused_role_bindings binding ON binding.subject_type = 'workspace' AND binding.subject_id = workspace.id
 	JOIN fused_roles role ON role.id = binding.role_id AND role.scope_type = binding.resource_type
 	JOIN fused_role_permissions permission ON permission.role_id = binding.role_id
 ), actor_access_manage AS (
@@ -219,6 +248,10 @@ WITH actor_principals(subject_type, subject_id) AS (
 	JOIN fused_subjects subject ON subject.id = membership.member_subject_id AND subject.status = 'active'
 	JOIN fused_teams team ON team.id = membership.team_id AND team.status = 'active'
 	WHERE membership.member_subject_id = $1
+	UNION ALL
+	SELECT 'workspace'::text, workspace.id FROM fused_workspaces workspace
+	JOIN fused_subjects subject ON subject.id = $1 AND subject.status = 'active'
+	WHERE workspace.singleton_key = 1
 ), actor_grants AS (
 	SELECT permission.permission, binding.resource_type, binding.resource_id
 	FROM actor_principals principal
@@ -233,18 +266,26 @@ WITH actor_principals(subject_type, subject_id) AS (
 	JOIN fused_roles role ON role.id = binding.role_id AND role.scope_type = binding.resource_type
 	JOIN fused_role_permissions permission ON permission.role_id = binding.role_id
 	WHERE team.id = $2 AND team.status = 'active' AND permission.permission = $3
+	UNION
+	SELECT permission.permission, binding.resource_type, binding.resource_id
+	FROM fused_workspaces workspace
+	JOIN fused_role_bindings binding ON binding.subject_type = 'workspace' AND binding.subject_id = workspace.id
+	JOIN fused_roles role ON role.id = binding.role_id AND role.scope_type = binding.resource_type
+	JOIN fused_role_permissions permission ON permission.role_id = binding.role_id
+	WHERE workspace.singleton_key = 1 AND permission.permission = $3
 ), owner_eligible AS (
 	SELECT EXISTS (
 		SELECT 1 FROM fused_subjects subject
-		JOIN fused_teams team ON team.id = $2 AND team.status = 'active'
 		WHERE subject.id = $1 AND subject.status = 'active' AND (
-			EXISTS (SELECT 1 FROM fused_team_memberships membership WHERE membership.team_id = $2 AND membership.member_subject_id = $1)
-			OR EXISTS (SELECT 1 FROM actor_principals principal
+			$2 = '00000000-0000-0000-0000-000000000000'::uuid
+			OR (EXISTS (SELECT 1 FROM fused_teams team WHERE team.id = $2 AND team.status = 'active') AND (
+				EXISTS (SELECT 1 FROM fused_team_memberships membership WHERE membership.team_id = $2 AND membership.member_subject_id = $1)
+				OR EXISTS (SELECT 1 FROM actor_principals principal
 				JOIN fused_role_bindings binding ON binding.subject_type = principal.subject_type AND binding.subject_id = principal.subject_id
 				JOIN fused_roles role ON role.id = binding.role_id AND role.scope_type = 'workspace'
 				JOIN fused_role_permissions permission ON permission.role_id = role.id AND permission.permission = 'access.manage'
 				JOIN fused_workspaces workspace ON workspace.singleton_key = 1 AND workspace.id = binding.resource_id
-				WHERE binding.resource_type = 'workspace')
+				WHERE binding.resource_type = 'workspace')))
 		)
 	) AS allowed
 ) `
@@ -258,8 +299,9 @@ filtered AS (
 		AND ($4 = '' OR service.service_name ILIKE '%' || $4 || '%')
 		AND EXISTS (SELECT 1 FROM actor_grants effective WHERE effective.resource_type = 'workspace'
 			OR (effective.resource_type = 'service' AND effective.resource_id = service.service_id))
-		AND EXISTS (SELECT 1 FROM team_grants effective WHERE effective.resource_type = 'workspace'
-			OR (effective.resource_type = 'service' AND effective.resource_id = service.service_id))
+		AND ($2 = '00000000-0000-0000-0000-000000000000'::uuid OR EXISTS (
+			SELECT 1 FROM team_grants effective WHERE effective.resource_type = 'workspace'
+				OR (effective.resource_type = 'service' AND effective.resource_id = service.service_id)))
 ), page AS (
 	SELECT * FROM filtered ORDER BY service_name, service_id LIMIT $5 OFFSET $6
 ), summary AS (SELECT COUNT(*)::int AS total FROM filtered)
@@ -274,15 +316,16 @@ filtered AS (
 		AND (SELECT allowed FROM owner_eligible)
 		AND EXISTS (SELECT 1 FROM actor_grants effective WHERE effective.resource_type = 'workspace'
 			OR (effective.resource_type = 'bucket' AND effective.resource_id = bucket.id))
-		AND EXISTS (SELECT 1 FROM team_grants effective WHERE effective.resource_type = 'workspace'
-			OR (effective.resource_type = 'bucket' AND effective.resource_id = bucket.id))
+		AND ($2 = '00000000-0000-0000-0000-000000000000'::uuid OR EXISTS (
+			SELECT 1 FROM team_grants effective WHERE effective.resource_type = 'workspace'
+				OR (effective.resource_type = 'bucket' AND effective.resource_id = bucket.id)))
 ), page AS (
 	SELECT * FROM filtered ORDER BY name, id LIMIT $5 OFFSET $6
 ), summary AS (SELECT COUNT(*)::int AS total FROM filtered)
 SELECT page.id, page.name, summary.total FROM summary LEFT JOIN page ON true
 ORDER BY page.name, page.id`
 
-const artifactOwningTeamSelectorSQL = `
+const artifactOwningTeamAuthorizationSQL = `
 WITH actor AS (
 	SELECT id FROM fused_subjects WHERE id = $1 AND status = 'active'
 ), actor_access_manage AS (
@@ -300,12 +343,9 @@ WITH actor AS (
 					JOIN fused_teams member_team ON member_team.id = membership.team_id AND member_team.status = 'active'
 				)))
 	) AS allowed
-)
-,
-filtered AS (
+), eligible AS (
 	SELECT team.id, team.name, team.slug FROM fused_teams team
-	WHERE team.status = 'active' AND ($2 = '' OR team.name ILIKE '%' || $2 || '%' OR team.slug ILIKE '%' || $2 || '%')
-		AND ((SELECT allowed FROM actor_access_manage) OR EXISTS (
+	WHERE team.status = 'active' AND ((SELECT allowed FROM actor_access_manage) OR EXISTS (
 			SELECT 1 FROM actor JOIN fused_team_memberships membership ON membership.member_subject_id = actor.id
 			WHERE membership.team_id = team.id
 		))
@@ -316,10 +356,20 @@ filtered AS (
 			JOIN fused_workspaces workspace ON workspace.singleton_key = 1 AND workspace.id = binding.resource_id
 			WHERE binding.subject_type = 'team' AND binding.subject_id = team.id AND binding.resource_type = 'workspace'
 		)
+)`
+
+const artifactOwningTeamSelectorSQL = artifactOwningTeamAuthorizationSQL + `
+, filtered AS (
+	SELECT * FROM eligible
+	WHERE $2 = '' OR name ILIKE '%' || $2 || '%' OR slug ILIKE '%' || $2 || '%'
 ), page AS (
 	SELECT * FROM filtered ORDER BY name, id LIMIT $3 OFFSET $4
 ), summary AS (SELECT COUNT(*)::int AS total FROM filtered)
 SELECT page.id, page.name, page.slug, summary.total FROM summary LEFT JOIN page ON true
 ORDER BY page.name, page.id`
+
+const artifactOwningTeamReferenceSQL = artifactOwningTeamAuthorizationSQL + `
+SELECT id FROM eligible WHERE id = $2 OR lower(slug) = lower($3)
+ORDER BY (id = $2) DESC LIMIT 1`
 
 var _ ArtifactAccessRepository = (*postgresStore)(nil)

@@ -61,8 +61,8 @@ func MCPConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 		span.SetAttributes(attribute.String("outcome", "success"), attribute.String("plan_id", result.plan.ID.String()))
 		writeJSON(w, map[string]any{
 			"plan_id": result.plan.ID.String(), "config_key": result.plan.ConfigKey,
-			"owner_team_id": result.plan.OwnerTeamID,
-			"source_hash":   result.plan.SourceHash, "base_generation": result.plan.BaseGeneration,
+			"owner_type":  planOwnerType(result.plan),
+			"source_hash": result.plan.SourceHash, "base_generation": result.plan.BaseGeneration,
 			"required_permissions": result.plan.RequiredPermissions,
 			"summary":              result.summary, "notifications": result.notifications,
 		})
@@ -130,7 +130,7 @@ func mcpConfigApplyResponse(planID uuid.UUID, result mcpConfigApplyResult) map[s
 // MCP documents so UI, CLI, and GraphQL cannot acquire different contracts.
 func decodeArtifactConfigPlanRequest(r *http.Request, kind string) (SDKConfigPlanRequest, sdkConfigDocument, error) {
 	var req SDKConfigPlanRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeOneStrictJSON(r.Body, &req); err != nil {
 		return req, sdkConfigDocument{}, errors.New("invalid request body")
 	}
 	if strings.TrimSpace(req.SourceHash) == "" || strings.TrimSpace(req.ConfigKey) == "" {
@@ -193,13 +193,13 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	if err != nil {
 		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to fetch config state"}
 	}
-	ownerTeamID, bucket, err := resolveArtifactPlanOwnerAndBucket(
-		ctx, configStore, s, call.request.ConfigKey, current, call.request.OwnerTeamID, call.document.Bucket,
+	owner, bucket, err := resolveArtifactPlanOwnerAndBucket(
+		ctx, s, current, call.actor, call.request.OwnerTeamSlug, call.document.Bucket,
 	)
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
-	call.request.OwnerTeamID = ownerTeamID
+	call.request.OwnerSubjectID, call.request.OwnerTeamID = owner.subjectID, owner.teamID
 	selections, services, resolved, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current), bucket.ID)
 	if err != nil {
 		return sdkPlanResult{}, err
@@ -229,13 +229,14 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	if err != nil {
 		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to compute required permissions"}
 	}
-	if err := preflightArtifactOwnership(ctx, s, call.actor, *ownerTeamID, existingArtifactID(current), requiredPermissions); err != nil {
+	if err := preflightArtifactOwnership(ctx, s, call.actor, owner, existingArtifactID(current), requiredPermissions); err != nil {
 		return sdkPlanResult{}, err
 	}
 	plan, err := configStore.CreateConfigPlan(ctx, store.CreateConfigPlanParams{
 		ConfigKey: call.request.ConfigKey, ConfigType: store.ConfigTypeMCP,
-		OwnerTeamID: call.request.OwnerTeamID,
-		SourceHash:  call.request.SourceHash, BaseGeneration: currentGeneration(current), Actions: []byte("[]"),
+		OwnerSubjectID: call.request.OwnerSubjectID,
+		OwnerTeamID:    call.request.OwnerTeamID,
+		SourceHash:     call.request.SourceHash, BaseGeneration: currentGeneration(current), Actions: []byte("[]"),
 		DesiredState: desiredState, ResolvedPayload: resolvedPayload, Blockers: []byte("[]"), Warnings: []byte("[]"),
 		RequiredPermissions: requiredPermissions,
 		CreatedBy:           call.accountID, SupersedeExisting: true,
@@ -307,7 +308,7 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 	runtimeID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(plan.ConfigKey))
 	selections, _ := json.Marshal(payload.Selections)
 	scope, err := artifactScopeForApply(persistArtifactScopeParams{
-		accountID: call.accountID, artifactID: runtimeID, ownerTeamID: planOwnerTeamID(plan), bucketID: payload.BucketID, bucketName: doc.Bucket,
+		accountID: call.accountID, artifactID: runtimeID, ownerSubjectID: planOwnerSubjectID(plan), ownerTeamID: planOwnerTeamID(plan), bucketID: payload.BucketID, bucketName: doc.Bucket,
 		selections: selections, scopeSchemaVersion: models.ArtifactScopeSchemaVersion,
 		kind: "mcp", name: doc.Name, version: doc.Version, configKey: plan.ConfigKey,
 	})

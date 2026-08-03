@@ -16,7 +16,7 @@ func (s *postgresStore) AddTeamMember(ctx context.Context, input TeamMemberMutat
 	if err := validateTeamMemberMutation(input); err != nil {
 		return MembershipMutationResult{}, recordTeamSpanError(span, err)
 	}
-	tx, err := s.beginTeamMutation(ctx, input.Actor)
+	tx, err := s.beginAccessMutation(ctx, input.Actor)
 	if err != nil {
 		return MembershipMutationResult{}, recordTeamSpanError(span, err)
 	}
@@ -59,7 +59,7 @@ func (s *postgresStore) AddTeamMemberByEmail(ctx context.Context, input AddTeamM
 	if err != nil {
 		return MembershipMutationResult{}, recordTeamSpanError(span, err)
 	}
-	tx, err := s.beginTeamMutation(ctx, input.Actor)
+	tx, err := s.beginAccessMutation(ctx, input.Actor)
 	if err != nil {
 		return MembershipMutationResult{}, recordTeamSpanError(span, err)
 	}
@@ -136,7 +136,7 @@ func (s *postgresStore) RemoveTeamMember(ctx context.Context, teamID, userID uui
 	if teamID == uuid.Nil || userID == uuid.Nil || validateMutationActor(actor) != nil {
 		return MembershipMutationResult{}, ErrInvalidTeamMembership
 	}
-	tx, err := s.beginTeamMutation(ctx, actor)
+	tx, err := s.beginAccessMutation(ctx, actor)
 	if err != nil {
 		return MembershipMutationResult{}, recordTeamSpanError(span, err)
 	}

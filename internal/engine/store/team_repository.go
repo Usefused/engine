@@ -121,6 +121,7 @@ func (e *TeamArchiveConflictError) Unwrap() error { return ErrTeamArchiveConflic
 type TeamRepository interface {
 	CreateTeam(context.Context, TeamMutation) (TeamMutationResult, error)
 	GetTeam(context.Context, uuid.UUID) (Team, error)
+	GetTeamBySlug(context.Context, string) (Team, error)
 	ListTeams(context.Context, TeamListOptions) ([]Team, int, error)
 	UpdateTeam(context.Context, uuid.UUID, TeamPatch) (TeamMutationResult, error)
 	ArchiveTeam(context.Context, uuid.UUID, MutationActor) (TeamMutationResult, error)
@@ -227,5 +228,6 @@ var teamRoleResourceTypes = map[string]accesscontrol.ResourceType{
 	accesscontrol.RoleBucketUser:      accesscontrol.ResourceBucket,
 	accesscontrol.RoleBucketManager:   accesscontrol.ResourceBucket,
 	accesscontrol.RoleArtifactReader:  accesscontrol.ResourceArtifact,
+	accesscontrol.RoleArtifactUser:    accesscontrol.ResourceArtifact,
 	accesscontrol.RoleArtifactManager: accesscontrol.ResourceArtifact,
 }

@@ -190,6 +190,11 @@ var allowedAuditMetadata = map[string]struct{}{
 	"credential_id":          {},
 	"membership_role":        {},
 	"created_user":           {},
+	// Artifact ownership is identity metadata, not credential material. These
+	// fields are emitted by the atomic scope transaction and must remain in the
+	// same allowlist used when records are read back through GraphQL.
+	"owner_type": {},
+	"owner_id":   {},
 }
 
 // SanitizeAuditMetadata returns a shallow copy after rejecting fields that

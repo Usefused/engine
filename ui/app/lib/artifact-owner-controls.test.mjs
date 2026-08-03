@@ -21,11 +21,12 @@ test("renders owning team and intersection-only bucket choices in product langua
   assert.doesNotMatch(html, /permission|binding|actor_allowed|team_allowed/i);
 });
 
-test("explains empty ownership and shared bucket choices", () => {
+test("explains personal ownership and shared bucket choices", () => {
   const noTeams = renderToStaticMarkup(createElement(ArtifactOwnerControls, {
     ownerTeams: [], ownerTeamId: "", buckets: [], bucketId: "", onOwnerTeamChange() {}, onBucketChange() {},
   }));
-  assert.match(noTeams, /Join an active team/i);
+	assert.match(noTeams, /Personal \(you\)/i);
+	assert.match(noTeams, /personal ownership still works/i);
 
   const noBuckets = renderToStaticMarkup(createElement(ArtifactOwnerControls, {
     ownerTeams: [{ id: "team-1", name: "Support", slug: "support" }], ownerTeamId: "team-1", buckets: [], bucketId: "", onOwnerTeamChange() {}, onBucketChange() {},

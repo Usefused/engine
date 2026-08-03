@@ -91,11 +91,11 @@ var (
 	ErrConfigJSONObjectRequired    = errors.New("config JSON payload must be an object")
 	ErrConfigJSONArrayRequired     = errors.New("config JSON payload must be an array")
 	ErrRequiredPermissions         = errors.New("required permissions must contain at least one valid permission scope")
-	ErrOwnerTeamRequired           = errors.New("owner team is required for artifact plans")
-	ErrOwnerTeamUnexpected         = errors.New("owner team is not valid for workspace plans")
+	ErrArtifactOwnerRequired       = errors.New("owner is required for artifact plans")
+	ErrArtifactOwnerUnexpected     = errors.New("owner is not valid for workspace plans")
 	ErrConfigPlanNotFound          = errors.New("config plan not found")
-	ErrConfigStateIdentityMismatch = errors.New("config type and owner team are immutable")
-	ErrConfigOwnerTeamInactive     = errors.New("config owner team is not active")
+	ErrConfigStateIdentityMismatch = errors.New("config type and owner are immutable")
+	ErrConfigOwnerInactive         = errors.New("config owner is not active")
 	ErrConfigPlanRevisionMismatch  = errors.New("config plan revision changed")
 	ErrConfigPlanApplyInProgress   = errors.New("config plan apply is in progress")
 	// ErrWorkspaceNotificationStatusInvalid guards
@@ -114,6 +114,7 @@ type ConfigState struct {
 	ID               uuid.UUID       `json:"id"`
 	ConfigKey        string          `json:"config_key"`
 	ConfigType       ConfigType      `json:"config_type"`
+	OwnerSubjectID   *uuid.UUID      `json:"owner_subject_id,omitempty"`
 	OwnerTeamID      *uuid.UUID      `json:"owner_team_id,omitempty"`
 	SourceHash       string          `json:"source_hash"`
 	Generation       int             `json:"generation"`
@@ -129,6 +130,7 @@ type ConfigPlan struct {
 	ID                  uuid.UUID        `json:"id"`
 	ConfigKey           string           `json:"config_key"`
 	ConfigType          ConfigType       `json:"config_type"`
+	OwnerSubjectID      *uuid.UUID       `json:"owner_subject_id,omitempty"`
 	OwnerTeamID         *uuid.UUID       `json:"owner_team_id,omitempty"`
 	SourceHash          string           `json:"source_hash"`
 	BaseGeneration      int              `json:"base_generation"`
@@ -170,6 +172,7 @@ type WorkspaceNotification struct {
 type UpsertConfigStateParams struct {
 	ConfigKey        string
 	ConfigType       ConfigType
+	OwnerSubjectID   *uuid.UUID
 	OwnerTeamID      *uuid.UUID
 	SourceHash       string
 	DesiredState     json.RawMessage
@@ -192,6 +195,7 @@ type CreateWorkspaceNotificationParams struct {
 type CreateConfigPlanParams struct {
 	ConfigKey           string
 	ConfigType          ConfigType
+	OwnerSubjectID      *uuid.UUID
 	OwnerTeamID         *uuid.UUID
 	SourceHash          string
 	BaseGeneration      int
@@ -256,7 +260,6 @@ type ApplyWebhookConfigPlanResult struct {
 type ConfigRepository interface {
 	GetConfigState(ctx context.Context, configKey string) (*ConfigState, error)
 	GetConfigStatesByKeys(ctx context.Context, configKeys []string) (map[string]ConfigState, error)
-	ResolveArtifactOwnerTeam(ctx context.Context, configKey string) (uuid.UUID, error)
 	ListConfigStates(ctx context.Context, configType ConfigType) ([]ConfigState, error)
 	UpsertConfigState(ctx context.Context, params UpsertConfigStateParams) (*ConfigState, error)
 	CreateConfigPlan(ctx context.Context, params CreateConfigPlanParams) (*ConfigPlan, error)
@@ -300,7 +303,7 @@ func (r *postgresConfigRepository) GetConfigState(ctx context.Context, configKey
 	}
 
 	row := r.db.QueryRow(ctx, `
-		SELECT id, config_key, config_type, owner_team_id, source_hash, generation,
+		SELECT id, config_key, config_type, owner_subject_id, owner_team_id, source_hash, generation,
 		       desired_state, managed_resources, latest_resource_id, updated_by,
 		       created_at, updated_at
 		FROM fused_config_states
@@ -315,7 +318,7 @@ func (r *postgresConfigRepository) GetConfigStatesByKeys(ctx context.Context, co
 		return states, nil
 	}
 	rows, err := r.db.Query(ctx, `
-		SELECT id, config_key, config_type, owner_team_id, source_hash, generation,
+		SELECT id, config_key, config_type, owner_subject_id, owner_team_id, source_hash, generation,
 		       desired_state, managed_resources, latest_resource_id, updated_by, created_at, updated_at
 		FROM fused_config_states WHERE config_key = ANY($1)
 	`, configKeys)
@@ -333,32 +336,12 @@ func (r *postgresConfigRepository) GetConfigStatesByKeys(ctx context.Context, co
 	return states, rows.Err()
 }
 
-// ResolveArtifactOwnerTeam gives every artifact kind, including webhooks that
-// have no runtime scope row, one SQL-owned immutable ownership lookup.
-func (r *postgresConfigRepository) ResolveArtifactOwnerTeam(ctx context.Context, configKey string) (uuid.UUID, error) {
-	if strings.TrimSpace(configKey) == "" {
-		return uuid.Nil, ErrConfigKeyRequired
-	}
-	var ownerTeamID uuid.UUID
-	err := r.db.QueryRow(ctx, `
-		SELECT owner_team_id FROM fused_config_states
-		WHERE config_key = $1 AND config_type IN ('sdk', 'mcp', 'webhook')
-	`, strings.TrimSpace(configKey)).Scan(&ownerTeamID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, ErrConfigPlanNotFound
-	}
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("resolve artifact owner team: %w", err)
-	}
-	return ownerTeamID, nil
-}
-
 func (r *postgresConfigRepository) ListConfigStates(ctx context.Context, configType ConfigType) ([]ConfigState, error) {
 	if !validConfigType(configType) {
 		return nil, ErrConfigTypeInvalid
 	}
 	rows, err := r.db.Query(ctx, `
-		SELECT id, config_key, config_type, owner_team_id, source_hash, generation,
+		SELECT id, config_key, config_type, owner_subject_id, owner_team_id, source_hash, generation,
 		       desired_state, managed_resources, latest_resource_id, updated_by,
 		       created_at, updated_at
 		FROM fused_config_states
@@ -421,12 +404,13 @@ func applyConfigPlanTx(ctx context.Context, tx pgx.Tx, params ApplyConfigPlanPar
 	if err := lockConfigGeneration(ctx, tx, params); err != nil {
 		return nil, err
 	}
-	ownerTeamID, err := loadApplyOwnerTeam(ctx, tx, params)
+	ownerSubjectID, ownerTeamID, err := loadApplyOwner(ctx, tx, params)
 	if err != nil {
 		return nil, err
 	}
 	// Apply ownership is read from the locked plan. A request cannot replace
-	// the team selected and authorized during planning.
+	// the actor or team selected and authorized during planning.
+	params.State.OwnerSubjectID = ownerSubjectID
 	params.State.OwnerTeamID = ownerTeamID
 	if err := validateStateParams(&params.State); err != nil {
 		return nil, err
@@ -469,16 +453,17 @@ func (r *postgresConfigRepository) ApplyWebhookConfigPlan(ctx context.Context, p
 }
 
 func applyWebhookConfigPlanTx(ctx context.Context, tx pgx.Tx, params ApplyWebhookConfigPlanParams) (*ApplyWebhookConfigPlanResult, error) {
-	if err := lockActiveWebhookOwnerTeam(ctx, tx, params.Plan); err != nil {
+	if err := lockActiveWebhookOwner(ctx, tx, params.Plan); err != nil {
 		return nil, err
 	}
 	if err := lockConfigGeneration(ctx, tx, params.Plan); err != nil {
 		return nil, err
 	}
-	ownerTeamID, err := loadApplyOwnerTeam(ctx, tx, params.Plan)
+	ownerSubjectID, ownerTeamID, err := loadApplyOwner(ctx, tx, params.Plan)
 	if err != nil {
 		return nil, err
 	}
+	params.Plan.State.OwnerSubjectID = ownerSubjectID
 	params.Plan.State.OwnerTeamID = ownerTeamID
 
 	saved, err := reconcileWebhookRegistrations(ctx, tx, params)
@@ -559,15 +544,15 @@ func validateWebhookSecretBinding(registration WorkspaceWebhook) error {
 	return nil
 }
 
-func lockActiveWebhookOwnerTeam(ctx context.Context, tx pgx.Tx, params ApplyConfigPlanParams) error {
-	var ownerTeamID uuid.UUID
+func lockActiveWebhookOwner(ctx context.Context, tx pgx.Tx, params ApplyConfigPlanParams) error {
+	var ownerSubjectID, ownerTeamID *uuid.UUID
 	err := tx.QueryRow(ctx, `
-		SELECT plan.owner_team_id
+		SELECT plan.owner_subject_id, plan.owner_team_id
 		FROM fused_config_plans plan
 		WHERE plan.id = $1 AND plan.config_key = $2 AND plan.config_type = 'webhook'
 		  AND plan.source_hash = $3 AND plan.base_generation = $4
 		  AND plan.status = 'pending' AND plan.revision = $5
-	`, params.PlanID, params.State.ConfigKey, params.State.SourceHash, params.BaseGeneration, params.ExpectedRevision).Scan(&ownerTeamID)
+	`, params.PlanID, params.State.ConfigKey, params.State.SourceHash, params.BaseGeneration, params.ExpectedRevision).Scan(&ownerSubjectID, &ownerTeamID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrConfigPlanNotFound
 	}
@@ -575,15 +560,21 @@ func lockActiveWebhookOwnerTeam(ctx context.Context, tx pgx.Tx, params ApplyConf
 		return fmt.Errorf("ApplyWebhookConfigPlan: load owner team: %w", err)
 	}
 	var active bool
-	err = tx.QueryRow(ctx, `SELECT status = 'active' FROM fused_teams WHERE id = $1 FOR UPDATE`, ownerTeamID).Scan(&active)
+	if ownerSubjectID != nil {
+		err = tx.QueryRow(ctx, `SELECT status = 'active' FROM fused_subjects WHERE id = $1 FOR UPDATE`, ownerSubjectID).Scan(&active)
+	} else {
+		err = tx.QueryRow(ctx, `SELECT status = 'active' FROM fused_teams WHERE id = $1 FOR UPDATE`, ownerTeamID).Scan(&active)
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrConfigOwnerTeamInactive
+		return ErrConfigOwnerInactive
 	}
 	if err != nil {
-		return fmt.Errorf("ApplyWebhookConfigPlan: lock owner team: %w", err)
+		return fmt.Errorf("ApplyWebhookConfigPlan: lock owner: %w", err)
 	}
-	if !active {
-		return ErrConfigOwnerTeamInactive
+	// A suspended personal owner cannot publish a new webhook. Existing
+	// webhooks remain manageable by administrators or explicitly shared teams.
+	if !active && (ownerTeamID != nil || params.BaseGeneration == 0) {
+		return ErrConfigOwnerInactive
 	}
 	return nil
 }
@@ -660,16 +651,17 @@ func prepareArtifactApplyTx(ctx context.Context, tx pgx.Tx, params *ApplyArtifac
 	if err := lockConfigGeneration(ctx, tx, params.Plan); err != nil {
 		return err
 	}
-	ownerTeamID, err := loadApplyOwnerTeam(ctx, tx, params.Plan)
+	ownerSubjectID, ownerTeamID, err := loadApplyOwner(ctx, tx, params.Plan)
 	if err != nil {
 		return err
 	}
-	if ownerTeamID == nil || *ownerTeamID != params.Scope.OwnerTeamID {
-		return ErrArtifactOwnerTeamMismatch
+	if !equalOwner(ownerSubjectID, ownerTeamID, optionalUUID(params.Scope.OwnerSubjectID), optionalUUID(params.Scope.OwnerTeamID)) {
+		return ErrArtifactOwnerMismatch
 	}
 	if err := verifyAuthorizedArtifactBucketTx(ctx, tx, params.Scope.BucketID, params.AuthorizedBucketName); err != nil {
 		return err
 	}
+	params.Plan.State.OwnerSubjectID = ownerSubjectID
 	params.Plan.State.OwnerTeamID = ownerTeamID
 	return validateStateParams(&params.Plan.State)
 }
@@ -725,7 +717,7 @@ func validateArtifactApplyParams(params ApplyArtifactConfigPlanParams) error {
 }
 
 func validateArtifactApplyScopeIdentity(scope ArtifactScope, bucketName string) error {
-	if scope.AccountID == uuid.Nil || scope.ArtifactID == uuid.Nil || scope.OwnerTeamID == uuid.Nil {
+	if scope.AccountID == uuid.Nil || scope.ArtifactID == uuid.Nil || !validArtifactOwner(optionalUUID(scope.OwnerSubjectID), optionalUUID(scope.OwnerTeamID)) {
 		return errors.New("artifact scope identity is required")
 	}
 	if scope.BucketID == uuid.Nil || strings.TrimSpace(bucketName) == "" {
@@ -752,22 +744,22 @@ func insertArtifactTokenTx(ctx context.Context, tx pgx.Tx, params ApplyArtifactC
 	return nil
 }
 
-func loadApplyOwnerTeam(ctx context.Context, tx pgx.Tx, params ApplyConfigPlanParams) (*uuid.UUID, error) {
-	var ownerTeamID *uuid.UUID
+func loadApplyOwner(ctx context.Context, tx pgx.Tx, params ApplyConfigPlanParams) (*uuid.UUID, *uuid.UUID, error) {
+	var ownerSubjectID, ownerTeamID *uuid.UUID
 	err := tx.QueryRow(ctx, `
-		SELECT owner_team_id FROM fused_config_plans
+		SELECT owner_subject_id, owner_team_id FROM fused_config_plans
 		WHERE id = $1 AND config_key = $2 AND config_type = $3
 			AND source_hash = $4 AND base_generation = $5 AND status = 'pending'
 			AND revision = $6
 		FOR UPDATE
-	`, params.PlanID, params.State.ConfigKey, params.State.ConfigType, params.State.SourceHash, params.BaseGeneration, params.ExpectedRevision).Scan(&ownerTeamID)
+	`, params.PlanID, params.State.ConfigKey, params.State.ConfigType, params.State.SourceHash, params.BaseGeneration, params.ExpectedRevision).Scan(&ownerSubjectID, &ownerTeamID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrConfigPlanRevisionMismatch
+		return nil, nil, ErrConfigPlanRevisionMismatch
 	}
 	if err != nil {
-		return nil, fmt.Errorf("ApplyConfigPlan: load owner team: %w", err)
+		return nil, nil, fmt.Errorf("ApplyConfigPlan: load owner: %w", err)
 	}
-	return ownerTeamID, nil
+	return ownerSubjectID, ownerTeamID, nil
 }
 
 type configQueryRower interface {
@@ -779,10 +771,10 @@ type configQueryRower interface {
 func upsertConfigState(ctx context.Context, q configQueryRower, params UpsertConfigStateParams) (*ConfigState, error) {
 	row := q.QueryRow(ctx, `
 		INSERT INTO fused_config_states (
-			config_key, config_type, owner_team_id, source_hash, desired_state,
+			config_key, config_type, owner_subject_id, owner_team_id, source_hash, desired_state,
 			managed_resources, latest_resource_id, updated_by
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (config_key) DO UPDATE SET
 			source_hash = EXCLUDED.source_hash,
 			generation = fused_config_states.generation + 1,
@@ -792,11 +784,12 @@ func upsertConfigState(ctx context.Context, q configQueryRower, params UpsertCon
 			updated_by = EXCLUDED.updated_by,
 			updated_at = NOW()
 		WHERE fused_config_states.config_type = EXCLUDED.config_type
+		  AND fused_config_states.owner_subject_id IS NOT DISTINCT FROM EXCLUDED.owner_subject_id
 		  AND fused_config_states.owner_team_id IS NOT DISTINCT FROM EXCLUDED.owner_team_id
-		RETURNING id, config_key, config_type, owner_team_id, source_hash, generation,
+		RETURNING id, config_key, config_type, owner_subject_id, owner_team_id, source_hash, generation,
 		          desired_state, managed_resources, latest_resource_id, updated_by,
 		          created_at, updated_at
-	`, params.ConfigKey, params.ConfigType, params.OwnerTeamID, params.SourceHash, params.DesiredState,
+	`, params.ConfigKey, params.ConfigType, params.OwnerSubjectID, params.OwnerTeamID, params.SourceHash, params.DesiredState,
 		params.ManagedResources, params.LatestResourceID, params.UpdatedBy)
 	state, err := scanConfigState(row)
 	if err != nil {
@@ -888,18 +881,18 @@ func (r *postgresConfigRepository) CreateConfigPlan(ctx context.Context, params 
 
 func validatePlanOwnerConsistency(ctx context.Context, tx pgx.Tx, params CreateConfigPlanParams) error {
 	var existingType ConfigType
-	var existingOwnerTeamID *uuid.UUID
+	var existingOwnerSubjectID, existingOwnerTeamID *uuid.UUID
 	err := tx.QueryRow(ctx, `
-		SELECT config_type, owner_team_id FROM fused_config_states WHERE config_key = $1 FOR UPDATE
-	`, params.ConfigKey).Scan(&existingType, &existingOwnerTeamID)
+		SELECT config_type, owner_subject_id, owner_team_id FROM fused_config_states WHERE config_key = $1 FOR UPDATE
+	`, params.ConfigKey).Scan(&existingType, &existingOwnerSubjectID, &existingOwnerTeamID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("CreateConfigPlan: lock current ownership: %w", err)
 	}
-	if existingType != params.ConfigType || !equalOptionalUUID(existingOwnerTeamID, params.OwnerTeamID) {
-		return ErrArtifactOwnerTeamMismatch
+	if existingType != params.ConfigType || !equalOwner(existingOwnerSubjectID, existingOwnerTeamID, params.OwnerSubjectID, params.OwnerTeamID) {
+		return ErrArtifactOwnerMismatch
 	}
 	return nil
 }
@@ -909,6 +902,18 @@ func equalOptionalUUID(left, right *uuid.UUID) bool {
 		return left == nil && right == nil
 	}
 	return *left == *right
+}
+
+func equalOwner(leftSubject, leftTeam, rightSubject, rightTeam *uuid.UUID) bool {
+	return equalOptionalUUID(leftSubject, rightSubject) && equalOptionalUUID(leftTeam, rightTeam)
+}
+
+func optionalUUID(value uuid.UUID) *uuid.UUID {
+	if value == uuid.Nil {
+		return nil
+	}
+	copy := value
+	return &copy
 }
 
 func (r *postgresConfigRepository) GetConfigPlan(ctx context.Context, planID uuid.UUID) (*ConfigPlan, error) {
@@ -938,7 +943,7 @@ func (r *postgresConfigRepository) ReplaceConfigPlanActions(ctx context.Context,
 		SET actions = $2, required_permissions = $3, revision = revision + 1
 		WHERE id = $1 AND status = 'pending'
 		  AND (apply_lease_id IS NULL OR apply_lease_expires_at <= NOW())
-		RETURNING id, config_key, config_type, owner_team_id, source_hash, base_generation,
+		RETURNING id, config_key, config_type, owner_subject_id, owner_team_id, source_hash, base_generation,
 		          status, actions, desired_state, resolved_payload, blockers, warnings, required_permissions, revision,
 		          created_by, created_at, applied_at, superseded_at
 	`, planID, normalized, requiredPermissions)
@@ -1307,7 +1312,7 @@ func validateStateParams(params *UpsertConfigStateParams) error {
 	if err != nil {
 		return err
 	}
-	return validateConfigOwnerTeam(params.ConfigType, params.OwnerTeamID)
+	return validateConfigOwner(params.ConfigType, params.OwnerSubjectID, params.OwnerTeamID)
 }
 
 func validatePlanParams(params *CreateConfigPlanParams) error {
@@ -1334,24 +1339,30 @@ func validatePlanParams(params *CreateConfigPlanParams) error {
 	if err != nil {
 		return err
 	}
-	if err := validateConfigOwnerTeam(params.ConfigType, params.OwnerTeamID); err != nil {
+	if err := validateConfigOwner(params.ConfigType, params.OwnerSubjectID, params.OwnerTeamID); err != nil {
 		return err
 	}
 	params.RequiredPermissions, _, err = normalizeRequiredPermissions(params.RequiredPermissions)
 	return err
 }
 
-func validateConfigOwnerTeam(configType ConfigType, ownerTeamID *uuid.UUID) error {
+func validateConfigOwner(configType ConfigType, ownerSubjectID, ownerTeamID *uuid.UUID) error {
 	if configType == ConfigTypeWorkspace {
-		if ownerTeamID != nil {
-			return ErrOwnerTeamUnexpected
+		if ownerSubjectID != nil || ownerTeamID != nil {
+			return ErrArtifactOwnerUnexpected
 		}
 		return nil
 	}
-	if ownerTeamID == nil || *ownerTeamID == uuid.Nil {
-		return ErrOwnerTeamRequired
+	if !validArtifactOwner(ownerSubjectID, ownerTeamID) {
+		return ErrArtifactOwnerRequired
 	}
 	return nil
+}
+
+func validArtifactOwner(ownerSubjectID, ownerTeamID *uuid.UUID) bool {
+	subjectSet := ownerSubjectID != nil && *ownerSubjectID != uuid.Nil
+	teamSet := ownerTeamID != nil && *ownerTeamID != uuid.Nil
+	return subjectSet != teamSet
 }
 
 func normalizeRequiredPermissions(raw json.RawMessage) (json.RawMessage, int, error) {
@@ -1441,14 +1452,14 @@ func supersedePendingPlans(ctx context.Context, tx pgx.Tx, configKey string) err
 func insertConfigPlan(ctx context.Context, tx pgx.Tx, params CreateConfigPlanParams) (*ConfigPlan, error) {
 	row := tx.QueryRow(ctx, `
 		INSERT INTO fused_config_plans (
-			config_key, config_type, owner_team_id, source_hash, base_generation,
+			config_key, config_type, owner_subject_id, owner_team_id, source_hash, base_generation,
 			actions, desired_state, resolved_payload, blockers, warnings, required_permissions, created_by
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-		RETURNING id, config_key, config_type, owner_team_id, source_hash, base_generation,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		RETURNING id, config_key, config_type, owner_subject_id, owner_team_id, source_hash, base_generation,
 		          status, actions, desired_state, resolved_payload, blockers, warnings, required_permissions, revision,
 		          created_by, created_at, applied_at, superseded_at
-	`, params.ConfigKey, params.ConfigType, params.OwnerTeamID, params.SourceHash, params.BaseGeneration,
+	`, params.ConfigKey, params.ConfigType, params.OwnerSubjectID, params.OwnerTeamID, params.SourceHash, params.BaseGeneration,
 		params.Actions, params.DesiredState, params.ResolvedPayload, params.Blockers, params.Warnings, params.RequiredPermissions, params.CreatedBy)
 	plan, err := scanConfigPlan(row)
 	if err != nil {
@@ -1461,7 +1472,7 @@ func scanConfigState(row pgx.Row) (*ConfigState, error) {
 	var state ConfigState
 	var latestResourceID *uuid.UUID
 	if err := row.Scan(
-		&state.ID, &state.ConfigKey, &state.ConfigType, &state.OwnerTeamID, &state.SourceHash,
+		&state.ID, &state.ConfigKey, &state.ConfigType, &state.OwnerSubjectID, &state.OwnerTeamID, &state.SourceHash,
 		&state.Generation, &state.DesiredState, &state.ManagedResources, &latestResourceID,
 		&state.UpdatedBy, &state.CreatedAt, &state.UpdatedAt,
 	); err != nil {
@@ -1478,7 +1489,7 @@ func scanConfigPlan(row pgx.Row) (*ConfigPlan, error) {
 	var plan ConfigPlan
 	var appliedAt, supersededAt sql.NullTime
 	if err := row.Scan(
-		&plan.ID, &plan.ConfigKey, &plan.ConfigType, &plan.OwnerTeamID, &plan.SourceHash,
+		&plan.ID, &plan.ConfigKey, &plan.ConfigType, &plan.OwnerSubjectID, &plan.OwnerTeamID, &plan.SourceHash,
 		&plan.BaseGeneration, &plan.Status, &plan.Actions, &plan.DesiredState, &plan.ResolvedPayload,
 		&plan.Blockers, &plan.Warnings, &plan.RequiredPermissions, &plan.Revision, &plan.CreatedBy, &plan.CreatedAt,
 		&appliedAt, &supersededAt,
@@ -1514,7 +1525,7 @@ func nullableTime(value sql.NullTime) *time.Time {
 
 func selectConfigPlanSQL() string {
 	return `
-		SELECT id, config_key, config_type, owner_team_id, source_hash, base_generation,
+		SELECT id, config_key, config_type, owner_subject_id, owner_team_id, source_hash, base_generation,
 		       status, actions, desired_state, resolved_payload, blockers, warnings, required_permissions, revision,
 		       created_by, created_at, applied_at, superseded_at
 		FROM fused_config_plans`

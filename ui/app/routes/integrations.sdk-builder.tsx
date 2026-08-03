@@ -377,10 +377,6 @@ export default function SdkBuilder() {
   };
 
   async function loadData(pageNum: number, search = "") {
-    if (!ownerTeamId) {
-      processResponse([], 0);
-      return;
-    }
     setLoading(true);
     setError("");
     try {
@@ -455,18 +451,11 @@ export default function SdkBuilder() {
     listArtifactOwningTeams()
       .then((page) => {
         setOwnerTeams(page.items);
-        setOwnerTeamId((current) => current || page.items[0]?.id || "");
       })
       .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Could not load owning teams."));
   }, []);
 
   useEffect(() => {
-    if (!ownerTeamId) {
-      setAvailableBuckets([]);
-      setBucketId("");
-      processResponse([], 0);
-      return;
-    }
     setPage(1);
     Promise.all([
       loadData(1, query.trim()),
@@ -477,9 +466,9 @@ export default function SdkBuilder() {
     }).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Could not load team access."));
   }, [ownerTeamId]);
 
-  // Re-fetch authorized services when page changes.
+  // Re-fetch authorized services when page changes for both personal and team ownership.
   useEffect(() => {
-    if (ownerTeamId && page > 1) {
+    if (page > 1) {
       loadData(page, query.trim());
     }
   }, [page, ownerTeamId]);
@@ -832,13 +821,9 @@ export default function SdkBuilder() {
       return;
     }
 
-    if (!ownerTeamId) {
-      toast.warning("Choose the team that will own this SDK or MCP server.");
-      return;
-    }
     const selectedBucket = availableBuckets.find((bucket) => bucket.resource_id === bucketId);
     if (!selectedBucket) {
-      toast.warning("Choose a bucket available to both you and the owning team.");
+      toast.warning(ownerTeamId ? "Choose a bucket available to both you and the owning team." : "Choose a bucket you can use.");
       return;
     }
     const hasWebhookSelections = selectionPayload.some((selection) => selection.webhook_ids.length > 0);
@@ -857,6 +842,7 @@ export default function SdkBuilder() {
     setGenerating(true);
     setGenerateStatus("Starting generation...");
     try {
+      const ownerTeamSlug = ownerTeams.find((team) => team.id === ownerTeamId)?.slug || "";
       const services = artifactServicesConfig(selectionPayload, data);
       const config: Record<string, unknown> = {
         apiVersion: "fused/v1",
@@ -871,7 +857,7 @@ export default function SdkBuilder() {
 
       if (generationMode === "mcp") {
         setGenerateStatus("Deploying MCP server...");
-        const result = await planAndApplyArtifact<{ artifact_id: string; mcp_url: string; execution_token?: string }>("mcp", ownerTeamId, config);
+        const result = await planAndApplyArtifact<{ artifact_id: string; mcp_url: string; execution_token?: string }>("mcp", ownerTeamSlug, config);
         await syncWorkspacePinsAfterGenerate(selectionPayload);
         setMcpDeployment({ id: result.artifact_id, url: result.mcp_url, token: result.execution_token || "" });
         setGenerateStatus("MCP server deployed");
@@ -879,7 +865,7 @@ export default function SdkBuilder() {
       }
 
       setGenerateStatus("Planning and generating SDK...");
-      const res = await planAndApplyArtifact<{ job_id: string }>("sdk", ownerTeamId, config);
+      const res = await planAndApplyArtifact<{ job_id: string }>("sdk", ownerTeamSlug, config);
 
       const ctrl = new AbortController();
       const processGenerationStreamEvent = (
@@ -986,7 +972,7 @@ export default function SdkBuilder() {
               <button
                 data-track="search_services"
                 type="submit"
-                disabled={searching || !ownerTeamId}
+                disabled={searching}
                 className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 disabled:opacity-50 cursor-pointer"
                 title="Search"
               >
@@ -1020,10 +1006,10 @@ export default function SdkBuilder() {
               {filteredData.length === 0 ? (
                 <div className="text-center py-12 text-slate-400 bg-white rounded-xl border border-dashed border-slate-200">
                   <p className="font-medium text-slate-600">
-                    {!ownerTeamId ? "Choose an owning team to see available services." : query ? "No available services match your search." : "No shared services are available."}
+                    {query ? "No available services match your search." : ownerTeamId ? "No shared services are available." : "No services are available with your access."}
                   </p>
                   <p className="mt-1 text-sm">
-                    {ownerTeamId ? "Ask an access administrator to give both you and the team access." : "Ownership determines which services and buckets can be selected."}
+                    {ownerTeamId ? "Ask an access administrator to give both you and the team access." : "Ask a workspace administrator for access to the services and buckets you need."}
                   </p>
                 </div>
               ) : (
@@ -1431,7 +1417,7 @@ export default function SdkBuilder() {
                   <button
                     data-track="generate_sdk_or_mcp"
                     type="submit"
-                    disabled={generating || totalSelected === 0 || !sdkName.trim() || !ownerTeamId || !bucketId || totalSelectedServices > 10 || unactivatedSelectedServiceIds.length > 0}
+                    disabled={generating || totalSelected === 0 || !sdkName.trim() || !bucketId || totalSelectedServices > 10 || unactivatedSelectedServiceIds.length > 0}
                     className={`w-full py-3 px-4 ${generationMode === 'mcp' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-blue-600 hover:bg-blue-700'} disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl shadow-sm hover:shadow transition-all flex items-center justify-center gap-2 active:scale-[0.98]`}
                   >
                     {generating ? (

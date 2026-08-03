@@ -676,9 +676,9 @@ export const api = {
       return res.data;
     }),
 
-  artifactConfig: {
-    plan: <T>(kind: "sdk" | "mcp" | "webhook", input: {
-      owner_team_id: string;
+	artifactConfig: {
+		plan: <T>(kind: "sdk" | "mcp" | "webhook", input: {
+			owner_team?: string;
       config_key: string;
       source_hash: string;
       config: Record<string, unknown>;

@@ -140,12 +140,12 @@ func (s *postgresStore) SaveArtifactScope(ctx context.Context, scope ArtifactSco
 	if kind == "" {
 		kind = "sdk"
 	}
-	if scope.OwnerTeamID == uuid.Nil {
-		return ErrOwnerTeamRequired
+	if !validArtifactOwner(optionalUUID(scope.OwnerSubjectID), optionalUUID(scope.OwnerTeamID)) {
+		return ErrArtifactOwnerRequired
 	}
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.artifact.scope.persist")
 	defer span.End()
-	span.SetAttributes(attribute.String("artifact_id", scope.ArtifactID.String()), attribute.String("team_id", scope.OwnerTeamID.String()))
+	span.SetAttributes(attribute.String("artifact_id", scope.ArtifactID.String()), artifactOwnerSpanAttribute(scope))
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("save artifact scope: begin: %w", err)
@@ -164,11 +164,11 @@ func (s *postgresStore) SaveArtifactScope(ctx context.Context, scope ArtifactSco
 }
 
 func saveArtifactScopeTx(ctx context.Context, tx pgx.Tx, scope ArtifactScope, kind string) (bool, error) {
-	if err := validateArtifactOwnerTeam(ctx, tx, scope.OwnerTeamID); err != nil {
-		return false, err
-	}
 	created, err := insertArtifactScopeTx(ctx, tx, scope, kind)
 	if err != nil {
+		return false, err
+	}
+	if err := validateArtifactOwner(ctx, tx, scope, created); err != nil {
 		return false, err
 	}
 	if !created {
@@ -183,7 +183,7 @@ func saveArtifactScopeTx(ctx context.Context, tx pgx.Tx, scope ArtifactScope, ki
 	if err := linkArtifactBucketTx(ctx, tx, scope.ArtifactID, scope.BucketID); err != nil {
 		return false, err
 	}
-	bindingChanged, err := ensureArtifactOwnerBinding(ctx, tx, scope.OwnerTeamID, scope.ArtifactID)
+	bindingChanged, err := ensureArtifactOwnerBinding(ctx, tx, scope, scope.ArtifactID)
 	if err != nil {
 		return false, err
 	}
@@ -200,11 +200,11 @@ func saveArtifactScopeTx(ctx context.Context, tx pgx.Tx, scope ArtifactScope, ki
 func insertArtifactScopeTx(ctx context.Context, tx pgx.Tx, scope ArtifactScope, kind string) (bool, error) {
 	var created bool
 	err := tx.QueryRow(ctx, `
-		INSERT INTO fused_artifact_scopes (account_id, artifact_id, owner_team_id, scope_schema_version, selections, kind, name, version, config_key)
-		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''))
+		INSERT INTO fused_artifact_scopes (account_id, artifact_id, owner_subject_id, owner_team_id, scope_schema_version, selections, kind, name, version, config_key)
+		VALUES ($1, $2, NULLIF($3, '00000000-0000-0000-0000-000000000000'::uuid), NULLIF($4, '00000000-0000-0000-0000-000000000000'::uuid), $5, $6, $7, NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''))
 		ON CONFLICT (artifact_id) DO NOTHING
 		RETURNING true
-	`, scope.AccountID, scope.ArtifactID, scope.OwnerTeamID, scope.ScopeSchemaVersion, scope.Selections, kind, scope.Name, scope.Version, scope.ConfigKey).Scan(&created)
+	`, scope.AccountID, scope.ArtifactID, scope.OwnerSubjectID, scope.OwnerTeamID, scope.ScopeSchemaVersion, scope.Selections, kind, scope.Name, scope.Version, scope.ConfigKey).Scan(&created)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -217,19 +217,21 @@ func insertArtifactScopeTx(ctx context.Context, tx pgx.Tx, scope ArtifactScope, 
 func updateArtifactScopeTx(ctx context.Context, tx pgx.Tx, scope ArtifactScope, kind string) error {
 	tag, err := tx.Exec(ctx, `
 		UPDATE fused_artifact_scopes SET
-			selections = $9,
-			scope_schema_version = $4,
-			kind = $5,
-			name = COALESCE(NULLIF($6, ''), name),
-			version = COALESCE(NULLIF($7, ''), version),
-			config_key = COALESCE(NULLIF($8, ''), config_key)
-		WHERE artifact_id = $2 AND account_id = $1 AND owner_team_id = $3
-	`, scope.AccountID, scope.ArtifactID, scope.OwnerTeamID, scope.ScopeSchemaVersion, kind, scope.Name, scope.Version, scope.ConfigKey, scope.Selections)
+			selections = $10,
+			scope_schema_version = $5,
+			kind = $6,
+			name = COALESCE(NULLIF($7, ''), name),
+			version = COALESCE(NULLIF($8, ''), version),
+			config_key = COALESCE(NULLIF($9, ''), config_key)
+		WHERE artifact_id = $2 AND account_id = $1
+		  AND owner_subject_id IS NOT DISTINCT FROM NULLIF($3, '00000000-0000-0000-0000-000000000000'::uuid)
+		  AND owner_team_id IS NOT DISTINCT FROM NULLIF($4, '00000000-0000-0000-0000-000000000000'::uuid)
+	`, scope.AccountID, scope.ArtifactID, scope.OwnerSubjectID, scope.OwnerTeamID, scope.ScopeSchemaVersion, kind, scope.Name, scope.Version, scope.ConfigKey, scope.Selections)
 	if err != nil {
 		return fmt.Errorf("update artifact scope: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrArtifactOwnerTeamMismatch
+		return ErrArtifactOwnerMismatch
 	}
 	return nil
 }
@@ -287,9 +289,26 @@ func linkArtifactBucketTx(ctx context.Context, tx pgx.Tx, artifactID, bucketID u
 	return nil
 }
 
-func validateArtifactOwnerTeam(ctx context.Context, tx pgx.Tx, ownerTeamID uuid.UUID) error {
+func validateArtifactOwner(ctx context.Context, tx pgx.Tx, scope ArtifactScope, created bool) error {
+	if scope.OwnerSubjectID != uuid.Nil {
+		var active bool
+		err := tx.QueryRow(ctx, `SELECT status = 'active' FROM fused_subjects WHERE id = $1 FOR UPDATE`, scope.OwnerSubjectID).Scan(&active)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return accesscontrol.ErrAuthenticationRequired
+		}
+		if err != nil {
+			return fmt.Errorf("load artifact owner subject: %w", err)
+		}
+		// Suspending a person removes their effective grants, but must not brick
+		// an existing artifact that a workspace administrator or shared team can
+		// still manage. Only initial publication requires an active owner.
+		if created && !active {
+			return accesscontrol.ErrAuthenticationRequired
+		}
+		return nil
+	}
 	var status TeamStatus
-	if err := tx.QueryRow(ctx, `SELECT status FROM fused_teams WHERE id = $1 FOR UPDATE`, ownerTeamID).Scan(&status); errors.Is(err, pgx.ErrNoRows) {
+	if err := tx.QueryRow(ctx, `SELECT status FROM fused_teams WHERE id = $1 FOR UPDATE`, scope.OwnerTeamID).Scan(&status); errors.Is(err, pgx.ErrNoRows) {
 		return ErrTeamNotFound
 	} else if err != nil {
 		return fmt.Errorf("load artifact owner team: %w", err)
@@ -300,17 +319,21 @@ func validateArtifactOwnerTeam(ctx context.Context, tx pgx.Tx, ownerTeamID uuid.
 	return nil
 }
 
-func ensureArtifactOwnerBinding(ctx context.Context, tx pgx.Tx, teamID, artifactID uuid.UUID) (bool, error) {
+func ensureArtifactOwnerBinding(ctx context.Context, tx pgx.Tx, scope ArtifactScope, artifactID uuid.UUID) (bool, error) {
+	subjectType, subjectID := "subject", scope.OwnerSubjectID
+	if scope.OwnerTeamID != uuid.Nil {
+		subjectType, subjectID = "team", scope.OwnerTeamID
+	}
 	var inserted, roleExists bool
 	err := tx.QueryRow(ctx, `
-		WITH role AS (SELECT id FROM fused_roles WHERE slug = $3 AND scope_type = 'artifact'), inserted AS (
+		WITH role AS (SELECT id FROM fused_roles WHERE slug = $4 AND scope_type = 'artifact'), inserted AS (
 			INSERT INTO fused_role_bindings (subject_type, subject_id, role_id, resource_type, resource_id)
-			SELECT 'team', $1, role.id, 'artifact', $2 FROM role
+			SELECT $1, $2, role.id, 'artifact', $3 FROM role
 			ON CONFLICT (subject_type, subject_id, role_id, resource_type, resource_id) DO NOTHING
 			RETURNING true
 		)
 		SELECT COALESCE((SELECT true FROM inserted), false), EXISTS (SELECT 1 FROM role)
-	`, teamID, artifactID, accesscontrol.RoleArtifactManager).Scan(&inserted, &roleExists)
+	`, subjectType, subjectID, artifactID, accesscontrol.RoleArtifactManager).Scan(&inserted, &roleExists)
 	if err != nil {
 		return false, fmt.Errorf("ensure artifact owner binding: %w", err)
 	}
@@ -318,6 +341,24 @@ func ensureArtifactOwnerBinding(ctx context.Context, tx pgx.Tx, teamID, artifact
 		return false, errors.New("artifact manager role is unavailable")
 	}
 	return inserted, nil
+}
+
+func artifactOwnerType(scope ArtifactScope) string {
+	if scope.OwnerTeamID != uuid.Nil {
+		return "team"
+	}
+	return "subject"
+}
+
+func artifactOwnerID(scope ArtifactScope) uuid.UUID {
+	if scope.OwnerTeamID != uuid.Nil {
+		return scope.OwnerTeamID
+	}
+	return scope.OwnerSubjectID
+}
+
+func artifactOwnerSpanAttribute(scope ArtifactScope) attribute.KeyValue {
+	return attribute.String("owner."+artifactOwnerType(scope)+"_id", artifactOwnerID(scope).String())
 }
 
 func auditArtifactScopeSave(ctx context.Context, tx pgx.Tx, scope ArtifactScope, revision int64, created bool) error {
@@ -330,9 +371,10 @@ func auditArtifactScopeSave(ctx context.Context, tx pgx.Tx, scope ArtifactScope,
 		INSERT INTO fused_audit_events (actor_subject_id, actor_credential_id, action, permission,
 			resource_type, resource_id, trace_id, outcome, metadata)
 		VALUES ($1, $2, 'artifact.scope.persist', $3, 'artifact', $4, $5, 'succeeded',
-			jsonb_build_object('team_id', $6::text, 'authorization_revision', $7::bigint, 'changed', true))
+			jsonb_build_object('owner_type', $6::text, 'owner_id', $7::text,
+				'authorization_revision', $8::bigint, 'changed', true))
 	`, nullableUUID(actor.SubjectID), nullableUUID(actor.CredentialID), permission, scope.ArtifactID,
-		trace.SpanFromContext(ctx).SpanContext().TraceID().String(), scope.OwnerTeamID.String(), revision)
+		trace.SpanFromContext(ctx).SpanContext().TraceID().String(), artifactOwnerType(scope), artifactOwnerID(scope).String(), revision)
 	if err != nil {
 		return fmt.Errorf("audit artifact scope save: %w", err)
 	}
@@ -342,15 +384,22 @@ func auditArtifactScopeSave(ctx context.Context, tx pgx.Tx, scope ArtifactScope,
 // artifactScopeSelectColumns is shared by GetArtifactScope/ListArtifactScopes/
 // ListMCPScopesByAccount so their SELECT lists and Scan order can't drift
 // apart from each other.
-const artifactScopeSelectColumns = "s.account_id, s.artifact_id, s.owner_team_id, b.bucket_id, s.scope_schema_version, s.selections, s.deactivated_at, s.kind, s.name, s.version, s.config_key, s.created_at"
+const artifactScopeSelectColumns = "s.account_id, s.artifact_id, s.owner_subject_id, s.owner_team_id, b.bucket_id, s.scope_schema_version, s.selections, s.deactivated_at, s.kind, s.name, s.version, s.config_key, s.created_at"
 
 func scanArtifactScope(row pgx.Row) (*ArtifactScope, error) {
 	var scope ArtifactScope
 	var bucketID *uuid.UUID
 	var name *string
 	var version, configKey *string
-	if err := row.Scan(&scope.AccountID, &scope.ArtifactID, &scope.OwnerTeamID, &bucketID, &scope.ScopeSchemaVersion, &scope.Selections, &scope.DeactivatedAt, &scope.Kind, &name, &version, &configKey, &scope.CreatedAt); err != nil {
+	var ownerSubjectID, ownerTeamID *uuid.UUID
+	if err := row.Scan(&scope.AccountID, &scope.ArtifactID, &ownerSubjectID, &ownerTeamID, &bucketID, &scope.ScopeSchemaVersion, &scope.Selections, &scope.DeactivatedAt, &scope.Kind, &name, &version, &configKey, &scope.CreatedAt); err != nil {
 		return nil, err
+	}
+	if ownerSubjectID != nil {
+		scope.OwnerSubjectID = *ownerSubjectID
+	}
+	if ownerTeamID != nil {
+		scope.OwnerTeamID = *ownerTeamID
 	}
 	if bucketID != nil {
 		scope.BucketID = *bucketID
@@ -454,14 +503,23 @@ func (s *postgresStore) ListMCPScopesByAccount(ctx context.Context, accountID uu
 }
 
 func (s *postgresStore) ListAuthorizedMCPScopesByAccount(ctx context.Context, accountID uuid.UUID, scope accesscontrol.AuthorizedScope, limit, offset int) ([]ArtifactScope, int, error) {
+	return s.ListAuthorizedArtifactScopesByAccount(ctx, accountID, scope, "mcp", limit, offset)
+}
+
+func (s *postgresStore) ListAuthorizedArtifactScopesByAccount(ctx context.Context, accountID uuid.UUID, scope accesscontrol.AuthorizedScope, kind string, limit, offset int) ([]ArtifactScope, int, error) {
 	if !scope.All && len(scope.IDs) == 0 {
 		return nil, 0, nil
+	}
+	kind, valid := normalizeArtifactKind(kind)
+	if !valid {
+		return nil, 0, ErrInvalidArtifactKind
 	}
 	var total int
 	if err := s.db.QueryRow(ctx, `
 		SELECT COUNT(*) FROM fused_artifact_scopes
-		WHERE account_id = $1 AND kind = 'mcp' AND ($2 OR artifact_id = ANY($3::uuid[]))`,
-		accountID, scope.All, scope.IDs).Scan(&total); err != nil {
+		WHERE account_id = $1 AND ($2 = '' OR kind = $2)
+		  AND ($3 OR artifact_id = ANY($4::uuid[]))`,
+		accountID, kind, scope.All, scope.IDs).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	if total == 0 {
@@ -472,12 +530,12 @@ func (s *postgresStore) ListAuthorizedMCPScopesByAccount(ctx context.Context, ac
 		SELECT ` + artifactScopeSelectColumns + `
 		FROM fused_artifact_scopes s
 		LEFT JOIN fused_artifact_buckets b ON s.artifact_id = b.artifact_id
-		WHERE s.account_id = $1 AND s.kind = 'mcp'
-		  AND ($2 OR s.artifact_id = ANY($3::uuid[]))
+		WHERE s.account_id = $1 AND ($2 = '' OR s.kind = $2)
+		  AND ($3 OR s.artifact_id = ANY($4::uuid[]))
 		ORDER BY s.created_at DESC
-		LIMIT $4 OFFSET $5
+		LIMIT $5 OFFSET $6
 	`
-	rows, err := s.db.Query(ctx, query, accountID, scope.All, scope.IDs, limit, offset)
+	rows, err := s.db.Query(ctx, query, accountID, kind, scope.All, scope.IDs, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -493,6 +551,8 @@ func (s *postgresStore) ListAuthorizedMCPScopesByAccount(ctx context.Context, ac
 	}
 	return scopes, total, rows.Err()
 }
+
+var _ ArtifactPageRepository = (*postgresStore)(nil)
 
 func (s *postgresStore) GetMCPScopeByName(ctx context.Context, accountID uuid.UUID, name, version string) (*ArtifactScope, error) {
 	query := `

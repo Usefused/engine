@@ -17,8 +17,8 @@ func TestPermissionCatalogueContainsUniqueValidNames(t *testing.T) {
 		}
 		seen[permission] = struct{}{}
 	}
-	if len(permissions) != 28 {
-		t.Fatalf("permission catalogue contains %d entries, want 28", len(permissions))
+	if len(permissions) != 29 {
+		t.Fatalf("permission catalogue contains %d entries, want 29", len(permissions))
 	}
 }
 

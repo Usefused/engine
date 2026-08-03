@@ -38,7 +38,18 @@ type userGraphQLTestStore struct {
 	credentialMutation store.CredentialMutationResult
 	effectiveGrants    []store.EffectiveAccessGrant
 	effectiveRevision  int64
+	referenceIDs       map[string]uuid.UUID
+	referenceQueries   []store.ResourceReferenceQuery
 	err                error
+}
+
+func (s *userGraphQLTestStore) ResolveResourceReference(_ context.Context, query store.ResourceReferenceQuery) (uuid.UUID, error) {
+	s.referenceQueries = append(s.referenceQueries, query)
+	id, ok := s.referenceIDs[string(query.Kind)+":"+query.Value]
+	if !ok {
+		return uuid.Nil, store.ErrResourceReferenceNotFound
+	}
+	return id, nil
 }
 
 func (s *userGraphQLTestStore) called(operation string) { s.ensureCalls(); s.calls[operation]++ }
@@ -197,6 +208,22 @@ func TestUserGraphQLReadContractsExecuteAgainstSchema(t *testing.T) {
 				t.Fatalf("response = %d %s", response.Code, response.Body.String())
 			}
 		})
+	}
+}
+
+func TestUserGraphQLResolvesEmailBeforePointRead(t *testing.T) {
+	user, _, _ := testGraphQLUser()
+	s := &userGraphQLTestStore{
+		userResult: user,
+		referenceIDs: map[string]uuid.UUID{"user:" + strings.ToLower(user.Email): user.ID},
+	}
+	query := `query User($id:ID!){user(id:$id){id email}}`
+	response := executeUserGraphQL(t, s, actorWithTeamPermissions(t, accesscontrol.PermissionAccessRead), query, map[string]interface{}{"id": strings.ToLower(user.Email)}, nil)
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), `"errors"`) {
+		t.Fatalf("response = %d %s", response.Code, response.Body.String())
+	}
+	if s.lastUserID != user.ID || len(s.referenceQueries) != 1 || s.referenceQueries[0].Kind != store.ReferenceUser {
+		t.Fatalf("email resolution = user %s queries %#v", s.lastUserID, s.referenceQueries)
 	}
 }
 

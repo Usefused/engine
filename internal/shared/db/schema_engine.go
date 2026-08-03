@@ -84,6 +84,7 @@ func engineSchemaQueries() []string {
 			CONSTRAINT chk_fused_teams_status
 				CHECK (status IN ('active', 'archived'))
 		);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_teams_slug_ci ON fused_teams(lower(slug));`,
 		`CREATE TABLE IF NOT EXISTS fused_team_memberships (
 			team_id               uuid NOT NULL REFERENCES fused_teams(id) ON DELETE CASCADE,
 			member_subject_id     uuid NOT NULL REFERENCES fused_subjects(id) ON DELETE CASCADE,
@@ -114,6 +115,8 @@ func engineSchemaQueries() []string {
 		ON fused_control_credentials(key_hash) WHERE revoked_at IS NULL;`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_control_credentials_subject_recent
 		ON fused_control_credentials(subject_id, created_at DESC, id);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_control_credentials_active_name_ci
+		ON fused_control_credentials(subject_id, lower(name)) WHERE revoked_at IS NULL;`,
 
 		// Roles are stable permission bundles. A binding determines both the
 		// principal (or team) receiving the role and its resource boundary.
@@ -143,7 +146,7 @@ func engineSchemaQueries() []string {
 			created_by_subject_id uuid REFERENCES fused_subjects(id) ON DELETE SET NULL,
 			created_at            timestamptz NOT NULL DEFAULT NOW(),
 			CONSTRAINT chk_fused_role_bindings_subject_type
-				CHECK (subject_type IN ('subject', 'team')),
+				CHECK (subject_type IN ('subject', 'team', 'workspace')),
 			CONSTRAINT chk_fused_role_bindings_resource_type
 				CHECK (resource_type IN ('workspace', 'service', 'bucket', 'artifact')),
 			CONSTRAINT uq_fused_role_binding
@@ -210,6 +213,7 @@ func engineSchemaQueries() []string {
 			updated_at timestamptz DEFAULT NOW(),
 			CONSTRAINT uq_workspace_buckets UNIQUE (name)
 		);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_buckets_name_ci ON fused_buckets(lower(name));`,
 
 		// Connect auth config is bucket-scoped, not SDK-scoped. SDKs already
 		// attach to buckets, so this lets a regenerated or sibling SDK reuse
@@ -340,7 +344,11 @@ func engineSchemaQueries() []string {
 			id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 			account_id uuid NOT NULL,
 			artifact_id uuid UNIQUE NOT NULL,
-			owner_team_id uuid NOT NULL REFERENCES fused_teams(id) ON DELETE RESTRICT,
+			owner_subject_id uuid REFERENCES fused_subjects(id) ON DELETE RESTRICT,
+			owner_team_id uuid REFERENCES fused_teams(id) ON DELETE RESTRICT,
+			CONSTRAINT chk_fused_artifact_scopes_owner CHECK (
+				(owner_subject_id IS NOT NULL)::int + (owner_team_id IS NOT NULL)::int = 1
+			),
 			scope_schema_version integer NOT NULL DEFAULT 1,
 			selections jsonb NOT NULL,
 			deactivated_at timestamptz,
@@ -356,6 +364,15 @@ func engineSchemaQueries() []string {
 			version text,
 			config_key text
 		);`,
+		// SDK and MCP names are separate user-facing namespaces. Version remains
+		// part of the identity so a generated SDK can publish multiple releases.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_artifact_identity_ci
+		ON fused_artifact_scopes(kind, lower(name), COALESCE(version, '')) WHERE name IS NOT NULL;`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_artifact_reference_latest
+		ON fused_artifact_scopes(kind, lower(name), created_at DESC, artifact_id DESC)
+		WHERE name IS NOT NULL AND deactivated_at IS NULL;`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_artifact_scopes_subject_owner_kind
+		ON fused_artifact_scopes(owner_subject_id, kind, created_at DESC, artifact_id);`,
 
 		// MCP Sessions
 		`CREATE TABLE IF NOT EXISTS fused_mcp_sessions (
@@ -468,6 +485,8 @@ func engineSchemaQueries() []string {
 			created_at     timestamptz DEFAULT clock_timestamp(),
 			UNIQUE(service_id)
 		);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_workspace_services_slug_ci
+		ON fused_workspace_services(lower(service_slug)) WHERE service_slug IS NOT NULL;`,
 
 		// clock_timestamp() records enablement order inside a single transaction;
 		// NOW() would give every row in one apply the same timestamp.
@@ -617,6 +636,7 @@ func engineSchemaQueries() []string {
 			id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 			config_key        text NOT NULL,
 			config_type       text NOT NULL CHECK (config_type IN ('workspace', 'sdk', 'mcp', 'webhook')),
+			owner_subject_id  uuid REFERENCES fused_subjects(id) ON DELETE RESTRICT,
 			owner_team_id     uuid REFERENCES fused_teams(id) ON DELETE RESTRICT,
 			source_hash       text NOT NULL,
 			generation        integer NOT NULL DEFAULT 1 CHECK (generation >= 1),
@@ -627,17 +647,19 @@ func engineSchemaQueries() []string {
 			created_at        timestamptz DEFAULT NOW(),
 			updated_at        timestamptz DEFAULT NOW(),
 			UNIQUE(config_key),
-			CONSTRAINT chk_fused_config_states_owner_team CHECK (
-				(config_type = 'workspace' AND owner_team_id IS NULL) OR
-				(config_type IN ('sdk', 'mcp', 'webhook') AND owner_team_id IS NOT NULL)
+			CONSTRAINT chk_fused_config_states_owner CHECK (
+				(config_type = 'workspace' AND owner_subject_id IS NULL AND owner_team_id IS NULL) OR
+				(config_type IN ('sdk', 'mcp', 'webhook') AND
+				 (owner_subject_id IS NOT NULL)::int + (owner_team_id IS NOT NULL)::int = 1)
 			)
 		);`,
 		`CREATE OR REPLACE FUNCTION fused_reject_config_identity_change()
 		RETURNS trigger AS $$
 		BEGIN
 			IF OLD.config_type IS DISTINCT FROM NEW.config_type
+			   OR OLD.owner_subject_id IS DISTINCT FROM NEW.owner_subject_id
 			   OR OLD.owner_team_id IS DISTINCT FROM NEW.owner_team_id THEN
-				RAISE EXCEPTION 'config type and owner team are immutable' USING ERRCODE = '23514';
+				RAISE EXCEPTION 'config type and owner are immutable' USING ERRCODE = '23514';
 			END IF;
 			RETURN NEW;
 		END;
@@ -656,6 +678,7 @@ func engineSchemaQueries() []string {
 			id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 			config_key       text NOT NULL,
 			config_type      text NOT NULL CHECK (config_type IN ('workspace', 'sdk', 'mcp', 'webhook')),
+			owner_subject_id uuid REFERENCES fused_subjects(id) ON DELETE RESTRICT,
 			owner_team_id    uuid REFERENCES fused_teams(id) ON DELETE RESTRICT,
 			source_hash      text NOT NULL,
 			base_generation  integer NOT NULL DEFAULT 0 CHECK (base_generation >= 0),
@@ -674,15 +697,18 @@ func engineSchemaQueries() []string {
 			created_at       timestamptz DEFAULT NOW(),
 			applied_at       timestamptz,
 			superseded_at    timestamptz,
-			CONSTRAINT chk_fused_config_plans_owner_team CHECK (
-				(config_type = 'workspace' AND owner_team_id IS NULL) OR
-				(config_type IN ('sdk', 'mcp', 'webhook') AND owner_team_id IS NOT NULL)
+			CONSTRAINT chk_fused_config_plans_owner CHECK (
+				(config_type = 'workspace' AND owner_subject_id IS NULL AND owner_team_id IS NULL) OR
+				(config_type IN ('sdk', 'mcp', 'webhook') AND
+				 (owner_subject_id IS NOT NULL)::int + (owner_team_id IS NOT NULL)::int = 1)
 			)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_config_plans_workspace_key_created
 		ON fused_config_plans(config_key, created_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_config_plans_owner_status
 		ON fused_config_plans(owner_team_id, status, created_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_config_plans_subject_owner_status
+		ON fused_config_plans(owner_subject_id, status, created_at DESC);`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_fused_config_plans_one_pending
 		ON fused_config_plans(config_key)
 		WHERE status = 'pending';`,
@@ -965,7 +991,6 @@ func engineMigrationQueries() []string {
 		WHERE name IS NOT NULL AND version IS NOT NULL;`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_artifact_scopes_account_kind ON fused_artifact_scopes(account_id, kind, created_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_artifact_scopes_owner_kind ON fused_artifact_scopes(owner_team_id, kind, created_at DESC, artifact_id);`,
-
 		`ALTER TABLE fused_workspace_services ADD COLUMN IF NOT EXISTS service_slug text;`,
 
 		// These historical entries used to backfill fused_bucket_bindings

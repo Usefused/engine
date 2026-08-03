@@ -691,7 +691,6 @@ type mockConfigStore struct {
 	upserted          *store.UpsertConfigStateParams
 	notifications     []store.WorkspaceNotification
 	createdNotes      []store.CreateWorkspaceNotificationParams
-	ownerTeamID       uuid.UUID
 	artifactApply     *store.ApplyArtifactConfigPlanParams
 	artifactApplyErr  error
 	artifactScopeSink func(store.ArtifactScope) error
@@ -788,6 +787,7 @@ func (m *mockConfigStore) CreateConfigPlan(ctx context.Context, params store.Cre
 			Revision:            1,
 			ConfigKey:           params.ConfigKey,
 			ConfigType:          params.ConfigType,
+			OwnerSubjectID:      params.OwnerSubjectID,
 			OwnerTeamID:         params.OwnerTeamID,
 			SourceHash:          params.SourceHash,
 			BaseGeneration:      params.BaseGeneration,
@@ -798,23 +798,11 @@ func (m *mockConfigStore) CreateConfigPlan(ctx context.Context, params store.Cre
 			RequiredPermissions: params.RequiredPermissions,
 		}
 	}
-	if m.plan.OwnerTeamID == nil {
+	if m.plan.OwnerSubjectID == nil && m.plan.OwnerTeamID == nil {
+		m.plan.OwnerSubjectID = params.OwnerSubjectID
 		m.plan.OwnerTeamID = params.OwnerTeamID
 	}
 	return m.plan, m.err
-}
-
-func (m *mockConfigStore) ResolveArtifactOwnerTeam(context.Context, string) (uuid.UUID, error) {
-	if m.ownerTeamID != uuid.Nil {
-		return m.ownerTeamID, nil
-	}
-	if m.plan != nil && m.plan.OwnerTeamID != nil {
-		return *m.plan.OwnerTeamID, nil
-	}
-	if m.createdPlan != nil && m.createdPlan.OwnerTeamID != nil {
-		return *m.createdPlan.OwnerTeamID, nil
-	}
-	return uuid.Nil, store.ErrConfigPlanNotFound
 }
 
 func (m *mockConfigStore) GetConfigPlan(ctx context.Context, planID uuid.UUID) (*store.ConfigPlan, error) {
@@ -1208,6 +1196,26 @@ func TestWorkspaceConfigPlanHandler_ResolvesServiceSlugsInOneBatch(t *testing.T)
 	}
 	if resolved.Services["github"].ServiceID != githubID.String() {
 		t.Fatalf("expected github service_id %s, got %q", githubID, resolved.Services["github"].ServiceID)
+	}
+}
+
+func TestWorkspaceServiceSlugPersistsLocalIdentity(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		want string
+	}{
+		{name: "bare", key: "github", want: "github"},
+		{name: "provider qualified", key: "@acme/github", want: "github"},
+		{name: "uuid identity", key: "11111111-1111-4111-8111-111111111111", want: ""},
+		{name: "trimmed", key: "  github  ", want: "github"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := workspaceServiceSlug(test.key); got != test.want {
+				t.Fatalf("workspaceServiceSlug(%q) = %q, want %q", test.key, got, test.want)
+			}
+		})
 	}
 }
 

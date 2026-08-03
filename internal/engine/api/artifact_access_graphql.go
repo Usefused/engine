@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/graphql-go/graphql"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -58,7 +59,7 @@ func artifactBuildSelectorsGraphQLField(s store.Store) *graphql.Field {
 	return &graphql.Field{
 		Type: artifactBuildSelectorPageGraphQLType,
 		Args: graphql.FieldConfigArgument{
-			"owner_team_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.ID)},
+			"owner_team_id": &graphql.ArgumentConfig{Type: graphql.ID},
 			"resource_type": &graphql.ArgumentConfig{Type: graphql.NewNonNull(artifactSelectorResourceTypeGraphQLEnum)},
 			"search":        &graphql.ArgumentConfig{Type: graphql.String, DefaultValue: ""},
 			"limit":         &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 20},
@@ -71,21 +72,30 @@ func artifactBuildSelectorsGraphQLField(s store.Store) *graphql.Field {
 			if !ok {
 				return nil, accesscontrol.ErrAuthenticationRequired
 			}
-			ownerTeamID, err := requiredGraphQLUUIDArg(p, "owner_team_id")
+			repository, err := artifactAccessRepository(s)
 			if err != nil {
 				return nil, err
+			}
+			resolvedOwnerTeamID := uuid.Nil
+			ownerTeamReference := strings.TrimSpace(graphQLArgString(p, "owner_team_id"))
+			if ownerTeamReference != "" {
+				// Team-facing commands accept a stable slug as well as a UUID. Resolve
+				// it inside the actor-scoped repository so ineligible and unknown teams
+				// are indistinguishable and clients never list/filter teams themselves.
+				resolvedOwnerTeamID, err = repository.ResolveArtifactOwningTeamReference(ctx, store.ArtifactOwningTeamReferenceQuery{
+					ActorSubjectID: actor.SubjectID, Reference: ownerTeamReference,
+				})
+				if err != nil {
+					return nil, resourceReferenceGraphQLError(err)
+				}
 			}
 			resourceType, ok := p.Args["resource_type"].(accesscontrol.ResourceType)
 			if !ok {
 				return nil, errors.New("invalid resource_type")
 			}
 			limit, offset := bucketPageArgs(p)
-			repository, err := artifactAccessRepository(s)
-			if err != nil {
-				return nil, err
-			}
 			page, err := repository.ListArtifactBuildSelectors(ctx, store.ArtifactSelectorQuery{
-				ActorSubjectID: actor.SubjectID, OwnerTeamID: ownerTeamID, ResourceType: resourceType,
+				ActorSubjectID: actor.SubjectID, OwnerTeamID: resolvedOwnerTeamID, ResourceType: resourceType,
 				Search: strings.TrimSpace(graphQLArgString(p, "search")), Limit: limit, Offset: offset,
 			})
 			if err != nil {

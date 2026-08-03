@@ -94,13 +94,13 @@ test("filters null and partial missing requirements", () => {
   assert.doesNotMatch(error.message, /bucket\.read|undefined|null/);
 });
 
-test("explains missing or forged owner-team intent without internal identifiers", () => {
-  assert.equal(
-    apiErrorMessage(400, { error: "owner_team_id is required for a new artifact" }),
-    "Choose an owning team before creating this SDK, MCP server, or webhook."
-  );
-  assert.match(apiErrorMessage(409, { error: "artifact owner team is immutable" }), /already belongs to another team/);
-  assert.doesNotMatch(apiErrorMessage(409, { error: "artifact owner team is immutable" }), /owner_team_id|artifact\.manage/);
+test("explains invalid artifact ownership without internal identifiers", () => {
+	assert.equal(
+		apiErrorMessage(400, { error: "owner team was not found or is archived" }),
+		"Choose an active team, or use personal ownership."
+	);
+	assert.match(apiErrorMessage(409, { error: "artifact owner is immutable" }), /already has an owner/);
+	assert.doesNotMatch(apiErrorMessage(409, { error: "artifact owner is immutable" }), /owner_team_id|artifact\.manage/);
 });
 
 test("explains owning-team membership denial in plain language", () => {

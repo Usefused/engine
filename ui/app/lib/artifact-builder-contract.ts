@@ -25,14 +25,14 @@ export interface ArtifactBuildSelectorPage {
 
 export interface ArtifactPlanResponse {
   plan_id: string;
-  owner_team_id: string;
+  owner_type: "subject" | "team";
   config_key: string;
   source_hash: string;
   summary: Record<string, unknown>;
 }
 
 export interface ArtifactPlanInput {
-  owner_team_id: string;
+  owner_team?: string;
   config_key: string;
   source_hash: string;
   config: Record<string, unknown>;
@@ -53,7 +53,7 @@ export const ARTIFACT_BUILDER_OPERATIONS = {
     }
   `,
   selectors: `
-    query ArtifactBuildSelectors($ownerTeamId: ID!, $resourceType: ArtifactSelectorResourceType!, $search: String, $limit: Int!, $offset: Int!) {
+    query ArtifactBuildSelectors($ownerTeamId: ID, $resourceType: ArtifactSelectorResourceType!, $search: String, $limit: Int!, $offset: Int!) {
       artifactBuildSelectors(owner_team_id: $ownerTeamId, resource_type: $resourceType, search: $search, limit: $limit, offset: $offset) {
         total
         items {
@@ -72,17 +72,17 @@ export function artifactConfigKey(kind: ArtifactKind, config: Record<string, unk
 
 export function artifactPlanInput(
   kind: ArtifactKind,
-  ownerTeamId: string,
+  ownerTeamSlug: string,
   sourceHash: string,
   config: Record<string, unknown>,
 ): ArtifactPlanInput {
-  if (!ownerTeamId.trim()) throw new Error("Choose an owning team before continuing.");
-  return {
-    owner_team_id: ownerTeamId.trim(),
+	const input: ArtifactPlanInput = {
     config_key: artifactConfigKey(kind, config),
     source_hash: sourceHash,
     config,
   };
+	if (ownerTeamSlug.trim()) input.owner_team = ownerTeamSlug.trim();
+	return input;
 }
 
 export function artifactApplyInput(plan: ArtifactPlanResponse): ArtifactApplyInput {

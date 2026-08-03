@@ -320,7 +320,7 @@ func TestWebhookConfigPlanHandler_CreatesPlanForValidConfig(t *testing.T) {
 
 	body := []byte(`{
 		"source_hash": "abc",
-		"owner_team_id":"00000000-0000-0000-0000-000000000001",
+		"owner_team":"platform",
 		"config_key": "webhook:team-x",
 		"config": {
 			"apiVersion": "fused/v1",
@@ -401,7 +401,7 @@ func TestWebhookConfigPlanHandlerRequiresOwnerTeamBucketUseBeforePlan(t *testing
 	configStore := &mockConfigStore{}
 	router := newControlTestRouter(base.accountID)
 	router.Post("/webhook-config/plan", WebhookConfigPlanHandler(configStore, s, nil, nil))
-	body := `{"source_hash":"abc","owner_team_id":"00000000-0000-0000-0000-000000000001","config_key":"webhook:denied","config":{"apiVersion":"fused/v1","kind":"webhook","name":"denied","services":{"github":{"secret":"${bucket.production.secret.signing}"}}}}`
+	body := `{"source_hash":"abc","owner_team":"platform","config_key":"webhook:denied","config":{"apiVersion":"fused/v1","kind":"webhook","name":"denied","services":{"github":{"secret":"${bucket.production.secret.signing}"}}}}`
 	request := httptest.NewRequest(http.MethodPost, "/webhook-config/plan", strings.NewReader(body))
 	request.Header.Set("X-API-Key", "fsk_test")
 	response := httptest.NewRecorder()
@@ -433,7 +433,7 @@ func TestWebhookConfigPlanHandler_RejectsUnactivatedService(t *testing.T) {
 
 	body := []byte(`{
 		"source_hash": "abc",
-		"owner_team_id":"00000000-0000-0000-0000-000000000001",
+		"owner_team":"platform",
 		"config_key": "webhook:team-x",
 		"config": {
 			"apiVersion": "fused/v1",
@@ -470,7 +470,7 @@ func TestWebhookConfigPlanHandlerRejectsMissingSecretBucketWithoutPlan(t *testin
 	configStore := &mockConfigStore{}
 	router := newControlTestRouter(s.accountID)
 	router.Post("/webhook-config/plan", WebhookConfigPlanHandler(configStore, s, nil, nil))
-	body := `{"source_hash":"abc","owner_team_id":"00000000-0000-0000-0000-000000000001","config_key":"webhook:missing","config":{"apiVersion":"fused/v1","kind":"webhook","name":"missing","services":{"github":{"secret":"${bucket.absent.secret.signing}"}}}}`
+	body := `{"source_hash":"abc","owner_team":"platform","config_key":"webhook:missing","config":{"apiVersion":"fused/v1","kind":"webhook","name":"missing","services":{"github":{"secret":"${bucket.absent.secret.signing}"}}}}`
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/webhook-config/plan", strings.NewReader(body))
 	request.Header.Set("X-API-Key", "fsk_test")
@@ -503,7 +503,7 @@ func TestWebhookConfigPlanHandler_RejectsNameConflictWithOtherArtifact(t *testin
 
 	body := []byte(`{
 		"source_hash": "abc",
-		"owner_team_id":"00000000-0000-0000-0000-000000000001",
+		"owner_team":"platform",
 		"config_key": "webhook:team-x",
 		"config": {
 			"apiVersion": "fused/v1",

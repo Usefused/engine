@@ -50,6 +50,19 @@ type teamGraphQLTestStore struct {
 	clearTeamID       uuid.UUID
 	clearWorkspaceID  uuid.UUID
 	clearActor        store.MutationActor
+	workspaceShares   []store.WorkspaceShare
+	workspaceTotal    int
+	workspaceOptions  store.WorkspaceShareListOptions
+	workspaceGrant    store.WorkspaceShareMutationResult
+	workspaceRevoke   store.WorkspaceShareMutationResult
+	workspaceMutation store.WorkspaceShareMutation
+	referenceIDs      map[string]uuid.UUID
+	referenceQueries  []store.ResourceReferenceQuery
+}
+
+func (s *teamGraphQLTestStore) ResolveResourceReference(_ context.Context, query store.ResourceReferenceQuery) (uuid.UUID, error) {
+	s.referenceQueries = append(s.referenceQueries, query)
+	return s.referenceIDs[string(query.Kind)+":"+query.Value], nil
 }
 
 type teamRevisionSink struct {
@@ -84,6 +97,10 @@ func (s *teamGraphQLTestStore) GetTeam(_ context.Context, _ uuid.UUID) (store.Te
 	return s.getResult, s.getErr
 }
 
+func (s *teamGraphQLTestStore) GetTeamBySlug(_ context.Context, _ string) (store.Team, error) {
+	return s.getResult, s.getErr
+}
+
 func (s *teamGraphQLTestStore) ListTeams(_ context.Context, options store.TeamListOptions) ([]store.Team, int, error) {
 	s.listCalls++
 	s.listOptions = options
@@ -100,6 +117,21 @@ func (s *teamGraphQLTestStore) ListWorkspaceServiceVersionsForServices(context.C
 
 func (s *teamGraphQLTestStore) ListAuthorizedBucketSummaries(context.Context, accesscontrol.AuthorizedScope, int, int) ([]store.BucketSummary, int, error) {
 	return []store.BucketSummary{}, 0, nil
+}
+
+func (s *teamGraphQLTestStore) ListWorkspaceShares(_ context.Context, options store.WorkspaceShareListOptions) ([]store.WorkspaceShare, int, error) {
+	s.workspaceOptions = options
+	return s.workspaceShares, s.workspaceTotal, nil
+}
+
+func (s *teamGraphQLTestStore) GrantWorkspaceShare(_ context.Context, input store.WorkspaceShareMutation) (store.WorkspaceShareMutationResult, error) {
+	s.workspaceMutation = input
+	return s.workspaceGrant, nil
+}
+
+func (s *teamGraphQLTestStore) RevokeWorkspaceShare(_ context.Context, input store.WorkspaceShareMutation) (store.WorkspaceShareMutationResult, error) {
+	s.workspaceMutation = input
+	return s.workspaceRevoke, nil
 }
 
 func (s *teamGraphQLTestStore) UpdateTeam(_ context.Context, _ uuid.UUID, patch store.TeamPatch) (store.TeamMutationResult, error) {
@@ -317,6 +349,10 @@ func TestTeamBindingGraphQLUsesExactRolesAndWorkspaceScope(t *testing.T) {
 	if s.addCalls != 2 || s.lastBinding.RoleSlug != accesscontrol.RoleArtifactReader || s.lastBinding.Resource.Type != accesscontrol.ResourceArtifact || s.lastBinding.Resource.ID != serviceID {
 		t.Fatalf("artifact reader grant = %#v calls=%d", s.lastBinding, s.addCalls)
 	}
+	executeTeamGraphQL(t, s, actor, `mutation { grantTeamArtifactAccess(team_id:"`+teamID.String()+`",artifact_id:"`+serviceID.String()+`",level:USER) { changed } }`)
+	if s.addCalls != 3 || s.lastBinding.RoleSlug != accesscontrol.RoleArtifactUser {
+		t.Fatalf("artifact user grant = %#v calls=%d", s.lastBinding, s.addCalls)
+	}
 	executeTeamGraphQL(t, s, actor, `mutation { revokeTeamArtifactAccess(team_id:"`+teamID.String()+`",artifact_id:"`+serviceID.String()+`",level:MANAGER) { changed } }`)
 	if s.removeCalls != 2 || s.lastBinding.RoleSlug != accesscontrol.RoleArtifactManager || s.lastBinding.Resource.Type != accesscontrol.ResourceArtifact {
 		t.Fatalf("artifact manager revoke = %#v calls=%d", s.lastBinding, s.removeCalls)
@@ -466,6 +502,22 @@ func TestTeamAccessEditorClientQueryExecutesAgainstEngineSchema(t *testing.T) {
 	servicePage, ok := data["workspaceServicePage"].(map[string]interface{})
 	if !ok || servicePage["data"] == nil {
 		t.Fatalf("workspaceServicePage = %#v, want data field", data["workspaceServicePage"])
+	}
+}
+
+func TestTeamGraphQLResolvesSlugBeforePointRead(t *testing.T) {
+	team := testGraphQLTeam()
+	s := &teamGraphQLTestStore{
+		getResult:    team,
+		referenceIDs: map[string]uuid.UUID{"team:" + team.Slug: team.ID},
+	}
+	response := executeTeamGraphQLWithVariables(t, s, actorWithTeamPermissions(t, accesscontrol.PermissionAccessRead),
+		`query Team($id:ID!){team(id:$id){id slug}}`, map[string]interface{}{"id": team.Slug})
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), `"errors"`) {
+		t.Fatalf("response = %d %s", response.Code, response.Body.String())
+	}
+	if len(s.referenceQueries) != 1 || s.referenceQueries[0].Kind != store.ReferenceTeam {
+		t.Fatalf("slug resolution queries = %#v", s.referenceQueries)
 	}
 }
 

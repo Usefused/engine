@@ -105,8 +105,8 @@ func WebhookConfigPlanHandler(configStore store.ConfigRepository, s store.Store,
 		span.SetAttributes(attribute.String("outcome", "success"), attribute.String("plan_id", plan.ID.String()))
 		writeJSON(w, map[string]any{
 			"plan_id": plan.ID.String(), "config_key": plan.ConfigKey,
-			"owner_team_id": plan.OwnerTeamID,
-			"source_hash":   plan.SourceHash, "base_generation": plan.BaseGeneration,
+			"owner_type":  planOwnerType(plan),
+			"source_hash": plan.SourceHash, "base_generation": plan.BaseGeneration,
 			"required_permissions": plan.RequiredPermissions,
 			"summary":              summary,
 		})
@@ -171,7 +171,7 @@ func webhookConfigApplyResponse(planID uuid.UUID, result webhookConfigApplyResul
 // different contract for this kind.
 func decodeWebhookConfigPlanRequest(r *http.Request) (SDKConfigPlanRequest, webhookConfigDocument, error) {
 	var req SDKConfigPlanRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeOneStrictJSON(r.Body, &req); err != nil {
 		return req, webhookConfigDocument{}, fmt.Errorf("invalid request body")
 	}
 	if strings.TrimSpace(req.SourceHash) == "" || strings.TrimSpace(req.ConfigKey) == "" {
@@ -234,11 +234,11 @@ func createWebhookConfigPlan(ctx context.Context, configStore store.ConfigReposi
 	if err != nil {
 		return nil, nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to fetch config state"}
 	}
-	ownerTeamID, err := resolveArtifactPlanOwnerTeam(ctx, configStore, call.request.ConfigKey, current, call.request.OwnerTeamID)
+	owner, err := resolveArtifactPlanOwner(ctx, s, current, call.actor, call.request.OwnerTeamSlug)
 	if err != nil {
 		return nil, nil, err
 	}
-	call.request.OwnerTeamID = ownerTeamID
+	call.request.OwnerSubjectID, call.request.OwnerTeamID = owner.subjectID, owner.teamID
 	resolved, err := resolveWebhookServices(ctx, s, registryClient, call.apiKey, call.document)
 	if err != nil {
 		return nil, nil, err
@@ -250,13 +250,14 @@ func createWebhookConfigPlan(ctx context.Context, configStore store.ConfigReposi
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := preflightArtifactOwnership(ctx, s, call.actor, *ownerTeamID, existingArtifactID(current), requiredPermissions); err != nil {
+	if err := preflightArtifactOwnership(ctx, s, call.actor, owner, existingArtifactID(current), requiredPermissions); err != nil {
 		return nil, nil, err
 	}
 	plan, err := configStore.CreateConfigPlan(ctx, store.CreateConfigPlanParams{
 		ConfigKey: call.request.ConfigKey, ConfigType: store.ConfigTypeWebhook,
-		OwnerTeamID: call.request.OwnerTeamID,
-		SourceHash:  call.request.SourceHash, BaseGeneration: currentGeneration(current), Actions: []byte("[]"),
+		OwnerSubjectID: call.request.OwnerSubjectID,
+		OwnerTeamID:    call.request.OwnerTeamID,
+		SourceHash:     call.request.SourceHash, BaseGeneration: currentGeneration(current), Actions: []byte("[]"),
 		DesiredState: desiredState, ResolvedPayload: desiredState, Blockers: []byte("[]"), Warnings: []byte("[]"),
 		RequiredPermissions: requiredPermissions,
 		CreatedBy:           call.accountID, SupersedeExisting: true,
@@ -544,8 +545,9 @@ func commitWebhookConfigApply(ctx context.Context, configStore store.ConfigRepos
 		Plan: store.ApplyConfigPlanParams{
 			State: store.UpsertConfigStateParams{
 				ConfigKey: plan.ConfigKey, ConfigType: store.ConfigTypeWebhook,
-				OwnerTeamID: plan.OwnerTeamID,
-				SourceHash:  plan.SourceHash, DesiredState: plan.DesiredState, ManagedResources: []byte("{}"),
+				OwnerSubjectID: plan.OwnerSubjectID,
+				OwnerTeamID:    plan.OwnerTeamID,
+				SourceHash:     plan.SourceHash, DesiredState: plan.DesiredState, ManagedResources: []byte("{}"),
 				UpdatedBy: call.accountID,
 			},
 			PlanID: call.planID, BaseGeneration: plan.BaseGeneration, ExpectedRevision: call.planRevision,
@@ -553,8 +555,8 @@ func commitWebhookConfigApply(ctx context.Context, configStore store.ConfigRepos
 		Registrations: registrations, KeepServiceIDs: keepServiceIDs,
 	})
 	if err != nil {
-		if errors.Is(err, store.ErrConfigOwnerTeamInactive) || errors.Is(err, store.ErrConfigPlanRevisionMismatch) || errors.Is(err, store.ErrConfigPlanNotFound) || errors.Is(err, store.ErrWorkspaceWebhookOwnerConflict) || errors.Is(err, store.ErrArtifactOwnerTeamMismatch) || errors.Is(err, store.ErrConfigStateIdentityMismatch) {
-			return webhookConfigApplyResult{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "webhook plan is stale or owner team is inactive"}
+		if errors.Is(err, store.ErrConfigOwnerInactive) || errors.Is(err, store.ErrConfigPlanRevisionMismatch) || errors.Is(err, store.ErrConfigPlanNotFound) || errors.Is(err, store.ErrWorkspaceWebhookOwnerConflict) || errors.Is(err, store.ErrArtifactOwnerMismatch) || errors.Is(err, store.ErrConfigStateIdentityMismatch) {
+			return webhookConfigApplyResult{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "webhook plan is stale or its owner is inactive"}
 		}
 		return webhookConfigApplyResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to atomically apply webhook config"}
 	}

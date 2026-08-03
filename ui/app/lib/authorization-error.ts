@@ -120,13 +120,12 @@ export function advancedPermissionDiagnostics(requirements: PermissionRequiremen
 
 function artifactOwnerErrorMessage(code: string | undefined): string | null {
   switch (code) {
-    case "owner_team_id is required for a new artifact":
-      return "Choose an owning team before creating this SDK, MCP server, or webhook.";
-    case "artifact owner team is immutable":
-    case "sdk scope owner mismatch":
-      return "This artifact already belongs to another team. Choose its existing owning team; ownership cannot be changed during apply.";
+    case "artifact owner is immutable":
+      return "This resource already has an owner. Keep its existing personal or team ownership.";
     case "artifact owner is unavailable":
-      return "The artifact's owning team is no longer available. Ask an access administrator for help.";
+      return "The resource owner is no longer available. Ask a workspace administrator for help.";
+    case "owner team was not found or is archived":
+      return "Choose an active team, or use personal ownership.";
     case "artifact owner authorization denied":
       return "You or the owning team no longer have the access required to complete this action.";
     default:

@@ -22,6 +22,20 @@ type artifactAccessGraphQLStore struct {
 	decision      store.ArtifactOwnershipDecision
 	preflight     store.ArtifactOwnershipPreflight
 	preflightErr  error
+	teamBySlug    store.Team
+	teamBySlugErr error
+	resolvedID    uuid.UUID
+	referenceCall store.ArtifactOwningTeamReferenceQuery
+	referenceErr  error
+}
+
+func (s *artifactAccessGraphQLStore) GetTeamBySlug(context.Context, string) (store.Team, error) {
+	return s.teamBySlug, s.teamBySlugErr
+}
+
+func (s *artifactAccessGraphQLStore) ResolveArtifactOwningTeamReference(_ context.Context, query store.ArtifactOwningTeamReferenceQuery) (uuid.UUID, error) {
+	s.referenceCall = query
+	return s.resolvedID, s.referenceErr
 }
 
 // Existing handler fixtures predate artifact ownership. Their Owner actor is
@@ -37,6 +51,10 @@ func (s *workspaceTestStore) ListArtifactBuildSelectors(context.Context, store.A
 
 func (s *workspaceTestStore) ListArtifactOwningTeams(context.Context, store.ActorTeamSelectorQuery) (store.ArtifactOwningTeamPage, error) {
 	return store.ArtifactOwningTeamPage{}, nil
+}
+
+func (s *workspaceTestStore) ResolveArtifactOwningTeamReference(context.Context, store.ArtifactOwningTeamReferenceQuery) (uuid.UUID, error) {
+	return uuid.Nil, store.ErrResourceReferenceNotFound
 }
 
 func (s *artifactAccessGraphQLStore) PreflightArtifactOwnership(_ context.Context, input store.ArtifactOwnershipPreflight) (store.ArtifactOwnershipDecision, error) {
@@ -60,6 +78,7 @@ func TestArtifactAccessGraphQLSelectorsUseOneRepositoryCallPerAggregate(t *testi
 	actor := controlTestOwnerActor(uuid.New())
 	teamID, serviceID := uuid.New(), uuid.New()
 	repository := &artifactAccessGraphQLStore{
+		resolvedID: teamID,
 		selectorPage: store.ArtifactSelectorPage{Items: []store.ArtifactBuildSelector{{
 			Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: serviceID}, DisplayName: "GitHub",
 		}}, Total: 1},
@@ -89,6 +108,67 @@ func TestArtifactAccessGraphQLSelectorsUseOneRepositoryCallPerAggregate(t *testi
 	}
 	if repository.teamQuery.ActorSubjectID != actor.SubjectID {
 		t.Fatalf("team query actor = %s, want %s", repository.teamQuery.ActorSubjectID, actor.SubjectID)
+	}
+}
+
+func TestArtifactAccessGraphQLSelectorsDefaultToPersonalOwner(t *testing.T) {
+	actor := controlTestOwnerActor(uuid.New())
+	repository := &artifactAccessGraphQLStore{selectorPage: store.ArtifactSelectorPage{Items: []store.ArtifactBuildSelector{}, Total: 0}}
+	schema, err := newMCPGraphQLSchema(nil, repository, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("new schema: %v", err)
+	}
+	result := graphql.Do(graphql.Params{
+		Schema: schema, RequestString: `{ artifactBuildSelectors(resource_type:SERVICE,limit:10,offset:0){total} }`,
+		Context: accesscontrol.ContextWithActor(context.Background(), actor),
+	})
+	if len(result.Errors) != 0 {
+		t.Fatalf("GraphQL errors: %#v", result.Errors)
+	}
+	if repository.selectorCalls != 1 || repository.selectorQuery.ActorSubjectID != actor.SubjectID || repository.selectorQuery.OwnerTeamID != uuid.Nil {
+		t.Fatalf("personal selector query = %#v", repository.selectorQuery)
+	}
+}
+
+func TestArtifactAccessGraphQLSelectorsResolveOwnerTeamSlug(t *testing.T) {
+	actor := controlTestOwnerActor(uuid.New())
+	teamID := uuid.New()
+	repository := &artifactAccessGraphQLStore{resolvedID: teamID, selectorPage: store.ArtifactSelectorPage{Items: []store.ArtifactBuildSelector{}}}
+	schema, err := newMCPGraphQLSchema(nil, repository, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("new schema: %v", err)
+	}
+	result := graphql.Do(graphql.Params{
+		Schema: schema, RequestString: `{ artifactBuildSelectors(owner_team_id:"platform",resource_type:BUCKET){total} }`,
+		Context: accesscontrol.ContextWithActor(context.Background(), actor),
+	})
+	if len(result.Errors) != 0 {
+		t.Fatalf("GraphQL errors: %#v", result.Errors)
+	}
+	if repository.referenceCall.ActorSubjectID != actor.SubjectID || repository.referenceCall.Reference != "platform" {
+		t.Fatalf("reference query = %#v", repository.referenceCall)
+	}
+	if repository.selectorCalls != 1 || repository.selectorQuery.OwnerTeamID != teamID {
+		t.Fatalf("selector query = %#v", repository.selectorQuery)
+	}
+}
+
+func TestArtifactAccessGraphQLSelectorsDoNotRevealIneligibleTeamSlugs(t *testing.T) {
+	actor := controlTestOwnerActor(uuid.New())
+	repository := &artifactAccessGraphQLStore{referenceErr: store.ErrResourceReferenceNotFound}
+	schema, err := newMCPGraphQLSchema(nil, repository, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("new schema: %v", err)
+	}
+	result := graphql.Do(graphql.Params{
+		Schema: schema, RequestString: `{ artifactBuildSelectors(owner_team_id:"private-team",resource_type:SERVICE){total} }`,
+		Context: accesscontrol.ContextWithActor(context.Background(), actor),
+	})
+	if len(result.Errors) != 1 || result.Errors[0].Message != "resource was not found; use its name, slug, email, or full UUID" {
+		t.Fatalf("GraphQL errors = %#v", result.Errors)
+	}
+	if repository.selectorCalls != 0 {
+		t.Fatalf("selector calls = %d, want 0", repository.selectorCalls)
 	}
 }
 
