@@ -4,7 +4,7 @@ import { getApiKey } from "~/lib/session";
 
 const PAGE_SIZE = 20;
 
-// usePaginatedWorkspaceNotifications backs the full /integrations/notifications
+// usePaginatedWorkspaceNotifications backs Activity's Notifications tab
 // page only (offset pagination, numbered pages -- see
 // plans/plan-service-changelog.md's Phase 4 pagination follow-up). Defaults
 // to "unread only" (pending rows) with a toggle to reveal acknowledged rows

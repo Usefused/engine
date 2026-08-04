@@ -8,6 +8,7 @@ interface ArtifactOwnerControlsProps {
   bucketId: string;
   onOwnerTeamChange: (teamId: string) => void;
   onBucketChange: (bucketId: string) => void;
+  onCreateCredential?: () => void;
 }
 
 export function ArtifactOwnerControls(props: ArtifactOwnerControlsProps): ReactElement {
@@ -52,7 +53,23 @@ function bucketControl(props: ArtifactOwnerControlsProps): ReactElement {
   return createElement(
     "div",
     null,
-    createElement("label", { className: "block text-sm font-medium text-slate-700 mb-1.5" }, "Credential set"),
+    createElement(
+      "div",
+      { className: "mb-1.5 flex items-center justify-between gap-3" },
+      createElement("label", { className: "block text-sm font-medium text-slate-700" }, "Credential set"),
+      props.onCreateCredential
+        ? createElement(
+            "button",
+            {
+              type: "button",
+              onClick: props.onCreateCredential,
+              className: "text-xs font-semibold text-blue-600 hover:text-blue-700 hover:underline",
+              "data-track": "create_builder_credential",
+            },
+            "Create credential"
+          )
+        : null
+    ),
     createElement(
       "select",
       {
@@ -68,6 +85,15 @@ function bucketControl(props: ArtifactOwnerControlsProps): ReactElement {
     ),
     props.buckets.length === 0
       ? createElement("p", { className: "mt-1.5 text-xs text-amber-700" }, props.ownerTeamId ? "You and this team do not share access to a credential set." : "You do not have access to a credential set.")
+      : null,
+    props.onCreateCredential
+      ? createElement(
+          "p",
+          { className: "mt-1.5 text-xs text-slate-500" },
+          props.ownerTeamId
+            ? "Create it in a new tab, then return here. Only sets shared with the owning team will appear."
+            : "Create it in a new tab, then return here; this list refreshes automatically."
+        )
       : null
   );
 }

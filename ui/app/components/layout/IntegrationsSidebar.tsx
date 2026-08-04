@@ -37,14 +37,14 @@ const AUTH_NAV_ITEMS: SidebarItem[] = [
     to: "/integrations/sdks",
     label: "Apps",
     Icon: Boxes,
-    isActive: (pathname, search) => pathname.startsWith("/integrations/sdks") || (pathname.startsWith("/integrations/sdk-builder") && search.get("tab") !== "mcp"),
+    isActive: (pathname, search) => pathname.startsWith("/integrations/sdks") || (pathname.startsWith("/integrations/builder") && search.get("tab") !== "mcp"),
     visible: (access) => hasAnyPermission(access, "artifact.read"),
   },
   {
     to: "/integrations/mcp",
     label: "MCP servers",
     Icon: Bot,
-    isActive: (pathname, search) => pathname.startsWith("/integrations/mcp") || (pathname.startsWith("/integrations/sdk-builder") && search.get("tab") === "mcp"),
+    isActive: (pathname, search) => pathname.startsWith("/integrations/mcp") || (pathname.startsWith("/integrations/builder") && search.get("tab") === "mcp"),
     visible: (access) => hasAnyPermission(access, "artifact.read"),
   },
   {
@@ -61,10 +61,10 @@ const AUTH_NAV_ITEMS: SidebarItem[] = [
     visible: (access) => hasWorkspacePermission(access, "access.read"),
   },
   {
-    to: "/integrations/observability",
+    to: "/integrations/activity",
     label: "Activity",
     Icon: Activity,
-    visible: (access) => hasAnyPermission(access, "artifact.read"),
+    visible: (access) => hasWorkspacePermission(access, "audit.read"),
   },
   { to: "/integrations/settings", label: "Settings", Icon: Settings, visible: (access) => hasWorkspacePermission(access, "account.read") },
 ];

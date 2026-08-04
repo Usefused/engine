@@ -50,6 +50,256 @@ function LanguageBadge({ targetLanguage }: { targetLanguage?: string }) {
   );
 }
 
+interface SdkRowProps {
+  sdk: SdkListItem;
+  selectedIds: string[];
+  setSelectedIds: React.Dispatch<React.SetStateAction<string[]>>;
+  onNavigate: (id: string) => void;
+  onUpgrade: (id: string, name: string) => void;
+  onDownload: (id: string, name: string, version: string) => void;
+  onDelete: (id: string, name: string) => void;
+}
+
+function SdkNameCell({ sdk }: { sdk: SdkListItem }) {
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <span className="block min-w-0 truncate font-semibold text-slate-900">{sdk.name}</span>
+      {sdk.target_type === "mcp" && (
+        <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-slate-200 text-slate-700 uppercase tracking-wider">
+          MCP
+        </span>
+      )}
+      {sdk.target_type === "sdk" && (
+        <LanguageBadge targetLanguage={sdk.target_language} />
+      )}
+    </div>
+  );
+}
+
+function SdkVersionBadges({ sdk }: { sdk: SdkListItem }) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-700 border border-slate-200">
+        {sdk.version}
+      </span>
+      {sdk.killed_at && (
+        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-500 border border-slate-200">
+          Killed
+        </span>
+      )}
+      {sdk.has_deprecated_endpoints && (
+        <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-700 border border-red-200 uppercase tracking-wider">
+          Deprecated Endpoints
+        </span>
+      )}
+      {sdk.has_update_available && (
+        <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-700 border border-green-200 uppercase tracking-wider">
+          Update Available
+        </span>
+      )}
+    </div>
+  );
+}
+
+interface SdkActionButtonsProps {
+  sdk: SdkListItem;
+  onUpgrade: (id: string, name: string) => void;
+  onDownload: (id: string, name: string, version: string) => void;
+  onDelete: (id: string, name: string) => void;
+}
+
+function SdkActionButtons({ sdk, onUpgrade, onDownload, onDelete }: SdkActionButtonsProps) {
+  return (
+    <div className="flex justify-end gap-1 sm:gap-2">
+      {sdk.has_update_available && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onUpgrade(sdk.id, sdk.name); }}
+          className="inline-flex h-8 w-8 md:w-auto items-center justify-center gap-1.5 md:px-3 md:py-1.5 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors shadow-sm cursor-pointer"
+          title="1-Click Upgrade"
+        >
+          <RefreshCw className="w-4 h-4" />
+          <span className="hidden md:inline">Upgrade</span>
+        </button>
+      )}
+      {sdk.is_downloadable ? (
+        <button
+          onClick={(e) => { e.stopPropagation(); onDownload(sdk.id, sdk.name, sdk.version); }}
+          className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors cursor-pointer"
+          title="Download SDK"
+        >
+          <Download className="w-4 h-4" />
+        </button>
+      ) : (
+        <button
+          disabled
+          className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-slate-400 bg-slate-100 rounded-lg cursor-not-allowed"
+          title="This SDK has expired and its files have been cleaned up."
+        >
+          <Download className="w-4 h-4" />
+        </button>
+      )}
+      <button
+        onClick={(e) => { e.stopPropagation(); onDelete(sdk.id, sdk.name); }}
+        className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors cursor-pointer"
+        title="Delete SDK"
+      >
+        <Trash2 className="w-4 h-4" />
+      </button>
+    </div>
+  );
+}
+
+interface SdkRowProps {
+  sdk: SdkListItem;
+  selectedIds: string[];
+  setSelectedIds: React.Dispatch<React.SetStateAction<string[]>>;
+  onNavigate: (id: string) => void;
+  onUpgrade: (id: string, name: string) => void;
+  onDownload: (id: string, name: string, version: string) => void;
+  onDelete: (id: string, name: string) => void;
+}
+
+function SdkRow({ sdk, selectedIds, setSelectedIds, onNavigate, onUpgrade, onDownload, onDelete }: SdkRowProps) {
+  const isSelected = selectedIds.includes(sdk.id);
+  const showCheckbox = selectedIds.length > 0 || isSelected;
+  return (
+    <tr
+      className="hover:bg-slate-50/50 transition-colors cursor-pointer group"
+      onClick={() => onNavigate(sdk.id)}
+    >
+      <td className="px-3 sm:px-6 py-4 min-w-0">
+        <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+          <div className="relative w-8 h-8 rounded shrink-0">
+            <div className={`absolute inset-0 z-10 bg-white/90 rounded flex items-center justify-center transition-opacity duration-200 ${showCheckbox ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}`} onClick={(e) => e.stopPropagation()}>
+              <input
+                type="checkbox"
+                className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
+                checked={isSelected}
+                onChange={() => {
+                  setSelectedIds(prev => prev.includes(sdk.id) ? prev.filter(i => i !== sdk.id) : [...prev, sdk.id]);
+                }}
+              />
+            </div>
+            <div className="absolute inset-0 w-8 h-8 rounded bg-blue-100 flex items-center justify-center text-blue-600">
+              <Package className="w-4 h-4" />
+            </div>
+          </div>
+          <SdkNameCell sdk={sdk} />
+        </div>
+      </td>
+      <td className="px-2 sm:px-6 py-4">
+        <SdkVersionBadges sdk={sdk} />
+      </td>
+      <td className="hidden md:table-cell px-6 py-4 text-slate-500 font-medium">
+        {sdk.downloads || 0}
+      </td>
+      <td className="hidden lg:table-cell px-6 py-4 text-slate-500">
+        {sdk.created_at ? new Date(sdk.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : ""}
+      </td>
+      <td className="px-2 sm:px-6 py-4 text-right">
+        <SdkActionButtons sdk={sdk} onUpgrade={onUpgrade} onDownload={onDownload} onDelete={onDelete} />
+      </td>
+    </tr>
+  );
+}
+
+interface SdkListContentProps {
+  loading: boolean;
+  searching: boolean;
+  sdks: SdkListItem[];
+  query: string;
+  selectedIds: string[];
+  setSelectedIds: React.Dispatch<React.SetStateAction<string[]>>;
+  navigate: (path: string) => void;
+  onUpgrade: (id: string, name: string) => void;
+  onDownload: (id: string, name: string, version: string) => void;
+  onDelete: (id: string, name: string) => void;
+}
+
+function SdkListContent({ loading, searching, sdks, query, selectedIds, setSelectedIds, navigate, onUpgrade, onDownload, onDelete }: SdkListContentProps) {
+  if (loading || searching) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 text-slate-400">
+        <Loader2 className="w-8 h-8 text-blue-500 animate-spin mb-4" />
+        <p className="animate-pulse font-medium text-slate-500">Loading SDKs...</p>
+      </div>
+    );
+  }
+  if (sdks.length === 0) {
+    return (
+      <div className="bg-white rounded-xl border border-slate-200 p-12 text-center">
+        <Package className="w-12 h-12 text-slate-300 mx-auto mb-4" />
+        <h3 className="text-lg font-medium text-slate-900 mb-1">
+          {query ? "No apps found" : "No apps yet"}
+        </h3>
+        <p className="text-slate-500 max-w-md mx-auto">
+          {query
+            ? "No apps match your search."
+            : "Create an app to give it reusable access to selected services and operations."}
+        </p>
+        {!query && (
+          <Link
+            to="/integrations/builder"
+            className="mt-5 inline-flex items-center gap-2 px-4 py-2 bg-slate-950 hover:bg-slate-800 text-white text-sm font-medium rounded-lg transition-colors shadow-sm cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            Create app
+          </Link>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 overflow-x-auto">
+      <table className="w-full table-fixed md:table-auto text-left text-sm whitespace-nowrap">
+        <thead className="bg-slate-50 border-b border-slate-200 text-slate-500">
+          <tr>
+            <th className="w-[55%] md:w-auto px-3 sm:px-6 py-4 font-medium">
+              <div className="flex items-center gap-3">
+                <div className="flex items-center justify-center w-8 h-8">
+                  <div className={`transition-opacity duration-200 ${selectedIds.length > 0 ? 'opacity-100' : 'opacity-0'}`}>
+                    <input
+                      type="checkbox"
+                      className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
+                      checked={selectedIds.length === sdks.length && sdks.length > 0}
+                      onChange={() => {
+                        if (selectedIds.length === sdks.length) {
+                          setSelectedIds([]);
+                        } else {
+                          setSelectedIds(sdks.map(s => s.id));
+                        }
+                      }}
+                    />
+                  </div>
+                </div>
+                <span>App</span>
+              </div>
+            </th>
+            <th className="w-[25%] md:w-auto px-2 sm:px-6 py-4 font-medium">Version</th>
+            <th className="hidden md:table-cell px-6 py-4 font-medium">Downloads</th>
+            <th className="hidden lg:table-cell px-6 py-4 font-medium">Date</th>
+            <th className="w-[20%] md:w-auto px-2 sm:px-6 py-4 font-medium text-right">Action</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {sdks.map((sdk) => (
+            <SdkRow
+              key={sdk.id}
+              sdk={sdk}
+              selectedIds={selectedIds}
+              setSelectedIds={setSelectedIds}
+              onNavigate={(id) => navigate(`/integrations/sdks/${id}`)}
+              onUpgrade={onUpgrade}
+              onDownload={onDownload}
+              onDelete={onDelete}
+            />
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export default function SdkHistory() {
   const toast = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -249,7 +499,7 @@ export default function SdkHistory() {
             </button>
           )}
           <Link
-            to="/integrations/sdk-builder"
+            to="/integrations/builder"
             className="inline-flex flex-1 sm:flex-none items-center justify-center gap-2 px-4 py-2 bg-slate-950 hover:bg-slate-800 text-white text-sm font-medium rounded-lg transition-colors shadow-sm cursor-pointer"
           >
             <Plus className="w-4 h-4" />
@@ -298,173 +548,18 @@ export default function SdkHistory() {
         </div>
       )}
 
-      {loading || searching ? (
-        <div className="flex flex-col items-center justify-center py-20 text-slate-400">
-          <Loader2 className="w-8 h-8 text-blue-500 animate-spin mb-4" />
-          <p className="animate-pulse font-medium text-slate-500">Loading SDKs...</p>
-        </div>
-      ) : sdks.length === 0 ? (
-        <div className="bg-white rounded-xl border border-slate-200 p-12 text-center">
-          <Package className="w-12 h-12 text-slate-300 mx-auto mb-4" />
-          <h3 className="text-lg font-medium text-slate-900 mb-1">
-            {query ? "No apps found" : "No apps yet"}
-          </h3>
-          <p className="text-slate-500 max-w-md mx-auto">
-            {query 
-              ? "No apps match your search."
-              : "Create an app to give it reusable access to selected services and operations."}
-          </p>
-          {!query && (
-            <Link
-              to="/integrations/sdk-builder"
-              className="mt-5 inline-flex items-center gap-2 px-4 py-2 bg-slate-950 hover:bg-slate-800 text-white text-sm font-medium rounded-lg transition-colors shadow-sm cursor-pointer"
-            >
-              <Plus className="w-4 h-4" />
-              Create app
-            </Link>
-          )}
-        </div>
-      ) : (
-        <div className="bg-white rounded-xl border border-slate-200 overflow-x-auto">
-          <table className="w-full table-fixed md:table-auto text-left text-sm whitespace-nowrap">
-            <thead className="bg-slate-50 border-b border-slate-200 text-slate-500">
-              <tr>
-                <th className="w-[55%] md:w-auto px-3 sm:px-6 py-4 font-medium">
-                  <div className="flex items-center gap-3">
-                    <div className="flex items-center justify-center w-8 h-8">
-                      <div className={`transition-opacity duration-200 ${selectedIds.length > 0 ? 'opacity-100' : 'opacity-0'}`}>
-                        <input
-                          type="checkbox"
-                          className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
-                          checked={selectedIds.length === sdks.length && sdks.length > 0}
-                          onChange={() => {
-                            if (selectedIds.length === sdks.length) {
-                              setSelectedIds([]);
-                            } else {
-                              setSelectedIds(sdks.map(s => s.id));
-                            }
-                          }}
-                        />
-                      </div>
-                    </div>
-                    <span>App</span>
-                  </div>
-                </th>
-                <th className="w-[25%] md:w-auto px-2 sm:px-6 py-4 font-medium">Version</th>
-                <th className="hidden md:table-cell px-6 py-4 font-medium">Downloads</th>
-                <th className="hidden lg:table-cell px-6 py-4 font-medium">Date</th>
-                <th className="w-[20%] md:w-auto px-2 sm:px-6 py-4 font-medium text-right">Action</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {sdks.map((sdk) => (
-                <tr
-                  key={sdk.id}
-                  className="hover:bg-slate-50/50 transition-colors cursor-pointer group"
-                  onClick={() => navigate(`/integrations/sdks/${sdk.id}`)}
-                >
-                  <td className="px-3 sm:px-6 py-4 min-w-0">
-                    <div className="flex min-w-0 items-center gap-2 sm:gap-3">
-                      <div className="relative w-8 h-8 rounded shrink-0">
-                        <div className={`absolute inset-0 z-10 bg-white/90 rounded flex items-center justify-center transition-opacity duration-200 ${selectedIds.length > 0 || selectedIds.includes(sdk.id) ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}`} onClick={(e) => e.stopPropagation()}>
-                          <input
-                            type="checkbox"
-                            className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
-                            checked={selectedIds.includes(sdk.id)}
-                            onChange={() => {
-                              setSelectedIds(prev => prev.includes(sdk.id) ? prev.filter(i => i !== sdk.id) : [...prev, sdk.id]);
-                            }}
-                          />
-                        </div>
-                        <div className="absolute inset-0 w-8 h-8 rounded bg-blue-100 flex items-center justify-center text-blue-600">
-                          <Package className="w-4 h-4" />
-                        </div>
-                      </div>
-                      <div className="flex min-w-0 items-center gap-2">
-                        <span className="block min-w-0 truncate font-semibold text-slate-900">{sdk.name}</span>
-                        {sdk.target_type === "mcp" && (
-                          <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-slate-200 text-slate-700 uppercase tracking-wider">
-                            MCP
-                          </span>
-                        )}
-                        {sdk.target_type === "sdk" && (
-                          <LanguageBadge targetLanguage={sdk.target_language} />
-                        )}
-                      </div>
-                    </div>
-                  </td>
-                  <td className="px-2 sm:px-6 py-4">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-700 border border-slate-200">
-                        {sdk.version}
-                      </span>
-                      {sdk.killed_at && (
-                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-500 border border-slate-200">
-                          Killed
-                        </span>
-                      )}
-                      {sdk.has_deprecated_endpoints && (
-                        <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-700 border border-red-200 uppercase tracking-wider">
-                          Deprecated Endpoints
-                        </span>
-                      )}
-                      {sdk.has_update_available && (
-                        <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-700 border border-green-200 uppercase tracking-wider">
-                          Update Available
-                        </span>
-                      )}
-                    </div>
-                  </td>
-                  <td className="hidden md:table-cell px-6 py-4 text-slate-500 font-medium">
-                    {sdk.downloads || 0}
-                  </td>
-                  <td className="hidden lg:table-cell px-6 py-4 text-slate-500">
-                    {sdk.created_at ? new Date(sdk.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : ""}
-                  </td>
-                  <td className="px-2 sm:px-6 py-4 text-right">
-                    <div className="flex justify-end gap-1 sm:gap-2">
-                      {sdk.has_update_available && (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleUpgrade(sdk.id, sdk.name); }}
-                          className="inline-flex h-8 w-8 md:w-auto items-center justify-center gap-1.5 md:px-3 md:py-1.5 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors shadow-sm cursor-pointer"
-                          title="1-Click Upgrade"
-                        >
-                          <RefreshCw className="w-4 h-4" />
-                          <span className="hidden md:inline">Upgrade</span>
-                        </button>
-                      )}
-                      {sdk.is_downloadable ? (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleDownload(sdk.id, sdk.name, sdk.version); }}
-                          className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors cursor-pointer"
-                          title="Download SDK"
-                        >
-                          <Download className="w-4 h-4" />
-                        </button>
-                      ) : (
-                        <button
-                          disabled
-                          className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-slate-400 bg-slate-100 rounded-lg cursor-not-allowed"
-                          title="This SDK has expired and its files have been cleaned up."
-                        >
-                          <Download className="w-4 h-4" />
-                        </button>
-                      )}
-                      <button
-                        onClick={(e) => { e.stopPropagation(); handleDelete(sdk.id, sdk.name); }}
-                        className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors cursor-pointer"
-                        title="Delete SDK"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <SdkListContent
+        loading={loading}
+        searching={searching}
+        sdks={sdks}
+        query={query}
+        selectedIds={selectedIds}
+        setSelectedIds={setSelectedIds}
+        navigate={navigate}
+        onUpgrade={handleUpgrade}
+        onDownload={handleDownload}
+        onDelete={handleDelete}
+      />
     </div>
   );
 }

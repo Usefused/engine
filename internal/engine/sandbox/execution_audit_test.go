@@ -40,9 +40,10 @@ func TestRecordEngineExecutionAuditPublishesCompactSafeEvent(t *testing.T) {
 	serviceID := uuid.New()
 	operationID := uuid.New()
 	artifactID := uuid.New()
+	accountID := uuid.New()
 	startedAt := time.Now().Add(-25 * time.Millisecond)
 	recordEngineExecutionAudit(ctx, trace.SpanFromContext(ctx), executionAuditState{
-		artifactID: artifactID, endpointName: "repos.list", startedAt: startedAt,
+		artifactID: artifactID, accountID: accountID, endpointName: "repos.list", startedAt: startedAt,
 		match: &scopedEndpoint{
 			service: &fusedobject.ServiceMetadata{ID: serviceID}, serviceVersionID: "version-1",
 			endpoint: fusedobject.Endpoint{ID: operationID, Method: "GET", NormalizedPath: "/repos"},
@@ -58,7 +59,32 @@ func TestRecordEngineExecutionAuditPublishesCompactSafeEvent(t *testing.T) {
 	if err := json.Unmarshal(capture.message.Data, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	assertCompactSafeExecutionEvent(t, envelope.Event, artifactID, serviceID, operationID)
+	assertCompactSafeExecutionEvent(t, envelope.Event, artifactID, accountID, serviceID, operationID)
+}
+
+// TestRecordEngineExecutionAuditRequiresAccountIDForActivityVisibility guards
+// the exact regression this bug was: models.EngineExecutionEvent.AccountID
+// must be populated from executionAuditState.accountID, or the event is
+// stored with a NULL account_id and becomes permanently invisible to
+// GetWorkspaceExecutionAnalytics -- a successful execution that never shows
+// up on the Activity page, with no error anywhere in the path.
+func TestRecordEngineExecutionAuditRequiresAccountIDForActivityVisibility(t *testing.T) {
+	capture := &captureJetStreamPublisher{}
+	executionevent.SetPublisher(executionevent.NewPublisher(capture))
+	defer executionevent.SetPublisher(nil)
+
+	accountID := uuid.New()
+	recordEngineExecutionAudit(context.Background(), trace.SpanFromContext(context.Background()), executionAuditState{
+		artifactID: uuid.New(), accountID: accountID, endpointName: "repos.list", startedAt: time.Now(),
+	}, nil)
+
+	var envelope models.EngineExecutionEventEnvelope
+	if err := json.Unmarshal(capture.message.Data, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Event.AccountID != accountID {
+		t.Fatalf("event.AccountID = %s, want %s (Activity page would show \"No calls\" for this account)", envelope.Event.AccountID, accountID)
+	}
 }
 
 func TestRecordEngineExecutionAuditTreatsProviderAuthResponseAsFailure(t *testing.T) {
@@ -82,13 +108,13 @@ func TestRecordEngineExecutionAuditTreatsProviderAuthResponseAsFailure(t *testin
 	}
 }
 
-func assertCompactSafeExecutionEvent(t *testing.T, event models.EngineExecutionEvent, artifactID, serviceID, operationID uuid.UUID) {
+func assertCompactSafeExecutionEvent(t *testing.T, event models.EngineExecutionEvent, artifactID, accountID, serviceID, operationID uuid.UUID) {
 	t.Helper()
 	checks := []struct {
 		valid   bool
 		message string
 	}{
-		{executionEventIdentityMatches(event, artifactID, serviceID, operationID), "unexpected event ids"},
+		{executionEventIdentityMatches(event, artifactID, accountID, serviceID, operationID), "unexpected event ids"},
 		{executionEventFailureMatches(event), "unexpected failure classification"},
 		{executionEventHashIsSafe(event), "idempotency key was not safely hashed"},
 		{executionEventProviderMetricsMatch(event), "unexpected provider metrics"},
@@ -101,8 +127,8 @@ func assertCompactSafeExecutionEvent(t *testing.T, event models.EngineExecutionE
 	}
 }
 
-func executionEventIdentityMatches(event models.EngineExecutionEvent, artifactID, serviceID, operationID uuid.UUID) bool {
-	return event.ArtifactID == artifactID && event.ServiceID == serviceID && event.OperationID == operationID
+func executionEventIdentityMatches(event models.EngineExecutionEvent, artifactID, accountID, serviceID, operationID uuid.UUID) bool {
+	return event.ArtifactID == artifactID && event.AccountID == accountID && event.ServiceID == serviceID && event.OperationID == operationID
 }
 
 func executionEventFailureMatches(event models.EngineExecutionEvent) bool {

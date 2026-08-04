@@ -154,7 +154,7 @@ func TestFetchRuntimeContractUsesBundledGraphQLProjection(t *testing.T) {
 					"incoming_webhook_config":{"auth_type":"signature","signature_header":"X-Signature"},
 					"webhooks":[{"id":"` + webhookID.String() + `","service_id":"` + serviceID.String() + `","name":"invoice.created","method":"POST","description":"Invoice created","request_body":{"type":"object"}}]
 				},
-				"serviceOperations":[{"id":"` + endpointID.String() + `","name":"listInvoices","description":"List invoices","resource_name":"Invoices","version":"2026-07-23","method":"GET","path":"/invoices","normalized_path":"/invoices","deprecated":false,"is_sse":false,"parameters":[{"name":"limit","in":"query","required":false,"type":"integer","description":"Limit"}],"request_body":null,"responses":{"200":{"type":"object"}},"pagination":{"type":"cursor","request_param":"cursor","response_path":"next"}}]
+				"serviceOperations":[{"id":"` + endpointID.String() + `","name":"listInvoices","description":"List invoices","resource_name":"query","version":"2026-07-23","method":"POST","path":"/graphql","normalized_path":"/graphql","deprecated":false,"is_sse":false,"parameters":[{"name":"limit","in":"","required":false,"type":"integer","description":"Limit"}],"request_body":{"type":"object"},"responses":{"200":{"type":"object"}},"graphql_query":"query ListInvoices($limit: Int) { invoices(limit: $limit) { id } }","provider_protocol":"graphql","operation_kind":"query","pagination":{"type":"cursor","request_param":"cursor","response_path":"next"}}]
 			}}`
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 		})},
@@ -173,10 +173,13 @@ func TestFetchRuntimeContractUsesBundledGraphQLProjection(t *testing.T) {
 	if len(snapshot.Endpoints) != 1 || snapshot.Endpoints[0].ID != endpointID || snapshot.Endpoints[0].Pagination == nil {
 		t.Fatalf("unexpected endpoints: %#v", snapshot.Endpoints)
 	}
+	if snapshot.Endpoints[0].GraphQLQuery == nil || snapshot.Endpoints[0].ProviderProtocol != "graphql" || snapshot.Endpoints[0].OperationKind != "query" {
+		t.Fatalf("GraphQL execution metadata was not decoded: %#v", snapshot.Endpoints[0])
+	}
 	if len(snapshot.Webhooks) != 1 || snapshot.Webhooks[0].ID != webhookID {
 		t.Fatalf("unexpected webhooks: %#v", snapshot.Webhooks)
 	}
-	if !strings.Contains(requestBody.Query, "serviceOperations") || !strings.Contains(requestBody.Query, "webhooks") {
+	if !strings.Contains(requestBody.Query, "serviceOperations") || !strings.Contains(requestBody.Query, "webhooks") || !strings.Contains(requestBody.Query, "graphql_query") || !strings.Contains(requestBody.Query, "provider_protocol") || !strings.Contains(requestBody.Query, "operation_kind") {
 		t.Fatalf("runtime contract query did not bundle service operations and webhooks: %s", requestBody.Query)
 	}
 	if requestBody.Variables["serviceId"] != serviceID.String() || requestBody.Variables["serviceVersionId"] != serviceVersionID.String() {
@@ -764,6 +767,11 @@ func TestFetchEndpointsByNames_UsesSingleGraphQLRequest(t *testing.T) {
 	}
 	if !strings.Contains(gotQuery, "pagination") {
 		t.Fatalf("expected endpoint pagination in query, got %s", gotQuery)
+	}
+	for _, field := range []string{"graphql_query", "provider_protocol", "operation_kind", "request_body", "responses"} {
+		if !strings.Contains(gotQuery, field) {
+			t.Fatalf("expected %s in endpoint projection, got %s", field, gotQuery)
+		}
 	}
 	names, ok := gotVariables["names"].([]interface{})
 	if !ok || len(names) != 2 {

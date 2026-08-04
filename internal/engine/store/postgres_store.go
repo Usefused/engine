@@ -903,20 +903,37 @@ func (s *postgresStore) DeleteEngineExecutionEventsBefore(ctx context.Context, b
 }
 
 type EngineExecutionFilter struct {
-	AccountID uuid.UUID
-	ServiceID uuid.UUID
-	Transport string
-	Direction string
-	Status    string
-	Limit     int
-	Offset    int
-	StartDate *time.Time
-	EndDate   *time.Time
+	AccountID  uuid.UUID
+	ServiceID  uuid.UUID
+	ArtifactID uuid.UUID
+	Transport  string
+	Direction  string
+	Status     string
+	Limit      int
+	Offset     int
+	StartDate  *time.Time
+	EndDate    *time.Time
+}
+
+// ArtifactExecutionEventReader is optional so alternate Store implementations
+// can adopt artifact activity without widening the core persistence contract.
+type ArtifactExecutionEventReader interface {
+	ListEngineExecutionEventsByArtifact(ctx context.Context, filter EngineExecutionFilter) ([]models.EngineExecutionEvent, int64, error)
+}
+
+type ArtifactExecutionAnalyticsReader interface {
+	GetEngineExecutionAnalyticsByArtifact(ctx context.Context, filter EngineExecutionFilter) (models.ArtifactExecutionAnalytics, error)
 }
 
 func engineExecutionWhereClause(filter EngineExecutionFilter) (string, []any) {
-	whereClause := "WHERE account_id = $1 AND service_id = $2"
-	args := []any{filter.AccountID, filter.ServiceID}
+	scopeColumn, scopeID := "service_id", filter.ServiceID
+	if filter.ArtifactID != uuid.Nil {
+		scopeColumn, scopeID = "artifact_id", filter.ArtifactID
+	}
+	// Keeping tenant and resource scope in the same SQL predicate prevents a
+	// caller from receiving broad workspace data and filtering it in memory.
+	whereClause := fmt.Sprintf("WHERE account_id = $1 AND %s = $2", scopeColumn)
+	args := []any{filter.AccountID, scopeID}
 	argIdx := 3
 	if filter.Transport != "" {
 		whereClause += fmt.Sprintf(" AND transport = $%d", argIdx)
@@ -946,6 +963,16 @@ func engineExecutionWhereClause(filter EngineExecutionFilter) (string, []any) {
 }
 
 func (s *postgresStore) ListEngineExecutionEventsByService(ctx context.Context, filter EngineExecutionFilter) ([]models.EngineExecutionEvent, int64, error) {
+	filter.ArtifactID = uuid.Nil
+	return s.listEngineExecutionEvents(ctx, filter)
+}
+
+func (s *postgresStore) ListEngineExecutionEventsByArtifact(ctx context.Context, filter EngineExecutionFilter) ([]models.EngineExecutionEvent, int64, error) {
+	filter.ServiceID = uuid.Nil
+	return s.listEngineExecutionEvents(ctx, filter)
+}
+
+func (s *postgresStore) listEngineExecutionEvents(ctx context.Context, filter EngineExecutionFilter) ([]models.EngineExecutionEvent, int64, error) {
 	whereClause, args := engineExecutionWhereClause(filter)
 	var count int64
 	if err := s.db.QueryRow(ctx, "SELECT COUNT(*) FROM fused_engine_execution_events "+whereClause, args...).Scan(&count); err != nil {
@@ -992,6 +1019,24 @@ func (s *postgresStore) ListEngineExecutionEventsByService(ctx context.Context, 
 }
 
 func (s *postgresStore) GetEngineExecutionAnalyticsByService(ctx context.Context, filter EngineExecutionFilter) (models.EngineExecutionAnalytics, error) {
+	filter.ArtifactID = uuid.Nil
+	return s.getEngineExecutionAnalytics(ctx, filter)
+}
+
+func (s *postgresStore) GetEngineExecutionAnalyticsByArtifact(ctx context.Context, filter EngineExecutionFilter) (models.ArtifactExecutionAnalytics, error) {
+	filter.ServiceID = uuid.Nil
+	summary, err := s.getEngineExecutionAnalytics(ctx, filter)
+	if err != nil {
+		return models.ArtifactExecutionAnalytics{}, err
+	}
+	byService, err := s.getArtifactServiceExecutionBreakdown(ctx, filter)
+	if err != nil {
+		return models.ArtifactExecutionAnalytics{}, err
+	}
+	return models.ArtifactExecutionAnalytics{EngineExecutionAnalytics: summary, ByService: byService}, nil
+}
+
+func (s *postgresStore) getEngineExecutionAnalytics(ctx context.Context, filter EngineExecutionFilter) (models.EngineExecutionAnalytics, error) {
 	whereClause, args := engineExecutionWhereClause(filter)
 	query := `SELECT COUNT(*),
 		COUNT(*) FILTER (WHERE status = 'success'),
@@ -1010,6 +1055,31 @@ func (s *postgresStore) GetEngineExecutionAnalyticsByService(ctx context.Context
 		&analytics.P95LatencyMs,
 	)
 	return analytics, err
+}
+
+func (s *postgresStore) getArtifactServiceExecutionBreakdown(ctx context.Context, filter EngineExecutionFilter) ([]models.EngineExecutionBreakdown, error) {
+	whereClause, args := engineExecutionWhereClause(filter)
+	// Keeping grouping in SQL avoids loading individual receipts just to count
+	// them in Go and makes the query count independent of bundled service count.
+	query := `SELECT service_id::text, service_id::text, COUNT(*),
+		COUNT(*) FILTER (WHERE status = 'failed'),
+		COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms), 0)
+		FROM fused_engine_execution_events ` + whereClause + `
+		GROUP BY service_id ORDER BY COUNT(*) DESC`
+	rows, err := s.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]models.EngineExecutionBreakdown, 0)
+	for rows.Next() {
+		var item models.EngineExecutionBreakdown
+		if err := rows.Scan(&item.Key, &item.Label, &item.TotalCalls, &item.FailedCalls, &item.P95LatencyMs); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func (s *postgresStore) ListWebhookEventsByService(ctx context.Context, accountID, serviceID uuid.UUID, eventName string, limit, offset int, startDate, endDate *time.Time) ([]models.WebhookEvent, int64, error) {

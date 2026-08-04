@@ -97,6 +97,8 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		"webhookEvents":               argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead, accesscontrol.PermissionAuditRead),
 		"webhookAnalytics":            argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead, accesscontrol.PermissionAuditRead),
 		"engineExecutionEvents":       argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead, accesscontrol.PermissionAuditRead),
+		"artifactExecutionEvents":     argumentPermissions(accesscontrol.ResourceArtifact, "artifact_id", accesscontrol.PermissionArtifactRead, accesscontrol.PermissionAuditRead),
+		"artifactExecutionAnalytics":  argumentPermissions(accesscontrol.ResourceArtifact, "artifact_id", accesscontrol.PermissionArtifactRead, accesscontrol.PermissionAuditRead),
 		"engineExecutionAnalytics":    argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead, accesscontrol.PermissionAuditRead),
 		"workspaceExecutionAnalytics": permissions(accesscontrol.PermissionAuditRead),
 		"publicServiceInsights":       argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead, accesscontrol.PermissionAuditRead),

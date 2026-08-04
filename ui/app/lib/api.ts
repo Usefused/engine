@@ -552,6 +552,45 @@ export interface EngineExecutionEventEntry {
   timings: Array<{ name: string; duration_ms: number }>;
 }
 
+const engineExecutionEventSelection = `
+  id
+  trace_id
+  span_id
+  artifact_id
+  artifact_name
+  artifact_kind
+  transport
+  direction
+  service_id
+  service_version_id
+  operation_id
+  webhook_id
+  operation
+  event_name
+  http_method
+  request_path
+  environment
+  environment_source
+  provider_host
+  provider_http_status
+  provider_status_class
+  status
+  failure_reason
+  failure_category
+  failure_code
+  latency_ms
+  provider_latency_ms
+  attempt_count
+  request_bytes
+  response_bytes
+  verification_status
+  delivery_status
+  idempotency_replayed
+  started_at
+  ended_at
+  timings { name duration_ms }
+`;
+
 export interface EngineExecutionAnalyticsSummary {
   total_calls: number;
   successful_calls: number;
@@ -567,6 +606,10 @@ export interface EngineExecutionBreakdown {
   total_calls: number;
   failed_calls: number;
   p95_latency_ms: number;
+}
+
+export interface ArtifactExecutionAnalytics extends EngineExecutionAnalyticsSummary {
+  by_service: EngineExecutionBreakdown[];
 }
 
 export interface EngineExecutionFailure {
@@ -1179,42 +1222,7 @@ export const api = {
             engineExecutionEvents(service_id: $serviceId, transport: $transport, direction: $direction, status: $status, limit: $limit, offset: $offset, start_date: $startDate, end_date: $endDate) {
               total
               items {
-                id
-                trace_id
-                span_id
-                artifact_id
-                artifact_name
-                artifact_kind
-                transport
-                direction
-                service_id
-                service_version_id
-                operation_id
-                webhook_id
-                operation
-                event_name
-                http_method
-                request_path
-                environment
-                environment_source
-                provider_host
-                provider_http_status
-                provider_status_class
-                status
-                failure_reason
-                failure_category
-                failure_code
-                latency_ms
-                provider_latency_ms
-                attempt_count
-                request_bytes
-                response_bytes
-                verification_status
-                delivery_status
-                idempotency_replayed
-                started_at
-                ended_at
-                timings { name duration_ms }
+                ${engineExecutionEventSelection}
               }
             }
           }`,
@@ -1230,6 +1238,76 @@ export const api = {
           }
         )
         .then(({ engineExecutionEvents }) => engineExecutionEvents),
+
+    listArtifactExecutionEvents: (params: {
+      artifactId: string;
+      transport?: string;
+      direction?: string;
+      status?: string;
+      limit?: number;
+      offset?: number;
+      startDate?: string;
+      endDate?: string;
+    }) =>
+      api
+        .mcpGraphql<{
+          artifactExecutionEvents: {
+            items: EngineExecutionEventEntry[];
+            total: number;
+          };
+        }>(
+          `query ArtifactExecutionEvents($artifactId: String!, $transport: String, $direction: String, $status: String, $limit: Int, $offset: Int, $startDate: String, $endDate: String) {
+            artifactExecutionEvents(artifact_id: $artifactId, transport: $transport, direction: $direction, status: $status, limit: $limit, offset: $offset, start_date: $startDate, end_date: $endDate) {
+              total
+              items {
+                ${engineExecutionEventSelection}
+              }
+            }
+          }`,
+          {
+            artifactId: params.artifactId,
+            transport: params.transport || null,
+            direction: params.direction || null,
+            status: params.status || null,
+            limit: params.limit ?? null,
+            offset: params.offset ?? null,
+            startDate: params.startDate || null,
+            endDate: params.endDate || null,
+          }
+        )
+        .then(({ artifactExecutionEvents }) => artifactExecutionEvents),
+
+    getArtifactExecutionAnalytics: (params: {
+      artifactId: string;
+      transport?: string;
+      direction?: string;
+      status?: string;
+      startDate?: string;
+      endDate?: string;
+    }) =>
+      api
+        .mcpGraphql<{ artifactExecutionAnalytics: ArtifactExecutionAnalytics }>(
+          `query ArtifactExecutionAnalytics($artifactId: String!, $transport: String, $direction: String, $status: String, $startDate: String, $endDate: String) {
+            artifactExecutionAnalytics(artifact_id: $artifactId, transport: $transport, direction: $direction, status: $status, start_date: $startDate, end_date: $endDate) {
+              total_calls
+              successful_calls
+              failed_calls
+              average_latency_ms
+              median_latency_ms
+              p95_latency_ms
+              by_service { key label total_calls failed_calls p95_latency_ms }
+            }
+          }`,
+          {
+            artifactId: params.artifactId,
+            transport: params.transport || null,
+            direction: params.direction || null,
+            status: params.status || null,
+            startDate: params.startDate || null,
+            endDate: params.endDate || null,
+          }
+        )
+        .then(({ artifactExecutionAnalytics }) => artifactExecutionAnalytics),
 
     getEngineExecutionAnalytics: (params: {
       serviceId: string;
@@ -1554,7 +1632,7 @@ export const api = {
         .then(({ workspaceNotifications }) => workspaceNotifications),
 
     // listNotificationsPage is listNotifications' paginated sibling for the
-    // full /integrations/notifications page (offset pagination, numbered
+    // Activity Notifications tab (offset pagination, numbered
     // pages -- see plans/plan-service-changelog.md's Phase 4 pagination
     // follow-up). Unlike listNotifications, this never includes live
     // registry drift snapshots (backend's workspaceNotificationInbox skips

@@ -1,6 +1,6 @@
 import { useState, useEffect, isValidElement, type ReactNode } from "react";
 import { useParams, Link, useNavigate, useSearchParams, type MetaFunction } from "@remix-run/react";
-import { ArrowLeft, Download, ChevronDown, ChevronRight, FileCode, Copy, Check, Loader2, AlertTriangle, Database } from "lucide-react";
+import { ArrowLeft, Download, ChevronDown, ChevronRight, Copy, Check, Loader2, Database } from "lucide-react";
 import { api } from "~/lib/api";
 import { useToast } from "~/components/Toast";
 import { readBucketsForSDK } from "~/lib/buckets";
@@ -12,6 +12,8 @@ import { NotificationBanner } from "~/components/notifications/NotificationBanne
 import { useWorkspaceNotifications } from "~/components/notifications/useWorkspaceNotifications";
 import { isPending, matchesConfig } from "~/components/notifications/notificationHelpers";
 import { PendingDriftSection, type PendingDriftItem } from "~/components/sdk/PendingDrift";
+import { ArtifactRequestsPanel } from "~/components/activity/ArtifactRequestsPanel";
+import { AppActivityOverview } from "~/components/activity/AppActivityOverview";
 import { type Bucket } from "~/lib/api";
 
 type SdkSelection = {
@@ -371,6 +373,9 @@ export default function SdkDetails() {
     urlTab === "docs" || urlTab === "analytics" || urlTab === "overview"
       ? urlTab
       : "overview";
+  const activityParam = searchParams.get("activity");
+  const activitySection: "overview" | "requests" | "changes" =
+    activityParam === "requests" || activityParam === "changes" ? activityParam : "overview";
 
   const [versions, setVersions] = useState<Array<{ id: string; version: string; created_at: string }>>([]);
   const [pendingDrift, setPendingDrift] = useState<PendingDriftItem[]>([]);
@@ -513,6 +518,14 @@ export default function SdkDetails() {
     } else {
       next.set("tab", tab);
     }
+    setSearchParams(next, { replace: true });
+  };
+
+  const setActivitySection = (section: "overview" | "requests" | "changes") => {
+    const next = new URLSearchParams(searchParams);
+    next.set("tab", "analytics");
+    if (section === "overview") next.delete("activity");
+    else next.set("activity", section);
     setSearchParams(next, { replace: true });
   };
 
@@ -779,44 +792,49 @@ export default function SdkDetails() {
 
         {activeTab === "analytics" && (
           <div className="space-y-6">
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-              <div className="bg-slate-50 p-6 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4">
-                <div className="w-12 h-12 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center">
-                  <Download className="w-6 h-6" />
-                </div>
-                <div>
-                  <p className="text-sm font-medium text-slate-500">Total Downloads</p>
-                  <p className="text-2xl font-bold text-slate-900">{sdk?.downloads || 0}</p>
-                </div>
-              </div>
-
-              <div className="bg-slate-50 p-6 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4">
-                <div className="w-12 h-12 bg-slate-200 text-slate-700 rounded-full flex items-center justify-center">
-                  <FileCode className="w-6 h-6" />
-                </div>
-                <div>
-                  <p className="text-sm font-medium text-slate-500">Connected services</p>
-                  <p className="text-2xl font-bold text-slate-900">{sdk?.detailed_selections?.length || 0}</p>
-                </div>
-              </div>
-
-              <div className="bg-slate-50 p-6 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4">
-                <div className={`w-12 h-12 rounded-full flex items-center justify-center ${pendingDrift.length > 0 ? 'bg-red-100 text-red-600' : 'bg-slate-100 text-slate-500'}`}>
-                  <AlertTriangle className="w-6 h-6" />
-                </div>
-                <div>
-                  <p className="text-sm font-medium text-slate-500">Pending Drift</p>
-                  <p className="text-2xl font-bold text-slate-900">{pendingDrift.length}</p>
-                </div>
-              </div>
+            <div className="flex w-fit rounded-lg bg-slate-100 p-1">
+              {(["overview", "requests", "changes"] as const).map((section) => (
+                <button
+                  key={section}
+                  type="button"
+                  onClick={() => setActivitySection(section)}
+                  className={`rounded-md px-3 py-1.5 text-sm font-medium capitalize ${activitySection === section ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                >
+                  {section}
+                </button>
+              ))}
             </div>
 
-            <div>
-              <h4 className="text-sm font-semibold text-slate-700 uppercase tracking-wider mb-3">
-                Pending Drift
-              </h4>
-              <PendingDriftSection items={pendingDrift} />
-            </div>
+            {activitySection === "overview" && (
+              <AppActivityOverview
+                artifactId={sdk.id}
+                downloads={sdk.downloads || 0}
+                pendingDriftCount={pendingDrift.length}
+                services={sdk.detailed_selections || []}
+              />
+            )}
+
+            {activitySection === "requests" && (
+              <ArtifactRequestsPanel artifactId={sdk.id} transport={sdk.target_type === "mcp" ? "mcp" : "sdk"} />
+            )}
+
+            {activitySection === "changes" && <div className="space-y-6">
+              <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                <div className="border-b border-slate-100 bg-slate-50 px-5 py-3"><h4 className="text-sm font-semibold text-slate-800">Version history</h4></div>
+                <div className="divide-y divide-slate-100">
+                  {versions.map((version) => (
+                    <div key={version.id} className="flex items-center justify-between px-5 py-3 text-sm">
+                      <button type="button" onClick={() => handleVersionSwitch(version.id)} className="font-medium text-slate-800 hover:text-blue-600">{version.version}</button>
+                      <span className="text-xs text-slate-400">{new Date(version.created_at).toLocaleDateString()}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <h4 className="mb-3 text-sm font-semibold uppercase tracking-wider text-slate-700">Pending drift</h4>
+                <PendingDriftSection items={pendingDrift} />
+              </div>
+            </div>}
           </div>
         )}
       </div>

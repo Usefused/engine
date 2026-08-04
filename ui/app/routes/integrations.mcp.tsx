@@ -21,6 +21,228 @@ interface McpServerItem {
   created_at?: string;
 }
 
+interface McpServerCardProps {
+  server: McpServerItem;
+  isSelected: boolean;
+  anySelected: boolean;
+  onToggleSelect: (id: string) => void;
+  onDelete: (id: string, name: string) => void;
+  onKill: (id: string, name: string) => void;
+  onReactivate: (id: string) => void;
+  onCopyUrl: (url: string) => void;
+}
+
+function McpServerStatusBadge({ active }: { active: boolean }) {
+  if (!active) {
+    return <span className="flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full text-slate-500 bg-slate-100">Killed</span>;
+  }
+  return (
+    <span className="flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full text-emerald-600 bg-emerald-50">
+      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+      Running
+    </span>
+  );
+}
+
+function McpConnectionUrlRow({ server, onCopyUrl }: { server: McpServerItem; onCopyUrl: (url: string) => void }) {
+  if (!server.active) {
+    return (
+      <code className="flex-1 bg-white px-3 py-2 rounded-lg border border-slate-200 text-xs font-mono text-slate-800 break-all shadow-sm">
+        <span className="text-slate-400 italic">Server killed -- reactivate to reconnect</span>
+      </code>
+    );
+  }
+  return (
+    <>
+      <code className="flex-1 bg-white px-3 py-2 rounded-lg border border-slate-200 text-xs font-mono text-slate-800 break-all shadow-sm">
+        {server.mcp_url}
+      </code>
+      <button
+        data-track="copy_mcp_sandbox_url"
+        onClick={() => onCopyUrl(server.mcp_url || "")}
+        className="p-2 bg-white border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 hover:text-slate-900 transition-colors shadow-sm cursor-pointer"
+        title="Copy URL"
+      >
+        <Copy className="w-4 h-4" />
+      </button>
+    </>
+  );
+}
+
+// Kill/Reactivate toggle, not Restart -- Kill just flips `active` (deployment
+// and its selections are untouched), so "restarting" is the same server
+// coming back, not a redeploy. There's also no token-regenerate button here
+// anymore: the Engine schema has no mutation for it, since the scope's auth
+// token is tied to the deploy itself.
+function McpKillReactivateButton({ server, onKill, onReactivate }: { server: McpServerItem; onKill: (id: string, name: string) => void; onReactivate: (id: string) => void }) {
+  if (server.active) {
+    return (
+      <button
+        data-track="kill_mcp_server"
+        onClick={() => onKill(server.id, server.name)}
+        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 text-amber-600 hover:bg-amber-100 hover:text-amber-700 rounded-lg text-xs font-semibold transition-colors border border-amber-100 cursor-pointer"
+      >
+        <ServerCrash className="w-3.5 h-3.5" />
+        Kill
+      </button>
+    );
+  }
+  return (
+    <button
+      data-track="reactivate_mcp_server"
+      onClick={() => onReactivate(server.id)}
+      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 hover:text-emerald-700 rounded-lg text-xs font-semibold transition-colors border border-emerald-100 cursor-pointer"
+    >
+      <Play className="w-3.5 h-3.5 fill-current" />
+      Reactivate
+    </button>
+  );
+}
+
+function McpServerCard({ server, isSelected, anySelected, onToggleSelect, onDelete, onKill, onReactivate, onCopyUrl }: McpServerCardProps) {
+  return (
+    <div className={`group bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm transition-shadow ${!server.active ? 'opacity-75' : 'hover:shadow-md'}`}>
+      <div className="p-5 border-b border-slate-100 flex items-start justify-between">
+        <div className="flex items-start gap-3">
+          <div className={`pt-2 transition-opacity duration-200 ${anySelected || isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}`}>
+            <input
+              type="checkbox"
+              className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
+              checked={isSelected}
+              onChange={() => onToggleSelect(server.id)}
+            />
+          </div>
+          <div className={`w-10 h-10 rounded-lg border flex items-center justify-center shrink-0 ${server.active ? 'bg-slate-100 border-slate-200' : 'bg-slate-50 border-slate-200'}`}>
+            <TerminalSquare className={`w-5 h-5 ${server.active ? 'text-slate-700' : 'text-slate-400'}`} />
+          </div>
+          <div>
+            <h3 className="font-semibold text-slate-900 leading-tight">{server.name || "Untitled MCP server"}</h3>
+            <div className="flex items-center gap-2 mt-1">
+              <McpServerStatusBadge active={server.active} />
+            </div>
+          </div>
+        </div>
+        <button
+          data-track="delete_mcp_server"
+          onClick={() => onDelete(server.id, server.name)}
+          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+          title="Delete server"
+        >
+          <Trash2 className="w-4 h-4" />
+        </button>
+      </div>
+
+      <div className="p-5 bg-slate-50/50 space-y-4">
+        <div>
+          <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 block">Connection URL</label>
+          <div className="flex items-center gap-2">
+            <McpConnectionUrlRow server={server} onCopyUrl={onCopyUrl} />
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between pt-2">
+          <span className="text-xs text-slate-400 font-medium">
+            Created {server.created_at ? new Date(server.created_at).toLocaleDateString() : ""}
+          </span>
+          <div className="flex items-center gap-2">
+            <McpKillReactivateButton server={server} onKill={onKill} onReactivate={onReactivate} />
+            <Link
+              to={`/integrations/mcp/${server.id}/analytics`}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 hover:text-slate-900 rounded-lg text-xs font-semibold transition-colors border border-slate-200 cursor-pointer"
+            >
+              <BarChart2 className="w-3.5 h-3.5" />
+              Analytics
+            </Link>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function McpConnectionGuide({ show }: { show: boolean }) {
+  if (!show) return null;
+  return (
+    <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl animate-in fade-in slide-in-from-top-2">
+      <h4 className="text-sm font-semibold text-slate-900 mb-2 flex items-center gap-1.5">
+        <AlertCircle className="w-4 h-4" />
+        Connect an MCP client
+      </h4>
+      <div className="space-y-2 text-sm text-slate-700 leading-relaxed">
+        <p>
+          Use the server's <strong>Connection URL</strong> and send its execution token in the authorization header:
+        </p>
+        <code className="inline-block max-w-full break-all rounded bg-slate-200/70 px-2 py-1 font-mono text-xs text-slate-900">
+          Authorization: Bearer &lt;execution-token&gt;
+        </code>
+        <p>
+          Service credentials come from the credential set selected when the server was created, so your MCP client never needs to send provider keys. The execution token is shown once at creation and should be stored securely.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function DeleteSelectedButton({ count, isDeleting, onClick }: { count: number; isDeleting: boolean; onClick: () => void }) {
+  if (count === 0) return null;
+  return (
+    <button
+      onClick={onClick}
+      disabled={isDeleting}
+      className="inline-flex items-center gap-2 px-4 py-2 bg-rose-50 text-rose-600 hover:bg-rose-100 text-sm font-medium rounded-lg transition-all border border-rose-200 self-start sm:self-auto cursor-pointer"
+    >
+      <Trash2 className="w-4 h-4" />
+      {isDeleting ? "Deleting..." : `Delete Selected (${count})`}
+    </button>
+  );
+}
+
+function SelectAllRow({ selectedCount, allSelected, onToggle }: { selectedCount: number; allSelected: boolean; onToggle: () => void }) {
+  if (selectedCount === 0) return null;
+  return (
+    <div className="flex items-center animate-in fade-in slide-in-from-top-2 duration-200">
+      <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer bg-blue-50 px-3 py-1.5 rounded-lg border border-blue-100">
+        <input
+          type="checkbox"
+          className="rounded border-blue-300 text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
+          checked={allSelected}
+          onChange={onToggle}
+        />
+        <span className="font-medium text-blue-800">Select All on Page</span>
+      </label>
+    </div>
+  );
+}
+
+function McpPagination({ page, limit, total, onPrevious, onNext }: { page: number; limit: number; total: number; onPrevious: () => void; onNext: () => void }) {
+  if (total <= limit) return null;
+  return (
+    <div className="flex items-center justify-between px-6 py-4 bg-white border border-slate-200 rounded-xl">
+      <span className="text-sm text-slate-500">
+        Showing <span className="font-medium">{(page - 1) * limit + 1}</span> to <span className="font-medium">{Math.min(page * limit, total)}</span> of <span className="font-medium">{total}</span>
+      </span>
+      <div className="flex gap-2">
+        <button
+          data-track="paginate_previous"
+          onClick={onPrevious}
+          disabled={page === 1}
+          className="px-3 py-1.5 text-sm font-medium border border-slate-200 rounded-md disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-50 transition-colors"
+        >
+          Previous
+        </button>
+        <button
+          data-track="paginate_next"
+          onClick={onNext}
+          disabled={page * limit >= total}
+          className="px-3 py-1.5 text-sm font-medium border border-slate-200 rounded-md disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-50 transition-colors"
+        >
+          Next
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function McpServers() {
   const toast = useToast();
   const [mcpServers, setMcpServers] = useState<McpServerItem[]>([]);
@@ -143,18 +365,9 @@ export default function McpServers() {
           <p className="text-sm text-slate-500 mt-1">Manage the MCP servers your agents connect to.</p>
         </div>
         <div className="flex items-center gap-3">
-          {selectedIds.length > 0 && (
-            <button
-              onClick={handleDeleteMultiple}
-              disabled={isDeletingMultiple}
-              className="inline-flex items-center gap-2 px-4 py-2 bg-rose-50 text-rose-600 hover:bg-rose-100 text-sm font-medium rounded-lg transition-all border border-rose-200 self-start sm:self-auto cursor-pointer"
-            >
-              <Trash2 className="w-4 h-4" />
-              {isDeletingMultiple ? "Deleting..." : `Delete Selected (${selectedIds.length})`}
-            </button>
-          )}
+          <DeleteSelectedButton count={selectedIds.length} isDeleting={isDeletingMultiple} onClick={handleDeleteMultiple} />
           <Link
-            to="/integrations/sdk-builder?tab=mcp"
+            to="/integrations/builder?tab=mcp"
             className="inline-flex items-center gap-2 px-4 py-2 bg-slate-950 text-white text-sm font-medium rounded-lg hover:bg-slate-800 transition-colors shadow-sm self-start sm:self-auto"
           >
             <Play className="w-4 h-4" />
@@ -163,25 +376,7 @@ export default function McpServers() {
         </div>
       </div>
 
-      {showHowToUse && (
-        <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl animate-in fade-in slide-in-from-top-2">
-          <h4 className="text-sm font-semibold text-slate-900 mb-2 flex items-center gap-1.5">
-            <AlertCircle className="w-4 h-4" />
-            Connect an MCP client
-          </h4>
-          <div className="space-y-2 text-sm text-slate-700 leading-relaxed">
-            <p>
-              Use the server's <strong>Connection URL</strong> and send its execution token in the authorization header:
-            </p>
-            <code className="inline-block max-w-full break-all rounded bg-slate-200/70 px-2 py-1 font-mono text-xs text-slate-900">
-              Authorization: Bearer &lt;execution-token&gt;
-            </code>
-            <p>
-              Service credentials come from the credential set selected when the server was created, so your MCP client never needs to send provider keys. The execution token is shown once at creation and should be stored securely.
-            </p>
-          </div>
-        </div>
-      )}
+      <McpConnectionGuide show={showHowToUse} />
 
       {mcpServers.length === 0 ? (
         <div className="bg-white border border-slate-200 rounded-xl p-12 text-center">
@@ -193,157 +388,36 @@ export default function McpServers() {
         </div>
       ) : (
         <div className="space-y-4">
-          {selectedIds.length > 0 && (
-            <div className="flex items-center animate-in fade-in slide-in-from-top-2 duration-200">
-              <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer bg-blue-50 px-3 py-1.5 rounded-lg border border-blue-100">
-                <input
-                  type="checkbox"
-                  className="rounded border-blue-300 text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
-                  checked={selectedIds.length === mcpServers.length && mcpServers.length > 0}
-                  onChange={() => {
-                    if (selectedIds.length === mcpServers.length) {
-                      setSelectedIds([]);
-                    } else {
-                      setSelectedIds(mcpServers.map(s => s.id));
-                    }
-                  }}
-                />
-                <span className="font-medium text-blue-800">Select All on Page</span>
-              </label>
-            </div>
-          )}
+          <SelectAllRow
+            selectedCount={selectedIds.length}
+            allSelected={selectedIds.length === mcpServers.length && mcpServers.length > 0}
+            onToggle={() => setSelectedIds(prev => prev.length === mcpServers.length ? [] : mcpServers.map(s => s.id))}
+          />
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {mcpServers.map(server => (
-            <div key={server.id} className={`group bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm transition-shadow ${!server.active ? 'opacity-75' : 'hover:shadow-md'}`}>
-              <div className="p-5 border-b border-slate-100 flex items-start justify-between">
-                <div className="flex items-start gap-3">
-                  <div className={`pt-2 transition-opacity duration-200 ${selectedIds.length > 0 || selectedIds.includes(server.id) ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}`}>
-                    <input
-                      type="checkbox"
-                      className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
-                      checked={selectedIds.includes(server.id)}
-                      onChange={() => {
-                        setSelectedIds(prev => prev.includes(server.id) ? prev.filter(i => i !== server.id) : [...prev, server.id]);
-                      }}
-                    />
-                  </div>
-                  <div className={`w-10 h-10 rounded-lg border flex items-center justify-center shrink-0 ${server.active ? 'bg-slate-100 border-slate-200' : 'bg-slate-50 border-slate-200'}`}>
-                    <TerminalSquare className={`w-5 h-5 ${server.active ? 'text-slate-700' : 'text-slate-400'}`} />
-                  </div>
-                  <div>
-                    <h3 className="font-semibold text-slate-900 leading-tight">{server.name || "Untitled MCP server"}</h3>
-                    <div className="flex items-center gap-2 mt-1">
-                      <span className={`flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full ${server.active ? 'text-emerald-600 bg-emerald-50' : 'text-slate-500 bg-slate-100'}`}>
-                        {server.active && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>}
-                        {server.active ? 'Running' : 'Killed'}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-                <button
-                  data-track="delete_mcp_server"
-                  onClick={() => handleDelete(server.id, server.name)}
-                  className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
-                  title="Delete server"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
-
-              <div className="p-5 bg-slate-50/50 space-y-4">
-                <div>
-                  <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 block">Connection URL</label>
-                  <div className="flex items-center gap-2">
-                    <code className="flex-1 bg-white px-3 py-2 rounded-lg border border-slate-200 text-xs font-mono text-slate-800 break-all shadow-sm">
-                      {server.active ? server.mcp_url : <span className="text-slate-400 italic">Server killed -- reactivate to reconnect</span>}
-                    </code>
-                    {server.active && (
-                      <button
-                        data-track="copy_mcp_sandbox_url"
-                        onClick={() => {
-                          navigator.clipboard.writeText(server.mcp_url || "");
-                          toast.success("URL copied to clipboard!");
-                        }}
-                        className="p-2 bg-white border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 hover:text-slate-900 transition-colors shadow-sm cursor-pointer"
-                        title="Copy URL"
-                      >
-                        <Copy className="w-4 h-4" />
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                <div className="flex items-center justify-between pt-2">
-                  <span className="text-xs text-slate-400 font-medium">
-                    Created {server.created_at ? new Date(server.created_at).toLocaleDateString() : ""}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    {/* Kill/Reactivate toggle, not Restart -- Kill just flips
-                        `active` (deployment and its selections are untouched),
-                        so "restarting" is the same server coming back, not a
-                        redeploy. There's also no token-regenerate button here
-                        anymore: the Engine schema has no mutation for it, since
-                        the scope's auth token is tied to the deploy itself. */}
-                    {server.active ? (
-                      <button
-                        data-track="kill_mcp_server"
-                        onClick={() => handleKill(server.id, server.name)}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 text-amber-600 hover:bg-amber-100 hover:text-amber-700 rounded-lg text-xs font-semibold transition-colors border border-amber-100 cursor-pointer"
-                      >
-                        <ServerCrash className="w-3.5 h-3.5" />
-                        Kill
-                      </button>
-                    ) : (
-                      <button
-                        data-track="reactivate_mcp_server"
-                        onClick={() => handleReactivate(server.id)}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 hover:text-emerald-700 rounded-lg text-xs font-semibold transition-colors border border-emerald-100 cursor-pointer"
-                      >
-                        <Play className="w-3.5 h-3.5 fill-current" />
-                        Reactivate
-                      </button>
-                    )}
-                    <Link
-                      to={`/integrations/mcp/${server.id}/analytics`}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 hover:text-slate-900 rounded-lg text-xs font-semibold transition-colors border border-slate-200 cursor-pointer"
-                    >
-                      <BarChart2 className="w-3.5 h-3.5" />
-                      Analytics
-                    </Link>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <McpServerCard
+              key={server.id}
+              server={server}
+              isSelected={selectedIds.includes(server.id)}
+              anySelected={selectedIds.length > 0}
+              onToggleSelect={(id) => setSelectedIds(prev => prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id])}
+              onDelete={handleDelete}
+              onKill={handleKill}
+              onReactivate={handleReactivate}
+              onCopyUrl={(url) => { navigator.clipboard.writeText(url); toast.success("URL copied to clipboard!"); }}
+            />
           ))}
         </div>
         </div>
       )}
 
-      {total > limit && (
-        <div className="flex items-center justify-between px-6 py-4 bg-white border border-slate-200 rounded-xl">
-          <span className="text-sm text-slate-500">
-            Showing <span className="font-medium">{(page - 1) * limit + 1}</span> to <span className="font-medium">{Math.min(page * limit, total)}</span> of <span className="font-medium">{total}</span>
-          </span>
-          <div className="flex gap-2">
-            <button
-              data-track="paginate_previous"
-              onClick={() => setPage(p => Math.max(1, p - 1))}
-              disabled={page === 1}
-              className="px-3 py-1.5 text-sm font-medium border border-slate-200 rounded-md disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-50 transition-colors"
-            >
-              Previous
-            </button>
-            <button
-              data-track="paginate_next"
-              onClick={() => setPage(p => p + 1)}
-              disabled={page * limit >= total}
-              className="px-3 py-1.5 text-sm font-medium border border-slate-200 rounded-md disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-50 transition-colors"
-            >
-              Next
-            </button>
-          </div>
-        </div>
-      )}
+      <McpPagination
+        page={page}
+        limit={limit}
+        total={total}
+        onPrevious={() => setPage(p => Math.max(1, p - 1))}
+        onNext={() => setPage(p => p + 1)}
+      />
     </div>
   );
 }

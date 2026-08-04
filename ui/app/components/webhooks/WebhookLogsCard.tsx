@@ -9,6 +9,95 @@ function Badge({ label, color }: { label: string; color: string }) {
   );
 }
 
+function deliveryStatus(event: WebhookEventEntry): string {
+  return event.delivery_status || event.status;
+}
+
+function mobileDeliveryColor(status: string): string {
+  if (status === "failed" || status === "rejected") return "bg-red-100 text-red-700";
+  return "bg-slate-100 text-slate-700";
+}
+
+function desktopDeliveryColor(status: string): string {
+  if (status === "acked") return "bg-green-100 text-green-700";
+  if (status === "delivered") return "bg-blue-100 text-blue-700";
+  if (status === "failed" || status === "nacked" || status === "rejected") return "bg-red-100 text-red-700";
+  return "bg-slate-100 text-slate-700";
+}
+
+function WebhookEventCard({ event }: { event: WebhookEventEntry }) {
+  const status = deliveryStatus(event);
+  return (
+    <article className="space-y-3 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="break-words text-sm font-medium text-slate-950">{event.event_name}</div>
+          <div className="mt-1 truncate font-mono text-[11px] text-slate-400" title={event.msg_id}>{event.msg_id}</div>
+        </div>
+        <Badge label={status} color={mobileDeliveryColor(status)} />
+      </div>
+      <dl className="grid grid-cols-2 gap-3 text-xs">
+        <div><dt className="text-slate-400">Verification</dt><dd className="mt-0.5 text-slate-700">{event.verification_status || "Not recorded"}</dd></div>
+        <div><dt className="text-slate-400">Environment</dt><dd className="mt-0.5 text-slate-700">{event.environment || "Not recorded"}</dd></div>
+        <div><dt className="text-slate-400">Delivery time</dt><dd className="mt-0.5 text-slate-700">{event.latency_ms > 0 ? `${event.latency_ms} ms` : "Not recorded"}</dd></div>
+        <div><dt className="text-slate-400">Payload</dt><dd className="mt-0.5 text-slate-700">{(event.payload_size / 1024).toFixed(1)} KB</dd></div>
+        <div><dt className="text-slate-400">Retries</dt><dd className="mt-0.5 text-slate-700">{event.retry_count}</dd></div>
+        <div><dt className="text-slate-400">Received</dt><dd className="mt-0.5 text-slate-700">{new Date(event.created_at).toLocaleString()}</dd></div>
+      </dl>
+      {event.error_reason ? <div className="text-xs text-red-700">{event.error_reason}</div> : null}
+    </article>
+  );
+}
+
+function SdkRecordCode({ sdkRecordId }: { sdkRecordId?: string }) {
+  if (!sdkRecordId) return null;
+  return (
+    <code className="text-[9px] text-blue-400 mt-0.5 truncate max-w-[80px] block" title={`SDK Record: ${sdkRecordId}`}>SDK: {sdkRecordId.substring(0, 8)}...</code>
+  );
+}
+
+function VerificationCell({ status }: { status?: string }) {
+  if (!status) return <span className="text-slate-300">-</span>;
+  return <Badge label={status} color={status === "passed" ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-700"} />;
+}
+
+function WebhookEventRow({ ev }: { ev: WebhookEventEntry }) {
+  const status = deliveryStatus(ev);
+  return (
+    <tr className="hover:bg-slate-50 transition-colors">
+      <td className="break-words px-4 py-3 font-medium text-slate-900">{ev.event_name}</td>
+      <td className="px-4 py-3">
+        <code className="text-[10px] text-slate-400 truncate max-w-[80px] block" title={ev.msg_id}>{ev.msg_id}</code>
+        <SdkRecordCode sdkRecordId={ev.sdk_record_id} />
+      </td>
+      <td className="px-4 py-3">
+        <VerificationCell status={ev.verification_status} />
+      </td>
+      <td className="px-4 py-3">
+        <Badge label={status} color={desktopDeliveryColor(status)} />
+        {ev.error_reason && (
+          <div className="text-[10px] text-red-500 mt-1 max-w-[150px] truncate" title={ev.error_reason}>
+            {ev.error_reason}
+          </div>
+        )}
+      </td>
+      <td className="px-4 py-3 text-slate-500">{ev.environment || "Not recorded"}</td>
+      <td className="px-4 py-3 text-slate-500">
+        {ev.latency_ms > 0 ? `${ev.latency_ms} ms` : <span className="text-slate-300">-</span>}
+      </td>
+      <td className="px-4 py-3 text-slate-500">
+        {typeof ev.payload_size === "number" ? `${(ev.payload_size / 1024).toFixed(1)} KB` : <span className="text-slate-300">-</span>}
+      </td>
+      <td className="px-4 py-3 text-slate-500">
+        {ev.retry_count}
+      </td>
+      <td className="whitespace-nowrap px-4 py-3 text-right text-xs text-slate-400">
+        {new Date(ev.created_at).toLocaleString()}
+      </td>
+    </tr>
+  );
+}
+
 export interface WebhookLogsCardProps {
   webhookNameOptions: string[];
   webhookEvents: WebhookEventEntry[];
@@ -114,27 +203,7 @@ export function WebhookLogsCard({
 
       <div className="divide-y divide-slate-100 md:hidden">
         {webhookEvents.length > 0 ? webhookEvents.map((event, index) => (
-          <article key={event.id || event.msg_id || index} className="space-y-3 p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="break-words text-sm font-medium text-slate-950">{event.event_name}</div>
-                <div className="mt-1 truncate font-mono text-[11px] text-slate-400" title={event.msg_id}>{event.msg_id}</div>
-              </div>
-              <Badge
-                label={event.delivery_status || event.status}
-                color={(event.delivery_status || event.status) === "failed" || (event.delivery_status || event.status) === "rejected" ? "bg-red-100 text-red-700" : "bg-slate-100 text-slate-700"}
-              />
-            </div>
-            <dl className="grid grid-cols-2 gap-3 text-xs">
-              <div><dt className="text-slate-400">Verification</dt><dd className="mt-0.5 text-slate-700">{event.verification_status || "Not recorded"}</dd></div>
-              <div><dt className="text-slate-400">Environment</dt><dd className="mt-0.5 text-slate-700">{event.environment || "Not recorded"}</dd></div>
-              <div><dt className="text-slate-400">Delivery time</dt><dd className="mt-0.5 text-slate-700">{event.latency_ms > 0 ? `${event.latency_ms} ms` : "Not recorded"}</dd></div>
-              <div><dt className="text-slate-400">Payload</dt><dd className="mt-0.5 text-slate-700">{(event.payload_size / 1024).toFixed(1)} KB</dd></div>
-              <div><dt className="text-slate-400">Retries</dt><dd className="mt-0.5 text-slate-700">{event.retry_count}</dd></div>
-              <div><dt className="text-slate-400">Received</dt><dd className="mt-0.5 text-slate-700">{new Date(event.created_at).toLocaleString()}</dd></div>
-            </dl>
-            {event.error_reason ? <div className="text-xs text-red-700">{event.error_reason}</div> : null}
-          </article>
+          <WebhookEventCard key={event.id || event.msg_id || index} event={event} />
         )) : (
           <div className="px-5 py-10 text-center text-sm text-slate-500">No incoming webhooks yet.</div>
         )}
@@ -158,52 +227,7 @@ export function WebhookLogsCard({
           <tbody className="divide-y divide-slate-100">
             {webhookEvents.length > 0 ? (
               webhookEvents.map((ev, index) => (
-                <tr key={ev.id || ev.msg_id || index} className="hover:bg-slate-50 transition-colors">
-                  <td className="break-words px-4 py-3 font-medium text-slate-900">{ev.event_name}</td>
-                  <td className="px-4 py-3">
-                    <code className="text-[10px] text-slate-400 truncate max-w-[80px] block" title={ev.msg_id}>{ev.msg_id}</code>
-                    {ev.sdk_record_id && (
-                      <code className="text-[9px] text-blue-400 mt-0.5 truncate max-w-[80px] block" title={`SDK Record: ${ev.sdk_record_id}`}>SDK: {ev.sdk_record_id.substring(0, 8)}...</code>
-                    )}
-                  </td>
-                  <td className="px-4 py-3">
-                    {ev.verification_status ? (
-                      <Badge
-                        label={ev.verification_status}
-                        color={ev.verification_status === "passed" ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-700"}
-                      />
-                    ) : <span className="text-slate-300">-</span>}
-                  </td>
-                  <td className="px-4 py-3">
-                    <Badge
-                      label={ev.delivery_status || ev.status}
-                      color={
-                        (ev.delivery_status || ev.status) === "acked" ? "bg-green-100 text-green-700" :
-                        (ev.delivery_status || ev.status) === "delivered" ? "bg-blue-100 text-blue-700" :
-                        (ev.delivery_status || ev.status) === "failed" || (ev.delivery_status || ev.status) === "nacked" || (ev.delivery_status || ev.status) === "rejected" ? "bg-red-100 text-red-700" :
-                        "bg-slate-100 text-slate-700"
-                      }
-                    />
-                    {ev.error_reason && (
-                      <div className="text-[10px] text-red-500 mt-1 max-w-[150px] truncate" title={ev.error_reason}>
-                        {ev.error_reason}
-                      </div>
-                    )}
-                  </td>
-                  <td className="px-4 py-3 text-slate-500">{ev.environment || "Not recorded"}</td>
-                  <td className="px-4 py-3 text-slate-500">
-                    {ev.latency_ms > 0 ? `${ev.latency_ms} ms` : <span className="text-slate-300">-</span>}
-                  </td>
-                  <td className="px-4 py-3 text-slate-500">
-                    {typeof ev.payload_size === "number" ? `${(ev.payload_size / 1024).toFixed(1)} KB` : <span className="text-slate-300">-</span>}
-                  </td>
-                  <td className="px-4 py-3 text-slate-500">
-                    {ev.retry_count}
-                  </td>
-                  <td className="whitespace-nowrap px-4 py-3 text-right text-xs text-slate-400">
-                    {new Date(ev.created_at).toLocaleString()}
-                  </td>
-                </tr>
+                <WebhookEventRow key={ev.id || ev.msg_id || index} ev={ev} />
               ))
             ) : (
               <tr>

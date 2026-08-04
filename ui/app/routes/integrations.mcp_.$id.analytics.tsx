@@ -11,6 +11,7 @@ export const meta: MetaFunction = ({ matches }) => {
 import { ArrowLeft, Clock } from "lucide-react";
 import { api } from "~/lib/api";
 import { McpAnalyticsPanel, type McpAnalyticsData } from "~/components/mcp/McpAnalyticsPanel";
+import { ArtifactRequestsPanel } from "~/components/activity/ArtifactRequestsPanel";
 
 export default function McpAnalyticsDashboard() {
   const { id } = useParams();
@@ -19,11 +20,13 @@ export default function McpAnalyticsDashboard() {
   const [error, setError] = useState("");
   const [searchParams, setSearchParams] = useSearchParams();
   const urlTab = searchParams.get("tab");
-  const activeTab = urlTab === "sessions" ? "sessions" : "analytics";
+  const activeTab: "overview" | "requests" | "sessions" =
+    urlTab === "requests" || urlTab === "sessions" ? urlTab : "overview";
 
-  const handleTabChange = (newTab: "analytics" | "sessions") => {
+  const handleTabChange = (newTab: "overview" | "requests" | "sessions") => {
     setSearchParams(prev => {
-      prev.set("tab", newTab);
+      if (newTab === "overview") prev.delete("tab");
+      else prev.set("tab", newTab);
       return prev;
     }, { replace: true });
   };
@@ -94,11 +97,23 @@ export default function McpAnalyticsDashboard() {
 
       <div className="flex bg-slate-100 p-1 rounded-lg w-fit mb-6">
         <button
-          data-track="view_mcp_analytics_tab"
+          data-track="view_mcp_overview_tab"
           type="button"
-          onClick={() => handleTabChange("analytics")}
+          onClick={() => handleTabChange("overview")}
           className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${
-            activeTab === "analytics"
+            activeTab === "overview"
+              ? "bg-white text-slate-900 shadow-sm"
+              : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"
+          } cursor-pointer`}
+        >
+          Overview
+        </button>
+        <button
+          data-track="view_mcp_requests_tab"
+          type="button"
+          onClick={() => handleTabChange("requests")}
+          className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${
+            activeTab === "requests"
               ? "bg-white text-slate-900 shadow-sm"
               : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"
           } cursor-pointer`}
@@ -128,9 +143,9 @@ export default function McpAnalyticsDashboard() {
         </button>
       </div>
 
-      {activeTab === "analytics" ? (
-        <McpAnalyticsPanel data={data} />
-      ) : (
+      {activeTab === "overview" && <McpAnalyticsPanel data={data} />}
+      {activeTab === "requests" && id && <ArtifactRequestsPanel artifactId={id} transport="mcp" />}
+      {activeTab === "sessions" && (
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
             <Clock className="w-4 h-4 text-blue-500" />

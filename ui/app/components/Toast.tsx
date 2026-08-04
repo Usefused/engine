@@ -51,6 +51,173 @@ export function useToast() {
   return context;
 }
 
+function cancelDismissValue(toast: ToastItem): unknown {
+  if (toast.type === "prompt") return null;
+  if (toast.checkboxLabel) return { confirmed: false, permissionGranted: false };
+  return false;
+}
+
+interface InteractiveToastCardProps {
+  toast: ToastItem;
+  inputValue: string;
+  setInputValue: (v: string) => void;
+  checkboxValue: boolean;
+  setCheckboxValue: (v: boolean) => void;
+  iconColors: string;
+  Icon: React.ComponentType<{ className?: string }>;
+  confirmBtnClass: string;
+  handleDismiss: (val: unknown) => void;
+}
+
+function InteractiveToastCard({
+  toast,
+  inputValue,
+  setInputValue,
+  checkboxValue,
+  setCheckboxValue,
+  iconColors,
+  Icon,
+  confirmBtnClass,
+  handleDismiss,
+}: InteractiveToastCardProps) {
+  const handleConfirm = () => {
+    if (toast.type === "prompt") {
+      handleDismiss(inputValue);
+      return;
+    }
+    handleDismiss(toast.checkboxLabel ? { confirmed: true, permissionGranted: checkboxValue } : true);
+  };
+
+  return (
+    <>
+      {/* Blue accent top bar */}
+      <div className="h-[3px] w-full bg-blue-500" />
+
+      {/* Card body */}
+      <div className="relative px-5 pt-5 pb-5 flex flex-col items-center text-center gap-3">
+        {/* X close — top-right */}
+        <button
+          data-track="close_toast"
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            handleDismiss(cancelDismissValue(toast));
+          }}
+          className="absolute top-3 right-3 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+          aria-label="Close notification"
+        >
+          <X className="w-3.5 h-3.5" />
+        </button>
+
+        {/* Icon badge */}
+        <div className={`p-3 rounded-2xl ${iconColors}`}>
+          <Icon className="w-6 h-6" />
+        </div>
+
+        {/* Message */}
+        <p className="text-[13px] font-medium text-gray-700 dark:text-gray-200 leading-relaxed max-w-[240px]">
+          {toast.message}
+        </p>
+
+        {/* Prompt input */}
+        {toast.type === "prompt" && (
+          <input
+            type="text"
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            placeholder={toast.placeholder}
+            className="w-full text-sm px-3 py-2.5 border border-gray-200 dark:border-slate-600 rounded-xl focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none bg-white dark:bg-slate-700 text-gray-900 dark:text-gray-100 placeholder:text-gray-400"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleDismiss(inputValue);
+            }}
+            autoFocus
+          />
+        )}
+
+        {/* Permission checkbox — card style */}
+        {toast.type === "confirm" && toast.checkboxLabel && (
+          <label
+            htmlFor={`chk-${toast.id}`}
+            className="flex items-center gap-2.5 w-full bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2.5 cursor-pointer group text-left"
+          >
+            <input
+              type="checkbox"
+              id={`chk-${toast.id}`}
+              checked={checkboxValue}
+              onChange={(e) => setCheckboxValue(e.target.checked)}
+              className="w-4 h-4 text-indigo-600 border-slate-300 dark:border-slate-600 rounded focus:ring-indigo-500 cursor-pointer shrink-0"
+            />
+            <span className="text-xs text-slate-600 dark:text-slate-300 select-none group-hover:text-slate-800 dark:group-hover:text-slate-100 transition-colors">
+              {toast.checkboxLabel}
+            </span>
+          </label>
+        )}
+      </div>
+
+      {/* Divider */}
+      <div className="h-px bg-gray-200 dark:bg-slate-700" />
+
+      {/* iOS-style full-width footer buttons */}
+      <div className="flex">
+        <button
+          data-track="cancel_toast_action"
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            handleDismiss(cancelDismissValue(toast));
+          }}
+          className="flex-1 py-3 text-sm font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-slate-700 transition-colors cursor-pointer border-r border-gray-200 dark:border-slate-700"
+        >
+          {toast.cancelLabel || "Cancel"}
+        </button>
+        <button
+          data-track="confirm_toast_action"
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            handleConfirm();
+          }}
+          className={`flex-1 py-3 text-sm transition-colors cursor-pointer ${confirmBtnClass}`}
+        >
+          {toast.confirmLabel || (toast.type === "prompt" ? "Submit" : "Confirm")}
+        </button>
+      </div>
+    </>
+  );
+}
+
+interface CompactToastCardProps {
+  toast: ToastItem;
+  iconColors: string;
+  Icon: React.ComponentType<{ className?: string }>;
+  handleDismiss: (val: unknown) => void;
+}
+
+function CompactToastCard({ toast, iconColors, Icon, handleDismiss }: CompactToastCardProps) {
+  return (
+    <div className="p-4 flex gap-3 items-center">
+      <div className={`p-2 rounded-lg shrink-0 ${iconColors}`}>
+        <Icon className="w-5 h-5" />
+      </div>
+      <p className="flex-1 min-w-0 text-sm font-semibold text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words">
+        {toast.message}
+      </p>
+      <button
+        data-track="dismiss_toast"
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          handleDismiss(false);
+        }}
+        className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800/80 shrink-0 cursor-pointer"
+        aria-label="Close notification"
+      >
+        <X className="w-4 h-4" />
+      </button>
+    </div>
+  );
+}
+
 function ToastItemComponent({ toast }: { toast: ToastItem }) {
   const [isVisible, setIsVisible] = useState(false);
   const [inputValue, setInputValue] = useState(toast.defaultValue || "");
@@ -126,142 +293,19 @@ function ToastItemComponent({ toast }: { toast: ToastItem }) {
       }`}
     >
       {isInteractive ? (
-        <>
-          {/* Blue accent top bar */}
-          <div className="h-[3px] w-full bg-blue-500" />
-
-          {/* Card body */}
-          <div className="relative px-5 pt-5 pb-5 flex flex-col items-center text-center gap-3">
-            {/* X close — top-right */}
-            <button
-              data-track="close_toast"
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                handleDismiss(
-                  toast.type === "prompt"
-                    ? null
-                    : toast.checkboxLabel
-                    ? { confirmed: false, permissionGranted: false }
-                    : false
-                );
-              }}
-              className="absolute top-3 right-3 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-              aria-label="Close notification"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-
-            {/* Icon badge */}
-            <div className={`p-3 rounded-2xl ${iconColors}`}>
-              <Icon className="w-6 h-6" />
-            </div>
-
-            {/* Message */}
-            <p className="text-[13px] font-medium text-gray-700 dark:text-gray-200 leading-relaxed max-w-[240px]">
-              {toast.message}
-            </p>
-
-            {/* Prompt input */}
-            {toast.type === "prompt" && (
-              <input
-                type="text"
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                placeholder={toast.placeholder}
-                className="w-full text-sm px-3 py-2.5 border border-gray-200 dark:border-slate-600 rounded-xl focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none bg-white dark:bg-slate-700 text-gray-900 dark:text-gray-100 placeholder:text-gray-400"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") handleDismiss(inputValue);
-                }}
-                autoFocus
-              />
-            )}
-
-            {/* Permission checkbox — card style */}
-            {toast.type === "confirm" && toast.checkboxLabel && (
-              <label
-                htmlFor={`chk-${toast.id}`}
-                className="flex items-center gap-2.5 w-full bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2.5 cursor-pointer group text-left"
-              >
-                <input
-                  type="checkbox"
-                  id={`chk-${toast.id}`}
-                  checked={checkboxValue}
-                  onChange={(e) => setCheckboxValue(e.target.checked)}
-                  className="w-4 h-4 text-indigo-600 border-slate-300 dark:border-slate-600 rounded focus:ring-indigo-500 cursor-pointer shrink-0"
-                />
-                <span className="text-xs text-slate-600 dark:text-slate-300 select-none group-hover:text-slate-800 dark:group-hover:text-slate-100 transition-colors">
-                  {toast.checkboxLabel}
-                </span>
-              </label>
-            )}
-          </div>
-
-          {/* Divider */}
-          <div className="h-px bg-gray-200 dark:bg-slate-700" />
-
-          {/* iOS-style full-width footer buttons */}
-          <div className="flex">
-            <button
-              data-track="cancel_toast_action"
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                handleDismiss(
-                  toast.type === "prompt"
-                    ? null
-                    : toast.checkboxLabel
-                    ? { confirmed: false, permissionGranted: false }
-                    : false
-                );
-              }}
-              className="flex-1 py-3 text-sm font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-slate-700 transition-colors cursor-pointer border-r border-gray-200 dark:border-slate-700"
-            >
-              {toast.cancelLabel || "Cancel"}
-            </button>
-            <button
-              data-track="confirm_toast_action"
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                if (toast.type === "prompt") {
-                  handleDismiss(inputValue);
-                } else {
-                  handleDismiss(
-                    toast.checkboxLabel
-                      ? { confirmed: true, permissionGranted: checkboxValue }
-                      : true
-                  );
-                }
-              }}
-              className={`flex-1 py-3 text-sm transition-colors cursor-pointer ${confirmBtnClass}`}
-            >
-              {toast.confirmLabel || (toast.type === "prompt" ? "Submit" : "Confirm")}
-            </button>
-          </div>
-        </>
+        <InteractiveToastCard
+          toast={toast}
+          inputValue={inputValue}
+          setInputValue={setInputValue}
+          checkboxValue={checkboxValue}
+          setCheckboxValue={setCheckboxValue}
+          iconColors={iconColors}
+          Icon={Icon}
+          confirmBtnClass={confirmBtnClass}
+          handleDismiss={handleDismiss}
+        />
       ) : (
-        /* ── Compact notification layout ── */
-        <div className="p-4 flex gap-3 items-center">
-          <div className={`p-2 rounded-lg shrink-0 ${iconColors}`}>
-            <Icon className="w-5 h-5" />
-          </div>
-          <p className="flex-1 min-w-0 text-sm font-semibold text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words">
-            {toast.message}
-          </p>
-          <button
-            data-track="dismiss_toast"
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              handleDismiss(false);
-            }}
-            className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800/80 shrink-0 cursor-pointer"
-            aria-label="Close notification"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
+        <CompactToastCard toast={toast} iconColors={iconColors} Icon={Icon} handleDismiss={handleDismiss} />
       )}
     </div>
   );

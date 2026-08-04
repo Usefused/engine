@@ -341,6 +341,19 @@ var engineExecutionAnalyticsGraphQLType = graphql.NewObject(graphql.ObjectConfig
 	},
 })
 
+var artifactExecutionAnalyticsGraphQLType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "ArtifactExecutionAnalytics",
+	Fields: graphql.Fields{
+		"total_calls":        &graphql.Field{Type: graphql.Int},
+		"successful_calls":   &graphql.Field{Type: graphql.Int},
+		"failed_calls":       &graphql.Field{Type: graphql.Int},
+		"average_latency_ms": &graphql.Field{Type: graphql.Float},
+		"median_latency_ms":  &graphql.Field{Type: graphql.Float},
+		"p95_latency_ms":     &graphql.Field{Type: graphql.Float},
+		"by_service":         &graphql.Field{Type: graphql.NewList(engineExecutionBreakdownGraphQLType)},
+	},
+})
+
 var engineExecutionBreakdownGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "EngineExecutionBreakdown",
 	Fields: graphql.Fields{
@@ -846,6 +859,81 @@ func engineExecutionEventsGraphQLField(s store.Store) *graphql.Field {
 				span.RecordError(err)
 			}
 			return map[string]interface{}{"items": projectGraphQLEngineExecutionEvents(events, artifactScopes), "total": int(total)}, nil
+		},
+	}
+}
+
+func artifactExecutionEventsGraphQLField(s store.Store) *graphql.Field {
+	return &graphql.Field{
+		Type: engineExecutionEventPageGraphQLType,
+		Args: artifactExecutionActivityArgs(true),
+		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.artifact_execution_events.list")
+			defer span.End()
+			actor, err := actorFromContext(ctx)
+			if err != nil {
+				return nil, err
+			}
+			filter, err := artifactExecutionActivityFilterFromArgs(p)
+			if err != nil {
+				return nil, err
+			}
+			if err := ensureArtifactScopeOwnedBy(ctx, s, actor.accountID, filter.artifactID); err != nil {
+				return nil, err
+			}
+			reader, ok := s.(store.ArtifactExecutionEventReader)
+			if !ok {
+				return nil, errors.New("artifact execution activity is unavailable")
+			}
+			span.SetAttributes(
+				attribute.String("artifact_id", filter.artifactID.String()),
+				attribute.String("transport", filter.transport),
+				attribute.String("status", filter.status),
+				attribute.Int("limit", filter.limit),
+				attribute.Int("offset", filter.offset),
+			)
+			events, total, err := reader.ListEngineExecutionEventsByArtifact(ctx, filter.storeFilter(actor.accountID))
+			if err != nil {
+				return nil, fmt.Errorf("list artifact execution events: %w", err)
+			}
+			// The artifact page already owns its display metadata. Avoiding a second
+			// lookup keeps this receipt feed to one scoped activity query.
+			return map[string]interface{}{"items": projectGraphQLEngineExecutionEvents(events, nil), "total": int(total)}, nil
+		},
+	}
+}
+
+func artifactExecutionAnalyticsGraphQLField(s store.Store) *graphql.Field {
+	return &graphql.Field{
+		Type: artifactExecutionAnalyticsGraphQLType,
+		Args: artifactExecutionActivityArgs(false),
+		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.artifact_execution_analytics.get")
+			defer span.End()
+			actor, err := actorFromContext(ctx)
+			if err != nil {
+				return nil, err
+			}
+			filter, err := artifactExecutionActivityFilterFromArgs(p)
+			if err != nil {
+				return nil, err
+			}
+			if err := ensureArtifactScopeOwnedBy(ctx, s, actor.accountID, filter.artifactID); err != nil {
+				return nil, err
+			}
+			reader, ok := s.(store.ArtifactExecutionAnalyticsReader)
+			if !ok {
+				return nil, errors.New("artifact execution analytics is unavailable")
+			}
+			span.SetAttributes(
+				attribute.String("artifact_id", filter.artifactID.String()),
+				attribute.String("transport", filter.transport),
+			)
+			analytics, err := reader.GetEngineExecutionAnalyticsByArtifact(ctx, filter.storeFilter(actor.accountID))
+			if err != nil {
+				return nil, fmt.Errorf("get artifact execution analytics: %w", err)
+			}
+			return projectGraphQLArtifactExecutionAnalytics(analytics), nil
 		},
 	}
 }
@@ -1811,20 +1899,59 @@ type engineExecutionActivityFilter struct {
 	endDate   *time.Time
 }
 
+type artifactExecutionActivityFilter struct {
+	artifactID uuid.UUID
+	transport  string
+	direction  string
+	status     string
+	limit      int
+	offset     int
+	startDate  *time.Time
+	endDate    *time.Time
+}
+
 func engineExecutionActivityArgs(includePage bool) graphql.FieldConfigArgument {
+	return scopedExecutionActivityArgs("service_id", includePage)
+}
+
+func artifactExecutionActivityArgs(includePage bool) graphql.FieldConfigArgument {
+	return scopedExecutionActivityArgs("artifact_id", includePage)
+}
+
+func scopedExecutionActivityArgs(scopeArgument string, includePage bool) graphql.FieldConfigArgument {
 	args := graphql.FieldConfigArgument{
-		"service_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
-		"transport":  &graphql.ArgumentConfig{Type: graphql.String},
-		"direction":  &graphql.ArgumentConfig{Type: graphql.String},
-		"status":     &graphql.ArgumentConfig{Type: graphql.String},
-		"start_date": &graphql.ArgumentConfig{Type: graphql.String},
-		"end_date":   &graphql.ArgumentConfig{Type: graphql.String},
+		scopeArgument: &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
+		"transport":   &graphql.ArgumentConfig{Type: graphql.String},
+		"direction":   &graphql.ArgumentConfig{Type: graphql.String},
+		"status":      &graphql.ArgumentConfig{Type: graphql.String},
+		"start_date":  &graphql.ArgumentConfig{Type: graphql.String},
+		"end_date":    &graphql.ArgumentConfig{Type: graphql.String},
 	}
 	if includePage {
 		args["limit"] = &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 10}
 		args["offset"] = &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 0}
 	}
 	return args
+}
+
+func artifactExecutionActivityFilterFromArgs(p graphql.ResolveParams) (artifactExecutionActivityFilter, error) {
+	artifactID, err := requiredGraphQLUUIDArg(p, "artifact_id")
+	if err != nil {
+		return artifactExecutionActivityFilter{}, err
+	}
+	transport, direction, status, err := engineExecutionDimensionsFromArgs(p)
+	if err != nil {
+		return artifactExecutionActivityFilter{}, err
+	}
+	startDate, endDate, err := engineExecutionDatesFromArgs(p)
+	if err != nil {
+		return artifactExecutionActivityFilter{}, err
+	}
+	limit, offset := bucketPageArgs(p)
+	return artifactExecutionActivityFilter{
+		artifactID: artifactID, transport: transport, direction: direction, status: status,
+		limit: limit, offset: offset, startDate: startDate, endDate: endDate,
+	}, nil
 }
 
 func engineExecutionActivityFilterFromArgs(p graphql.ResolveParams) (engineExecutionActivityFilter, error) {
@@ -1890,6 +2017,13 @@ func engineExecutionDatesFromArgs(p graphql.ResolveParams) (*time.Time, *time.Ti
 func (f engineExecutionActivityFilter) storeFilter(accountID uuid.UUID) store.EngineExecutionFilter {
 	return store.EngineExecutionFilter{
 		AccountID: accountID, ServiceID: f.serviceID, Transport: f.transport, Direction: f.direction,
+		Status: f.status, Limit: f.limit, Offset: f.offset, StartDate: f.startDate, EndDate: f.endDate,
+	}
+}
+
+func (f artifactExecutionActivityFilter) storeFilter(accountID uuid.UUID) store.EngineExecutionFilter {
+	return store.EngineExecutionFilter{
+		AccountID: accountID, ArtifactID: f.artifactID, Transport: f.transport, Direction: f.direction,
 		Status: f.status, Limit: f.limit, Offset: f.offset, StartDate: f.startDate, EndDate: f.endDate,
 	}
 }
@@ -2625,6 +2759,12 @@ func projectGraphQLEngineExecutionAnalytics(analytics models.EngineExecutionAnal
 		"failed_calls": int(analytics.FailedCalls), "average_latency_ms": analytics.AverageLatencyMs,
 		"median_latency_ms": analytics.MedianLatencyMs, "p95_latency_ms": analytics.P95LatencyMs,
 	}
+}
+
+func projectGraphQLArtifactExecutionAnalytics(analytics models.ArtifactExecutionAnalytics) map[string]interface{} {
+	result := projectGraphQLEngineExecutionAnalytics(analytics.EngineExecutionAnalytics)
+	result["by_service"] = projectGraphQLExecutionBreakdowns(analytics.ByService)
+	return result
 }
 
 func projectGraphQLWorkspaceExecutionAnalytics(analytics models.WorkspaceExecutionAnalytics) map[string]interface{} {

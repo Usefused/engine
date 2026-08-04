@@ -14,9 +14,8 @@ export default function IntegrationsLayout() {
   useEffect(() => {
     const isAuthenticatedStaticRoute = location.pathname.startsWith("/integrations/access/") || [
       "/integrations/buckets",
+	  "/integrations/activity",
       "/integrations/mcp",
-      "/integrations/notifications",
-      "/integrations/observability",
       "/integrations/sdks",
       "/integrations/settings",
     ].includes(location.pathname);
