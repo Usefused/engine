@@ -11,18 +11,7 @@
 
 The **Fused Engine** is the self-hosted runtime that applies workspace policies created in Fused. Deploy it in your own infrastructure to run configured API calls, MCP sessions, and webhook ingress close to your systems.
 
-Fused Engine cannot run as a standalone/offline product. It requires a Fused Cloud license key from your Fused account, and startup exits if the key is missing or the Registry handshake fails.
-
-After startup, Engine sends signed heartbeat checks to Fused Cloud so your workspace remains marked as a verified self-hosted runtime; missed heartbeats may cause support/cloud-managed features to treat the runtime as unverified until it reconnects.
-
 Credentials are not scraped from arbitrary traffic. Engine only injects credentials into requests that are executed through Fused-configured SDK, MCP, webhook, or proxy routes and only from secrets that you explicitly store or connect. Runtime request payloads stay in the environment where you deploy the Engine.
-
-## License
-
-Fused Engine is **source-available, not open source**. The public source is
-licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE). Commercial
-or production use requires a separate written agreement with Fused and a Fused
-Cloud license key. See [Commercial Use](COMMERCIAL-USE.md).
 
 ## Features
 - **Self-hosted runtime**: Process configured webhooks, SDK calls, and MCP requests inside your own infrastructure.
@@ -30,13 +19,11 @@ Cloud license key. See [Commercial Use](COMMERCIAL-USE.md).
 - **Embedded NATS JetStream**: Instantly and reliably queues incoming webhooks and broadcasts WebSocket events without requiring an external NATS cluster or Redis instance to be deployed alongside it.
 - **Headless Mode**: A no-UI Docker variant (`ghcr.io/usefused/engine:headless`) optimized for serverless and Kubernetes deployments.
 - **Resilient**: Fully caches execution metadata locally to withstand network partitions.
-- **Local activity history**: Persists SDK, MCP, and webhook execution receipts through one durable JetStream path for auditing and troubleshooting.
 
 ## Prerequisites
 
 - **PostgreSQL 16+**
 - **Fused License Key** (Provided by your Fused onboarding contact)
-- **Node.js 18+** (Required in your `$PATH` *only* if you are running the bare binary and plan to use MCP functionality. Docker images already include it.)
 
 ## Installation
 
@@ -52,12 +39,7 @@ ARCHIVE="fused_${OS}_${ARCH}.tar.gz"
 
 curl -LO "https://github.com/Usefused/engine/releases/download/${VERSION}/${ARCHIVE}"
 curl -LO "https://github.com/Usefused/engine/releases/download/${VERSION}/checksums.txt"
-grep " ${ARCHIVE}$" checksums.txt > "${ARCHIVE}.sha256"
-if command -v sha256sum >/dev/null; then
-  sha256sum -c "${ARCHIVE}.sha256"
-else
-  shasum -a 256 -c "${ARCHIVE}.sha256"
-fi
+sha256sum --check --ignore-missing checksums.txt
 tar -xzf "${ARCHIVE}"
 mv fused-engine /usr/local/bin/
 ```
@@ -91,7 +73,7 @@ export FUSED_LICENSE_KEY="<provided-by-fused>"
 fused-engine start
 ```
 
-By default, the Engine will automatically detect that no external NATS cluster is configured and will boot its embedded NATS server on port `4222`. It will spin up the REST API on port `8081`, and the SDK gRPC connection on port `50051`. The Engine always talks to the Fused Cloud Registry -- there's nothing to configure here.
+By default, the Engine will automatically detect that no external NATS cluster is configured and will boot its embedded NATS server on port `4222`. It will spin up the REST API on port `8081`, and the SDK gRPC connection on port `50051`. The Registry endpoint defaults to Fused Cloud; only set `FUSED_REGISTRY_ENDPOINT` when Fused support asks you to use a different endpoint.
 
 ### Docker Compose Example (with UI)
 Our full Docker image (`latest`) bundles both the Engine and the Admin Dashboard. The headless image (`headless`) runs the same Engine API without the embedded UI.
@@ -126,50 +108,9 @@ Once running, you can access the Admin Dashboard and Engine API at `http://local
 
 Install `fused-cli` from the [CLI releases](https://github.com/Usefused/cli/releases), then point it at this Engine with `fused-cli config set engine-url <engine-url>`.
 
-`FUSED_LICENSE_KEY` is also the bootstrap Owner credential for a new local
-workspace. Small teams can use it directly without first configuring RBAC.
-When personal or service credentials are introduced, set them through
-`FUSED_API_KEY`; the CLI prefers that attributable credential over the license
-key for local Engine commands. Engine continues to use the license key for its
-own Registry traffic, so Registry and local user identity do not need to match.
-
-SDK and MCP lifecycle commands are deliberately separate:
-
-```bash
-# Generate and optionally download a typed code package.
-fused-cli sdk plan -f .fused/sdks/customer-support.yaml
-fused-cli sdk apply -f .fused/sdks/customer-support.yaml --download
-
-# Deploy an Engine-hosted MCP server. This does not produce downloadable code.
-fused-cli mcp plan -f .fused/mcps/customer-support.yaml
-fused-cli mcp apply -f .fused/mcps/customer-support.yaml
-```
-
-Plans default to personal ownership. Pass an owning team slug when a central
-team should manage the SDK, MCP server, or webhook, for example
-`fused-cli sdk plan --owner-team platform`. Ownership is fixed by the plan and
-cannot be changed during apply; workspace-wide use is granted separately, so a
-centrally owned SDK or MCP server can be used broadly without making every
-workspace member its manager.
-
-SDK and MCP names resolve within their own kind, so both may use the same
-`name@version`. Full UUIDs are also verified against the requested kind rather
-than bypassing that boundary. The access-control API still calls their shared
-RBAC/storage resource `artifact`; that internal label does not merge the SDK
-and MCP product surfaces. If a generic access command sees the same identity in
-both kinds, use the full UUID shown by `fused-cli sdk list` or `fused-cli mcp
-list`.
-
 ## Configuration
 
 You can configure the Engine via a YAML configuration file (`engine.yaml`), environment variables, or CLI flags. CLI Flags always take the highest precedence.
-
-Canonical execution receipts are retained for 30 days by default. Configure
-`engine.execution_retention_days` to change the local history window and
-`engine.execution_cleanup_batch` to control the bounded cleanup batch. Local
-Activity queries read these receipts directly; Engine does not maintain a
-second local hourly rollup. OTEL remains an optional debugging export rather
-than the embedded Activity data store.
 
 For audit details, see [Registry contract](docs/registry-contract.md), [license key behavior](docs/license-key.md), [telemetry](docs/telemetry.md), [Docker](docs/docker.md), and [threat model](THREAT_MODEL.md).
 
@@ -190,14 +131,12 @@ FUSED_UI_URL="https://admin.your-company.com"
 # Leave blank to boot the internal embedded NATS.
 # NATS_URL="nats://nats:4222" 
 
-# (Optional) Override where embedded NATS JetStream stores local files.
-# Default behavior prefers <engine-binary-dir>/data/nats, then falls back to
-# <current-working-dir>/data/nats if the binary directory is not writable.
-# FUSED_NATS_STORE_DIR="/var/lib/fused/nats"
-
 # OpenTelemetry configuration for distributed tracing
 OTEL_SERVICE_NAME="engine"
 OTEL_EXPORTER_OTLP_ENDPOINT="http://jaeger:4318"
+
+# Optional: override the Fused Cloud Registry endpoint only when directed by Fused support.
+# FUSED_REGISTRY_ENDPOINT="https://registry.usefused.com/graphql"
 ```
 
 ### CLI Flags
