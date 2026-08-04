@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats-server/v2/server"
@@ -14,6 +16,66 @@ import (
 type NATSClient struct {
 	Conn *nats.Conn
 	JS   nats.JetStreamContext
+}
+
+func ensureWritableDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+
+	f, err := os.CreateTemp(dir, ".fused-nats-write-check-*")
+	if err != nil {
+		return err
+	}
+	_ = f.Close()
+	_ = os.Remove(f.Name())
+	return nil
+}
+
+func makeAbs(path string) string {
+	if path == "" || filepath.IsAbs(path) {
+		return path
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return path
+}
+
+func resolveEmbeddedNATSStoreDir() (string, error) {
+	if override := strings.TrimSpace(os.Getenv("FUSED_NATS_STORE_DIR")); override != "" {
+		dir := makeAbs(override)
+		if err := ensureWritableDir(dir); err != nil {
+			return "", fmt.Errorf("FUSED_NATS_STORE_DIR %q is not writable: %w", dir, err)
+		}
+		return dir, nil
+	}
+
+	var candidates []string
+	if exePath, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exePath), "data", "nats"))
+	}
+	if wd, err := os.Getwd(); err == nil {
+		fallback := filepath.Join(wd, "data", "nats")
+		if len(candidates) == 0 || candidates[0] != fallback {
+			candidates = append(candidates, fallback)
+		}
+	}
+
+	var lastErr error
+	for _, dir := range candidates {
+		if err := ensureWritableDir(dir); err != nil {
+			lastErr = err
+			slog.Warn("Embedded NATS store directory unavailable", slog.String("path", dir), slog.Any("error", err))
+			continue
+		}
+		return dir, nil
+	}
+
+	if lastErr != nil {
+		return "", fmt.Errorf("failed to find writable embedded NATS store directory: %w", lastErr)
+	}
+	return "", fmt.Errorf("failed to determine embedded NATS store directory")
 }
 
 // ConnectNATS establishes a connection to the NATS server.
@@ -33,11 +95,17 @@ func ConnectNATS() (*NATSClient, error) {
 			// No NATS server is running. We act as the Leader and boot the embedded server.
 			slog.Info("No local NATS server found. Booting embedded NATS server on port 4222... (Leader Mode)")
 
+			storeDir, err := resolveEmbeddedNATSStoreDir()
+			if err != nil {
+				return nil, fmt.Errorf("failed to resolve embedded NATS store directory: %w", err)
+			}
+			slog.Info("Using embedded NATS store directory", slog.String("path", storeDir))
+
 			// We need a robust data directory for JetStream to persist stream data locally.
 			opts := &server.Options{
 				Port:      4222,
 				JetStream: true,
-				StoreDir:  "data/nats",
+				StoreDir:  storeDir,
 			}
 
 			ns, err := server.NewServer(opts)

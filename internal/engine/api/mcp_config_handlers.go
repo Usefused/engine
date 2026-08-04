@@ -40,12 +40,12 @@ func MCPConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 		actor, ok := accesscontrol.ActorFromContext(ctx)
 		if !ok {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"})
+			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, ctx)
 			return
 		}
 		req, doc, err := decodeArtifactConfigPlanRequest(r, "mcp")
 		if err != nil {
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()})
+			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, ctx)
 			return
 		}
 		setSDKConfigSpanAttributes(span, req.ConfigKey, doc)
@@ -55,7 +55,7 @@ func MCPConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 		})
 		if err != nil {
 			span.SetStatus(codes.Error, "mcp config plan failed")
-			writeSDKConfigError(w, err)
+			writeSDKConfigError(w, err, ctx)
 			return
 		}
 		span.SetAttributes(attribute.String("outcome", "success"), attribute.String("plan_id", result.plan.ID.String()))
@@ -78,17 +78,17 @@ func MCPConfigApplyHandler(configStore store.ConfigRepository, s store.Store, re
 		actor, ok := accesscontrol.ActorFromContext(ctx)
 		if !ok {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"})
+			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, ctx)
 			return
 		}
 		req, planID, err := decodeSDKConfigApplyRequest(r)
 		if err != nil {
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()})
+			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, ctx)
 			return
 		}
 		planRevision, ok := AuthorizedPlanRevisionFromContext(ctx)
 		if !ok {
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"})
+			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"}, ctx)
 			return
 		}
 		result, err := executeMCPConfigApply(ctx, configStore, s, registryClient, sdkApplyCall{
@@ -97,7 +97,7 @@ func MCPConfigApplyHandler(configStore store.ConfigRepository, s store.Store, re
 		})
 		if err != nil {
 			span.SetStatus(codes.Error, "mcp config apply failed")
-			writeSDKConfigError(w, err)
+			writeSDKConfigError(w, err, ctx)
 			return
 		}
 		result.RuntimeURL = mcpURLForSDK(r, result.RuntimeID)
@@ -106,6 +106,9 @@ func MCPConfigApplyHandler(configStore store.ConfigRepository, s store.Store, re
 			attribute.String("artifact.name", result.Name), attribute.String("artifact.version", result.Version),
 			attribute.String("runtime_id", result.RuntimeID.String()),
 		)
+		if result.ExecutionToken != "" {
+			setOneTimeSecretResponseHeaders(w)
+		}
 		writeJSON(w, mcpConfigApplyResponse(planID, result))
 	}
 }

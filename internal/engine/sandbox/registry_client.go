@@ -96,6 +96,26 @@ type EngineUsageReportRequest struct {
 	Reports         []models.EngineUsageReport `json:"reports"`
 }
 
+type publicInsightEligibilityRequest struct {
+	ServiceIDs []uuid.UUID `json:"service_ids"`
+}
+
+type publicInsightEligibilityResponse struct {
+	Services []models.PublicServiceInsightEligibility `json:"services"`
+}
+
+type publicInsightReportRequest struct {
+	SchemaVersion   int                                 `json:"schema_version"`
+	EngineVersion   string                              `json:"engine_version"`
+	EngineBuildHash string                              `json:"engine_build_hash"`
+	ReportedAt      time.Time                           `json:"reported_at"`
+	Reports         []models.PublicServiceInsightReport `json:"reports"`
+}
+
+type publicInsightReportResponse struct {
+	Results []models.PublicServiceInsightReportResult `json:"results"`
+}
+
 type EngineHandshakeResult struct {
 	AccountID     string
 	WorkspaceName string
@@ -103,11 +123,12 @@ type EngineHandshakeResult struct {
 }
 
 type rawRuntimeEntitlement struct {
-	Plan                       string `json:"plan"`
-	HeartbeatRequired          *bool  `json:"heartbeat_required"`
-	UsageReporting             string `json:"usage_reporting"`
-	HeartbeatIntervalSeconds   int    `json:"heartbeat_interval_seconds"`
-	HeartbeatStaleAfterSeconds int    `json:"heartbeat_stale_after_seconds"`
+	Plan                           string `json:"plan"`
+	HeartbeatRequired              *bool  `json:"heartbeat_required"`
+	UsageReporting                 string `json:"usage_reporting"`
+	PublicServiceInsightsReporting *bool  `json:"public_service_insights_reporting"`
+	HeartbeatIntervalSeconds       int    `json:"heartbeat_interval_seconds"`
+	HeartbeatStaleAfterSeconds     int    `json:"heartbeat_stale_after_seconds"`
 }
 
 type ConnectionProfileRef struct {
@@ -1586,31 +1607,76 @@ func (c *HTTPRegistryClient) SendUsageReports(ctx context.Context, engineVersion
 	if len(reports) == 0 {
 		return nil
 	}
-	body, err := json.Marshal(EngineUsageReportRequest{
+	return c.postSignedEngineJSON(ctx, "/api/engine/usage-reports", EngineUsageReportRequest{
 		EngineVersion:   engineVersion,
 		EngineBuildHash: engineBuildHash,
 		ReportedAt:      reportedAt,
 		Reports:         reports,
-	})
-	if err != nil {
-		return fmt.Errorf("usage reports: marshal request: %w", err)
+	}, nil)
+}
+
+func (c *HTTPRegistryClient) FetchPublicServiceInsightEligibility(ctx context.Context, serviceIDs []uuid.UUID) (map[uuid.UUID]bool, error) {
+	if len(serviceIDs) == 0 {
+		return map[uuid.UUID]bool{}, nil
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.registryBaseURL()+"/api/engine/usage-reports", bytes.NewReader(body))
+	var response publicInsightEligibilityResponse
+	if err := c.postSignedEngineJSON(ctx, "/api/engine/public-service-insight-eligibility", publicInsightEligibilityRequest{ServiceIDs: serviceIDs}, &response); err != nil {
+		return nil, err
+	}
+	result := make(map[uuid.UUID]bool, len(response.Services))
+	for _, service := range response.Services {
+		result[service.ServiceID] = service.Reportable
+	}
+	return result, nil
+}
+
+func (c *HTTPRegistryClient) SendPublicServiceInsightReports(ctx context.Context, engineVersion, engineBuildHash string, reports []models.PublicServiceInsightReport, reportedAt time.Time) ([]models.PublicServiceInsightReportResult, error) {
+	if len(reports) == 0 {
+		return nil, nil
+	}
+	var response publicInsightReportResponse
+	err := c.postSignedEngineJSON(ctx, "/api/engine/public-service-insight-reports", publicInsightReportRequest{
+		SchemaVersion: models.PublicServiceInsightSchemaVersion, EngineVersion: engineVersion,
+		EngineBuildHash: engineBuildHash, ReportedAt: reportedAt, Reports: reports,
+	}, &response)
+	return response.Results, err
+}
+
+func (c *HTTPRegistryClient) FetchPublicServiceInsights(ctx context.Context, query models.PublicServiceInsightsQuery) (models.PublicServiceInsights, error) {
+	var response models.PublicServiceInsights
+	err := c.postSignedEngineJSON(ctx, "/api/engine/public-service-insights/query", query, &response)
+	return response, err
+}
+
+func (c *HTTPRegistryClient) postSignedEngineJSON(ctx context.Context, path string, requestBody, responseBody any) error {
+	if c.licenseKey == "" {
+		return fmt.Errorf("FUSED_LICENSE_KEY is required but was not provided")
+	}
+	body, err := json.Marshal(requestBody)
 	if err != nil {
-		return fmt.Errorf("usage reports: create request: %w", err)
+		return fmt.Errorf("Registry request: marshal %s: %w", path, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.registryBaseURL()+path, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("Registry request: create %s: %w", path, err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.licenseKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Engine-Signature", c.signRegistryPayload(body))
-
 	resp, err := c.do(req)
 	if err != nil {
-		return fmt.Errorf("usage reports: request failed: %w", err)
+		return fmt.Errorf("Registry request %s failed: %w", path, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("usage reports failed with status %d: %s", resp.StatusCode, string(body))
+		response, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Registry request %s returned status %d: %s", path, resp.StatusCode, string(response))
+	}
+	if responseBody == nil {
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(responseBody); err != nil {
+		return fmt.Errorf("Registry response %s: %w", path, err)
 	}
 	return nil
 }
@@ -1634,6 +1700,9 @@ func runtimeEntitlementFromHandshake(raw *rawRuntimeEntitlement) models.RuntimeE
 	}
 	if raw.UsageReporting != "" {
 		entitlement.UsageReporting = raw.UsageReporting
+	}
+	if raw.PublicServiceInsightsReporting != nil {
+		entitlement.PublicServiceInsightsReporting = *raw.PublicServiceInsightsReporting
 	}
 	entitlement.HeartbeatIntervalSeconds = raw.HeartbeatIntervalSeconds
 	entitlement.HeartbeatStaleAfterSeconds = raw.HeartbeatStaleAfterSeconds

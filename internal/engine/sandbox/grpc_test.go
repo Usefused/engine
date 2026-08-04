@@ -50,9 +50,10 @@ func TestExecute_EndpointNamePropagated(t *testing.T) {
 	t.Cleanup(func() { EngineStreamExecuteFunc = orig })
 	EngineStreamExecuteFunc = func(
 		_ context.Context, _, _, endpointName string,
-		_ map[string]any, _ map[string]any, _ string, _ engine.ResponseStream,
+		_ map[string]any, _ map[string]any, _ string, stream engine.ResponseStream,
 	) error {
 		gotEndpoint = endpointName
+		_ = engine.SendResponseStatus(stream, 202)
 		return nil
 	}
 
@@ -73,6 +74,9 @@ func TestExecute_EndpointNamePropagated(t *testing.T) {
 
 	if gotEndpoint != wantEndpoint {
 		t.Errorf("endpointName propagation: got %q, want %q", gotEndpoint, wantEndpoint)
+	}
+	if len(stream.sent) != 1 || stream.sent[0].StatusCode != 202 {
+		t.Fatalf("provider status frame was not propagated: %#v", stream.sent)
 	}
 }
 

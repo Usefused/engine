@@ -69,6 +69,18 @@ func TestWorkspaceServiceVersionByIDQueryUsesExactPinnedTuple(t *testing.T) {
 	}
 }
 
+func TestAuthorizedWorkspaceServiceFilterSupportsCLIReferences(t *testing.T) {
+	for _, fragment := range []string{
+		"s.service_name",
+		"s.service_slug",
+		"split_part(requested.name, '/', 2)",
+	} {
+		if !strings.Contains(authorizedWorkspaceServicesWhereSQL, fragment) {
+			t.Fatalf("authorized workspace-service filter must contain %q: %s", fragment, authorizedWorkspaceServicesWhereSQL)
+		}
+	}
+}
+
 func TestMissingContractSnapshotsQueryUsesSQLAntiJoin(t *testing.T) {
 	required := []string{
 		"LEFT JOIN fused_service_contract_snapshots snapshots",

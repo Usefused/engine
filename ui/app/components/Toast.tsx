@@ -14,7 +14,7 @@ export interface ToastItem {
   checkboxLabel?: string;
   placeholder?: string;
   defaultValue?: string;
-  resolve?: (value: any) => void;
+  resolve?: (value: unknown) => void;
   exiting?: boolean;
 }
 
@@ -62,7 +62,7 @@ function ToastItemComponent({ toast }: { toast: ToastItem }) {
     return () => clearTimeout(timeout);
   }, []);
 
-  const handleDismiss = (val: any) => {
+  const handleDismiss = (val: unknown) => {
     if (toast.resolve) {
       toast.resolve(val);
     }
@@ -296,7 +296,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   const warning = (message: string, duration?: number) => showBasicToast('warning', message, duration);
   const error = (message: string, duration?: number) => showBasicToast('error', message, duration);
 
-  const confirm = ((message: string, options?: ConfirmOptions): Promise<any> => {
+  const confirm = ((message: string, options?: ConfirmOptions): Promise<unknown> => {
     return new Promise((resolve) => {
       const id = Math.random().toString(36).substring(2, 9);
       const newToast: ToastItem = {
@@ -328,7 +328,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
         defaultValue: options?.defaultValue,
         resolve: (val) => {
           dismissToast(id);
-          resolve(val);
+          resolve(val as string | null);
         }
       };
       setToasts((prev) => [...prev, newToast]);

@@ -18,16 +18,33 @@ import (
 
 type controlRequirementStoreStub struct {
 	store.Store
-	bucket       *store.Bucket
-	defaultID    uuid.UUID
-	services     []store.WorkspaceService
-	buckets      []store.Bucket
-	bucketLoads  int
-	defaultLoads int
-	serviceLoads int
-	batchBuckets int
-	displayNames map[accesscontrol.ResourceRef]string
-	displayLoads int
+	bucket          *store.Bucket
+	defaultID       uuid.UUID
+	services        []store.WorkspaceService
+	buckets         []store.Bucket
+	bucketLoads     int
+	defaultLoads    int
+	serviceLoads    int
+	batchBuckets    int
+	displayNames    map[accesscontrol.ResourceRef]string
+	displayLoads    int
+	localServiceIDs map[string]uuid.UUID
+	slugLoads       int
+}
+
+// ResolveWorkspaceServiceIDsByKeys stands in for the Engine's local
+// fused_workspace_services mirror: only keys present in localServiceIDs
+// resolve, exactly like a real cache miss for a service never added to this
+// workspace before.
+func (s *controlRequirementStoreStub) ResolveWorkspaceServiceIDsByKeys(_ context.Context, keys []string) (map[string]uuid.UUID, error) {
+	s.slugLoads++
+	resolved := make(map[string]uuid.UUID, len(keys))
+	for _, key := range keys {
+		if id, ok := s.localServiceIDs[key]; ok {
+			resolved[key] = id
+		}
+	}
+	return resolved, nil
 }
 
 func (s *controlRequirementStoreStub) GetBucketByName(context.Context, string) (*store.Bucket, error) {
@@ -423,6 +440,118 @@ func TestWorkspacePlanIgnoresUnchangedResources(t *testing.T) {
 	}
 	if requirements[1].Resource.ID != changedID {
 		t.Fatalf("changed service requirement = %#v, want %s", requirements[1], changedID)
+	}
+}
+
+// TestWorkspacePlanResolvesServiceSlugLocally covers the ordinary case: a
+// workspace.yaml declares a service by bare slug (no service_id), and that
+// slug is already known locally because it was added to this workspace by an
+// earlier apply. Before the fix, addChangedServiceIDs would deny this
+// request outright because the raw entry had no service_id yet -- the
+// resolver never got a chance to run resolveWorkspaceServiceSlugs, because
+// that only happens later, inside the handler this middleware guards.
+func TestWorkspacePlanResolvesServiceSlugLocally(t *testing.T) {
+	workspaceID := uuid.New()
+	serviceID := uuid.New()
+	configStore := &controlConfigRepositoryStub{}
+	stores := &controlRequirementStoreStub{localServiceIDs: map[string]uuid.UUID{"stripe": serviceID}}
+	resolver := newControlRequirementResolver(stores, configStore)
+	desired := `{"services":{"stripe":{"version":"1"}},"buckets":{}}`
+	request := httptest.NewRequest(http.MethodPost, "/workspace/config/plan", strings.NewReader(`{"config_key":"workspace","config":`+desired+`}`))
+
+	requirements, err := resolver.ResolveControlRequirements(context.Background(), accesscontrol.Actor{WorkspaceID: workspaceID}, dynamicWorkspacePlan, nil, request)
+	if err != nil {
+		t.Fatalf("ResolveControlRequirements: %v", err)
+	}
+	found := false
+	for _, requirement := range requirements {
+		if requirement.Permission == accesscontrol.PermissionServiceManage && requirement.Resource.ID == serviceID {
+			found = true
+		}
+	}
+	if !found || stores.slugLoads != 1 {
+		t.Fatalf("requirements/slugLoads = %#v/%d", requirements, stores.slugLoads)
+	}
+	// This resolver only mutates its own decoded copy of the document -- the
+	// original request body (which the handler re-reads to do its own,
+	// independent resolution) must come back byte-for-byte unchanged.
+	restored, _ := io.ReadAll(request.Body)
+	if strings.Contains(string(restored), "service_id") {
+		t.Fatalf("original request body was mutated: %s", restored)
+	}
+}
+
+// TestWorkspacePlanRequiresWorkspaceAuthorityForNewService covers adding a
+// service to the workspace for the first time: the slug has no local
+// fused_workspace_services row (no Registry lookup happens -- this
+// middleware never leaves the Engine's own store), so it can't be turned
+// into a resource-scoped requirement. Instead the plan must require
+// workspace-level service.manage, the same fallback bucketNameRequirements
+// already uses for a bucket name it can't find. This is what actually
+// unblocks "add a new service by slug" for an owner/admin -- not by
+// resolving the slug's real ID up front, but by authorizing on workspace
+// authority since no per-resource grant could exist yet anyway.
+func TestWorkspacePlanRequiresWorkspaceAuthorityForNewService(t *testing.T) {
+	workspaceID := uuid.New()
+	configStore := &controlConfigRepositoryStub{}
+	stores := &controlRequirementStoreStub{} // no local match: brand-new service
+	resolver := newControlRequirementResolver(stores, configStore)
+	desired := `{"services":{"new-service":{"version":"1"}},"buckets":{}}`
+	request := httptest.NewRequest(http.MethodPost, "/workspace/config/plan", strings.NewReader(`{"config_key":"workspace","config":`+desired+`}`))
+
+	requirements, err := resolver.ResolveControlRequirements(context.Background(), accesscontrol.Actor{WorkspaceID: workspaceID}, dynamicWorkspacePlan, nil, request)
+	if err != nil {
+		t.Fatalf("ResolveControlRequirements: %v", err)
+	}
+	found := false
+	for _, requirement := range requirements {
+		if requirement.Permission == accesscontrol.PermissionServiceManage &&
+			requirement.Resource.Type == accesscontrol.ResourceWorkspace &&
+			requirement.Resource.ID == workspaceID {
+			found = true
+		}
+	}
+	if !found || stores.slugLoads != 1 {
+		t.Fatalf("requirements/slugLoads = %#v/%d, want a workspace-scoped service.manage requirement", requirements, stores.slugLoads)
+	}
+}
+
+// TestWorkspacePlanNewServiceRequiresWorkspaceAdmin proves the fallback end
+// to end through the real authorization middleware: an actor holding only a
+// narrow, resource-scoped service.manage grant (for a different, existing
+// service) cannot add a brand-new service by slug, while an actor holding a
+// workspace-scoped grant can.
+func TestWorkspacePlanNewServiceRequiresWorkspaceAdmin(t *testing.T) {
+	workspaceID := uuid.New()
+	unrelatedServiceID := uuid.New()
+	configStore := &controlConfigRepositoryStub{}
+	stores := &controlRequirementStoreStub{}
+	resolver := newControlRequirementResolver(stores, configStore)
+	body := `{"config_key":"workspace","config":{"services":{"new-service":{"version":"1"}},"buckets":{}}}`
+
+	run := func(actor accesscontrol.Actor) int {
+		handler := controlAuthorizationMiddleware(accesscontrol.SnapshotAuthorizer{}, resolver)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		request := httptest.NewRequest(http.MethodPost, "/workspace/config/plan", strings.NewReader(body))
+		request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), actor))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response.Code
+	}
+
+	narrowActor := actorWithGrants(t, workspaceID,
+		accesscontrol.Grant{Permission: accesscontrol.PermissionWorkspaceRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
+		accesscontrol.Grant{Permission: accesscontrol.PermissionServiceManage, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: unrelatedServiceID}},
+	)
+	if code := run(narrowActor); code != http.StatusForbidden {
+		t.Fatalf("narrowly-scoped actor status = %d, want 403", code)
+	}
+
+	adminActor := actorWithGrants(t, workspaceID,
+		accesscontrol.Grant{Permission: accesscontrol.PermissionWorkspaceRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
+		accesscontrol.Grant{Permission: accesscontrol.PermissionServiceManage, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
+	)
+	if code := run(adminActor); code != http.StatusOK {
+		t.Fatalf("workspace-scoped actor status = %d, want 200", code)
 	}
 }
 

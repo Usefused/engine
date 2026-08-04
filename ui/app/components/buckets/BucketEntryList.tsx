@@ -216,6 +216,6 @@ function copyEntryValue(value: string) {
 
 function emptyLabel(kind: BucketEntryListProps["kind"]): string {
   return kind === "secrets"
-    ? "No secrets in this bucket."
-    : "No env values in this bucket.";
+    ? "No secrets in this credential set."
+    : "No values in this credential set.";
 }

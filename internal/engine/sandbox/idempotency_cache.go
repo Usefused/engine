@@ -92,7 +92,7 @@ func lookupCachedExecution(ctx context.Context, artifactID uuid.UUID) (exec *mod
 // transient failure is never cached, so it can't get "stuck" replaying an
 // error for the TTL window. Best-effort: a save failure is not surfaced to
 // the caller, who already has their real response.
-func saveCachedExecution(ctx context.Context, artifactID uuid.UUID, responseBody []byte, environment string) {
+func saveCachedExecution(ctx context.Context, artifactID uuid.UUID, responseBody []byte, environment string, responseStatus int) {
 	if globalIdempotencyStore == nil {
 		return
 	}
@@ -108,6 +108,7 @@ func saveCachedExecution(ctx context.Context, artifactID uuid.UUID, responseBody
 		RequestBodyHash:    requestBodyHashFromContext(ctx),
 		Environment:        environment,
 		ResponseBody:       responseBody,
+		ResponseStatus:     responseStatus,
 		CreatedAt:          now,
 		ExpiresAt:          now.Add(models.IdempotencyTTL),
 	})
@@ -148,9 +149,14 @@ func tryReplayFromIdempotencyCache(
 	}
 	auditState.idempotencyReplayed = true
 	auditState.selectedEnvironment = cached.Environment
+	auditState.providerHTTPStatus = cached.ResponseStatus
 	if sendErr := stream.Send(cached.ResponseBody); sendErr != nil {
 		span.SetStatus(codes.Error, sendErr.Error())
 		return false, sendErr
+	}
+	if statusErr := engine.SendResponseStatus(stream, cached.ResponseStatus); statusErr != nil {
+		span.SetStatus(codes.Error, statusErr.Error())
+		return false, statusErr
 	}
 	span.SetAttributes(idempotencyReplayedAttr)
 	span.SetStatus(codes.Ok, "tool call replayed from idempotency cache")
@@ -174,7 +180,7 @@ func dispatchAndCache(
 	stream engine.ResponseStream,
 	span trace.Span,
 	artifactID uuid.UUID,
-) (selectedEnvironment string, err error) {
+) (resolution RuntimeEnvironmentResolution, providerHTTPStatus int, err error) {
 	eligible := idempotencyEligible(ctx, obj)
 	dispatchStream := stream
 	var tee *teeResponseStream
@@ -182,14 +188,14 @@ func dispatchAndCache(
 		tee = &teeResponseStream{inner: stream}
 		dispatchStream = tee
 	}
-	selectedEnvironment, err = dispatchRuntimeEnvironment(ctx, dispatcher, match, obj, params, credentials, bucketValues, environment, dispatchStream, span)
+	resolution, providerHTTPStatus, err = dispatchRuntimeEnvironment(ctx, dispatcher, match, obj, params, credentials, bucketValues, environment, dispatchStream, span)
 	if err != nil {
-		return selectedEnvironment, err
+		return resolution, providerHTTPStatus, err
 	}
-	if tee != nil {
-		saveCachedExecution(ctx, artifactID, tee.Bytes(), selectedEnvironment)
+	if tee != nil && providerHTTPStatus >= 200 && providerHTTPStatus < 400 {
+		saveCachedExecution(ctx, artifactID, tee.Bytes(), resolution.Environment, providerHTTPStatus)
 	}
-	return selectedEnvironment, nil
+	return resolution, providerHTTPStatus, nil
 }
 
 // teeResponseStream forwards every chunk to the real stream while also
@@ -204,6 +210,10 @@ type teeResponseStream struct {
 func (t *teeResponseStream) Send(chunk []byte) error {
 	t.buf.Write(chunk)
 	return t.inner.Send(chunk)
+}
+
+func (t *teeResponseStream) SendStatus(status int) error {
+	return engine.SendResponseStatus(t.inner, status)
 }
 
 func (t *teeResponseStream) Bytes() []byte { return t.buf.Bytes() }

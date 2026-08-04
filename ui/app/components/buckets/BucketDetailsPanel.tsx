@@ -82,7 +82,7 @@ export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
         className="fixed inset-0 z-40 bg-slate-900/20 transition-opacity"
         onClick={props.onClose}
       />
-      <aside className="fixed inset-y-0 right-0 z-50 flex w-full flex-col overflow-y-auto overflow-x-hidden border-l border-slate-200 bg-white shadow-2xl transition-transform md:w-[940px] xl:w-[1080px]">
+      <aside className="fixed inset-y-0 right-0 z-50 flex w-full flex-col overflow-y-auto overflow-x-hidden border-l border-slate-200 bg-white shadow-2xl transition-transform md:w-[calc(100vw-4rem)] md:max-w-[940px] xl:max-w-[1080px]">
         <BucketDetailsHeader
           bucket={props.bucket}
           loading={props.loading}
@@ -118,7 +118,7 @@ export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
         />
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-6 py-3">
           <span className="text-sm font-medium text-slate-700">
-            Bucket contents
+            Credentials and values
           </span>
           <BucketTabs
             activeTab={props.activeTab}
@@ -154,7 +154,7 @@ function BucketTabs({
 }) {
   const tabs: Array<{ key: BucketDetailTab; label: string; count: number }> = [
     { key: "secrets", label: "Secrets", count: secretCount },
-    { key: "env", label: "Env", count: valueCount },
+    { key: "env", label: "Values", count: valueCount },
     {
       key: "connected-users",
       label: "Connected users",
@@ -245,7 +245,7 @@ function BucketDetailsHeader({
 }: BucketDetailsHeaderProps) {
   const deleteDisabledReason = bucketDeleteDisabledReason(bucket, saving);
   return (
-    <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-slate-100 bg-white/90 px-6 py-5 backdrop-blur">
+    <div className="sticky top-0 z-10 flex flex-col items-stretch justify-between gap-3 border-b border-slate-100 bg-white/90 px-4 py-4 backdrop-blur sm:flex-row sm:items-center sm:px-6 sm:py-5">
       <div className="min-w-0">
         <div className="flex min-w-0 items-center gap-2">
           <h2 className="truncate text-lg font-semibold text-slate-900">
@@ -262,12 +262,12 @@ function BucketDetailsHeader({
           <span className="font-mono">{bucket.id.slice(0, 8)}</span>
         </p>
       </div>
-      <div className="flex shrink-0 items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2 sm:shrink-0 sm:flex-nowrap">
         <button
           type="button"
           onClick={() => onRefresh(bucket.id)}
           className="p-2 rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-slate-700"
-          aria-label="Refresh bucket contents"
+          aria-label="Refresh credential set"
           title="Refresh"
         >
           <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
@@ -277,7 +277,7 @@ function BucketDetailsHeader({
           onClick={onDeleteBucket}
           disabled={!!deleteDisabledReason}
           className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:opacity-50 disabled:hover:border-slate-200 disabled:hover:bg-white disabled:hover:text-slate-600"
-          title={deleteDisabledReason || "Remove bucket"}
+          title={deleteDisabledReason || "Remove credential set"}
         >
           <Trash2 className="w-4 h-4" />
           Remove
@@ -287,7 +287,7 @@ function BucketDetailsHeader({
           type="button"
           onClick={onClose}
           className="rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
-          aria-label="Close bucket details"
+          aria-label="Close credential details"
           title="Close"
         >
           <X className="w-4 h-4" />
@@ -323,7 +323,7 @@ function BucketConnectUsage({
       </div>
       {summary.connected_user_count > 0 && (
         <p className="mt-1 text-xs text-amber-800">
-          Deleting this bucket requires typing its name because connected users
+          Deleting this credential set requires typing its name because connected users
           will be removed too.
         </p>
       )}
@@ -339,7 +339,7 @@ function bucketDeleteDisabledReason(
   bucket: BucketSummary,
   saving: boolean
 ): string {
-  if (saving) return "Saving bucket changes";
-  if (bucket.is_default) return "Default buckets cannot be removed";
+  if (saving) return "Saving credential changes";
+  if (bucket.is_default) return "The default credential set cannot be removed";
   return "";
 }

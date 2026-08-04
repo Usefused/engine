@@ -8,6 +8,21 @@ type ResponseStream interface {
 	Send(chunk []byte) error
 }
 
+// ResponseStatusStream is implemented by transports that can preserve the
+// provider's HTTP status separately from its streamed body.
+type ResponseStatusStream interface {
+	SendStatus(status int) error
+}
+
+// SendResponseStatus keeps status propagation optional for buffered consumers
+// such as MCP while allowing SDK transports to retain provider semantics.
+func SendResponseStatus(stream ResponseStream, status int) error {
+	if statusStream, ok := stream.(ResponseStatusStream); ok && status > 0 {
+		return statusStream.SendStatus(status)
+	}
+	return nil
+}
+
 // BufferStream is an in-memory ResponseStream. It is the single buffering
 // implementation shared by both callers that need one: the dispatcher's
 // pagination loop (which reads each page's bytes) and the MCP path (which needs

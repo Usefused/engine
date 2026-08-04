@@ -115,6 +115,10 @@ func (g *grpcResponseStream) Send(chunk []byte) error {
 	return g.stream.Send(&enginev1.ExecuteResponse{Result: chunk})
 }
 
+func (g *grpcResponseStream) SendStatus(status int) error {
+	return g.stream.Send(&enginev1.ExecuteResponse{StatusCode: int32(status)})
+}
+
 func (s *EngineGRPCServer) Execute(req *enginev1.ExecuteRequest, stream enginev1.EngineService_ExecuteServer) error {
 	requestStarted := time.Now()
 	timings := engine.NewExecutionTimings()

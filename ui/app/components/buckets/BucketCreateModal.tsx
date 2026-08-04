@@ -34,7 +34,7 @@ export function BucketCreateModal({ open, onClose, onCreated }: BucketCreateModa
       onCreated(trimmed);
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create bucket");
+      setError(err instanceof Error ? err.message : "Failed to create credential set");
     } finally {
       setSaving(false);
     }
@@ -47,11 +47,11 @@ export function BucketCreateModal({ open, onClose, onCreated }: BucketCreateModa
         onSubmit={submit}
         role="dialog"
         aria-modal="true"
-        aria-labelledby="create-bucket-title"
+        aria-labelledby="create-credential-set-title"
         className="relative w-full max-w-md rounded-lg border border-slate-200 bg-white shadow-2xl"
       >
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
-          <h2 id="create-bucket-title" className="text-base font-semibold text-slate-900">Create Bucket</h2>
+          <h2 id="create-credential-set-title" className="text-base font-semibold text-slate-900">Create credential set</h2>
           <button
             type="button"
             onClick={onClose}
@@ -64,9 +64,9 @@ export function BucketCreateModal({ open, onClose, onCreated }: BucketCreateModa
         </div>
 
         <div className="px-5 py-4 space-y-3">
-          <label className="block text-sm font-medium text-slate-700" htmlFor="bucket-name">Name</label>
+          <label className="block text-sm font-medium text-slate-700" htmlFor="credential-set-name">Name</label>
           <input
-            id="bucket-name"
+            id="credential-set-name"
             value={name}
             onChange={(event) => setName(event.target.value)}
             autoFocus

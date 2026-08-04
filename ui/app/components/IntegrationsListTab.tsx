@@ -1,8 +1,9 @@
 import { FormEvent } from "react";
 import { Link } from "@remix-run/react";
-import { Loader2, Trash2, Search, X , ChevronLeft, ChevronRight } from "lucide-react";
+import { Loader2, Search, X , ChevronLeft, ChevronRight } from "lucide-react";
 import { Service, ActivatedService, serviceHref } from "~/lib/api";
 import { formatServiceName } from "~/lib/format";
+import { openAuthenticatedTab } from "~/lib/session";
 
 // ListableService is the minimal normalised shape that IntegrationsListTab
 // reads from. Both Service (catalog) and ActivatedService (workspace) satisfy
@@ -49,6 +50,15 @@ export function fromActivatedService(s: ActivatedService): ListableService {
     service_slug: s.service_slug,
     version: s.version,
   };
+}
+
+function detailHref(service: ListableService): string {
+  return serviceHref({
+    id: service.service_id || service.id,
+    slug: service.service_slug || service.slug,
+    provider: service.provider,
+    is_owner: service.is_owner ?? true,
+  });
 }
 
 interface IntegrationsListTabProps {
@@ -119,7 +129,9 @@ export default function IntegrationsListTab({
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder={isAuth ? "Semantic search" : "Search for a service to integrate (e.g. Stripe, Shopify...)"}
+          placeholder={isAuth
+            ? viewType === "workspace" ? "Search your services" : "Search service catalog"
+            : "Search for a service (e.g. Stripe, Shopify...)"}
           className="w-full text-sm border border-slate-300 rounded-lg pl-9 pr-8 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
         {query && (
@@ -151,21 +163,24 @@ export default function IntegrationsListTab({
             <>
               <p className="text-base font-medium text-slate-600 mb-1">Service not found</p>
               <p className="text-sm text-slate-400 mb-4">
-                Can't find it? Point us to the OpenAPI/GraphQL schema or API docs and we'll get it ingested for you.
+                Define it from an OpenAPI or GraphQL spec, or point Fused to its docs.
               </p>
               <button
                 data-track="submit_schema_or_docs_url"
                 onClick={() => setShowNewPanel(true)}
                 className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white text-sm font-medium rounded-lg transition-colors cursor-pointer"
               >
-                + Submit Schema or Docs URL
+                Define this service
               </button>
             </>
           ) : isAuth ? (
             <>
-              <p className="text-lg mb-2">No services yet</p>
+              <p className="text-lg mb-2">{viewType === "workspace" ? "No services added yet" : "No services found"}</p>
+              {viewType === "workspace" && (
+                <p className="text-sm text-slate-400 mb-3">Add one from the catalog, or define a service from a spec or docs.</p>
+              )}
               <button data-track="create_first_integration" onClick={() => setShowNewPanel(true)} className="text-blue-500 hover:text-blue-600 text-sm underline cursor-pointer">
-                Create your first one
+                Define a service
               </button>
             </>
           ) : (
@@ -177,14 +192,23 @@ export default function IntegrationsListTab({
           {integrations.map((obj) => (
             <Link
               key={obj.id}
-              to={serviceHref({
-                id: obj.service_id || obj.id,
-                slug: obj.service_slug || obj.slug,
-                provider: obj.provider,
-                is_owner: obj.is_owner ?? true,
-              })}
+              to={detailHref(obj)}
               target="_blank"
               rel="noopener noreferrer"
+              onClick={(event) => {
+                if (
+                  event.button !== 0 ||
+                  event.metaKey ||
+                  event.ctrlKey ||
+                  event.shiftKey ||
+                  event.altKey
+                ) {
+                  return;
+                }
+                if (openAuthenticatedTab(detailHref(obj))) {
+                  event.preventDefault();
+                }
+              }}
               className="flex items-center justify-between px-5 py-4 hover:bg-slate-50 transition-colors group"
             >
               <div>
@@ -204,7 +228,7 @@ export default function IntegrationsListTab({
                 <p className="text-xs text-slate-400 mt-0.5 truncate max-w-xs">
                   {(() => {
                     if (obj.servers && obj.servers.length > 0) {
-                      const prodIdx = obj.servers.findIndex((s: any) => 
+                      const prodIdx = obj.servers.findIndex((s) => 
                         s.description?.toLowerCase().includes("prod") || 
                         s.description?.toLowerCase().includes("production")
                       );
@@ -234,7 +258,7 @@ export default function IntegrationsListTab({
                         ? "text-red-600 border-red-200 hover:bg-red-50" 
                         : "text-slate-600 hover:text-red-600 border-slate-200 hover:border-red-200 hover:bg-red-50"
                     }`}
-                    title={obj.is_owner ? "Delete service from Registry" : "Remove from Workspace"}
+                    title={obj.is_owner ? "Delete service from Registry" : "Remove from workspace"}
                   >
                     {obj.is_owner ? "Delete" : "Remove"}
                   </button>
@@ -244,10 +268,10 @@ export default function IntegrationsListTab({
                   <button
                     data-track="add_workspace_service"
                     onClick={(e) => handleAddWorkspace(e, obj.id, obj.name)}
-                    className="opacity-0 group-hover:opacity-100 px-3 py-1 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg shadow-sm transition-all"
-                    title="Add to Workspace"
+                    className="px-3 py-1 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg shadow-sm transition-all"
+                    title="Add to workspace"
                   >
-                    Add
+                    Add to workspace
                   </button>
                 )}
               </div>

@@ -14,14 +14,15 @@ func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement 
 	entitlement = entitlement.Normalized()
 	query := `
 		INSERT INTO fused_runtime_entitlements (
-			singleton_key, plan, heartbeat_required, usage_reporting,
+			singleton_key, plan, heartbeat_required, usage_reporting, public_service_insights_reporting,
 			heartbeat_interval_seconds, heartbeat_stale_after_seconds, refreshed_at, updated_at
 		)
-		VALUES (1, $1, $2, $3, $4, $5, $6, NOW())
+		VALUES (1, $1, $2, $3, $4, $5, $6, $7, NOW())
 		ON CONFLICT (singleton_key) DO UPDATE SET
 			plan = EXCLUDED.plan,
 			heartbeat_required = EXCLUDED.heartbeat_required,
 			usage_reporting = EXCLUDED.usage_reporting,
+			public_service_insights_reporting = EXCLUDED.public_service_insights_reporting,
 			heartbeat_interval_seconds = EXCLUDED.heartbeat_interval_seconds,
 			heartbeat_stale_after_seconds = EXCLUDED.heartbeat_stale_after_seconds,
 			refreshed_at = EXCLUDED.refreshed_at,
@@ -31,6 +32,7 @@ func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement 
 		entitlement.Plan,
 		entitlement.HeartbeatRequired,
 		entitlement.UsageReporting,
+		entitlement.PublicServiceInsightsReporting,
 		entitlement.HeartbeatIntervalSeconds,
 		entitlement.HeartbeatStaleAfterSeconds,
 		entitlement.RefreshedAt,
@@ -40,7 +42,7 @@ func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement 
 
 func (s *postgresStore) GetRuntimeEntitlement(ctx context.Context) (models.RuntimeEntitlement, error) {
 	query := `
-		SELECT plan, heartbeat_required, usage_reporting,
+		SELECT plan, heartbeat_required, usage_reporting, public_service_insights_reporting,
 			heartbeat_interval_seconds, heartbeat_stale_after_seconds, refreshed_at
 		FROM fused_runtime_entitlements
 		WHERE singleton_key = 1
@@ -50,6 +52,7 @@ func (s *postgresStore) GetRuntimeEntitlement(ctx context.Context) (models.Runti
 		&entitlement.Plan,
 		&entitlement.HeartbeatRequired,
 		&entitlement.UsageReporting,
+		&entitlement.PublicServiceInsightsReporting,
 		&entitlement.HeartbeatIntervalSeconds,
 		&entitlement.HeartbeatStaleAfterSeconds,
 		&entitlement.RefreshedAt,

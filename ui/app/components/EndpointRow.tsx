@@ -1,5 +1,22 @@
 import { stripLinks } from "~/lib/format";
 
+interface EndpointRowData {
+  id: string;
+  method?: string;
+  path?: string;
+  name?: string;
+  description?: string;
+  deprecated?: boolean;
+  status?: string;
+}
+
+interface WebhookRowData {
+  id: string;
+  name?: string;
+  method?: string;
+  description?: string;
+}
+
 export const METHOD_COLORS: Record<string, string> = {
   GET: "bg-green-100 text-green-700 border-green-200",
   POST: "bg-blue-100 text-blue-700 border-blue-200",
@@ -8,10 +25,10 @@ export const METHOD_COLORS: Record<string, string> = {
   DELETE: "bg-red-100 text-red-700 border-red-200",
 };
 
-export function EndpointRow({ ep, onClick, selectable, selected, bulkMode, onSelect }: { ep: any; onClick?: () => void; selectable?: boolean; selected?: boolean; bulkMode?: boolean; onSelect?: (selected: boolean) => void }) {
+export function EndpointRow({ ep, onClick, selectable, selected, bulkMode, onSelect }: { ep: EndpointRowData; onClick?: () => void; selectable?: boolean; selected?: boolean; bulkMode?: boolean; onSelect?: (selected: boolean) => void }) {
   const method = ep.method?.toUpperCase();
   return (
-    <div className={`px-5 py-4 transition-colors ${onClick ? 'cursor-pointer hover:bg-slate-50 group' : 'hover:bg-slate-50 group'}`} onClick={onClick}>
+    <div className={`px-4 py-4 transition-colors sm:px-5 ${onClick ? 'cursor-pointer hover:bg-slate-50 group' : 'hover:bg-slate-50 group'}`} onClick={onClick}>
       <div className="flex items-start sm:items-center justify-between gap-3 mb-1 flex-col sm:flex-row">
         <div className="flex items-start sm:items-center gap-3 min-w-0">
           {bulkMode && selectable && (
@@ -24,10 +41,10 @@ export function EndpointRow({ ep, onClick, selectable, selected, bulkMode, onSel
               />
             </div>
           )}
-          <span className={`shrink-0 text-xs font-bold px-1.5 py-0.5 rounded ${METHOD_COLORS[method] ?? "bg-slate-100 text-slate-700 border-slate-200"}`}>
+          <span className={`shrink-0 text-xs font-bold px-1.5 py-0.5 rounded ${(method && METHOD_COLORS[method]) ?? "bg-slate-100 text-slate-700 border-slate-200"}`}>
             {method || "EP"}
           </span>
-          <code className="text-sm text-slate-700 break-all">{ep.path || ep.name}</code>
+          <code className="min-w-0 break-all text-sm text-slate-700">{ep.path || ep.name}</code>
           {ep.deprecated && <span className="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-50 text-red-700 border border-red-200 uppercase tracking-wider">Deprecated</span>}
           {ep.status === "drifted" && <span className="shrink-0 ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-orange-100 text-orange-800 border border-orange-200 uppercase tracking-wider">Drifted</span>}
         </div>
@@ -60,9 +77,9 @@ export function EndpointRow({ ep, onClick, selectable, selected, bulkMode, onSel
   );
 }
 
-export function WebhookRow({ wh, onClick, selectable, selected, bulkMode, onSelect }: { wh: any; onClick?: () => void; selectable?: boolean; selected?: boolean; bulkMode?: boolean; onSelect?: (selected: boolean) => void }) {
+export function WebhookRow({ wh, onClick, selectable, selected, bulkMode, onSelect }: { wh: WebhookRowData; onClick?: () => void; selectable?: boolean; selected?: boolean; bulkMode?: boolean; onSelect?: (selected: boolean) => void }) {
   return (
-    <div className={`px-5 py-4 transition-colors ${onClick ? 'cursor-pointer hover:bg-slate-50 group' : 'hover:bg-slate-50 group'}`} onClick={onClick}>
+    <div className={`px-4 py-4 transition-colors sm:px-5 ${onClick ? 'cursor-pointer hover:bg-slate-50 group' : 'hover:bg-slate-50 group'}`} onClick={onClick}>
       <div className="flex items-start sm:items-center justify-between gap-3 mb-1 flex-col sm:flex-row">
         <div className="flex items-start sm:items-center gap-3 min-w-0">
           {bulkMode && selectable && (

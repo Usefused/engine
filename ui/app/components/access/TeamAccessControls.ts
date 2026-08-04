@@ -49,7 +49,7 @@ export function TeamAccessControls(props: TeamAccessControlsProps): ReactElement
     { className: "space-y-6", "data-component": "team-access-controls" },
     workspaceRoleControl(props),
     resourceSection("Service access", "Choose which services this team can use or manage.", "service", props.services, props),
-    resourceSection("Bucket access", "Choose which credential buckets this team can use or manage.", "bucket", props.buckets, props),
+    resourceSection("Credential access", "Choose which credential sets this team can use or manage.", "bucket", props.buckets, props),
     artifactSection(props)
   );
 }
@@ -174,8 +174,8 @@ function artifactSection(props: TeamAccessControlsProps): ReactElement {
     createElement(
       "div",
       { className: "bg-slate-50 px-4 py-3 border-b border-slate-200" },
-      createElement("h3", { className: "text-sm font-semibold text-slate-900" }, "SDK and MCP server access"),
-      createElement("p", { className: "text-xs text-slate-500 mt-0.5" }, "Share an existing build with this team by its ID. Read allows viewing; Manage also allows changes and token management.")
+      createElement("h3", { className: "text-sm font-semibold text-slate-900" }, "App and MCP server access"),
+      createElement("p", { className: "text-xs text-slate-500 mt-0.5" }, "Share an app or MCP server with this team by its ID. Read allows viewing; Manage also allows changes and token management.")
     ),
     createElement(
       "div",
@@ -197,13 +197,13 @@ function artifactGrantForm(props: TeamAccessControlsProps): ReactElement {
       name: "artifact_id",
       required: true,
       disabled: props.disabled,
-      placeholder: "SDK or MCP server ID",
-      "aria-label": "SDK or MCP server ID",
+      placeholder: "App or MCP server ID",
+      "aria-label": "App or MCP server ID",
       className: "rounded-lg border border-slate-300 px-3 py-2 text-sm",
     }),
     createElement(
       "select",
-      { name: "level", disabled: props.disabled, "aria-label": "Build access", className: "rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm" },
+      { name: "level", disabled: props.disabled, "aria-label": "App or server access", className: "rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm" },
       createElement("option", { value: "READER" }, "Read"),
       createElement("option", { value: "MANAGER" }, "Manage")
     ),

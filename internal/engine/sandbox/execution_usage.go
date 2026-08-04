@@ -26,7 +26,7 @@ func recordEngineExecutionUsage(ctx context.Context, span trace.Span, state exec
 		return
 	}
 	bucketStart := state.startedAt.UTC().Truncate(time.Minute)
-	for _, metric := range executionUsageMetrics(execErr) {
+	for _, metric := range executionUsageMetrics(execErr, state.providerHTTPStatus) {
 		globalExecutionUsageRecorder.Record(models.EngineUsageIncrement{
 			Metric:        metric,
 			BucketStart:   bucketStart,
@@ -39,19 +39,19 @@ func recordEngineExecutionUsage(ctx context.Context, span trace.Span, state exec
 	// URLs, and credentials never belong in this signal.
 	span.AddEvent("engine.usage_counters_enqueued", trace.WithAttributes(
 		attribute.String("usage.bucket_start", bucketStart.Format(time.RFC3339)),
-		attribute.String("usage.status", executionUsageStatus(execErr)),
+		attribute.String("usage.status", executionUsageStatus(execErr, state.providerHTTPStatus)),
 	))
 }
 
-func executionUsageMetrics(execErr error) []string {
-	if execErr != nil {
+func executionUsageMetrics(execErr error, providerHTTPStatus int) []string {
+	if executionFailed(execErr, providerHTTPStatus) {
 		return []string{models.EngineUsageMetricExecutionTotal, models.EngineUsageMetricExecutionFailed}
 	}
 	return []string{models.EngineUsageMetricExecutionTotal, models.EngineUsageMetricExecutionSuccess}
 }
 
-func executionUsageStatus(execErr error) string {
-	if execErr != nil {
+func executionUsageStatus(execErr error, providerHTTPStatus int) string {
+	if executionFailed(execErr, providerHTTPStatus) {
 		return models.EngineExecutionStatusFailed
 	}
 	return models.EngineExecutionStatusSuccess

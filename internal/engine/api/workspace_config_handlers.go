@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/Usefused/engine/internal/engine/mtlsauth"
 	"github.com/Usefused/engine/internal/engine/sandbox"
@@ -422,8 +423,13 @@ type workspacePlanBlocker struct {
 }
 
 type workspaceConfigHTTPError struct {
-	status  int
-	message string
+	status      int
+	code        string
+	message     string
+	category    string
+	retryable   bool
+	details     map[string]any
+	remediation string
 }
 
 func (e workspaceConfigHTTPError) Error() string { return e.message }
@@ -494,19 +500,19 @@ func WorkspaceConfigPlanHandler(configStore store.ConfigRepository, s store.Stor
 		accountID, err := resolveWorkspaceActor(ctx)
 		if err != nil {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			http.Error(w, `{"error":"invalid API key or workspace not found"}`, http.StatusUnauthorized)
+			writeWorkspaceConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, ctx)
 			return
 		}
 		span.SetAttributes(attribute.String("account_id", accountID.String()))
 
 		req, err := decodeWorkspacePlanRequest(r)
 		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+			writeWorkspaceConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, ctx)
 			return
 		}
 		result, err := createWorkspaceConfigPlan(ctx, configStore, s, verifier, r.Header.Get("X-API-Key"), accountID, req)
 		if err != nil {
-			writeWorkspaceConfigError(w, err)
+			writeWorkspaceConfigError(w, err, ctx)
 			return
 		}
 
@@ -669,7 +675,7 @@ func WorkspaceConfigApplyHandler(configStore store.ConfigRepository, s store.Sto
 		accountID, err := resolveWorkspaceActor(ctx)
 		if err != nil {
 			step.AddContext(map[string]any{"outcome": "unauthorized"}).Error(ctx, err)
-			http.Error(w, `{"error":"invalid API key or workspace not found"}`, http.StatusUnauthorized)
+			writeWorkspaceConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, ctx)
 			return
 		}
 		step.AddContext(map[string]any{"account_id": accountID.String()})
@@ -677,13 +683,13 @@ func WorkspaceConfigApplyHandler(configStore store.ConfigRepository, s store.Sto
 		req, planID, err := decodeWorkspaceApplyRequest(r)
 		if err != nil {
 			step.AddContext(map[string]any{"outcome": "bad_request"}).Error(ctx, err)
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+			writeWorkspaceConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, ctx)
 			return
 		}
 		planRevision, ok := AuthorizedPlanRevisionFromContext(ctx)
 		if !ok {
 			step.AddContext(map[string]any{"outcome": "authorization_snapshot_missing"}).Error(ctx, errors.New("authorized plan revision unavailable"))
-			http.Error(w, `{"error":"authorized plan revision unavailable"}`, http.StatusForbidden)
+			writeWorkspaceConfigError(w, workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"}, ctx)
 			return
 		}
 		appliedWebhooks, err := executeWorkspaceConfigApply(ctx, configStore, s, verifier, workspaceApplyCall{
@@ -699,7 +705,7 @@ func WorkspaceConfigApplyHandler(configStore store.ConfigRepository, s store.Sto
 		})
 		if err != nil {
 			step.AddContext(map[string]any{"outcome": "apply_failed"}).Error(ctx, err)
-			writeWorkspaceConfigError(w, err)
+			writeWorkspaceConfigError(w, err, ctx)
 			return
 		}
 
@@ -4972,18 +4978,129 @@ func planFetchHTTPError(err error) error {
 	return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to fetch plan"}
 }
 
-func writeWorkspaceConfigError(w http.ResponseWriter, err error) {
+type workspaceConfigErrorResponse struct {
+	Error workspaceConfigErrorBody `json:"error"`
+}
+
+type workspaceConfigErrorBody struct {
+	Code        string         `json:"code"`
+	Message     string         `json:"message"`
+	Category    string         `json:"category"`
+	Retryable   bool           `json:"retryable"`
+	Details     map[string]any `json:"details,omitempty"`
+	Remediation string         `json:"remediation,omitempty"`
+	TraceID     string         `json:"trace_id,omitempty"`
+}
+
+func writeWorkspaceConfigError(w http.ResponseWriter, err error, contexts ...context.Context) {
 	var httpErr workspaceConfigHTTPError
 	if errors.As(err, &httpErr) {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, httpErr.message), httpErr.status)
+		response := workspaceConfigErrorResponse{
+			Error: workspaceConfigErrorBody{
+				Code:        workspaceConfigErrorCode(httpErr),
+				Message:     httpErr.message,
+				Category:    workspaceConfigErrorCategory(httpErr),
+				Retryable:   httpErr.retryable || httpErr.status == http.StatusTooManyRequests || httpErr.status >= http.StatusInternalServerError,
+				Details:     httpErr.details,
+				Remediation: httpErr.remediation,
+			},
+		}
+		if len(contexts) > 0 {
+			spanContext := trace.SpanContextFromContext(contexts[0])
+			if spanContext.IsValid() {
+				response.Error.TraceID = spanContext.TraceID().String()
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(httpErr.status)
+		_ = json.NewEncoder(w).Encode(response)
 		return
 	}
-	http.Error(w, `{"error":"workspace config error"}`, http.StatusInternalServerError)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusInternalServerError)
+	_ = json.NewEncoder(w).Encode(workspaceConfigErrorResponse{
+		Error: workspaceConfigErrorBody{
+			Code:      "workspace_config_error",
+			Message:   "The Engine could not complete the configuration request.",
+			Category:  "internal",
+			Retryable: true,
+		},
+	})
+}
+
+func workspaceConfigErrorCode(err workspaceConfigHTTPError) string {
+	if strings.TrimSpace(err.code) != "" {
+		return err.code
+	}
+	message := strings.TrimSpace(err.message)
+	switch {
+	case strings.HasPrefix(message, "bucket not found:"):
+		return "credential_set_not_found"
+	case message == "artifact config requires exactly one bucket":
+		return "credential_set_required"
+	case stableWorkspaceErrorCode(message):
+		return message
+	}
+	switch err.status {
+	case http.StatusBadRequest:
+		return "invalid_request"
+	case http.StatusUnauthorized:
+		return "authentication_required"
+	case http.StatusForbidden:
+		return "permission_denied"
+	case http.StatusNotFound:
+		return "resource_not_found"
+	case http.StatusConflict:
+		return "configuration_conflict"
+	case http.StatusTooManyRequests:
+		return "rate_limited"
+	default:
+		return "internal_error"
+	}
+}
+
+func stableWorkspaceErrorCode(message string) bool {
+	if message == "" {
+		return false
+	}
+	for _, char := range message {
+		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func workspaceConfigErrorCategory(err workspaceConfigHTTPError) string {
+	if strings.TrimSpace(err.category) != "" {
+		return err.category
+	}
+	switch err.status {
+	case http.StatusBadRequest:
+		return "validation"
+	case http.StatusUnauthorized:
+		return "authentication"
+	case http.StatusForbidden:
+		return "authorization"
+	case http.StatusNotFound:
+		return "not_found"
+	case http.StatusConflict:
+		return "conflict"
+	case http.StatusTooManyRequests:
+		return "rate_limit"
+	default:
+		return "internal"
+	}
 }
 
 func writeJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func setOneTimeSecretResponseHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 }
 
 func workspaceConfigKey(raw string) string {

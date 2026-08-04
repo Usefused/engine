@@ -185,24 +185,16 @@ func TestEngineMigrationsExpandRefreshStateConstraint(t *testing.T) {
 	}
 }
 
-func TestEngineSchemaCreatesWebhookEventsBeforeIndexes(t *testing.T) {
-	queries := engineSchemaQueries()
-	tableIndex := indexOfSchemaFragment(queries, "CREATE TABLE IF NOT EXISTS fused_webhook_events")
-	if tableIndex < 0 {
-		t.Fatal("fused_webhook_events table definition not found")
-	}
-	for _, fragment := range []string{
-		"idx_fused_webhook_events_account_id",
-		"idx_fused_webhook_events_service_id",
-		"uq_fused_webhook_events_msg_id",
-		"idx_fused_webhook_events_created_at",
+func TestEngineSchemaMigratesWebhookAnalyticsToCanonicalEvents(t *testing.T) {
+	joined := strings.Join(engineMigrationQueries(), "\n")
+	for _, expected := range []string{
+		"ADD COLUMN IF NOT EXISTS direction",
+		"ADD COLUMN IF NOT EXISTS webhook_id",
+		"idx_fused_engine_execution_events_webhook_started",
+		"DROP TABLE IF EXISTS fused_webhook_events",
 	} {
-		indexQuery := indexOfSchemaFragment(queries, fragment)
-		if indexQuery < 0 {
-			t.Fatalf("webhook event index %q not found", fragment)
-		}
-		if indexQuery < tableIndex {
-			t.Fatalf("webhook event index %q appears before fused_webhook_events table", fragment)
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("expected canonical webhook migration containing %q", expected)
 		}
 	}
 }

@@ -3,13 +3,12 @@ import { Link, useSearchParams, type MetaFunction } from "@remix-run/react";
 import { Logo } from "~/components/Logo";
 
 export const meta: MetaFunction = ({ matches }) => {
-  const parentMeta = matches.filter((m: any) => m.id === "root").flatMap((m: any) => m.meta ?? []);
+  const parentMeta = matches.filter((m) => m.id === "root").flatMap((m) => m.meta ?? []);
   return [
-    ...parentMeta.filter((m: any) => !("title" in m)),
-    { title: "Login - Fused" },
+    ...parentMeta.filter((m) => !("title" in m)),
+    { title: "Sign in - Fused" },
   ];
 };
-import { CreditBanner } from "~/components/CreditBanner";
 import { setApiKey, clearApiKey, isAuthenticated } from "~/lib/session";
 import { safeInternalPath } from "~/lib/safe-navigation";
 import { api } from "~/lib/api";
@@ -56,7 +55,6 @@ export default function Login() {
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50">
-      <CreditBanner />
       <main className="flex-1 flex items-center justify-center">
         <div className="w-full max-w-sm">
           <div className="mb-8 text-center flex flex-col items-center">
@@ -65,7 +63,7 @@ export default function Login() {
           </div>
 
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-8">
-          <h2 className="text-base font-semibold text-slate-800 mb-4">Enter your API key</h2>
+          <h1 className="text-base font-semibold text-slate-800 mb-4">Enter your API key</h1>
           <form 
             onSubmit={handleSubmit} 
             className="space-y-4"

@@ -63,6 +63,7 @@ The startup handshake returns a minimal entitlement bundle:
 - `plan`
 - `heartbeat_required`
 - `usage_reporting`
+- `public_service_insights_reporting`
 - `heartbeat_interval_seconds`
 - `heartbeat_stale_after_seconds`
 
@@ -94,6 +95,36 @@ URLs, credentials, or end-user references. Pricing and feature enforcement are
 intentionally deferred until product plans exist; the first contract records the
 safe accounting path without inventing billing decisions in Engine.
 
+## Public-Service Insights
+
+Public-service insights are a separate product-observability contract and do
+not share tables or payloads with commercial usage reporting. When the
+`public_service_insights_reporting` entitlement is enabled, Engine uses signed
+requests for:
+
+- `POST /api/engine/public-service-insight-eligibility`
+- `POST /api/engine/public-service-insight-reports`
+- `POST /api/engine/public-service-insights/query`
+
+Engine first asks Registry which parent services are public. It then derives
+closed-hour aggregates from canonical local execution events and writes them to
+a durable outbox before delivery. Registry validates parent visibility and the
+service, version, and Registry-object relationship again; a public version of a
+private service is never reportable.
+
+Reports contain counts, bounded dimensions, latency sums, fixed histogram
+buckets, and retry totals. They cannot contain environment names, local
+artifact identities, users, provider URLs, traces, payloads, secrets, or raw
+failure messages. The current cross-Engine projection reports endpoint calls;
+webhook calls remain fully available in local Activity until canonical webhook
+events carry a stable Registry webhook-object identity.
+
+Owner-only aggregate reads also travel through Engine. The embedded UI calls
+Engine GraphQL, Engine applies local `service.read` and `audit.read`, Registry
+independently verifies service ownership, and Engine may return a short-lived
+cached result during a Registry outage. Local Activity does not depend on this
+cloud path.
+
 ## Engine-Owned Data
 
 Engine owns local runtime state in its Postgres database:
@@ -105,7 +136,8 @@ Engine owns local runtime state in its Postgres database:
 - SDK scope bindings and service contract snapshots
 - service changelog cache and workspace notifications
 - OAuth/connect sessions, encrypted token material, and connection resources
-- MCP/webhook analytics and execution audit records
+- canonical SDK, MCP, and webhook execution history
+- the durable public-service insight projection outbox
 
 Engine tables are created by the Engine schema code under `internal/shared/db`.
 Registry schema helpers are intentionally not present in this repository.

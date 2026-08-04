@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -98,8 +99,13 @@ func TestValidateArtifactBucketReadinessReportsEveryMissingOAuthService(t *testi
 	err := validateArtifactBucketReadiness(context.Background(), s, bucketID, []models.SDKSelection{
 		{ServiceID: first, AuthType: "oauth"}, {ServiceID: second, AuthType: "oidc"},
 	})
-	if err == nil || !strings.Contains(err.Error(), first.String()) || !strings.Contains(err.Error(), second.String()) {
-		t.Fatalf("expected one aggregated readiness error containing both services, got %v", err)
+	var httpErr workspaceConfigHTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("expected a structured readiness error, got %v", err)
+	}
+	missing, ok := httpErr.details["missing"].([]string)
+	if !ok || !slices.Contains(missing, first.String()+" (oauth)") || !slices.Contains(missing, second.String()+" (oidc)") {
+		t.Fatalf("expected structured details containing both services, got %#v", httpErr.details)
 	}
 }
 

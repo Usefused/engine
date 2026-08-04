@@ -361,6 +361,7 @@ func (d *Dispatcher) executeWithRetries(
 	var lastStatus int
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
+		RecordExecutionCount(ctx, "provider_attempt_count", int64(attempt+1))
 		if attempt > 0 {
 			observability.RetriesTotal.Add(ctx, 1)
 			span.SetAttributes(attribute.Int("retry_count", attempt))

@@ -33,14 +33,23 @@ import {
   type TeamResourceType,
   type TeamWorkspaceRole,
 } from "~/lib/teams";
+import { SectionTabs } from "~/components/layout/SectionTabs";
+
+const ACCESS_TABS = [
+  { label: "People", to: "/integrations/access/people" },
+  { label: "Teams", to: "/integrations/access/teams" },
+];
 
 export const meta: MetaFunction = () => [{ title: "Teams - Fused" }];
 
 export default function TeamsPage() {
 	const { access } = useCurrentActorAccess();
-	return <WorkspacePermissionGate permission="access.read" area="teams and workspace access">
-		<TeamsManager canManage={hasWorkspacePermission(access, "access.manage")} canManageOwners={hasWorkspacePermission(access, "account.manage")} />
-	</WorkspacePermissionGate>;
+	return <>
+		<SectionTabs tabs={ACCESS_TABS} />
+		<WorkspacePermissionGate permission="access.read" area="teams and workspace access">
+			<TeamsManager canManage={hasWorkspacePermission(access, "access.manage")} canManageOwners={hasWorkspacePermission(access, "account.manage")} />
+		</WorkspacePermissionGate>
+	</>;
 }
 
 function TeamsManager({ canManage, canManageOwners }: { canManage: boolean; canManageOwners: boolean }) {
@@ -186,9 +195,9 @@ function TeamsManager({ canManage, canManageOwners }: { canManage: boolean; canM
 
       <TeamCreateControls canManage={canManage} name={newName} description={newDescription} saving={saving} onName={setNewName} onDescription={setNewDescription} onCreate={handleCreate} />
 
-      <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
+      <div className={`grid gap-6 ${editor ? "lg:grid-cols-[280px_1fr]" : ""}`}>
         <TeamsList teams={teams} selectedId={selectedId} includeArchived={includeArchived} loading={loading} onIncludeArchived={setIncludeArchived} onSelect={setSelectedId} />
-        <TeamEditorPanel editor={editor} members={members} name={editName} description={editDescription} saving={saving} canManage={canManage} canManageOwners={canManageOwners} onName={setEditName} onDescription={setEditDescription} onUpdate={handleUpdate} onArchive={handleArchive} onWorkspaceRole={handleWorkspaceRole} onResourceAccess={handleResourceAccess} onArtifactAccess={handleArtifactAccess} onAddMember={handleAddMember} onRemoveMember={handleRemoveMember} />
+        {editor && <TeamEditorPanel editor={editor} members={members} name={editName} description={editDescription} saving={saving} canManage={canManage} canManageOwners={canManageOwners} onName={setEditName} onDescription={setEditDescription} onUpdate={handleUpdate} onArchive={handleArchive} onWorkspaceRole={handleWorkspaceRole} onResourceAccess={handleResourceAccess} onArtifactAccess={handleArtifactAccess} onAddMember={handleAddMember} onRemoveMember={handleRemoveMember} />}
       </div>
     </div>
   );
@@ -196,7 +205,7 @@ function TeamsManager({ canManage, canManageOwners }: { canManage: boolean; canM
 
 function TeamCreateControls(props: { canManage: boolean; name: string; description: string; saving: boolean; onName: (value: string) => void; onDescription: (value: string) => void; onCreate: (event: FormEvent) => void }) {
   if (!props.canManage) return <p className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600" role="status">You have read-only access to teams.</p>;
-  return <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm"><h2 className="text-base font-semibold text-slate-900 mb-3">Create a team</h2><form onSubmit={props.onCreate} className="grid gap-3 md:grid-cols-[1fr_2fr_auto]" toolname="create_team" tooldescription="Create a workspace team."><input value={props.name} onChange={(event) => props.onName(event.target.value)} required maxLength={100} placeholder="Team name" aria-label="Team name" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" /><input value={props.description} onChange={(event) => props.onDescription(event.target.value)} maxLength={500} placeholder="What does this team work on?" aria-label="Team description" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" /><button type="submit" disabled={props.saving} className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"><Plus className="w-4 h-4" /> Create</button></form></section>;
+  return <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm"><h2 className="text-base font-semibold text-slate-900 mb-3">Create a team</h2><form onSubmit={props.onCreate} className="grid gap-3 md:grid-cols-[1fr_2fr_auto]" toolname="create_team" tooldescription="Create a workspace team."><input value={props.name} onChange={(event) => props.onName(event.target.value)} required maxLength={100} placeholder="Team name" aria-label="Team name" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" /><input value={props.description} onChange={(event) => props.onDescription(event.target.value)} maxLength={500} placeholder="What does this team work on?" aria-label="Team description" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" /><button type="submit" disabled={props.saving} className="inline-flex items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"><Plus className="w-4 h-4" /> Create</button></form></section>;
 }
 
 function TeamsList(props: { teams: Team[]; selectedId: string; includeArchived: boolean; loading: boolean; onIncludeArchived: (value: boolean) => void; onSelect: (id: string) => void }) {

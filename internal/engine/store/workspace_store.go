@@ -168,8 +168,7 @@ func (s *postgresStore) ListAuthorizedWorkspaceServices(ctx context.Context, sco
 		return nil, nil
 	}
 	query := listWorkspaceServicesSQL + `
-		WHERE ($1 OR s.service_id = ANY($2::uuid[]))
-		  AND (COALESCE(cardinality($3::text[]), 0) = 0 OR COALESCE(s.service_name, '') = ANY($3::text[]))
+		` + authorizedWorkspaceServicesWhereSQL + `
 		ORDER BY s.created_at DESC`
 	rows, err := s.db.Query(ctx, query, scope.All, scope.IDs, names)
 	if err != nil {
@@ -293,10 +292,8 @@ func (s *postgresStore) ListAuthorizedWorkspaceServicesPage(ctx context.Context,
 	if !scope.All && len(scope.IDs) == 0 {
 		return nil, 0, nil
 	}
-	const where = ` WHERE ($1 OR s.service_id = ANY($2::uuid[]))
-		AND (COALESCE(cardinality($3::text[]), 0) = 0 OR COALESCE(s.service_name, '') = ANY($3::text[]))`
 	var total int
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM fused_workspace_services s`+where, scope.All, scope.IDs, names).Scan(&total); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM fused_workspace_services s `+authorizedWorkspaceServicesWhereSQL, scope.All, scope.IDs, names).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("ListAuthorizedWorkspaceServicesPage count: %w", err)
 	}
 	if total == 0 {
@@ -304,7 +301,7 @@ func (s *postgresStore) ListAuthorizedWorkspaceServicesPage(ctx context.Context,
 	}
 	query := `WITH paged_services AS (
 		SELECT id, service_id, service_slug, service_name, added_by, created_at
-		FROM fused_workspace_services s` + where + `
+		FROM fused_workspace_services s ` + authorizedWorkspaceServicesWhereSQL + `
 		ORDER BY created_at DESC LIMIT $4 OFFSET $5
 	)
 	SELECT s.id, s.service_id, COALESCE(s.service_slug, ''),
@@ -334,6 +331,21 @@ func (s *postgresStore) ListAuthorizedWorkspaceServicesPage(ctx context.Context,
 	}
 	return services, total, rows.Err()
 }
+
+// Why: CLI commands address services by Registry slug, while the Admin UI can
+// filter using the display name. Keeping both exact matches in SQL avoids a
+// false "not enabled" result without loading the workspace into Go memory.
+const authorizedWorkspaceServicesWhereSQL = `WHERE ($1 OR s.service_id = ANY($2::uuid[]))
+	AND (
+		COALESCE(cardinality($3::text[]), 0) = 0
+		OR COALESCE(s.service_name, '') = ANY($3::text[])
+		OR COALESCE(s.service_slug, '') = ANY($3::text[])
+		OR EXISTS (
+			SELECT 1 FROM unnest($3::text[]) AS requested(name)
+			WHERE requested.name LIKE '@%/%'
+			  AND COALESCE(s.service_slug, '') = split_part(requested.name, '/', 2)
+		)
+	)`
 
 func (s *postgresStore) ListBucketServiceSummaries(ctx context.Context, bucketID uuid.UUID, search string, limit, offset int) ([]BucketServiceSummary, int, error) {
 	return s.ListAuthorizedBucketServiceSummaries(ctx, bucketID, accesscontrol.AuthorizedScope{All: true}, search, limit, offset)

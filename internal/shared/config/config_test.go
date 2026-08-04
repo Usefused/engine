@@ -56,3 +56,25 @@ func TestLoad_UIURL_OverriddenByEnv(t *testing.T) {
 		t.Errorf("expected UIURL from FUSED_UI_URL, got %q", cfg.UIURL)
 	}
 }
+
+func TestLoadExecutionRetentionDefaultsAndYAMLOverrides(t *testing.T) {
+	defaults, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
+	if err != nil {
+		t.Fatalf("Load defaults: %v", err)
+	}
+	if defaults.Engine.ExecutionRetentionDays != 30 || defaults.Engine.ExecutionCleanupBatch != 1000 {
+		t.Fatalf("retention defaults = %d days/%d rows", defaults.Engine.ExecutionRetentionDays, defaults.Engine.ExecutionCleanupBatch)
+	}
+
+	path := filepath.Join(t.TempDir(), "engine.yaml")
+	if err := os.WriteFile(path, []byte("engine:\n  execution_retention_days: 7\n  execution_cleanup_batch: 250\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	configured, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load configured: %v", err)
+	}
+	if configured.Engine.ExecutionRetentionDays != 7 || configured.Engine.ExecutionCleanupBatch != 250 {
+		t.Fatalf("retention config = %d days/%d rows", configured.Engine.ExecutionRetentionDays, configured.Engine.ExecutionCleanupBatch)
+	}
+}

@@ -1,6 +1,6 @@
 import { FormEvent } from "react";
 import { Pencil, X } from "lucide-react";
-import { AuthConfig } from "~/lib/api";
+import { AuthConfig, type Service } from "~/lib/api";
 
 function scopeGroup(scope: string): string {
   try {
@@ -42,7 +42,7 @@ function isOIDCConfigType(type?: string): boolean {
 }
 
 interface AuthConfigSectionProps {
-  srv: any;
+  srv: Service;
   isAuth: boolean;
   editingAuth: boolean;
   setEditingAuth: (editing: boolean) => void;
@@ -355,7 +355,7 @@ export function AuthConfigSection({
       ) : (
         <div className="flex flex-col gap-4 text-sm text-slate-600">
           {srv.auth_configs && srv.auth_configs.length > 0 ? (
-            srv.auth_configs.map((auth: any, idx: number) => (
+            srv.auth_configs.map((auth, idx: number) => (
               <div key={idx} className="flex flex-col gap-2 p-3 bg-slate-50 border border-slate-100 rounded">
                 <div className="flex flex-col sm:flex-row sm:gap-6 gap-2">
                   <span>

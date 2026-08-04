@@ -3,7 +3,7 @@ import { useState } from "react";
 import { useToast } from "~/components/Toast";
 import { Link } from "@remix-run/react";
 import type { NotificationServiceRef, WorkspaceNotification } from "~/lib/api";
-import { notificationLink, notificationTarget, notificationTitle, notificationTypeLabel } from "./notificationHelpers";
+import { notificationLink, notificationTypeLabel } from "./notificationHelpers";
 
 // Shared presentational row used by the bell panel, the full notifications
 // page, and the contextual banners, so read/dismiss/title/link logic can't
@@ -48,7 +48,7 @@ export function NotificationRow({
 
   return (
     <div
-      className={`flex items-start gap-3 border-l-4 ${accentBorder} border-b border-slate-100 last:border-b-0 ${
+      className={`flex min-w-0 items-start gap-3 border-l-4 ${accentBorder} border-b border-slate-100 last:border-b-0 ${
         dense ? "px-3 py-3" : "px-4 py-4"
       } ${isAcknowledged ? "opacity-80" : ""}`}
     >
@@ -68,7 +68,7 @@ export function NotificationRow({
         {link ? (
           <Link
             to={link}
-            className={`block mt-1 font-medium text-slate-700 hover:underline ${
+            className={`block mt-1 break-words font-medium text-slate-700 hover:underline ${
               dense ? "text-xs" : "text-sm"
             }`}
             title={item.message}
@@ -77,7 +77,7 @@ export function NotificationRow({
           </Link>
         ) : (
           <p
-            className={`mt-1 font-medium text-slate-700 ${
+            className={`mt-1 break-words font-medium text-slate-700 ${
               dense ? "text-xs" : "text-sm"
             }`}
             title={item.message}
@@ -87,12 +87,12 @@ export function NotificationRow({
         )}
         
         {(item.service_id || item.version || item.config_key) && (
-          <div className="mt-2 flex items-center gap-2 flex-wrap">
+          <div className="mt-2 flex min-w-0 max-w-full items-center gap-2 flex-wrap">
             {item.service_id && (
               <button
                 type="button"
                 onClick={(e) => copyTag(e, serviceRefs[item.service_id!]?.name || item.service_id!)}
-                className="text-[10px] font-medium bg-slate-50 text-slate-600 px-1.5 py-0.5 rounded border border-slate-200 truncate max-w-[150px] hover:bg-slate-100 transition-colors cursor-pointer"
+                className="min-w-0 max-w-[150px] truncate text-[10px] font-medium bg-slate-50 text-slate-600 px-1.5 py-0.5 rounded border border-slate-200 hover:bg-slate-100 transition-colors cursor-pointer"
                 title="Click to copy"
               >
                 {serviceRefs[item.service_id!]?.name || item.service_id}
@@ -102,7 +102,7 @@ export function NotificationRow({
               <button
                 type="button"
                 onClick={(e) => copyTag(e, item.version!)}
-                className="text-[10px] font-medium bg-slate-50 text-slate-600 px-1.5 py-0.5 rounded border border-slate-200 hover:bg-slate-100 transition-colors cursor-pointer"
+                className="min-w-0 max-w-[120px] truncate text-[10px] font-medium bg-slate-50 text-slate-600 px-1.5 py-0.5 rounded border border-slate-200 hover:bg-slate-100 transition-colors cursor-pointer"
                 title="Click to copy"
               >
                 {item.version}
@@ -112,7 +112,7 @@ export function NotificationRow({
               <button
                 type="button"
                 onClick={(e) => copyTag(e, item.config_key!)}
-                className="text-[10px] font-medium bg-slate-50 text-slate-600 px-1.5 py-0.5 rounded border border-slate-200 hover:bg-slate-100 transition-colors cursor-pointer"
+                className="max-w-[180px] truncate text-[10px] font-medium bg-slate-50 text-slate-600 px-1.5 py-0.5 rounded border border-slate-200 hover:bg-slate-100 transition-colors cursor-pointer"
                 title="Click to copy"
               >
                 {item.config_key}
@@ -202,7 +202,7 @@ export function NotificationList({
   }
 
   return (
-    <div className="flex flex-col">
+    <div className="flex min-w-0 flex-col">
       {items.map((item) => (
         <NotificationRow
           key={item.id}

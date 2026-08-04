@@ -1,5 +1,12 @@
 import { AlertTriangle } from "lucide-react";
 
+interface EndpointWarning {
+  id: string;
+  method?: string;
+  path?: string;
+  reasons?: string[];
+}
+
 export function ServiceHeaderWarningIcon({ warningCount }: { warningCount: number }) {
   if (!warningCount) return null;
   return (
@@ -12,7 +19,7 @@ export function ServiceHeaderWarningIcon({ warningCount }: { warningCount: numbe
   );
 }
 
-export function WarningRow({ warning }: { warning: any }) {
+export function WarningRow({ warning }: { warning: EndpointWarning }) {
   return (
     <div className="py-2 text-sm">
       <div className="flex flex-wrap items-center gap-2">
@@ -21,8 +28,8 @@ export function WarningRow({ warning }: { warning: any }) {
         </span>
         <span className="font-mono text-xs text-slate-800 break-all">{warning.path}</span>
       </div>
-      {warning.reasons?.length > 0 && (
-        <p className="mt-1 text-xs text-amber-800">{warning.reasons.join(" ")}</p>
+      {(warning.reasons?.length ?? 0) > 0 && (
+        <p className="mt-1 text-xs text-amber-800">{warning.reasons?.join(" ")}</p>
       )}
     </div>
   );
@@ -32,7 +39,7 @@ export function ImportWarningPanel({
   warnings,
   onClear,
 }: {
-  warnings: any[];
+  warnings: EndpointWarning[];
   onClear: () => void;
 }) {
   if (!warnings || warnings.length === 0) return null;
@@ -61,7 +68,7 @@ export function ImportWarningPanel({
         </div>
       </div>
       <div className="mt-3 divide-y divide-amber-200/70 border-t border-amber-200/70">
-        {warnings.slice(0, 8).map((warning: any) => (
+        {warnings.slice(0, 8).map((warning) => (
           <WarningRow key={warning.id} warning={warning} />
         ))}
         {warnings.length > 8 && (

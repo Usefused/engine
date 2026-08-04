@@ -34,6 +34,38 @@ export function isAuthenticated(): boolean {
   return !!getApiKey();
 }
 
+export function openAuthenticatedTab(path: string): boolean {
+  if (
+    typeof window === "undefined" ||
+    !path.startsWith("/") ||
+    path.startsWith("//") ||
+    path.startsWith("/\\")
+  ) {
+    return false;
+  }
+
+  const newTab = window.open("about:blank", "_blank");
+  if (!newTab) return false;
+
+  const key = getApiKey();
+  if (key) {
+    try {
+      newTab.sessionStorage.setItem(KEY, key);
+    } catch {
+      // The destination remains usable for public routes when storage is
+      // unavailable. Authenticated routes will show the normal sign-in flow.
+    }
+  }
+
+  try {
+    newTab.opener = null;
+  } catch {
+    // Some browsers expose opener as read-only. Navigation remains same-origin.
+  }
+  newTab.location.replace(path);
+  return true;
+}
+
 export function logoutAndRedirect(): never {
   clearApiKey();
   if (typeof window !== "undefined") {

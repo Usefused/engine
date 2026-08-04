@@ -397,6 +397,23 @@ func (r *storeBackedControlRequirementResolver) workspacePlanRequirements(ctx co
 	if json.Unmarshal(envelope.Config, &doc) != nil {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
+	// A workspace.yaml normally names services by bare slug (or "@provider/
+	// slug"), not by service_id -- the handler only learns the real ID later,
+	// inside resolveWorkspaceServiceSlugs (workspace_config_handlers.go),
+	// which runs after this middleware has already decided whether to allow
+	// the request. Resolving slug-only entries against the Engine's own
+	// local fused_workspace_services mirror here means authorization
+	// inspects the identity the request will actually act on, for every
+	// service this workspace already knows about, instead of rejecting the
+	// request before that identity exists. This is local-only (no Registry
+	// call): a slug the mirror doesn't recognize is left unresolved and
+	// falls through to workspacePlanChangedResources, which requires
+	// workspace-level authority for it instead -- see the comment there for
+	// why a per-resource grant can't apply to a service that isn't part of
+	// the workspace yet.
+	if err := r.resolveWorkspacePlanServiceSlugs(ctx, doc.Services); err != nil {
+		return nil, err
+	}
 	configKey := envelope.ConfigKey
 	if configKey == "" {
 		configKey = "workspace"
@@ -408,7 +425,7 @@ func (r *storeBackedControlRequirementResolver) workspacePlanRequirements(ctx co
 	if err != nil {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
-	serviceIDs, bucketNames, err := workspacePlanChangedResources(doc.Services, doc.Buckets, doc.Deprecations, current)
+	serviceIDs, needsServiceCreateAuthority, bucketNames, err := workspacePlanChangedResources(doc.Services, doc.Buckets, doc.Deprecations, current)
 	if err != nil {
 		return nil, err
 	}
@@ -420,6 +437,14 @@ func (r *storeBackedControlRequirementResolver) workspacePlanRequirements(ctx co
 		}
 		requirements = append(requirements, resolved...)
 	}
+	if needsServiceCreateAuthority {
+		// At least one changed entry names a service this workspace has
+		// never added before, so it has no service_id and no per-resource
+		// grant could possibly have been issued for it yet. Adding a new
+		// service to a workspace is a workspace-level decision -- same
+		// reasoning bucketNameRequirements already applies to buckets below.
+		requirements = append(requirements, workspaceAccessRequirement(actor.WorkspaceID, accesscontrol.PermissionServiceManage))
+	}
 	bucketRequirements, err := r.bucketNameRequirements(ctx, actor.WorkspaceID, bucketNames, accesscontrol.PermissionBucketManage)
 	if err != nil {
 		return nil, err
@@ -427,43 +452,135 @@ func (r *storeBackedControlRequirementResolver) workspacePlanRequirements(ctx co
 	return append(requirements, bucketRequirements...), nil
 }
 
-func workspacePlanChangedResources(desiredServices, desiredBuckets map[string]json.RawMessage, desiredDeprecations json.RawMessage, current *store.ConfigState) ([]string, []string, error) {
+// resolveWorkspacePlanServiceSlugs mutates services in place, filling in
+// service_id for any entry that names its service by slug alone and that
+// the Engine's local fused_workspace_services mirror already recognizes.
+// Entries that already carry a service_id (every entry from a
+// second-or-later plan for a config that previously applied successfully,
+// or any entry a caller pre-resolved itself) are left untouched and never
+// trigger a lookup. A slug the mirror doesn't recognize -- most likely
+// because the service has never been added to this workspace -- is left as
+// is; the caller falls back to requiring workspace-level authority for it
+// rather than treating an unresolved slug as an outright denial.
+func (r *storeBackedControlRequirementResolver) resolveWorkspacePlanServiceSlugs(ctx context.Context, services map[string]json.RawMessage) error {
+	if r.store == nil {
+		return nil
+	}
+	unresolvedKeys := make([]string, 0, len(services))
+	for key, raw := range services {
+		var probe struct {
+			ServiceID string `json:"service_id"`
+		}
+		if json.Unmarshal(raw, &probe) != nil {
+			return accesscontrol.ErrPolicyDenied
+		}
+		if strings.TrimSpace(probe.ServiceID) == "" {
+			unresolvedKeys = append(unresolvedKeys, key)
+		}
+	}
+	if len(unresolvedKeys) == 0 {
+		return nil
+	}
+	local, err := r.store.ResolveWorkspaceServiceIDsByKeys(ctx, unresolvedKeys)
+	if err != nil {
+		return accesscontrol.ErrPolicyDenied
+	}
+	for key, id := range local {
+		if id == uuid.Nil {
+			continue
+		}
+		merged, err := mergeServiceID(services[key], id)
+		if err != nil {
+			return accesscontrol.ErrPolicyDenied
+		}
+		services[key] = merged
+	}
+	return nil
+}
+
+// mergeServiceID adds/overwrites service_id on a raw service entry without
+// otherwise touching the entry's shape, so downstream diffing
+// (workspacePlanChangedResources) still compares the same fields the client
+// sent -- just with a resolved identity where the client only sent a slug.
+func mergeServiceID(raw json.RawMessage, id uuid.UUID) (json.RawMessage, error) {
+	fields := make(map[string]json.RawMessage)
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			return nil, err
+		}
+	}
+	encodedID, err := json.Marshal(id.String())
+	if err != nil {
+		return nil, err
+	}
+	fields["service_id"] = encodedID
+	return json.Marshal(fields)
+}
+
+func workspacePlanChangedResources(desiredServices, desiredBuckets map[string]json.RawMessage, desiredDeprecations json.RawMessage, current *store.ConfigState) ([]string, bool, []string, error) {
 	var prior struct {
 		Services     map[string]json.RawMessage `json:"services"`
 		Buckets      map[string]json.RawMessage `json:"buckets"`
 		Deprecations json.RawMessage            `json:"deprecations"`
 	}
 	if current != nil && json.Unmarshal(current.DesiredState, &prior) != nil {
-		return nil, nil, accesscontrol.ErrPolicyDenied
+		return nil, false, nil, accesscontrol.ErrPolicyDenied
 	}
 	serviceIDs := make(map[string]struct{})
-	if err := addChangedServiceIDs(serviceIDs, desiredServices, prior.Services); err != nil {
-		return nil, nil, err
+	needsServiceCreateAuthority, err := addChangedServiceIDs(serviceIDs, desiredServices, prior.Services)
+	if err != nil {
+		return nil, false, nil, err
 	}
 	if !jsonValuesEqual(desiredDeprecations, prior.Deprecations) {
 		if err := addDeprecationServiceIDs(serviceIDs, desiredDeprecations, prior.Deprecations); err != nil {
-			return nil, nil, err
+			return nil, false, nil, err
 		}
 	}
-	return mapKeys(serviceIDs), changedJSONKeys(desiredBuckets, prior.Buckets), nil
+	return mapKeys(serviceIDs), needsServiceCreateAuthority, changedJSONKeys(desiredBuckets, prior.Buckets), nil
 }
 
-func addChangedServiceIDs(serviceIDs map[string]struct{}, desired, prior map[string]json.RawMessage) error {
+// addChangedServiceIDs collects the resolved service_id of every changed
+// entry into serviceIDs, and reports (via its bool return) whether any
+// changed *desired* entry still has no service_id after local slug
+// resolution -- i.e. names a service this workspace has never added before.
+// That case is not a denial here: the caller substitutes a workspace-level
+// requirement for it instead, since a resource-scoped grant can't possibly
+// exist yet for a resource that doesn't exist yet. A missing service_id on
+// the *prior* (already-applied, previously-resolved) side is different --
+// that's unexpected, persisted state and still denied outright.
+func addChangedServiceIDs(serviceIDs map[string]struct{}, desired, prior map[string]json.RawMessage) (bool, error) {
+	needsServiceCreateAuthority := false
 	for _, key := range changedJSONKeys(desired, prior) {
-		for _, raw := range []json.RawMessage{desired[key], prior[key]} {
-			if len(raw) == 0 {
-				continue
+		if raw := desired[key]; len(raw) > 0 {
+			id, err := extractServiceID(raw)
+			if err != nil {
+				return false, accesscontrol.ErrPolicyDenied
 			}
-			var service struct {
-				ServiceID string `json:"service_id"`
+			if id == "" {
+				needsServiceCreateAuthority = true
+			} else {
+				serviceIDs[id] = struct{}{}
 			}
-			if json.Unmarshal(raw, &service) != nil || service.ServiceID == "" {
-				return accesscontrol.ErrPolicyDenied
+		}
+		if raw := prior[key]; len(raw) > 0 {
+			id, err := extractServiceID(raw)
+			if err != nil || id == "" {
+				return false, accesscontrol.ErrPolicyDenied
 			}
-			serviceIDs[service.ServiceID] = struct{}{}
+			serviceIDs[id] = struct{}{}
 		}
 	}
-	return nil
+	return needsServiceCreateAuthority, nil
+}
+
+func extractServiceID(raw json.RawMessage) (string, error) {
+	var service struct {
+		ServiceID string `json:"service_id"`
+	}
+	if err := json.Unmarshal(raw, &service); err != nil {
+		return "", err
+	}
+	return service.ServiceID, nil
 }
 
 func addDeprecationServiceIDs(serviceIDs map[string]struct{}, payloads ...json.RawMessage) error {

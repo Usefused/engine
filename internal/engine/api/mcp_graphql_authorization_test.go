@@ -22,6 +22,26 @@ func TestEngineGraphQLPolicyClassifiesEveryRootResolver(t *testing.T) {
 	assertRootPolicyCoverage(t, schema.MutationType(), engineGraphQLPolicy.mutationRoots)
 }
 
+func TestWorkspaceExecutionAnalyticsRequiresAuditRead(t *testing.T) {
+	workspaceID := uuid.New()
+	s := &workspaceTestStore{accountID: uuid.New()}
+	schema := authorizationTestSchema(t, s)
+	handler := mcpGraphQLHandler(schema)
+	actor := actorWithWorkspacePermissions(t, workspaceID, accesscontrol.PermissionWorkspaceRead)
+	request := httptest.NewRequest(http.MethodPost, "/engine/graphql", strings.NewReader(`{"query":"query { workspaceExecutionAnalytics { total_calls } }"}`))
+	request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), actor))
+	response := httptest.NewRecorder()
+
+	handler(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: %s", response.Code, response.Body.String())
+	}
+	if s.workspaceExecutionCalls != 0 {
+		t.Fatalf("resolver calls = %d, want 0", s.workspaceExecutionCalls)
+	}
+}
+
 func TestEngineGraphQLRejectsRequirementsBeyondAuditBound(t *testing.T) {
 	workspaceID := uuid.New()
 	schema := authorizationTestSchema(t, &workspaceTestStore{})

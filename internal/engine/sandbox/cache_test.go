@@ -568,10 +568,6 @@ func (m *mockCacheDB) BatchCreateEngineExecutionEvents(ctx context.Context, even
 	return nil
 }
 
-func (m *mockCacheDB) InsertMCPAnalytics(ctx context.Context, analytics *models.MCPAnalytics) error {
-	return nil
-}
-
 func (m *mockCacheDB) UpsertMCPSession(ctx context.Context, session *models.MCPSession) error {
 	return nil
 }

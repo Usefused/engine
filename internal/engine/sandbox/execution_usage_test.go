@@ -42,3 +42,19 @@ func TestRecordEngineExecutionUsageCapturesAggregateOnlyMetrics(t *testing.T) {
 		}
 	}
 }
+
+func TestRecordEngineExecutionUsageCountsProviderErrorResponseAsFailed(t *testing.T) {
+	recorder := &captureExecutionUsageRecorder{}
+	SetExecutionUsageRecorder(recorder)
+	defer SetExecutionUsageRecorder(nil)
+
+	ctx, span := noop.NewTracerProvider().Tracer("test").Start(context.Background(), "execution")
+	recordEngineExecutionUsage(ctx, span, executionAuditState{
+		startedAt: time.Now(), providerHTTPStatus: 429,
+	}, nil)
+	span.End()
+
+	if len(recorder.increments) != 2 || recorder.increments[1].Metric != models.EngineUsageMetricExecutionFailed {
+		t.Fatalf("unexpected usage increments: %#v", recorder.increments)
+	}
+}

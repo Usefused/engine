@@ -56,8 +56,10 @@ test("access routes gate reads before mounting data loaders and gate management 
 test("restricted access navigation is permission-aware and direct denial is explicit", () => {
   const sidebar = source("../components/layout/IntegrationsSidebar.tsx");
   const gate = source("../components/access/CurrentActorAccess.tsx");
-  assert.match(sidebar, /People.*access\.read/);
-  assert.match(sidebar, /Teams.*access\.read/);
+  assert.match(sidebar, /label: "Access"/);
+  assert.match(sidebar, /label: "Credentials"/);
+  assert.match(sidebar, /visible: \(access\) => hasAnyPermission\(access, "bucket\.read"\)/);
+  assert.match(sidebar, /visible: \(access\) => hasWorkspacePermission\(access, "access\.read"\)/);
   assert.match(gate, /Access not available/);
   assert.match(gate, /Ask a workspace administrator/);
   assert.doesNotMatch(gate, /No teams yet/);

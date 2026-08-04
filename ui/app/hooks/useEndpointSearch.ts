@@ -5,7 +5,7 @@ import { useToast } from "~/components/Toast";
 
 export function useEndpointSearch(
   serviceId: string | undefined,
-  res: any,
+  res: unknown,
   integrationsByResource: Record<string, IntegrationObject[]>
 ) {
   const toast = useToast();
@@ -68,7 +68,7 @@ export function useEndpointSearch(
     }
 
     try {
-      const data = await api.graphql<{ searchEndpoints: any[] }>(`
+      const data = await api.graphql<{ searchEndpoints: IntegrationObject[] }>(`
         query($serviceId: String!, $q: String!, $limit: Int, $offset: Int) {
           searchEndpoints(serviceId: $serviceId, q: $q, limit: $limit, offset: $offset) {
             id service_id name description version status method path deprecated
@@ -82,8 +82,8 @@ export function useEndpointSearch(
       setSearchResults(enriched);
       setSearchOffset(50);
       setHasMoreSearch(data.searchEndpoints.length === 50);
-    } catch (e: any) {
-      toast.error(e.message || "Search failed");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Search failed");
     } finally {
       setIsSearching(false);
     }
@@ -94,7 +94,7 @@ export function useEndpointSearch(
     setIsSearching(true);
     try {
       const allLoaded = Object.values(integrationsByResource).flat();
-      const data = await api.graphql<{ searchEndpoints: any[] }>(`
+      const data = await api.graphql<{ searchEndpoints: IntegrationObject[] }>(`
         query($serviceId: String!, $q: String!, $limit: Int, $offset: Int) {
           searchEndpoints(serviceId: $serviceId, q: $q, limit: $limit, offset: $offset) {
             id service_id name description version status method path deprecated
@@ -108,8 +108,8 @@ export function useEndpointSearch(
       setSearchResults(prev => [...(prev || []), ...enriched]);
       setSearchOffset(prev => prev + 50);
       setHasMoreSearch(data.searchEndpoints.length === 50);
-    } catch (e: any) {
-      toast.error(e.message || "Load more search failed");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Load more search failed");
     } finally {
       setIsSearching(false);
     }

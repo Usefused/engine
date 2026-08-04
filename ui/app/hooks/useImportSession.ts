@@ -50,20 +50,20 @@ async function completeImport(event: ImportStreamEvent, actions: ImportEventActi
 async function handleImportEvent(event: ImportStreamEvent, actions: ImportEventActions) {
   switch (event.type) {
     case "connected":
-      actions.setProgress(progress(true, "Extraction is running..."));
+      actions.setProgress(progress(true, "Finding operations..."));
       return;
     case "thinking":
-      actions.setProgress(progress(true, event.message || "Extracting selected endpoints..."));
+      actions.setProgress(progress(true, event.message || "Finding selected operations..."));
       return;
     case "extracted":
-      actions.setProgress(progress(true, event.message || "Extracted endpoint..."));
+      actions.setProgress(progress(true, event.message || "Operation found..."));
       if (event.payload) actions.onExtractedPayload(event.payload);
       return;
     case "complete":
       await completeImport(event, actions);
       return;
     case "error":
-      actions.setProgress(progress(false, "Extraction failed.", event.message || "The extraction job failed."));
+      actions.setProgress(progress(false, "Discovery failed.", event.message || "The discovery run failed."));
       actions.controller.abort();
   }
 }

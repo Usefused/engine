@@ -25,7 +25,7 @@ export function SDKCredentialBucketsSection({ artifactId }: { artifactId: string
         setBuckets(state.buckets);
         setSdkBuckets(state.sdkBuckets);
       })
-      .catch((err) => toast.error(errorMessage(err, "Failed to load buckets")))
+      .catch((err) => toast.error(errorMessage(err, "Failed to load credential sets")))
       .finally(() => setLoading(false));
   };
 
@@ -37,7 +37,7 @@ export function SDKCredentialBucketsSection({ artifactId }: { artifactId: string
 
   const onBucketCreated = (name: string) => {
     loadBuckets();
-    toast.success(`Bucket ${name} created`);
+    toast.success(`Credential set ${name} created`);
   };
 
   return (
@@ -69,9 +69,9 @@ function SectionHeader({ hasAttachedBucket, loading, onRefresh, onCreate }: { ha
   return (
     <div className="flex items-center justify-between gap-3 mb-3">
       <div>
-        <h4 className="text-sm font-semibold text-slate-700 uppercase tracking-wider">Credential Buckets</h4>
+        <h4 className="text-sm font-semibold text-slate-700 uppercase tracking-wider">Credential sets</h4>
         <p className="text-xs text-slate-500 mt-1">
-          {hasAttachedBucket ? "This SDK resolves runtime credentials from the attached bucket." : "No bucket is linked to this SDK scope yet."}
+          {hasAttachedBucket ? "This app uses the attached credential set at runtime." : "No credential set is linked to this app yet."}
         </p>
       </div>
       <div className="flex items-center gap-2">
@@ -79,7 +79,7 @@ function SectionHeader({ hasAttachedBucket, loading, onRefresh, onCreate }: { ha
           type="button"
           onClick={onRefresh}
           className="p-2 rounded-lg border border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50 cursor-pointer"
-          aria-label="Refresh bucket state"
+          aria-label="Refresh credential sets"
           title="Refresh"
         >
           <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
@@ -90,7 +90,7 @@ function SectionHeader({ hasAttachedBucket, loading, onRefresh, onCreate }: { ha
           className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 text-sm font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-800 cursor-pointer"
         >
           <Plus className="w-4 h-4" />
-          New Bucket
+          New credential set
         </button>
       </div>
     </div>
@@ -100,13 +100,13 @@ function SectionHeader({ hasAttachedBucket, loading, onRefresh, onCreate }: { ha
 function BucketRows({ rows, loading }: { rows: BucketRow[]; loading: boolean }) {
   return (
     <div className="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100 overflow-hidden">
-      {loading ? <EmptyBucketRows label="Loading buckets..." /> : <LoadedBucketRows rows={rows} />}
+      {loading ? <EmptyBucketRows label="Loading credential sets..." /> : <LoadedBucketRows rows={rows} />}
     </div>
   );
 }
 
 function LoadedBucketRows({ rows }: { rows: BucketRow[] }) {
-  if (rows.length === 0) return <EmptyBucketRows label="No linked bucket." />;
+  if (rows.length === 0) return <EmptyBucketRows label="No linked credential set." />;
   return rows.map(({ bucket, isAttached }) => (
     <Link
       key={bucket.id}
@@ -119,7 +119,7 @@ function LoadedBucketRows({ rows }: { rows: BucketRow[] }) {
         </span>
         <span className="min-w-0">
           <span className="block truncate text-sm font-semibold text-slate-800">{bucket.name}</span>
-          <span className="block text-xs text-slate-500">{isAttached ? "Attached runtime bucket" : "Workspace default"}</span>
+          <span className="block text-xs text-slate-500">{isAttached ? "Used at runtime" : "Workspace default"}</span>
         </span>
       </span>
       <span className="shrink-0 text-xs font-medium text-blue-600">Open</span>

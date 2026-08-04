@@ -18,7 +18,7 @@ export function ArtifactOwnerControls(props: ArtifactOwnerControlsProps): ReactE
       "div",
       { className: "rounded-xl border border-blue-100 bg-blue-50/60 p-3 text-xs text-blue-900" },
       props.ownerTeamId
-        ? "Fused checks both your access and the owning team's access. Only services and buckets available to both are shown."
+        ? "Fused checks both your access and the owning team's access. Only services and credential sets available to both are shown."
         : "What you create will belong to you. Choose a team when it should be owned and managed by that team."
     ),
     ownerTeamControl(props),
@@ -52,7 +52,7 @@ function bucketControl(props: ArtifactOwnerControlsProps): ReactElement {
   return createElement(
     "div",
     null,
-    createElement("label", { className: "block text-sm font-medium text-slate-700 mb-1.5" }, "Credential bucket"),
+    createElement("label", { className: "block text-sm font-medium text-slate-700 mb-1.5" }, "Credential set"),
     createElement(
       "select",
       {
@@ -63,11 +63,11 @@ function bucketControl(props: ArtifactOwnerControlsProps): ReactElement {
         className: "w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm bg-white disabled:bg-slate-100",
         "data-track": "select_artifact_bucket",
       },
-      createElement("option", { value: "" }, "Choose a bucket"),
+      createElement("option", { value: "" }, "Choose a credential set"),
       ...props.buckets.map((bucket) => createElement("option", { key: bucket.resource_id, value: bucket.resource_id }, bucket.display_name))
     ),
     props.buckets.length === 0
-      ? createElement("p", { className: "mt-1.5 text-xs text-amber-700" }, props.ownerTeamId ? "You and this team do not share access to a credential bucket." : "You do not have access to a credential bucket.")
+      ? createElement("p", { className: "mt-1.5 text-xs text-amber-700" }, props.ownerTeamId ? "You and this team do not share access to a credential set." : "You do not have access to a credential set.")
       : null
   );
 }

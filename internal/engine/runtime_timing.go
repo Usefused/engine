@@ -18,10 +18,11 @@ type executionTimingsKey struct{}
 type ExecutionTimings struct {
 	mu      sync.Mutex
 	entries map[string]time.Duration
+	counts  map[string]int64
 }
 
 func NewExecutionTimings() *ExecutionTimings {
-	return &ExecutionTimings{entries: make(map[string]time.Duration)}
+	return &ExecutionTimings{entries: make(map[string]time.Duration), counts: make(map[string]int64)}
 }
 
 func ContextWithExecutionTimings(ctx context.Context, timings *ExecutionTimings) context.Context {
@@ -68,6 +69,30 @@ func AddExecutionTiming(ctx context.Context, name string, duration time.Duration
 	if timings, ok := ExecutionTimingsFromContext(ctx); ok {
 		timings.Add(name, duration)
 	}
+}
+
+func RecordExecutionCount(ctx context.Context, name string, value int64) {
+	if timings, ok := ExecutionTimingsFromContext(ctx); ok {
+		timings.RecordCount(name, value)
+	}
+}
+
+func (t *ExecutionTimings) RecordCount(name string, value int64) {
+	if t == nil || name == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.counts[name] = value
+}
+
+func (t *ExecutionTimings) Count(name string) int64 {
+	if t == nil || name == "" {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.counts[name]
 }
 
 func (t *ExecutionTimings) SnapshotMilliseconds() map[string]float64 {

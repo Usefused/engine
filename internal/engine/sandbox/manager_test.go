@@ -242,10 +242,6 @@ func (m *mockStore) BatchCreateEngineExecutionEvents(ctx context.Context, events
 	return nil
 }
 
-func (m *mockStore) InsertMCPAnalytics(ctx context.Context, analytics *models.MCPAnalytics) error {
-	return nil
-}
-
 func (m *mockStore) UpsertMCPSession(ctx context.Context, session *models.MCPSession) error {
 	return nil
 }

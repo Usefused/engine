@@ -1,12 +1,22 @@
 import { useState } from "react";
 import { Search, X } from "lucide-react";
-import { type IntegrationObject } from "~/lib/api";
+
+// Shared between endpoint lists (IntegrationObject) and webhook lists
+// (WebhookObject) — only the fields actually rendered/searched here.
+export interface SelectableEvent {
+  id: string;
+  name: string;
+  description?: string;
+  path?: string;
+  resource?: string;
+  method?: string;
+}
 
 export interface WebhookSelectionListProps {
-  webhooks: IntegrationObject[]; // Type is IntegrationObject since we cast WebhookObject in the parent component
+  webhooks: SelectableEvent[];
   selectedIds: Set<string>;
   onToggle: (id: string, selected: boolean) => void;
-  getId: (wh: IntegrationObject) => string;
+  getId: (wh: SelectableEvent) => string;
   maxHeightClass?: string;
   disabled?: boolean;
 }
