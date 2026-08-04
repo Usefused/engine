@@ -1,13 +1,20 @@
 import { FormEvent, Dispatch, SetStateAction } from "react";
 import { Pencil } from "lucide-react";
+import { type Service } from "~/lib/api";
+
+interface ConfigForm {
+  rate_limit: { strategy: string; requests_per_second?: number; requests_per_minute?: number };
+  retry_config: { strategy: string; max_retries?: number; backoff_ms?: number };
+  default_headers: { key: string; value: string }[];
+}
 
 interface ServiceConfigSectionProps {
-  srv: any;
+  srv: Service;
   isAuth: boolean;
   editingConfig: boolean;
   setEditingConfig: Dispatch<SetStateAction<boolean>>;
-  configForm: any;
-  setConfigForm: Dispatch<SetStateAction<any>>;
+  configForm: ConfigForm | null;
+  setConfigForm: Dispatch<SetStateAction<ConfigForm | null>>;
   savingConfig: boolean;
   handleSaveConfig: (e: FormEvent) => void;
 }
@@ -190,7 +197,7 @@ export function ServiceConfigSection({
                 + Add Header
               </button>
             </div>
-            {configForm.default_headers.map((header: any, idx: number) => (
+            {configForm.default_headers.map((header, idx: number) => (
               <div key={idx} className="flex gap-2 items-center">
                 <input
                   type="text"

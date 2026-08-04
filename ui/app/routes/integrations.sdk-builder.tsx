@@ -1,15 +1,15 @@
 import { useState, useEffect, type FormEvent } from "react";
-import { useNavigate, useSearchParams, useLoaderData, type MetaFunction } from "@remix-run/react";
+import { useSearchParams, useLoaderData, type MetaFunction } from "@remix-run/react";
 import { redirect } from "@remix-run/react";
 
 export const meta: MetaFunction = ({ matches }) => {
-  const parentMeta = matches.filter((m: any) => m.id === "root").flatMap((m: any) => m.meta ?? []);
+  const parentMeta = matches.filter((m) => m.id === "root").flatMap((m) => m.meta ?? []);
   return [
-    ...parentMeta.filter((m: any) => !('title' in m)),
-    { title: "SDK Builder - Fused" },
+    ...parentMeta.filter((m) => !('title' in m)),
+    { title: "Create app - Fused" },
   ];
 };
-import { api, type Service, type IntegrationObject, BASE } from "~/lib/api";
+import { api, type Service, type IntegrationObject, type WebhookObject, type ServiceVersion, BASE } from "~/lib/api";
 import {
   listArtifactBuildSelectors,
   listArtifactOwningTeams,
@@ -19,12 +19,12 @@ import type { ArtifactBuildSelector, ArtifactOwningTeam } from "~/lib/artifact-b
 import { getApiKey } from "~/lib/session";
 import { useToast } from "~/components/Toast";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { Download, CheckSquare, Square, ChevronDown, ChevronRight, Search, Code, Server, AlertTriangle, Loader2, X, ChevronLeft, Copy, Check } from "lucide-react";
+import { CheckSquare, Square, ChevronDown, ChevronRight, Search, Loader2, X, ChevronLeft } from "lucide-react";
 import EndpointSelectionList from "~/components/EndpointSelectionList";
 import WebhookSelectionList from "~/components/WebhookSelectionList";
-import { ArtifactOwnerControls } from "~/components/access/ArtifactOwnerControls";
+import { ConsumerGenerationPanel } from "~/components/consumer/ConsumerGenerationPanel";
 
-export const clientLoader = async ({ request }: any) => {
+export const clientLoader = async ({ request }: { request: Request }) => {
   const token = getApiKey();
   const url = new URL(request.url);
   if (!token) {
@@ -33,14 +33,19 @@ export const clientLoader = async ({ request }: any) => {
 
   // Team-aware selectors are Engine-owned and depend on the user's chosen
   // owner. Do not broad-load Registry services before that choice exists.
-  return { services: [], total: 0, isAuth: true };
+  return { services: [] as Service[], total: 0, isAuth: true };
 };
+
+// The service-versions query below fetches header_value (the value clients
+// send in the version-pinning header), which the shared ServiceVersion type
+// doesn't declare since most callers don't need it.
+type SdkServiceVersion = ServiceVersion & { header_value?: string };
 
 type ServiceData = {
   service: Service;
   integrations: IntegrationObject[];
-  webhooks: any[];
-  serviceVersions: any[];
+  webhooks: WebhookObject[];
+  serviceVersions: SdkServiceVersion[];
 };
 
 type ArtifactSelection = {
@@ -131,8 +136,8 @@ function AddSelectedServiceToWorkspaceButton({
     try {
       await api.workspace.addService(serviceId, serviceName, versionTag!, serviceVersionId!);
       onAdded(serviceId);
-    } catch (e: any) {
-      setError(e?.message ?? "Failed to add service");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to add service");
     } finally {
       setAdding(false);
     }
@@ -157,7 +162,6 @@ export default function SdkBuilder() {
   const toast = useToast();
   const loaderData = useLoaderData<typeof clientLoader>();
   const [searchParams, setSearchParams] = useSearchParams();
-  const navigate = useNavigate();
   const isAuth = loaderData.isAuth;
   const selectedServiceParam = searchParams.get("serviceId") || searchParams.get("service") || searchParams.get("slug");
   const initialSelectedServiceId = selectedServiceParam && loaderData.services.length === 1
@@ -172,7 +176,6 @@ export default function SdkBuilder() {
   const [expanded, setExpanded] = useState<Record<string, boolean>>(() =>
     initialSelectedServiceId ? { [initialSelectedServiceId]: true } : {}
   );
-  const [expandedResources, setExpandedResources] = useState<Record<string, boolean>>({});
   const [resourceOffsets, setResourceOffsets] = useState<Record<string, number>>({});
   const [hasMoreResources, setHasMoreResources] = useState<Record<string, boolean>>({});
   const [loadingResource, setLoadingResource] = useState<Record<string, boolean>>({});
@@ -205,6 +208,7 @@ export default function SdkBuilder() {
   // workspace. Used only to decide which services get their pin synced
   // after a successful generate -- see syncWorkspacePinsAfterGenerate.
   const [workspaceServiceIds, setWorkspaceServiceIds] = useState<Set<string>>(new Set());
+  const [workspaceServicesLoaded, setWorkspaceServicesLoaded] = useState(false);
 
   const [sdkName, setSdkName] = useState("");
   const [artifactVersion, setArtifactVersion] = useState("1.0.0");
@@ -215,6 +219,8 @@ export default function SdkBuilder() {
   const [webhookAttachment, setWebhookAttachment] = useState("");
   const [generating, setGenerating] = useState(false);
   const [generateStatus, setGenerateStatus] = useState("");
+  const [sdkDeployment, setSdkDeployment] = useState<{ id: string; name: string; version: string; token: string } | null>(null);
+  const [sdkTokenCopied, setSdkTokenCopied] = useState(false);
   const [mcpDeployment, setMcpDeployment] = useState<{ id: string; url: string; token: string } | null>(null);
   const [mcpTokenCopied, setMcpTokenCopied] = useState(false);
   const [isDuplicate, setIsDuplicate] = useState(false);
@@ -223,13 +229,17 @@ export default function SdkBuilder() {
   const [lockedSelections, setLockedSelections] = useState<Record<string, Set<string>>>({});
   const [lockedWebhookSelections, setLockedWebhookSelections] = useState<Record<string, Set<string>>>({});
 
-  const [generationMode, setGenerationMode] = useState<"sdk" | "mcp">(() => {
+  const [generationMode] = useState<"sdk" | "mcp">(() => {
     const tab = searchParams.get("tab");
     return tab === "mcp" ? "mcp" : "sdk";
   });
   const [language, setLanguage] = useState<"typescript" | "python">("typescript");
 
   const targetType = generationMode === "mcp" ? "mcp" : "sdk";
+
+  useEffect(() => {
+    document.title = generationMode === "mcp" ? "Create MCP server - Fused" : "Create app - Fused";
+  }, [generationMode]);
 
   const [searching, setSearching] = useState(false);
   const pageParam = searchParams.get("page");
@@ -273,8 +283,20 @@ export default function SdkBuilder() {
         }
       `;
       try {
-        const sdkRes = await api.graphql<{ sdks: { items: any[] } }>(sdkQuery);
-        const targetSdk = sdkRes.sdks.items.find((s: any) => s.id === upgradeFrom);
+        type SdkSelection = {
+          service_id?: string;
+          endpoint_ids?: string[];
+          webhook_ids?: string[];
+          service_version_id?: string;
+        };
+        type SdkUpgradeTarget = {
+          id: string;
+          name?: string;
+          version?: string;
+          detailed_selections?: SdkSelection[];
+        };
+        const sdkRes = await api.graphql<{ sdks: { items: SdkUpgradeTarget[] } }>(sdkQuery);
+        const targetSdk = sdkRes.sdks.items.find((s) => s.id === upgradeFrom);
         if (targetSdk) {
           setSdkName(targetSdk.name || "");
           if (targetSdk.version) {
@@ -294,7 +316,7 @@ export default function SdkBuilder() {
           const lv: Record<string, string> = {};
           
           const selectionsList = targetSdk.detailed_selections || [];
-          selectionsList.forEach((sel: any) => {
+          selectionsList.forEach((sel) => {
             const srvId = sel.service_id;
             if (!srvId) return;
             ls[srvId] = new Set(sel.endpoint_ids || []);
@@ -327,19 +349,26 @@ export default function SdkBuilder() {
         } else {
           toast.error("Could not find previous SDK configuration.");
         }
-      } catch (e: any) {
+      } catch (e) {
         console.error("Failed to load upgrade SDK", e);
-        toast.error("Failed to load SDK configuration: " + (e.message || "Unknown error"));
+        toast.error("Failed to load SDK configuration: " + (e instanceof Error ? e.message : "Unknown error"));
       }
     }
     loadUpgrade();
   }, [upgradeFrom, targetType]);
 
-  const processResponse = (servicesData: any[], total: number) => {
+  type RawServiceWithExtras = Omit<Service, "resources"> & {
+    resources?: (NonNullable<Service["resources"]>[number] & {
+      integrations?: Omit<IntegrationObject, "resource" | "resource_id">[];
+    })[];
+    serviceVersions?: SdkServiceVersion[];
+  };
+
+  const processResponse = (servicesData: RawServiceWithExtras[], total: number) => {
     const validResults: ServiceData[] = servicesData.map(s => {
-      const integrations: any[] = [];
+      const integrations: IntegrationObject[] = [];
       if (s.resources) {
-        s.resources.forEach((res: any) => {
+        s.resources.forEach(res => {
           if (res.integrations) {
             if (res.integrations.length === 50) {
               setHasMoreResources(prev => ({ ...prev, [res.id]: true }));
@@ -347,7 +376,7 @@ export default function SdkBuilder() {
             } else {
               setHasMoreResources(prev => ({ ...prev, [res.id]: false }));
             }
-            res.integrations.forEach((intg: any) => {
+            res.integrations.forEach(intg => {
               integrations.push({ ...intg, resource: res.name, resource_id: res.id });
             });
           }
@@ -386,8 +415,8 @@ export default function SdkBuilder() {
       const total = selectors.total;
       processResponse(servicesData, total);
       setTotalPages(Math.ceil(total / limit) || 1);
-    } catch (err: any) {
-      setError(err.message || "Failed to load services");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load services");
     } finally {
       setLoading(false);
     }
@@ -407,8 +436,8 @@ export default function SdkBuilder() {
     setError("");
     try {
       await loadData(1, q.trim());
-    } catch (err: any) {
-      setError(err.message || "Failed to search services");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to search services");
     } finally {
       setSearching(false);
     }
@@ -481,7 +510,8 @@ export default function SdkBuilder() {
     if (!isAuth) return;
     api.workspace.getServices()
       .then(services => setWorkspaceServiceIds(new Set(services.map(s => s.service_id))))
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setWorkspaceServicesLoaded(true));
   }, [isAuth]);
 
   // After a successful generate, keep the workspace's pinned version in
@@ -501,7 +531,7 @@ export default function SdkBuilder() {
       const svcData = data.find(d => d.service.id === sel.service_id);
       if (!svcData) return;
       const selectedVersion = sel.service_version_id
-        ? svcData.serviceVersions.find((v: any) => v.id === sel.service_version_id)
+        ? svcData.serviceVersions.find((v) => v.id === sel.service_version_id)
         : undefined;
       // Generated SDK scopes are exact-version only; if a service_version_id
       // is absent, keep the existing workspace pin untouched.
@@ -560,8 +590,8 @@ export default function SdkBuilder() {
       
       setResourceOffsets(prev => ({ ...prev, [resourceId]: currentOffset + 50 }));
       setHasMoreResources(prev => ({ ...prev, [resourceId]: response.resourceIntegrations.length === 50 }));
-    } catch (err: any) {
-      toast.error("Failed to load more endpoints: " + err.message);
+    } catch (err) {
+      toast.error("Failed to load more endpoints: " + (err instanceof Error ? err.message : String(err)));
     } finally {
       setLoadingResource(prev => ({ ...prev, [resourceId]: false }));
     }
@@ -574,7 +604,7 @@ export default function SdkBuilder() {
     setLoadingService(prev => ({ ...prev, [serviceId]: true }));
     try {
       // Only fetch webhooks and service versions on expand — endpoints load lazily per resource
-      const webhookRes = await api.graphql<{ service: { webhooks: any[] }, serviceVersions: any[] }>(`
+      const webhookRes = await api.graphql<{ service: { webhooks: WebhookObject[] }, serviceVersions: SdkServiceVersion[] }>(`
         query($id: String!) {
           service(id: $id) { webhooks { id name description method } }
           serviceVersions(serviceId: $id) { id name header_value status }
@@ -593,8 +623,8 @@ export default function SdkBuilder() {
       }
       
       setLoadedServices(prev => ({ ...prev, [serviceId]: true }));
-    } catch (err: any) {
-      toast.error("Failed to load service data: " + err.message);
+    } catch (err) {
+      toast.error("Failed to load service data: " + (err instanceof Error ? err.message : String(err)));
     } finally {
       setLoadingService(prev => ({ ...prev, [serviceId]: false }));
     }
@@ -625,8 +655,8 @@ export default function SdkBuilder() {
         setHasMoreResources(prev => ({ ...prev, [resourceId]: true }));
         setResourceOffsets(prev => ({ ...prev, [resourceId]: 50 }));
       }
-    } catch (err: any) {
-      toast.error("Failed to load endpoints for " + resourceName + ": " + err.message);
+    } catch (err) {
+      toast.error("Failed to load endpoints for " + resourceName + ": " + (err instanceof Error ? err.message : String(err)));
     } finally {
       setLoadingResourceByName(prev => ({ ...prev, [resourceName]: false }));
     }
@@ -683,24 +713,24 @@ export default function SdkBuilder() {
     }
   };
 
-  const toggleSelectAllWebhooks = (serviceId: string, webhooks: any[]) => {
+  const toggleSelectAllWebhooks = (serviceId: string, webhooks: WebhookObject[]) => {
     if (webhooks.length === 0) return;
     const allSelected = (webhookSelections[serviceId]?.size || 0) === webhooks.length;
     if (allSelected) {
       setWebhookSelections(prev => ({ ...prev, [serviceId]: new Set(lockedWebhookSelections[serviceId] || []) }));
     } else {
-      setWebhookSelections(prev => ({ ...prev, [serviceId]: new Set(webhooks.map((w: any) => w.id)) }));
+      setWebhookSelections(prev => ({ ...prev, [serviceId]: new Set(webhooks.map((w) => w.id)) }));
     }
   };
 
-  const totalSelected = data.reduce((acc, { service, integrations, webhooks }) => {
+  const totalSelected = data.reduce((acc, { service, integrations }) => {
     const endpointCount = selectAllServices.has(service.id)
       ? (service.endpoint_count || integrations.length || 0)
       : (selections[service.id]?.size || 0);
     return acc + endpointCount + (webhookSelections[service.id]?.size || 0);
   }, 0);
   const totalSelectedWebhooks = Object.values(webhookSelections).reduce((total, selected) => total + selected.size, 0);
-  const totalSelectedServices = data.filter(({ service, webhooks }) =>
+  const totalSelectedServices = data.filter(({ service }) =>
     selectAllServices.has(service.id) ||
     (selections[service.id]?.size || 0) > 0 ||
     (webhookSelections[service.id]?.size || 0) > 0
@@ -751,7 +781,7 @@ export default function SdkBuilder() {
       } else {
         setIsDuplicate(false);
       }
-    } catch (e) {
+    } catch {
       setIsDuplicate(false);
     } finally {
       setCheckingDuplicate(false);
@@ -817,13 +847,13 @@ export default function SdkBuilder() {
     }
 
     if (!sdkName.trim()) {
-      toast.warning(`${generationMode === "mcp" ? "MCP server" : "SDK"} name is required.`);
+      toast.warning(`${generationMode === "mcp" ? "MCP server" : "App"} name is required.`);
       return;
     }
 
     const selectedBucket = availableBuckets.find((bucket) => bucket.resource_id === bucketId);
     if (!selectedBucket) {
-      toast.warning(ownerTeamId ? "Choose a bucket available to both you and the owning team." : "Choose a bucket you can use.");
+      toast.warning(ownerTeamId ? "Choose a credential set available to both you and the owning team." : "Choose a credential set you can use.");
       return;
     }
     const hasWebhookSelections = selectionPayload.some((selection) => selection.webhook_ids.length > 0);
@@ -841,6 +871,10 @@ export default function SdkBuilder() {
 
     setGenerating(true);
     setGenerateStatus("Starting generation...");
+    setSdkDeployment(null);
+    setMcpDeployment(null);
+    setSdkTokenCopied(false);
+    setMcpTokenCopied(false);
     try {
       const ownerTeamSlug = ownerTeams.find((team) => team.id === ownerTeamId)?.slug || "";
       const services = artifactServicesConfig(selectionPayload, data);
@@ -865,11 +899,15 @@ export default function SdkBuilder() {
       }
 
       setGenerateStatus("Planning and generating SDK...");
-      const res = await planAndApplyArtifact<{ job_id: string }>("sdk", ownerTeamSlug, config);
+      const res = await planAndApplyArtifact<{ artifact_id: string; job_id: string; execution_token?: string }>("sdk", ownerTeamSlug, config);
 
       const ctrl = new AbortController();
+      type GenerationStreamEvent =
+        | { type: "thinking"; message?: string }
+        | { type: "complete"; integration_id: string }
+        | { type: "error"; message?: string };
       const processGenerationStreamEvent = (
-        event: any,
+        event: GenerationStreamEvent,
         resolve: () => void,
         reject: (reason?: unknown) => void,
       ) => {
@@ -882,8 +920,14 @@ export default function SdkBuilder() {
           ctrl.abort();
           setGenerateStatus("Downloading...");
           api.sdks.download(event.integration_id, sdkName, artifactVersion).then(() => {
+            setSdkDeployment({
+              id: res.artifact_id,
+              name: sdkName.trim(),
+              version: artifactVersion.trim(),
+              token: res.execution_token || "",
+            });
+            setGenerateStatus("App ready");
             resolve();
-            navigate('/integrations/sdks');
           }).catch(reject);
           return;
         }
@@ -904,7 +948,7 @@ export default function SdkBuilder() {
             try {
               const event = JSON.parse(ev.data);
               processGenerationStreamEvent(event, resolve, reject);
-            } catch (e) {
+            } catch {
               console.error("Failed to parse SSE event", ev.data);
             }
           },
@@ -928,8 +972,8 @@ export default function SdkBuilder() {
       // workspace pins for it, regardless of which success branch got hit.
       await syncWorkspacePinsAfterGenerate(selectionPayload);
 
-    } catch (err: any) {
-      toast.error(`${generationMode === "mcp" ? "Failed to deploy MCP server" : "Failed to generate SDK"}: ${err.message || "Unknown error"}`, 0);
+    } catch (err) {
+      toast.error(`${generationMode === "mcp" ? "Failed to deploy MCP server" : "Failed to generate SDK"}: ${err instanceof Error ? err.message : "Unknown error"}`, 0);
     } finally {
       setGenerating(false);
       setGenerateStatus("");
@@ -943,8 +987,8 @@ export default function SdkBuilder() {
     <div className="max-w-6xl mx-auto py-8 px-4 h-full flex flex-col">
       <div className="flex items-center justify-between mb-8">
         <div>
-          <h1 className="text-3xl font-bold text-slate-900 tracking-tight mb-1">SDK Builder</h1>
-          <p className="text-slate-500">Select API endpoints to generate a unified, strictly-typed SDK.</p>
+          <h1 className="text-3xl font-bold text-slate-900 tracking-tight mb-1">{generationMode === "mcp" ? "Create MCP server" : "Create app"}</h1>
+          <p className="text-slate-500">{generationMode === "mcp" ? "Choose the services and operations to make available through MCP." : "Choose the services and operations this app can use."}</p>
         </div>
       </div>
 
@@ -1006,10 +1050,22 @@ export default function SdkBuilder() {
               {filteredData.length === 0 ? (
                 <div className="text-center py-12 text-slate-400 bg-white rounded-xl border border-dashed border-slate-200">
                   <p className="font-medium text-slate-600">
-                    {query ? "No available services match your search." : ownerTeamId ? "No shared services are available." : "No services are available with your access."}
+                    {query
+                      ? "No services in your workspace match your search."
+                      : workspaceServicesLoaded && workspaceServiceIds.size === 0
+                        ? "No services added yet."
+                        : ownerTeamId
+                          ? "No shared services are available."
+                          : "No services are available with your access."}
                   </p>
                   <p className="mt-1 text-sm">
-                    {ownerTeamId ? "Ask an access administrator to give both you and the team access." : "Ask a workspace administrator for access to the services and buckets you need."}
+                    {query
+                      ? "Try another service name or activate one from the service catalog."
+                      : workspaceServicesLoaded && workspaceServiceIds.size === 0
+                        ? "Define and activate a service before creating an app or MCP server."
+                        : ownerTeamId
+                          ? "Ask an access administrator to give both you and the team access."
+                          : "Ask a workspace administrator for access to the services and credential sets you need."}
                   </p>
                 </div>
               ) : (
@@ -1023,20 +1079,20 @@ export default function SdkBuilder() {
                   const serviceWebhookCount = service.webhook_count || webhooks.length || 0;
                   const totalSelectedItems = (isSelectAll ? serviceEndpointCount : (selectedSet?.size || 0)) + selectedWebhookSet.size;
                   return (
-                    <div key={service.id} className="bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow">
+                    <div key={service.id} className="min-w-0 overflow-hidden bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow">
                       <div 
                         className={`flex items-center justify-between p-4 cursor-pointer hover:bg-slate-50 transition-colors ${isExpanded ? 'rounded-t-xl' : 'rounded-xl'}`}
                         onClick={() => toggleExpand(service.id)}
                       >
-                        <div className="flex items-center gap-3">
-                          <button className="text-slate-400 hover:text-slate-600 transition-colors">
+                        <div className="flex min-w-0 items-center gap-3">
+                          <button className="shrink-0 text-slate-400 hover:text-slate-600 transition-colors">
                             {isExpanded ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
                           </button>
-                          <div>
+                          <div className="min-w-0">
                             <h3 className="font-semibold text-slate-900 flex items-center gap-2">
-                              <span>{capitalizeFirstLetter(service.name)}</span>
+                              <span className="truncate">{capitalizeFirstLetter(service.name)}</span>
                             </h3>
-                            <p className="text-xs text-slate-400">
+                            <p className="truncate text-xs text-slate-400">
                               {service.canonical_ref || (service.provider ? `@${service.provider.handle}/${service.slug}` : "")}
                               {(service.canonical_ref || service.provider) && " · "}
                               {isLoaded && totalSelectedItems > 0 ? `${totalSelectedItems} selected` : "Expand to view endpoints and webhooks"}
@@ -1046,7 +1102,7 @@ export default function SdkBuilder() {
                       </div>
                       
                       {isExpanded && (
-                        <div className="border-t border-slate-100 bg-slate-50/50 max-h-[500px] overflow-y-auto">
+                        <div className="min-w-0 overflow-x-hidden border-t border-slate-100 bg-slate-50/50 max-h-[500px] overflow-y-auto">
                           {loadingService[service.id] ? (
                             <div className="flex items-center justify-center gap-2 py-6 text-slate-400">
                               <Loader2 className="w-4 h-4 animate-spin" />
@@ -1056,20 +1112,23 @@ export default function SdkBuilder() {
                             const sections = expandedSections[service.id] ?? { endpoints: true, webhooks: true };
                             const hasWebhooks = (service.webhook_count || webhooks.length) > 0;
                             const versions = serviceVersions || [];
+                            const selectedVersionId = versionSelections[service.id] || versions[0]?.id || "";
+                            const selectedVersion = versions.find((version) => version.id === selectedVersionId) || versions[0];
                             return (
                               <div>
                                 {versions.length > 0 && (
-                                  <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
-                                    <div className="flex flex-col">
+                                  <div className="flex min-w-0 flex-col gap-3 border-b border-slate-100 bg-slate-50 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+                                    <div className="flex min-w-0 flex-col">
                                       <span className="text-sm font-semibold text-slate-800">Service Version</span>
-                                      <span className="text-xs text-slate-500">Select the service version to bind the SDK to</span>
+                                      <span className="text-xs text-slate-500">Select the version this {generationMode === "mcp" ? "MCP server" : "app"} will use</span>
                                     </div>
                                     <select
-                                      value={versionSelections[service.id] || versions[0]?.id || ""}
+                                      value={selectedVersionId}
                                       onChange={(e) => setVersionSelections(prev => ({ ...prev, [service.id]: e.target.value }))}
-                                      className="text-sm border border-slate-300 rounded-lg py-1.5 px-3 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white shadow-sm"
+                                      title={selectedVersion?.header_value || selectedVersion?.name || ""}
+                                      className="block w-full min-w-0 truncate rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm shadow-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500 sm:w-[min(55%,22rem)]"
                                     >
-                                      {versions.map((v: any) => (
+                                      {versions.map((v) => (
                                         <option key={v.id} value={v.id}>{v.header_value || v.name}</option>
                                       ))}
                                     </select>
@@ -1120,7 +1179,7 @@ export default function SdkBuilder() {
                                       maxHeightClass=""
                                       hasMoreResources={hasMoreResources}
                                       onLoadMoreResource={(resourceName) => loadMoreResource(service.id, resourceName)}
-                                      resourceMetadata={(service as any).resources || []}
+                                      resourceMetadata={service.resources || []}
                                       loadingResources={loadingResourceByName}
                                       onResourceExpand={(resourceId, resourceName) => loadResourceEndpoints(service.id, resourceId, resourceName)}
                                     />
@@ -1234,250 +1293,44 @@ export default function SdkBuilder() {
           </div>
 
           {/* Right Column: Generation Form */}
-          <div className="w-full lg:w-80 flex-shrink-0">
-            <div className="bg-white rounded-2xl border border-slate-200 shadow-xl shadow-slate-200/50 overflow-hidden sticky top-8">
-              <div className="bg-gradient-to-br from-slate-900 to-slate-800 p-6 text-white">
-                <h2 className="text-xl font-bold mb-2">{generationMode === "mcp" ? "MCP Configuration" : "SDK Configuration"}</h2>
-                <p className="text-sm text-slate-300 opacity-90">
-                  {generationMode === "mcp" ? "Configure the Engine-hosted tool surface." : "Customize your generated package."}
-                </p>
-              </div>
-              
-              <form 
-                onSubmit={handleGenerate} 
-                className="p-6 space-y-5"
-                toolname="generate_sdk"
-                tooldescription="Generate a native SDK or MCP server based on the selected endpoints. Requires name and version."
-              >
-                <ArtifactOwnerControls ownerTeams={ownerTeams} ownerTeamId={ownerTeamId} buckets={availableBuckets} bucketId={bucketId} onOwnerTeamChange={setOwnerTeamId} onBucketChange={setBucketId} />
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">{generationMode === "mcp" ? "Server Name" : "Package Name"}</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder={generationMode === "mcp" ? "customer-support" : "@myorg/custom-sdk"}
-                    value={sdkName}
-                    onChange={e => {
-                      setSdkName(e.target.value);
-                      setIsDuplicate(false);
-                    }}
-                    onBlur={generationMode === "sdk" ? checkDuplicateSDK : undefined}
-                    className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all bg-slate-50 focus:bg-white"
-                  />
-                </div>
-                
-                {totalSelectedWebhooks > 0 && <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Webhook bundle</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="customer-events"
-                    value={webhookAttachment}
-                    onChange={(event) => setWebhookAttachment(event.target.value)}
-                    className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm bg-white"
-                  />
-                  <p className="mt-1.5 text-xs text-slate-500">Name of the team-owned webhook configuration that supplies these events.</p>
-                </div>}
-                
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5 flex justify-between">
-                    <span>Version</span>
-                    {generationMode === "sdk" && checkingDuplicate && <span className="text-xs text-slate-400">Checking...</span>}
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="1.0.0"
-                    value={artifactVersion}
-                    onChange={e => {
-                      setArtifactVersion(e.target.value);
-                      setIsDuplicate(false);
-                    }}
-                    onBlur={generationMode === "sdk" ? checkDuplicateSDK : undefined}
-                    className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all bg-slate-50 focus:bg-white"
-                  />
-                  {generationMode === "sdk" && isDuplicate && (
-                    <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded-lg flex items-start gap-2 animate-in fade-in slide-in-from-top-1">
-                      <div className="text-yellow-600 mt-0.5">
-                        <AlertTriangle className="w-4 h-4" />
-                      </div>
-                      <p className="text-xs text-yellow-800 leading-tight">
-                        An SDK with this name and version already exists. Generating it again will overwrite the existing package file.
-                      </p>
-                    </div>
-                  )}
-                </div>
-
-                <div className="pt-2">
-                  <label className="block text-sm font-medium text-slate-700 mb-2">Generation Mode</label>
-                  <div className="grid grid-cols-2 gap-3">
-                    <button
-                      data-track="select_generation_mode_sdk"
-                      type="button"
-                      onClick={() => setGenerationMode("sdk")}
-                      className={`flex flex-col items-center justify-center p-3 rounded-xl border-2 transition-all ${
-                        generationMode === "sdk"
-                          ? "border-blue-500 bg-blue-50/50 text-blue-700"
-                          : "border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:bg-slate-50"
-                      }`}
-                    >
-                      <Code className={`w-5 h-5 mb-1 ${generationMode === "sdk" ? "text-blue-500" : "text-slate-400"}`} />
-                      <span className="text-sm font-semibold">Native SDK</span>
-                    </button>
-                    <button
-                      data-track="select_generation_mode_mcp"
-                      type="button"
-                      onClick={() => setGenerationMode("mcp")}
-                      className={`flex flex-col items-center justify-center p-3 rounded-xl border-2 transition-all ${
-                        generationMode === "mcp"
-                          ? "border-indigo-500 bg-indigo-50/50 text-indigo-700"
-                          : "border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:bg-slate-50"
-                      }`}
-                    >
-                      <Server className={`w-5 h-5 mb-1 ${generationMode === "mcp" ? "text-indigo-500" : "text-slate-400"}`} />
-                      <span className="text-sm font-semibold">MCP Server</span>
-                    </button>
-                  </div>
-                </div>
-
-                <div className="pt-2">
-                  {generationMode === "sdk" && <><label className="block text-sm font-medium text-slate-700 mb-2">Language</label>
-                  <div className="grid grid-cols-2 gap-3">
-                    <button
-                      data-track="select_language_typescript"
-                      type="button"
-                      onClick={() => setLanguage("typescript")}
-                      className={`flex items-center justify-center py-2 px-3 rounded-lg border transition-all ${
-                        language === "typescript"
-                          ? "border-blue-500 bg-blue-50 text-blue-700"
-                          : "border-slate-200 bg-white text-slate-500 hover:border-slate-300"
-                      }`}
-                    >
-                      <span className="text-sm font-medium">TypeScript</span>
-                    </button>
-                    <button
-                      data-track="select_language_python"
-                      type="button"
-                      onClick={() => setLanguage("python")}
-                      className={`flex items-center justify-center py-2 px-3 rounded-lg border transition-all ${
-                        language === "python"
-                          ? "border-blue-500 bg-blue-50 text-blue-700"
-                          : "border-slate-200 bg-white text-slate-500 hover:border-slate-300"
-                      }`}
-                    >
-                      <span className="text-sm font-medium">Python</span>
-                    </button>
-                  </div>
-                  </>}
-                </div>
-
-                <div className="pt-4 border-t border-slate-100">
-                  <div className="flex items-center justify-between mb-6">
-                    <span className="text-sm text-slate-500 font-medium">Selected Endpoints</span>
-                    <div className="flex items-center gap-3">
-                      {totalSelectedServices > 10 && (
-                        <span className="text-xs font-semibold text-rose-600 bg-rose-50 px-2.5 py-1 rounded-full border border-rose-200">
-                          Max 10 services allowed ({totalSelectedServices} selected)
-                        </span>
-                      )}
-                      <span className="inline-flex items-center justify-center px-2.5 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-700">
-                        {totalSelected}
-                      </span>
-                    </div>
-                  </div>
-
-                  {unactivatedSelectedServiceIds.length > 0 && (
-                    <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-xl animate-in fade-in slide-in-from-top-1">
-                      <p className="text-xs text-amber-800 leading-snug mb-2.5">
-                        {unactivatedSelectedServiceIds.length === 1
-                          ? "This service isn't in your workspace yet. Add it to generate an SDK for it:"
-                          : "These services aren't in your workspace yet. Add them to generate an SDK:"}
-                      </p>
-                      <div className="flex flex-wrap gap-2">
-                        {unactivatedSelectedServiceIds.map(serviceId => {
-                          const svcData = data.find(d => d.service.id === serviceId);
-                          const serviceName = svcData?.service.name || serviceId;
-                          const selectedVersionId = versionSelections[serviceId] || svcData?.serviceVersions?.[0]?.id || "";
-                          const selectedVersion = svcData?.serviceVersions?.find((v: any) => v.id === selectedVersionId);
-                          return (
-                            <AddSelectedServiceToWorkspaceButton
-                              key={serviceId}
-                              serviceId={serviceId}
-                              serviceName={serviceName}
-                              serviceVersionId={selectedVersionId}
-                              versionTag={selectedVersion?.name || ""}
-                              onAdded={handleServiceAddedToWorkspace}
-                            />
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-
-                  <button
-                    data-track="generate_sdk_or_mcp"
-                    type="submit"
-                    disabled={generating || totalSelected === 0 || !sdkName.trim() || !bucketId || totalSelectedServices > 10 || unactivatedSelectedServiceIds.length > 0}
-                    className={`w-full py-3 px-4 ${generationMode === 'mcp' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-blue-600 hover:bg-blue-700'} disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl shadow-sm hover:shadow transition-all flex items-center justify-center gap-2 active:scale-[0.98]`}
-                  >
-                    {generating ? (
-                      <>
-                        <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                        {generationMode === "mcp" ? "Deploying..." : "Generating..."}
-                      </>
-                    ) : generationMode === 'sdk' ? (
-                      <>
-                        <Download className="w-5 h-5" />
-                        Generate & Download SDK
-                      </>
-                    ) : (
-                      <>
-                        <Server className="w-5 h-5" />
-                        Deploy MCP Server
-                      </>
-                    )}
-                  </button>
-
-                  {generating && generateStatus && (
-                    <div className="mt-4 flex items-center justify-center gap-2.5 text-sm text-slate-500 animate-in fade-in slide-in-from-top-2 duration-300">
-                      <div className="flex gap-1 items-center shrink-0">
-                        <div className="w-1.5 h-1.5 bg-blue-500/80 rounded-full animate-bounce [animation-delay:-0.3s]" />
-                        <div className="w-1.5 h-1.5 bg-blue-500/80 rounded-full animate-bounce [animation-delay:-0.15s]" />
-                        <div className="w-1.5 h-1.5 bg-blue-500/80 rounded-full animate-bounce" />
-                      </div>
-                      <span className="text-center leading-snug">{generateStatus}</span>
-                    </div>
-                  )}
-
-                  {mcpDeployment && (
-                    <div className="mt-4 border-t border-slate-200 pt-4 text-sm text-slate-700">
-                      <div className="flex items-center gap-2 font-semibold text-slate-900">
-                        <Check className="h-4 w-4 text-emerald-600" /> MCP server ready
-                      </div>
-                      <p className="mt-2 break-all font-mono text-xs">{mcpDeployment.url}</p>
-                      {mcpDeployment.token && (
-                        <div className="mt-3 flex items-center gap-2">
-                          <code className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs">{mcpDeployment.token}</code>
-                          <button
-                            type="button"
-                            title="Copy execution token"
-                            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded border border-slate-200 bg-white hover:bg-slate-50"
-                            onClick={async () => {
-                              await navigator.clipboard.writeText(mcpDeployment.token);
-                              setMcpTokenCopied(true);
-                            }}
-                          >
-                            {mcpTokenCopied ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4" />}
-                          </button>
-                        </div>
-                      )}
-                      <p className="mt-2 text-xs text-slate-500">This token is displayed only when the server is first created. Store it securely.</p>
-                    </div>
-                  )}
-                </div>
-              </form>
-            </div>
-          </div>
+          <ConsumerGenerationPanel
+            generationMode={generationMode}
+            ownerTeams={ownerTeams}
+            ownerTeamId={ownerTeamId}
+            setOwnerTeamId={setOwnerTeamId}
+            availableBuckets={availableBuckets}
+            bucketId={bucketId}
+            setBucketId={setBucketId}
+            sdkName={sdkName}
+            setSdkName={setSdkName}
+            setIsDuplicate={setIsDuplicate}
+            checkDuplicateSDK={checkDuplicateSDK}
+            totalSelectedWebhooks={totalSelectedWebhooks}
+            webhookAttachment={webhookAttachment}
+            setWebhookAttachment={setWebhookAttachment}
+            artifactVersion={artifactVersion}
+            setArtifactVersion={setArtifactVersion}
+            checkingDuplicate={checkingDuplicate}
+            isDuplicate={isDuplicate}
+            language={language}
+            setLanguage={setLanguage}
+            totalSelectedServices={totalSelectedServices}
+            totalSelected={totalSelected}
+            unactivatedSelectedServiceIds={unactivatedSelectedServiceIds}
+            data={data}
+            versionSelections={versionSelections}
+            handleServiceAddedToWorkspace={handleServiceAddedToWorkspace}
+            handleGenerate={handleGenerate}
+            generating={generating}
+            generateStatus={generateStatus}
+            sdkDeployment={sdkDeployment}
+            sdkTokenCopied={sdkTokenCopied}
+            setSdkTokenCopied={setSdkTokenCopied}
+            mcpDeployment={mcpDeployment}
+            mcpTokenCopied={mcpTokenCopied}
+            setMcpTokenCopied={setMcpTokenCopied}
+            AddSelectedServiceToWorkspaceButton={AddSelectedServiceToWorkspaceButton}
+          />
         </div>
       )}
 

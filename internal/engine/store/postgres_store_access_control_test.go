@@ -406,7 +406,8 @@ func TestPostgresAuthorizedGraphQLCollectionsFilterBeforeTotals(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO fused_buckets (id, name) VALUES ($1, 'allowed'), ($2, 'denied')`, allowedBucket, deniedBucket); err != nil {
 		t.Fatalf("insert bucket fixtures: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO fused_workspace_services (service_id, service_name) VALUES ($1, 'Allowed'), ($2, 'Denied')`, allowedService, deniedService); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO fused_workspace_services (service_id, service_slug, service_name)
+		VALUES ($1, 'allowed-service', 'Allowed'), ($2, 'denied-service', 'Denied')`, allowedService, deniedService); err != nil {
 		t.Fatalf("insert service fixtures: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO fused_workspace_service_versions (service_id, service_version_id, version)
@@ -434,6 +435,14 @@ func TestPostgresAuthorizedGraphQLCollectionsFilterBeforeTotals(t *testing.T) {
 	services, err := repository.ListAuthorizedWorkspaceServices(ctx, accesscontrol.AuthorizedScope{IDs: []uuid.UUID{allowedService}}, nil)
 	if err != nil || len(services) != 1 || services[0].ServiceID != allowedService {
 		t.Fatalf("authorized services with nil names = %#v, %v", services, err)
+	}
+	services, err = repository.ListAuthorizedWorkspaceServices(ctx, accesscontrol.AuthorizedScope{IDs: []uuid.UUID{allowedService}}, []string{"allowed-service"})
+	if err != nil || len(services) != 1 || services[0].ServiceID != allowedService {
+		t.Fatalf("authorized services by slug = %#v, %v", services, err)
+	}
+	services, err = repository.ListAuthorizedWorkspaceServices(ctx, accesscontrol.AuthorizedScope{IDs: []uuid.UUID{allowedService}}, []string{"@provider/allowed-service"})
+	if err != nil || len(services) != 1 || services[0].ServiceID != allowedService {
+		t.Fatalf("authorized services by qualified slug = %#v, %v", services, err)
 	}
 	page, serviceTotal, err := repository.ListAuthorizedWorkspaceServicesPage(ctx, accesscontrol.AuthorizedScope{IDs: []uuid.UUID{allowedService}}, nil, 10, 0)
 	if err != nil || serviceTotal != 1 || len(page) != 1 || page[0].ServiceID != allowedService {

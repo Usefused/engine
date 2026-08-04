@@ -67,7 +67,7 @@ export function BucketConnectedUsersTable({
         </div>
       ) : connections.length === 0 ? (
         <div className="px-5 py-10 text-center text-sm text-slate-400">
-          No connected users in this bucket.
+          No connected users in this credential set.
         </div>
       ) : (
         <div className="flex flex-col gap-3 p-5">
@@ -113,13 +113,13 @@ function ConnectedUserToolbar({
       <BucketServiceSelect
         id="connected-user-service-filter"
         label="Service"
-        placeholder="All linked services"
+        placeholder="All services"
         options={bucketServiceOptions(services)}
         search={serviceSearch}
         selectedServiceId={serviceFilter}
         className="max-w-xs"
         allowAll
-        allLabel="All linked services"
+        allLabel="All services"
         onSearchChange={onServiceSearchChange}
         onSelectedServiceChange={onServiceFilterChange}
       />

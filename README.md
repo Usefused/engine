@@ -30,6 +30,7 @@ Cloud license key. See [Commercial Use](COMMERCIAL-USE.md).
 - **Embedded NATS JetStream**: Instantly and reliably queues incoming webhooks and broadcasts WebSocket events without requiring an external NATS cluster or Redis instance to be deployed alongside it.
 - **Headless Mode**: A no-UI Docker variant (`ghcr.io/usefused/engine:headless`) optimized for serverless and Kubernetes deployments.
 - **Resilient**: Fully caches execution metadata locally to withstand network partitions.
+- **Local activity history**: Persists SDK, MCP, and webhook execution receipts through one durable JetStream path for auditing and troubleshooting.
 
 ## Prerequisites
 
@@ -163,6 +164,13 @@ list`.
 
 You can configure the Engine via a YAML configuration file (`engine.yaml`), environment variables, or CLI flags. CLI Flags always take the highest precedence.
 
+Canonical execution receipts are retained for 30 days by default. Configure
+`engine.execution_retention_days` to change the local history window and
+`engine.execution_cleanup_batch` to control the bounded cleanup batch. Local
+Activity queries read these receipts directly; Engine does not maintain a
+second local hourly rollup. OTEL remains an optional debugging export rather
+than the embedded Activity data store.
+
 For audit details, see [Registry contract](docs/registry-contract.md), [license key behavior](docs/license-key.md), [telemetry](docs/telemetry.md), [Docker](docs/docker.md), and [threat model](THREAT_MODEL.md).
 
 ### Essential Environment Variables
@@ -181,6 +189,11 @@ FUSED_UI_URL="https://admin.your-company.com"
 # (Optional) If you have a separate external NATS cluster, set this to override the embedded server.
 # Leave blank to boot the internal embedded NATS.
 # NATS_URL="nats://nats:4222" 
+
+# (Optional) Override where embedded NATS JetStream stores local files.
+# Default behavior prefers <engine-binary-dir>/data/nats, then falls back to
+# <current-working-dir>/data/nats if the binary directory is not writable.
+# FUSED_NATS_STORE_DIR="/var/lib/fused/nats"
 
 # OpenTelemetry configuration for distributed tracing
 OTEL_SERVICE_NAME="engine"

@@ -5,9 +5,9 @@ import { usePaginatedWorkspaceNotifications } from "~/components/notifications/u
 import { NotificationList } from "~/components/notifications/NotificationList";
 
 export const meta: MetaFunction = ({ matches }) => {
-  const parentMeta = matches.filter((m: any) => m.id === "root").flatMap((m: any) => m.meta ?? []);
+  const parentMeta = matches.filter((m) => m.id === "root").flatMap((m) => m.meta ?? []);
   return [
-    ...parentMeta.filter((m: any) => !("title" in m)),
+    ...parentMeta.filter((m) => !("title" in m)),
     { title: "Notifications - Fused" },
   ];
 };

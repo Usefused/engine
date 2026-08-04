@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -274,10 +275,18 @@ func engineExecuteCore(
 
 	engine.MeasureExecutionTiming(ctx, "engine_resolution_total", resolutionStarted)
 
-	auditState.selectedEnvironment, err = dispatchAndCache(ctx, dispatcher, match, obj, params, credentials, bucketVals, environment, stream, span, uid)
+	var runtimeResolution RuntimeEnvironmentResolution
+	runtimeResolution, auditState.providerHTTPStatus, err = dispatchAndCache(ctx, dispatcher, match, obj, params, credentials, bucketVals, environment, stream, span, uid)
+	auditState.selectedEnvironment = runtimeResolution.Environment
+	auditState.environmentSource = runtimeResolution.Source
+	auditState.providerHost = providerHost(runtimeResolution.BaseURL)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err
+	}
+	if auditState.providerHTTPStatus >= http.StatusBadRequest {
+		span.SetStatus(codes.Error, providerStatusError(auditState.providerHTTPStatus))
+		return nil
 	}
 	if timings, ok := engine.ExecutionTimingsFromContext(ctx); ok {
 		span.SetAttributes(timings.Attributes()...)
@@ -447,17 +456,17 @@ func dispatchRuntimeEnvironment(
 	environment string,
 	stream engine.ResponseStream,
 	span trace.Span,
-) (string, error) {
+) (RuntimeEnvironmentResolution, int, error) {
 	environmentStarted := time.Now()
 	srv, resolution, err := serviceForRuntimeEnvironment(match.service, environment)
 	engine.MeasureExecutionTiming(ctx, "runtime_environment", environmentStarted)
 	if err != nil {
 		recordRuntimeEnvironmentAttrs(span, match, environment, "")
-		return "", err
+		return RuntimeEnvironmentResolution{}, 0, err
 	}
 	resourceSource := selectedConnectedResourceSource(credentials)
 	if auths, selectedAuthType, err := selectedAuthConfigsForExecution(srv.AuthConfigs, credentials); err != nil {
-		return "", err
+		return RuntimeEnvironmentResolution{}, 0, err
 	} else {
 		// The dispatcher intentionally applies auths[0]. Narrowing here lets the
 		// execution context choose a scheme without weakening that simple rule.
@@ -474,10 +483,25 @@ func dispatchRuntimeEnvironment(
 	}
 	status, err := dispatcher.ExecuteStream(ctx, srv, obj, params, credentials, bucketValues, stream)
 	span.SetAttributes(attribute.Int("provider_http_status", status))
+	if statusErr := engine.SendResponseStatus(stream, status); err == nil {
+		err = statusErr
+	}
 	// Diagnostics are best-effort and never change provider response behavior;
 	// an unexpired token's 401/403 remains information, not an automation trigger.
 	recordProviderAuthFailure(ctx, status, credentials, span)
-	return resolution.Environment, err
+	return resolution, status, err
+}
+
+func providerStatusError(status int) string {
+	return fmt.Sprintf("provider returned HTTP %d", status)
+}
+
+func providerHost(baseURL string) string {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Hostname()
 }
 
 // recordProviderAuthFailure writes only stable authorization codes and trace

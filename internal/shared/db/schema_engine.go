@@ -385,22 +385,6 @@ func engineSchemaQueries() []string {
 			client_info jsonb
 		);`,
 
-		// MCP Analytics
-		`CREATE TABLE IF NOT EXISTS fused_mcp_analytics (
-			id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-			artifact_id uuid,
-			session_id text,
-			endpoint_name text,
-			service_name text,
-			latency_ms bigint,
-			failed boolean,
-			timestamp timestamp with time zone,
-			params jsonb,
-			result jsonb
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_mcp_analytics_artifact_id ON fused_mcp_analytics(artifact_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_mcp_analytics_sdk_endpoint ON fused_mcp_analytics(artifact_id, endpoint_name);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_mcp_analytics_sdk_service ON fused_mcp_analytics(artifact_id, service_name);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_mcp_sessions_sdk_started ON fused_mcp_sessions(artifact_id, started_at DESC);`,
 
 		// Engine execution receipts are compact product/audit records. OTEL owns
@@ -410,16 +394,35 @@ func engineSchemaQueries() []string {
 			id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 			trace_id text,
 			span_id text,
-			artifact_id uuid NOT NULL,
+			account_id uuid,
+			artifact_id uuid,
 			transport text NOT NULL,
+			direction text NOT NULL DEFAULT 'outbound',
 			service_id uuid,
 			service_version_id text,
+			operation_id uuid,
+			webhook_id uuid,
 			endpoint_name text NOT NULL,
+			external_id text,
+			event_name text,
+			http_method text,
+			request_path text,
 			environment text,
+			environment_source text,
+			provider_host text,
+			provider_http_status integer,
+			provider_status_class text,
 			status text NOT NULL,
 			failure_reason text,
+			failure_category text,
+			failure_code text,
 			latency_ms bigint NOT NULL,
 			provider_latency_ms bigint,
+			attempt_count integer NOT NULL DEFAULT 1,
+			request_bytes bigint NOT NULL DEFAULT 0,
+			response_bytes bigint NOT NULL DEFAULT 0,
+			verification_status text,
+			delivery_status text,
 			idempotency_key_hash text,
 			request_body_hash text,
 			timings jsonb,
@@ -432,8 +435,48 @@ func engineSchemaQueries() []string {
 		ON fused_engine_execution_events(artifact_id, started_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_service_version
 		ON fused_engine_execution_events(service_id, service_version_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_service_started
+		ON fused_engine_execution_events(service_id, started_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_started
+		ON fused_engine_execution_events(started_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_endpoint
 		ON fused_engine_execution_events(artifact_id, endpoint_name, started_at DESC);`,
+
+		// Public-service insight reporting starts from committed canonical events.
+		// The projection marker and outbox are updated in one transaction so a
+		// Registry outage never blocks execution or causes double counting.
+		`CREATE TABLE IF NOT EXISTS fused_public_service_insight_projected_events (
+			event_id uuid PRIMARY KEY REFERENCES fused_engine_execution_events(id) ON DELETE CASCADE,
+			report_id uuid NOT NULL,
+			projected_at timestamptz NOT NULL DEFAULT NOW()
+		);`,
+		`CREATE TABLE IF NOT EXISTS fused_public_service_insight_outbox (
+			report_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			service_id uuid NOT NULL,
+			service_version_id uuid NOT NULL,
+			registry_object_kind text NOT NULL,
+			registry_object_id uuid NOT NULL,
+			direction text NOT NULL,
+			transport text NOT NULL,
+			outcome text NOT NULL,
+			provider_status_class text NOT NULL,
+			bucket_start timestamptz NOT NULL,
+			bucket_seconds integer NOT NULL DEFAULT 3600,
+			call_count bigint NOT NULL,
+			total_latency_ms_sum bigint NOT NULL,
+			provider_latency_ms_sum bigint NOT NULL,
+			latency_histogram jsonb NOT NULL,
+			retry_attempts_sum bigint NOT NULL,
+			state text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'sent', 'rejected')),
+			attempt_count integer NOT NULL DEFAULT 0,
+			next_attempt_at timestamptz NOT NULL DEFAULT NOW(),
+			last_error_code text NOT NULL DEFAULT '',
+			created_at timestamptz NOT NULL DEFAULT NOW(),
+			updated_at timestamptz NOT NULL DEFAULT NOW(),
+			sent_at timestamptz
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_public_insight_outbox_pending
+		ON fused_public_service_insight_outbox(next_attempt_at, created_at) WHERE state = 'pending';`,
 
 		// Runtime entitlement is a singleton cache of the Registry handshake
 		// contract. Engine remains useful during short Registry outages, but
@@ -445,6 +488,7 @@ func engineSchemaQueries() []string {
 			plan text NOT NULL,
 			heartbeat_required boolean NOT NULL,
 			usage_reporting text NOT NULL,
+			public_service_insights_reporting boolean NOT NULL DEFAULT true,
 			heartbeat_interval_seconds integer NOT NULL CHECK (heartbeat_interval_seconds > 0),
 			heartbeat_stale_after_seconds integer NOT NULL CHECK (heartbeat_stale_after_seconds > 0),
 			refreshed_at timestamptz NOT NULL,
@@ -748,36 +792,13 @@ func engineSchemaQueries() []string {
 			request_body_hash text,
 			environment text,
 			response_body bytea,
+			response_status integer NOT NULL DEFAULT 200,
 			created_at timestamptz NOT NULL DEFAULT NOW(),
 			expires_at timestamptz NOT NULL,
 			UNIQUE(artifact_id, idempotency_key_hash)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_engine_idempotency_keys_expires
 		ON fused_engine_idempotency_keys(expires_at);`,
-
-		// Webhook Events
-		`CREATE TABLE IF NOT EXISTS fused_webhook_events (
-			id uuid PRIMARY KEY,
-			account_id uuid,
-			service_id uuid,
-			msg_id text,
-			event_type text,
-			error_reason text,
-			sdk_record_id uuid,
-			verification_status text,
-			delivery_status text,
-			environment text,
-			latency_ms integer,
-			retry_count integer,
-			credits_consumed integer,
-			payload_size integer,
-			created_at timestamp with time zone DEFAULT NOW(),
-			updated_at timestamp with time zone DEFAULT NOW()
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_webhook_events_account_id ON fused_webhook_events(account_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_webhook_events_service_id ON fused_webhook_events(service_id);`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_webhook_events_msg_id ON fused_webhook_events(msg_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_webhook_events_created_at ON fused_webhook_events(created_at);`,
 
 		// SDK Tokens
 		`CREATE TABLE IF NOT EXISTS fused_artifact_tokens (
@@ -957,15 +978,7 @@ func engineSchemaQueries() []string {
 
 func engineMigrationQueries() []string {
 	return []string{
-		// Mono-workspace: fused_buckets/fused_connect_configs/fused_auth_connections/
-		// fused_connect_sessions dropped their per-row workspace_id (the CREATE
-		// TABLE statements above no longer declare it -- there is only ever one
-		// workspace, so bucket_id/etc. already uniquely scope these rows). But
-		// CREATE TABLE IF NOT EXISTS is a no-op on a database that already ran
-		// the old schema, so any such database still carries the NOT NULL
-		// workspace_id column and, on fused_buckets, the old composite unique
-		// constraint -- causing inserts to fail (missing workspace_id) or
-		// ON CONFLICT (name) to fail (no matching constraint) without this.
+		// The engine operates in a mono-workspace environment. Remove the workspace-level scoping columns.
 		`ALTER TABLE fused_buckets DROP CONSTRAINT IF EXISTS uq_workspace_buckets;`,
 		`ALTER TABLE fused_buckets DROP COLUMN IF EXISTS workspace_id;`,
 		`ALTER TABLE fused_buckets ADD CONSTRAINT uq_workspace_buckets UNIQUE (name);`,
@@ -973,17 +986,8 @@ func engineMigrationQueries() []string {
 		`ALTER TABLE fused_auth_connections DROP COLUMN IF EXISTS workspace_id;`,
 		`ALTER TABLE fused_connect_sessions DROP COLUMN IF EXISTS workspace_id;`,
 
-		// bucket_id moved off fused_artifact_scopes onto fused_artifact_buckets (a
-		// bucket is now resolved via LEFT JOIN, see
-		// GetArtifactScope/ListArtifactScopes). The CREATE TABLE statement above no
-		// longer declares this column, but any database where
-		// fused_artifact_scopes was already created still has it as NOT NULL
-		// with no default -- SaveArtifactScope's INSERT (which correctly no
-		// longer supplies bucket_id) would fail that constraint on any such
-		// database without this drop.
+		// Artifacts map to buckets via the fused_artifact_buckets table. Remove the inline bucket_id column.
 		`ALTER TABLE fused_artifact_scopes DROP COLUMN IF EXISTS bucket_id;`,
-		// Existing development databases used a composite SDK/bucket key. The
-		// unique index closes that shape without adding runtime compatibility:
 		// every artifact has one immutable bucket assignment.
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_artifact_buckets_artifact_id ON fused_artifact_buckets(artifact_id);`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_fused_artifact_scopes_artifact_identity
@@ -992,28 +996,43 @@ func engineMigrationQueries() []string {
 		`CREATE INDEX IF NOT EXISTS idx_fused_artifact_scopes_account_kind ON fused_artifact_scopes(account_id, kind, created_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_artifact_scopes_owner_kind ON fused_artifact_scopes(owner_team_id, kind, created_at DESC, artifact_id);`,
 		`ALTER TABLE fused_workspace_services ADD COLUMN IF NOT EXISTS service_slug text;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS http_method text;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS request_path text;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS environment_source text;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS provider_host text;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS provider_http_status integer;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS account_id uuid;`,
+		`ALTER TABLE fused_engine_execution_events ALTER COLUMN artifact_id DROP NOT NULL;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS direction text NOT NULL DEFAULT 'outbound';`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS operation_id uuid;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS webhook_id uuid;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS external_id text;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS event_name text;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS provider_status_class text;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS failure_category text;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS failure_code text;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS attempt_count integer NOT NULL DEFAULT 1;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS request_bytes bigint NOT NULL DEFAULT 0;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS response_bytes bigint NOT NULL DEFAULT 0;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS verification_status text;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS delivery_status text;`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_direction_started ON fused_engine_execution_events(direction, transport, started_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_operation_started ON fused_engine_execution_events(operation_id, started_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_webhook_started ON fused_engine_execution_events(webhook_id, started_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_started ON fused_engine_execution_events(started_at);`,
+		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS public_service_insights_reporting boolean NOT NULL DEFAULT true;`,
+		`ALTER TABLE fused_engine_idempotency_keys ADD COLUMN IF NOT EXISTS response_status integer NOT NULL DEFAULT 200;`,
+		`DROP TABLE IF EXISTS fused_webhook_events;`,
+		`DROP TABLE IF EXISTS fused_mcp_analytics;`,
 
-		// These historical entries used to backfill fused_bucket_bindings
-		// (materializing fused_bucket_values rows and stripping untrusted
-		// literal base_url overrides). fused_bucket_bindings is dropped
-		// outright later in this list as part of the workspace-scoped
-		// connection-profile migration -- see
-		// plans/workspace_connection_profile_scope_plan.md -- so backfilling it
-		// here would either target a table that no longer exists on a fresh
-		// install (schema no longer creates it) or populate rows that the drop
-		// below immediately discards on an existing install. Removed rather
-		// than left as dead/broken statements.
+		// Update connection profile and auth connection constraints to their latest
+		// definitions. Unconditionally dropping and re-adding ensures idempotency.
 		`ALTER TABLE fused_workspace_connection_profiles
 			DROP CONSTRAINT IF EXISTS chk_fused_workspace_connection_profile_baseline_registry_id;`,
 		`ALTER TABLE fused_workspace_connection_profiles
 			ADD CONSTRAINT chk_fused_workspace_connection_profile_baseline_registry_id
 			CHECK (layer <> 'baseline' OR registry_profile_id IS NOT NULL);`,
-		// Same drop-then-recreate idiom as
-		// chk_fused_workspace_connection_profile_baseline_registry_id just
-		// above: unconditionally dropping (if present) and re-adding is
-		// idempotent on its own, so no DO block / pg_constraint inspection
-		// is needed to distinguish "missing", "stale definition", and
-		// "already correct" -- all three converge to the same end state.
+
 		`ALTER TABLE fused_auth_connections
 			DROP CONSTRAINT IF EXISTS chk_fused_auth_connections_refresh_state;`,
 		`ALTER TABLE fused_auth_connections
@@ -1029,22 +1048,11 @@ func engineMigrationQueries() []string {
 		`ALTER TABLE fused_workspace_secrets ADD CONSTRAINT uq_workspace_secrets UNIQUE (bucket_id, service_id, key_name);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_workspace_secrets_lookup ON fused_workspace_secrets(bucket_id, service_id);`,
 
-		// The product is not live, so connection-profile ownership moves from
-		// bucket-scoped to workspace-scoped by dropping the old tables outright
-		// rather than migrating rows -- see
-		// plans/workspace_connection_profile_scope_plan.md. Bindings are
-		// dropped first because they FK to attachments.
+		// Connection profiles are workspace-scoped. Remove the bucket-scoped binding tables.
 		`DROP TABLE IF EXISTS fused_bucket_bindings;`,
 		`DROP TABLE IF EXISTS fused_bucket_profile_attachments;`,
 
-		// fused_workspace_notifications' severity column was originally
-		// created CHECK (severity IN ('breaking')) -- Phase 3 of the service
-		// changelog system (plans/plan-service-changelog.md) adds
-		// WorkspaceNotificationSeverityNonBreaking for changelog-derived
-		// notifications that are genuinely not breaking (a new version, a
-		// deprecation warning), so any pre-existing database still carrying
-		// the old constraint would reject those inserts without this widen.
-		// Same drop-then-recreate idiom as the config_type_check pairs above.
+		// Widen the severity constraint to support non-breaking notifications.
 		`ALTER TABLE fused_workspace_notifications DROP CONSTRAINT IF EXISTS fused_workspace_notifications_severity_check;`,
 		`ALTER TABLE fused_workspace_notifications ADD CONSTRAINT fused_workspace_notifications_severity_check CHECK (severity IN ('breaking', 'non-breaking'));`,
 
@@ -1054,13 +1062,7 @@ func engineMigrationQueries() []string {
 		// transition happens, same optional/audit-only shape as created_by.
 		`ALTER TABLE fused_workspace_notifications ADD COLUMN IF NOT EXISTS resolved_by uuid;`,
 
-		// base_url was added to fused_workspace_execution_policies' CREATE
-		// TABLE statement above, but CREATE TABLE IF NOT EXISTS is a no-op on
-		// any database that already ran the old schema -- same failure mode
-		// documented at the top of this function. Those databases never got
-		// the column, so UpsertWorkspaceExecutionPolicyOverride's INSERT
-		// (which always lists base_url) fails with "column base_url does not
-		// exist", surfaced to the CLI as a generic 500 on workspace apply.
+		// Ensure the base_url override column exists for execution policies.
 		`ALTER TABLE fused_workspace_execution_policies ADD COLUMN IF NOT EXISTS base_url text;`,
 	}
 }

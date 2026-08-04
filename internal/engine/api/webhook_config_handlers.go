@@ -84,12 +84,12 @@ func WebhookConfigPlanHandler(configStore store.ConfigRepository, s store.Store,
 		actor, ok := accesscontrol.ActorFromContext(ctx)
 		if !ok {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"})
+			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, ctx)
 			return
 		}
 		req, doc, err := decodeWebhookConfigPlanRequest(r)
 		if err != nil {
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()})
+			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, ctx)
 			return
 		}
 		span.SetAttributes(attribute.String("config_key", req.ConfigKey), attribute.String("webhook.name", doc.Name))
@@ -99,7 +99,7 @@ func WebhookConfigPlanHandler(configStore store.ConfigRepository, s store.Store,
 		})
 		if err != nil {
 			span.SetStatus(codes.Error, "webhook config plan failed")
-			writeSDKConfigError(w, err)
+			writeSDKConfigError(w, err, ctx)
 			return
 		}
 		span.SetAttributes(attribute.String("outcome", "success"), attribute.String("plan_id", plan.ID.String()))
@@ -125,17 +125,17 @@ func WebhookConfigApplyHandler(configStore store.ConfigRepository, s store.Store
 		actor, ok := accesscontrol.ActorFromContext(ctx)
 		if !ok {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"})
+			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, ctx)
 			return
 		}
 		req, planID, err := decodeSDKConfigApplyRequest(r)
 		if err != nil {
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()})
+			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, ctx)
 			return
 		}
 		planRevision, ok := AuthorizedPlanRevisionFromContext(ctx)
 		if !ok {
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"})
+			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"}, ctx)
 			return
 		}
 		result, err := executeWebhookConfigApply(ctx, configStore, s, verifier, registryClient, sdkApplyCall{
@@ -144,7 +144,7 @@ func WebhookConfigApplyHandler(configStore store.ConfigRepository, s store.Store
 		})
 		if err != nil {
 			span.SetStatus(codes.Error, "webhook config apply failed")
-			writeSDKConfigError(w, err)
+			writeSDKConfigError(w, err, ctx)
 			return
 		}
 		span.SetAttributes(

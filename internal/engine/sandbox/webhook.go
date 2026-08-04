@@ -17,6 +17,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/tidwall/gjson"
 
+	"github.com/Usefused/engine/internal/engine/executionevent"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/engine/webhookid"
 	"github.com/Usefused/engine/internal/engine/webhookverify"
@@ -49,8 +50,10 @@ func SetWebhookConfigStore(s webhookConfigStore) {
 // engine_owned_webhooks_plan.md) so ingress never needs to look anything up
 // beyond the one indexed row this came from.
 type webhookConfig struct {
+	RegistrationID      uuid.UUID
 	AccountID           string
 	ServiceID           string
+	ServiceVersionID    uuid.UUID
 	EventExtractionPath string
 	AuthType            string
 	AuthLocation        string
@@ -135,7 +138,7 @@ func webhookIngressHandler(w http.ResponseWriter, r *http.Request) {
 
 	eventName := extractEventName(r, body, config)
 	if eventName == "" {
-		publishRejection(config.AccountID, config.ServiceID, "UNKNOWN", "failed to extract event name", len(body))
+		publishRejection(ctx, config, "UNKNOWN", "failed to extract event name", len(body))
 		span.SetStatus(codes.Error, "failed to extract event name")
 		writeError(w, http.StatusBadRequest, "failed to extract event name using configured extraction path")
 		return
@@ -203,8 +206,10 @@ func fetchWebhookConfig(ctx context.Context, urlSlug string) (*webhookConfig, er
 		secretBucketID = *ww.SecretBucketID
 	}
 	return &webhookConfig{
+		RegistrationID:      ww.ID,
 		AccountID:           ww.AccountID.String(),
 		ServiceID:           ww.ServiceID.String(),
+		ServiceVersionID:    ww.ServiceVersionID,
 		EventExtractionPath: ww.EventExtractionPath,
 		AuthType:            ww.AuthType,
 		AuthLocation:        ww.AuthLocation,
@@ -231,7 +236,7 @@ func validateWebhookAuth(ctx context.Context, w http.ResponseWriter, r *http.Req
 		secret, err := globalSecretResolver.GetWebhookSecret(ctx, uuid.MustParse(config.AccountID), config.SecretBucketID, config.SecretRef)
 		if err != nil {
 			span.SetStatus(codes.Error, "failed to resolve webhook secret")
-			publishRejection(config.AccountID, config.ServiceID, "UNKNOWN", "internal config error", len(body))
+			publishRejection(ctx, config, "UNKNOWN", "internal config error", len(body))
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return false
 		}
@@ -255,7 +260,7 @@ func validateWebhookAuth(ctx context.Context, w http.ResponseWriter, r *http.Req
 	}
 
 	span.SetStatus(codes.Error, result.Reason)
-	publishRejection(config.AccountID, config.ServiceID, "", result.Reason, len(body))
+	publishRejection(ctx, config, "", result.Reason, len(body))
 	writeError(w, http.StatusUnauthorized, result.Reason)
 	return false
 }
@@ -333,6 +338,8 @@ func publishWebhookEvent(w http.ResponseWriter, r *http.Request, body []byte, ur
 	natsMsg.Data = eventData
 	natsMsg.Header.Set("X-Webhook-Msg-ID", msgID)
 	natsMsg.Header.Set("X-Webhook-Start-Time", time.Now().Format(time.RFC3339Nano))
+	natsMsg.Header.Set("X-Fused-Service-Version-ID", config.ServiceVersionID.String())
+	natsMsg.Header.Set("X-Fused-Webhook-ID", config.RegistrationID.String())
 
 	// Synchronous wait for NATS JetStream ACK to ensure delivery.
 	if err := webhookPublishFunc(natsMsg); err != nil {
@@ -341,7 +348,7 @@ func publishWebhookEvent(w http.ResponseWriter, r *http.Request, body []byte, ur
 		return
 	}
 
-	publishAnalyticsIngestion(msgID, eventName, len(eventData), config)
+	publishAnalyticsIngestion(r.Context(), msgID, eventName, len(eventData), config)
 
 	if shouldObserveWebhookSchema() {
 		publishSchemaObservation(body, eventName, config)
@@ -405,44 +412,52 @@ func buildDownstreamPayload(r *http.Request, body []byte, urlSlug, eventName str
 }
 
 // publishAnalyticsIngestion records a successful webhook ingestion in analytics.
-func publishAnalyticsIngestion(msgID, eventName string, payloadSize int, config *webhookConfig) {
-	// Guard: analytics is best-effort; a nil NATS client (e.g. in unit tests)
-	// must never crash the ingress handler.
-	if globalNATSClient == nil || globalNATSClient.JS == nil {
+func publishAnalyticsIngestion(ctx context.Context, msgID, eventName string, payloadSize int, config *webhookConfig) {
+	accountID, serviceID := webhookExecutionIDs(config)
+	if accountID == uuid.Nil || serviceID == uuid.Nil {
 		return
 	}
-	analyticsPayload, _ := json.Marshal(map[string]any{
-		"msg_id":       msgID,
-		"account_id":   config.AccountID,
-		"service_id":   config.ServiceID,
-		"event_name":   eventName,
-		"status":       "ingested",
-		"payload_size": payloadSize,
-		"timestamp":    time.Now(),
+	event := executionevent.NewWebhookEvent(executionevent.WebhookEventInput{
+		MessageID: msgID, AccountID: accountID, ServiceID: serviceID,
+		ServiceVersionID: config.ServiceVersionID, RegistrationID: config.RegistrationID, EventName: eventName,
+		DeliveryStatus: "ingested", VerificationStatus: "verified", PayloadSize: int64(payloadSize), OccurredAt: time.Now(),
 	})
-	globalNATSClient.PublishJS("webhook.analytics.ingested", analyticsPayload)
+	if err := executionevent.Publish(ctx, event); err != nil {
+		slog.ErrorContext(ctx, "Failed to publish webhook execution event", slog.Any("error", err), slog.String("event_id", event.ID.String()))
+	}
 }
 
 // publishRejection records an aborted/rejected webhook in analytics.
-func publishRejection(configAccountID, configServiceID, eventName, errorReason string, payloadSize int) {
-	if globalNATSClient == nil || globalNATSClient.JS == nil || configAccountID == "" || configServiceID == "" {
+func publishRejection(ctx context.Context, config *webhookConfig, eventName, errorReason string, payloadSize int) {
+	if config == nil || config.AccountID == "" || config.ServiceID == "" {
+		return
+	}
+	accountID, serviceID := webhookExecutionIDs(config)
+	if accountID == uuid.Nil || serviceID == uuid.Nil {
 		return
 	}
 	if eventName == "" {
 		eventName = "UNKNOWN"
 	}
 	msgID := uuid.New().String()
-	analyticsPayload, _ := json.Marshal(map[string]any{
-		"msg_id":       msgID,
-		"account_id":   configAccountID,
-		"service_id":   configServiceID,
-		"event_name":   eventName,
-		"status":       "rejected",
-		"error_reason": errorReason,
-		"payload_size": payloadSize,
-		"timestamp":    time.Now(),
+	event := executionevent.NewWebhookEvent(executionevent.WebhookEventInput{
+		MessageID: msgID, AccountID: accountID, ServiceID: serviceID,
+		ServiceVersionID: config.ServiceVersionID, RegistrationID: config.RegistrationID, EventName: eventName,
+		DeliveryStatus: "rejected", VerificationStatus: "rejected", FailureReason: errorReason,
+		PayloadSize: int64(payloadSize), OccurredAt: time.Now(),
 	})
-	globalNATSClient.PublishJS("webhook.analytics.rejected", analyticsPayload)
+	if err := executionevent.Publish(ctx, event); err != nil {
+		slog.ErrorContext(ctx, "Failed to publish rejected webhook execution event", slog.Any("error", err), slog.String("event_id", event.ID.String()))
+	}
+}
+
+func webhookExecutionIDs(config *webhookConfig) (uuid.UUID, uuid.UUID) {
+	if config == nil {
+		return uuid.Nil, uuid.Nil
+	}
+	accountID, _ := uuid.Parse(config.AccountID)
+	serviceID, _ := uuid.Parse(config.ServiceID)
+	return accountID, serviceID
 }
 
 // queryOrFormToJSON converts URL query params or URL-encoded forms into JSON data.

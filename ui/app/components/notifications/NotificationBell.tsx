@@ -5,9 +5,7 @@ import { getApiKey } from "~/lib/session";
 import { useWorkspaceNotifications } from "./useWorkspaceNotifications";
 import { NotificationList } from "./NotificationList";
 
-// General notification surface: a bell + panel mounted once in the shared
-// layout (integrations.tsx), independent of the sidebar -- mirrors
-// FloatingCredits' self-contained fixed-position pattern. Badge = pending
+// General notification surface mounted once in the shared layout. Badge = pending
 // count; panel lists pending+acknowledged (dismissed items are hidden and
 // gone for good, per the two-tier read/dismiss model). The panel itself is
 // a preview -- capped to PANEL_LIMIT rows so it doesn't grow into an
@@ -37,7 +35,7 @@ export function NotificationBell() {
   const hasMore = unresolved.length > PANEL_LIMIT;
 
   return (
-    <div ref={panelRef} className="fixed top-12 right-20 z-20">
+    <div ref={panelRef} className="relative z-20">
       <button
         data-track="toggle_notification_bell"
         type="button"
@@ -56,14 +54,15 @@ export function NotificationBell() {
       </button>
 
       {open && (
-        <div className="absolute right-0 mt-2 w-[420px] max-h-[75vh] flex flex-col rounded-xl border border-slate-200 bg-white shadow-2xl overflow-hidden">
+        <div className="absolute right-0 mt-2 w-[min(420px,calc(100vw-2rem))] max-h-[75vh] flex flex-col rounded-xl border border-slate-200 bg-white shadow-2xl overflow-hidden">
           <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between shrink-0">
             <span className="text-base font-semibold text-slate-900">Notifications</span>
             {pendingCount > 0 && (
               <span className="text-xs font-medium text-slate-500">{pendingCount} unread</span>
             )}
           </div>
-          <div className="overflow-y-auto">
+          {/* Long config keys/messages must wrap inside the fixed-width panel. */}
+          <div className="min-w-0 overflow-x-hidden overflow-y-auto">
             <NotificationList
               items={previewItems}
               serviceRefs={serviceRefs}

@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { ArtifactOwnerControls } from "../components/access/ArtifactOwnerControls.ts";
 
-test("renders owning team and intersection-only bucket choices in product language", () => {
+test("renders owning team and intersection-only credential choices in product language", () => {
   const html = renderToStaticMarkup(createElement(ArtifactOwnerControls, {
     ownerTeams: [{ id: "team-1", name: "Support", slug: "support" }],
     ownerTeamId: "team-1",
@@ -15,13 +15,13 @@ test("renders owning team and intersection-only bucket choices in product langua
     onBucketChange() {},
   }));
 
-  for (const label of ["Owning team", "Support", "Credential bucket", "Support production", "both your access and the owning team"] ) {
+  for (const label of ["Owning team", "Support", "Credential set", "Support production", "both your access and the owning team"] ) {
     assert.match(html, new RegExp(label, "i"));
   }
   assert.doesNotMatch(html, /permission|binding|actor_allowed|team_allowed/i);
 });
 
-test("explains personal ownership and shared bucket choices", () => {
+test("explains personal ownership and shared credential choices", () => {
   const noTeams = renderToStaticMarkup(createElement(ArtifactOwnerControls, {
     ownerTeams: [], ownerTeamId: "", buckets: [], bucketId: "", onOwnerTeamChange() {}, onBucketChange() {},
   }));
@@ -31,5 +31,5 @@ test("explains personal ownership and shared bucket choices", () => {
   const noBuckets = renderToStaticMarkup(createElement(ArtifactOwnerControls, {
     ownerTeams: [{ id: "team-1", name: "Support", slug: "support" }], ownerTeamId: "team-1", buckets: [], bucketId: "", onOwnerTeamChange() {}, onBucketChange() {},
   }));
-  assert.match(noBuckets, /do not share access to a credential bucket/i);
+  assert.match(noBuckets, /do not share access to a credential set/i);
 });

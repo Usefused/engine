@@ -1,6 +1,5 @@
 import { useEffect } from "react";
 import { Outlet, useNavigate, useLocation, useRouteLoaderData } from "@remix-run/react";
-import { CreditBanner } from "~/components/CreditBanner";
 import { NotificationBell } from "~/components/notifications/NotificationBell";
 import { clearApiKey } from "~/lib/session";
 import { IntegrationsSidebar } from "~/components/layout/IntegrationsSidebar";
@@ -15,9 +14,9 @@ export default function IntegrationsLayout() {
   useEffect(() => {
     const isAuthenticatedStaticRoute = location.pathname.startsWith("/integrations/access/") || [
       "/integrations/buckets",
-      "/integrations/credits",
       "/integrations/mcp",
       "/integrations/notifications",
+      "/integrations/observability",
       "/integrations/sdks",
       "/integrations/settings",
     ].includes(location.pathname);
@@ -40,18 +39,20 @@ export default function IntegrationsLayout() {
 
   return (
     <CurrentActorAccessProvider isAuth={isAuth}>
-      <div className="min-h-screen flex flex-col md:flex-row bg-slate-50">
+      <div className="min-h-screen flex flex-col lg:flex-row bg-[var(--brand-paper)]">
         <IntegrationsSidebar isAuth={isAuth} handleSignOut={handleSignOut} />
 
         {/* Main content */}
         <main className="flex-1 min-w-0 overflow-y-auto">
-          <CreditBanner />
-          <div className="max-w-6xl mx-auto px-4 md:px-8 py-8 w-full">
+          <div className="max-w-6xl mx-auto w-full px-4 py-5 sm:px-6 sm:py-8 lg:px-8">
+            {isAuth && (
+              <div className="flex justify-end mb-3">
+                <NotificationBell />
+              </div>
+            )}
             <Outlet />
           </div>
         </main>
-        {/* {isAuth && <FloatingCredits />} */}
-        {isAuth && <NotificationBell />}
       </div>
     </CurrentActorAccessProvider>
   );

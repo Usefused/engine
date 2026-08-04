@@ -23,6 +23,8 @@ import (
 	"github.com/Usefused/engine/runtime"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const maxMCPMessageBodyBytes = 256 * 1024
@@ -186,7 +188,7 @@ func buildMCPCommand(ctx context.Context, sessionID string, fixture *Fixture) (*
 	if err != nil {
 		return nil, err
 	}
-	
+
 	entrypoint := sharedRuntimeEntrypointPath()
 	if entrypoint == "" {
 		entrypoint = filepath.Join(sessionTmpDir, "bundle.js")
@@ -451,12 +453,12 @@ func processMCPStream(ctx context.Context, w http.ResponseWriter, flusher http.F
 				return
 			}
 			if strings.HasPrefix(line, "___FUSED_SPAN___:") {
-				handleFusedSpan(line, artifactIDHex, sessionID)
+				recordMCPExecutorSpan(line, artifactIDHex, sessionID)
 				continue
 			}
 			fmt.Fprintf(w, "event: message\ndata: %s\n\n", line)
 			flusher.Flush()
-			handleAnalyticsResponse(line, sessionID, artifactIDHex)
+			handleMCPResponse(line, sessionID)
 
 		case line, ok := <-injectedResp:
 			if !ok {
@@ -464,29 +466,32 @@ func processMCPStream(ctx context.Context, w http.ResponseWriter, flusher http.F
 			}
 			fmt.Fprintf(w, "event: message\ndata: %s\n\n", line)
 			flusher.Flush()
-			handleAnalyticsResponse(line, sessionID, artifactIDHex)
+			handleMCPResponse(line, sessionID)
 		}
 	}
 }
 
-// handleFusedSpan processes and forwards a telemetry span to NATS.
-func handleFusedSpan(line, artifactIDHex, sessionID string) {
-	if globalNATSClient != nil && globalNATSClient.JS != nil {
-		spanJSON := strings.TrimPrefix(line, "___FUSED_SPAN___:")
-		var spanData map[string]any
-
-		if err := json.Unmarshal([]byte(spanJSON), &spanData); err == nil {
-			spanData["artifact_id"] = artifactIDHex
-			spanData["session_id"] = sessionID
-			spanData["timestamp"] = time.Now()
-			eventData, _ := json.Marshal(spanData)
-			globalNATSClient.PublishJS(messaging.FusedEngineAnalyticsSubject(artifactIDHex), eventData)
-		}
+// recordMCPExecutorSpan keeps child-process executions in the operator's OTEL
+// trace stream without reviving the removed analytics persistence channel.
+func recordMCPExecutorSpan(line, artifactIDHex, sessionID string) {
+	var spanData struct {
+		EndpointName string `json:"endpoint_name"`
+		Failed       bool   `json:"failed"`
 	}
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "___FUSED_SPAN___:")), &spanData); err != nil {
+		return
+	}
+	_, span := otel.Tracer("engine").Start(context.Background(), "engine.mcp.executor")
+	span.SetAttributes(
+		attribute.String("artifact.id", artifactIDHex),
+		attribute.String("mcp.session_id", sessionID),
+		attribute.String("execution.operation", spanData.EndpointName),
+		attribute.Bool("execution.failed", spanData.Failed),
+	)
+	span.End()
 }
 
-// handleAnalyticsResponse parses tool call responses for latency and error tracking.
-func handleAnalyticsResponse(line, sessionID, artifactIDHex string) {
+func handleMCPResponse(line, sessionID string) {
 	var msg map[string]any
 	if err := json.Unmarshal([]byte(line), &msg); err != nil {
 		return
@@ -504,55 +509,17 @@ func handleAnalyticsResponse(line, sessionID, artifactIDHex string) {
 
 	if ok {
 		sess.pendingMu.Lock()
-		req, found := sess.pendingRequests[idStr]
+		_, found := sess.pendingRequests[idStr]
 		if found {
 			delete(sess.pendingRequests, idStr)
 		}
 		sess.pendingMu.Unlock()
 
 		if found {
-			publishAnalyticsForRequest(msg, req, artifactIDHex, sessionID)
-
 			// Reset idle timer when a tool call completes.
 			sessionIdleTimeout := time.Duration(cfg.Sandbox.SessionMaxAgeSeconds) * time.Second
 			sess.idleTimer.Reset(sessionIdleTimeout)
 		}
-	}
-}
-
-// publishAnalyticsForRequest checks for errors in the MCP response and publishes
-// analytics. Params (sanitised) and result content are included because the user
-// owns the MCP executor — this data is safe to persist for debugging.
-func publishAnalyticsForRequest(msg map[string]any, req pendingReq, artifactIDHex, sessionID string) {
-	latencyMs := time.Since(req.startTime).Milliseconds()
-	failed := false
-
-	// Determine failure from the MCP JSON-RPC response shape.
-	var resultContent any
-	if _, hasErr := msg["error"]; hasErr {
-		failed = true
-	} else if res, hasRes := msg["result"].(map[string]any); hasRes {
-		if isErr, _ := res["isError"].(bool); isErr {
-			failed = true
-		}
-		// Capture result content for observability (no credentials in result).
-		resultContent = res["content"]
-	}
-
-	if globalNATSClient != nil && globalNATSClient.JS != nil {
-		paramsJSON, _ := json.Marshal(sanitiseParams(req.arguments))
-		resultJSON, _ := json.Marshal(resultContent)
-		eventData, _ := json.Marshal(map[string]any{
-			"artifact_id":   artifactIDHex,
-			"session_id":    sessionID,
-			"endpoint_name": req.endpointName,
-			"latency_ms":    latencyMs,
-			"failed":        failed,
-			"timestamp":     time.Now(),
-			"params":        json.RawMessage(paramsJSON),
-			"result":        json.RawMessage(resultJSON),
-		})
-		globalNATSClient.PublishJS(messaging.FusedEngineAnalyticsSubject(artifactIDHex), eventData)
 	}
 }
 

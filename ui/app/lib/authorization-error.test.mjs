@@ -123,3 +123,66 @@ test("malformed missing entries fall back to generic permission guidance", () =>
     "Permission denied. Ask a workspace administrator for access."
   );
 });
+
+test("keeps Engine-authored bucket readiness errors actionable", () => {
+  const message = apiErrorMessage(400, {
+    error: "The selected credential set is missing required authentication material.",
+    code: "bucket_credentials_missing",
+    category: "validation",
+    retryable: false,
+    details: {
+      missing: [
+        "11111111-1111-1111-1111-111111111111 (basic:jira_username)",
+        "11111111-1111-1111-1111-111111111111 (basic:jira_password)",
+      ],
+    },
+    remediation: "Add the required credentials and create the plan again.",
+  });
+
+  assert.match(message, /selected credential set is missing/i);
+  assert.match(message, /Basic auth credential jira_username/);
+  assert.match(message, /Basic auth credential jira_password/);
+  assert.doesNotMatch(message, /11111111|bucket_readiness/);
+  assert.match(message, /create the plan again/);
+});
+
+test("preserves structured Engine errors and diagnostics", () => {
+  const payload = normalizeAPIErrorPayload({
+    error: {
+      message: "The Registry could not complete SDK generation.",
+      code: "registry_request_failed",
+      category: "dependency",
+      retryable: true,
+      details: { http_status: 503 },
+      trace_id: "0123456789abcdef0123456789abcdef",
+    },
+  });
+  const error = new APIRequestError(503, payload);
+
+  assert.equal(error.message, "The Registry could not complete SDK generation.");
+  assert.equal(error.code, "registry_request_failed");
+  assert.equal(error.category, "dependency");
+  assert.equal(error.retryable, true);
+  assert.deepEqual(error.details, { http_status: 503 });
+  assert.equal(error.traceId, "0123456789abcdef0123456789abcdef");
+});
+
+test("does not treat a removed top-level plan error shape as structured", () => {
+  const payload = normalizeAPIErrorPayload({
+    error: "The Registry could not complete SDK generation.",
+    code: "registry_request_failed",
+    category: "dependency",
+  });
+
+  assert.equal(payload.code, undefined);
+  assert.equal(payload.category, undefined);
+});
+
+test("does not echo arbitrary upstream errors", () => {
+  const message = apiErrorMessage(400, {
+    error: "provider failed with Authorization: Bearer secret-value",
+  });
+
+  assert.equal(message, "Fused could not use this request. Check the selected team and inputs.");
+  assert.doesNotMatch(message, /secret-value/);
+});

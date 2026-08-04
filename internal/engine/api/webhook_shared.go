@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/executionevent"
 	"github.com/Usefused/engine/internal/engine/store"
-	"github.com/Usefused/engine/internal/shared/messaging"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 )
@@ -68,27 +68,15 @@ func buildFilterSubjects(accountID uuid.UUID, webhookLabel string, validEvents [
 	return filterSubjects
 }
 
-func publishFailedAnalytics(accountID uuid.UUID, parts []string, eventName string, msgID string, m *nats.Msg, natsClient *messaging.NATSClient) {
+func publishFailedAnalytics(ctx context.Context, accountID uuid.UUID, parts []string, eventName string, msgID string, m *nats.Msg) {
 	serviceIDStr := ""
 	if len(parts) >= 2 {
 		serviceIDStr = parts[1]
 	}
-	latencyMs := computeLatencyMs(m.Header.Get("X-Webhook-Start-Time"))
-	analyticsPayload, _ := json.Marshal(map[string]any{
-		"msg_id":           msgID,
-		"account_id":       accountID.String(),
-		"service_id":       serviceIDStr,
-		"event_name":       eventName,
-		"status":           "failed",
-		"payload_size":     len(m.Data),
-		"latency_ms":       latencyMs,
-		"credits_consumed": 0,
-		"timestamp":        time.Now(),
-	})
-	natsClient.PublishJS("webhook.analytics.failed", analyticsPayload)
+	publishWebhookOutcome(ctx, accountID, serviceIDStr, eventName, msgID, "failed", "delivery attempts exhausted", m)
 }
 
-func publishSuccessAnalytics(accountID uuid.UUID, msgID string, m *nats.Msg, natsClient *messaging.NATSClient) {
+func publishSuccessAnalytics(ctx context.Context, accountID uuid.UUID, msgID string, m *nats.Msg) {
 	parts := strings.Split(m.Subject, ".")
 	serviceIDStr := ""
 	if len(parts) >= 2 {
@@ -98,19 +86,30 @@ func publishSuccessAnalytics(accountID uuid.UUID, msgID string, m *nats.Msg, nat
 	if len(parts) > 4 {
 		eventName = strings.Join(parts[4:], ".")
 	}
-	latencyMs := computeLatencyMs(m.Header.Get("X-Webhook-Start-Time"))
-	analyticsPayload, _ := json.Marshal(map[string]any{
-		"msg_id":           msgID,
-		"account_id":       accountID.String(),
-		"service_id":       serviceIDStr,
-		"event_name":       eventName,
-		"status":           "success",
-		"payload_size":     len(m.Data),
-		"latency_ms":       latencyMs,
-		"credits_consumed": 0,
-		"timestamp":        time.Now(),
+	publishWebhookOutcome(ctx, accountID, serviceIDStr, eventName, msgID, "success", "", m)
+}
+
+func publishWebhookOutcome(ctx context.Context, accountID uuid.UUID, serviceIDStr, eventName, msgID, status, failureReason string, message *nats.Msg) {
+	serviceID, _ := uuid.Parse(serviceIDStr)
+	serviceVersionID, _ := uuid.Parse(message.Header.Get("X-Fused-Service-Version-ID"))
+	registrationID, _ := uuid.Parse(message.Header.Get("X-Fused-Webhook-ID"))
+	event := executionevent.NewWebhookEvent(executionevent.WebhookEventInput{
+		MessageID: msgID, AccountID: accountID, ServiceID: serviceID, ServiceVersionID: serviceVersionID,
+		RegistrationID: registrationID, EventName: eventName, DeliveryStatus: status, VerificationStatus: "verified",
+		FailureReason: failureReason, Environment: "production", PayloadSize: int64(len(message.Data)),
+		LatencyMs: int64(computeLatencyMs(message.Header.Get("X-Webhook-Start-Time"))), AttemptCount: webhookDeliveryCount(message), OccurredAt: time.Now(),
 	})
-	natsClient.PublishJS("webhook.analytics.success", analyticsPayload)
+	if err := executionevent.Publish(ctx, event); err != nil {
+		slog.ErrorContext(ctx, "Failed to publish webhook delivery event", slog.Any("error", err), slog.String("event_id", event.ID.String()))
+	}
+}
+
+func webhookDeliveryCount(message *nats.Msg) int {
+	metadata, err := message.Metadata()
+	if err != nil || metadata.NumDelivered == 0 {
+		return 1
+	}
+	return int(metadata.NumDelivered)
 }
 
 // resolveWebhookAttachmentLabel looks up which kind: webhook artifact (if

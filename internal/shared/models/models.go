@@ -56,12 +56,13 @@ const (
 // reporting mode until product pricing exists; adding speculative feature gates
 // here would create enforcement semantics before the Registry can own them.
 type RuntimeEntitlement struct {
-	Plan                       string    `json:"plan"`
-	HeartbeatRequired          bool      `json:"heartbeat_required"`
-	UsageReporting             string    `json:"usage_reporting"`
-	HeartbeatIntervalSeconds   int       `json:"heartbeat_interval_seconds"`
-	HeartbeatStaleAfterSeconds int       `json:"heartbeat_stale_after_seconds"`
-	RefreshedAt                time.Time `json:"refreshed_at,omitempty"`
+	Plan                           string    `json:"plan"`
+	HeartbeatRequired              bool      `json:"heartbeat_required"`
+	UsageReporting                 string    `json:"usage_reporting"`
+	PublicServiceInsightsReporting bool      `json:"public_service_insights_reporting"`
+	HeartbeatIntervalSeconds       int       `json:"heartbeat_interval_seconds"`
+	HeartbeatStaleAfterSeconds     int       `json:"heartbeat_stale_after_seconds"`
+	RefreshedAt                    time.Time `json:"refreshed_at,omitempty"`
 }
 
 // DefaultRuntimeEntitlement keeps Engines compatible with older Registries
@@ -69,11 +70,12 @@ type RuntimeEntitlement struct {
 // must fail toward the commercial baseline, not toward "no heartbeat".
 func DefaultRuntimeEntitlement() RuntimeEntitlement {
 	return RuntimeEntitlement{
-		Plan:                       "commercial",
-		HeartbeatRequired:          true,
-		UsageReporting:             RuntimeUsageReportingAggregate,
-		HeartbeatIntervalSeconds:   60,
-		HeartbeatStaleAfterSeconds: 300,
+		Plan:                           "commercial",
+		HeartbeatRequired:              true,
+		UsageReporting:                 RuntimeUsageReportingAggregate,
+		PublicServiceInsightsReporting: true,
+		HeartbeatIntervalSeconds:       60,
+		HeartbeatStaleAfterSeconds:     300,
 	}
 }
 
@@ -110,6 +112,76 @@ type EngineUsageReport struct {
 	BucketStart   time.Time `json:"bucket_start"`
 	BucketSeconds int       `json:"bucket_seconds"`
 	Count         int64     `json:"count"`
+}
+
+const PublicServiceInsightSchemaVersion = 1
+
+var PublicServiceInsightLatencyBounds = [...]int64{5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000}
+
+type PublicServiceInsightReport struct {
+	ReportID             uuid.UUID `json:"report_id"`
+	ServiceID            uuid.UUID `json:"service_id"`
+	ServiceVersionID     uuid.UUID `json:"service_version_id"`
+	RegistryObjectKind   string    `json:"registry_object_kind"`
+	RegistryObjectID     uuid.UUID `json:"registry_object_id"`
+	Direction            string    `json:"direction"`
+	Transport            string    `json:"transport"`
+	Outcome              string    `json:"outcome"`
+	ProviderStatusClass  string    `json:"provider_status_class"`
+	BucketStart          time.Time `json:"bucket_start"`
+	BucketSeconds        int       `json:"bucket_seconds"`
+	CallCount            int64     `json:"call_count"`
+	TotalLatencyMsSum    int64     `json:"total_latency_ms_sum"`
+	ProviderLatencyMsSum int64     `json:"provider_latency_ms_sum"`
+	LatencyHistogram     []int64   `json:"latency_histogram"`
+	RetryAttemptsSum     int64     `json:"retry_attempts_sum"`
+}
+
+type PublicServiceInsightReportResult struct {
+	ReportID uuid.UUID `json:"report_id"`
+	Accepted bool      `json:"accepted"`
+	Reason   string    `json:"reason,omitempty"`
+}
+
+type PublicServiceInsightEligibility struct {
+	ServiceID  uuid.UUID `json:"service_id"`
+	Reportable bool      `json:"reportable"`
+}
+
+type PublicServiceInsightsQuery struct {
+	ServiceID          uuid.UUID  `json:"service_id"`
+	StartDate          time.Time  `json:"start_date"`
+	EndDate            time.Time  `json:"end_date"`
+	Granularity        string     `json:"granularity"`
+	ServiceVersionID   *uuid.UUID `json:"service_version_id,omitempty"`
+	RegistryObjectKind string     `json:"registry_object_kind,omitempty"`
+	RegistryObjectID   *uuid.UUID `json:"registry_object_id,omitempty"`
+	Transport          string     `json:"transport,omitempty"`
+}
+
+type PublicServiceInsightPoint struct {
+	Key          string  `json:"key"`
+	Label        string  `json:"label"`
+	TotalCalls   int64   `json:"total_calls"`
+	FailedCalls  int64   `json:"failed_calls"`
+	P50LatencyMs float64 `json:"p50_latency_ms"`
+	P95LatencyMs float64 `json:"p95_latency_ms"`
+}
+
+type PublicServiceInsights struct {
+	Source             string                      `json:"source"`
+	GeneratedAt        time.Time                   `json:"generated_at"`
+	DataThrough        *time.Time                  `json:"data_through,omitempty"`
+	PartialData        bool                        `json:"partial_data"`
+	TotalCalls         int64                       `json:"total_calls"`
+	SuccessfulCalls    int64                       `json:"successful_calls"`
+	FailedCalls        int64                       `json:"failed_calls"`
+	P50LatencyMs       float64                     `json:"p50_latency_ms"`
+	P95LatencyMs       float64                     `json:"p95_latency_ms"`
+	TimeSeries         []PublicServiceInsightPoint `json:"time_series"`
+	TopOperations      []PublicServiceInsightPoint `json:"top_operations"`
+	VersionBreakdown   []PublicServiceInsightPoint `json:"version_breakdown"`
+	TransportBreakdown []PublicServiceInsightPoint `json:"transport_breakdown"`
 }
 
 // ─── Service ──────────────────────────────────────────────────────────────────
@@ -903,24 +975,6 @@ type SDKGenerationResult struct {
 
 // ─── MCP Analytics ────────────────────────────────────────────────────────────
 
-type MCPAnalytics struct {
-	ID         uuid.UUID `json:"id"`
-	ArtifactID uuid.UUID `json:"artifact_id"`
-	SessionID  string    `json:"session_id"`
-	// EndpointName replaced the old ToolName field to align with the endpoint_name
-	// proto standard. The backing DB column was renamed by the Sprint 2 migration.
-	EndpointName string    `json:"endpoint_name" db:"endpoint_name"`
-	ServiceName  string    `json:"service_name,omitempty"`
-	LatencyMs    int64     `json:"latency_ms"`
-	Failed       bool      `json:"failed"`
-	Timestamp    time.Time `json:"timestamp"`
-	// Params and Result are captured because the user owns the MCP executor —
-	// this data flows through their process and is safe to persist for debugging.
-	// Credentials are stripped by sanitiseParams before this struct is populated.
-	Params []byte `json:"params,omitempty" db:"params"`
-	Result []byte `json:"result,omitempty" db:"result"`
-}
-
 type MCPSession struct {
 	ID         uuid.UUID  `json:"id"`
 	ArtifactID uuid.UUID  `json:"artifact_id"`
@@ -930,8 +984,8 @@ type MCPSession struct {
 }
 
 // MCPToolUsage/MCPServiceUsage are the per-dimension breakdowns
-// GetMCPAnalyticsDashboard groups fused_mcp_analytics by (endpoint_name and
-// service_name respectively). Two distinct types rather than one generic
+// GetMCPAnalyticsDashboard groups canonical events by endpoint and service.
+// Two distinct types rather than one generic
 // "Name" struct so each carries the field name the MCP analytics UI page
 // already expects (tool_name vs service_name) without a translation layer.
 type MCPToolUsage struct {
@@ -971,33 +1025,56 @@ type MCPAnalyticsDashboard struct {
 // ─── Engine Execution Audit ──────────────────────────────────────────────────
 
 const (
-	EngineExecutionTransportSDK = "sdk"
-	EngineExecutionTransportMCP = "mcp"
+	EngineExecutionTransportSDK     = "sdk"
+	EngineExecutionTransportMCP     = "mcp"
+	EngineExecutionTransportWebhook = "webhook"
+
+	EngineExecutionDirectionOutbound = "outbound"
+	EngineExecutionDirectionInbound  = "inbound"
 
 	EngineExecutionStatusSuccess = "success"
 	EngineExecutionStatusFailed  = "failed"
 )
 
-// EngineExecutionEvent is the durable product receipt for an SDK/MCP execution.
+// EngineExecutionEvent is the durable product receipt for an SDK, MCP, or webhook execution.
 // Rich per-step diagnostics stay in OTEL; this row is intentionally
 // compact so user-facing history and dependency checks do not depend on an
 // observability backend being configured.
 type EngineExecutionEvent struct {
-	ID                 uuid.UUID `json:"id" db:"id"`
-	TraceID            string    `json:"trace_id,omitempty" db:"trace_id"`
-	SpanID             string    `json:"span_id,omitempty" db:"span_id"`
-	ArtifactID         uuid.UUID `json:"artifact_id" db:"artifact_id"`
-	Transport          string    `json:"transport" db:"transport"`
-	ServiceID          uuid.UUID `json:"service_id,omitempty" db:"service_id"`
-	ServiceVersionID   string    `json:"service_version_id" db:"service_version_id"`
-	EndpointName       string    `json:"endpoint_name" db:"endpoint_name"`
-	Environment        string    `json:"environment,omitempty" db:"environment"`
-	Status             string    `json:"status" db:"status"`
-	FailureReason      string    `json:"failure_reason,omitempty" db:"failure_reason"`
-	LatencyMs          int64     `json:"latency_ms" db:"latency_ms"`
-	ProviderLatencyMs  *int64    `json:"provider_latency_ms,omitempty" db:"provider_latency_ms"`
-	IdempotencyKeyHash string    `json:"idempotency_key_hash,omitempty" db:"idempotency_key_hash"`
-	RequestBodyHash    string    `json:"request_body_hash,omitempty" db:"request_body_hash"`
+	ID                  uuid.UUID `json:"id" db:"id"`
+	TraceID             string    `json:"trace_id,omitempty" db:"trace_id"`
+	SpanID              string    `json:"span_id,omitempty" db:"span_id"`
+	AccountID           uuid.UUID `json:"account_id,omitempty" db:"account_id"`
+	ArtifactID          uuid.UUID `json:"artifact_id" db:"artifact_id"`
+	Transport           string    `json:"transport" db:"transport"`
+	Direction           string    `json:"direction" db:"direction"`
+	ServiceID           uuid.UUID `json:"service_id,omitempty" db:"service_id"`
+	ServiceVersionID    string    `json:"service_version_id" db:"service_version_id"`
+	OperationID         uuid.UUID `json:"operation_id,omitempty" db:"operation_id"`
+	WebhookID           uuid.UUID `json:"webhook_id,omitempty" db:"webhook_id"`
+	EndpointName        string    `json:"endpoint_name" db:"endpoint_name"`
+	ExternalID          string    `json:"external_id,omitempty" db:"external_id"`
+	EventName           string    `json:"event_name,omitempty" db:"event_name"`
+	HTTPMethod          string    `json:"http_method,omitempty" db:"http_method"`
+	RequestPath         string    `json:"request_path,omitempty" db:"request_path"`
+	Environment         string    `json:"environment,omitempty" db:"environment"`
+	EnvironmentSource   string    `json:"environment_source,omitempty" db:"environment_source"`
+	ProviderHost        string    `json:"provider_host,omitempty" db:"provider_host"`
+	ProviderHTTPStatus  *int      `json:"provider_http_status,omitempty" db:"provider_http_status"`
+	ProviderStatusClass string    `json:"provider_status_class,omitempty" db:"provider_status_class"`
+	Status              string    `json:"status" db:"status"`
+	FailureReason       string    `json:"failure_reason,omitempty" db:"failure_reason"`
+	FailureCategory     string    `json:"failure_category,omitempty" db:"failure_category"`
+	FailureCode         string    `json:"failure_code,omitempty" db:"failure_code"`
+	LatencyMs           int64     `json:"latency_ms" db:"latency_ms"`
+	ProviderLatencyMs   *int64    `json:"provider_latency_ms,omitempty" db:"provider_latency_ms"`
+	AttemptCount        int       `json:"attempt_count" db:"attempt_count"`
+	RequestBytes        int64     `json:"request_bytes,omitempty" db:"request_bytes"`
+	ResponseBytes       int64     `json:"response_bytes,omitempty" db:"response_bytes"`
+	VerificationStatus  string    `json:"verification_status,omitempty" db:"verification_status"`
+	DeliveryStatus      string    `json:"delivery_status,omitempty" db:"delivery_status"`
+	IdempotencyKeyHash  string    `json:"idempotency_key_hash,omitempty" db:"idempotency_key_hash"`
+	RequestBodyHash     string    `json:"request_body_hash,omitempty" db:"request_body_hash"`
 	// IdempotencyReplayed is true when this execution was served from the
 	// idempotency cache (see IdempotentExecution) instead of calling the
 	// vendor -- lets callers see cache-hit rate without a separate metric.
@@ -1006,6 +1083,56 @@ type EngineExecutionEvent struct {
 	StartedAt           time.Time `json:"started_at" db:"started_at"`
 	EndedAt             time.Time `json:"ended_at" db:"ended_at"`
 	CreatedAt           time.Time `json:"created_at" db:"created_at"`
+}
+
+const EngineExecutionEventSchemaVersion = 1
+
+// EngineExecutionEventEnvelope keeps the NATS contract versioned independently
+// from the database schema so a malformed or future message can be rejected
+// before it reaches persistence.
+type EngineExecutionEventEnvelope struct {
+	SchemaVersion int                  `json:"schema_version"`
+	Event         EngineExecutionEvent `json:"event"`
+}
+
+// EngineExecutionAnalytics is the compact summary shown above a service's
+// outbound call history. It deliberately mirrors the durable execution
+// receipts instead of depending on an external observability backend.
+type EngineExecutionAnalytics struct {
+	TotalCalls       int64   `json:"total_calls"`
+	SuccessfulCalls  int64   `json:"successful_calls"`
+	FailedCalls      int64   `json:"failed_calls"`
+	AverageLatencyMs float64 `json:"average_latency_ms"`
+	MedianLatencyMs  float64 `json:"median_latency_ms"`
+	P95LatencyMs     float64 `json:"p95_latency_ms"`
+}
+
+type EngineExecutionBreakdown struct {
+	Key          string  `json:"key"`
+	Label        string  `json:"label"`
+	TotalCalls   int64   `json:"total_calls"`
+	FailedCalls  int64   `json:"failed_calls"`
+	P95LatencyMs float64 `json:"p95_latency_ms"`
+}
+
+type EngineExecutionFailure struct {
+	ID              uuid.UUID `json:"id"`
+	ServiceID       uuid.UUID `json:"service_id"`
+	ServiceName     string    `json:"service_name"`
+	Operation       string    `json:"operation"`
+	Transport       string    `json:"transport"`
+	FailureCategory string    `json:"failure_category"`
+	FailureCode     string    `json:"failure_code"`
+	FailureReason   string    `json:"failure_reason"`
+	LatencyMs       int64     `json:"latency_ms"`
+	StartedAt       time.Time `json:"started_at"`
+}
+
+type WorkspaceExecutionAnalytics struct {
+	EngineExecutionAnalytics
+	ByService      []EngineExecutionBreakdown `json:"by_service"`
+	ByTransport    []EngineExecutionBreakdown `json:"by_transport"`
+	RecentFailures []EngineExecutionFailure   `json:"recent_failures"`
 }
 
 // ─── Idempotency Cache ──────────────────────────────────────────────────────
@@ -1032,6 +1159,7 @@ type IdempotentExecution struct {
 	RequestBodyHash    string    `db:"request_body_hash"`
 	Environment        string    `db:"environment"`
 	ResponseBody       []byte    `db:"response_body"`
+	ResponseStatus     int       `db:"response_status"`
 	CreatedAt          time.Time `db:"created_at"`
 	ExpiresAt          time.Time `db:"expires_at"`
 }

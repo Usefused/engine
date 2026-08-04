@@ -60,22 +60,9 @@ func (p *pendingWebhookMsgs) Take(id string) (*nats.Msg, bool) {
 func (s *EngineGRPCServer) SubscribeWebhooks(stream enginev1.EngineService_SubscribeWebhooksServer) error {
 	ctx := stream.Context()
 	thread := observability.ThreadFromContext(ctx)
-
-	// The first client message must be a subscribe -- mirrors
-	// parseInitMessage's "type != init" rejection in the WS path.
-	first, err := stream.Recv()
+	subscribeMsg, err := receiveWebhookSubscribe(stream)
 	if err != nil {
-		return status.Error(codes.InvalidArgument, "expected initial subscribe message")
-	}
-	subscribeMsg := first.GetSubscribe()
-	if subscribeMsg == nil {
-		return status.Error(codes.InvalidArgument, "first message must be a subscribe")
-	}
-	if strings.TrimSpace(subscribeMsg.GetReceiverName()) == "" {
-		return status.Error(codes.InvalidArgument, "receiver_name is required")
-	}
-	if len(subscribeMsg.GetEvents()) == 0 {
-		return status.Error(codes.InvalidArgument, "events are required")
+		return err
 	}
 
 	sdkUUID, accountID, err := s.authenticateWebhookSubscribe(ctx)
@@ -131,7 +118,27 @@ func (s *EngineGRPCServer) SubscribeWebhooks(stream enginev1.EngineService_Subsc
 		return err
 	}
 
-	return processGRPCWebhookEventLoop(stream, msgMap, accountID, s.natsClient)
+	return processGRPCWebhookEventLoop(stream, msgMap, accountID)
+}
+
+func receiveWebhookSubscribe(stream enginev1.EngineService_SubscribeWebhooksServer) (*enginev1.WebhookSubscribe, error) {
+	// Subscription identity is accepted only in the first frame so later ACK
+	// traffic cannot silently change the durable consumer's scope.
+	first, err := stream.Recv()
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "expected initial subscribe message")
+	}
+	subscribe := first.GetSubscribe()
+	if subscribe == nil {
+		return nil, status.Error(codes.InvalidArgument, "first message must be a subscribe")
+	}
+	if strings.TrimSpace(subscribe.GetReceiverName()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "receiver_name is required")
+	}
+	if len(subscribe.GetEvents()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "events are required")
+	}
+	return subscribe, nil
 }
 
 // authenticateWebhookSubscribe validates the (artifact_id, token) pair from
@@ -222,7 +229,7 @@ func handleGRPCNatsMessage(ctx context.Context, thread observability.Thread, m *
 
 	if meta, err := m.Metadata(); err == nil && meta.NumDelivered >= 3 {
 		m.Term()
-		publishFailedAnalytics(accountID, parts, eventName, msgID, m, natsClient)
+		publishFailedAnalytics(ctx, accountID, parts, eventName, msgID, m)
 		return
 	}
 
@@ -258,7 +265,7 @@ func handleGRPCNatsMessage(ctx context.Context, thread observability.Thread, m *
 // processGRPCWebhookEventLoop mirrors processWebSocketEventLoop
 // (websocket_handler.go), reading WebhookAck/WebhookNack messages back from
 // the stream instead of {"type": "ack"|"nack", "id": ...} JSON frames.
-func processGRPCWebhookEventLoop(stream enginev1.EngineService_SubscribeWebhooksServer, msgMap *pendingWebhookMsgs, accountID uuid.UUID, natsClient *messaging.NATSClient) error {
+func processGRPCWebhookEventLoop(stream enginev1.EngineService_SubscribeWebhooksServer, msgMap *pendingWebhookMsgs, accountID uuid.UUID) error {
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
@@ -268,7 +275,7 @@ func processGRPCWebhookEventLoop(stream enginev1.EngineService_SubscribeWebhooks
 		if ack := msg.GetAck(); ack != nil {
 			if m, ok := msgMap.Take(ack.GetEventId()); ok {
 				m.Ack()
-				publishSuccessAnalytics(accountID, ack.GetEventId(), m, natsClient)
+				publishSuccessAnalytics(stream.Context(), accountID, ack.GetEventId(), m)
 			}
 		} else if nack := msg.GetNack(); nack != nil {
 			if m, ok := msgMap.Take(nack.GetEventId()); ok {

@@ -1,6 +1,25 @@
 @import "tailwindcss";
 
+/* Brand tokens lifted from the marketing homepage (homepage/app/components/
+   MarketingChrome.jsx, AccessRequestSection.jsx) so the embedded Engine UI
+   reads as the same product, not a separate internal tool. Referenced via
+   Tailwind v4 arbitrary-value utilities, e.g. bg-[var(--brand-violet)]. */
+:root {
+  --brand-ink: #15121c;
+  --brand-line: #e7e2ea;
+  --brand-paper: #fbfaf8;
+  --brand-violet: #2563eb;
+  --brand-violet-hover: #1d4ed8;
+  --brand-violet-tint: #eff6ff;
+  --brand-lime: #dfff5f;
+}
+
 @layer base {
+  html,
+  body {
+    font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
   button:not(:disabled),
   a[href] {
     cursor: pointer;

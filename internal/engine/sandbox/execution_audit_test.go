@@ -2,68 +2,121 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/Usefused/engine/internal/engine"
+	"github.com/Usefused/engine/internal/engine/executionevent"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
+	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel/trace"
 )
 
-type captureExecutionAuditRecorder struct {
-	event models.EngineExecutionEvent
+type captureJetStreamPublisher struct {
+	message *nats.Msg
 }
 
-func (r *captureExecutionAuditRecorder) Record(event models.EngineExecutionEvent) {
-	r.event = event
+func (p *captureJetStreamPublisher) PublishMsgJS(message *nats.Msg) (*nats.PubAck, error) {
+	p.message = message
+	return &nats.PubAck{}, nil
 }
 
-func TestRecordEngineExecutionAuditCapturesCompactSafeReceipt(t *testing.T) {
-	orig := globalExecutionAuditRecorder
-	recorder := &captureExecutionAuditRecorder{}
-	SetExecutionAuditRecorder(recorder)
-	defer SetExecutionAuditRecorder(orig)
+func TestRecordEngineExecutionAuditPublishesCompactSafeEvent(t *testing.T) {
+	capture := &captureJetStreamPublisher{}
+	executionevent.SetPublisher(executionevent.NewPublisher(capture))
+	defer executionevent.SetPublisher(nil)
 
 	timings := engine.NewExecutionTimings()
 	ctx := engine.ContextWithExecutionTimings(context.Background(), timings)
 	ctx = contextWithExecutionIdentity(ctx, "raw-idempotency-key", "request-body-hash")
 	ctx = contextWithExecutionTransport(ctx, models.EngineExecutionTransportSDK)
 	engine.RecordExecutionTiming(ctx, "provider_total", 12*time.Millisecond)
+	engine.RecordExecutionCount(ctx, "provider_attempt_count", 2)
 
 	serviceID := uuid.New()
+	operationID := uuid.New()
 	artifactID := uuid.New()
 	startedAt := time.Now().Add(-25 * time.Millisecond)
 	recordEngineExecutionAudit(ctx, trace.SpanFromContext(ctx), executionAuditState{
-		artifactID:   artifactID,
-		endpointName: "repos.list",
-		startedAt:    startedAt,
+		artifactID: artifactID, endpointName: "repos.list", startedAt: startedAt,
 		match: &scopedEndpoint{
-			service:          &fusedobject.ServiceMetadata{ID: serviceID},
-			serviceVersionID: "version-1",
+			service: &fusedobject.ServiceMetadata{ID: serviceID}, serviceVersionID: "version-1",
+			endpoint: fusedobject.Endpoint{ID: operationID, Method: "GET", NormalizedPath: "/repos"},
 		},
-		selectedEnvironment: "production",
+		selectedEnvironment: "production", environmentSource: "provider",
+		providerHost: "api.example.com", providerHTTPStatus: 502,
 	}, errors.New("provider failed"))
 
-	event := recorder.event
-	if event.ArtifactID != artifactID || event.ServiceID != serviceID {
-		t.Fatalf("unexpected receipt ids: sdk=%s service=%s", event.ArtifactID, event.ServiceID)
+	if capture.message == nil {
+		t.Fatal("expected a canonical event publication")
 	}
-	if event.Status != models.EngineExecutionStatusFailed {
-		t.Fatalf("status = %q, want failed", event.Status)
+	var envelope models.EngineExecutionEventEnvelope
+	if err := json.Unmarshal(capture.message.Data, &envelope); err != nil {
+		t.Fatal(err)
 	}
-	if event.IdempotencyKeyHash == "" || event.IdempotencyKeyHash == "raw-idempotency-key" {
-		t.Fatal("idempotency key must be hashed before persistence")
+	assertCompactSafeExecutionEvent(t, envelope.Event, artifactID, serviceID, operationID)
+}
+
+func TestRecordEngineExecutionAuditTreatsProviderAuthResponseAsFailure(t *testing.T) {
+	capture := &captureJetStreamPublisher{}
+	executionevent.SetPublisher(executionevent.NewPublisher(capture))
+	defer executionevent.SetPublisher(nil)
+
+	recordEngineExecutionAudit(context.Background(), trace.SpanFromContext(context.Background()), executionAuditState{
+		artifactID: uuid.New(), endpointName: "repos.list", startedAt: time.Now(), providerHTTPStatus: 401,
+	}, nil)
+
+	var envelope models.EngineExecutionEventEnvelope
+	if err := json.Unmarshal(capture.message.Data, &envelope); err != nil {
+		t.Fatal(err)
 	}
-	if event.RequestBodyHash != "request-body-hash" {
-		t.Fatalf("request body hash = %q", event.RequestBodyHash)
+	if envelope.Event.Status != models.EngineExecutionStatusFailed || envelope.Event.FailureCategory != "auth" || envelope.Event.FailureCode != "provider_auth" {
+		t.Fatalf("provider auth response was not classified as a failure: %#v", envelope.Event)
 	}
-	if event.ProviderLatencyMs == nil || *event.ProviderLatencyMs != 12 {
-		t.Fatalf("provider latency = %v, want 12ms", event.ProviderLatencyMs)
+	if envelope.Event.FailureReason != "provider returned HTTP 401" {
+		t.Fatalf("failure reason = %q", envelope.Event.FailureReason)
 	}
-	if len(event.Timings) == 0 {
-		t.Fatal("expected timing summary JSON to be persisted")
+}
+
+func assertCompactSafeExecutionEvent(t *testing.T, event models.EngineExecutionEvent, artifactID, serviceID, operationID uuid.UUID) {
+	t.Helper()
+	checks := []struct {
+		valid   bool
+		message string
+	}{
+		{executionEventIdentityMatches(event, artifactID, serviceID, operationID), "unexpected event ids"},
+		{executionEventFailureMatches(event), "unexpected failure classification"},
+		{executionEventHashIsSafe(event), "idempotency key was not safely hashed"},
+		{executionEventProviderMetricsMatch(event), "unexpected provider metrics"},
+		{executionEventProviderIdentityMatches(event), "unexpected provider identity"},
 	}
+	for _, check := range checks {
+		if !check.valid {
+			t.Fatalf("%s: %#v", check.message, event)
+		}
+	}
+}
+
+func executionEventIdentityMatches(event models.EngineExecutionEvent, artifactID, serviceID, operationID uuid.UUID) bool {
+	return event.ArtifactID == artifactID && event.ServiceID == serviceID && event.OperationID == operationID
+}
+
+func executionEventFailureMatches(event models.EngineExecutionEvent) bool {
+	return event.Status == models.EngineExecutionStatusFailed && event.FailureCategory == "provider"
+}
+
+func executionEventHashIsSafe(event models.EngineExecutionEvent) bool {
+	return event.IdempotencyKeyHash != "" && event.IdempotencyKeyHash != "raw-idempotency-key"
+}
+
+func executionEventProviderMetricsMatch(event models.EngineExecutionEvent) bool {
+	return event.ProviderLatencyMs != nil && *event.ProviderLatencyMs == 12 && event.AttemptCount == 2
+}
+
+func executionEventProviderIdentityMatches(event models.EngineExecutionEvent) bool {
+	return event.ProviderStatusClass == "5xx" && event.HTTPMethod == "GET" && event.RequestPath == "/repos"
 }

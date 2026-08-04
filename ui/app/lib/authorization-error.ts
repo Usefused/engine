@@ -7,6 +7,12 @@ export interface PermissionRequirement {
 
 export interface APIErrorPayload {
   error?: string;
+  code?: string;
+  category?: string;
+  retryable?: boolean;
+  details?: Record<string, unknown>;
+  remediation?: string;
+  trace_id?: string;
   message?: string;
   missing?: PermissionRequirement[];
 }
@@ -14,19 +20,41 @@ export interface APIErrorPayload {
 export class APIRequestError extends Error {
   readonly status: number;
   readonly code?: string;
+  readonly category?: string;
+  readonly retryable: boolean;
+  readonly details: Record<string, unknown>;
+  readonly remediation?: string;
+  readonly traceId?: string;
   readonly missing: PermissionRequirement[];
 
   constructor(status: number, payload: APIErrorPayload) {
     super(apiErrorMessage(status, payload));
     this.name = "APIRequestError";
     this.status = status;
-    this.code = payload.error;
+    this.code = payload.code || payload.error;
+    this.category = payload.category;
+    this.retryable = payload.retryable === true;
+    this.details = payload.details || {};
+    this.remediation = payload.remediation;
+    this.traceId = payload.trace_id;
     this.missing = Array.isArray(payload.missing) ? payload.missing : [];
   }
 }
 
 export function normalizeAPIErrorPayload(input: unknown): APIErrorPayload {
   if (!isRecord(input)) return {};
+  if (isRecord(input.error)) {
+    const engineError = input.error;
+    return {
+      error: typeof engineError.message === "string" ? engineError.message : undefined,
+      code: typeof engineError.code === "string" ? engineError.code : undefined,
+      category: typeof engineError.category === "string" ? engineError.category : undefined,
+      retryable: typeof engineError.retryable === "boolean" ? engineError.retryable : undefined,
+      details: isRecord(engineError.details) ? engineError.details : undefined,
+      remediation: typeof engineError.remediation === "string" ? engineError.remediation : undefined,
+      trace_id: typeof engineError.trace_id === "string" ? engineError.trace_id : undefined,
+    };
+  }
   return {
     error: typeof input.error === "string" ? input.error : undefined,
     message: typeof input.message === "string" ? input.message : undefined,
@@ -38,14 +66,22 @@ export function apiErrorMessage(
   status: number,
   payload: APIErrorPayload
 ): string {
-  if (status === 401 && payload.error === "authentication_required") {
+  const code = payload.code || payload.error;
+  if (status === 401 && code === "authentication_required") {
     return "Authentication required. Provide a valid Fused credential.";
   }
-  if (status === 403 && payload.error === "permission_denied") {
+  if (status === 403 && code === "permission_denied") {
     return permissionDeniedMessage(payload.missing);
   }
   const ownerMessage = artifactOwnerErrorMessage(payload.error);
   if (ownerMessage) return ownerMessage;
+  const workspaceMessage = workspaceConfigErrorMessage(payload);
+  if (workspaceMessage) return workspaceMessage;
+  if (payload.code && payload.error) {
+    return payload.remediation
+      ? `${payload.error} ${payload.remediation}`
+      : payload.error;
+  }
   return genericStatusMessage(status);
 }
 
@@ -54,11 +90,12 @@ export function isAuthenticationFailure(
   payload: APIErrorPayload
 ): boolean {
   if (status !== 401) return false;
+  const code = payload.code || payload.error;
   return [
     "authentication_required",
     "invalid API key",
     "missing X-API-Key header",
-  ].includes(payload.error || "");
+  ].includes(code || "");
 }
 
 function permissionDeniedMessage(
@@ -131,6 +168,58 @@ function artifactOwnerErrorMessage(code: string | undefined): string | null {
     default:
       return null;
   }
+}
+
+function workspaceConfigErrorMessage(payload: APIErrorPayload): string | null {
+  const code = payload.code || payload.error;
+  if (!code) return null;
+
+  if (code === "bucket_credentials_missing") {
+    const missing = Array.isArray(payload.details?.missing)
+      ? payload.details.missing.filter((value): value is string => typeof value === "string")
+      : [];
+    const requirements = uniqueBucketMaterialLabels(missing);
+    const message = requirements.length > 0
+      ? `The selected credential set is missing ${requirements.join(", ")}.`
+      : payload.error || "The selected credential set is missing required authentication.";
+    return payload.remediation ? `${message} ${payload.remediation}` : message;
+  }
+
+  if (code === "credential_set_required") {
+    return "Choose one credential set before creating this consumer.";
+  }
+  if (code === "credential_set_not_found") {
+    return "The selected credential set no longer exists. Choose another credential set.";
+  }
+  return null;
+}
+
+function uniqueBucketMaterialLabels(requirements: string[]): string[] {
+  return requirements
+    .map(bucketMaterialLabel)
+    .filter((value, index, values) => value && values.indexOf(value) === index);
+}
+
+function bucketMaterialLabel(requirement: string): string {
+  const match = requirement.match(/^[0-9a-f-]+ \(([^)]+)\)$/i);
+  const material = match?.[1]?.trim();
+  if (!material) return "required authentication";
+  if (material === "oauth") return "an OAuth connection";
+  if (material === "oidc") return "an OpenID Connect connection";
+
+  const separator = material.indexOf(":");
+  if (separator === -1) return "required authentication";
+  const authType = material.slice(0, separator);
+  const key = material.slice(separator + 1);
+  const authLabel: Record<string, string> = {
+    api_key: "API key",
+    basic: "Basic auth",
+    bearer: "bearer token",
+    mtls: "mTLS",
+  };
+  return key === "<credential-name>"
+    ? `${authLabel[authType] || "authentication"} credentials`
+    : `${authLabel[authType] || "authentication"} credential ${key}`;
 }
 
 function genericStatusMessage(status: number): string {

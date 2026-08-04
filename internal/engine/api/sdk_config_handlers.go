@@ -181,12 +181,12 @@ func SDKConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 		actor, ok := accesscontrol.ActorFromContext(ctx)
 		if !ok {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			http.Error(w, `{"error":"invalid API key or workspace not found"}`, http.StatusUnauthorized)
+			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, ctx)
 			return
 		}
 		req, doc, err := decodeSDKConfigPlanRequest(r)
 		if err != nil {
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()})
+			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, ctx)
 			return
 		}
 		setSDKConfigSpanAttributes(span, req.ConfigKey, doc)
@@ -198,7 +198,7 @@ func SDKConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 			document:  doc,
 		})
 		if err != nil {
-			writeSDKConfigError(w, err)
+			writeSDKConfigError(w, err, ctx)
 			return
 		}
 
@@ -229,17 +229,17 @@ func SDKConfigApplyHandler(configStore store.ConfigRepository, s store.Store, pr
 		actor, ok := accesscontrol.ActorFromContext(ctx)
 		if !ok {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			http.Error(w, `{"error":"invalid API key or workspace not found"}`, http.StatusUnauthorized)
+			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, ctx)
 			return
 		}
 		req, planID, err := decodeSDKConfigApplyRequest(r)
 		if err != nil {
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()})
+			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, ctx)
 			return
 		}
 		planRevision, ok := AuthorizedPlanRevisionFromContext(ctx)
 		if !ok {
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"})
+			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"}, ctx)
 			return
 		}
 		span.SetAttributes(
@@ -255,7 +255,7 @@ func SDKConfigApplyHandler(configStore store.ConfigRepository, s store.Store, pr
 			sourceHash:   req.SourceHash,
 		})
 		if err != nil {
-			writeSDKConfigError(w, err)
+			writeSDKConfigError(w, err, ctx)
 			return
 		}
 
@@ -272,6 +272,7 @@ func SDKConfigApplyHandler(configStore store.ConfigRepository, s store.Store, pr
 		}
 		if result.ExecutionToken != "" {
 			resp["execution_token"] = result.ExecutionToken
+			setOneTimeSecretResponseHeaders(w)
 		}
 		writeJSON(w, resp)
 	}
@@ -1907,7 +1908,14 @@ func validateArtifactBucketReadiness(ctx context.Context, s store.Store, bucketI
 		return nil
 	}
 	sort.Strings(missing)
-	return workspaceConfigHTTPError{status: http.StatusBadRequest, message: "bucket_readiness: missing bucket material for " + strings.Join(missing, ", ")}
+	return workspaceConfigHTTPError{
+		status:      http.StatusBadRequest,
+		code:        "bucket_credentials_missing",
+		message:     "The selected credential set is missing required authentication material.",
+		category:    "validation",
+		details:     map[string]any{"missing": missing},
+		remediation: "Add the required credentials to the credential set and create the plan again.",
+	}
 }
 
 func loadArtifactBucketMaterial(ctx context.Context, s store.Store, bucketID uuid.UUID) (map[string]bool, map[string]bool, error) {
@@ -2298,18 +2306,24 @@ func newSDKExecutionCredential() (string, string, error) {
 	return token, hex.EncodeToString(hash[:]), nil
 }
 
-func writeSDKConfigError(w http.ResponseWriter, err error) {
+func writeSDKConfigError(w http.ResponseWriter, err error, contexts ...context.Context) {
 	if isArtifactAuthorizationError(err) {
 		accesscontrol.WriteAuthorizationError(w, err)
 		return
 	}
 	var proxyErr sdkProxyError
 	if errors.As(err, &proxyErr) {
-		w.WriteHeader(proxyErr.status)
-		_, _ = w.Write(proxyErr.body)
+		writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+			status:    proxyErr.status,
+			code:      "registry_request_failed",
+			message:   "The Registry could not complete SDK generation.",
+			category:  "dependency",
+			retryable: proxyErr.status >= http.StatusInternalServerError,
+			details:   map[string]any{"http_status": proxyErr.status},
+		}, contexts...)
 		return
 	}
-	writeWorkspaceConfigError(w, err)
+	writeWorkspaceConfigError(w, err, contexts...)
 }
 
 // SDKConfigDownloadHandler handles GET /sdk-config/{name}/download.

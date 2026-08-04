@@ -117,7 +117,7 @@ export default function EndpointSelectionList({
           type="text"
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
-          placeholder="Search endpoints..."
+          placeholder="Search operations..."
           className="w-full pl-9 pr-8 py-1.5 bg-white border border-slate-200 rounded-md text-xs placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 transition-all text-slate-800"
         />
         {searchTerm && (

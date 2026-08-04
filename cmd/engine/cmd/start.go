@@ -23,6 +23,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/api"
 	"github.com/Usefused/engine/internal/engine/auth"
+	"github.com/Usefused/engine/internal/engine/executionevent"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	enginemiddleware "github.com/Usefused/engine/internal/engine/middleware"
 	"github.com/Usefused/engine/internal/engine/sandbox"
@@ -113,9 +114,10 @@ func runEngine() {
 	engineStore := store.NewCachedStore(store.NewPostgresStore(database), natsClient)
 	registryClient := sandbox.NewHTTPRegistryClient(cfg.Engine.RegistryEndpoint, envLicense)
 
-	engineWorkers := startEngineWorkers(ctx, engineStore, natsClient, cfg)
+	engineWorkers := startEngineWorkers(ctx, engineStore, natsClient, cfg.Engine)
 
 	entitlement, authorizationRevision := bootstrapRegistryIdentity(ctx, engineStore, registryClient, envLicense)
+	engineWorkers.publicInsights = startPublicServiceInsightReporting(ctx, engineStore, registryClient, entitlement)
 	controlAuthenticator := newControlAuthenticator(ctx, engineStore, authorizationRevision)
 	startAuthorizationRevisionPolling(ctx, engineStore, controlAuthenticator)
 	engineWorkers.usageCounter = startEngineUsageCounter(ctx, engineStore, entitlement)
@@ -209,16 +211,24 @@ func requireRegistryLicense(ctx context.Context) string {
 }
 
 type engineWorkers struct {
-	executionAudit *worker.ExecutionAuditWorker
-	usageCounter   *worker.UsageCounterWorker
+	executionEvents *worker.ExecutionEventWorker
+	retention       *worker.ExecutionRetentionWorker
+	publicInsights  *worker.PublicInsightWorker
+	usageCounter    *worker.UsageCounterWorker
 }
 
 func (w engineWorkers) Stop(ctx context.Context) {
 	if w.usageCounter != nil {
 		w.usageCounter.Stop(ctx)
 	}
-	if w.executionAudit != nil {
-		w.executionAudit.Stop(ctx)
+	if w.executionEvents != nil {
+		w.executionEvents.Stop(ctx)
+	}
+	if w.retention != nil {
+		w.retention.Stop(ctx)
+	}
+	if w.publicInsights != nil {
+		w.publicInsights.Stop(ctx)
 	}
 }
 
@@ -226,18 +236,21 @@ type runtimeEntitlementStore interface {
 	SaveRuntimeEntitlement(ctx context.Context, entitlement models.RuntimeEntitlement) error
 }
 
-func startEngineWorkers(ctx context.Context, engineStore store.Store, natsClient *messaging.NATSClient, cfg *config.Config) engineWorkers {
-	executionAuditWorker := worker.NewExecutionAuditWorker(engineStore, worker.ExecutionAuditOptions{})
-	executionAuditWorker.Start(ctx)
-	sandbox.SetExecutionAuditRecorder(executionAuditWorker)
+func startEngineWorkers(ctx context.Context, engineStore store.Store, natsClient *messaging.NATSClient, cfg config.EngineConfig) engineWorkers {
+	executionevent.SetPublisher(executionevent.NewPublisher(natsClient))
+	executionEventWorker, err := worker.StartExecutionEventWorker(ctx, engineStore, natsClient)
+	if err != nil {
+		slog.ErrorContext(ctx, "FATAL: Failed to start execution event persistence", slog.Any("error", err))
+		os.Exit(1)
+	}
 	sandbox.SetIdempotencyStore(engineStore)
 	// Webhook ingress resolves slugs against the Engine's own table so
 	// delivery keeps working even when Registry is only used as the control
 	// plane for catalogue data.
 	sandbox.SetWebhookConfigStore(engineStore)
-	worker.StartMCPAnalyticsWorker(ctx, engineStore, natsClient, cfg)
-	worker.StartWebhookAnalyticsWorker(ctx, engineStore, natsClient)
-	return engineWorkers{executionAudit: executionAuditWorker}
+	worker.StartMCPSessionWorker(ctx, engineStore, natsClient)
+	retentionWorker := worker.StartExecutionRetentionWorker(ctx, engineStore, cfg.ExecutionRetentionDays, cfg.ExecutionCleanupBatch)
+	return engineWorkers{executionEvents: executionEventWorker, retention: retentionWorker}
 }
 
 func startEngineUsageCounter(ctx context.Context, engineStore store.Store, entitlement models.RuntimeEntitlement) *worker.UsageCounterWorker {
@@ -293,6 +306,11 @@ func bootstrapRegistryIdentity(ctx context.Context, engineStore store.Store, reg
 		slog.ErrorContext(ctx, "FATAL: Failed to initialize bootstrap Owner access", slog.Any("error", err))
 		os.Exit(1)
 	}
+	ownedServices, err := sandbox.ReconcileOwnedServices(ctx, engineStore, registryClient, accUUID, envLicense)
+	if err != nil {
+		slog.ErrorContext(ctx, "FATAL: Failed to reconcile Registry-owned services into the Engine workspace", slog.Any("error", err))
+		os.Exit(1)
+	}
 	entitlement := handshake.Entitlements.Normalized()
 	if entitlementStore, ok := engineStore.(runtimeEntitlementStore); ok {
 		if err := entitlementStore.SaveRuntimeEntitlement(ctx, entitlement); err != nil {
@@ -305,6 +323,9 @@ func bootstrapRegistryIdentity(ctx context.Context, engineStore store.Store, reg
 		slog.String("plan", entitlement.Plan),
 		slog.String("usage_reporting", entitlement.UsageReporting),
 		slog.Int64("authorization_revision", accessBootstrap.Revision),
+		slog.Int("owned_services_discovered", ownedServices.Discovered),
+		slog.Int("owned_services_restored", ownedServices.Activated),
+		slog.Int("owned_services_already_active", ownedServices.AlreadyActive),
 	)
 	return entitlement, accessBootstrap.Revision
 }
@@ -375,6 +396,24 @@ func startEngineUsageReporting(ctx context.Context, engineStore store.Store, reg
 	})
 	flushWorker.Start(ctx)
 	return flushWorker
+}
+
+func startPublicServiceInsightReporting(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, entitlement models.RuntimeEntitlement) *worker.PublicInsightWorker {
+	if !entitlement.PublicServiceInsightsReporting {
+		slog.InfoContext(ctx, "Public service insight reporting disabled by Registry entitlement")
+		return nil
+	}
+	reportStore, ok := engineStore.(worker.PublicInsightStore)
+	if !ok {
+		slog.WarnContext(ctx, "Public service insight store unavailable; reporting disabled")
+		return nil
+	}
+	reportWorker := worker.NewPublicInsightWorker(reportStore, registryClient, worker.PublicInsightOptions{
+		Interval:      engineDurationFromEnv("FUSED_PUBLIC_INSIGHT_INTERVAL", time.Minute),
+		EngineVersion: Version, EngineBuildHash: BuildHash,
+	})
+	reportWorker.Start(ctx)
+	return reportWorker
 }
 
 func sendEngineHeartbeat(ctx context.Context, registryClient *sandbox.HTTPRegistryClient) {

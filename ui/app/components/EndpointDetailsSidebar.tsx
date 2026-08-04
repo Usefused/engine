@@ -1,10 +1,11 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { AlertTriangle, ChevronDown, ChevronUp, Loader2, Copy, Check } from "lucide-react";
 import { SchemaViewer } from "~/components/SchemaViewer";
+import { type JsonSchemaNode } from "~/components/SchemaViewer";
 import { type IntegrationObject, type DriftSnapshot } from "~/lib/api";
 import { stripLinks } from "~/lib/format";
 
-function ResponseSchemaViewer({ code, schema, serviceId }: { code: string; schema: any; serviceId: string }) {
+function ResponseSchemaViewer({ code, schema, serviceId }: { code: string; schema: JsonSchemaNode; serviceId: string }) {
   const [isOpen, setIsOpen] = useState(false);
 
   const codeStyle = code.startsWith('2')
@@ -43,7 +44,7 @@ function ResponseSchemaViewer({ code, schema, serviceId }: { code: string; schem
 export interface EndpointDetailsSidebarProps {
   selectedEndpoint: IntegrationObject;
   setSelectedEndpoint: (ep: IntegrationObject | null) => void;
-  srv: any;
+  srv: { id: string };
   drift: DriftSnapshot[];
   driftAction: string | null;
   handleDismiss: (id: string) => void;
@@ -62,7 +63,7 @@ export default function EndpointDetailsSidebar({
   const [reqSchemaOpen, setReqSchemaOpen] = useState(false);
   const [copiedPath, setCopiedPath] = useState(false);
 
-  const isLoading = !(selectedEndpoint as any)._detailsLoaded && !selectedEndpoint.isWebhook;
+  const isLoading = !selectedEndpoint._detailsLoaded && !selectedEndpoint.isWebhook;
 
   let endpointType = "REST API";
   if (selectedEndpoint.isWebhook) {
@@ -82,8 +83,8 @@ export default function EndpointDetailsSidebar({
         onClick={() => setSelectedEndpoint(null)}
       />
       <div className="fixed inset-y-0 right-0 w-full md:w-[600px] bg-white shadow-2xl z-50 overflow-y-auto overflow-x-hidden transform transition-transform border-l border-slate-200 flex flex-col">
-        <div className="p-6 border-b border-slate-100 flex items-center justify-between gap-2 sticky top-0 bg-white/90 backdrop-blur z-10 min-w-0">
-          <div className="flex items-center gap-3 min-w-0 overflow-hidden flex-1">
+        <div className="sticky top-0 z-10 flex min-w-0 items-start justify-between gap-2 border-b border-slate-100 bg-white/90 p-4 backdrop-blur sm:items-center sm:p-6">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 overflow-hidden sm:gap-3">
             <span className={`shrink-0 text-xs font-bold px-2 py-1 rounded ${
               selectedEndpoint.isWebhook ? "bg-purple-100 text-purple-700" :
               selectedEndpoint.method === "SOAP" ? "bg-purple-100 text-purple-700" :
@@ -94,7 +95,7 @@ export default function EndpointDetailsSidebar({
             }`}>
               {selectedEndpoint.isWebhook ? "WEBHOOK" : selectedEndpoint.method}
             </span>
-            <div className="flex items-center gap-1.5 group min-w-0 overflow-hidden">
+            <div className="group flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
               <code className="text-sm text-slate-800 break-all min-w-0 overflow-hidden">{selectedEndpoint.path}</code>
               <button
                 data-track="copy_endpoint_path"
@@ -104,7 +105,7 @@ export default function EndpointDetailsSidebar({
                   setCopiedPath(true);
                   setTimeout(() => setCopiedPath(false), 2000);
                 }}
-                className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-slate-600 transition-opacity cursor-pointer rounded hover:bg-slate-100"
+                className="shrink-0 rounded p-1 text-slate-400 opacity-100 transition-opacity cursor-pointer hover:bg-slate-100 hover:text-slate-600 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100"
                 title="Copy Path"
               >
                 {copiedPath ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
@@ -140,13 +141,13 @@ export default function EndpointDetailsSidebar({
         </div>
 
         {selectedEndpoint.status === "drifted" && drift.some(s => s.integration_object_id === selectedEndpoint.id) && (
-          <div className="bg-orange-50 border-b border-orange-100 p-6">
-            <div className="flex items-center justify-between mb-4">
+          <div className="border-b border-orange-100 bg-orange-50 p-4 sm:p-6">
+            <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <h3 className="text-sm font-bold text-orange-900 flex items-center gap-2">
                 <AlertTriangle className="w-4 h-4 text-orange-600" />
                 Pending Semantic Drift Detected
               </h3>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 {drift.filter(s => s.integration_object_id === selectedEndpoint.id).map(snap => (
                   <div key={snap.id} className="flex gap-2">
                     <button
@@ -189,7 +190,7 @@ export default function EndpointDetailsSidebar({
                           </p>
                         </div>
                       )}
-                      <div className="grid grid-cols-2 divide-x divide-slate-100">
+                      <div className="grid grid-cols-1 divide-y divide-slate-100 sm:grid-cols-2 sm:divide-x sm:divide-y-0">
                         <div className="p-3 bg-red-50/30">
                           <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Previous</div>
                           <pre className="text-xs text-red-900 whitespace-pre-wrap break-words font-mono max-h-[400px] overflow-y-auto custom-scrollbar">
@@ -211,7 +212,7 @@ export default function EndpointDetailsSidebar({
           </div>
         )}
         
-        <div className="p-6 space-y-8 flex-1 flex flex-col">
+        <div className="flex flex-1 flex-col space-y-8 p-4 sm:p-6">
           {isLoading ? (
             <div className="flex-1 flex flex-col items-center justify-center text-slate-400 min-h-[300px]">
               <Loader2 className="w-8 h-8 text-blue-500 animate-spin mb-4" />
@@ -245,8 +246,8 @@ export default function EndpointDetailsSidebar({
               {selectedEndpoint.parameters && selectedEndpoint.parameters.length > 0 && (
                 <div>
                   <h3 className="text-sm font-semibold text-slate-800 mb-3 border-b border-slate-100 pb-2">Parameters</h3>
-                  <div className="bg-slate-50 border border-slate-200 rounded-lg overflow-hidden">
-                    <table className="w-full text-left text-sm">
+                  <div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50">
+                    <table className="min-w-[480px] w-full text-left text-sm">
                       <thead className="bg-slate-100 text-slate-600">
                         <tr>
                           <th className="px-4 py-2 font-medium">Name</th>

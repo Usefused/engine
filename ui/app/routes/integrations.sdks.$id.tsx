@@ -4,18 +4,63 @@ import { ArrowLeft, Download, ChevronDown, ChevronRight, FileCode, Copy, Check, 
 import { api } from "~/lib/api";
 import { useToast } from "~/components/Toast";
 import { readBucketsForSDK } from "~/lib/buckets";
+import { serviceDetailPath } from "~/lib/service-navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { EndpointRow, WebhookRow } from "~/components/EndpointRow";
 import { NotificationBanner } from "~/components/notifications/NotificationBanner";
 import { useWorkspaceNotifications } from "~/components/notifications/useWorkspaceNotifications";
-import { matchesConfig } from "~/components/notifications/notificationHelpers";
+import { isPending, matchesConfig } from "~/components/notifications/notificationHelpers";
+import { PendingDriftSection, type PendingDriftItem } from "~/components/sdk/PendingDrift";
+import { type Bucket } from "~/lib/api";
+
+type SdkSelection = {
+  service_id: string;
+  service_name?: string;
+  service_slug?: string;
+  service_provider?: string;
+  service_version_id?: string;
+  service_version_name?: string;
+  select_all?: boolean;
+  endpoint_ids?: string[];
+  webhook_ids?: string[];
+};
+
+type SdkEndpointRow = {
+  id: string;
+  method?: string;
+  path?: string;
+  name?: string;
+  description?: string;
+  resource_name?: string;
+};
+
+type SdkWebhookRow = {
+  id: string;
+  method?: string;
+  name?: string;
+};
+
+type Sdk = {
+  id: string;
+  name: string;
+  description?: string;
+  version: string;
+  target_type: string;
+  target_language?: string;
+  sandbox_url?: string;
+  is_downloadable?: boolean;
+  created_at?: string;
+  downloads?: number;
+  readme?: string;
+  detailed_selections?: SdkSelection[];
+};
 
 export const meta: MetaFunction = ({ matches }) => {
-  const parentMeta = matches.filter((m: any) => m.id === "root").flatMap((m: any) => m.meta ?? []);
+  const parentMeta = matches.filter((m) => m.id === "root").flatMap((m) => m.meta ?? []);
   return [
-    ...parentMeta.filter((m: any) => !('title' in m)),
-    { title: "SDK Details - Fused" },
+    ...parentMeta.filter((m) => !('title' in m)),
+    { title: "App details - Fused" },
   ];
 };
 
@@ -47,12 +92,12 @@ function LanguageBadge({ targetLanguage }: { targetLanguage?: string }) {
 }
 
 /** Read-only bundled services display — mirrors EndpointSelectionList visual style */
-function BundledServicesSection({ artifactId, selections }: { artifactId: string; selections: any[] }) {
+function BundledServicesSection({ artifactId, selections }: { artifactId: string; selections: SdkSelection[] }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [expandedResourceGroups, setExpandedResourceGroups] = useState<Record<string, boolean>>({});
   const [resourceGroupsData, setResourceGroupsData] = useState<Record<string, string[]>>({});
-  const [endpointsData, setEndpointsData] = useState<Record<string, any[]>>({});
-  const [webhooksData, setWebhooksData] = useState<Record<string, any[]>>({});
+  const [endpointsData, setEndpointsData] = useState<Record<string, SdkEndpointRow[]>>({});
+  const [webhooksData, setWebhooksData] = useState<Record<string, SdkWebhookRow[]>>({});
   const [loadingServices, setLoadingServices] = useState<Record<string, boolean>>({});
   const [loadingEndpoints, setLoadingEndpoints] = useState<Record<string, boolean>>({});
   const toast = useToast();
@@ -69,12 +114,12 @@ function BundledServicesSection({ artifactId, selections }: { artifactId: string
         }
       }
     `;
-    api.graphql<{ sdkSelectionResourceGroups: string[], sdkSelectionWebhooks: any[] }>(query)
+    api.graphql<{ sdkSelectionResourceGroups: string[], sdkSelectionWebhooks: SdkWebhookRow[] }>(query)
       .then(res => {
         setResourceGroupsData(prev => ({ ...prev, [serviceId]: res.sdkSelectionResourceGroups || [] }));
         setWebhooksData(prev => ({ ...prev, [serviceId]: res.sdkSelectionWebhooks || [] }));
       })
-      .catch(e => toast.error("Failed to fetch service metadata"))
+      .catch(() => toast.error("Failed to fetch service metadata"))
       .finally(() => setLoadingServices(prev => ({ ...prev, [serviceId]: false })));
   };
 
@@ -92,11 +137,11 @@ function BundledServicesSection({ artifactId, selections }: { artifactId: string
         }
       }
     `;
-    api.graphql<{ sdkSelectionResources: any[] }>(query)
+    api.graphql<{ sdkSelectionResources: SdkEndpointRow[] }>(query)
       .then(res => {
         setEndpointsData(prev => ({ ...prev, [groupKey]: res.sdkSelectionResources || [] }));
       })
-      .catch(e => toast.error("Failed to fetch endpoints"))
+      .catch(() => toast.error("Failed to fetch operations"))
       .finally(() => setLoadingEndpoints(prev => ({ ...prev, [groupKey]: false })));
   };
 
@@ -122,13 +167,16 @@ function BundledServicesSection({ artifactId, selections }: { artifactId: string
   };
 
   if (!selections || selections.length === 0) {
-    return <p className="text-sm text-slate-400 py-2">No services bundled.</p>;
+    return <p className="text-sm text-slate-400 py-2">No services connected.</p>;
   }
 
   return (
     <div className="rounded-lg border border-slate-200 overflow-hidden divide-y divide-slate-100">
-      {selections.map((sel: any, idx: number) => {
+      {selections.map((sel, idx: number) => {
         const key = sel.service_id ?? String(idx);
+        const canonicalSlug = sel.service_slug && sel.service_provider
+          ? `@${sel.service_provider}/${sel.service_slug}`
+          : sel.service_slug;
         const isOpen = !!expanded[key];
         const webhooks = webhooksData[key] || [];
         const isLoading = loadingServices[key];
@@ -139,35 +187,45 @@ function BundledServicesSection({ artifactId, selections }: { artifactId: string
         return (
           <div key={key}>
             {/* Service header */}
-            <button
-              type="button"
-              onClick={() => toggle(key)}
-              className="w-full flex items-center justify-between px-4 py-3 bg-slate-50 hover:bg-slate-100 transition-colors text-left select-none cursor-pointer"
+            <div
+              className="w-full flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-4 py-3 bg-slate-50 hover:bg-slate-100 transition-colors text-left select-none cursor-pointer"
             >
-              <div className="flex items-center gap-2">
-                {isOpen
-                  ? <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                  : <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />}
-                <Link
-                  to={`/integrations/${sel.service_id}`}
-                  onClick={e => e.stopPropagation()}
-                  className="text-sm font-semibold text-slate-700 hover:text-blue-600 transition-colors"
+              <div className="flex min-w-0 w-full sm:w-auto items-start gap-2">
+                <button
+                  type="button"
+                  onClick={() => toggle(key)}
+                  className="rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-700"
+                  aria-label={`${isOpen ? "Collapse" : "Expand"} ${sel.service_name}`}
                 >
-                  {capitalizeFirstLetter(sel.service_name)}
-                </Link>
-                {sel.service_version_name && (
-                  <span className="text-xs text-slate-500 bg-white border border-slate-200 rounded px-1.5 py-0.5">
-                    {sel.service_version_name}
-                  </span>
-                )}
+                  {isOpen
+                    ? <ChevronDown className="w-3.5 h-3.5 shrink-0" />
+                    : <ChevronRight className="w-3.5 h-3.5 shrink-0" />}
+                </button>
+                <div className="flex min-w-0 flex-1 flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
+                  <a
+                    href={serviceDetailPath(sel.service_id, canonicalSlug)}
+                    className="text-sm font-semibold text-slate-700 hover:text-blue-600 transition-colors"
+                  >
+                    {capitalizeFirstLetter(sel.service_name || "")}
+                  </a>
+                  {sel.service_version_name && (
+                    <span className="max-w-full break-all text-xs text-slate-500 bg-white border border-slate-200 rounded px-1.5 py-0.5">
+                      {sel.service_version_name}
+                    </span>
+                  )}
+                </div>
               </div>
-              <span className="text-xs text-slate-400 shrink-0">
-                {sel.select_all ? "All endpoints" : [
-                  (sel.endpoint_ids?.length || 0) > 0 ? `${sel.endpoint_ids.length} endpoint${sel.endpoint_ids.length !== 1 ? "s" : ""}` : null,
-                  (sel.webhook_ids?.length || 0) > 0 ? `${sel.webhook_ids.length} webhook${sel.webhook_ids.length !== 1 ? "s" : ""}` : null,
+              <button
+                type="button"
+                onClick={() => toggle(key)}
+                className="self-end rounded px-1 py-0.5 text-xs text-slate-400 hover:bg-slate-200 hover:text-slate-700 sm:self-auto shrink-0"
+              >
+                {sel.select_all ? "All operations" : [
+                  (sel.endpoint_ids?.length || 0) > 0 ? `${sel.endpoint_ids?.length} operation${sel.endpoint_ids?.length !== 1 ? "s" : ""}` : null,
+                  (sel.webhook_ids?.length || 0) > 0 ? `${sel.webhook_ids?.length} webhook${sel.webhook_ids?.length !== 1 ? "s" : ""}` : null,
                 ].filter(Boolean).join(" · ") || "0 resources"}
-              </span>
-            </button>
+              </button>
+            </div>
 
             {/* Expanded rows */}
             {isOpen && (
@@ -178,7 +236,7 @@ function BundledServicesSection({ artifactId, selections }: { artifactId: string
                     Loading resources...
                   </div>
                 ) : (resources.length === 0 && webhooks.length === 0) ? (
-                  <div className="px-5 py-4 text-sm text-slate-400 italic text-center">No endpoints or webhooks.</div>
+                  <div className="px-5 py-4 text-sm text-slate-400 italic text-center">No operations or events.</div>
                 ) : (
                   <div className="pb-2">
                     {/* Render Grouped Endpoints */}
@@ -201,10 +259,10 @@ function BundledServicesSection({ artifactId, selections }: { artifactId: string
                           </div>
                           {!isGroupCollapsed && !isEpsLoading && (
                             <div className="divide-y divide-slate-50">
-                              {eps.map((ep: any) => (
+                              {eps.map((ep) => (
                                 <EndpointRow key={ep.id} ep={ep} />
                               ))}
-                              {eps.length === 0 && <div className="px-5 py-4 text-xs text-slate-400">No endpoints found.</div>}
+                              {eps.length === 0 && <div className="px-5 py-4 text-xs text-slate-400">No operations found.</div>}
                             </div>
                           )}
                         </div>
@@ -229,7 +287,7 @@ function BundledServicesSection({ artifactId, selections }: { artifactId: string
                           </div>
                           {!isGroupCollapsed && (
                             <div className="divide-y divide-slate-50">
-                              {webhooks.map((wh: any) => (
+                              {webhooks.map((wh) => (
                                 <WebhookRow key={wh.id} wh={wh} />
                               ))}
                             </div>
@@ -241,73 +299,6 @@ function BundledServicesSection({ artifactId, selections }: { artifactId: string
                 )}
               </div>
             )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-type DriftChangeItem = {
-  field: string;
-  old_value: string;
-  new_value: string;
-  severity: string;
-  description: string;
-};
-
-type PendingDriftItem = {
-  id: string;
-  status: string;
-  integration_object_id: string;
-  webhook_object_id: string | null;
-  diff: DriftChangeItem[];
-};
-
-/** Pending drift detail list -- what changed, not just a count. Endpoint vs
- * webhook is inferred from which ID field is set, and shown with a short ID
- * since this view doesn't resolve human-readable endpoint/webhook names. */
-function PendingDriftSection({ items }: { items: PendingDriftItem[] }) {
-  if (items.length === 0) {
-    return (
-      <div className="bg-slate-50 p-6 rounded-xl border border-slate-200 shadow-sm text-sm text-slate-500">
-        No pending drift. This SDK's endpoints and webhooks match what's currently documented.
-      </div>
-    );
-  }
-
-  return (
-    <div className="rounded-lg border border-slate-200 overflow-hidden divide-y divide-slate-100">
-      {items.map(item => {
-        const isWebhook = !!item.webhook_object_id;
-        const shortId = (isWebhook ? item.webhook_object_id : item.integration_object_id)?.slice(0, 8);
-        return (
-          <div key={item.id} className="p-4 bg-white">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-xs font-semibold uppercase tracking-wider px-2 py-0.5 rounded bg-slate-100 text-slate-600">
-                {isWebhook ? "Webhook" : "Endpoint"}
-              </span>
-              <span className="text-xs text-slate-400 font-mono">{shortId}</span>
-            </div>
-            <div className="space-y-1.5">
-              {item.diff.map((change, idx) => (
-                <div key={idx} className="flex items-start gap-2 text-sm">
-                  {change.severity === "breaking" ? (
-                    <AlertTriangle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-                  ) : (
-                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                  )}
-                  <div>
-                    <span className="text-slate-700">{change.description || change.field}</span>
-                    {change.severity && (
-                      <span className={`ml-2 text-xs font-medium ${change.severity === "breaking" ? "text-red-500" : "text-amber-500"}`}>
-                        {change.severity}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
           </div>
         );
       })}
@@ -372,7 +363,7 @@ export default function SdkDetails() {
   const [searchParams, setSearchParams] = useSearchParams();
   const toast = useToast();
 
-  const [sdk, setSdk] = useState<any>(null);
+  const [sdk, setSdk] = useState<Sdk | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const urlTab = searchParams.get("tab");
@@ -383,7 +374,7 @@ export default function SdkDetails() {
 
   const [versions, setVersions] = useState<Array<{ id: string; version: string; created_at: string }>>([]);
   const [pendingDrift, setPendingDrift] = useState<PendingDriftItem[]>([]);
-  const [bucket, setBucket] = useState<any>(null);
+  const [bucket, setBucket] = useState<Bucket | null>(null);
 
   // Contextual notification banner: filtered to just this SDK/MCP config.
   // config_key follows the Engine's own "sdk:<name>:<version>" /
@@ -399,9 +390,12 @@ export default function SdkDetails() {
     dismiss: dismissNotification,
   } = useWorkspaceNotifications();
   const sdkConfigKey = sdk ? `${sdk.target_type}:${sdk.name}:${sdk.version}` : "";
+  // Keep the detail banner focused on outstanding work; acknowledged
+  // notifications remain visible from the bell and full notifications page.
   const sdkNotifications = sdk
     ? allNotifications.filter((item) =>
-        (sdk.detailed_selections || []).some((sel: any) =>
+        isPending(item) &&
+        (sdk.detailed_selections || []).some((sel) =>
           matchesConfig(item, sdkConfigKey, sel.service_id, sel.service_version_name || "")
         )
       )
@@ -426,6 +420,8 @@ export default function SdkDetails() {
           detailed_selections {
             service_id
             service_name
+            service_slug
+            service_provider
             endpoint_ids
             webhook_ids
             select_all
@@ -435,7 +431,7 @@ export default function SdkDetails() {
         }
       }
     `;
-    api.graphql<{ sdk: any }>(queryStr)
+    api.graphql<{ sdk: Sdk }>(queryStr)
       .then(res => {
         setSdk(res.sdk);
         // Fetch version history once we have the name
@@ -451,7 +447,7 @@ export default function SdkDetails() {
         const defaultBucket = state.buckets.find(b => b.is_default);
         if (defaultBucket) setBucket(defaultBucket);
       }
-    }).catch(e => {
+    }).catch(() => {
       // Ignore failures fetching bucket quietly
     });
   };
@@ -499,6 +495,10 @@ export default function SdkDetails() {
   }, [id]);
 
   useEffect(() => {
+    if (sdk?.name) document.title = `${sdk.name} - Fused`;
+  }, [sdk?.name]);
+
+  useEffect(() => {
     if (!loading && activeTab === "docs" && !sdk?.readme) {
       const next = new URLSearchParams(searchParams);
       next.delete("tab");
@@ -525,15 +525,15 @@ export default function SdkDetails() {
     if (!sdk) return;
     try {
       await api.sdks.download(sdk.id, sdk.name, sdk.version);
-    } catch (err) {
-      toast.error("Failed to download SDK");
+    } catch {
+      toast.error("Failed to download app package");
     }
   };
 
   if (loading) return (
     <div className="flex flex-col items-center justify-center py-20 text-slate-400">
       <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4" />
-      <p className="animate-pulse font-medium text-slate-500">Loading SDK details...</p>
+      <p className="animate-pulse font-medium text-slate-500">Loading app details...</p>
     </div>
   );
 
@@ -541,10 +541,10 @@ export default function SdkDetails() {
     <div className="p-6">
       <Link to="/integrations/sdks" className="inline-flex items-center text-sm text-slate-500 hover:text-slate-800 mb-6 transition-colors">
         <ArrowLeft className="w-4 h-4 mr-2" />
-        Back to SDKs
+        Back to apps
       </Link>
       <div className="bg-red-50 border border-red-200 text-red-600 p-4 rounded-lg">
-        {error || "SDK not found"}
+        {error || "App not found"}
       </div>
     </div>
   );
@@ -553,22 +553,22 @@ export default function SdkDetails() {
     <div className="space-y-6">
       <Link to="/integrations/sdks" className="inline-flex items-center text-sm text-slate-500 hover:text-slate-800 transition-colors">
         <ArrowLeft className="w-4 h-4 mr-2" />
-        Back to SDKs
+        Back to apps
       </Link>
 
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">{sdk.name}</h1>
-          {sdk.description && <p className="text-slate-500 mt-1">{sdk.description}</p>}
-          <div className="flex items-center gap-3 mt-3 text-sm">
+          <p className="text-slate-500 mt-1">A reusable interface for the services and operations this app can use.</p>
+          <div className="flex flex-wrap items-center gap-3 mt-3 text-sm">
             <span className="px-2.5 py-1 bg-slate-100 text-slate-700 rounded font-medium">{sdk.version}</span>
             {sdk.target_type === "sdk" && <LanguageBadge targetLanguage={sdk.target_language} />}
-            <span className="text-slate-600">Generated on {new Date(sdk.created_at).toLocaleDateString()}</span>
+            <span className="text-slate-600">Created {sdk.created_at ? new Date(sdk.created_at).toLocaleDateString() : ""}</span>
             {bucket && (
               <span className="flex items-center gap-1.5 text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
                 <Database className="w-3.5 h-3.5 text-slate-400" />
-                <Link to={`/integrations/buckets/${bucket.id}`} className="hover:text-blue-600 transition-colors">
+                <Link to={`/integrations/buckets?bucket=${encodeURIComponent(bucket.id)}`} className="hover:text-blue-600 transition-colors">
                   {bucket.name}
                 </Link>
               </span>
@@ -579,10 +579,10 @@ export default function SdkDetails() {
         {sdk.is_downloadable && (
           <button
             onClick={handleDownload}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors shadow-sm cursor-pointer"
+            className="inline-flex w-full md:w-auto items-center justify-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors shadow-sm cursor-pointer"
           >
             <Download className="w-4 h-4" />
-            Download Source
+            Download package
           </button>
         )}
       </div>
@@ -599,7 +599,7 @@ export default function SdkDetails() {
       {/* Version switcher */}
       {versions.length > 1 && (
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-xs font-medium text-slate-500 uppercase tracking-wider mr-1">Service Version</span>
+          <span className="text-xs font-medium text-slate-500 uppercase tracking-wider mr-1">App version</span>
           <div className="flex p-1 bg-slate-100/80 rounded-lg gap-0.5 flex-wrap">
             {versions.map(v => (
               <button
@@ -650,7 +650,7 @@ export default function SdkDetails() {
               : "text-slate-500 hover:text-slate-700"
           }`}
         >
-          Analytics
+          Activity
         </button>
       </div>
 
@@ -659,31 +659,34 @@ export default function SdkDetails() {
         {activeTab === "overview" && (
           <div className="space-y-2">
 
-            {/* Bundled Services — plain subsection, no card */}
+            {/* Connected services — plain subsection, no card */}
             <div>
               <h4 className="text-sm font-semibold text-slate-700 uppercase tracking-wider mb-3">
-                Bundled Services
+                Connected services
               </h4>
-              <BundledServicesSection artifactId={sdk.id} selections={sdk.detailed_selections ?? []} />
+              <BundledServicesSection
+                artifactId={sdk.id}
+                selections={sdk.detailed_selections ?? []}
+              />
             </div>
 
             {/* MCP Sandbox URL */}
             {sdk.target_type === "mcp" && sdk.sandbox_url && (
-              <div className="p-6 bg-indigo-50 border border-indigo-100 rounded-xl shadow-sm">
-                <h3 className="text-lg font-semibold text-indigo-900 mb-2">Hosted Sandbox URL</h3>
-                <p className="text-sm text-indigo-700 mb-4 max-w-2xl">
+              <div className="p-6 bg-slate-50 border border-slate-200 rounded-xl shadow-sm">
+                <h3 className="text-lg font-semibold text-slate-900 mb-2">Hosted Sandbox URL</h3>
+                <p className="text-sm text-slate-700 mb-4 max-w-2xl">
                   Use this URL in your MCP client (Cursor, Claude Desktop) to connect to this server instantly without running it locally.
                 </p>
                 <div className="flex items-center gap-3">
-                  <code className="flex-1 px-4 py-3 rounded-lg border border-indigo-200 bg-white text-slate-800 font-mono text-sm break-all">
+                  <code className="flex-1 px-4 py-3 rounded-lg border border-slate-200 bg-white text-slate-800 font-mono text-sm break-all">
                     {sdk.sandbox_url}
                   </code>
                   <button
                     onClick={() => {
-                      navigator.clipboard.writeText(sdk.sandbox_url);
+                      navigator.clipboard.writeText(sdk.sandbox_url || "");
                       toast.success("Sandbox URL copied!");
                     }}
-                    className="p-3 bg-white border border-indigo-200 text-indigo-600 rounded-lg hover:bg-indigo-50 transition-colors shadow-sm cursor-pointer"
+                    className="p-3 bg-white border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 transition-colors shadow-sm cursor-pointer"
                   >
                     <Copy className="w-5 h-5" />
                   </button>
@@ -756,6 +759,7 @@ export default function SdkDetails() {
                   return <hr className="my-10 border-slate-200" {...props} />;
                 },
                 code(props) {
+                  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured out of rest so it isn't spread onto the DOM element
                   const {children, className, node, ...rest} = props;
                   const match = /language-(\w+)/.exec(className || '');
                   return match ? (
@@ -787,11 +791,11 @@ export default function SdkDetails() {
               </div>
 
               <div className="bg-slate-50 p-6 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4">
-                <div className="w-12 h-12 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center">
+                <div className="w-12 h-12 bg-slate-200 text-slate-700 rounded-full flex items-center justify-center">
                   <FileCode className="w-6 h-6" />
                 </div>
                 <div>
-                  <p className="text-sm font-medium text-slate-500">Bundled Services</p>
+                  <p className="text-sm font-medium text-slate-500">Connected services</p>
                   <p className="text-2xl font-bold text-slate-900">{sdk?.detailed_selections?.length || 0}</p>
                 </div>
               </div>

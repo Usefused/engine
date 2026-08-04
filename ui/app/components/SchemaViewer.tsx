@@ -2,8 +2,30 @@ import React, { useState } from "react";
 import { ChevronDown, ChevronRight, Loader2, Link2, AlertCircle, Info } from "lucide-react";
 import { api } from "~/lib/api";
 
+// Loosely-typed JSON Schema node used for the recursive tree renderer below.
+// Deliberately permissive (all fields optional) since real-world schemas from
+// observed webhook payloads / OpenAPI imports vary widely in which fields
+// they populate.
+export interface JsonSchemaNode {
+  $ref?: string;
+  type?: string;
+  properties?: Record<string, JsonSchemaNode>;
+  items?: JsonSchemaNode;
+  required?: string[];
+  format?: string;
+  nullable?: boolean;
+  description?: string;
+  enum?: unknown[];
+  examples?: unknown[];
+  example?: unknown;
+  default?: unknown;
+  oneOf?: JsonSchemaNode[];
+  anyOf?: JsonSchemaNode[];
+  allOf?: JsonSchemaNode[];
+}
+
 // Global cache for fetched $ref components
-const componentCache: Record<string, any> = {};
+const componentCache: Record<string, JsonSchemaNode> = {};
 
 // ─── Type system ──────────────────────────────────────────────────────────────
 
@@ -11,19 +33,20 @@ type SchemaType =
   | "object" | "array" | "string" | "number" | "integer"
   | "boolean" | "null" | "ref" | "oneOf" | "anyOf" | "allOf" | "unknown";
 
-function inferType(node: any): SchemaType {
+function inferType(node: unknown): SchemaType {
   if (!node || typeof node !== "object") return "unknown";
-  if (node.$ref)    return "ref";
-  if (node.oneOf)   return "oneOf";
-  if (node.anyOf)   return "anyOf";
-  if (node.allOf)   return "allOf";
-  if (node.type === "object" || node.properties) return "object";
-  if (node.type === "array"  || node.items)      return "array";
-  if (node.type === "string")  return "string";
-  if (node.type === "number")  return "number";
-  if (node.type === "integer") return "integer";
-  if (node.type === "boolean") return "boolean";
-  if (node.type === "null")    return "null";
+  const obj = node as JsonSchemaNode;
+  if (obj.$ref)    return "ref";
+  if (obj.oneOf)   return "oneOf";
+  if (obj.anyOf)   return "anyOf";
+  if (obj.allOf)   return "allOf";
+  if (obj.type === "object" || obj.properties) return "object";
+  if (obj.type === "array"  || obj.items)      return "array";
+  if (obj.type === "string")  return "string";
+  if (obj.type === "number")  return "number";
+  if (obj.type === "integer") return "integer";
+  if (obj.type === "boolean") return "boolean";
+  if (obj.type === "null")    return "null";
   return "unknown";
 }
 
@@ -89,7 +112,7 @@ function TreeGuide({ children }: { children: React.ReactNode }) {
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 interface SchemaViewerProps {
-  schema: any;
+  schema: JsonSchemaNode | null | undefined;
   serviceId: string;
   isWebhookEvent?: boolean;
 }
@@ -108,7 +131,7 @@ export function SchemaViewer({ schema, serviceId, isWebhookEvent }: SchemaViewer
 // ─── Node dispatcher ──────────────────────────────────────────────────────────
 
 interface NodeProps {
-  node: any;
+  node: unknown;
   serviceId: string;
   depth: number;
   name?: string;
@@ -121,12 +144,12 @@ function SchemaNode({ node, serviceId, depth, name, required, isWebhookEvent }: 
     return <Row name={name} required={required}><PrimitiveVal value={node} /></Row>;
   }
   const type = inferType(node);
-  if (type === "ref")    return <RefNode    refStr={node.$ref}   serviceId={serviceId} depth={depth} name={name} required={required} />;
-  if (type === "object") return <ObjectNode node={node} serviceId={serviceId} depth={depth} name={name} required={required} isWebhookEvent={depth === 0 && isWebhookEvent} />;
-  if (type === "array")  return <ArrayNode  node={node} serviceId={serviceId} depth={depth} name={name} required={required} />;
+  if (type === "ref")    return <RefNode    refStr={(node as JsonSchemaNode).$ref as string} serviceId={serviceId} depth={depth} name={name} required={required} />;
+  if (type === "object") return <ObjectNode node={node as JsonSchemaNode} serviceId={serviceId} depth={depth} name={name} required={required} isWebhookEvent={depth === 0 && isWebhookEvent} />;
+  if (type === "array")  return <ArrayNode  node={node as JsonSchemaNode} serviceId={serviceId} depth={depth} name={name} required={required} />;
   if (type === "oneOf" || type === "anyOf" || type === "allOf")
-    return <CompositeNode node={node} serviceId={serviceId} depth={depth} ctype={type} name={name} required={required} />;
-  return <ScalarNode node={node} type={type} name={name} required={required} />;
+    return <CompositeNode node={node as JsonSchemaNode} serviceId={serviceId} depth={depth} ctype={type} name={name} required={required} />;
+  return <ScalarNode node={node as JsonSchemaNode} type={type} name={name} required={required} />;
 }
 
 // ─── Shared row wrapper ───────────────────────────────────────────────────────
@@ -180,10 +203,10 @@ function Row({
 
 // ─── Scalar ───────────────────────────────────────────────────────────────────
 
-function ScalarNode({ node, type, name, required }: { node: any; type: SchemaType; name?: string; required?: boolean }) {
+function ScalarNode({ node, type, name, required }: { node: JsonSchemaNode; type: SchemaType; name?: string; required?: boolean }) {
   const format     = node.format;
   const desc       = node.description;
-  const enums: any[] = node.enum ?? [];
+  const enums: unknown[] = node.enum ?? [];
   const def        = node.default;
   const ex         = node.example ?? node.examples?.[0];
 
@@ -217,7 +240,7 @@ function ScalarNode({ node, type, name, required }: { node: any; type: SchemaTyp
 
 // ─── Object ───────────────────────────────────────────────────────────────────
 
-function ObjectNode({ node, serviceId, depth, name, required, isWebhookEvent }: NodeProps) {
+function ObjectNode({ node, serviceId, depth, name, required, isWebhookEvent }: { node: JsonSchemaNode; serviceId: string; depth: number; name?: string; required?: boolean; isWebhookEvent?: boolean }) {
   const [open, setOpen] = useState(depth < 2);
   const props      = node.properties ?? {};
   const req: string[] = node.required ?? [];
@@ -260,7 +283,7 @@ function ObjectNode({ node, serviceId, depth, name, required, isWebhookEvent }: 
 
 // ─── Array ────────────────────────────────────────────────────────────────────
 
-function ArrayNode({ node, serviceId, depth, name, required }: NodeProps) {
+function ArrayNode({ node, serviceId, depth, name, required }: { node: JsonSchemaNode; serviceId: string; depth: number; name?: string; required?: boolean }) {
   const [open, setOpen] = useState(depth < 2);
   const items = node.items;
   const desc  = node.description;
@@ -290,9 +313,9 @@ function ArrayNode({ node, serviceId, depth, name, required }: NodeProps) {
 
 // ─── Composite (oneOf / anyOf / allOf) ───────────────────────────────────────
 
-function CompositeNode({ node, serviceId, depth, ctype, name, required }: NodeProps & { ctype: SchemaType }) {
+function CompositeNode({ node, serviceId, depth, ctype, name, required }: { node: JsonSchemaNode; serviceId: string; depth: number; ctype: "oneOf" | "anyOf" | "allOf"; name?: string; required?: boolean }) {
   const [open, setOpen] = useState(depth === 0);
-  const variants: any[] = (node as any)[ctype] ?? [];
+  const variants: JsonSchemaNode[] = node[ctype] ?? [];
   const desc = node.description;
   const LABEL: Record<string, string> = { oneOf: "one of", anyOf: "any of", allOf: "all of" };
 
@@ -325,10 +348,10 @@ function CompositeNode({ node, serviceId, depth, ctype, name, required }: NodePr
 
 // ─── $ref ─────────────────────────────────────────────────────────────────────
 
-function RefNode({ refStr, serviceId, depth, name, required }: { refStr: string; serviceId: string; depth: number; name?: string; required?: boolean }) {
+function RefNode({ refStr, serviceId, name, required }: { refStr: string; serviceId: string; depth: number; name?: string; required?: boolean }) {
   const [open, setOpen]       = useState(false);
   const [loading, setLoading] = useState(false);
-  const [data, setData]       = useState<any>(null);
+  const [data, setData]       = useState<JsonSchemaNode | null>(null);
   const [err, setErr]         = useState<string | null>(null);
   const refName = getRefName(refStr);
 
@@ -344,7 +367,7 @@ function RefNode({ refStr, serviceId, depth, name, required }: { refStr: string;
     setLoading(true);
     setErr(null);
     try {
-      const res = await api.graphql<{ getServiceComponent: any }>(`
+      const res = await api.graphql<{ getServiceComponent: { id: string; name: string; schema: JsonSchemaNode } | null }>(`
         query GetServiceComponent($serviceId: String!, $name: String!) {
           getServiceComponent(serviceId: $serviceId, name: $name) { id name schema }
         }
@@ -357,8 +380,8 @@ function RefNode({ refStr, serviceId, depth, name, required }: { refStr: string;
       } else {
         setErr("Not found");
       }
-    } catch (e: any) {
-      setErr(e.message || "Failed");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Failed");
     } finally {
       setLoading(false);
     }
@@ -395,7 +418,7 @@ function RefNode({ refStr, serviceId, depth, name, required }: { refStr: string;
 
 // ─── Raw primitives ───────────────────────────────────────────────────────────
 
-function PrimitiveVal({ value }: { value: any }) {
+function PrimitiveVal({ value }: { value: unknown }) {
   if (value == null)              return <span className="text-slate-400 italic text-[10px]">null</span>;
   if (typeof value === "string")  return <span className="text-emerald-400 text-[10px] font-mono">"{value}"</span>;
   if (typeof value === "number")  return <span className="text-amber-400   text-[10px] font-mono">{value}</span>;

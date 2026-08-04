@@ -26,7 +26,7 @@ const team = {
   ],
 };
 
-test("renders simple workspace, service, and bucket access controls", () => {
+test("renders simple workspace, service, and credential access controls", () => {
   const html = renderToStaticMarkup(TeamAccessControls({
     team,
     services: [{ id: "service-1", name: "Stripe" }],
@@ -36,7 +36,7 @@ test("renders simple workspace, service, and bucket access controls", () => {
     onArtifactAccessChange() {},
   }));
 
-  for (const label of ["Workspace role", "Builder", "Service access", "Stripe", "Bucket access", "Payments production", "SDK and MCP server access", "Support SDK", "Read", "Share", "No access", "Use", "Manage"]) {
+  for (const label of ["Workspace role", "Builder", "Service access", "Stripe", "Credential access", "Payments production", "App and MCP server access", "Support SDK", "Read", "Share", "No access", "Use", "Manage"]) {
     assert.match(html, new RegExp(label));
   }
   assert.doesNotMatch(html, /webhook/i);

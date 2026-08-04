@@ -97,6 +97,11 @@ type workspaceTestStore struct {
 	webhookEvents               []models.WebhookEvent
 	webhookAnalytics            models.WebhookAnalytics
 	webhookAnalyticsErr         error
+	engineExecutionEvents       []models.EngineExecutionEvent
+	engineExecutionAnalytics    models.EngineExecutionAnalytics
+	engineExecutionAnalyticsErr error
+	workspaceExecutionAnalytics models.WorkspaceExecutionAnalytics
+	workspaceExecutionCalls     int
 	bucketsByName               map[string]*store.Bucket
 	bucketsByID                 map[uuid.UUID]*store.Bucket
 	// secretsByKey/secretLookupKeys/secretLookupErr back GetSecret -- used by
@@ -498,6 +503,15 @@ func (s *workspaceTestStore) ListWorkspaceServices(ctx context.Context, names []
 	return s.workspaceServices, nil
 }
 
+func (s *workspaceTestStore) IsWorkspaceServiceEnabled(ctx context.Context, serviceID uuid.UUID) (bool, error) {
+	for _, service := range s.workspaceServices {
+		if service.ServiceID == serviceID {
+			return true, nil
+		}
+	}
+	return len(s.workspaceServiceVersions[serviceID]) > 0, nil
+}
+
 func (s *workspaceTestStore) ListAuthorizedWorkspaceServices(ctx context.Context, scope accesscontrol.AuthorizedScope, names []string) ([]store.WorkspaceService, error) {
 	services, err := s.ListWorkspaceServices(ctx, names)
 	if err != nil || scope.All {
@@ -620,6 +634,44 @@ func (s *workspaceTestStore) GetWebhookAnalytics(ctx context.Context, accountID,
 		return models.WebhookAnalytics{}, s.webhookAnalyticsErr
 	}
 	return s.webhookAnalytics, nil
+}
+
+func (s *workspaceTestStore) ListEngineExecutionEventsByService(ctx context.Context, filter store.EngineExecutionFilter) ([]models.EngineExecutionEvent, int64, error) {
+	filtered := make([]models.EngineExecutionEvent, 0, len(s.engineExecutionEvents))
+	for _, event := range s.engineExecutionEvents {
+		if event.ServiceID != filter.ServiceID || (filter.Transport != "" && event.Transport != filter.Transport) ||
+			(filter.Direction != "" && event.Direction != filter.Direction) || (filter.Status != "" && event.Status != filter.Status) {
+			continue
+		}
+		if filter.StartDate != nil && event.StartedAt.Before(*filter.StartDate) {
+			continue
+		}
+		if filter.EndDate != nil && event.StartedAt.After(*filter.EndDate) {
+			continue
+		}
+		filtered = append(filtered, event)
+	}
+	total := int64(len(filtered))
+	if filter.Offset >= len(filtered) {
+		return []models.EngineExecutionEvent{}, total, nil
+	}
+	end := filter.Offset + filter.Limit
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	return filtered[filter.Offset:end], total, nil
+}
+
+func (s *workspaceTestStore) GetEngineExecutionAnalyticsByService(ctx context.Context, filter store.EngineExecutionFilter) (models.EngineExecutionAnalytics, error) {
+	if s.engineExecutionAnalyticsErr != nil {
+		return models.EngineExecutionAnalytics{}, s.engineExecutionAnalyticsErr
+	}
+	return s.engineExecutionAnalytics, nil
+}
+
+func (s *workspaceTestStore) GetWorkspaceExecutionAnalytics(ctx context.Context, accountID uuid.UUID, startDate, endDate time.Time) (models.WorkspaceExecutionAnalytics, error) {
+	s.workspaceExecutionCalls++
+	return s.workspaceExecutionAnalytics, nil
 }
 
 func TestAddService_MissingServiceID_400(t *testing.T) {
@@ -1281,6 +1333,35 @@ func (s *workspaceTestStore) ListAuthorizedArtifactScopesByAccount(_ context.Con
 		end = total
 	}
 	return matched[offset:end], total, nil
+}
+
+func (s *workspaceTestStore) ListServiceConsumers(_ context.Context, accountID uuid.UUID, scope accesscontrol.AuthorizedScope, serviceID uuid.UUID) ([]store.ServiceConsumer, error) {
+	allowed := make(map[uuid.UUID]struct{}, len(scope.IDs))
+	for _, id := range scope.IDs {
+		allowed[id] = struct{}{}
+	}
+	consumers := make([]store.ServiceConsumer, 0)
+	for _, artifact := range s.mockScopes {
+		_, permitted := allowed[artifact.ArtifactID]
+		if artifact.AccountID != accountID || (!scope.All && !permitted) {
+			continue
+		}
+		var selections models.SDKSelections
+		if err := json.Unmarshal(artifact.Selections, &selections); err != nil {
+			return nil, err
+		}
+		for _, selection := range selections {
+			if selection.ServiceID == serviceID {
+				consumers = append(consumers, store.ServiceConsumer{
+					ArtifactID: artifact.ArtifactID, Name: artifact.Name, Version: artifact.Version, Kind: artifact.Kind,
+					DeactivatedAt: artifact.DeactivatedAt, ServiceVersionID: selection.ServiceVersionID, SelectAll: selection.SelectAll,
+					OperationCount: len(selection.EndpointIDs) + len(selection.OperationNames),
+					WebhookCount:   len(selection.WebhookIDs) + len(selection.WebhookNames), CreatedAt: artifact.CreatedAt,
+				})
+			}
+		}
+	}
+	return consumers, nil
 }
 
 func (s *workspaceTestStore) GetMCPAnalyticsDashboard(ctx context.Context, artifactID uuid.UUID) (*models.MCPAnalyticsDashboard, error) {

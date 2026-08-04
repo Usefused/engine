@@ -172,6 +172,26 @@ func TestMCPGraphQLHandler_RejectsUnauthenticated(t *testing.T) {
 	assertEngineGraphQLServerTiming(t, rr.Header().Get("Server-Timing"), false)
 }
 
+func TestEngineGraphQLServiceActivityRejectsInactiveService(t *testing.T) {
+	serviceID := uuid.New()
+	s := &workspaceTestStore{accountID: uuid.New(), workspaceID: uuid.New()}
+	h := mountMCPGraphQLTestHandler(t, s)
+	body := `{"query":"query { webhookEvents(service_id: \"` + serviceID.String() + `\") { total } webhookAnalytics(service_id: \"` + serviceID.String() + `\") { total_ingested } engineExecutionEvents(service_id: \"` + serviceID.String() + `\") { total } engineExecutionAnalytics(service_id: \"` + serviceID.String() + `\") { total_calls } }"}`
+	req := httptest.NewRequest(http.MethodPost, "/engine/graphql", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "fsk_test")
+	response := httptest.NewRecorder()
+
+	h(response, req)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "service is not active in this workspace") {
+		t.Fatalf("response = %d %s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), `"total_ingested":`) || strings.Contains(response.Body.String(), `"total_calls":`) || strings.Contains(response.Body.String(), `"total":`) {
+		t.Fatalf("inactive service returned activity data: %s", response.Body.String())
+	}
+}
+
 func assertEngineGraphQLServerTiming(t *testing.T, timing string, wantExecution bool) {
 	t.Helper()
 	for _, want := range []string{"engine_auth;dur=", "engine_total;dur="} {
@@ -375,7 +395,10 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 			}},
 		},
 		mockScopes: map[uuid.UUID]*store.ArtifactScope{
-			artifactID: {AccountID: accountID, ArtifactID: artifactID, Kind: "sdk", CreatedAt: now},
+			artifactID: {
+				AccountID: accountID, ArtifactID: artifactID, Kind: "sdk", Name: "jira-activity-smoke", Version: "1.0.0", CreatedAt: now,
+				Selections: []byte(`[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","operation_names":["issues.list"]}]`),
+			},
 		},
 		listWorkspaceWebhooksResult: []store.WorkspaceWebhook{{
 			ID: uuid.New(), ServiceID: serviceID, ServiceVersionID: serviceVersionID,
@@ -388,6 +411,19 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 		}},
 		webhookAnalytics: models.WebhookAnalytics{
 			TotalIngested: 1, TotalDelivered: 1, TotalRejected: 0, TotalFailed: 0,
+		},
+		engineExecutionEvents: []models.EngineExecutionEvent{{
+			ID: uuid.New(), ArtifactID: artifactID, ServiceID: serviceID, ServiceVersionID: serviceVersionID.String(),
+			Transport: models.EngineExecutionTransportSDK, EndpointName: "issues.list", HTTPMethod: "GET", RequestPath: "/issues",
+			Environment: "production", EnvironmentSource: "provider", ProviderHost: "api.linear.app",
+			Status: models.EngineExecutionStatusSuccess, LatencyMs: 41, StartedAt: now, EndedAt: now, CreatedAt: now,
+		}},
+		engineExecutionAnalytics: models.EngineExecutionAnalytics{
+			TotalCalls: 1, SuccessfulCalls: 1, AverageLatencyMs: 41,
+		},
+		workspaceExecutionAnalytics: models.WorkspaceExecutionAnalytics{
+			EngineExecutionAnalytics: models.EngineExecutionAnalytics{TotalCalls: 1, SuccessfulCalls: 1, P95LatencyMs: 41},
+			ByTransport:              []models.EngineExecutionBreakdown{{Key: "sdk", Label: "SDK", TotalCalls: 1, P95LatencyMs: 41}},
 		},
 		sdkTokens: []store.SDKToken{{
 			ID: tokenID, ArtifactID: artifactID, Name: "default", LastUsedAt: &tokenLastUsedAt, CreatedAt: now,
@@ -460,6 +496,10 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 		workspaceWebhooks(service_id: "` + serviceID.String() + `") { label slug created_at }
 		webhookEvents(service_id: "` + serviceID.String() + `", event_name: "repo.created", limit: 10, offset: 0) { total items { msg_id event_name delivery_status latency_ms credits_consumed created_at } }
 		webhookAnalytics(service_id: "` + serviceID.String() + `", event_name: "repo.created") { total_ingested total_delivered total_rejected total_failed }
+		engineExecutionEvents(service_id: "` + serviceID.String() + `", transport: "sdk", status: "success", limit: 10, offset: 0) { total items { artifact_id artifact_name artifact_kind transport operation http_method request_path environment environment_source provider_host status latency_ms started_at timings { name duration_ms } } }
+		engineExecutionAnalytics(service_id: "` + serviceID.String() + `", transport: "sdk", status: "success") { total_calls successful_calls failed_calls average_latency_ms }
+		workspaceExecutionAnalytics { total_calls successful_calls failed_calls p95_latency_ms by_transport { key total_calls } }
+		serviceConsumers(service_id: "` + serviceID.String() + `") { id name version kind active service_version_id select_all operation_count webhook_count created_at }
 		sdkTokens(artifact_id: "` + artifactID.String() + `") { id artifact_id name created_at last_used_at }
 		sdkBuckets(artifact_id: "` + artifactID.String() + `") { id name is_default }
 		bucketSDKPage(bucket_id: "` + attachedBucketID.String() + `", limit: 10, offset: 0) { total items { id name kind active } }
@@ -533,6 +573,29 @@ func assertWebhookAndTokenGraphQLData(t *testing.T, data map[string]any) {
 	webhookAnalytics := graphQLMap(t, data["webhookAnalytics"], "webhookAnalytics")
 	assertGraphQLField(t, webhookAnalytics, "total_ingested", float64(1), "webhookAnalytics")
 	assertGraphQLField(t, webhookAnalytics, "total_delivered", float64(1), "webhookAnalytics")
+	executionEvents := graphQLMap(t, data["engineExecutionEvents"], "engineExecutionEvents")
+	assertGraphQLField(t, executionEvents, "total", float64(1), "engineExecutionEvents")
+	execution := graphQLMap(t, graphQLList(t, executionEvents["items"], "engineExecutionEvents.items")[0], "engineExecutionEvents.items[0]")
+	assertGraphQLField(t, execution, "operation", "issues.list", "engineExecutionEvents.items[0]")
+	assertGraphQLField(t, execution, "artifact_name", "jira-activity-smoke", "engineExecutionEvents.items[0]")
+	assertGraphQLField(t, execution, "artifact_kind", "sdk", "engineExecutionEvents.items[0]")
+	assertGraphQLField(t, execution, "transport", "sdk", "engineExecutionEvents.items[0]")
+	assertGraphQLField(t, execution, "http_method", "GET", "engineExecutionEvents.items[0]")
+	assertGraphQLField(t, execution, "request_path", "/issues", "engineExecutionEvents.items[0]")
+	assertGraphQLField(t, execution, "provider_host", "api.linear.app", "engineExecutionEvents.items[0]")
+	assertGraphQLField(t, execution, "latency_ms", float64(41), "engineExecutionEvents.items[0]")
+	consumers := graphQLList(t, data["serviceConsumers"], "serviceConsumers")
+	assertGraphQLLen(t, consumers, 1, "serviceConsumers")
+	consumer := graphQLMap(t, consumers[0], "serviceConsumers[0]")
+	assertGraphQLField(t, consumer, "name", "jira-activity-smoke", "serviceConsumers[0]")
+	assertGraphQLField(t, consumer, "kind", "sdk", "serviceConsumers[0]")
+	assertGraphQLField(t, consumer, "operation_count", float64(1), "serviceConsumers[0]")
+	executionAnalytics := graphQLMap(t, data["engineExecutionAnalytics"], "engineExecutionAnalytics")
+	assertGraphQLField(t, executionAnalytics, "total_calls", float64(1), "engineExecutionAnalytics")
+	assertGraphQLField(t, executionAnalytics, "successful_calls", float64(1), "engineExecutionAnalytics")
+	workspaceAnalytics := graphQLMap(t, data["workspaceExecutionAnalytics"], "workspaceExecutionAnalytics")
+	assertGraphQLField(t, workspaceAnalytics, "total_calls", float64(1), "workspaceExecutionAnalytics")
+	assertGraphQLLen(t, graphQLList(t, workspaceAnalytics["by_transport"], "workspaceExecutionAnalytics.by_transport"), 1, "workspaceExecutionAnalytics.by_transport")
 	tokens := graphQLList(t, data["sdkTokens"], "sdkTokens")
 	assertGraphQLLen(t, tokens, 1, "sdkTokens")
 	token := graphQLMap(t, tokens[0], "sdkTokens[0]")

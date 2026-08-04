@@ -5,14 +5,14 @@ import { Loader2, Server, PlayCircle } from "lucide-react";
 import { api, type IntegrationObject, BASE } from "~/lib/api";
 import { getApiKey } from "~/lib/session";
 import EndpointSelectionList from "~/components/EndpointSelectionList";
-import WebhookSelectionList from "~/components/WebhookSelectionList";
+import WebhookSelectionList, { type SelectableEvent } from "~/components/WebhookSelectionList";
 import { useToast } from "~/components/Toast";
 
 const DEFAULT_AGENT_MAX_IMPORT_SELECTIONS = 20;
 
 function getMaxAgentImportSelections() {
   const raw = typeof window !== "undefined"
-    ? (window as Window & { ENV?: { AGENT_MAX_IMPORT_SELECTIONS?: string | number } }).ENV?.AGENT_MAX_IMPORT_SELECTIONS
+    ? window.ENV?.AGENT_MAX_IMPORT_SELECTIONS
     : undefined;
   const parsed = Number.parseInt(String(raw || ""), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_AGENT_MAX_IMPORT_SELECTIONS;
@@ -83,7 +83,7 @@ async function handleWizardEvent(event: WizardEvent, actions: WizardEventActions
     case "extraction_started":
       actions.notifyExtractionStarted();
       actions.setLoading(true);
-      actions.setLoadingMessage(event.message || "Extracting selected endpoints...");
+      actions.setLoadingMessage(event.message || "Finding selected operations...");
       return;
     case "complete":
       await completeWizardEvent(event, actions);
@@ -201,7 +201,7 @@ export default function ExtractionWizard({
     setSelectedEndpoints,
     setSubmitting,
     navigate,
-    notifyExtractionStarted: () => toast.success("Extraction started!"),
+    notifyExtractionStarted: () => toast.success("Operation discovery started."),
     finish: finishWizard,
     sessionId,
   };
@@ -313,23 +313,23 @@ function WizardHeader(props: ExtractionWizardViewProps) {
     <div className="p-6 border-b border-slate-200 flex items-center justify-between sticky top-0 bg-slate-50/90 backdrop-blur z-10">
       <div>
         <div className="flex items-center gap-2">
-          <h1 className="text-xl font-bold text-slate-900 tracking-tight">API Spec Extraction</h1>
-          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-50 text-blue-700 border border-blue-200 uppercase tracking-wider">Automated</span>
+          <h1 className="text-xl font-bold text-slate-900 tracking-tight">Review discovered operations</h1>
+          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[var(--brand-violet-tint)] text-[var(--brand-violet)] border border-[var(--brand-violet)]/20 uppercase tracking-wider">Automated</span>
         </div>
-        <p className="text-xs text-slate-500 mt-1">Select the resources you want to map to your Integration.</p>
+        <p className="text-xs text-slate-500 mt-1">Choose the operations this service should expose.</p>
       </div>
       <button data-track="cancel_extraction" onClick={() => cancelExtraction(props)} className="px-3 py-1.5 text-xs font-medium text-slate-500 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors cursor-pointer border border-transparent">
-        Cancel Process
+        Cancel discovery
       </button>
     </div>
   );
 }
 
 async function cancelExtraction(props: ExtractionWizardViewProps) {
-  const confirmed = await props.toast.confirm("Are you sure you want to cancel the extraction?");
+  const confirmed = await props.toast.confirm("Cancel this service discovery run?");
   if (!confirmed) return;
   api.integrations.cancelSession(props.sessionId).catch(console.error);
-  props.toast.success("Extraction cancelled.");
+  props.toast.success("Discovery cancelled.");
   props.onClose();
 }
 
@@ -338,7 +338,7 @@ function WizardError({ error }: { error: string }) {
   return (
     <div className="bg-red-50 border border-red-200 text-red-700 px-5 py-4 rounded-xl text-sm flex items-start gap-3 shadow-sm mb-6">
       <div className="flex-1">
-        <h3 className="font-semibold text-red-800">Extraction Error</h3>
+        <h3 className="font-semibold text-red-800">Discovery error</h3>
         <p className="text-red-700 mt-1">{error}</p>
       </div>
     </div>
@@ -358,7 +358,7 @@ function WizardLoading({ message }: { message: string }) {
         <div className="absolute inset-0 bg-blue-500/20 animate-pulse" />
         <Loader2 className="w-8 h-8 text-blue-600 animate-spin relative z-10" />
       </div>
-      <h3 className="text-lg font-semibold text-slate-900 mb-2">Analyzing Documentation</h3>
+      <h3 className="text-lg font-semibold text-slate-900 mb-2">Finding operations</h3>
       <p className="text-sm text-slate-500 max-w-sm mx-auto leading-relaxed">{message}</p>
     </div>
   );
@@ -368,12 +368,12 @@ function WizardSelectionForm(props: ExtractionWizardViewProps & { question: Ques
   const endpoints = props.question.endpoints || [];
   const onToggle = (id: string, selected: boolean) => toggleSelection(id, selected, props);
   return (
-    <form onSubmit={props.onSubmit} className="flex flex-col h-full" toolname="submit_extraction_endpoints" tooldescription="Submit the selected endpoints to be extracted by the agent.">
+    <form onSubmit={props.onSubmit} className="flex flex-col h-full" toolname="submit_extraction_endpoints" tooldescription="Add the selected operations to this service definition.">
       <div className="flex-1 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden mb-6">
         <div className="p-5 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center shrink-0"><Server className="w-4 h-4" /></div>
-            <h2 className="text-sm font-semibold text-slate-900">Discovered Endpoints</h2>
+            <h2 className="text-sm font-semibold text-slate-900">Discovered operations</h2>
           </div>
           <button data-track="toggle_select_all_endpoints" type="button" onClick={() => toggleAllSelections(props, endpoints)} className="text-xs font-semibold text-blue-600 hover:text-blue-700 uppercase tracking-wider">
             {selectionLabel(props, endpoints.length)}
@@ -412,7 +412,7 @@ function selectionID(endpoint: IntegrationObject, targetType: string) {
 function toggleSelection(id: string, selected: boolean, props: ExtractionWizardViewProps) {
   const next = new Set(props.selectedEndpoints);
   if (selected && next.size >= props.maxSelections) {
-    props.toast.error(`Select ${props.maxSelections} or fewer endpoints per import batch.`);
+    props.toast.error(`Select ${props.maxSelections} or fewer operations at a time.`);
     return;
   }
   if (selected) next.add(id); else next.delete(id);
@@ -421,7 +421,7 @@ function toggleSelection(id: string, selected: boolean, props: ExtractionWizardV
 
 function SelectionLimitNotice({ count, maxSelections }: { count: number; maxSelections: number }) {
   if (count <= maxSelections) return null;
-  return <div className="px-5 py-3 border-b border-amber-100 bg-amber-50 text-sm text-amber-800">Import up to {maxSelections} endpoints at a time.</div>;
+  return <div className="px-5 py-3 border-b border-amber-100 bg-amber-50 text-sm text-amber-800">Add up to {maxSelections} operations at a time.</div>;
 }
 
 function SelectionList(props: ExtractionWizardViewProps & { endpoints: IntegrationObject[]; onToggle: (id: string, selected: boolean) => void }) {
@@ -431,7 +431,7 @@ function SelectionList(props: ExtractionWizardViewProps & { endpoints: Integrati
   return <EndpointSelectionList endpoints={props.endpoints} selectedIds={props.selectedEndpoints} onToggle={props.onToggle} getId={endpointSelectionID} />;
 }
 
-function webhookSelectionID(endpoint: IntegrationObject) {
+function webhookSelectionID(endpoint: SelectableEvent) {
   return `${endpoint.method}|${endpoint.path}`;
 }
 
@@ -443,7 +443,7 @@ function SubmitSelectionButton(props: ExtractionWizardViewProps) {
   const disabled = props.submitting || props.selectedEndpoints.size === 0 || props.selectedEndpoints.size > props.maxSelections;
   return (
     <div className="flex justify-end gap-3 sticky bottom-0 bg-slate-50 pt-2 pb-6">
-      <button data-track="extract_selected_endpoints" type="submit" disabled={disabled} className="w-full sm:w-auto px-8 py-3 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 disabled:opacity-50 text-white font-medium rounded-xl transition-all flex items-center justify-center gap-2 shadow-sm cursor-pointer">
+      <button data-track="extract_selected_endpoints" type="submit" disabled={disabled} className="w-full sm:w-auto px-8 py-3 bg-slate-950 hover:bg-slate-800 disabled:opacity-50 text-white font-medium rounded-xl transition-all flex items-center justify-center gap-2 shadow-sm cursor-pointer">
         <SubmitSelectionContent submitting={props.submitting} count={props.selectedEndpoints.size} />
       </button>
     </div>
@@ -452,5 +452,5 @@ function SubmitSelectionButton(props: ExtractionWizardViewProps) {
 
 function SubmitSelectionContent({ submitting, count }: { submitting: boolean; count: number }) {
   if (submitting) return <><Loader2 className="w-5 h-5 animate-spin" /><span>Dispatching...</span></>;
-  return <><PlayCircle className="w-5 h-5" /><span>Extract {count} endpoints</span></>;
+  return <><PlayCircle className="w-5 h-5" /><span>Add {count} operations</span></>;
 }

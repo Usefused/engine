@@ -1,9 +1,9 @@
 import { Trash2 } from "lucide-react";
-import { api } from "~/lib/api";
+import { api, type AgentSession } from "~/lib/api";
 import { useToast } from "~/components/Toast";
 
 interface IntegrationsPendingTabProps {
-  activeSessions: any[];
+  activeSessions: AgentSession[];
   setNewSessionId: (id: string) => void;
   onRefresh: () => void;
 }
@@ -19,16 +19,16 @@ export default function IntegrationsPendingTab({
     <div className="mb-6 space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-semibold text-slate-900">Pending Integrations</h2>
+          <h2 className="text-lg font-semibold text-slate-900">Service discovery runs</h2>
           <p className="text-sm text-slate-500 mt-1">
-            Background generation tasks that are actively running or were recently interrupted.
+            Review service definitions that are still running or need your attention.
           </p>
         </div>
       </div>
       
       {activeSessions.length === 0 ? (
           <div className="text-center py-16 text-slate-400 bg-white rounded-xl border border-slate-200">
-            <p className="text-sm">No pending integrations</p>
+            <p className="text-sm">No active discovery runs</p>
           </div>
       ) : (
         <div className="grid gap-3">
@@ -71,19 +71,19 @@ export default function IntegrationsPendingTab({
                 <button
                   data-track="delete_pending_integration"
                   onClick={async () => {
-                    const confirmed = await toast.confirm("Are you sure you want to delete this pending integration?");
+                    const confirmed = await toast.confirm("Delete this service discovery run?");
                     if (confirmed) {
                       try {
                         await api.integrations.deleteSession(sess.id);
                         onRefresh(); // Re-fetch active sessions
-                        toast.success("Pending integration deleted successfully.");
-                      } catch (e: any) {
-                        toast.error(e.message || "Failed to delete session");
+                        toast.success("Discovery run deleted.");
+                      } catch (e) {
+                        toast.error(e instanceof Error ? e.message : "Failed to delete session");
                       }
                     }
                   }}
                   className="p-2 text-red-500 hover:text-red-700 bg-red-50 hover:bg-red-100 rounded-lg transition-colors cursor-pointer"
-                  title="Delete Session"
+                  title="Delete discovery run"
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>

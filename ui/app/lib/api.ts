@@ -43,7 +43,7 @@ async function req<T>(
 ): Promise<T> {
   const base = getBaseURL();
   const envToken =
-    typeof window !== "undefined" ? (window as any).ENV?.API_KEY : null;
+    typeof window !== "undefined" ? window.ENV?.API_KEY : null;
   const key = serverToken || envToken || getApiKey() || "";
   const res = await fetch(`${base}${path}`, {
     ...init,
@@ -155,9 +155,15 @@ export interface Service {
   watch_for_drift: boolean;
   is_owner: boolean;
   webhook_count?: number;
+  webhooks?: WebhookObject[];
   endpoint_count?: number;
   event_extraction_path?: string;
-  incoming_webhook_config?: any;
+  incoming_webhook_config?: {
+    auth_type?: string;
+    auth_location?: string;
+    auth_key_name?: string;
+    signature_header?: string;
+  };
   connect_config?: {
     auth_type?: "oauth" | "oidc";
     resource_input?: {
@@ -169,7 +175,6 @@ export interface Service {
       }>;
     };
   };
-  webhooks?: WebhookObject[];
   webhook_slug?: string;
   created_at: string;
   updated_at: string;
@@ -267,6 +272,9 @@ export interface IntegrationObject {
   updated_at: string;
   status: "active" | "drifted" | "updating";
   isWebhook?: boolean;
+  // UI-only bookkeeping flag set after lazily fetching full endpoint details
+  // (description/schemas) for the details sidebar; never sent by the API.
+  _detailsLoaded?: boolean;
 }
 
 export interface ServiceGenerationResult {
@@ -291,6 +299,17 @@ export interface EndpointIdentifier {
   name?: string;
 }
 
+export interface AgentSession {
+  id: string;
+  service_name?: string;
+  target_type?: string;
+  state: string;
+  error?: string;
+  source_url?: string;
+  pending_question?: string;
+  updated_at: string;
+}
+
 export interface WebhookIdentifier {
   name: string;
   method: string;
@@ -298,8 +317,8 @@ export interface WebhookIdentifier {
 
 export interface PreviewOpenAPIResult {
   serviceName: string;
-  integrations?: any[];
-  webhooks?: any[];
+  integrations?: Record<string, unknown>[];
+  webhooks?: Record<string, unknown>[];
 }
 
 export interface SpecificationImportPlan {
@@ -477,6 +496,7 @@ export interface WebhookEventEntry {
   status: string;
   delivery_status: string;
   verification_status: string;
+  environment: string;
   latency_ms: number;
   retry_count: number;
   credits_consumed: number;
@@ -491,6 +511,110 @@ export interface WebhookAnalyticsSummary {
   total_delivered: number;
   total_rejected: number;
   total_failed: number;
+}
+
+export interface EngineExecutionEventEntry {
+  id: string;
+  trace_id?: string;
+  span_id?: string;
+  artifact_id: string;
+  artifact_name?: string;
+  artifact_kind?: "sdk" | "mcp";
+  transport: "sdk" | "mcp" | "webhook";
+  direction: "inbound" | "outbound";
+  service_id: string;
+  service_version_id: string;
+  operation_id?: string;
+  webhook_id?: string;
+  operation: string;
+  event_name?: string;
+  http_method?: string;
+  request_path?: string;
+  environment: string;
+  environment_source?: string;
+  provider_host?: string;
+  provider_http_status?: number;
+  provider_status_class?: string;
+  status: "success" | "failed";
+  failure_reason?: string;
+  failure_category?: string;
+  failure_code?: string;
+  latency_ms: number;
+  provider_latency_ms?: number;
+  attempt_count: number;
+  request_bytes: number;
+  response_bytes: number;
+  verification_status?: string;
+  delivery_status?: string;
+  idempotency_replayed: boolean;
+  started_at: string;
+  ended_at: string;
+  timings: Array<{ name: string; duration_ms: number }>;
+}
+
+export interface EngineExecutionAnalyticsSummary {
+  total_calls: number;
+  successful_calls: number;
+  failed_calls: number;
+  average_latency_ms: number;
+  median_latency_ms: number;
+  p95_latency_ms: number;
+}
+
+export interface EngineExecutionBreakdown {
+  key: string;
+  label: string;
+  total_calls: number;
+  failed_calls: number;
+  p95_latency_ms: number;
+}
+
+export interface EngineExecutionFailure {
+  id: string;
+  service_id: string;
+  service_name: string;
+  operation: string;
+  transport: string;
+  failure_category?: string;
+  failure_code?: string;
+  failure_reason?: string;
+  latency_ms: number;
+  started_at: string;
+}
+
+export interface WorkspaceExecutionAnalytics extends EngineExecutionAnalyticsSummary {
+  by_service: EngineExecutionBreakdown[];
+  by_transport: EngineExecutionBreakdown[];
+  recent_failures: EngineExecutionFailure[];
+}
+
+export interface PublicServiceInsights {
+  source: "fused_engines_aggregate";
+  generated_at: string;
+  data_through?: string;
+  partial_data: boolean;
+  total_calls: number;
+  successful_calls: number;
+  failed_calls: number;
+  p50_latency_ms: number;
+  p95_latency_ms: number;
+  time_series: EngineExecutionBreakdown[];
+  top_operations: EngineExecutionBreakdown[];
+  version_breakdown: EngineExecutionBreakdown[];
+  transport_breakdown: EngineExecutionBreakdown[];
+}
+
+export interface ServiceConsumerEntry {
+  id: string;
+  name: string;
+  version?: string;
+  kind: "sdk" | "mcp";
+  active: boolean;
+  service_version_id: string;
+  select_all: boolean;
+  operation_count: number;
+  webhook_count: number;
+  created_at: string;
 }
 
 export interface Bucket {
@@ -648,8 +772,8 @@ export const api = {
     getPricing: () => req<CreditsPricing>("/credits/pricing"),
   },
 
-  graphql: <T>(query: string, variables?: any, serverToken?: string) =>
-    req<{ data: T; errors?: any[] }>(
+  graphql: <T>(query: string, variables?: Record<string, unknown>, serverToken?: string) =>
+    req<{ data: T; errors?: { message: string }[] }>(
       "/graphql",
       {
         method: "POST",
@@ -666,8 +790,8 @@ export const api = {
   // reactivate/delete + analytics -- internal/engine/api/mcp_graphql.go),
   // a separate endpoint from api.graphql above, which is a pure Registry
   // forward-proxy with no MCP-aware resolvers of its own.
-  mcpGraphql: <T>(query: string, variables?: any) =>
-    req<{ data: T; errors?: any[] }>("/engine/graphql", {
+  mcpGraphql: <T>(query: string, variables?: Record<string, unknown>) =>
+    req<{ data: T; errors?: { message: string }[] }>("/engine/graphql", {
       method: "POST",
       body: JSON.stringify({ query, variables }),
     }).then((res) => {
@@ -756,7 +880,7 @@ export const api = {
         }),
       }),
 
-    getActiveSessions: () => req<any[]>("/integrations/sessions/active"),
+    getActiveSessions: () => req<AgentSession[]>("/integrations/sessions/active"),
 
     recoverSession: (sessionId: string) =>
       req<void>(`/integrations/session/${sessionId}/recover`, {
@@ -770,7 +894,7 @@ export const api = {
       req<void>(`/integrations/session/${sessionId}`, { method: "DELETE" }),
 
     getSession: (sessionId: string) =>
-      req<any>(`/integrations/session/${sessionId}`),
+      req<AgentSession>(`/integrations/session/${sessionId}`),
 
     delete: (id: string) =>
       req<void>(`/integrations/${id}`, { method: "DELETE" }),
@@ -987,6 +1111,7 @@ export const api = {
                 status
                 delivery_status
                 verification_status
+                environment
                 latency_ms
                 retry_count
                 credits_consumed
@@ -1032,6 +1157,169 @@ export const api = {
           }
         )
         .then(({ webhookAnalytics }) => webhookAnalytics),
+
+    listEngineExecutionEvents: (params: {
+      serviceId: string;
+      transport?: string;
+      direction?: string;
+      status?: string;
+      limit?: number;
+      offset?: number;
+      startDate?: string;
+      endDate?: string;
+    }) =>
+      api
+        .mcpGraphql<{
+          engineExecutionEvents: {
+            items: EngineExecutionEventEntry[];
+            total: number;
+          };
+        }>(
+          `query EngineExecutionEvents($serviceId: String!, $transport: String, $direction: String, $status: String, $limit: Int, $offset: Int, $startDate: String, $endDate: String) {
+            engineExecutionEvents(service_id: $serviceId, transport: $transport, direction: $direction, status: $status, limit: $limit, offset: $offset, start_date: $startDate, end_date: $endDate) {
+              total
+              items {
+                id
+                trace_id
+                span_id
+                artifact_id
+                artifact_name
+                artifact_kind
+                transport
+                direction
+                service_id
+                service_version_id
+                operation_id
+                webhook_id
+                operation
+                event_name
+                http_method
+                request_path
+                environment
+                environment_source
+                provider_host
+                provider_http_status
+                provider_status_class
+                status
+                failure_reason
+                failure_category
+                failure_code
+                latency_ms
+                provider_latency_ms
+                attempt_count
+                request_bytes
+                response_bytes
+                verification_status
+                delivery_status
+                idempotency_replayed
+                started_at
+                ended_at
+                timings { name duration_ms }
+              }
+            }
+          }`,
+          {
+            serviceId: params.serviceId,
+            transport: params.transport || null,
+            direction: params.direction || null,
+            status: params.status || null,
+            limit: params.limit ?? null,
+            offset: params.offset ?? null,
+            startDate: params.startDate || null,
+            endDate: params.endDate || null,
+          }
+        )
+        .then(({ engineExecutionEvents }) => engineExecutionEvents),
+
+    getEngineExecutionAnalytics: (params: {
+      serviceId: string;
+      transport?: string;
+      direction?: string;
+      status?: string;
+      startDate?: string;
+      endDate?: string;
+    }) =>
+      api
+        .mcpGraphql<{
+          engineExecutionAnalytics: EngineExecutionAnalyticsSummary;
+        }>(
+          `query EngineExecutionAnalytics($serviceId: String!, $transport: String, $direction: String, $status: String, $startDate: String, $endDate: String) {
+            engineExecutionAnalytics(service_id: $serviceId, transport: $transport, direction: $direction, status: $status, start_date: $startDate, end_date: $endDate) {
+              total_calls
+              successful_calls
+              failed_calls
+              average_latency_ms
+              median_latency_ms
+              p95_latency_ms
+            }
+          }`,
+          {
+            serviceId: params.serviceId,
+            transport: params.transport || null,
+            direction: params.direction || null,
+            status: params.status || null,
+            startDate: params.startDate || null,
+            endDate: params.endDate || null,
+          }
+        )
+        .then(({ engineExecutionAnalytics }) => engineExecutionAnalytics),
+
+    getWorkspaceExecutionAnalytics: (params: { startDate?: string; endDate?: string } = {}) =>
+	  api
+		.mcpGraphql<{ workspaceExecutionAnalytics: WorkspaceExecutionAnalytics }>(
+		  `query WorkspaceExecutionAnalytics($startDate: String, $endDate: String) {
+			workspaceExecutionAnalytics(start_date: $startDate, end_date: $endDate) {
+			  total_calls successful_calls failed_calls average_latency_ms median_latency_ms p95_latency_ms
+			  by_service { key label total_calls failed_calls p95_latency_ms }
+			  by_transport { key label total_calls failed_calls p95_latency_ms }
+			  recent_failures { id service_id service_name operation transport failure_category failure_code failure_reason latency_ms started_at }
+			}
+		  }`,
+		  { startDate: params.startDate || null, endDate: params.endDate || null }
+		)
+		.then(({ workspaceExecutionAnalytics }) => workspaceExecutionAnalytics),
+
+    getPublicServiceInsights: (params: {
+      serviceId: string;
+      startDate: string;
+      endDate: string;
+      granularity?: "hour" | "day";
+    }) =>
+      api
+        .mcpGraphql<{ publicServiceInsights: PublicServiceInsights }>(
+          `query PublicServiceInsights($serviceId: String!, $startDate: String!, $endDate: String!, $granularity: String) {
+            publicServiceInsights(service_id: $serviceId, start_date: $startDate, end_date: $endDate, granularity: $granularity) {
+              source generated_at data_through partial_data total_calls successful_calls failed_calls p50_latency_ms p95_latency_ms
+              time_series { key label total_calls failed_calls p50_latency_ms p95_latency_ms }
+              top_operations { key label total_calls failed_calls p50_latency_ms p95_latency_ms }
+              version_breakdown { key label total_calls failed_calls p50_latency_ms p95_latency_ms }
+              transport_breakdown { key label total_calls failed_calls p50_latency_ms p95_latency_ms }
+            }
+          }`,
+          { serviceId: params.serviceId, startDate: params.startDate, endDate: params.endDate, granularity: params.granularity || "day" }
+        )
+        .then(({ publicServiceInsights }) => publicServiceInsights),
+
+    listServiceConsumers: (serviceId: string) =>
+      api
+        .mcpGraphql<{ serviceConsumers: ServiceConsumerEntry[] }>(
+          `query ServiceConsumers($serviceId: String!) {
+            serviceConsumers(service_id: $serviceId) {
+              id
+              name
+              version
+              kind
+              active
+              service_version_id
+              select_all
+              operation_count
+              webhook_count
+              created_at
+            }
+          }`,
+          { serviceId }
+        )
+        .then(({ serviceConsumers }) => serviceConsumers),
 
     createBucket: (name: string) =>
       req<Bucket>("/workspace/buckets", {

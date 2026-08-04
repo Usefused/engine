@@ -2,15 +2,31 @@ import { useState, useEffect } from "react";
 import { Link, useNavigate, useSearchParams, type MetaFunction } from "@remix-run/react";
 
 export const meta: MetaFunction = ({ matches }) => {
-  const parentMeta = matches.filter((m: any) => m.id === "root").flatMap((m: any) => m.meta ?? []);
+  const parentMeta = matches.filter((m) => m.id === "root").flatMap((m) => m.meta ?? []);
   return [
-    ...parentMeta.filter((m: any) => !('title' in m)),
-    { title: "SDK History - Fused" },
+    ...parentMeta.filter((m) => !('title' in m)),
+    { title: "Apps - Fused" },
   ];
 };
 import { Download, Package, Plus, Trash2, RefreshCw, Loader2, Search, X } from "lucide-react";
 import { api } from "~/lib/api";
 import { useToast } from "~/components/Toast";
+
+interface SdkListItem {
+  id: string;
+  name: string;
+  description?: string;
+  version: string;
+  target_type: string;
+  target_language?: string;
+  sandbox_url?: string;
+  is_downloadable?: boolean;
+  has_update_available?: boolean;
+  has_deprecated_endpoints?: boolean;
+  created_at?: string;
+  killed_at?: string;
+  downloads?: number;
+}
 
 function LanguageBadge({ targetLanguage }: { targetLanguage?: string }) {
   if (targetLanguage === "python") {
@@ -37,7 +53,7 @@ function LanguageBadge({ targetLanguage }: { targetLanguage?: string }) {
 export default function SdkHistory() {
   const toast = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [sdks, setSdks] = useState<any[]>([]);
+  const [sdks, setSdks] = useState<SdkListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [query, setQuery] = useState(searchParams.get("q") ?? "");
@@ -71,12 +87,12 @@ export default function SdkHistory() {
         }
       }
     `;
-    api.graphql<{ sdks: { items: any[]; total: number } }>(queryStr)
+    api.graphql<{ sdks: { items: SdkListItem[]; total: number } }>(queryStr)
       .then(res => {
         setSdks(res.sdks.items ?? []);
         setSelectedIds([]);
       })
-      .catch(e => setError(e.message))
+      .catch(e => setError(e instanceof Error ? e.message : "Failed to load apps"))
       .finally(() => setLoading(false));
   };
 
@@ -120,13 +136,13 @@ export default function SdkHistory() {
           }
         }
       `;
-      const res = await api.graphql<{ sdkByName: any }>(queryStr, { name: searchName, version: searchVersion });
+      const res = await api.graphql<{ sdkByName: SdkListItem | null }>(queryStr, { name: searchName, version: searchVersion });
       if (res.sdkByName) {
         setSdks([res.sdkByName]);
       } else {
         setSdks([]);
       }
-    } catch (e: unknown) {
+    } catch {
       setSdks([]);
     } finally {
       setSearching(false);
@@ -165,7 +181,7 @@ export default function SdkHistory() {
   const handleDownload = async (id: string, name: string, version: string) => {
     try {
       await api.sdks.download(id, name, version);
-    } catch (err) {
+    } catch {
       toast.error("Failed to download SDK");
     }
   };
@@ -178,8 +194,8 @@ export default function SdkHistory() {
       fetchSdks();
       toast.success(`SDK "${name}" deleted successfully.`);
       setSelectedIds(prev => prev.filter(i => i !== id));
-    } catch (err: any) {
-      toast.error(`Failed to delete SDK: ${err.message || "Unknown error"}`);
+    } catch (err) {
+      toast.error(`Failed to delete SDK: ${err instanceof Error ? err.message : "Unknown error"}`);
     }
   };
 
@@ -194,8 +210,8 @@ export default function SdkHistory() {
       fetchSdks();
       setSelectedIds([]);
       toast.success(`Successfully deleted ${selectedIds.length} SDK(s).`);
-    } catch (err: any) {
-      toast.error(`Failed to delete some SDKs: ${err.message || "Unknown error"}`);
+    } catch (err) {
+      toast.error(`Failed to delete some SDKs: ${err instanceof Error ? err.message : "Unknown error"}`);
       fetchSdks();
     } finally {
       setIsDeletingMultiple(false);
@@ -209,24 +225,24 @@ export default function SdkHistory() {
       await api.sdks.upgradeAsync(id);
       toast.success("Upgrade started! A new SDK will appear in your history shortly.");
       fetchSdks();
-    } catch (err: any) {
-      toast.error(`Failed to upgrade SDK: ${err.message || "Unknown error"}`);
+    } catch (err) {
+      toast.error(`Failed to upgrade SDK: ${err instanceof Error ? err.message : "Unknown error"}`);
     }
   };
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold text-slate-900">SDKs</h1>
-          <p className="text-slate-500 text-sm mt-1">Manage and track your generated SDK packages.</p>
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h1 className="text-xl font-semibold text-slate-900">Apps</h1>
+          <p className="text-slate-500 text-sm mt-1">Choose which services and operations an app can use.</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex w-full sm:w-auto items-center gap-3">
           {selectedIds.length > 0 && (
             <button
               onClick={handleDeleteMultiple}
               disabled={isDeletingMultiple}
-              className="inline-flex items-center gap-2 px-4 py-2 bg-rose-50 text-rose-600 hover:bg-rose-100 text-sm font-medium rounded-lg transition-all border border-rose-200 cursor-pointer"
+              className="inline-flex flex-1 sm:flex-none items-center justify-center gap-2 px-4 py-2 bg-rose-50 text-rose-600 hover:bg-rose-100 text-sm font-medium rounded-lg transition-all border border-rose-200 cursor-pointer"
             >
               <Trash2 className="w-4 h-4" />
               {isDeletingMultiple ? "Deleting..." : `Delete Selected (${selectedIds.length})`}
@@ -234,10 +250,10 @@ export default function SdkHistory() {
           )}
           <Link
             to="/integrations/sdk-builder"
-            className="inline-flex items-center shadow-blue-200 gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors shadow-sm cursor-pointer"
+            className="inline-flex flex-1 sm:flex-none items-center justify-center gap-2 px-4 py-2 bg-slate-950 hover:bg-slate-800 text-white text-sm font-medium rounded-lg transition-colors shadow-sm cursor-pointer"
           >
             <Plus className="w-4 h-4" />
-            Create
+            Create app
           </Link>
         </div>
       </div>
@@ -262,7 +278,7 @@ export default function SdkHistory() {
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search by SDK name..."
+          placeholder="Search apps..."
           className="w-full text-sm border border-slate-300 rounded-lg pl-9 pr-8 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
         {query && (
@@ -291,29 +307,29 @@ export default function SdkHistory() {
         <div className="bg-white rounded-xl border border-slate-200 p-12 text-center">
           <Package className="w-12 h-12 text-slate-300 mx-auto mb-4" />
           <h3 className="text-lg font-medium text-slate-900 mb-1">
-            {query ? "No SDKs Found" : "No SDKs Generated"}
+            {query ? "No apps found" : "No apps yet"}
           </h3>
           <p className="text-slate-500 max-w-md mx-auto">
             {query 
-              ? "We couldn't find any SDKs matching your search." 
-              : "You haven't generated any SDKs yet. Search for a service to get started."}
+              ? "No apps match your search."
+              : "Create an app to give it reusable access to selected services and operations."}
           </p>
           {!query && (
             <Link
               to="/integrations/sdk-builder"
-              className="mt-5 inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors shadow-sm cursor-pointer"
+              className="mt-5 inline-flex items-center gap-2 px-4 py-2 bg-slate-950 hover:bg-slate-800 text-white text-sm font-medium rounded-lg transition-colors shadow-sm cursor-pointer"
             >
               <Plus className="w-4 h-4" />
-              Search services
+              Create app
             </Link>
           )}
         </div>
       ) : (
         <div className="bg-white rounded-xl border border-slate-200 overflow-x-auto">
-          <table className="w-full text-left text-sm whitespace-nowrap">
+          <table className="w-full table-fixed md:table-auto text-left text-sm whitespace-nowrap">
             <thead className="bg-slate-50 border-b border-slate-200 text-slate-500">
               <tr>
-                <th className="px-6 py-4 font-medium">
+                <th className="w-[55%] md:w-auto px-3 sm:px-6 py-4 font-medium">
                   <div className="flex items-center gap-3">
                     <div className="flex items-center justify-center w-8 h-8">
                       <div className={`transition-opacity duration-200 ${selectedIds.length > 0 ? 'opacity-100' : 'opacity-0'}`}>
@@ -331,24 +347,24 @@ export default function SdkHistory() {
                         />
                       </div>
                     </div>
-                    <span>Package</span>
+                    <span>App</span>
                   </div>
                 </th>
-                <th className="px-6 py-4 font-medium">Version</th>
-                <th className="px-6 py-4 font-medium">Downloads</th>
-                <th className="px-6 py-4 font-medium">Date</th>
-                <th className="px-6 py-4 font-medium text-right">Action</th>
+                <th className="w-[25%] md:w-auto px-2 sm:px-6 py-4 font-medium">Version</th>
+                <th className="hidden md:table-cell px-6 py-4 font-medium">Downloads</th>
+                <th className="hidden lg:table-cell px-6 py-4 font-medium">Date</th>
+                <th className="w-[20%] md:w-auto px-2 sm:px-6 py-4 font-medium text-right">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {sdks.map((sdk: any) => (
+              {sdks.map((sdk) => (
                 <tr
                   key={sdk.id}
                   className="hover:bg-slate-50/50 transition-colors cursor-pointer group"
                   onClick={() => navigate(`/integrations/sdks/${sdk.id}`)}
                 >
-                  <td className="px-6 py-4">
-                    <div className="flex items-center gap-3">
+                  <td className="px-3 sm:px-6 py-4 min-w-0">
+                    <div className="flex min-w-0 items-center gap-2 sm:gap-3">
                       <div className="relative w-8 h-8 rounded shrink-0">
                         <div className={`absolute inset-0 z-10 bg-white/90 rounded flex items-center justify-center transition-opacity duration-200 ${selectedIds.length > 0 || selectedIds.includes(sdk.id) ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}`} onClick={(e) => e.stopPropagation()}>
                           <input
@@ -364,10 +380,10 @@ export default function SdkHistory() {
                           <Package className="w-4 h-4" />
                         </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-semibold text-slate-900">{sdk.name}</span>
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="block min-w-0 truncate font-semibold text-slate-900">{sdk.name}</span>
                         {sdk.target_type === "mcp" && (
-                          <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-100 text-indigo-700 uppercase tracking-wider">
+                          <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-slate-200 text-slate-700 uppercase tracking-wider">
                             MCP
                           </span>
                         )}
@@ -377,7 +393,7 @@ export default function SdkHistory() {
                       </div>
                     </div>
                   </td>
-                  <td className="px-6 py-4">
+                  <td className="px-2 sm:px-6 py-4">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-700 border border-slate-200">
                         {sdk.version}
@@ -399,22 +415,22 @@ export default function SdkHistory() {
                       )}
                     </div>
                   </td>
-                  <td className="px-6 py-4 text-slate-500 font-medium">
+                  <td className="hidden md:table-cell px-6 py-4 text-slate-500 font-medium">
                     {sdk.downloads || 0}
                   </td>
-                  <td className="px-6 py-4 text-slate-500">
-                    {new Date(sdk.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                  <td className="hidden lg:table-cell px-6 py-4 text-slate-500">
+                    {sdk.created_at ? new Date(sdk.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : ""}
                   </td>
-                  <td className="px-6 py-4 text-right">
-                    <div className="flex justify-end gap-2">
+                  <td className="px-2 sm:px-6 py-4 text-right">
+                    <div className="flex justify-end gap-1 sm:gap-2">
                       {sdk.has_update_available && (
                         <button
                           onClick={(e) => { e.stopPropagation(); handleUpgrade(sdk.id, sdk.name); }}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors shadow-sm cursor-pointer"
+                          className="inline-flex h-8 w-8 md:w-auto items-center justify-center gap-1.5 md:px-3 md:py-1.5 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors shadow-sm cursor-pointer"
                           title="1-Click Upgrade"
                         >
                           <RefreshCw className="w-4 h-4" />
-                          Upgrade
+                          <span className="hidden md:inline">Upgrade</span>
                         </button>
                       )}
                       {sdk.is_downloadable ? (

@@ -8,6 +8,7 @@ import {
 } from "~/lib/api";
 import { BucketPagination } from "~/components/buckets/BucketPagination";
 import { BucketServiceSelect } from "~/components/buckets/BucketServiceSelect";
+import { serviceDetailPath } from "~/lib/service-navigation";
 
 type BucketOverviewProps = {
   sdks: BucketSDKSummary[];
@@ -41,9 +42,9 @@ export function BucketOverview({
   return (
     <section className="grid gap-4 border-b border-slate-100 px-6 py-4 lg:grid-cols-2">
       <OverviewList
-        title="Linked Artefacts"
+        title="Apps using this set"
         total={sdkTotal}
-        empty="No SDKs linked to this bucket."
+        empty="No apps use this credential set yet."
         page={sdkPage}
         pageSize={pageSize}
         onPageChange={onSDKPageChange}
@@ -53,7 +54,7 @@ export function BucketOverview({
         ))}
       </OverviewList>
       <OverviewList
-        title="Linked Services"
+        title="Services using this set"
         total={serviceTotal}
         empty={serviceEmptyText(serviceSearch)}
         page={servicePage}
@@ -63,13 +64,13 @@ export function BucketOverview({
           <BucketServiceSelect
             id="bucket-linked-service-search"
             label="Service"
-            placeholder="All linked services"
+            placeholder="All services"
             options={bucketServiceOptions(services)}
             search={serviceSearch}
             className="w-64"
             hideLabel
             allowAll
-            allLabel="All linked services"
+            allLabel="All services"
             onSearchChange={onServiceSearchChange}
           />
         }
@@ -154,7 +155,7 @@ function SDKRow({ sdk }: { sdk: BucketSDKSummary }) {
         }`}
       >
         <Icon className="h-3.5 w-3.5" />
-        {sdk.active ? "Active" : "Inactive"}
+        {sdk.active ? "Available" : "Unavailable"}
       </span>
     </Link>
   );
@@ -184,7 +185,7 @@ function ServiceRow({
       </div>
       <div className="grid grid-cols-2 gap-2 text-center text-xs sm:grid-cols-4">
         <ServiceMetric label="Secrets" value={service.secret_count} strong />
-        <ServiceMetric label="Env" value={service.value_count} />
+        <ServiceMetric label="Values" value={service.value_count} />
         <ServiceMetric label="OAuth" value={service.connect_config_count} />
         <ServiceMetric label="Users" value={service.connected_user_count} />
       </div>
@@ -216,8 +217,8 @@ function ServiceMetric({
 
 function serviceEmptyText(search: string): string {
   return search.trim()
-    ? "No linked services match this search."
-    : "No linked services have secrets in this bucket yet.";
+    ? "No services match this search."
+    : "No services use this credential set yet.";
 }
 
 function bucketServiceOptions(services: BucketServiceSummary[]) {
@@ -240,13 +241,5 @@ function serviceDetailHref(
   const workspaceService = workspaceServices.find(
     (item) => item.service_id === service.service_id
   );
-  const slug = workspaceService?.service_slug || service.service_id;
-  if (slug.startsWith("@")) {
-    const [provider, serviceSlug] = slug.slice(1).split("/");
-    if (provider && serviceSlug)
-      return `/integrations/${encodeURIComponent(
-        provider
-      )}/${encodeURIComponent(serviceSlug)}`;
-  }
-  return `/integrations/${encodeURIComponent(slug)}`;
+  return serviceDetailPath(service.service_id, workspaceService?.service_slug);
 }

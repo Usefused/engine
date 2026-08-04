@@ -55,6 +55,7 @@ func GenerateSDKTokenHandler(s store.Store) http.HandlerFunc {
 			return
 		}
 
+		setOneTimeSecretResponseHeaders(w)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"id":          tok.ID,

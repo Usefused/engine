@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -225,6 +226,7 @@ var webhookEventGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"status":              &graphql.Field{Type: graphql.String},
 		"delivery_status":     &graphql.Field{Type: graphql.String},
 		"verification_status": &graphql.Field{Type: graphql.String},
+		"environment":         &graphql.Field{Type: graphql.String},
 		"latency_ms":          &graphql.Field{Type: graphql.Int},
 		"retry_count":         &graphql.Field{Type: graphql.Int},
 		"credits_consumed":    &graphql.Field{Type: graphql.Float},
@@ -250,6 +252,134 @@ var webhookAnalyticsGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"total_delivered": &graphql.Field{Type: graphql.Int},
 		"total_rejected":  &graphql.Field{Type: graphql.Int},
 		"total_failed":    &graphql.Field{Type: graphql.Int},
+	},
+})
+
+var engineExecutionTimingGraphQLType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "EngineExecutionTiming",
+	Fields: graphql.Fields{
+		"name":        &graphql.Field{Type: graphql.String},
+		"duration_ms": &graphql.Field{Type: graphql.Float},
+	},
+})
+
+var engineExecutionEventGraphQLType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "EngineExecutionEvent",
+	Fields: graphql.Fields{
+		"id":                    &graphql.Field{Type: graphql.String},
+		"trace_id":              &graphql.Field{Type: graphql.String},
+		"span_id":               &graphql.Field{Type: graphql.String},
+		"artifact_id":           &graphql.Field{Type: graphql.String},
+		"artifact_name":         &graphql.Field{Type: graphql.String},
+		"artifact_kind":         &graphql.Field{Type: graphql.String},
+		"transport":             &graphql.Field{Type: graphql.String},
+		"direction":             &graphql.Field{Type: graphql.String},
+		"service_id":            &graphql.Field{Type: graphql.String},
+		"service_version_id":    &graphql.Field{Type: graphql.String},
+		"operation_id":          &graphql.Field{Type: graphql.String},
+		"webhook_id":            &graphql.Field{Type: graphql.String},
+		"operation":             &graphql.Field{Type: graphql.String},
+		"event_name":            &graphql.Field{Type: graphql.String},
+		"http_method":           &graphql.Field{Type: graphql.String},
+		"request_path":          &graphql.Field{Type: graphql.String},
+		"environment":           &graphql.Field{Type: graphql.String},
+		"environment_source":    &graphql.Field{Type: graphql.String},
+		"provider_host":         &graphql.Field{Type: graphql.String},
+		"provider_http_status":  &graphql.Field{Type: graphql.Int},
+		"provider_status_class": &graphql.Field{Type: graphql.String},
+		"status":                &graphql.Field{Type: graphql.String},
+		"failure_reason":        &graphql.Field{Type: graphql.String},
+		"failure_category":      &graphql.Field{Type: graphql.String},
+		"failure_code":          &graphql.Field{Type: graphql.String},
+		"latency_ms":            &graphql.Field{Type: graphql.Int},
+		"provider_latency_ms":   &graphql.Field{Type: graphql.Int},
+		"attempt_count":         &graphql.Field{Type: graphql.Int},
+		"request_bytes":         &graphql.Field{Type: graphql.Int},
+		"response_bytes":        &graphql.Field{Type: graphql.Int},
+		"verification_status":   &graphql.Field{Type: graphql.String},
+		"delivery_status":       &graphql.Field{Type: graphql.String},
+		"idempotency_replayed":  &graphql.Field{Type: graphql.Boolean},
+		"started_at":            &graphql.Field{Type: graphql.String},
+		"ended_at":              &graphql.Field{Type: graphql.String},
+		"timings":               &graphql.Field{Type: graphql.NewList(engineExecutionTimingGraphQLType)},
+	},
+})
+
+var serviceConsumerGraphQLType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "ServiceConsumer",
+	Fields: graphql.Fields{
+		"id":                 &graphql.Field{Type: graphql.String},
+		"name":               &graphql.Field{Type: graphql.String},
+		"version":            &graphql.Field{Type: graphql.String},
+		"kind":               &graphql.Field{Type: graphql.String},
+		"active":             &graphql.Field{Type: graphql.Boolean},
+		"service_version_id": &graphql.Field{Type: graphql.String},
+		"select_all":         &graphql.Field{Type: graphql.Boolean},
+		"operation_count":    &graphql.Field{Type: graphql.Int},
+		"webhook_count":      &graphql.Field{Type: graphql.Int},
+		"created_at":         &graphql.Field{Type: graphql.String},
+	},
+})
+
+var engineExecutionEventPageGraphQLType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "EngineExecutionEventPage",
+	Fields: graphql.Fields{
+		"items": &graphql.Field{Type: graphql.NewList(engineExecutionEventGraphQLType)},
+		"total": &graphql.Field{Type: graphql.Int},
+	},
+})
+
+var engineExecutionAnalyticsGraphQLType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "EngineExecutionAnalytics",
+	Fields: graphql.Fields{
+		"total_calls":        &graphql.Field{Type: graphql.Int},
+		"successful_calls":   &graphql.Field{Type: graphql.Int},
+		"failed_calls":       &graphql.Field{Type: graphql.Int},
+		"average_latency_ms": &graphql.Field{Type: graphql.Float},
+		"median_latency_ms":  &graphql.Field{Type: graphql.Float},
+		"p95_latency_ms":     &graphql.Field{Type: graphql.Float},
+	},
+})
+
+var engineExecutionBreakdownGraphQLType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "EngineExecutionBreakdown",
+	Fields: graphql.Fields{
+		"key":            &graphql.Field{Type: graphql.String},
+		"label":          &graphql.Field{Type: graphql.String},
+		"total_calls":    &graphql.Field{Type: graphql.Int},
+		"failed_calls":   &graphql.Field{Type: graphql.Int},
+		"p95_latency_ms": &graphql.Field{Type: graphql.Float},
+	},
+})
+
+var engineExecutionFailureGraphQLType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "EngineExecutionFailure",
+	Fields: graphql.Fields{
+		"id":               &graphql.Field{Type: graphql.String},
+		"service_id":       &graphql.Field{Type: graphql.String},
+		"service_name":     &graphql.Field{Type: graphql.String},
+		"operation":        &graphql.Field{Type: graphql.String},
+		"transport":        &graphql.Field{Type: graphql.String},
+		"failure_category": &graphql.Field{Type: graphql.String},
+		"failure_code":     &graphql.Field{Type: graphql.String},
+		"failure_reason":   &graphql.Field{Type: graphql.String},
+		"latency_ms":       &graphql.Field{Type: graphql.Int},
+		"started_at":       &graphql.Field{Type: graphql.String},
+	},
+})
+
+var workspaceExecutionAnalyticsGraphQLType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "WorkspaceExecutionAnalytics",
+	Fields: graphql.Fields{
+		"total_calls":        &graphql.Field{Type: graphql.Int},
+		"successful_calls":   &graphql.Field{Type: graphql.Int},
+		"failed_calls":       &graphql.Field{Type: graphql.Int},
+		"average_latency_ms": &graphql.Field{Type: graphql.Float},
+		"median_latency_ms":  &graphql.Field{Type: graphql.Float},
+		"p95_latency_ms":     &graphql.Field{Type: graphql.Float},
+		"by_service":         &graphql.Field{Type: graphql.NewList(engineExecutionBreakdownGraphQLType)},
+		"by_transport":       &graphql.Field{Type: graphql.NewList(engineExecutionBreakdownGraphQLType)},
+		"recent_failures":    &graphql.Field{Type: graphql.NewList(engineExecutionFailureGraphQLType)},
 	},
 })
 
@@ -635,6 +765,9 @@ func webhookEventsGraphQLField(s store.Store) *graphql.Field {
 			if err != nil {
 				return nil, err
 			}
+			if err := requireActiveWorkspaceService(ctx, s, filter.serviceID); err != nil {
+				return nil, err
+			}
 			span.SetAttributes(
 				attribute.String("service_id", filter.serviceID.String()),
 				attribute.Int("limit", filter.limit),
@@ -664,6 +797,9 @@ func webhookAnalyticsGraphQLField(s store.Store) *graphql.Field {
 			if err != nil {
 				return nil, err
 			}
+			if err := requireActiveWorkspaceService(ctx, s, filter.serviceID); err != nil {
+				return nil, err
+			}
 			span.SetAttributes(attribute.String("service_id", filter.serviceID.String()))
 			analytics, err := s.GetWebhookAnalytics(ctx, actor.accountID, filter.serviceID, filter.eventName, filter.startDate, filter.endDate)
 			if err != nil {
@@ -672,6 +808,186 @@ func webhookAnalyticsGraphQLField(s store.Store) *graphql.Field {
 			return projectGraphQLWebhookAnalytics(analytics), nil
 		},
 	}
+}
+
+func engineExecutionEventsGraphQLField(s store.Store) *graphql.Field {
+	return &graphql.Field{
+		Type: engineExecutionEventPageGraphQLType,
+		Args: engineExecutionActivityArgs(true),
+		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.execution_events.list")
+			defer span.End()
+			filter, err := engineExecutionActivityFilterFromArgs(p)
+			if err != nil {
+				return nil, err
+			}
+			if err := requireActiveWorkspaceService(ctx, s, filter.serviceID); err != nil {
+				return nil, err
+			}
+			span.SetAttributes(
+				attribute.String("service_id", filter.serviceID.String()),
+				attribute.String("transport", filter.transport),
+				attribute.String("status", filter.status),
+				attribute.Int("limit", filter.limit),
+				attribute.Int("offset", filter.offset),
+			)
+			actor, err := actorFromContext(ctx)
+			if err != nil {
+				return nil, err
+			}
+			events, total, err := s.ListEngineExecutionEventsByService(ctx, filter.storeFilter(actor.accountID))
+			if err != nil {
+				return nil, fmt.Errorf("list engine execution events: %w", err)
+			}
+			artifactScopes, err := executionArtifactScopes(ctx, s, events)
+			if err != nil {
+				// Source metadata is useful context, but an unavailable scope lookup
+				// must not hide the durable activity receipts themselves.
+				span.RecordError(err)
+			}
+			return map[string]interface{}{"items": projectGraphQLEngineExecutionEvents(events, artifactScopes), "total": int(total)}, nil
+		},
+	}
+}
+
+func engineExecutionAnalyticsGraphQLField(s store.Store) *graphql.Field {
+	return &graphql.Field{
+		Type: engineExecutionAnalyticsGraphQLType,
+		Args: engineExecutionActivityArgs(false),
+		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.execution_analytics.get")
+			defer span.End()
+			filter, err := engineExecutionActivityFilterFromArgs(p)
+			if err != nil {
+				return nil, err
+			}
+			if err := requireActiveWorkspaceService(ctx, s, filter.serviceID); err != nil {
+				return nil, err
+			}
+			span.SetAttributes(attribute.String("service_id", filter.serviceID.String()))
+			actor, err := actorFromContext(ctx)
+			if err != nil {
+				return nil, err
+			}
+			analytics, err := s.GetEngineExecutionAnalyticsByService(ctx, filter.storeFilter(actor.accountID))
+			if err != nil {
+				return nil, fmt.Errorf("get engine execution analytics: %w", err)
+			}
+			return projectGraphQLEngineExecutionAnalytics(analytics), nil
+		},
+	}
+}
+
+func workspaceExecutionAnalyticsGraphQLField(s store.Store) *graphql.Field {
+	return &graphql.Field{
+		Type: workspaceExecutionAnalyticsGraphQLType,
+		Args: graphql.FieldConfigArgument{
+			"start_date": &graphql.ArgumentConfig{Type: graphql.String},
+			"end_date":   &graphql.ArgumentConfig{Type: graphql.String},
+		},
+		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.workspace_execution_analytics.get")
+			defer span.End()
+			actor, err := actorFromContext(ctx)
+			if err != nil {
+				return nil, err
+			}
+			startDate, endDate, err := workspaceExecutionRange(p)
+			if err != nil {
+				return nil, err
+			}
+			span.SetAttributes(attribute.String("range.start", startDate.Format(time.RFC3339)), attribute.String("range.end", endDate.Format(time.RFC3339)))
+			analytics, err := s.GetWorkspaceExecutionAnalytics(ctx, actor.accountID, startDate, endDate)
+			if err != nil {
+				return nil, fmt.Errorf("get workspace execution analytics: %w", err)
+			}
+			return projectGraphQLWorkspaceExecutionAnalytics(analytics), nil
+		},
+	}
+}
+
+func workspaceExecutionRange(p graphql.ResolveParams) (time.Time, time.Time, error) {
+	endDate := time.Now().UTC()
+	if value, err := parseOptionalRFC3339(graphQLStringArg(p, "end_date")); err != nil {
+		return time.Time{}, time.Time{}, errors.New("invalid end_date")
+	} else if value != nil {
+		endDate = *value
+	}
+	startDate := endDate.Add(-7 * 24 * time.Hour)
+	if value, err := parseOptionalRFC3339(graphQLStringArg(p, "start_date")); err != nil {
+		return time.Time{}, time.Time{}, errors.New("invalid start_date")
+	} else if value != nil {
+		startDate = *value
+	}
+	if !startDate.Before(endDate) {
+		return time.Time{}, time.Time{}, errors.New("start_date must be before end_date")
+	}
+	if endDate.Sub(startDate) > 90*24*time.Hour {
+		return time.Time{}, time.Time{}, errors.New("activity range cannot exceed 90 days")
+	}
+	return startDate, endDate, nil
+}
+
+func serviceConsumersGraphQLField(s store.Store) *graphql.Field {
+	return &graphql.Field{
+		Type: graphql.NewList(serviceConsumerGraphQLType),
+		Args: graphql.FieldConfigArgument{
+			"service_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
+		},
+		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+			serviceID, err := requiredGraphQLUUIDArg(p, "service_id")
+			if err != nil {
+				return nil, err
+			}
+			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.service_consumers.list")
+			defer span.End()
+			if err := requireActiveWorkspaceService(ctx, s, serviceID); err != nil {
+				return nil, err
+			}
+			repository, ok := s.(store.ServiceConsumerRepository)
+			if !ok {
+				return nil, errors.New("service consumers are unavailable")
+			}
+			actor, err := actorFromContext(ctx)
+			if err != nil {
+				return nil, err
+			}
+			authorized, err := graphQLAuthorizedScope(ctx, accesscontrol.PermissionArtifactRead, accesscontrol.ResourceArtifact)
+			if err != nil {
+				return nil, err
+			}
+			consumers, err := repository.ListServiceConsumers(ctx, actor.accountID, authorized, serviceID)
+			if err != nil {
+				return nil, err
+			}
+			return projectServiceConsumers(consumers), nil
+		},
+	}
+}
+
+func projectServiceConsumers(consumers []store.ServiceConsumer) []map[string]interface{} {
+	items := make([]map[string]interface{}, 0, len(consumers))
+	for _, consumer := range consumers {
+		items = append(items, map[string]interface{}{
+			"id": consumer.ArtifactID.String(), "name": consumer.Name, "version": consumer.Version,
+			"kind": consumer.Kind, "active": consumer.DeactivatedAt == nil,
+			"service_version_id": consumer.ServiceVersionID.String(), "select_all": consumer.SelectAll,
+			"operation_count": consumer.OperationCount, "webhook_count": consumer.WebhookCount,
+			"created_at": formatGraphQLTime(consumer.CreatedAt),
+		})
+	}
+	return items
+}
+
+func requireActiveWorkspaceService(ctx context.Context, s store.Store, serviceID uuid.UUID) error {
+	enabled, err := s.IsWorkspaceServiceEnabled(ctx, serviceID)
+	if err != nil {
+		return fmt.Errorf("check workspace service activation: %w", err)
+	}
+	if !enabled {
+		return errors.New("service is not active in this workspace")
+	}
+	return nil
 }
 
 func workspaceNotificationsGraphQLField(configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient) *graphql.Field {
@@ -1484,6 +1800,100 @@ type webhookAnalyticsFilter struct {
 	endDate   *time.Time
 }
 
+type engineExecutionActivityFilter struct {
+	serviceID uuid.UUID
+	transport string
+	direction string
+	status    string
+	limit     int
+	offset    int
+	startDate *time.Time
+	endDate   *time.Time
+}
+
+func engineExecutionActivityArgs(includePage bool) graphql.FieldConfigArgument {
+	args := graphql.FieldConfigArgument{
+		"service_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
+		"transport":  &graphql.ArgumentConfig{Type: graphql.String},
+		"direction":  &graphql.ArgumentConfig{Type: graphql.String},
+		"status":     &graphql.ArgumentConfig{Type: graphql.String},
+		"start_date": &graphql.ArgumentConfig{Type: graphql.String},
+		"end_date":   &graphql.ArgumentConfig{Type: graphql.String},
+	}
+	if includePage {
+		args["limit"] = &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 10}
+		args["offset"] = &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 0}
+	}
+	return args
+}
+
+func engineExecutionActivityFilterFromArgs(p graphql.ResolveParams) (engineExecutionActivityFilter, error) {
+	serviceID, err := requiredGraphQLUUIDArg(p, "service_id")
+	if err != nil {
+		return engineExecutionActivityFilter{}, err
+	}
+	transport, direction, status, err := engineExecutionDimensionsFromArgs(p)
+	if err != nil {
+		return engineExecutionActivityFilter{}, err
+	}
+	startDate, endDate, err := engineExecutionDatesFromArgs(p)
+	if err != nil {
+		return engineExecutionActivityFilter{}, err
+	}
+	limit, offset := bucketPageArgs(p)
+	return engineExecutionActivityFilter{
+		serviceID: serviceID, transport: transport, direction: direction, status: status,
+		limit: limit, offset: offset, startDate: startDate, endDate: endDate,
+	}, nil
+}
+
+func engineExecutionDimensionsFromArgs(p graphql.ResolveParams) (string, string, string, error) {
+	transport := strings.ToLower(strings.TrimSpace(graphQLStringArg(p, "transport")))
+	if err := validateOptionalExecutionDimension(transport, "transport", models.EngineExecutionTransportSDK, models.EngineExecutionTransportMCP, models.EngineExecutionTransportWebhook); err != nil {
+		return "", "", "", err
+	}
+	direction := strings.ToLower(strings.TrimSpace(graphQLStringArg(p, "direction")))
+	if err := validateOptionalExecutionDimension(direction, "direction", models.EngineExecutionDirectionInbound, models.EngineExecutionDirectionOutbound); err != nil {
+		return "", "", "", err
+	}
+	status := strings.ToLower(strings.TrimSpace(graphQLStringArg(p, "status")))
+	if err := validateOptionalExecutionDimension(status, "status", models.EngineExecutionStatusSuccess, models.EngineExecutionStatusFailed); err != nil {
+		return "", "", "", err
+	}
+	return transport, direction, status, nil
+}
+
+func validateOptionalExecutionDimension(value, name string, allowed ...string) error {
+	if value == "" {
+		return nil
+	}
+	for _, candidate := range allowed {
+		if value == candidate {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid %s", name)
+}
+
+func engineExecutionDatesFromArgs(p graphql.ResolveParams) (*time.Time, *time.Time, error) {
+	startDate, err := parseOptionalRFC3339(graphQLStringArg(p, "start_date"))
+	if err != nil {
+		return nil, nil, errors.New("invalid start_date")
+	}
+	endDate, err := parseOptionalRFC3339(graphQLStringArg(p, "end_date"))
+	if err != nil {
+		return nil, nil, errors.New("invalid end_date")
+	}
+	return startDate, endDate, nil
+}
+
+func (f engineExecutionActivityFilter) storeFilter(accountID uuid.UUID) store.EngineExecutionFilter {
+	return store.EngineExecutionFilter{
+		AccountID: accountID, ServiceID: f.serviceID, Transport: f.transport, Direction: f.direction,
+		Status: f.status, Limit: f.limit, Offset: f.offset, StartDate: f.startDate, EndDate: f.endDate,
+	}
+}
+
 func webhookAnalyticsArgs(includePage bool) graphql.FieldConfigArgument {
 	args := graphql.FieldConfigArgument{
 		"service_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
@@ -2091,6 +2501,7 @@ func projectGraphQLWebhookEvent(event models.WebhookEvent) map[string]interface{
 		"msg_id": event.MsgID, "event_name": event.EventType,
 		"status": event.DeliveryStatus, "delivery_status": event.DeliveryStatus,
 		"verification_status": event.VerificationStatus, "latency_ms": event.LatencyMs,
+		"environment": event.Environment,
 		"retry_count": event.RetryCount, "credits_consumed": event.CreditsConsumed,
 		"sdk_record_id": sdkRecordID, "error_reason": event.ErrorReason,
 		"payload_size": event.PayloadSize, "created_at": formatGraphQLTime(event.CreatedAt),
@@ -2104,6 +2515,151 @@ func projectGraphQLWebhookAnalytics(analytics models.WebhookAnalytics) map[strin
 		"total_rejected":  int(analytics.TotalRejected),
 		"total_failed":    int(analytics.TotalFailed),
 	}
+}
+
+type artifactScopeBatchReader interface {
+	ListArtifactScopes(ctx context.Context, artifactIDs []uuid.UUID) (map[uuid.UUID]*store.ArtifactScope, error)
+}
+
+func executionArtifactScopes(ctx context.Context, s store.Store, events []models.EngineExecutionEvent) (map[uuid.UUID]*store.ArtifactScope, error) {
+	artifactIDs := make([]uuid.UUID, 0, len(events))
+	seen := make(map[uuid.UUID]struct{}, len(events))
+	for _, event := range events {
+		if event.ArtifactID == uuid.Nil {
+			continue
+		}
+		if _, exists := seen[event.ArtifactID]; exists {
+			continue
+		}
+		seen[event.ArtifactID] = struct{}{}
+		artifactIDs = append(artifactIDs, event.ArtifactID)
+	}
+
+	if reader, ok := s.(artifactScopeBatchReader); ok {
+		return reader.ListArtifactScopes(ctx, artifactIDs)
+	}
+
+	scopes := make(map[uuid.UUID]*store.ArtifactScope, len(artifactIDs))
+	for _, artifactID := range artifactIDs {
+		scope, err := s.GetArtifactScope(ctx, artifactID)
+		if errors.Is(err, store.ErrArtifactScopeNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		scopes[artifactID] = scope
+	}
+	return scopes, nil
+}
+
+func projectGraphQLEngineExecutionEvents(events []models.EngineExecutionEvent, artifactScopes map[uuid.UUID]*store.ArtifactScope) []map[string]interface{} {
+	items := make([]map[string]interface{}, 0, len(events))
+	for _, event := range events {
+		providerLatency := interface{}(nil)
+		if event.ProviderLatencyMs != nil {
+			providerLatency = int(*event.ProviderLatencyMs)
+		}
+		providerHTTPStatus := interface{}(nil)
+		if event.ProviderHTTPStatus != nil {
+			providerHTTPStatus = *event.ProviderHTTPStatus
+		}
+		artifactName := ""
+		artifactKind := event.Transport
+		if scope := artifactScopes[event.ArtifactID]; scope != nil {
+			artifactName = scope.Name
+			if scope.Kind != "" {
+				artifactKind = scope.Kind
+			}
+		}
+		items = append(items, map[string]interface{}{
+			"id": event.ID.String(), "trace_id": event.TraceID, "span_id": event.SpanID,
+			"artifact_id":   event.ArtifactID.String(),
+			"artifact_name": artifactName, "artifact_kind": artifactKind,
+			"transport": event.Transport, "direction": event.Direction, "service_id": event.ServiceID.String(),
+			"service_version_id": event.ServiceVersionID, "operation_id": optionalGraphQLUUID(event.OperationID),
+			"webhook_id": optionalGraphQLUUID(event.WebhookID), "operation": event.EndpointName, "event_name": event.EventName,
+			"http_method": event.HTTPMethod, "request_path": event.RequestPath,
+			"environment": event.Environment, "environment_source": event.EnvironmentSource,
+			"provider_host": event.ProviderHost, "provider_http_status": providerHTTPStatus, "provider_status_class": event.ProviderStatusClass,
+			"status":         event.Status,
+			"failure_reason": event.FailureReason, "failure_category": event.FailureCategory, "failure_code": event.FailureCode,
+			"latency_ms":          int(event.LatencyMs),
+			"provider_latency_ms": providerLatency, "idempotency_replayed": event.IdempotencyReplayed,
+			"attempt_count": event.AttemptCount, "request_bytes": int(event.RequestBytes), "response_bytes": int(event.ResponseBytes),
+			"verification_status": event.VerificationStatus, "delivery_status": event.DeliveryStatus,
+			"started_at": formatGraphQLTime(event.StartedAt), "ended_at": formatGraphQLTime(event.EndedAt),
+			"timings": engineExecutionTimingEntries(event.Timings),
+		})
+	}
+	return items
+}
+
+func optionalGraphQLUUID(id uuid.UUID) interface{} {
+	if id == uuid.Nil {
+		return nil
+	}
+	return id.String()
+}
+
+func engineExecutionTimingEntries(encoded []byte) []map[string]interface{} {
+	var timings map[string]float64
+	if len(encoded) == 0 || json.Unmarshal(encoded, &timings) != nil {
+		return []map[string]interface{}{}
+	}
+	keys := make([]string, 0, len(timings))
+	for name := range timings {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	items := make([]map[string]interface{}, 0, len(keys))
+	for _, name := range keys {
+		items = append(items, map[string]interface{}{"name": name, "duration_ms": timings[name]})
+	}
+	return items
+}
+
+func projectGraphQLEngineExecutionAnalytics(analytics models.EngineExecutionAnalytics) map[string]interface{} {
+	return map[string]interface{}{
+		"total_calls": int(analytics.TotalCalls), "successful_calls": int(analytics.SuccessfulCalls),
+		"failed_calls": int(analytics.FailedCalls), "average_latency_ms": analytics.AverageLatencyMs,
+		"median_latency_ms": analytics.MedianLatencyMs, "p95_latency_ms": analytics.P95LatencyMs,
+	}
+}
+
+func projectGraphQLWorkspaceExecutionAnalytics(analytics models.WorkspaceExecutionAnalytics) map[string]interface{} {
+	return map[string]interface{}{
+		"total_calls": int(analytics.TotalCalls), "successful_calls": int(analytics.SuccessfulCalls),
+		"failed_calls": int(analytics.FailedCalls), "average_latency_ms": analytics.AverageLatencyMs,
+		"median_latency_ms": analytics.MedianLatencyMs, "p95_latency_ms": analytics.P95LatencyMs,
+		"by_service":      projectGraphQLExecutionBreakdowns(analytics.ByService),
+		"by_transport":    projectGraphQLExecutionBreakdowns(analytics.ByTransport),
+		"recent_failures": projectGraphQLExecutionFailures(analytics.RecentFailures),
+	}
+}
+
+func projectGraphQLExecutionBreakdowns(items []models.EngineExecutionBreakdown) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0, len(items))
+	for _, item := range items {
+		result = append(result, map[string]interface{}{
+			"key": item.Key, "label": item.Label, "total_calls": int(item.TotalCalls),
+			"failed_calls": int(item.FailedCalls), "p95_latency_ms": item.P95LatencyMs,
+		})
+	}
+	return result
+}
+
+func projectGraphQLExecutionFailures(items []models.EngineExecutionFailure) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0, len(items))
+	for _, item := range items {
+		result = append(result, map[string]interface{}{
+			"id": item.ID.String(), "service_id": item.ServiceID.String(), "service_name": item.ServiceName,
+			"operation": item.Operation, "transport": item.Transport, "failure_category": item.FailureCategory,
+			"failure_code": item.FailureCode, "failure_reason": item.FailureReason,
+			"latency_ms": int(item.LatencyMs), "started_at": formatGraphQLTime(item.StartedAt),
+		})
+	}
+	return result
 }
 
 func projectGraphQLWorkspaceNotificationInbox(inbox workspaceNotificationInboxResponse) map[string]interface{} {

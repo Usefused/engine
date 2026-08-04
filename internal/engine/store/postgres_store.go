@@ -702,20 +702,6 @@ func (s *postgresStore) VerifyWorkspaceOwner(ctx context.Context, accountID uuid
 	return nil
 }
 
-func (s *postgresStore) InsertMCPAnalytics(ctx context.Context, analytics *models.MCPAnalytics) error {
-	query := `
-		INSERT INTO fused_mcp_analytics (id, artifact_id, session_id, endpoint_name, service_name, latency_ms, failed, timestamp, params, result)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-	`
-	_, err := s.db.Exec(ctx, query,
-		analytics.ID, analytics.ArtifactID, analytics.SessionID,
-		analytics.EndpointName, analytics.ServiceName,
-		analytics.LatencyMs, analytics.Failed, analytics.Timestamp,
-		analytics.Params, analytics.Result,
-	)
-	return err
-}
-
 func (s *postgresStore) UpsertMCPSession(ctx context.Context, session *models.MCPSession) error {
 	query := `
 		INSERT INTO fused_mcp_sessions (id, artifact_id, session_id, started_at, ended_at)
@@ -727,19 +713,15 @@ func (s *postgresStore) UpsertMCPSession(ctx context.Context, session *models.MC
 	return err
 }
 
-// GetMCPAnalyticsDashboard is the read side of InsertMCPAnalytics/
-// UpsertMCPSession -- those two are write-only (called by
-// internal/engine/worker/mcp_analytics.go's NATS consumer); this is the
-// first read path for that data. Four targeted queries (overall totals,
-// tool breakdown, service breakdown, recent sessions) rather than pulling
-// every fused_mcp_analytics row for this SDK and aggregating in Go, which
-// would not scale with call volume the way GROUP BY does.
+// GetMCPAnalyticsDashboard uses SQL aggregation over canonical execution
+// events. Session lifecycle remains a separate concern because a connection
+// is not an execution and has different retention and update semantics.
 func (s *postgresStore) GetMCPAnalyticsDashboard(ctx context.Context, artifactID uuid.UUID) (*models.MCPAnalyticsDashboard, error) {
 	dashboard := &models.MCPAnalyticsDashboard{}
 
 	totalsQuery := `
-		SELECT COUNT(*), COUNT(*) FILTER (WHERE failed), COALESCE(AVG(latency_ms), 0)
-		FROM fused_mcp_analytics WHERE artifact_id = $1
+		SELECT COUNT(*), COUNT(*) FILTER (WHERE status = 'failed'), COALESCE(AVG(latency_ms), 0)
+		FROM fused_engine_execution_events WHERE artifact_id = $1 AND transport = 'mcp'
 	`
 	if err := s.db.QueryRow(ctx, totalsQuery, artifactID).Scan(&dashboard.TotalRequests, &dashboard.FailedRequests, &dashboard.AverageLatencyMs); err != nil {
 		return nil, fmt.Errorf("query mcp analytics totals: %w", err)
@@ -773,9 +755,9 @@ func (s *postgresStore) GetMCPAnalyticsDashboard(ctx context.Context, artifactID
 
 func queryMCPToolUsage(ctx context.Context, db *pgxpool.Pool, artifactID uuid.UUID) ([]models.MCPToolUsage, error) {
 	query := `
-		SELECT endpoint_name, COUNT(*), COUNT(*) FILTER (WHERE failed), COALESCE(AVG(latency_ms), 0)
-		FROM fused_mcp_analytics
-		WHERE artifact_id = $1 AND endpoint_name <> ''
+		SELECT endpoint_name, COUNT(*), COUNT(*) FILTER (WHERE status = 'failed'), COALESCE(AVG(latency_ms), 0)
+		FROM fused_engine_execution_events
+		WHERE artifact_id = $1 AND transport = 'mcp' AND endpoint_name <> ''
 		GROUP BY endpoint_name
 		ORDER BY COUNT(*) DESC
 	`
@@ -798,10 +780,12 @@ func queryMCPToolUsage(ctx context.Context, db *pgxpool.Pool, artifactID uuid.UU
 
 func queryMCPServiceUsage(ctx context.Context, db *pgxpool.Pool, artifactID uuid.UUID) ([]models.MCPServiceUsage, error) {
 	query := `
-		SELECT service_name, COUNT(*), COUNT(*) FILTER (WHERE failed), COALESCE(AVG(latency_ms), 0)
-		FROM fused_mcp_analytics
-		WHERE artifact_id = $1 AND service_name <> ''
-		GROUP BY service_name
+		SELECT COALESCE(workspace_service.service_name, event.service_id::text), COUNT(*),
+			COUNT(*) FILTER (WHERE event.status = 'failed'), COALESCE(AVG(event.latency_ms), 0)
+		FROM fused_engine_execution_events event
+		LEFT JOIN fused_workspace_services workspace_service ON workspace_service.service_id = event.service_id
+		WHERE event.artifact_id = $1 AND event.transport = 'mcp' AND event.service_id IS NOT NULL
+		GROUP BY COALESCE(workspace_service.service_name, event.service_id::text)
 		ORDER BY COUNT(*) DESC
 	`
 	rows, err := db.Query(ctx, query, artifactID)
@@ -855,20 +839,38 @@ func (s *postgresStore) BatchCreateEngineExecutionEvents(ctx context.Context, ev
 	b := &pgx.Batch{}
 	query := `
 		INSERT INTO fused_engine_execution_events (
-			id, trace_id, span_id, artifact_id, transport, service_id, service_version_id,
-			endpoint_name, environment, status, failure_reason, latency_ms,
-			provider_latency_ms, idempotency_key_hash, request_body_hash, idempotency_replayed, timings,
-			started_at, ended_at, created_at
+			id, trace_id, span_id, account_id, artifact_id, transport, direction, service_id, service_version_id,
+			operation_id, webhook_id, endpoint_name, external_id, event_name, http_method, request_path,
+			environment, environment_source, provider_host, provider_http_status, provider_status_class,
+			status, failure_reason, failure_category, failure_code, latency_ms, provider_latency_ms,
+			attempt_count, request_bytes, response_bytes, verification_status, delivery_status,
+			idempotency_key_hash, request_body_hash, idempotency_replayed, timings, started_at, ended_at, created_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+			$21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39)
+		ON CONFLICT (id) DO UPDATE SET
+			status = EXCLUDED.status,
+			failure_reason = EXCLUDED.failure_reason,
+			failure_category = EXCLUDED.failure_category,
+			failure_code = EXCLUDED.failure_code,
+			latency_ms = EXCLUDED.latency_ms,
+			attempt_count = EXCLUDED.attempt_count,
+			request_bytes = EXCLUDED.request_bytes,
+			response_bytes = EXCLUDED.response_bytes,
+			verification_status = EXCLUDED.verification_status,
+			delivery_status = EXCLUDED.delivery_status,
+			ended_at = EXCLUDED.ended_at
 	`
 	for _, event := range events {
 		b.Queue(query,
-			event.ID, event.TraceID, event.SpanID, event.ArtifactID, event.Transport,
-			nullableUUID(event.ServiceID), event.ServiceVersionID, event.EndpointName,
-			event.Environment, event.Status, event.FailureReason, event.LatencyMs,
-			event.ProviderLatencyMs, event.IdempotencyKeyHash, event.RequestBodyHash, event.IdempotencyReplayed,
-			event.Timings, event.StartedAt, event.EndedAt, event.CreatedAt,
+			event.ID, event.TraceID, event.SpanID, nullableUUID(event.AccountID), nullableUUID(event.ArtifactID), event.Transport,
+			event.Direction, nullableUUID(event.ServiceID), event.ServiceVersionID, nullableUUID(event.OperationID), nullableUUID(event.WebhookID),
+			event.EndpointName, event.ExternalID, event.EventName, event.HTTPMethod, event.RequestPath, event.Environment,
+			event.EnvironmentSource, event.ProviderHost, event.ProviderHTTPStatus, event.ProviderStatusClass, event.Status,
+			event.FailureReason, event.FailureCategory, event.FailureCode, event.LatencyMs, event.ProviderLatencyMs,
+			event.AttemptCount, event.RequestBytes, event.ResponseBytes, event.VerificationStatus, event.DeliveryStatus,
+			event.IdempotencyKeyHash, event.RequestBodyHash, event.IdempotencyReplayed, event.Timings,
+			event.StartedAt, event.EndedAt, event.CreatedAt,
 		)
 	}
 	results := s.db.SendBatch(ctx, b)
@@ -882,65 +884,165 @@ func nullableUUID(id uuid.UUID) any {
 	return id
 }
 
-func (s *postgresStore) BatchCreateWebhookEvents(ctx context.Context, events []models.WebhookEvent) error {
-	if len(events) == 0 {
-		return nil
+func (s *postgresStore) DeleteEngineExecutionEventsBefore(ctx context.Context, before time.Time, limit int) (int64, error) {
+	result, err := s.db.Exec(ctx, `
+		WITH expired AS (
+			SELECT id FROM fused_engine_execution_events
+			WHERE started_at < $1
+			ORDER BY started_at
+			LIMIT $2
+			FOR UPDATE SKIP LOCKED
+		)
+		DELETE FROM fused_engine_execution_events event
+		USING expired
+		WHERE event.id = expired.id`, before, limit)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired execution events: %w", err)
 	}
-	b := &pgx.Batch{}
-	query := `
-		INSERT INTO fused_webhook_events (id, account_id, service_id, msg_id, event_type, error_reason, sdk_record_id, verification_status, delivery_status, environment, latency_ms, retry_count, credits_consumed, payload_size, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-		ON CONFLICT (msg_id) DO UPDATE SET 
-			delivery_status = EXCLUDED.delivery_status,
-			error_reason = EXCLUDED.error_reason,
-			sdk_record_id = EXCLUDED.sdk_record_id,
-			verification_status = EXCLUDED.verification_status,
-			latency_ms = EXCLUDED.latency_ms,
-			retry_count = EXCLUDED.retry_count,
-			credits_consumed = EXCLUDED.credits_consumed,
-			updated_at = NOW()
-	`
-	for _, event := range events {
-		b.Queue(query, event.ID, event.AccountID, event.ServiceID, event.MsgID, event.EventType, event.ErrorReason, event.SDKRecordID, event.VerificationStatus, event.DeliveryStatus, event.Environment, event.LatencyMs, event.RetryCount, event.CreditsConsumed, event.PayloadSize, event.CreatedAt)
-	}
-	results := s.db.SendBatch(ctx, b)
-	return results.Close()
+	return result.RowsAffected(), nil
 }
 
-// ListWebhookEventsByService and GetWebhookAnalytics are ported from the
-// Registry's old (never-actually-created) webhook_events implementation --
-// same SQL shape, retargeted at fused_webhook_events and scoped by
-// accountID in addition to serviceID, since this table has no
-// column (Engine is single-workspace-per-account, so accountID is the
-// tenant boundary here, same as everywhere else in this file).
-func (s *postgresStore) ListWebhookEventsByService(ctx context.Context, accountID, serviceID uuid.UUID, eventName string, limit, offset int, startDate, endDate *time.Time) ([]models.WebhookEvent, int64, error) {
+type EngineExecutionFilter struct {
+	AccountID uuid.UUID
+	ServiceID uuid.UUID
+	Transport string
+	Direction string
+	Status    string
+	Limit     int
+	Offset    int
+	StartDate *time.Time
+	EndDate   *time.Time
+}
+
+func engineExecutionWhereClause(filter EngineExecutionFilter) (string, []any) {
 	whereClause := "WHERE account_id = $1 AND service_id = $2"
+	args := []any{filter.AccountID, filter.ServiceID}
+	argIdx := 3
+	if filter.Transport != "" {
+		whereClause += fmt.Sprintf(" AND transport = $%d", argIdx)
+		args = append(args, filter.Transport)
+		argIdx++
+	}
+	if filter.Direction != "" {
+		whereClause += fmt.Sprintf(" AND direction = $%d", argIdx)
+		args = append(args, filter.Direction)
+		argIdx++
+	}
+	if filter.Status != "" {
+		whereClause += fmt.Sprintf(" AND status = $%d", argIdx)
+		args = append(args, filter.Status)
+		argIdx++
+	}
+	if filter.StartDate != nil {
+		whereClause += fmt.Sprintf(" AND started_at >= $%d", argIdx)
+		args = append(args, *filter.StartDate)
+		argIdx++
+	}
+	if filter.EndDate != nil {
+		whereClause += fmt.Sprintf(" AND started_at <= $%d", argIdx)
+		args = append(args, *filter.EndDate)
+	}
+	return whereClause, args
+}
+
+func (s *postgresStore) ListEngineExecutionEventsByService(ctx context.Context, filter EngineExecutionFilter) ([]models.EngineExecutionEvent, int64, error) {
+	whereClause, args := engineExecutionWhereClause(filter)
+	var count int64
+	if err := s.db.QueryRow(ctx, "SELECT COUNT(*) FROM fused_engine_execution_events "+whereClause, args...).Scan(&count); err != nil {
+		return nil, 0, err
+	}
+
+	argIdx := len(args) + 1
+	query := `SELECT id, COALESCE(trace_id, ''), COALESCE(span_id, ''), COALESCE(account_id, '00000000-0000-0000-0000-000000000000'::uuid),
+		COALESCE(artifact_id, '00000000-0000-0000-0000-000000000000'::uuid), transport, direction, service_id, COALESCE(service_version_id, ''),
+		COALESCE(operation_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(webhook_id, '00000000-0000-0000-0000-000000000000'::uuid),
+		endpoint_name, COALESCE(external_id, ''), COALESCE(event_name, ''), COALESCE(http_method, ''), COALESCE(request_path, ''), COALESCE(environment, ''),
+		COALESCE(environment_source, ''), COALESCE(provider_host, ''), provider_http_status, COALESCE(provider_status_class, ''),
+		status, COALESCE(failure_reason, ''), COALESCE(failure_category, ''), COALESCE(failure_code, ''), latency_ms, provider_latency_ms,
+		attempt_count, request_bytes, response_bytes, COALESCE(verification_status, ''), COALESCE(delivery_status, ''),
+		idempotency_replayed, COALESCE(timings, '{}'::jsonb), started_at, ended_at, created_at
+		FROM fused_engine_execution_events ` + whereClause + fmt.Sprintf(" ORDER BY started_at DESC LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
+	args = append(args, filter.Limit, filter.Offset)
+	rows, err := s.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	events := make([]models.EngineExecutionEvent, 0, filter.Limit)
+	for rows.Next() {
+		var event models.EngineExecutionEvent
+		if err := rows.Scan(
+			&event.ID, &event.TraceID, &event.SpanID, &event.AccountID, &event.ArtifactID, &event.Transport, &event.Direction,
+			&event.ServiceID, &event.ServiceVersionID, &event.OperationID, &event.WebhookID, &event.EndpointName,
+			&event.ExternalID, &event.EventName, &event.HTTPMethod, &event.RequestPath, &event.Environment, &event.EnvironmentSource,
+			&event.ProviderHost, &event.ProviderHTTPStatus, &event.ProviderStatusClass, &event.Status, &event.FailureReason,
+			&event.FailureCategory, &event.FailureCode, &event.LatencyMs, &event.ProviderLatencyMs, &event.AttemptCount,
+			&event.RequestBytes, &event.ResponseBytes, &event.VerificationStatus, &event.DeliveryStatus,
+			&event.IdempotencyReplayed, &event.Timings, &event.StartedAt, &event.EndedAt, &event.CreatedAt,
+		); err != nil {
+			return nil, 0, err
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return events, count, nil
+}
+
+func (s *postgresStore) GetEngineExecutionAnalyticsByService(ctx context.Context, filter EngineExecutionFilter) (models.EngineExecutionAnalytics, error) {
+	whereClause, args := engineExecutionWhereClause(filter)
+	query := `SELECT COUNT(*),
+		COUNT(*) FILTER (WHERE status = 'success'),
+		COUNT(*) FILTER (WHERE status = 'failed'),
+		COALESCE(AVG(latency_ms), 0),
+		COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms), 0),
+		COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms), 0)
+		FROM fused_engine_execution_events ` + whereClause
+	var analytics models.EngineExecutionAnalytics
+	err := s.db.QueryRow(ctx, query, args...).Scan(
+		&analytics.TotalCalls,
+		&analytics.SuccessfulCalls,
+		&analytics.FailedCalls,
+		&analytics.AverageLatencyMs,
+		&analytics.MedianLatencyMs,
+		&analytics.P95LatencyMs,
+	)
+	return analytics, err
+}
+
+func (s *postgresStore) ListWebhookEventsByService(ctx context.Context, accountID, serviceID uuid.UUID, eventName string, limit, offset int, startDate, endDate *time.Time) ([]models.WebhookEvent, int64, error) {
+	whereClause := "WHERE account_id = $1 AND service_id = $2 AND transport = 'webhook'"
 	args := []any{accountID, serviceID}
 	argIdx := 3
 
 	if eventName != "" {
-		whereClause += fmt.Sprintf(" AND event_type = $%d", argIdx)
+		whereClause += fmt.Sprintf(" AND event_name = $%d", argIdx)
 		args = append(args, eventName)
 		argIdx++
 	}
 	if startDate != nil {
-		whereClause += fmt.Sprintf(" AND created_at >= $%d", argIdx)
+		whereClause += fmt.Sprintf(" AND started_at >= $%d", argIdx)
 		args = append(args, *startDate)
 		argIdx++
 	}
 	if endDate != nil {
-		whereClause += fmt.Sprintf(" AND created_at <= $%d", argIdx)
+		whereClause += fmt.Sprintf(" AND started_at <= $%d", argIdx)
 		args = append(args, *endDate)
 		argIdx++
 	}
 
-	countQuery := "SELECT COUNT(*) FROM fused_webhook_events " + whereClause
+	countQuery := "SELECT COUNT(*) FROM fused_engine_execution_events " + whereClause
 	var count int64
 	if err := s.db.QueryRow(ctx, countQuery, args...).Scan(&count); err != nil {
 		return nil, 0, err
 	}
 
-	query := "SELECT id, account_id, service_id, msg_id, event_type, error_reason, sdk_record_id, verification_status, delivery_status, latency_ms, retry_count, credits_consumed, payload_size, created_at FROM fused_webhook_events " + whereClause + fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
+	query := `SELECT id, account_id, service_id, COALESCE(external_id, ''), COALESCE(event_name, ''),
+		COALESCE(failure_reason, ''), artifact_id, COALESCE(verification_status, ''), COALESCE(delivery_status, ''),
+		COALESCE(environment, ''), latency_ms::integer, GREATEST(attempt_count - 1, 0), 0::double precision,
+		request_bytes::integer, started_at FROM fused_engine_execution_events ` + whereClause + fmt.Sprintf(" ORDER BY started_at DESC LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
 	args = append(args, limit, offset)
 
 	rows, err := s.db.Query(ctx, query, args...)
@@ -955,57 +1057,36 @@ func (s *postgresStore) ListWebhookEventsByService(ctx context.Context, accountI
 }
 
 func (s *postgresStore) GetWebhookAnalytics(ctx context.Context, accountID, serviceID uuid.UUID, eventName string, startDate, endDate *time.Time) (models.WebhookAnalytics, error) {
-	whereClause := "WHERE account_id = $1 AND service_id = $2"
+	whereClause := "WHERE account_id = $1 AND service_id = $2 AND transport = 'webhook'"
 	args := []any{accountID, serviceID}
 	argIdx := 3
 
 	if eventName != "" {
-		whereClause += fmt.Sprintf(" AND event_type = $%d", argIdx)
+		whereClause += fmt.Sprintf(" AND event_name = $%d", argIdx)
 		args = append(args, eventName)
 		argIdx++
 	}
 	if startDate != nil {
-		whereClause += fmt.Sprintf(" AND created_at >= $%d", argIdx)
+		whereClause += fmt.Sprintf(" AND started_at >= $%d", argIdx)
 		args = append(args, *startDate)
 		argIdx++
 	}
 	if endDate != nil {
-		whereClause += fmt.Sprintf(" AND created_at <= $%d", argIdx)
+		whereClause += fmt.Sprintf(" AND started_at <= $%d", argIdx)
 		args = append(args, *endDate)
 		argIdx++
 	}
 
-	query := "SELECT delivery_status, count(*) FROM fused_webhook_events " + whereClause + " GROUP BY delivery_status"
-	rows, err := s.db.Query(ctx, query, args...)
-	if err != nil {
-		return models.WebhookAnalytics{}, err
-	}
-	defer rows.Close()
-
 	var analytics models.WebhookAnalytics
-	for rows.Next() {
-		var status string
-		var count int64
-		if err := rows.Scan(&status, &count); err != nil {
-			return analytics, err
-		}
-		switch status {
-		case "ingested":
-			analytics.TotalIngested = count
-		case "delivered", "success":
-			// "success" is what the WebSocket delivery path
-			// (websocket_handler.go) actually publishes when an SDK client
-			// ACKs a webhook -- that's a delivered event. "delivered" is
-			// kept alongside it in case a future publisher uses that name
-			// instead; both count toward the same bucket.
-			analytics.TotalDelivered += count
-		case "rejected":
-			analytics.TotalRejected = count
-		case "failed":
-			analytics.TotalFailed = count
-		}
-	}
-	return analytics, nil
+	query := `SELECT COUNT(*),
+		COUNT(*) FILTER (WHERE delivery_status IN ('success', 'delivered')),
+		COUNT(*) FILTER (WHERE delivery_status = 'rejected'),
+		COUNT(*) FILTER (WHERE delivery_status = 'failed')
+		FROM fused_engine_execution_events ` + whereClause
+	err := s.db.QueryRow(ctx, query, args...).Scan(
+		&analytics.TotalIngested, &analytics.TotalDelivered, &analytics.TotalRejected, &analytics.TotalFailed,
+	)
+	return analytics, err
 }
 
 // GetIdempotentExecution looks up a cached response for (artifactID,
@@ -1014,14 +1095,14 @@ func (s *postgresStore) GetWebhookAnalytics(ctx context.Context, accountID, serv
 // correctness (though one could trim storage over time as a follow-up).
 func (s *postgresStore) GetIdempotentExecution(ctx context.Context, artifactID uuid.UUID, idempotencyKeyHash, requestBodyHash string) (*models.IdempotentExecution, error) {
 	query := `
-		SELECT id, artifact_id, idempotency_key_hash, request_body_hash, environment, response_body, created_at, expires_at
+		SELECT id, artifact_id, idempotency_key_hash, request_body_hash, environment, response_body, response_status, created_at, expires_at
 		FROM fused_engine_idempotency_keys
 		WHERE artifact_id = $1 AND idempotency_key_hash = $2 AND expires_at > NOW()
 	`
 	var exec models.IdempotentExecution
 	err := s.db.QueryRow(ctx, query, artifactID, idempotencyKeyHash).Scan(
 		&exec.ID, &exec.ArtifactID, &exec.IdempotencyKeyHash, &exec.RequestBodyHash,
-		&exec.Environment, &exec.ResponseBody, &exec.CreatedAt, &exec.ExpiresAt,
+		&exec.Environment, &exec.ResponseBody, &exec.ResponseStatus, &exec.CreatedAt, &exec.ExpiresAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrIdempotentExecutionNotFound
@@ -1043,11 +1124,11 @@ func (s *postgresStore) GetIdempotentExecution(ctx context.Context, artifactID u
 func (s *postgresStore) SaveIdempotentExecution(ctx context.Context, exec *models.IdempotentExecution) error {
 	query := `
 		INSERT INTO fused_engine_idempotency_keys
-			(id, artifact_id, idempotency_key_hash, request_body_hash, environment, response_body, created_at, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7)
+			(id, artifact_id, idempotency_key_hash, request_body_hash, environment, response_body, response_status, created_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8)
 		ON CONFLICT (artifact_id, idempotency_key_hash) DO NOTHING
 	`
-	_, err := s.db.Exec(ctx, query, exec.ArtifactID, exec.IdempotencyKeyHash, exec.RequestBodyHash, exec.Environment, exec.ResponseBody, exec.ExpiresAt)
+	_, err := s.db.Exec(ctx, query, exec.ArtifactID, exec.IdempotencyKeyHash, exec.RequestBodyHash, exec.Environment, exec.ResponseBody, exec.ResponseStatus, exec.ExpiresAt)
 	return err
 }
 

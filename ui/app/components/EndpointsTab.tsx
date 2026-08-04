@@ -24,7 +24,6 @@ const ObserverTarget = ({ onIntersect, disabled }: { onIntersect: () => void, di
 };
 
 interface EndpointsTabProps {
-  srv: any;
   res: ServiceGenerationResult;
   searchQuery: string;
   setSearchQuery: (q: string) => void;
@@ -47,7 +46,6 @@ interface EndpointsTabProps {
 }
 
 export default function EndpointsTab({
-  srv,
   res,
   searchQuery,
   setSearchQuery,
@@ -79,14 +77,11 @@ export default function EndpointsTab({
       }
     });
   }
-  const totalEndpoints = searchResults !== null
-    ? searchResults.length
-    : (srv.resources?.reduce((sum: number, r: any) => sum + (r.endpointCount || 0), 0) || 0);
 
   return (
-    <div className="bg-white rounded-xl border border-slate-200">
-      <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between gap-3 flex-wrap">
-        <div className="relative flex-1 sm:flex-initial sm:min-w-[250px] max-w-md">
+    <div className="min-w-0 rounded-xl border border-slate-200 bg-white">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-3 sm:px-5">
+        <div className="relative w-full min-w-0 sm:w-auto sm:min-w-[250px] sm:max-w-md sm:flex-1">
             <button
               data-track="search_endpoints"
               onClick={handleSearch}
@@ -102,7 +97,7 @@ export default function EndpointsTab({
             </button>
             <input
               type="text"
-              placeholder="Search endpoints..."
+              placeholder="Search operations..."
               value={searchQuery}
               onChange={(e) => {
                 setSearchQuery(e.target.value);
@@ -144,10 +139,10 @@ export default function EndpointsTab({
 
               return (
                 <div key={resource} className="mb-2">
-                  <div className="bg-slate-50 px-5 py-2.5 border-y border-slate-100 mt-2 flex justify-between items-center select-none">
-                    <div className="flex items-center gap-2 flex-wrap">
+                  <div className="mt-2 flex min-w-0 items-center justify-between gap-2 border-y border-slate-100 bg-slate-50 px-4 py-2.5 select-none sm:px-5">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
                       <ChevronDown className="w-4 h-4 text-slate-400" />
-                      <h3 className="text-xs font-semibold text-slate-600 uppercase tracking-wider">{resource}</h3>
+                      <h3 className="min-w-0 break-words text-xs font-semibold text-slate-600 uppercase tracking-wider">{resource}</h3>
                     </div>
                     {availableVersions.length > 1 && (
                       <select
@@ -200,12 +195,12 @@ export default function EndpointsTab({
               return (
                 <div key={resource.id} className="mb-2">
                   <div
-                    className="bg-slate-50 px-5 py-2.5 border-y border-slate-100 mt-2 flex justify-between items-center cursor-pointer hover:bg-slate-100 transition-colors select-none"
+                    className="mt-2 flex min-w-0 items-center justify-between gap-2 border-y border-slate-100 bg-slate-50 px-4 py-2.5 cursor-pointer transition-colors select-none hover:bg-slate-100 sm:px-5"
                     onClick={() => toggleResource(resource.id, resource.name)}
                   >
-                    <div className="flex items-center gap-2 flex-wrap">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
                       {isCollapsed ? <ChevronRight className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
-                      <h3 className="text-xs font-semibold text-slate-600 uppercase tracking-wider">{resource.name}</h3>
+                      <h3 className="min-w-0 break-words text-xs font-semibold text-slate-600 uppercase tracking-wider">{resource.name}</h3>
                       {isLoading && <span className="text-xs text-blue-500 ml-2 animate-pulse">Fetching...</span>}
                       {!isLoading && (
                         <span className="text-xs text-slate-400 ml-2">

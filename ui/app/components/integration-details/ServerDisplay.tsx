@@ -55,7 +55,7 @@ export function ServerDisplay({ srv, isAuth, onEditClick }: ServerDisplayProps) 
   }
 
   return (
-    <div className="flex items-center gap-2 mt-1.5" ref={dropdownRef}>
+    <div className="mt-1.5 flex max-w-full min-w-0 items-center gap-2" ref={dropdownRef}>
       {primaryDesc && (
         <span className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider border ${getEnvBadgeStyles(primaryDesc)}`}>
           {primaryDesc}
@@ -67,7 +67,7 @@ export function ServerDisplay({ srv, isAuth, onEditClick }: ServerDisplayProps) 
             navigator.clipboard.writeText(primaryUrl);
             toast.success("URL copied to clipboard");
           }}
-          className="text-xs font-mono text-slate-600 hover:text-blue-600 transition-colors truncate max-w-sm cursor-pointer"
+          className="min-w-0 max-w-full truncate text-left font-mono text-xs text-slate-600 transition-colors hover:text-blue-600 cursor-pointer sm:max-w-sm"
           title="Click to copy URL"
         >
           {primaryUrl}
@@ -86,7 +86,7 @@ export function ServerDisplay({ srv, isAuth, onEditClick }: ServerDisplayProps) 
             <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${dropdownOpen ? "rotate-180" : ""}`} />
           </button>
           {dropdownOpen && (
-            <div className="absolute top-full left-0 mt-1 z-30 bg-white border border-slate-200 rounded-lg shadow-lg py-1.5 min-w-[280px] divide-y divide-slate-100 overflow-hidden animate-in fade-in slide-in-from-top-1 duration-150">
+            <div className="absolute top-full right-0 mt-1 z-30 w-[min(280px,calc(100vw-2rem))] bg-white border border-slate-200 rounded-lg shadow-lg py-1.5 divide-y divide-slate-100 overflow-hidden animate-in fade-in slide-in-from-top-1 duration-150 sm:left-0 sm:right-auto">
               {extraServers.map((s, i) => (
                 <button
                   key={i}

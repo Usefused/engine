@@ -1,10 +1,10 @@
 import { useState, useEffect } from "react";
-import { useNavigate, type MetaFunction } from "@remix-run/react";
+import { type MetaFunction } from "@remix-run/react";
 
 export const meta: MetaFunction = ({ matches }) => {
-  const parentMeta = matches.filter((m: any) => m.id === "root").flatMap((m: any) => m.meta ?? []);
+  const parentMeta = matches.filter((m) => m.id === "root").flatMap((m) => m.meta ?? []);
   return [
-    ...parentMeta.filter((m: any) => !('title' in m)),
+    ...parentMeta.filter((m) => !('title' in m)),
     { title: "Settings - Fused" },
   ];
 };
@@ -14,7 +14,6 @@ import { setApiKey } from "~/lib/session";
 
 export default function SettingsPage() {
   const toast = useToast();
-  const navigate = useNavigate();
   const [account, setAccount] = useState<Account | null>(null);
   const [email, setEmail] = useState("");
   const [savingEmail, setSavingEmail] = useState(false);
@@ -124,47 +123,6 @@ export default function SettingsPage() {
             <div className="animate-pulse flex flex-col gap-4">
               <div className="h-10 bg-slate-100 rounded w-full"></div>
               <div className="h-10 bg-slate-100 rounded w-full"></div>
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-        <div className="p-6">
-          <h2 className="text-lg font-semibold text-slate-900">Wallet & Credits</h2>
-          <p className="text-sm text-slate-500 mb-6">View your current credit balance and billing information.</p>
-          
-          {account ? (
-            <div className="flex items-center justify-between p-4 bg-slate-50 rounded-lg border border-slate-100">
-              <div>
-                <p className="text-sm font-medium text-slate-700">Available Credits</p>
-                <p className="text-2xl font-bold text-slate-900 mt-1">
-                  ${(account.credit_balance ?? 0).toFixed(4).toLocaleString()}
-                </p>
-              </div>
-              {/* <button
-                className="px-4 py-2 bg-white border border-slate-300 text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-slate-500 transition-colors"
-                onClick={() => navigate('/integrations/credits')}
-              >
-                Add Credits
-              </button> */}
-              <div className="flex items-center gap-3">
-                {(account.credit_balance ?? 0) < 1.0 && (
-                  <a
-                    href={`mailto:${(typeof window !== "undefined" && (window as any).ENV?.SUPPORT_EMAIL) || "hello@usefused.com"}?subject=Extra%20Credit`}
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors cursor-pointer text-center"
-                  >
-                    Request Extra Credits
-                  </a>
-                )}
-                <div className="text-sm text-blue-600 bg-blue-50 px-3 py-1.5 rounded-md border border-blue-100 font-medium">
-                  Credits are complementary for our early users
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="animate-pulse flex flex-col gap-4">
-              <div className="h-20 bg-slate-100 rounded w-full"></div>
             </div>
           )}
         </div>

@@ -56,17 +56,12 @@ type StorageConfig struct {
 	SecretKey string `yaml:"secret_key"`
 }
 
-type EngineWorkerCounts struct {
-	MCPAnalytics     int `yaml:"mcp_analytics"`
-	WebhookConfig    int `yaml:"webhook_config"`
-	WebhookAnalytics int `yaml:"webhook_analytics"`
-}
-
 type EngineConfig struct {
-	RegistryEndpoint string             `yaml:"registry_endpoint"`
-	AccountID        string             `yaml:"account_id"`
-	LicenseKey       string             `yaml:"license_key"`
-	WorkerCounts     EngineWorkerCounts `yaml:"worker_counts"`
+	RegistryEndpoint       string `yaml:"registry_endpoint"`
+	AccountID              string `yaml:"account_id"`
+	LicenseKey             string `yaml:"license_key"`
+	ExecutionRetentionDays int    `yaml:"execution_retention_days"`
+	ExecutionCleanupBatch  int    `yaml:"execution_cleanup_batch"`
 }
 
 type ObservabilityConfig struct {
@@ -136,12 +131,9 @@ func Load(path string) (*Config, error) {
 			},
 		},
 		Engine: EngineConfig{
-			RegistryEndpoint: "https://registry.usefused.com/graphql",
-			WorkerCounts: EngineWorkerCounts{
-				MCPAnalytics:     2,
-				WebhookConfig:    2,
-				WebhookAnalytics: 2,
-			},
+			RegistryEndpoint:       "https://registry.usefused.com/graphql",
+			ExecutionRetentionDays: 30,
+			ExecutionCleanupBatch:  1000,
 		},
 	}
 

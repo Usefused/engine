@@ -474,7 +474,7 @@ type Store interface {
 	// by version. If version is empty, it returns the most recently created one.
 	GetMCPScopeByName(ctx context.Context, accountID uuid.UUID, name, version string) (*ArtifactScope, error)
 
-	// GetMCPAnalyticsDashboard aggregates fused_mcp_analytics/fused_mcp_sessions
+	// GetMCPAnalyticsDashboard aggregates canonical execution events and MCP sessions
 	// for one SDK into the shape the MCP analytics page renders (overall
 	// totals, per-tool and per-service breakdowns, active session count, and
 	// recent sessions).
@@ -601,20 +601,21 @@ type Store interface {
 	// existing registration for this label at all.
 	WorkspaceWebhookOwnersByLabel(ctx context.Context, serviceIDs []uuid.UUID, label string) (map[uuid.UUID]string, error)
 
-	InsertMCPAnalytics(ctx context.Context, analytics *models.MCPAnalytics) error
 	UpsertMCPSession(ctx context.Context, session *models.MCPSession) error
 	BatchCreateEngineExecutionEvents(ctx context.Context, events []models.EngineExecutionEvent) error
-	BatchCreateWebhookEvents(ctx context.Context, events []models.WebhookEvent) error
+	DeleteEngineExecutionEventsBefore(ctx context.Context, before time.Time, limit int) (int64, error)
+	ListEngineExecutionEventsByService(ctx context.Context, filter EngineExecutionFilter) ([]models.EngineExecutionEvent, int64, error)
+	GetEngineExecutionAnalyticsByService(ctx context.Context, filter EngineExecutionFilter) (models.EngineExecutionAnalytics, error)
+	GetWorkspaceExecutionAnalytics(ctx context.Context, accountID uuid.UUID, startDate, endDate time.Time) (models.WorkspaceExecutionAnalytics, error)
+	ListUnprojectedPublicInsightServiceIDs(ctx context.Context, before time.Time, limit int) ([]uuid.UUID, error)
+	ProjectPublicServiceInsightReports(ctx context.Context, reportableServiceIDs []uuid.UUID, before time.Time, eventLimit int) (int64, error)
+	ListPendingPublicServiceInsightReports(ctx context.Context, limit int, now time.Time) ([]models.PublicServiceInsightReport, error)
+	MarkPublicServiceInsightReportResults(ctx context.Context, results []models.PublicServiceInsightReportResult, at time.Time) error
+	MarkPublicServiceInsightReportDeliveryFailure(ctx context.Context, reportIDs []uuid.UUID, errorCode string, at time.Time) error
 
-	// ListWebhookEventsByService and GetWebhookAnalytics are the read side of
-	// fused_webhook_events (write side: BatchCreateWebhookEvents, fed by
-	// StartWebhookAnalyticsWorker). This data never lived in the Registry --
-	// see sprint/engine_owned_webhooks_plan.md -- and the UI's webhook
-	// analytics tab now calls these directly via /workspace/webhooks/*
-	// instead of going through Registry's GraphQL. Both are scoped by
-	// accountID AND serviceID at the query level (not just checked in the
-	// handler) so one account's rows are never reachable through another's
-	// credentials.
+	// Webhook activity is projected from the canonical execution-event table.
+	// Both reads keep account and service scoping in SQL so tenant isolation is
+	// enforced by the data access boundary, not by filtering returned rows.
 	ListWebhookEventsByService(ctx context.Context, accountID, serviceID uuid.UUID, eventName string, limit, offset int, startDate, endDate *time.Time) ([]models.WebhookEvent, int64, error)
 	GetWebhookAnalytics(ctx context.Context, accountID, serviceID uuid.UUID, eventName string, startDate, endDate *time.Time) (models.WebhookAnalytics, error)
 

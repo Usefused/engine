@@ -2,19 +2,28 @@ import { useState, useEffect } from "react";
 import { Link, type MetaFunction } from "@remix-run/react";
 
 export const meta: MetaFunction = ({ matches }) => {
-  const parentMeta = matches.filter((m: any) => m.id === "root").flatMap((m: any) => m.meta ?? []);
+  const parentMeta = matches.filter((m) => m.id === "root").flatMap((m) => m.meta ?? []);
   return [
-    ...parentMeta.filter((m: any) => !('title' in m)),
-    { title: "MCP Servers - Fused" },
+    ...parentMeta.filter((m) => !('title' in m)),
+    { title: "MCP servers - Fused" },
   ];
 };
 import { Trash2, Copy, TerminalSquare, AlertCircle, Play, ServerCrash, BarChart2, Info } from "lucide-react";
 import { api } from "~/lib/api";
 import { useToast } from "~/components/Toast";
 
+interface McpServerItem {
+  id: string;
+  name: string;
+  active: boolean;
+  mcp_url?: string;
+  deactivated_at?: string;
+  created_at?: string;
+}
+
 export default function McpServers() {
   const toast = useToast();
-  const [mcpServers, setMcpServers] = useState<any[]>([]);
+  const [mcpServers, setMcpServers] = useState<McpServerItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [page, setPage] = useState(1);
@@ -45,12 +54,12 @@ export default function McpServers() {
         }
       }
     `;
-    api.mcpGraphql<{ mcpServers: { items: any[], total: number } }>(queryStr)
+    api.mcpGraphql<{ mcpServers: { items: McpServerItem[], total: number } }>(queryStr)
       .then(res => {
         setMcpServers(res.mcpServers.items);
         setTotal(res.mcpServers.total);
       })
-      .catch(e => setError(e.message))
+      .catch(e => setError(e instanceof Error ? e.message : "Failed to load MCP servers"))
       .finally(() => setLoading(false));
   };
 
@@ -66,8 +75,8 @@ export default function McpServers() {
       await api.mcpGraphql(`mutation { killMcpServer(id: "${id}") { id } }`);
       fetchServers();
       toast.success(`Server "${name}" killed successfully.`);
-    } catch (err: any) {
-      toast.error(`Failed to kill server: ${err.message || "Unknown error"}`);
+    } catch (err) {
+      toast.error(`Failed to kill server: ${err instanceof Error ? err.message : "Unknown error"}`);
     }
   };
 
@@ -79,8 +88,8 @@ export default function McpServers() {
       fetchServers();
       toast.success(`Server "${name}" deleted successfully.`);
       setSelectedIds(prev => prev.filter(i => i !== id));
-    } catch (err: any) {
-      toast.error(`Failed to delete server: ${err.message || "Unknown error"}`);
+    } catch (err) {
+      toast.error(`Failed to delete server: ${err instanceof Error ? err.message : "Unknown error"}`);
     }
   };
 
@@ -95,8 +104,8 @@ export default function McpServers() {
       fetchServers();
       setSelectedIds([]);
       toast.success(`Successfully deleted ${selectedIds.length} server(s).`);
-    } catch (err: any) {
-      toast.error(`Failed to delete some servers: ${err.message || "Unknown error"}`);
+    } catch (err) {
+      toast.error(`Failed to delete some servers: ${err instanceof Error ? err.message : "Unknown error"}`);
       fetchServers();
     } finally {
       setIsDeletingMultiple(false);
@@ -108,8 +117,8 @@ export default function McpServers() {
       await api.mcpGraphql(`mutation { reactivateMcpServer(id: "${id}") { id } }`);
       fetchServers();
       toast.success("Server reactivated successfully.");
-    } catch (err: any) {
-      toast.error(`Failed to reactivate server: ${err.message || "Unknown error"}`);
+    } catch (err) {
+      toast.error(`Failed to reactivate server: ${err instanceof Error ? err.message : "Unknown error"}`);
     }
   };
 
@@ -121,17 +130,17 @@ export default function McpServers() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-            <h1 className="text-xl font-semibold text-slate-900">MCP Servers</h1>
+            <h1 className="text-xl font-semibold text-slate-900">MCP servers</h1>
             <button
               data-track="toggle_mcp_connection_guide"
               onClick={() => setShowHowToUse(!showHowToUse)}
-              className={`inline-flex items-center gap-1.5 text-xs font-semibold transition-colors cursor-pointer ${showHowToUse ? 'text-indigo-800 underline' : 'text-indigo-600 hover:text-indigo-800 hover:underline'}`}
+              className={`inline-flex items-center gap-1.5 text-xs font-semibold transition-colors cursor-pointer ${showHowToUse ? 'text-slate-800 underline' : 'text-slate-500 hover:text-slate-800 hover:underline'}`}
             >
               <Info className="w-3.5 h-3.5 shrink-0" />
               How to connect
             </button>
           </div>
-          <p className="text-sm text-slate-500 mt-1">Manage your deployed Model Context Protocol servers.</p>
+          <p className="text-sm text-slate-500 mt-1">Manage the MCP servers your agents connect to.</p>
         </div>
         <div className="flex items-center gap-3">
           {selectedIds.length > 0 && (
@@ -146,37 +155,40 @@ export default function McpServers() {
           )}
           <Link
             to="/integrations/sdk-builder?tab=mcp"
-            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-all shadow-sm shadow-blue-200 self-start sm:self-auto"
+            className="inline-flex items-center gap-2 px-4 py-2 bg-slate-950 text-white text-sm font-medium rounded-lg hover:bg-slate-800 transition-colors shadow-sm self-start sm:self-auto"
           >
             <Play className="w-4 h-4" />
-            Deploy
+            Create MCP server
           </Link>
         </div>
       </div>
 
       {showHowToUse && (
-        <div className="p-4 bg-indigo-50 border border-indigo-100 rounded-xl animate-in fade-in slide-in-from-top-2">
-          <h4 className="text-sm font-semibold text-indigo-900 mb-2 flex items-center gap-1.5">
+        <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl animate-in fade-in slide-in-from-top-2">
+          <h4 className="text-sm font-semibold text-slate-900 mb-2 flex items-center gap-1.5">
             <AlertCircle className="w-4 h-4" />
-            Client Configuration Guide
+            Connect an MCP client
           </h4>
-          <p className="text-sm text-indigo-700 leading-relaxed">
-            To securely connect your MCP client (like your agent or Claude Desktop) to these servers, use the SSE <strong>Connection URL</strong> provided for the MCP server.
-            You <strong>must</strong> pass your required API credentials as HTTP headers prefixed with <code className="bg-indigo-100/70 px-1.5 py-0.5 rounded text-indigo-900 font-mono text-xs">X-Env-</code> during the connection handshake.
-            <br/><br/>
-            For example: <code className="bg-indigo-100/70 px-1.5 py-0.5 rounded text-indigo-900 font-mono text-xs">X-Env-STRIPE_KEY: sk_test_...</code>
-            <br/><br/>
-            The server will automatically and securely inject these into the sandbox environment without the LLM ever needing to handle the raw secret keys.
-          </p>
+          <div className="space-y-2 text-sm text-slate-700 leading-relaxed">
+            <p>
+              Use the server's <strong>Connection URL</strong> and send its execution token in the authorization header:
+            </p>
+            <code className="inline-block max-w-full break-all rounded bg-slate-200/70 px-2 py-1 font-mono text-xs text-slate-900">
+              Authorization: Bearer &lt;execution-token&gt;
+            </code>
+            <p>
+              Service credentials come from the credential set selected when the server was created, so your MCP client never needs to send provider keys. The execution token is shown once at creation and should be stored securely.
+            </p>
+          </div>
         </div>
       )}
 
       {mcpServers.length === 0 ? (
         <div className="bg-white border border-slate-200 rounded-xl p-12 text-center">
           <TerminalSquare className="w-12 h-12 text-slate-300 mx-auto mb-4" />
-          <h3 className="text-lg font-medium text-slate-900">No active servers</h3>
+          <h3 className="text-lg font-medium text-slate-900">No MCP servers yet</h3>
           <p className="text-slate-500 mt-2 mb-6 max-w-md mx-auto">
-            You haven't deployed any MCP servers yet. Generate one from the SDK Builder to start exposing your APIs to LLMs.
+            You haven't created an MCP server yet. Create one to expose selected services and operations to your agents.
           </p>
         </div>
       ) : (
@@ -215,8 +227,8 @@ export default function McpServers() {
                       }}
                     />
                   </div>
-                  <div className={`w-10 h-10 rounded-lg border flex items-center justify-center shrink-0 ${server.active ? 'bg-indigo-50 border-indigo-100' : 'bg-slate-50 border-slate-200'}`}>
-                    <TerminalSquare className={`w-5 h-5 ${server.active ? 'text-indigo-600' : 'text-slate-400'}`} />
+                  <div className={`w-10 h-10 rounded-lg border flex items-center justify-center shrink-0 ${server.active ? 'bg-slate-100 border-slate-200' : 'bg-slate-50 border-slate-200'}`}>
+                    <TerminalSquare className={`w-5 h-5 ${server.active ? 'text-slate-700' : 'text-slate-400'}`} />
                   </div>
                   <div>
                     <h3 className="font-semibold text-slate-900 leading-tight">{server.name || "Untitled MCP server"}</h3>
@@ -249,10 +261,10 @@ export default function McpServers() {
                       <button
                         data-track="copy_mcp_sandbox_url"
                         onClick={() => {
-                          navigator.clipboard.writeText(server.mcp_url);
+                          navigator.clipboard.writeText(server.mcp_url || "");
                           toast.success("URL copied to clipboard!");
                         }}
-                        className="p-2 bg-white border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 hover:text-indigo-600 transition-colors shadow-sm cursor-pointer"
+                        className="p-2 bg-white border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 hover:text-slate-900 transition-colors shadow-sm cursor-pointer"
                         title="Copy URL"
                       >
                         <Copy className="w-4 h-4" />
@@ -263,7 +275,7 @@ export default function McpServers() {
 
                 <div className="flex items-center justify-between pt-2">
                   <span className="text-xs text-slate-400 font-medium">
-                    Created {new Date(server.created_at).toLocaleDateString()}
+                    Created {server.created_at ? new Date(server.created_at).toLocaleDateString() : ""}
                   </span>
                   <div className="flex items-center gap-2">
                     {/* Kill/Reactivate toggle, not Restart -- Kill just flips
@@ -293,7 +305,7 @@ export default function McpServers() {
                     )}
                     <Link
                       to={`/integrations/mcp/${server.id}/analytics`}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 hover:text-indigo-700 rounded-lg text-xs font-semibold transition-colors border border-indigo-100 cursor-pointer"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 hover:text-slate-900 rounded-lg text-xs font-semibold transition-colors border border-slate-200 cursor-pointer"
                     >
                       <BarChart2 className="w-3.5 h-3.5" />
                       Analytics

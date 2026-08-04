@@ -18,8 +18,8 @@ export const meta: MetaFunction<typeof clientLoader> = ({
   const title = service?.name
     ? `${
         service.name.charAt(0).toUpperCase() + service.name.slice(1)
-      } Service Page - Fused`
-    : "Integration Details - Fused";
+      } - Fused`
+    : "Service details - Fused";
   const description =
     service?.description ||
     `Explore the ${
@@ -35,15 +35,18 @@ export const meta: MetaFunction<typeof clientLoader> = ({
   }`;
 
   const parentMeta = matches
-    .filter((m: any) => m.id === "root")
-    .flatMap((m: any) => m.meta ?? []);
-  const inheritedMeta = parentMeta.filter(
-    (m: any) =>
+    .filter((m) => m.id === "root")
+    .flatMap((m) => m.meta ?? []);
+  const inheritedMeta = parentMeta.filter((m) => {
+    const name = "name" in m ? m.name : undefined;
+    const property = "property" in m ? m.property : undefined;
+    return (
       !("title" in m) &&
-      m.name !== "description" &&
-      !String(m.property ?? "").startsWith("og:") &&
-      !String(m.name ?? "").startsWith("twitter:")
-  );
+      name !== "description" &&
+      !String(property ?? "").startsWith("og:") &&
+      !String(name ?? "").startsWith("twitter:")
+    );
+  });
 
   return [
     ...inheritedMeta,
@@ -67,10 +70,15 @@ import {
   type Service,
   type ServiceVersion,
   type SpecificationImportPlan,
+  type WebhookEventEntry,
+  type WebhookAnalyticsSummary,
+  type EngineExecutionEventEntry,
+  type EngineExecutionAnalyticsSummary,
+  type ServiceConsumerEntry,
 } from "~/lib/api";
 import EndpointsTab from "~/components/EndpointsTab";
 import WebhooksTab from "~/components/WebhooksTab";
-import AnalyticsTab from "~/components/AnalyticsTab";
+import ActivityTab from "~/components/AnalyticsTab";
 import EndpointDetailsSidebar from "~/components/EndpointDetailsSidebar";
 import { ServerDisplay } from "~/components/integration-details/ServerDisplay";
 import { VersionSelector } from "~/components/integration-details/VersionSelector";
@@ -84,6 +92,8 @@ import {
   Share2,
   Briefcase,
   ChevronDown,
+  Globe2,
+  Lock,
 } from "lucide-react";
 import {
   ImportWarningPanel,
@@ -91,7 +101,7 @@ import {
 } from "~/components/ImportWarnings";
 import { NotificationBanner } from "~/components/notifications/NotificationBanner";
 import { useWorkspaceNotifications } from "~/components/notifications/useWorkspaceNotifications";
-import { matchesService } from "~/components/notifications/notificationHelpers";
+import { isPending, matchesService } from "~/components/notifications/notificationHelpers";
 import { useToast } from "~/components/Toast";
 import { formatServiceName } from "~/lib/format";
 import { useEndpointSearch } from "~/hooks/useEndpointSearch";
@@ -153,7 +163,13 @@ function canManageService(
   return !provider && !!routeId && !isUUID(routeId);
 }
 
-export const clientLoader = async ({ params, request }: any) => {
+export const clientLoader = async ({
+  params,
+  request,
+}: {
+  params: { id?: string; provider?: string };
+  request: Request;
+}) => {
   const id = params.id;
   // provider is only ever present when this loader is reused by
   // integrations.$provider.$id.tsx (the cross-account public-browsing
@@ -226,7 +242,10 @@ export const clientLoader = async ({ params, request }: any) => {
       version: version || "",
     };
     if (provider) variables.provider = provider;
-    const res = await api.graphql<any>(queryStr, variables, token || undefined);
+    const res = await api.graphql<{
+      service: Service | null;
+      serviceVersions?: ServiceVersion[];
+    }>(queryStr, variables, token || undefined);
     initialServiceData = res;
 
     if (!initialServiceData?.service && !token) {
@@ -252,8 +271,8 @@ export const clientLoader = async ({ params, request }: any) => {
         : `/integrations/${initialServiceData.service.slug}`;
       return redirect(`${canonicalPath}${url.search}`);
     }
-  } catch (err: any) {
-    const msg = err.message || "";
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "";
     if (
       msg === "invalid API key" ||
       msg === "missing X-API-Key header" ||
@@ -296,10 +315,12 @@ function AddToWorkspaceButton({
   serviceId,
   serviceName,
   versionTag,
+  onAdded,
 }: {
   serviceId: string;
   serviceName: string;
   versionTag?: string | null;
+  onAdded?: () => void;
 }) {
   const [added, setAdded] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -313,8 +334,9 @@ function AddToWorkspaceButton({
     try {
       await api.workspace.addService(serviceId, serviceName, versionTag);
       setAdded(true);
-    } catch (e: any) {
-      setError(e?.message ?? "Failed to add service");
+      onAdded?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to add service");
     } finally {
       setAdding(false);
     }
@@ -341,7 +363,7 @@ function AddToWorkspaceButton({
       data-track="add_to_workspace"
       title={`Add ${serviceName} to your workspace`}
     >
-      {adding ? "Adding…" : "+ Add to Workspace"}
+      {adding ? "Adding…" : "Add to workspace"}
       {error && <span className="ml-2 text-red-500 text-xs">{error}</span>}
     </button>
   );
@@ -349,7 +371,7 @@ function AddToWorkspaceButton({
 
 export default function IntegrationDetail() {
   const toast = useToast();
-  const loaderData = useLoaderData<typeof loader>();
+  const loaderData = useLoaderData<typeof clientLoader>();
   const { id: paramId, provider } = useParams<{
     id: string;
     provider?: string;
@@ -364,35 +386,62 @@ export default function IntegrationDetail() {
       return {
         service: loaderData.initialServiceData.service,
         integrations: [],
-      } as any;
+      };
     }
     return null;
   });
 
   useEffect(() => {
-    if (loaderData?.initialServiceData) {
-      setRes((prev) => {
-        const service = loaderData.initialServiceData.service;
-
-        if (!prev)
-          return {
-            service,
-            integrations: [],
-          } as any;
-
-        const newService = { ...prev.service, ...service };
-
+    const initialServiceData = loaderData?.initialServiceData;
+    const service = initialServiceData?.service;
+    if (!service) return;
+    setRes((prev) => {
+      if (!prev)
         return {
-          ...prev,
-          service: newService,
+          service,
+          integrations: [],
         };
-      });
-    }
+
+      const newService = { ...prev.service, ...service };
+
+      return {
+        ...prev,
+        service: newService,
+      };
+    });
   }, [loaderData?.initialServiceData]);
 
   // Only the loaded service row gives us the Engine/Registry UUID. The route
   // param may be a slug, so UUID-only admin panels must wait for `res`.
   const serviceId = res?.service?.id;
+
+  const [workspaceServiceActive, setWorkspaceServiceActive] = useState<
+    boolean | null
+  >(null);
+
+  useEffect(() => {
+    if (!isAuth || !serviceId) {
+      setWorkspaceServiceActive(false);
+      return;
+    }
+    let cancelled = false;
+    setWorkspaceServiceActive(null);
+    api.workspace
+      .getServices()
+      .then((services) => {
+        if (!cancelled) {
+          setWorkspaceServiceActive(
+            services.some((service) => service.service_id === serviceId)
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setWorkspaceServiceActive(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuth, serviceId]);
 
   const [drift, setDrift] = useState<DriftSnapshot[]>([]);
   const [loading, setLoading] = useState(
@@ -402,8 +451,10 @@ export default function IntegrationDetail() {
   const [driftAction, setDriftAction] = useState<string | null>(null);
   const [showShareMenu, setShowShareMenu] = useState(false);
   const shareMenuRef = useRef<HTMLDivElement>(null);
+  const [showVisibilityMenu, setShowVisibilityMenu] = useState(false);
+  const visibilityMenuRef = useRef<HTMLDivElement>(null);
 
-  // Close share menu when clicking outside
+  // Close header menus when clicking outside.
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (
@@ -411,6 +462,12 @@ export default function IntegrationDetail() {
         !shareMenuRef.current.contains(event.target as Node)
       ) {
         setShowShareMenu(false);
+      }
+      if (
+        visibilityMenuRef.current &&
+        !visibilityMenuRef.current.contains(event.target as Node)
+      ) {
+        setShowVisibilityMenu(false);
       }
     }
     document.addEventListener("mousedown", handleClickOutside);
@@ -437,7 +494,6 @@ export default function IntegrationDetail() {
     hasMoreResources,
     toggleResource,
     loadMoreEndpoints,
-    resetResources,
   } = useResourceLoader(serviceId, version);
 
   const urlTab = searchParams.get("tab") as
@@ -464,6 +520,12 @@ export default function IntegrationDetail() {
     );
   };
 
+  useEffect(() => {
+    if (workspaceServiceActive === false && activeTab === "analytics") {
+      handleTabChange("endpoints");
+    }
+  }, [workspaceServiceActive, activeTab]);
+
   const syncWebhookParams = (params: {
     page?: number;
     startDate?: string;
@@ -489,7 +551,7 @@ export default function IntegrationDetail() {
     );
   };
 
-  const [webhookEvents, setWebhookEvents] = useState<any[]>([]);
+  const [webhookEvents, setWebhookEvents] = useState<WebhookEventEntry[]>([]);
   const [webhookPage, setWebhookPage] = useState(
     isNaN(urlWPage) || urlWPage < 1 ? 1 : urlWPage
   );
@@ -499,9 +561,16 @@ export default function IntegrationDetail() {
   const [webhookStartDate, setWebhookStartDate] =
     useState<string>(urlWStartDate);
   const [webhookEndDate, setWebhookEndDate] = useState<string>(urlWEndDate);
-  const [webhookAnalytics, setWebhookAnalytics] = useState<any>(null);
-  const [dependentSDKs, setDependentSDKs] = useState<any[]>([]);
-  const [dependentMCPs, setDependentMCPs] = useState<any[]>([]);
+  const [webhookAnalytics, setWebhookAnalytics] = useState<WebhookAnalyticsSummary | null>(null);
+  const [executionEvents, setExecutionEvents] = useState<EngineExecutionEventEntry[]>([]);
+  const [executionTotal, setExecutionTotal] = useState(0);
+  const [executionPage, setExecutionPage] = useState(1);
+  const executionLimit = 10;
+  const [executionTransport, setExecutionTransport] = useState("");
+  const [executionStatus, setExecutionStatus] = useState("");
+  const [executionAnalytics, setExecutionAnalytics] = useState<EngineExecutionAnalyticsSummary | null>(null);
+  const [dependentSDKs, setDependentSDKs] = useState<ServiceConsumerEntry[]>([]);
+  const [dependentMCPs, setDependentMCPs] = useState<ServiceConsumerEntry[]>([]);
   const {
     searchQuery,
     setSearchQuery,
@@ -523,8 +592,11 @@ export default function IntegrationDetail() {
     markRead: markNotificationRead,
     dismiss: dismissNotification,
   } = useWorkspaceNotifications();
+  // Detail banners are action-oriented. Acknowledged items remain available
+  // in the bell and full notifications page, but should not interrupt a
+  // service view after the user has already marked them read.
   const serviceNotifications = serviceId
-    ? allNotifications.filter((item) => matchesService(item, serviceId))
+    ? allNotifications.filter((item) => isPending(item) && matchesService(item, serviceId))
     : [];
 
   useEffect(() => {
@@ -562,7 +634,7 @@ export default function IntegrationDetail() {
     if (
       selectedEndpoint &&
       !selectedEndpoint.isWebhook &&
-      !(selectedEndpoint as any)._detailsLoaded
+      !selectedEndpoint._detailsLoaded
     ) {
       api
         .graphql<{ integration: IntegrationObject }>(
@@ -623,7 +695,7 @@ export default function IntegrationDetail() {
       )
     )
       return;
-    if (!isAuth) return;
+    if (!isAuth || workspaceServiceActive !== true) return;
     if (!serviceId) return;
     setIsClientFetchingTab(true);
     try {
@@ -662,6 +734,31 @@ export default function IntegrationDetail() {
     }
   }
 
+  async function loadExecutionData() {
+    if (!isAuth || workspaceServiceActive !== true || !serviceId) return;
+    setIsClientFetchingTab(true);
+    try {
+      const params: Parameters<typeof api.workspace.listEngineExecutionEvents>[0] = {
+        serviceId,
+        limit: executionLimit,
+        offset: (executionPage - 1) * executionLimit,
+      };
+      if (executionTransport) params.transport = executionTransport;
+      if (executionStatus) params.status = executionStatus;
+      const [events, analytics] = await Promise.all([
+        api.workspace.listEngineExecutionEvents(params),
+        api.workspace.getEngineExecutionAnalytics(params),
+      ]);
+      setExecutionEvents(events.items || []);
+      setExecutionTotal(events.total || 0);
+      setExecutionAnalytics(analytics);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsClientFetchingTab(false);
+    }
+  }
+
   useEffect(() => {
     if (activeTab === "webhooks" || activeTab === "analytics") {
       loadWebhookData();
@@ -673,38 +770,28 @@ export default function IntegrationDetail() {
     webhookEndDate,
     webhookPage,
     activeTab,
+    workspaceServiceActive,
+  ]);
+
+  useEffect(() => {
+    if (activeTab === "analytics") loadExecutionData();
+  }, [
+    activeTab,
+    serviceId,
+    executionPage,
+    executionTransport,
+    executionStatus,
+    workspaceServiceActive,
   ]);
 
   async function loadAnalyticsData() {
     if (!id) return;
-    if (!isAuth) return;
+    if (!isAuth || workspaceServiceActive !== true || !serviceId) return;
     setIsClientFetchingTab(true);
     try {
-      const queryStr = `
-        query($id: String!) {
-          sdks(serviceId: $id, target_type: "sdk", limit: 50, offset: 0) {
-            items {
-              id
-              name
-              version
-              created_at
-            }
-          }
-          mcps: sdks(serviceId: $id, target_type: "mcp", limit: 50, offset: 0) {
-            items {
-              id
-              name
-              version
-              created_at
-            }
-          }
-        }
-      `;
-      const data = await api.graphql<{ sdks: any; mcps: any }>(queryStr, {
-        id: serviceId,
-      });
-      setDependentSDKs(data.sdks?.items || []);
-      setDependentMCPs(data.mcps?.items || []);
+      const consumers = await api.workspace.listServiceConsumers(serviceId);
+      setDependentSDKs(consumers.filter((consumer) => consumer.kind === "sdk"));
+      setDependentMCPs(consumers.filter((consumer) => consumer.kind === "mcp"));
     } catch (e) {
       console.error(e);
     } finally {
@@ -716,7 +803,7 @@ export default function IntegrationDetail() {
     if (activeTab === "analytics") {
       loadAnalyticsData();
     }
-  }, [id, activeTab]);
+  }, [id, activeTab, workspaceServiceActive]);
 
   async function loadData() {
     if (!id) return;
@@ -892,7 +979,7 @@ export default function IntegrationDetail() {
           throw new Error("Service not found");
         }
 
-        setRes((prev) => {
+        setRes(() => {
           return {
             service,
             serviceVersions: data.serviceVersions || [],
@@ -969,7 +1056,7 @@ export default function IntegrationDetail() {
     if (res?.service?.name) {
       document.title = `${
         res.service.name.charAt(0).toUpperCase() + res.service.name.slice(1)
-      } Integration - Fused`;
+      } - Fused`;
     }
   }, [res]);
 
@@ -1041,8 +1128,8 @@ export default function IntegrationDetail() {
     try {
       await api.integrations.updateDriftWatch(serviceId, watch);
       setRes({ ...res, service: { ...res.service, watch_for_drift: watch } });
-    } catch (err: any) {
-      toast.error(err.message || "Failed to update drift watch setting");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update drift watch setting");
     } finally {
       setSavingDrift(false);
     }
@@ -1057,8 +1144,8 @@ export default function IntegrationDetail() {
         ...res,
         service: { ...res.service, is_public: newStatus },
       });
-    } catch (e: any) {
-      toast.error("Failed to update public status: " + e.message);
+    } catch (e) {
+      toast.error("Failed to update public status: " + (e instanceof Error ? e.message : String(e)));
     }
   }
 
@@ -1078,12 +1165,12 @@ export default function IntegrationDetail() {
       );
       setRes({
         ...res,
-        serviceVersions: (res.serviceVersions || []).map((v: any) =>
+        serviceVersions: (res.serviceVersions || []).map((v) =>
           v.name === currentVersionEntry.name ? { ...v, is_public: newStatus } : v
         ),
       });
-    } catch (e: any) {
-      toast.error("Failed to update version public status: " + e.message);
+    } catch (e) {
+      toast.error("Failed to update version public status: " + (e instanceof Error ? e.message : String(e)));
     }
   }
 
@@ -1096,8 +1183,8 @@ export default function IntegrationDetail() {
         service: { ...res.service, import_warnings: [] },
       });
       toast.success("Import warnings cleared.");
-    } catch (e: any) {
-      toast.error("Failed to clear import warnings: " + e.message);
+    } catch (e) {
+      toast.error("Failed to clear import warnings: " + (e instanceof Error ? e.message : String(e)));
     }
   }
 
@@ -1119,22 +1206,22 @@ export default function IntegrationDetail() {
     res.serviceVersions ||
     loaderData?.initialServiceData?.serviceVersions ||
     [];
-  // currentVersionEntry backs the version-level Public toggle: the same
+  // currentVersionEntry backs the selected version state: the same
   // "currently viewed version" resolution WorkspaceConnectionProfileSection
   // already uses below (URL ?version= param, falling back to the service's
   // default version).
   const currentVersionEntry = serviceVersions.find(
-    (v: any) => v.name === (version || srv.current_service_version)
+    (v) => v.name === (version || srv.current_service_version)
   );
   const integrations = res.integrations || [];
   const totalEndpoints =
     searchResults !== null
       ? searchResults.length
       : srv.resources?.reduce(
-          (sum: number, r: any) => sum + (r.endpointCount || 0),
+          (sum: number, r) => sum + (r.endpointCount || 0),
           0
         ) || 0;
-  const hasDrift = integrations.some((i: any) => i.status === "drifted");
+  const hasDrift = integrations.some((i) => i.status === "drifted");
   const importWarnings = srv.import_warnings || [];
   const overallStatus = hasDrift ? "drifted" : "active";
   const statusColor =
@@ -1145,19 +1232,19 @@ export default function IntegrationDetail() {
     }[overallStatus] || "bg-slate-50 text-slate-700";
 
   return (
-    <div className="space-y-6">
+    <div className="min-w-0 space-y-5 sm:space-y-6">
       {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
-        <div className="flex-1">
+      <div className="flex min-w-0 flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+        <div className="min-w-0 flex-1">
           <div className="flex items-center gap-3 mb-1">
             <Link
               to="/integrations"
               className="text-sm text-slate-400 hover:text-slate-600"
             >
-              ← Back
+              Back to services
             </Link>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             <h1 className="text-xl font-semibold text-slate-900">
               {formatServiceName(srv.name)}
             </h1>
@@ -1165,21 +1252,13 @@ export default function IntegrationDetail() {
               currentVersionTag={srv.current_service_version}
               versions={serviceVersions}
             />
-            {canManage && currentVersionEntry ? (
-              <label
-                className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer hover:text-slate-900 transition-colors"
-                title="Visibility for this version only, independent of the service-level Public setting"
-              >
-                <input
-                  type="checkbox"
-                  checked={!!currentVersionEntry.is_public}
-                  onChange={handleToggleVersionPublic}
-                  className="w-3.5 h-3.5 text-blue-600 rounded border-slate-300 focus:ring-blue-500 cursor-pointer"
-                />
-                Version Public
-              </label>
-            ) : currentVersionEntry?.is_public ? (
-              <Badge label="VERSION PUBLIC" color="bg-blue-50 text-blue-600" />
+            {currentVersionEntry?.status === "deprecated" ? (
+              <Badge label="DEPRECATED VERSION" color="bg-amber-50 text-amber-700" />
+            ) : currentVersionEntry?.status === "draft" ? (
+              <Badge label="DRAFT VERSION" color="bg-slate-100 text-slate-600" />
+            ) : currentVersionEntry?.status === "public" ||
+              currentVersionEntry?.is_public ? (
+              <Badge label="PUBLIC VERSION" color="bg-slate-100 text-slate-600" />
             ) : null}
             {overallStatus !== "active" && (
               <Badge label={overallStatus} color={statusColor} />
@@ -1195,7 +1274,7 @@ export default function IntegrationDetail() {
                 <Share2 className="w-4 h-4" />
               </button>
               {showShareMenu && (
-                <div className="absolute left-0 top-full mt-1 w-48 bg-white border border-slate-200 rounded-lg shadow-lg z-50 py-1 overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200">
+                <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-slate-200 rounded-lg shadow-lg z-50 py-1 overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200 sm:left-0 sm:right-auto">
                   <button
                     data-track="share_on_twitter"
                     onClick={() => {
@@ -1249,28 +1328,107 @@ export default function IntegrationDetail() {
             </div>
           </div>
           {(srv.provider || srv.canonical_ref) && (
-            <div className="mt-1 flex items-center text-sm text-slate-500 gap-1.5">
-              {srv.provider && <span>Provider: {srv.provider.name}</span>}
+            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-sm text-slate-500">
+              {srv.provider && <span className="break-words">Provider: {srv.provider.name}</span>}
               {srv.provider && srv.canonical_ref && <span>·</span>}
               {srv.canonical_ref && <CopyableCanonicalRef text={srv.canonical_ref} />}
             </div>
           )}
           <ServerDisplay srv={srv} isAuth={false} />
         </div>
-        <div className="flex flex-wrap items-center gap-4 md:justify-end">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 xl:justify-end">
           {canManage ? (
-            <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer hover:text-slate-900 transition-colors">
-              <input
-                type="checkbox"
-                checked={!!srv.is_public}
-                onChange={handleTogglePublic}
-                className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 cursor-pointer"
-              />
-              Public
-            </label>
+            <div className="relative" ref={visibilityMenuRef}>
+              <button
+                type="button"
+                aria-expanded={showVisibilityMenu}
+                aria-haspopup="dialog"
+                onClick={() => setShowVisibilityMenu((open) => !open)}
+                className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:border-slate-300 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1"
+              >
+                {srv.is_public ? (
+                  <Globe2 className="h-4 w-4 text-blue-600" />
+                ) : (
+                  <Lock className="h-4 w-4 text-slate-500" />
+                )}
+                {srv.is_public ? "Public service" : "Private service"}
+                <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+              </button>
+              {showVisibilityMenu && (
+                <div
+                  role="dialog"
+                  aria-label="Service visibility"
+                  className="absolute left-0 top-full z-50 mt-2 w-[min(22rem,calc(100vw-2rem))] rounded-md border border-slate-200 bg-white p-4 shadow-xl xl:left-auto xl:right-0"
+                >
+                  <h2 className="text-sm font-semibold text-slate-900">Visibility</h2>
+                  <div className="mt-3 divide-y divide-slate-100">
+                    <div className="flex items-start justify-between gap-4 pb-3">
+                      <div>
+                        <p className="text-sm font-medium text-slate-800">Service</p>
+                        <p className="mt-0.5 text-xs leading-5 text-slate-500">
+                          {srv.is_public
+                            ? "Discoverable outside your workspace."
+                            : "Only your workspace can discover it."}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-label="Make service public"
+                        aria-checked={!!srv.is_public}
+                        onClick={handleTogglePublic}
+                        className={`relative mt-0.5 inline-flex h-5 w-9 shrink-0 rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
+                          srv.is_public ? "bg-slate-900" : "bg-slate-300"
+                        }`}
+                      >
+                        <span
+                          className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
+                            srv.is_public ? "translate-x-4" : "translate-x-0.5"
+                          }`}
+                        />
+                      </button>
+                    </div>
+                    {currentVersionEntry && (
+                      <div className="flex items-start justify-between gap-4 pt-3">
+                        <div>
+                          <p className="text-sm font-medium text-slate-800">Consumer access</p>
+                          <p className="mt-0.5 text-xs leading-5 text-slate-500">
+                            {currentVersionEntry.is_public
+                              ? "Available when the service is public."
+                              : "This version is held back from consumers."}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-label="Allow consumer access to this version"
+                          aria-checked={!!currentVersionEntry.is_public}
+                          onClick={handleToggleVersionPublic}
+                          className={`relative mt-0.5 inline-flex h-5 w-9 shrink-0 rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
+                            currentVersionEntry.is_public
+                              ? "bg-slate-900"
+                              : "bg-slate-300"
+                          }`}
+                        >
+                          <span
+                            className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
+                              currentVersionEntry.is_public
+                                ? "translate-x-4"
+                                : "translate-x-0.5"
+                            }`}
+                          />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
           ) : srv.is_public ? (
-            <Badge label="PUBLIC" color="bg-blue-100 text-blue-700" />
-          ) : null}
+            <Badge label="PUBLIC SERVICE" color="bg-blue-50 text-blue-700" />
+          ) : (
+            <Badge label="PRIVATE SERVICE" color="bg-slate-100 text-slate-600" />
+          )}
           {canManage && (
             <div className="flex flex-col items-start group relative">
               <label
@@ -1297,17 +1455,12 @@ export default function IntegrationDetail() {
               )}
             </div>
           )}
-          {/* S2: Add to Workspace button.
-              Visible only for authenticated users viewing a service they don't
-              own (is_owner === false). Owners see the Edit/manage controls
-              instead — consistent with the is_owner gating at lines 1107/1120.
-              OTEL audit span is emitted server-side by the Engine handler;
-              the UI doesn't duplicate it. */}
-          {isAuth && !canManage && (
+          {isAuth && workspaceServiceActive === false && (
             <AddToWorkspaceButton
               serviceId={srv.id}
               serviceName={srv.name}
               versionTag={srv.current_service_version}
+              onAdded={() => setWorkspaceServiceActive(true)}
             />
           )}
         </div>
@@ -1372,9 +1525,9 @@ export default function IntegrationDetail() {
           </div>
         </div>
       )}
-      <section className="bg-white border border-slate-200 rounded-lg p-5">
+      <section className="bg-white border border-slate-200 rounded-lg p-4 sm:p-5">
         <h2 className="text-sm font-semibold text-slate-900 mb-4">
-          API Config
+          Service configuration
         </h2>
         <dl className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
           {/* Base URL */}
@@ -1392,7 +1545,7 @@ export default function IntegrationDetail() {
             </summary>
             {srv.servers && srv.servers.length > 1 && (
               <div className="mt-3 pt-3 border-t border-slate-200 text-xs text-slate-700 space-y-2">
-                {srv.servers.map((server: any, i: number) => (
+                {srv.servers.map((server, i: number) => (
                   <div key={i}>
                     <div className="font-mono text-slate-800 break-all">{server.url}</div>
                     <div className="flex gap-2 text-slate-500 mt-0.5">
@@ -1411,7 +1564,7 @@ export default function IntegrationDetail() {
               <div>
                 <dt className="text-xs text-slate-500">Authentication</dt>
                 <dd className="mt-1 text-slate-800">
-                  {srv.auth_configs?.map((auth: any) => auth.type).join(", ") || "None"}
+                  {srv.auth_configs?.map((auth) => auth.type).join(", ") || "None"}
                 </dd>
               </div>
               {srv.auth_configs && srv.auth_configs.length > 0 && (
@@ -1420,14 +1573,32 @@ export default function IntegrationDetail() {
             </summary>
             {srv.auth_configs && srv.auth_configs.length > 0 && (
               <div className="mt-3 pt-3 border-t border-slate-200 text-xs text-slate-700 space-y-3">
-                {srv.auth_configs.map((auth: any, i: number) => (
+                {srv.auth_configs.map((auth, i: number) => (
                   <div key={i} className={i > 0 ? "pt-3 border-t border-slate-200" : ""}>
                     {auth.type && <div className="flex justify-between"><span className="text-slate-500">Type</span><span className="font-medium text-slate-900">{auth.type}</span></div>}
                     {auth.flow && <div className="flex justify-between mt-1"><span className="text-slate-500">Flow</span><span className="font-medium text-slate-900">{auth.flow}</span></div>}
                     {auth.scheme && <div className="flex justify-between mt-1"><span className="text-slate-500">Scheme</span><span className="font-medium text-slate-900">{auth.scheme}</span></div>}
                     {auth.location && <div className="flex justify-between mt-1"><span className="text-slate-500">Location</span><span className="font-medium text-slate-900">{auth.location}</span></div>}
                     {auth.key_name && <div className="flex justify-between mt-1"><span className="text-slate-500">Key</span><span className="font-mono text-slate-900">{auth.key_name}</span></div>}
-                    {auth.scopes && auth.scopes.length > 0 && <div className="mt-2"><span className="text-slate-500 block mb-1">Scopes</span><span className="break-all bg-white px-2 py-1 rounded border border-slate-200 block">{auth.scopes.join(", ")}</span></div>}
+                    {auth.scopes && auth.scopes.length > 0 && (
+                      <div className="mt-2 min-w-0">
+                        <span className="mb-1 block text-slate-500">
+                          Scopes ({auth.scopes.length})
+                        </span>
+                        <div className="max-h-40 overflow-y-auto overscroll-contain rounded-md border border-slate-200 bg-white [scrollbar-gutter:stable]">
+                          <ul className="divide-y divide-slate-100">
+                            {auth.scopes.map((scope: string, scopeIndex: number) => (
+                              <li
+                                key={`${scope}-${scopeIndex}`}
+                                className="break-words px-2 py-1.5 font-mono text-[11px] leading-4 text-slate-700"
+                              >
+                                {scope}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1489,7 +1660,7 @@ export default function IntegrationDetail() {
       </section>
 
       {srv.incoming_webhook_config && (
-        <section className="bg-white border border-slate-200 rounded-lg p-5 mt-6 mb-6">
+        <section className="bg-white border border-slate-200 rounded-lg p-4 mt-6 mb-6 sm:p-5">
           <h2 className="text-sm font-semibold text-slate-900 mb-4">
             Webhook configuration
           </h2>
@@ -1526,7 +1697,7 @@ export default function IntegrationDetail() {
           serviceId={serviceId}
           serviceVersionId={
             serviceVersions.find(
-              (item: any) => item.name === (version || srv.current_service_version)
+              (item) => item.name === (version || srv.current_service_version)
             )?.id
           }
           serviceVersion={version || srv.current_service_version || ""}
@@ -1536,22 +1707,22 @@ export default function IntegrationDetail() {
       )}
 
       {/* Tabs */}
-      <div className="flex overflow-x-auto p-1 bg-slate-100/80 rounded-lg mb-6 whitespace-nowrap max-w-full [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <div className="flex max-w-full overflow-x-auto whitespace-nowrap rounded-lg bg-slate-100/80 p-1 mb-6 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <button
           data-track="view_endpoints_tab"
           onClick={() => handleTabChange("endpoints")}
-          className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all cursor-pointer shrink-0 ${
+          className={`shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-all cursor-pointer sm:px-4 sm:text-sm ${
             activeTab === "endpoints"
               ? "bg-white text-slate-900 shadow-sm"
               : "text-slate-500 hover:text-slate-700"
           }`}
         >
-          Endpoints ({totalEndpoints})
+          Operations ({totalEndpoints})
         </button>
         <button
           data-track="view_webhooks_tab"
           onClick={() => handleTabChange("webhooks")}
-          className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all cursor-pointer shrink-0 ${
+          className={`shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-all cursor-pointer sm:px-4 sm:text-sm ${
             activeTab === "webhooks"
               ? "bg-white text-slate-900 shadow-sm"
               : "text-slate-500 hover:text-slate-700"
@@ -1559,17 +1730,17 @@ export default function IntegrationDetail() {
         >
           Webhooks ({srv.webhook_count ?? 0})
         </button>
-        {isAuth && (
+        {isAuth && workspaceServiceActive === true && (
           <button
-            data-track="view_analytics_tab"
+            data-track="view_activity_tab"
             onClick={() => handleTabChange("analytics")}
-            className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all cursor-pointer shrink-0 ${
+            className={`shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-all cursor-pointer sm:px-4 sm:text-sm ${
               activeTab === "analytics"
                 ? "bg-white text-slate-900 shadow-sm"
                 : "text-slate-500 hover:text-slate-700"
             }`}
           >
-            Analytics
+            Activity
           </button>
         )}
       </div>
@@ -1586,7 +1757,6 @@ export default function IntegrationDetail() {
           {/* Endpoints Tab */}
           {activeTab === "endpoints" && (
             <EndpointsTab
-              srv={srv}
               res={res}
               searchQuery={searchQuery}
               setSearchQuery={setSearchQuery}
@@ -1614,10 +1784,26 @@ export default function IntegrationDetail() {
             <WebhooksTab srv={srv} setSelectedEndpoint={setSelectedEndpoint} />
           )}
 
-          {/* Analytics Tab */}
+          {/* Activity Tab */}
           {activeTab === "analytics" && (
-            <AnalyticsTab
+            <ActivityTab
               res={res}
+              executionEvents={executionEvents}
+              executionTotal={executionTotal}
+              executionPage={executionPage}
+              setExecutionPage={setExecutionPage}
+              executionLimit={executionLimit}
+              executionTransport={executionTransport}
+              setExecutionTransport={(transport) => {
+                setExecutionPage(1);
+                setExecutionTransport(transport);
+              }}
+              executionStatus={executionStatus}
+              setExecutionStatus={(status) => {
+                setExecutionPage(1);
+                setExecutionStatus(status);
+              }}
+              executionAnalytics={executionAnalytics}
               webhookEvents={webhookEvents}
               webhookTotal={webhookTotal}
               webhookPage={webhookPage}
@@ -1665,7 +1851,7 @@ export default function IntegrationDetail() {
       {/* Side Panel for Endpoint Details */}
       {selectedEndpoint && (
         <EndpointDetailsSidebar
-          selectedEndpoint={selectedEndpoint as any}
+          selectedEndpoint={selectedEndpoint}
           setSelectedEndpoint={setSelectedEndpoint}
           srv={srv}
           drift={drift}
@@ -1688,7 +1874,7 @@ function CopyableCanonicalRef({ text }: { text: string }) {
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
       }}
-      className="relative cursor-pointer group hover:text-slate-700 transition-colors"
+      className="relative break-all cursor-pointer group hover:text-slate-700 transition-colors"
       title="Click to copy"
     >
       {text}

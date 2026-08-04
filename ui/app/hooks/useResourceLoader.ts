@@ -43,8 +43,8 @@ export function useResourceLoader(
         setIntegrationsByResource(prev => ({ ...prev, [resourceId]: enriched }));
         setResourceOffsets(prev => ({ ...prev, [resourceId]: 500 }));
         setHasMoreResources(prev => ({ ...prev, [resourceId]: data.resourceIntegrations.length === 500 }));
-      } catch (e: any) {
-        toast.error("Failed to load integrations for resource: " + e.message);
+      } catch (e) {
+        toast.error("Failed to load integrations for resource: " + (e instanceof Error ? e.message : "Unknown error"));
       } finally {
         setLoadingResources(prev => ({ ...prev, [resourceId]: false }));
       }
@@ -63,8 +63,8 @@ export function useResourceLoader(
       setIntegrationsByResource(prev => ({ ...prev, [resourceId]: [...(prev[resourceId] || []), ...enriched] }));
       setResourceOffsets(prev => ({ ...prev, [resourceId]: currentOffset + 500 }));
       setHasMoreResources(prev => ({ ...prev, [resourceId]: data.resourceIntegrations.length === 500 }));
-    } catch (e: any) {
-      toast.error("Failed to load more endpoints: " + e.message);
+    } catch (e) {
+      toast.error("Failed to load more endpoints: " + (e instanceof Error ? e.message : "Unknown error"));
     } finally {
       setLoadingResources(prev => ({ ...prev, [resourceId]: false }));
     }

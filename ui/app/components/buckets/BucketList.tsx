@@ -39,14 +39,14 @@ function BucketListHeader({ loading, total, onRefresh }: { loading: boolean; tot
   return (
     <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
       <div>
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-600">Workspace Buckets</h2>
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-600">Credential sets</h2>
         <p className="mt-1 text-xs text-slate-400">{total} total</p>
       </div>
       <button
         type="button"
         onClick={onRefresh}
         className="p-1.5 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100"
-        aria-label="Refresh buckets"
+        aria-label="Refresh credential sets"
         title="Refresh"
       >
         <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
@@ -56,8 +56,8 @@ function BucketListHeader({ loading, total, onRefresh }: { loading: boolean; tot
 }
 
 function BucketRows({ buckets, selectedBucketId, loading, onSelect }: Pick<BucketListProps, "buckets" | "selectedBucketId" | "loading" | "onSelect">) {
-  if (loading) return <BucketEmptyState label="Loading buckets..." />;
-  if (buckets.length === 0) return <BucketEmptyState label="No buckets." />;
+  if (loading) return <BucketEmptyState label="Loading credential sets..." />;
+  if (buckets.length === 0) return <BucketEmptyState label="No credential sets yet." />;
 
   return (
     <div className="divide-y divide-slate-100">
@@ -94,7 +94,7 @@ function BucketRow({ bucket, selected, onSelect }: { bucket: BucketSummary; sele
           <KeyRound className="w-3.5 h-3.5" />
           {bucket.secret_count}
         </span>
-        <span className="inline-flex items-center gap-1.5" title="Environment Variables">
+        <span className="inline-flex items-center gap-1.5" title="Values">
           <Database className="w-3.5 h-3.5" />
           {bucket.value_count}
         </span>
@@ -119,7 +119,7 @@ function BucketPagination({ page, pageCount, pageSize, total, onPageChange }: Pi
           onClick={() => onPageChange(page - 1)}
           disabled={page === 0}
           className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 disabled:opacity-40 disabled:hover:bg-transparent"
-          aria-label="Previous bucket page"
+          aria-label="Previous credential set page"
           title="Previous"
         >
           <ChevronLeft className="w-4 h-4" />
@@ -140,7 +140,7 @@ function BucketPagination({ page, pageCount, pageSize, total, onPageChange }: Pi
           onClick={() => onPageChange(page + 1)}
           disabled={page + 1 >= pageCount}
           className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 disabled:opacity-40 disabled:hover:bg-transparent"
-          aria-label="Next bucket page"
+          aria-label="Next credential set page"
           title="Next"
         >
           <ChevronRight className="w-4 h-4" />

@@ -5,6 +5,12 @@ import { useToast } from "~/components/Toast";
 import { PersonalCredentialPanel } from "~/components/access/PersonalCredentialPanel";
 import { WorkspacePermissionGate, useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasWorkspacePermission } from "~/lib/current-actor-access";
+import { SectionTabs } from "~/components/layout/SectionTabs";
+
+const ACCESS_TABS = [
+  { label: "People", to: "/integrations/access/people" },
+  { label: "Teams", to: "/integrations/access/teams" },
+];
 import {
   changeUserStatus,
   createUser,
@@ -22,9 +28,12 @@ export const meta: MetaFunction = () => [{ title: "People - Fused" }];
 
 export default function PeoplePage() {
 	const { access } = useCurrentActorAccess();
-	return <WorkspacePermissionGate permission="access.read" area="people and personal keys">
-		<PeopleManager canManage={hasWorkspacePermission(access, "access.manage")} canManageOwners={hasWorkspacePermission(access, "account.manage")} />
-	</WorkspacePermissionGate>;
+	return <>
+		<SectionTabs tabs={ACCESS_TABS} />
+		<WorkspacePermissionGate permission="access.read" area="people and personal keys">
+			<PeopleManager canManage={hasWorkspacePermission(access, "access.manage")} canManageOwners={hasWorkspacePermission(access, "account.manage")} />
+		</WorkspacePermissionGate>
+	</>;
 }
 
 function PeopleManager({ canManage, canManageOwners }: { canManage: boolean; canManageOwners: boolean }) {
@@ -145,15 +154,15 @@ function PeopleManager({ canManage, canManageOwners }: { canManage: boolean; can
   return <div className="space-y-6">
     <header><p className="text-sm font-medium text-blue-600">Access</p><h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2"><Users className="w-6 h-6" /> People</h1><p className="text-slate-500 mt-1">Add people, manage their status, and create personal sign-in keys.</p></header>
     {canManage && <AddPersonForm email={newEmail} name={newName} saving={saving} onEmail={setNewEmail} onName={setNewName} onSubmit={handleCreate} />}
-    <div className="grid gap-6 lg:grid-cols-[300px_1fr]">
+    <div className={`grid gap-6 ${selected ? "lg:grid-cols-[300px_1fr]" : ""}`}>
       <PeopleList users={users} total={userTotal} search={search} selectedId={selectedId} loading={loading} includeSuspended={includeSuspended} onSearch={setSearch} onApplySearch={() => setAppliedSearch(search.trim())} onIncludeSuspended={setIncludeSuspended} onSelect={setSelectedId} />
-      <PersonEditor user={selected} email={editEmail} name={editName} saving={saving} issued={issued} canManage={canManage && (canManageOwners || !selectedOwnerProtected)} ownerProtected={selectedOwnerProtected && !canManageOwners} onEmail={setEditEmail} onName={setEditName} onUpdate={handleUpdate} onStatus={handleStatus} onIssue={handleIssue} onRevoke={handleRevoke} onClearSecret={() => setIssued(null)} />
+      {selected && <PersonEditor user={selected} email={editEmail} name={editName} saving={saving} issued={issued} canManage={canManage && (canManageOwners || !selectedOwnerProtected)} ownerProtected={selectedOwnerProtected && !canManageOwners} onEmail={setEditEmail} onName={setEditName} onUpdate={handleUpdate} onStatus={handleStatus} onIssue={handleIssue} onRevoke={handleRevoke} onClearSecret={() => setIssued(null)} />}
     </div>
   </div>;
 }
 
 function AddPersonForm(props: { email: string; name: string; saving: boolean; onEmail: (value: string) => void; onName: (value: string) => void; onSubmit: (event: FormEvent) => void }) {
-  return <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm"><h2 className="text-base font-semibold text-slate-900 mb-1">Add a person</h2><p className="text-xs text-slate-500 mb-3">This does not send an email. Create a personal key separately when they need to sign in.</p><form onSubmit={props.onSubmit} className="grid gap-3 md:grid-cols-[1fr_1fr_auto]" toolname="add_person" tooldescription="Add a person to the workspace without sending an invitation email."><input type="email" required value={props.email} onChange={(event) => props.onEmail(event.target.value)} placeholder="person@example.com" aria-label="Email address" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" /><input required value={props.name} onChange={(event) => props.onName(event.target.value)} placeholder="Display name" aria-label="Display name" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" /><button type="submit" disabled={props.saving} className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"><UserPlus className="w-4 h-4" /> Add person</button></form></section>;
+  return <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm"><h2 className="text-base font-semibold text-slate-900 mb-1">Add a person</h2><p className="text-xs text-slate-500 mb-3">This does not send an email. Create a personal key separately when they need to sign in.</p><form onSubmit={props.onSubmit} className="grid gap-3 md:grid-cols-[1fr_1fr_auto]" toolname="add_person" tooldescription="Add a person to the workspace without sending an invitation email."><input type="email" required value={props.email} onChange={(event) => props.onEmail(event.target.value)} placeholder="person@example.com" aria-label="Email address" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" /><input required value={props.name} onChange={(event) => props.onName(event.target.value)} placeholder="Display name" aria-label="Display name" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" /><button type="submit" disabled={props.saving} className="inline-flex items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"><UserPlus className="w-4 h-4" /> Add person</button></form></section>;
 }
 
 function PeopleList(props: { users: UserSummary[]; total: number; search: string; selectedId: string; loading: boolean; includeSuspended: boolean; onSearch: (value: string) => void; onApplySearch: () => void; onIncludeSuspended: (value: boolean) => void; onSelect: (id: string) => void }) {

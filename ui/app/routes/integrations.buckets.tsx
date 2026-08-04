@@ -34,7 +34,7 @@ import {
 } from "~/lib/buckets";
 import { useToast } from "~/components/Toast";
 
-export const meta: MetaFunction = () => [{ title: "Buckets - Fused" }];
+export const meta: MetaFunction = () => [{ title: "Credentials - Fused" }];
 
 const BUCKET_PAGE_SIZE = 12;
 const BUCKET_CONTENT_PAGE_SIZE = 10;
@@ -197,7 +197,7 @@ export default function BucketsPage() {
           setBucketTotal
         );
       })
-      .catch((err) => toast.error(errorMessage(err, "Failed to load buckets")))
+      .catch((err) => toast.error(errorMessage(err, "Failed to load credential sets")))
       .finally(() => setLoadingBuckets(false));
   };
 
@@ -224,7 +224,7 @@ export default function BucketsPage() {
       })
       .catch((err) => {
         if (requestID === contentRequestID.current)
-          toast.error(errorMessage(err, "Failed to load bucket contents"));
+          toast.error(errorMessage(err, "Failed to load credential set"));
       })
       .finally(() => {
         if (requestID === contentRequestID.current) setLoadingContents(false);
@@ -235,7 +235,7 @@ export default function BucketsPage() {
     readBucketSummary(bucketId)
       .then(setSelectedBucketOverride)
       .catch((err) =>
-        toast.error(errorMessage(err, "Failed to load selected bucket"))
+        toast.error(errorMessage(err, "Failed to load selected credential set"))
       );
   };
 
@@ -336,7 +336,7 @@ export default function BucketsPage() {
       state.bucketSummaries.find((bucket) => bucket.name === name)?.id ||
         preferredBucketID(state.bucketSummaries)
     );
-    toast.success("Bucket created");
+    toast.success("Credential set created");
   };
 
   const deleteSelectedBucket = async () => {
@@ -346,7 +346,7 @@ export default function BucketsPage() {
       { placeholder: selectedBucket.name }
     );
     if (typedName !== selectedBucket.name) {
-      if (typedName !== null) toast.error("Bucket name did not match");
+      if (typedName !== null) toast.error("Credential set name did not match");
       return;
     }
     await withSaving(
@@ -369,9 +369,9 @@ export default function BucketsPage() {
         setBuckets(state.bucketSummaries);
         setBucketTotal(state.total || 0);
         clearSelectedBucket();
-        toast.success("Bucket removed");
+        toast.success("Credential set removed");
       },
-      (err) => toast.error(errorMessage(err, "Failed to remove bucket"))
+      (err) => toast.error(errorMessage(err, "Failed to remove credential set"))
     );
   };
 
@@ -635,7 +635,7 @@ function deleteBucketPrompt(
           connectedUsers === 1 ? "" : "s"
         }.`
       : "";
-  return `Type "${bucket.name}" to delete this bucket.${usage}`;
+  return `Type "${bucket.name}" to delete this credential set.${usage}`;
 }
 
 async function saveBucketSecret(

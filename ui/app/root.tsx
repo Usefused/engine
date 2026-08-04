@@ -4,9 +4,11 @@ import {
   Scripts,
   ScrollRestoration,
   useLoaderData,
+  useLocation,
 } from "@remix-run/react";
 import { useEffect } from "react";
 import { track } from "~/lib/analytics";
+import { routeTitle } from "~/lib/route-title";
 import type { LinksFunction } from "@remix-run/node";
 import "./tailwind.css";
 import { ToastProvider } from "~/components/Toast";
@@ -20,7 +22,7 @@ import { getApiKey } from "~/lib/session";
 export async function clientLoader() {
   const token = getApiKey();
   const runtimeEnv =
-    typeof window !== "undefined" ? (window as any).__FUSED_ENV || {} : {};
+    typeof window !== "undefined" ? window.__FUSED_ENV || {} : {};
   return {
     isAuth: !!token,
     apiToken: token,
@@ -50,6 +52,11 @@ export function HydrateFallback() {
 export default function App() {
   const data = useLoaderData<typeof clientLoader>();
   const gaId = data.ENV.GA_MEASUREMENT_ID;
+  const location = useLocation();
+
+  useEffect(() => {
+    document.title = routeTitle(location.pathname, location.search);
+  }, [location.pathname, location.search]);
 
   useEffect(() => {
     if (!gaId) return;
@@ -64,12 +71,12 @@ export default function App() {
       script.src = `https://www.googletagmanager.com/gtag/js?id=${gaId}`;
       document.head.appendChild(script);
 
-      (window as any).dataLayer = (window as any).dataLayer || [];
-      (window as any).gtag = function (...args: any[]) {
-        (window as any).dataLayer.push(args);
+      window.dataLayer = window.dataLayer || [];
+      window.gtag = function (...args: unknown[]) {
+        window.dataLayer?.push(args);
       };
-      (window as any).gtag("js", new Date());
-      (window as any).gtag("config", gaId);
+      window.gtag("js", new Date());
+      window.gtag("config", gaId);
     };
 
     const interactEvents = ["scroll", "mousemove", "touchstart", "keydown", "click"];
@@ -125,7 +132,7 @@ export function ErrorBoundary() {
         <div className="h-full flex items-center justify-center text-center">
           <div>
             <h1 className="text-2xl font-semibold text-slate-800 mb-2">Something went wrong</h1>
-            <a href="/" className="text-blue-600 underline">Go home</a>
+            <a href="/" className="text-[var(--brand-violet)] underline">Go home</a>
           </div>
         </div>
       </div>

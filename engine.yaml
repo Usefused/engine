@@ -9,10 +9,8 @@ database:
 ui_url: "http://localhost:5173"
 
 engine:
-  worker_counts:
-    mcp_analytics: 2
-    webhook_config: 2
-    webhook_analytics: 2
+  execution_retention_days: 30
+  execution_cleanup_batch: 1000
 
 observability:
   otel_target: "localhost:4317"

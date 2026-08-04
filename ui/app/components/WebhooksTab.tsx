@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Info, AlertTriangle, Search } from "lucide-react";
-import type { IntegrationObject } from "~/lib/api";
+import type { IntegrationObject, Service } from "~/lib/api";
 import { WebhookRow } from "~/components/EndpointRow";
 
 interface Webhook {
@@ -12,7 +12,7 @@ interface Webhook {
 }
 
 interface WebhooksTabProps {
-  srv: any;
+  srv: Service;
   setSelectedEndpoint: (ep: IntegrationObject | null) => void;
 }
 
