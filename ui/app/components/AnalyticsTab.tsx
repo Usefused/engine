@@ -25,6 +25,7 @@ import type {
 } from "~/lib/api";
 import { api } from "~/lib/api";
 import { WebhookLogsCard } from "~/components/webhooks/WebhookLogsCard";
+import { NestedActivityTabs } from "~/components/activity/NestedActivityTabs";
 
 interface ActivityTabProps {
   res: ServiceGenerationResult;
@@ -145,29 +146,19 @@ export default function ActivityTab({
 
   return (
     <div className="space-y-8">
-      <div className="flex w-fit rounded-lg bg-slate-100 p-1" role="tablist" aria-label="Activity source">
-        <SourceButton active={source === "local"} onClick={() => setSource("local")}>This Engine</SourceButton>
-        {res.service.is_owner ? (
-          <SourceButton active={source === "cross-engine"} onClick={() => setSource("cross-engine")}>Across Fused Engines</SourceButton>
-        ) : null}
-      </div>
-
-      {source === "cross-engine" ? (
-        <CrossEngineInsights serviceId={res.service.id} isPublic={res.service.is_public} />
-      ) : (
-        <LocalActivity
-          res={res} view={view} setView={setView} executionEvents={executionEvents} executionTotal={executionTotal}
-          executionPage={executionPage} setExecutionPage={setExecutionPage} executionLimit={executionLimit}
-          executionTransport={executionTransport} setExecutionTransport={setExecutionTransport}
-          executionStatus={executionStatus} setExecutionStatus={setExecutionStatus} executionAnalytics={executionAnalytics}
-          webhookEvents={webhookEvents} webhookTotal={webhookTotal} webhookPage={webhookPage} setWebhookPage={setWebhookPage}
-          webhookLimit={webhookLimit} webhookFilterEvent={webhookFilterEvent} setWebhookFilterEvent={setWebhookFilterEvent}
-          webhookStartDate={webhookStartDate} setWebhookStartDate={setWebhookStartDate} webhookEndDate={webhookEndDate}
-          setWebhookEndDate={setWebhookEndDate} webhookAnalytics={webhookAnalytics} loadWebhookData={loadWebhookData}
-          artifactNames={artifactNames} selectedExecutionID={selectedExecutionID} setSelectedExecutionID={setSelectedExecutionID}
-          selectedExecution={selectedExecution}
-        />
-      )}
+      <LocalActivity
+        res={res} view={view} setView={setView} source={source} setSource={setSource}
+        executionEvents={executionEvents} executionTotal={executionTotal}
+        executionPage={executionPage} setExecutionPage={setExecutionPage} executionLimit={executionLimit}
+        executionTransport={executionTransport} setExecutionTransport={setExecutionTransport}
+        executionStatus={executionStatus} setExecutionStatus={setExecutionStatus} executionAnalytics={executionAnalytics}
+        webhookEvents={webhookEvents} webhookTotal={webhookTotal} webhookPage={webhookPage} setWebhookPage={setWebhookPage}
+        webhookLimit={webhookLimit} webhookFilterEvent={webhookFilterEvent} setWebhookFilterEvent={setWebhookFilterEvent}
+        webhookStartDate={webhookStartDate} setWebhookStartDate={setWebhookStartDate} webhookEndDate={webhookEndDate}
+        setWebhookEndDate={setWebhookEndDate} webhookAnalytics={webhookAnalytics} loadWebhookData={loadWebhookData}
+        artifactNames={artifactNames} selectedExecutionID={selectedExecutionID} setSelectedExecutionID={setSelectedExecutionID}
+        selectedExecution={selectedExecution}
+      />
 
       <Consumers consumers={consumers} />
     </div>
@@ -177,6 +168,8 @@ export default function ActivityTab({
 type LocalActivityProps = Omit<ActivityTabProps, "dependentSDKs" | "dependentMCPs"> & {
   view: "outbound" | "webhooks";
   setView: (view: "outbound" | "webhooks") => void;
+  source: "local" | "cross-engine";
+  setSource: (source: "local" | "cross-engine") => void;
   artifactNames: Map<string, string>;
   selectedExecutionID: string;
   setSelectedExecutionID: (id: string) => void;
@@ -186,60 +179,18 @@ type LocalActivityProps = Omit<ActivityTabProps, "dependentSDKs" | "dependentMCP
 function LocalActivity(props: LocalActivityProps) {
   return (
     <>
-      <div className="border-b border-slate-200">
-        <div className="flex gap-6" role="tablist" aria-label="Service activity">
-          <ActivityViewButton active={props.view === "outbound"} onClick={() => props.setView("outbound")}>
-            Outbound calls
-          </ActivityViewButton>
-          <ActivityViewButton active={props.view === "webhooks"} onClick={() => props.setView("webhooks")}>
-            Incoming webhooks
-          </ActivityViewButton>
-        </div>
-      </div>
+      <NestedActivityTabs
+        active={props.view}
+        ariaLabel="Service activity"
+        onChange={props.setView}
+        options={[
+          { value: "outbound", label: "Outbound calls" },
+          { value: "webhooks", label: "Incoming webhooks" },
+        ]}
+      />
 
       {props.view === "outbound" ? (
-        <section aria-label="Outbound calls" className="space-y-5">
-          <ExecutionMetrics analytics={props.executionAnalytics} />
-
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <h2 className="text-sm font-semibold text-slate-950">Execution receipts</h2>
-              <p className="mt-1 text-xs text-slate-500">One receipt for every request Fused sends to this service.</p>
-            </div>
-            <div className="flex flex-col gap-2 min-[420px]:flex-row">
-              <select
-                value={props.executionTransport}
-                onChange={(event) => props.setExecutionTransport(event.target.value)}
-                aria-label="Filter by consumer type"
-                className="h-9 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-              >
-                <option value="">All consumers</option>
-                <option value="sdk">SDKs</option>
-                <option value="mcp">MCP servers</option>
-              </select>
-              <select
-                value={props.executionStatus}
-                onChange={(event) => props.setExecutionStatus(event.target.value)}
-                aria-label="Filter by result"
-                className="h-9 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-              >
-                <option value="">All results</option>
-                <option value="success">Successful</option>
-                <option value="failed">Failed</option>
-              </select>
-            </div>
-          </div>
-
-          <ExecutionHistory
-            events={props.executionEvents}
-            artifactNames={props.artifactNames}
-            selectedExecutionID={props.selectedExecutionID}
-            setSelectedExecutionID={props.setSelectedExecutionID}
-          />
-
-          <ExecutionPagination total={props.executionTotal} limit={props.executionLimit} page={props.executionPage} setPage={props.setExecutionPage} />
-          <SelectedExecutionPanel event={props.selectedExecution} eventsExist={props.executionEvents.length > 0} artifactNames={props.artifactNames} />
-        </section>
+        <OutboundActivity {...props} />
       ) : (
         <WebhookLogsCard
           webhookNameOptions={Array.from(new Set((props.res.service.webhooks || []).map((webhook) => webhook.name)))}
@@ -251,6 +202,75 @@ function LocalActivity(props: LocalActivityProps) {
         />
       )}
 	</>
+  );
+}
+
+function OutboundActivity(props: LocalActivityProps) {
+  return (
+    <section aria-label="Outbound calls" className="space-y-5">
+      {props.res.service.is_owner ? (
+        <div className="flex justify-end">
+          <select
+            value={props.source}
+            onChange={(event) => props.setSource(event.target.value as "local" | "cross-engine")}
+            aria-label="Outbound analytics source"
+            className="h-9 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+          >
+            <option value="local">Workspace calls</option>
+            <option value="cross-engine">Aggregate usage</option>
+          </select>
+        </div>
+      ) : null}
+      {props.source === "cross-engine" ? (
+        <CrossEngineInsights serviceId={props.res.service.id} isPublic={props.res.service.is_public} />
+      ) : (
+        <LocalOutboundActivity {...props} />
+      )}
+    </section>
+  );
+}
+
+function LocalOutboundActivity(props: LocalActivityProps) {
+  return (
+    <>
+      <ExecutionMetrics analytics={props.executionAnalytics} />
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h2 className="text-sm font-semibold text-slate-950">Execution receipts</h2>
+          <p className="mt-1 text-xs text-slate-500">One receipt for every request Fused sends to this service.</p>
+        </div>
+        <div className="flex flex-col gap-2 min-[420px]:flex-row">
+          <select
+            value={props.executionTransport}
+            onChange={(event) => props.setExecutionTransport(event.target.value)}
+            aria-label="Filter by consumer type"
+            className="h-9 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+          >
+            <option value="">All consumers</option>
+            <option value="sdk">SDKs</option>
+            <option value="mcp">MCP servers</option>
+          </select>
+          <select
+            value={props.executionStatus}
+            onChange={(event) => props.setExecutionStatus(event.target.value)}
+            aria-label="Filter by result"
+            className="h-9 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+          >
+            <option value="">All results</option>
+            <option value="success">Successful</option>
+            <option value="failed">Failed</option>
+          </select>
+        </div>
+      </div>
+      <ExecutionHistory
+        events={props.executionEvents}
+        artifactNames={props.artifactNames}
+        selectedExecutionID={props.selectedExecutionID}
+        setSelectedExecutionID={props.setSelectedExecutionID}
+      />
+      <ExecutionPagination total={props.executionTotal} limit={props.executionLimit} page={props.executionPage} setPage={props.setExecutionPage} />
+      <SelectedExecutionPanel event={props.selectedExecution} eventsExist={props.executionEvents.length > 0} artifactNames={props.artifactNames} />
+    </>
   );
 }
 
@@ -281,10 +301,6 @@ function SelectedExecutionPanel({ event, eventsExist, artifactNames }: { event: 
   return <div className="border-y border-slate-200 py-5 text-sm text-slate-500">Select a receipt to inspect its target, timing, and trace context.</div>;
 }
 
-function SourceButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: string }) {
-  return <button type="button" role="tab" aria-selected={active} onClick={onClick} className={`rounded-md px-3 py-1.5 text-sm font-medium ${active ? "bg-white text-slate-950 shadow-sm" : "text-slate-500 hover:text-slate-800"}`}>{children}</button>;
-}
-
 function CrossEngineInsights({ serviceId, isPublic }: { serviceId: string; isPublic: boolean }) {
   const [insights, setInsights] = useState<PublicServiceInsights | null>(null);
   const [loading, setLoading] = useState(isPublic);
@@ -300,7 +316,7 @@ function CrossEngineInsights({ serviceId, isPublic }: { serviceId: string; isPub
   if (!isPublic) return <ActivityNotice>Cross-engine insights are available after this service is public.</ActivityNotice>;
   if (loading) return <div className="flex items-center gap-2 py-12 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin text-blue-600" />Loading cross-engine insights...</div>;
   if (error) return <ActivityNotice>{error}</ActivityNotice>;
-  if (!insights || insights.total_calls === 0) return <ActivityNotice>No cross-engine usage has been reported for this period.</ActivityNotice>;
+  if (!insights || insights.total_calls === 0) return <ActivityNotice>No other Fused users have used this service in the last 30 days.</ActivityNotice>;
   return (
     <section className="space-y-6" aria-label="Cross-engine service activity">
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -324,22 +340,6 @@ function InsightBreakdown({ title, items }: { title: string; items: PublicServic
 
 function ActivityNotice({ children }: { children: ReactNode }) {
   return <div className="rounded-lg border border-slate-200 bg-white px-6 py-12 text-center text-sm text-slate-500">{children}</div>;
-}
-
-function ActivityViewButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: string }) {
-  return (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={active}
-      onClick={onClick}
-      className={`border-b-2 pb-3 text-sm font-medium transition-colors ${
-        active ? "border-slate-900 text-slate-900" : "border-transparent text-slate-500 hover:text-slate-800"
-      }`}
-    >
-      {children}
-    </button>
-  );
 }
 
 function Metric({ label, value, icon: Icon }: { label: string; value: string | number; icon: typeof Code2 }) {

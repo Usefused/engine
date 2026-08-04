@@ -2005,10 +2005,13 @@ type persistArtifactScopeParams struct {
 	scopeSchemaVersion int
 	// kind/name label the scope for the MCP servers list page
 	// (store.ArtifactScope.Kind/Name) -- see persistArtifactScope below.
-	kind      string
-	name      string
-	version   string
-	configKey string
+	kind           string
+	name           string
+	version        string
+	configKey      string
+	description    string
+	targetLanguage string
+	sourceHash     string
 }
 
 func artifactScopeForApply(p persistArtifactScopeParams) (store.ArtifactScope, error) {
@@ -2061,6 +2064,9 @@ func applyGeneratedArtifactScope(
 		name:               doc.Name,
 		version:            doc.Version,
 		configKey:          fmt.Sprintf("sdk:%s:%s", doc.Name, doc.Version),
+		description:        payload.Description,
+		targetLanguage:     payload.TargetLanguage,
+		sourceHash:         plan.SourceHash,
 	})
 }
 
@@ -2069,10 +2075,14 @@ func applyArtifactConfigPlan(ctx context.Context, configStore store.ConfigReposi
 	if err != nil {
 		return "", false, err
 	}
-	return applyArtifactConfigScope(ctx, configStore, s, call, plan, scope, params.bucketName)
+	snapshot := store.ArtifactSnapshot{ArtifactID: params.artifactID, AccountID: params.accountID,
+		Kind: params.kind, Name: params.name, Description: params.description, Version: params.version,
+		TargetLanguage: params.targetLanguage, Selections: params.selections,
+		ScopeSchemaVersion: params.scopeSchemaVersion, SourceHash: params.sourceHash}
+	return applyArtifactConfigScope(ctx, configStore, s, call, plan, scope, snapshot, params.bucketName)
 }
 
-func applyArtifactConfigScope(ctx context.Context, configStore store.ConfigRepository, s store.Store, call sdkApplyCall, plan *store.ConfigPlan, scope store.ArtifactScope, authorizedBucketName string) (string, bool, error) {
+func applyArtifactConfigScope(ctx context.Context, configStore store.ConfigRepository, s store.Store, call sdkApplyCall, plan *store.ConfigPlan, scope store.ArtifactScope, snapshot store.ArtifactSnapshot, authorizedBucketName string) (string, bool, error) {
 	rawToken, tokenHash, err := newSDKExecutionCredential()
 	if err != nil {
 		return "", false, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to issue sdk execution credential"}
@@ -2086,7 +2096,7 @@ func applyArtifactConfigScope(ctx context.Context, configStore store.ConfigRepos
 			PlanID: call.planID, BaseGeneration: plan.BaseGeneration, ExpectedRevision: call.planRevision,
 			ApplyLeaseID: call.applyLeaseID,
 		},
-		Scope: scope, AuthorizedBucketName: authorizedBucketName, TokenHash: tokenHash, TokenName: "default", Activate: true,
+		Scope: scope, Snapshot: snapshot, AuthorizedBucketName: authorizedBucketName, TokenHash: tokenHash, TokenName: "default", Activate: true,
 	})
 	if err != nil {
 		return "", false, artifactApplyPersistenceError(ctx, err, scope.ArtifactID)

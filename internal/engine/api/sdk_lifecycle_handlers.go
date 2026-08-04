@@ -177,32 +177,10 @@ func DeleteSDKHandler(s store.Store, proxy Forwarder) http.HandlerFunc {
 		}
 		span.SetAttributes(attribute.String("artifact_id", artifactID.String()))
 
-		scope, err := s.GetArtifactScope(ctx, artifactID)
-		if errors.Is(err, store.ErrArtifactScopeNotFound) {
-			span.SetAttributes(attribute.String("outcome", "already_deleted"))
-			writeJSON(w, sdkLifecycleResponse{Status: "deleted", ArtifactID: artifactID.String()})
-			return
-		}
+		outcome, err := deleteSDKState(ctx, s, proxy, accountID, artifactID)
 		if err != nil {
-			span.SetAttributes(attribute.String("outcome", "failed"))
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to load sdk scope"})
-			return
-		}
-		if scope.AccountID != accountID {
-			span.SetAttributes(attribute.String("outcome", "denied"))
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusForbidden, message: "sdk scope owner mismatch"})
-			return
-		}
-		if scope.Kind != "mcp" {
-			if err := retireRegistrySDK(ctx, proxy, artifactID); err != nil {
-				span.SetAttributes(attribute.String("outcome", "registry_retire_failed"))
-				writeSDKConfigError(w, err)
-				return
-			}
-		}
-		if err := s.DeleteArtifactScope(ctx, accountID, artifactID); err != nil {
-			span.SetAttributes(attribute.String("outcome", "failed"))
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to delete sdk scope"})
+			span.SetAttributes(attribute.String("outcome", outcome))
+			writeSDKConfigError(w, err)
 			return
 		}
 
@@ -214,9 +192,53 @@ func DeleteSDKHandler(s store.Store, proxy Forwarder) http.HandlerFunc {
 			slog.WarnContext(ctx, "DeleteSDKHandler: failed to remove sandbox directory", slog.Any("error", err), slog.String("artifact_id", artifactID.String()))
 		}
 
-		span.SetAttributes(attribute.String("outcome", "success"))
+		span.SetAttributes(attribute.String("outcome", outcome))
 		writeJSON(w, sdkLifecycleResponse{Status: "deleted", ArtifactID: artifactID.String()})
 	}
+}
+
+func deleteSDKState(ctx context.Context, s store.Store, proxy Forwarder, accountID, artifactID uuid.UUID) (string, error) {
+	scope, err := s.GetArtifactScope(ctx, artifactID)
+	if errors.Is(err, store.ErrArtifactScopeNotFound) {
+		if deleteRestoredArtifact(ctx, s, proxy, accountID, artifactID) {
+			return "snapshot_deleted", nil
+		}
+		return "already_deleted", nil
+	}
+	if err != nil {
+		return "failed", workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to load sdk scope"}
+	}
+	if scope.AccountID != accountID {
+		return "denied", workspaceConfigHTTPError{status: http.StatusForbidden, message: "sdk scope owner mismatch"}
+	}
+	if scope.Kind != "mcp" {
+		if err := retireRegistrySDK(ctx, proxy, artifactID); err != nil {
+			return "registry_retire_failed", err
+		}
+	}
+	if err := s.DeleteArtifactScope(ctx, accountID, artifactID); err != nil {
+		return "failed", workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to delete sdk scope"}
+	}
+	if snapshots, ok := s.(store.ArtifactSnapshotStore); ok {
+		if err := snapshots.DeleteArtifactSnapshot(ctx, accountID, artifactID); err != nil {
+			return "failed", workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to delete artifact snapshot"}
+		}
+	}
+	return "success", nil
+}
+
+func deleteRestoredArtifact(ctx context.Context, s store.Store, proxy Forwarder, accountID, artifactID uuid.UUID) bool {
+	snapshots, ok := s.(store.ArtifactSnapshotStore)
+	if !ok {
+		return false
+	}
+	if _, err := snapshots.GetArtifactSnapshot(ctx, accountID, artifactID); err != nil {
+		return false
+	}
+	if err := retireRegistrySDK(ctx, proxy, artifactID); err != nil {
+		return false
+	}
+	return snapshots.DeleteArtifactSnapshot(ctx, accountID, artifactID) == nil
 }
 
 func retireRegistrySDK(ctx context.Context, proxy Forwarder, artifactID uuid.UUID) error {

@@ -318,7 +318,10 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 	if err != nil {
 		return mcpConfigApplyResult{}, err
 	}
-	token, _, err := applyArtifactConfigScope(ctx, configStore, s, call, plan, scope, doc.Bucket)
+	snapshot := store.ArtifactSnapshot{ArtifactID: runtimeID, AccountID: call.accountID, Kind: "mcp",
+		Name: doc.Name, Description: payload.Description, Version: doc.Version,
+		Selections: selections, ScopeSchemaVersion: models.ArtifactScopeSchemaVersion, SourceHash: plan.SourceHash}
+	token, _, err := applyArtifactConfigScope(ctx, configStore, s, call, plan, scope, snapshot, doc.Bucket)
 	if err != nil {
 		return mcpConfigApplyResult{}, err
 	}

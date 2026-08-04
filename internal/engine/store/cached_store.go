@@ -80,6 +80,38 @@ func (s *cachedStore) GetEngineExecutionAnalyticsByArtifact(ctx context.Context,
 	return reader.GetEngineExecutionAnalyticsByArtifact(ctx, filter)
 }
 
+func (s *cachedStore) UpsertArtifactSnapshots(ctx context.Context, snapshots []ArtifactSnapshot) error {
+	repository, ok := s.Store.(ArtifactSnapshotStore)
+	if !ok {
+		return errors.New("store does not support artifact snapshots")
+	}
+	return repository.UpsertArtifactSnapshots(ctx, snapshots)
+}
+
+func (s *cachedStore) DeleteArtifactSnapshot(ctx context.Context, accountID, artifactID uuid.UUID) error {
+	repository, ok := s.Store.(ArtifactSnapshotStore)
+	if !ok {
+		return errors.New("store does not support artifact snapshots")
+	}
+	return repository.DeleteArtifactSnapshot(ctx, accountID, artifactID)
+}
+
+func (s *cachedStore) GetArtifactSnapshot(ctx context.Context, accountID, artifactID uuid.UUID) (*ArtifactSnapshot, error) {
+	repository, ok := s.Store.(ArtifactSnapshotStore)
+	if !ok {
+		return nil, errors.New("store does not support artifact snapshots")
+	}
+	return repository.GetArtifactSnapshot(ctx, accountID, artifactID)
+}
+
+func (s *cachedStore) ListArtifactSnapshots(ctx context.Context, accountID uuid.UUID, kind string, limit, offset int) ([]ArtifactSnapshot, int, error) {
+	repository, ok := s.Store.(ArtifactSnapshotStore)
+	if !ok {
+		return nil, 0, errors.New("store does not support artifact snapshots")
+	}
+	return repository.ListArtifactSnapshots(ctx, accountID, kind, limit, offset)
+}
+
 func (s *cachedStore) UpsertSecret(ctx context.Context, secret WorkspaceSecret) error {
 	err := s.Store.UpsertSecret(ctx, secret)
 	if err == nil {

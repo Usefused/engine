@@ -68,6 +68,8 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		"artifact":                    collectionPermissions(accesscontrol.ResourceArtifact, accesscontrol.PermissionArtifactRead),
 		"artifactServices":            collectionPermissions(accesscontrol.ResourceArtifact, accesscontrol.PermissionArtifactRead),
 		"artifacts":                   collectionPermissions(accesscontrol.ResourceArtifact, accesscontrol.PermissionArtifactRead),
+		"artifactSnapshots":           collectionPermissions(accesscontrol.ResourceArtifact, accesscontrol.PermissionArtifactRead),
+		"artifactSnapshot":            collectionPermissions(accesscontrol.ResourceArtifact, accesscontrol.PermissionArtifactRead),
 		"accessExplanation":           permissions(accesscontrol.PermissionAccessRead),
 		"auditEvents":                 permissions(accesscontrol.PermissionAuditRead),
 		"artifactBuildSelectors":      permissions(accesscontrol.PermissionArtifactCreate),

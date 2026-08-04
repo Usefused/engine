@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -306,9 +307,9 @@ func bootstrapRegistryIdentity(ctx context.Context, engineStore store.Store, reg
 		slog.ErrorContext(ctx, "FATAL: Failed to initialize bootstrap Owner access", slog.Any("error", err))
 		os.Exit(1)
 	}
-	ownedServices, err := sandbox.ReconcileOwnedServices(ctx, engineStore, registryClient, accUUID, envLicense)
+	ownedServices, restoredArtifacts, err := reconcileRegistryRuntime(ctx, engineStore, registryClient, accUUID, envLicense)
 	if err != nil {
-		slog.ErrorContext(ctx, "FATAL: Failed to reconcile Registry-owned services into the Engine workspace", slog.Any("error", err))
+		slog.ErrorContext(ctx, "FATAL: Failed to reconcile Registry runtime into the Engine workspace", slog.Any("error", err))
 		os.Exit(1)
 	}
 	entitlement := handshake.Entitlements.Normalized()
@@ -326,8 +327,22 @@ func bootstrapRegistryIdentity(ctx context.Context, engineStore store.Store, reg
 		slog.Int("owned_services_discovered", ownedServices.Discovered),
 		slog.Int("owned_services_restored", ownedServices.Activated),
 		slog.Int("owned_services_already_active", ownedServices.AlreadyActive),
+		slog.Int("artifact_snapshots_reconciled", restoredArtifacts),
 	)
 	return entitlement, accessBootstrap.Revision
+}
+
+func reconcileRegistryRuntime(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, accountID uuid.UUID, license string) (sandbox.OwnedServiceReconcileResult, int, error) {
+	services, err := sandbox.ReconcileOwnedServices(ctx, engineStore, registryClient, accountID, license)
+	if err != nil {
+		return services, 0, err
+	}
+	artifacts, ok := engineStore.(store.ArtifactSnapshotStore)
+	if !ok {
+		return services, 0, errors.New("artifact snapshot reconciliation is unavailable")
+	}
+	count, err := sandbox.ReconcileOwnedArtifacts(ctx, artifacts, registryClient, accountID)
+	return services, count, err
 }
 
 func newControlAuthenticator(ctx context.Context, engineStore store.Store, revision int64) *accesscontrol.Authenticator {
