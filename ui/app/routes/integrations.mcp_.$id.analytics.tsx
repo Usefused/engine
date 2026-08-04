@@ -12,6 +12,7 @@ import { ArrowLeft, Clock } from "lucide-react";
 import { api } from "~/lib/api";
 import { McpAnalyticsPanel, type McpAnalyticsData } from "~/components/mcp/McpAnalyticsPanel";
 import { ArtifactRequestsPanel } from "~/components/activity/ArtifactRequestsPanel";
+import { NestedActivityTabs } from "~/components/activity/NestedActivityTabs";
 
 export default function McpAnalyticsDashboard() {
   const { id } = useParams();
@@ -19,9 +20,7 @@ export default function McpAnalyticsDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [searchParams, setSearchParams] = useSearchParams();
-  const urlTab = searchParams.get("tab");
-  const activeTab: "overview" | "requests" | "sessions" =
-    urlTab === "requests" || urlTab === "sessions" ? urlTab : "overview";
+  const activeTab = mcpActivityTab(searchParams.get("tab"));
 
   const handleTabChange = (newTab: "overview" | "requests" | "sessions") => {
     setSearchParams(prev => {
@@ -79,10 +78,37 @@ export default function McpAnalyticsDashboard() {
     return () => clearInterval(interval);
   }, [id]);
 
+  return (
+    <McpActivityState id={id} data={data} loading={loading} error={error} activeTab={activeTab} onTabChange={handleTabChange} />
+  );
+}
+
+type McpActivityTab = "overview" | "requests" | "sessions";
+
+function mcpActivityTab(value: string | null): McpActivityTab {
+  return value === "requests" || value === "sessions" ? value : "overview";
+}
+
+function McpActivityState({ id, data, loading, error, activeTab, onTabChange }: {
+  id?: string;
+  data: McpAnalyticsData | null;
+  loading: boolean;
+  error: string;
+  activeTab: McpActivityTab;
+  onTabChange: (tab: McpActivityTab) => void;
+}) {
   if (loading && !data) return <div className="text-center py-12 text-slate-500">Loading analytics...</div>;
   if (error) return <div className="text-center py-12 text-red-500">Error: {error}</div>;
   if (!data) return null;
+  return <McpActivityContent id={id} data={data} activeTab={activeTab} onTabChange={onTabChange} />;
+}
 
+function McpActivityContent({ id, data, activeTab, onTabChange }: {
+  id?: string;
+  data: McpAnalyticsData;
+  activeTab: McpActivityTab;
+  onTabChange: (tab: McpActivityTab) => void;
+}) {
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-5xl mx-auto">
       <div className="flex items-center gap-4">
@@ -95,110 +121,77 @@ export default function McpAnalyticsDashboard() {
         </div>
       </div>
 
-      <div className="flex bg-slate-100 p-1 rounded-lg w-fit mb-6">
-        <button
-          data-track="view_mcp_overview_tab"
-          type="button"
-          onClick={() => handleTabChange("overview")}
-          className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${
-            activeTab === "overview"
-              ? "bg-white text-slate-900 shadow-sm"
-              : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"
-          } cursor-pointer`}
-        >
-          Overview
-        </button>
-        <button
-          data-track="view_mcp_requests_tab"
-          type="button"
-          onClick={() => handleTabChange("requests")}
-          className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${
-            activeTab === "requests"
-              ? "bg-white text-slate-900 shadow-sm"
-              : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"
-          } cursor-pointer`}
-        >
-          Requests
-        </button>
-        <button
-          data-track="view_mcp_sessions_tab"
-          type="button"
-          onClick={() => handleTabChange("sessions")}
-          className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all flex items-center gap-2 ${
-            activeTab === "sessions"
-              ? "bg-white text-slate-900 shadow-sm"
-              : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"
-          } cursor-pointer`}
-        >
-          Sessions
-          {(data.recent_sessions?.length ?? 0) > 0 && (
-            <span className={`px-2 py-0.5 rounded-full text-xs transition-colors ${
-              activeTab === "sessions"
-                ? "bg-slate-100 text-slate-600"
-                : "bg-slate-200/50 text-slate-600"
-            }`}>
-              {data.recent_sessions?.length}
-            </span>
-          )}
-        </button>
-      </div>
+      <NestedActivityTabs
+        active={activeTab}
+        ariaLabel="MCP server activity"
+        onChange={onTabChange}
+        options={[
+          { value: "overview", label: "Overview", trackingId: "view_mcp_overview_tab" },
+          { value: "requests", label: "Requests", trackingId: "view_mcp_requests_tab" },
+          { value: "sessions", label: "Sessions", badge: data.recent_sessions?.length, trackingId: "view_mcp_sessions_tab" },
+        ]}
+      />
 
       {activeTab === "overview" && <McpAnalyticsPanel data={data} />}
       {activeTab === "requests" && id && <ArtifactRequestsPanel artifactId={id} transport="mcp" />}
-      {activeTab === "sessions" && (
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-          <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
-            <Clock className="w-4 h-4 text-blue-500" />
-            <h3 className="font-semibold text-slate-900">Recent sessions</h3>
+      {activeTab === "sessions" && <McpSessionsPanel sessions={data.recent_sessions || []} />}
+    </div>
+  );
+}
+
+function McpSessionsPanel({ sessions }: { sessions: NonNullable<McpAnalyticsData["recent_sessions"]> }) {
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
+        <Clock className="w-4 h-4 text-blue-500" />
+        <h3 className="font-semibold text-slate-900">Recent sessions</h3>
+      </div>
+      <div className="p-0">
+        {sessions.length === 0 ? (
+          <div className="text-center py-12 text-slate-500 text-sm">
+            No sessions recorded yet.
           </div>
-          <div className="p-0">
-            {(!data.recent_sessions || data.recent_sessions.length === 0) ? (
-              <div className="text-center py-12 text-slate-500 text-sm">
-                No sessions recorded yet.
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm text-left">
-                  <thead className="bg-slate-50/50 text-slate-500 text-xs uppercase tracking-wider">
-                    <tr>
-                      <th className="px-6 py-3 font-medium">Session ID</th>
-                      <th className="px-6 py-3 font-medium">Started At</th>
-                      <th className="px-6 py-3 font-medium">Ended At</th>
-                      <th className="px-6 py-3 font-medium text-right">Status</th>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm text-left">
+              <thead className="bg-slate-50/50 text-slate-500 text-xs uppercase tracking-wider">
+                <tr>
+                  <th className="px-6 py-3 font-medium">Session ID</th>
+                  <th className="px-6 py-3 font-medium">Started At</th>
+                  <th className="px-6 py-3 font-medium">Ended At</th>
+                  <th className="px-6 py-3 font-medium text-right">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 text-slate-700">
+                {sessions.map((sess) => {
+                  const isLive = !sess.ended_at;
+                  return (
+                    <tr key={sess.id} className="hover:bg-slate-50 transition-colors">
+                      <td className="px-6 py-4 font-mono text-slate-600">{sess.session_id}</td>
+                      <td className="px-6 py-4">{new Date(sess.started_at).toLocaleString()}</td>
+                      <td className="px-6 py-4 text-slate-500">
+                        {sess.ended_at ? new Date(sess.ended_at).toLocaleString() : "-"}
+                      </td>
+                      <td className="px-6 py-4 text-right">
+                        {isLive ? (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-600 border border-emerald-100">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                            Live
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-600 border border-slate-200">
+                            Disconnected
+                          </span>
+                        )}
+                      </td>
                     </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 text-slate-700">
-                    {data.recent_sessions.map((sess) => {
-                      const isLive = !sess.ended_at;
-                      return (
-                        <tr key={sess.id} className="hover:bg-slate-50 transition-colors">
-                          <td className="px-6 py-4 font-mono text-slate-600">{sess.session_id}</td>
-                          <td className="px-6 py-4">{new Date(sess.started_at).toLocaleString()}</td>
-                          <td className="px-6 py-4 text-slate-500">
-                            {sess.ended_at ? new Date(sess.ended_at).toLocaleString() : "-"}
-                          </td>
-                          <td className="px-6 py-4 text-right">
-                            {isLive ? (
-                              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-600 border border-emerald-100">
-                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                                Live
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-600 border border-slate-200">
-                                Disconnected
-                              </span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

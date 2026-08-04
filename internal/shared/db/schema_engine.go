@@ -574,6 +574,30 @@ func engineSchemaQueries() []string {
 		`CREATE INDEX IF NOT EXISTS idx_fused_contract_snapshots_service
 		ON fused_service_contract_snapshots(service_id);`,
 
+		// Artifact snapshots are the Engine-local definition of an SDK or MCP
+		// artifact. They deliberately do not reference fused_artifact_scopes:
+		// startup reconciliation can restore safe definition metadata after a
+		// database reset, while credentials and execution tokens remain absent
+		// until an operator explicitly configures the artifact on this Engine.
+		`CREATE TABLE IF NOT EXISTS fused_artifact_snapshots (
+			artifact_id          uuid PRIMARY KEY,
+			account_id           uuid NOT NULL,
+			kind                 text NOT NULL CHECK (kind IN ('sdk', 'mcp')),
+			name                 text NOT NULL,
+			description          text NOT NULL DEFAULT '',
+			version              text NOT NULL DEFAULT '',
+			target_language      text NOT NULL DEFAULT '',
+			readme               text NOT NULL DEFAULT '',
+			selections           jsonb NOT NULL DEFAULT '[]'::jsonb,
+			scope_schema_version integer NOT NULL DEFAULT 0,
+			source_hash          text NOT NULL DEFAULT '',
+			registry_created_at  timestamptz,
+			fetched_at           timestamptz NOT NULL DEFAULT NOW(),
+			refreshed_at         timestamptz NOT NULL DEFAULT NOW()
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_artifact_snapshots_account_kind
+		ON fused_artifact_snapshots(account_id, kind, registry_created_at DESC, artifact_id);`,
+
 		`CREATE TABLE IF NOT EXISTS fused_service_contract_endpoints (
 			snapshot_id     uuid NOT NULL REFERENCES fused_service_contract_snapshots(id) ON DELETE CASCADE,
 			endpoint_id     uuid NOT NULL,

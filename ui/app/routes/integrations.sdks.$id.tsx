@@ -14,6 +14,8 @@ import { isPending, matchesConfig } from "~/components/notifications/notificatio
 import { PendingDriftSection, type PendingDriftItem } from "~/components/sdk/PendingDrift";
 import { ArtifactRequestsPanel } from "~/components/activity/ArtifactRequestsPanel";
 import { AppActivityOverview } from "~/components/activity/AppActivityOverview";
+import { NestedActivityTabs } from "~/components/activity/NestedActivityTabs";
+import { ArtifactRuntimeStatus } from "~/components/artifacts/ArtifactRuntimeStatus";
 import { type Bucket } from "~/lib/api";
 
 type SdkSelection = {
@@ -56,6 +58,8 @@ type Sdk = {
   downloads?: number;
   readme?: string;
   detailed_selections?: SdkSelection[];
+  active?: boolean;
+  runtime_state?: string;
 };
 
 export const meta: MetaFunction = ({ matches }) => {
@@ -410,37 +414,41 @@ export default function SdkDetails() {
     setLoading(true);
     const queryStr = `
       query {
-        sdk(id: "${artifactId}") {
+        artifactSnapshot(id: "${artifactId}") {
           id
           name
           description
           version
-          target_type
           target_language
-          sandbox_url
-          is_downloadable
           created_at
-          downloads
           readme
-          detailed_selections {
-            service_id
-            service_name
-            service_slug
-            service_provider
-            endpoint_ids
-            webhook_ids
-            select_all
-            service_version_id
-            service_version_name
-          }
+          active
+          runtime_state
         }
       }
     `;
-    api.graphql<{ sdk: Sdk }>(queryStr)
+    api.mcpGraphql<{ artifactSnapshot: Sdk & { active: boolean; runtime_state: string } }>(queryStr)
       .then(res => {
-        setSdk(res.sdk);
+        const local = { ...res.artifactSnapshot, target_type: "sdk", is_downloadable: true };
+        setSdk(local);
+        if (res.artifactSnapshot.active) {
+          void api.mcpGraphql<{ artifactServices: Array<{
+            service_id: string; service_slug: string; service_name: string; version?: string; select_all: boolean;
+          }> }>(`query { artifactServices(reference: "${artifactId}", kind: "sdk") {
+            service_id service_slug service_name version select_all
+          } }`).then(serviceResult => setSdk(current => current ? ({
+            ...current,
+            detailed_selections: serviceResult.artifactServices.map(service => ({
+              service_id: service.service_id,
+              service_slug: service.service_slug,
+              service_name: service.service_name,
+              service_version_name: service.version,
+              select_all: service.select_all,
+            })),
+          }) : current)).catch(() => {});
+        }
         // Fetch version history once we have the name
-        if (res.sdk?.name) fetchVersions(res.sdk.name);
+        if (local.name) fetchVersions(local.name);
       })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
@@ -574,6 +582,7 @@ export default function SdkDetails() {
         <div>
           <h1 className="text-2xl font-bold text-slate-900">{sdk.name}</h1>
           <p className="text-slate-500 mt-1">A reusable interface for the services and operations this app can use.</p>
+          <ArtifactRuntimeStatus className="mt-1.5" active={sdk.active} runtimeState={sdk.runtime_state} />
           <div className="flex flex-wrap items-center gap-3 mt-3 text-sm">
             <span className="px-2.5 py-1 bg-slate-100 text-slate-700 rounded font-medium">{sdk.version}</span>
             {sdk.target_type === "sdk" && <LanguageBadge targetLanguage={sdk.target_language} />}
@@ -792,18 +801,16 @@ export default function SdkDetails() {
 
         {activeTab === "analytics" && (
           <div className="space-y-6">
-            <div className="flex w-fit rounded-lg bg-slate-100 p-1">
-              {(["overview", "requests", "changes"] as const).map((section) => (
-                <button
-                  key={section}
-                  type="button"
-                  onClick={() => setActivitySection(section)}
-                  className={`rounded-md px-3 py-1.5 text-sm font-medium capitalize ${activitySection === section ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
-                >
-                  {section}
-                </button>
-              ))}
-            </div>
+            <NestedActivityTabs
+              active={activitySection}
+              ariaLabel="App activity"
+              onChange={setActivitySection}
+              options={[
+                { value: "overview", label: "Overview" },
+                { value: "requests", label: "Requests" },
+                { value: "changes", label: "Changes" },
+              ]}
+            />
 
             {activitySection === "overview" && (
               <AppActivityOverview

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ComponentType } from "react";
 import { Activity, AlertTriangle, Clock3, Download, FileCode, ServerCrash } from "lucide-react";
 import { api, type ArtifactExecutionAnalytics, type EngineExecutionBreakdown } from "~/lib/api";
+import { artifactActivityIssue, type ArtifactActivityIssue } from "~/lib/artifact-activity-error";
 
 export interface AppActivityService {
   service_id: string;
@@ -92,13 +93,13 @@ function ServiceUsageTable({ rows }: { rows: ServiceUsageRow[] }) {
 
 export function AppActivityOverview({ artifactId, downloads, pendingDriftCount, services }: AppActivityOverviewProps) {
   const [analytics, setAnalytics] = useState<ArtifactExecutionAnalytics | null>(null);
-  const [error, setError] = useState("");
+  const [issue, setIssue] = useState<ArtifactActivityIssue | null>(null);
 
   useEffect(() => {
-    setError("");
+    setIssue(null);
     api.workspace.getArtifactExecutionAnalytics({ artifactId, transport: "sdk" })
       .then(setAnalytics)
-      .catch((cause) => setError(cause instanceof Error ? cause.message : "Failed to load app analytics"));
+      .catch((cause) => setIssue(artifactActivityIssue(cause, "sdk")));
   }, [artifactId]);
 
   const rows = useMemo(() => usageRows(services, analytics), [analytics, services]);
@@ -116,7 +117,11 @@ export function AppActivityOverview({ artifactId, downloads, pendingDriftCount, 
         <Metric label="Connected services" value={services.length.toLocaleString()} icon={FileCode} />
         <Metric label="Pending drift" value={pendingDriftCount.toLocaleString()} icon={AlertTriangle} />
       </div>
-      {error ? <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">Execution analytics could not be loaded: {error}</div> : null}
+      {issue ? (
+        <div className={`rounded-lg border px-4 py-3 text-sm ${issue.tone === "neutral" ? "border-slate-200 bg-slate-50 text-slate-600" : "border-red-200 bg-red-50 text-red-700"}`}>
+          {issue.message}
+        </div>
+      ) : null}
       <ServiceUsageTable rows={rows} />
     </div>
   );

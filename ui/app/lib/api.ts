@@ -1050,7 +1050,7 @@ export const api = {
     // generates a per-SDK sandbox) -- see integrations/mcp.tsx for their
     // GraphQL replacements (kill/reactivate; there is no token-rotation
     // equivalent in the new model, so that action was dropped).
-    delete: (id: string) => req<void>(`/sdks/${id}`, { method: "DELETE" }),
+    delete: (id: string) => req<void>(`/sdk-config/${id}`, { method: "DELETE" }),
   },
 
   // api.auth (the hosted Connect runtime's setOAuthConfig/getConnections/

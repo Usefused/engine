@@ -231,6 +231,7 @@ type ConfigPlanApplyLease struct {
 type ApplyArtifactConfigPlanParams struct {
 	Plan                 ApplyConfigPlanParams
 	Scope                ArtifactScope
+	Snapshot             ArtifactSnapshot
 	AuthorizedBucketName string
 	TokenHash            string
 	TokenName            string
@@ -597,6 +598,9 @@ func reconcileWebhookRegistrations(ctx context.Context, tx pgx.Tx, params ApplyW
 // one transaction. SDK callers must carry the database lease acquired before
 // Registry generation, so only that reviewed plan revision can finalize.
 func (r *postgresConfigRepository) ApplyArtifactConfigPlan(ctx context.Context, params ApplyArtifactConfigPlanParams) (*ApplyArtifactConfigPlanResult, error) {
+	if params.Snapshot.ArtifactID == uuid.Nil {
+		params.Snapshot = artifactSnapshotFromScope(params.Scope)
+	}
 	if params.Plan.ExpectedRevision <= 0 {
 		return nil, ErrConfigPlanRevisionMismatch
 	}
@@ -697,6 +701,9 @@ func persistArtifactRuntimeTx(ctx context.Context, tx pgx.Tx, params ApplyArtifa
 			return false, fmt.Errorf("ApplyArtifactConfigPlan: activate scope: %w", err)
 		}
 	}
+	if err := upsertArtifactSnapshotTx(ctx, tx, params.Snapshot); err != nil {
+		return false, err
+	}
 	return created, nil
 }
 
@@ -710,8 +717,46 @@ func validateArtifactApplyParams(params ApplyArtifactConfigPlanParams) error {
 	if err := validateArtifactApplyScopeIdentity(params.Scope, params.AuthorizedBucketName); err != nil {
 		return err
 	}
+	if err := validateArtifactSnapshot(params.Snapshot); err != nil {
+		return err
+	}
+	if params.Snapshot.ArtifactID != params.Scope.ArtifactID || params.Snapshot.AccountID != params.Scope.AccountID {
+		return errors.New("artifact snapshot and scope identity must match")
+	}
 	if strings.TrimSpace(params.TokenHash) == "" || strings.TrimSpace(params.TokenName) == "" {
 		return errors.New("artifact token identity is required")
+	}
+	return nil
+}
+
+func artifactSnapshotFromScope(scope ArtifactScope) ArtifactSnapshot {
+	selections := json.RawMessage(scope.Selections)
+	if len(selections) == 0 {
+		selections = json.RawMessage("[]")
+	}
+	return ArtifactSnapshot{ArtifactID: scope.ArtifactID, AccountID: scope.AccountID,
+		Kind: normalizedArtifactKind(scope.Kind), Name: scope.Name, Version: scope.Version,
+		Selections: selections, ScopeSchemaVersion: scope.ScopeSchemaVersion}
+}
+
+func upsertArtifactSnapshotTx(ctx context.Context, tx pgx.Tx, snapshot ArtifactSnapshot) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO fused_artifact_snapshots (
+			artifact_id, account_id, kind, name, description, version, target_language,
+			readme, selections, scope_schema_version, source_hash, registry_created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		ON CONFLICT (artifact_id) DO UPDATE SET
+			account_id=EXCLUDED.account_id, kind=EXCLUDED.kind, name=EXCLUDED.name,
+			description=EXCLUDED.description, version=EXCLUDED.version,
+			target_language=EXCLUDED.target_language, readme=EXCLUDED.readme,
+			selections=EXCLUDED.selections, scope_schema_version=EXCLUDED.scope_schema_version,
+			source_hash=EXCLUDED.source_hash, registry_created_at=EXCLUDED.registry_created_at,
+			refreshed_at=NOW()`, snapshot.ArtifactID, snapshot.AccountID, snapshot.Kind,
+		snapshot.Name, snapshot.Description, snapshot.Version, snapshot.TargetLanguage,
+		snapshot.Readme, snapshot.Selections, snapshot.ScopeSchemaVersion, snapshot.SourceHash,
+		snapshot.RegistryCreatedAt)
+	if err != nil {
+		return fmt.Errorf("ApplyArtifactConfigPlan: upsert artifact snapshot: %w", err)
 	}
 	return nil
 }

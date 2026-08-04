@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/graphql-go/graphql"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
@@ -14,14 +15,97 @@ import (
 var artifactSummaryGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "ArtifactSummary",
 	Fields: graphql.Fields{
-		"id":         &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
-		"name":       &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
-		"version":    &graphql.Field{Type: graphql.String},
-		"kind":       &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
-		"active":     &graphql.Field{Type: graphql.NewNonNull(graphql.Boolean)},
-		"created_at": &graphql.Field{Type: graphql.String},
+		"id":              &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"name":            &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"version":         &graphql.Field{Type: graphql.String},
+		"kind":            &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"active":          &graphql.Field{Type: graphql.NewNonNull(graphql.Boolean)},
+		"created_at":      &graphql.Field{Type: graphql.String},
+		"description":     &graphql.Field{Type: graphql.String},
+		"target_language": &graphql.Field{Type: graphql.String},
+		"readme":          &graphql.Field{Type: graphql.String},
+		"runtime_state":   &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
 	},
 })
+
+func artifactSnapshotsGraphQLField(s store.Store) *graphql.Field {
+	return &graphql.Field{Type: artifactSummaryPageGraphQLType, Args: graphql.FieldConfigArgument{
+		"kind":   &graphql.ArgumentConfig{Type: graphql.String, DefaultValue: ""},
+		"limit":  &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 20},
+		"offset": &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 0},
+	}, Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+		repository, ok := s.(store.ArtifactSnapshotStore)
+		if !ok {
+			return nil, errors.New("artifact snapshots are unavailable")
+		}
+		actor, err := actorFromContext(p.Context)
+		if err != nil {
+			return nil, err
+		}
+		if _, err = graphQLAuthorizedScope(p.Context, accesscontrol.PermissionArtifactRead, accesscontrol.ResourceArtifact); err != nil {
+			return nil, err
+		}
+		limit, _ := p.Args["limit"].(int)
+		if limit <= 0 || limit > 100 {
+			limit = 20
+		}
+		offset, _ := p.Args["offset"].(int)
+		if offset < 0 {
+			offset = 0
+		}
+		items, total, err := repository.ListArtifactSnapshots(p.Context, actor.accountID, strings.TrimSpace(fmt.Sprint(p.Args["kind"])), limit, offset)
+		if err != nil {
+			return nil, err
+		}
+		projected := make([]map[string]interface{}, 0, len(items))
+		for _, item := range items {
+			projected = append(projected, artifactSnapshotFields(item))
+		}
+		return map[string]interface{}{"items": projected, "total": total}, nil
+	}}
+}
+
+func artifactSnapshotGraphQLField(s store.Store) *graphql.Field {
+	return &graphql.Field{Type: artifactSummaryGraphQLType, Args: graphql.FieldConfigArgument{
+		"id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
+	}, Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+		repository, ok := s.(store.ArtifactSnapshotStore)
+		if !ok {
+			return nil, errors.New("artifact snapshots are unavailable")
+		}
+		actor, err := actorFromContext(p.Context)
+		if err != nil {
+			return nil, err
+		}
+		if _, err = graphQLAuthorizedScope(p.Context, accesscontrol.PermissionArtifactRead, accesscontrol.ResourceArtifact); err != nil {
+			return nil, err
+		}
+		id, err := uuid.Parse(fmt.Sprint(p.Args["id"]))
+		if err != nil {
+			return nil, errors.New("artifact was not found")
+		}
+		item, err := repository.GetArtifactSnapshot(p.Context, actor.accountID, id)
+		if err != nil {
+			return nil, errors.New("artifact was not found")
+		}
+		return artifactSnapshotFields(*item), nil
+	}}
+}
+
+func artifactSnapshotFields(snapshot store.ArtifactSnapshot) map[string]interface{} {
+	state := "needs_configuration"
+	if snapshot.Active {
+		state = "active"
+	}
+	created := ""
+	if snapshot.RegistryCreatedAt != nil {
+		created = snapshot.RegistryCreatedAt.Format(mcpGraphQLTimeFormat)
+	}
+	return map[string]interface{}{"id": snapshot.ArtifactID.String(), "name": snapshot.Name,
+		"version": snapshot.Version, "kind": snapshot.Kind, "active": snapshot.Active,
+		"created_at": created, "description": snapshot.Description, "target_language": snapshot.TargetLanguage,
+		"readme": snapshot.Readme, "runtime_state": state}
+}
 
 var artifactSummaryPageGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "ArtifactSummaryPage",

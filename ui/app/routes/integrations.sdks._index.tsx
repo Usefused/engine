@@ -11,6 +11,7 @@ export const meta: MetaFunction = ({ matches }) => {
 import { Download, Package, Plus, Trash2, RefreshCw, Loader2, Search, X } from "lucide-react";
 import { api } from "~/lib/api";
 import { useToast } from "~/components/Toast";
+import { ArtifactRuntimeStatus } from "~/components/artifacts/ArtifactRuntimeStatus";
 
 interface SdkListItem {
   id: string;
@@ -26,6 +27,8 @@ interface SdkListItem {
   created_at?: string;
   killed_at?: string;
   downloads?: number;
+  active?: boolean;
+  runtime_state?: string;
 }
 
 function LanguageBadge({ targetLanguage }: { targetLanguage?: string }) {
@@ -62,16 +65,19 @@ interface SdkRowProps {
 
 function SdkNameCell({ sdk }: { sdk: SdkListItem }) {
   return (
-    <div className="flex min-w-0 items-center gap-2">
-      <span className="block min-w-0 truncate font-semibold text-slate-900">{sdk.name}</span>
-      {sdk.target_type === "mcp" && (
-        <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-slate-200 text-slate-700 uppercase tracking-wider">
-          MCP
-        </span>
-      )}
-      {sdk.target_type === "sdk" && (
-        <LanguageBadge targetLanguage={sdk.target_language} />
-      )}
+    <div className="min-w-0">
+      <div className="flex min-w-0 items-center gap-2">
+        <span className="block min-w-0 truncate font-semibold text-slate-900">{sdk.name}</span>
+        {sdk.target_type === "mcp" && (
+          <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-slate-200 text-slate-700 uppercase tracking-wider">
+            MCP
+          </span>
+        )}
+        {sdk.target_type === "sdk" && (
+          <LanguageBadge targetLanguage={sdk.target_language} />
+        )}
+      </div>
+      <ArtifactRuntimeStatus className="mt-0.5" active={sdk.active} runtimeState={sdk.runtime_state} />
     </div>
   );
 }
@@ -314,32 +320,26 @@ export default function SdkHistory() {
 
   const fetchSdks = () => {
     setLoading(true);
-    // Over-fetch then deduplicate client-side by name (keep latest by created_at)
     const queryStr = `
       query {
-        sdks(limit: 100, offset: 0, target_type: "sdk", latest_only: true) {
+        artifactSnapshots(kind: "sdk", limit: 100, offset: 0) {
           items {
             id
             name
             description
             version
-            target_type
             target_language
-            sandbox_url
-            is_downloadable
-            has_update_available
-            has_deprecated_endpoints
             created_at
-            killed_at
-            downloads
+            active
+            runtime_state
           }
           total
         }
       }
     `;
-    api.graphql<{ sdks: { items: SdkListItem[]; total: number } }>(queryStr)
+    api.mcpGraphql<{ artifactSnapshots: { items: SdkListItem[]; total: number } }>(queryStr)
       .then(res => {
-        setSdks(res.sdks.items ?? []);
+        setSdks((res.artifactSnapshots.items ?? []).map(item => ({ ...item, target_type: "sdk", is_downloadable: true })));
         setSelectedIds([]);
       })
       .catch(e => setError(e instanceof Error ? e.message : "Failed to load apps"))
@@ -367,31 +367,12 @@ export default function SdkHistory() {
     }
 
     try {
-      const queryStr = `
-        query($name: String!, $version: String) {
-          sdkByName(name: $name, version: $version) {
-            id
-            name
-            description
-            version
-            target_type
-            target_language
-            sandbox_url
-            is_downloadable
-            has_update_available
-            has_deprecated_endpoints
-            created_at
-            killed_at
-            downloads
-          }
-        }
-      `;
-      const res = await api.graphql<{ sdkByName: SdkListItem | null }>(queryStr, { name: searchName, version: searchVersion });
-      if (res.sdkByName) {
-        setSdks([res.sdkByName]);
-      } else {
-        setSdks([]);
-      }
+      const queryStr = `query { artifactSnapshots(kind: "sdk", limit: 100, offset: 0) { items { id name description version target_language created_at active runtime_state } } }`;
+      const res = await api.mcpGraphql<{ artifactSnapshots: { items: SdkListItem[] } }>(queryStr);
+      const normalizedName = searchName.toLowerCase();
+      setSdks((res.artifactSnapshots.items ?? []).filter(item =>
+        item.name.toLowerCase().includes(normalizedName) && (!searchVersion || item.version === searchVersion)
+      ).map(item => ({ ...item, target_type: "sdk", is_downloadable: true })));
     } catch {
       setSdks([]);
     } finally {

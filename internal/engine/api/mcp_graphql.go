@@ -364,6 +364,8 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"artifact":                    artifactGraphQLField(s),
 			"artifactServices":            artifactServicesGraphQLField(s),
 			"artifacts":                   artifactsGraphQLField(s),
+			"artifactSnapshots":           artifactSnapshotsGraphQLField(s),
+			"artifactSnapshot":            artifactSnapshotGraphQLField(s),
 			"accessExplanation":           accessExplanationGraphQLField(s),
 			"auditEvents":                 auditEventsGraphQLField(s),
 			"artifactBuildSelectors":      artifactBuildSelectorsGraphQLField(s),

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ChevronLeft, ChevronRight, Clock, Loader2 } from "lucide-react";
 import { api, type EngineExecutionEventEntry } from "~/lib/api";
+import { artifactActivityIssue, type ArtifactActivityIssue } from "~/lib/artifact-activity-error";
 
 type RequestStatus = "all" | "success" | "failed";
 
@@ -50,11 +51,11 @@ export function ArtifactRequestsPanel({ artifactId, transport }: ArtifactRequest
   const [items, setItems] = useState<EngineExecutionEventEntry[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [issue, setIssue] = useState<ArtifactActivityIssue | null>(null);
 
   useEffect(() => {
     setLoading(true);
-    setError("");
+    setIssue(null);
     api.workspace.listArtifactExecutionEvents({
       artifactId,
       transport,
@@ -65,7 +66,7 @@ export function ArtifactRequestsPanel({ artifactId, transport }: ArtifactRequest
       setItems(result.items);
       setTotal(result.total);
     }).catch((cause) => {
-      setError(cause instanceof Error ? cause.message : "Failed to load requests");
+      setIssue(artifactActivityIssue(cause, transport));
     }).finally(() => setLoading(false));
   }, [artifactId, page, status, transport]);
 
@@ -99,8 +100,8 @@ export function ArtifactRequestsPanel({ artifactId, transport }: ArtifactRequest
 
       {loading ? (
         <div className="flex items-center justify-center gap-2 py-14 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin" /> Loading requests...</div>
-      ) : error ? (
-        <div className="px-4 py-12 text-center text-sm text-red-600">{error}</div>
+      ) : issue ? (
+        <div className={`px-4 py-12 text-center text-sm ${issue.tone === "neutral" ? "text-slate-500" : "text-red-600"}`}>{issue.message}</div>
       ) : items.length === 0 ? (
         <div className="flex flex-col items-center py-14 text-center text-slate-500">
           <Clock className="mb-2 h-5 w-5 text-slate-400" />
