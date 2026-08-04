@@ -68,7 +68,11 @@ func TestPostgresStoreServiceContractSnapshotRoundTrip(t *testing.T) {
 	defer pool.Exec(context.Background(), `DELETE FROM fused_service_contract_snapshots WHERE service_version_id = $1`, versionID) //nolint:errcheck
 
 	s := NewPostgresStore(pool).(*postgresStore)
-	endpoint := fusedobject.Endpoint{ID: uuid.New(), Name: "listWidgets", Method: "GET", Path: "/widgets", NormalizedPath: "/widgets"}
+	query := `query ListWidgets { widgets { id } }`
+	endpoint := fusedobject.Endpoint{
+		ID: uuid.New(), Name: "listWidgets", Method: "POST", Path: "/graphql", NormalizedPath: "/graphql",
+		GraphQLQuery: &query, ProviderProtocol: "graphql", OperationKind: "query",
+	}
 	webhook := fusedobject.Webhook{ID: uuid.New(), Name: "widget.created", Method: "POST"}
 	snapshot := ServiceContractSnapshot{
 		ServiceID:        serviceID,
@@ -98,7 +102,7 @@ func TestPostgresStoreServiceContractSnapshotRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetServiceContractEndpointByName: %v", err)
 	}
-	if gotEndpoint.ID != endpoint.ID || gotEndpoint.Path != "/widgets" {
+	if gotEndpoint.ID != endpoint.ID || gotEndpoint.GraphQLQuery == nil || *gotEndpoint.GraphQLQuery != query || gotEndpoint.ProviderProtocol != "graphql" || gotEndpoint.OperationKind != "query" {
 		t.Fatalf("unexpected endpoint: %#v", gotEndpoint)
 	}
 

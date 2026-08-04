@@ -10,7 +10,7 @@ import { NotificationList } from "./NotificationList";
 // gone for good, per the two-tier read/dismiss model). The panel itself is
 // a preview -- capped to PANEL_LIMIT rows so it doesn't grow into an
 // unusably tall dropdown; "View all" links to the full /integrations/
-// notifications page for anything past that.
+// Activity's notifications tab for anything past that.
 const PANEL_LIMIT = 6;
 
 export function NotificationBell() {
@@ -71,7 +71,7 @@ export function NotificationBell() {
             />
           </div>
           <Link
-            to="/integrations/notifications"
+            to="/integrations/activity?tab=notifications"
             onClick={() => setOpen(false)}
             className="shrink-0 block text-center px-4 py-3 text-sm font-medium text-blue-600 hover:bg-slate-50 border-t border-slate-100 transition-colors"
           >

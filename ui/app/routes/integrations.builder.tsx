@@ -16,7 +16,8 @@ import {
   planAndApplyArtifact,
 } from "~/lib/artifact-builder";
 import type { ArtifactBuildSelector, ArtifactOwningTeam } from "~/lib/artifact-builder-contract";
-import { getApiKey } from "~/lib/session";
+import { getApiKey, openAuthenticatedTab } from "~/lib/session";
+import { CREATE_CREDENTIAL_PATH } from "~/lib/credential-navigation";
 import { useToast } from "~/components/Toast";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import { CheckSquare, Square, ChevronDown, ChevronRight, Search, Loader2, X, ChevronLeft } from "lucide-react";
@@ -484,16 +485,42 @@ export default function SdkBuilder() {
       .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Could not load owning teams."));
   }, []);
 
+  const loadAvailableBuckets = () =>
+    listArtifactBuildSelectors(ownerTeamId, "BUCKET", "", 100, 0).then((bucketPage) => {
+      setAvailableBuckets(bucketPage.items);
+      setBucketId((current) =>
+        bucketPage.items.some((bucket) => bucket.resource_id === current)
+          ? current
+          : bucketPage.items[0]?.resource_id || ""
+      );
+      return bucketPage;
+    });
+
   useEffect(() => {
     setPage(1);
     Promise.all([
       loadData(1, query.trim()),
-      listArtifactBuildSelectors(ownerTeamId, "BUCKET", "", 100, 0),
-    ]).then(([, bucketPage]) => {
-      setAvailableBuckets(bucketPage.items);
-      setBucketId((current) => bucketPage.items.some((bucket) => bucket.resource_id === current) ? current : bucketPage.items[0]?.resource_id || "");
-    }).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Could not load team access."));
+      loadAvailableBuckets(),
+    ]).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Could not load team access."));
   }, [ownerTeamId]);
+
+  useEffect(() => {
+    const refreshAfterCredentialTab = () => {
+      // A separate tab preserves the in-progress build form. Refreshing on
+      // focus makes newly created, authorized credential sets selectable.
+      loadAvailableBuckets().catch((cause: unknown) =>
+        setError(cause instanceof Error ? cause.message : "Could not refresh credential sets.")
+      );
+    };
+    window.addEventListener("focus", refreshAfterCredentialTab);
+    return () => window.removeEventListener("focus", refreshAfterCredentialTab);
+  }, [ownerTeamId]);
+
+  const createCredential = () => {
+    if (!openAuthenticatedTab(CREATE_CREDENTIAL_PATH)) {
+      toast.warning("Allow pop-ups to create a credential without losing this build.");
+    }
+  };
 
   // Re-fetch authorized services when page changes for both personal and team ownership.
   useEffect(() => {
@@ -1301,6 +1328,7 @@ export default function SdkBuilder() {
             availableBuckets={availableBuckets}
             bucketId={bucketId}
             setBucketId={setBucketId}
+            onCreateCredential={createCredential}
             sdkName={sdkName}
             setSdkName={setSdkName}
             setIsDuplicate={setIsDuplicate}

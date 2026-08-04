@@ -73,3 +73,37 @@ func TestFusedToIntegrationObject_NoPaginationAnywhereStaysNil(t *testing.T) {
 		t.Fatalf("expected nil pagination, got %#v", got.Pagination)
 	}
 }
+
+func TestFusedToIntegrationObject_PreservesGraphQLExecutionContract(t *testing.T) {
+	query := `query Viewer($id: ID!) { viewer(id: $id) { id } }`
+	ep := fusedobject.Endpoint{
+		Name: "viewer", Method: "POST", Path: "/graphql", GraphQLQuery: &query,
+		ProviderProtocol: "graphql", OperationKind: "query",
+		Parameters:  fusedobject.Parameters{{Name: "id", Required: true, Type: "string"}},
+		RequestBody: &fusedobject.Schema{Type: "object", Required: []string{"id"}},
+		Responses:   fusedobject.Responses{"200": {Type: "object"}},
+	}
+
+	got := fusedToIntegrationObject(&fusedobject.ServiceMetadata{}, ep)
+
+	if got.GraphQLQuery == nil || *got.GraphQLQuery != query {
+		t.Fatalf("GraphQL query was not preserved: %#v", got.GraphQLQuery)
+	}
+	if got.ProviderProtocol != "graphql" || got.OperationKind != "query" {
+		t.Fatalf("unexpected execution metadata: protocol=%q kind=%q", got.ProviderProtocol, got.OperationKind)
+	}
+	if len(got.Parameters) != 1 || got.RequestBody == nil || got.Responses["200"].Type != "object" {
+		t.Fatalf("operation schemas were not preserved: %#v", got)
+	}
+}
+
+func TestFusedToIntegrationObject_RecognizesLegacyGraphQLSnapshot(t *testing.T) {
+	query := `query Viewer { viewer { id } }`
+	got := fusedToIntegrationObject(&fusedobject.ServiceMetadata{}, fusedobject.Endpoint{
+		GraphQLQuery: &query, ResourceName: "query",
+	})
+
+	if got.ProviderProtocol != "graphql" || got.OperationKind != "query" {
+		t.Fatalf("legacy GraphQL snapshot was not upgraded: %#v", got)
+	}
+}

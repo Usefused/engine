@@ -41,23 +41,31 @@ export class APIRequestError extends Error {
   }
 }
 
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function asBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
 export function normalizeAPIErrorPayload(input: unknown): APIErrorPayload {
   if (!isRecord(input)) return {};
   if (isRecord(input.error)) {
     const engineError = input.error;
     return {
-      error: typeof engineError.message === "string" ? engineError.message : undefined,
-      code: typeof engineError.code === "string" ? engineError.code : undefined,
-      category: typeof engineError.category === "string" ? engineError.category : undefined,
-      retryable: typeof engineError.retryable === "boolean" ? engineError.retryable : undefined,
+      error: asString(engineError.message),
+      code: asString(engineError.code),
+      category: asString(engineError.category),
+      retryable: asBoolean(engineError.retryable),
       details: isRecord(engineError.details) ? engineError.details : undefined,
-      remediation: typeof engineError.remediation === "string" ? engineError.remediation : undefined,
-      trace_id: typeof engineError.trace_id === "string" ? engineError.trace_id : undefined,
+      remediation: asString(engineError.remediation),
+      trace_id: asString(engineError.trace_id),
     };
   }
   return {
-    error: typeof input.error === "string" ? input.error : undefined,
-    message: typeof input.message === "string" ? input.message : undefined,
+    error: asString(input.error),
+    message: asString(input.message),
     missing: normalizeMissingRequirements(input.missing),
   };
 }
@@ -66,6 +74,17 @@ export function apiErrorMessage(
   status: number,
   payload: APIErrorPayload
 ): string {
+  const specific = specificApiErrorMessage(status, payload);
+  if (specific) return specific;
+  const coded = codedErrorMessage(payload);
+  if (coded) return coded;
+  return genericStatusMessage(status);
+}
+
+function specificApiErrorMessage(
+  status: number,
+  payload: APIErrorPayload
+): string | null {
   const code = payload.code || payload.error;
   if (status === 401 && code === "authentication_required") {
     return "Authentication required. Provide a valid Fused credential.";
@@ -73,16 +92,14 @@ export function apiErrorMessage(
   if (status === 403 && code === "permission_denied") {
     return permissionDeniedMessage(payload.missing);
   }
-  const ownerMessage = artifactOwnerErrorMessage(payload.error);
-  if (ownerMessage) return ownerMessage;
-  const workspaceMessage = workspaceConfigErrorMessage(payload);
-  if (workspaceMessage) return workspaceMessage;
-  if (payload.code && payload.error) {
-    return payload.remediation
-      ? `${payload.error} ${payload.remediation}`
-      : payload.error;
-  }
-  return genericStatusMessage(status);
+  return artifactOwnerErrorMessage(payload.error) || workspaceConfigErrorMessage(payload);
+}
+
+function codedErrorMessage(payload: APIErrorPayload): string | null {
+  if (!payload.code || !payload.error) return null;
+  return payload.remediation
+    ? `${payload.error} ${payload.remediation}`
+    : payload.error;
 }
 
 export function isAuthenticationFailure(
@@ -175,16 +192,8 @@ function workspaceConfigErrorMessage(payload: APIErrorPayload): string | null {
   if (!code) return null;
 
   if (code === "bucket_credentials_missing") {
-    const missing = Array.isArray(payload.details?.missing)
-      ? payload.details.missing.filter((value): value is string => typeof value === "string")
-      : [];
-    const requirements = uniqueBucketMaterialLabels(missing);
-    const message = requirements.length > 0
-      ? `The selected credential set is missing ${requirements.join(", ")}.`
-      : payload.error || "The selected credential set is missing required authentication.";
-    return payload.remediation ? `${message} ${payload.remediation}` : message;
+    return bucketCredentialsMissingMessage(payload);
   }
-
   if (code === "credential_set_required") {
     return "Choose one credential set before creating this consumer.";
   }
@@ -192,6 +201,17 @@ function workspaceConfigErrorMessage(payload: APIErrorPayload): string | null {
     return "The selected credential set no longer exists. Choose another credential set.";
   }
   return null;
+}
+
+function bucketCredentialsMissingMessage(payload: APIErrorPayload): string {
+  const missing = Array.isArray(payload.details?.missing)
+    ? payload.details.missing.filter((value): value is string => typeof value === "string")
+    : [];
+  const requirements = uniqueBucketMaterialLabels(missing);
+  const message = requirements.length > 0
+    ? `The selected credential set is missing ${requirements.join(", ")}.`
+    : payload.error || "The selected credential set is missing required authentication.";
+  return payload.remediation ? `${message} ${payload.remediation}` : message;
 }
 
 function uniqueBucketMaterialLabels(requirements: string[]): string[] {

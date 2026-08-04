@@ -22,7 +22,17 @@ import (
 type executionTransportContextKey struct{}
 
 type executionAuditState struct {
-	artifactID          uuid.UUID
+	artifactID uuid.UUID
+	// accountID identifies which account this execution belongs to. It must
+	// be threaded through from resolveExecutionIdentity's return value at the
+	// call site -- without it, recordEngineExecutionAudit has no way to
+	// populate models.EngineExecutionEvent.AccountID, and every published
+	// event ends up persisted with a NULL account_id. That makes the event
+	// exist in fused_engine_execution_events but permanently invisible to
+	// GetWorkspaceExecutionAnalytics, which filters on the caller's real
+	// account ID -- the Activity page then shows "No calls" no matter how
+	// many executions actually succeeded.
+	accountID           uuid.UUID
 	endpointName        string
 	startedAt           time.Time
 	match               *scopedEndpoint
@@ -49,6 +59,7 @@ func executionTransportFromContext(ctx context.Context) string {
 func recordEngineExecutionAudit(ctx context.Context, span trace.Span, state executionAuditState, execErr error) {
 	event := models.EngineExecutionEvent{
 		ID:                  uuid.New(),
+		AccountID:           state.accountID,
 		ArtifactID:          state.artifactID,
 		Transport:           executionTransportFromContext(ctx),
 		Direction:           models.EngineExecutionDirectionOutbound,

@@ -13,12 +13,15 @@ test("renders owning team and intersection-only credential choices in product la
     bucketId: "bucket-1",
     onOwnerTeamChange() {},
     onBucketChange() {},
+    onCreateCredential() {},
   }));
 
-  for (const label of ["Owning team", "Support", "Credential set", "Support production", "both your access and the owning team"] ) {
+  for (const label of ["Owning team", "Support", "Credential set", "Support production", "Create credential", "both your access and the owning team"] ) {
     assert.match(html, new RegExp(label, "i"));
   }
   assert.doesNotMatch(html, /permission|binding|actor_allowed|team_allowed/i);
+  assert.match(html, /data-track="create_builder_credential"/);
+  assert.match(html, /type="button"/);
 });
 
 test("explains personal ownership and shared credential choices", () => {

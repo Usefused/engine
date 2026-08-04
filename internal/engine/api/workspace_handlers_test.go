@@ -100,6 +100,7 @@ type workspaceTestStore struct {
 	engineExecutionEvents       []models.EngineExecutionEvent
 	engineExecutionAnalytics    models.EngineExecutionAnalytics
 	engineExecutionAnalyticsErr error
+	artifactExecutionAnalytics  models.ArtifactExecutionAnalytics
 	workspaceExecutionAnalytics models.WorkspaceExecutionAnalytics
 	workspaceExecutionCalls     int
 	bucketsByName               map[string]*store.Bucket
@@ -662,11 +663,41 @@ func (s *workspaceTestStore) ListEngineExecutionEventsByService(ctx context.Cont
 	return filtered[filter.Offset:end], total, nil
 }
 
+func (s *workspaceTestStore) ListEngineExecutionEventsByArtifact(ctx context.Context, filter store.EngineExecutionFilter) ([]models.EngineExecutionEvent, int64, error) {
+	filtered := make([]models.EngineExecutionEvent, 0, len(s.engineExecutionEvents))
+	for _, event := range s.engineExecutionEvents {
+		if event.ArtifactID != filter.ArtifactID || (filter.Transport != "" && event.Transport != filter.Transport) ||
+			(filter.Direction != "" && event.Direction != filter.Direction) || (filter.Status != "" && event.Status != filter.Status) {
+			continue
+		}
+		if filter.StartDate != nil && event.StartedAt.Before(*filter.StartDate) {
+			continue
+		}
+		if filter.EndDate != nil && event.StartedAt.After(*filter.EndDate) {
+			continue
+		}
+		filtered = append(filtered, event)
+	}
+	total := int64(len(filtered))
+	if filter.Offset >= len(filtered) {
+		return []models.EngineExecutionEvent{}, total, nil
+	}
+	end := min(filter.Offset+filter.Limit, len(filtered))
+	return filtered[filter.Offset:end], total, nil
+}
+
 func (s *workspaceTestStore) GetEngineExecutionAnalyticsByService(ctx context.Context, filter store.EngineExecutionFilter) (models.EngineExecutionAnalytics, error) {
 	if s.engineExecutionAnalyticsErr != nil {
 		return models.EngineExecutionAnalytics{}, s.engineExecutionAnalyticsErr
 	}
 	return s.engineExecutionAnalytics, nil
+}
+
+func (s *workspaceTestStore) GetEngineExecutionAnalyticsByArtifact(ctx context.Context, filter store.EngineExecutionFilter) (models.ArtifactExecutionAnalytics, error) {
+	if s.engineExecutionAnalyticsErr != nil {
+		return models.ArtifactExecutionAnalytics{}, s.engineExecutionAnalyticsErr
+	}
+	return s.artifactExecutionAnalytics, nil
 }
 
 func (s *workspaceTestStore) GetWorkspaceExecutionAnalytics(ctx context.Context, accountID uuid.UUID, startDate, endDate time.Time) (models.WorkspaceExecutionAnalytics, error) {

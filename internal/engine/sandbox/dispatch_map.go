@@ -61,15 +61,97 @@ func mapRetryConfig(r *fusedobject.RetryConfig) *models.RetryConfig {
 // (see plans/plan-service-config-restructure.md item 1).
 func fusedToIntegrationObject(o *fusedobject.ServiceMetadata, ep fusedobject.Endpoint) *models.IntegrationObject {
 	return &models.IntegrationObject{
-		ID:             ep.ID,
-		ServiceID:      o.ID,
-		Name:           ep.Name,
-		Method:         ep.Method,
-		Path:           ep.Path,
-		NormalizedPath: ep.NormalizedPath,
-		IsSSE:          ep.IsSSE,
-		Pagination:     resolvePagination(ep.Pagination, o.Pagination),
+		ID:               ep.ID,
+		ServiceID:        o.ID,
+		Name:             ep.Name,
+		Description:      ep.Description,
+		ResourceName:     ep.ResourceName,
+		Version:          ep.Version,
+		Method:           ep.Method,
+		Path:             ep.Path,
+		NormalizedPath:   ep.NormalizedPath,
+		Deprecated:       ep.Deprecated,
+		IsSSE:            ep.IsSSE,
+		Parameters:       mapParameters(ep.Parameters),
+		RequestBody:      mapSchema(ep.RequestBody),
+		Responses:        mapResponses(ep.Responses),
+		GraphQLQuery:     ep.GraphQLQuery,
+		ProviderProtocol: effectiveProviderProtocol(ep),
+		OperationKind:    effectiveOperationKind(ep),
+		Pagination:       resolvePagination(ep.Pagination, o.Pagination),
 	}
+}
+
+// effectiveProviderProtocol keeps snapshots written before the explicit field
+// executable. The query document is authoritative enough for this one-way
+// migration, while new snapshots always carry the provider protocol directly.
+func effectiveProviderProtocol(ep fusedobject.Endpoint) string {
+	if ep.ProviderProtocol != "" {
+		return ep.ProviderProtocol
+	}
+	if ep.GraphQLQuery != nil {
+		return models.ProviderProtocolGraphQL
+	}
+	return models.ProviderProtocolREST
+}
+
+// effectiveOperationKind uses the legacy resource bucket only for old GraphQL
+// snapshots; new contracts persist the semantic kind explicitly.
+func effectiveOperationKind(ep fusedobject.Endpoint) string {
+	if ep.OperationKind != "" {
+		return ep.OperationKind
+	}
+	if ep.ProviderProtocol == "" && ep.GraphQLQuery == nil {
+		return ""
+	}
+	switch ep.ResourceName {
+	case models.OperationKindQuery, models.OperationKindMutation:
+		return ep.ResourceName
+	default:
+		return ""
+	}
+}
+
+func mapParameters(parameters fusedobject.Parameters) models.Parameters {
+	if len(parameters) == 0 {
+		return nil
+	}
+	mapped := make(models.Parameters, len(parameters))
+	for i, parameter := range parameters {
+		mapped[i] = models.Parameter{
+			Name: parameter.Name, In: parameter.In, Required: parameter.Required,
+			Type: parameter.Type, Description: parameter.Description,
+		}
+	}
+	return mapped
+}
+
+func mapSchema(schema *fusedobject.Schema) *models.Schema {
+	if schema == nil {
+		return nil
+	}
+	mapped := models.Schema{Ref: schema.Ref, Type: schema.Type, Format: schema.Format, Required: schema.Required, Example: schema.Example}
+	if schema.Items != nil {
+		mapped.Items = mapSchema(schema.Items)
+	}
+	if len(schema.Properties) > 0 {
+		mapped.Properties = make(map[string]models.Schema, len(schema.Properties))
+		for name, property := range schema.Properties {
+			mapped.Properties[name] = *mapSchema(&property)
+		}
+	}
+	return &mapped
+}
+
+func mapResponses(responses fusedobject.Responses) models.Responses {
+	if len(responses) == 0 {
+		return nil
+	}
+	mapped := make(models.Responses, len(responses))
+	for status, response := range responses {
+		mapped[status] = *mapSchema(&response)
+	}
+	return mapped
 }
 
 // resolvePagination applies the endpoint-wins-over-service fallback rule

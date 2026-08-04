@@ -393,6 +393,8 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"webhookEvents":               webhookEventsGraphQLField(s),
 			"webhookAnalytics":            webhookAnalyticsGraphQLField(s),
 			"engineExecutionEvents":       engineExecutionEventsGraphQLField(s),
+			"artifactExecutionEvents":     artifactExecutionEventsGraphQLField(s),
+			"artifactExecutionAnalytics":  artifactExecutionAnalyticsGraphQLField(s),
 			"engineExecutionAnalytics":    engineExecutionAnalyticsGraphQLField(s),
 			"workspaceExecutionAnalytics": workspaceExecutionAnalyticsGraphQLField(s),
 			"publicServiceInsights":       publicServiceInsightsGraphQLField(s, publicInsightReader),

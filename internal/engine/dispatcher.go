@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -400,6 +401,8 @@ func (d *Dispatcher) executeOnce(
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.dispatch.vendor_call", trace.WithAttributes(
 		attribute.String("http.method", obj.Method),
 		attribute.String("peer.service", srv.Name),
+		attribute.String("provider.protocol", providerProtocol(obj)),
+		attribute.String("graphql.operation.kind", obj.OperationKind),
 	))
 	defer span.End()
 
@@ -514,7 +517,6 @@ func prepareRequestParts(srv *models.Service, obj *models.IntegrationObject, par
 	applyDefaultBindings(&reqURL, queryParams, headerParams, bodyParams, bucketValues)
 	applyForcedBindings(&reqURL, queryParams, headerParams, bodyParams, bucketValues)
 
-	slog.Info("DISPATCH DEBUG", slog.Any("headers", headerParams), slog.Any("bucketValues", bucketValues))
 	reqURL = appendQueryParams(reqURL, queryParams)
 
 	bodyReader, err := buildRequestBody(obj, srv, headerParams, bodyParams)
@@ -757,6 +759,15 @@ func appendQueryParams(reqURL string, queryParams neturl.Values) string {
 }
 
 func buildRequestBody(obj *models.IntegrationObject, srv *models.Service, headerParams map[string]string, bodyParams map[string]any) (io.Reader, error) {
+	// GraphQL is handled before GET/DELETE suppression because its query document
+	// is part of the required request body, regardless of the declared method.
+	if providerProtocol(obj) == models.ProviderProtocolGraphQL {
+		if obj.GraphQLQuery == nil || strings.TrimSpace(*obj.GraphQLQuery) == "" {
+			return nil, errors.New("GraphQL operation is missing its query document")
+		}
+		return buildGraphQLRequestBody(obj, headerParams, bodyParams)
+	}
+
 	// GET and DELETE requests should not have a request body
 	if obj.Method == http.MethodGet || obj.Method == http.MethodDelete {
 		return nil, nil
@@ -787,6 +798,70 @@ func buildRequestBody(obj *models.IntegrationObject, srv *models.Service, header
 	}
 	headerParams["Content-Type"] = "application/json"
 	return bytes.NewReader(bodyBytes), nil
+}
+
+// providerProtocol accepts legacy in-memory operations that predate the field
+// so direct callers and rolling Engine upgrades do not silently lose GraphQL
+// request construction while refreshed snapshots become explicit.
+func providerProtocol(obj *models.IntegrationObject) string {
+	if obj.ProviderProtocol != "" {
+		return obj.ProviderProtocol
+	}
+	if obj.GraphQLQuery != nil {
+		return models.ProviderProtocolGraphQL
+	}
+	return models.ProviderProtocolREST
+}
+
+// Keep direct dispatch aligned with generated SDKs by using the same standard
+// envelope and omitting variables when the operation has none.
+func buildGraphQLRequestBody(obj *models.IntegrationObject, headerParams map[string]string, bodyParams map[string]any) (io.Reader, error) {
+	envelope := map[string]any{"query": *obj.GraphQLQuery}
+	variables := graphQLVariables(bodyParams)
+	if len(variables) > 0 {
+		envelope["variables"] = variables
+	}
+	bodyBytes, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal GraphQL request body: %w", err)
+	}
+	headerParams["Content-Type"] = "application/json"
+	return bytes.NewReader(bodyBytes), nil
+}
+
+// Generated SDKs flatten their GraphQL envelope into Engine params. Unwrap
+// only that recognizable shape and ignore its query document: the reviewed
+// Registry operation remains the authority, so an SDK token cannot substitute
+// a different provider operation while reusing an allowed endpoint name.
+func graphQLVariables(bodyParams map[string]any) map[string]any {
+	if !isGeneratedGraphQLEnvelope(bodyParams) {
+		return bodyParams
+	}
+	variables, _ := bodyParams["variables"].(map[string]any)
+	return variables
+}
+
+func isGeneratedGraphQLEnvelope(bodyParams map[string]any) bool {
+	if len(bodyParams) == 0 || len(bodyParams) > 3 {
+		return false
+	}
+	if _, ok := bodyParams["query"].(string); !ok {
+		return false
+	}
+	if len(bodyParams) == 1 {
+		return true
+	}
+	variables, ok := bodyParams["variables"]
+	if !ok {
+		return false
+	}
+	if variables != nil {
+		if _, ok := variables.(map[string]any); !ok {
+			return false
+		}
+	}
+	_, hasOperationName := bodyParams["operationName"]
+	return len(bodyParams) == 2 || hasOperationName
 }
 
 func resolveContentType(obj *models.IntegrationObject, srv *models.Service, headerParams map[string]string) string {

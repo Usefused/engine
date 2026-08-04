@@ -33,6 +33,10 @@ import {
   type ValueFormPayload,
 } from "~/lib/buckets";
 import { useToast } from "~/components/Toast";
+import {
+  consumeCredentialCreationRequest,
+  requestsCredentialCreation,
+} from "~/lib/credential-navigation";
 
 export const meta: MetaFunction = () => [{ title: "Credentials - Fused" }];
 
@@ -87,6 +91,15 @@ export default function BucketsPage() {
   );
   const contentRequestID = useRef(0);
   const activeTab = bucketTabFromSearch(searchParams);
+
+  useEffect(() => {
+    if (!requestsCredentialCreation(searchParams)) return;
+    setModalOpen(true);
+    // Consume the command so refreshes do not reopen a modal the user closed.
+    setSearchParams(consumeCredentialCreationRequest(searchParams), {
+      replace: true,
+    });
+  }, [searchParams, setSearchParams]);
 
   const selectedBucket = useMemo(
     () =>
@@ -336,6 +349,9 @@ export default function BucketsPage() {
       state.bucketSummaries.find((bucket) => bucket.name === name)?.id ||
         preferredBucketID(state.bucketSummaries)
     );
+    // A new set is only useful once it contains a provider credential, so
+    // continue directly into the existing secret composer.
+    setEntryModalKind("secret");
     toast.success("Credential set created");
   };
 

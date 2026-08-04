@@ -1466,6 +1466,9 @@ func (c *HTTPRegistryClient) fetchServiceOperations(ctx context.Context, service
 				}
 				request_body
 				responses
+				graphql_query
+				provider_protocol
+				operation_kind
 				pagination
 			}
 		}
@@ -1811,6 +1814,18 @@ func (c *HTTPRegistryClient) buildEndpointsByNamesRequest(ctx context.Context, s
 				normalized_path
 				is_sse
 				deprecated
+				parameters {
+					name
+					in
+					required
+					type
+					description
+				}
+				request_body
+				responses
+				graphql_query
+				provider_protocol
+				operation_kind
 				pagination
 			}
 		}

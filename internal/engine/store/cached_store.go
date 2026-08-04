@@ -64,6 +64,22 @@ func (s *cachedStore) LoadDefaultBucketID(ctx context.Context) (uuid.UUID, error
 	return loader.LoadDefaultBucketID(ctx)
 }
 
+func (s *cachedStore) ListEngineExecutionEventsByArtifact(ctx context.Context, filter EngineExecutionFilter) ([]models.EngineExecutionEvent, int64, error) {
+	reader, ok := s.Store.(ArtifactExecutionEventReader)
+	if !ok {
+		return nil, 0, errors.New("store does not support artifact execution activity")
+	}
+	return reader.ListEngineExecutionEventsByArtifact(ctx, filter)
+}
+
+func (s *cachedStore) GetEngineExecutionAnalyticsByArtifact(ctx context.Context, filter EngineExecutionFilter) (models.ArtifactExecutionAnalytics, error) {
+	reader, ok := s.Store.(ArtifactExecutionAnalyticsReader)
+	if !ok {
+		return models.ArtifactExecutionAnalytics{}, errors.New("store does not support artifact execution analytics")
+	}
+	return reader.GetEngineExecutionAnalyticsByArtifact(ctx, filter)
+}
+
 func (s *cachedStore) UpsertSecret(ctx context.Context, secret WorkspaceSecret) error {
 	err := s.Store.UpsertSecret(ctx, secret)
 	if err == nil {

@@ -3,16 +3,21 @@ package engine
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type mockStream struct {
@@ -288,6 +293,133 @@ func TestDispatcherExecuteStream_Retry(t *testing.T) {
 	if attempts != 2 {
 		t.Errorf("Expected 2 attempts, got %d", attempts)
 	}
+}
+
+// The REST retry safety gate is reused so GraphQL mutations do not gain a
+// separate, less conservative execution path.
+func TestDispatcherExecuteStream_GraphQLReusesRESTExecutionSystem(t *testing.T) {
+	attempts := 0
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("expected application/json, got %s", r.Header.Get("Content-Type"))
+		}
+		if attempts < 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"data":{"viewer":{"login":"octocat"}}}`))
+	}))
+	defer server.Close()
+
+	d := NewDispatcher()
+	query := `query Viewer($id: ID!) { viewer(id: $id) { login } }`
+	srv := &models.Service{BaseURL: server.URL, RetryConfig: &models.RetryConfig{MaxRetries: 2}}
+	obj := &models.IntegrationObject{Path: "/graphql", Method: http.MethodPost, GraphQLQuery: &query}
+	params := map[string]any{"id": "u_123"}
+
+	ctx := ContextWithIdempotencyKeyPresent(context.Background(), true)
+	stream := &mockStream{}
+	status, err := d.ExecuteStream(ctx, srv, obj, params, nil, nil, stream)
+	if err != nil {
+		t.Fatalf("ExecuteStream failed: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Errorf("expected 200, got %d", status)
+	}
+	if attempts != 2 {
+		t.Errorf("expected 2 attempts (retry reused), got %d", attempts)
+	}
+	if gotBody["query"] != query {
+		t.Errorf("query = %v, want %v", gotBody["query"], query)
+	}
+	variables, _ := gotBody["variables"].(map[string]any)
+	if variables["id"] != "u_123" {
+		t.Errorf("variables[id] = %v, want u_123", variables["id"])
+	}
+	if len(stream.chunks) != 1 || string(stream.chunks[0]) != `{"data":{"viewer":{"login":"octocat"}}}` {
+		t.Errorf("unexpected streamed response: %#v", stream.chunks)
+	}
+}
+
+func TestDispatcherExecuteStream_GraphQLPOSTWithoutIdempotencyKey_NoRetry(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	d := NewDispatcher()
+	query := `mutation CreateWidget($name: String!) { createWidget(name: $name) { id } }`
+	srv := &models.Service{BaseURL: server.URL, RetryConfig: &models.RetryConfig{MaxRetries: 2}}
+	obj := &models.IntegrationObject{Path: "/graphql", Method: http.MethodPost, GraphQLQuery: &query}
+
+	stream := &mockStream{}
+	_, err := d.ExecuteStream(context.Background(), srv, obj, map[string]any{"name": "widget"}, nil, nil, stream)
+	if err == nil {
+		t.Fatalf("expected an error from the unretried 500")
+	}
+	if attempts != 1 {
+		t.Errorf("expected exactly 1 attempt (no idempotency key), got %d", attempts)
+	}
+}
+
+func TestDispatcherExecuteStream_ExplicitGraphQLProtocolRequiresDocument(t *testing.T) {
+	d := NewDispatcher()
+	srv := &models.Service{BaseURL: "https://provider.example"}
+	obj := &models.IntegrationObject{
+		Path: "/graphql", Method: http.MethodPost,
+		ProviderProtocol: models.ProviderProtocolGraphQL, OperationKind: models.OperationKindQuery,
+	}
+
+	_, err := d.ExecuteStream(context.Background(), srv, obj, nil, nil, nil, &mockStream{})
+
+	if err == nil || !strings.Contains(err.Error(), "missing its query document") {
+		t.Fatalf("expected missing GraphQL document error, got %v", err)
+	}
+}
+
+func TestDispatcherGraphQLExecutionRecordsSafeProtocolAttributes(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	previousProvider := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	defer otel.SetTracerProvider(previousProvider)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"viewer":{"id":"1"}}}`))
+	}))
+	defer server.Close()
+	query := `query Viewer { viewer { id } }`
+	obj := &models.IntegrationObject{
+		Name: "viewer", Method: http.MethodPost, Path: "/graphql", GraphQLQuery: &query,
+		ProviderProtocol: models.ProviderProtocolGraphQL, OperationKind: models.OperationKindQuery,
+	}
+	if _, err := NewDispatcher().ExecuteStream(context.Background(), &models.Service{Name: "test", BaseURL: server.URL}, obj, nil, nil, nil, &mockStream{}); err != nil {
+		t.Fatalf("ExecuteStream: %v", err)
+	}
+
+	for _, span := range recorder.Ended() {
+		if span.Name() != "engine.dispatch.vendor_call" {
+			continue
+		}
+		attributes := map[string]string{}
+		for _, attr := range span.Attributes() {
+			attributes[string(attr.Key)] = attr.Value.AsString()
+			if strings.Contains(string(attr.Key), "query") || strings.Contains(string(attr.Key), "variables") {
+				t.Fatalf("sensitive GraphQL payload attribute recorded: %s", attr.Key)
+			}
+		}
+		if attributes["provider.protocol"] != "graphql" || attributes["graphql.operation.kind"] != "query" {
+			t.Fatalf("unexpected protocol attributes: %#v", attributes)
+		}
+		return
+	}
+	t.Fatal("provider call span was not recorded")
 }
 
 // TestDispatcherExecuteStream_NoRetryWithoutConfig is the strict half of the
@@ -802,6 +934,124 @@ func TestPrepareRequestParts_DynamicFormURLEncoded(t *testing.T) {
 	buf.ReadFrom(bodyReader)
 	if buf.String() != "amount=1000" {
 		t.Errorf("Expected form-encoded payload, got: %s", buf.String())
+	}
+}
+
+func TestPrepareRequestParts_GraphQLWithVariables(t *testing.T) {
+	srv := &models.Service{BaseURL: "https://api.example.com"}
+	query := `query Viewer($id: ID!) { viewer(id: $id) { login } }`
+	obj := &models.IntegrationObject{
+		Path:         "/graphql",
+		Method:       http.MethodPost,
+		GraphQLQuery: &query,
+	}
+	params := map[string]any{"id": "u_123"}
+
+	reqURL, headers, bodyReader, err := prepareRequestParts(srv, obj, params, nil)
+	if err != nil {
+		t.Fatalf("prepareRequestParts failed: %v", err)
+	}
+	if reqURL != "https://api.example.com/graphql" {
+		t.Errorf("unexpected URL: %s", reqURL)
+	}
+	if headers["Content-Type"] != "application/json" {
+		t.Errorf("expected application/json, got %s", headers["Content-Type"])
+	}
+	if bodyReader == nil {
+		t.Fatalf("expected non-nil bodyReader")
+	}
+	var decoded map[string]any
+	if err := json.NewDecoder(bodyReader).Decode(&decoded); err != nil {
+		t.Fatalf("body was not valid JSON: %v", err)
+	}
+	if decoded["query"] != query {
+		t.Errorf("query = %v, want %v", decoded["query"], query)
+	}
+	variables, ok := decoded["variables"].(map[string]any)
+	if !ok {
+		t.Fatalf("variables missing or wrong type: %#v", decoded["variables"])
+	}
+	if variables["id"] != "u_123" {
+		t.Errorf("variables[id] = %v, want u_123", variables["id"])
+	}
+}
+
+func TestPrepareRequestParts_GraphQLUnwrapsGeneratedSDKEnvelope(t *testing.T) {
+	srv := &models.Service{BaseURL: "https://api.example.com"}
+	query := `query Viewer($id: ID!) { viewer(id: $id) { login } }`
+	obj := &models.IntegrationObject{Path: "/graphql", Method: http.MethodPost, GraphQLQuery: &query}
+	params := map[string]any{
+		"query":     `mutation DeleteAccount { deleteAccount }`,
+		"variables": map[string]any{"id": "u_123"},
+	}
+
+	_, _, bodyReader, err := prepareRequestParts(srv, obj, params, nil)
+	if err != nil {
+		t.Fatalf("prepareRequestParts failed: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.NewDecoder(bodyReader).Decode(&decoded); err != nil {
+		t.Fatalf("body was not valid JSON: %v", err)
+	}
+	if decoded["query"] != query {
+		t.Errorf("query = %v, want stored operation %v", decoded["query"], query)
+	}
+	variables, ok := decoded["variables"].(map[string]any)
+	if !ok || variables["id"] != "u_123" {
+		t.Fatalf("variables were not unwrapped: %#v", decoded["variables"])
+	}
+	if _, nested := variables["variables"]; nested {
+		t.Fatalf("generated SDK envelope was nested again: %#v", variables)
+	}
+}
+
+func TestGraphQLVariablesDoesNotUnwrapOrdinaryVariablesNamedQuery(t *testing.T) {
+	params := map[string]any{"query": "customer search", "limit": 10}
+	if got := graphQLVariables(params); !reflect.DeepEqual(got, params) {
+		t.Fatalf("ordinary variables changed: %#v", got)
+	}
+}
+
+func TestPrepareRequestParts_GraphQLOmitsVariablesWhenEmpty(t *testing.T) {
+	srv := &models.Service{BaseURL: "https://api.example.com"}
+	query := `query Health { health }`
+	obj := &models.IntegrationObject{
+		Path:         "/graphql",
+		Method:       http.MethodPost,
+		GraphQLQuery: &query,
+	}
+
+	_, _, bodyReader, err := prepareRequestParts(srv, obj, nil, nil)
+	if err != nil {
+		t.Fatalf("prepareRequestParts failed: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.NewDecoder(bodyReader).Decode(&decoded); err != nil {
+		t.Fatalf("body was not valid JSON: %v", err)
+	}
+	if _, present := decoded["variables"]; present {
+		t.Errorf("expected no \"variables\" key for a query with no params, got %#v", decoded["variables"])
+	}
+	if decoded["query"] != query {
+		t.Errorf("query = %v, want %v", decoded["query"], query)
+	}
+}
+
+func TestPrepareRequestParts_GraphQLBypassesGetDeleteBodySuppression(t *testing.T) {
+	srv := &models.Service{BaseURL: "https://api.example.com"}
+	query := `query Health { health }`
+	obj := &models.IntegrationObject{
+		Path:         "/graphql",
+		Method:       http.MethodGet,
+		GraphQLQuery: &query,
+	}
+
+	_, _, bodyReader, err := prepareRequestParts(srv, obj, nil, nil)
+	if err != nil {
+		t.Fatalf("prepareRequestParts failed: %v", err)
+	}
+	if bodyReader == nil {
+		t.Fatalf("expected a GraphQL query body even for a GET-declared object")
 	}
 }
 

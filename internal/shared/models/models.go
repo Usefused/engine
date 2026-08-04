@@ -629,16 +629,21 @@ type IntegrationObject struct {
 	Status            string           `json:"status"` // "active" | "drifted" | "updating"
 	SpecHash          string           `json:"spec_hash"`
 
-	Method          string            `json:"method"`
-	NormalizedPath  string            `json:"normalized_path"`
-	Path            string            `json:"path"`
-	Deprecated      bool              `json:"deprecated"`
-	DeprecationDate *time.Time        `json:"deprecation_date,omitempty"`
-	Parameters      Parameters        `json:"parameters"`
-	RequestBody     *Schema           `json:"request_body,omitempty"`
-	Responses       Responses         `json:"responses"`
-	GraphQLQuery    *string           `json:"graphql_query,omitempty"`
-	Pagination      *PaginationConfig `json:"pagination,omitempty"`
+	Method          string     `json:"method"`
+	NormalizedPath  string     `json:"normalized_path"`
+	Path            string     `json:"path"`
+	Deprecated      bool       `json:"deprecated"`
+	DeprecationDate *time.Time `json:"deprecation_date,omitempty"`
+	Parameters      Parameters `json:"parameters"`
+	RequestBody     *Schema    `json:"request_body,omitempty"`
+	Responses       Responses  `json:"responses"`
+	GraphQLQuery    *string    `json:"graphql_query,omitempty"`
+	// ProviderProtocol is the provider-facing wire contract, not the SDK/MCP
+	// execution transport recorded by activity and usage events.
+	ProviderProtocol string `json:"provider_protocol,omitempty"`
+	// OperationKind preserves GraphQL query/mutation semantics beyond HTTP POST.
+	OperationKind string            `json:"operation_kind,omitempty"`
+	Pagination    *PaginationConfig `json:"pagination,omitempty"`
 	// IsSSE marks that this endpoint returns a Server-Sent Events stream.
 	// The Engine will set Accept: text/event-stream and parse the SSE wire format.
 	IsSSE bool `json:"is_sse,omitempty"`
@@ -648,6 +653,13 @@ type IntegrationObject struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
+
+const (
+	ProviderProtocolREST    = "rest"
+	ProviderProtocolGraphQL = "graphql"
+	OperationKindQuery      = "query"
+	OperationKindMutation   = "mutation"
+)
 
 type PaginationConfig struct {
 	Type         string `json:"type"`          // "cursor", "offset", "page_number", "next_url"
@@ -1113,6 +1125,13 @@ type EngineExecutionBreakdown struct {
 	TotalCalls   int64   `json:"total_calls"`
 	FailedCalls  int64   `json:"failed_calls"`
 	P95LatencyMs float64 `json:"p95_latency_ms"`
+}
+
+// ArtifactExecutionAnalytics keeps artifact totals and service distribution
+// on the canonical execution-event model rather than the legacy MCP tables.
+type ArtifactExecutionAnalytics struct {
+	EngineExecutionAnalytics
+	ByService []EngineExecutionBreakdown `json:"by_service"`
 }
 
 type EngineExecutionFailure struct {

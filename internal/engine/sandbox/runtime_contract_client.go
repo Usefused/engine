@@ -217,6 +217,9 @@ const runtimeContractOperationFields = `
 	}
 	request_body
 	responses
+	graphql_query
+	provider_protocol
+	operation_kind
 	pagination
 `
 

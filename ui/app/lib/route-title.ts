@@ -7,14 +7,13 @@ const TITLES: Record<string, string> = {
   "/integrations/access/people": "People - Fused",
   "/integrations/access/teams": "Teams - Fused",
   "/integrations/buckets": "Credentials - Fused",
-  "/integrations/observability": "Activity - Fused",
+	"/integrations/activity": "Activity - Fused",
   "/integrations/settings": "Settings - Fused",
-  "/integrations/notifications": "Notifications - Fused",
 };
 
 export function routeTitle(pathname: string, search = ""): string {
   const normalizedPath = pathname.length > 1 ? pathname.replace(/\/$/, "") : pathname;
-  if (normalizedPath === "/integrations/sdk-builder") {
+  if (normalizedPath === "/integrations/builder") {
     return new URLSearchParams(search).get("tab") === "mcp"
       ? "Create MCP server - Fused"
       : "Create app - Fused";

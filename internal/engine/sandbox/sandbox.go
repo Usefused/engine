@@ -218,6 +218,7 @@ func engineExecuteCore(
 	}
 	auditState := executionAuditState{
 		artifactID:   uid,
+		accountID:    accountID,
 		endpointName: endpointName,
 		startedAt:    executionStarted,
 	}

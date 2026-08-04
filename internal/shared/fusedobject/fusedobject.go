@@ -36,7 +36,7 @@ type Endpoint struct {
 	Name           string    `json:"name"`
 	Description    string    `json:"description"`
 	ResourceID     uuid.UUID `json:"resource_id,omitempty"`
-	ResourceName   string    `json:"resource,omitempty"`
+	ResourceName   string    `json:"resource_name,omitempty"`
 	Version        string    `json:"version"`
 	Method         string    `json:"method"`
 	NormalizedPath string    `json:"normalized_path"`
@@ -45,10 +45,15 @@ type Endpoint struct {
 	// IsSSE indicates the vendor endpoint streams Server-Sent Events.
 	// When true the Engine sets Accept: text/event-stream and parses
 	// the response line-by-line, forwarding each parsed event as a chunk.
-	IsSSE       bool       `json:"is_sse,omitempty"`
-	Parameters  Parameters `json:"parameters"`
-	RequestBody *Schema    `json:"request_body,omitempty"`
-	Responses   Responses  `json:"responses"`
+	IsSSE        bool       `json:"is_sse,omitempty"`
+	Parameters   Parameters `json:"parameters"`
+	RequestBody  *Schema    `json:"request_body,omitempty"`
+	Responses    Responses  `json:"responses"`
+	GraphQLQuery *string    `json:"graphql_query,omitempty"`
+	// ProviderProtocol is kept distinct from the SDK/MCP/webhook execution
+	// transport used by audit events; this value describes the provider wire.
+	ProviderProtocol string `json:"provider_protocol,omitempty"`
+	OperationKind    string `json:"operation_kind,omitempty"`
 	// Pagination, when set, tells the Engine how to auto-paginate this endpoint:
 	// which request param carries the next token and where to read the next token
 	// from in the response. A nil value means the endpoint is not paginated.

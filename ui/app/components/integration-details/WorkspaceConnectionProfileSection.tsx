@@ -108,30 +108,55 @@ export function WorkspaceConnectionProfileSection({
           className="mt-3 w-full resize-y rounded-md border border-slate-200 bg-slate-50 p-3 font-mono text-xs text-slate-700 focus:border-blue-500 focus:ring-blue-500"
         />
         {isOwner && (
-          <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
-            {editing ? (
-              <>
-                <button type="button" onClick={() => { setSource(JSON.stringify(profile?.profile || { auth_type: authType }, null, 2)); setEditing(false); }} disabled={saving} className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-600 sm:w-auto">
-                  <X className="h-3.5 w-3.5" /> Cancel
-                </button>
-                {profile?.has_workspace_override && (
-                  <button type="button" onClick={reset} disabled={saving} className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-600 sm:w-auto">
-                    <RotateCcw className="h-3.5 w-3.5" /> Reset to provider default
-                  </button>
-                )}
-                <button type="button" onClick={save} disabled={saving} className="inline-flex w-full items-center justify-center gap-1.5 rounded-md bg-slate-950 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50 sm:w-auto">
-                  {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} Save workspace customization
-                </button>
-              </>
-            ) : (
-              <button type="button" onClick={() => setEditing(true)} className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-700 sm:w-auto">
-                <Pencil className="h-3.5 w-3.5" /> Customize for workspace
-              </button>
-            )}
-          </div>
+          <ConnectionProfileActions
+            editing={editing}
+            saving={saving}
+            hasOverride={Boolean(profile?.has_workspace_override)}
+            onCancel={() => { setSource(JSON.stringify(profile?.profile || { auth_type: authType }, null, 2)); setEditing(false); }}
+            onEdit={() => setEditing(true)}
+            onReset={reset}
+            onSave={save}
+          />
         )}
       </details>
     </section>
+  );
+}
+
+interface ConnectionProfileActionsProps {
+  editing: boolean;
+  saving: boolean;
+  hasOverride: boolean;
+  onCancel: () => void;
+  onEdit: () => void;
+  onReset: () => void;
+  onSave: () => void;
+}
+
+function ConnectionProfileActions({ editing, saving, hasOverride, onCancel, onEdit, onReset, onSave }: ConnectionProfileActionsProps) {
+  if (!editing) {
+    return (
+      <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
+        <button type="button" onClick={onEdit} className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-700 sm:w-auto">
+          <Pencil className="h-3.5 w-3.5" /> Customize for workspace
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
+      <button type="button" onClick={onCancel} disabled={saving} className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-600 sm:w-auto">
+        <X className="h-3.5 w-3.5" /> Cancel
+      </button>
+      {hasOverride && (
+        <button type="button" onClick={onReset} disabled={saving} className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-600 sm:w-auto">
+          <RotateCcw className="h-3.5 w-3.5" /> Reset to provider default
+        </button>
+      )}
+      <button type="button" onClick={onSave} disabled={saving} className="inline-flex w-full items-center justify-center gap-1.5 rounded-md bg-slate-950 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50 sm:w-auto">
+        {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} Save workspace customization
+      </button>
+    </div>
   );
 }
 
