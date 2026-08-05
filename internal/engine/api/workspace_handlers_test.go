@@ -139,8 +139,13 @@ type workspaceTestStore struct {
 	createdConnectSessions       []store.ConnectSession
 	sdkTokens                    []store.SDKToken
 	// kind: webhook's ownership-conflict lookup controls.
-	webhookOwnersByLabel map[uuid.UUID]string
-	webhookOwnersErr     error
+	webhookOwnersByLabel   map[uuid.UUID]string
+	webhookOwnersErr       error
+	exactExecutionPolicies map[store.WorkspaceExecutionPolicyRef]*store.WorkspaceExecutionPolicyOverride
+}
+
+func (s *workspaceTestStore) GetWorkspaceExecutionPolicyOverrides(_ context.Context, _ []store.WorkspaceExecutionPolicyRef) (map[store.WorkspaceExecutionPolicyRef]*store.WorkspaceExecutionPolicyOverride, error) {
+	return s.exactExecutionPolicies, nil
 }
 
 func (s *workspaceTestStore) GetTeamBySlug(_ context.Context, slug string) (store.Team, error) {

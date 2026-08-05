@@ -104,6 +104,22 @@ func (s *cachedStore) GetArtifactSnapshot(ctx context.Context, accountID, artifa
 	return repository.GetArtifactSnapshot(ctx, accountID, artifactID)
 }
 
+func (s *cachedStore) GetArtifactSnapshotByName(ctx context.Context, accountID uuid.UUID, kind, name string) (*ArtifactSnapshot, error) {
+	repository, ok := s.Store.(ArtifactSnapshotStore)
+	if !ok {
+		return nil, errors.New("store does not support artifact snapshots")
+	}
+	return repository.GetArtifactSnapshotByName(ctx, accountID, kind, name)
+}
+
+func (s *cachedStore) GetArtifactSnapshotByIdentity(ctx context.Context, accountID uuid.UUID, kind, name, version string) (*ArtifactSnapshot, error) {
+	repository, ok := s.Store.(ArtifactSnapshotStore)
+	if !ok {
+		return nil, errors.New("store does not support artifact snapshots")
+	}
+	return repository.GetArtifactSnapshotByIdentity(ctx, accountID, kind, name, version)
+}
+
 func (s *cachedStore) ListArtifactSnapshots(ctx context.Context, accountID uuid.UUID, kind string, limit, offset int) ([]ArtifactSnapshot, int, error) {
 	repository, ok := s.Store.(ArtifactSnapshotStore)
 	if !ok {
@@ -622,6 +638,14 @@ func (s *cachedStore) GetEffectiveWorkspaceExecutionPolicyOverrides(ctx context.
 		return nil, errors.New("workspace execution policy batch store is unavailable")
 	}
 	return delegate.GetEffectiveWorkspaceExecutionPolicyOverrides(ctx, refs)
+}
+
+func (s *cachedStore) GetWorkspaceExecutionPolicyOverrides(ctx context.Context, refs []WorkspaceExecutionPolicyRef) (map[WorkspaceExecutionPolicyRef]*WorkspaceExecutionPolicyOverride, error) {
+	delegate, ok := s.Store.(WorkspaceExecutionPolicyExactBatchStore)
+	if !ok {
+		return nil, errors.New("store does not support exact workspace execution policy batches")
+	}
+	return delegate.GetWorkspaceExecutionPolicyOverrides(ctx, refs)
 }
 
 func (s *cachedStore) ResetWorkspaceExecutionPolicyOverride(ctx context.Context, serviceID uuid.UUID, serviceVersionID *uuid.UUID) error {

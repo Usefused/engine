@@ -57,6 +57,14 @@ func TestPostgresResourceReferencesResolveHumanKeysAndEnforceScope(t *testing.T)
 	`, teamID, subjectID, bucketID, hiddenBucketID, serviceID, credentialID, accountID, sdkV1ID, sdkV2ID, mcpV1ID, serviceVersionID); err != nil {
 		t.Fatalf("seed references: %v", err)
 	}
+	if _, err := pool.Exec(ctx, `INSERT INTO fused_artifact_snapshots
+		(account_id, artifact_id, kind, name, version, selections, scope_schema_version, active, registry_created_at)
+		VALUES ($1, $2, 'sdk', 'Support', '2.0.0',
+		 jsonb_build_array(jsonb_build_object('service_id', $3::text, 'service_version_id', $4::text,
+		 'endpoint_ids', jsonb_build_array($2::text), 'webhook_ids', '[]'::jsonb)), 2, false, NOW())`,
+		accountID, sdkV2ID, serviceID, serviceVersionID); err != nil {
+		t.Fatalf("seed artifact snapshot: %v", err)
+	}
 
 	assertReferenceID(t, ctx, repository, ResourceReferenceQuery{Kind: ReferenceTeam, Value: "PLATFORM", AllowedAll: true}, teamID)
 	assertReferenceID(t, ctx, repository, ResourceReferenceQuery{Kind: ReferenceUser, Value: "ada@example.test", AllowedAll: true}, subjectID)
@@ -88,6 +96,18 @@ func TestPostgresResourceReferencesResolveHumanKeysAndEnforceScope(t *testing.T)
 	services, err := repository.ListArtifactServiceSummaries(ctx, sdkV2ID)
 	if err != nil || len(services) != 1 || services[0].ServiceSlug != "github" || services[0].Version != "v1" || services[0].EndpointCount != 1 {
 		t.Fatalf("artifact services = %#v, %v", services, err)
+	}
+	snapshot, err := repository.GetArtifactSnapshotByName(ctx, accountID, "sdk", "Support")
+	if err != nil || snapshot.ArtifactID != sdkV2ID || snapshot.Active {
+		t.Fatalf("artifact snapshot by name = %#v, %v", snapshot, err)
+	}
+	snapshot, err = repository.GetArtifactSnapshotByIdentity(ctx, accountID, "sdk", "Support", "2.0.0")
+	if err != nil || snapshot.ArtifactID != sdkV2ID {
+		t.Fatalf("artifact snapshot by identity = %#v, %v", snapshot, err)
+	}
+	services, err = repository.ListArtifactSnapshotServiceSummaries(ctx, accountID, sdkV2ID)
+	if err != nil || len(services) != 1 || services[0].ServiceSlug != "github" || services[0].EndpointCount != 1 {
+		t.Fatalf("artifact snapshot services = %#v, %v", services, err)
 	}
 }
 

@@ -33,6 +33,53 @@ func (s *artifactReferenceGraphQLTestStore) ListArtifactServiceSummaries(_ conte
 	return s.services, nil
 }
 
+func (s *artifactReferenceGraphQLTestStore) ListArtifactSnapshotServiceSummaries(_ context.Context, _, _ uuid.UUID) ([]store.ArtifactServiceSummary, error) {
+	return s.services, nil
+}
+
+func (*artifactReferenceGraphQLTestStore) UpsertArtifactSnapshots(context.Context, []store.ArtifactSnapshot) error {
+	return nil
+}
+
+func (*artifactReferenceGraphQLTestStore) DeleteArtifactSnapshot(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+
+func (s *artifactReferenceGraphQLTestStore) GetArtifactSnapshot(_ context.Context, accountID, artifactID uuid.UUID) (*store.ArtifactSnapshot, error) {
+	scope, ok := s.mockScopes[artifactID]
+	if !ok || scope.AccountID != accountID {
+		return nil, store.ErrArtifactSnapshotNotFound
+	}
+	return artifactSnapshotFromTestScope(scope), nil
+}
+
+func (s *artifactReferenceGraphQLTestStore) GetArtifactSnapshotByName(_ context.Context, accountID uuid.UUID, kind, name string) (*store.ArtifactSnapshot, error) {
+	for _, scope := range s.mockScopes {
+		if scope.AccountID == accountID && scope.Kind == kind && scope.Name == name {
+			return artifactSnapshotFromTestScope(scope), nil
+		}
+	}
+	return nil, store.ErrArtifactSnapshotNotFound
+}
+
+func (s *artifactReferenceGraphQLTestStore) GetArtifactSnapshotByIdentity(_ context.Context, accountID uuid.UUID, kind, name, version string) (*store.ArtifactSnapshot, error) {
+	for _, scope := range s.mockScopes {
+		if scope.AccountID == accountID && scope.Kind == kind && scope.Name == name && scope.Version == version {
+			return artifactSnapshotFromTestScope(scope), nil
+		}
+	}
+	return nil, store.ErrArtifactSnapshotNotFound
+}
+
+func (*artifactReferenceGraphQLTestStore) ListArtifactSnapshots(context.Context, uuid.UUID, string, int, int) ([]store.ArtifactSnapshot, int, error) {
+	return nil, 0, nil
+}
+
+func artifactSnapshotFromTestScope(scope *store.ArtifactScope) *store.ArtifactSnapshot {
+	return &store.ArtifactSnapshot{ArtifactID: scope.ArtifactID, AccountID: scope.AccountID, Kind: scope.Kind,
+		Name: scope.Name, Version: scope.Version, Active: scope.DeactivatedAt == nil, RegistryCreatedAt: &scope.CreatedAt}
+}
+
 func (s *artifactReferenceGraphQLTestStore) ResolveResourceReference(_ context.Context, query store.ResourceReferenceQuery) (uuid.UUID, error) {
 	s.lastQuery = query
 	if s.referenceErr != nil {
@@ -103,7 +150,10 @@ func mountMCPGraphQLTestHandlerWithRegistryAndSink(t *testing.T, s store.Store, 
 func withGraphQLTestOwner(t *testing.T, s store.Store, next http.HandlerFunc) http.HandlerFunc {
 	t.Helper()
 	accountID := uuid.New()
-	if fixture, ok := s.(*workspaceTestStore); ok {
+	switch fixture := s.(type) {
+	case *workspaceTestStore:
+		accountID = fixture.accountID
+	case *artifactReferenceGraphQLTestStore:
 		accountID = fixture.accountID
 	}
 	workspaceID := uuid.New()
@@ -1004,9 +1054,6 @@ func TestArtifact_ResolvesHumanReferenceToEngineScope(t *testing.T) {
 	if artifact["id"] != artifactID.String() || artifact["name"] != "support" || artifact["kind"] != "sdk" {
 		t.Fatalf("unexpected artifact: %#v", artifact)
 	}
-	if s.lastQuery.ArtifactKind != "sdk" {
-		t.Fatalf("artifact lookup kind = %q, want sdk", s.lastQuery.ArtifactKind)
-	}
 }
 
 func TestArtifactServices_UsesOnePermissionScopedArtifactLookup(t *testing.T) {
@@ -1026,9 +1073,6 @@ func TestArtifactServices_UsesOnePermissionScopedArtifactLookup(t *testing.T) {
 	services := data["artifactServices"].([]any)
 	if len(services) != 1 || services[0].(map[string]any)["service_slug"] != "github" {
 		t.Fatalf("unexpected artifact services: %#v", services)
-	}
-	if s.lastQuery.ArtifactKind != "mcp" {
-		t.Fatalf("artifact services lookup kind = %q, want mcp", s.lastQuery.ArtifactKind)
 	}
 }
 

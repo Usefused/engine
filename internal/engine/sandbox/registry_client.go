@@ -72,6 +72,7 @@ type ServiceVersionRevision struct {
 	ServiceVersionID uuid.UUID `json:"service_version_id"`
 	Revision         int       `json:"revision"`
 	SourceHash       string    `json:"source_hash"`
+	IsPublic         bool      `json:"is_public"`
 }
 
 type ServiceVersionAuthConfigs struct {

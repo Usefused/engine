@@ -67,7 +67,11 @@ func (c *HTTPRegistryClient) fetchOwnedArtifactsPage(ctx context.Context, offset
 		sdks(limit: $limit, offset: $offset, target_type: "sdk", latest_only: true) {
 			items {
 				id name description version target_type target_language readme created_at
-				detailed_selections { service_id service_version_id endpoint_ids webhook_ids select_all }
+					detailed_selections {
+						service_id service_version_id endpoint_ids webhook_ids select_all webhook_select_all
+						operation_names webhook_names auth_type auth_name connect_scopes
+						injections { location name value mode }
+					}
 			}
 			total
 		}
@@ -96,7 +100,7 @@ func (c *HTTPRegistryClient) fetchOwnedArtifactsPage(ctx context.Context, offset
 		return ownedArtifactsPage{}, err
 	}
 	if len(decoded.Errors) > 0 {
-		return ownedArtifactsPage{}, fmt.Errorf("FetchOwnedArtifactSnapshots: graphql error: %s", decoded.Errors[0].Message)
+		return ownedArtifactsPage{}, fmt.Errorf("FetchOwnedArtifactSnapshots: Registry contract mismatch: %s", decoded.Errors[0].Message)
 	}
 	return decoded.Data.SDKs, nil
 }

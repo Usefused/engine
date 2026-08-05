@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -151,7 +152,22 @@ func preflightStoredArtifactPlan(ctx context.Context, s store.Store, actor acces
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "artifact owner is unavailable"}
 	}
 	owner := artifactOwner{subjectID: plan.OwnerSubjectID, teamID: plan.OwnerTeamID}
-	return preflightArtifactOwnership(ctx, s, actor, owner, existingArtifactID(current), plan.RequiredPermissions)
+	return preflightArtifactOwnership(ctx, s, actor, owner, plannedArtifactID(plan, current), plan.RequiredPermissions)
+}
+
+func plannedArtifactID(plan *store.ConfigPlan, current *store.ConfigState) *uuid.UUID {
+	if id := existingArtifactID(current); id != nil {
+		return id
+	}
+	var payload struct {
+		ArtifactID uuid.UUID `json:"artifact_id"`
+	}
+	if plan == nil || json.Unmarshal(plan.ResolvedPayload, &payload) != nil || payload.ArtifactID == uuid.Nil {
+		return nil
+	}
+	// Restored definitions have no config state yet, so the plan payload is the
+	// authorization snapshot that carries their stable Registry identity.
+	return &payload.ArtifactID
 }
 
 func existingArtifactID(current *store.ConfigState) *uuid.UUID {

@@ -79,9 +79,67 @@ func TestArtifactResolvedPayloadHasNoTarget(t *testing.T) {
 	}
 }
 
+func TestPlannedArtifactIDUsesRestoredDefinitionWithoutConfigState(t *testing.T) {
+	id := uuid.New()
+	plan := &store.ConfigPlan{ResolvedPayload: json.RawMessage(`{"artifact_id":"` + id.String() + `"}`)}
+	got := plannedArtifactID(plan, nil)
+	if got == nil || *got != id {
+		t.Fatalf("planned artifact id = %v, want %s", got, id)
+	}
+}
+
+func TestArtifactPermissionStateTreatsRestoredDefinitionAsExisting(t *testing.T) {
+	id := uuid.New()
+	state := artifactPermissionState(nil, id)
+	if state == nil || state.LatestResourceID == nil || *state.LatestResourceID != id {
+		t.Fatalf("permission state did not retain restored identity: %+v", state)
+	}
+}
+
+func TestSDKNoOpSummaryHasNoUpdateOrOperationAdditions(t *testing.T) {
+	service := sdkServiceSummary("Jira", sdkConfigServiceDoc{Version: "1.0.0", Operations: []string{"createIssue", "getCurrentUser"}}, []string{"getCurrentUser", "createIssue"})
+	summary := sdkPlanSummary(false, false, []map[string]any{service})
+	if summary["create_sdk"] != false || summary["update_sdk"] != false {
+		t.Fatalf("unexpected no-op summary: %+v", summary)
+	}
+	if added := service["operations_added"].([]string); len(added) != 0 {
+		t.Fatalf("unchanged operations were reported as additions: %+v", service)
+	}
+}
+
+func TestExecuteSDKConfigApplyNoopDoesNotCallRegistryOrRotateToken(t *testing.T) {
+	artifactID, planID, accountID := uuid.New(), uuid.New(), uuid.New()
+	payload, err := json.Marshal(artifactResolvedPayload{ArtifactID: artifactID, Noop: true, BucketID: uuid.New()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &store.ConfigState{ConfigKey: "sdk:jira:1.0.0", ConfigType: store.ConfigTypeSDK,
+		DesiredState: json.RawMessage(`{"name":"jira"}`), ManagedResources: json.RawMessage(`{"keep":true}`), LatestResourceID: &artifactID}
+	configStore := &mockConfigStore{state: state, plan: &store.ConfigPlan{
+		ID: planID, Revision: 1, ConfigKey: state.ConfigKey, ConfigType: store.ConfigTypeSDK,
+		SourceHash: "same", Status: store.ConfigPlanStatusPending, DesiredState: state.DesiredState, ResolvedPayload: payload,
+	}}
+	proxy := &recordingForwarder{}
+	result, err := executeSDKConfigApply(context.Background(), configStore, &workspaceTestStore{}, proxy, &mockRegistryClient{}, sdkApplyCall{
+		accountID: accountID, planID: planID, planRevision: 1, sourceHash: "same",
+	})
+	if err != nil {
+		t.Fatalf("no-op apply: %v", err)
+	}
+	if proxy.forwardCalled || proxy.forwardAndInspectCalled {
+		t.Fatal("no-op apply contacted Registry generation")
+	}
+	if configStore.artifactApply != nil || result.ExecutionToken != "" {
+		t.Fatalf("no-op apply changed runtime scope or token: apply=%+v token=%q", configStore.artifactApply, result.ExecutionToken)
+	}
+	if !configStore.markApplied || result.ArtifactID != artifactID || result.Status != models.SDKGenerationStatusComplete {
+		t.Fatalf("no-op apply did not finalize the plan: result=%+v applied=%v", result, configStore.markApplied)
+	}
+}
+
 func resolvedDefaultBucketPayload(t *testing.T, request GenerateSDKRequest) json.RawMessage {
 	t.Helper()
-	payload, err := json.Marshal(resolvedSDKPayload(request, workspaceTestBucketID("default")))
+	payload, err := json.Marshal(resolvedSDKPayload(request, workspaceTestBucketID("default"), uuid.Nil, false))
 	if err != nil {
 		t.Fatalf("marshal resolved SDK payload: %v", err)
 	}
@@ -591,7 +649,7 @@ func TestExecuteSDKConfigApplyRejectsSameNameBucketReplacementBeforeGeneration(t
 	payload, err := json.Marshal(resolvedSDKPayload(GenerateSDKRequest{
 		Selections:       []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID}},
 		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"}},
-	}, authorizedBucketID))
+	}, authorizedBucketID, uuid.Nil, false))
 	if err != nil {
 		t.Fatalf("marshal resolved payload: %v", err)
 	}
@@ -646,7 +704,7 @@ func TestExecuteSDKConfigApplyPersistsEngineScopeBeforeMarkingApplied(t *testing
 	registry := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
 		serviceID.String() + "|1.0": {ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"},
 	}}
-	proxy := &recordingForwarder{body: `{"artifact_id":"` + artifactID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + endpointID.String() + `"]}]}`}
+	proxy := &recordingForwarder{body: `{"artifact_id":"` + artifactID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + endpointID.String() + `"],"operation_names":["listLogEvents"]}]}`}
 
 	result, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
 		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
@@ -1263,6 +1321,24 @@ func TestValidateGeneratedScopeSelectionsRejectsDuplicateAndExplicitIDDrift(t *t
 				t.Fatal("expected returned scope to be rejected")
 			}
 		})
+	}
+}
+
+func TestValidateGeneratedScopeSelectionsPreservesPortablePolicy(t *testing.T) {
+	serviceID, versionID, endpointID := uuid.New(), uuid.New(), uuid.New()
+	planned := []models.SDKSelection{{
+		ServiceID: serviceID, ServiceVersionID: versionID, OperationNames: []string{"getIssue"},
+		AuthType: "oauth2", AuthName: "jiraOAuth", ConnectScopes: []string{"read:jira-work"},
+		Injections: []models.SDKInjectionConfig{{Location: "header", Name: "X-Tenant", Value: "$connection.tenant"}},
+	}}
+	returned := append([]models.SDKSelection(nil), planned...)
+	returned[0].EndpointIDs = []uuid.UUID{endpointID}
+	if err := validateGeneratedScopeSelections(planned, returned); err != nil {
+		t.Fatalf("matching portable policy was rejected: %v", err)
+	}
+	returned[0].AuthName = "different"
+	if err := validateGeneratedScopeSelections(planned, returned); err == nil {
+		t.Fatal("Registry auth-policy drift was accepted")
 	}
 }
 

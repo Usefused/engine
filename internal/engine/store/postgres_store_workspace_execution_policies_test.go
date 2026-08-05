@@ -86,6 +86,20 @@ func TestPostgresStore_WorkspaceExecutionPolicyOverride(t *testing.T) {
 	if versionOverride.RateLimit != nil {
 		t.Fatalf("version-tier row should not inherit the service-default's rate_limit, got %#v", versionOverride.RateLimit)
 	}
+	exactStore, ok := base.(WorkspaceExecutionPolicyExactBatchStore)
+	if !ok {
+		t.Fatal("store does not implement exact workspace execution policy batches")
+	}
+	serviceRef := WorkspaceExecutionPolicyRef{ServiceID: serviceID}
+	versionRef := WorkspaceExecutionPolicyRef{ServiceID: serviceID, ServiceVersionID: versionID}
+	missingRef := WorkspaceExecutionPolicyRef{ServiceID: serviceID, ServiceVersionID: otherVersionID}
+	exact, err := exactStore.GetWorkspaceExecutionPolicyOverrides(ctx, []WorkspaceExecutionPolicyRef{serviceRef, versionRef, missingRef})
+	if err != nil {
+		t.Fatalf("get exact override batch: %v", err)
+	}
+	if exact[serviceRef] == nil || exact[versionRef] == nil || exact[missingRef] != nil {
+		t.Fatalf("exact override tiers = %#v", exact)
+	}
 
 	// The version with its own row now resolves to the version-tier row, not
 	// the service default.
