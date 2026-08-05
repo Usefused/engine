@@ -68,7 +68,7 @@ func (c *HTTPRegistryClient) fetchOwnedArtifactsPage(ctx context.Context, offset
 			items {
 				id name description version target_type target_language readme created_at
 					detailed_selections {
-						service_id service_version_id endpoint_ids webhook_ids select_all webhook_select_all
+						service_id service_version_id definition_schema_version endpoint_ids webhook_ids select_all webhook_select_all
 						operation_names webhook_names auth_type auth_name connect_scopes
 						injections { location name value mode }
 					}
@@ -129,6 +129,30 @@ func ReconcileOwnedArtifacts(ctx context.Context, destination store.ArtifactSnap
 		span.SetAttributes(attribute.String("outcome", "persist_failed"))
 		return 0, err
 	}
-	span.SetAttributes(attribute.String("outcome", "success"), attribute.Int("artifact_count", len(snapshots)))
+	span.SetAttributes(
+		attribute.String("outcome", "success"),
+		attribute.Int("artifact_count", len(snapshots)),
+		attribute.Int("artifact_definitions_requiring_refresh", artifactDefinitionsRequiringRefresh(snapshots)),
+	)
 	return len(snapshots), nil
+}
+
+func artifactDefinitionsRequiringRefresh(snapshots []store.ArtifactSnapshot) int {
+	count := 0
+	for _, snapshot := range snapshots {
+		var selections []models.SDKSelection
+		if json.Unmarshal(snapshot.Selections, &selections) != nil || sdkSelectionsRequireRefresh(selections) {
+			count++
+		}
+	}
+	return count
+}
+
+func sdkSelectionsRequireRefresh(selections []models.SDKSelection) bool {
+	for _, selection := range selections {
+		if selection.DefinitionSchemaVersion < models.SDKDefinitionSchemaVersion {
+			return true
+		}
+	}
+	return false
 }

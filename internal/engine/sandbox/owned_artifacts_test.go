@@ -74,7 +74,7 @@ func TestFetchOwnedArtifactSnapshotsUsesCurrentPortableSelectionContract(t *test
 			if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
 				t.Fatalf("decode request: %v", err)
 			}
-			body := `{"data":{"sdks":{"total":1,"items":[{"id":"` + artifactID.String() + `","name":"jira","version":"1.0.0","target_type":"sdk","target_language":"typescript","created_at":"2026-08-05T00:00:00Z","detailed_selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + versionID.String() + `","endpoint_ids":["` + uuid.New().String() + `"],"operation_names":["getIssue"],"auth_type":"oauth2","auth_name":"jiraOAuth","connect_scopes":["read:jira-work"],"injections":[{"location":"header","name":"X-Tenant","value":"$connection.tenant","mode":"replace"}]}] }]}}}`
+			body := `{"data":{"sdks":{"total":1,"items":[{"id":"` + artifactID.String() + `","name":"jira","version":"1.0.0","target_type":"sdk","target_language":"typescript","created_at":"2026-08-05T00:00:00Z","detailed_selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + versionID.String() + `","definition_schema_version":1,"endpoint_ids":["` + uuid.New().String() + `"],"operation_names":["getIssue"],"auth_type":"oauth2","auth_name":"jiraOAuth","connect_scopes":["read:jira-work"],"injections":[{"location":"header","name":"X-Tenant","value":"$connection.tenant","mode":"replace"}]}] }]}}}`
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 		})}}
 
@@ -83,7 +83,7 @@ func TestFetchOwnedArtifactSnapshotsUsesCurrentPortableSelectionContract(t *test
 		t.Fatalf("FetchOwnedArtifactSnapshots = %#v, %v", snapshots, err)
 	}
 	assertOwnedArtifactCount(t, len(snapshots), 1)
-	if !strings.Contains(requestBody.Query, "injections { location name value mode }") {
+	if !strings.Contains(requestBody.Query, "definition_schema_version") || !strings.Contains(requestBody.Query, "injections { location name value mode }") {
 		t.Fatalf("portable query omitted injections: %s", requestBody.Query)
 	}
 	var selections []models.SDKSelection
@@ -92,6 +92,9 @@ func TestFetchOwnedArtifactSnapshotsUsesCurrentPortableSelectionContract(t *test
 	}
 	assertOwnedArtifactCount(t, len(selections), 1)
 	selection := selections[0]
+	if selection.DefinitionSchemaVersion != models.SDKDefinitionSchemaVersion {
+		t.Fatalf("definition schema version was lost: %+v", selection)
+	}
 	if selection.AuthName != "jiraOAuth" {
 		t.Fatalf("portable selection metadata was lost: %+v", selection)
 	}
@@ -99,6 +102,15 @@ func TestFetchOwnedArtifactSnapshotsUsesCurrentPortableSelectionContract(t *test
 	assertOwnedArtifactCount(t, len(selection.Injections), 1)
 	if selection.Injections[0].Mode != "replace" {
 		t.Fatalf("portable injection mode was lost: %+v", selection.Injections[0])
+	}
+}
+
+func TestArtifactDefinitionsRequiringRefresh(t *testing.T) {
+	current, _ := json.Marshal([]models.SDKSelection{{DefinitionSchemaVersion: models.SDKDefinitionSchemaVersion}})
+	historical, _ := json.Marshal([]models.SDKSelection{{DefinitionSchemaVersion: 0}})
+	snapshots := []store.ArtifactSnapshot{{Selections: current}, {Selections: historical}, {Selections: json.RawMessage(`{"invalid":`)}}
+	if got := artifactDefinitionsRequiringRefresh(snapshots); got != 2 {
+		t.Fatalf("definitions requiring refresh = %d, want 2", got)
 	}
 }
 
