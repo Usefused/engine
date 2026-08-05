@@ -91,11 +91,7 @@ func (s *postgresStore) GetEffectiveWorkspaceExecutionPolicyOverrides(ctx contex
 	if len(refs) == 0 {
 		return result, nil
 	}
-	serviceIDs := make([]uuid.UUID, len(refs))
-	versionIDs := make([]uuid.UUID, len(refs))
-	for i, ref := range refs {
-		serviceIDs[i], versionIDs[i] = ref.ServiceID, ref.ServiceVersionID
-	}
+	serviceIDs, versionIDs := workspaceExecutionPolicyRefArrays(refs)
 	rows, err := s.db.Query(ctx, `
 		SELECT input.service_id, input.service_version_id,
 		       policy.id, policy.service_id, policy.service_version_id,
@@ -113,12 +109,54 @@ func (s *postgresStore) GetEffectiveWorkspaceExecutionPolicyOverrides(ctx contex
 		return nil, fmt.Errorf("GetEffectiveWorkspaceExecutionPolicyOverrides: query: %w", err)
 	}
 	defer rows.Close()
+	return collectWorkspaceExecutionPolicyOverrides(rows, result)
+}
+
+func (s *postgresStore) GetWorkspaceExecutionPolicyOverrides(ctx context.Context, refs []WorkspaceExecutionPolicyRef) (map[WorkspaceExecutionPolicyRef]*WorkspaceExecutionPolicyOverride, error) {
+	result := make(map[WorkspaceExecutionPolicyRef]*WorkspaceExecutionPolicyOverride, len(refs))
+	if len(refs) == 0 {
+		return result, nil
+	}
+	serviceIDs, versionIDs := workspaceExecutionPolicyRefArrays(refs)
+	rows, err := s.db.Query(ctx, `
+		SELECT input.service_id, input.service_version_id,
+		       policy.id, policy.service_id, policy.service_version_id,
+		       policy.rate_limit, policy.retry_config, policy.pagination,
+		       policy.event_extraction_path, policy.incoming_webhook_config,
+		       policy.base_url, policy.created_at, policy.updated_at
+		FROM unnest($1::uuid[], $2::uuid[]) AS input(service_id, service_version_id)
+		JOIN fused_workspace_execution_policies policy
+		  ON policy.service_id = input.service_id
+		 AND policy.service_version_id IS NOT DISTINCT FROM
+		     NULLIF(input.service_version_id, '00000000-0000-0000-0000-000000000000'::uuid)`, serviceIDs, versionIDs)
+	if err != nil {
+		return nil, fmt.Errorf("GetWorkspaceExecutionPolicyOverrides: query: %w", err)
+	}
+	defer rows.Close()
+	return collectWorkspaceExecutionPolicyOverrides(rows, result)
+}
+
+func workspaceExecutionPolicyRefArrays(refs []WorkspaceExecutionPolicyRef) ([]uuid.UUID, []uuid.UUID) {
+	serviceIDs := make([]uuid.UUID, len(refs))
+	versionIDs := make([]uuid.UUID, len(refs))
+	for i, ref := range refs {
+		serviceIDs[i], versionIDs[i] = ref.ServiceID, ref.ServiceVersionID
+	}
+	return serviceIDs, versionIDs
+}
+
+type workspaceExecutionPolicyRows interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+}
+
+func collectWorkspaceExecutionPolicyOverrides(rows workspaceExecutionPolicyRows, result map[WorkspaceExecutionPolicyRef]*WorkspaceExecutionPolicyOverride) (map[WorkspaceExecutionPolicyRef]*WorkspaceExecutionPolicyOverride, error) {
 	for rows.Next() {
 		var ref WorkspaceExecutionPolicyRef
 		var override WorkspaceExecutionPolicyOverride
 		var rateLimit, retryConfig, pagination, incomingWebhookConfig []byte
-		if err := rows.Scan(&ref.ServiceID, &ref.ServiceVersionID,
-			&override.ID, &override.ServiceID, &override.ServiceVersionID,
+		if err := rows.Scan(&ref.ServiceID, &ref.ServiceVersionID, &override.ID, &override.ServiceID, &override.ServiceVersionID,
 			&rateLimit, &retryConfig, &pagination, &override.EventExtractionPath,
 			&incomingWebhookConfig, &override.BaseURL, &override.CreatedAt, &override.UpdatedAt); err != nil {
 			return nil, err

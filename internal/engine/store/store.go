@@ -284,6 +284,10 @@ type WorkspaceExecutionPolicyBatchStore interface {
 	GetEffectiveWorkspaceExecutionPolicyOverrides(ctx context.Context, refs []WorkspaceExecutionPolicyRef) (map[WorkspaceExecutionPolicyRef]*WorkspaceExecutionPolicyOverride, error)
 }
 
+type WorkspaceExecutionPolicyExactBatchStore interface {
+	GetWorkspaceExecutionPolicyOverrides(ctx context.Context, refs []WorkspaceExecutionPolicyRef) (map[WorkspaceExecutionPolicyRef]*WorkspaceExecutionPolicyOverride, error)
+}
+
 // WorkspaceExecutionPolicyStore is kept separate from Store for the same
 // staged-rollout reason as WorkspaceProfileStore: the consolidated
 // resolution point (and the plan-action wiring that writes overrides) can

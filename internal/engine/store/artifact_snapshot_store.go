@@ -38,6 +38,8 @@ type ArtifactSnapshotStore interface {
 	UpsertArtifactSnapshots(context.Context, []ArtifactSnapshot) error
 	DeleteArtifactSnapshot(context.Context, uuid.UUID, uuid.UUID) error
 	GetArtifactSnapshot(context.Context, uuid.UUID, uuid.UUID) (*ArtifactSnapshot, error)
+	GetArtifactSnapshotByName(context.Context, uuid.UUID, string, string) (*ArtifactSnapshot, error)
+	GetArtifactSnapshotByIdentity(context.Context, uuid.UUID, string, string, string) (*ArtifactSnapshot, error)
 	ListArtifactSnapshots(context.Context, uuid.UUID, string, int, int) ([]ArtifactSnapshot, int, error)
 }
 
@@ -93,6 +95,39 @@ func (s *postgresStore) UpsertArtifactSnapshots(ctx context.Context, snapshots [
 func (s *postgresStore) GetArtifactSnapshot(ctx context.Context, accountID, artifactID uuid.UUID) (*ArtifactSnapshot, error) {
 	row := s.db.QueryRow(ctx, artifactSnapshotSelect+`
 		WHERE snapshot.account_id = $1 AND snapshot.artifact_id = $2`, accountID, artifactID)
+	snapshot, err := scanArtifactSnapshot(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrArtifactSnapshotNotFound
+	}
+	return snapshot, err
+}
+
+func (s *postgresStore) GetArtifactSnapshotByIdentity(ctx context.Context, accountID uuid.UUID, kind, name, version string) (*ArtifactSnapshot, error) {
+	kind, valid := normalizeArtifactKind(kind)
+	if !valid {
+		return nil, ErrArtifactSnapshotNotFound
+	}
+	row := s.db.QueryRow(ctx, artifactSnapshotSelect+`
+		WHERE snapshot.account_id = $1 AND snapshot.kind = $2
+		  AND snapshot.name = $3 AND snapshot.version = $4
+		ORDER BY snapshot.registry_created_at DESC NULLS LAST, snapshot.artifact_id
+		LIMIT 1`, accountID, kind, name, version)
+	snapshot, err := scanArtifactSnapshot(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrArtifactSnapshotNotFound
+	}
+	return snapshot, err
+}
+
+func (s *postgresStore) GetArtifactSnapshotByName(ctx context.Context, accountID uuid.UUID, kind, name string) (*ArtifactSnapshot, error) {
+	kind, valid := normalizeArtifactKind(kind)
+	if !valid {
+		return nil, ErrArtifactSnapshotNotFound
+	}
+	row := s.db.QueryRow(ctx, artifactSnapshotSelect+`
+		WHERE snapshot.account_id = $1 AND snapshot.kind = $2 AND snapshot.name = $3
+		ORDER BY snapshot.registry_created_at DESC NULLS LAST, snapshot.artifact_id
+		LIMIT 1`, accountID, kind, name)
 	snapshot, err := scanArtifactSnapshot(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrArtifactSnapshotNotFound

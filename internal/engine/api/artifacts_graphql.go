@@ -181,16 +181,11 @@ func artifactGraphQLField(s store.Store) *graphql.Field {
 			"kind":      &graphql.ArgumentConfig{Type: graphql.String, DefaultValue: ""},
 		},
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			value := strings.TrimSpace(fmt.Sprint(p.Args["reference"]))
-			artifactID, err := resolveVisibleResourceReference(p, s, store.ReferenceArtifact, value, referenceArtifactKind(p, store.ReferenceArtifact))
+			snapshot, err := resolveArtifactSnapshotReference(p, s)
 			if err != nil {
 				return nil, err
 			}
-			scope, err := s.GetArtifactScope(p.Context, artifactID)
-			if err != nil {
-				return nil, errors.New("artifact was not found")
-			}
-			return artifactSummaryFields(*scope), nil
+			return artifactSnapshotFields(*snapshot), nil
 		},
 	}
 }
@@ -207,12 +202,11 @@ func artifactServicesGraphQLField(s store.Store) *graphql.Field {
 			if !ok {
 				return nil, errors.New("artifact service summaries are unavailable")
 			}
-			value := strings.TrimSpace(fmt.Sprint(p.Args["reference"]))
-			artifactID, err := resolveVisibleResourceReference(p, s, store.ReferenceArtifact, value, referenceArtifactKind(p, store.ReferenceArtifact))
+			snapshot, err := resolveArtifactSnapshotReference(p, s)
 			if err != nil {
 				return nil, err
 			}
-			services, err := repository.ListArtifactServiceSummaries(p.Context, artifactID)
+			services, err := repository.ListArtifactSnapshotServiceSummaries(p.Context, snapshot.AccountID, snapshot.ArtifactID)
 			if err != nil {
 				return nil, err
 			}
@@ -223,6 +217,36 @@ func artifactServicesGraphQLField(s store.Store) *graphql.Field {
 			return items, nil
 		},
 	}
+}
+
+func resolveArtifactSnapshotReference(p graphql.ResolveParams, s store.Store) (*store.ArtifactSnapshot, error) {
+	repository, ok := s.(store.ArtifactSnapshotStore)
+	if !ok {
+		return nil, errors.New("artifact snapshots are unavailable")
+	}
+	actor, err := actorFromContext(p.Context)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = graphQLAuthorizedScope(p.Context, accesscontrol.PermissionArtifactRead, accesscontrol.ResourceArtifact); err != nil {
+		return nil, err
+	}
+	reference := strings.TrimSpace(fmt.Sprint(p.Args["reference"]))
+	kind := referenceArtifactKind(p, store.ReferenceArtifact)
+	if id, parseErr := uuid.Parse(reference); parseErr == nil {
+		return artifactSnapshotOrNotFound(repository.GetArtifactSnapshot(p.Context, actor.accountID, id))
+	}
+	if split := strings.LastIndex(reference, "@"); split > 0 {
+		return artifactSnapshotOrNotFound(repository.GetArtifactSnapshotByIdentity(p.Context, actor.accountID, kind, reference[:split], reference[split+1:]))
+	}
+	return artifactSnapshotOrNotFound(repository.GetArtifactSnapshotByName(p.Context, actor.accountID, kind, reference))
+}
+
+func artifactSnapshotOrNotFound(snapshot *store.ArtifactSnapshot, err error) (*store.ArtifactSnapshot, error) {
+	if err != nil {
+		return nil, errors.New("artifact was not found")
+	}
+	return snapshot, nil
 }
 
 func artifactServiceSummaryFields(service store.ArtifactServiceSummary) map[string]interface{} {

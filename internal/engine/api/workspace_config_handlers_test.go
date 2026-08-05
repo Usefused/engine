@@ -1430,7 +1430,7 @@ func TestWorkspaceConfigPlanHandler_PlansVersionPublicAndExecutionPolicyChange(t
 			svcID: {ServiceID: svcID, IsOwner: true, IsPublic: true},
 		},
 		contractRevisions: map[string]sandbox.ServiceVersionRevision{
-			svcID.String() + "|2026-07-01": {ServiceID: svcID, Version: "2026-07-01", ServiceVersionID: versionID, Revision: 1},
+			svcID.String() + "|2026-07-01": {ServiceID: svcID, Version: "2026-07-01", ServiceVersionID: versionID, Revision: 1, IsPublic: true},
 		},
 	}
 	s := &workspaceTestStore{accountID: uuid.New()}
@@ -3002,6 +3002,57 @@ func TestPlanWorkspaceChanges_WillArchiveOnlyForOwned(t *testing.T) {
 	}
 	if archiveActions[nonOwnedID] {
 		t.Errorf("non-owned service %s should have WillArchive=false, got true", nonOwnedID)
+	}
+}
+
+func TestDesiredVersionVisibilityActionsUsesRegistryCurrentState(t *testing.T) {
+	serviceID := uuid.New()
+	private := false
+	desired := workspaceDesiredState{Services: map[uuid.UUID]workspaceDesiredService{serviceID: {
+		ServiceID: serviceID, VersionPolicies: []workspaceDesiredVersionPolicy{{Version: "1.0.0", Public: &private, CurrentPublic: &private}},
+	}}}
+	if actions := desiredVersionVisibilityActions(desired); len(actions) != 0 {
+		t.Fatalf("unchanged private version produced actions: %+v", actions)
+	}
+	public := true
+	policy := desired.Services[serviceID]
+	policy.VersionPolicies[0].CurrentPublic = &public
+	desired.Services[serviceID] = policy
+	if actions := desiredVersionVisibilityActions(desired); len(actions) != 1 || actions[0].Type != "set_service_version_private" {
+		t.Fatalf("version visibility drift was not planned: %+v", actions)
+	}
+}
+
+func TestRejectConfiguredRegistryVisibility(t *testing.T) {
+	public := true
+	err := rejectConfiguredRegistryVisibility(map[string]workspaceConfigService{
+		"jira": {Versions: []workspaceConfigServiceVersion{{Version: "1.0.0", RegistryPublic: &public}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "registry_public is read-only") {
+		t.Fatalf("expected read-only Registry visibility error, got %v", err)
+	}
+}
+
+func TestReconcileWorkspaceExecutionPolicyActionsUsesExactCurrentTier(t *testing.T) {
+	serviceID := uuid.New()
+	policy := &workspaceExecutionPolicy{Retry: &retryConfig{Strategy: "exponential_backoff", MaxRetries: 2, BackoffMs: 250}}
+	desired := workspaceDesiredState{Services: map[uuid.UUID]workspaceDesiredService{serviceID: {ServiceID: serviceID, ExecutionPolicy: policy}}}
+	expected := workspaceExecutionPolicyOverride(serviceID, nil, policy)
+	ref := store.WorkspaceExecutionPolicyRef{ServiceID: serviceID}
+	s := &workspaceTestStore{exactExecutionPolicies: map[store.WorkspaceExecutionPolicyRef]*store.WorkspaceExecutionPolicyOverride{ref: &expected}}
+	summary := workspacePlanSummary{Actions: desiredExecutionPolicyLocalActions(desired)}
+	if err := reconcileWorkspaceExecutionPolicyPlanActions(context.Background(), s, desired, &summary); err != nil {
+		t.Fatalf("reconcile exact policy: %v", err)
+	}
+	if len(summary.Actions) != 0 {
+		t.Fatalf("unchanged exact policy produced actions: %+v", summary.Actions)
+	}
+	drifted := expected
+	drifted.RetryConfig = &fusedobject.RetryConfig{Strategy: "fixed", MaxRetries: 1, BackoffMs: 10}
+	s.exactExecutionPolicies[ref] = &drifted
+	summary.Actions = desiredExecutionPolicyLocalActions(desired)
+	if err := reconcileWorkspaceExecutionPolicyPlanActions(context.Background(), s, desired, &summary); err != nil || len(summary.Actions) != 1 {
+		t.Fatalf("policy drift was not retained: actions=%+v err=%v", summary.Actions, err)
 	}
 }
 

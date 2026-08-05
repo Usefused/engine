@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -118,6 +119,9 @@ type workspaceConfigServiceVersion struct {
 	// resolved value at apply time so apply never needs a fresh registry
 	// lookup that could drift under a reused version label.
 	ServiceVersionID string `json:"service_version_id,omitempty"`
+	// RegistryPublic is attached by Engine from the same batched version
+	// revision lookup that resolves ServiceVersionID. Source configs cannot set it.
+	RegistryPublic *bool `json:"registry_public,omitempty"`
 	// Public controls Registry-level visibility for just this version via
 	// UpdateServiceVersionPublicStatus (owner only). Distinct from
 	// ExecutionPolicy.Public, which controls whether this version's
@@ -311,6 +315,7 @@ type workspaceDesiredVersionPolicy struct {
 	VersionID       uuid.UUID
 	Public          *bool
 	ExecutionPolicy *workspaceExecutionPolicy
+	CurrentPublic   *bool
 }
 
 // workspaceDesiredConnectionProfile is the normalized, version-pinned form of
@@ -562,10 +567,14 @@ func createWorkspaceConfigPlan(ctx context.Context, configStore store.ConfigRepo
 	if err != nil {
 		return workspaceConfigPlanResult{}, err
 	}
-	return persistWorkspaceConfigPlan(ctx, configStore, accountID, req, configKey, resolvedConfig, desired, currentState, summary)
+	// Source hashes include formatting, so they cannot decide semantic
+	// equality. Declaration actions remain visible until their backing systems
+	// expose current state; this prevents a matching file from hiding drift.
+	unchangedDesired := currentState != nil && sameCanonicalArtifactState(currentState.DesiredState, resolvedConfig)
+	return persistWorkspaceConfigPlan(ctx, configStore, accountID, req, configKey, resolvedConfig, desired, currentState, summary, unchangedDesired)
 }
 
-func persistWorkspaceConfigPlan(ctx context.Context, configStore store.ConfigRepository, accountID uuid.UUID, req ConfigPlanRequest, configKey string, resolvedConfig []byte, desired workspaceDesiredState, currentState *store.ConfigState, summary workspacePlanSummary) (workspaceConfigPlanResult, error) {
+func persistWorkspaceConfigPlan(ctx context.Context, configStore store.ConfigRepository, accountID uuid.UUID, req ConfigPlanRequest, configKey string, resolvedConfig []byte, desired workspaceDesiredState, currentState *store.ConfigState, summary workspacePlanSummary, unchangedDesired bool) (workspaceConfigPlanResult, error) {
 	actionsJSON, _ := json.Marshal(summary.Actions)
 	blockersJSON, _ := json.Marshal(summary.Blockers)
 	warningsJSON, _ := json.Marshal(summary.Warnings)
@@ -582,10 +591,11 @@ func persistWorkspaceConfigPlan(ctx context.Context, configStore store.ConfigRep
 	if err != nil {
 		return workspaceConfigPlanResult{}, configPlanSaveHTTPError(err)
 	}
-	return workspaceConfigPlanResult{
-		plan: plan, summary: summary, requiredCount: requiredCount,
-		notifications: collectWorkspacePlanNotifications(ctx, configStore, workspaceServiceVersionsMap(desired)),
-	}, nil
+	notifications := notificationInbox{}
+	if !unchangedDesired {
+		notifications = collectWorkspacePlanNotifications(ctx, configStore, workspaceServiceVersionsMap(desired))
+	}
+	return workspaceConfigPlanResult{plan: plan, summary: summary, requiredCount: requiredCount, notifications: notifications}, nil
 }
 
 func configPlanSaveHTTPError(err error) workspaceConfigHTTPError {
@@ -1080,6 +1090,9 @@ func resolveWorkspacePlanConfig(
 	if err != nil {
 		return nil, workspaceDesiredState{}, err
 	}
+	if err := rejectConfiguredRegistryVisibility(doc.Services); err != nil {
+		return nil, workspaceDesiredState{}, err
+	}
 	if err := resolveWorkspaceServiceSlugs(ctx, resolver, apiKey, &doc); err != nil {
 		return nil, workspaceDesiredState{}, err
 	}
@@ -1353,6 +1366,7 @@ func resolveWorkspaceServiceVersions(ctx context.Context, resolver any, apiKey s
 		return fmt.Errorf("resolve workspace service versions: %w", err)
 	}
 	versionIDs := workspaceVersionIDMap(revisions)
+	versionVisibility := workspaceVersionVisibilityMap(revisions)
 	latestVersions, err := resolveLatestWorkspaceServiceVersions(ctx, verifier, apiKey, doc.Services)
 	if err != nil {
 		return err
@@ -1365,12 +1379,23 @@ func resolveWorkspaceServiceVersions(ctx context.Context, resolver any, apiKey s
 			if err := attachLatestWorkspaceServiceVersion(key, &svc, latestVersions); err != nil {
 				return err
 			}
-		} else if err := attachResolvedWorkspaceVersions(key, &svc, versionIDs); err != nil {
+		} else if err := attachResolvedWorkspaceVersions(key, &svc, versionIDs, versionVisibility); err != nil {
 			// One or more explicit versions were declared -- resolve each by
 			// exact name instead of substituting the latest.
 			return err
 		}
 		doc.Services[key] = svc
+	}
+	return nil
+}
+
+func rejectConfiguredRegistryVisibility(services map[string]workspaceConfigService) error {
+	for key, service := range services {
+		for _, version := range service.Versions {
+			if version.RegistryPublic != nil {
+				return fmt.Errorf("service %q version registry_public is read-only", key)
+			}
+		}
 	}
 	return nil
 }
@@ -1447,7 +1472,8 @@ func attachLatestWorkspaceServiceVersion(key string, svc *workspaceConfigService
 	}
 	// Replaces Versions outright (there was nothing here to preserve
 	// overrides for -- an empty Versions list can't carry any).
-	svc.Versions = []workspaceConfigServiceVersion{{Version: ref.Version, ServiceVersionID: ref.ServiceVersionID.String()}}
+	public := true
+	svc.Versions = []workspaceConfigServiceVersion{{Version: ref.Version, ServiceVersionID: ref.ServiceVersionID.String(), RegistryPublic: &public}}
 	return nil
 }
 
@@ -1456,7 +1482,7 @@ func attachLatestWorkspaceServiceVersion(key string, svc *workspaceConfigService
 // ConnectionProfiles overrides (workspaceConfigServiceVersionsByName), only
 // overwriting the identity fields (Version/ServiceVersionID) this resolution
 // pass owns.
-func attachResolvedWorkspaceVersions(key string, svc *workspaceConfigService, ids map[uuid.UUID]map[string]uuid.UUID) error {
+func attachResolvedWorkspaceVersions(key string, svc *workspaceConfigService, ids map[uuid.UUID]map[string]uuid.UUID, visibility map[uuid.UUID]map[string]bool) error {
 	serviceID, _ := uuid.Parse(strings.TrimSpace(svc.ServiceID))
 	names := uniqueTrimmedServiceVersionNames(svc.Versions)
 	byName := workspaceConfigServiceVersionsByName(svc.Versions)
@@ -1473,6 +1499,8 @@ func attachResolvedWorkspaceVersions(key string, svc *workspaceConfigService, id
 		entry := byName[version]
 		entry.Version = version
 		entry.ServiceVersionID = versionID.String()
+		currentPublic := visibility[serviceID][version]
+		entry.RegistryPublic = &currentPublic
 		resolved = append(resolved, entry)
 	}
 	svc.Versions = resolved
@@ -1684,7 +1712,7 @@ func normalizeWorkspaceVersionPolicies(items []workspaceConfigServiceVersion, ve
 		version := strings.TrimSpace(item.Version)
 		out = append(out, workspaceDesiredVersionPolicy{
 			Version: version, VersionID: versionIDs[version],
-			Public: item.Public, ExecutionPolicy: item.ExecutionPolicy,
+			Public: item.Public, ExecutionPolicy: item.ExecutionPolicy, CurrentPublic: item.RegistryPublic,
 		})
 	}
 	return out
@@ -2004,6 +2032,9 @@ func buildWorkspacePlanSummary(
 	if err := reconcileWorkspaceProfilePlanActions(ctx, s, desired, &summary); err != nil {
 		return workspacePlanSummary{}, err
 	}
+	if err := reconcileWorkspaceExecutionPolicyPlanActions(ctx, s, desired, &summary); err != nil {
+		return workspacePlanSummary{}, err
+	}
 	// Ambiguous tuples are surfaced as warnings, not blockers: the plan still
 	// contains every other action (including unrelated attach/enable actions
 	// for the same or other services), and this tuple simply has no
@@ -2039,6 +2070,80 @@ func ambiguousConnectionProfileWarnings(desired workspaceDesiredState) []workspa
 // auth_type, so workspaceID alone is enough to build its lookup refs.
 func reconcileWorkspaceProfilePlanActions(ctx context.Context, s store.Store, desired workspaceDesiredState, summary *workspacePlanSummary) error {
 	return suppressPreservedAutomaticProfileActions(ctx, s, desired, summary)
+}
+
+type workspaceExecutionPolicyCandidate struct {
+	Ref      store.WorkspaceExecutionPolicyRef
+	ActionID string
+	Expected store.WorkspaceExecutionPolicyOverride
+	Reset    bool
+}
+
+func reconcileWorkspaceExecutionPolicyPlanActions(ctx context.Context, s store.Store, desired workspaceDesiredState, summary *workspacePlanSummary) error {
+	candidates := workspaceExecutionPolicyCandidates(desired)
+	if len(candidates) == 0 {
+		return nil
+	}
+	repository, ok := s.(store.WorkspaceExecutionPolicyExactBatchStore)
+	if !ok {
+		return errors.New("exact workspace execution policy lookup is unavailable")
+	}
+	refs := make([]store.WorkspaceExecutionPolicyRef, len(candidates))
+	for i := range candidates {
+		refs[i] = candidates[i].Ref
+	}
+	current, err := repository.GetWorkspaceExecutionPolicyOverrides(ctx, refs)
+	if err != nil {
+		return err
+	}
+	suppressed := map[string]struct{}{}
+	for _, candidate := range candidates {
+		if workspaceExecutionPolicyCandidateUnchanged(candidate, current[candidate.Ref]) {
+			suppressed[candidate.ActionID] = struct{}{}
+		}
+	}
+	summary.Actions = workspaceActionsWithoutIDs(summary.Actions, suppressed)
+	return nil
+}
+
+func workspaceExecutionPolicyCandidateUnchanged(candidate workspaceExecutionPolicyCandidate, actual *store.WorkspaceExecutionPolicyOverride) bool {
+	if candidate.Reset {
+		return actual == nil
+	}
+	return actual != nil && sameWorkspaceExecutionPolicy(candidate.Expected, *actual)
+}
+
+func workspaceExecutionPolicyCandidates(desired workspaceDesiredState) []workspaceExecutionPolicyCandidate {
+	var candidates []workspaceExecutionPolicyCandidate
+	for serviceID, service := range desired.Services {
+		if service.ExecutionPolicy != nil {
+			policy := workspaceExecutionPolicyOverride(serviceID, nil, service.ExecutionPolicy)
+			actionType := "set_local_execution_policy"
+			if service.ExecutionPolicy.Reset {
+				actionType = "reset_local_execution_policy"
+			}
+			candidates = append(candidates, workspaceExecutionPolicyCandidate{Ref: store.WorkspaceExecutionPolicyRef{ServiceID: serviceID}, ActionID: workspaceActionID(actionType, serviceID), Expected: policy, Reset: service.ExecutionPolicy.Reset})
+		}
+		for _, version := range service.VersionPolicies {
+			if version.ExecutionPolicy == nil {
+				continue
+			}
+			versionID := version.VersionID
+			policy := workspaceExecutionPolicyOverride(serviceID, &versionID, version.ExecutionPolicy)
+			actionType := "set_local_service_version_execution_policy"
+			if version.ExecutionPolicy.Reset {
+				actionType = "reset_local_service_version_execution_policy"
+			}
+			candidates = append(candidates, workspaceExecutionPolicyCandidate{Ref: store.WorkspaceExecutionPolicyRef{ServiceID: serviceID, ServiceVersionID: versionID}, ActionID: workspaceActionID(actionType, serviceID, version.Version), Expected: policy, Reset: version.ExecutionPolicy.Reset})
+		}
+	}
+	return candidates
+}
+
+func sameWorkspaceExecutionPolicy(expected, actual store.WorkspaceExecutionPolicyOverride) bool {
+	return reflect.DeepEqual(expected.RateLimit, actual.RateLimit) && reflect.DeepEqual(expected.RetryConfig, actual.RetryConfig) &&
+		reflect.DeepEqual(expected.Pagination, actual.Pagination) && reflect.DeepEqual(expected.EventExtractionPath, actual.EventExtractionPath) &&
+		reflect.DeepEqual(expected.IncomingWebhookConfig, actual.IncomingWebhookConfig) && reflect.DeepEqual(expected.BaseURL, actual.BaseURL)
 }
 
 type automaticWorkspaceProfileCandidate struct {
@@ -2375,18 +2480,16 @@ func workspaceVisibilityActionType(isPublic bool) string {
 	return "set_service_private"
 }
 
-// desiredVersionVisibilityActions emits a set_service_version_public/private
-// action for every version_policies entry with Public set. Unlike
-// desiredWorkspaceVisibilityActions, this has no per-version current-state
-// fetch to diff against (the Registry visibility fetch is service-scoped
-// only), so the action is always emitted when declared -- matching
-// desiredExecutionPolicyPublishActions' rationale below, since
-// UpdateServiceVersionPublicStatus is idempotent.
+// desiredVersionVisibilityActions compares version declarations with the
+// batched revision response that already resolved each immutable version ID.
 func desiredVersionVisibilityActions(desired workspaceDesiredState) []workspacePlanAction {
 	var actions []workspacePlanAction
 	for serviceID, svc := range desired.Services {
 		for _, vp := range svc.VersionPolicies {
 			if vp.Public == nil {
+				continue
+			}
+			if vp.CurrentPublic != nil && *vp.CurrentPublic == *vp.Public {
 				continue
 			}
 			actionType := workspaceVersionVisibilityActionType(*vp.Public)
@@ -4661,6 +4764,17 @@ func workspaceVersionIDMap(revisions []sandbox.ServiceVersionRevision) map[uuid.
 		ids[revision.ServiceID][revision.Version] = revision.ServiceVersionID
 	}
 	return ids
+}
+
+func workspaceVersionVisibilityMap(revisions []sandbox.ServiceVersionRevision) map[uuid.UUID]map[string]bool {
+	visibility := map[uuid.UUID]map[string]bool{}
+	for _, revision := range revisions {
+		if visibility[revision.ServiceID] == nil {
+			visibility[revision.ServiceID] = map[string]bool{}
+		}
+		visibility[revision.ServiceID][revision.Version] = revision.IsPublic
+	}
+	return visibility
 }
 
 func removePreviouslyManagedWorkspaceResources(

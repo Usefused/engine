@@ -491,6 +491,7 @@ type ServiceVersionRevision struct {
 	ServiceVersionID uuid.UUID `json:"service_version_id"`
 	Revision         int       `json:"revision"`
 	SourceHash       string    `json:"source_hash"`
+	IsPublic         bool      `json:"is_public"`
 }
 
 type ServiceVersionAuthConfigs struct {
@@ -931,6 +932,7 @@ type SDKInjectionConfig struct {
 	Location string `json:"location"`
 	Name     string `json:"name"`
 	Value    string `json:"value"`
+	Mode     string `json:"mode,omitempty"`
 }
 
 const ArtifactScopeSchemaVersion = 2

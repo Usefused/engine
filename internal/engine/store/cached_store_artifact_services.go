@@ -15,4 +15,12 @@ func (s *cachedStore) ListArtifactServiceSummaries(ctx context.Context, artifact
 	return repository.ListArtifactServiceSummaries(ctx, artifactID)
 }
 
+func (s *cachedStore) ListArtifactSnapshotServiceSummaries(ctx context.Context, accountID, artifactID uuid.UUID) ([]ArtifactServiceSummary, error) {
+	repository, ok := s.Store.(ArtifactServiceRepository)
+	if !ok {
+		return nil, errors.New("store does not support artifact service summaries")
+	}
+	return repository.ListArtifactSnapshotServiceSummaries(ctx, accountID, artifactID)
+}
+
 var _ ArtifactServiceRepository = (*cachedStore)(nil)
