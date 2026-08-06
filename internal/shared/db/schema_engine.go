@@ -574,7 +574,7 @@ func engineSchemaQueries() []string {
 			plan text NOT NULL,
 			heartbeat_required boolean NOT NULL,
 			usage_reporting text NOT NULL,
-			public_service_insights_reporting boolean NOT NULL DEFAULT true,
+			public_service_insights_enabled boolean NOT NULL DEFAULT false,
 			heartbeat_interval_seconds integer NOT NULL CHECK (heartbeat_interval_seconds > 0),
 			heartbeat_stale_after_seconds integer NOT NULL CHECK (heartbeat_stale_after_seconds > 0),
 			refreshed_at timestamptz NOT NULL,
@@ -1364,7 +1364,7 @@ func engineMigrationQueries() []string {
 		ON fused_engine_execution_events(account_id, app_id, started_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_endpoint
 		ON fused_engine_execution_events(app_id, endpoint_name, started_at DESC);`,
-		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS public_service_insights_reporting boolean NOT NULL DEFAULT true;`,
+		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS public_service_insights_enabled boolean NOT NULL DEFAULT false;`,
 		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS entitlement_revision text NOT NULL DEFAULT '';`,
 		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS max_buckets integer NOT NULL DEFAULT -1;`,
 		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS max_sdk_families integer NOT NULL DEFAULT -1;`,

@@ -147,7 +147,7 @@ func runEngine() {
 	}
 	engineWorkers := startEngineWorkers(ctx, engineStore, natsClient, cfg.Engine)
 	engineWorkers.packageLeases = startSDKPackageLeaseRenewal(ctx, engineStore, registryClient)
-	engineWorkers.publicInsights = startPublicServiceInsightReporting(ctx, engineStore, registryClient, entitlement)
+	engineWorkers.publicInsights = startPublicServiceInsightReporting(ctx, engineStore, registryClient)
 	controlAuthenticator := newControlAuthenticator(ctx, engineStore, authorizationRevision)
 	startAuthorizationRevisionPolling(ctx, engineStore, controlAuthenticator)
 	engineWorkers.usageCounter = startEngineUsageCounter(ctx, engineStore, entitlement)
@@ -533,11 +533,7 @@ func startEngineUsageReporting(ctx context.Context, engineStore store.Store, reg
 	return flushWorker
 }
 
-func startPublicServiceInsightReporting(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, entitlement models.RuntimeEntitlement) *worker.PublicInsightWorker {
-	if !entitlement.PublicServiceInsightsReporting {
-		slog.InfoContext(ctx, "Public service insight reporting disabled by Registry entitlement")
-		return nil
-	}
+func startPublicServiceInsightReporting(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient) *worker.PublicInsightWorker {
 	reportStore, ok := engineStore.(worker.PublicInsightStore)
 	if !ok {
 		slog.WarnContext(ctx, "Public service insight store unavailable; reporting disabled")
