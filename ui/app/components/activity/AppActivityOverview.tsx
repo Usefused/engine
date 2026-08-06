@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ComponentType } from "react";
 import { Activity, AlertTriangle, Clock3, Download, FileCode, ServerCrash } from "lucide-react";
-import { api, type ArtifactExecutionAnalytics, type EngineExecutionBreakdown } from "~/lib/api";
-import { artifactActivityIssue, type ArtifactActivityIssue } from "~/lib/artifact-activity-error";
+import { api, type AppExecutionAnalytics, type EngineExecutionBreakdown } from "~/lib/api";
+import { appActivityIssue, type AppActivityIssue } from "~/lib/app-activity-error";
 
 export interface AppActivityService {
   service_id: string;
@@ -9,7 +9,7 @@ export interface AppActivityService {
 }
 
 interface AppActivityOverviewProps {
-  artifactId: string;
+  appId: string;
   downloads: number;
   pendingDriftCount: number;
   services: AppActivityService[];
@@ -24,12 +24,12 @@ function formatLatency(value: number): string {
   return `${(value / 1000).toFixed(2)} s`;
 }
 
-function failureRate(analytics: ArtifactExecutionAnalytics | null): string {
+function failureRate(analytics: AppExecutionAnalytics | null): string {
   if (!analytics?.total_calls) return "0%";
   return `${((analytics.failed_calls / analytics.total_calls) * 100).toFixed(1)}%`;
 }
 
-function usageRows(services: AppActivityService[], analytics: ArtifactExecutionAnalytics | null): ServiceUsageRow[] {
+function usageRows(services: AppActivityService[], analytics: AppExecutionAnalytics | null): ServiceUsageRow[] {
   const usageByService = new Map((analytics?.by_service ?? []).map((item) => [item.key, item]));
   return services.map((service) => {
     const usage = usageByService.get(service.service_id);
@@ -91,24 +91,38 @@ function ServiceUsageTable({ rows }: { rows: ServiceUsageRow[] }) {
   );
 }
 
-export function AppActivityOverview({ artifactId, downloads, pendingDriftCount, services }: AppActivityOverviewProps) {
-  const [analytics, setAnalytics] = useState<ArtifactExecutionAnalytics | null>(null);
-  const [issue, setIssue] = useState<ArtifactActivityIssue | null>(null);
+export function AppActivityOverview({ appId, downloads, pendingDriftCount, services }: AppActivityOverviewProps) {
+	const [analytics, setAnalytics] = useState<AppExecutionAnalytics | null>(null);
+	const [issue, setIssue] = useState<AppActivityIssue | null>(null);
+	const [includeAllVersions, setIncludeAllVersions] = useState(false);
 
   useEffect(() => {
     setIssue(null);
-    api.workspace.getArtifactExecutionAnalytics({ artifactId, transport: "sdk" })
+	api.workspace.getAppExecutionAnalytics({ appId, includeAllVersions, transport: "sdk" })
       .then(setAnalytics)
-      .catch((cause) => setIssue(artifactActivityIssue(cause, "sdk")));
-  }, [artifactId]);
+      .catch((cause) => setIssue(appActivityIssue(cause, "sdk")));
+	}, [appId, includeAllVersions]);
 
   const rows = useMemo(() => usageRows(services, analytics), [analytics, services]);
   const requestValue = analytics ? analytics.total_calls.toLocaleString() : "—";
   const failedValue = analytics ? analytics.failed_calls.toLocaleString() : "—";
   const latencyValue = analytics ? formatLatency(analytics.average_latency_ms) : "—";
 
-  return (
-    <div className="space-y-6">
+	return (
+		<div className="space-y-6">
+			<div className="flex justify-end">
+				<label className="flex items-center gap-2 text-sm text-slate-600">
+					<span>Version</span>
+					<select
+						value={includeAllVersions ? "all" : "current"}
+						onChange={(event) => setIncludeAllVersions(event.target.value === "all")}
+						className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm"
+					>
+						<option value="current">This version</option>
+						<option value="all">All versions</option>
+					</select>
+				</label>
+			</div>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <Metric label="Requests" value={requestValue} detail="Executed with this app" icon={Activity} />
         <Metric label="Failed requests" value={failedValue} detail={`${failureRate(analytics)} failure rate`} icon={ServerCrash} />

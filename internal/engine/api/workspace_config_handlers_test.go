@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
@@ -238,9 +239,11 @@ func TestWorkspaceProfileDetachSkipsRegistryResolution(t *testing.T) {
 // would silently drop it at either hop without ever failing to compile, so
 // this pins the tag names directly.
 func TestWorkspaceExecutionPolicy_PaginationSurvivesJSONRoundTrip(t *testing.T) {
+	timeoutMs := 45000
 	original := workspaceExecutionPolicy{
 		Public:    boolPtrEngineTest(true),
 		RateLimit: &rateLimitConfig{Strategy: "fixed_window", RequestsPerSecond: 10},
+		TimeoutMs: &timeoutMs,
 		Pagination: &paginationConfig{
 			Type: "cursor", RequestParam: "after", ResponsePath: "page.next",
 		},
@@ -260,6 +263,21 @@ func TestWorkspaceExecutionPolicy_PaginationSurvivesJSONRoundTrip(t *testing.T) 
 	}
 	if roundTripped.Pagination == nil || *roundTripped.Pagination != *original.Pagination {
 		t.Fatalf("pagination did not survive round-trip: got %#v, want %#v", roundTripped.Pagination, original.Pagination)
+	}
+	if roundTripped.TimeoutMs == nil || *roundTripped.TimeoutMs != timeoutMs {
+		t.Fatalf("timeout_ms did not survive round-trip: got %v", roundTripped.TimeoutMs)
+	}
+}
+
+func TestValidateWorkspaceConfigDocumentRejectsInvalidExecutionTimeout(t *testing.T) {
+	invalid := 0
+	doc := workspaceConfigDocument{Services: map[string]workspaceConfigService{
+		"payments": {ExecutionPolicy: &workspaceExecutionPolicy{TimeoutMs: &invalid}},
+	}}
+
+	err := validateWorkspaceConfigDocument(doc)
+	if err == nil || !strings.Contains(err.Error(), "timeout_ms") {
+		t.Fatalf("validation error = %v, want timeout_ms error", err)
 	}
 }
 
@@ -677,29 +695,29 @@ func (r *workspaceProfileResolver) FetchEligibleConnectionProfiles(_ context.Con
 // masterKey []byte -- matches the convention already used by
 // workspace_handlers_test.go's dummyMasterKey.
 var testMasterKey = []byte("12345678901234567890123456789012")
-var testArtifactOwnerTeamID = uuid.MustParse("00000000-0000-0000-0000-000000000001")
+var testAppOwnerTeamID = uuid.MustParse("00000000-0000-0000-0000-000000000001")
 
 type mockConfigStore struct {
-	state             *store.ConfigState
-	states            []store.ConfigState
-	plan              *store.ConfigPlan
-	err               error
-	upsertErr         error
-	markErr           error
-	markApplied       bool
-	createdPlan       *store.CreateConfigPlanParams
-	upserted          *store.UpsertConfigStateParams
-	notifications     []store.WorkspaceNotification
-	createdNotes      []store.CreateWorkspaceNotificationParams
-	artifactApply     *store.ApplyArtifactConfigPlanParams
-	artifactApplyErr  error
-	artifactScopeSink func(store.ArtifactScope) error
-	webhookApply      *store.ApplyWebhookConfigPlanParams
-	webhookResult     *store.ApplyWebhookConfigPlanResult
-	webhookErr        error
-	applyLeaseID      uuid.UUID
-	renewLeaseErr     error
-	renewLeaseCalled  chan struct{}
+	state            *store.ConfigState
+	states           []store.ConfigState
+	plan             *store.ConfigPlan
+	err              error
+	upsertErr        error
+	markErr          error
+	markApplied      bool
+	createdPlan      *store.CreateConfigPlanParams
+	upserted         *store.UpsertConfigStateParams
+	notifications    []store.WorkspaceNotification
+	createdNotes     []store.CreateWorkspaceNotificationParams
+	artifactApply    *store.ApplyAppConfigPlanParams
+	artifactApplyErr error
+	appRuntimeSink   func(store.AppRuntime) error
+	webhookApply     *store.ApplyWebhookConfigPlanParams
+	webhookResult    *store.ApplyWebhookConfigPlanResult
+	webhookErr       error
+	applyLeaseID     uuid.UUID
+	renewLeaseErr    error
+	renewLeaseCalled chan struct{}
 }
 
 func (m *mockConfigStore) GetConfigState(ctx context.Context, configKey string) (*store.ConfigState, error) {
@@ -743,7 +761,7 @@ func (m *mockConfigStore) ApplyConfigPlan(ctx context.Context, params store.Appl
 	return state, nil
 }
 
-func (m *mockConfigStore) ApplyArtifactConfigPlan(ctx context.Context, params store.ApplyArtifactConfigPlanParams) (*store.ApplyArtifactConfigPlanResult, error) {
+func (m *mockConfigStore) ApplyAppConfigPlan(ctx context.Context, params store.ApplyAppConfigPlanParams) (*store.ApplyAppConfigPlanResult, error) {
 	m.artifactApply = &params
 	if m.artifactApplyErr != nil {
 		return nil, m.artifactApplyErr
@@ -752,13 +770,16 @@ func (m *mockConfigStore) ApplyArtifactConfigPlan(ctx context.Context, params st
 	if err != nil {
 		return nil, err
 	}
-	if m.artifactScopeSink != nil {
-		if err := m.artifactScopeSink(params.Scope); err != nil {
+	if m.appRuntimeSink != nil {
+		if err := m.appRuntimeSink(params.Scope); err != nil {
 			return nil, err
 		}
 	}
 	created := m.state == nil || m.state.LatestResourceID == nil
-	return &store.ApplyArtifactConfigPlanResult{State: state, ScopeCreated: created}, nil
+	return &store.ApplyAppConfigPlanResult{
+		State: state, AppFamilyID: uuid.New(), AppID: params.Scope.AppID,
+		VersionCreated: created, TokenCreated: created,
+	}, nil
 }
 
 func (m *mockConfigStore) ApplyWebhookConfigPlan(ctx context.Context, params store.ApplyWebhookConfigPlanParams) (*store.ApplyWebhookConfigPlanResult, error) {
@@ -811,11 +832,11 @@ func (m *mockConfigStore) GetConfigPlan(ctx context.Context, planID uuid.UUID) (
 	}
 	if m.plan != nil && m.plan.ConfigType != store.ConfigTypeWorkspace {
 		if m.plan.OwnerTeamID == nil {
-			owner := testArtifactOwnerTeamID
+			owner := testAppOwnerTeamID
 			m.plan.OwnerTeamID = &owner
 		}
 		if len(m.plan.RequiredPermissions) == 0 {
-			m.plan.RequiredPermissions = json.RawMessage(`[{"permission":"artifact.read","resource_type":"artifact","resource_id":"00000000-0000-0000-0000-000000000002"}]`)
+			m.plan.RequiredPermissions = json.RawMessage(`[{"permission":"app.read","resource_type":"app","resource_id":"00000000-0000-0000-0000-000000000002"}]`)
 		}
 	}
 	return m.plan, m.err
@@ -1489,7 +1510,7 @@ func hasWorkspaceAction(actions []workspacePlanAction, actionType, serviceID str
 
 func TestWorkspaceConfigPlanHandler_BlocksRemovingServiceUsedBySDK(t *testing.T) {
 	svcID := uuid.New()
-	artifactID := uuid.New()
+	appID := uuid.New()
 	svcVersionID := uuid.New()
 	s := &workspaceTestStore{
 		accountID:   uuid.New(),
@@ -1509,7 +1530,7 @@ func TestWorkspaceConfigPlanHandler_BlocksRemovingServiceUsedBySDK(t *testing.T)
 		states: []store.ConfigState{{
 			ConfigKey:        "sdk:security",
 			ConfigType:       store.ConfigTypeSDK,
-			LatestResourceID: &artifactID,
+			LatestResourceID: &appID,
 		}},
 	}
 
@@ -1544,10 +1565,10 @@ func TestWorkspaceConfigPlanHandler_BlocksRemovingServiceUsedBySDK(t *testing.T)
 	}
 }
 
-func TestWorkspaceConfigPlanHandler_ReadsArtifactScopesInOneBatch(t *testing.T) {
+func TestWorkspaceConfigPlanHandler_ReadsAppRuntimesInOneBatch(t *testing.T) {
 	svcID := uuid.New()
-	firstArtifactID := uuid.New()
-	secondArtifactID := uuid.New()
+	firstAppID := uuid.New()
+	secondAppID := uuid.New()
 	svcVersionID := uuid.New()
 	selection := []byte(`[{"service_id":"` + svcID.String() + `","service_version_id":"` + svcVersionID.String() + `"}]`)
 	s := &workspaceTestStore{
@@ -1556,9 +1577,9 @@ func TestWorkspaceConfigPlanHandler_ReadsArtifactScopesInOneBatch(t *testing.T) 
 		workspaceServices: []store.WorkspaceService{
 			{ServiceID: svcID, Version: "2026-07-01"},
 		},
-		mockScopes: map[uuid.UUID]*store.ArtifactScope{
-			firstArtifactID:  {ArtifactID: firstArtifactID, Selections: selection},
-			secondArtifactID: {ArtifactID: secondArtifactID, Selections: selection},
+		mockScopes: map[uuid.UUID]*store.AppRuntime{
+			firstAppID:  {AppID: firstAppID, Selections: selection},
+			secondAppID: {AppID: secondAppID, Selections: selection},
 		},
 	}
 	managed, _ := json.Marshal(workspaceManagedResources{Services: []workspaceManagedService{{
@@ -1568,8 +1589,8 @@ func TestWorkspaceConfigPlanHandler_ReadsArtifactScopesInOneBatch(t *testing.T) 
 	configStore := &mockConfigStore{
 		state: &store.ConfigState{Generation: 1, ManagedResources: managed},
 		states: []store.ConfigState{
-			{ConfigKey: "sdk:security", ConfigType: store.ConfigTypeSDK, LatestResourceID: &firstArtifactID},
-			{ConfigKey: "sdk:platform", ConfigType: store.ConfigTypeSDK, LatestResourceID: &secondArtifactID},
+			{ConfigKey: "sdk:security", ConfigType: store.ConfigTypeSDK, LatestResourceID: &firstAppID},
+			{ConfigKey: "sdk:platform", ConfigType: store.ConfigTypeSDK, LatestResourceID: &secondAppID},
 		},
 	}
 
@@ -1598,7 +1619,7 @@ func TestWorkspaceConfigPlanHandler_ReadsArtifactScopesInOneBatch(t *testing.T) 
 
 func TestWorkspaceConfigPlanHandler_FailsClosedOnScopeBatchError(t *testing.T) {
 	svcID := uuid.New()
-	artifactID := uuid.New()
+	appID := uuid.New()
 	s := &workspaceTestStore{
 		accountID:   uuid.New(),
 		workspaceID: uuid.New(),
@@ -1613,7 +1634,7 @@ func TestWorkspaceConfigPlanHandler_FailsClosedOnScopeBatchError(t *testing.T) {
 	}}})
 	configStore := &mockConfigStore{
 		state:  &store.ConfigState{Generation: 1, ManagedResources: managed},
-		states: []store.ConfigState{{ConfigKey: "sdk:security", ConfigType: store.ConfigTypeSDK, LatestResourceID: &artifactID}},
+		states: []store.ConfigState{{ConfigKey: "sdk:security", ConfigType: store.ConfigTypeSDK, LatestResourceID: &appID}},
 	}
 
 	r := newControlTestRouter(s.accountID)
@@ -1631,7 +1652,7 @@ func TestWorkspaceConfigPlanHandler_FailsClosedOnScopeBatchError(t *testing.T) {
 
 func TestWorkspaceConfigPlanHandler_DeprecationDirectiveKeepsImpactedService(t *testing.T) {
 	svcID := uuid.New()
-	artifactID := uuid.New()
+	appID := uuid.New()
 	svcVersionID := uuid.New()
 	s := &workspaceTestStore{
 		accountID:   uuid.New(),
@@ -1651,7 +1672,7 @@ func TestWorkspaceConfigPlanHandler_DeprecationDirectiveKeepsImpactedService(t *
 		states: []store.ConfigState{{
 			ConfigKey:        "sdk:security",
 			ConfigType:       store.ConfigTypeSDK,
-			LatestResourceID: &artifactID,
+			LatestResourceID: &appID,
 		}},
 	}
 
@@ -2780,6 +2801,8 @@ func TestWorkspaceConfigApplyHandler_VersionForceRemovalCreatesNotification(t *t
 }
 
 func TestWorkspaceNotificationsGraphQL_AggregatesRegistryDrift(t *testing.T) {
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{DriftMonitoringEnabled: true})
+	defer entitlement.LiveEntitlement.Reset()
 	workspaceID := uuid.New()
 	svcID := uuid.New()
 	configStore := &mockConfigStore{
@@ -2825,6 +2848,8 @@ func TestWorkspaceNotificationsGraphQL_AggregatesRegistryDrift(t *testing.T) {
 // services must still cost exactly one Registry call, covering every
 // service, not one call per service.
 func TestWorkspaceNotificationsGraphQL_BatchesDriftAcrossMultipleServices(t *testing.T) {
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{DriftMonitoringEnabled: true})
+	defer entitlement.LiveEntitlement.Reset()
 	workspaceID := uuid.New()
 	svcA := uuid.New()
 	svcB := uuid.New()
@@ -2847,6 +2872,79 @@ func TestWorkspaceNotificationsGraphQL_BatchesDriftAcrossMultipleServices(t *tes
 	}
 	if got, want := len(registryClient.driftServiceIDBatches[0]), 3; got != want {
 		t.Fatalf("expected the batched call to cover all 3 activated services, got %d ids: %#v", got, registryClient.driftServiceIDBatches[0])
+	}
+}
+
+// TestWorkspaceNotificationsGraphQL_DriftDisabled_SkipsRegistry verifies
+// the P4-01 gate: when DriftMonitoringEnabled is false the registry
+// must not be called and no drift items appear.
+func TestWorkspaceNotificationsGraphQL_DriftDisabled_SkipsRegistry(t *testing.T) {
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{DriftMonitoringEnabled: false})
+	defer entitlement.LiveEntitlement.Reset()
+
+	workspaceID := uuid.New()
+	svcID := uuid.New()
+	s := &workspaceTestStore{
+		accountID:   uuid.New(),
+		workspaceID: workspaceID,
+		workspaceServices: []store.WorkspaceService{{
+			ServiceID:   svcID,
+			ServiceName: "okta",
+			Version:     "1.0.0",
+		}},
+	}
+	registryClient := &mockRegistryClient{
+		driftSnapshots: []models.DriftSnapshot{{ID: uuid.New()}},
+	}
+
+	h := mountWorkspaceNotificationsGraphQLTestHandler(t, &mockConfigStore{}, s, registryClient)
+	resp := workspaceNotificationsGraphQLData(t, h)
+	items := resp["items"].([]any)
+	if len(items) != 0 {
+		t.Fatalf("expected zero items when drift disabled, got %#v", items)
+	}
+	if len(registryClient.driftServiceIDBatches) != 0 {
+		t.Fatalf("expected no registry drift calls when disabled, got %#v", registryClient.driftServiceIDBatches)
+	}
+}
+
+// TestWorkspaceNotificationsGraphQL_DriftEnabled_CallsRegistry verifies
+// the positive path: when DriftMonitoringEnabled is true the registry
+// is still called and drift items appear.
+func TestWorkspaceNotificationsGraphQL_DriftEnabled_CallsRegistry(t *testing.T) {
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{DriftMonitoringEnabled: true})
+	defer entitlement.LiveEntitlement.Reset()
+
+	workspaceID := uuid.New()
+	svcID := uuid.New()
+	s := &workspaceTestStore{
+		accountID:   uuid.New(),
+		workspaceID: workspaceID,
+		workspaceServices: []store.WorkspaceService{{
+			ServiceID:   svcID,
+			ServiceName: "okta",
+			Version:     "1.0.0",
+		}},
+	}
+	registryClient := &mockRegistryClient{
+		driftSnapshots: []models.DriftSnapshot{{
+			ID:                  uuid.New(),
+			IntegrationObjectID: uuid.New(),
+		}},
+	}
+
+	h := mountWorkspaceNotificationsGraphQLTestHandler(t, &mockConfigStore{}, s, registryClient)
+	resp := workspaceNotificationsGraphQLData(t, h)
+	items := resp["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("expected one drift item when enabled, got %#v", items)
+	}
+	first := items[0].(map[string]any)
+	if first["source"] != "registry" || first["type"] != "endpoint_drift" {
+		t.Errorf("unexpected item: %#v", first)
+	}
+	if len(registryClient.driftServiceIDBatches) != 1 {
+		t.Fatalf("expected exactly one batched drift call, got %d: %#v", len(registryClient.driftServiceIDBatches), registryClient.driftServiceIDBatches)
 	}
 }
 

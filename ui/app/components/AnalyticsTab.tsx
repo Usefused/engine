@@ -69,8 +69,8 @@ function formatTime(value: string) {
   }).format(new Date(value));
 }
 
-function sourceName(event: EngineExecutionEventEntry, artifactNames: Map<string, string>) {
-  return event.artifact_name?.trim() || artifactNames.get(event.artifact_id) || "Source unavailable";
+function sourceName(event: EngineExecutionEventEntry, appNames: Map<string, string>) {
+  return (event.app_id && appNames.get(event.app_id)) || "Source unavailable";
 }
 
 function environmentLabel(event: EngineExecutionEventEntry) {
@@ -91,14 +91,14 @@ function timingValue(event: EngineExecutionEventEntry, name: string) {
 
 function ExecutionSource({
   event,
-  artifactNames,
+  appNames,
 }: {
   event: EngineExecutionEventEntry;
-  artifactNames: Map<string, string>;
+  appNames: Map<string, string>;
 }) {
   const SourceIcon = event.transport === "mcp" ? Bot : Code2;
-  const name = sourceName(event, artifactNames);
-  const kind = (event.artifact_kind || event.transport).toUpperCase();
+  const name = sourceName(event, appNames);
+  const kind = (event.app_kind || event.transport).toUpperCase();
 
   return (
     <div className="flex min-w-0 items-center gap-2 text-slate-700">
@@ -141,7 +141,7 @@ export default function ActivityTab({
   const [source, setSource] = useState<"local" | "cross-engine">("local");
   const [selectedExecutionID, setSelectedExecutionID] = useState("");
   const consumers = [...dependentSDKs, ...dependentMCPs];
-  const artifactNames = new Map<string, string>(consumers.map((consumer) => [consumer.id, consumer.name]));
+  const appNames = new Map<string, string>(consumers.map((consumer) => [consumer.id, consumer.name]));
   const selectedExecution = executionEvents.find((event) => event.id === selectedExecutionID) || null;
 
   return (
@@ -156,7 +156,7 @@ export default function ActivityTab({
         webhookLimit={webhookLimit} webhookFilterEvent={webhookFilterEvent} setWebhookFilterEvent={setWebhookFilterEvent}
         webhookStartDate={webhookStartDate} setWebhookStartDate={setWebhookStartDate} webhookEndDate={webhookEndDate}
         setWebhookEndDate={setWebhookEndDate} webhookAnalytics={webhookAnalytics} loadWebhookData={loadWebhookData}
-        artifactNames={artifactNames} selectedExecutionID={selectedExecutionID} setSelectedExecutionID={setSelectedExecutionID}
+        appNames={appNames} selectedExecutionID={selectedExecutionID} setSelectedExecutionID={setSelectedExecutionID}
         selectedExecution={selectedExecution}
       />
 
@@ -170,7 +170,7 @@ type LocalActivityProps = Omit<ActivityTabProps, "dependentSDKs" | "dependentMCP
   setView: (view: "outbound" | "webhooks") => void;
   source: "local" | "cross-engine";
   setSource: (source: "local" | "cross-engine") => void;
-  artifactNames: Map<string, string>;
+  appNames: Map<string, string>;
   selectedExecutionID: string;
   setSelectedExecutionID: (id: string) => void;
   selectedExecution: EngineExecutionEventEntry | null;
@@ -264,12 +264,12 @@ function LocalOutboundActivity(props: LocalActivityProps) {
       </div>
       <ExecutionHistory
         events={props.executionEvents}
-        artifactNames={props.artifactNames}
+        appNames={props.appNames}
         selectedExecutionID={props.selectedExecutionID}
         setSelectedExecutionID={props.setSelectedExecutionID}
       />
       <ExecutionPagination total={props.executionTotal} limit={props.executionLimit} page={props.executionPage} setPage={props.setExecutionPage} />
-      <SelectedExecutionPanel event={props.selectedExecution} eventsExist={props.executionEvents.length > 0} artifactNames={props.artifactNames} />
+      <SelectedExecutionPanel event={props.selectedExecution} eventsExist={props.executionEvents.length > 0} appNames={props.appNames} />
     </>
   );
 }
@@ -295,8 +295,8 @@ function ExecutionPagination({ total, limit, page, setPage }: { total: number; l
   </div>;
 }
 
-function SelectedExecutionPanel({ event, eventsExist, artifactNames }: { event: EngineExecutionEventEntry | null; eventsExist: boolean; artifactNames: Map<string, string> }) {
-  if (event) return <ExecutionDetails event={event} artifactNames={artifactNames} />;
+function SelectedExecutionPanel({ event, eventsExist, appNames }: { event: EngineExecutionEventEntry | null; eventsExist: boolean; appNames: Map<string, string> }) {
+  if (event) return <ExecutionDetails event={event} appNames={appNames} />;
   if (!eventsExist) return null;
   return <div className="border-y border-slate-200 py-5 text-sm text-slate-500">Select a receipt to inspect its target, timing, and trace context.</div>;
 }
@@ -356,12 +356,12 @@ function Metric({ label, value, icon: Icon }: { label: string; value: string | n
 
 function ExecutionHistory({
   events,
-  artifactNames,
+  appNames,
   selectedExecutionID,
   setSelectedExecutionID,
 }: {
   events: EngineExecutionEventEntry[];
-  artifactNames: Map<string, string>;
+  appNames: Map<string, string>;
   selectedExecutionID: string;
   setSelectedExecutionID: (id: string) => void;
 }) {
@@ -393,7 +393,7 @@ function ExecutionHistory({
                 {expanded ? <ChevronUp className="h-4 w-4 shrink-0 text-slate-400" /> : <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />}
               </div>
               <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
-                <ExecutionSource event={event} artifactNames={artifactNames} />
+                <ExecutionSource event={event} appNames={appNames} />
                 <Result event={event} />
                 <span className="text-slate-600">{formatLatency(event.latency_ms)}</span>
                 <span className="text-right text-slate-500">{formatTime(event.started_at)}</span>
@@ -421,7 +421,7 @@ function ExecutionHistory({
               return (
                 <tr key={event.id} className={expanded ? "bg-slate-50" : "hover:bg-slate-50/70"}>
                   <td className="px-4 py-3"><RequestIdentity event={event} /></td>
-                  <td className="px-4 py-3"><ExecutionSource event={event} artifactNames={artifactNames} /></td>
+                  <td className="px-4 py-3"><ExecutionSource event={event} appNames={appNames} /></td>
                   <td className="px-4 py-3"><Result event={event} /></td>
                   <td className="px-4 py-3 tabular-nums text-slate-700">{formatLatency(event.latency_ms)}</td>
                   <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-500">{formatTime(event.started_at)}</td>
@@ -470,7 +470,7 @@ function Result({ event }: { event: EngineExecutionEventEntry }) {
   );
 }
 
-function ExecutionDetails({ event, artifactNames }: { event: EngineExecutionEventEntry; artifactNames: Map<string, string> }) {
+function ExecutionDetails({ event, appNames }: { event: EngineExecutionEventEntry; appNames: Map<string, string> }) {
   const timingRows = executionTimingRows(event);
 
   return (
@@ -496,7 +496,7 @@ function ExecutionDetails({ event, artifactNames }: { event: EngineExecutionEven
         </DetailGroup>
 
         <DetailGroup title="Execution context">
-          <Detail label="Consumer" value={sourceName(event, artifactNames)} />
+          <Detail label="Consumer" value={sourceName(event, appNames)} />
           <Detail label="Access path" value={accessPathLabel(event)} />
           <Detail label="Environment" value={environmentLabel(event)} />
           <Detail label="Environment source" value={environmentSourceLabel(event)} />
@@ -536,7 +536,7 @@ function executionTimingRows(event: EngineExecutionEventEntry) {
 
 function recordedLabel(value?: string) { return value || "Not recorded"; }
 function providerRequestLabel(event: EngineExecutionEventEntry) { return recordedLabel([event.http_method, event.request_path].filter(Boolean).join(" ")); }
-function accessPathLabel(event: EngineExecutionEventEntry) { return (event.artifact_kind || event.transport).toUpperCase(); }
+function accessPathLabel(event: EngineExecutionEventEntry) { return (event.app_kind || event.transport).toUpperCase(); }
 function cacheReplayLabel(event: EngineExecutionEventEntry) { return event.idempotency_replayed ? "Yes, provider was not called" : "No"; }
 function attemptLabel(event: EngineExecutionEventEntry) { return String(event.attempt_count || 1); }
 function failureTypeLabel(event: EngineExecutionEventEntry) { return recordedLabel([event.failure_category, event.failure_code].filter(Boolean).join(" · ")).replace("Not recorded", "None"); }

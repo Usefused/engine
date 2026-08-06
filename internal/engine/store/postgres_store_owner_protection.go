@@ -112,14 +112,14 @@ func loadOwnerAuthorizedWorkspaceRole(ctx context.Context, tx pgx.Tx, teamID, wo
 }
 
 func lockOwnerAuthorizedTeamForArchive(ctx context.Context, tx pgx.Tx, teamID, actorID uuid.UUID) (Team, int, int, error) {
-	team, bindingCount, activeArtifactCount, err := lockTeamForArchive(ctx, tx, teamID)
+	team, bindingCount, activeAppCount, err := lockTeamForArchive(ctx, tx, teamID)
 	if err != nil {
 		return Team{}, 0, 0, err
 	}
 	if err := ensureOwnerTeamAuthorized(ctx, tx, teamID, actorID, false); err != nil {
 		return Team{}, 0, 0, err
 	}
-	return team, bindingCount, activeArtifactCount, nil
+	return team, bindingCount, activeAppCount, nil
 }
 
 func ownerRoleRequested(resource accesscontrol.ResourceRef, role string) bool {

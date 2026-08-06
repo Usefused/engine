@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Bell } from "lucide-react";
 import { Link } from "@remix-run/react";
-import { getApiKey } from "~/lib/session";
 import { useWorkspaceNotifications } from "./useWorkspaceNotifications";
 import { NotificationList } from "./NotificationList";
 
@@ -28,8 +27,6 @@ export function NotificationBell() {
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [open]);
-
-  if (!getApiKey()) return null;
 
   const previewItems = unresolved.slice(0, PANEL_LIMIT);
   const hasMore = unresolved.length > PANEL_LIMIT;

@@ -51,20 +51,20 @@ func persistMCPSessionMessage(ctx context.Context, engineStore store.Store, mess
 
 func decodeMCPSession(payload []byte, occurredAt time.Time) (models.MCPSession, error) {
 	var data struct {
-		ArtifactID string `json:"artifact_id"`
-		SessionID  string `json:"session_id"`
-		Type       string `json:"type"`
+		AppID     string `json:"app_id"`
+		SessionID string `json:"session_id"`
+		Type      string `json:"type"`
 	}
 	if err := json.Unmarshal(payload, &data); err != nil {
 		return models.MCPSession{}, err
 	}
-	artifactID, err := uuid.Parse(data.ArtifactID)
+	appID, err := uuid.Parse(data.AppID)
 	if err != nil {
 		return models.MCPSession{}, err
 	}
 	session := models.MCPSession{
-		ID:         uuid.NewSHA1(uuid.NameSpaceOID, []byte(artifactID.String()+":"+data.SessionID)),
-		ArtifactID: artifactID, SessionID: data.SessionID,
+		ID:    uuid.NewSHA1(uuid.NameSpaceOID, []byte(appID.String()+":"+data.SessionID)),
+		AppID: appID, SessionID: data.SessionID,
 	}
 	if data.Type == "started" {
 		session.StartedAt = occurredAt

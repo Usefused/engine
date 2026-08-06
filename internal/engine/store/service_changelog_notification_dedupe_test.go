@@ -8,10 +8,9 @@ import (
 // TestWorkspaceNotificationDedupeSQL_HasRegistryChangelogBranch is a pure
 // query-shape assertion (no DB needed, same convention as
 // workspace_webhook_store_test.go's TestUpsertWorkspaceWebhookSQLNeverReassignsSlug):
-// Phase 3 (plans/plan-service-changelog.md) widened the dedupe predicate to
-// key on metadata->>'registry_changelog_id' when present, using a jsonb `?`
-// key-existence check so it can never accidentally match a pre-Phase-3 row
-// that lacks the key.
+// the dedupe predicate was widened to key on metadata->>'registry_changelog_id'
+// when present, using a jsonb `?` key-existence check so it can never
+// accidentally match a pre-changelog row that lacks the key.
 func TestWorkspaceNotificationDedupeSQL_HasRegistryChangelogBranch(t *testing.T) {
 	required := []string{
 		`? 'registry_changelog_id'`,

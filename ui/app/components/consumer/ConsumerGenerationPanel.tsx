@@ -1,19 +1,19 @@
 import type { FormEvent } from "react";
 import { AlertTriangle, Check, Copy, Download, Server } from "lucide-react";
-import { ArtifactOwnerControls } from "~/components/access/ArtifactOwnerControls";
-import type { ArtifactBuildSelector, ArtifactOwningTeam } from "~/lib/artifact-builder-contract";
+import { AppOwnerControls } from "~/components/access/AppOwnerControls";
+import type { AppBuildSelector, AppOwningTeam } from "~/lib/app-builder-contract";
 import type { ServiceVersion } from "~/lib/api";
 
 // The right-hand "generate" form from the Create-a-consumer page (SDK vs
 // MCP server config + submit). Pulled out of routes/integrations.builder.tsx
-// verbatim -- same handleGenerate/planAndApplyArtifact contract, only moved
+// verbatim -- same handleGenerate/planAndApplyApp contract, only moved
 // so that route isn't carrying this JSX inline alongside the service list.
 export interface ConsumerGenerationPanelProps {
   generationMode: "sdk" | "mcp";
-  ownerTeams: ArtifactOwningTeam[];
+  ownerTeams: AppOwningTeam[];
   ownerTeamId: string;
   setOwnerTeamId: (id: string) => void;
-  availableBuckets: ArtifactBuildSelector[];
+  availableBuckets: AppBuildSelector[];
   bucketId: string;
   setBucketId: (id: string) => void;
   onCreateCredential: () => void;
@@ -24,8 +24,8 @@ export interface ConsumerGenerationPanelProps {
   totalSelectedWebhooks: number;
   webhookAttachment: string;
   setWebhookAttachment: (value: string) => void;
-  artifactVersion: string;
-  setArtifactVersion: (value: string) => void;
+  appVersion: string;
+  setAppVersion: (value: string) => void;
   checkingDuplicate: boolean;
   isDuplicate: boolean;
   language: "typescript" | "python";
@@ -104,8 +104,8 @@ function WebhookBundleField({ totalSelectedWebhooks, webhookAttachment, setWebho
   );
 }
 
-function VersionField({ generationMode, artifactVersion, setArtifactVersion, setIsDuplicate, checkDuplicateSDK, checkingDuplicate, isDuplicate }: {
-  generationMode: "sdk" | "mcp"; artifactVersion: string; setArtifactVersion: (v: string) => void; setIsDuplicate: (v: boolean) => void;
+function VersionField({ generationMode, appVersion, setAppVersion, setIsDuplicate, checkDuplicateSDK, checkingDuplicate, isDuplicate }: {
+  generationMode: "sdk" | "mcp"; appVersion: string; setAppVersion: (v: string) => void; setIsDuplicate: (v: boolean) => void;
   checkDuplicateSDK: () => void; checkingDuplicate: boolean; isDuplicate: boolean;
 }) {
   const isSdk = generationMode === "sdk";
@@ -119,8 +119,8 @@ function VersionField({ generationMode, artifactVersion, setArtifactVersion, set
         type="text"
         required
         placeholder="1.0.0"
-        value={artifactVersion}
-        onChange={e => { setArtifactVersion(e.target.value); setIsDuplicate(false); }}
+        value={appVersion}
+        onChange={e => { setAppVersion(e.target.value); setIsDuplicate(false); }}
         onBlur={isSdk ? checkDuplicateSDK : undefined}
         className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm focus:outline-none focus:border-[var(--brand-violet)] focus:ring-2 focus:ring-[var(--brand-violet)]/20 transition-all bg-slate-50 focus:bg-white"
       />
@@ -374,8 +374,8 @@ export function ConsumerGenerationPanel(props: ConsumerGenerationPanelProps) {
     totalSelectedWebhooks,
     webhookAttachment,
     setWebhookAttachment,
-    artifactVersion,
-    setArtifactVersion,
+    appVersion,
+    setAppVersion,
     checkingDuplicate,
     isDuplicate,
     language,
@@ -411,13 +411,13 @@ export function ConsumerGenerationPanel(props: ConsumerGenerationPanelProps) {
           toolname="generate_sdk"
           tooldescription="Generate a native SDK or MCP server based on the selected endpoints. Requires name and version."
         >
-          <ArtifactOwnerControls ownerTeams={ownerTeams} ownerTeamId={ownerTeamId} buckets={availableBuckets} bucketId={bucketId} onOwnerTeamChange={setOwnerTeamId} onBucketChange={setBucketId} onCreateCredential={onCreateCredential} />
+          <AppOwnerControls ownerTeams={ownerTeams} ownerTeamId={ownerTeamId} buckets={availableBuckets} bucketId={bucketId} onOwnerTeamChange={setOwnerTeamId} onBucketChange={setBucketId} onCreateCredential={onCreateCredential} />
           <NameField generationMode={generationMode} sdkName={sdkName} setSdkName={setSdkName} setIsDuplicate={setIsDuplicate} checkDuplicateSDK={checkDuplicateSDK} />
           <WebhookBundleField totalSelectedWebhooks={totalSelectedWebhooks} webhookAttachment={webhookAttachment} setWebhookAttachment={setWebhookAttachment} />
           <VersionField
             generationMode={generationMode}
-            artifactVersion={artifactVersion}
-            setArtifactVersion={setArtifactVersion}
+            appVersion={appVersion}
+            setAppVersion={setAppVersion}
             setIsDuplicate={setIsDuplicate}
             checkDuplicateSDK={checkDuplicateSDK}
             checkingDuplicate={checkingDuplicate}

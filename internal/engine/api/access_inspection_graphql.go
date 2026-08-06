@@ -23,7 +23,7 @@ var accessResourceTypeGraphQLEnum = graphql.NewEnum(graphql.EnumConfig{
 		"WORKSPACE": &graphql.EnumValueConfig{Value: accesscontrol.ResourceWorkspace},
 		"SERVICE":   &graphql.EnumValueConfig{Value: accesscontrol.ResourceService},
 		"BUCKET":    &graphql.EnumValueConfig{Value: accesscontrol.ResourceBucket},
-		"ARTIFACT":  &graphql.EnumValueConfig{Value: accesscontrol.ResourceArtifact},
+		"APP":       &graphql.EnumValueConfig{Value: accesscontrol.ResourceApp},
 	},
 })
 

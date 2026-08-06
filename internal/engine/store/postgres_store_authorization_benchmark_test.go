@@ -213,9 +213,11 @@ func resetAuthorizationBenchmarkDatabase(b *testing.B, pool *pgxpool.Pool) {
 	if _, err := pool.Exec(context.Background(), `
 		DELETE FROM fused_config_plans;
 		DELETE FROM fused_config_states;
-		DELETE FROM fused_artifact_buckets;
-		DELETE FROM fused_artifact_tokens;
-		DELETE FROM fused_artifact_scopes;
+		DELETE FROM fused_app_tokens;
+		DELETE FROM fused_app_family_buckets;
+		DELETE FROM fused_apps;
+		DELETE FROM fused_app_tombstones;
+		DELETE FROM fused_app_families;
 		DELETE FROM fused_audit_events;
 		DELETE FROM fused_role_bindings;
 		DELETE FROM fused_role_permissions;

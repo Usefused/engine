@@ -85,7 +85,7 @@ func mcpCallHandler(w http.ResponseWriter, r *http.Request) {
 	writeMCPCallResult(w, http.StatusOK, mcpCallResponse{Result: result})
 }
 
-// resolveSessionFixtureOperation requires the artifact-derived session
+// resolveSessionFixtureOperation requires the app-derived session
 // fixture so one tenant can never observe a process-wide operation catalog.
 func resolveSessionFixtureOperation(sess *mcpSession, operationID string) (*FixtureOperation, bool) {
 	if sess == nil || sess.fixture == nil {
@@ -122,8 +122,8 @@ func extractBearerToken(r *http.Request) (string, bool) {
 // the same credential-resolving, scope-enforcing, audited path the gRPC edge
 // uses. Only non-secret user/resource selectors enter the credential envelope;
 // globalSecretResolver resolves provider material server-side from the
-// artifact scope and validated identity. The sandboxed Node process therefore
-// never holds a provider credential. sess.token (not just sess.artifactID) remains
+// app scope and validated identity. The sandboxed Node process therefore
+// never holds a provider credential. sess.token (not just sess.appID) remains
 // required because engineExecuteCore resolves the account identity from it.
 func dispatchMCPCall(ctx context.Context, sess *mcpSession, operationID string, params map[string]any) (json.RawMessage, error) {
 	ctx = contextWithExecutionTransport(ctx, models.EngineExecutionTransportMCP)
@@ -132,7 +132,7 @@ func dispatchMCPCall(ctx context.Context, sess *mcpSession, operationID string, 
 	buf := engine.NewBufferStream()
 	err := engineExecuteCore(
 		ctx, globalObjectCache, globalDispatcher, globalTokenValidator,
-		sess.artifactID, sess.token, operationID, params, copyCredentialEnvelope(sess.authContext), "", buf,
+		sess.appID, sess.token, operationID, params, copyCredentialEnvelope(sess.authContext), "", buf,
 	)
 	if err != nil {
 		return nil, err

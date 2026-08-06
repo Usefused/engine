@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -207,11 +208,11 @@ var workspaceWebhookGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 var sdkTokenGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "SDKToken",
 	Fields: graphql.Fields{
-		"id":           &graphql.Field{Type: graphql.String},
-		"artifact_id":  &graphql.Field{Type: graphql.String},
-		"name":         &graphql.Field{Type: graphql.String},
-		"created_at":   &graphql.Field{Type: graphql.String},
-		"last_used_at": &graphql.Field{Type: graphql.String},
+		"id":            &graphql.Field{Type: graphql.String},
+		"app_family_id": &graphql.Field{Type: graphql.String},
+		"name":          &graphql.Field{Type: graphql.String},
+		"created_at":    &graphql.Field{Type: graphql.String},
+		"last_used_at":  &graphql.Field{Type: graphql.String},
 	},
 })
 
@@ -269,10 +270,12 @@ var engineExecutionEventGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"id":                    &graphql.Field{Type: graphql.String},
 		"trace_id":              &graphql.Field{Type: graphql.String},
 		"span_id":               &graphql.Field{Type: graphql.String},
-		"artifact_id":           &graphql.Field{Type: graphql.String},
-		"artifact_name":         &graphql.Field{Type: graphql.String},
-		"artifact_kind":         &graphql.Field{Type: graphql.String},
+		"app_family_id":         &graphql.Field{Type: graphql.String},
+		"app_id":                &graphql.Field{Type: graphql.String},
+		"app_version":           &graphql.Field{Type: graphql.String},
+		"app_kind":              &graphql.Field{Type: graphql.String},
 		"transport":             &graphql.Field{Type: graphql.String},
+		"provider_protocol":     &graphql.Field{Type: graphql.String},
 		"direction":             &graphql.Field{Type: graphql.String},
 		"service_id":            &graphql.Field{Type: graphql.String},
 		"service_version_id":    &graphql.Field{Type: graphql.String},
@@ -341,8 +344,8 @@ var engineExecutionAnalyticsGraphQLType = graphql.NewObject(graphql.ObjectConfig
 	},
 })
 
-var artifactExecutionAnalyticsGraphQLType = graphql.NewObject(graphql.ObjectConfig{
-	Name: "ArtifactExecutionAnalytics",
+var appExecutionAnalyticsGraphQLType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "AppExecutionAnalytics",
 	Fields: graphql.Fields{
 		"total_calls":        &graphql.Field{Type: graphql.Int},
 		"successful_calls":   &graphql.Field{Type: graphql.Int},
@@ -500,7 +503,7 @@ var authConnectionGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"bucket_id":                &graphql.Field{Type: graphql.String},
 		"service_id":               &graphql.Field{Type: graphql.String},
 		"end_user_ref":             &graphql.Field{Type: graphql.String},
-		"created_by_artifact_id":   &graphql.Field{Type: graphql.String},
+		"created_by_app_id":        &graphql.Field{Type: graphql.String},
 		"auth_type":                &graphql.Field{Type: graphql.String},
 		"token_type":               &graphql.Field{Type: graphql.String},
 		"scopes":                   &graphql.Field{Type: graphql.NewList(graphql.String)},
@@ -852,88 +855,76 @@ func engineExecutionEventsGraphQLField(s store.Store) *graphql.Field {
 			if err != nil {
 				return nil, fmt.Errorf("list engine execution events: %w", err)
 			}
-			artifactScopes, err := executionArtifactScopes(ctx, s, events)
-			if err != nil {
-				// Source metadata is useful context, but an unavailable scope lookup
-				// must not hide the durable activity receipts themselves.
-				span.RecordError(err)
-			}
-			return map[string]interface{}{"items": projectGraphQLEngineExecutionEvents(events, artifactScopes), "total": int(total)}, nil
+			return map[string]interface{}{"items": projectGraphQLEngineExecutionEvents(events), "total": int(total)}, nil
 		},
 	}
 }
 
-func artifactExecutionEventsGraphQLField(s store.Store) *graphql.Field {
+func appExecutionEventsGraphQLField(s store.Store) *graphql.Field {
 	return &graphql.Field{
 		Type: engineExecutionEventPageGraphQLType,
-		Args: artifactExecutionActivityArgs(true),
+		Args: appExecutionActivityArgs(true),
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.artifact_execution_events.list")
+			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.app_execution_events.list")
 			defer span.End()
 			actor, err := actorFromContext(ctx)
 			if err != nil {
 				return nil, err
 			}
-			filter, err := artifactExecutionActivityFilterFromArgs(p)
+			filter, err := appExecutionActivityFilterFromArgs(ctx, s, actor.accountID, p)
 			if err != nil {
 				return nil, err
 			}
-			if err := ensureArtifactScopeOwnedBy(ctx, s, actor.accountID, filter.artifactID); err != nil {
-				return nil, err
-			}
-			reader, ok := s.(store.ArtifactExecutionEventReader)
+			reader, ok := s.(store.AppExecutionEventReader)
 			if !ok {
-				return nil, errors.New("artifact execution activity is unavailable")
+				return nil, errors.New("app execution activity is unavailable")
 			}
 			span.SetAttributes(
-				attribute.String("artifact_id", filter.artifactID.String()),
+				attribute.String("app.family_id", filter.appFamilyID.String()),
+				attribute.String("app.id", filter.appID.String()),
 				attribute.String("transport", filter.transport),
 				attribute.String("status", filter.status),
 				attribute.Int("limit", filter.limit),
 				attribute.Int("offset", filter.offset),
 			)
-			events, total, err := reader.ListEngineExecutionEventsByArtifact(ctx, filter.storeFilter(actor.accountID))
+			events, total, err := reader.ListEngineExecutionEventsByApp(ctx, filter.storeFilter(actor.accountID))
 			if err != nil {
-				return nil, fmt.Errorf("list artifact execution events: %w", err)
+				return nil, fmt.Errorf("list app execution events: %w", err)
 			}
-			// The artifact page already owns its display metadata. Avoiding a second
-			// lookup keeps this receipt feed to one scoped activity query.
-			return map[string]interface{}{"items": projectGraphQLEngineExecutionEvents(events, nil), "total": int(total)}, nil
+			return map[string]interface{}{"items": projectGraphQLEngineExecutionEvents(events), "total": int(total)}, nil
 		},
 	}
 }
 
-func artifactExecutionAnalyticsGraphQLField(s store.Store) *graphql.Field {
+func appExecutionAnalyticsGraphQLField(s store.Store) *graphql.Field {
 	return &graphql.Field{
-		Type: artifactExecutionAnalyticsGraphQLType,
-		Args: artifactExecutionActivityArgs(false),
+		Type: appExecutionAnalyticsGraphQLType,
+		Args: appExecutionActivityArgs(false),
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.artifact_execution_analytics.get")
+			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.app_execution_analytics.get")
 			defer span.End()
 			actor, err := actorFromContext(ctx)
 			if err != nil {
 				return nil, err
 			}
-			filter, err := artifactExecutionActivityFilterFromArgs(p)
+			filter, err := appExecutionActivityFilterFromArgs(ctx, s, actor.accountID, p)
 			if err != nil {
 				return nil, err
 			}
-			if err := ensureArtifactScopeOwnedBy(ctx, s, actor.accountID, filter.artifactID); err != nil {
-				return nil, err
-			}
-			reader, ok := s.(store.ArtifactExecutionAnalyticsReader)
+			reader, ok := s.(store.AppExecutionAnalyticsReader)
 			if !ok {
-				return nil, errors.New("artifact execution analytics is unavailable")
+				return nil, errors.New("app execution analytics is unavailable")
 			}
 			span.SetAttributes(
-				attribute.String("artifact_id", filter.artifactID.String()),
+				attribute.String("app.family_id", filter.appFamilyID.String()),
+				attribute.String("app.id", filter.appID.String()),
 				attribute.String("transport", filter.transport),
 			)
-			analytics, err := reader.GetEngineExecutionAnalyticsByArtifact(ctx, filter.storeFilter(actor.accountID))
+			analytics, err := reader.GetEngineExecutionAnalyticsByApp(ctx, filter.storeFilter(actor.accountID))
 			if err != nil {
-				return nil, fmt.Errorf("get artifact execution analytics: %w", err)
+				return nil, fmt.Errorf("get app execution analytics: %w", err)
 			}
-			return projectGraphQLArtifactExecutionAnalytics(analytics), nil
+			return projectGraphQLAppExecutionAnalytics(analytics), nil
 		},
 	}
 }
@@ -1040,7 +1031,7 @@ func serviceConsumersGraphQLField(s store.Store) *graphql.Field {
 			if err != nil {
 				return nil, err
 			}
-			authorized, err := graphQLAuthorizedScope(ctx, accesscontrol.PermissionArtifactRead, accesscontrol.ResourceArtifact)
+			authorized, err := graphQLAuthorizedScope(ctx, accesscontrol.PermissionAppRead, accesscontrol.ResourceApp)
 			if err != nil {
 				return nil, err
 			}
@@ -1057,8 +1048,8 @@ func projectServiceConsumers(consumers []store.ServiceConsumer) []map[string]int
 	items := make([]map[string]interface{}, 0, len(consumers))
 	for _, consumer := range consumers {
 		items = append(items, map[string]interface{}{
-			"id": consumer.ArtifactID.String(), "name": consumer.Name, "version": consumer.Version,
-			"kind": consumer.Kind, "active": consumer.DeactivatedAt == nil,
+			"id": consumer.AppID.String(), "name": consumer.Name, "version": consumer.Version,
+			"kind": consumer.Kind, "active": consumer.Status == "active" || consumer.Status == "deprecated",
 			"service_version_id": consumer.ServiceVersionID.String(), "select_all": consumer.SelectAll,
 			"operation_count": consumer.OperationCount, "webhook_count": consumer.WebhookCount,
 			"created_at": formatGraphQLTime(consumer.CreatedAt),
@@ -1115,7 +1106,7 @@ func workspaceNotificationsGraphQLField(configStore store.ConfigRepository, s st
 }
 
 // updateWorkspaceNotificationStatusGraphQLField is Phase 4's one write path
-// on top of Phase 3's read-only notifications
+// on top of changelog-derived read-only notifications
 // (plans/plan-service-changelog.md's "## Phase 4"): mark read
 // ('acknowledged') or dismiss ('dismissed'). "id" is the notification's own
 // row id -- not the "engine:"/"registry:" prefixed composite id
@@ -1161,7 +1152,7 @@ func sdkTokensGraphQLField(s store.Store) *graphql.Field {
 	return &graphql.Field{
 		Type: graphql.NewList(sdkTokenGraphQLType),
 		Args: graphql.FieldConfigArgument{
-			"artifact_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
+			"app_family_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
 		},
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.sdk_tokens.list")
@@ -1170,23 +1161,35 @@ func sdkTokensGraphQLField(s store.Store) *graphql.Field {
 			if err != nil {
 				return nil, err
 			}
-			artifactID, err := requiredGraphQLUUIDArg(p, "artifact_id")
+			appFamilyID, err := requiredGraphQLUUIDArg(p, "app_family_id")
 			if err != nil {
 				return nil, err
 			}
-			// Why: token rows are keyed by Artifact ID only, so verify scope
-			// ownership before listing metadata for a caller-supplied UUID.
-			if err := ensureArtifactScopeOwnedBy(ctx, s, actor.accountID, artifactID); err != nil {
+			if _, err := appFamilyOwnedBy(ctx, s, actor.accountID, appFamilyID); err != nil {
 				return nil, err
 			}
-			span.SetAttributes(attribute.String("artifact_id", artifactID.String()))
-			tokens, err := s.ListSDKTokens(ctx, artifactID)
+			span.SetAttributes(attribute.String("app.family_id", appFamilyID.String()))
+			tokens, err := s.ListAppTokens(ctx, appFamilyID)
 			if err != nil {
 				return nil, fmt.Errorf("list sdk tokens: %w", err)
 			}
-			return projectGraphQLSDKTokens(tokens), nil
+			return projectGraphQLAppTokens(tokens), nil
 		},
 	}
+}
+
+func appFamilyOwnedBy(ctx context.Context, s store.Store, accountID, appFamilyID uuid.UUID) (*store.AppFamily, error) {
+	family, err := s.GetAppFamily(ctx, appFamilyID)
+	if errors.Is(err, store.ErrAppFamilyNotFound) {
+		return nil, workspaceConfigHTTPError{status: http.StatusNotFound, message: "app family not found"}
+	}
+	if err != nil {
+		return nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to load app family"}
+	}
+	if family.AccountID != accountID {
+		return nil, workspaceConfigHTTPError{status: http.StatusForbidden, message: "app family is not available in this workspace"}
+	}
+	return family, nil
 }
 
 // sdkBucketsGraphQLField exposes the credential bucket(s) linked to one SDK
@@ -1197,7 +1200,7 @@ func sdkBucketsGraphQLField(s store.Store) *graphql.Field {
 	return &graphql.Field{
 		Type: graphql.NewList(bucketGraphQLType),
 		Args: graphql.FieldConfigArgument{
-			"artifact_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
+			"app_family_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
 		},
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.sdk_buckets.list")
@@ -1206,22 +1209,22 @@ func sdkBucketsGraphQLField(s store.Store) *graphql.Field {
 			if err != nil {
 				return nil, err
 			}
-			artifactID, err := requiredGraphQLUUIDArg(p, "artifact_id")
+			appFamilyID, err := requiredGraphQLUUIDArg(p, "app_family_id")
 			if err != nil {
 				return nil, err
 			}
-			if err := ensureArtifactScopeOwnedBy(p.Context, s, actor.accountID, artifactID); err != nil {
+			if _, err := appFamilyOwnedBy(p.Context, s, actor.accountID, appFamilyID); err != nil {
 				return nil, err
 			}
 			span.SetAttributes(
 				attribute.String("account_id", actor.accountID.String()),
-				attribute.String("artifact_id", artifactID.String()),
+				attribute.String("app.family_id", appFamilyID.String()),
 			)
 			authorized, err := graphQLAuthorizedScope(ctx, accesscontrol.PermissionBucketRead, accesscontrol.ResourceBucket)
 			if err != nil {
 				return nil, err
 			}
-			buckets, err := s.ListAuthorizedBucketsForSDK(ctx, artifactID, authorized)
+			buckets, err := s.ListAuthorizedBucketsForAppFamily(ctx, appFamilyID, authorized)
 			if err != nil {
 				return nil, fmt.Errorf("list sdk buckets: %w", err)
 			}
@@ -1247,11 +1250,11 @@ func bucketSDKPageGraphQLField(s store.Store) *graphql.Field {
 				attribute.Int("limit", limit),
 				attribute.Int("offset", offset),
 			)
-			authorized, err := graphQLAuthorizedScope(ctx, accesscontrol.PermissionArtifactRead, accesscontrol.ResourceArtifact)
+			authorized, err := graphQLAuthorizedScope(ctx, accesscontrol.PermissionAppRead, accesscontrol.ResourceApp)
 			if err != nil {
 				return nil, err
 			}
-			scopes, total, err := s.ListAuthorizedArtifactScopesForBucket(ctx, bucketID, authorized, limit, offset)
+			scopes, total, err := s.ListAuthorizedAppRuntimesForBucket(ctx, bucketID, authorized, limit, offset)
 			if err != nil {
 				return nil, fmt.Errorf("list bucket sdks: %w", err)
 			}
@@ -1783,7 +1786,7 @@ func startConnectSessionGraphQLField(s store.Store, verifier ServiceVerifier, ma
 			if endUserRef == "" {
 				return nil, errors.New("end_user_ref is required")
 			}
-			createdByArtifactID, err := optionalGraphQLUUIDArg(p, "created_by_artifact_id")
+			createdByAppID, err := optionalGraphQLUUIDArg(p, "created_by_app_id")
 			if err != nil {
 				return nil, err
 			}
@@ -1796,7 +1799,7 @@ func startConnectSessionGraphQLField(s store.Store, verifier ServiceVerifier, ma
 			if returnURL != "" && !isHTTPRedirectURI(returnURL) {
 				return nil, errors.New("return_url must be an absolute http or https URL")
 			}
-			response, err := createConnectSession(ctx, s, call, endUserRef, optionalUUIDValueOrNil(createdByArtifactID), returnURL, graphQLStringMapArg(p, "resource_input"), graphQLStringSliceArg(p, "scopes"), resolved, masterKey)
+			response, err := createConnectSession(ctx, s, call, endUserRef, optionalUUIDValueOrNil(createdByAppID), returnURL, graphQLStringMapArg(p, "resource_input"), graphQLStringSliceArg(p, "scopes"), resolved, masterKey)
 			if err != nil {
 				return nil, fmt.Errorf("create connect session: %w", err)
 			}
@@ -1899,23 +1902,26 @@ type engineExecutionActivityFilter struct {
 	endDate   *time.Time
 }
 
-type artifactExecutionActivityFilter struct {
-	artifactID uuid.UUID
-	transport  string
-	direction  string
-	status     string
-	limit      int
-	offset     int
-	startDate  *time.Time
-	endDate    *time.Time
+type appExecutionActivityFilter struct {
+	appFamilyID uuid.UUID
+	appID       uuid.UUID
+	transport   string
+	direction   string
+	status      string
+	limit       int
+	offset      int
+	startDate   *time.Time
+	endDate     *time.Time
 }
 
 func engineExecutionActivityArgs(includePage bool) graphql.FieldConfigArgument {
 	return scopedExecutionActivityArgs("service_id", includePage)
 }
 
-func artifactExecutionActivityArgs(includePage bool) graphql.FieldConfigArgument {
-	return scopedExecutionActivityArgs("artifact_id", includePage)
+func appExecutionActivityArgs(includePage bool) graphql.FieldConfigArgument {
+	args := scopedExecutionActivityArgs("app_id", includePage)
+	args["include_all_versions"] = &graphql.ArgumentConfig{Type: graphql.Boolean, DefaultValue: false}
+	return args
 }
 
 func scopedExecutionActivityArgs(scopeArgument string, includePage bool) graphql.FieldConfigArgument {
@@ -1934,24 +1940,46 @@ func scopedExecutionActivityArgs(scopeArgument string, includePage bool) graphql
 	return args
 }
 
-func artifactExecutionActivityFilterFromArgs(p graphql.ResolveParams) (artifactExecutionActivityFilter, error) {
-	artifactID, err := requiredGraphQLUUIDArg(p, "artifact_id")
+func appExecutionActivityFilterFromArgs(ctx context.Context, s store.Store, accountID uuid.UUID, p graphql.ResolveParams) (appExecutionActivityFilter, error) {
+	appID, err := requiredGraphQLUUIDArg(p, "app_id")
 	if err != nil {
-		return artifactExecutionActivityFilter{}, err
+		return appExecutionActivityFilter{}, err
+	}
+	appFamilyID, err := appExecutionActivityFamilyID(ctx, s, accountID, appID)
+	if err != nil {
+		return appExecutionActivityFilter{}, err
 	}
 	transport, direction, status, err := engineExecutionDimensionsFromArgs(p)
 	if err != nil {
-		return artifactExecutionActivityFilter{}, err
+		return appExecutionActivityFilter{}, err
 	}
 	startDate, endDate, err := engineExecutionDatesFromArgs(p)
 	if err != nil {
-		return artifactExecutionActivityFilter{}, err
+		return appExecutionActivityFilter{}, err
 	}
 	limit, offset := bucketPageArgs(p)
-	return artifactExecutionActivityFilter{
-		artifactID: artifactID, transport: transport, direction: direction, status: status,
+	if includeAll, _ := p.Args["include_all_versions"].(bool); includeAll {
+		appID = uuid.Nil
+	}
+	return appExecutionActivityFilter{
+		appFamilyID: appFamilyID, appID: appID, transport: transport, direction: direction, status: status,
 		limit: limit, offset: offset, startDate: startDate, endDate: endDate,
 	}, nil
+}
+
+func appExecutionActivityFamilyID(ctx context.Context, s store.Store, accountID, appID uuid.UUID) (uuid.UUID, error) {
+	resolver, ok := s.(store.AppFamilyAccessResolver)
+	if !ok {
+		return uuid.Nil, errors.New("app execution activity is unavailable")
+	}
+	resolved, err := resolver.ResolveAppFamilyAccess(ctx, accountID, []uuid.UUID{appID})
+	if err != nil {
+		return uuid.Nil, errors.New("failed to resolve app execution activity")
+	}
+	if familyID := resolved[appID]; familyID != uuid.Nil {
+		return familyID, nil
+	}
+	return uuid.Nil, errors.New("app execution activity was not found")
 }
 
 func engineExecutionActivityFilterFromArgs(p graphql.ResolveParams) (engineExecutionActivityFilter, error) {
@@ -2021,9 +2049,9 @@ func (f engineExecutionActivityFilter) storeFilter(accountID uuid.UUID) store.En
 	}
 }
 
-func (f artifactExecutionActivityFilter) storeFilter(accountID uuid.UUID) store.EngineExecutionFilter {
+func (f appExecutionActivityFilter) storeFilter(accountID uuid.UUID) store.EngineExecutionFilter {
 	return store.EngineExecutionFilter{
-		AccountID: accountID, ArtifactID: f.artifactID, Transport: f.transport, Direction: f.direction,
+		AccountID: accountID, AppFamilyID: f.appFamilyID, AppID: f.appID, Transport: f.transport, Direction: f.direction,
 		Status: f.status, Limit: f.limit, Offset: f.offset, StartDate: f.startDate, EndDate: f.endDate,
 	}
 }
@@ -2079,7 +2107,7 @@ func bucketIDPageArgs() graphql.FieldConfigArgument {
 func connectSessionMutationArgs() graphql.FieldConfigArgument {
 	args := connectScopedArgs()
 	args["end_user_ref"] = &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)}
-	args["created_by_artifact_id"] = &graphql.ArgumentConfig{Type: graphql.String}
+	args["created_by_app_id"] = &graphql.ArgumentConfig{Type: graphql.String}
 	args["return_url"] = &graphql.ArgumentConfig{Type: graphql.String}
 	args["resource_input"] = &graphql.ArgumentConfig{Type: engineJSONType}
 	args["scopes"] = &graphql.ArgumentConfig{Type: graphql.NewList(graphql.NewNonNull(graphql.String))}
@@ -2604,11 +2632,11 @@ func webhookSignatureStatus(secretBucketID *uuid.UUID) string {
 	return "set"
 }
 
-func projectGraphQLSDKTokens(tokens []store.SDKToken) []map[string]interface{} {
+func projectGraphQLAppTokens(tokens []store.AppToken) []map[string]interface{} {
 	items := make([]map[string]interface{}, 0, len(tokens))
 	for _, token := range tokens {
 		items = append(items, map[string]interface{}{
-			"id": token.ID.String(), "artifact_id": token.ArtifactID.String(), "name": token.Name,
+			"id": token.ID.String(), "app_family_id": token.AppFamilyID.String(), "name": token.Name,
 			"created_at": formatGraphQLTime(token.CreatedAt), "last_used_at": formatOptionalGraphQLTime(token.LastUsedAt),
 		})
 	}
@@ -2651,43 +2679,7 @@ func projectGraphQLWebhookAnalytics(analytics models.WebhookAnalytics) map[strin
 	}
 }
 
-type artifactScopeBatchReader interface {
-	ListArtifactScopes(ctx context.Context, artifactIDs []uuid.UUID) (map[uuid.UUID]*store.ArtifactScope, error)
-}
-
-func executionArtifactScopes(ctx context.Context, s store.Store, events []models.EngineExecutionEvent) (map[uuid.UUID]*store.ArtifactScope, error) {
-	artifactIDs := make([]uuid.UUID, 0, len(events))
-	seen := make(map[uuid.UUID]struct{}, len(events))
-	for _, event := range events {
-		if event.ArtifactID == uuid.Nil {
-			continue
-		}
-		if _, exists := seen[event.ArtifactID]; exists {
-			continue
-		}
-		seen[event.ArtifactID] = struct{}{}
-		artifactIDs = append(artifactIDs, event.ArtifactID)
-	}
-
-	if reader, ok := s.(artifactScopeBatchReader); ok {
-		return reader.ListArtifactScopes(ctx, artifactIDs)
-	}
-
-	scopes := make(map[uuid.UUID]*store.ArtifactScope, len(artifactIDs))
-	for _, artifactID := range artifactIDs {
-		scope, err := s.GetArtifactScope(ctx, artifactID)
-		if errors.Is(err, store.ErrArtifactScopeNotFound) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		scopes[artifactID] = scope
-	}
-	return scopes, nil
-}
-
-func projectGraphQLEngineExecutionEvents(events []models.EngineExecutionEvent, artifactScopes map[uuid.UUID]*store.ArtifactScope) []map[string]interface{} {
+func projectGraphQLEngineExecutionEvents(events []models.EngineExecutionEvent) []map[string]interface{} {
 	items := make([]map[string]interface{}, 0, len(events))
 	for _, event := range events {
 		providerLatency := interface{}(nil)
@@ -2698,19 +2690,12 @@ func projectGraphQLEngineExecutionEvents(events []models.EngineExecutionEvent, a
 		if event.ProviderHTTPStatus != nil {
 			providerHTTPStatus = *event.ProviderHTTPStatus
 		}
-		artifactName := ""
-		artifactKind := event.Transport
-		if scope := artifactScopes[event.ArtifactID]; scope != nil {
-			artifactName = scope.Name
-			if scope.Kind != "" {
-				artifactKind = scope.Kind
-			}
-		}
 		items = append(items, map[string]interface{}{
 			"id": event.ID.String(), "trace_id": event.TraceID, "span_id": event.SpanID,
-			"artifact_id":   event.ArtifactID.String(),
-			"artifact_name": artifactName, "artifact_kind": artifactKind,
-			"transport": event.Transport, "direction": event.Direction, "service_id": event.ServiceID.String(),
+			"app_family_id": optionalGraphQLUUID(event.AppFamilyID), "app_id": optionalGraphQLUUID(event.AppID),
+			"app_version": event.AppVersion, "app_kind": event.Transport,
+			"transport": event.Transport, "provider_protocol": event.ProviderProtocol,
+			"direction": event.Direction, "service_id": event.ServiceID.String(),
 			"service_version_id": event.ServiceVersionID, "operation_id": optionalGraphQLUUID(event.OperationID),
 			"webhook_id": optionalGraphQLUUID(event.WebhookID), "operation": event.EndpointName, "event_name": event.EventName,
 			"http_method": event.HTTPMethod, "request_path": event.RequestPath,
@@ -2761,7 +2746,7 @@ func projectGraphQLEngineExecutionAnalytics(analytics models.EngineExecutionAnal
 	}
 }
 
-func projectGraphQLArtifactExecutionAnalytics(analytics models.ArtifactExecutionAnalytics) map[string]interface{} {
+func projectGraphQLAppExecutionAnalytics(analytics models.AppExecutionAnalytics) map[string]interface{} {
 	result := projectGraphQLEngineExecutionAnalytics(analytics.EngineExecutionAnalytics)
 	result["by_service"] = projectGraphQLExecutionBreakdowns(analytics.ByService)
 	return result
@@ -2845,12 +2830,12 @@ func projectGraphQLDriftChanges(changes []models.DriftChange) []map[string]inter
 	return out
 }
 
-func projectGraphQLBucketSDKSummaries(scopes []store.ArtifactScope) []map[string]interface{} {
+func projectGraphQLBucketSDKSummaries(scopes []store.AppRuntime) []map[string]interface{} {
 	items := make([]map[string]interface{}, 0, len(scopes))
 	for _, scope := range scopes {
 		items = append(items, map[string]interface{}{
-			"id": scope.ArtifactID.String(), "name": scope.Name,
-			"kind": scope.Kind, "active": scope.DeactivatedAt == nil,
+			"id": scope.AppID.String(), "name": scope.Name,
+			"kind": scope.Kind, "active": scope.Status == "active" || scope.Status == "deprecated",
 			"created_at": formatGraphQLTime(scope.CreatedAt),
 		})
 	}
@@ -2916,7 +2901,7 @@ func projectGraphQLAuthConnection(conn store.AuthConnection) map[string]interfac
 	resp := projectAuthConnection(conn)
 	return map[string]interface{}{
 		"id": resp.ID.String(), "bucket_id": resp.BucketID.String(), "service_id": resp.ServiceID.String(),
-		"end_user_ref": resp.EndUserRef, "created_by_artifact_id": resp.CreatedByArtifactID.String(),
+		"end_user_ref": resp.EndUserRef, "created_by_app_id": resp.CreatedByAppID.String(),
 		"auth_type": resp.AuthType, "token_type": resp.TokenType, "scopes": resp.Scopes,
 		"scope_source": resp.ScopeSource, "issuer": resp.Issuer, "subject": resp.Subject,
 		"expires_at":               formatOptionalGraphQLTime(resp.ExpiresAt),

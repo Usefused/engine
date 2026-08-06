@@ -22,7 +22,7 @@ import (
 // package-level setter so the deeply-nested engineExecuteCore doesn't need
 // the store threaded through every call site.
 type idempotencyStore interface {
-	GetIdempotentExecution(ctx context.Context, artifactID uuid.UUID, idempotencyKeyHash, requestBodyHash string) (*models.IdempotentExecution, error)
+	GetIdempotentExecution(ctx context.Context, appID uuid.UUID, idempotencyKeyHash, requestBodyHash string) (*models.IdempotentExecution, error)
 	SaveIdempotentExecution(ctx context.Context, exec *models.IdempotentExecution) error
 }
 
@@ -63,7 +63,7 @@ func idempotencyEligible(ctx context.Context, obj *models.IntegrationObject) boo
 // means "no cache entry, dispatch normally". A non-nil error (e.g. the
 // idempotency key was reused with a different request body) means the
 // caller should fail the request without dispatching.
-func lookupCachedExecution(ctx context.Context, artifactID uuid.UUID) (exec *models.IdempotentExecution, ok bool, err error) {
+func lookupCachedExecution(ctx context.Context, appID uuid.UUID) (exec *models.IdempotentExecution, ok bool, err error) {
 	if globalIdempotencyStore == nil {
 		return nil, false, nil
 	}
@@ -72,7 +72,7 @@ func lookupCachedExecution(ctx context.Context, artifactID uuid.UUID) (exec *mod
 		return nil, false, nil
 	}
 	bodyHash := requestBodyHashFromContext(ctx)
-	found, err := globalIdempotencyStore.GetIdempotentExecution(ctx, artifactID, keyHash, bodyHash)
+	found, err := globalIdempotencyStore.GetIdempotentExecution(ctx, appID, keyHash, bodyHash)
 	if err != nil {
 		if errors.Is(err, store.ErrIdempotentExecutionNotFound) {
 			return nil, false, nil
@@ -92,7 +92,7 @@ func lookupCachedExecution(ctx context.Context, artifactID uuid.UUID) (exec *mod
 // transient failure is never cached, so it can't get "stuck" replaying an
 // error for the TTL window. Best-effort: a save failure is not surfaced to
 // the caller, who already has their real response.
-func saveCachedExecution(ctx context.Context, artifactID uuid.UUID, responseBody []byte, environment string, responseStatus int) {
+func saveCachedExecution(ctx context.Context, appID uuid.UUID, responseBody []byte, environment string, responseStatus int) {
 	if globalIdempotencyStore == nil {
 		return
 	}
@@ -103,7 +103,7 @@ func saveCachedExecution(ctx context.Context, artifactID uuid.UUID, responseBody
 	now := time.Now()
 	_ = globalIdempotencyStore.SaveIdempotentExecution(ctx, &models.IdempotentExecution{
 		ID:                 uuid.New(),
-		ArtifactID:         artifactID,
+		AppID:              appID,
 		IdempotencyKeyHash: keyHash,
 		RequestBodyHash:    requestBodyHashFromContext(ctx),
 		Environment:        environment,
@@ -131,7 +131,7 @@ func saveCachedExecution(ctx context.Context, artifactID uuid.UUID, responseBody
 func tryReplayFromIdempotencyCache(
 	ctx context.Context,
 	span trace.Span,
-	artifactID uuid.UUID,
+	appID uuid.UUID,
 	obj *models.IntegrationObject,
 	stream engine.ResponseStream,
 	auditState *executionAuditState,
@@ -139,7 +139,7 @@ func tryReplayFromIdempotencyCache(
 	if !idempotencyEligible(ctx, obj) {
 		return false, nil
 	}
-	cached, hit, lookupErr := lookupCachedExecution(ctx, artifactID)
+	cached, hit, lookupErr := lookupCachedExecution(ctx, appID)
 	if lookupErr != nil {
 		span.SetStatus(codes.Error, lookupErr.Error())
 		return false, lookupErr
@@ -179,7 +179,7 @@ func dispatchAndCache(
 	environment string,
 	stream engine.ResponseStream,
 	span trace.Span,
-	artifactID uuid.UUID,
+	appID uuid.UUID,
 ) (resolution RuntimeEnvironmentResolution, providerHTTPStatus int, err error) {
 	eligible := idempotencyEligible(ctx, obj)
 	dispatchStream := stream
@@ -193,7 +193,7 @@ func dispatchAndCache(
 		return resolution, providerHTTPStatus, err
 	}
 	if tee != nil && providerHTTPStatus >= 200 && providerHTTPStatus < 400 {
-		saveCachedExecution(ctx, artifactID, tee.Bytes(), resolution.Environment, providerHTTPStatus)
+		saveCachedExecution(ctx, appID, tee.Bytes(), resolution.Environment, providerHTTPStatus)
 	}
 	return resolution, providerHTTPStatus, nil
 }

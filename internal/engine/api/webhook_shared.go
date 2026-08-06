@@ -112,10 +112,10 @@ func webhookDeliveryCount(message *nats.Msg) int {
 	return int(metadata.NumDelivered)
 }
 
-// resolveWebhookAttachmentLabel looks up which kind: webhook artifact (if
-// any) artifactID's own config attached, entirely server-side -- the connecting
+// resolveWebhookAttachmentLabel looks up which kind: webhook desired config (if
+// any) appID's own config attached, entirely server-side -- the connecting
 // client (generated SDK/MCP code) never has to know or report this itself.
-// fused_artifact_scopes.config_key (set at apply time, see SaveArtifactScope callers)
+// fused_apps.config_key (set by the atomic app apply transaction)
 // links this runtime identity back to the exact kind: sdk/kind: mcp document
 // that created it, and that document's own webhook_attachment field
 // (sdkConfigDocument.WebhookAttachment) names the registration whose events
@@ -125,10 +125,10 @@ func webhookDeliveryCount(message *nats.Msg) int {
 // webhook_attachment all return ("", nil): "this connection gets no webhook
 // subscription," not an error -- most SDKs/MCPs never attach a webhook at
 // all, and that's a normal, valid connection.
-func resolveWebhookAttachmentLabel(ctx context.Context, configStore store.ConfigRepository, s store.Store, artifactID uuid.UUID) (string, error) {
-	scope, err := s.GetArtifactScope(ctx, artifactID)
+func resolveWebhookAttachmentLabel(ctx context.Context, configStore store.ConfigRepository, s store.Store, appID uuid.UUID) (string, error) {
+	scope, err := s.GetAppRuntime(ctx, appID)
 	if err != nil {
-		if errors.Is(err, store.ErrArtifactScopeNotFound) {
+		if errors.Is(err, store.ErrAppRuntimeNotFound) {
 			return "", nil
 		}
 		return "", err

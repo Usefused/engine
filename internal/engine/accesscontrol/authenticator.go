@@ -19,14 +19,18 @@ import (
 var ErrStaleAuthorizationRevision = errors.New("stale authorization revision")
 
 type ControlPrincipal struct {
-	AccountID       uuid.UUID
-	WorkspaceID     uuid.UUID
-	SubjectID       uuid.UUID
-	CredentialID    uuid.UUID
-	Kind            SubjectKind
-	ExpiresAt       *time.Time
-	Revision        int64
-	EffectiveGrants []Grant
+	AccountID            uuid.UUID
+	WorkspaceID          uuid.UUID
+	SubjectID            uuid.UUID
+	DisplayName          string
+	Email                string
+	CredentialID         uuid.UUID
+	CredentialSource     string
+	AuthenticationMethod string
+	Kind                 SubjectKind
+	ExpiresAt            *time.Time
+	Revision             int64
+	EffectiveGrants      []Grant
 }
 
 type PrincipalLoader interface {
@@ -52,12 +56,16 @@ type Authenticator struct {
 }
 
 type cachedCredential struct {
-	AccountID    uuid.UUID
-	WorkspaceID  uuid.UUID
-	SubjectID    uuid.UUID
-	CredentialID uuid.UUID
-	Kind         SubjectKind
-	ExpiresAt    *time.Time
+	AccountID            uuid.UUID
+	WorkspaceID          uuid.UUID
+	SubjectID            uuid.UUID
+	DisplayName          string
+	Email                string
+	CredentialID         uuid.UUID
+	CredentialSource     string
+	AuthenticationMethod string
+	Kind                 SubjectKind
+	ExpiresAt            *time.Time
 }
 
 func NewAuthenticator(loader PrincipalLoader, revision int64, options AuthenticatorOptions) (*Authenticator, error) {
@@ -255,12 +263,16 @@ func (a *Authenticator) cachePrincipal(credentialHash string, principal ControlP
 		return Actor{}, err
 	}
 	identity := cachedCredential{
-		AccountID:    principal.AccountID,
-		WorkspaceID:  principal.WorkspaceID,
-		SubjectID:    principal.SubjectID,
-		CredentialID: principal.CredentialID,
-		Kind:         principal.Kind,
-		ExpiresAt:    principal.ExpiresAt,
+		AccountID:            principal.AccountID,
+		WorkspaceID:          principal.WorkspaceID,
+		SubjectID:            principal.SubjectID,
+		DisplayName:          principal.DisplayName,
+		Email:                principal.Email,
+		CredentialID:         principal.CredentialID,
+		CredentialSource:     principal.CredentialSource,
+		AuthenticationMethod: principal.AuthenticationMethod,
+		Kind:                 principal.Kind,
+		ExpiresAt:            principal.ExpiresAt,
 	}
 	a.credentialCache.set(credentialHash, identity)
 	a.snapshotCache.set(snapshotCacheKey(principal.SubjectID, principal.Revision), snapshot)
@@ -269,12 +281,17 @@ func (a *Authenticator) cachePrincipal(credentialHash string, principal ControlP
 
 func actorFromCached(identity cachedCredential, snapshot AuthorizationSnapshot) Actor {
 	return Actor{
-		AccountID:     identity.AccountID,
-		WorkspaceID:   identity.WorkspaceID,
-		SubjectID:     identity.SubjectID,
-		CredentialID:  identity.CredentialID,
-		Kind:          identity.Kind,
-		Authorization: snapshot,
+		AccountID:            identity.AccountID,
+		WorkspaceID:          identity.WorkspaceID,
+		SubjectID:            identity.SubjectID,
+		DisplayName:          identity.DisplayName,
+		Email:                identity.Email,
+		CredentialID:         identity.CredentialID,
+		CredentialSource:     identity.CredentialSource,
+		AuthenticationMethod: identity.AuthenticationMethod,
+		CredentialExpiresAt:  identity.ExpiresAt,
+		Kind:                 identity.Kind,
+		Authorization:        snapshot,
 	}
 }
 

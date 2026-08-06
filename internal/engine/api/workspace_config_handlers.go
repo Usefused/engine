@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/mtlsauth"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
@@ -78,7 +79,7 @@ type workspaceConfigBucket struct {
 	// Secrets are generic, bucket-scoped named secrets ($ENV refs only, same
 	// discipline as ServiceConfig.Auth/.Connect) -- not tied to any one
 	// service, resolved via an explicit bucket.<name>.secret.<key> reference
-	// rather than ambient SDK/artifact context (see
+	// rather than ambient SDK/app context (see
 	// plans/plan-service-config-restructure.md item 4).
 	Secrets map[string]string `json:"secrets,omitempty"`
 }
@@ -151,6 +152,7 @@ type workspaceExecutionPolicy struct {
 	RateLimit   *rateLimitConfig `json:"rate_limit,omitempty"`
 	Retry       *retryConfig     `json:"retry,omitempty"`
 	RetryConfig *retryConfig     `json:"retry_config,omitempty"`
+	TimeoutMs   *int             `json:"timeout_ms,omitempty"`
 	// Pagination moved under execution_policy from the now-deleted
 	// runtime_config.pagination (see plans/plan-service-config-restructure.md
 	// item 1) -- it shares this same Public flag rather than having its own,
@@ -570,7 +572,7 @@ func createWorkspaceConfigPlan(ctx context.Context, configStore store.ConfigRepo
 	// Source hashes include formatting, so they cannot decide semantic
 	// equality. Declaration actions remain visible until their backing systems
 	// expose current state; this prevents a matching file from hiding drift.
-	unchangedDesired := currentState != nil && sameCanonicalArtifactState(currentState.DesiredState, resolvedConfig)
+	unchangedDesired := currentState != nil && sameCanonicalAppState(currentState.DesiredState, resolvedConfig)
 	return persistWorkspaceConfigPlan(ctx, configStore, accountID, req, configKey, resolvedConfig, desired, currentState, summary, unchangedDesired)
 }
 
@@ -774,6 +776,9 @@ func executeWorkspaceConfigApply(
 	verifier ServiceVerifier,
 	call workspaceApplyCall,
 ) ([]appliedWorkspaceWebhook, error) {
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.execute_apply")
+	defer span.End()
+
 	plan, currentState, err := loadWorkspacePlanForApply(ctx, configStore, call)
 	if err != nil {
 		return nil, err
@@ -790,6 +795,10 @@ func executeWorkspaceConfigApply(
 	}
 	if err := validateWorkspaceRemovalDecisions(plan, desired, previousManaged); err != nil {
 		return nil, err
+	}
+	if limErr := checkWorkspaceServiceLimit(ctx, span, s, desired, previousManaged); limErr != nil {
+		span.SetAttributes(attribute.String("outcome", "service_limit_exceeded"))
+		return nil, workspaceConfigHTTPError{status: http.StatusForbidden, message: limErr.Error()}
 	}
 	// Once external execution begins we finish independently of client
 	// cancellation. Otherwise a dropped connection after an accepted Registry
@@ -972,7 +981,7 @@ func workspaceApplyInputs(plan *store.ConfigPlan, currentState *store.ConfigStat
 
 // validateWorkspaceProfileResetApproved requires destructive reset intent to
 // appear in the approved action list before apply proceeds. Deleting a
-// workspace override changes dispatch for every artifact that selects the
+// workspace override changes dispatch for every app that selects the
 // tuple, so this must be an explicit, reviewed action -- see the plan's
 // "Produce an explicit reset action before deleting an override." Unlike the
 // old bucket-owned model, there is no bucket identity to pin here: a
@@ -1614,7 +1623,36 @@ func validateWorkspaceConfigDocument(doc workspaceConfigDocument) error {
 	if doc.Services == nil {
 		return errors.New("config.services is required")
 	}
+	return validateWorkspaceExecutionPolicyTimeouts(doc.Services)
+}
+
+const maxWorkspaceExecutionTimeoutMs = 24 * 60 * 60 * 1000
+
+func validateWorkspaceExecutionPolicyTimeouts(services map[string]workspaceConfigService) error {
+	for name, service := range services {
+		if err := validateWorkspaceExecutionPolicyTimeout(name, "", service.ExecutionPolicy); err != nil {
+			return err
+		}
+		for _, version := range service.Versions {
+			if err := validateWorkspaceExecutionPolicyTimeout(name, version.Version, version.ExecutionPolicy); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
+}
+
+func validateWorkspaceExecutionPolicyTimeout(name, version string, policy *workspaceExecutionPolicy) error {
+	if policy == nil || policy.TimeoutMs == nil {
+		return nil
+	}
+	if *policy.TimeoutMs >= 1 && *policy.TimeoutMs <= maxWorkspaceExecutionTimeoutMs {
+		return nil
+	}
+	if version == "" {
+		return fmt.Errorf("service %q execution_policy.timeout_ms must be between 1 and %d", name, maxWorkspaceExecutionTimeoutMs)
+	}
+	return fmt.Errorf("service %q version %q execution_policy.timeout_ms must be between 1 and %d", name, version, maxWorkspaceExecutionTimeoutMs)
 }
 
 func normalizeWorkspaceService(key string, svc workspaceConfigService) (workspaceDesiredService, error) {
@@ -2142,7 +2180,7 @@ func workspaceExecutionPolicyCandidates(desired workspaceDesiredState) []workspa
 
 func sameWorkspaceExecutionPolicy(expected, actual store.WorkspaceExecutionPolicyOverride) bool {
 	return reflect.DeepEqual(expected.RateLimit, actual.RateLimit) && reflect.DeepEqual(expected.RetryConfig, actual.RetryConfig) &&
-		reflect.DeepEqual(expected.Pagination, actual.Pagination) && reflect.DeepEqual(expected.EventExtractionPath, actual.EventExtractionPath) &&
+		reflect.DeepEqual(expected.TimeoutMs, actual.TimeoutMs) && reflect.DeepEqual(expected.Pagination, actual.Pagination) && reflect.DeepEqual(expected.EventExtractionPath, actual.EventExtractionPath) &&
 		reflect.DeepEqual(expected.IncomingWebhookConfig, actual.IncomingWebhookConfig) && reflect.DeepEqual(expected.BaseURL, actual.BaseURL)
 }
 
@@ -3958,7 +3996,7 @@ func workspaceConnectBucketName(bucketName string) string {
 }
 
 // prepareWorkspaceWebhookRegistration is deliberately persistence-free so
-// batch artifact preparation can build every row without database calls in
+// batch app preparation can build every row without database calls in
 // its service loop.
 func prepareWorkspaceWebhookRegistration(serviceID, serviceVersionID uuid.UUID, label, secretRef string, secretBucketID *uuid.UUID, authShape fusedobject.IncomingWebhookConfig, eventExtractionPath, owningConfigKey string) (store.WorkspaceWebhook, error) {
 	slug, err := webhookid.Generate()
@@ -4576,6 +4614,7 @@ func workspaceExecutionPolicyOverride(serviceID uuid.UUID, serviceVersionID *uui
 	override := store.WorkspaceExecutionPolicyOverride{
 		ServiceID:           serviceID,
 		ServiceVersionID:    serviceVersionID,
+		TimeoutMs:           ep.TimeoutMs,
 		EventExtractionPath: ep.EventExtractionPath,
 		BaseURL:             ep.BaseURL,
 	}
@@ -4891,6 +4930,38 @@ func validateWorkspaceRemovalDecisions(
 	return nil
 }
 
+// checkWorkspaceServiceLimit evaluates whether adding new services in this apply
+// would exceed the account's MaxServices entitlement. It counts only services
+// that are not already present in previousManaged — removals free capacity and
+// additions consume it.
+func checkWorkspaceServiceLimit(
+	ctx context.Context,
+	span trace.Span,
+	s store.Store,
+	desired workspaceDesiredState,
+	previousManaged map[uuid.UUID]workspaceManagedService,
+) error {
+	newServiceCount := 0
+	for svcID := range desired.Services {
+		if _, exists := previousManaged[svcID]; !exists {
+			newServiceCount++
+		}
+	}
+	if newServiceCount == 0 {
+		return nil
+	}
+	currentActive, err := s.CountActiveServices(ctx)
+	if err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("failed to count active services: %w", err)
+	}
+	lim := entitlement.CheckLimit(span, "services", currentActive, entitlement.LiveEntitlement.Load().MaxServices)
+	if lim != nil {
+		return lim
+	}
+	return nil
+}
+
 func createWorkspaceRemovalNotifications(
 	ctx context.Context,
 	configStore store.ConfigRepository,
@@ -5150,12 +5221,16 @@ func workspaceConfigErrorCode(err workspaceConfigHTTPError) string {
 	switch {
 	case strings.HasPrefix(message, "bucket not found:"):
 		return "credential_set_not_found"
-	case message == "artifact config requires exactly one bucket":
+	case message == "app config requires exactly one bucket":
 		return "credential_set_required"
 	case stableWorkspaceErrorCode(message):
 		return message
 	}
-	switch err.status {
+	return workspaceHTTPStatusErrorCode(err.status)
+}
+
+func workspaceHTTPStatusErrorCode(status int) string {
+	switch status {
 	case http.StatusBadRequest:
 		return "invalid_request"
 	case http.StatusUnauthorized:
@@ -5385,6 +5460,10 @@ func workspaceNotificationInbox(ctx context.Context, configStore store.ConfigRep
 	}
 
 	if paginated {
+		return inbox, nil
+	}
+
+	if !entitlement.LiveEntitlement.Load().DriftMonitoringEnabled {
 		return inbox, nil
 	}
 

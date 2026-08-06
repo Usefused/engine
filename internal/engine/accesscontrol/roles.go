@@ -7,17 +7,17 @@ import (
 )
 
 const (
-	RoleOwner           = "owner"
-	RoleAdmin           = "admin"
-	RoleBuilder         = "builder"
-	RoleViewer          = "viewer"
-	RoleServiceUser     = "service-user"
-	RoleServiceManager  = "service-manager"
-	RoleBucketUser      = "bucket-user"
-	RoleBucketManager   = "bucket-manager"
-	RoleArtifactReader  = "artifact-reader"
-	RoleArtifactUser    = "artifact-user"
-	RoleArtifactManager = "artifact-manager"
+	RoleOwner          = "owner"
+	RoleAdmin          = "admin"
+	RoleBuilder        = "builder"
+	RoleViewer         = "viewer"
+	RoleServiceUser    = "service-user"
+	RoleServiceManager = "service-manager"
+	RoleBucketUser     = "bucket-user"
+	RoleBucketManager  = "bucket-manager"
+	RoleAppReader      = "app-reader"
+	RoleAppUser        = "app-user"
+	RoleAppManager     = "app-manager"
 )
 
 var ErrInvalidRoleDefinition = errors.New("invalid role definition")
@@ -54,11 +54,11 @@ var builtInRoles = []RoleDefinition{
 			PermissionCredentialsManage,
 			PermissionConnectionRead,
 			PermissionConnectionManage,
-			PermissionArtifactRead,
-			PermissionArtifactUse,
-			PermissionArtifactCreate,
-			PermissionArtifactManage,
-			PermissionArtifactTokensManage,
+			PermissionAppRead,
+			PermissionAppUse,
+			PermissionAppCreate,
+			PermissionAppManage,
+			PermissionAppTokensManage,
 			PermissionCatalogueRead,
 			PermissionCatalogueImport,
 			PermissionCatalogueManage,
@@ -76,7 +76,7 @@ var builtInRoles = []RoleDefinition{
 		ScopeType:   ResourceWorkspace,
 		Permissions: []Permission{
 			PermissionWorkspaceRead,
-			PermissionArtifactCreate,
+			PermissionAppCreate,
 			PermissionCatalogueRead,
 			PermissionAccountRead,
 			PermissionBillingRead,
@@ -138,29 +138,29 @@ var builtInRoles = []RoleDefinition{
 		},
 	},
 	{
-		Slug:        RoleArtifactReader,
-		DisplayName: "Artifact reader",
-		ScopeType:   ResourceArtifact,
-		Permissions: []Permission{PermissionArtifactRead},
+		Slug:        RoleAppReader,
+		DisplayName: "App reader",
+		ScopeType:   ResourceApp,
+		Permissions: []Permission{PermissionAppRead},
 	},
 	{
-		Slug:        RoleArtifactUser,
-		DisplayName: "Artifact user",
-		ScopeType:   ResourceArtifact,
+		Slug:        RoleAppUser,
+		DisplayName: "App user",
+		ScopeType:   ResourceApp,
 		Permissions: []Permission{
-			PermissionArtifactRead,
-			PermissionArtifactUse,
+			PermissionAppRead,
+			PermissionAppUse,
 		},
 	},
 	{
-		Slug:        RoleArtifactManager,
-		DisplayName: "Artifact manager",
-		ScopeType:   ResourceArtifact,
+		Slug:        RoleAppManager,
+		DisplayName: "App manager",
+		ScopeType:   ResourceApp,
 		Permissions: []Permission{
-			PermissionArtifactRead,
-			PermissionArtifactUse,
-			PermissionArtifactManage,
-			PermissionArtifactTokensManage,
+			PermissionAppRead,
+			PermissionAppUse,
+			PermissionAppManage,
+			PermissionAppTokensManage,
 		},
 	},
 }
@@ -216,8 +216,8 @@ func permissionSupportsRoleScope(permission Permission, scope ResourceType) bool
 		return scope == ResourceService
 	case "bucket", "credentials", "connection":
 		return scope == ResourceBucket
-	case "artifact":
-		return scope == ResourceArtifact
+	case "app":
+		return scope == ResourceApp
 	default:
 		return false
 	}

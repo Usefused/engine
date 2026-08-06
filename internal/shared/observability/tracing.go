@@ -38,7 +38,7 @@ import (
 // Each Thread maps to one root OTel span; Steps are child spans.
 type Thread interface {
 	// AddRefs attaches safe, non-secret metadata to the root span
-	// (e.g. artifact_id, service_id, tool_name). Never add credentials here.
+	// (e.g. app.id, service_id, tool_name). Never add credentials here.
 	AddRefs(ctx context.Context, refs map[string]string) Thread
 	// Step creates a named child span within this thread.
 	Step(name string) Step
@@ -136,7 +136,7 @@ type otelThread struct {
 	span trace.Span
 }
 
-// AddRefs attaches safe metadata (artifact_id, service_id …) as span attributes.
+// AddRefs attaches safe metadata (app.id, service_id …) as span attributes.
 // Callers MUST NOT pass credentials here — see package doc.
 func (t *otelThread) AddRefs(ctx context.Context, refs map[string]string) Thread {
 	attrs := make([]attribute.KeyValue, 0, len(refs))

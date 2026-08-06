@@ -1,7 +1,7 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Outlet, useNavigate, useLocation, useRouteLoaderData } from "@remix-run/react";
 import { NotificationBell } from "~/components/notifications/NotificationBell";
-import { clearApiKey } from "~/lib/session";
+import { api } from "~/lib/api";
 import { IntegrationsSidebar } from "~/components/layout/IntegrationsSidebar";
 import { CurrentActorAccessProvider } from "~/components/access/CurrentActorAccess";
 
@@ -10,6 +10,7 @@ export default function IntegrationsLayout() {
   const location = useLocation();
   const rootData = useRouteLoaderData<{ isAuth: boolean }>("root");
   const isAuth = rootData?.isAuth ?? false;
+  const [signOutError, setSignOutError] = useState("");
 
   useEffect(() => {
     const isAuthenticatedStaticRoute = location.pathname.startsWith("/integrations/access/") || [
@@ -31,9 +32,21 @@ export default function IntegrationsLayout() {
     }
   }, [navigate, location.pathname, isAuth]);
 
-  function handleSignOut() {
-    clearApiKey();
-    navigate("/login", { replace: true });
+	async function handleSignOut() {
+		setSignOutError("");
+		try {
+			await api.auth.logout();
+			window.location.replace("/login");
+		} catch (error) {
+			try {
+				await api.auth.session();
+				await api.auth.logout();
+				window.location.replace("/login");
+			} catch (retryError) {
+				console.error("Failed to sign out", error, retryError);
+				setSignOutError("Sign out could not be completed. Refresh the page and try again.");
+			}
+		}
   }
 
   return (
@@ -43,6 +56,7 @@ export default function IntegrationsLayout() {
 
         {/* Main content */}
         <main className="flex-1 min-w-0 overflow-y-auto">
+          {signOutError && <p role="alert" className="m-4 rounded-md bg-red-50 p-3 text-sm text-red-700">{signOutError}</p>}
           <div className="max-w-6xl mx-auto w-full px-4 py-5 sm:px-6 sm:py-8 lg:px-8">
             {isAuth && (
               <div className="flex justify-end mb-3">

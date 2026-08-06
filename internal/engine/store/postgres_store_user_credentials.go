@@ -71,11 +71,12 @@ func validateIssueCredentialInput(input IssueCredentialInput) error {
 
 func insertUserControlCredential(ctx context.Context, tx pgx.Tx, input IssueCredentialInput, rawKey string) (ControlCredential, error) {
 	var credential ControlCredential
+	source, authMethod := controlCredentialMetadata(input)
 	err := tx.QueryRow(ctx, `
-		INSERT INTO fused_control_credentials (subject_id, key_hash, key_prefix, name, expires_at)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO fused_control_credentials (subject_id, key_hash, key_prefix, name, expires_at, source, auth_method)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id, subject_id, key_prefix, name, expires_at, last_used_at, revoked_at, created_at
-	`, input.UserID, accesscontrol.HashControlCredential(rawKey), accesscontrol.CredentialPrefix(rawKey), input.Name, input.ExpiresAt).Scan(
+	`, input.UserID, accesscontrol.HashControlCredential(rawKey), accesscontrol.CredentialPrefix(rawKey), input.Name, input.ExpiresAt, source, authMethod).Scan(
 		&credential.ID, &credential.UserID, &credential.KeyPrefix, &credential.Name,
 		&credential.ExpiresAt, &credential.LastUsedAt, &credential.RevokedAt, &credential.CreatedAt,
 	)
@@ -83,6 +84,17 @@ func insertUserControlCredential(ctx context.Context, tx pgx.Tx, input IssueCred
 		return ControlCredential{}, fmt.Errorf("insert user control credential: %w", err)
 	}
 	return credential, nil
+}
+
+func controlCredentialMetadata(input IssueCredentialInput) (string, string) {
+	source, authMethod := input.Source, input.AuthMethod
+	if source == "" {
+		source = "api_key"
+	}
+	if authMethod == "" {
+		authMethod = "api_key"
+	}
+	return source, authMethod
 }
 
 func (s *postgresStore) RevokeUserControlCredential(ctx context.Context, userID, credentialID uuid.UUID, actor MutationActor) (CredentialMutationResult, error) {

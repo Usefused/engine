@@ -22,7 +22,7 @@ func (s *bootstrapRepositoryStub) ReconcileBootstrapOwner(_ context.Context, inp
 func TestBootstrapOwnerHashesLicenseKeyAndSeedsRoles(t *testing.T) {
 	accountID := uuid.New()
 	repository := &bootstrapRepositoryStub{result: BootstrapResult{SubjectID: uuid.New(), Revision: 2, Changed: true}}
-	result, err := BootstrapOwner(context.Background(), repository, accountID, "fsk_license_secret")
+	result, err := BootstrapOwner(context.Background(), repository, accountID, "fsk_license_secret", "owner@example.com")
 	if err != nil {
 		t.Fatalf("BootstrapOwner: %v", err)
 	}
@@ -37,6 +37,9 @@ func TestBootstrapOwnerHashesLicenseKeyAndSeedsRoles(t *testing.T) {
 	}
 	if repository.input.CredentialPrefix != "fsk_lice" {
 		t.Fatalf("credential prefix = %q, want fsk_lice", repository.input.CredentialPrefix)
+	}
+	if repository.input.OwnerEmail != "owner@example.com" {
+		t.Fatalf("owner email = %q, want owner@example.com", repository.input.OwnerEmail)
 	}
 	if len(repository.input.Roles) != len(BuiltInRoles()) {
 		t.Fatalf("role count = %d, want %d", len(repository.input.Roles), len(BuiltInRoles()))

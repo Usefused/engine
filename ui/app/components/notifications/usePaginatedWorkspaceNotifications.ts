@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, NotificationServiceRef, WorkspaceNotification } from "~/lib/api";
-import { getApiKey } from "~/lib/session";
 
 const PAGE_SIZE = 20;
 
@@ -46,8 +45,7 @@ export function usePaginatedWorkspaceNotifications() {
   }, []);
 
   const refresh = useCallback(() => {
-    if (!getApiKey()) return;
-    setLoading(true);
+		setLoading(true);
     setError(null);
     return api.workspace
       .listNotificationsPage(page, PAGE_SIZE, filter === "unread", filter === "read")

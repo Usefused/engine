@@ -83,16 +83,16 @@ func (s *EngineGRPCServer) StartConnectSession(ctx context.Context, req *enginev
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.grpc.connect_session.start")
 	defer span.End()
 
-	call, artifactID, err := s.authenticatedConnectCallFromGRPC(ctx, req.GetBucketId(), req.GetServiceId())
+	call, appID, err := s.authenticatedConnectCallFromGRPC(ctx, req.GetBucketId(), req.GetServiceId())
 	if err != nil {
 		return nil, grpcConnectError(err)
 	}
-	createdByArtifactID, err := optionalUUIDValue(req.GetCreatedByArtifactId())
+	createdByAppID, err := optionalUUIDValue(req.GetCreatedByAppId())
 	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, "created_by_artifact_id must be a valid UUID")
+		return nil, status.Error(codes.InvalidArgument, "created_by_app_id must be a valid UUID")
 	}
-	if createdByArtifactID != uuid.Nil && createdByArtifactID != artifactID {
-		return nil, status.Error(codes.PermissionDenied, "created_by_artifact_id must match the authenticated artifact")
+	if createdByAppID != uuid.Nil && createdByAppID != appID {
+		return nil, status.Error(codes.PermissionDenied, "created_by_app_id must match the authenticated app")
 	}
 	endUserRef := strings.TrimSpace(req.GetEndUserRef())
 	if endUserRef == "" {
@@ -106,7 +106,7 @@ func (s *EngineGRPCServer) StartConnectSession(ctx context.Context, req *enginev
 	if err != nil {
 		return nil, grpcConnectError(err)
 	}
-	response, err := createConnectSession(ctx, s.store, call, endUserRef, artifactID, returnURL, req.GetResourceInput(), req.GetScopes(), resolved, s.masterKey)
+	response, err := createConnectSession(ctx, s.store, call, endUserRef, appID, returnURL, req.GetResourceInput(), req.GetScopes(), resolved, s.masterKey)
 	if err != nil {
 		return nil, grpcConnectError(err)
 	}
@@ -124,7 +124,7 @@ func (s *EngineGRPCServer) GetConnection(ctx context.Context, req *enginev1.GetC
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "connection_id must be a valid UUID")
 	}
-	scope, err := s.authenticateArtifactFromGRPC(ctx)
+	scope, err := s.authenticateAppFromGRPC(ctx)
 	if err != nil {
 		return nil, grpcConnectError(err)
 	}
@@ -132,7 +132,7 @@ func (s *EngineGRPCServer) GetConnection(ctx context.Context, req *enginev1.GetC
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to get auth connection")
 	}
-	if conn == nil || !artifactScopeSelectsService(scope.Selections, conn.ServiceID) {
+	if conn == nil || !appRuntimeSelectsService(scope.Selections, conn.ServiceID) {
 		return &enginev1.GetConnectionResponse{Found: false}, nil
 	}
 	return &enginev1.GetConnectionResponse{Found: true, Connection: projectProtoAuthConnection(*conn)}, nil
@@ -147,7 +147,7 @@ func (s *EngineGRPCServer) ListConnectionResources(ctx context.Context, req *eng
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "connection_id must be a valid UUID")
 	}
-	scope, err := s.authenticateArtifactFromGRPC(ctx)
+	scope, err := s.authenticateAppFromGRPC(ctx)
 	if err != nil {
 		return nil, grpcConnectError(err)
 	}
@@ -155,7 +155,7 @@ func (s *EngineGRPCServer) ListConnectionResources(ctx context.Context, req *eng
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to resolve auth connection")
 	}
-	if connection == nil || !artifactScopeSelectsService(scope.Selections, connection.ServiceID) {
+	if connection == nil || !appRuntimeSelectsService(scope.Selections, connection.ServiceID) {
 		return nil, status.Error(codes.NotFound, "auth connection not found")
 	}
 	resources, err := s.store.ListConnectionResources(ctx, connectionID)
@@ -167,9 +167,9 @@ func (s *EngineGRPCServer) ListConnectionResources(ctx context.Context, req *eng
 }
 
 // authenticatedConnectCallFromGRPC binds a runtime call to the immutable
-// artifact scope authenticated by x-artifact-id plus its SDK token.
+// app version authenticated by x-app-id plus its family token.
 func (s *EngineGRPCServer) authenticatedConnectCallFromGRPC(ctx context.Context, bucketIDRaw, serviceIDRaw string) (connectAdminCall, uuid.UUID, error) {
-	scope, err := s.authenticateArtifactFromGRPC(ctx)
+	scope, err := s.authenticateAppFromGRPC(ctx)
 	if err != nil {
 		return connectAdminCall{}, uuid.Nil, err
 	}
@@ -181,31 +181,31 @@ func (s *EngineGRPCServer) authenticatedConnectCallFromGRPC(ctx context.Context,
 	if err != nil {
 		return connectAdminCall{}, uuid.Nil, status.Error(codes.InvalidArgument, "service_id must be a valid UUID")
 	}
-	if scope.BucketID != bucketID || !artifactScopeSelectsService(scope.Selections, serviceID) {
-		return connectAdminCall{}, uuid.Nil, status.Error(codes.PermissionDenied, "artifact scope does not allow this bucket and service")
+	if scope.BucketID != bucketID || !appRuntimeSelectsService(scope.Selections, serviceID) {
+		return connectAdminCall{}, uuid.Nil, status.Error(codes.PermissionDenied, "app scope does not allow this bucket and service")
 	}
-	return connectAdminCall{bucketID: bucketID, serviceID: serviceID}, scope.ArtifactID, nil
+	return connectAdminCall{bucketID: bucketID, serviceID: serviceID}, scope.AppID, nil
 }
 
-// authenticateArtifactFromGRPC deliberately avoids control credentials: SDK
-// runtime identity is the artifact ID plus a token issued for that artifact.
-func (s *EngineGRPCServer) authenticateArtifactFromGRPC(ctx context.Context) (*store.ArtifactScope, error) {
-	artifactID, err := uuid.Parse(strings.TrimSpace(grpcArtifactID(ctx)))
+// authenticateAppFromGRPC deliberately avoids control credentials: SDK
+// runtime identity is the exact app ID plus a token issued for its family.
+func (s *EngineGRPCServer) authenticateAppFromGRPC(ctx context.Context) (*store.AppRuntime, error) {
+	appID, err := uuid.Parse(strings.TrimSpace(grpcAppID(ctx)))
 	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, "artifact authentication is required")
+		return nil, status.Error(codes.Unauthenticated, "app authentication is required")
 	}
-	accountID, err := s.tokenValidator.Validate(ctx, artifactID, grpcAPIKey(ctx))
+	identity, err := s.tokenValidator.Validate(ctx, appID, grpcAPIKey(ctx))
 	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, "artifact authentication failed")
+		return nil, status.Error(codes.Unauthenticated, "app authentication failed")
 	}
-	scope, err := s.store.GetArtifactScope(ctx, artifactID)
-	if err != nil || scope.AccountID != accountID || scope.ArtifactID != artifactID || scope.BucketID == uuid.Nil || scope.DeactivatedAt != nil {
-		return nil, status.Error(codes.PermissionDenied, "artifact scope is unavailable")
+	scope, err := s.store.GetAppRuntime(ctx, appID)
+	if err != nil || scope.AccountID != identity.AccountID || scope.AppID != appID || scope.BucketID == uuid.Nil {
+		return nil, status.Error(codes.PermissionDenied, "app scope is unavailable")
 	}
 	return scope, nil
 }
 
-func artifactScopeSelectsService(raw []byte, serviceID uuid.UUID) bool {
+func appRuntimeSelectsService(raw []byte, serviceID uuid.UUID) bool {
 	var selections []models.SDKSelection
 	if err := json.Unmarshal(raw, &selections); err != nil {
 		return false
@@ -234,15 +234,13 @@ func grpcAPIKey(ctx context.Context) string {
 	return ""
 }
 
-// grpcArtifactID reads the x-artifact-id call metadata SubscribeWebhooks
-// authenticates with -- the gRPC-metadata equivalent of the WS path's
-// X-Artifact-ID header (authenticateWebSocket in websocket_handler.go).
-func grpcArtifactID(ctx context.Context) string {
+// grpcAppID reads the exact app version from call metadata.
+func grpcAppID(ctx context.Context) string {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		return ""
 	}
-	if vals := md.Get("x-artifact-id"); len(vals) > 0 {
+	if vals := md.Get("x-app-id"); len(vals) > 0 {
 		return vals[0]
 	}
 	return ""
@@ -290,7 +288,7 @@ func projectProtoAuthConnection(conn store.AuthConnection) *enginev1.AuthConnect
 		BucketId:              resp.BucketID.String(),
 		ServiceId:             resp.ServiceID.String(),
 		EndUserRef:            resp.EndUserRef,
-		CreatedByArtifactId:   resp.CreatedByArtifactID.String(),
+		CreatedByAppId:        resp.CreatedByAppID.String(),
 		AuthType:              resp.AuthType,
 		TokenType:             resp.TokenType,
 		Scopes:                resp.Scopes,

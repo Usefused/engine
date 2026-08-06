@@ -241,9 +241,9 @@ func TestConfigRepositoryPostgres(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateConfigPlan(subject): %v", err)
 		}
-		artifactID := uuid.New()
+		appID := uuid.New()
 		state, err := repo.ApplyConfigPlan(ctx, ApplyConfigPlanParams{
-			State:  UpsertConfigStateParams{ConfigKey: configKey, ConfigType: ConfigTypeMCP, SourceHash: plan.SourceHash, LatestResourceID: &artifactID, UpdatedBy: accountID},
+			State:  UpsertConfigStateParams{ConfigKey: configKey, ConfigType: ConfigTypeMCP, SourceHash: plan.SourceHash, LatestResourceID: &appID, UpdatedBy: accountID},
 			PlanID: plan.ID, BaseGeneration: plan.BaseGeneration, ExpectedRevision: plan.Revision,
 		})
 		if err != nil {
@@ -418,8 +418,8 @@ func TestConfigRepositoryPostgres(t *testing.T) {
 		}
 		_, err = repo.CreateConfigPlan(ctx, CreateConfigPlanParams{ConfigKey: plan.ConfigKey, ConfigType: ConfigTypeMCP,
 			OwnerTeamID: &otherTeamID, SourceHash: "sha256:forged-owner", RequiredPermissions: requiredPermissions, CreatedBy: accountID, SupersedeExisting: true})
-		if !errors.Is(err, ErrArtifactOwnerMismatch) {
-			t.Fatalf("owner replacement error = %v, want ErrArtifactOwnerMismatch", err)
+		if !errors.Is(err, ErrAppOwnerMismatch) {
+			t.Fatalf("owner replacement error = %v, want ErrAppOwnerMismatch", err)
 		}
 	})
 

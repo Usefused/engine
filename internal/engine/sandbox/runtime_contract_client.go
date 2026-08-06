@@ -174,6 +174,7 @@ const runtimeContractServiceFields = `
 		max_retries
 		backoff_ms
 	}
+	timeout_ms
 	pagination {
 		type
 		request_param
@@ -305,6 +306,7 @@ type runtimeContractService struct {
 	AuthConfigs           fusedobject.AuthConfigs            `json:"auth_configs"`
 	RateLimit             *fusedobject.RateLimitConfig       `json:"rate_limit"`
 	RetryConfig           *fusedobject.RetryConfig           `json:"retry_config"`
+	TimeoutMs             *int                               `json:"timeout_ms"`
 	Pagination            *fusedobject.PaginationConfig      `json:"pagination"`
 	DefaultHeaders        fusedobject.DefaultHeaders         `json:"default_headers"`
 	ConnectConfig         *fusedobject.ServiceConnectConfig  `json:"connect_config"`
@@ -332,6 +334,7 @@ func runtimeContractSnapshot(serviceID, serviceVersionID uuid.UUID, version stri
 		AuthConfigs:           service.AuthConfigs,
 		RateLimit:             service.RateLimit,
 		RetryConfig:           service.RetryConfig,
+		TimeoutMs:             service.TimeoutMs,
 		Pagination:            service.Pagination,
 		DefaultHeaders:        service.DefaultHeaders,
 		ConnectConfig:         service.ConnectConfig,

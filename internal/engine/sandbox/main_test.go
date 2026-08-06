@@ -190,10 +190,10 @@ func TestEnforceToolCallTimeout_KillsSessionOnTimeout(t *testing.T) {
 	defer cancel()
 
 	sess := &mcpSession{
-		artifactID: "sdk-timeout-test",
-		sessionID:  "sess-timeout-test",
-		cmd:        cmd,
-		cancel:     cancel,
+		appID:     "sdk-timeout-test",
+		sessionID: "sess-timeout-test",
+		cmd:       cmd,
+		cancel:    cancel,
 		pendingRequests: map[string]pendingReq{
 			"call-1": {endpointName: "slow_tool", startTime: time.Now()},
 		},
@@ -234,9 +234,9 @@ func TestEnforceToolCallTimeout_DoesNotKillIfCompleted(t *testing.T) {
 	var mu sync.Mutex
 
 	sess := &mcpSession{
-		artifactID: "sdk-no-kill",
-		sessionID:  "sess-no-kill",
-		cmd:        cmd,
+		appID:     "sdk-no-kill",
+		sessionID: "sess-no-kill",
+		cmd:       cmd,
 		cancel: func() {
 			mu.Lock()
 			killed = true

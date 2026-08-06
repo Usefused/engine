@@ -12,16 +12,17 @@ import (
 )
 
 var acceptanceDynamicPermissions = map[dynamicRequirementKind][]accesscontrol.Permission{
-	dynamicServiceCreate:    {accesscontrol.PermissionServiceManage},
-	dynamicBucketByName:     {accesscontrol.PermissionBucketManage},
-	dynamicSecretWrite:      {accesscontrol.PermissionCredentialsManage},
-	dynamicWorkspaceApply:   {accesscontrol.PermissionWorkspaceRead, accesscontrol.PermissionServiceManage, accesscontrol.PermissionBucketManage, accesscontrol.PermissionCredentialsManage},
-	dynamicConfigPlanAction: {accesscontrol.PermissionWorkspaceUpdate},
-	dynamicWorkspacePlan:    {accesscontrol.PermissionWorkspaceRead, accesscontrol.PermissionServiceRead, accesscontrol.PermissionBucketRead},
-	dynamicArtifactPlan:     {accesscontrol.PermissionArtifactCreate, accesscontrol.PermissionServiceRead, accesscontrol.PermissionBucketRead},
-	dynamicArtifactApply:    {accesscontrol.PermissionArtifactCreate, accesscontrol.PermissionServiceConsume, accesscontrol.PermissionBucketUse},
-	dynamicSDKGenerate:      {accesscontrol.PermissionArtifactCreate, accesscontrol.PermissionServiceConsume, accesscontrol.PermissionBucketUse},
-	dynamicArtifactDownload: {accesscontrol.PermissionArtifactRead},
+	dynamicServiceCreate:      {accesscontrol.PermissionServiceManage},
+	dynamicBucketByName:       {accesscontrol.PermissionBucketManage},
+	dynamicSecretWrite:        {accesscontrol.PermissionCredentialsManage},
+	dynamicWorkspaceApply:     {accesscontrol.PermissionWorkspaceRead, accesscontrol.PermissionServiceManage, accesscontrol.PermissionBucketManage, accesscontrol.PermissionCredentialsManage},
+	dynamicConfigPlanAction:   {accesscontrol.PermissionWorkspaceUpdate},
+	dynamicWorkspacePlan:      {accesscontrol.PermissionWorkspaceRead, accesscontrol.PermissionServiceRead, accesscontrol.PermissionBucketRead},
+	dynamicDesiredConfigPlan:  {accesscontrol.PermissionAppCreate, accesscontrol.PermissionServiceRead, accesscontrol.PermissionBucketRead},
+	dynamicDesiredConfigApply: {accesscontrol.PermissionAppCreate, accesscontrol.PermissionServiceConsume, accesscontrol.PermissionBucketUse},
+	dynamicSDKGenerate:        {accesscontrol.PermissionAppCreate, accesscontrol.PermissionServiceConsume, accesscontrol.PermissionBucketUse},
+	dynamicAppAccess:          {accesscontrol.PermissionAppManage, accesscontrol.PermissionAppRead},
+	dynamicAppTokenAccess:     {accesscontrol.PermissionAppTokensManage},
 }
 
 type acceptanceRequirementResolver struct {
@@ -127,7 +128,7 @@ func acceptanceRoleAllowsPermission(role string, permission accesscontrol.Permis
 func acceptanceBuilderPermission(permission accesscontrol.Permission) bool {
 	switch permission {
 	case accesscontrol.PermissionWorkspaceRead,
-		accesscontrol.PermissionArtifactCreate,
+		accesscontrol.PermissionAppCreate,
 		accesscontrol.PermissionCatalogueRead,
 		accesscontrol.PermissionAccountRead,
 		accesscontrol.PermissionBillingRead,

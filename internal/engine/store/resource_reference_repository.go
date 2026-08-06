@@ -21,17 +21,19 @@ const (
 	ReferenceUser       ResourceReferenceKind = "user"
 	ReferenceService    ResourceReferenceKind = "service"
 	ReferenceBucket     ResourceReferenceKind = "bucket"
-	ReferenceArtifact   ResourceReferenceKind = "artifact"
+	ReferenceApp        ResourceReferenceKind = "app"
+	ReferenceAppFamily  ResourceReferenceKind = "app_family"
 	ReferenceCredential ResourceReferenceKind = "credential"
 )
 
 type ResourceReferenceQuery struct {
-	Kind         ResourceReferenceKind
-	Value        string
-	ArtifactKind string
-	ParentID     uuid.UUID
-	AllowedAll   bool
-	AllowedIDs   []uuid.UUID
+	Kind       ResourceReferenceKind
+	Value      string
+	AppKind    string
+	AppVersion string
+	ParentID   uuid.UUID
+	AllowedAll bool
+	AllowedIDs []uuid.UUID
 }
 
 type ResourceReferenceResolver interface {
@@ -45,10 +47,10 @@ func validateResourceReferenceQuery(query ResourceReferenceQuery) error {
 	switch query.Kind {
 	case ReferenceTeam, ReferenceUser, ReferenceService, ReferenceBucket:
 		return nil
-	case ReferenceArtifact:
-		// SDK and MCP share a permission repository, but callers may bind a human
-		// name to one product namespace to prevent cross-kind resolution.
-		if query.ArtifactKind == "" || query.ArtifactKind == "sdk" || query.ArtifactKind == "mcp" {
+	case ReferenceApp, ReferenceAppFamily:
+		// SDK and MCP families share a permission repository, but callers may bind
+		// a human name to one product namespace to prevent cross-kind resolution.
+		if query.AppKind == "" || query.AppKind == "sdk" || query.AppKind == "mcp" {
 			return nil
 		}
 	case ReferenceCredential:
@@ -57,12 +59,4 @@ func validateResourceReferenceQuery(query ResourceReferenceQuery) error {
 		}
 	}
 	return fmt.Errorf("%w: unsupported reference kind %q", ErrResourceReferenceNotFound, query.Kind)
-}
-
-func parseArtifactReference(value string) (string, string) {
-	name, version, found := strings.Cut(strings.TrimSpace(value), "@")
-	if !found {
-		return strings.TrimSpace(name), ""
-	}
-	return strings.TrimSpace(name), strings.TrimSpace(version)
 }

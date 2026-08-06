@@ -14,11 +14,14 @@ func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement 
 	entitlement = entitlement.Normalized()
 	query := `
 		INSERT INTO fused_runtime_entitlements (
-			singleton_key, plan, heartbeat_required, usage_reporting, public_service_insights_reporting,
-			heartbeat_interval_seconds, heartbeat_stale_after_seconds, refreshed_at, updated_at
+			singleton_key, entitlement_revision, plan, heartbeat_required, usage_reporting, public_service_insights_reporting,
+			heartbeat_interval_seconds, heartbeat_stale_after_seconds, refreshed_at, updated_at,
+			max_buckets, max_sdk_families, max_mcp_families, max_services, max_sandbox_concurrency,
+			drift_monitoring_enabled, webhook_ingestion_enabled, sso_enabled, execution_retention_days
 		)
-		VALUES (1, $1, $2, $3, $4, $5, $6, $7, NOW())
+		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9, $10, $11, $12, $13, $14, $15, $16, $17)
 		ON CONFLICT (singleton_key) DO UPDATE SET
+			entitlement_revision = EXCLUDED.entitlement_revision,
 			plan = EXCLUDED.plan,
 			heartbeat_required = EXCLUDED.heartbeat_required,
 			usage_reporting = EXCLUDED.usage_reporting,
@@ -26,9 +29,19 @@ func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement 
 			heartbeat_interval_seconds = EXCLUDED.heartbeat_interval_seconds,
 			heartbeat_stale_after_seconds = EXCLUDED.heartbeat_stale_after_seconds,
 			refreshed_at = EXCLUDED.refreshed_at,
-			updated_at = NOW()
+			updated_at = NOW(),
+			max_buckets = EXCLUDED.max_buckets,
+			max_sdk_families = EXCLUDED.max_sdk_families,
+			max_mcp_families = EXCLUDED.max_mcp_families,
+			max_services = EXCLUDED.max_services,
+			max_sandbox_concurrency = EXCLUDED.max_sandbox_concurrency,
+			drift_monitoring_enabled = EXCLUDED.drift_monitoring_enabled,
+			webhook_ingestion_enabled = EXCLUDED.webhook_ingestion_enabled,
+			sso_enabled = EXCLUDED.sso_enabled,
+			execution_retention_days = EXCLUDED.execution_retention_days
 	`
 	_, err := s.db.Exec(ctx, query,
+		entitlement.EntitlementRevision,
 		entitlement.Plan,
 		entitlement.HeartbeatRequired,
 		entitlement.UsageReporting,
@@ -36,19 +49,31 @@ func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement 
 		entitlement.HeartbeatIntervalSeconds,
 		entitlement.HeartbeatStaleAfterSeconds,
 		entitlement.RefreshedAt,
+		entitlement.MaxBuckets,
+		entitlement.MaxSDKFamilies,
+		entitlement.MaxMCPFamilies,
+		entitlement.MaxServices,
+		entitlement.MaxSandboxConcurrency,
+		entitlement.DriftMonitoringEnabled,
+		entitlement.WebhookIngestionEnabled,
+		entitlement.SSOEnabled,
+		entitlement.ExecutionRetentionDays,
 	)
 	return err
 }
 
 func (s *postgresStore) GetRuntimeEntitlement(ctx context.Context) (models.RuntimeEntitlement, error) {
 	query := `
-		SELECT plan, heartbeat_required, usage_reporting, public_service_insights_reporting,
-			heartbeat_interval_seconds, heartbeat_stale_after_seconds, refreshed_at
+		SELECT entitlement_revision, plan, heartbeat_required, usage_reporting, public_service_insights_reporting,
+			heartbeat_interval_seconds, heartbeat_stale_after_seconds, refreshed_at,
+			max_buckets, max_sdk_families, max_mcp_families, max_services, max_sandbox_concurrency,
+			drift_monitoring_enabled, webhook_ingestion_enabled, sso_enabled, execution_retention_days
 		FROM fused_runtime_entitlements
 		WHERE singleton_key = 1
 	`
 	var entitlement models.RuntimeEntitlement
 	err := s.db.QueryRow(ctx, query).Scan(
+		&entitlement.EntitlementRevision,
 		&entitlement.Plan,
 		&entitlement.HeartbeatRequired,
 		&entitlement.UsageReporting,
@@ -56,6 +81,15 @@ func (s *postgresStore) GetRuntimeEntitlement(ctx context.Context) (models.Runti
 		&entitlement.HeartbeatIntervalSeconds,
 		&entitlement.HeartbeatStaleAfterSeconds,
 		&entitlement.RefreshedAt,
+		&entitlement.MaxBuckets,
+		&entitlement.MaxSDKFamilies,
+		&entitlement.MaxMCPFamilies,
+		&entitlement.MaxServices,
+		&entitlement.MaxSandboxConcurrency,
+		&entitlement.DriftMonitoringEnabled,
+		&entitlement.WebhookIngestionEnabled,
+		&entitlement.SSOEnabled,
+		&entitlement.ExecutionRetentionDays,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

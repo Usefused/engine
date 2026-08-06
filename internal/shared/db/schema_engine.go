@@ -38,6 +38,19 @@ func engineSchemaQueries() []string {
 			CHECK (singleton_key = 1)
 		);`,
 
+		// Installation identity belongs to the database, not a process. Every
+		// Engine replica sharing this database therefore reports one stable
+		// installation while retaining a distinct runtime identity in memory.
+		`CREATE TABLE IF NOT EXISTS fused_engine_installation (
+			singleton_key smallint PRIMARY KEY DEFAULT 1,
+			installation_id uuid NOT NULL UNIQUE DEFAULT gen_random_uuid(),
+			created_at timestamptz NOT NULL DEFAULT NOW(),
+			CHECK (singleton_key = 1)
+		);`,
+		`INSERT INTO fused_engine_installation (singleton_key)
+		VALUES (1)
+		ON CONFLICT (singleton_key) DO NOTHING;`,
+
 		// Control-plane subjects are deliberately independent of Registry
 		// accounts. The Engine authenticates these local principals before it
 		// uses its own licence identity for outbound Registry requests.
@@ -49,7 +62,7 @@ func engineSchemaQueries() []string {
 			created_at   timestamptz NOT NULL DEFAULT NOW(),
 			updated_at   timestamptz NOT NULL DEFAULT NOW(),
 			CONSTRAINT chk_fused_subjects_kind
-				CHECK (kind IN ('bootstrap', 'user', 'service_account', 'artifact')),
+				CHECK (kind IN ('bootstrap', 'user', 'service_account', 'app')),
 			CONSTRAINT chk_fused_subjects_status
 				CHECK (status IN ('invited', 'active', 'suspended', 'archived'))
 		);`,
@@ -69,6 +82,56 @@ func engineSchemaQueries() []string {
 			CONSTRAINT chk_fused_users_email_normalized CHECK (email_normalized <> ''),
 			CONSTRAINT chk_fused_users_email_display CHECK (email_display <> '')
 		);`,
+
+		// External subjects are durable Engine-local bindings. Registry proves the
+		// identity, but only this database decides which invited user receives the
+		// existing local roles and grants.
+		`CREATE TABLE IF NOT EXISTS fused_external_identities (
+			issuer               text NOT NULL,
+			external_subject     text NOT NULL,
+			provider             text NOT NULL,
+			user_subject_id      uuid NOT NULL REFERENCES fused_users(subject_id) ON DELETE CASCADE,
+			created_at           timestamptz NOT NULL DEFAULT NOW(),
+			last_authenticated_at timestamptz NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (issuer, external_subject),
+			CONSTRAINT uq_fused_external_identity_user UNIQUE (user_subject_id),
+			CONSTRAINT chk_fused_external_identity_values CHECK (
+				issuer <> '' AND external_subject <> '' AND provider <> ''
+			)
+		);`,
+
+		// The Registry verifier is encrypted for cross-process completion; poll
+		// tokens are reduced to hashes. Verified assertion fields exist only until
+		// the local binding transaction consumes and clears them.
+		`CREATE TABLE IF NOT EXISTS fused_managed_login_transactions (
+			id                           uuid PRIMARY KEY,
+			registry_transaction_id      uuid NOT NULL UNIQUE,
+			account_id                   uuid NOT NULL,
+			installation_id              uuid NOT NULL,
+			purpose                      text NOT NULL CHECK (purpose = 'browser_login'),
+			poll_secret_hash             text NOT NULL UNIQUE,
+			enrollment_ref               text NOT NULL,
+			encrypted_dek                text NOT NULL,
+			encrypted_registry_verifier  text,
+			state                        text NOT NULL DEFAULT 'pending' CHECK (
+				state IN ('pending', 'exchanging', 'verified', 'consumed', 'expired')
+			),
+			exchange_started_at          timestamptz,
+			provider                     text,
+			issuer                       text,
+			external_subject             text,
+			verified_email               text,
+			display_name                 text,
+			auth_method                  text,
+			authenticated_at             timestamptz,
+			expires_at                   timestamptz NOT NULL,
+			created_at                   timestamptz NOT NULL DEFAULT NOW(),
+			consumed_at                  timestamptz,
+			CONSTRAINT chk_fused_managed_login_enrollment CHECK (enrollment_ref <> '')
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_managed_login_transactions_expiry
+		ON fused_managed_login_transactions(expires_at, id)
+		WHERE state <> 'consumed';`,
 
 		// Team rows and memberships exist before their management API so the
 		// effective-grants query has one stable direct-plus-team shape from its
@@ -106,10 +169,13 @@ func engineSchemaQueries() []string {
 			key_hash     text NOT NULL UNIQUE,
 			key_prefix   text NOT NULL,
 			name         text NOT NULL,
+			source       text NOT NULL DEFAULT 'api_key',
+			auth_method  text NOT NULL DEFAULT 'api_key',
 			expires_at   timestamptz,
 			last_used_at timestamptz,
 			revoked_at   timestamptz,
-			created_at   timestamptz NOT NULL DEFAULT NOW()
+			created_at   timestamptz NOT NULL DEFAULT NOW(),
+			CONSTRAINT chk_fused_control_credential_metadata CHECK (source <> '' AND auth_method <> '')
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_control_credentials_active_hash
 		ON fused_control_credentials(key_hash) WHERE revoked_at IS NULL;`,
@@ -117,6 +183,33 @@ func engineSchemaQueries() []string {
 		ON fused_control_credentials(subject_id, created_at DESC, id);`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_control_credentials_active_name_ci
 		ON fused_control_credentials(subject_id, lower(name)) WHERE revoked_at IS NULL;`,
+
+		// CLI login precommits a credential hash before browser approval. Keeping
+		// the rendezvous in PostgreSQL lets any Engine node complete the flow while
+		// ensuring the browser and polling capabilities are independent and one-time.
+		`CREATE TABLE IF NOT EXISTS fused_cli_login_transactions (
+			id                       uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			poll_secret_hash         text NOT NULL UNIQUE,
+			browser_secret_hash      text NOT NULL UNIQUE,
+			credential_hash          text NOT NULL UNIQUE,
+			credential_prefix        text NOT NULL,
+			state                    text NOT NULL DEFAULT 'pending',
+			approved_subject_id      uuid REFERENCES fused_subjects(id) ON DELETE RESTRICT,
+			approved_by_credential_id uuid REFERENCES fused_control_credentials(id) ON DELETE RESTRICT,
+			auth_method              text,
+			expires_at               timestamptz NOT NULL,
+			credential_expires_at    timestamptz NOT NULL,
+			credential_id            uuid REFERENCES fused_control_credentials(id) ON DELETE RESTRICT,
+			created_at                timestamptz NOT NULL DEFAULT NOW(),
+			approved_at               timestamptz,
+			consumed_at               timestamptz,
+			CONSTRAINT chk_fused_cli_login_state
+				CHECK (state IN ('pending', 'approved', 'consumed')),
+			CONSTRAINT chk_fused_cli_login_prefix CHECK (credential_prefix <> '')
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_cli_login_transactions_expiry
+		ON fused_cli_login_transactions(expires_at, id)
+		WHERE state <> 'consumed';`,
 
 		// Roles are stable permission bundles. A binding determines both the
 		// principal (or team) receiving the role and its resource boundary.
@@ -128,7 +221,7 @@ func engineSchemaQueries() []string {
 			system_role  boolean NOT NULL DEFAULT false,
 			created_at   timestamptz NOT NULL DEFAULT NOW(),
 			CONSTRAINT chk_fused_roles_scope_type
-				CHECK (scope_type IN ('workspace', 'service', 'bucket', 'artifact'))
+				CHECK (scope_type IN ('workspace', 'service', 'bucket', 'app'))
 		);`,
 		`CREATE TABLE IF NOT EXISTS fused_role_permissions (
 			role_id    uuid NOT NULL REFERENCES fused_roles(id) ON DELETE CASCADE,
@@ -148,7 +241,7 @@ func engineSchemaQueries() []string {
 			CONSTRAINT chk_fused_role_bindings_subject_type
 				CHECK (subject_type IN ('subject', 'team', 'workspace')),
 			CONSTRAINT chk_fused_role_bindings_resource_type
-				CHECK (resource_type IN ('workspace', 'service', 'bucket', 'artifact')),
+				CHECK (resource_type IN ('workspace', 'service', 'bucket', 'app')),
 			CONSTRAINT uq_fused_role_binding
 				UNIQUE (subject_type, subject_id, role_id, resource_type, resource_id)
 		);`,
@@ -195,7 +288,7 @@ func engineSchemaQueries() []string {
 			CONSTRAINT chk_fused_audit_events_outcome
 				CHECK (outcome IN ('attempted', 'allowed', 'denied', 'succeeded', 'failed')),
 			CONSTRAINT chk_fused_audit_events_resource_type
-				CHECK (resource_type IS NULL OR resource_type IN ('workspace', 'service', 'bucket', 'artifact')),
+				CHECK (resource_type IS NULL OR resource_type IN ('workspace', 'service', 'bucket', 'app')),
 			CONSTRAINT chk_fused_audit_events_status_code
 				CHECK (status_code BETWEEN 0 AND 599)
 		);`,
@@ -236,14 +329,14 @@ func engineSchemaQueries() []string {
 		ON fused_connect_configs(bucket_id);`,
 
 		// User connections live in the same bucket credential namespace as
-		// workspace secrets. The unique key intentionally excludes artifact_id: SDKs
+		// workspace secrets. The unique key intentionally excludes app_id: SDKs
 		// linked to the same bucket should share connected users.
 		`CREATE TABLE IF NOT EXISTS fused_auth_connections (
 			id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 			bucket_id          uuid NOT NULL REFERENCES fused_buckets(id) ON DELETE CASCADE,
 			service_id         uuid NOT NULL,
 			end_user_ref       text NOT NULL,
-			created_by_artifact_id  uuid,
+			created_by_app_id       uuid,
 			auth_type          text NOT NULL,
 			encrypted_dek      text NOT NULL,
 			access_token       text NOT NULL,
@@ -326,7 +419,7 @@ func engineSchemaQueries() []string {
 				nonce_hash         text NOT NULL DEFAULT '',
 				encrypted_dek      text NOT NULL DEFAULT '',
 				pkce_verifier      text NOT NULL DEFAULT '',
-				created_by_artifact_id  uuid,
+				created_by_app_id       uuid,
 				return_url         text NOT NULL DEFAULT '',
 				resource_input     jsonb NOT NULL DEFAULT '{}'::jsonb,
 				requested_scopes   text[] NOT NULL DEFAULT '{}',
@@ -339,53 +432,19 @@ func engineSchemaQueries() []string {
 		`CREATE INDEX IF NOT EXISTS idx_fused_connect_sessions_expires
 		ON fused_connect_sessions(expires_at);`,
 
-		// SDK Scopes
-		`CREATE TABLE IF NOT EXISTS fused_artifact_scopes (
-			id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-			account_id uuid NOT NULL,
-			artifact_id uuid UNIQUE NOT NULL,
-			owner_subject_id uuid REFERENCES fused_subjects(id) ON DELETE RESTRICT,
-			owner_team_id uuid REFERENCES fused_teams(id) ON DELETE RESTRICT,
-			CONSTRAINT chk_fused_artifact_scopes_owner CHECK (
-				(owner_subject_id IS NOT NULL)::int + (owner_team_id IS NOT NULL)::int = 1
-			),
-			scope_schema_version integer NOT NULL DEFAULT 1,
-			selections jsonb NOT NULL,
-			deactivated_at timestamptz,
-			created_at timestamp with time zone DEFAULT NOW(),
-			-- kind labels how this scope is meant to be connected to ("sdk" or
-			-- "mcp"); a scope's shape (selections+bucket) is identical either
-			-- way, this is purely a listing/UI distinction, not enforcement.
-			kind text NOT NULL DEFAULT 'sdk',
-			-- name is an optional user-supplied label (CLI --name flag, or a
-			-- workspace config's name); reactivate-only activate calls never
-			-- set it, so it can be NULL for scopes that were only reactivated.
-			name text,
-			version text,
-			config_key text
-		);`,
-		// SDK and MCP names are separate user-facing namespaces. Version remains
-		// part of the identity so a generated SDK can publish multiple releases.
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_artifact_identity_ci
-		ON fused_artifact_scopes(kind, lower(name), COALESCE(version, '')) WHERE name IS NOT NULL;`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_artifact_reference_latest
-		ON fused_artifact_scopes(kind, lower(name), created_at DESC, artifact_id DESC)
-		WHERE name IS NOT NULL AND deactivated_at IS NULL;`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_artifact_scopes_subject_owner_kind
-		ON fused_artifact_scopes(owner_subject_id, kind, created_at DESC, artifact_id);`,
-
 		// MCP Sessions
 		`CREATE TABLE IF NOT EXISTS fused_mcp_sessions (
 			id uuid PRIMARY KEY,
-			artifact_id uuid,
+			app_id uuid,
 			session_id text,
 			started_at timestamp with time zone DEFAULT NOW(),
 			ended_at timestamp with time zone,
 			last_ping_at timestamp with time zone DEFAULT NOW(),
 			client_info jsonb
 		);`,
-
-		`CREATE INDEX IF NOT EXISTS idx_fused_mcp_sessions_sdk_started ON fused_mcp_sessions(artifact_id, started_at DESC);`,
+		// App-scoped indexes are created by the additive migration after legacy
+		// tables receive app_id. Keeping one definition also prevents fresh and
+		// upgraded installations from drifting.
 
 		// Engine execution receipts are compact product/audit records. OTEL owns
 		// rich step-level detail; this table keeps user history queryable even
@@ -395,8 +454,11 @@ func engineSchemaQueries() []string {
 			trace_id text,
 			span_id text,
 			account_id uuid,
-			artifact_id uuid,
+			app_family_id uuid,
+			app_id uuid,
+			app_version text,
 			transport text NOT NULL,
+			provider_protocol text,
 			direction text NOT NULL DEFAULT 'outbound',
 			service_id uuid,
 			service_version_id text,
@@ -429,19 +491,23 @@ func engineSchemaQueries() []string {
 			started_at timestamp with time zone NOT NULL,
 			ended_at timestamp with time zone NOT NULL,
 			created_at timestamp with time zone DEFAULT NOW(),
-			idempotency_replayed boolean NOT NULL DEFAULT false
+			idempotency_replayed boolean NOT NULL DEFAULT false,
+			CONSTRAINT chk_fused_execution_app_identity CHECK (
+				transport NOT IN ('sdk', 'mcp') OR (
+					app_family_id IS NOT NULL AND app_id IS NOT NULL
+					AND NULLIF(BTRIM(app_version), '') IS NOT NULL
+				)
+			),
+			CONSTRAINT chk_fused_execution_app_version_length CHECK (
+				app_version IS NULL OR CHAR_LENGTH(app_version) <= 128
+			)
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_sdk_started
-		ON fused_engine_execution_events(artifact_id, started_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_service_version
 		ON fused_engine_execution_events(service_id, service_version_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_service_started
 		ON fused_engine_execution_events(service_id, started_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_started
 		ON fused_engine_execution_events(started_at);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_endpoint
-		ON fused_engine_execution_events(artifact_id, endpoint_name, started_at DESC);`,
-
 		// Public-service insight reporting starts from committed canonical events.
 		// The projection marker and outbox are updated in one transaction so a
 		// Registry outage never blocks execution or causes double counting.
@@ -485,6 +551,7 @@ func engineSchemaQueries() []string {
 		// is operating under.
 		`CREATE TABLE IF NOT EXISTS fused_runtime_entitlements (
 			singleton_key smallint PRIMARY KEY DEFAULT 1,
+			entitlement_revision text NOT NULL DEFAULT '',
 			plan text NOT NULL,
 			heartbeat_required boolean NOT NULL,
 			usage_reporting text NOT NULL,
@@ -493,6 +560,16 @@ func engineSchemaQueries() []string {
 			heartbeat_stale_after_seconds integer NOT NULL CHECK (heartbeat_stale_after_seconds > 0),
 			refreshed_at timestamptz NOT NULL,
 			updated_at timestamptz NOT NULL DEFAULT NOW(),
+			-- Capability limits: negative = unlimited, 0 = not allowed
+			max_buckets integer NOT NULL DEFAULT -1,
+			max_sdk_families integer NOT NULL DEFAULT -1,
+			max_mcp_families integer NOT NULL DEFAULT -1,
+			max_services integer NOT NULL DEFAULT -1,
+			max_sandbox_concurrency integer NOT NULL DEFAULT -1,
+			drift_monitoring_enabled boolean NOT NULL DEFAULT false,
+			webhook_ingestion_enabled boolean NOT NULL DEFAULT false,
+			sso_enabled boolean NOT NULL DEFAULT false,
+			execution_retention_days integer NOT NULL DEFAULT 30,
 			CHECK (singleton_key = 1)
 		);`,
 
@@ -574,30 +651,6 @@ func engineSchemaQueries() []string {
 		`CREATE INDEX IF NOT EXISTS idx_fused_contract_snapshots_service
 		ON fused_service_contract_snapshots(service_id);`,
 
-		// Artifact snapshots are the Engine-local definition of an SDK or MCP
-		// artifact. They deliberately do not reference fused_artifact_scopes:
-		// startup reconciliation can restore safe definition metadata after a
-		// database reset, while credentials and execution tokens remain absent
-		// until an operator explicitly configures the artifact on this Engine.
-		`CREATE TABLE IF NOT EXISTS fused_artifact_snapshots (
-			artifact_id          uuid PRIMARY KEY,
-			account_id           uuid NOT NULL,
-			kind                 text NOT NULL CHECK (kind IN ('sdk', 'mcp')),
-			name                 text NOT NULL,
-			description          text NOT NULL DEFAULT '',
-			version              text NOT NULL DEFAULT '',
-			target_language      text NOT NULL DEFAULT '',
-			readme               text NOT NULL DEFAULT '',
-			selections           jsonb NOT NULL DEFAULT '[]'::jsonb,
-			scope_schema_version integer NOT NULL DEFAULT 0,
-			source_hash          text NOT NULL DEFAULT '',
-			registry_created_at  timestamptz,
-			fetched_at           timestamptz NOT NULL DEFAULT NOW(),
-			refreshed_at         timestamptz NOT NULL DEFAULT NOW()
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_artifact_snapshots_account_kind
-		ON fused_artifact_snapshots(account_id, kind, registry_created_at DESC, artifact_id);`,
-
 		`CREATE TABLE IF NOT EXISTS fused_service_contract_endpoints (
 			snapshot_id     uuid NOT NULL REFERENCES fused_service_contract_snapshots(id) ON DELETE CASCADE,
 			endpoint_id     uuid NOT NULL,
@@ -636,9 +689,9 @@ func engineSchemaQueries() []string {
 		);`,
 
 		// Engine's local, queryable copy of provider-contract changelog events.
-		// Phase 3 matches against this cache, not a live Registry call, so it
-		// needs to exist whether or not a workspace happens to be actively
-		// syncing when a change lands. registry_changelog_id is UNIQUE so a
+		// The changelog matcher queries this cache rather than calling the
+		// Registry live, so it needs to exist whether or not a workspace
+		// happens to be actively syncing when a change lands. registry_changelog_id is UNIQUE so a
 		// re-fetch of the same event (e.g. a crash between insert and cursor
 		// advance)
 		// is a no-op via ON CONFLICT DO NOTHING, never a duplicate.
@@ -804,14 +857,14 @@ func engineSchemaQueries() []string {
 		ON fused_workspace_notifications(status, created_at DESC);`,
 
 		// Idempotency cache: stores the final response of an Execute call keyed
-		// by (artifact_id, idempotency_key_hash) so a retried/duplicate request with
+		// by (app_id, idempotency_key_hash) so a retried/duplicate request with
 		// the same key replays the original result instead of re-hitting the
 		// vendor. 24h TTL mirrors Stripe's idempotency key retention. The key
 		// itself is hashed before storage, consistent with how execution audit
 		// events already only ever store idempotency_key_hash, never the raw key.
 		`CREATE TABLE IF NOT EXISTS fused_engine_idempotency_keys (
 			id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-			artifact_id uuid NOT NULL,
+			app_id uuid NOT NULL,
 			idempotency_key_hash text NOT NULL,
 			request_body_hash text,
 			environment text,
@@ -819,21 +872,10 @@ func engineSchemaQueries() []string {
 			response_status integer NOT NULL DEFAULT 200,
 			created_at timestamptz NOT NULL DEFAULT NOW(),
 			expires_at timestamptz NOT NULL,
-			UNIQUE(artifact_id, idempotency_key_hash)
+			UNIQUE(app_id, idempotency_key_hash)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_engine_idempotency_keys_expires
 		ON fused_engine_idempotency_keys(expires_at);`,
-
-		// SDK Tokens
-		`CREATE TABLE IF NOT EXISTS fused_artifact_tokens (
-			id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-			artifact_id      uuid NOT NULL REFERENCES fused_artifact_scopes(artifact_id) ON DELETE CASCADE,
-			token_hash  text NOT NULL UNIQUE,
-			name        text NOT NULL,
-			last_used_at timestamptz,
-			created_at  timestamptz DEFAULT NOW()
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_artifact_tokens_artifact_id ON fused_artifact_tokens(artifact_id);`,
 
 		// Workspace Secrets
 		`CREATE TABLE IF NOT EXISTS fused_workspace_secrets (
@@ -866,8 +908,8 @@ func engineSchemaQueries() []string {
 
 		// Connection profiles are workspace-scoped, not bucket-scoped: the
 		// effective profile identity is workspace + service + service_version +
-		// auth_type, and every artifact execution in the workspace shares it
-		// regardless of which bucket the artifact selected. Baseline and
+		// auth_type, and every app execution in the workspace shares it
+		// regardless of which bucket the app selected. Baseline and
 		// override are kept as separate rows (the "layer" column) rather than
 		// one row with an override flag, so a reset is a targeted delete of the
 		// override row and the pinned provider baseline survives untouched --
@@ -970,6 +1012,7 @@ func engineSchemaQueries() []string {
 			service_version_id      uuid,
 			rate_limit              jsonb,
 			retry_config            jsonb,
+			timeout_ms              integer,
 			pagination              jsonb,
 			event_extraction_path   text,
 			incoming_webhook_config jsonb,
@@ -979,7 +1022,8 @@ func engineSchemaQueries() []string {
 			-- column on this table (see LocalObjectCache.applyExecutionPolicyOverride).
 			base_url                text,
 			created_at timestamptz NOT NULL DEFAULT NOW(),
-			updated_at timestamptz NOT NULL DEFAULT NOW()
+			updated_at timestamptz NOT NULL DEFAULT NOW(),
+			CHECK (timeout_ms IS NULL OR timeout_ms BETWEEN 1 AND 86400000)
 		);`,
 		// Exactly one service-default override row per service.
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_fused_workspace_execution_policies_service_default
@@ -988,20 +1032,195 @@ func engineSchemaQueries() []string {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_fused_workspace_execution_policies_version_override
 		ON fused_workspace_execution_policies(service_version_id) WHERE service_version_id IS NOT NULL;`,
 
-		// An artifact resolves credentials from exactly one bucket. Keeping the
-		// bucket in a separate table preserves lifecycle joins without implying
-		// that one SDK can choose among several buckets at runtime.
-		`CREATE TABLE IF NOT EXISTS fused_artifact_buckets (
-			artifact_id      uuid NOT NULL REFERENCES fused_artifact_scopes(artifact_id) ON DELETE CASCADE,
-			bucket_id   uuid NOT NULL REFERENCES fused_buckets(id) ON DELETE CASCADE,
-			created_at  timestamptz DEFAULT NOW(),
-			PRIMARY KEY (artifact_id)
+		// --- App-family tables ---
+
+		// App families are the stable authorization and configuration boundary
+		// for SDK and MCP applications. One family represents one logical SDK
+		// or MCP across all its versions. Tokens, ownership, team access, and
+		// credential-bucket configuration belong to the family, not to
+		// individual versions.
+		`CREATE TABLE IF NOT EXISTS fused_app_families (
+			app_family_id       uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id          uuid NOT NULL,
+			kind                text NOT NULL CHECK (kind IN ('sdk', 'mcp')),
+			canonical_name      text NOT NULL,
+			display_name        text NOT NULL,
+			target_language     text,
+			owner_subject_id    uuid REFERENCES fused_subjects(id) ON DELETE RESTRICT,
+			owner_team_id       uuid REFERENCES fused_teams(id) ON DELETE RESTRICT,
+			created_at          timestamptz NOT NULL DEFAULT NOW(),
+			updated_at          timestamptz NOT NULL DEFAULT NOW(),
+			CONSTRAINT chk_fused_app_families_owner CHECK (
+				(owner_subject_id IS NOT NULL)::int +
+				(owner_team_id IS NOT NULL)::int = 1
+			),
+			CONSTRAINT chk_fused_app_families_language CHECK (
+				(kind = 'sdk' AND target_language IS NOT NULL)
+				OR (kind = 'mcp' AND target_language IS NULL)
+			),
+			UNIQUE (account_id, kind, canonical_name),
+			UNIQUE (app_family_id, account_id)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_app_families_account_kind
+			ON fused_app_families(account_id, kind, created_at DESC);`,
+
+		// Each app is one immutable version and its exact execution scope.
+		// The existing artifact_id is preserved as app_id during migration.
+		// Kind and target_language are read through the family to avoid
+		// duplicating them on every version row.
+		`CREATE TABLE IF NOT EXISTS fused_apps (
+			app_id                 uuid PRIMARY KEY,
+			app_family_id          uuid NOT NULL,
+			account_id             uuid NOT NULL,
+			version                text NOT NULL,
+			config_key             text NOT NULL,
+			source_hash            text NOT NULL DEFAULT '',
+			capability_hash        text NOT NULL DEFAULT '',
+			scope_schema_version   integer NOT NULL DEFAULT 1,
+			selections             jsonb NOT NULL DEFAULT '[]'::jsonb,
+			generator_version      text,
+			status                 text NOT NULL
+			                       CHECK (status IN ('building', 'active', 'deprecated')),
+			deprecation_message    text,
+			deprecated_at          timestamptz,
+			planned_deactivation_at timestamptz,
+			created_by             uuid REFERENCES fused_subjects(id) ON DELETE RESTRICT,
+			created_at             timestamptz NOT NULL DEFAULT NOW(),
+			activated_at           timestamptz,
+			UNIQUE (app_family_id, version),
+			UNIQUE (account_id, config_key),
+			FOREIGN KEY (app_family_id, account_id)
+				REFERENCES fused_app_families(app_family_id, account_id)
+				ON DELETE RESTRICT
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_apps_family_status
+			ON fused_apps(app_family_id, status, created_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_apps_account_status
+			ON fused_apps(account_id, status, created_at DESC);`,
+		// Package retention walks only runnable SDK versions by app_id. This
+		// partial index keeps each keyset page bounded as version history grows.
+		`CREATE INDEX IF NOT EXISTS idx_fused_apps_package_lease
+			ON fused_apps(app_id, app_family_id)
+			WHERE status IN ('active', 'deprecated');`,
+		`CREATE TABLE IF NOT EXISTS fused_app_capabilities (
+			app_id          uuid NOT NULL REFERENCES fused_apps(app_id) ON DELETE CASCADE,
+			capability_key  text NOT NULL CHECK (capability_key <> ''),
+			PRIMARY KEY (app_id, capability_key)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_app_capabilities_key
+			ON fused_app_capabilities(capability_key, app_id);`,
+
+		// Tombstones prevent a deactivated (family, version) pair from being
+		// reused. They contain only identity fields — no selections,
+		// credentials, or runtime configuration.
+		`CREATE TABLE IF NOT EXISTS fused_app_tombstones (
+			app_id             uuid PRIMARY KEY,
+			app_family_id      uuid NOT NULL,
+			account_id         uuid NOT NULL,
+			version            text NOT NULL,
+			source_hash        text NOT NULL,
+			deactivated_by     uuid REFERENCES fused_subjects(id) ON DELETE RESTRICT,
+			deactivated_at     timestamptz NOT NULL DEFAULT NOW(),
+			UNIQUE (app_family_id, version),
+			FOREIGN KEY (app_family_id, account_id)
+				REFERENCES fused_app_families(app_family_id, account_id)
+				ON DELETE RESTRICT
+		);`,
+
+		// Family-level bucket mapping replaces fused_artifact_buckets.
+		// All versions in a family resolve through the same connection
+		// profile/credential bucket. Reconfiguration changes the mapping
+		// once without cloning version scopes.
+		`CREATE TABLE IF NOT EXISTS fused_app_family_buckets (
+			app_family_id uuid PRIMARY KEY
+			              REFERENCES fused_app_families(app_family_id)
+			              ON DELETE CASCADE,
+			bucket_id     uuid NOT NULL REFERENCES fused_buckets(id) ON DELETE RESTRICT,
+			created_at    timestamptz NOT NULL DEFAULT NOW(),
+			updated_at    timestamptz NOT NULL DEFAULT NOW()
+		);`,
+
+		// Family-level tokens replace fused_artifact_tokens. One token
+		// authorizes all active and deprecated versions in the family.
+		// Plaintext is one-time output; only the hash is stored.
+		`CREATE TABLE IF NOT EXISTS fused_app_tokens (
+			id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			app_family_id   uuid NOT NULL
+			                REFERENCES fused_app_families(app_family_id)
+			                ON DELETE CASCADE,
+			token_hash      text NOT NULL UNIQUE,
+			name            text NOT NULL,
+			last_used_at    timestamptz,
+			created_at      timestamptz NOT NULL DEFAULT NOW(),
+			UNIQUE (app_family_id, name)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_app_tokens_family
+			ON fused_app_tokens(app_family_id, created_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS fused_app_family_migrations (
+			account_id       uuid NOT NULL,
+			kind             text NOT NULL CHECK (kind IN ('sdk', 'mcp')),
+			canonical_name   text NOT NULL,
+			app_family_id    uuid NOT NULL REFERENCES fused_app_families(app_family_id) ON DELETE RESTRICT,
+			migrated_apps    integer NOT NULL CHECK (migrated_apps >= 0),
+			migrated_tokens  integer NOT NULL CHECK (migrated_tokens >= 0),
+			completed_at     timestamptz NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (account_id, kind, canonical_name)
 		);`,
 	}
 }
 
 func engineMigrationQueries() []string {
 	return []string{
+		`ALTER TABLE fused_subjects DROP CONSTRAINT IF EXISTS chk_fused_subjects_kind;`,
+		`UPDATE fused_subjects SET kind = 'app' WHERE kind = 'artifact';`,
+		`ALTER TABLE fused_subjects ADD CONSTRAINT chk_fused_subjects_kind
+		 CHECK (kind IN ('bootstrap', 'user', 'service_account', 'app'));`,
+		// App-family IDs are the only app authorization boundary. Existing
+		// version-scoped grants are collapsed onto their family before the old
+		// vocabulary is removed, so sibling versions cannot drift in access.
+		`ALTER TABLE fused_roles DROP CONSTRAINT IF EXISTS chk_fused_roles_scope_type;`,
+		`ALTER TABLE fused_role_bindings DROP CONSTRAINT IF EXISTS chk_fused_role_bindings_resource_type;`,
+		`ALTER TABLE fused_audit_events DROP CONSTRAINT IF EXISTS chk_fused_audit_events_resource_type;`,
+		`INSERT INTO fused_role_permissions (role_id, permission)
+		 SELECT role_id, 'app.' || substr(permission, length('artifact.') + 1)
+		 FROM fused_role_permissions WHERE permission LIKE 'artifact.%'
+		 ON CONFLICT (role_id, permission) DO NOTHING;`,
+		`DELETE FROM fused_role_permissions WHERE permission LIKE 'artifact.%';`,
+		`UPDATE fused_roles SET
+			slug = CASE slug
+				WHEN 'artifact-reader' THEN 'app-reader'
+				WHEN 'artifact-user' THEN 'app-user'
+				WHEN 'artifact-manager' THEN 'app-manager'
+				ELSE slug END,
+			display_name = CASE display_name
+				WHEN 'Artifact reader' THEN 'App reader'
+				WHEN 'Artifact user' THEN 'App user'
+				WHEN 'Artifact manager' THEN 'App manager'
+				ELSE display_name END,
+			scope_type = 'app'
+		 WHERE scope_type = 'artifact';`,
+		`INSERT INTO fused_role_bindings
+			(id, subject_type, subject_id, role_id, resource_type, resource_id, created_by_subject_id, created_at)
+		 SELECT gen_random_uuid(), binding.subject_type, binding.subject_id, binding.role_id,
+			'app', app.app_family_id, binding.created_by_subject_id, MIN(binding.created_at)
+		 FROM fused_role_bindings binding
+		 JOIN fused_apps app ON app.app_id = binding.resource_id
+		 WHERE binding.resource_type = 'artifact'
+		 GROUP BY binding.subject_type, binding.subject_id, binding.role_id, app.app_family_id, binding.created_by_subject_id
+		 ON CONFLICT (subject_type, subject_id, role_id, resource_type, resource_id) DO NOTHING;`,
+		`DELETE FROM fused_role_bindings WHERE resource_type = 'artifact';`,
+		`UPDATE fused_audit_events audit
+		 SET resource_type = 'app', resource_id = app.app_family_id
+		 FROM fused_apps app
+		 WHERE audit.resource_type = 'artifact' AND audit.resource_id = app.app_id;`,
+		`UPDATE fused_audit_events SET resource_type = NULL, resource_id = NULL
+		 WHERE resource_type = 'artifact';`,
+		`ALTER TABLE fused_roles ADD CONSTRAINT chk_fused_roles_scope_type
+		 CHECK (scope_type IN ('workspace', 'service', 'bucket', 'app'));`,
+		`ALTER TABLE fused_role_bindings ADD CONSTRAINT chk_fused_role_bindings_resource_type
+		 CHECK (resource_type IN ('workspace', 'service', 'bucket', 'app'));`,
+		`ALTER TABLE fused_audit_events ADD CONSTRAINT chk_fused_audit_events_resource_type
+		 CHECK (resource_type IS NULL OR resource_type IN ('workspace', 'service', 'bucket', 'app'));`,
 		// The engine operates in a mono-workspace environment. Remove the workspace-level scoping columns.
 		`ALTER TABLE fused_buckets DROP CONSTRAINT IF EXISTS uq_workspace_buckets;`,
 		`ALTER TABLE fused_buckets DROP COLUMN IF EXISTS workspace_id;`,
@@ -1009,16 +1228,39 @@ func engineMigrationQueries() []string {
 		`ALTER TABLE fused_connect_configs DROP COLUMN IF EXISTS workspace_id;`,
 		`ALTER TABLE fused_auth_connections DROP COLUMN IF EXISTS workspace_id;`,
 		`ALTER TABLE fused_connect_sessions DROP COLUMN IF EXISTS workspace_id;`,
+		`ALTER TABLE fused_mcp_sessions ADD COLUMN IF NOT EXISTS app_id uuid;`,
+		`DO $$ BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = current_schema() AND table_name = 'fused_mcp_sessions' AND column_name = 'artifact_id'
+			) THEN
+				EXECUTE 'UPDATE fused_mcp_sessions SET app_id = artifact_id WHERE app_id IS NULL';
+			END IF;
+		END $$;`,
+		`DROP INDEX IF EXISTS idx_fused_mcp_sessions_sdk_started;`,
+		`ALTER TABLE fused_mcp_sessions DROP COLUMN IF EXISTS artifact_id;`,
+		`ALTER TABLE fused_mcp_sessions ALTER COLUMN app_id SET NOT NULL;`,
+		`ALTER TABLE fused_mcp_sessions DROP CONSTRAINT IF EXISTS fk_fused_mcp_sessions_app;`,
+		`ALTER TABLE fused_mcp_sessions ADD CONSTRAINT fk_fused_mcp_sessions_app
+			FOREIGN KEY (app_id) REFERENCES fused_apps(app_id) ON DELETE CASCADE;`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_mcp_sessions_app_started ON fused_mcp_sessions(app_id, started_at DESC);`,
+		`ALTER TABLE fused_engine_idempotency_keys ADD COLUMN IF NOT EXISTS app_id uuid;`,
+		`DO $$ BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = current_schema() AND table_name = 'fused_engine_idempotency_keys' AND column_name = 'artifact_id'
+			) THEN
+				EXECUTE 'UPDATE fused_engine_idempotency_keys SET app_id = artifact_id WHERE app_id IS NULL';
+			END IF;
+		END $$;`,
+		`ALTER TABLE fused_engine_idempotency_keys DROP CONSTRAINT IF EXISTS fused_engine_idempotency_keys_artifact_id_idempotency_key_hash_key;`,
+		`ALTER TABLE fused_engine_idempotency_keys DROP COLUMN IF EXISTS artifact_id;`,
+		`ALTER TABLE fused_engine_idempotency_keys ALTER COLUMN app_id SET NOT NULL;`,
+		`ALTER TABLE fused_engine_idempotency_keys DROP CONSTRAINT IF EXISTS fk_fused_engine_idempotency_app;`,
+		`ALTER TABLE fused_engine_idempotency_keys ADD CONSTRAINT fk_fused_engine_idempotency_app
+			FOREIGN KEY (app_id) REFERENCES fused_apps(app_id) ON DELETE CASCADE;`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_engine_idempotency_app_key ON fused_engine_idempotency_keys(app_id, idempotency_key_hash);`,
 
-		// Artifacts map to buckets via the fused_artifact_buckets table. Remove the inline bucket_id column.
-		`ALTER TABLE fused_artifact_scopes DROP COLUMN IF EXISTS bucket_id;`,
-		// every artifact has one immutable bucket assignment.
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_artifact_buckets_artifact_id ON fused_artifact_buckets(artifact_id);`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_fused_artifact_scopes_artifact_identity
-		ON fused_artifact_scopes(account_id, kind, name, version)
-		WHERE name IS NOT NULL AND version IS NOT NULL;`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_artifact_scopes_account_kind ON fused_artifact_scopes(account_id, kind, created_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_artifact_scopes_owner_kind ON fused_artifact_scopes(owner_team_id, kind, created_at DESC, artifact_id);`,
 		`ALTER TABLE fused_workspace_services ADD COLUMN IF NOT EXISTS service_slug text;`,
 		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS http_method text;`,
 		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS request_path text;`,
@@ -1026,7 +1268,60 @@ func engineMigrationQueries() []string {
 		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS provider_host text;`,
 		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS provider_http_status integer;`,
 		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS account_id uuid;`,
-		`ALTER TABLE fused_engine_execution_events ALTER COLUMN artifact_id DROP NOT NULL;`,
+		// Existing installations need the target identity columns before the
+		// historical backfill and app-scoped indexes run below.
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS app_family_id uuid;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS app_id uuid;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS app_version text;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS provider_protocol text;`,
+		`DROP INDEX IF EXISTS idx_fused_engine_execution_events_sdk_started;`,
+		`DROP INDEX IF EXISTS idx_fused_engine_execution_events_endpoint;`,
+		`DO $$ BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = current_schema()
+				  AND table_name = 'fused_engine_execution_events'
+				  AND column_name = 'artifact_id'
+			) THEN
+				EXECUTE $backfill$
+					UPDATE fused_engine_execution_events event
+					SET app_family_id = identity.app_family_id,
+						app_id = identity.app_id,
+						app_version = identity.version
+					FROM (
+						SELECT app_id, app_family_id, version FROM fused_apps
+						UNION ALL
+						SELECT app_id, app_family_id, version FROM fused_app_tombstones
+					) identity
+					WHERE event.artifact_id = identity.app_id
+					  AND event.app_id IS NULL
+				$backfill$;
+			END IF;
+		END $$;`,
+		`ALTER TABLE fused_engine_execution_events DROP COLUMN IF EXISTS artifact_id;`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname = 'chk_fused_execution_app_identity'
+				  AND conrelid = 'fused_engine_execution_events'::regclass
+			) THEN
+				ALTER TABLE fused_engine_execution_events ADD CONSTRAINT chk_fused_execution_app_identity
+				CHECK (transport NOT IN ('sdk', 'mcp') OR (
+					app_family_id IS NOT NULL AND app_id IS NOT NULL
+					AND NULLIF(BTRIM(app_version), '') IS NOT NULL
+				)) NOT VALID;
+			END IF;
+		END $$;`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname = 'chk_fused_execution_app_version_length'
+				  AND conrelid = 'fused_engine_execution_events'::regclass
+			) THEN
+				ALTER TABLE fused_engine_execution_events ADD CONSTRAINT chk_fused_execution_app_version_length
+				CHECK (app_version IS NULL OR CHAR_LENGTH(app_version) <= 128) NOT VALID;
+			END IF;
+		END $$;`,
 		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS direction text NOT NULL DEFAULT 'outbound';`,
 		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS operation_id uuid;`,
 		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS webhook_id uuid;`,
@@ -1044,7 +1339,25 @@ func engineMigrationQueries() []string {
 		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_operation_started ON fused_engine_execution_events(operation_id, started_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_webhook_started ON fused_engine_execution_events(webhook_id, started_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_started ON fused_engine_execution_events(started_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_family_started
+		ON fused_engine_execution_events(account_id, app_family_id, started_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_app_started
+		ON fused_engine_execution_events(account_id, app_id, started_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_endpoint
+		ON fused_engine_execution_events(app_id, endpoint_name, started_at DESC);`,
 		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS public_service_insights_reporting boolean NOT NULL DEFAULT true;`,
+		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS entitlement_revision text NOT NULL DEFAULT '';`,
+		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS max_buckets integer NOT NULL DEFAULT -1;`,
+		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS max_sdk_families integer NOT NULL DEFAULT -1;`,
+		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS max_mcp_families integer NOT NULL DEFAULT -1;`,
+		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS max_services integer NOT NULL DEFAULT -1;`,
+		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS max_sandbox_concurrency integer NOT NULL DEFAULT -1;`,
+		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS drift_monitoring_enabled boolean NOT NULL DEFAULT false;`,
+		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS webhook_ingestion_enabled boolean NOT NULL DEFAULT false;`,
+		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS sso_enabled boolean NOT NULL DEFAULT false;`,
+		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS execution_retention_days integer NOT NULL DEFAULT 30;`,
+		`ALTER TABLE fused_control_credentials ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'api_key';`,
+		`ALTER TABLE fused_control_credentials ADD COLUMN IF NOT EXISTS auth_method text NOT NULL DEFAULT 'api_key';`,
 		`ALTER TABLE fused_engine_idempotency_keys ADD COLUMN IF NOT EXISTS response_status integer NOT NULL DEFAULT 200;`,
 		`DROP TABLE IF EXISTS fused_webhook_events;`,
 		`DROP TABLE IF EXISTS fused_mcp_analytics;`,

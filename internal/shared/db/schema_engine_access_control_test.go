@@ -12,7 +12,7 @@ func TestEngineSchemaDefinesAccessControlFoundation(t *testing.T) {
 	joined := strings.Join(engineSchemaQueries(), "\n")
 	required := []string{
 		"CREATE TABLE IF NOT EXISTS fused_subjects",
-		"CHECK (kind IN ('bootstrap', 'user', 'service_account', 'artifact'))",
+		"CHECK (kind IN ('bootstrap', 'user', 'service_account', 'app'))",
 		"CHECK (status IN ('invited', 'active', 'suspended', 'archived'))",
 		"uq_fused_subjects_bootstrap",
 		"CREATE TABLE IF NOT EXISTS fused_teams",
@@ -20,8 +20,21 @@ func TestEngineSchemaDefinesAccessControlFoundation(t *testing.T) {
 		"idx_fused_team_memberships_member",
 		"CREATE TABLE IF NOT EXISTS fused_control_credentials",
 		"key_hash     text NOT NULL UNIQUE",
+		"source       text NOT NULL DEFAULT 'api_key'",
+		"auth_method  text NOT NULL DEFAULT 'api_key'",
 		"idx_fused_control_credentials_active_hash",
 		"WHERE revoked_at IS NULL",
+		"CREATE TABLE IF NOT EXISTS fused_cli_login_transactions",
+		"browser_secret_hash      text NOT NULL UNIQUE",
+		"credential_hash          text NOT NULL UNIQUE",
+		"idx_fused_cli_login_transactions_expiry",
+		"CREATE TABLE IF NOT EXISTS fused_external_identities",
+		"PRIMARY KEY (issuer, external_subject)",
+		"CONSTRAINT uq_fused_external_identity_user UNIQUE (user_subject_id)",
+		"CREATE TABLE IF NOT EXISTS fused_managed_login_transactions",
+		"poll_secret_hash             text NOT NULL UNIQUE",
+		"encrypted_registry_verifier  text",
+		"idx_fused_managed_login_transactions_expiry",
 		"CREATE TABLE IF NOT EXISTS fused_roles",
 		"CREATE TABLE IF NOT EXISTS fused_role_permissions",
 		"CREATE TABLE IF NOT EXISTS fused_role_bindings",
@@ -48,6 +61,9 @@ func TestEngineSchemaDefinesAccessControlFoundation(t *testing.T) {
 func TestEngineSchemaCreatesAccessControlDependenciesInOrder(t *testing.T) {
 	queries := engineSchemaQueries()
 	assertSchemaOrder(t, queries, "CREATE TABLE IF NOT EXISTS fused_subjects", "CREATE TABLE IF NOT EXISTS fused_control_credentials")
+	assertSchemaOrder(t, queries, "CREATE TABLE IF NOT EXISTS fused_control_credentials", "CREATE TABLE IF NOT EXISTS fused_cli_login_transactions")
+	assertSchemaOrder(t, queries, "CREATE TABLE IF NOT EXISTS fused_users", "CREATE TABLE IF NOT EXISTS fused_external_identities")
+	assertSchemaOrder(t, queries, "CREATE TABLE IF NOT EXISTS fused_users", "CREATE TABLE IF NOT EXISTS fused_managed_login_transactions")
 	assertSchemaOrder(t, queries, "CREATE TABLE IF NOT EXISTS fused_subjects", "CREATE TABLE IF NOT EXISTS fused_team_memberships")
 	assertSchemaOrder(t, queries, "CREATE TABLE IF NOT EXISTS fused_teams", "CREATE TABLE IF NOT EXISTS fused_team_memberships")
 	assertSchemaOrder(t, queries, "CREATE TABLE IF NOT EXISTS fused_subjects", "CREATE TABLE IF NOT EXISTS fused_audit_events")
@@ -79,6 +95,9 @@ func TestEngineAccessControlSchemaInitializationIsIdempotent(t *testing.T) {
 	for _, table := range []string{
 		"fused_subjects",
 		"fused_control_credentials",
+		"fused_cli_login_transactions",
+		"fused_external_identities",
+		"fused_managed_login_transactions",
 		"fused_teams",
 		"fused_team_memberships",
 		"fused_roles",

@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { api, BASE, type IntegrationObject } from "~/lib/api";
-import { getApiKey } from "~/lib/session";
+import { api, BASE, handleCredentialedResponse, type IntegrationObject } from "~/lib/api";
 
 interface ImportStreamEvent {
   type: "connected" | "thinking" | "extracted" | "complete" | "error";
@@ -94,10 +93,12 @@ export function useImportSession(
     let retryDelay = 2000;
     const maxRetryDelay = 60000;
 
-    fetchEventSource(`${BASE}/integrations/session/${importSessionId}/stream`, {
-      headers: { "X-API-Key": getApiKey() ?? "" },
+		fetchEventSource(`${BASE}/integrations/session/${importSessionId}/stream`, {
+			credentials: "include",
       signal: controller.signal,
       async onopen(response) {
+        handleCredentialedResponse(response);
+        if (response.status === 401) controller.abort();
         if (!response.ok) throw new Error(`Failed to connect to extraction stream: ${response.status}`);
         retryDelay = 2000;
       },

@@ -19,7 +19,7 @@ import {
 } from "~/lib/people";
 import {
   archiveTeam,
-  changeTeamArtifactAccess,
+  changeTeamAppAccess,
   changeTeamResourceAccess,
   createTeam,
   listTeams,
@@ -28,7 +28,7 @@ import {
   updateTeam,
   type Team,
   type TeamAccessLevel,
-  type TeamArtifactAccessLevel,
+  type TeamAppAccessLevel,
   type TeamEditorData,
   type TeamResourceType,
   type TeamWorkspaceRole,
@@ -143,10 +143,10 @@ function TeamsManager({ canManage, canManageOwners }: { canManage: boolean; canM
     });
   }
 
-  async function handleArtifactAccess(artifactId: string, level: TeamArtifactAccessLevel | null) {
+  async function handleAppAccess(appFamilyId: string, level: TeamAppAccessLevel | null) {
     if (!editor) return;
     await runChange(async () => {
-      await replaceArtifactAccess(editor.team, artifactId, level);
+      await replaceAppAccess(editor.team, appFamilyId, level);
       await refreshEditor();
       toast.success(level ? "Build shared with this team." : "Build access removed.");
     });
@@ -197,7 +197,7 @@ function TeamsManager({ canManage, canManageOwners }: { canManage: boolean; canM
 
       <div className={`grid gap-6 ${editor ? "lg:grid-cols-[280px_1fr]" : ""}`}>
         <TeamsList teams={teams} selectedId={selectedId} includeArchived={includeArchived} loading={loading} onIncludeArchived={setIncludeArchived} onSelect={setSelectedId} />
-        {editor && <TeamEditorPanel editor={editor} members={members} name={editName} description={editDescription} saving={saving} canManage={canManage} canManageOwners={canManageOwners} onName={setEditName} onDescription={setEditDescription} onUpdate={handleUpdate} onArchive={handleArchive} onWorkspaceRole={handleWorkspaceRole} onResourceAccess={handleResourceAccess} onArtifactAccess={handleArtifactAccess} onAddMember={handleAddMember} onRemoveMember={handleRemoveMember} />}
+        {editor && <TeamEditorPanel editor={editor} members={members} name={editName} description={editDescription} saving={saving} canManage={canManage} canManageOwners={canManageOwners} onName={setEditName} onDescription={setEditDescription} onUpdate={handleUpdate} onArchive={handleArchive} onWorkspaceRole={handleWorkspaceRole} onResourceAccess={handleResourceAccess} onAppAccess={handleAppAccess} onAddMember={handleAddMember} onRemoveMember={handleRemoveMember} />}
       </div>
     </div>
   );
@@ -212,14 +212,14 @@ function TeamsList(props: { teams: Team[]; selectedId: string; includeArchived: 
   return <section className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden"><div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between"><h2 className="font-semibold text-slate-900">Teams</h2><label className="text-xs text-slate-500 flex items-center gap-1.5"><input type="checkbox" checked={props.includeArchived} onChange={(event) => props.onIncludeArchived(event.target.checked)} /> Archived</label></div><div className="divide-y divide-slate-100">{props.loading && <p className="p-4 text-sm text-slate-500">Loading teams…</p>}{!props.loading && props.teams.length === 0 && <p className="p-4 text-sm text-slate-500">No teams yet.</p>}{props.teams.map((team) => <TeamListButton key={team.id} team={team} selected={team.id === props.selectedId} onSelect={props.onSelect} />)}</div></section>;
 }
 
-function TeamEditorPanel(props: { editor: TeamEditorData | null; members: TeamMember[]; name: string; description: string; saving: boolean; canManage: boolean; canManageOwners: boolean; onName: (value: string) => void; onDescription: (value: string) => void; onUpdate: (event: FormEvent) => void; onArchive: () => void; onWorkspaceRole: (role: TeamWorkspaceRole | null) => void; onResourceAccess: (resourceType: TeamResourceType, resourceId: string, level: TeamAccessLevel | null) => void; onArtifactAccess: (artifactId: string, level: TeamArtifactAccessLevel | null) => void; onAddMember: (email: string, role: TeamMembershipRole) => void; onRemoveMember: (userId: string) => void }) {
+function TeamEditorPanel(props: { editor: TeamEditorData | null; members: TeamMember[]; name: string; description: string; saving: boolean; canManage: boolean; canManageOwners: boolean; onName: (value: string) => void; onDescription: (value: string) => void; onUpdate: (event: FormEvent) => void; onArchive: () => void; onWorkspaceRole: (role: TeamWorkspaceRole | null) => void; onResourceAccess: (resourceType: TeamResourceType, resourceId: string, level: TeamAccessLevel | null) => void; onAppAccess: (appFamilyId: string, level: TeamAppAccessLevel | null) => void; onAddMember: (email: string, role: TeamMembershipRole) => void; onRemoveMember: (userId: string) => void }) {
   if (!props.editor) return <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm"><p className="text-sm text-slate-500">Select a team to manage its access.</p></section>;
   // access.manage covers ordinary teams; account.manage is additionally
   // required for an existing Owner team so Admins never see controls that the
   // transactional Owner-protection fence will reject.
   const canEditTeam = props.canManage && (props.canManageOwners || teamWorkspaceRole(props.editor.team) !== "OWNER");
   const disabled = !canEditTeam || teamEditorDisabled(props.saving, props.editor.team.status);
-  return <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm"><TeamEditorHeader team={props.editor.team} canManage={canEditTeam} saving={props.saving} onArchive={props.onArchive} /><TeamDetailsForm team={props.editor.team} name={props.name} description={props.description} saving={props.saving} canManage={canEditTeam} onName={props.onName} onDescription={props.onDescription} onUpdate={props.onUpdate} /><TeamAccessControls team={props.editor.team} services={props.editor.services} buckets={props.editor.buckets} disabled={disabled} canManageOwners={props.canManageOwners} onWorkspaceRoleChange={props.onWorkspaceRole} onResourceAccessChange={props.onResourceAccess} onArtifactAccessChange={props.onArtifactAccess} /><TeamMembersControls members={props.members} disabled={disabled} onAdd={props.onAddMember} onRemove={props.onRemoveMember} /></section>;
+  return <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm"><TeamEditorHeader team={props.editor.team} canManage={canEditTeam} saving={props.saving} onArchive={props.onArchive} /><TeamDetailsForm team={props.editor.team} name={props.name} description={props.description} saving={props.saving} canManage={canEditTeam} onName={props.onName} onDescription={props.onDescription} onUpdate={props.onUpdate} /><TeamAccessControls team={props.editor.team} services={props.editor.services} buckets={props.editor.buckets} disabled={disabled} canManageOwners={props.canManageOwners} onWorkspaceRoleChange={props.onWorkspaceRole} onResourceAccessChange={props.onResourceAccess} onAppAccessChange={props.onAppAccess} /><TeamMembersControls members={props.members} disabled={disabled} onAdd={props.onAddMember} onRemove={props.onRemoveMember} /></section>;
 }
 
 function TeamEditorHeader({ team, canManage, saving, onArchive }: { team: Team; canManage: boolean; saving: boolean; onArchive: () => void }) {
@@ -253,18 +253,18 @@ async function replaceResourceAccess(team: Team, resourceType: TeamResourceType,
   }
 }
 
-async function replaceArtifactAccess(team: Team, artifactId: string, desired: TeamArtifactAccessLevel | null): Promise<void> {
+async function replaceAppAccess(team: Team, appFamilyId: string, desired: TeamAppAccessLevel | null): Promise<void> {
   const existing = team.bindings.flatMap((binding) => {
-    if (binding.resource_type !== "artifact" || binding.resource_id !== artifactId) return [];
-    if (binding.role_slug === "artifact-reader") return ["READER" as const];
-    if (binding.role_slug === "artifact-manager") return ["MANAGER" as const];
+    if (binding.resource_type !== "app" || binding.resource_id !== appFamilyId) return [];
+    if (binding.role_slug === "app-reader") return ["READER" as const];
+    if (binding.role_slug === "app-manager") return ["MANAGER" as const];
     return [];
   });
   // Grant first so moving between Read and Manage cannot briefly remove a
   // second team's runtime access if the follow-up revoke is interrupted.
-  if (desired && !existing.includes(desired)) await changeTeamArtifactAccess("grant", team.id, artifactId, desired);
+  if (desired && !existing.includes(desired)) await changeTeamAppAccess("grant", team.id, appFamilyId, desired);
   for (const level of existing) {
-    if (level !== desired) await changeTeamArtifactAccess("revoke", team.id, artifactId, level);
+    if (level !== desired) await changeTeamAppAccess("revoke", team.id, appFamilyId, level);
   }
 }
 

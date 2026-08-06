@@ -18,6 +18,7 @@ import (
 
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
+	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/config"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
@@ -43,7 +44,7 @@ type pendingReq struct {
 }
 
 type mcpSession struct {
-	artifactID      string
+	appID           string
 	sessionID       string
 	cmd             *exec.Cmd
 	stdin           io.WriteCloser
@@ -55,7 +56,7 @@ type mcpSession struct {
 	token           string
 
 	// fixture is this session's own operation catalog, built at connect time
-	// from the SDK's ArtifactScope.Selections (mcp_session_fixture.go), scoping
+	// from the SDK's AppRuntime.Selections (mcp_session_fixture.go), scoping
 	// search_docs/call() to exactly what its owner selected. A missing fixture
 	// fails closed instead of exposing a process-wide catalog.
 	fixture *Fixture
@@ -100,9 +101,52 @@ var tokenCache struct {
 	m map[string]tokenCacheEntry
 }
 
+// activeExecutions tracks per-account in-flight sandbox executions for
+// MaxSandboxConcurrency enforcement. A sync.Map is chosen because account
+// count is unbounded and a coarse mutex would serialize unrelated accounts.
+var activeExecutions struct {
+	sync.Map // key: uuid.UUID.String() → *int64 (pointer so we can atomic increment)
+}
+
 func init() {
 	mcpSessions.m = make(map[string]*mcpSession)
 	tokenCache.m = make(map[string]tokenCacheEntry)
+}
+
+// executionCounter tracks a single account's in-flight executions.
+type executionCounter struct {
+	sync.Mutex
+	count int
+}
+
+// trackExecutionStart increments the per-account active execution count and
+// returns the new count plus a decrement function to call when execution ends.
+// If the limit is exceeded the counter is not incremented.
+func trackExecutionStart(accountID uuid.UUID) (current int, decrement func()) {
+	key := accountID.String()
+	val, _ := activeExecutions.LoadOrStore(key, &executionCounter{})
+	c := val.(*executionCounter)
+	c.Lock()
+	c.count++
+	current = c.count
+	c.Unlock()
+	return current, func() {
+		c.Lock()
+		c.count--
+		remaining := c.count
+		c.Unlock()
+		if remaining <= 0 {
+			activeExecutions.Delete(key)
+		}
+	}
+}
+
+// activeMCPSessionCount returns the total number of active MCP sessions
+// currently registered across all SDK IDs.
+func activeMCPSessionCount() int {
+	mcpSessions.RLock()
+	defer mcpSessions.RUnlock()
+	return len(mcpSessions.m)
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
@@ -180,8 +224,8 @@ var observabilityStartFunc = func(ctx context.Context, name, parentID string, ta
 // EngineStreamExecuteFunc is the credential-aware, streaming execution entrypoint
 // used by the gRPC edge (grpc.go). It is a package var so tests can substitute a
 // mock. The default performs real scope-checked dispatch to the vendor.
-var EngineStreamExecuteFunc = func(ctx context.Context, artifactID, token, endpointName string, params, credentials map[string]any, environment string, stream engine.ResponseStream) error {
-	return engineExecuteCore(ctx, globalObjectCache, globalDispatcher, globalTokenValidator, artifactID, token, endpointName, params, credentials, environment, stream)
+var EngineStreamExecuteFunc = func(ctx context.Context, appID, token, endpointName string, params, credentials map[string]any, environment string, stream engine.ResponseStream) error {
+	return engineExecuteCore(ctx, globalObjectCache, globalDispatcher, globalTokenValidator, appID, token, endpointName, params, credentials, environment, stream)
 }
 
 // engineExecuteCore is the single code path that performs a vendor call. Both the
@@ -197,34 +241,39 @@ func engineExecuteCore(
 	cache ObjectCache,
 	dispatcher *engine.Dispatcher,
 	validator auth.TokenValidator,
-	artifactID, token, endpointName string,
+	appID, token, endpointName string,
 	params, credentials map[string]any,
 	environment string,
 	stream engine.ResponseStream,
 ) (err error) {
 	executionStarted := time.Now()
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.dispatch.execute", trace.WithAttributes(
-		attribute.String("artifact_id", artifactID),
+		attribute.String("app.id", appID),
 		attribute.String("endpoint_name", endpointName),
 		attribute.Bool("idempotency_key_present", idempotencyKeyFromContext(ctx) != ""),
 		attribute.Bool("request_body_hash_present", requestBodyHashFromContext(ctx) != ""),
 	))
 	defer span.End()
 
-	uid, accountID, err := resolveExecutionIdentity(ctx, validator, artifactID, token)
+	identity, decrementActive, err := resolveTrackedExecutionIdentity(ctx, validator, appID, token, span)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
+	defer decrementActive()
+
 	auditState := executionAuditState{
-		artifactID:   uid,
-		accountID:    accountID,
+		identity:     identity,
 		endpointName: endpointName,
 		startedAt:    executionStarted,
 	}
 	defer func() {
-		recordEngineExecutionAudit(ctx, span, auditState, err)
-		recordEngineExecutionUsage(ctx, span, auditState, err)
+		// A client or policy deadline must not suppress the durable audit event.
+		// WithoutCancel preserves identity/timing/span values while removing only
+		// the cancellation signal that has already done its execution work.
+		auditCtx := context.WithoutCancel(ctx)
+		recordEngineExecutionAudit(auditCtx, span, auditState, err)
+		recordEngineExecutionUsage(auditCtx, span, auditState, err)
 	}()
 
 	// 1-2. Validate the SDK's scope manifest and resolve endpointName within
@@ -234,11 +283,16 @@ func engineExecuteCore(
 	// branching within the repo's complexity budget. See that function's doc
 	// comment for the child span lifecycle it owns.
 	resolutionStarted := time.Now()
-	match, err := resolveScopedEndpoint(ctx, cache, span, artifactID, endpointName)
+	match, err := resolveScopedEndpoint(ctx, cache, span, appID, endpointName)
 	if err != nil {
 		return err
 	}
 	auditState.match = match
+	ctx, cancelExecution, executionTimeoutMs := contextWithExecutionPolicyTimeout(ctx, match.service.TimeoutMs, span)
+	defer cancelExecution()
+	defer func() {
+		err = normalizeExecutionTimeout(ctx, err, executionTimeoutMs)
+	}()
 
 	// 3. Map the resolved Fused endpoint to dispatcher inputs, then execute. The
 	//    dispatcher applies auth from credentials and streams the response
@@ -260,7 +314,7 @@ func engineExecuteCore(
 	// failure modes). A cache hit fully handles the response and this function
 	// returns immediately; a lookup error (e.g. the key was reused with a
 	// different body) fails the request without ever reaching the vendor.
-	if replayed, replayErr := tryReplayFromIdempotencyCache(ctx, span, uid, obj, stream, &auditState); replayErr != nil {
+	if replayed, replayErr := tryReplayFromIdempotencyCache(ctx, span, identity.AppID, obj, stream, &auditState); replayErr != nil {
 		return replayErr
 	} else if replayed {
 		engine.MeasureExecutionTiming(ctx, "engine_resolution_total", resolutionStarted)
@@ -269,7 +323,7 @@ func engineExecuteCore(
 
 	// 4. Resolve Secrets (Workspace Defaults / SDK Overrides)
 	credentials = withConnectedResourceRequirement(credentials, match.service.ConnectConfig)
-	credentials, bucketVals, err := resolveMatchedExecutionCredentials(ctx, match, obj, uid, accountID, credentials)
+	credentials, bucketVals, err := resolveMatchedExecutionCredentials(ctx, match, obj, identity.AppID, identity.AccountID, credentials)
 	if err != nil {
 		return err
 	}
@@ -277,11 +331,12 @@ func engineExecuteCore(
 	engine.MeasureExecutionTiming(ctx, "engine_resolution_total", resolutionStarted)
 
 	var runtimeResolution RuntimeEnvironmentResolution
-	runtimeResolution, auditState.providerHTTPStatus, err = dispatchAndCache(ctx, dispatcher, match, obj, params, credentials, bucketVals, environment, stream, span, uid)
+	runtimeResolution, auditState.providerHTTPStatus, err = dispatchAndCache(ctx, dispatcher, match, obj, params, credentials, bucketVals, environment, stream, span, identity.AppID)
 	auditState.selectedEnvironment = runtimeResolution.Environment
 	auditState.environmentSource = runtimeResolution.Source
 	auditState.providerHost = providerHost(runtimeResolution.BaseURL)
 	if err != nil {
+		err = normalizeExecutionTimeout(ctx, err, executionTimeoutMs)
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
@@ -296,10 +351,27 @@ func engineExecuteCore(
 	return nil
 }
 
-func resolveMatchedExecutionCredentials(ctx context.Context, match *scopedEndpoint, obj *models.IntegrationObject, artifactID, accountID uuid.UUID, credentials map[string]any) (map[string]any, []store.BucketValue, error) {
+func resolveTrackedExecutionIdentity(ctx context.Context, validator auth.TokenValidator, appID, token string, span trace.Span) (auth.RuntimeIdentity, func(), error) {
+	identity, err := resolveExecutionIdentity(ctx, validator, appID, token)
+	if err != nil {
+		return auth.RuntimeIdentity{}, func() {}, err
+	}
+	if identity.AccountID == uuid.Nil {
+		return identity, func() {}, nil
+	}
+	current, decrement := trackExecutionStart(identity.AccountID)
+	limitErr := entitlement.CheckLimit(span, "sandbox_concurrency", current-1, entitlement.LiveEntitlement.Load().MaxSandboxConcurrency)
+	if limitErr != nil {
+		decrement()
+		return auth.RuntimeIdentity{}, func() {}, limitErr
+	}
+	return identity, decrement, nil
+}
+
+func resolveMatchedExecutionCredentials(ctx context.Context, match *scopedEndpoint, obj *models.IntegrationObject, appID, accountID uuid.UUID, credentials map[string]any) (map[string]any, []store.BucketValue, error) {
 	credentials = credentialsWithSelectionAuth(credentials, match.selection)
 	request := CredentialRequest{
-		AccountID: accountID, ArtifactID: artifactID, ServiceID: match.service.ID,
+		AccountID: accountID, AppID: appID, ServiceID: match.service.ID,
 		OperationID: obj.Name, Auths: match.service.AuthConfigs, Passthrough: credentials,
 	}
 	serviceVersionID, err := uuid.Parse(match.serviceVersionID)
@@ -316,7 +388,7 @@ func resolveMatchedExecutionCredentials(ctx context.Context, match *scopedEndpoi
 }
 
 // credentialsWithSelectionAuth adds only non-secret routing metadata resolved
-// during artifact planning. Explicit SDK inputs still win for callers that
+// during desired-config planning. Explicit SDK inputs still win for callers that
 // intentionally select another declared scheme on a general-purpose SDK.
 func credentialsWithSelectionAuth(credentials map[string]any, selection models.SDKSelection) map[string]any {
 	if selection.AuthType == "" && selection.AuthName == "" {
@@ -367,18 +439,18 @@ func isInternalResourceCredential(key string) bool {
 
 // resolveExecutionIdentity keeps SDK ID parsing and token validation together
 // because both determine the account/bucket boundary for the rest of execution.
-func resolveExecutionIdentity(ctx context.Context, validator auth.TokenValidator, artifactID, token string) (uuid.UUID, uuid.UUID, error) {
-	uid, err := uuid.Parse(artifactID)
+func resolveExecutionIdentity(ctx context.Context, validator auth.TokenValidator, appID, token string) (auth.RuntimeIdentity, error) {
+	uid, err := uuid.Parse(appID)
 	if err != nil {
-		return uuid.Nil, uuid.Nil, fmt.Errorf("invalid sdk id format")
+		return auth.RuntimeIdentity{}, fmt.Errorf("invalid app id format")
 	}
 	if validator == nil {
-		return uid, uuid.Nil, nil
+		return auth.RuntimeIdentity{AppID: uid}, nil
 	}
 	authStarted := time.Now()
-	accountID, err := validator.Validate(ctx, uid, token)
+	identity, err := validator.Validate(ctx, uid, token)
 	engine.MeasureExecutionTiming(ctx, "auth", authStarted)
-	return uid, accountID, err
+	return identity, err
 }
 
 // resolveExecutionCredentials is the single pre-dispatch merge point for
@@ -410,12 +482,12 @@ func resolveScopedCredentials(ctx context.Context, request CredentialRequest) (m
 // this stays a single self-contained governance step. parentSpan only
 // receives a status update on failure -- span ownership for the successful
 // path continues in engineExecuteCore's outer span.
-func resolveScopedEndpoint(ctx context.Context, cache ObjectCache, parentSpan trace.Span, artifactID, endpointName string) (*scopedEndpoint, error) {
+func resolveScopedEndpoint(ctx context.Context, cache ObjectCache, parentSpan trace.Span, appID, endpointName string) (*scopedEndpoint, error) {
 	_, scopeSpan := otel.Tracer("engine").Start(ctx, "engine.scope.enforce")
 	defer scopeSpan.End()
 
 	scopeStarted := time.Now()
-	selections, err := validateAndParseScope(ctx, cache, artifactID)
+	selections, err := validateAndParseScope(ctx, cache, appID)
 	engine.MeasureExecutionTiming(ctx, "sdk_scope_manifest_lookup", scopeStarted)
 	if err != nil {
 		scopeSpan.SetStatus(codes.Error, err.Error())
@@ -424,7 +496,7 @@ func resolveScopedEndpoint(ctx context.Context, cache ObjectCache, parentSpan tr
 	}
 
 	endpointStarted := time.Now()
-	match, err := findEndpointInScope(ctx, cache, artifactID, selections, endpointName)
+	match, err := findEndpointInScope(ctx, cache, appID, selections, endpointName)
 	engine.MeasureExecutionTiming(ctx, "endpoint_metadata", endpointStarted)
 	if err != nil {
 		scopeSpan.SetStatus(codes.Error, err.Error())
@@ -573,8 +645,8 @@ func recordRuntimeEnvironmentAttrs(span trace.Span, match *scopedEndpoint, envir
 	)
 }
 
-func validateAndParseScope(ctx context.Context, cache ObjectCache, artifactID string) ([]models.SDKSelection, error) {
-	_, selectionsJSON, err := cache.GetArtifactScope(ctx, artifactID)
+func validateAndParseScope(ctx context.Context, cache ObjectCache, appID string) ([]models.SDKSelection, error) {
+	_, selectionsJSON, err := cache.GetAppRuntime(ctx, appID)
 	if err != nil {
 		return nil, fmt.Errorf("ScopeError: sdk scope not found")
 	}
@@ -601,17 +673,17 @@ type scopedEndpoint struct {
 
 // findEndpointInScope resolves endpointName to an endpoint across the SDK's scoped
 // providers. It returns nil when no provider in scope exposes the tool.
-func findEndpointInScope(ctx context.Context, cache ObjectCache, artifactID string, selections []models.SDKSelection, endpointName string) (*scopedEndpoint, error) {
+func findEndpointInScope(ctx context.Context, cache ObjectCache, appID string, selections []models.SDKSelection, endpointName string) (*scopedEndpoint, error) {
 	for _, sel := range selections {
 		serviceStarted := time.Now()
-		fusedObj, err := cache.GetOrFetchServiceMetadata(ctx, artifactID, sel.ServiceID.String())
+		fusedObj, err := cache.GetOrFetchServiceMetadata(ctx, appID, sel.ServiceID.String())
 		engine.MeasureExecutionTiming(ctx, "service_metadata_resolution", serviceStarted)
 		if err != nil {
 			continue
 		}
 
 		endpointStarted := time.Now()
-		ep, err := cache.GetEndpoint(ctx, artifactID, sel.ServiceID.String(), endpointName)
+		ep, err := cache.GetEndpoint(ctx, appID, sel.ServiceID.String(), endpointName)
 		engine.MeasureExecutionTiming(ctx, "endpoint_lookup", endpointStarted)
 		if err != nil {
 			// Not found in this service, try next

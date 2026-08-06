@@ -35,25 +35,25 @@ func handleKillMessage(msg *nats.Msg) {
 		// Ignore malformed kill messages.
 		return
 	}
-	artifactIDHex := parts[2]
+	appIDHex := parts[2]
 
-	KillMCPSessionsForSDK(artifactIDHex)
+	KillMCPSessionsForSDK(appIDHex)
 	purgeKillCommand(msg.Subject)
 
-	slog.Info("Sandbox killed via NATS (streams cancelled)", slog.String("sandbox_id", artifactIDHex))
+	slog.Info("Sandbox killed via NATS (streams cancelled)", slog.String("sandbox_id", appIDHex))
 }
 
-// KillMCPSessionsForSDK cancels every live MCP session for artifactIDHex,
+// KillMCPSessionsForSDK cancels every live MCP session for appIDHex,
 // terminating each session's spawned process. Exported so the Engine's
 // direct deactivate/delete HTTP handlers (internal/engine/api) can call it
 // in-process instead of round-tripping through a NATS publish to reach the
 // same effect handleKillMessage above achieves for the Registry-driven kill
 // path -- one implementation, two triggers, per DRY.
-func KillMCPSessionsForSDK(artifactIDHex string) {
+func KillMCPSessionsForSDK(appIDHex string) {
 	mcpSessions.Lock()
 	defer mcpSessions.Unlock()
 	for sessionID, sess := range mcpSessions.m {
-		if sess.artifactID == artifactIDHex {
+		if sess.appID == appIDHex {
 			// Cancel the context to kill the spawned process.
 			sess.cancel()
 			delete(mcpSessions.m, sessionID)
@@ -79,13 +79,13 @@ func setupCleanupSubscription(natsClient *messaging.NATSClient) {
 			// Ignore malformed cleanup messages.
 			return
 		}
-		artifactIDHex := parts[2]
+		appIDHex := parts[2]
 
-		if err := CleanupMCPSandboxDir(artifactIDHex); err != nil {
-			slog.Error("Failed to remove sandbox directory via NATS", slog.Any("error", err), slog.String("sandbox_id", artifactIDHex))
+		if err := CleanupMCPSandboxDir(appIDHex); err != nil {
+			slog.Error("Failed to remove sandbox directory via NATS", slog.Any("error", err), slog.String("sandbox_id", appIDHex))
 			return
 		}
-		slog.Info("Sandbox directory cleaned up via NATS message", slog.String("sandbox_id", artifactIDHex))
+		slog.Info("Sandbox directory cleaned up via NATS message", slog.String("sandbox_id", appIDHex))
 	})
 	if err != nil {
 		slog.Error("Failed to subscribe to fused_engine.cleanup.*", slog.Any("error", err))
@@ -96,8 +96,8 @@ func setupCleanupSubscription(natsClient *messaging.NATSClient) {
 // Exported for the same reason as KillMCPSessionsForSDK above -- the
 // direct DELETE /sdk-config/{id} handler calls this in-process rather than
 // publishing a NATS message to itself.
-func CleanupMCPSandboxDir(artifactIDHex string) error {
-	return os.RemoveAll(sandboxDirFor(artifactIDHex))
+func CleanupMCPSandboxDir(appIDHex string) error {
+	return os.RemoveAll(sandboxDirFor(appIDHex))
 }
 
 // sandboxDataRoot is the parent of the "data/sandboxes" tree, relative to
@@ -118,7 +118,7 @@ func sandboxesDir() string {
 	return filepath.Join(sandboxDataRoot, "data", "sandboxes")
 }
 
-// sandboxDirFor is the per-SDK sandbox working directory for artifactIDHex.
-func sandboxDirFor(artifactIDHex string) string {
-	return filepath.Join(sandboxesDir(), artifactIDHex)
+// sandboxDirFor is the per-SDK sandbox working directory for appIDHex.
+func sandboxDirFor(appIDHex string) string {
+	return filepath.Join(sandboxesDir(), appIDHex)
 }

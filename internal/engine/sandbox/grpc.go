@@ -13,7 +13,9 @@ import (
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 type EngineGRPCServer struct {
@@ -24,41 +26,41 @@ func NewEngineGRPCServer() *EngineGRPCServer {
 	return &EngineGRPCServer{}
 }
 
-func authFromIncomingContext(ctx context.Context) (artifactID, token string) {
+func authFromIncomingContext(ctx context.Context) (appID, token string) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		return "", ""
 	}
-	if vals := md.Get("x-sdk-id"); len(vals) > 0 {
-		artifactID = vals[0]
+	if vals := md.Get("x-app-id"); len(vals) > 0 {
+		appID = vals[0]
 	}
 	if vals := md.Get("x-api-key"); len(vals) > 0 {
 		token = vals[0]
 	}
-	return artifactID, token
+	return appID, token
 }
 
 func (s *EngineGRPCServer) Connect(ctx context.Context, req *enginev1.ConnectRequest) (*enginev1.ConnectResponse, error) {
 	// Guard: the cache is wired by InitSandbox; a nil here means the Engine booted wrong.
 	if globalObjectCache == nil {
-		return nil, fmt.Errorf("engine object cache not initialized")
+		return nil, status.Error(codes.Internal, "Engine runtime is unavailable")
 	}
-	artifactID, token := authFromIncomingContext(ctx)
+	appID, token := authFromIncomingContext(ctx)
 
-	uid, err := uuid.Parse(artifactID)
+	uid, err := uuid.Parse(appID)
 	if err != nil {
-		return nil, fmt.Errorf("invalid sdk id format")
+		return nil, status.Error(codes.InvalidArgument, "SDK app ID must be a valid UUID")
 	}
 	if globalTokenValidator != nil {
 		if _, err := globalTokenValidator.Validate(ctx, uid, token); err != nil {
-			return nil, fmt.Errorf("unauthorized")
+			return nil, status.Error(codes.Unauthenticated, "SDK authentication failed; check the token and confirm this SDK version is active")
 		}
 	}
 
 	// Inject the user's token into the context so RegistryClient can authenticate as the user
 	ctx = context.WithValue(ctx, "sdk-token", token)
-	if err := globalObjectCache.ConnectSDK(ctx, artifactID); err != nil {
-		return nil, fmt.Errorf("handshake failed: %w", err)
+	if err := globalObjectCache.ConnectSDK(ctx, appID); err != nil {
+		return nil, status.Error(codes.FailedPrecondition, "SDK version is not available on this Engine; reapply its configuration")
 	}
 	return &enginev1.ConnectResponse{}, nil
 }
@@ -69,12 +71,12 @@ func (s *EngineGRPCServer) Connect(ctx context.Context, req *enginev1.ConnectReq
 func (s *EngineGRPCServer) Disconnect(ctx context.Context, req *enginev1.DisconnectRequest) (*enginev1.DisconnectResponse, error) {
 	// No-op if the cache isn't wired — disconnect must never fail the caller.
 	if globalObjectCache != nil {
-		artifactID, token := authFromIncomingContext(ctx)
-		if uid, err := uuid.Parse(artifactID); err == nil {
+		appID, token := authFromIncomingContext(ctx)
+		if uid, err := uuid.Parse(appID); err == nil {
 			if globalTokenValidator == nil {
-				globalObjectCache.DisconnectSDK(artifactID)
+				globalObjectCache.DisconnectSDK(appID)
 			} else if _, err := globalTokenValidator.Validate(ctx, uid, token); err == nil {
-				globalObjectCache.DisconnectSDK(artifactID)
+				globalObjectCache.DisconnectSDK(appID)
 			}
 		}
 	}
@@ -129,12 +131,12 @@ func (s *EngineGRPCServer) Execute(req *enginev1.ExecuteRequest, stream enginev1
 	ctx = engine.ContextWithIdempotencyKeyPresent(ctx, strings.TrimSpace(req.IdempotencyKey) != "")
 
 	decodeStarted := time.Now()
-	artifactID, token := authFromIncomingContext(ctx)
+	appID, token := authFromIncomingContext(ctx)
 
 	var params map[string]any
 	if len(req.Params) > 0 {
 		if err := json.Unmarshal(req.Params, &params); err != nil {
-			recordExecuteTimings(ctx, timings, requestStarted, artifactID, req.EndpointName)
+			recordExecuteTimings(ctx, timings, requestStarted, appID, req.EndpointName)
 			return fmt.Errorf("invalid json params: %w", err)
 		}
 	} else {
@@ -152,15 +154,15 @@ func (s *EngineGRPCServer) Execute(req *enginev1.ExecuteRequest, stream enginev1
 	// Real streaming dispatch: scope-check + vendor call, chunks relayed as they
 	// arrive. Errors surface as a single ExecuteResponse.Error frame.
 	adapter := &grpcResponseStream{stream: stream}
-	if err := EngineStreamExecuteFunc(ctx, artifactID, token, req.EndpointName, params, credentials, req.Environment, adapter); err != nil {
-		recordExecuteTimings(ctx, timings, requestStarted, artifactID, req.EndpointName)
+	if err := EngineStreamExecuteFunc(ctx, appID, token, req.EndpointName, params, credentials, req.Environment, adapter); err != nil {
+		recordExecuteTimings(ctx, timings, requestStarted, appID, req.EndpointName)
 		return stream.Send(&enginev1.ExecuteResponse{Error: encodeRuntimeError(err)})
 	}
-	recordExecuteTimings(ctx, timings, requestStarted, artifactID, req.EndpointName)
+	recordExecuteTimings(ctx, timings, requestStarted, appID, req.EndpointName)
 	return nil
 }
 
-func recordExecuteTimings(ctx context.Context, timings *engine.ExecutionTimings, requestStarted time.Time, artifactID, endpointName string) {
+func recordExecuteTimings(ctx context.Context, timings *engine.ExecutionTimings, requestStarted time.Time, appID, endpointName string) {
 	timings.Record("engine_total", time.Since(requestStarted))
 	snapshot := timings.SnapshotMilliseconds()
 
@@ -169,7 +171,7 @@ func recordExecuteTimings(ctx context.Context, timings *engine.ExecutionTimings,
 	}
 
 	slog.InfoContext(ctx, "Engine runtime timings",
-		slog.String("artifact_id", artifactID),
+		slog.String("app.id", appID),
 		slog.String("endpoint_name", endpointName),
 		slog.Any("timings_ms", snapshot),
 	)

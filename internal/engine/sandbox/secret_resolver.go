@@ -47,7 +47,7 @@ type connectedAuthFailureRecorder interface {
 
 type CredentialRequest struct {
 	AccountID        uuid.UUID
-	ArtifactID       uuid.UUID
+	AppID            uuid.UUID
 	ServiceID        uuid.UUID
 	ServiceVersionID uuid.UUID
 	OperationID      string
@@ -75,7 +75,7 @@ func (r *secretResolver) ResolveExecutionCredentials(ctx context.Context, reques
 	ctx, span := otel.Tracer("engine").Start(ctx, "ResolveCredentials")
 	defer span.End()
 
-	scope, err := r.db.GetArtifactScope(ctx, request.ArtifactID)
+	scope, err := r.db.GetAppRuntime(ctx, request.AppID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load SDK scope for secrets: %w", err)
 	}
@@ -157,7 +157,7 @@ func (r *secretResolver) resolveDynamicBucketValues(ctx context.Context, bucketI
 // the recognized ambient forms -- most importantly a named-bucket reference
 // like ${bucket.prod.secret.key} (the kind: webhook grammar, see
 // internal/shared/secretref), which has no meaning here since an injection
-// value always resolves against this artifact's own dispatch-scoped bucket.
+// value always resolves against this app's own dispatch-scoped bucket.
 // Surfacing that here, at classification time, gives a specific reason
 // instead of letting it fall through unrecognized and surface later as
 // interpolateValues' generic "missing required bucket value" error.
@@ -204,7 +204,7 @@ type dynamicKey struct {
 }
 
 // classifyDynamicKey accepts only the three ambient forms SDK/MCP injections
-// support (no bucket name segment -- always this artifact's own dispatch
+// support (no bucket name segment -- always this app's own dispatch
 // bucket) and rejects any other bucket.* shape by name instead of silently
 // dropping it.
 func classifyDynamicKey(k string) (dynamicKey, error) {
@@ -218,7 +218,7 @@ func classifyDynamicKey(k string) (dynamicKey, error) {
 	case strings.HasPrefix(k, "bucket."):
 		return dynamicKey{}, fmt.Errorf(
 			"injection value references %q, which is not a supported bucket variable here: "+
-				"SDK/MCP injections resolve only against this artifact's own bucket via "+
+				"SDK/MCP injections resolve only against this app's own bucket via "+
 				"${bucket.env.*}, ${bucket.values.*}, or ${bucket.secrets.*} -- a named bucket "+
 				"like ${bucket.<name>.secret.<key>} is valid only in a kind: webhook secret", k)
 	default:

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -42,6 +43,20 @@ func CreateBucketHandler(s store.Store) http.HandlerFunc {
 		var payload CreateBucketPayload
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		currentBuckets, err := s.CountBuckets(ctx)
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to count buckets", slog.Any("error", err))
+			http.Error(w, "failed to count buckets", http.StatusInternalServerError)
+			return
+		}
+		if limErr := entitlement.CheckLimit(span, "buckets", currentBuckets, entitlement.LiveEntitlement.Load().MaxBuckets); limErr != nil {
+			span.SetAttributes(attribute.String("outcome", "limit_exceeded"))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": limErr.Error()})
 			return
 		}
 

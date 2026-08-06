@@ -1,37 +1,33 @@
-const KEY = "fused_api_key";
-let inMemoryKey: string | null = null;
+const LEGACY_KEY = "fused_api_key";
+const CSRF_COOKIE_NAMES = ["__Host-fused_csrf", "fused_csrf_dev"];
 
-export function getApiKey(): string | null {
-  if (typeof window === "undefined") return null;
-  try {
-    return window.sessionStorage.getItem(KEY) || inMemoryKey;
-  } catch {
-    return inMemoryKey;
-  }
-}
-
-export function setApiKey(key: string): void {
-  inMemoryKey = key;
-  try {
-    window.sessionStorage.setItem(KEY, key);
-  } catch {
-    // The in-memory fallback keeps the current tab usable when browser policy
-    // disables storage without extending credential lifetime beyond this page.
-  }
-}
-
-export function clearApiKey(): void {
-  inMemoryKey = null;
+export function purgeLegacyBrowserCredential(): void {
   if (typeof window === "undefined") return;
   try {
-    window.sessionStorage.removeItem(KEY);
+    window.sessionStorage.removeItem(LEGACY_KEY);
   } catch {
-    // Clearing the in-memory copy is sufficient when storage is unavailable.
+    // Browser policy may disable storage; there is no in-memory credential
+    // fallback because browser authentication is cookie-only now.
   }
 }
 
-export function isAuthenticated(): boolean {
-  return !!getApiKey();
+export function getCSRFToken(): string | null {
+  if (typeof document === "undefined") return null;
+  const values = new Map<string, string>();
+  for (const part of document.cookie.split(";")) {
+    const [rawName, ...rawValue] = part.trim().split("=");
+    if (CSRF_COOKIE_NAMES.includes(rawName)) values.set(rawName, rawValue.join("="));
+  }
+  for (const name of CSRF_COOKIE_NAMES) {
+    const value = values.get(name);
+    if (value === undefined) continue;
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      // Ignore a malformed stale cookie and try the active alternative.
+    }
+  }
+  return null;
 }
 
 export function openAuthenticatedTab(path: string): boolean {
@@ -44,32 +40,16 @@ export function openAuthenticatedTab(path: string): boolean {
     return false;
   }
 
+  // Opening about:blank keeps a usable WindowProxy; passing noopener as a
+  // feature makes compliant browsers return null even when the tab opened.
   const newTab = window.open("about:blank", "_blank");
   if (!newTab) return false;
-
-  const key = getApiKey();
-  if (key) {
-    try {
-      newTab.sessionStorage.setItem(KEY, key);
-    } catch {
-      // The destination remains usable for public routes when storage is
-      // unavailable. Authenticated routes will show the normal sign-in flow.
-    }
-  }
-
   try {
     newTab.opener = null;
   } catch {
-    // Some browsers expose opener as read-only. Navigation remains same-origin.
+    newTab.close();
+    return false;
   }
   newTab.location.replace(path);
   return true;
-}
-
-export function logoutAndRedirect(): never {
-  clearApiKey();
-  if (typeof window !== "undefined") {
-    window.location.href = "/login";
-  }
-  throw new Error("Redirecting to login");
 }

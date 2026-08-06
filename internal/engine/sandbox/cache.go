@@ -18,20 +18,20 @@ import (
 )
 
 type ObjectCache interface {
-	ConnectSDK(ctx context.Context, artifactID string) error
-	DisconnectSDK(artifactID string)
-	GetOrFetchServiceMetadata(ctx context.Context, artifactID string, serviceID string) (*fusedobject.ServiceMetadata, error)
-	GetEndpoint(ctx context.Context, artifactID string, serviceID string, endpointName string) (*fusedobject.Endpoint, error)
+	ConnectSDK(ctx context.Context, appID string) error
+	DisconnectSDK(appID string)
+	GetOrFetchServiceMetadata(ctx context.Context, appID string, serviceID string) (*fusedobject.ServiceMetadata, error)
+	GetEndpoint(ctx context.Context, appID string, serviceID string, endpointName string) (*fusedobject.Endpoint, error)
 	// ListEndpointsForSelection returns the endpoints one SDKSelection grants
 	// access to (SelectAll, or the ones named by EndpointIDs), resolved
 	// against the service+version's full operation list. Distinct from
 	// GetEndpoint's by-name lookup used on the dispatch hot path: this exists
 	// to build a per-session MCP fixture (mcp_session_fixture.go) from a
 	// selection that only carries opaque endpoint IDs, not names.
-	ListEndpointsForSelection(ctx context.Context, artifactID string, sel models.SDKSelection) ([]fusedobject.Endpoint, error)
+	ListEndpointsForSelection(ctx context.Context, appID string, sel models.SDKSelection) ([]fusedobject.Endpoint, error)
 	Invalidate(serviceID string)
-	InvalidateArtifactScope(artifactID string)
-	GetArtifactScope(ctx context.Context, artifactID string) (string, []byte, error)
+	InvalidateAppRuntime(appID string)
+	GetAppRuntime(ctx context.Context, appID string) (string, []byte, error)
 }
 
 type LocalObjectCache struct {
@@ -59,9 +59,9 @@ func NewLocalObjectCache(db store.Store, rc RegistryClient) *LocalObjectCache {
 	}
 }
 
-func (c *LocalObjectCache) ConnectSDK(ctx context.Context, artifactID string) error {
+func (c *LocalObjectCache) ConnectSDK(ctx context.Context, appID string) error {
 	started := time.Now()
-	sdkUUID, err := uuid.Parse(artifactID)
+	sdkUUID, err := uuid.Parse(appID)
 	if err != nil {
 		return fmt.Errorf("invalid sdk id format: %w", err)
 	}
@@ -69,10 +69,10 @@ func (c *LocalObjectCache) ConnectSDK(ctx context.Context, artifactID string) er
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if _, exists := c.scopes[artifactID]; exists {
-		err := c.reuseCachedSDK(ctx, artifactID)
+	if _, exists := c.scopes[appID]; exists {
+		err := c.reuseCachedSDK(ctx, appID)
 		slog.InfoContext(ctx, "SDK connect cache timing",
-			slog.String("artifact_id", artifactID),
+			slog.String("app.id", appID),
 			slog.String("cache_status", "reused"),
 			slog.Float64("duration_ms", float64(time.Since(started).Microseconds())/1000),
 		)
@@ -80,22 +80,22 @@ func (c *LocalObjectCache) ConnectSDK(ctx context.Context, artifactID string) er
 	}
 
 	scopeStarted := time.Now()
-	scopeJSON, selections, err := c.loadArtifactScope(ctx, sdkUUID)
+	scopeJSON, selections, err := c.loadAppRuntime(ctx, sdkUUID)
 	scopeDuration := time.Since(scopeStarted)
 	if err != nil {
 		return err
 	}
 	metadataStarted := time.Now()
-	if err := c.cacheSDKSelections(ctx, artifactID, selections); err != nil {
+	if err := c.cacheSDKSelections(ctx, appID, selections); err != nil {
 		return err
 	}
 	metadataDuration := time.Since(metadataStarted)
 
-	c.scopes[artifactID] = scopeJSON
-	c.scopeRefCounts[artifactID] = 1
+	c.scopes[appID] = scopeJSON
+	c.scopeRefCounts[appID] = 1
 
 	slog.InfoContext(ctx, "SDK connected (loaded to cache)",
-		slog.String("artifactID", artifactID),
+		slog.String("appID", appID),
 		slog.Int("selection_count", len(selections)),
 		slog.Float64("scope_load_ms", float64(scopeDuration.Microseconds())/1000),
 		slog.Float64("service_metadata_load_ms", float64(metadataDuration.Microseconds())/1000),
@@ -104,37 +104,28 @@ func (c *LocalObjectCache) ConnectSDK(ctx context.Context, artifactID string) er
 	return nil
 }
 
-func (c *LocalObjectCache) reuseCachedSDK(ctx context.Context, artifactID string) error {
-	c.scopeRefCounts[artifactID]++
+func (c *LocalObjectCache) reuseCachedSDK(ctx context.Context, appID string) error {
+	c.scopeRefCounts[appID]++
 
 	var selections []models.SDKSelection
-	_ = json.Unmarshal(c.scopes[artifactID], &selections)
-	versions := c.sdkVersions[artifactID]
+	_ = json.Unmarshal(c.scopes[appID], &selections)
+	versions := c.sdkVersions[appID]
 	for _, sel := range selections {
 		svcID := sel.ServiceID.String()
 		version := versions[svcID]
 		cacheKey := svcID + ":" + version
 		c.objectRefCounts[cacheKey]++
 	}
-	slog.InfoContext(ctx, "SDK connected (re-used cache)", slog.String("artifactID", artifactID))
+	slog.InfoContext(ctx, "SDK connected (re-used cache)", slog.String("appID", appID))
 	return nil
 }
 
-func (c *LocalObjectCache) loadArtifactScope(ctx context.Context, sdkUUID uuid.UUID) ([]byte, []models.SDKSelection, error) {
-	scope, err := c.db.GetArtifactScope(ctx, sdkUUID)
+func (c *LocalObjectCache) loadAppRuntime(ctx context.Context, sdkUUID uuid.UUID) ([]byte, []models.SDKSelection, error) {
+	scope, err := c.db.GetAppRuntime(ctx, sdkUUID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to fetch sdk scope: %w", err)
 	}
-	// This is the enforcement point for deactivation (design: "reject new
-	// connections"). It only runs on a cache miss, which is why
-	// DeactivateSDK/ReactivateSDK explicitly invalidate the cached scope
-	// (cached_store.go) instead of relying on session cleanup to evict it --
-	// otherwise a second session for an artifactID with another still-live
-	// session would hit reuseCachedSDK and never reach this check at all.
-	if scope.DeactivatedAt != nil {
-		return nil, nil, fmt.Errorf("ScopeError: sdk is deactivated")
-	}
-	if scope.ScopeSchemaVersion != models.ArtifactScopeSchemaVersion {
+	if scope.ScopeSchemaVersion != models.AppScopeSchemaVersion {
 		return nil, nil, fmt.Errorf("ScopeError: unsupported scope schema version")
 	}
 
@@ -145,10 +136,10 @@ func (c *LocalObjectCache) loadArtifactScope(ctx context.Context, sdkUUID uuid.U
 	return scope.Selections, selections, nil
 }
 
-func (c *LocalObjectCache) cacheSDKSelections(ctx context.Context, artifactID string, selections []models.SDKSelection) error {
+func (c *LocalObjectCache) cacheSDKSelections(ctx context.Context, appID string, selections []models.SDKSelection) error {
 	for _, sel := range selections {
-		if c.sdkVersions[artifactID] == nil {
-			c.sdkVersions[artifactID] = make(map[string]string)
+		if c.sdkVersions[appID] == nil {
+			c.sdkVersions[appID] = make(map[string]string)
 		}
 
 		version, err := selectionVersionIdentity(sel)
@@ -157,7 +148,7 @@ func (c *LocalObjectCache) cacheSDKSelections(ctx context.Context, artifactID st
 		}
 
 		svcID := sel.ServiceID.String()
-		c.sdkVersions[artifactID][svcID] = version
+		c.sdkVersions[appID][svcID] = version
 		cacheKey := svcID + ":" + version
 
 		if err := c.fetchServiceMetadataIfMissing(ctx, sel.ServiceID, version, cacheKey); err != nil {
@@ -242,20 +233,20 @@ func (c *LocalObjectCache) fetchServiceMetadataIfMissing(ctx context.Context, se
 	return nil
 }
 
-func (c *LocalObjectCache) DisconnectSDK(artifactID string) {
+func (c *LocalObjectCache) DisconnectSDK(appID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if _, exists := c.scopes[artifactID]; !exists {
+	if _, exists := c.scopes[appID]; !exists {
 		return
 	}
 
-	c.scopeRefCounts[artifactID]--
-	if c.scopeRefCounts[artifactID] <= 0 {
+	c.scopeRefCounts[appID]--
+	if c.scopeRefCounts[appID] <= 0 {
 		var selections []models.SDKSelection
-		_ = json.Unmarshal(c.scopes[artifactID], &selections)
+		_ = json.Unmarshal(c.scopes[appID], &selections)
 
-		versions := c.sdkVersions[artifactID]
+		versions := c.sdkVersions[appID]
 
 		for _, sel := range selections {
 			svcID := sel.ServiceID.String()
@@ -279,30 +270,30 @@ func (c *LocalObjectCache) DisconnectSDK(artifactID string) {
 				slog.Info("Evicted ServiceMetadata from cache", slog.String("serviceID", svcID), slog.String("version", version))
 			}
 		}
-		delete(c.scopes, artifactID)
-		delete(c.scopeRefCounts, artifactID)
-		delete(c.sdkVersions, artifactID)
-		slog.Info("SDK disconnected (evicted from cache)", slog.String("artifactID", artifactID))
+		delete(c.scopes, appID)
+		delete(c.scopeRefCounts, appID)
+		delete(c.sdkVersions, appID)
+		slog.Info("SDK disconnected (evicted from cache)", slog.String("appID", appID))
 	} else {
 		var selections []models.SDKSelection
-		_ = json.Unmarshal(c.scopes[artifactID], &selections)
-		versions := c.sdkVersions[artifactID]
+		_ = json.Unmarshal(c.scopes[appID], &selections)
+		versions := c.sdkVersions[appID]
 		for _, sel := range selections {
 			svcID := sel.ServiceID.String()
 			version := versions[svcID]
 			cacheKey := svcID + ":" + version
 			c.objectRefCounts[cacheKey]--
 		}
-		slog.Info("SDK disconnected (decremented refcount)", slog.String("artifactID", artifactID))
+		slog.Info("SDK disconnected (decremented refcount)", slog.String("appID", appID))
 	}
 }
 
-func (c *LocalObjectCache) GetOrFetchServiceMetadata(ctx context.Context, artifactID string, serviceID string) (*fusedobject.ServiceMetadata, error) {
+func (c *LocalObjectCache) GetOrFetchServiceMetadata(ctx context.Context, appID string, serviceID string) (*fusedobject.ServiceMetadata, error) {
 	c.mu.RLock()
-	versions, ok := c.sdkVersions[artifactID]
+	versions, ok := c.sdkVersions[appID]
 	if !ok {
 		c.mu.RUnlock()
-		return nil, fmt.Errorf("sdk session %s not initialized", artifactID)
+		return nil, fmt.Errorf("sdk session %s not initialized", appID)
 	}
 	version, ok := versions[serviceID]
 	if !ok {
@@ -332,12 +323,12 @@ func (c *LocalObjectCache) GetOrFetchServiceMetadata(ctx context.Context, artifa
 	return nil, fmt.Errorf("service metadata not found in connection cache")
 }
 
-func (c *LocalObjectCache) GetEndpoint(ctx context.Context, artifactID string, serviceID string, endpointName string) (*fusedobject.Endpoint, error) {
+func (c *LocalObjectCache) GetEndpoint(ctx context.Context, appID string, serviceID string, endpointName string) (*fusedobject.Endpoint, error) {
 	c.mu.RLock()
-	versions, ok := c.sdkVersions[artifactID]
+	versions, ok := c.sdkVersions[appID]
 	if !ok {
 		c.mu.RUnlock()
-		return nil, fmt.Errorf("sdk session %s not initialized", artifactID)
+		return nil, fmt.Errorf("sdk session %s not initialized", appID)
 	}
 	version, ok := versions[serviceID]
 	if !ok {
@@ -393,7 +384,7 @@ func (c *LocalObjectCache) GetEndpoint(ctx context.Context, artifactID string, s
 // old pre-snapshot activations usable until a refresh materializes them.
 // Results are also written into endpointMetadataCache so a later per-call
 // GetEndpoint for the same name is a cache hit.
-func (c *LocalObjectCache) ListEndpointsForSelection(ctx context.Context, artifactID string, sel models.SDKSelection) ([]fusedobject.Endpoint, error) {
+func (c *LocalObjectCache) ListEndpointsForSelection(ctx context.Context, appID string, sel models.SDKSelection) ([]fusedobject.Endpoint, error) {
 	all, err := c.listEndpointsForSelection(ctx, sel)
 	if err != nil {
 		return nil, fmt.Errorf("fetch service operations for %s: %w", sel.ServiceID, err)
@@ -482,12 +473,19 @@ func (c *LocalObjectCache) applyExecutionPolicyOverride(ctx context.Context, ser
 	if override == nil {
 		return metadata
 	}
+	return mergeExecutionPolicyOverride(metadata, override)
+}
+
+func mergeExecutionPolicyOverride(metadata *fusedobject.ServiceMetadata, override *store.WorkspaceExecutionPolicyOverride) *fusedobject.ServiceMetadata {
 	overridden := *metadata
 	if override.RateLimit != nil {
 		overridden.RateLimit = override.RateLimit
 	}
 	if override.RetryConfig != nil {
 		overridden.RetryConfig = override.RetryConfig
+	}
+	if override.TimeoutMs != nil {
+		overridden.TimeoutMs = override.TimeoutMs
 	}
 	if override.Pagination != nil {
 		overridden.Pagination = override.Pagination
@@ -645,19 +643,19 @@ func filterEndpointsByIDs(all []fusedobject.Endpoint, ids []uuid.UUID) []fusedob
 	return matched
 }
 
-func (c *LocalObjectCache) InvalidateArtifactScope(artifactID string) {
+func (c *LocalObjectCache) InvalidateAppRuntime(appID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	// Fast path: if the SDK isn't in our scopes cache, there's nothing to invalidate
-	if _, exists := c.scopes[artifactID]; !exists {
+	if _, exists := c.scopes[appID]; !exists {
 		return
 	}
 
 	// We must decrement objectRefCounts for all service versions referenced by this SDK's selections.
 	var selections []models.SDKSelection
-	_ = json.Unmarshal(c.scopes[artifactID], &selections)
-	versions := c.sdkVersions[artifactID]
+	_ = json.Unmarshal(c.scopes[appID], &selections)
+	versions := c.sdkVersions[appID]
 	for _, sel := range selections {
 		svcID := sel.ServiceID.String()
 		version := versions[svcID]
@@ -680,10 +678,10 @@ func (c *LocalObjectCache) InvalidateArtifactScope(artifactID string) {
 	}
 
 	// Remove the scope completely
-	delete(c.scopes, artifactID)
-	delete(c.scopeRefCounts, artifactID)
-	delete(c.sdkVersions, artifactID)
-	slog.Info("SDK Scope invalidated and evicted from cache", slog.String("artifactID", artifactID))
+	delete(c.scopes, appID)
+	delete(c.scopeRefCounts, appID)
+	delete(c.sdkVersions, appID)
+	slog.Info("SDK Scope invalidated and evicted from cache", slog.String("appID", appID))
 }
 
 func (c *LocalObjectCache) Invalidate(serviceID string) {
@@ -706,9 +704,9 @@ func (c *LocalObjectCache) Invalidate(serviceID string) {
 	slog.Info("Invalidated local ServiceMetadata cache", slog.String("serviceID", serviceID))
 }
 
-func (c *LocalObjectCache) GetArtifactScope(ctx context.Context, artifactID string) (string, []byte, error) {
+func (c *LocalObjectCache) GetAppRuntime(ctx context.Context, appID string) (string, []byte, error) {
 	c.mu.RLock()
-	scopeJSON, exists := c.scopes[artifactID]
+	scopeJSON, exists := c.scopes[appID]
 	c.mu.RUnlock()
 
 	if exists {

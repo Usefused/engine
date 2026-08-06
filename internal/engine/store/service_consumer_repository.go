@@ -12,11 +12,11 @@ import (
 )
 
 type ServiceConsumer struct {
-	ArtifactID       uuid.UUID
+	AppID            uuid.UUID
 	Name             string
 	Version          string
 	Kind             string
-	DeactivatedAt    *time.Time
+	Status           string
 	ServiceVersionID uuid.UUID
 	SelectAll        bool
 	OperationCount   int
@@ -33,21 +33,23 @@ func (s *postgresStore) ListServiceConsumers(ctx context.Context, accountID uuid
 		return nil, nil
 	}
 	rows, err := s.db.Query(ctx, `
-		SELECT artifact.artifact_id, COALESCE(NULLIF(BTRIM(artifact.name), ''), 'Unnamed ' || UPPER(artifact.kind)),
-		       COALESCE(artifact.version, ''), artifact.kind, artifact.deactivated_at,
+		SELECT app.app_id, family.display_name,
+		       app.version, family.kind, app.status,
 		       NULLIF(selection->>'service_version_id', '')::uuid,
 		       COALESCE((selection->>'select_all')::boolean, false),
 		       jsonb_array_length(COALESCE(selection->'endpoint_ids', '[]'::jsonb))
 		         + jsonb_array_length(COALESCE(selection->'operation_names', '[]'::jsonb)),
 		       jsonb_array_length(COALESCE(selection->'webhook_ids', '[]'::jsonb))
 		         + jsonb_array_length(COALESCE(selection->'webhook_names', '[]'::jsonb)),
-		       artifact.created_at
-		FROM fused_artifact_scopes artifact
-		CROSS JOIN LATERAL jsonb_array_elements(artifact.selections) selection
-		WHERE artifact.account_id = $1
-		  AND ($2 OR artifact.artifact_id = ANY($3::uuid[]))
+		       app.created_at
+		FROM fused_apps app
+		JOIN fused_app_families family ON family.app_family_id = app.app_family_id AND family.account_id = app.account_id
+		CROSS JOIN LATERAL jsonb_array_elements(app.selections) selection
+		WHERE app.account_id = $1
+		  AND app.status IN ('active', 'deprecated')
+		  AND ($2 OR app.app_family_id = ANY($3::uuid[]))
 		  AND NULLIF(selection->>'service_id', '')::uuid = $4
-		ORDER BY artifact.created_at DESC, artifact.artifact_id`, accountID, scope.All, scope.IDs, serviceID)
+		ORDER BY app.created_at DESC, app.app_id`, accountID, scope.All, scope.IDs, serviceID)
 	if err != nil {
 		return nil, fmt.Errorf("list service consumers: %w", err)
 	}
@@ -56,7 +58,7 @@ func (s *postgresStore) ListServiceConsumers(ctx context.Context, accountID uuid
 	for rows.Next() {
 		var consumer ServiceConsumer
 		if err := rows.Scan(
-			&consumer.ArtifactID, &consumer.Name, &consumer.Version, &consumer.Kind, &consumer.DeactivatedAt,
+			&consumer.AppID, &consumer.Name, &consumer.Version, &consumer.Kind, &consumer.Status,
 			&consumer.ServiceVersionID, &consumer.SelectAll, &consumer.OperationCount, &consumer.WebhookCount, &consumer.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan service consumer: %w", err)

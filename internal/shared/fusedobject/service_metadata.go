@@ -28,6 +28,7 @@ type ServiceMetadata struct {
 
 	RateLimit   *RateLimitConfig `json:"rate_limit,omitempty"`
 	RetryConfig *RetryConfig     `json:"retry_config,omitempty"`
+	TimeoutMs   *int             `json:"timeout_ms,omitempty"`
 	// Pagination is the service-level execution_policy fallback the dispatcher
 	// uses when an endpoint has no spec-derived pagination of its own (see
 	// plans/plan-service-config-restructure.md item 1). Endpoint.Pagination

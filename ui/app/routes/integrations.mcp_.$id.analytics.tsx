@@ -11,7 +11,7 @@ export const meta: MetaFunction = ({ matches }) => {
 import { ArrowLeft, Clock } from "lucide-react";
 import { api } from "~/lib/api";
 import { McpAnalyticsPanel, type McpAnalyticsData } from "~/components/mcp/McpAnalyticsPanel";
-import { ArtifactRequestsPanel } from "~/components/activity/ArtifactRequestsPanel";
+import { AppRequestsPanel } from "~/components/activity/AppRequestsPanel";
 import { NestedActivityTabs } from "~/components/activity/NestedActivityTabs";
 
 export default function McpAnalyticsDashboard() {
@@ -35,7 +35,7 @@ export default function McpAnalyticsDashboard() {
     setLoading(true);
     const queryStr = `
       query($id: String!) {
-        mcpAnalytics(artifactId: $id) {
+        mcpAnalytics(app_id: $id) {
           total_requests
           failed_requests
           average_latency
@@ -133,7 +133,7 @@ function McpActivityContent({ id, data, activeTab, onTabChange }: {
       />
 
       {activeTab === "overview" && <McpAnalyticsPanel data={data} />}
-      {activeTab === "requests" && id && <ArtifactRequestsPanel artifactId={id} transport="mcp" />}
+      {activeTab === "requests" && id && <AppRequestsPanel appId={id} transport="mcp" />}
       {activeTab === "sessions" && <McpSessionsPanel sessions={data.recent_sessions || []} />}
     </div>
   );

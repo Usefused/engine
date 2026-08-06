@@ -10,7 +10,6 @@ export const meta: MetaFunction = ({ matches }) => {
 };
 import { api, Account } from "~/lib/api";
 import { useToast } from "~/components/Toast";
-import { setApiKey } from "~/lib/session";
 
 export default function SettingsPage() {
   const toast = useToast();
@@ -50,10 +49,9 @@ export default function SettingsPage() {
   async function handleRegenerateKey() {
     setRegenerating(true);
     try {
-      const res = await api.regenerateApiKey();
-      setNewKey(res.api_key);
-      setApiKey(res.api_key); // Update local storage
-      setShowRegenConfirm(false);
+		const res = await api.regenerateApiKey();
+		setNewKey(res.api_key);
+		setShowRegenConfirm(false);
     } catch (err) {
       console.error("Failed to regenerate API key", err);
       toast.error("Failed to regenerate API key.");

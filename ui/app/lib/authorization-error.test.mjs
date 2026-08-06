@@ -94,13 +94,13 @@ test("filters null and partial missing requirements", () => {
   assert.doesNotMatch(error.message, /bucket\.read|undefined|null/);
 });
 
-test("explains invalid artifact ownership without internal identifiers", () => {
+test("explains invalid app ownership without internal identifiers", () => {
 	assert.equal(
 		apiErrorMessage(400, { error: "owner team was not found or is archived" }),
 		"Choose an active team, or use personal ownership."
 	);
-	assert.match(apiErrorMessage(409, { error: "artifact owner is immutable" }), /already has an owner/);
-	assert.doesNotMatch(apiErrorMessage(409, { error: "artifact owner is immutable" }), /owner_team_id|artifact\.manage/);
+	assert.match(apiErrorMessage(409, { error: "app owner is immutable" }), /already has an owner/);
+	assert.doesNotMatch(apiErrorMessage(409, { error: "app owner is immutable" }), /owner_team_id|app\.manage/);
 });
 
 test("explains owning-team membership denial in plain language", () => {

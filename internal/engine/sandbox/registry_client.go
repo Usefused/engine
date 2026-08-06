@@ -85,9 +85,22 @@ type ServiceVersionAuthConfigs struct {
 type ServiceVersionRef = models.ServiceVersionRef
 
 type EngineHeartbeatRequest struct {
-	EngineVersion   string    `json:"engine_version"`
-	EngineBuildHash string    `json:"engine_build_hash"`
-	ReportedAt      time.Time `json:"reported_at"`
+	EngineVersion              string    `json:"engine_version"`
+	EngineBuildHash            string    `json:"engine_build_hash"`
+	AppliedPlan                string    `json:"applied_plan,omitempty"`
+	AppliedEntitlementRevision string    `json:"applied_entitlement_revision,omitempty"`
+	ReportedAt                 time.Time `json:"reported_at"`
+}
+
+// EngineHeartbeatResponse mirrors the Registry heartbeat response contract.
+// Defined locally because backend/ is a separate Go module.
+type EngineHeartbeatResponse struct {
+	Status        string                 `json:"status"`
+	AccountID     string                 `json:"account_id"`
+	WorkspaceName string                 `json:"workspace_name"`
+	IsSuspended   bool                   `json:"is_suspended"`
+	PlanChanged   bool                   `json:"plan_changed"`
+	Entitlements  *rawRuntimeEntitlement `json:"entitlements"`
 }
 
 type EngineUsageReportRequest struct {
@@ -95,6 +108,14 @@ type EngineUsageReportRequest struct {
 	EngineBuildHash string                     `json:"engine_build_hash"`
 	ReportedAt      time.Time                  `json:"reported_at"`
 	Reports         []models.EngineUsageReport `json:"reports"`
+}
+
+type sdkPackageLeaseRequest struct {
+	Apps []models.SDKPackageLeaseRenewal `json:"apps"`
+}
+
+type sdkPackageLeaseResponse struct {
+	Renewed int64 `json:"renewed"`
 }
 
 type publicInsightEligibilityRequest struct {
@@ -119,17 +140,72 @@ type publicInsightReportResponse struct {
 
 type EngineHandshakeResult struct {
 	AccountID     string
+	EngineID      string
 	WorkspaceName string
+	OwnerEmail    string
 	Entitlements  models.RuntimeEntitlement
+	Identity      ManagedIdentityCapability
+}
+
+type ManagedIdentityCapability struct {
+	ProtocolVersion    int    `json:"protocol_version"`
+	Available          bool   `json:"available"`
+	OrganizationStatus string `json:"organization_status"`
+	InstallationID     string `json:"installation_id"`
+}
+
+type ManagedLoginTransaction struct {
+	TransactionID   uuid.UUID `json:"transaction_id"`
+	VerificationURL string    `json:"verification_url"`
+	ExpiresAt       time.Time `json:"expires_at"`
+}
+
+type ManagedIdentityAssertion struct {
+	SchemaVersion   int       `json:"schema_version"`
+	TransactionID   uuid.UUID `json:"transaction_id"`
+	AccountID       uuid.UUID `json:"account_id"`
+	InstallationID  uuid.UUID `json:"installation_id"`
+	Purpose         string    `json:"purpose"`
+	Provider        string    `json:"provider"`
+	Issuer          string    `json:"issuer"`
+	ExternalSubject string    `json:"external_subject"`
+	VerifiedEmail   string    `json:"verified_email"`
+	DisplayName     string    `json:"display_name"`
+	AuthMethod      string    `json:"auth_method"`
+	EnrollmentRef   string    `json:"enrollment_ref"`
+	AuthenticatedAt time.Time `json:"authenticated_at"`
+	ExpiresAt       time.Time `json:"expires_at"`
+}
+
+type ManagedIdentityRegistryError struct {
+	Status int
+	Code   string
+}
+
+func (e ManagedIdentityRegistryError) Error() string {
+	if e.Code == "" {
+		return fmt.Sprintf("managed identity Registry request failed with status %d", e.Status)
+	}
+	return fmt.Sprintf("managed identity Registry request failed with status %d (%s)", e.Status, e.Code)
 }
 
 type rawRuntimeEntitlement struct {
+	EntitlementRevision            string `json:"entitlement_revision"`
 	Plan                           string `json:"plan"`
 	HeartbeatRequired              *bool  `json:"heartbeat_required"`
 	UsageReporting                 string `json:"usage_reporting"`
 	PublicServiceInsightsReporting *bool  `json:"public_service_insights_reporting"`
 	HeartbeatIntervalSeconds       int    `json:"heartbeat_interval_seconds"`
 	HeartbeatStaleAfterSeconds     int    `json:"heartbeat_stale_after_seconds"`
+	MaxBuckets                     *int   `json:"max_buckets,omitempty"`
+	MaxSDKFamilies                 *int   `json:"max_sdk_families,omitempty"`
+	MaxMCPFamilies                 *int   `json:"max_mcp_families,omitempty"`
+	MaxServices                    *int   `json:"max_services,omitempty"`
+	MaxSandboxConcurrency          *int   `json:"max_sandbox_concurrency,omitempty"`
+	DriftMonitoringEnabled         bool   `json:"drift_monitoring_enabled"`
+	WebhookIngestionEnabled        bool   `json:"webhook_ingestion_enabled"`
+	SSOEnabled                     bool   `json:"sso_enabled"`
+	ExecutionRetentionDays         *int   `json:"execution_retention_days,omitempty"`
 }
 
 type ConnectionProfileRef struct {
@@ -868,9 +944,11 @@ func uniqueNonEmptyStrings(items []string) []string {
 }
 
 type HTTPRegistryClient struct {
-	endpoint   string
-	licenseKey string
-	httpClient *http.Client
+	endpoint          string
+	licenseKey        string
+	installationID    uuid.UUID
+	runtimeInstanceID uuid.UUID
+	httpClient        *http.Client
 
 	// sfGroup collapses concurrent identical in-flight Registry calls into one.
 	// FetchServiceMetadata and FetchEndpointsByNames are the hot paths:
@@ -890,7 +968,22 @@ func (c *HTTPRegistryClient) do(request *http.Request) (*http.Response, error) {
 	// control credentials are local to Engine and must never cross this boundary.
 	outbound.Header.Set("Authorization", "Bearer "+c.licenseKey)
 	outbound.Header.Set("X-API-Key", c.licenseKey)
+	if c.installationID != uuid.Nil {
+		outbound.Header.Set("X-Fused-Installation-ID", c.installationID.String())
+	}
+	if c.runtimeInstanceID != uuid.Nil {
+		outbound.Header.Set("X-Fused-Runtime-Instance-ID", c.runtimeInstanceID.String())
+	}
 	return c.httpClient.Do(outbound)
+}
+
+func (c *HTTPRegistryClient) ConfigureEngineIdentity(installationID, runtimeInstanceID uuid.UUID) error {
+	if installationID == uuid.Nil || runtimeInstanceID == uuid.Nil {
+		return errors.New("Engine installation and runtime identities are required")
+	}
+	c.installationID = installationID
+	c.runtimeInstanceID = runtimeInstanceID
+	return nil
 }
 
 func NewHTTPRegistryClient(endpoint, licenseKey string) *HTTPRegistryClient {
@@ -1309,6 +1402,7 @@ func (c *HTTPRegistryClient) fetchServiceMetadata(ctx context.Context, serviceID
 				AuthConfigs           fusedobject.AuthConfigs            `json:"auth_configs"`
 				RateLimit             *fusedobject.RateLimitConfig       `json:"rate_limit"`
 				RetryConfig           *fusedobject.RetryConfig           `json:"retry_config"`
+				TimeoutMs             *int                               `json:"timeout_ms"`
 				Pagination            *fusedobject.PaginationConfig      `json:"pagination"`
 				DefaultHeaders        fusedobject.DefaultHeaders         `json:"default_headers"`
 				ConnectConfig         *fusedobject.ServiceConnectConfig  `json:"connect_config"`
@@ -1345,6 +1439,7 @@ func (c *HTTPRegistryClient) fetchServiceMetadata(ctx context.Context, serviceID
 		AuthConfigs:           srv.AuthConfigs,
 		RateLimit:             srv.RateLimit,
 		RetryConfig:           srv.RetryConfig,
+		TimeoutMs:             srv.TimeoutMs,
 		Pagination:            srv.Pagination,
 		DefaultHeaders:        srv.DefaultHeaders,
 		ConnectConfig:         srv.ConnectConfig,
@@ -1554,9 +1649,12 @@ func (c *HTTPRegistryClient) HandshakeWithEntitlements(ctx context.Context) (Eng
 	}
 
 	var result struct {
-		AccountID     string                 `json:"account_id"`
-		WorkspaceName string                 `json:"workspace_name"`
-		Entitlements  *rawRuntimeEntitlement `json:"entitlements"`
+		AccountID     string                    `json:"account_id"`
+		EngineID      string                    `json:"engine_id"`
+		WorkspaceName string                    `json:"workspace_name"`
+		OwnerEmail    string                    `json:"owner_email"`
+		Entitlements  *rawRuntimeEntitlement    `json:"entitlements"`
+		Identity      ManagedIdentityCapability `json:"identity"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return EngineHandshakeResult{}, fmt.Errorf("failed to decode handshake response: %w", err)
@@ -1564,28 +1662,94 @@ func (c *HTTPRegistryClient) HandshakeWithEntitlements(ctx context.Context) (Eng
 
 	return EngineHandshakeResult{
 		AccountID:     result.AccountID,
+		EngineID:      result.EngineID,
 		WorkspaceName: result.WorkspaceName,
-		Entitlements:  runtimeEntitlementFromHandshake(result.Entitlements),
+		OwnerEmail:    result.OwnerEmail,
+		Entitlements:  RuntimeEntitlementFromHandshake(result.Entitlements),
+		Identity:      result.Identity,
 	}, nil
 }
 
-func (c *HTTPRegistryClient) SendHeartbeat(ctx context.Context, engineVersion, engineBuildHash string, reportedAt time.Time) error {
+func (c *HTTPRegistryClient) CreateManagedLoginTransaction(ctx context.Context, verifier, enrollmentRef string) (ManagedLoginTransaction, error) {
+	request := struct {
+		Purpose        string `json:"purpose"`
+		EngineVerifier string `json:"engine_verifier"`
+		EnrollmentRef  string `json:"enrollment_ref"`
+	}{Purpose: "browser_login", EngineVerifier: verifier, EnrollmentRef: enrollmentRef}
+	var transaction ManagedLoginTransaction
+	err := c.postManagedIdentityJSON(ctx, "/api/engine/identity/transactions", request, &transaction)
+	return transaction, err
+}
+
+func (c *HTTPRegistryClient) ExchangeManagedLoginTransaction(ctx context.Context, id uuid.UUID, verifier string) (ManagedIdentityAssertion, error) {
+	request := struct {
+		EngineVerifier string `json:"engine_verifier"`
+	}{EngineVerifier: verifier}
+	var assertion ManagedIdentityAssertion
+	err := c.postManagedIdentityJSON(ctx, "/api/engine/identity/transactions/"+id.String()+"/exchange", request, &assertion)
+	return assertion, err
+}
+
+func IsManagedLoginPending(err error) bool {
+	var registryError ManagedIdentityRegistryError
+	return errors.As(err, &registryError) && registryError.Status == http.StatusNotFound && registryError.Code == "transaction_unavailable"
+}
+
+func (c *HTTPRegistryClient) postManagedIdentityJSON(ctx context.Context, path string, requestBody, responseBody any) error {
+	body, err := json.Marshal(requestBody)
+	if err != nil {
+		return fmt.Errorf("managed identity Registry request: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.registryBaseURL()+path, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("managed identity Registry request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.do(request)
+	if err != nil {
+		return fmt.Errorf("managed identity Registry request failed: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return decodeManagedIdentityRegistryError(response)
+	}
+	if responseBody == nil {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 16<<10))
+		return nil
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 16<<10)).Decode(responseBody); err != nil {
+		return errors.New("managed identity Registry response was invalid")
+	}
+	return nil
+}
+
+func decodeManagedIdentityRegistryError(response *http.Response) error {
+	var payload struct {
+		Code string `json:"code"`
+	}
+	_ = json.NewDecoder(io.LimitReader(response.Body, 4<<10)).Decode(&payload)
+	return ManagedIdentityRegistryError{Status: response.StatusCode, Code: payload.Code}
+}
+
+func (c *HTTPRegistryClient) SendHeartbeat(ctx context.Context, engineVersion, engineBuildHash, appliedPlan, appliedEntitlementRevision string, reportedAt time.Time) (*EngineHeartbeatResponse, error) {
 	if c.licenseKey == "" {
-		return fmt.Errorf("FUSED_LICENSE_KEY is required but was not provided")
+		return nil, fmt.Errorf("FUSED_LICENSE_KEY is required but was not provided")
 	}
 
 	body, err := json.Marshal(EngineHeartbeatRequest{
-		EngineVersion:   engineVersion,
-		EngineBuildHash: engineBuildHash,
-		ReportedAt:      reportedAt,
+		EngineVersion:              engineVersion,
+		EngineBuildHash:            engineBuildHash,
+		AppliedPlan:                appliedPlan,
+		AppliedEntitlementRevision: appliedEntitlementRevision,
+		ReportedAt:                 reportedAt,
 	})
 	if err != nil {
-		return fmt.Errorf("heartbeat: marshal request: %w", err)
+		return nil, fmt.Errorf("heartbeat: marshal request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.registryBaseURL()+"/api/engine/heartbeat", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("heartbeat: create request: %w", err)
+		return nil, fmt.Errorf("heartbeat: create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.licenseKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -1593,15 +1757,24 @@ func (c *HTTPRegistryClient) SendHeartbeat(ctx context.Context, engineVersion, e
 
 	resp, err := c.do(req)
 	if err != nil {
-		return fmt.Errorf("heartbeat: request failed: %w", err)
+		return nil, fmt.Errorf("heartbeat: request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("heartbeat failed with status %d: %s", resp.StatusCode, string(body))
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("heartbeat: read response body: %w", err)
 	}
-	return nil
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("heartbeat failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result EngineHeartbeatResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("heartbeat: unmarshal response: %w", err)
+	}
+	return &result, nil
 }
 
 func (c *HTTPRegistryClient) SendUsageReports(ctx context.Context, engineVersion, engineBuildHash string, reports []models.EngineUsageReport, reportedAt time.Time) error {
@@ -1617,6 +1790,33 @@ func (c *HTTPRegistryClient) SendUsageReports(ctx context.Context, engineVersion
 		ReportedAt:      reportedAt,
 		Reports:         reports,
 	}, nil)
+}
+
+func (c *HTTPRegistryClient) RenewSDKPackageLeases(ctx context.Context, apps []models.SDKPackageLeaseRenewal) (int64, error) {
+	if len(apps) == 0 {
+		return 0, nil
+	}
+	var response sdkPackageLeaseResponse
+	err := c.postSignedEngineJSON(ctx, "/sdk-packages/leases/renew", sdkPackageLeaseRequest{Apps: apps}, &response)
+	if err != nil {
+		return 0, err
+	}
+	return response.Renewed, nil
+}
+
+func (c *HTTPRegistryClient) DownloadSDKPackage(ctx context.Context, appID uuid.UUID) (*http.Response, error) {
+	if appID == uuid.Nil {
+		return nil, errors.New("SDK package app ID is required")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.registryBaseURL()+"/sdk-packages/"+appID.String()+"/download", nil)
+	if err != nil {
+		return nil, fmt.Errorf("SDK package download: create request: %w", err)
+	}
+	response, err := c.do(request)
+	if err != nil {
+		return nil, fmt.Errorf("SDK package download: request failed: %w", err)
+	}
+	return response, nil
 }
 
 func (c *HTTPRegistryClient) FetchPublicServiceInsightEligibility(ctx context.Context, serviceIDs []uuid.UUID) (map[uuid.UUID]bool, error) {
@@ -1691,11 +1891,12 @@ func (c *HTTPRegistryClient) signRegistryPayload(body []byte) string {
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
 
-func runtimeEntitlementFromHandshake(raw *rawRuntimeEntitlement) models.RuntimeEntitlement {
+func RuntimeEntitlementFromHandshake(raw *rawRuntimeEntitlement) models.RuntimeEntitlement {
 	entitlement := models.DefaultRuntimeEntitlement()
 	if raw == nil {
 		return entitlement
 	}
+	entitlement.EntitlementRevision = raw.EntitlementRevision
 	if raw.Plan != "" {
 		entitlement.Plan = raw.Plan
 	}
@@ -1710,6 +1911,15 @@ func runtimeEntitlementFromHandshake(raw *rawRuntimeEntitlement) models.RuntimeE
 	}
 	entitlement.HeartbeatIntervalSeconds = raw.HeartbeatIntervalSeconds
 	entitlement.HeartbeatStaleAfterSeconds = raw.HeartbeatStaleAfterSeconds
+	entitlement.MaxBuckets = raw.MaxBuckets
+	entitlement.MaxSDKFamilies = raw.MaxSDKFamilies
+	entitlement.MaxMCPFamilies = raw.MaxMCPFamilies
+	entitlement.MaxServices = raw.MaxServices
+	entitlement.MaxSandboxConcurrency = raw.MaxSandboxConcurrency
+	entitlement.DriftMonitoringEnabled = raw.DriftMonitoringEnabled
+	entitlement.WebhookIngestionEnabled = raw.WebhookIngestionEnabled
+	entitlement.SSOEnabled = raw.SSOEnabled
+	entitlement.ExecutionRetentionDays = raw.ExecutionRetentionDays
 	return entitlement.Normalized()
 }
 
@@ -1757,6 +1967,7 @@ func (c *HTTPRegistryClient) buildServiceMetadataRequest(ctx context.Context, se
 					max_retries
 					backoff_ms
 				}
+				timeout_ms
 				pagination {
 					type
 					request_param

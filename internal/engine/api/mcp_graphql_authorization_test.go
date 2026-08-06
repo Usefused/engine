@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -15,6 +16,72 @@ import (
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/store"
 )
+
+type appAccessResolverTestStore struct {
+	*workspaceTestStore
+	families map[uuid.UUID]uuid.UUID
+	calls    int
+}
+
+func (s *appAccessResolverTestStore) ResolveAppFamilyAccess(_ context.Context, _ uuid.UUID, appIDs []uuid.UUID) (map[uuid.UUID]uuid.UUID, error) {
+	s.calls++
+	resolved := make(map[uuid.UUID]uuid.UUID, len(appIDs))
+	for _, appID := range appIDs {
+		if familyID := s.families[appID]; familyID != uuid.Nil {
+			resolved[appID] = familyID
+		}
+	}
+	return resolved, nil
+}
+
+func TestGraphQLAppRequirementsResolveFamiliesInOneCall(t *testing.T) {
+	appOne, appTwo, familyID := uuid.New(), uuid.New(), uuid.New()
+	s := &appAccessResolverTestStore{
+		workspaceTestStore: &workspaceTestStore{},
+		families:           map[uuid.UUID]uuid.UUID{appOne: familyID, appTwo: familyID},
+	}
+	requests := []graphQLAppRequirement{
+		{appID: appOne, permission: accesscontrol.PermissionAppRead},
+		{appID: appTwo, permission: accesscontrol.PermissionAppRead},
+	}
+	requirements, err := (graphQLAuthorizationResources{store: s}).resolveApps(t.Context(), uuid.New(), requests)
+	want := accesscontrol.Requirement{Permission: accesscontrol.PermissionAppRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID}}
+	if err != nil || s.calls != 1 || len(requirements) != 1 || requirements[0] != want {
+		t.Fatalf("requirements/calls/error = %#v/%d/%v, want %#v/1/nil", requirements, s.calls, err, want)
+	}
+}
+
+func TestMCPAnalyticsAuthorizationResolvesAppIDToFamily(t *testing.T) {
+	appID, familyID, workspaceID := uuid.New(), uuid.New(), uuid.New()
+	baseStore := &workspaceTestStore{}
+	schema := authorizationTestSchema(t, baseStore)
+	body, err := json.Marshal(map[string]any{
+		"query": `query { mcpAnalytics(app_id: "` + appID.String() + `") { total_requests } }`,
+	})
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	plan, err := buildGraphQLAuthorizationPlan(&schema, body, workspaceID)
+	if err != nil {
+		t.Fatalf("build plan: %v", err)
+	}
+	if len(plan.apps) != 1 || plan.apps[0].appID != appID {
+		t.Fatalf("app requirements = %#v, want exact app id %s", plan.apps, appID)
+	}
+
+	resolverStore := &appAccessResolverTestStore{
+		workspaceTestStore: baseStore,
+		families:           map[uuid.UUID]uuid.UUID{appID: familyID},
+	}
+	requirements, err := (graphQLAuthorizationResources{store: resolverStore}).resolveApps(t.Context(), workspaceID, plan.apps)
+	want := accesscontrol.Requirement{
+		Permission: accesscontrol.PermissionAppRead,
+		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID},
+	}
+	if err != nil || resolverStore.calls != 1 || len(requirements) != 1 || requirements[0] != want {
+		t.Fatalf("requirements/calls/error = %#v/%d/%v, want %#v/1/nil", requirements, resolverStore.calls, err, want)
+	}
+}
 
 func TestEngineGraphQLPolicyClassifiesEveryRootResolver(t *testing.T) {
 	schema := authorizationTestSchema(t, &workspaceTestStore{})
@@ -105,8 +172,8 @@ func TestBuildGraphQLAuthorizationPlanHandlesOperationAliasesAndFragments(t *tes
 		t.Fatalf("buildGraphQLAuthorizationPlan() error = %v", err)
 	}
 	want := map[accesscontrol.Permission]bool{
-		accesscontrol.PermissionArtifactTokensManage: true,
-		accesscontrol.PermissionBucketRead:           true,
+		accesscontrol.PermissionAppTokensManage: true,
+		accesscontrol.PermissionBucketRead:      true,
 	}
 	if len(plan.requirements) != len(want) || plan.rootFields != 2 {
 		t.Fatalf("plan = %#v, want 2 direct requirements across 2 roots", plan)
@@ -122,17 +189,17 @@ func TestBuildGraphQLAuthorizationPlanHandlesOperationAliasesAndFragments(t *tes
 			t.Errorf("workspace requirement = %#v, want workspace %s", requirement, workspaceID)
 		}
 	}
-	if len(plan.scopes) != 1 || plan.scopes[0].permission != accesscontrol.PermissionArtifactRead || plan.scopes[0].resource != accesscontrol.ResourceArtifact {
-		t.Fatalf("collection scopes = %#v, want artifact.read", plan.scopes)
+	if len(plan.scopes) != 1 || plan.scopes[0].permission != accesscontrol.PermissionAppRead || plan.scopes[0].resource != accesscontrol.ResourceApp {
+		t.Fatalf("collection scopes = %#v, want app.read", plan.scopes)
 	}
 }
 
 func TestEngineGraphQLPreflightIsAllOrNothing(t *testing.T) {
 	workspaceID := uuid.New()
-	s := &workspaceTestStore{accountID: uuid.New(), mockScopes: map[uuid.UUID]*store.ArtifactScope{}}
+	s := &workspaceTestStore{accountID: uuid.New(), mockScopes: map[uuid.UUID]*store.AppRuntime{}}
 	schema := authorizationTestSchema(t, s)
 	handler := mcpGraphQLHandler(schema)
-	actor := actorWithWorkspacePermissions(t, workspaceID, accesscontrol.PermissionArtifactRead)
+	actor := actorWithWorkspacePermissions(t, workspaceID, accesscontrol.PermissionAppRead)
 	body := `{"query":"query { first: mcpServers { total } second: bucketSummaries { id } }"}`
 	request := httptest.NewRequest(http.MethodPost, "/engine/graphql", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
@@ -157,7 +224,7 @@ func TestEngineGraphQLProtectedChildAddsPermission(t *testing.T) {
 	s := &workspaceTestStore{accountID: uuid.New()}
 	schema := authorizationTestSchema(t, s)
 	handler := mcpGraphQLHandler(schema)
-	actor := actorWithWorkspacePermissions(t, workspaceID, accesscontrol.PermissionArtifactRead)
+	actor := actorWithWorkspacePermissions(t, workspaceID, accesscontrol.PermissionAppRead)
 	body := `{"query":"query { mcpServers { items { ... on MCPServer { execution_token } } } }"}`
 	request := httptest.NewRequest(http.MethodPost, "/engine/graphql", strings.NewReader(body))
 	captureContext, capture := accesscontrol.ContextWithRequiredPermissionsCapture(request.Context())
@@ -177,11 +244,11 @@ func TestEngineGraphQLProtectedChildAddsPermission(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &denial); err != nil {
 		t.Fatalf("decode denial: %v", err)
 	}
-	if len(denial.Missing) != 1 || denial.Missing[0].Permission != accesscontrol.PermissionArtifactTokensManage {
-		t.Fatalf("missing = %#v, want artifact.tokens.manage", denial.Missing)
+	if len(denial.Missing) != 1 || denial.Missing[0].Permission != accesscontrol.PermissionAppTokensManage {
+		t.Fatalf("missing = %#v, want app.tokens.manage", denial.Missing)
 	}
 	captured, ok := capture.RequiredPermissions()
-	if !ok || !hasRequirementPermission(captured, accesscontrol.PermissionArtifactTokensManage) {
+	if !ok || !hasRequirementPermission(captured, accesscontrol.PermissionAppTokensManage) {
 		t.Fatalf("captured authorization requirements = %#v, %v", captured, ok)
 	}
 }
@@ -197,14 +264,14 @@ func hasRequirementPermission(requirements []accesscontrol.Requirement, permissi
 
 func TestEngineGraphQLProtectedCollectionRejectsDisjointScopes(t *testing.T) {
 	workspaceID, readableArtifact, tokenArtifact := uuid.New(), uuid.New(), uuid.New()
-	s := &workspaceTestStore{accountID: uuid.New(), mockScopes: map[uuid.UUID]*store.ArtifactScope{
-		readableArtifact: {AccountID: uuid.New(), ArtifactID: readableArtifact, Kind: "mcp"},
+	s := &workspaceTestStore{accountID: uuid.New(), mockScopes: map[uuid.UUID]*store.AppRuntime{
+		readableArtifact: {AccountID: uuid.New(), AppID: readableArtifact, Kind: "mcp"},
 	}}
 	schema := authorizationTestSchema(t, s)
 	handler := mcpGraphQLHandler(schema)
 	actor := actorWithResourcePermissions(t, workspaceID,
-		accesscontrol.Grant{Permission: accesscontrol.PermissionArtifactRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceArtifact, ID: readableArtifact}},
-		accesscontrol.Grant{Permission: accesscontrol.PermissionArtifactTokensManage, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceArtifact, ID: tokenArtifact}},
+		accesscontrol.Grant{Permission: accesscontrol.PermissionAppRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: readableArtifact}},
+		accesscontrol.Grant{Permission: accesscontrol.PermissionAppTokensManage, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: tokenArtifact}},
 	)
 	request := httptest.NewRequest(http.MethodPost, "/engine/graphql", strings.NewReader(`{"query":"query { mcpServers { items { id execution_token } } }"}`))
 	request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), actor))
@@ -229,9 +296,9 @@ func TestEngineGraphQLCollectionsFilterAndCountAuthorizedResources(t *testing.T)
 	now := time.Now().UTC()
 	s := &workspaceTestStore{
 		accountID: accountID,
-		mockScopes: map[uuid.UUID]*store.ArtifactScope{
-			allowedArtifact: {AccountID: accountID, ArtifactID: allowedArtifact, Kind: "mcp", Name: "allowed", CreatedAt: now},
-			deniedArtifact:  {AccountID: accountID, ArtifactID: deniedArtifact, Kind: "mcp", Name: "denied", CreatedAt: now.Add(-time.Minute)},
+		mockScopes: map[uuid.UUID]*store.AppRuntime{
+			allowedArtifact: {AccountID: accountID, AppID: allowedArtifact, Kind: "mcp", Name: "allowed", CreatedAt: now},
+			deniedArtifact:  {AccountID: accountID, AppID: deniedArtifact, Kind: "mcp", Name: "denied", CreatedAt: now.Add(-time.Minute)},
 		},
 		bucketSummaries: []store.BucketSummary{{Bucket: store.Bucket{ID: allowedBucket, Name: "allowed"}}, {Bucket: store.Bucket{ID: deniedBucket, Name: "denied"}}},
 		workspaceServices: []store.WorkspaceService{
@@ -242,7 +309,7 @@ func TestEngineGraphQLCollectionsFilterAndCountAuthorizedResources(t *testing.T)
 	schema := authorizationTestSchema(t, s)
 	handler := mcpGraphQLHandler(schema)
 	actor := actorWithResourcePermissions(t, workspaceID,
-		accesscontrol.Grant{Permission: accesscontrol.PermissionArtifactRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceArtifact, ID: allowedArtifact}},
+		accesscontrol.Grant{Permission: accesscontrol.PermissionAppRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: allowedArtifact}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionBucketRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: allowedBucket}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionServiceRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: allowedService}},
 	)
@@ -284,15 +351,15 @@ func TestEngineGraphQLRelatedCollectionsIntersectScopesBeforeTotals(t *testing.T
 	now := time.Now().UTC()
 	s := &workspaceTestStore{
 		accountID: accountID,
-		mockScopes: map[uuid.UUID]*store.ArtifactScope{
-			allowedArtifact: {AccountID: accountID, ArtifactID: allowedArtifact, Kind: "sdk", Name: "allowed", CreatedAt: now},
+		mockScopes: map[uuid.UUID]*store.AppRuntime{
+			allowedArtifact: {AccountID: accountID, AppID: allowedArtifact, Kind: "sdk", Name: "allowed", CreatedAt: now},
 		},
 		sdkBuckets: map[uuid.UUID][]store.Bucket{allowedArtifact: {
 			{ID: allowedBucket, Name: "allowed"}, {ID: deniedBucket, Name: "denied"},
 		}},
-		artifactScopesForBucket: map[uuid.UUID][]store.ArtifactScope{allowedBucket: {
-			{AccountID: accountID, ArtifactID: allowedArtifact, Kind: "sdk", Name: "allowed", CreatedAt: now},
-			{AccountID: accountID, ArtifactID: deniedArtifact, Kind: "sdk", Name: "denied", CreatedAt: now.Add(-time.Minute)},
+		appRuntimesForBucket: map[uuid.UUID][]store.AppRuntime{allowedBucket: {
+			{AccountID: accountID, AppID: allowedArtifact, Kind: "sdk", Name: "allowed", CreatedAt: now},
+			{AccountID: accountID, AppID: deniedArtifact, Kind: "sdk", Name: "denied", CreatedAt: now.Add(-time.Minute)},
 		}},
 		bucketServiceSummaries: map[uuid.UUID][]store.BucketServiceSummary{allowedBucket: {
 			{ServiceID: allowedService, ServiceName: "Allowed"}, {ServiceID: deniedService, ServiceName: "Denied"},
@@ -301,13 +368,13 @@ func TestEngineGraphQLRelatedCollectionsIntersectScopesBeforeTotals(t *testing.T
 	schema := authorizationTestSchema(t, s)
 	handler := mcpGraphQLHandler(schema)
 	actor := actorWithResourcePermissions(t, workspaceID,
-		accesscontrol.Grant{Permission: accesscontrol.PermissionArtifactRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceArtifact, ID: allowedArtifact}},
+		accesscontrol.Grant{Permission: accesscontrol.PermissionAppRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: allowedArtifact}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionBucketRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: allowedBucket}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionServiceRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: allowedService}},
 	)
 	actor.AccountID = accountID
 	query := `query {
-		sdkBuckets(artifact_id: "` + allowedArtifact.String() + `") { id }
+		sdkBuckets(app_family_id: "` + allowedArtifact.String() + `") { id }
 		bucketSDKPage(bucket_id: "` + allowedBucket.String() + `", limit: 10, offset: 0) { total items { id } }
 		bucketServicePage(bucket_id: "` + allowedBucket.String() + `", limit: 10, offset: 0) { total items { service_id } }
 	}`
@@ -434,7 +501,7 @@ func TestDeployMCPAuthorizationResolvesBucketAndEveryServiceInBatches(t *testing
 	}
 	actor := actorWithResourcePermissions(t, workspaceID,
 		accesscontrol.Grant{Permission: accesscontrol.PermissionWorkspaceRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
-		accesscontrol.Grant{Permission: accesscontrol.PermissionArtifactCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
+		accesscontrol.Grant{Permission: accesscontrol.PermissionAppCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionBucketUse, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: bucketID}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionServiceConsume, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: firstService}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionServiceConsume, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: secondService}},
@@ -442,9 +509,9 @@ func TestDeployMCPAuthorizationResolvesBucketAndEveryServiceInBatches(t *testing
 	if err := authorizeGraphQLPlan(t.Context(), actor, plan); err != nil {
 		t.Fatalf("complete scoped deployment should authorize: %v", err)
 	}
-	existingArtifactID := uuid.New()
+	existingConfigResourceID := uuid.New()
 	configStore.states = []store.ConfigState{{
-		ConfigKey: "mcp:team-agent:1.0.0", ConfigType: store.ConfigTypeMCP, LatestResourceID: &existingArtifactID,
+		ConfigKey: "mcp:team-agent:1.0.0", ConfigType: store.ConfigTypeMCP, LatestResourceID: &existingConfigResourceID,
 	}}
 	updateRequirements, err := resources.resolveDeployments(t.Context(), workspaceID, plan.deployments, "test-key")
 	if err != nil {
@@ -456,7 +523,7 @@ func TestDeployMCPAuthorizationResolvesBucketAndEveryServiceInBatches(t *testing
 	}}, updateRequirements...)}
 	manager := actorWithResourcePermissions(t, workspaceID,
 		accesscontrol.Grant{Permission: accesscontrol.PermissionWorkspaceRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
-		accesscontrol.Grant{Permission: accesscontrol.PermissionArtifactManage, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceArtifact, ID: existingArtifactID}},
+		accesscontrol.Grant{Permission: accesscontrol.PermissionAppManage, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: existingConfigResourceID}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionBucketUse, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: bucketID}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionServiceConsume, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: firstService}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionServiceConsume, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: secondService}},
@@ -466,7 +533,7 @@ func TestDeployMCPAuthorizationResolvesBucketAndEveryServiceInBatches(t *testing
 	}
 	actor = actorWithResourcePermissions(t, workspaceID,
 		accesscontrol.Grant{Permission: accesscontrol.PermissionWorkspaceRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
-		accesscontrol.Grant{Permission: accesscontrol.PermissionArtifactCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
+		accesscontrol.Grant{Permission: accesscontrol.PermissionAppCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionBucketUse, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: bucketID}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionServiceConsume, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: firstService}},
 	)

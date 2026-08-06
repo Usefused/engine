@@ -40,7 +40,7 @@ func TestWorkspaceShareGraphQLListsAndMutatesBoundedAccess(t *testing.T) {
 func TestWorkspaceShareGraphQLRequiresAccessManage(t *testing.T) {
 	testStore := &teamGraphQLTestStore{}
 	actor := actorWithTeamPermissions(t, accesscontrol.PermissionAccessRead)
-	response := executeTeamGraphQL(t, testStore, actor, `mutation { grantWorkspaceArtifactAccess(artifact_id:"`+uuid.NewString()+`") { changed } }`)
+	response := executeTeamGraphQL(t, testStore, actor, `mutation { grantWorkspaceAppAccess(app_family_id:"`+uuid.NewString()+`") { changed } }`)
 	if response.Code != 403 {
 		t.Fatalf("status = %d, want 403: %s", response.Code, response.Body.String())
 	}

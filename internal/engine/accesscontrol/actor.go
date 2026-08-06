@@ -2,6 +2,7 @@ package accesscontrol
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -12,16 +13,21 @@ const (
 	SubjectBootstrap      SubjectKind = "bootstrap"
 	SubjectUser           SubjectKind = "user"
 	SubjectServiceAccount SubjectKind = "service_account"
-	SubjectArtifact       SubjectKind = "artifact"
+	SubjectApp            SubjectKind = "app"
 )
 
 type Actor struct {
-	AccountID     uuid.UUID
-	WorkspaceID   uuid.UUID
-	SubjectID     uuid.UUID
-	CredentialID  uuid.UUID
-	Kind          SubjectKind
-	Authorization AuthorizationSnapshot
+	AccountID            uuid.UUID
+	WorkspaceID          uuid.UUID
+	SubjectID            uuid.UUID
+	DisplayName          string
+	Email                string
+	CredentialID         uuid.UUID
+	CredentialSource     string
+	AuthenticationMethod string
+	CredentialExpiresAt  *time.Time
+	Kind                 SubjectKind
+	Authorization        AuthorizationSnapshot
 }
 
 type actorContextKey struct{}

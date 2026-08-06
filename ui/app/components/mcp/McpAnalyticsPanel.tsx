@@ -2,7 +2,7 @@ import { Activity, Clock, ServerCrash, Users, Wrench } from "lucide-react";
 
 // Shared with the per-server /integrations/mcp/:id/analytics route and the
 // Observability page's MCP tab -- both fetch the exact same
-// `mcpAnalytics(artifactId)` query from the Engine's MCP GraphQL schema
+// `mcpAnalytics(app_id)` query from the Engine's MCP GraphQL schema
 // (internal/engine/api/mcp_graphql.go) and just hand the result here.
 export interface McpAnalyticsData {
   total_requests: number;

@@ -105,22 +105,18 @@ func (m *mockStore) BootstrapWorkspace(ctx context.Context, accountID uuid.UUID,
 	return uuid.Nil, nil
 }
 
-func (m *mockStore) SaveArtifactScope(ctx context.Context, scope store.ArtifactScope) error {
+func (m *mockStore) SaveAppRuntime(ctx context.Context, scope store.AppRuntime) error {
 	return nil
 }
 
-func (m *mockStore) DeleteArtifactScope(ctx context.Context, accountID uuid.UUID, artifactID uuid.UUID) error {
-	return nil
-}
-
-func (m *mockStore) GetSDKAccountID(ctx context.Context, artifactID uuid.UUID) (uuid.UUID, error) {
+func (m *mockStore) GetSDKAccountID(ctx context.Context, appID uuid.UUID) (uuid.UUID, error) {
 	return uuid.Nil, nil
 }
 func (m *mockStore) GetAccountByAPIKey(ctx context.Context, apiKey string) (uuid.UUID, error) {
 	return uuid.Nil, nil
 }
-func (m *mockStore) GetArtifactScope(ctx context.Context, artifactID uuid.UUID) (*store.ArtifactScope, error) {
-	return &store.ArtifactScope{ArtifactID: artifactID, ScopeSchemaVersion: models.ArtifactScopeSchemaVersion}, nil
+func (m *mockStore) GetAppRuntime(ctx context.Context, appID uuid.UUID) (*store.AppRuntime, error) {
+	return &store.AppRuntime{AppID: appID, ScopeSchemaVersion: models.AppScopeSchemaVersion}, nil
 }
 
 func (m *mockStore) AddWorkspaceServiceVersion(ctx context.Context, serviceID uuid.UUID, serviceSlug string, version string, serviceVersionID uuid.UUID, serviceName string, addedBy uuid.UUID) error {
@@ -246,7 +242,7 @@ func (m *mockStore) UpsertMCPSession(ctx context.Context, session *models.MCPSes
 	return nil
 }
 
-func (m *mockStore) GetIdempotentExecution(ctx context.Context, artifactID uuid.UUID, idempotencyKeyHash, requestBodyHash string) (*models.IdempotentExecution, error) {
+func (m *mockStore) GetIdempotentExecution(ctx context.Context, appID uuid.UUID, idempotencyKeyHash, requestBodyHash string) (*models.IdempotentExecution, error) {
 	return nil, store.ErrIdempotentExecutionNotFound
 }
 

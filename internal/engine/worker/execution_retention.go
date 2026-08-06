@@ -26,9 +26,19 @@ func StartExecutionRetentionWorker(ctx context.Context, store executionRetention
 	if store == nil || retentionDays <= 0 || batchSize <= 0 {
 		return nil
 	}
+	return StartDynamicExecutionRetentionWorker(ctx, store, func() int { return retentionDays }, batchSize)
+}
+
+// StartDynamicExecutionRetentionWorker reads the retention period before each
+// cleanup pass so a heartbeat plan change takes effect without restarting the
+// Engine. A non-positive value skips that pass without stopping the worker.
+func StartDynamicExecutionRetentionWorker(ctx context.Context, store executionRetentionStore, retentionDays func() int, batchSize int) *ExecutionRetentionWorker {
+	if store == nil || retentionDays == nil || batchSize <= 0 {
+		return nil
+	}
 	workerCtx, cancel := context.WithCancel(ctx)
 	worker := &ExecutionRetentionWorker{cancel: cancel, done: make(chan struct{})}
-	go worker.run(workerCtx, store, time.Duration(retentionDays)*24*time.Hour, batchSize)
+	go worker.run(workerCtx, store, retentionDays, batchSize)
 	return worker
 }
 
@@ -43,9 +53,9 @@ func (w *ExecutionRetentionWorker) Stop(ctx context.Context) {
 	}
 }
 
-func (w *ExecutionRetentionWorker) run(ctx context.Context, store executionRetentionStore, retention time.Duration, batchSize int) {
+func (w *ExecutionRetentionWorker) run(ctx context.Context, store executionRetentionStore, retentionDays func() int, batchSize int) {
 	defer close(w.done)
-	cleanupExpiredExecutionEvents(ctx, store, time.Now().UTC().Add(-retention), batchSize)
+	cleanupExecutionRetentionPass(ctx, store, time.Now().UTC(), retentionDays(), batchSize)
 	ticker := time.NewTicker(executionRetentionInterval)
 	defer ticker.Stop()
 	for {
@@ -53,9 +63,16 @@ func (w *ExecutionRetentionWorker) run(ctx context.Context, store executionReten
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			cleanupExpiredExecutionEvents(ctx, store, now.UTC().Add(-retention), batchSize)
+			cleanupExecutionRetentionPass(ctx, store, now.UTC(), retentionDays(), batchSize)
 		}
 	}
+}
+
+func cleanupExecutionRetentionPass(ctx context.Context, store executionRetentionStore, now time.Time, retentionDays, batchSize int) {
+	if retentionDays <= 0 {
+		return
+	}
+	cleanupExpiredExecutionEvents(ctx, store, now.Add(-time.Duration(retentionDays)*24*time.Hour), batchSize)
 }
 
 func cleanupExpiredExecutionEvents(ctx context.Context, store executionRetentionStore, before time.Time, batchSize int) {

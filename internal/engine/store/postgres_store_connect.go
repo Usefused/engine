@@ -17,14 +17,14 @@ const connectConfigColumns = `
 	created_at, updated_at`
 
 const authConnectionColumns = `
-	id,  bucket_id, service_id, end_user_ref, created_by_artifact_id,
+	id,  bucket_id, service_id, end_user_ref, created_by_app_id,
 	auth_type, encrypted_dek, access_token, refresh_token, id_token, token_type,
 	scopes, scope_source, issuer, subject, identity_claims, expires_at, refresh_token_expires_at, last_used_at,
 	refresh_state, last_failure_code, last_failure_at, last_failure_trace_id, created_at, updated_at`
 
 const connectSessionColumns = `
 	id,  bucket_id, service_id, end_user_ref, state_hash,
-	nonce_hash, encrypted_dek, pkce_verifier, created_by_artifact_id, return_url, resource_input, requested_scopes, expires_at, used_at, created_at`
+	nonce_hash, encrypted_dek, pkce_verifier, created_by_app_id, return_url, resource_input, requested_scopes, expires_at, used_at, created_at`
 
 func (s *postgresStore) UpsertConnectConfig(ctx context.Context, cfg ConnectConfig) (*ConnectConfig, error) {
 	if err := validateConnectConfigMaterial(cfg); err != nil {
@@ -87,7 +87,7 @@ func (s *postgresStore) ListConnectConfigsForService(ctx context.Context, servic
 
 // ListWorkspaceConnectConfigs returns every bucket-owned connect config in one
 // SQL read. Service activation is intentionally not a filter here: buckets can
-// hold credentials before an artifact chooses the service, and sync must not
+// hold credentials before an app chooses the service, and sync must not
 // hide that material.
 func (s *postgresStore) ListWorkspaceConnectConfigs(ctx context.Context) ([]WorkspaceConnectConfig, error) {
 	query := `SELECT ` + prefixedConnectConfigColumns("configs") + `, buckets.name
@@ -135,7 +135,7 @@ func (s *postgresStore) UpsertAuthConnection(ctx context.Context, conn AuthConne
 	}
 	query := `
 		INSERT INTO fused_auth_connections (
-			bucket_id, service_id, end_user_ref, created_by_artifact_id,
+			bucket_id, service_id, end_user_ref, created_by_app_id,
 			auth_type, encrypted_dek, access_token, refresh_token, id_token,
 			token_type, scopes, scope_source, issuer, subject, identity_claims, expires_at, refresh_token_expires_at,
 			refresh_state, last_failure_code, last_failure_at, last_failure_trace_id
@@ -146,7 +146,7 @@ func (s *postgresStore) UpsertAuthConnection(ctx context.Context, conn AuthConne
 		WHERE b.id = $1
 		ON CONFLICT ON CONSTRAINT uq_fused_auth_connections
 		DO UPDATE SET
-			created_by_artifact_id = EXCLUDED.created_by_artifact_id,
+			created_by_app_id = EXCLUDED.created_by_app_id,
 			auth_type = EXCLUDED.auth_type,
 			encrypted_dek = EXCLUDED.encrypted_dek,
 			access_token = EXCLUDED.access_token,
@@ -167,7 +167,7 @@ func (s *postgresStore) UpsertAuthConnection(ctx context.Context, conn AuthConne
 			updated_at = NOW()
 		RETURNING ` + authConnectionColumns
 	return scanAuthConnection(s.db.QueryRow(ctx, query,
-		conn.BucketID, conn.ServiceID, conn.EndUserRef, uuidOrNil(conn.CreatedByArtifactID),
+		conn.BucketID, conn.ServiceID, conn.EndUserRef, uuidOrNil(conn.CreatedByAppID),
 		conn.AuthType, conn.EncryptedDEK, conn.EncryptedAccessToken, emptyStringOrNil(conn.EncryptedRefreshToken), emptyStringOrNil(conn.EncryptedIDToken),
 		defaultString(conn.TokenType, "Bearer"), nonNilStrings(conn.Scopes), defaultString(conn.ScopeSource, "none"), conn.Issuer, conn.Subject,
 		jsonObjectBytes(conn.IdentityClaims), conn.ExpiresAt, conn.RefreshTokenExpiresAt, defaultString(conn.RefreshState, "ok"),
@@ -314,7 +314,7 @@ func (s *postgresStore) CreateConnectSession(ctx context.Context, session Connec
 	query := `
 		INSERT INTO fused_connect_sessions (
 			bucket_id, service_id, end_user_ref, state_hash,
-			nonce_hash, encrypted_dek, pkce_verifier, created_by_artifact_id, return_url, resource_input, requested_scopes, expires_at
+			nonce_hash, encrypted_dek, pkce_verifier, created_by_app_id, return_url, resource_input, requested_scopes, expires_at
 			)
 			SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 			FROM fused_buckets b
@@ -323,7 +323,7 @@ func (s *postgresStore) CreateConnectSession(ctx context.Context, session Connec
 	return scanConnectSession(s.db.QueryRow(ctx, query,
 		session.BucketID, session.ServiceID, session.EndUserRef,
 		session.StateHash, session.NonceHash, session.EncryptedDEK, session.EncryptedPKCEVerifier,
-		uuidOrNil(session.CreatedByArtifactID), session.ReturnURL, jsonObjectBytes(session.ResourceInputJSON), session.RequestedScopes, session.ExpiresAt,
+		uuidOrNil(session.CreatedByAppID), session.ReturnURL, jsonObjectBytes(session.ResourceInputJSON), session.RequestedScopes, session.ExpiresAt,
 	))
 }
 
@@ -416,7 +416,7 @@ func scanAuthConnection(row rowScanner) (*AuthConnection, error) {
 		&conn.RefreshState, &conn.LastFailureCode, &conn.LastFailureAt, &conn.LastFailureTraceID, &conn.CreatedAt, &conn.UpdatedAt,
 	)
 	if createdBy != nil {
-		conn.CreatedByArtifactID = *createdBy
+		conn.CreatedByAppID = *createdBy
 	}
 	if refreshToken != nil {
 		conn.EncryptedRefreshToken = *refreshToken
@@ -448,7 +448,7 @@ func scanConnectSession(row rowScanner) (*ConnectSession, error) {
 		&session.ReturnURL, &session.ResourceInputJSON, &session.RequestedScopes, &session.ExpiresAt, &session.UsedAt, &session.CreatedAt,
 	)
 	if createdBy != nil {
-		session.CreatedByArtifactID = *createdBy
+		session.CreatedByAppID = *createdBy
 	}
 	return &session, err
 }

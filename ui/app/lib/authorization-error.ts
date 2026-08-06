@@ -92,7 +92,7 @@ function specificApiErrorMessage(
   if (status === 403 && code === "permission_denied") {
     return permissionDeniedMessage(payload.missing);
   }
-  return artifactOwnerErrorMessage(payload.error) || workspaceConfigErrorMessage(payload);
+  return appOwnerErrorMessage(payload.error) || workspaceConfigErrorMessage(payload);
 }
 
 function codedErrorMessage(payload: APIErrorPayload): string | null {
@@ -138,7 +138,7 @@ function productPermissionRequirementLabel(
     ? `${resourceType} "${displayName}"`
     : resourceType === "workspace"
       ? "this workspace"
-      : ["service", "bucket", "artifact"].includes(resourceType)
+      : ["service", "bucket", "app"].includes(resourceType)
         ? `the selected ${resourceType}`
         : "the requested resource";
   return `${productPermissionAction(requirement.permission)} ${resource}`;
@@ -155,10 +155,10 @@ function productPermissionAction(permission: string): string {
     "bucket.values.read": "view",
     "bucket.use": "use",
     "bucket.manage": "manage",
-    "artifact.read": "view",
-    "artifact.create": "create an SDK, MCP server, or webhook in",
-    "artifact.manage": "manage",
-    "artifact.tokens.manage": "manage",
+    "app.read": "view",
+    "app.create": "create an SDK or MCP server in",
+    "app.manage": "manage",
+    "app.tokens.manage": "manage",
     "connection.read": "view connections in",
     "connection.manage": "manage connections in",
     "audit.read": "view access activity for",
@@ -172,15 +172,15 @@ export function advancedPermissionDiagnostics(requirements: PermissionRequiremen
   );
 }
 
-function artifactOwnerErrorMessage(code: string | undefined): string | null {
+function appOwnerErrorMessage(code: string | undefined): string | null {
   switch (code) {
-    case "artifact owner is immutable":
+    case "app owner is immutable":
       return "This resource already has an owner. Keep its existing personal or team ownership.";
-    case "artifact owner is unavailable":
+    case "app owner is unavailable":
       return "The resource owner is no longer available. Ask a workspace administrator for help.";
     case "owner team was not found or is archived":
       return "Choose an active team, or use personal ownership.";
-    case "artifact owner authorization denied":
+    case "app owner authorization denied":
       return "You or the owning team no longer have the access required to complete this action.";
     default:
       return null;

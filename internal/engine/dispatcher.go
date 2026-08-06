@@ -380,12 +380,25 @@ func (d *Dispatcher) executeWithRetries(
 
 		if attempt < maxRetries {
 			if delay := retrypolicy.BackoffDuration(policy.Strategy, policy.BackoffMs, attempt); delay > 0 {
-				time.Sleep(delay)
+				if err := waitForRetry(ctx, delay); err != nil {
+					return lastStatus, err
+				}
 			}
 		}
 	}
 
 	return lastStatus, normalizeError(lastErr, lastStatus)
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (d *Dispatcher) executeOnce(

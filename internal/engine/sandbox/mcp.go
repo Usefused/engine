@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
+	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/shared/messaging"
 	"github.com/Usefused/engine/runtime"
 	"github.com/go-chi/chi/v5"
@@ -34,7 +36,7 @@ const maxMCPMessageBodyBytes = 256 * 1024
 // Isolation guarantee: each connection spawns a brand-new `node` process.
 // No memory, globals, or file handles are shared between sessions.
 func mcpSseHandler(w http.ResponseWriter, r *http.Request) {
-	artifactIDHex, token, ok := extractMCPParams(w, r)
+	appIDHex, token, ok := extractMCPParams(w, r)
 	if !ok {
 		return
 	}
@@ -45,23 +47,33 @@ func mcpSseHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ── Rate limit: SSE connections per SDK-ID ─────────────────────────────
-	if !allowSSEConnect(w, artifactIDHex) {
+	if !allowSSEConnect(w, appIDHex) {
 		return
 	}
 
-	if _, err := validateTokenWithCache(r.Context(), artifactIDHex, token); err != nil {
+	// ── Entitlement: MaxSandboxConcurrency gate ────────────────────────────
+	ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.sandbox.mcp.concurrency_check")
+	if limitErr := entitlement.CheckLimit(span, "mcp_sandbox_concurrency", activeMCPSessionCount(), entitlement.LiveEntitlement.Load().MaxSandboxConcurrency); limitErr != nil {
+		slog.InfoContext(ctx, "mcp sse denied: max sandbox concurrency reached", "limit", limitErr.Limit, "current", limitErr.Current)
+		writeError(w, http.StatusPaymentRequired, limitErr.Error())
+		span.End()
+		return
+	}
+	span.End()
+
+	if _, err := validateTokenWithCache(r.Context(), appIDHex, token); err != nil {
 		writeError(w, http.StatusUnauthorized, "invalid token")
 		return
 	}
 
 	// S4.3 Handshake: Load the SDK scope and Fused Objects into memory refcounted cache
 	// Inject the user's token into the context so RegistryClient can authenticate as the user
-	ctx := context.WithValue(r.Context(), "sdk-token", token)
-	if err := globalObjectCache.ConnectSDK(ctx, artifactIDHex); err != nil {
+	ctx = context.WithValue(r.Context(), "sdk-token", token)
+	if err := globalObjectCache.ConnectSDK(ctx, appIDHex); err != nil {
 		writeError(w, http.StatusUnauthorized, fmt.Sprintf("Failed to handshake SDK cache: %v", err))
 		return
 	}
-	defer globalObjectCache.DisconnectSDK(artifactIDHex)
+	defer globalObjectCache.DisconnectSDK(appIDHex)
 
 	sessionID := uuid.NewString()
 
@@ -69,13 +81,13 @@ func mcpSseHandler(w http.ResponseWriter, r *http.Request) {
 	// or if the idle timer fires (see registerMCPSession).
 	ctx, cancel := context.WithCancel(r.Context())
 
-	// Sessions get an operation catalog scoped to exactly what this artifact's
+	// Sessions get an operation catalog scoped to exactly what this app's
 	// owner selected; catalog construction must succeed before the child starts.
 	// Built from a Registry round trip, so a failure here is treated the same
 	// as the ConnectSDK handshake failure above -- the session never starts
 	// rather than serving a session whose search_docs/call() catalog can't be
 	// trusted to match its actual scope.
-	fixture, err := prepareSessionFixture(ctx, artifactIDHex)
+	fixture, err := prepareSessionFixture(ctx, appIDHex)
 	if err != nil {
 		cancel()
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to build mcp fixture: %v", err))
@@ -97,24 +109,24 @@ func mcpSseHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	injectedResp := make(chan string, 100)
-	registerMCPSession(sessionID, artifactIDHex, token, cmd, stdin, cancel, injectedResp, fixture, authContext)
-	publishMCPSessionEvent(artifactIDHex, sessionID, "started")
+	registerMCPSession(sessionID, appIDHex, token, cmd, stdin, cancel, injectedResp, fixture, authContext)
+	publishMCPSessionEvent(appIDHex, sessionID, "started")
 
-	defer cleanupMCPSession(sessionID, artifactIDHex, cmd, cancel)
+	defer cleanupMCPSession(sessionID, appIDHex, cmd, cancel)
 
 	flusher, ok := setupSSEResponse(w, sessionID)
 	if !ok {
 		return
 	}
 
-	processMCPStream(ctx, w, flusher, stdout, artifactIDHex, sessionID, injectedResp)
+	processMCPStream(ctx, w, flusher, stdout, appIDHex, sessionID, injectedResp)
 }
 
 // extractMCPParams extracts and validates required URL parameters and headers.
 func extractMCPParams(w http.ResponseWriter, r *http.Request) (string, string, bool) {
-	artifactIDHex := chi.URLParam(r, "id")
-	if artifactIDHex == "" {
-		writeError(w, http.StatusBadRequest, "sdk id required")
+	appIDHex := chi.URLParam(r, "id")
+	if appIDHex == "" {
+		writeError(w, http.StatusBadRequest, "app id required")
 		return "", "", false
 	}
 
@@ -123,14 +135,14 @@ func extractMCPParams(w http.ResponseWriter, r *http.Request) (string, string, b
 		writeError(w, http.StatusUnauthorized, "Authorization header required")
 		return "", "", false
 	}
-	return artifactIDHex, token, true
+	return appIDHex, token, true
 }
 
-func validateTokenWithCache(ctx context.Context, artifactIDHex, token string) (uuid.UUID, error) {
+func validateTokenWithCache(ctx context.Context, appIDHex, token string) (uuid.UUID, error) {
 	if globalTokenValidator == nil {
 		return uuid.Nil, auth.ErrUnauthorized
 	}
-	cacheKey := sha256CacheKey(artifactIDHex, token)
+	cacheKey := sha256CacheKey(appIDHex, token)
 	now := time.Now()
 
 	tokenCache.RLock()
@@ -140,23 +152,23 @@ func validateTokenWithCache(ctx context.Context, artifactIDHex, token string) (u
 		return entry.accountID, nil
 	}
 
-	artifactID, err := uuid.Parse(artifactIDHex)
+	appID, err := uuid.Parse(appIDHex)
 	if err != nil {
 		return uuid.Nil, err
 	}
-	accountID, err := globalTokenValidator.Validate(ctx, artifactID, token)
+	identity, err := globalTokenValidator.Validate(ctx, appID, token)
 	if err != nil {
 		return uuid.Nil, err
 	}
 
 	tokenCache.Lock()
-	tokenCache.m[cacheKey] = tokenCacheEntry{accountID: accountID, expiry: now.Add(time.Minute)}
+	tokenCache.m[cacheKey] = tokenCacheEntry{accountID: identity.AccountID, expiry: now.Add(time.Minute)}
 	tokenCache.Unlock()
-	return accountID, nil
+	return identity.AccountID, nil
 }
 
-func sha256CacheKey(artifactIDHex, token string) string {
-	sum := sha256.Sum256([]byte(artifactIDHex + "\x00" + token))
+func sha256CacheKey(appIDHex, token string) string {
+	sum := sha256.Sum256([]byte(appIDHex + "\x00" + token))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -232,12 +244,12 @@ func sharedRuntimeEntrypointPath() string {
 // prepareSessionFixture loads the SDK's scope and derives its own MCP
 // fixture from it (mcp_session_fixture.go) -- split out of mcpSseHandler so
 // that handler's own error-handling stays a single branch instead of two.
-func prepareSessionFixture(ctx context.Context, artifactIDHex string) (*Fixture, error) {
-	selections, err := validateAndParseScope(ctx, globalObjectCache, artifactIDHex)
+func prepareSessionFixture(ctx context.Context, appIDHex string) (*Fixture, error) {
+	selections, err := validateAndParseScope(ctx, globalObjectCache, appIDHex)
 	if err != nil {
 		return nil, fmt.Errorf("load sdk scope: %w", err)
 	}
-	fixture, err := buildSessionFixture(ctx, globalObjectCache, artifactIDHex, selections)
+	fixture, err := buildSessionFixture(ctx, globalObjectCache, appIDHex, selections)
 	if err != nil {
 		return nil, fmt.Errorf("build fixture: %w", err)
 	}
@@ -295,11 +307,11 @@ func setupPipesAndStart(cmd *exec.Cmd) (io.WriteCloser, io.ReadCloser, error) {
 }
 
 // registerMCPSession saves the session state safely in the global map and starts the idle timer.
-func registerMCPSession(sessionID, artifactIDHex, token string, cmd *exec.Cmd, stdin io.WriteCloser, cancel context.CancelFunc, injectedResp chan string, fixture *Fixture, authContext map[string]any) {
+func registerMCPSession(sessionID, appIDHex, token string, cmd *exec.Cmd, stdin io.WriteCloser, cancel context.CancelFunc, injectedResp chan string, fixture *Fixture, authContext map[string]any) {
 	sessionIdleTimeout := time.Duration(cfg.Sandbox.SessionMaxAgeSeconds) * time.Second
 
 	sess := &mcpSession{
-		artifactID:      artifactIDHex,
+		appID:           appIDHex,
 		sessionID:       sessionID,
 		cmd:             cmd,
 		stdin:           stdin,
@@ -368,7 +380,7 @@ func mcpSessionAuthContext(headers http.Header) (map[string]any, error) {
 
 // cleanupMCPSession kills the Node process, removes the session from the
 // registry, cleans up the per-session temp dir, and publishes an end event.
-func cleanupMCPSession(sessionID, artifactIDHex string, cmd *exec.Cmd, cancel context.CancelFunc) {
+func cleanupMCPSession(sessionID, appIDHex string, cmd *exec.Cmd, cancel context.CancelFunc) {
 	// Kill the process explicitly before cancelling the context so there is no
 	// race between context cancellation and process termination.
 	if cmd.Process != nil {
@@ -386,19 +398,19 @@ func cleanupMCPSession(sessionID, artifactIDHex string, cmd *exec.Cmd, cancel co
 	// Clean up the per-session temp directory.
 	os.RemoveAll(mcpSessionTmpDir(sessionID))
 
-	publishMCPSessionEvent(artifactIDHex, sessionID, "ended")
+	publishMCPSessionEvent(appIDHex, sessionID, "ended")
 }
 
 // publishMCPSessionEvent sends a session lifecycle event to NATS JetStream.
-func publishMCPSessionEvent(artifactIDHex, sessionID, eventType string) {
+func publishMCPSessionEvent(appIDHex, sessionID, eventType string) {
 	if globalNATSClient != nil && globalNATSClient.JS != nil {
 		eventData, _ := json.Marshal(map[string]any{
-			"artifact_id": artifactIDHex,
-			"session_id":  sessionID,
-			"type":        eventType,
-			"timestamp":   time.Now(),
+			"app_id":     appIDHex,
+			"session_id": sessionID,
+			"type":       eventType,
+			"timestamp":  time.Now(),
 		})
-		globalNATSClient.PublishJS(messaging.FusedEngineSessionSubject(artifactIDHex), eventData)
+		globalNATSClient.PublishJS(messaging.FusedEngineSessionSubject(appIDHex), eventData)
 	}
 }
 
@@ -420,7 +432,7 @@ func setupSSEResponse(w http.ResponseWriter, sessionID string) (http.Flusher, bo
 }
 
 // processMCPStream reads stdout from the Node process and forwards to the client.
-func processMCPStream(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, stdout io.ReadCloser, artifactIDHex, sessionID string, injectedResp chan string) {
+func processMCPStream(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, stdout io.ReadCloser, appIDHex, sessionID string, injectedResp chan string) {
 	stdoutLines := make(chan string)
 
 	go func() {
@@ -453,7 +465,7 @@ func processMCPStream(ctx context.Context, w http.ResponseWriter, flusher http.F
 				return
 			}
 			if strings.HasPrefix(line, "___FUSED_SPAN___:") {
-				recordMCPExecutorSpan(line, artifactIDHex, sessionID)
+				recordMCPExecutorSpan(line, appIDHex, sessionID)
 				continue
 			}
 			fmt.Fprintf(w, "event: message\ndata: %s\n\n", line)
@@ -473,7 +485,7 @@ func processMCPStream(ctx context.Context, w http.ResponseWriter, flusher http.F
 
 // recordMCPExecutorSpan keeps child-process executions in the operator's OTEL
 // trace stream without reviving the removed analytics persistence channel.
-func recordMCPExecutorSpan(line, artifactIDHex, sessionID string) {
+func recordMCPExecutorSpan(line, appIDHex, sessionID string) {
 	var spanData struct {
 		EndpointName string `json:"endpoint_name"`
 		Failed       bool   `json:"failed"`
@@ -483,7 +495,7 @@ func recordMCPExecutorSpan(line, artifactIDHex, sessionID string) {
 	}
 	_, span := otel.Tracer("engine").Start(context.Background(), "engine.mcp.executor")
 	span.SetAttributes(
-		attribute.String("artifact.id", artifactIDHex),
+		attribute.String("app.id", appIDHex),
 		attribute.String("mcp.session_id", sessionID),
 		attribute.String("execution.operation", spanData.EndpointName),
 		attribute.Bool("execution.failed", spanData.Failed),
@@ -545,7 +557,7 @@ func mcpMessageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ── Rate limit: tools/call messages per SDK-ID ─────────────────────────
-	if !allowMessage(w, sess.artifactID) {
+	if !allowMessage(w, sess.appID) {
 		return
 	}
 

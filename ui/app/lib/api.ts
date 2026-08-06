@@ -1,4 +1,5 @@
-import { getApiKey, clearApiKey } from "./session";
+import { getCSRFToken, purgeLegacyBrowserCredential } from "./session";
+import { credentialedRequestInit } from "./browser-request";
 import type { ServiceAuthOption } from "./service-auth";
 import {
   APIRequestError,
@@ -24,7 +25,7 @@ function getBaseURL(): string {
     const envUrl =
       runtimeWindow.__FUSED_ENV?.BACKEND_URL ??
       runtimeWindow.ENV?.BACKEND_URL;
-    if (envUrl !== undefined && envUrl !== null) return envUrl; // "" → relative, "https://…" → absolute
+    if (envUrl !== undefined && envUrl !== null) return sameOriginBaseURL(envUrl);
   }
   if (typeof process !== "undefined" && process.env.BACKEND_URL != null) {
     return process.env.BACKEND_URL;
@@ -33,26 +34,26 @@ function getBaseURL(): string {
   // explicit BACKEND_URL through env.js or the process environment.
   return "";
 }
+
+function sameOriginBaseURL(value: string): string {
+  if (value === "" || value.startsWith("/")) return value;
+  const configured = new URL(value, window.location.origin);
+  if (configured.origin !== window.location.origin) {
+    // Host-only session and CSRF cookies cannot safely support a split-origin
+    // browser UI. Deployments should reverse-proxy the Engine on this origin.
+    throw new Error("Fused browser authentication requires a same-origin BACKEND_URL");
+  }
+  return configured.href.replace(/\/$/, "");
+}
 /** @deprecated prefer getBaseURL() which reads window.ENV lazily */
 export const BASE = getBaseURL();
 
 async function req<T>(
-  path: string,
-  init: RequestInit = {},
-  serverToken?: string
+	path: string,
+	init: RequestInit = {}
 ): Promise<T> {
   const base = getBaseURL();
-  const envToken =
-    typeof window !== "undefined" ? window.ENV?.API_KEY : null;
-  const key = serverToken || envToken || getApiKey() || "";
-  const res = await fetch(`${base}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      "X-API-Key": key,
-      ...(init.headers ?? {}),
-    },
-  });
+  const res = await fetch(`${base}${path}`, credentialedRequestInit(init, getCSRFToken()));
 
   const data = await res.json().catch(() => ({}));
 
@@ -68,14 +69,22 @@ function handleAuthenticationFailure(
   payload: APIErrorPayload
 ): void {
   if (!isAuthenticationFailure(status, payload)) return;
-  clearApiKey();
+  purgeLegacyBrowserCredential();
+  if (shouldRedirectToLogin()) window.location.href = "/login";
+}
+
+export function handleCredentialedResponse(response: Response): void {
+  if (response.status !== 401) return;
+  purgeLegacyBrowserCredential();
   if (shouldRedirectToLogin()) window.location.href = "/login";
 }
 
 function shouldRedirectToLogin(): boolean {
   if (typeof window === "undefined") return false;
   return (
-    window.location.pathname !== "/login" && window.location.pathname !== "/"
+    window.location.pathname !== "/login" &&
+    window.location.pathname !== "/cli-login" &&
+    window.location.pathname !== "/"
   );
 }
 
@@ -517,10 +526,12 @@ export interface EngineExecutionEventEntry {
   id: string;
   trace_id?: string;
   span_id?: string;
-  artifact_id: string;
-  artifact_name?: string;
-  artifact_kind?: "sdk" | "mcp";
-  transport: "sdk" | "mcp" | "webhook";
+	app_family_id?: string;
+	app_id?: string;
+	app_version?: string;
+	app_kind?: "sdk" | "mcp";
+	transport: "sdk" | "mcp" | "webhook";
+	provider_protocol?: "rest" | "graphql";
   direction: "inbound" | "outbound";
   service_id: string;
   service_version_id: string;
@@ -556,10 +567,12 @@ const engineExecutionEventSelection = `
   id
   trace_id
   span_id
-  artifact_id
-  artifact_name
-  artifact_kind
-  transport
+	app_family_id
+	app_id
+	app_version
+	app_kind
+	transport
+	provider_protocol
   direction
   service_id
   service_version_id
@@ -608,7 +621,7 @@ export interface EngineExecutionBreakdown {
   p95_latency_ms: number;
 }
 
-export interface ArtifactExecutionAnalytics extends EngineExecutionAnalyticsSummary {
+export interface AppExecutionAnalytics extends EngineExecutionAnalyticsSummary {
   by_service: EngineExecutionBreakdown[];
 }
 
@@ -793,6 +806,36 @@ export interface BucketValue {
 }
 
 export const api = {
+  auth: {
+    session: () => req<{ authenticated: boolean; subject_kind?: string }>("/auth/session"),
+    startManaged: () => req<{
+      transaction_id: string;
+      poll_token: string;
+      verification_url: string;
+      expires_at: string;
+    }>("/auth/managed/start", { method: "POST", body: "{}" }),
+    pollManaged: (transactionId: string, pollToken: string, signal?: AbortSignal) =>
+      req<{ status: "pending" | "authenticated"; expires_at?: string }>("/auth/managed/poll", {
+        method: "POST",
+        signal,
+        body: JSON.stringify({ transaction_id: transactionId, poll_token: pollToken }),
+      }),
+    // Any active Engine API credential can establish a short-lived browser
+    // session for the same subject; the source credential is never persisted
+    // by the browser.
+    exchangeAPIKey: (apiKey: string) =>
+      req<{ status: "authenticated" }>("/auth/api-key/exchange", {
+        method: "POST",
+        body: JSON.stringify({ license_key: apiKey }),
+      }),
+    approveCLI: (transactionId: string, browserToken: string) =>
+      req<void>("/auth/cli/approve", {
+        method: "POST",
+        body: JSON.stringify({ transaction_id: transactionId, token: browserToken }),
+      }),
+    logout: () => req<void>("/auth/logout", { method: "POST", body: "{}" }),
+  },
+
   // Account
   getAccount: () => req<Account>("/account"),
   updateEmail: (email: string) =>
@@ -815,14 +858,13 @@ export const api = {
     getPricing: () => req<CreditsPricing>("/credits/pricing"),
   },
 
-  graphql: <T>(query: string, variables?: Record<string, unknown>, serverToken?: string) =>
+	graphql: <T>(query: string, variables?: Record<string, unknown>) =>
     req<{ data: T; errors?: { message: string }[] }>(
       "/graphql",
       {
         method: "POST",
         body: JSON.stringify({ query, variables }),
-      },
-      serverToken
+		}
     ).then((res) => {
       if (res.errors && res.errors.length > 0)
         throw new Error(res.errors[0].message);
@@ -843,14 +885,14 @@ export const api = {
       return res.data;
     }),
 
-	artifactConfig: {
-		plan: <T>(kind: "sdk" | "mcp" | "webhook", input: {
+	appConfig: {
+		plan: <T>(kind: "sdk" | "mcp", input: {
 			owner_team?: string;
       config_key: string;
       source_hash: string;
       config: Record<string, unknown>;
     }) => req<T>(`/${kind}-config/plan`, { method: "POST", body: JSON.stringify(input) }),
-    apply: <T>(kind: "sdk" | "mcp" | "webhook", input: { plan_id: string; source_hash: string }) =>
+    apply: <T>(kind: "sdk" | "mcp", input: { plan_id: string; source_hash: string }) =>
       req<T>(`/${kind}-config/apply`, { method: "POST", body: JSON.stringify(input) }),
   },
 
@@ -991,46 +1033,11 @@ export const api = {
   },
 
   sdks: {
-    generateAsync: (
-      name: string,
-      description: string,
-      version: string,
-      targetType: string,
-      targetLanguage: string,
-      selections: {
-        service_id: string;
-        service_name?: string;
-        service_slug?: string;
-        endpoint_ids: string[];
-        webhook_ids?: string[];
-        service_version_id?: string;
-      }[],
-      skipSandbox?: boolean,
-      upgradeFrom?: string
-    ) =>
-      req<{ job_id: string }>("/sdks/generate", {
-        method: "POST",
-        body: JSON.stringify({
-          name,
-          description,
-          version,
-          target_type: targetType,
-          target_language: targetLanguage,
-          selections,
-          skip_sandbox: skipSandbox,
-          upgrade_from: upgradeFrom,
-        }),
-      }),
-    upgradeAsync: (id: string) =>
-      req<{ job_id: string }>(`/sdks/${id}/upgrade`, {
-        method: "PUT",
-        body: "{}",
-      }),
     download: async (id: string, name: string, version: string) => {
-      const key = getApiKey() ?? "";
       const res = await fetch(`${BASE}/sdks/${id}/download`, {
-        headers: { "X-API-Key": key },
+        credentials: "include",
       });
+      handleCredentialedResponse(res);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
@@ -1042,21 +1049,11 @@ export const api = {
       a.remove();
       window.URL.revokeObjectURL(url);
     },
-    // delete: still the Registry-proxied path -- for plain (non-MCP) SDKs
-    // only. MCP servers are deleted via the deleteMcpServer GraphQL mutation
-    // (api.mcpGraphql) instead, since an Engine-native MCP scope has no
-    // Registry sdks row to delete. kill/restart/regenerateToken were removed
-    // here along with their Registry routes (MCP creation no longer
-    // generates a per-SDK sandbox) -- see integrations/mcp.tsx for their
-    // GraphQL replacements (kill/reactivate; there is no token-rotation
-    // equivalent in the new model, so that action was dropped).
-    delete: (id: string) => req<void>(`/sdk-config/${id}`, { method: "DELETE" }),
+    deactivate: (appId: string) => req<void>(`/apps/${appId}/`, { method: "DELETE" }),
   },
 
-  // api.auth (the hosted Connect runtime's setOAuthConfig/getConnections/
-  // deleteConnection/getWebhookAttempts) was removed along with the
-  // connect.$artifact_id.$service_id and connect.callback routes that were its
-  // only callers, and the backend endpoints behind it.
+  // The hosted Connect runtime API was removed with its obsolete browser
+  // routes. Engine-owned app connection configuration is exposed separately.
 
   // S2: Workspace membership — Engine-local (not proxied to the Registry).
   // The Engine owns which services are in a workspace; the Registry owns the
@@ -1239,8 +1236,9 @@ export const api = {
         )
         .then(({ engineExecutionEvents }) => engineExecutionEvents),
 
-    listArtifactExecutionEvents: (params: {
-      artifactId: string;
+	listAppExecutionEvents: (params: {
+		appId: string;
+		includeAllVersions?: boolean;
       transport?: string;
       direction?: string;
       status?: string;
@@ -1251,13 +1249,13 @@ export const api = {
     }) =>
       api
         .mcpGraphql<{
-          artifactExecutionEvents: {
+			appExecutionEvents: {
             items: EngineExecutionEventEntry[];
             total: number;
           };
         }>(
-          `query ArtifactExecutionEvents($artifactId: String!, $transport: String, $direction: String, $status: String, $limit: Int, $offset: Int, $startDate: String, $endDate: String) {
-            artifactExecutionEvents(artifact_id: $artifactId, transport: $transport, direction: $direction, status: $status, limit: $limit, offset: $offset, start_date: $startDate, end_date: $endDate) {
+			`query AppExecutionEvents($appId: String!, $includeAllVersions: Boolean, $transport: String, $direction: String, $status: String, $limit: Int, $offset: Int, $startDate: String, $endDate: String) {
+				appExecutionEvents(app_id: $appId, include_all_versions: $includeAllVersions, transport: $transport, direction: $direction, status: $status, limit: $limit, offset: $offset, start_date: $startDate, end_date: $endDate) {
               total
               items {
                 ${engineExecutionEventSelection}
@@ -1265,7 +1263,8 @@ export const api = {
             }
           }`,
           {
-            artifactId: params.artifactId,
+			appId: params.appId,
+			includeAllVersions: params.includeAllVersions ?? false,
             transport: params.transport || null,
             direction: params.direction || null,
             status: params.status || null,
@@ -1275,10 +1274,11 @@ export const api = {
             endDate: params.endDate || null,
           }
         )
-        .then(({ artifactExecutionEvents }) => artifactExecutionEvents),
+		.then(({ appExecutionEvents }) => appExecutionEvents),
 
-    getArtifactExecutionAnalytics: (params: {
-      artifactId: string;
+	getAppExecutionAnalytics: (params: {
+		appId: string;
+		includeAllVersions?: boolean;
       transport?: string;
       direction?: string;
       status?: string;
@@ -1286,9 +1286,9 @@ export const api = {
       endDate?: string;
     }) =>
       api
-        .mcpGraphql<{ artifactExecutionAnalytics: ArtifactExecutionAnalytics }>(
-          `query ArtifactExecutionAnalytics($artifactId: String!, $transport: String, $direction: String, $status: String, $startDate: String, $endDate: String) {
-            artifactExecutionAnalytics(artifact_id: $artifactId, transport: $transport, direction: $direction, status: $status, start_date: $startDate, end_date: $endDate) {
+		.mcpGraphql<{ appExecutionAnalytics: AppExecutionAnalytics }>(
+			`query AppExecutionAnalytics($appId: String!, $includeAllVersions: Boolean, $transport: String, $direction: String, $status: String, $startDate: String, $endDate: String) {
+				appExecutionAnalytics(app_id: $appId, include_all_versions: $includeAllVersions, transport: $transport, direction: $direction, status: $status, start_date: $startDate, end_date: $endDate) {
               total_calls
               successful_calls
               failed_calls
@@ -1299,7 +1299,8 @@ export const api = {
             }
           }`,
           {
-            artifactId: params.artifactId,
+			appId: params.appId,
+			includeAllVersions: params.includeAllVersions ?? false,
             transport: params.transport || null,
             direction: params.direction || null,
             status: params.status || null,
@@ -1307,7 +1308,7 @@ export const api = {
             endDate: params.endDate || null,
           }
         )
-        .then(({ artifactExecutionAnalytics }) => artifactExecutionAnalytics),
+		.then(({ appExecutionAnalytics }) => appExecutionAnalytics),
 
     getEngineExecutionAnalytics: (params: {
       serviceId: string;

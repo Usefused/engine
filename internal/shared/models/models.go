@@ -52,10 +52,11 @@ const (
 )
 
 // RuntimeEntitlement is the Registry-issued commercial contract shape the
-// Engine persists locally. It deliberately carries only plan/heartbeat/usage
-// reporting mode until product pricing exists; adding speculative feature gates
-// here would create enforcement semantics before the Registry can own them.
+// Engine persists locally. New capability fields are forward-compatible:
+// missing JSON fields deserialize to Go zero values, which Normalized()
+// promotes to safe commercial-tier defaults.
 type RuntimeEntitlement struct {
+	EntitlementRevision            string    `json:"entitlement_revision,omitempty"`
 	Plan                           string    `json:"plan"`
 	HeartbeatRequired              bool      `json:"heartbeat_required"`
 	UsageReporting                 string    `json:"usage_reporting"`
@@ -63,11 +64,31 @@ type RuntimeEntitlement struct {
 	HeartbeatIntervalSeconds       int       `json:"heartbeat_interval_seconds"`
 	HeartbeatStaleAfterSeconds     int       `json:"heartbeat_stale_after_seconds"`
 	RefreshedAt                    time.Time `json:"refreshed_at,omitempty"`
+
+	// ─── Capability limits (nil = missing/unlimited, 0 = not allowed, positive = hard ceiling) ───
+	MaxBuckets            *int `json:"max_buckets,omitempty"`
+	MaxSDKFamilies        *int `json:"max_sdk_families,omitempty"`
+	MaxMCPFamilies        *int `json:"max_mcp_families,omitempty"`
+	MaxServices           *int `json:"max_services,omitempty"`
+	MaxSandboxConcurrency *int `json:"max_sandbox_concurrency,omitempty"`
+
+	// ─── Feature gates ───
+	DriftMonitoringEnabled  bool `json:"drift_monitoring_enabled"`
+	WebhookIngestionEnabled bool `json:"webhook_ingestion_enabled"`
+	SSOEnabled              bool `json:"sso_enabled"`
+
+	// ─── Data governance (nil = missing, 0 = explicitly disallowed) ───
+	ExecutionRetentionDays *int `json:"execution_retention_days,omitempty"`
 }
 
 // DefaultRuntimeEntitlement keeps Engines compatible with older Registries
 // that only know account/workspace handshake fields. Missing contract fields
 // must fail toward the commercial baseline, not toward "no heartbeat".
+// IntPtr returns a pointer to v. Used for pointer-typed entitlement limit fields.
+func IntPtr(v int) *int { return &v }
+
+// Capability defaults are "commercial = unlimited" so new fields never block
+// an Engine that was working before they existed.
 func DefaultRuntimeEntitlement() RuntimeEntitlement {
 	return RuntimeEntitlement{
 		Plan:                           "commercial",
@@ -76,6 +97,15 @@ func DefaultRuntimeEntitlement() RuntimeEntitlement {
 		PublicServiceInsightsReporting: true,
 		HeartbeatIntervalSeconds:       60,
 		HeartbeatStaleAfterSeconds:     300,
+		MaxBuckets:                     IntPtr(-1),
+		MaxSDKFamilies:                 IntPtr(-1),
+		MaxMCPFamilies:                 IntPtr(-1),
+		MaxServices:                    IntPtr(-1),
+		MaxSandboxConcurrency:          IntPtr(-1),
+		DriftMonitoringEnabled:         false,
+		WebhookIngestionEnabled:        false,
+		SSOEnabled:                     false,
+		ExecutionRetentionDays:         IntPtr(30),
 	}
 }
 
@@ -95,6 +125,28 @@ func (e RuntimeEntitlement) Normalized() RuntimeEntitlement {
 	}
 	if e.RefreshedAt.IsZero() {
 		e.RefreshedAt = time.Now().UTC()
+	}
+
+	// nil means the field was missing (older Registry or JSON zero value).
+	// Default to unlimited (-1) so missing fields never accidentally block.
+	// Explicit 0 is preserved: it means "not allowed".
+	if e.MaxBuckets == nil {
+		e.MaxBuckets = defaults.MaxBuckets
+	}
+	if e.MaxSDKFamilies == nil {
+		e.MaxSDKFamilies = defaults.MaxSDKFamilies
+	}
+	if e.MaxMCPFamilies == nil {
+		e.MaxMCPFamilies = defaults.MaxMCPFamilies
+	}
+	if e.MaxServices == nil {
+		e.MaxServices = defaults.MaxServices
+	}
+	if e.MaxSandboxConcurrency == nil {
+		e.MaxSandboxConcurrency = defaults.MaxSandboxConcurrency
+	}
+	if e.ExecutionRetentionDays == nil {
+		e.ExecutionRetentionDays = defaults.ExecutionRetentionDays
 	}
 	return e
 }
@@ -220,6 +272,7 @@ type Service struct {
 	AuthConfigs            AuthConfigs      `json:"auth_configs" db:"auth_config"`
 	RateLimit              *RateLimitConfig `json:"rate_limit,omitempty"`
 	RetryConfig            *RetryConfig     `json:"retry_config,omitempty"`
+	TimeoutMs              *int             `json:"timeout_ms,omitempty"`
 	// Pagination is the service-level execution_policy fallback used when an
 	// endpoint has no spec-derived pagination of its own (see
 	// plans/plan-service-config-restructure.md item 1). One value per service,
@@ -748,6 +801,7 @@ type RetryConfig struct {
 type ExecutionPolicy struct {
 	RateLimit             *RateLimitConfig
 	Retry                 *RetryConfig
+	TimeoutMs             *int
 	Pagination            *PaginationConfig
 	BaseURLOverride       *string
 	EventExtractionPath   *string
@@ -916,14 +970,15 @@ type SDKSelection struct {
 	// WebhookSelectAll is the webhook-only counterpart to SelectAll -- a
 	// service can select every operation and only an explicit subset of
 	// webhooks, or vice versa (see cli/internal/configfile's
-	// ArtifactService.WebhooksSelectAll and plans/plan-webhook-kind.md), so
+	// App service configuration's WebhooksSelectAll and
+	// plans/plan-webhook-kind.md), so
 	// this can't reuse SelectAll's single flag. sdkWebhookMatchesSelection
 	// (postgres_repository_sdk_generator.go) treats SelectAll and
 	// WebhookSelectAll as equivalent for webhook matching -- either one means
 	// "all webhooks" -- while only SelectAll matches operations.
 	WebhookSelectAll bool `json:"webhook_select_all,omitempty"`
 	// AuthType and AuthName pin dispatch to the scheme selected when the
-	// artifact was planned. Runtime callers should not have to rediscover a
+	// app was planned. Runtime callers should not have to rediscover a
 	// provider's security-scheme spelling or rely on Registry ordering.
 	AuthType      string               `json:"auth_type,omitempty"`
 	AuthName      string               `json:"auth_name,omitempty"`
@@ -938,7 +993,9 @@ type SDKInjectionConfig struct {
 	Mode     string `json:"mode,omitempty"`
 }
 
-const ArtifactScopeSchemaVersion = 2
+const AppScopeSchemaVersion = 2
+
+const SDKGeneratorVersion = "registry-generator-v1"
 
 const (
 	SDKGenerationStatusPending  = "pending"
@@ -958,25 +1015,40 @@ type SDKGenerationRequest struct {
 	Name             string               `json:"name"`
 	Description      string               `json:"description"`
 	Version          string               `json:"version"`
-	ArtifactID       uuid.UUID            `json:"artifact_id,omitempty"`
+	AppFamilyID      uuid.UUID            `json:"app_family_id"`
+	AppID            uuid.UUID            `json:"app_id"`
+	SourceHash       string               `json:"source_hash"`
+	GeneratorVersion string               `json:"generator_version"`
 	IdempotencyKey   string               `json:"idempotency_key,omitempty"`
 	Selections       []SDKSelection       `json:"selections"`
 	IncludeMCP       bool                 `json:"include_mcp"`
 	TargetType       string               `json:"target_type"`
 	TargetLanguage   string               `json:"target_language"`
 	SkipSandbox      bool                 `json:"skip_sandbox"`
-	UpgradeFrom      *uuid.UUID           `json:"upgrade_from,omitempty"`
 	ContractBindings []SDKContractBinding `json:"contract_bindings,omitempty"`
 }
 
 type SDKGenerationResult struct {
-	ArtifactID         uuid.UUID     `json:"artifact_id"`
+	AppFamilyID        uuid.UUID     `json:"app_family_id"`
+	AppID              uuid.UUID     `json:"app_id"`
 	AccountID          uuid.UUID     `json:"account_id,omitempty"`
+	EngineID           uuid.UUID     `json:"-"`
+	SourceHash         string        `json:"-"`
 	JobID              string        `json:"job_id"`
 	Status             string        `json:"status"`
 	ScopeSchemaVersion int           `json:"scope_schema_version"`
+	GeneratorVersion   string        `json:"generator_version"`
 	Selections         SDKSelections `json:"selections"`
 	RequestHash        string        `json:"-"`
+}
+
+const SDKPackageLeaseBatchLimit = 500
+
+// SDKPackageLeaseRenewal is the minimal identity the Registry needs to retain
+// one generated SDK package. Runtime configuration stays on the Engine.
+type SDKPackageLeaseRenewal struct {
+	AppID       uuid.UUID `json:"app_id"`
+	AppFamilyID uuid.UUID `json:"app_family_id"`
 }
 
 // Fused Auth (SDKAuthKey, SDKAuthConnection, SDKOAuthConfig, AuthWebhookAttempt
@@ -993,11 +1065,11 @@ type SDKGenerationResult struct {
 // ─── MCP Analytics ────────────────────────────────────────────────────────────
 
 type MCPSession struct {
-	ID         uuid.UUID  `json:"id"`
-	ArtifactID uuid.UUID  `json:"artifact_id"`
-	SessionID  string     `json:"session_id"`
-	StartedAt  time.Time  `json:"started_at"`
-	EndedAt    *time.Time `json:"ended_at,omitempty"`
+	ID        uuid.UUID  `json:"id"`
+	AppID     uuid.UUID  `json:"app_id"`
+	SessionID string     `json:"session_id"`
+	StartedAt time.Time  `json:"started_at"`
+	EndedAt   *time.Time `json:"ended_at,omitempty"`
 }
 
 // MCPToolUsage/MCPServiceUsage are the per-dimension breakdowns
@@ -1062,8 +1134,11 @@ type EngineExecutionEvent struct {
 	TraceID             string    `json:"trace_id,omitempty" db:"trace_id"`
 	SpanID              string    `json:"span_id,omitempty" db:"span_id"`
 	AccountID           uuid.UUID `json:"account_id,omitempty" db:"account_id"`
-	ArtifactID          uuid.UUID `json:"artifact_id" db:"artifact_id"`
+	AppFamilyID         uuid.UUID `json:"app_family_id,omitempty" db:"app_family_id"`
+	AppID               uuid.UUID `json:"app_id,omitempty" db:"app_id"`
+	AppVersion          string    `json:"app_version,omitempty" db:"app_version"`
 	Transport           string    `json:"transport" db:"transport"`
+	ProviderProtocol    string    `json:"provider_protocol,omitempty" db:"provider_protocol"`
 	Direction           string    `json:"direction" db:"direction"`
 	ServiceID           uuid.UUID `json:"service_id,omitempty" db:"service_id"`
 	ServiceVersionID    string    `json:"service_version_id" db:"service_version_id"`
@@ -1102,7 +1177,7 @@ type EngineExecutionEvent struct {
 	CreatedAt           time.Time `json:"created_at" db:"created_at"`
 }
 
-const EngineExecutionEventSchemaVersion = 1
+const EngineExecutionEventSchemaVersion = 2
 
 // EngineExecutionEventEnvelope keeps the NATS contract versioned independently
 // from the database schema so a malformed or future message can be rejected
@@ -1132,9 +1207,9 @@ type EngineExecutionBreakdown struct {
 	P95LatencyMs float64 `json:"p95_latency_ms"`
 }
 
-// ArtifactExecutionAnalytics keeps artifact totals and service distribution
+// AppExecutionAnalytics keeps app totals and service distribution
 // on the canonical execution-event model rather than the legacy MCP tables.
-type ArtifactExecutionAnalytics struct {
+type AppExecutionAnalytics struct {
 	EngineExecutionAnalytics
 	ByService []EngineExecutionBreakdown `json:"by_service"`
 }
@@ -1168,7 +1243,7 @@ type WorkspaceExecutionAnalytics struct {
 const IdempotencyTTL = 24 * time.Hour
 
 // IdempotentExecution caches the final response of one Execute call, keyed by
-// (artifact_id, idempotency key). A repeated call with the same key -- a client
+// (app_id, idempotency key). A repeated call with the same key -- a client
 // retry, a dropped-response reconnect, or overlap with Engine's own retry
 // loop -- replays this row instead of re-hitting the vendor. RequestBodyHash
 // guards against key reuse across two genuinely different requests: a
@@ -1178,7 +1253,7 @@ const IdempotencyTTL = 24 * time.Hour
 // replayed error for the TTL window.
 type IdempotentExecution struct {
 	ID                 uuid.UUID `db:"id"`
-	ArtifactID         uuid.UUID `db:"artifact_id"`
+	AppID              uuid.UUID `db:"app_id"`
 	IdempotencyKeyHash string    `db:"idempotency_key_hash"`
 	RequestBodyHash    string    `db:"request_body_hash"`
 	Environment        string    `db:"environment"`

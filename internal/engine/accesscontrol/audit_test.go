@@ -43,7 +43,7 @@ func TestAuditEventValidation(t *testing.T) {
 	}
 }
 
-func TestSanitizeAuditMetadataAllowsArtifactOwnerIdentity(t *testing.T) {
+func TestSanitizeAuditMetadataAllowsAppOwnerIdentity(t *testing.T) {
 	ownerID := uuid.NewString()
 	metadata, err := SanitizeAuditMetadata(map[string]any{
 		"owner_type": "team",

@@ -117,8 +117,8 @@ func initRateLimiters(ssePerMinute, sseBurst, msgPerMinute, msgBurst int) {
 
 // allowSSEConnect returns true and does nothing if the SDK-ID is within the
 // SSE connection rate limit. Otherwise it writes HTTP 429 and returns false.
-func allowSSEConnect(w http.ResponseWriter, artifactID string) bool {
-	if sseRateLimiter != nil && !sseRateLimiter.allow(artifactID) {
+func allowSSEConnect(w http.ResponseWriter, appID string) bool {
+	if sseRateLimiter != nil && !sseRateLimiter.allow(appID) {
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, "too many connections for this MCP server, please slow down")
 		return false
@@ -128,8 +128,8 @@ func allowSSEConnect(w http.ResponseWriter, artifactID string) bool {
 
 // allowMessage returns true and does nothing if the SDK-ID is within the
 // message-rate limit. Otherwise it writes HTTP 429 and returns false.
-func allowMessage(w http.ResponseWriter, artifactID string) bool {
-	if messageRateLimiter != nil && !messageRateLimiter.allow(artifactID) {
+func allowMessage(w http.ResponseWriter, appID string) bool {
+	if messageRateLimiter != nil && !messageRateLimiter.allow(appID) {
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, "message rate limit exceeded for this MCP server")
 		return false

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
@@ -120,6 +121,7 @@ func makeWebhookRequest(method, slug, body string, headers map[string]string) *h
 // TestWebhookHandler_BadHMAC_EventDropped proves that a request with a tampered
 // body (HMAC mismatch) is rejected before publishWebhookEvent is reached.
 func TestWebhookHandler_BadHMAC_EventDropped(t *testing.T) {
+	withEntitlement(t, models.RuntimeEntitlement{WebhookIngestionEnabled: true})
 	const slug = "slug-bad-hmac"
 	seedConfig(slug, &webhookConfig{
 		AuthType:        "hmac_signature",
@@ -148,6 +150,7 @@ func TestWebhookHandler_BadHMAC_EventDropped(t *testing.T) {
 // request flows through auth and reaches publishWebhookEvent. A no-op publish
 // hook is injected so the test does not need a real NATS server.
 func TestWebhookHandler_ValidHMAC_EventPublished(t *testing.T) {
+	withEntitlement(t, models.RuntimeEntitlement{WebhookIngestionEnabled: true})
 	const slug = "slug-valid-hmac"
 	const body = `{"event":"charge.succeeded"}`
 	sig := hmacBodySig("real-secret", body)
@@ -187,6 +190,7 @@ func TestWebhookHandler_ValidHMAC_EventPublished(t *testing.T) {
 // fused_workspace_webhooks row (never registered, or already removed) 404s
 // before any auth logic runs -- there's no config to validate against.
 func TestWebhookHandler_UnknownSlug_404(t *testing.T) {
+	withEntitlement(t, models.RuntimeEntitlement{WebhookIngestionEnabled: true})
 	req := makeWebhookRequest(http.MethodPost, "slug-never-registered", `{}`, nil)
 	w := httptest.NewRecorder()
 
@@ -202,6 +206,7 @@ func TestWebhookHandler_UnknownSlug_404(t *testing.T) {
 // TestWebhookHandler_StaticToken_MissingToken_Rejects proves that a request
 // without the required token header is rejected before publish.
 func TestWebhookHandler_StaticToken_MissingToken_Rejects(t *testing.T) {
+	withEntitlement(t, models.RuntimeEntitlement{WebhookIngestionEnabled: true})
 	const slug = "slug-static-token"
 	seedConfig(slug, &webhookConfig{
 		AuthType:     "static_token",
@@ -224,6 +229,7 @@ func TestWebhookHandler_StaticToken_MissingToken_Rejects(t *testing.T) {
 // TestWebhookHandler_StaticToken_ValidToken_PassesAuth proves that a correctly
 // supplied token passes the auth gate and reaches the publish step.
 func TestWebhookHandler_StaticToken_ValidToken_PassesAuth(t *testing.T) {
+	withEntitlement(t, models.RuntimeEntitlement{WebhookIngestionEnabled: true})
 	const slug = "slug-static-valid"
 	seedConfig(slug, &webhookConfig{
 		AuthType:     "static_token",

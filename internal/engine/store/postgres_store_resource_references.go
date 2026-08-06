@@ -16,6 +16,17 @@ func (s *postgresStore) ResolveResourceReference(ctx context.Context, query Reso
 	}
 	value := strings.TrimSpace(query.Value)
 	exactID, _ := uuid.Parse(value)
+	switch query.Kind {
+	case ReferenceApp:
+		return s.resolveAppVersionReference(ctx, exactID, value, query.AppVersion, query.AppKind, query.AllowedAll, query.AllowedIDs)
+	case ReferenceAppFamily:
+		return s.resolveAppReference(ctx, exactID, value, query.AppKind, query.AllowedAll, query.AllowedIDs)
+	default:
+		return s.resolveNonAppReference(ctx, query, exactID, value)
+	}
+}
+
+func (s *postgresStore) resolveNonAppReference(ctx context.Context, query ResourceReferenceQuery, exactID uuid.UUID, value string) (uuid.UUID, error) {
 	var id uuid.UUID
 	var err error
 	switch query.Kind {
@@ -27,8 +38,6 @@ func (s *postgresStore) ResolveResourceReference(ctx context.Context, query Reso
 		err = s.db.QueryRow(ctx, resolveServiceReferenceSQL, exactID, value, query.AllowedAll, query.AllowedIDs).Scan(&id)
 	case ReferenceBucket:
 		err = s.db.QueryRow(ctx, resolveBucketReferenceSQL, exactID, value, query.AllowedAll, query.AllowedIDs).Scan(&id)
-	case ReferenceArtifact:
-		return s.resolveArtifactReference(ctx, exactID, value, query.ArtifactKind, query.AllowedAll, query.AllowedIDs)
 	case ReferenceCredential:
 		err = s.db.QueryRow(ctx, resolveCredentialReferenceSQL, query.ParentID, exactID, value, query.AllowedAll).Scan(&id)
 	}
@@ -41,35 +50,74 @@ func (s *postgresStore) ResolveResourceReference(ctx context.Context, query Reso
 	return id, nil
 }
 
-func (s *postgresStore) resolveArtifactReference(ctx context.Context, exactID uuid.UUID, value, artifactKind string, allowedAll bool, allowedIDs []uuid.UUID) (uuid.UUID, error) {
+func (s *postgresStore) resolveAppVersionReference(ctx context.Context, exactID uuid.UUID, value, version, appKind string, allowedAll bool, allowedFamilyIDs []uuid.UUID) (uuid.UUID, error) {
 	if exactID != uuid.Nil {
 		var id uuid.UUID
-		if err := s.db.QueryRow(ctx, `SELECT artifact_id FROM fused_artifact_scopes WHERE artifact_id = $1 AND ($2 = '' OR kind = $2) AND ($3 OR artifact_id = ANY($4::uuid[]))`, exactID, artifactKind, allowedAll, allowedIDs).Scan(&id); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return uuid.Nil, fmt.Errorf("%w: artifact %q", ErrResourceReferenceNotFound, value)
-			}
-			return uuid.Nil, fmt.Errorf("resolve artifact UUID: %w", err)
+		err := s.db.QueryRow(ctx, `
+			SELECT app.app_id FROM fused_apps app
+			JOIN fused_app_families family ON family.app_family_id = app.app_family_id
+			WHERE app.app_id = $1 AND ($2 = '' OR family.kind = $2)
+			  AND ($3 OR family.app_family_id = ANY($4::uuid[]))
+		`, exactID, appKind, allowedAll, allowedFamilyIDs).Scan(&id)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, fmt.Errorf("%w: app %q", ErrResourceReferenceNotFound, value)
+		}
+		if err != nil {
+			return uuid.Nil, fmt.Errorf("resolve app UUID: %w", err)
 		}
 		return id, nil
 	}
-	name, version := parseArtifactReference(value)
-	if name == "" || strings.Contains(value, "@") && version == "" {
-		return uuid.Nil, fmt.Errorf("%w: invalid artifact reference %q", ErrResourceReferenceNotFound, value)
+	name := strings.TrimSpace(value)
+	if name == "" || strings.TrimSpace(version) == "" {
+		return uuid.Nil, fmt.Errorf("%w: app version is required", ErrResourceReferenceNotFound)
+	}
+	var id uuid.UUID
+	err := s.db.QueryRow(ctx, `
+		SELECT app.app_id FROM fused_apps app
+		JOIN fused_app_families family ON family.app_family_id = app.app_family_id
+		WHERE (lower(family.canonical_name) = lower($1) OR lower(family.display_name) = lower($1))
+		  AND app.version = $2 AND ($3 = '' OR family.kind = $3)
+		  AND ($4 OR family.app_family_id = ANY($5::uuid[]))
+		ORDER BY app.created_at DESC, app.app_id DESC LIMIT 1
+	`, name, version, appKind, allowedAll, allowedFamilyIDs).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, fmt.Errorf("%w: app %q", ErrResourceReferenceNotFound, value)
+	}
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("resolve app version reference: %w", err)
+	}
+	return id, nil
+}
+
+func (s *postgresStore) resolveAppReference(ctx context.Context, exactID uuid.UUID, value, appKind string, allowedAll bool, allowedIDs []uuid.UUID) (uuid.UUID, error) {
+	if exactID != uuid.Nil {
+		var id uuid.UUID
+		if err := s.db.QueryRow(ctx, `SELECT app_family_id FROM fused_app_families WHERE app_family_id = $1 AND ($2 = '' OR kind = $2) AND ($3 OR app_family_id = ANY($4::uuid[]))`, exactID, appKind, allowedAll, allowedIDs).Scan(&id); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return uuid.Nil, fmt.Errorf("%w: app %q", ErrResourceReferenceNotFound, value)
+			}
+			return uuid.Nil, fmt.Errorf("resolve app UUID: %w", err)
+		}
+		return id, nil
+	}
+	name := strings.TrimSpace(value)
+	if name == "" {
+		return uuid.Nil, fmt.Errorf("%w: invalid app reference %q", ErrResourceReferenceNotFound, value)
 	}
 	var id uuid.UUID
 	var kindCount int
-	err := s.db.QueryRow(ctx, resolveArtifactReferenceSQL, name, version, artifactKind, allowedAll, allowedIDs).Scan(&id, &kindCount)
+	err := s.db.QueryRow(ctx, resolveAppReferenceSQL, name, appKind, allowedAll, allowedIDs).Scan(&id, &kindCount)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, fmt.Errorf("%w: artifact %q", ErrResourceReferenceNotFound, value)
+		return uuid.Nil, fmt.Errorf("%w: app %q", ErrResourceReferenceNotFound, value)
 	}
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("resolve artifact reference: %w", err)
+		return uuid.Nil, fmt.Errorf("resolve app reference: %w", err)
 	}
 	// A generic RBAC selector cannot silently choose between an SDK and an MCP
 	// server that happen to share a name. Kind-specific product commands never
 	// hit this branch; generic access commands can use the displayed full UUID.
 	if kindCount > 1 {
-		return uuid.Nil, fmt.Errorf("%w: artifact %q exists as both an SDK and MCP server", ErrResourceReferenceAmbiguous, value)
+		return uuid.Nil, fmt.Errorf("%w: app %q exists as both an SDK and MCP server", ErrResourceReferenceAmbiguous, value)
 	}
 	return id, nil
 }
@@ -103,15 +151,14 @@ JOIN fused_users person ON person.subject_id = credential.subject_id
 WHERE person.subject_id = $1 AND $4 AND (credential.id = $2 OR (credential.revoked_at IS NULL AND lower(credential.name) = lower($3)))
 ORDER BY (credential.id = $2) DESC, credential.created_at DESC LIMIT 1`
 
-const resolveArtifactReferenceSQL = `
+const resolveAppReferenceSQL = `
 WITH matches AS (
-	SELECT artifact_id, kind, created_at FROM fused_artifact_scopes
-	WHERE deactivated_at IS NULL AND lower(name) = lower($1) AND ($2 = '' OR version = $2)
-		AND ($3 = '' OR kind = $3) AND ($4 OR artifact_id = ANY($5::uuid[]))
+	SELECT app_family_id, kind, created_at FROM fused_app_families
+	WHERE (lower(canonical_name) = lower($1) OR lower(display_name) = lower($1))
+		AND ($2 = '' OR kind = $2) AND ($3 OR app_family_id = ANY($4::uuid[]))
 ), selected AS (
-	-- A plain name follows the most recent active version within its namespace.
-	SELECT artifact_id FROM matches ORDER BY created_at DESC, artifact_id DESC LIMIT 1
+	SELECT app_family_id FROM matches ORDER BY created_at DESC, app_family_id DESC LIMIT 1
 )
-SELECT artifact_id, (SELECT COUNT(DISTINCT kind) FROM matches) FROM selected`
+SELECT app_family_id, (SELECT COUNT(DISTINCT kind) FROM matches) FROM selected`
 
 var _ ResourceReferenceResolver = (*postgresStore)(nil)

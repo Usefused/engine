@@ -31,6 +31,7 @@ func TestPostgresResourceReferencesResolveHumanKeysAndEnforceScope(t *testing.T)
 	bucketID, hiddenBucketID, serviceID := uuid.New(), uuid.New(), uuid.New()
 	serviceVersionID := uuid.New()
 	sdkV1ID, sdkV2ID, mcpV1ID := uuid.New(), uuid.New(), uuid.New()
+	sdkFamilyID, mcpFamilyID := uuid.New(), uuid.New()
 	credentialID := uuid.New()
 	if _, err := pool.Exec(ctx, `WITH inserted_team AS (
 		INSERT INTO fused_teams (id, name, slug) VALUES ($1, 'Platform', 'platform') RETURNING id
@@ -50,20 +51,25 @@ func TestPostgresResourceReferencesResolveHumanKeysAndEnforceScope(t *testing.T)
 		INSERT INTO fused_control_credentials (id, subject_id, key_hash, key_prefix, name)
 		SELECT $6, subject_id, 'reference-hash', 'test', 'Laptop' FROM inserted_user RETURNING id
 	)
-	INSERT INTO fused_artifact_scopes (account_id, artifact_id, owner_subject_id, scope_schema_version, selections, kind, name, version, created_at)
-	VALUES ($7, $8, $2, 1, '[]', 'sdk', 'Support', '1.0.0', NOW() - INTERVAL '2 minutes'),
-	       ($7, $9, $2, 1, jsonb_build_array(jsonb_build_object('service_id', $5::text, 'service_version_id', $11::text, 'endpoint_ids', jsonb_build_array($8::text), 'webhook_ids', '[]'::jsonb)), 'sdk', 'Support', '2.0.0', NOW()),
-	       ($7, $10, $2, 1, '[]', 'mcp', 'Support', '2.0.0', NOW() + INTERVAL '1 minute')
+	SELECT 1
+	FROM inserted_credential
 	`, teamID, subjectID, bucketID, hiddenBucketID, serviceID, credentialID, accountID, sdkV1ID, sdkV2ID, mcpV1ID, serviceVersionID); err != nil {
 		t.Fatalf("seed references: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO fused_artifact_snapshots
-		(account_id, artifact_id, kind, name, version, selections, scope_schema_version, active, registry_created_at)
-		VALUES ($1, $2, 'sdk', 'Support', '2.0.0',
-		 jsonb_build_array(jsonb_build_object('service_id', $3::text, 'service_version_id', $4::text,
-		 'endpoint_ids', jsonb_build_array($2::text), 'webhook_ids', '[]'::jsonb)), 2, false, NOW())`,
-		accountID, sdkV2ID, serviceID, serviceVersionID); err != nil {
-		t.Fatalf("seed artifact snapshot: %v", err)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO fused_app_families
+			(app_family_id, account_id, kind, canonical_name, display_name, target_language, owner_subject_id)
+		VALUES ($1, $2, 'sdk', 'support', 'Support', 'typescript', $3),
+		       ($4, $2, 'mcp', 'support', 'Support', NULL, $3);
+		INSERT INTO fused_apps
+			(app_id, app_family_id, account_id, version, config_key, source_hash, status, selections)
+		VALUES ($5, $1, $2, '1.0.0', 'sdk:support:1.0.0', 'sdk-v1', 'active', '[]'),
+		       ($6, $1, $2, '2.0.0', 'sdk:support:2.0.0', 'sdk-v2', 'active',
+		        jsonb_build_array(jsonb_build_object('service_id', $8::text, 'service_version_id', $9::text,
+		        'endpoint_ids', jsonb_build_array($5::text), 'webhook_ids', '[]'::jsonb))),
+		       ($7, $4, $2, '2.0.0', 'mcp:support:2.0.0', 'mcp-v2', 'active', '[]')
+	`, sdkFamilyID, accountID, subjectID, mcpFamilyID, sdkV1ID, sdkV2ID, mcpV1ID, serviceID, serviceVersionID); err != nil {
+		t.Fatalf("seed app references: %v", err)
 	}
 
 	assertReferenceID(t, ctx, repository, ResourceReferenceQuery{Kind: ReferenceTeam, Value: "PLATFORM", AllowedAll: true}, teamID)
@@ -71,11 +77,12 @@ func TestPostgresResourceReferencesResolveHumanKeysAndEnforceScope(t *testing.T)
 	assertReferenceID(t, ctx, repository, ResourceReferenceQuery{Kind: ReferenceBucket, Value: "company credentials", AllowedIDs: []uuid.UUID{bucketID}}, bucketID)
 	assertReferenceID(t, ctx, repository, ResourceReferenceQuery{Kind: ReferenceService, Value: "github", AllowedAll: true}, serviceID)
 	assertReferenceID(t, ctx, repository, ResourceReferenceQuery{Kind: ReferenceCredential, Value: "laptop", ParentID: subjectID, AllowedAll: true}, credentialID)
-	assertReferenceID(t, ctx, repository, ResourceReferenceQuery{Kind: ReferenceArtifact, Value: "support@2.0.0", ArtifactKind: "sdk", AllowedAll: true}, sdkV2ID)
-	assertReferenceID(t, ctx, repository, ResourceReferenceQuery{Kind: ReferenceArtifact, Value: "support", ArtifactKind: "sdk", AllowedAll: true}, sdkV2ID)
-	assertReferenceID(t, ctx, repository, ResourceReferenceQuery{Kind: ReferenceArtifact, Value: "support", ArtifactKind: "mcp", AllowedAll: true}, mcpV1ID)
-	assertReferenceID(t, ctx, repository, ResourceReferenceQuery{Kind: ReferenceArtifact, Value: "support", AllowedIDs: []uuid.UUID{mcpV1ID}}, mcpV1ID)
-	_, err := repository.ResolveResourceReference(ctx, ResourceReferenceQuery{Kind: ReferenceArtifact, Value: "support", AllowedAll: true})
+	assertReferenceID(t, ctx, repository, ResourceReferenceQuery{Kind: ReferenceApp, Value: "support", AppVersion: "2.0.0", AppKind: "sdk", AllowedAll: true}, sdkV2ID)
+	assertReferenceID(t, ctx, repository, ResourceReferenceQuery{Kind: ReferenceApp, Value: sdkV2ID.String(), AppKind: "sdk", AllowedAll: true}, sdkV2ID)
+	assertReferenceID(t, ctx, repository, ResourceReferenceQuery{Kind: ReferenceAppFamily, Value: "support", AppKind: "sdk", AllowedAll: true}, sdkFamilyID)
+	assertReferenceID(t, ctx, repository, ResourceReferenceQuery{Kind: ReferenceAppFamily, Value: "support", AppKind: "mcp", AllowedAll: true}, mcpFamilyID)
+	assertReferenceID(t, ctx, repository, ResourceReferenceQuery{Kind: ReferenceAppFamily, Value: "support", AllowedIDs: []uuid.UUID{mcpFamilyID}}, mcpFamilyID)
+	_, err := repository.ResolveResourceReference(ctx, ResourceReferenceQuery{Kind: ReferenceAppFamily, Value: "support", AllowedAll: true})
 	if !errors.Is(err, ErrResourceReferenceAmbiguous) {
 		t.Fatalf("cross-kind name error = %v, want ambiguous", err)
 	}
@@ -84,30 +91,18 @@ func TestPostgresResourceReferencesResolveHumanKeysAndEnforceScope(t *testing.T)
 	if !errors.Is(err, ErrResourceReferenceNotFound) {
 		t.Fatalf("hidden bucket error = %v, want not found", err)
 	}
-	_, err = repository.ResolveResourceReference(ctx, ResourceReferenceQuery{Kind: ReferenceArtifact, Value: sdkV2ID.String(), ArtifactKind: "mcp", AllowedAll: true})
+	_, err = repository.ResolveResourceReference(ctx, ResourceReferenceQuery{Kind: ReferenceApp, Value: sdkV2ID.String(), AppKind: "mcp", AllowedAll: true})
 	if !errors.Is(err, ErrResourceReferenceNotFound) {
 		t.Fatalf("cross-kind UUID error = %v, want not found", err)
 	}
 
-	artifacts, total, err := repository.ListAuthorizedArtifactScopesByAccount(ctx, accountID, accesscontrol.AuthorizedScope{IDs: []uuid.UUID{sdkV2ID, mcpV1ID}}, "", 20, 0)
-	if err != nil || total != 2 || len(artifacts) != 2 {
-		t.Fatalf("scoped artifact page = %d/%d, %v; want 2/2", len(artifacts), total, err)
+	artifacts, total, err := repository.ListAuthorizedAppRuntimesByAccount(ctx, accountID, accesscontrol.AuthorizedScope{IDs: []uuid.UUID{sdkFamilyID, mcpFamilyID}}, "", 20, 0)
+	if err != nil || total != 3 || len(artifacts) != 3 {
+		t.Fatalf("scoped app page = %d/%d, %v; want 3/3", len(artifacts), total, err)
 	}
-	services, err := repository.ListArtifactServiceSummaries(ctx, sdkV2ID)
+	services, err := repository.ListAuthorizedAppServiceSummaries(ctx, accountID, sdkV2ID, accesscontrol.AuthorizedScope{All: true})
 	if err != nil || len(services) != 1 || services[0].ServiceSlug != "github" || services[0].Version != "v1" || services[0].EndpointCount != 1 {
 		t.Fatalf("artifact services = %#v, %v", services, err)
-	}
-	snapshot, err := repository.GetArtifactSnapshotByName(ctx, accountID, "sdk", "Support")
-	if err != nil || snapshot.ArtifactID != sdkV2ID || snapshot.Active {
-		t.Fatalf("artifact snapshot by name = %#v, %v", snapshot, err)
-	}
-	snapshot, err = repository.GetArtifactSnapshotByIdentity(ctx, accountID, "sdk", "Support", "2.0.0")
-	if err != nil || snapshot.ArtifactID != sdkV2ID {
-		t.Fatalf("artifact snapshot by identity = %#v, %v", snapshot, err)
-	}
-	services, err = repository.ListArtifactSnapshotServiceSummaries(ctx, accountID, sdkV2ID)
-	if err != nil || len(services) != 1 || services[0].ServiceSlug != "github" || services[0].EndpointCount != 1 {
-		t.Fatalf("artifact snapshot services = %#v, %v", services, err)
 	}
 }
 

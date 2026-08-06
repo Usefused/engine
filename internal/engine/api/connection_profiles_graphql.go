@@ -63,7 +63,7 @@ var workspaceConnectionProfileGraphQLType = graphql.NewObject(graphql.ObjectConf
 // workspaceConnectionProfileGraphQLField returns the effective profile
 // (override if present, else baseline) only after account and workspace
 // ownership checks at the Engine boundary. There is no bucket dimension:
-// every artifact execution in the workspace shares this profile.
+// every app execution in the workspace shares this profile.
 func workspaceConnectionProfileGraphQLField(s store.Store) *graphql.Field {
 	return &graphql.Field{
 		Type: workspaceConnectionProfileGraphQLType,
@@ -116,7 +116,7 @@ func setWorkspaceConnectionProfileGraphQLField(s store.Store, verifier ServiceVe
 
 // resetWorkspaceConnectionProfileGraphQLField deletes the workspace override
 // only; the baseline (if any) survives untouched. This affects dispatch for
-// every artifact in the workspace that selects the tuple, so it always
+// every app in the workspace that selects the tuple, so it always
 // returns the resulting effective profile (or null) rather than a bare
 // boolean, letting the caller show the user what happened.
 func resetWorkspaceConnectionProfileGraphQLField(s store.Store) *graphql.Field {

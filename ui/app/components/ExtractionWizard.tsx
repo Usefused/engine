@@ -2,8 +2,7 @@ import { useEffect, useState, type Dispatch, type FormEvent, type SetStateAction
 import { useNavigate } from "@remix-run/react";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import { Loader2, Server, PlayCircle } from "lucide-react";
-import { api, type IntegrationObject, BASE } from "~/lib/api";
-import { getApiKey } from "~/lib/session";
+import { api, type IntegrationObject, BASE, handleCredentialedResponse } from "~/lib/api";
 import EndpointSelectionList from "~/components/EndpointSelectionList";
 import WebhookSelectionList, { type SelectableEvent } from "~/components/WebhookSelectionList";
 import { useToast } from "~/components/Toast";
@@ -130,8 +129,7 @@ export default function ExtractionWizard({
   useEffect(() => {
     if (!sessionId) return;
     
-    const token = getApiKey() || "";
-    const ctrl = new AbortController();
+		const ctrl = new AbortController();
     let retryDelay = 2000;
     const maxRetryDelay = 60000;
 
@@ -149,12 +147,12 @@ export default function ExtractionWizard({
       if (ctrl.signal.aborted) return;
 
       // Connect to the live stream
-      fetchEventSource(`${BASE}/integrations/session/${sessionId}/stream`, {
-        headers: {
-          "X-API-Key": token,
-        },
+		fetchEventSource(`${BASE}/integrations/session/${sessionId}/stream`, {
+			credentials: "include",
         signal: ctrl.signal,
         async onopen(response) {
+          handleCredentialedResponse(response);
+          if (response.status === 401) ctrl.abort();
           if (response.ok) {
             setError("");
             retryDelay = 2000; // reset delay on successful connection

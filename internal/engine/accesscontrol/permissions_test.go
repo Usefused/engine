@@ -39,7 +39,7 @@ func TestAllPermissionsReturnsCopy(t *testing.T) {
 }
 
 func TestValidateResourceType(t *testing.T) {
-	for _, resourceType := range []ResourceType{ResourceWorkspace, ResourceService, ResourceBucket, ResourceArtifact} {
+	for _, resourceType := range []ResourceType{ResourceWorkspace, ResourceService, ResourceBucket, ResourceApp} {
 		if err := ValidateResourceType(resourceType); err != nil {
 			t.Fatalf("ValidateResourceType(%q): %v", resourceType, err)
 		}

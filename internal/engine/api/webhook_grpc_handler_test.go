@@ -14,64 +14,64 @@ import (
 )
 
 // webhookAuthTestStore stubs just enough of store.Store for
-// authenticateWebhookSubscribe's auth.TokenValidator.Validate call
-// (store.ValidateToken) -- everything else panics via the zero-value
+// authenticateWebhookSubscribe's family-scoped authorization call. Everything
+// else panics via the zero-value
 // embedded store.Store if a test accidentally exercises it, same pattern as
 // workspaceTestStore in workspace_handlers_test.go.
 type webhookAuthTestStore struct {
 	store.Store
-	wantArtifactID uuid.UUID
-	wantTokenHash  string
-	accountID      uuid.UUID
-	err            error
+	wantAppID     uuid.UUID
+	wantTokenHash string
+	accountID     uuid.UUID
+	err           error
 }
 
-func (s *webhookAuthTestStore) ValidateToken(ctx context.Context, artifactID uuid.UUID, tokenHash string) (uuid.UUID, error) {
+func (s *webhookAuthTestStore) AuthorizeApp(ctx context.Context, appID uuid.UUID, tokenHash string) (*store.AuthProjection, error) {
 	if s.err != nil {
-		return uuid.Nil, s.err
+		return nil, s.err
 	}
-	if artifactID != s.wantArtifactID || tokenHash != s.wantTokenHash {
-		return uuid.Nil, store.ErrArtifactScopeNotFound
+	if appID != s.wantAppID || tokenHash != s.wantTokenHash {
+		return nil, store.ErrAppNotFound
 	}
-	return s.accountID, nil
+	return &store.AuthProjection{AccountID: s.accountID, AppFamilyID: appID, AppID: appID, Version: "1.0.0", Kind: "sdk", AppStatus: "active"}, nil
 }
 
-// TestAuthenticateWebhookSubscribe_ReadsArtifactIDAndTokenFromMetadata is the
+// TestAuthenticateWebhookSubscribe_ReadsAppIDAndTokenFromMetadata is the
 // core regression assertion for the gRPC-metadata auth migration: no
 // backward compat was kept with the earlier design that read artifact_id
 // and token from the first WebhookSubscribe message's fields, so this
 // exercises the replacement (x-api-key/x-artifact-id metadata, mirroring
-// grpcAPIKey/grpcArtifactID in engine_grpc.go) end to end.
-func TestAuthenticateWebhookSubscribe_ReadsArtifactIDAndTokenFromMetadata(t *testing.T) {
-	artifactID := uuid.New()
+// grpcAPIKey/grpcAppID in engine_grpc.go) end to end.
+func TestAuthenticateWebhookSubscribe_ReadsAppIDAndTokenFromMetadata(t *testing.T) {
+	appID := uuid.New()
 	wantAccountID := uuid.New()
 	token := "fsk_test_token"
 
 	s := &webhookAuthTestStore{
-		wantArtifactID: artifactID,
-		wantTokenHash:  auth.HashToken(token),
-		accountID:      wantAccountID,
+		wantAppID:     appID,
+		wantTokenHash: auth.HashToken(token),
+		accountID:     wantAccountID,
 	}
 	srv := NewEngineGRPCServer(s, nil, nil, nil, nil)
 
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(
 		"x-api-key", token,
-		"x-artifact-id", artifactID.String(),
+		"x-app-id", appID.String(),
 	))
 
-	gotArtifactID, gotAccountID, err := srv.authenticateWebhookSubscribe(ctx)
+	gotAppID, gotAccountID, err := srv.authenticateWebhookSubscribe(ctx)
 	if err != nil {
 		t.Fatalf("authenticateWebhookSubscribe() error = %v", err)
 	}
-	if gotArtifactID != artifactID {
-		t.Fatalf("artifactID = %v, want %v", gotArtifactID, artifactID)
+	if gotAppID != appID {
+		t.Fatalf("appID = %v, want %v", gotAppID, appID)
 	}
 	if gotAccountID != wantAccountID {
 		t.Fatalf("accountID = %v, want %v", gotAccountID, wantAccountID)
 	}
 }
 
-func TestAuthenticateWebhookSubscribe_MissingArtifactIDMetadataRejected(t *testing.T) {
+func TestAuthenticateWebhookSubscribe_MissingAppIDMetadataRejected(t *testing.T) {
 	s := &webhookAuthTestStore{}
 	srv := NewEngineGRPCServer(s, nil, nil, nil, nil)
 
@@ -83,13 +83,13 @@ func TestAuthenticateWebhookSubscribe_MissingArtifactIDMetadataRejected(t *testi
 	}
 }
 
-func TestAuthenticateWebhookSubscribe_InvalidArtifactIDFormatRejected(t *testing.T) {
+func TestAuthenticateWebhookSubscribe_InvalidAppIDFormatRejected(t *testing.T) {
 	s := &webhookAuthTestStore{}
 	srv := NewEngineGRPCServer(s, nil, nil, nil, nil)
 
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(
 		"x-api-key", "fsk_test_token",
-		"x-artifact-id", "not-a-uuid",
+		"x-app-id", "not-a-uuid",
 	))
 
 	_, _, err := srv.authenticateWebhookSubscribe(ctx)
@@ -99,17 +99,17 @@ func TestAuthenticateWebhookSubscribe_InvalidArtifactIDFormatRejected(t *testing
 }
 
 func TestAuthenticateWebhookSubscribe_WrongTokenRejected(t *testing.T) {
-	artifactID := uuid.New()
+	appID := uuid.New()
 	s := &webhookAuthTestStore{
-		wantArtifactID: artifactID,
-		wantTokenHash:  auth.HashToken("the-real-token"),
-		accountID:      uuid.New(),
+		wantAppID:     appID,
+		wantTokenHash: auth.HashToken("the-real-token"),
+		accountID:     uuid.New(),
 	}
 	srv := NewEngineGRPCServer(s, nil, nil, nil, nil)
 
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(
 		"x-api-key", "wrong-token",
-		"x-artifact-id", artifactID.String(),
+		"x-app-id", appID.String(),
 	))
 
 	_, _, err := srv.authenticateWebhookSubscribe(ctx)

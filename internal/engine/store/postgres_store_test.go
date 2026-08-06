@@ -38,6 +38,24 @@ func TestPostgresStore(t *testing.T) {
 		t.Fatalf("reset singleton workspace: %v", err)
 	}
 
+	t.Run("StableEngineInstallationIdentity", func(t *testing.T) {
+		identityStore, ok := s.(EngineInstallationStore)
+		if !ok {
+			t.Fatal("store does not expose Engine installation identity")
+		}
+		first, err := identityStore.LoadEngineInstallationID(ctx)
+		if err != nil {
+			t.Fatalf("LoadEngineInstallationID: %v", err)
+		}
+		second, err := identityStore.LoadEngineInstallationID(ctx)
+		if err != nil {
+			t.Fatalf("LoadEngineInstallationID second read: %v", err)
+		}
+		if first == uuid.Nil || first != second {
+			t.Fatalf("expected one stable installation ID, got %s and %s", first, second)
+		}
+	})
+
 	t.Run("BootstrapWorkspace", func(t *testing.T) {
 		wsID1, err := s.BootstrapWorkspace(ctx, accountID, "Test Workspace")
 		if err != nil {
@@ -79,15 +97,25 @@ func TestPostgresStore(t *testing.T) {
 	})
 
 	t.Run("GetSDKAccountID", func(t *testing.T) {
-		artifactID := uuid.New()
-		ownerTeamID := seedArtifactOwnerTeam(t, ctx, pool)
-		// token_hash is UNIQUE too -- same reasoning as key_hash above.
-		_, err := pool.Exec(ctx, "INSERT INTO fused_artifact_scopes (account_id, artifact_id, owner_team_id, selections) VALUES ($1, $2, $3, $4)", accountID, artifactID, ownerTeamID, "[]")
+		appFamilyID, appID := uuid.New(), uuid.New()
+		ownerTeamID := seedAppOwnerTeam(t, ctx, pool)
+		_, err := pool.Exec(ctx, `
+			INSERT INTO fused_app_families
+				(app_family_id, account_id, kind, canonical_name, display_name, target_language, owner_team_id)
+			VALUES ($1, $2, 'sdk', $3, 'Account lookup SDK', 'typescript', $4)
+		`, appFamilyID, accountID, "account-lookup-"+appFamilyID.String(), ownerTeamID)
+		if err != nil {
+			t.Fatalf("failed to insert test sdk family: %v", err)
+		}
+		_, err = pool.Exec(ctx, `
+			INSERT INTO fused_apps (app_id, app_family_id, account_id, version, config_key, source_hash, status)
+			VALUES ($3, $1, $2, '1.0.0', $4, 'account-lookup', 'active')
+		`, appFamilyID, accountID, appID, "sdk:account-lookup:"+appFamilyID.String())
 		if err != nil {
 			t.Fatalf("failed to insert test sdk: %v", err)
 		}
 
-		fetchedAccountID, err := s.GetSDKAccountID(ctx, artifactID)
+		fetchedAccountID, err := s.GetSDKAccountID(ctx, appID)
 		if err != nil {
 			t.Fatalf("failed to get sdk account id: %v", err)
 		}
@@ -183,8 +211,18 @@ func TestRuntimeEntitlementRoundTrip(t *testing.T) {
 		GetRuntimeEntitlement(context.Context) (models.RuntimeEntitlement, error)
 	})
 	entitlement := models.DefaultRuntimeEntitlement()
+	entitlement.EntitlementRevision = "enterprise-revision"
 	entitlement.Plan = "enterprise"
 	entitlement.HeartbeatIntervalSeconds = 15
+	entitlement.MaxBuckets = models.IntPtr(5)
+	entitlement.MaxSDKFamilies = models.IntPtr(3)
+	entitlement.MaxMCPFamilies = models.IntPtr(3)
+	entitlement.MaxServices = models.IntPtr(10)
+	entitlement.MaxSandboxConcurrency = models.IntPtr(20)
+	entitlement.DriftMonitoringEnabled = true
+	entitlement.WebhookIngestionEnabled = true
+	entitlement.SSOEnabled = true
+	entitlement.ExecutionRetentionDays = models.IntPtr(90)
 	if err := entitlementStore.SaveRuntimeEntitlement(ctx, entitlement); err != nil {
 		t.Fatalf("SaveRuntimeEntitlement: %v", err)
 	}
@@ -192,8 +230,17 @@ func TestRuntimeEntitlementRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRuntimeEntitlement: %v", err)
 	}
-	if got.Plan != "enterprise" || got.HeartbeatIntervalSeconds != 15 {
+	if got.Plan != "enterprise" || got.EntitlementRevision != "enterprise-revision" || got.HeartbeatIntervalSeconds != 15 {
 		t.Fatalf("unexpected entitlement: %#v", got)
+	}
+	if *got.MaxBuckets != 5 || *got.MaxSDKFamilies != 3 || *got.MaxMCPFamilies != 3 || *got.MaxServices != 10 || *got.MaxSandboxConcurrency != 20 {
+		t.Fatalf("unexpected capability limits: %#v", got)
+	}
+	if !got.DriftMonitoringEnabled || !got.WebhookIngestionEnabled || !got.SSOEnabled {
+		t.Fatalf("unexpected feature gates: %#v", got)
+	}
+	if *got.ExecutionRetentionDays != 90 {
+		t.Fatalf("unexpected retention days: %#v", got)
 	}
 }
 

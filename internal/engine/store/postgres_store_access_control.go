@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,9 +18,11 @@ func (s *postgresStore) LoadControlPrincipal(ctx context.Context, credentialHash
 	query := `
 		WITH candidate AS (
 			SELECT w.id AS workspace_id, w.account_id, c.id AS credential_id, c.subject_id, c.expires_at,
-				s.kind, state.revision
+				c.source, c.auth_method,
+				s.kind, s.display_name, COALESCE(user_row.email_display, '') AS email_display, state.revision
 			FROM fused_control_credentials c
 			JOIN fused_subjects s ON s.id = c.subject_id
+			LEFT JOIN fused_users user_row ON user_row.subject_id = s.id
 			JOIN fused_workspaces w ON w.singleton_key = 1
 			JOIN fused_authorization_state state ON state.singleton_key = 1
 			WHERE c.key_hash = $1
@@ -32,7 +35,9 @@ func (s *postgresStore) LoadControlPrincipal(ctx context.Context, credentialHash
 			FROM candidate
 			WHERE credential.id = candidate.credential_id
 			RETURNING candidate.workspace_id, candidate.account_id, candidate.credential_id,
-				candidate.subject_id, candidate.expires_at, candidate.kind, candidate.revision
+				candidate.subject_id, candidate.display_name, candidate.email_display,
+				candidate.expires_at, candidate.source, candidate.auth_method,
+				candidate.kind, candidate.revision
 		), principals(subject_type, subject_id) AS (
 			SELECT 'subject'::text, subject_id FROM authenticated
 			UNION ALL
@@ -56,8 +61,10 @@ func (s *postgresStore) LoadControlPrincipal(ctx context.Context, credentialHash
 			WHERE binding.resource_type <> 'workspace'
 				OR binding.resource_id = (SELECT workspace_id FROM authenticated)
 		)
-		SELECT actor.account_id, actor.workspace_id, actor.subject_id, actor.credential_id, actor.kind,
-			actor.expires_at, actor.revision, effective.permission, effective.resource_type,
+		SELECT actor.account_id, actor.workspace_id, actor.subject_id, actor.display_name,
+			actor.email_display, actor.credential_id, actor.kind, actor.expires_at,
+			actor.source, actor.auth_method, actor.revision,
+			effective.permission, effective.resource_type,
 			effective.resource_id
 		FROM authenticated actor
 		LEFT JOIN effective_grants effective ON true
@@ -108,13 +115,13 @@ func (s *postgresStore) ResolveAuthorizationResourceDisplayNames(ctx context.Con
 				WHEN 'workspace' THEN workspace.name
 				WHEN 'service' THEN service.service_name
 				WHEN 'bucket' THEN bucket.name
-				WHEN 'artifact' THEN artifact.name
+				WHEN 'app' THEN app.display_name
 			END
 		FROM requested
 		LEFT JOIN fused_workspaces workspace ON requested.resource_type = 'workspace' AND workspace.id = requested.resource_id
 		LEFT JOIN fused_workspace_services service ON requested.resource_type = 'service' AND service.service_id = requested.resource_id
 		LEFT JOIN fused_buckets bucket ON requested.resource_type = 'bucket' AND bucket.id = requested.resource_id
-		LEFT JOIN fused_artifact_scopes artifact ON requested.resource_type = 'artifact' AND artifact.artifact_id = requested.resource_id
+		LEFT JOIN fused_app_families app ON requested.resource_type = 'app' AND app.app_family_id = requested.resource_id
 	`, types, ids)
 	if err != nil {
 		return nil, fmt.Errorf("resolve authorization display names: %w", err)
@@ -196,9 +203,13 @@ func scanControlPrincipal(rows pgx.Rows) (accesscontrol.ControlPrincipal, bool, 
 			&principal.AccountID,
 			&principal.WorkspaceID,
 			&principal.SubjectID,
+			&principal.DisplayName,
+			&principal.Email,
 			&principal.CredentialID,
 			&kind,
 			&expiresAt,
+			&principal.CredentialSource,
+			&principal.AuthenticationMethod,
 			&principal.Revision,
 			&permission,
 			&resourceType,
@@ -263,12 +274,18 @@ func reconcileBootstrapOwnerTx(ctx context.Context, tx pgx.Tx, input accesscontr
 	if err != nil {
 		return accesscontrol.BootstrapResult{}, err
 	}
-	bindingChanged, err := ensureOwnerBinding(ctx, tx, subjectID, workspaceID, roleIDs[accesscontrol.RoleOwner])
+	bindingChanged, err := ensureOwnerBinding(ctx, tx, subjectID, subjectID, workspaceID, roleIDs[accesscontrol.RoleOwner])
+	if err != nil {
+		return accesscontrol.BootstrapResult{}, err
+	}
+	managedOwnerChanged, err := reconcileManagedOwnerInvitation(
+		ctx, tx, input.OwnerEmail, subjectID, workspaceID, roleIDs[accesscontrol.RoleOwner],
+	)
 	if err != nil {
 		return accesscontrol.BootstrapResult{}, err
 	}
 
-	changed := anyAccessChange(rolesChanged, permissionsChanged, subjectChanged, credentialChanged, bindingChanged)
+	changed := anyAccessChange(rolesChanged, permissionsChanged, subjectChanged, credentialChanged, bindingChanged, managedOwnerChanged)
 	revision, err := finalizeAccessBootstrap(ctx, tx, input.TraceID, workspaceID, subjectID, credentialID, changed)
 	if err != nil {
 		return accesscontrol.BootstrapResult{}, err
@@ -280,6 +297,32 @@ func reconcileBootstrapOwnerTx(ctx context.Context, tx pgx.Tx, input accesscontr
 		Revision:     revision,
 		Changed:      changed,
 	}, nil
+}
+
+func reconcileManagedOwnerInvitation(ctx context.Context, tx pgx.Tx, email string, bootstrapSubjectID, workspaceID, ownerRoleID uuid.UUID) (bool, error) {
+	if strings.TrimSpace(email) == "" {
+		return false, nil
+	}
+	normalized, display, err := normalizeUserEmail(email)
+	if err != nil {
+		return false, fmt.Errorf("validate managed owner email: %w", err)
+	}
+	// Registry owns the initial owner email, while Engine owns authorization.
+	// Seeding an invitation here bridges those boundaries without allowing an
+	// arbitrary Logto identity to create itself or gain local access.
+	displayName := strings.SplitN(display, "@", 2)[0]
+	user, created, err := loadOrCreateInvitedUser(ctx, tx, normalized, display, displayName)
+	if err != nil {
+		return false, fmt.Errorf("reconcile managed owner invitation: %w", err)
+	}
+	if user.Status != UserStatusInvited && user.Status != UserStatusActive {
+		return false, fmt.Errorf("reconcile managed owner invitation: owner is %s", user.Status)
+	}
+	bindingChanged, err := ensureOwnerBinding(ctx, tx, user.ID, bootstrapSubjectID, workspaceID, ownerRoleID)
+	if err != nil {
+		return false, err
+	}
+	return created || bindingChanged, nil
 }
 
 func anyAccessChange(changes ...bool) bool {
@@ -478,16 +521,18 @@ func rotateBootstrapCredential(ctx context.Context, tx pgx.Tx, subjectID uuid.UU
 	return credentialID, revoked.RowsAffected() > 0 || upsertChanged, nil
 }
 
-func ensureOwnerBinding(ctx context.Context, tx pgx.Tx, subjectID, workspaceID, ownerRoleID uuid.UUID) (bool, error) {
+func ensureOwnerBinding(ctx context.Context, tx pgx.Tx, subjectID, createdBySubjectID, workspaceID, ownerRoleID uuid.UUID) (bool, error) {
 	if ownerRoleID == uuid.Nil {
 		return false, errors.New("owner role ID is required")
 	}
 	tag, err := tx.Exec(ctx, `
 		INSERT INTO fused_role_bindings (
 			subject_type, subject_id, role_id, resource_type, resource_id, created_by_subject_id
-		) VALUES ('subject', $1, $2, 'workspace', $3, $1)
-		ON CONFLICT (subject_type, subject_id, role_id, resource_type, resource_id) DO NOTHING
-	`, subjectID, ownerRoleID, workspaceID)
+		) VALUES ('subject', $1, $2, 'workspace', $3, $4)
+		ON CONFLICT (subject_type, subject_id, role_id, resource_type, resource_id) DO UPDATE
+		SET created_by_subject_id = EXCLUDED.created_by_subject_id
+		WHERE fused_role_bindings.created_by_subject_id IS DISTINCT FROM EXCLUDED.created_by_subject_id
+	`, subjectID, ownerRoleID, workspaceID, createdBySubjectID)
 	if err != nil {
 		return false, fmt.Errorf("ensure bootstrap Owner binding: %w", err)
 	}

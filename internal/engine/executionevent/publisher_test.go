@@ -28,7 +28,9 @@ func TestPublisherNormalizesAndVersionsEvent(t *testing.T) {
 	now := time.Now()
 	event := models.EngineExecutionEvent{
 		Transport: models.EngineExecutionTransportSDK, Status: models.EngineExecutionStatusSuccess,
-		StartedAt: now.Add(-time.Millisecond), EndedAt: now,
+		AppFamilyID: uuid.New(), AppID: uuid.New(), AppVersion: "1.0.0",
+		ProviderProtocol: models.ProviderProtocolREST,
+		StartedAt:        now.Add(-time.Millisecond), EndedAt: now,
 	}
 	if err := publisher.Publish(context.Background(), event); err != nil {
 		t.Fatal(err)
@@ -53,10 +55,23 @@ func TestPublisherReturnsJetStreamFailure(t *testing.T) {
 	now := time.Now()
 	err := publisher.Publish(context.Background(), models.EngineExecutionEvent{
 		Transport: models.EngineExecutionTransportSDK, Status: models.EngineExecutionStatusSuccess,
-		StartedAt: now.Add(-time.Millisecond), EndedAt: now,
+		AppFamilyID: uuid.New(), AppID: uuid.New(), AppVersion: "1.0.0",
+		ProviderProtocol: models.ProviderProtocolREST,
+		StartedAt:        now.Add(-time.Millisecond), EndedAt: now,
 	})
 	if err == nil {
 		t.Fatal("expected publication failure")
+	}
+}
+
+func TestPublisherRejectsSDKEventWithoutVersionIdentity(t *testing.T) {
+	now := time.Now()
+	err := NewPublisher(&publisherStub{}).Publish(context.Background(), models.EngineExecutionEvent{
+		Transport: models.EngineExecutionTransportSDK, Status: models.EngineExecutionStatusSuccess,
+		StartedAt: now.Add(-time.Millisecond), EndedAt: now,
+	})
+	if err == nil {
+		t.Fatal("expected SDK identity validation failure")
 	}
 }
 

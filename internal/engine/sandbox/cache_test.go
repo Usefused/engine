@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
@@ -18,7 +17,6 @@ type mockCacheDB struct {
 	scopeData         []byte
 	scopeVersion      int
 	scopeCount        int
-	scopeDeactivated  bool
 	activatedVersion  string
 	activatedErr      error
 	activatedCalls    int
@@ -31,7 +29,7 @@ type mockCacheDB struct {
 	contractListCalls int
 }
 
-func (m *mockCacheDB) GetSDKAccountID(ctx context.Context, artifactID uuid.UUID) (uuid.UUID, error) {
+func (m *mockCacheDB) GetSDKAccountID(ctx context.Context, appID uuid.UUID) (uuid.UUID, error) {
 	return uuid.Nil, nil
 }
 
@@ -39,25 +37,16 @@ func (m *mockCacheDB) GetAccountByAPIKey(ctx context.Context, apiKey string) (uu
 	return uuid.Nil, nil
 }
 
-func (m *mockCacheDB) GetArtifactScope(ctx context.Context, id uuid.UUID) (*store.ArtifactScope, error) {
+func (m *mockCacheDB) GetAppRuntime(ctx context.Context, id uuid.UUID) (*store.AppRuntime, error) {
 	m.scopeCount++
 	version := m.scopeVersion
 	if version == 0 {
-		version = models.ArtifactScopeSchemaVersion
+		version = models.AppScopeSchemaVersion
 	}
-	scope := &store.ArtifactScope{ArtifactID: id, Selections: m.scopeData, ScopeSchemaVersion: version}
-	if m.scopeDeactivated {
-		now := time.Now()
-		scope.DeactivatedAt = &now
-	}
-	return scope, nil
+	return &store.AppRuntime{AppID: id, Selections: m.scopeData, ScopeSchemaVersion: version, Status: "active"}, nil
 }
 
-func (m *mockCacheDB) SaveArtifactScope(ctx context.Context, scope store.ArtifactScope) error {
-	return nil
-}
-
-func (m *mockCacheDB) DeleteArtifactScope(ctx context.Context, accountID uuid.UUID, artifactID uuid.UUID) error {
+func (m *mockCacheDB) SaveAppRuntime(ctx context.Context, scope store.AppRuntime) error {
 	return nil
 }
 
@@ -214,7 +203,7 @@ func (m *mockCacheDB) GetWorkspaceIDForAccount(ctx context.Context, accountID uu
 
 func TestLocalObjectCache_Refcounting(t *testing.T) {
 	mockID := uuid.New()
-	artifactID := uuid.New()
+	appID := uuid.New()
 
 	obj := &fusedobject.ServiceMetadata{
 		ID:   mockID,
@@ -240,13 +229,13 @@ func TestLocalObjectCache_Refcounting(t *testing.T) {
 	ctx := context.Background()
 
 	// 1. Connect SDK (Conn 1)
-	err := cache.ConnectSDK(ctx, artifactID.String())
+	err := cache.ConnectSDK(ctx, appID.String())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if cache.scopeRefCounts[artifactID.String()] != 1 {
-		t.Errorf("expected scope refcount 1, got %d", cache.scopeRefCounts[artifactID.String()])
+	if cache.scopeRefCounts[appID.String()] != 1 {
+		t.Errorf("expected scope refcount 1, got %d", cache.scopeRefCounts[appID.String()])
 	}
 	if cache.objectRefCounts[mockID.String()+":"+"00000000-0000-0000-0000-000000000101"] != 1 {
 		t.Errorf("expected object refcount 1, got %d", cache.objectRefCounts[mockID.String()+":"+"00000000-0000-0000-0000-000000000101"])
@@ -256,13 +245,13 @@ func TestLocalObjectCache_Refcounting(t *testing.T) {
 	}
 
 	// 2. Connect SDK again (Conn 2)
-	err = cache.ConnectSDK(ctx, artifactID.String())
+	err = cache.ConnectSDK(ctx, appID.String())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if cache.scopeRefCounts[artifactID.String()] != 2 {
-		t.Errorf("expected scope refcount 2, got %d", cache.scopeRefCounts[artifactID.String()])
+	if cache.scopeRefCounts[appID.String()] != 2 {
+		t.Errorf("expected scope refcount 2, got %d", cache.scopeRefCounts[appID.String()])
 	}
 	if cache.objectRefCounts[mockID.String()+":"+"00000000-0000-0000-0000-000000000101"] != 2 {
 		t.Errorf("expected object refcount 2, got %d", cache.objectRefCounts[mockID.String()+":"+"00000000-0000-0000-0000-000000000101"])
@@ -272,20 +261,20 @@ func TestLocalObjectCache_Refcounting(t *testing.T) {
 	}
 
 	// 3. Disconnect SDK (Conn 1)
-	cache.DisconnectSDK(artifactID.String())
-	if cache.scopeRefCounts[artifactID.String()] != 1 {
-		t.Errorf("expected scope refcount 1, got %d", cache.scopeRefCounts[artifactID.String()])
+	cache.DisconnectSDK(appID.String())
+	if cache.scopeRefCounts[appID.String()] != 1 {
+		t.Errorf("expected scope refcount 1, got %d", cache.scopeRefCounts[appID.String()])
 	}
 
 	// Ensure object is still in cache
-	cachedObj, err := cache.GetOrFetchServiceMetadata(ctx, artifactID.String(), mockID.String())
+	cachedObj, err := cache.GetOrFetchServiceMetadata(ctx, appID.String(), mockID.String())
 	if err != nil || cachedObj == nil {
 		t.Errorf("object should still be in cache")
 	}
 
 	// 4. Disconnect SDK (Conn 2) - should evict
-	cache.DisconnectSDK(artifactID.String())
-	if cache.scopeRefCounts[artifactID.String()] != 0 {
+	cache.DisconnectSDK(appID.String())
+	if cache.scopeRefCounts[appID.String()] != 0 {
 		t.Errorf("expected scope refcount 0")
 	}
 	if cache.objectRefCounts[mockID.String()+":"+"00000000-0000-0000-0000-000000000101"] != 0 {
@@ -293,7 +282,7 @@ func TestLocalObjectCache_Refcounting(t *testing.T) {
 	}
 
 	// Ensure object is evicted
-	_, err = cache.GetOrFetchServiceMetadata(ctx, artifactID.String(), mockID.String())
+	_, err = cache.GetOrFetchServiceMetadata(ctx, appID.String(), mockID.String())
 	if err == nil {
 		t.Errorf("object should be evicted")
 	}
@@ -301,7 +290,7 @@ func TestLocalObjectCache_Refcounting(t *testing.T) {
 
 func TestLocalObjectCache_ConnectSDKRequiresActivatedVersion(t *testing.T) {
 	mockID := uuid.New()
-	artifactID := uuid.New()
+	appID := uuid.New()
 	scopeData, _ := json.Marshal([]map[string]interface{}{
 		{
 			"service_id":   mockID.String(),
@@ -315,7 +304,7 @@ func TestLocalObjectCache_ConnectSDKRequiresActivatedVersion(t *testing.T) {
 	rc := &mockRegistryClient{fusedObj: &fusedobject.ServiceMetadata{ID: mockID, Name: "Stripe"}}
 	cache := NewLocalObjectCache(db, rc)
 
-	err := cache.ConnectSDK(context.Background(), artifactID.String())
+	err := cache.ConnectSDK(context.Background(), appID.String())
 	if err == nil {
 		t.Fatal("expected missing activation version to fail SDK connect")
 	}
@@ -326,7 +315,7 @@ func TestLocalObjectCache_ConnectSDKRequiresActivatedVersion(t *testing.T) {
 
 func TestLocalObjectCache_ConnectSDKRequiresSelectionServiceVersionID(t *testing.T) {
 	serviceID := uuid.New()
-	artifactID := uuid.New()
+	appID := uuid.New()
 	scopeData, _ := json.Marshal([]models.SDKSelection{{
 		ServiceID:   serviceID,
 		EndpointIDs: []uuid.UUID{uuid.New()},
@@ -338,7 +327,7 @@ func TestLocalObjectCache_ConnectSDKRequiresSelectionServiceVersionID(t *testing
 	rc := &mockRegistryClient{fusedObj: &fusedobject.ServiceMetadata{ID: serviceID, Name: "Stripe"}}
 	cache := NewLocalObjectCache(db, rc)
 
-	err := cache.ConnectSDK(context.Background(), artifactID.String())
+	err := cache.ConnectSDK(context.Background(), appID.String())
 	if err == nil {
 		t.Fatal("expected unpinned SDK scope to fail")
 	}
@@ -353,7 +342,7 @@ func TestLocalObjectCache_ConnectSDKRequiresSelectionServiceVersionID(t *testing
 func TestLocalObjectCache_ConnectSDKUsesSelectionServiceVersionID(t *testing.T) {
 	serviceID := uuid.New()
 	serviceVersionID := uuid.New()
-	artifactID := uuid.New()
+	appID := uuid.New()
 	scopeData, _ := json.Marshal([]models.SDKSelection{{
 		ServiceID:        serviceID,
 		ServiceVersionID: serviceVersionID,
@@ -366,13 +355,13 @@ func TestLocalObjectCache_ConnectSDKUsesSelectionServiceVersionID(t *testing.T) 
 	rc := &mockRegistryClient{fusedObj: &fusedobject.ServiceMetadata{ID: serviceID, Name: "Stripe"}}
 	cache := NewLocalObjectCache(db, rc)
 
-	if err := cache.ConnectSDK(context.Background(), artifactID.String()); err != nil {
+	if err := cache.ConnectSDK(context.Background(), appID.String()); err != nil {
 		t.Fatalf("ConnectSDK: %v", err)
 	}
 	if len(rc.fetchedVersions) != 1 || rc.fetchedVersions[0] != serviceVersionID.String() {
 		t.Fatalf("expected Registry metadata fetch by service_version_id %s, got %#v", serviceVersionID, rc.fetchedVersions)
 	}
-	if _, err := cache.GetOrFetchServiceMetadata(context.Background(), artifactID.String(), serviceID.String()); err != nil {
+	if _, err := cache.GetOrFetchServiceMetadata(context.Background(), appID.String(), serviceID.String()); err != nil {
 		t.Fatalf("expected metadata cached under service_version_id identity: %v", err)
 	}
 	if _, ok := cache.serviceMetadataCache[serviceID.String()+":workspace-latest-public-version"]; ok {
@@ -384,7 +373,7 @@ func TestLocalObjectCache_ConnectSDKUsesServiceContractSnapshot(t *testing.T) {
 	serviceID := uuid.New()
 	serviceVersionID := uuid.New()
 	endpointID := uuid.New()
-	artifactID := uuid.New()
+	appID := uuid.New()
 	scopeData, _ := json.Marshal([]models.SDKSelection{{
 		ServiceID:        serviceID,
 		ServiceVersionID: serviceVersionID,
@@ -401,17 +390,17 @@ func TestLocalObjectCache_ConnectSDKUsesServiceContractSnapshot(t *testing.T) {
 	rc := &mockRegistryClient{fusedObj: &fusedobject.ServiceMetadata{ID: serviceID, Name: "RegistryService"}}
 	cache := NewLocalObjectCache(db, rc)
 
-	if err := cache.ConnectSDK(context.Background(), artifactID.String()); err != nil {
+	if err := cache.ConnectSDK(context.Background(), appID.String()); err != nil {
 		t.Fatalf("ConnectSDK: %v", err)
 	}
-	got, err := cache.GetOrFetchServiceMetadata(context.Background(), artifactID.String(), serviceID.String())
+	got, err := cache.GetOrFetchServiceMetadata(context.Background(), appID.String(), serviceID.String())
 	if err != nil {
 		t.Fatalf("GetOrFetchServiceMetadata: %v", err)
 	}
 	if got.Name != "SnapshotService" {
 		t.Fatalf("expected snapshot metadata, got %#v", got)
 	}
-	endpoint, err := cache.GetEndpoint(context.Background(), artifactID.String(), serviceID.String(), "listUsers")
+	endpoint, err := cache.GetEndpoint(context.Background(), appID.String(), serviceID.String(), "listUsers")
 	if err != nil {
 		t.Fatalf("GetEndpoint: %v", err)
 	}
@@ -429,7 +418,7 @@ func TestLocalObjectCache_ConnectSDKUsesServiceContractSnapshot(t *testing.T) {
 func TestLocalObjectCache_GetEndpointDoesNotFallbackWhenSnapshotExists(t *testing.T) {
 	serviceID := uuid.New()
 	serviceVersionID := uuid.New()
-	artifactID := uuid.New()
+	appID := uuid.New()
 	scopeData, _ := json.Marshal([]models.SDKSelection{{
 		ServiceID:        serviceID,
 		ServiceVersionID: serviceVersionID,
@@ -442,10 +431,10 @@ func TestLocalObjectCache_GetEndpointDoesNotFallbackWhenSnapshotExists(t *testin
 	rc := &mockRegistryClient{fusedObj: &fusedobject.ServiceMetadata{ID: serviceID, Name: "RegistryService"}}
 	cache := NewLocalObjectCache(db, rc)
 
-	if err := cache.ConnectSDK(context.Background(), artifactID.String()); err != nil {
+	if err := cache.ConnectSDK(context.Background(), appID.String()); err != nil {
 		t.Fatalf("ConnectSDK: %v", err)
 	}
-	_, err := cache.GetEndpoint(context.Background(), artifactID.String(), serviceID.String(), "registryOnlyOperation")
+	_, err := cache.GetEndpoint(context.Background(), appID.String(), serviceID.String(), "registryOnlyOperation")
 	if !errors.Is(err, store.ErrServiceContractEndpointNotFound) {
 		t.Fatalf("expected local snapshot endpoint miss, got %v", err)
 	}
@@ -454,39 +443,14 @@ func TestLocalObjectCache_GetEndpointDoesNotFallbackWhenSnapshotExists(t *testin
 	}
 }
 
-// TestLocalObjectCache_ConnectSDKRejectsDeactivatedScope is the enforcement
-// point for POST /sdk-config/{id}/deactivate (api.DeactivateSDKHandler):
-// loadArtifactScope must reject a new connection outright when DeactivatedAt is
-// set, before ever unmarshaling selections or touching the Registry.
-func TestLocalObjectCache_ConnectSDKRejectsDeactivatedScope(t *testing.T) {
-	artifactID := uuid.New()
-	db := &mockCacheDB{
-		scopeData:        []byte(`[]`),
-		scopeDeactivated: true,
-	}
-	rc := &mockRegistryClient{}
-	c := NewLocalObjectCache(db, rc)
-
-	err := c.ConnectSDK(context.Background(), artifactID.String())
-	if err == nil {
-		t.Fatal("expected a deactivated sdk scope to reject the new connection")
-	}
-	if rc.fetchCount != 0 {
-		t.Errorf("expected no Registry fetch for a rejected/deactivated connection, got %d", rc.fetchCount)
-	}
-	if _, exists := c.scopes[artifactID.String()]; exists {
-		t.Error("a rejected connection must not populate the scope cache")
-	}
-}
-
 func TestLocalObjectCache_ConnectSDKRejectsUnsupportedScopeSchemaVersion(t *testing.T) {
-	artifactID := uuid.New()
+	appID := uuid.New()
 	db := &mockCacheDB{
 		scopeData: []byte(`[]`),
 	}
 	c := NewLocalObjectCache(db, &mockRegistryClient{})
-	db.scopeVersion = models.ArtifactScopeSchemaVersion + 1
-	if err := c.ConnectSDK(context.Background(), artifactID.String()); err == nil {
+	db.scopeVersion = models.AppScopeSchemaVersion + 1
+	if err := c.ConnectSDK(context.Background(), appID.String()); err == nil {
 		t.Fatal("expected unsupported scope schema version to fail")
 	}
 }
@@ -498,7 +462,7 @@ func TestLocalObjectCache_ConnectSDKRejectsUnsupportedScopeSchemaVersion(t *test
 func TestLocalObjectCache_EndpointsPrefetchedAtConnect(t *testing.T) {
 	serviceID := uuid.New()
 	serviceVersionID := uuid.New()
-	artifactID := uuid.New()
+	appID := uuid.New()
 
 	scopeData, _ := json.Marshal([]models.SDKSelection{{
 		ServiceID:        serviceID,
@@ -510,7 +474,7 @@ func TestLocalObjectCache_EndpointsPrefetchedAtConnect(t *testing.T) {
 	rc := &mockRegistryClient{fusedObj: &fusedobject.ServiceMetadata{ID: serviceID, Name: "TestService"}}
 	cache := NewLocalObjectCache(db, rc)
 
-	if err := cache.ConnectSDK(context.Background(), artifactID.String()); err != nil {
+	if err := cache.ConnectSDK(context.Background(), appID.String()); err != nil {
 		t.Fatalf("ConnectSDK: %v", err)
 	}
 
@@ -522,7 +486,7 @@ func TestLocalObjectCache_EndpointsPrefetchedAtConnect(t *testing.T) {
 
 	// GetEndpoint for a pre-warmed name must be a cache hit — endpointFetchCount
 	// must stay at 1 (FetchEndpointByName is not called).
-	ep, err := cache.GetEndpoint(context.Background(), artifactID.String(), serviceID.String(), "listUsers")
+	ep, err := cache.GetEndpoint(context.Background(), appID.String(), serviceID.String(), "listUsers")
 	if err != nil {
 		t.Fatalf("GetEndpoint after pre-warm: %v", err)
 	}
@@ -540,7 +504,7 @@ func TestLocalObjectCache_EndpointsPrefetchedAtConnect(t *testing.T) {
 func TestLocalObjectCache_EndpointsNotPrefetchedWhenOperationNamesEmpty(t *testing.T) {
 	serviceID := uuid.New()
 	serviceVersionID := uuid.New()
-	artifactID := uuid.New()
+	appID := uuid.New()
 
 	scopeData, _ := json.Marshal([]models.SDKSelection{{
 		ServiceID:        serviceID,
@@ -552,7 +516,7 @@ func TestLocalObjectCache_EndpointsNotPrefetchedWhenOperationNamesEmpty(t *testi
 	rc := &mockRegistryClient{fusedObj: &fusedobject.ServiceMetadata{ID: serviceID, Name: "TestService"}}
 	cache := NewLocalObjectCache(db, rc)
 
-	if err := cache.ConnectSDK(context.Background(), artifactID.String()); err != nil {
+	if err := cache.ConnectSDK(context.Background(), appID.String()); err != nil {
 		t.Fatalf("ConnectSDK: %v", err)
 	}
 	if rc.endpointFetchCount != 0 {
@@ -572,7 +536,7 @@ func (m *mockCacheDB) UpsertMCPSession(ctx context.Context, session *models.MCPS
 	return nil
 }
 
-func (m *mockCacheDB) GetIdempotentExecution(ctx context.Context, artifactID uuid.UUID, idempotencyKeyHash, requestBodyHash string) (*models.IdempotentExecution, error) {
+func (m *mockCacheDB) GetIdempotentExecution(ctx context.Context, appID uuid.UUID, idempotencyKeyHash, requestBodyHash string) (*models.IdempotentExecution, error) {
 	return nil, store.ErrIdempotentExecutionNotFound
 }
 

@@ -59,8 +59,8 @@ func visibilityPermission(resourceType accesscontrol.ResourceType) accesscontrol
 		return accesscontrol.PermissionServiceRead
 	case accesscontrol.ResourceBucket:
 		return accesscontrol.PermissionBucketRead
-	case accesscontrol.ResourceArtifact:
-		return accesscontrol.PermissionArtifactRead
+	case accesscontrol.ResourceApp:
+		return accesscontrol.PermissionAppRead
 	default:
 		return accesscontrol.PermissionWorkspaceRead
 	}

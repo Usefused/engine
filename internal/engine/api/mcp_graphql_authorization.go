@@ -43,8 +43,9 @@ type graphQLFieldPolicy struct {
 type graphQLScopeMode string
 
 const (
-	graphQLScopeWorkspace graphQLScopeMode = "workspace"
-	graphQLScopeArgument  graphQLScopeMode = "argument"
+	graphQLScopeWorkspace   graphQLScopeMode = "workspace"
+	graphQLScopeArgument    graphQLScopeMode = "argument"
+	graphQLScopeAppArgument graphQLScopeMode = "app_argument"
 	// Collection roots pass the actor's complete authorized scope into SQL so
 	// filtering happens before pagination and totals are calculated.
 	graphQLScopeCollection graphQLScopeMode = "collection"
@@ -65,15 +66,14 @@ type graphQLAuthorizationPolicy struct {
 var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 	queryRoots: map[string]graphQLFieldPolicy{
 		"currentActorAccess":          authenticatedOnly(),
-		"artifact":                    collectionPermissions(accesscontrol.ResourceArtifact, accesscontrol.PermissionArtifactRead),
-		"artifactServices":            collectionPermissions(accesscontrol.ResourceArtifact, accesscontrol.PermissionArtifactRead),
-		"artifacts":                   collectionPermissions(accesscontrol.ResourceArtifact, accesscontrol.PermissionArtifactRead),
-		"artifactSnapshots":           collectionPermissions(accesscontrol.ResourceArtifact, accesscontrol.PermissionArtifactRead),
-		"artifactSnapshot":            collectionPermissions(accesscontrol.ResourceArtifact, accesscontrol.PermissionArtifactRead),
+		"app":                         collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
+		"apps":                        collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
+		"appVersions":                 collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
+		"appServices":                 collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
 		"accessExplanation":           permissions(accesscontrol.PermissionAccessRead),
 		"auditEvents":                 permissions(accesscontrol.PermissionAuditRead),
-		"artifactBuildSelectors":      permissions(accesscontrol.PermissionArtifactCreate),
-		"artifactOwningTeams":         permissions(accesscontrol.PermissionArtifactCreate),
+		"appBuildSelectors":           permissions(accesscontrol.PermissionAppCreate),
+		"appOwningTeams":              permissions(accesscontrol.PermissionAppCreate),
 		"users":                       permissions(accesscontrol.PermissionAccessRead),
 		"user":                        permissions(accesscontrol.PermissionAccessRead),
 		"userEffectiveAccess":         permissions(accesscontrol.PermissionAccessRead),
@@ -83,12 +83,13 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		"workspaceShares":             permissions(accesscontrol.PermissionAccessRead),
 		"bucketReference":             collectionPermissions(accesscontrol.ResourceBucket, accesscontrol.PermissionBucketRead),
 		"serviceReference":            collectionPermissions(accesscontrol.ResourceService, accesscontrol.PermissionServiceRead),
-		"artifactReference":           collectionPermissions(accesscontrol.ResourceArtifact, accesscontrol.PermissionArtifactRead),
+		"appReference":                collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
+		"appFamilyReference":          collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
 		"workspaceConnectionProfile":  argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead),
 		"workspaceConnectConfigs":     permissions(accesscontrol.PermissionConnectionRead),
-		"mcpServers":                  collectionPermissions(accesscontrol.ResourceArtifact, accesscontrol.PermissionArtifactRead),
-		"mcpServerByName":             permissions(accesscontrol.PermissionArtifactRead),
-		"mcpAnalytics":                argumentPermissions(accesscontrol.ResourceArtifact, "artifactId", accesscontrol.PermissionArtifactRead),
+		"mcpServers":                  collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
+		"mcpServerByName":             permissions(accesscontrol.PermissionAppRead),
+		"mcpAnalytics":                appArgumentPermissions("app_id", accesscontrol.PermissionAppRead),
 		"bucketSummaries":             collectionPermissions(accesscontrol.ResourceBucket, accesscontrol.PermissionBucketRead),
 		"bucketSummary":               argumentPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionBucketRead),
 		"bucketSummaryPage":           collectionPermissions(accesscontrol.ResourceBucket, accesscontrol.PermissionBucketRead),
@@ -99,16 +100,16 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		"webhookEvents":               argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead, accesscontrol.PermissionAuditRead),
 		"webhookAnalytics":            argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead, accesscontrol.PermissionAuditRead),
 		"engineExecutionEvents":       argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead, accesscontrol.PermissionAuditRead),
-		"artifactExecutionEvents":     argumentPermissions(accesscontrol.ResourceArtifact, "artifact_id", accesscontrol.PermissionArtifactRead, accesscontrol.PermissionAuditRead),
-		"artifactExecutionAnalytics":  argumentPermissions(accesscontrol.ResourceArtifact, "artifact_id", accesscontrol.PermissionArtifactRead, accesscontrol.PermissionAuditRead),
+		"appExecutionEvents":          appArgumentPermissions("app_id", accesscontrol.PermissionAppRead, accesscontrol.PermissionAuditRead),
+		"appExecutionAnalytics":       appArgumentPermissions("app_id", accesscontrol.PermissionAppRead, accesscontrol.PermissionAuditRead),
 		"engineExecutionAnalytics":    argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead, accesscontrol.PermissionAuditRead),
 		"workspaceExecutionAnalytics": permissions(accesscontrol.PermissionAuditRead),
 		"publicServiceInsights":       argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead, accesscontrol.PermissionAuditRead),
 		"serviceConsumers":            argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead),
 		"workspaceNotifications":      permissions(accesscontrol.PermissionWorkspaceRead),
-		"sdkTokens":                   argumentPermissions(accesscontrol.ResourceArtifact, "artifact_id", accesscontrol.PermissionArtifactTokensManage),
-		"sdkBuckets":                  relatedCollectionPermissions(accesscontrol.ResourceArtifact, "artifact_id", accesscontrol.PermissionArtifactRead, accesscontrol.ResourceBucket, accesscontrol.PermissionBucketRead),
-		"bucketSDKPage":               relatedCollectionPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionBucketRead, accesscontrol.ResourceArtifact, accesscontrol.PermissionArtifactRead),
+		"sdkTokens":                   argumentPermissions(accesscontrol.ResourceApp, "app_family_id", accesscontrol.PermissionAppTokensManage),
+		"sdkBuckets":                  relatedCollectionPermissions(accesscontrol.ResourceApp, "app_family_id", accesscontrol.PermissionAppRead, accesscontrol.ResourceBucket, accesscontrol.PermissionBucketRead),
+		"bucketSDKPage":               relatedCollectionPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionBucketRead, accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
 		"bucketServicePage":           relatedCollectionPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionBucketRead, accesscontrol.ResourceService, accesscontrol.PermissionServiceRead),
 		"bucketValues":                argumentPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionBucketValuesRead),
 		"bucketValuePage":             argumentPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionBucketValuesRead),
@@ -135,19 +136,19 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		"revokeTeamServiceAccess":           permissions(accesscontrol.PermissionAccessManage),
 		"grantTeamBucketAccess":             permissions(accesscontrol.PermissionAccessManage),
 		"revokeTeamBucketAccess":            permissions(accesscontrol.PermissionAccessManage),
-		"grantTeamArtifactAccess":           permissions(accesscontrol.PermissionAccessManage),
-		"revokeTeamArtifactAccess":          permissions(accesscontrol.PermissionAccessManage),
+		"grantTeamAppAccess":                permissions(accesscontrol.PermissionAccessManage),
+		"revokeTeamAppAccess":               permissions(accesscontrol.PermissionAccessManage),
 		"grantWorkspaceBucketAccess":        permissions(accesscontrol.PermissionAccessManage),
 		"revokeWorkspaceBucketAccess":       permissions(accesscontrol.PermissionAccessManage),
-		"grantWorkspaceArtifactAccess":      permissions(accesscontrol.PermissionAccessManage),
-		"revokeWorkspaceArtifactAccess":     permissions(accesscontrol.PermissionAccessManage),
+		"grantWorkspaceAppAccess":           permissions(accesscontrol.PermissionAccessManage),
+		"revokeWorkspaceAppAccess":          permissions(accesscontrol.PermissionAccessManage),
 		"setWorkspaceConnectionProfile":     argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceManage),
 		"resetWorkspaceConnectionProfile":   argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceManage),
 		"updateWorkspaceNotificationStatus": permissions(accesscontrol.PermissionNotificationUpdate),
 		"deployMcpServer":                   deploymentPermissions(accesscontrol.PermissionWorkspaceRead),
-		"killMcpServer":                     argumentPermissions(accesscontrol.ResourceArtifact, "id", accesscontrol.PermissionArtifactManage),
-		"reactivateMcpServer":               argumentPermissions(accesscontrol.ResourceArtifact, "id", accesscontrol.PermissionArtifactManage),
-		"deleteMcpServer":                   argumentPermissions(accesscontrol.ResourceArtifact, "id", accesscontrol.PermissionArtifactManage),
+		"deprecateApp":                      appArgumentPermissions("app_id", accesscontrol.PermissionAppManage),
+		"undeprecateApp":                    appArgumentPermissions("app_id", accesscontrol.PermissionAppManage),
+		"deactivateApp":                     appArgumentPermissions("app_id", accesscontrol.PermissionAppManage),
 		"upsertSecrets":                     argumentPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionCredentialsManage),
 		"deleteSecrets":                     argumentPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionCredentialsManage),
 		"startConnectSession":               argumentPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionConnectionManage, accesscontrol.PermissionBucketUse),
@@ -159,7 +160,7 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 	protected: map[string]graphQLFieldPolicy{
 		// An MCP execution token is a credential, even when reached through a
 		// read-only root or a fragment, so selecting it requires token management.
-		"MCPServer.execution_token": permissions(accesscontrol.PermissionArtifactTokensManage),
+		"MCPServer.execution_token": permissions(accesscontrol.PermissionAppTokensManage),
 		"BucketValue.value":         permissions(accesscontrol.PermissionBucketValuesRead),
 		// Literal connection bindings can contain configuration values that are
 		// more sensitive than the surrounding connection-profile metadata.
@@ -185,6 +186,10 @@ func authenticatedOnly() graphQLFieldPolicy {
 
 func argumentPermissions(resource accesscontrol.ResourceType, argument string, values ...accesscontrol.Permission) graphQLFieldPolicy {
 	return graphQLFieldPolicy{permissions: values, scope: graphQLScopeArgument, resource: resource, argument: argument}
+}
+
+func appArgumentPermissions(argument string, values ...accesscontrol.Permission) graphQLFieldPolicy {
+	return graphQLFieldPolicy{permissions: values, scope: graphQLScopeAppArgument, resource: accesscontrol.ResourceApp, argument: argument}
 }
 
 func collectionPermissions(resource accesscontrol.ResourceType, values ...accesscontrol.Permission) graphQLFieldPolicy {
@@ -293,7 +298,7 @@ func validatePolicyScope(path string, policy graphQLFieldPolicy) error {
 		return nil
 	case graphQLScopeCollection:
 		return validateCollectionPolicyScope(path, policy)
-	case graphQLScopeArgument, graphQLScopeConnection:
+	case graphQLScopeArgument, graphQLScopeAppArgument, graphQLScopeConnection:
 		return validateArgumentPolicyScope(path, policy)
 	case graphQLScopeRelated:
 		return validateRelatedPolicyScope(path, policy)
@@ -345,7 +350,13 @@ type graphQLAuthorizationPlan struct {
 	rootFields          int
 	deployments         []sdkConfigDocument
 	connections         []graphQLConnectionRequirement
+	apps                []graphQLAppRequirement
 	resolvedConnections map[uuid.UUID]store.AuthConnection
+}
+
+type graphQLAppRequirement struct {
+	appID      uuid.UUID
+	permission accesscontrol.Permission
 }
 
 type graphQLScopeRequest struct {
@@ -371,6 +382,7 @@ type graphQLPlanBuilder struct {
 	rootFields    int
 	deployments   []sdkConfigDocument
 	connections   []graphQLConnectionRequirement
+	apps          []graphQLAppRequirement
 }
 
 func buildGraphQLAuthorizationPlan(schema *graphql.Schema, body []byte, workspaceID uuid.UUID) (graphQLAuthorizationPlan, error) {
@@ -468,6 +480,9 @@ func (b *graphQLPlanBuilder) collectRootSelections(selectionSet *ast.SelectionSe
 		if policy.scope == graphQLScopeConnection {
 			return b.collectConnection(field, policy)
 		}
+		if policy.scope == graphQLScopeAppArgument {
+			return b.collectApp(field, policy)
+		}
 		if policy.scope == graphQLScopeRelated {
 			b.scopes[graphQLScopeRequest{permission: policy.relatedPermission, resource: policy.relatedResource}] = struct{}{}
 		}
@@ -482,6 +497,18 @@ func (b *graphQLPlanBuilder) collectRootSelections(selectionSet *ast.SelectionSe
 		b.rootFields++
 		return resource, nil
 	})
+}
+
+func (b *graphQLPlanBuilder) collectApp(field *ast.Field, policy graphQLFieldPolicy) (accesscontrol.ResourceRef, error) {
+	appID, err := b.uuidArgument(field, policy.argument)
+	if err != nil {
+		return accesscontrol.ResourceRef{}, err
+	}
+	for _, permission := range policy.permissions {
+		b.apps = append(b.apps, graphQLAppRequirement{appID: appID, permission: permission})
+	}
+	b.rootFields++
+	return accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: appID}, nil
 }
 
 func (b *graphQLPlanBuilder) addProtectedValueRequirement(field *ast.Field, policy graphQLFieldPolicy, resource accesscontrol.ResourceRef) error {
@@ -757,7 +784,7 @@ func (b *graphQLPlanBuilder) plan() (graphQLAuthorizationPlan, error) {
 	})
 	return graphQLAuthorizationPlan{
 		requirements: requirements, scopes: scopes, rootFields: b.rootFields,
-		deployments: b.deployments, connections: b.connections,
+		deployments: b.deployments, connections: b.connections, apps: b.apps,
 	}, nil
 }
 

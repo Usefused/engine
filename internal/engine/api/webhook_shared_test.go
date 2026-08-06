@@ -12,15 +12,15 @@ import (
 
 // TestResolveWebhookAttachmentLabel_ReturnsAttachmentFromConfigState is the
 // core isolation-fix assertion: the label comes entirely from the
-// connecting SDK/MCP's own applied config (via fused_artifact_scopes.config_key),
+// connecting SDK/MCP's own applied config (via fused_apps.config_key),
 // never from anything the client reports itself -- see the function's doc
 // comment and plans/plan-webhook-kind.md's NATS/WS section.
 func TestResolveWebhookAttachmentLabel_ReturnsAttachmentFromConfigState(t *testing.T) {
-	artifactID := uuid.New()
+	appID := uuid.New()
 	configKey := "sdk:jira-sdk:1.0.0"
 	s := &workspaceTestStore{
-		mockScopes: map[uuid.UUID]*store.ArtifactScope{
-			artifactID: {ArtifactID: artifactID, ConfigKey: configKey},
+		mockScopes: map[uuid.UUID]*store.AppRuntime{
+			appID: {AppID: appID, ConfigKey: configKey},
 		},
 	}
 	configStore := &mockConfigStore{state: &store.ConfigState{
@@ -28,7 +28,7 @@ func TestResolveWebhookAttachmentLabel_ReturnsAttachmentFromConfigState(t *testi
 		DesiredState: []byte(`{"apiVersion":"fused/v1","kind":"sdk","name":"jira-sdk","webhook_attachment":"team-x-webhooks","services":{}}`),
 	}}
 
-	label, err := resolveWebhookAttachmentLabel(context.Background(), configStore, s, artifactID)
+	label, err := resolveWebhookAttachmentLabel(context.Background(), configStore, s, appID)
 	if err != nil {
 		t.Fatalf("resolveWebhookAttachmentLabel: %v", err)
 	}
@@ -38,11 +38,11 @@ func TestResolveWebhookAttachmentLabel_ReturnsAttachmentFromConfigState(t *testi
 }
 
 func TestResolveWebhookAttachmentLabel_NoScopeReturnsEmptyNotError(t *testing.T) {
-	artifactID := uuid.New()
-	s := &workspaceTestStore{mockScopes: map[uuid.UUID]*store.ArtifactScope{}}
+	appID := uuid.New()
+	s := &workspaceTestStore{mockScopes: map[uuid.UUID]*store.AppRuntime{}}
 	configStore := &mockConfigStore{}
 
-	label, err := resolveWebhookAttachmentLabel(context.Background(), configStore, s, artifactID)
+	label, err := resolveWebhookAttachmentLabel(context.Background(), configStore, s, appID)
 	if err != nil {
 		t.Fatalf("expected no error for an unknown sdk id, got %v", err)
 	}
@@ -52,13 +52,13 @@ func TestResolveWebhookAttachmentLabel_NoScopeReturnsEmptyNotError(t *testing.T)
 }
 
 func TestResolveWebhookAttachmentLabel_ScopeWithNoConfigKeyReturnsEmpty(t *testing.T) {
-	artifactID := uuid.New()
+	appID := uuid.New()
 	s := &workspaceTestStore{
-		mockScopes: map[uuid.UUID]*store.ArtifactScope{artifactID: {ArtifactID: artifactID}},
+		mockScopes: map[uuid.UUID]*store.AppRuntime{appID: {AppID: appID}},
 	}
 	configStore := &mockConfigStore{}
 
-	label, err := resolveWebhookAttachmentLabel(context.Background(), configStore, s, artifactID)
+	label, err := resolveWebhookAttachmentLabel(context.Background(), configStore, s, appID)
 	if err != nil {
 		t.Fatalf("expected no error for a scope with no config_key, got %v", err)
 	}
@@ -68,16 +68,16 @@ func TestResolveWebhookAttachmentLabel_ScopeWithNoConfigKeyReturnsEmpty(t *testi
 }
 
 func TestResolveWebhookAttachmentLabel_NoConfigStateReturnsEmpty(t *testing.T) {
-	artifactID := uuid.New()
+	appID := uuid.New()
 	s := &workspaceTestStore{
-		mockScopes: map[uuid.UUID]*store.ArtifactScope{artifactID: {ArtifactID: artifactID, ConfigKey: "sdk:reader:1.0.0"}},
+		mockScopes: map[uuid.UUID]*store.AppRuntime{appID: {AppID: appID, ConfigKey: "sdk:reader:1.0.0"}},
 	}
 	// mockConfigStore.state is nil with a nil error -- GetConfigState's real
 	// "not found" shape (config_repository.go's scanConfigState), not an
 	// error condition.
 	configStore := &mockConfigStore{}
 
-	label, err := resolveWebhookAttachmentLabel(context.Background(), configStore, s, artifactID)
+	label, err := resolveWebhookAttachmentLabel(context.Background(), configStore, s, appID)
 	if err != nil {
 		t.Fatalf("expected no error when the config state is missing, got %v", err)
 	}
@@ -87,15 +87,15 @@ func TestResolveWebhookAttachmentLabel_NoConfigStateReturnsEmpty(t *testing.T) {
 }
 
 func TestResolveWebhookAttachmentLabel_NoAttachmentReturnsEmpty(t *testing.T) {
-	artifactID := uuid.New()
+	appID := uuid.New()
 	s := &workspaceTestStore{
-		mockScopes: map[uuid.UUID]*store.ArtifactScope{artifactID: {ArtifactID: artifactID, ConfigKey: "sdk:reader:1.0.0"}},
+		mockScopes: map[uuid.UUID]*store.AppRuntime{appID: {AppID: appID, ConfigKey: "sdk:reader:1.0.0"}},
 	}
 	configStore := &mockConfigStore{state: &store.ConfigState{
 		DesiredState: []byte(`{"apiVersion":"fused/v1","kind":"sdk","name":"reader","services":{}}`),
 	}}
 
-	label, err := resolveWebhookAttachmentLabel(context.Background(), configStore, s, artifactID)
+	label, err := resolveWebhookAttachmentLabel(context.Background(), configStore, s, appID)
 	if err != nil {
 		t.Fatalf("expected no error for a config with no webhook_attachment, got %v", err)
 	}
@@ -105,13 +105,13 @@ func TestResolveWebhookAttachmentLabel_NoAttachmentReturnsEmpty(t *testing.T) {
 }
 
 func TestResolveWebhookAttachmentLabel_ConfigStateLookupErrorPropagates(t *testing.T) {
-	artifactID := uuid.New()
+	appID := uuid.New()
 	s := &workspaceTestStore{
-		mockScopes: map[uuid.UUID]*store.ArtifactScope{artifactID: {ArtifactID: artifactID, ConfigKey: "sdk:reader:1.0.0"}},
+		mockScopes: map[uuid.UUID]*store.AppRuntime{appID: {AppID: appID, ConfigKey: "sdk:reader:1.0.0"}},
 	}
 	configStore := &mockConfigStore{err: errors.New("db unavailable")}
 
-	if _, err := resolveWebhookAttachmentLabel(context.Background(), configStore, s, artifactID); err == nil {
+	if _, err := resolveWebhookAttachmentLabel(context.Background(), configStore, s, appID); err == nil {
 		t.Fatal("expected a config state lookup failure to propagate")
 	}
 }

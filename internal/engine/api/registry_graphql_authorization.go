@@ -26,20 +26,14 @@ var registryGraphQLQueryPolicies = registryGraphQLPolicies(
 	[]string{
 		"eligibleConnectionProfiles", "connectionProfileContracts", "connectionProfileRevision",
 		"services", "serviceIdBySlug", "serviceIdsBySlugs", "servicesByIds", "serviceVersions",
-		"latestServiceVersions", "serviceVersionAuthConfigs", "service", "sdkSelectionResources",
-		"sdkSelectionResourceGroups", "sdkSelectionWebhooks", "resourceIntegrations", "getServiceComponent",
+		"latestServiceVersions", "serviceVersionAuthConfigs", "service", "resourceIntegrations", "getServiceComponent",
 		"integration", "endpointByName", "endpointsByNames", "serviceOperations", "validateSDKSelections",
 		"searchEndpoints", "searchServices", "parseSDKIntent", "driftSnapshots", "driftSnapshotsForServices",
 		"serviceChangelogSince",
 	},
 	[]accesscontrol.Permission{accesscontrol.PermissionCatalogueRead},
 	map[string][]accesscontrol.Permission{
-		"sdk":                    {accesscontrol.PermissionArtifactRead},
-		"sdkByName":              {accesscontrol.PermissionArtifactRead},
-		"sdks":                   {accesscontrol.PermissionArtifactRead},
-		"globalServiceAnalytics": {accesscontrol.PermissionCatalogueRead, accesscontrol.PermissionArtifactRead},
-		"globalSdkAnalytics":     {accesscontrol.PermissionArtifactRead},
-		"sdkAnalytics":           {accesscontrol.PermissionArtifactRead},
+		"globalServiceAnalytics": {accesscontrol.PermissionCatalogueRead},
 		"__typename":             {},
 	},
 )

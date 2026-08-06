@@ -124,7 +124,7 @@ type dispatchProfileHarness struct {
 func (h *dispatchProfileHarness) dispatch(t *testing.T, cache *richMockCache, endpointName string) error {
 	t.Helper()
 	*h.captured = capturedVendorRequest{}
-	return engineExecuteCore(h.ctx, cache, h.dispatcher, &dummyTokenValidator{}, h.f.artifactID.String(), "tok",
+	return engineExecuteCore(h.ctx, cache, h.dispatcher, &dummyTokenValidator{}, h.f.appID.String(), "tok",
 		endpointName, map[string]any{}, cloneCredMap(h.creds), "", engine.NewBufferStream())
 }
 
@@ -324,7 +324,8 @@ type dispatchProfileFixture struct {
 	versionID           uuid.UUID
 	outOfScopeServiceID uuid.UUID
 	outOfScopeVersionID uuid.UUID
-	artifactID          uuid.UUID
+	appID               uuid.UUID
+	appFamilyID         uuid.UUID
 	ownerTeamID         uuid.UUID
 	epID                uuid.UUID
 	endUserRef          string
@@ -339,7 +340,7 @@ func setupDispatchProfileFixture(t *testing.T, ctx context.Context, pool *pgxpoo
 		workspaceID: workspaceID, accountID: accountID, ownsWorkspace: ownsWorkspace,
 		bucketID: uuid.New(), serviceID: uuid.New(), versionID: uuid.New(),
 		outOfScopeServiceID: uuid.New(), outOfScopeVersionID: uuid.New(),
-		artifactID: uuid.New(), ownerTeamID: uuid.New(), epID: uuid.New(), endUserRef: "dispatch-profile-user",
+		appID: uuid.New(), appFamilyID: uuid.New(), ownerTeamID: uuid.New(), epID: uuid.New(), endUserRef: "dispatch-profile-user",
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO fused_teams (id, name, slug) VALUES ($1, $2, $3)`,
 		f.ownerTeamID, "Dispatch profile owner", "dispatch-profile-owner-"+f.ownerTeamID.String()); err != nil {
@@ -368,18 +369,23 @@ func setupDispatchProfileFixture(t *testing.T, ctx context.Context, pool *pgxpoo
 	if err != nil {
 		t.Fatalf("marshal sdk scope selections: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO fused_artifact_scopes (account_id, artifact_id, owner_team_id, selections) VALUES ($1, $2, $3, $4)`,
-		f.accountID, f.artifactID, f.ownerTeamID, selectionsJSON); err != nil {
-		t.Fatalf("seed sdk scope: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO fused_artifact_buckets (artifact_id, bucket_id) VALUES ($1, $2)`, f.artifactID, f.bucketID); err != nil {
-		t.Fatalf("link sdk to bucket: %v", err)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO fused_app_families
+			(app_family_id, account_id, kind, canonical_name, display_name, target_language, owner_team_id)
+		VALUES ($1, $2, 'sdk', $3, 'Dispatch profile SDK', 'typescript', $4);
+		INSERT INTO fused_apps
+			(app_id, app_family_id, account_id, version, config_key, source_hash, status, selections)
+		VALUES ($5, $1, $2, '1.0.0', $6, 'dispatch-profile', 'active', $7);
+		INSERT INTO fused_app_family_buckets (app_family_id, bucket_id) VALUES ($1, $8)
+	`, f.appFamilyID, f.accountID, "dispatch-profile-"+f.appFamilyID.String(), f.ownerTeamID,
+		f.appID, "sdk:dispatch-profile:"+f.appFamilyID.String(), selectionsJSON, f.bucketID); err != nil {
+		t.Fatalf("seed SDK app runtime: %v", err)
 	}
 
 	encryptedToken := dispatchEncrypt(t, "connected-access-token")
 	conn, err := f.store.UpsertAuthConnection(ctx, store.AuthConnection{
 		BucketID: f.bucketID, ServiceID: f.serviceID,
-		EndUserRef: f.endUserRef, CreatedByArtifactID: f.artifactID, AuthType: "oauth",
+		EndUserRef: f.endUserRef, CreatedByAppID: f.appID, AuthType: "oauth",
 		EncryptedDEK:         encryptedToken.dek,
 		EncryptedAccessToken: encryptedToken.values[0],
 		TokenType:            "Bearer", RefreshState: "ok",
@@ -502,7 +508,8 @@ func (f *dispatchProfileFixture) cleanup() {
 	if f.ownsWorkspace {
 		_, _ = f.pool.Exec(ctx, `DELETE FROM fused_workspaces WHERE id = $1`, f.workspaceID)
 	}
-	_, _ = f.pool.Exec(ctx, `DELETE FROM fused_artifact_scopes WHERE artifact_id = $1`, f.artifactID)
+	_, _ = f.pool.Exec(ctx, `DELETE FROM fused_apps WHERE app_id = $1`, f.appID)
+	_, _ = f.pool.Exec(ctx, `DELETE FROM fused_app_families WHERE app_family_id = $1`, f.appFamilyID)
 	_, _ = f.pool.Exec(ctx, `DELETE FROM fused_buckets WHERE id = $1`, f.bucketID)
 	// Neither table below carries workspace_id anymore post mono-workspace
 	// migration -- service_id alone already scopes these rows uniquely.

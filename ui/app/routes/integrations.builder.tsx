@@ -9,14 +9,14 @@ export const meta: MetaFunction = ({ matches }) => {
     { title: "Create app - Fused" },
   ];
 };
-import { api, type Service, type IntegrationObject, type WebhookObject, type ServiceVersion, BASE } from "~/lib/api";
+import { api, handleCredentialedResponse, type Service, type IntegrationObject, type WebhookObject, type ServiceVersion, BASE } from "~/lib/api";
 import {
-  listArtifactBuildSelectors,
-  listArtifactOwningTeams,
-  planAndApplyArtifact,
-} from "~/lib/artifact-builder";
-import type { ArtifactBuildSelector, ArtifactOwningTeam } from "~/lib/artifact-builder-contract";
-import { getApiKey, openAuthenticatedTab } from "~/lib/session";
+  listAppBuildSelectors,
+  listAppOwningTeams,
+  planAndApplyApp,
+} from "~/lib/app-builder";
+import type { AppBuildSelector, AppOwningTeam } from "~/lib/app-builder-contract";
+import { openAuthenticatedTab } from "~/lib/session";
 import { CREATE_CREDENTIAL_PATH } from "~/lib/credential-navigation";
 import { useToast } from "~/components/Toast";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
@@ -26,9 +26,9 @@ import WebhookSelectionList from "~/components/WebhookSelectionList";
 import { ConsumerGenerationPanel } from "~/components/consumer/ConsumerGenerationPanel";
 
 export const clientLoader = async ({ request }: { request: Request }) => {
-  const token = getApiKey();
-  const url = new URL(request.url);
-  if (!token) {
+	const session = await api.auth.session().catch(() => ({ authenticated: false }));
+	const url = new URL(request.url);
+	if (!session.authenticated) {
     return redirect(`/login?next=${encodeURIComponent(url.pathname + url.search)}`);
   }
 
@@ -49,7 +49,7 @@ type ServiceData = {
   serviceVersions: SdkServiceVersion[];
 };
 
-type ArtifactSelection = {
+type AppSelection = {
   service_id: string;
   service_name?: string;
   service_slug?: string;
@@ -59,31 +59,31 @@ type ArtifactSelection = {
   service_version_id?: string;
 };
 
-function artifactServicesConfig(selections: ArtifactSelection[], services: ServiceData[]): Record<string, unknown> {
-  return Object.fromEntries(selections.map((selection) => artifactServiceEntry(selection, services)));
+function appServicesConfig(selections: AppSelection[], services: ServiceData[]): Record<string, unknown> {
+  return Object.fromEntries(selections.map((selection) => appServiceEntry(selection, services)));
 }
 
-function artifactServiceEntry(selection: ArtifactSelection, services: ServiceData[]): [string, Record<string, unknown>] {
+function appServiceEntry(selection: AppSelection, services: ServiceData[]): [string, Record<string, unknown>] {
   const service = services.find((item) => item.service.id === selection.service_id);
-  return [artifactSelectionKey(selection), {
+  return [appSelectionKey(selection), {
     version: service?.serviceVersions.find((version) => version.id === selection.service_version_id)?.name,
-    operations: artifactOperations(selection, service),
-    webhooks: artifactWebhooks(selection, service),
+    operations: appOperations(selection, service),
+    webhooks: appWebhooks(selection, service),
     select_all: selection.select_all,
   }];
 }
 
-function artifactSelectionKey(selection: ArtifactSelection): string {
+function appSelectionKey(selection: AppSelection): string {
   return selection.service_slug || selection.service_name || selection.service_id;
 }
 
-function artifactOperations(selection: ArtifactSelection, service?: ServiceData): string[] {
+function appOperations(selection: AppSelection, service?: ServiceData): string[] {
   if (selection.select_all) return [];
   const selected = new Set(selection.endpoint_ids);
   return (service?.integrations || []).filter((endpoint) => selected.has(endpoint.id)).map((endpoint) => endpoint.name);
 }
 
-function artifactWebhooks(selection: ArtifactSelection, service?: ServiceData): string[] {
+function appWebhooks(selection: AppSelection, service?: ServiceData): string[] {
   const selected = new Set(selection.webhook_ids);
   return (service?.webhooks || []).filter((webhook) => selected.has(webhook.id)).map((webhook) => webhook.name);
 }
@@ -96,7 +96,7 @@ const capitalizeFirstLetter = (value?: string | null) => {
 async function loadRegistryServicesByIDs(serviceIds: string[]): Promise<Service[]> {
   if (serviceIds.length === 0) return [];
   const response = await api.graphql<{ servicesByIds: Service[] }>(`
-    query ArtifactBuilderServices($serviceIds: [String!]!) {
+    query AppBuilderServices($serviceIds: [String!]!) {
       servicesByIds(serviceIds: $serviceIds) {
         id name slug canonical_ref provider { name handle } description base_url endpoint_count webhook_count
         event_extraction_path incoming_webhook_config { auth_type }
@@ -212,10 +212,10 @@ export default function SdkBuilder() {
   const [workspaceServicesLoaded, setWorkspaceServicesLoaded] = useState(false);
 
   const [sdkName, setSdkName] = useState("");
-  const [artifactVersion, setArtifactVersion] = useState("1.0.0");
-  const [ownerTeams, setOwnerTeams] = useState<ArtifactOwningTeam[]>([]);
+  const [appVersion, setAppVersion] = useState("1.0.0");
+  const [ownerTeams, setOwnerTeams] = useState<AppOwningTeam[]>([]);
   const [ownerTeamId, setOwnerTeamId] = useState("");
-  const [availableBuckets, setAvailableBuckets] = useState<ArtifactBuildSelector[]>([]);
+  const [availableBuckets, setAvailableBuckets] = useState<AppBuildSelector[]>([]);
   const [bucketId, setBucketId] = useState("");
   const [webhookAttachment, setWebhookAttachment] = useState("");
   const [generating, setGenerating] = useState(false);
@@ -226,10 +226,6 @@ export default function SdkBuilder() {
   const [mcpTokenCopied, setMcpTokenCopied] = useState(false);
   const [isDuplicate, setIsDuplicate] = useState(false);
   const [checkingDuplicate, setCheckingDuplicate] = useState(false);
-  const upgradeFrom = searchParams.get("upgrade_from");
-  const [lockedSelections, setLockedSelections] = useState<Record<string, Set<string>>>({});
-  const [lockedWebhookSelections, setLockedWebhookSelections] = useState<Record<string, Set<string>>>({});
-
   const [generationMode] = useState<"sdk" | "mcp">(() => {
     const tab = searchParams.get("tab");
     return tab === "mcp" ? "mcp" : "sdk";
@@ -255,108 +251,6 @@ export default function SdkBuilder() {
   };
   const [totalPages, setTotalPages] = useState(1);
   const [totalItems, setTotalItems] = useState(0);
-
-  // Handle upgradeFrom initialization ONCE. MCP servers are excluded: they're
-  // Engine-native fused_sdk_scopes rows now, not Registry sdks rows, and the
-  // Engine's MCPServer GraphQL type (mcp_graphql.go) doesn't expose past
-  // selections to prefill from -- there's currently no data to load an
-  // "expand" flow from for MCP, so skip the doomed-to-fail fetch entirely
-  // rather than firing a query that can only ever come back empty.
-  useEffect(() => {
-    if (!upgradeFrom || targetType === "mcp") return;
-    async function loadUpgrade() {
-      const sdkQuery = `
-        query {
-          sdks(limit: 1000, offset: 0) {
-            items {
-              id
-              name
-              description
-              version
-              detailed_selections {
-                service_id
-                endpoint_ids
-                webhook_ids
-                service_version_id
-              }
-            }
-          }
-        }
-      `;
-      try {
-        type SdkSelection = {
-          service_id?: string;
-          endpoint_ids?: string[];
-          webhook_ids?: string[];
-          service_version_id?: string;
-        };
-        type SdkUpgradeTarget = {
-          id: string;
-          name?: string;
-          version?: string;
-          detailed_selections?: SdkSelection[];
-        };
-        const sdkRes = await api.graphql<{ sdks: { items: SdkUpgradeTarget[] } }>(sdkQuery);
-        const targetSdk = sdkRes.sdks.items.find((s) => s.id === upgradeFrom);
-        if (targetSdk) {
-          setSdkName(targetSdk.name || "");
-          if (targetSdk.version) {
-            const parts = targetSdk.version.split('.');
-            if (parts.length >= 2 && !isNaN(Number(parts[1]))) {
-              parts[1] = (Number(parts[1]) + 1).toString();
-              if (parts.length === 3) parts[2] = "0";
-              setArtifactVersion(parts.join('.'));
-            } else {
-              setArtifactVersion(targetSdk.version + "-expanded");
-            }
-          }
-          
-          const ls: Record<string, Set<string>> = {};
-          const lw: Record<string, Set<string>> = {};
-          const lexp: Record<string, boolean> = {};
-          const lv: Record<string, string> = {};
-          
-          const selectionsList = targetSdk.detailed_selections || [];
-          selectionsList.forEach((sel) => {
-            const srvId = sel.service_id;
-            if (!srvId) return;
-            ls[srvId] = new Set(sel.endpoint_ids || []);
-            lw[srvId] = new Set(sel.webhook_ids || []);
-            lexp[srvId] = true;
-            if (sel.service_version_id) lv[srvId] = sel.service_version_id;
-          });
-          
-          setLockedSelections(ls);
-          setLockedWebhookSelections(lw);
-          setVersionSelections(prev => ({ ...prev, ...lv }));
-          setSelections(prev => {
-            const next = { ...prev };
-            Object.keys(ls).forEach(k => {
-               if (!next[k]) next[k] = new Set();
-               ls[k].forEach(id => next[k].add(id));
-            });
-            return next;
-          });
-          setWebhookSelections(prev => {
-            const next = { ...prev };
-            Object.keys(lw).forEach(k => {
-               if (!next[k]) next[k] = new Set();
-               lw[k].forEach(id => next[k].add(id));
-            });
-            return next;
-          });
-          setExpanded(prev => ({ ...prev, ...lexp }));
-          toast.success("Loaded configuration from previous SDK. You can add new endpoints.");
-        } else {
-          toast.error("Could not find previous SDK configuration.");
-        }
-      } catch (e) {
-        console.error("Failed to load upgrade SDK", e);
-        toast.error("Failed to load SDK configuration: " + (e instanceof Error ? e.message : "Unknown error"));
-      }
-    }
-    loadUpgrade();
-  }, [upgradeFrom, targetType]);
 
   type RawServiceWithExtras = Omit<Service, "resources"> & {
     resources?: (NonNullable<Service["resources"]>[number] & {
@@ -411,7 +305,7 @@ export default function SdkBuilder() {
     setError("");
     try {
       const limit = 20;
-      const selectors = await listArtifactBuildSelectors(ownerTeamId, "SERVICE", search, limit, (pageNum - 1) * limit);
+      const selectors = await listAppBuildSelectors(ownerTeamId, "SERVICE", search, limit, (pageNum - 1) * limit);
       const servicesData = await loadRegistryServicesByIDs(selectors.items.map((item) => item.resource_id));
       const total = selectors.total;
       processResponse(servicesData, total);
@@ -478,7 +372,7 @@ export default function SdkBuilder() {
   // Load only teams the actor may choose as an owner. This query intentionally
   // exposes no bindings or roles, so builders do not need access.read.
   useEffect(() => {
-    listArtifactOwningTeams()
+    listAppOwningTeams()
       .then((page) => {
         setOwnerTeams(page.items);
       })
@@ -486,7 +380,7 @@ export default function SdkBuilder() {
   }, []);
 
   const loadAvailableBuckets = () =>
-    listArtifactBuildSelectors(ownerTeamId, "BUCKET", "", 100, 0).then((bucketPage) => {
+    listAppBuildSelectors(ownerTeamId, "BUCKET", "", 100, 0).then((bucketPage) => {
       setAvailableBuckets(bucketPage.items);
       setBucketId((current) =>
         bucketPage.items.some((bucket) => bucket.resource_id === current)
@@ -698,10 +592,6 @@ export default function SdkBuilder() {
   };
 
   const toggleEndpoint = (serviceId: string, endpointId: string) => {
-    if (lockedSelections[serviceId]?.has(endpointId)) {
-      toast.warning("This endpoint is part of the existing SDK and cannot be removed during expansion.");
-      return;
-    }
     setSelections(prev => {
       const nextSet = new Set(prev[serviceId]);
       if (nextSet.has(endpointId)) {
@@ -714,10 +604,6 @@ export default function SdkBuilder() {
   };
 
   const toggleWebhook = (serviceId: string, webhookId: string) => {
-    if (lockedWebhookSelections[serviceId]?.has(webhookId)) {
-      toast.warning("This webhook is part of the existing SDK and cannot be removed during expansion.");
-      return;
-    }
     setWebhookSelections(prev => {
       const nextSet = new Set(prev[serviceId]);
       if (nextSet.has(webhookId)) {
@@ -733,7 +619,7 @@ export default function SdkBuilder() {
     const isSelectAll = selectAllServices.has(serviceId);
     if (isSelectAll) {
       setSelectAllServices(prev => { const s = new Set(prev); s.delete(serviceId); return s; });
-      setSelections(prev => ({ ...prev, [serviceId]: new Set(lockedSelections[serviceId] || []) }));
+      setSelections(prev => ({ ...prev, [serviceId]: new Set() }));
     } else {
       setSelectAllServices(prev => new Set([...prev, serviceId]));
       setSelections(prev => ({ ...prev, [serviceId]: new Set() }));
@@ -744,7 +630,7 @@ export default function SdkBuilder() {
     if (webhooks.length === 0) return;
     const allSelected = (webhookSelections[serviceId]?.size || 0) === webhooks.length;
     if (allSelected) {
-      setWebhookSelections(prev => ({ ...prev, [serviceId]: new Set(lockedWebhookSelections[serviceId] || []) }));
+      setWebhookSelections(prev => ({ ...prev, [serviceId]: new Set() }));
     } else {
       setWebhookSelections(prev => ({ ...prev, [serviceId]: new Set(webhooks.map((w) => w.id)) }));
     }
@@ -786,28 +672,15 @@ export default function SdkBuilder() {
   };
 
   const checkDuplicateSDK = async () => {
-    if (!sdkName.trim() || !artifactVersion.trim()) {
+    if (!sdkName.trim() || !appVersion.trim()) {
       setIsDuplicate(false);
       return;
     }
     setCheckingDuplicate(true);
     try {
-      const queryStr = `
-        query {
-          sdkAnalytics(name: "${sdkName.trim()}") {
-            history {
-              version
-            }
-          }
-        }
-      `;
-      const res = await api.graphql<{ sdkAnalytics?: { history: { version: string }[] } }>(queryStr);
-      if (res.sdkAnalytics && res.sdkAnalytics.history) {
-        const versions = res.sdkAnalytics.history.map(h => h.version);
-        setIsDuplicate(versions.includes(artifactVersion.trim()));
-      } else {
-        setIsDuplicate(false);
-      }
+      const queryStr = `query($search: String!) { apps(kind: "sdk", search: $search, limit: 100, offset: 0) { items { name version } } }`;
+      const res = await api.mcpGraphql<{ apps: { items: { name: string; version: string }[] } }>(queryStr, { search: sdkName.trim() });
+      setIsDuplicate(res.apps.items.some(item => item.name === sdkName.trim() && item.version === appVersion.trim()));
     } catch {
       setIsDuplicate(false);
     } finally {
@@ -890,7 +763,7 @@ export default function SdkBuilder() {
     }
 
     if (generationMode === "sdk" && isDuplicate) {
-      const confirmed = await toast.confirm(`An SDK with name "${sdkName.trim()}" and version "${artifactVersion.trim()}" already exists. Generating it again will overwrite the existing package file. Are you sure you want to continue?`);
+      const confirmed = await toast.confirm(`An SDK with name "${sdkName.trim()}" and version "${appVersion.trim()}" already exists. Generating it again will overwrite the existing package file. Are you sure you want to continue?`);
       if (!confirmed) {
         return;
       }
@@ -904,12 +777,12 @@ export default function SdkBuilder() {
     setMcpTokenCopied(false);
     try {
       const ownerTeamSlug = ownerTeams.find((team) => team.id === ownerTeamId)?.slug || "";
-      const services = artifactServicesConfig(selectionPayload, data);
+      const services = appServicesConfig(selectionPayload, data);
       const config: Record<string, unknown> = {
         apiVersion: "fused/v1",
         kind: generationMode,
         name: sdkName.trim(),
-        version: artifactVersion.trim(),
+        version: appVersion.trim(),
         bucket: selectedBucket.display_name,
         services,
       };
@@ -918,15 +791,15 @@ export default function SdkBuilder() {
 
       if (generationMode === "mcp") {
         setGenerateStatus("Deploying MCP server...");
-        const result = await planAndApplyArtifact<{ artifact_id: string; mcp_url: string; execution_token?: string }>("mcp", ownerTeamSlug, config);
+		const result = await planAndApplyApp<{ app_id: string; mcp_url: string; execution_token?: string }>("mcp", ownerTeamSlug, config);
         await syncWorkspacePinsAfterGenerate(selectionPayload);
-        setMcpDeployment({ id: result.artifact_id, url: result.mcp_url, token: result.execution_token || "" });
+		setMcpDeployment({ id: result.app_id, url: result.mcp_url, token: result.execution_token || "" });
         setGenerateStatus("MCP server deployed");
         return;
       }
 
       setGenerateStatus("Planning and generating SDK...");
-      const res = await planAndApplyArtifact<{ artifact_id: string; job_id: string; execution_token?: string }>("sdk", ownerTeamSlug, config);
+	  const res = await planAndApplyApp<{ app_id: string; job_id: string; execution_token?: string }>("sdk", ownerTeamSlug, config);
 
       const ctrl = new AbortController();
       type GenerationStreamEvent =
@@ -946,11 +819,11 @@ export default function SdkBuilder() {
         if (event.type === "complete") {
           ctrl.abort();
           setGenerateStatus("Downloading...");
-          api.sdks.download(event.integration_id, sdkName, artifactVersion).then(() => {
+          api.sdks.download(event.integration_id, sdkName, appVersion).then(() => {
             setSdkDeployment({
-              id: res.artifact_id,
+			  id: res.app_id,
               name: sdkName.trim(),
-              version: artifactVersion.trim(),
+              version: appVersion.trim(),
               token: res.execution_token || "",
             });
             setGenerateStatus("App ready");
@@ -966,11 +839,14 @@ export default function SdkBuilder() {
       };
 
       await new Promise<void>((resolve, reject) => {
-        fetchEventSource(`${BASE}/sdks/job/${res.job_id}/stream`, {
-          headers: {
-            "X-API-Key": getApiKey() ?? "",
-          },
+		fetchEventSource(`${BASE}/sdks/job/${res.job_id}/stream`, {
+			credentials: "include",
           signal: ctrl.signal,
+          async onopen(response) {
+            handleCredentialedResponse(response);
+            if (response.status === 401) ctrl.abort();
+            if (!response.ok) throw new Error(`Failed to connect to generation stream: ${response.status}`);
+          },
           onmessage(ev) {
             try {
               const event = JSON.parse(ev.data);
@@ -1336,8 +1212,8 @@ export default function SdkBuilder() {
             totalSelectedWebhooks={totalSelectedWebhooks}
             webhookAttachment={webhookAttachment}
             setWebhookAttachment={setWebhookAttachment}
-            artifactVersion={artifactVersion}
-            setArtifactVersion={setArtifactVersion}
+            appVersion={appVersion}
+            setAppVersion={setAppVersion}
             checkingDuplicate={checkingDuplicate}
             isDuplicate={isDuplicate}
             language={language}

@@ -110,7 +110,11 @@ Install `fused-cli` from the [CLI releases](https://github.com/Usefused/cli/rele
 
 ## Configuration
 
-You can configure the Engine via a YAML configuration file (`engine.yaml`), environment variables, or CLI flags. CLI Flags always take the highest precedence.
+You can configure the Engine via a YAML configuration file (`engine.yaml`),
+environment variables, or CLI flags. For the Registry license specifically,
+precedence is `--license-key`, local `.env`, `engine.yaml`, then the inherited
+`FUSED_LICENSE_KEY` environment variable. `FUSED_API_KEY` is a caller
+control-plane credential and is never used to start the Engine.
 
 For audit details, see [Registry contract](docs/registry-contract.md), [license key behavior](docs/license-key.md), [telemetry](docs/telemetry.md), [Docker](docs/docker.md), and [threat model](THREAT_MODEL.md).
 

@@ -5,6 +5,20 @@ import (
 	"testing"
 )
 
+func TestEngineSchemaDefinesStableInstallationIdentity(t *testing.T) {
+	joined := strings.Join(engineSchemaQueries(), "\n")
+	for _, expected := range []string{
+		"CREATE TABLE IF NOT EXISTS fused_engine_installation",
+		"installation_id uuid NOT NULL UNIQUE DEFAULT gen_random_uuid()",
+		"CHECK (singleton_key = 1)",
+		"ON CONFLICT (singleton_key) DO NOTHING",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("expected stable Engine installation schema containing %q", expected)
+		}
+	}
+}
+
 func TestEngineSchemaDefinesCurrentConfigColumnsDirectly(t *testing.T) {
 	joined := strings.Join(engineSchemaQueries(), "\n")
 	required := []string{
@@ -22,6 +36,17 @@ func TestEngineSchemaDefinesCurrentConfigColumnsDirectly(t *testing.T) {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("expected current schema containing %q", expected)
 		}
+	}
+}
+
+func TestEngineSchemaDefinesExecutionTimeoutWithoutCompatibilityMigration(t *testing.T) {
+	schema := strings.Join(engineSchemaQueries(), "\n")
+	if !strings.Contains(schema, "timeout_ms              integer") ||
+		!strings.Contains(schema, "CHECK (timeout_ms IS NULL OR timeout_ms BETWEEN 1 AND 86400000)") {
+		t.Fatal("clean Engine execution policy schema must define bounded timeout_ms")
+	}
+	if strings.Contains(schema, "fused_workspace_execution_policies ADD COLUMN IF NOT EXISTS timeout_ms") {
+		t.Fatal("timeout_ms must not add a compatibility migration")
 	}
 }
 
@@ -61,30 +86,87 @@ func TestEngineSchemaEnforcesImmutableConfigIdentity(t *testing.T) {
 	}
 }
 
-func TestEngineSchemaRequiresExactlyOneArtifactOwner(t *testing.T) {
+func TestEngineSchemaRequiresExactlyOneAppFamilyOwner(t *testing.T) {
 	schema := strings.Join(engineSchemaQueries(), "\n")
 	for _, expected := range []string{
-		"owner_subject_id  uuid REFERENCES fused_subjects(id) ON DELETE RESTRICT",
+		"owner_subject_id    uuid REFERENCES fused_subjects(id) ON DELETE RESTRICT",
 		"(owner_subject_id IS NOT NULL)::int + (owner_team_id IS NOT NULL)::int = 1",
-		"idx_fused_artifact_scopes_subject_owner_kind",
+		"idx_fused_app_families_account_kind",
 		"idx_fused_config_plans_subject_owner_status",
 	} {
 		if !strings.Contains(schema, expected) {
 			t.Fatalf("clean schema must contain subject-or-team ownership rule %q", expected)
 		}
 	}
-	if strings.Contains(strings.Join(engineMigrationQueries(), "\n"), "owner_subject_id") {
-		t.Fatal("subject ownership belongs in the clean schema, not a legacy migration")
+}
+
+func TestEngineSchemaUsesKindScopedAppFamilyIdentity(t *testing.T) {
+	schema := strings.Join(engineSchemaQueries(), "\n")
+	if !strings.Contains(schema, "UNIQUE (account_id, kind, canonical_name)") {
+		t.Fatal("clean schema must bound SDK and MCP families independently by canonical name")
+	}
+	if !strings.Contains(schema, "UNIQUE (app_family_id, version)") {
+		t.Fatal("clean schema must bind each semantic version within its app family")
 	}
 }
 
-func TestEngineSchemaUsesKindScopedHumanArtifactIdentity(t *testing.T) {
+func TestEngineFreshSchemaDoesNotCreateLegacyArtifactPersistence(t *testing.T) {
 	schema := strings.Join(engineSchemaQueries(), "\n")
-	if !strings.Contains(schema, "ON fused_artifact_scopes(kind, lower(name), COALESCE(version, ''))") {
-		t.Fatal("clean schema must bound SDK and MCP identities independently by name and version")
+	for _, table := range []string{
+		"fused_artifact_scopes", "fused_artifact_tokens",
+		"fused_artifact_buckets", "fused_artifact_snapshots",
+	} {
+		if strings.Contains(schema, "CREATE TABLE IF NOT EXISTS "+table) {
+			t.Fatalf("fresh schema must not create legacy table %s", table)
+		}
 	}
-	if !strings.Contains(schema, "idx_fused_artifact_reference_latest") {
-		t.Fatal("clean schema must index latest active artifact resolution")
+	for _, required := range []string{"fused_app_families", "fused_apps", "fused_app_tokens", "fused_app_family_buckets"} {
+		if !strings.Contains(schema, "CREATE TABLE IF NOT EXISTS "+required) {
+			t.Fatalf("fresh schema missing app persistence table %s", required)
+		}
+	}
+}
+
+func TestEngineRuntimeTablesUseExactAppIdentity(t *testing.T) {
+	schema := strings.Join(engineSchemaQueries(), "\n")
+	for _, expected := range []string{
+		"CREATE TABLE IF NOT EXISTS fused_mcp_sessions",
+		"app_id uuid",
+		"CREATE TABLE IF NOT EXISTS fused_engine_idempotency_keys",
+		"UNIQUE(app_id, idempotency_key_hash)",
+	} {
+		if !strings.Contains(schema, expected) {
+			t.Fatalf("fresh runtime schema missing %q", expected)
+		}
+	}
+	migrations := strings.Join(engineMigrationQueries(), "\n")
+	for _, expected := range []string{
+		"UPDATE fused_mcp_sessions SET app_id = artifact_id",
+		"UPDATE fused_engine_idempotency_keys SET app_id = artifact_id",
+		"fused_mcp_sessions DROP COLUMN IF EXISTS artifact_id",
+		"fused_engine_idempotency_keys DROP COLUMN IF EXISTS artifact_id",
+	} {
+		if !strings.Contains(migrations, expected) {
+			t.Fatalf("runtime identity migration missing %q", expected)
+		}
+	}
+	for _, index := range []string{
+		"idx_fused_mcp_sessions_app_started",
+		"idx_fused_engine_execution_events_family_started",
+		"idx_fused_engine_execution_events_app_started",
+		"idx_fused_engine_execution_events_endpoint",
+	} {
+		if indexOfSchemaFragment(engineSchemaQueries(), index) >= 0 {
+			t.Fatalf("app identity index %q must run after legacy column migration", index)
+		}
+		if indexOfSchemaFragment(engineMigrationQueries(), index) < 0 {
+			t.Fatalf("app identity migration missing index %q", index)
+		}
+	}
+	addMCPAppID := indexOfSchemaFragment(engineMigrationQueries(), "fused_mcp_sessions ADD COLUMN IF NOT EXISTS app_id uuid")
+	mcpIndex := indexOfSchemaFragment(engineMigrationQueries(), "idx_fused_mcp_sessions_app_started")
+	if addMCPAppID < 0 || mcpIndex < 0 || addMCPAppID > mcpIndex {
+		t.Fatalf("MCP session identity migration order is unsafe: add=%d index=%d", addMCPAppID, mcpIndex)
 	}
 }
 
@@ -122,7 +204,7 @@ func TestEngineSchemaDefinesBucketAttachedConnectAuth(t *testing.T) {
 		"CREATE TABLE IF NOT EXISTS fused_auth_connections",
 		"CREATE TABLE IF NOT EXISTS fused_connect_sessions",
 		"CONSTRAINT uq_fused_auth_connections UNIQUE (bucket_id, service_id, end_user_ref)",
-		"created_by_artifact_id  uuid",
+		"created_by_app_id       uuid",
 		"identity_claims    jsonb NOT NULL DEFAULT '{}'::jsonb",
 		"encrypted_dek      text NOT NULL DEFAULT ''",
 		"'reconnect_required'",
@@ -143,6 +225,7 @@ func TestEngineSchemaDefinesRuntimeReportingTables(t *testing.T) {
 	joined := strings.Join(engineSchemaQueries(), "\n")
 	required := []string{
 		"CREATE TABLE IF NOT EXISTS fused_runtime_entitlements",
+		"entitlement_revision text NOT NULL DEFAULT ''",
 		"heartbeat_interval_seconds integer NOT NULL",
 		"CREATE TABLE IF NOT EXISTS fused_engine_usage_counter_reports",
 		"uq_fused_engine_usage_pending_counter",
@@ -196,6 +279,54 @@ func TestEngineSchemaMigratesWebhookAnalyticsToCanonicalEvents(t *testing.T) {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("expected canonical webhook migration containing %q", expected)
 		}
+	}
+}
+
+func TestEngineSchemaDefinesVersionAwareAppExecutionIdentity(t *testing.T) {
+	var eventTable string
+	for _, query := range engineSchemaQueries() {
+		if strings.Contains(query, "CREATE TABLE IF NOT EXISTS fused_engine_execution_events") {
+			eventTable = query
+			break
+		}
+	}
+	if eventTable == "" {
+		t.Fatal("canonical execution-event table is missing")
+	}
+	for _, expected := range []string{
+		"app_family_id uuid",
+		"app_id uuid",
+		"app_version text",
+		"provider_protocol text",
+		"chk_fused_execution_app_identity",
+	} {
+		if !strings.Contains(eventTable, expected) {
+			t.Fatalf("expected execution-event schema containing %q", expected)
+		}
+	}
+	if strings.Contains(eventTable, "artifact_id") {
+		t.Fatal("canonical execution-event table must not retain artifact_id")
+	}
+
+	migrations := strings.Join(engineMigrationQueries(), "\n")
+	for _, expected := range []string{
+		"UPDATE fused_engine_execution_events event",
+		"SELECT app_id, app_family_id, version FROM fused_apps",
+		"SELECT app_id, app_family_id, version FROM fused_app_tombstones",
+		"DROP COLUMN IF EXISTS artifact_id",
+		"idx_fused_engine_execution_events_family_started",
+		"idx_fused_engine_execution_events_app_started",
+	} {
+		if !strings.Contains(migrations, expected) {
+			t.Fatalf("expected execution-event migration containing %q", expected)
+		}
+	}
+	addAppID := indexOfSchemaFragment(engineMigrationQueries(), "fused_engine_execution_events ADD COLUMN IF NOT EXISTS app_id uuid")
+	appIndex := indexOfSchemaFragment(engineMigrationQueries(), "idx_fused_engine_execution_events_app_started")
+	backfill := indexOfSchemaFragment(engineMigrationQueries(), "UPDATE fused_engine_execution_events event")
+	dropLegacy := indexOfSchemaFragment(engineMigrationQueries(), "fused_engine_execution_events DROP COLUMN IF EXISTS artifact_id")
+	if addAppID < 0 || appIndex < 0 || backfill < 0 || dropLegacy < 0 || addAppID > appIndex || backfill > dropLegacy {
+		t.Fatalf("execution identity migration order is unsafe: add=%d index=%d backfill=%d drop=%d", addAppID, appIndex, backfill, dropLegacy)
 	}
 }
 
@@ -289,14 +420,10 @@ func TestEngineSchemaDefinesActivatedContractSnapshots(t *testing.T) {
 // TestEngineSchemaRestrictsArtifactsToOneBucket protects the runtime contract:
 // an SDK or MCP scope can contain many services, but resolves all of them from
 // one bucket selected when the artifact is provisioned.
-func TestEngineSchemaRestrictsArtifactsToOneBucket(t *testing.T) {
+func TestEngineSchemaRestrictsAppFamiliesToOneBucket(t *testing.T) {
 	joined := strings.Join(engineSchemaQueries(), "\n")
-	if !strings.Contains(joined, "PRIMARY KEY (artifact_id)") {
-		t.Fatal("fused_artifact_buckets must allow exactly one bucket row per artifact")
-	}
-	migrations := strings.Join(engineMigrationQueries(), "\n")
-	if !strings.Contains(migrations, "CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_artifact_buckets_artifact_id ON fused_artifact_buckets(artifact_id)") {
-		t.Fatal("existing Engine databases must receive the one-bucket artifact invariant")
+	if !strings.Contains(joined, "app_family_id uuid PRIMARY KEY") {
+		t.Fatal("fused_app_family_buckets must allow exactly one bucket row per app family")
 	}
 }
 
@@ -340,8 +467,8 @@ func TestEngineSchemaContainsNoLegacyPersistence(t *testing.T) {
 	}
 }
 
-// TestEngineSchemaAllowsNonBreakingNotificationSeverity protects Phase 3 of
-// the service changelog system (plans/plan-service-changelog.md): the
+// TestEngineSchemaAllowsNonBreakingNotificationSeverity protects the
+// service changelog notification system (plans/plan-service-changelog.md): the
 // severity CHECK constraint originally only allowed 'breaking', which would
 // silently reject every non-breaking changelog notification insert. Both the
 // fresh-database CREATE TABLE and the existing-database migration must allow
@@ -386,8 +513,8 @@ func TestEngineSchemaEnforcesSingletonWorkspaceWithoutAccountOwnership(t *testin
 		"provider_latency_ms bigint",
 		"request_body_hash text",
 		"version text",
-		"config_key text",
-		"idx_fused_artifact_scopes_artifact_identity",
+		"config_key             text NOT NULL",
+		"idx_fused_apps_family_status",
 		"config_type IN ('workspace', 'sdk', 'mcp', 'webhook')",
 	}
 	for _, expected := range required {

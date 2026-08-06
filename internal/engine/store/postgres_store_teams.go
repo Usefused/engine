@@ -94,7 +94,7 @@ func (s *postgresStore) GetTeamBySlug(ctx context.Context, slug string) (Team, e
 	if err := validateTeamSlug(slug); err != nil {
 		return Team{}, ErrTeamNotFound
 	}
-	// Artifact ownership only needs identity and status. The unique slug index
+	// App ownership only needs identity and status. The unique slug index
 	// makes this a single bounded lookup without loading unrelated bindings.
 	var team Team
 	err := s.db.QueryRow(ctx, `
@@ -244,18 +244,18 @@ func (s *postgresStore) ArchiveTeam(ctx context.Context, teamID uuid.UUID, actor
 	if _, err := lockAuthorizationState(ctx, tx); err != nil {
 		return TeamMutationResult{}, recordTeamSpanError(span, err)
 	}
-	team, bindingCount, activeArtifactCount, err := lockOwnerAuthorizedTeamForArchive(ctx, tx, teamID, actor.SubjectID)
+	team, bindingCount, activeAppCount, err := lockOwnerAuthorizedTeamForArchive(ctx, tx, teamID, actor.SubjectID)
 	if err != nil {
 		return TeamMutationResult{}, recordTeamSpanError(span, err)
 	}
-	if err := ensureTeamArchivable(team, bindingCount, activeArtifactCount); err != nil {
+	if err := ensureTeamArchivable(team, bindingCount, activeAppCount); err != nil {
 		return TeamMutationResult{}, recordTeamSpanError(span, err)
 	}
 	team, changed, err := archiveActiveTeam(ctx, tx, team)
 	if err != nil {
 		return TeamMutationResult{}, recordTeamSpanError(span, err)
 	}
-	// Archiving requires zero bindings and zero owned artifacts, so it has no
+	// Archiving requires zero bindings and zero owned apps, so it has no
 	// effective grant to invalidate at the point the status changes.
 	revision, err := bumpAuthorizationRevision(ctx, tx, false)
 	if err != nil {
@@ -270,9 +270,9 @@ func (s *postgresStore) ArchiveTeam(ctx context.Context, teamID uuid.UUID, actor
 	return TeamMutationResult{Team: team, AuthorizationRevision: revision, Changed: changed}, nil
 }
 
-func ensureTeamArchivable(team Team, bindingCount, activeArtifactCount int) error {
-	if team.Status == TeamStatusActive && (bindingCount > 0 || activeArtifactCount > 0) {
-		return &TeamArchiveConflictError{BindingCount: bindingCount, ActiveArtifactCount: activeArtifactCount}
+func ensureTeamArchivable(team Team, bindingCount, activeAppCount int) error {
+	if team.Status == TeamStatusActive && (bindingCount > 0 || activeAppCount > 0) {
+		return &TeamArchiveConflictError{BindingCount: bindingCount, ActiveAppCount: activeAppCount}
 	}
 	return nil
 }
@@ -301,17 +301,19 @@ func lockTeamForArchive(ctx context.Context, tx pgx.Tx, teamID uuid.UUID) (Team,
 	// Count blockers only after the row lock is acquired. Under READ COMMITTED
 	// this second statement gets a fresh snapshot, so an apply that held the
 	// team lock first cannot commit ownership invisibly while archive waits.
-	var bindingCount, activeArtifactCount int
+	var bindingCount, activeAppCount int
 	err = tx.QueryRow(ctx, `
 		SELECT
 			(SELECT COUNT(*) FROM fused_role_bindings binding WHERE binding.subject_type = 'team' AND binding.subject_id = $1),
-			(SELECT COUNT(*) FROM fused_artifact_scopes artifact WHERE artifact.owner_team_id = $1 AND artifact.deactivated_at IS NULL) +
+			(SELECT COUNT(*) FROM fused_app_families family
+			 WHERE family.owner_team_id = $1
+			   AND EXISTS (SELECT 1 FROM fused_apps app WHERE app.app_family_id = family.app_family_id AND app.status IN ('active', 'deprecated'))) +
 			(SELECT COUNT(*) FROM fused_config_states state WHERE state.owner_team_id = $1 AND state.config_type = 'webhook')
-	`, teamID).Scan(&bindingCount, &activeArtifactCount)
+	`, teamID).Scan(&bindingCount, &activeAppCount)
 	if err != nil {
 		return Team{}, 0, 0, fmt.Errorf("count team archive blockers: %w", err)
 	}
-	return team, bindingCount, activeArtifactCount, nil
+	return team, bindingCount, activeAppCount, nil
 }
 
 func archiveTeamRow(ctx context.Context, tx pgx.Tx, teamID uuid.UUID) (Team, error) {
@@ -535,13 +537,13 @@ func resolveTeamBindingTarget(ctx context.Context, tx pgx.Tx, input TeamBindingM
 				WHEN 'workspace' THEN workspace.name
 				WHEN 'service' THEN service.service_name
 				WHEN 'bucket' THEN bucket.name
-				WHEN 'artifact' THEN artifact.name
+				WHEN 'app' THEN app.display_name
 			END,
 			CASE $3::text
 				WHEN 'workspace' THEN workspace.id IS NOT NULL
 				WHEN 'service' THEN service.service_id IS NOT NULL
 				WHEN 'bucket' THEN bucket.id IS NOT NULL
-				WHEN 'artifact' THEN artifact.artifact_id IS NOT NULL
+				WHEN 'app' THEN app.app_family_id IS NOT NULL
 				ELSE false
 			END
 		FROM fused_teams team
@@ -549,7 +551,8 @@ func resolveTeamBindingTarget(ctx context.Context, tx pgx.Tx, input TeamBindingM
 		LEFT JOIN fused_workspaces workspace ON $3 = 'workspace' AND workspace.id = $4
 		LEFT JOIN fused_workspace_services service ON $3 = 'service' AND service.service_id = $4
 		LEFT JOIN fused_buckets bucket ON $3 = 'bucket' AND bucket.id = $4
-		LEFT JOIN fused_artifact_scopes artifact ON $3 = 'artifact' AND artifact.artifact_id = $4
+		LEFT JOIN fused_app_families app ON $3 = 'app' AND app.app_family_id = $4
+			AND EXISTS (SELECT 1 FROM fused_apps version WHERE version.app_family_id = app.app_family_id AND version.status IN ('active', 'deprecated'))
 		WHERE team.id = $1
 		FOR UPDATE OF team
 	`, input.TeamID, input.RoleSlug, input.Resource.Type, input.Resource.ID).Scan(
@@ -702,7 +705,7 @@ const teamJoinsSQL = `
 	LEFT JOIN fused_workspaces workspace ON binding.resource_type = 'workspace' AND workspace.id = binding.resource_id
 	LEFT JOIN fused_workspace_services service ON binding.resource_type = 'service' AND service.service_id = binding.resource_id
 	LEFT JOIN fused_buckets bucket ON binding.resource_type = 'bucket' AND bucket.id = binding.resource_id
-	LEFT JOIN fused_artifact_scopes artifact ON binding.resource_type = 'artifact' AND artifact.artifact_id = binding.resource_id
+	LEFT JOIN fused_app_families app ON binding.resource_type = 'app' AND app.app_family_id = binding.resource_id
 `
 
 const teamSelectColumnsSQL = `
@@ -713,7 +716,7 @@ const teamSelectColumnsSQL = `
 			WHEN 'workspace' THEN workspace.name
 			WHEN 'service' THEN service.service_name
 			WHEN 'bucket' THEN bucket.name
-			WHEN 'artifact' THEN artifact.name
+			WHEN 'app' THEN app.display_name
 		END
 	FROM `
 

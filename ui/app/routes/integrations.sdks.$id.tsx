@@ -11,11 +11,10 @@ import { EndpointRow, WebhookRow } from "~/components/EndpointRow";
 import { NotificationBanner } from "~/components/notifications/NotificationBanner";
 import { useWorkspaceNotifications } from "~/components/notifications/useWorkspaceNotifications";
 import { isPending, matchesConfig } from "~/components/notifications/notificationHelpers";
-import { PendingDriftSection, type PendingDriftItem } from "~/components/sdk/PendingDrift";
-import { ArtifactRequestsPanel } from "~/components/activity/ArtifactRequestsPanel";
+import { AppRequestsPanel } from "~/components/activity/AppRequestsPanel";
 import { AppActivityOverview } from "~/components/activity/AppActivityOverview";
 import { NestedActivityTabs } from "~/components/activity/NestedActivityTabs";
-import { ArtifactRuntimeStatus } from "~/components/artifacts/ArtifactRuntimeStatus";
+import { AppRuntimeStatus } from "~/components/apps/AppRuntimeStatus";
 import { type Bucket } from "~/lib/api";
 
 type SdkSelection = {
@@ -46,7 +45,8 @@ type SdkWebhookRow = {
 };
 
 type Sdk = {
-  id: string;
+  app_id: string;
+  app_family_id: string;
   name: string;
   description?: string;
   version: string;
@@ -58,8 +58,7 @@ type Sdk = {
   downloads?: number;
   readme?: string;
   detailed_selections?: SdkSelection[];
-  active?: boolean;
-  runtime_state?: string;
+  status: string;
 };
 
 export const meta: MetaFunction = ({ matches }) => {
@@ -98,7 +97,7 @@ function LanguageBadge({ targetLanguage }: { targetLanguage?: string }) {
 }
 
 /** Read-only bundled services display — mirrors EndpointSelectionList visual style */
-function BundledServicesSection({ artifactId, selections }: { artifactId: string; selections: SdkSelection[] }) {
+function BundledServicesSection({ selections }: { selections: SdkSelection[] }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [expandedResourceGroups, setExpandedResourceGroups] = useState<Record<string, boolean>>({});
   const [resourceGroupsData, setResourceGroupsData] = useState<Record<string, string[]>>({});
@@ -110,45 +109,19 @@ function BundledServicesSection({ artifactId, selections }: { artifactId: string
 
   const fetchServiceMetadata = (serviceId: string) => {
     setLoadingServices(prev => ({ ...prev, [serviceId]: true }));
-    const query = `
-      query {
-        sdkSelectionResourceGroups(artifactId: "${artifactId}", serviceId: "${serviceId}")
-        sdkSelectionWebhooks(artifactId: "${artifactId}", serviceId: "${serviceId}") {
-          id
-          method
-          name
-        }
-      }
-    `;
-    api.graphql<{ sdkSelectionResourceGroups: string[], sdkSelectionWebhooks: SdkWebhookRow[] }>(query)
-      .then(res => {
-        setResourceGroupsData(prev => ({ ...prev, [serviceId]: res.sdkSelectionResourceGroups || [] }));
-        setWebhooksData(prev => ({ ...prev, [serviceId]: res.sdkSelectionWebhooks || [] }));
-      })
-      .catch(() => toast.error("Failed to fetch service metadata"))
-      .finally(() => setLoadingServices(prev => ({ ...prev, [serviceId]: false })));
+    const selection = selections.find(item => item.service_id === serviceId);
+    // Exact selections are persisted with the app version. Present those IDs
+    // directly instead of consulting Registry state that may have changed.
+    setResourceGroupsData(prev => ({ ...prev, [serviceId]: selection?.endpoint_ids?.length ? ["Selected operations"] : [] }));
+    setWebhooksData(prev => ({ ...prev, [serviceId]: (selection?.webhook_ids ?? []).map(id => ({ id })) }));
+    setLoadingServices(prev => ({ ...prev, [serviceId]: false }));
   };
 
-  const fetchResourceEndpoints = (serviceId: string, resourceName: string, groupKey: string) => {
+  const fetchResourceEndpoints = (serviceId: string, _resourceName: string, groupKey: string) => {
     setLoadingEndpoints(prev => ({ ...prev, [groupKey]: true }));
-    const query = `
-      query {
-        sdkSelectionResources(artifactId: "${artifactId}", serviceId: "${serviceId}", resourceName: "${resourceName}") {
-          id
-          method
-          path
-          name
-          description
-          resource_name
-        }
-      }
-    `;
-    api.graphql<{ sdkSelectionResources: SdkEndpointRow[] }>(query)
-      .then(res => {
-        setEndpointsData(prev => ({ ...prev, [groupKey]: res.sdkSelectionResources || [] }));
-      })
-      .catch(() => toast.error("Failed to fetch operations"))
-      .finally(() => setLoadingEndpoints(prev => ({ ...prev, [groupKey]: false })));
+    const selection = selections.find(item => item.service_id === serviceId);
+    setEndpointsData(prev => ({ ...prev, [groupKey]: (selection?.endpoint_ids ?? []).map(id => ({ id, name: id })) }));
+    setLoadingEndpoints(prev => ({ ...prev, [groupKey]: false }));
   };
 
   const toggle = (serviceId: string) => {
@@ -382,7 +355,6 @@ export default function SdkDetails() {
     activityParam === "requests" || activityParam === "changes" ? activityParam : "overview";
 
   const [versions, setVersions] = useState<Array<{ id: string; version: string; created_at: string }>>([]);
-  const [pendingDrift, setPendingDrift] = useState<PendingDriftItem[]>([]);
   const [bucket, setBucket] = useState<Bucket | null>(null);
 
   // Contextual notification banner: filtered to just this SDK/MCP config.
@@ -410,94 +382,64 @@ export default function SdkDetails() {
       )
     : [];
 
-  const fetchSdk = (artifactId: string) => {
+  const fetchSdk = (appId: string) => {
     setLoading(true);
     const queryStr = `
       query {
-        artifactSnapshot(id: "${artifactId}") {
-          id
+        app(app_id: "${appId}") {
+          app_id
+          app_family_id
           name
           description
           version
+          kind
           target_language
           created_at
           readme
-          active
-          runtime_state
+          status
+          selections { service_id service_version_id endpoint_ids webhook_ids select_all webhook_select_all }
         }
+        appServices(app_id: "${appId}") { service_id service_slug service_name version select_all endpoint_count webhook_count }
       }
     `;
-    api.mcpGraphql<{ artifactSnapshot: Sdk & { active: boolean; runtime_state: string } }>(queryStr)
+    type AppService = { service_id: string; service_slug: string; service_name: string; version?: string; select_all: boolean };
+    api.mcpGraphql<{ app: Sdk & { selections: SdkSelection[] }; appServices: AppService[] }>(queryStr)
       .then(res => {
-        const local = { ...res.artifactSnapshot, target_type: "sdk", is_downloadable: true };
+        const serviceById = new Map(res.appServices.map(service => [service.service_id, service]));
+        const detailedSelections = res.app.selections.map(selection => {
+          const service = serviceById.get(selection.service_id);
+          return {
+            ...selection,
+            service_slug: service?.service_slug,
+            service_name: service?.service_name,
+            service_version_name: service?.version,
+          };
+        });
+        const local = { ...res.app, detailed_selections: detailedSelections, target_type: "sdk", is_downloadable: true };
         setSdk(local);
-        if (res.artifactSnapshot.active) {
-          void api.mcpGraphql<{ artifactServices: Array<{
-            service_id: string; service_slug: string; service_name: string; version?: string; select_all: boolean;
-          }> }>(`query { artifactServices(reference: "${artifactId}", kind: "sdk") {
-            service_id service_slug service_name version select_all
-          } }`).then(serviceResult => setSdk(current => current ? ({
-            ...current,
-            detailed_selections: serviceResult.artifactServices.map(service => ({
-              service_id: service.service_id,
-              service_slug: service.service_slug,
-              service_name: service.service_name,
-              service_version_name: service.version,
-              select_all: service.select_all,
-            })),
-          }) : current)).catch(() => {});
-        }
-        // Fetch version history once we have the name
-        if (local.name) fetchVersions(local.name);
+        fetchVersions(local.app_family_id);
+        readBucketsForSDK(local.app_family_id).then(state => {
+          if (state.sdkBuckets.length > 0) setBucket(state.sdkBuckets[0]);
+          else setBucket(state.buckets.find(bucket => bucket.is_default) ?? null);
+        }).catch(() => {});
       })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
-
-    readBucketsForSDK(artifactId).then(state => {
-      if (state.sdkBuckets.length > 0) {
-        setBucket(state.sdkBuckets[0]);
-      } else {
-        const defaultBucket = state.buckets.find(b => b.is_default);
-        if (defaultBucket) setBucket(defaultBucket);
-      }
-    }).catch(() => {
-      // Ignore failures fetching bucket quietly
-    });
   };
 
-  const fetchVersions = (name: string) => {
+  const fetchVersions = (appFamilyId: string) => {
     const queryStr = `
       query {
-        sdkAnalytics(name: "${name}") {
-          history {
-            id
+        appVersions(app_family_id: "${appFamilyId}") {
+            app_id
             version
             created_at
-          }
-          pending_drift {
-            id
-            status
-            integration_object_id
-            webhook_object_id
-            diff {
-              field
-              old_value
-              new_value
-              severity
-              description
-            }
-          }
         }
       }
     `;
-    api.graphql<{ sdkAnalytics: { history: Array<{ id: string; version: string; created_at: string }>; pending_drift: PendingDriftItem[] } }>(queryStr)
+    api.mcpGraphql<{ appVersions: Array<{ app_id: string; version: string; created_at: string }> }>(queryStr)
       .then(res => {
-        // Newest first
-        const sorted = [...(res.sdkAnalytics?.history ?? [])].sort(
-          (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-        );
-        setVersions(sorted);
-        setPendingDrift(res.sdkAnalytics?.pending_drift ?? []);
+        setVersions(res.appVersions.map(version => ({ ...version, id: version.app_id })));
       })
       .catch(() => {}); // non-fatal
   };
@@ -545,7 +487,7 @@ export default function SdkDetails() {
   const handleDownload = async () => {
     if (!sdk) return;
     try {
-      await api.sdks.download(sdk.id, sdk.name, sdk.version);
+      await api.sdks.download(sdk.app_id, sdk.name, sdk.version);
     } catch {
       toast.error("Failed to download app package");
     }
@@ -582,7 +524,7 @@ export default function SdkDetails() {
         <div>
           <h1 className="text-2xl font-bold text-slate-900">{sdk.name}</h1>
           <p className="text-slate-500 mt-1">A reusable interface for the services and operations this app can use.</p>
-          <ArtifactRuntimeStatus className="mt-1.5" active={sdk.active} runtimeState={sdk.runtime_state} />
+          <AppRuntimeStatus className="mt-1.5" status={sdk.status} />
           <div className="flex flex-wrap items-center gap-3 mt-3 text-sm">
             <span className="px-2.5 py-1 bg-slate-100 text-slate-700 rounded font-medium">{sdk.version}</span>
             {sdk.target_type === "sdk" && <LanguageBadge targetLanguage={sdk.target_language} />}
@@ -687,7 +629,6 @@ export default function SdkDetails() {
                 Connected services
               </h4>
               <BundledServicesSection
-                artifactId={sdk.id}
                 selections={sdk.detailed_selections ?? []}
               />
             </div>
@@ -814,15 +755,15 @@ export default function SdkDetails() {
 
             {activitySection === "overview" && (
               <AppActivityOverview
-                artifactId={sdk.id}
+                appId={sdk.app_id}
                 downloads={sdk.downloads || 0}
-                pendingDriftCount={pendingDrift.length}
+                pendingDriftCount={0}
                 services={sdk.detailed_selections || []}
               />
             )}
 
             {activitySection === "requests" && (
-              <ArtifactRequestsPanel artifactId={sdk.id} transport={sdk.target_type === "mcp" ? "mcp" : "sdk"} />
+              <AppRequestsPanel appId={sdk.app_id} transport={sdk.target_type === "mcp" ? "mcp" : "sdk"} />
             )}
 
             {activitySection === "changes" && <div className="space-y-6">
@@ -836,10 +777,6 @@ export default function SdkDetails() {
                     </div>
                   ))}
                 </div>
-              </div>
-              <div>
-                <h4 className="mb-3 text-sm font-semibold uppercase tracking-wider text-slate-700">Pending drift</h4>
-                <PendingDriftSection items={pendingDrift} />
               </div>
             </div>}
           </div>

@@ -139,6 +139,83 @@ func TestPostgresAccessControlBootstrapAndAuthentication(t *testing.T) {
 	}
 }
 
+func TestPostgresAccessBootstrapSeedsManagedOwnerInvitation(t *testing.T) {
+	ctx, cancel, pool, repository := accessControlTestRepository(t)
+	defer cancel()
+	defer pool.Close()
+
+	accountID := uuid.New()
+	workspaceID, err := repository.BootstrapWorkspace(ctx, accountID, "Managed Owner Workspace")
+	if err != nil {
+		t.Fatalf("BootstrapWorkspace: %v", err)
+	}
+	first, err := accesscontrol.BootstrapOwner(ctx, repository, accountID, "fsk_managed_owner", "Owner@Example.com")
+	if err != nil {
+		t.Fatalf("BootstrapOwner: %v", err)
+	}
+	var status UserStatus
+	var ownerBindings int
+	err = pool.QueryRow(ctx, `
+		SELECT subject.status, COUNT(role.id)
+		FROM fused_users user_row
+		JOIN fused_subjects subject ON subject.id = user_row.subject_id
+		LEFT JOIN fused_role_bindings binding ON binding.subject_type = 'subject'
+			AND binding.subject_id = user_row.subject_id
+			AND binding.resource_type = 'workspace' AND binding.resource_id = $1
+		LEFT JOIN fused_roles role ON role.id = binding.role_id AND role.slug = $2
+		WHERE user_row.email_normalized = 'owner@example.com'
+		GROUP BY subject.status
+	`, workspaceID, accesscontrol.RoleOwner).Scan(&status, &ownerBindings)
+	if err != nil {
+		t.Fatalf("load managed owner invitation: %v", err)
+	}
+	if status != UserStatusInvited || ownerBindings != 1 {
+		t.Fatalf("managed owner status/bindings = %s/%d, want invited/1", status, ownerBindings)
+	}
+	second, err := accesscontrol.BootstrapOwner(ctx, repository, accountID, "fsk_managed_owner", "owner@example.com")
+	if err != nil {
+		t.Fatalf("second BootstrapOwner: %v", err)
+	}
+	if !first.Changed || second.Changed || second.Revision != first.Revision {
+		t.Fatalf("bootstrap idempotency = first %#v second %#v", first, second)
+	}
+}
+
+func TestResolveAppFamilyAccessIncludesTombstonesAndScopesAccount(t *testing.T) {
+	ctx, cancel, pool, repository := accessControlTestRepository(t)
+	defer cancel()
+	defer pool.Close()
+
+	accountID := uuid.New()
+	if _, err := repository.BootstrapWorkspace(ctx, accountID, "Historical Activity Workspace"); err != nil {
+		t.Fatalf("BootstrapWorkspace: %v", err)
+	}
+	owner, err := accesscontrol.BootstrapOwner(ctx, repository, accountID, "fsk_historical_activity")
+	if err != nil {
+		t.Fatalf("BootstrapOwner: %v", err)
+	}
+	familyID, deletedAppID := uuid.New(), uuid.New()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO fused_app_families
+			(app_family_id, account_id, kind, canonical_name, display_name, target_language, owner_subject_id)
+		VALUES ($1, $2, 'sdk', 'historical-sdk', 'Historical SDK', 'typescript', $3);
+		INSERT INTO fused_app_tombstones
+			(app_id, app_family_id, account_id, version, source_hash, deactivated_by)
+		VALUES ($4, $1, $2, '1.0.0', 'sha256:deleted', $3)
+	`, familyID, accountID, owner.SubjectID, deletedAppID); err != nil {
+		t.Fatalf("insert tombstoned app identity: %v", err)
+	}
+
+	resolved, err := repository.ResolveAppFamilyAccess(ctx, accountID, []uuid.UUID{deletedAppID})
+	if err != nil || resolved[deletedAppID] != familyID {
+		t.Fatalf("resolved tombstone = %#v, %v; want %s", resolved, err, familyID)
+	}
+	otherAccount, err := repository.ResolveAppFamilyAccess(ctx, uuid.New(), []uuid.UUID{deletedAppID})
+	if err != nil || len(otherAccount) != 0 {
+		t.Fatalf("cross-account tombstone resolution = %#v, %v; want empty", otherAccount, err)
+	}
+}
+
 func TestPostgresWorkspaceShareGrantsUsersAndOwningTeamsBoundedUse(t *testing.T) {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
@@ -184,10 +261,10 @@ func TestPostgresWorkspaceShareGrantsUsersAndOwningTeamsBoundedUse(t *testing.T)
 		t.Fatalf("CreateBucket: %v", err)
 	}
 	requirements := []accesscontrol.Requirement{
-		{Permission: accesscontrol.PermissionArtifactCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
+		{Permission: accesscontrol.PermissionAppCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
 		{Permission: accesscontrol.PermissionBucketUse, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: bucket.ID}},
 	}
-	before, err := repository.PreflightArtifactOwnership(ctx, ArtifactOwnershipPreflight{ActorSubjectID: userResult.User.ID, OwnerTeamID: teamResult.Team.ID, Requirements: requirements})
+	before, err := repository.PreflightAppOwnership(ctx, AppOwnershipPreflight{ActorSubjectID: userResult.User.ID, OwnerTeamID: teamResult.Team.ID, Requirements: requirements})
 	if err != nil || before.Allowed {
 		t.Fatalf("pre-share decision = %#v, %v; want denied", before, err)
 	}
@@ -212,7 +289,7 @@ func TestPostgresWorkspaceShareGrantsUsersAndOwningTeamsBoundedUse(t *testing.T)
 	if err := (accesscontrol.SnapshotAuthorizer{}).CheckAll(ctx, accesscontrol.Actor{Authorization: snapshot}, bucketRequirement); err != nil {
 		t.Fatalf("workspace-shared bucket permission: %v", err)
 	}
-	after, err := repository.PreflightArtifactOwnership(ctx, ArtifactOwnershipPreflight{ActorSubjectID: userResult.User.ID, OwnerTeamID: teamResult.Team.ID, Requirements: requirements})
+	after, err := repository.PreflightAppOwnership(ctx, AppOwnershipPreflight{ActorSubjectID: userResult.User.ID, OwnerTeamID: teamResult.Team.ID, Requirements: requirements})
 	if err != nil || !after.Allowed || len(after.ActorMissing) != 0 || len(after.TeamMissing) != 0 {
 		t.Fatalf("post-share decision = %#v, %v; want allowed", after, err)
 	}
@@ -220,16 +297,18 @@ func TestPostgresWorkspaceShareGrantsUsersAndOwningTeamsBoundedUse(t *testing.T)
 	if err != nil || total != 1 || len(shares) != 1 || shares[0].Resource.ID != bucket.ID {
 		t.Fatalf("ListWorkspaceShares = %#v/%d, %v", shares, total, err)
 	}
-	inactiveArtifactID := uuid.New()
+	inactiveFamilyID, inactiveAppID := uuid.New(), uuid.New()
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO fused_artifact_scopes
-			(account_id, artifact_id, owner_subject_id, scope_schema_version, selections, kind, name, version, deactivated_at)
-		VALUES ($1, $2, $3, 1, '[]', 'sdk', 'Retired SDK', '1.0.0', NOW())
-	`, accountID, inactiveArtifactID, owner.SubjectID); err != nil {
-		t.Fatalf("insert inactive artifact: %v", err)
+		INSERT INTO fused_app_families
+			(app_family_id, account_id, kind, canonical_name, display_name, target_language, owner_subject_id)
+		VALUES ($1, $2, 'sdk', 'retired-sdk', 'Retired SDK', 'typescript', $3);
+		INSERT INTO fused_app_tombstones (app_id, app_family_id, account_id, version, source_hash)
+		VALUES ($4, $1, $2, '1.0.0', 'retired')
+	`, inactiveFamilyID, accountID, owner.SubjectID, inactiveAppID); err != nil {
+		t.Fatalf("insert inactive app: %v", err)
 	}
 	_, err = repository.GrantWorkspaceShare(ctx, WorkspaceShareMutation{
-		Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceArtifact, ID: inactiveArtifactID}, Actor: actor,
+		Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: inactiveFamilyID}, Actor: actor,
 	})
 	if !errors.Is(err, ErrInvalidWorkspaceShare) {
 		t.Fatalf("inactive artifact share error = %v, want ErrInvalidWorkspaceShare", err)
@@ -386,8 +465,11 @@ func TestPostgresAuthorizedGraphQLCollectionsFilterBeforeTotals(t *testing.T) {
 	defer cancel()
 	defer pool.Close()
 	if _, err := pool.Exec(ctx, `
-		DELETE FROM fused_artifact_buckets;
-		DELETE FROM fused_artifact_scopes;
+		DELETE FROM fused_app_tokens;
+		DELETE FROM fused_app_family_buckets;
+		DELETE FROM fused_apps;
+		DELETE FROM fused_app_tombstones;
+		DELETE FROM fused_app_families;
 		DELETE FROM fused_workspace_service_versions;
 		DELETE FROM fused_workspace_services;
 		DELETE FROM fused_buckets;
@@ -396,12 +478,22 @@ func TestPostgresAuthorizedGraphQLCollectionsFilterBeforeTotals(t *testing.T) {
 	}
 	accountID := uuid.New()
 	allowedArtifact, deniedArtifact := uuid.New(), uuid.New()
-	ownerTeamID := seedArtifactOwnerTeam(t, ctx, pool)
+	allowedFamily, deniedFamily := uuid.New(), uuid.New()
+	ownerTeamID := seedAppOwnerTeam(t, ctx, pool)
 	allowedBucket, deniedBucket := uuid.New(), uuid.New()
 	allowedService, deniedService := uuid.New(), uuid.New()
-	if _, err := pool.Exec(ctx, `INSERT INTO fused_artifact_scopes (account_id, artifact_id, owner_team_id, selections, kind, name)
-		VALUES ($1, $2, $4, '[]', 'mcp', 'allowed'), ($1, $3, $4, '[]', 'mcp', 'denied')`, accountID, allowedArtifact, deniedArtifact, ownerTeamID); err != nil {
-		t.Fatalf("insert artifact fixtures: %v", err)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO fused_app_families (app_family_id, account_id, kind, canonical_name, display_name, owner_team_id)
+		VALUES ($1, $3, 'mcp', 'allowed', 'Allowed', $4), ($2, $3, 'mcp', 'denied', 'Denied', $4)
+	`, allowedFamily, deniedFamily, accountID, ownerTeamID); err != nil {
+		t.Fatalf("insert app family fixtures: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO fused_apps (app_id, app_family_id, account_id, version, config_key, source_hash, status)
+		VALUES ($4, $1, $3, '1.0.0', 'mcp:allowed:1.0.0', 'allowed', 'active'),
+		       ($5, $2, $3, '1.0.0', 'mcp:denied:1.0.0', 'denied', 'active')
+	`, allowedFamily, deniedFamily, accountID, allowedArtifact, deniedArtifact); err != nil {
+		t.Fatalf("insert app fixtures: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO fused_buckets (id, name) VALUES ($1, 'allowed'), ($2, 'denied')`, allowedBucket, deniedBucket); err != nil {
 		t.Fatalf("insert bucket fixtures: %v", err)
@@ -414,9 +506,9 @@ func TestPostgresAuthorizedGraphQLCollectionsFilterBeforeTotals(t *testing.T) {
 		VALUES ($1, gen_random_uuid(), '1.0.0'), ($2, gen_random_uuid(), '1.0.0')`, allowedService, deniedService); err != nil {
 		t.Fatalf("insert collection fixtures: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO fused_artifact_buckets (artifact_id, bucket_id) VALUES ($1, $3), ($2, $3)`,
-		allowedArtifact, deniedArtifact, allowedBucket); err != nil {
-		t.Fatalf("insert related artifact fixtures: %v", err)
+	if _, err := pool.Exec(ctx, `INSERT INTO fused_app_family_buckets (app_family_id, bucket_id) VALUES ($1, $3), ($2, $3)`,
+		allowedFamily, deniedFamily, allowedBucket); err != nil {
+		t.Fatalf("insert related app fixtures: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO fused_bucket_values (bucket_id, service_id, key_name, location, value)
 		VALUES ($1, $2, 'allowed', 'header', 'one'), ($1, $3, 'denied', 'header', 'two')`,
@@ -424,8 +516,8 @@ func TestPostgresAuthorizedGraphQLCollectionsFilterBeforeTotals(t *testing.T) {
 		t.Fatalf("insert related service fixtures: %v", err)
 	}
 
-	artifacts, artifactTotal, err := repository.ListAuthorizedMCPScopesByAccount(ctx, accountID, accesscontrol.AuthorizedScope{IDs: []uuid.UUID{allowedArtifact}}, 10, 0)
-	if err != nil || artifactTotal != 1 || len(artifacts) != 1 || artifacts[0].ArtifactID != allowedArtifact {
+	artifacts, artifactTotal, err := repository.ListAuthorizedMCPAppsByAccount(ctx, accountID, accesscontrol.AuthorizedScope{IDs: []uuid.UUID{allowedFamily}}, 10, 0)
+	if err != nil || artifactTotal != 1 || len(artifacts) != 1 || artifacts[0].AppID != allowedArtifact {
 		t.Fatalf("authorized artifacts = %#v/%d, %v", artifacts, artifactTotal, err)
 	}
 	buckets, bucketTotal, err := repository.ListAuthorizedBucketSummaries(ctx, accesscontrol.AuthorizedScope{IDs: []uuid.UUID{allowedBucket}}, 10, 0)
@@ -448,12 +540,12 @@ func TestPostgresAuthorizedGraphQLCollectionsFilterBeforeTotals(t *testing.T) {
 	if err != nil || serviceTotal != 1 || len(page) != 1 || page[0].ServiceID != allowedService {
 		t.Fatalf("authorized service page with nil names = %#v/%d, %v", page, serviceTotal, err)
 	}
-	linkedBuckets, err := repository.ListAuthorizedBucketsForSDK(ctx, allowedArtifact, accesscontrol.AuthorizedScope{IDs: []uuid.UUID{allowedBucket}})
+	linkedBuckets, err := repository.ListAuthorizedBucketsForAppFamily(ctx, allowedFamily, accesscontrol.AuthorizedScope{IDs: []uuid.UUID{allowedBucket}})
 	if err != nil || len(linkedBuckets) != 1 || linkedBuckets[0].ID != allowedBucket {
 		t.Fatalf("authorized linked buckets = %#v, %v", linkedBuckets, err)
 	}
-	linkedArtifacts, linkedArtifactTotal, err := repository.ListAuthorizedArtifactScopesForBucket(ctx, allowedBucket, accesscontrol.AuthorizedScope{IDs: []uuid.UUID{allowedArtifact}}, 10, 0)
-	if err != nil || linkedArtifactTotal != 1 || len(linkedArtifacts) != 1 || linkedArtifacts[0].ArtifactID != allowedArtifact {
+	linkedArtifacts, linkedArtifactTotal, err := repository.ListAuthorizedAppRuntimesForBucket(ctx, allowedBucket, accesscontrol.AuthorizedScope{IDs: []uuid.UUID{allowedFamily}}, 10, 0)
+	if err != nil || linkedArtifactTotal != 1 || len(linkedArtifacts) != 1 || linkedArtifacts[0].AppID != allowedArtifact {
 		t.Fatalf("authorized linked artifacts = %#v/%d, %v", linkedArtifacts, linkedArtifactTotal, err)
 	}
 	linkedServices, linkedServiceTotal, err := repository.ListAuthorizedBucketServiceSummaries(ctx, allowedBucket, accesscontrol.AuthorizedScope{IDs: []uuid.UUID{allowedService}}, "", 10, 0)

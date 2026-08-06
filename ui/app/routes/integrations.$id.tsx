@@ -109,10 +109,7 @@ import { useImportSession } from "~/hooks/useImportSession";
 import { useResourceLoader } from "~/hooks/useResourceLoader";
 
 import { redirect } from "@remix-run/react";
-import {
-  getApiKey,
-  logoutAndRedirect,
-} from "~/lib/session";
+import { APIRequestError } from "~/lib/authorization-error";
 
 function requireRemoteSource(sourceURL?: string): string {
   const value = sourceURL || "";
@@ -179,7 +176,8 @@ export const clientLoader = async ({
   if (!id)
     return { resolvedId: null, initialServiceData: null, error: "No ID provided" };
 
-  const token = getApiKey();
+	const session = await api.auth.session().catch(() => ({ authenticated: false }));
+	const isAuthenticated = session.authenticated;
   const url = new URL(request.url);
   const version = url.searchParams.get("version");
 
@@ -242,13 +240,13 @@ export const clientLoader = async ({
       version: version || "",
     };
     if (provider) variables.provider = provider;
-    const res = await api.graphql<{
+		const res = await api.graphql<{
       service: Service | null;
       serviceVersions?: ServiceVersion[];
-    }>(queryStr, variables, token || undefined);
+		}>(queryStr, variables);
     initialServiceData = res;
 
-    if (!initialServiceData?.service && !token) {
+		if (!initialServiceData?.service && !isAuthenticated) {
       return redirect(
         `/login?next=${encodeURIComponent(url.pathname + url.search)}`
       );
@@ -273,16 +271,10 @@ export const clientLoader = async ({
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : "";
-    if (
-      msg === "invalid API key" ||
-      msg === "missing X-API-Key header" ||
-      msg.includes("401") ||
-      msg.includes("403") ||
-      msg.toLowerCase().includes("unauthorized")
-    ) {
-      // Only force logout when the user had a valid session that was rejected.
-      // If there's no token they're already a guest — let the page render instead of bouncing to login.
-      if (token) throw logoutAndRedirect();
+    if (isAuthenticated && err instanceof APIRequestError && err.status === 401) {
+      // Session status clears invalid cookies on the login page. A permission
+      // denial is intentionally not a logout because the session remains valid.
+      throw redirect(`/login?next=${encodeURIComponent(url.pathname + url.search)}`);
     }
     error = msg;
   }
@@ -591,7 +583,7 @@ export default function IntegrationDetail() {
     serviceRefs: notificationServiceRefs,
     markRead: markNotificationRead,
     dismiss: dismissNotification,
-  } = useWorkspaceNotifications();
+  } = useWorkspaceNotifications(isAuth);
   // Detail banners are action-oriented. Acknowledged items remain available
   // in the bell and full notifications page, but should not interrupt a
   // service view after the user has already marked them read.

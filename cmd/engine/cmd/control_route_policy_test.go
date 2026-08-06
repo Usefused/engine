@@ -317,10 +317,10 @@ func TestDynamicMultiPermissionPoliciesDenyEachMissingPermissionWithoutSideEffec
 		build func(uuid.UUID) dynamicAuthorizationFixture
 	}{
 		{"workspace apply", workspaceApplyAuthorizationFixture},
-		{"artifact apply", artifactApplyAuthorizationFixture},
+		{"desired config apply", desiredConfigApplyAuthorizationFixture},
 		{"SDK generate", sdkGenerateAuthorizationFixture},
 		{"workspace plan", workspacePlanAuthorizationFixture},
-		{"artifact plan", artifactPlanAuthorizationFixture},
+		{"desired config plan", desiredConfigPlanAuthorizationFixture},
 		{"plan action", configPlanActionAuthorizationFixture},
 	}
 	for _, test := range fixtures {
@@ -394,17 +394,22 @@ func workspaceApplyAuthorizationFixture(workspaceID uuid.UUID) dynamicAuthorizat
 	}
 }
 
-func artifactApplyAuthorizationFixture(workspaceID uuid.UUID) dynamicAuthorizationFixture {
-	artifactID, firstServiceID, secondServiceID := uuid.New(), uuid.New(), uuid.New()
+func desiredConfigApplyAuthorizationFixture(workspaceID uuid.UUID) dynamicAuthorizationFixture {
+	appID, firstServiceID, secondServiceID := uuid.New(), uuid.New(), uuid.New()
 	bucketID, planID := uuid.New(), uuid.New()
-	stores := &controlRequirementStoreStub{buckets: []store.Bucket{{ID: bucketID, Name: "production"}}}
+	stores := &controlRequirementStoreStub{
+		buckets: []store.Bucket{{ID: bucketID, Name: "production"}},
+		apps: map[uuid.UUID]store.App{
+			appID: {AppID: appID, AppFamilyID: appID},
+		},
+	}
 	plans := &controlConfigRepositoryStub{
 		plan: &store.ConfigPlan{
 			ID: planID, ConfigKey: "sdk:test", ConfigType: store.ConfigTypeSDK, BaseGeneration: 2,
 			ResolvedPayload: []byte(`{"bucket_id":"` + bucketID.String() + `","selections":[{"service_id":"` + firstServiceID.String() + `"},{"service_id":"` + secondServiceID.String() + `"}]}`),
 			DesiredState:    []byte(`{"bucket":"production"}`),
 		},
-		state: &store.ConfigState{LatestResourceID: &artifactID},
+		state: &store.ConfigState{LatestResourceID: &appID},
 	}
 	return dynamicAuthorizationFixture{
 		method: http.MethodPost, path: "/sdk-config/apply", body: `{"plan_id":"` + planID.String() + `"}`,
@@ -431,7 +436,7 @@ func workspacePlanAuthorizationFixture(uuid.UUID) dynamicAuthorizationFixture {
 	}
 }
 
-func artifactPlanAuthorizationFixture(uuid.UUID) dynamicAuthorizationFixture {
+func desiredConfigPlanAuthorizationFixture(uuid.UUID) dynamicAuthorizationFixture {
 	firstServiceID, secondServiceID, bucketID := uuid.New(), uuid.New(), uuid.New()
 	stores := &controlRequirementStoreStub{
 		services: []store.WorkspaceService{{ServiceID: firstServiceID}, {ServiceID: secondServiceID}},

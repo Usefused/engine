@@ -18,7 +18,7 @@ import (
 
 func TestSecretResolverResolveExecutionCredentials(t *testing.T) {
 	ctx := context.Background()
-	artifactID := uuid.New()
+	appID := uuid.New()
 	serviceID := uuid.New()
 
 	masterKey := []byte("12345678901234567890123456789012") // 32 bytes
@@ -74,7 +74,7 @@ func TestSecretResolverResolveExecutionCredentials(t *testing.T) {
 	}
 
 	creds, _, err := resolver.ResolveExecutionCredentials(ctx, CredentialRequest{
-		ArtifactID: artifactID, ServiceID: serviceID,
+		AppID: appID, ServiceID: serviceID,
 		AuthType: "api_key",
 		Auths: fusedobject.AuthConfigs{{
 			Name:     "API_KEY",
@@ -363,7 +363,7 @@ func TestSecretResolverResolveExecutionCredentialsUsesTargetedBindings(t *testin
 	versionID := uuid.New()
 	literal := "eu"
 	mockStore := &resolverMockStore{
-		artifactScope: &store.ArtifactScope{BucketID: bucketID},
+		appRuntime: &store.AppRuntime{BucketID: bucketID},
 		bindings: []store.WorkspaceConnectionBinding{{
 			SourceKind: "literal", LiteralValue: &literal,
 			TargetLocation: "header", TargetName: "X-Region", Mode: "force",
@@ -371,7 +371,7 @@ func TestSecretResolverResolveExecutionCredentialsUsesTargetedBindings(t *testin
 	}
 	resolver := NewSecretResolver(mockStore, []byte("12345678901234567890123456789012")).(*secretResolver)
 	_, values, err := resolver.ResolveExecutionCredentials(context.Background(), CredentialRequest{
-		ArtifactID: uuid.New(), ServiceID: serviceID, ServiceVersionID: versionID,
+		AppID: uuid.New(), ServiceID: serviceID, ServiceVersionID: versionID,
 		OperationID: "listAccounts", AuthType: "oauth",
 	})
 	if err != nil {
@@ -389,20 +389,20 @@ func TestSecretResolverResolveExecutionCredentialsUsesTargetedBindings(t *testin
 // bucket-linked user credential path without involving dispatcher HTTP calls.
 func TestSecretResolverResolveExecutionCredentialsInjectsConnectedAuth(t *testing.T) {
 	ctx := context.Background()
-	artifactID := uuid.New()
+	appID := uuid.New()
 	bucketID := uuid.New()
 	serviceID := uuid.New()
 	masterKey := []byte("12345678901234567890123456789012")
 	conn := encryptedAuthConnection(t, masterKey, bucketID, serviceID, "user_123", "connected-token", "", time.Time{})
 	mockStore := &resolverMockStore{
-		artifactScope:    &store.ArtifactScope{ArtifactID: artifactID, BucketID: bucketID},
+		appRuntime:       &store.AppRuntime{AppID: appID, BucketID: bucketID},
 		authConnection:   &conn,
 		authConnectionID: conn.ID,
 	}
 
 	resolver := NewSecretResolver(mockStore, masterKey)
 	creds, _, err := resolver.ResolveExecutionCredentials(ctx, CredentialRequest{
-		ArtifactID: artifactID, ServiceID: serviceID, AuthType: "oauth",
+		AppID: appID, ServiceID: serviceID, AuthType: "oauth",
 		Passthrough: map[string]any{
 			"fused_end_user_ref": "user_123",
 			"fused_auth_name":    "bearerAuth",
@@ -425,20 +425,20 @@ func TestSecretResolverResolveExecutionCredentialsInjectsConnectedAuth(t *testin
 
 func TestSecretResolverResolveExecutionCredentialsInfersBlankOAuthAuthName(t *testing.T) {
 	ctx := context.Background()
-	artifactID := uuid.New()
+	appID := uuid.New()
 	bucketID := uuid.New()
 	serviceID := uuid.New()
 	masterKey := []byte("12345678901234567890123456789012")
 	conn := encryptedAuthConnection(t, masterKey, bucketID, serviceID, "user_123", "connected-token", "", time.Time{})
 	mockStore := &resolverMockStore{
-		artifactScope:    &store.ArtifactScope{ArtifactID: artifactID, BucketID: bucketID},
+		appRuntime:       &store.AppRuntime{AppID: appID, BucketID: bucketID},
 		authConnection:   &conn,
 		authConnectionID: conn.ID,
 	}
 
 	resolver := NewSecretResolver(mockStore, masterKey)
 	creds, _, err := resolver.ResolveExecutionCredentials(ctx, CredentialRequest{
-		ArtifactID: artifactID, ServiceID: serviceID, AuthType: "oauth",
+		AppID: appID, ServiceID: serviceID, AuthType: "oauth",
 		Auths: fusedobject.AuthConfigs{{Type: "oauth2"}},
 		Passthrough: map[string]any{
 			"fused_end_user_ref": "user_123",
@@ -462,7 +462,7 @@ func TestSecretResolverResolveExecutionCredentialsInjectsConnectionResource(t *t
 	access, _ := store.EncryptWithDEK(dek, "access-token")
 	mockStore := &resolverMockStore{
 
-		artifactScope: &store.ArtifactScope{ArtifactID: uuid.New(), BucketID: bucketID},
+		appRuntime: &store.AppRuntime{AppID: uuid.New(), BucketID: bucketID},
 		authConnection: &store.AuthConnection{
 			ID: connectionID, BucketID: bucketID, ServiceID: serviceID, EndUserRef: "user_123",
 			EncryptedDEK: wrapper, EncryptedAccessToken: access,
@@ -475,7 +475,7 @@ func TestSecretResolverResolveExecutionCredentialsInjectsConnectionResource(t *t
 	}
 	resolver := NewSecretResolver(mockStore, masterKey)
 	credentials, _, err := resolver.ResolveExecutionCredentials(context.Background(), CredentialRequest{
-		ArtifactID: mockStore.artifactScope.ArtifactID, ServiceID: serviceID, AuthType: "oauth",
+		AppID: mockStore.appRuntime.AppID, ServiceID: serviceID, AuthType: "oauth",
 		Auths: fusedobject.AuthConfigs{{Name: "oauth", Type: "oauth2"}},
 		Passthrough: map[string]any{
 			"fused_end_user_ref": "user_123", "fused_resource_id": resourceID.String(),
@@ -498,13 +498,13 @@ func TestSecretResolverResolveExecutionCredentialsRequiresResourceChoice(t *test
 	access, _ := store.EncryptWithDEK(dek, "access-token")
 	mockStore := &resolverMockStore{
 
-		artifactScope:           &store.ArtifactScope{ArtifactID: uuid.New(), BucketID: bucketID},
+		appRuntime:              &store.AppRuntime{AppID: uuid.New(), BucketID: bucketID},
 		authConnection:          &store.AuthConnection{ID: uuid.New(), BucketID: bucketID, ServiceID: serviceID, EndUserRef: "user_123", EncryptedDEK: wrapper, EncryptedAccessToken: access},
 		connectionResourceCount: 2,
 	}
 	resolver := NewSecretResolver(mockStore, masterKey)
 	_, _, err := resolver.ResolveExecutionCredentials(context.Background(), CredentialRequest{
-		ArtifactID: mockStore.artifactScope.ArtifactID, ServiceID: serviceID, AuthType: "oauth",
+		AppID: mockStore.appRuntime.AppID, ServiceID: serviceID, AuthType: "oauth",
 		Auths: fusedobject.AuthConfigs{{Name: "oauth", Type: "oauth2"}},
 		Passthrough: map[string]any{
 			"fused_end_user_ref": "user_123", "fused_resource_required": "true",
@@ -519,20 +519,20 @@ func TestSecretResolverResolveExecutionCredentialsRequiresResourceChoice(t *test
 // choose OAuth/OIDC by family instead of leaking provider security-scheme names.
 func TestSecretResolverResolveExecutionCredentialsSelectsConnectedAuthType(t *testing.T) {
 	ctx := context.Background()
-	artifactID := uuid.New()
+	appID := uuid.New()
 	bucketID := uuid.New()
 	serviceID := uuid.New()
 	masterKey := []byte("12345678901234567890123456789012")
 	conn := encryptedAuthConnection(t, masterKey, bucketID, serviceID, "user_123", "connected-token", "", time.Time{})
 	mockStore := &resolverMockStore{
-		artifactScope:    &store.ArtifactScope{ArtifactID: artifactID, BucketID: bucketID},
+		appRuntime:       &store.AppRuntime{AppID: appID, BucketID: bucketID},
 		authConnection:   &conn,
 		authConnectionID: conn.ID,
 	}
 
 	resolver := NewSecretResolver(mockStore, masterKey)
 	creds, _, err := resolver.ResolveExecutionCredentials(ctx, CredentialRequest{
-		ArtifactID: artifactID, ServiceID: serviceID, AuthType: "oauth",
+		AppID: appID, ServiceID: serviceID, AuthType: "oauth",
 		Auths: fusedobject.AuthConfigs{{
 			Name: "bearerAuth",
 			Type: "oauth2",
@@ -561,7 +561,7 @@ func TestSecretResolverResolveExecutionCredentialsSelectsConnectedAuthType(t *te
 // static bucket auth usable even when app code carries an end-user reference.
 func TestSecretResolverResolveExecutionCredentialsSkipsConnectedLookupForBasic(t *testing.T) {
 	ctx := context.Background()
-	artifactID := uuid.New()
+	appID := uuid.New()
 	bucketID := uuid.New()
 	serviceID := uuid.New()
 	masterKey := []byte("12345678901234567890123456789012")
@@ -578,7 +578,7 @@ func TestSecretResolverResolveExecutionCredentialsSkipsConnectedLookupForBasic(t
 		t.Fatalf("encrypt password: %v", err)
 	}
 	mockStore := &resolverMockStore{
-		artifactScope: &store.ArtifactScope{ArtifactID: artifactID, BucketID: bucketID},
+		appRuntime: &store.AppRuntime{AppID: appID, BucketID: bucketID},
 		secrets: []store.WorkspaceSecret{
 			{
 				WorkspaceSecretMeta: store.WorkspaceSecretMeta{
@@ -607,7 +607,7 @@ func TestSecretResolverResolveExecutionCredentialsSkipsConnectedLookupForBasic(t
 
 	resolver := NewSecretResolver(mockStore, masterKey)
 	creds, _, err := resolver.ResolveExecutionCredentials(ctx, CredentialRequest{
-		ArtifactID: artifactID, ServiceID: serviceID, AuthType: "basic",
+		AppID: appID, ServiceID: serviceID, AuthType: "basic",
 		Auths: fusedobject.AuthConfigs{{
 			Name:   "basicAuth",
 			Type:   "http",
@@ -643,7 +643,7 @@ func TestSecretResolverResolveExecutionCredentialsSkipsConnectedLookupForBasic(t
 // dispatch refreshes bucket-owned user tokens before injecting provider auth.
 func TestSecretResolverResolveExecutionCredentialsRefreshesExpiringConnectedAuth(t *testing.T) {
 	ctx := context.Background()
-	artifactID := uuid.New()
+	appID := uuid.New()
 	bucketID := uuid.New()
 	serviceID := uuid.New()
 	masterKey := []byte("12345678901234567890123456789012")
@@ -654,7 +654,7 @@ func TestSecretResolverResolveExecutionCredentialsRefreshesExpiringConnectedAuth
 	conn.LastFailureCode, conn.LastFailureAt, conn.LastFailureTraceID = "provider_unauthorized", &failedAt, "old-trace"
 	cfg := encryptedResolverConnectConfig(t, masterKey, bucketID, serviceID)
 	mockStore := &resolverMockStore{
-		artifactScope:  &store.ArtifactScope{ArtifactID: artifactID, BucketID: bucketID},
+		appRuntime:     &store.AppRuntime{AppID: appID, BucketID: bucketID},
 		authConnection: &conn,
 		connectConfig:  &cfg,
 	}
@@ -663,7 +663,7 @@ func TestSecretResolverResolveExecutionCredentialsRefreshesExpiringConnectedAuth
 
 	resolver := NewSecretResolver(mockStore, masterKey)
 	creds, _, err := resolver.ResolveExecutionCredentials(ctx, CredentialRequest{
-		ArtifactID: artifactID, ServiceID: serviceID, AuthType: "oauth",
+		AppID: appID, ServiceID: serviceID, AuthType: "oauth",
 		Auths: fusedobject.AuthConfigs{{
 			Name:     "bearerAuth",
 			Type:     "oauth2",
@@ -697,12 +697,12 @@ func TestSecretResolverResolveExecutionCredentialsRefreshesExpiringConnectedAuth
 // failure becomes durable state and a typed SDK-facing execution decision.
 func TestSecretResolver_InvalidGrantRequiresReconnect(t *testing.T) {
 	ctx := context.Background()
-	bucketID, serviceID, artifactID := uuid.New(), uuid.New(), uuid.New()
+	bucketID, serviceID, appID := uuid.New(), uuid.New(), uuid.New()
 	masterKey := []byte("12345678901234567890123456789012")
 	conn := encryptedAuthConnection(t, masterKey, bucketID, serviceID, "user_123", "old-access", "old-refresh", time.Now().UTC().Add(time.Minute))
 	cfg := encryptedResolverConnectConfig(t, masterKey, bucketID, serviceID)
 	mockStore := &resolverMockStore{
-		artifactScope:  &store.ArtifactScope{ArtifactID: artifactID, BucketID: bucketID},
+		appRuntime:     &store.AppRuntime{AppID: appID, BucketID: bucketID},
 		authConnection: &conn, connectConfig: &cfg,
 	}
 	restoreClient := replaceResolverHTTPClient(roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -716,7 +716,7 @@ func TestSecretResolver_InvalidGrantRequiresReconnect(t *testing.T) {
 
 	resolver := NewSecretResolver(mockStore, masterKey)
 	_, _, err := resolver.ResolveExecutionCredentials(ctx, CredentialRequest{
-		AccountID: uuid.New(), ArtifactID: artifactID, ServiceID: serviceID, AuthType: "oauth",
+		AccountID: uuid.New(), AppID: appID, ServiceID: serviceID, AuthType: "oauth",
 		Auths:       fusedobject.AuthConfigs{{Name: "bearerAuth", Type: "oauth2", TokenURL: "https://provider.example/token"}},
 		Passthrough: map[string]any{"fused_end_user_ref": "user_123", "fused_auth_name": "bearerAuth"},
 	})
@@ -739,16 +739,16 @@ func TestSecretResolver_InvalidGrantRequiresReconnect(t *testing.T) {
 // providers that issue access-only grants where another consent is the repair.
 func TestSecretResolver_ExpiredAccessWithoutRefreshRequiresReconnect(t *testing.T) {
 	ctx := context.Background()
-	bucketID, serviceID, artifactID := uuid.New(), uuid.New(), uuid.New()
+	bucketID, serviceID, appID := uuid.New(), uuid.New(), uuid.New()
 	masterKey := []byte("12345678901234567890123456789012")
 	conn := encryptedAuthConnection(t, masterKey, bucketID, serviceID, "user_456", "expired-access", "", time.Now().UTC().Add(-time.Minute))
 	mockStore := &resolverMockStore{
-		artifactScope: &store.ArtifactScope{ArtifactID: artifactID, BucketID: bucketID}, authConnection: &conn,
+		appRuntime: &store.AppRuntime{AppID: appID, BucketID: bucketID}, authConnection: &conn,
 	}
 
 	resolver := NewSecretResolver(mockStore, masterKey)
 	_, _, err := resolver.ResolveExecutionCredentials(ctx, CredentialRequest{
-		AccountID: uuid.New(), ArtifactID: artifactID, ServiceID: serviceID, AuthType: "oauth",
+		AccountID: uuid.New(), AppID: appID, ServiceID: serviceID, AuthType: "oauth",
 		Auths:       fusedobject.AuthConfigs{{Name: "bearerAuth", Type: "oauth2", TokenURL: "https://provider.example/token"}},
 		Passthrough: map[string]any{"fused_end_user_ref": "user_456", "fused_auth_name": "bearerAuth"},
 	})
@@ -763,7 +763,7 @@ func TestSecretResolver_ExpiredAccessWithoutRefreshRequiresReconnect(t *testing.
 
 type resolverMockStore struct {
 	store.Store
-	artifactScope             *store.ArtifactScope
+	appRuntime                *store.AppRuntime
 	secrets                   []store.WorkspaceSecret
 	getSecretKeys             []string
 	getSecretsKeys            []string
@@ -819,11 +819,11 @@ func (m *resolverMockStore) GetWorkspaceIDForAccount(ctx context.Context, accoun
 	return uuid.New(), nil
 }
 
-func (m *resolverMockStore) GetArtifactScope(ctx context.Context, artifactID uuid.UUID) (*store.ArtifactScope, error) {
-	if m.artifactScope != nil {
-		return m.artifactScope, nil
+func (m *resolverMockStore) GetAppRuntime(ctx context.Context, appID uuid.UUID) (*store.AppRuntime, error) {
+	if m.appRuntime != nil {
+		return m.appRuntime, nil
 	}
-	return &store.ArtifactScope{BucketID: uuid.New()}, nil
+	return &store.AppRuntime{BucketID: uuid.New()}, nil
 }
 
 func (m *resolverMockStore) ListSecretsForBucket(ctx context.Context, bucketID, serviceID uuid.UUID) ([]store.WorkspaceSecret, error) {
@@ -888,11 +888,11 @@ func (m *resolverMockStore) GetSecrets(ctx context.Context, bucketID, serviceID 
 	return out, nil
 }
 
-func (m *resolverMockStore) LinkBucketToSDK(ctx context.Context, artifactID, bucketID uuid.UUID) error {
+func (m *resolverMockStore) LinkBucketToSDK(ctx context.Context, appID, bucketID uuid.UUID) error {
 	return nil
 }
-func (m *resolverMockStore) ListBucketsForSDK(ctx context.Context, artifactID uuid.UUID) ([]store.Bucket, error) {
-	return []store.Bucket{{ID: artifactID}}, nil
+func (m *resolverMockStore) ListBucketsForSDK(ctx context.Context, appID uuid.UUID) ([]store.Bucket, error) {
+	return []store.Bucket{{ID: appID}}, nil
 }
 
 func (m *resolverMockStore) GetBucketByName(ctx context.Context, name string) (*store.Bucket, error) {

@@ -48,12 +48,12 @@ func serviceChangelogPollIntervalFromEnv() time.Duration {
 // StartServiceChangelogPoller runs the Engine-side capture half of Phase 2
 // (see plans/plan-service-changelog.md): a ticker worker that, per active
 // service, reads that service's own poll cursor, asks Registry for anything
-// new since then, caches the results locally, and (Phase 3) matches each
-// freshly cached row against this workspace's actual usage, notifying only
-// when something actually affects it. Mirrors StartMCPCleanupWorker's
-// ticker+initial-run shape. configStore is Phase 3's addition -- needed to
-// create workspace notifications; engineStore/registryClient/apiKey are
-// unchanged from Phase 2.
+// new since then, caches the results locally, then matches each freshly
+// cached row against this workspace's actual usage, notifying only when
+// something actually affects it. Mirrors StartMCPCleanupWorker's
+// ticker+initial-run shape. configStore was added to create workspace
+// notifications; engineStore/registryClient/apiKey are unchanged from
+// Phase 2.
 func StartServiceChangelogPoller(ctx context.Context, engineStore store.Store, configStore store.ConfigRepository, registryClient RegistryClient, apiKey string) {
 	interval := serviceChangelogPollIntervalFromEnv()
 	ticker := time.NewTicker(interval)

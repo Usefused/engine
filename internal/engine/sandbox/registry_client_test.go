@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 )
 
@@ -92,6 +93,71 @@ func TestRegistryBaseURLPreservesNonGraphQLBasePath(t *testing.T) {
 	}
 }
 
+func TestRenewSDKPackageLeasesUsesEngineIdentityAndBatchPayload(t *testing.T) {
+	appID, familyID := uuid.New(), uuid.New()
+	client := &HTTPRegistryClient{
+		endpoint: "https://registry.example/graphql", licenseKey: "engine-license-key",
+		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.Method != http.MethodPost || request.URL.Path != "/sdk-packages/leases/renew" {
+				t.Fatalf("unexpected lease request: %s %s", request.Method, request.URL.Path)
+			}
+			if request.Header.Get("Authorization") != "Bearer engine-license-key" || request.Header.Get("X-API-Key") != "engine-license-key" {
+				t.Fatal("lease request did not use the Engine licence identity")
+			}
+			if request.Header.Get("X-Engine-Signature") == "" {
+				t.Fatal("lease request was not signed")
+			}
+			var body sdkPackageLeaseRequest
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Fatalf("decode lease request: %v", err)
+			}
+			if len(body.Apps) != 1 || body.Apps[0].AppID != appID || body.Apps[0].AppFamilyID != familyID {
+				t.Fatalf("unexpected lease payload: %#v", body.Apps)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"renewed":1}`)),
+				Header:     make(http.Header),
+			}, nil
+		})},
+	}
+
+	renewed, err := client.RenewSDKPackageLeases(context.Background(), []models.SDKPackageLeaseRenewal{{
+		AppID: appID, AppFamilyID: familyID,
+	}})
+	if err != nil {
+		t.Fatalf("RenewSDKPackageLeases() error = %v", err)
+	}
+	if renewed != 1 {
+		t.Fatalf("RenewSDKPackageLeases() = %d, want 1", renewed)
+	}
+}
+
+func TestDownloadSDKPackageUsesExactAppCacheRoute(t *testing.T) {
+	appID := uuid.New()
+	client := &HTTPRegistryClient{
+		endpoint: "https://registry.example/graphql", licenseKey: "engine-license-key",
+		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.Method != http.MethodGet || request.URL.Path != "/sdk-packages/"+appID.String()+"/download" {
+				t.Fatalf("unexpected package download: %s %s", request.Method, request.URL.Path)
+			}
+			if request.Header.Get("X-API-Key") != "engine-license-key" {
+				t.Fatal("package download did not use Engine identity")
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("zip")), Header: make(http.Header)}, nil
+		})},
+	}
+
+	response, err := client.DownloadSDKPackage(context.Background(), appID)
+	if err != nil {
+		t.Fatalf("DownloadSDKPackage() error = %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("DownloadSDKPackage() status = %d", response.StatusCode)
+	}
+}
+
 func TestFetchServiceMetadataBatchUsesOneAliasedGraphQLRequest(t *testing.T) {
 	first, second := uuid.New(), uuid.New()
 	requestCount := 0
@@ -150,6 +216,7 @@ func TestFetchRuntimeContractUsesBundledGraphQLProjection(t *testing.T) {
 					"auth_configs":[{"name":"apiKeyAuth","type":"apiKey","location":"header","key_name":"X-API-Key"}],
 					"rate_limit":{"strategy":"token_bucket","requests_per_second":10,"requests_per_minute":600},
 					"retry_config":{"strategy":"fixed","max_retries":2,"backoff_ms":100},
+					"timeout_ms":45000,
 					"event_extraction_path":"event.type",
 					"incoming_webhook_config":{"auth_type":"signature","signature_header":"X-Signature"},
 					"webhooks":[{"id":"` + webhookID.String() + `","service_id":"` + serviceID.String() + `","name":"invoice.created","method":"POST","description":"Invoice created","request_body":{"type":"object"}}]
@@ -170,6 +237,9 @@ func TestFetchRuntimeContractUsesBundledGraphQLProjection(t *testing.T) {
 	if snapshot.ServiceMetadata.Name != "Runtime Service" || snapshot.ServiceMetadata.ServiceVersionID != serviceVersionID {
 		t.Fatalf("unexpected metadata: %#v", snapshot.ServiceMetadata)
 	}
+	if snapshot.ServiceMetadata.TimeoutMs == nil || *snapshot.ServiceMetadata.TimeoutMs != 45000 {
+		t.Fatalf("runtime timeout was not decoded: %v", snapshot.ServiceMetadata.TimeoutMs)
+	}
 	if len(snapshot.Endpoints) != 1 || snapshot.Endpoints[0].ID != endpointID || snapshot.Endpoints[0].Pagination == nil {
 		t.Fatalf("unexpected endpoints: %#v", snapshot.Endpoints)
 	}
@@ -179,7 +249,7 @@ func TestFetchRuntimeContractUsesBundledGraphQLProjection(t *testing.T) {
 	if len(snapshot.Webhooks) != 1 || snapshot.Webhooks[0].ID != webhookID {
 		t.Fatalf("unexpected webhooks: %#v", snapshot.Webhooks)
 	}
-	if !strings.Contains(requestBody.Query, "serviceOperations") || !strings.Contains(requestBody.Query, "webhooks") || !strings.Contains(requestBody.Query, "graphql_query") || !strings.Contains(requestBody.Query, "provider_protocol") || !strings.Contains(requestBody.Query, "operation_kind") {
+	if !strings.Contains(requestBody.Query, "serviceOperations") || !strings.Contains(requestBody.Query, "webhooks") || !strings.Contains(requestBody.Query, "timeout_ms") || !strings.Contains(requestBody.Query, "graphql_query") || !strings.Contains(requestBody.Query, "provider_protocol") || !strings.Contains(requestBody.Query, "operation_kind") {
 		t.Fatalf("runtime contract query did not bundle service operations and webhooks: %s", requestBody.Query)
 	}
 	if requestBody.Variables["serviceId"] != serviceID.String() || requestBody.Variables["serviceVersionId"] != serviceVersionID.String() {

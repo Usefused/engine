@@ -16,10 +16,22 @@ var (
 )
 
 type TokenValidator interface {
-	// Validate resolves a token string to an AccountID, given the SDK ID context.
+	// Validate resolves the immutable app and its family from one token lookup.
 	// Control-plane credentials do not cross this runtime boundary; only a token
-	// issued for the selected artifact is accepted.
-	Validate(ctx context.Context, artifactID uuid.UUID, token string) (uuid.UUID, error)
+	// issued for the selected app's family is accepted.
+	Validate(ctx context.Context, appID uuid.UUID, token string) (RuntimeIdentity, error)
+}
+
+// RuntimeIdentity carries only safe identity metadata from authorization into
+// execution receipts. Bucket, selection, and token data remain inside the
+// authorization/store boundary.
+type RuntimeIdentity struct {
+	AccountID   uuid.UUID
+	AppFamilyID uuid.UUID
+	AppID       uuid.UUID
+	AppVersion  string
+	Kind        string
+	Status      string
 }
 
 type tokenValidator struct {
@@ -30,17 +42,21 @@ func NewTokenValidator(s store.Store) TokenValidator {
 	return &tokenValidator{store: s}
 }
 
-func (v *tokenValidator) Validate(ctx context.Context, artifactID uuid.UUID, token string) (uuid.UUID, error) {
+func (v *tokenValidator) Validate(ctx context.Context, appID uuid.UUID, token string) (RuntimeIdentity, error) {
 	if token == "" {
-		return uuid.Nil, ErrUnauthorized
+		return RuntimeIdentity{}, ErrUnauthorized
 	}
 
 	tokenHash := HashToken(strings.TrimSpace(token))
-	accountID, err := v.store.ValidateToken(ctx, artifactID, tokenHash)
+	projection, err := v.store.AuthorizeApp(ctx, appID, tokenHash)
 	if err != nil {
-		return uuid.Nil, ErrUnauthorized
+		return RuntimeIdentity{}, ErrUnauthorized
 	}
-	return accountID, nil
+	return RuntimeIdentity{
+		AccountID: projection.AccountID, AppFamilyID: projection.AppFamilyID,
+		AppID: projection.AppID, AppVersion: projection.Version,
+		Kind: projection.Kind, Status: projection.AppStatus,
+	}, nil
 }
 
 func HashToken(token string) string {

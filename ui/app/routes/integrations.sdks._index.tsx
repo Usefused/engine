@@ -8,13 +8,14 @@ export const meta: MetaFunction = ({ matches }) => {
     { title: "Apps - Fused" },
   ];
 };
-import { Download, Package, Plus, Trash2, RefreshCw, Loader2, Search, X } from "lucide-react";
+import { Download, Package, Plus, Trash2, Loader2, Search, X } from "lucide-react";
 import { api } from "~/lib/api";
 import { useToast } from "~/components/Toast";
-import { ArtifactRuntimeStatus } from "~/components/artifacts/ArtifactRuntimeStatus";
+import { AppRuntimeStatus } from "~/components/apps/AppRuntimeStatus";
 
 interface SdkListItem {
-  id: string;
+  app_id: string;
+  app_family_id: string;
   name: string;
   description?: string;
   version: string;
@@ -27,8 +28,7 @@ interface SdkListItem {
   created_at?: string;
   killed_at?: string;
   downloads?: number;
-  active?: boolean;
-  runtime_state?: string;
+  status: string;
 }
 
 function LanguageBadge({ targetLanguage }: { targetLanguage?: string }) {
@@ -58,9 +58,8 @@ interface SdkRowProps {
   selectedIds: string[];
   setSelectedIds: React.Dispatch<React.SetStateAction<string[]>>;
   onNavigate: (id: string) => void;
-  onUpgrade: (id: string, name: string) => void;
   onDownload: (id: string, name: string, version: string) => void;
-  onDelete: (id: string, name: string) => void;
+  onDeactivate: (id: string, name: string) => void;
 }
 
 function SdkNameCell({ sdk }: { sdk: SdkListItem }) {
@@ -77,7 +76,7 @@ function SdkNameCell({ sdk }: { sdk: SdkListItem }) {
           <LanguageBadge targetLanguage={sdk.target_language} />
         )}
       </div>
-      <ArtifactRuntimeStatus className="mt-0.5" active={sdk.active} runtimeState={sdk.runtime_state} />
+      <AppRuntimeStatus className="mt-0.5" status={sdk.status} />
     </div>
   );
 }
@@ -109,27 +108,16 @@ function SdkVersionBadges({ sdk }: { sdk: SdkListItem }) {
 
 interface SdkActionButtonsProps {
   sdk: SdkListItem;
-  onUpgrade: (id: string, name: string) => void;
   onDownload: (id: string, name: string, version: string) => void;
-  onDelete: (id: string, name: string) => void;
+  onDeactivate: (id: string, name: string) => void;
 }
 
-function SdkActionButtons({ sdk, onUpgrade, onDownload, onDelete }: SdkActionButtonsProps) {
+function SdkActionButtons({ sdk, onDownload, onDeactivate }: SdkActionButtonsProps) {
   return (
     <div className="flex justify-end gap-1 sm:gap-2">
-      {sdk.has_update_available && (
-        <button
-          onClick={(e) => { e.stopPropagation(); onUpgrade(sdk.id, sdk.name); }}
-          className="inline-flex h-8 w-8 md:w-auto items-center justify-center gap-1.5 md:px-3 md:py-1.5 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors shadow-sm cursor-pointer"
-          title="1-Click Upgrade"
-        >
-          <RefreshCw className="w-4 h-4" />
-          <span className="hidden md:inline">Upgrade</span>
-        </button>
-      )}
       {sdk.is_downloadable ? (
         <button
-          onClick={(e) => { e.stopPropagation(); onDownload(sdk.id, sdk.name, sdk.version); }}
+          onClick={(e) => { e.stopPropagation(); onDownload(sdk.app_id, sdk.name, sdk.version); }}
           className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors cursor-pointer"
           title="Download SDK"
         >
@@ -145,9 +133,9 @@ function SdkActionButtons({ sdk, onUpgrade, onDownload, onDelete }: SdkActionBut
         </button>
       )}
       <button
-        onClick={(e) => { e.stopPropagation(); onDelete(sdk.id, sdk.name); }}
+        onClick={(e) => { e.stopPropagation(); onDeactivate(sdk.app_id, sdk.name); }}
         className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors cursor-pointer"
-        title="Delete SDK"
+        title="Deactivate SDK version"
       >
         <Trash2 className="w-4 h-4" />
       </button>
@@ -160,18 +148,17 @@ interface SdkRowProps {
   selectedIds: string[];
   setSelectedIds: React.Dispatch<React.SetStateAction<string[]>>;
   onNavigate: (id: string) => void;
-  onUpgrade: (id: string, name: string) => void;
   onDownload: (id: string, name: string, version: string) => void;
-  onDelete: (id: string, name: string) => void;
+  onDeactivate: (id: string, name: string) => void;
 }
 
-function SdkRow({ sdk, selectedIds, setSelectedIds, onNavigate, onUpgrade, onDownload, onDelete }: SdkRowProps) {
-  const isSelected = selectedIds.includes(sdk.id);
+function SdkRow({ sdk, selectedIds, setSelectedIds, onNavigate, onDownload, onDeactivate }: SdkRowProps) {
+  const isSelected = selectedIds.includes(sdk.app_id);
   const showCheckbox = selectedIds.length > 0 || isSelected;
   return (
     <tr
       className="hover:bg-slate-50/50 transition-colors cursor-pointer group"
-      onClick={() => onNavigate(sdk.id)}
+      onClick={() => onNavigate(sdk.app_id)}
     >
       <td className="px-3 sm:px-6 py-4 min-w-0">
         <div className="flex min-w-0 items-center gap-2 sm:gap-3">
@@ -182,7 +169,7 @@ function SdkRow({ sdk, selectedIds, setSelectedIds, onNavigate, onUpgrade, onDow
                 className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
                 checked={isSelected}
                 onChange={() => {
-                  setSelectedIds(prev => prev.includes(sdk.id) ? prev.filter(i => i !== sdk.id) : [...prev, sdk.id]);
+                  setSelectedIds(prev => prev.includes(sdk.app_id) ? prev.filter(i => i !== sdk.app_id) : [...prev, sdk.app_id]);
                 }}
               />
             </div>
@@ -203,7 +190,7 @@ function SdkRow({ sdk, selectedIds, setSelectedIds, onNavigate, onUpgrade, onDow
         {sdk.created_at ? new Date(sdk.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : ""}
       </td>
       <td className="px-2 sm:px-6 py-4 text-right">
-        <SdkActionButtons sdk={sdk} onUpgrade={onUpgrade} onDownload={onDownload} onDelete={onDelete} />
+        <SdkActionButtons sdk={sdk} onDownload={onDownload} onDeactivate={onDeactivate} />
       </td>
     </tr>
   );
@@ -217,12 +204,11 @@ interface SdkListContentProps {
   selectedIds: string[];
   setSelectedIds: React.Dispatch<React.SetStateAction<string[]>>;
   navigate: (path: string) => void;
-  onUpgrade: (id: string, name: string) => void;
   onDownload: (id: string, name: string, version: string) => void;
-  onDelete: (id: string, name: string) => void;
+  onDeactivate: (id: string, name: string) => void;
 }
 
-function SdkListContent({ loading, searching, sdks, query, selectedIds, setSelectedIds, navigate, onUpgrade, onDownload, onDelete }: SdkListContentProps) {
+function SdkListContent({ loading, searching, sdks, query, selectedIds, setSelectedIds, navigate, onDownload, onDeactivate }: SdkListContentProps) {
   if (loading || searching) {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-slate-400">
@@ -272,7 +258,7 @@ function SdkListContent({ loading, searching, sdks, query, selectedIds, setSelec
                         if (selectedIds.length === sdks.length) {
                           setSelectedIds([]);
                         } else {
-                          setSelectedIds(sdks.map(s => s.id));
+                          setSelectedIds(sdks.map(s => s.app_id));
                         }
                       }}
                     />
@@ -290,14 +276,13 @@ function SdkListContent({ loading, searching, sdks, query, selectedIds, setSelec
         <tbody className="divide-y divide-slate-100">
           {sdks.map((sdk) => (
             <SdkRow
-              key={sdk.id}
+              key={sdk.app_id}
               sdk={sdk}
               selectedIds={selectedIds}
               setSelectedIds={setSelectedIds}
               onNavigate={(id) => navigate(`/integrations/sdks/${id}`)}
-              onUpgrade={onUpgrade}
               onDownload={onDownload}
-              onDelete={onDelete}
+              onDeactivate={onDeactivate}
             />
           ))}
         </tbody>
@@ -315,31 +300,31 @@ export default function SdkHistory() {
   const [query, setQuery] = useState(searchParams.get("q") ?? "");
   const [searching, setSearching] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [isDeletingMultiple, setIsDeletingMultiple] = useState(false);
+  const [isDeactivatingMultiple, setIsDeactivatingMultiple] = useState(false);
   const navigate = useNavigate();
 
   const fetchSdks = () => {
     setLoading(true);
     const queryStr = `
       query {
-        artifactSnapshots(kind: "sdk", limit: 100, offset: 0) {
+        apps(kind: "sdk", limit: 100, offset: 0) {
           items {
-            id
+            app_id
+            app_family_id
             name
             description
             version
             target_language
             created_at
-            active
-            runtime_state
+            status
           }
           total
         }
       }
     `;
-    api.mcpGraphql<{ artifactSnapshots: { items: SdkListItem[]; total: number } }>(queryStr)
+    api.mcpGraphql<{ apps: { items: SdkListItem[]; total: number } }>(queryStr)
       .then(res => {
-        setSdks((res.artifactSnapshots.items ?? []).map(item => ({ ...item, target_type: "sdk", is_downloadable: true })));
+        setSdks((res.apps.items ?? []).map(item => ({ ...item, target_type: "sdk", is_downloadable: true })));
         setSelectedIds([]);
       })
       .catch(e => setError(e instanceof Error ? e.message : "Failed to load apps"))
@@ -367,12 +352,9 @@ export default function SdkHistory() {
     }
 
     try {
-      const queryStr = `query { artifactSnapshots(kind: "sdk", limit: 100, offset: 0) { items { id name description version target_language created_at active runtime_state } } }`;
-      const res = await api.mcpGraphql<{ artifactSnapshots: { items: SdkListItem[] } }>(queryStr);
-      const normalizedName = searchName.toLowerCase();
-      setSdks((res.artifactSnapshots.items ?? []).filter(item =>
-        item.name.toLowerCase().includes(normalizedName) && (!searchVersion || item.version === searchVersion)
-      ).map(item => ({ ...item, target_type: "sdk", is_downloadable: true })));
+      const queryStr = `query($search: String!, $version: String!) { apps(kind: "sdk", search: $search, version: $version, limit: 100, offset: 0) { items { app_id app_family_id name description version target_language created_at status } } }`;
+      const res = await api.mcpGraphql<{ apps: { items: SdkListItem[] } }>(queryStr, { search: searchName, version: searchVersion });
+      setSdks((res.apps.items ?? []).map(item => ({ ...item, target_type: "sdk", is_downloadable: true })));
     } catch {
       setSdks([]);
     } finally {
@@ -417,47 +399,35 @@ export default function SdkHistory() {
     }
   };
 
-  const handleDelete = async (id: string, name: string) => {
-    const confirmed = await toast.confirm(`Are you sure you want to delete SDK "${name}"?`);
+  const handleDeactivate = async (id: string, name: string) => {
+    const confirmed = await toast.confirm(`Deactivate SDK version "${name}"? This permanently removes its runtime and package.`);
     if (!confirmed) return;
     try {
-      await api.sdks.delete(id);
+      await api.sdks.deactivate(id);
       fetchSdks();
-      toast.success(`SDK "${name}" deleted successfully.`);
+      toast.success(`SDK version "${name}" deactivated.`);
       setSelectedIds(prev => prev.filter(i => i !== id));
     } catch (err) {
-      toast.error(`Failed to delete SDK: ${err instanceof Error ? err.message : "Unknown error"}`);
+      toast.error(`Failed to deactivate SDK: ${err instanceof Error ? err.message : "Unknown error"}`);
     }
   };
 
-  const handleDeleteMultiple = async () => {
+  const handleDeactivateMultiple = async () => {
     if (selectedIds.length === 0) return;
-    const confirmed = await toast.confirm(`Are you sure you want to delete ${selectedIds.length} SDK(s)?`);
+    const confirmed = await toast.confirm(`Deactivate ${selectedIds.length} SDK version(s)? This permanently removes their runtimes and packages.`);
     if (!confirmed) return;
     
-    setIsDeletingMultiple(true);
+    setIsDeactivatingMultiple(true);
     try {
-      await Promise.all(selectedIds.map(id => api.sdks.delete(id)));
+      await Promise.all(selectedIds.map(id => api.sdks.deactivate(id)));
       fetchSdks();
       setSelectedIds([]);
-      toast.success(`Successfully deleted ${selectedIds.length} SDK(s).`);
+      toast.success(`Deactivated ${selectedIds.length} SDK version(s).`);
     } catch (err) {
-      toast.error(`Failed to delete some SDKs: ${err instanceof Error ? err.message : "Unknown error"}`);
+      toast.error(`Failed to deactivate some SDKs: ${err instanceof Error ? err.message : "Unknown error"}`);
       fetchSdks();
     } finally {
-      setIsDeletingMultiple(false);
-    }
-  };
-
-  const handleUpgrade = async (id: string, name: string) => {
-    const confirmed = await toast.confirm(`Are you sure you want to 1-Click Upgrade SDK "${name}" to the latest service versions?\n\nThis will generate a new SDK and leave this one intact in your history.`);
-    if (!confirmed) return;
-    try {
-      await api.sdks.upgradeAsync(id);
-      toast.success("Upgrade started! A new SDK will appear in your history shortly.");
-      fetchSdks();
-    } catch (err) {
-      toast.error(`Failed to upgrade SDK: ${err instanceof Error ? err.message : "Unknown error"}`);
+		setIsDeactivatingMultiple(false);
     }
   };
 
@@ -471,12 +441,12 @@ export default function SdkHistory() {
         <div className="flex w-full sm:w-auto items-center gap-3">
           {selectedIds.length > 0 && (
             <button
-              onClick={handleDeleteMultiple}
-              disabled={isDeletingMultiple}
+              onClick={handleDeactivateMultiple}
+              disabled={isDeactivatingMultiple}
               className="inline-flex flex-1 sm:flex-none items-center justify-center gap-2 px-4 py-2 bg-rose-50 text-rose-600 hover:bg-rose-100 text-sm font-medium rounded-lg transition-all border border-rose-200 cursor-pointer"
             >
               <Trash2 className="w-4 h-4" />
-              {isDeletingMultiple ? "Deleting..." : `Delete Selected (${selectedIds.length})`}
+              {isDeactivatingMultiple ? "Deactivating..." : `Deactivate selected (${selectedIds.length})`}
             </button>
           )}
           <Link
@@ -537,9 +507,8 @@ export default function SdkHistory() {
         selectedIds={selectedIds}
         setSelectedIds={setSelectedIds}
         navigate={navigate}
-        onUpgrade={handleUpgrade}
         onDownload={handleDownload}
-        onDelete={handleDelete}
+        onDeactivate={handleDeactivate}
       />
     </div>
   );

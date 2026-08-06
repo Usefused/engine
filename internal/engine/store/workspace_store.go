@@ -108,6 +108,15 @@ func (s *postgresStore) DisableWorkspaceServiceVersion(
 	return nil
 }
 
+// CountActiveServices returns the number of rows in fused_workspace_services.
+// A workspace service with no enabled versions is auto-deleted, so every row
+// in that table represents an active (routable) service.
+func (s *postgresStore) CountActiveServices(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM fused_workspace_services`).Scan(&n)
+	return n, err
+}
+
 func (s *postgresStore) ListWorkspaceServiceVersions(
 	ctx context.Context,
 	serviceID uuid.UUID,

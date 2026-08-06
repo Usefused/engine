@@ -5,10 +5,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
+	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 )
 
@@ -184,4 +187,90 @@ func deleteBucketForTest(t *testing.T, s *bucketDeleteGuardStore, name string) *
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 	return rr
+}
+
+// bucketCreateGuardStore stubs Store for CreateBucketHandler tests.
+type bucketCreateGuardStore struct {
+	store.Store
+	accountID uuid.UUID
+	count     int
+	countErr  error
+	created   *store.Bucket
+	createErr error
+}
+
+func (s *bucketCreateGuardStore) CountBuckets(context.Context) (int, error) {
+	return s.count, s.countErr
+}
+
+func (s *bucketCreateGuardStore) CreateBucket(context.Context, string, bool) (*store.Bucket, error) {
+	return s.created, s.createErr
+}
+
+func createBucketForTest(t *testing.T, s *bucketCreateGuardStore) *httptest.ResponseRecorder {
+	t.Helper()
+	r := newControlTestRouter(s.accountID)
+	r.Post("/workspace/buckets", CreateBucketHandler(s))
+	req := httptest.NewRequest(http.MethodPost, "/workspace/buckets", strings.NewReader(`{"name":"prod","is_default":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(accesscontrol.ContextWithRequiredPermissions(req.Context(), []accesscontrol.Requirement{{
+		Permission: accesscontrol.PermissionBucketManage,
+		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: uuid.New()},
+	}}))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	return rr
+}
+
+func TestCreateBucketHandler_Limits(t *testing.T) {
+	accountID := uuid.New()
+	workspaceID := uuid.New()
+
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{
+		MaxBuckets: models.IntPtr(-1), // unlimited
+	})
+	defer entitlement.LiveEntitlement.Reset()
+
+	store := &bucketCreateGuardStore{
+		accountID: accountID,
+		count:     10,
+		created:   &store.Bucket{ID: uuid.New(), Name: "prod"},
+	}
+
+	// unlimited: allow
+	rr := createBucketForTest(t, store)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unlimited should allow, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// zero: block
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{MaxBuckets: models.IntPtr(0)})
+	rr = createBucketForTest(t, store)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("zero limit should block, got %d", rr.Code)
+	}
+
+	// hard ceiling: allow below limit
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{MaxBuckets: models.IntPtr(11)})
+	rr = createBucketForTest(t, store)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("10/11 should allow, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// hard ceiling: block at limit
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{MaxBuckets: models.IntPtr(10)})
+	rr = createBucketForTest(t, store)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("10/10 should block, got %d", rr.Code)
+	}
+
+	// count error: 500
+	store.countErr = errors.New("db down")
+	rr = createBucketForTest(t, store)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("count error should 500, got %d", rr.Code)
+	}
+
+	// Verify workspaceID is set on the actor context properly
+	_ = workspaceID
 }

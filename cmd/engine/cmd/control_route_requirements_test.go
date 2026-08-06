@@ -30,6 +30,71 @@ type controlRequirementStoreStub struct {
 	displayLoads    int
 	localServiceIDs map[string]uuid.UUID
 	slugLoads       int
+	apps            map[uuid.UUID]store.App
+	appLoads        int
+	families        map[uuid.UUID]store.AppFamily
+}
+
+func TestAppAccessRequirementsUseFamilyBoundary(t *testing.T) {
+	accountID, appID, familyID := uuid.New(), uuid.New(), uuid.New()
+	stores := &controlRequirementStoreStub{apps: map[uuid.UUID]store.App{
+		appID: {AppID: appID, AppFamilyID: familyID, AccountID: accountID},
+	}}
+	resolver := newControlRequirementResolver(stores, nil)
+	actor := accesscontrol.Actor{AccountID: accountID}
+
+	tests := []struct {
+		method     string
+		path       string
+		permission accesscontrol.Permission
+	}{
+		{method: http.MethodPost, path: "/apps/" + appID.String() + "/deprecate", permission: accesscontrol.PermissionAppManage},
+		{method: http.MethodGet, path: "/sdks/" + appID.String() + "/download", permission: accesscontrol.PermissionAppRead},
+	}
+	for _, test := range tests {
+		request := httptest.NewRequest(test.method, test.path, nil)
+		request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), actor))
+		requirements, _, ok := resolveControlRESTPolicy(request, resolver)
+		if !ok || len(requirements) != 1 {
+			t.Fatalf("%s %s requirements = %#v, ok=%v", test.method, test.path, requirements, ok)
+		}
+		want := accesscontrol.Requirement{Permission: test.permission, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID}}
+		if requirements[0] != want {
+			t.Fatalf("%s %s requirement = %#v, want %#v", test.method, test.path, requirements[0], want)
+		}
+	}
+}
+
+func TestAppTokenAccessRequirementsUseFamilyBoundary(t *testing.T) {
+	accountID, familyID := uuid.New(), uuid.New()
+	stores := &controlRequirementStoreStub{families: map[uuid.UUID]store.AppFamily{
+		familyID: {AppFamilyID: familyID, AccountID: accountID},
+	}}
+	resolver := newControlRequirementResolver(stores, nil)
+	request := httptest.NewRequest(http.MethodPost, "/workspace/sdk-tokens?app_family_id="+familyID.String(), nil)
+	request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), accesscontrol.Actor{AccountID: accountID}))
+	requirements, _, ok := resolveControlRESTPolicy(request, resolver)
+	want := accesscontrol.Requirement{Permission: accesscontrol.PermissionAppTokensManage, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID}}
+	if !ok || len(requirements) != 1 || requirements[0] != want {
+		t.Fatalf("requirements = %#v, ok=%v, want %#v", requirements, ok, want)
+	}
+}
+
+func (s *controlRequirementStoreStub) GetAppFamily(_ context.Context, familyID uuid.UUID) (*store.AppFamily, error) {
+	if family, ok := s.families[familyID]; ok {
+		copy := family
+		return &copy, nil
+	}
+	return nil, store.ErrAppFamilyNotFound
+}
+
+func (s *controlRequirementStoreStub) GetApp(_ context.Context, appID uuid.UUID) (*store.App, error) {
+	s.appLoads++
+	if app, ok := s.apps[appID]; ok {
+		copy := app
+		return &copy, nil
+	}
+	return nil, store.ErrAppNotFound
 }
 
 // ResolveWorkspaceServiceIDsByKeys stands in for the Engine's local
@@ -177,7 +242,7 @@ func TestDynamicWorkspaceApplyBatchesPlanActionResolution(t *testing.T) {
 	}
 }
 
-func TestDynamicArtifactApplyBindsAuthorizedPlanRevision(t *testing.T) {
+func TestDynamicDesiredConfigApplyBindsAuthorizedPlanRevision(t *testing.T) {
 	for _, test := range []struct {
 		configType store.ConfigType
 		path       string
@@ -202,7 +267,7 @@ func TestDynamicArtifactApplyBindsAuthorizedPlanRevision(t *testing.T) {
 			resolver := newControlRequirementResolver(stores, configStore)
 			request := httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(`{"plan_id":"`+planID.String()+`"}`))
 
-			_, err := resolver.ResolveControlRequirements(context.Background(), accesscontrol.Actor{WorkspaceID: workspaceID}, dynamicArtifactApply, nil, request)
+			_, err := resolver.ResolveControlRequirements(context.Background(), accesscontrol.Actor{WorkspaceID: workspaceID}, dynamicDesiredConfigApply, nil, request)
 			if err != nil {
 				t.Fatalf("ResolveControlRequirements: %v", err)
 			}
@@ -235,9 +300,9 @@ func TestDynamicWorkspaceApplyScopesCredentialMaterialsToBucket(t *testing.T) {
 	}
 }
 
-func TestDynamicArtifactApplyChoosesCreateOrManage(t *testing.T) {
+func TestDynamicDesiredConfigApplyChoosesCreateOrManage(t *testing.T) {
 	workspaceID := uuid.New()
-	artifactID := uuid.New()
+	appID := uuid.New()
 	serviceID := uuid.New()
 	bucketID := uuid.New()
 	planID := uuid.New()
@@ -249,8 +314,8 @@ func TestDynamicArtifactApplyChoosesCreateOrManage(t *testing.T) {
 		resource   accesscontrol.ResourceType
 		stateLoads int
 	}{
-		{name: "create", permission: accesscontrol.PermissionArtifactCreate, resource: accesscontrol.ResourceWorkspace},
-		{name: "manage", generation: 2, state: &store.ConfigState{LatestResourceID: &artifactID}, permission: accesscontrol.PermissionArtifactManage, resource: accesscontrol.ResourceArtifact, stateLoads: 1},
+		{name: "create", permission: accesscontrol.PermissionAppCreate, resource: accesscontrol.ResourceWorkspace},
+		{name: "manage", generation: 2, state: &store.ConfigState{LatestResourceID: &appID}, permission: accesscontrol.PermissionAppManage, resource: accesscontrol.ResourceApp, stateLoads: 1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -261,9 +326,15 @@ func TestDynamicArtifactApplyChoosesCreateOrManage(t *testing.T) {
 				},
 				state: test.state,
 			}
-			resolver := newControlRequirementResolver(&controlRequirementStoreStub{}, configStore)
+			stores := &controlRequirementStoreStub{}
+			if test.state != nil {
+				stores.apps = map[uuid.UUID]store.App{
+					appID: {AppID: appID, AppFamilyID: appID},
+				}
+			}
+			resolver := newControlRequirementResolver(stores, configStore)
 			request := httptest.NewRequest(http.MethodPost, "/sdk-config/apply", strings.NewReader(`{"plan_id":"`+planID.String()+`"}`))
-			requirements, err := resolver.ResolveControlRequirements(context.Background(), accesscontrol.Actor{WorkspaceID: workspaceID}, dynamicArtifactApply, nil, request)
+			requirements, err := resolver.ResolveControlRequirements(context.Background(), accesscontrol.Actor{WorkspaceID: workspaceID}, dynamicDesiredConfigApply, nil, request)
 			if err != nil || len(requirements) != 3 {
 				t.Fatalf("requirements/error = %#v/%v", requirements, err)
 			}
@@ -280,7 +351,7 @@ func TestDynamicArtifactApplyChoosesCreateOrManage(t *testing.T) {
 	}
 }
 
-func TestDynamicArtifactPlanResolvesSelectionsInBatches(t *testing.T) {
+func TestDynamicDesiredConfigPlanResolvesSelectionsInBatches(t *testing.T) {
 	workspaceID := uuid.New()
 	serviceID := uuid.New()
 	bucketID := uuid.New()
@@ -292,7 +363,7 @@ func TestDynamicArtifactPlanResolvesSelectionsInBatches(t *testing.T) {
 	body := `{"config_key":"sdk:payments:1.0.0","config":{"bucket":"production","services":{"payments":{"version":"1"}}}}`
 	request := httptest.NewRequest(http.MethodPost, "/sdk-config/plan", strings.NewReader(body))
 
-	requirements, err := resolver.ResolveControlRequirements(context.Background(), accesscontrol.Actor{WorkspaceID: workspaceID}, dynamicArtifactPlan, nil, request)
+	requirements, err := resolver.ResolveControlRequirements(context.Background(), accesscontrol.Actor{WorkspaceID: workspaceID}, dynamicDesiredConfigPlan, nil, request)
 	if err != nil || len(requirements) != 3 {
 		t.Fatalf("requirements/error = %#v/%v", requirements, err)
 	}
@@ -315,7 +386,7 @@ func TestWebhookPlanSecretReferencesRequireEveryBucketReadBeforeSideEffects(t *t
 	resolver := newControlRequirementResolver(stores, &controlConfigRepositoryStub{})
 	body := `{"config_key":"webhook:security","config":{"services":{"github":{"secret":"${bucket.alpha.secret.one}"},"github-audit":{"secret":"${bucket.beta.secret.two}"}}}}`
 	actor := actorWithGrants(t, workspaceID,
-		accesscontrol.Grant{Permission: accesscontrol.PermissionArtifactCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
+		accesscontrol.Grant{Permission: accesscontrol.PermissionAppCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionServiceRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: serviceID}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionServiceRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: auditServiceID}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionBucketRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: alphaID}},
@@ -338,7 +409,7 @@ func TestWebhookPlanSecretReferencesRequireEveryBucketReadBeforeSideEffects(t *t
 		t.Fatalf("service/bucket batches = %d/%d, want 1/1", stores.serviceLoads, stores.batchBuckets)
 	}
 	allowed := actorWithGrants(t, workspaceID,
-		accesscontrol.Grant{Permission: accesscontrol.PermissionArtifactCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
+		accesscontrol.Grant{Permission: accesscontrol.PermissionAppCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionServiceRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: serviceID}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionServiceRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: auditServiceID}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionBucketRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: alphaID}},
@@ -363,7 +434,7 @@ func TestWebhookPlanRejectsInvalidSecretBeforeSideEffectsWithoutEcho(t *testing.
 	handler := controlAuthorizationMiddleware(accesscontrol.SnapshotAuthorizer{}, resolver)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { downstream++ }))
 	request := httptest.NewRequest(http.MethodPost, "/webhook-config/plan", strings.NewReader(body))
 	request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), actorWithGrants(t, workspaceID,
-		accesscontrol.Grant{Permission: accesscontrol.PermissionArtifactCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
+		accesscontrol.Grant{Permission: accesscontrol.PermissionAppCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionServiceRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: serviceID}},
 	)))
 	response := httptest.NewRecorder()
@@ -380,7 +451,7 @@ func TestWebhookApplyUsesPersistedImmutableBucketRequirement(t *testing.T) {
 	workspaceID, planID, serviceID := uuid.New(), uuid.New(), uuid.New()
 	originalBucketID := uuid.New()
 	required, _ := accesscontrol.MarshalRequiredPermissions([]accesscontrol.Requirement{
-		{Permission: accesscontrol.PermissionArtifactCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
+		{Permission: accesscontrol.PermissionAppCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
 		{Permission: accesscontrol.PermissionServiceConsume, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: serviceID}},
 		{Permission: accesscontrol.PermissionBucketUse, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: originalBucketID}},
 	})
@@ -392,7 +463,7 @@ func TestWebhookApplyUsesPersistedImmutableBucketRequirement(t *testing.T) {
 	stores := &controlRequirementStoreStub{buckets: []store.Bucket{{ID: uuid.New(), Name: "production"}}}
 	resolver := newControlRequirementResolver(stores, configStore)
 	request := httptest.NewRequest(http.MethodPost, "/webhook-config/apply", strings.NewReader(`{"plan_id":"`+planID.String()+`"}`))
-	requirements, err := resolver.ResolveControlRequirements(context.Background(), accesscontrol.Actor{WorkspaceID: workspaceID}, dynamicArtifactApply, nil, request)
+	requirements, err := resolver.ResolveControlRequirements(context.Background(), accesscontrol.Actor{WorkspaceID: workspaceID}, dynamicDesiredConfigApply, nil, request)
 	if err != nil {
 		t.Fatalf("ResolveControlRequirements: %v", err)
 	}

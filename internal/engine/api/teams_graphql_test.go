@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/entitlement"
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 
@@ -247,8 +249,8 @@ func TestTeamGraphQLAllOperationsFailClosedWithoutRequiredPermission(t *testing.
 		{name: "revoke service", actor: actorWithTeamPermissions(t, accesscontrol.PermissionAccessRead), query: `mutation { revokeTeamServiceAccess(team_id:"` + teamID.String() + `",service_id:"` + resourceID.String() + `",level:USER) { changed } }`},
 		{name: "grant bucket", actor: actorWithTeamPermissions(t, accesscontrol.PermissionAccessRead), query: `mutation { grantTeamBucketAccess(team_id:"` + teamID.String() + `",bucket_id:"` + resourceID.String() + `",level:USER) { changed } }`},
 		{name: "revoke bucket", actor: actorWithTeamPermissions(t, accesscontrol.PermissionAccessRead), query: `mutation { revokeTeamBucketAccess(team_id:"` + teamID.String() + `",bucket_id:"` + resourceID.String() + `",level:USER) { changed } }`},
-		{name: "grant artifact", actor: actorWithTeamPermissions(t, accesscontrol.PermissionAccessRead), query: `mutation { grantTeamArtifactAccess(team_id:"` + teamID.String() + `",artifact_id:"` + resourceID.String() + `",level:READER) { changed } }`},
-		{name: "revoke artifact", actor: actorWithTeamPermissions(t, accesscontrol.PermissionAccessRead), query: `mutation { revokeTeamArtifactAccess(team_id:"` + teamID.String() + `",artifact_id:"` + resourceID.String() + `",level:MANAGER) { changed } }`},
+		{name: "grant artifact", actor: actorWithTeamPermissions(t, accesscontrol.PermissionAccessRead), query: `mutation { grantTeamAppAccess(team_id:"` + teamID.String() + `",app_family_id:"` + resourceID.String() + `",level:READER) { changed } }`},
+		{name: "revoke artifact", actor: actorWithTeamPermissions(t, accesscontrol.PermissionAccessRead), query: `mutation { revokeTeamAppAccess(team_id:"` + teamID.String() + `",app_family_id:"` + resourceID.String() + `",level:MANAGER) { changed } }`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -305,11 +307,11 @@ func TestTeamGraphQLConflictAndArchivedErrorsHaveNoSideEffects(t *testing.T) {
 	}
 }
 
-func TestTeamArtifactBindingRejectsWebhookConfigStateIDWithoutRevisionChange(t *testing.T) {
+func TestTeamAppBindingRejectsWebhookConfigStateIDWithoutRevisionChange(t *testing.T) {
 	teamID, webhookStateID := uuid.New(), uuid.New()
 	s := &teamGraphQLTestStore{addErr: store.ErrInvalidTeamBinding}
 	sink := &teamRevisionSink{}
-	query := `mutation { grantTeamArtifactAccess(team_id:"` + teamID.String() + `",artifact_id:"` + webhookStateID.String() + `",level:MANAGER) { changed authorization_revision } }`
+	query := `mutation { grantTeamAppAccess(team_id:"` + teamID.String() + `",app_family_id:"` + webhookStateID.String() + `",level:MANAGER) { changed authorization_revision } }`
 
 	response := executeTeamGraphQLWithSink(t, s, actorWithTeamPermissions(t, accesscontrol.PermissionAccessManage), query, sink)
 
@@ -325,7 +327,7 @@ func TestTeamArtifactBindingRejectsWebhookConfigStateIDWithoutRevisionChange(t *
 }
 
 func TestTeamGraphQLErrorHidesArchiveConflictCounts(t *testing.T) {
-	err := teamGraphQLError(&store.TeamArchiveConflictError{BindingCount: 17, ActiveArtifactCount: 23})
+	err := teamGraphQLError(&store.TeamArchiveConflictError{BindingCount: 17, ActiveAppCount: 23})
 	if err.Error() != "team cannot be archived while it has active access" {
 		t.Fatalf("archive conflict error = %q", err)
 	}
@@ -345,44 +347,44 @@ func TestTeamBindingGraphQLUsesExactRolesAndWorkspaceScope(t *testing.T) {
 	if s.removeCalls != 1 || s.lastBinding.RoleSlug != accesscontrol.RoleServiceManager || s.lastBinding.Resource.ID != serviceID {
 		t.Fatalf("service revoke = %#v calls=%d", s.lastBinding, s.removeCalls)
 	}
-	executeTeamGraphQL(t, s, actor, `mutation { grantTeamArtifactAccess(team_id:"`+teamID.String()+`",artifact_id:"`+serviceID.String()+`",level:READER) { changed } }`)
-	if s.addCalls != 2 || s.lastBinding.RoleSlug != accesscontrol.RoleArtifactReader || s.lastBinding.Resource.Type != accesscontrol.ResourceArtifact || s.lastBinding.Resource.ID != serviceID {
+	executeTeamGraphQL(t, s, actor, `mutation { grantTeamAppAccess(team_id:"`+teamID.String()+`",app_family_id:"`+serviceID.String()+`",level:READER) { changed } }`)
+	if s.addCalls != 2 || s.lastBinding.RoleSlug != accesscontrol.RoleAppReader || s.lastBinding.Resource.Type != accesscontrol.ResourceApp || s.lastBinding.Resource.ID != serviceID {
 		t.Fatalf("artifact reader grant = %#v calls=%d", s.lastBinding, s.addCalls)
 	}
-	executeTeamGraphQL(t, s, actor, `mutation { grantTeamArtifactAccess(team_id:"`+teamID.String()+`",artifact_id:"`+serviceID.String()+`",level:USER) { changed } }`)
-	if s.addCalls != 3 || s.lastBinding.RoleSlug != accesscontrol.RoleArtifactUser {
+	executeTeamGraphQL(t, s, actor, `mutation { grantTeamAppAccess(team_id:"`+teamID.String()+`",app_family_id:"`+serviceID.String()+`",level:USER) { changed } }`)
+	if s.addCalls != 3 || s.lastBinding.RoleSlug != accesscontrol.RoleAppUser {
 		t.Fatalf("artifact user grant = %#v calls=%d", s.lastBinding, s.addCalls)
 	}
-	executeTeamGraphQL(t, s, actor, `mutation { revokeTeamArtifactAccess(team_id:"`+teamID.String()+`",artifact_id:"`+serviceID.String()+`",level:MANAGER) { changed } }`)
-	if s.removeCalls != 2 || s.lastBinding.RoleSlug != accesscontrol.RoleArtifactManager || s.lastBinding.Resource.Type != accesscontrol.ResourceArtifact {
+	executeTeamGraphQL(t, s, actor, `mutation { revokeTeamAppAccess(team_id:"`+teamID.String()+`",app_family_id:"`+serviceID.String()+`",level:MANAGER) { changed } }`)
+	if s.removeCalls != 2 || s.lastBinding.RoleSlug != accesscontrol.RoleAppManager || s.lastBinding.Resource.Type != accesscontrol.ResourceApp {
 		t.Fatalf("artifact manager revoke = %#v calls=%d", s.lastBinding, s.removeCalls)
 	}
 }
 
-func TestTeamArtifactBindingGraphQLInvalidatesRevisionOnlyAfterChangedMutation(t *testing.T) {
-	teamID, artifactID := uuid.New(), uuid.New()
-	binding := store.TeamBinding{ID: uuid.New(), TeamID: teamID, RoleSlug: accesscontrol.RoleArtifactManager, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceArtifact, ID: artifactID}, CreatedAt: time.Now()}
+func TestTeamAppBindingGraphQLInvalidatesRevisionOnlyAfterChangedMutation(t *testing.T) {
+	teamID, appID := uuid.New(), uuid.New()
+	binding := store.TeamBinding{ID: uuid.New(), TeamID: teamID, RoleSlug: accesscontrol.RoleAppManager, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: appID}, CreatedAt: time.Now()}
 	s := &teamGraphQLTestStore{addResult: store.TeamBindingMutationResult{Binding: binding, AuthorizationRevision: 44, Changed: true}}
 	sink := &teamRevisionSink{}
 	actor := actorWithTeamPermissions(t, accesscontrol.PermissionAccessManage)
-	query := `mutation { grantTeamArtifactAccess(team_id:"` + teamID.String() + `",artifact_id:"` + artifactID.String() + `",level:MANAGER) { changed authorization_revision binding { role_slug resource_type resource_id } } }`
+	query := `mutation { grantTeamAppAccess(team_id:"` + teamID.String() + `",app_family_id:"` + appID.String() + `",level:MANAGER) { changed authorization_revision binding { role_slug resource_type resource_id } } }`
 
 	response := executeTeamGraphQLWithSink(t, s, actor, query, sink)
 
-	if response.Code != http.StatusOK || !mutationChanged(t, response, "grantTeamArtifactAccess") || len(sink.revisions) != 1 || sink.revisions[0] != 44 {
+	if response.Code != http.StatusOK || !mutationChanged(t, response, "grantTeamAppAccess") || len(sink.revisions) != 1 || sink.revisions[0] != 44 {
 		t.Fatalf("response/revisions = %d %s / %#v", response.Code, response.Body.String(), sink.revisions)
 	}
 }
 
-func TestTeamArtifactBindingGraphQLFragmentRequiresAccessManageBeforeAnyCall(t *testing.T) {
-	teamID, artifactID := uuid.New(), uuid.New()
+func TestTeamAppBindingGraphQLFragmentRequiresAccessManageBeforeAnyCall(t *testing.T) {
+	teamID, appID := uuid.New(), uuid.New()
 	s := &teamGraphQLTestStore{}
 	query := `mutation Share {
 		...Grant
-		revokeTeamArtifactAccess(team_id:"` + teamID.String() + `",artifact_id:"` + artifactID.String() + `",level:READER) { changed }
+		revokeTeamAppAccess(team_id:"` + teamID.String() + `",app_family_id:"` + appID.String() + `",level:READER) { changed }
 	}
 	fragment Grant on EngineMutation {
-		grantTeamArtifactAccess(team_id:"` + teamID.String() + `",artifact_id:"` + artifactID.String() + `",level:MANAGER) { changed }
+		grantTeamAppAccess(team_id:"` + teamID.String() + `",app_family_id:"` + appID.String() + `",level:MANAGER) { changed }
 	}`
 
 	response := executeTeamGraphQL(t, s, actorWithTeamPermissions(t, accesscontrol.PermissionAccessRead), query)
@@ -597,6 +599,9 @@ func executeTeamGraphQLWithVariables(t *testing.T, s *teamGraphQLTestStore, acto
 
 func executeTeamGraphQLRequest(t *testing.T, s *teamGraphQLTestStore, actor accesscontrol.Actor, query string, variables map[string]interface{}, sink authorizationRevisionSink) *httptest.ResponseRecorder {
 	t.Helper()
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{SSOEnabled: true})
+	defer entitlement.LiveEntitlement.Reset()
+
 	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"))
 	if err != nil {
 		t.Fatalf("new schema: %v", err)

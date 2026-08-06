@@ -39,7 +39,7 @@ type WorkspaceWebhook struct {
 	// configured for this registration. Runtime parses only its key while the
 	// immutable bucket identity below controls lookup.
 	SecretRef string
-	// SecretBucketID is resolved when the artifact is planned/applied and is
+	// SecretBucketID is resolved when the webhook is planned/applied and is
 	// the only bucket identity runtime secret lookup trusts. SecretRef's name
 	// is descriptive input, never a runtime lookup key.
 	SecretBucketID *uuid.UUID
@@ -179,9 +179,9 @@ func (s *postgresStore) ListWorkspaceWebhooks(ctx context.Context, serviceID uui
 }
 
 // WorkspaceWebhookOwnersByLabel is one batched query (service_id = ANY($1))
-// rather than one query per service, since a kind: webhook artifact's
+// rather than one query per service, since a webhook configuration's
 // (service, name) uniqueness check needs an answer for every service it
-// declares and label is the same constant (the artifact's own name) across
+// declares and label is the same constant (the configuration's name) across
 // all of them -- see this method's doc comment on the Store interface.
 func (s *postgresStore) WorkspaceWebhookOwnersByLabel(ctx context.Context, serviceIDs []uuid.UUID, label string) (map[uuid.UUID]string, error) {
 	if len(serviceIDs) == 0 {
