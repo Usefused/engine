@@ -1,4 +1,5 @@
-import { useEffect, useState, type MetaFunction } from "react";
+import { useEffect, useState } from "react";
+import type { MetaFunction } from "@remix-run/react";
 import { CheckCircle2, Loader2, XCircle } from "lucide-react";
 import { Logo } from "~/components/Logo";
 import { api } from "~/lib/api";
