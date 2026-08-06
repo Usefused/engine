@@ -124,6 +124,9 @@ func engineSchemaQueries() []string {
 			display_name                 text,
 			auth_method                  text,
 			authenticated_at             timestamptz,
+			logout_encrypted_dek         text,
+			encrypted_logout_token       text,
+			logout_expires_at            timestamptz,
 			expires_at                   timestamptz NOT NULL,
 			created_at                   timestamptz NOT NULL DEFAULT NOW(),
 			consumed_at                  timestamptz,
@@ -183,6 +186,22 @@ func engineSchemaQueries() []string {
 		ON fused_control_credentials(subject_id, created_at DESC, id);`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_control_credentials_active_name_ci
 		ON fused_control_credentials(subject_id, lower(name)) WHERE revoked_at IS NULL;`,
+
+		// A managed browser credential owns exactly one opaque Registry logout
+		// capability. Deleting it during local revocation makes provider logout
+		// one-shot while keeping Logto tokens out of Engine storage.
+		`CREATE TABLE IF NOT EXISTS fused_browser_logout_contexts (
+			credential_id          uuid PRIMARY KEY REFERENCES fused_control_credentials(id) ON DELETE CASCADE,
+			encrypted_dek          text NOT NULL,
+			encrypted_logout_token text NOT NULL,
+			expires_at             timestamptz NOT NULL,
+			created_at             timestamptz NOT NULL DEFAULT NOW(),
+			CONSTRAINT chk_fused_browser_logout_context_values CHECK (
+				encrypted_dek <> '' AND encrypted_logout_token <> ''
+			)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_browser_logout_contexts_expiry
+		ON fused_browser_logout_contexts(expires_at, credential_id);`,
 
 		// CLI login precommits a credential hash before browser approval. Keeping
 		// the rendezvous in PostgreSQL lets any Engine node complete the flow while
@@ -1358,6 +1377,11 @@ func engineMigrationQueries() []string {
 		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS execution_retention_days integer NOT NULL DEFAULT 30;`,
 		`ALTER TABLE fused_control_credentials ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'api_key';`,
 		`ALTER TABLE fused_control_credentials ADD COLUMN IF NOT EXISTS auth_method text NOT NULL DEFAULT 'api_key';`,
+		// Existing self-hosted Engines need the transient handoff columns before
+		// managed login can persist the optional Registry logout capability.
+		`ALTER TABLE fused_managed_login_transactions ADD COLUMN IF NOT EXISTS logout_encrypted_dek text;`,
+		`ALTER TABLE fused_managed_login_transactions ADD COLUMN IF NOT EXISTS encrypted_logout_token text;`,
+		`ALTER TABLE fused_managed_login_transactions ADD COLUMN IF NOT EXISTS logout_expires_at timestamptz;`,
 		`ALTER TABLE fused_engine_idempotency_keys ADD COLUMN IF NOT EXISTS response_status integer NOT NULL DEFAULT 200;`,
 		`DROP TABLE IF EXISTS fused_webhook_events;`,
 		`DROP TABLE IF EXISTS fused_mcp_analytics;`,

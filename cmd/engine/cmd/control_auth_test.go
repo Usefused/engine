@@ -32,7 +32,7 @@ func TestControlActorMiddlewareHydratesActorAndReusesCache(t *testing.T) {
 	}
 	handler := controlActorMiddleware(authenticator)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		actor, ok := accesscontrol.ActorFromContext(r.Context())
-		if !ok || actor.SubjectID != loader.principal.SubjectID || actor.WorkspaceID != loader.principal.WorkspaceID {
+		if !ok || actor.SubjectID != loader.principal.SubjectID || actor.WorkspaceID != loader.principal.WorkspaceID || actor.DisplayName != loader.principal.DisplayName || actor.Email != loader.principal.Email {
 			t.Fatalf("request actor = %#v, %v", actor, ok)
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -231,6 +231,8 @@ func TestClassifyEngineRequest(t *testing.T) {
 		{method: http.MethodPost, path: "/auth/cli/start", want: requestClassPublic},
 		{method: http.MethodPost, path: "/auth/cli/poll", want: requestClassPublic},
 		{method: http.MethodPost, path: "/auth/cli/approve", want: requestClassPublic},
+		{method: http.MethodGet, path: "/auth/whoami", want: requestClassControl},
+		{method: http.MethodPost, path: "/auth/cli/logout", want: requestClassControl},
 		{method: http.MethodOptions, path: "/workspace/services", want: requestClassPublic},
 		{method: http.MethodPost, path: "/mcp/example", want: requestClassRuntimeExcluded},
 		{method: http.MethodPost, path: "/workspace/connect/callback", want: requestClassRuntimeExcluded},
@@ -253,6 +255,8 @@ func controlTestPrincipal() accesscontrol.ControlPrincipal {
 		AccountID:            uuid.New(),
 		WorkspaceID:          workspaceID,
 		SubjectID:            uuid.New(),
+		DisplayName:          "CLI User",
+		Email:                "cli@example.com",
 		CredentialID:         uuid.New(),
 		CredentialSource:     "license_exchange",
 		AuthenticationMethod: "license_key",

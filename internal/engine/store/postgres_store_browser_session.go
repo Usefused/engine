@@ -66,17 +66,21 @@ func issueBrowserSessionInTransaction(
 	}, nil
 }
 
-func (s *postgresStore) RevokeBrowserSession(ctx context.Context, actor accesscontrol.Actor, at time.Time) (int64, error) {
+func (s *postgresStore) RevokeBrowserSession(ctx context.Context, actor accesscontrol.Actor, at time.Time) (BrowserLogoutContext, error) {
 	if !validBrowserSessionActor(actor) {
-		return 0, accesscontrol.ErrAuthenticationRequired
+		return BrowserLogoutContext{}, accesscontrol.ErrAuthenticationRequired
 	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
-		return 0, err
+		return BrowserLogoutContext{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := lockAuthorizationState(ctx, tx); err != nil {
-		return 0, err
+		return BrowserLogoutContext{}, err
+	}
+	logout, err := lockBrowserLogoutContext(ctx, tx, actor, at)
+	if err != nil {
+		return BrowserLogoutContext{}, err
 	}
 	command, err := tx.Exec(ctx, `
 		UPDATE fused_control_credentials
@@ -85,19 +89,54 @@ func (s *postgresStore) RevokeBrowserSession(ctx context.Context, actor accessco
 			AND source IN ('managed_login', 'license_exchange', 'api_key_exchange')
 	`, actor.CredentialID, actor.SubjectID, at)
 	if err != nil {
-		return 0, err
+		return BrowserLogoutContext{}, err
 	}
 	if command.RowsAffected() != 1 {
-		return 0, accesscontrol.ErrAuthenticationRequired
+		return BrowserLogoutContext{}, accesscontrol.ErrAuthenticationRequired
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM fused_browser_logout_contexts WHERE credential_id = $1`, actor.CredentialID); err != nil {
+		return BrowserLogoutContext{}, err
 	}
 	revision, err := finalizeBrowserSessionMutation(ctx, tx, actor, actor.CredentialID, "user.browser_session.logout", "session", true)
 	if err != nil {
-		return 0, err
+		return BrowserLogoutContext{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("commit browser session logout: %w", err)
+		return BrowserLogoutContext{}, fmt.Errorf("commit browser session logout: %w", err)
 	}
-	return revision, nil
+	logout.AuthorizationRevision = revision
+	return logout, nil
+}
+
+func lockBrowserLogoutContext(ctx context.Context, tx pgx.Tx, actor accesscontrol.Actor, at time.Time) (BrowserLogoutContext, error) {
+	var source string
+	var result BrowserLogoutContext
+	err := tx.QueryRow(ctx, `
+		SELECT credential.source, COALESCE(logout.encrypted_dek, ''),
+			COALESCE(logout.encrypted_logout_token, ''),
+			COALESCE(logout.expires_at, 'epoch'::timestamptz)
+		FROM fused_control_credentials credential
+		LEFT JOIN fused_browser_logout_contexts logout
+			ON logout.credential_id = credential.id AND logout.expires_at > $3
+		WHERE credential.id = $1 AND credential.subject_id = $2
+			AND credential.revoked_at IS NULL AND credential.expires_at > $3
+			AND credential.source IN ('managed_login', 'license_exchange', 'api_key_exchange')
+		FOR UPDATE OF credential
+	`, actor.CredentialID, actor.SubjectID, at).Scan(
+		&source, &result.EncryptedDEK, &result.EncryptedLogoutToken, &result.ExpiresAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return BrowserLogoutContext{}, accesscontrol.ErrAuthenticationRequired
+	}
+	if err != nil {
+		return BrowserLogoutContext{}, err
+	}
+	// Only managed-login credentials may activate the Registry capability, even
+	// if corrupt data were ever attached to another browser credential source.
+	if source != "managed_login" {
+		return BrowserLogoutContext{}, nil
+	}
+	return result, nil
 }
 
 func validBrowserSessionActor(actor accesscontrol.Actor) bool {

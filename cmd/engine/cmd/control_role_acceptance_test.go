@@ -74,7 +74,7 @@ func acceptancePolicyRequirements(t *testing.T, policy controlRoutePolicy, works
 	request := requestWithActor(t, policy.method, path, actorWithGrants(t, workspaceID))
 	request.URL.RawQuery = policyQuery(policy).Encode()
 	requirements, _, ok := resolveControlRESTPolicy(request, resolver)
-	if !ok || len(requirements) == 0 {
+	if !ok {
 		t.Fatalf("policy did not resolve: %s %s", policy.method, policy.pattern)
 	}
 	return requirements

@@ -44,9 +44,9 @@ func TestPostgresBrowserSessionDerivesAndRevokesCredentialAtomically(t *testing.
 	}
 
 	logoutActor := accesscontrol.Actor{SubjectID: owner.SubjectID, CredentialID: credential.CredentialID, Kind: accesscontrol.SubjectBootstrap}
-	revision, err := repository.RevokeBrowserSession(ctx, logoutActor, time.Now().UTC())
-	if err != nil || revision <= credential.AuthorizationRevision {
-		t.Fatalf("RevokeBrowserSession = %d, %v", revision, err)
+	logout, err := repository.RevokeBrowserSession(ctx, logoutActor, time.Now().UTC())
+	if err != nil || logout.AuthorizationRevision <= credential.AuthorizationRevision {
+		t.Fatalf("RevokeBrowserSession = %#v, %v", logout, err)
 	}
 	if _, err := repository.LoadControlPrincipal(ctx, accesscontrol.HashControlCredential(credential.RawKey)); !errors.Is(err, accesscontrol.ErrAuthenticationRequired) {
 		t.Fatalf("revoked browser credential auth error = %v", err)

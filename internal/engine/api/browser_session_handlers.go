@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -20,7 +21,7 @@ const maxBrowserSessionBodyBytes = 4 << 10
 type BrowserSessionService interface {
 	ExchangeLicenseKey(context.Context, string) (store.BrowserSessionCredential, error)
 	Session(context.Context, string) (accesscontrol.Actor, error)
-	Logout(context.Context, string) error
+	Logout(context.Context, string, string) (browserauth.LogoutResult, error)
 	Cookies() *browserauth.CookieManager
 }
 
@@ -100,7 +101,12 @@ func browserSessionLogoutHandler(service BrowserSessionService) http.HandlerFunc
 			writeManagedLoginError(w, http.StatusForbidden, "csrf_denied")
 			return
 		}
-		err = service.Logout(r.Context(), credential)
+		returnURL, err := browserLogoutReturnURL(r, service.Cookies())
+		if err != nil {
+			writeManagedLoginError(w, http.StatusForbidden, "origin_denied")
+			return
+		}
+		result, err := service.Logout(r.Context(), credential, returnURL)
 		if err != nil && !errors.Is(err, accesscontrol.ErrAuthenticationRequired) {
 			writeManagedLoginError(w, http.StatusInternalServerError, "logout_failed")
 			return
@@ -108,8 +114,23 @@ func browserSessionLogoutHandler(service BrowserSessionService) http.HandlerFunc
 		// Keep the cookie on transient persistence failures so the browser can
 		// repair CSRF/retry; invalid or revoked sessions are safe to clear.
 		service.Cookies().ClearSession(w)
-		w.WriteHeader(http.StatusNoContent)
+		writeManagedLoginJSON(w, http.StatusOK, map[string]string{"logout_url": result.LogoutURL})
 	}
+}
+
+func browserLogoutReturnURL(r *http.Request, cookies *browserauth.CookieManager) (string, error) {
+	if cookies == nil || !cookies.ValidateSameOrigin(r) {
+		return "", errors.New("invalid logout origin")
+	}
+	origin, err := url.Parse(strings.TrimSpace(r.Header.Get("Origin")))
+	if err != nil || origin.User != nil {
+		return "", errors.New("invalid logout origin")
+	}
+	// The initiating browser supplies its deployed Engine origin. Keeping the
+	// path fixed prevents Registry state from becoming an open redirect.
+	origin.Path, origin.RawPath = "/login", ""
+	origin.RawQuery, origin.Fragment = "", ""
+	return origin.String(), nil
 }
 
 func browserSessionCredential(r *http.Request, service BrowserSessionService) (string, browserauth.CredentialSource, error) {

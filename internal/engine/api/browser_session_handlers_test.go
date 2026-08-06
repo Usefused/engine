@@ -17,11 +17,13 @@ import (
 )
 
 type browserSessionHandlerFixture struct {
-	cookies    *browserauth.CookieManager
-	credential store.BrowserSessionCredential
-	actor      accesscontrol.Actor
-	logoutKey  string
-	logoutErr  error
+	cookies         *browserauth.CookieManager
+	credential      store.BrowserSessionCredential
+	actor           accesscontrol.Actor
+	logoutKey       string
+	logoutReturnURL string
+	logoutResult    browserauth.LogoutResult
+	logoutErr       error
 }
 
 func (f *browserSessionHandlerFixture) ExchangeLicenseKey(context.Context, string) (store.BrowserSessionCredential, error) {
@@ -32,9 +34,9 @@ func (f *browserSessionHandlerFixture) Session(context.Context, string) (accessc
 	return f.actor, nil
 }
 
-func (f *browserSessionHandlerFixture) Logout(_ context.Context, raw string) error {
-	f.logoutKey = raw
-	return f.logoutErr
+func (f *browserSessionHandlerFixture) Logout(_ context.Context, raw, returnURL string) (browserauth.LogoutResult, error) {
+	f.logoutKey, f.logoutReturnURL = raw, returnURL
+	return f.logoutResult, f.logoutErr
 }
 
 func TestBrowserLogoutKeepsSessionCookieOnPersistenceFailure(t *testing.T) {
@@ -49,6 +51,7 @@ func TestBrowserLogoutKeepsSessionCookieOnPersistenceFailure(t *testing.T) {
 	request.AddCookie(cookies[0])
 	request.AddCookie(cookies[1])
 	request.Header.Set(browserauth.CSRFHeader, cookies[1].Value)
+	request.Header.Set("Origin", "https://example.com")
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	if response.Code != http.StatusInternalServerError || response.Header().Get("Set-Cookie") != "" {
@@ -104,6 +107,7 @@ func TestBrowserLicenseExchangeRejectsCrossOriginAndRateLimits(t *testing.T) {
 
 func TestBrowserSessionStatusAndLogoutRequireCookieBoundCSRF(t *testing.T) {
 	fixture := browserSessionHandlerTestFixture(t)
+	fixture.logoutResult = browserauth.LogoutResult{LogoutURL: "https://tenant.logto.test/oidc/session/end?state=safe"}
 	router := chi.NewRouter()
 	MountBrowserSessionRoutes(router, fixture)
 	cookieResponse := httptest.NewRecorder()
@@ -131,9 +135,10 @@ func TestBrowserSessionStatusAndLogoutRequireCookieBoundCSRF(t *testing.T) {
 	logoutRequest.AddCookie(cookies[0])
 	logoutRequest.AddCookie(cookies[1])
 	logoutRequest.Header.Set(browserauth.CSRFHeader, cookies[1].Value)
+	logoutRequest.Header.Set("Origin", "https://example.com")
 	logoutResponse = httptest.NewRecorder()
 	router.ServeHTTP(logoutResponse, logoutRequest)
-	if logoutResponse.Code != http.StatusNoContent || fixture.logoutKey != fixture.credential.RawKey {
+	if logoutResponse.Code != http.StatusOK || fixture.logoutKey != fixture.credential.RawKey || fixture.logoutReturnURL != "https://example.com/login" || !strings.Contains(logoutResponse.Body.String(), fixture.logoutResult.LogoutURL) {
 		t.Fatalf("logout response = %d key=%q", logoutResponse.Code, fixture.logoutKey)
 	}
 }

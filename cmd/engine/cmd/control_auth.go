@@ -11,6 +11,7 @@ import (
 )
 
 var controlPlanePrefixes = []string{
+	"/auth",
 	"/graphql",
 	"/integrations",
 	"/sdks",

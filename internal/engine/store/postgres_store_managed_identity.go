@@ -56,7 +56,9 @@ func (s *postgresStore) ClaimManagedLoginExchange(ctx context.Context, id uuid.U
 			COALESCE(encrypted_registry_verifier, ''), state,
 			COALESCE(provider, ''), COALESCE(issuer, ''), COALESCE(external_subject, ''),
 			COALESCE(verified_email, ''), COALESCE(display_name, ''), COALESCE(auth_method, ''),
-			COALESCE(authenticated_at, 'epoch'::timestamptz), expires_at
+			COALESCE(authenticated_at, 'epoch'::timestamptz),
+			COALESCE(logout_encrypted_dek, ''), COALESCE(encrypted_logout_token, ''),
+			COALESCE(logout_expires_at, 'epoch'::timestamptz), expires_at
 	`, id, pollSecretHash, at, managedLoginExchangeLease.String()))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ManagedLoginTransaction{}, ErrManagedLoginPending
@@ -90,14 +92,17 @@ func (s *postgresStore) SaveManagedLoginAssertion(ctx context.Context, id uuid.U
 		SET state = 'verified', encrypted_dek = '', encrypted_registry_verifier = NULL,
 			exchange_started_at = NULL, provider = $4, issuer = $5,
 			external_subject = $6, verified_email = $7, display_name = $8,
-			auth_method = $9, authenticated_at = $10
+			auth_method = $9, authenticated_at = $10,
+			logout_encrypted_dek = NULLIF($11, ''), encrypted_logout_token = NULLIF($12, ''),
+			logout_expires_at = $13
 		WHERE id = $1 AND poll_secret_hash = $2 AND state = 'exchanging'
-			AND expires_at > $3 AND account_id = $11 AND installation_id = $12
-			AND purpose = $13 AND enrollment_ref = $14
+			AND expires_at > $3 AND account_id = $14 AND installation_id = $15
+			AND purpose = $16 AND enrollment_ref = $17
 	`, id, pollSecretHash, at, identity.Provider, identity.Issuer,
 		identity.ExternalSubject, identity.VerifiedEmail, identity.DisplayName,
-		identity.AuthMethod, identity.AuthenticatedAt, identity.AccountID,
-		identity.InstallationID, identity.Purpose, identity.EnrollmentRef)
+		identity.AuthMethod, identity.AuthenticatedAt, identity.LogoutEncryptedDEK,
+		identity.EncryptedLogoutToken, optionalManagedLogoutExpiry(identity.LogoutExpiresAt),
+		identity.AccountID, identity.InstallationID, identity.Purpose, identity.EnrollmentRef)
 	if err != nil {
 		return fmt.Errorf("save managed identity assertion: %w", err)
 	}
@@ -157,6 +162,9 @@ func consumeManagedLoginInTransaction(
 	if err != nil {
 		return ManagedSessionCredential{}, err
 	}
+	if err := insertManagedLogoutContext(ctx, tx, credential.ID, transaction, sessionExpiresAt); err != nil {
+		return ManagedSessionCredential{}, err
+	}
 	revision, err := bumpAuthorizationRevision(ctx, tx, true)
 	if err != nil {
 		return ManagedSessionCredential{}, err
@@ -182,7 +190,9 @@ func lockVerifiedManagedLogin(ctx context.Context, tx pgx.Tx, id uuid.UUID, poll
 			COALESCE(transaction.encrypted_registry_verifier, ''), transaction.state,
 			transaction.provider, transaction.issuer, transaction.external_subject,
 			transaction.verified_email, COALESCE(transaction.display_name, ''), transaction.auth_method,
-			transaction.authenticated_at, transaction.expires_at
+			transaction.authenticated_at, COALESCE(transaction.logout_encrypted_dek, ''),
+			COALESCE(transaction.encrypted_logout_token, ''),
+			COALESCE(transaction.logout_expires_at, 'epoch'::timestamptz), transaction.expires_at
 		FROM fused_managed_login_transactions transaction
 		JOIN fused_workspaces workspace ON workspace.singleton_key = 1
 			AND workspace.account_id = transaction.account_id
@@ -196,6 +206,28 @@ func lockVerifiedManagedLogin(ctx context.Context, tx pgx.Tx, id uuid.UUID, poll
 		return ManagedLoginTransaction{}, ErrManagedLoginUnavailable
 	}
 	return transaction, err
+}
+
+func insertManagedLogoutContext(
+	ctx context.Context,
+	tx pgx.Tx,
+	credentialID uuid.UUID,
+	transaction ManagedLoginTransaction,
+	sessionExpiresAt time.Time,
+) error {
+	if transaction.EncryptedLogoutToken == "" {
+		return nil
+	}
+	expiresAt := transaction.LogoutExpiresAt
+	if sessionExpiresAt.Before(expiresAt) {
+		expiresAt = sessionExpiresAt
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO fused_browser_logout_contexts (
+			credential_id, encrypted_dek, encrypted_logout_token, expires_at
+		) VALUES ($1, $2, $3, $4)
+	`, credentialID, transaction.LogoutEncryptedDEK, transaction.EncryptedLogoutToken, expiresAt)
+	return err
 }
 
 func resolveManagedIdentityUser(ctx context.Context, tx pgx.Tx, transaction ManagedLoginTransaction, at time.Time) (uuid.UUID, bool, error) {
@@ -309,7 +341,8 @@ func consumeManagedLoginRow(ctx context.Context, tx pgx.Tx, id uuid.UUID, at tim
 		UPDATE fused_managed_login_transactions
 		SET state = 'consumed', consumed_at = $2, provider = NULL, issuer = NULL,
 			external_subject = NULL, verified_email = NULL, display_name = NULL,
-			auth_method = NULL, authenticated_at = NULL
+			auth_method = NULL, authenticated_at = NULL, logout_encrypted_dek = NULL,
+			encrypted_logout_token = NULL, logout_expires_at = NULL
 		WHERE id = $1 AND state = 'verified'
 	`, id, at)
 	if err != nil {
@@ -339,6 +372,24 @@ func (s *postgresStore) ExpireManagedLoginTransactions(ctx context.Context, at t
 	return command.RowsAffected(), nil
 }
 
+func (s *postgresStore) ExpireBrowserLogoutContexts(ctx context.Context, at time.Time, limit int) (int64, error) {
+	command, err := s.db.Exec(ctx, `
+		WITH expired AS (
+			SELECT credential_id FROM fused_browser_logout_contexts
+			WHERE expires_at <= $1
+			ORDER BY expires_at, credential_id
+			LIMIT $2
+			FOR UPDATE SKIP LOCKED
+		)
+		DELETE FROM fused_browser_logout_contexts logout
+		USING expired WHERE logout.credential_id = expired.credential_id
+	`, at, limit)
+	if err != nil {
+		return 0, err
+	}
+	return command.RowsAffected(), nil
+}
+
 func scanManagedLoginTransaction(row pgx.Row) (ManagedLoginTransaction, error) {
 	var transaction ManagedLoginTransaction
 	err := row.Scan(
@@ -348,9 +399,17 @@ func scanManagedLoginTransaction(row pgx.Row) (ManagedLoginTransaction, error) {
 		&transaction.EncryptedRegistryVerifier, &transaction.State,
 		&transaction.Provider, &transaction.Issuer, &transaction.ExternalSubject,
 		&transaction.VerifiedEmail, &transaction.DisplayName, &transaction.AuthMethod,
-		&transaction.AuthenticatedAt, &transaction.ExpiresAt,
+		&transaction.AuthenticatedAt, &transaction.LogoutEncryptedDEK,
+		&transaction.EncryptedLogoutToken, &transaction.LogoutExpiresAt, &transaction.ExpiresAt,
 	)
 	return transaction, err
+}
+
+func optionalManagedLogoutExpiry(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value
 }
 
 func accesscontrolTraceID(ctx context.Context) string {

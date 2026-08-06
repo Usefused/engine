@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -175,6 +176,12 @@ type ManagedIdentityAssertion struct {
 	EnrollmentRef   string    `json:"enrollment_ref"`
 	AuthenticatedAt time.Time `json:"authenticated_at"`
 	ExpiresAt       time.Time `json:"expires_at"`
+	LogoutToken     string    `json:"logout_token,omitempty"`
+	LogoutExpiresAt time.Time `json:"logout_expires_at,omitempty"`
+}
+
+type ManagedLogoutResult struct {
+	LogoutURL string `json:"logout_url"`
 }
 
 type ManagedIdentityRegistryError struct {
@@ -1688,6 +1695,26 @@ func (c *HTTPRegistryClient) ExchangeManagedLoginTransaction(ctx context.Context
 	var assertion ManagedIdentityAssertion
 	err := c.postManagedIdentityJSON(ctx, "/api/engine/identity/transactions/"+id.String()+"/exchange", request, &assertion)
 	return assertion, err
+}
+
+func (c *HTTPRegistryClient) StartManagedLogout(ctx context.Context, logoutToken, returnURL string) (string, error) {
+	request := struct {
+		LogoutToken string `json:"logout_token"`
+		ReturnURL   string `json:"return_url"`
+	}{LogoutToken: logoutToken, ReturnURL: returnURL}
+	var result ManagedLogoutResult
+	if err := c.postManagedIdentityJSON(ctx, "/api/engine/identity/logout", request, &result); err != nil {
+		return "", err
+	}
+	if !validManagedLogoutURL(result.LogoutURL) {
+		return "", errors.New("managed identity Registry logout response was invalid")
+	}
+	return result.LogoutURL, nil
+}
+
+func validManagedLogoutURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil && parsed.Fragment == ""
 }
 
 func IsManagedLoginPending(err error) bool {

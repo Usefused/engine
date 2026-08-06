@@ -82,6 +82,14 @@ var dynamicControlRequirements = map[string]dynamicRequirementKind{
 	http.MethodDelete + " /workspace/sdk-tokens":             dynamicAppTokenAccess,
 }
 
+// These endpoints need a valid current identity but deliberately have no RBAC
+// requirement: users must be able to inspect and revoke their own credential
+// even after their workspace grants have been removed.
+var authenticatedOnlyControlRoutes = map[string]struct{}{
+	http.MethodGet + " /auth/whoami":      {},
+	http.MethodPost + " /auth/cli/logout": {},
+}
+
 func workspaceRequirement(permission accesscontrol.Permission) routeRequirement {
 	return routeRequirement{permission: permission, resourceType: accesscontrol.ResourceWorkspace, source: resourceFromWorkspace}
 }
@@ -99,6 +107,8 @@ func queryRequirement(permission accesscontrol.Permission, resourceType accessco
 // even though their transport is mounted by prefix, so newly added Registry
 // endpoints remain denied until this local policy is deliberately extended.
 var controlRESTPolicies = []controlRoutePolicy{
+	{http.MethodGet, "/auth/whoami", false, nil},
+	{http.MethodPost, "/auth/cli/logout", false, nil},
 	{http.MethodGet, "/audit/export", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionAuditRead),
 	}},
@@ -532,22 +542,43 @@ func finishControlAuthorization(w http.ResponseWriter, r *http.Request, started 
 func validateControlRESTPolicies() error {
 	seen := make(map[string]struct{}, len(controlRESTPolicies))
 	for _, policy := range controlRESTPolicies {
-		key := policy.method + " " + policy.pattern
-		if _, duplicate := seen[key]; duplicate {
-			return fmt.Errorf("duplicate control route policy: %s", key)
-		}
-		seen[key] = struct{}{}
-		if len(policy.requirements) == 0 && dynamicControlRequirements[key] == "" {
-			return fmt.Errorf("control route policy has no requirements: %s", key)
-		}
-		if err := validateRouteRequirements(policy); err != nil {
-			return fmt.Errorf("%s: %w", key, err)
-		}
-		if policy.subtree && isRegistryProxyPolicy(policy.pattern) {
-			return fmt.Errorf("Registry proxy policy must be exact: %s", key)
+		if err := validateControlRESTPolicy(policy, seen); err != nil {
+			return err
 		}
 	}
-	return validateDynamicPolicyReferences(seen)
+	if err := validateDynamicPolicyReferences(seen); err != nil {
+		return err
+	}
+	return validateAuthenticatedOnlyPolicyReferences(seen)
+}
+
+func validateControlRESTPolicy(policy controlRoutePolicy, seen map[string]struct{}) error {
+	key := policy.method + " " + policy.pattern
+	if _, duplicate := seen[key]; duplicate {
+		return fmt.Errorf("duplicate control route policy: %s", key)
+	}
+	seen[key] = struct{}{}
+	if err := validateControlRequirementMode(key, policy); err != nil {
+		return err
+	}
+	if err := validateRouteRequirements(policy); err != nil {
+		return fmt.Errorf("%s: %w", key, err)
+	}
+	if policy.subtree && isRegistryProxyPolicy(policy.pattern) {
+		return fmt.Errorf("Registry proxy policy must be exact: %s", key)
+	}
+	return nil
+}
+
+func validateControlRequirementMode(key string, policy controlRoutePolicy) error {
+	_, authenticatedOnly := authenticatedOnlyControlRoutes[key]
+	if authenticatedOnly && len(policy.requirements) != 0 {
+		return fmt.Errorf("authenticated-only route has RBAC requirements: %s", key)
+	}
+	if len(policy.requirements) == 0 && dynamicControlRequirements[key] == "" && !authenticatedOnly {
+		return fmt.Errorf("control route policy has no requirements: %s", key)
+	}
+	return nil
 }
 
 func isRegistryProxyPolicy(pattern string) bool {
@@ -563,6 +594,18 @@ func validateDynamicPolicyReferences(policies map[string]struct{}) error {
 	for key := range dynamicControlRequirements {
 		if _, ok := policies[key]; !ok {
 			return fmt.Errorf("dynamic resolver has no route policy: %s", key)
+		}
+	}
+	return nil
+}
+
+func validateAuthenticatedOnlyPolicyReferences(policies map[string]struct{}) error {
+	for key := range authenticatedOnlyControlRoutes {
+		if _, ok := policies[key]; !ok {
+			return fmt.Errorf("authenticated-only route has no policy: %s", key)
+		}
+		if dynamicControlRequirements[key] != "" {
+			return fmt.Errorf("authenticated-only route has dynamic requirements: %s", key)
 		}
 	}
 	return nil

@@ -23,6 +23,31 @@ func TestControlRESTPolicyManifestIsValid(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedIdentityRoutesDoNotRequireWorkspaceGrants(t *testing.T) {
+	workspaceID := uuid.New()
+	actor := actorWithGrants(t, workspaceID)
+	for _, route := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/auth/whoami"},
+		{http.MethodPost, "/auth/cli/logout"},
+	} {
+		t.Run(route.method+" "+route.path, func(t *testing.T) {
+			called := false
+			handler := controlAuthorizationMiddleware(accesscontrol.SnapshotAuthorizer{})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, requestWithActor(t, route.method, route.path, actor))
+			if response.Code != http.StatusNoContent || !called {
+				t.Fatalf("authenticated-only response = %d, called=%v", response.Code, called)
+			}
+		})
+	}
+}
+
 func TestControlRESTPolicyManifestCoversNativeRoutes(t *testing.T) {
 	workspaceID := uuid.New()
 	actor := actorWithGrants(t, workspaceID)

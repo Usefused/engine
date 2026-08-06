@@ -191,7 +191,7 @@ func runEngine() {
 	// making a live Registry call on every single proxied request.
 	runtimeEnforcer := enginemiddleware.NewRuntimeEnforcer(engineStore, localObjectCache)
 	masterKey := loadMasterKey(ctx)
-	browserCookies, browserSessionService := newBrowserSessionService(ctx, engineStore, controlAuthenticator, masterKey)
+	browserCookies, browserSessionService := newBrowserSessionService(ctx, engineStore, registryClient, controlAuthenticator, masterKey)
 	managedLoginService := newManagedLoginService(ctx, engineStore, registryClient, controlAuthenticator, masterKey)
 	cliLoginService := newCLILoginService(ctx, engineStore, controlAuthenticator)
 
@@ -771,6 +771,7 @@ func newManagedLoginService(
 func newBrowserSessionService(
 	ctx context.Context,
 	engineStore store.Store,
+	registryClient *sandbox.HTTPRegistryClient,
 	authenticator *accesscontrol.Authenticator,
 	masterKey []byte,
 ) (*browserauth.CookieManager, *browserauth.Service) {
@@ -784,7 +785,7 @@ func newBrowserSessionService(
 		slog.ErrorContext(ctx, "Browser session store is unavailable")
 		return cookies, nil
 	}
-	service, err := browserauth.NewService(sessionStore, authenticator, cookies)
+	service, err := browserauth.NewService(sessionStore, authenticator, cookies, registryClient, masterKey)
 	if err != nil {
 		slog.ErrorContext(ctx, "Browser session service is unavailable")
 		return cookies, nil

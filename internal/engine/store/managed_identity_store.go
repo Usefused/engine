@@ -38,6 +38,9 @@ type ManagedLoginTransaction struct {
 	DisplayName               string
 	AuthMethod                string
 	AuthenticatedAt           time.Time
+	LogoutEncryptedDEK        string
+	EncryptedLogoutToken      string
+	LogoutExpiresAt           time.Time
 	ExpiresAt                 time.Time
 }
 
@@ -54,6 +57,11 @@ type VerifiedManagedIdentity struct {
 	EnrollmentRef    string
 	AuthenticatedAt  time.Time
 	AssertionExpires time.Time
+	// Logout material is already envelope-encrypted before it crosses the
+	// persistence boundary, so PostgreSQL never receives the Registry token.
+	LogoutEncryptedDEK   string
+	EncryptedLogoutToken string
+	LogoutExpiresAt      time.Time
 }
 
 type ManagedSessionCredential struct {
@@ -73,4 +81,5 @@ type ManagedIdentityStore interface {
 	SaveManagedLoginAssertion(context.Context, uuid.UUID, string, VerifiedManagedIdentity, time.Time) error
 	ConsumeManagedLoginAssertion(context.Context, uuid.UUID, string, time.Time, time.Time) (ManagedSessionCredential, error)
 	ExpireManagedLoginTransactions(context.Context, time.Time, int) (int64, error)
+	ExpireBrowserLogoutContexts(context.Context, time.Time, int) (int64, error)
 }
