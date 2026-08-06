@@ -2875,10 +2875,9 @@ func TestWorkspaceNotificationsGraphQL_BatchesDriftAcrossMultipleServices(t *tes
 	}
 }
 
-// TestWorkspaceNotificationsGraphQL_DriftDisabled_SkipsRegistry verifies
-// the P4-01 gate: when DriftMonitoringEnabled is false the registry
-// must not be called and no drift items appear.
-func TestWorkspaceNotificationsGraphQL_DriftDisabled_SkipsRegistry(t *testing.T) {
+// A persisted false value from the former Dev-plan gate is normalized to true,
+// so drift remains available after upgrading an existing Engine.
+func TestWorkspaceNotificationsGraphQL_LegacyDriftFalseStillCallsRegistry(t *testing.T) {
 	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{DriftMonitoringEnabled: false})
 	defer entitlement.LiveEntitlement.Reset()
 
@@ -2900,11 +2899,11 @@ func TestWorkspaceNotificationsGraphQL_DriftDisabled_SkipsRegistry(t *testing.T)
 	h := mountWorkspaceNotificationsGraphQLTestHandler(t, &mockConfigStore{}, s, registryClient)
 	resp := workspaceNotificationsGraphQLData(t, h)
 	items := resp["items"].([]any)
-	if len(items) != 0 {
-		t.Fatalf("expected zero items when drift disabled, got %#v", items)
+	if len(items) != 1 {
+		t.Fatalf("expected drift item after legacy value normalization, got %#v", items)
 	}
-	if len(registryClient.driftServiceIDBatches) != 0 {
-		t.Fatalf("expected no registry drift calls when disabled, got %#v", registryClient.driftServiceIDBatches)
+	if len(registryClient.driftServiceIDBatches) != 1 {
+		t.Fatalf("expected registry drift call after legacy value normalization, got %#v", registryClient.driftServiceIDBatches)
 	}
 }
 
