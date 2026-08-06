@@ -9,7 +9,10 @@ import (
 
 	"github.com/Usefused/engine/internal/engine"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
+	"github.com/google/uuid"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 // fakeExecuteStream is a minimal EngineService_ExecuteServer that captures
@@ -59,7 +62,7 @@ func TestExecute_EndpointNamePropagated(t *testing.T) {
 
 	params, _ := json.Marshal(map[string]any{"page": 1})
 	req := &enginev1.ExecuteRequest{
-		ArtifactId:   "test-sdk-id",
+		AppId:        "test-sdk-id",
 		Token:        "tok",
 		EndpointName: wantEndpoint, // must use EndpointName, NOT a ToolName field
 		Params:       params,
@@ -123,7 +126,7 @@ func TestExecute_CredentialPassthrough(t *testing.T) {
 	}
 
 	req := &enginev1.ExecuteRequest{
-		ArtifactId:   "sdk",
+		AppId:        "sdk",
 		EndpointName: "ep",
 		Credentials:  wantCreds,
 	}
@@ -156,7 +159,7 @@ func TestExecute_RuntimeEnvironmentPropagated(t *testing.T) {
 	}
 
 	req := &enginev1.ExecuteRequest{
-		ArtifactId:   "sdk",
+		AppId:        "sdk",
 		EndpointName: "ep",
 		Environment:  wantEnvironment,
 	}
@@ -190,7 +193,7 @@ func TestExecute_IdempotencyKeyPropagatedInContext(t *testing.T) {
 	}
 
 	req := &enginev1.ExecuteRequest{
-		ArtifactId:      "sdk",
+		AppId:           "sdk",
 		EndpointName:    "ep",
 		IdempotencyKey:  wantKey,
 		RequestBodyHash: wantHash,
@@ -222,7 +225,7 @@ func TestExecute_ProvidesRuntimeTimingContext(t *testing.T) {
 	}
 
 	req := &enginev1.ExecuteRequest{
-		ArtifactId:   "sdk",
+		AppId:        "sdk",
 		EndpointName: "ep",
 		Params:       []byte(`{"ok":true}`),
 	}
@@ -264,7 +267,7 @@ func TestExecute_RuntimeEnvironmentErrorsAreStructured(t *testing.T) {
 		}
 	}
 
-	req := &enginev1.ExecuteRequest{ArtifactId: "sdk", EndpointName: "ep", Environment: "production"}
+	req := &enginev1.ExecuteRequest{AppId: "sdk", EndpointName: "ep", Environment: "production"}
 	stream := &fakeExecuteStream{ctx: context.Background()}
 
 	if err := NewEngineGRPCServer().Execute(req, stream); err != nil {
@@ -297,7 +300,7 @@ func TestExecute_OrdinaryErrorsRemainStrings(t *testing.T) {
 	}
 
 	stream := &fakeExecuteStream{ctx: context.Background()}
-	if err := NewEngineGRPCServer().Execute(&enginev1.ExecuteRequest{ArtifactId: "sdk", EndpointName: "ep"}, stream); err != nil {
+	if err := NewEngineGRPCServer().Execute(&enginev1.ExecuteRequest{AppId: "sdk", EndpointName: "ep"}, stream); err != nil {
 		t.Fatalf("unexpected Execute transport error: %v", err)
 	}
 	if stream.sent[0].Error != "ordinary failure" {
@@ -316,10 +319,32 @@ func TestConnect_NilCacheFails(t *testing.T) {
 
 	srv := NewEngineGRPCServer()
 	_, err := srv.Connect(context.Background(), &enginev1.ConnectRequest{
-		ArtifactId: "test",
-		Token:      "tok",
+		AppId: "test",
+		Token: "tok",
 	})
 	if err == nil {
 		t.Fatal("expected error when cache is nil, got nil")
+	}
+}
+
+func TestConnect_InvalidOrInactiveSDKReturnsFriendlyUnauthenticatedStatus(t *testing.T) {
+	originalCache, originalValidator := globalObjectCache, globalTokenValidator
+	t.Cleanup(func() {
+		globalObjectCache, globalTokenValidator = originalCache, originalValidator
+	})
+	globalObjectCache = &richMockCache{}
+	globalTokenValidator = &mockTokenValidator{validToken: "active-token", accountID: uuid.New()}
+
+	appID := uuid.NewString()
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(
+		"x-app-id", appID,
+		"x-api-key", "revoked-or-inactive-token",
+	))
+	_, err := NewEngineGRPCServer().Connect(ctx, &enginev1.ConnectRequest{})
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("Connect error = %v, want Unauthenticated", err)
+	}
+	if got := status.Convert(err).Message(); got != "SDK authentication failed; check the token and confirm this SDK version is active" {
+		t.Fatalf("Connect message = %q", got)
 	}
 }

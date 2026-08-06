@@ -27,9 +27,12 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
+	"github.com/Usefused/engine/internal/engine/applifecycle"
+	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 
+	"github.com/Usefused/engine/internal/shared/canonical"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 )
@@ -57,20 +60,22 @@ type sdkConfigDocument struct {
 	Version    string `json:"version"`
 	Language   string `json:"language"`
 	Bucket     string `json:"bucket,omitempty"`
-	// WebhookAttachment names one kind: webhook artifact this SDK/MCP wants
+	// WebhookAttachment names one kind: webhook config this SDK/MCP wants
 	// event delivery from -- mirrors cli/internal/configfile's
-	// ArtifactConfig.WebhookAttachment field-for-field (same yaml/json key),
+	// app config webhook_attachment field-for-field (same yaml/json key),
 	// since this struct is the Engine-side decode target for that exact wire
 	// document. Required (validated in validateSDKConfigDocument) whenever
 	// any service below selects webhooks -- the WS bridge
-	// (websocket_handler.go) resolves this back out of fused_artifact_scopes at
-	// connect time to scope FilterSubjects to just this artifact's
+	// (websocket_handler.go) resolves this from the exact fused_apps row at
+	// connect time to scope FilterSubjects to just this app's
 	// registrations. See plans/plan-webhook-kind.md.
 	WebhookAttachment string                         `json:"webhook_attachment,omitempty"`
 	Services          map[string]sdkConfigServiceDoc `json:"services"`
 }
 
-var sdkArtifactVersionPattern = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
+const maxAppVersionLength = 128
+
+var appVersionPattern = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
 
 type sdkConfigServiceDoc struct {
 	Version    string   `json:"version"`
@@ -78,23 +83,23 @@ type sdkConfigServiceDoc struct {
 	Webhooks   []string `json:"webhooks,omitempty"`
 	SelectAll  bool     `json:"select_all,omitempty"`
 	// WebhooksSelectAll is the webhook-only counterpart to SelectAll --
-	// mirrors ArtifactService.WebhooksSelectAll (same key) so a service can
+	// mirrors app service webhooks_select_all (same key) so a service can
 	// select every webhook event independent of whether it also selects
 	// every operation. Threaded into models.SDKSelection.WebhookSelectAll at
 	// resolution time; see that field's doc comment for how the Registry
 	// generator treats it.
-	WebhooksSelectAll bool                   `json:"webhooks_select_all,omitempty"`
-	Auth              *sdkArtifactAuthDoc    `json:"auth,omitempty"`
-	Connect           *sdkArtifactConnectDoc `json:"connect,omitempty"`
-	Injections        []InjectionConfig      `json:"injections,omitempty"`
+	WebhooksSelectAll bool              `json:"webhooks_select_all,omitempty"`
+	Auth              *sdkAppAuthDoc    `json:"auth,omitempty"`
+	Connect           *sdkAppConnectDoc `json:"connect,omitempty"`
+	Injections        []InjectionConfig `json:"injections,omitempty"`
 }
 
-type sdkArtifactAuthDoc struct {
+type sdkAppAuthDoc struct {
 	Type string `json:"type"`
 	Name string `json:"name,omitempty"`
 }
 
-type sdkArtifactConnectDoc struct {
+type sdkAppConnectDoc struct {
 	Scopes []string `json:"scopes,omitempty"`
 }
 
@@ -102,11 +107,11 @@ type GenerateSDKRequest = models.SDKGenerationRequest
 
 type sdkContractBinding = models.SDKContractBinding
 
-// artifactResolvedPayload is the shared, generation-free record of resolved
+// appResolvedPayload is the shared, generation-free record of resolved
 // selections used by both SDK and MCP config apply. SDK generation adds its
 // Registry-specific fields separately, while MCP never carries a target.
-type artifactResolvedPayload struct {
-	ArtifactID       uuid.UUID             `json:"artifact_id,omitempty"`
+type appResolvedPayload struct {
+	AppID            uuid.UUID             `json:"app_id,omitempty"`
 	Noop             bool                  `json:"noop,omitempty"`
 	BucketID         uuid.UUID             `json:"bucket_id"`
 	Name             string                `json:"name,omitempty"`
@@ -116,6 +121,7 @@ type artifactResolvedPayload struct {
 	IncludeMCP       bool                  `json:"include_mcp,omitempty"`
 	TargetType       string                `json:"target_type,omitempty"`
 	TargetLanguage   string                `json:"target_language,omitempty"`
+	SkipSandbox      bool                  `json:"skip_sandbox,omitempty"`
 	ContractBindings []sdkContractBinding  `json:"contract_bindings,omitempty"`
 }
 
@@ -253,8 +259,8 @@ func SDKConfigApplyHandler(configStore store.ConfigRepository, s store.Store, pr
 			return
 		}
 		span.SetAttributes(
-			attribute.String("config.source_hash", req.SourceHash),
 			attribute.String("plan_id", planID.String()),
+			attribute.String("actor.type", string(actor.Kind)),
 		)
 		result, err := executeSDKConfigApply(ctx, configStore, s, proxy, registryClient, sdkApplyCall{
 			apiKey:       r.Header.Get("X-API-Key"),
@@ -275,10 +281,11 @@ func SDKConfigApplyHandler(configStore store.ConfigRepository, s store.Store, pr
 			status = models.SDKGenerationStatusPending
 		}
 		resp := map[string]string{
-			"status":      status,
-			"plan_id":     planID.String(),
-			"artifact_id": result.ArtifactID.String(),
-			"job_id":      result.JobID,
+			"status":        status,
+			"plan_id":       planID.String(),
+			"app_family_id": result.AppFamilyID.String(),
+			"app_id":        result.AppID.String(),
+			"job_id":        result.JobID,
 		}
 		if result.ExecutionToken != "" {
 			resp["execution_token"] = result.ExecutionToken
@@ -288,7 +295,7 @@ func SDKConfigApplyHandler(configStore store.ConfigRepository, s store.Store, pr
 	}
 }
 
-// decodeSDKConfigPlanRequest validates the envelope and artifact identity
+// decodeSDKConfigPlanRequest validates the envelope and app identity
 // before Registry lookups or plan persistence can occur.
 func decodeSDKConfigPlanRequest(r *http.Request) (SDKConfigPlanRequest, sdkConfigDocument, error) {
 	var req SDKConfigPlanRequest
@@ -305,7 +312,7 @@ func decodeSDKConfigPlanRequest(r *http.Request) (SDKConfigPlanRequest, sdkConfi
 		return req, sdkConfigDocument{}, err
 	}
 	var doc sdkConfigDocument
-	if err := decodeArtifactConfigJSON(req.Config, &doc); err != nil {
+	if err := decodeAppConfigJSON(req.Config, &doc); err != nil {
 		return req, doc, errors.New("invalid config json")
 	}
 	if err := validateSDKConfigDocument(doc); err != nil {
@@ -317,9 +324,9 @@ func decodeSDKConfigPlanRequest(r *http.Request) (SDKConfigPlanRequest, sdkConfi
 	return req, doc, nil
 }
 
-// decodeArtifactConfigJSON rejects misspelled and obsolete fields at the
+// decodeAppConfigJSON rejects misspelled and obsolete fields at the
 // Engine boundary; otherwise a valid-looking plan could silently omit policy.
-func decodeArtifactConfigJSON(raw []byte, target *sdkConfigDocument) error {
+func decodeAppConfigJSON(raw []byte, target *sdkConfigDocument) error {
 	return decodeOneStrictJSON(bytes.NewReader(raw), target)
 }
 
@@ -341,8 +348,8 @@ func rejectRemovedSDKConfigFields(raw json.RawMessage) error {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return errors.New("invalid config json")
 	}
-	// The new artifact contract has no compatibility bridge: version identifies
-	// the artifact directly and kind-specific routes replace target switching.
+	// The new app contract has no compatibility bridge: version identifies
+	// the app directly and kind-specific routes replace target switching.
 	for _, field := range []string{"sdkVersion", "target"} {
 		if _, ok := doc[field]; ok {
 			return fmt.Errorf("config uses the unsupported %s field", field)
@@ -365,7 +372,7 @@ func validateSDKConfigDocument(doc sdkConfigDocument) error {
 	if err := validateWebhookAttachmentRequired(doc); err != nil {
 		return err
 	}
-	return validateArtifactServiceDocs(doc.Services)
+	return validateAppServiceDocs(doc.Services)
 }
 
 func validateSDKIdentity(doc sdkConfigDocument) error {
@@ -378,7 +385,7 @@ func validateSDKIdentity(doc sdkConfigDocument) error {
 	if strings.TrimSpace(doc.Name) == "" || strings.TrimSpace(doc.Version) == "" {
 		return errors.New("sdk config requires name and version")
 	}
-	if !sdkArtifactVersionPattern.MatchString(doc.Version) {
+	if !validAppVersion(doc.Version) {
 		return errors.New("sdk config requires a SemVer-compatible version")
 	}
 	if doc.Language != "typescript" && doc.Language != "python" && doc.Language != "go" {
@@ -390,8 +397,12 @@ func validateSDKIdentity(doc sdkConfigDocument) error {
 	return nil
 }
 
+func validAppVersion(version string) bool {
+	return len(version) <= maxAppVersionLength && appVersionPattern.MatchString(version)
+}
+
 // validateWebhookAttachmentRequired mirrors the CLI's own plan-time check
-// (cli/internal/configfile.validateArtifactServices) server-side: a service
+// CLI validation server-side: a service
 // that selects webhooks with nothing named to attach them to would silently
 // receive no deliveries at all (websocket_handler.go has no registration
 // identity to scope FilterSubjects to), so this is rejected up front instead
@@ -408,17 +419,17 @@ func validateWebhookAttachmentRequired(doc sdkConfigDocument) error {
 	return nil
 }
 
-// validateWebhookAttachmentCoverage mirrors validateArtifactBucketReadiness's
-// pattern for webhook_attachment, the same way this artifact already
-// requires its one bucket to exist: the named kind: webhook artifact must
-// already exist, and must register every service this artifact selects
+// validateWebhookAttachmentCoverage mirrors validateAppBucketReadiness's
+// pattern for webhook_attachment, the same way this app already
+// requires its one bucket to exist: the named kind: webhook config must
+// already exist, and must register every service this app selects
 // webhooks for. Without this, a service selecting webhooks whose attached
-// artifact never registered it fails silently -- no signing secret, no
+// webhook config never registered it fails silently -- no signing secret, no
 // endpoint accepting deliveries under this label, the events just never
 // arrive with no error anywhere (see plans/plan-webhook-kind.md's "known
 // gap" note). Checked once at plan time (resolveSDKSelections) and again at
 // apply (generateSDKForApply/executeMCPConfigApply), same defense-in-depth
-// as bucket readiness, since the referenced webhook artifact can be edited
+// as bucket readiness, since the referenced webhook config can be edited
 // or removed between plan and apply.
 func validateWebhookAttachmentCoverage(ctx context.Context, configStore store.ConfigRepository, doc sdkConfigDocument) error {
 	name := strings.TrimSpace(doc.WebhookAttachment)
@@ -448,34 +459,34 @@ func validateWebhookAttachmentCoverage(ctx context.Context, configStore store.Co
 	return nil
 }
 
-// decodeArtifactApplyPlan decodes a stored SDK/MCP plan's desired state and
+// decodeAppApplyPlan decodes a stored SDK/MCP plan's desired state and
 // resolved payload, then re-verifies both cross-references apply depends on
 // (bucket readiness, webhook attachment coverage) still hold -- grouped into
 // one call so generateSDKForApply/executeMCPConfigApply each need only one
 // branch here instead of four, keeping them under the complexity budget.
 // kind customizes the "invalid resolved ... plan" message only; decoding and
 // validation are identical for both, so this is the one place that logic
-// lives rather than duplicated per artifact kind.
-func decodeArtifactApplyPlan(ctx context.Context, configStore store.ConfigRepository, s store.Store, plan *store.ConfigPlan, kind string) (sdkConfigDocument, artifactResolvedPayload, error) {
+// lives rather than duplicated per app kind.
+func decodeAppApplyPlan(ctx context.Context, configStore store.ConfigRepository, s store.Store, plan *store.ConfigPlan, kind string) (sdkConfigDocument, appResolvedPayload, error) {
 	var doc sdkConfigDocument
-	var payload artifactResolvedPayload
+	var payload appResolvedPayload
 	if json.Unmarshal(plan.DesiredState, &doc) != nil || json.Unmarshal(plan.ResolvedPayload, &payload) != nil {
-		return sdkConfigDocument{}, artifactResolvedPayload{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid resolved " + kind + " plan"}
+		return sdkConfigDocument{}, appResolvedPayload{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid resolved " + kind + " plan"}
 	}
-	if err := validateArtifactBucketIdentity(ctx, s, doc.Bucket, payload.BucketID); err != nil {
-		return sdkConfigDocument{}, artifactResolvedPayload{}, err
+	if err := validateAppBucketIdentity(ctx, s, doc.Bucket, payload.BucketID); err != nil {
+		return sdkConfigDocument{}, appResolvedPayload{}, err
 	}
-	if err := validateArtifactBucketReadiness(ctx, s, payload.BucketID, payload.Selections); err != nil {
-		return sdkConfigDocument{}, artifactResolvedPayload{}, err
+	if err := validateAppBucketReadiness(ctx, s, payload.BucketID, payload.Selections); err != nil {
+		return sdkConfigDocument{}, appResolvedPayload{}, err
 	}
 	if err := validateWebhookAttachmentCoverage(ctx, configStore, doc); err != nil {
-		return sdkConfigDocument{}, artifactResolvedPayload{}, err
+		return sdkConfigDocument{}, appResolvedPayload{}, err
 	}
 	return doc, payload, nil
 }
 
 // webhookAttachmentServiceNames extracts just the service keys from a
-// kind: webhook artifact's stored desired state -- the only thing coverage
+// kind: webhook config's stored desired state -- the only thing coverage
 // validation needs. Kept local rather than importing
 // webhook_config_handlers.go's own decode target, since that struct's
 // Services value shape (secret ref, string) is irrelevant here and would be
@@ -494,26 +505,26 @@ func webhookAttachmentServiceNames(desiredState json.RawMessage) (map[string]boo
 	return names, nil
 }
 
-// validateArtifactServiceDocs rejects empty operation surfaces and unknown
+// validateAppServiceDocs rejects empty operation surfaces and unknown
 // auth types before selectors are resolved against Registry metadata.
-func validateArtifactServiceDocs(services map[string]sdkConfigServiceDoc) error {
+func validateAppServiceDocs(services map[string]sdkConfigServiceDoc) error {
 	if len(services) == 0 {
-		return errors.New("artifact config requires at least one service")
+		return errors.New("app config requires at least one service")
 	}
 	for name, service := range services {
 		// A service may select only webhooks (no operations at all) -- MCP
 		// already rejects non-empty Webhooks/WebhooksSelectAll earlier in
-		// validateArtifactConfigDocument, so by the time this runs for an mcp
+		// validateAppConfigDocument, so by the time this runs for an mcp
 		// document those are always empty/false and this check degrades to
 		// the original operations-only gate for that kind.
-		if err := validateArtifactServiceDoc(name, service); err != nil {
+		if err := validateAppServiceDoc(name, service); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateArtifactServiceDoc(name string, service sdkConfigServiceDoc) error {
+func validateAppServiceDoc(name string, service sdkConfigServiceDoc) error {
 	if len(service.Operations) == 0 && !service.SelectAll && len(service.Webhooks) == 0 && !service.WebhooksSelectAll {
 		return fmt.Errorf("service %s requires at least one operation or webhook", name)
 	}
@@ -523,15 +534,15 @@ func validateArtifactServiceDoc(name string, service sdkConfigServiceDoc) error 
 	if strings.TrimSpace(service.Auth.Type) == "" {
 		return fmt.Errorf("service %s auth requires type", name)
 	}
-	if !validArtifactAuthType(service.Auth.Type) {
+	if !validAppAuthType(service.Auth.Type) {
 		return fmt.Errorf("service %s auth type must be one of basic, bearer, api_key, oauth, oidc, or mtls", name)
 	}
 	return nil
 }
 
-// validArtifactAuthType keeps the public config vocabulary independent of
+// validAppAuthType keeps the public config vocabulary independent of
 // provider-specific OpenAPI scheme names.
-func validArtifactAuthType(value string) bool {
+func validAppAuthType(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "basic", "bearer", "api_key", "oauth", "oidc", "mtls":
 		return true
@@ -553,11 +564,10 @@ func validateSDKConfigKey(configKey string, doc sdkConfigDocument) error {
 func setSDKConfigSpanAttributes(span trace.Span, configKey string, doc sdkConfigDocument) {
 	span.SetAttributes(
 		attribute.String("config_key", configKey),
-		attribute.String("artifact.kind", doc.Kind),
-		attribute.String("artifact.name", doc.Name),
-		attribute.String("artifact.version", doc.Version),
-		attribute.String("artifact.language", doc.Language),
-		attribute.Int("artifact.service_count", len(doc.Services)),
+		attribute.String("app.kind", doc.Kind),
+		attribute.String("app.version", doc.Version),
+		attribute.String("app.language", doc.Language),
+		attribute.Int("app.service_count", len(doc.Services)),
 	)
 }
 
@@ -568,29 +578,29 @@ func createSDKConfigPlan(
 	registryClient sandbox.RegistryClient,
 	call sdkPlanCall,
 ) (sdkPlanResult, error) {
-	currentState, artifactID, err := loadSDKPlanState(ctx, configStore, s, call)
+	currentState, appID, err := loadSDKPlanState(ctx, configStore, s, call)
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
-	owner, bucket, err := resolveArtifactPlanOwnerAndBucket(
+	owner, bucket, err := resolveAppPlanOwnerAndBucket(
 		ctx, s, currentState, call.actor, call.request.OwnerTeamSlug, call.document.Bucket,
 	)
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
 	call.request.OwnerSubjectID, call.request.OwnerTeamID = owner.subjectID, owner.teamID
-	definition, err := resolveSDKPlanDefinition(ctx, configStore, s, registryClient, call, currentState, bucket.ID, artifactID)
+	definition, err := resolveSDKPlanDefinition(ctx, configStore, s, registryClient, call, currentState, bucket.ID, appID)
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
 	notifications := sdkPlanNotifications(ctx, configStore, registryClient, call, definition.resolvedServices, definition.noop)
-	requiredPermissions, requiredCount, err := artifactPlanRequiredPermissionsWithBuckets(
-		ctx, artifactPermissionState(currentState, artifactID), serviceNamesFromResolved(definition.resolvedServices), []store.Bucket{*bucket}, call.document.Name,
+	requiredPermissions, requiredCount, err := configPlanRequiredPermissionsWithBuckets(
+		ctx, s, appPermissionState(currentState, appID), serviceNamesFromResolved(definition.resolvedServices), []store.Bucket{*bucket}, call.document.Name,
 	)
 	if err != nil {
 		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to compute required permissions"}
 	}
-	if err := preflightArtifactOwnership(ctx, s, call.actor, owner, optionalArtifactID(artifactID), requiredPermissions); err != nil {
+	if err := preflightConfigOwnership(ctx, s, call.actor, owner, optionalAppID(appID), requiredPermissions); err != nil {
 		return sdkPlanResult{}, err
 	}
 	plan, err := configStore.CreateConfigPlan(ctx, store.CreateConfigPlanParams{
@@ -616,12 +626,12 @@ func createSDKConfigPlan(
 	trace.SpanFromContext(ctx).SetAttributes(attribute.Int("required_permissions_count", requiredCount))
 	return sdkPlanResult{
 		plan:          plan,
-		summary:       sdkPlanSummary(artifactID == uuid.Nil, !definition.noop && artifactID != uuid.Nil, definition.services),
+		summary:       sdkPlanSummary(appID == uuid.Nil, !definition.noop && appID != uuid.Nil, definition.services),
 		notifications: notifications,
 	}, nil
 }
 
-func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkPlanCall, current *store.ConfigState, bucketID, artifactID uuid.UUID) (sdkPlanDefinition, error) {
+func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkPlanCall, current *store.ConfigState, bucketID, appID uuid.UUID) (sdkPlanDefinition, error) {
 	selections, services, resolvedServices, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current), bucketID)
 	if err != nil {
 		return sdkPlanDefinition{}, err
@@ -632,37 +642,37 @@ func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepos
 	}
 	selections = attachSDKServiceVersionIDs(selections, bindings)
 	desiredState, _ := json.Marshal(stateDoc)
-	unchanged := current != nil && sameCanonicalArtifactState(current.DesiredState, desiredState)
-	noop, err := sdkPlanIsNoop(ctx, s, call.accountID, artifactID, unchanged)
+	unchanged := current != nil && sameCanonicalAppState(current.DesiredState, desiredState)
+	noop, err := sdkPlanIsNoop(ctx, s, call.accountID, appID, unchanged)
 	if err != nil {
 		return sdkPlanDefinition{}, err
 	}
-	resolvedPayload, _ := json.Marshal(resolvedSDKPayload(sdkGenerateRequest(call.document, selections, bindings), bucketID, artifactID, noop))
+	resolvedPayload, _ := json.Marshal(resolvedSDKPayload(sdkGenerateRequest(call.document, selections, bindings), bucketID, appID, noop))
 	return sdkPlanDefinition{services: services, resolvedServices: resolvedServices, desiredState: desiredState, resolvedPayload: resolvedPayload, noop: noop}, nil
 }
 
-func sdkPlanIsNoop(ctx context.Context, s store.Store, accountID, artifactID uuid.UUID, unchanged bool) (bool, error) {
-	if !unchanged || artifactID == uuid.Nil {
+func sdkPlanIsNoop(ctx context.Context, s store.Store, accountID, appID uuid.UUID, unchanged bool) (bool, error) {
+	if !unchanged || appID == uuid.Nil {
 		return false, nil
 	}
-	scope, err := s.GetArtifactScope(ctx, artifactID)
-	if errors.Is(err, store.ErrArtifactScopeNotFound) {
+	scope, err := s.GetAppRuntime(ctx, appID)
+	if errors.Is(err, store.ErrAppRuntimeNotFound) {
 		return false, nil
 	}
 	if err != nil {
 		return false, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to verify sdk runtime state"}
 	}
-	return scope.AccountID == accountID && scope.DeactivatedAt == nil, nil
+	return scope.AccountID == accountID, nil
 }
 
-func artifactPermissionState(current *store.ConfigState, artifactID uuid.UUID) *store.ConfigState {
-	if current != nil || artifactID == uuid.Nil {
+func appPermissionState(current *store.ConfigState, appID uuid.UUID) *store.ConfigState {
+	if current != nil || appID == uuid.Nil {
 		return current
 	}
-	// A reconciled snapshot is an existing Registry artifact even though its
+	// A reconciled snapshot is an existing Registry package even though its
 	// Engine config state was intentionally cleared. Authorize manage on that
 	// exact identity instead of treating reconfiguration as a fresh create.
-	return &store.ConfigState{LatestResourceID: &artifactID}
+	return &store.ConfigState{LatestResourceID: &appID}
 }
 
 func loadSDKPlanState(ctx context.Context, configStore store.ConfigRepository, s store.Store, call sdkPlanCall) (*store.ConfigState, uuid.UUID, error) {
@@ -670,8 +680,8 @@ func loadSDKPlanState(ctx context.Context, configStore store.ConfigRepository, s
 	if err != nil {
 		return nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to fetch config state"}
 	}
-	artifactID, err := resolvedArtifactIDForPlan(ctx, s, call.accountID, current, call.document)
-	return current, artifactID, err
+	appID, err := resolvedAppIDForPlan(ctx, s, call.accountID, current, call.document)
+	return current, appID, err
 }
 
 func sdkPlanNotifications(ctx context.Context, configStore store.ConfigRepository, registryClient sandbox.RegistryClient, call sdkPlanCall, services []sdkResolvedService, unchanged bool) notificationInbox {
@@ -681,52 +691,39 @@ func sdkPlanNotifications(ctx context.Context, configStore store.ConfigRepositor
 	return collectSDKPlanNotifications(ctx, configStore, registryClient, call, services)
 }
 
-func resolvedArtifactIDForPlan(ctx context.Context, s store.Store, accountID uuid.UUID, current *store.ConfigState, doc sdkConfigDocument) (uuid.UUID, error) {
-	if id := existingArtifactID(current); id != nil {
-		trace.SpanFromContext(ctx).SetAttributes(attribute.String("artifact.identity_source", "config_state"))
+func resolvedAppIDForPlan(ctx context.Context, s store.Store, accountID uuid.UUID, current *store.ConfigState, doc sdkConfigDocument) (uuid.UUID, error) {
+	if id := existingConfigResourceID(current); id != nil {
+		trace.SpanFromContext(ctx).SetAttributes(attribute.String("app.identity_source", "config_state"))
 		return *id, nil
 	}
-	repository, ok := s.(store.ArtifactSnapshotStore)
-	if !ok {
-		trace.SpanFromContext(ctx).SetAttributes(attribute.String("artifact.identity_source", "new"))
-		return uuid.Nil, nil
-	}
-	snapshot, err := repository.GetArtifactSnapshotByIdentity(ctx, accountID, "sdk", doc.Name, doc.Version)
-	if errors.Is(err, store.ErrArtifactSnapshotNotFound) {
-		trace.SpanFromContext(ctx).SetAttributes(attribute.String("artifact.identity_source", "new"))
-		return uuid.Nil, nil
-	}
-	if err != nil {
-		return uuid.Nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to resolve restored sdk definition"}
-	}
-	// Reconciliation restores definition identity only. The new plan still has
-	// to authorize ownership and rebuild bucket and execution credentials.
-	trace.SpanFromContext(ctx).SetAttributes(attribute.String("artifact.identity_source", "reconciled_snapshot"))
-	return snapshot.ArtifactID, nil
+	// Config state is the authoritative pointer for an Engine-owned app. The
+	// Registry no longer restores SDK/MCP definitions after a database reset.
+	trace.SpanFromContext(ctx).SetAttributes(attribute.String("app.identity_source", "new"))
+	return uuid.Nil, nil
 }
 
-func optionalArtifactID(id uuid.UUID) *uuid.UUID {
+func optionalAppID(id uuid.UUID) *uuid.UUID {
 	if id == uuid.Nil {
 		return nil
 	}
 	return &id
 }
 
-func resolveArtifactPlanOwnerAndBucket(
+func resolveAppPlanOwnerAndBucket(
 	ctx context.Context,
 	s store.Store,
 	current *store.ConfigState,
 	actor accesscontrol.Actor,
 	requestedOwnerTeamSlug string,
 	bucketName string,
-) (artifactOwner, *store.Bucket, error) {
-	owner, err := resolveArtifactPlanOwner(ctx, s, current, actor, requestedOwnerTeamSlug)
+) (configOwner, *store.Bucket, error) {
+	owner, err := resolveConfigPlanOwner(ctx, s, current, actor, requestedOwnerTeamSlug)
 	if err != nil {
-		return artifactOwner{}, nil, err
+		return configOwner{}, nil, err
 	}
-	bucket, err := resolveArtifactBucket(ctx, s, bucketName)
+	bucket, err := resolveAppBucket(ctx, s, bucketName)
 	if err != nil {
-		return artifactOwner{}, nil, err
+		return configOwner{}, nil, err
 	}
 	return owner, bucket, nil
 }
@@ -742,7 +739,7 @@ func resolveSDKSelections(
 	previous sdkConfigDocument,
 	bucketID uuid.UUID,
 ) ([]models.SDKSelection, []map[string]any, []sdkResolvedService, sdkConfigDocument, error) {
-	doc = canonicalArtifactDocument(doc)
+	doc = canonicalAppDocument(doc)
 	services, err := workspaceServicesByConfigKey(ctx, s, registryClient, apiKey, doc)
 	if err != nil {
 		return nil, nil, nil, sdkConfigDocument{}, err
@@ -773,10 +770,10 @@ func resolveSDKSelections(
 			WebhookNames:     serviceDoc.Webhooks,
 			SelectAll:        serviceDoc.SelectAll,
 			WebhookSelectAll: serviceDoc.WebhooksSelectAll,
-			AuthType:         artifactAuthType(serviceDoc.Auth),
-			AuthName:         artifactAuthName(serviceDoc.Auth),
-			ConnectScopes:    artifactConnectScopes(serviceDoc.Connect),
-			Injections:       artifactInjections(serviceDoc.Injections),
+			AuthType:         appAuthType(serviceDoc.Auth),
+			AuthName:         appAuthName(serviceDoc.Auth),
+			ConnectScopes:    appConnectScopes(serviceDoc.Connect),
+			Injections:       appInjections(serviceDoc.Injections),
 		})
 		// Applied state is keyed by Registry display name, while a hand-authored
 		// config may use its stable slug. Compare through the resolved identity so
@@ -788,10 +785,10 @@ func resolveSDKSelections(
 		})
 		stateDoc.Services[activation.ServiceName] = serviceDoc
 	}
-	if err := resolveArtifactAuthPolicies(ctx, registryClient, apiKey, resolved, selections); err != nil {
+	if err := resolveAppAuthPolicies(ctx, registryClient, apiKey, resolved, selections); err != nil {
 		return nil, nil, nil, sdkConfigDocument{}, err
 	}
-	if err := validateArtifactBucketReadiness(ctx, s, bucketID, selections); err != nil {
+	if err := validateAppBucketReadiness(ctx, s, bucketID, selections); err != nil {
 		return nil, nil, nil, sdkConfigDocument{}, err
 	}
 	if err := validateWebhookAttachmentCoverage(ctx, configStore, doc); err != nil {
@@ -807,9 +804,9 @@ func resolveSDKSelections(
 	return selections, summary, resolved, stateDoc, nil
 }
 
-// canonicalArtifactDocument removes presentation-only ordering differences
-// before an artifact is resolved, hashed, or persisted as immutable state.
-func canonicalArtifactDocument(doc sdkConfigDocument) sdkConfigDocument {
+// canonicalAppDocument removes presentation-only ordering differences
+// before an app is resolved, hashed, or persisted as immutable state.
+func canonicalAppDocument(doc sdkConfigDocument) sdkConfigDocument {
 	canonical := doc
 	canonical.APIVersion = strings.TrimSpace(doc.APIVersion)
 	canonical.Kind = strings.TrimSpace(doc.Kind)
@@ -839,33 +836,33 @@ func canonicalArtifactDocument(doc sdkConfigDocument) sdkConfigDocument {
 	return canonical
 }
 
-// canonicalArtifactState serializes the canonical desired state so identity
+// canonicalAppState serializes the canonical desired state so identity
 // comparisons ignore YAML/JSON ordering and harmless whitespace changes.
-func canonicalArtifactState(doc sdkConfigDocument) ([]byte, error) {
-	return json.Marshal(canonicalArtifactDocument(doc))
+func canonicalAppState(doc sdkConfigDocument) ([]byte, error) {
+	return json.Marshal(canonicalAppDocument(doc))
 }
 
-// artifactAuthType normalizes only the public type selector; exact scheme
+// appAuthType normalizes only the public type selector; exact scheme
 // resolution remains Registry-owned.
-func artifactAuthType(auth *sdkArtifactAuthDoc) string {
+func appAuthType(auth *sdkAppAuthDoc) string {
 	if auth == nil {
 		return ""
 	}
 	return strings.ToLower(strings.TrimSpace(auth.Type))
 }
 
-// artifactAuthName preserves an explicit scheme name for same-type
+// appAuthName preserves an explicit scheme name for same-type
 // disambiguation without treating it as credential material.
-func artifactAuthName(auth *sdkArtifactAuthDoc) string {
+func appAuthName(auth *sdkAppAuthDoc) string {
 	if auth == nil {
 		return ""
 	}
 	return strings.TrimSpace(auth.Name)
 }
 
-// artifactConnectScopes canonicalizes the consent ceiling so source order and
-// duplicate values cannot alter artifact identity at runtime.
-func artifactConnectScopes(connect *sdkArtifactConnectDoc) []string {
+// appConnectScopes canonicalizes the consent ceiling so source order and
+// duplicate values cannot alter app identity at runtime.
+func appConnectScopes(connect *sdkAppConnectDoc) []string {
 	if connect == nil {
 		return nil
 	}
@@ -876,10 +873,10 @@ type sdkServiceVersionAuthConfigFetcher interface {
 	FetchServiceVersionAuthConfigs(context.Context, []sandbox.ServiceVersionRef, string) ([]sandbox.ServiceVersionAuthConfigs, error)
 }
 
-// resolveArtifactAuthPolicies turns human-facing auth selectors into the
+// resolveAppAuthPolicies turns human-facing auth selectors into the
 // exact Registry scheme used at dispatch. Doing this once during planning
 // keeps agents and SDK consumers from guessing provider-specific auth names.
-func resolveArtifactAuthPolicies(ctx context.Context, registryClient sandbox.RegistryClient, apiKey string, services []sdkResolvedService, selections []models.SDKSelection) error {
+func resolveAppAuthPolicies(ctx context.Context, registryClient sandbox.RegistryClient, apiKey string, services []sdkResolvedService, selections []models.SDKSelection) error {
 	fetcher, ok := registryClient.(sdkServiceVersionAuthConfigFetcher)
 	if !ok {
 		return validateNoExplicitAuthPolicy(selections)
@@ -901,7 +898,7 @@ func resolveArtifactAuthPolicies(ctx context.Context, registryClient sandbox.Reg
 }
 
 // validateNoExplicitAuthPolicy fails closed when Registry cannot resolve a
-// policy the user explicitly requested; auth-free artifacts remain usable.
+// policy the user explicitly requested; auth-free apps remain usable.
 func validateNoExplicitAuthPolicy(selections []models.SDKSelection) error {
 	for _, selection := range selections {
 		if selection.AuthType != "" || selection.AuthName != "" || len(selection.ConnectScopes) > 0 {
@@ -920,7 +917,7 @@ func resolveSelectionAuthPolicy(selection *models.SDKSelection, auths fusedobjec
 		}
 		return nil
 	}
-	matches := matchingArtifactAuths(auths, selection.AuthType, selection.AuthName)
+	matches := matchingAppAuths(auths, selection.AuthType, selection.AuthName)
 	if len(matches) == 0 {
 		return fmt.Errorf("service %s does not support the selected authentication", selection.ServiceID)
 	}
@@ -930,12 +927,12 @@ func resolveSelectionAuthPolicy(selection *models.SDKSelection, auths fusedobjec
 	selected := matches[0]
 	selection.AuthType = sandbox.CanonicalFusedAuthType(selected)
 	selection.AuthName = sandbox.AuthCredentialName(selected)
-	return validateArtifactScopes(selection, selected.Scopes)
+	return validateAppScopes(selection, selected.Scopes)
 }
 
-// matchingArtifactAuths defaults to the provider's first declared scheme but
-// requires a unique match whenever the artifact supplies selectors.
-func matchingArtifactAuths(auths fusedobject.AuthConfigs, authType, authName string) fusedobject.AuthConfigs {
+// matchingAppAuths defaults to the provider's first declared scheme but
+// requires a unique match whenever the app supplies selectors.
+func matchingAppAuths(auths fusedobject.AuthConfigs, authType, authName string) fusedobject.AuthConfigs {
 	if authType == "" && authName == "" {
 		return auths[:1]
 	}
@@ -952,9 +949,9 @@ func matchingArtifactAuths(auths fusedobject.AuthConfigs, authType, authName str
 	return matches
 }
 
-// validateArtifactScopes lets an artifact narrow OAuth/OIDC permissions while
+// validateAppScopes lets an app narrow OAuth/OIDC permissions while
 // preventing config from requesting scopes absent from the provider contract.
-func validateArtifactScopes(selection *models.SDKSelection, allowed []string) error {
+func validateAppScopes(selection *models.SDKSelection, allowed []string) error {
 	if len(selection.ConnectScopes) == 0 {
 		return nil
 	}
@@ -1016,9 +1013,12 @@ func collectSDKPlanNotifications(
 	if err != nil {
 		inbox.Warnings = append(inbox.Warnings, "engine_notifications_unavailable")
 	} else {
-		inbox.Items = append(inbox.Items, filterSDKEngineNotifications(notifications, call.request.ConfigKey, serviceVersions)...)
+		inbox.Items = append(inbox.Items, filterSDKEngineNotifications(notifications, call.request.ConfigKey)...)
 	}
 	if registryClient == nil {
+		return inbox
+	}
+	if !entitlement.LiveEntitlement.Load().DriftMonitoringEnabled {
 		return inbox
 	}
 	// One batched Registry call for every service this SDK config
@@ -1046,29 +1046,23 @@ func sdkServiceVersionMap(services []sdkResolvedService) map[uuid.UUID]string {
 func filterSDKEngineNotifications(
 	notifications []store.WorkspaceNotification,
 	configKey string,
-	serviceVersions map[uuid.UUID]string,
 ) []workspaceNotificationInboxItem {
 	var items []workspaceNotificationInboxItem
 	for _, notification := range notifications {
-		if sdkNotificationMatches(notification, configKey, serviceVersions) {
+		if sdkNotificationMatches(notification, configKey) {
 			items = append(items, workspaceNotificationInboxItems([]store.WorkspaceNotification{notification})...)
 		}
 	}
 	return items
 }
 
-func sdkNotificationMatches(notification store.WorkspaceNotification, configKey string, serviceVersions map[uuid.UUID]string) bool {
-	if notification.ConfigKey == configKey {
-		return true
+func sdkNotificationMatches(notification store.WorkspaceNotification, configKey string) bool {
+	for _, target := range strings.Split(notification.ConfigKey, ",") {
+		if strings.TrimSpace(target) == configKey {
+			return true
+		}
 	}
-	if notification.ServiceID == nil {
-		return false
-	}
-	version, ok := serviceVersions[*notification.ServiceID]
-	if !ok {
-		return false
-	}
-	return notification.Version == "" || notification.Version == version
+	return false
 }
 
 func sortedUUIDKeys(items map[uuid.UUID]string) []uuid.UUID {
@@ -1248,8 +1242,7 @@ func validateSDKServiceSelection(
 // versions list -- callers fetch every referenced service's allowed
 // versions once via ListWorkspaceServiceVersionsForServices and pass the relevant
 // slice in, instead of this function querying the store itself once per
-// service (the shape both resolveSDKSelections and
-// ensureSDKDownloadAvailable used to call it in).
+// service (the shape resolveSDKSelections uses).
 func resolveSDKVersionAllowed(
 	activation store.WorkspaceService,
 	version string,
@@ -1320,11 +1313,11 @@ func sdkGenerateRequest(doc sdkConfigDocument, selections []models.SDKSelection,
 	}
 }
 
-func resolvedSDKPayload(request GenerateSDKRequest, bucketID, artifactID uuid.UUID, noop bool) artifactResolvedPayload {
-	return artifactResolvedPayload{
-		ArtifactID: artifactID, Noop: noop, BucketID: bucketID, Name: request.Name, Description: request.Description, Version: request.Version,
+func resolvedSDKPayload(request GenerateSDKRequest, bucketID, appID uuid.UUID, noop bool) appResolvedPayload {
+	return appResolvedPayload{
+		AppID: appID, Noop: noop, BucketID: bucketID, Name: request.Name, Description: request.Description, Version: request.Version,
 		Selections: request.Selections, IncludeMCP: request.IncludeMCP, TargetType: request.TargetType,
-		TargetLanguage: request.TargetLanguage, ContractBindings: request.ContractBindings,
+		TargetLanguage: request.TargetLanguage, SkipSandbox: request.SkipSandbox, ContractBindings: request.ContractBindings,
 	}
 }
 
@@ -1394,12 +1387,12 @@ func executeSDKConfigApply(
 	registryClient sandbox.RegistryClient,
 	call sdkApplyCall,
 ) (sdkGenerationResult, error) {
-	// A plan has one deterministic Registry artifact. Serializing that identity
-	// prevents a losing first apply from deleting the artifact committed by a
+	// A plan has one deterministic Registry package. Serializing that identity
+	// prevents a losing first apply from deleting the app committed by a
 	// concurrent winner after both initially observed an empty local state.
-	unlockArtifact := sdkGenerationApplies.lock(stableArtifactIDForPlan(call.planID))
-	defer unlockArtifact()
-	plan, err := loadAuthorizedSDKPlanForApply(ctx, configStore, s, call)
+	unlockApp := sdkGenerationApplies.lock(stableAppIDForPlan(call.planID))
+	defer unlockApp()
+	plan, err := loadAuthorizedSDKAppPlanForApply(ctx, configStore, s, call)
 	if err != nil {
 		return sdkGenerationResult{}, err
 	}
@@ -1413,7 +1406,7 @@ func executeSDKConfigApply(
 	defer stopLease()
 	call.applyLeaseID = lease.ID
 	if payload, noop := noopSDKPayload(plan.ResolvedPayload); noop {
-		result, applyErr := applyNoopSDKPlan(applyCtx, configStore, call, plan, payload)
+		result, applyErr := applyNoopSDKPlan(applyCtx, configStore, s, call, plan, payload)
 		// No external system was contacted, so a failed local transaction is
 		// always safe to release and retry immediately.
 		leaseGuard.releasable = true
@@ -1432,44 +1425,56 @@ func executeSDKConfigApply(
 	applyCtx, scopeSpan := otel.Tracer("engine").Start(applyCtx, "engine.sdk_scope.persist")
 	defer scopeSpan.End()
 	scopeSpan.SetAttributes(
-		attribute.String("artifact_id", result.ArtifactID.String()),
+		attribute.String("app.id", result.AppID.String()),
 		attribute.String("sdk_generation_status", result.Status),
 		attribute.Int("scope_schema_version", result.ScopeSchemaVersion),
 	)
 	if err := validateSDKGenerationResult(plan.ResolvedPayload, call, result.SDKGenerationResult); err != nil {
 		scopeSpan.SetStatus(codes.Error, err.Error())
 		scopeSpan.SetAttributes(attribute.String("outcome", "validation_failed"))
-		leaseGuard.releasable = compensateNewRegistryArtifact(applyCtx, proxy, result)
+		leaseGuard.releasable = compensateNewRegistryPackage(applyCtx, proxy, result)
 		return sdkGenerationResult{}, err
 	}
-	token, _, err := applyGeneratedArtifactScope(applyCtx, configStore, s, call, plan, result)
+	token, familyID, appID, _, err := applyGeneratedAppRuntime(applyCtx, configStore, s, call, plan, result)
 	if err != nil {
 		scopeSpan.SetStatus(codes.Error, err.Error())
 		scopeSpan.SetAttributes(attribute.String("outcome", "scope_persist_failed"))
-		leaseGuard.releasable = compensateNewRegistryArtifact(applyCtx, proxy, result)
+		leaseGuard.releasable = compensateRejectedSDKPackage(applyCtx, configStore, plan.ConfigKey, proxy, result)
 		return sdkGenerationResult{}, err
 	}
 	leaseGuard.releasable = true
+	result.AppFamilyID = familyID
+	result.AppID = appID
 	result.ExecutionToken = token
 	scopeSpan.SetAttributes(attribute.String("outcome", "success"))
 	return result, nil
 }
 
-func noopSDKPayload(raw json.RawMessage) (artifactResolvedPayload, bool) {
-	payload, err := artifactPayloadFromJSON(raw)
+func compensateRejectedSDKPackage(ctx context.Context, configStore store.ConfigRepository, configKey string, proxy Forwarder, result sdkGenerationResult) bool {
+	state, err := configStore.GetConfigState(ctx, configKey)
+	if err == nil && state != nil && state.LatestResourceID != nil && *state.LatestResourceID == result.AppID {
+		// A concurrent apply may have committed this exact immutable app. Its
+		// package is now referenced and must not be removed by the losing caller.
+		return true
+	}
+	return compensateNewRegistryPackage(ctx, proxy, result)
+}
+
+func noopSDKPayload(raw json.RawMessage) (appResolvedPayload, bool) {
+	payload, err := appPayloadFromJSON(raw)
 	return payload, err == nil && payload.Noop
 }
 
 func sdkGenerationFailureReleasable(ctx context.Context, proxy Forwarder, result sdkGenerationResult) bool {
 	if result.createdForPlan {
-		return compensateNewRegistryArtifact(ctx, proxy, result)
+		return compensateNewRegistryPackage(ctx, proxy, result)
 	}
 	return !result.registryGenerationAttempted || result.registryGenerationOutcomeConfirmed
 }
 
-func applyNoopSDKPlan(ctx context.Context, configStore store.ConfigRepository, call sdkApplyCall, plan *store.ConfigPlan, payload artifactResolvedPayload) (sdkGenerationResult, error) {
+func applyNoopSDKPlan(ctx context.Context, configStore store.ConfigRepository, s store.Store, call sdkApplyCall, plan *store.ConfigPlan, payload appResolvedPayload) (sdkGenerationResult, error) {
 	current, err := configStore.GetConfigState(ctx, plan.ConfigKey)
-	if err != nil || current == nil || current.LatestResourceID == nil || *current.LatestResourceID != payload.ArtifactID {
+	if err != nil || current == nil || current.LatestResourceID == nil || *current.LatestResourceID != payload.AppID {
 		return sdkGenerationResult{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "plan_stale_or_mismatched"}
 	}
 	_, err = configStore.ApplyConfigPlan(ctx, store.ApplyConfigPlanParams{
@@ -1481,13 +1486,19 @@ func applyNoopSDKPlan(ctx context.Context, configStore store.ConfigRepository, c
 		PlanID: plan.ID, BaseGeneration: plan.BaseGeneration, ExpectedRevision: call.planRevision, ApplyLeaseID: call.applyLeaseID,
 	})
 	if err != nil {
-		return sdkGenerationResult{}, artifactApplyPersistenceError(ctx, err, payload.ArtifactID)
+		return sdkGenerationResult{}, appApplyPersistenceError(ctx, err, payload.AppID)
+	}
+	app, err := s.GetApp(ctx, payload.AppID)
+	if err != nil {
+		return sdkGenerationResult{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "app_scope_not_found"}
 	}
 	span := trace.SpanFromContext(ctx)
 	span.SetAttributes(attribute.String("sdk.apply_mode", "noop"), attribute.String("outcome", "success"))
 	span.AddEvent("sdk configuration apply skipped registry generation")
 	return sdkGenerationResult{SDKGenerationResult: models.SDKGenerationResult{
-		ArtifactID: payload.ArtifactID, Status: models.SDKGenerationStatusComplete,
+		AppFamilyID: app.AppFamilyID,
+		AppID:       app.AppID,
+		Status:      models.SDKGenerationStatusComplete,
 	}}, nil
 }
 
@@ -1507,14 +1518,14 @@ func generateSDKForApply(
 	if err != nil {
 		return input.plan, result, err
 	}
-	if err := validateRegistryArtifactIdentity(input.payload, result.ArtifactID); err != nil {
+	if err := validateRegistryAppIdentity(input.payload, result.AppID); err != nil {
 		// Preserve the unexpected Registry identity so the caller retains the
 		// lease instead of treating this external outcome as safely untouched.
 		return input.plan, result, err
 	}
 	// Ownership is established as soon as Registry creates the deterministic
 	// identity, so stream failures can compensate it as well as DB failures.
-	result.createdForPlan = input.existingArtifactID == uuid.Nil
+	result.createdForPlan = input.existingConfigResourceID == uuid.Nil
 	completed, err := awaitSDKGenerationCompletion(ctx, proxy, call.apiKey, result)
 	if err != nil {
 		return input.plan, result, err
@@ -1523,9 +1534,9 @@ func generateSDKForApply(
 }
 
 type sdkGenerationApplyInput struct {
-	plan               *store.ConfigPlan
-	existingArtifactID uuid.UUID
-	payload            json.RawMessage
+	plan                     *store.ConfigPlan
+	existingConfigResourceID uuid.UUID
+	payload                  json.RawMessage
 }
 
 func prepareSDKGenerationForApply(
@@ -1535,7 +1546,7 @@ func prepareSDKGenerationForApply(
 	registryClient sandbox.RegistryClient,
 	call sdkApplyCall,
 ) (sdkGenerationApplyInput, error) {
-	plan, err := loadAuthorizedSDKPlanForApply(ctx, configStore, s, call)
+	plan, err := loadAuthorizedSDKAppPlanForApply(ctx, configStore, s, call)
 	if err != nil {
 		return sdkGenerationApplyInput{}, err
 	}
@@ -1549,19 +1560,68 @@ func prepareSDKGenerationForApply(
 	if err := ensureSDKContractBindingsCurrent(ctx, registryClient, call.apiKey, bindings); err != nil {
 		return sdkGenerationApplyInput{}, workspaceConfigHTTPError{status: http.StatusConflict, message: err.Error()}
 	}
-	if _, _, err := decodeArtifactApplyPlan(ctx, configStore, s, plan, "sdk"); err != nil {
-		return sdkGenerationApplyInput{}, err
-	}
-
-	existingArtifactID := existingArtifactIDForApply(ctx, configStore, plan.ConfigKey)
-	if payload, decodeErr := artifactPayloadFromJSON(plan.ResolvedPayload); decodeErr == nil && payload.ArtifactID != uuid.Nil {
-		existingArtifactID = payload.ArtifactID
-	}
-	generationPayload, err := sdkGenerationPayloadForPlan(plan.ResolvedPayload, call, existingArtifactID)
+	doc, _, err := decodeAppApplyPlan(ctx, configStore, s, plan, "sdk")
 	if err != nil {
 		return sdkGenerationApplyInput{}, err
 	}
-	return sdkGenerationApplyInput{plan: plan, existingArtifactID: existingArtifactID, payload: generationPayload}, nil
+	familyID, appID, existing, err := reserveSDKGenerationIdentity(ctx, s, call, plan, doc)
+	if err != nil {
+		return sdkGenerationApplyInput{}, err
+	}
+	generationPayload, err := sdkGenerationPayloadForPlan(plan.ResolvedPayload, call, familyID, appID, plan.SourceHash)
+	if err != nil {
+		return sdkGenerationApplyInput{}, err
+	}
+	return sdkGenerationApplyInput{plan: plan, existingConfigResourceID: existing, payload: generationPayload}, nil
+}
+
+func reserveSDKGenerationIdentity(ctx context.Context, s store.Store, call sdkApplyCall, plan *store.ConfigPlan, doc sdkConfigDocument) (uuid.UUID, uuid.UUID, uuid.UUID, error) {
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.sdk_config.reserve_identity")
+	defer span.End()
+
+	canonicalName, displayName, err := canonical.AppName(doc.Name)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid_app_name"}
+	}
+
+	// Check SDK family limit only when creating a new family.
+	_, familyErr := s.GetAppFamilyByIdentity(ctx, call.accountID, "sdk", canonicalName)
+	if errors.Is(familyErr, store.ErrAppFamilyNotFound) {
+		currentFamilies, err := s.CountAppFamilies(ctx, call.accountID, "sdk")
+		if err != nil {
+			span.RecordError(err)
+			return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_count_sdk_families"}
+		}
+		if limErr := entitlement.CheckLimit(span, "sdk_families", currentFamilies, entitlement.LiveEntitlement.Load().MaxSDKFamilies); limErr != nil {
+			span.SetAttributes(attribute.String("outcome", "sdk_family_limit_exceeded"))
+			return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusForbidden, message: limErr.Error()}
+		}
+	}
+
+	family, _, err := applifecycle.New(s).CreateOrGetFamily(ctx, applifecycle.CreateFamilyParams{
+		AccountID: call.accountID, Kind: "sdk", CanonicalName: canonicalName,
+		DisplayName: displayName, TargetLanguage: doc.Language,
+		OwnerSubjectID: planOwnerSubjectID(plan), OwnerTeamID: planOwnerTeamID(plan),
+	})
+	if err != nil {
+		return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app_family_conflict"}
+	}
+	if tombstoned, checkErr := s.AppTombstoneExists(ctx, family.AppFamilyID, doc.Version); checkErr != nil {
+		return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_check_app_version"}
+	} else if tombstoned {
+		return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app_version_deactivated"}
+	}
+	existing, err := s.GetAppByFamilyAndVersion(ctx, family.AppFamilyID, doc.Version)
+	if errors.Is(err, store.ErrAppNotFound) {
+		return family.AppFamilyID, stableAppIDForPlan(call.planID), uuid.Nil, nil
+	}
+	if err != nil {
+		return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_check_app_version"}
+	}
+	if existing.SourceHash != plan.SourceHash {
+		return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app_version_immutable"}
+	}
+	return family.AppFamilyID, existing.AppID, existing.AppID, nil
 }
 
 func runTrackedSDKGeneration(ctx context.Context, proxy Forwarder, apiKey string, payload json.RawMessage) (sdkGenerationResult, error) {
@@ -1579,8 +1639,8 @@ func runTrackedSDKGeneration(ctx context.Context, proxy Forwarder, apiKey string
 	return result, nil
 }
 
-func compensateNewRegistryArtifact(ctx context.Context, proxy Forwarder, result sdkGenerationResult) bool {
-	if !result.createdForPlan || result.ArtifactID == uuid.Nil {
+func compensateNewRegistryPackage(ctx context.Context, proxy Forwarder, result sdkGenerationResult) bool {
+	if !result.createdForPlan || result.AppID == uuid.Nil {
 		return true
 	}
 	// Cleanup must outlive a disconnected caller, but remains bounded so a
@@ -1589,12 +1649,12 @@ func compensateNewRegistryArtifact(ctx context.Context, proxy Forwarder, result 
 	defer cancel()
 	cleanupCtx, span := otel.Tracer("engine").Start(cleanupCtx, "engine.sdk_generation.compensate")
 	defer span.End()
-	span.SetAttributes(attribute.String("artifact_id", result.ArtifactID.String()))
-	if err := retireRegistrySDK(cleanupCtx, proxy, result.ArtifactID); err != nil {
-		// The plan remains pending and keeps the same deterministic artifact ID,
+	span.SetAttributes(attribute.String("app.id", result.AppID.String()))
+	if err := deleteRegistryPackage(cleanupCtx, proxy, result.AppID); err != nil {
+		// The plan remains pending and keeps the same deterministic app ID,
 		// so a retry reclaims the same Registry record and retries compensation.
-		slog.ErrorContext(cleanupCtx, "failed to compensate rejected Registry artifact", slog.String("artifact_id", result.ArtifactID.String()))
-		span.SetStatus(codes.Error, "registry artifact compensation failed")
+		slog.ErrorContext(cleanupCtx, "failed to compensate rejected Registry package", slog.String("app_id", result.AppID.String()))
+		span.SetStatus(codes.Error, "registry package compensation failed")
 		span.SetAttributes(attribute.String("outcome", "failed"))
 		return false
 	}
@@ -1602,29 +1662,17 @@ func compensateNewRegistryArtifact(ctx context.Context, proxy Forwarder, result 
 	return true
 }
 
-func validateRegistryArtifactIdentity(payload json.RawMessage, returnedID uuid.UUID) error {
+func validateRegistryAppIdentity(payload json.RawMessage, returnedID uuid.UUID) error {
 	var request GenerateSDKRequest
-	if err := json.Unmarshal(payload, &request); err != nil || request.ArtifactID == uuid.Nil {
-		return workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_requested_artifact_id_invalid"}
+	if err := json.Unmarshal(payload, &request); err != nil || request.AppID == uuid.Nil {
+		return workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_requested_app_id_invalid"}
 	}
 	// Registry may update bytes and job state, but it cannot replace the stable
 	// identity Engine authorized and placed in the generation request.
-	if returnedID != request.ArtifactID {
-		return workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_artifact_id_mismatch"}
+	if returnedID != request.AppID {
+		return workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_app_id_mismatch"}
 	}
 	return nil
-}
-
-// existingArtifactIDForApply looks up the SDK/MCP's currently-active resource ID
-// (if any) so regeneration reuses the same identity instead of minting a new
-// one on every apply -- split out only to keep generateSDKForApply's own
-// branching under the complexity budget.
-func existingArtifactIDForApply(ctx context.Context, configStore store.ConfigRepository, configKey string) uuid.UUID {
-	currentState, _ := configStore.GetConfigState(ctx, configKey)
-	if currentState == nil || currentState.LatestResourceID == nil {
-		return uuid.UUID{}
-	}
-	return *currentState.LatestResourceID
 }
 
 const (
@@ -1643,7 +1691,7 @@ func awaitSDKGenerationCompletion(
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.sdk_generation.await")
 	defer span.End()
 	span.SetAttributes(
-		attribute.String("artifact_id", initial.ArtifactID.String()),
+		attribute.String("app.id", initial.AppID.String()),
 		attribute.String("job_id", initial.JobID),
 		attribute.String("initial_status", initial.Status),
 	)
@@ -1662,7 +1710,7 @@ func awaitSDKGenerationCompletion(
 	return initial, nil
 }
 
-func artifactInjections(injections []InjectionConfig) []models.SDKInjectionConfig {
+func appInjections(injections []InjectionConfig) []models.SDKInjectionConfig {
 	if len(injections) == 0 {
 		return nil
 	}
@@ -1735,25 +1783,24 @@ func parseSDKGenerationEventLine(line []byte) (sdkGenerationStreamEvent, bool) {
 	return event, true
 }
 
-func sdkGenerationPayloadForPlan(payload json.RawMessage, call sdkApplyCall, existingArtifactID uuid.UUID) (json.RawMessage, error) {
+func sdkGenerationPayloadForPlan(payload json.RawMessage, call sdkApplyCall, appFamilyID, appID uuid.UUID, sourceHash string) (json.RawMessage, error) {
 	var request GenerateSDKRequest
 	if err := json.Unmarshal(payload, &request); err != nil {
 		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid sdk generation payload"}
 	}
 	request.IdempotencyKey = call.planID.String()
-	if existingArtifactID != uuid.Nil {
-		request.ArtifactID = existingArtifactID
-	} else {
-		request.ArtifactID = stableArtifactIDForPlan(call.planID)
-	}
+	request.AppFamilyID = appFamilyID
+	request.AppID = appID
+	request.SourceHash = sourceHash
+	request.GeneratorVersion = models.SDKGeneratorVersion
 	out, _ := json.Marshal(request)
 	return out, nil
 }
 
-// stableArtifactIDForPlan derives a deterministic Artifact ID from planID alone --
+// stableAppIDForPlan derives a deterministic App ID from planID alone --
 // Engine is mono-workspace, so there is no separate workspace dimension left
 // to fold into the hash for cross-workspace disambiguation.
-func stableArtifactIDForPlan(planID uuid.UUID) uuid.UUID {
+func stableAppIDForPlan(planID uuid.UUID) uuid.UUID {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("sdk-config:"+planID.String()))
 }
 
@@ -1813,17 +1860,17 @@ func attachSDKServiceVersionIDs(selections []models.SDKSelection, bindings []sdk
 }
 
 func sdkContractBindingsFromPayload(payload json.RawMessage) ([]sdkContractBinding, error) {
-	resolved, err := artifactPayloadFromJSON(payload)
+	resolved, err := appPayloadFromJSON(payload)
 	if err != nil {
 		return nil, err
 	}
 	return resolved.ContractBindings, nil
 }
 
-func artifactPayloadFromJSON(payload json.RawMessage) (artifactResolvedPayload, error) {
-	var resolved artifactResolvedPayload
+func appPayloadFromJSON(payload json.RawMessage) (appResolvedPayload, error) {
+	var resolved appResolvedPayload
 	if err := json.Unmarshal(payload, &resolved); err != nil {
-		return artifactResolvedPayload{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid artifact resolved payload"}
+		return appResolvedPayload{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid app resolved payload"}
 	}
 	return resolved, nil
 }
@@ -1913,7 +1960,7 @@ func validateSDKPlanForApply(plan *store.ConfigPlan, sourceHash string) error {
 }
 
 func ensureSDKSelectionsStillAllowed(ctx context.Context, s store.Store, payload json.RawMessage) error {
-	resolved, err := artifactPayloadFromJSON(payload)
+	resolved, err := appPayloadFromJSON(payload)
 	if err != nil {
 		return err
 	}
@@ -2001,16 +2048,16 @@ func parseSDKGenerationResponse(ctx context.Context, bodyBytes []byte) (sdkGener
 		slog.ErrorContext(ctx, "failed to parse SDK generation response", slog.Any("error", err))
 		return result, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to parse generation response"}
 	}
-	if result.ArtifactID == uuid.Nil {
+	if result.AppID == uuid.Nil {
 		return result, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "invalid sdk ID returned from generator"}
 	}
 	return result, nil
 }
 
-func resolveArtifactBucket(ctx context.Context, s store.Store, bucketName string) (*store.Bucket, error) {
+func resolveAppBucket(ctx context.Context, s store.Store, bucketName string) (*store.Bucket, error) {
 	bucketName = strings.TrimSpace(bucketName)
 	if bucketName == "" {
-		return nil, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "artifact config requires exactly one bucket"}
+		return nil, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "app config requires exactly one bucket"}
 	}
 	b, err := s.GetBucketByName(ctx, bucketName)
 	if err != nil || b == nil || b.ID == uuid.Nil {
@@ -2019,31 +2066,31 @@ func resolveArtifactBucket(ctx context.Context, s store.Store, bucketName string
 	return b, nil
 }
 
-func validateArtifactBucketIdentity(ctx context.Context, s store.Store, bucketName string, authorizedBucketID uuid.UUID) error {
-	bucket, err := resolveArtifactBucket(ctx, s, bucketName)
+func validateAppBucketIdentity(ctx context.Context, s store.Store, bucketName string, authorizedBucketID uuid.UUID) error {
+	bucket, err := resolveAppBucket(ctx, s, bucketName)
 	if err != nil || authorizedBucketID == uuid.Nil || bucket.ID != authorizedBucketID {
-		return workspaceConfigHTTPError{status: http.StatusConflict, message: "artifact bucket identity changed; create a new plan"}
+		return workspaceConfigHTTPError{status: http.StatusConflict, message: "app bucket identity changed; create a new plan"}
 	}
 	return nil
 }
 
-// validateArtifactBucketReadiness checks the one bucket selected by an
-// artifact before a plan is persisted and again during apply. OAuth/OIDC
+// validateAppBucketReadiness checks the one bucket selected by an
+// app before a plan is persisted and again during apply. OAuth/OIDC
 // selections need an enabled client application in that bucket; static
 // schemes intentionally remain bucket-secret managed and are resolved at
 // dispatch. One bucket-scoped read reports every missing OAuth/OIDC material
 // item together rather than failing selected services one at a time.
-func validateArtifactBucketReadiness(ctx context.Context, s store.Store, bucketID uuid.UUID, selections []models.SDKSelection) error {
+func validateAppBucketReadiness(ctx context.Context, s store.Store, bucketID uuid.UUID, selections []models.SDKSelection) error {
 	if bucketID == uuid.Nil {
-		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: "artifact config requires exactly one bucket"}
+		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: "app config requires exactly one bucket"}
 	}
-	ready, secretKeys, err := loadArtifactBucketMaterial(ctx, s, bucketID)
+	ready, secretKeys, err := loadAppBucketMaterial(ctx, s, bucketID)
 	if err != nil {
 		return err
 	}
 	missing := make([]string, 0)
 	for _, selection := range selections {
-		missing = append(missing, missingArtifactBucketMaterial(selection, ready, secretKeys)...)
+		missing = append(missing, missingAppBucketMaterial(selection, ready, secretKeys)...)
 	}
 	if len(missing) == 0 {
 		return nil
@@ -2059,7 +2106,7 @@ func validateArtifactBucketReadiness(ctx context.Context, s store.Store, bucketI
 	}
 }
 
-func loadArtifactBucketMaterial(ctx context.Context, s store.Store, bucketID uuid.UUID) (map[string]bool, map[string]bool, error) {
+func loadAppBucketMaterial(ctx context.Context, s store.Store, bucketID uuid.UUID) (map[string]bool, map[string]bool, error) {
 	configs, err := s.ListConnectConfigsForBucket(ctx, bucketID)
 	if err != nil {
 		return nil, nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to read bucket readiness"}
@@ -2085,7 +2132,7 @@ func loadArtifactBucketMaterial(ctx context.Context, s store.Store, bucketID uui
 	return ready, secretKeys, nil
 }
 
-func missingArtifactBucketMaterial(selection models.SDKSelection, ready, secretKeys map[string]bool) []string {
+func missingAppBucketMaterial(selection models.SDKSelection, ready, secretKeys map[string]bool) []string {
 	authType := canonicalWorkspaceStaticAuthType(selection.AuthType)
 	serviceID := selection.ServiceID.String()
 	if authType == "oauth" || authType == "oidc" {
@@ -2095,7 +2142,7 @@ func missingArtifactBucketMaterial(selection models.SDKSelection, ready, secretK
 		return []string{serviceID + " (" + authType + ")"}
 	}
 	missing := make([]string, 0)
-	for _, key := range artifactRequiredSecretKeys(selection, authType) {
+	for _, key := range appRequiredSecretKeys(selection, authType) {
 		if !secretKeys[serviceID+"\x00"+key] {
 			missing = append(missing, serviceID+" ("+authType+":"+key+")")
 		}
@@ -2103,12 +2150,12 @@ func missingArtifactBucketMaterial(selection models.SDKSelection, ready, secretK
 	return missing
 }
 
-// artifactRequiredSecretKeys mirrors workspace auth material naming. AuthName
+// appRequiredSecretKeys mirrors workspace auth material naming. AuthName
 // is pinned during Registry policy resolution, so readiness can identify every
 // static credential required without decrypting or loading its value.
-func artifactRequiredSecretKeys(selection models.SDKSelection, authType string) []string {
+func appRequiredSecretKeys(selection models.SDKSelection, authType string) []string {
 	if authType == "" {
-		// Auth-free artifacts have no bucket material prerequisite. A populated
+		// Auth-free apps have no bucket material prerequisite. A populated
 		// auth selector is always pinned by Registry before it reaches this path.
 		return nil
 	}
@@ -2128,40 +2175,35 @@ func artifactRequiredSecretKeys(selection models.SDKSelection, authType string) 
 	}
 }
 
-// persistArtifactScopeParams carries what persistArtifactScope needs to save an
-// ArtifactScope row and link its bucket, decoupled from *how* the scope was
-// produced. The config-apply path derives these from a GenerateSDKRequest
-// response (see persistGeneratedArtifactScope below); the activate handler
-// (sdk_lifecycle_handlers.go) has neither a plan nor a generation result --
-// it takes selections/bucket straight from the activate request body --
-// so this struct only carries the values both paths actually share.
-type persistArtifactScopeParams struct {
+// persistAppRuntimeParams carries the exact app version plus its family-level
+// bucket and owner inputs into the atomic config apply transaction.
+type persistAppRuntimeParams struct {
 	accountID          uuid.UUID
-	artifactID         uuid.UUID
+	appID              uuid.UUID
 	ownerSubjectID     uuid.UUID
 	ownerTeamID        uuid.UUID
 	bucketID           uuid.UUID
 	bucketName         string
 	selections         json.RawMessage
 	scopeSchemaVersion int
-	// kind/name label the scope for the MCP servers list page
-	// (store.ArtifactScope.Kind/Name) -- see persistArtifactScope below.
-	kind           string
-	name           string
-	version        string
-	configKey      string
-	description    string
-	targetLanguage string
-	sourceHash     string
+	// Kind and name label the exact version for the app catalogue.
+	kind             string
+	name             string
+	version          string
+	configKey        string
+	description      string
+	targetLanguage   string
+	sourceHash       string
+	generatorVersion string
 }
 
-func artifactScopeForApply(p persistArtifactScopeParams) (store.ArtifactScope, error) {
+func appRuntimeForApply(p persistAppRuntimeParams) (store.AppRuntime, error) {
 	if p.bucketID == uuid.Nil || strings.TrimSpace(p.bucketName) == "" {
-		return store.ArtifactScope{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "artifact bucket identity unavailable"}
+		return store.AppRuntime{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "app bucket identity unavailable"}
 	}
-	return store.ArtifactScope{
+	return store.AppRuntime{
 		AccountID:          p.accountID,
-		ArtifactID:         p.artifactID,
+		AppID:              p.appID,
 		OwnerSubjectID:     p.ownerSubjectID,
 		OwnerTeamID:        p.ownerTeamID,
 		BucketID:           p.bucketID,
@@ -2174,27 +2216,27 @@ func artifactScopeForApply(p persistArtifactScopeParams) (store.ArtifactScope, e
 	}, nil
 }
 
-func applyGeneratedArtifactScope(
+func applyGeneratedAppRuntime(
 	ctx context.Context,
 	configStore store.ConfigRepository,
 	s store.Store,
 	call sdkApplyCall,
 	plan *store.ConfigPlan,
 	result sdkGenerationResult,
-) (string, bool, error) {
+) (string, uuid.UUID, uuid.UUID, bool, error) {
 	// DesiredState is an sdkConfigDocument, not the Registry generation payload.
 	// sdkConfigDocument (stateDoc, built in resolveSDKSelections), not the
 	// GenerateSDKRequest shape plan.ResolvedPayload.
 	var doc sdkConfigDocument
 	_ = json.Unmarshal(plan.DesiredState, &doc)
-	payload, err := artifactPayloadFromJSON(plan.ResolvedPayload)
+	payload, err := appPayloadFromJSON(plan.ResolvedPayload)
 	if err != nil {
-		return "", false, err
+		return "", uuid.Nil, uuid.Nil, false, err
 	}
 	selections, _ := json.Marshal(result.Selections)
-	return applyArtifactConfigPlan(ctx, configStore, s, call, plan, persistArtifactScopeParams{
+	return applyAppConfigPlan(ctx, configStore, s, call, plan, persistAppRuntimeParams{
 		accountID:          call.accountID,
-		artifactID:         result.ArtifactID,
+		appID:              result.AppID,
 		ownerSubjectID:     planOwnerSubjectID(plan),
 		ownerTeamID:        planOwnerTeamID(plan),
 		bucketID:           payload.BucketID,
@@ -2208,66 +2250,65 @@ func applyGeneratedArtifactScope(
 		description:        payload.Description,
 		targetLanguage:     payload.TargetLanguage,
 		sourceHash:         plan.SourceHash,
+		generatorVersion:   result.GeneratorVersion,
 	})
 }
 
-func applyArtifactConfigPlan(ctx context.Context, configStore store.ConfigRepository, s store.Store, call sdkApplyCall, plan *store.ConfigPlan, params persistArtifactScopeParams) (string, bool, error) {
-	scope, err := artifactScopeForApply(params)
+func applyAppConfigPlan(ctx context.Context, configStore store.ConfigRepository, s store.Store, call sdkApplyCall, plan *store.ConfigPlan, params persistAppRuntimeParams) (string, uuid.UUID, uuid.UUID, bool, error) {
+	scope, err := appRuntimeForApply(params)
 	if err != nil {
-		return "", false, err
+		return "", uuid.Nil, uuid.Nil, false, err
 	}
-	snapshot := store.ArtifactSnapshot{ArtifactID: params.artifactID, AccountID: params.accountID,
-		Kind: params.kind, Name: params.name, Description: params.description, Version: params.version,
-		TargetLanguage: params.targetLanguage, Selections: params.selections,
-		ScopeSchemaVersion: params.scopeSchemaVersion, SourceHash: params.sourceHash}
-	return applyArtifactConfigScope(ctx, configStore, s, call, plan, scope, snapshot, params.bucketName)
+	return applyAppConfigRuntime(ctx, configStore, s, call, plan, scope, params.bucketName, params.targetLanguage, params.generatorVersion)
 }
 
-func applyArtifactConfigScope(ctx context.Context, configStore store.ConfigRepository, s store.Store, call sdkApplyCall, plan *store.ConfigPlan, scope store.ArtifactScope, snapshot store.ArtifactSnapshot, authorizedBucketName string) (string, bool, error) {
+func applyAppConfigRuntime(ctx context.Context, configStore store.ConfigRepository, s store.Store, call sdkApplyCall, plan *store.ConfigPlan, scope store.AppRuntime, authorizedBucketName, targetLanguage, generatorVersion string) (string, uuid.UUID, uuid.UUID, bool, error) {
 	rawToken, tokenHash, err := newSDKExecutionCredential()
 	if err != nil {
-		return "", false, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to issue sdk execution credential"}
+		return "", uuid.Nil, uuid.Nil, false, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to issue sdk execution credential"}
 	}
-	result, err := configStore.ApplyArtifactConfigPlan(ctx, store.ApplyArtifactConfigPlanParams{
+	result, err := configStore.ApplyAppConfigPlan(ctx, store.ApplyAppConfigPlanParams{
 		Plan: store.ApplyConfigPlanParams{
 			State: store.UpsertConfigStateParams{
 				ConfigKey: plan.ConfigKey, ConfigType: plan.ConfigType, SourceHash: plan.SourceHash,
-				DesiredState: plan.DesiredState, ManagedResources: []byte("{}"), LatestResourceID: &scope.ArtifactID, UpdatedBy: call.accountID,
+				DesiredState: plan.DesiredState, ManagedResources: []byte("{}"), LatestResourceID: &scope.AppID, UpdatedBy: call.accountID,
 			},
 			PlanID: call.planID, BaseGeneration: plan.BaseGeneration, ExpectedRevision: call.planRevision,
 			ApplyLeaseID: call.applyLeaseID,
 		},
-		Scope: scope, Snapshot: snapshot, AuthorizedBucketName: authorizedBucketName, TokenHash: tokenHash, TokenName: "default", Activate: true,
+		Scope: scope, AuthorizedBucketName: authorizedBucketName,
+		TokenHash: tokenHash, TokenName: "default", TargetLanguage: targetLanguage,
+		GeneratorVersion: generatorVersion, Activate: true,
 	})
 	if err != nil {
-		return "", false, artifactApplyPersistenceError(ctx, err, scope.ArtifactID)
+		return "", uuid.Nil, uuid.Nil, false, appApplyPersistenceError(ctx, err, scope.AppID)
 	}
-	notifyArtifactScopeChanged(ctx, s, scope.ArtifactID)
-	if !result.ScopeCreated {
-		return "", false, nil
+	notifyAppRuntimeChanged(ctx, s, scope.AppID)
+	if !result.TokenCreated {
+		return "", result.AppFamilyID, result.AppID, result.VersionCreated, nil
 	}
-	return rawToken, true, nil
+	return rawToken, result.AppFamilyID, result.AppID, result.VersionCreated, nil
 }
 
-type artifactScopeChangeNotifier interface {
-	NotifyArtifactScopeChanged(context.Context, uuid.UUID)
+type appRuntimeChangeNotifier interface {
+	NotifyAppRuntimeChanged(context.Context, uuid.UUID)
 }
 
-func notifyArtifactScopeChanged(ctx context.Context, s store.Store, artifactID uuid.UUID) {
-	if notifier, ok := s.(artifactScopeChangeNotifier); ok {
-		notifier.NotifyArtifactScopeChanged(ctx, artifactID)
+func notifyAppRuntimeChanged(ctx context.Context, s store.Store, appID uuid.UUID) {
+	if notifier, ok := s.(appRuntimeChangeNotifier); ok {
+		notifier.NotifyAppRuntimeChanged(ctx, appID)
 	}
 }
 
-func artifactApplyPersistenceError(ctx context.Context, err error, artifactID uuid.UUID) error {
-	slog.ErrorContext(ctx, "artifact config apply persistence failed", slog.Any("error", err), slog.String("artifact_id", artifactID.String()))
+func appApplyPersistenceError(ctx context.Context, err error, appID uuid.UUID) error {
+	slog.ErrorContext(ctx, "app config apply persistence failed", slog.Any("error", err), slog.String("app.id", appID.String()))
 	if errors.Is(err, store.ErrSDKBucketImmutable) {
-		return workspaceConfigHTTPError{status: http.StatusConflict, message: "artifact bucket assignment is immutable"}
+		return workspaceConfigHTTPError{status: http.StatusConflict, message: "app bucket assignment is immutable"}
 	}
 	if errors.Is(err, store.ErrConfigPlanNotFound) {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "plan_stale_or_mismatched"}
 	}
-	return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to apply artifact config"}
+	return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to apply app config"}
 }
 
 func planOwnerTeamID(plan *store.ConfigPlan) uuid.UUID {
@@ -2292,8 +2333,8 @@ func planOwnerType(plan *store.ConfigPlan) string {
 }
 
 func validateSDKGenerationResult(payload json.RawMessage, call sdkApplyCall, result models.SDKGenerationResult) error {
-	if result.ArtifactID == uuid.Nil {
-		return workspaceConfigHTTPError{status: http.StatusConflict, message: "artifact_id_required"}
+	if result.AppID == uuid.Nil {
+		return workspaceConfigHTTPError{status: http.StatusConflict, message: "app_id_required"}
 	}
 	if strings.TrimSpace(result.JobID) == "" {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_job_id_required"}
@@ -2307,7 +2348,7 @@ func validateSDKGenerationResult(payload json.RawMessage, call sdkApplyCall, res
 	if result.Status != models.SDKGenerationStatusPending && result.Status != models.SDKGenerationStatusComplete {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_generation_status_invalid"}
 	}
-	if result.ScopeSchemaVersion != models.ArtifactScopeSchemaVersion {
+	if result.ScopeSchemaVersion != models.AppScopeSchemaVersion {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_scope_schema_version_mismatch"}
 	}
 	var request GenerateSDKRequest
@@ -2507,7 +2548,7 @@ func newSDKExecutionCredential() (string, string, error) {
 }
 
 func writeSDKConfigError(w http.ResponseWriter, err error, contexts ...context.Context) {
-	if isArtifactAuthorizationError(err) {
+	if isConfigAuthorizationError(err) {
 		accesscontrol.WriteAuthorizationError(w, err)
 		return
 	}
@@ -2524,87 +2565,4 @@ func writeSDKConfigError(w http.ResponseWriter, err error, contexts ...context.C
 		return
 	}
 	writeWorkspaceConfigError(w, err, contexts...)
-}
-
-// SDKConfigDownloadHandler handles GET /sdk-config/{name}/download.
-func SDKConfigDownloadHandler(configStore store.ConfigRepository, s store.Store, proxy Forwarder) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.sdk_config.download")
-		defer span.End()
-
-		_, err := resolveWorkspaceActor(ctx)
-		if err != nil {
-			http.Error(w, `{"error":"invalid API key or workspace not found"}`, http.StatusUnauthorized)
-			return
-		}
-
-		pathParts := strings.Split(r.URL.Path, "/")
-		name := pathParts[len(pathParts)-2] // /sdk-config/{name}/download
-
-		configKey := "sdk:" + name
-		if strings.HasPrefix(name, "sdk:") {
-			configKey = name
-		}
-
-		state, err := configStore.GetConfigState(ctx, configKey)
-		if err != nil || state == nil {
-			http.Error(w, `{"error":"sdk config not found"}`, http.StatusNotFound)
-			return
-		}
-
-		if state.LatestResourceID == nil || *state.LatestResourceID == uuid.Nil {
-			http.Error(w, `{"error":"no generated SDK found for this config"}`, http.StatusNotFound)
-			return
-		}
-		if err := accesscontrol.AuthorizeAll(ctx, accesscontrol.SnapshotAuthorizer{}, accesscontrol.Requirement{
-			Permission: accesscontrol.PermissionArtifactRead,
-			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceArtifact, ID: *state.LatestResourceID},
-		}); err != nil {
-			accesscontrol.WriteAuthorizationError(w, err)
-			return
-		}
-		if err := ensureSDKDownloadAvailable(ctx, s, state.DesiredState); err != nil {
-			writeSDKConfigError(w, err)
-			return
-		}
-
-		proxyReq, err := http.NewRequestWithContext(ctx, "GET", "/sdks/"+state.LatestResourceID.String()+"/download", nil)
-		if err != nil {
-			http.Error(w, `{"error":"failed to create internal download request"}`, http.StatusInternalServerError)
-			return
-		}
-		proxyReq.Header.Set("X-API-Key", r.Header.Get("X-API-Key"))
-
-		proxy.Forward(w, proxyReq, "")
-	}
-}
-
-func ensureSDKDownloadAvailable(ctx context.Context, s store.Store, raw json.RawMessage) error {
-	if len(raw) == 0 {
-		return nil
-	}
-	var doc sdkConfigDocument
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid sdk config state"}
-	}
-	services, err := workspaceServicesByName(ctx, s)
-	if err != nil {
-		return err
-	}
-	// Same batching as resolveSDKSelections: one lookup for every service
-	// this stored config references, not one per service in the loop below.
-	allowedVersions, err := s.ListWorkspaceServiceVersionsForServices(ctx, sdkReferencedServiceIDs(doc, services))
-	if err != nil {
-		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to list allowed versions"}
-	}
-	for serviceName, serviceDoc := range doc.Services {
-		activation, ok := services[serviceName]
-		if !ok {
-			return workspaceConfigHTTPError{status: http.StatusConflict, message: fmt.Sprintf("service %s is no longer allowed in this workspace", serviceName)}
-		}
-		if _, err := resolveSDKVersionAllowed(activation, serviceDoc.Version, serviceName, allowedVersions[activation.ServiceID]); err != nil {
-			return workspaceConfigHTTPError{status: http.StatusConflict, message: err.Error()}
-		}
-	}
-	return nil
 }

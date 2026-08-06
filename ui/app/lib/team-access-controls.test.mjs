@@ -6,7 +6,7 @@ import {
   TeamAccessControls,
   changeWorkspaceRole,
   teamResourceLevel,
-  teamArtifactAccessLevels,
+  teamAppAccessLevels,
   teamWorkspaceRole,
 } from "../components/access/TeamAccessControls.ts";
 
@@ -22,7 +22,7 @@ const team = {
     binding("builder", "workspace", "workspace-1"),
     binding("service-user", "service", "service-1"),
     binding("bucket-manager", "bucket", "bucket-1"),
-    { ...binding("artifact-reader", "artifact", "artifact-1"), resource_display_name: "Support SDK" },
+    { ...binding("app-reader", "app", "family-1"), resource_display_name: "Support SDK" },
   ],
 };
 
@@ -33,7 +33,7 @@ test("renders simple workspace, service, and credential access controls", () => 
     buckets: [{ id: "bucket-1", name: "Payments production" }],
     onWorkspaceRoleChange() {},
     onResourceAccessChange() {},
-    onArtifactAccessChange() {},
+    onAppAccessChange() {},
   }));
 
   for (const label of ["Workspace role", "Builder", "Service access", "Stripe", "Credential access", "Payments production", "App and MCP server access", "Support SDK", "Read", "Share", "No access", "Use", "Manage"]) {
@@ -43,7 +43,7 @@ test("renders simple workspace, service, and credential access controls", () => 
   assert.equal(teamWorkspaceRole(team), "BUILDER");
   assert.equal(teamResourceLevel(team, "service", "service-1"), "USER");
   assert.equal(teamResourceLevel(team, "bucket", "bucket-1"), "MANAGER");
-  assert.deepEqual(teamArtifactAccessLevels(team, "artifact-1"), ["READER"]);
+  assert.deepEqual(teamAppAccessLevels(team, "family-1"), ["READER"]);
 });
 
 test("does not imply Viewer for a new team and allows Viewer to be selected", () => {
@@ -55,7 +55,7 @@ test("does not imply Viewer for a new team and allows Viewer to be selected", ()
     buckets: [],
     onWorkspaceRoleChange() {},
     onResourceAccessChange() {},
-    onArtifactAccessChange() {},
+    onAppAccessChange() {},
   }));
   assert.match(html, /No workspace role/);
 
@@ -74,7 +74,7 @@ test("keeps Owner role changes out of the Admin control surface", () => {
     canManageOwners: false,
     onWorkspaceRoleChange() {},
     onResourceAccessChange() {},
-    onArtifactAccessChange() {},
+    onAppAccessChange() {},
   }));
   assert.doesNotMatch(adminHTML, />Owner<\/option>/);
   assert.match(adminHTML, />Admin<\/option>/);
@@ -87,7 +87,7 @@ test("keeps Owner role changes out of the Admin control surface", () => {
     canManageOwners: false,
     onWorkspaceRoleChange() {},
     onResourceAccessChange() {},
-    onArtifactAccessChange() {},
+    onAppAccessChange() {},
   }));
   assert.match(protectedHTML, /<select disabled=""[^>]*aria-label="Workspace role"/);
   assert.match(protectedHTML, />Owner<\/option>/);
@@ -98,18 +98,18 @@ test("models the same build as independently shareable with two teams", () => {
     ...team,
     id: "team-2",
     name: "Support",
-    bindings: [{ ...binding("artifact-manager", "artifact", "artifact-1"), team_id: "team-2", resource_display_name: "Support SDK" }],
+    bindings: [{ ...binding("app-manager", "app", "family-1"), team_id: "team-2", resource_display_name: "Support SDK" }],
   };
 
-  assert.deepEqual(teamArtifactAccessLevels(team, "artifact-1"), ["READER"]);
-  assert.deepEqual(teamArtifactAccessLevels(secondTeam, "artifact-1"), ["MANAGER"]);
+  assert.deepEqual(teamAppAccessLevels(team, "family-1"), ["READER"]);
+  assert.deepEqual(teamAppAccessLevels(secondTeam, "family-1"), ["MANAGER"]);
   const html = renderToStaticMarkup(TeamAccessControls({
     team: secondTeam,
     services: [],
     buckets: [],
     onWorkspaceRoleChange() {},
     onResourceAccessChange() {},
-    onArtifactAccessChange() {},
+    onAppAccessChange() {},
   }));
   assert.match(html, /Support SDK/);
   assert.match(html, /value="MANAGER" selected=""/);

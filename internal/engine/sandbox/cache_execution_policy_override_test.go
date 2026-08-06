@@ -33,8 +33,10 @@ type executionPolicyOverrideNarrowStore struct {
 }
 
 func snapshotMetadataFixture() *fusedobject.ServiceMetadata {
+	timeoutMs := 30000
 	return &fusedobject.ServiceMetadata{
 		RateLimit:           &fusedobject.RateLimitConfig{Strategy: "fixed_window", RequestsPerSecond: 100},
+		TimeoutMs:           &timeoutMs,
 		EventExtractionPath: "body.type",
 	}
 }
@@ -51,9 +53,11 @@ func TestApplyExecutionPolicyOverride_NoOverride_ReturnsSnapshotUnchanged(t *tes
 }
 
 func TestApplyExecutionPolicyOverride_FieldPresent_WinsOverSnapshot(t *testing.T) {
+	timeoutMs := 5000
 	c := &LocalObjectCache{db: &executionPolicyOverrideStubStore{
 		override: &store.WorkspaceExecutionPolicyOverride{
 			RateLimit: &fusedobject.RateLimitConfig{Strategy: "token_bucket", RequestsPerSecond: 5},
+			TimeoutMs: &timeoutMs,
 		},
 	}}
 	metadata := snapshotMetadataFixture()
@@ -62,6 +66,9 @@ func TestApplyExecutionPolicyOverride_FieldPresent_WinsOverSnapshot(t *testing.T
 
 	if got.RateLimit.RequestsPerSecond != 5 {
 		t.Fatalf("expected override rate_limit to win, got %#v", got.RateLimit)
+	}
+	if got.TimeoutMs == nil || *got.TimeoutMs != timeoutMs {
+		t.Fatalf("expected override timeout_ms to win, got %v", got.TimeoutMs)
 	}
 	// A field the override didn't set must still fall through to the snapshot
 	// value -- this is a per-field merge, not a whole-row replacement.

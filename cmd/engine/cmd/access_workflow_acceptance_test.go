@@ -318,9 +318,9 @@ func (f *accessWorkflowFixture) assertPersonalCredential(t *testing.T, user acce
 func (f *accessWorkflowFixture) assertTeamSelectors(t *testing.T, key string, teams accessWorkflowTeams) {
 	t.Helper()
 	query := `query Selectors($team:ID!){
-artifactOwningTeams(limit:20){total items{id}}
-services:artifactBuildSelectors(owner_team_id:$team,resource_type:SERVICE,limit:20){total items{resource_id}}
-	buckets:artifactBuildSelectors(owner_team_id:$team,resource_type:BUCKET,limit:20){total items{resource_id}}}`
+appOwningTeams(limit:20){total items{id}}
+services:appBuildSelectors(owner_team_id:$team,resource_type:SERVICE,limit:20){total items{resource_id}}
+	buckets:appBuildSelectors(owner_team_id:$team,resource_type:BUCKET,limit:20){total items{resource_id}}}`
 	allowed := f.selectorQuery(t, key, query, teams.allowed)
 	f.assertAllowedSelectors(t, allowed, teams.allowed)
 	forged := f.selectorQuery(t, key, query, teams.forged)
@@ -347,7 +347,7 @@ type accessWorkflowSelectorResult struct {
 	Owning struct {
 		Total int                          `json:"total"`
 		Items []accessWorkflowSelectorItem `json:"items"`
-	} `json:"artifactOwningTeams"`
+	} `json:"appOwningTeams"`
 	Services struct {
 		Total int                          `json:"total"`
 		Items []accessWorkflowSelectorItem `json:"items"`
@@ -619,7 +619,7 @@ func (r *accessWorkflowRegistry) serveGraphQL(w http.ResponseWriter, request *ht
 
 func (r *accessWorkflowRegistry) serveGeneration(w http.ResponseWriter, request *http.Request) {
 	var payload models.SDKGenerationRequest
-	if json.NewDecoder(request.Body).Decode(&payload) != nil || payload.ArtifactID == uuid.Nil || len(payload.Selections) != 1 {
+	if json.NewDecoder(request.Body).Decode(&payload) != nil || payload.AppFamilyID == uuid.Nil || payload.AppID == uuid.Nil || len(payload.Selections) != 1 {
 		r.recordUnexpected("invalid generation request")
 		http.Error(w, "invalid generation request", http.StatusBadRequest)
 		return
@@ -633,8 +633,9 @@ func (r *accessWorkflowRegistry) serveGeneration(w http.ResponseWriter, request 
 	generatedSelections[0].OperationNames = nil
 	generatedSelections[0].EndpointIDs = []uuid.UUID{r.endpointID}
 	writeAcceptanceRegistryJSON(w, models.SDKGenerationResult{
-		ArtifactID: payload.ArtifactID, AccountID: r.accountID, JobID: "acceptance-job", Status: models.SDKGenerationStatusComplete,
-		ScopeSchemaVersion: models.ArtifactScopeSchemaVersion, Selections: generatedSelections,
+		AppFamilyID: payload.AppFamilyID, AppID: payload.AppID,
+		AccountID: r.accountID, JobID: "acceptance-job", Status: models.SDKGenerationStatusComplete,
+		ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: generatedSelections,
 	})
 }
 

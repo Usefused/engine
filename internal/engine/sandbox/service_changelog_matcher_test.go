@@ -243,7 +243,7 @@ func TestMatchedVersionConfigKeys_Changed_AddedEndpointNeverMatchesExistingSelec
 
 type matcherMockStore struct {
 	store.Store
-	scopes           map[uuid.UUID]*store.ArtifactScope
+	scopes           map[uuid.UUID]*store.AppRuntime
 	overrides        map[uuid.UUID]*store.WorkspaceExecutionPolicyOverride // keyed by ServiceVersionID
 	overrideErr      error
 	connectProfiles  []store.WorkspaceConnectionProfile
@@ -252,9 +252,9 @@ type matcherMockStore struct {
 	hasConnectLister bool
 }
 
-func (m *matcherMockStore) ListArtifactScopes(ctx context.Context, artifactIDs []uuid.UUID) (map[uuid.UUID]*store.ArtifactScope, error) {
-	out := make(map[uuid.UUID]*store.ArtifactScope)
-	for _, id := range artifactIDs {
+func (m *matcherMockStore) ListAppRuntimes(ctx context.Context, appIDs []uuid.UUID) (map[uuid.UUID]*store.AppRuntime, error) {
+	out := make(map[uuid.UUID]*store.AppRuntime)
+	for _, id := range appIDs {
 		if scope, ok := m.scopes[id]; ok {
 			out[id] = scope
 		}
@@ -473,7 +473,7 @@ func (m *matcherMockConfigStore) CreateWorkspaceNotification(ctx context.Context
 }
 
 func TestMatchAndNotifyServiceChangelog_EndToEnd_CreatesNotificationWithDedupeMetadata(t *testing.T) {
-	serviceID, versionID, artifactID := uuid.New(), uuid.New(), uuid.New()
+	serviceID, versionID, appID := uuid.New(), uuid.New(), uuid.New()
 	versionName := "2026-01-01"
 
 	selectionsJSON, err := json.Marshal([]models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: versionID, SelectAll: true}})
@@ -481,12 +481,12 @@ func TestMatchAndNotifyServiceChangelog_EndToEnd_CreatesNotificationWithDedupeMe
 		t.Fatalf("marshal selections: %v", err)
 	}
 	engineStore := &matcherMockStore{
-		scopes: map[uuid.UUID]*store.ArtifactScope{
-			artifactID: {ArtifactID: artifactID, Selections: selectionsJSON},
+		scopes: map[uuid.UUID]*store.AppRuntime{
+			appID: {AppID: appID, Selections: selectionsJSON},
 		},
 	}
 	configStore := &matcherMockConfigStore{
-		states: []store.ConfigState{{ConfigKey: "sdk:test", ConfigType: store.ConfigTypeSDK, LatestResourceID: &artifactID}},
+		states: []store.ConfigState{{ConfigKey: "sdk:test", ConfigType: store.ConfigTypeSDK, LatestResourceID: &appID}},
 	}
 	versions := []store.WorkspaceService{{ServiceID: serviceID, Version: versionName, ServiceVersionID: versionID}}
 	changelogID := uuid.New()

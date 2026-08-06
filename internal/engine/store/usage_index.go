@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 
@@ -12,27 +11,17 @@ import (
 	"github.com/Usefused/engine/internal/shared/models"
 )
 
-// artifactScopeBatchReader is the optional targeted-batch capability
-// WorkspaceSDKServiceImpacts prefers when the concrete Store supports it
-// (postgresStore.ListArtifactScopes), falling back to one GetArtifactScope
-// call per artifact ID otherwise -- the same optional-capability pattern
-// used throughout this package (e.g. WorkspaceProfileStore).
-type artifactScopeBatchReader interface {
-	ListArtifactScopes(ctx context.Context, artifactIDs []uuid.UUID) (map[uuid.UUID]*ArtifactScope, error)
-}
-
 // WorkspaceSDKServiceImpacts builds a per-service, per-version index of
 // which SDK/MCP config keys reference each (serviceID, serviceVersionID)
-// pair, by reading every SDK/MCP ArtifactScope's Selections and
-// cross-referencing config states (config_key -> latest_resource_id ->
-// artifact scope). Originally lived in
+// pair, by reading every SDK/MCP AppRuntime's Selections and
+// cross-referencing config states (config_key -> latest_resource_id -> app
+// runtime). Originally lived in
 // internal/engine/api/workspace_config_handlers.go, used only by the
 // remove_service/disable_service_version apply-plan-impact check -- moved
 // here (a mechanical relocation, not a design change) so
-// internal/engine/sandbox's Phase 3 changelog matcher can reuse it too:
+// internal/engine/sandbox's changelog matcher can reuse it too:
 // api already imports sandbox, so sandbox importing api back would cycle,
-// but both already import store (see plans/plan-service-changelog.md's
-// "## Phase 3", "Where the usage index lives").
+// but both already import store.
 //
 // This is a thin projection of WorkspaceSDKSelectionsByServiceVersion down
 // to just config keys -- kept as its own function (rather than inlining a
@@ -50,9 +39,9 @@ func WorkspaceSDKServiceImpacts(ctx context.Context, configStore ConfigRepositor
 // SDKSelection it made for one service+version. WorkspaceSDKServiceImpacts
 // alone only keeps the coarse config-key list, which is enough to know
 // "this config touches this service+version at all" but not enough for
-// Phase 3's version/changed matching, which needs to know *which specific
-// endpoints* (SelectAll vs. EndpointIDs/OperationNames) each config
-// actually selected, to narrow an endpoint-diff notification down to
+// enough for changelog-derived version/changed matching, which needs to know
+// *which specific endpoints* (SelectAll vs. EndpointIDs/OperationNames) each
+// config actually selected, to narrow an endpoint-diff notification down to
 // configs that selected the endpoint that changed.
 type WorkspaceSDKSelectionMatch struct {
 	ConfigKey string
@@ -60,7 +49,7 @@ type WorkspaceSDKSelectionMatch struct {
 }
 
 // WorkspaceSDKSelectionsByServiceVersion is WorkspaceSDKServiceImpacts'
-// detail-preserving base: same underlying config-state/artifact-scope
+// detail-preserving base: same underlying config-state/app-runtime
 // fetch, but keeps each config's full SDKSelection instead of collapsing
 // straight to a config-key list.
 func WorkspaceSDKSelectionsByServiceVersion(ctx context.Context, configStore ConfigRepository, s Store) (map[uuid.UUID]map[uuid.UUID][]WorkspaceSDKSelectionMatch, error) {
@@ -68,15 +57,15 @@ func WorkspaceSDKSelectionsByServiceVersion(ctx context.Context, configStore Con
 	if err != nil {
 		return nil, err
 	}
-	artifactIDs, configKeys := artifactScopeStateIndex(states)
-	scopes, err := workspaceArtifactScopes(ctx, s, artifactIDs)
+	appIDs, configKeys := appRuntimeStateIndex(states)
+	scopes, err := s.ListAppRuntimes(ctx, appIDs)
 	if err != nil {
 		return nil, err
 	}
 	return workspaceSDKSelectionsFromScopes(scopes, configKeys)
 }
 
-func artifactScopeStateIndex(states []ConfigState) ([]uuid.UUID, map[uuid.UUID][]string) {
+func appRuntimeStateIndex(states []ConfigState) ([]uuid.UUID, map[uuid.UUID][]string) {
 	configKeys := make(map[uuid.UUID][]string)
 	for _, state := range states {
 		if state.LatestResourceID == nil {
@@ -84,50 +73,28 @@ func artifactScopeStateIndex(states []ConfigState) ([]uuid.UUID, map[uuid.UUID][
 		}
 		configKeys[*state.LatestResourceID] = append(configKeys[*state.LatestResourceID], state.ConfigKey)
 	}
-	artifactIDs := make([]uuid.UUID, 0, len(configKeys))
-	for artifactID := range configKeys {
-		artifactIDs = append(artifactIDs, artifactID)
+	appIDs := make([]uuid.UUID, 0, len(configKeys))
+	for appID := range configKeys {
+		appIDs = append(appIDs, appID)
 	}
-	return artifactIDs, configKeys
+	return appIDs, configKeys
 }
 
-func workspaceArtifactScopes(ctx context.Context, s Store, artifactIDs []uuid.UUID) (map[uuid.UUID]*ArtifactScope, error) {
-	if batchStore, ok := s.(artifactScopeBatchReader); ok {
-		return batchStore.ListArtifactScopes(ctx, artifactIDs)
-	}
-	return workspaceArtifactScopesFallback(ctx, s, artifactIDs)
-}
-
-func workspaceArtifactScopesFallback(ctx context.Context, s Store, artifactIDs []uuid.UUID) (map[uuid.UUID]*ArtifactScope, error) {
-	out := make(map[uuid.UUID]*ArtifactScope)
-	for _, artifactID := range artifactIDs {
-		scope, err := s.GetArtifactScope(ctx, artifactID)
-		if errors.Is(err, ErrArtifactScopeNotFound) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		out[artifactID] = scope
-	}
-	return out, nil
-}
-
-func workspaceSDKSelectionsFromScopes(scopes map[uuid.UUID]*ArtifactScope, configKeys map[uuid.UUID][]string) (map[uuid.UUID]map[uuid.UUID][]WorkspaceSDKSelectionMatch, error) {
+func workspaceSDKSelectionsFromScopes(scopes map[uuid.UUID]*AppRuntime, configKeys map[uuid.UUID][]string) (map[uuid.UUID]map[uuid.UUID][]WorkspaceSDKSelectionMatch, error) {
 	out := make(map[uuid.UUID]map[uuid.UUID][]WorkspaceSDKSelectionMatch)
-	for artifactID, scope := range scopes {
+	for appID, scope := range scopes {
 		if scope == nil {
 			continue
 		}
 		var selections []models.SDKSelection
 		if err := json.Unmarshal(scope.Selections, &selections); err != nil {
-			return nil, fmt.Errorf("decode sdk scope selections for %s: %w", artifactID, err)
+			return nil, fmt.Errorf("decode sdk scope selections for %s: %w", appID, err)
 		}
 		for _, selection := range selections {
 			if out[selection.ServiceID] == nil {
 				out[selection.ServiceID] = make(map[uuid.UUID][]WorkspaceSDKSelectionMatch)
 			}
-			for _, configKey := range configKeys[artifactID] {
+			for _, configKey := range configKeys[appID] {
 				out[selection.ServiceID][selection.ServiceVersionID] = append(
 					out[selection.ServiceID][selection.ServiceVersionID],
 					WorkspaceSDKSelectionMatch{ConfigKey: configKey, Selection: selection},

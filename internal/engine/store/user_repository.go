@@ -37,6 +37,7 @@ var (
 	ErrInvalidControlCredential  = errors.New("invalid control credential")
 	ErrControlCredentialNotFound = errors.New("control credential not found")
 	ErrLastEffectiveOwner        = errors.New("operation would remove the last effective Owner")
+	ErrSelfSuspensionForbidden   = errors.New("you cannot suspend your own account")
 )
 
 type User struct {
@@ -127,10 +128,12 @@ type AddTeamMemberByEmailInput struct {
 }
 
 type IssueCredentialInput struct {
-	UserID    uuid.UUID
-	Name      string
-	ExpiresAt *time.Time
-	Actor     MutationActor
+	UserID     uuid.UUID
+	Name       string
+	ExpiresAt  *time.Time
+	Source     string
+	AuthMethod string
+	Actor      MutationActor
 }
 
 type UserMutationResult struct {

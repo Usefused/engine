@@ -69,13 +69,13 @@ func validateWorkspaceShareListOptions(options WorkspaceShareListOptions) error 
 }
 
 func workspaceShareRole(resourceType accesscontrol.ResourceType) (string, bool) {
-	// Workspace-wide access must never imply secret or artifact management;
+	// Workspace-wide access must never imply secret or app management;
 	// owners keep those duties while every workspace member gets bounded use.
 	switch resourceType {
 	case accesscontrol.ResourceBucket:
 		return accesscontrol.RoleBucketUser, true
-	case accesscontrol.ResourceArtifact:
-		return accesscontrol.RoleArtifactUser, true
+	case accesscontrol.ResourceApp:
+		return accesscontrol.RoleAppUser, true
 	default:
 		return "", false
 	}

@@ -17,13 +17,13 @@ var sensitiveGraphQLAuditFields = map[string]struct{}{
 	"secretMetas": {}, "secretMetaPage": {}, "authConnections": {},
 	"authConnectionPage": {}, "connectionResources": {}, "mcpAnalytics": {},
 	"webhookEvents": {}, "webhookAnalytics": {}, "account": {}, "credits": {},
-	"sdkAnalytics": {}, "globalServiceAnalytics": {},
+	"globalServiceAnalytics": {},
 	// Access-control reads expose identities, credential metadata, memberships,
 	// and effective grants. Persist their outcomes even though they are queries.
 	"users": {}, "user": {}, "userEffectiveAccess": {}, "teamMembers": {},
-	"teams": {}, "team": {}, "artifactBuildSelectors": {}, "artifactOwningTeams": {},
+	"teams": {}, "team": {}, "appBuildSelectors": {}, "appOwningTeams": {},
 	"accessExplanation": {}, "auditEvents": {}, "workspaceConnectionProfile": {},
-	"grantTeamArtifactAccess": {}, "revokeTeamArtifactAccess": {},
+	"grantTeamAppAccess": {}, "revokeTeamAppAccess": {},
 }
 
 func classifyGraphQLAudit(request *http.Request) (string, bool) {

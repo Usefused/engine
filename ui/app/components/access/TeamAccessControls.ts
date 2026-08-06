@@ -2,7 +2,7 @@ import { createElement, type ChangeEvent, type FormEvent, type ReactElement } fr
 import type {
   Team,
   TeamAccessLevel,
-  TeamArtifactAccessLevel,
+  TeamAppAccessLevel,
   TeamResourceType,
   TeamWorkspaceRole,
 } from "../../lib/teams";
@@ -20,7 +20,7 @@ interface TeamAccessControlsProps {
   canManageOwners?: boolean;
   onWorkspaceRoleChange: (role: TeamWorkspaceRole | null) => void;
   onResourceAccessChange: (resourceType: TeamResourceType, resourceId: string, level: TeamAccessLevel | null) => void;
-  onArtifactAccessChange: (artifactId: string, level: TeamArtifactAccessLevel | null) => void;
+  onAppAccessChange: (appFamilyId: string, level: TeamAppAccessLevel | null) => void;
 }
 
 const workspaceRoles: Array<[TeamWorkspaceRole | "NONE", string]> = [
@@ -37,7 +37,7 @@ const resourceLevels: Array<[TeamAccessLevel | "NONE", string]> = [
   ["MANAGER", "Manage"],
 ];
 
-const artifactLevels: Array<[TeamArtifactAccessLevel | "NONE", string]> = [
+const appLevels: Array<[TeamAppAccessLevel | "NONE", string]> = [
   ["NONE", "No access"],
   ["READER", "Read"],
   ["MANAGER", "Manage"],
@@ -50,15 +50,15 @@ export function TeamAccessControls(props: TeamAccessControlsProps): ReactElement
     workspaceRoleControl(props),
     resourceSection("Service access", "Choose which services this team can use or manage.", "service", props.services, props),
     resourceSection("Credential access", "Choose which credential sets this team can use or manage.", "bucket", props.buckets, props),
-    artifactSection(props)
+    appSection(props)
   );
 }
 
-export function teamArtifactAccessLevels(team: Team, artifactId: string): TeamArtifactAccessLevel[] {
+export function teamAppAccessLevels(team: Team, appFamilyId: string): TeamAppAccessLevel[] {
   return team.bindings.flatMap((item) => {
-    if (item.resource_type !== "artifact" || item.resource_id !== artifactId) return [];
-    if (item.role_slug === "artifact-manager") return ["MANAGER"];
-    if (item.role_slug === "artifact-reader") return ["READER"];
+    if (item.resource_type !== "app" || item.resource_id !== appFamilyId) return [];
+    if (item.role_slug === "app-manager") return ["MANAGER"];
+    if (item.role_slug === "app-reader") return ["READER"];
     return [];
   });
 }
@@ -165,12 +165,12 @@ function resourceRow(resourceType: TeamResourceType, resource: TeamAccessResourc
   );
 }
 
-function artifactSection(props: TeamAccessControlsProps): ReactElement {
-  const bindings = uniqueArtifactBindings(props.team);
-  const rows = bindings.map((binding) => artifactRow(binding, props));
+function appSection(props: TeamAccessControlsProps): ReactElement {
+  const bindings = uniqueAppBindings(props.team);
+  const rows = bindings.map((binding) => appRow(binding, props));
   return createElement(
     "section",
-    { className: "rounded-lg border border-slate-200 overflow-hidden", "data-section": "artifact-access" },
+    { className: "rounded-lg border border-slate-200 overflow-hidden", "data-section": "app-access" },
     createElement(
       "div",
       { className: "bg-slate-50 px-4 py-3 border-b border-slate-200" },
@@ -181,24 +181,24 @@ function artifactSection(props: TeamAccessControlsProps): ReactElement {
       "div",
       { className: "divide-y divide-slate-100 px-4" },
       ...(rows.length > 0 ? rows : [createElement("p", { key: "empty", className: "text-sm text-slate-500 py-3" }, "No SDKs or MCP servers are shared with this team.")]),
-      artifactGrantForm(props)
+      appGrantForm(props)
     )
   );
 }
 
-function artifactGrantForm(props: TeamAccessControlsProps): ReactElement {
+function appGrantForm(props: TeamAccessControlsProps): ReactElement {
   return createElement(
     "form",
     {
       className: "grid gap-2 py-3 sm:grid-cols-[1fr_110px_auto]",
-      onSubmit: (event: FormEvent<HTMLFormElement>) => submitArtifactGrant(event, props),
+      onSubmit: (event: FormEvent<HTMLFormElement>) => submitAppGrant(event, props),
     },
     createElement("input", {
-      name: "artifact_id",
+      name: "app_family_id",
       required: true,
       disabled: props.disabled,
-      placeholder: "App or MCP server ID",
-      "aria-label": "App or MCP server ID",
+      placeholder: "App family ID",
+      "aria-label": "App family ID",
       className: "rounded-lg border border-slate-300 px-3 py-2 text-sm",
     }),
     createElement(
@@ -211,18 +211,18 @@ function artifactGrantForm(props: TeamAccessControlsProps): ReactElement {
   );
 }
 
-function submitArtifactGrant(event: FormEvent<HTMLFormElement>, props: TeamAccessControlsProps): void {
+function submitAppGrant(event: FormEvent<HTMLFormElement>, props: TeamAccessControlsProps): void {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
-  const artifactId = String(form.get("artifact_id") || "").trim();
+  const appFamilyId = String(form.get("app_family_id") || "").trim();
   const level = form.get("level") === "MANAGER" ? "MANAGER" : "READER";
-  if (!artifactId) return;
-  props.onArtifactAccessChange(artifactId, level);
+  if (!appFamilyId) return;
+  props.onAppAccessChange(appFamilyId, level);
   event.currentTarget.reset();
 }
 
-function artifactRow(binding: Team["bindings"][number], props: TeamAccessControlsProps): ReactElement {
-  const levels = teamArtifactAccessLevels(props.team, binding.resource_id);
+function appRow(binding: Team["bindings"][number], props: TeamAccessControlsProps): ReactElement {
+  const levels = teamAppAccessLevels(props.team, binding.resource_id);
   const current = levels.includes("MANAGER") ? "MANAGER" : levels.includes("READER") ? "READER" : "NONE";
   const name = binding.resource_display_name || `Build ${binding.resource_id}`;
   return createElement(
@@ -237,24 +237,24 @@ function artifactRow(binding: Team["bindings"][number], props: TeamAccessControl
       {
         value: current,
         disabled: props.disabled,
-        onChange: (event: ChangeEvent<HTMLSelectElement>) => props.onArtifactAccessChange(binding.resource_id, artifactLevel(event.target.value)),
+        onChange: (event: ChangeEvent<HTMLSelectElement>) => props.onAppAccessChange(binding.resource_id, appLevel(event.target.value)),
         className: "w-32 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-sm",
         "aria-label": `${name} access`,
       },
-      ...artifactLevels.map(([value, label]) => createElement("option", { key: value, value }, label))
+      ...appLevels.map(([value, label]) => createElement("option", { key: value, value }, label))
     )
   );
 }
 
-function artifactLevel(value: string): TeamArtifactAccessLevel | null {
+function appLevel(value: string): TeamAppAccessLevel | null {
   if (value === "READER" || value === "MANAGER") return value;
   return null;
 }
 
-function uniqueArtifactBindings(team: Team): Team["bindings"] {
+function uniqueAppBindings(team: Team): Team["bindings"] {
   const seen = new Set<string>();
   return team.bindings.filter((binding) => {
-    if (binding.resource_type !== "artifact" || seen.has(binding.resource_id)) return false;
+    if (binding.resource_type !== "app" || seen.has(binding.resource_id)) return false;
     seen.add(binding.resource_id);
     return true;
   });

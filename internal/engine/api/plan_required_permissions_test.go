@@ -92,3 +92,34 @@ func TestConfigPlanActionsRefreshesRequiredPermissionsInResponse(t *testing.T) {
 		t.Fatal("updated plan did not persist required permissions")
 	}
 }
+
+func TestAppPlanUpdateRequiresFamilyManage(t *testing.T) {
+	accountID, workspaceID := uuid.New(), uuid.New()
+	appID, familyID := uuid.New(), uuid.New()
+	s := &workspaceTestStore{
+		accountID: accountID,
+		apps: map[uuid.UUID]store.App{
+			appID: {AppID: appID, AppFamilyID: familyID, AccountID: accountID},
+		},
+	}
+	ctx := accesscontrol.ContextWithActor(t.Context(), accesscontrol.Actor{
+		AccountID: accountID, WorkspaceID: workspaceID, SubjectID: uuid.New(),
+	})
+	raw, count, err := configPlanRequiredPermissionsWithBuckets(
+		ctx, s, &store.ConfigState{LatestResourceID: &appID}, nil, nil, "Security SDK",
+	)
+	if err != nil {
+		t.Fatalf("required permissions: %v", err)
+	}
+	requirements, err := accesscontrol.UnmarshalRequiredPermissions(raw)
+	if err != nil {
+		t.Fatalf("decode required permissions: %v", err)
+	}
+	want := accesscontrol.Requirement{
+		Permission: accesscontrol.PermissionAppManage,
+		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID},
+	}
+	if count != 1 || len(requirements) != 1 || requirements[0] != want {
+		t.Fatalf("requirements = %#v (count %d), want %#v", requirements, count, want)
+	}
+}

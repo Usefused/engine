@@ -26,16 +26,17 @@ const (
 type dynamicRequirementKind string
 
 const (
-	dynamicServiceCreate    dynamicRequirementKind = "service_create"
-	dynamicBucketByName     dynamicRequirementKind = "bucket_by_name"
-	dynamicSecretWrite      dynamicRequirementKind = "secret_write"
-	dynamicWorkspaceApply   dynamicRequirementKind = "workspace_apply"
-	dynamicConfigPlanAction dynamicRequirementKind = "config_plan_action"
-	dynamicWorkspacePlan    dynamicRequirementKind = "workspace_plan"
-	dynamicArtifactPlan     dynamicRequirementKind = "artifact_plan"
-	dynamicArtifactApply    dynamicRequirementKind = "artifact_apply"
-	dynamicSDKGenerate      dynamicRequirementKind = "sdk_generate"
-	dynamicArtifactDownload dynamicRequirementKind = "artifact_download"
+	dynamicServiceCreate      dynamicRequirementKind = "service_create"
+	dynamicBucketByName       dynamicRequirementKind = "bucket_by_name"
+	dynamicSecretWrite        dynamicRequirementKind = "secret_write"
+	dynamicWorkspaceApply     dynamicRequirementKind = "workspace_apply"
+	dynamicConfigPlanAction   dynamicRequirementKind = "config_plan_action"
+	dynamicWorkspacePlan      dynamicRequirementKind = "workspace_plan"
+	dynamicDesiredConfigPlan  dynamicRequirementKind = "desired_config_plan"
+	dynamicDesiredConfigApply dynamicRequirementKind = "desired_config_apply"
+	dynamicSDKGenerate        dynamicRequirementKind = "sdk_generate"
+	dynamicAppAccess          dynamicRequirementKind = "app_access"
+	dynamicAppTokenAccess     dynamicRequirementKind = "app_token_access"
 )
 
 type controlRequirementResolver interface {
@@ -65,15 +66,20 @@ var dynamicControlRequirements = map[string]dynamicRequirementKind{
 	http.MethodPost + " /workspace/config/apply":             dynamicWorkspaceApply,
 	http.MethodPost + " /workspace/config/plan":              dynamicWorkspacePlan,
 	http.MethodPatch + " /config/plans/{plan_id}/actions":    dynamicConfigPlanAction,
-	http.MethodPost + " /sdk-config/plan":                    dynamicArtifactPlan,
-	http.MethodPost + " /sdk-config/apply":                   dynamicArtifactApply,
-	http.MethodPost + " /mcp-config/plan":                    dynamicArtifactPlan,
-	http.MethodPost + " /mcp-config/apply":                   dynamicArtifactApply,
-	http.MethodPost + " /webhook-config/plan":                dynamicArtifactPlan,
-	http.MethodPost + " /webhook-config/apply":               dynamicArtifactApply,
+	http.MethodPost + " /sdk-config/plan":                    dynamicDesiredConfigPlan,
+	http.MethodPost + " /sdk-config/apply":                   dynamicDesiredConfigApply,
+	http.MethodPost + " /mcp-config/plan":                    dynamicDesiredConfigPlan,
+	http.MethodPost + " /mcp-config/apply":                   dynamicDesiredConfigApply,
+	http.MethodPost + " /webhook-config/plan":                dynamicDesiredConfigPlan,
+	http.MethodPost + " /webhook-config/apply":               dynamicDesiredConfigApply,
 	http.MethodPost + " /sdks/generate":                      dynamicSDKGenerate,
 	http.MethodPost + " /integrations/{service_id}/generate": dynamicSDKGenerate,
-	http.MethodGet + " /sdk-config/{artifact_name}/download": dynamicArtifactDownload,
+	http.MethodPost + " /apps/{app_id}/deprecate":            dynamicAppAccess,
+	http.MethodPost + " /apps/{app_id}/undeprecate":          dynamicAppAccess,
+	http.MethodDelete + " /apps/{app_id}/":                   dynamicAppAccess,
+	http.MethodGet + " /sdks/{app_id}/download":              dynamicAppAccess,
+	http.MethodPost + " /workspace/sdk-tokens":               dynamicAppTokenAccess,
+	http.MethodDelete + " /workspace/sdk-tokens":             dynamicAppTokenAccess,
 }
 
 func workspaceRequirement(permission accesscontrol.Permission) routeRequirement {
@@ -131,12 +137,8 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodPut, "/workspace/secrets", false, nil},
 	{http.MethodPut, "/workspace/secrets/bulk", false, nil},
 	{http.MethodDelete, "/workspace/secrets", false, nil},
-	{http.MethodPost, "/workspace/sdk-tokens", false, []routeRequirement{
-		queryRequirement(accesscontrol.PermissionArtifactTokensManage, accesscontrol.ResourceArtifact, "artifact_id"),
-	}},
-	{http.MethodDelete, "/workspace/sdk-tokens", false, []routeRequirement{
-		queryRequirement(accesscontrol.PermissionArtifactTokensManage, accesscontrol.ResourceArtifact, "artifact_id"),
-	}},
+	{http.MethodPost, "/workspace/sdk-tokens", false, nil},
+	{http.MethodDelete, "/workspace/sdk-tokens", false, nil},
 
 	{http.MethodPost, "/workspace/config/plan", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionWorkspaceRead),
@@ -145,16 +147,9 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodPatch, "/config/plans/{plan_id}/actions", false, nil},
 	{http.MethodPost, "/sdk-config/plan", false, nil},
 	{http.MethodPost, "/sdk-config/apply", false, nil},
-	{http.MethodGet, "/sdk-config/{artifact_name}/download", false, nil},
-	{http.MethodPost, "/sdk-config/{artifact_id}/activate", false, []routeRequirement{
-		pathRequirement(accesscontrol.PermissionArtifactManage, accesscontrol.ResourceArtifact, "artifact_id"),
-	}},
-	{http.MethodPost, "/sdk-config/{artifact_id}/deactivate", false, []routeRequirement{
-		pathRequirement(accesscontrol.PermissionArtifactManage, accesscontrol.ResourceArtifact, "artifact_id"),
-	}},
-	{http.MethodDelete, "/sdk-config/{artifact_id}", false, []routeRequirement{
-		pathRequirement(accesscontrol.PermissionArtifactManage, accesscontrol.ResourceArtifact, "artifact_id"),
-	}},
+	{http.MethodPost, "/apps/{app_id}/deprecate", false, nil},
+	{http.MethodPost, "/apps/{app_id}/undeprecate", false, nil},
+	{http.MethodDelete, "/apps/{app_id}/", false, nil},
 	{http.MethodPost, "/mcp-config/plan", false, nil},
 	{http.MethodPost, "/mcp-config/apply", false, nil},
 	{http.MethodPost, "/webhook-config/plan", false, nil},
@@ -228,7 +223,7 @@ var controlRESTPolicies = []controlRoutePolicy{
 	}},
 	{http.MethodPost, "/integrations/{service_id}/generate", false, []routeRequirement{
 		pathRequirement(accesscontrol.PermissionServiceConsume, accesscontrol.ResourceService, "service_id"),
-		workspaceRequirement(accesscontrol.PermissionArtifactCreate),
+		workspaceRequirement(accesscontrol.PermissionAppCreate),
 	}},
 	{http.MethodGet, "/account", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionAccountRead),
@@ -252,13 +247,11 @@ var controlRESTPolicies = []controlRoutePolicy{
 		workspaceRequirement(accesscontrol.PermissionAccountManage),
 	}},
 	{http.MethodPost, "/sdks/generate", false, []routeRequirement{
-		workspaceRequirement(accesscontrol.PermissionArtifactCreate),
+		workspaceRequirement(accesscontrol.PermissionAppCreate),
 	}},
-	{http.MethodGet, "/sdks/{artifact_id}/download", false, []routeRequirement{
-		pathRequirement(accesscontrol.PermissionArtifactRead, accesscontrol.ResourceArtifact, "artifact_id"),
-	}},
+	{http.MethodGet, "/sdks/{app_id}/download", false, nil},
 	{http.MethodGet, "/sdks/job/{job_id}/stream", false, []routeRequirement{
-		workspaceRequirement(accesscontrol.PermissionArtifactRead),
+		workspaceRequirement(accesscontrol.PermissionAppRead),
 	}},
 }
 
@@ -385,7 +378,7 @@ func requiresSensitiveReadAudit(requirements []accesscontrol.Requirement) bool {
 		switch requirement.Permission {
 		case accesscontrol.PermissionBucketValuesRead,
 			accesscontrol.PermissionCredentialsMetadataRead,
-			accesscontrol.PermissionArtifactTokensManage,
+			accesscontrol.PermissionAppTokensManage,
 			accesscontrol.PermissionConnectionRead,
 			accesscontrol.PermissionAccountRead,
 			accesscontrol.PermissionBillingRead,

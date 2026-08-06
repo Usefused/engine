@@ -49,7 +49,7 @@ type authConnectionResponse struct {
 	BucketID              uuid.UUID  `json:"bucket_id"`
 	ServiceID             uuid.UUID  `json:"service_id"`
 	EndUserRef            string     `json:"end_user_ref"`
-	CreatedByArtifactID   uuid.UUID  `json:"created_by_artifact_id,omitempty"`
+	CreatedByAppID        uuid.UUID  `json:"created_by_app_id,omitempty"`
 	AuthType              string     `json:"auth_type"`
 	TokenType             string     `json:"token_type"`
 	Scopes                []string   `json:"scopes"`
@@ -463,7 +463,7 @@ func projectAuthConnection(conn store.AuthConnection) authConnectionResponse {
 		BucketID:              conn.BucketID,
 		ServiceID:             conn.ServiceID,
 		EndUserRef:            conn.EndUserRef,
-		CreatedByArtifactID:   conn.CreatedByArtifactID,
+		CreatedByAppID:        conn.CreatedByAppID,
 		AuthType:              conn.AuthType,
 		TokenType:             conn.TokenType,
 		Scopes:                conn.Scopes,

@@ -22,11 +22,11 @@ type mockTokenValidator struct {
 	accountID  uuid.UUID
 }
 
-func (m *mockTokenValidator) Validate(_ context.Context, _ uuid.UUID, token string) (uuid.UUID, error) {
+func (m *mockTokenValidator) Validate(_ context.Context, appID uuid.UUID, token string) (auth.RuntimeIdentity, error) {
 	if token == m.validToken {
-		return m.accountID, nil
+		return auth.RuntimeIdentity{AccountID: m.accountID, AppFamilyID: uuid.New(), AppID: appID, AppVersion: "1.0.0", Kind: "mcp", Status: "active"}, nil
 	}
-	return uuid.Nil, auth.ErrUnauthorized
+	return auth.RuntimeIdentity{}, auth.ErrUnauthorized
 }
 
 type countingValidator struct {
@@ -35,12 +35,12 @@ type countingValidator struct {
 	count      *int
 }
 
-func (c *countingValidator) Validate(_ context.Context, _ uuid.UUID, token string) (uuid.UUID, error) {
+func (c *countingValidator) Validate(_ context.Context, appID uuid.UUID, token string) (auth.RuntimeIdentity, error) {
 	*c.count++
 	if token == c.validToken {
-		return c.accountID, nil
+		return auth.RuntimeIdentity{AccountID: c.accountID, AppFamilyID: uuid.New(), AppID: appID, AppVersion: "1.0.0", Kind: "mcp", Status: "active"}, nil
 	}
-	return uuid.Nil, auth.ErrUnauthorized
+	return auth.RuntimeIdentity{}, auth.ErrUnauthorized
 }
 
 // ─── Blocker 1 + Gap 4: Bearer scheme rejection ───────────────────────────────
@@ -52,10 +52,10 @@ func (c *countingValidator) Validate(_ context.Context, _ uuid.UUID, token strin
 func TestBearerSchemeRejectedInMessageHandler(t *testing.T) {
 	sessionID := uuid.New().String()
 	sess := &mcpSession{
-		artifactID: uuid.New().String(),
-		sessionID:  sessionID,
-		token:      "correct-token",
-		idleTimer:  time.AfterFunc(time.Hour, func() {}),
+		appID:     uuid.New().String(),
+		sessionID: sessionID,
+		token:     "correct-token",
+		idleTimer: time.AfterFunc(time.Hour, func() {}),
 	}
 	mcpSessions.Lock()
 	mcpSessions.m[sessionID] = sess
@@ -108,11 +108,11 @@ func TestValidateTokenWithCacheCachesOnSuccess(t *testing.T) {
 	defer func() { globalTokenValidator = orig }()
 
 	callCount := 0
-	artifactID := uuid.New()
+	appID := uuid.New()
 	accountID := uuid.New()
 	globalTokenValidator = &countingValidator{validToken: "good", accountID: accountID, count: &callCount}
 
-	got1, err := validateTokenWithCache(context.Background(), artifactID.String(), "good")
+	got1, err := validateTokenWithCache(context.Background(), appID.String(), "good")
 	if err != nil || got1 != accountID {
 		t.Fatalf("first call: err=%v accountID=%v", err, got1)
 	}
@@ -121,7 +121,7 @@ func TestValidateTokenWithCacheCachesOnSuccess(t *testing.T) {
 	}
 
 	// Second call within TTL: cache hit, validator not called again.
-	got2, err := validateTokenWithCache(context.Background(), artifactID.String(), "good")
+	got2, err := validateTokenWithCache(context.Background(), appID.String(), "good")
 	if err != nil || got2 != accountID {
 		t.Fatalf("second call: err=%v accountID=%v", err, got2)
 	}
@@ -131,14 +131,14 @@ func TestValidateTokenWithCacheCachesOnSuccess(t *testing.T) {
 
 	// Clean up cache entry so other tests aren't affected.
 	tokenCache.Lock()
-	delete(tokenCache.m, sha256CacheKey(artifactID.String(), "good"))
+	delete(tokenCache.m, sha256CacheKey(appID.String(), "good"))
 	tokenCache.Unlock()
 }
 
 func TestValidateTokenWithCacheCallsValidatorAfterExpiry(t *testing.T) {
-	artifactID := "sdk-expired-test"
+	appID := "sdk-expired-test"
 	token := "tok-expired"
-	key := sha256CacheKey(artifactID, token)
+	key := sha256CacheKey(appID, token)
 
 	// Pre-populate with an expired entry.
 	tokenCache.Lock()
@@ -150,7 +150,7 @@ func TestValidateTokenWithCacheCallsValidatorAfterExpiry(t *testing.T) {
 	// Validator returns error so we know a real Validate call was made.
 	globalTokenValidator = &mockTokenValidator{validToken: "different", accountID: uuid.New()}
 
-	_, err := validateTokenWithCache(context.Background(), artifactID, token)
+	_, err := validateTokenWithCache(context.Background(), appID, token)
 	if err == nil {
 		t.Fatal("expected validator error after cache expiry, got nil")
 	}
@@ -161,10 +161,10 @@ func TestValidateTokenWithCacheCallsValidatorAfterExpiry(t *testing.T) {
 func TestMCPMessageHandlerRejectsWrongToken(t *testing.T) {
 	sessionID := uuid.New().String()
 	sess := &mcpSession{
-		artifactID: uuid.New().String(),
-		sessionID:  sessionID,
-		token:      "correct-token",
-		idleTimer:  time.AfterFunc(time.Hour, func() {}),
+		appID:     uuid.New().String(),
+		sessionID: sessionID,
+		token:     "correct-token",
+		idleTimer: time.AfterFunc(time.Hour, func() {}),
 	}
 	mcpSessions.Lock()
 	mcpSessions.m[sessionID] = sess
@@ -206,10 +206,10 @@ func TestMCPMessageHandlerRejectsWrongToken(t *testing.T) {
 func TestMCPMessageHandlerEnforcesBodySizeLimit(t *testing.T) {
 	sessionID := uuid.New().String()
 	sess := &mcpSession{
-		artifactID: uuid.New().String(),
-		sessionID:  sessionID,
-		token:      "tok",
-		idleTimer:  time.AfterFunc(time.Hour, func() {}),
+		appID:     uuid.New().String(),
+		sessionID: sessionID,
+		token:     "tok",
+		idleTimer: time.AfterFunc(time.Hour, func() {}),
 	}
 	mcpSessions.Lock()
 	mcpSessions.m[sessionID] = sess
@@ -236,7 +236,7 @@ func TestMCPMessageHandlerEnforcesBodySizeLimit(t *testing.T) {
 // ─── Blocker 4: Per-session temp dir ─────────────────────────────────────────
 
 func TestSessionTmpDirIsPerSessionNotPerSDK(t *testing.T) {
-	artifactID := uuid.New().String()
+	appID := uuid.New().String()
 	sessionA := uuid.New().String()
 	sessionB := uuid.New().String()
 
@@ -248,8 +248,8 @@ func TestSessionTmpDirIsPerSessionNotPerSDK(t *testing.T) {
 		t.Fatal("two different sessions produced the same temp dir name")
 	}
 	// The SDK ID must not appear in the path (it would cause cross-session races).
-	if strings.Contains(dirA, artifactID) || strings.Contains(dirB, artifactID) {
-		t.Fatalf("session temp dirs must not embed artifactID; got %q and %q", dirA, dirB)
+	if strings.Contains(dirA, appID) || strings.Contains(dirB, appID) {
+		t.Fatalf("session temp dirs must not embed appID; got %q and %q", dirA, dirB)
 	}
 	// Verify the new prefix is "fused-sandbox-" not the old "opensync-sandbox-".
 	if strings.HasPrefix(dirA, "opensync-sandbox-") {

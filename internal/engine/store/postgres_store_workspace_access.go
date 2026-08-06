@@ -98,17 +98,17 @@ func resolveWorkspaceShareTarget(ctx context.Context, tx pgx.Tx, resource access
 	var workspaceID, roleID uuid.UUID
 	var displayName *string
 	var resourceExists bool
-	// Deactivated SDKs/MCP servers are not valid new workspace shares. Revoke
-	// still proceeds by binding identity even when this active-resource lookup
-	// returns false, so administrators can clean up an older share.
+	// A family remains shareable while it has any runnable version. Revoke still
+	// proceeds by binding identity so administrators can remove a stale share.
 	err := tx.QueryRow(ctx, `
 		SELECT workspace.id, role.id, role.display_name,
-			CASE $2::text WHEN 'bucket' THEN bucket.name WHEN 'artifact' THEN artifact.name END,
-			CASE $2::text WHEN 'bucket' THEN bucket.id IS NOT NULL WHEN 'artifact' THEN artifact.artifact_id IS NOT NULL ELSE false END
+			CASE $2::text WHEN 'bucket' THEN bucket.name WHEN 'app' THEN app.display_name END,
+			CASE $2::text WHEN 'bucket' THEN bucket.id IS NOT NULL WHEN 'app' THEN app.app_family_id IS NOT NULL ELSE false END
 		FROM fused_workspaces workspace
 		JOIN fused_roles role ON role.slug = $1 AND role.system_role = true AND role.scope_type = $2
 		LEFT JOIN fused_buckets bucket ON $2 = 'bucket' AND bucket.id = $3
-		LEFT JOIN fused_artifact_scopes artifact ON $2 = 'artifact' AND artifact.artifact_id = $3 AND artifact.deactivated_at IS NULL
+		LEFT JOIN fused_app_families app ON $2 = 'app' AND app.app_family_id = $3
+			AND EXISTS (SELECT 1 FROM fused_apps version WHERE version.app_family_id = app.app_family_id AND version.status IN ('active', 'deprecated'))
 		WHERE workspace.singleton_key = 1
 		FOR UPDATE OF workspace
 	`, roleSlug, resource.Type, resource.ID).Scan(&workspaceID, &roleID, &share.RoleDisplayName, &displayName, &resourceExists)
@@ -203,14 +203,14 @@ const listWorkspaceSharesSQL = `
 WITH workspace AS (SELECT id FROM fused_workspaces WHERE singleton_key = 1),
 filtered AS (
 	SELECT binding.id, role.slug, role.display_name, binding.resource_type, binding.resource_id,
-		CASE binding.resource_type WHEN 'bucket' THEN bucket.name WHEN 'artifact' THEN artifact.name END AS resource_name,
+		CASE binding.resource_type WHEN 'bucket' THEN bucket.name WHEN 'app' THEN app.display_name END AS resource_name,
 		binding.created_at
 	FROM workspace
 	JOIN fused_role_bindings binding ON binding.subject_type = 'workspace' AND binding.subject_id = workspace.id
 	JOIN fused_roles role ON role.id = binding.role_id AND role.system_role = true
 	LEFT JOIN fused_buckets bucket ON binding.resource_type = 'bucket' AND bucket.id = binding.resource_id
-	LEFT JOIN fused_artifact_scopes artifact ON binding.resource_type = 'artifact' AND artifact.artifact_id = binding.resource_id
-	WHERE binding.resource_type IN ('bucket', 'artifact') AND ($1 = '' OR binding.resource_type = $1)
+	LEFT JOIN fused_app_families app ON binding.resource_type = 'app' AND app.app_family_id = binding.resource_id
+	WHERE binding.resource_type IN ('bucket', 'app') AND ($1 = '' OR binding.resource_type = $1)
 ), page AS (
 	SELECT * FROM filtered ORDER BY resource_type, resource_name, resource_id LIMIT $2 OFFSET $3
 ), summary AS (SELECT COUNT(*)::int AS total FROM filtered)

@@ -4,7 +4,7 @@ import { TEAM_OPERATIONS } from "./teams-contract";
 export type TeamStatus = "active" | "archived";
 export type TeamWorkspaceRole = "OWNER" | "ADMIN" | "BUILDER" | "VIEWER";
 export type TeamAccessLevel = "USER" | "MANAGER";
-export type TeamArtifactAccessLevel = "READER" | "MANAGER";
+export type TeamAppAccessLevel = "READER" | "MANAGER";
 export type TeamResourceType = "service" | "bucket";
 
 export interface TeamBinding {
@@ -109,17 +109,17 @@ export async function changeTeamResourceAccess(
   return data[field];
 }
 
-export async function changeTeamArtifactAccess(
+export async function changeTeamAppAccess(
   action: "grant" | "revoke",
   teamId: string,
-  artifactId: string,
-  level: TeamArtifactAccessLevel
+  appFamilyId: string,
+  level: TeamAppAccessLevel
 ): Promise<TeamBindingMutationPayload> {
-  const operationKey = action === "grant" ? "grantArtifact" : "revokeArtifact";
-  const field = action === "grant" ? "grantTeamArtifactAccess" : "revokeTeamArtifactAccess";
-  const data = await api.mcpGraphql<TeamArtifactAccessMutationData>(TEAM_OPERATIONS[operationKey], {
+  const operationKey = action === "grant" ? "grantApp" : "revokeApp";
+  const field = action === "grant" ? "grantTeamAppAccess" : "revokeTeamAppAccess";
+  const data = await api.mcpGraphql<TeamAppAccessMutationData>(TEAM_OPERATIONS[operationKey], {
     teamId,
-    resourceId: artifactId,
+    resourceId: appFamilyId,
     level,
   });
   return data[field];
@@ -132,9 +132,9 @@ type TeamAccessMutationData = {
   revokeTeamBucketAccess: TeamBindingMutationPayload;
 };
 
-type TeamArtifactAccessMutationData = {
-  grantTeamArtifactAccess: TeamBindingMutationPayload;
-  revokeTeamArtifactAccess: TeamBindingMutationPayload;
+type TeamAppAccessMutationData = {
+  grantTeamAppAccess: TeamBindingMutationPayload;
+  revokeTeamAppAccess: TeamBindingMutationPayload;
 };
 
 function capitalize(value: TeamResourceType): "Service" | "Bucket" {

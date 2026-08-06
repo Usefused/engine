@@ -13,16 +13,18 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/engine"
+	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/executionevent"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
 
 type executionTransportContextKey struct{}
 
 type executionAuditState struct {
-	artifactID uuid.UUID
+	identity auth.RuntimeIdentity
 	// accountID identifies which account this execution belongs to. It must
 	// be threaded through from resolveExecutionIdentity's return value at the
 	// call site -- without it, recordEngineExecutionAudit has no way to
@@ -32,7 +34,6 @@ type executionAuditState struct {
 	// GetWorkspaceExecutionAnalytics, which filters on the caller's real
 	// account ID -- the Activity page then shows "No calls" no matter how
 	// many executions actually succeeded.
-	accountID           uuid.UUID
 	endpointName        string
 	startedAt           time.Time
 	match               *scopedEndpoint
@@ -59,8 +60,10 @@ func executionTransportFromContext(ctx context.Context) string {
 func recordEngineExecutionAudit(ctx context.Context, span trace.Span, state executionAuditState, execErr error) {
 	event := models.EngineExecutionEvent{
 		ID:                  uuid.New(),
-		AccountID:           state.accountID,
-		ArtifactID:          state.artifactID,
+		AccountID:           state.identity.AccountID,
+		AppFamilyID:         state.identity.AppFamilyID,
+		AppID:               state.identity.AppID,
+		AppVersion:          state.identity.AppVersion,
 		Transport:           executionTransportFromContext(ctx),
 		Direction:           models.EngineExecutionDirectionOutbound,
 		EndpointName:        state.endpointName,
@@ -90,9 +93,15 @@ func recordEngineExecutionAudit(ctx context.Context, span trace.Span, state exec
 		event.ServiceID = state.match.service.ID
 		event.ServiceVersionID = state.match.serviceVersionID
 		event.OperationID = state.match.endpoint.ID
+		event.ProviderProtocol = effectiveProviderProtocol(state.match.endpoint)
 	}
 	event.ProviderStatusClass = providerStatusClass(state.providerHTTPStatus, execErr)
 	event.FailureCategory, event.FailureCode = classifyExecutionFailure(execErr, state.providerHTTPStatus)
+	span.SetAttributes(
+		attribute.String("execution.outcome", event.Status),
+		attribute.String("execution.failure_category", event.FailureCategory),
+		attribute.String("execution.failure_code", event.FailureCode),
+	)
 	if spanContext := span.SpanContext(); spanContext.IsValid() {
 		event.TraceID = spanContext.TraceID().String()
 		event.SpanID = spanContext.SpanID().String()

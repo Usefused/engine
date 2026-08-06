@@ -230,7 +230,7 @@ func newGraphQLPreflightFixture(tb testing.TB, fieldCount int) graphQLPreflightF
 	resolver := &graphQLPreflightSlugResolver{serviceID: serviceID}
 	actor := benchmarkActor(tb, workspaceID,
 		accesscontrol.Grant{Permission: accesscontrol.PermissionWorkspaceRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
-		accesscontrol.Grant{Permission: accesscontrol.PermissionArtifactCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
+		accesscontrol.Grant{Permission: accesscontrol.PermissionAppCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionBucketUse, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: bucketID}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionServiceConsume, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: serviceID}},
 	)

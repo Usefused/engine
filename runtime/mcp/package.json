@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Spike: shared MCP runtime exposing exactly search_docs and execute, replacing per-SDK-generated MCP artifacts. See sprint/lighter_mcp_runtime_design.md and sprint/lighter_mcp_runtime_spike_plan.md.",
+  "description": "Shared MCP runtime exposing exactly search_docs and execute for Engine-managed MCP apps.",
   "main": "dist/server.js",
   "scripts": {
     "build": "tsc -p tsconfig.build.json && npx esbuild dist/server.js --bundle --platform=node --format=cjs --outfile=dist/bundle.js",

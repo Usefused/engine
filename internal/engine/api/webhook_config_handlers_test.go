@@ -13,7 +13,9 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
+	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/models"
 )
 
 // ─── workspaceTestStore additions for kind: webhook ────────────────────────
@@ -69,6 +71,8 @@ func TestValidateWebhookConfigDocumentRejectsNonSecretBucketReference(t *testing
 }
 
 func TestWebhookConfigPlanHandlerNeverEchoesCredentialShapedSecret(t *testing.T) {
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{WebhookIngestionEnabled: true})
+	defer entitlement.LiveEntitlement.Reset()
 	credential := "test-provider-credential-material"
 	s := &workspaceTestStore{accountID: uuid.New()}
 	r := newControlTestRouter(s.accountID)
@@ -108,7 +112,7 @@ func TestValidateWebhookConfigDocument_RejectsWrongKind(t *testing.T) {
 	}
 }
 
-// webhookConfigKey has no version segment, unlike SDK/MCP's artifactConfigKey
+// webhookConfigKey has no version segment, unlike versioned SDK/MCP config keys
 // -- see its doc comment for why (a continuously-reconciled bundle, not an
 // immutable release).
 func TestWebhookConfigKeyHasNoVersionSegment(t *testing.T) {
@@ -298,6 +302,8 @@ func TestEnsureWebhookNameAvailable_RejectsOtherArtifactOwnedRegistration(t *tes
 // ─── WebhookConfigPlanHandler (HTTP) ───────────────────────────────────────
 
 func TestWebhookConfigPlanHandler_CreatesPlanForValidConfig(t *testing.T) {
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{WebhookIngestionEnabled: true})
+	defer entitlement.LiveEntitlement.Reset()
 	serviceID := uuid.New()
 	serviceVersionID := uuid.New()
 	bucketID := uuid.New()
@@ -372,12 +378,12 @@ func TestWebhookConfigPlanHandler_CreatesPlanForValidConfig(t *testing.T) {
 
 type webhookOwnershipDenyStore struct {
 	*workspaceTestStore
-	preflight store.ArtifactOwnershipPreflight
+	preflight store.AppOwnershipPreflight
 }
 
-func (s *webhookOwnershipDenyStore) PreflightArtifactOwnership(_ context.Context, input store.ArtifactOwnershipPreflight) (store.ArtifactOwnershipDecision, error) {
+func (s *webhookOwnershipDenyStore) PreflightAppOwnership(_ context.Context, input store.AppOwnershipPreflight) (store.AppOwnershipDecision, error) {
 	s.preflight = input
-	return store.ArtifactOwnershipDecision{
+	return store.AppOwnershipDecision{
 		MembershipAllowed: true,
 		TeamMissing: []accesscontrol.Requirement{{
 			Permission: accesscontrol.PermissionBucketUse,
@@ -387,6 +393,8 @@ func (s *webhookOwnershipDenyStore) PreflightArtifactOwnership(_ context.Context
 }
 
 func TestWebhookConfigPlanHandlerRequiresOwnerTeamBucketUseBeforePlan(t *testing.T) {
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{WebhookIngestionEnabled: true})
+	defer entitlement.LiveEntitlement.Reset()
 	serviceID, bucketID := uuid.New(), uuid.New()
 	base := &workspaceTestStore{
 		accountID: uuid.New(), workspaceID: uuid.New(),
@@ -421,6 +429,8 @@ func TestWebhookConfigPlanHandlerRequiresOwnerTeamBucketUseBeforePlan(t *testing
 }
 
 func TestWebhookConfigPlanHandler_RejectsUnactivatedService(t *testing.T) {
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{WebhookIngestionEnabled: true})
+	defer entitlement.LiveEntitlement.Reset()
 	s := &workspaceTestStore{
 		accountID:            uuid.New(),
 		workspaceID:          uuid.New(),
@@ -457,6 +467,8 @@ func TestWebhookConfigPlanHandler_RejectsUnactivatedService(t *testing.T) {
 }
 
 func TestWebhookConfigPlanHandlerRejectsMissingSecretBucketWithoutPlan(t *testing.T) {
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{WebhookIngestionEnabled: true})
+	defer entitlement.LiveEntitlement.Reset()
 	serviceID := uuid.New()
 	s := &workspaceTestStore{
 		accountID: uuid.New(), workspaceID: uuid.New(),
@@ -484,6 +496,8 @@ func TestWebhookConfigPlanHandlerRejectsMissingSecretBucketWithoutPlan(t *testin
 }
 
 func TestWebhookConfigPlanHandler_RejectsNameConflictWithOtherArtifact(t *testing.T) {
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{WebhookIngestionEnabled: true})
+	defer entitlement.LiveEntitlement.Reset()
 	serviceID := uuid.New()
 	s := &workspaceTestStore{
 		accountID:   uuid.New(),

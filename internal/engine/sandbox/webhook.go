@@ -17,6 +17,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/tidwall/gjson"
 
+	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/executionevent"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/engine/webhookid"
@@ -65,7 +66,7 @@ type webhookConfig struct {
 	SecretBucketID uuid.UUID
 	SecretRef      string
 	// Label is the registration's identity (store.WorkspaceWebhook.Label --
-	// a kind: webhook artifact's own name; see plans/plan-webhook-kind.md).
+	// a kind: webhook desired config's own name; see plans/plan-webhook-kind.md).
 	// Published into the NATS subject alongside service/event so two
 	// registrations on the same service that happen to produce the same
 	// event name stay on distinct subjects -- without this, any WS
@@ -82,6 +83,11 @@ type webhookConfig struct {
 // Internal infrastructure calls (the config store read) are not traced here
 // — only the user/agent-visible execution boundary gets a thread.
 func webhookIngressHandler(w http.ResponseWriter, r *http.Request) {
+	if !entitlement.LiveEntitlement.Load().WebhookIngestionEnabled {
+		writeError(w, http.StatusPaymentRequired, "webhook ingestion not enabled on current plan")
+		return
+	}
+
 	urlSlug := chi.URLParam(r, "urlSlug")
 	if urlSlug == "" {
 		// URL slug must be provided to identify the integration.
@@ -360,7 +366,7 @@ func publishWebhookEvent(w http.ResponseWriter, r *http.Request, body []byte, ur
 }
 
 // subjectSafeLabel guards the NATS subject's fixed segment positions: "." is
-// the subject delimiter, and a kind: webhook artifact's name (the label) has
+// the subject delimiter, and a kind: webhook desired config's name (the label) has
 // no character restriction today, so a literal "." in a name would otherwise
 // shift every downstream positional parse. websocket_handler.go's
 // FilterSubjects construction must apply this exact same substitution when

@@ -32,15 +32,17 @@ func seedPublicInsightExecutionEvents(t *testing.T, ctx context.Context, pool in
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }, accountID, serviceID, versionID, operationID uuid.UUID, startedAt time.Time) {
 	t.Helper()
+	sdkFamilyID, mcpFamilyID, sdkAppID, mcpAppID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO fused_engine_execution_events (
-			account_id, transport, direction, service_id, service_version_id, operation_id,
+			account_id, app_family_id, app_id, app_version, transport, direction,
+			service_id, service_version_id, operation_id,
 			endpoint_name, provider_status_class, status, latency_ms, provider_latency_ms,
 			attempt_count, started_at, ended_at
 		) VALUES
-		($1, 'sdk', 'outbound', $2, $3, $4, 'issues.list', '2xx', 'success', 20, 15, 1, $5, $5),
-		($1, 'mcp', 'outbound', $2, $3, $4, 'issues.list', '5xx', 'failed', 80, 70, 2, $5, $5)`,
-		accountID, serviceID, versionID.String(), operationID, startedAt); err != nil {
+		($1, $6, $8, '1.0.0', 'sdk', 'outbound', $2, $3, $4, 'issues.list', '2xx', 'success', 20, 15, 1, $5, $5),
+		($1, $7, $9, '2.0.0', 'mcp', 'outbound', $2, $3, $4, 'issues.list', '5xx', 'failed', 80, 70, 2, $5, $5)`,
+		accountID, serviceID, versionID.String(), operationID, startedAt, sdkFamilyID, mcpFamilyID, sdkAppID, mcpAppID); err != nil {
 		t.Fatalf("seed execution events: %v", err)
 	}
 }

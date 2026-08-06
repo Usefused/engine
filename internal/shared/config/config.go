@@ -60,8 +60,27 @@ type EngineConfig struct {
 	RegistryEndpoint       string `yaml:"registry_endpoint"`
 	AccountID              string `yaml:"account_id"`
 	LicenseKey             string `yaml:"license_key"`
+	LicenseKeySource       string `yaml:"-"`
 	ExecutionRetentionDays int    `yaml:"execution_retention_days"`
 	ExecutionCleanupBatch  int    `yaml:"execution_cleanup_batch"`
+}
+
+type EngineLicenseSources struct {
+	Flag        string
+	DotEnv      string
+	Environment string
+}
+
+type loadOptions struct {
+	engineLicense *EngineLicenseSources
+}
+
+type LoadOption func(*loadOptions)
+
+func WithEngineLicenseSources(sources EngineLicenseSources) LoadOption {
+	return func(options *loadOptions) {
+		options.engineLicense = &sources
+	}
 }
 
 type ObservabilityConfig struct {
@@ -91,9 +110,26 @@ type Config struct {
 
 // Load reads the YAML configuration file and parses it.
 // If the file does not exist, it returns a Config struct with default values.
-func Load(path string) (*Config, error) {
-	// Set defaults
-	cfg := &Config{
+func Load(path string, options ...LoadOption) (*Config, error) {
+	cfg := defaultConfig()
+	if err := loadYAML(path, cfg); err != nil {
+		return nil, err
+	}
+	settings := loadOptions{}
+	for _, option := range options {
+		option(&settings)
+	}
+	applyEnvironment(cfg)
+	resolveEngineLicense(cfg, settings)
+	finalizeEncryptionKey(cfg)
+	if cfg.WorkerPool.Size <= 0 {
+		cfg.WorkerPool.Size = 1
+	}
+	return cfg, nil
+}
+
+func defaultConfig() *Config {
+	return &Config{
 		EncryptionKey: "fused-default-encrypt-key-32b",
 		WorkerPool: WorkerPoolConfig{
 			Size: 5, // Default worker pool size
@@ -136,23 +172,22 @@ func Load(path string) (*Config, error) {
 			ExecutionCleanupBatch:  1000,
 		},
 	}
+}
 
+func loadYAML(path string, cfg *Config) error {
 	data, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return nil, err
+	if os.IsNotExist(err) {
+		return nil
 	}
-	if err == nil {
-		if err := yaml.Unmarshal(data, cfg); err != nil {
-			return nil, err
-		}
+	if err != nil {
+		return err
 	}
+	return yaml.Unmarshal(data, cfg)
+}
 
-	// Env vars always win over both defaults and YAML config.
+func applyEnvironment(cfg *Config) {
 	if envKey := os.Getenv("FUSED_ENCRYPTION_KEY"); envKey != "" {
 		cfg.EncryptionKey = envKey
-	}
-	if envLicenseKey := os.Getenv("FUSED_LICENSE_KEY"); envLicenseKey != "" {
-		cfg.Engine.LicenseKey = envLicenseKey
 	}
 	if envRegistryEndpoint := os.Getenv("FUSED_REGISTRY_ENDPOINT"); envRegistryEndpoint != "" {
 		cfg.Engine.RegistryEndpoint = envRegistryEndpoint
@@ -177,8 +212,43 @@ func Load(path string) (*Config, error) {
 	if sk := os.Getenv("FUSED_S3_SECRET_KEY"); sk != "" {
 		cfg.Storage.SecretKey = sk
 	}
+}
 
-	// Validate and expose encryption key globally.
+func resolveEngineLicense(cfg *Config, options loadOptions) {
+	if options.engineLicense == nil {
+		resolveDefaultLicense(cfg)
+		return
+	}
+	sources := *options.engineLicense
+	// Startup passes the sources separately because collapsing .env and process
+	// env would make a checked-in deployment choice depend on the parent shell.
+	switch {
+	case sources.Flag != "":
+		cfg.Engine.LicenseKey, cfg.Engine.LicenseKeySource = sources.Flag, "flag"
+	case sources.DotEnv != "":
+		cfg.Engine.LicenseKey, cfg.Engine.LicenseKeySource = sources.DotEnv, "dotenv"
+	case cfg.Engine.LicenseKey != "":
+		cfg.Engine.LicenseKeySource = "yaml"
+	case sources.Environment != "":
+		cfg.Engine.LicenseKey, cfg.Engine.LicenseKeySource = sources.Environment, "environment"
+	default:
+		cfg.Engine.LicenseKeySource = "missing"
+	}
+}
+
+func resolveDefaultLicense(cfg *Config) {
+	if envLicenseKey := os.Getenv("FUSED_LICENSE_KEY"); envLicenseKey != "" {
+		cfg.Engine.LicenseKey, cfg.Engine.LicenseKeySource = envLicenseKey, "environment"
+		return
+	}
+	if cfg.Engine.LicenseKey != "" {
+		cfg.Engine.LicenseKeySource = "yaml"
+		return
+	}
+	cfg.Engine.LicenseKeySource = "missing"
+}
+
+func finalizeEncryptionKey(cfg *Config) {
 	const defaultKey = "fused-default-encrypt-key-32b"
 	if cfg.EncryptionKey == "" {
 		cfg.EncryptionKey = defaultKey
@@ -194,10 +264,4 @@ func Load(path string) (*Config, error) {
 		copy(b, cfg.EncryptionKey)
 		GlobalEncryptionKey = b
 	}
-
-	if cfg.WorkerPool.Size <= 0 {
-		cfg.WorkerPool.Size = 1
-	}
-
-	return cfg, nil
 }

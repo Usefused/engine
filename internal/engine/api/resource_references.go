@@ -60,8 +60,8 @@ func referenceKindForResource(resourceType accesscontrol.ResourceType) (store.Re
 		return store.ReferenceService, nil
 	case accesscontrol.ResourceBucket:
 		return store.ReferenceBucket, nil
-	case accesscontrol.ResourceArtifact:
-		return store.ReferenceArtifact, nil
+	case accesscontrol.ResourceApp:
+		return store.ReferenceAppFamily, nil
 	default:
 		return "", fmt.Errorf("resource type %q does not support a human reference", resourceType)
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -95,6 +96,20 @@ func (m *mockStream) Send(chunk []byte) error {
 	copy(copied, chunk)
 	m.chunks = append(m.chunks, copied)
 	return nil
+}
+
+func TestWaitForRetryStopsWhenExecutionContextExpires(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	err := waitForRetry(ctx, time.Second)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("waitForRetry error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("retry backoff ignored cancellation; elapsed=%s", elapsed)
+	}
 }
 
 func TestDispatcherExecuteStream(t *testing.T) {

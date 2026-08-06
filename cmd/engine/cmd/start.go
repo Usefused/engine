@@ -24,8 +24,12 @@ import (
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/api"
 	"github.com/Usefused/engine/internal/engine/auth"
+	"github.com/Usefused/engine/internal/engine/browserauth"
+	"github.com/Usefused/engine/internal/engine/cliauth"
+	entitlementpkg "github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/executionevent"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
+	"github.com/Usefused/engine/internal/engine/managedauth"
 	enginemiddleware "github.com/Usefused/engine/internal/engine/middleware"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
@@ -39,6 +43,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
 )
 
@@ -94,7 +100,8 @@ func init() {
 }
 
 func runEngine() {
-	loadEngineEnv()
+	licenseSources := loadEngineEnv()
+	licenseSources.Flag = licenseKey
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -105,24 +112,47 @@ func runEngine() {
 	observability.InitMetrics(ctx)
 	defer observability.CloseMetrics(ctx)
 
-	cfg, database, natsClient := initDependencies(ctx)
+	cfg, database, natsClient := initDependencies(ctx, config.WithEngineLicenseSources(licenseSources))
 	defer natsClient.Close()
 
 	applyEngineOverrides(cfg)
+	recordEngineLicenseResolution(ctx, cfg.Engine.LicenseKeySource)
 	envLicense := requireRegistryLicense(ctx)
 
 	// ─── Engine Bootstrap ───
 	engineStore := store.NewCachedStore(store.NewPostgresStore(database), natsClient)
 	registryClient := sandbox.NewHTTPRegistryClient(cfg.Engine.RegistryEndpoint, envLicense)
-
-	engineWorkers := startEngineWorkers(ctx, engineStore, natsClient, cfg.Engine)
+	if err := configureRegistryEngineIdentity(ctx, engineStore, registryClient); err != nil {
+		slog.ErrorContext(ctx, "FATAL: Failed to configure Engine installation identity", slog.Any("error", err))
+		os.Exit(1)
+	}
 
 	entitlement, authorizationRevision := bootstrapRegistryIdentity(ctx, engineStore, registryClient, envLicense)
+	// Load the persisted entitlement into the in-memory cache so runtime limit checks
+	// (sandbox concurrency, bucket creation, service limits) read from memory instead
+	// of the database on every request.
+	var entitlementStore runtimeEntitlementStore
+	if ets, ok := engineStore.(runtimeEntitlementStore); ok {
+		entitlementStore = ets
+		dbEnt, err := ets.GetRuntimeEntitlement(ctx)
+		if err == nil {
+			entitlement = dbEnt
+			entitlementpkg.LiveEntitlement.Store(dbEnt)
+		} else {
+			slog.WarnContext(ctx, "Failed to load persisted entitlement into memory cache; using handshake value", slog.Any("error", err))
+			entitlementpkg.LiveEntitlement.Store(entitlement)
+		}
+	} else {
+		entitlementpkg.LiveEntitlement.Store(entitlement)
+	}
+	engineWorkers := startEngineWorkers(ctx, engineStore, natsClient, cfg.Engine)
+	engineWorkers.packageLeases = startSDKPackageLeaseRenewal(ctx, engineStore, registryClient)
 	engineWorkers.publicInsights = startPublicServiceInsightReporting(ctx, engineStore, registryClient, entitlement)
 	controlAuthenticator := newControlAuthenticator(ctx, engineStore, authorizationRevision)
 	startAuthorizationRevisionPolling(ctx, engineStore, controlAuthenticator)
 	engineWorkers.usageCounter = startEngineUsageCounter(ctx, engineStore, entitlement)
-	startEngineHeartbeat(ctx, registryClient, entitlement)
+
+	startEngineHeartbeat(ctx, registryClient, entitlement, entitlementStore)
 	usageFlushWorker := startEngineUsageReporting(ctx, engineStore, registryClient, entitlement)
 	defer func() {
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -143,11 +173,10 @@ func runEngine() {
 	// here rather than down by MountConfigRoutes -- both the changelog
 	// poller below and SDKWebSocketHandler further down need it.
 	configStore := store.NewPostgresConfigRepository(database)
-	// Phase 2 (capture) + Phase 3 (usage-index matching + notification) of
-	// the service changelog system (plans/plan-service-changelog.md):
-	// captures Registry-published changes into this Engine's own local
-	// cache and, for each newly cached row, notifies this workspace only
-	// when its own configuration actually uses what changed.
+	// Start the service changelog poller: periodically fetches published service
+	// changelogs from the Registry, caches them locally, and emits workspace-scoped
+	// notifications only when the workspace's own configuration references a changed
+	// service or endpoint.
 	sandbox.StartServiceChangelogPoller(ctx, engineStore, configStore, registryClient, envLicense)
 
 	_ = sandbox.NewActivationManager(registryClient, engineStore)
@@ -162,6 +191,9 @@ func runEngine() {
 	// making a live Registry call on every single proxied request.
 	runtimeEnforcer := enginemiddleware.NewRuntimeEnforcer(engineStore, localObjectCache)
 	masterKey := loadMasterKey(ctx)
+	browserCookies, browserSessionService := newBrowserSessionService(ctx, engineStore, controlAuthenticator, masterKey)
+	managedLoginService := newManagedLoginService(ctx, engineStore, registryClient, controlAuthenticator, masterKey)
+	cliLoginService := newCLILoginService(ctx, engineStore, controlAuthenticator)
 
 	r := buildEngineRouter(engineRouterDeps{
 		cfg:              cfg,
@@ -174,6 +206,10 @@ func runEngine() {
 		configStore:      configStore,
 		masterKey:        masterKey,
 		controlAuth:      controlAuthenticator,
+		managedLogin:     managedLoginService,
+		cliLogin:         cliLoginService,
+		browserSession:   browserSessionService,
+		browserCookies:   browserCookies,
 	})
 
 	webhookSrv := startWebhookServer(ctx, r)
@@ -183,22 +219,80 @@ func runEngine() {
 	waitForEngineShutdown(ctx, cancel, srv, webhookSrv, grpcServer)
 }
 
-func loadEngineEnv() {
-	if err := godotenv.Load(".env"); err != nil {
-		if err := godotenv.Load("../.env"); err != nil {
-			slog.Warn("No .env file found, reading from environment")
-		}
+func configureRegistryEngineIdentity(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient) error {
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.registry_identity.configure")
+	defer span.End()
+	span.SetAttributes(attribute.String("actor.type", "engine"))
+
+	identityStore, ok := engineStore.(store.EngineInstallationStore)
+	if !ok {
+		span.SetAttributes(attribute.String("outcome", "unsupported"))
+		return errors.New("Engine store does not support installation identity")
 	}
+	installationID, err := identityStore.LoadEngineInstallationID(ctx)
+	if err != nil {
+		span.SetAttributes(attribute.String("outcome", "load_failed"))
+		return err
+	}
+	runtimeInstanceID := uuid.New()
+	if err := registryClient.ConfigureEngineIdentity(installationID, runtimeInstanceID); err != nil {
+		span.SetAttributes(attribute.String("outcome", "configure_failed"))
+		return err
+	}
+	span.SetAttributes(
+		attribute.String("engine.installation_id", installationID.String()),
+		attribute.String("engine.runtime_instance_id", runtimeInstanceID.String()),
+		attribute.String("outcome", "configured"),
+	)
+	return nil
+}
+
+func loadEngineEnv() config.EngineLicenseSources {
+	return loadEngineEnvFiles([]string{".env", "../.env"})
+}
+
+func loadEngineEnvFiles(paths []string) config.EngineLicenseSources {
+	sources := config.EngineLicenseSources{Environment: os.Getenv("FUSED_LICENSE_KEY")}
+	for _, path := range paths {
+		values, err := godotenv.Read(path)
+		if err != nil {
+			continue
+		}
+		if err := godotenv.Load(path); err != nil {
+			slog.Warn("Failed to load Engine environment file", slog.String("path", path), slog.Any("error", err))
+			continue
+		}
+		sources.DotEnv = values["FUSED_LICENSE_KEY"]
+		return sources
+	}
+	slog.Warn("No .env file found, reading from configuration and environment")
+	return sources
 }
 
 func applyEngineOverrides(cfg *config.Config) {
-	// Flags intentionally outrank engine.yaml so container launches can make
-	// one-off operational overrides without mutating checked-in config.
 	if uiURL != "" {
 		cfg.UIURL = uiURL
 	}
-	if licenseKey != "" {
-		os.Setenv("FUSED_LICENSE_KEY", licenseKey)
+	if cfg.Engine.LicenseKey == "" {
+		_ = os.Unsetenv("FUSED_LICENSE_KEY")
+	} else {
+		_ = os.Setenv("FUSED_LICENSE_KEY", cfg.Engine.LicenseKey)
+	}
+	setEnvFromConfigIfMissing("FUSED_ENCRYPTION_KEY", cfg.EncryptionKey)
+}
+
+func recordEngineLicenseResolution(ctx context.Context, source string) {
+	_, span := otel.Tracer("engine").Start(ctx, "engine.configuration.license.resolve")
+	span.SetAttributes(
+		attribute.String("license.source", source),
+		attribute.Bool("license.configured", source != "missing"),
+	)
+	span.End()
+}
+
+func setEnvFromConfigIfMissing(name, value string) {
+	if os.Getenv(name) == "" && value != "" {
+		os.Setenv(name, value)
 	}
 }
 
@@ -216,6 +310,7 @@ type engineWorkers struct {
 	retention       *worker.ExecutionRetentionWorker
 	publicInsights  *worker.PublicInsightWorker
 	usageCounter    *worker.UsageCounterWorker
+	packageLeases   *worker.SDKPackageLeaseWorker
 }
 
 func (w engineWorkers) Stop(ctx context.Context) {
@@ -231,10 +326,14 @@ func (w engineWorkers) Stop(ctx context.Context) {
 	if w.publicInsights != nil {
 		w.publicInsights.Stop(ctx)
 	}
+	if w.packageLeases != nil {
+		w.packageLeases.Stop(ctx)
+	}
 }
 
 type runtimeEntitlementStore interface {
 	SaveRuntimeEntitlement(ctx context.Context, entitlement models.RuntimeEntitlement) error
+	GetRuntimeEntitlement(ctx context.Context) (models.RuntimeEntitlement, error)
 }
 
 func startEngineWorkers(ctx context.Context, engineStore store.Store, natsClient *messaging.NATSClient, cfg config.EngineConfig) engineWorkers {
@@ -250,8 +349,30 @@ func startEngineWorkers(ctx context.Context, engineStore store.Store, natsClient
 	// plane for catalogue data.
 	sandbox.SetWebhookConfigStore(engineStore)
 	worker.StartMCPSessionWorker(ctx, engineStore, natsClient)
-	retentionWorker := worker.StartExecutionRetentionWorker(ctx, engineStore, cfg.ExecutionRetentionDays, cfg.ExecutionCleanupBatch)
+	retentionWorker := worker.StartDynamicExecutionRetentionWorker(ctx, engineStore, func() int {
+		return engineExecutionRetentionDays(entitlementpkg.LiveEntitlement.Load(), cfg.ExecutionRetentionDays)
+	}, cfg.ExecutionCleanupBatch)
 	return engineWorkers{executionEvents: executionEventWorker, retention: retentionWorker}
+}
+
+func engineExecutionRetentionDays(entitlement models.RuntimeEntitlement, fallback int) int {
+	if entitlement.ExecutionRetentionDays == nil {
+		return fallback
+	}
+	return *entitlement.ExecutionRetentionDays
+}
+
+func startSDKPackageLeaseRenewal(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient) *worker.SDKPackageLeaseWorker {
+	leaseStore, ok := engineStore.(worker.SDKPackageLeaseStore)
+	if !ok {
+		slog.WarnContext(ctx, "SDK package lease store unavailable; package retention renewal disabled")
+		return nil
+	}
+	leaseWorker := worker.NewSDKPackageLeaseWorker(leaseStore, registryClient, worker.SDKPackageLeaseOptions{})
+	// Start is non-blocking, but its goroutine completes the startup pass before
+	// arming the periodic timer. Registry availability never gates Engine runtime.
+	leaseWorker.Start(ctx)
+	return leaseWorker
 }
 
 func startEngineUsageCounter(ctx context.Context, engineStore store.Store, entitlement models.RuntimeEntitlement) *worker.UsageCounterWorker {
@@ -302,20 +423,24 @@ func bootstrapRegistryIdentity(ctx context.Context, engineStore store.Store, reg
 		slog.ErrorContext(ctx, "FATAL: Engine store does not support access-control bootstrap")
 		os.Exit(1)
 	}
-	accessBootstrap, err := accesscontrol.BootstrapOwner(ctx, accessRepository, accUUID, envLicense)
+	accessBootstrap, err := accesscontrol.BootstrapOwner(ctx, accessRepository, accUUID, envLicense, handshake.OwnerEmail)
 	if err != nil {
 		slog.ErrorContext(ctx, "FATAL: Failed to initialize bootstrap Owner access", slog.Any("error", err))
 		os.Exit(1)
 	}
-	ownedServices, restoredArtifacts, err := reconcileRegistryRuntime(ctx, engineStore, registryClient, accUUID, envLicense)
+	ownedServices, err := sandbox.ReconcileOwnedServices(ctx, engineStore, registryClient, accUUID, envLicense)
 	if err != nil {
-		slog.ErrorContext(ctx, "FATAL: Failed to reconcile Registry runtime into the Engine workspace", slog.Any("error", err))
+		slog.ErrorContext(ctx, "FATAL: Failed to reconcile Registry services into the Engine workspace", slog.Any("error", err))
 		os.Exit(1)
 	}
 	entitlement := handshake.Entitlements.Normalized()
 	if entitlementStore, ok := engineStore.(runtimeEntitlementStore); ok {
 		if err := entitlementStore.SaveRuntimeEntitlement(ctx, entitlement); err != nil {
 			slog.WarnContext(ctx, "Failed to persist Registry entitlement bundle", slog.Any("error", err))
+			// Do not acknowledge a revision that is only present in memory. The
+			// next heartbeat will advertise an empty/older revision and Registry
+			// will resend the bundle until persistence succeeds.
+			entitlement.EntitlementRevision = ""
 		}
 	}
 	slog.InfoContext(ctx, "Successfully initialized Engine workspace and bootstrap Owner",
@@ -327,22 +452,8 @@ func bootstrapRegistryIdentity(ctx context.Context, engineStore store.Store, reg
 		slog.Int("owned_services_discovered", ownedServices.Discovered),
 		slog.Int("owned_services_restored", ownedServices.Activated),
 		slog.Int("owned_services_already_active", ownedServices.AlreadyActive),
-		slog.Int("artifact_snapshots_reconciled", restoredArtifacts),
 	)
 	return entitlement, accessBootstrap.Revision
-}
-
-func reconcileRegistryRuntime(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, accountID uuid.UUID, license string) (sandbox.OwnedServiceReconcileResult, int, error) {
-	services, err := sandbox.ReconcileOwnedServices(ctx, engineStore, registryClient, accountID, license)
-	if err != nil {
-		return services, 0, err
-	}
-	artifacts, ok := engineStore.(store.ArtifactSnapshotStore)
-	if !ok {
-		return services, 0, errors.New("artifact snapshot reconciliation is unavailable")
-	}
-	count, err := sandbox.ReconcileOwnedArtifacts(ctx, artifacts, registryClient, accountID)
-	return services, count, err
 }
 
 func newControlAuthenticator(ctx context.Context, engineStore store.Store, revision int64) *accesscontrol.Authenticator {
@@ -370,24 +481,33 @@ func startAuthorizationRevisionPolling(ctx context.Context, engineStore store.St
 	})
 }
 
-func startEngineHeartbeat(ctx context.Context, registryClient *sandbox.HTTPRegistryClient, entitlement models.RuntimeEntitlement) {
+func startEngineHeartbeat(ctx context.Context, registryClient *sandbox.HTTPRegistryClient, entitlement models.RuntimeEntitlement, entitlementStore runtimeEntitlementStore) {
 	if !entitlement.HeartbeatRequired {
 		slog.InfoContext(ctx, "Engine heartbeat disabled by Registry entitlement")
 		return
 	}
 	interval := engineHeartbeatInterval(entitlement)
+	entitlementpkg.MarkHeartbeatSuccess(time.Now())
 	go func() {
 		// Send immediately after bootstrap so Registry can verify the runtime
 		// during startup; the ticker then proves the Engine stayed alive.
-		sendEngineHeartbeat(ctx, registryClient)
+		sendEngineHeartbeat(ctx, registryClient, entitlementStore)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
+		leaseTicker := time.NewTicker(engineHeartbeatLeaseCheckInterval(entitlement))
+		defer leaseTicker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				sendEngineHeartbeat(ctx, registryClient)
+				sendEngineHeartbeat(ctx, registryClient, entitlementStore)
+			case <-leaseTicker.C:
+				current := entitlementpkg.LiveEntitlement.Load()
+				staleAfter := time.Duration(current.HeartbeatStaleAfterSeconds) * time.Second
+				if entitlementpkg.EvaluateHeartbeatLease(time.Now(), staleAfter) {
+					slog.ErrorContext(ctx, "Engine heartbeat grace period expired. Restricting runtime operations.", slog.Duration("stale_after", staleAfter))
+				}
 			}
 		}
 	}()
@@ -431,12 +551,44 @@ func startPublicServiceInsightReporting(ctx context.Context, engineStore store.S
 	return reportWorker
 }
 
-func sendEngineHeartbeat(ctx context.Context, registryClient *sandbox.HTTPRegistryClient) {
-	if err := registryClient.SendHeartbeat(ctx, Version, BuildHash, time.Now()); err != nil {
+func sendEngineHeartbeat(ctx context.Context, registryClient *sandbox.HTTPRegistryClient, entitlementStore runtimeEntitlementStore) bool {
+	applied := entitlementpkg.LiveEntitlement.Load()
+	resp, err := registryClient.SendHeartbeat(ctx, Version, BuildHash, applied.Plan, applied.EntitlementRevision, time.Now())
+	if err != nil {
 		slog.WarnContext(ctx, "Failed to send Engine heartbeat", slog.Any("error", err))
-		return
+		return false
 	}
+	entitlementpkg.MarkHeartbeatSuccess(time.Now())
+
+	entitlementpkg.EngineSuspended.Store(resp.IsSuspended)
+	if resp.IsSuspended {
+		slog.ErrorContext(ctx, "Engine suspended by Registry. Halting runtime operations.")
+	}
+
+	if resp.PlanChanged && resp.Entitlements != nil {
+		newEntitlement := sandbox.RuntimeEntitlementFromHandshake(resp.Entitlements)
+		if err := persistHeartbeatEntitlement(ctx, entitlementStore, newEntitlement); err != nil {
+			slog.WarnContext(ctx, "Failed to persist updated entitlement after plan change", slog.Any("error", err))
+		}
+	}
+
 	slog.DebugContext(ctx, "Sent Engine heartbeat", slog.String("version", Version), slog.String("build_hash", BuildHash))
+	return true
+}
+
+func persistHeartbeatEntitlement(ctx context.Context, entitlementStore runtimeEntitlementStore, newEntitlement models.RuntimeEntitlement) error {
+	if entitlementStore == nil {
+		return errors.New("runtime entitlement store is unavailable")
+	}
+	oldPlan := entitlementpkg.LiveEntitlement.Load().Plan
+	if err := entitlementStore.SaveRuntimeEntitlement(ctx, newEntitlement); err != nil {
+		return err
+	}
+	entitlementpkg.LiveEntitlement.Store(newEntitlement)
+	slog.InfoContext(ctx, "Engine entitlement updated after plan change",
+		slog.String("old_plan", oldPlan),
+		slog.String("new_plan", newEntitlement.Plan))
+	return nil
 }
 
 func engineHeartbeatInterval(entitlement models.RuntimeEntitlement) time.Duration {
@@ -446,6 +598,17 @@ func engineHeartbeatInterval(entitlement models.RuntimeEntitlement) time.Duratio
 		return engineDurationFromEnv("FUSED_ENGINE_HEARTBEAT_INTERVAL", time.Minute)
 	}
 	return time.Duration(entitlement.Normalized().HeartbeatIntervalSeconds) * time.Second
+}
+
+func engineHeartbeatLeaseCheckInterval(entitlement models.RuntimeEntitlement) time.Duration {
+	interval := time.Duration(entitlement.Normalized().HeartbeatStaleAfterSeconds) * time.Second / 4
+	if interval > 5*time.Second {
+		return 5 * time.Second
+	}
+	if interval < 100*time.Millisecond {
+		return 100 * time.Millisecond
+	}
+	return interval
 }
 
 func engineDurationFromEnv(name string, fallback time.Duration) time.Duration {
@@ -479,7 +642,7 @@ func subscribeCacheInvalidation(natsClient *messaging.NATSClient, localObjectCac
 		natsClient.Conn.Subscribe("engine.cache.invalidate.sdk_scope.>", func(m *nats.Msg) {
 			parts := strings.Split(m.Subject, ".")
 			if len(parts) == 5 {
-				localObjectCache.InvalidateArtifactScope(parts[4])
+				localObjectCache.InvalidateAppRuntime(parts[4])
 			}
 		})
 	}
@@ -505,6 +668,10 @@ type engineRouterDeps struct {
 	configStore      store.ConfigRepository
 	masterKey        []byte
 	controlAuth      *accesscontrol.Authenticator
+	managedLogin     api.ManagedLoginService
+	cliLogin         api.CLILoginService
+	browserSession   api.BrowserSessionService
+	browserCookies   *browserauth.CookieManager
 }
 
 func buildEngineRouter(deps engineRouterDeps) chi.Router {
@@ -513,6 +680,7 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	r.Use(discardInboundRequestID)
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
+	r.Use(enginemiddleware.LicenseEnforcement)
 	r.Use(apimiddleware.CORS(deps.cfg.UIURL))
 	// Embedded SPA assets are many small JS/CSS chunks; compressing here keeps
 	// local Engine hosting close to what a CDN would normally do for the UI.
@@ -525,10 +693,17 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	uiFS := backend.GetUIFS()
 	r.Use(api.EmbeddedUIMiddleware(uiFS))
 	auditRecorder, _ := deps.engineStore.(accesscontrol.AuditRecorder)
-	r.Use(controlActorMiddlewareWithAudit(deps.controlAuth, auditRecorder))
+	r.Use(controlActorMiddlewareWithAudit(deps.controlAuth, auditRecorder, deps.browserCookies))
 	r.Use(controlGraphQLAuditMiddleware(auditRecorder))
 	r.Use(controlAuthorizationMiddlewareWithAudit(accesscontrol.SnapshotAuthorizer{}, newControlRequirementResolver(deps.engineStore, deps.configStore), auditRecorder))
+	api.MountBrowserSessionRoutes(r, deps.browserSession)
+	api.MountManagedIdentityRoutes(r, deps.managedLogin, deps.browserCookies)
+	api.MountCLILoginRoutes(r, deps.cliLogin, deps.browserSession)
 
+	// Exact Engine-owned control routes must be registered before Registry
+	// prefix mounts so /sdks/{app_id}/download resolves locally while generation
+	// and job-stream routes under /sdks continue through the Registry proxy.
+	registerNativeRESTControlRoutes(r, deps)
 	registerProxyRoutesWithRuntimeContracts(r, deps.registryProxy, deps.engineStore, deps.registryClient, deps.runtimeEnforcer)
 
 	engineEnvironment := observability.EngineEnvironment()
@@ -555,8 +730,6 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	// Webhook delivery to SDKs/MCPs is gRPC-only now (EngineGRPCServer's
 	// SubscribeWebhooks, see webhook_grpc_handler.go) -- the old wss://.../sdks/ws
 	// WebSocket route has been retired rather than kept running alongside it.
-	registerNativeRESTControlRoutes(r, deps)
-
 	// Engine-native MCP GraphQL surface (list/deploy/kill/reactivate/delete +
 	// analytics) -- a distinct endpoint from POST /graphql, which is a pure
 	// Registry forward-proxy with no resolvers of its own (graphql_proxy.go).
@@ -572,6 +745,69 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 		http.NotFound(w, req)
 	})
 	return r
+}
+
+func newManagedLoginService(
+	ctx context.Context,
+	engineStore store.Store,
+	registryClient *sandbox.HTTPRegistryClient,
+	authenticator *accesscontrol.Authenticator,
+	masterKey []byte,
+) *managedauth.Service {
+	identityStore, ok := engineStore.(store.ManagedIdentityStore)
+	if !ok {
+		slog.ErrorContext(ctx, "Managed login store is unavailable")
+		return nil
+	}
+	service, err := managedauth.NewService(identityStore, registryClient, authenticator, masterKey)
+	if err != nil {
+		slog.ErrorContext(ctx, "Managed login service is unavailable")
+		return nil
+	}
+	service.StartCleanupWorker(ctx, time.Minute)
+	return service
+}
+
+func newBrowserSessionService(
+	ctx context.Context,
+	engineStore store.Store,
+	authenticator *accesscontrol.Authenticator,
+	masterKey []byte,
+) (*browserauth.CookieManager, *browserauth.Service) {
+	cookies, err := browserauth.NewCookieManager(masterKey)
+	if err != nil {
+		slog.ErrorContext(ctx, "Browser session cookies are unavailable")
+		return nil, nil
+	}
+	sessionStore, ok := engineStore.(store.BrowserSessionStore)
+	if !ok {
+		slog.ErrorContext(ctx, "Browser session store is unavailable")
+		return cookies, nil
+	}
+	service, err := browserauth.NewService(sessionStore, authenticator, cookies)
+	if err != nil {
+		slog.ErrorContext(ctx, "Browser session service is unavailable")
+		return cookies, nil
+	}
+	return cookies, service
+}
+
+func newCLILoginService(
+	ctx context.Context,
+	engineStore store.Store,
+	authenticator *accesscontrol.Authenticator,
+) *cliauth.Service {
+	loginStore, ok := engineStore.(store.CLILoginStore)
+	if !ok {
+		slog.ErrorContext(ctx, "CLI login store is unavailable")
+		return nil
+	}
+	service, err := cliauth.NewService(loginStore, authenticator)
+	if err != nil {
+		slog.ErrorContext(ctx, "CLI login service is unavailable")
+		return nil
+	}
+	return service
 }
 
 // Request IDs are audit identifiers, so they must be generated inside Engine
@@ -639,7 +875,11 @@ func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registr
 		os.Exit(1)
 	}
 
-	grpcServer := grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()))
+	grpcServer := grpc.NewServer(
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
+		grpc.UnaryInterceptor(enginemiddleware.UnaryLicenseEnforcement),
+		grpc.StreamInterceptor(enginemiddleware.StreamLicenseEnforcement),
+	)
 	// configStore/natsClient are threaded through so SubscribeWebhooks (the
 	// gRPC replacement for /sdks/ws -- see webhook_grpc_handler.go) can reuse
 	// the exact same NATS JetStream durable-consumer setup and
@@ -695,21 +935,13 @@ func shutdownWebhookServer(ctx context.Context, webhookSrv *http.Server) {
 	}
 }
 
-func initDependencies(ctx context.Context) (*config.Config, *pgxpool.Pool, *messaging.NATSClient) {
-	cfg, err := config.Load(ConfigPath)
+func initDependencies(ctx context.Context, options ...config.LoadOption) (*config.Config, *pgxpool.Pool, *messaging.NATSClient) {
+	cfg, err := config.Load(ConfigPath, options...)
 	if err != nil {
 		slog.WarnContext(ctx, "Failed to parse config file, using defaults", slog.Any("error", err))
 	}
 
-	databaseURL := os.Getenv("FUSED_DATABASE_URL")
-	if databaseURL == "" {
-		databaseURL = os.Getenv("DATABASE_URL")
-	}
-	if databaseURL == "" {
-		databaseURL = cfg.Database.URL
-	}
-
-	database, err := db.InitEnginePostgres(ctx, databaseURL)
+	database, err := db.InitEnginePostgres(ctx, engineDatabaseURL(cfg))
 	if err != nil {
 		slog.ErrorContext(ctx, "Failed to connect to PostgreSQL", slog.Any("error", err))
 		os.Exit(1)

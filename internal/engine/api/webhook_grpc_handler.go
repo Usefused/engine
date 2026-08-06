@@ -141,29 +141,29 @@ func receiveWebhookSubscribe(stream enginev1.EngineService_SubscribeWebhooksServ
 	return subscribe, nil
 }
 
-// authenticateWebhookSubscribe validates the (artifact_id, token) pair from
-// call metadata -- x-api-key/x-artifact-id, the same two values
+// authenticateWebhookSubscribe validates the (app_id, family token) pair from
+// call metadata -- x-api-key/x-app-id, the same two values
 // authenticateWebSocket reads from HTTP headers for the WS path, just
 // carried as gRPC metadata instead so this RPC authenticates exactly like
 // every other one on EngineGRPCServer (see grpcAPIKey in engine_grpc.go)
 // rather than via fields on the first stream message. auth.TokenValidator's
 // Validate is the right tool here per auth.go's own doc comment: it is scoped
-// to exactly this artifactID+token shape, unlike the account-level local
+// to exactly this appID+token shape, unlike the account-level local
 // access middleware used by the REST/GraphQL proxy handlers.
 func (s *EngineGRPCServer) authenticateWebhookSubscribe(ctx context.Context) (uuid.UUID, uuid.UUID, error) {
-	artifactIDStr := strings.TrimSpace(grpcArtifactID(ctx))
-	if artifactIDStr == "" {
-		return uuid.Nil, uuid.Nil, status.Error(codes.InvalidArgument, "x-artifact-id metadata is required")
+	appIDString := strings.TrimSpace(grpcAppID(ctx))
+	if appIDString == "" {
+		return uuid.Nil, uuid.Nil, status.Error(codes.InvalidArgument, "x-app-id metadata is required")
 	}
-	sdkUUID, err := uuid.Parse(artifactIDStr)
+	appID, err := uuid.Parse(appIDString)
 	if err != nil {
-		return uuid.Nil, uuid.Nil, status.Error(codes.InvalidArgument, "invalid x-artifact-id format")
+		return uuid.Nil, uuid.Nil, status.Error(codes.InvalidArgument, "invalid x-app-id format")
 	}
-	accountID, err := s.tokenValidator.Validate(ctx, sdkUUID, grpcAPIKey(ctx))
-	if err != nil || accountID == uuid.Nil {
+	identity, err := s.tokenValidator.Validate(ctx, appID, grpcAPIKey(ctx))
+	if err != nil || identity.AccountID == uuid.Nil {
 		return uuid.Nil, uuid.Nil, status.Error(codes.Unauthenticated, "unauthorized")
 	}
-	return sdkUUID, accountID, nil
+	return appID, identity.AccountID, nil
 }
 
 // setupGRPCWebhookConsumer mirrors setupWebhookConsumer (websocket_handler.go)

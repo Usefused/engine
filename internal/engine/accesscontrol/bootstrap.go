@@ -20,6 +20,7 @@ type BootstrapInput struct {
 	AccountID        uuid.UUID
 	CredentialHash   string
 	CredentialPrefix string
+	OwnerEmail       string
 	Roles            []RoleDefinition
 	TraceID          string
 }
@@ -36,7 +37,7 @@ type BootstrapRepository interface {
 	ReconcileBootstrapOwner(ctx context.Context, input BootstrapInput) (BootstrapResult, error)
 }
 
-func BootstrapOwner(ctx context.Context, repository BootstrapRepository, accountID uuid.UUID, licenseKey string) (BootstrapResult, error) {
+func BootstrapOwner(ctx context.Context, repository BootstrapRepository, accountID uuid.UUID, licenseKey string, ownerEmails ...string) (BootstrapResult, error) {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.access.bootstrap_owner")
 	defer span.End()
 
@@ -55,10 +56,15 @@ func BootstrapOwner(ctx context.Context, repository BootstrapRepository, account
 		}
 	}
 
+	ownerEmail := ""
+	if len(ownerEmails) > 0 {
+		ownerEmail = ownerEmails[0]
+	}
 	result, err := repository.ReconcileBootstrapOwner(ctx, BootstrapInput{
 		AccountID:        accountID,
 		CredentialHash:   HashControlCredential(licenseKey),
 		CredentialPrefix: CredentialPrefix(licenseKey),
+		OwnerEmail:       ownerEmail,
 		Roles:            roles,
 		TraceID:          traceIDFromContext(ctx),
 	})

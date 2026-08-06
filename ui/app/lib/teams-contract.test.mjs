@@ -40,13 +40,13 @@ test("uses the same exact binding fields and enum names as the CLI", () => {
     assert.match(document, /binding \{ id team_id role_slug role_display_name resource_type resource_id resource_display_name created_at \}/);
   }
 
-  const artifactOperations = [
-    [TEAM_OPERATIONS.grantArtifact, "grantTeamArtifactAccess"],
-    [TEAM_OPERATIONS.revokeArtifact, "revokeTeamArtifactAccess"],
+  const appOperations = [
+    [TEAM_OPERATIONS.grantApp, "grantTeamAppAccess"],
+    [TEAM_OPERATIONS.revokeApp, "revokeTeamAppAccess"],
   ];
-  for (const [document, field] of artifactOperations) {
-    assert.match(document, /\$level: TeamArtifactAccessLevel!/);
-    assert.match(document, new RegExp(`${field}\\(team_id: \\$teamId, artifact_id: \\$resourceId, level: \\$level\\)`));
+  for (const [document, field] of appOperations) {
+    assert.match(document, /\$level: TeamAppAccessLevel!/);
+    assert.match(document, new RegExp(`${field}\\(team_id: \\$teamId, app_family_id: \\$resourceId, level: \\$level\\)`));
     assert.match(document, /authorization_revision changed/);
   }
 });

@@ -214,7 +214,7 @@ func TestUserGraphQLReadContractsExecuteAgainstSchema(t *testing.T) {
 func TestUserGraphQLResolvesEmailBeforePointRead(t *testing.T) {
 	user, _, _ := testGraphQLUser()
 	s := &userGraphQLTestStore{
-		userResult: user,
+		userResult:   user,
 		referenceIDs: map[string]uuid.UUID{"user:" + strings.ToLower(user.Email): user.ID},
 	}
 	query := `query User($id:ID!){user(id:$id){id email}}`

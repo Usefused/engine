@@ -181,7 +181,7 @@ var allowedAuditMetadata = map[string]struct{}{
 	"permission_count":       {},
 	"service_count":          {},
 	"bucket_count":           {},
-	"artifact_count":         {},
+	"app_count":              {},
 	"selection_count":        {},
 	"team_id":                {},
 	"role_slug":              {},
@@ -190,8 +190,8 @@ var allowedAuditMetadata = map[string]struct{}{
 	"credential_id":          {},
 	"membership_role":        {},
 	"created_user":           {},
-	// Artifact ownership is identity metadata, not credential material. These
-	// fields are emitted by the atomic scope transaction and must remain in the
+	// App ownership is identity metadata, not credential material. These fields
+	// are emitted by the atomic desired-config transaction and must remain in the
 	// same allowlist used when records are read back through GraphQL.
 	"owner_type": {},
 	"owner_id":   {},

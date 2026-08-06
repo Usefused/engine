@@ -21,6 +21,6 @@ func FusedEngineStreamSubjects() []string {
 	}
 }
 
-func FusedEngineSessionSubject(artifactID string) string {
-	return fmt.Sprintf("fused_engine.session.%s", artifactID)
+func FusedEngineSessionSubject(appID string) string {
+	return fmt.Sprintf("fused_engine.session.%s", appID)
 }

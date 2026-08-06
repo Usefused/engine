@@ -38,14 +38,14 @@ const AUTH_NAV_ITEMS: SidebarItem[] = [
     label: "Apps",
     Icon: Boxes,
     isActive: (pathname, search) => pathname.startsWith("/integrations/sdks") || (pathname.startsWith("/integrations/builder") && search.get("tab") !== "mcp"),
-    visible: (access) => hasAnyPermission(access, "artifact.read"),
+    visible: (access) => hasAnyPermission(access, "app.read"),
   },
   {
     to: "/integrations/mcp",
     label: "MCP servers",
     Icon: Bot,
     isActive: (pathname, search) => pathname.startsWith("/integrations/mcp") || (pathname.startsWith("/integrations/builder") && search.get("tab") === "mcp"),
-    visible: (access) => hasAnyPermission(access, "artifact.read"),
+    visible: (access) => hasAnyPermission(access, "app.read"),
   },
   {
     to: "/integrations/buckets",

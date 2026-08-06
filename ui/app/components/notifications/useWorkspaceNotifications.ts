@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, NotificationServiceRef, WorkspaceNotification } from "~/lib/api";
-import { getApiKey } from "~/lib/session";
 import { isPending, isUnresolved } from "./notificationHelpers";
 
 // useWorkspaceNotifications is the single data-fetching hook backing both the
@@ -15,7 +14,7 @@ import { isPending, isUnresolved } from "./notificationHelpers";
 // as a second pass after items load (not joined server-side) -- the simplest
 // fix for a real bug: the bell panel was rendering raw service_id UUIDs as
 // the row's title with no way to tell what was actually affected.
-export function useWorkspaceNotifications() {
+export function useWorkspaceNotifications(enabled = true) {
   const [items, setItems] = useState<WorkspaceNotification[]>([]);
   const [serviceRefs, setServiceRefs] = useState<Record<string, NotificationServiceRef>>({});
   const [loading, setLoading] = useState(false);
@@ -42,8 +41,8 @@ export function useWorkspaceNotifications() {
   }, []);
 
   const refresh = useCallback(() => {
-    if (!getApiKey()) return;
-    setLoading(true);
+		if (!enabled) return Promise.resolve();
+		setLoading(true);
     setError(null);
     return api.workspace
       .listNotifications()
@@ -57,11 +56,11 @@ export function useWorkspaceNotifications() {
         setError("Failed to load notifications");
       })
       .finally(() => setLoading(false));
-  }, [loadServiceRefs]);
+  }, [enabled, loadServiceRefs]);
 
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    if (enabled) refresh();
+  }, [enabled, refresh]);
 
   // Optimistic update: apply the new status locally immediately, then
   // reconcile with the server. If the server rejects it (e.g. someone else

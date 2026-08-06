@@ -31,11 +31,12 @@ type versionDiffWire struct {
 	Removed []models.IntegrationObject `json:"Removed"`
 }
 
-// changelogSeverity derives a WorkspaceNotificationSeverity from one
-// service_changelog entry's own diff payload, per
-// plans/plan-service-changelog.md's "## Phase 3" severity rules. Any
-// failure to unmarshal a diff degrades to non-breaking -- the conservative
-// default that never over-alarms -- rather than failing the whole match.
+// changelogSeverity derives a WorkspaceNotificationSeverity from a single
+// service_changelog entry by inspecting its diff payload. Execution policy
+// and connection profile diffs are analyzed for breaking changes; version
+// diffs are compared against the currently loaded service contract. Any
+// unmarshal failure degrades to non-breaking — the conservative default
+// that never over-alarms — rather than failing the whole match.
 func changelogSeverity(entry models.ServiceChangelogEntry) store.WorkspaceNotificationSeverity {
 	switch entry.ConfigType {
 	case models.ServiceChangelogConfigTypeExecutionPolicy, models.ServiceChangelogConfigTypeConnectionProfile:
@@ -110,9 +111,9 @@ func severityFromDriftChanges(changes []models.DriftChange) store.WorkspaceNotif
 	return store.WorkspaceNotificationSeverityNonBreaking
 }
 
-// matchAndNotifyServiceChangelog is Phase 3's entry point, called from the
-// poller right after InsertServiceChangelogCacheEntries succeeds (see
-// service_changelog_poller.go). versions is this service's activated
+// matchAndNotifyServiceChangelog is the entry point for changelog-driven
+// workspace notifications, called from the poller right after
+// InsertServiceChangelogCacheEntries succeeds (see service_changelog_poller.go). versions is this service's activated
 // version rows (from ListWorkspaceServices, grouped by ServiceID) -- needed
 // to resolve a changelog entry's version *name* to the ServiceVersionID the
 // usage index and execution-policy/profile checks are keyed by.
@@ -155,12 +156,11 @@ func notifyIfImpacted(
 	createChangelogNotification(ctx, configStore, entry, notifyType, configKeys)
 }
 
-// matchedConfigKeys dispatches to the per-config_type matching rule from
-// plans/plan-service-changelog.md's "## Phase 3": version reuses the SDK
-// usage index (narrowed by endpoint selection for `changed`); execution_policy
-// is ambient, gated only by whether a local override already shadows it;
-// connection_profile is gated by whether the workspace's effective profile
-// is still on the baseline layer.
+// matchedConfigKeys dispatches to the per-config_type matching rule:
+// version reuses the SDK usage index (narrowed by endpoint selection for
+// `changed`); execution_policy is ambient, gated only by whether a local
+// override already shadows it; connection_profile is gated by whether the
+// workspace's effective profile is still on the baseline layer.
 func matchedConfigKeys(
 	ctx context.Context,
 	engineStore store.Store,
@@ -316,9 +316,8 @@ type connectProfileLister interface {
 }
 
 // matchedConnectionProfileConfigKeys: a connection_profile changelog row
-// doesn't record which auth_type changed (Phase 1's schema has no such
-// column -- see plans/plan-service-changelog.md's "## Phase 3" note on this
-// gap), so rather than guessing, this checks every effective profile the
+// doesn't record which auth_type changed (the schema has no such column,
+// so rather than guessing, this checks every effective profile the
 // workspace holds for this (service, version): any of them still on the
 // baseline layer means the workspace inherits whatever Registry default
 // just changed for that auth_type, so it's notified about that auth_type
@@ -393,8 +392,9 @@ func dedupSortedStrings(values []string) []string {
 	return out
 }
 
-// changelogNotificationType maps a service_changelog entry to one of
-// Phase 3's registry_* notification types (see config_repository.go).
+// changelogNotificationType maps a service_changelog entry to one of the
+// registry_* notification types used for changelog-driven workspace
+// notifications (see config_repository.go).
 func changelogNotificationType(entry models.ServiceChangelogEntry) (store.WorkspaceNotificationType, bool) {
 	switch entry.ConfigType {
 	case models.ServiceChangelogConfigTypeVersion:

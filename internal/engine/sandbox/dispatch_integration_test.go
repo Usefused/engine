@@ -3,6 +3,8 @@ package sandbox
 import (
 	"context"
 	"fmt"
+
+	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
@@ -10,8 +12,8 @@ import (
 
 type dummyTokenValidator struct{}
 
-func (v *dummyTokenValidator) Validate(ctx context.Context, artifactID uuid.UUID, token string) (uuid.UUID, error) {
-	return uuid.New(), nil
+func (v *dummyTokenValidator) Validate(ctx context.Context, appID uuid.UUID, token string) (auth.RuntimeIdentity, error) {
+	return auth.RuntimeIdentity{AccountID: uuid.New(), AppFamilyID: uuid.New(), AppID: appID, AppVersion: "1.0.0", Kind: "sdk", Status: "active"}, nil
 }
 
 // richMockCache serves a full scope + Fused object so engineExecuteCore can be
@@ -27,29 +29,29 @@ type richMockCache struct {
 	method string
 }
 
-func (m *richMockCache) ConnectSDK(ctx context.Context, artifactID string) error { return nil }
-func (m *richMockCache) DisconnectSDK(artifactID string)                         {}
+func (m *richMockCache) ConnectSDK(ctx context.Context, appID string) error { return nil }
+func (m *richMockCache) DisconnectSDK(appID string)                         {}
 
-func (m *richMockCache) GetOrFetchServiceMetadata(ctx context.Context, artifactID string, serviceID string) (*fusedobject.ServiceMetadata, error) {
+func (m *richMockCache) GetOrFetchServiceMetadata(ctx context.Context, appID string, serviceID string) (*fusedobject.ServiceMetadata, error) {
 	return m.obj, nil
 }
-func (c *richMockCache) GetEndpoint(ctx context.Context, artifactID string, serviceID string, endpointName string) (*fusedobject.Endpoint, error) {
+func (c *richMockCache) GetEndpoint(ctx context.Context, appID string, serviceID string, endpointName string) (*fusedobject.Endpoint, error) {
 	if endpointName == "list_items" || endpointName == "do_thing" {
 		return &fusedobject.Endpoint{Name: endpointName, ID: c.epID, Path: c.path, Method: c.method}, nil
 	}
 	return nil, fmt.Errorf("not found")
 }
-func (m *richMockCache) GetArtifactScope(ctx context.Context, artifactID string) (string, []byte, error) {
+func (m *richMockCache) GetAppRuntime(ctx context.Context, appID string) (string, []byte, error) {
 	return "test", m.scopeJSON, nil
 }
-func (m *richMockCache) Invalidate(serviceID string)               {}
-func (m *richMockCache) InvalidateArtifactScope(artifactID string) {}
+func (m *richMockCache) Invalidate(serviceID string)       {}
+func (m *richMockCache) InvalidateAppRuntime(appID string) {}
 
 // ListEndpointsForSelection mirrors GetEndpoint's permissive stub behavior:
 // this mock backs engineExecuteCore's dispatch path, not fixture-building
 // tests, so it just hands back the same fixed "list_items"/"do_thing" pair
 // GetEndpoint already recognizes.
-func (m *richMockCache) ListEndpointsForSelection(ctx context.Context, artifactID string, sel models.SDKSelection) ([]fusedobject.Endpoint, error) {
+func (m *richMockCache) ListEndpointsForSelection(ctx context.Context, appID string, sel models.SDKSelection) ([]fusedobject.Endpoint, error) {
 	return []fusedobject.Endpoint{
 		{Name: "list_items", ID: m.epID},
 		{Name: "do_thing", ID: m.epID},

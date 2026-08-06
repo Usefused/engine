@@ -62,8 +62,8 @@ export const TEAM_OPERATIONS = {
   revokeService: bindingOperation("RevokeTeamServiceAccess", "revokeTeamServiceAccess", "service_id"),
   grantBucket: bindingOperation("GrantTeamBucketAccess", "grantTeamBucketAccess", "bucket_id"),
   revokeBucket: bindingOperation("RevokeTeamBucketAccess", "revokeTeamBucketAccess", "bucket_id"),
-  grantArtifact: artifactBindingOperation("GrantTeamArtifactAccess", "grantTeamArtifactAccess"),
-  revokeArtifact: artifactBindingOperation("RevokeTeamArtifactAccess", "revokeTeamArtifactAccess"),
+  grantApp: appBindingOperation("GrantTeamAppAccess", "grantTeamAppAccess"),
+  revokeApp: appBindingOperation("RevokeTeamAppAccess", "revokeTeamAppAccess"),
 } as const;
 
 function bindingOperation(operation: string, field: string, resourceArgument: string): string {
@@ -77,10 +77,10 @@ function bindingOperation(operation: string, field: string, resourceArgument: st
   `;
 }
 
-function artifactBindingOperation(operation: string, field: string): string {
+function appBindingOperation(operation: string, field: string): string {
   return `
-    mutation ${operation}($teamId: ID!, $resourceId: ID!, $level: TeamArtifactAccessLevel!) {
-      ${field}(team_id: $teamId, artifact_id: $resourceId, level: $level) {
+    mutation ${operation}($teamId: ID!, $resourceId: ID!, $level: TeamAppAccessLevel!) {
+      ${field}(team_id: $teamId, app_family_id: $resourceId, level: $level) {
         binding { id team_id role_slug role_display_name resource_type resource_id resource_display_name created_at }
         authorization_revision changed
       }

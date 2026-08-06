@@ -108,12 +108,12 @@ type TeamBindingMutationResult struct {
 }
 
 type TeamArchiveConflictError struct {
-	BindingCount        int
-	ActiveArtifactCount int
+	BindingCount   int
+	ActiveAppCount int
 }
 
 func (e *TeamArchiveConflictError) Error() string {
-	return fmt.Sprintf("%v: %d binding(s), %d active artifact(s)", ErrTeamArchiveConflict, e.BindingCount, e.ActiveArtifactCount)
+	return fmt.Sprintf("%v: %d binding(s), %d active app(s)", ErrTeamArchiveConflict, e.BindingCount, e.ActiveAppCount)
 }
 
 func (e *TeamArchiveConflictError) Unwrap() error { return ErrTeamArchiveConflict }
@@ -219,15 +219,15 @@ func validateTeamBindingMutation(input TeamBindingMutation) error {
 }
 
 var teamRoleResourceTypes = map[string]accesscontrol.ResourceType{
-	accesscontrol.RoleOwner:           accesscontrol.ResourceWorkspace,
-	accesscontrol.RoleAdmin:           accesscontrol.ResourceWorkspace,
-	accesscontrol.RoleBuilder:         accesscontrol.ResourceWorkspace,
-	accesscontrol.RoleViewer:          accesscontrol.ResourceWorkspace,
-	accesscontrol.RoleServiceUser:     accesscontrol.ResourceService,
-	accesscontrol.RoleServiceManager:  accesscontrol.ResourceService,
-	accesscontrol.RoleBucketUser:      accesscontrol.ResourceBucket,
-	accesscontrol.RoleBucketManager:   accesscontrol.ResourceBucket,
-	accesscontrol.RoleArtifactReader:  accesscontrol.ResourceArtifact,
-	accesscontrol.RoleArtifactUser:    accesscontrol.ResourceArtifact,
-	accesscontrol.RoleArtifactManager: accesscontrol.ResourceArtifact,
+	accesscontrol.RoleOwner:          accesscontrol.ResourceWorkspace,
+	accesscontrol.RoleAdmin:          accesscontrol.ResourceWorkspace,
+	accesscontrol.RoleBuilder:        accesscontrol.ResourceWorkspace,
+	accesscontrol.RoleViewer:         accesscontrol.ResourceWorkspace,
+	accesscontrol.RoleServiceUser:    accesscontrol.ResourceService,
+	accesscontrol.RoleServiceManager: accesscontrol.ResourceService,
+	accesscontrol.RoleBucketUser:     accesscontrol.ResourceBucket,
+	accesscontrol.RoleBucketManager:  accesscontrol.ResourceBucket,
+	accesscontrol.RoleAppReader:      accesscontrol.ResourceApp,
+	accesscontrol.RoleAppUser:        accesscontrol.ResourceApp,
+	accesscontrol.RoleAppManager:     accesscontrol.ResourceApp,
 }

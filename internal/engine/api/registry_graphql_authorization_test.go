@@ -12,9 +12,9 @@ import (
 )
 
 func TestRegistryGraphQLAuthorizationCollectsAliasesAndFragments(t *testing.T) {
-	actor := registryPolicyActor(t, accesscontrol.PermissionCatalogueRead, accesscontrol.PermissionArtifactRead)
+	actor := registryPolicyActor(t, accesscontrol.PermissionCatalogueRead)
 	ctx := accesscontrol.ContextWithActor(context.Background(), actor)
-	body := []byte(`{"query":"query Dashboard { catalogue: services { total } ...Artifacts } fragment Artifacts on Query { sdks { total } }","operationName":"Dashboard"}`)
+	body := []byte(`{"query":"query Dashboard { catalogue: services { total } ...Catalogue } fragment Catalogue on Query { globalServiceAnalytics { total_services } }","operationName":"Dashboard"}`)
 
 	operation, err := authorizeRegistryGraphQLOperation(ctx, body)
 	if err != nil || operation != "query" {
@@ -23,19 +23,19 @@ func TestRegistryGraphQLAuthorizationCollectsAliasesAndFragments(t *testing.T) {
 }
 
 func TestRegistryGraphQLAuthorizationIsAllOrNothing(t *testing.T) {
-	actor := registryPolicyActor(t, accesscontrol.PermissionCatalogueRead)
+	actor := registryPolicyActor(t, accesscontrol.PermissionCatalogueManage)
 	ctx, capture := accesscontrol.ContextWithRequiredPermissionsCapture(context.Background())
 	ctx = accesscontrol.ContextWithActor(ctx, actor)
-	body := []byte(`{"query":"query Dashboard { services { total } sdks { total } }"}`)
+	body := []byte(`{"query":"mutation Dashboard { updateServicePublic setConnectionProfile }"}`)
 
 	_, err := authorizeRegistryGraphQLOperation(ctx, body)
 	var denied *accesscontrol.PermissionDeniedError
-	if !errors.As(err, &denied) || len(denied.Missing) != 1 || denied.Missing[0].Permission != accesscontrol.PermissionArtifactRead {
+	if !errors.As(err, &denied) || len(denied.Missing) != 2 {
 		t.Fatalf("denial = %#v, %v", denied, err)
 	}
 	requirements, captured := capture.RequiredPermissions()
-	if !captured || len(requirements) != 2 {
-		t.Fatalf("captured requirements = %#v/%t, want both root-field requirements", requirements, captured)
+	if !captured || len(requirements) != 3 {
+		t.Fatalf("captured requirements = %#v/%t, want all root-field requirements", requirements, captured)
 	}
 }
 
@@ -79,8 +79,8 @@ func TestRegistryGraphQLAuthorizationFailsClosedForUnknownRoot(t *testing.T) {
 }
 
 func TestRegistryGraphQLPolicyCoversCurrentRegistrySchema(t *testing.T) {
-	if got := len(registryGraphQLQueryPolicies) - 1; got != 33 {
-		t.Fatalf("classified Registry queries = %d, want 33", got)
+	if got := len(registryGraphQLQueryPolicies) - 1; got != 25 {
+		t.Fatalf("classified Registry queries = %d, want 25", got)
 	}
 	if got := len(registryGraphQLMutationPolicies) - 1; got != 3 {
 		t.Fatalf("classified Registry mutations = %d, want 3", got)

@@ -34,6 +34,9 @@ authorization.
 
 ## Storage
 
-The license key is read from `FUSED_LICENSE_KEY`, the `--license-key` flag, or
-configuration loaded by Engine. Prefer environment variables or secret managers
-in production. Do not commit production license keys to `engine.yaml`.
+The license key resolves in this order: `--license-key`, `FUSED_LICENSE_KEY` in
+the local `.env`, `engine.license_key` in `engine.yaml`, then an inherited
+`FUSED_LICENSE_KEY` process environment variable. `FUSED_API_KEY` is never a
+Registry license source. Prefer a deployment-managed `.env` or secret-backed
+configuration in production, and do not commit production keys to
+`engine.yaml`.

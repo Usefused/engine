@@ -23,18 +23,19 @@ func MountConfigRoutes(r chi.Router, configStore store.ConfigRepository, s store
 	})
 
 	// SDK config routes
+	packageClient, _ := registryClient.(SDKPackageClient)
 	r.Route("/sdk-config", func(r chi.Router) {
 		r.Post("/plan", SDKConfigPlanHandler(configStore, s, registryClient))
 		r.Post("/apply", authorizationRevisionSyncHandler(revisionLoader, revisionSink, SDKConfigApplyHandler(configStore, s, proxy, registryClient)))
-		r.Get("/{name}/download", SDKConfigDownloadHandler(configStore, s, proxy))
+	})
+	r.Get("/sdks/{app_id}/download", SDKPackageDownloadHandler(s, proxy, packageClient))
 
-		// SDK/MCP lifecycle routes. Deliberately under /sdk-config, not
-		// /sdks/* -- /sdks/* is proxied straight through to the Registry
-		// (see RESTProxyMountPaths), so an Engine-native route registered
-		// there would either be shadowed by the proxy or collide with it.
-		r.Post("/{id}/activate", ActivateSDKHandler(s))
-		r.Post("/{id}/deactivate", DeactivateSDKHandler(s))
-		r.Delete("/{id}", DeleteSDKHandler(s, proxy))
+	// SDK and MCP versions share lifecycle semantics. There is deliberately no
+	// activate/reactivate endpoint: deactivation is an irreversible hard delete.
+	r.Route("/apps/{app_id}", func(r chi.Router) {
+		r.Post("/deprecate", DeprecateAppHandler(s))
+		r.Post("/undeprecate", UndeprecateAppHandler(s))
+		r.Delete("/", DeactivateAppHandler(s, proxy))
 	})
 
 	// MCP uses the same desired-state contract and resolver as SDK configs,

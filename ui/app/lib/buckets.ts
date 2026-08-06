@@ -264,13 +264,13 @@ export function readWorkspaceServices(): Promise<ActivatedService[]> {
     .then(({ workspaceServices }) => workspaceServices);
 }
 
-export function readBucketsForSDK(artifactId: string): Promise<SDKBucketState> {
+export function readBucketsForSDK(appFamilyId: string): Promise<SDKBucketState> {
   return api.mcpGraphql<SDKBucketState>(
-    `query($artifactId: String!) {
+    `query($appFamilyId: String!) {
       buckets { id name is_default created_at updated_at }
-      sdkBuckets(artifact_id: $artifactId) { id name is_default created_at updated_at }
+      sdkBuckets(app_family_id: $appFamilyId) { id name is_default created_at updated_at }
     }`,
-    { artifactId }
+    { appFamilyId }
   );
 }
 

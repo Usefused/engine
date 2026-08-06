@@ -2,7 +2,7 @@ export interface CurrentActorGrant {
   permission: string;
   // GraphQL serializes ResourceType as an enum, so its wire values are
   // uppercase even though REST permission requirements use lowercase names.
-  resource_type: "WORKSPACE" | "SERVICE" | "BUCKET" | "ARTIFACT";
+  resource_type: "WORKSPACE" | "SERVICE" | "BUCKET" | "APP";
   resource_id: string;
 }
 

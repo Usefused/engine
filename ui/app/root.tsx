@@ -17,18 +17,20 @@ export const links: LinksFunction = () => [
   { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
 ];
 
-import { getApiKey } from "~/lib/session";
+import { api } from "~/lib/api";
+import { purgeLegacyBrowserCredential } from "~/lib/session";
 
 export async function clientLoader() {
-  const token = getApiKey();
+	purgeLegacyBrowserCredential();
+	const session = await api.auth.session().catch(() => ({ authenticated: false }));
   const runtimeEnv =
     typeof window !== "undefined" ? window.__FUSED_ENV || {} : {};
   return {
-    isAuth: !!token,
-    apiToken: token,
+		isAuth: session.authenticated,
+		apiToken: "",
     ENV: {
       BACKEND_URL: runtimeEnv.BACKEND_URL ?? "", // Relative when embedded in the Go backend
-      API_KEY: token || "",
+			API_KEY: "",
       WEBHOOK_BASE_URL: "https://run.usefused.com",
       SUPPORT_EMAIL: "hello@usefused.com",
       AGENT_MAX_IMPORT_SELECTIONS: "20",

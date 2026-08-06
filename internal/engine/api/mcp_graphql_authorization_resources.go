@@ -18,6 +18,66 @@ type graphQLAuthorizationResources struct {
 	revisionSink authorizationRevisionSink
 }
 
+func (r graphQLAuthorizationResources) resolveApps(ctx context.Context, accountID uuid.UUID, requests []graphQLAppRequirement) ([]accesscontrol.Requirement, error) {
+	if len(requests) == 0 {
+		return nil, nil
+	}
+	resolver, ok := r.store.(store.AppFamilyAccessResolver)
+	if !ok {
+		return nil, fmt.Errorf("%w: app access resolver unavailable", errGraphQLPolicyMissing)
+	}
+	appIDs := uniqueAppRequirementIDs(requests)
+	families, err := resolver.ResolveAppFamilyAccess(ctx, accountID, appIDs)
+	if err != nil {
+		return nil, fmt.Errorf("%w: resolve app access: %v", errGraphQLPolicyMissing, err)
+	}
+	requirements := make(map[accesscontrol.Requirement]struct{}, len(requests))
+	for _, request := range requests {
+		familyID := families[request.appID]
+		if familyID == uuid.Nil {
+			return nil, accesscontrol.ErrPolicyDenied
+		}
+		requirements[accesscontrol.Requirement{
+			Permission: request.permission,
+			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID},
+		}] = struct{}{}
+	}
+	return sortedRequirements(requirements), nil
+}
+
+func (r graphQLAuthorizationResources) resolveAppRequirements(ctx context.Context, accountID uuid.UUID, requirements []accesscontrol.Requirement) ([]accesscontrol.Requirement, error) {
+	requests := make([]graphQLAppRequirement, 0)
+	for _, requirement := range requirements {
+		if requirement.Resource.Type == accesscontrol.ResourceApp {
+			requests = append(requests, graphQLAppRequirement{appID: requirement.Resource.ID, permission: requirement.Permission})
+		}
+	}
+	resolved, err := r.resolveApps(ctx, accountID, requests)
+	if err != nil || len(requests) == 0 {
+		return requirements, err
+	}
+	result := make([]accesscontrol.Requirement, 0, len(requirements))
+	for _, requirement := range requirements {
+		if requirement.Resource.Type != accesscontrol.ResourceApp {
+			result = append(result, requirement)
+		}
+	}
+	return append(result, resolved...), nil
+}
+
+func uniqueAppRequirementIDs(requests []graphQLAppRequirement) []uuid.UUID {
+	unique := make(map[uuid.UUID]struct{}, len(requests))
+	for _, request := range requests {
+		unique[request.appID] = struct{}{}
+	}
+	ids := make([]uuid.UUID, 0, len(unique))
+	for id := range unique {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	return ids
+}
+
 func (r graphQLAuthorizationResources) resolveConnections(ctx context.Context, requests []graphQLConnectionRequirement) ([]accesscontrol.Requirement, map[uuid.UUID]store.AuthConnection, error) {
 	if len(requests) == 0 {
 		return nil, nil, nil
@@ -81,7 +141,7 @@ func (r graphQLAuthorizationResources) resolveDeployments(ctx context.Context, w
 	}
 	states, err := r.configStore.GetConfigStatesByKeys(ctx, deploymentConfigKeys(documents))
 	if err != nil {
-		return nil, fmt.Errorf("%w: resolve deployment artifacts: %v", errGraphQLPolicyMissing, err)
+		return nil, fmt.Errorf("%w: resolve deployment apps: %v", errGraphQLPolicyMissing, err)
 	}
 	return deploymentRequirements(workspaceID, documents, buckets, serviceIDs, states)
 }
@@ -154,7 +214,7 @@ func deploymentRequirements(workspaceID uuid.UUID, documents []sdkConfigDocument
 	}
 	requirements := make(map[accesscontrol.Requirement]struct{})
 	for _, document := range documents {
-		addDeploymentArtifactRequirement(requirements, workspaceID, document, states)
+		addDeploymentAppRequirement(requirements, workspaceID, document, states)
 		bucketID := bucketIDs[document.Bucket]
 		if bucketID == uuid.Nil {
 			return nil, fmt.Errorf("%w: deployment bucket %q was not found", errGraphQLPolicyMissing, document.Bucket)
@@ -171,13 +231,13 @@ func deploymentRequirements(workspaceID uuid.UUID, documents []sdkConfigDocument
 	return sortedRequirements(requirements), nil
 }
 
-func addDeploymentArtifactRequirement(requirements map[accesscontrol.Requirement]struct{}, workspaceID uuid.UUID, document sdkConfigDocument, states map[string]store.ConfigState) {
+func addDeploymentAppRequirement(requirements map[accesscontrol.Requirement]struct{}, workspaceID uuid.UUID, document sdkConfigDocument, states map[string]store.ConfigState) {
 	state, exists := states[fmt.Sprintf("mcp:%s:%s", document.Name, document.Version)]
 	if exists && state.LatestResourceID != nil && *state.LatestResourceID != uuid.Nil {
-		requirements[accesscontrol.Requirement{Permission: accesscontrol.PermissionArtifactManage, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceArtifact, ID: *state.LatestResourceID}}] = struct{}{}
+		requirements[accesscontrol.Requirement{Permission: accesscontrol.PermissionAppManage, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: *state.LatestResourceID}}] = struct{}{}
 		return
 	}
-	requirements[accesscontrol.Requirement{Permission: accesscontrol.PermissionArtifactCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}}] = struct{}{}
+	requirements[accesscontrol.Requirement{Permission: accesscontrol.PermissionAppCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}}] = struct{}{}
 }
 
 func sortedRequirements(values map[accesscontrol.Requirement]struct{}) []accesscontrol.Requirement {

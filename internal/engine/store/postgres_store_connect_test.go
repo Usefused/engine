@@ -370,7 +370,8 @@ type connectAuthFixture struct {
 	bucketA       uuid.UUID
 	bucketB       uuid.UUID
 	serviceID     uuid.UUID
-	artifactID    uuid.UUID
+	appID         uuid.UUID
+	appFamilyID   uuid.UUID
 	ownerTeamID   uuid.UUID
 	accountID     uuid.UUID
 	ownsWorkspace bool
@@ -401,8 +402,9 @@ func setupConnectAuthStore(t *testing.T) connectAuthFixture {
 		bucketA:       uuid.New(),
 		bucketB:       uuid.New(),
 		serviceID:     uuid.New(),
-		artifactID:    uuid.New(),
-		ownerTeamID:   seedArtifactOwnerTeam(t, ctx, pool),
+		appID:         uuid.New(),
+		appFamilyID:   uuid.New(),
+		ownerTeamID:   seedAppOwnerTeam(t, ctx, pool),
 		accountID:     accountID,
 		ownsWorkspace: ownsWorkspace,
 	}
@@ -447,7 +449,8 @@ func connectAuthWorkspace(t *testing.T, ctx context.Context, pool interface {
 // foreign keys to remove every connection row owned by the test buckets.
 func cleanupConnectAuthFixture(db execer, fixture connectAuthFixture) {
 	ctx := context.Background()
-	_, _ = db.Exec(ctx, `DELETE FROM fused_artifact_scopes WHERE artifact_id = $1`, fixture.artifactID)
+	_, _ = db.Exec(ctx, `DELETE FROM fused_apps WHERE app_id = $1`, fixture.appID)
+	_, _ = db.Exec(ctx, `DELETE FROM fused_app_families WHERE app_family_id = $1`, fixture.appFamilyID)
 	_, _ = db.Exec(ctx, `DELETE FROM fused_teams WHERE id = $1`, fixture.ownerTeamID)
 	if fixture.ownsWorkspace {
 		_, _ = db.Exec(ctx, `DELETE FROM fused_workspaces WHERE id = $1`, fixture.workspaceID)
@@ -471,14 +474,22 @@ func seedConnectAuthFixture(t *testing.T, db execer, f connectAuthFixture) {
 		t.Fatalf("seed connect auth buckets: %v", err)
 	}
 	if _, err := db.Exec(f.ctx, `
-		INSERT INTO fused_artifact_scopes (account_id, artifact_id, owner_team_id, selections) VALUES ($1, $2, $3, '[]')
-	`, f.accountID, f.artifactID, f.ownerTeamID); err != nil {
-		t.Fatalf("seed connect auth sdk scope: %v", err)
+		INSERT INTO fused_app_families
+			(app_family_id, account_id, kind, canonical_name, display_name, target_language, owner_team_id)
+		VALUES ($1, $2, 'sdk', $3, 'Connect Auth SDK', 'typescript', $4)
+	`, f.appFamilyID, f.accountID, "connect-auth-"+f.appFamilyID.String(), f.ownerTeamID); err != nil {
+		t.Fatalf("seed connect auth app family: %v", err)
 	}
 	if _, err := db.Exec(f.ctx, `
-		INSERT INTO fused_artifact_buckets (artifact_id, bucket_id) VALUES ($1, $2)
-	`, f.artifactID, f.bucketA); err != nil {
-		t.Fatalf("seed connect auth sdk bucket link: %v", err)
+		INSERT INTO fused_apps (app_id, app_family_id, account_id, version, config_key, source_hash, status)
+		VALUES ($3, $1, $2, '1.0.0', $4, 'connect-auth', 'active')
+	`, f.appFamilyID, f.accountID, f.appID, "sdk:connect-auth:"+f.appFamilyID.String()); err != nil {
+		t.Fatalf("seed connect auth app runtime: %v", err)
+	}
+	if _, err := db.Exec(f.ctx, `
+		INSERT INTO fused_app_family_buckets (app_family_id, bucket_id) VALUES ($1, $2)
+	`, f.appFamilyID, f.bucketA); err != nil {
+		t.Fatalf("seed connect auth app bucket: %v", err)
 	}
 }
 
@@ -561,7 +572,7 @@ func assertReconnectUpsertReplacesConnection(t *testing.T, f connectAuthFixture,
 	expiresAt := time.Now().UTC().Add(2 * time.Minute)
 	reconnected, err := f.store.UpsertAuthConnection(f.ctx, AuthConnection{
 		BucketID: f.bucketA, ServiceID: f.serviceID,
-		EndUserRef: "user_123", CreatedByArtifactID: f.artifactID, AuthType: "oauth",
+		EndUserRef: "user_123", CreatedByAppID: f.appID, AuthType: "oauth",
 		EncryptedDEK: encrypted.dek, EncryptedAccessToken: encrypted.values[0],
 		EncryptedRefreshToken: encrypted.values[1], TokenType: "Bearer", ExpiresAt: &expiresAt, RefreshState: "ok",
 	})
@@ -595,7 +606,7 @@ func upsertOAuthConnection(t *testing.T, f connectAuthFixture) *AuthConnection {
 		BucketID:              f.bucketA,
 		ServiceID:             f.serviceID,
 		EndUserRef:            "user_123",
-		CreatedByArtifactID:   f.artifactID,
+		CreatedByAppID:        f.appID,
 		AuthType:              "oauth",
 		EncryptedDEK:          encrypted.dek,
 		EncryptedAccessToken:  encrypted.values[0],
@@ -742,7 +753,7 @@ func createConnectSession(t *testing.T, f connectAuthFixture) *ConnectSession {
 		NonceHash:             "nonce-hash",
 		EncryptedDEK:          encrypted.dek,
 		EncryptedPKCEVerifier: encrypted.values[0],
-		CreatedByArtifactID:   f.artifactID,
+		CreatedByAppID:        f.appID,
 		ReturnURL:             "https://app.example.com/oauth/done",
 		RequestedScopes:       []string{"test"},
 		ExpiresAt:             time.Now().UTC().Add(15 * time.Minute),

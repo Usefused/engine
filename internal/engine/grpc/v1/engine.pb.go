@@ -23,7 +23,7 @@ const (
 
 type ConnectRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	ArtifactId    string                 `protobuf:"bytes,1,opt,name=artifact_id,json=artifactId,proto3" json:"artifact_id,omitempty"`
+	AppId         string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
 	Token         string                 `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -59,9 +59,9 @@ func (*ConnectRequest) Descriptor() ([]byte, []int) {
 	return file_engine_v1_engine_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *ConnectRequest) GetArtifactId() string {
+func (x *ConnectRequest) GetAppId() string {
 	if x != nil {
-		return x.ArtifactId
+		return x.AppId
 	}
 	return ""
 }
@@ -111,7 +111,7 @@ func (*ConnectResponse) Descriptor() ([]byte, []int) {
 
 type DisconnectRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	ArtifactId    string                 `protobuf:"bytes,1,opt,name=artifact_id,json=artifactId,proto3" json:"artifact_id,omitempty"`
+	AppId         string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -146,9 +146,9 @@ func (*DisconnectRequest) Descriptor() ([]byte, []int) {
 	return file_engine_v1_engine_proto_rawDescGZIP(), []int{2}
 }
 
-func (x *DisconnectRequest) GetArtifactId() string {
+func (x *DisconnectRequest) GetAppId() string {
 	if x != nil {
-		return x.ArtifactId
+		return x.AppId
 	}
 	return ""
 }
@@ -191,7 +191,7 @@ func (*DisconnectResponse) Descriptor() ([]byte, []int) {
 
 type ExecuteRequest struct {
 	state        protoimpl.MessageState `protogen:"open.v1"`
-	ArtifactId   string                 `protobuf:"bytes,1,opt,name=artifact_id,json=artifactId,proto3" json:"artifact_id,omitempty"`
+	AppId        string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
 	Token        string                 `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"`
 	EndpointName string                 `protobuf:"bytes,3,opt,name=endpoint_name,json=endpointName,proto3" json:"endpoint_name,omitempty"`
 	Params       []byte                 `protobuf:"bytes,4,opt,name=params,proto3" json:"params,omitempty"` // JSON-encoded parameters
@@ -248,9 +248,9 @@ func (*ExecuteRequest) Descriptor() ([]byte, []int) {
 	return file_engine_v1_engine_proto_rawDescGZIP(), []int{4}
 }
 
-func (x *ExecuteRequest) GetArtifactId() string {
+func (x *ExecuteRequest) GetAppId() string {
 	if x != nil {
-		return x.ArtifactId
+		return x.AppId
 	}
 	return ""
 }
@@ -429,12 +429,12 @@ func (x *ExecuteResponse) GetStatusCode() int32 {
 }
 
 type StartConnectSessionRequest struct {
-	state               protoimpl.MessageState `protogen:"open.v1"`
-	BucketId            string                 `protobuf:"bytes,1,opt,name=bucket_id,json=bucketId,proto3" json:"bucket_id,omitempty"`
-	ServiceId           string                 `protobuf:"bytes,2,opt,name=service_id,json=serviceId,proto3" json:"service_id,omitempty"`
-	EndUserRef          string                 `protobuf:"bytes,3,opt,name=end_user_ref,json=endUserRef,proto3" json:"end_user_ref,omitempty"`
-	ReturnUrl           string                 `protobuf:"bytes,4,opt,name=return_url,json=returnUrl,proto3" json:"return_url,omitempty"`
-	CreatedByArtifactId string                 `protobuf:"bytes,5,opt,name=created_by_artifact_id,json=createdByArtifactId,proto3" json:"created_by_artifact_id,omitempty"`
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	BucketId       string                 `protobuf:"bytes,1,opt,name=bucket_id,json=bucketId,proto3" json:"bucket_id,omitempty"`
+	ServiceId      string                 `protobuf:"bytes,2,opt,name=service_id,json=serviceId,proto3" json:"service_id,omitempty"`
+	EndUserRef     string                 `protobuf:"bytes,3,opt,name=end_user_ref,json=endUserRef,proto3" json:"end_user_ref,omitempty"`
+	ReturnUrl      string                 `protobuf:"bytes,4,opt,name=return_url,json=returnUrl,proto3" json:"return_url,omitempty"`
+	CreatedByAppId string                 `protobuf:"bytes,5,opt,name=created_by_app_id,json=createdByAppId,proto3" json:"created_by_app_id,omitempty"`
 	// resource_input carries only fields declared by x-fused-connect; Engine
 	// validates and binds them to callback state before provider redirect.
 	ResourceInput map[string]string `protobuf:"bytes,6,rep,name=resource_input,json=resourceInput,proto3" json:"resource_input,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
@@ -502,9 +502,9 @@ func (x *StartConnectSessionRequest) GetReturnUrl() string {
 	return ""
 }
 
-func (x *StartConnectSessionRequest) GetCreatedByArtifactId() string {
+func (x *StartConnectSessionRequest) GetCreatedByAppId() string {
 	if x != nil {
-		return x.CreatedByArtifactId
+		return x.CreatedByAppId
 	}
 	return ""
 }
@@ -677,7 +677,7 @@ type AuthConnection struct {
 	BucketId              string                 `protobuf:"bytes,2,opt,name=bucket_id,json=bucketId,proto3" json:"bucket_id,omitempty"`
 	ServiceId             string                 `protobuf:"bytes,3,opt,name=service_id,json=serviceId,proto3" json:"service_id,omitempty"`
 	EndUserRef            string                 `protobuf:"bytes,4,opt,name=end_user_ref,json=endUserRef,proto3" json:"end_user_ref,omitempty"`
-	CreatedByArtifactId   string                 `protobuf:"bytes,5,opt,name=created_by_artifact_id,json=createdByArtifactId,proto3" json:"created_by_artifact_id,omitempty"`
+	CreatedByAppId        string                 `protobuf:"bytes,5,opt,name=created_by_app_id,json=createdByAppId,proto3" json:"created_by_app_id,omitempty"`
 	AuthType              string                 `protobuf:"bytes,6,opt,name=auth_type,json=authType,proto3" json:"auth_type,omitempty"`
 	TokenType             string                 `protobuf:"bytes,7,opt,name=token_type,json=tokenType,proto3" json:"token_type,omitempty"`
 	Scopes                []string               `protobuf:"bytes,8,rep,name=scopes,proto3" json:"scopes,omitempty"`
@@ -752,9 +752,9 @@ func (x *AuthConnection) GetEndUserRef() string {
 	return ""
 }
 
-func (x *AuthConnection) GetCreatedByArtifactId() string {
+func (x *AuthConnection) GetCreatedByAppId() string {
 	if x != nil {
-		return x.CreatedByArtifactId
+		return x.CreatedByAppId
 	}
 	return ""
 }
@@ -1141,10 +1141,10 @@ type WebhookSubscribe struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// receiver_name is the durable NATS consumer/queue-group identity
 	// (accountID + "-" + receiver_name server-side) -- intentionally
-	// independent of artifact_id/the Connect session, so the same named
+	// independent of app_id/the Connect session, so the same named
 	// receiver can resume across reconnects and multiple processes can share
-	// one receiver_name for queue-group fan-out. Auth (artifact_id + token)
-	// is carried as x-api-key/x-artifact-id call metadata instead of fields
+	// one receiver_name for queue-group fan-out. Auth (app_id + token)
+	// is carried as x-api-key/x-app-id call metadata instead of fields
 	// here, matching every other RPC on this service.
 	ReceiverName  string   `protobuf:"bytes,1,opt,name=receiver_name,json=receiverName,proto3" json:"receiver_name,omitempty"`
 	Events        []string `protobuf:"bytes,2,rep,name=events,proto3" json:"events,omitempty"`
@@ -1482,19 +1482,16 @@ var File_engine_v1_engine_proto protoreflect.FileDescriptor
 
 const file_engine_v1_engine_proto_rawDesc = "" +
 	"\n" +
-	"\x16engine/v1/engine.proto\x12\tengine.v1\"G\n" +
-	"\x0eConnectRequest\x12\x1f\n" +
-	"\vartifact_id\x18\x01 \x01(\tR\n" +
-	"artifactId\x12\x14\n" +
+	"\x16engine/v1/engine.proto\x12\tengine.v1\"=\n" +
+	"\x0eConnectRequest\x12\x15\n" +
+	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12\x14\n" +
 	"\x05token\x18\x02 \x01(\tR\x05token\"\x11\n" +
-	"\x0fConnectResponse\"4\n" +
-	"\x11DisconnectRequest\x12\x1f\n" +
-	"\vartifact_id\x18\x01 \x01(\tR\n" +
-	"artifactId\"\x14\n" +
-	"\x12DisconnectResponse\"\xca\x03\n" +
-	"\x0eExecuteRequest\x12\x1f\n" +
-	"\vartifact_id\x18\x01 \x01(\tR\n" +
-	"artifactId\x12\x14\n" +
+	"\x0fConnectResponse\"*\n" +
+	"\x11DisconnectRequest\x12\x15\n" +
+	"\x06app_id\x18\x01 \x01(\tR\x05appId\"\x14\n" +
+	"\x12DisconnectResponse\"\xc0\x03\n" +
+	"\x0eExecuteRequest\x12\x15\n" +
+	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12\x14\n" +
 	"\x05token\x18\x02 \x01(\tR\x05token\x12#\n" +
 	"\rendpoint_name\x18\x03 \x01(\tR\fendpointName\x12\x16\n" +
 	"\x06params\x18\x04 \x01(\fR\x06params\x12L\n" +
@@ -1517,7 +1514,7 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\x06result\x18\x01 \x01(\fR\x06result\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12\x1f\n" +
 	"\vstatus_code\x18\x03 \x01(\x05R\n" +
-	"statusCode\"\x89\x03\n" +
+	"statusCode\"\xff\x02\n" +
 	"\x1aStartConnectSessionRequest\x12\x1b\n" +
 	"\tbucket_id\x18\x01 \x01(\tR\bbucketId\x12\x1d\n" +
 	"\n" +
@@ -1525,8 +1522,8 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\fend_user_ref\x18\x03 \x01(\tR\n" +
 	"endUserRef\x12\x1d\n" +
 	"\n" +
-	"return_url\x18\x04 \x01(\tR\treturnUrl\x123\n" +
-	"\x16created_by_artifact_id\x18\x05 \x01(\tR\x13createdByArtifactId\x12_\n" +
+	"return_url\x18\x04 \x01(\tR\treturnUrl\x12)\n" +
+	"\x11created_by_app_id\x18\x05 \x01(\tR\x0ecreatedByAppId\x12_\n" +
 	"\x0eresource_input\x18\x06 \x03(\v28.engine.v1.StartConnectSessionRequest.ResourceInputEntryR\rresourceInput\x12\x16\n" +
 	"\x06scopes\x18\a \x03(\tR\x06scopes\x1a@\n" +
 	"\x12ResourceInputEntry\x12\x10\n" +
@@ -1542,15 +1539,15 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\n" +
 	"connection\x18\x01 \x01(\v2\x19.engine.v1.AuthConnectionR\n" +
 	"connection\x12\x14\n" +
-	"\x05found\x18\x02 \x01(\bR\x05found\"\xb9\x04\n" +
+	"\x05found\x18\x02 \x01(\bR\x05found\"\xaf\x04\n" +
 	"\x0eAuthConnection\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\tbucket_id\x18\x02 \x01(\tR\bbucketId\x12\x1d\n" +
 	"\n" +
 	"service_id\x18\x03 \x01(\tR\tserviceId\x12 \n" +
 	"\fend_user_ref\x18\x04 \x01(\tR\n" +
-	"endUserRef\x123\n" +
-	"\x16created_by_artifact_id\x18\x05 \x01(\tR\x13createdByArtifactId\x12\x1b\n" +
+	"endUserRef\x12)\n" +
+	"\x11created_by_app_id\x18\x05 \x01(\tR\x0ecreatedByAppId\x12\x1b\n" +
 	"\tauth_type\x18\x06 \x01(\tR\bauthType\x12\x1d\n" +
 	"\n" +
 	"token_type\x18\a \x01(\tR\ttokenType\x12\x16\n" +

@@ -43,7 +43,7 @@ func (m *changelogPollerMockRegistryClient) FetchServiceChangelogSince(ctx conte
 }
 
 // changelogPollerMockStore embeds store.Store (nil) for the same reason --
-// only the four methods the poller actually calls are overridden.
+// only the methods the poller actually calls are overridden.
 type changelogPollerMockStore struct {
 	store.Store
 	services      []store.WorkspaceService
@@ -88,10 +88,15 @@ func (m *changelogPollerMockStore) InsertServiceChangelogCacheEntries(ctx contex
 	return nil
 }
 
+func (m *changelogPollerMockStore) ListAppRuntimes(_ context.Context, _ []uuid.UUID) (map[uuid.UUID]*store.AppRuntime, error) {
+	return map[uuid.UUID]*store.AppRuntime{}, nil
+}
+
 // changelogPollerMockConfigStore embeds store.ConfigRepository (nil) --
-// these Phase 2-focused tests don't exercise Phase 3's matching in detail
-// (no SDK config states configured), so ListConfigStates returning empty is
-// enough for matchAndNotifyServiceChangelog to safely no-op without ever
+// these tests only exercise the poller and cache insertion; the
+// changelog-driven workspace notification matching path requires SDK config
+// states which are not configured here, so ListConfigStates returning empty
+// is enough for matchAndNotifyServiceChangelog to safely no-op without ever
 // touching the nil-embedded remainder of the interface.
 type changelogPollerMockConfigStore struct {
 	store.ConfigRepository

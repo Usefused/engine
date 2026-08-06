@@ -12,17 +12,17 @@ import (
 )
 
 // buildSessionFixture derives one MCP session's operation catalog from the
-// connecting SDK's own ArtifactScope.Selections. Every shared-runtime session gets
+// connecting SDK's own AppRuntime.Selections. Every shared-runtime session gets
 // its own scoped
 // fixture: only the endpoints its owner actually selected are discoverable
 // via search_docs or callable via call(), matching the per-SDK enforcement
 // engineExecuteCore/findEndpointInScope already apply at dispatch time --
 // this makes the *catalog* match the *enforcement*, not just the enforcement
 // alone.
-func buildSessionFixture(ctx context.Context, cache ObjectCache, artifactID string, selections []models.SDKSelection) (*Fixture, error) {
+func buildSessionFixture(ctx context.Context, cache ObjectCache, appID string, selections []models.SDKSelection) (*Fixture, error) {
 	var ops []FixtureOperation
 	for _, sel := range selections {
-		endpoints, err := cache.ListEndpointsForSelection(ctx, artifactID, sel)
+		endpoints, err := cache.ListEndpointsForSelection(ctx, appID, sel)
 		if err != nil {
 			return nil, fmt.Errorf("list endpoints for service %s: %w", sel.ServiceID, err)
 		}

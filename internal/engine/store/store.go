@@ -13,17 +13,26 @@ import (
 )
 
 var (
-	ErrArtifactScopeNotFound        = errors.New("sdk scope not found")
+	ErrAppRuntimeNotFound           = errors.New("sdk scope not found")
 	ErrSDKBucketImmutable           = errors.New("sdk bucket assignment is immutable")
 	ErrBucketNotFound               = errors.New("bucket not found")
-	ErrBucketBound                  = errors.New("bucket is bound to an artifact")
+	ErrBucketBound                  = errors.New("bucket is bound to an app")
 	ErrDefaultBucketProtected       = errors.New("default bucket cannot be deleted")
 	ErrAuthConnectionNotFound       = errors.New("auth connection not found")
 	ErrConnectSessionUnavailable    = errors.New("connect session not found or already used")
 	ErrInvalidEncryptedAuthMaterial = errors.New("invalid encrypted auth material")
 
+	// App-family errors
+	ErrAppFamilyNotFound   = errors.New("app family not found")
+	ErrAppNotFound         = errors.New("app not found")
+	ErrAppVersionImmutable = errors.New("app version is immutable: same version with changed source")
+	ErrAppVersionExists    = errors.New("app version already exists in family")
+	ErrAppDeactivated      = errors.New("app is deactivated")
+	ErrAppTokenNotFound    = errors.New("app token not found")
+	ErrAppTombstoneExists  = errors.New("app version was deactivated and cannot be reused")
+
 	// ErrIdempotentExecutionNotFound means there's no unexpired cached
-	// response for the given (artifact_id, idempotency key) -- the caller should
+	// response for the given (app_id, idempotency key) -- the caller should
 	// dispatch to the vendor normally.
 	ErrIdempotentExecutionNotFound = errors.New("idempotent execution not found")
 	// ErrIdempotencyKeyConflict means the idempotency key was reused with a
@@ -32,9 +41,9 @@ var (
 	ErrIdempotencyKeyConflict = errors.New("idempotency key reused with a different request body")
 )
 
-type ArtifactScope struct {
-	AccountID  uuid.UUID
-	ArtifactID uuid.UUID
+type AppRuntime struct {
+	AccountID uuid.UUID
+	AppID     uuid.UUID
 	// Exactly one owner is set. Subject ownership is the safe default derived
 	// from the authenticated actor; team ownership is an explicit sharing
 	// decision resolved from a stable team slug by the Engine.
@@ -43,19 +52,18 @@ type ArtifactScope struct {
 	BucketID           uuid.UUID
 	Selections         []byte
 	ScopeSchemaVersion int
-	// DeactivatedAt is nil for an active SDK/MCP. Non-nil blocks new MCP
-	// session connections (LocalObjectCache.loadArtifactScope checks this) --
-	// live sessions already in flight are killed separately by the caller
-	// that sets this, not by the presence of the field itself.
-	DeactivatedAt *time.Time
+	// Status is projected from the exact app version. Hard-deactivated versions
+	// have no runtime row, while deprecated versions remain executable until
+	// their configured deactivation is applied.
+	Status string
 	// Kind labels how this scope is meant to be connected to: "sdk" (default)
 	// or "mcp". A scope's shape (selections+bucket) is identical either way --
-	// this is a listing/UI distinction (see ListMCPScopesByAccount), not an
+	// this is a listing/UI distinction (see ListMCPAppsByAccount), not an
 	// enforcement mechanism.
 	Kind string
 	// Name is an optional user-supplied label (CLI --name flag, or a
 	// workspace config's name), surfaced on the MCP servers list page. Never
-	// set by a reactivate-only activate call (persistArtifactScope isn't invoked
+	// set by a reactivate-only activate call (persistAppRuntime isn't invoked
 	// on that path), so it can be empty even for a scope in active use.
 	Name string
 	// Version and ConfigKey identify the immutable declaration that created a
@@ -63,17 +71,116 @@ type ArtifactScope struct {
 	Version   string
 	ConfigKey string
 	// CreatedAt is read-only, populated from the DB default -- never written
-	// by SaveArtifactScope.
+	// by SaveAppRuntime.
 	CreatedAt time.Time
 }
 
-type SDKToken struct {
-	ID         uuid.UUID
-	ArtifactID uuid.UUID
-	TokenHash  string
-	Name       string
-	LastUsedAt *time.Time
-	CreatedAt  time.Time
+// --- App-family types ---
+
+// AppFamily is the stable authorization and configuration boundary for an SDK
+// or MCP. One family represents the logical application across all its versions.
+type AppFamily struct {
+	AppFamilyID    uuid.UUID
+	AccountID      uuid.UUID
+	Kind           string // "sdk" or "mcp"
+	CanonicalName  string
+	DisplayName    string
+	TargetLanguage string // required for SDK, empty for MCP
+	OwnerSubjectID uuid.UUID
+	OwnerTeamID    uuid.UUID
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+// App is one immutable version within an AppFamily. Migration preserves the
+// existing version identity as AppID.
+type App struct {
+	AppID                 uuid.UUID
+	AppFamilyID           uuid.UUID
+	AccountID             uuid.UUID
+	Version               string
+	ConfigKey             string
+	SourceHash            string
+	CapabilityHash        string
+	CapabilityKeys        []string
+	ScopeSchemaVersion    int
+	Selections            []byte // jsonb
+	GeneratorVersion      string // SDK only, empty for MCP
+	Status                string // "building", "active", "deprecated"
+	DeprecationMessage    string
+	PlannedDeactivationAt *time.Time
+	CreatedBy             uuid.UUID
+	CreatedAt             time.Time
+	ActivatedAt           *time.Time
+}
+
+// SDKPackageLeaseStore lists package identities in bounded keyset pages.
+// The SQL implementation owns kind/status filtering so workers never load MCP,
+// building, or deactivated app data merely to discard it.
+type SDKPackageLeaseStore interface {
+	ListSDKPackageLeaseRenewals(ctx context.Context, after uuid.UUID, limit int) ([]models.SDKPackageLeaseRenewal, error)
+}
+
+// SDKPackageBuildStore reconstructs the immutable, credential-free generation
+// request for one runnable SDK app. Its SQL implementation joins the app to
+// the exact applied plan, so cache recovery never guesses from a name/version.
+type SDKPackageBuildStore interface {
+	GetSDKPackageBuildRequest(ctx context.Context, accountID, appID uuid.UUID) (*models.SDKGenerationRequest, error)
+}
+
+// EngineInstallationStore is intentionally narrower than Store because the
+// stable installation identity is needed only during process bootstrap.
+type EngineInstallationStore interface {
+	LoadEngineInstallationID(ctx context.Context) (uuid.UUID, error)
+}
+
+// AppToken is a family-scoped token. One token authorizes all active and
+// deprecated versions in the family. Plaintext is one-time output.
+type AppToken struct {
+	ID          uuid.UUID
+	AppFamilyID uuid.UUID
+	TokenHash   string
+	Name        string
+	LastUsedAt  *time.Time
+	CreatedAt   time.Time
+}
+
+// AppFamilyBucket maps a family to its credential bucket. All versions in
+// the family resolve through the same bucket.
+type AppFamilyBucket struct {
+	AppFamilyID uuid.UUID
+	BucketID    uuid.UUID
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+// AuthProjection is the one-query result from family-token authorization.
+// It contains everything the SDK/MCP boundary needs to execute a call
+// without additional database lookups.
+type AuthProjection struct {
+	AccountID      uuid.UUID
+	AppFamilyID    uuid.UUID
+	AppID          uuid.UUID
+	Version        string
+	Kind           string
+	AppStatus      string
+	BucketID       uuid.UUID
+	Selections     []byte
+	CapabilityHash string
+}
+
+// CapabilityDiff describes what changed between two versions for plan output
+// and audit purposes.
+type CapabilityDiff struct {
+	ServicesAdded         []string `json:"services_added,omitempty"`
+	ServicesRemoved       []string `json:"services_removed,omitempty"`
+	OperationsAdded       []string `json:"operations_added,omitempty"`
+	OperationsRemoved     []string `json:"operations_removed,omitempty"`
+	WebhooksAdded         []string `json:"webhooks_added,omitempty"`
+	WebhooksRemoved       []string `json:"webhooks_removed,omitempty"`
+	AuthFamiliesChanged   bool     `json:"auth_families_changed,omitempty"`
+	ConnectCeilingChanged bool     `json:"connect_ceiling_changed,omitempty"`
+	Expands               bool     `json:"expands"`
 }
 
 type Bucket struct {
@@ -264,6 +371,7 @@ type WorkspaceExecutionPolicyOverride struct {
 	ServiceVersionID      *uuid.UUID
 	RateLimit             *fusedobject.RateLimitConfig
 	RetryConfig           *fusedobject.RetryConfig
+	TimeoutMs             *int
 	Pagination            *fusedobject.PaginationConfig
 	EventExtractionPath   *string
 	IncomingWebhookConfig *fusedobject.IncomingWebhookConfig
@@ -369,7 +477,7 @@ type AuthConnection struct {
 	BucketID              uuid.UUID
 	ServiceID             uuid.UUID
 	EndUserRef            string
-	CreatedByArtifactID   uuid.UUID
+	CreatedByAppID        uuid.UUID
 	AuthType              string
 	EncryptedDEK          string
 	EncryptedAccessToken  string
@@ -403,7 +511,7 @@ type ConnectSession struct {
 	NonceHash             string
 	EncryptedDEK          string
 	EncryptedPKCEVerifier string
-	CreatedByArtifactID   uuid.UUID
+	CreatedByAppID        uuid.UUID
 	ReturnURL             string
 	ResourceInputJSON     []byte
 	RequestedScopes       []string
@@ -456,40 +564,69 @@ type Store interface {
 	GetLatestWorkspaceServiceVersionID(ctx context.Context, accountID uuid.UUID, serviceID uuid.UUID) (uuid.UUID, error)
 	GetLatestWorkspaceServiceVersionByWorkspace(ctx context.Context, serviceID uuid.UUID) (string, error)
 	GetLatestWorkspaceServiceVersionIDByWorkspace(ctx context.Context, serviceID uuid.UUID) (uuid.UUID, error)
-	SaveArtifactScope(ctx context.Context, scope ArtifactScope) error
-	GetArtifactScope(ctx context.Context, artifactID uuid.UUID) (*ArtifactScope, error)
-	DeleteArtifactScope(ctx context.Context, accountID uuid.UUID, artifactID uuid.UUID) error
-	// DeactivateSDK/ReactivateSDK toggle ArtifactScope.DeactivatedAt. Both are
-	// idempotent -- deactivating an already-deactivated SDK (or reactivating
-	// an already-active one) succeeds without error, since the caller is
-	// declaring a desired end state, not applying a transition.
-	DeactivateSDK(ctx context.Context, accountID, artifactID uuid.UUID) error
-	ReactivateSDK(ctx context.Context, accountID, artifactID uuid.UUID) error
-	GetSDKAccountID(ctx context.Context, artifactID uuid.UUID) (uuid.UUID, error)
-	// ListMCPScopesByAccount is the read side of the MCP servers list page:
+	GetAppRuntime(ctx context.Context, appID uuid.UUID) (*AppRuntime, error)
+	ListAppRuntimes(ctx context.Context, appIDs []uuid.UUID) (map[uuid.UUID]*AppRuntime, error)
+	GetSDKAccountID(ctx context.Context, appID uuid.UUID) (uuid.UUID, error)
+	// ListMCPAppsByAccount is the read side of the MCP servers list page:
 	// paginated kind='mcp' scopes for accountID, newest first, plus the total
 	// count. Mirrors the Registry's removed sdks(target_type: "mcp") GraphQL
-	// query, but scoped to Engine-native scopes (SaveArtifactScope's kind column)
+	// query, but scoped to Engine-native scopes (SaveAppRuntime's kind column)
 	// instead of Registry-generated SDK rows.
-	ListMCPScopesByAccount(ctx context.Context, accountID uuid.UUID, limit, offset int) ([]ArtifactScope, int, error)
-	ListAuthorizedMCPScopesByAccount(ctx context.Context, accountID uuid.UUID, scope accesscontrol.AuthorizedScope, limit, offset int) ([]ArtifactScope, int, error)
+	ListMCPAppsByAccount(ctx context.Context, accountID uuid.UUID, limit, offset int) ([]AppRuntime, int, error)
+	ListAuthorizedMCPAppsByAccount(ctx context.Context, accountID uuid.UUID, scope accesscontrol.AuthorizedScope, limit, offset int) ([]AppRuntime, int, error)
 
-	// GetMCPScopeByName looks up a specific MCP server by name, and optionally
+	// GetMCPAppByName looks up a specific MCP server by name, and optionally
 	// by version. If version is empty, it returns the most recently created one.
-	GetMCPScopeByName(ctx context.Context, accountID uuid.UUID, name, version string) (*ArtifactScope, error)
+	GetMCPAppByName(ctx context.Context, accountID uuid.UUID, name, version string) (*AppRuntime, error)
 
 	// GetMCPAnalyticsDashboard aggregates canonical execution events and MCP sessions
 	// for one SDK into the shape the MCP analytics page renders (overall
 	// totals, per-tool and per-service breakdowns, active session count, and
 	// recent sessions).
-	GetMCPAnalyticsDashboard(ctx context.Context, artifactID uuid.UUID) (*models.MCPAnalyticsDashboard, error)
+	GetMCPAnalyticsDashboard(ctx context.Context, appID uuid.UUID) (*models.MCPAnalyticsDashboard, error)
 
-	// SDK Token methods
-	CreateSDKToken(ctx context.Context, artifactID uuid.UUID, tokenHash, name string) (*SDKToken, error)
-	ListSDKTokens(ctx context.Context, artifactID uuid.UUID) ([]SDKToken, error)
-	RevokeSDKToken(ctx context.Context, artifactID uuid.UUID, name string) error
-	GetArtifactByToken(ctx context.Context, tokenHash string) (*ArtifactScope, error)
-	ValidateToken(ctx context.Context, artifactID uuid.UUID, tokenHash string) (uuid.UUID, error)
+	// --- App-family methods (Phase 2) ---
+
+	// AppFamily CRUD
+	CreateOrGetAppFamily(ctx context.Context, family AppFamily) (*AppFamily, bool, error)
+	GetAppFamily(ctx context.Context, appFamilyID uuid.UUID) (*AppFamily, error)
+	GetAppFamilyByIdentity(ctx context.Context, accountID uuid.UUID, kind, canonicalName string) (*AppFamily, error)
+	ListAppFamilies(ctx context.Context, accountID uuid.UUID, kind string, limit, offset int) ([]AppFamily, int, error)
+
+	// App (version) CRUD
+	PublishAppVersion(ctx context.Context, app App) (*App, bool, error)
+	AssessAppCapabilityExpansion(ctx context.Context, appFamilyID uuid.UUID, capabilityKeys []string) (bool, int, error)
+	GetApp(ctx context.Context, appID uuid.UUID) (*App, error)
+	GetAppByFamilyAndVersion(ctx context.Context, appFamilyID uuid.UUID, version string) (*App, error)
+	ListApps(ctx context.Context, appFamilyID uuid.UUID) ([]App, error)
+
+	// App lifecycle
+	DeprecateApp(ctx context.Context, appID uuid.UUID, message string, plannedDeactivationAt *time.Time) error
+	UndeprecateApp(ctx context.Context, appID uuid.UUID) error
+	DeactivateAppVersion(ctx context.Context, appID, deactivatedBy uuid.UUID) error
+
+	// Family-token authorization — one bounded SQL query that hashes the token,
+	// joins family→app, and returns the full AuthProjection.
+	AuthorizeApp(ctx context.Context, appID uuid.UUID, tokenHash string) (*AuthProjection, error)
+
+	// Family tokens
+	CreateAppToken(ctx context.Context, appFamilyID uuid.UUID, tokenHash, name string) (*AppToken, error)
+	ListAppTokens(ctx context.Context, appFamilyID uuid.UUID) ([]AppToken, error)
+	RevokeAppToken(ctx context.Context, appFamilyID uuid.UUID, name string) error
+	GetAppFamilyByToken(ctx context.Context, tokenHash string) (*AppFamily, error)
+
+	// Family buckets
+	SetAppFamilyBucket(ctx context.Context, appFamilyID, bucketID uuid.UUID) error
+	GetAppFamilyBucket(ctx context.Context, appFamilyID uuid.UUID) (*AppFamilyBucket, error)
+
+	// App tombstones
+	AppTombstoneExists(ctx context.Context, appFamilyID uuid.UUID, version string) (bool, error)
+
+	// License-tier count queries (single-row, no pagination).
+	// Implementations must keep the query scoped to the calling workspace.
+	CountBuckets(ctx context.Context) (int, error)
+	CountAppFamilies(ctx context.Context, accountID uuid.UUID, kind string) (int, error)
+	CountActiveServices(ctx context.Context) (int, error)
 
 	// Bucket methods
 	CreateBucket(ctx context.Context, name string, isDefault bool) (*Bucket, error)
@@ -503,10 +640,10 @@ type Store interface {
 	DeleteBucket(ctx context.Context, name string, authorizedBucketID uuid.UUID) error
 
 	// SDK Bucket Link methods
-	ListBucketsForSDK(ctx context.Context, artifactID uuid.UUID) ([]Bucket, error)
-	ListAuthorizedBucketsForSDK(ctx context.Context, artifactID uuid.UUID, scope accesscontrol.AuthorizedScope) ([]Bucket, error)
-	ListArtifactScopesForBucket(ctx context.Context, bucketID uuid.UUID, limit, offset int) ([]ArtifactScope, int, error)
-	ListAuthorizedArtifactScopesForBucket(ctx context.Context, bucketID uuid.UUID, scope accesscontrol.AuthorizedScope, limit, offset int) ([]ArtifactScope, int, error)
+	ListBucketsForAppFamily(ctx context.Context, appFamilyID uuid.UUID) ([]Bucket, error)
+	ListAuthorizedBucketsForAppFamily(ctx context.Context, appFamilyID uuid.UUID, scope accesscontrol.AuthorizedScope) ([]Bucket, error)
+	ListAppRuntimesForBucket(ctx context.Context, bucketID uuid.UUID, limit, offset int) ([]AppRuntime, int, error)
+	ListAuthorizedAppRuntimesForBucket(ctx context.Context, bucketID uuid.UUID, scope accesscontrol.AuthorizedScope, limit, offset int) ([]AppRuntime, int, error)
 
 	// Bucket Value methods
 	UpsertBucketValue(ctx context.Context, val BucketValue) error
@@ -529,7 +666,8 @@ type Store interface {
 	ListSecretsForBucket(ctx context.Context, bucketID, serviceID uuid.UUID) ([]WorkspaceSecret, error)
 	ListSecretsForBuckets(ctx context.Context, bucketIDs []uuid.UUID, serviceID uuid.UUID) ([]WorkspaceSecret, error)
 	// GetSecret fetches a single secret by its natural key (bucket + service + key_name).
-	// Intended for point lookups where artifact_id is irrelevant (e.g. webhook signing keys).
+	// Intended for point lookups that do not require an app identity, such as
+	// webhook signing keys.
 	GetSecret(ctx context.Context, bucketID, serviceID uuid.UUID, keyName string) (*WorkspaceSecret, error)
 	// GetSecrets fetches a bounded exact key set for hot-path auth resolution.
 	GetSecrets(ctx context.Context, bucketID, serviceID uuid.UUID, keyNames []string) ([]WorkspaceSecret, error)
@@ -599,8 +737,8 @@ type Store interface {
 	// WorkspaceWebhookOwnersByLabel resolves, in one query, which config_key
 	// (if any) already owns the (service_id, label) pair for every service in
 	// serviceIDs -- used by kind: webhook's plan step to detect a conflict
-	// (another artifact already claiming this artifact's name for one of its
-	// services) without
+	// (another desired configuration already claiming this label for one of
+	// its services) without
 	// a query per service. A service_id absent from the returned map has no
 	// existing registration for this label at all.
 	WorkspaceWebhookOwnersByLabel(ctx context.Context, serviceIDs []uuid.UUID, label string) (map[uuid.UUID]string, error)
@@ -623,11 +761,11 @@ type Store interface {
 	ListWebhookEventsByService(ctx context.Context, accountID, serviceID uuid.UUID, eventName string, limit, offset int, startDate, endDate *time.Time) ([]models.WebhookEvent, int64, error)
 	GetWebhookAnalytics(ctx context.Context, accountID, serviceID uuid.UUID, eventName string, startDate, endDate *time.Time) (models.WebhookAnalytics, error)
 
-	// GetIdempotentExecution looks up a cached response for (artifactID,
+	// GetIdempotentExecution looks up a cached response for (appID,
 	// idempotencyKeyHash). Returns ErrIdempotentExecutionNotFound if there's
 	// no unexpired row, or ErrIdempotencyKeyConflict if a row exists but its
 	// stored request body hash doesn't match requestBodyHash (both non-empty).
-	GetIdempotentExecution(ctx context.Context, artifactID uuid.UUID, idempotencyKeyHash, requestBodyHash string) (*models.IdempotentExecution, error)
+	GetIdempotentExecution(ctx context.Context, appID uuid.UUID, idempotencyKeyHash, requestBodyHash string) (*models.IdempotentExecution, error)
 	// SaveIdempotentExecution caches a successful execution's response for
 	// later replay. Concurrent duplicate writes for the same key are
 	// harmless: the first one to land wins, later ones are no-ops.

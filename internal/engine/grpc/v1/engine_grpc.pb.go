@@ -32,7 +32,7 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type EngineServiceClient interface {
-	// Connect performs the SDK handshake: it authenticates the artifact_id and loads
+	// Connect performs the SDK handshake: it authenticates the exact app_id and loads
 	// the SDK's scope manifest + every referenced Fused object into the Engine's
 	// connection-scoped, refcounted cache (AD-7). It must be called once after the
 	// SDK opens its long-lived channel and before any Execute call.
@@ -54,8 +54,7 @@ type EngineServiceClient interface {
 	// an opaque connection owned by one of the authenticated SDK's buckets.
 	ListConnectionResources(ctx context.Context, in *ListConnectionResourcesRequest, opts ...grpc.CallOption) (*ListConnectionResourcesResponse, error)
 	// SubscribeWebhooks opens a durable, receiver-scoped inbound event stream
-	// over the same channel used for Execute -- replacing the separate
-	// wss://.../sdks/ws WebSocket transport. Auth (x-api-key + x-artifact-id)
+	// over the same channel used for Execute. Auth (x-api-key + x-app-id)
 	// travels as call metadata, same as every other RPC on this service, not
 	// as fields on the first message. The client sends exactly one
 	// WebhookSubscribe message first (receiver name + subscribed event types),
@@ -163,7 +162,7 @@ type EngineService_SubscribeWebhooksClient = grpc.BidiStreamingClient[WebhookCli
 // All implementations must embed UnimplementedEngineServiceServer
 // for forward compatibility.
 type EngineServiceServer interface {
-	// Connect performs the SDK handshake: it authenticates the artifact_id and loads
+	// Connect performs the SDK handshake: it authenticates the exact app_id and loads
 	// the SDK's scope manifest + every referenced Fused object into the Engine's
 	// connection-scoped, refcounted cache (AD-7). It must be called once after the
 	// SDK opens its long-lived channel and before any Execute call.
@@ -185,8 +184,7 @@ type EngineServiceServer interface {
 	// an opaque connection owned by one of the authenticated SDK's buckets.
 	ListConnectionResources(context.Context, *ListConnectionResourcesRequest) (*ListConnectionResourcesResponse, error)
 	// SubscribeWebhooks opens a durable, receiver-scoped inbound event stream
-	// over the same channel used for Execute -- replacing the separate
-	// wss://.../sdks/ws WebSocket transport. Auth (x-api-key + x-artifact-id)
+	// over the same channel used for Execute. Auth (x-api-key + x-app-id)
 	// travels as call metadata, same as every other RPC on this service, not
 	// as fields on the first message. The client sends exactly one
 	// WebhookSubscribe message first (receiver name + subscribed event types),

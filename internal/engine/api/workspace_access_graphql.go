@@ -47,8 +47,8 @@ var workspaceShareMutationPayloadGraphQLType = graphql.NewObject(graphql.ObjectC
 var workspaceShareResourceGraphQLEnum = graphql.NewEnum(graphql.EnumConfig{
 	Name: "WorkspaceShareResource",
 	Values: graphql.EnumValueConfigMap{
-		"BUCKET":   &graphql.EnumValueConfig{Value: accesscontrol.ResourceBucket},
-		"ARTIFACT": &graphql.EnumValueConfig{Value: accesscontrol.ResourceArtifact},
+		"BUCKET": &graphql.EnumValueConfig{Value: accesscontrol.ResourceBucket},
+		"APP":    &graphql.EnumValueConfig{Value: accesscontrol.ResourceApp},
 	},
 })
 
@@ -86,12 +86,12 @@ func revokeWorkspaceBucketAccessGraphQLField(s store.Store) *graphql.Field {
 	return workspaceShareMutationGraphQLField(s, "workspace.bucket_access.revoke", accesscontrol.ResourceBucket, "bucket_id", false)
 }
 
-func grantWorkspaceArtifactAccessGraphQLField(s store.Store) *graphql.Field {
-	return workspaceShareMutationGraphQLField(s, "workspace.artifact_access.grant", accesscontrol.ResourceArtifact, "artifact_id", true)
+func grantWorkspaceAppAccessGraphQLField(s store.Store) *graphql.Field {
+	return workspaceShareMutationGraphQLField(s, "workspace.app_access.grant", accesscontrol.ResourceApp, "app_family_id", true)
 }
 
-func revokeWorkspaceArtifactAccessGraphQLField(s store.Store) *graphql.Field {
-	return workspaceShareMutationGraphQLField(s, "workspace.artifact_access.revoke", accesscontrol.ResourceArtifact, "artifact_id", false)
+func revokeWorkspaceAppAccessGraphQLField(s store.Store) *graphql.Field {
+	return workspaceShareMutationGraphQLField(s, "workspace.app_access.revoke", accesscontrol.ResourceApp, "app_family_id", false)
 }
 
 func workspaceShareMutationGraphQLField(s store.Store, action string, resourceType accesscontrol.ResourceType, argument string, grant bool) *graphql.Field {

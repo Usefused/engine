@@ -11,7 +11,7 @@ type BucketRow = {
   isAttached: boolean;
 };
 
-export function SDKCredentialBucketsSection({ artifactId }: { artifactId: string }) {
+export function SDKCredentialBucketsSection({ appFamilyId }: { appFamilyId: string }) {
   const toast = useToast();
   const [buckets, setBuckets] = useState<Bucket[]>([]);
   const [sdkBuckets, setSdkBuckets] = useState<Bucket[]>([]);
@@ -20,7 +20,7 @@ export function SDKCredentialBucketsSection({ artifactId }: { artifactId: string
 
   const loadBuckets = () => {
     setLoading(true);
-    readBucketsForSDK(artifactId)
+    readBucketsForSDK(appFamilyId)
       .then((state) => {
         setBuckets(state.buckets);
         setSdkBuckets(state.sdkBuckets);
@@ -31,7 +31,7 @@ export function SDKCredentialBucketsSection({ artifactId }: { artifactId: string
 
   useEffect(() => {
     loadBuckets();
-  }, [artifactId]);
+  }, [appFamilyId]);
 
   const visibleBuckets = useMemo(() => visibleCredentialBuckets(buckets, sdkBuckets), [buckets, sdkBuckets]);
 

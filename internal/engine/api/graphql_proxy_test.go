@@ -165,7 +165,7 @@ func TestGraphQLProxy_OperationNameCannotHideMutationInReadCache(t *testing.T) {
 
 func TestGraphQLProxyRejectsAmbiguousBatchAndSubscriptionDocuments(t *testing.T) {
 	tests := []string{
-		`{"query":"query One { services { id } } query Two { sdks { total } }"}`,
+		`{"query":"query One { services { id } } query Two { service { id } }"}`,
 		`[{"query":"{ services { id } }"},{"query":"mutation { activateService(id: \"x\") { id } }"}]`,
 		`{"query":"subscription Events { serviceChanged { id } }"}`,
 	}
@@ -189,7 +189,7 @@ func TestGraphQLProxy_QueryAddsServerTiming(t *testing.T) {
 	fwd := &mockForwarder{}
 	handler := GraphQLProxyHandler(fwd, s)
 
-	req := httptest.NewRequest(http.MethodPost, "/graphql", bytes.NewBufferString(`{"query":"{ sdks { total } }"}`))
+	req := httptest.NewRequest(http.MethodPost, "/graphql", bytes.NewBufferString(`{"query":"{ services { total } }"}`))
 	req.Header.Set("X-API-Key", "fsk_valid")
 	req = req.WithContext(accesscontrol.ContextWithActor(req.Context(), graphQLProxyTestActor(t, s.accountID, uuid.New(), 1)))
 	rec := httptest.NewRecorder()
@@ -208,7 +208,7 @@ func TestGraphQLProxy_CacheHitAddsServerTiming(t *testing.T) {
 	s := &mockKeyStore{accountID: uuid.New()}
 	fwd := &mockForwarder{}
 	handler := GraphQLProxyHandler(fwd, s)
-	body := `{"query":"{ sdks { total } }"}`
+	body := `{"query":"{ services { total } }"}`
 	actor := graphQLProxyTestActor(t, s.accountID, uuid.New(), 1)
 
 	first := httptest.NewRecorder()
@@ -236,7 +236,7 @@ func TestGraphQLProxyCachePartitionsSubjectsAndRevisions(t *testing.T) {
 	s := &mockKeyStore{accountID: uuid.New()}
 	fwd := &mockForwarder{}
 	handler := GraphQLProxyHandler(fwd, s)
-	body := `{"query":"{ sdks { total } }"}`
+	body := `{"query":"{ services { total } }"}`
 	firstSubject := uuid.New()
 	actors := []accesscontrol.Actor{
 		graphQLProxyTestActor(t, s.accountID, firstSubject, 1),

@@ -146,6 +146,9 @@ func validate(event models.EngineExecutionEvent) error {
 	if event.Transport == "" {
 		return errors.New("execution event transport is required")
 	}
+	if err := validateAppIdentity(event); err != nil {
+		return err
+	}
 	if event.Status != models.EngineExecutionStatusSuccess && event.Status != models.EngineExecutionStatusFailed {
 		return fmt.Errorf("invalid execution event status %q", event.Status)
 	}
@@ -153,6 +156,23 @@ func validate(event models.EngineExecutionEvent) error {
 		return errors.New("execution event timestamps are required")
 	}
 	return nil
+}
+
+func validateAppIdentity(event models.EngineExecutionEvent) error {
+	if !appTransport(event.Transport) {
+		return nil
+	}
+	if event.AppFamilyID == uuid.Nil || event.AppID == uuid.Nil || event.AppVersion == "" {
+		return errors.New("SDK and MCP execution events require app family, app, and version identity")
+	}
+	if len(event.AppVersion) > 128 {
+		return errors.New("execution event app version is too long")
+	}
+	return nil
+}
+
+func appTransport(transport string) bool {
+	return transport == models.EngineExecutionTransportSDK || transport == models.EngineExecutionTransportMCP
 }
 
 func recordPublish(ctx context.Context, event models.EngineExecutionEvent, publishErr error) {
@@ -165,6 +185,13 @@ func recordPublish(ctx context.Context, event models.EngineExecutionEvent, publi
 	}
 	if event.ServiceID != uuid.Nil {
 		attrs = append(attrs, attribute.String("service.id", event.ServiceID.String()))
+	}
+	if event.AppFamilyID != uuid.Nil {
+		attrs = append(attrs,
+			attribute.String("app.family_id", event.AppFamilyID.String()),
+			attribute.String("app.id", event.AppID.String()),
+			attribute.String("app.version", event.AppVersion),
+		)
 	}
 	if publishErr != nil {
 		span.RecordError(publishErr)

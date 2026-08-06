@@ -8,9 +8,9 @@ import (
 )
 
 // TestKillMCPSessionsForSDK_CancelsOnlyMatchingSessions is the direct-call
-// path exercised by api.DeactivateSDKHandler/DeleteSDKHandler: they call
+// path exercised by app-version hard deactivation: it calls
 // this function in-process (rather than round-tripping through NATS) to
-// force-kill every live MCP session for a deactivated/deleted artifactID, without
+// force-kill every live MCP session for a deactivated/deleted appID, without
 // touching sessions belonging to other SDKs.
 func TestKillMCPSessionsForSDK_CancelsOnlyMatchingSessions(t *testing.T) {
 	var mu sync.Mutex
@@ -19,8 +19,8 @@ func TestKillMCPSessionsForSDK_CancelsOnlyMatchingSessions(t *testing.T) {
 
 	mcpSessions.Lock()
 	mcpSessions.m["sess-target"] = &mcpSession{
-		artifactID: "sdk-target",
-		sessionID:  "sess-target",
+		appID:     "sdk-target",
+		sessionID: "sess-target",
 		cancel: func() {
 			mu.Lock()
 			targetCancelled = true
@@ -28,8 +28,8 @@ func TestKillMCPSessionsForSDK_CancelsOnlyMatchingSessions(t *testing.T) {
 		},
 	}
 	mcpSessions.m["sess-other"] = &mcpSession{
-		artifactID: "sdk-other",
-		sessionID:  "sess-other",
+		appID:     "sdk-other",
+		sessionID: "sess-other",
 		cancel: func() {
 			mu.Lock()
 			otherCancelled = true
@@ -52,7 +52,7 @@ func TestKillMCPSessionsForSDK_CancelsOnlyMatchingSessions(t *testing.T) {
 		t.Error("expected the matching session's context to be cancelled")
 	}
 	if otherCancelled {
-		t.Error("expected a session for a different artifactID to be left alone")
+		t.Error("expected a session for a different appID to be left alone")
 	}
 
 	mcpSessions.RLock()
@@ -69,10 +69,10 @@ func TestKillMCPSessionsForSDK_CancelsOnlyMatchingSessions(t *testing.T) {
 
 // TestCleanupMCPSandboxDir_RemovesDirectory is the on-disk half of
 // api.DeleteSDKHandler's best-effort cleanup: it must remove the sandbox
-// working directory for the given artifactID, and must not error when the
+// working directory for the given appID, and must not error when the
 // directory never existed (delete-before-first-connect is a valid case).
 func TestCleanupMCPSandboxDir_RemovesDirectory(t *testing.T) {
-	const artifactIDHex = "sdk-cleanup-test"
+	const appIDHex = "sdk-cleanup-test"
 	// Redirect the sandbox root at a directory the test process actually
 	// owns and can unlink from -- t.TempDir() (not the repo checkout, which
 	// some environments mount read/write-but-not-delete) -- and restore it
@@ -82,7 +82,7 @@ func TestCleanupMCPSandboxDir_RemovesDirectory(t *testing.T) {
 	sandboxDataRoot = t.TempDir()
 	t.Cleanup(func() { sandboxDataRoot = previousRoot })
 
-	dir := sandboxDirFor(artifactIDHex)
+	dir := sandboxDirFor(appIDHex)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("failed to set up sandbox dir fixture: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestCleanupMCPSandboxDir_RemovesDirectory(t *testing.T) {
 		t.Fatalf("failed to write fixture file: %v", err)
 	}
 
-	if err := CleanupMCPSandboxDir(artifactIDHex); err != nil {
+	if err := CleanupMCPSandboxDir(appIDHex); err != nil {
 		t.Fatalf("CleanupMCPSandboxDir: %v", err)
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {

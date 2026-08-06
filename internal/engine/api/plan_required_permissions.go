@@ -36,46 +36,51 @@ func workspacePlanRequiredPermissions(ctx context.Context, actions json.RawMessa
 	return marshalPlanRequiredPermissions(requirements, displayNames, err)
 }
 
-func artifactPlanRequiredPermissions(
+func configPlanRequiredPermissions(
 	ctx context.Context,
 	s store.Store,
 	current *store.ConfigState,
 	serviceNames map[uuid.UUID]string,
 	bucketName string,
-	artifactName string,
+	configName string,
 ) (json.RawMessage, int, error) {
-	buckets, err := artifactNamedBuckets(ctx, s, bucketName)
+	buckets, err := configNamedBuckets(ctx, s, bucketName)
 	if err != nil {
 		return nil, 0, err
 	}
-	return artifactPlanRequiredPermissionsWithBuckets(ctx, current, serviceNames, buckets, artifactName)
+	return configPlanRequiredPermissionsWithBuckets(ctx, s, current, serviceNames, buckets, configName)
 }
 
-func artifactPlanRequiredPermissionsWithBuckets(
+func configPlanRequiredPermissionsWithBuckets(
 	ctx context.Context,
+	s store.Store,
 	current *store.ConfigState,
 	serviceNames map[uuid.UUID]string,
 	buckets []store.Bucket,
-	artifactName string,
+	configName string,
 ) (json.RawMessage, int, error) {
 	workspaceID, err := requiredPermissionWorkspaceID(ctx)
 	if err != nil {
 		return nil, 0, errRequiredPermissionContext
 	}
-	requirements := artifactMutationRequirements(workspaceID, current)
+	familyID, err := currentAppFamilyID(ctx, s, current)
+	if err != nil {
+		return nil, 0, err
+	}
+	requirements := configMutationRequirements(workspaceID, current, familyID)
 	displayNames := map[accesscontrol.ResourceRef]string{
 		{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}: "workspace",
 	}
-	serviceRequirements, serviceDisplayNames, err := artifactServiceRequirements(serviceNames)
+	serviceRequirements, serviceDisplayNames, err := configServiceRequirements(serviceNames)
 	if err != nil {
 		return nil, 0, err
 	}
 	requirements = append(requirements, serviceRequirements...)
 	mergeResourceDisplayNames(displayNames, serviceDisplayNames)
-	if current != nil && current.LatestResourceID != nil && *current.LatestResourceID != uuid.Nil {
-		displayNames[accesscontrol.ResourceRef{Type: accesscontrol.ResourceArtifact, ID: *current.LatestResourceID}] = artifactName
+	if familyID != uuid.Nil {
+		displayNames[accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID}] = configName
 	}
-	bucketRequirement, bucketDisplayNames, err := artifactBucketRequirements(buckets)
+	bucketRequirement, bucketDisplayNames, err := configBucketRequirements(buckets)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -84,7 +89,7 @@ func artifactPlanRequiredPermissionsWithBuckets(
 	return marshalPlanRequiredPermissions(requirements, displayNames, nil)
 }
 
-func artifactNamedBuckets(ctx context.Context, s store.Store, bucketName string) ([]store.Bucket, error) {
+func configNamedBuckets(ctx context.Context, s store.Store, bucketName string) ([]store.Bucket, error) {
 	if bucketName == "" {
 		return nil, nil
 	}
@@ -103,7 +108,7 @@ func requiredPermissionWorkspaceID(ctx context.Context) (uuid.UUID, error) {
 	return actor.WorkspaceID, nil
 }
 
-func artifactServiceRequirements(serviceNames map[uuid.UUID]string) ([]accesscontrol.Requirement, map[accesscontrol.ResourceRef]string, error) {
+func configServiceRequirements(serviceNames map[uuid.UUID]string) ([]accesscontrol.Requirement, map[accesscontrol.ResourceRef]string, error) {
 	requirements := make([]accesscontrol.Requirement, 0, len(serviceNames))
 	displayNames := make(map[accesscontrol.ResourceRef]string, len(serviceNames))
 	for serviceID, serviceName := range serviceNames {
@@ -117,7 +122,7 @@ func artifactServiceRequirements(serviceNames map[uuid.UUID]string) ([]accesscon
 	return requirements, displayNames, nil
 }
 
-func artifactBucketRequirements(buckets []store.Bucket) ([]accesscontrol.Requirement, map[accesscontrol.ResourceRef]string, error) {
+func configBucketRequirements(buckets []store.Bucket) ([]accesscontrol.Requirement, map[accesscontrol.ResourceRef]string, error) {
 	requirements := make([]accesscontrol.Requirement, 0, len(buckets))
 	displayNames := make(map[accesscontrol.ResourceRef]string, len(buckets))
 	for _, bucket := range buckets {
@@ -137,24 +142,37 @@ func mergeResourceDisplayNames(target, additions map[accesscontrol.ResourceRef]s
 	}
 }
 
-func artifactMutationRequirements(workspaceID uuid.UUID, current *store.ConfigState) []accesscontrol.Requirement {
-	// New artifacts require create at workspace scope. Once an artifact exists,
-	// its stable identity becomes the authorization boundary and subsequent
-	// plans require manage on that exact artifact instead of another create.
+func currentAppFamilyID(ctx context.Context, s store.Store, current *store.ConfigState) (uuid.UUID, error) {
+	if current == nil || current.LatestResourceID == nil || *current.LatestResourceID == uuid.Nil {
+		return uuid.Nil, nil
+	}
+	if s == nil {
+		return uuid.Nil, accesscontrol.ErrInvalidRequirement
+	}
+	app, err := s.GetApp(ctx, *current.LatestResourceID)
+	if err != nil || app == nil || app.AppFamilyID == uuid.Nil {
+		return uuid.Nil, accesscontrol.ErrInvalidRequirement
+	}
+	return app.AppFamilyID, nil
+}
+
+func configMutationRequirements(workspaceID uuid.UUID, current *store.ConfigState, familyID uuid.UUID) []accesscontrol.Requirement {
+	// New apps require create at workspace scope. Once a version exists, the
+	// family is the stable boundary so one grant consistently covers every version.
 	if current == nil {
 		return []accesscontrol.Requirement{{
-			Permission: accesscontrol.PermissionArtifactCreate,
+			Permission: accesscontrol.PermissionAppCreate,
 			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID},
 		}}
 	}
-	if current.LatestResourceID != nil && *current.LatestResourceID != uuid.Nil {
+	if familyID != uuid.Nil {
 		return []accesscontrol.Requirement{{
-			Permission: accesscontrol.PermissionArtifactManage,
-			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceArtifact, ID: *current.LatestResourceID},
+			Permission: accesscontrol.PermissionAppManage,
+			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID},
 		}}
 	}
 	return []accesscontrol.Requirement{{
-		Permission: accesscontrol.PermissionArtifactManage,
+		Permission: accesscontrol.PermissionAppManage,
 		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID},
 	}}
 }

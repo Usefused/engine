@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,6 +37,13 @@ type workspaceTestStore struct {
 	store.Store // zero-value embedded — panics if an uncovered method is called
 	accountID   uuid.UUID
 	workspaceID uuid.UUID
+	appMutex    sync.Mutex
+	appFamilies map[string]store.AppFamily
+	apps        map[uuid.UUID]store.App
+	tombstones  map[string]bool
+	// tombstoneApps preserves only identity for historical activity tests; it
+	// is intentionally separate from apps so catalogue/runtime reads stay empty.
+	tombstoneApps map[uuid.UUID]store.App
 	// workspaceServices returned by List
 	workspaceServices []store.WorkspaceService
 	// errors to inject
@@ -72,7 +80,7 @@ type workspaceTestStore struct {
 	existingScopeAccount       uuid.UUID
 	existingScopeVersion       int
 	existingScope              []byte
-	mockScopes                 map[uuid.UUID]*store.ArtifactScope
+	mockScopes                 map[uuid.UUID]*store.AppRuntime
 	listMCPScopesCalls         int
 	// mcpAnalyticsDashboard/mcpAnalyticsErr drive GetMCPAnalyticsDashboard for
 	// mcp_graphql_test.go; nil dashboard with nil err returns an empty one.
@@ -83,13 +91,6 @@ type workspaceTestStore struct {
 	scopeBatchErr         error
 	getScopeErr           error
 	deletedScopes         []uuid.UUID
-	// sdk lifecycle (activate/deactivate/delete) test doubles -- named
-	// sdk*Err rather than reusing deactivateErr/activateErr above, which are
-	// already claimed by the workspace *service* activation tests.
-	sdkDeactivateErr       error
-	sdkReactivateErr       error
-	deactivatedArtifactIDs []uuid.UUID
-	reactivatedArtifactIDs []uuid.UUID
 	// listWorkspaceWebhooksResult/Err let GraphQL tests drive webhook
 	// visibility reads without a real DB.
 	listWorkspaceWebhooksResult []store.WorkspaceWebhook
@@ -100,7 +101,7 @@ type workspaceTestStore struct {
 	engineExecutionEvents       []models.EngineExecutionEvent
 	engineExecutionAnalytics    models.EngineExecutionAnalytics
 	engineExecutionAnalyticsErr error
-	artifactExecutionAnalytics  models.ArtifactExecutionAnalytics
+	appExecutionAnalytics       models.AppExecutionAnalytics
 	workspaceExecutionAnalytics models.WorkspaceExecutionAnalytics
 	workspaceExecutionCalls     int
 	bucketsByName               map[string]*store.Bucket
@@ -110,11 +111,11 @@ type workspaceTestStore struct {
 	secretsByKey                 map[string]*store.WorkspaceSecret
 	secretLookupKeys             []string
 	secretLookupErr              error
-	getMCPScopeByNameFunc        func(ctx context.Context, accountID uuid.UUID, name, version string) (*store.ArtifactScope, error)
+	getMCPScopeByNameFunc        func(ctx context.Context, accountID uuid.UUID, name, version string) (*store.AppRuntime, error)
 	buckets                      []store.Bucket
 	bucketSummaries              []store.BucketSummary
 	sdkBuckets                   map[uuid.UUID][]store.Bucket
-	artifactScopesForBucket      map[uuid.UUID][]store.ArtifactScope
+	appRuntimesForBucket         map[uuid.UUID][]store.AppRuntime
 	bucketServiceSummaries       map[uuid.UUID][]store.BucketServiceSummary
 	bucketValues                 map[uuid.UUID][]store.BucketValue
 	secretMetas                  map[uuid.UUID][]store.WorkspaceSecretMeta
@@ -137,11 +138,173 @@ type workspaceTestStore struct {
 	deletedAuthConnections       []uuid.UUID
 	deletedSecretKeys            []string
 	createdConnectSessions       []store.ConnectSession
-	sdkTokens                    []store.SDKToken
+	appTokens                    []store.AppToken
 	// kind: webhook's ownership-conflict lookup controls.
 	webhookOwnersByLabel   map[uuid.UUID]string
 	webhookOwnersErr       error
 	exactExecutionPolicies map[store.WorkspaceExecutionPolicyRef]*store.WorkspaceExecutionPolicyOverride
+	packageBuildRequest    *models.SDKGenerationRequest
+}
+
+func (s *workspaceTestStore) CreateOrGetAppFamily(_ context.Context, family store.AppFamily) (*store.AppFamily, bool, error) {
+	s.appMutex.Lock()
+	defer s.appMutex.Unlock()
+	if s.appFamilies == nil {
+		s.appFamilies = make(map[string]store.AppFamily)
+	}
+	key := family.AccountID.String() + "\x00" + family.Kind + "\x00" + family.CanonicalName
+	if existing, ok := s.appFamilies[key]; ok {
+		return &existing, false, nil
+	}
+	s.appFamilies[key] = family
+	return &family, true, nil
+}
+
+// GetAppFamilyByIdentity looks up a family by the composite identity key used
+// by CreateOrGetAppFamily.  This is needed by the SDK-generation path that
+// checks family existence before enforcing the MaxSDKFamilies limit.
+func (s *workspaceTestStore) GetAppFamilyByIdentity(_ context.Context, accountID uuid.UUID, kind, canonicalName string) (*store.AppFamily, error) {
+	s.appMutex.Lock()
+	defer s.appMutex.Unlock()
+	key := accountID.String() + "\x00" + kind + "\x00" + canonicalName
+	if existing, ok := s.appFamilies[key]; ok {
+		copy := existing
+		return &copy, nil
+	}
+	return nil, store.ErrAppFamilyNotFound
+}
+
+// CountAppFamilies returns the number of families for the given account and
+// kind.  It is used by the license-tier limit check in reserveSDKGenerationIdentity.
+func (s *workspaceTestStore) CountAppFamilies(_ context.Context, accountID uuid.UUID, kind string) (int, error) {
+	s.appMutex.Lock()
+	defer s.appMutex.Unlock()
+	count := 0
+	prefix := accountID.String() + "\x00" + kind + "\x00"
+	for key := range s.appFamilies {
+		if strings.HasPrefix(key, prefix) {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// CountActiveServices returns the number of workspace services registered in
+// the mock store.  It supports the license-tier service-limit check.
+func (s *workspaceTestStore) CountActiveServices(_ context.Context) (int, error) {
+	return len(s.workspaceServices), nil
+}
+
+func (s *workspaceTestStore) GetAppByFamilyAndVersion(_ context.Context, familyID uuid.UUID, version string) (*store.App, error) {
+	s.appMutex.Lock()
+	defer s.appMutex.Unlock()
+	for _, app := range s.apps {
+		if app.AppFamilyID == familyID && app.Version == version {
+			copy := app
+			return &copy, nil
+		}
+	}
+	return nil, store.ErrAppNotFound
+}
+
+func (s *workspaceTestStore) AppTombstoneExists(_ context.Context, familyID uuid.UUID, version string) (bool, error) {
+	s.appMutex.Lock()
+	defer s.appMutex.Unlock()
+	return s.tombstones[familyID.String()+"\x00"+version], nil
+}
+
+func (s *workspaceTestStore) GetApp(_ context.Context, appID uuid.UUID) (*store.App, error) {
+	s.appMutex.Lock()
+	app, exists := s.apps[appID]
+	s.appMutex.Unlock()
+	if exists {
+		copy := app
+		return &copy, nil
+	}
+	scope, ok := s.mockScopes[appID]
+	if !ok {
+		return nil, store.ErrAppNotFound
+	}
+	status := scope.Status
+	if status == "" {
+		status = "active"
+	}
+	return &store.App{
+		AppID: appID, AppFamilyID: appID, AccountID: scope.AccountID,
+		Version: scope.Version, ConfigKey: scope.ConfigKey, Status: status,
+	}, nil
+}
+
+func (s *workspaceTestStore) ResolveAppFamilyAccess(_ context.Context, accountID uuid.UUID, appIDs []uuid.UUID) (map[uuid.UUID]uuid.UUID, error) {
+	s.appMutex.Lock()
+	defer s.appMutex.Unlock()
+	resolved := make(map[uuid.UUID]uuid.UUID, len(appIDs))
+	for _, appID := range appIDs {
+		if app, ok := s.apps[appID]; ok && app.AccountID == accountID {
+			resolved[appID] = app.AppFamilyID
+			continue
+		}
+		if scope := s.mockScopes[appID]; scope != nil && scope.AccountID == accountID {
+			resolved[appID] = appID
+			continue
+		}
+		if tombstone, ok := s.tombstoneApps[appID]; ok && tombstone.AccountID == accountID {
+			resolved[appID] = tombstone.AppFamilyID
+		}
+	}
+	return resolved, nil
+}
+
+func (s *workspaceTestStore) GetAppFamily(_ context.Context, appFamilyID uuid.UUID) (*store.AppFamily, error) {
+	for _, family := range s.appFamilies {
+		if family.AppFamilyID == appFamilyID {
+			copy := family
+			return &copy, nil
+		}
+	}
+	for _, app := range s.apps {
+		if app.AppFamilyID == appFamilyID {
+			return &store.AppFamily{AppFamilyID: appFamilyID, AccountID: app.AccountID}, nil
+		}
+	}
+	if scope := s.mockScopes[appFamilyID]; scope != nil {
+		return &store.AppFamily{AppFamilyID: appFamilyID, AccountID: scope.AccountID, Kind: scope.Kind, DisplayName: scope.Name}, nil
+	}
+	return nil, store.ErrAppFamilyNotFound
+}
+
+func (s *workspaceTestStore) GetSDKPackageBuildRequest(_ context.Context, _ uuid.UUID, appID uuid.UUID) (*models.SDKGenerationRequest, error) {
+	if s.packageBuildRequest == nil || s.packageBuildRequest.AppID != appID {
+		return nil, store.ErrAppNotFound
+	}
+	return s.packageBuildRequest, nil
+}
+
+func (s *workspaceTestStore) DeprecateApp(_ context.Context, appID uuid.UUID, _ string, _ *time.Time) error {
+	scope, ok := s.mockScopes[appID]
+	if !ok {
+		return store.ErrAppNotFound
+	}
+	scope.Status = "deprecated"
+	return nil
+}
+
+func (s *workspaceTestStore) UndeprecateApp(_ context.Context, appID uuid.UUID) error {
+	scope, ok := s.mockScopes[appID]
+	if !ok {
+		return store.ErrAppNotFound
+	}
+	scope.Status = "active"
+	return nil
+}
+
+func (s *workspaceTestStore) DeactivateAppVersion(_ context.Context, appID, _ uuid.UUID) error {
+	if _, ok := s.mockScopes[appID]; !ok {
+		return store.ErrAppNotFound
+	}
+	delete(s.mockScopes, appID)
+	s.deletedScopes = append(s.deletedScopes, appID)
+	return nil
 }
 
 func (s *workspaceTestStore) GetWorkspaceExecutionPolicyOverrides(_ context.Context, _ []store.WorkspaceExecutionPolicyRef) (map[store.WorkspaceExecutionPolicyRef]*store.WorkspaceExecutionPolicyOverride, error) {
@@ -152,12 +315,12 @@ func (s *workspaceTestStore) GetTeamBySlug(_ context.Context, slug string) (stor
 	if slug == "" {
 		return store.Team{}, store.ErrTeamNotFound
 	}
-	return store.Team{ID: testArtifactOwnerTeamID, Name: "Platform", Slug: slug, Status: store.TeamStatusActive}, nil
+	return store.Team{ID: testAppOwnerTeamID, Name: "Platform", Slug: slug, Status: store.TeamStatusActive}, nil
 }
 
 type sdkSaveParams struct {
 	accountID          uuid.UUID
-	artifactID         uuid.UUID
+	appID              uuid.UUID
 	ownerTeamID        uuid.UUID
 	selections         []byte
 	scopeSchemaVersion int
@@ -668,10 +831,11 @@ func (s *workspaceTestStore) ListEngineExecutionEventsByService(ctx context.Cont
 	return filtered[filter.Offset:end], total, nil
 }
 
-func (s *workspaceTestStore) ListEngineExecutionEventsByArtifact(ctx context.Context, filter store.EngineExecutionFilter) ([]models.EngineExecutionEvent, int64, error) {
+func (s *workspaceTestStore) ListEngineExecutionEventsByApp(ctx context.Context, filter store.EngineExecutionFilter) ([]models.EngineExecutionEvent, int64, error) {
 	filtered := make([]models.EngineExecutionEvent, 0, len(s.engineExecutionEvents))
 	for _, event := range s.engineExecutionEvents {
-		if event.ArtifactID != filter.ArtifactID || (filter.Transport != "" && event.Transport != filter.Transport) ||
+		if event.AppFamilyID != filter.AppFamilyID || (filter.AppID != uuid.Nil && event.AppID != filter.AppID) ||
+			(filter.Transport != "" && event.Transport != filter.Transport) ||
 			(filter.Direction != "" && event.Direction != filter.Direction) || (filter.Status != "" && event.Status != filter.Status) {
 			continue
 		}
@@ -698,11 +862,11 @@ func (s *workspaceTestStore) GetEngineExecutionAnalyticsByService(ctx context.Co
 	return s.engineExecutionAnalytics, nil
 }
 
-func (s *workspaceTestStore) GetEngineExecutionAnalyticsByArtifact(ctx context.Context, filter store.EngineExecutionFilter) (models.ArtifactExecutionAnalytics, error) {
+func (s *workspaceTestStore) GetEngineExecutionAnalyticsByApp(ctx context.Context, filter store.EngineExecutionFilter) (models.AppExecutionAnalytics, error) {
 	if s.engineExecutionAnalyticsErr != nil {
-		return models.ArtifactExecutionAnalytics{}, s.engineExecutionAnalyticsErr
+		return models.AppExecutionAnalytics{}, s.engineExecutionAnalyticsErr
 	}
-	return s.artifactExecutionAnalytics, nil
+	return s.appExecutionAnalytics, nil
 }
 
 func (s *workspaceTestStore) GetWorkspaceExecutionAnalytics(ctx context.Context, accountID uuid.UUID, startDate, endDate time.Time) (models.WorkspaceExecutionAnalytics, error) {
@@ -1221,10 +1385,10 @@ func (s *workspaceTestStore) BatchCreateEngineExecutionEvents(ctx context.Contex
 	return nil
 }
 
-func (s *workspaceTestStore) SaveArtifactScope(ctx context.Context, scope store.ArtifactScope) error {
+func (s *workspaceTestStore) SaveAppRuntime(ctx context.Context, scope store.AppRuntime) error {
 	s.savedScopes = append(s.savedScopes, sdkSaveParams{
 		accountID:          scope.AccountID,
-		artifactID:         scope.ArtifactID,
+		appID:              scope.AppID,
 		ownerTeamID:        scope.OwnerTeamID,
 		selections:         append([]byte(nil), scope.Selections...),
 		scopeSchemaVersion: scope.ScopeSchemaVersion,
@@ -1232,22 +1396,20 @@ func (s *workspaceTestStore) SaveArtifactScope(ctx context.Context, scope store.
 		name:               scope.Name,
 	})
 	if s.saveScopeErr == nil {
-		_, alreadyExists := s.mockScopes[scope.ArtifactID]
-		// Mirror the real store's round-trip: a save-then-get (e.g. the mcp
-		// GraphQL deploy resolver, mcp_graphql.go) must see what was just
-		// saved. DeactivatedAt is deliberately preserved rather than reset --
-		// SaveArtifactScope's real ON CONFLICT clause doesn't touch that column
-		// either (see postgresStore.SaveArtifactScope).
+		_, alreadyExists := s.mockScopes[scope.AppID]
+		// Mirror the real store's round-trip: a save-then-get must see what was
+		// just saved, including the exact app-version status.
 		if s.mockScopes == nil {
-			s.mockScopes = make(map[uuid.UUID]*store.ArtifactScope)
+			s.mockScopes = make(map[uuid.UUID]*store.AppRuntime)
 		}
 		saved := scope
-		if existing, ok := s.mockScopes[scope.ArtifactID]; ok {
-			saved.DeactivatedAt = existing.DeactivatedAt
+		if existing, ok := s.mockScopes[scope.AppID]; ok {
+			saved.Status = existing.Status
 		} else {
 			saved.CreatedAt = time.Now()
+			saved.Status = "active"
 		}
-		s.mockScopes[scope.ArtifactID] = &saved
+		s.mockScopes[scope.AppID] = &saved
 		if !alreadyExists {
 			// A new scope also creates its owner binding in the real transaction.
 			s.authorizationRevision++
@@ -1260,20 +1422,20 @@ func (s *workspaceTestStore) LoadAuthorizationRevision(context.Context) (int64, 
 	return s.authorizationRevision, nil
 }
 
-func (s *workspaceTestStore) GetArtifactScope(ctx context.Context, artifactID uuid.UUID) (*store.ArtifactScope, error) {
-	s.scopeLookups = append(s.scopeLookups, artifactID)
+func (s *workspaceTestStore) GetAppRuntime(ctx context.Context, appID uuid.UUID) (*store.AppRuntime, error) {
+	s.scopeLookups = append(s.scopeLookups, appID)
 	if s.getScopeErr != nil {
 		return nil, s.getScopeErr
 	}
 	if s.mockScopes != nil {
-		scope, ok := s.mockScopes[artifactID]
+		scope, ok := s.mockScopes[appID]
 		if !ok {
-			return nil, store.ErrArtifactScopeNotFound
+			return nil, store.ErrAppRuntimeNotFound
 		}
 		return scope, nil
 	}
 	if s.existingScopeHash == "" {
-		return nil, store.ErrArtifactScopeNotFound
+		return nil, store.ErrAppRuntimeNotFound
 	}
 	accountID := s.accountID
 	if s.existingScopeAccount != uuid.Nil {
@@ -1281,29 +1443,29 @@ func (s *workspaceTestStore) GetArtifactScope(ctx context.Context, artifactID uu
 	}
 	version := s.existingScopeVersion
 	if version == 0 {
-		version = models.ArtifactScopeSchemaVersion
+		version = models.AppScopeSchemaVersion
 	}
-	return &store.ArtifactScope{
+	return &store.AppRuntime{
 		AccountID:          accountID,
-		ArtifactID:         artifactID,
+		AppID:              appID,
 		Selections:         append([]byte(nil), s.existingScope...),
 		ScopeSchemaVersion: version,
 	}, nil
 }
 
-// ListMCPScopesByAccount filters mockScopes by accountID+kind="mcp",
-func (s *workspaceTestStore) GetMCPScopeByName(ctx context.Context, accountID uuid.UUID, name, version string) (*store.ArtifactScope, error) {
+// ListMCPAppsByAccount filters mockScopes by accountID+kind="mcp",
+func (s *workspaceTestStore) GetMCPAppByName(ctx context.Context, accountID uuid.UUID, name, version string) (*store.AppRuntime, error) {
 	if s.getMCPScopeByNameFunc != nil {
 		return s.getMCPScopeByNameFunc(ctx, accountID, name, version)
 	}
-	return nil, store.ErrArtifactScopeNotFound
+	return nil, store.ErrAppRuntimeNotFound
 }
 
 // newest-first by CreatedAt, mirroring postgresStore's real query closely
 // enough for mcp_graphql_test.go's list resolver tests.
-func (s *workspaceTestStore) ListMCPScopesByAccount(ctx context.Context, accountID uuid.UUID, limit, offset int) ([]store.ArtifactScope, int, error) {
+func (s *workspaceTestStore) ListMCPAppsByAccount(ctx context.Context, accountID uuid.UUID, limit, offset int) ([]store.AppRuntime, int, error) {
 	s.listMCPScopesCalls++
-	var matched []store.ArtifactScope
+	var matched []store.AppRuntime
 	for _, scope := range s.mockScopes {
 		if scope.AccountID == accountID && scope.Kind == "mcp" {
 			matched = append(matched, *scope)
@@ -1321,17 +1483,17 @@ func (s *workspaceTestStore) ListMCPScopesByAccount(ctx context.Context, account
 	return matched[offset:end], total, nil
 }
 
-func (s *workspaceTestStore) ListAuthorizedMCPScopesByAccount(ctx context.Context, accountID uuid.UUID, scope accesscontrol.AuthorizedScope, limit, offset int) ([]store.ArtifactScope, int, error) {
+func (s *workspaceTestStore) ListAuthorizedMCPAppsByAccount(ctx context.Context, accountID uuid.UUID, scope accesscontrol.AuthorizedScope, limit, offset int) ([]store.AppRuntime, int, error) {
 	if scope.All {
-		return s.ListMCPScopesByAccount(ctx, accountID, limit, offset)
+		return s.ListMCPAppsByAccount(ctx, accountID, limit, offset)
 	}
 	allowed := make(map[uuid.UUID]struct{}, len(scope.IDs))
 	for _, id := range scope.IDs {
 		allowed[id] = struct{}{}
 	}
-	var matched []store.ArtifactScope
+	var matched []store.AppRuntime
 	for _, artifact := range s.mockScopes {
-		if _, ok := allowed[artifact.ArtifactID]; ok && artifact.AccountID == accountID && artifact.Kind == "mcp" {
+		if _, ok := allowed[artifact.AppID]; ok && artifact.AccountID == accountID && artifact.Kind == "mcp" {
 			matched = append(matched, *artifact)
 		}
 	}
@@ -1347,14 +1509,14 @@ func (s *workspaceTestStore) ListAuthorizedMCPScopesByAccount(ctx context.Contex
 	return matched[offset:end], total, nil
 }
 
-func (s *workspaceTestStore) ListAuthorizedArtifactScopesByAccount(_ context.Context, accountID uuid.UUID, scope accesscontrol.AuthorizedScope, kind string, limit, offset int) ([]store.ArtifactScope, int, error) {
+func (s *workspaceTestStore) ListAuthorizedAppRuntimesByAccount(_ context.Context, accountID uuid.UUID, scope accesscontrol.AuthorizedScope, kind string, limit, offset int) ([]store.AppRuntime, int, error) {
 	allowed := make(map[uuid.UUID]struct{}, len(scope.IDs))
 	for _, id := range scope.IDs {
 		allowed[id] = struct{}{}
 	}
-	var matched []store.ArtifactScope
+	var matched []store.AppRuntime
 	for _, artifact := range s.mockScopes {
-		_, permitted := allowed[artifact.ArtifactID]
+		_, permitted := allowed[artifact.AppID]
 		if artifact.AccountID == accountID && (kind == "" || artifact.Kind == kind) && (scope.All || permitted) {
 			matched = append(matched, *artifact)
 		}
@@ -1378,7 +1540,7 @@ func (s *workspaceTestStore) ListServiceConsumers(_ context.Context, accountID u
 	}
 	consumers := make([]store.ServiceConsumer, 0)
 	for _, artifact := range s.mockScopes {
-		_, permitted := allowed[artifact.ArtifactID]
+		_, permitted := allowed[artifact.AppID]
 		if artifact.AccountID != accountID || (!scope.All && !permitted) {
 			continue
 		}
@@ -1388,9 +1550,13 @@ func (s *workspaceTestStore) ListServiceConsumers(_ context.Context, accountID u
 		}
 		for _, selection := range selections {
 			if selection.ServiceID == serviceID {
+				status := artifact.Status
+				if status == "" {
+					status = "active"
+				}
 				consumers = append(consumers, store.ServiceConsumer{
-					ArtifactID: artifact.ArtifactID, Name: artifact.Name, Version: artifact.Version, Kind: artifact.Kind,
-					DeactivatedAt: artifact.DeactivatedAt, ServiceVersionID: selection.ServiceVersionID, SelectAll: selection.SelectAll,
+					AppID: artifact.AppID, Name: artifact.Name, Version: artifact.Version, Kind: artifact.Kind,
+					Status: status, ServiceVersionID: selection.ServiceVersionID, SelectAll: selection.SelectAll,
 					OperationCount: len(selection.EndpointIDs) + len(selection.OperationNames),
 					WebhookCount:   len(selection.WebhookIDs) + len(selection.WebhookNames), CreatedAt: artifact.CreatedAt,
 				})
@@ -1400,7 +1566,7 @@ func (s *workspaceTestStore) ListServiceConsumers(_ context.Context, accountID u
 	return consumers, nil
 }
 
-func (s *workspaceTestStore) GetMCPAnalyticsDashboard(ctx context.Context, artifactID uuid.UUID) (*models.MCPAnalyticsDashboard, error) {
+func (s *workspaceTestStore) GetMCPAnalyticsDashboard(ctx context.Context, appID uuid.UUID) (*models.MCPAnalyticsDashboard, error) {
 	if s.mcpAnalyticsErr != nil {
 		return nil, s.mcpAnalyticsErr
 	}
@@ -1410,19 +1576,19 @@ func (s *workspaceTestStore) GetMCPAnalyticsDashboard(ctx context.Context, artif
 	return &models.MCPAnalyticsDashboard{}, nil
 }
 
-func (s *workspaceTestStore) ListArtifactScopes(ctx context.Context, artifactIDs []uuid.UUID) (map[uuid.UUID]*store.ArtifactScope, error) {
-	s.batchedScopeLookups = append(s.batchedScopeLookups, append([]uuid.UUID(nil), artifactIDs...))
+func (s *workspaceTestStore) ListAppRuntimes(ctx context.Context, appIDs []uuid.UUID) (map[uuid.UUID]*store.AppRuntime, error) {
+	s.batchedScopeLookups = append(s.batchedScopeLookups, append([]uuid.UUID(nil), appIDs...))
 	if s.scopeBatchErr != nil {
 		return nil, s.scopeBatchErr
 	}
-	out := make(map[uuid.UUID]*store.ArtifactScope)
-	for _, artifactID := range artifactIDs {
-		scope, err := s.GetArtifactScope(ctx, artifactID)
+	out := make(map[uuid.UUID]*store.AppRuntime)
+	for _, appID := range appIDs {
+		scope, err := s.GetAppRuntime(ctx, appID)
 		if err == nil {
-			out[artifactID] = scope
+			out[appID] = scope
 			continue
 		}
-		if !errors.Is(err, store.ErrArtifactScopeNotFound) {
+		if !errors.Is(err, store.ErrAppRuntimeNotFound) {
 			return nil, err
 		}
 	}
@@ -1430,56 +1596,8 @@ func (s *workspaceTestStore) ListArtifactScopes(ctx context.Context, artifactIDs
 	return out, nil
 }
 
-func (s *workspaceTestStore) DeleteArtifactScope(ctx context.Context, accountID uuid.UUID, artifactID uuid.UUID) error {
-	s.deletedScopes = append(s.deletedScopes, artifactID)
-	if s.mockScopes != nil {
-		delete(s.mockScopes, artifactID)
-	}
-	return nil
-}
-
-// DeactivateSDK/ReactivateSDK flip DeactivatedAt on the matching mockScopes
-// entry (when present), mirroring the real cachedStore/postgresStore pair
-// closely enough that a test can round-trip activate -> deactivate -> GetArtifactScope
-// and observe the flag change, without a real database.
-func (s *workspaceTestStore) DeactivateSDK(ctx context.Context, accountID, artifactID uuid.UUID) error {
-	if s.sdkDeactivateErr != nil {
-		return s.sdkDeactivateErr
-	}
-	s.deactivatedArtifactIDs = append(s.deactivatedArtifactIDs, artifactID)
-	if scope, ok := s.mockScopes[artifactID]; ok {
-		now := time.Now()
-		scope.DeactivatedAt = &now
-	}
-	return nil
-}
-
-func (s *workspaceTestStore) ReactivateSDK(ctx context.Context, accountID, artifactID uuid.UUID) error {
-	if s.sdkReactivateErr != nil {
-		return s.sdkReactivateErr
-	}
-	s.reactivatedArtifactIDs = append(s.reactivatedArtifactIDs, artifactID)
-	if scope, ok := s.mockScopes[artifactID]; ok {
-		scope.DeactivatedAt = nil
-	}
-	return nil
-}
-
-func (s *workspaceTestStore) CreateSDKToken(ctx context.Context, artifactID uuid.UUID, tokenHash, tokenName string) (*store.SDKToken, error) {
-	return &store.SDKToken{
-		ID:         uuid.New(),
-		ArtifactID: artifactID,
-		Name:       tokenName,
-		TokenHash:  tokenHash,
-	}, nil
-}
-
-func (s *workspaceTestStore) ListSDKTokens(ctx context.Context, artifactID uuid.UUID) ([]store.SDKToken, error) {
-	return s.sdkTokens, nil
-}
-
-func (s *workspaceTestStore) RevokeSDKToken(ctx context.Context, artifactID uuid.UUID, tokenName string) error {
-	return nil
+func (s *workspaceTestStore) ListAppTokens(ctx context.Context, appFamilyID uuid.UUID) ([]store.AppToken, error) {
+	return s.appTokens, nil
 }
 
 func (s *workspaceTestStore) ListSecretMeta(ctx context.Context, bucketID uuid.UUID) ([]store.WorkspaceSecretMeta, error) {
@@ -1653,20 +1771,20 @@ func (s *workspaceTestStore) CreateBucket(ctx context.Context, name string, isDe
 	return &store.Bucket{ID: uuid.New(), Name: name, IsDefault: isDefault}, nil
 }
 
-func (s *workspaceTestStore) LinkBucketToSDK(ctx context.Context, artifactID, bucketID uuid.UUID) error {
+func (s *workspaceTestStore) LinkBucketToSDK(ctx context.Context, appID, bucketID uuid.UUID) error {
 	s.linkBucketCalls++
 	return nil
 }
 
-func (s *workspaceTestStore) ListBucketsForSDK(ctx context.Context, artifactID uuid.UUID) ([]store.Bucket, error) {
+func (s *workspaceTestStore) ListBucketsForAppFamily(ctx context.Context, appFamilyID uuid.UUID) ([]store.Bucket, error) {
 	if s.sdkBuckets != nil {
-		return s.sdkBuckets[artifactID], nil
+		return s.sdkBuckets[appFamilyID], nil
 	}
 	return nil, nil
 }
 
-func (s *workspaceTestStore) ListAuthorizedBucketsForSDK(ctx context.Context, artifactID uuid.UUID, scope accesscontrol.AuthorizedScope) ([]store.Bucket, error) {
-	buckets, err := s.ListBucketsForSDK(ctx, artifactID)
+func (s *workspaceTestStore) ListAuthorizedBucketsForAppFamily(ctx context.Context, appFamilyID uuid.UUID, scope accesscontrol.AuthorizedScope) ([]store.Bucket, error) {
+	buckets, err := s.ListBucketsForAppFamily(ctx, appFamilyID)
 	if err != nil || scope.All {
 		return buckets, err
 	}
@@ -1680,23 +1798,23 @@ func (s *workspaceTestStore) ListAuthorizedBucketsForSDK(ctx context.Context, ar
 	return filtered, nil
 }
 
-func (s *workspaceTestStore) ListArtifactScopesForBucket(ctx context.Context, bucketID uuid.UUID, limit, offset int) ([]store.ArtifactScope, int, error) {
-	items, total := pageArtifactScopes(s.artifactScopesForBucket[bucketID], limit, offset)
+func (s *workspaceTestStore) ListAppRuntimesForBucket(ctx context.Context, bucketID uuid.UUID, limit, offset int) ([]store.AppRuntime, int, error) {
+	items, total := pageAppRuntimes(s.appRuntimesForBucket[bucketID], limit, offset)
 	return items, total, nil
 }
 
-func (s *workspaceTestStore) ListAuthorizedArtifactScopesForBucket(ctx context.Context, bucketID uuid.UUID, scope accesscontrol.AuthorizedScope, limit, offset int) ([]store.ArtifactScope, int, error) {
+func (s *workspaceTestStore) ListAuthorizedAppRuntimesForBucket(ctx context.Context, bucketID uuid.UUID, scope accesscontrol.AuthorizedScope, limit, offset int) ([]store.AppRuntime, int, error) {
 	if scope.All {
-		return s.ListArtifactScopesForBucket(ctx, bucketID, limit, offset)
+		return s.ListAppRuntimesForBucket(ctx, bucketID, limit, offset)
 	}
 	allowed := testUUIDSet(scope.IDs)
-	var filtered []store.ArtifactScope
-	for _, artifact := range s.artifactScopesForBucket[bucketID] {
-		if _, ok := allowed[artifact.ArtifactID]; ok {
+	var filtered []store.AppRuntime
+	for _, artifact := range s.appRuntimesForBucket[bucketID] {
+		if _, ok := allowed[artifact.AppID]; ok {
 			filtered = append(filtered, artifact)
 		}
 	}
-	items, total := pageArtifactScopes(filtered, limit, offset)
+	items, total := pageAppRuntimes(filtered, limit, offset)
 	return items, total, nil
 }
 
@@ -1909,7 +2027,7 @@ func pageWorkspaceSecretMetas(items []store.WorkspaceSecretMeta, limit, offset i
 	return pageTestItems(items, limit, offset)
 }
 
-func pageArtifactScopes(items []store.ArtifactScope, limit, offset int) ([]store.ArtifactScope, int) {
+func pageAppRuntimes(items []store.AppRuntime, limit, offset int) ([]store.AppRuntime, int) {
 	return pageTestItems(items, limit, offset)
 }
 

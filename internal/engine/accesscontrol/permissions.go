@@ -23,11 +23,11 @@ const (
 	PermissionCredentialsManage       Permission = "credentials.manage"
 	PermissionConnectionRead          Permission = "connection.read"
 	PermissionConnectionManage        Permission = "connection.manage"
-	PermissionArtifactRead            Permission = "artifact.read"
-	PermissionArtifactUse             Permission = "artifact.use"
-	PermissionArtifactCreate          Permission = "artifact.create"
-	PermissionArtifactManage          Permission = "artifact.manage"
-	PermissionArtifactTokensManage    Permission = "artifact.tokens.manage"
+	PermissionAppRead                 Permission = "app.read"
+	PermissionAppUse                  Permission = "app.use"
+	PermissionAppCreate               Permission = "app.create"
+	PermissionAppManage               Permission = "app.manage"
+	PermissionAppTokensManage         Permission = "app.tokens.manage"
 	PermissionCatalogueRead           Permission = "catalogue.read"
 	PermissionCatalogueImport         Permission = "catalogue.import"
 	PermissionCatalogueManage         Permission = "catalogue.manage"
@@ -58,11 +58,11 @@ var (
 		PermissionCredentialsManage,
 		PermissionConnectionRead,
 		PermissionConnectionManage,
-		PermissionArtifactRead,
-		PermissionArtifactUse,
-		PermissionArtifactCreate,
-		PermissionArtifactManage,
-		PermissionArtifactTokensManage,
+		PermissionAppRead,
+		PermissionAppUse,
+		PermissionAppCreate,
+		PermissionAppManage,
+		PermissionAppTokensManage,
 		PermissionCatalogueRead,
 		PermissionCatalogueImport,
 		PermissionCatalogueManage,
@@ -84,14 +84,14 @@ const (
 	ResourceWorkspace ResourceType = "workspace"
 	ResourceService   ResourceType = "service"
 	ResourceBucket    ResourceType = "bucket"
-	ResourceArtifact  ResourceType = "artifact"
+	ResourceApp       ResourceType = "app"
 )
 
 var validResourceTypes = map[ResourceType]struct{}{
 	ResourceWorkspace: {},
 	ResourceService:   {},
 	ResourceBucket:    {},
-	ResourceArtifact:  {},
+	ResourceApp:       {},
 }
 
 type ResourceRef struct {

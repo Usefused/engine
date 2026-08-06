@@ -30,45 +30,23 @@ func (m *usageIndexMockConfigStore) ListConfigStates(ctx context.Context, config
 
 type usageIndexMockBatchStore struct {
 	Store
-	scopes    map[uuid.UUID]*ArtifactScope
+	scopes    map[uuid.UUID]*AppRuntime
 	batchErr  error
 	batchedAt [][]uuid.UUID
 }
 
-func (m *usageIndexMockBatchStore) ListArtifactScopes(ctx context.Context, artifactIDs []uuid.UUID) (map[uuid.UUID]*ArtifactScope, error) {
-	m.batchedAt = append(m.batchedAt, artifactIDs)
+func (m *usageIndexMockBatchStore) ListAppRuntimes(ctx context.Context, appIDs []uuid.UUID) (map[uuid.UUID]*AppRuntime, error) {
+	m.batchedAt = append(m.batchedAt, appIDs)
 	if m.batchErr != nil {
 		return nil, m.batchErr
 	}
-	out := make(map[uuid.UUID]*ArtifactScope)
-	for _, id := range artifactIDs {
+	out := make(map[uuid.UUID]*AppRuntime)
+	for _, id := range appIDs {
 		if scope, ok := m.scopes[id]; ok {
 			out[id] = scope
 		}
 	}
 	return out, nil
-}
-
-// usageIndexMockFallbackStore deliberately does NOT implement
-// artifactScopeBatchReader, exercising workspaceArtifactScopesFallback's
-// one-GetArtifactScope-per-artifact path.
-type usageIndexMockFallbackStore struct {
-	Store
-	scopes  map[uuid.UUID]*ArtifactScope
-	getErrs map[uuid.UUID]error
-	gets    []uuid.UUID
-}
-
-func (m *usageIndexMockFallbackStore) GetArtifactScope(ctx context.Context, artifactID uuid.UUID) (*ArtifactScope, error) {
-	m.gets = append(m.gets, artifactID)
-	if err, ok := m.getErrs[artifactID]; ok {
-		return nil, err
-	}
-	scope, ok := m.scopes[artifactID]
-	if !ok {
-		return nil, ErrArtifactScopeNotFound
-	}
-	return scope, nil
 }
 
 func selectionsJSON(t *testing.T, selections []models.SDKSelection) []byte {
@@ -84,15 +62,15 @@ func selectionsJSON(t *testing.T, selections []models.SDKSelection) []byte {
 // regression pin for the pre-extraction behavior (originally tested only
 // indirectly through internal/engine/api's plan-impact handler tests):
 // WorkspaceSDKServiceImpacts must still return one sorted config-key list per
-// (service, version), using the batched ListArtifactScopes path when the
+// (service, version), using the batched ListAppRuntimes path when the
 // concrete Store supports it.
 func TestWorkspaceSDKServiceImpacts_BatchPath_SortedDedupedConfigKeys(t *testing.T) {
 	serviceID, versionID := uuid.New(), uuid.New()
 	artifactA, artifactB := uuid.New(), uuid.New()
 
-	batchStore := &usageIndexMockBatchStore{scopes: map[uuid.UUID]*ArtifactScope{
-		artifactA: {ArtifactID: artifactA, Selections: selectionsJSON(t, []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: versionID}})},
-		artifactB: {ArtifactID: artifactB, Selections: selectionsJSON(t, []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: versionID}})},
+	batchStore := &usageIndexMockBatchStore{scopes: map[uuid.UUID]*AppRuntime{
+		artifactA: {AppID: artifactA, Selections: selectionsJSON(t, []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: versionID}})},
+		artifactB: {AppID: artifactB, Selections: selectionsJSON(t, []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: versionID}})},
 	}}
 	configStore := &usageIndexMockConfigStore{states: []ConfigState{
 		{ConfigKey: "sdk:zebra", ConfigType: ConfigTypeSDK, LatestResourceID: &artifactA},
@@ -112,51 +90,22 @@ func TestWorkspaceSDKServiceImpacts_BatchPath_SortedDedupedConfigKeys(t *testing
 	}
 }
 
-// TestWorkspaceSDKServiceImpacts_FallsBackToPerArtifactReads proves the
-// non-batch Store path (workspaceArtifactScopesFallback) produces the exact
-// same shape as the batch path, and that a not-found artifact is skipped
-// rather than failing the whole call.
-func TestWorkspaceSDKServiceImpacts_FallsBackToPerArtifactReads(t *testing.T) {
-	serviceID, versionID := uuid.New(), uuid.New()
-	present, missing := uuid.New(), uuid.New()
-
-	fallbackStore := &usageIndexMockFallbackStore{scopes: map[uuid.UUID]*ArtifactScope{
-		present: {ArtifactID: present, Selections: selectionsJSON(t, []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: versionID}})},
-	}}
-	configStore := &usageIndexMockConfigStore{states: []ConfigState{
-		{ConfigKey: "sdk:present", ConfigType: ConfigTypeSDK, LatestResourceID: &present},
-		{ConfigKey: "sdk:missing", ConfigType: ConfigTypeSDK, LatestResourceID: &missing},
-	}}
-
-	impacts, err := WorkspaceSDKServiceImpacts(context.Background(), configStore, fallbackStore)
-	if err != nil {
-		t.Fatalf("WorkspaceSDKServiceImpacts: %v", err)
-	}
-	keys := impacts[serviceID][versionID]
-	if len(keys) != 1 || keys[0] != "sdk:present" {
-		t.Fatalf("expected only sdk:present (sdk:missing's artifact is gone), got %#v", keys)
-	}
-	if len(fallbackStore.gets) != 2 {
-		t.Fatalf("expected one GetArtifactScope call per artifact, got %d", len(fallbackStore.gets))
-	}
-}
-
 // TestWorkspaceSDKSelectionsByServiceVersion_PreservesEndpointDetail is the
-// detail Phase 3's endpoint-narrowing depends on: unlike
+// endpoint-narrowing for changelog notifications depends on: unlike
 // WorkspaceSDKServiceImpacts, the detailed base must keep each config's full
 // SDKSelection (SelectAll / EndpointIDs), not just its key.
 func TestWorkspaceSDKSelectionsByServiceVersion_PreservesEndpointDetail(t *testing.T) {
 	serviceID, versionID := uuid.New(), uuid.New()
-	artifactID := uuid.New()
+	appID := uuid.New()
 	endpointID := uuid.New()
 
-	batchStore := &usageIndexMockBatchStore{scopes: map[uuid.UUID]*ArtifactScope{
-		artifactID: {ArtifactID: artifactID, Selections: selectionsJSON(t, []models.SDKSelection{
+	batchStore := &usageIndexMockBatchStore{scopes: map[uuid.UUID]*AppRuntime{
+		appID: {AppID: appID, Selections: selectionsJSON(t, []models.SDKSelection{
 			{ServiceID: serviceID, ServiceVersionID: versionID, EndpointIDs: []uuid.UUID{endpointID}},
 		})},
 	}}
 	configStore := &usageIndexMockConfigStore{states: []ConfigState{
-		{ConfigKey: "sdk:restricted", ConfigType: ConfigTypeSDK, LatestResourceID: &artifactID},
+		{ConfigKey: "sdk:restricted", ConfigType: ConfigTypeSDK, LatestResourceID: &appID},
 	}}
 
 	detailed, err := WorkspaceSDKSelectionsByServiceVersion(context.Background(), configStore, batchStore)

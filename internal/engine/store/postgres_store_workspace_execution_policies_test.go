@@ -41,6 +41,8 @@ func TestPostgresStore_WorkspaceExecutionPolicyOverride(t *testing.T) {
 	serviceID := uuid.New()
 	versionID := uuid.New()
 	otherVersionID := uuid.New()
+	serviceTimeoutMs := 45000
+	versionTimeoutMs := 5000
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM fused_workspace_execution_policies WHERE service_id = $1`, serviceID)
 	})
@@ -49,6 +51,7 @@ func TestPostgresStore_WorkspaceExecutionPolicyOverride(t *testing.T) {
 	serviceDefault, err := s.UpsertWorkspaceExecutionPolicyOverride(ctx, WorkspaceExecutionPolicyOverride{
 		ServiceID: serviceID,
 		RateLimit: &fusedobject.RateLimitConfig{Strategy: "fixed_window", RequestsPerSecond: 5},
+		TimeoutMs: &serviceTimeoutMs,
 	})
 	if err != nil {
 		t.Fatalf("upsert service-default override: %v", err)
@@ -68,6 +71,9 @@ func TestPostgresStore_WorkspaceExecutionPolicyOverride(t *testing.T) {
 	if effective == nil || effective.RateLimit == nil || effective.RateLimit.RequestsPerSecond != 5 {
 		t.Fatalf("expected service-default fallback, got %#v", effective)
 	}
+	if effective.TimeoutMs == nil || *effective.TimeoutMs != serviceTimeoutMs {
+		t.Fatalf("expected service-default timeout fallback, got %v", effective.TimeoutMs)
+	}
 
 	// Version-tier override for versionID: retry config only, no rate limit --
 	// tiers are whole distinct rows, not merged field-by-field with each other
@@ -76,6 +82,7 @@ func TestPostgresStore_WorkspaceExecutionPolicyOverride(t *testing.T) {
 		ServiceID:        serviceID,
 		ServiceVersionID: &versionID,
 		RetryConfig:      &fusedobject.RetryConfig{Strategy: "exponential", MaxRetries: 3, BackoffMs: 200},
+		TimeoutMs:        &versionTimeoutMs,
 	})
 	if err != nil {
 		t.Fatalf("upsert version-tier override: %v", err)
@@ -109,6 +116,9 @@ func TestPostgresStore_WorkspaceExecutionPolicyOverride(t *testing.T) {
 	}
 	if effective == nil || effective.RetryConfig == nil || effective.RetryConfig.MaxRetries != 3 {
 		t.Fatalf("expected version-tier override to win, got %#v", effective)
+	}
+	if effective.TimeoutMs == nil || *effective.TimeoutMs != versionTimeoutMs {
+		t.Fatalf("expected version-tier timeout to win, got %v", effective.TimeoutMs)
 	}
 	if effective.RateLimit != nil {
 		t.Fatalf("version-tier row should not carry the service-default's rate_limit, got %#v", effective.RateLimit)

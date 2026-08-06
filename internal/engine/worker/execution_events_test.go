@@ -72,7 +72,9 @@ func validExecutionEvent() models.EngineExecutionEvent {
 	now := time.Now()
 	return models.EngineExecutionEvent{
 		ID: uuid.New(), Transport: models.EngineExecutionTransportSDK,
-		Direction: models.EngineExecutionDirectionOutbound, Status: models.EngineExecutionStatusSuccess,
+		AppFamilyID: uuid.New(), AppID: uuid.New(), AppVersion: "1.0.0",
+		ProviderProtocol: models.ProviderProtocolREST,
+		Direction:        models.EngineExecutionDirectionOutbound, Status: models.EngineExecutionStatusSuccess,
 		StartedAt: now.Add(-time.Millisecond), EndedAt: now, CreatedAt: now,
 	}
 }

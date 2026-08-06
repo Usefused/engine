@@ -5,7 +5,7 @@ package engine.v1;
 option go_package = "github.com/Usefused/engine/internal/engine/grpc/v1;enginev1";
 
 service EngineService {
-  // Connect performs the SDK handshake: it authenticates the artifact_id and loads
+  // Connect performs the SDK handshake: it authenticates the exact app_id and loads
   // the SDK's scope manifest + every referenced Fused object into the Engine's
   // connection-scoped, refcounted cache (AD-7). It must be called once after the
   // SDK opens its long-lived channel and before any Execute call.
@@ -33,8 +33,7 @@ service EngineService {
   rpc ListConnectionResources(ListConnectionResourcesRequest) returns (ListConnectionResourcesResponse);
 
   // SubscribeWebhooks opens a durable, receiver-scoped inbound event stream
-  // over the same channel used for Execute -- replacing the separate
-  // wss://.../sdks/ws WebSocket transport. Auth (x-api-key + x-artifact-id)
+  // over the same channel used for Execute. Auth (x-api-key + x-app-id)
   // travels as call metadata, same as every other RPC on this service, not
   // as fields on the first message. The client sends exactly one
   // WebhookSubscribe message first (receiver name + subscribed event types),
@@ -49,20 +48,20 @@ service EngineService {
 }
 
 message ConnectRequest {
-  string artifact_id = 1;
+  string app_id = 1;
   string token = 2;
 }
 
 message ConnectResponse {}
 
 message DisconnectRequest {
-  string artifact_id = 1;
+  string app_id = 1;
 }
 
 message DisconnectResponse {}
 
 message ExecuteRequest {
-  string artifact_id = 1;
+  string app_id = 1;
   string token = 2;
   string endpoint_name = 3;
   bytes params = 4; // JSON-encoded parameters
@@ -108,7 +107,7 @@ message StartConnectSessionRequest {
   string service_id = 2;
   string end_user_ref = 3;
   string return_url = 4;
-  string created_by_artifact_id = 5;
+  string created_by_app_id = 5;
   // resource_input carries only fields declared by x-fused-connect; Engine
   // validates and binds them to callback state before provider redirect.
   map<string, string> resource_input = 6;
@@ -135,7 +134,7 @@ message AuthConnection {
   string bucket_id = 2;
   string service_id = 3;
   string end_user_ref = 4;
-  string created_by_artifact_id = 5;
+  string created_by_app_id = 5;
   string auth_type = 6;
   string token_type = 7;
   repeated string scopes = 8;
@@ -181,10 +180,10 @@ message WebhookClientMessage {
 message WebhookSubscribe {
   // receiver_name is the durable NATS consumer/queue-group identity
   // (accountID + "-" + receiver_name server-side) -- intentionally
-  // independent of artifact_id/the Connect session, so the same named
+  // independent of app_id/the Connect session, so the same named
   // receiver can resume across reconnects and multiple processes can share
-  // one receiver_name for queue-group fan-out. Auth (artifact_id + token)
-  // is carried as x-api-key/x-artifact-id call metadata instead of fields
+  // one receiver_name for queue-group fan-out. Auth (app_id + token)
+  // is carried as x-api-key/x-app-id call metadata instead of fields
   // here, matching every other RPC on this service.
   string receiver_name = 1;
   repeated string events = 2;

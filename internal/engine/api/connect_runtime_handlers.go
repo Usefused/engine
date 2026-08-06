@@ -29,11 +29,11 @@ import (
 const connectSessionTTL = 10 * time.Minute
 
 type connectSessionStartRequest struct {
-	EndUserRef          string            `json:"end_user_ref"`
-	CreatedByArtifactID string            `json:"created_by_artifact_id,omitempty"`
-	ReturnURL           string            `json:"return_url,omitempty"`
-	ResourceInput       map[string]string `json:"resource_input,omitempty"`
-	Scopes              []string          `json:"scopes,omitempty"`
+	EndUserRef     string            `json:"end_user_ref"`
+	CreatedByAppID string            `json:"created_by_app_id,omitempty"`
+	ReturnURL      string            `json:"return_url,omitempty"`
+	ResourceInput  map[string]string `json:"resource_input,omitempty"`
+	Scopes         []string          `json:"scopes,omitempty"`
 }
 
 type connectSessionStartResponse struct {
@@ -56,7 +56,7 @@ func StartConnectSessionHandler(s store.Store, verifier ServiceVerifier, masterK
 		if !ok {
 			return
 		}
-		req, createdByArtifactID, ok := decodeConnectSessionStartRequest(w, r)
+		req, createdByAppID, ok := decodeConnectSessionStartRequest(w, r)
 		if !ok {
 			return
 		}
@@ -65,7 +65,7 @@ func StartConnectSessionHandler(s store.Store, verifier ServiceVerifier, masterK
 			writeConnectRuntimeError(w, err)
 			return
 		}
-		response, err := createConnectSession(ctx, s, call, req.EndUserRef, createdByArtifactID, req.ReturnURL, req.ResourceInput, req.Scopes, resolved, masterKey)
+		response, err := createConnectSession(ctx, s, call, req.EndUserRef, createdByAppID, req.ReturnURL, req.ResourceInput, req.Scopes, resolved, masterKey)
 		if err != nil {
 			var requestErr connectRuntimeHTTPError
 			if errors.As(err, &requestErr) {
@@ -157,9 +157,9 @@ func decodeConnectSessionStartRequest(w http.ResponseWriter, r *http.Request) (c
 		http.Error(w, "return_url must be an absolute http or https URL", http.StatusBadRequest)
 		return req, uuid.Nil, false
 	}
-	createdBy, err := optionalUUIDValue(req.CreatedByArtifactID)
+	createdBy, err := optionalUUIDValue(req.CreatedByAppID)
 	if err != nil {
-		http.Error(w, "created_by_artifact_id must be a valid UUID", http.StatusBadRequest)
+		http.Error(w, "created_by_app_id must be a valid UUID", http.StatusBadRequest)
 		return req, uuid.Nil, false
 	}
 	return req, createdBy, true
@@ -241,7 +241,7 @@ func canonicalConnectAuthType(authType string) string {
 
 // createConnectSession stores only hashed browser state and encrypted PKCE
 // material so a stolen session row is not enough to complete token exchange.
-func createConnectSession(ctx context.Context, s store.Store, call connectAdminCall, endUserRef string, createdByArtifactID uuid.UUID, returnURL string, resourceInput map[string]string, requestedScopes []string, resolved connectRuntimeConfig, masterKey []byte) (connectSessionStartResponse, error) {
+func createConnectSession(ctx context.Context, s store.Store, call connectAdminCall, endUserRef string, createdByAppID uuid.UUID, returnURL string, resourceInput map[string]string, requestedScopes []string, resolved connectRuntimeConfig, masterKey []byte) (connectSessionStartResponse, error) {
 	state, verifier, nonce, err := newConnectSessionSecrets()
 	if err != nil {
 		return connectSessionStartResponse{}, err
@@ -255,7 +255,7 @@ func createConnectSession(ctx context.Context, s store.Store, call connectAdminC
 	if err != nil {
 		return connectSessionStartResponse{}, err
 	}
-	requestedScopes, err = applyArtifactConnectScopePolicy(ctx, s, call.bucketID, call.serviceID, createdByArtifactID, requestedScopes)
+	requestedScopes, err = applyAppConnectScopePolicy(ctx, s, call.bucketID, call.serviceID, createdByAppID, requestedScopes)
 	if err != nil {
 		return connectSessionStartResponse{}, err
 	}
@@ -271,7 +271,7 @@ func createConnectSession(ctx context.Context, s store.Store, call connectAdminC
 		NonceHash:             connectHash(nonce),
 		EncryptedDEK:          encrypted.wrappedDEK,
 		EncryptedPKCEVerifier: encrypted.value,
-		CreatedByArtifactID:   createdByArtifactID,
+		CreatedByAppID:        createdByAppID,
 		ReturnURL:             returnURL,
 		ResourceInputJSON:     resourceInputJSON,
 		RequestedScopes:       effectiveScopes,
@@ -289,25 +289,25 @@ func createConnectSession(ctx context.Context, s store.Store, call connectAdminC
 	return connectSessionStartResponse{AuthorizeURL: authURL, ExpiresAt: expiresAt, Scopes: effectiveScopes}, nil
 }
 
-// applyArtifactConnectScopePolicy makes an artifact's validated scope subset
+// applyAppConnectScopePolicy makes an app version's validated scope subset
 // the consent ceiling whenever a connect session names that SDK/MCP runtime.
 // Callers may narrow it further, but cannot silently expand it at runtime.
-func applyArtifactConnectScopePolicy(ctx context.Context, s store.Store, bucketID, serviceID, artifactID uuid.UUID, requested []string) ([]string, error) {
-	if artifactID == uuid.Nil {
+func applyAppConnectScopePolicy(ctx context.Context, s store.Store, bucketID, serviceID, appID uuid.UUID, requested []string) ([]string, error) {
+	if appID == uuid.Nil {
 		return requested, nil
 	}
-	scope, err := s.GetArtifactScope(ctx, artifactID)
-	if errors.Is(err, store.ErrArtifactScopeNotFound) {
-		return nil, connectRuntimeHTTPError{status: http.StatusForbidden, message: "artifact scope is unavailable"}
+	scope, err := s.GetAppRuntime(ctx, appID)
+	if errors.Is(err, store.ErrAppRuntimeNotFound) {
+		return nil, connectRuntimeHTTPError{status: http.StatusForbidden, message: "app scope is unavailable"}
 	}
 	if err != nil || scope.BucketID != bucketID {
-		return nil, connectRuntimeHTTPError{status: http.StatusForbidden, message: "artifact scope is unavailable"}
+		return nil, connectRuntimeHTTPError{status: http.StatusForbidden, message: "app scope is unavailable"}
 	}
 	var selections []models.SDKSelection
 	if err := json.Unmarshal(scope.Selections, &selections); err != nil {
-		return nil, connectRuntimeHTTPError{status: http.StatusConflict, message: "artifact scope is invalid"}
+		return nil, connectRuntimeHTTPError{status: http.StatusConflict, message: "app scope is invalid"}
 	}
-	policy := artifactScopesForService(selections, serviceID)
+	policy := appScopesForService(selections, serviceID)
 	if len(policy) == 0 {
 		return requested, nil
 	}
@@ -317,16 +317,16 @@ func applyArtifactConnectScopePolicy(ctx context.Context, s store.Store, bucketI
 	allowed := stringSet(policy)
 	for _, value := range normalizedConnectScopes(requested) {
 		if !allowed[value] {
-			return nil, connectRuntimeHTTPError{status: http.StatusBadRequest, message: fmt.Sprintf("scope %q is outside the artifact policy", value)}
+			return nil, connectRuntimeHTTPError{status: http.StatusBadRequest, message: fmt.Sprintf("scope %q is outside the app policy", value)}
 		}
 	}
 	return requested, nil
 }
 
-// artifactScopesForService reads the one immutable scope document already
+// appScopesForService reads the one immutable scope document already
 // loaded for this request; matching by service prevents one selected
-// provider's consent policy from affecting another provider in the artifact.
-func artifactScopesForService(selections []models.SDKSelection, serviceID uuid.UUID) []string {
+// provider's consent policy from affecting another provider in the app.
+func appScopesForService(selections []models.SDKSelection, serviceID uuid.UUID) []string {
 	for _, selection := range selections {
 		if selection.ServiceID == serviceID {
 			return selection.ConnectScopes
@@ -558,7 +558,7 @@ func encryptAuthConnectionFromToken(session *store.ConnectSession, resolved conn
 		BucketID:              session.BucketID,
 		ServiceID:             session.ServiceID,
 		EndUserRef:            session.EndUserRef,
-		CreatedByArtifactID:   session.CreatedByArtifactID,
+		CreatedByAppID:        session.CreatedByAppID,
 		AuthType:              resolved.config.AuthType,
 		EncryptedDEK:          wrappedDEK,
 		EncryptedAccessToken:  access,

@@ -23,26 +23,26 @@ import (
 // as REST/GraphQL instead of minting provider URLs client-side.
 func TestEngineGRPCStartConnectSessionCreatesAuthorizationURL(t *testing.T) {
 	fixture := newConnectRuntimeFixture(t)
-	artifactID := attachConnectTestArtifact(&fixture)
+	appID := attachConnectTestArtifact(&fixture)
 	runtimeStore := &grpcRuntimeStore{
-		Store:      fixture.store,
-		accountID:  fixture.store.accountID,
-		artifactID: artifactID,
-		scope:      fixture.store.artifactScopes[artifactID],
+		Store:     fixture.store,
+		accountID: fixture.store.accountID,
+		appID:     appID,
+		scope:     fixture.store.appRuntimes[appID],
 	}
 	// configStore/natsClient are nil: this test only exercises StartConnectSession,
 	// which (like GetConnection/ListConnectionResources) never touches the
 	// webhook-only fields SubscribeWebhooks added to EngineGRPCServer.
 	srv := NewEngineGRPCServer(runtimeStore, fixture.verifier, fixture.masterKey, nil, nil)
-	ctx := grpcTestContext(artifactID)
+	ctx := grpcTestContext(appID)
 
 	resp, err := srv.StartConnectSession(ctx, &enginev1.StartConnectSessionRequest{
-		BucketId:            fixture.bucketID.String(),
-		ServiceId:           fixture.serviceID.String(),
-		EndUserRef:          "user_123",
-		ReturnUrl:           "https://app.example.com/oauth/done",
-		CreatedByArtifactId: artifactID.String(),
-		Scopes:              []string{"openid"},
+		BucketId:       fixture.bucketID.String(),
+		ServiceId:      fixture.serviceID.String(),
+		EndUserRef:     "user_123",
+		ReturnUrl:      "https://app.example.com/oauth/done",
+		CreatedByAppId: appID.String(),
+		Scopes:         []string{"openid"},
 	})
 	if err != nil {
 		t.Fatalf("StartConnectSession() error = %v", err)
@@ -89,24 +89,24 @@ func TestEngineGRPCGetConnectionReturnsMetadataOnly(t *testing.T) {
 			EncryptedAccessToken: "encrypted-access-token",
 		}},
 	}
-	artifactID := uuid.New()
+	appID := uuid.New()
 	selections, err := json.Marshal([]models.SDKSelection{{ServiceID: serviceID}})
 	if err != nil {
 		t.Fatalf("marshal selections: %v", err)
 	}
 	runtimeStore := &grpcRuntimeStore{
-		Store:      s,
-		accountID:  s.accountID,
-		artifactID: artifactID,
-		scope: &store.ArtifactScope{
-			AccountID: s.accountID, ArtifactID: artifactID, BucketID: bucketID, Selections: selections,
+		Store:     s,
+		accountID: s.accountID,
+		appID:     appID,
+		scope: &store.AppRuntime{
+			AccountID: s.accountID, AppID: appID, BucketID: bucketID, Selections: selections,
 		},
 	}
 	// configStore/natsClient are nil -- see the identical note above; this
 	// test only exercises GetConnection.
 	srv := NewEngineGRPCServer(runtimeStore, &mockVerifier{}, []byte("12345678901234567890123456789012"), nil, nil)
 
-	resp, err := srv.GetConnection(grpcTestContext(artifactID), &enginev1.GetConnectionRequest{ConnectionId: connectionID.String()})
+	resp, err := srv.GetConnection(grpcTestContext(appID), &enginev1.GetConnectionRequest{ConnectionId: connectionID.String()})
 	if err != nil {
 		t.Fatalf("GetConnection() error = %v", err)
 	}
@@ -118,7 +118,7 @@ func TestEngineGRPCGetConnectionReturnsMetadataOnly(t *testing.T) {
 	}
 	controlCredentialContext := metadata.NewIncomingContext(context.Background(), metadata.Pairs(
 		"x-api-key", "fused_control_credential",
-		"x-artifact-id", artifactID.String(),
+		"x-app-id", appID.String(),
 	))
 	_, err = srv.GetConnection(controlCredentialContext, &enginev1.GetConnectionRequest{ConnectionId: connectionID.String()})
 	if status.Code(err) != codes.Unauthenticated {
@@ -130,42 +130,42 @@ func TestEngineGRPCGetConnectionReturnsMetadataOnly(t *testing.T) {
 		t.Fatalf("marshal other selections: %v", err)
 	}
 	runtimeStore.scope.Selections = otherSelections
-	resp, err = srv.GetConnection(grpcTestContext(artifactID), &enginev1.GetConnectionRequest{ConnectionId: connectionID.String()})
+	resp, err = srv.GetConnection(grpcTestContext(appID), &enginev1.GetConnectionRequest{ConnectionId: connectionID.String()})
 	if err != nil || resp.GetFound() {
 		t.Fatalf("cross-service GetConnection = (%#v, %v), want hidden", resp, err)
 	}
-	_, err = srv.ListConnectionResources(grpcTestContext(artifactID), &enginev1.ListConnectionResourcesRequest{ConnectionId: connectionID.String()})
+	_, err = srv.ListConnectionResources(grpcTestContext(appID), &enginev1.ListConnectionResourcesRequest{ConnectionId: connectionID.String()})
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("cross-service ListConnectionResources error = %v, want NotFound", err)
 	}
 }
 
-func grpcTestContext(artifactID uuid.UUID) context.Context {
+func grpcTestContext(appID uuid.UUID) context.Context {
 	// Tests mirror generated SDK metadata so handler auth is exercised without
 	// standing up a real gRPC listener.
 	return metadata.NewIncomingContext(context.Background(), metadata.Pairs(
 		"x-api-key", "fsk_test",
-		"x-artifact-id", artifactID.String(),
+		"x-app-id", appID.String(),
 	))
 }
 
 type grpcRuntimeStore struct {
 	store.Store
-	accountID  uuid.UUID
-	artifactID uuid.UUID
-	scope      *store.ArtifactScope
+	accountID uuid.UUID
+	appID     uuid.UUID
+	scope     *store.AppRuntime
 }
 
-func (s *grpcRuntimeStore) ValidateToken(_ context.Context, artifactID uuid.UUID, tokenHash string) (uuid.UUID, error) {
-	if artifactID != s.artifactID || tokenHash != auth.HashToken("fsk_test") {
-		return uuid.Nil, errors.New("unauthorized")
+func (s *grpcRuntimeStore) AuthorizeApp(_ context.Context, appID uuid.UUID, tokenHash string) (*store.AuthProjection, error) {
+	if appID != s.appID || tokenHash != auth.HashToken("fsk_test") {
+		return nil, errors.New("unauthorized")
 	}
-	return s.accountID, nil
+	return &store.AuthProjection{AccountID: s.accountID, AppFamilyID: appID, AppID: appID, Version: "1.0.0", Kind: "sdk", AppStatus: "active"}, nil
 }
 
-func (s *grpcRuntimeStore) GetArtifactScope(_ context.Context, artifactID uuid.UUID) (*store.ArtifactScope, error) {
-	if artifactID != s.artifactID || s.scope == nil {
-		return nil, store.ErrArtifactScopeNotFound
+func (s *grpcRuntimeStore) GetAppRuntime(_ context.Context, appID uuid.UUID) (*store.AppRuntime, error) {
+	if appID != s.appID || s.scope == nil {
+		return nil, store.ErrAppRuntimeNotFound
 	}
 	return s.scope, nil
 }

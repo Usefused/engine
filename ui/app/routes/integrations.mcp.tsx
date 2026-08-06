@@ -14,7 +14,10 @@ import { useToast } from "~/components/Toast";
 
 interface McpServerItem {
   id: string;
+  app_family_id: string;
   name: string;
+  version: string;
+  status: string;
   active: boolean;
   mcp_url?: string;
   deactivated_at?: string;
@@ -32,9 +35,9 @@ interface McpServerCardProps {
   onCopyUrl: (url: string) => void;
 }
 
-function McpServerStatusBadge({ active }: { active: boolean }) {
-  if (!active) {
-    return <span className="flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full text-slate-500 bg-slate-100">Killed</span>;
+function McpServerStatusBadge({ status }: { status: string }) {
+  if (status === "deprecated") {
+    return <span className="flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full text-amber-700 bg-amber-50">Deprecated</span>;
   }
   return (
     <span className="flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full text-emerald-600 bg-emerald-50">
@@ -75,7 +78,7 @@ function McpConnectionUrlRow({ server, onCopyUrl }: { server: McpServerItem; onC
 // anymore: the Engine schema has no mutation for it, since the scope's auth
 // token is tied to the deploy itself.
 function McpKillReactivateButton({ server, onKill, onReactivate }: { server: McpServerItem; onKill: (id: string, name: string) => void; onReactivate: (id: string) => void }) {
-  if (server.active) {
+  if (server.status === "active") {
     return (
       <button
         data-track="kill_mcp_server"
@@ -83,7 +86,7 @@ function McpKillReactivateButton({ server, onKill, onReactivate }: { server: Mcp
         className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 text-amber-600 hover:bg-amber-100 hover:text-amber-700 rounded-lg text-xs font-semibold transition-colors border border-amber-100 cursor-pointer"
       >
         <ServerCrash className="w-3.5 h-3.5" />
-        Kill
+        Deprecate
       </button>
     );
   }
@@ -94,7 +97,7 @@ function McpKillReactivateButton({ server, onKill, onReactivate }: { server: Mcp
       className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 hover:text-emerald-700 rounded-lg text-xs font-semibold transition-colors border border-emerald-100 cursor-pointer"
     >
       <Play className="w-3.5 h-3.5 fill-current" />
-      Reactivate
+      Restore
     </button>
   );
 }
@@ -118,7 +121,7 @@ function McpServerCard({ server, isSelected, anySelected, onToggleSelect, onDele
           <div>
             <h3 className="font-semibold text-slate-900 leading-tight">{server.name || "Untitled MCP server"}</h3>
             <div className="flex items-center gap-2 mt-1">
-              <McpServerStatusBadge active={server.active} />
+              <McpServerStatusBadge status={server.status} />
             </div>
           </div>
         </div>
@@ -255,31 +258,33 @@ export default function McpServers() {
   const [isDeletingMultiple, setIsDeletingMultiple] = useState(false);
   const limit = 10;
 
-  // mcpServers/killMcpServer/reactivateMcpServer/deleteMcpServer all live on
-  // the Engine's own MCP GraphQL schema (internal/engine/api/mcp_graphql.go),
-  // not the Registry-proxied api.graphql this page used to call -- MCP
-  // creation no longer generates a Registry SDK row for these servers.
   const fetchServers = () => {
     setLoading(true);
     const queryStr = `
       query {
-        mcpServers(limit: ${limit}, offset: ${(page - 1) * limit}) {
+        apps(kind: "mcp", limit: ${limit}, offset: ${(page - 1) * limit}) {
           items {
-            id
+            app_id
+            app_family_id
             name
-            active
-            mcp_url
-            deactivated_at
+            version
+            status
             created_at
           }
           total
         }
       }
     `;
-    api.mcpGraphql<{ mcpServers: { items: McpServerItem[], total: number } }>(queryStr)
+    type MCPApp = Omit<McpServerItem, "id" | "active" | "mcp_url"> & { app_id: string; status: string };
+    api.mcpGraphql<{ apps: { items: MCPApp[], total: number } }>(queryStr)
       .then(res => {
-        setMcpServers(res.mcpServers.items);
-        setTotal(res.mcpServers.total);
+        setMcpServers(res.apps.items.map(app => ({
+          ...app,
+          id: app.app_id,
+          active: app.status === "active" || app.status === "deprecated",
+          mcp_url: `${window.location.origin}/mcp/${app.app_id}/sse`,
+        })));
+        setTotal(res.apps.total);
       })
       .catch(e => setError(e instanceof Error ? e.message : "Failed to load MCP servers"))
       .finally(() => setLoading(false));
@@ -291,14 +296,14 @@ export default function McpServers() {
   }, [page]);
 
   const handleKill = async (id: string, name: string) => {
-    const confirmed = await toast.confirm(`Are you sure you want to kill the MCP server "${name}"? This will terminate any active connections immediately and block new ones until you reactivate it.`);
+    const confirmed = await toast.confirm(`Deprecate MCP app "${name}"? Existing clients can continue while teammates move to another version.`);
     if (!confirmed) return;
     try {
-      await api.mcpGraphql(`mutation { killMcpServer(id: "${id}") { id } }`);
+      await api.mcpGraphql(`mutation { deprecateApp(app_id: "${id}", message: "A newer MCP app version is available") }`);
       fetchServers();
-      toast.success(`Server "${name}" killed successfully.`);
+      toast.success(`MCP app "${name}" deprecated.`);
     } catch (err) {
-      toast.error(`Failed to kill server: ${err instanceof Error ? err.message : "Unknown error"}`);
+      toast.error(`Failed to deprecate MCP app: ${err instanceof Error ? err.message : "Unknown error"}`);
     }
   };
 
@@ -306,7 +311,7 @@ export default function McpServers() {
     const confirmed = await toast.confirm(`Are you sure you want to completely delete the MCP server "${name}"? This cannot be undone.`);
     if (!confirmed) return;
     try {
-      await api.mcpGraphql(`mutation { deleteMcpServer(id: "${id}") }`);
+      await api.mcpGraphql(`mutation { deactivateApp(app_id: "${id}") }`);
       fetchServers();
       toast.success(`Server "${name}" deleted successfully.`);
       setSelectedIds(prev => prev.filter(i => i !== id));
@@ -322,7 +327,7 @@ export default function McpServers() {
 
     setIsDeletingMultiple(true);
     try {
-      await Promise.all(selectedIds.map(id => api.mcpGraphql(`mutation { deleteMcpServer(id: "${id}") }`)));
+      await Promise.all(selectedIds.map(id => api.mcpGraphql(`mutation { deactivateApp(app_id: "${id}") }`)));
       fetchServers();
       setSelectedIds([]);
       toast.success(`Successfully deleted ${selectedIds.length} server(s).`);
@@ -336,9 +341,9 @@ export default function McpServers() {
 
   const handleReactivate = async (id: string) => {
     try {
-      await api.mcpGraphql(`mutation { reactivateMcpServer(id: "${id}") { id } }`);
+      await api.mcpGraphql(`mutation { undeprecateApp(app_id: "${id}") }`);
       fetchServers();
-      toast.success("Server reactivated successfully.");
+      toast.success("MCP app restored.");
     } catch (err) {
       toast.error(`Failed to reactivate server: ${err instanceof Error ? err.message : "Unknown error"}`);
     }

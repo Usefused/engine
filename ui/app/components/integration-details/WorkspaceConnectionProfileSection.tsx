@@ -12,7 +12,7 @@ interface Props {
 }
 
 // WorkspaceConnectionProfileSection is deliberately independent of buckets:
-// one override affects every artifact selecting this service/version/auth tuple.
+// one override affects every app selecting this service/version/auth tuple.
 export function WorkspaceConnectionProfileSection({
   serviceId,
   serviceVersionId,
@@ -66,7 +66,7 @@ export function WorkspaceConnectionProfileSection({
   const reset = async () => {
     if (!profile?.has_workspace_override) return;
     const confirmed = await toast.confirm(
-      "Reset this workspace customization? Every artifact selecting this service version and auth type will use the provider default."
+      "Reset this workspace customization? Every app selecting this service version and auth type will use the provider default."
     );
     if (!confirmed) return;
     setSaving(true);

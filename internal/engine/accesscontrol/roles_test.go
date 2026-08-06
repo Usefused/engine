@@ -68,7 +68,7 @@ func TestWorkspaceShareRolesCannotManageSharedResources(t *testing.T) {
 		forbidden []Permission
 	}{
 		{role: RoleBucketUser, allows: PermissionBucketUse, forbidden: []Permission{PermissionBucketManage, PermissionCredentialsManage}},
-		{role: RoleArtifactUser, allows: PermissionArtifactUse, forbidden: []Permission{PermissionArtifactManage, PermissionArtifactTokensManage}},
+		{role: RoleAppUser, allows: PermissionAppUse, forbidden: []Permission{PermissionAppManage, PermissionAppTokensManage}},
 	}
 	for _, test := range tests {
 		role := roleBySlug(t, test.role)

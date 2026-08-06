@@ -3,14 +3,15 @@
 # encryption in Engine-local storage, and connect session state signing.
 # Override in production via the FUSED_ENCRYPTION_KEY environment variable.
 # Generate a secure key: openssl rand -base64 32
-encryption_key: "b3BlbnN5bmMtZGVmYXVsdC1lbmNyeXB0LWtleS0zMmI="
+encryption_key: <32-byte AES key>
 database:
-  url: "postgres://opensync:password@localhost:5432/opensync?sslmode=disable"
-ui_url: "http://localhost:5173"
+  url: "postgres://fused:password@localhost:5432/fused?sslmode=disable"
 
 engine:
+  registry_endpoint: https://registry.usefused.com
+  license_key: <license_key>
   execution_retention_days: 30
   execution_cleanup_batch: 1000
 
 observability:
-  otel_target: "localhost:4317"
+  otel_target: <OTLP target>

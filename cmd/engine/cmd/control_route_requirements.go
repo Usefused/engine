@@ -89,8 +89,8 @@ func resourceReadPermission(resourceType accesscontrol.ResourceType) accesscontr
 		return accesscontrol.PermissionServiceRead
 	case accesscontrol.ResourceBucket:
 		return accesscontrol.PermissionBucketRead
-	case accesscontrol.ResourceArtifact:
-		return accesscontrol.PermissionArtifactRead
+	case accesscontrol.ResourceApp:
+		return accesscontrol.PermissionAppRead
 	default:
 		return ""
 	}
@@ -107,9 +107,6 @@ func (r *storeBackedControlRequirementResolver) ResolveControlRequirements(
 	params map[string]string,
 	request *http.Request,
 ) ([]accesscontrol.Requirement, error) {
-	if kind == dynamicArtifactDownload {
-		return r.artifactDownloadRequirements(ctx, params)
-	}
 	switch kind {
 	case dynamicServiceCreate:
 		return serviceCreateRequirements(request)
@@ -121,19 +118,23 @@ func (r *storeBackedControlRequirementResolver) ResolveControlRequirements(
 		return r.workspaceApplyRequirements(ctx, actor, request)
 	case dynamicWorkspacePlan:
 		return r.workspacePlanRequirements(ctx, actor, request)
+	case dynamicAppAccess:
+		return r.appAccessRequirements(ctx, actor, params, request)
+	case dynamicAppTokenAccess:
+		return r.appTokenAccessRequirements(ctx, actor, request)
 	default:
-		return r.resolveArtifactControlRequirements(ctx, actor, kind, params, request)
+		return r.resolveDesiredConfigRequirements(ctx, actor, kind, params, request)
 	}
 }
 
-func (r *storeBackedControlRequirementResolver) resolveArtifactControlRequirements(ctx context.Context, actor accesscontrol.Actor, kind dynamicRequirementKind, params map[string]string, request *http.Request) ([]accesscontrol.Requirement, error) {
+func (r *storeBackedControlRequirementResolver) resolveDesiredConfigRequirements(ctx context.Context, actor accesscontrol.Actor, kind dynamicRequirementKind, params map[string]string, request *http.Request) ([]accesscontrol.Requirement, error) {
 	switch kind {
 	case dynamicConfigPlanAction:
 		return r.configPlanActionRequirements(ctx, actor, params, request)
-	case dynamicArtifactPlan:
-		return r.artifactPlanRequestRequirements(ctx, actor, request)
-	case dynamicArtifactApply:
-		return r.artifactApplyRequirements(ctx, actor, request)
+	case dynamicDesiredConfigPlan:
+		return r.desiredConfigPlanRequestRequirements(ctx, actor, request)
+	case dynamicDesiredConfigApply:
+		return r.desiredConfigApplyRequirements(ctx, actor, request)
 	case dynamicSDKGenerate:
 		return r.sdkGenerateRequirements(ctx, actor, request)
 	default:
@@ -141,25 +142,47 @@ func (r *storeBackedControlRequirementResolver) resolveArtifactControlRequiremen
 	}
 }
 
-func (r *storeBackedControlRequirementResolver) artifactDownloadRequirements(ctx context.Context, params map[string]string) ([]accesscontrol.Requirement, error) {
-	if r.configStore == nil {
+func (r *storeBackedControlRequirementResolver) appAccessRequirements(ctx context.Context, actor accesscontrol.Actor, params map[string]string, request *http.Request) ([]accesscontrol.Requirement, error) {
+	appID, err := uuid.Parse(params["app_id"])
+	if err != nil {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
-	name, err := url.PathUnescape(params["artifact_name"])
-	if err != nil || strings.TrimSpace(name) == "" {
+	permission := accesscontrol.PermissionAppManage
+	if request.Method == http.MethodGet {
+		permission = accesscontrol.PermissionAppRead
+	}
+	return r.appFamilyRequirement(ctx, actor.AccountID, appID, permission)
+}
+
+func (r *storeBackedControlRequirementResolver) appTokenAccessRequirements(ctx context.Context, actor accesscontrol.Actor, request *http.Request) ([]accesscontrol.Requirement, error) {
+	familyID, err := uuid.Parse(request.URL.Query().Get("app_family_id"))
+	if err != nil {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
-	configKey := "sdk:" + name
-	if strings.HasPrefix(name, "sdk:") {
-		configKey = name
+	if r.store == nil {
+		return nil, accesscontrol.ErrPolicyDenied
 	}
-	state, err := r.configStore.GetConfigState(ctx, configKey)
-	if err != nil || state == nil || state.LatestResourceID == nil || *state.LatestResourceID == uuid.Nil {
+	family, err := r.store.GetAppFamily(ctx, familyID)
+	if err != nil || family == nil || family.AccountID != actor.AccountID {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
 	return []accesscontrol.Requirement{{
-		Permission: accesscontrol.PermissionArtifactRead,
-		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceArtifact, ID: *state.LatestResourceID},
+		Permission: accesscontrol.PermissionAppTokensManage,
+		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID},
+	}}, nil
+}
+
+func (r *storeBackedControlRequirementResolver) appFamilyRequirement(ctx context.Context, accountID, appID uuid.UUID, permission accesscontrol.Permission) ([]accesscontrol.Requirement, error) {
+	if r.store == nil {
+		return nil, accesscontrol.ErrPolicyDenied
+	}
+	app, err := r.store.GetApp(ctx, appID)
+	if err != nil || app == nil || accountID != uuid.Nil && app.AccountID != accountID {
+		return nil, accesscontrol.ErrPolicyDenied
+	}
+	return []accesscontrol.Requirement{{
+		Permission: permission,
+		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: app.AppFamilyID},
 	}}, nil
 }
 
@@ -297,11 +320,11 @@ func (r *storeBackedControlRequirementResolver) configPlanActionRequirements(
 		return nil, accesscontrol.ErrPolicyDenied
 	}
 	if plan.ConfigType != store.ConfigTypeWorkspace {
-		requirements, err := r.artifactPlanRequirements(ctx, actor.WorkspaceID, plan)
+		requirements, err := r.desiredConfigPlanRequirements(ctx, actor.WorkspaceID, plan)
 		if err != nil {
 			return nil, err
 		}
-		selections, err := storedArtifactSelectionRequirements(plan, accesscontrol.PermissionServiceConsume, accesscontrol.PermissionBucketUse)
+		selections, err := storedDesiredConfigSelectionRequirements(plan, accesscontrol.PermissionServiceConsume, accesscontrol.PermissionBucketUse)
 		if err != nil {
 			return nil, err
 		}
@@ -316,7 +339,7 @@ func (r *storeBackedControlRequirementResolver) configPlanActionRequirements(
 	return workspaceActionRequirements(actor.WorkspaceID, payload.Actions)
 }
 
-func (r *storeBackedControlRequirementResolver) artifactApplyRequirements(ctx context.Context, actor accesscontrol.Actor, request *http.Request) ([]accesscontrol.Requirement, error) {
+func (r *storeBackedControlRequirementResolver) desiredConfigApplyRequirements(ctx context.Context, actor accesscontrol.Actor, request *http.Request) ([]accesscontrol.Requirement, error) {
 	plan, err := r.planFromRequest(ctx, request)
 	if err != nil || plan.ConfigType == store.ConfigTypeWorkspace {
 		return nil, accesscontrol.ErrPolicyDenied
@@ -328,18 +351,18 @@ func (r *storeBackedControlRequirementResolver) artifactApplyRequirements(ctx co
 	// A concurrent action replacement must not make apply execute a different
 	// permission snapshot from the one authorized at this boundary.
 	*request = *request.WithContext(api.ContextWithAuthorizedPlanRevision(request.Context(), plan.Revision))
-	requirements, err := r.artifactPlanRequirements(ctx, actor.WorkspaceID, plan)
+	requirements, err := r.desiredConfigPlanRequirements(ctx, actor.WorkspaceID, plan)
 	if err != nil {
 		return nil, err
 	}
-	selections, err := storedArtifactSelectionRequirements(plan, accesscontrol.PermissionServiceConsume, accesscontrol.PermissionBucketUse)
+	selections, err := storedDesiredConfigSelectionRequirements(plan, accesscontrol.PermissionServiceConsume, accesscontrol.PermissionBucketUse)
 	if err != nil {
 		return nil, err
 	}
 	return append(requirements, selections...), nil
 }
 
-func (r *storeBackedControlRequirementResolver) artifactPlanRequestRequirements(ctx context.Context, actor accesscontrol.Actor, request *http.Request) ([]accesscontrol.Requirement, error) {
+func (r *storeBackedControlRequirementResolver) desiredConfigPlanRequestRequirements(ctx context.Context, actor accesscontrol.Actor, request *http.Request) ([]accesscontrol.Requirement, error) {
 	var envelope struct {
 		ConfigKey string          `json:"config_key"`
 		Config    json.RawMessage `json:"config"`
@@ -347,18 +370,18 @@ func (r *storeBackedControlRequirementResolver) artifactPlanRequestRequirements(
 	if err := decodeAndRestoreAuthorizationBody(request, &envelope); err != nil {
 		return nil, err
 	}
-	mutation, err := r.artifactPlanMutationRequirement(ctx, actor.WorkspaceID, envelope.ConfigKey)
+	mutation, err := r.desiredConfigPlanMutationRequirement(ctx, actor.WorkspaceID, envelope.ConfigKey)
 	if err != nil {
 		return nil, err
 	}
-	selections, err := r.artifactDocumentRequirements(ctx, actor.WorkspaceID, envelope.Config, accesscontrol.PermissionServiceRead, accesscontrol.PermissionBucketRead)
+	selections, err := r.desiredConfigDocumentRequirements(ctx, actor.WorkspaceID, envelope.Config, accesscontrol.PermissionServiceRead, accesscontrol.PermissionBucketRead)
 	if err != nil {
 		return nil, err
 	}
 	return append(mutation, selections...), nil
 }
 
-func (r *storeBackedControlRequirementResolver) artifactPlanMutationRequirement(ctx context.Context, workspaceID uuid.UUID, configKey string) ([]accesscontrol.Requirement, error) {
+func (r *storeBackedControlRequirementResolver) desiredConfigPlanMutationRequirement(ctx context.Context, workspaceID uuid.UUID, configKey string) ([]accesscontrol.Requirement, error) {
 	if r.configStore == nil || strings.TrimSpace(configKey) == "" {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
@@ -366,19 +389,16 @@ func (r *storeBackedControlRequirementResolver) artifactPlanMutationRequirement(
 	if err != nil {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
-	// Engine state, not a client-supplied artifact ID, decides whether this is
+	// Engine state, not a client-supplied app ID, decides whether this is
 	// a create or update. The handler repeats this distinction during ownership
 	// preflight before persisting a plan.
 	if state == nil {
-		return []accesscontrol.Requirement{workspaceAccessRequirement(workspaceID, accesscontrol.PermissionArtifactCreate)}, nil
+		return []accesscontrol.Requirement{workspaceAccessRequirement(workspaceID, accesscontrol.PermissionAppCreate)}, nil
 	}
 	if state.LatestResourceID != nil && *state.LatestResourceID != uuid.Nil {
-		return []accesscontrol.Requirement{{
-			Permission: accesscontrol.PermissionArtifactManage,
-			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceArtifact, ID: *state.LatestResourceID},
-		}}, nil
+		return r.appFamilyRequirement(ctx, uuid.Nil, *state.LatestResourceID, accesscontrol.PermissionAppManage)
 	}
-	return []accesscontrol.Requirement{workspaceAccessRequirement(workspaceID, accesscontrol.PermissionArtifactManage)}, nil
+	return []accesscontrol.Requirement{workspaceAccessRequirement(workspaceID, accesscontrol.PermissionAppManage)}, nil
 }
 
 func (r *storeBackedControlRequirementResolver) workspacePlanRequirements(ctx context.Context, actor accesscontrol.Actor, request *http.Request) ([]accesscontrol.Requirement, error) {
@@ -429,7 +449,11 @@ func (r *storeBackedControlRequirementResolver) workspacePlanRequirements(ctx co
 	if err != nil {
 		return nil, err
 	}
-	requirements := []accesscontrol.Requirement{workspaceAccessRequirement(actor.WorkspaceID, accesscontrol.PermissionWorkspaceRead)}
+	return r.workspacePlanResourceRequirements(ctx, actor.WorkspaceID, serviceIDs, needsServiceCreateAuthority, bucketNames)
+}
+
+func (r *storeBackedControlRequirementResolver) workspacePlanResourceRequirements(ctx context.Context, workspaceID uuid.UUID, serviceIDs []string, needsServiceCreateAuthority bool, bucketNames []string) ([]accesscontrol.Requirement, error) {
+	requirements := []accesscontrol.Requirement{workspaceAccessRequirement(workspaceID, accesscontrol.PermissionWorkspaceRead)}
 	for _, serviceID := range serviceIDs {
 		resolved, err := oneResourceRequirement(accesscontrol.PermissionServiceManage, accesscontrol.ResourceService, serviceID)
 		if err != nil {
@@ -443,9 +467,9 @@ func (r *storeBackedControlRequirementResolver) workspacePlanRequirements(ctx co
 		// grant could possibly have been issued for it yet. Adding a new
 		// service to a workspace is a workspace-level decision -- same
 		// reasoning bucketNameRequirements already applies to buckets below.
-		requirements = append(requirements, workspaceAccessRequirement(actor.WorkspaceID, accesscontrol.PermissionServiceManage))
+		requirements = append(requirements, workspaceAccessRequirement(workspaceID, accesscontrol.PermissionServiceManage))
 	}
-	bucketRequirements, err := r.bucketNameRequirements(ctx, actor.WorkspaceID, bucketNames, accesscontrol.PermissionBucketManage)
+	bucketRequirements, err := r.bucketNameRequirements(ctx, workspaceID, bucketNames, accesscontrol.PermissionBucketManage)
 	if err != nil {
 		return nil, err
 	}
@@ -630,7 +654,7 @@ func jsonValuesEqual(first, second json.RawMessage) bool {
 	return reflect.DeepEqual(left, right)
 }
 
-func (r *storeBackedControlRequirementResolver) artifactDocumentRequirements(
+func (r *storeBackedControlRequirementResolver) desiredConfigDocumentRequirements(
 	ctx context.Context,
 	workspaceID uuid.UUID,
 	raw json.RawMessage,
@@ -658,10 +682,10 @@ func (r *storeBackedControlRequirementResolver) artifactDocumentRequirements(
 			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: service.ServiceID},
 		})
 	}
-	return r.appendArtifactDocumentBucketRequirements(ctx, workspaceID, requirements, doc.Bucket, doc.Services, bucketPermission)
+	return r.appendDesiredConfigBucketRequirements(ctx, workspaceID, requirements, doc.Bucket, doc.Services, bucketPermission)
 }
 
-func (r *storeBackedControlRequirementResolver) appendArtifactDocumentBucketRequirements(
+func (r *storeBackedControlRequirementResolver) appendDesiredConfigBucketRequirements(
 	ctx context.Context,
 	workspaceID uuid.UUID,
 	requirements []accesscontrol.Requirement,
@@ -671,7 +695,7 @@ func (r *storeBackedControlRequirementResolver) appendArtifactDocumentBucketRequ
 	},
 	bucketPermission accesscontrol.Permission,
 ) ([]accesscontrol.Requirement, error) {
-	bucketNames, err := artifactDocumentBucketNames(defaultBucket, services)
+	bucketNames, err := desiredConfigBucketNames(defaultBucket, services)
 	if err != nil || len(bucketNames) == 0 {
 		if err != nil {
 			return nil, err
@@ -685,7 +709,7 @@ func (r *storeBackedControlRequirementResolver) appendArtifactDocumentBucketRequ
 	return append(requirements, buckets...), nil
 }
 
-func artifactDocumentBucketNames(topLevel string, services map[string]struct {
+func desiredConfigBucketNames(topLevel string, services map[string]struct {
 	Secret string `json:"secret"`
 }) ([]string, error) {
 	names := make(map[string]struct{})
@@ -705,7 +729,7 @@ func artifactDocumentBucketNames(topLevel string, services map[string]struct {
 	return mapKeys(names), nil
 }
 
-func storedArtifactSelectionRequirements(
+func storedDesiredConfigSelectionRequirements(
 	plan *store.ConfigPlan,
 	servicePermission accesscontrol.Permission,
 	bucketPermission accesscontrol.Permission,
@@ -805,9 +829,9 @@ func requestMatchesConfigType(path string, configType store.ConfigType) bool {
 	}
 }
 
-func (r *storeBackedControlRequirementResolver) artifactPlanRequirements(ctx context.Context, workspaceID uuid.UUID, plan *store.ConfigPlan) ([]accesscontrol.Requirement, error) {
+func (r *storeBackedControlRequirementResolver) desiredConfigPlanRequirements(ctx context.Context, workspaceID uuid.UUID, plan *store.ConfigPlan) ([]accesscontrol.Requirement, error) {
 	if plan.BaseGeneration == 0 {
-		return []accesscontrol.Requirement{workspaceAccessRequirement(workspaceID, accesscontrol.PermissionArtifactCreate)}, nil
+		return []accesscontrol.Requirement{workspaceAccessRequirement(workspaceID, accesscontrol.PermissionAppCreate)}, nil
 	}
 	if r.configStore == nil {
 		return nil, accesscontrol.ErrPolicyDenied
@@ -817,12 +841,9 @@ func (r *storeBackedControlRequirementResolver) artifactPlanRequirements(ctx con
 		return nil, accesscontrol.ErrPolicyDenied
 	}
 	if state.LatestResourceID == nil || *state.LatestResourceID == uuid.Nil {
-		return []accesscontrol.Requirement{workspaceAccessRequirement(workspaceID, accesscontrol.PermissionArtifactManage)}, nil
+		return []accesscontrol.Requirement{workspaceAccessRequirement(workspaceID, accesscontrol.PermissionAppManage)}, nil
 	}
-	return []accesscontrol.Requirement{{
-		Permission: accesscontrol.PermissionArtifactManage,
-		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceArtifact, ID: *state.LatestResourceID},
-	}}, nil
+	return r.appFamilyRequirement(ctx, uuid.Nil, *state.LatestResourceID, accesscontrol.PermissionAppManage)
 }
 
 func (r *storeBackedControlRequirementResolver) planFromRequest(ctx context.Context, request *http.Request) (*store.ConfigPlan, error) {

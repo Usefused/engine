@@ -15,6 +15,12 @@ import (
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
 )
 
+func (s *postgresStore) CountBuckets(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM fused_buckets`).Scan(&n)
+	return n, err
+}
+
 func (s *postgresStore) CreateBucket(ctx context.Context, name string, isDefault bool) (*Bucket, error) {
 	query := `
 		INSERT INTO fused_buckets (name, is_default)
@@ -291,9 +297,9 @@ func lockAuthorizedBucketForDelete(ctx context.Context, tx pgx.Tx, name string, 
 func ensureBucketUnbound(ctx context.Context, tx pgx.Tx, bucketID uuid.UUID) error {
 	var bound bool
 	if err := tx.QueryRow(ctx, `SELECT
-		EXISTS (SELECT 1 FROM fused_artifact_buckets WHERE bucket_id = $1)
+		EXISTS (SELECT 1 FROM fused_app_family_buckets WHERE bucket_id = $1)
 		OR EXISTS (SELECT 1 FROM fused_workspace_webhooks WHERE secret_bucket_id = $1)`, bucketID).Scan(&bound); err != nil {
-		return fmt.Errorf("delete bucket: inspect artifact bindings: %w", err)
+		return fmt.Errorf("delete bucket: inspect app bindings: %w", err)
 	}
 	if bound {
 		return ErrBucketBound
@@ -467,22 +473,22 @@ func (s *postgresStore) DeleteBucketValue(ctx context.Context, bucketID uuid.UUI
 	return err
 }
 
-func (s *postgresStore) ListBucketsForSDK(ctx context.Context, artifactID uuid.UUID) ([]Bucket, error) {
-	return s.ListAuthorizedBucketsForSDK(ctx, artifactID, accesscontrol.AuthorizedScope{All: true})
+func (s *postgresStore) ListBucketsForAppFamily(ctx context.Context, appFamilyID uuid.UUID) ([]Bucket, error) {
+	return s.ListAuthorizedBucketsForAppFamily(ctx, appFamilyID, accesscontrol.AuthorizedScope{All: true})
 }
 
-func (s *postgresStore) ListAuthorizedBucketsForSDK(ctx context.Context, artifactID uuid.UUID, scope accesscontrol.AuthorizedScope) ([]Bucket, error) {
+func (s *postgresStore) ListAuthorizedBucketsForAppFamily(ctx context.Context, appFamilyID uuid.UUID, scope accesscontrol.AuthorizedScope) ([]Bucket, error) {
 	if !scope.All && len(scope.IDs) == 0 {
 		return nil, nil
 	}
 	query := `
 		SELECT b.id, b.name, b.is_default, b.created_at, b.updated_at
 		FROM fused_buckets b
-		JOIN fused_artifact_buckets sb ON b.id = sb.bucket_id
-		WHERE sb.artifact_id = $1 AND ($2 OR b.id = ANY($3::uuid[]))
+		JOIN fused_app_family_buckets family_bucket ON b.id = family_bucket.bucket_id
+		WHERE family_bucket.app_family_id = $1 AND ($2 OR b.id = ANY($3::uuid[]))
 		ORDER BY b.created_at ASC
 	`
-	rows, err := s.db.Query(ctx, query, artifactID, scope.All, scope.IDs)
+	rows, err := s.db.Query(ctx, query, appFamilyID, scope.All, scope.IDs)
 	if err != nil {
 		return nil, err
 	}
@@ -499,24 +505,34 @@ func (s *postgresStore) ListAuthorizedBucketsForSDK(ctx context.Context, artifac
 	return buckets, rows.Err()
 }
 
-func (s *postgresStore) ListArtifactScopesForBucket(ctx context.Context, bucketID uuid.UUID, limit, offset int) ([]ArtifactScope, int, error) {
-	return s.ListAuthorizedArtifactScopesForBucket(ctx, bucketID, accesscontrol.AuthorizedScope{All: true}, limit, offset)
+func (s *postgresStore) ListAppRuntimesForBucket(ctx context.Context, bucketID uuid.UUID, limit, offset int) ([]AppRuntime, int, error) {
+	return s.ListAuthorizedAppRuntimesForBucket(ctx, bucketID, accesscontrol.AuthorizedScope{All: true}, limit, offset)
 }
 
-func (s *postgresStore) ListAuthorizedArtifactScopesForBucket(ctx context.Context, bucketID uuid.UUID, scope accesscontrol.AuthorizedScope, limit, offset int) ([]ArtifactScope, int, error) {
+func (s *postgresStore) ListAuthorizedAppRuntimesForBucket(ctx context.Context, bucketID uuid.UUID, scope accesscontrol.AuthorizedScope, limit, offset int) ([]AppRuntime, int, error) {
 	if !scope.All && len(scope.IDs) == 0 {
 		return nil, 0, nil
 	}
 	var total int
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM fused_artifact_buckets WHERE bucket_id = $1 AND ($2 OR artifact_id = ANY($3::uuid[]))`, bucketID, scope.All, scope.IDs).Scan(&total); err != nil {
+	if err := s.db.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM fused_apps app
+		JOIN fused_app_family_buckets link ON link.app_family_id = app.app_family_id
+		WHERE link.bucket_id = $1
+		  AND app.status IN ('active', 'deprecated')
+		  AND ($2 OR app.app_family_id = ANY($3::uuid[]))
+	`, bucketID, scope.All, scope.IDs).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	query := `
-		SELECT ` + artifactScopeSelectColumns + `
-		FROM fused_artifact_scopes s
-		JOIN fused_artifact_buckets b ON s.artifact_id = b.artifact_id
-		WHERE b.bucket_id = $1 AND ($2 OR s.artifact_id = ANY($3::uuid[]))
-		ORDER BY s.created_at DESC
+		SELECT ` + appRuntimeSelectColumns + `
+		FROM fused_apps a
+		JOIN fused_app_families f ON f.app_family_id = a.app_family_id AND f.account_id = a.account_id
+		JOIN fused_app_family_buckets fb ON fb.app_family_id = f.app_family_id
+		WHERE fb.bucket_id = $1
+		  AND a.status IN ('active', 'deprecated')
+		  AND ($2 OR a.app_family_id = ANY($3::uuid[]))
+		ORDER BY a.created_at DESC
 		LIMIT $4 OFFSET $5
 	`
 	rows, err := s.db.Query(ctx, query, bucketID, scope.All, scope.IDs, limit, offset)
@@ -524,9 +540,9 @@ func (s *postgresStore) ListAuthorizedArtifactScopesForBucket(ctx context.Contex
 		return nil, 0, err
 	}
 	defer rows.Close()
-	var scopes []ArtifactScope
+	var scopes []AppRuntime
 	for rows.Next() {
-		scope, err := scanArtifactScope(rows)
+		scope, err := scanAppRuntime(rows)
 		if err != nil {
 			return nil, 0, err
 		}

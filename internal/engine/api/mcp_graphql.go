@@ -13,6 +13,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/google/uuid"
@@ -20,13 +21,14 @@ import (
 	"github.com/graphql-go/handler"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
+	"github.com/Usefused/engine/internal/engine/applifecycle"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
 )
 
 // This file is the Engine-native GraphQL surface for MCP server management:
-// list, deploy, kill (=deactivate), reactivate, delete, and analytics. It
+// list, deploy, shared app lifecycle, and analytics. It
 // exists as its own schema/endpoint (mounted at POST /engine/graphql, see
 // MountMCPGraphQLRoute) rather than folded into the existing POST /graphql,
 // which is a pure Registry forward-proxy (graphql_proxy.go) with no
@@ -35,12 +37,8 @@ import (
 // forwarding everything, a much larger and riskier change than a second
 // endpoint.
 //
-// Resolvers here call the same unexported helpers the REST lifecycle
-// handlers (sdk_lifecycle_handlers.go) already use -- activateArtifactScope,
-// ensureArtifactScopeOwnedBy, sandbox.KillMCPSessionsForSDK, etc -- rather than
-// reimplementing that logic, so the REST and GraphQL surfaces can't drift
-// apart on what "kill" or "deploy" actually does. This file only owns
-// request/response shape translation.
+// Lifecycle resolvers delegate to applifecycle.Service so SDK and MCP versions
+// cannot drift on deprecation or irreversible deactivation semantics.
 
 // mcpGraphQLContextKey namespaces this file's two context values
 // (authenticated actor, inbound request) separately from the package's other
@@ -206,7 +204,7 @@ func authorizeEngineGraphQL(r *http.Request, schema *graphql.Schema, actor acces
 		err = authorizeGraphQLPlan(ctx, actor, plan)
 	}
 	if err == nil {
-		err = resolveDynamicGraphQLResources(ctx, &plan, resources, actor.WorkspaceID, r.Header.Get("X-API-Key"))
+		err = resolveDynamicGraphQLResources(ctx, &plan, resources, actor.AccountID, actor.WorkspaceID, r.Header.Get("X-API-Key"))
 	}
 	if err == nil {
 		if limitErr := accesscontrol.ValidateAuditableRequirementCount(plan.requirements); limitErr != nil {
@@ -224,8 +222,12 @@ func authorizeEngineGraphQL(r *http.Request, schema *graphql.Schema, actor acces
 	return plan, err
 }
 
-func resolveDynamicGraphQLResources(ctx context.Context, plan *graphQLAuthorizationPlan, resources graphQLAuthorizationResources, workspaceID uuid.UUID, apiKey string) error {
+func resolveDynamicGraphQLResources(ctx context.Context, plan *graphQLAuthorizationPlan, resources graphQLAuthorizationResources, accountID, workspaceID uuid.UUID, apiKey string) error {
 	deploymentRequirements, err := resources.resolveDeployments(ctx, workspaceID, plan.deployments, apiKey)
+	if err != nil {
+		return err
+	}
+	deploymentRequirements, err = resources.resolveAppRequirements(ctx, accountID, deploymentRequirements)
 	if err != nil {
 		return err
 	}
@@ -233,8 +235,13 @@ func resolveDynamicGraphQLResources(ctx context.Context, plan *graphQLAuthorizat
 	if err != nil {
 		return err
 	}
+	appRequirements, err := resources.resolveApps(ctx, accountID, plan.apps)
+	if err != nil {
+		return err
+	}
 	plan.mergeRequirements(deploymentRequirements)
 	plan.mergeRequirements(connectionRequirements)
+	plan.mergeRequirements(appRequirements)
 	plan.resolvedConnections = connections
 	return nil
 }
@@ -361,15 +368,14 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 		Name: "EngineQuery",
 		Fields: graphql.Fields{
 			"currentActorAccess":          currentActorAccessGraphQLField(),
-			"artifact":                    artifactGraphQLField(s),
-			"artifactServices":            artifactServicesGraphQLField(s),
-			"artifacts":                   artifactsGraphQLField(s),
-			"artifactSnapshots":           artifactSnapshotsGraphQLField(s),
-			"artifactSnapshot":            artifactSnapshotGraphQLField(s),
+			"app":                         appGraphQLField(s),
+			"apps":                        appsGraphQLField(s),
+			"appVersions":                 appVersionsGraphQLField(s),
+			"appServices":                 appServicesGraphQLField(s),
 			"accessExplanation":           accessExplanationGraphQLField(s),
 			"auditEvents":                 auditEventsGraphQLField(s),
-			"artifactBuildSelectors":      artifactBuildSelectorsGraphQLField(s),
-			"artifactOwningTeams":         artifactOwningTeamsGraphQLField(s),
+			"appBuildSelectors":           appBuildSelectorsGraphQLField(s),
+			"appOwningTeams":              appOwningTeamsGraphQLField(s),
 			"users":                       usersGraphQLField(s),
 			"user":                        userGraphQLField(s),
 			"userEffectiveAccess":         userEffectiveAccessGraphQLField(s),
@@ -379,7 +385,8 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"workspaceShares":             workspaceSharesGraphQLField(s),
 			"bucketReference":             bucketReferenceGraphQLField(s),
 			"serviceReference":            serviceReferenceGraphQLField(s),
-			"artifactReference":           artifactReferenceGraphQLField(s),
+			"appReference":                appReferenceGraphQLField(s),
+			"appFamilyReference":          appFamilyReferenceGraphQLField(s),
 			"workspaceConnectionProfile":  workspaceConnectionProfileGraphQLField(s),
 			"workspaceConnectConfigs":     workspaceConnectConfigsGraphQLField(s),
 			"mcpServers":                  mcpServersField(s),
@@ -395,8 +402,8 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"webhookEvents":               webhookEventsGraphQLField(s),
 			"webhookAnalytics":            webhookAnalyticsGraphQLField(s),
 			"engineExecutionEvents":       engineExecutionEventsGraphQLField(s),
-			"artifactExecutionEvents":     artifactExecutionEventsGraphQLField(s),
-			"artifactExecutionAnalytics":  artifactExecutionAnalyticsGraphQLField(s),
+			"appExecutionEvents":          appExecutionEventsGraphQLField(s),
+			"appExecutionAnalytics":       appExecutionAnalyticsGraphQLField(s),
 			"engineExecutionAnalytics":    engineExecutionAnalyticsGraphQLField(s),
 			"workspaceExecutionAnalytics": workspaceExecutionAnalyticsGraphQLField(s),
 			"publicServiceInsights":       publicServiceInsightsGraphQLField(s, publicInsightReader),
@@ -434,19 +441,19 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"revokeTeamServiceAccess":           revokeTeamServiceAccessGraphQLField(s),
 			"grantTeamBucketAccess":             grantTeamBucketAccessGraphQLField(s),
 			"revokeTeamBucketAccess":            revokeTeamBucketAccessGraphQLField(s),
-			"grantTeamArtifactAccess":           grantTeamArtifactAccessGraphQLField(s),
-			"revokeTeamArtifactAccess":          revokeTeamArtifactAccessGraphQLField(s),
+			"grantTeamAppAccess":                grantTeamAppAccessGraphQLField(s),
+			"revokeTeamAppAccess":               revokeTeamAppAccessGraphQLField(s),
 			"grantWorkspaceBucketAccess":        grantWorkspaceBucketAccessGraphQLField(s),
 			"revokeWorkspaceBucketAccess":       revokeWorkspaceBucketAccessGraphQLField(s),
-			"grantWorkspaceArtifactAccess":      grantWorkspaceArtifactAccessGraphQLField(s),
-			"revokeWorkspaceArtifactAccess":     revokeWorkspaceArtifactAccessGraphQLField(s),
+			"grantWorkspaceAppAccess":           grantWorkspaceAppAccessGraphQLField(s),
+			"revokeWorkspaceAppAccess":          revokeWorkspaceAppAccessGraphQLField(s),
 			"setWorkspaceConnectionProfile":     setWorkspaceConnectionProfileGraphQLField(s, verifier, registryClient),
 			"resetWorkspaceConnectionProfile":   resetWorkspaceConnectionProfileGraphQLField(s),
 			"updateWorkspaceNotificationStatus": updateWorkspaceNotificationStatusGraphQLField(configStore),
 			"deployMcpServer":                   deployMCPServerField(configStore, s, registryClient),
-			"killMcpServer":                     killMCPServerField(s),
-			"reactivateMcpServer":               reactivateMCPServerField(s),
-			"deleteMcpServer":                   deleteMCPServerField(s),
+			"deprecateApp":                      deprecateAppGraphQLField(s),
+			"undeprecateApp":                    undeprecateAppGraphQLField(s),
+			"deactivateApp":                     deactivateAppGraphQLField(s),
 			"upsertSecrets":                     upsertSecretsGraphQLField(s, masterKey),
 			"deleteSecrets":                     deleteSecretsGraphQLField(s),
 			"startConnectSession":               startConnectSessionGraphQLField(s, verifier, masterKey),
@@ -490,11 +497,11 @@ func mcpServersField(s store.Store) *graphql.Field {
 			if limit <= 0 {
 				limit = 10
 			}
-			authorized, err := graphQLAuthorizedScope(p.Context, accesscontrol.PermissionArtifactRead, accesscontrol.ResourceArtifact)
+			authorized, err := graphQLAuthorizedScope(p.Context, accesscontrol.PermissionAppRead, accesscontrol.ResourceApp)
 			if err != nil {
 				return nil, err
 			}
-			scopes, total, err := s.ListAuthorizedMCPScopesByAccount(p.Context, actor.accountID, authorized, limit, offset)
+			scopes, total, err := s.ListAuthorizedMCPAppsByAccount(p.Context, actor.accountID, authorized, limit, offset)
 			if err != nil {
 				return nil, fmt.Errorf("list mcp servers: %w", err)
 			}
@@ -535,13 +542,11 @@ func mcpServerByNameField(s store.Store) *graphql.Field {
 			name := p.Args["name"].(string)
 			version := p.Args["version"].(string)
 
-			scope, err := s.GetMCPScopeByName(ctx, actor.accountID, name, version)
+			scope, err := s.GetMCPAppByName(ctx, actor.accountID, name, version)
 			if err != nil {
-				if errors.Is(err, store.ErrArtifactScopeNotFound) {
-					// We return a strict error instead of null when an MCP is not found.
-					// This maintains API consistency with the Registry's sdkByName behavior,
-					// which explicitly errors so clients can cleanly catch the "not found" state
-					// rather than handling a generic null object.
+				if errors.Is(err, store.ErrAppRuntimeNotFound) {
+					// A strict not-found error lets clients distinguish a missing local app
+					// version from an empty optional field without consulting Registry state.
 					if version != "" {
 						return nil, fmt.Errorf("no MCP server found with name %s and version %s", name, version)
 					}
@@ -554,29 +559,44 @@ func mcpServerByNameField(s store.Store) *graphql.Field {
 	}
 }
 
-// mcpServerFields is the one place an store.ArtifactScope becomes the MCPServer
+// mcpServerFields is the one place an store.AppRuntime becomes the MCPServer
 // GraphQL shape, shared by the list query and every mutation below that
 // returns the server it just acted on -- one mapping, not five copies that
 // could drift on which fields it exposes.
-func mcpServerFields(r *http.Request, scope store.ArtifactScope) map[string]interface{} {
+func mcpServerFields(r *http.Request, scope store.AppRuntime) map[string]interface{} {
+	active := scope.Status == "" || scope.Status == "active" || scope.Status == "deprecated"
 	return map[string]interface{}{
-		"id":             scope.ArtifactID.String(),
+		"id":             scope.AppID.String(),
 		"name":           scope.Name,
 		"version":        scope.Version,
 		"config_key":     scope.ConfigKey,
-		"mcp_url":        mcpURLForSDK(r, scope.ArtifactID),
-		"active":         scope.DeactivatedAt == nil,
-		"deactivated_at": formatOptionalTime(scope.DeactivatedAt),
+		"mcp_url":        mcpURLForApp(r, scope.AppID),
+		"active":         active,
+		"deactivated_at": "",
 		"created_at":     scope.CreatedAt.Format(mcpGraphQLTimeFormat),
 	}
 }
 
+func mcpURLForApp(r *http.Request, appID uuid.UUID) string {
+	if r == nil {
+		return "/mcp/" + appID.String() + "/sse"
+	}
+	scheme := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+	if scheme == "" {
+		scheme = "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+	}
+	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = r.Host
+	}
+	return scheme + "://" + host + "/mcp/" + appID.String() + "/sse"
+}
+
 const mcpGraphQLTimeFormat = "2006-01-02T15:04:05Z07:00"
 
-// formatOptionalTime returns "" for a nil timestamp (an active scope's
-// DeactivatedAt) rather than a zero-time string, so the UI can treat an
-// empty deactivated_at as "never deactivated" without parsing a sentinel
-// date.
 func formatOptionalTime(t *time.Time) string {
 	if t == nil {
 		return ""
@@ -584,27 +604,27 @@ func formatOptionalTime(t *time.Time) string {
 	return t.Format(mcpGraphQLTimeFormat)
 }
 
-// ─── mcpAnalytics(artifactId) ────────────────────────────────────────────────────
+// ─── mcpAnalytics(app_id) ────────────────────────────────────────────────────
 
 func mcpAnalyticsField(s store.Store) *graphql.Field {
 	return &graphql.Field{
 		Type: mcpAnalyticsDashboardType,
 		Args: graphql.FieldConfigArgument{
-			"artifactId": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
+			"app_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
 		},
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 			actor, err := actorFromContext(p.Context)
 			if err != nil {
 				return nil, err
 			}
-			artifactID, err := uuid.Parse(p.Args["artifactId"].(string))
+			appID, err := uuid.Parse(p.Args["app_id"].(string))
 			if err != nil {
-				return nil, fmt.Errorf("invalid artifactId")
+				return nil, fmt.Errorf("invalid app_id")
 			}
-			if err := ensureArtifactScopeOwnedBy(p.Context, s, actor.accountID, artifactID); err != nil {
+			if _, err := appOwnedBy(p.Context, s, actor.accountID, appID); err != nil {
 				return nil, err
 			}
-			dashboard, err := s.GetMCPAnalyticsDashboard(p.Context, artifactID)
+			dashboard, err := s.GetMCPAnalyticsDashboard(p.Context, appID)
 			if err != nil {
 				return nil, fmt.Errorf("load mcp analytics: %w", err)
 			}
@@ -644,9 +664,9 @@ func mcpAnalyticsDashboardFields(d *models.MCPAnalyticsDashboard) map[string]int
 	}
 }
 
-// ─── deployMcpServer / killMcpServer / reactivateMcpServer / deleteMcpServer ─
+// ─── deployMcpServer and shared app lifecycle ────────────────────────────────
 
-// deployMCPServerField accepts the complete declarative artifact and delegates
+// deployMCPServerField accepts the complete declarative app config and delegates
 // to the same plan/apply services as CLI, avoiding a second selections-only
 // creation contract.
 func deployMCPServerField(configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient) *graphql.Field {
@@ -666,10 +686,10 @@ func deployMCPServerField(configStore store.ConfigRepository, s store.Store, reg
 				return nil, fmt.Errorf("invalid mcp config")
 			}
 			var doc sdkConfigDocument
-			if err := decodeArtifactConfigJSON(raw, &doc); err != nil {
+			if err := decodeAppConfigJSON(raw, &doc); err != nil {
 				return nil, fmt.Errorf("invalid mcp config")
 			}
-			if err := validateArtifactConfigDocument(doc, "mcp"); err != nil {
+			if err := validateAppConfigDocument(doc, "mcp"); err != nil {
 				return nil, err
 			}
 			ownerTeamSlug := strings.TrimSpace(graphQLArgString(p, "owner_team"))
@@ -705,84 +725,115 @@ func deployMCPServerField(configStore store.ConfigRepository, s store.Store, reg
 	}
 }
 
-func killMCPServerField(s store.Store) *graphql.Field {
-	return &graphql.Field{
-		Type: mcpServerType,
-		Args: graphql.FieldConfigArgument{"id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)}},
-		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			actor, err := actorFromContext(p.Context)
-			if err != nil {
-				return nil, err
-			}
-			artifactID, err := uuid.Parse(p.Args["id"].(string))
-			if err != nil {
-				return nil, fmt.Errorf("invalid id")
-			}
-			if err := ensureArtifactScopeOwnedBy(p.Context, s, actor.accountID, artifactID); err != nil {
-				return nil, err
-			}
-			if err := s.DeactivateSDK(p.Context, actor.accountID, artifactID); err != nil {
-				return nil, sdkLifecycleStoreError(err, "failed to kill mcp server")
-			}
-			// See DeactivateSDKHandler's own comment: DeactivateSDK alone only
-			// blocks *new* connections, live sessions must be force-killed here.
-			sandbox.KillMCPSessionsForSDK(artifactID.String())
-			scope, err := s.GetArtifactScope(p.Context, artifactID)
-			if err != nil {
-				return nil, fmt.Errorf("load killed mcp server: %w", err)
-			}
-			return mcpServerFields(requestFromContext(p.Context), *scope), nil
-		},
-	}
-}
-
-func reactivateMCPServerField(s store.Store) *graphql.Field {
-	return &graphql.Field{
-		Type: mcpServerType,
-		Args: graphql.FieldConfigArgument{"id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)}},
-		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			actor, err := actorFromContext(p.Context)
-			if err != nil {
-				return nil, err
-			}
-			artifactID, err := uuid.Parse(p.Args["id"].(string))
-			if err != nil {
-				return nil, fmt.Errorf("invalid id")
-			}
-			if err := reactivateArtifactScope(p.Context, s, actor.accountID, artifactID); err != nil {
-				return nil, err
-			}
-			scope, err := s.GetArtifactScope(p.Context, artifactID)
-			if err != nil {
-				return nil, fmt.Errorf("load reactivated mcp server: %w", err)
-			}
-			return mcpServerFields(requestFromContext(p.Context), *scope), nil
-		},
-	}
-}
-
-func deleteMCPServerField(s store.Store) *graphql.Field {
+func deprecateAppGraphQLField(s store.Store) *graphql.Field {
 	return &graphql.Field{
 		Type: graphql.Boolean,
-		Args: graphql.FieldConfigArgument{"id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)}},
+		Args: graphql.FieldConfigArgument{
+			"app_id":                  &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
+			"message":                 &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
+			"planned_deactivation_at": &graphql.ArgumentConfig{Type: graphql.String},
+		},
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			actor, err := actorFromContext(p.Context)
+			actor, app, err := appLifecycleGraphQLTarget(p, s)
 			if err != nil {
 				return nil, err
 			}
-			artifactID, err := uuid.Parse(p.Args["id"].(string))
-			if err != nil {
-				return nil, fmt.Errorf("invalid id")
+			message := strings.TrimSpace(p.Args["message"].(string))
+			if message == "" {
+				return nil, errors.New("message is required")
 			}
-			if err := ensureArtifactScopeOwnedBy(p.Context, s, actor.accountID, artifactID); err != nil {
+			plannedAt, err := optionalGraphQLTime(p.Args["planned_deactivation_at"])
+			if err != nil {
 				return nil, err
 			}
-			if err := s.DeleteArtifactScope(p.Context, actor.accountID, artifactID); err != nil {
-				return nil, fmt.Errorf("failed to delete mcp server: %w", err)
+			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.app.deprecate")
+			defer span.End()
+			span.SetAttributes(attribute.String("actor.type", string(actor.Kind)), attribute.String("app.id", app.AppID.String()))
+			if err := applifecycle.New(s).Deprecate(ctx, app.AppID, message, plannedAt); err != nil {
+				recordAppLifecycleGraphQLError(span, err)
+				return nil, fmt.Errorf("deprecate app: %w", err)
 			}
-			sandbox.KillMCPSessionsForSDK(artifactID.String())
-			_ = sandbox.CleanupMCPSandboxDir(artifactID.String())
+			span.SetAttributes(attribute.String("outcome", "deprecated"))
 			return true, nil
 		},
 	}
+}
+
+func undeprecateAppGraphQLField(s store.Store) *graphql.Field {
+	return &graphql.Field{
+		Type: graphql.Boolean,
+		Args: graphql.FieldConfigArgument{"app_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)}},
+		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+			actor, app, err := appLifecycleGraphQLTarget(p, s)
+			if err != nil {
+				return nil, err
+			}
+			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.app.undeprecate")
+			defer span.End()
+			span.SetAttributes(attribute.String("actor.type", string(actor.Kind)), attribute.String("app.id", app.AppID.String()))
+			if err := applifecycle.New(s).Undeprecate(ctx, app.AppID); err != nil {
+				recordAppLifecycleGraphQLError(span, err)
+				return nil, fmt.Errorf("undeprecate app: %w", err)
+			}
+			span.SetAttributes(attribute.String("outcome", "active"))
+			return true, nil
+		},
+	}
+}
+
+func deactivateAppGraphQLField(s store.Store) *graphql.Field {
+	return &graphql.Field{
+		Type: graphql.Boolean,
+		Args: graphql.FieldConfigArgument{"app_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)}},
+		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+			actor, app, err := appLifecycleGraphQLTarget(p, s)
+			if err != nil {
+				return nil, err
+			}
+			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.app.deactivate")
+			defer span.End()
+			span.SetAttributes(attribute.String("actor.type", string(actor.Kind)), attribute.String("app.id", app.AppID.String()))
+			if err := applifecycle.New(s).Deactivate(ctx, app.AppID, actor.SubjectID); err != nil {
+				recordAppLifecycleGraphQLError(span, err)
+				return nil, fmt.Errorf("deactivate app: %w", err)
+			}
+			if app.GeneratorVersion == "" {
+				sandbox.KillMCPSessionsForSDK(app.AppID.String())
+				_ = sandbox.CleanupMCPSandboxDir(app.AppID.String())
+			}
+			span.SetAttributes(attribute.String("outcome", "deactivated"))
+			return true, nil
+		},
+	}
+}
+
+func recordAppLifecycleGraphQLError(span trace.Span, err error) {
+	span.SetAttributes(attribute.String("outcome", "failed"))
+	span.RecordError(err)
+	span.SetStatus(codes.Error, "app lifecycle mutation failed")
+}
+
+func appLifecycleGraphQLTarget(p graphql.ResolveParams, s store.Store) (accesscontrol.Actor, *store.App, error) {
+	actor, ok := accesscontrol.ActorFromContext(p.Context)
+	if !ok {
+		return accesscontrol.Actor{}, nil, accesscontrol.ErrAuthenticationRequired
+	}
+	appID, err := uuid.Parse(p.Args["app_id"].(string))
+	if err != nil {
+		return accesscontrol.Actor{}, nil, errors.New("invalid app_id")
+	}
+	app, err := appOwnedBy(p.Context, s, actor.AccountID, appID)
+	return actor, app, err
+}
+
+func optionalGraphQLTime(value interface{}) (*time.Time, error) {
+	text, _ := value.(string)
+	if strings.TrimSpace(text) == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, text)
+	if err != nil {
+		return nil, errors.New("planned_deactivation_at must be RFC3339")
+	}
+	return &parsed, nil
 }

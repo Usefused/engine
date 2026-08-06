@@ -54,6 +54,14 @@ func NewCachedStore(delegate Store, nc *messaging.NATSClient) Store {
 	return cs
 }
 
+func (s *cachedStore) LoadEngineInstallationID(ctx context.Context) (uuid.UUID, error) {
+	repository, ok := s.Store.(EngineInstallationStore)
+	if !ok {
+		return uuid.Nil, errors.New("store does not support Engine installation identity")
+	}
+	return repository.LoadEngineInstallationID(ctx)
+}
+
 func (s *cachedStore) LoadDefaultBucketID(ctx context.Context) (uuid.UUID, error) {
 	loader, ok := s.Store.(interface {
 		LoadDefaultBucketID(context.Context) (uuid.UUID, error)
@@ -64,68 +72,36 @@ func (s *cachedStore) LoadDefaultBucketID(ctx context.Context) (uuid.UUID, error
 	return loader.LoadDefaultBucketID(ctx)
 }
 
-func (s *cachedStore) ListEngineExecutionEventsByArtifact(ctx context.Context, filter EngineExecutionFilter) ([]models.EngineExecutionEvent, int64, error) {
-	reader, ok := s.Store.(ArtifactExecutionEventReader)
+func (s *cachedStore) ListSDKPackageLeaseRenewals(ctx context.Context, after uuid.UUID, limit int) ([]models.SDKPackageLeaseRenewal, error) {
+	repository, ok := s.Store.(SDKPackageLeaseStore)
 	if !ok {
-		return nil, 0, errors.New("store does not support artifact execution activity")
+		return nil, errors.New("store does not support SDK package lease renewal")
 	}
-	return reader.ListEngineExecutionEventsByArtifact(ctx, filter)
+	return repository.ListSDKPackageLeaseRenewals(ctx, after, limit)
 }
 
-func (s *cachedStore) GetEngineExecutionAnalyticsByArtifact(ctx context.Context, filter EngineExecutionFilter) (models.ArtifactExecutionAnalytics, error) {
-	reader, ok := s.Store.(ArtifactExecutionAnalyticsReader)
+func (s *cachedStore) GetSDKPackageBuildRequest(ctx context.Context, accountID, appID uuid.UUID) (*models.SDKGenerationRequest, error) {
+	repository, ok := s.Store.(SDKPackageBuildStore)
 	if !ok {
-		return models.ArtifactExecutionAnalytics{}, errors.New("store does not support artifact execution analytics")
+		return nil, errors.New("store does not support SDK package build recovery")
 	}
-	return reader.GetEngineExecutionAnalyticsByArtifact(ctx, filter)
+	return repository.GetSDKPackageBuildRequest(ctx, accountID, appID)
 }
 
-func (s *cachedStore) UpsertArtifactSnapshots(ctx context.Context, snapshots []ArtifactSnapshot) error {
-	repository, ok := s.Store.(ArtifactSnapshotStore)
+func (s *cachedStore) ListEngineExecutionEventsByApp(ctx context.Context, filter EngineExecutionFilter) ([]models.EngineExecutionEvent, int64, error) {
+	reader, ok := s.Store.(AppExecutionEventReader)
 	if !ok {
-		return errors.New("store does not support artifact snapshots")
+		return nil, 0, errors.New("store does not support app execution activity")
 	}
-	return repository.UpsertArtifactSnapshots(ctx, snapshots)
+	return reader.ListEngineExecutionEventsByApp(ctx, filter)
 }
 
-func (s *cachedStore) DeleteArtifactSnapshot(ctx context.Context, accountID, artifactID uuid.UUID) error {
-	repository, ok := s.Store.(ArtifactSnapshotStore)
+func (s *cachedStore) GetEngineExecutionAnalyticsByApp(ctx context.Context, filter EngineExecutionFilter) (models.AppExecutionAnalytics, error) {
+	reader, ok := s.Store.(AppExecutionAnalyticsReader)
 	if !ok {
-		return errors.New("store does not support artifact snapshots")
+		return models.AppExecutionAnalytics{}, errors.New("store does not support app execution analytics")
 	}
-	return repository.DeleteArtifactSnapshot(ctx, accountID, artifactID)
-}
-
-func (s *cachedStore) GetArtifactSnapshot(ctx context.Context, accountID, artifactID uuid.UUID) (*ArtifactSnapshot, error) {
-	repository, ok := s.Store.(ArtifactSnapshotStore)
-	if !ok {
-		return nil, errors.New("store does not support artifact snapshots")
-	}
-	return repository.GetArtifactSnapshot(ctx, accountID, artifactID)
-}
-
-func (s *cachedStore) GetArtifactSnapshotByName(ctx context.Context, accountID uuid.UUID, kind, name string) (*ArtifactSnapshot, error) {
-	repository, ok := s.Store.(ArtifactSnapshotStore)
-	if !ok {
-		return nil, errors.New("store does not support artifact snapshots")
-	}
-	return repository.GetArtifactSnapshotByName(ctx, accountID, kind, name)
-}
-
-func (s *cachedStore) GetArtifactSnapshotByIdentity(ctx context.Context, accountID uuid.UUID, kind, name, version string) (*ArtifactSnapshot, error) {
-	repository, ok := s.Store.(ArtifactSnapshotStore)
-	if !ok {
-		return nil, errors.New("store does not support artifact snapshots")
-	}
-	return repository.GetArtifactSnapshotByIdentity(ctx, accountID, kind, name, version)
-}
-
-func (s *cachedStore) ListArtifactSnapshots(ctx context.Context, accountID uuid.UUID, kind string, limit, offset int) ([]ArtifactSnapshot, int, error) {
-	repository, ok := s.Store.(ArtifactSnapshotStore)
-	if !ok {
-		return nil, 0, errors.New("store does not support artifact snapshots")
-	}
-	return repository.ListArtifactSnapshots(ctx, accountID, kind, limit, offset)
+	return reader.GetEngineExecutionAnalyticsByApp(ctx, filter)
 }
 
 func (s *cachedStore) UpsertSecret(ctx context.Context, secret WorkspaceSecret) error {
@@ -172,25 +148,9 @@ func (s *cachedStore) invalidateSecretCaches(bucketID uuid.UUID, secrets []Works
 	}
 }
 
-func (s *cachedStore) SaveArtifactScope(ctx context.Context, scope ArtifactScope) error {
-	err := s.Store.SaveArtifactScope(ctx, scope)
-	if err == nil && s.nc != nil && s.nc.Conn != nil {
-		s.nc.Conn.Publish("engine.cache.invalidate.sdk_scope."+scope.ArtifactID.String(), nil)
-	}
-	return err
-}
-
-func (s *cachedStore) DeleteArtifactScope(ctx context.Context, accountID, artifactID uuid.UUID) error {
-	err := s.Store.DeleteArtifactScope(ctx, accountID, artifactID)
-	if err == nil && s.nc != nil && s.nc.Conn != nil {
-		s.nc.Conn.Publish("engine.cache.invalidate.sdk_scope."+artifactID.String(), nil)
-	}
-	return err
-}
-
-func (s *cachedStore) NotifyArtifactScopeChanged(_ context.Context, artifactID uuid.UUID) {
+func (s *cachedStore) NotifyAppRuntimeChanged(_ context.Context, appID uuid.UUID) {
 	if s.nc != nil && s.nc.Conn != nil {
-		s.nc.Conn.Publish("engine.cache.invalidate.sdk_scope."+artifactID.String(), nil)
+		s.nc.Conn.Publish("engine.cache.invalidate.sdk_scope."+appID.String(), nil)
 	}
 }
 
@@ -220,30 +180,6 @@ func (s *cachedStore) ListWorkspaceServiceVersionsMissingContractSnapshots(ctx c
 	return delegate.ListWorkspaceServiceVersionsMissingContractSnapshots(ctx, limit)
 }
 
-// DeactivateSDK/ReactivateSDK invalidate LocalObjectCache's cached scope the
-// same way SaveArtifactScope does above -- deliberately not relying on a live
-// MCP session's own disconnect to evict the cache. Without this, a new
-// session connecting for an artifactID that already has another live session
-// (cache hit, ConnectSDK's reuseCachedSDK path) would never call
-// loadArtifactScope at all, so it would never see a deactivation that landed
-// between "session A connected" and "session B tries to connect" -- this
-// closes that window instead of accepting it as an eventual-consistency gap.
-func (s *cachedStore) DeactivateSDK(ctx context.Context, accountID, artifactID uuid.UUID) error {
-	err := s.Store.DeactivateSDK(ctx, accountID, artifactID)
-	if err == nil && s.nc != nil && s.nc.Conn != nil {
-		s.nc.Conn.Publish("engine.cache.invalidate.sdk_scope."+artifactID.String(), nil)
-	}
-	return err
-}
-
-func (s *cachedStore) ReactivateSDK(ctx context.Context, accountID, artifactID uuid.UUID) error {
-	err := s.Store.ReactivateSDK(ctx, accountID, artifactID)
-	if err == nil && s.nc != nil && s.nc.Conn != nil {
-		s.nc.Conn.Publish("engine.cache.invalidate.sdk_scope."+artifactID.String(), nil)
-	}
-	return err
-}
-
 func (s *cachedStore) DeleteSecret(ctx context.Context, bucketID uuid.UUID, serviceID uuid.UUID, keyName string) error {
 	err := s.Store.DeleteSecret(ctx, bucketID, serviceID, keyName)
 	if err == nil {
@@ -269,14 +205,6 @@ func (s *cachedStore) DeleteSecrets(ctx context.Context, bucketID uuid.UUID, ser
 	return nil
 }
 
-func (s *cachedStore) RevokeSDKToken(ctx context.Context, artifactID uuid.UUID, name string) error {
-	err := s.Store.RevokeSDKToken(ctx, artifactID, name)
-	if err == nil && s.nc != nil && s.nc.Conn != nil {
-		s.nc.Conn.Publish("engine.cache.invalidate.token."+artifactID.String(), nil)
-	}
-	return err
-}
-
 func (s *cachedStore) VerifyWorkspaceOwner(ctx context.Context, accountID uuid.UUID) error {
 	return s.Store.VerifyWorkspaceOwner(ctx, accountID)
 }
@@ -299,26 +227,6 @@ func (s *cachedStore) GetLatestWorkspaceServiceVersion(ctx context.Context, acco
 		step.Error(ctx, err)
 	}
 	return version, err
-}
-
-func (s *cachedStore) ValidateToken(ctx context.Context, artifactID uuid.UUID, tokenHash string) (uuid.UUID, error) {
-	step := observability.ThreadFromContext(ctx).Step("Cache: ValidateToken")
-
-	key := "validate_token:" + artifactID.String() + ":" + tokenHash
-	if val, ok := s.cache.Get(key); ok {
-		step.Success(ctx)
-		return val.(uuid.UUID), nil
-	}
-
-	step.SubStep("Cache miss, querying DB", nil)
-	id, err := s.Store.ValidateToken(ctx, artifactID, tokenHash)
-	if err == nil {
-		s.cache.Set(key, id, 5*time.Minute)
-		step.Success(ctx)
-	} else {
-		step.Error(ctx, err)
-	}
-	return id, err
 }
 
 func (s *cachedStore) GetSecret(ctx context.Context, bucketID, serviceID uuid.UUID, keyName string) (*WorkspaceSecret, error) {

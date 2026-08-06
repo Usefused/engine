@@ -51,6 +51,9 @@ func TestPostgresStore_WorkspaceSecrets(t *testing.T) {
 	if _, err := pool.Exec(ctx, "DELETE FROM fused_workspaces"); err != nil {
 		t.Fatalf("clean workspace: %v", err)
 	}
+	if _, err := pool.Exec(ctx, "DELETE FROM fused_app_family_buckets"); err != nil {
+		t.Fatalf("clean app bucket bindings: %v", err)
+	}
 	if _, err := pool.Exec(ctx, "DELETE FROM fused_buckets"); err != nil {
 		t.Fatalf("clean buckets: %v", err)
 	}

@@ -232,6 +232,9 @@ func mutateUserStatusTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, target
 	if err != nil {
 		return UserMutationResult{}, err
 	}
+	if user.ID == actor.SubjectID && target == UserStatusSuspended {
+		return UserMutationResult{}, ErrSelfSuspensionForbidden
+	}
 	changed, err := changeUserStatus(ctx, tx, &user, target)
 	if err != nil {
 		return UserMutationResult{}, err

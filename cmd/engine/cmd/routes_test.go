@@ -166,3 +166,18 @@ func TestRegisterProxyRoutes_WorkspaceNotMounted(t *testing.T) {
 		t.Errorf("expected 404 for /workspace (not proxied), got %d", resp.StatusCode)
 	}
 }
+
+func TestExactSDKDownloadRouteWinsBeforeRegistryPrefixMount(t *testing.T) {
+	router := chi.NewRouter()
+	router.Get("/sdks/{app_id}/download", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	registerProxyRoutes(router, api.NewRegistryProxy("http://127.0.0.1:0", "registry-license"), &stubStore{accountID: uuid.New()})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/sdks/"+uuid.NewString()+"/download", nil)
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("SDK download resolved to status %d, want local route status 204", recorder.Code)
+	}
+}

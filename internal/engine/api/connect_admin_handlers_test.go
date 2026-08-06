@@ -354,14 +354,14 @@ type connectAdminMockStore struct {
 	deleteErr           error
 	latestVersion       string
 	reconciledResources []store.ConnectionResource
-	artifactScopes      map[uuid.UUID]*store.ArtifactScope
+	appRuntimes         map[uuid.UUID]*store.AppRuntime
 }
 
-func (s *connectAdminMockStore) GetArtifactScope(_ context.Context, id uuid.UUID) (*store.ArtifactScope, error) {
-	if scope := s.artifactScopes[id]; scope != nil {
+func (s *connectAdminMockStore) GetAppRuntime(_ context.Context, id uuid.UUID) (*store.AppRuntime, error) {
+	if scope := s.appRuntimes[id]; scope != nil {
 		return scope, nil
 	}
-	return nil, store.ErrArtifactScopeNotFound
+	return nil, store.ErrAppRuntimeNotFound
 }
 
 func newConnectAdminFixture() connectAdminFixture {

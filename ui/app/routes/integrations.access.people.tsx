@@ -38,6 +38,8 @@ export default function PeoplePage() {
 
 function PeopleManager({ canManage, canManageOwners }: { canManage: boolean; canManageOwners: boolean }) {
   const toast = useToast();
+  const { access } = useCurrentActorAccess();
+  const currentSubjectId = access?.subject_id ?? "";
   const [users, setUsers] = useState<UserSummary[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [selected, setSelected] = useState<User | null>(null);
@@ -112,6 +114,12 @@ function PeopleManager({ canManage, canManageOwners }: { canManage: boolean; can
   async function handleStatus() {
     if (!selected) return;
     const action = selected.status === "SUSPENDED" ? "reactivate" : "suspend";
+    const confirmed = await toast.confirm(
+      action === "suspend"
+        ? `Suspend ${selected.display_name}? They will immediately lose access.`
+        : `Reactivate ${selected.display_name}? They will regain access.`
+    );
+    if (!confirmed) return;
     await runChange(async () => {
       await changeUserStatus(selected.id, action);
       await Promise.all([refreshUsers(selected.id), refreshSelected()]);
@@ -121,6 +129,8 @@ function PeopleManager({ canManage, canManageOwners }: { canManage: boolean; can
 
   async function handleIssue(name: string) {
     if (!selected) return;
+    const confirmed = await toast.confirm(`Create a new personal key for ${selected.display_name}? The secret will be shown once.`);
+    if (!confirmed) return;
     await runChange(async () => {
       const payload = await issueUserCredential(selected.id, name);
       setIssued(payload);
@@ -132,6 +142,9 @@ function PeopleManager({ canManage, canManageOwners }: { canManage: boolean; can
 
   async function handleRevoke(credentialId: string) {
     if (!selected) return;
+    const credential = selected.credentials.find((c) => c.id === credentialId);
+    const confirmed = await toast.confirm(`Revoke key "${credential?.name ?? ""}"? This person will no longer be able to sign in with it.`);
+    if (!confirmed) return;
     await runChange(async () => {
       await revokeUserCredential(selected.id, credentialId);
       if (issued?.credential.id === credentialId) setIssued(null);
@@ -156,31 +169,56 @@ function PeopleManager({ canManage, canManageOwners }: { canManage: boolean; can
     {canManage && <AddPersonForm email={newEmail} name={newName} saving={saving} onEmail={setNewEmail} onName={setNewName} onSubmit={handleCreate} />}
     <div className={`grid gap-6 ${selected ? "lg:grid-cols-[300px_1fr]" : ""}`}>
       <PeopleList users={users} total={userTotal} search={search} selectedId={selectedId} loading={loading} includeSuspended={includeSuspended} onSearch={setSearch} onApplySearch={() => setAppliedSearch(search.trim())} onIncludeSuspended={setIncludeSuspended} onSelect={setSelectedId} />
-      {selected && <PersonEditor user={selected} email={editEmail} name={editName} saving={saving} issued={issued} canManage={canManage && (canManageOwners || !selectedOwnerProtected)} ownerProtected={selectedOwnerProtected && !canManageOwners} onEmail={setEditEmail} onName={setEditName} onUpdate={handleUpdate} onStatus={handleStatus} onIssue={handleIssue} onRevoke={handleRevoke} onClearSecret={() => setIssued(null)} />}
+      {selected && <PersonEditor user={selected} email={editEmail} name={editName} saving={saving} issued={issued} canManage={canManage && (canManageOwners || !selectedOwnerProtected)} ownerProtected={selectedOwnerProtected && !canManageOwners} currentSubjectId={currentSubjectId} onEmail={setEditEmail} onName={setEditName} onUpdate={handleUpdate} onStatus={handleStatus} onIssue={handleIssue} onRevoke={handleRevoke} onClearSecret={() => setIssued(null)} />}
     </div>
   </div>;
 }
 
 function AddPersonForm(props: { email: string; name: string; saving: boolean; onEmail: (value: string) => void; onName: (value: string) => void; onSubmit: (event: FormEvent) => void }) {
-  return <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm"><h2 className="text-base font-semibold text-slate-900 mb-1">Add a person</h2><p className="text-xs text-slate-500 mb-3">This does not send an email. Create a personal key separately when they need to sign in.</p><form onSubmit={props.onSubmit} className="grid gap-3 md:grid-cols-[1fr_1fr_auto]" toolname="add_person" tooldescription="Add a person to the workspace without sending an invitation email."><input type="email" required value={props.email} onChange={(event) => props.onEmail(event.target.value)} placeholder="person@example.com" aria-label="Email address" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" /><input required value={props.name} onChange={(event) => props.onName(event.target.value)} placeholder="Display name" aria-label="Display name" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" /><button type="submit" disabled={props.saving} className="inline-flex items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"><UserPlus className="w-4 h-4" /> Add person</button></form></section>;
+  return <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
+    <h2 className="text-base font-semibold text-slate-900 mb-1">Add a person</h2>
+    <p className="text-xs text-slate-500 mb-3">This does not send an email. Create a personal key separately when they need to sign in.</p>
+    <form onSubmit={props.onSubmit} className="grid gap-3 md:grid-cols-[1fr_1fr_auto] items-end" toolname="add_person" tooldescription="Add a person to the workspace without sending an invitation email.">
+      <label className="flex flex-col gap-1">
+        <span className="text-xs font-medium text-slate-700">Email</span>
+        <input type="email" required value={props.email} onChange={(event) => props.onEmail(event.target.value)} placeholder="person@example.com" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+      </label>
+      <label className="flex flex-col gap-1">
+        <span className="text-xs font-medium text-slate-700">Display name</span>
+        <input required value={props.name} onChange={(event) => props.onName(event.target.value)} placeholder="Display name" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+      </label>
+      <button type="submit" disabled={props.saving} className="inline-flex items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"><UserPlus className="w-4 h-4" /> Add person</button>
+    </form>
+  </section>;
 }
 
 function PeopleList(props: { users: UserSummary[]; total: number; search: string; selectedId: string; loading: boolean; includeSuspended: boolean; onSearch: (value: string) => void; onApplySearch: () => void; onIncludeSuspended: (value: boolean) => void; onSelect: (id: string) => void }) {
   return <section className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden"><div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between"><h2 className="font-semibold text-slate-900">People</h2><label className="text-xs text-slate-500 flex items-center gap-1.5"><input type="checkbox" checked={props.includeSuspended} onChange={(event) => props.onIncludeSuspended(event.target.checked)} /> Suspended</label></div><form onSubmit={(event) => { event.preventDefault(); props.onApplySearch(); }} className="flex gap-2 border-b border-slate-100 p-3"><input type="search" value={props.search} onChange={(event) => props.onSearch(event.target.value)} placeholder="Search people" aria-label="Search people" className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm" /><button type="submit" className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700">Search</button></form>{!props.loading && props.total > props.users.length && <p className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900" role="status">Showing {props.users.length} of {props.total} people. Search by name or email to find someone outside this list.</p>}<div className="divide-y divide-slate-100">{props.loading && <p className="p-4 text-sm text-slate-500">Loading people…</p>}{!props.loading && props.users.length === 0 && <p className="p-4 text-sm text-slate-500">No people found.</p>}{props.users.map((user) => <button key={user.id} type="button" onClick={() => props.onSelect(user.id)} className={`w-full text-left px-4 py-3 ${user.id === props.selectedId ? "bg-blue-50 text-blue-800" : "hover:bg-slate-50 text-slate-700"}`}><span className="block text-sm font-medium truncate">{user.display_name}</span><span className="block text-xs text-slate-500 truncate mt-0.5">{user.email} · {statusLabel(user.status)}</span></button>)}</div></section>;
 }
 
-function PersonEditor(props: { user: User | null; email: string; name: string; saving: boolean; issued: IssuedCredentialPayload | null; canManage: boolean; ownerProtected: boolean; onEmail: (value: string) => void; onName: (value: string) => void; onUpdate: (event: FormEvent) => void; onStatus: () => void; onIssue: (name: string) => void; onRevoke: (id: string) => void; onClearSecret: () => void }) {
+function PersonEditor(props: { user: User | null; email: string; name: string; saving: boolean; issued: IssuedCredentialPayload | null; canManage: boolean; ownerProtected: boolean; currentSubjectId: string; onEmail: (value: string) => void; onName: (value: string) => void; onUpdate: (event: FormEvent) => void; onStatus: () => void; onIssue: (name: string) => void; onRevoke: (id: string) => void; onClearSecret: () => void }) {
   if (!props.user) return <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm"><p className="text-sm text-slate-500">Select a person to manage them.</p></section>;
   const archived = props.user.status === "ARCHIVED";
-  return <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-6"><PersonEditorHeader user={props.user} canManage={props.canManage} saving={props.saving} archived={archived} onStatus={props.onStatus} />{!props.canManage && <p className="text-xs text-slate-500" role="status">{props.ownerProtected ? "Only a workspace Owner can change this person." : "You have read-only access to people."}</p>}<PersonDetailsForm email={props.email} name={props.name} canManage={props.canManage} saving={props.saving} archived={archived} onEmail={props.onEmail} onName={props.onName} onUpdate={props.onUpdate} /><MembershipSummary memberships={props.user.memberships} truncated={props.user.memberships_truncated} /><PersonalCredentialPanel credentials={props.user.credentials} truncated={props.user.credentials_truncated} issuedSecret={props.issued?.secret ?? null} disabled={!props.canManage || props.saving || archived} onIssue={props.onIssue} onRevoke={props.onRevoke} onClearSecret={props.onClearSecret} /></section>;
+  const isSelf = props.user.id === props.currentSubjectId;
+  return <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-6"><PersonEditorHeader user={props.user} canManage={props.canManage} saving={props.saving} archived={archived} isSelf={isSelf} onStatus={props.onStatus} />{!props.canManage && <p className="text-xs text-slate-500" role="status">{props.ownerProtected ? "Only a workspace Owner can change this person." : "You have read-only access to people."}</p>}<PersonDetailsForm email={props.email} name={props.name} canManage={props.canManage} saving={props.saving} archived={archived} onEmail={props.onEmail} onName={props.onName} onUpdate={props.onUpdate} /><MembershipSummary memberships={props.user.memberships} truncated={props.user.memberships_truncated} /><PersonalCredentialPanel credentials={props.user.credentials} truncated={props.user.credentials_truncated} issuedSecret={props.issued?.secret ?? null} disabled={!props.canManage || props.saving || archived} onIssue={props.onIssue} onRevoke={props.onRevoke} onClearSecret={props.onClearSecret} /></section>;
 }
 
-function PersonEditorHeader({ user, canManage, saving, archived, onStatus }: { user: User; canManage: boolean; saving: boolean; archived: boolean; onStatus: () => void }) {
-  return <div className="flex items-start justify-between gap-4"><div><h2 className="text-lg font-semibold text-slate-900">{user.display_name}</h2><p className="text-xs text-slate-500">{statusLabel(user.status)} · {user.id}</p></div>{canManage && !archived && <button type="button" disabled={saving} onClick={onStatus} className="text-sm font-semibold text-rose-600 disabled:opacity-50">{user.status === "SUSPENDED" ? "Reactivate" : "Suspend"}</button>}</div>;
+function PersonEditorHeader({ user, canManage, saving, archived, isSelf, onStatus }: { user: User; canManage: boolean; saving: boolean; archived: boolean; isSelf: boolean; onStatus: () => void }) {
+  return <div className="flex items-start justify-between gap-4"><div><h2 className="text-lg font-semibold text-slate-900">{user.display_name}</h2><p className="text-xs text-slate-500">{statusLabel(user.status)} · {user.id}</p></div>{canManage && !archived && !isSelf && <button type="button" disabled={saving} onClick={onStatus} className="text-sm font-semibold text-rose-600 disabled:opacity-50">{user.status === "SUSPENDED" ? "Reactivate" : "Suspend"}</button>}</div>;
 }
 
 function PersonDetailsForm(props: { email: string; name: string; canManage: boolean; saving: boolean; archived: boolean; onEmail: (value: string) => void; onName: (value: string) => void; onUpdate: (event: FormEvent) => void }) {
-  return <form onSubmit={props.onUpdate} className="grid gap-3 md:grid-cols-[1fr_1fr_auto]"><input type="email" required value={props.email} disabled={!props.canManage} onChange={(event) => props.onEmail(event.target.value)} aria-label="Edit email address" className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-50" /><input required value={props.name} disabled={!props.canManage} onChange={(event) => props.onName(event.target.value)} aria-label="Edit display name" className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-50" />{props.canManage && <button type="submit" disabled={props.saving || props.archived} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 disabled:opacity-50">Save</button>}</form>;
+  return <form onSubmit={props.onUpdate} className="grid gap-3 md:grid-cols-[1fr_1fr_auto] items-end">
+    <label className="flex flex-col gap-1">
+      <span className="text-xs font-medium text-slate-700">Email</span>
+      <input type="email" required value={props.email} disabled={!props.canManage} onChange={(event) => props.onEmail(event.target.value)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-50" />
+    </label>
+    <label className="flex flex-col gap-1">
+      <span className="text-xs font-medium text-slate-700">Display name</span>
+      <input required value={props.name} disabled={!props.canManage} onChange={(event) => props.onName(event.target.value)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-50" />
+    </label>
+    {props.canManage && <button type="submit" disabled={props.saving || props.archived} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 disabled:opacity-50">Save</button>}
+  </form>;
 }
 
 function MembershipSummary({ memberships, truncated }: { memberships: User["memberships"]; truncated: boolean }) {

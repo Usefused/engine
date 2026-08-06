@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
+	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
@@ -22,10 +23,9 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// webhookConfigDocument is kind: webhook's wire shape -- an independent
-// decode target from cli/internal/configfile.WebhookArtifactConfig (this
-// package doesn't import the CLI module, same reason sdkConfigDocument
-// exists alongside configfile.ArtifactConfig). Name is the registration
+// webhookConfigDocument is kind: webhook's wire shape. It remains local so
+// Engine desired-config handling does not depend on the CLI package. Name is
+// the registration
 // identity for every service listed here -- see
 // plans/plan-webhook-kind.md and store.WorkspaceWebhook.OwningConfigKey's
 // doc comment for why there's no per-service label anymore.
@@ -75,10 +75,15 @@ type webhookConfigApplyResult struct {
 // WebhookConfigPlanHandler owns desired-state validation for kind: webhook --
 // completely Engine-owned, like fused_workspace_webhooks itself: no Registry
 // round trip, no generation proxy, just a reconciliation of that table
-// scoped to this artifact's own config_key. verifier is only used to fetch
+// scoped to this desired config's own config_key. verifier is only used to fetch
 // each referenced service's webhook auth shape in one Registry metadata batch.
 func WebhookConfigPlanHandler(configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !entitlement.LiveEntitlement.Load().WebhookIngestionEnabled {
+			slog.InfoContext(r.Context(), "webhook config plan denied: webhook ingestion not enabled on current plan")
+			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusForbidden, message: "webhook ingestion not enabled on current plan"}, r.Context())
+			return
+		}
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.webhook_config.plan")
 		defer span.End()
 		actor, ok := accesscontrol.ActorFromContext(ctx)
@@ -114,12 +119,17 @@ func WebhookConfigPlanHandler(configStore store.ConfigRepository, s store.Store,
 }
 
 // WebhookConfigApplyHandler reconciles fused_workspace_webhooks rows owned by
-// this artifact's config_key -- creating/updating one row per declared
+// this desired config's config_key -- creating/updating one row per declared
 // service and pruning any this apply no longer declares. No runtime,
 // package, or token is produced; unlike SDK/MCP there is nothing else to
 // activate.
 func WebhookConfigApplyHandler(configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !entitlement.LiveEntitlement.Load().WebhookIngestionEnabled {
+			slog.InfoContext(r.Context(), "webhook config apply denied: webhook ingestion not enabled on current plan")
+			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusForbidden, message: "webhook ingestion not enabled on current plan"}, r.Context())
+			return
+		}
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.webhook_config.apply")
 		defer span.End()
 		actor, ok := accesscontrol.ActorFromContext(ctx)
@@ -167,7 +177,7 @@ func webhookConfigApplyResponse(planID uuid.UUID, result webhookConfigApplyResul
 }
 
 // decodeWebhookConfigPlanRequest applies one strict wire decoder, mirroring
-// decodeArtifactConfigPlanRequest's SDK/MCP shape, so CLI/UI cannot acquire a
+// decodeAppConfigPlanRequest's SDK/MCP shape, so CLI/UI cannot acquire a
 // different contract for this kind.
 func decodeWebhookConfigPlanRequest(r *http.Request) (SDKConfigPlanRequest, webhookConfigDocument, error) {
 	var req SDKConfigPlanRequest
@@ -185,13 +195,13 @@ func decodeWebhookConfigPlanRequest(r *http.Request) (SDKConfigPlanRequest, webh
 		return req, doc, err
 	}
 	if req.ConfigKey != webhookConfigKey(doc.Name) {
-		return req, doc, fmt.Errorf("config_key does not match webhook artifact identity")
+		return req, doc, fmt.Errorf("config_key does not match webhook desired-config identity")
 	}
 	return req, doc, nil
 }
 
 // webhookConfigKey has no version segment, unlike SDK/MCP's
-// artifactConfigKey -- kind: webhook is a continuously-reconciled
+// SDK and MCP config keys -- kind: webhook is a continuously-reconciled
 // registration bundle (like kind: workspace), not an immutable release, so
 // its identity is just its name.
 func webhookConfigKey(name string) string {
@@ -234,7 +244,7 @@ func createWebhookConfigPlan(ctx context.Context, configStore store.ConfigReposi
 	if err != nil {
 		return nil, nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to fetch config state"}
 	}
-	owner, err := resolveArtifactPlanOwner(ctx, s, current, call.actor, call.request.OwnerTeamSlug)
+	owner, err := resolveConfigPlanOwner(ctx, s, current, call.actor, call.request.OwnerTeamSlug)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -250,7 +260,7 @@ func createWebhookConfigPlan(ctx context.Context, configStore store.ConfigReposi
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := preflightArtifactOwnership(ctx, s, call.actor, owner, existingArtifactID(current), requiredPermissions); err != nil {
+	if err := preflightConfigOwnership(ctx, s, call.actor, owner, existingConfigResourceID(current), requiredPermissions); err != nil {
 		return nil, nil, err
 	}
 	plan, err := configStore.CreateConfigPlan(ctx, store.CreateConfigPlanParams{
@@ -282,7 +292,7 @@ func webhookPlanPermissionSnapshot(ctx context.Context, s store.Store, current *
 	for serviceName, service := range resolved {
 		serviceNames[service.ServiceID] = serviceName
 	}
-	required, count, err := artifactPlanRequiredPermissionsWithBuckets(ctx, current, serviceNames, secretBuckets, document.Name)
+	required, count, err := configPlanRequiredPermissionsWithBuckets(ctx, s, current, serviceNames, secretBuckets, document.Name)
 	if err != nil {
 		return nil, nil, 0, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to compute required permissions"}
 	}
@@ -308,7 +318,7 @@ func executeWebhookConfigApply(ctx context.Context, configStore store.ConfigRepo
 }
 
 func loadResolvedWebhookApply(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkApplyCall) (*store.ConfigPlan, webhookConfigDocument, map[string]webhookResolvedService, error) {
-	plan, err := loadAuthorizedArtifactPlanForApply(ctx, configStore, s, call, store.ConfigTypeWebhook)
+	plan, err := loadAuthorizedConfigPlanForApply(ctx, configStore, s, call, store.ConfigTypeWebhook)
 	if err != nil {
 		return nil, webhookConfigDocument{}, nil, err
 	}
@@ -555,7 +565,7 @@ func commitWebhookConfigApply(ctx context.Context, configStore store.ConfigRepos
 		Registrations: registrations, KeepServiceIDs: keepServiceIDs,
 	})
 	if err != nil {
-		if errors.Is(err, store.ErrConfigOwnerInactive) || errors.Is(err, store.ErrConfigPlanRevisionMismatch) || errors.Is(err, store.ErrConfigPlanNotFound) || errors.Is(err, store.ErrWorkspaceWebhookOwnerConflict) || errors.Is(err, store.ErrArtifactOwnerMismatch) || errors.Is(err, store.ErrConfigStateIdentityMismatch) {
+		if errors.Is(err, store.ErrConfigOwnerInactive) || errors.Is(err, store.ErrConfigPlanRevisionMismatch) || errors.Is(err, store.ErrConfigPlanNotFound) || errors.Is(err, store.ErrWorkspaceWebhookOwnerConflict) || errors.Is(err, store.ErrAppOwnerMismatch) || errors.Is(err, store.ErrConfigStateIdentityMismatch) {
 			return webhookConfigApplyResult{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "webhook plan is stale or its owner is inactive"}
 		}
 		return webhookConfigApplyResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to atomically apply webhook config"}
@@ -698,7 +708,7 @@ func workspaceWebhookServicesByKey(activations []store.WorkspaceService, keys []
 // (plans/plan-webhook-kind.md): one batched WorkspaceWebhookOwnersByLabel
 // call across every resolved service, not one query per service, then a
 // pure in-memory check of who (if anyone) already owns that pair. An owner
-// different from configKey means another webhook artifact got there first.
+// different from configKey means another webhook desired config got there first.
 func ensureWebhookNameAvailable(ctx context.Context, s store.Store, configKey, name string, resolved map[string]webhookResolvedService) error {
 	serviceIDs := make([]uuid.UUID, 0, len(resolved))
 	for _, r := range resolved {

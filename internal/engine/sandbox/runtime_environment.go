@@ -147,6 +147,10 @@ func comparableEnvironmentName(name string) string {
 // encodeRuntimeError preserves only documented structured decisions while
 // keeping ordinary execution failures backward-compatible as plain strings.
 func encodeRuntimeError(err error) string {
+	var timeoutErr *executionTimeoutError
+	if errors.As(err, &timeoutErr) {
+		return mustJSONError(timeoutErr)
+	}
 	var reconnectErr *ReconnectRequiredError
 	// Wrapped reconnect errors retain their typed SDK contract across the
 	// resolver and dispatcher layers instead of degrading to a plain string.

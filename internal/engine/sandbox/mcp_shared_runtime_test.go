@@ -33,7 +33,7 @@ func registerTestMCPSession(t *testing.T, token string, fixture *Fixture) string
 	sessionID := uuid.NewString()
 	mcpSessions.Lock()
 	mcpSessions.m[sessionID] = &mcpSession{
-		artifactID:      uuid.NewString(),
+		appID:           uuid.NewString(),
 		sessionID:       sessionID,
 		token:           token,
 		pendingRequests: make(map[string]pendingReq),

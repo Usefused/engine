@@ -236,8 +236,8 @@ func seedWebhookOwnedTeam(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 	`, configKey, created.Team.ID, uuid.NewString()).Scan(&configStateID); err != nil {
 		t.Fatalf("insert webhook config state: %v", err)
 	}
-	// SDK and MCP states mirror scope metadata and must not inflate ownership;
-	// their live resource is already represented by fused_artifact_scopes.
+	// SDK and MCP states mirror app metadata and must not inflate ownership;
+	// their live resource is represented by its app family.
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO fused_config_states (config_key, config_type, owner_team_id, source_hash)
 		VALUES ($1, 'sdk', $3, $5), ($2, 'mcp', $3, $4)
@@ -250,8 +250,8 @@ func seedWebhookOwnedTeam(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 func assertWebhookConfigStateIsNotArtifact(t *testing.T, ctx context.Context, repository *postgresStore, teamID, configStateID uuid.UUID, actor MutationActor) {
 	t.Helper()
 	if _, err := repository.AddTeamBinding(ctx, TeamBindingMutation{
-		TeamID: teamID, RoleSlug: accesscontrol.RoleArtifactManager,
-		Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceArtifact, ID: configStateID}, Actor: actor,
+		TeamID: teamID, RoleSlug: accesscontrol.RoleAppManager,
+		Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: configStateID}, Actor: actor,
 	}); !errors.Is(err, ErrInvalidTeamBinding) {
 		t.Fatalf("webhook config state artifact binding error = %v, want ErrInvalidTeamBinding", err)
 	}
@@ -263,7 +263,7 @@ func assertWebhookOwnershipBlocksArchive(t *testing.T, ctx context.Context, repo
 		t.Fatalf("archive webhook-owning team error = %v, want ErrTeamArchiveConflict", err)
 	} else {
 		var conflict *TeamArchiveConflictError
-		if !errors.As(err, &conflict) || conflict.ActiveArtifactCount != 1 {
+		if !errors.As(err, &conflict) || conflict.ActiveAppCount != 1 {
 			t.Fatalf("webhook archive conflict = %#v, %v", conflict, err)
 		}
 	}

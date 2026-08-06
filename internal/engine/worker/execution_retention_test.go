@@ -62,3 +62,29 @@ func TestStartExecutionRetentionWorkerRejectsDisabledConfiguration(t *testing.T)
 		t.Fatal("worker started with invalid batch size")
 	}
 }
+
+func TestCleanupExecutionRetentionPassUsesCurrentPlanValue(t *testing.T) {
+	now := time.Date(2026, time.August, 5, 12, 0, 0, 0, time.UTC)
+	store := &retentionStoreStub{results: []int64{0, 0}}
+
+	cleanupExecutionRetentionPass(context.Background(), store, now, 7, 100)
+	cleanupExecutionRetentionPass(context.Background(), store, now, 30, 100)
+
+	if len(store.before) != 2 {
+		t.Fatalf("cleanup calls = %d, want 2", len(store.before))
+	}
+	if want := now.Add(-7 * 24 * time.Hour); !store.before[0].Equal(want) {
+		t.Fatalf("dev cutoff = %s, want %s", store.before[0], want)
+	}
+	if want := now.Add(-30 * 24 * time.Hour); !store.before[1].Equal(want) {
+		t.Fatalf("scale-up cutoff = %s, want %s", store.before[1], want)
+	}
+}
+
+func TestCleanupExecutionRetentionPassSkipsNonPositiveRetention(t *testing.T) {
+	store := &retentionStoreStub{}
+	cleanupExecutionRetentionPass(context.Background(), store, time.Now(), 0, 100)
+	if store.calls != 0 {
+		t.Fatalf("disabled retention made %d delete calls", store.calls)
+	}
+}

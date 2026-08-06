@@ -44,22 +44,23 @@ func (s *postgresStore) UpsertWorkspaceExecutionPolicyOverride(ctx context.Conte
 	query := fmt.Sprintf(`
 		INSERT INTO fused_workspace_execution_policies (
 			service_id, service_version_id, rate_limit, retry_config,
-			pagination, event_extraction_path, incoming_webhook_config, base_url
+			timeout_ms, pagination, event_extraction_path, incoming_webhook_config, base_url
 		)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 		ON CONFLICT %s DO UPDATE SET
 			rate_limit = EXCLUDED.rate_limit,
 			retry_config = EXCLUDED.retry_config,
+			timeout_ms = EXCLUDED.timeout_ms,
 			pagination = EXCLUDED.pagination,
 			event_extraction_path = EXCLUDED.event_extraction_path,
 			incoming_webhook_config = EXCLUDED.incoming_webhook_config,
 			base_url = EXCLUDED.base_url,
 			updated_at = NOW()
 		RETURNING id, service_id, service_version_id, rate_limit, retry_config,
-		          pagination, event_extraction_path, incoming_webhook_config,
+		          timeout_ms, pagination, event_extraction_path, incoming_webhook_config,
 		          base_url, created_at, updated_at`, conflictTarget)
 	row := s.db.QueryRow(ctx, query, override.ServiceID, override.ServiceVersionID,
-		nullableJSON(rateLimit), nullableJSON(retryConfig), nullableJSON(pagination),
+		nullableJSON(rateLimit), nullableJSON(retryConfig), override.TimeoutMs, nullableJSON(pagination),
 		override.EventExtractionPath, nullableJSON(incomingWebhookConfig), override.BaseURL)
 	return scanWorkspaceExecutionPolicyOverride(row)
 }
@@ -72,7 +73,7 @@ func (s *postgresStore) UpsertWorkspaceExecutionPolicyOverride(ctx context.Conte
 // layer DESC.
 func (s *postgresStore) GetEffectiveWorkspaceExecutionPolicyOverride(ctx context.Context, serviceID, serviceVersionID uuid.UUID) (*WorkspaceExecutionPolicyOverride, error) {
 	query := `
-		SELECT id, service_id, service_version_id, rate_limit, retry_config,
+		SELECT id, service_id, service_version_id, rate_limit, retry_config, timeout_ms,
 		       pagination, event_extraction_path, incoming_webhook_config,
 		       base_url, created_at, updated_at
 		FROM fused_workspace_execution_policies
@@ -95,7 +96,7 @@ func (s *postgresStore) GetEffectiveWorkspaceExecutionPolicyOverrides(ctx contex
 	rows, err := s.db.Query(ctx, `
 		SELECT input.service_id, input.service_version_id,
 		       policy.id, policy.service_id, policy.service_version_id,
-		       policy.rate_limit, policy.retry_config, policy.pagination,
+		       policy.rate_limit, policy.retry_config, policy.timeout_ms, policy.pagination,
 		       policy.event_extraction_path, policy.incoming_webhook_config,
 		       policy.base_url, policy.created_at, policy.updated_at
 		FROM unnest($1::uuid[], $2::uuid[]) AS input(service_id, service_version_id)
@@ -121,7 +122,7 @@ func (s *postgresStore) GetWorkspaceExecutionPolicyOverrides(ctx context.Context
 	rows, err := s.db.Query(ctx, `
 		SELECT input.service_id, input.service_version_id,
 		       policy.id, policy.service_id, policy.service_version_id,
-		       policy.rate_limit, policy.retry_config, policy.pagination,
+		       policy.rate_limit, policy.retry_config, policy.timeout_ms, policy.pagination,
 		       policy.event_extraction_path, policy.incoming_webhook_config,
 		       policy.base_url, policy.created_at, policy.updated_at
 		FROM unnest($1::uuid[], $2::uuid[]) AS input(service_id, service_version_id)
@@ -157,7 +158,7 @@ func collectWorkspaceExecutionPolicyOverrides(rows workspaceExecutionPolicyRows,
 		var override WorkspaceExecutionPolicyOverride
 		var rateLimit, retryConfig, pagination, incomingWebhookConfig []byte
 		if err := rows.Scan(&ref.ServiceID, &ref.ServiceVersionID, &override.ID, &override.ServiceID, &override.ServiceVersionID,
-			&rateLimit, &retryConfig, &pagination, &override.EventExtractionPath,
+			&rateLimit, &retryConfig, &override.TimeoutMs, &pagination, &override.EventExtractionPath,
 			&incomingWebhookConfig, &override.BaseURL, &override.CreatedAt, &override.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -195,7 +196,7 @@ func scanWorkspaceExecutionPolicyOverride(row interface{ Scan(...any) error }) (
 	var override WorkspaceExecutionPolicyOverride
 	var rateLimit, retryConfig, pagination, incomingWebhookConfig []byte
 	err := row.Scan(&override.ID, &override.ServiceID, &override.ServiceVersionID,
-		&rateLimit, &retryConfig, &pagination, &override.EventExtractionPath,
+		&rateLimit, &retryConfig, &override.TimeoutMs, &pagination, &override.EventExtractionPath,
 		&incomingWebhookConfig, &override.BaseURL, &override.CreatedAt, &override.UpdatedAt)
 	if err != nil {
 		return nil, err

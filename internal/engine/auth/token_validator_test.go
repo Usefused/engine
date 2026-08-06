@@ -11,26 +11,23 @@ import (
 	"github.com/google/uuid"
 )
 
-// mockStore only needs to fake ValidateToken -- that's the sole store method
-// Validate() calls (token_validator.go:38). The real query accepts only an SDK
-// token bound to artifactID; control-plane credentials never enter runtime
-// authentication.
 type mockStore struct {
 	store.Store
-	validateTokenFn func(ctx context.Context, artifactID uuid.UUID, tokenHash string) (uuid.UUID, error)
+	authorizeAppFn func(ctx context.Context, appID uuid.UUID, tokenHash string) (*store.AuthProjection, error)
 }
 
-func (m *mockStore) ValidateToken(ctx context.Context, artifactID uuid.UUID, tokenHash string) (uuid.UUID, error) {
-	if m.validateTokenFn != nil {
-		return m.validateTokenFn(ctx, artifactID, tokenHash)
+func (m *mockStore) AuthorizeApp(ctx context.Context, appID uuid.UUID, tokenHash string) (*store.AuthProjection, error) {
+	if m.authorizeAppFn != nil {
+		return m.authorizeAppFn(ctx, appID, tokenHash)
 	}
-	return uuid.Nil, errors.New("not implemented")
+	return nil, errors.New("not implemented")
 }
 
 func TestTokenValidator(t *testing.T) {
 	ctx := context.Background()
-	artifactID := uuid.New()
+	appID := uuid.New()
 	accountID := uuid.New()
+	appFamilyID := uuid.New()
 	sdkToken := "fused_sdk_test_token"
 
 	hashedSDKToken := HashToken(sdkToken)
@@ -43,16 +40,14 @@ func TestTokenValidator(t *testing.T) {
 		expectedAccID uuid.UUID
 	}{
 		{
-			// Real ValidateToken matches the SDK token's own hash against
-			// fused_artifact_tokens for this artifactID.
 			name:  "Valid SDK Token",
 			token: sdkToken,
 			mock: &mockStore{
-				validateTokenFn: func(ctx context.Context, id uuid.UUID, hash string) (uuid.UUID, error) {
-					if id == artifactID && hash == hashedSDKToken {
-						return accountID, nil
+				authorizeAppFn: func(ctx context.Context, id uuid.UUID, hash string) (*store.AuthProjection, error) {
+					if id == appID && hash == hashedSDKToken {
+						return &store.AuthProjection{AccountID: accountID, AppFamilyID: appFamilyID, AppID: appID, Version: "1.0.0", Kind: "sdk", AppStatus: "active"}, nil
 					}
-					return uuid.Nil, errors.New("not found")
+					return nil, errors.New("not found")
 				},
 			},
 			expectedErr:   nil,
@@ -62,21 +57,19 @@ func TestTokenValidator(t *testing.T) {
 			name:  "Invalid Token",
 			token: "invalid_nonsense",
 			mock: &mockStore{
-				validateTokenFn: func(ctx context.Context, id uuid.UUID, hash string) (uuid.UUID, error) {
-					return uuid.Nil, errors.New("not found")
+				authorizeAppFn: func(ctx context.Context, id uuid.UUID, hash string) (*store.AuthProjection, error) {
+					return nil, errors.New("not found")
 				},
 			},
 			expectedErr:   ErrUnauthorized,
 			expectedAccID: uuid.Nil,
 		},
 		{
-			// An artifactID with no matching fused_artifact_scopes row is indistinguishable
-			// from any other non-match at the query level -- zero rows either way.
 			name:  "SDK Not Found",
 			token: sdkToken,
 			mock: &mockStore{
-				validateTokenFn: func(ctx context.Context, id uuid.UUID, hash string) (uuid.UUID, error) {
-					return uuid.Nil, errors.New("not found")
+				authorizeAppFn: func(ctx context.Context, id uuid.UUID, hash string) (*store.AuthProjection, error) {
+					return nil, errors.New("not found")
 				},
 			},
 			expectedErr:   ErrUnauthorized,
@@ -97,12 +90,12 @@ func TestTokenValidator(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			v := NewTokenValidator(tt.mock)
-			gotAccID, err := v.Validate(ctx, artifactID, tt.token)
+			identity, err := v.Validate(ctx, appID, tt.token)
 			if err != tt.expectedErr {
 				t.Errorf("expected error %v, got %v", tt.expectedErr, err)
 			}
-			if gotAccID != tt.expectedAccID {
-				t.Errorf("expected account id %v, got %v", tt.expectedAccID, gotAccID)
+			if identity.AccountID != tt.expectedAccID {
+				t.Errorf("expected account id %v, got %v", tt.expectedAccID, identity.AccountID)
 			}
 		})
 	}
@@ -110,25 +103,26 @@ func TestTokenValidator(t *testing.T) {
 
 func TestTokenValidatorResolvesSDKToken(t *testing.T) {
 	ctx := context.Background()
-	artifactID := uuid.New()
+	appID := uuid.New()
 	accountID := uuid.New()
+	appFamilyID := uuid.New()
 	rawToken := "fused_runtime_token"
 	hashedToken := HashToken(rawToken)
 
 	v := NewTokenValidator(&mockStore{
-		validateTokenFn: func(ctx context.Context, id uuid.UUID, hash string) (uuid.UUID, error) {
-			if id == artifactID && hash == hashedToken {
-				return accountID, nil
+		authorizeAppFn: func(ctx context.Context, id uuid.UUID, hash string) (*store.AuthProjection, error) {
+			if id == appID && hash == hashedToken {
+				return &store.AuthProjection{AccountID: accountID, AppFamilyID: appFamilyID, AppID: appID, Version: "1.0.0", Kind: "sdk", AppStatus: "active"}, nil
 			}
-			return uuid.Nil, errors.New("not found")
+			return nil, errors.New("not found")
 		},
 	})
-	gotAccID, err := v.Validate(ctx, artifactID, rawToken)
+	identity, err := v.Validate(ctx, appID, rawToken)
 	if err != nil {
 		t.Fatalf("expected raw SDK token to validate against stored hash, got %v", err)
 	}
-	if gotAccID != accountID {
-		t.Fatalf("expected account %s, got %s", accountID, gotAccID)
+	if identity.AccountID != accountID || identity.AppFamilyID != appFamilyID || identity.AppID != appID || identity.AppVersion != "1.0.0" {
+		t.Fatalf("unexpected runtime identity: %#v", identity)
 	}
 }
 

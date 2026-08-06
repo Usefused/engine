@@ -144,7 +144,23 @@ func TestHTTPRegistryClient_HandshakeDefaultsEntitlementsForOlderRegistry(t *tes
 	if err != nil {
 		t.Fatalf("HandshakeWithEntitlements: %v", err)
 	}
-	if result.Entitlements != models.DefaultRuntimeEntitlement() {
+	got := result.Entitlements.Normalized()
+	want := models.DefaultRuntimeEntitlement().Normalized()
+	if *got.MaxBuckets != *want.MaxBuckets ||
+		*got.MaxSDKFamilies != *want.MaxSDKFamilies ||
+		*got.MaxMCPFamilies != *want.MaxMCPFamilies ||
+		*got.MaxServices != *want.MaxServices ||
+		*got.MaxSandboxConcurrency != *want.MaxSandboxConcurrency ||
+		*got.ExecutionRetentionDays != *want.ExecutionRetentionDays ||
+		got.Plan != want.Plan ||
+		got.HeartbeatRequired != want.HeartbeatRequired ||
+		got.UsageReporting != want.UsageReporting ||
+		got.PublicServiceInsightsReporting != want.PublicServiceInsightsReporting ||
+		got.HeartbeatIntervalSeconds != want.HeartbeatIntervalSeconds ||
+		got.HeartbeatStaleAfterSeconds != want.HeartbeatStaleAfterSeconds ||
+		got.DriftMonitoringEnabled != want.DriftMonitoringEnabled ||
+		got.WebhookIngestionEnabled != want.WebhookIngestionEnabled ||
+		got.SSOEnabled != want.SSOEnabled {
 		t.Fatalf("expected default entitlement, got %#v", result.Entitlements)
 	}
 }
@@ -154,12 +170,37 @@ func TestHTTPRegistryClient_SendHeartbeat(t *testing.T) {
 	defer os.Unsetenv("FUSED_ENV")
 
 	var sawHeartbeat bool
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	installationID, runtimeID := uuid.New(), uuid.New()
+	ts := httptest.NewServer(heartbeatFixtureHandler(t, installationID, runtimeID, &sawHeartbeat))
+	defer ts.Close()
+
+	client := NewHTTPRegistryClient(ts.URL+"/graphql", "valid_license_key")
+	if err := client.ConfigureEngineIdentity(installationID, runtimeID); err != nil {
+		t.Fatalf("ConfigureEngineIdentity: %v", err)
+	}
+	resp, err := client.SendHeartbeat(context.Background(), "1.2.3", "abc123", "scale-up", "revision-1", time.Now())
+	if err != nil {
+		t.Fatalf("SendHeartbeat: %v", err)
+	}
+	if resp == nil || resp.Status != "ok" {
+		t.Fatalf("unexpected heartbeat response: %+v", resp)
+	}
+	if !sawHeartbeat {
+		t.Fatal("expected heartbeat request")
+	}
+}
+
+func heartbeatFixtureHandler(t *testing.T, installationID, runtimeID uuid.UUID, sawHeartbeat *bool) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/engine/heartbeat" {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
 		assertRegistryLicenseHeaders(t, r, "valid_license_key")
+		if r.Header.Get("X-Fused-Installation-ID") != installationID.String() || r.Header.Get("X-Fused-Runtime-Instance-ID") != runtimeID.String() {
+			t.Fatalf("missing Engine process identity headers: %v", r.Header)
+		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatalf("read body: %v", err)
@@ -168,25 +209,47 @@ func TestHTTPRegistryClient_SendHeartbeat(t *testing.T) {
 			http.Error(w, "invalid signature", http.StatusUnauthorized)
 			return
 		}
-		var req EngineHeartbeatRequest
-		if err := json.Unmarshal(body, &req); err != nil {
+		var request EngineHeartbeatRequest
+		if err := json.Unmarshal(body, &request); err != nil {
 			t.Fatalf("decode heartbeat: %v", err)
 		}
-		if req.EngineVersion != "1.2.3" || req.EngineBuildHash != "abc123" {
-			t.Fatalf("unexpected heartbeat identity: %+v", req)
+		if request.EngineVersion != "1.2.3" || request.EngineBuildHash != "abc123" {
+			t.Fatalf("unexpected heartbeat identity: %+v", request)
 		}
-		sawHeartbeat = true
-		w.WriteHeader(http.StatusOK)
+		if request.AppliedPlan != "scale-up" || request.AppliedEntitlementRevision != "revision-1" {
+			t.Fatalf("unexpected entitlement acknowledgement: %+v", request)
+		}
+		*sawHeartbeat = true
+		_ = json.NewEncoder(w).Encode(EngineHeartbeatResponse{Status: "ok"})
+	}
+}
+
+func TestHTTPRegistryClient_HandshakeDecodesManagedIdentityCapability(t *testing.T) {
+	os.Setenv("FUSED_ENV", "development")
+	defer os.Unsetenv("FUSED_ENV")
+
+	installationID := uuid.New()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"account_id": "acc", "workspace_name": "Workspace", "owner_email": "owner@example.com",
+			"identity": map[string]any{
+				"protocol_version": 1, "available": false,
+				"organization_status": "not_configured",
+				"installation_id":     installationID.String(),
+			},
+		})
 	}))
 	defer ts.Close()
 
-	client := NewHTTPRegistryClient(ts.URL+"/graphql", "valid_license_key")
-	err := client.SendHeartbeat(context.Background(), "1.2.3", "abc123", time.Now())
+	result, err := NewHTTPRegistryClient(ts.URL+"/graphql", "valid_license_key").HandshakeWithEntitlements(context.Background())
 	if err != nil {
-		t.Fatalf("SendHeartbeat: %v", err)
+		t.Fatalf("HandshakeWithEntitlements: %v", err)
 	}
-	if !sawHeartbeat {
-		t.Fatal("expected heartbeat request")
+	if result.Identity.ProtocolVersion != 1 || result.Identity.InstallationID != installationID.String() {
+		t.Fatalf("unexpected managed identity capability: %#v", result.Identity)
+	}
+	if result.OwnerEmail != "owner@example.com" {
+		t.Fatalf("owner email = %q, want owner@example.com", result.OwnerEmail)
 	}
 }
 

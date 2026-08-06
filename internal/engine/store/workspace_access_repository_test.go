@@ -11,7 +11,7 @@ import (
 
 func TestWorkspaceShareValidationOnlyAllowsBoundedResourceRoles(t *testing.T) {
 	actor := MutationActor{SubjectID: uuid.New(), CredentialID: uuid.New(), RequestID: "workspace-share-test", TraceID: "0123456789abcdef0123456789abcdef"}
-	for _, resourceType := range []accesscontrol.ResourceType{accesscontrol.ResourceBucket, accesscontrol.ResourceArtifact} {
+	for _, resourceType := range []accesscontrol.ResourceType{accesscontrol.ResourceBucket, accesscontrol.ResourceApp} {
 		input := WorkspaceShareMutation{Resource: accesscontrol.ResourceRef{Type: resourceType, ID: uuid.New()}, Actor: actor}
 		if err := validateWorkspaceShareMutation(input); err != nil {
 			t.Fatalf("validate %s share: %v", resourceType, err)
@@ -21,7 +21,7 @@ func TestWorkspaceShareValidationOnlyAllowsBoundedResourceRoles(t *testing.T) {
 	if err := validateWorkspaceShareMutation(invalid); !errors.Is(err, ErrInvalidWorkspaceShare) {
 		t.Fatalf("service share error = %v, want ErrInvalidWorkspaceShare", err)
 	}
-	if role, ok := workspaceShareRole(accesscontrol.ResourceArtifact); !ok || role != accesscontrol.RoleArtifactUser {
+	if role, ok := workspaceShareRole(accesscontrol.ResourceApp); !ok || role != accesscontrol.RoleAppUser {
 		t.Fatalf("artifact share role = %q/%v", role, ok)
 	}
 }

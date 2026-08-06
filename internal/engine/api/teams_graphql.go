@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"regexp"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
+	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/store"
 )
 
@@ -113,8 +115,8 @@ var teamAccessLevelGraphQLEnum = graphql.NewEnum(graphql.EnumConfig{
 	},
 })
 
-var teamArtifactAccessLevelGraphQLEnum = graphql.NewEnum(graphql.EnumConfig{
-	Name: "TeamArtifactAccessLevel",
+var teamAppAccessLevelGraphQLEnum = graphql.NewEnum(graphql.EnumConfig{
+	Name: "TeamAppAccessLevel",
 	Values: graphql.EnumValueConfigMap{
 		"READER":  &graphql.EnumValueConfig{Value: "reader"},
 		"USER":    &graphql.EnumValueConfig{Value: "user"},
@@ -269,26 +271,26 @@ func revokeTeamBucketAccessGraphQLField(s store.Store) *graphql.Field {
 	return teamResourceAccessGraphQLField(s, "team.bucket_access.revoke", accesscontrol.ResourceBucket, "bucket_id", false)
 }
 
-func grantTeamArtifactAccessGraphQLField(s store.Store) *graphql.Field {
-	return teamArtifactAccessGraphQLField(s, "team.artifact_access.grant", true)
+func grantTeamAppAccessGraphQLField(s store.Store) *graphql.Field {
+	return teamAppAccessGraphQLField(s, "team.app_access.grant", true)
 }
 
-func revokeTeamArtifactAccessGraphQLField(s store.Store) *graphql.Field {
-	return teamArtifactAccessGraphQLField(s, "team.artifact_access.revoke", false)
+func revokeTeamAppAccessGraphQLField(s store.Store) *graphql.Field {
+	return teamAppAccessGraphQLField(s, "team.app_access.revoke", false)
 }
 
-func teamArtifactAccessGraphQLField(s store.Store, action string, add bool) *graphql.Field {
+func teamAppAccessGraphQLField(s store.Store, action string, add bool) *graphql.Field {
 	role := func(p graphql.ResolveParams) string {
 		level, _ := p.Args["level"].(string)
 		if level == "manager" {
-			return accesscontrol.RoleArtifactManager
+			return accesscontrol.RoleAppManager
 		}
 		if level == "user" {
-			return accesscontrol.RoleArtifactUser
+			return accesscontrol.RoleAppUser
 		}
-		return accesscontrol.RoleArtifactReader
+		return accesscontrol.RoleAppReader
 	}
-	return teamBindingMutationField(s, action, accesscontrol.ResourceArtifact, "artifact_id", teamArtifactAccessLevelGraphQLEnum, role, add)
+	return teamBindingMutationField(s, action, accesscontrol.ResourceApp, "app_family_id", teamAppAccessLevelGraphQLEnum, role, add)
 }
 
 func teamResourceAccessGraphQLField(s store.Store, action string, resourceType accesscontrol.ResourceType, resourceArgument string, add bool) *graphql.Field {
@@ -332,6 +334,10 @@ func teamMutationField(resultType graphql.Output, args graphql.FieldConfigArgume
 		ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql."+action)
 		defer span.End()
 		p.Context = ctx
+		if !entitlement.LiveEntitlement.Load().SSOEnabled {
+			slog.InfoContext(ctx, "team mutation denied: sso not enabled on current plan")
+			return nil, teamGraphQLError(errors.New("team management (SSO) not enabled on current plan"))
+		}
 		repository, err := teamRepository(s)
 		if err != nil {
 			return nil, recordTeamMutationError(span, err)

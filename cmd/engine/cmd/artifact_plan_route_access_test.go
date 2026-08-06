@@ -60,7 +60,7 @@ func TestArtifactApplyMiddlewareRevisionReplacementStopsBeforeRegistry(t *testin
 	registry := &revisionReplacementForwarder{}
 	handler := controlAuthorizationMiddleware(accesscontrol.SnapshotAuthorizer{}, resolver)(api.SDKConfigApplyHandler(configStore, nil, registry))
 	actor := actorWithGrants(t, workspaceID,
-		accesscontrol.Grant{Permission: accesscontrol.PermissionArtifactCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
+		accesscontrol.Grant{Permission: accesscontrol.PermissionAppCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionServiceConsume, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: serviceID}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionBucketUse, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: bucketID}},
 	)
@@ -166,13 +166,13 @@ func artifactPlanSharedActor(t *testing.T, workspaceID, serviceID, bucketID, art
 	t.Helper()
 	grants := artifactPlanSelectionGrants(serviceID, bucketID)
 	grants = append(grants, accesscontrol.Grant{
-		Permission: accesscontrol.PermissionArtifactRead,
-		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceArtifact, ID: artifactID},
+		Permission: accesscontrol.PermissionAppRead,
+		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: artifactID},
 	})
 	if manager {
 		grants = append(grants, accesscontrol.Grant{
-			Permission: accesscontrol.PermissionArtifactManage,
-			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceArtifact, ID: artifactID},
+			Permission: accesscontrol.PermissionAppManage,
+			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: artifactID},
 		})
 	}
 	return actorWithGrants(t, workspaceID, grants...)
@@ -197,6 +197,11 @@ func serveArtifactPlanRoute(t *testing.T, path string, serviceID, bucketID uuid.
 	stores := &controlRequirementStoreStub{
 		services: []store.WorkspaceService{{ServiceID: serviceID, ServiceName: acceptanceServiceName}},
 		buckets:  []store.Bucket{{ID: bucketID, Name: "default"}},
+	}
+	if state != nil && state.LatestResourceID != nil {
+		stores.apps = map[uuid.UUID]store.App{
+			*state.LatestResourceID: {AppID: *state.LatestResourceID, AppFamilyID: *state.LatestResourceID},
+		}
 	}
 	resolver := newControlRequirementResolver(stores, &controlConfigRepositoryStub{state: state})
 	downstreamCalls := 0

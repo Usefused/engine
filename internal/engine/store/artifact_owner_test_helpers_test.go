@@ -7,7 +7,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func seedArtifactOwnerTeam(t *testing.T, ctx context.Context, db execer) uuid.UUID {
+func seedAppOwnerTeam(t *testing.T, ctx context.Context, db execer) uuid.UUID {
 	t.Helper()
 	teamID := uuid.New()
 	if _, err := db.Exec(ctx, `INSERT INTO fused_teams (id, name, slug) VALUES ($1, $2, $3)`,

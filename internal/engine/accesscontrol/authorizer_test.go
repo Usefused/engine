@@ -16,14 +16,14 @@ func TestCheckAllRequiresEveryUniqueRequirement(t *testing.T) {
 	allowedServiceID := uuid.New()
 	deniedBucketID := uuid.New()
 	snapshot := mustSnapshot(t,
-		Grant{Permission: PermissionArtifactCreate, Resource: ResourceRef{Type: ResourceWorkspace, ID: workspaceID}},
+		Grant{Permission: PermissionAppCreate, Resource: ResourceRef{Type: ResourceWorkspace, ID: workspaceID}},
 		Grant{Permission: PermissionServiceConsume, Resource: ResourceRef{Type: ResourceService, ID: allowedServiceID}},
 	)
 	actor := Actor{Authorization: snapshot}
 	authorizer := SnapshotAuthorizer{}
 
 	requirements := []Requirement{
-		{Permission: PermissionArtifactCreate, Resource: ResourceRef{Type: ResourceWorkspace, ID: workspaceID}},
+		{Permission: PermissionAppCreate, Resource: ResourceRef{Type: ResourceWorkspace, ID: workspaceID}},
 		{Permission: PermissionServiceConsume, Resource: ResourceRef{Type: ResourceService, ID: allowedServiceID}},
 		{Permission: PermissionBucketUse, Resource: ResourceRef{Type: ResourceBucket, ID: deniedBucketID}},
 		{Permission: PermissionBucketUse, Resource: ResourceRef{Type: ResourceBucket, ID: deniedBucketID}},

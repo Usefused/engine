@@ -9,8 +9,10 @@ import (
 	"strings"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
+	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/canonical"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
@@ -20,6 +22,7 @@ import (
 )
 
 type mcpConfigApplyResult struct {
+	AppFamilyID    uuid.UUID
 	RuntimeID      uuid.UUID
 	RuntimeURL     string
 	ExecutionToken string
@@ -27,7 +30,7 @@ type mcpConfigApplyResult struct {
 	Name           string
 	Version        string
 	SourceHash     string
-	Scope          store.ArtifactScope
+	Scope          store.AppRuntime
 }
 
 // MCPConfigPlanHandler owns desired-state validation for Engine-projected MCP
@@ -43,7 +46,7 @@ func MCPConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, ctx)
 			return
 		}
-		req, doc, err := decodeArtifactConfigPlanRequest(r, "mcp")
+		req, doc, err := decodeAppConfigPlanRequest(r, "mcp")
 		if err != nil {
 			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, ctx)
 			return
@@ -70,7 +73,7 @@ func MCPConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 }
 
 // MCPConfigApplyHandler activates a resolved Engine scope directly. No
-// Registry SDK generation request or artifact record exists on this path.
+// Registry SDK generation request or package record exists on this path.
 func MCPConfigApplyHandler(configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.mcp_config.apply")
@@ -91,6 +94,7 @@ func MCPConfigApplyHandler(configStore store.ConfigRepository, s store.Store, re
 			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"}, ctx)
 			return
 		}
+		span.SetAttributes(attribute.String("actor.type", string(actor.Kind)))
 		result, err := executeMCPConfigApply(ctx, configStore, s, registryClient, sdkApplyCall{
 			apiKey: r.Header.Get("X-API-Key"), accountID: actor.AccountID, actor: actor,
 			planID: planID, planRevision: planRevision, sourceHash: req.SourceHash,
@@ -100,11 +104,12 @@ func MCPConfigApplyHandler(configStore store.ConfigRepository, s store.Store, re
 			writeSDKConfigError(w, err, ctx)
 			return
 		}
-		result.RuntimeURL = mcpURLForSDK(r, result.RuntimeID)
+		result.RuntimeURL = mcpURLForApp(r, result.RuntimeID)
 		span.SetAttributes(
-			attribute.String("outcome", "success"), attribute.String("artifact.kind", "mcp"),
-			attribute.String("artifact.name", result.Name), attribute.String("artifact.version", result.Version),
-			attribute.String("runtime_id", result.RuntimeID.String()),
+			attribute.String("outcome", "success"), attribute.String("app.kind", "mcp"),
+			attribute.String("app.version", result.Version),
+			attribute.String("app.family_id", result.AppFamilyID.String()),
+			attribute.String("app.id", result.RuntimeID.String()),
 		)
 		if result.ExecutionToken != "" {
 			setOneTimeSecretResponseHeaders(w)
@@ -113,12 +118,13 @@ func MCPConfigApplyHandler(configStore store.ConfigRepository, s store.Store, re
 	}
 }
 
-// mcpConfigApplyResponse keeps MCP's one-time token on the shared artifact
+// mcpConfigApplyResponse keeps MCP's one-time token on the shared app
 // wire key so fused-cli can use one decoder for SDK and MCP apply responses.
 func mcpConfigApplyResponse(planID uuid.UUID, result mcpConfigApplyResult) map[string]any {
 	resp := map[string]any{
 		"status": "applied", "plan_id": planID.String(), "config_key": result.ConfigKey,
-		"name": result.Name, "version": result.Version, "artifact_id": result.RuntimeID.String(),
+		"name": result.Name, "version": result.Version,
+		"app_family_id": result.AppFamilyID.String(), "app_id": result.RuntimeID.String(),
 		"mcp_url": result.RuntimeURL,
 	}
 	if result.ExecutionToken != "" {
@@ -129,9 +135,9 @@ func mcpConfigApplyResponse(planID uuid.UUID, result mcpConfigApplyResult) map[s
 	return resp
 }
 
-// decodeArtifactConfigPlanRequest applies one strict wire decoder to SDK and
+// decodeAppConfigPlanRequest applies one strict wire decoder to SDK and
 // MCP documents so UI, CLI, and GraphQL cannot acquire different contracts.
-func decodeArtifactConfigPlanRequest(r *http.Request, kind string) (SDKConfigPlanRequest, sdkConfigDocument, error) {
+func decodeAppConfigPlanRequest(r *http.Request, kind string) (SDKConfigPlanRequest, sdkConfigDocument, error) {
 	var req SDKConfigPlanRequest
 	if err := decodeOneStrictJSON(r.Body, &req); err != nil {
 		return req, sdkConfigDocument{}, errors.New("invalid request body")
@@ -143,37 +149,37 @@ func decodeArtifactConfigPlanRequest(r *http.Request, kind string) (SDKConfigPla
 		return req, sdkConfigDocument{}, err
 	}
 	var doc sdkConfigDocument
-	if err := decodeArtifactConfigJSON(req.Config, &doc); err != nil {
+	if err := decodeAppConfigJSON(req.Config, &doc); err != nil {
 		return req, doc, errors.New("invalid config json")
 	}
-	if err := validateArtifactConfigDocument(doc, kind); err != nil {
+	if err := validateAppConfigDocument(doc, kind); err != nil {
 		return req, doc, err
 	}
 	if req.ConfigKey != fmt.Sprintf("%s:%s:%s", kind, doc.Name, doc.Version) {
-		return req, doc, fmt.Errorf("config_key does not match %s artifact identity", kind)
+		return req, doc, fmt.Errorf("config_key does not match %s app identity", kind)
 	}
 	return req, doc, nil
 }
 
-// validateArtifactConfigDocument enforces the shared artifact identity while
+// validateAppConfigDocument enforces the shared app identity while
 // keeping generation-only fields out of an Engine-projected MCP runtime.
-func validateArtifactConfigDocument(doc sdkConfigDocument, kind string) error {
+func validateAppConfigDocument(doc sdkConfigDocument, kind string) error {
 	if doc.APIVersion != "fused/v1" || doc.Kind != kind {
 		return fmt.Errorf("config must use apiVersion fused/v1 and kind %s", kind)
 	}
-	if strings.TrimSpace(doc.Name) == "" || !sdkArtifactVersionPattern.MatchString(doc.Version) {
+	if strings.TrimSpace(doc.Name) == "" || !validAppVersion(doc.Version) {
 		return fmt.Errorf("%s config requires name and a SemVer-compatible version", kind)
 	}
 	if strings.TrimSpace(doc.Bucket) == "" {
 		return fmt.Errorf("%s config requires exactly one bucket", kind)
 	}
-	if err := validateMCPArtifactRestrictions(doc, kind); err != nil {
+	if err := validateMCPAppRestrictions(doc, kind); err != nil {
 		return err
 	}
-	return validateArtifactServiceDocs(doc.Services)
+	return validateAppServiceDocs(doc.Services)
 }
 
-func validateMCPArtifactRestrictions(doc sdkConfigDocument, kind string) error {
+func validateMCPAppRestrictions(doc sdkConfigDocument, kind string) error {
 	if kind != "mcp" {
 		return nil
 	}
@@ -181,7 +187,7 @@ func validateMCPArtifactRestrictions(doc sdkConfigDocument, kind string) error {
 		return errors.New("mcp config must not set language")
 	}
 	for name, service := range doc.Services {
-		// MCP is operation-only; webhook attachment belongs to SDK artifacts.
+		// MCP is operation-only; webhook attachment belongs to SDK apps.
 		if len(service.Webhooks) > 0 || service.WebhooksSelectAll {
 			return fmt.Errorf("mcp service %s cannot select webhooks", name)
 		}
@@ -196,7 +202,7 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	if err != nil {
 		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to fetch config state"}
 	}
-	owner, bucket, err := resolveArtifactPlanOwnerAndBucket(
+	owner, bucket, err := resolveAppPlanOwnerAndBucket(
 		ctx, s, current, call.actor, call.request.OwnerTeamSlug, call.document.Bucket,
 	)
 	if err != nil {
@@ -222,17 +228,17 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
-	payload := artifactResolvedPayload{
+	payload := appResolvedPayload{
 		Selections: selections, ContractBindings: bindings, BucketID: bucket.ID,
 	}
 	resolvedPayload, _ := json.Marshal(payload)
-	requiredPermissions, requiredCount, err := artifactPlanRequiredPermissionsWithBuckets(
-		ctx, current, serviceNamesFromResolved(resolved), []store.Bucket{*bucket}, call.document.Name,
+	requiredPermissions, requiredCount, err := configPlanRequiredPermissionsWithBuckets(
+		ctx, s, current, serviceNamesFromResolved(resolved), []store.Bucket{*bucket}, call.document.Name,
 	)
 	if err != nil {
 		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to compute required permissions"}
 	}
-	if err := preflightArtifactOwnership(ctx, s, call.actor, owner, existingArtifactID(current), requiredPermissions); err != nil {
+	if err := preflightConfigOwnership(ctx, s, call.actor, owner, existingConfigResourceID(current), requiredPermissions); err != nil {
 		return sdkPlanResult{}, err
 	}
 	plan, err := configStore.CreateConfigPlan(ctx, store.CreateConfigPlanParams{
@@ -252,16 +258,16 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 }
 
 func validateMCPDesiredState(state sdkConfigDocument, current *store.ConfigState) ([]byte, error) {
-	desiredState, err := canonicalArtifactState(state)
+	desiredState, err := canonicalAppState(state)
 	if err != nil {
 		return nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to canonicalize mcp config"}
 	}
 	// The version identity is immutable, but source formatting and set order
-	// are not part of the artifact contract and must remain idempotent.
-	if current != nil && !sameCanonicalArtifactState(current.DesiredState, desiredState) {
+	// are not part of the app contract and must remain idempotent.
+	if current != nil && !sameCanonicalAppState(current.DesiredState, desiredState) {
 		return nil, workspaceConfigHTTPError{
 			status:  http.StatusConflict,
-			message: "artifact_version_immutable: mcp version already applied with different content; bump version to change scope",
+			message: "app_version_immutable: mcp version already applied with different content; bump version to change scope",
 		}
 	}
 	return desiredState, nil
@@ -288,9 +294,9 @@ func resolveMCPEndpointIDs(ctx context.Context, registryClient sandbox.RegistryC
 }
 
 // executeMCPConfigApply persists only an Engine scope and one-time execution
-// token; MCP intentionally has no generated package or archive artifact.
+// token; MCP intentionally has no generated package or archive package.
 func executeMCPConfigApply(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkApplyCall) (mcpConfigApplyResult, error) {
-	plan, err := loadAuthorizedArtifactPlanForApply(ctx, configStore, s, call, store.ConfigTypeMCP)
+	plan, err := loadAuthorizedConfigPlanForApply(ctx, configStore, s, call, store.ConfigTypeMCP)
 	if err != nil {
 		return mcpConfigApplyResult{}, err
 	}
@@ -304,47 +310,70 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 	if err := ensureSDKContractBindingsCurrent(ctx, registryClient, call.apiKey, bindings); err != nil {
 		return mcpConfigApplyResult{}, workspaceConfigHTTPError{status: http.StatusConflict, message: err.Error()}
 	}
-	doc, payload, err := decodeArtifactApplyPlan(ctx, configStore, s, plan, "mcp")
+	doc, payload, err := decodeAppApplyPlan(ctx, configStore, s, plan, "mcp")
 	if err != nil {
 		return mcpConfigApplyResult{}, err
 	}
 	runtimeID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(plan.ConfigKey))
 	selections, _ := json.Marshal(payload.Selections)
-	scope, err := artifactScopeForApply(persistArtifactScopeParams{
-		accountID: call.accountID, artifactID: runtimeID, ownerSubjectID: planOwnerSubjectID(plan), ownerTeamID: planOwnerTeamID(plan), bucketID: payload.BucketID, bucketName: doc.Bucket,
-		selections: selections, scopeSchemaVersion: models.ArtifactScopeSchemaVersion,
+	scope, err := appRuntimeForApply(persistAppRuntimeParams{
+		accountID: call.accountID, appID: runtimeID, ownerSubjectID: planOwnerSubjectID(plan), ownerTeamID: planOwnerTeamID(plan), bucketID: payload.BucketID, bucketName: doc.Bucket,
+		selections: selections, scopeSchemaVersion: models.AppScopeSchemaVersion,
 		kind: "mcp", name: doc.Name, version: doc.Version, configKey: plan.ConfigKey,
 	})
 	if err != nil {
 		return mcpConfigApplyResult{}, err
 	}
-	snapshot := store.ArtifactSnapshot{ArtifactID: runtimeID, AccountID: call.accountID, Kind: "mcp",
-		Name: doc.Name, Description: payload.Description, Version: doc.Version,
-		Selections: selections, ScopeSchemaVersion: models.ArtifactScopeSchemaVersion, SourceHash: plan.SourceHash}
-	token, _, err := applyArtifactConfigScope(ctx, configStore, s, call, plan, scope, snapshot, doc.Bucket)
+	if err := enforceMCPFamilyLimit(ctx, s, call.accountID, doc.Name); err != nil {
+		return mcpConfigApplyResult{}, err
+	}
+
+	token, familyID, appID, _, err := applyAppConfigRuntime(ctx, configStore, s, call, plan, scope, doc.Bucket, "", "")
 	if err != nil {
 		return mcpConfigApplyResult{}, err
 	}
 	return mcpConfigApplyResult{
-		RuntimeID: runtimeID, ExecutionToken: token, ConfigKey: plan.ConfigKey,
+		AppFamilyID: familyID, RuntimeID: appID, ExecutionToken: token, ConfigKey: plan.ConfigKey,
 		Name: doc.Name, Version: doc.Version, SourceHash: plan.SourceHash, Scope: scope,
 	}, nil
 }
 
-// sameCanonicalArtifactState compares persisted desired state after applying
+func enforceMCPFamilyLimit(ctx context.Context, s store.Store, accountID uuid.UUID, name string) error {
+	canonicalName, _, err := canonical.AppName(name)
+	if err != nil {
+		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
+	}
+	_, err = s.GetAppFamilyByIdentity(ctx, accountID, "mcp", canonicalName)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, store.ErrAppFamilyNotFound) {
+		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_resolve_mcp_family"}
+	}
+	currentFamilies, err := s.CountAppFamilies(ctx, accountID, "mcp")
+	if err != nil {
+		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_count_mcp_families"}
+	}
+	if limitErr := entitlement.CheckLimit(trace.SpanFromContext(ctx), "mcp_families", currentFamilies, entitlement.LiveEntitlement.Load().MaxMCPFamilies); limitErr != nil {
+		return workspaceConfigHTTPError{status: http.StatusForbidden, message: limitErr.Error()}
+	}
+	return nil
+}
+
+// sameCanonicalAppState compares persisted desired state after applying
 // the same normalization used for a new plan, not the caller's raw source.
-func sameCanonicalArtifactState(existing, candidate []byte) bool {
+func sameCanonicalAppState(existing, candidate []byte) bool {
 	var document sdkConfigDocument
 	if json.Unmarshal(existing, &document) != nil {
 		return false
 	}
-	canonicalExisting, err := canonicalArtifactState(document)
+	canonicalExisting, err := canonicalAppState(document)
 	return err == nil && string(canonicalExisting) == string(candidate)
 }
 
-// loadArtifactPlanForApply rejects superseded identity or generation data
+// loadConfigPlanForApply rejects superseded identity or generation data
 // before any runtime state is changed.
-func loadArtifactPlanForApply(ctx context.Context, configStore store.ConfigRepository, call sdkApplyCall, expected store.ConfigType) (*store.ConfigPlan, *store.ConfigState, error) {
+func loadConfigPlanForApply(ctx context.Context, configStore store.ConfigRepository, call sdkApplyCall, expected store.ConfigType) (*store.ConfigPlan, *store.ConfigState, error) {
 	plan, err := configStore.GetConfigPlan(ctx, call.planID)
 	if err != nil {
 		return nil, nil, planFetchHTTPError(err)

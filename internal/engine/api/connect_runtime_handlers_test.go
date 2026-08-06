@@ -24,9 +24,9 @@ import (
 func TestStartConnectSessionHandlerCreatesAuthorizationURL(t *testing.T) {
 	fixture := newConnectRuntimeFixture(t)
 	router := buildConnectRuntimeRouter(fixture)
-	artifactID := attachConnectTestArtifact(&fixture)
+	appID := attachConnectTestArtifact(&fixture)
 
-	body := bytes.NewReader([]byte(`{"end_user_ref":"user_123","created_by_artifact_id":"` + artifactID.String() + `","return_url":"https://app.example.com/oauth/done"}`))
+	body := bytes.NewReader([]byte(`{"end_user_ref":"user_123","created_by_app_id":"` + appID.String() + `","return_url":"https://app.example.com/oauth/done"}`))
 	req := httptest.NewRequest(http.MethodPost, fixture.startPath(), body)
 	req.Header.Set("X-API-Key", "fsk_test")
 	rr := httptest.NewRecorder()
@@ -56,12 +56,12 @@ func TestStartConnectSessionHandlerCreatesAuthorizationURL(t *testing.T) {
 // attachConnectTestArtifact gives connect entrypoint tests a real immutable
 // scope because production rejects attribution to an unknown SDK/MCP ID.
 func attachConnectTestArtifact(fixture *connectRuntimeFixture) uuid.UUID {
-	artifactID := uuid.New()
+	appID := uuid.New()
 	selections, _ := json.Marshal([]models.SDKSelection{{ServiceID: fixture.serviceID}})
-	fixture.store.artifactScopes = map[uuid.UUID]*store.ArtifactScope{
-		artifactID: {AccountID: fixture.store.accountID, ArtifactID: artifactID, BucketID: fixture.bucketID, Selections: selections},
+	fixture.store.appRuntimes = map[uuid.UUID]*store.AppRuntime{
+		appID: {AccountID: fixture.store.accountID, AppID: appID, BucketID: fixture.bucketID, Selections: selections},
 	}
-	return artifactID
+	return appID
 }
 
 // TestResolveConnectScopesNarrowsAndNormalizes proves callers can request a
@@ -97,17 +97,17 @@ func TestResolveConnectScopesRequiresOpenID(t *testing.T) {
 
 func TestArtifactConnectScopePolicyIsAppliedBeforeProviderScopes(t *testing.T) {
 	fixture := newConnectAdminFixture()
-	artifactID := uuid.New()
+	appID := uuid.New()
 	selections, _ := json.Marshal([]models.SDKSelection{{ServiceID: fixture.serviceID, ConnectScopes: []string{"read"}}})
-	fixture.store.artifactScopes = map[uuid.UUID]*store.ArtifactScope{
-		artifactID: {AccountID: fixture.store.accountID, ArtifactID: artifactID, BucketID: fixture.bucketID, Selections: selections},
+	fixture.store.appRuntimes = map[uuid.UUID]*store.AppRuntime{
+		appID: {AccountID: fixture.store.accountID, AppID: appID, BucketID: fixture.bucketID, Selections: selections},
 	}
 
-	scopes, err := applyArtifactConnectScopePolicy(context.Background(), fixture.store, fixture.bucketID, fixture.serviceID, artifactID, nil)
+	scopes, err := applyAppConnectScopePolicy(context.Background(), fixture.store, fixture.bucketID, fixture.serviceID, appID, nil)
 	if err != nil || strings.Join(scopes, " ") != "read" {
 		t.Fatalf("artifact policy = %#v, err = %v", scopes, err)
 	}
-	if _, err := applyArtifactConnectScopePolicy(context.Background(), fixture.store, fixture.bucketID, fixture.serviceID, artifactID, []string{"write"}); err == nil {
+	if _, err := applyAppConnectScopePolicy(context.Background(), fixture.store, fixture.bucketID, fixture.serviceID, appID, []string{"write"}); err == nil {
 		t.Fatal("expected a scope outside the artifact policy to be rejected")
 	}
 }

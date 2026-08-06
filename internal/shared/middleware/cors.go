@@ -51,7 +51,13 @@ func CORS(allowedOrigins ...string) func(http.Handler) http.Handler {
 
 			w.Header().Set("Access-Control-Allow-Origin", originToSet)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key, x-api-key")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key, x-api-key, X-Fused-CSRF")
+			if originToSet != "*" {
+				// Browser sessions use HttpOnly cookies only for explicitly allowed
+				// origins; wildcard CORS can never opt into credentials safely.
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+				w.Header().Add("Vary", "Origin")
+			}
 
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)

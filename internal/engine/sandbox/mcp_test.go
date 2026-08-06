@@ -37,29 +37,29 @@ type mockObjectCache struct {
 	err error
 }
 
-func (m *mockObjectCache) ConnectSDK(ctx context.Context, artifactID string) error {
+func (m *mockObjectCache) ConnectSDK(ctx context.Context, appID string) error {
 	return nil
 }
 
-func (m *mockObjectCache) DisconnectSDK(artifactID string) {}
+func (m *mockObjectCache) DisconnectSDK(appID string) {}
 
-func (m *mockObjectCache) GetOrFetchServiceMetadata(ctx context.Context, artifactID string, serviceID string) (*fusedobject.ServiceMetadata, error) {
+func (m *mockObjectCache) GetOrFetchServiceMetadata(ctx context.Context, appID string, serviceID string) (*fusedobject.ServiceMetadata, error) {
 	if m.err != nil {
 		return nil, m.err
 	}
 	return m.obj, nil
 }
 
-func (m *mockObjectCache) GetArtifactScope(ctx context.Context, artifactID string) (string, []byte, error) {
+func (m *mockObjectCache) GetAppRuntime(ctx context.Context, appID string) (string, []byte, error) {
 	return "test_token", []byte(`[{"service_id": "00000000-0000-0000-0000-000000000000", "endpoint_ids": ["00000000-0000-0000-0000-000000000000"]}]`), nil
 }
 
 func (m *mockObjectCache) Invalidate(serviceID string) {}
 
-func (m *mockObjectCache) GetEndpoint(ctx context.Context, artifactID string, serviceID string, endpointName string) (*fusedobject.Endpoint, error) {
+func (m *mockObjectCache) GetEndpoint(ctx context.Context, appID string, serviceID string, endpointName string) (*fusedobject.Endpoint, error) {
 	return nil, nil
 }
 
-func (m *mockObjectCache) ListEndpointsForSelection(ctx context.Context, artifactID string, sel models.SDKSelection) ([]fusedobject.Endpoint, error) {
+func (m *mockObjectCache) ListEndpointsForSelection(ctx context.Context, appID string, sel models.SDKSelection) ([]fusedobject.Endpoint, error) {
 	return nil, nil
 }
