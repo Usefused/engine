@@ -102,7 +102,7 @@ func DefaultRuntimeEntitlement() RuntimeEntitlement {
 		MaxMCPFamilies:                 IntPtr(-1),
 		MaxServices:                    IntPtr(-1),
 		MaxSandboxConcurrency:          IntPtr(-1),
-		DriftMonitoringEnabled:         false,
+		DriftMonitoringEnabled:         true,
 		WebhookIngestionEnabled:        false,
 		SSOEnabled:                     false,
 		ExecutionRetentionDays:         IntPtr(30),
@@ -111,6 +111,9 @@ func DefaultRuntimeEntitlement() RuntimeEntitlement {
 
 func (e RuntimeEntitlement) Normalized() RuntimeEntitlement {
 	defaults := DefaultRuntimeEntitlement()
+	// Drift monitoring is part of every plan. Normalizing it to true also
+	// unlocks Engines that persisted the former Dev-plan false value.
+	e.DriftMonitoringEnabled = true
 	if e.Plan == "" {
 		e.Plan = defaults.Plan
 	}

@@ -1908,10 +1908,9 @@ func TestArtifactApplyHandlersRejectMissingAuthorizedPlanRevision(t *testing.T) 
 	}
 }
 
-// TestCollectSDKPlanNotifications_DriftMonitoringDisabled_SkipsRegistry
-// verifies the P4-01 gate: when DriftMonitoringEnabled is false the
-// registry client must never be called and no drift items appear.
-func TestCollectSDKPlanNotifications_DriftMonitoringDisabled_SkipsRegistry(t *testing.T) {
+// A persisted false value from the former Dev-plan gate is normalized to true,
+// so upgrading an Engine makes drift available without manual intervention.
+func TestCollectSDKPlanNotifications_LegacyDriftFalseStillCallsRegistry(t *testing.T) {
 	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{DriftMonitoringEnabled: false})
 	defer entitlement.LiveEntitlement.Reset()
 
@@ -1933,11 +1932,11 @@ func TestCollectSDKPlanNotifications_DriftMonitoringDisabled_SkipsRegistry(t *te
 		request: SDKConfigPlanRequest{ConfigKey: "sdk:test:1.0.0"},
 	}, []sdkResolvedService{{ServiceID: serviceID, Version: "v1"}})
 
-	if len(registryClient.driftServiceIDs) != 0 {
-		t.Fatalf("expected no registry drift calls when disabled, got %#v", registryClient.driftServiceIDs)
+	if len(registryClient.driftServiceIDs) != 1 || registryClient.driftServiceIDs[0] != serviceID {
+		t.Fatalf("expected registry drift call after legacy value normalization, got %#v", registryClient.driftServiceIDs)
 	}
-	if len(inbox.Items) != 1 || inbox.Items[0].Source != "engine" {
-		t.Fatalf("expected only engine-local item, got %#v", inbox.Items)
+	if len(inbox.Items) != 2 {
+		t.Fatalf("expected engine and registry items, got %#v", inbox.Items)
 	}
 }
 
