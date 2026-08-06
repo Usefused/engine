@@ -63,7 +63,7 @@ The startup handshake returns a minimal entitlement bundle:
 - `plan`
 - `heartbeat_required`
 - `usage_reporting`
-- `public_service_insights_reporting`
+- `public_service_insights_enabled`
 - `heartbeat_interval_seconds`
 - `heartbeat_stale_after_seconds`
 
@@ -98,13 +98,17 @@ safe accounting path without inventing billing decisions in Engine.
 ## Public-Service Insights
 
 Public-service insights are a separate product-observability contract and do
-not share tables or payloads with commercial usage reporting. When the
-`public_service_insights_reporting` entitlement is enabled, Engine uses signed
-requests for:
+not share tables or payloads with commercial usage reporting. Engine always
+contributes privacy-bounded public-service insight reports using
+signed requests, regardless of the consumer account's plan:
 
 - `POST /api/engine/public-service-insight-eligibility`
 - `POST /api/engine/public-service-insight-reports`
-- `POST /api/engine/public-service-insights/query`
+
+The plan-controlled `public_service_insights_enabled` entitlement gates only
+owner reads through `POST /api/engine/public-service-insights/query`. It never
+suppresses usage contribution from an Engine consuming an eligible public
+service.
 
 Engine first asks Registry which parent services are public. It then derives
 closed-hour aggregates from canonical local execution events and writes them to

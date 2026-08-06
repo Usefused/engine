@@ -33,11 +33,12 @@ func TestHTTPRegistryClient_Handshake(t *testing.T) {
 				"account_id":     "mock-acc-123",
 				"workspace_name": "Integration Test Workspace",
 				"entitlements": map[string]any{
-					"plan":                          "commercial",
-					"heartbeat_required":            true,
-					"usage_reporting":               "aggregate",
-					"heartbeat_interval_seconds":    30,
-					"heartbeat_stale_after_seconds": 90,
+					"plan":                            "commercial",
+					"heartbeat_required":              true,
+					"usage_reporting":                 "aggregate",
+					"public_service_insights_enabled": true,
+					"heartbeat_interval_seconds":      30,
+					"heartbeat_stale_after_seconds":   90,
 				},
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -91,6 +92,7 @@ func TestHTTPRegistryClient_Handshake(t *testing.T) {
 		if result.Entitlements.HeartbeatIntervalSeconds != 30 || result.Entitlements.HeartbeatStaleAfterSeconds != 90 {
 			t.Fatalf("unexpected entitlement bundle: %#v", result.Entitlements)
 		}
+		assertPublicInsightContract(t, result.Entitlements, true)
 	})
 
 	t.Run("Handshake_LocalMode_EmptyKey", func(t *testing.T) {
@@ -155,13 +157,20 @@ func TestHTTPRegistryClient_HandshakeDefaultsEntitlementsForOlderRegistry(t *tes
 		got.Plan != want.Plan ||
 		got.HeartbeatRequired != want.HeartbeatRequired ||
 		got.UsageReporting != want.UsageReporting ||
-		got.PublicServiceInsightsReporting != want.PublicServiceInsightsReporting ||
 		got.HeartbeatIntervalSeconds != want.HeartbeatIntervalSeconds ||
 		got.HeartbeatStaleAfterSeconds != want.HeartbeatStaleAfterSeconds ||
 		got.DriftMonitoringEnabled != want.DriftMonitoringEnabled ||
 		got.WebhookIngestionEnabled != want.WebhookIngestionEnabled ||
 		got.SSOEnabled != want.SSOEnabled {
 		t.Fatalf("expected default entitlement, got %#v", result.Entitlements)
+	}
+	assertPublicInsightContract(t, got, want.PublicServiceInsightsEnabled)
+}
+
+func assertPublicInsightContract(t *testing.T, entitlement models.RuntimeEntitlement, wantEnabled bool) {
+	t.Helper()
+	if entitlement.PublicServiceInsightsEnabled != wantEnabled {
+		t.Fatalf("PublicServiceInsightsEnabled = %v, want %v", entitlement.PublicServiceInsightsEnabled, wantEnabled)
 	}
 }
 

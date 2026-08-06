@@ -197,22 +197,22 @@ func (e ManagedIdentityRegistryError) Error() string {
 }
 
 type rawRuntimeEntitlement struct {
-	EntitlementRevision            string `json:"entitlement_revision"`
-	Plan                           string `json:"plan"`
-	HeartbeatRequired              *bool  `json:"heartbeat_required"`
-	UsageReporting                 string `json:"usage_reporting"`
-	PublicServiceInsightsReporting *bool  `json:"public_service_insights_reporting"`
-	HeartbeatIntervalSeconds       int    `json:"heartbeat_interval_seconds"`
-	HeartbeatStaleAfterSeconds     int    `json:"heartbeat_stale_after_seconds"`
-	MaxBuckets                     *int   `json:"max_buckets,omitempty"`
-	MaxSDKFamilies                 *int   `json:"max_sdk_families,omitempty"`
-	MaxMCPFamilies                 *int   `json:"max_mcp_families,omitempty"`
-	MaxServices                    *int   `json:"max_services,omitempty"`
-	MaxSandboxConcurrency          *int   `json:"max_sandbox_concurrency,omitempty"`
-	DriftMonitoringEnabled         bool   `json:"drift_monitoring_enabled"`
-	WebhookIngestionEnabled        bool   `json:"webhook_ingestion_enabled"`
-	SSOEnabled                     bool   `json:"sso_enabled"`
-	ExecutionRetentionDays         *int   `json:"execution_retention_days,omitempty"`
+	EntitlementRevision          string `json:"entitlement_revision"`
+	Plan                         string `json:"plan"`
+	HeartbeatRequired            *bool  `json:"heartbeat_required"`
+	UsageReporting               string `json:"usage_reporting"`
+	PublicServiceInsightsEnabled bool   `json:"public_service_insights_enabled"`
+	HeartbeatIntervalSeconds     int    `json:"heartbeat_interval_seconds"`
+	HeartbeatStaleAfterSeconds   int    `json:"heartbeat_stale_after_seconds"`
+	MaxBuckets                   *int   `json:"max_buckets,omitempty"`
+	MaxSDKFamilies               *int   `json:"max_sdk_families,omitempty"`
+	MaxMCPFamilies               *int   `json:"max_mcp_families,omitempty"`
+	MaxServices                  *int   `json:"max_services,omitempty"`
+	MaxSandboxConcurrency        *int   `json:"max_sandbox_concurrency,omitempty"`
+	DriftMonitoringEnabled       bool   `json:"drift_monitoring_enabled"`
+	WebhookIngestionEnabled      bool   `json:"webhook_ingestion_enabled"`
+	SSOEnabled                   bool   `json:"sso_enabled"`
+	ExecutionRetentionDays       *int   `json:"execution_retention_days,omitempty"`
 }
 
 type ConnectionProfileRef struct {
@@ -1933,9 +1933,7 @@ func RuntimeEntitlementFromHandshake(raw *rawRuntimeEntitlement) models.RuntimeE
 	if raw.UsageReporting != "" {
 		entitlement.UsageReporting = raw.UsageReporting
 	}
-	if raw.PublicServiceInsightsReporting != nil {
-		entitlement.PublicServiceInsightsReporting = *raw.PublicServiceInsightsReporting
-	}
+	entitlement.PublicServiceInsightsEnabled = raw.PublicServiceInsightsEnabled
 	entitlement.HeartbeatIntervalSeconds = raw.HeartbeatIntervalSeconds
 	entitlement.HeartbeatStaleAfterSeconds = raw.HeartbeatStaleAfterSeconds
 	entitlement.MaxBuckets = raw.MaxBuckets

@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 
+	entitlementpkg "github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
@@ -41,6 +42,9 @@ func newPublicInsightReader(registryClient sandbox.RegistryClient) *publicInsigh
 }
 
 func (r *publicInsightReader) Fetch(ctx context.Context, query models.PublicServiceInsightsQuery) (models.PublicServiceInsights, error) {
+	if !entitlementpkg.LiveEntitlement.Load().PublicServiceInsightsEnabled {
+		return models.PublicServiceInsights{}, errors.New("cross-engine insights are not included in the current plan")
+	}
 	if r == nil || r.client == nil {
 		return models.PublicServiceInsights{}, errors.New("cross-engine insights are temporarily unavailable")
 	}

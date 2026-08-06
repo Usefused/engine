@@ -56,14 +56,14 @@ const (
 // missing JSON fields deserialize to Go zero values, which Normalized()
 // promotes to safe commercial-tier defaults.
 type RuntimeEntitlement struct {
-	EntitlementRevision            string    `json:"entitlement_revision,omitempty"`
-	Plan                           string    `json:"plan"`
-	HeartbeatRequired              bool      `json:"heartbeat_required"`
-	UsageReporting                 string    `json:"usage_reporting"`
-	PublicServiceInsightsReporting bool      `json:"public_service_insights_reporting"`
-	HeartbeatIntervalSeconds       int       `json:"heartbeat_interval_seconds"`
-	HeartbeatStaleAfterSeconds     int       `json:"heartbeat_stale_after_seconds"`
-	RefreshedAt                    time.Time `json:"refreshed_at,omitempty"`
+	EntitlementRevision          string    `json:"entitlement_revision,omitempty"`
+	Plan                         string    `json:"plan"`
+	HeartbeatRequired            bool      `json:"heartbeat_required"`
+	UsageReporting               string    `json:"usage_reporting"`
+	PublicServiceInsightsEnabled bool      `json:"public_service_insights_enabled"`
+	HeartbeatIntervalSeconds     int       `json:"heartbeat_interval_seconds"`
+	HeartbeatStaleAfterSeconds   int       `json:"heartbeat_stale_after_seconds"`
+	RefreshedAt                  time.Time `json:"refreshed_at,omitempty"`
 
 	// ─── Capability limits (nil = missing/unlimited, 0 = not allowed, positive = hard ceiling) ───
 	MaxBuckets            *int `json:"max_buckets,omitempty"`
@@ -91,21 +91,21 @@ func IntPtr(v int) *int { return &v }
 // an Engine that was working before they existed.
 func DefaultRuntimeEntitlement() RuntimeEntitlement {
 	return RuntimeEntitlement{
-		Plan:                           "commercial",
-		HeartbeatRequired:              true,
-		UsageReporting:                 RuntimeUsageReportingAggregate,
-		PublicServiceInsightsReporting: true,
-		HeartbeatIntervalSeconds:       60,
-		HeartbeatStaleAfterSeconds:     300,
-		MaxBuckets:                     IntPtr(-1),
-		MaxSDKFamilies:                 IntPtr(-1),
-		MaxMCPFamilies:                 IntPtr(-1),
-		MaxServices:                    IntPtr(-1),
-		MaxSandboxConcurrency:          IntPtr(-1),
-		DriftMonitoringEnabled:         true,
-		WebhookIngestionEnabled:        false,
-		SSOEnabled:                     false,
-		ExecutionRetentionDays:         IntPtr(30),
+		Plan:                         "commercial",
+		HeartbeatRequired:            true,
+		UsageReporting:               RuntimeUsageReportingAggregate,
+		PublicServiceInsightsEnabled: false,
+		HeartbeatIntervalSeconds:     60,
+		HeartbeatStaleAfterSeconds:   300,
+		MaxBuckets:                   IntPtr(-1),
+		MaxSDKFamilies:               IntPtr(-1),
+		MaxMCPFamilies:               IntPtr(-1),
+		MaxServices:                  IntPtr(-1),
+		MaxSandboxConcurrency:        IntPtr(-1),
+		DriftMonitoringEnabled:       true,
+		WebhookIngestionEnabled:      false,
+		SSOEnabled:                   false,
+		ExecutionRetentionDays:       IntPtr(30),
 	}
 }
 

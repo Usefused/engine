@@ -221,6 +221,7 @@ func TestRuntimeEntitlementRoundTrip(t *testing.T) {
 	entitlement.MaxSandboxConcurrency = models.IntPtr(20)
 	entitlement.DriftMonitoringEnabled = true
 	entitlement.WebhookIngestionEnabled = true
+	entitlement.PublicServiceInsightsEnabled = true
 	entitlement.SSOEnabled = true
 	entitlement.ExecutionRetentionDays = models.IntPtr(90)
 	if err := entitlementStore.SaveRuntimeEntitlement(ctx, entitlement); err != nil {
@@ -236,11 +237,16 @@ func TestRuntimeEntitlementRoundTrip(t *testing.T) {
 	if *got.MaxBuckets != 5 || *got.MaxSDKFamilies != 3 || *got.MaxMCPFamilies != 3 || *got.MaxServices != 10 || *got.MaxSandboxConcurrency != 20 {
 		t.Fatalf("unexpected capability limits: %#v", got)
 	}
-	if !got.DriftMonitoringEnabled || !got.WebhookIngestionEnabled || !got.SSOEnabled {
-		t.Fatalf("unexpected feature gates: %#v", got)
-	}
+	assertRuntimeEntitlementFeatureGates(t, got)
 	if *got.ExecutionRetentionDays != 90 {
 		t.Fatalf("unexpected retention days: %#v", got)
+	}
+}
+
+func assertRuntimeEntitlementFeatureGates(t *testing.T, entitlement models.RuntimeEntitlement) {
+	t.Helper()
+	if !entitlement.DriftMonitoringEnabled || !entitlement.WebhookIngestionEnabled || !entitlement.PublicServiceInsightsEnabled || !entitlement.SSOEnabled {
+		t.Fatalf("unexpected feature gates: %#v", entitlement)
 	}
 }
 

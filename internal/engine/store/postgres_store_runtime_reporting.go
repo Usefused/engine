@@ -14,7 +14,8 @@ func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement 
 	entitlement = entitlement.Normalized()
 	query := `
 		INSERT INTO fused_runtime_entitlements (
-			singleton_key, entitlement_revision, plan, heartbeat_required, usage_reporting, public_service_insights_reporting,
+			singleton_key, entitlement_revision, plan, heartbeat_required, usage_reporting,
+			public_service_insights_enabled,
 			heartbeat_interval_seconds, heartbeat_stale_after_seconds, refreshed_at, updated_at,
 			max_buckets, max_sdk_families, max_mcp_families, max_services, max_sandbox_concurrency,
 			drift_monitoring_enabled, webhook_ingestion_enabled, sso_enabled, execution_retention_days
@@ -25,7 +26,7 @@ func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement 
 			plan = EXCLUDED.plan,
 			heartbeat_required = EXCLUDED.heartbeat_required,
 			usage_reporting = EXCLUDED.usage_reporting,
-			public_service_insights_reporting = EXCLUDED.public_service_insights_reporting,
+			public_service_insights_enabled = EXCLUDED.public_service_insights_enabled,
 			heartbeat_interval_seconds = EXCLUDED.heartbeat_interval_seconds,
 			heartbeat_stale_after_seconds = EXCLUDED.heartbeat_stale_after_seconds,
 			refreshed_at = EXCLUDED.refreshed_at,
@@ -45,7 +46,7 @@ func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement 
 		entitlement.Plan,
 		entitlement.HeartbeatRequired,
 		entitlement.UsageReporting,
-		entitlement.PublicServiceInsightsReporting,
+		entitlement.PublicServiceInsightsEnabled,
 		entitlement.HeartbeatIntervalSeconds,
 		entitlement.HeartbeatStaleAfterSeconds,
 		entitlement.RefreshedAt,
@@ -64,7 +65,8 @@ func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement 
 
 func (s *postgresStore) GetRuntimeEntitlement(ctx context.Context) (models.RuntimeEntitlement, error) {
 	query := `
-		SELECT entitlement_revision, plan, heartbeat_required, usage_reporting, public_service_insights_reporting,
+		SELECT entitlement_revision, plan, heartbeat_required, usage_reporting,
+			public_service_insights_enabled,
 			heartbeat_interval_seconds, heartbeat_stale_after_seconds, refreshed_at,
 			max_buckets, max_sdk_families, max_mcp_families, max_services, max_sandbox_concurrency,
 			drift_monitoring_enabled, webhook_ingestion_enabled, sso_enabled, execution_retention_days
@@ -77,7 +79,7 @@ func (s *postgresStore) GetRuntimeEntitlement(ctx context.Context) (models.Runti
 		&entitlement.Plan,
 		&entitlement.HeartbeatRequired,
 		&entitlement.UsageReporting,
-		&entitlement.PublicServiceInsightsReporting,
+		&entitlement.PublicServiceInsightsEnabled,
 		&entitlement.HeartbeatIntervalSeconds,
 		&entitlement.HeartbeatStaleAfterSeconds,
 		&entitlement.RefreshedAt,
