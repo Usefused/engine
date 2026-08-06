@@ -9,6 +9,9 @@ import (
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type cliLoginStoreFixture struct {
@@ -19,6 +22,9 @@ type cliLoginStoreFixture struct {
 	consumedHash string
 	credential   store.CLILoginCredential
 	consumeErr   error
+	logoutActor  store.MutationActor
+	logout       store.CLILogoutResult
+	logoutErr    error
 }
 
 func (f *cliLoginStoreFixture) CreateCLILoginTransaction(_ context.Context, transaction store.CLILoginTransaction) error {
@@ -34,6 +40,11 @@ func (f *cliLoginStoreFixture) ApproveCLILoginTransaction(_ context.Context, id 
 func (f *cliLoginStoreFixture) ConsumeCLILoginTransaction(_ context.Context, _ uuid.UUID, hash string, _ time.Time) (store.CLILoginCredential, error) {
 	f.consumedHash = hash
 	return f.credential, f.consumeErr
+}
+
+func (f *cliLoginStoreFixture) RevokeCurrentCLICredential(_ context.Context, actor store.MutationActor) (store.CLILogoutResult, error) {
+	f.logoutActor = actor
+	return f.logout, f.logoutErr
 }
 
 type revisionFixture struct{ revision int64 }
@@ -101,4 +112,52 @@ func TestCLILoginRejectsInvalidCommitmentAndNonBrowserActor(t *testing.T) {
 	if err := service.Approve(t.Context(), uuid.New(), token, actor); !errors.Is(err, store.ErrCLILoginDenied) {
 		t.Fatalf("non-browser approval error = %v", err)
 	}
+}
+
+func TestCLILogoutRevokesOnlyManagedCurrentCredential(t *testing.T) {
+	previousTracer := otel.GetTracerProvider()
+	spanRecorder := tracetest.NewSpanRecorder()
+	tracerProvider := trace.NewTracerProvider(trace.WithSpanProcessor(spanRecorder))
+	otel.SetTracerProvider(tracerProvider)
+	defer func() {
+		_ = tracerProvider.Shutdown(context.Background())
+		otel.SetTracerProvider(previousTracer)
+	}()
+	actor := accesscontrol.Actor{
+		SubjectID: uuid.New(), CredentialID: uuid.New(), CredentialSource: "managed_cli_login",
+		Kind: accesscontrol.SubjectUser,
+	}
+	repository := &cliLoginStoreFixture{logout: store.CLILogoutResult{AuthorizationRevision: 9}}
+	revisions := &revisionFixture{}
+	service, _ := NewService(repository, revisions)
+	if err := service.Logout(t.Context(), LogoutInput{Actor: actor, RequestID: "cli-logout"}); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if repository.logoutActor.SubjectID != actor.SubjectID || repository.logoutActor.CredentialID != actor.CredentialID || repository.logoutActor.RequestID != "cli-logout" {
+		t.Fatalf("logout actor = %#v", repository.logoutActor)
+	}
+	if revisions.revision != 9 {
+		t.Fatalf("authorization revision = %d, want 9", revisions.revision)
+	}
+	assertCLILogoutSpan(t, spanRecorder)
+
+	actor.CredentialSource = "license_exchange"
+	if err := service.Logout(t.Context(), LogoutInput{Actor: actor}); !errors.Is(err, store.ErrCLILogoutDenied) {
+		t.Fatalf("non-CLI logout error = %v", err)
+	}
+}
+
+func assertCLILogoutSpan(t *testing.T, recorder *tracetest.SpanRecorder) {
+	t.Helper()
+	for _, span := range recorder.Ended() {
+		if span.Name() != "engine.identity.cli.logout" {
+			continue
+		}
+		for _, item := range span.Attributes() {
+			if string(item.Key) == "outcome" && item.Value.AsString() == "revoked" {
+				return
+			}
+		}
+	}
+	t.Fatal("successful CLI logout OTEL span was not recorded")
 }

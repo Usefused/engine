@@ -62,6 +62,10 @@ func (*managedAuthStoreFixture) ExpireManagedLoginTransactions(context.Context, 
 	return 0, nil
 }
 
+func (*managedAuthStoreFixture) ExpireBrowserLogoutContexts(context.Context, time.Time, int) (int64, error) {
+	return 0, nil
+}
+
 type managedAuthRegistryFixture struct {
 	transactionID uuid.UUID
 	expiresAt     time.Time
@@ -139,6 +143,9 @@ func assertManagedAuthCompletion(t *testing.T, credential store.ManagedSessionCr
 	if credential.RawKey != "fsk_browser_secret" || revisions.revision != 7 || repository.identity.ExternalSubject != "user_123" {
 		t.Fatalf("unexpected managed login completion: credential=%#v revision=%d identity=%#v", credential, revisions.revision, repository.identity)
 	}
+	if repository.identity.EncryptedLogoutToken == "" || repository.identity.EncryptedLogoutToken == "opaque-logout-capability" || repository.identity.LogoutEncryptedDEK == "" {
+		t.Fatalf("logout token was not envelope-encrypted: %#v", repository.identity)
+	}
 }
 
 func TestRegistryTransactionAllowsHTTPOnlyForExplicitDevelopmentLoopback(t *testing.T) {
@@ -198,7 +205,18 @@ func TestServicePollRejectsCrossInstallationAssertionAndKeepsSecretsOutOfOTEL(t 
 	if !errors.Is(err, store.ErrManagedIdentityDenied) || !repository.rejected {
 		t.Fatalf("Poll error/rejected = %v/%v, want denied/true", err, repository.rejected)
 	}
-	assertManagedAuthTelemetryExcludes(t, exporter, started.PollToken, registry.verifier)
+	assertManagedAuthTelemetryExcludes(t, exporter, started.PollToken, registry.verifier, registry.assertion.LogoutToken)
+}
+
+func TestServicePollRejectsIncompleteLogoutCapability(t *testing.T) {
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	repository, registry, service, started := startedManagedAuthFixture(t, now)
+	registry.assertion = validManagedAssertion(repository, registry, now)
+	registry.assertion.LogoutExpiresAt = time.Time{}
+	_, err := service.Poll(t.Context(), started.TransactionID, started.PollToken)
+	if !errors.Is(err, store.ErrManagedIdentityDenied) || !repository.rejected {
+		t.Fatalf("Poll incomplete logout error/rejected = %v/%v", err, repository.rejected)
+	}
 }
 
 func startedManagedAuthFixture(t *testing.T, now time.Time) (*managedAuthStoreFixture, *managedAuthRegistryFixture, *Service, StartResult) {
@@ -225,6 +243,7 @@ func validManagedAssertion(repository *managedAuthStoreFixture, registry *manage
 		ExternalSubject: "user_123", VerifiedEmail: "person@example.com", DisplayName: "Person",
 		AuthMethod: "email_code", EnrollmentRef: repository.transaction.EnrollmentRef,
 		AuthenticatedAt: now, ExpiresAt: registry.expiresAt,
+		LogoutToken: "opaque-logout-capability", LogoutExpiresAt: now.Add(defaultSessionTTL),
 	}
 }
 

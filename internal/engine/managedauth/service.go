@@ -24,6 +24,7 @@ import (
 const (
 	BrowserLoginPurpose = "browser_login"
 	defaultSessionTTL   = 8 * time.Hour
+	maximumLogoutTTL    = 24 * time.Hour
 	cleanupBatchSize    = 500
 )
 
@@ -161,7 +162,7 @@ func (s *Service) exchangeAndSave(ctx context.Context, transaction store.Managed
 		}
 		return store.ErrManagedLoginUnavailable
 	}
-	identity, err := verifiedIdentity(transaction, assertion, now)
+	identity, err := verifiedIdentity(s.masterKey, transaction, assertion, now)
 	if err != nil {
 		_ = s.store.RejectManagedLoginTransaction(ctx, transaction.ID, pollHash, now)
 		return err
@@ -169,18 +170,29 @@ func (s *Service) exchangeAndSave(ctx context.Context, transaction store.Managed
 	return s.store.SaveManagedLoginAssertion(ctx, transaction.ID, pollHash, identity, now)
 }
 
-func verifiedIdentity(transaction store.ManagedLoginTransaction, assertion sandbox.ManagedIdentityAssertion, now time.Time) (store.VerifiedManagedIdentity, error) {
+func verifiedIdentity(masterKey []byte, transaction store.ManagedLoginTransaction, assertion sandbox.ManagedIdentityAssertion, now time.Time) (store.VerifiedManagedIdentity, error) {
 	if !assertionMatchesTransaction(transaction, assertion) || !validAssertionClaims(transaction, assertion, now) {
 		return store.VerifiedManagedIdentity{}, store.ErrManagedIdentityDenied
 	}
-	return store.VerifiedManagedIdentity{
+	identity := store.VerifiedManagedIdentity{
 		AccountID: assertion.AccountID, InstallationID: assertion.InstallationID,
 		Purpose: assertion.Purpose, Provider: assertion.Provider, Issuer: assertion.Issuer,
 		ExternalSubject: assertion.ExternalSubject, VerifiedEmail: assertion.VerifiedEmail,
 		DisplayName: assertion.DisplayName, AuthMethod: assertion.AuthMethod,
 		EnrollmentRef: assertion.EnrollmentRef, AuthenticatedAt: assertion.AuthenticatedAt,
 		AssertionExpires: assertion.ExpiresAt,
-	}, nil
+	}
+	if assertion.LogoutToken == "" {
+		return identity, nil
+	}
+	wrapped, encrypted, err := encryptManagedLogoutToken(masterKey, assertion.LogoutToken)
+	if err != nil {
+		return store.VerifiedManagedIdentity{}, store.ErrManagedLoginUnavailable
+	}
+	identity.LogoutEncryptedDEK = wrapped
+	identity.EncryptedLogoutToken = encrypted
+	identity.LogoutExpiresAt = assertion.LogoutExpiresAt
+	return identity, nil
 }
 
 func assertionMatchesTransaction(transaction store.ManagedLoginTransaction, assertion sandbox.ManagedIdentityAssertion) bool {
@@ -192,7 +204,20 @@ func assertionMatchesTransaction(transaction store.ManagedLoginTransaction, asse
 func validAssertionClaims(transaction store.ManagedLoginTransaction, assertion sandbox.ManagedIdentityAssertion, now time.Time) bool {
 	return assertion.Provider == "logto" && validAssertionStrings(assertion) &&
 		!assertion.AuthenticatedAt.IsZero() && assertion.ExpiresAt.After(now) &&
-		!assertion.ExpiresAt.After(transaction.ExpiresAt.Add(time.Second))
+		!assertion.ExpiresAt.After(transaction.ExpiresAt.Add(time.Second)) && validLogoutClaims(assertion, now)
+}
+
+func validLogoutClaims(assertion sandbox.ManagedIdentityAssertion, now time.Time) bool {
+	hasToken := assertion.LogoutToken != ""
+	hasExpiry := !assertion.LogoutExpiresAt.IsZero()
+	if hasToken != hasExpiry {
+		return false
+	}
+	if !hasToken {
+		return true
+	}
+	return boundedValue(assertion.LogoutToken, 256) && assertion.LogoutExpiresAt.After(now) &&
+		!assertion.LogoutExpiresAt.After(now.Add(maximumLogoutTTL))
 }
 
 func validAssertionStrings(assertion sandbox.ManagedIdentityAssertion) bool {
@@ -246,6 +271,15 @@ func encryptRegistryVerifier(masterKey []byte, verifier string) (string, string,
 		return "", "", err
 	}
 	ciphertext, err := store.EncryptWithDEK(dek, verifier)
+	return wrapped, ciphertext, err
+}
+
+func encryptManagedLogoutToken(masterKey []byte, token string) (string, string, error) {
+	wrapped, dek, err := store.WrapDEK(masterKey)
+	if err != nil {
+		return "", "", err
+	}
+	ciphertext, err := store.EncryptWithDEK(dek, token)
 	return wrapped, ciphertext, err
 }
 
@@ -307,11 +341,17 @@ func (s *Service) StartCleanupWorker(ctx context.Context, interval time.Duration
 func (s *Service) cleanup(ctx context.Context) {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.identity.login.cleanup")
 	defer span.End()
-	expired, err := s.store.ExpireManagedLoginTransactions(ctx, s.now().UTC(), cleanupBatchSize)
-	if err != nil {
+	now := s.now().UTC()
+	expired, loginErr := s.store.ExpireManagedLoginTransactions(ctx, now, cleanupBatchSize)
+	logoutExpired, logoutErr := s.store.ExpireBrowserLogoutContexts(ctx, now, cleanupBatchSize)
+	if loginErr != nil || logoutErr != nil {
 		span.SetAttributes(attribute.String("outcome", "failed"))
 		slog.ErrorContext(ctx, "Managed login cleanup failed")
 		return
 	}
-	span.SetAttributes(attribute.String("outcome", "completed"), attribute.Int64("identity.transactions_expired", expired))
+	span.SetAttributes(
+		attribute.String("outcome", "completed"),
+		attribute.Int64("identity.transactions_expired", expired),
+		attribute.Int64("identity.logout_contexts_expired", logoutExpired),
+	)
 }

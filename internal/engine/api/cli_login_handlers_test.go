@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,6 +24,8 @@ type cliLoginHandlerFixture struct {
 	actor       accesscontrol.Actor
 	poll        store.CLILoginCredential
 	pollErr     error
+	logout      cliauth.LogoutInput
+	logoutErr   error
 }
 
 func (f *cliLoginHandlerFixture) Start(context.Context, cliauth.StartInput) (cliauth.StartResult, error) {
@@ -36,6 +39,11 @@ func (f *cliLoginHandlerFixture) Approve(_ context.Context, id uuid.UUID, token 
 
 func (f *cliLoginHandlerFixture) Poll(context.Context, uuid.UUID, string) (store.CLILoginCredential, error) {
 	return f.poll, f.pollErr
+}
+
+func (f *cliLoginHandlerFixture) Logout(_ context.Context, input cliauth.LogoutInput) error {
+	f.logout = input
+	return f.logoutErr
 }
 
 func TestCLILoginStartAndPendingPollArePublicAndNoStore(t *testing.T) {
@@ -88,5 +96,60 @@ func TestCLILoginApprovalRequiresCookieAndCSRF(t *testing.T) {
 	router.ServeHTTP(approved, request)
 	if approved.Code != http.StatusNoContent || cliFixture.approvedID != transactionID || cliFixture.approvedKey != "browser-token" {
 		t.Fatalf("approval = %d %#v", approved.Code, cliFixture)
+	}
+}
+
+func TestCLIWhoAmIReturnsAuthenticatedHumanIdentity(t *testing.T) {
+	expiresAt := time.Date(2026, 9, 5, 2, 0, 0, 0, time.UTC)
+	actor := accesscontrol.Actor{
+		AccountID: uuid.New(), WorkspaceID: uuid.New(), SubjectID: uuid.New(),
+		DisplayName: "Ada Lovelace", Email: "ada@example.com", CredentialID: uuid.New(),
+		CredentialSource: "managed_cli_login", AuthenticationMethod: "google",
+		CredentialExpiresAt: &expiresAt, Kind: accesscontrol.SubjectUser,
+	}
+	router := chi.NewRouter()
+	MountCLILoginRoutes(router, &cliLoginHandlerFixture{}, nil)
+	request := httptest.NewRequest(http.MethodGet, "/auth/whoami", nil)
+	request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), actor))
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("whoami response = %d %#v", response.Code, response.Header())
+	}
+	var identity cliWhoAmIResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &identity); err != nil {
+		t.Fatalf("decode whoami: %v", err)
+	}
+	if !identity.Authenticated || identity.SubjectID != actor.SubjectID || identity.DisplayName != actor.DisplayName || identity.Email != actor.Email || identity.ExpiresAt == nil || !identity.ExpiresAt.Equal(expiresAt) {
+		t.Fatalf("whoami identity = %#v", identity)
+	}
+	if strings.Contains(response.Body.String(), "credential_prefix") {
+		t.Fatalf("whoami exposed credential prefix: %s", response.Body.String())
+	}
+}
+
+func TestCLILogoutUsesOnlyAuthenticatedActor(t *testing.T) {
+	actor := accesscontrol.Actor{
+		SubjectID: uuid.New(), CredentialID: uuid.New(),
+		CredentialSource: "managed_cli_login", Kind: accesscontrol.SubjectUser,
+	}
+	fixture := &cliLoginHandlerFixture{}
+	router := chi.NewRouter()
+	MountCLILoginRoutes(router, fixture, nil)
+	request := httptest.NewRequest(http.MethodPost, "/auth/cli/logout", nil)
+	request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), actor))
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("logout response = %d %s", response.Code, response.Body.String())
+	}
+	if fixture.logout.Actor.SubjectID != actor.SubjectID || fixture.logout.Actor.CredentialID != actor.CredentialID {
+		t.Fatalf("logout input = %#v", fixture.logout)
+	}
+
+	unauthenticated := httptest.NewRecorder()
+	router.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodPost, "/auth/cli/logout", nil))
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated logout = %d", unauthenticated.Code)
 	}
 }

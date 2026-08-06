@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -56,5 +57,38 @@ func TestPostgresCLILoginCreatesSubjectCredentialOnce(t *testing.T) {
 		if strings.Contains(metadata, secret) {
 			t.Fatalf("CLI audit leaked secret material: %s", metadata)
 		}
+	}
+
+	_, err = repository.RevokeCurrentCLICredential(ctx, MutationActor{
+		SubjectID: owner.SubjectID, CredentialID: browser.CredentialID,
+		RequestID: "cli-logout-wrong-source", TraceID: "trace-cli-logout-wrong-source",
+	})
+	if !errors.Is(err, ErrCLILogoutDenied) {
+		t.Fatalf("browser credential self-revoke error = %v", err)
+	}
+	if _, err := repository.LoadControlPrincipal(ctx, accesscontrol.HashControlCredential(browser.RawKey)); err != nil {
+		t.Fatalf("browser credential was revoked by CLI logout: %v", err)
+	}
+
+	logout, err := repository.RevokeCurrentCLICredential(ctx, MutationActor{
+		SubjectID: owner.SubjectID, CredentialID: issued.CredentialID,
+		RequestID: "cli-logout", TraceID: "trace-cli-logout",
+	})
+	if err != nil || logout.AuthorizationRevision <= issued.AuthorizationRevision {
+		t.Fatalf("RevokeCurrentCLICredential = %#v, %v", logout, err)
+	}
+	if _, err := repository.LoadControlPrincipal(ctx, accesscontrol.HashControlCredential(rawKey)); !errors.Is(err, accesscontrol.ErrAuthenticationRequired) {
+		t.Fatalf("revoked CLI credential authentication error = %v", err)
+	}
+	var source, requestID, traceID string
+	if err := pool.QueryRow(ctx, `
+		SELECT metadata->>'credential_source', request_id, trace_id
+		FROM fused_audit_events
+		WHERE action = 'user.cli_credential.revoke' AND actor_credential_id = $1
+	`, issued.CredentialID).Scan(&source, &requestID, &traceID); err != nil {
+		t.Fatalf("load CLI logout audit: %v", err)
+	}
+	if source != "managed_cli_login" || requestID != "cli-logout" || traceID != "trace-cli-logout" {
+		t.Fatalf("CLI logout audit = %q/%q/%q", source, requestID, traceID)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/cliauth"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/go-chi/chi/v5"
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 )
 
@@ -22,6 +23,21 @@ type CLILoginService interface {
 	Start(context.Context, cliauth.StartInput) (cliauth.StartResult, error)
 	Approve(context.Context, uuid.UUID, string, accesscontrol.Actor) error
 	Poll(context.Context, uuid.UUID, string) (store.CLILoginCredential, error)
+	Logout(context.Context, cliauth.LogoutInput) error
+}
+
+type cliWhoAmIResponse struct {
+	Authenticated        bool                      `json:"authenticated"`
+	AccountID            uuid.UUID                 `json:"account_id"`
+	WorkspaceID          uuid.UUID                 `json:"workspace_id"`
+	SubjectID            uuid.UUID                 `json:"subject_id"`
+	SubjectKind          accesscontrol.SubjectKind `json:"subject_kind"`
+	DisplayName          string                    `json:"display_name"`
+	Email                string                    `json:"email,omitempty"`
+	CredentialID         uuid.UUID                 `json:"credential_id"`
+	CredentialSource     string                    `json:"credential_source"`
+	AuthenticationMethod string                    `json:"authentication_method"`
+	ExpiresAt            *time.Time                `json:"expires_at,omitempty"`
 }
 
 type cliLoginStartRequest struct {
@@ -41,6 +57,47 @@ func MountCLILoginRoutes(router chi.Router, service CLILoginService, browser Bro
 		Post("/auth/cli/poll", cliLoginPollHandler(service))
 	router.With(limitAuthenticationRequests(browserauth.NewRequestLimiter(20, 200, time.Minute))).
 		Post("/auth/cli/approve", cliLoginApproveHandler(service, browser))
+	router.Get("/auth/whoami", cliWhoAmIHandler())
+	router.Post("/auth/cli/logout", cliLogoutHandler(service))
+}
+
+func cliWhoAmIHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		setManagedLoginResponseHeaders(w)
+		actor, ok := accesscontrol.ActorFromContext(r.Context())
+		if !ok {
+			writeCLILoginError(w, http.StatusUnauthorized, "authentication_required")
+			return
+		}
+		writeManagedLoginJSON(w, http.StatusOK, cliWhoAmIResponse{
+			Authenticated: true, AccountID: actor.AccountID, WorkspaceID: actor.WorkspaceID,
+			SubjectID: actor.SubjectID, SubjectKind: actor.Kind, DisplayName: actor.DisplayName,
+			Email: actor.Email, CredentialID: actor.CredentialID,
+			CredentialSource: actor.CredentialSource, AuthenticationMethod: actor.AuthenticationMethod,
+			ExpiresAt: actor.CredentialExpiresAt,
+		})
+	}
+}
+
+func cliLogoutHandler(service CLILoginService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		setManagedLoginResponseHeaders(w)
+		if service == nil {
+			writeCLILoginError(w, http.StatusServiceUnavailable, "cli_logout_unavailable")
+			return
+		}
+		actor, ok := accesscontrol.ActorFromContext(r.Context())
+		if !ok {
+			writeCLILoginError(w, http.StatusUnauthorized, "authentication_required")
+			return
+		}
+		err := service.Logout(r.Context(), cliauth.LogoutInput{Actor: actor, RequestID: chimiddleware.GetReqID(r.Context())})
+		if err != nil {
+			writeCLILogoutServiceError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
 }
 
 func cliLoginStartHandler(service CLILoginService) http.HandlerFunc {
@@ -186,6 +243,14 @@ func writeCLILoginServiceError(w http.ResponseWriter, err error) {
 
 func writeCLILoginError(w http.ResponseWriter, status int, code string) {
 	writeManagedLoginError(w, status, code)
+}
+
+func writeCLILogoutServiceError(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrCLILogoutDenied) || errors.Is(err, store.ErrInvalidMutationActor) {
+		writeCLILoginError(w, http.StatusForbidden, "cli_logout_denied")
+		return
+	}
+	writeCLILoginError(w, http.StatusServiceUnavailable, "cli_logout_unavailable")
 }
 
 var _ CLILoginService = (*cliauth.Service)(nil)

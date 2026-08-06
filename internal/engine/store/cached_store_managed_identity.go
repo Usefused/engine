@@ -72,4 +72,12 @@ func (s *cachedStore) ExpireManagedLoginTransactions(ctx context.Context, at tim
 	return repository.ExpireManagedLoginTransactions(ctx, at, limit)
 }
 
+func (s *cachedStore) ExpireBrowserLogoutContexts(ctx context.Context, at time.Time, limit int) (int64, error) {
+	repository, err := s.managedIdentityStore()
+	if err != nil {
+		return 0, err
+	}
+	return repository.ExpireBrowserLogoutContexts(ctx, at, limit)
+}
+
 var _ ManagedIdentityStore = (*cachedStore)(nil)

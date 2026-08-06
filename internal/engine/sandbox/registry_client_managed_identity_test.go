@@ -16,6 +16,7 @@ func TestManagedIdentityRegistryClientUsesEngineIdentityAndDecodesContracts(t *t
 	transactionID, accountID := uuid.New(), uuid.New()
 	installationID, runtimeID := uuid.New(), uuid.New()
 	expiresAt := time.Now().UTC().Add(10 * time.Minute).Truncate(time.Second)
+	logoutExpiresAt := expiresAt.Add(7 * time.Hour)
 	requests := 0
 	client := &HTTPRegistryClient{
 		endpoint: "https://registry.example/graphql", licenseKey: "engine-license",
@@ -35,8 +36,17 @@ func TestManagedIdentityRegistryClientUsesEngineIdentityAndDecodesContracts(t *t
 				payload := `{"transaction_id":"` + transactionID.String() + `","verification_url":"https://auth.usefused.test/login","expires_at":"` + expiresAt.Format(time.RFC3339) + `"}`
 				return managedIdentityResponse(http.StatusCreated, payload), nil
 			case "/api/engine/identity/transactions/" + transactionID.String() + "/exchange":
-				payload := `{"schema_version":1,"transaction_id":"` + transactionID.String() + `","account_id":"` + accountID.String() + `","installation_id":"` + installationID.String() + `","purpose":"browser_login","provider":"logto","issuer":"https://tenant.logto.test/oidc","external_subject":"subject-1","verified_email":"person@example.com","auth_method":"email_code","enrollment_ref":"local-transaction","authenticated_at":"` + expiresAt.Add(-time.Minute).Format(time.RFC3339) + `","expires_at":"` + expiresAt.Format(time.RFC3339) + `"}`
+				payload := `{"schema_version":1,"transaction_id":"` + transactionID.String() + `","account_id":"` + accountID.String() + `","installation_id":"` + installationID.String() + `","purpose":"browser_login","provider":"logto","issuer":"https://tenant.logto.test/oidc","external_subject":"subject-1","verified_email":"person@example.com","auth_method":"email_code","enrollment_ref":"local-transaction","authenticated_at":"` + expiresAt.Add(-time.Minute).Format(time.RFC3339) + `","expires_at":"` + expiresAt.Format(time.RFC3339) + `","logout_token":"opaque-logout","logout_expires_at":"` + logoutExpiresAt.Format(time.RFC3339) + `"}`
 				return managedIdentityResponse(http.StatusOK, payload), nil
+			case "/api/engine/identity/logout":
+				var body map[string]string
+				if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+					t.Fatalf("decode logout request: %v", err)
+				}
+				if body["logout_token"] != "opaque-logout" || body["return_url"] != "https://engine.test/login" {
+					t.Fatalf("unexpected logout body: %#v", body)
+				}
+				return managedIdentityResponse(http.StatusOK, `{"logout_url":"https://tenant.logto.test/oidc/session/end?state=safe"}`), nil
 			default:
 				t.Fatalf("unexpected managed identity path: %s", request.URL.Path)
 				return nil, nil
@@ -49,11 +59,15 @@ func TestManagedIdentityRegistryClientUsesEngineIdentityAndDecodesContracts(t *t
 		t.Fatalf("CreateManagedLoginTransaction = %#v, %v", transaction, err)
 	}
 	assertion, err := client.ExchangeManagedLoginTransaction(context.Background(), transactionID, "registry-verifier")
-	if err != nil || assertion.AccountID != accountID || assertion.InstallationID != installationID || assertion.Purpose != "browser_login" {
+	if err != nil || assertion.AccountID != accountID || assertion.InstallationID != installationID || assertion.Purpose != "browser_login" || assertion.LogoutToken != "opaque-logout" {
 		t.Fatalf("ExchangeManagedLoginTransaction = %#v, %v", assertion, err)
 	}
-	if requests != 2 {
-		t.Fatalf("managed identity request count = %d, want 2", requests)
+	logoutURL, err := client.StartManagedLogout(context.Background(), assertion.LogoutToken, "https://engine.test/login")
+	if err != nil || !strings.HasPrefix(logoutURL, "https://tenant.logto.test/") {
+		t.Fatalf("StartManagedLogout = %q, %v", logoutURL, err)
+	}
+	if requests != 3 {
+		t.Fatalf("managed identity request count = %d, want 3", requests)
 	}
 }
 

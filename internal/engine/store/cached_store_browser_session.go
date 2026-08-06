@@ -23,10 +23,10 @@ func (s *cachedStore) IssueBrowserSession(ctx context.Context, actor accesscontr
 	return repository.IssueBrowserSession(ctx, actor, authMethod, expiresAt)
 }
 
-func (s *cachedStore) RevokeBrowserSession(ctx context.Context, actor accesscontrol.Actor, at time.Time) (int64, error) {
+func (s *cachedStore) RevokeBrowserSession(ctx context.Context, actor accesscontrol.Actor, at time.Time) (BrowserLogoutContext, error) {
 	repository, err := s.browserSessionStore()
 	if err != nil {
-		return 0, err
+		return BrowserLogoutContext{}, err
 	}
 	return repository.RevokeBrowserSession(ctx, actor, at)
 }

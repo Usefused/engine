@@ -16,7 +16,14 @@ type BrowserSessionCredential struct {
 	AuthorizationRevision int64
 }
 
+type BrowserLogoutContext struct {
+	AuthorizationRevision int64
+	EncryptedDEK          string
+	EncryptedLogoutToken  string
+	ExpiresAt             time.Time
+}
+
 type BrowserSessionStore interface {
 	IssueBrowserSession(context.Context, accesscontrol.Actor, string, time.Time) (BrowserSessionCredential, error)
-	RevokeBrowserSession(context.Context, accesscontrol.Actor, time.Time) (int64, error)
+	RevokeBrowserSession(context.Context, accesscontrol.Actor, time.Time) (BrowserLogoutContext, error)
 }

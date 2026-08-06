@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -36,6 +37,11 @@ type StartResult struct {
 	PollToken     string
 	BrowserToken  string
 	ExpiresAt     time.Time
+}
+
+type LogoutInput struct {
+	Actor     accesscontrol.Actor
+	RequestID string
 }
 
 type Service struct {
@@ -111,6 +117,46 @@ func (s *Service) Poll(ctx context.Context, id uuid.UUID, pollToken string) (sto
 	return credential, nil
 }
 
+func (s *Service) Logout(ctx context.Context, input LogoutInput) error {
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.identity.cli.logout")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("actor.type", string(input.Actor.Kind)),
+		attribute.String("client.type", "cli"),
+		attribute.String("credential.source", input.Actor.CredentialSource),
+	)
+	if !validLogoutActor(input.Actor) {
+		span.SetAttributes(attribute.String("outcome", "denied"))
+		return store.ErrCLILogoutDenied
+	}
+	result, err := s.store.RevokeCurrentCLICredential(ctx, store.MutationActor{
+		SubjectID: input.Actor.SubjectID, CredentialID: input.Actor.CredentialID,
+		RequestID: input.RequestID, TraceID: traceID(ctx),
+	})
+	if err != nil {
+		span.SetAttributes(attribute.String("outcome", cliLogoutOutcome(err)))
+		return err
+	}
+	s.revisions.SetRevision(result.AuthorizationRevision)
+	span.SetAttributes(
+		attribute.String("outcome", "revoked"),
+		attribute.Int64("engine.authorization.revision", result.AuthorizationRevision),
+	)
+	return nil
+}
+
+func validLogoutActor(actor accesscontrol.Actor) bool {
+	return actor.SubjectID != uuid.Nil && actor.CredentialID != uuid.Nil && actor.CredentialSource == "managed_cli_login"
+}
+
+func traceID(ctx context.Context) string {
+	spanContext := trace.SpanContextFromContext(ctx)
+	if !spanContext.IsValid() {
+		return ""
+	}
+	return spanContext.TraceID().String()
+}
+
 func (s *Service) prepareTransaction(input StartInput) (StartResult, store.CLILoginTransaction, error) {
 	pollToken, err := randomToken()
 	if err != nil {
@@ -175,4 +221,11 @@ func cliLoginOutcome(err error) string {
 	default:
 		return "failed"
 	}
+}
+
+func cliLogoutOutcome(err error) string {
+	if errors.Is(err, store.ErrCLILogoutDenied) || errors.Is(err, store.ErrInvalidMutationActor) {
+		return "denied"
+	}
+	return "failed"
 }

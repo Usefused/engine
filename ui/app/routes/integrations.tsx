@@ -32,21 +32,37 @@ export default function IntegrationsLayout() {
     }
   }, [navigate, location.pathname, isAuth]);
 
-	async function handleSignOut() {
-		setSignOutError("");
-		try {
-			await api.auth.logout();
-			window.location.replace("/login");
-		} catch (error) {
-			try {
-				await api.auth.session();
-				await api.auth.logout();
-				window.location.replace("/login");
-			} catch (retryError) {
-				console.error("Failed to sign out", error, retryError);
-				setSignOutError("Sign out could not be completed. Refresh the page and try again.");
-			}
-		}
+  async function handleSignOut() {
+    setSignOutError("");
+    try {
+      const result = await api.auth.logout();
+      completeBrowserLogout(result.logout_url);
+    } catch (error) {
+      try {
+        const session = await api.auth.session();
+        // A lost response can arrive after Engine already revoked the local
+        // session. In that case there is nothing left to retry.
+        if (!session.authenticated) {
+          window.location.replace("/login");
+          return;
+        }
+        const result = await api.auth.logout();
+        completeBrowserLogout(result.logout_url);
+      } catch (retryError) {
+        console.error("Failed to sign out", error, retryError);
+        setSignOutError("Sign out could not be completed. Refresh the page and try again.");
+      }
+    }
+  }
+
+  function completeBrowserLogout(logoutURL?: string) {
+    if (logoutURL) {
+      // Provider logout must be a top-level navigation so Logto can clear its
+      // own host-only session cookie before returning to this Engine.
+      window.location.assign(logoutURL);
+      return;
+    }
+    window.location.replace("/login");
   }
 
   return (

@@ -7,6 +7,7 @@ const loginSource = readFileSync(new URL("../routes/login.tsx", import.meta.url)
 const apiSource = readFileSync(new URL("./api.ts", import.meta.url), "utf8");
 const browserRequestSource = readFileSync(new URL("./browser-request.ts", import.meta.url), "utf8");
 const cliLoginSource = readFileSync(new URL("../routes/cli-login.tsx", import.meta.url), "utf8");
+const integrationsSource = readFileSync(new URL("../routes/integrations.tsx", import.meta.url), "utf8");
 
 test("uses managed sign-in with API Key administrator access", () => {
   assert.match(loginSource, /await api\.auth\.startManaged\(\)/);
@@ -42,4 +43,11 @@ test("uses cookie credentials and credential-bound CSRF without browser API keys
   assert.match(browserRequestSource, /credentials: "include"/);
   assert.match(browserRequestSource, /headers\.set\("X-Fused-CSRF", csrfToken\)/);
   assert.doesNotMatch(apiSource, /getApiKey\(\)/);
+});
+
+test("uses top-level provider logout and handles an already-revoked local session", () => {
+  assert.match(apiSource, /logout_url\?: string/);
+  assert.match(integrationsSource, /window\.location\.assign\(logoutURL\)/);
+  assert.match(integrationsSource, /if \(!session\.authenticated\)/);
+  assert.match(integrationsSource, /window\.location\.replace\("\/login"\)/);
 });

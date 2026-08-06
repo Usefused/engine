@@ -833,7 +833,7 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ transaction_id: transactionId, token: browserToken }),
       }),
-    logout: () => req<void>("/auth/logout", { method: "POST", body: "{}" }),
+    logout: () => req<{ logout_url?: string }>("/auth/logout", { method: "POST", body: "{}" }),
   },
 
   // Account

@@ -39,6 +39,7 @@ func TestPostgresManagedLoginBindsExactInvitationAndIssuesExistingCredential(t *
 	}
 
 	var status, keyHash, source, authMethod, transactionState string
+	var storedLogoutDEK, storedLogoutToken string
 	var metadata []byte
 	var clearedIdentity bool
 	if err := pool.QueryRow(ctx, `SELECT status FROM fused_subjects WHERE id = $1`, created.User.ID).Scan(&status); err != nil {
@@ -52,12 +53,22 @@ func TestPostgresManagedLoginBindsExactInvitationAndIssuesExistingCredential(t *
 	}
 	if err := pool.QueryRow(ctx, `
 		SELECT state, issuer IS NULL AND external_subject IS NULL AND verified_email IS NULL
+			AND encrypted_logout_token IS NULL
 		FROM fused_managed_login_transactions WHERE id = $1
 	`, transaction.ID).Scan(&transactionState, &clearedIdentity); err != nil {
 		t.Fatalf("load consumed transaction: %v", err)
 	}
 	if status != string(UserStatusActive) || keyHash == credential.RawKey || source != "managed_login" || authMethod != "email_code" || transactionState != "consumed" || !clearedIdentity {
 		t.Fatalf("managed persistence status/hash/state/cleared = %q/%q/%q/%v", status, keyHash, transactionState, clearedIdentity)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT encrypted_dek, encrypted_logout_token
+		FROM fused_browser_logout_contexts WHERE credential_id = $1
+	`, credential.CredentialID).Scan(&storedLogoutDEK, &storedLogoutToken); err != nil {
+		t.Fatalf("load managed logout context: %v", err)
+	}
+	if storedLogoutDEK != "wrapped-logout-dek" || storedLogoutToken != "encrypted-logout-token" {
+		t.Fatalf("managed logout context = %q/%q", storedLogoutDEK, storedLogoutToken)
 	}
 	for _, secret := range []string{credential.RawKey, "invited.person@example.com", "subject-1"} {
 		if strings.Contains(string(metadata), secret) {
@@ -67,6 +78,16 @@ func TestPostgresManagedLoginBindsExactInvitationAndIssuesExistingCredential(t *
 	if _, err := repository.ConsumeManagedLoginAssertion(ctx, transaction.ID, transaction.PollSecretHash, now, now.Add(time.Hour)); !errors.Is(err, ErrManagedLoginUnavailable) {
 		t.Fatalf("managed login replay error = %v", err)
 	}
+	logout, err := repository.RevokeBrowserSession(ctx, accesscontrol.Actor{
+		SubjectID: credential.UserID, CredentialID: credential.CredentialID,
+	}, now)
+	if err != nil || logout.EncryptedDEK != "wrapped-logout-dek" || logout.EncryptedLogoutToken != "encrypted-logout-token" {
+		t.Fatalf("managed browser logout context = %#v, %v", logout, err)
+	}
+	var logoutContextExists bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM fused_browser_logout_contexts WHERE credential_id = $1)`, credential.CredentialID).Scan(&logoutContextExists); err != nil || logoutContextExists {
+		t.Fatalf("managed logout context remained after revoke: exists=%v err=%v", logoutContextExists, err)
+	}
 
 	// A durable external subject wins over later email claims, preventing an
 	// email change at the provider from silently rebinding local authorization.
@@ -74,6 +95,10 @@ func TestPostgresManagedLoginBindsExactInvitationAndIssuesExistingCredential(t *
 	secondCredential, err := repository.ConsumeManagedLoginAssertion(ctx, second.ID, second.PollSecretHash, now, now.Add(time.Hour))
 	if err != nil || secondCredential.UserID != created.User.ID {
 		t.Fatalf("existing external binding = %#v, %v", secondCredential, err)
+	}
+	expired, err := repository.ExpireBrowserLogoutContexts(ctx, now.Add(2*time.Hour), 10)
+	if err != nil || expired != 1 {
+		t.Fatalf("ExpireBrowserLogoutContexts = %d, %v", expired, err)
 	}
 }
 
@@ -154,5 +179,7 @@ func managedIdentityFixture(transaction ManagedLoginTransaction, externalSubject
 		ExternalSubject: externalSubject, VerifiedEmail: email, DisplayName: "Managed User",
 		AuthMethod: "email_code", EnrollmentRef: transaction.EnrollmentRef,
 		AuthenticatedAt: now, AssertionExpires: transaction.ExpiresAt,
+		LogoutEncryptedDEK: "wrapped-logout-dek", EncryptedLogoutToken: "encrypted-logout-token",
+		LogoutExpiresAt: now.Add(time.Hour),
 	}
 }
