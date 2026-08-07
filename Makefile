@@ -1,4 +1,4 @@
-.PHONY: build build-headless ui-install build-ui embed-ui runtime-mcp-build run run-headless test test-headless tidy proto-gen release-local release release-with-tag docker-build docker-build-headless
+.PHONY: build build-headless ui-install build-ui embed-ui runtime-mcp-build run run-headless test test-headless tidy proto-gen release-local release release-with-tag docker-build docker-build-headless docker-push docker-push-headless docker-build-push docker-build-push-headless
 
 VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo "0.1.0")
 COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo "dev")
@@ -61,8 +61,22 @@ release-with-tag:
 	@git push origin $(VERSION)
 	@goreleaser release --clean
 
+PLATFORMS ?= linux/amd64,linux/arm64
+
 docker-build:
-	docker build --target full --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t $(IMAGE_NAME):$(VERSION) .
+	docker buildx build --platform $(PLATFORMS) --target full --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t $(IMAGE_NAME):$(VERSION) --load .
 
 docker-build-headless:
-	docker build --target headless --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t $(IMAGE_NAME):$(VERSION)-headless .
+	docker buildx build --platform $(PLATFORMS) --target headless --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t $(IMAGE_NAME):$(VERSION)-headless --load .
+
+docker-push:
+	docker push $(IMAGE_NAME):$(VERSION)
+
+docker-push-headless:
+	docker push $(IMAGE_NAME):$(VERSION)-headless
+
+docker-build-push:
+	docker buildx build --platform $(PLATFORMS) --target full --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t $(IMAGE_NAME):$(VERSION) --push .
+
+docker-build-push-headless:
+	docker buildx build --platform $(PLATFORMS) --target headless --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t $(IMAGE_NAME):$(VERSION)-headless --push .
