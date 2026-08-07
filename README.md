@@ -124,6 +124,12 @@ For audit details, see [Registry contract](docs/registry-contract.md), [license 
 # Database connection
 FUSED_DATABASE_URL="postgres://fused:password@localhost:5432/fused?sslmode=disable"
 
+# Optional pool ceiling. Hosted starter Engines default this to 2.
+FUSED_DATABASE_MAX_CONNS=10
+
+# Optional idle retention. MinConns is zero, so the pool can drain completely.
+FUSED_DATABASE_MAX_CONN_IDLE_TIME=30m
+
 # Your organization's Fused Cloud license key for the Engine (Required)
 FUSED_LICENSE_KEY="<provided-by-fused>"
 

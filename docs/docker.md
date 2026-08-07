@@ -33,6 +33,10 @@ Containers need:
 
 - `FUSED_LICENSE_KEY`
 - `FUSED_DATABASE_URL`
+- `FUSED_DATABASE_MAX_CONNS` when the operator needs a ceiling lower than the
+  standalone default of `10`
+- `FUSED_DATABASE_MAX_CONN_IDLE_TIME` to release unused pool connections;
+  standalone defaults to `30m`, while Fused-hosted starter Engines use `2m`
 - `FUSED_ENCRYPTION_KEY`
 - `FUSED_REGISTRY_ENDPOINT` only when Fused support directs you away from the
   production Fused Cloud Registry default
