@@ -4,8 +4,9 @@ FROM node:24-alpine AS engine-runtime
 
 WORKDIR /app
 
-# Node and npm remain part of the runtime because MCP sessions execute in
-# isolated Node processes and initialize their shared runtime dependencies.
+# Node remains part of the runtime because MCP sessions execute in isolated
+# processes. GoReleaser builds the bundled MCP runtime before compiling the Go
+# binary, so containers never install dependencies into tenant storage.
 RUN apk upgrade --no-cache && \
     apk add --no-cache bash su-exec nats-server tini
 
@@ -16,8 +17,6 @@ ARG ENGINE_BINARY=fused-engine
 COPY ${ENGINE_BINARY} /app/fused-engine
 COPY engine.yaml /app/engine.yaml
 COPY entrypoint.sh /app/entrypoint.sh
-COPY runtime /app/runtime
-RUN cd /app/runtime/mcp && npm ci --omit=dev
 
 RUN addgroup -S fused && adduser -S -G fused fused && \
     mkdir -p /app/data/sandboxes && \

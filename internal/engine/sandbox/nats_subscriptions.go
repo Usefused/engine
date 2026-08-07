@@ -100,20 +100,13 @@ func CleanupMCPSandboxDir(appIDHex string) error {
 	return os.RemoveAll(sandboxDirFor(appIDHex))
 }
 
-// sandboxDataRoot is the parent of the "data/sandboxes" tree, relative to
-// the Engine process's working directory by default -- matches how
-// initSharedSandboxes (sandbox.go) has always resolved it. It's a
-// package-level var, not a const, solely so tests can point it at a
-// t.TempDir() (see nats_subscriptions_test.go): directory-cleanup tests
-// need a location the test process actually owns and can unlink from,
-// which a fixed relative path under the repo checkout is not guaranteed to
-// be in every environment this test suite runs in.
+// sandboxDataRoot is the parent of the legacy per-SDK "data/sandboxes" tree.
+// Current MCP dependencies are embedded in the Engine binary, but cleanup
+// remains for data created by older versions. It is a variable solely so tests
+// can point it at a t.TempDir().
 var sandboxDataRoot = "."
 
-// sandboxesDir is the shared parent directory every per-SDK sandbox working
-// directory lives under -- the single source of truth this file,
-// mcp_cleanup.go, and sandbox.go all resolve their sandbox paths from
-// (previously each hardcoded "./data/sandboxes" independently).
+// sandboxesDir remains the single source of truth for legacy cleanup.
 func sandboxesDir() string {
 	return filepath.Join(sandboxDataRoot, "data", "sandboxes")
 }
