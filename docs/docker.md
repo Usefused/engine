@@ -24,8 +24,10 @@ make docker-build-headless
 The full image builds the UI and embeds `ui-build` into the Go binary. The
 headless image compiles with `-tags headless`.
 
-Both images include `runtime/mcp/dist/server.js`, because MCP sessions execute
-through a small Node runtime process.
+Both images build `runtime/mcp/dist/bundle.js` before Go compilation. The Go
+binary embeds that dependency-complete bundle, so MCP sessions still execute
+through a small Node process without installing `node_modules` at container
+startup or writing shared dependencies into `/app/data`.
 
 ## Runtime Requirements
 
@@ -40,6 +42,12 @@ Containers need:
 - `FUSED_ENCRYPTION_KEY`
 - `FUSED_REGISTRY_ENDPOINT` only when Fused support directs you away from the
   production Fused Cloud Registry default
+
+Scheduled authorization, usage-report, package-lease, and public-insight
+probes share a short database gate. This lets one connection serve quiet
+maintenance while foreground requests can still expand the pool to its
+configured maximum; actual maintenance writes and Registry calls do not hold
+the gate.
 
 `FUSED_ENCRYPTION_KEY` must be a production secret. Do not use the checked-in
 example value outside local development.

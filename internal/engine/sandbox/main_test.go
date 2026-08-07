@@ -378,6 +378,67 @@ func TestWriteHTTPBlockPreload_NodeCanLoadIt(t *testing.T) {
 
 // ─── Config defaults test ──────────────────────────────────────────────────────
 
+func TestInitSharedSandboxesRemovesOnlyLegacyDependencyCache(t *testing.T) {
+	originalRoot := sandboxDataRoot
+	sandboxDataRoot = t.TempDir()
+	t.Cleanup(func() { sandboxDataRoot = originalRoot })
+
+	sharedDir, perAppDir, outsidePath := createLegacySandboxFixture(t)
+	initSharedSandboxes()
+	assertLegacySandboxCleanup(t, sharedDir, perAppDir, outsidePath)
+}
+
+func createLegacySandboxFixture(t *testing.T) (string, string, string) {
+	t.Helper()
+	sharedDir := sandboxesDir()
+	legacyModuleDir, perAppDir := sharedDir+"/node_modules/example", sharedDir+"/app-123"
+	if err := os.MkdirAll(legacyModuleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(perAppDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for path, contents := range map[string]string{
+		legacyModuleDir + "/index.js": "module.exports = {};",
+		sharedDir + "/package.json":   `{}`,
+		perAppDir + "/keep.txt":       "tenant data",
+	} {
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outsidePath := sandboxDataRoot + "/outside.txt"
+	if err := os.WriteFile(outsidePath, []byte("outside cache"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsidePath, legacyModuleDir+"/outside-link"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(legacyModuleDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	return sharedDir, perAppDir, outsidePath
+}
+
+func assertLegacySandboxCleanup(t *testing.T, sharedDir, perAppDir, outsidePath string) {
+	t.Helper()
+	for _, name := range legacySharedSandboxEntries {
+		if _, err := os.Stat(sharedDir + "/" + name); !os.IsNotExist(err) {
+			t.Fatalf("legacy dependency %q was not removed", name)
+		}
+	}
+	if data, err := os.ReadFile(perAppDir + "/keep.txt"); err != nil || string(data) != "tenant data" {
+		t.Fatalf("per-app data changed: data=%q err=%v", data, err)
+	}
+	info, err := os.Stat(outsidePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o444 {
+		t.Fatalf("symlink target permissions changed: mode=%v", info.Mode().Perm())
+	}
+}
+
 func TestSandboxConfigDefaults(t *testing.T) {
 	// config.Load("") panics when the encryption key is shorter than 32 chars
 	// (a pre-existing issue in the config package unrelated to our changes).

@@ -33,13 +33,21 @@ COPY . ./
 ARG VERSION=dev
 ARG COMMIT=dev
 
-FROM engine-base AS engine-headless-builder
+# The MCP package is bundled before Go compilation so its complete dependency
+# graph is embedded in the Engine binary instead of installed into tenant data
+# at startup. Copying it into this shared stage also prevents a stale checked-in
+# dist file from entering either image variant.
+FROM engine-base AS engine-source
+
+COPY --from=mcp-runtime-builder /app/runtime/mcp/dist/bundle.js /app/runtime/mcp/dist/bundle.js
+
+FROM engine-source AS engine-headless-builder
 
 RUN CGO_ENABLED=0 GOOS=linux go build -tags headless \
     -ldflags="-s -w -X github.com/Usefused/engine/cmd/engine/cmd.Version=${VERSION} -X github.com/Usefused/engine/cmd/engine/cmd.BuildHash=${COMMIT}" \
     -o /out/fused-engine ./cmd/engine
 
-FROM engine-base AS engine-embedded-builder
+FROM engine-source AS engine-embedded-builder
 
 COPY --from=ui-builder /app/build/client ./ui-build
 RUN CGO_ENABLED=0 GOOS=linux go build \
@@ -50,14 +58,11 @@ FROM node:24-alpine AS engine-runtime-base
 
 WORKDIR /app
 
-# Node and npm remain part of the slim runtime because MCP sessions execute in
-# isolated Node processes and initialize their shared runtime dependencies.
+# Node remains part of the slim runtime because MCP sessions execute in
+# isolated processes. Their JavaScript dependencies are already bundled into
+# the Go binary, so containers never run npm against tenant storage.
 RUN apk upgrade --no-cache && \
     apk add --no-cache bash su-exec nats-server tini
-
-COPY --from=engine-base /app/runtime /app/runtime
-COPY --from=mcp-runtime-builder /app/runtime/mcp/dist /app/runtime/mcp/dist
-RUN cd /app/runtime/mcp && npm ci --omit=dev
 
 RUN addgroup -S fused && adduser -S -G fused fused && \
     mkdir -p /app/data/sandboxes && \

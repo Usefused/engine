@@ -811,9 +811,9 @@ Module._resolveFilename = function(req, parent, isMain, opts) {
 };
 `
 
-// writeHTTPBlockPreload (re)writes the Node.js preload script every sandbox
-// session loads via `node --require <path>`. Called on every server start
-// (see initSharedSandboxes) so script changes always take effect.
+// writeHTTPBlockPreload keeps the defense-in-depth preload available to legacy
+// sandbox execution paths while the current MCP runtime enforces network
+// access inside its dependency-complete embedded bundle.
 func writeHTTPBlockPreload(dir string) {
 	path := filepath.Join(dir, "http-block-preload.cjs")
 	if err := os.WriteFile(path, []byte(httpBlockPreloadScript), 0644); err != nil {
@@ -821,53 +821,56 @@ func writeHTTPBlockPreload(dir string) {
 	}
 }
 
-// initSharedSandboxes bootstraps the shared node_modules and writes the
-// HTTP-blocking preload script that every sandbox session loads.
-func initSharedSandboxes() {
-	sharedDir := sandboxesDir()
-	os.MkdirAll(sharedDir, 0755)
+var legacySharedSandboxEntries = []string{"node_modules", "package.json", "package-lock.json"}
 
-	// Always (re)write the preload script so server restarts pick up changes.
-	writeHTTPBlockPreload(sharedDir)
-
-	pkgJsonPath := filepath.Join(sharedDir, "package.json")
-	pkgJson := `{
-		"name": "fused-shared-sandboxes",
-		"version": "1.0.0",
-		"private": true,
-		"dependencies": {
-			"node-fetch": "^2.7.0",
-			"@types/node-fetch": "^2.6.4",
-			"@opentelemetry/api": "^1.8.0",
-			"@opentelemetry/sdk-trace-base": "^1.25.0",
-			"@modelcontextprotocol/sdk": "^1.0.0",
-			"fuse.js": "^7.0.0",
-			"typescript": "^5.0.0",
-			"@types/node": "^20.0.0"
+func removeLegacySharedSandboxDependencies(sharedDir string) error {
+	for _, name := range legacySharedSandboxEntries {
+		path := filepath.Join(sharedDir, name)
+		if err := makeLegacyDependencyWritable(path); err != nil {
+			return fmt.Errorf("make legacy sandbox dependency %s writable: %w", name, err)
 		}
-	}`
-
-	existing, err := os.ReadFile(pkgJsonPath)
-	if err != nil || string(existing) != pkgJson {
-		slog.Info("Initializing/Updating shared sandbox node_modules...")
-		os.WriteFile(pkgJsonPath, []byte(pkgJson), 0644)
-
-		nmDir := filepath.Join(sharedDir, "node_modules")
-		if _, err := os.Stat(nmDir); err == nil {
-			exec.Command("chmod", "-R", "a+w", nmDir).Run()
-		}
-
-		cmd := exec.Command("npm", "install")
-		cmd.Dir = sharedDir
-		if err := cmd.Run(); err != nil {
-			slog.Error("Failed to initialize shared sandbox node_modules", slog.Any("error", err))
-		} else {
-			slog.Info("Shared sandbox node_modules initialized successfully")
-			// Make node_modules read-only so sandbox processes cannot alter
-			// installed packages between sessions.
-			if err := exec.Command("chmod", "-R", "a-w", nmDir).Run(); err != nil {
-				slog.Warn("Failed to make shared node_modules read-only", slog.Any("error", err))
-			}
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("remove legacy sandbox dependency %s: %w", name, err)
 		}
 	}
+	return nil
+}
+
+func makeLegacyDependencyWritable(root string) error {
+	if _, err := os.Lstat(root); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	// Older Engines deliberately made the cache read-only. Restore only owner
+	// write permission so the unprivileged Engine user can remove its own tree.
+	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		// npm bin links need no permission change, and following an unexpected
+		// symlink here could modify a target outside the retired cache tree.
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		return os.Chmod(path, info.Mode().Perm()|0o200)
+	})
+}
+
+// initSharedSandboxes removes the retired per-tenant dependency cache. The
+// current MCP runtime and all of its npm dependencies are bundled by esbuild
+// and embedded in the Engine binary, so retaining this cache only wastes PVC
+// space. Exact known paths are removed to preserve any per-app directories.
+func initSharedSandboxes() {
+	sharedDir := sandboxesDir()
+	if err := os.MkdirAll(sharedDir, 0755); err != nil {
+		slog.Error("Failed to initialize sandbox data directory", slog.Any("error", err), slog.String("path", sharedDir))
+		return
+	}
+	if err := removeLegacySharedSandboxDependencies(sharedDir); err != nil {
+		slog.Warn("Failed to remove legacy sandbox dependencies", slog.Any("error", err))
+	}
+
+	// Keep this small compatibility asset current without installing packages.
+	writeHTTPBlockPreload(sharedDir)
 }

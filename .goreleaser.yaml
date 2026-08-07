@@ -55,7 +55,6 @@ dockers:
     extra_files:
       - engine.yaml
       - entrypoint.sh
-      - runtime/
     build_flag_templates:
       - "--platform=linux/amd64"
       - "--label=org.opencontainers.image.source=https://github.com/usefused/engine"
@@ -74,7 +73,6 @@ dockers:
     extra_files:
       - engine.yaml
       - entrypoint.sh
-      - runtime/
     build_flag_templates:
       - "--platform=linux/arm64"
       - "--label=org.opencontainers.image.source=https://github.com/usefused/engine"
@@ -96,7 +94,6 @@ dockers:
     extra_files:
       - engine.yaml
       - entrypoint.sh
-      - runtime/
     build_flag_templates:
       - "--platform=linux/amd64"
       - "--build-arg=ENGINE_BINARY=fused-engine-headless"
@@ -116,7 +113,6 @@ dockers:
     extra_files:
       - engine.yaml
       - entrypoint.sh
-      - runtime/
     build_flag_templates:
       - "--platform=linux/arm64"
       - "--build-arg=ENGINE_BINARY=fused-engine-headless"

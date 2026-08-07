@@ -75,6 +75,11 @@ fused-engine start
 
 By default, the Engine will automatically detect that no external NATS cluster is configured and will boot its embedded NATS server on port `4222`. It will spin up the REST API on port `8081`, and the SDK gRPC connection on port `50051`. The Registry endpoint defaults to Fused Cloud; only set `FUSED_REGISTRY_ENDPOINT` when Fused support asks you to use a different endpoint.
 
+MCP runtime dependencies are bundled into the Engine binary at build time.
+Containers do not run `npm install` at startup or persist shared
+`node_modules` under `/app/data`; upgrading from an older release removes only
+that retired shared dependency cache while preserving per-app data.
+
 ### Docker Compose Example (with UI)
 Our full Docker image (`latest`) bundles both the Engine and the Admin Dashboard. The headless image (`headless`) runs the same Engine API without the embedded UI.
 
@@ -127,7 +132,8 @@ FUSED_DATABASE_URL="postgres://fused:password@localhost:5432/fused?sslmode=disab
 # Optional pool ceiling. Hosted starter Engines default this to 2.
 FUSED_DATABASE_MAX_CONNS=10
 
-# Optional idle retention. MinConns is zero, so the pool can drain completely.
+# Optional idle retention. MinConns is zero; periodic safety probes may keep
+# one connection warm while burst/request connections remain eligible to close.
 FUSED_DATABASE_MAX_CONN_IDLE_TIME=30m
 
 # Your organization's Fused Cloud license key for the Engine (Required)

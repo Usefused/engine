@@ -145,15 +145,16 @@ func runEngine() {
 	} else {
 		entitlementpkg.LiveEntitlement.Store(entitlement)
 	}
+	backgroundStore := newSerializedBackgroundStore(engineStore)
 	engineWorkers := startEngineWorkers(ctx, engineStore, natsClient, cfg.Engine)
-	engineWorkers.packageLeases = startSDKPackageLeaseRenewal(ctx, engineStore, registryClient)
-	engineWorkers.publicInsights = startPublicServiceInsightReporting(ctx, engineStore, registryClient)
+	engineWorkers.packageLeases = startSDKPackageLeaseRenewal(ctx, backgroundStore, registryClient)
+	engineWorkers.publicInsights = startPublicServiceInsightReporting(ctx, backgroundStore, registryClient)
 	controlAuthenticator := newControlAuthenticator(ctx, engineStore, authorizationRevision)
-	startAuthorizationRevisionPolling(ctx, engineStore, controlAuthenticator)
+	startAuthorizationRevisionPolling(ctx, backgroundStore, controlAuthenticator)
 	engineWorkers.usageCounter = startEngineUsageCounter(ctx, engineStore, entitlement)
 
 	startEngineHeartbeat(ctx, registryClient, entitlement, entitlementStore)
-	usageFlushWorker := startEngineUsageReporting(ctx, engineStore, registryClient, entitlement)
+	usageFlushWorker := startEngineUsageReporting(ctx, backgroundStore, registryClient, entitlement)
 	defer func() {
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer stopCancel()
