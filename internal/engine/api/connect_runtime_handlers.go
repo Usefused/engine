@@ -100,6 +100,10 @@ func ConnectCallbackHandler(s store.Store, verifier ServiceVerifier, masterKey [
 			writeConnectCallbackFailure(w, r, session, err)
 			return
 		}
+		if session.AuthType != resolved.config.AuthType || session.AuthName != resolved.config.AuthName {
+			writeConnectCallbackFailure(w, r, session, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "connect auth configuration changed"})
+			return
+		}
 		// Callback fallback scope metadata must describe what the user actually
 		// consented to, not every scope the provider integration supports.
 		resolved.auth.Scopes = append([]string(nil), session.RequestedScopes...)
@@ -187,7 +191,7 @@ func resolveConnectRuntimeConfig(ctx context.Context, s store.Store, verifier Se
 	if err != nil {
 		return connectRuntimeConfig{}, fmt.Errorf("load service metadata: %w", err)
 	}
-	auth, err := selectRuntimeOAuthConfig(metadata.AuthConfigs, cfg.AuthType)
+	auth, err := selectRuntimeOAuthConfig(metadata.AuthConfigs, cfg.AuthType, cfg.AuthName)
 	if err != nil {
 		return connectRuntimeConfig{}, err
 	}
@@ -266,6 +270,8 @@ func createConnectSession(ctx context.Context, s store.Store, call connectAdminC
 	if _, err := s.CreateConnectSession(ctx, store.ConnectSession{
 		BucketID:              call.bucketID,
 		ServiceID:             call.serviceID,
+		AuthType:              resolved.config.AuthType,
+		AuthName:              resolved.config.AuthName,
 		EndUserRef:            endUserRef,
 		StateHash:             connectHash(state),
 		NonceHash:             connectHash(nonce),
@@ -560,6 +566,7 @@ func encryptAuthConnectionFromToken(session *store.ConnectSession, resolved conn
 		EndUserRef:            session.EndUserRef,
 		CreatedByAppID:        session.CreatedByAppID,
 		AuthType:              resolved.config.AuthType,
+		AuthName:              resolved.config.AuthName,
 		EncryptedDEK:          wrappedDEK,
 		EncryptedAccessToken:  access,
 		EncryptedRefreshToken: refresh,
@@ -647,14 +654,14 @@ func writeConnectCallbackFallback(w http.ResponseWriter, status int, message str
 
 // selectRuntimeOAuthConfig matches the bucket's chosen auth family instead of
 // relying on registry order, which can differ between equivalent imports.
-func selectRuntimeOAuthConfig(auths fusedobject.AuthConfigs, configuredType string) (fusedobject.AuthConfig, error) {
+func selectRuntimeOAuthConfig(auths fusedobject.AuthConfigs, configuredType, configuredName string) (fusedobject.AuthConfig, error) {
 	want := canonicalConnectAuthType(configuredType)
 	for _, auth := range auths {
-		if runtimeConnectAuthType(auth) == want {
+		if runtimeConnectAuthType(auth) == want && auth.Name == configuredName {
 			return auth, validateRuntimeOAuthConfig(auth)
 		}
 	}
-	return fusedobject.AuthConfig{}, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "service has no configured " + want + " auth config"}
+	return fusedobject.AuthConfig{}, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "service has no configured auth_name for " + want}
 }
 
 // runtimeConnectAuthType maps provider metadata into the small set of connect

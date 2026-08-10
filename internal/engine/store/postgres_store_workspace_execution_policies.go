@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -216,6 +217,11 @@ func decodeWorkspaceExecutionPolicyJSON(override *WorkspaceExecutionPolicyOverri
 	}
 	if err := unmarshalIfPresent(pagination, &override.Pagination); err != nil {
 		return fmt.Errorf("decode pagination: %w", err)
+	}
+	if override.Pagination != nil {
+		if err := paginationpolicy.Validate((*paginationpolicy.Config)(override.Pagination)); err != nil {
+			return fmt.Errorf("decode pagination: %w", err)
+		}
 	}
 	if err := unmarshalIfPresent(incomingWebhookConfig, &override.IncomingWebhookConfig); err != nil {
 		return fmt.Errorf("decode incoming_webhook_config: %w", err)

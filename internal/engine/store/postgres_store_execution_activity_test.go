@@ -112,6 +112,9 @@ func TestEngineExecutionEventPersistenceUsesAppIdentity(t *testing.T) {
 	if rows[0].AppVersion != "2.0.0" || rows[0].ProviderProtocol != "graphql" {
 		t.Fatalf("persisted identity = %#v", rows[0])
 	}
+	if rows[0].AuthSchemeNames == nil || rows[0].RateLimitScopeKinds == nil || rows[0].RateLimitUnits == nil || rows[0].RateLimitUnitTotals == nil {
+		t.Fatalf("non-null execution dimensions decoded as nil: %#v", rows[0])
+	}
 
 	_, total, err = repository.ListEngineExecutionEventsByApp(ctx, EngineExecutionFilter{
 		AccountID: accountID, AppFamilyID: familyID, AppID: uuid.New(), Limit: 10,

@@ -15,8 +15,12 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/config"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
+	"github.com/Usefused/engine/internal/shared/paginationpolicy"
+	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
+	"github.com/Usefused/engine/internal/shared/serverrouting"
 	"github.com/google/uuid"
 	"github.com/pgvector/pgvector-go"
 	"github.com/sashabaranov/go-openai"
@@ -242,10 +246,11 @@ type PublicServiceInsights struct {
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 type Server struct {
-	URL         string `json:"url"`
-	Description string `json:"description,omitempty"`
-	Environment string `json:"environment,omitempty"`
-	IsDefault   bool   `json:"is_default,omitempty"`
+	URL         string                   `json:"url"`
+	Description string                   `json:"description,omitempty"`
+	Environment string                   `json:"environment,omitempty"`
+	IsDefault   bool                     `json:"is_default,omitempty"`
+	Variables   []serverrouting.Variable `json:"variables,omitempty"`
 }
 
 type Servers []Server
@@ -259,6 +264,7 @@ type ServiceProviderIdentity struct {
 
 type Service struct {
 	ID               uuid.UUID `json:"id"`
+	ServiceVersionID uuid.UUID `json:"service_version_id,omitempty"`
 	Name             string    `json:"name"` // e.g., "Stripe"
 	Description      string    `json:"description"`
 	BaseURL          string    `json:"base_url"`
@@ -673,6 +679,7 @@ func serviceVersionNewer(candidate, current *ServiceVersion) bool {
 
 type IntegrationObject struct {
 	ID                uuid.UUID        `json:"id"`
+	StableKey         string           `json:"stable_key"`
 	AccountID         uuid.UUID        `json:"account_id,omitempty"`
 	ServiceID         uuid.UUID        `json:"service_id"`
 	SourceID          uuid.UUID        `json:"source_id,omitempty"`
@@ -686,26 +693,25 @@ type IntegrationObject struct {
 	Status            string           `json:"status"` // "active" | "drifted" | "updating"
 	SpecHash          string           `json:"spec_hash"`
 
-	Method          string     `json:"method"`
-	NormalizedPath  string     `json:"normalized_path"`
-	Path            string     `json:"path"`
-	Deprecated      bool       `json:"deprecated"`
-	DeprecationDate *time.Time `json:"deprecation_date,omitempty"`
-	Parameters      Parameters `json:"parameters"`
-	RequestBody     *Schema    `json:"request_body,omitempty"`
-	Responses       Responses  `json:"responses"`
-	GraphQLQuery    *string    `json:"graphql_query,omitempty"`
+	Method          string          `json:"method"`
+	NormalizedPath  string          `json:"normalized_path"`
+	Path            string          `json:"path"`
+	Deprecated      bool            `json:"deprecated"`
+	DeprecationDate *time.Time      `json:"deprecation_date,omitempty"`
+	Parameters      Parameters      `json:"parameters"`
+	RequestContent  *RequestContent `json:"request_content,omitempty"`
+	Responses       Responses       `json:"responses"`
+	GraphQLQuery    *string         `json:"graphql_query,omitempty"`
 	// ProviderProtocol is the provider-facing wire contract, not the SDK/MCP
 	// execution transport recorded by activity and usage events.
 	ProviderProtocol string `json:"provider_protocol,omitempty"`
 	// OperationKind preserves GraphQL query/mutation semantics beyond HTTP POST.
-	OperationKind string            `json:"operation_kind,omitempty"`
-	Pagination    *PaginationConfig `json:"pagination,omitempty"`
+	OperationKind        string                   `json:"operation_kind,omitempty"`
+	Pagination           *PaginationConfig        `json:"pagination,omitempty"`
+	SecurityRequirements authrouting.Requirements `json:"security_requirements"`
 	// IsSSE marks that this endpoint returns a Server-Sent Events stream.
 	// The Engine will set Accept: text/event-stream and parse the SSE wire format.
 	IsSSE bool `json:"is_sse,omitempty"`
-
-	Encoding string `json:"encoding,omitempty"` // "application/json", "application/x-www-form-urlencoded"
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -718,11 +724,7 @@ const (
 	OperationKindMutation   = "mutation"
 )
 
-type PaginationConfig struct {
-	Type         string `json:"type"`          // "cursor", "offset", "page_number", "next_url"
-	RequestParam string `json:"request_param"` // e.g. "cursor", "offset"
-	ResponsePath string `json:"response_path"` // JSON path to the next token, e.g. "metadata.next_cursor"
-}
+type PaginationConfig paginationpolicy.Config
 
 type PaginationOverrides map[string]PaginationConfig
 
@@ -734,35 +736,66 @@ func (p *PaginationOverrides) Scan(value interface{}) error {
 	return scanJSONB(value, p)
 }
 
+const PathEncodingPreserveSlashes = "preserve_slashes"
+
 type Parameter struct {
-	Name        string `json:"name"`
-	In          string `json:"in"` // "query" | "path" | "header"
-	Required    bool   `json:"required"`
-	Type        string `json:"type"`
-	Description string `json:"description"`
+	Name         string `json:"name"`
+	In           string `json:"in"` // "query" | "path" | "header"
+	Required     bool   `json:"required"`
+	Type         string `json:"type"`
+	Description  string `json:"description"`
+	PathEncoding string `json:"path_encoding,omitempty"`
 }
 
 type Schema struct {
-	Ref        string            `json:"$ref,omitempty"`
-	Type       string            `json:"type,omitempty"`
-	Format     string            `json:"format,omitempty"` // e.g. "binary" for file downloads
-	Properties map[string]Schema `json:"properties,omitempty"`
-	Items      *Schema           `json:"items,omitempty"`
-	Required   []string          `json:"required,omitempty"`
-	Example    any               `json:"example,omitempty"`
+	Ref                  string            `json:"$ref,omitempty"`
+	Type                 string            `json:"type,omitempty"`
+	Format               string            `json:"format,omitempty"` // e.g. "binary" for file downloads
+	Properties           map[string]Schema `json:"properties,omitempty"`
+	Items                *Schema           `json:"items,omitempty"`
+	AdditionalProperties *Schema           `json:"additional_properties,omitempty"`
+	Required             []string          `json:"required,omitempty"`
+	Example              any               `json:"example,omitempty"`
+}
+
+const (
+	RequestSerializationJSON      = "json"
+	RequestSerializationForm      = "form_urlencoded"
+	RequestSerializationMultipart = "multipart"
+	RequestSerializationRaw       = "raw"
+	RequestBinaryEncodingBase64   = "base64"
+)
+
+// RequestContent is the reviewed provider request representation. Keeping the
+// schema with its media type and serialization prevents downstream layers from
+// independently guessing how an otherwise identical object must be encoded.
+type RequestContent struct {
+	MediaType        string                 `json:"media_type"`
+	Serialization    string                 `json:"serialization"`
+	Required         bool                   `json:"required,omitempty"`
+	Schema           *Schema                `json:"schema,omitempty"`
+	PayloadParameter string                 `json:"payload_parameter,omitempty"`
+	BinaryEncoding   string                 `json:"binary_encoding,omitempty"`
+	Parts            map[string]RequestPart `json:"parts,omitempty"`
+}
+
+type RequestPart struct {
+	ContentType    string `json:"content_type,omitempty"`
+	BinaryEncoding string `json:"binary_encoding,omitempty"`
 }
 
 type AuthConfig struct {
-	Name             string   `json:"name,omitempty"`              // Logical name from OpenAPI securitySchemes (e.g. "bearerAuth")
-	Type             string   `json:"type"`                        // "apiKey", "http", "mutualTLS", "oauth2", "openIdConnect"
-	Flow             string   `json:"flow,omitempty"`              // OAuth2 grant type: "clientCredentials", "authorizationCode", "password", "implicit"
-	Scheme           string   `json:"scheme,omitempty"`            // e.g., "bearer", "basic", "digest"
-	Location         string   `json:"location,omitempty"`          // "header", "query", "cookie"
-	KeyName          string   `json:"key_name,omitempty"`          // e.g., "Authorization", "X-API-Key"
-	TokenURL         string   `json:"token_url,omitempty"`         // For oauth2
-	AuthorizationURL string   `json:"authorization_url,omitempty"` // For oauth2 authorizationCode/implicit only
-	OpenIdConnectUrl string   `json:"open_id_connect_url,omitempty"`
-	Scopes           []string `json:"scopes,omitempty"`
+	Name              string                        `json:"name,omitempty"`   // Logical name from OpenAPI securitySchemes (e.g. "bearerAuth")
+	Type              string                        `json:"type"`             // "apiKey", "http", "mutualTLS", "oauth2", "openIdConnect"
+	Flow              string                        `json:"flow,omitempty"`   // OAuth2 grant type: "clientCredentials", "authorizationCode", "password", "implicit"
+	Scheme            string                        `json:"scheme,omitempty"` // e.g., "bearer", "basic", "digest"
+	BasicPasswordMode authrouting.BasicPasswordMode `json:"basic_password_mode,omitempty"`
+	Location          string                        `json:"location,omitempty"`          // "header", "query", "cookie"
+	KeyName           string                        `json:"key_name,omitempty"`          // e.g., "Authorization", "X-API-Key"
+	TokenURL          string                        `json:"token_url,omitempty"`         // For oauth2
+	AuthorizationURL  string                        `json:"authorization_url,omitempty"` // For oauth2 authorizationCode/implicit only
+	OpenIdConnectUrl  string                        `json:"open_id_connect_url,omitempty"`
+	Scopes            []string                      `json:"scopes,omitempty"`
 
 	// Fused Auth: OAuth edge-case fields stored per AuthConfig (not per service, since a
 	// service can have multiple auth configs and these settings are per-config).
@@ -785,11 +818,7 @@ type IncomingWebhookConfig struct {
 	VerificationHeaders []string `json:"verification_headers,omitempty"` // For signature_header: all required headers for PKI verification
 }
 
-type RateLimitConfig struct {
-	Strategy          string `json:"strategy"`
-	RequestsPerSecond int    `json:"requests_per_second"`
-	RequestsPerMinute int    `json:"requests_per_minute"`
-}
+type RateLimitConfig = ratelimitpolicy.Config
 
 type RetryConfig struct {
 	Strategy   string `json:"strategy"`
@@ -1133,43 +1162,59 @@ const (
 // compact so user-facing history and dependency checks do not depend on an
 // observability backend being configured.
 type EngineExecutionEvent struct {
-	ID                  uuid.UUID `json:"id" db:"id"`
-	TraceID             string    `json:"trace_id,omitempty" db:"trace_id"`
-	SpanID              string    `json:"span_id,omitempty" db:"span_id"`
-	AccountID           uuid.UUID `json:"account_id,omitempty" db:"account_id"`
-	AppFamilyID         uuid.UUID `json:"app_family_id,omitempty" db:"app_family_id"`
-	AppID               uuid.UUID `json:"app_id,omitempty" db:"app_id"`
-	AppVersion          string    `json:"app_version,omitempty" db:"app_version"`
-	Transport           string    `json:"transport" db:"transport"`
-	ProviderProtocol    string    `json:"provider_protocol,omitempty" db:"provider_protocol"`
-	Direction           string    `json:"direction" db:"direction"`
-	ServiceID           uuid.UUID `json:"service_id,omitempty" db:"service_id"`
-	ServiceVersionID    string    `json:"service_version_id" db:"service_version_id"`
-	OperationID         uuid.UUID `json:"operation_id,omitempty" db:"operation_id"`
-	WebhookID           uuid.UUID `json:"webhook_id,omitempty" db:"webhook_id"`
-	EndpointName        string    `json:"endpoint_name" db:"endpoint_name"`
-	ExternalID          string    `json:"external_id,omitempty" db:"external_id"`
-	EventName           string    `json:"event_name,omitempty" db:"event_name"`
-	HTTPMethod          string    `json:"http_method,omitempty" db:"http_method"`
-	RequestPath         string    `json:"request_path,omitempty" db:"request_path"`
-	Environment         string    `json:"environment,omitempty" db:"environment"`
-	EnvironmentSource   string    `json:"environment_source,omitempty" db:"environment_source"`
-	ProviderHost        string    `json:"provider_host,omitempty" db:"provider_host"`
-	ProviderHTTPStatus  *int      `json:"provider_http_status,omitempty" db:"provider_http_status"`
-	ProviderStatusClass string    `json:"provider_status_class,omitempty" db:"provider_status_class"`
-	Status              string    `json:"status" db:"status"`
-	FailureReason       string    `json:"failure_reason,omitempty" db:"failure_reason"`
-	FailureCategory     string    `json:"failure_category,omitempty" db:"failure_category"`
-	FailureCode         string    `json:"failure_code,omitempty" db:"failure_code"`
-	LatencyMs           int64     `json:"latency_ms" db:"latency_ms"`
-	ProviderLatencyMs   *int64    `json:"provider_latency_ms,omitempty" db:"provider_latency_ms"`
-	AttemptCount        int       `json:"attempt_count" db:"attempt_count"`
-	RequestBytes        int64     `json:"request_bytes,omitempty" db:"request_bytes"`
-	ResponseBytes       int64     `json:"response_bytes,omitempty" db:"response_bytes"`
-	VerificationStatus  string    `json:"verification_status,omitempty" db:"verification_status"`
-	DeliveryStatus      string    `json:"delivery_status,omitempty" db:"delivery_status"`
-	IdempotencyKeyHash  string    `json:"idempotency_key_hash,omitempty" db:"idempotency_key_hash"`
-	RequestBodyHash     string    `json:"request_body_hash,omitempty" db:"request_body_hash"`
+	ID                     uuid.UUID `json:"id" db:"id"`
+	TraceID                string    `json:"trace_id,omitempty" db:"trace_id"`
+	SpanID                 string    `json:"span_id,omitempty" db:"span_id"`
+	AccountID              uuid.UUID `json:"account_id,omitempty" db:"account_id"`
+	AppFamilyID            uuid.UUID `json:"app_family_id,omitempty" db:"app_family_id"`
+	AppID                  uuid.UUID `json:"app_id,omitempty" db:"app_id"`
+	AppVersion             string    `json:"app_version,omitempty" db:"app_version"`
+	Transport              string    `json:"transport" db:"transport"`
+	ProviderProtocol       string    `json:"provider_protocol,omitempty" db:"provider_protocol"`
+	Direction              string    `json:"direction" db:"direction"`
+	ServiceID              uuid.UUID `json:"service_id,omitempty" db:"service_id"`
+	ServiceVersionID       string    `json:"service_version_id" db:"service_version_id"`
+	OperationID            uuid.UUID `json:"operation_id,omitempty" db:"operation_id"`
+	WebhookID              uuid.UUID `json:"webhook_id,omitempty" db:"webhook_id"`
+	EndpointName           string    `json:"endpoint_name" db:"endpoint_name"`
+	ExternalID             string    `json:"external_id,omitempty" db:"external_id"`
+	EventName              string    `json:"event_name,omitempty" db:"event_name"`
+	HTTPMethod             string    `json:"http_method,omitempty" db:"http_method"`
+	RequestPath            string    `json:"request_path,omitempty" db:"request_path"`
+	Environment            string    `json:"environment,omitempty" db:"environment"`
+	EnvironmentSource      string    `json:"environment_source,omitempty" db:"environment_source"`
+	ProviderHost           string    `json:"provider_host,omitempty" db:"provider_host"`
+	ProviderHTTPStatus     *int      `json:"provider_http_status,omitempty" db:"provider_http_status"`
+	ProviderStatusClass    string    `json:"provider_status_class,omitempty" db:"provider_status_class"`
+	Status                 string    `json:"status" db:"status"`
+	FailureReason          string    `json:"failure_reason,omitempty" db:"failure_reason"`
+	FailureCategory        string    `json:"failure_category,omitempty" db:"failure_category"`
+	FailureCode            string    `json:"failure_code,omitempty" db:"failure_code"`
+	LatencyMs              int64     `json:"latency_ms" db:"latency_ms"`
+	ProviderLatencyMs      *int64    `json:"provider_latency_ms,omitempty" db:"provider_latency_ms"`
+	AttemptCount           int       `json:"attempt_count" db:"attempt_count"`
+	AuthSchemeNames        []string  `json:"auth_scheme_names,omitempty" db:"auth_scheme_names"`
+	AuthSchemeTypes        []string  `json:"auth_scheme_types,omitempty" db:"auth_scheme_types"`
+	AuthSchemeCount        int64     `json:"auth_scheme_count,omitempty" db:"auth_scheme_count"`
+	AuthSelectionOutcome   string    `json:"auth_selection_outcome,omitempty" db:"auth_selection_outcome"`
+	PaginationType         string    `json:"pagination_type,omitempty" db:"pagination_type"`
+	PaginationPageCount    int64     `json:"pagination_page_count,omitempty" db:"pagination_page_count"`
+	PaginationItemCount    int64     `json:"pagination_item_count,omitempty" db:"pagination_item_count"`
+	PaginationByteCount    int64     `json:"pagination_byte_count,omitempty" db:"pagination_byte_count"`
+	PaginationStopReason   string    `json:"pagination_stop_reason,omitempty" db:"pagination_stop_reason"`
+	RateLimitDecision      string    `json:"rate_limit_decision,omitempty" db:"rate_limit_decision"`
+	RateLimitPolicyCount   int64     `json:"rate_limit_policy_count,omitempty" db:"rate_limit_policy_count"`
+	RateLimitScopeKinds    []string  `json:"rate_limit_scope_kinds,omitempty" db:"rate_limit_scope_kinds"`
+	RateLimitUnits         []string  `json:"rate_limit_units,omitempty" db:"rate_limit_units"`
+	RateLimitUnitTotals    []int64   `json:"rate_limit_unit_totals,omitempty" db:"rate_limit_unit_totals"`
+	RateLimitRetryOutcome  string    `json:"rate_limit_retry_outcome,omitempty" db:"rate_limit_retry_outcome"`
+	RateLimitHeaderOutcome string    `json:"rate_limit_header_outcome,omitempty" db:"rate_limit_header_outcome"`
+	RequestBytes           int64     `json:"request_bytes,omitempty" db:"request_bytes"`
+	ResponseBytes          int64     `json:"response_bytes,omitempty" db:"response_bytes"`
+	VerificationStatus     string    `json:"verification_status,omitempty" db:"verification_status"`
+	DeliveryStatus         string    `json:"delivery_status,omitempty" db:"delivery_status"`
+	IdempotencyKeyHash     string    `json:"idempotency_key_hash,omitempty" db:"idempotency_key_hash"`
+	RequestBodyHash        string    `json:"request_body_hash,omitempty" db:"request_body_hash"`
 	// IdempotencyReplayed is true when this execution was served from the
 	// idempotency cache (see IdempotentExecution) instead of calling the
 	// vendor -- lets callers see cache-hit rate without a separate metric.
@@ -1180,7 +1225,7 @@ type EngineExecutionEvent struct {
 	CreatedAt           time.Time `json:"created_at" db:"created_at"`
 }
 
-const EngineExecutionEventSchemaVersion = 2
+const EngineExecutionEventSchemaVersion = 4
 
 // EngineExecutionEventEnvelope keeps the NATS contract versioned independently
 // from the database schema so a malformed or future message can be rejected
@@ -1308,40 +1353,17 @@ func (d *DefaultHeaders) Scan(value interface{}) error { return scanJSONB(value,
 func (s Schema) Value() (driver.Value, error)  { return json.Marshal(s) }
 func (s *Schema) Scan(value interface{}) error { return scanJSONB(value, s) }
 
+func (r RequestContent) Value() (driver.Value, error)  { return json.Marshal(r) }
+func (r *RequestContent) Scan(value interface{}) error { return scanJSONB(value, r) }
+
 func (s Servers) Value() (driver.Value, error)  { return json.Marshal(s) }
 func (s *Servers) Scan(value interface{}) error { return scanJSONB(value, s) }
 
 func (s AuthConfig) Value() (driver.Value, error)  { return json.Marshal(s) }
 func (s *AuthConfig) Scan(value interface{}) error { return scanJSONB(value, s) }
 
-func (s AuthConfigs) Value() (driver.Value, error) { return json.Marshal(s) }
-func (s *AuthConfigs) Scan(value interface{}) error {
-	if value == nil {
-		return nil
-	}
-	b, ok := value.([]byte)
-	if !ok {
-		str, ok := value.(string)
-		if !ok {
-			return errors.New("type assertion to []byte or string failed")
-		}
-		b = []byte(str)
-	}
-	// Try parsing as array first
-	if err := json.Unmarshal(b, s); err == nil {
-		return nil
-	}
-	// Fallback to parsing as single object (legacy compatibility)
-	var single AuthConfig
-	if err := json.Unmarshal(b, &single); err != nil {
-		return err
-	}
-	*s = AuthConfigs{single}
-	return nil
-}
-
-func (s RateLimitConfig) Value() (driver.Value, error)  { return json.Marshal(s) }
-func (s *RateLimitConfig) Scan(value interface{}) error { return scanJSONB(value, s) }
+func (s AuthConfigs) Value() (driver.Value, error)  { return json.Marshal(s) }
+func (s *AuthConfigs) Scan(value interface{}) error { return scanJSONB(value, s) }
 
 func (s RetryConfig) Value() (driver.Value, error)  { return json.Marshal(s) }
 func (s *RetryConfig) Scan(value interface{}) error { return scanJSONB(value, s) }

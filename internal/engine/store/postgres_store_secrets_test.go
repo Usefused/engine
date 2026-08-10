@@ -25,6 +25,17 @@ func TestUpsertSecretSQLDerivesWorkspaceFromBucket(t *testing.T) {
 	}
 }
 
+func TestFirstCompleteSecretSetSQLIsOrderedAndExpiryAware(t *testing.T) {
+	for _, required := range []string{"WITH ORDINALITY", "ORDER BY ordinality", "LIMIT 1", "expires_at IS NULL OR secret.expires_at > NOW()", "value->'optional'"} {
+		if !strings.Contains(firstCompleteSecretSetSQL, required) {
+			t.Fatalf("ordered secret selector is missing %q: %s", required, firstCompleteSecretSetSQL)
+		}
+	}
+	if strings.Count(firstCompleteSecretSetSQL, "expires_at IS NULL OR secret.expires_at > NOW()") != 2 {
+		t.Fatal("required selection and returned optional values must both exclude expired rows")
+	}
+}
+
 func TestPostgresStore_WorkspaceSecrets(t *testing.T) {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -102,6 +113,29 @@ func TestPostgresStore_WorkspaceSecrets(t *testing.T) {
 	sec2.EncryptedValue = "enc-val-override"
 	if err := s.UpsertSecret(ctx, sec2); err != nil {
 		t.Fatalf("UpsertSecret 2 failed: %v", err)
+	}
+
+	// The ordered selector must fall through an expired required branch and
+	// return no expired optional value from the selected branch.
+	expiredAt := time.Now().UTC().Add(-time.Minute)
+	expiredRequired := sec1
+	expiredRequired.KeyName = "expired_required"
+	expiredRequired.ExpiresAt = &expiredAt
+	expiredOptional := sec1
+	expiredOptional.KeyName = "expired_optional"
+	expiredOptional.ExpiresAt = &expiredAt
+	if err := s.UpsertSecrets(ctx, []WorkspaceSecret{expiredRequired, expiredOptional}); err != nil {
+		t.Fatalf("UpsertSecrets expired selector fixtures: %v", err)
+	}
+	selected, err := s.GetFirstCompleteSecretSet(ctx, bucketID, serviceID, []SecretKeyAlternative{
+		{Required: []string{"expired_required"}},
+		{Required: []string{"API_SECRET"}, Optional: []string{"expired_optional"}},
+	})
+	if err != nil || len(selected) != 1 || selected[0].KeyName != "API_SECRET" {
+		t.Fatalf("ordered active secret selection=%#v err=%v", selected, err)
+	}
+	if err := s.DeleteSecrets(ctx, bucketID, serviceID, []string{"expired_required", "expired_optional"}); err != nil {
+		t.Fatalf("delete selector fixtures: %v", err)
 	}
 
 	// 3. List secrets

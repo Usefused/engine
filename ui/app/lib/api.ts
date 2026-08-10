@@ -1,6 +1,7 @@
 import { getCSRFToken, purgeLegacyBrowserCredential } from "./session";
 import { credentialedRequestInit } from "./browser-request";
 import type { ServiceAuthOption } from "./service-auth";
+import type { RateLimitConfig } from "./rate-limit";
 import {
   APIRequestError,
   isAuthenticationFailure,
@@ -149,11 +150,7 @@ export interface Service {
   import_warnings?: ServiceImportWarning[];
   resources?: { id: string; name: string; endpointCount?: number }[];
   auth_configs: AuthConfig[];
-  rate_limit?: {
-    strategy: string;
-    requests_per_second?: number;
-    requests_per_minute?: number;
-  };
+  rate_limit?: RateLimitConfig;
   retry_config?: {
     strategy: string;
     max_retries?: number;
@@ -214,11 +211,7 @@ export interface ServiceVersion {
   status?: "public" | "deprecated" | string;
   base_url?: string;
   auth_configs?: AuthConfig[];
-  rate_limit?: {
-    strategy: string;
-    requests_per_second?: number;
-    requests_per_minute?: number;
-  };
+  rate_limit?: RateLimitConfig;
   retry_config?: {
     strategy: string;
     max_retries?: number;

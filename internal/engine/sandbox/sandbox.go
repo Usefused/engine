@@ -166,6 +166,11 @@ func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, 
 	globalNATSClient = nc
 	globalObjectCache = cache
 	globalDispatcher = engine.NewDispatcher()
+	if local, ok := cache.(*LocalObjectCache); ok {
+		if rateLimits := local.providerRateLimitStore(); rateLimits != nil {
+			globalDispatcher = engine.NewDispatcherWithProviderRateLimits(rateLimits)
+		}
+	}
 	globalTokenValidator = validator
 	globalSecretResolver = resolver
 	globalEnginePort = enginePort
@@ -327,6 +332,10 @@ func engineExecuteCore(
 	if err != nil {
 		return err
 	}
+	ctx, err = contextWithProviderRateLimitIdentity(ctx, identity.AccountID, credentials)
+	if err != nil {
+		return err
+	}
 
 	engine.MeasureExecutionTiming(ctx, "engine_resolution_total", resolutionStarted)
 
@@ -351,6 +360,30 @@ func engineExecuteCore(
 	return nil
 }
 
+func contextWithProviderRateLimitIdentity(ctx context.Context, accountID uuid.UUID, credentials map[string]any) (context.Context, error) {
+	bucketID, err := optionalResolvedCredentialUUID(credentials, "fused_bucket_id")
+	if err != nil {
+		return nil, err
+	}
+	connectionID, err := optionalResolvedCredentialUUID(credentials, "fused_connection_id")
+	if err != nil {
+		return nil, err
+	}
+	return engine.WithProviderRateLimitIdentity(ctx, accountID, bucketID, connectionID), nil
+}
+
+func optionalResolvedCredentialUUID(credentials map[string]any, key string) (uuid.UUID, error) {
+	raw := credentialString(credentials, key)
+	if raw == "" {
+		return uuid.Nil, nil
+	}
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("resolved %s is invalid", key)
+	}
+	return id, nil
+}
+
 func resolveTrackedExecutionIdentity(ctx context.Context, validator auth.TokenValidator, appID, token string, span trace.Span) (auth.RuntimeIdentity, func(), error) {
 	identity, err := resolveExecutionIdentity(ctx, validator, appID, token)
 	if err != nil {
@@ -373,15 +406,13 @@ func resolveMatchedExecutionCredentials(ctx context.Context, match *scopedEndpoi
 	request := CredentialRequest{
 		AccountID: accountID, AppID: appID, ServiceID: match.service.ID,
 		OperationID: obj.Name, Auths: match.service.AuthConfigs, Passthrough: credentials,
+		Requirements: obj.SecurityRequirements,
 	}
 	serviceVersionID, err := uuid.Parse(match.serviceVersionID)
 	if err != nil {
 		return nil, nil, errors.New("resolved service version ID is invalid")
 	}
 	authType := requestedAuthType(credentials)
-	if authType == "" && len(match.service.AuthConfigs) > 0 {
-		authType = canonicalFusedAuthType(match.service.AuthConfigs[0])
-	}
 	request.ServiceVersionID = serviceVersionID
 	request.AuthType = authType
 	return resolveExecutionCredentials(ctx, request)
@@ -430,7 +461,7 @@ func withConnectedResourceRequirement(credentials map[string]any, config *fusedo
 // a connection-scoped database lookup; resourceId remains public by design.
 func isInternalResourceCredential(key string) bool {
 	switch key {
-	case "fused_resource_required", "fused_connection_id", "fused_resource_base_url", "fused_resource_type", "fused_resource_provider_id", "fused_resource_metadata":
+	case "fused_resource_required", "fused_connection_id", "fused_bucket_id", "fused_resource_base_url", "fused_resource_type", "fused_resource_provider_id", "fused_resource_metadata":
 		return true
 	default:
 		return false
@@ -463,7 +494,7 @@ func resolveExecutionCredentials(ctx context.Context, request CredentialRequest)
 	// Generated SDKs should only need the stable user reference; the Engine can
 	// infer the concrete auth config name from the service manifest it already
 	// loaded for this execution.
-	request.Passthrough = WithDefaultConnectedAuthName(request.Passthrough, request.Auths)
+	request.Passthrough = WithDefaultConnectedAuthName(request.Passthrough, request.Auths, request.Requirements)
 	resolved, vals, err := resolveScopedCredentials(ctx, request)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to resolve credentials: %w", err)
@@ -531,21 +562,13 @@ func dispatchRuntimeEnvironment(
 	span trace.Span,
 ) (RuntimeEnvironmentResolution, int, error) {
 	environmentStarted := time.Now()
-	srv, resolution, err := serviceForRuntimeEnvironment(match.service, environment)
+	srv, resolution, err := serviceForRuntimeEnvironment(match.service, environment, credentials, bucketValues)
 	engine.MeasureExecutionTiming(ctx, "runtime_environment", environmentStarted)
 	if err != nil {
 		recordRuntimeEnvironmentAttrs(span, match, environment, "")
 		return RuntimeEnvironmentResolution{}, 0, err
 	}
 	resourceSource := selectedConnectedResourceSource(credentials)
-	if auths, selectedAuthType, err := selectedAuthConfigsForExecution(srv.AuthConfigs, credentials); err != nil {
-		return RuntimeEnvironmentResolution{}, 0, err
-	} else {
-		// The dispatcher intentionally applies auths[0]. Narrowing here lets the
-		// execution context choose a scheme without weakening that simple rule.
-		srv.AuthConfigs = auths
-		recordSelectedAuthType(span, selectedAuthType)
-	}
 	recordRuntimeEnvironmentAttrs(span, match, resolution.Environment, resolution.Source)
 	if resourceSource != "" {
 		span.SetAttributes(
@@ -701,8 +724,12 @@ func findEndpointInScope(ctx context.Context, cache ObjectCache, appID string, s
 	return nil, nil
 }
 
-func serviceForRuntimeEnvironment(metadata *fusedobject.ServiceMetadata, environment string) (*models.Service, RuntimeEnvironmentResolution, error) {
+func serviceForRuntimeEnvironment(metadata *fusedobject.ServiceMetadata, environment string, credentials map[string]any, values []store.BucketValue) (*models.Service, RuntimeEnvironmentResolution, error) {
 	resolution, err := resolveRuntimeEnvironment(metadata, environment)
+	if err != nil {
+		return nil, RuntimeEnvironmentResolution{}, err
+	}
+	resolution, err = resolveRuntimeServerTemplate(metadata, resolution, credentials, values)
 	if err != nil {
 		return nil, RuntimeEnvironmentResolution{}, err
 	}

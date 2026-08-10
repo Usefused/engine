@@ -35,7 +35,7 @@ const validFixtureJSON = `{
 			"name": "Create widget",
 			"method": "POST",
 			"path": "/widgets",
-			"request_body": {"type": "object", "required": ["name"]},
+			"request_content": {"media_type":"application/octet-stream","serialization":"raw","required":true,"schema":{"type":"string"},"payload_parameter":"body","binary_encoding":"base64"},
 			"responses": {"201": {"type": "object"}}
 		}
 	]
@@ -62,6 +62,10 @@ func TestLoadFixture_ParsesAndIndexesOperations(t *testing.T) {
 	}
 	if len(op.Parameters) != 1 || op.Parameters[0].In != "path" {
 		t.Errorf("resolved operation parameters = %+v, want one path param", op.Parameters)
+	}
+	raw, ok := f.Resolve("test.createWidget")
+	if !ok || raw.RequestContent == nil || raw.RequestContent.PayloadParameter != "body" || raw.RequestContent.BinaryEncoding != "base64" {
+		t.Fatalf("raw request content was not decoded: %#v", raw)
 	}
 }
 

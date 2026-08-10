@@ -107,6 +107,26 @@ func recordEngineExecutionAudit(ctx context.Context, span trace.Span, state exec
 		event.SpanID = spanContext.SpanID().String()
 	}
 	attachExecutionTimings(ctx, &event)
+	if event.PaginationType != "" {
+		span.SetAttributes(
+			attribute.String("pagination.type", event.PaginationType),
+			attribute.Int64("pagination.page_count", event.PaginationPageCount),
+			attribute.Int64("pagination.item_count", event.PaginationItemCount),
+			attribute.Int64("pagination.byte_count", event.PaginationByteCount),
+			attribute.String("pagination.stop_reason", event.PaginationStopReason),
+		)
+	}
+	if event.RateLimitDecision != "" {
+		span.SetAttributes(
+			attribute.String("rate_limit.decision", event.RateLimitDecision),
+			attribute.Int64("rate_limit.policy_count", event.RateLimitPolicyCount),
+			attribute.StringSlice("rate_limit.scope_kinds", event.RateLimitScopeKinds),
+			attribute.StringSlice("rate_limit.units", event.RateLimitUnits),
+			attribute.Int64Slice("rate_limit.unit_totals", event.RateLimitUnitTotals),
+			attribute.String("rate_limit.retry_outcome", event.RateLimitRetryOutcome),
+			attribute.String("rate_limit.header_outcome", event.RateLimitHeaderOutcome),
+		)
+	}
 	if err := executionevent.Publish(ctx, event); err != nil {
 		slog.ErrorContext(ctx, "Failed to publish execution event", slog.Any("error", err), slog.String("event_id", event.ID.String()))
 	}
@@ -123,6 +143,9 @@ func providerStatusClass(status int, execErr error) string {
 }
 
 func classifyExecutionFailure(execErr error, status int) (string, string) {
+	if code := engine.PaginationFailureCode(execErr); code != "" {
+		return "pagination", code
+	}
 	if errors.Is(execErr, context.DeadlineExceeded) {
 		return "timeout", "deadline_exceeded"
 	}
@@ -192,6 +215,25 @@ func attachExecutionTimings(ctx context.Context, event *models.EngineExecutionEv
 		return
 	}
 	snapshot := timings.SnapshotMilliseconds()
+	pagination := timings.PaginationSummary()
+	authSummary := timings.AuthSummary()
+	rateLimit := timings.RateLimitSummary()
+	event.AuthSchemeNames = authSummary.SchemeNames
+	event.AuthSchemeTypes = authSummary.SchemeTypes
+	event.AuthSchemeCount = authSummary.SchemeCount
+	event.AuthSelectionOutcome = authSummary.Outcome
+	event.PaginationType = pagination.Type
+	event.PaginationPageCount = pagination.PageCount
+	event.PaginationItemCount = pagination.ItemCount
+	event.PaginationByteCount = pagination.ByteCount
+	event.PaginationStopReason = pagination.StopReason
+	event.RateLimitDecision = rateLimit.Decision
+	event.RateLimitPolicyCount = rateLimit.PolicyCount
+	event.RateLimitScopeKinds = rateLimit.ScopeKinds
+	event.RateLimitUnits = rateLimit.Units
+	event.RateLimitUnitTotals = rateLimit.UnitTotals
+	event.RateLimitRetryOutcome = rateLimit.RetryOutcome
+	event.RateLimitHeaderOutcome = rateLimit.HeaderOutcome
 	if len(snapshot) == 0 {
 		return
 	}

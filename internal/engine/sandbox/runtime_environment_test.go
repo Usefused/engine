@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
+	"github.com/Usefused/engine/internal/shared/serverrouting"
 	"github.com/google/uuid"
 )
 
@@ -26,6 +28,73 @@ func TestResolveRuntimeEnvironmentUsesExplicitProviderLabelNotDescription(t *tes
 	}
 	if resolved.BaseURL != "https://sandbox.example.test" || resolved.Environment != "sandbox" || resolved.Source != "provider" {
 		t.Fatalf("unexpected environment resolution: %+v", resolved)
+	}
+}
+
+func TestResolveRuntimeServerTemplateUsesProviderDefaultWithoutAllowlist(t *testing.T) {
+	defaultTenant := "api"
+	metadata := &fusedobject.ServiceMetadata{Servers: fusedobject.Servers{{
+		URL: "https://{tenant}.example.com", IsDefault: true,
+		Variables: []serverrouting.Variable{{Name: "tenant", Default: &defaultTenant, Required: true}},
+	}}}
+	resolution, err := resolveRuntimeEnvironment(metadata, "")
+	if err == nil {
+		resolution, err = resolveRuntimeServerTemplate(metadata, resolution, nil, nil)
+	}
+	if err != nil || resolution.BaseURL != "https://api.example.com" || resolution.Source != "default" {
+		t.Fatalf("resolution=%+v err=%v", resolution, err)
+	}
+}
+
+func TestResolveRuntimeServerTemplateAllowsDynamicConfluenceTenant(t *testing.T) {
+	defaultTenant := "example"
+	metadata := &fusedobject.ServiceMetadata{
+		Servers: fusedobject.Servers{{
+			URL: "https://{your-domain}.atlassian.net", IsDefault: true,
+			Variables: []serverrouting.Variable{{Name: "your-domain", Default: &defaultTenant, Required: true}},
+		}},
+		ConnectConfig: &fusedobject.ServiceConnectConfig{ResourceInput: &fusedobject.ResourceInputConfig{AllowedHosts: []string{"*.atlassian.net"}}},
+	}
+	resolution, err := resolveRuntimeEnvironment(metadata, "")
+	credentials := map[string]any{"fused_resource_metadata": []byte(`{"your-domain":"acme"}`)}
+	if err == nil {
+		resolution, err = resolveRuntimeServerTemplate(metadata, resolution, credentials, nil)
+	}
+	if err != nil || resolution.BaseURL != "https://acme.atlassian.net" || resolution.Source != "connection_resource" {
+		t.Fatalf("resolution=%+v err=%v", resolution, err)
+	}
+}
+
+func TestResolveRuntimeServerTemplateRejectsDynamicHostOutsideAllowlist(t *testing.T) {
+	defaultHost := "api.example.com"
+	metadata := &fusedobject.ServiceMetadata{
+		Servers: fusedobject.Servers{{
+			URL: "https://{host}", IsDefault: true,
+			Variables: []serverrouting.Variable{{Name: "host", Default: &defaultHost, Required: true}},
+		}},
+		ConnectConfig: &fusedobject.ServiceConnectConfig{ResourceInput: &fusedobject.ResourceInputConfig{AllowedHosts: []string{"*.example.com"}}},
+	}
+	resolution, err := resolveRuntimeEnvironment(metadata, "")
+	if err == nil {
+		resolution, err = resolveRuntimeServerTemplate(metadata, resolution, map[string]any{"fused_resource_metadata": []byte(`{"host":"evil.example.net"}`)}, nil)
+	}
+	if err == nil {
+		t.Fatalf("unexpected resolution outside allowlist: %+v", resolution)
+	}
+}
+
+func TestResolveRuntimeServerTemplateAppliesForcedBaseURLBeforeVariables(t *testing.T) {
+	metadata := &fusedobject.ServiceMetadata{
+		Servers:       fusedobject.Servers{{URL: "https://{tenant}.example.com", IsDefault: true, Variables: []serverrouting.Variable{{Name: "tenant", Required: true}}}},
+		ConnectConfig: &fusedobject.ServiceConnectConfig{ResourceInput: &fusedobject.ResourceInputConfig{AllowedHosts: []string{"*.example.com"}}},
+	}
+	resolution, err := resolveRuntimeEnvironment(metadata, "")
+	bindings := []store.BucketValue{{Location: "base_url", SourceKind: "connection_resource", Mode: "force", Value: "https://acme.example.com"}}
+	if err == nil {
+		resolution, err = resolveRuntimeServerTemplate(metadata, resolution, nil, bindings)
+	}
+	if err != nil || resolution.BaseURL != "https://acme.example.com" || resolution.Source != "connection_resource" {
+		t.Fatalf("resolution=%+v err=%v", resolution, err)
 	}
 }
 

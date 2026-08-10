@@ -20,6 +20,7 @@ func TestConnectAdminHandlers_ConfigLifecycle(t *testing.T) {
 
 	body := bytes.NewReader([]byte(`{
 		"auth_type":"oauth",
+		"auth_name":"oauthScheme",
 		"client_id":"client-id",
 		"client_secret":"client-secret",
 		"redirect_uri":"https://engine.example.com/connect/callback"
@@ -158,6 +159,7 @@ func TestConnectAdminHandlers_PartialUpdatePreservesUnspecifiedFields(t *testing
 
 	create := httptest.NewRequest(http.MethodPut, fixture.configPath(), bytes.NewReader([]byte(`{
 		"auth_type":"oauth",
+		"auth_name":"oauthScheme",
 		"client_id":"client-id",
 		"client_secret":"client-secret",
 		"redirect_uri":"https://engine.example.com/connect/callback"
@@ -253,6 +255,7 @@ func seedConnectConfig(t *testing.T, router http.Handler, fixture connectAdminFi
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPut, fixture.configPath(), bytes.NewReader([]byte(`{
 		"auth_type":"oauth",
+		"auth_name":"oauthScheme",
 		"client_id":"client-id",
 		"client_secret":"client-secret",
 		"redirect_uri":"https://engine.example.com/connect/callback"
@@ -478,8 +481,8 @@ func (s *connectAdminMockStore) ListAuthConnections(context.Context, uuid.UUID, 
 
 // GetAuthConnection supports control-plane actions that reuse the same
 // proactive connected-token resolver as SDK dispatch.
-func (s *connectAdminMockStore) GetAuthConnection(_ context.Context, bucketID, serviceID uuid.UUID, endUserRef string) (*store.AuthConnection, error) {
-	if s.savedConnection != nil && s.savedConnection.BucketID == bucketID && s.savedConnection.ServiceID == serviceID && s.savedConnection.EndUserRef == endUserRef {
+func (s *connectAdminMockStore) GetAuthConnection(_ context.Context, bucketID, serviceID uuid.UUID, endUserRef, authName string) (*store.AuthConnection, error) {
+	if s.savedConnection != nil && s.savedConnection.BucketID == bucketID && s.savedConnection.ServiceID == serviceID && s.savedConnection.EndUserRef == endUserRef && s.savedConnection.AuthName == authName {
 		return s.savedConnection, nil
 	}
 	return nil, store.ErrAuthConnectionNotFound

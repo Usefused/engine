@@ -1,4 +1,10 @@
-import { Fixture, FixtureOperation, FixtureParameter, FixtureSchema } from "./fixture.js";
+import {
+  Fixture,
+  FixtureOperation,
+  FixtureParameter,
+  FixtureRequestContent,
+  FixtureSchema,
+} from "./fixture.js";
 import { bestScore } from "./fuzzyMatch.js";
 
 /**
@@ -22,7 +28,7 @@ export interface OperationDetail {
   path: string;
   description?: string;
   parameters: FixtureParameter[];
-  request_body?: FixtureSchema | null;
+  request_content?: FixtureRequestContent | null;
   responses: Record<string, FixtureSchema>;
 }
 
@@ -98,7 +104,7 @@ function toDetail(op: FixtureOperation): OperationDetail {
     path: op.path,
     description: op.description,
     parameters: op.parameters ?? [],
-    request_body: op.request_body ?? null,
+    request_content: op.request_content ?? null,
     responses: op.responses,
   };
 }

@@ -4,7 +4,6 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Usefused/engine/internal/engine/api"
-	enginemiddleware "github.com/Usefused/engine/internal/engine/middleware"
 	"github.com/Usefused/engine/internal/engine/store"
 )
 
@@ -12,17 +11,16 @@ import (
 // onto r. Split out from main() so this wiring can be exercised in
 // routes_test.go without booting the Engine's full dependency graph (DB,
 // NATS, gRPC) -- the tests only need a chi.Router, a Forwarder, and a Store.
-func registerProxyRoutes(r chi.Router, proxy api.Forwarder, s store.Store, enforcers ...*enginemiddleware.RuntimeEnforcer) {
-	registerProxyRoutesWithRuntimeContracts(r, proxy, s, nil, enforcers...)
+func registerProxyRoutes(r chi.Router, proxy api.Forwarder, s store.Store) {
+	registerProxyRoutesWithRuntimeContracts(r, proxy, s, nil)
 }
 
-func registerProxyRoutesWithRuntimeContracts(r chi.Router, proxy api.Forwarder, s store.Store, contractFetcher api.RuntimeContractFetcher, enforcers ...*enginemiddleware.RuntimeEnforcer) {
-	enforcer := firstRuntimeEnforcer(enforcers)
+func registerProxyRoutesWithRuntimeContracts(r chi.Router, proxy api.Forwarder, s store.Store, contractFetcher api.RuntimeContractFetcher) {
 	// Proxy routes authenticate locally, then RegistryProxy replaces inbound
 	// auth with the Engine's licensed workspace identity.
-	r.Post("/graphql", api.GraphQLProxyHandler(proxy, s, enforcer))
+	r.Post("/graphql", api.GraphQLProxyHandler(proxy, s))
 
-	restHandler := api.RESTProxyHandlerWithRuntimeContracts(proxy, s, contractFetcher, enforcer)
+	restHandler := api.RESTProxyHandlerWithRuntimeContracts(proxy, s, contractFetcher)
 	for _, path := range api.RESTProxyMountPaths {
 		if path == "/leads" {
 			// /leads is a single POST endpoint on the Registry, not a
@@ -34,11 +32,4 @@ func registerProxyRoutesWithRuntimeContracts(r chi.Router, proxy api.Forwarder, 
 		}
 		r.Mount(path, restHandler)
 	}
-}
-
-func firstRuntimeEnforcer(enforcers []*enginemiddleware.RuntimeEnforcer) *enginemiddleware.RuntimeEnforcer {
-	if len(enforcers) == 0 {
-		return nil
-	}
-	return enforcers[0]
 }

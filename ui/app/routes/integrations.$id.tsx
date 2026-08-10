@@ -110,6 +110,10 @@ import { useResourceLoader } from "~/hooks/useResourceLoader";
 
 import { redirect } from "@remix-run/react";
 import { APIRequestError } from "~/lib/authorization-error";
+import {
+  RATE_LIMIT_GRAPHQL_FIELDS,
+  rateLimitSummary,
+} from "~/lib/rate-limit";
 
 function requireRemoteSource(sourceURL?: string): string {
   const value = sourceURL || "";
@@ -192,7 +196,7 @@ export const clientLoader = async ({
         auth_configs { type flow scheme location key_name token_url authorization_url open_id_connect_url scopes }
         event_extraction_path
         incoming_webhook_config { auth_type auth_location auth_key_name signature_header }
-        rate_limit { strategy requests_per_second requests_per_minute }
+        rate_limit { ${RATE_LIMIT_GRAPHQL_FIELDS} }
         retry_config { strategy max_retries backoff_ms }
         default_headers
         provider { name handle }
@@ -216,7 +220,7 @@ export const clientLoader = async ({
         auth_configs { type flow scheme location key_name token_url authorization_url open_id_connect_url scopes }
         event_extraction_path
         incoming_webhook_config { auth_type auth_location auth_key_name signature_header }
-        rate_limit { strategy requests_per_second requests_per_minute }
+        rate_limit { ${RATE_LIMIT_GRAPHQL_FIELDS} }
         retry_config { strategy max_retries backoff_ms }
         default_headers
         provider { name handle }
@@ -855,11 +859,7 @@ export default function IntegrationDetail() {
             auth_key_name
             signature_header
           }
-          rate_limit {
-            strategy
-            requests_per_second
-            requests_per_minute
-          }
+          rate_limit { ${RATE_LIMIT_GRAPHQL_FIELDS} }
           retry_config {
             strategy
             max_retries
@@ -927,11 +927,7 @@ export default function IntegrationDetail() {
             auth_key_name
             signature_header
           }
-          rate_limit {
-            strategy
-            requests_per_second
-            requests_per_minute
-          }
+          rate_limit { ${RATE_LIMIT_GRAPHQL_FIELDS} }
           retry_config {
             strategy
             max_retries
@@ -1603,7 +1599,7 @@ export default function IntegrationDetail() {
               <div>
                 <dt className="text-xs text-slate-500">Rate limit</dt>
                 <dd className="mt-1 text-slate-800">
-                  {srv.rate_limit?.strategy || "Not declared"}
+                  {rateLimitSummary(srv.rate_limit)}
                 </dd>
               </div>
               {srv.rate_limit && (
@@ -1611,14 +1607,20 @@ export default function IntegrationDetail() {
               )}
             </summary>
             {srv.rate_limit && (
-              <div className="mt-3 pt-3 border-t border-slate-200 text-xs text-slate-700 space-y-1">
-                <div className="flex justify-between"><span className="text-slate-500">Strategy</span><span className="font-medium text-slate-900">{srv.rate_limit.strategy}</span></div>
-                {srv.rate_limit.requests_per_second != null && (
-                  <div className="flex justify-between"><span className="text-slate-500">Per second</span><span className="font-medium text-slate-900">{srv.rate_limit.requests_per_second}</span></div>
-                )}
-                {srv.rate_limit.requests_per_minute != null && (
-                  <div className="flex justify-between"><span className="text-slate-500">Per minute</span><span className="font-medium text-slate-900">{srv.rate_limit.requests_per_minute}</span></div>
-                )}
+              <div className="mt-3 space-y-2 border-t border-slate-200 pt-3 text-xs text-slate-700">
+                {srv.rate_limit.policies.map((policy) => (
+                  <div key={policy.name} className="rounded border border-slate-200 bg-white p-2">
+                    <div className="flex justify-between gap-3"><span className="font-medium text-slate-900">{policy.name}</span><span>{policy.unit} · {policy.scope}</span></div>
+                    <div className="mt-1 flex justify-between gap-3"><span className="text-slate-500">Algorithm</span><span>{policy.algorithm}</span></div>
+                    <div className="flex justify-between gap-3"><span className="text-slate-500">Default cost</span><span>{policy.default_cost}</span></div>
+                    {policy.fixed_window && (
+                      <div className="flex justify-between gap-3"><span className="text-slate-500">Window</span><span>{policy.fixed_window.limit} / {policy.fixed_window.duration_ms} ms</span></div>
+                    )}
+                    {policy.token_bucket && (
+                      <div className="flex justify-between gap-3"><span className="text-slate-500">Bucket</span><span>{policy.token_bucket.capacity}; +{policy.token_bucket.refill_units} / {policy.token_bucket.refill_interval_ms} ms</span></div>
+                    )}
+                  </div>
+                ))}
               </div>
             )}
           </details>

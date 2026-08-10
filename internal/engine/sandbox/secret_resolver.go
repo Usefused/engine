@@ -12,6 +12,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/connectauth"
 	"github.com/Usefused/engine/internal/engine/requestbinding"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/secretref"
@@ -53,6 +54,7 @@ type CredentialRequest struct {
 	OperationID      string
 	AuthType         string
 	Auths            fusedobject.AuthConfigs
+	Requirements     authrouting.Requirements
 	Passthrough      map[string]any
 }
 
@@ -87,13 +89,16 @@ func (r *secretResolver) ResolveExecutionCredentials(ctx context.Context, reques
 	bindings = appendInjectionBindings(bindings, scope.Selections, request.ServiceID)
 
 	finalCreds := copyPassthroughCredentials(request.Passthrough)
+	// The dispatcher needs the exact resolved bucket only to derive the fallback
+	// connection scope; this internal routing value is stripped before telemetry.
+	finalCreds["fused_bucket_id"] = scope.BucketID.String()
 	if requestbinding.HasDynamicSource(bindings) {
 		finalCreds["fused_resource_required"] = "true"
 	}
-	if err := r.mergeStoredSecrets(ctx, scope.BucketID, request.ServiceID, finalCreds, request.Auths); err != nil {
+	if err := r.mergeStoredSecrets(ctx, scope.BucketID, request.ServiceID, finalCreds, request.Auths, request.Requirements); err != nil {
 		return nil, nil, err
 	}
-	if err := r.resolveConnectedAuth(ctx, scope.BucketID, request.ServiceID, request.Auths, finalCreds); err != nil {
+	if err := r.resolveConnectedAuth(ctx, scope.BucketID, request.ServiceID, request.Auths, request.Requirements, finalCreds); err != nil {
 		return nil, nil, err
 	}
 	values, err := resolveRequestBindings(bindings, finalCreds, scope.BucketID)
@@ -323,12 +328,15 @@ func resolveRequestBindings(bindings []store.WorkspaceConnectionBinding, credent
 
 // mergeStoredSecrets preserves per-call overrides while reading only the auth
 // keys this execution can apply.
-func (r *secretResolver) mergeStoredSecrets(ctx context.Context, bucketID, serviceID uuid.UUID, credentials map[string]any, auths fusedobject.AuthConfigs) error {
-	keys := missingCredentialKeys(credentials, requiredStaticSecretKeys(auths, credentials))
-	if len(keys) == 0 {
+func (r *secretResolver) mergeStoredSecrets(ctx context.Context, bucketID, serviceID uuid.UUID, credentials map[string]any, auths fusedobject.AuthConfigs, requirements authrouting.Requirements) error {
+	alternatives, err := orderedStaticSecretAlternatives(auths, requirements, credentials)
+	if err != nil {
+		return err
+	}
+	if len(alternatives) == 0 || secretAlternativeNeedsNoStore(alternatives[0]) {
 		return nil
 	}
-	secrets, err := r.db.GetSecrets(ctx, bucketID, serviceID, keys)
+	secrets, err := r.db.GetFirstCompleteSecretSet(ctx, bucketID, serviceID, alternatives)
 	if err != nil {
 		return fmt.Errorf("failed to fetch secrets from store: %w", err)
 	}
@@ -345,16 +353,8 @@ func (r *secretResolver) mergeStoredSecrets(ctx context.Context, bucketID, servi
 	return nil
 }
 
-// missingCredentialKeys keeps per-call overrides DB-free and lets basic/mTLS
-// style multi-part auth resolve through one exact-key batch query.
-func missingCredentialKeys(credentials map[string]any, keys []string) []string {
-	missing := make([]string, 0, len(keys))
-	for _, key := range keys {
-		if _, exists := credentials[key]; !exists {
-			missing = append(missing, key)
-		}
-	}
-	return missing
+func secretAlternativeNeedsNoStore(alternative store.SecretKeyAlternative) bool {
+	return len(alternative.Required) == 0 && len(alternative.Optional) == 0
 }
 
 // decryptStoredSecret owns expiry enforcement for stored bucket secrets so
@@ -376,7 +376,7 @@ func (r *secretResolver) decryptStoredSecret(serviceID uuid.UUID, sec store.Work
 
 // resolveConnectedAuth turns a stable end-user reference into the actual
 // provider credential only inside Engine's execution path.
-func (r *secretResolver) resolveConnectedAuth(ctx context.Context, bucketID, serviceID uuid.UUID, auths fusedobject.AuthConfigs, credentials map[string]any) error {
+func (r *secretResolver) resolveConnectedAuth(ctx context.Context, bucketID, serviceID uuid.UUID, auths fusedobject.AuthConfigs, requirements authrouting.Requirements, credentials map[string]any) error {
 	endUserRef := connectedEndUserRef(credentials)
 	if endUserRef == "" {
 		return nil
@@ -386,7 +386,7 @@ func (r *secretResolver) resolveConnectedAuth(ctx context.Context, bucketID, ser
 		// bucket secrets; endUserRef should remain harmless metadata in that path.
 		return nil
 	}
-	authName, err := selectedConnectedAuthName(credentials, auths)
+	authName, err := selectedConnectedAuthName(credentials, auths, requirements)
 	if err != nil {
 		return err
 	}
@@ -508,13 +508,16 @@ func injectConnectedToken(credentials map[string]any, authName, token string) {
 
 // selectedConnectedAuthName keeps public selection at the auth-type level while
 // returning the internal credential key applyAuth needs for token injection.
-func selectedConnectedAuthName(credentials map[string]any, auths fusedobject.AuthConfigs) (string, error) {
+func selectedConnectedAuthName(credentials map[string]any, auths fusedobject.AuthConfigs, requirements authrouting.Requirements) (string, error) {
 	if authName := credentialString(credentials, "fused_auth_name"); authName != "" {
-		return authName, nil
+		if requirementAuthNameConfigured(auths, requirements, authName, "") {
+			return authName, nil
+		}
+		return "", fmt.Errorf("connected auth name %q is not configured for this operation", authName)
 	}
 	selector := requestedAuthType(credentials)
 	if selector == "" {
-		return defaultConnectedAuthName(auths), nil
+		return defaultConnectedAuthName(auths, requirements), nil
 	}
 	if !isConnectedAuthSelector(selector) {
 		// Static auth can share request builders with connected auth. Selecting a
@@ -522,7 +525,7 @@ func selectedConnectedAuthName(credentials map[string]any, auths fusedobject.Aut
 		// endUserRef is present.
 		return "", nil
 	}
-	authName := connectedAuthNameForType(auths, selector)
+	authName := connectedAuthNameForRequirements(auths, requirements, selector)
 	if authName == "" {
 		return "", fmt.Errorf("connected auth type %q is not configured for this service", selector)
 	}
@@ -532,7 +535,7 @@ func selectedConnectedAuthName(credentials map[string]any, auths fusedobject.Aut
 // usableAuthConnection refreshes near-expiry tokens before dispatch while
 // still allowing a currently-valid token through if the provider is flaky.
 func (r *secretResolver) usableAuthConnection(ctx context.Context, bucketID, serviceID uuid.UUID, endUserRef, authName string, auths fusedobject.AuthConfigs) (*store.AuthConnection, error) {
-	conn, err := r.db.GetAuthConnection(ctx, bucketID, serviceID, endUserRef)
+	conn, err := r.db.GetAuthConnection(ctx, bucketID, serviceID, endUserRef, authName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch auth connection: %w", err)
 	}
@@ -862,8 +865,8 @@ func decryptAuthConnectionToken(masterKey []byte, encryptedDEK, encryptedValue s
 
 // WithDefaultConnectedAuthName lets generated SDKs avoid service-specific auth
 // field names while still targeting the correct dispatcher credential slot.
-func WithDefaultConnectedAuthName(credentials map[string]any, auths fusedobject.AuthConfigs) map[string]any {
-	authName := defaultConnectedAuthNameForCredentials(credentials, auths)
+func WithDefaultConnectedAuthName(credentials map[string]any, auths fusedobject.AuthConfigs, requirements authrouting.Requirements) map[string]any {
+	authName := defaultConnectedAuthNameForCredentials(credentials, auths, requirements)
 	if authName == "" || credentialString(credentials, "fused_auth_name") != "" {
 		return credentials
 	}
@@ -879,49 +882,54 @@ func WithDefaultConnectedAuthName(credentials map[string]any, auths fusedobject.
 
 // defaultConnectedAuthName keeps the auth-name inference deliberately narrow
 // to OAuth/OIDC schemes that Engine-owned connect can satisfy.
-func defaultConnectedAuthName(auths fusedobject.AuthConfigs) string {
-	for _, auth := range auths {
-		if isConnectedAuthSelector(canonicalFusedAuthType(auth)) {
-			return authCredentialName(auth)
+func defaultConnectedAuthName(auths fusedobject.AuthConfigs, requirements authrouting.Requirements) string {
+	return connectedAuthNameForRequirements(auths, requirements, "")
+}
+
+// defaultConnectedAuthNameForCredentials lets authType select the connected
+// credential slot while preserving the old first-OAuth/OIDC default.
+func defaultConnectedAuthNameForCredentials(credentials map[string]any, auths fusedobject.AuthConfigs, requirements authrouting.Requirements) string {
+	selector := requestedAuthType(credentials)
+	if selector == "" {
+		return defaultConnectedAuthName(auths, requirements)
+	}
+	return connectedAuthNameForRequirements(auths, requirements, selector)
+}
+
+func connectedAuthNameForRequirements(auths fusedobject.AuthConfigs, requirements authrouting.Requirements, selector string) string {
+	definitions, err := fusedAuthDefinitions(auths)
+	if err != nil {
+		return ""
+	}
+	for _, alternative := range requirements {
+		for _, requirement := range alternative.Schemes {
+			auth, ok := definitions[requirement.Scheme]
+			if ok && isConnectedAuthSelector(canonicalFusedAuthType(auth)) && (selector == "" || canonicalFusedAuthType(auth) == selector) {
+				return authCredentialName(auth)
+			}
 		}
 	}
 	return ""
 }
 
-// defaultConnectedAuthNameForCredentials lets authType select the connected
-// credential slot while preserving the old first-OAuth/OIDC default.
-func defaultConnectedAuthNameForCredentials(credentials map[string]any, auths fusedobject.AuthConfigs) string {
-	selector := requestedAuthType(credentials)
-	if selector == "" {
-		return defaultConnectedAuthName(auths)
+func requirementAuthNameConfigured(auths fusedobject.AuthConfigs, requirements authrouting.Requirements, authName, selector string) bool {
+	definitions, err := fusedAuthDefinitions(auths)
+	if err != nil {
+		return false
 	}
-	return connectedAuthNameForType(auths, selector)
+	for _, alternative := range requirements {
+		for _, requirement := range alternative.Schemes {
+			auth, ok := definitions[requirement.Scheme]
+			if ok && authCredentialName(auth) == authName && isConnectedAuthSelector(canonicalFusedAuthType(auth)) && (selector == "" || canonicalFusedAuthType(auth) == selector) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func authCredentialName(auth fusedobject.AuthConfig) string {
-	name := strings.TrimSpace(auth.Name)
-	if name != "" {
-		return name
-	}
-	if canonicalFusedAuthType(auth) == "api_key" && strings.TrimSpace(auth.KeyName) != "" {
-		// Unnamed API-key schemes still have a concrete provider key name; using
-		// it here keeps bucket storage and applyAPIKey lookup aligned.
-		return strings.TrimSpace(auth.KeyName)
-	}
-	if auth.Type == "oauth2" || auth.Type == "openIdConnect" || auth.Type == "oidc" ||
-		auth.Type == "http" && strings.EqualFold(auth.Scheme, "bearer") {
-		// Some imported OpenAPI auth schemes omit a friendly auth name even
-		// though the generated SDK and dispatcher both use Authorization for
-		// bearer-style credentials. Normalising here keeps token lookup and
-		// outbound header application on the same non-secret key.
-		return "Authorization"
-	}
-	if canonicalFusedAuthType(auth) == "mtls" {
-		// mTLS has no header name to fall back to; use a stable pair prefix so
-		// cert/key bucket secrets can still be resolved for unnamed imports.
-		return "mtls"
-	}
-	return ""
+	return strings.TrimSpace(auth.Name)
 }
 
 func AuthCredentialName(auth fusedobject.AuthConfig) string {

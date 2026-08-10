@@ -11,6 +11,7 @@ import (
 
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/observability"
@@ -46,7 +47,17 @@ func makePassthroughCache(t *testing.T, vendorURL string) (*richMockCache, strin
 	// same immutable selection contract used by generated SDKs and MCP servers.
 	selections := []models.SDKSelection{{ServiceID: svcID, ServiceVersionID: serviceVersionID, EndpointIDs: []uuid.UUID{epID}}}
 	scopeJSON, _ := json.Marshal(selections)
-	return &richMockCache{scopeJSON: scopeJSON, obj: obj, epID: epID}, "do_thing"
+	return &richMockCache{
+		scopeJSON: scopeJSON, obj: obj, epID: epID,
+		securityRequirements: authrouting.Requirements{{Schemes: []authrouting.Requirement{{Scheme: "bearerAuth"}}}},
+	}, "do_thing"
+}
+
+func makeAnonymousPassthroughCache(t *testing.T, vendorURL string) (*richMockCache, string) {
+	cache, endpoint := makePassthroughCache(t, vendorURL)
+	cache.obj.AuthConfigs = nil
+	cache.securityRequirements = authrouting.Requirements{{Schemes: []authrouting.Requirement{}}}
+	return cache, endpoint
 }
 
 // ─── AC1: Credential reaches vendor ──────────────────────────────────────────

@@ -1,5 +1,5 @@
 {
-  "_comment": "Spike fixture (Task 2, sprint/lighter_mcp_runtime_spike_plan.md). Stands in for real IntegrationObject rows pulled from a registered service -- no live DB access was available to source this from an actual account's data, so these two operations are modeled on GitHub's public REST API shape (well-known, stable, publicly documented) rather than copied from a verified registered service. Swap this file for a real export before Task 7's live end-to-end proof; the shape (operation_id, method, path, parameters[].in, request_body, responses) is what both search_docs and call() read, so a real export only needs to match this same shape, not this file's contents.",
+  "_comment": "Spike fixture (Task 2, sprint/lighter_mcp_runtime_spike_plan.md). Stands in for real IntegrationObject rows pulled from a registered service -- no live DB access was available to source this from an actual account's data, so these two operations are modeled on GitHub's public REST API shape (well-known, stable, publicly documented) rather than copied from a verified registered service. Swap this file for a real export before Task 7's live end-to-end proof; the shape (operation_id, method, path, parameters[].in, request_content, responses) is what both search_docs and call() read, so a real export only needs to match this same shape, not this file's contents.",
   "operations": [
     {
       "operation_id": "github.listRepos",
@@ -24,7 +24,7 @@
           "description": "Number of results per page (max 100)."
         }
       ],
-      "request_body": null,
+      "request_content": null,
       "responses": {
         "200": {
           "type": "array",
@@ -69,7 +69,7 @@
           "description": "The name of the repository."
         }
       ],
-      "request_body": null,
+      "request_content": null,
       "responses": {
         "200": {
           "type": "object",

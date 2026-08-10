@@ -137,7 +137,7 @@ func TestUpsertSecretsHandler_StoresMTLSPairAtomically(t *testing.T) {
 	}
 }
 
-func TestUpsertSecretsHandler_RejectsIncompleteBasicPair(t *testing.T) {
+func TestUpsertSecretsHandler_StoresUsernameOnlyBasicCredential(t *testing.T) {
 	fixture := newSecretsFixture()
 	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
@@ -151,11 +151,33 @@ func TestUpsertSecretsHandler_RejectsIncompleteBasicPair(t *testing.T) {
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for incomplete basic pair, got %d body=%s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected username-only Basic credential to be accepted, got %d body=%s", rr.Code, rr.Body.String())
 	}
-	if len(fixture.store.upsertedSecrets) != 0 {
-		t.Fatal("incomplete basic material must not be persisted")
+	if len(fixture.store.upsertedSecrets) != 1 || fixture.store.upsertedSecrets[0].KeyName != "basicAuth_username" {
+		t.Fatalf("unexpected stored Basic material: %#v", fixture.store.upsertedSecrets)
+	}
+}
+
+func TestUpsertSecretsHandler_StoresExplicitlyEmptyBasicPassword(t *testing.T) {
+	fixture := newSecretsFixture()
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
+	body := bytes.NewReader([]byte(`{
+		"secrets":[
+			{"service_id":"` + fixture.serviceID.String() + `","key_name":"basicAuth_username","credential_type":"basic","value":"api-key"},
+			{"service_id":"` + fixture.serviceID.String() + `","key_name":"basicAuth_password","credential_type":"basic","value":""}
+		]
+	}`))
+	req := httptest.NewRequest(http.MethodPut, "/workspace/secrets/bulk", body)
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected empty Basic password to be accepted, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if len(fixture.store.upsertedSecrets) != 2 {
+		t.Fatalf("expected username and empty password to be saved atomically, got %d", len(fixture.store.upsertedSecrets))
 	}
 }
 

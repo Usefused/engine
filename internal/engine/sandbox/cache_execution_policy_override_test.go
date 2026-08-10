@@ -7,6 +7,7 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
+	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
 	"github.com/google/uuid"
 )
 
@@ -35,7 +36,7 @@ type executionPolicyOverrideNarrowStore struct {
 func snapshotMetadataFixture() *fusedobject.ServiceMetadata {
 	timeoutMs := 30000
 	return &fusedobject.ServiceMetadata{
-		RateLimit:           &fusedobject.RateLimitConfig{Strategy: "fixed_window", RequestsPerSecond: 100},
+		RateLimit:           executionPolicyFixedLimit(100),
 		TimeoutMs:           &timeoutMs,
 		EventExtractionPath: "body.type",
 	}
@@ -47,7 +48,7 @@ func TestApplyExecutionPolicyOverride_NoOverride_ReturnsSnapshotUnchanged(t *tes
 
 	got := c.applyExecutionPolicyOverride(context.Background(), uuid.New(), uuid.New(), metadata)
 
-	if got.RateLimit.RequestsPerSecond != 100 || got.EventExtractionPath != "body.type" {
+	if executionPolicyLimit(got.RateLimit) != 100 || got.EventExtractionPath != "body.type" {
 		t.Fatalf("expected snapshot values unchanged, got %#v", got)
 	}
 }
@@ -56,7 +57,7 @@ func TestApplyExecutionPolicyOverride_FieldPresent_WinsOverSnapshot(t *testing.T
 	timeoutMs := 5000
 	c := &LocalObjectCache{db: &executionPolicyOverrideStubStore{
 		override: &store.WorkspaceExecutionPolicyOverride{
-			RateLimit: &fusedobject.RateLimitConfig{Strategy: "token_bucket", RequestsPerSecond: 5},
+			RateLimit: executionPolicyFixedLimit(5),
 			TimeoutMs: &timeoutMs,
 		},
 	}}
@@ -64,7 +65,7 @@ func TestApplyExecutionPolicyOverride_FieldPresent_WinsOverSnapshot(t *testing.T
 
 	got := c.applyExecutionPolicyOverride(context.Background(), uuid.New(), uuid.New(), metadata)
 
-	if got.RateLimit.RequestsPerSecond != 5 {
+	if executionPolicyLimit(got.RateLimit) != 5 {
 		t.Fatalf("expected override rate_limit to win, got %#v", got.RateLimit)
 	}
 	if got.TimeoutMs == nil || *got.TimeoutMs != timeoutMs {
@@ -91,7 +92,7 @@ func TestApplyExecutionPolicyOverride_EventExtractionPath_OnlyThatFieldOverridde
 	if got.EventExtractionPath != overriddenPath {
 		t.Fatalf("expected event_extraction_path override to win, got %q", got.EventExtractionPath)
 	}
-	if got.RateLimit.RequestsPerSecond != 100 {
+	if executionPolicyLimit(got.RateLimit) != 100 {
 		t.Fatalf("expected rate_limit to remain the snapshot value, got %#v", got.RateLimit)
 	}
 }
@@ -102,7 +103,7 @@ func TestApplyExecutionPolicyOverride_LookupError_SoftFailsToSnapshot(t *testing
 
 	got := c.applyExecutionPolicyOverride(context.Background(), uuid.New(), uuid.New(), metadata)
 
-	if got.RateLimit.RequestsPerSecond != 100 {
+	if executionPolicyLimit(got.RateLimit) != 100 {
 		t.Fatalf("expected snapshot value on lookup error, got %#v", got)
 	}
 }
@@ -113,9 +114,24 @@ func TestApplyExecutionPolicyOverride_StoreWithoutCapability_NoOp(t *testing.T) 
 
 	got := c.applyExecutionPolicyOverride(context.Background(), uuid.New(), uuid.New(), metadata)
 
-	if got.RateLimit.RequestsPerSecond != 100 {
+	if executionPolicyLimit(got.RateLimit) != 100 {
 		t.Fatalf("expected snapshot value when store lacks the override capability, got %#v", got)
 	}
+}
+
+func executionPolicyFixedLimit(limit int64) *fusedobject.RateLimitConfig {
+	return &fusedobject.RateLimitConfig{Version: 2, Policies: []ratelimitpolicy.Policy{{
+		Name: "requests", Unit: "requests", Scope: "service_version", DefaultCost: 1,
+		OperationCosts: map[string]int64{}, Algorithm: "fixed_window",
+		FixedWindow: &ratelimitpolicy.FixedWindow{Limit: limit, DurationMS: 1_000},
+	}}}
+}
+
+func executionPolicyLimit(config *fusedobject.RateLimitConfig) int64 {
+	if config == nil || len(config.Policies) == 0 || config.Policies[0].FixedWindow == nil {
+		return 0
+	}
+	return config.Policies[0].FixedWindow.Limit
 }
 
 func TestApplyExecutionPolicyOverride_NilMetadata_ReturnsNil(t *testing.T) {

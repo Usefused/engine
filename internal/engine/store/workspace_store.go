@@ -117,6 +117,24 @@ func (s *postgresStore) CountActiveServices(ctx context.Context) (int, error) {
 	return n, err
 }
 
+// CountProjectedActiveServices keeps membership checks in PostgreSQL. The
+// caller supplies bounded desired/removable IDs from the validated plan; no
+// workspace rows are loaded into Go merely to filter them.
+func (s *postgresStore) CountProjectedActiveServices(ctx context.Context, desiredIDs, removableIDs []uuid.UUID) (int, int, error) {
+	var current, desiredActive, removableActive int
+	err := s.db.QueryRow(ctx, `
+		SELECT COUNT(*),
+			COUNT(*) FILTER (WHERE service_id = ANY($1::uuid[])),
+			COUNT(*) FILTER (WHERE service_id = ANY($2::uuid[]))
+		FROM fused_workspace_services
+	`, desiredIDs, removableIDs).Scan(&current, &desiredActive, &removableActive)
+	if err != nil {
+		return 0, 0, fmt.Errorf("count projected active services: %w", err)
+	}
+	projected := current - removableActive + len(desiredIDs) - desiredActive
+	return current, projected, nil
+}
+
 func (s *postgresStore) ListWorkspaceServiceVersions(
 	ctx context.Context,
 	serviceID uuid.UUID,

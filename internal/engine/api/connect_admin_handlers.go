@@ -25,6 +25,7 @@ import (
 // carried forward from the existing row instead of being required every call.
 type connectConfigUpsertPayload struct {
 	AuthType     *string `json:"auth_type"`
+	AuthName     *string `json:"auth_name"`
 	Enabled      *bool   `json:"enabled"`
 	ClientID     *string `json:"client_id"`
 	ClientSecret *string `json:"client_secret"`
@@ -36,6 +37,7 @@ type connectConfigResponse struct {
 	BucketID        uuid.UUID `json:"bucket_id"`
 	ServiceID       uuid.UUID `json:"service_id"`
 	AuthType        string    `json:"auth_type"`
+	AuthName        string    `json:"auth_name"`
 	Enabled         bool      `json:"enabled"`
 	RedirectURI     string    `json:"redirect_uri"`
 	HasClientID     bool      `json:"has_client_id"`
@@ -51,6 +53,7 @@ type authConnectionResponse struct {
 	EndUserRef            string     `json:"end_user_ref"`
 	CreatedByAppID        uuid.UUID  `json:"created_by_app_id,omitempty"`
 	AuthType              string     `json:"auth_type"`
+	AuthName              string     `json:"auth_name"`
 	TokenType             string     `json:"token_type"`
 	Scopes                []string   `json:"scopes"`
 	ScopeSource           string     `json:"scope_source"`
@@ -247,6 +250,7 @@ func resolveBucketAdminCall(w http.ResponseWriter, r *http.Request, s store.Stor
 // once, in resolveConnectConfigFields.
 type resolvedConnectConfigFields struct {
 	AuthType     string
+	AuthName     string
 	Enabled      bool
 	ClientID     string
 	ClientSecret string
@@ -274,6 +278,7 @@ func encryptConnectConfig(bucketID, serviceID uuid.UUID, resolved resolvedConnec
 		BucketID:              bucketID,
 		ServiceID:             serviceID,
 		AuthType:              resolved.AuthType,
+		AuthName:              resolved.AuthName,
 		Enabled:               resolved.Enabled,
 		EncryptedDEK:          wrappedDEK,
 		EncryptedClientID:     encryptedClientID,
@@ -294,6 +299,9 @@ func resolveConnectConfigFields(payload connectConfigUpsertPayload, existing *st
 	}
 	if payload.AuthType != nil {
 		resolved.AuthType = *payload.AuthType
+	}
+	if payload.AuthName != nil {
+		resolved.AuthName = *payload.AuthName
 	}
 	if payload.Enabled != nil {
 		resolved.Enabled = *payload.Enabled
@@ -336,6 +344,7 @@ func existingConnectConfigFields(existing *store.ConnectConfig, masterKey []byte
 	}
 	return resolvedConnectConfigFields{
 		AuthType:     existing.AuthType,
+		AuthName:     existing.AuthName,
 		Enabled:      existing.Enabled,
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
@@ -352,6 +361,7 @@ func (p *connectConfigUpsertPayload) normalize() {
 		canonical := canonicalWorkspaceStaticAuthType(strings.TrimSpace(*p.AuthType))
 		p.AuthType = &canonical
 	}
+	p.AuthName = trimPtr(p.AuthName)
 	p.ClientID = trimPtr(p.ClientID)
 	p.ClientSecret = trimPtr(p.ClientSecret)
 	p.RedirectURI = trimPtr(p.RedirectURI)
@@ -381,17 +391,17 @@ func validateConnectConfigPayload(payload *connectConfigUpsertPayload, existing 
 }
 
 func validateConnectConfigCreate(payload *connectConfigUpsertPayload) string {
-	if payload.AuthType == nil || !isSupportedConnectAuthType(*payload.AuthType) {
-		return "unsupported auth_type"
+	checks := []string{
+		validateConnectAuthType(payload.AuthType),
+		requiredConnectValue(payload.AuthName, "auth_name"),
+		requiredConnectValue(payload.ClientID, "client_id"),
+		requiredConnectValue(payload.ClientSecret, "client_secret"),
+		validateConnectRedirect(payload.RedirectURI),
 	}
-	if payload.ClientID == nil || *payload.ClientID == "" {
-		return "client_id is required"
-	}
-	if payload.ClientSecret == nil || *payload.ClientSecret == "" {
-		return "client_secret is required"
-	}
-	if payload.RedirectURI == nil || !isHTTPRedirectURI(*payload.RedirectURI) {
-		return "redirect_uri must be an absolute http or https URL"
+	for _, message := range checks {
+		if message != "" {
+			return message
+		}
 	}
 	return ""
 }
@@ -402,23 +412,68 @@ func validateConnectConfigCreate(payload *connectConfigUpsertPayload) string {
 // actually provided; the rest are left to resolveConnectConfigFields to
 // carry forward from the existing row.
 func validateConnectConfigUpdate(payload *connectConfigUpsertPayload) string {
-	if payload.AuthType == nil && payload.ClientID == nil && payload.ClientSecret == nil &&
-		payload.RedirectURI == nil && payload.Enabled == nil {
-		return "update requires at least one of auth_type, client_id, client_secret, redirect_uri, or enabled"
+	if connectUpdateEmpty(payload) {
+		return "update requires at least one of auth_type, auth_name, client_id, client_secret, redirect_uri, or enabled"
 	}
-	if payload.AuthType != nil && !isSupportedConnectAuthType(*payload.AuthType) {
+	checks := []string{
+		validateOptionalConnectAuthType(payload.AuthType),
+		validateOptionalConnectValue(payload.AuthName, "auth_name"),
+		validateOptionalConnectValue(payload.ClientID, "client_id"),
+		validateOptionalConnectValue(payload.ClientSecret, "client_secret"),
+		validateOptionalConnectRedirect(payload.RedirectURI),
+	}
+	for _, message := range checks {
+		if message != "" {
+			return message
+		}
+	}
+	return ""
+}
+
+func connectUpdateEmpty(payload *connectConfigUpsertPayload) bool {
+	return payload.AuthType == nil && payload.AuthName == nil && payload.ClientID == nil && payload.ClientSecret == nil && payload.RedirectURI == nil && payload.Enabled == nil
+}
+
+func validateConnectAuthType(value *string) string {
+	if value == nil || !isSupportedConnectAuthType(*value) {
 		return "unsupported auth_type"
 	}
-	if payload.ClientID != nil && *payload.ClientID == "" {
-		return "client_id cannot be blanked out -- omit it to leave unchanged"
+	return ""
+}
+
+func validateOptionalConnectAuthType(value *string) string {
+	if value == nil {
+		return ""
 	}
-	if payload.ClientSecret != nil && *payload.ClientSecret == "" {
-		return "client_secret cannot be blanked out -- omit it to leave unchanged"
+	return validateConnectAuthType(value)
+}
+
+func requiredConnectValue(value *string, name string) string {
+	if value == nil || *value == "" {
+		return name + " is required"
 	}
-	if payload.RedirectURI != nil && !isHTTPRedirectURI(*payload.RedirectURI) {
+	return ""
+}
+
+func validateOptionalConnectValue(value *string, name string) string {
+	if value != nil && *value == "" {
+		return name + " cannot be blanked out -- omit it to leave unchanged"
+	}
+	return ""
+}
+
+func validateConnectRedirect(value *string) string {
+	if value == nil || !isHTTPRedirectURI(*value) {
 		return "redirect_uri must be an absolute http or https URL"
 	}
 	return ""
+}
+
+func validateOptionalConnectRedirect(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return validateConnectRedirect(value)
 }
 
 // isSupportedConnectAuthType keeps connect admin scoped to flows the connection
@@ -448,6 +503,7 @@ func projectConnectConfig(cfg *store.ConnectConfig) connectConfigResponse {
 		BucketID:        cfg.BucketID,
 		ServiceID:       cfg.ServiceID,
 		AuthType:        cfg.AuthType,
+		AuthName:        cfg.AuthName,
 		Enabled:         cfg.Enabled,
 		RedirectURI:     cfg.RedirectURI,
 		HasClientID:     cfg.EncryptedClientID != "",
@@ -465,6 +521,7 @@ func projectAuthConnection(conn store.AuthConnection) authConnectionResponse {
 		EndUserRef:            conn.EndUserRef,
 		CreatedByAppID:        conn.CreatedByAppID,
 		AuthType:              conn.AuthType,
+		AuthName:              conn.AuthName,
 		TokenType:             conn.TokenType,
 		Scopes:                conn.Scopes,
 		ScopeSource:           conn.ScopeSource,

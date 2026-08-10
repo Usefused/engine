@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -507,12 +508,16 @@ func (s *postgresStore) BatchCreateEngineExecutionEvents(ctx context.Context, ev
 			endpoint_name, external_id, event_name, http_method, request_path, environment,
 			environment_source, provider_host, provider_http_status, provider_status_class, status,
 			failure_reason, failure_category, failure_code, latency_ms, provider_latency_ms, attempt_count,
+			auth_scheme_names, auth_scheme_types, auth_scheme_count, auth_selection_outcome,
+			pagination_type, pagination_page_count, pagination_item_count, pagination_byte_count, pagination_stop_reason,
+			rate_limit_decision, rate_limit_policy_count, rate_limit_scope_kinds, rate_limit_units,
+			rate_limit_unit_totals, rate_limit_retry_outcome, rate_limit_header_outcome,
 			request_bytes, response_bytes, verification_status, delivery_status, idempotency_key_hash,
 			request_body_hash, idempotency_replayed, timings, started_at, ended_at, created_at
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
 			$21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40,
-			$41, $42)
+			$41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58)
 		ON CONFLICT (id) DO UPDATE SET
 			status = EXCLUDED.status,
 			failure_reason = EXCLUDED.failure_reason,
@@ -520,6 +525,22 @@ func (s *postgresStore) BatchCreateEngineExecutionEvents(ctx context.Context, ev
 			failure_code = EXCLUDED.failure_code,
 			latency_ms = EXCLUDED.latency_ms,
 			attempt_count = EXCLUDED.attempt_count,
+			auth_scheme_names = EXCLUDED.auth_scheme_names,
+			auth_scheme_types = EXCLUDED.auth_scheme_types,
+			auth_scheme_count = EXCLUDED.auth_scheme_count,
+			auth_selection_outcome = EXCLUDED.auth_selection_outcome,
+			pagination_type = EXCLUDED.pagination_type,
+			pagination_page_count = EXCLUDED.pagination_page_count,
+			pagination_item_count = EXCLUDED.pagination_item_count,
+			pagination_byte_count = EXCLUDED.pagination_byte_count,
+			pagination_stop_reason = EXCLUDED.pagination_stop_reason,
+			rate_limit_decision = EXCLUDED.rate_limit_decision,
+			rate_limit_policy_count = EXCLUDED.rate_limit_policy_count,
+			rate_limit_scope_kinds = EXCLUDED.rate_limit_scope_kinds,
+			rate_limit_units = EXCLUDED.rate_limit_units,
+			rate_limit_unit_totals = EXCLUDED.rate_limit_unit_totals,
+			rate_limit_retry_outcome = EXCLUDED.rate_limit_retry_outcome,
+			rate_limit_header_outcome = EXCLUDED.rate_limit_header_outcome,
 			request_bytes = EXCLUDED.request_bytes,
 			response_bytes = EXCLUDED.response_bytes,
 			verification_status = EXCLUDED.verification_status,
@@ -537,13 +558,25 @@ func (s *postgresStore) BatchCreateEngineExecutionEvents(ctx context.Context, ev
 			event.EndpointName, event.ExternalID, event.EventName, event.HTTPMethod, event.RequestPath, event.Environment,
 			event.EnvironmentSource, event.ProviderHost, event.ProviderHTTPStatus, event.ProviderStatusClass, event.Status,
 			event.FailureReason, event.FailureCategory, event.FailureCode, event.LatencyMs, event.ProviderLatencyMs,
-			event.AttemptCount, event.RequestBytes, event.ResponseBytes, event.VerificationStatus, event.DeliveryStatus,
+			event.AttemptCount, nonNilStrings(event.AuthSchemeNames), nonNilStrings(event.AuthSchemeTypes), event.AuthSchemeCount, event.AuthSelectionOutcome,
+			event.PaginationType, event.PaginationPageCount, event.PaginationItemCount,
+			event.PaginationByteCount, event.PaginationStopReason,
+			event.RateLimitDecision, event.RateLimitPolicyCount, nonNilStrings(event.RateLimitScopeKinds), nonNilStrings(event.RateLimitUnits),
+			nonNilInt64s(event.RateLimitUnitTotals), event.RateLimitRetryOutcome, event.RateLimitHeaderOutcome,
+			event.RequestBytes, event.ResponseBytes, event.VerificationStatus, event.DeliveryStatus,
 			event.IdempotencyKeyHash, event.RequestBodyHash, event.IdempotencyReplayed, event.Timings, event.StartedAt,
 			event.EndedAt, event.CreatedAt,
 		)
 	}
 	results := s.db.SendBatch(ctx, b)
 	return results.Close()
+}
+
+func nonNilInt64s(values []int64) []int64 {
+	if values == nil {
+		return []int64{}
+	}
+	return values
 }
 
 func validateExecutionEventIdentity(event models.EngineExecutionEvent) error {
@@ -676,7 +709,12 @@ func (s *postgresStore) listEngineExecutionEvents(ctx context.Context, filter En
 		endpoint_name, COALESCE(external_id, ''), COALESCE(event_name, ''), COALESCE(http_method, ''), COALESCE(request_path, ''), COALESCE(environment, ''),
 		COALESCE(environment_source, ''), COALESCE(provider_host, ''), provider_http_status, COALESCE(provider_status_class, ''),
 		status, COALESCE(failure_reason, ''), COALESCE(failure_category, ''), COALESCE(failure_code, ''), latency_ms, provider_latency_ms,
-		attempt_count, request_bytes, response_bytes, COALESCE(verification_status, ''), COALESCE(delivery_status, ''),
+		attempt_count, auth_scheme_names, auth_scheme_types, auth_scheme_count, COALESCE(auth_selection_outcome, ''),
+		COALESCE(pagination_type, ''), pagination_page_count, pagination_item_count, pagination_byte_count,
+		COALESCE(pagination_stop_reason, ''), COALESCE(rate_limit_decision, ''), rate_limit_policy_count,
+		rate_limit_scope_kinds, rate_limit_units, rate_limit_unit_totals,
+		COALESCE(rate_limit_retry_outcome, ''), COALESCE(rate_limit_header_outcome, ''),
+		request_bytes, response_bytes, COALESCE(verification_status, ''), COALESCE(delivery_status, ''),
 		idempotency_replayed, COALESCE(timings, '{}'::jsonb), started_at, ended_at, created_at
 		FROM fused_engine_execution_events ` + whereClause + fmt.Sprintf(" ORDER BY started_at DESC LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
 	args = append(args, filter.Limit, filter.Offset)
@@ -696,6 +734,11 @@ func (s *postgresStore) listEngineExecutionEvents(ctx context.Context, filter En
 			&event.ExternalID, &event.EventName, &event.HTTPMethod, &event.RequestPath, &event.Environment, &event.EnvironmentSource,
 			&event.ProviderHost, &event.ProviderHTTPStatus, &event.ProviderStatusClass, &event.Status, &event.FailureReason,
 			&event.FailureCategory, &event.FailureCode, &event.LatencyMs, &event.ProviderLatencyMs, &event.AttemptCount,
+			&event.AuthSchemeNames, &event.AuthSchemeTypes, &event.AuthSchemeCount, &event.AuthSelectionOutcome,
+			&event.PaginationType, &event.PaginationPageCount, &event.PaginationItemCount, &event.PaginationByteCount,
+			&event.PaginationStopReason, &event.RateLimitDecision, &event.RateLimitPolicyCount,
+			&event.RateLimitScopeKinds, &event.RateLimitUnits, &event.RateLimitUnitTotals,
+			&event.RateLimitRetryOutcome, &event.RateLimitHeaderOutcome,
 			&event.RequestBytes, &event.ResponseBytes, &event.VerificationStatus, &event.DeliveryStatus,
 			&event.IdempotencyReplayed, &event.Timings, &event.StartedAt, &event.EndedAt, &event.CreatedAt,
 		); err != nil {
@@ -1033,6 +1076,56 @@ func (s *postgresStore) GetSecrets(ctx context.Context, bucketID, serviceID uuid
 		WHERE bucket_id = $1 AND service_id = $2 AND key_name = ANY($3)
 	`
 	rows, err := s.db.Query(ctx, query, bucketID, serviceID, keyNames)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanWorkspaceSecrets(rows)
+}
+
+const firstCompleteSecretSetSQL = `
+	WITH alternatives AS (
+		SELECT ordinality, value
+		FROM jsonb_array_elements($3::jsonb) WITH ORDINALITY
+	), selected AS (
+		SELECT value
+		FROM alternatives candidate
+		WHERE NOT EXISTS (
+			SELECT 1
+			FROM jsonb_array_elements_text(candidate.value->'required') required_key
+			WHERE NOT EXISTS (
+				SELECT 1 FROM fused_workspace_secrets secret
+				WHERE secret.bucket_id = $1 AND secret.service_id = $2
+				  AND secret.key_name = required_key
+				  AND (secret.expires_at IS NULL OR secret.expires_at > NOW())
+			)
+		)
+		ORDER BY ordinality
+		LIMIT 1
+	), selected_keys AS (
+		SELECT jsonb_array_elements_text(
+			COALESCE(value->'required', '[]'::jsonb) || COALESCE(value->'optional', '[]'::jsonb)
+		) AS key_name
+		FROM selected
+	)
+	SELECT secret.id, secret.bucket_id, secret.service_id, secret.key_name,
+	       secret.credential_type, secret.encrypted_dek, secret.encrypted_value,
+	       secret.last_used_at, secret.expires_at, secret.created_at, secret.updated_at
+	FROM fused_workspace_secrets secret
+	JOIN selected_keys selected_key ON selected_key.key_name = secret.key_name
+	WHERE secret.bucket_id = $1 AND secret.service_id = $2
+	  AND (secret.expires_at IS NULL OR secret.expires_at > NOW())
+`
+
+func (s *postgresStore) GetFirstCompleteSecretSet(ctx context.Context, bucketID, serviceID uuid.UUID, alternatives []SecretKeyAlternative) ([]WorkspaceSecret, error) {
+	if len(alternatives) == 0 {
+		return nil, nil
+	}
+	payload, err := json.Marshal(alternatives)
+	if err != nil {
+		return nil, fmt.Errorf("encode ordered secret alternatives: %w", err)
+	}
+	rows, err := s.db.Query(ctx, firstCompleteSecretSetSQL, bucketID, serviceID, payload)
 	if err != nil {
 		return nil, err
 	}

@@ -1,7 +1,9 @@
 package sandbox
 
 import (
+	"encoding/base64"
 	"fmt"
+	"strings"
 
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/getkin/kin-openapi/openapi3"
@@ -19,7 +21,7 @@ func validateCallParams(op *FixtureOperation, params map[string]any) error {
 	if err := validateRequiredParameters(op.Parameters, params); err != nil {
 		return err
 	}
-	if op.RequestBody != nil {
+	if op.RequestContent != nil {
 		if err := validateRequestBody(op, params); err != nil {
 			return err
 		}
@@ -44,7 +46,7 @@ func validateRequiredParameters(declared []models.Parameter, params map[string]a
 // validateRequestBody builds the same "everything not a declared
 // path/query/header parameter" body object the dispatcher itself constructs
 // (dispatcher.go: determineParamLocation/applyParam default case), then
-// validates it against the operation's RequestBody schema. Mirroring that
+// validates it against the operation's RequestContent schema. Mirroring that
 // convention here -- rather than expecting a nested {path,query,...,body}
 // shape -- means validation checks the request the same way it will
 // eventually be routed, with one source of truth for what "the body" means
@@ -61,14 +63,68 @@ func validateRequestBody(op *FixtureOperation, params map[string]any) error {
 			bodyParams[k] = v
 		}
 	}
+	validationValue, err := requestValidationValue(op, bodyParams)
+	if err != nil {
+		return err
+	}
+	if op.RequestContent.Schema == nil {
+		return nil
+	}
 
-	schema, err := modelSchemaToOpenAPI(op.RequestBody)
+	schema, err := modelSchemaToOpenAPI(op.RequestContent.Schema)
 	if err != nil {
 		return fmt.Errorf("invalid operation schema for %q: %w", op.OperationID, err)
 	}
 
-	if err := schema.VisitJSON(bodyParams); err != nil {
+	if err := schema.VisitJSON(validationValue); err != nil {
 		return fmt.Errorf("request body for %q failed schema validation: %w", op.OperationID, err)
+	}
+	return nil
+}
+
+func requestValidationValue(op *FixtureOperation, bodyParams map[string]any) (any, error) {
+	content := op.RequestContent
+	if content.Serialization != models.RequestSerializationRaw {
+		if content.Required && len(bodyParams) == 0 {
+			return nil, fmt.Errorf("missing required request body for %q", op.OperationID)
+		}
+		return bodyParams, nil
+	}
+	name := strings.TrimSpace(content.PayloadParameter)
+	if name == "" {
+		return nil, fmt.Errorf("raw request payload_parameter is required for %q", op.OperationID)
+	}
+	value, ok := bodyParams[name]
+	if !ok {
+		return nil, fmt.Errorf("missing raw request payload parameter %q", name)
+	}
+	if len(bodyParams) != 1 {
+		return nil, fmt.Errorf("raw request contains parameters outside payload_parameter %q", name)
+	}
+	if err := validateRawBinaryValue(name, value, content.BinaryEncoding); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+func validateRawBinaryValue(name string, value any, binaryEncoding string) error {
+	if binaryEncoding == "" {
+		switch value.(type) {
+		case string, []byte:
+			return nil
+		default:
+			return fmt.Errorf("raw request payload %q must be a string or byte array", name)
+		}
+	}
+	if binaryEncoding != models.RequestBinaryEncodingBase64 {
+		return fmt.Errorf("raw request payload %q has unsupported binary_encoding %q", name, binaryEncoding)
+	}
+	encoded, ok := value.(string)
+	if !ok {
+		return fmt.Errorf("raw request payload %q requires a base64 string", name)
+	}
+	if _, err := base64.StdEncoding.Strict().DecodeString(encoded); err != nil {
+		return fmt.Errorf("raw request payload %q contains invalid base64", name)
 	}
 	return nil
 }
@@ -111,11 +167,19 @@ func modelSchemaToOpenAPI(s *models.Schema) (*openapi3.Schema, error) {
 		schema.Items = openapi3.NewSchemaRef("", itemSchema)
 	}
 
+	if s.AdditionalProperties != nil {
+		valueSchema, err := modelSchemaToOpenAPI(s.AdditionalProperties)
+		if err != nil {
+			return nil, err
+		}
+		schema.AdditionalProperties.Schema = openapi3.NewSchemaRef("", valueSchema)
+	}
+
 	return schema, nil
 }
 
 // schemaTypeOrDefault treats an unspecified type as "object": the fixture's
-// RequestBody schemas describe JSON request bodies, and an empty Type field
+// RequestContent schemas describe request bodies, and an empty Type field
 // (common for hand-authored fixtures, e.g. fixture.json's request bodies)
 // should validate as a permissive object rather than failing kin-openapi's
 // type check outright.

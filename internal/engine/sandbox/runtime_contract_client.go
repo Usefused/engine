@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
+	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"github.com/google/uuid"
 )
 
@@ -22,31 +22,14 @@ type BatchRuntimeContractFetcher interface {
 }
 
 func (c *HTTPRegistryClient) FetchRuntimeContract(ctx context.Context, serviceID, serviceVersionID uuid.UUID, version, apiKey string) (*store.ServiceContractSnapshot, error) {
-	req, err := c.buildRuntimeContractRequest(ctx, serviceID, serviceVersionID, apiKey)
+	snapshots, err := c.FetchRuntimeContracts(ctx, []store.WorkspaceServiceVersion{{ServiceID: serviceID, ServiceVersionID: serviceVersionID, Version: version}}, apiKey)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.do(req)
-	if err != nil {
-		return nil, fmt.Errorf("FetchRuntimeContract: request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= http.StatusBadRequest {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("FetchRuntimeContract: registry returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	var decoded runtimeContractGraphQLResponse
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
-		return nil, fmt.Errorf("FetchRuntimeContract: decode response: %w", err)
-	}
-	if len(decoded.Errors) > 0 {
-		return nil, fmt.Errorf("FetchRuntimeContract: graphql error: %s", decoded.Errors[0].Message)
-	}
-	if decoded.Data.Service == nil {
+	if len(snapshots) != 1 {
 		return nil, fmt.Errorf("FetchRuntimeContract: service %s version %s not found", serviceID, serviceVersionID)
 	}
-	return runtimeContractSnapshot(serviceID, serviceVersionID, version, decoded.Data.Service, decoded.Data.ServiceOperations), nil
+	return &snapshots[0], nil
 }
 
 func (c *HTTPRegistryClient) FetchRuntimeContracts(ctx context.Context, versions []store.WorkspaceServiceVersion, apiKey string) ([]store.ServiceContractSnapshot, error) {
@@ -69,27 +52,9 @@ func (c *HTTPRegistryClient) FetchRuntimeContracts(ctx context.Context, versions
 	return decodeRuntimeContractsResponse(resp.Body, versions)
 }
 
-func (c *HTTPRegistryClient) buildRuntimeContractRequest(ctx context.Context, serviceID, serviceVersionID uuid.UUID, apiKey string) (*http.Request, error) {
-	req, err := c.newGraphQLRequest(ctx, graphqlQuery{
-		Query: runtimeContractQuery,
-		Variables: map[string]interface{}{
-			"serviceId":        serviceID.String(),
-			"serviceVersionId": serviceVersionID.String(),
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("FetchRuntimeContract: create request: %w", err)
-	}
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-		req.Header.Set("X-API-Key", apiKey)
-	}
-	return req, nil
-}
-
 func (c *HTTPRegistryClient) buildRuntimeContractsRequest(ctx context.Context, versions []store.WorkspaceServiceVersion, apiKey string) (*http.Request, error) {
 	req, err := c.newGraphQLRequest(ctx, graphqlQuery{
-		Query:     buildRuntimeContractsQuery(len(versions)),
+		Query:     runtimeContractsQuery,
 		Variables: runtimeContractBatchVariables(versions),
 	})
 	if err != nil {
@@ -102,45 +67,32 @@ func (c *HTTPRegistryClient) buildRuntimeContractsRequest(ctx context.Context, v
 	return req, nil
 }
 
-func buildRuntimeContractsQuery(count int) string {
-	var variables strings.Builder
-	var body strings.Builder
-	for i := 0; i < count; i++ {
-		if i > 0 {
-			variables.WriteString(", ")
-		}
-		variables.WriteString(fmt.Sprintf("$serviceId%d: String!, $serviceVersionId%d: String!", i, i))
-		body.WriteString(fmt.Sprintf(`
-		service%d: service(id: $serviceId%d, version: $serviceVersionId%d) {%s}
-		serviceOperations%d: serviceOperations(serviceId: $serviceId%d, version: $serviceVersionId%d) {%s}
-`, i, i, i, runtimeContractServiceFields, i, i, i, runtimeContractOperationFields))
-	}
-	return fmt.Sprintf("query EngineRuntimeContracts(%s) {%s\n}", variables.String(), body.String())
-}
-
 func runtimeContractBatchVariables(versions []store.WorkspaceServiceVersion) map[string]interface{} {
-	variables := make(map[string]interface{}, len(versions)*2)
-	for i, version := range versions {
-		variables[fmt.Sprintf("serviceId%d", i)] = version.ServiceID.String()
-		variables[fmt.Sprintf("serviceVersionId%d", i)] = version.ServiceVersionID.String()
+	refs := make([]ServiceVersionRef, 0, len(versions))
+	for _, version := range versions {
+		refs = append(refs, ServiceVersionRef{ServiceID: version.ServiceID, Version: version.ServiceVersionID.String()})
 	}
-	return variables
+	return map[string]interface{}{"refs": refs}
 }
 
-const runtimeContractQuery = `
-	query EngineRuntimeContract($serviceId: String!, $serviceVersionId: String!) {
-		service(id: $serviceId, version: $serviceVersionId) {` + runtimeContractServiceFields + `}
-		serviceOperations(serviceId: $serviceId, version: $serviceVersionId) {` + runtimeContractOperationFields + `}
+const runtimeContractsQuery = `
+	query EngineRuntimeContracts($refs: [ServiceVersionRefInput!]!) {
+		serviceRuntimeContracts(refs: $refs) {
+			service_id
+			service_version_id
+			version
+			service {` + runtimeContractServiceFields + `}
+			operations {` + runtimeContractOperationFields + `}
+			webhooks {
+				id service_id name method description request_body
+			}
+		}
 	}
 `
 
 const runtimeContractServiceFields = `
 	id
 	current_service_version
-	service_versions {
-		id
-		name
-	}
 	name
 	description
 	base_url
@@ -149,6 +101,7 @@ const runtimeContractServiceFields = `
 		description
 		environment
 		is_default
+		variables { name default enum required }
 	}
 	default_headers
 	connect_config
@@ -157,6 +110,7 @@ const runtimeContractServiceFields = `
 		type
 		flow
 		scheme
+		basic_password_mode
 		location
 		key_name
 		token_url
@@ -164,22 +118,14 @@ const runtimeContractServiceFields = `
 		open_id_connect_url
 		scopes
 	}
-	rate_limit {
-		strategy
-		requests_per_second
-		requests_per_minute
-	}
+	rate_limit {` + runtimeRateLimitFields + `}
 	retry_config {
 		strategy
 		max_retries
 		backoff_ms
 	}
 	timeout_ms
-	pagination {
-		type
-		request_param
-		response_path
-	}
+	pagination {` + runtimePaginationFields + `}
 	event_extraction_path
 	incoming_webhook_config {
 		auth_type
@@ -188,18 +134,11 @@ const runtimeContractServiceFields = `
 		signature_header
 		verification_headers
 	}
-	webhooks {
-		id
-		service_id
-		name
-		method
-		description
-		request_body
-	}
 `
 
 const runtimeContractOperationFields = `
 	id
+	stable_key
 	name
 	description
 	resource_name
@@ -215,30 +154,90 @@ const runtimeContractOperationFields = `
 		required
 		type
 		description
+		path_encoding
 	}
-	request_body
+	request_content
 	responses
 	graphql_query
 	provider_protocol
 	operation_kind
-	pagination
+	pagination {` + runtimePaginationFields + `}
+	security_requirements {` + runtimeSecurityRequirementFields + `}
 `
 
-type runtimeContractGraphQLResponse struct {
+const runtimeRateLimitFields = `
+	version
+	policies {
+		name
+		unit
+		scope
+		default_cost
+		operation_costs
+		algorithm
+		fixed_window { limit duration_ms }
+		token_bucket { capacity refill_units refill_interval_ms }
+		response_headers {
+			limit
+			remaining
+			reset { name format }
+		}
+	}
+	retry_after { enabled max_delay_ms }
+`
+
+const runtimeSecurityRequirementFields = `
+	schemes { scheme scopes }
+`
+
+const runtimePaginationFields = `
+	version
+	type
+	items_path
+	limits { max_pages max_items max_bytes max_duration_ms }
+	cursor {
+		request { location name }
+		initial { type string integer }
+		next { location path name relation value_type }
+		has_more { location path name relation value_type }
+	}
+	offset {
+		request { location name }
+		start
+		increment { mode value }
+		page_size { target { location name } value }
+		next_offset { location path name relation value_type }
+		total_items { location path name relation value_type }
+		has_more { location path name relation value_type }
+		stop_on_short_page
+	}
+	page_number {
+		request { location name }
+		start
+		increment
+		page_size { target { location name } value }
+		total_pages { location path name relation value_type }
+		has_more { location path name relation value_type }
+		stop_on_short_page
+	}
+	next_url { next { location path name relation value_type } }
+`
+
+type runtimeContractsGraphQLResponse struct {
 	Data struct {
-		Service           *runtimeContractService `json:"service"`
-		ServiceOperations []fusedobject.Endpoint  `json:"serviceOperations"`
+		Contracts []runtimeContractBatchItem `json:"serviceRuntimeContracts"`
 	} `json:"data"`
 	Errors []struct {
 		Message string `json:"message"`
 	} `json:"errors"`
 }
 
-type runtimeContractsGraphQLResponse struct {
-	Data   map[string]json.RawMessage `json:"data"`
-	Errors []struct {
-		Message string `json:"message"`
-	} `json:"errors"`
+type runtimeContractBatchItem struct {
+	ServiceID        uuid.UUID               `json:"service_id"`
+	ServiceVersionID uuid.UUID               `json:"service_version_id"`
+	Version          string                  `json:"version"`
+	Service          *runtimeContractService `json:"service"`
+	Operations       []fusedobject.Endpoint  `json:"operations"`
+	Webhooks         []fusedobject.Webhook   `json:"webhooks"`
 }
 
 func decodeRuntimeContractsResponse(body io.Reader, versions []store.WorkspaceServiceVersion) ([]store.ServiceContractSnapshot, error) {
@@ -249,13 +248,17 @@ func decodeRuntimeContractsResponse(body io.Reader, versions []store.WorkspaceSe
 	if len(decoded.Errors) > 0 {
 		return nil, fmt.Errorf("FetchRuntimeContracts: graphql error: %s", decoded.Errors[0].Message)
 	}
-	return runtimeContractSnapshotsFromBatch(decoded.Data, versions)
+	return runtimeContractSnapshotsFromBatch(decoded.Data.Contracts, versions)
 }
 
-func runtimeContractSnapshotsFromBatch(data map[string]json.RawMessage, versions []store.WorkspaceServiceVersion) ([]store.ServiceContractSnapshot, error) {
+func runtimeContractSnapshotsFromBatch(items []runtimeContractBatchItem, versions []store.WorkspaceServiceVersion) ([]store.ServiceContractSnapshot, error) {
+	byVersion := make(map[uuid.UUID]runtimeContractBatchItem, len(items))
+	for _, item := range items {
+		byVersion[item.ServiceVersionID] = item
+	}
 	out := make([]store.ServiceContractSnapshot, 0, len(versions))
-	for i, version := range versions {
-		snapshot, err := runtimeContractSnapshotFromBatchItem(data, version, i)
+	for _, version := range versions {
+		snapshot, err := runtimeContractSnapshotFromBatchItem(byVersion[version.ServiceVersionID], version)
 		if err != nil {
 			return nil, err
 		}
@@ -264,41 +267,56 @@ func runtimeContractSnapshotsFromBatch(data map[string]json.RawMessage, versions
 	return out, nil
 }
 
-func runtimeContractSnapshotFromBatchItem(data map[string]json.RawMessage, version store.WorkspaceServiceVersion, index int) (*store.ServiceContractSnapshot, error) {
-	service, err := decodeRuntimeContractService(data, fmt.Sprintf("service%d", index), version)
-	if err != nil {
+func runtimeContractSnapshotFromBatchItem(item runtimeContractBatchItem, requested store.WorkspaceServiceVersion) (*store.ServiceContractSnapshot, error) {
+	if item.Service == nil || item.ServiceID != requested.ServiceID || item.ServiceVersionID != requested.ServiceVersionID {
+		return nil, fmt.Errorf("FetchRuntimeContracts: service %s version %s not found", requested.ServiceID, requested.ServiceVersionID)
+	}
+	if err := validateRuntimePagination(item.Service, item.Operations); err != nil {
 		return nil, err
 	}
-	operations, err := decodeRuntimeContractOperations(data, fmt.Sprintf("serviceOperations%d", index), version)
-	if err != nil {
+	version := item.Version
+	if version == "" {
+		version = requested.Version
+	}
+	snapshot := runtimeContractSnapshot(requested.ServiceID, requested.ServiceVersionID, version, item.Service, item.Operations, item.Webhooks)
+	if err := validateRuntimeSnapshot(snapshot); err != nil {
 		return nil, err
 	}
-	return runtimeContractSnapshot(version.ServiceID, version.ServiceVersionID, version.Version, service, operations), nil
+	return snapshot, nil
 }
 
-func decodeRuntimeContractService(data map[string]json.RawMessage, key string, version store.WorkspaceServiceVersion) (*runtimeContractService, error) {
-	var service *runtimeContractService
-	if err := json.Unmarshal(data[key], &service); err != nil {
-		return nil, fmt.Errorf("FetchRuntimeContracts: decode %s: %w", key, err)
+func validateRuntimeSnapshot(snapshot *store.ServiceContractSnapshot) error {
+	if err := validateTransportContract(&snapshot.ServiceMetadata, snapshot.Endpoints); err != nil {
+		return fmt.Errorf("FetchRuntimeContract: invalid transport contract: %w", err)
 	}
-	if service == nil {
-		return nil, fmt.Errorf("FetchRuntimeContracts: service %s version %s not found", version.ServiceID, version.ServiceVersionID)
-	}
-	return service, nil
+	return nil
 }
 
-func decodeRuntimeContractOperations(data map[string]json.RawMessage, key string, version store.WorkspaceServiceVersion) ([]fusedobject.Endpoint, error) {
-	var operations []fusedobject.Endpoint
-	if err := json.Unmarshal(data[key], &operations); err != nil {
-		return nil, fmt.Errorf("FetchRuntimeContracts: decode operations for %s version %s: %w", version.ServiceID, version.ServiceVersionID, err)
+func validateRuntimePagination(service *runtimeContractService, operations []fusedobject.Endpoint) error {
+	if err := validateRuntimePaginationConfig("service", service.Pagination); err != nil {
+		return err
 	}
-	return operations, nil
+	for i := range operations {
+		if err := validateRuntimePaginationConfig("operation", operations[i].Pagination); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateRuntimePaginationConfig(scope string, config *fusedobject.PaginationConfig) error {
+	if config == nil {
+		return nil
+	}
+	if err := paginationpolicy.Validate(config); err != nil {
+		return fmt.Errorf("FetchRuntimeContract: invalid %s pagination: %w", scope, err)
+	}
+	return nil
 }
 
 type runtimeContractService struct {
 	ID                    uuid.UUID                          `json:"id"`
 	CurrentServiceVersion string                             `json:"current_service_version"`
-	ServiceVersions       []runtimeContractServiceVersion    `json:"service_versions"`
 	Name                  string                             `json:"name"`
 	Description           string                             `json:"description"`
 	BaseURL               string                             `json:"base_url"`
@@ -312,18 +330,9 @@ type runtimeContractService struct {
 	ConnectConfig         *fusedobject.ServiceConnectConfig  `json:"connect_config"`
 	EventExtractionPath   string                             `json:"event_extraction_path"`
 	IncomingWebhookConfig *fusedobject.IncomingWebhookConfig `json:"incoming_webhook_config"`
-	Webhooks              []fusedobject.Webhook              `json:"webhooks"`
 }
 
-type runtimeContractServiceVersion struct {
-	ID   uuid.UUID `json:"id"`
-	Name string    `json:"name"`
-}
-
-func runtimeContractSnapshot(serviceID, serviceVersionID uuid.UUID, version string, service *runtimeContractService, operations []fusedobject.Endpoint) *store.ServiceContractSnapshot {
-	if version == "" {
-		version = runtimeContractVersionName(serviceVersionID, service.CurrentServiceVersion, service.ServiceVersions)
-	}
+func runtimeContractSnapshot(serviceID, serviceVersionID uuid.UUID, version string, service *runtimeContractService, operations []fusedobject.Endpoint, webhooks []fusedobject.Webhook) *store.ServiceContractSnapshot {
 	metadata := fusedobject.ServiceMetadata{
 		ID:                    service.ID,
 		ServiceVersionID:      serviceVersionID,
@@ -348,15 +357,6 @@ func runtimeContractSnapshot(serviceID, serviceVersionID uuid.UUID, version stri
 		Status:           "active",
 		ServiceMetadata:  metadata,
 		Endpoints:        operations,
-		Webhooks:         service.Webhooks,
+		Webhooks:         webhooks,
 	}
-}
-
-func runtimeContractVersionName(serviceVersionID uuid.UUID, current string, versions []runtimeContractServiceVersion) string {
-	for _, version := range versions {
-		if version.ID == serviceVersionID {
-			return version.Name
-		}
-	}
-	return current
 }

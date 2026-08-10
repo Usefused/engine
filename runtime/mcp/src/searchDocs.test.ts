@@ -27,6 +27,14 @@ const getRepo: FixtureOperation = {
     { name: "owner", in: "path", required: true, type: "string" },
     { name: "repo", in: "path", required: true, type: "string" },
   ],
+  request_content: {
+    media_type: "application/octet-stream",
+    serialization: "raw",
+    required: true,
+    schema: { type: "string" },
+    payload_parameter: "body",
+    binary_encoding: "base64",
+  },
   responses: { "200": { type: "object" } },
 };
 
@@ -40,11 +48,11 @@ describe("searchDocs", () => {
     expect(result.mode).toBe("list");
     if (result.mode !== "list") throw new Error("expected list mode");
     expect(result.operations).toHaveLength(2);
-    // Deliberately schema-free -- no parameters/request_body/responses keys
+    // Deliberately schema-free -- no parameters/request_content/responses keys
     // should appear on a summary (design doc, Discovery section).
     for (const op of result.operations) {
       expect(op).not.toHaveProperty("parameters");
-      expect(op).not.toHaveProperty("request_body");
+      expect(op).not.toHaveProperty("request_content");
       expect(op).not.toHaveProperty("responses");
     }
   });
@@ -71,6 +79,7 @@ describe("searchDocs", () => {
     expect(result.operation.operation_id).toBe("github.getRepo");
     expect(result.operation.parameters).toHaveLength(2);
     expect(result.operation.parameters[0].in).toBe("path");
+    expect(result.operation.request_content).toEqual(getRepo.request_content);
     expect(result.operation.responses["200"]).toBeDefined();
   });
 

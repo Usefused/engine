@@ -1,18 +1,23 @@
 package sandbox
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/Usefused/engine/internal/engine/connectresource"
+	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
+	"github.com/Usefused/engine/internal/shared/serverrouting"
 )
 
 type RuntimeEnvironmentResolution struct {
 	Environment string
 	BaseURL     string
 	Source      string
+	Variables   []serverrouting.Variable
 }
 
 type EnvironmentNotSupportedError struct {
@@ -50,7 +55,7 @@ func namedRuntimeEnvironment(metadata *fusedobject.ServiceMetadata, servers []ru
 	key := comparableEnvironmentName(requested)
 	for _, server := range servers {
 		if server.Name != "" && comparableEnvironmentName(server.Name) == key {
-			return RuntimeEnvironmentResolution{Environment: server.Name, BaseURL: server.URL, Source: "provider"}, nil
+			return RuntimeEnvironmentResolution{Environment: server.Name, BaseURL: server.URL, Source: "provider", Variables: server.Variables}, nil
 		}
 	}
 	return RuntimeEnvironmentResolution{}, unsupportedEnvironment(requested, servers)
@@ -58,7 +63,7 @@ func namedRuntimeEnvironment(metadata *fusedobject.ServiceMetadata, servers []ru
 
 func defaultRuntimeEnvironment(metadata *fusedobject.ServiceMetadata, servers []runtimeServer) (RuntimeEnvironmentResolution, error) {
 	if server, ok := findDefaultServer(servers, metadata.BaseURL); ok {
-		return RuntimeEnvironmentResolution{Environment: server.Name, BaseURL: server.URL, Source: "default"}, nil
+		return RuntimeEnvironmentResolution{Environment: server.Name, BaseURL: server.URL, Source: "default", Variables: server.Variables}, nil
 	}
 	if metadata.BaseURL != "" && len(servers) == 0 {
 		return RuntimeEnvironmentResolution{Environment: "", BaseURL: metadata.BaseURL, Source: "default"}, nil
@@ -73,6 +78,7 @@ type runtimeServer struct {
 	Name      string
 	URL       string
 	IsDefault bool
+	Variables []serverrouting.Variable
 }
 
 func runtimeServers(metadata *fusedobject.ServiceMetadata) []runtimeServer {
@@ -80,10 +86,115 @@ func runtimeServers(metadata *fusedobject.ServiceMetadata) []runtimeServer {
 	for _, server := range metadata.Servers {
 		name := strings.TrimSpace(server.Environment)
 		if server.URL != "" {
-			out = append(out, runtimeServer{Name: name, URL: server.URL, IsDefault: server.IsDefault})
+			out = append(out, runtimeServer{Name: name, URL: server.URL, IsDefault: server.IsDefault, Variables: server.Variables})
 		}
 	}
 	return out
+}
+
+func resolveRuntimeServerTemplate(metadata *fusedobject.ServiceMetadata, resolution RuntimeEnvironmentResolution, credentials map[string]any, values []store.BucketValue) (RuntimeEnvironmentResolution, error) {
+	if baseURL := forcedRuntimeBaseURL(values); baseURL != "" {
+		if err := serverrouting.ValidateResolvedURL(baseURL); err != nil {
+			return RuntimeEnvironmentResolution{}, err
+		}
+		if err := connectresource.ValidateBaseURL(baseURL, runtimeAllowedHosts(metadata.ConnectConfig)); err != nil {
+			return RuntimeEnvironmentResolution{}, err
+		}
+		resolution.BaseURL = baseURL
+		resolution.Source = "connection_resource"
+		resolution.Variables = nil
+		return resolution, nil
+	}
+	if len(resolution.Variables) == 0 {
+		return resolution, nil
+	}
+	supplied, err := serverVariableValues(credentials, values)
+	if err != nil {
+		return RuntimeEnvironmentResolution{}, err
+	}
+	resolved, usedSupplied, err := serverrouting.Resolve(resolution.BaseURL, resolution.Variables, supplied)
+	if err != nil {
+		return RuntimeEnvironmentResolution{}, err
+	}
+	if usedSupplied {
+		if err := connectresource.ValidateBaseURL(resolved, runtimeAllowedHosts(metadata.ConnectConfig)); err != nil {
+			return RuntimeEnvironmentResolution{}, err
+		}
+		resolution.Source = "connection_resource"
+	}
+	resolution.BaseURL = resolved
+	return resolution, nil
+}
+
+func forcedRuntimeBaseURL(values []store.BucketValue) string {
+	for _, value := range values {
+		if value.Location == "base_url" && value.SourceKind == "connection_resource" && value.Mode == "force" {
+			return value.Value
+		}
+	}
+	return ""
+}
+
+func serverVariableValues(credentials map[string]any, values []store.BucketValue) (map[string]string, error) {
+	result, err := resourceMetadataValues(credentials["fused_resource_metadata"])
+	if err != nil {
+		return nil, err
+	}
+	for _, value := range values {
+		if value.SourceKind == "connection_resource" && value.KeyName != "" {
+			result[value.KeyName] = value.Value
+		}
+	}
+	return result, nil
+}
+
+func resourceMetadataValues(raw any) (map[string]string, error) {
+	result := make(map[string]string)
+	data, ok := resourceMetadataBytes(raw)
+	if !ok || len(data) == 0 {
+		return result, nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var metadata map[string]any
+	if err := decoder.Decode(&metadata); err != nil {
+		return nil, errors.New("connection resource metadata is invalid")
+	}
+	for key, value := range metadata {
+		switch scalar := value.(type) {
+		case string:
+			result[key] = scalar
+		case json.Number:
+			result[key] = scalar.String()
+		case bool:
+			result[key] = fmt.Sprint(scalar)
+		}
+	}
+	return result, nil
+}
+
+func resourceMetadataBytes(raw any) ([]byte, bool) {
+	switch value := raw.(type) {
+	case []byte:
+		return value, true
+	case string:
+		return []byte(value), true
+	default:
+		return nil, false
+	}
+}
+
+func runtimeAllowedHosts(config *fusedobject.ServiceConnectConfig) []string {
+	if config == nil {
+		return nil
+	}
+	if config.ResourceInput != nil {
+		return config.ResourceInput.AllowedHosts
+	}
+	if config.ResourceDiscovery != nil {
+		return config.ResourceDiscovery.AllowedHosts
+	}
+	return nil
 }
 
 func findDefaultServer(servers []runtimeServer, baseURL string) (runtimeServer, bool) {

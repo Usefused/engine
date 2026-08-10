@@ -72,7 +72,7 @@ func TestIdempotency_CacheHit_SkipsVendorCall(t *testing.T) {
 	defer vendor.Close()
 
 	withIdempotencyStore(t, newFakeIdempotencyStore())
-	cache, endpointName := makePassthroughCache(t, vendor.URL)
+	cache, endpointName := makeAnonymousPassthroughCache(t, vendor.URL)
 	appID := uuid.New().String()
 
 	ctx := contextWithExecutionIdentity(context.Background(), "idem-key-1", "body-hash-1")
@@ -104,7 +104,7 @@ func TestIdempotency_DifferentKeys_BothHitVendor(t *testing.T) {
 	defer vendor.Close()
 
 	withIdempotencyStore(t, newFakeIdempotencyStore())
-	cache, endpointName := makePassthroughCache(t, vendor.URL)
+	cache, endpointName := makeAnonymousPassthroughCache(t, vendor.URL)
 	appID := uuid.New().String()
 
 	ctx1 := contextWithExecutionIdentity(context.Background(), "idem-key-a", "hash-a")
@@ -132,7 +132,7 @@ func TestIdempotency_SameKeyDifferentBody_Conflicts(t *testing.T) {
 	defer vendor.Close()
 
 	withIdempotencyStore(t, newFakeIdempotencyStore())
-	cache, endpointName := makePassthroughCache(t, vendor.URL)
+	cache, endpointName := makeAnonymousPassthroughCache(t, vendor.URL)
 	appID := uuid.New().String()
 
 	ctx1 := contextWithExecutionIdentity(context.Background(), "reused-key", "hash-original")

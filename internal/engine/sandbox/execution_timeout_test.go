@@ -27,7 +27,7 @@ func TestEngineExecuteCoreEnforcesExecutionPolicyTimeout(t *testing.T) {
 	defer vendor.Close()
 	defer close(releaseVendor)
 
-	cache, endpoint := makePassthroughCache(t, vendor.URL)
+	cache, endpoint := makeAnonymousPassthroughCache(t, vendor.URL)
 	timeoutMs := 10
 	cache.obj.TimeoutMs = &timeoutMs
 	appID := uuid.New()

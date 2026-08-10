@@ -12,18 +12,18 @@ import (
 )
 
 const connectConfigColumns = `
-	id,  bucket_id, service_id, auth_type, enabled,
+	id,  bucket_id, service_id, auth_type, auth_name, enabled,
 	encrypted_dek, encrypted_client_id, encrypted_client_secret, redirect_uri,
 	created_at, updated_at`
 
 const authConnectionColumns = `
 	id,  bucket_id, service_id, end_user_ref, created_by_app_id,
-	auth_type, encrypted_dek, access_token, refresh_token, id_token, token_type,
+	auth_type, auth_name, encrypted_dek, access_token, refresh_token, id_token, token_type,
 	scopes, scope_source, issuer, subject, identity_claims, expires_at, refresh_token_expires_at, last_used_at,
 	refresh_state, last_failure_code, last_failure_at, last_failure_trace_id, created_at, updated_at`
 
 const connectSessionColumns = `
-	id,  bucket_id, service_id, end_user_ref, state_hash,
+	id,  bucket_id, service_id, auth_type, auth_name, end_user_ref, state_hash,
 	nonce_hash, encrypted_dek, pkce_verifier, created_by_app_id, return_url, resource_input, requested_scopes, expires_at, used_at, created_at`
 
 func (s *postgresStore) UpsertConnectConfig(ctx context.Context, cfg ConnectConfig) (*ConnectConfig, error) {
@@ -32,15 +32,16 @@ func (s *postgresStore) UpsertConnectConfig(ctx context.Context, cfg ConnectConf
 	}
 	query := `
 		INSERT INTO fused_connect_configs (
-			bucket_id, service_id, auth_type, enabled,
+			bucket_id, service_id, auth_type, auth_name, enabled,
 			encrypted_dek, encrypted_client_id, encrypted_client_secret, redirect_uri
 		)
-		SELECT b.id, $2, $3, $4, $5, $6, $7, $8
+		SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9
 		FROM fused_buckets b
 		WHERE b.id = $1
 		ON CONFLICT ON CONSTRAINT uq_fused_connect_configs
 		DO UPDATE SET
 			auth_type = EXCLUDED.auth_type,
+			auth_name = EXCLUDED.auth_name,
 			enabled = EXCLUDED.enabled,
 			encrypted_dek = EXCLUDED.encrypted_dek,
 			encrypted_client_id = EXCLUDED.encrypted_client_id,
@@ -49,7 +50,7 @@ func (s *postgresStore) UpsertConnectConfig(ctx context.Context, cfg ConnectConf
 			updated_at = NOW()
 		RETURNING ` + connectConfigColumns
 	return scanConnectConfig(s.db.QueryRow(ctx, query,
-		cfg.BucketID, cfg.ServiceID, cfg.AuthType, cfg.Enabled,
+		cfg.BucketID, cfg.ServiceID, cfg.AuthType, cfg.AuthName, cfg.Enabled,
 		cfg.EncryptedDEK, cfg.EncryptedClientID, cfg.EncryptedClientSecret, cfg.RedirectURI,
 	))
 }
@@ -136,18 +137,19 @@ func (s *postgresStore) UpsertAuthConnection(ctx context.Context, conn AuthConne
 	query := `
 		INSERT INTO fused_auth_connections (
 			bucket_id, service_id, end_user_ref, created_by_app_id,
-			auth_type, encrypted_dek, access_token, refresh_token, id_token,
+			auth_type, auth_name, encrypted_dek, access_token, refresh_token, id_token,
 			token_type, scopes, scope_source, issuer, subject, identity_claims, expires_at, refresh_token_expires_at,
 			refresh_state, last_failure_code, last_failure_at, last_failure_trace_id
 		)
-		SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16, $17,
-		       $18, $19, $20, $21
+		SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18,
+		       $19, $20, $21, $22
 		FROM fused_buckets b
 		WHERE b.id = $1
 		ON CONFLICT ON CONSTRAINT uq_fused_auth_connections
 		DO UPDATE SET
 			created_by_app_id = EXCLUDED.created_by_app_id,
 			auth_type = EXCLUDED.auth_type,
+			auth_name = EXCLUDED.auth_name,
 			encrypted_dek = EXCLUDED.encrypted_dek,
 			access_token = EXCLUDED.access_token,
 			refresh_token = EXCLUDED.refresh_token,
@@ -168,16 +170,16 @@ func (s *postgresStore) UpsertAuthConnection(ctx context.Context, conn AuthConne
 		RETURNING ` + authConnectionColumns
 	return scanAuthConnection(s.db.QueryRow(ctx, query,
 		conn.BucketID, conn.ServiceID, conn.EndUserRef, uuidOrNil(conn.CreatedByAppID),
-		conn.AuthType, conn.EncryptedDEK, conn.EncryptedAccessToken, emptyStringOrNil(conn.EncryptedRefreshToken), emptyStringOrNil(conn.EncryptedIDToken),
+		conn.AuthType, conn.AuthName, conn.EncryptedDEK, conn.EncryptedAccessToken, emptyStringOrNil(conn.EncryptedRefreshToken), emptyStringOrNil(conn.EncryptedIDToken),
 		defaultString(conn.TokenType, "Bearer"), nonNilStrings(conn.Scopes), defaultString(conn.ScopeSource, "none"), conn.Issuer, conn.Subject,
 		jsonObjectBytes(conn.IdentityClaims), conn.ExpiresAt, conn.RefreshTokenExpiresAt, defaultString(conn.RefreshState, "ok"),
 		conn.LastFailureCode, conn.LastFailureAt, conn.LastFailureTraceID,
 	))
 }
 
-func (s *postgresStore) GetAuthConnection(ctx context.Context, bucketID, serviceID uuid.UUID, endUserRef string) (*AuthConnection, error) {
-	query := `SELECT ` + authConnectionColumns + ` FROM fused_auth_connections WHERE bucket_id = $1 AND service_id = $2 AND end_user_ref = $3`
-	conn, err := scanAuthConnection(s.db.QueryRow(ctx, query, bucketID, serviceID, endUserRef))
+func (s *postgresStore) GetAuthConnection(ctx context.Context, bucketID, serviceID uuid.UUID, endUserRef, authName string) (*AuthConnection, error) {
+	query := `SELECT ` + authConnectionColumns + ` FROM fused_auth_connections WHERE bucket_id = $1 AND service_id = $2 AND end_user_ref = $3 AND auth_name = $4`
+	conn, err := scanAuthConnection(s.db.QueryRow(ctx, query, bucketID, serviceID, endUserRef, authName))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -308,20 +310,23 @@ func (s *postgresStore) ListAuthConnectionsNeedingRefresh(ctx context.Context, c
 }
 
 func (s *postgresStore) CreateConnectSession(ctx context.Context, session ConnectSession) (*ConnectSession, error) {
+	if strings.TrimSpace(session.AuthType) == "" || strings.TrimSpace(session.AuthName) == "" {
+		return nil, ErrInvalidEncryptedAuthMaterial
+	}
 	if session.EncryptedPKCEVerifier != "" && (!looksWrappedDEK(session.EncryptedDEK) || !looksEncryptedValue(session.EncryptedPKCEVerifier)) {
 		return nil, ErrInvalidEncryptedAuthMaterial
 	}
 	query := `
 		INSERT INTO fused_connect_sessions (
-			bucket_id, service_id, end_user_ref, state_hash,
+			bucket_id, service_id, auth_type, auth_name, end_user_ref, state_hash,
 			nonce_hash, encrypted_dek, pkce_verifier, created_by_app_id, return_url, resource_input, requested_scopes, expires_at
 			)
-			SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+			SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
 			FROM fused_buckets b
 			WHERE b.id = $1
 			RETURNING ` + connectSessionColumns
 	return scanConnectSession(s.db.QueryRow(ctx, query,
-		session.BucketID, session.ServiceID, session.EndUserRef,
+		session.BucketID, session.ServiceID, session.AuthType, session.AuthName, session.EndUserRef,
 		session.StateHash, session.NonceHash, session.EncryptedDEK, session.EncryptedPKCEVerifier,
 		uuidOrNil(session.CreatedByAppID), session.ReturnURL, jsonObjectBytes(session.ResourceInputJSON), session.RequestedScopes, session.ExpiresAt,
 	))
@@ -364,7 +369,7 @@ type rowsScanner interface {
 func scanConnectConfig(row rowScanner) (*ConnectConfig, error) {
 	var cfg ConnectConfig
 	err := row.Scan(
-		&cfg.ID, &cfg.BucketID, &cfg.ServiceID, &cfg.AuthType, &cfg.Enabled,
+		&cfg.ID, &cfg.BucketID, &cfg.ServiceID, &cfg.AuthType, &cfg.AuthName, &cfg.Enabled,
 		&cfg.EncryptedDEK, &cfg.EncryptedClientID, &cfg.EncryptedClientSecret, &cfg.RedirectURI,
 		&cfg.CreatedAt, &cfg.UpdatedAt,
 	)
@@ -393,7 +398,7 @@ func collectWorkspaceConnectConfigs(rows rowsScanner) ([]WorkspaceConnectConfig,
 		var config WorkspaceConnectConfig
 		err := rows.Scan(
 			&config.ID, &config.BucketID, &config.ServiceID,
-			&config.AuthType, &config.Enabled, &config.EncryptedDEK,
+			&config.AuthType, &config.AuthName, &config.Enabled, &config.EncryptedDEK,
 			&config.EncryptedClientID, &config.EncryptedClientSecret,
 			&config.RedirectURI, &config.CreatedAt, &config.UpdatedAt, &config.BucketName,
 		)
@@ -411,7 +416,7 @@ func scanAuthConnection(row rowScanner) (*AuthConnection, error) {
 	var refreshToken, idToken *string
 	err := row.Scan(
 		&conn.ID, &conn.BucketID, &conn.ServiceID, &conn.EndUserRef, &createdBy,
-		&conn.AuthType, &conn.EncryptedDEK, &conn.EncryptedAccessToken, &refreshToken, &idToken, &conn.TokenType,
+		&conn.AuthType, &conn.AuthName, &conn.EncryptedDEK, &conn.EncryptedAccessToken, &refreshToken, &idToken, &conn.TokenType,
 		&conn.Scopes, &conn.ScopeSource, &conn.Issuer, &conn.Subject, &conn.IdentityClaims, &conn.ExpiresAt, &conn.RefreshTokenExpiresAt, &conn.LastUsedAt,
 		&conn.RefreshState, &conn.LastFailureCode, &conn.LastFailureAt, &conn.LastFailureTraceID, &conn.CreatedAt, &conn.UpdatedAt,
 	)
@@ -443,7 +448,7 @@ func scanConnectSession(row rowScanner) (*ConnectSession, error) {
 	var session ConnectSession
 	var createdBy *uuid.UUID
 	err := row.Scan(
-		&session.ID, &session.BucketID, &session.ServiceID, &session.EndUserRef,
+		&session.ID, &session.BucketID, &session.ServiceID, &session.AuthType, &session.AuthName, &session.EndUserRef,
 		&session.StateHash, &session.NonceHash, &session.EncryptedDEK, &session.EncryptedPKCEVerifier, &createdBy,
 		&session.ReturnURL, &session.ResourceInputJSON, &session.RequestedScopes, &session.ExpiresAt, &session.UsedAt, &session.CreatedAt,
 	)
@@ -454,7 +459,7 @@ func scanConnectSession(row rowScanner) (*ConnectSession, error) {
 }
 
 func validateConnectConfigMaterial(cfg ConnectConfig) error {
-	if !looksWrappedDEK(cfg.EncryptedDEK) ||
+	if strings.TrimSpace(cfg.AuthName) == "" || !looksWrappedDEK(cfg.EncryptedDEK) ||
 		!looksEncryptedValue(cfg.EncryptedClientID) ||
 		!looksEncryptedValue(cfg.EncryptedClientSecret) {
 		return ErrInvalidEncryptedAuthMaterial
@@ -463,7 +468,7 @@ func validateConnectConfigMaterial(cfg ConnectConfig) error {
 }
 
 func validateAuthConnectionMaterial(conn AuthConnection) error {
-	if !looksWrappedDEK(conn.EncryptedDEK) || !looksEncryptedValue(conn.EncryptedAccessToken) {
+	if strings.TrimSpace(conn.AuthName) == "" || !looksWrappedDEK(conn.EncryptedDEK) || !looksEncryptedValue(conn.EncryptedAccessToken) {
 		return ErrInvalidEncryptedAuthMaterial
 	}
 	for _, value := range []string{conn.EncryptedRefreshToken, conn.EncryptedIDToken} {

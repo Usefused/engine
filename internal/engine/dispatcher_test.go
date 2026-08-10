@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -15,7 +18,9 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/models"
+	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -23,6 +28,10 @@ import (
 
 type mockStream struct {
 	chunks [][]byte
+}
+
+func testRequestContent(mediaType, serialization string) *models.RequestContent {
+	return &models.RequestContent{MediaType: mediaType, Serialization: serialization}
 }
 
 func TestPrepareRequestPartsBindingPrecedence(t *testing.T) {
@@ -50,6 +59,56 @@ func TestPrepareRequestPartsBindingPrecedence(t *testing.T) {
 	}
 	if headers["X-Tenant"] != "forced-header" {
 		t.Fatalf("forced header = %q", headers["X-Tenant"])
+	}
+}
+
+func TestPrepareRequestPartsPathBindingPreservesReviewedSlashes(t *testing.T) {
+	service := &models.Service{BaseURL: "https://service.example.com"}
+	endpoint := &models.IntegrationObject{
+		Path: "/files/{resource}", Method: http.MethodGet,
+		Parameters: models.Parameters{{
+			Name: "resource", In: "path", PathEncoding: models.PathEncodingPreserveSlashes,
+		}},
+	}
+	binding := store.BucketValue{Location: "path", KeyName: "resource", Value: "folders/a b?c#d", Mode: "force"}
+	requestURL, _, _, err := prepareRequestParts(service, endpoint, nil, []store.BucketValue{binding})
+	if err != nil {
+		t.Fatalf("prepareRequestParts: %v", err)
+	}
+	if requestURL != "https://service.example.com/files/folders/a%20b%3Fc%23d" {
+		t.Fatalf("request URL = %q", requestURL)
+	}
+}
+
+func TestDispatcherExecuteStream_PathEncodingIsParameterDriven(t *testing.T) {
+	tests := []struct {
+		name         string
+		pathEncoding string
+		wantPath     string
+	}{
+		{name: "default escapes slash", wantPath: "/files/folders%2Fa%20b%3Fc%23d"},
+		{name: "preserve slashes", pathEncoding: models.PathEncodingPreserveSlashes, wantPath: "/files/folders/a%20b%3Fc%23d"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requestURI string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestURI = r.RequestURI
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			}))
+			defer server.Close()
+			endpoint := &models.IntegrationObject{
+				Path: "/files/{resource}", Method: http.MethodGet,
+				Parameters: models.Parameters{{Name: "resource", In: "path", PathEncoding: tt.pathEncoding}},
+			}
+			_, err := NewDispatcher().ExecuteStream(context.Background(), &models.Service{BaseURL: server.URL}, explicitAnonymousEndpoint(endpoint), map[string]any{"resource": "folders/a b?c#d"}, nil, nil, &mockStream{})
+			if err != nil {
+				t.Fatalf("ExecuteStream: %v", err)
+			}
+			if requestURI != tt.wantPath {
+				t.Fatalf("provider request URI = %q, want %q", requestURI, tt.wantPath)
+			}
+		})
 	}
 }
 
@@ -124,7 +183,7 @@ func TestDispatcherExecuteStream(t *testing.T) {
 	obj := &models.IntegrationObject{Path: "/test", Method: http.MethodGet}
 	stream := &mockStream{}
 
-	status, err := d.ExecuteStream(context.Background(), srv, obj, nil, nil, nil, stream)
+	status, err := d.ExecuteStream(context.Background(), srv, explicitAnonymousEndpoint(obj), nil, nil, nil, stream)
 
 	if err != nil {
 		t.Fatalf("ExecuteStream failed: %v", err)
@@ -157,7 +216,7 @@ func TestDispatcherExecuteStream_RecordsProviderTimings(t *testing.T) {
 	status, err := NewDispatcher().ExecuteStream(
 		ctx,
 		&models.Service{BaseURL: server.URL},
-		&models.IntegrationObject{Path: "/test", Method: http.MethodGet},
+		explicitAnonymousEndpoint(&models.IntegrationObject{Path: "/test", Method: http.MethodGet}),
 		nil,
 		nil,
 		nil,
@@ -205,7 +264,7 @@ func TestApplyAuthAcceptsOIDCAlias(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "https://api.example.test/profile", nil)
 	auths := models.AuthConfigs{{Type: "oidc", Name: "oidc_token"}}
 
-	applyAuth(req, auths, map[string]any{"oidc_token": "id-token"})
+	applySelectedAuth(req, auths, map[string]any{"oidc_token": "id-token"})
 
 	if got := req.Header.Get("Authorization"); got != "Bearer id-token" {
 		t.Fatalf("Authorization = %q, want bearer token", got)
@@ -213,7 +272,8 @@ func TestApplyAuthAcceptsOIDCAlias(t *testing.T) {
 }
 
 func TestApplyHTTPBasicAuthRequiresUsernameAndPassword(t *testing.T) {
-	auths := models.AuthConfigs{{Type: "http", Scheme: "basic", Name: "basicAuth"}}
+	auths := models.AuthConfigs{{Type: "http", Scheme: "basic", Name: "basicAuth", BasicPasswordMode: authrouting.BasicPasswordRequired}}
+	requirements := authrouting.Requirements{{Schemes: []authrouting.Requirement{{Scheme: "basicAuth"}}}}
 	tests := []struct {
 		name        string
 		credentials map[string]any
@@ -239,7 +299,8 @@ func TestApplyHTTPBasicAuthRequiresUsernameAndPassword(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "https://api.example.test/profile", nil)
-			applyAuth(req, auths, tt.credentials)
+			selected, _ := selectRequestAuth(auths, requirements, tt.credentials)
+			applySelectedAuth(req, selected, tt.credentials)
 			if gotHeader := req.Header.Get("Authorization") != ""; gotHeader != tt.wantHeader {
 				t.Fatalf("Authorization present = %v, want %v", gotHeader, tt.wantHeader)
 			}
@@ -263,7 +324,7 @@ func TestDispatcherExecuteStream_LogsProviderConnectionReuse(t *testing.T) {
 	srv := &models.Service{Name: "GitHub", BaseURL: server.URL}
 	obj := &models.IntegrationObject{Name: "repos.list", Path: "/test", Method: http.MethodGet}
 	for i := 0; i < 2; i++ {
-		if _, err := d.ExecuteStream(context.Background(), srv, obj, nil, nil, nil, &mockStream{}); err != nil {
+		if _, err := d.ExecuteStream(context.Background(), srv, explicitAnonymousEndpoint(obj), nil, nil, nil, &mockStream{}); err != nil {
 			t.Fatalf("ExecuteStream call %d failed: %v", i+1, err)
 		}
 	}
@@ -297,7 +358,7 @@ func TestDispatcherExecuteStream_Retry(t *testing.T) {
 	obj := &models.IntegrationObject{Path: "/test", Method: http.MethodGet}
 
 	stream := &mockStream{}
-	status, err := d.ExecuteStream(context.Background(), srv, obj, nil, nil, nil, stream)
+	status, err := d.ExecuteStream(context.Background(), srv, explicitAnonymousEndpoint(obj), nil, nil, nil, stream)
 
 	if err != nil {
 		t.Fatalf("ExecuteStream failed: %v", err)
@@ -338,7 +399,7 @@ func TestDispatcherExecuteStream_GraphQLReusesRESTExecutionSystem(t *testing.T) 
 
 	ctx := ContextWithIdempotencyKeyPresent(context.Background(), true)
 	stream := &mockStream{}
-	status, err := d.ExecuteStream(ctx, srv, obj, params, nil, nil, stream)
+	status, err := d.ExecuteStream(ctx, srv, explicitAnonymousEndpoint(obj), params, nil, nil, stream)
 	if err != nil {
 		t.Fatalf("ExecuteStream failed: %v", err)
 	}
@@ -374,7 +435,7 @@ func TestDispatcherExecuteStream_GraphQLPOSTWithoutIdempotencyKey_NoRetry(t *tes
 	obj := &models.IntegrationObject{Path: "/graphql", Method: http.MethodPost, GraphQLQuery: &query}
 
 	stream := &mockStream{}
-	_, err := d.ExecuteStream(context.Background(), srv, obj, map[string]any{"name": "widget"}, nil, nil, stream)
+	_, err := d.ExecuteStream(context.Background(), srv, explicitAnonymousEndpoint(obj), map[string]any{"name": "widget"}, nil, nil, stream)
 	if err == nil {
 		t.Fatalf("expected an error from the unretried 500")
 	}
@@ -391,7 +452,7 @@ func TestDispatcherExecuteStream_ExplicitGraphQLProtocolRequiresDocument(t *test
 		ProviderProtocol: models.ProviderProtocolGraphQL, OperationKind: models.OperationKindQuery,
 	}
 
-	_, err := d.ExecuteStream(context.Background(), srv, obj, nil, nil, nil, &mockStream{})
+	_, err := d.ExecuteStream(context.Background(), srv, explicitAnonymousEndpoint(obj), nil, nil, nil, &mockStream{})
 
 	if err == nil || !strings.Contains(err.Error(), "missing its query document") {
 		t.Fatalf("expected missing GraphQL document error, got %v", err)
@@ -414,27 +475,81 @@ func TestDispatcherGraphQLExecutionRecordsSafeProtocolAttributes(t *testing.T) {
 		Name: "viewer", Method: http.MethodPost, Path: "/graphql", GraphQLQuery: &query,
 		ProviderProtocol: models.ProviderProtocolGraphQL, OperationKind: models.OperationKindQuery,
 	}
-	if _, err := NewDispatcher().ExecuteStream(context.Background(), &models.Service{Name: "test", BaseURL: server.URL}, obj, nil, nil, nil, &mockStream{}); err != nil {
+	ctx, executionSpan := provider.Tracer("test").Start(context.Background(), "engine.execution")
+	if _, err := NewDispatcher().ExecuteStream(ctx, &models.Service{Name: "test", BaseURL: server.URL}, explicitAnonymousEndpoint(obj), nil, nil, nil, &mockStream{}); err != nil {
 		t.Fatalf("ExecuteStream: %v", err)
 	}
+	executionSpan.End()
 
-	for _, span := range recorder.Ended() {
-		if span.Name() != "engine.dispatch.vendor_call" {
-			continue
-		}
-		attributes := map[string]string{}
-		for _, attr := range span.Attributes() {
-			attributes[string(attr.Key)] = attr.Value.AsString()
-			if strings.Contains(string(attr.Key), "query") || strings.Contains(string(attr.Key), "variables") {
-				t.Fatalf("sensitive GraphQL payload attribute recorded: %s", attr.Key)
-			}
-		}
-		if attributes["provider.protocol"] != "graphql" || attributes["graphql.operation.kind"] != "query" {
-			t.Fatalf("unexpected protocol attributes: %#v", attributes)
-		}
-		return
+	executionAttributes := safeStringSpanAttributes(t, recordedSpan(t, recorder.Ended(), "engine.execution"))
+	if executionAttributes["request.serialization"] != "graphql" || executionAttributes["request.media_family"] != "json" {
+		t.Fatalf("unexpected request content attributes: %#v", executionAttributes)
 	}
-	t.Fatal("provider call span was not recorded")
+	providerAttributes := safeStringSpanAttributes(t, recordedSpan(t, recorder.Ended(), "engine.dispatch.vendor_call"))
+	if providerAttributes["provider.protocol"] != "graphql" || providerAttributes["graphql.operation.kind"] != "query" {
+		t.Fatalf("unexpected protocol attributes: %#v", providerAttributes)
+	}
+}
+
+func recordedSpan(t *testing.T, spans []sdktrace.ReadOnlySpan, name string) sdktrace.ReadOnlySpan {
+	t.Helper()
+	for _, span := range spans {
+		if span.Name() == name {
+			return span
+		}
+	}
+	t.Fatalf("span %q was not recorded", name)
+	return nil
+}
+
+func safeStringSpanAttributes(t *testing.T, span sdktrace.ReadOnlySpan) map[string]string {
+	t.Helper()
+	attributes := make(map[string]string, len(span.Attributes()))
+	for _, attr := range span.Attributes() {
+		key := string(attr.Key)
+		if isSensitiveRequestAttribute(key) {
+			t.Fatalf("sensitive request attribute recorded: %s", key)
+		}
+		attributes[key] = attr.Value.AsString()
+	}
+	return attributes
+}
+
+func isSensitiveRequestAttribute(key string) bool {
+	for _, fragment := range []string{"body", "header", "query", "variables"} {
+		if strings.Contains(key, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRequestContentTelemetryUsesBoundedValues(t *testing.T) {
+	query := "query Viewer { viewer { id } }"
+	tests := []struct {
+		name          string
+		operation     *models.IntegrationObject
+		serialization string
+		mediaFamily   string
+	}{
+		{name: "no REST body", operation: &models.IntegrationObject{}, serialization: "none", mediaFamily: "none"},
+		{name: "JSON", operation: &models.IntegrationObject{RequestContent: testRequestContent("application/vnd.vendor+json", models.RequestSerializationJSON)}, serialization: "json", mediaFamily: "json"},
+		{name: "form", operation: &models.IntegrationObject{RequestContent: testRequestContent("application/x-www-form-urlencoded", models.RequestSerializationForm)}, serialization: "form_urlencoded", mediaFamily: "form"},
+		{name: "multipart", operation: &models.IntegrationObject{RequestContent: testRequestContent("multipart/form-data", models.RequestSerializationMultipart)}, serialization: "multipart", mediaFamily: "multipart"},
+		{name: "raw text", operation: &models.IntegrationObject{RequestContent: testRequestContent("text/plain; charset=utf-8", models.RequestSerializationRaw)}, serialization: "raw", mediaFamily: "text"},
+		{name: "raw binary", operation: &models.IntegrationObject{RequestContent: testRequestContent("application/octet-stream", models.RequestSerializationRaw)}, serialization: "raw", mediaFamily: "binary"},
+		{name: "unknown", operation: &models.IntegrationObject{RequestContent: testRequestContent("application/vnd.unbounded", "provider-specific")}, serialization: "unknown", mediaFamily: "other"},
+		{name: "GraphQL", operation: &models.IntegrationObject{GraphQLQuery: &query}, serialization: "graphql", mediaFamily: "json"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			serialization, mediaFamily := requestContentTelemetry(tt.operation)
+			if serialization != tt.serialization || mediaFamily != tt.mediaFamily {
+				t.Fatalf("requestContentTelemetry() = (%q, %q), want (%q, %q)", serialization, mediaFamily, tt.serialization, tt.mediaFamily)
+			}
+		})
+	}
 }
 
 // TestDispatcherExecuteStream_NoRetryWithoutConfig is the strict half of the
@@ -454,7 +569,7 @@ func TestDispatcherExecuteStream_NoRetryWithoutConfig(t *testing.T) {
 	obj := &models.IntegrationObject{Path: "/test", Method: http.MethodGet}
 
 	stream := &mockStream{}
-	_, err := d.ExecuteStream(context.Background(), srv, obj, nil, nil, nil, stream)
+	_, err := d.ExecuteStream(context.Background(), srv, explicitAnonymousEndpoint(obj), nil, nil, nil, stream)
 
 	if err == nil {
 		t.Fatal("expected an error from the single failed attempt")
@@ -486,7 +601,7 @@ func TestDispatcherExecuteStream_SDKOverrideWithoutServiceConfig(t *testing.T) {
 	maxRetries := 2
 	ctx := ContextWithRetryOverride(context.Background(), &RetryOverride{MaxRetries: &maxRetries})
 	stream := &mockStream{}
-	status, err := d.ExecuteStream(ctx, srv, obj, nil, nil, nil, stream)
+	status, err := d.ExecuteStream(ctx, srv, explicitAnonymousEndpoint(obj), nil, nil, nil, stream)
 
 	if err != nil {
 		t.Fatalf("ExecuteStream failed: %v", err)
@@ -517,7 +632,7 @@ func TestDispatcherExecuteStream_POSTWithoutIdempotencyKey_NoRetry(t *testing.T)
 	obj := &models.IntegrationObject{Path: "/test", Method: http.MethodPost}
 
 	stream := &mockStream{}
-	_, err := d.ExecuteStream(context.Background(), srv, obj, nil, nil, nil, stream)
+	_, err := d.ExecuteStream(context.Background(), srv, explicitAnonymousEndpoint(obj), nil, nil, nil, stream)
 
 	if err == nil {
 		t.Fatal("expected an error from the single failed attempt")
@@ -548,7 +663,7 @@ func TestDispatcherExecuteStream_POSTWithIdempotencyKey_Retries(t *testing.T) {
 
 	ctx := ContextWithIdempotencyKeyPresent(context.Background(), true)
 	stream := &mockStream{}
-	status, err := d.ExecuteStream(ctx, srv, obj, nil, nil, nil, stream)
+	status, err := d.ExecuteStream(ctx, srv, explicitAnonymousEndpoint(obj), nil, nil, nil, stream)
 
 	if err != nil {
 		t.Fatalf("ExecuteStream failed: %v", err)
@@ -582,7 +697,7 @@ func TestDispatcherExecuteStream_GETWithoutIdempotencyKey_StillRetries(t *testin
 	obj := &models.IntegrationObject{Path: "/test", Method: http.MethodGet}
 
 	stream := &mockStream{}
-	status, err := d.ExecuteStream(context.Background(), srv, obj, nil, nil, nil, stream)
+	status, err := d.ExecuteStream(context.Background(), srv, explicitAnonymousEndpoint(obj), nil, nil, nil, stream)
 
 	if err != nil {
 		t.Fatalf("ExecuteStream failed: %v", err)
@@ -614,7 +729,7 @@ func TestDispatcherExecuteStream_SDKOverrideClampedToServiceCeiling(t *testing.T
 	requested := 10
 	ctx := ContextWithRetryOverride(context.Background(), &RetryOverride{MaxRetries: &requested})
 	stream := &mockStream{}
-	_, _ = d.ExecuteStream(ctx, srv, obj, nil, nil, nil, stream)
+	_, _ = d.ExecuteStream(ctx, srv, explicitAnonymousEndpoint(obj), nil, nil, nil, stream)
 
 	if attempts != 2 {
 		t.Errorf("expected attempts clamped to service ceiling (1 retry = 2 attempts), got %d", attempts)
@@ -645,14 +760,18 @@ func TestDispatcherExecuteStream_Paginated(t *testing.T) {
 		Path:   "/test",
 		Method: http.MethodGet,
 		Pagination: &models.PaginationConfig{
-			Type:         "cursor",
-			RequestParam: "cursor",
-			ResponsePath: "meta.next_cursor",
+			Version:   2,
+			Type:      "cursor",
+			ItemsPath: "$.data",
+			Cursor: &paginationpolicy.CursorConfig{
+				Request: paginationpolicy.RequestTarget{Location: "query", Name: "cursor"},
+				Next:    paginationpolicy.ValueSource{Location: "body", Path: "$.meta.next_cursor", ValueType: "string"},
+			},
 		},
 	}
 	stream := &mockStream{}
 
-	status, err := d.ExecuteStream(context.Background(), srv, obj, nil, nil, nil, stream)
+	status, err := d.ExecuteStream(context.Background(), srv, explicitAnonymousEndpoint(obj), nil, nil, nil, stream)
 
 	if err != nil {
 		t.Fatalf("ExecuteStream Paginated failed: %v", err)
@@ -759,7 +878,7 @@ func TestDispatcherExecuteStream_SSE(t *testing.T) {
 	}
 	stream := &mockStream{}
 
-	status, err := d.ExecuteStream(context.Background(), srv, obj, nil, nil, nil, stream)
+	status, err := d.ExecuteStream(context.Background(), srv, explicitAnonymousEndpoint(obj), nil, nil, nil, stream)
 	if err != nil {
 		t.Fatalf("SSE ExecuteStream failed: %v", err)
 	}
@@ -828,6 +947,9 @@ func TestPrepareRequestParts_FormURLEncoded(t *testing.T) {
 	obj := &models.IntegrationObject{
 		Path:   "/charges",
 		Method: http.MethodPost,
+		RequestContent: testRequestContent(
+			"application/x-www-form-urlencoded", models.RequestSerializationForm,
+		),
 	}
 	params := map[string]any{
 		"amount":   2000,
@@ -864,6 +986,9 @@ func TestPrepareRequestParts_PathParameterLeaks(t *testing.T) {
 	obj := &models.IntegrationObject{
 		Path:   "/repos/{owner}/{repo}/issues",
 		Method: http.MethodPost,
+		RequestContent: testRequestContent(
+			"application/json", models.RequestSerializationJSON,
+		),
 		// Explicitly simulate missing definitions in obj.Parameters
 		Parameters: []models.Parameter{},
 	}
@@ -925,11 +1050,13 @@ func TestPrepareRequestParts_HeaderInjection(t *testing.T) {
 
 func TestPrepareRequestParts_DynamicFormURLEncoded(t *testing.T) {
 	srv := &models.Service{BaseURL: "https://api.example.com"}
-	// This object requires form encoding but the service doesn't have it by default.
+	// The reviewed operation, not a service default, selects form serialization.
 	obj := &models.IntegrationObject{
-		Path:     "/test",
-		Method:   http.MethodPost,
-		Encoding: "application/x-www-form-urlencoded",
+		Path:   "/test",
+		Method: http.MethodPost,
+		RequestContent: testRequestContent(
+			"application/x-www-form-urlencoded", models.RequestSerializationForm,
+		),
 	}
 
 	params := map[string]any{
@@ -949,6 +1076,66 @@ func TestPrepareRequestParts_DynamicFormURLEncoded(t *testing.T) {
 	buf.ReadFrom(bodyReader)
 	if buf.String() != "amount=1000" {
 		t.Errorf("Expected form-encoded payload, got: %s", buf.String())
+	}
+}
+
+func TestPrepareRequestParts_PreservesReviewedJSONMediaType(t *testing.T) {
+	srv := &models.Service{BaseURL: "https://api.example.com"}
+	obj := &models.IntegrationObject{
+		Path:   "/widgets",
+		Method: http.MethodPost,
+		RequestContent: testRequestContent(
+			"application/vnd.api+json", models.RequestSerializationJSON,
+		),
+	}
+
+	_, headers, bodyReader, err := prepareRequestParts(srv, obj, map[string]any{
+		"name": "one", "_headers": map[string]any{"content-type": "text/plain"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("prepareRequestParts failed: %v", err)
+	}
+	if headers["Content-Type"] != obj.RequestContent.MediaType || headers["content-type"] != "" {
+		t.Fatalf("headers = %#v, want authoritative imported media type", headers)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(bodyReader).Decode(&body); err != nil {
+		t.Fatalf("body was not valid JSON: %v", err)
+	}
+	if body["name"] != "one" {
+		t.Fatalf("body = %#v, want imported request parameters", body)
+	}
+}
+
+func TestDispatcherExecuteStream_RequestContentOverridesServiceDefault(t *testing.T) {
+	var gotContentType string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotContentType = r.Header.Get("Content-Type")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	dispatcher := NewDispatcher()
+	service := &models.Service{
+		BaseURL:        server.URL,
+		DefaultHeaders: models.DefaultHeaders{"Content-Type": "application/x-www-form-urlencoded"},
+	}
+	endpoint := &models.IntegrationObject{
+		Path: "/widgets", Method: http.MethodPost,
+		RequestContent: testRequestContent("application/merge-patch+json", models.RequestSerializationJSON),
+	}
+	status, err := dispatcher.ExecuteStream(
+		context.Background(), service, explicitAnonymousEndpoint(endpoint), map[string]any{"enabled": true}, nil, nil, &mockStream{},
+	)
+	if err != nil {
+		t.Fatalf("ExecuteStream failed: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want %d", status, http.StatusOK)
+	}
+	if gotContentType != endpoint.RequestContent.MediaType {
+		t.Fatalf("provider Content-Type = %q, want %q", gotContentType, endpoint.RequestContent.MediaType)
 	}
 }
 
@@ -1090,33 +1277,197 @@ func TestBuildBaseURL(t *testing.T) {
 	}
 }
 
-func TestResolveContentType(t *testing.T) {
-	srv := &models.Service{
-		DefaultHeaders: map[string]string{"Content-Type": "application/xml"},
+func TestPrepareRequestParts_NilRequestContentMeansNoRESTBody(t *testing.T) {
+	service := &models.Service{BaseURL: "https://api.example.com"}
+	endpoint := &models.IntegrationObject{Path: "/widgets", Method: http.MethodPost}
+	_, headers, body, err := prepareRequestParts(service, endpoint, map[string]any{"name": "ignored"}, nil)
+	if err != nil {
+		t.Fatalf("prepareRequestParts: %v", err)
 	}
-	obj := &models.IntegrationObject{Encoding: "text/plain"}
-	headers := map[string]string{"content-type": "text/html"}
-
-	// Priority 1: User injected header
-	if ct := resolveContentType(obj, srv, headers); ct != "text/html" {
-		t.Errorf("Expected text/html, got %s", ct)
+	if body != nil || headers["Content-Type"] != "" {
+		t.Fatalf("nil request content produced body=%v headers=%#v", body, headers)
 	}
+}
 
-	// Priority 2: Service default
-	delete(headers, "content-type")
-	if ct := resolveContentType(obj, srv, headers); ct != "application/xml" {
-		t.Errorf("Expected application/xml, got %s", ct)
+func TestPrepareRequestParts_RequestContentRequiresMediaType(t *testing.T) {
+	endpoint := &models.IntegrationObject{
+		Path: "/widgets", Method: http.MethodPost,
+		RequestContent: testRequestContent("", models.RequestSerializationJSON),
 	}
-
-	// Priority 3: Endpoint encoding
-	srv.DefaultHeaders = map[string]string{}
-	if ct := resolveContentType(obj, srv, headers); ct != "text/plain" {
-		t.Errorf("Expected text/plain, got %s", ct)
+	_, _, _, err := prepareRequestParts(&models.Service{BaseURL: "https://api.example.com"}, endpoint, map[string]any{"name": "one"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "media_type") {
+		t.Fatalf("missing media_type error = %v", err)
 	}
+}
 
-	// Fallback
-	obj.Encoding = ""
-	if ct := resolveContentType(obj, srv, headers); ct != "application/json" {
-		t.Errorf("Expected application/json, got %s", ct)
+func TestPrepareRequestParts_UnsupportedRequestSerializationFails(t *testing.T) {
+	for _, serialization := range []string{"protobuf"} {
+		t.Run(serialization, func(t *testing.T) {
+			endpoint := &models.IntegrationObject{Path: "/widgets", Method: http.MethodPost, RequestContent: testRequestContent("application/octet-stream", serialization)}
+			_, _, _, err := prepareRequestParts(&models.Service{BaseURL: "https://api.example.com"}, endpoint, map[string]any{"name": "one"}, nil)
+			if err == nil || !strings.Contains(err.Error(), "serialization") {
+				t.Fatalf("serialization %q error = %v", serialization, err)
+			}
+		})
+	}
+}
+
+type capturedMultipartPart struct {
+	contentType string
+	payload     []byte
+}
+
+func readMultipartParts(t *testing.T, contentType string, body io.Reader) map[string]capturedMultipartPart {
+	t.Helper()
+	_, parameters, err := mime.ParseMediaType(contentType)
+	if err != nil || parameters["boundary"] == "" {
+		t.Fatalf("multipart Content-Type %q has no valid boundary: %v", contentType, err)
+	}
+	reader := multipart.NewReader(body, parameters["boundary"])
+	parts := make(map[string]capturedMultipartPart)
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			return parts
+		}
+		if err != nil {
+			t.Fatalf("read multipart part: %v", err)
+		}
+		payload, err := io.ReadAll(part)
+		if err != nil {
+			t.Fatalf("read multipart payload: %v", err)
+		}
+		parts[part.FormName()] = capturedMultipartPart{contentType: part.Header.Get("Content-Type"), payload: payload}
+	}
+}
+
+func TestPrepareRequestParts_MultipartUsesReviewedPartEncoding(t *testing.T) {
+	endpoint := &models.IntegrationObject{
+		Path: "/uploads", Method: http.MethodPost,
+		RequestContent: &models.RequestContent{
+			MediaType: "multipart/form-data", Serialization: models.RequestSerializationMultipart,
+			Parts: map[string]models.RequestPart{
+				"file": {ContentType: "image/png", BinaryEncoding: models.RequestBinaryEncodingBase64},
+				"blob": {BinaryEncoding: models.RequestBinaryEncodingBase64},
+			},
+		},
+	}
+	_, headers, body, err := prepareRequestParts(&models.Service{BaseURL: "https://api.example.com"}, endpoint, map[string]any{
+		"name": "widget", "count": 3, "metadata": map[string]any{"active": true},
+		"file": "aGVsbG8=", "blob": "AAE=",
+	}, nil)
+	if err != nil {
+		t.Fatalf("prepareRequestParts: %v", err)
+	}
+	parts := readMultipartParts(t, headers["Content-Type"], body)
+	if string(parts["name"].payload) != "widget" || string(parts["count"].payload) != "3" {
+		t.Fatalf("scalar multipart parts = %#v", parts)
+	}
+	if string(parts["metadata"].payload) != `{"active":true}` || parts["metadata"].contentType != "application/json" {
+		t.Fatalf("composite multipart part = %#v", parts["metadata"])
+	}
+	if string(parts["file"].payload) != "hello" || parts["file"].contentType != "image/png" {
+		t.Fatalf("configured binary multipart part = %#v", parts["file"])
+	}
+	if !bytes.Equal(parts["blob"].payload, []byte{0, 1}) || parts["blob"].contentType != "application/octet-stream" {
+		t.Fatalf("default binary multipart part = %#v", parts["blob"])
+	}
+}
+
+func TestPrepareRequestParts_MultipartRejectsUnsafeValues(t *testing.T) {
+	tests := []struct {
+		name        string
+		part        models.RequestPart
+		value       any
+		wantMessage string
+	}{
+		{name: "base64 type", part: models.RequestPart{BinaryEncoding: "base64"}, value: 42, wantMessage: `requires a base64 string`},
+		{name: "invalid base64", part: models.RequestPart{BinaryEncoding: "base64"}, value: "not-base64", wantMessage: `contains invalid base64`},
+		{name: "unsupported encoding", part: models.RequestPart{BinaryEncoding: "hex"}, value: "00", wantMessage: `unsupported binary_encoding`},
+		{name: "invalid content type", part: models.RequestPart{ContentType: "bad\r\nInjected: yes"}, value: "value", wantMessage: `invalid content_type`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			endpoint := &models.IntegrationObject{Path: "/uploads", Method: http.MethodPost, RequestContent: &models.RequestContent{
+				MediaType: "multipart/form-data", Serialization: models.RequestSerializationMultipart,
+				Parts: map[string]models.RequestPart{"file": tt.part},
+			}}
+			_, _, _, err := prepareRequestParts(&models.Service{BaseURL: "https://api.example.com"}, endpoint, map[string]any{"file": tt.value}, nil)
+			if err == nil || !strings.Contains(err.Error(), tt.wantMessage) {
+				t.Fatalf("multipart error = %v, want %q", err, tt.wantMessage)
+			}
+		})
+	}
+}
+
+func TestPrepareRequestParts_RawUsesConfiguredPayload(t *testing.T) {
+	tests := []struct {
+		name           string
+		value          any
+		binaryEncoding string
+		want           []byte
+	}{
+		{name: "string", value: "plain text", want: []byte("plain text")},
+		{name: "bytes", value: []byte{0, 1}, want: []byte{0, 1}},
+		{name: "base64", value: "aGVsbG8=", binaryEncoding: models.RequestBinaryEncodingBase64, want: []byte("hello")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			endpoint := &models.IntegrationObject{Path: "/raw", Method: http.MethodPost, RequestContent: &models.RequestContent{
+				MediaType: "application/octet-stream", Serialization: models.RequestSerializationRaw,
+				PayloadParameter: "body", BinaryEncoding: tt.binaryEncoding,
+			}}
+			_, _, body, err := prepareRequestParts(&models.Service{BaseURL: "https://api.example.com"}, endpoint, map[string]any{"body": tt.value}, nil)
+			if err != nil {
+				t.Fatalf("prepareRequestParts: %v", err)
+			}
+			payload, err := io.ReadAll(body)
+			if err != nil || !bytes.Equal(payload, tt.want) {
+				t.Fatalf("raw payload = %q, err=%v, want %q", payload, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestPrepareRequestParts_RawRejectsInvalidPayload(t *testing.T) {
+	tests := []struct {
+		name        string
+		content     *models.RequestContent
+		params      map[string]any
+		wantMessage string
+	}{
+		{name: "missing convention", content: testRequestContent("text/plain", models.RequestSerializationRaw), params: map[string]any{"body": "x"}, wantMessage: `payload_parameter is required`},
+		{name: "missing payload", content: &models.RequestContent{MediaType: "text/plain", Serialization: models.RequestSerializationRaw, PayloadParameter: "body"}, params: map[string]any{}, wantMessage: `missing raw request payload parameter "body"`},
+		{name: "ambiguous extras", content: &models.RequestContent{MediaType: "text/plain", Serialization: models.RequestSerializationRaw, PayloadParameter: "body"}, params: map[string]any{"body": "value", "extra": "lossy"}, wantMessage: `parameters outside payload_parameter "body"`},
+		{name: "wrong type", content: &models.RequestContent{MediaType: "text/plain", Serialization: models.RequestSerializationRaw, PayloadParameter: "body"}, params: map[string]any{"body": map[string]any{"not": "JSON"}}, wantMessage: `must be a string or byte array`},
+		{name: "invalid base64", content: &models.RequestContent{MediaType: "application/octet-stream", Serialization: models.RequestSerializationRaw, PayloadParameter: "body", BinaryEncoding: "base64"}, params: map[string]any{"body": "not-base64"}, wantMessage: `contains invalid base64`},
+		{name: "unsupported encoding", content: &models.RequestContent{MediaType: "application/octet-stream", Serialization: models.RequestSerializationRaw, PayloadParameter: "body", BinaryEncoding: "hex"}, params: map[string]any{"body": "00"}, wantMessage: `unsupported binary_encoding`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			endpoint := &models.IntegrationObject{Path: "/raw", Method: http.MethodPost, RequestContent: tt.content}
+			_, _, _, err := prepareRequestParts(&models.Service{BaseURL: "https://api.example.com"}, endpoint, tt.params, nil)
+			if err == nil || !strings.Contains(err.Error(), tt.wantMessage) {
+				t.Fatalf("raw error = %v, want %q", err, tt.wantMessage)
+			}
+		})
+	}
+}
+
+func TestPrepareRequestParts_RequiredRequestContentRejectsEmptyBody(t *testing.T) {
+	for _, serialization := range []string{models.RequestSerializationJSON, models.RequestSerializationForm, models.RequestSerializationMultipart} {
+		t.Run(serialization, func(t *testing.T) {
+			mediaType := "application/json"
+			if serialization == models.RequestSerializationMultipart {
+				mediaType = "multipart/form-data"
+			}
+			content := testRequestContent(mediaType, serialization)
+			content.Required = true
+			endpoint := &models.IntegrationObject{Path: "/required", Method: http.MethodPost, RequestContent: content}
+			_, _, _, err := prepareRequestParts(&models.Service{BaseURL: "https://api.example.com"}, endpoint, map[string]any{}, nil)
+			if err == nil || !strings.Contains(err.Error(), "missing required request body") {
+				t.Fatalf("required %s body error = %v", serialization, err)
+			}
+		})
 	}
 }

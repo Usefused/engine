@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -24,10 +25,59 @@ import (
 	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
+	"github.com/Usefused/engine/internal/shared/paginationpolicy"
+	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
+	"go.opentelemetry.io/otel"
 )
+
+type workspaceCapacityStoreStub struct {
+	store.Store
+	current      int
+	projected    int
+	desiredIDs   []uuid.UUID
+	removableIDs []uuid.UUID
+}
+
+func (s *workspaceCapacityStoreStub) CountProjectedActiveServices(_ context.Context, desiredIDs, removableIDs []uuid.UUID) (int, int, error) {
+	s.desiredIDs = append([]uuid.UUID(nil), desiredIDs...)
+	s.removableIDs = append([]uuid.UUID(nil), removableIDs...)
+	return s.current, s.projected, nil
+}
+
+func TestCheckWorkspaceServiceLimitUsesLiveProjectedCount(t *testing.T) {
+	original := entitlement.LiveEntitlement.Load()
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{MaxServices: models.IntPtr(5)})
+	t.Cleanup(func() { entitlement.LiveEntitlement.Store(original) })
+
+	existingID, replacementID := uuid.New(), uuid.New()
+	desired := workspaceDesiredState{Services: map[uuid.UUID]workspaceDesiredService{
+		existingID: {ServiceID: existingID}, replacementID: {ServiceID: replacementID},
+	}}
+	removedID := uuid.New()
+	previous := map[uuid.UUID]workspaceManagedService{
+		existingID: {ServiceID: existingID.String()},
+		removedID:  {ServiceID: removedID.String()},
+	}
+	capacity := &workspaceCapacityStoreStub{current: 5, projected: 5}
+	_, span := otel.Tracer("test").Start(context.Background(), "service-capacity")
+	defer span.End()
+
+	if err := checkWorkspaceServiceLimit(context.Background(), span, capacity, desired, previous); err != nil {
+		t.Fatalf("replacement at the ceiling should be allowed: %v", err)
+	}
+	if len(capacity.desiredIDs) != 2 || len(capacity.removableIDs) != 1 {
+		t.Fatalf("capacity inputs desired=%v removable=%v", capacity.desiredIDs, capacity.removableIDs)
+	}
+
+	capacity.projected = 6
+	if err := checkWorkspaceServiceLimit(context.Background(), span, capacity, desired, previous); err == nil || err.Error() != "services limit reached (5/5)" {
+		t.Fatalf("net addition at the ceiling should fail with a stable limit error, got %v", err)
+	}
+}
 
 type requiredPermissionResponse struct {
 	Permission   string    `json:"permission"`
@@ -242,10 +292,14 @@ func TestWorkspaceExecutionPolicy_PaginationSurvivesJSONRoundTrip(t *testing.T) 
 	timeoutMs := 45000
 	original := workspaceExecutionPolicy{
 		Public:    boolPtrEngineTest(true),
-		RateLimit: &rateLimitConfig{Strategy: "fixed_window", RequestsPerSecond: 10},
+		RateLimit: apiRateLimitFixture(10),
 		TimeoutMs: &timeoutMs,
 		Pagination: &paginationConfig{
-			Type: "cursor", RequestParam: "after", ResponsePath: "page.next",
+			Version: 2, Type: "cursor", ItemsPath: "$.items",
+			Cursor: &paginationpolicy.CursorConfig{
+				Request: paginationpolicy.RequestTarget{Location: "query", Name: "after"},
+				Next:    paginationpolicy.ValueSource{Location: "body", Path: "$.page.next", ValueType: "string"},
+			},
 		},
 	}
 
@@ -253,7 +307,7 @@ func TestWorkspaceExecutionPolicy_PaginationSurvivesJSONRoundTrip(t *testing.T) 
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if !strings.Contains(string(raw), `"pagination":{"type":"cursor","request_param":"after","response_path":"page.next"}`) {
+	if !strings.Contains(string(raw), `"pagination":{"version":2,"type":"cursor"`) || !strings.Contains(string(raw), `"items_path":"$.items"`) {
 		t.Fatalf("expected pagination to marshal under the registry's json tags, got %s", raw)
 	}
 
@@ -261,12 +315,20 @@ func TestWorkspaceExecutionPolicy_PaginationSurvivesJSONRoundTrip(t *testing.T) 
 	if err := json.Unmarshal(raw, &roundTripped); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if roundTripped.Pagination == nil || *roundTripped.Pagination != *original.Pagination {
+	if roundTripped.Pagination == nil || !reflect.DeepEqual(roundTripped.Pagination, original.Pagination) {
 		t.Fatalf("pagination did not survive round-trip: got %#v, want %#v", roundTripped.Pagination, original.Pagination)
 	}
 	if roundTripped.TimeoutMs == nil || *roundTripped.TimeoutMs != timeoutMs {
 		t.Fatalf("timeout_ms did not survive round-trip: got %v", roundTripped.TimeoutMs)
 	}
+}
+
+func apiRateLimitFixture(limit int64) *rateLimitConfig {
+	return &rateLimitConfig{Version: 2, Policies: []ratelimitpolicy.Policy{{
+		Name: "requests", Unit: "requests", Scope: "service_version", DefaultCost: 1,
+		OperationCosts: map[string]int64{}, Algorithm: "fixed_window",
+		FixedWindow: &ratelimitpolicy.FixedWindow{Limit: limit, DurationMS: 1_000},
+	}}}
 }
 
 func TestValidateWorkspaceConfigDocumentRejectsInvalidExecutionTimeout(t *testing.T) {
@@ -1470,7 +1532,7 @@ func TestWorkspaceConfigPlanHandler_PlansVersionPublicAndExecutionPolicyChange(t
 					"versions": [{
 						"version": "2026-07-01",
 						"public": false,
-						"execution_policy": {"public": true, "rate_limit": {"strategy": "fixed", "requests_per_second": 5, "requests_per_minute": 300}}
+						"execution_policy": {"public": true, "rate_limit": {"version":2,"policies":[{"name":"requests","unit":"requests","scope":"service_version","default_cost":1,"operation_costs":{},"algorithm":"fixed_window","fixed_window":{"limit":5,"duration_ms":1000}}]}}
 					}]
 				}
 			}
@@ -1823,9 +1885,10 @@ func TestWorkspaceConfigApplyHandler_UpsertsBasicAuthSecretsFromRuntimeConfig(t 
 		serviceMetadata: &fusedobject.ServiceMetadata{
 			ID: svcID,
 			AuthConfigs: fusedobject.AuthConfigs{{
-				Name:   "basicAuth",
-				Type:   "http",
-				Scheme: "basic",
+				Name:              "basicAuth",
+				Type:              "http",
+				Scheme:            "basic",
+				BasicPasswordMode: authrouting.BasicPasswordRequired,
 			}},
 		},
 	}
@@ -2406,7 +2469,11 @@ func (m *mockRegistryClient) FetchServiceMetadataBatch(_ context.Context, refs [
 func (m *mockRegistryClient) FetchServiceVersionAuthConfigs(_ context.Context, refs []sandbox.ServiceVersionRef, _ string) ([]sandbox.ServiceVersionAuthConfigs, error) {
 	out := make([]sandbox.ServiceVersionAuthConfigs, 0, len(refs))
 	for _, ref := range refs {
-		out = append(out, sandbox.ServiceVersionAuthConfigs{ServiceID: ref.ServiceID, Version: ref.Version})
+		var authConfigs fusedobject.AuthConfigs
+		if m.serviceMetadata != nil {
+			authConfigs = m.serviceMetadata.AuthConfigs
+		}
+		out = append(out, sandbox.ServiceVersionAuthConfigs{ServiceID: ref.ServiceID, Version: ref.Version, AuthConfigs: authConfigs})
 	}
 	return out, nil
 }
@@ -2698,7 +2765,7 @@ func TestWorkspaceConfigApplyHandler_AppliesVersionPublicAndExecutionPolicyChang
 	s := &workspaceTestStore{accountID: uuid.New()}
 	resolved := []byte(`{"services":{"stripe":{` +
 		`"service_id":"` + svcID.String() + `",` +
-		`"versions":[{"version":"2026-07-01","service_version_id":"` + versionID.String() + `","public":false,"execution_policy":{"public":true,"rate_limit":{"strategy":"fixed","requests_per_second":5,"requests_per_minute":300}}}]` +
+		`"versions":[{"version":"2026-07-01","service_version_id":"` + versionID.String() + `","public":false,"execution_policy":{"public":true,"rate_limit":{"version":2,"policies":[{"name":"requests","unit":"requests","scope":"service_version","default_cost":1,"operation_costs":{},"algorithm":"fixed_window","fixed_window":{"limit":5,"duration_ms":1000}}]}}}]` +
 		`}}}`)
 	actions := []byte(`[` +
 		`{"id":"set_service_version_private:` + svcID.String() + `:2026-07-01","type":"set_service_version_private","service_id":"` + svcID.String() + `","version":"2026-07-01","public":false},` +

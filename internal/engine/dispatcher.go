@@ -5,14 +5,18 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/textproto"
 	neturl "net/url"
 	"regexp"
 
@@ -33,7 +37,16 @@ import (
 
 // Dispatcher coordinates the execution of vendor API calls.
 type Dispatcher struct {
-	client *http.Client
+	client     *http.Client
+	rateLimits store.ProviderRateLimitStore
+}
+
+// NewDispatcherWithProviderRateLimits wires the shared SQL coordinator used by
+// production. NewDispatcher remains available for executions without policy.
+func NewDispatcherWithProviderRateLimits(rateLimits store.ProviderRateLimitStore) *Dispatcher {
+	dispatcher := NewDispatcher()
+	dispatcher.rateLimits = rateLimits
+	return dispatcher
 }
 
 // NewDispatcher creates a new execution dispatcher.
@@ -108,6 +121,7 @@ func (d *Dispatcher) ExecuteStream(
 	bucketValues []store.BucketValue,
 	stream ResponseStream,
 ) (int, error) {
+	setRequestContentSpanAttributes(ctx, obj)
 	if obj.Method == "SOAP" {
 		return d.executeSOAP(ctx, srv, obj, params, credentials, bucketValues, stream)
 	}
@@ -134,6 +148,12 @@ func (d *Dispatcher) executeSSE(
 	bucketValues []store.BucketValue,
 	stream ResponseStream,
 ) (int, error) {
+	selectedAuths, err := selectRequestAuth(srv.AuthConfigs, obj.SecurityRequirements, credentials)
+	if err != nil {
+		recordAuthSelection(ctx, trace.SpanFromContext(ctx), nil, "rejected")
+		return 0, err
+	}
+	recordAuthSelection(ctx, trace.SpanFromContext(ctx), selectedAuths, authSelectionOutcome(selectedAuths))
 	reqURL, headers, bodyReader, err := prepareRequestParts(srv, obj, params, bucketValues)
 	if err != nil {
 		return 0, fmt.Errorf("failed to prepare SSE request: %w", err)
@@ -158,11 +178,14 @@ func (d *Dispatcher) executeSSE(
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Cache-Control", "no-cache")
 
-	applyAuth(req, srv.AuthConfigs, credentials)
+	applySelectedAuth(req, selectedAuths, credentials)
 
 	start := time.Now()
-	client, err := d.providerClientForAuth(srv.AuthConfigs, credentials)
+	client, err := d.providerClientForAuth(selectedAuths, credentials)
 	if err != nil {
+		return 0, err
+	}
+	if _, err := d.awaitProviderRateLimit(ctx, srv, obj); err != nil {
 		return 0, err
 	}
 	resp, err := client.Do(req)
@@ -179,6 +202,9 @@ func (d *Dispatcher) executeSSE(
 		return 0, fmt.Errorf("network request failed: %w", err)
 	}
 	defer resp.Body.Close()
+	if err := d.syncProviderRateLimitResponse(ctx, srv, obj, resp); err != nil {
+		return resp.StatusCode, err
+	}
 
 	observability.RequestsTotal.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("service", srv.Name),
@@ -273,69 +299,7 @@ func (d *Dispatcher) executePaginated(
 	bucketValues []store.BucketValue,
 	stream ResponseStream,
 ) (int, error) {
-	ctx, span := otel.Tracer("engine").Start(ctx, "engine.dispatch.paginate")
-	defer span.End()
-
-	// Copy params to avoid mutating the original map across pages.
-	p := make(map[string]any)
-	for k, v := range params {
-		p[k] = v
-	}
-
-	var finalStatus int
-
-	// Cap at 100 pages to prevent runaway loops.
-	for page := 0; page < 100; page++ {
-		pageStream := NewBufferStream()
-		status, err := d.executeWithRetries(ctx, srv, obj, p, credentials, bucketValues, pageStream)
-		finalStatus = status
-
-		observability.PaginationTotal.Add(ctx, 1)
-		span.SetAttributes(attribute.Int("page_count", page+1))
-
-		if err != nil {
-			return status, err
-		}
-
-		// Stream the chunk back.
-		if sendErr := stream.Send(pageStream.Bytes()); sendErr != nil {
-			return status, sendErr
-		}
-
-		nextToken := extractNextToken(pageStream.Bytes(), obj.Pagination.ResponsePath)
-		// Break if no next token exists.
-		if nextToken == "" {
-			break
-		}
-
-		p[obj.Pagination.RequestParam] = nextToken
-	}
-
-	return finalStatus, nil
-}
-
-func extractNextToken(payload []byte, path string) string {
-	var data map[string]any
-	if err := json.Unmarshal(payload, &data); err != nil {
-		return ""
-	}
-
-	parts := strings.Split(path, ".")
-	var current any = data
-
-	// Traverse JSON map hierarchy to find the token.
-	for _, part := range parts {
-		m, ok := current.(map[string]any)
-		if !ok {
-			return ""
-		}
-		current = m[part]
-	}
-
-	if str, ok := current.(string); ok {
-		return str
-	}
-	return ""
+	return d.runPagination(ctx, srv, obj, params, credentials, bucketValues, stream)
 }
 
 func (d *Dispatcher) executeWithRetries(
@@ -362,7 +326,10 @@ func (d *Dispatcher) executeWithRetries(
 	var lastStatus int
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		RecordExecutionCount(ctx, "provider_attempt_count", int64(attempt+1))
+		AddExecutionCount(ctx, "provider_attempt_count", 1)
+		if resetter, ok := stream.(interface{ ResetForRetry() }); ok {
+			resetter.ResetForRetry()
+		}
 		if attempt > 0 {
 			observability.RetriesTotal.Add(ctx, 1)
 			span.SetAttributes(attribute.Int("retry_count", attempt))
@@ -370,9 +337,10 @@ func (d *Dispatcher) executeWithRetries(
 
 		status, err := d.executeOnce(ctx, srv, obj, params, credentials, bucketValues, stream, attempt)
 
-		// If success or non-retryable error, return immediately.
-		if err == nil && status < 500 {
-			return status, nil
+		// A response body or post-response accounting failure must not replay a
+		// request the provider may already have committed.
+		if !retryableProviderAttempt(status) {
+			return status, err
 		}
 
 		lastErr = err
@@ -388,6 +356,10 @@ func (d *Dispatcher) executeWithRetries(
 	}
 
 	return lastStatus, normalizeError(lastErr, lastStatus)
+}
+
+func retryableProviderAttempt(status int) bool {
+	return status == 0 || status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500
 }
 
 func waitForRetry(ctx context.Context, delay time.Duration) error {
@@ -418,6 +390,12 @@ func (d *Dispatcher) executeOnce(
 		attribute.String("graphql.operation.kind", obj.OperationKind),
 	))
 	defer span.End()
+	selectedAuths, err := selectRequestAuth(srv.AuthConfigs, obj.SecurityRequirements, credentials)
+	if err != nil {
+		recordAuthSelection(ctx, span, nil, "rejected")
+		return 0, err
+	}
+	recordAuthSelection(ctx, span, selectedAuths, authSelectionOutcome(selectedAuths))
 
 	prepareStarted := time.Now()
 	reqURL, headers, bodyReader, err := prepareRequestParts(srv, obj, params, bucketValues)
@@ -443,12 +421,16 @@ func (d *Dispatcher) executeOnce(
 		}
 	}
 
-	applyAuth(req, srv.AuthConfigs, credentials)
+	applySelectedAuth(req, selectedAuths, credentials)
 	MeasureExecutionTiming(ctx, "provider_request_prepare", prepareStarted)
 
 	providerStarted := time.Now()
-	client, err := d.providerClientForAuth(srv.AuthConfigs, credentials)
+	client, err := d.providerClientForAuth(selectedAuths, credentials)
 	if err != nil {
+		MeasureExecutionTiming(ctx, "provider_total", providerStarted)
+		return 0, err
+	}
+	if _, err := d.awaitProviderRateLimit(ctx, srv, obj); err != nil {
 		MeasureExecutionTiming(ctx, "provider_total", providerStarted)
 		return 0, err
 	}
@@ -460,6 +442,15 @@ func (d *Dispatcher) executeOnce(
 	}
 	defer resp.Body.Close()
 	span.SetAttributes(attribute.Int("http.status_code", resp.StatusCode))
+	if err := d.syncProviderRateLimitResponse(ctx, srv, obj, resp); err != nil {
+		MeasureExecutionTiming(ctx, "provider_total", providerStarted)
+		return resp.StatusCode, err
+	}
+	if sink, ok := stream.(interface {
+		CaptureResponseMetadata(http.Header, *neturl.URL)
+	}); ok {
+		sink.CaptureResponseMetadata(resp.Header, resp.Request.URL)
+	}
 
 	status, err := streamResponseBody(ctx, resp.Body, resp.StatusCode, stream)
 	MeasureExecutionTiming(ctx, "provider_total", providerStarted)
@@ -524,15 +515,15 @@ func prepareRequestParts(srv *models.Service, obj *models.IntegrationObject, par
 
 	baseURL := bindingBaseURL(srv.BaseURL, bucketValues)
 	reqURL := buildBaseURL(obj.Path, baseURL)
-	applyForcedPathBindings(&reqURL, bucketValues)
+	applyForcedPathBindings(&reqURL, obj.Parameters, bucketValues)
 	extractCustomHeaders(params, headerParams)
 	reqURL = mapParameters(reqURL, obj, params, queryParams, headerParams, bodyParams)
-	applyDefaultBindings(&reqURL, queryParams, headerParams, bodyParams, bucketValues)
-	applyForcedBindings(&reqURL, queryParams, headerParams, bodyParams, bucketValues)
+	applyDefaultBindings(&reqURL, queryParams, headerParams, bodyParams, obj.Parameters, bucketValues)
+	applyForcedBindings(&reqURL, queryParams, headerParams, bodyParams, obj.Parameters, bucketValues)
 
 	reqURL = appendQueryParams(reqURL, queryParams)
 
-	bodyReader, err := buildRequestBody(obj, srv, headerParams, bodyParams)
+	bodyReader, err := buildRequestBody(obj, headerParams, bodyParams)
 	if err != nil {
 		return "", nil, nil, err
 	}
@@ -572,32 +563,32 @@ func bindingBaseURL(serviceDefault string, bindings []store.BucketValue) string 
 
 // applyDefaultBindings fills absent values first so caller parameters retain
 // precedence over non-forced workspace defaults.
-func applyDefaultBindings(reqURL *string, query neturl.Values, headers map[string]string, body map[string]any, bindings []store.BucketValue) {
+func applyDefaultBindings(reqURL *string, query neturl.Values, headers map[string]string, body map[string]any, parameters models.Parameters, bindings []store.BucketValue) {
 	for _, binding := range bindings {
 		if normalizedBindingMode(binding.Mode) != "default" || binding.Location == "base_url" {
 			continue
 		}
-		applyBinding(reqURL, query, headers, body, binding, false)
+		applyBinding(reqURL, query, headers, body, parameters, binding, false)
 	}
 }
 
 // applyForcedBindings runs after caller mapping because tenant-routing values
 // must not be overridden by SDK input.
-func applyForcedBindings(reqURL *string, query neturl.Values, headers map[string]string, body map[string]any, bindings []store.BucketValue) {
+func applyForcedBindings(reqURL *string, query neturl.Values, headers map[string]string, body map[string]any, parameters models.Parameters, bindings []store.BucketValue) {
 	for _, binding := range bindings {
 		if normalizedBindingMode(binding.Mode) != "force" || binding.Location == "base_url" || binding.Location == "path" {
 			continue
 		}
-		applyBinding(reqURL, query, headers, body, binding, true)
+		applyBinding(reqURL, query, headers, body, parameters, binding, true)
 	}
 }
 
-// applyForcedPathBindings runs after path parameters are rendered so selected
-// resource context wins over a conflicting caller path value.
-func applyForcedPathBindings(reqURL *string, bindings []store.BucketValue) {
+// applyForcedPathBindings consumes placeholders before caller mapping so
+// selected resource context wins without a second string-replacement pass.
+func applyForcedPathBindings(reqURL *string, parameters models.Parameters, bindings []store.BucketValue) {
 	for _, binding := range bindings {
 		if normalizedBindingMode(binding.Mode) == "force" && binding.Location == "path" {
-			applyPathBinding(reqURL, binding.KeyName, binding.Value, true)
+			applyPathBinding(reqURL, binding.KeyName, binding.Value, pathEncodingForParameter(parameters, binding.KeyName), true)
 		}
 	}
 }
@@ -614,14 +605,14 @@ func normalizedBindingMode(mode string) string {
 
 // applyBinding dispatches a validated binding to its transport owner instead of
 // letting target-specific rules leak into resolution or storage.
-func applyBinding(reqURL *string, query neturl.Values, headers map[string]string, body map[string]any, binding store.BucketValue, force bool) {
+func applyBinding(reqURL *string, query neturl.Values, headers map[string]string, body map[string]any, parameters models.Parameters, binding store.BucketValue, force bool) {
 	switch strings.ToLower(binding.Location) {
 	case "header":
 		applyHeaderBinding(headers, binding.KeyName, binding.Value, force)
 	case "query":
 		applyQueryBinding(query, binding.KeyName, binding.Value, force)
 	case "path":
-		applyPathBinding(reqURL, binding.KeyName, binding.Value, force)
+		applyPathBinding(reqURL, binding.KeyName, binding.Value, pathEncodingForParameter(parameters, binding.KeyName), force)
 	case "body":
 		if force || body[binding.KeyName] == nil {
 			body[binding.KeyName] = binding.Value
@@ -664,15 +655,15 @@ func applyQueryBinding(query neturl.Values, name, value string, force bool) {
 	query.Set(name, value)
 }
 
-// applyPathBinding substitutes an encoded segment and leaves unmatched optional
-// defaults alone, avoiding accidental whole-URL string replacement.
-func applyPathBinding(reqURL *string, name, value string, force bool) {
+// applyPathBinding substitutes only the named placeholder and leaves unmatched
+// optional defaults alone, avoiding accidental whole-URL string replacement.
+func applyPathBinding(reqURL *string, name, value, pathEncoding string, force bool) {
 	placeholder := regexp.MustCompile(`(?i)\{` + regexp.QuoteMeta(name) + `\}`)
 	if !force && !placeholder.MatchString(*reqURL) {
 		return
 	}
 	if placeholder.MatchString(*reqURL) {
-		*reqURL = placeholder.ReplaceAllString(*reqURL, neturl.PathEscape(value))
+		*reqURL = placeholder.ReplaceAllString(*reqURL, encodePathParameter(value, pathEncoding))
 	}
 }
 
@@ -714,7 +705,7 @@ func mapParameters(reqURL string, obj *models.IntegrationObject, params map[stri
 	for k, v := range params {
 		valStr := fmt.Sprintf("%v", v)
 		in := determineParamLocation(k, paramLocations, matches)
-		reqURL = applyParam(in, k, v, valStr, reqURL, obj.Method, queryParams, headerParams, bodyParams)
+		reqURL = applyParam(in, k, v, valStr, reqURL, obj.Method, pathEncodingForParameter(obj.Parameters, k), queryParams, headerParams, bodyParams)
 	}
 	return reqURL
 }
@@ -735,12 +726,12 @@ func determineParamLocation(key string, paramLocations map[string]string, pathMa
 	return ""
 }
 
-func applyParam(in, key string, val any, valStr, reqURL, method string, queryParams neturl.Values, headerParams map[string]string, bodyParams map[string]any) string {
+func applyParam(in, key string, val any, valStr, reqURL, method, pathEncoding string, queryParams neturl.Values, headerParams map[string]string, bodyParams map[string]any) string {
 	// Route the parameter to the appropriate location
 	switch in {
 	case "path":
 		// Replace the path variable placeholder with the URL-encoded value
-		encodedVal := neturl.PathEscape(valStr)
+		encodedVal := encodePathParameter(valStr, pathEncoding)
 		return regexp.MustCompile(fmt.Sprintf(`(?i)\{%s\}`, regexp.QuoteMeta(key))).ReplaceAllString(reqURL, encodedVal)
 	case "query":
 		// SDK parameters replace defaults at their declared scalar target.
@@ -748,6 +739,8 @@ func applyParam(in, key string, val any, valStr, reqURL, method string, queryPar
 	case "header":
 		// Add the parameter to the request headers
 		headerParams[key] = valStr
+	case "body":
+		bodyParams[key] = val
 	default:
 		// If no location is known, fallback to query for GET/DELETE or body for others
 		if method == http.MethodGet || method == http.MethodDelete {
@@ -757,6 +750,29 @@ func applyParam(in, key string, val any, valStr, reqURL, method string, queryPar
 		}
 	}
 	return reqURL
+}
+
+func pathEncodingForParameter(parameters models.Parameters, name string) string {
+	for _, parameter := range parameters {
+		if strings.EqualFold(parameter.Name, name) {
+			return parameter.PathEncoding
+		}
+	}
+	return ""
+}
+
+func encodePathParameter(value, pathEncoding string) string {
+	// Whole-value escaping remains the safe default. Slash preservation must be
+	// reviewed explicitly, and each segment is still escaped independently so
+	// reserved characters cannot become a query, fragment, or adjacent segment.
+	if pathEncoding != models.PathEncodingPreserveSlashes {
+		return neturl.PathEscape(value)
+	}
+	segments := strings.Split(value, "/")
+	for index, segment := range segments {
+		segments[index] = neturl.PathEscape(segment)
+	}
+	return strings.Join(segments, "/")
 }
 
 func appendQueryParams(reqURL string, queryParams neturl.Values) string {
@@ -771,7 +787,7 @@ func appendQueryParams(reqURL string, queryParams neturl.Values) string {
 	return reqURL
 }
 
-func buildRequestBody(obj *models.IntegrationObject, srv *models.Service, headerParams map[string]string, bodyParams map[string]any) (io.Reader, error) {
+func buildRequestBody(obj *models.IntegrationObject, headerParams map[string]string, bodyParams map[string]any) (io.Reader, error) {
 	// GraphQL is handled before GET/DELETE suppression because its query document
 	// is part of the required request body, regardless of the declared method.
 	if providerProtocol(obj) == models.ProviderProtocolGraphQL {
@@ -780,37 +796,268 @@ func buildRequestBody(obj *models.IntegrationObject, srv *models.Service, header
 		}
 		return buildGraphQLRequestBody(obj, headerParams, bodyParams)
 	}
+	return buildRESTRequestBody(obj.RequestContent, headerParams, bodyParams)
+}
 
-	// GET and DELETE requests should not have a request body
-	if obj.Method == http.MethodGet || obj.Method == http.MethodDelete {
+func buildRESTRequestBody(content *models.RequestContent, headerParams map[string]string, bodyParams map[string]any) (io.Reader, error) {
+	// The reviewed contract is the only authority for whether a REST body
+	// exists. Method and service defaults cannot recreate a body the importer
+	// deliberately left absent.
+	if content == nil {
 		return nil, nil
 	}
+	if strings.TrimSpace(content.MediaType) == "" {
+		return nil, errors.New("request content media_type is required")
+	}
+	if err := validateRequiredRequestBody(content, bodyParams); err != nil {
+		return nil, err
+	}
+	setAuthoritativeContentType(headerParams, content.MediaType)
+	switch content.Serialization {
+	case models.RequestSerializationJSON:
+		return buildJSONRequestBody(bodyParams)
+	case models.RequestSerializationForm:
+		return buildFormRequestBody(bodyParams), nil
+	case models.RequestSerializationMultipart:
+		return buildMultipartRequestBody(content, headerParams, bodyParams)
+	case models.RequestSerializationRaw:
+		return buildRawRequestBody(content, bodyParams)
+	default:
+		return nil, fmt.Errorf("unknown request serialization %q", content.Serialization)
+	}
+}
 
-	contentType := resolveContentType(obj, srv, headerParams)
+func validateRequiredRequestBody(content *models.RequestContent, bodyParams map[string]any) error {
+	if content.Serialization != models.RequestSerializationRaw && content.Required && len(bodyParams) == 0 {
+		return errors.New("missing required request body")
+	}
+	return nil
+}
 
-	// If the resolved content type is urlencoded, construct a form
-	if strings.Contains(strings.ToLower(contentType), "application/x-www-form-urlencoded") {
-		// Only build the form body if there are actual parameters
-		if len(bodyParams) > 0 {
-			formValues := neturl.Values{}
-			// Add each parameter to the form values
-			for k, v := range bodyParams {
-				formValues.Add(k, fmt.Sprintf("%v", v))
-			}
-			headerParams["Content-Type"] = "application/x-www-form-urlencoded"
-			return strings.NewReader(formValues.Encode()), nil
+func setAuthoritativeContentType(headers map[string]string, mediaType string) {
+	for key := range headers {
+		if strings.EqualFold(key, "Content-Type") {
+			delete(headers, key)
 		}
-		return nil, nil
 	}
+	headers["Content-Type"] = mediaType
+}
 
-	// For JSON content type, marshal the body parameters
+func buildJSONRequestBody(bodyParams map[string]any) (io.Reader, error) {
 	bodyBytes, err := json.Marshal(bodyParams)
-	// If JSON marshaling fails, bubble up the error
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal JSON body: %w", err)
 	}
-	headerParams["Content-Type"] = "application/json"
 	return bytes.NewReader(bodyBytes), nil
+}
+
+func buildFormRequestBody(bodyParams map[string]any) io.Reader {
+	formValues := neturl.Values{}
+	for key, value := range bodyParams {
+		formValues.Add(key, fmt.Sprintf("%v", value))
+	}
+	return strings.NewReader(formValues.Encode())
+}
+
+func buildMultipartRequestBody(content *models.RequestContent, headers map[string]string, bodyParams map[string]any) (io.Reader, error) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	contentType, err := multipartRequestContentType(content.MediaType, writer.Boundary())
+	if err != nil {
+		return nil, err
+	}
+	for name, value := range bodyParams {
+		payload, partContentType, err := encodeMultipartPart(name, value, content.Parts[name])
+		if err != nil {
+			return nil, err
+		}
+		part, err := writer.CreatePart(multipartPartHeader(name, partContentType))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create multipart part %q", name)
+		}
+		if _, err := part.Write(payload); err != nil {
+			return nil, fmt.Errorf("failed to write multipart part %q", name)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, errors.New("failed to finalize multipart request")
+	}
+	setAuthoritativeContentType(headers, contentType)
+	return bytes.NewReader(body.Bytes()), nil
+}
+
+func encodeMultipartPart(name string, value any, part models.RequestPart) ([]byte, string, error) {
+	if part.BinaryEncoding != "" {
+		return encodeMultipartBinaryPart(name, value, part)
+	}
+	contentType, err := validatedPartContentType(name, part.ContentType)
+	if err != nil {
+		return nil, "", err
+	}
+	switch typed := value.(type) {
+	case string:
+		return []byte(typed), contentType, nil
+	case []byte:
+		return typed, defaultContentType(contentType, "application/octet-stream"), nil
+	case bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
+		return []byte(fmt.Sprintf("%v", typed)), contentType, nil
+	default:
+		payload, err := json.Marshal(value)
+		if err != nil {
+			return nil, "", fmt.Errorf("multipart part %q is not JSON serializable", name)
+		}
+		return payload, defaultContentType(contentType, "application/json"), nil
+	}
+}
+
+func encodeMultipartBinaryPart(name string, value any, part models.RequestPart) ([]byte, string, error) {
+	if part.BinaryEncoding != models.RequestBinaryEncodingBase64 {
+		return nil, "", fmt.Errorf("multipart part %q has unsupported binary_encoding %q", name, part.BinaryEncoding)
+	}
+	encoded, ok := value.(string)
+	if !ok {
+		return nil, "", fmt.Errorf("multipart part %q requires a base64 string", name)
+	}
+	payload, err := base64.StdEncoding.Strict().DecodeString(encoded)
+	if err != nil {
+		return nil, "", fmt.Errorf("multipart part %q contains invalid base64", name)
+	}
+	contentType, err := validatedPartContentType(name, part.ContentType)
+	if err != nil {
+		return nil, "", err
+	}
+	return payload, defaultContentType(contentType, "application/octet-stream"), nil
+}
+
+func validatedPartContentType(name, contentType string) (string, error) {
+	if contentType == "" {
+		return "", nil
+	}
+	if _, _, err := mime.ParseMediaType(contentType); err != nil {
+		return "", fmt.Errorf("multipart part %q has invalid content_type", name)
+	}
+	return contentType, nil
+}
+
+func defaultContentType(contentType, fallback string) string {
+	if contentType != "" {
+		return contentType
+	}
+	return fallback
+}
+
+func multipartPartHeader(name, contentType string) textproto.MIMEHeader {
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{"name": name}))
+	if contentType != "" {
+		header.Set("Content-Type", contentType)
+	}
+	return header
+}
+
+func multipartRequestContentType(importedMediaType, boundary string) (string, error) {
+	mediaType, parameters, err := mime.ParseMediaType(importedMediaType)
+	if err != nil || !strings.EqualFold(mediaType, "multipart/form-data") {
+		return "", errors.New("multipart request media_type must be multipart/form-data")
+	}
+	parameters["boundary"] = boundary
+	return mime.FormatMediaType(mediaType, parameters), nil
+}
+
+func buildRawRequestBody(content *models.RequestContent, bodyParams map[string]any) (io.Reader, error) {
+	name := strings.TrimSpace(content.PayloadParameter)
+	if name == "" {
+		return nil, errors.New("raw request payload_parameter is required")
+	}
+	value, ok := bodyParams[name]
+	if !ok {
+		return nil, fmt.Errorf("missing raw request payload parameter %q", name)
+	}
+	if len(bodyParams) != 1 {
+		return nil, fmt.Errorf("raw request contains parameters outside payload_parameter %q", name)
+	}
+	payload, err := encodeRawPayload(name, value, content.BinaryEncoding)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.NewReader(payload), nil
+}
+
+func encodeRawPayload(name string, value any, binaryEncoding string) ([]byte, error) {
+	if binaryEncoding == models.RequestBinaryEncodingBase64 {
+		return decodeRawBase64(name, value)
+	}
+	if binaryEncoding != "" {
+		return nil, fmt.Errorf("raw request payload %q has unsupported binary_encoding %q", name, binaryEncoding)
+	}
+	switch typed := value.(type) {
+	case string:
+		return []byte(typed), nil
+	case []byte:
+		return typed, nil
+	default:
+		return nil, fmt.Errorf("raw request payload %q must be a string or byte array", name)
+	}
+}
+
+func decodeRawBase64(name string, value any) ([]byte, error) {
+	encoded, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("raw request payload %q requires a base64 string", name)
+	}
+	payload, err := base64.StdEncoding.Strict().DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("raw request payload %q contains invalid base64", name)
+	}
+	return payload, nil
+}
+
+func setRequestContentSpanAttributes(ctx context.Context, obj *models.IntegrationObject) {
+	serialization, mediaFamily := requestContentTelemetry(obj)
+	trace.SpanFromContext(ctx).SetAttributes(
+		attribute.String("request.serialization", serialization),
+		attribute.String("request.media_family", mediaFamily),
+	)
+}
+
+func requestContentTelemetry(obj *models.IntegrationObject) (string, string) {
+	if providerProtocol(obj) == models.ProviderProtocolGraphQL {
+		return "graphql", "json"
+	}
+	if obj.RequestContent == nil {
+		return "none", "none"
+	}
+	return boundedRequestSerialization(obj.RequestContent.Serialization), requestMediaFamily(obj.RequestContent.MediaType)
+}
+
+func boundedRequestSerialization(serialization string) string {
+	switch serialization {
+	case models.RequestSerializationJSON,
+		models.RequestSerializationForm,
+		models.RequestSerializationMultipart,
+		models.RequestSerializationRaw:
+		return serialization
+	default:
+		return "unknown"
+	}
+}
+
+func requestMediaFamily(value string) string {
+	mediaType := strings.ToLower(strings.TrimSpace(strings.SplitN(value, ";", 2)[0]))
+	switch {
+	case mediaType == "application/json", strings.HasSuffix(mediaType, "+json"):
+		return "json"
+	case mediaType == "application/x-www-form-urlencoded":
+		return "form"
+	case strings.HasPrefix(mediaType, "multipart/"):
+		return "multipart"
+	case strings.HasPrefix(mediaType, "text/"):
+		return "text"
+	case mediaType == "application/octet-stream":
+		return "binary"
+	default:
+		return "other"
+	}
 }
 
 // providerProtocol accepts legacy in-memory operations that predate the field
@@ -838,7 +1085,7 @@ func buildGraphQLRequestBody(obj *models.IntegrationObject, headerParams map[str
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal GraphQL request body: %w", err)
 	}
-	headerParams["Content-Type"] = "application/json"
+	setAuthoritativeContentType(headerParams, "application/json")
 	return bytes.NewReader(bodyBytes), nil
 }
 
@@ -877,51 +1124,6 @@ func isGeneratedGraphQLEnvelope(bodyParams map[string]any) bool {
 	return len(bodyParams) == 2 || hasOperationName
 }
 
-func resolveContentType(obj *models.IntegrationObject, srv *models.Service, headerParams map[string]string) string {
-	// Priority 1: User injected header (capitalized)
-	if ct, ok := headerParams["Content-Type"]; ok {
-		return ct
-	}
-	// Priority 1: User injected header (lowercase)
-	if ct, ok := headerParams["content-type"]; ok {
-		return ct
-	}
-	// Priority 2: Service default headers (capitalized)
-	if ct, ok := srv.DefaultHeaders["Content-Type"]; ok {
-		return ct
-	}
-	// Priority 2: Service default headers (lowercase)
-	if ct, ok := srv.DefaultHeaders["content-type"]; ok {
-		return ct
-	}
-	// Priority 3: Endpoint encoding override
-	if obj.Encoding != "" {
-		return obj.Encoding
-	}
-	// Fallback default
-	return "application/json"
-}
-
-func applyAuth(req *http.Request, auths models.AuthConfigs, credentials map[string]any) {
-	if len(auths) == 0 {
-		return
-	}
-	auth := auths[0]
-
-	switch auth.Type {
-	case "http":
-		applyHTTPAuth(req, auth, credentials)
-	case "oauth2", "openIdConnect", "oidc":
-		applyOAuth(req, auth, credentials)
-	case "apiKey", "api_key":
-		applyAPIKey(req, auth, credentials)
-	case "mutualTLS", "mutual_tls", "mtls":
-		// mTLS is applied by providerClientForAuth because certificates belong
-		// to the TLS transport, not request headers/query/cookies.
-		return
-	}
-}
-
 func applyHTTPAuth(req *http.Request, auth models.AuthConfig, credentials map[string]any) {
 	scheme := strings.ToLower(auth.Scheme)
 	if scheme == "bearer" {
@@ -930,13 +1132,7 @@ func applyHTTPAuth(req *http.Request, auth models.AuthConfig, credentials map[st
 			req.Header.Set("Authorization", "Bearer "+credValue)
 		}
 	} else if scheme == "basic" {
-		user, _ := credentials[auth.Name+"_username"].(string)
-		pass, _ := credentials[auth.Name+"_password"].(string)
-		// Basic auth is only valid as a pair in our config/apply model. Refuse
-		// partial manual bucket state instead of sending "user:" or ":pass".
-		if user != "" && pass != "" {
-			req.SetBasicAuth(user, pass)
-		}
+		applyBasicAuth(req, auth, credentials)
 	} else {
 		credValue, _ := credentials[auth.Name].(string)
 		if credValue != "" {

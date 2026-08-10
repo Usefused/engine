@@ -22,10 +22,13 @@ import (
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/engine/webhookid"
+	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/observability"
+	"github.com/Usefused/engine/internal/shared/paginationpolicy"
+	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
 	"github.com/Usefused/engine/internal/shared/secretref"
 )
 
@@ -182,11 +185,7 @@ type workspaceExecutionPolicy struct {
 	Reset                 bool                 `json:"reset,omitempty"`
 }
 
-type rateLimitConfig struct {
-	Strategy          string `json:"strategy"`
-	RequestsPerSecond int    `json:"requests_per_second"`
-	RequestsPerMinute int    `json:"requests_per_minute"`
-}
+type rateLimitConfig = ratelimitpolicy.Config
 
 type retryConfig struct {
 	Strategy   string `json:"strategy"`
@@ -194,11 +193,7 @@ type retryConfig struct {
 	BackoffMs  int    `json:"backoff_ms"`
 }
 
-type paginationConfig struct {
-	Type         string `json:"type"`
-	RequestParam string `json:"request_param"`
-	ResponsePath string `json:"response_path"`
-}
+type paginationConfig = paginationpolicy.Config
 
 // webhookVerifyConfig mirrors cli/internal/configfile.WebhookVerify --
 // auth mechanism + where to find the signature, deliberately no secret field.
@@ -238,6 +233,7 @@ type workspaceConfigConnectionProfileIntent struct {
 type WorkspaceAuthConfig struct {
 	Bucket   string `json:"bucket,omitempty"`
 	AuthType string `json:"auth_type"`
+	AuthName string `json:"auth_name,omitempty"`
 	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`
 	Token    string `json:"token,omitempty"`
@@ -1630,14 +1626,27 @@ const maxWorkspaceExecutionTimeoutMs = 24 * 60 * 60 * 1000
 
 func validateWorkspaceExecutionPolicyTimeouts(services map[string]workspaceConfigService) error {
 	for name, service := range services {
-		if err := validateWorkspaceExecutionPolicyTimeout(name, "", service.ExecutionPolicy); err != nil {
+		if err := validateWorkspaceExecutionPolicy(name, "", service.ExecutionPolicy); err != nil {
 			return err
 		}
 		for _, version := range service.Versions {
-			if err := validateWorkspaceExecutionPolicyTimeout(name, version.Version, version.ExecutionPolicy); err != nil {
+			if err := validateWorkspaceExecutionPolicy(name, version.Version, version.ExecutionPolicy); err != nil {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+func validateWorkspaceExecutionPolicy(name, version string, policy *workspaceExecutionPolicy) error {
+	if err := validateWorkspaceExecutionPolicyTimeout(name, version, policy); err != nil {
+		return err
+	}
+	if policy == nil || policy.Pagination == nil {
+		return nil
+	}
+	if err := paginationpolicy.Validate(policy.Pagination); err != nil {
+		return fmt.Errorf("service %q version %q execution_policy.pagination: %w", name, version, err)
 	}
 	return nil
 }
@@ -3056,6 +3065,7 @@ type workspaceAuthApplyPlan struct {
 	BucketID  uuid.UUID
 	ServiceID uuid.UUID
 	AuthType  string
+	AuthName  string
 	Secrets   []store.WorkspaceSecret
 }
 
@@ -3073,11 +3083,16 @@ func prepareWorkspaceAuthSecrets(
 ) (map[string]workspaceAuthApplyPlan, error) {
 	plans := map[string]workspaceAuthApplyPlan{}
 	buckets := workspaceConnectBucketCache{}
+	authConfigs, err := fetchWorkspaceAuthConfigs(ctx, verifier, apiKey, desired)
+	if err != nil {
+		return nil, err
+	}
 	for _, item := range desired.BucketServiceConfigs {
 		if item.Auth == nil {
 			continue
 		}
-		plan, err := prepareWorkspaceAuthSecret(ctx, s, verifier, apiKey, desired.Services[item.ServiceID], item, materials, buckets, masterKey)
+		service := desired.Services[item.ServiceID]
+		plan, err := prepareWorkspaceAuthSecret(ctx, s, service, item, authConfigs[workspaceAuthMetadataKey(service)], materials, buckets, masterKey)
 		if err != nil {
 			return nil, err
 		}
@@ -3086,16 +3101,47 @@ func prepareWorkspaceAuthSecrets(
 	return plans, nil
 }
 
+func fetchWorkspaceAuthConfigs(ctx context.Context, verifier ServiceVerifier, apiKey string, desired workspaceDesiredState) (map[string]fusedobject.AuthConfigs, error) {
+	seen := make(map[string]struct{})
+	var refs []sandbox.ServiceVersionRef
+	for _, item := range desired.BucketServiceConfigs {
+		if item.Auth == nil {
+			continue
+		}
+		service := desired.Services[item.ServiceID]
+		key := workspaceAuthMetadataKey(service)
+		if _, exists := seen[key]; !exists {
+			seen[key] = struct{}{}
+			refs = append(refs, sandbox.ServiceVersionRef{ServiceID: service.ServiceID, Version: service.Versions[0]})
+		}
+	}
+	if len(refs) == 0 {
+		return map[string]fusedobject.AuthConfigs{}, nil
+	}
+	configs, err := verifier.FetchServiceVersionAuthConfigs(ctx, refs, apiKey)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]fusedobject.AuthConfigs, len(configs))
+	for _, config := range configs {
+		key := sandbox.ServiceMetadataRefKey(sandbox.ServiceMetadataRef{ServiceID: config.ServiceID, Version: config.Version})
+		result[key] = config.AuthConfigs
+	}
+	return result, nil
+}
+
+func workspaceAuthMetadataKey(service workspaceDesiredService) string {
+	return sandbox.ServiceMetadataRefKey(sandbox.ServiceMetadataRef{ServiceID: service.ServiceID, Version: service.Versions[0]})
+}
+
 // prepareWorkspaceAuthSecret derives provider-specific secret keys from
 // registry metadata so users configure "basic" instead of dispatcher key names.
 func prepareWorkspaceAuthSecret(
 	ctx context.Context,
 	s store.Store,
-	verifier ServiceVerifier,
-	apiKey string,
-
 	svc workspaceDesiredService,
 	item workspaceDesiredBucketServiceConfig,
+	authConfigs fusedobject.AuthConfigs,
 	materials map[string]workspaceAuthMaterial,
 	buckets workspaceConnectBucketCache,
 	masterKey []byte,
@@ -3105,11 +3151,11 @@ func prepareWorkspaceAuthSecret(
 		return workspaceAuthApplyPlan{}, err
 	}
 	authType := canonicalWorkspaceStaticAuthType(item.Auth.AuthType)
-	auth, err := workspaceStaticAuthConfig(ctx, verifier, apiKey, svc, authType)
+	auth, err := workspaceStaticAuthConfig(authConfigs, svc, authType, item.Auth.AuthName)
 	if err != nil {
 		return workspaceAuthApplyPlan{}, err
 	}
-	resolved, err := workspaceAuthConfigWithMaterial(svc, item, materials)
+	resolved, err := workspaceAuthConfigWithMaterial(svc, item, auth, materials)
 	if err != nil {
 		return workspaceAuthApplyPlan{}, err
 	}
@@ -3117,40 +3163,46 @@ func prepareWorkspaceAuthSecret(
 	if err != nil {
 		return workspaceAuthApplyPlan{}, err
 	}
-	return workspaceAuthApplyPlan{BucketID: bucket.ID, ServiceID: svc.ServiceID, AuthType: authType, Secrets: secrets}, nil
+	return workspaceAuthApplyPlan{BucketID: bucket.ID, ServiceID: svc.ServiceID, AuthType: authType, AuthName: auth.Name, Secrets: secrets}, nil
 }
 
 // workspaceStaticAuthConfig fetches the selected service version's auth shape;
 // config files intentionally name auth families, not provider scheme IDs.
-func workspaceStaticAuthConfig(ctx context.Context, verifier ServiceVerifier, apiKey string, svc workspaceDesiredService, authType string) (fusedobject.AuthConfig, error) {
-	if verifier == nil {
-		return fusedobject.AuthConfig{}, fmt.Errorf("service %s auth metadata resolver is unavailable", svc.ServiceID)
+func workspaceStaticAuthConfig(authConfigs fusedobject.AuthConfigs, svc workspaceDesiredService, authType, authName string) (fusedobject.AuthConfig, error) {
+	if authConfigs == nil {
+		return fusedobject.AuthConfig{}, fmt.Errorf("fetch auth shape for service %s: auth configs missing", svc.ServiceID)
 	}
-	metadata, err := verifier.FetchServiceMetadata(ctx, svc.ServiceID, svc.Versions[0])
-	if err != nil {
-		return fusedobject.AuthConfig{}, fmt.Errorf("fetch auth shape for service %s: %w", svc.ServiceID, err)
-	}
-	return selectWorkspaceStaticAuthConfig(metadata.AuthConfigs, authType)
+	return selectWorkspaceStaticAuthConfig(authConfigs, authType, authName)
 }
 
-// selectWorkspaceStaticAuthConfig enforces the one-auth-per-type MVP contract
-// by choosing the first config matching the requested auth family.
-func selectWorkspaceStaticAuthConfig(auths fusedobject.AuthConfigs, authType string) (fusedobject.AuthConfig, error) {
+// selectWorkspaceStaticAuthConfig requires the provider scheme name only when
+// a service exposes multiple static schemes in the same public auth family.
+func selectWorkspaceStaticAuthConfig(auths fusedobject.AuthConfigs, authType, authName string) (fusedobject.AuthConfig, error) {
+	var matches fusedobject.AuthConfigs
 	for _, auth := range auths {
-		if canonicalWorkspaceAuthConfigType(auth) == authType {
-			return auth, nil
+		if canonicalWorkspaceAuthConfigType(auth) == authType && (authName == "" || auth.Name == authName) {
+			matches = append(matches, auth)
 		}
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) > 1 {
+		return fusedobject.AuthConfig{}, fmt.Errorf("auth type %q has multiple schemes; auth_name is required", authType)
+	}
+	if authName != "" {
+		return fusedobject.AuthConfig{}, fmt.Errorf("auth name %q with type %q is not configured for this service", authName, authType)
 	}
 	return fusedobject.AuthConfig{}, fmt.Errorf("auth type %q is not configured for this service", authType)
 }
 
 // workspaceAuthConfigWithMaterial replaces shareable $ENV refs with the
 // apply-time material sent by the CLI before encryption.
-func workspaceAuthConfigWithMaterial(svc workspaceDesiredService, item workspaceDesiredBucketServiceConfig, materials map[string]workspaceAuthMaterial) (WorkspaceAuthConfig, error) {
+func workspaceAuthConfigWithMaterial(svc workspaceDesiredService, item workspaceDesiredBucketServiceConfig, auth fusedobject.AuthConfig, materials map[string]workspaceAuthMaterial) (WorkspaceAuthConfig, error) {
 	resolved := *item.Auth
 	material := materials[workspaceBucketMaterialKey(item.BucketName, item.ServiceKey)]
 	replaceWorkspaceAuthEnvRefs(&resolved, material)
-	if err := validateWorkspaceAuthResolvedMaterial(svc.Key, &resolved); err != nil {
+	if err := validateWorkspaceAuthResolvedMaterial(svc.Key, auth, &resolved); err != nil {
 		return WorkspaceAuthConfig{}, err
 	}
 	return resolved, nil
@@ -3181,17 +3233,36 @@ func replaceWorkspaceAuthEnvRefs(auth *WorkspaceAuthConfig, material workspaceAu
 
 // validateWorkspaceAuthResolvedMaterial fails closed when apply callers omit
 // material for a config that declared static auth secrets.
-func validateWorkspaceAuthResolvedMaterial(key string, auth *WorkspaceAuthConfig) error {
+func validateWorkspaceAuthResolvedMaterial(key string, definition fusedobject.AuthConfig, auth *WorkspaceAuthConfig) error {
 	authType := canonicalWorkspaceStaticAuthType(auth.AuthType)
 	switch authType {
 	case "basic":
-		return validateWorkspaceAuthResolvedFields(key, authType, auth.Username, auth.Password)
+		return validateWorkspaceBasicMaterial(key, definition.BasicPasswordMode, auth)
 	case "api_key":
 		return validateWorkspaceAuthResolvedFields(key, authType, auth.APIKey)
 	case "mtls":
 		return validateWorkspaceAuthResolvedFields(key, authType, auth.Cert, auth.Key)
 	default:
 		return validateWorkspaceAuthResolvedFields(key, authType, auth.Token)
+	}
+}
+
+func validateWorkspaceBasicMaterial(key string, mode authrouting.BasicPasswordMode, auth *WorkspaceAuthConfig) error {
+	if err := validateWorkspaceAuthResolvedFields(key, "basic", auth.Username); err != nil {
+		return err
+	}
+	switch mode {
+	case authrouting.BasicPasswordRequired:
+		return validateWorkspaceAuthResolvedFields(key, "basic", auth.Password)
+	case authrouting.BasicPasswordOptional:
+		return nil
+	case authrouting.BasicPasswordEmpty:
+		if auth.Password != "" {
+			return fmt.Errorf("service %q auth basic password must be empty", key)
+		}
+		return nil
+	default:
+		return fmt.Errorf("service %q auth basic password mode is invalid", key)
 	}
 }
 
@@ -3241,7 +3312,11 @@ func workspaceAuthSecretInputs(auth fusedobject.AuthConfig, cfg *WorkspaceAuthCo
 	}
 	switch canonicalWorkspaceStaticAuthType(cfg.AuthType) {
 	case "basic":
-		return []workspaceAuthSecretInput{{Name: name + "_username", Type: "basic", Value: cfg.Username}, {Name: name + "_password", Type: "basic", Value: cfg.Password}}, nil
+		inputs := []workspaceAuthSecretInput{{Name: name + "_username", Type: "basic", Value: cfg.Username}}
+		if auth.BasicPasswordMode == authrouting.BasicPasswordRequired || auth.BasicPasswordMode == authrouting.BasicPasswordOptional && cfg.Password != "" {
+			inputs = append(inputs, workspaceAuthSecretInput{Name: name + "_password", Type: "basic", Value: cfg.Password})
+		}
+		return inputs, nil
 	case "api_key":
 		return []workspaceAuthSecretInput{{Name: name, Type: "apiKey", Value: cfg.APIKey}}, nil
 	case "mtls":
@@ -3351,6 +3426,7 @@ func upsertPreparedWorkspaceAuthSecrets(ctx context.Context, s store.Store, svc 
 			attribute.String("bucket_id", plan.BucketID.String()),
 			attribute.String("service_id", svc.ServiceID.String()),
 			attribute.String("auth_type", plan.AuthType),
+			attribute.String("auth_name", plan.AuthName),
 			attribute.Int("secret_count", len(plan.Secrets)),
 		)
 		span.End()
@@ -3361,21 +3437,7 @@ func upsertPreparedWorkspaceAuthSecrets(ctx context.Context, s store.Store, svc 
 // workspaceAuthCredentialName mirrors runtime credential resolution so config
 // apply writes the same key names applyAuth reads at execution time.
 func workspaceAuthCredentialName(auth fusedobject.AuthConfig) string {
-	name := strings.TrimSpace(auth.Name)
-	if name != "" {
-		return name
-	}
-	if canonicalWorkspaceAuthConfigType(auth) == "bearer" || canonicalWorkspaceAuthConfigType(auth) == "oauth" || canonicalWorkspaceAuthConfigType(auth) == "oidc" {
-		// Bearer-style auth without a scheme name still maps to the dispatcher
-		// Authorization slot, matching runtime credential resolution.
-		return "Authorization"
-	}
-	if canonicalWorkspaceAuthConfigType(auth) == "mtls" {
-		// mTLS is a paired transport credential, so unnamed imports need a
-		// stable prefix for cert/key lookup instead of a header slot.
-		return "mtls"
-	}
-	return ""
+	return strings.TrimSpace(auth.Name)
 }
 
 // canonicalWorkspaceAuthConfigType converts OpenAPI http schemes into the auth
@@ -4619,11 +4681,8 @@ func workspaceExecutionPolicyOverride(serviceID uuid.UUID, serviceVersionID *uui
 		BaseURL:             ep.BaseURL,
 	}
 	if ep.RateLimit != nil {
-		override.RateLimit = &fusedobject.RateLimitConfig{
-			Strategy:          ep.RateLimit.Strategy,
-			RequestsPerSecond: ep.RateLimit.RequestsPerSecond,
-			RequestsPerMinute: ep.RateLimit.RequestsPerMinute,
-		}
+		mapped := fusedobject.RateLimitConfig(*ep.RateLimit)
+		override.RateLimit = &mapped
 	}
 	// Retry and RetryConfig are two accepted input spellings for the same
 	// field (see workspaceExecutionPolicy's json tags); Retry wins when both
@@ -4641,11 +4700,8 @@ func workspaceExecutionPolicyOverride(serviceID uuid.UUID, serviceVersionID *uui
 		}
 	}
 	if ep.Pagination != nil {
-		override.Pagination = &fusedobject.PaginationConfig{
-			Type:         ep.Pagination.Type,
-			RequestParam: ep.Pagination.RequestParam,
-			ResponsePath: ep.Pagination.ResponsePath,
-		}
+		mapped := fusedobject.PaginationConfig(*ep.Pagination)
+		override.Pagination = &mapped
 	}
 	if ep.IncomingWebhookConfig != nil {
 		override.IncomingWebhookConfig = &fusedobject.IncomingWebhookConfig{
@@ -4930,10 +4986,9 @@ func validateWorkspaceRemovalDecisions(
 	return nil
 }
 
-// checkWorkspaceServiceLimit evaluates whether adding new services in this apply
-// would exceed the account's MaxServices entitlement. It counts only services
-// that are not already present in previousManaged — removals free capacity and
-// additions consume it.
+// checkWorkspaceServiceLimit evaluates the net live service count after apply.
+// Import activation may legitimately precede declarative state persistence, so
+// previousManaged alone cannot distinguish a new service from an active one.
 func checkWorkspaceServiceLimit(
 	ctx context.Context,
 	span trace.Span,
@@ -4941,25 +4996,44 @@ func checkWorkspaceServiceLimit(
 	desired workspaceDesiredState,
 	previousManaged map[uuid.UUID]workspaceManagedService,
 ) error {
-	newServiceCount := 0
-	for svcID := range desired.Services {
-		if _, exists := previousManaged[svcID]; !exists {
-			newServiceCount++
-		}
+	capacityStore, ok := s.(store.WorkspaceServiceCapacityStore)
+	if !ok {
+		return errors.New("workspace service capacity is unavailable")
 	}
-	if newServiceCount == 0 {
-		return nil
-	}
-	currentActive, err := s.CountActiveServices(ctx)
+	desiredIDs := workspaceDesiredServiceIDs(desired)
+	removableIDs := workspaceRemovableServiceIDs(desired, previousManaged)
+	currentActive, projectedActive, err := capacityStore.CountProjectedActiveServices(ctx, desiredIDs, removableIDs)
 	if err != nil {
 		span.RecordError(err)
-		return fmt.Errorf("failed to count active services: %w", err)
+		return fmt.Errorf("failed to project active services: %w", err)
 	}
-	lim := entitlement.CheckLimit(span, "services", currentActive, entitlement.LiveEntitlement.Load().MaxServices)
-	if lim != nil {
-		return lim
+	if projectedActive <= currentActive {
+		return nil
+	}
+	// CheckLimit accepts the count before one addition. Using projected-1 makes
+	// the hard ceiling inclusive while supporting multi-service plans.
+	if limitErr := entitlement.CheckLimit(span, "services", projectedActive-1, entitlement.LiveEntitlement.Load().MaxServices); limitErr != nil {
+		return limitErr
 	}
 	return nil
+}
+
+func workspaceDesiredServiceIDs(desired workspaceDesiredState) []uuid.UUID {
+	ids := make([]uuid.UUID, 0, len(desired.Services))
+	for serviceID := range desired.Services {
+		ids = append(ids, serviceID)
+	}
+	return ids
+}
+
+func workspaceRemovableServiceIDs(desired workspaceDesiredState, previousManaged map[uuid.UUID]workspaceManagedService) []uuid.UUID {
+	ids := make([]uuid.UUID, 0, len(previousManaged))
+	for serviceID := range previousManaged {
+		if _, retained := desired.Services[serviceID]; !retained {
+			ids = append(ids, serviceID)
+		}
+	}
+	return ids
 }
 
 func createWorkspaceRemovalNotifications(

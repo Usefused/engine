@@ -13,6 +13,7 @@ export interface FixtureParameter {
   required: boolean;
   type: string;
   description?: string;
+  path_encoding?: "preserve_slashes";
 }
 
 /** Mirrors models.Schema's JSON shape. */
@@ -22,8 +23,25 @@ export interface FixtureSchema {
   format?: string;
   properties?: Record<string, FixtureSchema>;
   items?: FixtureSchema;
+  additional_properties?: FixtureSchema;
   required?: string[];
   example?: unknown;
+}
+
+/** Mirrors models.RequestContent's reviewed wire representation. */
+export interface FixtureRequestContent {
+  media_type: string;
+  serialization: "json" | "form_urlencoded" | "multipart" | "raw";
+  required: boolean;
+  schema?: FixtureSchema | null;
+  payload_parameter?: string;
+  binary_encoding?: "base64";
+  parts?: Record<string, FixtureRequestPart>;
+}
+
+export interface FixtureRequestPart {
+  content_type?: string;
+  binary_encoding?: "base64";
 }
 
 export interface FixtureOperation {
@@ -34,7 +52,7 @@ export interface FixtureOperation {
   method: string;
   path: string;
   parameters?: FixtureParameter[];
-  request_body?: FixtureSchema | null;
+  request_content?: FixtureRequestContent | null;
   responses: Record<string, FixtureSchema>;
 }
 
