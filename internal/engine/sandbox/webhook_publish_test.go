@@ -10,8 +10,7 @@ import (
 // TestSubjectSafeLabel_ReplacesDots guards the NATS subject's fixed segment
 // positions: "." is the subject delimiter, and a kind: webhook artifact's
 // name (the label) has no character restriction today, so a literal "." in
-// a name must never reach the subject as-is -- see the function's doc
-// comment and websocket_handler.go's identical helper.
+// a name must never reach the subject as-is.
 func TestSubjectSafeLabel_ReplacesDots(t *testing.T) {
 	got := subjectSafeLabel("team.x.webhooks")
 	want := "team-x-webhooks"
@@ -31,7 +30,7 @@ func TestSubjectSafeLabel_LeavesOrdinaryNameUnchanged(t *testing.T) {
 // TestPublishWebhookEvent_SubjectIncludesLabel is the isolation-bug
 // regression test: the subject must carry the registration's label as its
 // own segment (webhooks.<account>.<service>.<label>.<event>), not just
-// account+service+event -- see plans/plan-webhook-kind.md's NATS/WS section.
+// account+service+event -- see plans/plan-webhook-kind.md.
 // Two registrations for the same service producing the same event name must
 // land on different subjects when their labels differ.
 func TestPublishWebhookEvent_SubjectIncludesLabel(t *testing.T) {
@@ -57,7 +56,7 @@ func TestPublishWebhookEvent_SubjectIncludesLabel(t *testing.T) {
 
 // TestPublishWebhookEvent_DifferentLabelsProduceDifferentSubjects is the
 // direct isolation assertion: same account+service+event, different labels
-// -> different subjects, so a WS subscriber scoped to one registration's
+// -> different subjects, so a subscriber scoped to one registration's
 // label can never receive the other's deliveries.
 func TestPublishWebhookEvent_DifferentLabelsProduceDifferentSubjects(t *testing.T) {
 	var subjects []string

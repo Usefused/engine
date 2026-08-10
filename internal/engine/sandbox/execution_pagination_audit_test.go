@@ -2,7 +2,9 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/shared/models"
@@ -38,6 +40,7 @@ func TestAttachExecutionTimingsIncludesSafeRateLimitAggregate(t *testing.T) {
 		Units: []string{"points", "requests"}, UnitTotals: []int64{10, 1}, RetryOutcome: "waited",
 	})
 	engine.RecordRateLimitHeaderOutcome(ctx, "applied")
+	engine.AddExecutionTiming(ctx, "rate_limit_acquire", 3*time.Millisecond)
 	event := models.EngineExecutionEvent{}
 
 	attachExecutionTimings(ctx, &event)
@@ -47,5 +50,12 @@ func TestAttachExecutionTimingsIncludesSafeRateLimitAggregate(t *testing.T) {
 	}
 	if len(event.RateLimitUnits) != 2 || event.RateLimitUnits[0] != "points" || event.RateLimitUnitTotals[0] != 10 {
 		t.Fatalf("rate-limit unit totals = %#v/%#v", event.RateLimitUnits, event.RateLimitUnitTotals)
+	}
+	var timingSnapshot map[string]float64
+	if err := json.Unmarshal(event.Timings, &timingSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	if timingSnapshot["rate_limit_acquire"] != 3 {
+		t.Fatalf("rate-limit acquisition timing = %#v", timingSnapshot)
 	}
 }

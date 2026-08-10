@@ -4,10 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,9 +61,8 @@ type sdkConfigDocument struct {
 	// app config webhook_attachment field-for-field (same yaml/json key),
 	// since this struct is the Engine-side decode target for that exact wire
 	// document. Required (validated in validateSDKConfigDocument) whenever
-	// any service below selects webhooks -- the WS bridge
-	// (websocket_handler.go) resolves this from the exact fused_apps row at
-	// connect time to scope FilterSubjects to just this app's
+	// any service below selects webhooks. The gRPC subscription resolves this
+	// from the exact fused_apps row to scope FilterSubjects to this app's
 	// registrations. See plans/plan-webhook-kind.md.
 	WebhookAttachment string                         `json:"webhook_attachment,omitempty"`
 	Services          map[string]sdkConfigServiceDoc `json:"services"`
@@ -403,10 +398,8 @@ func validAppVersion(version string) bool {
 
 // validateWebhookAttachmentRequired mirrors the CLI's own plan-time check
 // CLI validation server-side: a service
-// that selects webhooks with nothing named to attach them to would silently
-// receive no deliveries at all (websocket_handler.go has no registration
-// identity to scope FilterSubjects to), so this is rejected up front instead
-// of failing quietly at runtime.
+// that selects webhooks with nothing named to attach them to has no
+// registration identity for scoped delivery, so reject it before runtime.
 func validateWebhookAttachmentRequired(doc sdkConfigDocument) error {
 	if strings.TrimSpace(doc.WebhookAttachment) != "" {
 		return nil
@@ -1145,14 +1138,6 @@ func pointerUUIDString(id *uuid.UUID) string {
 	return id.String()
 }
 
-func workspaceServicesByName(ctx context.Context, s store.Store) (map[string]store.WorkspaceService, error) {
-	workspaceServices, err := s.ListWorkspaceServices(ctx, nil)
-	if err != nil {
-		return nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to list workspace services"}
-	}
-	return workspaceServicesByDisplayName(workspaceServices), nil
-}
-
 func workspaceServicesByConfigKey(
 	ctx context.Context,
 	s store.Store,
@@ -1270,15 +1255,6 @@ func resolveSDKVersionAllowed(
 	}
 }
 
-func activationVersionExists(versions []store.WorkspaceServiceVersion, version string) bool {
-	for _, allowed := range versions {
-		if allowed.Version == version {
-			return true
-		}
-	}
-	return false
-}
-
 func activationVersionExistsByUUID(versions []store.WorkspaceServiceVersion, serviceVersionID uuid.UUID) bool {
 	for _, allowed := range versions {
 		if allowed.ServiceVersionID == serviceVersionID {
@@ -1286,10 +1262,6 @@ func activationVersionExistsByUUID(versions []store.WorkspaceServiceVersion, ser
 		}
 	}
 	return false
-}
-
-func normalizedOperationName(name string) string {
-	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(name), " ", "_"))
 }
 
 func previousSDKDocument(state *store.ConfigState) sdkConfigDocument {
@@ -1583,45 +1555,70 @@ func reserveSDKGenerationIdentity(ctx context.Context, s store.Store, call sdkAp
 	if err != nil {
 		return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid_app_name"}
 	}
-
-	// Check SDK family limit only when creating a new family.
-	_, familyErr := s.GetAppFamilyByIdentity(ctx, call.accountID, "sdk", canonicalName)
-	if errors.Is(familyErr, store.ErrAppFamilyNotFound) {
-		currentFamilies, err := s.CountAppFamilies(ctx, call.accountID, "sdk")
-		if err != nil {
-			span.RecordError(err)
-			return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_count_sdk_families"}
-		}
-		if limErr := entitlement.CheckLimit(span, "sdk_families", currentFamilies, entitlement.LiveEntitlement.Load().MaxSDKFamilies); limErr != nil {
-			span.SetAttributes(attribute.String("outcome", "sdk_family_limit_exceeded"))
-			return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusForbidden, message: limErr.Error()}
-		}
+	if err := checkSDKFamilyCapacity(ctx, s, span, call.accountID, canonicalName); err != nil {
+		return uuid.Nil, uuid.Nil, uuid.Nil, err
 	}
 
 	family, _, err := applifecycle.New(s).CreateOrGetFamily(ctx, applifecycle.CreateFamilyParams{
-		AccountID: call.accountID, Kind: "sdk", CanonicalName: canonicalName,
+		AccountID: call.accountID, Kind: store.AppKindSDK, CanonicalName: canonicalName,
 		DisplayName: displayName, TargetLanguage: doc.Language,
 		OwnerSubjectID: planOwnerSubjectID(plan), OwnerTeamID: planOwnerTeamID(plan),
 	})
 	if err != nil {
 		return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app_family_conflict"}
 	}
-	if tombstoned, checkErr := s.AppTombstoneExists(ctx, family.AppFamilyID, doc.Version); checkErr != nil {
-		return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_check_app_version"}
-	} else if tombstoned {
-		return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app_version_deactivated"}
+	appID, existingID, err := reserveSDKVersionIdentity(ctx, s, call.planID, family.AppFamilyID, doc.Version, plan.SourceHash)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, uuid.Nil, err
 	}
-	existing, err := s.GetAppByFamilyAndVersion(ctx, family.AppFamilyID, doc.Version)
+	span.SetAttributes(
+		attribute.String("app.family_id", family.AppFamilyID.String()),
+		attribute.String("app.id", appID.String()),
+		attribute.Bool("app.version_existing", existingID != uuid.Nil),
+		attribute.String("outcome", "success"),
+	)
+	return family.AppFamilyID, appID, existingID, nil
+}
+
+func checkSDKFamilyCapacity(ctx context.Context, s store.Store, span trace.Span, accountID uuid.UUID, canonicalName string) error {
+	_, familyErr := s.GetAppFamilyByIdentity(ctx, accountID, store.AppKindSDK.String(), canonicalName)
+	if !errors.Is(familyErr, store.ErrAppFamilyNotFound) {
+		return nil
+	}
+
+	// Existing families consume no additional entitlement, so only the absent
+	// identity path needs the aggregate count query.
+	currentFamilies, err := s.CountAppFamilies(ctx, accountID, store.AppKindSDK.String())
+	if err != nil {
+		span.RecordError(err)
+		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_count_sdk_families"}
+	}
+	if limitErr := entitlement.CheckLimit(span, "sdk_families", currentFamilies, entitlement.LiveEntitlement.Load().MaxSDKFamilies); limitErr != nil {
+		span.SetAttributes(attribute.String("outcome", "sdk_family_limit_exceeded"))
+		return workspaceConfigHTTPError{status: http.StatusForbidden, message: limitErr.Error()}
+	}
+	return nil
+}
+
+func reserveSDKVersionIdentity(ctx context.Context, s store.Store, planID, familyID uuid.UUID, version, sourceHash string) (uuid.UUID, uuid.UUID, error) {
+	tombstoned, err := s.AppTombstoneExists(ctx, familyID, version)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_check_app_version"}
+	}
+	if tombstoned {
+		return uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app_version_deactivated"}
+	}
+	existing, err := s.GetAppByFamilyAndVersion(ctx, familyID, version)
 	if errors.Is(err, store.ErrAppNotFound) {
-		return family.AppFamilyID, stableAppIDForPlan(call.planID), uuid.Nil, nil
+		return stableAppIDForPlan(planID), uuid.Nil, nil
 	}
 	if err != nil {
-		return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_check_app_version"}
+		return uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_check_app_version"}
 	}
-	if existing.SourceHash != plan.SourceHash {
-		return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app_version_immutable"}
+	if existing.SourceHash != sourceHash {
+		return uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app_version_immutable"}
 	}
-	return family.AppFamilyID, existing.AppID, existing.AppID, nil
+	return existing.AppID, existing.AppID, nil
 }
 
 func runTrackedSDKGeneration(ctx context.Context, proxy Forwarder, apiKey string, payload json.RawMessage) (sdkGenerationResult, error) {
@@ -2187,7 +2184,7 @@ type persistAppRuntimeParams struct {
 	selections         json.RawMessage
 	scopeSchemaVersion int
 	// Kind and name label the exact version for the app catalogue.
-	kind             string
+	kind             store.AppKind
 	name             string
 	version          string
 	configKey        string
@@ -2243,7 +2240,7 @@ func applyGeneratedAppRuntime(
 		bucketName:         doc.Bucket,
 		selections:         selections,
 		scopeSchemaVersion: result.ScopeSchemaVersion,
-		kind:               "sdk",
+		kind:               store.AppKindSDK,
 		name:               doc.Name,
 		version:            doc.Version,
 		configKey:          fmt.Sprintf("sdk:%s:%s", doc.Name, doc.Version),
@@ -2263,11 +2260,11 @@ func applyAppConfigPlan(ctx context.Context, configStore store.ConfigRepository,
 }
 
 func applyAppConfigRuntime(ctx context.Context, configStore store.ConfigRepository, s store.Store, call sdkApplyCall, plan *store.ConfigPlan, scope store.AppRuntime, authorizedBucketName, targetLanguage, generatorVersion string) (string, uuid.UUID, uuid.UUID, bool, error) {
-	rawToken, tokenHash, err := newSDKExecutionCredential()
+	rawToken, tokenHash, err := applifecycle.NewExecutionToken()
 	if err != nil {
 		return "", uuid.Nil, uuid.Nil, false, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to issue sdk execution credential"}
 	}
-	result, err := configStore.ApplyAppConfigPlan(ctx, store.ApplyAppConfigPlanParams{
+	result, err := applifecycle.New(s).ApplyConfigPlan(ctx, configStore, store.ApplyAppConfigPlanParams{
 		Plan: store.ApplyConfigPlanParams{
 			State: store.UpsertConfigStateParams{
 				ConfigKey: plan.ConfigKey, ConfigType: plan.ConfigType, SourceHash: plan.SourceHash,
@@ -2277,8 +2274,8 @@ func applyAppConfigRuntime(ctx context.Context, configStore store.ConfigReposito
 			ApplyLeaseID: call.applyLeaseID,
 		},
 		Scope: scope, AuthorizedBucketName: authorizedBucketName,
-		TokenHash: tokenHash, TokenName: "default", TargetLanguage: targetLanguage,
-		GeneratorVersion: generatorVersion, Activate: true,
+		TokenHash: tokenHash, TokenName: "default", TokenPolicy: applifecycle.FullAccessTokenPolicy(), TargetLanguage: targetLanguage,
+		GeneratorVersion: generatorVersion,
 	})
 	if err != nil {
 		return "", uuid.Nil, uuid.Nil, false, appApplyPersistenceError(ctx, err, scope.AppID)
@@ -2535,16 +2532,6 @@ func sameSDKServiceVersion(a, b models.SDKSelection) bool {
 		return false
 	}
 	return a.ServiceVersionID == b.ServiceVersionID
-}
-
-func newSDKExecutionCredential() (string, string, error) {
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return "", "", err
-	}
-	token := "fused_sdk_" + base64.RawURLEncoding.EncodeToString(raw)
-	hash := sha256.Sum256([]byte(token))
-	return token, hex.EncodeToString(hash[:]), nil
 }
 
 func writeSDKConfigError(w http.ResponseWriter, err error, contexts ...context.Context) {

@@ -9,20 +9,10 @@ import (
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/entitlement"
+	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 )
-
-// concurrencyFixture helps set up the entitlement singleton and mock cache for
-// concurrency-limit tests. It returns a vendor URL, a cache, endpoint name, and
-// a cleanup function.
-func concurrencyFixture(t *testing.T, vendorHandler http.HandlerFunc) (cache *richMockCache, endpoint string, vendorURL string) {
-	t.Helper()
-	vendor := httptest.NewServer(vendorHandler)
-	t.Cleanup(func() { vendor.Close() })
-	cache, endpoint = makeAnonymousPassthroughCache(t, vendor.URL)
-	return cache, endpoint, vendor.URL
-}
 
 // withEntitlement installs the given RuntimeEntitlement into the global
 // LiveEntitlement singleton for the duration of the test.
@@ -48,6 +38,7 @@ func (a *accountValidator) Validate(_ context.Context, appID uuid.UUID, _ string
 		AppVersion:  "1.0.0",
 		Kind:        "sdk",
 		Status:      "active",
+		TokenPolicy: store.AppTokenPolicy{AllowAll: true},
 	}, nil
 }
 

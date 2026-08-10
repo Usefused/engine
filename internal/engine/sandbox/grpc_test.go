@@ -308,8 +308,6 @@ func TestExecute_OrdinaryErrorsRemainStrings(t *testing.T) {
 	}
 }
 
-// TestConnect_PropagatesToken confirms Connect wires the token into the context
-// passed to ConnectSDK so downstream registry calls authenticate as the user.
 func TestConnect_NilCacheFails(t *testing.T) {
 	// When InitSandbox hasn't been called the global cache is nil; Connect must
 	// surface a clear error rather than panicking.
@@ -346,5 +344,30 @@ func TestConnect_InvalidOrInactiveSDKReturnsFriendlyUnauthenticatedStatus(t *tes
 	}
 	if got := status.Convert(err).Message(); got != "SDK authentication failed; check the token and confirm this SDK version is active" {
 		t.Fatalf("Connect message = %q", got)
+	}
+}
+
+func TestConnectDoesNotForwardExecutionTokenToCache(t *testing.T) {
+	originalCache, originalValidator := globalObjectCache, globalTokenValidator
+	t.Cleanup(func() {
+		globalObjectCache, globalTokenValidator = originalCache, originalValidator
+	})
+	cache := &recordingCache{}
+	globalObjectCache = cache
+	globalTokenValidator = &mockTokenValidator{validToken: "family-token", accountID: uuid.New()}
+
+	appID := uuid.NewString()
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(
+		"x-app-id", appID,
+		"x-api-key", "family-token",
+	))
+	if _, err := NewEngineGRPCServer().Connect(ctx, &enginev1.ConnectRequest{}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if cache.connectedID != appID {
+		t.Fatalf("connected app = %q, want %q", cache.connectedID, appID)
+	}
+	if cache.connectedContext != ctx {
+		t.Fatal("Connect derived a cache context instead of forwarding the credential-free request context")
 	}
 }

@@ -56,7 +56,7 @@ type mcpSession struct {
 	token           string
 
 	// fixture is this session's own operation catalog, built at connect time
-	// from the SDK's AppRuntime.Selections (mcp_session_fixture.go), scoping
+	// from the app version's AppRuntime.Selections (mcp_session_fixture.go), scoping
 	// search_docs/call() to exactly what its owner selected. A missing fixture
 	// fails closed instead of exposing a process-wide catalog.
 	fixture *Fixture
@@ -89,18 +89,6 @@ var mcpSessions struct {
 	m map[string]*mcpSession
 }
 
-// tokenCacheEntry holds the result of a successful TokenValidator.Validate call
-// so the DB round-trip is skipped for repeated requests within the TTL window.
-type tokenCacheEntry struct {
-	accountID uuid.UUID
-	expiry    time.Time
-}
-
-var tokenCache struct {
-	sync.RWMutex
-	m map[string]tokenCacheEntry
-}
-
 // activeExecutions tracks per-account in-flight sandbox executions for
 // MaxSandboxConcurrency enforcement. A sync.Map is chosen because account
 // count is unbounded and a coarse mutex would serialize unrelated accounts.
@@ -110,7 +98,6 @@ var activeExecutions struct {
 
 func init() {
 	mcpSessions.m = make(map[string]*mcpSession)
-	tokenCache.m = make(map[string]tokenCacheEntry)
 }
 
 // executionCounter tracks a single account's in-flight executions.
@@ -159,17 +146,15 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, msg)))
 }
 
-func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, cache ObjectCache, validator auth.TokenValidator, resolver SecretResolver, enginePort string) {
+func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, cache ObjectCache, validator auth.TokenValidator, resolver SecretResolver, rateLimits store.ProviderRateLimitStore, enginePort string) {
 	initSharedSandboxes()
 
 	cfg = appCfg
 	globalNATSClient = nc
 	globalObjectCache = cache
 	globalDispatcher = engine.NewDispatcher()
-	if local, ok := cache.(*LocalObjectCache); ok {
-		if rateLimits := local.providerRateLimitStore(); rateLimits != nil {
-			globalDispatcher = engine.NewDispatcherWithProviderRateLimits(rateLimits)
-		}
+	if rateLimits != nil {
+		globalDispatcher = engine.NewDispatcherWithProviderRateLimits(rateLimits)
 	}
 	globalTokenValidator = validator
 	globalSecretResolver = resolver
@@ -181,23 +166,6 @@ func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, 
 
 	// Setup NATS subscriptions
 	setupNATSSubscriptions(nc)
-
-	// Background goroutine: evict expired token cache entries every 5 minutes.
-	// Without this sweep the map grows without bound across the process lifetime.
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		for range ticker.C {
-			now := time.Now()
-			tokenCache.Lock()
-			for key, entry := range tokenCache.m {
-				if now.After(entry.expiry) {
-					delete(tokenCache.m, key)
-				}
-			}
-			tokenCache.Unlock()
-		}
-	}()
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"status":"ok"}`))
@@ -266,7 +234,6 @@ func engineExecuteCore(
 		return err
 	}
 	defer decrementActive()
-
 	auditState := executionAuditState{
 		identity:     identity,
 		endpointName: endpointName,
@@ -280,8 +247,17 @@ func engineExecuteCore(
 		recordEngineExecutionAudit(auditCtx, span, auditState, err)
 		recordEngineExecutionUsage(auditCtx, span, auditState, err)
 	}()
+	if !identity.AllowsOperation(endpointName) {
+		// Fixture filtering improves MCP discovery, but this shared boundary is
+		// the authoritative authorization decision for both SDK and MCP calls.
+		span.SetAttributes(attribute.String("authorization.outcome", "denied"))
+		err = errors.New("ScopeError: operation not allowed by token")
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetAttributes(attribute.String("authorization.outcome", "allowed"))
 
-	// 1-2. Validate the SDK's scope manifest and resolve endpointName within
+	// 1-2. Validate the app version's scope manifest and resolve endpointName within
 	// it (governance layer 2; resolution only, no dispatcher mapping yet).
 	// Split into resolveScopedEndpoint -- separation of concerns (scope
 	// governance is a distinct step from dispatch) and keeps this function's
@@ -344,13 +320,20 @@ func engineExecuteCore(
 	auditState.selectedEnvironment = runtimeResolution.Environment
 	auditState.environmentSource = runtimeResolution.Source
 	auditState.providerHost = providerHost(runtimeResolution.BaseURL)
-	if err != nil {
-		err = normalizeExecutionTimeout(ctx, err, executionTimeoutMs)
-		span.SetStatus(codes.Error, err.Error())
-		return err
+	return finishExecutionDispatch(ctx, span, auditState.providerHTTPStatus, executionTimeoutMs, err)
+}
+
+// Final status projection is kept separate from governance and dispatch so
+// adding a new provider outcome cannot make the execution boundary itself too
+// complex to audit reliably.
+func finishExecutionDispatch(ctx context.Context, span trace.Span, providerHTTPStatus, executionTimeoutMs int, dispatchErr error) error {
+	if dispatchErr != nil {
+		dispatchErr = normalizeExecutionTimeout(ctx, dispatchErr, executionTimeoutMs)
+		span.SetStatus(codes.Error, dispatchErr.Error())
+		return dispatchErr
 	}
-	if auditState.providerHTTPStatus >= http.StatusBadRequest {
-		span.SetStatus(codes.Error, providerStatusError(auditState.providerHTTPStatus))
+	if providerHTTPStatus >= http.StatusBadRequest {
+		span.SetStatus(codes.Error, providerStatusError(providerHTTPStatus))
 		return nil
 	}
 	if timings, ok := engine.ExecutionTimingsFromContext(ctx); ok {
@@ -507,7 +490,7 @@ func resolveScopedCredentials(ctx context.Context, request CredentialRequest) (m
 	return globalSecretResolver.ResolveExecutionCredentials(ctx, request)
 }
 
-// resolveScopedEndpoint validates the SDK's scope manifest and resolves
+// resolveScopedEndpoint validates the app version's scope manifest and resolves
 // endpointName within it, opening and fully owning its own "engine.scope.enforce"
 // child span (started and ended here, not left for the caller to manage) so
 // this stays a single self-contained governance step. parentSpan only
@@ -651,14 +634,6 @@ func selectedConnectedResourceSource(credentials map[string]any) string {
 	return "connection_resource"
 }
 
-// recordSelectedAuthType records only the selected scheme name for audit/debug;
-// credential values and key material stay out of telemetry.
-func recordSelectedAuthType(span trace.Span, authType string) {
-	if authType != "" {
-		span.SetAttributes(attribute.String("selected_auth_type", authType))
-	}
-}
-
 func recordRuntimeEnvironmentAttrs(span trace.Span, match *scopedEndpoint, environment, source string) {
 	span.SetAttributes(
 		attribute.String("service_id", match.service.ID.String()),
@@ -671,7 +646,7 @@ func recordRuntimeEnvironmentAttrs(span trace.Span, match *scopedEndpoint, envir
 func validateAndParseScope(ctx context.Context, cache ObjectCache, appID string) ([]models.SDKSelection, error) {
 	_, selectionsJSON, err := cache.GetAppRuntime(ctx, appID)
 	if err != nil {
-		return nil, fmt.Errorf("ScopeError: sdk scope not found")
+		return nil, fmt.Errorf("ScopeError: app scope not found")
 	}
 
 	var selections []models.SDKSelection
@@ -682,7 +657,7 @@ func validateAndParseScope(ctx context.Context, cache ObjectCache, appID string)
 	return selections, nil
 }
 
-// scopedEndpoint is the result of resolving a tool name against an SDK's scope:
+// scopedEndpoint is the result of resolving a tool name against an app version's scope:
 // the provider object, the matched endpoint, and whether it is enabled for the
 // SDK. This is pure resolution data — mapping to dispatcher types happens in the
 // caller, keeping resolution and mapping as separate concerns.
@@ -694,7 +669,7 @@ type scopedEndpoint struct {
 	selection        models.SDKSelection
 }
 
-// findEndpointInScope resolves endpointName to an endpoint across the SDK's scoped
+// findEndpointInScope resolves endpointName to an endpoint across the app's scoped
 // providers. It returns nil when no provider in scope exposes the tool.
 func findEndpointInScope(ctx context.Context, cache ObjectCache, appID string, selections []models.SDKSelection, endpointName string) (*scopedEndpoint, error) {
 	for _, sel := range selections {
@@ -762,12 +737,6 @@ func endpointAllowed(sel models.SDKSelection, ep *fusedobject.Endpoint) bool {
 		}
 	}
 	return false
-}
-
-// snakeCase lowercases and replaces spaces with underscores, matching how
-// endpoint names are surfaced as tool names.
-func snakeCase(s string) string {
-	return strings.ReplaceAll(strings.ToLower(s), " ", "_")
 }
 
 // sanitiseParams removes known credential keys from a params map before the

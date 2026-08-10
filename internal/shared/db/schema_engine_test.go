@@ -19,6 +19,61 @@ func TestEngineSchemaDefinesStableInstallationIdentity(t *testing.T) {
 	}
 }
 
+func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
+	joined := strings.Join(engineSchemaQueries(), "\n")
+	for _, expected := range []string{
+		"CREATE TABLE IF NOT EXISTS fused_engine_schema_migrations",
+		"version    bigint PRIMARY KEY",
+		"name       text NOT NULL UNIQUE",
+		"applied_at timestamptz NOT NULL DEFAULT NOW()",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("expected Engine migration ledger containing %q", expected)
+		}
+	}
+
+	migrations := engineMigrations()
+	if len(migrations) != 2 {
+		t.Fatalf("Engine migration count = %d, want 2", len(migrations))
+	}
+	if migrations[0].Version != engineMigrationVersion || migrations[0].Name != engineMigrationName {
+		t.Fatalf("Engine migration identity = (%d, %q), want (%d, %q)", migrations[0].Version, migrations[0].Name, engineMigrationVersion, engineMigrationName)
+	}
+	if migrations[1].Version != appTokenPolicyMigrationVersion || migrations[1].Name != appTokenPolicyMigrationName {
+		t.Fatalf("app token migration identity = (%d, %q), want (%d, %q)", migrations[1].Version, migrations[1].Name, appTokenPolicyMigrationVersion, appTokenPolicyMigrationName)
+	}
+	if engineMigrationLockQuery != "SELECT pg_advisory_xact_lock($1)" {
+		t.Fatalf("Engine migrations must use a transaction-scoped advisory lock, got %q", engineMigrationLockQuery)
+	}
+}
+
+func TestEngineSchemaDefinesAppTokenPolicy(t *testing.T) {
+	schema := strings.Join(engineSchemaQueries(), "\n")
+	for _, expected := range []string{
+		"allow_all       boolean NOT NULL DEFAULT true",
+		"allowed_operations text[] NOT NULL DEFAULT '{}'",
+		"expires_at timestamptz",
+		"CONSTRAINT chk_fused_app_tokens_allow",
+		"NOT ('*' = ANY(allowed_operations))",
+	} {
+		if !strings.Contains(schema, expected) {
+			t.Fatalf("app token schema missing %q", expected)
+		}
+	}
+
+	migration := strings.Join(appTokenPolicyMigrationQueries(), "\n")
+	for _, expected := range []string{
+		"ADD COLUMN IF NOT EXISTS allow_all",
+		"ADD COLUMN IF NOT EXISTS allowed_operations",
+		"ADD COLUMN IF NOT EXISTS expires_at",
+		"ADD CONSTRAINT chk_fused_app_tokens_allow",
+	} {
+		if !strings.Contains(migration, expected) {
+			t.Fatalf("app token policy migration missing %q", expected)
+		}
+	}
+}
+
 func TestEngineSchemaDefinesCurrentConfigColumnsDirectly(t *testing.T) {
 	joined := strings.Join(engineSchemaQueries(), "\n")
 	required := []string{
@@ -85,6 +140,24 @@ func TestEngineSchemaDefinesProviderRateLimitCoordinationAndActivity(t *testing.
 		if !strings.Contains(migrations, expected) {
 			t.Fatalf("provider rate-limit migration missing %q", expected)
 		}
+	}
+	if strings.Contains(migrations, "CREATE TABLE IF NOT EXISTS fused_provider_rate_limit_states") ||
+		strings.Contains(migrations, "idx_fused_provider_rate_limit_states_updated") {
+		t.Fatal("provider rate-limit base objects must not be recreated by startup migrations")
+	}
+	if !strings.Contains(migrations, "ADD COLUMN IF NOT EXISTS state_sequence") {
+		t.Fatal("existing provider rate-limit projections must receive state_sequence")
+	}
+}
+
+func TestEngineMigrationDoesNotRecreateBaseExecutionStartedIndex(t *testing.T) {
+	schema := strings.Join(engineSchemaQueries(), "\n")
+	migrations := strings.Join(engineMigrationQueries(), "\n")
+	if !strings.Contains(schema, "idx_fused_engine_execution_events_started") {
+		t.Fatal("fresh schema must create the execution started index")
+	}
+	if strings.Contains(migrations, "idx_fused_engine_execution_events_started ON") {
+		t.Fatal("startup migrations must not recreate the base execution started index")
 	}
 }
 
@@ -153,6 +226,7 @@ func TestEngineFreshSchemaDoesNotCreateLegacyArtifactPersistence(t *testing.T) {
 	for _, table := range []string{
 		"fused_artifact_scopes", "fused_artifact_tokens",
 		"fused_artifact_buckets", "fused_artifact_snapshots",
+		"fused_app_family_migrations",
 	} {
 		if strings.Contains(schema, "CREATE TABLE IF NOT EXISTS "+table) {
 			t.Fatalf("fresh schema must not create legacy table %s", table)
@@ -166,45 +240,38 @@ func TestEngineFreshSchemaDoesNotCreateLegacyArtifactPersistence(t *testing.T) {
 }
 
 func TestEngineRuntimeTablesUseExactAppIdentity(t *testing.T) {
-	schema := strings.Join(engineSchemaQueries(), "\n")
-	for _, expected := range []string{
+	schemaQueries := engineSchemaQueries()
+	migrationQueries := engineMigrationQueries()
+	assertSchemaContainsAll(t, strings.Join(schemaQueries, "\n"), "fresh runtime schema missing %q", []string{
 		"CREATE TABLE IF NOT EXISTS fused_mcp_sessions",
 		"app_id uuid",
 		"CREATE TABLE IF NOT EXISTS fused_engine_idempotency_keys",
 		"UNIQUE(app_id, idempotency_key_hash)",
-	} {
-		if !strings.Contains(schema, expected) {
-			t.Fatalf("fresh runtime schema missing %q", expected)
-		}
-	}
-	migrations := strings.Join(engineMigrationQueries(), "\n")
-	for _, expected := range []string{
+	})
+	assertSchemaContainsAll(t, strings.Join(migrationQueries, "\n"), "runtime identity migration missing %q", []string{
 		"UPDATE fused_mcp_sessions SET app_id = artifact_id",
 		"UPDATE fused_engine_idempotency_keys SET app_id = artifact_id",
 		"fused_mcp_sessions DROP COLUMN IF EXISTS artifact_id",
 		"fused_engine_idempotency_keys DROP COLUMN IF EXISTS artifact_id",
-	} {
-		if !strings.Contains(migrations, expected) {
-			t.Fatalf("runtime identity migration missing %q", expected)
-		}
-	}
+	})
+	assertAppIdentityIndexesRunAfterLegacyColumns(t, schemaQueries, migrationQueries)
+	assertSchemaOrder(t, migrationQueries, "fused_mcp_sessions ADD COLUMN IF NOT EXISTS app_id uuid", "idx_fused_mcp_sessions_app_started")
+}
+
+func assertAppIdentityIndexesRunAfterLegacyColumns(t *testing.T, schemaQueries, migrationQueries []string) {
+	t.Helper()
 	for _, index := range []string{
 		"idx_fused_mcp_sessions_app_started",
 		"idx_fused_engine_execution_events_family_started",
 		"idx_fused_engine_execution_events_app_started",
 		"idx_fused_engine_execution_events_endpoint",
 	} {
-		if indexOfSchemaFragment(engineSchemaQueries(), index) >= 0 {
+		if indexOfSchemaFragment(schemaQueries, index) >= 0 {
 			t.Fatalf("app identity index %q must run after legacy column migration", index)
 		}
-		if indexOfSchemaFragment(engineMigrationQueries(), index) < 0 {
+		if indexOfSchemaFragment(migrationQueries, index) < 0 {
 			t.Fatalf("app identity migration missing index %q", index)
 		}
-	}
-	addMCPAppID := indexOfSchemaFragment(engineMigrationQueries(), "fused_mcp_sessions ADD COLUMN IF NOT EXISTS app_id uuid")
-	mcpIndex := indexOfSchemaFragment(engineMigrationQueries(), "idx_fused_mcp_sessions_app_started")
-	if addMCPAppID < 0 || mcpIndex < 0 || addMCPAppID > mcpIndex {
-		t.Fatalf("MCP session identity migration order is unsafe: add=%d index=%d", addMCPAppID, mcpIndex)
 	}
 }
 
@@ -321,50 +388,49 @@ func TestEngineSchemaMigratesWebhookAnalyticsToCanonicalEvents(t *testing.T) {
 }
 
 func TestEngineSchemaDefinesVersionAwareAppExecutionIdentity(t *testing.T) {
-	var eventTable string
-	for _, query := range engineSchemaQueries() {
-		if strings.Contains(query, "CREATE TABLE IF NOT EXISTS fused_engine_execution_events") {
-			eventTable = query
-			break
-		}
-	}
+	eventTable := schemaQueryContaining(engineSchemaQueries(), "CREATE TABLE IF NOT EXISTS fused_engine_execution_events")
 	if eventTable == "" {
 		t.Fatal("canonical execution-event table is missing")
 	}
-	for _, expected := range []string{
+	assertSchemaContainsAll(t, eventTable, "expected execution-event schema containing %q", []string{
 		"app_family_id uuid",
 		"app_id uuid",
 		"app_version text",
 		"provider_protocol text",
 		"chk_fused_execution_app_identity",
-	} {
-		if !strings.Contains(eventTable, expected) {
-			t.Fatalf("expected execution-event schema containing %q", expected)
-		}
-	}
+	})
 	if strings.Contains(eventTable, "artifact_id") {
 		t.Fatal("canonical execution-event table must not retain artifact_id")
 	}
 
-	migrations := strings.Join(engineMigrationQueries(), "\n")
-	for _, expected := range []string{
+	migrationQueries := engineMigrationQueries()
+	assertSchemaContainsAll(t, strings.Join(migrationQueries, "\n"), "expected execution-event migration containing %q", []string{
 		"UPDATE fused_engine_execution_events event",
 		"SELECT app_id, app_family_id, version FROM fused_apps",
 		"SELECT app_id, app_family_id, version FROM fused_app_tombstones",
 		"DROP COLUMN IF EXISTS artifact_id",
 		"idx_fused_engine_execution_events_family_started",
 		"idx_fused_engine_execution_events_app_started",
-	} {
-		if !strings.Contains(migrations, expected) {
-			t.Fatalf("expected execution-event migration containing %q", expected)
+	})
+	assertSchemaOrder(t, migrationQueries, "fused_engine_execution_events ADD COLUMN IF NOT EXISTS app_id uuid", "idx_fused_engine_execution_events_app_started")
+	assertSchemaOrder(t, migrationQueries, "UPDATE fused_engine_execution_events event", "fused_engine_execution_events DROP COLUMN IF EXISTS artifact_id")
+}
+
+func schemaQueryContaining(queries []string, fragment string) string {
+	for _, query := range queries {
+		if strings.Contains(query, fragment) {
+			return query
 		}
 	}
-	addAppID := indexOfSchemaFragment(engineMigrationQueries(), "fused_engine_execution_events ADD COLUMN IF NOT EXISTS app_id uuid")
-	appIndex := indexOfSchemaFragment(engineMigrationQueries(), "idx_fused_engine_execution_events_app_started")
-	backfill := indexOfSchemaFragment(engineMigrationQueries(), "UPDATE fused_engine_execution_events event")
-	dropLegacy := indexOfSchemaFragment(engineMigrationQueries(), "fused_engine_execution_events DROP COLUMN IF EXISTS artifact_id")
-	if addAppID < 0 || appIndex < 0 || backfill < 0 || dropLegacy < 0 || addAppID > appIndex || backfill > dropLegacy {
-		t.Fatalf("execution identity migration order is unsafe: add=%d index=%d backfill=%d drop=%d", addAppID, appIndex, backfill, dropLegacy)
+	return ""
+}
+
+func assertSchemaContainsAll(t *testing.T, schema, failureFormat string, expectedFragments []string) {
+	t.Helper()
+	for _, expected := range expectedFragments {
+		if !strings.Contains(schema, expected) {
+			t.Fatalf(failureFormat, expected)
+		}
 	}
 }
 

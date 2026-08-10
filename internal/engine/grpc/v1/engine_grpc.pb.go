@@ -63,8 +63,7 @@ type EngineServiceClient interface {
 	// an active subscription and redelivers un-acked events with backoff --
 	// this is a transport change only: durability/retry/queue-group fan-out is
 	// unchanged, owned by the Engine's NATS JetStream durable consumer keyed
-	// on receiver_name (see websocket_handler.go's setupWebhookConsumer,
-	// ported as-is onto this stream in the gRPC handler).
+	// on receiver_name and bridged to the stream by the gRPC handler.
 	SubscribeWebhooks(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[WebhookClientMessage, WebhookServerMessage], error)
 }
 
@@ -193,8 +192,7 @@ type EngineServiceServer interface {
 	// an active subscription and redelivers un-acked events with backoff --
 	// this is a transport change only: durability/retry/queue-group fan-out is
 	// unchanged, owned by the Engine's NATS JetStream durable consumer keyed
-	// on receiver_name (see websocket_handler.go's setupWebhookConsumer,
-	// ported as-is onto this stream in the gRPC handler).
+	// on receiver_name and bridged to the stream by the gRPC handler.
 	SubscribeWebhooks(grpc.BidiStreamingServer[WebhookClientMessage, WebhookServerMessage]) error
 	mustEmbedUnimplementedEngineServiceServer()
 }

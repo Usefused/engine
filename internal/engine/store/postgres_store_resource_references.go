@@ -18,9 +18,9 @@ func (s *postgresStore) ResolveResourceReference(ctx context.Context, query Reso
 	exactID, _ := uuid.Parse(value)
 	switch query.Kind {
 	case ReferenceApp:
-		return s.resolveAppVersionReference(ctx, exactID, value, query.AppVersion, query.AppKind, query.AllowedAll, query.AllowedIDs)
+		return s.resolveAppVersionReference(ctx, exactID, value, query.AppVersion, query.AppKind.String(), query.AllowedAll, query.AllowedIDs)
 	case ReferenceAppFamily:
-		return s.resolveAppReference(ctx, exactID, value, query.AppKind, query.AllowedAll, query.AllowedIDs)
+		return s.resolveAppReference(ctx, exactID, value, query.AppKind.String(), query.AllowedAll, query.AllowedIDs)
 	default:
 		return s.resolveNonAppReference(ctx, query, exactID, value)
 	}

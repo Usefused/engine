@@ -12,7 +12,7 @@ const EngineEnvironmentEnvVar = "FUSED_ENGINE_ENVIRONMENT"
 // otherwise "production" so existing single-Engine deployments see no
 // behavior change. Purely an observability/UX label -- it has no effect on
 // workspace resolution, database schema, or any business logic. Attached to
-// OTel trace/log/metric resource attributes (see Init/InitLogs/InitMetrics)
+// OTel trace/metric resource attributes (see Init/InitMetrics)
 // and echoed on the Engine's /health response so operators and the CLI can
 // tell which deployment they're talking to before a destructive operation.
 func EngineEnvironment() string {

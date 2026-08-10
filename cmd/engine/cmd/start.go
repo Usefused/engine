@@ -31,6 +31,7 @@ import (
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/managedauth"
 	enginemiddleware "github.com/Usefused/engine/internal/engine/middleware"
+	"github.com/Usefused/engine/internal/engine/ratelimitcoordinator"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/engine/worker"
@@ -40,6 +41,7 @@ import (
 	apimiddleware "github.com/Usefused/engine/internal/shared/middleware"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/observability"
+	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -112,7 +114,7 @@ func runEngine() {
 	observability.InitMetrics(ctx)
 	defer observability.CloseMetrics(ctx)
 
-	cfg, database, natsClient := initDependencies(ctx, config.WithEngineLicenseSources(licenseSources))
+	cfg, database, natsClient, rateLimitKV := initDependencies(ctx, config.WithEngineLicenseSources(licenseSources))
 	defer natsClient.Close()
 
 	applyEngineOverrides(cfg)
@@ -120,7 +122,14 @@ func runEngine() {
 	envLicense := requireRegistryLicense(ctx)
 
 	// ─── Engine Bootstrap ───
-	engineStore := store.NewCachedStore(store.NewPostgresStore(database), natsClient)
+	postgresStore := store.NewPostgresStore(database)
+	engineStore := store.NewCachedStore(postgresStore, natsClient)
+	rateLimits, err := newProviderRateLimitCoordinator(rateLimitKV, postgresStore)
+	if err != nil {
+		slog.ErrorContext(ctx, "FATAL: Failed to initialize provider rate-limit coordination", slog.Any("error", err))
+		os.Exit(1)
+	}
+	defer func() { _ = rateLimits.Close() }()
 	registryClient := sandbox.NewHTTPRegistryClient(cfg.Engine.RegistryEndpoint, envLicense)
 	if err := configureRegistryEngineIdentity(ctx, engineStore, registryClient); err != nil {
 		slog.ErrorContext(ctx, "FATAL: Failed to configure Engine installation identity", slog.Any("error", err))
@@ -147,6 +156,7 @@ func runEngine() {
 	}
 	backgroundStore := newSerializedBackgroundStore(engineStore)
 	engineWorkers := startEngineWorkers(ctx, engineStore, natsClient, cfg.Engine)
+	engineWorkers.providerRateLimits = startProviderRateLimitProjection(ctx, postgresStore, natsClient)
 	engineWorkers.packageLeases = startSDKPackageLeaseRenewal(ctx, backgroundStore, registryClient)
 	engineWorkers.publicInsights = startPublicServiceInsightReporting(ctx, backgroundStore, registryClient)
 	controlAuthenticator := newControlAuthenticator(ctx, engineStore, authorizationRevision)
@@ -170,17 +180,14 @@ func runEngine() {
 	}()
 
 	sandbox.StartMCPCleanupWorker(ctx, database)
-	// configStore only needs database (already available), so it's created
-	// here rather than down by MountConfigRoutes -- both the changelog
-	// poller below and SDKWebSocketHandler further down need it.
+	// configStore only needs the database, so create it once for both the
+	// changelog poller and the gRPC webhook subscription path.
 	configStore := store.NewPostgresConfigRepository(database)
 	// Start the service changelog poller: periodically fetches published service
 	// changelogs from the Registry, caches them locally, and emits workspace-scoped
 	// notifications only when the workspace's own configuration references a changed
 	// service or endpoint.
 	sandbox.StartServiceChangelogPoller(ctx, engineStore, configStore, registryClient, envLicense)
-
-	_ = sandbox.NewActivationManager(registryClient, engineStore)
 
 	localObjectCache := sandbox.NewLocalObjectCache(engineStore, registryClient)
 	subscribeCacheInvalidation(natsClient, localObjectCache)
@@ -192,19 +199,20 @@ func runEngine() {
 	cliLoginService := newCLILoginService(ctx, engineStore, controlAuthenticator)
 
 	r := buildEngineRouter(engineRouterDeps{
-		cfg:              cfg,
-		natsClient:       natsClient,
-		engineStore:      engineStore,
-		registryClient:   registryClient,
-		registryProxy:    registryProxy,
-		localObjectCache: localObjectCache,
-		configStore:      configStore,
-		masterKey:        masterKey,
-		controlAuth:      controlAuthenticator,
-		managedLogin:     managedLoginService,
-		cliLogin:         cliLoginService,
-		browserSession:   browserSessionService,
-		browserCookies:   browserCookies,
+		cfg:                cfg,
+		natsClient:         natsClient,
+		engineStore:        engineStore,
+		registryClient:     registryClient,
+		registryProxy:      registryProxy,
+		localObjectCache:   localObjectCache,
+		configStore:        configStore,
+		masterKey:          masterKey,
+		controlAuth:        controlAuthenticator,
+		managedLogin:       managedLoginService,
+		cliLogin:           cliLoginService,
+		browserSession:     browserSessionService,
+		browserCookies:     browserCookies,
+		providerRateLimits: rateLimits,
 	})
 
 	webhookSrv := startWebhookServer(ctx, r)
@@ -212,6 +220,14 @@ func runEngine() {
 	grpcServer := startEngineGRPCServer(ctx, engineStore, registryClient, masterKey, configStore, natsClient)
 
 	waitForEngineShutdown(ctx, cancel, srv, webhookSrv, grpcServer)
+}
+
+func newProviderRateLimitCoordinator(kv nats.KeyValue, repository store.Store) (*ratelimitcoordinator.Coordinator, error) {
+	recovery, ok := repository.(ratelimitcoordinator.RecoveryStore)
+	if !ok {
+		return nil, errors.New("provider rate-limit recovery store is unavailable")
+	}
+	return ratelimitcoordinator.New(kv, recovery)
 }
 
 func configureRegistryEngineIdentity(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient) error {
@@ -301,14 +317,18 @@ func requireRegistryLicense(ctx context.Context) string {
 }
 
 type engineWorkers struct {
-	executionEvents *worker.ExecutionEventWorker
-	retention       *worker.ExecutionRetentionWorker
-	publicInsights  *worker.PublicInsightWorker
-	usageCounter    *worker.UsageCounterWorker
-	packageLeases   *worker.SDKPackageLeaseWorker
+	executionEvents    *worker.ExecutionEventWorker
+	retention          *worker.ExecutionRetentionWorker
+	publicInsights     *worker.PublicInsightWorker
+	usageCounter       *worker.UsageCounterWorker
+	packageLeases      *worker.SDKPackageLeaseWorker
+	providerRateLimits *worker.ProviderRateLimitProjectionWorker
 }
 
 func (w engineWorkers) Stop(ctx context.Context) {
+	if w.providerRateLimits != nil {
+		w.providerRateLimits.Stop(ctx)
+	}
 	if w.usageCounter != nil {
 		w.usageCounter.Stop(ctx)
 	}
@@ -324,6 +344,22 @@ func (w engineWorkers) Stop(ctx context.Context) {
 	if w.packageLeases != nil {
 		w.packageLeases.Stop(ctx)
 	}
+}
+
+func startProviderRateLimitProjection(ctx context.Context, projectionStore store.Store, natsClient *messaging.NATSClient) *worker.ProviderRateLimitProjectionWorker {
+	typed, ok := projectionStore.(interface {
+		BatchUpsertProviderRateLimitStates(context.Context, []ratelimitpolicy.StateEnvelope) error
+	})
+	if !ok {
+		slog.ErrorContext(ctx, "FATAL: Provider rate-limit projection store is unavailable")
+		os.Exit(1)
+	}
+	projectionWorker, err := worker.StartProviderRateLimitProjectionWorker(ctx, typed, natsClient)
+	if err != nil {
+		slog.ErrorContext(ctx, "FATAL: Failed to start provider rate-limit projection", slog.Any("error", err))
+		os.Exit(1)
+	}
+	return projectionWorker
 }
 
 type runtimeEntitlementStore interface {
@@ -649,19 +685,20 @@ func loadMasterKey(ctx context.Context) []byte {
 }
 
 type engineRouterDeps struct {
-	cfg              *config.Config
-	natsClient       *messaging.NATSClient
-	engineStore      store.Store
-	registryClient   *sandbox.HTTPRegistryClient
-	registryProxy    api.Forwarder
-	localObjectCache sandbox.ObjectCache
-	configStore      store.ConfigRepository
-	masterKey        []byte
-	controlAuth      *accesscontrol.Authenticator
-	managedLogin     api.ManagedLoginService
-	cliLogin         api.CLILoginService
-	browserSession   api.BrowserSessionService
-	browserCookies   *browserauth.CookieManager
+	cfg                *config.Config
+	natsClient         *messaging.NATSClient
+	engineStore        store.Store
+	registryClient     *sandbox.HTTPRegistryClient
+	registryProxy      api.Forwarder
+	localObjectCache   sandbox.ObjectCache
+	configStore        store.ConfigRepository
+	masterKey          []byte
+	controlAuth        *accesscontrol.Authenticator
+	managedLogin       api.ManagedLoginService
+	cliLogin           api.CLILoginService
+	browserSession     api.BrowserSessionService
+	browserCookies     *browserauth.CookieManager
+	providerRateLimits store.ProviderRateLimitStore
 }
 
 func buildEngineRouter(deps engineRouterDeps) chi.Router {
@@ -716,10 +753,8 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	tokenValidator := auth.NewTokenValidator(deps.engineStore)
 	secretResolver := sandbox.NewSecretResolver(deps.engineStore, deps.masterKey)
 
-	sandbox.InitSandbox(r, deps.natsClient, deps.cfg, deps.localObjectCache, tokenValidator, secretResolver, port)
-	// Webhook delivery to SDKs/MCPs is gRPC-only now (EngineGRPCServer's
-	// SubscribeWebhooks, see webhook_grpc_handler.go) -- the old wss://.../sdks/ws
-	// WebSocket route has been retired rather than kept running alongside it.
+	sandbox.InitSandbox(r, deps.natsClient, deps.cfg, deps.localObjectCache, tokenValidator, secretResolver, deps.providerRateLimits, port)
+	// SDK and MCP webhook delivery uses EngineGRPCServer.SubscribeWebhooks.
 	// Engine-native MCP GraphQL surface (list/deploy/kill/reactivate/delete +
 	// analytics) -- a distinct endpoint from POST /graphql, which is a pure
 	// Registry forward-proxy with no resolvers of its own (graphql_proxy.go).
@@ -871,10 +906,8 @@ func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registr
 		grpc.UnaryInterceptor(enginemiddleware.UnaryLicenseEnforcement),
 		grpc.StreamInterceptor(enginemiddleware.StreamLicenseEnforcement),
 	)
-	// configStore/natsClient are threaded through so SubscribeWebhooks (the
-	// gRPC replacement for /sdks/ws -- see webhook_grpc_handler.go) can reuse
-	// the exact same NATS JetStream durable-consumer setup and
-	// webhook_attachment label resolution the WS handler already has below.
+	// SubscribeWebhooks needs both dependencies to resolve the configured
+	// attachment and bridge its durable JetStream consumer to the gRPC stream.
 	enginev1.RegisterEngineServiceServer(grpcServer, api.NewEngineGRPCServer(engineStore, registryClient, masterKey, configStore, natsClient))
 
 	go serveGRPCServer(ctx, grpcServer, lis, listenAddress)
@@ -926,7 +959,7 @@ func shutdownWebhookServer(ctx context.Context, webhookSrv *http.Server) {
 	}
 }
 
-func initDependencies(ctx context.Context, options ...config.LoadOption) (*config.Config, *pgxpool.Pool, *messaging.NATSClient) {
+func initDependencies(ctx context.Context, options ...config.LoadOption) (*config.Config, *pgxpool.Pool, *messaging.NATSClient, nats.KeyValue) {
 	cfg, err := config.Load(ConfigPath, options...)
 	if err != nil {
 		slog.WarnContext(ctx, "Failed to parse config file, using defaults", slog.Any("error", err))
@@ -951,7 +984,10 @@ func initDependencies(ctx context.Context, options ...config.LoadOption) (*confi
 		slog.ErrorContext(ctx, "Failed to init FUSED_ENGINE_EVENTS stream", slog.Any("error", err))
 		os.Exit(1)
 	}
-	slog.InfoContext(ctx, "Connected to NATS", slog.String("url", os.Getenv("NATS_URL")))
-
-	return cfg, database, natsClient
+	rateLimitKV, err := natsClient.InitProviderRateLimitBucket()
+	if err != nil {
+		slog.ErrorContext(ctx, "Failed to init provider rate-limit KV", slog.Any("error", err))
+		os.Exit(1)
+	}
+	return cfg, database, natsClient, rateLimitKV
 }

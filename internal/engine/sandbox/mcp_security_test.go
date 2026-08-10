@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/auth"
+	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/google/uuid"
 )
 
@@ -24,7 +25,7 @@ type mockTokenValidator struct {
 
 func (m *mockTokenValidator) Validate(_ context.Context, appID uuid.UUID, token string) (auth.RuntimeIdentity, error) {
 	if token == m.validToken {
-		return auth.RuntimeIdentity{AccountID: m.accountID, AppFamilyID: uuid.New(), AppID: appID, AppVersion: "1.0.0", Kind: "mcp", Status: "active"}, nil
+		return auth.RuntimeIdentity{AccountID: m.accountID, AppFamilyID: uuid.New(), AppID: appID, AppVersion: "1.0.0", Kind: "mcp", Status: "active", TokenPolicy: store.AppTokenPolicy{AllowAll: true}}, nil
 	}
 	return auth.RuntimeIdentity{}, auth.ErrUnauthorized
 }
@@ -38,7 +39,7 @@ type countingValidator struct {
 func (c *countingValidator) Validate(_ context.Context, appID uuid.UUID, token string) (auth.RuntimeIdentity, error) {
 	*c.count++
 	if token == c.validToken {
-		return auth.RuntimeIdentity{AccountID: c.accountID, AppFamilyID: uuid.New(), AppID: appID, AppVersion: "1.0.0", Kind: "mcp", Status: "active"}, nil
+		return auth.RuntimeIdentity{AccountID: c.accountID, AppFamilyID: uuid.New(), AppID: appID, AppVersion: "1.0.0", Kind: "mcp", Status: "active", TokenPolicy: store.AppTokenPolicy{AllowAll: true}}, nil
 	}
 	return auth.RuntimeIdentity{}, auth.ErrUnauthorized
 }
@@ -90,20 +91,20 @@ func TestBearerSchemeRejectedInMessageHandler(t *testing.T) {
 	}
 }
 
-// ─── Blocker 1: validateTokenWithCache ────────────────────────────────────────
+// MCP session establishment always validates against current token state.
 
-func TestValidateTokenWithCacheRejectsInvalidToken(t *testing.T) {
+func TestValidateMCPTokenRejectsInvalidToken(t *testing.T) {
 	orig := globalTokenValidator
 	defer func() { globalTokenValidator = orig }()
 	globalTokenValidator = &mockTokenValidator{validToken: "good", accountID: uuid.New()}
 
-	_, err := validateTokenWithCache(context.Background(), uuid.New().String(), "bad-token")
+	_, err := validateMCPToken(context.Background(), uuid.New().String(), "bad-token")
 	if err == nil {
 		t.Fatal("expected error for invalid token, got nil")
 	}
 }
 
-func TestValidateTokenWithCacheCachesOnSuccess(t *testing.T) {
+func TestValidateMCPTokenRechecksEverySession(t *testing.T) {
 	orig := globalTokenValidator
 	defer func() { globalTokenValidator = orig }()
 
@@ -112,47 +113,39 @@ func TestValidateTokenWithCacheCachesOnSuccess(t *testing.T) {
 	accountID := uuid.New()
 	globalTokenValidator = &countingValidator{validToken: "good", accountID: accountID, count: &callCount}
 
-	got1, err := validateTokenWithCache(context.Background(), appID.String(), "good")
-	if err != nil || got1 != accountID {
-		t.Fatalf("first call: err=%v accountID=%v", err, got1)
+	got1, err := validateMCPToken(context.Background(), appID.String(), "good")
+	if err != nil || got1.AccountID != accountID {
+		t.Fatalf("first call: err=%v identity=%v", err, got1)
 	}
 	if callCount != 1 {
 		t.Fatalf("expected 1 validator call, got %d", callCount)
 	}
 
-	// Second call within TTL: cache hit, validator not called again.
-	got2, err := validateTokenWithCache(context.Background(), appID.String(), "good")
-	if err != nil || got2 != accountID {
-		t.Fatalf("second call: err=%v accountID=%v", err, got2)
+	got2, err := validateMCPToken(context.Background(), appID.String(), "good")
+	if err != nil || got2.AccountID != accountID {
+		t.Fatalf("second call: err=%v identity=%v", err, got2)
 	}
-	if callCount != 1 {
-		t.Fatalf("expected still 1 validator call after cache hit, got %d", callCount)
+	if callCount != 2 {
+		t.Fatalf("validator calls = %d, want 2 for two session checks", callCount)
 	}
-
-	// Clean up cache entry so other tests aren't affected.
-	tokenCache.Lock()
-	delete(tokenCache.m, sha256CacheKey(appID.String(), "good"))
-	tokenCache.Unlock()
 }
 
-func TestValidateTokenWithCacheCallsValidatorAfterExpiry(t *testing.T) {
-	appID := "sdk-expired-test"
-	token := "tok-expired"
-	key := sha256CacheKey(appID, token)
-
-	// Pre-populate with an expired entry.
-	tokenCache.Lock()
-	tokenCache.m[key] = tokenCacheEntry{accountID: uuid.New(), expiry: time.Now().Add(-1 * time.Second)}
-	tokenCache.Unlock()
-
+func TestValidateMCPTokenDeniesRevokedTokenImmediately(t *testing.T) {
 	orig := globalTokenValidator
 	defer func() { globalTokenValidator = orig }()
-	// Validator returns error so we know a real Validate call was made.
-	globalTokenValidator = &mockTokenValidator{validToken: "different", accountID: uuid.New()}
+	validator := &countingValidator{validToken: "good", accountID: uuid.New(), count: new(int)}
+	globalTokenValidator = validator
+	appID := uuid.NewString()
 
-	_, err := validateTokenWithCache(context.Background(), appID, token)
-	if err == nil {
-		t.Fatal("expected validator error after cache expiry, got nil")
+	if _, err := validateMCPToken(context.Background(), appID, "good"); err != nil {
+		t.Fatalf("initial validation failed: %v", err)
+	}
+	validator.validToken = ""
+	if _, err := validateMCPToken(context.Background(), appID, "good"); err == nil {
+		t.Fatal("revoked token remained valid for a later session")
+	}
+	if *validator.count != 2 {
+		t.Fatalf("validator calls = %d, want 2 across issue and revocation checks", *validator.count)
 	}
 }
 

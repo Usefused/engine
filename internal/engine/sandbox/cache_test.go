@@ -14,19 +14,20 @@ import (
 
 type mockCacheDB struct {
 	store.Store
-	scopeData         []byte
-	scopeVersion      int
-	scopeCount        int
-	activatedVersion  string
-	activatedErr      error
-	activatedCalls    int
-	contractMetadata  *fusedobject.ServiceMetadata
-	contractEndpoints []fusedobject.Endpoint
-	contractErr       error
-	contractMetaCalls int
-	contractNameCalls int
-	contractIDCalls   int
-	contractListCalls int
+	scopeData          []byte
+	scopeVersion       int
+	scopeCount         int
+	activatedVersion   string
+	activatedErr       error
+	activatedCalls     int
+	contractMetadata   *fusedobject.ServiceMetadata
+	contractEndpoints  []fusedobject.Endpoint
+	contractErr        error
+	contractMetaCalls  int
+	contractNameCalls  int
+	contractIDCalls    int
+	contractListCalls  int
+	contractBatchCalls int
 }
 
 func (m *mockCacheDB) GetSDKAccountID(ctx context.Context, appID uuid.UUID) (uuid.UUID, error) {
@@ -156,6 +157,35 @@ func (m *mockCacheDB) ListServiceContractEndpointsByNames(ctx context.Context, s
 		_, ok := wanted[ep.Name]
 		return ok
 	}), nil
+}
+
+func (m *mockCacheDB) ListServiceContractEndpointsForSelections(ctx context.Context, selections []store.ServiceContractEndpointSelection, endpointNames []string) ([]store.ServiceContractEndpointMatch, error) {
+	m.contractBatchCalls++
+	if m.contractErr != nil {
+		return nil, m.contractErr
+	}
+	if m.contractMetadata == nil {
+		return nil, store.ErrServiceContractSnapshotNotFound
+	}
+	names := make(map[string]struct{}, len(endpointNames))
+	for _, name := range endpointNames {
+		names[name] = struct{}{}
+	}
+	var matches []store.ServiceContractEndpointMatch
+	for _, selection := range selections {
+		ids := make(map[uuid.UUID]struct{}, len(selection.EndpointIDs))
+		for _, id := range selection.EndpointIDs {
+			ids[id] = struct{}{}
+		}
+		for _, endpoint := range m.contractEndpoints {
+			_, nameAllowed := names[endpoint.Name]
+			_, idAllowed := ids[endpoint.ID]
+			if nameAllowed && (selection.SelectAll || idAllowed) {
+				matches = append(matches, store.ServiceContractEndpointMatch{SelectionIndex: selection.SelectionIndex, Endpoint: endpoint})
+			}
+		}
+	}
+	return matches, nil
 }
 
 func (m *mockCacheDB) ListServiceContractEndpointsByIDs(ctx context.Context, serviceID, serviceVersionID uuid.UUID, endpointIDs []uuid.UUID) ([]fusedobject.Endpoint, error) {

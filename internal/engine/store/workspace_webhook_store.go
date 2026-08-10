@@ -214,10 +214,6 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanWorkspaceWebhook(row rowScanner) (WorkspaceWebhook, error) {
-	return scanWorkspaceWebhookRows(row)
-}
-
 func scanWorkspaceWebhookRows(row rowScanner) (WorkspaceWebhook, error) {
 	var w WorkspaceWebhook
 	err := row.Scan(

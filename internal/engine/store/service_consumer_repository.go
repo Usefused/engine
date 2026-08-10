@@ -15,8 +15,8 @@ type ServiceConsumer struct {
 	AppID            uuid.UUID
 	Name             string
 	Version          string
-	Kind             string
-	Status           string
+	Kind             AppKind
+	Status           AppStatus
 	ServiceVersionID uuid.UUID
 	SelectAll        bool
 	OperationCount   int

@@ -3,9 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -236,9 +234,9 @@ type ApplyAppConfigPlanParams struct {
 	AuthorizedBucketName string
 	TokenHash            string
 	TokenName            string
+	TokenPolicy          AppTokenPolicy
 	TargetLanguage       string
 	GeneratorVersion     string
-	Activate             bool
 }
 
 type ApplyAppConfigPlanResult struct {
@@ -618,7 +616,7 @@ func (r *postgresConfigRepository) ApplyAppConfigPlan(ctx context.Context, param
 	span.SetAttributes(configAttrs(params.Plan.State.ConfigKey, params.Plan.State.ConfigType)...)
 	span.SetAttributes(
 		attribute.String("app.id", params.Scope.AppID.String()),
-		attribute.String("app.kind", normalizedAppKind(params.Scope.Kind)),
+		attribute.String("app.kind", params.Scope.Kind.String()),
 	)
 
 	tx, err := r.db.Begin(ctx)
@@ -754,30 +752,20 @@ func upsertAppFamilyTx(ctx context.Context, tx pgx.Tx, params ApplyAppConfigPlan
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("ApplyAppConfigPlan: canonical app name: %w", err)
 	}
-	kind := normalizedAppKind(params.Scope.Kind)
-	var familyID uuid.UUID
-	err = tx.QueryRow(ctx, `
-		INSERT INTO fused_app_families AS family
-			(account_id, kind, canonical_name, display_name, target_language,
-			 owner_subject_id, owner_team_id)
-		VALUES ($1, $2, $3, $4, CASE WHEN $2 = 'sdk' THEN NULLIF($5, '') END,
-		        NULLIF($6, '00000000-0000-0000-0000-000000000000'::uuid),
-		        NULLIF($7, '00000000-0000-0000-0000-000000000000'::uuid))
-		ON CONFLICT (account_id, kind, canonical_name) DO UPDATE
-		SET updated_at = family.updated_at
-		WHERE family.target_language IS NOT DISTINCT FROM EXCLUDED.target_language
-		  AND family.owner_subject_id IS NOT DISTINCT FROM EXCLUDED.owner_subject_id
-		  AND family.owner_team_id IS NOT DISTINCT FROM EXCLUDED.owner_team_id
-		RETURNING app_family_id
-	`, params.Scope.AccountID, kind, canonicalName, displayName,
-		params.TargetLanguage, params.Scope.OwnerSubjectID, params.Scope.OwnerTeamID).Scan(&familyID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, ErrAppOwnerMismatch
+	requested := AppFamily{
+		AppFamilyID: uuid.New(), AccountID: params.Scope.AccountID, Kind: params.Scope.Kind,
+		CanonicalName: canonicalName, DisplayName: displayName,
+		TargetLanguage: params.TargetLanguage,
+		OwnerSubjectID: params.Scope.OwnerSubjectID, OwnerTeamID: params.Scope.OwnerTeamID,
 	}
+	family, _, err := createOrGetAppFamily(ctx, tx, requested)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("ApplyAppConfigPlan: upsert app family: %w", err)
 	}
-	return familyID, nil
+	if !family.HasSameBinding(requested) {
+		return uuid.Nil, ErrAppOwnerMismatch
+	}
+	return family.AppFamilyID, nil
 }
 
 func bindAppFamilyBucketTx(ctx context.Context, tx pgx.Tx, familyID, bucketID uuid.UUID) error {
@@ -799,49 +787,36 @@ func bindAppFamilyBucketTx(ctx context.Context, tx pgx.Tx, familyID, bucketID uu
 }
 
 func publishConfigAppTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, params ApplyAppConfigPlanParams) (uuid.UUID, bool, error) {
-	capabilityKeys, err := capability.Keys(params.Scope.Selections)
+	capabilityKeys, capabilityHash, err := capability.KeysAndHash(params.Scope.Selections)
 	if err != nil {
 		return uuid.Nil, false, err
 	}
-	capabilityHash := sha256.Sum256(params.Scope.Selections)
 	app := App{
 		AppID: params.Scope.AppID, AppFamilyID: familyID,
 		AccountID: params.Scope.AccountID, Version: params.Scope.Version,
 		ConfigKey: params.Plan.State.ConfigKey, SourceHash: params.Plan.State.SourceHash,
-		CapabilityHash: hex.EncodeToString(capabilityHash[:]), CapabilityKeys: capabilityKeys,
+		CapabilityHash: capabilityHash, CapabilityKeys: capabilityKeys,
 		ScopeSchemaVersion: params.Scope.ScopeSchemaVersion, Selections: params.Scope.Selections,
-		GeneratorVersion: params.GeneratorVersion, Status: "active",
+		GeneratorVersion: params.GeneratorVersion, Status: AppStatusActive,
+		ExpectedFamilyKind: params.Scope.Kind,
 	}
-	existing, err := loadVersionForPublish(ctx, tx, familyID, app.Version)
+	persisted, created, err := publishAppVersionTx(ctx, tx, app)
 	if err != nil {
 		return uuid.Nil, false, err
 	}
-	if existing != nil {
-		if existing.SourceHash != app.SourceHash {
-			return uuid.Nil, false, ErrAppVersionImmutable
-		}
-		return existing.AppID, false, nil
-	}
-	if err := rejectTombstonedVersion(ctx, tx, familyID, app.Version); err != nil {
-		return uuid.Nil, false, err
-	}
-	if err := insertApp(ctx, tx, app); err != nil {
-		return uuid.Nil, false, err
-	}
-	if err := insertAppCapabilities(ctx, tx, app.AppID, app.CapabilityKeys); err != nil {
-		return uuid.Nil, false, err
-	}
-	return app.AppID, true, nil
+	return persisted.AppID, created, nil
 }
 
 func ensureAppFamilyTokenTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, params ApplyAppConfigPlanParams) (bool, error) {
 	var created bool
 	err := tx.QueryRow(ctx, `
-		INSERT INTO fused_app_tokens (app_family_id, token_hash, name)
-		SELECT $1, $2, $3
+		INSERT INTO fused_app_tokens
+			(app_family_id, token_hash, name, allow_all, allowed_operations, expires_at)
+		SELECT $1, $2, $3, $4, $5, $6
 		WHERE NOT EXISTS (SELECT 1 FROM fused_app_tokens WHERE app_family_id = $1)
 		RETURNING true
-	`, familyID, params.TokenHash, params.TokenName).Scan(&created)
+	`, familyID, params.TokenHash, params.TokenName, params.TokenPolicy.AllowAll,
+		params.TokenPolicy.AllowedOperations, params.TokenPolicy.ExpiresAt).Scan(&created)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -858,10 +833,18 @@ func validateAppApplyParams(params ApplyAppConfigPlanParams) error {
 	if err := validateAppApplyScopeIdentity(params.Scope, params.AuthorizedBucketName); err != nil {
 		return err
 	}
+	if !appKindMatchesConfigType(params.Scope.Kind, params.Plan.State.ConfigType) {
+		return ErrAppKindInvalid
+	}
 	if err := validateAppApplyMetadata(params); err != nil {
 		return err
 	}
 	return validateAppGeneratorVersion(params.Plan.State.ConfigType, params.GeneratorVersion)
+}
+
+func appKindMatchesConfigType(kind AppKind, configType ConfigType) bool {
+	return (kind == AppKindSDK && configType == ConfigTypeSDK) ||
+		(kind == AppKindMCP && configType == ConfigTypeMCP)
 }
 
 func validateAppApplyMetadata(params ApplyAppConfigPlanParams) error {
@@ -898,17 +881,13 @@ func validateAppApplyScopeIdentity(scope AppRuntime, bucketName string) error {
 	if scope.AccountID == uuid.Nil || scope.AppID == uuid.Nil || !validAppOwner(optionalUUID(scope.OwnerSubjectID), optionalUUID(scope.OwnerTeamID)) {
 		return errors.New("app runtime identity is required")
 	}
+	if !scope.Kind.Valid() {
+		return ErrAppKindInvalid
+	}
 	if scope.BucketID == uuid.Nil || strings.TrimSpace(bucketName) == "" {
 		return errors.New("authorized app bucket identity is required")
 	}
 	return nil
-}
-
-func normalizedAppKind(kind string) string {
-	if kind == "" {
-		return "sdk"
-	}
-	return kind
 }
 
 func loadApplyOwner(ctx context.Context, tx pgx.Tx, params ApplyConfigPlanParams) (*uuid.UUID, *uuid.UUID, error) {

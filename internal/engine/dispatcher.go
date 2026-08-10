@@ -41,8 +41,9 @@ type Dispatcher struct {
 	rateLimits store.ProviderRateLimitStore
 }
 
-// NewDispatcherWithProviderRateLimits wires the shared SQL coordinator used by
-// production. NewDispatcher remains available for executions without policy.
+// NewDispatcherWithProviderRateLimits wires the shared JetStream coordinator
+// used by production. NewDispatcher remains available for executions without
+// a provider quota policy.
 func NewDispatcherWithProviderRateLimits(rateLimits store.ProviderRateLimitStore) *Dispatcher {
 	dispatcher := NewDispatcher()
 	dispatcher.rateLimits = rateLimits
@@ -148,39 +149,23 @@ func (d *Dispatcher) executeSSE(
 	bucketValues []store.BucketValue,
 	stream ResponseStream,
 ) (int, error) {
+	span := trace.SpanFromContext(ctx)
 	selectedAuths, err := selectRequestAuth(srv.AuthConfigs, obj.SecurityRequirements, credentials)
 	if err != nil {
-		recordAuthSelection(ctx, trace.SpanFromContext(ctx), nil, "rejected")
+		recordAuthSelection(ctx, span, nil, "rejected")
 		return 0, err
 	}
-	recordAuthSelection(ctx, trace.SpanFromContext(ctx), selectedAuths, authSelectionOutcome(selectedAuths))
-	reqURL, headers, bodyReader, err := prepareRequestParts(srv, obj, params, bucketValues)
+	recordAuthSelection(ctx, span, selectedAuths, authSelectionOutcome(selectedAuths))
+	req, err := prepareProviderRequest(ctx, srv, obj, params, credentials, bucketValues, selectedAuths, span)
 	if err != nil {
-		return 0, fmt.Errorf("failed to prepare SSE request: %w", err)
+		return 0, err
 	}
-
-	req, err := http.NewRequestWithContext(ctx, obj.Method, reqURL, bodyReader)
-	if err != nil {
-		return 0, fmt.Errorf("failed to build SSE request: %w", err)
-	}
-	req = requestWithProviderHTTPTrace(ctx, req, srv, obj, trace.SpanFromContext(ctx))
-
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	for k, v := range srv.DefaultHeaders {
-		if req.Header.Get(k) == "" {
-			req.Header.Set(k, v)
-		}
-	}
-
 	// Signal to the vendor that we want an SSE stream.
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Cache-Control", "no-cache")
 
-	applySelectedAuth(req, selectedAuths, credentials)
-
 	start := time.Now()
+	defer func() { AddExecutionTiming(ctx, "provider_total", time.Since(start)) }()
 	client, err := d.providerClientForAuth(selectedAuths, credentials)
 	if err != nil {
 		return 0, err
@@ -189,6 +174,7 @@ func (d *Dispatcher) executeSSE(
 		return 0, err
 	}
 	resp, err := client.Do(req)
+	AddExecutionTiming(ctx, "provider_time_to_headers", time.Since(start))
 
 	duration := float64(time.Since(start).Milliseconds())
 	observability.RequestsDuration.Record(ctx, duration)
@@ -213,9 +199,9 @@ func (d *Dispatcher) executeSSE(
 	))
 
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		err := fmt.Errorf("provider returned status %d: %s", resp.StatusCode, string(body))
-		return resp.StatusCode, err
+		// Provider bodies can contain tenant data and do not belong in execution
+		// errors, OTEL, or Activity receipts.
+		return resp.StatusCode, fmt.Errorf("provider returned status %d", resp.StatusCode)
 	}
 
 	if err := parseSSEEvents(resp.Body, stream); err != nil {
@@ -397,53 +383,31 @@ func (d *Dispatcher) executeOnce(
 	}
 	recordAuthSelection(ctx, span, selectedAuths, authSelectionOutcome(selectedAuths))
 
-	prepareStarted := time.Now()
-	reqURL, headers, bodyReader, err := prepareRequestParts(srv, obj, params, bucketValues)
+	req, err := prepareProviderRequest(ctx, srv, obj, params, credentials, bucketValues, selectedAuths, span)
 	if err != nil {
-		MeasureExecutionTiming(ctx, "provider_request_prepare", prepareStarted)
-		span.SetStatus(codes.Error, err.Error())
-		return 0, fmt.Errorf("failed to prepare request: %w", err)
+		return 0, err
 	}
-
-	req, err := http.NewRequestWithContext(ctx, obj.Method, reqURL, bodyReader)
-	if err != nil {
-		MeasureExecutionTiming(ctx, "provider_request_prepare", prepareStarted)
-		return 0, fmt.Errorf("failed to build request: %w", err)
-	}
-	req = requestWithProviderHTTPTrace(ctx, req, srv, obj, span)
-
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	for k, v := range srv.DefaultHeaders {
-		if req.Header.Get(k) == "" {
-			req.Header.Set(k, v)
-		}
-	}
-
-	applySelectedAuth(req, selectedAuths, credentials)
-	MeasureExecutionTiming(ctx, "provider_request_prepare", prepareStarted)
 
 	providerStarted := time.Now()
 	client, err := d.providerClientForAuth(selectedAuths, credentials)
 	if err != nil {
-		MeasureExecutionTiming(ctx, "provider_total", providerStarted)
+		AddExecutionTiming(ctx, "provider_total", time.Since(providerStarted))
 		return 0, err
 	}
 	if _, err := d.awaitProviderRateLimit(ctx, srv, obj); err != nil {
-		MeasureExecutionTiming(ctx, "provider_total", providerStarted)
+		AddExecutionTiming(ctx, "provider_total", time.Since(providerStarted))
 		return 0, err
 	}
 	resp, err := client.Do(req)
-	MeasureExecutionTiming(ctx, "provider_time_to_headers", providerStarted)
+	AddExecutionTiming(ctx, "provider_time_to_headers", time.Since(providerStarted))
 	if err != nil {
-		MeasureExecutionTiming(ctx, "provider_total", providerStarted)
+		AddExecutionTiming(ctx, "provider_total", time.Since(providerStarted))
 		return 0, fmt.Errorf("network request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	span.SetAttributes(attribute.Int("http.status_code", resp.StatusCode))
 	if err := d.syncProviderRateLimitResponse(ctx, srv, obj, resp); err != nil {
-		MeasureExecutionTiming(ctx, "provider_total", providerStarted)
+		AddExecutionTiming(ctx, "provider_total", time.Since(providerStarted))
 		return resp.StatusCode, err
 	}
 	if sink, ok := stream.(interface {
@@ -453,11 +417,45 @@ func (d *Dispatcher) executeOnce(
 	}
 
 	status, err := streamResponseBody(ctx, resp.Body, resp.StatusCode, stream)
-	MeasureExecutionTiming(ctx, "provider_total", providerStarted)
-	if timings, ok := ExecutionTimingsFromContext(ctx); ok {
-		span.SetAttributes(timings.Attributes()...)
-	}
+	AddExecutionTiming(ctx, "provider_total", time.Since(providerStarted))
+	// Aggregate timings belong to the logical execution span. This span's own
+	// duration represents one provider attempt/page; attaching the accumulator
+	// here would make later pagination spans look progressively slower.
 	return status, err
+}
+
+func prepareProviderRequest(
+	ctx context.Context,
+	srv *models.Service,
+	obj *models.IntegrationObject,
+	params map[string]any,
+	credentials map[string]any,
+	bucketValues []store.BucketValue,
+	selectedAuths models.AuthConfigs,
+	span trace.Span,
+) (*http.Request, error) {
+	started := time.Now()
+	defer func() { AddExecutionTiming(ctx, "provider_request_prepare", time.Since(started)) }()
+	reqURL, headers, bodyReader, err := prepareRequestParts(srv, obj, params, bucketValues)
+	if err != nil {
+		span.SetStatus(codes.Error, "request_prepare_failed")
+		return nil, fmt.Errorf("failed to prepare request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, obj.Method, reqURL, bodyReader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build request: %w", err)
+	}
+	req = requestWithProviderHTTPTrace(ctx, req, srv, obj, span)
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	for key, value := range srv.DefaultHeaders {
+		if req.Header.Get(key) == "" {
+			req.Header.Set(key, value)
+		}
+	}
+	applySelectedAuth(req, selectedAuths, credentials)
+	return req, nil
 }
 
 func streamResponseBody(ctx context.Context, body io.Reader, status int, stream ResponseStream) (int, error) {
@@ -465,10 +463,10 @@ func streamResponseBody(ctx context.Context, body io.Reader, status int, stream 
 	var sendDuration time.Duration
 	defer func() {
 		bodyDuration := time.Since(bodyStarted)
-		RecordExecutionTiming(ctx, "provider_body_stream", bodyDuration)
-		RecordExecutionTiming(ctx, "engine_stream_send", sendDuration)
+		AddExecutionTiming(ctx, "provider_body_stream", bodyDuration)
+		AddExecutionTiming(ctx, "engine_stream_send", sendDuration)
 		if bodyDuration > sendDuration {
-			RecordExecutionTiming(ctx, "provider_body_read", bodyDuration-sendDuration)
+			AddExecutionTiming(ctx, "provider_body_read", bodyDuration-sendDuration)
 		}
 	}()
 

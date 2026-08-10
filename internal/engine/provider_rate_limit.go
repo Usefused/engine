@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var ErrProviderRateLimited = errors.New("provider rate limit exceeded")
@@ -49,9 +50,7 @@ func (d *Dispatcher) awaitProviderRateLimit(ctx context.Context, srv *models.Ser
 	waited := false
 	waitDeadline := providerRateLimitWaitDeadline(srv.RateLimit)
 	for {
-		decision, acquireErr := d.rateLimits.AcquireProviderRateLimit(ctx, request)
-		decision = attachRateLimitAggregates(decision, request.Policies)
-		recordProviderRateLimitDecision(ctx, decision, acquireErr)
+		decision, acquireErr := d.acquireProviderRateLimit(ctx, request)
 		if acquireErr != nil {
 			RecordRateLimitSummary(ctx, rateLimitSummary(decision, "acquisition_failed"))
 			return decision, acquireErr
@@ -71,6 +70,17 @@ func (d *Dispatcher) awaitProviderRateLimit(ctx context.Context, srv *models.Ser
 			return decision, err
 		}
 	}
+}
+
+func (d *Dispatcher) acquireProviderRateLimit(ctx context.Context, request ratelimitpolicy.AcquireRequest) (ratelimitpolicy.Decision, error) {
+	acquireCtx, span := otel.Tracer("engine").Start(ctx, "engine.provider_rate_limit.acquire")
+	defer span.End()
+	started := time.Now()
+	decision, err := d.rateLimits.AcquireProviderRateLimit(acquireCtx, request)
+	AddExecutionTiming(ctx, "rate_limit_acquire", time.Since(started))
+	decision = attachRateLimitAggregates(decision, request.Policies)
+	recordProviderRateLimitDecision(span, decision, err)
+	return decision, err
 }
 
 func allowedRateLimitRetryOutcome(waited bool) string {
@@ -223,9 +233,7 @@ func attachRateLimitAggregates(decision ratelimitpolicy.Decision, policies []rat
 	return decision
 }
 
-func recordProviderRateLimitDecision(ctx context.Context, decision ratelimitpolicy.Decision, err error) {
-	_, span := otel.Tracer("engine").Start(ctx, "engine.provider_rate_limit.acquire")
-	defer span.End()
+func recordProviderRateLimitDecision(span trace.Span, decision ratelimitpolicy.Decision, err error) {
 	outcome := "denied"
 	if decision.Allowed {
 		outcome = "allowed"
@@ -238,6 +246,9 @@ func recordProviderRateLimitDecision(ctx context.Context, decision ratelimitpoli
 		attribute.StringSlice("rate_limit.units", summary.Units),
 		attribute.Int64Slice("rate_limit.unit_totals", summary.UnitTotals),
 		attribute.Int64("rate_limit.retry_after_ms", decision.RetryAfter.Milliseconds()),
+		attribute.String("rate_limit.coordinator", "jetstream_kv"),
+		attribute.Int64("rate_limit.coordination_attempts", decision.CoordinationAttempts),
+		attribute.Bool("rate_limit.local_lease", decision.LocalLease),
 	)
 	if err != nil {
 		span.SetStatus(codes.Error, "acquisition_failed")

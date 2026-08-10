@@ -18,11 +18,8 @@ import (
 
 // pendingWebhookMsgs guards the ack/nack lookup map that's written from the
 // NATS QueueSubscribe callback goroutine (handleGRPCNatsMessage) and read
-// from the stream's Recv loop goroutine (processGRPCWebhookEventLoop) --
-// two different goroutines touching a plain map without a mutex is a data
-// race (the WS path has the same shape via websocket_handler.go's msgMap,
-// but that path is being retired, not extended, so it isn't worth changing
-// there too).
+// from the stream's Recv loop goroutine (processGRPCWebhookEventLoop).
+// Keeping synchronization here prevents concurrent map access under load.
 type pendingWebhookMsgs struct {
 	mu   sync.Mutex
 	msgs map[string]*nats.Msg
@@ -48,15 +45,9 @@ func (p *pendingWebhookMsgs) Take(id string) (*nats.Msg, bool) {
 	return m, ok
 }
 
-// SubscribeWebhooks is the gRPC counterpart to SDKWebSocketHandler
-// (websocket_handler.go). It reuses the exact same NATS JetStream durable
-// consumer / queue-group setup (setupWebhookConsumer's logic, ported below
-// as setupGRPCWebhookConsumer) and the exact same auth/label/filter helpers
-// (validateRequestedEvents, resolveWebhookAttachmentLabel, buildFilterSubjects
-// -- all transport-agnostic already) -- only the wire framing changes, from
-// conn.WriteJSON/conn.ReadJSON to stream.Send/stream.Recv, because this
-// stream now rides the same gRPC channel every generated SDK already opens
-// for Execute, instead of a second wss://.../sdks/ws WebSocket connection.
+// SubscribeWebhooks binds an authenticated app to a receiver-scoped durable
+// JetStream consumer and carries delivery acknowledgements over its existing
+// bidirectional gRPC channel.
 func (s *EngineGRPCServer) SubscribeWebhooks(stream enginev1.EngineService_SubscribeWebhooksServer) error {
 	ctx := stream.Context()
 	thread := observability.ThreadFromContext(ctx)
@@ -107,9 +98,8 @@ func (s *EngineGRPCServer) SubscribeWebhooks(stream enginev1.EngineService_Subsc
 		defer sub.Unsubscribe()
 	}
 
-	// Confirms the subscription took effect -- the client's SubscribeWebhooks
-	// equivalent of the WS path's "SDK connected" log, but observable by the
-	// caller itself instead of only server-side logs.
+	// Confirm activation on the stream so the caller need not infer readiness
+	// from server-side logs or the arrival of its first event.
 	if err := stream.Send(&enginev1.WebhookServerMessage{
 		Payload: &enginev1.WebhookServerMessage_Subscribed{
 			Subscribed: &enginev1.WebhookSubscribeAck{ReceiverName: subscribeMsg.GetReceiverName()},
@@ -141,15 +131,9 @@ func receiveWebhookSubscribe(stream enginev1.EngineService_SubscribeWebhooksServ
 	return subscribe, nil
 }
 
-// authenticateWebhookSubscribe validates the (app_id, family token) pair from
-// call metadata -- x-api-key/x-app-id, the same two values
-// authenticateWebSocket reads from HTTP headers for the WS path, just
-// carried as gRPC metadata instead so this RPC authenticates exactly like
-// every other one on EngineGRPCServer (see grpcAPIKey in engine_grpc.go)
-// rather than via fields on the first stream message. auth.TokenValidator's
-// Validate is the right tool here per auth.go's own doc comment: it is scoped
-// to exactly this appID+token shape, unlike the account-level local
-// access middleware used by the REST/GraphQL proxy handlers.
+// authenticateWebhookSubscribe validates the app ID and family token from
+// gRPC metadata. Keeping identity outside the first payload frame applies the
+// same authentication contract as every other EngineGRPCServer method.
 func (s *EngineGRPCServer) authenticateWebhookSubscribe(ctx context.Context) (uuid.UUID, uuid.UUID, error) {
 	appIDString := strings.TrimSpace(grpcAppID(ctx))
 	if appIDString == "" {
@@ -166,13 +150,8 @@ func (s *EngineGRPCServer) authenticateWebhookSubscribe(ctx context.Context) (uu
 	return appID, identity.AccountID, nil
 }
 
-// setupGRPCWebhookConsumer mirrors setupWebhookConsumer (websocket_handler.go)
-// exactly -- same durable name, same queue group, same ack policy/max-deliver
-// -- only the per-message callback bridges to a gRPC stream instead of a
-// websocket.Conn. Keeping this as its own function (rather than
-// parameterizing setupWebhookConsumer over an interface) avoids touching the
-// already-working, already-tested WS path while both transports coexist
-// during the migration window.
+// setupGRPCWebhookConsumer gives each receiver a stable durable name and queue
+// group so reconnects preserve explicit acknowledgement and redelivery state.
 func setupGRPCWebhookConsumer(ctx context.Context, thread observability.Thread, js nats.JetStreamContext, accountID uuid.UUID, receiverName string, filterSubjects []string, natsClient *messaging.NATSClient, stream enginev1.EngineService_SubscribeWebhooksServer, msgMap *pendingWebhookMsgs) (*nats.Subscription, error) {
 	if len(filterSubjects) == 0 {
 		return nil, nil // No subscription needed
@@ -210,8 +189,7 @@ func setupGRPCWebhookConsumer(ctx context.Context, thread observability.Thread, 
 	return sub, nil
 }
 
-// handleGRPCNatsMessage mirrors handleNatsMessage (websocket_handler.go)
-// exactly, swapping conn.WriteJSON for stream.Send.
+// handleGRPCNatsMessage maps one durable delivery to the public gRPC envelope.
 func handleGRPCNatsMessage(ctx context.Context, thread observability.Thread, m *nats.Msg, accountID uuid.UUID, natsClient *messaging.NATSClient, stream enginev1.EngineService_SubscribeWebhooksServer, msgMap *pendingWebhookMsgs) {
 	// Subject layout: webhooks.<account>.<service>.<label>.<event>
 	// (sandbox/webhook.go's publishWebhookEvent) -- parts[3] is the
@@ -262,14 +240,13 @@ func handleGRPCNatsMessage(ctx context.Context, thread observability.Thread, m *
 	}
 }
 
-// processGRPCWebhookEventLoop mirrors processWebSocketEventLoop
-// (websocket_handler.go), reading WebhookAck/WebhookNack messages back from
-// the stream instead of {"type": "ack"|"nack", "id": ...} JSON frames.
+// processGRPCWebhookEventLoop applies client acknowledgements to their pending
+// JetStream messages so delivery state advances only after client processing.
 func processGRPCWebhookEventLoop(stream enginev1.EngineService_SubscribeWebhooksServer, msgMap *pendingWebhookMsgs, accountID uuid.UUID) error {
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
-			return nil // client closed the stream -- same as a WS read error breaking the loop
+			return nil // Client closure ends this receiver session cleanly.
 		}
 
 		if ack := msg.GetAck(); ack != nil {

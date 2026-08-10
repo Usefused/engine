@@ -35,11 +35,30 @@ type ServiceContractSnapshot struct {
 	LastRefreshError string
 }
 
+// ServiceContractEndpointSelection is the database-facing portion of one app
+// selection. SelectionIndex preserves the app's declared order without making
+// the store understand SDK/MCP wire models.
+type ServiceContractEndpointSelection struct {
+	SelectionIndex   int         `json:"selection_index"`
+	ServiceID        uuid.UUID   `json:"service_id"`
+	ServiceVersionID uuid.UUID   `json:"service_version_id"`
+	SelectAll        bool        `json:"select_all"`
+	EndpointIDs      []uuid.UUID `json:"endpoint_ids"`
+}
+
+// ServiceContractEndpointMatch contains only rows already intersected by the
+// app selection and token allowlist in PostgreSQL.
+type ServiceContractEndpointMatch struct {
+	SelectionIndex int
+	Endpoint       fusedobject.Endpoint
+}
+
 type ServiceContractSnapshotStore interface {
 	UpsertServiceContractSnapshot(ctx context.Context, snapshot ServiceContractSnapshot) (*ServiceContractSnapshot, error)
 	GetServiceContractMetadata(ctx context.Context, serviceID, serviceVersionID uuid.UUID) (*fusedobject.ServiceMetadata, error)
 	GetServiceContractEndpointByName(ctx context.Context, serviceID, serviceVersionID uuid.UUID, endpointName string) (*fusedobject.Endpoint, error)
 	ListServiceContractEndpointsByNames(ctx context.Context, serviceID, serviceVersionID uuid.UUID, endpointNames []string) ([]fusedobject.Endpoint, error)
+	ListServiceContractEndpointsForSelections(ctx context.Context, selections []ServiceContractEndpointSelection, endpointNames []string) ([]ServiceContractEndpointMatch, error)
 	ListServiceContractEndpointsByIDs(ctx context.Context, serviceID, serviceVersionID uuid.UUID, endpointIDs []uuid.UUID) ([]fusedobject.Endpoint, error)
 	ListServiceContractOperations(ctx context.Context, serviceID, serviceVersionID uuid.UUID) ([]fusedobject.Endpoint, error)
 }
@@ -251,6 +270,75 @@ func (s *postgresStore) ListServiceContractEndpointsByNames(ctx context.Context,
 		ORDER BY name`,
 		snapshotID, endpointNames,
 	)
+}
+
+func (s *postgresStore) ListServiceContractEndpointsForSelections(ctx context.Context, selections []ServiceContractEndpointSelection, endpointNames []string) ([]ServiceContractEndpointMatch, error) {
+	if len(selections) == 0 || len(endpointNames) == 0 {
+		return nil, nil
+	}
+	payload, err := json.Marshal(selections)
+	if err != nil {
+		return nil, fmt.Errorf("encode service contract endpoint selections: %w", err)
+	}
+	rows, err := s.db.Query(ctx, `
+		WITH requested AS (
+			SELECT (item->>'selection_index')::integer AS selection_index,
+			       (item->>'service_id')::uuid AS service_id,
+			       (item->>'service_version_id')::uuid AS service_version_id,
+			       COALESCE((item->>'select_all')::boolean, false) AS select_all,
+			       CASE WHEN jsonb_typeof(item->'endpoint_ids') = 'array'
+			            THEN item->'endpoint_ids' ELSE '[]'::jsonb END AS endpoint_ids
+			FROM jsonb_array_elements($1::jsonb) AS item
+		), resolved AS (
+			SELECT requested.*, snapshots.id AS snapshot_id
+			FROM requested
+			LEFT JOIN fused_service_contract_snapshots snapshots
+			  ON snapshots.service_id = requested.service_id
+			 AND snapshots.service_version_id = requested.service_version_id
+		)
+		SELECT resolved.selection_index, resolved.snapshot_id, endpoints.operation_json
+		FROM resolved
+		LEFT JOIN fused_service_contract_endpoints endpoints
+		  ON endpoints.snapshot_id = resolved.snapshot_id
+		 AND endpoints.name = ANY($2)
+		 AND (
+		   resolved.select_all
+		   OR EXISTS (
+		     SELECT 1
+		     FROM jsonb_array_elements_text(resolved.endpoint_ids) allowed(endpoint_id)
+		     WHERE allowed.endpoint_id::uuid = endpoints.endpoint_id
+		   )
+		 )
+		ORDER BY resolved.selection_index, endpoints.name`, payload, endpointNames)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanServiceContractEndpointMatches(rows)
+}
+
+func scanServiceContractEndpointMatches(rows pgx.Rows) ([]ServiceContractEndpointMatch, error) {
+	var matches []ServiceContractEndpointMatch
+	for rows.Next() {
+		var selectionIndex int
+		var snapshotID *uuid.UUID
+		var operationJSON []byte
+		if err := rows.Scan(&selectionIndex, &snapshotID, &operationJSON); err != nil {
+			return nil, err
+		}
+		if snapshotID == nil {
+			return nil, ErrServiceContractSnapshotNotFound
+		}
+		if operationJSON == nil {
+			continue
+		}
+		var endpoint fusedobject.Endpoint
+		if err := json.Unmarshal(operationJSON, &endpoint); err != nil {
+			return nil, fmt.Errorf("decode selected service contract operation: %w", err)
+		}
+		matches = append(matches, ServiceContractEndpointMatch{SelectionIndex: selectionIndex, Endpoint: endpoint})
+	}
+	return matches, rows.Err()
 }
 
 func (s *postgresStore) ListServiceContractEndpointsByIDs(ctx context.Context, serviceID, serviceVersionID uuid.UUID, endpointIDs []uuid.UUID) ([]fusedobject.Endpoint, error) {

@@ -96,20 +96,6 @@ func isConnectedAuthSelector(selector string) bool {
 	return selector == "oauth" || selector == "oidc"
 }
 
-// connectedAuthNameForType bridges public auth-type selection to the private
-// credential key where the connected access token must be injected.
-func connectedAuthNameForType(auths fusedobject.AuthConfigs, selector string) string {
-	if !isConnectedAuthSelector(selector) {
-		return ""
-	}
-	for _, auth := range auths {
-		if canonicalFusedAuthType(auth) == selector {
-			return authCredentialName(auth)
-		}
-	}
-	return ""
-}
-
 // orderedStaticSecretAlternatives preserves OpenAPI OR ordering while keeping
 // every AND-set together. The store can therefore choose one complete branch
 // without decrypting values belonging to unused alternatives.

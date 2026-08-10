@@ -32,7 +32,7 @@ type artifactReferenceGraphQLTestStore struct {
 func (s *artifactReferenceGraphQLTestStore) ListAuthorizedAppsByAccount(_ context.Context, accountID uuid.UUID, _ accesscontrol.AuthorizedScope, kind, _, _ string, _, _ int) ([]store.AppCatalogItem, int, error) {
 	items := make([]store.AppCatalogItem, 0)
 	for _, scope := range s.mockScopes {
-		if scope.AccountID == accountID && (kind == "" || scope.Kind == kind) {
+		if scope.AccountID == accountID && (kind == "" || scope.Kind == store.AppKind(kind)) {
 			items = append(items, appCatalogItemFromTestScope(scope))
 		}
 	}
@@ -497,8 +497,10 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 			EngineExecutionAnalytics: models.EngineExecutionAnalytics{TotalCalls: 1, SuccessfulCalls: 1, P95LatencyMs: 41},
 			ByTransport:              []models.EngineExecutionBreakdown{{Key: "sdk", Label: "SDK", TotalCalls: 1, P95LatencyMs: 41}},
 		},
-		appTokens: []store.AppToken{{
-			ID: tokenID, AppFamilyID: appID, Name: "default", LastUsedAt: &tokenLastUsedAt, CreatedAt: now,
+		appTokens: []store.AppTokenMetadata{{
+			ID: tokenID, AppFamilyID: appID, Name: "agent",
+			AppTokenPolicy: store.AppTokenPolicy{AllowedOperations: []string{"issues.list"}, ExpiresAt: &tokenLastUsedAt},
+			LastUsedAt:     &tokenLastUsedAt, CreatedAt: now,
 		}},
 		appRuntimesForBucket: map[uuid.UUID][]store.AppRuntime{
 			attachedBucketID: {{AccountID: accountID, AppID: appID, BucketID: attachedBucketID, Kind: "sdk", Name: "prod sdk", CreatedAt: now}},
@@ -575,7 +577,7 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 		engineExecutionAnalytics(service_id: "` + serviceID.String() + `", transport: "sdk", status: "success") { total_calls successful_calls failed_calls average_latency_ms }
 		workspaceExecutionAnalytics { total_calls successful_calls failed_calls p95_latency_ms by_transport { key total_calls } }
 		serviceConsumers(service_id: "` + serviceID.String() + `") { id name version kind active service_version_id select_all operation_count webhook_count created_at }
-		sdkTokens(app_family_id: "` + appID.String() + `") { id app_family_id name created_at last_used_at }
+		appTokens(app_family_id: "` + appID.String() + `") { id app_family_id name allow expires_at created_at last_used_at }
 		sdkBuckets(app_family_id: "` + appID.String() + `") { id name is_default }
 		bucketSDKPage(bucket_id: "` + attachedBucketID.String() + `", limit: 10, offset: 0) { total items { id name kind active } }
 		bucketServicePage(bucket_id: "` + attachedBucketID.String() + `", search: "Lin", limit: 10, offset: 0) { total items { service_id service_name secret_count value_count connect_config_count connected_user_count } }
@@ -692,11 +694,17 @@ func assertWebhookAndTokenGraphQLData(t *testing.T, data map[string]any) {
 	workspaceAnalytics := graphQLMap(t, data["workspaceExecutionAnalytics"], "workspaceExecutionAnalytics")
 	assertGraphQLField(t, workspaceAnalytics, "total_calls", float64(1), "workspaceExecutionAnalytics")
 	assertGraphQLLen(t, graphQLList(t, workspaceAnalytics["by_transport"], "workspaceExecutionAnalytics.by_transport"), 1, "workspaceExecutionAnalytics.by_transport")
-	tokens := graphQLList(t, data["sdkTokens"], "sdkTokens")
-	assertGraphQLLen(t, tokens, 1, "sdkTokens")
-	token := graphQLMap(t, tokens[0], "sdkTokens[0]")
-	assertGraphQLField(t, token, "name", "default", "sdkTokens[0]")
-	assertGraphQLNonEmpty(t, token, "last_used_at", "sdkTokens[0]")
+	tokens := graphQLList(t, data["appTokens"], "appTokens")
+	assertGraphQLLen(t, tokens, 1, "appTokens")
+	token := graphQLMap(t, tokens[0], "appTokens[0]")
+	assertGraphQLField(t, token, "name", "agent", "appTokens[0]")
+	assertGraphQLNonEmpty(t, token, "expires_at", "appTokens[0]")
+	assertGraphQLNonEmpty(t, token, "last_used_at", "appTokens[0]")
+	allow := graphQLList(t, token["allow"], "appTokens[0].allow")
+	assertGraphQLLen(t, allow, 1, "appTokens[0].allow")
+	if allow[0] != "issues.list" {
+		t.Fatalf("appTokens[0].allow = %#v, want issues.list", allow)
+	}
 }
 
 func assertBucketUsageGraphQLData(t *testing.T, data map[string]any) {

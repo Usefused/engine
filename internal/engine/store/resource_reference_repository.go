@@ -29,7 +29,7 @@ const (
 type ResourceReferenceQuery struct {
 	Kind       ResourceReferenceKind
 	Value      string
-	AppKind    string
+	AppKind    AppKind
 	AppVersion string
 	ParentID   uuid.UUID
 	AllowedAll bool
@@ -50,7 +50,7 @@ func validateResourceReferenceQuery(query ResourceReferenceQuery) error {
 	case ReferenceApp, ReferenceAppFamily:
 		// SDK and MCP families share a permission repository, but callers may bind
 		// a human name to one product namespace to prevent cross-kind resolution.
-		if query.AppKind == "" || query.AppKind == "sdk" || query.AppKind == "mcp" {
+		if query.AppKind == "" || query.AppKind.Valid() {
 			return nil
 		}
 	case ReferenceCredential:

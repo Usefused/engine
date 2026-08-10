@@ -30,8 +30,7 @@ type EngineGRPCServer struct {
 	// configStore and natsClient are only needed by SubscribeWebhooks
 	// (webhook_grpc_handler.go) -- resolving a connecting SDK/MCP's
 	// webhook_attachment label and bridging to the NATS JetStream durable
-	// consumer/queue-group that already backs the WS webhook path
-	// (websocket_handler.go's identical setupWebhookConsumer logic).
+	// consumer and queue group.
 	configStore    store.ConfigRepository
 	natsClient     *messaging.NATSClient
 	tokenValidator auth.TokenValidator

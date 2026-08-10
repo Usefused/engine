@@ -43,6 +43,14 @@ Containers need:
 - `FUSED_REGISTRY_ENDPOINT` only when Fused support directs you away from the
   production Fused Cloud Registry default
 
+External NATS is required when horizontally replicating Engine. Set `NATS_URL`
+without embedded credentials, then configure exactly one of
+`NATS_CREDS_FILE`, `NATS_NKEY_SEED_FILE`, `NATS_TOKEN`, or the paired
+`NATS_USERNAME`/`NATS_PASSWORD`. TLS uses `NATS_TLS_CA_FILE`, optional paired
+`NATS_TLS_CERT_FILE`/`NATS_TLS_KEY_FILE` for mTLS, and optional
+`NATS_TLS_SERVER_NAME`. Mount credential and TLS files read-only from the
+container secret mechanism; do not bake them into an image.
+
 Scheduled authorization, usage-report, package-lease, and public-insight
 probes share a short database gate. This lets one connection serve quiet
 maintenance while foreground requests can still expand the pool to its

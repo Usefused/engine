@@ -424,11 +424,11 @@ func (f *accessWorkflowFixture) planArtifactWithResources(t *testing.T, key stri
 
 func (f *accessWorkflowFixture) assertForgedBuildsHaveNoSideEffects(t *testing.T, key string, teams accessWorkflowTeams) {
 	t.Helper()
-	before := f.artifactMutationSnapshot(t)
+	before := f.appMutationSnapshot(t)
 	generationCalls := f.registry.generationCount()
 	f.planArtifact(t, key, teams.forged, "sdk", "forged-sdk", http.StatusForbidden)
 	f.planArtifact(t, key, teams.forged, "mcp", "forged-mcp", http.StatusForbidden)
-	after := f.artifactMutationSnapshot(t)
+	after := f.appMutationSnapshot(t)
 	if before != after {
 		t.Fatal("denied forged-team builds mutated plan, config, runtime, or token state")
 	}
@@ -445,7 +445,7 @@ func (f *accessWorkflowFixture) assertUngrantedResourceBuildsDenied(t *testing.T
 		f.planArtifactWithResources(t, key, allowedTeamID, kind, "ungranted-service-"+kind, "ungranted-service", "default", http.StatusForbidden)
 		f.planArtifactWithResources(t, key, allowedTeamID, kind, "ungranted-bucket-"+kind, acceptanceServiceName, "ungranted", http.StatusForbidden)
 	}
-	if f.artifactMutationSnapshot(t) != before {
+	if f.appMutationSnapshot(t) != before {
 		t.Fatal("denied ungranted-resource builds mutated plan, config, runtime, or token state")
 	}
 	if f.registry.callCount() != registryCalls {
@@ -453,16 +453,22 @@ func (f *accessWorkflowFixture) assertUngrantedResourceBuildsDenied(t *testing.T
 	}
 }
 
-func (f *accessWorkflowFixture) artifactMutationSnapshot(t *testing.T) string {
+func (f *accessWorkflowFixture) appMutationSnapshot(t *testing.T) string {
 	t.Helper()
+	// Denied plans must leave every Engine-owned app relationship unchanged;
+	// checking the canonical tables prevents a partial family or token write
+	// from being hidden behind the config-plan response.
 	const query = `SELECT md5(
 		COALESCE((SELECT jsonb_agg(to_jsonb(row_data) ORDER BY row_data.id)::text FROM fused_config_plans row_data), '[]') ||
 		COALESCE((SELECT jsonb_agg(to_jsonb(row_data) ORDER BY row_data.config_key)::text FROM fused_config_states row_data), '[]') ||
-		COALESCE((SELECT jsonb_agg(to_jsonb(row_data) ORDER BY row_data.artifact_id)::text FROM fused_artifact_scopes row_data), '[]') ||
-		COALESCE((SELECT jsonb_agg(to_jsonb(row_data) ORDER BY row_data.id)::text FROM fused_artifact_tokens row_data), '[]'))`
+		COALESCE((SELECT jsonb_agg(to_jsonb(row_data) ORDER BY row_data.app_family_id)::text FROM fused_app_families row_data), '[]') ||
+		COALESCE((SELECT jsonb_agg(to_jsonb(row_data) ORDER BY row_data.app_id)::text FROM fused_apps row_data), '[]') ||
+		COALESCE((SELECT jsonb_agg(to_jsonb(row_data) ORDER BY row_data.app_id, row_data.capability_key)::text FROM fused_app_capabilities row_data), '[]') ||
+		COALESCE((SELECT jsonb_agg(to_jsonb(row_data) ORDER BY row_data.id)::text FROM fused_app_tokens row_data), '[]') ||
+		COALESCE((SELECT jsonb_agg(to_jsonb(row_data) ORDER BY row_data.app_family_id)::text FROM fused_app_family_buckets row_data), '[]'))`
 	var snapshot string
 	if err := f.pool.QueryRow(f.ctx, query).Scan(&snapshot); err != nil {
-		t.Fatalf("capture artifact mutation snapshot: %v", err)
+		t.Fatalf("capture app mutation snapshot: %v", err)
 	}
 	return snapshot
 }

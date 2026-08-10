@@ -51,6 +51,7 @@ func TestGetSDKPackageBuildRequestUsesExactAppliedPlan(t *testing.T) {
 		Version: "2.0.0", ConfigKey: configKey, SourceHash: sourceHash,
 		CapabilityHash: "capability", ScopeSchemaVersion: models.AppScopeSchemaVersion,
 		Selections: selections, GeneratorVersion: models.SDKGeneratorVersion, Status: "deprecated",
+		ExpectedFamilyKind: AppKindSDK,
 	}); err != nil {
 		t.Fatalf("publish SDK app: %v", err)
 	}

@@ -59,11 +59,6 @@ func NewLocalObjectCache(db store.Store, rc RegistryClient) *LocalObjectCache {
 	}
 }
 
-func (c *LocalObjectCache) providerRateLimitStore() store.ProviderRateLimitStore {
-	store, _ := c.db.(store.ProviderRateLimitStore)
-	return store
-}
-
 func (c *LocalObjectCache) ConnectSDK(ctx context.Context, appID string) error {
 	started := time.Now()
 	sdkUUID, err := uuid.Parse(appID)
@@ -405,6 +400,32 @@ func (c *LocalObjectCache) ListEndpointsForSelection(ctx context.Context, appID 
 	c.mu.Unlock()
 
 	return all, nil
+}
+
+// ListEndpointsForSelectionsByNames constrains a restricted MCP catalog in one
+// snapshot query. PostgreSQL performs both policy intersections so neither a
+// full endpoint catalog nor one query per selected service reaches Go.
+func (c *LocalObjectCache) ListEndpointsForSelectionsByNames(ctx context.Context, selections []models.SDKSelection, names []string) (map[int][]fusedobject.Endpoint, error) {
+	contractStore := c.serviceContractStore()
+	if contractStore == nil {
+		return nil, store.ErrServiceContractSnapshotNotFound
+	}
+	requested := make([]store.ServiceContractEndpointSelection, 0, len(selections))
+	for index, selection := range selections {
+		requested = append(requested, store.ServiceContractEndpointSelection{
+			SelectionIndex: index, ServiceID: selection.ServiceID, ServiceVersionID: selection.ServiceVersionID,
+			SelectAll: selection.SelectAll, EndpointIDs: selection.EndpointIDs,
+		})
+	}
+	matches, err := contractStore.ListServiceContractEndpointsForSelections(ctx, requested, names)
+	if err != nil {
+		return nil, err
+	}
+	grouped := make(map[int][]fusedobject.Endpoint, len(selections))
+	for _, match := range matches {
+		grouped[match.SelectionIndex] = append(grouped[match.SelectionIndex], match.Endpoint)
+	}
+	return grouped, nil
 }
 
 // FetchServiceMetadata implements middleware.MetadataFetcher, letting

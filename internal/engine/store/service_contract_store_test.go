@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -125,6 +126,33 @@ func TestPostgresStoreServiceContractSnapshotRoundTrip(t *testing.T) {
 	}
 	if len(byName) != 1 || byName[0].ID != updatedEndpoint.ID {
 		t.Fatalf("expected SQL-filtered name lookup, got %#v", byName)
+	}
+	secondServiceID := uuid.New()
+	secondVersionID := uuid.New()
+	defer pool.Exec(context.Background(), `DELETE FROM fused_service_contract_snapshots WHERE service_version_id = $1`, secondVersionID) //nolint:errcheck
+	secondEndpoint := fusedobject.Endpoint{ID: uuid.New(), Name: "listGadgets", Method: "GET", Path: "/gadgets"}
+	if _, err := s.UpsertServiceContractSnapshot(ctx, ServiceContractSnapshot{
+		ServiceID: secondServiceID, ServiceVersionID: secondVersionID, Version: "2026-07-24",
+		ServiceMetadata: fusedobject.ServiceMetadata{ID: secondServiceID, ServiceVersionID: secondVersionID, Name: "Gadgets"},
+		Endpoints:       []fusedobject.Endpoint{secondEndpoint},
+	}); err != nil {
+		t.Fatalf("UpsertServiceContractSnapshot second selection: %v", err)
+	}
+	intersection, err := s.ListServiceContractEndpointsForSelections(ctx, []ServiceContractEndpointSelection{
+		{SelectionIndex: 0, ServiceID: serviceID, ServiceVersionID: versionID, EndpointIDs: []uuid.UUID{updatedEndpoint.ID}},
+		{SelectionIndex: 1, ServiceID: secondServiceID, ServiceVersionID: secondVersionID, SelectAll: true},
+	}, []string{"createWidget", "listGadgets", "missingWidget"})
+	if err != nil {
+		t.Fatalf("ListServiceContractEndpointsForSelections: %v", err)
+	}
+	if len(intersection) != 2 || intersection[0].SelectionIndex != 0 || intersection[0].Endpoint.ID != updatedEndpoint.ID || intersection[1].SelectionIndex != 1 || intersection[1].Endpoint.ID != secondEndpoint.ID {
+		t.Fatalf("batched name/app-scope intersection returned %#v", intersection)
+	}
+	_, err = s.ListServiceContractEndpointsForSelections(ctx, []ServiceContractEndpointSelection{{
+		SelectionIndex: 0, ServiceID: uuid.New(), ServiceVersionID: uuid.New(), SelectAll: true,
+	}}, []string{"createWidget"})
+	if !errors.Is(err, ErrServiceContractSnapshotNotFound) {
+		t.Fatalf("missing strict snapshot error = %v, want %v", err, ErrServiceContractSnapshotNotFound)
 	}
 	byID, err := s.ListServiceContractEndpointsByIDs(ctx, serviceID, versionID, []uuid.UUID{updatedEndpoint.ID, uuid.New()})
 	if err != nil {

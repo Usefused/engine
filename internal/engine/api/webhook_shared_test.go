@@ -14,7 +14,7 @@ import (
 // core isolation-fix assertion: the label comes entirely from the
 // connecting SDK/MCP's own applied config (via fused_apps.config_key),
 // never from anything the client reports itself -- see the function's doc
-// comment and plans/plan-webhook-kind.md's NATS/WS section.
+// comment and plans/plan-webhook-kind.md's subject-filter section.
 func TestResolveWebhookAttachmentLabel_ReturnsAttachmentFromConfigState(t *testing.T) {
 	appID := uuid.New()
 	configKey := "sdk:jira-sdk:1.0.0"
@@ -119,7 +119,7 @@ func TestResolveWebhookAttachmentLabel_ConfigStateLookupErrorPropagates(t *testi
 // subjectSafeLabel is duplicated verbatim in sandbox/webhook.go (see that
 // package's test for the equivalent case) -- both must apply the exact same
 // substitution or a label containing "." would match on the publish side
-// but not the WS filter side, silently dropping every delivery.
+// but not the consumer-filter side, silently dropping every delivery.
 func TestSubjectSafeLabel_ReplacesDots(t *testing.T) {
 	if got, want := subjectSafeLabel("team.x"), "team-x"; got != want {
 		t.Fatalf("subjectSafeLabel(%q) = %q, want %q", "team.x", got, want)

@@ -581,11 +581,8 @@ func commitWebhookConfigApply(ctx context.Context, configStore store.ConfigRepos
 	return webhookConfigApplyResult{ConfigKey: plan.ConfigKey, Name: name, Applied: applied}, nil
 }
 
-// resolveWebhookServices resolves every service name in doc against this
-// workspace's activated services and allowed versions in two batched calls
-// (workspaceServicesByName, ListWorkspaceServiceVersionsForServices) rather
-// than one query per service -- reused by both plan and apply so they can
-// never resolve a service differently.
+// unresolvedWebhookServiceKeys checks the caller's already-batched activation
+// map so resolving a document never adds one query per service.
 func unresolvedWebhookServiceKeys(doc webhookConfigDocument, services map[string]store.WorkspaceService) []string {
 	var missing []string
 	for serviceName := range doc.Services {
@@ -598,9 +595,9 @@ func unresolvedWebhookServiceKeys(doc webhookConfigDocument, services map[string
 }
 
 // resolveWebhookServices is the (service, version) lookup bottleneck
-// (workspaceServicesByName, ListWorkspaceServiceVersionsForServices) rather
-// than one query per service -- reused by both plan and apply so they can
-// never resolve a service differently.
+// (ListWorkspaceServices, ListWorkspaceServiceVersionsForServices) rather than
+// one query per service. Plan and apply share it so they cannot resolve a
+// service differently.
 func resolveWebhookServices(ctx context.Context, s store.Store, registryClient sandbox.RegistryClient, apiKey string, doc webhookConfigDocument) (map[string]webhookResolvedService, error) {
 	keys := sortedWebhookDocumentServiceKeys(doc)
 	workspaceServices, err := s.ListWorkspaceServices(ctx, keys)

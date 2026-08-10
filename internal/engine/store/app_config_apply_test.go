@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
+	"github.com/Usefused/engine/internal/shared/capability"
 	"github.com/Usefused/engine/internal/shared/db"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -222,10 +223,10 @@ func newConcurrentArtifactApplyFixture(t *testing.T, configType ConfigType) conc
 			},
 			Scope: AppRuntime{AccountID: accountID, AppID: appID, OwnerTeamID: ownerTeamID,
 				BucketID: bucketID, Selections: []byte("[]"), ScopeSchemaVersion: 2,
-				Kind: string(configType), Name: "concurrent", Version: version, ConfigKey: configKey},
+				Kind: AppKind(configType), Name: "concurrent", Version: version, ConfigKey: configKey},
 			AuthorizedBucketName: bucketName,
 			TokenName:            "default", TargetLanguage: targetLanguage,
-			GeneratorVersion: generatorVersion, Activate: true,
+			GeneratorVersion: generatorVersion,
 		},
 	}
 }
@@ -250,5 +251,21 @@ func assertAtomicArtifactApplyState(t *testing.T, fixture concurrentArtifactAppl
 	}
 	if scopes != 1 || tokens != 1 || states != 1 || applied != 1 {
 		t.Fatalf("atomic artifact state scopes=%d tokens=%d states=%d applied=%d", scopes, tokens, states, applied)
+	}
+	assertCanonicalCapabilityHash(t, fixture)
+}
+
+func assertCanonicalCapabilityHash(t *testing.T, fixture concurrentArtifactApplyFixture) {
+	t.Helper()
+	_, expected, err := capability.KeysAndHash(fixture.params.Scope.Selections)
+	if err != nil {
+		t.Fatalf("canonical capability hash: %v", err)
+	}
+	var persisted string
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT capability_hash FROM fused_apps WHERE app_id = $1`, fixture.params.Scope.AppID).Scan(&persisted); err != nil {
+		t.Fatalf("read persisted capability hash: %v", err)
+	}
+	if persisted != expected {
+		t.Fatalf("capability hash = %q, want canonical %q", persisted, expected)
 	}
 }

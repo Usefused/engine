@@ -17,7 +17,11 @@ WORKDIR /app/runtime/mcp
 RUN apk upgrade --no-cache
 COPY runtime/mcp/package.json runtime/mcp/package-lock.json ./
 RUN npm ci
-COPY runtime/mcp/ ./
+# Why: copying the whole development directory can replace the container's
+# platform-specific npm binaries with host node_modules (for example Mach-O
+# esbuild in a Linux/ARM64 build). Keep this stage limited to build inputs.
+COPY runtime/mcp/tsconfig.json runtime/mcp/tsconfig.build.json ./
+COPY runtime/mcp/src ./src
 RUN npm run build
 
 FROM golang:1.25-alpine AS engine-base

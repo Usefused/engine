@@ -52,6 +52,29 @@ func TestKeysIsStableAcrossInputOrdering(t *testing.T) {
 	assert.Equal(t, firstKeys, secondKeys)
 }
 
+func TestKeysAndHashIsStableAcrossInputOrdering(t *testing.T) {
+	serviceID, versionID := uuid.New(), uuid.New()
+	first := selectionJSON(t, serviceID, versionID, []string{"create", "list"})
+	second := selectionJSON(t, serviceID, versionID, []string{"list", "create"})
+
+	firstKeys, firstHash, err := KeysAndHash(first)
+	require.NoError(t, err)
+	secondKeys, secondHash, err := KeysAndHash(second)
+	require.NoError(t, err)
+
+	assert.Equal(t, firstKeys, secondKeys)
+	assert.Equal(t, firstHash, secondHash)
+	assert.Len(t, firstHash, 64)
+}
+
+func TestCapabilityHashUsesUnambiguousKeyEncoding(t *testing.T) {
+	first := hashKeys([]string{"a\nb", "c"})
+	second := hashKeys([]string{"a", "b\nc"})
+	if first == second {
+		t.Fatal("distinct capability key sets must not collide at delimiters")
+	}
+}
+
 func selectionJSON(t *testing.T, serviceID, versionID uuid.UUID, operations []string) []byte {
 	t.Helper()
 	raw, err := json.Marshal([]models.SDKSelection{{

@@ -3,10 +3,10 @@ package sandbox
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
-	"github.com/Usefused/engine/internal/shared/fusedobject"
-	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 )
 
@@ -25,6 +25,21 @@ func TestMCPSessionAuthContextBindsConnectedUserOutsideToolArguments(t *testing.
 	}
 }
 
+func TestMCPSessionContextEndsAtTokenExpiry(t *testing.T) {
+	expiresAt := time.Now().Add(20 * time.Millisecond)
+	ctx, cancel := mcpSessionContext(context.Background(), &expiresAt)
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+		if ctx.Err() != context.DeadlineExceeded {
+			t.Fatalf("session context error = %v, want deadline exceeded", ctx.Err())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session remained active after token expiry")
+	}
+}
+
 func TestMCPSessionAuthContextRejectsInvalidResourceID(t *testing.T) {
 	headers := http.Header{"X-Fused-Resource-Id": []string{"not-a-uuid"}}
 	if _, err := mcpSessionAuthContext(headers); err == nil {
@@ -32,34 +47,26 @@ func TestMCPSessionAuthContextRejectsInvalidResourceID(t *testing.T) {
 	}
 }
 
-type mockObjectCache struct {
-	obj *fusedobject.ServiceMetadata
-	err error
-}
+func TestConnectMCPAppDoesNotForwardExecutionTokenToCache(t *testing.T) {
+	originalCache, originalValidator := globalObjectCache, globalTokenValidator
+	t.Cleanup(func() {
+		globalObjectCache, globalTokenValidator = originalCache, originalValidator
+	})
+	cache := &recordingCache{}
+	globalObjectCache = cache
+	globalTokenValidator = &mockTokenValidator{validToken: "family-token", accountID: uuid.New()}
 
-func (m *mockObjectCache) ConnectSDK(ctx context.Context, appID string) error {
-	return nil
-}
-
-func (m *mockObjectCache) DisconnectSDK(appID string) {}
-
-func (m *mockObjectCache) GetOrFetchServiceMetadata(ctx context.Context, appID string, serviceID string) (*fusedobject.ServiceMetadata, error) {
-	if m.err != nil {
-		return nil, m.err
+	recorder := httptest.NewRecorder()
+	appID := uuid.NewString()
+	ctx := context.Background()
+	_, connected := connectMCPApp(recorder, ctx, appID, "family-token")
+	if !connected {
+		t.Fatalf("connectMCPApp failed: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	return m.obj, nil
-}
-
-func (m *mockObjectCache) GetAppRuntime(ctx context.Context, appID string) (string, []byte, error) {
-	return "test_token", []byte(`[{"service_id": "00000000-0000-0000-0000-000000000000", "endpoint_ids": ["00000000-0000-0000-0000-000000000000"]}]`), nil
-}
-
-func (m *mockObjectCache) Invalidate(serviceID string) {}
-
-func (m *mockObjectCache) GetEndpoint(ctx context.Context, appID string, serviceID string, endpointName string) (*fusedobject.Endpoint, error) {
-	return nil, nil
-}
-
-func (m *mockObjectCache) ListEndpointsForSelection(ctx context.Context, appID string, sel models.SDKSelection) ([]fusedobject.Endpoint, error) {
-	return nil, nil
+	if cache.connectedID != appID {
+		t.Fatalf("connected app = %q, want %q", cache.connectedID, appID)
+	}
+	if cache.connectedContext != ctx {
+		t.Fatal("MCP connect derived a cache context instead of forwarding the credential-free request context")
+	}
 }

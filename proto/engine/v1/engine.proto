@@ -42,8 +42,7 @@ service EngineService {
   // an active subscription and redelivers un-acked events with backoff --
   // this is a transport change only: durability/retry/queue-group fan-out is
   // unchanged, owned by the Engine's NATS JetStream durable consumer keyed
-  // on receiver_name (see websocket_handler.go's setupWebhookConsumer,
-  // ported as-is onto this stream in the gRPC handler).
+  // on receiver_name and bridged to the stream by the gRPC handler.
   rpc SubscribeWebhooks(stream WebhookClientMessage) returns (stream WebhookServerMessage);
 }
 
@@ -212,5 +211,5 @@ message WebhookSubscribeAck {
 message WebhookEvent {
   string id = 1;
   string event = 2;
-  bytes payload = 3; // JSON-encoded {body, headers, query, params, path} -- same shape as today's WS frame
+  bytes payload = 3; // JSON-encoded {body, headers, query, params, path}
 }

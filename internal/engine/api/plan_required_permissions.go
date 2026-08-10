@@ -36,21 +36,6 @@ func workspacePlanRequiredPermissions(ctx context.Context, actions json.RawMessa
 	return marshalPlanRequiredPermissions(requirements, displayNames, err)
 }
 
-func configPlanRequiredPermissions(
-	ctx context.Context,
-	s store.Store,
-	current *store.ConfigState,
-	serviceNames map[uuid.UUID]string,
-	bucketName string,
-	configName string,
-) (json.RawMessage, int, error) {
-	buckets, err := configNamedBuckets(ctx, s, bucketName)
-	if err != nil {
-		return nil, 0, err
-	}
-	return configPlanRequiredPermissionsWithBuckets(ctx, s, current, serviceNames, buckets, configName)
-}
-
 func configPlanRequiredPermissionsWithBuckets(
 	ctx context.Context,
 	s store.Store,
@@ -87,17 +72,6 @@ func configPlanRequiredPermissionsWithBuckets(
 	requirements = append(requirements, bucketRequirement...)
 	mergeResourceDisplayNames(displayNames, bucketDisplayNames)
 	return marshalPlanRequiredPermissions(requirements, displayNames, nil)
-}
-
-func configNamedBuckets(ctx context.Context, s store.Store, bucketName string) ([]store.Bucket, error) {
-	if bucketName == "" {
-		return nil, nil
-	}
-	bucket, err := s.GetBucketByName(ctx, bucketName)
-	if err != nil || bucket == nil || bucket.ID == uuid.Nil {
-		return nil, accesscontrol.ErrInvalidRequirement
-	}
-	return []store.Bucket{*bucket}, nil
 }
 
 func requiredPermissionWorkspaceID(ctx context.Context) (uuid.UUID, error) {

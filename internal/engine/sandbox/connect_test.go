@@ -10,9 +10,10 @@ import (
 // recordingCache records handshake calls so the gRPC Connect/Disconnect handlers
 // can be asserted in isolation.
 type recordingCache struct {
-	connectedID    string
-	disconnectedID string
-	connectErr     error
+	connectedID      string
+	disconnectedID   string
+	connectErr       error
+	connectedContext context.Context
 }
 
 func (r *recordingCache) ConnectSDK(ctx context.Context, appID string) error {
@@ -20,6 +21,7 @@ func (r *recordingCache) ConnectSDK(ctx context.Context, appID string) error {
 		return r.connectErr
 	}
 	r.connectedID = appID
+	r.connectedContext = ctx
 	return nil
 }
 func (r *recordingCache) DisconnectSDK(appID string) { r.disconnectedID = appID }
@@ -36,4 +38,5 @@ func (r *recordingCache) ListEndpointsForSelection(ctx context.Context, appID st
 func (r *recordingCache) GetAppRuntime(ctx context.Context, appID string) (string, []byte, error) {
 	return "", nil, nil
 }
-func (r *recordingCache) Invalidate(serviceID string) {}
+func (r *recordingCache) Invalidate(serviceID string)       {}
+func (r *recordingCache) InvalidateAppRuntime(appID string) {}

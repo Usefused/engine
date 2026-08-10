@@ -16,7 +16,7 @@ Credentials are not scraped from arbitrary traffic. Engine only injects credenti
 ## Features
 - **Self-hosted runtime**: Process configured webhooks, SDK calls, and MCP requests inside your own infrastructure.
 - **Explicit credential routing**: Inject credentials only for Fused-managed routes using secrets you configure.
-- **Embedded NATS JetStream**: Instantly and reliably queues incoming webhooks and broadcasts WebSocket events without requiring an external NATS cluster or Redis instance to be deployed alongside it.
+- **Embedded NATS JetStream**: Reliably queues incoming webhooks and coordinates durable delivery without requiring an external NATS cluster or Redis instance alongside it.
 - **Headless Mode**: A no-UI Docker variant (`ghcr.io/usefused/engine:headless`) optimized for serverless and Kubernetes deployments.
 - **Resilient**: Fully caches execution metadata locally to withstand network partitions.
 
@@ -147,6 +147,25 @@ FUSED_UI_URL="https://admin.your-company.com"
 # Leave blank to boot the internal embedded NATS.
 # NATS_URL="nats://nats:4222" 
 
+# External NATS authentication: configure exactly one of these methods.
+# Keep credentials out of NATS_URL so startup errors and diagnostics cannot expose them.
+# NATS_CREDS_FILE="/run/secrets/fused-engine.creds" # NATS operator/account JWT credentials
+# NATS_NKEY_SEED_FILE="/run/secrets/fused-engine.nk"
+# NATS_TOKEN="<secret>"
+# NATS_USERNAME="fused-engine"
+# NATS_PASSWORD="<secret>"
+
+# Optional TLS/mTLS for external NATS. A client certificate may be combined
+# with any one application authentication method above.
+# NATS_TLS_CA_FILE="/run/secrets/nats-ca.pem"
+# NATS_TLS_CERT_FILE="/run/secrets/nats-client.pem"
+# NATS_TLS_KEY_FILE="/run/secrets/nats-client-key.pem"
+# NATS_TLS_SERVER_NAME="nats.internal.example.com"
+
+# Replicate live provider rate-limit state across this many JetStream nodes.
+# Keep 1 for embedded NATS; otherwise match the JetStream replica count.
+FUSED_NATS_RATE_LIMIT_REPLICAS=1
+
 # OpenTelemetry configuration for distributed tracing
 OTEL_SERVICE_NAME="engine"
 OTEL_EXPORTER_OTLP_ENDPOINT="http://jaeger:4318"
@@ -154,6 +173,10 @@ OTEL_EXPORTER_OTLP_ENDPOINT="http://jaeger:4318"
 # Optional: override the Fused Cloud Registry endpoint only when directed by Fused support.
 # FUSED_REGISTRY_ENDPOINT="https://registry.usefused.com/graphql"
 ```
+
+Provider quota admission uses JetStream KV as the live cluster-wide authority.
+PostgreSQL receives an asynchronous, monotonic projection for recovery and
+reporting, so normal provider calls do not wait on the database.
 
 ### CLI Flags
 
@@ -171,3 +194,23 @@ Flags:
 Global Flags:
       --config string   Path to configuration file (default "engine.yaml")
 ```
+
+## Running Multiple Engine Replicas
+
+Embedded NATS supports one Engine process. To run replicas of the same Engine
+installation, give every replica the same PostgreSQL database, license and
+encryption keys, and authenticated external JetStream account:
+
+```bash
+FUSED_DATABASE_URL="postgres://fused:<password>@postgres:5432/fused?sslmode=require"
+FUSED_LICENSE_KEY="<provided-by-fused>"
+FUSED_ENCRYPTION_KEY="<shared-encryption-key>"
+NATS_URL="tls://nats-1:4222,tls://nats-2:4222,tls://nats-3:4222"
+NATS_CREDS_FILE="/run/secrets/fused-engine.creds"
+NATS_TLS_CA_FILE="/run/secrets/nats-ca.pem"
+FUSED_NATS_RATE_LIMIT_REPLICAS=3
+```
+
+Apply these settings to every replica and place the HTTP and gRPC endpoints
+behind load balancers. Independent Engine installations require separate
+databases and NATS accounts.

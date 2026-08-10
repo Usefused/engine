@@ -107,6 +107,49 @@ func TestSDKNoOpSummaryHasNoUpdateOrOperationAdditions(t *testing.T) {
 	}
 }
 
+func TestReserveSDKVersionIdentity(t *testing.T) {
+	ctx := context.Background()
+	planID, familyID := uuid.New(), uuid.New()
+	const version = "1.2.3"
+
+	t.Run("new version uses the plan-stable identity", func(t *testing.T) {
+		appID, existingID, err := reserveSDKVersionIdentity(ctx, &workspaceTestStore{}, planID, familyID, version, "source-a")
+		if err != nil {
+			t.Fatalf("reserve new version: %v", err)
+		}
+		if appID != stableAppIDForPlan(planID) || existingID != uuid.Nil {
+			t.Fatalf("new identity = (%s, %s), want (%s, nil)", appID, existingID, stableAppIDForPlan(planID))
+		}
+	})
+
+	existingID := uuid.New()
+	existing := store.App{AppID: existingID, AppFamilyID: familyID, Version: version, SourceHash: "source-a"}
+	t.Run("matching immutable version is reused", func(t *testing.T) {
+		appID, reusedID, err := reserveSDKVersionIdentity(ctx, &workspaceTestStore{apps: map[uuid.UUID]store.App{existingID: existing}}, planID, familyID, version, "source-a")
+		if err != nil {
+			t.Fatalf("reserve existing version: %v", err)
+		}
+		if appID != existingID || reusedID != existingID {
+			t.Fatalf("existing identity = (%s, %s), want %s", appID, reusedID, existingID)
+		}
+	})
+
+	t.Run("changed source cannot replace an immutable version", func(t *testing.T) {
+		_, _, err := reserveSDKVersionIdentity(ctx, &workspaceTestStore{apps: map[uuid.UUID]store.App{existingID: existing}}, planID, familyID, version, "source-b")
+		if err == nil || err.Error() != "app_version_immutable" {
+			t.Fatalf("immutable version error = %v", err)
+		}
+	})
+
+	t.Run("deactivated version cannot be recreated", func(t *testing.T) {
+		tombstoneKey := familyID.String() + "\x00" + version
+		_, _, err := reserveSDKVersionIdentity(ctx, &workspaceTestStore{tombstones: map[string]bool{tombstoneKey: true}}, planID, familyID, version, "source-a")
+		if err == nil || err.Error() != "app_version_deactivated" {
+			t.Fatalf("deactivated version error = %v", err)
+		}
+	})
+}
+
 func TestExecuteSDKConfigApplyNoopDoesNotCallRegistryOrRotateToken(t *testing.T) {
 	appID, planID, accountID := uuid.New(), uuid.New(), uuid.New()
 	payload, err := json.Marshal(appResolvedPayload{AppID: appID, Noop: true, BucketID: uuid.New()})

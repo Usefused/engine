@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/models"
@@ -40,15 +41,19 @@ func TestSelectRequestAuthChargebeeEmptyBasicPassword(t *testing.T) {
 }
 
 func TestSelectRequestAuthWiseOAuthAndMTLS(t *testing.T) {
+	certPEM, keyPEM := testMTLSPair(t, time.Now().Add(time.Hour))
 	auths := models.AuthConfigs{
-		{Name: "wiseOAuth", Type: "oauth2"},
-		{Name: "wiseMTLS", Type: "mutualTLS"},
+		{Name: "UserToken", Type: "oauth2", Flow: "authorizationCode"},
+		{Name: "WiseMTLS", Type: "mutualTLS"},
 	}
-	requirements := authrouting.Requirements{{Schemes: []authrouting.Requirement{{Scheme: "wiseOAuth"}, {Scheme: "wiseMTLS"}}}}
+	requirements := authrouting.Requirements{{Schemes: []authrouting.Requirement{
+		{Scheme: "UserToken", Scopes: []string{}},
+		{Scheme: "WiseMTLS", Scopes: []string{}},
+	}}}
 	credentials := map[string]any{
-		"wiseOAuth":     "access-token",
-		"wiseMTLS_cert": "certificate",
-		"wiseMTLS_key":  "private-key",
+		"UserToken":     "access-token",
+		"WiseMTLS_cert": certPEM,
+		"WiseMTLS_key":  keyPEM,
 	}
 	selected, err := selectRequestAuth(auths, requirements, credentials)
 	if err != nil || len(selected) != 2 {
@@ -58,6 +63,14 @@ func TestSelectRequestAuthWiseOAuthAndMTLS(t *testing.T) {
 	applySelectedAuth(req, selected, credentials)
 	if got := req.Header.Get("Authorization"); got != "Bearer access-token" {
 		t.Fatalf("Authorization=%q", got)
+	}
+	dispatcher := NewDispatcher()
+	client, err := dispatcher.providerClientForAuth(selected, credentials)
+	if err != nil {
+		t.Fatalf("compose OAuth+mTLS provider transport: %v", err)
+	}
+	if client == dispatcher.client {
+		t.Fatal("OAuth+mTLS execution must use a certificate-scoped transport")
 	}
 }
 

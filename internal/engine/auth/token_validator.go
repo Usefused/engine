@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	ErrUnauthorized = errors.New("unauthorized: invalid SDK token")
+	ErrUnauthorized = errors.New("unauthorized: invalid app token")
 )
 
 type TokenValidator interface {
@@ -30,8 +30,9 @@ type RuntimeIdentity struct {
 	AppFamilyID uuid.UUID
 	AppID       uuid.UUID
 	AppVersion  string
-	Kind        string
-	Status      string
+	Kind        store.AppKind
+	Status      store.AppStatus
+	TokenPolicy store.AppTokenPolicy
 }
 
 type tokenValidator struct {
@@ -55,8 +56,14 @@ func (v *tokenValidator) Validate(ctx context.Context, appID uuid.UUID, token st
 	return RuntimeIdentity{
 		AccountID: projection.AccountID, AppFamilyID: projection.AppFamilyID,
 		AppID: projection.AppID, AppVersion: projection.Version,
-		Kind: projection.Kind, Status: projection.AppStatus,
+		Kind: projection.Kind, Status: projection.AppStatus, TokenPolicy: projection.TokenPolicy,
 	}, nil
+}
+
+// AllowsOperation applies the token's deny-all-except rule. App-version scope
+// is checked separately, so this helper cannot grant an unselected operation.
+func (identity RuntimeIdentity) AllowsOperation(operation string) bool {
+	return identity.TokenPolicy.AllowsOperation(operation)
 }
 
 func HashToken(token string) string {

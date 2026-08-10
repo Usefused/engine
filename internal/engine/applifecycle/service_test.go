@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
 )
@@ -163,10 +164,31 @@ func TestPublishVersion_ImmutableVersionFails(t *testing.T) {
 	_, err := svc.PublishVersion(ctx, params)
 	require.NoError(t, err)
 
+	// The source hash is only one part of immutable identity; changing the
+	// executable scope under the same hash must also be rejected.
+	params.Selections = []byte(`[{"select_all":true}]`)
+	_, err = svc.PublishVersion(ctx, params)
+	assert.ErrorIs(t, err, ErrAppVersionImmutable)
+	params.Selections = []byte(`[{"service":"a"}]`)
+
 	// Same version, different source — must fail.
 	params.SourceHash = "hash-v2-different"
 	_, err = svc.PublishVersion(ctx, params)
 	assert.ErrorIs(t, err, ErrAppVersionImmutable)
+}
+
+func TestPublishVersion_KindMustMatchFamily(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	svc := testService(t)
+	family := createTestFamily(t, svc, context.Background(), store.AppKindSDK, "kind-test", "typescript")
+	_, err := svc.PublishVersion(context.Background(), PublishVersionParams{
+		AppFamilyID: family.AppFamilyID, AccountID: family.AccountID, AppID: uuid.New(),
+		Kind: store.AppKindMCP, Version: "1.0.0", ConfigKey: "mcp:kind-test:1.0.0",
+		SourceHash: "source", Selections: []byte(`[]`), ScopeSchemaVersion: 1,
+	})
+	assert.ErrorIs(t, err, store.ErrAppFamilyKindMismatch)
 }
 
 func TestPublishVersion_DifferentVersionsOK(t *testing.T) {
@@ -210,7 +232,7 @@ func TestPublishVersion_DifferentVersionsOK(t *testing.T) {
 	assert.True(t, r2.Created)
 
 	// Both versions exist.
-	apps, err := svc.store.ListApps(ctx, family.AppFamilyID)
+	apps, err := svc.store.(store.Store).ListApps(ctx, family.AppFamilyID)
 	require.NoError(t, err)
 	assert.Len(t, apps, 2)
 }
@@ -263,7 +285,7 @@ func TestDeactivate_Irreversible(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrAppNotFound)
 
 	// Tombstone exists.
-	exists, err := svc.store.AppTombstoneExists(ctx, family.AppFamilyID, "1.0.0")
+	exists, err := svc.store.(store.Store).AppTombstoneExists(ctx, family.AppFamilyID, "1.0.0")
 	require.NoError(t, err)
 	assert.True(t, exists)
 
@@ -283,7 +305,7 @@ func TestDeactivate_Irreversible(t *testing.T) {
 	assert.ErrorIs(t, err, ErrAppTombstoneExists)
 }
 
-func TestAuthorizeCall_Success(t *testing.T) {
+func TestRuntimeTokenAuthorization_Success(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
@@ -294,20 +316,20 @@ func TestAuthorizeCall_Success(t *testing.T) {
 	app := createTestApp(t, svc, ctx, family, "1.0.0")
 
 	// Generate a token.
-	plaintext, _, err := svc.GenerateToken(ctx, family.AppFamilyID, "default")
+	plaintext, _, err := svc.GenerateToken(ctx, GenerateTokenParams{AppFamilyID: family.AppFamilyID, Name: "default"})
 	require.NoError(t, err)
 	require.NotEmpty(t, plaintext)
 
-	// Authorize with the correct token.
-	tokenHash := HashToken(plaintext)
-	proj, err := svc.AuthorizeCall(ctx, app.AppID, tokenHash)
+	// Exercise the validator used by SDK and MCP execution rather than a
+	// lifecycle-only wrapper that production never calls.
+	identity, err := auth.NewTokenValidator(svc.store.(store.Store)).Validate(ctx, app.AppID, plaintext)
 	require.NoError(t, err)
-	assert.Equal(t, app.AppID, proj.AppID)
-	assert.Equal(t, family.AppFamilyID, proj.AppFamilyID)
-	assert.Equal(t, "active", proj.AppStatus)
+	assert.Equal(t, app.AppID, identity.AppID)
+	assert.Equal(t, family.AppFamilyID, identity.AppFamilyID)
+	assert.Equal(t, store.AppStatusActive, identity.Status)
 }
 
-func TestAuthorizeCall_DeprecatedAppStillAuthorized(t *testing.T) {
+func TestRuntimeTokenAuthorization_DeprecatedAppStillAuthorized(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
@@ -317,7 +339,7 @@ func TestAuthorizeCall_DeprecatedAppStillAuthorized(t *testing.T) {
 	family := createTestFamily(t, svc, ctx, "mcp", "depr-auth-test", "")
 	app := createTestApp(t, svc, ctx, family, "1.0.0")
 
-	plaintext, _, err := svc.GenerateToken(ctx, family.AppFamilyID, "default")
+	plaintext, _, err := svc.GenerateToken(ctx, GenerateTokenParams{AppFamilyID: family.AppFamilyID, Name: "default"})
 	require.NoError(t, err)
 
 	// Deprecate the app.
@@ -325,13 +347,12 @@ func TestAuthorizeCall_DeprecatedAppStillAuthorized(t *testing.T) {
 	require.NoError(t, err)
 
 	// Authorization still succeeds for deprecated apps.
-	tokenHash := HashToken(plaintext)
-	proj, err := svc.AuthorizeCall(ctx, app.AppID, tokenHash)
+	identity, err := auth.NewTokenValidator(svc.store.(store.Store)).Validate(ctx, app.AppID, plaintext)
 	require.NoError(t, err)
-	assert.Equal(t, "deprecated", proj.AppStatus)
+	assert.Equal(t, store.AppStatusDeprecated, identity.Status)
 }
 
-func TestAuthorizeCall_DeactivatedAppDenied(t *testing.T) {
+func TestRuntimeTokenAuthorization_DeactivatedAppDenied(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
@@ -341,7 +362,7 @@ func TestAuthorizeCall_DeactivatedAppDenied(t *testing.T) {
 	family := createTestFamily(t, svc, ctx, "mcp", "dead-auth-test", "")
 	app := createTestApp(t, svc, ctx, family, "1.0.0")
 
-	plaintext, _, err := svc.GenerateToken(ctx, family.AppFamilyID, "default")
+	plaintext, _, err := svc.GenerateToken(ctx, GenerateTokenParams{AppFamilyID: family.AppFamilyID, Name: "default"})
 	require.NoError(t, err)
 
 	// Deactivate the app.
@@ -349,12 +370,11 @@ func TestAuthorizeCall_DeactivatedAppDenied(t *testing.T) {
 	require.NoError(t, err)
 
 	// Authorization must fail.
-	tokenHash := HashToken(plaintext)
-	_, err = svc.AuthorizeCall(ctx, app.AppID, tokenHash)
-	assert.ErrorIs(t, err, store.ErrAppNotFound)
+	_, err = auth.NewTokenValidator(svc.store.(store.Store)).Validate(ctx, app.AppID, plaintext)
+	assert.ErrorIs(t, err, auth.ErrUnauthorized)
 }
 
-func TestAuthorizeCall_WrongFamilyDenied(t *testing.T) {
+func TestRuntimeTokenAuthorization_WrongFamilyDenied(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
@@ -368,13 +388,12 @@ func TestAuthorizeCall_WrongFamilyDenied(t *testing.T) {
 	familyB := createTestFamily(t, svc, ctx, "sdk", "family-b", "typescript")
 	appB := createTestApp(t, svc, ctx, familyB, "1.0.0")
 
-	plaintextA, _, err := svc.GenerateToken(ctx, familyA.AppFamilyID, "token-a")
+	plaintextA, _, err := svc.GenerateToken(ctx, GenerateTokenParams{AppFamilyID: familyA.AppFamilyID, Name: "token-a"})
 	require.NoError(t, err)
 
 	// Token from family A with app from family B must fail.
-	tokenHashA := HashToken(plaintextA)
-	_, err = svc.AuthorizeCall(ctx, appB.AppID, tokenHashA)
-	assert.ErrorIs(t, err, store.ErrAppNotFound)
+	_, err = auth.NewTokenValidator(svc.store.(store.Store)).Validate(ctx, appB.AppID, plaintextA)
+	assert.ErrorIs(t, err, auth.ErrUnauthorized)
 	_ = appA // used above
 }
 
@@ -432,28 +451,36 @@ func TestGenerateToken_PlaintextReturnedOnce(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
-	svc := testService(t)
+	db := testDB(t)
+	cleanAppTables(t, db)
+	svc := New(store.NewPostgresStore(db))
 	ctx := context.Background()
 
 	family := createTestFamily(t, svc, ctx, "sdk", "token-test", "typescript")
 
-	plaintext, tok, err := svc.GenerateToken(ctx, family.AppFamilyID, "my-token")
+	plaintext, tok, err := svc.GenerateToken(ctx, GenerateTokenParams{AppFamilyID: family.AppFamilyID, Name: "my-token"})
 	require.NoError(t, err)
 	assert.Contains(t, plaintext, "fused-app-")
 	assert.Equal(t, "my-token", tok.Name)
 
-	// Listing tokens returns only the hash, not the plaintext.
-	tokens, err := svc.store.ListAppTokens(ctx, family.AppFamilyID)
+	// Listing returns metadata only. Hashes remain inside the database and the
+	// authorization query so a metadata surface cannot accidentally expose them.
+	tokens, err := svc.store.(store.Store).ListAppTokens(ctx, family.AppFamilyID)
 	require.NoError(t, err)
 	assert.Len(t, tokens, 1)
-	assert.Equal(t, tok.TokenHash, tokens[0].TokenHash)
-	// The stored hash must match our hashing of the returned plaintext.
-	assert.Equal(t, HashToken(plaintext), tokens[0].TokenHash)
+	assert.Equal(t, tok.ID, tokens[0].ID)
+	assert.Equal(t, tok.Name, tokens[0].Name)
+
+	var storedHash string
+	require.NoError(t, db.QueryRow(ctx, `
+		SELECT token_hash FROM fused_app_tokens WHERE id = $1
+	`, tok.ID).Scan(&storedHash))
+	assert.Equal(t, auth.HashToken(plaintext), storedHash)
 }
 
 // --- helpers ---
 
-func createTestFamily(t *testing.T, svc *Service, ctx context.Context, kind, name, targetLanguage string) *store.AppFamily {
+func createTestFamily(t *testing.T, svc *Service, ctx context.Context, kind store.AppKind, name, targetLanguage string) *store.AppFamily {
 	t.Helper()
 	accountID := uuid.New()
 	family, created, err := svc.CreateOrGetFamily(ctx, CreateFamilyParams{
@@ -482,7 +509,7 @@ func createTestAppWithSelections(t *testing.T, svc *Service, ctx context.Context
 		AppID:              uuid.New(),
 		Kind:               family.Kind,
 		Version:            version,
-		ConfigKey:          family.Kind + ":" + family.CanonicalName + ":" + version,
+		ConfigKey:          family.Kind.String() + ":" + family.CanonicalName + ":" + version,
 		SourceHash:         "src-" + version,
 		Selections:         selections,
 		ScopeSchemaVersion: 1,

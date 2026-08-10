@@ -138,8 +138,9 @@ func (s *postgresStore) MarkPublicServiceInsightReportResults(ctx context.Contex
 	_, err = s.db.Exec(ctx, `
 		UPDATE fused_public_service_insight_outbox report
 		SET state = CASE WHEN result.accepted THEN 'sent' ELSE 'rejected' END,
-		    sent_at = CASE WHEN result.accepted THEN $2 ELSE NULL END,
-		    last_error_code = COALESCE(result.reason, ''), attempt_count = attempt_count + 1, updated_at = $2
+		    sent_at = CASE WHEN result.accepted THEN $2::timestamptz ELSE NULL::timestamptz END,
+		    last_error_code = COALESCE(result.reason, ''), attempt_count = attempt_count + 1,
+		    updated_at = $2::timestamptz
 		FROM jsonb_to_recordset($1::jsonb) AS result(report_id uuid, accepted boolean, reason text)
 		WHERE report.report_id = result.report_id AND report.state = 'pending'`, payload, at)
 	if err != nil {

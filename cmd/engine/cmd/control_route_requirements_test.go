@@ -71,7 +71,7 @@ func TestAppTokenAccessRequirementsUseFamilyBoundary(t *testing.T) {
 		familyID: {AppFamilyID: familyID, AccountID: accountID},
 	}}
 	resolver := newControlRequirementResolver(stores, nil)
-	request := httptest.NewRequest(http.MethodPost, "/workspace/sdk-tokens?app_family_id="+familyID.String(), nil)
+	request := httptest.NewRequest(http.MethodPost, "/workspace/app-tokens?app_family_id="+familyID.String(), nil)
 	request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), accesscontrol.Actor{AccountID: accountID}))
 	requirements, _, ok := resolveControlRESTPolicy(request, resolver)
 	want := accesscontrol.Requirement{Permission: accesscontrol.PermissionAppTokensManage, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID}}

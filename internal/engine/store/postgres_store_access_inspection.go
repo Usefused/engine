@@ -2,11 +2,9 @@ package store
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 
@@ -120,5 +118,3 @@ FROM guarded LEFT JOIN matching ON true WHERE guarded.allowed
 ORDER BY matching.subject_type, matching.subject_id, matching.slug, matching.resource_type, matching.resource_id`
 
 var _ AccessInspectionRepository = (*postgresStore)(nil)
-
-func hiddenExplanationError(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
