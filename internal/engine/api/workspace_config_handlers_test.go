@@ -25,6 +25,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/engine/workspaceplan"
 	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
@@ -1216,7 +1217,7 @@ func assertWorkspacePlanUsesBatchedVersionLookup(t *testing.T, s *workspaceTestS
 	}
 }
 
-func hasWorkspaceVersionAction(actions []workspacePlanAction, actionType, version string) bool {
+func hasWorkspaceVersionAction(actions []workspacePlanAction, actionType workspaceplan.ActionType, version string) bool {
 	for _, action := range actions {
 		if action.Type == actionType && action.Version == version {
 			return true
@@ -1561,7 +1562,7 @@ func TestWorkspaceConfigPlanHandler_PlansVersionPublicAndExecutionPolicyChange(t
 	}
 }
 
-func hasWorkspaceAction(actions []workspacePlanAction, actionType, serviceID string) bool {
+func hasWorkspaceAction(actions []workspacePlanAction, actionType workspaceplan.ActionType, serviceID string) bool {
 	for _, action := range actions {
 		if action.Type == actionType && action.ServiceID == serviceID {
 			return true
@@ -2362,8 +2363,8 @@ func runWorkspaceRemovalApplyWithStore(t *testing.T, svcID uuid.UUID, decision s
 		Versions:  []string{"2026-07-01"},
 	}}})
 	action := workspacePlanAction{
-		ID:                 workspaceActionID("remove_service", svcID),
-		Type:               "remove_service",
+		ID:                 workspaceActionID(workspaceplan.ActionRemoveService, svcID),
+		Type:               workspaceplan.ActionRemoveService,
 		ServiceID:          svcID.String(),
 		RequiresDecision:   true,
 		Decision:           decision,
@@ -3022,8 +3023,8 @@ func makeRemoveServicePlan(serviceIDs ...uuid.UUID) *store.ConfigPlan {
 	actions := make([]workspacePlanAction, 0, len(serviceIDs))
 	for _, id := range serviceIDs {
 		actions = append(actions, workspacePlanAction{
-			ID:        workspaceActionID("remove_service", id),
-			Type:      "remove_service",
+			ID:        workspaceActionID(workspaceplan.ActionRemoveService, id),
+			Type:      workspaceplan.ActionRemoveService,
 			ServiceID: id.String(),
 		})
 	}
@@ -3037,9 +3038,9 @@ func TestPlanRemovedServiceIDs_ReturnsOnlyRemoveActions(t *testing.T) {
 	addSvc := uuid.New()
 
 	actions := []workspacePlanAction{
-		{ID: "a1", Type: "remove_service", ServiceID: svc1.String()},
-		{ID: "a2", Type: "add_service", ServiceID: addSvc.String()},
-		{ID: "a3", Type: "remove_service", ServiceID: svc2.String()},
+		{ID: "a1", Type: workspaceplan.ActionRemoveService, ServiceID: svc1.String()},
+		{ID: "a2", Type: workspaceplan.ActionAddService, ServiceID: addSvc.String()},
+		{ID: "a3", Type: workspaceplan.ActionRemoveService, ServiceID: svc2.String()},
 	}
 	b, _ := json.Marshal(actions)
 	plan := &store.ConfigPlan{Actions: b}
@@ -3154,7 +3155,7 @@ func TestPlanWorkspaceChanges_WillArchiveOnlyForOwned(t *testing.T) {
 
 	archiveActions := map[uuid.UUID]bool{}
 	for _, action := range summary.Actions {
-		if action.Type != "remove_service" {
+		if action.Type != workspaceplan.ActionRemoveService {
 			continue
 		}
 		id, _ := uuid.Parse(action.ServiceID)
@@ -3235,9 +3236,9 @@ func TestApplyDeprecationActions_DeprecatesVersions(t *testing.T) {
 
 	rc := &mockRegistryClient{}
 	plan := makePlanWithActions([]workspacePlanAction{
-		{Type: "deprecate_version", ServiceID: svcID.String(), Version: "2026-07-01"},
-		{Type: "deprecate_version", ServiceID: svcID.String(), Version: "2026-06-01"},
-		{Type: "add_service", ServiceID: uuid.New().String()}, // must be ignored
+		{Type: workspaceplan.ActionDeprecateVersion, ServiceID: svcID.String(), Version: "2026-07-01"},
+		{Type: workspaceplan.ActionDeprecateVersion, ServiceID: svcID.String(), Version: "2026-06-01"},
+		{Type: workspaceplan.ActionAddService, ServiceID: uuid.New().String()}, // must be ignored
 	})
 	call := workspaceApplyCall{apiKey: "fsk_test"}
 
@@ -3272,7 +3273,7 @@ func TestApplyDeprecationActions_MissingCapabilityReturnsError(t *testing.T) {
 	ctx := context.Background()
 	svcID := uuid.New()
 	plan := makePlanWithActions([]workspacePlanAction{
-		{Type: "deprecate_version", ServiceID: svcID.String(), Version: "2026-07-01"},
+		{Type: workspaceplan.ActionDeprecateVersion, ServiceID: svcID.String(), Version: "2026-07-01"},
 	})
 
 	// A client that does NOT implement ServiceVersionDeprecator must return an
@@ -3289,7 +3290,7 @@ func TestApplyDeprecationActions_PropagatesError(t *testing.T) {
 
 	rc := &mockRegistryClient{deprecateVersionErr: errors.New("registry 500")}
 	plan := makePlanWithActions([]workspacePlanAction{
-		{Type: "deprecate_version", ServiceID: svcID.String(), Version: "2026-07-01"},
+		{Type: workspaceplan.ActionDeprecateVersion, ServiceID: svcID.String(), Version: "2026-07-01"},
 	})
 
 	if err := applyDeprecationActions(ctx, rc, workspaceApplyCall{apiKey: "fsk_test"}, plan, nil); err == nil {
@@ -3343,8 +3344,8 @@ func TestApplyDeprecationActions_SkipsAlreadyApplied(t *testing.T) {
 
 	// Both versions in the plan — but 2026-07-01 was already applied last time.
 	plan := makePlanWithActions([]workspacePlanAction{
-		{Type: "deprecate_version", ServiceID: svcID.String(), Version: "2026-07-01"},
-		{Type: "deprecate_version", ServiceID: svcID.String(), Version: "2026-06-01"},
+		{Type: workspaceplan.ActionDeprecateVersion, ServiceID: svcID.String(), Version: "2026-07-01"},
+		{Type: workspaceplan.ActionDeprecateVersion, ServiceID: svcID.String(), Version: "2026-06-01"},
 	})
 	currentState := &store.ConfigState{
 		DesiredState: makeDesiredStateWithDeprecations(svcID, "2026-07-01"),

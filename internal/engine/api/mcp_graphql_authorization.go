@@ -107,7 +107,7 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		"publicServiceInsights":       argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead, accesscontrol.PermissionAuditRead),
 		"serviceConsumers":            argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead),
 		"workspaceNotifications":      permissions(accesscontrol.PermissionWorkspaceRead),
-		"sdkTokens":                   argumentPermissions(accesscontrol.ResourceApp, "app_family_id", accesscontrol.PermissionAppTokensManage),
+		"appTokens":                   argumentPermissions(accesscontrol.ResourceApp, "app_family_id", accesscontrol.PermissionAppTokensManage),
 		"sdkBuckets":                  relatedCollectionPermissions(accesscontrol.ResourceApp, "app_family_id", accesscontrol.PermissionAppRead, accesscontrol.ResourceBucket, accesscontrol.PermissionBucketRead),
 		"bucketSDKPage":               relatedCollectionPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionBucketRead, accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
 		"bucketServicePage":           relatedCollectionPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionBucketRead, accesscontrol.ResourceService, accesscontrol.PermissionServiceRead),

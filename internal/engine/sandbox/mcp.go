@@ -21,6 +21,7 @@ import (
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/entitlement"
+	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/messaging"
 	"github.com/Usefused/engine/runtime"
 	"github.com/go-chi/chi/v5"
@@ -46,7 +47,7 @@ func mcpSseHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ── Rate limit: SSE connections per SDK-ID ─────────────────────────────
+	// ── Rate limit: SSE connections per app ID ─────────────────────────────
 	if !allowSSEConnect(w, appIDHex) {
 		return
 	}
@@ -61,16 +62,8 @@ func mcpSseHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	span.End()
 
-	if _, err := validateTokenWithCache(r.Context(), appIDHex, token); err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid token")
-		return
-	}
-
-	// S4.3 Handshake: Load the SDK scope and Fused Objects into memory refcounted cache
-	// Inject the user's token into the context so RegistryClient can authenticate as the user
-	ctx = context.WithValue(r.Context(), "sdk-token", token)
-	if err := globalObjectCache.ConnectSDK(ctx, appIDHex); err != nil {
-		writeError(w, http.StatusUnauthorized, fmt.Sprintf("Failed to handshake SDK cache: %v", err))
+	identity, connected := connectMCPApp(w, r.Context(), appIDHex, token)
+	if !connected {
 		return
 	}
 	defer globalObjectCache.DisconnectSDK(appIDHex)
@@ -79,15 +72,15 @@ func mcpSseHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Each session gets a context. It will be cancelled if the client disconnects,
 	// or if the idle timer fires (see registerMCPSession).
-	ctx, cancel := context.WithCancel(r.Context())
+	ctx, cancel := mcpSessionContext(r.Context(), identity.TokenPolicy.ExpiresAt)
 
 	// Sessions get an operation catalog scoped to exactly what this app's
 	// owner selected; catalog construction must succeed before the child starts.
-	// Built from a Registry round trip, so a failure here is treated the same
-	// as the ConnectSDK handshake failure above -- the session never starts
+	// Built from the Engine snapshot, so a failure here is treated the same as
+	// the app-cache handshake failure above -- the session never starts
 	// rather than serving a session whose search_docs/call() catalog can't be
 	// trusted to match its actual scope.
-	fixture, err := prepareSessionFixture(ctx, appIDHex)
+	fixture, err := prepareSessionFixture(ctx, appIDHex, identity.TokenPolicy)
 	if err != nil {
 		cancel()
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to build mcp fixture: %v", err))
@@ -122,6 +115,21 @@ func mcpSseHandler(w http.ResponseWriter, r *http.Request) {
 	processMCPStream(ctx, w, flusher, stdout, appIDHex, sessionID, injectedResp)
 }
 
+func connectMCPApp(w http.ResponseWriter, ctx context.Context, appID, token string) (auth.RuntimeIdentity, bool) {
+	identity, err := validateMCPToken(ctx, appID, token)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid token")
+		return auth.RuntimeIdentity{}, false
+	}
+	// The execution token authorizes this boundary only. Cache loading receives
+	// no credential value because Registry access uses Engine identity.
+	if err := globalObjectCache.ConnectSDK(ctx, appID); err != nil {
+		writeError(w, http.StatusUnauthorized, fmt.Sprintf("failed to handshake app cache: %v", err))
+		return auth.RuntimeIdentity{}, false
+	}
+	return identity, true
+}
+
 // extractMCPParams extracts and validates required URL parameters and headers.
 func extractMCPParams(w http.ResponseWriter, r *http.Request) (string, string, bool) {
 	appIDHex := chi.URLParam(r, "id")
@@ -138,38 +146,26 @@ func extractMCPParams(w http.ResponseWriter, r *http.Request) (string, string, b
 	return appIDHex, token, true
 }
 
-func validateTokenWithCache(ctx context.Context, appIDHex, token string) (uuid.UUID, error) {
+func validateMCPToken(ctx context.Context, appIDHex, token string) (auth.RuntimeIdentity, error) {
 	if globalTokenValidator == nil {
-		return uuid.Nil, auth.ErrUnauthorized
+		return auth.RuntimeIdentity{}, auth.ErrUnauthorized
 	}
-	cacheKey := sha256CacheKey(appIDHex, token)
-	now := time.Now()
-
-	tokenCache.RLock()
-	entry, found := tokenCache.m[cacheKey]
-	tokenCache.RUnlock()
-	if found && now.Before(entry.expiry) && entry.accountID != uuid.Nil {
-		return entry.accountID, nil
-	}
-
 	appID, err := uuid.Parse(appIDHex)
 	if err != nil {
-		return uuid.Nil, err
+		return auth.RuntimeIdentity{}, err
 	}
-	identity, err := globalTokenValidator.Validate(ctx, appID, token)
-	if err != nil {
-		return uuid.Nil, err
-	}
-
-	tokenCache.Lock()
-	tokenCache.m[cacheKey] = tokenCacheEntry{accountID: identity.AccountID, expiry: now.Add(time.Minute)}
-	tokenCache.Unlock()
-	return identity.AccountID, nil
+	// Session establishment rechecks persistence every time so revocation takes
+	// effect immediately instead of leaving a catalog-access grace period.
+	return globalTokenValidator.Validate(ctx, appID, token)
 }
 
-func sha256CacheKey(appIDHex, token string) string {
-	sum := sha256.Sum256([]byte(appIDHex + "\x00" + token))
-	return hex.EncodeToString(sum[:])
+func mcpSessionContext(parent context.Context, expiresAt *time.Time) (context.Context, context.CancelFunc) {
+	if expiresAt == nil {
+		return context.WithCancel(parent)
+	}
+	// A token deadline closes the child runtime as well as future dispatches,
+	// so expired credentials cannot leave a discoverable MCP session behind.
+	return context.WithDeadline(parent, *expiresAt)
 }
 
 func extractBearerAuthToken(authHeader string) (string, bool) {
@@ -241,15 +237,15 @@ func sharedRuntimeEntrypointPath() string {
 	return ""
 }
 
-// prepareSessionFixture loads the SDK's scope and derives its own MCP
+// prepareSessionFixture loads the MCP app version's scope and derives its
 // fixture from it (mcp_session_fixture.go) -- split out of mcpSseHandler so
 // that handler's own error-handling stays a single branch instead of two.
-func prepareSessionFixture(ctx context.Context, appIDHex string) (*Fixture, error) {
+func prepareSessionFixture(ctx context.Context, appIDHex string, policy store.AppTokenPolicy) (*Fixture, error) {
 	selections, err := validateAndParseScope(ctx, globalObjectCache, appIDHex)
 	if err != nil {
-		return nil, fmt.Errorf("load sdk scope: %w", err)
+		return nil, fmt.Errorf("load app scope: %w", err)
 	}
-	fixture, err := buildSessionFixture(ctx, globalObjectCache, appIDHex, selections)
+	fixture, err := buildSessionFixture(ctx, globalObjectCache, appIDHex, selections, policy)
 	if err != nil {
 		return nil, fmt.Errorf("build fixture: %w", err)
 	}
@@ -556,7 +552,7 @@ func mcpMessageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ── Rate limit: tools/call messages per SDK-ID ─────────────────────────
+	// ── Rate limit: tools/call messages per app ID ─────────────────────────
 	if !allowMessage(w, sess.appID) {
 		return
 	}

@@ -8,10 +8,11 @@ package applifecycle
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,20 +20,71 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 
+	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/canonical"
 	"github.com/Usefused/engine/internal/shared/capability"
 )
 
+var ErrTokenPolicyInvalid = errors.New("invalid app token policy")
+
 // Service orchestrates app-family and app-version operations. It is the
 // single coordination point for SDK and MCP lifecycle; callers provide a
 // kind-specific adapter for package generation (SDK) or runtime setup (MCP).
 type Service struct {
-	store store.Store
+	store Repository
 }
 
-func New(s store.Store) *Service {
+// Repository is the lifecycle-owned persistence surface. Keeping it narrower
+// than store.Store prevents lifecycle decisions from becoming coupled to
+// unrelated workspace, analytics, or credential storage concerns.
+type Repository interface {
+	CreateOrGetAppFamily(context.Context, store.AppFamily) (*store.AppFamily, bool, error)
+	PublishAppVersion(context.Context, store.App) (*store.App, bool, error)
+	AssessAppCapabilityExpansion(context.Context, uuid.UUID, []string) (bool, int, error)
+	DeprecateApp(context.Context, uuid.UUID, string, *time.Time) error
+	UndeprecateApp(context.Context, uuid.UUID) error
+	GetApp(context.Context, uuid.UUID) (*store.App, error)
+	DeactivateAppVersion(context.Context, uuid.UUID, uuid.UUID) error
+	CreateAppToken(context.Context, uuid.UUID, string, string, store.AppTokenPolicy) (*store.AppTokenMetadata, error)
+}
+
+// ConfigPlanRepository is the atomic desired-state apply boundary. The SQL
+// implementation owns the transaction; the lifecycle service owns the
+// user-triggered operation and its safe telemetry.
+type ConfigPlanRepository interface {
+	ApplyAppConfigPlan(context.Context, store.ApplyAppConfigPlanParams) (*store.ApplyAppConfigPlanResult, error)
+}
+
+func New(s Repository) *Service {
 	return &Service{store: s}
+}
+
+// ApplyConfigPlan finalizes one SDK or MCP version through the shared app
+// lifecycle while preserving the repository's single PostgreSQL transaction.
+func (svc *Service) ApplyConfigPlan(ctx context.Context, repository ConfigPlanRepository, params store.ApplyAppConfigPlanParams) (*store.ApplyAppConfigPlanResult, error) {
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.applifecycle.apply_config_plan")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("app.id", params.Scope.AppID.String()),
+		attribute.String("app.kind", params.Scope.Kind.String()),
+		attribute.String("app.version", params.Scope.Version),
+	)
+	if !params.Scope.Kind.Valid() {
+		span.SetAttributes(attribute.String("outcome", "invalid"))
+		return nil, store.ErrAppKindInvalid
+	}
+	result, err := repository.ApplyAppConfigPlan(ctx, params)
+	if err != nil {
+		span.SetAttributes(attribute.String("outcome", "failed"))
+		return nil, err
+	}
+	span.SetAttributes(
+		attribute.String("outcome", "success"),
+		attribute.Bool("app.version_created", result.VersionCreated),
+		attribute.Bool("app.token_created", result.TokenCreated),
+	)
+	return result, nil
 }
 
 // --- Family and version creation ---
@@ -43,6 +95,11 @@ func New(s store.Store) *Service {
 func (svc *Service) CreateOrGetFamily(ctx context.Context, params CreateFamilyParams) (*store.AppFamily, bool, error) {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.applifecycle.create_family")
 	defer span.End()
+	span.SetAttributes(attribute.String("app.kind", params.Kind.String()))
+	if !params.Kind.Valid() {
+		span.SetAttributes(attribute.String("outcome", "invalid"))
+		return nil, false, store.ErrAppKindInvalid
+	}
 
 	family := store.AppFamily{
 		AppFamilyID:    uuid.New(),
@@ -56,22 +113,23 @@ func (svc *Service) CreateOrGetFamily(ctx context.Context, params CreateFamilyPa
 	}
 	result, created, err := svc.store.CreateOrGetAppFamily(ctx, family)
 	if err != nil {
+		span.SetAttributes(attribute.String("outcome", "failed"))
 		return nil, false, fmt.Errorf("create or get family: %w", err)
 	}
-	if err := validateFamilyMatch(*result, family); err != nil {
-		return nil, false, err
+	if !result.HasSameBinding(family) {
+		span.SetAttributes(attribute.String("outcome", "conflict"))
+		return nil, false, store.ErrAppOwnerMismatch
 	}
-	span.SetAttributes(attribute.Bool("family.created", created))
+	outcome := "existing"
+	if created {
+		outcome = "created"
+	}
+	span.SetAttributes(
+		attribute.String("app.family_id", result.AppFamilyID.String()),
+		attribute.String("outcome", outcome),
+		attribute.Bool("family.created", created),
+	)
 	return result, created, nil
-}
-
-func validateFamilyMatch(existing, requested store.AppFamily) error {
-	if existing.TargetLanguage != requested.TargetLanguage ||
-		existing.OwnerSubjectID != requested.OwnerSubjectID ||
-		existing.OwnerTeamID != requested.OwnerTeamID {
-		return fmt.Errorf("app family identity already exists with different language or owner")
-	}
-	return nil
 }
 
 // PublishVersion creates a new immutable app version within a family.
@@ -81,15 +139,19 @@ func (svc *Service) PublishVersion(ctx context.Context, params PublishVersionPar
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.applifecycle.publish_version")
 	defer span.End()
 	span.SetAttributes(
-		attribute.String("app.kind", params.Kind),
+		attribute.String("app.kind", params.Kind.String()),
 		attribute.String("app.version", params.Version),
 	)
+	if !params.Kind.Valid() {
+		span.SetAttributes(attribute.String("outcome", "invalid"))
+		return nil, store.ErrAppKindInvalid
+	}
 
-	capabilityKeys, err := capability.Keys(params.Selections)
+	capabilityKeys, capHash, err := capability.KeysAndHash(params.Selections)
 	if err != nil {
+		span.SetAttributes(attribute.String("outcome", "invalid"))
 		return nil, fmt.Errorf("publish version: decode capabilities: %w", err)
 	}
-	capHash := hashStrings(capabilityKeys)
 
 	app := store.App{
 		AppID:              params.AppID,
@@ -103,23 +165,27 @@ func (svc *Service) PublishVersion(ctx context.Context, params PublishVersionPar
 		ScopeSchemaVersion: params.ScopeSchemaVersion,
 		Selections:         params.Selections,
 		GeneratorVersion:   params.GeneratorVersion,
-		Status:             "active",
+		Status:             store.AppStatusActive,
 		CreatedBy:          params.CreatedBy,
+		ExpectedFamilyKind: params.Kind,
 	}
 
 	persisted, created, err := svc.store.PublishAppVersion(ctx, app)
 	if err != nil {
 		if errors.Is(err, store.ErrAppVersionImmutable) {
 			span.SetAttributes(attribute.String("outcome", "version_immutable"))
+		} else {
+			span.SetAttributes(attribute.String("outcome", "failed"))
 		}
 		return nil, err
 	}
 	if !created {
-		span.SetAttributes(attribute.Bool("app.noop", true))
+		span.SetAttributes(attribute.String("outcome", "noop"), attribute.Bool("app.noop", true))
 		return &PublishVersionResult{App: *persisted, NoOp: true}, nil
 	}
 
 	span.SetAttributes(
+		attribute.String("outcome", "created"),
 		attribute.Bool("app.created", true),
 		attribute.String("app.id", app.AppID.String()),
 	)
@@ -154,10 +220,13 @@ func (svc *Service) CapabilityExpansion(ctx context.Context, appFamilyID uuid.UU
 func (svc *Service) Deprecate(ctx context.Context, appID uuid.UUID, message string, plannedDeactivationAt *time.Time) error {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.applifecycle.deprecate")
 	defer span.End()
+	span.SetAttributes(attribute.String("app.id", appID.String()))
 
 	if err := svc.store.DeprecateApp(ctx, appID, message, plannedDeactivationAt); err != nil {
+		span.SetAttributes(attribute.String("outcome", "failed"))
 		return fmt.Errorf("deprecate: %w", err)
 	}
+	span.SetAttributes(attribute.String("outcome", "deprecated"))
 	return nil
 }
 
@@ -165,10 +234,13 @@ func (svc *Service) Deprecate(ctx context.Context, appID uuid.UUID, message stri
 func (svc *Service) Undeprecate(ctx context.Context, appID uuid.UUID) error {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.applifecycle.undeprecate")
 	defer span.End()
+	span.SetAttributes(attribute.String("app.id", appID.String()))
 
 	if err := svc.store.UndeprecateApp(ctx, appID); err != nil {
+		span.SetAttributes(attribute.String("outcome", "failed"))
 		return fmt.Errorf("undeprecate: %w", err)
 	}
+	span.SetAttributes(attribute.String("outcome", "active"))
 	return nil
 }
 
@@ -181,92 +253,138 @@ func (svc *Service) Undeprecate(ctx context.Context, appID uuid.UUID) error {
 func (svc *Service) Deactivate(ctx context.Context, appID uuid.UUID, actorID uuid.UUID) error {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.applifecycle.deactivate")
 	defer span.End()
+	span.SetAttributes(attribute.String("app.id", appID.String()))
 
 	app, err := svc.store.GetApp(ctx, appID)
 	if err != nil {
+		span.SetAttributes(attribute.String("outcome", "failed"))
 		return fmt.Errorf("get app for deactivation: %w", err)
 	}
 	if err := svc.store.DeactivateAppVersion(ctx, appID, actorID); err != nil {
+		span.SetAttributes(attribute.String("outcome", "failed"))
 		return fmt.Errorf("deactivate app: %w", err)
 	}
 
 	span.SetAttributes(
 		attribute.String("app.family_id", app.AppFamilyID.String()),
 		attribute.String("app.version", app.Version),
+		attribute.String("outcome", "deactivated"),
 	)
 	return nil
 }
 
-// --- Authorization ---
-
-// HashToken produces the SHA-256 hex digest of a plaintext token.
-// The plaintext is returned to the caller exactly once; only the hash is
-// stored and compared during authorization.
-func HashToken(token string) string {
-	hash := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(hash[:])
-}
-
-// AuthorizeCall is the one-query authorization for an SDK/MCP runtime call.
-// It verifies the token hash against the app's family, loads the full
-// AuthProjection, and returns it for use by the execution boundary.
-//
-// A deactivated app returns ErrAppNotFound (stable denial). A deprecated
-// app returns the projection with AppStatus "deprecated" so the boundary
-// can surface a warning.
-func (svc *Service) AuthorizeCall(ctx context.Context, appID uuid.UUID, tokenHash string) (*store.AuthProjection, error) {
-	ctx, span := otel.Tracer("engine").Start(ctx, "engine.applifecycle.authorize")
-	defer span.End()
-
-	proj, err := svc.store.AuthorizeApp(ctx, appID, tokenHash)
-	if err != nil {
-		span.SetAttributes(attribute.String("outcome", "denied"))
-		return nil, err
-	}
-	return proj, nil
-}
-
 // --- Token management ---
+
+// NewExecutionToken returns one cryptographically random family-scoped token
+// and the hash that may be persisted. SDK and MCP use the same token shape
+// because the family, not the runtime adapter, is the authorization boundary.
+func NewExecutionToken() (plaintext, tokenHash string, err error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", "", err
+	}
+	plaintext = "fused-app-" + base64.RawURLEncoding.EncodeToString(raw)
+	return plaintext, auth.HashToken(plaintext), nil
+}
 
 // GenerateToken creates a new family-scoped token. It returns the plaintext
 // exactly once; the caller is responsible for delivering it to the user.
-func (svc *Service) GenerateToken(ctx context.Context, appFamilyID uuid.UUID, name string) (plaintext string, token *store.AppToken, err error) {
+func (svc *Service) GenerateToken(ctx context.Context, params GenerateTokenParams) (plaintext string, token *store.AppTokenMetadata, err error) {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.applifecycle.generate_token")
 	defer span.End()
+	span.SetAttributes(attribute.String("app.family_id", params.AppFamilyID.String()))
 
-	plaintext = "fused-app-" + uuid.NewString()
-	tokenHash := HashToken(plaintext)
-
-	tok, err := svc.store.CreateAppToken(ctx, appFamilyID, tokenHash, name)
+	policy, err := resolveTokenPolicy(params.Allow, params.ExpiresIn, time.Now())
 	if err != nil {
+		span.SetAttributes(attribute.String("outcome", "invalid"))
+		return "", nil, err
+	}
+	span.SetAttributes(
+		attribute.Bool("app.token.allow_all", policy.AllowAll),
+		attribute.Bool("app.token.expiry_present", policy.ExpiresAt != nil),
+	)
+
+	plaintext, tokenHash, err := NewExecutionToken()
+	if err != nil {
+		span.SetAttributes(attribute.String("outcome", "failed"))
+		return "", nil, fmt.Errorf("generate app token: %w", err)
+	}
+
+	tok, err := svc.store.CreateAppToken(ctx, params.AppFamilyID, tokenHash, params.Name, policy)
+	if err != nil {
+		span.SetAttributes(attribute.String("outcome", "failed"))
 		return "", nil, fmt.Errorf("create app token: %w", err)
 	}
 
 	span.SetAttributes(
-		attribute.String("app.family_id", appFamilyID.String()),
-		attribute.String("token.name", name),
+		attribute.String("outcome", "created"),
 	)
 	return plaintext, tok, nil
 }
 
+// FullAccessTokenPolicy is the apply-time default. Keeping it in the lifecycle
+// domain prevents SDK and MCP adapters from inventing different token defaults.
+func FullAccessTokenPolicy() store.AppTokenPolicy {
+	return store.AppTokenPolicy{AllowAll: true, AllowedOperations: []string{}}
+}
+
+func resolveTokenPolicy(allow []string, expiresIn *time.Duration, now time.Time) (store.AppTokenPolicy, error) {
+	allowAll, operations, err := normalizeTokenAllow(allow)
+	if err != nil {
+		return store.AppTokenPolicy{}, err
+	}
+	policy := store.AppTokenPolicy{AllowAll: allowAll, AllowedOperations: operations}
+	if expiresIn == nil {
+		return policy, nil
+	}
+	if *expiresIn <= 0 {
+		return store.AppTokenPolicy{}, fmt.Errorf("%w: expires_in must be positive", ErrTokenPolicyInvalid)
+	}
+	expiresAt := now.Add(*expiresIn).UTC()
+	if !expiresAt.After(now) {
+		return store.AppTokenPolicy{}, fmt.Errorf("%w: expires_in is out of range", ErrTokenPolicyInvalid)
+	}
+	policy.ExpiresAt = &expiresAt
+	return policy, nil
+}
+
+func normalizeTokenAllow(allow []string) (bool, []string, error) {
+	if allow == nil {
+		return true, []string{}, nil
+	}
+	if len(allow) == 0 {
+		return false, nil, fmt.Errorf("%w: allow must contain at least one operation or *", ErrTokenPolicyInvalid)
+	}
+	unique := make(map[string]struct{}, len(allow))
+	for _, raw := range allow {
+		operation := strings.TrimSpace(raw)
+		if operation == "" {
+			return false, nil, fmt.Errorf("%w: allow entries must not be empty", ErrTokenPolicyInvalid)
+		}
+		unique[operation] = struct{}{}
+	}
+	if _, wildcard := unique["*"]; wildcard {
+		if len(unique) != 1 {
+			return false, nil, fmt.Errorf("%w: * must be the only allow entry", ErrTokenPolicyInvalid)
+		}
+		return true, []string{}, nil
+	}
+	operations := make([]string, 0, len(unique))
+	for operation := range unique {
+		operations = append(operations, operation)
+	}
+	sort.Strings(operations)
+	return false, operations, nil
+}
+
 // --- Helpers ---
-
-func hashBytes(data []byte) string {
-	hash := sha256.Sum256(data)
-	return hex.EncodeToString(hash[:])
-}
-
-func hashStrings(values []string) string {
-	data := []byte(strings.Join(values, "\n"))
-	return hashBytes(data)
-}
 
 // --- Request/response types ---
 
 // CreateFamilyParams contains the data needed to create or look up an app family.
 type CreateFamilyParams struct {
 	AccountID      uuid.UUID
-	Kind           string
+	Kind           store.AppKind
 	CanonicalName  string
 	DisplayName    string
 	TargetLanguage string
@@ -274,12 +392,21 @@ type CreateFamilyParams struct {
 	OwnerTeamID    uuid.UUID
 }
 
+// GenerateTokenParams is adapter-neutral. MCP exposes scope/expiry controls;
+// SDK callers currently use the default policy through the same service.
+type GenerateTokenParams struct {
+	AppFamilyID uuid.UUID
+	Name        string
+	Allow       []string
+	ExpiresIn   *time.Duration
+}
+
 // PublishVersionParams contains the immutable version data.
 type PublishVersionParams struct {
 	AppFamilyID        uuid.UUID
 	AccountID          uuid.UUID
 	AppID              uuid.UUID
-	Kind               string
+	Kind               store.AppKind
 	Version            string
 	ConfigKey          string
 	SourceHash         string

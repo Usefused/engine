@@ -58,9 +58,9 @@ func TestControlRESTPolicyManifestCoversNativeRoutes(t *testing.T) {
 	err := chi.Walk(router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
 		path := sampleControlRoutePath(route)
 		request := requestWithActor(t, method, path, actor)
-		if route == "/workspace/sdk-tokens" {
+		if route == "/workspace/app-tokens" {
 			query := request.URL.Query()
-			query.Set("artifact_id", uuid.NewString())
+			query.Set("app_family_id", uuid.NewString())
 			request.URL.RawQuery = query.Encode()
 		}
 		if classifyEngineRequest(request) == requestClassRuntimeExcluded {

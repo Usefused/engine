@@ -22,6 +22,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/engine/webhookid"
+	"github.com/Usefused/engine/internal/engine/workspaceplan"
 	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
@@ -374,28 +375,28 @@ type workspaceManagedService struct {
 }
 
 type workspacePlanAction struct {
-	ID                 string   `json:"id"`
-	Type               string   `json:"type"`
-	ServiceID          string   `json:"service_id"`
-	ServiceName        string   `json:"service_name,omitempty"`
-	Version            string   `json:"version,omitempty"`
-	ServiceVersionID   string   `json:"service_version_id,omitempty"`
-	FromVersion        string   `json:"from_version,omitempty"`
-	ToVersion          string   `json:"to_version,omitempty"`
-	Decision           string   `json:"decision,omitempty"`
-	RequiresDecision   bool     `json:"requires_decision,omitempty"`
-	ImpactedSDKConfigs []string `json:"impacted_sdk_configs,omitempty"`
-	Recommendation     string   `json:"recommendation,omitempty"`
-	SuggestedCommand   string   `json:"suggested_command,omitempty"`
-	EffectiveAt        string   `json:"effective_at,omitempty"`
-	Reason             string   `json:"reason,omitempty"`
-	Public             *bool    `json:"public,omitempty"`
-	AuthType           string   `json:"auth_type,omitempty"`
-	ProfileRevision    int      `json:"profile_revision,omitempty"`
-	ProfileProvenance  string   `json:"profile_provenance,omitempty"`
-	TargetLocation     string   `json:"target_location,omitempty"`
-	TargetName         string   `json:"target_name,omitempty"`
-	BindingSource      string   `json:"binding_source,omitempty"`
+	ID                 string                   `json:"id"`
+	Type               workspaceplan.ActionType `json:"type"`
+	ServiceID          string                   `json:"service_id"`
+	ServiceName        string                   `json:"service_name,omitempty"`
+	Version            string                   `json:"version,omitempty"`
+	ServiceVersionID   string                   `json:"service_version_id,omitempty"`
+	FromVersion        string                   `json:"from_version,omitempty"`
+	ToVersion          string                   `json:"to_version,omitempty"`
+	Decision           string                   `json:"decision,omitempty"`
+	RequiresDecision   bool                     `json:"requires_decision,omitempty"`
+	ImpactedSDKConfigs []string                 `json:"impacted_sdk_configs,omitempty"`
+	Recommendation     string                   `json:"recommendation,omitempty"`
+	SuggestedCommand   string                   `json:"suggested_command,omitempty"`
+	EffectiveAt        string                   `json:"effective_at,omitempty"`
+	Reason             string                   `json:"reason,omitempty"`
+	Public             *bool                    `json:"public,omitempty"`
+	AuthType           string                   `json:"auth_type,omitempty"`
+	ProfileRevision    int                      `json:"profile_revision,omitempty"`
+	ProfileProvenance  string                   `json:"profile_provenance,omitempty"`
+	TargetLocation     string                   `json:"target_location,omitempty"`
+	TargetName         string                   `json:"target_name,omitempty"`
+	BindingSource      string                   `json:"binding_source,omitempty"`
 	// WillArchive is true when the service is owned by this workspace, meaning
 	// removal will also soft-delete it from the Registry (not just deactivate
 	// it locally). Surfaces this distinction in plan output so the user can see
@@ -805,9 +806,33 @@ func executeWorkspaceConfigApply(
 	// partial or unknown outcome. Keep the reservation until crash-recovery
 	// expiry unless the final database commit proves the apply completed.
 	leaseGuard.releasable = false
+	appliedWebhooks, err := applyWorkspaceConfigMutations(applyCtx, ctx, configStore, s, verifier, call, plan, currentState, desired, previousManaged, lease.ID)
+	if err != nil {
+		return nil, err
+	}
+	leaseGuard.releasable = true
+	return appliedWebhooks, nil
+}
+
+// applyWorkspaceConfigMutations keeps the externally visible mutation order
+// in one place. The order matters because Registry calls are not part of the
+// final Engine transaction and therefore cannot be rolled back with it.
+func applyWorkspaceConfigMutations(
+	applyCtx context.Context,
+	requestCtx context.Context,
+	configStore store.ConfigRepository,
+	s store.Store,
+	verifier ServiceVerifier,
+	call workspaceApplyCall,
+	plan *store.ConfigPlan,
+	currentState *store.ConfigState,
+	desired workspaceDesiredState,
+	previousManaged map[uuid.UUID]workspaceManagedService,
+	leaseID uuid.UUID,
+) ([]appliedWorkspaceWebhook, error) {
 	appliedWebhooks, err := applyWorkspaceConfig(applyCtx, s, verifier, call.apiKey, call.accountID, desired, previousManaged, call.authMats, call.profileMats, call.bucketSecretMats, call.masterKey)
 	if err != nil {
-		return nil, workspaceApplyError(ctx, err)
+		return nil, workspaceApplyError(requestCtx, err)
 	}
 	if err := applyWorkspaceRegistryActions(applyCtx, verifier, call, plan, currentState); err != nil {
 		return nil, err
@@ -818,10 +843,9 @@ func executeWorkspaceConfigApply(
 	if err := createWorkspaceRemovalNotifications(applyCtx, configStore, call, plan); err != nil {
 		return nil, err
 	}
-	if err := persistWorkspaceConfigApply(applyCtx, configStore, call, plan, desired, previousManaged, lease.ID); err != nil {
+	if err := persistWorkspaceConfigApply(applyCtx, configStore, call, plan, desired, previousManaged, leaseID); err != nil {
 		return nil, err
 	}
-	leaseGuard.releasable = true
 	return appliedWebhooks, nil
 }
 
@@ -1009,7 +1033,7 @@ func approvedProfileDetachActions(rawActions json.RawMessage) (map[string]worksp
 	}
 	approved := make(map[string]workspacePlanAction, len(actions))
 	for _, action := range actions {
-		if action.Type == "detach_connection_profile" {
+		if action.Type == workspaceplan.ActionDetachConnectionProfile {
 			approved[action.ID] = action
 		}
 	}
@@ -1025,7 +1049,7 @@ func desiredProfileDetachActions(desired workspaceDesiredState) map[string]works
 	actions := make(map[string]workspacePlanAction)
 	for _, service := range sortedDesiredServices(desired) {
 		for _, action := range desiredConnectionProfileActions(service) {
-			if action.Type == "detach_connection_profile" {
+			if action.Type == workspaceplan.ActionDetachConnectionProfile {
 				actions[action.ID] = action
 			}
 		}
@@ -1976,29 +2000,8 @@ func resolveWorkspaceServiceVisibility(
 func workspaceServicesWithPublicIntent(desired workspaceDesiredState) []uuid.UUID {
 	seen := make(map[uuid.UUID]struct{})
 	for serviceID, svc := range desired.Services {
-		if svc.Public != nil {
+		if workspaceServiceHasPublicIntent(svc) {
 			seen[serviceID] = struct{}{}
-			continue
-		}
-		if svc.ExecutionPolicy != nil && svc.ExecutionPolicy.Public != nil && *svc.ExecutionPolicy.Public {
-			seen[serviceID] = struct{}{}
-			continue
-		}
-		for _, p := range svc.ConnectionProfiles {
-			if p.Public != nil && *p.Public {
-				seen[serviceID] = struct{}{}
-				break
-			}
-		}
-		for _, vp := range svc.VersionPolicies {
-			if vp.Public != nil {
-				seen[serviceID] = struct{}{}
-				break
-			}
-			if vp.ExecutionPolicy != nil && vp.ExecutionPolicy.Public != nil && *vp.ExecutionPolicy.Public {
-				seen[serviceID] = struct{}{}
-				break
-			}
 		}
 	}
 	out := make([]uuid.UUID, 0, len(seen))
@@ -2008,52 +2011,83 @@ func workspaceServicesWithPublicIntent(desired workspaceDesiredState) []uuid.UUI
 	return out
 }
 
+func workspaceServiceHasPublicIntent(svc workspaceDesiredService) bool {
+	if svc.Public != nil || publishesWorkspaceExecutionPolicy(svc.ExecutionPolicy) {
+		return true
+	}
+	return hasPublishedConnectionProfile(svc.ConnectionProfiles) || hasWorkspaceVersionPublicIntent(svc.VersionPolicies)
+}
+
+func publishesWorkspaceExecutionPolicy(policy *workspaceExecutionPolicy) bool {
+	return policy != nil && policy.Public != nil && *policy.Public
+}
+
+func hasPublishedConnectionProfile(profiles []workspaceDesiredConnectionProfile) bool {
+	for _, profile := range profiles {
+		if profile.Public != nil && *profile.Public {
+			return true
+		}
+	}
+	return false
+}
+
+func hasWorkspaceVersionPublicIntent(policies []workspaceDesiredVersionPolicy) bool {
+	for _, policy := range policies {
+		if policy.Public != nil || publishesWorkspaceExecutionPolicy(policy.ExecutionPolicy) {
+			return true
+		}
+	}
+	return false
+}
+
 func validateWorkspacePublicIntent(
 	desired workspaceDesiredState,
 	visibility map[uuid.UUID]sandbox.ServiceVisibility,
 ) (map[uuid.UUID]sandbox.ServiceVisibility, error) {
 	for serviceID, svc := range desired.Services {
-		vis := visibility[serviceID]
-
-		if svc.Public != nil {
-			// Service-level public toggle: only the owner may publish the
-			// service page to the Registry.
-			if !vis.IsOwner {
-				return nil, fmt.Errorf("service %s public can only be set for services owned by this workspace", serviceID)
-			}
-		}
-
-		if svc.ExecutionPolicy != nil && svc.ExecutionPolicy.Public != nil && *svc.ExecutionPolicy.Public {
-			// Publishing execution policy (rate_limit/retry) to the Registry
-			// changes the defaults inherited by all consumers, so it is
-			// strictly owner-only.
-			if !vis.IsOwner {
-				return nil, fmt.Errorf("service %s execution_policy.public can only be set for services owned by this workspace", serviceID)
-			}
-		}
-
-		for i, p := range svc.ConnectionProfiles {
-			if p.Public == nil || !*p.Public {
-				continue
-			}
-			// Publishing a connection profile to the Registry means any
-			// consumer of the service can adopt it as a baseline, so only
-			// the owning workspace may do this.
-			if !vis.IsOwner {
-				return nil, fmt.Errorf("service %s connection_profiles[%d].public can only be set for services owned by this workspace", serviceID, i)
-			}
-		}
-
-		for _, vp := range svc.VersionPolicies {
-			if vp.Public != nil && !vis.IsOwner {
-				return nil, fmt.Errorf("service %s version %s public can only be set for services owned by this workspace", serviceID, vp.Version)
-			}
-			if vp.ExecutionPolicy != nil && vp.ExecutionPolicy.Public != nil && *vp.ExecutionPolicy.Public && !vis.IsOwner {
-				return nil, fmt.Errorf("service %s version %s execution_policy.public can only be set for services owned by this workspace", serviceID, vp.Version)
-			}
+		if err := validateWorkspaceServicePublicIntent(serviceID, svc, visibility[serviceID]); err != nil {
+			return nil, err
 		}
 	}
 	return visibility, nil
+}
+
+func validateWorkspaceServicePublicIntent(serviceID uuid.UUID, svc workspaceDesiredService, visibility sandbox.ServiceVisibility) error {
+	// Any service-level visibility declaration changes Registry state, including
+	// an explicit private value, so ownership is required for both directions.
+	if svc.Public != nil && !visibility.IsOwner {
+		return fmt.Errorf("service %s public can only be set for services owned by this workspace", serviceID)
+	}
+	if publishesWorkspaceExecutionPolicy(svc.ExecutionPolicy) && !visibility.IsOwner {
+		return fmt.Errorf("service %s execution_policy.public can only be set for services owned by this workspace", serviceID)
+	}
+	if err := validateWorkspaceConnectionProfilePublicIntent(serviceID, svc.ConnectionProfiles, visibility.IsOwner); err != nil {
+		return err
+	}
+	return validateWorkspaceVersionPublicIntent(serviceID, svc.VersionPolicies, visibility.IsOwner)
+}
+
+func validateWorkspaceConnectionProfilePublicIntent(serviceID uuid.UUID, profiles []workspaceDesiredConnectionProfile, isOwner bool) error {
+	for index, profile := range profiles {
+		// A published profile becomes a reusable Registry baseline for every
+		// consumer, which is why consumers cannot opt into public=true here.
+		if profile.Public != nil && *profile.Public && !isOwner {
+			return fmt.Errorf("service %s connection_profiles[%d].public can only be set for services owned by this workspace", serviceID, index)
+		}
+	}
+	return nil
+}
+
+func validateWorkspaceVersionPublicIntent(serviceID uuid.UUID, policies []workspaceDesiredVersionPolicy, isOwner bool) error {
+	for _, policy := range policies {
+		if policy.Public != nil && !isOwner {
+			return fmt.Errorf("service %s version %s public can only be set for services owned by this workspace", serviceID, policy.Version)
+		}
+		if publishesWorkspaceExecutionPolicy(policy.ExecutionPolicy) && !isOwner {
+			return fmt.Errorf("service %s version %s execution_policy.public can only be set for services owned by this workspace", serviceID, policy.Version)
+		}
+	}
+	return nil
 }
 
 func buildWorkspacePlanSummary(
@@ -2165,9 +2199,9 @@ func workspaceExecutionPolicyCandidates(desired workspaceDesiredState) []workspa
 	for serviceID, service := range desired.Services {
 		if service.ExecutionPolicy != nil {
 			policy := workspaceExecutionPolicyOverride(serviceID, nil, service.ExecutionPolicy)
-			actionType := "set_local_execution_policy"
+			actionType := workspaceplan.ActionSetLocalExecutionPolicy
 			if service.ExecutionPolicy.Reset {
-				actionType = "reset_local_execution_policy"
+				actionType = workspaceplan.ActionResetLocalExecutionPolicy
 			}
 			candidates = append(candidates, workspaceExecutionPolicyCandidate{Ref: store.WorkspaceExecutionPolicyRef{ServiceID: serviceID}, ActionID: workspaceActionID(actionType, serviceID), Expected: policy, Reset: service.ExecutionPolicy.Reset})
 		}
@@ -2177,9 +2211,9 @@ func workspaceExecutionPolicyCandidates(desired workspaceDesiredState) []workspa
 			}
 			versionID := version.VersionID
 			policy := workspaceExecutionPolicyOverride(serviceID, &versionID, version.ExecutionPolicy)
-			actionType := "set_local_service_version_execution_policy"
+			actionType := workspaceplan.ActionSetLocalServiceVersionExecutionPolicy
 			if version.ExecutionPolicy.Reset {
-				actionType = "reset_local_service_version_execution_policy"
+				actionType = workspaceplan.ActionResetLocalServiceVersionExecutionPolicy
 			}
 			candidates = append(candidates, workspaceExecutionPolicyCandidate{Ref: store.WorkspaceExecutionPolicyRef{ServiceID: serviceID, ServiceVersionID: versionID}, ActionID: workspaceActionID(actionType, serviceID, version.Version), Expected: policy, Reset: version.ExecutionPolicy.Reset})
 		}
@@ -2233,7 +2267,7 @@ func automaticWorkspaceProfileCandidates(desired workspaceDesiredState) []automa
 			}
 			candidates = append(candidates, automaticWorkspaceProfileCandidate{
 				Ref:      store.WorkspaceProfileRef{ServiceID: svc.ServiceID, ServiceVersionID: intent.VersionID, AuthType: intent.AuthType},
-				AttachID: workspaceActionID("attach_connection_profile", svc.ServiceID, intent.Version), ServiceID: svc.ServiceID,
+				AttachID: workspaceActionID(workspaceplan.ActionAttachConnectionProfile, svc.ServiceID, intent.Version), ServiceID: svc.ServiceID,
 				Version: intent.Version, BindingCount: len(intent.Resolved.Config.Bindings),
 			})
 		}
@@ -2261,7 +2295,7 @@ func preservedAutomaticProfileActionIDs(candidates []automaticWorkspaceProfileCa
 		}
 		ids[candidate.AttachID] = struct{}{}
 		for index := 0; index < candidate.BindingCount; index++ {
-			ids[workspaceActionID("create_bucket_binding", candidate.ServiceID, candidate.Version, fmt.Sprint(index))] = struct{}{}
+			ids[workspaceActionID(workspaceplan.ActionCreateBucketBinding, candidate.ServiceID, candidate.Version, fmt.Sprint(index))] = struct{}{}
 		}
 	}
 	return ids
@@ -2418,12 +2452,12 @@ func desiredWorkspaceActions(desired workspaceDesiredState, current map[uuid.UUI
 	for serviceID, svc := range desired.Services {
 		currentSvc, exists := current[serviceID]
 		if !exists {
-			actions = append(actions, workspacePlanAction{ID: workspaceActionID("add_service", serviceID), Type: "add_service", ServiceID: serviceID.String(), ServiceName: svc.ServiceName})
+			actions = append(actions, workspacePlanAction{ID: workspaceActionID(workspaceplan.ActionAddService, serviceID), Type: workspaceplan.ActionAddService, ServiceID: serviceID.String(), ServiceName: svc.ServiceName})
 		}
 		for _, version := range svc.Versions {
 			if !currentSvc.Versions[version] {
 				actions = append(actions, workspacePlanAction{
-					ID: workspaceActionID("enable_service_version", serviceID, version), Type: "enable_service_version",
+					ID: workspaceActionID(workspaceplan.ActionEnableServiceVersion, serviceID, version), Type: workspaceplan.ActionEnableServiceVersion,
 					ServiceID: serviceID.String(), Version: version, ServiceVersionID: svc.VersionIDs[version].String(),
 				})
 			}
@@ -2446,7 +2480,7 @@ func desiredConnectionProfileActions(svc workspaceDesiredService) []workspacePla
 	for _, intent := range svc.ConnectionProfiles {
 		if intent.Reset {
 			actions = append(actions, workspacePlanAction{
-				ID: workspaceActionID("detach_connection_profile", svc.ServiceID, intent.Version), Type: "detach_connection_profile",
+				ID: workspaceActionID(workspaceplan.ActionDetachConnectionProfile, svc.ServiceID, intent.Version), Type: workspaceplan.ActionDetachConnectionProfile,
 				ServiceID: svc.ServiceID.String(), ServiceName: svc.ServiceName, Version: intent.Version,
 				ServiceVersionID: intent.VersionID.String(), AuthType: intent.AuthType,
 			})
@@ -2463,15 +2497,15 @@ func desiredConnectionProfileActions(svc workspaceDesiredService) []workspacePla
 			profile = &resolvedProfile
 		}
 		actions = append(actions, workspacePlanAction{
-			ID:   workspaceActionID("attach_connection_profile", svc.ServiceID, intent.Version),
-			Type: "attach_connection_profile", ServiceID: svc.ServiceID.String(), ServiceName: svc.ServiceName,
+			ID:   workspaceActionID(workspaceplan.ActionAttachConnectionProfile, svc.ServiceID, intent.Version),
+			Type: workspaceplan.ActionAttachConnectionProfile, ServiceID: svc.ServiceID.String(), ServiceName: svc.ServiceName,
 			Version: intent.Version, ServiceVersionID: intent.VersionID.String(),
 			AuthType: intent.AuthType, ProfileRevision: revision, ProfileProvenance: provenance,
 		})
 		for index, binding := range profile.Bindings {
 			actions = append(actions, workspacePlanAction{
-				ID:   workspaceActionID("create_bucket_binding", svc.ServiceID, intent.Version, fmt.Sprint(index)),
-				Type: "create_bucket_binding", ServiceID: svc.ServiceID.String(), ServiceName: svc.ServiceName,
+				ID:   workspaceActionID(workspaceplan.ActionCreateBucketBinding, svc.ServiceID, intent.Version, fmt.Sprint(index)),
+				Type: workspaceplan.ActionCreateBucketBinding, ServiceID: svc.ServiceID.String(), ServiceName: svc.ServiceName,
 				Version: intent.Version, ServiceVersionID: intent.VersionID.String(),
 				TargetLocation: binding.Location, TargetName: binding.Name, BindingSource: safeBindingPlanSource(binding.Value),
 			})
@@ -2520,11 +2554,11 @@ func desiredWorkspaceVisibilityActions(
 	return actions
 }
 
-func workspaceVisibilityActionType(isPublic bool) string {
+func workspaceVisibilityActionType(isPublic bool) workspaceplan.ActionType {
 	if isPublic {
-		return "set_service_public"
+		return workspaceplan.ActionSetServicePublic
 	}
-	return "set_service_private"
+	return workspaceplan.ActionSetServicePrivate
 }
 
 // desiredVersionVisibilityActions compares version declarations with the
@@ -2554,11 +2588,11 @@ func desiredVersionVisibilityActions(desired workspaceDesiredState) []workspaceP
 	return actions
 }
 
-func workspaceVersionVisibilityActionType(isPublic bool) string {
+func workspaceVersionVisibilityActionType(isPublic bool) workspaceplan.ActionType {
 	if isPublic {
-		return "set_service_version_public"
+		return workspaceplan.ActionSetServiceVersionPublic
 	}
-	return "set_service_version_private"
+	return workspaceplan.ActionSetServiceVersionPrivate
 }
 
 // desiredExecutionPolicyPublishActions emits a
@@ -2574,8 +2608,8 @@ func desiredExecutionPolicyPublishActions(desired workspaceDesiredState) []works
 			continue
 		}
 		actions = append(actions, workspacePlanAction{
-			ID:          workspaceActionID("publish_service_execution_policy", serviceID),
-			Type:        "publish_service_execution_policy",
+			ID:          workspaceActionID(workspaceplan.ActionPublishServiceExecutionPolicy, serviceID),
+			Type:        workspaceplan.ActionPublishServiceExecutionPolicy,
 			ServiceID:   serviceID.String(),
 			ServiceName: svc.ServiceName,
 			Public:      ep.Public,
@@ -2597,8 +2631,8 @@ func desiredVersionExecutionPolicyPublishActions(desired workspaceDesiredState) 
 				continue
 			}
 			actions = append(actions, workspacePlanAction{
-				ID:               workspaceActionID("publish_service_version_execution_policy", serviceID, vp.Version),
-				Type:             "publish_service_version_execution_policy",
+				ID:               workspaceActionID(workspaceplan.ActionPublishServiceVersionExecutionPolicy, serviceID, vp.Version),
+				Type:             workspaceplan.ActionPublishServiceVersionExecutionPolicy,
 				ServiceID:        serviceID.String(),
 				ServiceName:      svc.ServiceName,
 				Version:          vp.Version,
@@ -2628,9 +2662,9 @@ func desiredExecutionPolicyLocalActions(desired workspaceDesiredState) []workspa
 		if ep == nil {
 			continue
 		}
-		actionType := "set_local_execution_policy"
+		actionType := workspaceplan.ActionSetLocalExecutionPolicy
 		if ep.Reset {
-			actionType = "reset_local_execution_policy"
+			actionType = workspaceplan.ActionResetLocalExecutionPolicy
 		}
 		actions = append(actions, workspacePlanAction{
 			ID:          workspaceActionID(actionType, serviceID),
@@ -2653,9 +2687,9 @@ func desiredVersionExecutionPolicyLocalActions(desired workspaceDesiredState) []
 			if ep == nil {
 				continue
 			}
-			actionType := "set_local_service_version_execution_policy"
+			actionType := workspaceplan.ActionSetLocalServiceVersionExecutionPolicy
 			if ep.Reset {
-				actionType = "reset_local_service_version_execution_policy"
+				actionType = workspaceplan.ActionResetLocalServiceVersionExecutionPolicy
 			}
 			actions = append(actions, workspacePlanAction{
 				ID:               workspaceActionID(actionType, serviceID, vp.Version),
@@ -2682,8 +2716,8 @@ func desiredConnectionProfilePublishActions(desired workspaceDesiredState) []wor
 				continue
 			}
 			actions = append(actions, workspacePlanAction{
-				ID:               workspaceActionID("publish_connection_profile", serviceID, intent.Version, intent.AuthType),
-				Type:             "publish_connection_profile",
+				ID:               workspaceActionID(workspaceplan.ActionPublishConnectionProfile, serviceID, intent.Version, intent.AuthType),
+				Type:             workspaceplan.ActionPublishConnectionProfile,
 				ServiceID:        serviceID.String(),
 				ServiceName:      svc.ServiceName,
 				Version:          intent.Version,
@@ -2745,8 +2779,8 @@ func managedWorkspaceRemovalActions(
 				continue
 			}
 			action := workspacePlanAction{
-				ID:        workspaceActionID("remove_service", serviceID),
-				Type:      "remove_service",
+				ID:        workspaceActionID(workspaceplan.ActionRemoveService, serviceID),
+				Type:      workspaceplan.ActionRemoveService,
 				ServiceID: serviceID.String(),
 				// WillArchive tells the user that this Engine owns the service, so
 				// confirming the apply will also soft-delete it from the Registry
@@ -2768,8 +2802,8 @@ func managedWorkspaceRemovalActions(
 					continue
 				}
 				action := workspacePlanAction{
-					ID:        workspaceActionID("disable_service_version", serviceID, version),
-					Type:      "disable_service_version",
+					ID:        workspaceActionID(workspaceplan.ActionDisableServiceVersion, serviceID, version),
+					Type:      workspaceplan.ActionDisableServiceVersion,
 					ServiceID: serviceID.String(),
 					Version:   version,
 				}
@@ -2802,8 +2836,8 @@ func versionDeprecationDirective(desired workspaceDesiredState, serviceID uuid.U
 
 func deprecateServiceAction(serviceID uuid.UUID, deprecation workspaceDeprecation, impactedSDKs []string, summary *workspacePlanSummary) workspacePlanAction {
 	action := workspacePlanAction{
-		ID:               workspaceActionID("deprecate_service", serviceID),
-		Type:             "deprecate_service",
+		ID:               workspaceActionID(workspaceplan.ActionDeprecateService, serviceID),
+		Type:             workspaceplan.ActionDeprecateService,
 		ServiceID:        serviceID.String(),
 		EffectiveAt:      deprecation.EffectiveAt,
 		Reason:           deprecation.Reason,
@@ -2826,8 +2860,8 @@ func deprecateServiceAction(serviceID uuid.UUID, deprecation workspaceDeprecatio
 
 func deprecateVersionAction(serviceID uuid.UUID, version string, deprecation workspaceDeprecation) workspacePlanAction {
 	return workspacePlanAction{
-		ID:               workspaceActionID("deprecate_version", serviceID, version),
-		Type:             "deprecate_version",
+		ID:               workspaceActionID(workspaceplan.ActionDeprecateVersion, serviceID, version),
+		Type:             workspaceplan.ActionDeprecateVersion,
 		ServiceID:        serviceID.String(),
 		Version:          version,
 		EffectiveAt:      deprecation.EffectiveAt,
@@ -4138,7 +4172,7 @@ func applyDeprecationActions(
 			continue
 		}
 		switch action.Type {
-		case "deprecate_version":
+		case workspaceplan.ActionDeprecateVersion:
 			if action.Version == "" {
 				continue
 			}
@@ -4258,7 +4292,7 @@ func planRemovedServiceIDs(plan *store.ConfigPlan) []uuid.UUID {
 	}
 	var ids []uuid.UUID
 	for _, action := range actions {
-		if action.Type != "remove_service" {
+		if action.Type != workspaceplan.ActionRemoveService {
 			continue
 		}
 		id, err := uuid.Parse(action.ServiceID)
@@ -4305,7 +4339,7 @@ func workspaceVisibilityActions(raw json.RawMessage) ([]workspacePlanAction, err
 	}
 	out := make([]workspacePlanAction, 0, len(actions))
 	for _, action := range actions {
-		if action.Type == "set_service_public" || action.Type == "set_service_private" {
+		if action.Type == workspaceplan.ActionSetServicePublic || action.Type == workspaceplan.ActionSetServicePrivate {
 			out = append(out, action)
 		}
 	}
@@ -4322,7 +4356,7 @@ func applyWorkspaceVisibilityAction(
 	if err != nil {
 		return err
 	}
-	isPublic := action.Type == "set_service_public"
+	isPublic := action.Type == workspaceplan.ActionSetServicePublic
 	if action.Public != nil {
 		isPublic = *action.Public
 	}
@@ -4376,7 +4410,7 @@ func workspaceVersionVisibilityActions(raw json.RawMessage) ([]workspacePlanActi
 	}
 	out := make([]workspacePlanAction, 0, len(actions))
 	for _, action := range actions {
-		if action.Type == "set_service_version_public" || action.Type == "set_service_version_private" {
+		if action.Type == workspaceplan.ActionSetServiceVersionPublic || action.Type == workspaceplan.ActionSetServiceVersionPrivate {
 			out = append(out, action)
 		}
 	}
@@ -4393,7 +4427,7 @@ func applyWorkspaceVersionVisibilityAction(
 	if err != nil {
 		return err
 	}
-	isPublic := action.Type == "set_service_version_public"
+	isPublic := action.Type == workspaceplan.ActionSetServiceVersionPublic
 	if action.Public != nil {
 		isPublic = *action.Public
 	}
@@ -4423,51 +4457,76 @@ func applyWorkspaceVersionExecutionPolicyPublishActions(
 	plan *store.ConfigPlan,
 	desired workspaceDesiredState,
 ) error {
-	var actions []workspacePlanAction
-	if len(plan.Actions) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(plan.Actions, &actions); err != nil {
+	publish, err := workspacePlanActionsByType(plan.Actions, workspaceplan.ActionPublishServiceVersionExecutionPolicy)
+	if err != nil || len(publish) == 0 {
 		return err
-	}
-	var publish []workspacePlanAction
-	for _, a := range actions {
-		if a.Type == "publish_service_version_execution_policy" {
-			publish = append(publish, a)
-		}
-	}
-	if len(publish) == 0 {
-		return nil
 	}
 	svu, ok := updater.(ServiceVisibilityUpdater)
 	if !ok {
 		return errors.New("workspace version execution policy publishing is unavailable")
 	}
 	for _, action := range publish {
-		serviceID, err := uuid.Parse(action.ServiceID)
-		if err != nil {
+		if err := applyWorkspaceVersionExecutionPolicyPublishAction(ctx, svu, call.apiKey, desired, action); err != nil {
 			return err
 		}
-		svc, ok := desired.Services[serviceID]
-		if !ok {
-			continue
+	}
+	return nil
+}
+
+func workspacePlanActionsByType(raw json.RawMessage, actionTypes ...workspaceplan.ActionType) ([]workspacePlanAction, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var actions []workspacePlanAction
+	if err := json.Unmarshal(raw, &actions); err != nil {
+		return nil, err
+	}
+	accepted := make(map[workspaceplan.ActionType]struct{}, len(actionTypes))
+	for _, actionType := range actionTypes {
+		accepted[actionType] = struct{}{}
+	}
+	selected := make([]workspacePlanAction, 0, len(actions))
+	for _, action := range actions {
+		if _, ok := accepted[action.Type]; ok {
+			selected = append(selected, action)
 		}
-		var policy *workspaceExecutionPolicy
-		for _, vp := range svc.VersionPolicies {
-			if vp.Version == action.Version {
-				policy = vp.ExecutionPolicy
-				break
-			}
+	}
+	return selected, nil
+}
+
+func applyWorkspaceVersionExecutionPolicyPublishAction(
+	ctx context.Context,
+	updater ServiceVisibilityUpdater,
+	apiKey string,
+	desired workspaceDesiredState,
+	action workspacePlanAction,
+) error {
+	serviceID, err := uuid.Parse(action.ServiceID)
+	if err != nil {
+		return err
+	}
+	svc, ok := desired.Services[serviceID]
+	if !ok {
+		return nil
+	}
+	policy := desiredVersionExecutionPolicy(svc, action.Version)
+	if policy == nil {
+		return nil
+	}
+	if err := updater.PublishServiceVersionExecutionPolicy(ctx, serviceID, action.Version, policy, apiKey); err != nil {
+		return fmt.Errorf("publish execution policy for service %s version %s: %w", serviceID, action.Version, err)
+	}
+	_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.version_execution_policy_published")
+	span.SetAttributes(attribute.String("service_id", serviceID.String()), attribute.String("version", action.Version))
+	span.End()
+	return nil
+}
+
+func desiredVersionExecutionPolicy(svc workspaceDesiredService, version string) *workspaceExecutionPolicy {
+	for _, policy := range svc.VersionPolicies {
+		if policy.Version == version {
+			return policy.ExecutionPolicy
 		}
-		if policy == nil {
-			continue
-		}
-		if err := svu.PublishServiceVersionExecutionPolicy(ctx, serviceID, action.Version, policy, call.apiKey); err != nil {
-			return fmt.Errorf("publish execution policy for service %s version %s: %w", serviceID, action.Version, err)
-		}
-		_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.version_execution_policy_published")
-		span.SetAttributes(attribute.String("service_id", serviceID.String()), attribute.String("version", action.Version))
-		span.End()
 	}
 	return nil
 }
@@ -4485,42 +4544,43 @@ func applyWorkspaceExecutionPolicyPublishActions(
 	plan *store.ConfigPlan,
 	desired workspaceDesiredState,
 ) error {
-	var actions []workspacePlanAction
-	if len(plan.Actions) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(plan.Actions, &actions); err != nil {
+	publish, err := workspacePlanActionsByType(plan.Actions, workspaceplan.ActionPublishServiceExecutionPolicy)
+	if err != nil || len(publish) == 0 {
 		return err
-	}
-	var publish []workspacePlanAction
-	for _, a := range actions {
-		if a.Type == "publish_service_execution_policy" {
-			publish = append(publish, a)
-		}
-	}
-	if len(publish) == 0 {
-		return nil
 	}
 	svu, ok := updater.(ServiceVisibilityUpdater)
 	if !ok {
 		return errors.New("workspace execution policy publishing is unavailable")
 	}
 	for _, action := range publish {
-		serviceID, err := uuid.Parse(action.ServiceID)
-		if err != nil {
+		if err := applyWorkspaceExecutionPolicyPublishAction(ctx, svu, call.apiKey, desired, action); err != nil {
 			return err
 		}
-		svc, ok := desired.Services[serviceID]
-		if !ok || svc.ExecutionPolicy == nil {
-			continue
-		}
-		if err := svu.PublishServiceExecutionPolicy(ctx, serviceID, svc.ExecutionPolicy, call.apiKey); err != nil {
-			return fmt.Errorf("publish execution policy for service %s: %w", serviceID, err)
-		}
-		_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.execution_policy_published")
-		span.SetAttributes(attribute.String("service_id", serviceID.String()))
-		span.End()
 	}
+	return nil
+}
+
+func applyWorkspaceExecutionPolicyPublishAction(
+	ctx context.Context,
+	updater ServiceVisibilityUpdater,
+	apiKey string,
+	desired workspaceDesiredState,
+	action workspacePlanAction,
+) error {
+	serviceID, err := uuid.Parse(action.ServiceID)
+	if err != nil {
+		return err
+	}
+	svc, ok := desired.Services[serviceID]
+	if !ok || svc.ExecutionPolicy == nil {
+		return nil
+	}
+	if err := updater.PublishServiceExecutionPolicy(ctx, serviceID, svc.ExecutionPolicy, apiKey); err != nil {
+		return fmt.Errorf("publish execution policy for service %s: %w", serviceID, err)
+	}
+	_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.execution_policy_published")
+	span.SetAttributes(attribute.String("service_id", serviceID.String()))
+	span.End()
 	return nil
 }
 
@@ -4552,48 +4612,55 @@ func applyWorkspaceExecutionPolicyLocalActions(
 	plan *store.ConfigPlan,
 	desired workspaceDesiredState,
 ) error {
-	var actions []workspacePlanAction
-	if len(plan.Actions) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(plan.Actions, &actions); err != nil {
+	local, err := workspacePlanActionsByType(plan.Actions, workspaceplan.ActionSetLocalExecutionPolicy, workspaceplan.ActionResetLocalExecutionPolicy)
+	if err != nil || len(local) == 0 {
 		return err
-	}
-	var local []workspacePlanAction
-	for _, a := range actions {
-		if a.Type == "set_local_execution_policy" || a.Type == "reset_local_execution_policy" {
-			local = append(local, a)
-		}
-	}
-	if len(local) == 0 {
-		return nil
 	}
 	overrideStore, ok := s.(executionPolicyOverrideStore)
 	if !ok {
 		return errors.New("workspace local execution policy is unavailable")
 	}
 	for _, action := range local {
-		serviceID, err := uuid.Parse(action.ServiceID)
-		if err != nil {
+		if err := applyWorkspaceExecutionPolicyLocalAction(ctx, overrideStore, desired, action); err != nil {
 			return err
 		}
-		if action.Type == "reset_local_execution_policy" {
-			if err := overrideStore.ResetWorkspaceExecutionPolicyOverride(ctx, serviceID, nil); err != nil {
-				return fmt.Errorf("reset local execution policy for service %s: %w", serviceID, err)
-			}
-			continue
+	}
+	return nil
+}
+
+func applyWorkspaceExecutionPolicyLocalAction(
+	ctx context.Context,
+	overrideStore executionPolicyOverrideStore,
+	desired workspaceDesiredState,
+	action workspacePlanAction,
+) error {
+	serviceID, err := uuid.Parse(action.ServiceID)
+	if err != nil {
+		return err
+	}
+	if action.Type == workspaceplan.ActionResetLocalExecutionPolicy {
+		return resetWorkspaceExecutionPolicy(ctx, overrideStore, serviceID, nil, action.Version)
+	}
+	svc, ok := desired.Services[serviceID]
+	if !ok || svc.ExecutionPolicy == nil {
+		return nil
+	}
+	override := workspaceExecutionPolicyOverride(serviceID, nil, svc.ExecutionPolicy)
+	if _, err := overrideStore.UpsertWorkspaceExecutionPolicyOverride(ctx, override); err != nil {
+		return fmt.Errorf("set local execution policy for service %s: %w", serviceID, err)
+	}
+	_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.local_execution_policy_set")
+	span.SetAttributes(attribute.String("service_id", serviceID.String()))
+	span.End()
+	return nil
+}
+
+func resetWorkspaceExecutionPolicy(ctx context.Context, overrideStore executionPolicyOverrideStore, serviceID uuid.UUID, versionID *uuid.UUID, version string) error {
+	if err := overrideStore.ResetWorkspaceExecutionPolicyOverride(ctx, serviceID, versionID); err != nil {
+		if versionID != nil {
+			return fmt.Errorf("reset local execution policy for service %s version %s: %w", serviceID, version, err)
 		}
-		svc, ok := desired.Services[serviceID]
-		if !ok || svc.ExecutionPolicy == nil {
-			continue
-		}
-		override := workspaceExecutionPolicyOverride(serviceID, nil, svc.ExecutionPolicy)
-		if _, err := overrideStore.UpsertWorkspaceExecutionPolicyOverride(ctx, override); err != nil {
-			return fmt.Errorf("set local execution policy for service %s: %w", serviceID, err)
-		}
-		_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.local_execution_policy_set")
-		span.SetAttributes(attribute.String("service_id", serviceID.String()))
-		span.End()
+		return fmt.Errorf("reset local execution policy for service %s: %w", serviceID, err)
 	}
 	return nil
 }
@@ -4606,63 +4673,54 @@ func applyWorkspaceVersionExecutionPolicyLocalActions(
 	plan *store.ConfigPlan,
 	desired workspaceDesiredState,
 ) error {
-	var actions []workspacePlanAction
-	if len(plan.Actions) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(plan.Actions, &actions); err != nil {
+	local, err := workspacePlanActionsByType(plan.Actions, workspaceplan.ActionSetLocalServiceVersionExecutionPolicy, workspaceplan.ActionResetLocalServiceVersionExecutionPolicy)
+	if err != nil || len(local) == 0 {
 		return err
-	}
-	var local []workspacePlanAction
-	for _, a := range actions {
-		if a.Type == "set_local_service_version_execution_policy" || a.Type == "reset_local_service_version_execution_policy" {
-			local = append(local, a)
-		}
-	}
-	if len(local) == 0 {
-		return nil
 	}
 	overrideStore, ok := s.(executionPolicyOverrideStore)
 	if !ok {
 		return errors.New("workspace local execution policy is unavailable")
 	}
 	for _, action := range local {
-		serviceID, err := uuid.Parse(action.ServiceID)
-		if err != nil {
+		if err := applyWorkspaceVersionExecutionPolicyLocalAction(ctx, overrideStore, desired, action); err != nil {
 			return err
 		}
-		versionID, err := uuid.Parse(action.ServiceVersionID)
-		if err != nil {
-			return err
-		}
-		if action.Type == "reset_local_service_version_execution_policy" {
-			if err := overrideStore.ResetWorkspaceExecutionPolicyOverride(ctx, serviceID, &versionID); err != nil {
-				return fmt.Errorf("reset local execution policy for service %s version %s: %w", serviceID, action.Version, err)
-			}
-			continue
-		}
-		svc, ok := desired.Services[serviceID]
-		if !ok {
-			continue
-		}
-		var policy *workspaceExecutionPolicy
-		for _, vp := range svc.VersionPolicies {
-			if vp.Version == action.Version {
-				policy = vp.ExecutionPolicy
-				break
-			}
-		}
-		if policy == nil {
-			continue
-		}
-		override := workspaceExecutionPolicyOverride(serviceID, &versionID, policy)
-		if _, err := overrideStore.UpsertWorkspaceExecutionPolicyOverride(ctx, override); err != nil {
-			return fmt.Errorf("set local execution policy for service %s version %s: %w", serviceID, action.Version, err)
-		}
-		_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.local_version_execution_policy_set")
-		span.SetAttributes(attribute.String("service_id", serviceID.String()), attribute.String("version", action.Version))
-		span.End()
 	}
+	return nil
+}
+
+func applyWorkspaceVersionExecutionPolicyLocalAction(
+	ctx context.Context,
+	overrideStore executionPolicyOverrideStore,
+	desired workspaceDesiredState,
+	action workspacePlanAction,
+) error {
+	serviceID, err := uuid.Parse(action.ServiceID)
+	if err != nil {
+		return err
+	}
+	versionID, err := uuid.Parse(action.ServiceVersionID)
+	if err != nil {
+		return err
+	}
+	if action.Type == workspaceplan.ActionResetLocalServiceVersionExecutionPolicy {
+		return resetWorkspaceExecutionPolicy(ctx, overrideStore, serviceID, &versionID, action.Version)
+	}
+	svc, ok := desired.Services[serviceID]
+	if !ok {
+		return nil
+	}
+	policy := desiredVersionExecutionPolicy(svc, action.Version)
+	if policy == nil {
+		return nil
+	}
+	override := workspaceExecutionPolicyOverride(serviceID, &versionID, policy)
+	if _, err := overrideStore.UpsertWorkspaceExecutionPolicyOverride(ctx, override); err != nil {
+		return fmt.Errorf("set local execution policy for service %s version %s: %w", serviceID, action.Version, err)
+	}
+	_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.local_version_execution_policy_set")
+	span.SetAttributes(attribute.String("service_id", serviceID.String()), attribute.String("version", action.Version))
+	span.End()
 	return nil
 }
 
@@ -4738,21 +4796,9 @@ func applyWorkspaceConnectionProfilePublishActions(
 	plan *store.ConfigPlan,
 	desired workspaceDesiredState,
 ) error {
-	var actions []workspacePlanAction
-	if len(plan.Actions) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(plan.Actions, &actions); err != nil {
+	publish, err := workspacePlanActionsByType(plan.Actions, workspaceplan.ActionPublishConnectionProfile)
+	if err != nil || len(publish) == 0 {
 		return err
-	}
-	var publish []workspacePlanAction
-	for _, a := range actions {
-		if a.Type == "publish_connection_profile" {
-			publish = append(publish, a)
-		}
-	}
-	if len(publish) == 0 {
-		return nil
 	}
 	publisher, ok := updater.(ConnectionProfilePublisher)
 	if !ok {
@@ -4763,46 +4809,80 @@ func applyWorkspaceConnectionProfilePublishActions(
 	// itself to succeed, so its absence must not block apply.
 	profileStore, _ := s.(store.WorkspaceProfileStore)
 	for _, action := range publish {
-		serviceID, err := uuid.Parse(action.ServiceID)
-		if err != nil {
+		if err := applyWorkspaceConnectionProfilePublishAction(ctx, publisher, profileStore, call.apiKey, desired, action); err != nil {
 			return err
 		}
-		svc, ok := desired.Services[serviceID]
-		if !ok {
-			continue
-		}
-		intent, ok := findDesiredConnectionProfileIntent(svc, action.Version, action.AuthType)
-		if !ok {
-			continue
-		}
-		if intent.Profile == nil {
-			return fmt.Errorf("publish connection profile for service %s version %s auth_type %s: public requires an explicit inline profile, not profile_id", serviceID, action.Version, action.AuthType)
-		}
-		versionID := intent.VersionID
-		if versionID == uuid.Nil {
-			versionID = svc.VersionIDs[action.Version]
-		}
-		if versionID == uuid.Nil {
-			return fmt.Errorf("publish connection profile for service %s version %s: unresolved service_version_id", serviceID, action.Version)
-		}
-		if _, err := publisher.PublishConnectionProfile(ctx, serviceID, versionID, svc.ServiceName, *intent.Profile, call.apiKey); err != nil {
-			return fmt.Errorf("publish connection profile for service %s version %s auth_type %s: %w", serviceID, action.Version, action.AuthType, err)
-		}
-		if profileStore != nil {
-			if err := profileStore.MarkWorkspaceProfilePublished(ctx, serviceID, versionID, action.AuthType); err != nil {
-				slog.ErrorContext(ctx, "WorkspaceConfigApplyHandler: mark connection profile published failed",
-					slog.Any("error", err), slog.String("service_id", serviceID.String()))
-			}
-		}
-		_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.connection_profile_published")
-		span.SetAttributes(
-			attribute.String("service_id", serviceID.String()),
-			attribute.String("version", action.Version),
-			attribute.String("auth_type", action.AuthType),
-		)
-		span.End()
 	}
 	return nil
+}
+
+type workspaceConnectionProfilePublishInput struct {
+	serviceID uuid.UUID
+	versionID uuid.UUID
+	name      string
+	profile   connectionprofile.Profile
+}
+
+func applyWorkspaceConnectionProfilePublishAction(
+	ctx context.Context,
+	publisher ConnectionProfilePublisher,
+	profileStore store.WorkspaceProfileStore,
+	apiKey string,
+	desired workspaceDesiredState,
+	action workspacePlanAction,
+) error {
+	input, found, err := resolveWorkspaceConnectionProfilePublishInput(desired, action)
+	if err != nil || !found {
+		return err
+	}
+	if _, err := publisher.PublishConnectionProfile(ctx, input.serviceID, input.versionID, input.name, input.profile, apiKey); err != nil {
+		return fmt.Errorf("publish connection profile for service %s version %s auth_type %s: %w", input.serviceID, action.Version, action.AuthType, err)
+	}
+	markWorkspaceConnectionProfilePublished(ctx, profileStore, input.serviceID, input.versionID, action.AuthType)
+	_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.connection_profile_published")
+	span.SetAttributes(
+		attribute.String("service_id", input.serviceID.String()),
+		attribute.String("version", action.Version),
+		attribute.String("auth_type", action.AuthType),
+	)
+	span.End()
+	return nil
+}
+
+func resolveWorkspaceConnectionProfilePublishInput(desired workspaceDesiredState, action workspacePlanAction) (workspaceConnectionProfilePublishInput, bool, error) {
+	serviceID, err := uuid.Parse(action.ServiceID)
+	if err != nil {
+		return workspaceConnectionProfilePublishInput{}, false, err
+	}
+	svc, ok := desired.Services[serviceID]
+	if !ok {
+		return workspaceConnectionProfilePublishInput{}, false, nil
+	}
+	intent, ok := findDesiredConnectionProfileIntent(svc, action.Version, action.AuthType)
+	if !ok {
+		return workspaceConnectionProfilePublishInput{}, false, nil
+	}
+	if intent.Profile == nil {
+		return workspaceConnectionProfilePublishInput{}, false, fmt.Errorf("publish connection profile for service %s version %s auth_type %s: public requires an explicit inline profile, not profile_id", serviceID, action.Version, action.AuthType)
+	}
+	versionID := intent.VersionID
+	if versionID == uuid.Nil {
+		versionID = svc.VersionIDs[action.Version]
+	}
+	if versionID == uuid.Nil {
+		return workspaceConnectionProfilePublishInput{}, false, fmt.Errorf("publish connection profile for service %s version %s: unresolved service_version_id", serviceID, action.Version)
+	}
+	return workspaceConnectionProfilePublishInput{serviceID: serviceID, versionID: versionID, name: svc.ServiceName, profile: *intent.Profile}, true, nil
+}
+
+func markWorkspaceConnectionProfilePublished(ctx context.Context, profileStore store.WorkspaceProfileStore, serviceID, versionID uuid.UUID, authType string) {
+	if profileStore == nil {
+		return
+	}
+	if err := profileStore.MarkWorkspaceProfilePublished(ctx, serviceID, versionID, authType); err != nil {
+		slog.ErrorContext(ctx, "WorkspaceConfigApplyHandler: mark connection profile published failed",
+			slog.Any("error", err), slog.String("service_id", serviceID.String()))
+	}
 }
 
 // findDesiredConnectionProfileIntent looks up the exact (version, auth_type)
@@ -4815,39 +4895,6 @@ func findDesiredConnectionProfileIntent(svc workspaceDesiredService, version, au
 		}
 	}
 	return workspaceDesiredConnectionProfile{}, false
-}
-
-func resolveWorkspaceDesiredVersionIDs(
-	ctx context.Context,
-	verifier ServiceVerifier,
-	apiKey string,
-	desired workspaceDesiredState,
-) (map[uuid.UUID]map[string]uuid.UUID, error) {
-	if verifier == nil {
-		return nil, errors.New("service version resolver is required")
-	}
-	refs := workspaceVersionRefs(desired)
-	revisions, err := verifier.FetchServiceVersionRevisions(ctx, refs, apiKey)
-	if err != nil {
-		return nil, fmt.Errorf("resolve workspace service versions: %w", err)
-	}
-	ids := workspaceVersionIDMap(revisions)
-	for _, ref := range refs {
-		if ids[ref.ServiceID][ref.Version] == uuid.Nil {
-			return nil, fmt.Errorf("service %s version %s has no exact service_version_id", ref.ServiceID, ref.Version)
-		}
-	}
-	return ids, nil
-}
-
-func workspaceVersionRefs(desired workspaceDesiredState) []sandbox.ServiceVersionRef {
-	refs := make([]sandbox.ServiceVersionRef, 0)
-	for _, svc := range sortedDesiredServices(desired) {
-		for _, version := range svc.Versions {
-			refs = append(refs, sandbox.ServiceVersionRef{ServiceID: svc.ServiceID, Version: version})
-		}
-	}
-	return refs
 }
 
 func workspaceVersionIDMap(revisions []sandbox.ServiceVersionRevision) map[uuid.UUID]map[string]uuid.UUID {
@@ -4962,7 +5009,7 @@ func validateWorkspaceRemovalDecisions(
 	blockedRemovals := blockedServiceRemovalActions(plan.Blockers)
 	for serviceID, managed := range previousManaged {
 		if desiredSvc, keep := desired.Services[serviceID]; !keep {
-			actionID := workspaceActionID("remove_service", serviceID)
+			actionID := workspaceActionID(workspaceplan.ActionRemoveService, serviceID)
 			if blockedRemovals[actionID] {
 				action := actions[actionID]
 				if action.Decision != "force_remove" {
@@ -4972,7 +5019,7 @@ func validateWorkspaceRemovalDecisions(
 		} else {
 			for _, version := range managed.Versions {
 				if !containsString(desiredSvc.Versions, version) {
-					actionID := workspaceActionID("disable_service_version", serviceID, version)
+					actionID := workspaceActionID(workspaceplan.ActionDisableServiceVersion, serviceID, version)
 					if blockedRemovals[actionID] {
 						action := actions[actionID]
 						if action.Decision != "force_remove" {
@@ -5061,7 +5108,7 @@ func workspaceNotificationActions(raw json.RawMessage) ([]workspacePlanAction, e
 	}
 	var actions []workspacePlanAction
 	for _, action := range actionMap {
-		if (action.Type == "remove_service" || action.Type == "disable_service_version") && action.Decision == "force_remove" && len(action.ImpactedSDKConfigs) > 0 {
+		if (action.Type == workspaceplan.ActionRemoveService || action.Type == workspaceplan.ActionDisableServiceVersion) && action.Decision == "force_remove" && len(action.ImpactedSDKConfigs) > 0 {
 			actions = append(actions, action)
 		}
 	}
@@ -5100,7 +5147,7 @@ func workspaceRemovalNotificationParams(
 	})
 	notifType := store.WorkspaceNotificationTypeServiceRemoved
 	msg := fmt.Sprintf("Workspace service %s was force removed while %d SDK configs still reference it.", serviceID, len(action.ImpactedSDKConfigs))
-	if action.Type == "disable_service_version" {
+	if action.Type == workspaceplan.ActionDisableServiceVersion {
 		notifType = store.WorkspaceNotificationTypeVersionRemoved
 		msg = fmt.Sprintf("Workspace service version %s@%s was force removed while %d SDK configs still reference it.", serviceID, action.Version, len(action.ImpactedSDKConfigs))
 	}
@@ -5140,6 +5187,9 @@ func parseWorkspacePlanActions(raw json.RawMessage) (map[string]workspacePlanAct
 	}
 	out := map[string]workspacePlanAction{}
 	for _, action := range actions {
+		if action.ID == "" || !action.Type.Valid() {
+			return nil, fmt.Errorf("invalid workspace plan action %q", action.Type)
+		}
 		out[action.ID] = action
 	}
 	return out, nil
@@ -5441,15 +5491,6 @@ func workspaceActionID(parts ...any) string {
 	return strings.Join(out, ":")
 }
 
-func uuidFromAny(value any) (uuid.UUID, bool) {
-	raw, ok := value.(string)
-	if !ok {
-		return uuid.Nil, false
-	}
-	serviceID, err := uuid.Parse(raw)
-	return serviceID, err == nil
-}
-
 type workspaceNotificationInboxItem struct {
 	ID                  string               `json:"id"`
 	Source              string               `json:"source"`
@@ -5507,44 +5548,64 @@ type workspaceNotificationInboxResponse struct {
 // panel/banners have no read/unread toggle, just the two-tier
 // acknowledge/dismiss model).
 func workspaceNotificationInbox(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, apiKey string, page, limit int, unreadOnly, readOnly bool) (workspaceNotificationInboxResponse, error) {
-	var notifications []store.WorkspaceNotification
-	var err error
-	paginated := limit > 0
-	if paginated {
-		if page < 1 {
-			page = 1
-		}
-		notifications, err = configStore.ListUnresolvedWorkspaceNotificationsPage(ctx, limit, (page-1)*limit, unreadOnly, readOnly)
-	} else {
-		notifications, err = configStore.ListWorkspaceNotifications(ctx, "")
-		notifications = unresolvedWorkspaceNotifications(notifications)
-	}
+	notifications, paginated, err := loadWorkspaceNotificationInbox(ctx, configStore, page, limit, unreadOnly, readOnly)
 	if err != nil {
 		return workspaceNotificationInboxResponse{}, fmt.Errorf("list workspace notifications: %w", err)
 	}
 
 	inbox := workspaceNotificationInboxResponse{Items: workspaceNotificationInboxItems(notifications)}
 	inbox.TotalCount, inbox.PendingCount = workspaceNotificationCounts(ctx, configStore, len(notifications))
-	if paginated {
-		if unreadOnly {
-			inbox.TotalCount = inbox.PendingCount
-		} else if readOnly {
-			inbox.TotalCount = inbox.TotalCount - inbox.PendingCount
-		}
-	}
-
+	adjustWorkspaceNotificationCounts(&inbox, paginated, unreadOnly, readOnly)
 	if paginated {
 		return inbox, nil
 	}
+	return enrichWorkspaceNotificationInbox(ctx, s, registryClient, apiKey, inbox), nil
+}
 
+func loadWorkspaceNotificationInbox(
+	ctx context.Context,
+	configStore store.ConfigRepository,
+	page, limit int,
+	unreadOnly, readOnly bool,
+) ([]store.WorkspaceNotification, bool, error) {
+	if limit <= 0 {
+		notifications, err := configStore.ListWorkspaceNotifications(ctx, "")
+		return unresolvedWorkspaceNotifications(notifications), false, err
+	}
+	if page < 1 {
+		page = 1
+	}
+	notifications, err := configStore.ListUnresolvedWorkspaceNotificationsPage(ctx, limit, (page-1)*limit, unreadOnly, readOnly)
+	return notifications, true, err
+}
+
+func adjustWorkspaceNotificationCounts(inbox *workspaceNotificationInboxResponse, paginated, unreadOnly, readOnly bool) {
+	if !paginated {
+		return
+	}
+	if unreadOnly {
+		inbox.TotalCount = inbox.PendingCount
+		return
+	}
+	if readOnly {
+		inbox.TotalCount -= inbox.PendingCount
+	}
+}
+
+func enrichWorkspaceNotificationInbox(
+	ctx context.Context,
+	s store.Store,
+	registryClient sandbox.RegistryClient,
+	apiKey string,
+	inbox workspaceNotificationInboxResponse,
+) workspaceNotificationInboxResponse {
 	if !entitlement.LiveEntitlement.Load().DriftMonitoringEnabled {
-		return inbox, nil
+		return inbox
 	}
-
 	services, err := s.ListWorkspaceServices(ctx, nil)
 	if err != nil {
 		inbox.Warnings = append(inbox.Warnings, "failed_to_list_workspace_services")
-		return inbox, nil
+		return inbox
 	}
 	snapshots, err := registryClient.FetchDriftSnapshotsForServices(ctx, workspaceServiceIDs(services), apiKey)
 	if err != nil {
@@ -5552,12 +5613,12 @@ func workspaceNotificationInbox(ctx context.Context, configStore store.ConfigRep
 		// return Engine-local notifications when that enrichment is unavailable.
 		slog.WarnContext(ctx, "failed to fetch drift snapshots for workspace", slog.Any("error", err))
 		inbox.Warnings = append(inbox.Warnings, "registry_notifications_unavailable")
-		return inbox, nil
+		return inbox
 	}
 	for _, snap := range snapshots {
 		inbox.Items = append(inbox.Items, registryDriftInboxItem(snap))
 	}
-	return inbox, nil
+	return inbox
 }
 
 // workspaceNotificationCounts resolves total_count/pending_count via the

@@ -57,8 +57,6 @@ func (s *EngineGRPCServer) Connect(ctx context.Context, req *enginev1.ConnectReq
 		}
 	}
 
-	// Inject the user's token into the context so RegistryClient can authenticate as the user
-	ctx = context.WithValue(ctx, "sdk-token", token)
 	if err := globalObjectCache.ConnectSDK(ctx, appID); err != nil {
 		return nil, status.Error(codes.FailedPrecondition, "SDK version is not available on this Engine; reapply its configuration")
 	}

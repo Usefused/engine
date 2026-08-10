@@ -156,13 +156,22 @@ func Validate(config *Config) error {
 	if config.Version != Version {
 		return invalid("pagination version must be 2")
 	}
-	if err := ValidateBodyPath(config.ItemsPath); err != nil {
+	if err := ValidateItemsPath(config.ItemsPath); err != nil {
 		return invalid("items_path: " + err.Error())
 	}
 	if err := validateLimits(EffectiveLimits(config.Limits)); err != nil {
 		return err
 	}
 	return validateStrategy(config)
+}
+
+// ValidateItemsPath accepts the document root because some provider list
+// operations return a JSON array without an enclosing response object.
+func ValidateItemsPath(path string) error {
+	if path == "$" {
+		return nil
+	}
+	return ValidateBodyPath(path)
 }
 
 func ValidateBodyPath(path string) error {

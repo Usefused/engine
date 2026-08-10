@@ -1,13 +1,41 @@
 package capability
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"sort"
+	"strconv"
 
 	"github.com/google/uuid"
 
 	"github.com/Usefused/engine/internal/shared/models"
 )
+
+// KeysAndHash returns the canonical, non-secret capability surface and its
+// stable digest. Every app publication path must use this function so
+// semantically identical selection documents cannot acquire different hashes
+// because of JSON formatting or input ordering.
+func KeysAndHash(raw []byte) ([]string, string, error) {
+	keys, err := Keys(raw)
+	if err != nil {
+		return nil, "", err
+	}
+	return keys, hashKeys(keys), nil
+}
+
+func hashKeys(keys []string) string {
+	encoded := make([]byte, 0)
+	for _, key := range keys {
+		// Length-prefixing makes the set encoding unambiguous even when provider
+		// operation names contain delimiters or control-like characters.
+		encoded = strconv.AppendInt(encoded, int64(len([]byte(key))), 10)
+		encoded = append(encoded, ':')
+		encoded = append(encoded, key...)
+	}
+	hash := sha256.Sum256(encoded)
+	return hex.EncodeToString(hash[:])
+}
 
 // Keys reduces an SDK/MCP selection document to its non-secret authorization
 // surface. Injection values are deliberately excluded because they may carry

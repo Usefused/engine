@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine/store"
@@ -95,6 +96,43 @@ func TestResolveRuntimeServerTemplateAppliesForcedBaseURLBeforeVariables(t *test
 	}
 	if err != nil || resolution.BaseURL != "https://acme.example.com" || resolution.Source != "connection_resource" {
 		t.Fatalf("resolution=%+v err=%v", resolution, err)
+	}
+}
+
+func TestResolveRuntimeServerTemplateRequiresAbsoluteProtocolRelativeOverride(t *testing.T) {
+	metadata := &fusedobject.ServiceMetadata{
+		Servers: fusedobject.Servers{{URL: "//your-domain.atlassian.net", IsDefault: true}},
+		ConnectConfig: &fusedobject.ServiceConnectConfig{ResourceDiscovery: &fusedobject.ResourceDiscoveryConfig{
+			AllowedHosts: []string{"api.atlassian.com"},
+		}},
+	}
+	resolution, err := resolveRuntimeEnvironment(metadata, "")
+	if err == nil {
+		resolution, err = resolveRuntimeServerTemplate(metadata, resolution, nil, nil)
+	}
+	if err == nil || !strings.Contains(err.Error(), "resolved server URL") {
+		t.Fatalf("resolution=%+v err=%v, want generic resolved URL failure", resolution, err)
+	}
+
+	binding := []store.BucketValue{{
+		Location: "base_url", SourceKind: "connection_resource", Mode: "force",
+		Value: "https://api.atlassian.com/ex/confluence/cloud-a",
+	}}
+	resolution, err = resolveRuntimeEnvironment(metadata, "")
+	if err == nil {
+		resolution, err = resolveRuntimeServerTemplate(metadata, resolution, nil, binding)
+	}
+	if err != nil || resolution.BaseURL != binding[0].Value || resolution.Source != "connection_resource" {
+		t.Fatalf("forced resolution=%+v err=%v", resolution, err)
+	}
+
+	override := &fusedobject.ServiceMetadata{BaseURL: "https://acme.atlassian.net"}
+	resolution, err = resolveRuntimeEnvironment(override, "")
+	if err == nil {
+		resolution, err = resolveRuntimeServerTemplate(override, resolution, nil, nil)
+	}
+	if err != nil || resolution.BaseURL != override.BaseURL || resolution.Source != "default" {
+		t.Fatalf("workspace override resolution=%+v err=%v", resolution, err)
 	}
 }
 

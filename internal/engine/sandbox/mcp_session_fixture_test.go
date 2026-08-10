@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
@@ -143,7 +144,7 @@ func TestBuildSessionFixture_MapsEndpointsAcrossSelections(t *testing.T) {
 		{ServiceID: svcA, ServiceVersionID: svcB, SelectAll: true},
 	}
 
-	fixture, err := buildSessionFixture(context.Background(), cache, "sdk-1", selections)
+	fixture, err := buildSessionFixture(context.Background(), cache, "sdk-1", selections, store.AppTokenPolicy{AllowAll: true})
 	if err != nil {
 		t.Fatalf("buildSessionFixture() error = %v", err)
 	}
@@ -187,9 +188,45 @@ func TestBuildSessionFixture_PropagatesListEndpointsError(t *testing.T) {
 	selections := []models.SDKSelection{
 		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), SelectAll: true},
 	}
-	_, err := buildSessionFixture(context.Background(), cache, "sdk-1", selections)
+	_, err := buildSessionFixture(context.Background(), cache, "sdk-1", selections, store.AppTokenPolicy{AllowAll: true})
 	if err == nil {
 		t.Fatal("buildSessionFixture() error = nil, want propagated error")
+	}
+}
+
+func TestBuildSessionFixture_StrictTokenFetchesOnlyAllowedOperations(t *testing.T) {
+	allowedGet := uuid.New()
+	allowedList := uuid.New()
+	db := &mockCacheDB{
+		contractMetadata: &fusedobject.ServiceMetadata{ID: uuid.New(), Name: "Users"},
+		contractEndpoints: []fusedobject.Endpoint{
+			{ID: allowedGet, Name: "getUser", Method: "GET", Path: "/users/{id}"},
+			{ID: allowedList, Name: "listUsers", Method: "GET", Path: "/users"},
+			{ID: uuid.New(), Name: "deleteUser", Method: "DELETE", Path: "/users/{id}"},
+		}}
+	cache := NewLocalObjectCache(db, &mockRegistryClient{})
+	selections := []models.SDKSelection{
+		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), EndpointIDs: []uuid.UUID{allowedGet}},
+		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), EndpointIDs: []uuid.UUID{allowedList}},
+	}
+
+	fixture, err := buildSessionFixture(context.Background(), cache, "mcp-1", selections, store.AppTokenPolicy{
+		AllowedOperations: []string{"getUser", "listUsers", "deleteUser"},
+	})
+	if err != nil {
+		t.Fatalf("buildSessionFixture() error = %v", err)
+	}
+	if _, ok := fixture.Resolve("getUser"); !ok {
+		t.Fatal("allowed operation is missing from strict token fixture")
+	}
+	if _, ok := fixture.Resolve("listUsers"); !ok {
+		t.Fatal("allowed operation from the second selection is missing")
+	}
+	if _, ok := fixture.Resolve("deleteUser"); ok {
+		t.Fatal("operation outside the app selection leaked into the strict fixture")
+	}
+	if db.contractBatchCalls != 1 {
+		t.Fatalf("strict fixture snapshot queries = %d, want one batched query", db.contractBatchCalls)
 	}
 }
 

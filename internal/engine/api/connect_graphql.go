@@ -206,12 +206,14 @@ var workspaceWebhookGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
-var sdkTokenGraphQLType = graphql.NewObject(graphql.ObjectConfig{
-	Name: "SDKToken",
+var appTokenGraphQLType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "AppToken",
 	Fields: graphql.Fields{
 		"id":            &graphql.Field{Type: graphql.String},
 		"app_family_id": &graphql.Field{Type: graphql.String},
 		"name":          &graphql.Field{Type: graphql.String},
+		"allow":         &graphql.Field{Type: graphql.NewList(graphql.String)},
+		"expires_at":    &graphql.Field{Type: graphql.String},
 		"created_at":    &graphql.Field{Type: graphql.String},
 		"last_used_at":  &graphql.Field{Type: graphql.String},
 	},
@@ -1067,7 +1069,7 @@ func projectServiceConsumers(consumers []store.ServiceConsumer) []map[string]int
 	for _, consumer := range consumers {
 		items = append(items, map[string]interface{}{
 			"id": consumer.AppID.String(), "name": consumer.Name, "version": consumer.Version,
-			"kind": consumer.Kind, "active": consumer.Status == "active" || consumer.Status == "deprecated",
+			"kind": consumer.Kind, "active": consumer.Status.Runnable(),
 			"service_version_id": consumer.ServiceVersionID.String(), "select_all": consumer.SelectAll,
 			"operation_count": consumer.OperationCount, "webhook_count": consumer.WebhookCount,
 			"created_at": formatGraphQLTime(consumer.CreatedAt),
@@ -1166,14 +1168,14 @@ func updateWorkspaceNotificationStatusGraphQLField(configStore store.ConfigRepos
 	}
 }
 
-func sdkTokensGraphQLField(s store.Store) *graphql.Field {
+func appTokensGraphQLField(s store.Store) *graphql.Field {
 	return &graphql.Field{
-		Type: graphql.NewList(sdkTokenGraphQLType),
+		Type: graphql.NewList(appTokenGraphQLType),
 		Args: graphql.FieldConfigArgument{
 			"app_family_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
 		},
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.sdk_tokens.list")
+			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.app_tokens.list")
 			defer span.End()
 			actor, err := actorFromContext(p.Context)
 			if err != nil {
@@ -1189,7 +1191,7 @@ func sdkTokensGraphQLField(s store.Store) *graphql.Field {
 			span.SetAttributes(attribute.String("app.family_id", appFamilyID.String()))
 			tokens, err := s.ListAppTokens(ctx, appFamilyID)
 			if err != nil {
-				return nil, fmt.Errorf("list sdk tokens: %w", err)
+				return nil, fmt.Errorf("list app tokens: %w", err)
 			}
 			return projectGraphQLAppTokens(tokens), nil
 		},
@@ -2650,11 +2652,13 @@ func webhookSignatureStatus(secretBucketID *uuid.UUID) string {
 	return "set"
 }
 
-func projectGraphQLAppTokens(tokens []store.AppToken) []map[string]interface{} {
+func projectGraphQLAppTokens(tokens []store.AppTokenMetadata) []map[string]interface{} {
 	items := make([]map[string]interface{}, 0, len(tokens))
 	for _, token := range tokens {
 		items = append(items, map[string]interface{}{
 			"id": token.ID.String(), "app_family_id": token.AppFamilyID.String(), "name": token.Name,
+			"allow":      projectTokenAllow(token.AllowAll, token.AllowedOperations),
+			"expires_at": formatOptionalGraphQLTime(token.ExpiresAt),
 			"created_at": formatGraphQLTime(token.CreatedAt), "last_used_at": formatOptionalGraphQLTime(token.LastUsedAt),
 		})
 	}
@@ -2870,7 +2874,7 @@ func projectGraphQLBucketSDKSummaries(scopes []store.AppRuntime) []map[string]in
 	for _, scope := range scopes {
 		items = append(items, map[string]interface{}{
 			"id": scope.AppID.String(), "name": scope.Name,
-			"kind": scope.Kind, "active": scope.Status == "active" || scope.Status == "deprecated",
+			"kind": scope.Kind, "active": scope.Status.Runnable(),
 			"created_at": formatGraphQLTime(scope.CreatedAt),
 		})
 	}

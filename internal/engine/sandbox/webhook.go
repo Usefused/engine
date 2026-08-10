@@ -69,10 +69,10 @@ type webhookConfig struct {
 	// a kind: webhook desired config's own name; see plans/plan-webhook-kind.md).
 	// Published into the NATS subject alongside service/event so two
 	// registrations on the same service that happen to produce the same
-	// event name stay on distinct subjects -- without this, any WS
+	// event name stay on distinct subjects -- without this, any delivery
 	// subscriber listening on that service+event received every matching
 	// delivery regardless of which registration it came from (the isolation
-	// bug plan-webhook-kind.md's NATS/WS section describes).
+	// bug plan-webhook-kind.md's subject-filter section describes).
 	Label string
 }
 
@@ -335,9 +335,8 @@ func publishWebhookEvent(w http.ResponseWriter, r *http.Request, body []byte, ur
 	msgID := uuid.New().String()
 	// Subject layout: webhooks.<account>.<service>.<label>.<event>. label is
 	// inserted between service and event (not appended after) so every
-	// existing fixed-position parse of this subject only needs a shifted
-	// index, not a rewrite -- see websocket_handler.go's consumer callback,
-	// which parses this same layout on the receiving end.
+	// publisher and consumer resolves the registration and event positions
+	// consistently.
 	subject := fmt.Sprintf("webhooks.%s.%s.%s.%s", config.AccountID, config.ServiceID, subjectSafeLabel(config.Label), eventName)
 
 	natsMsg := nats.NewMsg(subject)
@@ -368,10 +367,9 @@ func publishWebhookEvent(w http.ResponseWriter, r *http.Request, body []byte, ur
 // subjectSafeLabel guards the NATS subject's fixed segment positions: "." is
 // the subject delimiter, and a kind: webhook desired config's name (the label) has
 // no character restriction today, so a literal "." in a name would otherwise
-// shift every downstream positional parse. websocket_handler.go's
-// FilterSubjects construction must apply this exact same substitution when
-// it resolves an SDK/MCP's attached label, or a name containing "." would
-// never match its own published subject.
+// shift every downstream positional parse. FilterSubjects construction must
+// apply this exact substitution or a dotted label would not match its own
+// published subject.
 func subjectSafeLabel(label string) string {
 	return strings.ReplaceAll(label, ".", "-")
 }

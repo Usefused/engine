@@ -68,19 +68,14 @@ func WorkspaceHandler(s store.Store, verifier ServiceVerifier, masterKey []byte)
 	r.Put("/secrets/bulk", UpsertSecretsHandler(s, masterKey))
 	r.Delete("/secrets", DeleteSecretHandler(s))
 
-	r.Post("/sdk-tokens", GenerateSDKTokenHandler(s))
-	r.Delete("/sdk-tokens", RevokeSDKTokenHandler(s))
+	r.Post("/app-tokens", GenerateAppTokenHandler(s))
+	r.Delete("/app-tokens", RevokeAppTokenHandler(s))
 
 	return r
 }
 
 func runtimeContractFetcher(verifier ServiceVerifier) RuntimeContractFetcher {
 	fetcher, _ := verifier.(RuntimeContractFetcher)
-	return fetcher
-}
-
-func batchRuntimeContractFetcher(verifier ServiceVerifier) BatchRuntimeContractFetcher {
-	fetcher, _ := verifier.(BatchRuntimeContractFetcher)
 	return fetcher
 }
 

@@ -3,39 +3,74 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 
+	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 )
 
 // buildSessionFixture derives one MCP session's operation catalog from the
-// connecting SDK's own AppRuntime.Selections. Every shared-runtime session gets
-// its own scoped
-// fixture: only the endpoints its owner actually selected are discoverable
-// via search_docs or callable via call(), matching the per-SDK enforcement
-// engineExecuteCore/findEndpointInScope already apply at dispatch time --
+// connecting app version's AppRuntime.Selections. Every shared-runtime session
+// gets its own scoped fixture: only the endpoints its owner actually selected
+// are discoverable via search_docs or callable via call(), matching the per-app
+// enforcement engineExecuteCore/findEndpointInScope apply at dispatch time --
 // this makes the *catalog* match the *enforcement*, not just the enforcement
 // alone.
-func buildSessionFixture(ctx context.Context, cache ObjectCache, appID string, selections []models.SDKSelection) (*Fixture, error) {
+func buildSessionFixture(ctx context.Context, cache ObjectCache, appID string, selections []models.SDKSelection, policy store.AppTokenPolicy) (*Fixture, error) {
+	if !policy.IsUnrestricted() {
+		return buildRestrictedSessionFixture(ctx, cache, selections, policy.AllowedOperations)
+	}
 	var ops []FixtureOperation
 	for _, sel := range selections {
 		endpoints, err := cache.ListEndpointsForSelection(ctx, appID, sel)
 		if err != nil {
 			return nil, fmt.Errorf("list endpoints for service %s: %w", sel.ServiceID, err)
 		}
-		for _, ep := range endpoints {
-			op, err := endpointToFixtureOperation(sel.ServiceID.String(), ep)
-			if err != nil {
-				return nil, fmt.Errorf("convert endpoint %s: %w", ep.Name, err)
-			}
-			stripMCPAuthParameters(&op, sel.AuthName)
-			ops = append(ops, op)
+		ops, err = appendFixtureOperations(ops, sel, endpoints)
+		if err != nil {
+			return nil, err
 		}
 	}
 	return newFixtureFromOperations(ctx, ops), nil
+}
+
+type namedEndpointBatchLister interface {
+	ListEndpointsForSelectionsByNames(context.Context, []models.SDKSelection, []string) (map[int][]fusedobject.Endpoint, error)
+}
+
+func buildRestrictedSessionFixture(ctx context.Context, cache ObjectCache, selections []models.SDKSelection, allowedOperations []string) (*Fixture, error) {
+	lister, ok := cache.(namedEndpointBatchLister)
+	if !ok {
+		return nil, errors.New("token-scoped endpoint lookup unavailable")
+	}
+	endpointsBySelection, err := lister.ListEndpointsForSelectionsByNames(ctx, selections, allowedOperations)
+	if err != nil {
+		return nil, fmt.Errorf("list token-scoped endpoints: %w", err)
+	}
+	var operations []FixtureOperation
+	for index, selection := range selections {
+		operations, err = appendFixtureOperations(operations, selection, endpointsBySelection[index])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return newFixtureFromOperations(ctx, operations), nil
+}
+
+func appendFixtureOperations(operations []FixtureOperation, selection models.SDKSelection, endpoints []fusedobject.Endpoint) ([]FixtureOperation, error) {
+	for _, endpoint := range endpoints {
+		operation, err := endpointToFixtureOperation(selection.ServiceID.String(), endpoint)
+		if err != nil {
+			return nil, fmt.Errorf("convert endpoint %s: %w", endpoint.Name, err)
+		}
+		stripMCPAuthParameters(&operation, selection.AuthName)
+		operations = append(operations, operation)
+	}
+	return operations, nil
 }
 
 // stripMCPAuthParameters removes credential-shaped inputs before the operation

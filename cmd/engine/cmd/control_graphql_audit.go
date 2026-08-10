@@ -13,7 +13,7 @@ import (
 
 var sensitiveGraphQLAuditFields = map[string]struct{}{
 	"execution_token": {}, "value": {}, "literal_value": {}, "profile": {},
-	"sdkTokens": {}, "bucketValues": {}, "bucketValuePage": {},
+	"appTokens": {}, "bucketValues": {}, "bucketValuePage": {},
 	"secretMetas": {}, "secretMetaPage": {}, "authConnections": {},
 	"authConnectionPage": {}, "connectionResources": {}, "mcpAnalytics": {},
 	"webhookEvents": {}, "webhookAnalytics": {}, "account": {}, "credits": {},

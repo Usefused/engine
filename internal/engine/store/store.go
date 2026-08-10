@@ -24,13 +24,16 @@ var (
 	ErrInvalidEncryptedAuthMaterial = errors.New("invalid encrypted auth material")
 
 	// App-family errors
-	ErrAppFamilyNotFound   = errors.New("app family not found")
-	ErrAppNotFound         = errors.New("app not found")
-	ErrAppVersionImmutable = errors.New("app version is immutable: same version with changed source")
-	ErrAppVersionExists    = errors.New("app version already exists in family")
-	ErrAppDeactivated      = errors.New("app is deactivated")
-	ErrAppTokenNotFound    = errors.New("app token not found")
-	ErrAppTombstoneExists  = errors.New("app version was deactivated and cannot be reused")
+	ErrAppFamilyNotFound     = errors.New("app family not found")
+	ErrAppNotFound           = errors.New("app not found")
+	ErrAppVersionImmutable   = errors.New("app version is immutable: same version with changed source or scope")
+	ErrAppVersionExists      = errors.New("app version already exists in family")
+	ErrAppDeactivated        = errors.New("app is deactivated")
+	ErrAppTokenNotFound      = errors.New("app token not found")
+	ErrAppTombstoneExists    = errors.New("app version was deactivated and cannot be reused")
+	ErrAppKindInvalid        = errors.New("app kind is invalid")
+	ErrAppFamilyKindMismatch = errors.New("app kind does not match app family")
+	ErrAppStatusInvalid      = errors.New("app status is invalid")
 
 	// ErrIdempotentExecutionNotFound means there's no unexpired cached
 	// response for the given (app_id, idempotency key) -- the caller should
@@ -56,12 +59,12 @@ type AppRuntime struct {
 	// Status is projected from the exact app version. Hard-deactivated versions
 	// have no runtime row, while deprecated versions remain executable until
 	// their configured deactivation is applied.
-	Status string
+	Status AppStatus
 	// Kind labels how this scope is meant to be connected to: "sdk" (default)
 	// or "mcp". A scope's shape (selections+bucket) is identical either way --
 	// this is a listing/UI distinction (see ListMCPAppsByAccount), not an
 	// enforcement mechanism.
-	Kind string
+	Kind AppKind
 	// Name is an optional user-supplied label (CLI --name flag, or a
 	// workspace config's name), surfaced on the MCP servers list page. Never
 	// set by a reactivate-only activate call (persistAppRuntime isn't invoked
@@ -83,7 +86,7 @@ type AppRuntime struct {
 type AppFamily struct {
 	AppFamilyID    uuid.UUID
 	AccountID      uuid.UUID
-	Kind           string // "sdk" or "mcp"
+	Kind           AppKind
 	CanonicalName  string
 	DisplayName    string
 	TargetLanguage string // required for SDK, empty for MCP
@@ -107,12 +110,16 @@ type App struct {
 	ScopeSchemaVersion    int
 	Selections            []byte // jsonb
 	GeneratorVersion      string // SDK only, empty for MCP
-	Status                string // "building", "active", "deprecated"
+	Status                AppStatus
 	DeprecationMessage    string
 	PlannedDeactivationAt *time.Time
 	CreatedBy             uuid.UUID
 	CreatedAt             time.Time
 	ActivatedAt           *time.Time
+	// ExpectedFamilyKind is a publication precondition, not another persisted
+	// copy of family.kind. It prevents an adapter from publishing into a family
+	// owned by the other runtime kind.
+	ExpectedFamilyKind AppKind
 }
 
 // SDKPackageLeaseStore lists package identities in bounded keyset pages.
@@ -135,15 +142,43 @@ type EngineInstallationStore interface {
 	LoadEngineInstallationID(ctx context.Context) (uuid.UUID, error)
 }
 
-// AppToken is a family-scoped token. One token authorizes all active and
-// deprecated versions in the family. Plaintext is one-time output.
-type AppToken struct {
+// AppTokenMetadata describes a family-scoped token without exposing its hash.
+// Hashes stay inside persistence and authorization paths because list callers
+// need only operational metadata, not credential material.
+type AppTokenMetadata struct {
 	ID          uuid.UUID
 	AppFamilyID uuid.UUID
-	TokenHash   string
 	Name        string
-	LastUsedAt  *time.Time
-	CreatedAt   time.Time
+	AppTokenPolicy
+	LastUsedAt *time.Time
+	CreatedAt  time.Time
+}
+
+// AppTokenPolicy is the shared SDK/MCP execution-token authorization policy.
+// The API renders AllowAll as ["*"]; storage keeps it explicit so a wildcard
+// can never collide with a provider operation ID.
+type AppTokenPolicy struct {
+	AllowAll          bool
+	AllowedOperations []string
+	ExpiresAt         *time.Time
+}
+
+// IsUnrestricted is explicit so an absent or malformed policy fails closed.
+// Apply-time tokens persist AllowAll=true, while strict tokens name every grant.
+func (policy AppTokenPolicy) IsUnrestricted() bool {
+	return policy.AllowAll
+}
+
+func (policy AppTokenPolicy) AllowsOperation(operation string) bool {
+	if policy.IsUnrestricted() {
+		return true
+	}
+	for _, allowed := range policy.AllowedOperations {
+		if allowed == operation {
+			return true
+		}
+	}
+	return false
 }
 
 // AppFamilyBucket maps a family to its credential bucket. All versions in
@@ -155,19 +190,17 @@ type AppFamilyBucket struct {
 	UpdatedAt   time.Time
 }
 
-// AuthProjection is the one-query result from family-token authorization.
-// It contains everything the SDK/MCP boundary needs to execute a call
-// without additional database lookups.
+// AuthProjection is the minimal one-query result from family-token
+// authorization. Runtime scope remains in the object cache, so authentication
+// does not load selections or capability documents merely to discard them.
 type AuthProjection struct {
-	AccountID      uuid.UUID
-	AppFamilyID    uuid.UUID
-	AppID          uuid.UUID
-	Version        string
-	Kind           string
-	AppStatus      string
-	BucketID       uuid.UUID
-	Selections     []byte
-	CapabilityHash string
+	AccountID   uuid.UUID
+	AppFamilyID uuid.UUID
+	AppID       uuid.UUID
+	Version     string
+	Kind        AppKind
+	AppStatus   AppStatus
+	TokenPolicy AppTokenPolicy
 }
 
 // CapabilityDiff describes what changed between two versions for plan output
@@ -397,8 +430,9 @@ type WorkspaceExecutionPolicyExactBatchStore interface {
 	GetWorkspaceExecutionPolicyOverrides(ctx context.Context, refs []WorkspaceExecutionPolicyRef) (map[WorkspaceExecutionPolicyRef]*WorkspaceExecutionPolicyOverride, error)
 }
 
-// ProviderRateLimitStore coordinates provider quotas in PostgreSQL so all
-// Engine replicas share one atomic AND decision.
+// ProviderRateLimitStore coordinates provider quotas through one shared
+// atomic AND decision. Production wires JetStream; PostgreSQL is only its
+// eventual projection and cold recovery source.
 type ProviderRateLimitStore interface {
 	AcquireProviderRateLimit(ctx context.Context, request ratelimitpolicy.AcquireRequest) (ratelimitpolicy.Decision, error)
 	SyncProviderRateLimit(ctx context.Context, request ratelimitpolicy.SyncRequest) error
@@ -633,15 +667,14 @@ type Store interface {
 	UndeprecateApp(ctx context.Context, appID uuid.UUID) error
 	DeactivateAppVersion(ctx context.Context, appID, deactivatedBy uuid.UUID) error
 
-	// Family-token authorization — one bounded SQL query that hashes the token,
-	// joins family→app, and returns the full AuthProjection.
+	// Family-token authorization joins the supplied token hash to one app family
+	// and returns the minimal runtime identity in a single bounded query.
 	AuthorizeApp(ctx context.Context, appID uuid.UUID, tokenHash string) (*AuthProjection, error)
 
 	// Family tokens
-	CreateAppToken(ctx context.Context, appFamilyID uuid.UUID, tokenHash, name string) (*AppToken, error)
-	ListAppTokens(ctx context.Context, appFamilyID uuid.UUID) ([]AppToken, error)
+	CreateAppToken(ctx context.Context, appFamilyID uuid.UUID, tokenHash, name string, policy AppTokenPolicy) (*AppTokenMetadata, error)
+	ListAppTokens(ctx context.Context, appFamilyID uuid.UUID) ([]AppTokenMetadata, error)
 	RevokeAppToken(ctx context.Context, appFamilyID uuid.UUID, name string) error
-	GetAppFamilyByToken(ctx context.Context, tokenHash string) (*AppFamily, error)
 
 	// Family buckets
 	SetAppFamilyBucket(ctx context.Context, appFamilyID, bucketID uuid.UUID) error

@@ -56,7 +56,7 @@ func resourceReferenceGraphQLField(s store.Store, kind store.ResourceReferenceKi
 	}
 }
 
-func resolveVisibleResourceReference(p graphql.ResolveParams, s store.Store, kind store.ResourceReferenceKind, value, appKind, appVersion string) (uuid.UUID, error) {
+func resolveVisibleResourceReference(p graphql.ResolveParams, s store.Store, kind store.ResourceReferenceKind, value string, appKind store.AppKind, appVersion string) (uuid.UUID, error) {
 	resolver, ok := s.(store.ResourceReferenceResolver)
 	if !ok {
 		return uuid.Nil, errors.New("resource reference resolution is unavailable")
@@ -67,7 +67,7 @@ func resolveVisibleResourceReference(p graphql.ResolveParams, s store.Store, kin
 		return uuid.Nil, err
 	}
 	id, err := resolver.ResolveResourceReference(p.Context, store.ResourceReferenceQuery{
-		Kind: kind, Value: value, AppKind: appKind, AppVersion: appVersion, AllowedAll: authorized.All, AllowedIDs: authorized.IDs,
+		Kind: kind, Value: value, AppKind: store.AppKind(appKind), AppVersion: appVersion, AllowedAll: authorized.All, AllowedIDs: authorized.IDs,
 	})
 	if err != nil {
 		return uuid.Nil, resourceReferenceGraphQLError(err)
@@ -75,11 +75,11 @@ func resolveVisibleResourceReference(p graphql.ResolveParams, s store.Store, kin
 	return id, nil
 }
 
-func referenceAppKind(p graphql.ResolveParams, kind store.ResourceReferenceKind) string {
+func referenceAppKind(p graphql.ResolveParams, kind store.ResourceReferenceKind) store.AppKind {
 	if kind != store.ReferenceApp && kind != store.ReferenceAppFamily {
 		return ""
 	}
-	return strings.ToLower(strings.TrimSpace(fmt.Sprint(p.Args["kind"])))
+	return store.AppKind(strings.ToLower(strings.TrimSpace(fmt.Sprint(p.Args["kind"]))))
 }
 
 func referenceAppVersion(p graphql.ResolveParams, kind store.ResourceReferenceKind) string {

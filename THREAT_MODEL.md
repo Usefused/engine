@@ -32,6 +32,8 @@ Engine makes outbound calls to:
 - Third-party APIs during configured SDK/MCP/runtime execution.
 - OAuth/OIDC providers during connect-session authorization and token refresh.
 - OTLP collectors when telemetry endpoints are configured.
+- An operator-configured external NATS cluster when Engine replicas share
+  JetStream state.
 
 Inbound traffic includes:
 
@@ -39,6 +41,11 @@ Inbound traffic includes:
 - gRPC SDK connections on the configured gRPC port.
 - webhook ingress on the configured webhook port or shared HTTP port.
 - local NATS connections when embedded NATS is enabled.
+
+Embedded NATS binds to loopback and is a single-instance convenience. External
+NATS credentials are supplied separately from `NATS_URL`; Engine logs only the
+bounded connection mode, authentication method, and TLS state. Independent
+Engine installations must not share a NATS account or fixed stream namespace.
 
 ## Credential Storage
 

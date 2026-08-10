@@ -5,8 +5,24 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+const (
+	engineMigrationAdvisoryLockKey int64 = 0x465553454E47494E
+	engineMigrationLockQuery             = `SELECT pg_advisory_xact_lock($1)`
+	engineMigrationVersion         int64 = 1
+	engineMigrationName                  = "20260810_engine_schema_convergence"
+	appTokenPolicyMigrationVersion int64 = 2
+	appTokenPolicyMigrationName          = "20260810_app_token_policy"
+)
+
+type engineMigration struct {
+	Version int64
+	Name    string
+	Queries []string
+}
 
 func initEngineSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	for _, q := range engineSchemaQueries() {
@@ -14,14 +30,83 @@ func initEngineSchema(ctx context.Context, pool *pgxpool.Pool) error {
 			return fmt.Errorf("failed to execute query %q: %w", q, err)
 		}
 	}
-	for _, q := range engineMigrationQueries() {
-		if _, err := pool.Exec(ctx, q); err != nil {
-			return fmt.Errorf("failed to execute query %q: %w", q, err)
-		}
+	if err := applyEngineMigrations(ctx, pool); err != nil {
+		return err
 	}
 
 	log.Println("Engine database schema initialization complete.")
 	return nil
+}
+
+func applyEngineMigrations(ctx context.Context, pool *pgxpool.Pool) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin Engine schema migrations: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// The transaction-scoped lock makes the ledger decision and its DDL atomic,
+	// so replicas cannot both observe a pending migration and replay it.
+	if _, err := tx.Exec(ctx, engineMigrationLockQuery, engineMigrationAdvisoryLockKey); err != nil {
+		return fmt.Errorf("lock Engine schema migrations: %w", err)
+	}
+	for _, migration := range engineMigrations() {
+		if err := applyEngineMigration(ctx, tx, migration); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit Engine schema migrations: %w", err)
+	}
+	return nil
+}
+
+func applyEngineMigration(ctx context.Context, tx pgx.Tx, migration engineMigration) error {
+	applied, err := engineMigrationApplied(ctx, tx, migration)
+	if err != nil {
+		return err
+	}
+	if applied {
+		return nil
+	}
+	for _, query := range migration.Queries {
+		if _, err := tx.Exec(ctx, query); err != nil {
+			return fmt.Errorf("apply Engine schema migration %d (%s): %w", migration.Version, migration.Name, err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO fused_engine_schema_migrations (version, name) VALUES ($1, $2)`, migration.Version, migration.Name); err != nil {
+		return fmt.Errorf("record Engine schema migration %d (%s): %w", migration.Version, migration.Name, err)
+	}
+	return nil
+}
+
+func engineMigrationApplied(ctx context.Context, tx pgx.Tx, migration engineMigration) (bool, error) {
+	const query = `SELECT
+		EXISTS (SELECT 1 FROM fused_engine_schema_migrations WHERE version = $1),
+		EXISTS (SELECT 1 FROM fused_engine_schema_migrations WHERE version = $1 AND name = $2)`
+	var versionExists, identityMatches bool
+	if err := tx.QueryRow(ctx, query, migration.Version, migration.Name).Scan(&versionExists, &identityMatches); err != nil {
+		return false, fmt.Errorf("read Engine schema migration %d: %w", migration.Version, err)
+	}
+	if versionExists && !identityMatches {
+		return false, fmt.Errorf("Engine schema migration version %d has a different recorded name", migration.Version)
+	}
+	return versionExists, nil
+}
+
+func engineMigrations() []engineMigration {
+	return []engineMigration{
+		{Version: engineMigrationVersion, Name: engineMigrationName, Queries: engineMigrationV1Queries()},
+		{Version: appTokenPolicyMigrationVersion, Name: appTokenPolicyMigrationName, Queries: appTokenPolicyMigrationQueries()},
+	}
+}
+
+func engineMigrationQueries() []string {
+	var queries []string
+	for _, migration := range engineMigrations() {
+		queries = append(queries, migration.Queries...)
+	}
+	return queries
 }
 
 func engineSchemaQueries() []string {
@@ -50,6 +135,13 @@ func engineSchemaQueries() []string {
 		`INSERT INTO fused_engine_installation (singleton_key)
 		VALUES (1)
 		ON CONFLICT (singleton_key) DO NOTHING;`,
+		// Schema migration history is separate from app lifecycle state. It is the
+		// durable coordination point shared by every replica using this database.
+		`CREATE TABLE IF NOT EXISTS fused_engine_schema_migrations (
+			version    bigint PRIMARY KEY,
+			name       text NOT NULL UNIQUE CHECK (name <> ''),
+			applied_at timestamptz NOT NULL DEFAULT NOW()
+		);`,
 
 		// Control-plane subjects are deliberately independent of Registry
 		// accounts. The Engine authenticates these local principals before it
@@ -1071,9 +1163,9 @@ func engineSchemaQueries() []string {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_fused_workspace_execution_policies_version_override
 		ON fused_workspace_execution_policies(service_version_id) WHERE service_version_id IS NOT NULL;`,
 
-		// Provider limits coordinate every Engine replica through PostgreSQL. The
-		// complete scope key prevents a connection-scoped policy from consuming a
-		// neighbouring bucket while retaining the service version for policy identity.
+		// JetStream coordinates live provider limits. This table is its eventual
+		// projection for recovery and audit queries; the complete scope key keeps
+		// connection-scoped policies separated without joining on execution data.
 		`CREATE TABLE IF NOT EXISTS fused_provider_rate_limit_states (
 			account_id                uuid NOT NULL,
 			service_version_id        uuid NOT NULL,
@@ -1087,6 +1179,7 @@ func engineSchemaQueries() []string {
 			tokens                     bigint,
 			token_refilled_at          timestamptz,
 			cooldown_until             timestamptz,
+			state_sequence             bigint NOT NULL DEFAULT 0,
 			updated_at                 timestamptz NOT NULL DEFAULT NOW(),
 			PRIMARY KEY (account_id, service_version_id, policy_name, scope_kind, scope_id),
 			CHECK (scope_kind IN ('service_version', 'connection')),
@@ -1192,7 +1285,6 @@ func engineSchemaQueries() []string {
 				ON DELETE RESTRICT
 		);`,
 
-		// Family-level bucket mapping replaces fused_artifact_buckets.
 		// All versions in a family resolve through the same connection
 		// profile/credential bucket. Reconfiguration changes the mapping
 		// once without cloning version scopes.
@@ -1205,8 +1297,8 @@ func engineSchemaQueries() []string {
 			updated_at    timestamptz NOT NULL DEFAULT NOW()
 		);`,
 
-		// Family-level tokens replace fused_artifact_tokens. One token
-		// authorizes all active and deprecated versions in the family.
+		// Family-level execution tokens authorize all active and deprecated
+		// versions without duplicating credentials for each immutable app.
 		// Plaintext is one-time output; only the hash is stored.
 		`CREATE TABLE IF NOT EXISTS fused_app_tokens (
 			id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1215,26 +1307,41 @@ func engineSchemaQueries() []string {
 			                ON DELETE CASCADE,
 			token_hash      text NOT NULL UNIQUE,
 			name            text NOT NULL,
+			allow_all       boolean NOT NULL DEFAULT true,
+			allowed_operations text[] NOT NULL DEFAULT '{}',
+			expires_at      timestamptz,
 			last_used_at    timestamptz,
 			created_at      timestamptz NOT NULL DEFAULT NOW(),
+			CONSTRAINT chk_fused_app_tokens_allow CHECK (
+				(allow_all AND cardinality(allowed_operations) = 0)
+				OR (NOT allow_all AND cardinality(allowed_operations) > 0 AND NOT ('*' = ANY(allowed_operations)))
+			),
 			UNIQUE (app_family_id, name)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_app_tokens_family
 			ON fused_app_tokens(app_family_id, created_at DESC);`,
-		`CREATE TABLE IF NOT EXISTS fused_app_family_migrations (
-			account_id       uuid NOT NULL,
-			kind             text NOT NULL CHECK (kind IN ('sdk', 'mcp')),
-			canonical_name   text NOT NULL,
-			app_family_id    uuid NOT NULL REFERENCES fused_app_families(app_family_id) ON DELETE RESTRICT,
-			migrated_apps    integer NOT NULL CHECK (migrated_apps >= 0),
-			migrated_tokens  integer NOT NULL CHECK (migrated_tokens >= 0),
-			completed_at     timestamptz NOT NULL DEFAULT NOW(),
-			PRIMARY KEY (account_id, kind, canonical_name)
+	}
+}
+
+// Token policy is an additive upgrade over the app-family schema. The ledger
+// keeps it one-shot, while IF NOT EXISTS lets fresh databases run the same
+// migration after creating the canonical table shape.
+func appTokenPolicyMigrationQueries() []string {
+	return []string{
+		`ALTER TABLE fused_app_tokens ADD COLUMN IF NOT EXISTS allow_all boolean NOT NULL DEFAULT true;`,
+		`ALTER TABLE fused_app_tokens ADD COLUMN IF NOT EXISTS allowed_operations text[] NOT NULL DEFAULT '{}';`,
+		`ALTER TABLE fused_app_tokens ADD COLUMN IF NOT EXISTS expires_at timestamptz;`,
+		`ALTER TABLE fused_app_tokens DROP CONSTRAINT IF EXISTS chk_fused_app_tokens_allow;`,
+		`ALTER TABLE fused_app_tokens ADD CONSTRAINT chk_fused_app_tokens_allow CHECK (
+			(allow_all AND cardinality(allowed_operations) = 0)
+			OR (NOT allow_all AND cardinality(allowed_operations) > 0 AND NOT ('*' = ANY(allowed_operations)))
 		);`,
 	}
 }
 
-func engineMigrationQueries() []string {
+// Version 1 is immutable once recorded. Later schema changes need a new
+// engineMigration entry so existing databases cannot silently skip them.
+func engineMigrationV1Queries() []string {
 	return []string{
 		`ALTER TABLE fused_subjects DROP CONSTRAINT IF EXISTS chk_fused_subjects_kind;`,
 		`UPDATE fused_subjects SET kind = 'app' WHERE kind = 'artifact';`,
@@ -1425,7 +1532,6 @@ func engineMigrationQueries() []string {
 		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_direction_started ON fused_engine_execution_events(direction, transport, started_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_operation_started ON fused_engine_execution_events(operation_id, started_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_webhook_started ON fused_engine_execution_events(webhook_id, started_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_started ON fused_engine_execution_events(started_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_family_started
 		ON fused_engine_execution_events(account_id, app_family_id, started_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_app_started
@@ -1499,27 +1605,6 @@ func engineMigrationQueries() []string {
 		SET rate_limit = NULL
 		WHERE rate_limit IS NOT NULL
 		  AND rate_limit->>'version' IS DISTINCT FROM '2';`,
-		`CREATE TABLE IF NOT EXISTS fused_provider_rate_limit_states (
-			account_id uuid NOT NULL,
-			service_version_id uuid NOT NULL,
-			policy_name text NOT NULL,
-			scope_kind text NOT NULL,
-			scope_id uuid NOT NULL,
-			config_hash text NOT NULL,
-			algorithm text NOT NULL,
-			fixed_window_started_at timestamptz,
-			fixed_window_used bigint NOT NULL DEFAULT 0,
-			tokens bigint,
-			token_refilled_at timestamptz,
-			cooldown_until timestamptz,
-			updated_at timestamptz NOT NULL DEFAULT NOW(),
-			PRIMARY KEY (account_id, service_version_id, policy_name, scope_kind, scope_id),
-			CHECK (scope_kind IN ('service_version', 'connection')),
-			CHECK (algorithm IN ('fixed_window', 'token_bucket')),
-			CHECK (fixed_window_used >= 0),
-			CHECK (tokens IS NULL OR tokens >= 0)
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_provider_rate_limit_states_updated
-		ON fused_provider_rate_limit_states(updated_at);`,
+		`ALTER TABLE fused_provider_rate_limit_states ADD COLUMN IF NOT EXISTS state_sequence bigint NOT NULL DEFAULT 0;`,
 	}
 }

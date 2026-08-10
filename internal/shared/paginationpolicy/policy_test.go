@@ -12,6 +12,7 @@ func TestContractFixtures(t *testing.T) {
 		"v2_cursor_body.json",
 		"v2_cursor_header_numeric.json",
 		"v2_offset.json",
+		"v2_offset_root_array.json",
 		"v2_page_number.json",
 		"v2_next_url_link.json",
 	}
@@ -22,6 +23,15 @@ func TestContractFixtures(t *testing.T) {
 				t.Fatalf("Validate: %v", err)
 			}
 		})
+	}
+}
+
+func TestRootPathIsLimitedToItems(t *testing.T) {
+	if err := ValidateItemsPath("$"); err != nil {
+		t.Fatalf("ValidateItemsPath: %v", err)
+	}
+	if err := ValidateBodyPath("$"); err == nil {
+		t.Fatal("root continuation source unexpectedly accepted")
 	}
 }
 

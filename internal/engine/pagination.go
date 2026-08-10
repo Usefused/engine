@@ -189,10 +189,11 @@ func (a *paginationAggregate) Add(document any, itemsPath string) error {
 }
 
 func sendPaginationAggregate(stream ResponseStream, aggregate *paginationAggregate, itemsPath string, maxBytes int64) error {
-	if aggregate == nil || aggregate.document == nil || !setValueAtPath(aggregate.document, itemsPath, aggregate.items) {
+	document, ok := aggregate.result(itemsPath)
+	if !ok {
 		return paginationError("response_invalid")
 	}
-	payload, err := json.Marshal(aggregate.document)
+	payload, err := json.Marshal(document)
 	if err != nil {
 		return paginationError("response_invalid")
 	}
@@ -200,6 +201,21 @@ func sendPaginationAggregate(stream ResponseStream, aggregate *paginationAggrega
 		return paginationError("max_bytes")
 	}
 	return stream.Send(payload)
+}
+
+func (a *paginationAggregate) result(itemsPath string) (any, bool) {
+	if a == nil || a.document == nil {
+		return nil, false
+	}
+	// A root array has no parent object whose field can be replaced after
+	// aggregation, so the accumulated items are the response document.
+	if isRootBodyPath(itemsPath) {
+		return a.items, true
+	}
+	if !setValueAtPath(a.document, itemsPath, a.items) {
+		return nil, false
+	}
+	return a.document, true
 }
 
 func paginationProviderError(parent context.Context, err error) error {
@@ -533,6 +549,9 @@ func readSource(source paginationpolicy.ValueSource, document any, page *paginat
 }
 
 func valueAtPath(document any, path string) (any, bool) {
+	if isRootBodyPath(path) {
+		return document, true
+	}
 	path = strings.TrimPrefix(strings.TrimSpace(path), "$")
 	path = strings.TrimPrefix(path, ".")
 	current := document
@@ -547,6 +566,10 @@ func valueAtPath(document any, path string) (any, bool) {
 		}
 	}
 	return current, true
+}
+
+func isRootBodyPath(path string) bool {
+	return strings.TrimSpace(path) == "$"
 }
 
 func setValueAtPath(document any, path string, value any) bool {

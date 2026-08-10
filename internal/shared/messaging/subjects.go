@@ -4,6 +4,10 @@ import "fmt"
 
 const (
 	FusedEngineStream = "FUSED_ENGINE_EVENTS"
+	// ProviderRateLimitBucket is a separate compacted JetStream stream. Its
+	// latest value is the live quota authority; PostgreSQL consumes revisions
+	// only as an eventual projection.
+	ProviderRateLimitBucket = "FUSED_PROVIDER_RATE_LIMITS"
 
 	FusedEngineSessionWildcard   = "fused_engine.session.>"
 	FusedEngineKillWildcard      = "fused_engine.kill.>"
@@ -12,6 +16,14 @@ const (
 	FusedEngineKillSubscribe    = "fused_engine.kill.*"
 	FusedEngineCleanupSubscribe = "fused_engine.cleanup.*"
 )
+
+func ProviderRateLimitKVStream() string {
+	return "KV_" + ProviderRateLimitBucket
+}
+
+func ProviderRateLimitKVSubject() string {
+	return "$KV." + ProviderRateLimitBucket + ".>"
+}
 
 func FusedEngineStreamSubjects() []string {
 	return []string{

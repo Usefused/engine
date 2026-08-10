@@ -103,12 +103,6 @@ func RefreshAccessToken(ctx context.Context, client *http.Client, auth fusedobje
 	return doTokenForm(ctx, client, auth, creds, form)
 }
 
-// TokenScopes prefers provider-granted scopes because consent screens may
-// narrow what the registry originally requested.
-func TokenScopes(token TokenResponse, fallback []string) []string {
-	return TokenScopeMetadata(token, fallback, "registry").Scopes
-}
-
 // TokenScopeMetadata records the caller's fallback provenance so a selected
 // consent subset is never mislabeled as the service's full Registry catalogue.
 func TokenScopeMetadata(token TokenResponse, fallback []string, fallbackSource string) TokenScopeSet {

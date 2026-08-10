@@ -100,7 +100,6 @@ type Config struct {
 	// two separate deployments, two separate origins. The Engine never needs
 	// this: its UI only ever calls the Engine directly, never the Registry.
 	HomepageURL   string              `yaml:"homepage_url"`
-	BackendURL    string              `yaml:"backend_url"`
 	Credits       CreditConfig        `yaml:"credits"`
 	Sandbox       SandboxConfig       `yaml:"sandbox"`
 	Storage       StorageConfig       `yaml:"storage"`
@@ -139,7 +138,6 @@ func defaultConfig() *Config {
 		},
 		UIURL:       "http://localhost:5173", // Default UI URL
 		HomepageURL: "http://localhost:3000", // Default homepage URL (matches homepage/Dockerfile's PORT=3000)
-		BackendURL:  "wss://run.usefused.com",
 		Sandbox: SandboxConfig{
 			ToolCallTimeoutSeconds: 45,
 			SessionMaxAgeSeconds:   300,

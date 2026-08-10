@@ -138,7 +138,7 @@ type workspaceTestStore struct {
 	deletedAuthConnections       []uuid.UUID
 	deletedSecretKeys            []string
 	createdConnectSessions       []store.ConnectSession
-	appTokens                    []store.AppToken
+	appTokens                    []store.AppTokenMetadata
 	// kind: webhook's ownership-conflict lookup controls.
 	webhookOwnersByLabel   map[uuid.UUID]string
 	webhookOwnersErr       error
@@ -152,7 +152,7 @@ func (s *workspaceTestStore) CreateOrGetAppFamily(_ context.Context, family stor
 	if s.appFamilies == nil {
 		s.appFamilies = make(map[string]store.AppFamily)
 	}
-	key := family.AccountID.String() + "\x00" + family.Kind + "\x00" + family.CanonicalName
+	key := family.AccountID.String() + "\x00" + family.Kind.String() + "\x00" + family.CanonicalName
 	if existing, ok := s.appFamilies[key]; ok {
 		return &existing, false, nil
 	}
@@ -339,7 +339,7 @@ type sdkSaveParams struct {
 	ownerTeamID        uuid.UUID
 	selections         []byte
 	scopeSchemaVersion int
-	kind               string
+	kind               store.AppKind
 	name               string
 }
 
@@ -786,31 +786,21 @@ func (s *workspaceTestStore) ListWorkspaceWebhooks(ctx context.Context, serviceI
 }
 
 func (s *workspaceTestStore) ListWebhookEventsByService(ctx context.Context, accountID, serviceID uuid.UUID, eventName string, limit, offset int, startDate, endDate *time.Time) ([]models.WebhookEvent, int64, error) {
-	var filtered []models.WebhookEvent
-	for _, event := range s.webhookEvents {
-		if event.AccountID != accountID || event.ServiceID != serviceID {
-			continue
-		}
-		if eventName != "" && event.EventType != eventName {
-			continue
-		}
-		if startDate != nil && event.CreatedAt.Before(*startDate) {
-			continue
-		}
-		if endDate != nil && event.CreatedAt.After(*endDate) {
-			continue
-		}
-		filtered = append(filtered, event)
+	filtered := filterTestItems(s.webhookEvents, func(event models.WebhookEvent) bool {
+		return webhookEventMatches(event, accountID, serviceID, eventName, startDate, endDate)
+	})
+	page, total := paginateTestItems(filtered, limit, offset)
+	return page, total, nil
+}
+
+func webhookEventMatches(event models.WebhookEvent, accountID, serviceID uuid.UUID, eventName string, startDate, endDate *time.Time) bool {
+	if event.AccountID != accountID || event.ServiceID != serviceID {
+		return false
 	}
-	total := int64(len(filtered))
-	if offset > len(filtered) {
-		return []models.WebhookEvent{}, total, nil
+	if !optionalTestStringMatches(event.EventType, eventName) {
+		return false
 	}
-	end := offset + limit
-	if end > len(filtered) {
-		end = len(filtered)
-	}
-	return filtered[offset:end], total, nil
+	return testTimeInRange(event.CreatedAt, startDate, endDate)
 }
 
 func (s *workspaceTestStore) GetWebhookAnalytics(ctx context.Context, accountID, serviceID uuid.UUID, eventName string, startDate, endDate *time.Time) (models.WebhookAnalytics, error) {
@@ -821,53 +811,59 @@ func (s *workspaceTestStore) GetWebhookAnalytics(ctx context.Context, accountID,
 }
 
 func (s *workspaceTestStore) ListEngineExecutionEventsByService(ctx context.Context, filter store.EngineExecutionFilter) ([]models.EngineExecutionEvent, int64, error) {
-	filtered := make([]models.EngineExecutionEvent, 0, len(s.engineExecutionEvents))
-	for _, event := range s.engineExecutionEvents {
-		if event.ServiceID != filter.ServiceID || (filter.Transport != "" && event.Transport != filter.Transport) ||
-			(filter.Direction != "" && event.Direction != filter.Direction) || (filter.Status != "" && event.Status != filter.Status) {
-			continue
-		}
-		if filter.StartDate != nil && event.StartedAt.Before(*filter.StartDate) {
-			continue
-		}
-		if filter.EndDate != nil && event.StartedAt.After(*filter.EndDate) {
-			continue
-		}
-		filtered = append(filtered, event)
-	}
-	total := int64(len(filtered))
-	if filter.Offset >= len(filtered) {
-		return []models.EngineExecutionEvent{}, total, nil
-	}
-	end := filter.Offset + filter.Limit
-	if end > len(filtered) {
-		end = len(filtered)
-	}
-	return filtered[filter.Offset:end], total, nil
+	filtered := filterTestItems(s.engineExecutionEvents, func(event models.EngineExecutionEvent) bool {
+		return event.ServiceID == filter.ServiceID && engineExecutionEventMatches(event, filter)
+	})
+	page, total := paginateTestItems(filtered, filter.Limit, filter.Offset)
+	return page, total, nil
 }
 
 func (s *workspaceTestStore) ListEngineExecutionEventsByApp(ctx context.Context, filter store.EngineExecutionFilter) ([]models.EngineExecutionEvent, int64, error) {
-	filtered := make([]models.EngineExecutionEvent, 0, len(s.engineExecutionEvents))
-	for _, event := range s.engineExecutionEvents {
-		if event.AppFamilyID != filter.AppFamilyID || (filter.AppID != uuid.Nil && event.AppID != filter.AppID) ||
-			(filter.Transport != "" && event.Transport != filter.Transport) ||
-			(filter.Direction != "" && event.Direction != filter.Direction) || (filter.Status != "" && event.Status != filter.Status) {
-			continue
+	filtered := filterTestItems(s.engineExecutionEvents, func(event models.EngineExecutionEvent) bool {
+		return event.AppFamilyID == filter.AppFamilyID &&
+			(filter.AppID == uuid.Nil || event.AppID == filter.AppID) &&
+			engineExecutionEventMatches(event, filter)
+	})
+	page, total := paginateTestItems(filtered, filter.Limit, filter.Offset)
+	return page, total, nil
+}
+
+// These helpers keep the mock's in-memory behavior aligned with the store
+// contract while leaving each fake query small enough to audit independently.
+func filterTestItems[T any](items []T, matches func(T) bool) []T {
+	filtered := make([]T, 0, len(items))
+	for _, item := range items {
+		if matches(item) {
+			filtered = append(filtered, item)
 		}
-		if filter.StartDate != nil && event.StartedAt.Before(*filter.StartDate) {
-			continue
-		}
-		if filter.EndDate != nil && event.StartedAt.After(*filter.EndDate) {
-			continue
-		}
-		filtered = append(filtered, event)
 	}
-	total := int64(len(filtered))
-	if filter.Offset >= len(filtered) {
-		return []models.EngineExecutionEvent{}, total, nil
+	return filtered
+}
+
+func paginateTestItems[T any](items []T, limit, offset int) ([]T, int64) {
+	total := int64(len(items))
+	if offset >= len(items) {
+		return []T{}, total
 	}
-	end := min(filter.Offset+filter.Limit, len(filtered))
-	return filtered[filter.Offset:end], total, nil
+	return items[offset:min(offset+limit, len(items))], total
+}
+
+func engineExecutionEventMatches(event models.EngineExecutionEvent, filter store.EngineExecutionFilter) bool {
+	return optionalTestStringMatches(event.Transport, filter.Transport) &&
+		optionalTestStringMatches(event.Direction, filter.Direction) &&
+		optionalTestStringMatches(event.Status, filter.Status) &&
+		testTimeInRange(event.StartedAt, filter.StartDate, filter.EndDate)
+}
+
+func optionalTestStringMatches(actual, expected string) bool {
+	return expected == "" || actual == expected
+}
+
+func testTimeInRange(value time.Time, startDate, endDate *time.Time) bool {
+	if startDate != nil && value.Before(*startDate) {
+		return false
+	}
+	return endDate == nil || !value.After(*endDate)
 }
 
 func (s *workspaceTestStore) GetEngineExecutionAnalyticsByService(ctx context.Context, filter store.EngineExecutionFilter) (models.EngineExecutionAnalytics, error) {
@@ -907,57 +903,6 @@ func TestAddService_MissingServiceID_400(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %s", rr.Code, rr.Body.String())
-	}
-}
-
-// TestAddService_EmitsOTELSpan asserts an actual span is recorded, using the
-// same tracetest.InMemoryExporter pattern as TestGraphQLProxy_MutationEmitsOTELSpan
-// and TestRESTProxy_POST_EmitsOTELSpan (setupTestTracer, defined in
-// graphql_proxy_test.go, same package). A prior version of this test only
-// checked for a 200 response, which would still pass even if span emission
-// were deleted entirely -- this version actually exercises the claim in its name.
-func TestAddService_EmitsOTELSpan(t *testing.T) {
-	t.Skip("migrated to unified observability")
-	exporter := setupTestTracer(t)
-	svcID := uuid.New()
-	s := &workspaceTestStore{
-		accountID:   uuid.New(),
-		workspaceID: uuid.New(),
-	}
-	router := buildWorkspaceRouter(s, &mockVerifier{name: "Stripe"})
-
-	body := jsonBody(map[string]string{
-		"service_id":   svcID.String(),
-		"service_name": "whatever-the-client-sent",
-	})
-	req := httptest.NewRequest(http.MethodPost, "/workspace/services", body)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-API-Key", "fsk_test")
-
-	rr := httptest.NewRecorder()
-	router.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
-	}
-
-	spans := exporter.GetSpans()
-	if len(spans) != 1 {
-		t.Fatalf("expected 1 span, got %d", len(spans))
-	}
-	if spans[0].Name != "engine.workspace.add_service" {
-		t.Errorf("unexpected span name: %s", spans[0].Name)
-	}
-
-	attrs := spans[0].Attributes
-	found := map[string]bool{}
-	for _, a := range attrs {
-		found[string(a.Key)] = true
-	}
-	for _, want := range []string{"user_action", "account_id", "service_id", "outcome"} {
-		if !found[want] {
-			t.Errorf("expected span attribute %q, not present", want)
-		}
 	}
 }
 
@@ -1039,13 +984,9 @@ func TestRefreshServiceContract_RefreshesExactActivatedVersion(t *testing.T) {
 	if len(s.versionLookups) != 1 || s.versionLookups[0] != versionID {
 		t.Fatalf("expected one exact version lookup, got %#v", s.versionLookups)
 	}
-	if len(verifier.runtimeContractArgs) != 1 {
-		t.Fatalf("expected one runtime contract fetch, got %#v", verifier.runtimeContractArgs)
-	}
-	gotFetch := verifier.runtimeContractArgs[0]
-	if gotFetch.serviceID != serviceID || gotFetch.serviceVersionID != versionID || gotFetch.version != "2026-07-23" || gotFetch.apiKey != "fsk_test" {
-		t.Fatalf("unexpected runtime contract fetch args: %#v", gotFetch)
-	}
+	assertRuntimeContractFetch(t, verifier.runtimeContractArgs, runtimeContractFetchArgs{
+		serviceID: serviceID, serviceVersionID: versionID, version: "2026-07-23", apiKey: "fsk_test",
+	})
 	if len(s.snapshotWrites) != 1 || s.snapshotWrites[0].ContractHash != "contract-hash" {
 		t.Fatalf("expected one snapshot write, got %#v", s.snapshotWrites)
 	}
@@ -1133,12 +1074,7 @@ func TestRefreshMissingServiceContracts_BackfillsMissingSnapshotsInBatch(t *test
 	if s.missingContractLimit != 2 {
 		t.Fatalf("expected bounded missing lookup limit 2, got %d", s.missingContractLimit)
 	}
-	if len(verifier.batchRuntimeArgs) != 1 || len(verifier.batchRuntimeArgs[0]) != 2 {
-		t.Fatalf("expected one batched runtime-contract fetch, got %#v", verifier.batchRuntimeArgs)
-	}
-	if len(verifier.runtimeContractArgs) != 0 {
-		t.Fatalf("batch-capable verifier must not fall back to per-version fetches: %#v", verifier.runtimeContractArgs)
-	}
+	assertBatchedRuntimeContractFetch(t, verifier, 2)
 	if len(s.snapshotWrites) != 2 {
 		t.Fatalf("expected two snapshot writes, got %#v", s.snapshotWrites)
 	}
@@ -1148,6 +1084,26 @@ func TestRefreshMissingServiceContracts_BackfillsMissingSnapshotsInBatch(t *test
 	spans := exporter.GetSpans()
 	if len(spans) != 1 || spans[0].Name != "engine.workspace.refresh_missing_runtime_contracts" {
 		t.Fatalf("expected one missing-refresh span, got %#v", spans)
+	}
+}
+
+func assertRuntimeContractFetch(t *testing.T, got []runtimeContractFetchArgs, want runtimeContractFetchArgs) {
+	t.Helper()
+	if len(got) != 1 {
+		t.Fatalf("expected one runtime contract fetch, got %#v", got)
+	}
+	if got[0] != want {
+		t.Fatalf("unexpected runtime contract fetch args: got %#v, want %#v", got[0], want)
+	}
+}
+
+func assertBatchedRuntimeContractFetch(t *testing.T, verifier *runtimeContractVerifier, wantVersions int) {
+	t.Helper()
+	if len(verifier.batchRuntimeArgs) != 1 || len(verifier.batchRuntimeArgs[0]) != wantVersions {
+		t.Fatalf("expected one batched runtime-contract fetch of %d versions, got %#v", wantVersions, verifier.batchRuntimeArgs)
+	}
+	if len(verifier.runtimeContractArgs) != 0 {
+		t.Fatalf("batch-capable verifier must not fall back to per-version fetches: %#v", verifier.runtimeContractArgs)
 	}
 }
 
@@ -1532,7 +1488,7 @@ func (s *workspaceTestStore) ListAuthorizedAppRuntimesByAccount(_ context.Contex
 	var matched []store.AppRuntime
 	for _, artifact := range s.mockScopes {
 		_, permitted := allowed[artifact.AppID]
-		if artifact.AccountID == accountID && (kind == "" || artifact.Kind == kind) && (scope.All || permitted) {
+		if artifact.AccountID == accountID && (kind == "" || artifact.Kind == store.AppKind(kind)) && (scope.All || permitted) {
 			matched = append(matched, *artifact)
 		}
 	}
@@ -1611,7 +1567,7 @@ func (s *workspaceTestStore) ListAppRuntimes(ctx context.Context, appIDs []uuid.
 	return out, nil
 }
 
-func (s *workspaceTestStore) ListAppTokens(ctx context.Context, appFamilyID uuid.UUID) ([]store.AppToken, error) {
+func (s *workspaceTestStore) ListAppTokens(ctx context.Context, appFamilyID uuid.UUID) ([]store.AppTokenMetadata, error) {
 	return s.appTokens, nil
 }
 

@@ -28,9 +28,9 @@ func TestTokenValidator(t *testing.T) {
 	appID := uuid.New()
 	accountID := uuid.New()
 	appFamilyID := uuid.New()
-	sdkToken := "fused_sdk_test_token"
+	appToken := "fused_app_test_token"
 
-	hashedSDKToken := HashToken(sdkToken)
+	hashedAppToken := HashToken(appToken)
 
 	tests := []struct {
 		name          string
@@ -40,11 +40,11 @@ func TestTokenValidator(t *testing.T) {
 		expectedAccID uuid.UUID
 	}{
 		{
-			name:  "Valid SDK Token",
-			token: sdkToken,
+			name:  "Valid App Token",
+			token: appToken,
 			mock: &mockStore{
 				authorizeAppFn: func(ctx context.Context, id uuid.UUID, hash string) (*store.AuthProjection, error) {
-					if id == appID && hash == hashedSDKToken {
+					if id == appID && hash == hashedAppToken {
 						return &store.AuthProjection{AccountID: accountID, AppFamilyID: appFamilyID, AppID: appID, Version: "1.0.0", Kind: "sdk", AppStatus: "active"}, nil
 					}
 					return nil, errors.New("not found")
@@ -65,8 +65,8 @@ func TestTokenValidator(t *testing.T) {
 			expectedAccID: uuid.Nil,
 		},
 		{
-			name:  "SDK Not Found",
-			token: sdkToken,
+			name:  "App Not Found",
+			token: appToken,
 			mock: &mockStore{
 				authorizeAppFn: func(ctx context.Context, id uuid.UUID, hash string) (*store.AuthProjection, error) {
 					return nil, errors.New("not found")
@@ -101,7 +101,7 @@ func TestTokenValidator(t *testing.T) {
 	}
 }
 
-func TestTokenValidatorResolvesSDKToken(t *testing.T) {
+func TestTokenValidatorResolvesAppToken(t *testing.T) {
 	ctx := context.Background()
 	appID := uuid.New()
 	accountID := uuid.New()
@@ -119,10 +119,29 @@ func TestTokenValidatorResolvesSDKToken(t *testing.T) {
 	})
 	identity, err := v.Validate(ctx, appID, rawToken)
 	if err != nil {
-		t.Fatalf("expected raw SDK token to validate against stored hash, got %v", err)
+		t.Fatalf("expected raw app token to validate against stored hash, got %v", err)
 	}
 	if identity.AccountID != accountID || identity.AppFamilyID != appFamilyID || identity.AppID != appID || identity.AppVersion != "1.0.0" {
 		t.Fatalf("unexpected runtime identity: %#v", identity)
+	}
+}
+
+func TestRuntimeIdentityAllowsOnlyTokenPolicyOperations(t *testing.T) {
+	strict := RuntimeIdentity{TokenPolicy: store.AppTokenPolicy{AllowedOperations: []string{"users.get"}}}
+	if !strict.AllowsOperation("users.get") {
+		t.Fatal("strict token denied its allowed operation")
+	}
+	if strict.AllowsOperation("users.delete") {
+		t.Fatal("strict token allowed an operation outside its policy")
+	}
+
+	full := RuntimeIdentity{TokenPolicy: store.AppTokenPolicy{AllowAll: true}}
+	if !full.AllowsOperation("users.delete") {
+		t.Fatal("full-access token denied an operation")
+	}
+
+	if (RuntimeIdentity{}).AllowsOperation("users.get") {
+		t.Fatal("missing token policy must fail closed")
 	}
 }
 

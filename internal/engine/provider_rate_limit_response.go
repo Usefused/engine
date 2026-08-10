@@ -29,12 +29,31 @@ func (d *Dispatcher) syncProviderRateLimitResponse(ctx context.Context, srv *mod
 	}
 	observations, outcome := providerHeaderObservations(srv.RateLimit, request.Policies, response.Header, time.Now())
 	cooldown := providerCooldown(srv.RateLimit, response.StatusCode, response.Header.Get("Retry-After"), time.Now())
+	// Most successful responses carry no quota signal. Avoiding a no-op UPDATE
+	// keeps that common path from competing with the next acquisition solely to
+	// rewrite updated_at; actionable clamps and cooldowns remain fail-closed.
+	if !providerRateLimitSyncRequired(observations, cooldown) {
+		recordProviderHeaderSync(ctx, outcome, nil)
+		return nil
+	}
 	err = d.rateLimits.SyncProviderRateLimit(ctx, ratelimitpolicy.SyncRequest{
 		AccountID: request.AccountID, ServiceVersionID: request.ServiceVersionID,
 		CooldownUntil: cooldown, Observations: observations,
 	})
 	recordProviderHeaderSync(ctx, outcome, err)
 	return err
+}
+
+func providerRateLimitSyncRequired(observations []ratelimitpolicy.ResponseObservation, cooldown *time.Time) bool {
+	if cooldown != nil {
+		return true
+	}
+	for _, observation := range observations {
+		if observation.Limit != nil || observation.Remaining != nil || observation.ResetAt != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func providerHeaderObservations(config *ratelimitpolicy.Config, resolved []ratelimitpolicy.ResolvedPolicy, headers http.Header, now time.Time) ([]ratelimitpolicy.ResponseObservation, string) {

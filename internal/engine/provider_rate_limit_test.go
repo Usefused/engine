@@ -20,12 +20,14 @@ import (
 
 type providerRateLimitStoreStub struct {
 	mu        sync.Mutex
+	delay     time.Duration
 	decisions []ratelimitpolicy.Decision
 	requests  []ratelimitpolicy.AcquireRequest
 	syncs     []ratelimitpolicy.SyncRequest
 }
 
 func (s *providerRateLimitStoreStub) AcquireProviderRateLimit(_ context.Context, request ratelimitpolicy.AcquireRequest) (ratelimitpolicy.Decision, error) {
+	time.Sleep(s.delay)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.requests = append(s.requests, request)
@@ -134,8 +136,8 @@ func TestEveryRetryAttemptAcquiresImmediatelyBeforeTransport(t *testing.T) {
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("status=%d err=%v", status, err)
 	}
-	if attempts != 2 || len(rateStore.requests) != 2 || len(rateStore.syncs) != 2 {
-		t.Fatalf("attempts=%d acquires=%d syncs=%d, want 2 each", attempts, len(rateStore.requests), len(rateStore.syncs))
+	if attempts != 2 || len(rateStore.requests) != 2 || len(rateStore.syncs) != 0 {
+		t.Fatalf("attempts=%d acquires=%d syncs=%d, want two charges and no headerless sync writes", attempts, len(rateStore.requests), len(rateStore.syncs))
 	}
 }
 
@@ -154,10 +156,11 @@ func TestSSEAttemptAcquiresBeforeTransport(t *testing.T) {
 	}
 }
 
-func TestEachPaginationPageAcquires(t *testing.T) {
-	rateStore := &providerRateLimitStoreStub{}
+func TestEachPaginationPageAcquiresAndAccumulatesTimings(t *testing.T) {
+	rateStore := &providerRateLimitStoreStub{delay: 5 * time.Millisecond}
 	calls := 0
 	dispatcher := &Dispatcher{rateLimits: rateStore, client: &http.Client{Transport: paginationRoundTripper(func(request *http.Request) (*http.Response, error) {
+		time.Sleep(5 * time.Millisecond)
 		calls++
 		body := `{"items":[1],"next":"/items?page=2"}`
 		if calls == 2 {
@@ -170,12 +173,18 @@ func TestEachPaginationPageAcquires(t *testing.T) {
 		NextURL: &paginationpolicy.NextURLConfig{Next: paginationpolicy.ValueSource{Location: "body", Path: "$.next", ValueType: "url"}},
 	})
 	srv := &models.Service{BaseURL: "https://provider.test", ServiceVersionID: uuid.New(), RateLimit: fixedRateLimitFixture(5)}
-	ctx := WithProviderRateLimitIdentity(context.Background(), uuid.New(), uuid.New(), uuid.Nil)
+	timings := NewExecutionTimings()
+	ctx := ContextWithExecutionTimings(context.Background(), timings)
+	ctx = WithProviderRateLimitIdentity(ctx, uuid.New(), uuid.New(), uuid.Nil)
 	status, err := dispatcher.ExecuteStream(ctx, srv, explicitAnonymousEndpoint(&models.IntegrationObject{
 		Path: "/items", Method: http.MethodGet, Pagination: policy, StableKey: "rest:GET:/items",
 	}), nil, nil, nil, &mockStream{})
 	if err != nil || status != http.StatusOK || calls != 2 || len(rateStore.requests) != 2 {
 		t.Fatalf("status=%d err=%v calls=%d acquisitions=%d", status, err, calls, len(rateStore.requests))
+	}
+	snapshot := timings.SnapshotMilliseconds()
+	if snapshot["provider_total"] < 18 || snapshot["rate_limit_acquire"] < 8 {
+		t.Fatalf("pagination timings did not accumulate every page: %#v", snapshot)
 	}
 }
 
@@ -227,13 +236,22 @@ func TestProviderRateLimitTelemetryHasOnlySafeAggregateKeys(t *testing.T) {
 		_ = provider.Shutdown(context.Background())
 		otel.SetTracerProvider(previous)
 	})
-	recordProviderRateLimitDecision(context.Background(), ratelimitpolicy.Decision{
-		Allowed: true, PolicyCount: 2, ScopeKinds: []string{"connection"},
-		UnitTotals: map[string]int64{"points": 10},
-	}, nil)
+	dispatcher := NewDispatcherWithProviderRateLimits(&providerRateLimitStoreStub{decisions: []ratelimitpolicy.Decision{{Allowed: true}}})
+	timings := NewExecutionTimings()
+	ctx := ContextWithExecutionTimings(context.Background(), timings)
+	_, err := dispatcher.acquireProviderRateLimit(ctx, ratelimitpolicy.AcquireRequest{Policies: []ratelimitpolicy.ResolvedPolicy{
+		{Unit: "points", Cost: 10, ScopeKind: "connection"},
+		{Unit: "requests", Cost: 1, ScopeKind: "service_version"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	spans := recorder.Ended()
 	if len(spans) != 1 {
 		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	if _, ok := timings.SnapshotMilliseconds()["rate_limit_acquire"]; !ok {
+		t.Fatal("rate-limit acquisition timing was not recorded")
 	}
 	for _, attribute := range spans[0].Attributes() {
 		key := string(attribute.Key)

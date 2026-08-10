@@ -14,13 +14,8 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// This file used to also hold the wss://.../sdks/ws WebSocket transport
-// (SDKWebSocketHandler and its helpers). That path has been retired in favor
-// of EngineGRPCServer.SubscribeWebhooks (webhook_grpc_handler.go), which
-// rides the same gRPC channel every generated SDK already opens for
-// Execute. The functions below are transport-agnostic -- durability/retry/
-// queue-group fan-out logic and auth/label/filter helpers -- and are shared
-// by the gRPC handler unchanged.
+// These transport-agnostic helpers keep event validation, subject filtering,
+// delivery analytics, and attachment resolution separate from the gRPC stream.
 
 func validateRequestedEvents(ctx context.Context, s store.Store, events []string) []string {
 	validEvents := make([]string, 0)
@@ -119,7 +114,7 @@ func webhookDeliveryCount(message *nats.Msg) int {
 // links this runtime identity back to the exact kind: sdk/kind: mcp document
 // that created it, and that document's own webhook_attachment field
 // (sdkConfigDocument.WebhookAttachment) names the registration whose events
-// this connection may receive -- see plans/plan-webhook-kind.md's NATS/WS
+// this connection may receive -- see plans/plan-webhook-kind.md's subject-filter
 // section. A missing scope, a scope with no config_key (never happens for a
 // config-created scope, but defensive), or a config with no
 // webhook_attachment all return ("", nil): "this connection gets no webhook

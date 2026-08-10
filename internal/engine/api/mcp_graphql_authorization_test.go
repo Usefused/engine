@@ -253,6 +253,36 @@ func TestEngineGraphQLProtectedChildAddsPermission(t *testing.T) {
 	}
 }
 
+func TestEngineGraphQLAppTokensRequiresManagePermissionForRequestedFamily(t *testing.T) {
+	workspaceID := uuid.New()
+	familyID := uuid.New()
+	s := &workspaceTestStore{accountID: uuid.New()}
+	schema := authorizationTestSchema(t, s)
+	handler := mcpGraphQLHandler(schema)
+	actor := actorWithWorkspacePermissions(t, workspaceID, accesscontrol.PermissionAppRead)
+	request := httptest.NewRequest(http.MethodPost, "/engine/graphql", strings.NewReader(`{"query":"query { appTokens(app_family_id: \"`+familyID.String()+`\") { id allow expires_at } }"}`))
+	request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), actor))
+	response := httptest.NewRecorder()
+
+	handler(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: %s", response.Code, response.Body.String())
+	}
+	var denial struct {
+		Missing []struct {
+			Permission accesscontrol.Permission `json:"permission"`
+			ResourceID uuid.UUID                `json:"resource_id"`
+		} `json:"missing"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &denial); err != nil {
+		t.Fatalf("decode denial: %v", err)
+	}
+	if len(denial.Missing) != 1 || denial.Missing[0].Permission != accesscontrol.PermissionAppTokensManage || denial.Missing[0].ResourceID != familyID {
+		t.Fatalf("missing = %#v, want app.tokens.manage for %s", denial.Missing, familyID)
+	}
+}
+
 func hasRequirementPermission(requirements []accesscontrol.Requirement, permission accesscontrol.Permission) bool {
 	for _, requirement := range requirements {
 		if requirement.Permission == permission {

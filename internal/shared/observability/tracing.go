@@ -347,15 +347,7 @@ func Close() {
 
 type contextKey string
 
-const (
-	threadKey    contextKey = "fused_trace_thread"
-	KeepAliveKey contextKey = "fused_trace_keepalive"
-)
-
-// NewContext returns a new context with the given Thread attached.
-func NewContext(ctx context.Context, t Thread) context.Context {
-	return context.WithValue(ctx, threadKey, t)
-}
+const threadKey contextKey = "fused_trace_thread"
 
 // ThreadFromContext retrieves the Thread from the context, or a noopThread if absent.
 func ThreadFromContext(ctx context.Context) Thread {
@@ -363,12 +355,4 @@ func ThreadFromContext(ctx context.Context) Thread {
 		return t
 	}
 	return &noopThread{}
-}
-
-// DetachThread sets the keep-alive flag in the context so HTTP middleware does
-// not close the thread when the request finishes (e.g. async workers).
-func DetachThread(ctx context.Context) {
-	if keepAlive, ok := ctx.Value(KeepAliveKey).(*bool); ok {
-		*keepAlive = true
-	}
 }

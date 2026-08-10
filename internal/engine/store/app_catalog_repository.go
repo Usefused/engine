@@ -21,8 +21,8 @@ type AppCatalogItem struct {
 	Name                  string
 	Description           string
 	Version               string
-	Kind                  string
-	Status                string
+	Kind                  AppKind
+	Status                AppStatus
 	CreatedAt             time.Time
 	TargetLanguage        string
 	GeneratorVersion      string

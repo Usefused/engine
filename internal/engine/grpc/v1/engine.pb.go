@@ -1422,7 +1422,7 @@ type WebhookEvent struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	Event         string                 `protobuf:"bytes,2,opt,name=event,proto3" json:"event,omitempty"`
-	Payload       []byte                 `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"` // JSON-encoded {body, headers, query, params, path} -- same shape as today's WS frame
+	Payload       []byte                 `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"` // JSON-encoded {body, headers, query, params, path}
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

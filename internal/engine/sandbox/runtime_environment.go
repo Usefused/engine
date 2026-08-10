@@ -106,7 +106,10 @@ func resolveRuntimeServerTemplate(metadata *fusedobject.ServiceMetadata, resolut
 		return resolution, nil
 	}
 	if len(resolution.Variables) == 0 {
-		return resolution, nil
+		// Registry may preserve a provider's protocol-relative source URL, but
+		// execution must never infer a scheme. A workspace override or trusted
+		// connection-resource binding has to resolve it to an absolute URL.
+		return resolution, serverrouting.ValidateResolvedURL(resolution.BaseURL)
 	}
 	supplied, err := serverVariableValues(credentials, values)
 	if err != nil {

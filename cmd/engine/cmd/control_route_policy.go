@@ -78,8 +78,8 @@ var dynamicControlRequirements = map[string]dynamicRequirementKind{
 	http.MethodPost + " /apps/{app_id}/undeprecate":          dynamicAppAccess,
 	http.MethodDelete + " /apps/{app_id}/":                   dynamicAppAccess,
 	http.MethodGet + " /sdks/{app_id}/download":              dynamicAppAccess,
-	http.MethodPost + " /workspace/sdk-tokens":               dynamicAppTokenAccess,
-	http.MethodDelete + " /workspace/sdk-tokens":             dynamicAppTokenAccess,
+	http.MethodPost + " /workspace/app-tokens":               dynamicAppTokenAccess,
+	http.MethodDelete + " /workspace/app-tokens":             dynamicAppTokenAccess,
 }
 
 // These endpoints need a valid current identity but deliberately have no RBAC
@@ -96,10 +96,6 @@ func workspaceRequirement(permission accesscontrol.Permission) routeRequirement 
 
 func pathRequirement(permission accesscontrol.Permission, resourceType accesscontrol.ResourceType, param string) routeRequirement {
 	return routeRequirement{permission: permission, resourceType: resourceType, source: resourceFromPath, pathParam: param}
-}
-
-func queryRequirement(permission accesscontrol.Permission, resourceType accesscontrol.ResourceType, param string) routeRequirement {
-	return routeRequirement{permission: permission, resourceType: resourceType, source: resourceFromQuery, pathParam: param}
 }
 
 // controlRESTPolicies is the server-owned, machine-validated authorization
@@ -147,8 +143,8 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodPut, "/workspace/secrets", false, nil},
 	{http.MethodPut, "/workspace/secrets/bulk", false, nil},
 	{http.MethodDelete, "/workspace/secrets", false, nil},
-	{http.MethodPost, "/workspace/sdk-tokens", false, nil},
-	{http.MethodDelete, "/workspace/sdk-tokens", false, nil},
+	{http.MethodPost, "/workspace/app-tokens", false, nil},
+	{http.MethodDelete, "/workspace/app-tokens", false, nil},
 
 	{http.MethodPost, "/workspace/config/plan", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionWorkspaceRead),

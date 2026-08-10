@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestEngineSchemaDefinesAccessControlFoundation(t *testing.T) {
@@ -103,12 +105,53 @@ func TestEngineAccessControlSchemaInitializationIsIdempotent(t *testing.T) {
 	}
 	defer pool.Close()
 
-	// Replaying initialization is how every Engine restart upgrades an existing
-	// installation, so each statement must converge without manual migration state.
+	firstMigration := readEngineMigrationRecord(t, ctx, pool)
+
+	// Base schema reconciliation remains idempotent, while the ledger ensures the
+	// transactional migration batch is not replayed on every restart.
 	if err := initEngineSchema(ctx, pool); err != nil {
 		t.Fatalf("second initEngineSchema: %v", err)
 	}
 
+	assertEngineMigrationNotReplayed(t, ctx, pool, firstMigration)
+	assertAccessControlTablesExist(t, ctx, pool)
+	assertAuthorizationStateSingleton(t, ctx, pool)
+}
+
+type engineMigrationRecord struct {
+	Name      string
+	AppliedAt time.Time
+}
+
+func readEngineMigrationRecord(t *testing.T, ctx context.Context, pool *pgxpool.Pool) engineMigrationRecord {
+	t.Helper()
+	var record engineMigrationRecord
+	if err := pool.QueryRow(ctx, `SELECT name, applied_at FROM fused_engine_schema_migrations WHERE version = $1`, engineMigrationVersion).Scan(&record.Name, &record.AppliedAt); err != nil {
+		t.Fatalf("read Engine migration ledger entry: %v", err)
+	}
+	return record
+}
+
+func assertEngineMigrationNotReplayed(t *testing.T, ctx context.Context, pool *pgxpool.Pool, first engineMigrationRecord) {
+	t.Helper()
+	var migrationRows int
+	var second engineMigrationRecord
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*), MIN(name), MIN(applied_at) FROM fused_engine_schema_migrations`).Scan(&migrationRows, &second.Name, &second.AppliedAt); err != nil {
+		t.Fatalf("read Engine migration ledger after restart: %v", err)
+	}
+	if migrationRows != len(engineMigrations()) {
+		t.Fatalf("Engine migration ledger rows = %d, want %d", migrationRows, len(engineMigrations()))
+	}
+	if first.Name != engineMigrationName || second.Name != first.Name {
+		t.Fatalf("Engine migration name changed across restart: first=%q second=%q", first.Name, second.Name)
+	}
+	if !second.AppliedAt.Equal(first.AppliedAt) {
+		t.Fatalf("Engine migration replayed: first=%s second=%s", first.AppliedAt, second.AppliedAt)
+	}
+}
+
+func assertAccessControlTablesExist(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
 	for _, table := range []string{
 		"fused_subjects",
 		"fused_control_credentials",
@@ -132,7 +175,10 @@ func TestEngineAccessControlSchemaInitializationIsIdempotent(t *testing.T) {
 			t.Fatalf("expected table %s to exist", table)
 		}
 	}
+}
 
+func assertAuthorizationStateSingleton(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
 	var stateRows int
 	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM fused_authorization_state").Scan(&stateRows); err != nil {
 		t.Fatalf("count authorization state: %v", err)

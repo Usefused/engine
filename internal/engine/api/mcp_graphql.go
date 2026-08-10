@@ -40,12 +40,8 @@ import (
 // Lifecycle resolvers delegate to applifecycle.Service so SDK and MCP versions
 // cannot drift on deprecation or irreversible deactivation semantics.
 
-// mcpGraphQLContextKey namespaces this file's two context values
-// (authenticated actor, inbound request) separately from the package's other
-// context.WithValue usages (e.g. sandbox.go's "sdk-token"), which all use
-// bare string keys -- an unexported type here avoids colliding with any of
-// those by construction, at the one call site (MCPGraphQLHandler) that needs
-// to be internally consistent, not interoperate with those other keys.
+// mcpGraphQLContextKey prevents the authenticated actor, inbound request, and
+// revision sink from colliding with context values owned by other boundaries.
 type mcpGraphQLContextKey string
 
 const (
@@ -409,7 +405,7 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"publicServiceInsights":       publicServiceInsightsGraphQLField(s, publicInsightReader),
 			"serviceConsumers":            serviceConsumersGraphQLField(s),
 			"workspaceNotifications":      workspaceNotificationsGraphQLField(configStore, s, registryClient),
-			"sdkTokens":                   sdkTokensGraphQLField(s),
+			"appTokens":                   appTokensGraphQLField(s),
 			"sdkBuckets":                  sdkBucketsGraphQLField(s),
 			"bucketSDKPage":               bucketSDKPageGraphQLField(s),
 			"bucketServicePage":           bucketServicePageGraphQLField(s),
@@ -564,7 +560,7 @@ func mcpServerByNameField(s store.Store) *graphql.Field {
 // returns the server it just acted on -- one mapping, not five copies that
 // could drift on which fields it exposes.
 func mcpServerFields(r *http.Request, scope store.AppRuntime) map[string]interface{} {
-	active := scope.Status == "" || scope.Status == "active" || scope.Status == "deprecated"
+	active := scope.Status == "" || scope.Status.Runnable()
 	return map[string]interface{}{
 		"id":             scope.AppID.String(),
 		"name":           scope.Name,

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/Usefused/engine/internal/engine/auth"
+	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
@@ -14,7 +15,7 @@ import (
 type dummyTokenValidator struct{}
 
 func (v *dummyTokenValidator) Validate(ctx context.Context, appID uuid.UUID, token string) (auth.RuntimeIdentity, error) {
-	return auth.RuntimeIdentity{AccountID: uuid.New(), AppFamilyID: uuid.New(), AppID: appID, AppVersion: "1.0.0", Kind: "sdk", Status: "active"}, nil
+	return auth.RuntimeIdentity{AccountID: uuid.New(), AppFamilyID: uuid.New(), AppID: appID, AppVersion: "1.0.0", Kind: "sdk", Status: "active", TokenPolicy: store.AppTokenPolicy{AllowAll: true}}, nil
 }
 
 // richMockCache serves a full scope + Fused object so engineExecuteCore can be

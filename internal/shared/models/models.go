@@ -118,6 +118,11 @@ func (e RuntimeEntitlement) Normalized() RuntimeEntitlement {
 	// Drift monitoring is part of every plan. Normalizing it to true also
 	// unlocks Engines that persisted the former Dev-plan false value.
 	e.DriftMonitoringEnabled = true
+	e = e.withRuntimeDefaults(defaults)
+	return e.withMissingLimitDefaults(defaults)
+}
+
+func (e RuntimeEntitlement) withRuntimeDefaults(defaults RuntimeEntitlement) RuntimeEntitlement {
 	if e.Plan == "" {
 		e.Plan = defaults.Plan
 	}
@@ -133,29 +138,28 @@ func (e RuntimeEntitlement) Normalized() RuntimeEntitlement {
 	if e.RefreshedAt.IsZero() {
 		e.RefreshedAt = time.Now().UTC()
 	}
+	return e
+}
 
+func (e RuntimeEntitlement) withMissingLimitDefaults(defaults RuntimeEntitlement) RuntimeEntitlement {
 	// nil means the field was missing (older Registry or JSON zero value).
 	// Default to unlimited (-1) so missing fields never accidentally block.
-	// Explicit 0 is preserved: it means "not allowed".
-	if e.MaxBuckets == nil {
-		e.MaxBuckets = defaults.MaxBuckets
-	}
-	if e.MaxSDKFamilies == nil {
-		e.MaxSDKFamilies = defaults.MaxSDKFamilies
-	}
-	if e.MaxMCPFamilies == nil {
-		e.MaxMCPFamilies = defaults.MaxMCPFamilies
-	}
-	if e.MaxServices == nil {
-		e.MaxServices = defaults.MaxServices
-	}
-	if e.MaxSandboxConcurrency == nil {
-		e.MaxSandboxConcurrency = defaults.MaxSandboxConcurrency
-	}
-	if e.ExecutionRetentionDays == nil {
-		e.ExecutionRetentionDays = defaults.ExecutionRetentionDays
-	}
+	e.MaxBuckets = entitlementLimitOrDefault(e.MaxBuckets, defaults.MaxBuckets)
+	e.MaxSDKFamilies = entitlementLimitOrDefault(e.MaxSDKFamilies, defaults.MaxSDKFamilies)
+	e.MaxMCPFamilies = entitlementLimitOrDefault(e.MaxMCPFamilies, defaults.MaxMCPFamilies)
+	e.MaxServices = entitlementLimitOrDefault(e.MaxServices, defaults.MaxServices)
+	e.MaxSandboxConcurrency = entitlementLimitOrDefault(e.MaxSandboxConcurrency, defaults.MaxSandboxConcurrency)
+	e.ExecutionRetentionDays = entitlementLimitOrDefault(e.ExecutionRetentionDays, defaults.ExecutionRetentionDays)
 	return e
+}
+
+func entitlementLimitOrDefault(value, fallback *int) *int {
+	// An explicit zero blocks the capability, so only a missing pointer may
+	// inherit the compatibility default.
+	if value != nil {
+		return value
+	}
+	return fallback
 }
 
 type EngineUsageIncrement struct {
@@ -633,46 +637,6 @@ func ComputeNextVersionName(existing map[string]bool, now time.Time) string {
 			return candidate
 		}
 	}
-}
-
-// FindVersionByID returns the version with the given ID, or nil if none
-// matches. Pure lookup logic, no I/O -- shared by the repository-layer
-// ResolveVersionConfig (SDK generation) and available to any other caller
-// that already has a []ServiceVersion slice in hand, so "look up a
-// version by ID" isn't reimplemented at every call site.
-func FindVersionByID(versions []ServiceVersion, id uuid.UUID) *ServiceVersion {
-	for i := range versions {
-		if versions[i].ID == id {
-			return &versions[i]
-		}
-	}
-	return nil
-}
-
-// FindLatestPublicVersion returns the latest public service version by the
-// canonical ordering used for omitted-version resolution.
-func FindLatestPublicVersion(versions []ServiceVersion) *ServiceVersion {
-	var best *ServiceVersion
-	for i := range versions {
-		v := &versions[i]
-		if v.Status != VersionStatusPublic {
-			continue
-		}
-		if best == nil || serviceVersionNewer(v, best) {
-			best = v
-		}
-	}
-	return best
-}
-
-func serviceVersionNewer(candidate, current *ServiceVersion) bool {
-	if candidate.CreatedAt.After(current.CreatedAt) {
-		return true
-	}
-	if candidate.CreatedAt.Before(current.CreatedAt) {
-		return false
-	}
-	return candidate.ID.String() > current.ID.String()
 }
 
 // ─── Integration Object ──────────────────────────────────────────────────────

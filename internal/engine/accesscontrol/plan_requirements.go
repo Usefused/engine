@@ -5,11 +5,13 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+
+	"github.com/Usefused/engine/internal/engine/workspaceplan"
 )
 
 type workspacePlanAction struct {
-	Type      string    `json:"type"`
-	ServiceID uuid.UUID `json:"service_id"`
+	Type      workspaceplan.ActionType `json:"type"`
+	ServiceID uuid.UUID                `json:"service_id"`
 }
 
 // WorkspacePlanApplyRequirements derives only plan-known apply authority.
@@ -35,19 +37,20 @@ func WorkspacePlanApplyRequirements(workspaceID uuid.UUID, raw json.RawMessage) 
 }
 
 func workspaceActionApplyRequirement(workspaceID uuid.UUID, action workspacePlanAction) (Requirement, error) {
-	switch action.Type {
-	case "add_service", "enable_service_version", "remove_service", "disable_service_version", "deprecate_service", "deprecate_version",
-		"publish_service_execution_policy", "publish_service_version_execution_policy", "attach_connection_profile", "detach_connection_profile", "publish_connection_profile",
-		"set_service_public", "set_service_private", "set_service_version_public", "set_service_version_private",
-		"set_local_execution_policy", "reset_local_execution_policy", "set_local_service_version_execution_policy", "reset_local_service_version_execution_policy":
+	class, valid := action.Type.AuthorizationClass()
+	if !valid {
+		return Requirement{}, fmt.Errorf("%w: unsupported workspace action %q", ErrPolicyDenied, action.Type)
+	}
+	switch class {
+	case workspaceplan.AuthorizationServiceManage:
 		if action.ServiceID == uuid.Nil {
 			return Requirement{}, ErrInvalidRequirement
 		}
 		return Requirement{Permission: PermissionServiceManage, Resource: ResourceRef{Type: ResourceService, ID: action.ServiceID}}, nil
-	case "create_bucket_binding":
+	case workspaceplan.AuthorizationCredentialsManage:
 		return workspaceRequirement(workspaceID, PermissionCredentialsManage), nil
 	default:
-		return Requirement{}, fmt.Errorf("%w: unsupported workspace action %q", ErrPolicyDenied, action.Type)
+		return Requirement{}, ErrInvalidRequirement
 	}
 }
 

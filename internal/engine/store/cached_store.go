@@ -14,7 +14,6 @@ import (
 	"github.com/Usefused/engine/internal/shared/messaging"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/observability"
-	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
 )
 
 // cachedStore wraps a store.Store with an in-memory cache to ensure
@@ -79,30 +78,6 @@ func (s *cachedStore) CountProjectedActiveServices(ctx context.Context, desiredI
 		return 0, 0, errors.New("store does not support workspace service capacity")
 	}
 	return counter.CountProjectedActiveServices(ctx, desiredIDs, removableIDs)
-}
-
-func (s *cachedStore) AcquireProviderRateLimit(ctx context.Context, request ratelimitpolicy.AcquireRequest) (ratelimitpolicy.Decision, error) {
-	coordinator, err := s.providerRateLimitStore()
-	if err != nil {
-		return ratelimitpolicy.Decision{}, err
-	}
-	return coordinator.AcquireProviderRateLimit(ctx, request)
-}
-
-func (s *cachedStore) SyncProviderRateLimit(ctx context.Context, request ratelimitpolicy.SyncRequest) error {
-	coordinator, err := s.providerRateLimitStore()
-	if err != nil {
-		return err
-	}
-	return coordinator.SyncProviderRateLimit(ctx, request)
-}
-
-func (s *cachedStore) providerRateLimitStore() (ProviderRateLimitStore, error) {
-	coordinator, ok := s.Store.(ProviderRateLimitStore)
-	if !ok {
-		return nil, errors.New("store does not support provider rate limits")
-	}
-	return coordinator, nil
 }
 
 func (s *cachedStore) ListSDKPackageLeaseRenewals(ctx context.Context, after uuid.UUID, limit int) ([]models.SDKPackageLeaseRenewal, error) {
@@ -527,6 +502,14 @@ func (s *cachedStore) ListServiceContractEndpointsByNames(ctx context.Context, s
 		return nil, err
 	}
 	return delegate.ListServiceContractEndpointsByNames(ctx, serviceID, serviceVersionID, endpointNames)
+}
+
+func (s *cachedStore) ListServiceContractEndpointsForSelections(ctx context.Context, selections []ServiceContractEndpointSelection, endpointNames []string) ([]ServiceContractEndpointMatch, error) {
+	delegate, err := s.serviceContractSnapshotStore()
+	if err != nil {
+		return nil, err
+	}
+	return delegate.ListServiceContractEndpointsForSelections(ctx, selections, endpointNames)
 }
 
 func (s *cachedStore) ListServiceContractEndpointsByIDs(ctx context.Context, serviceID, serviceVersionID uuid.UUID, endpointIDs []uuid.UUID) ([]fusedobject.Endpoint, error) {

@@ -141,6 +141,48 @@ func TestPaginationStrategiesReturnOneAggregatedJSONResponse(t *testing.T) {
 	}
 }
 
+func TestPaginationAggregatesRootArrayPages(t *testing.T) {
+	policy := modelPolicy(paginationpolicy.Config{
+		Version: 2, Type: "offset", ItemsPath: "$",
+		Offset: &paginationpolicy.OffsetConfig{
+			Request:         paginationpolicy.RequestTarget{Location: "query", Name: "offset"},
+			Increment:       paginationpolicy.OffsetIncrement{Mode: "items_returned"},
+			PageSize:        &paginationpolicy.PageSize{Target: paginationpolicy.RequestTarget{Location: "query", Name: "limit"}, Value: 2},
+			StopOnShortPage: true,
+		},
+	})
+	calls := 0
+	dispatcher := &Dispatcher{client: &http.Client{Transport: paginationRoundTripper(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Query().Get("offset") != []string{"0", "2"}[calls] {
+			t.Fatalf("offset was not advanced: %s", request.URL.RawQuery)
+		}
+		if request.URL.Query().Get("limit") != "2" {
+			t.Fatalf("page size was not injected: %s", request.URL.RawQuery)
+		}
+		body := []string{"[1,2]", "[3]"}[calls]
+		calls++
+		return paginationResponse(request, body, nil), nil
+	})}}
+	stream := &mockStream{}
+	status, err := dispatcher.ExecuteStream(context.Background(), &models.Service{BaseURL: "https://provider.test"}, explicitAnonymousEndpoint(&models.IntegrationObject{Path: "/items", Method: http.MethodGet, Pagination: policy}), nil, nil, nil, stream)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("ExecuteStream status=%d err=%v", status, err)
+	}
+	var response []int
+	if len(stream.chunks) != 1 || json.Unmarshal(stream.chunks[0], &response) != nil {
+		t.Fatalf("aggregated response = %q", stream.chunks)
+	}
+	want := []int{1, 2, 3}
+	if len(response) != len(want) {
+		t.Fatalf("aggregated items = %#v, want %#v", response, want)
+	}
+	for index := range want {
+		if response[index] != want[index] {
+			t.Fatalf("aggregated items = %#v, want %#v", response, want)
+		}
+	}
+}
+
 func TestPaginationRejectsCrossOriginNextURL(t *testing.T) {
 	policy := modelPolicy(paginationpolicy.Config{
 		Version: 2, Type: "next_url", ItemsPath: "$.items",

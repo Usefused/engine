@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/Usefused/engine/internal/shared/models"
@@ -22,14 +23,28 @@ const appFamilyCollectionLimit = 500
 // --- AppFamily CRUD ---
 
 func (s *postgresStore) CreateOrGetAppFamily(ctx context.Context, family AppFamily) (*AppFamily, bool, error) {
+	if !family.Kind.Valid() {
+		return nil, false, ErrAppKindInvalid
+	}
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.store.app_family.create")
 	defer span.End()
 	span.SetAttributes(
 		attribute.String("app.family_id", family.AppFamilyID.String()),
-		attribute.String("app.kind", family.Kind),
+		attribute.String("app.kind", family.Kind.String()),
 	)
 
-	row := s.db.QueryRow(ctx, `
+	return createOrGetAppFamily(ctx, s.db, family)
+}
+
+type appFamilyQueryer interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+// createOrGetAppFamily is shared by lifecycle reservation and atomic config
+// apply. Both operations need identical conflict identity and scan semantics,
+// while their callers retain responsibility for transaction ownership.
+func createOrGetAppFamily(ctx context.Context, queryer appFamilyQueryer, family AppFamily) (*AppFamily, bool, error) {
+	row := queryer.QueryRow(ctx, `
 		INSERT INTO fused_app_families AS family
 			(app_family_id, account_id, kind, canonical_name, display_name,
 			 target_language, owner_subject_id, owner_team_id)
@@ -142,6 +157,12 @@ func (s *postgresStore) CountAppFamilies(ctx context.Context, accountID uuid.UUI
 // --- App (version) CRUD ---
 
 func (s *postgresStore) PublishAppVersion(ctx context.Context, app App) (*App, bool, error) {
+	if !app.Status.Valid() {
+		return nil, false, ErrAppStatusInvalid
+	}
+	if !app.ExpectedFamilyKind.Valid() {
+		return nil, false, ErrAppKindInvalid
+	}
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.store.app.create")
 	defer span.End()
 	span.SetAttributes(
@@ -155,6 +176,20 @@ func (s *postgresStore) PublishAppVersion(ctx context.Context, app App) (*App, b
 		return nil, false, fmt.Errorf("publish app: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	persisted, created, err := publishAppVersionTx(ctx, tx, app)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, false, fmt.Errorf("publish app: commit: %w", err)
+	}
+	return persisted, created, nil
+}
+
+// publishAppVersionTx is the single persistence implementation for immutable
+// app publication. Standalone lifecycle operations and atomic config apply both
+// use it so tombstone, immutability, and capability semantics cannot drift.
+func publishAppVersionTx(ctx context.Context, tx pgx.Tx, app App) (*App, bool, error) {
 	if err := lockAppFamily(ctx, tx, app); err != nil {
 		return nil, false, err
 	}
@@ -163,7 +198,7 @@ func (s *postgresStore) PublishAppVersion(ctx context.Context, app App) (*App, b
 		return nil, false, err
 	}
 	if existing != nil {
-		if existing.SourceHash != app.SourceHash {
+		if !sameImmutableAppVersion(*existing, app) {
 			return nil, false, ErrAppVersionImmutable
 		}
 		return existing, false, nil
@@ -177,10 +212,20 @@ func (s *postgresStore) PublishAppVersion(ctx context.Context, app App) (*App, b
 	if err := insertAppCapabilities(ctx, tx, app.AppID, app.CapabilityKeys); err != nil {
 		return nil, false, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, false, fmt.Errorf("publish app: commit: %w", err)
-	}
 	return &app, true, nil
+}
+
+func sameImmutableAppVersion(existing, requested App) bool {
+	if existing.SourceHash != requested.SourceHash || existing.ConfigKey != requested.ConfigKey ||
+		existing.CapabilityHash != requested.CapabilityHash || existing.ScopeSchemaVersion != requested.ScopeSchemaVersion ||
+		existing.GeneratorVersion != requested.GeneratorVersion {
+		return false
+	}
+	var existingSelections, requestedSelections any
+	if json.Unmarshal(existing.Selections, &existingSelections) != nil || json.Unmarshal(requested.Selections, &requestedSelections) != nil {
+		return false
+	}
+	return reflect.DeepEqual(existingSelections, requestedSelections)
 }
 
 func insertAppCapabilities(ctx context.Context, tx pgx.Tx, appID uuid.UUID, capabilityKeys []string) error {
@@ -206,25 +251,52 @@ func (s *postgresStore) AssessAppCapabilityExpansion(
 ) (bool, int, error) {
 	var expands bool
 	var tokenCount int
+	// Expansion and impact share one database snapshot. Matching strict token
+	// scopes here avoids both an N+1 lookup and a race-prone in-memory diff.
 	err := s.db.QueryRow(ctx, `
 		WITH incoming AS (
 			SELECT DISTINCT capability_key
 			FROM unnest($2::text[]) AS capability_key
+		), runnable_apps AS (
+			SELECT app_id
+			FROM fused_apps
+			WHERE app_family_id = $1 AND status IN ('active', 'deprecated')
 		), existing AS (
 			SELECT DISTINCT capability.capability_key
-			FROM fused_apps app
+			FROM runnable_apps app
 			JOIN fused_app_capabilities capability ON capability.app_id = app.app_id
-			WHERE app.app_family_id = $1 AND app.status IN ('active', 'deprecated')
 		), missing AS (
 			SELECT capability_key FROM incoming
 			EXCEPT
 			SELECT capability_key FROM existing
+		), missing_operations AS (
+			SELECT regexp_replace(
+			         capability_key,
+			         '^service:[^:]+:[^:]+:operation:',
+			         ''
+			       ) AS operation_name
+			FROM missing
+			WHERE capability_key ~ '^service:[^:]+:[^:]+:operation:'
+		), expansion AS (
+			SELECT EXISTS(SELECT 1 FROM runnable_apps)
+			   AND EXISTS(SELECT 1 FROM missing) AS expands
+		), affected_tokens AS (
+			SELECT COUNT(*) AS token_count
+			FROM fused_app_tokens token
+			WHERE token.app_family_id = $1
+			  AND (token.expires_at IS NULL OR token.expires_at > NOW())
+			  AND (SELECT expands FROM expansion)
+			  AND (
+			    token.allow_all
+			    OR EXISTS (
+			      SELECT 1
+			      FROM missing_operations operation
+			      WHERE operation.operation_name = ANY(token.allowed_operations)
+			    )
+			  )
 		)
-		SELECT EXISTS(
-		         SELECT 1 FROM fused_apps
-		         WHERE app_family_id = $1 AND status IN ('active', 'deprecated')
-		       ) AND EXISTS(SELECT 1 FROM missing),
-		       (SELECT COUNT(*) FROM fused_app_tokens WHERE app_family_id = $1)
+		SELECT expansion.expands, affected_tokens.token_count
+		FROM expansion CROSS JOIN affected_tokens
 	`, appFamilyID, capabilityKeys).Scan(&expands, &tokenCount)
 	if err != nil {
 		return false, 0, fmt.Errorf("assess app capability expansion: %w", err)
@@ -234,16 +306,20 @@ func (s *postgresStore) AssessAppCapabilityExpansion(
 
 func lockAppFamily(ctx context.Context, tx pgx.Tx, app App) error {
 	var found uuid.UUID
+	var kind AppKind
 	err := tx.QueryRow(ctx, `
-		SELECT app_family_id FROM fused_app_families
+		SELECT app_family_id, kind FROM fused_app_families
 		WHERE app_family_id = $1 AND account_id = $2
 		FOR UPDATE
-	`, app.AppFamilyID, app.AccountID).Scan(&found)
+	`, app.AppFamilyID, app.AccountID).Scan(&found, &kind)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrAppFamilyNotFound
 	}
 	if err != nil {
 		return fmt.Errorf("publish app: lock family: %w", err)
+	}
+	if kind != app.ExpectedFamilyKind {
+		return ErrAppFamilyKindMismatch
 	}
 	return nil
 }
@@ -556,15 +632,14 @@ func (s *postgresStore) AuthorizeApp(ctx context.Context, appID uuid.UUID, token
 	err := s.db.QueryRow(ctx, `
 		WITH matched AS (
 			SELECT a.account_id, f.app_family_id, a.app_id, a.version, f.kind, a.status,
-			       COALESCE(fb.bucket_id, '00000000-0000-0000-0000-000000000000'::uuid) AS bucket_id,
-			       a.selections, a.capability_hash, t.id AS token_id
+			       t.id AS token_id, t.allow_all, t.allowed_operations, t.expires_at
 			FROM fused_apps a
 			JOIN fused_app_families f
 			  ON f.app_family_id = a.app_family_id AND f.account_id = a.account_id
 			JOIN fused_app_tokens t ON t.app_family_id = f.app_family_id
-			LEFT JOIN fused_app_family_buckets fb ON fb.app_family_id = f.app_family_id
 			WHERE a.app_id = $1 AND t.token_hash = $2
 			  AND a.status IN ('active', 'deprecated')
+			  AND (t.expires_at IS NULL OR t.expires_at > NOW())
 		), touched AS (
 			UPDATE fused_app_tokens token
 			SET last_used_at = NOW()
@@ -572,13 +647,13 @@ func (s *postgresStore) AuthorizeApp(ctx context.Context, appID uuid.UUID, token
 			WHERE token.id = matched.token_id
 			RETURNING token.id
 		)
-		SELECT account_id, app_family_id, app_id, version, kind, status, bucket_id,
-		       selections, capability_hash
+		SELECT account_id, app_family_id, app_id, version, kind, status,
+		       allow_all, allowed_operations, expires_at
 		FROM matched
 		WHERE EXISTS (SELECT 1 FROM touched)
 	`, appID, tokenHash).Scan(
 		&proj.AccountID, &proj.AppFamilyID, &proj.AppID, &proj.Version, &proj.Kind, &proj.AppStatus,
-		&proj.BucketID, &proj.Selections, &proj.CapabilityHash,
+		&proj.TokenPolicy.AllowAll, &proj.TokenPolicy.AllowedOperations, &proj.TokenPolicy.ExpiresAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		span.SetAttributes(attribute.String("outcome", "denied"))
@@ -591,7 +666,7 @@ func (s *postgresStore) AuthorizeApp(ctx context.Context, appID uuid.UUID, token
 	span.SetAttributes(
 		attribute.String("app.family_id", proj.AppFamilyID.String()),
 		attribute.String("app.id", proj.AppID.String()),
-		attribute.String("app.status", proj.AppStatus),
+		attribute.String("app.status", proj.AppStatus.String()),
 		attribute.String("outcome", "allowed"),
 	)
 	return &proj, nil
@@ -599,17 +674,20 @@ func (s *postgresStore) AuthorizeApp(ctx context.Context, appID uuid.UUID, token
 
 // --- Family tokens ---
 
-func (s *postgresStore) CreateAppToken(ctx context.Context, appFamilyID uuid.UUID, tokenHash, name string) (*AppToken, error) {
+func (s *postgresStore) CreateAppToken(ctx context.Context, appFamilyID uuid.UUID, tokenHash, name string, policy AppTokenPolicy) (*AppTokenMetadata, error) {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.store.app_token.create")
 	defer span.End()
 
-	var tok AppToken
+	var tok AppTokenMetadata
 	err := s.db.QueryRow(ctx, `
-		INSERT INTO fused_app_tokens (app_family_id, token_hash, name)
-		VALUES ($1, $2, $3)
-		RETURNING id, app_family_id, token_hash, name, last_used_at, created_at
-	`, appFamilyID, tokenHash, name).Scan(
-		&tok.ID, &tok.AppFamilyID, &tok.TokenHash, &tok.Name, &tok.LastUsedAt, &tok.CreatedAt,
+		INSERT INTO fused_app_tokens
+			(app_family_id, token_hash, name, allow_all, allowed_operations, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id, app_family_id, name, allow_all, allowed_operations, expires_at,
+		          last_used_at, created_at
+	`, appFamilyID, tokenHash, name, policy.AllowAll, policy.AllowedOperations, policy.ExpiresAt).Scan(
+		&tok.ID, &tok.AppFamilyID, &tok.Name, &tok.AllowAll, &tok.AllowedOperations,
+		&tok.ExpiresAt, &tok.LastUsedAt, &tok.CreatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create app token: %w", err)
@@ -617,9 +695,10 @@ func (s *postgresStore) CreateAppToken(ctx context.Context, appFamilyID uuid.UUI
 	return &tok, nil
 }
 
-func (s *postgresStore) ListAppTokens(ctx context.Context, appFamilyID uuid.UUID) ([]AppToken, error) {
+func (s *postgresStore) ListAppTokens(ctx context.Context, appFamilyID uuid.UUID) ([]AppTokenMetadata, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT id, app_family_id, token_hash, name, last_used_at, created_at
+		SELECT id, app_family_id, name, allow_all, allowed_operations, expires_at,
+		       last_used_at, created_at
 		FROM fused_app_tokens
 		WHERE app_family_id = $1
 		ORDER BY created_at DESC
@@ -630,10 +709,11 @@ func (s *postgresStore) ListAppTokens(ctx context.Context, appFamilyID uuid.UUID
 	}
 	defer rows.Close()
 
-	var tokens []AppToken
+	var tokens []AppTokenMetadata
 	for rows.Next() {
-		var t AppToken
-		if err := rows.Scan(&t.ID, &t.AppFamilyID, &t.TokenHash, &t.Name, &t.LastUsedAt, &t.CreatedAt); err != nil {
+		var t AppTokenMetadata
+		if err := rows.Scan(&t.ID, &t.AppFamilyID, &t.Name, &t.AllowAll,
+			&t.AllowedOperations, &t.ExpiresAt, &t.LastUsedAt, &t.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan app token: %w", err)
 		}
 		tokens = append(tokens, t)
@@ -653,19 +733,6 @@ func (s *postgresStore) RevokeAppToken(ctx context.Context, appFamilyID uuid.UUI
 		return ErrAppTokenNotFound
 	}
 	return nil
-}
-
-func (s *postgresStore) GetAppFamilyByToken(ctx context.Context, tokenHash string) (*AppFamily, error) {
-	row := s.db.QueryRow(ctx, appFamilySelect+`
-		WHERE app_family_id = (
-			SELECT app_family_id FROM fused_app_tokens WHERE token_hash = $1
-		)
-	`, tokenHash)
-	f, err := scanAppFamily(row)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrAppFamilyNotFound
-	}
-	return f, err
 }
 
 // --- Family buckets ---

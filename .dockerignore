@@ -4,8 +4,15 @@
 tmp_bin
 server
 sandbox-server
+engine-bin
+fused-engine
+fused-engine-headless
+internal/engine/sandbox/server
+internal/engine/sandbox/sandbox
 
 node_modules/
+runtime/mcp/node_modules/
+runtime/mcp/dist/
 ui/node_modules/
 ui/build/
 ui/.cache/
