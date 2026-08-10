@@ -325,7 +325,7 @@ func upsertOAuthConnectionForUser(t *testing.T, f connectAuthFixture, endUserRef
 	encrypted := encryptConnectAuthValues(t, "resource-access")
 	connection, err := f.store.UpsertAuthConnection(f.ctx, AuthConnection{
 		BucketID: f.bucketA, ServiceID: f.serviceID,
-		EndUserRef: endUserRef, AuthType: "oauth", EncryptedDEK: encrypted.dek,
+		EndUserRef: endUserRef, AuthType: "oauth", AuthName: "oauth", EncryptedDEK: encrypted.dek,
 		EncryptedAccessToken: encrypted.values[0], TokenType: "Bearer", RefreshState: "ok",
 	})
 	if err != nil {
@@ -526,6 +526,7 @@ func connectConfigForFixture(t *testing.T, f connectAuthFixture) ConnectConfig {
 		BucketID:              f.bucketA,
 		ServiceID:             f.serviceID,
 		AuthType:              "oauth",
+		AuthName:              "oauth",
 		Enabled:               true,
 		EncryptedDEK:          encrypted.dek,
 		EncryptedClientID:     encrypted.values[0],
@@ -555,7 +556,7 @@ func assertAuthConnectionFailureDiagnostic(t *testing.T, f connectAuthFixture, c
 	if err := f.store.RecordAuthConnectionFailure(f.ctx, connection.ID, "provider_unauthorized", "trace-123", failedAt); err != nil {
 		t.Fatalf("RecordAuthConnectionFailure: %v", err)
 	}
-	found, err := f.store.GetAuthConnection(f.ctx, connection.BucketID, connection.ServiceID, connection.EndUserRef)
+	found, err := f.store.GetAuthConnection(f.ctx, connection.BucketID, connection.ServiceID, connection.EndUserRef, connection.AuthName)
 	if err != nil {
 		t.Fatalf("GetAuthConnection after diagnostic: %v", err)
 	}
@@ -572,7 +573,7 @@ func assertReconnectUpsertReplacesConnection(t *testing.T, f connectAuthFixture,
 	expiresAt := time.Now().UTC().Add(2 * time.Minute)
 	reconnected, err := f.store.UpsertAuthConnection(f.ctx, AuthConnection{
 		BucketID: f.bucketA, ServiceID: f.serviceID,
-		EndUserRef: "user_123", CreatedByAppID: f.appID, AuthType: "oauth",
+		EndUserRef: "user_123", CreatedByAppID: f.appID, AuthType: "oauth", AuthName: "oauth",
 		EncryptedDEK: encrypted.dek, EncryptedAccessToken: encrypted.values[0],
 		EncryptedRefreshToken: encrypted.values[1], TokenType: "Bearer", ExpiresAt: &expiresAt, RefreshState: "ok",
 	})
@@ -608,6 +609,7 @@ func upsertOAuthConnection(t *testing.T, f connectAuthFixture) *AuthConnection {
 		EndUserRef:            "user_123",
 		CreatedByAppID:        f.appID,
 		AuthType:              "oauth",
+		AuthName:              "oauth",
 		EncryptedDEK:          encrypted.dek,
 		EncryptedAccessToken:  encrypted.values[0],
 		EncryptedRefreshToken: encrypted.values[1],
@@ -633,6 +635,7 @@ func upsertAPIKeyConnection(t *testing.T, f connectAuthFixture) *AuthConnection 
 		ServiceID:            f.serviceID,
 		EndUserRef:           "user_123",
 		AuthType:             "api_key",
+		AuthName:             "api_key",
 		EncryptedDEK:         encrypted.dek,
 		EncryptedAccessToken: encrypted.values[0],
 		TokenType:            "Bearer",
@@ -660,7 +663,7 @@ func assertBucketConnectionLookup(t *testing.T, f connectAuthFixture, connA *Aut
 
 func assertAuthConnectionByNaturalKey(t *testing.T, f connectAuthFixture, connA *AuthConnection) {
 	t.Helper()
-	found, err := f.store.GetAuthConnection(f.ctx, f.bucketA, f.serviceID, "user_123")
+	found, err := f.store.GetAuthConnection(f.ctx, f.bucketA, f.serviceID, "user_123", "oauth")
 	if err != nil {
 		t.Fatalf("GetAuthConnection: %v", err)
 	}
@@ -748,6 +751,8 @@ func createConnectSession(t *testing.T, f connectAuthFixture) *ConnectSession {
 	session, err := f.store.CreateConnectSession(f.ctx, ConnectSession{
 		BucketID:              f.bucketA,
 		ServiceID:             f.serviceID,
+		AuthType:              "oauth",
+		AuthName:              "oauth",
 		EndUserRef:            "user_456",
 		StateHash:             "state-" + uuid.NewString(),
 		NonceHash:             "nonce-hash",

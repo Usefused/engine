@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -267,44 +268,60 @@ var engineExecutionTimingGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 var engineExecutionEventGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "EngineExecutionEvent",
 	Fields: graphql.Fields{
-		"id":                    &graphql.Field{Type: graphql.String},
-		"trace_id":              &graphql.Field{Type: graphql.String},
-		"span_id":               &graphql.Field{Type: graphql.String},
-		"app_family_id":         &graphql.Field{Type: graphql.String},
-		"app_id":                &graphql.Field{Type: graphql.String},
-		"app_version":           &graphql.Field{Type: graphql.String},
-		"app_kind":              &graphql.Field{Type: graphql.String},
-		"transport":             &graphql.Field{Type: graphql.String},
-		"provider_protocol":     &graphql.Field{Type: graphql.String},
-		"direction":             &graphql.Field{Type: graphql.String},
-		"service_id":            &graphql.Field{Type: graphql.String},
-		"service_version_id":    &graphql.Field{Type: graphql.String},
-		"operation_id":          &graphql.Field{Type: graphql.String},
-		"webhook_id":            &graphql.Field{Type: graphql.String},
-		"operation":             &graphql.Field{Type: graphql.String},
-		"event_name":            &graphql.Field{Type: graphql.String},
-		"http_method":           &graphql.Field{Type: graphql.String},
-		"request_path":          &graphql.Field{Type: graphql.String},
-		"environment":           &graphql.Field{Type: graphql.String},
-		"environment_source":    &graphql.Field{Type: graphql.String},
-		"provider_host":         &graphql.Field{Type: graphql.String},
-		"provider_http_status":  &graphql.Field{Type: graphql.Int},
-		"provider_status_class": &graphql.Field{Type: graphql.String},
-		"status":                &graphql.Field{Type: graphql.String},
-		"failure_reason":        &graphql.Field{Type: graphql.String},
-		"failure_category":      &graphql.Field{Type: graphql.String},
-		"failure_code":          &graphql.Field{Type: graphql.String},
-		"latency_ms":            &graphql.Field{Type: graphql.Int},
-		"provider_latency_ms":   &graphql.Field{Type: graphql.Int},
-		"attempt_count":         &graphql.Field{Type: graphql.Int},
-		"request_bytes":         &graphql.Field{Type: graphql.Int},
-		"response_bytes":        &graphql.Field{Type: graphql.Int},
-		"verification_status":   &graphql.Field{Type: graphql.String},
-		"delivery_status":       &graphql.Field{Type: graphql.String},
-		"idempotency_replayed":  &graphql.Field{Type: graphql.Boolean},
-		"started_at":            &graphql.Field{Type: graphql.String},
-		"ended_at":              &graphql.Field{Type: graphql.String},
-		"timings":               &graphql.Field{Type: graphql.NewList(engineExecutionTimingGraphQLType)},
+		"id":                        &graphql.Field{Type: graphql.String},
+		"trace_id":                  &graphql.Field{Type: graphql.String},
+		"span_id":                   &graphql.Field{Type: graphql.String},
+		"app_family_id":             &graphql.Field{Type: graphql.String},
+		"app_id":                    &graphql.Field{Type: graphql.String},
+		"app_version":               &graphql.Field{Type: graphql.String},
+		"app_kind":                  &graphql.Field{Type: graphql.String},
+		"transport":                 &graphql.Field{Type: graphql.String},
+		"provider_protocol":         &graphql.Field{Type: graphql.String},
+		"direction":                 &graphql.Field{Type: graphql.String},
+		"service_id":                &graphql.Field{Type: graphql.String},
+		"service_version_id":        &graphql.Field{Type: graphql.String},
+		"operation_id":              &graphql.Field{Type: graphql.String},
+		"webhook_id":                &graphql.Field{Type: graphql.String},
+		"operation":                 &graphql.Field{Type: graphql.String},
+		"event_name":                &graphql.Field{Type: graphql.String},
+		"http_method":               &graphql.Field{Type: graphql.String},
+		"request_path":              &graphql.Field{Type: graphql.String},
+		"environment":               &graphql.Field{Type: graphql.String},
+		"environment_source":        &graphql.Field{Type: graphql.String},
+		"provider_host":             &graphql.Field{Type: graphql.String},
+		"provider_http_status":      &graphql.Field{Type: graphql.Int},
+		"provider_status_class":     &graphql.Field{Type: graphql.String},
+		"status":                    &graphql.Field{Type: graphql.String},
+		"failure_reason":            &graphql.Field{Type: graphql.String},
+		"failure_category":          &graphql.Field{Type: graphql.String},
+		"failure_code":              &graphql.Field{Type: graphql.String},
+		"latency_ms":                &graphql.Field{Type: graphql.Int},
+		"provider_latency_ms":       &graphql.Field{Type: graphql.Int},
+		"attempt_count":             &graphql.Field{Type: graphql.Int},
+		"auth_scheme_names":         &graphql.Field{Type: graphql.NewList(graphql.String)},
+		"auth_scheme_types":         &graphql.Field{Type: graphql.NewList(graphql.String)},
+		"auth_scheme_count":         &graphql.Field{Type: graphql.Int},
+		"auth_selection_outcome":    &graphql.Field{Type: graphql.String},
+		"pagination_type":           &graphql.Field{Type: graphql.String},
+		"pagination_page_count":     &graphql.Field{Type: graphql.Int},
+		"pagination_item_count":     &graphql.Field{Type: graphql.Int},
+		"pagination_byte_count":     &graphql.Field{Type: graphql.Int},
+		"pagination_stop_reason":    &graphql.Field{Type: graphql.String},
+		"rate_limit_decision":       &graphql.Field{Type: graphql.String},
+		"rate_limit_policy_count":   &graphql.Field{Type: graphql.Int},
+		"rate_limit_scope_kinds":    &graphql.Field{Type: graphql.NewList(graphql.String)},
+		"rate_limit_units":          &graphql.Field{Type: graphql.NewList(graphql.String)},
+		"rate_limit_unit_totals":    &graphql.Field{Type: graphql.NewList(graphql.String)},
+		"rate_limit_retry_outcome":  &graphql.Field{Type: graphql.String},
+		"rate_limit_header_outcome": &graphql.Field{Type: graphql.String},
+		"request_bytes":             &graphql.Field{Type: graphql.Int},
+		"response_bytes":            &graphql.Field{Type: graphql.Int},
+		"verification_status":       &graphql.Field{Type: graphql.String},
+		"delivery_status":           &graphql.Field{Type: graphql.String},
+		"idempotency_replayed":      &graphql.Field{Type: graphql.Boolean},
+		"started_at":                &graphql.Field{Type: graphql.String},
+		"ended_at":                  &graphql.Field{Type: graphql.String},
+		"timings":                   &graphql.Field{Type: graphql.NewList(engineExecutionTimingGraphQLType)},
 	},
 })
 
@@ -488,6 +505,7 @@ var workspaceConnectConfigGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"bucket_name":       &graphql.Field{Type: graphql.String},
 		"service_id":        &graphql.Field{Type: graphql.String},
 		"auth_type":         &graphql.Field{Type: graphql.String},
+		"auth_name":         &graphql.Field{Type: graphql.String},
 		"enabled":           &graphql.Field{Type: graphql.Boolean},
 		"redirect_uri":      &graphql.Field{Type: graphql.String},
 		"has_client_id":     &graphql.Field{Type: graphql.Boolean},
@@ -1483,7 +1501,7 @@ func projectGraphQLWorkspaceConnectConfig(config store.WorkspaceConnectConfig, p
 	}
 	return map[string]interface{}{
 		"bucket_id": config.BucketID.String(), "bucket_name": config.BucketName,
-		"service_id": config.ServiceID.String(), "auth_type": config.AuthType,
+		"service_id": config.ServiceID.String(), "auth_type": config.AuthType, "auth_name": config.AuthName,
 		"enabled": config.Enabled, "redirect_uri": config.RedirectURI,
 		"has_client_id": config.EncryptedClientID != "", "has_client_secret": config.EncryptedClientSecret != "",
 		"profiles": profileItems,
@@ -1708,7 +1726,7 @@ func connectionDiscoveryContract(ctx context.Context, s store.Store, verifier Se
 	if err != nil {
 		return nil, nil, fusedobject.AuthConfig{}, errors.New("resource discovery operation is unavailable")
 	}
-	auth, err := selectRuntimeOAuthConfig(metadata.AuthConfigs, connection.AuthType)
+	auth, err := selectRuntimeOAuthConfig(metadata.AuthConfigs, connection.AuthType, connection.AuthName)
 	if err != nil {
 		return nil, nil, fusedobject.AuthConfig{}, err
 	}
@@ -2706,12 +2724,29 @@ func projectGraphQLEngineExecutionEvents(events []models.EngineExecutionEvent) [
 			"latency_ms":          int(event.LatencyMs),
 			"provider_latency_ms": providerLatency, "idempotency_replayed": event.IdempotencyReplayed,
 			"attempt_count": event.AttemptCount, "request_bytes": int(event.RequestBytes), "response_bytes": int(event.ResponseBytes),
+			"auth_scheme_names": event.AuthSchemeNames, "auth_scheme_types": event.AuthSchemeTypes,
+			"auth_scheme_count": int(event.AuthSchemeCount), "auth_selection_outcome": event.AuthSelectionOutcome,
+			"pagination_type": event.PaginationType, "pagination_page_count": int(event.PaginationPageCount),
+			"pagination_item_count": int(event.PaginationItemCount), "pagination_byte_count": int(event.PaginationByteCount),
+			"pagination_stop_reason": event.PaginationStopReason,
+			"rate_limit_decision":    event.RateLimitDecision, "rate_limit_policy_count": int(event.RateLimitPolicyCount),
+			"rate_limit_scope_kinds": event.RateLimitScopeKinds, "rate_limit_units": event.RateLimitUnits,
+			"rate_limit_unit_totals":   graphQLInt64Strings(event.RateLimitUnitTotals),
+			"rate_limit_retry_outcome": event.RateLimitRetryOutcome, "rate_limit_header_outcome": event.RateLimitHeaderOutcome,
 			"verification_status": event.VerificationStatus, "delivery_status": event.DeliveryStatus,
 			"started_at": formatGraphQLTime(event.StartedAt), "ended_at": formatGraphQLTime(event.EndedAt),
 			"timings": engineExecutionTimingEntries(event.Timings),
 		})
 	}
 	return items
+}
+
+func graphQLInt64Strings(values []int64) []string {
+	encoded := make([]string, len(values))
+	for i, value := range values {
+		encoded[i] = strconv.FormatInt(value, 10)
+	}
+	return encoded
 }
 
 func optionalGraphQLUUID(id uuid.UUID) interface{} {

@@ -10,6 +10,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
+	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
 )
 
 var (
@@ -396,6 +397,13 @@ type WorkspaceExecutionPolicyExactBatchStore interface {
 	GetWorkspaceExecutionPolicyOverrides(ctx context.Context, refs []WorkspaceExecutionPolicyRef) (map[WorkspaceExecutionPolicyRef]*WorkspaceExecutionPolicyOverride, error)
 }
 
+// ProviderRateLimitStore coordinates provider quotas in PostgreSQL so all
+// Engine replicas share one atomic AND decision.
+type ProviderRateLimitStore interface {
+	AcquireProviderRateLimit(ctx context.Context, request ratelimitpolicy.AcquireRequest) (ratelimitpolicy.Decision, error)
+	SyncProviderRateLimit(ctx context.Context, request ratelimitpolicy.SyncRequest) error
+}
+
 // WorkspaceExecutionPolicyStore is kept separate from Store for the same
 // staged-rollout reason as WorkspaceProfileStore: the consolidated
 // resolution point (and the plan-action wiring that writes overrides) can
@@ -439,11 +447,21 @@ type WorkspaceSecret struct {
 	EncryptedValue string
 }
 
+// SecretKeyAlternative describes one ordered OR branch. Required keys decide
+// satisfiability; optional keys are returned only when the chosen branch has
+// them, which lets optional Basic passwords remain useful without making them
+// mandatory.
+type SecretKeyAlternative struct {
+	Required []string `json:"required"`
+	Optional []string `json:"optional,omitempty"`
+}
+
 type ConnectConfig struct {
 	ID                    uuid.UUID
 	BucketID              uuid.UUID
 	ServiceID             uuid.UUID
 	AuthType              string
+	AuthName              string
 	Enabled               bool
 	EncryptedDEK          string
 	EncryptedClientID     string
@@ -472,6 +490,13 @@ type WorkspaceConnectSyncStore interface {
 	ListWorkspaceConnectProfiles(ctx context.Context) ([]WorkspaceConnectionProfile, error)
 }
 
+// WorkspaceServiceCapacityStore projects the post-apply service count in one
+// database query. Declarative state can lag a successful import activation,
+// so entitlement decisions must compare against live service identities.
+type WorkspaceServiceCapacityStore interface {
+	CountProjectedActiveServices(ctx context.Context, desiredIDs, removableIDs []uuid.UUID) (current, projected int, err error)
+}
+
 type AuthConnection struct {
 	ID                    uuid.UUID
 	BucketID              uuid.UUID
@@ -479,6 +504,7 @@ type AuthConnection struct {
 	EndUserRef            string
 	CreatedByAppID        uuid.UUID
 	AuthType              string
+	AuthName              string
 	EncryptedDEK          string
 	EncryptedAccessToken  string
 	EncryptedRefreshToken string
@@ -506,6 +532,8 @@ type ConnectSession struct {
 	ID                    uuid.UUID
 	BucketID              uuid.UUID
 	ServiceID             uuid.UUID
+	AuthType              string
+	AuthName              string
 	EndUserRef            string
 	StateHash             string
 	NonceHash             string
@@ -671,6 +699,9 @@ type Store interface {
 	GetSecret(ctx context.Context, bucketID, serviceID uuid.UUID, keyName string) (*WorkspaceSecret, error)
 	// GetSecrets fetches a bounded exact key set for hot-path auth resolution.
 	GetSecrets(ctx context.Context, bucketID, serviceID uuid.UUID, keyNames []string) ([]WorkspaceSecret, error)
+	// GetFirstCompleteSecretSet selects the earliest fully present auth
+	// alternative and returns only that branch's encrypted values in one query.
+	GetFirstCompleteSecretSet(ctx context.Context, bucketID, serviceID uuid.UUID, alternatives []SecretKeyAlternative) ([]WorkspaceSecret, error)
 
 	// Connect auth methods. User auth is bucket-attached rather than SDK-
 	// attached so newly generated SDKs can reuse connected users by linking to
@@ -681,7 +712,7 @@ type Store interface {
 	ListConnectConfigsForService(ctx context.Context, serviceID uuid.UUID) ([]ConnectConfig, error)
 	GetBucketConnectSummary(ctx context.Context, bucketID uuid.UUID) (*BucketConnectSummary, error)
 	UpsertAuthConnection(ctx context.Context, conn AuthConnection) (*AuthConnection, error)
-	GetAuthConnection(ctx context.Context, bucketID, serviceID uuid.UUID, endUserRef string) (*AuthConnection, error)
+	GetAuthConnection(ctx context.Context, bucketID, serviceID uuid.UUID, endUserRef, authName string) (*AuthConnection, error)
 	GetAuthConnectionByIDForBuckets(ctx context.Context, id uuid.UUID, bucketIDs []uuid.UUID) (*AuthConnection, error)
 	GetAuthConnectionsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]AuthConnection, error)
 	ListAuthConnections(ctx context.Context, bucketID uuid.UUID, serviceID *uuid.UUID, endUserRef string) ([]AuthConnection, error)

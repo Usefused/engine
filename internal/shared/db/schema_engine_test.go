@@ -50,6 +50,44 @@ func TestEngineSchemaDefinesExecutionTimeoutWithoutCompatibilityMigration(t *tes
 	}
 }
 
+func TestEngineMigrationClearsOnlyLegacyRateLimitJSON(t *testing.T) {
+	migrations := strings.Join(engineMigrationQueries(), "\n")
+	for _, expected := range []string{
+		"UPDATE fused_workspace_execution_policies",
+		"SET rate_limit = NULL",
+		"rate_limit->>'version' IS DISTINCT FROM '2'",
+	} {
+		if !strings.Contains(migrations, expected) {
+			t.Fatalf("rate-limit migration missing %q", expected)
+		}
+	}
+	for _, preserved := range []string{"retry_config = NULL", "pagination = NULL", "base_url = NULL"} {
+		if strings.Contains(migrations, preserved) {
+			t.Fatalf("rate-limit migration must preserve unrelated field %q", preserved)
+		}
+	}
+}
+
+func TestEngineSchemaDefinesProviderRateLimitCoordinationAndActivity(t *testing.T) {
+	schema := strings.Join(engineSchemaQueries(), "\n")
+	for _, expected := range []string{
+		"CREATE TABLE IF NOT EXISTS fused_provider_rate_limit_states",
+		"PRIMARY KEY (account_id, service_version_id, policy_name, scope_kind, scope_id)",
+		"rate_limit_decision text",
+		"rate_limit_unit_totals bigint[] NOT NULL DEFAULT '{}'",
+	} {
+		if !strings.Contains(schema, expected) {
+			t.Fatalf("provider rate-limit schema missing %q", expected)
+		}
+	}
+	migrations := strings.Join(engineMigrationQueries(), "\n")
+	for _, expected := range []string{"rate_limit_policy_count", "rate_limit_header_outcome"} {
+		if !strings.Contains(migrations, expected) {
+			t.Fatalf("provider rate-limit migration missing %q", expected)
+		}
+	}
+}
+
 func TestEngineSchemaDefinesOwnedWebhooksWithoutCompatibilityMigration(t *testing.T) {
 	schema := strings.Join(engineSchemaQueries(), "\n")
 	if !strings.Contains(schema, "owning_config_key     text NOT NULL CHECK (owning_config_key <> '')") {
@@ -203,7 +241,7 @@ func TestEngineSchemaDefinesBucketAttachedConnectAuth(t *testing.T) {
 		"CREATE TABLE IF NOT EXISTS fused_connect_configs",
 		"CREATE TABLE IF NOT EXISTS fused_auth_connections",
 		"CREATE TABLE IF NOT EXISTS fused_connect_sessions",
-		"CONSTRAINT uq_fused_auth_connections UNIQUE (bucket_id, service_id, end_user_ref)",
+		"CONSTRAINT uq_fused_auth_connections UNIQUE (bucket_id, service_id, end_user_ref, auth_name)",
 		"created_by_app_id       uuid",
 		"identity_claims    jsonb NOT NULL DEFAULT '{}'::jsonb",
 		"encrypted_dek      text NOT NULL DEFAULT ''",

@@ -11,27 +11,15 @@ import (
 // intentionally dropped.
 func fusedToService(o *fusedobject.ServiceMetadata) *models.Service {
 	return &models.Service{
-		ID:             o.ID,
-		Name:           o.Name,
-		BaseURL:        o.BaseURL,
-		AuthConfigs:    mapAuthConfigs(o.AuthConfigs),
-		DefaultHeaders: models.DefaultHeaders(o.DefaultHeaders),
-		RawWSDL:        o.RawWSDL,
-		RateLimit:      mapRateLimit(o.RateLimit),
-		RetryConfig:    mapRetryConfig(o.RetryConfig),
-	}
-}
-
-// mapRateLimit converts the wire rate-limit config to the models type
-// dispatcher.go's CheckRateLimit reads. Returns nil when unset.
-func mapRateLimit(r *fusedobject.RateLimitConfig) *models.RateLimitConfig {
-	if r == nil {
-		return nil
-	}
-	return &models.RateLimitConfig{
-		Strategy:          r.Strategy,
-		RequestsPerSecond: r.RequestsPerSecond,
-		RequestsPerMinute: r.RequestsPerMinute,
+		ID:               o.ID,
+		ServiceVersionID: o.ServiceVersionID,
+		Name:             o.Name,
+		BaseURL:          o.BaseURL,
+		AuthConfigs:      mapAuthConfigs(o.AuthConfigs),
+		DefaultHeaders:   models.DefaultHeaders(o.DefaultHeaders),
+		RawWSDL:          o.RawWSDL,
+		RateLimit:        o.RateLimit,
+		RetryConfig:      mapRetryConfig(o.RetryConfig),
 	}
 }
 
@@ -61,25 +49,50 @@ func mapRetryConfig(r *fusedobject.RetryConfig) *models.RetryConfig {
 // (see plans/plan-service-config-restructure.md item 1).
 func fusedToIntegrationObject(o *fusedobject.ServiceMetadata, ep fusedobject.Endpoint) *models.IntegrationObject {
 	return &models.IntegrationObject{
-		ID:               ep.ID,
-		ServiceID:        o.ID,
-		Name:             ep.Name,
-		Description:      ep.Description,
-		ResourceName:     ep.ResourceName,
-		Version:          ep.Version,
-		Method:           ep.Method,
-		Path:             ep.Path,
-		NormalizedPath:   ep.NormalizedPath,
-		Deprecated:       ep.Deprecated,
-		IsSSE:            ep.IsSSE,
-		Parameters:       mapParameters(ep.Parameters),
-		RequestBody:      mapSchema(ep.RequestBody),
-		Responses:        mapResponses(ep.Responses),
-		GraphQLQuery:     ep.GraphQLQuery,
-		ProviderProtocol: effectiveProviderProtocol(ep),
-		OperationKind:    effectiveOperationKind(ep),
-		Pagination:       resolvePagination(ep.Pagination, o.Pagination),
+		ID:                   ep.ID,
+		StableKey:            ep.StableKey,
+		ServiceID:            o.ID,
+		Name:                 ep.Name,
+		Description:          ep.Description,
+		ResourceName:         ep.ResourceName,
+		Version:              ep.Version,
+		Method:               ep.Method,
+		Path:                 ep.Path,
+		NormalizedPath:       ep.NormalizedPath,
+		Deprecated:           ep.Deprecated,
+		IsSSE:                ep.IsSSE,
+		Parameters:           mapParameters(ep.Parameters),
+		RequestContent:       mapRequestContent(ep.RequestContent),
+		Responses:            mapResponses(ep.Responses),
+		GraphQLQuery:         ep.GraphQLQuery,
+		ProviderProtocol:     effectiveProviderProtocol(ep),
+		OperationKind:        effectiveOperationKind(ep),
+		Pagination:           resolvePagination(ep.Pagination, o.Pagination),
+		SecurityRequirements: ep.SecurityRequirements,
 	}
+}
+
+func mapRequestContent(content *fusedobject.RequestContent) *models.RequestContent {
+	if content == nil {
+		return nil
+	}
+	return &models.RequestContent{
+		MediaType: content.MediaType, Serialization: content.Serialization,
+		Required: content.Required, Schema: mapSchema(content.Schema),
+		PayloadParameter: content.PayloadParameter, BinaryEncoding: content.BinaryEncoding,
+		Parts: mapRequestParts(content.Parts),
+	}
+}
+
+func mapRequestParts(parts map[string]fusedobject.RequestPart) map[string]models.RequestPart {
+	if parts == nil {
+		return nil
+	}
+	mapped := make(map[string]models.RequestPart, len(parts))
+	for name, part := range parts {
+		mapped[name] = models.RequestPart{ContentType: part.ContentType, BinaryEncoding: part.BinaryEncoding}
+	}
+	return mapped
 }
 
 // effectiveProviderProtocol keeps snapshots written before the explicit field
@@ -120,7 +133,7 @@ func mapParameters(parameters fusedobject.Parameters) models.Parameters {
 	for i, parameter := range parameters {
 		mapped[i] = models.Parameter{
 			Name: parameter.Name, In: parameter.In, Required: parameter.Required,
-			Type: parameter.Type, Description: parameter.Description,
+			Type: parameter.Type, Description: parameter.Description, PathEncoding: parameter.PathEncoding,
 		}
 	}
 	return mapped
@@ -133,6 +146,9 @@ func mapSchema(schema *fusedobject.Schema) *models.Schema {
 	mapped := models.Schema{Ref: schema.Ref, Type: schema.Type, Format: schema.Format, Required: schema.Required, Example: schema.Example}
 	if schema.Items != nil {
 		mapped.Items = mapSchema(schema.Items)
+	}
+	if schema.AdditionalProperties != nil {
+		mapped.AdditionalProperties = mapSchema(schema.AdditionalProperties)
 	}
 	if len(schema.Properties) > 0 {
 		mapped.Properties = make(map[string]models.Schema, len(schema.Properties))
@@ -170,11 +186,10 @@ func mapPagination(p *fusedobject.PaginationConfig) *models.PaginationConfig {
 	if p == nil {
 		return nil
 	}
-	return &models.PaginationConfig{
-		Type:         p.Type,
-		RequestParam: p.RequestParam,
-		ResponsePath: p.ResponsePath,
-	}
+	// The shared versioned contract is immutable after cache decode; copying
+	// the wrapper prevents endpoint mapping from aliasing the cached pointer.
+	mapped := models.PaginationConfig(*p)
+	return &mapped
 }
 
 // mapAuthConfigs converts the Fused-object auth configs to the models auth
@@ -188,13 +203,14 @@ func mapAuthConfigs(in fusedobject.AuthConfigs) models.AuthConfigs {
 	out := make(models.AuthConfigs, 0, len(in))
 	for _, a := range in {
 		out = append(out, models.AuthConfig{
-			Name:     authCredentialName(a),
-			Type:     a.Type,
-			Flow:     a.Flow,
-			Scheme:   a.Scheme,
-			Location: a.Location,
-			KeyName:  a.KeyName,
-			TokenURL: a.TokenURL,
+			Name:              authCredentialName(a),
+			Type:              a.Type,
+			Flow:              a.Flow,
+			Scheme:            a.Scheme,
+			BasicPasswordMode: a.BasicPasswordMode,
+			Location:          a.Location,
+			KeyName:           a.KeyName,
+			TokenURL:          a.TokenURL,
 		})
 	}
 	return out

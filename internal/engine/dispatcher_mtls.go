@@ -16,10 +16,21 @@ var errMTLSRedirectBlocked = errors.New("mTLS cross-host redirect blocked")
 // providerClientForAuth returns the shared provider client unless the selected
 // auth config needs mTLS; client certificates must never mutate shared transport.
 func (d *Dispatcher) providerClientForAuth(auths models.AuthConfigs, credentials map[string]any) (*http.Client, error) {
-	if len(auths) == 0 || !isMutualTLSAuth(auths[0]) {
+	mtlsAuths := mutualTLSAuths(auths)
+	if len(mtlsAuths) == 0 {
 		return d.client, nil
 	}
-	return newProviderMTLSClient(auths[0], credentials)
+	return newProviderMTLSClient(mtlsAuths, credentials)
+}
+
+func mutualTLSAuths(auths models.AuthConfigs) models.AuthConfigs {
+	selected := make(models.AuthConfigs, 0, len(auths))
+	for _, auth := range auths {
+		if isMutualTLSAuth(auth) {
+			selected = append(selected, auth)
+		}
+	}
+	return selected
 }
 
 // isMutualTLSAuth accepts both imported and public spellings because Registry
@@ -32,14 +43,18 @@ func isMutualTLSAuth(auth models.AuthConfig) bool {
 
 // newProviderMTLSClient scopes the certificate to one request execution and
 // blocks cross-host redirects so client certs cannot leak to another provider.
-func newProviderMTLSClient(auth models.AuthConfig, credentials map[string]any) (*http.Client, error) {
-	cert, err := mtlsCertificate(auth, credentials)
-	if err != nil {
-		return nil, err
+func newProviderMTLSClient(auths models.AuthConfigs, credentials map[string]any) (*http.Client, error) {
+	certificates := make([]tls.Certificate, 0, len(auths))
+	for _, auth := range auths {
+		cert, err := mtlsCertificate(auth, credentials)
+		if err != nil {
+			return nil, err
+		}
+		certificates = append(certificates, cert)
 	}
 	tlsConfig := &tls.Config{
 		MinVersion:   tls.VersionTLS12,
-		Certificates: []tls.Certificate{cert},
+		Certificates: certificates,
 	}
 	return &http.Client{
 		Timeout:       30 * time.Second,

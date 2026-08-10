@@ -335,6 +335,7 @@ func engineSchemaQueries() []string {
 			bucket_id                uuid NOT NULL REFERENCES fused_buckets(id) ON DELETE CASCADE,
 			service_id               uuid NOT NULL,
 			auth_type                text NOT NULL,
+			auth_name                text NOT NULL,
 			enabled                  boolean NOT NULL DEFAULT true,
 			encrypted_dek            text NOT NULL,
 			encrypted_client_id      text NOT NULL,
@@ -357,6 +358,7 @@ func engineSchemaQueries() []string {
 			end_user_ref       text NOT NULL,
 			created_by_app_id       uuid,
 			auth_type          text NOT NULL,
+			auth_name          text NOT NULL,
 			encrypted_dek      text NOT NULL,
 			access_token       text NOT NULL,
 			refresh_token      text,
@@ -384,7 +386,7 @@ func engineSchemaQueries() []string {
 			last_failure_trace_id text NOT NULL DEFAULT '',
 			created_at         timestamptz DEFAULT NOW(),
 			updated_at         timestamptz DEFAULT NOW(),
-			CONSTRAINT uq_fused_auth_connections UNIQUE (bucket_id, service_id, end_user_ref),
+			CONSTRAINT uq_fused_auth_connections UNIQUE (bucket_id, service_id, end_user_ref, auth_name),
 			CONSTRAINT chk_fused_auth_connections_refresh_state
 				CHECK (refresh_state IN ('ok', 'failed', 'expired', 'reconnect_required'))
 		);`,
@@ -433,6 +435,8 @@ func engineSchemaQueries() []string {
 			id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 				bucket_id          uuid NOT NULL REFERENCES fused_buckets(id) ON DELETE CASCADE,
 				service_id         uuid NOT NULL,
+				auth_type          text NOT NULL,
+				auth_name          text NOT NULL,
 				end_user_ref       text NOT NULL,
 				state_hash         text NOT NULL UNIQUE,
 				nonce_hash         text NOT NULL DEFAULT '',
@@ -500,6 +504,22 @@ func engineSchemaQueries() []string {
 			latency_ms bigint NOT NULL,
 			provider_latency_ms bigint,
 			attempt_count integer NOT NULL DEFAULT 1,
+			auth_scheme_names text[] NOT NULL DEFAULT '{}',
+			auth_scheme_types text[] NOT NULL DEFAULT '{}',
+			auth_scheme_count bigint NOT NULL DEFAULT 0,
+			auth_selection_outcome text,
+			pagination_type text,
+			pagination_page_count bigint NOT NULL DEFAULT 0,
+			pagination_item_count bigint NOT NULL DEFAULT 0,
+			pagination_byte_count bigint NOT NULL DEFAULT 0,
+			pagination_stop_reason text,
+			rate_limit_decision text,
+			rate_limit_policy_count bigint NOT NULL DEFAULT 0,
+			rate_limit_scope_kinds text[] NOT NULL DEFAULT '{}',
+			rate_limit_units text[] NOT NULL DEFAULT '{}',
+			rate_limit_unit_totals bigint[] NOT NULL DEFAULT '{}',
+			rate_limit_retry_outcome text,
+			rate_limit_header_outcome text,
 			request_bytes bigint NOT NULL DEFAULT 0,
 			response_bytes bigint NOT NULL DEFAULT 0,
 			verification_status text,
@@ -1051,6 +1071,32 @@ func engineSchemaQueries() []string {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_fused_workspace_execution_policies_version_override
 		ON fused_workspace_execution_policies(service_version_id) WHERE service_version_id IS NOT NULL;`,
 
+		// Provider limits coordinate every Engine replica through PostgreSQL. The
+		// complete scope key prevents a connection-scoped policy from consuming a
+		// neighbouring bucket while retaining the service version for policy identity.
+		`CREATE TABLE IF NOT EXISTS fused_provider_rate_limit_states (
+			account_id                uuid NOT NULL,
+			service_version_id        uuid NOT NULL,
+			policy_name               text NOT NULL,
+			scope_kind                text NOT NULL,
+			scope_id                  uuid NOT NULL,
+			config_hash               text NOT NULL,
+			algorithm                 text NOT NULL,
+			fixed_window_started_at   timestamptz,
+			fixed_window_used         bigint NOT NULL DEFAULT 0,
+			tokens                     bigint,
+			token_refilled_at          timestamptz,
+			cooldown_until             timestamptz,
+			updated_at                 timestamptz NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (account_id, service_version_id, policy_name, scope_kind, scope_id),
+			CHECK (scope_kind IN ('service_version', 'connection')),
+			CHECK (algorithm IN ('fixed_window', 'token_bucket')),
+			CHECK (fixed_window_used >= 0),
+			CHECK (tokens IS NULL OR tokens >= 0)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_provider_rate_limit_states_updated
+		ON fused_provider_rate_limit_states(updated_at);`,
+
 		// --- App-family tables ---
 
 		// App families are the stable authorization and configuration boundary
@@ -1245,8 +1291,14 @@ func engineMigrationQueries() []string {
 		`ALTER TABLE fused_buckets DROP COLUMN IF EXISTS workspace_id;`,
 		`ALTER TABLE fused_buckets ADD CONSTRAINT uq_workspace_buckets UNIQUE (name);`,
 		`ALTER TABLE fused_connect_configs DROP COLUMN IF EXISTS workspace_id;`,
+		`ALTER TABLE fused_connect_configs ADD COLUMN IF NOT EXISTS auth_name text NOT NULL DEFAULT '';`,
 		`ALTER TABLE fused_auth_connections DROP COLUMN IF EXISTS workspace_id;`,
+		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS auth_name text NOT NULL DEFAULT '';`,
+		`ALTER TABLE fused_auth_connections DROP CONSTRAINT IF EXISTS uq_fused_auth_connections;`,
+		`ALTER TABLE fused_auth_connections ADD CONSTRAINT uq_fused_auth_connections UNIQUE (bucket_id, service_id, end_user_ref, auth_name);`,
 		`ALTER TABLE fused_connect_sessions DROP COLUMN IF EXISTS workspace_id;`,
+		`ALTER TABLE fused_connect_sessions ADD COLUMN IF NOT EXISTS auth_type text NOT NULL DEFAULT '';`,
+		`ALTER TABLE fused_connect_sessions ADD COLUMN IF NOT EXISTS auth_name text NOT NULL DEFAULT '';`,
 		`ALTER TABLE fused_mcp_sessions ADD COLUMN IF NOT EXISTS app_id uuid;`,
 		`DO $$ BEGIN
 			IF EXISTS (
@@ -1350,6 +1402,22 @@ func engineMigrationQueries() []string {
 		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS failure_category text;`,
 		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS failure_code text;`,
 		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS attempt_count integer NOT NULL DEFAULT 1;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS auth_scheme_names text[] NOT NULL DEFAULT '{}';`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS auth_scheme_types text[] NOT NULL DEFAULT '{}';`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS auth_scheme_count bigint NOT NULL DEFAULT 0;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS auth_selection_outcome text;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS pagination_type text;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS pagination_page_count bigint NOT NULL DEFAULT 0;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS pagination_item_count bigint NOT NULL DEFAULT 0;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS pagination_byte_count bigint NOT NULL DEFAULT 0;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS pagination_stop_reason text;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS rate_limit_decision text;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS rate_limit_policy_count bigint NOT NULL DEFAULT 0;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS rate_limit_scope_kinds text[] NOT NULL DEFAULT '{}';`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS rate_limit_units text[] NOT NULL DEFAULT '{}';`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS rate_limit_unit_totals bigint[] NOT NULL DEFAULT '{}';`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS rate_limit_retry_outcome text;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS rate_limit_header_outcome text;`,
 		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS request_bytes bigint NOT NULL DEFAULT 0;`,
 		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS response_bytes bigint NOT NULL DEFAULT 0;`,
 		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS verification_status text;`,
@@ -1425,5 +1493,33 @@ func engineMigrationQueries() []string {
 
 		// Ensure the base_url override column exists for execution policies.
 		`ALTER TABLE fused_workspace_execution_policies ADD COLUMN IF NOT EXISTS base_url text;`,
+		// Legacy rate-limit JSON has no unambiguous v2 meaning. Clear only that
+		// column so retry, pagination, webhook, and base URL overrides survive.
+		`UPDATE fused_workspace_execution_policies
+		SET rate_limit = NULL
+		WHERE rate_limit IS NOT NULL
+		  AND rate_limit->>'version' IS DISTINCT FROM '2';`,
+		`CREATE TABLE IF NOT EXISTS fused_provider_rate_limit_states (
+			account_id uuid NOT NULL,
+			service_version_id uuid NOT NULL,
+			policy_name text NOT NULL,
+			scope_kind text NOT NULL,
+			scope_id uuid NOT NULL,
+			config_hash text NOT NULL,
+			algorithm text NOT NULL,
+			fixed_window_started_at timestamptz,
+			fixed_window_used bigint NOT NULL DEFAULT 0,
+			tokens bigint,
+			token_refilled_at timestamptz,
+			cooldown_until timestamptz,
+			updated_at timestamptz NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (account_id, service_version_id, policy_name, scope_kind, scope_id),
+			CHECK (scope_kind IN ('service_version', 'connection')),
+			CHECK (algorithm IN ('fixed_window', 'token_bucket')),
+			CHECK (fixed_window_used >= 0),
+			CHECK (tokens IS NULL OR tokens >= 0)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_provider_rate_limit_states_updated
+		ON fused_provider_rate_limit_states(updated_at);`,
 	}
 }

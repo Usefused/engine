@@ -1,19 +1,26 @@
 package sandbox
 
 import (
-	"fmt"
+	"errors"
 	"strings"
 
+	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 )
 
 const credentialKeyFusedAuthType = "fused_auth_type"
+const credentialKeyFusedAuthName = "fused_auth_name"
 
 // requestedAuthType reads the SDK-facing selector from credentials so every
 // execution path shares the same auth-type vocabulary.
 func requestedAuthType(credentials map[string]any) string {
 	return canonicalAuthSelector(credentialString(credentials, credentialKeyFusedAuthType))
+}
+
+func requestedAuthName(credentials map[string]any) string {
+	return strings.TrimSpace(credentialString(credentials, credentialKeyFusedAuthName))
 }
 
 // canonicalAuthSelector accepts only the public selector vocabulary so imported
@@ -89,32 +96,6 @@ func isConnectedAuthSelector(selector string) bool {
 	return selector == "oauth" || selector == "oidc"
 }
 
-// selectedAuthConfigsForExecution narrows auths for applyAuth's first-auth
-// contract while keeping the selection policy outside the dispatcher.
-func selectedAuthConfigsForExecution(auths models.AuthConfigs, credentials map[string]any) (models.AuthConfigs, string, error) {
-	selector := requestedAuthType(credentials)
-	if selector == "" {
-		return auths, firstAuthType(auths), nil
-	}
-	for _, auth := range auths {
-		if canonicalModelAuthType(auth) == selector {
-			// applyAuth intentionally consumes auths[0], so selection happens here
-			// where the full request context is still available.
-			return models.AuthConfigs{auth}, selector, nil
-		}
-	}
-	return nil, selector, fmt.Errorf("auth type %q is not configured for this service", selector)
-}
-
-// firstAuthType records the implicit default so telemetry can explain what was
-// applied even when the caller omitted fused.authType.
-func firstAuthType(auths models.AuthConfigs) string {
-	if len(auths) == 0 {
-		return ""
-	}
-	return canonicalModelAuthType(auths[0])
-}
-
 // connectedAuthNameForType bridges public auth-type selection to the private
 // credential key where the connected access token must be injected.
 func connectedAuthNameForType(auths fusedobject.AuthConfigs, selector string) string {
@@ -129,33 +110,134 @@ func connectedAuthNameForType(auths fusedobject.AuthConfigs, selector string) st
 	return ""
 }
 
-// requiredStaticSecretKeys derives the exact bucket secret names for this
-// execution, preventing service-wide secret loads while preserving per-call
-// auth selection.
-func requiredStaticSecretKeys(auths fusedobject.AuthConfigs, credentials map[string]any) []string {
-	auth, ok := selectedFusedAuthForExecution(auths, credentials)
-	if !ok || selectedAuthIsConnected(auth, credentials) {
-		return nil
+// orderedStaticSecretAlternatives preserves OpenAPI OR ordering while keeping
+// every AND-set together. The store can therefore choose one complete branch
+// without decrypting values belonging to unused alternatives.
+func orderedStaticSecretAlternatives(auths fusedobject.AuthConfigs, requirements authrouting.Requirements, credentials map[string]any) ([]store.SecretKeyAlternative, error) {
+	if len(requirements) == 0 {
+		return nil, errors.New("auth routing contract requires explicit security requirements")
 	}
-	return staticSecretKeysForAuth(auth)
+	definitions, err := fusedAuthDefinitions(auths)
+	if err != nil {
+		return nil, err
+	}
+	var alternatives []store.SecretKeyAlternative
+	for _, requirement := range requirements {
+		candidate, eligible, err := staticSecretAlternative(requirement, definitions, credentials)
+		if err != nil {
+			return nil, err
+		}
+		if eligible {
+			alternatives = append(alternatives, candidate)
+		}
+	}
+	return alternatives, nil
 }
 
-// selectedFusedAuthForExecution mirrors dispatcher selection before mapping to
-// models.AuthConfig, so secret reads and request auth stay in lockstep.
-func selectedFusedAuthForExecution(auths fusedobject.AuthConfigs, credentials map[string]any) (fusedobject.AuthConfig, bool) {
-	selector := requestedAuthType(credentials)
-	if selector == "" {
-		if len(auths) == 0 {
-			return fusedobject.AuthConfig{}, false
-		}
-		return auths[0], true
-	}
+func fusedAuthDefinitions(auths fusedobject.AuthConfigs) (map[string]fusedobject.AuthConfig, error) {
+	definitions := make(map[string]fusedobject.AuthConfig, len(auths))
 	for _, auth := range auths {
-		if canonicalFusedAuthType(auth) == selector {
-			return auth, true
+		if auth.Name == "" || definitions[auth.Name].Name != "" {
+			return nil, errors.New("auth routing contract has invalid auth definitions")
+		}
+		definitions[auth.Name] = auth
+	}
+	return definitions, nil
+}
+
+func staticSecretAlternative(alternative authrouting.Alternative, definitions map[string]fusedobject.AuthConfig, credentials map[string]any) (store.SecretKeyAlternative, bool, error) {
+	if !alternativeMatchesSelectors(alternative, definitions, credentials) {
+		return store.SecretKeyAlternative{}, false, nil
+	}
+	candidate := store.SecretKeyAlternative{}
+	for _, requirement := range alternative.Schemes {
+		auth, ok := definitions[requirement.Scheme]
+		if !ok {
+			return store.SecretKeyAlternative{}, false, errors.New("auth routing contract references an unknown scheme")
+		}
+		if selectedAuthIsConnected(auth, credentials) {
+			continue
+		}
+		required, optional, eligible := secretKeysNeeded(auth, credentials)
+		if !eligible {
+			return store.SecretKeyAlternative{}, false, nil
+		}
+		candidate.Required = appendUnique(candidate.Required, required...)
+		candidate.Optional = appendUnique(candidate.Optional, optional...)
+	}
+	return candidate, true, nil
+}
+
+func alternativeMatchesSelectors(alternative authrouting.Alternative, definitions map[string]fusedobject.AuthConfig, credentials map[string]any) bool {
+	wantName := requestedAuthName(credentials)
+	wantType := requestedAuthType(credentials)
+	nameMatched := wantName == ""
+	typeMatched := wantType == ""
+	for _, requirement := range alternative.Schemes {
+		auth, ok := definitions[requirement.Scheme]
+		if !ok {
+			continue
+		}
+		nameMatched = nameMatched || auth.Name == wantName
+		typeMatched = typeMatched || canonicalFusedAuthType(auth) == wantType
+	}
+	return nameMatched && typeMatched
+}
+
+func secretKeysNeeded(auth fusedobject.AuthConfig, credentials map[string]any) ([]string, []string, bool) {
+	name := authCredentialName(auth)
+	if name == "" {
+		return nil, nil, false
+	}
+	switch canonicalFusedAuthType(auth) {
+	case "basic":
+		return basicSecretKeysNeeded(auth, credentials)
+	case "mtls":
+		return missingNonemptyKeys(credentials, name+"_cert", name+"_key"), nil, true
+	default:
+		return missingNonemptyKeys(credentials, name), nil, true
+	}
+}
+
+func basicSecretKeysNeeded(auth fusedobject.AuthConfig, credentials map[string]any) ([]string, []string, bool) {
+	name := authCredentialName(auth)
+	required := missingNonemptyKeys(credentials, name+"_username")
+	switch auth.BasicPasswordMode {
+	case authrouting.BasicPasswordRequired:
+		return appendUnique(required, missingNonemptyKeys(credentials, name+"_password")...), nil, true
+	case authrouting.BasicPasswordOptional:
+		if _, supplied := credentials[name+"_password"]; supplied {
+			return required, nil, true
+		}
+		return required, []string{name + "_password"}, true
+	case authrouting.BasicPasswordEmpty:
+		return required, nil, credentialString(credentials, name+"_password") == ""
+	default:
+		return nil, nil, false
+	}
+}
+
+func missingNonemptyKeys(credentials map[string]any, keys ...string) []string {
+	missing := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if credentialString(credentials, key) == "" {
+			missing = append(missing, key)
 		}
 	}
-	return fusedobject.AuthConfig{}, false
+	return missing
+}
+
+func appendUnique(existing []string, values ...string) []string {
+	for _, value := range values {
+		found := false
+		for _, current := range existing {
+			found = found || current == value
+		}
+		if !found {
+			existing = append(existing, value)
+		}
+	}
+	return existing
 }
 
 // selectedAuthIsConnected avoids fetching a static token for OAuth/OIDC calls
@@ -173,6 +255,9 @@ func staticSecretKeysForAuth(auth fusedobject.AuthConfig) []string {
 	}
 	switch canonicalFusedAuthType(auth) {
 	case "basic":
+		if auth.BasicPasswordMode == authrouting.BasicPasswordEmpty {
+			return []string{name + "_username"}
+		}
 		return []string{name + "_username", name + "_password"}
 	case "mtls":
 		return []string{name + "_cert", name + "_key"}

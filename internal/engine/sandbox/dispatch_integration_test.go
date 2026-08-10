@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/Usefused/engine/internal/engine/auth"
+	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
@@ -25,8 +26,9 @@ type richMockCache struct {
 	// path/method let dispatch-chain tests exercise path-parameter binding
 	// materialization (e.g. "/items/{accountId}"); the zero value preserves
 	// the pathless behavior every other caller of this fixture already relies on.
-	path   string
-	method string
+	path                 string
+	method               string
+	securityRequirements authrouting.Requirements
 }
 
 func (m *richMockCache) ConnectSDK(ctx context.Context, appID string) error { return nil }
@@ -37,7 +39,7 @@ func (m *richMockCache) GetOrFetchServiceMetadata(ctx context.Context, appID str
 }
 func (c *richMockCache) GetEndpoint(ctx context.Context, appID string, serviceID string, endpointName string) (*fusedobject.Endpoint, error) {
 	if endpointName == "list_items" || endpointName == "do_thing" {
-		return &fusedobject.Endpoint{Name: endpointName, ID: c.epID, Path: c.path, Method: c.method}, nil
+		return &fusedobject.Endpoint{Name: endpointName, ID: c.epID, Path: c.path, Method: c.method, SecurityRequirements: c.testSecurityRequirements()}, nil
 	}
 	return nil, fmt.Errorf("not found")
 }
@@ -53,7 +55,14 @@ func (m *richMockCache) InvalidateAppRuntime(appID string) {}
 // GetEndpoint already recognizes.
 func (m *richMockCache) ListEndpointsForSelection(ctx context.Context, appID string, sel models.SDKSelection) ([]fusedobject.Endpoint, error) {
 	return []fusedobject.Endpoint{
-		{Name: "list_items", ID: m.epID},
-		{Name: "do_thing", ID: m.epID},
+		{Name: "list_items", ID: m.epID, SecurityRequirements: m.testSecurityRequirements()},
+		{Name: "do_thing", ID: m.epID, SecurityRequirements: m.testSecurityRequirements()},
 	}, nil
+}
+
+func (m *richMockCache) testSecurityRequirements() authrouting.Requirements {
+	if m.securityRequirements != nil {
+		return m.securityRequirements
+	}
+	return authrouting.Requirements{{Schemes: []authrouting.Requirement{}}}
 }

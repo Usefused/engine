@@ -24,13 +24,26 @@ func widgetCreateOperation() *FixtureOperation {
 		OperationID: "test.createWidget",
 		Method:      "POST",
 		Path:        "/widgets",
-		RequestBody: &models.Schema{
-			Type:     "object",
-			Required: []string{"name"},
-			Properties: map[string]models.Schema{
-				"name":  {Type: "string"},
-				"count": {Type: "integer"},
+		RequestContent: &models.RequestContent{
+			MediaType: "application/json", Serialization: models.RequestSerializationJSON, Required: true,
+			Schema: &models.Schema{
+				Type:     "object",
+				Required: []string{"name"},
+				Properties: map[string]models.Schema{
+					"name":  {Type: "string"},
+					"count": {Type: "integer"},
+				},
 			},
+		},
+	}
+}
+
+func rawUploadOperation() *FixtureOperation {
+	return &FixtureOperation{
+		OperationID: "test.uploadWidget",
+		RequestContent: &models.RequestContent{
+			MediaType: "application/octet-stream", Serialization: models.RequestSerializationRaw,
+			PayloadParameter: "body", Schema: &models.Schema{Type: "string"},
 		},
 	}
 }
@@ -60,21 +73,21 @@ func TestValidateCallParams_OptionalParameterMayBeOmitted(t *testing.T) {
 	}
 }
 
-func TestValidateCallParams_RequestBodyMissingRequiredFieldRejected(t *testing.T) {
+func TestValidateCallParams_RequestContentMissingRequiredFieldRejected(t *testing.T) {
 	err := validateCallParams(widgetCreateOperation(), map[string]any{"count": 3})
 	if err == nil {
 		t.Fatal("validateCallParams() with missing required body field = nil error, want error")
 	}
 }
 
-func TestValidateCallParams_RequestBodyWithRequiredFieldPasses(t *testing.T) {
+func TestValidateCallParams_RequestContentWithRequiredFieldPasses(t *testing.T) {
 	err := validateCallParams(widgetCreateOperation(), map[string]any{"name": "widget", "count": 3})
 	if err != nil {
 		t.Errorf("validateCallParams() = %v, want nil", err)
 	}
 }
 
-func TestValidateCallParams_RequestBodyWrongTypeRejected(t *testing.T) {
+func TestValidateCallParams_RequestContentWrongTypeRejected(t *testing.T) {
 	// "name" is declared as a string; a script hallucinating a numeric value
 	// here is exactly the failure mode this validation exists to catch
 	// before it becomes a malformed vendor request.
@@ -84,13 +97,61 @@ func TestValidateCallParams_RequestBodyWrongTypeRejected(t *testing.T) {
 	}
 }
 
-func TestValidateCallParams_NoRequestBodyDeclaredSkipsBodyValidation(t *testing.T) {
-	// widgetGetOperation has no RequestBody at all -- extra keys beyond the
+func TestValidateCallParams_RequiredRequestContentRejectsEmptyBody(t *testing.T) {
+	err := validateCallParams(widgetCreateOperation(), map[string]any{})
+	if err == nil || !strings.Contains(err.Error(), "required request body") {
+		t.Fatalf("empty required request content error = %v", err)
+	}
+}
+
+func TestValidateCallParams_NoRequestContentDeclaredSkipsBodyValidation(t *testing.T) {
+	// widgetGetOperation has no RequestContent at all -- extra keys beyond the
 	// declared path/query parameters are simply not something this operation
 	// has a schema to validate them against.
 	err := validateCallParams(widgetGetOperation(), map[string]any{"id": "widget-1", "unrelated": "value"})
 	if err != nil {
-		t.Errorf("validateCallParams() with no RequestBody declared = %v, want nil", err)
+		t.Errorf("validateCallParams() with no RequestContent declared = %v, want nil", err)
+	}
+}
+
+func TestValidateCallParams_RawValidatesConfiguredPayloadValue(t *testing.T) {
+	err := validateCallParams(rawUploadOperation(), map[string]any{"body": "payload"})
+	if err != nil {
+		t.Fatalf("valid raw payload rejected: %v", err)
+	}
+}
+
+func TestValidateCallParams_RawRequiresPayloadConvention(t *testing.T) {
+	op := rawUploadOperation()
+	op.RequestContent.PayloadParameter = ""
+	err := validateCallParams(op, map[string]any{"body": "payload"})
+	if err == nil || !strings.Contains(err.Error(), "payload_parameter is required") {
+		t.Fatalf("raw payload convention error = %v", err)
+	}
+}
+
+func TestValidateCallParams_RawRejectsMissingOrInvalidPayload(t *testing.T) {
+	tests := []struct {
+		name        string
+		params      map[string]any
+		binary      string
+		wantMessage string
+	}{
+		{name: "missing", params: map[string]any{}, wantMessage: `missing raw request payload parameter "body"`},
+		{name: "ambiguous extras", params: map[string]any{"body": "value", "extra": "lossy"}, wantMessage: `parameters outside payload_parameter "body"`},
+		{name: "wrong type", params: map[string]any{"body": map[string]any{"no": "json"}}, wantMessage: "string or byte array"},
+		{name: "invalid base64", params: map[string]any{"body": "not-base64"}, binary: "base64", wantMessage: "invalid base64"},
+		{name: "unsupported encoding", params: map[string]any{"body": "00"}, binary: "hex", wantMessage: "unsupported binary_encoding"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			op := rawUploadOperation()
+			op.RequestContent.BinaryEncoding = tt.binary
+			err := validateCallParams(op, tt.params)
+			if err == nil || !strings.Contains(err.Error(), tt.wantMessage) {
+				t.Fatalf("raw validation error = %v, want %q", err, tt.wantMessage)
+			}
+		})
 	}
 }
 
@@ -124,5 +185,20 @@ func TestModelSchemaToOpenAPI_NestedArrayItemsValidate(t *testing.T) {
 	}
 	if err := schema.VisitJSON(map[string]any{"tags": []any{1, 2}}); err == nil {
 		t.Error("array of wrong-typed items accepted, want rejected")
+	}
+}
+
+func TestModelSchemaToOpenAPI_AdditionalPropertiesValuesValidate(t *testing.T) {
+	schema, err := modelSchemaToOpenAPI(&models.Schema{
+		Type: "object", AdditionalProperties: &models.Schema{Type: "string"},
+	})
+	if err != nil {
+		t.Fatalf("modelSchemaToOpenAPI: %v", err)
+	}
+	if err := schema.VisitJSON(map[string]any{"first": "valid", "second": "also-valid"}); err != nil {
+		t.Fatalf("valid map values rejected: %v", err)
+	}
+	if err := schema.VisitJSON(map[string]any{"first": 42}); err == nil {
+		t.Fatal("invalid map value accepted")
 	}
 }

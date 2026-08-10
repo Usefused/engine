@@ -7,11 +7,11 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
+
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	enginemiddleware "github.com/Usefused/engine/internal/engine/middleware"
 	"github.com/Usefused/engine/internal/engine/store"
 )
 
@@ -36,12 +36,11 @@ var RESTProxyMountPaths = []string{
 // RESTProxyHandler validates the caller's API key the same way
 // GraphQLProxyHandler does, then forwards through the licence-identity proxy.
 // Mounted at each path in RESTProxyMountPaths.
-func RESTProxyHandler(proxy Forwarder, s store.Store, enforcers ...*enginemiddleware.RuntimeEnforcer) http.HandlerFunc {
-	return RESTProxyHandlerWithRuntimeContracts(proxy, s, nil, enforcers...)
+func RESTProxyHandler(proxy Forwarder, s store.Store) http.HandlerFunc {
+	return RESTProxyHandlerWithRuntimeContracts(proxy, s, nil)
 }
 
-func RESTProxyHandlerWithRuntimeContracts(proxy Forwarder, s store.Store, contractFetcher RuntimeContractFetcher, enforcers ...*enginemiddleware.RuntimeEnforcer) http.HandlerFunc {
-	enforcer := firstRuntimeEnforcer(enforcers)
+func RESTProxyHandlerWithRuntimeContracts(proxy Forwarder, s store.Store, contractFetcher RuntimeContractFetcher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		accountID, err := controlActorAccount(r.Context())
 		if err != nil {
@@ -58,7 +57,7 @@ func RESTProxyHandlerWithRuntimeContracts(proxy Forwarder, s store.Store, contra
 			// reads: the Registry already traces its own handlers, and every
 			// catalogue/account read passing through here would be a lot of
 			// low-value span volume.
-			forwardWithRuntime(enforcer, proxy, w, r, accountID)
+			proxy.Forward(w, r, "")
 			return
 		}
 
@@ -82,26 +81,8 @@ func RESTProxyHandlerWithRuntimeContracts(proxy Forwarder, s store.Store, contra
 			return
 		}
 
-		forwardRESTMutationWithSpan(proxy, enforcer, w, r, accountID)
+		forwardRESTMutationWithSpan(proxy, w, r, accountID)
 	}
-}
-
-func firstRuntimeEnforcer(enforcers []*enginemiddleware.RuntimeEnforcer) *enginemiddleware.RuntimeEnforcer {
-	if len(enforcers) == 0 {
-		return nil
-	}
-	return enforcers[0]
-}
-
-func forwardWithRuntime(enforcer *enginemiddleware.RuntimeEnforcer, proxy Forwarder, w http.ResponseWriter, r *http.Request, accountID uuid.UUID) {
-	forward := func(w http.ResponseWriter, r *http.Request) {
-		proxy.Forward(w, r, "")
-	}
-	if enforcer == nil {
-		forward(w, r)
-		return
-	}
-	enforcer.Forward(w, r, accountID, forward)
 }
 
 // isMutatingMethod reports whether method is one Sprint 1's OTEL standard
@@ -122,7 +103,7 @@ func isMutatingMethod(method string) bool {
 // proxy types) because the two span names and user_action values differ and
 // forcing them through one generic function would need attribute maps
 // instead of readable literals, for no real complexity savings.
-func forwardRESTMutationWithSpan(proxy Forwarder, enforcer *enginemiddleware.RuntimeEnforcer, w http.ResponseWriter, r *http.Request, accountID uuid.UUID) {
+func forwardRESTMutationWithSpan(proxy Forwarder, w http.ResponseWriter, r *http.Request, accountID uuid.UUID) {
 	ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.proxy.rest_mutation", trace.WithAttributes(
 		attribute.String("user_action", "rest."+r.Method),
 		attribute.String("account_id", accountID.String()),
@@ -131,7 +112,7 @@ func forwardRESTMutationWithSpan(proxy Forwarder, enforcer *enginemiddleware.Run
 	defer span.End()
 
 	rec := newStatusRecorder(w)
-	forwardWithRuntime(enforcer, proxy, rec, r.WithContext(ctx), accountID)
+	proxy.Forward(rec, r.WithContext(ctx), "")
 	span.SetAttributes(
 		attribute.Int("http_status_code", rec.status),
 		attribute.String("outcome", outcomeLabel(rec.status)),

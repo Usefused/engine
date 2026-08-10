@@ -59,6 +59,11 @@ func NewLocalObjectCache(db store.Store, rc RegistryClient) *LocalObjectCache {
 	}
 }
 
+func (c *LocalObjectCache) providerRateLimitStore() store.ProviderRateLimitStore {
+	store, _ := c.db.(store.ProviderRateLimitStore)
+	return store
+}
+
 func (c *LocalObjectCache) ConnectSDK(ctx context.Context, appID string) error {
 	started := time.Now()
 	sdkUUID, err := uuid.Parse(appID)

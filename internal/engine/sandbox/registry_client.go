@@ -1067,7 +1067,7 @@ func (c *HTTPRegistryClient) FetchServiceVersionAuthConfigs(ctx context.Context,
 		Query: `query ServiceVersionAuthConfigs($refs: [ServiceVersionRefInput!]!) {
 			serviceVersionAuthConfigs(refs: $refs) {
 				service_id version service_version_id
-				auth_configs { name type flow scheme location key_name token_url authorization_url open_id_connect_url scopes }
+				auth_configs { name type flow scheme basic_password_mode location key_name token_url authorization_url open_id_connect_url scopes }
 			}
 		}`,
 		Variables: map[string]interface{}{"refs": refs},
@@ -1288,9 +1288,8 @@ func ServiceMetadataRefKey(ref ServiceMetadataRef) string {
 	return ref.ServiceID.String() + ":" + ref.Version
 }
 
-// FetchServiceMetadataBatch reads the webhook-relevant metadata for every
-// selected service in one GraphQL operation. Aliases keep this compatible
-// with the Registry's existing singular service field.
+// FetchServiceMetadataBatch reads webhook metadata through Registry's
+// set-based field so adding services does not add resolver/database queries.
 func (c *HTTPRegistryClient) FetchServiceMetadataBatch(ctx context.Context, refs []ServiceMetadataRef) (map[string]*fusedobject.ServiceMetadata, error) {
 	if len(refs) == 0 {
 		return map[string]*fusedobject.ServiceMetadata{}, nil
@@ -1312,18 +1311,16 @@ func (c *HTTPRegistryClient) FetchServiceMetadataBatch(ctx context.Context, refs
 }
 
 func (c *HTTPRegistryClient) buildServiceMetadataBatchRequest(ctx context.Context, refs []ServiceMetadataRef) (*http.Request, error) {
-	var declarations, fields strings.Builder
-	variables := make(map[string]interface{}, len(refs)*2)
-	for i, ref := range refs {
-		if i > 0 {
-			declarations.WriteString(", ")
-		}
-		fmt.Fprintf(&declarations, "$id%d: String!, $version%d: String!", i, i)
-		fmt.Fprintf(&fields, "s%d: service(id: $id%d, version: $version%d) { id name event_extraction_path incoming_webhook_config { auth_type auth_location auth_key_name signature_header verification_headers } }\n", i, i, i)
-		variables[fmt.Sprintf("id%d", i)] = ref.ServiceID.String()
-		variables[fmt.Sprintf("version%d", i)] = ref.Version
+	versionRefs := make([]ServiceVersionRef, 0, len(refs))
+	for _, ref := range refs {
+		versionRefs = append(versionRefs, ServiceVersionRef{ServiceID: ref.ServiceID, Version: ref.Version})
 	}
-	payload, err := json.Marshal(graphqlQuery{Query: "query WebhookMetadata(" + declarations.String() + ") {\n" + fields.String() + "}", Variables: variables})
+	payload, err := json.Marshal(graphqlQuery{Query: `query WebhookMetadata($refs: [ServiceVersionRefInput!]!) {
+		serviceWebhookMetadata(refs: $refs) {
+			service_id version service_version_id name event_extraction_path
+			incoming_webhook_config { auth_type auth_location auth_key_name signature_header verification_headers }
+		}
+	}`, Variables: map[string]interface{}{"refs": versionRefs}})
 	if err != nil {
 		return nil, fmt.Errorf("FetchServiceMetadataBatch: marshal: %w", err)
 	}
@@ -1340,7 +1337,21 @@ func (c *HTTPRegistryClient) buildServiceMetadataBatchRequest(ctx context.Contex
 }
 
 func decodeServiceMetadataBatch(body io.Reader, refs []ServiceMetadataRef) (map[string]*fusedobject.ServiceMetadata, error) {
-	var response graphqlResponse
+	var response struct {
+		Data struct {
+			Metadata []struct {
+				ServiceID             uuid.UUID                          `json:"service_id"`
+				Version               string                             `json:"version"`
+				ServiceVersionID      uuid.UUID                          `json:"service_version_id"`
+				Name                  string                             `json:"name"`
+				EventExtractionPath   string                             `json:"event_extraction_path"`
+				IncomingWebhookConfig *fusedobject.IncomingWebhookConfig `json:"incoming_webhook_config"`
+			} `json:"serviceWebhookMetadata"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
 	if err := json.NewDecoder(body).Decode(&response); err != nil {
 		return nil, fmt.Errorf("FetchServiceMetadataBatch: decode: %w", err)
 	}
@@ -1348,15 +1359,16 @@ func decodeServiceMetadataBatch(body io.Reader, refs []ServiceMetadataRef) (map[
 		return nil, fmt.Errorf("FetchServiceMetadataBatch: graphql: %s", response.Errors[0].Message)
 	}
 	result := make(map[string]*fusedobject.ServiceMetadata, len(refs))
-	for i, ref := range refs {
-		var metadata *fusedobject.ServiceMetadata
-		if err := json.Unmarshal(response.Data[fmt.Sprintf("s%d", i)], &metadata); err != nil {
-			return nil, fmt.Errorf("FetchServiceMetadataBatch: decode service %s: %w", ref.ServiceID, err)
+	for _, item := range response.Data.Metadata {
+		result[ServiceMetadataRefKey(ServiceMetadataRef{ServiceID: item.ServiceID, Version: item.Version})] = &fusedobject.ServiceMetadata{
+			ID: item.ServiceID, ServiceVersionID: item.ServiceVersionID, Name: item.Name,
+			EventExtractionPath: item.EventExtractionPath, IncomingWebhookConfig: item.IncomingWebhookConfig,
 		}
-		if metadata == nil {
+	}
+	for _, ref := range refs {
+		if result[ServiceMetadataRefKey(ref)] == nil {
 			return nil, fmt.Errorf("FetchServiceMetadataBatch: service %s not found", ref.ServiceID)
 		}
-		result[ServiceMetadataRefKey(ref)] = metadata
 	}
 	return result, nil
 }
@@ -1532,7 +1544,7 @@ func (c *HTTPRegistryClient) fetchEndpointsByNames(ctx context.Context, serviceI
 }
 
 // FetchServiceOperations returns every endpoint on serviceID/serviceVersionID,
-// including the schema fields (parameters, request_body, responses)
+// including the schema fields (parameters, request_content, responses)
 // FetchEndpointsByNames' query intentionally omits -- that query backs the
 // dispatch hot path's by-name lookups (cache.go's prefetchEndpoints/
 // GetEndpoint), which don't need full schema; this one backs building a
@@ -1553,6 +1565,7 @@ func (c *HTTPRegistryClient) fetchServiceOperations(ctx context.Context, service
 		query GetServiceOperations($serviceId: String!, $version: String!) {
 			serviceOperations(serviceId: $serviceId, version: $version) {
 				id
+				stable_key
 				name
 				description
 				method
@@ -1566,13 +1579,15 @@ func (c *HTTPRegistryClient) fetchServiceOperations(ctx context.Context, service
 					required
 					type
 					description
+					path_encoding
 				}
-				request_body
+				request_content
 				responses
 				graphql_query
 				provider_protocol
 				operation_kind
-				pagination
+				pagination {` + runtimePaginationFields + `}
+				security_requirements {` + runtimeSecurityRequirementFields + `}
 			}
 		}
 	`
@@ -1967,6 +1982,7 @@ func (c *HTTPRegistryClient) buildServiceMetadataRequest(ctx context.Context, se
 					description
 					environment
 					is_default
+					variables { name default enum required }
 				}
 				default_headers
 				connect_config
@@ -1975,6 +1991,7 @@ func (c *HTTPRegistryClient) buildServiceMetadataRequest(ctx context.Context, se
 					type
 					flow
 					scheme
+					basic_password_mode
 					location
 					key_name
 					token_url
@@ -1982,22 +1999,14 @@ func (c *HTTPRegistryClient) buildServiceMetadataRequest(ctx context.Context, se
 					open_id_connect_url
 					scopes
 				}
-				rate_limit {
-					strategy
-					requests_per_second
-					requests_per_minute
-				}
+				rate_limit {` + runtimeRateLimitFields + `}
 				retry_config {
 					strategy
 					max_retries
 					backoff_ms
 				}
 				timeout_ms
-				pagination {
-					type
-					request_param
-					response_path
-				}
+				pagination {` + runtimePaginationFields + `}
 				event_extraction_path
 				incoming_webhook_config {
 					auth_type
@@ -2044,6 +2053,7 @@ func (c *HTTPRegistryClient) buildEndpointsByNamesRequest(ctx context.Context, s
 		query GetEndpoints($serviceId: String!, $serviceVersionId: String!, $names: [String!]!) {
 			endpointsByNames(serviceId: $serviceId, serviceVersionId: $serviceVersionId, names: $names) {
 				id
+				stable_key
 				name
 				description
 				method
@@ -2057,13 +2067,15 @@ func (c *HTTPRegistryClient) buildEndpointsByNamesRequest(ctx context.Context, s
 					required
 					type
 					description
+					path_encoding
 				}
-				request_body
+				request_content
 				responses
 				graphql_query
 				provider_protocol
 				operation_kind
-				pagination
+				pagination {` + runtimePaginationFields + `}
+				security_requirements {` + runtimeSecurityRequirementFields + `}
 			}
 		}
 	`

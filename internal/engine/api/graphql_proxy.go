@@ -21,7 +21,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
-	enginemiddleware "github.com/Usefused/engine/internal/engine/middleware"
 	"github.com/Usefused/engine/internal/engine/store"
 )
 
@@ -155,8 +154,7 @@ func copyHeaders(dst, src http.Header) {
 // Registry is an internal service and should not be a public auth boundary
 // for the Engine's users. Rejecting invalid keys here means unauthenticated
 // traffic never reaches the Registry at all.
-func GraphQLProxyHandler(proxy Forwarder, s store.Store, enforcers ...*enginemiddleware.RuntimeEnforcer) http.HandlerFunc {
-	enforcer := firstRuntimeEnforcer(enforcers)
+func GraphQLProxyHandler(proxy Forwarder, s store.Store) http.HandlerFunc {
 	// Short-TTL response cache for non-mutation reads. Created once per server
 	// startup; TTL of 5 s is enough to collapse burst traffic (repeated workspace
 	// plans, polling dashboards) without risking stale results for write-after-read.
@@ -191,15 +189,15 @@ func GraphQLProxyHandler(proxy Forwarder, s store.Store, enforcers ...*enginemid
 			return
 		}
 		if operation != "mutation" {
-			forwardGraphQLRead(enforcer, proxy, cache, w, r, accountID, body, authDur, start)
+			forwardGraphQLRead(proxy, cache, w, r, body, authDur, start)
 			return
 		}
 
-		forwardMutationWithSpan(proxy, enforcer, w, r, accountID)
+		forwardMutationWithSpan(proxy, w, r, accountID)
 	}
 }
 
-func forwardGraphQLRead(enforcer *enginemiddleware.RuntimeEnforcer, proxy Forwarder, cache *proxyResponseCache, w http.ResponseWriter, r *http.Request, accountID uuid.UUID, body []byte, authDur time.Duration, start time.Time) {
+func forwardGraphQLRead(proxy Forwarder, cache *proxyResponseCache, w http.ResponseWriter, r *http.Request, body []byte, authDur time.Duration, start time.Time) {
 	cacheStart := time.Now()
 	cacheKey, cacheable := graphQLRequestCacheKey(r.Context(), body)
 	if entry, ok := cache.get(cacheKey); cacheable && ok {
@@ -210,7 +208,7 @@ func forwardGraphQLRead(enforcer *enginemiddleware.RuntimeEnforcer, proxy Forwar
 
 	registryStart := time.Now()
 	bw := newBufferedResponseWriter()
-	forwardWithRuntime(enforcer, proxy, bw, r, accountID)
+	proxy.Forward(bw, r, "")
 	timing := graphQLProxyTiming{auth: authDur, cache: time.Since(cacheStart), registry: time.Since(registryStart), total: time.Since(start)}
 	setGraphQLServerTiming(bw.Header(), timing)
 	bw.flushTo(w)
@@ -265,7 +263,7 @@ func serverTimingMetric(name string, duration time.Duration) string {
 // the audit attributes required for user/agent-triggered writes: who did it
 // (account_id), what path they hit, and whether it succeeded. Split out from
 // GraphQLProxyHandler to keep that function's branching simple.
-func forwardMutationWithSpan(proxy Forwarder, enforcer *enginemiddleware.RuntimeEnforcer, w http.ResponseWriter, r *http.Request, accountID uuid.UUID) {
+func forwardMutationWithSpan(proxy Forwarder, w http.ResponseWriter, r *http.Request, accountID uuid.UUID) {
 	ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.proxy.graphql_mutation", trace.WithAttributes(
 		attribute.String("user_action", "graphql.mutation"),
 		attribute.String("account_id", accountID.String()),
@@ -274,7 +272,7 @@ func forwardMutationWithSpan(proxy Forwarder, enforcer *enginemiddleware.Runtime
 	defer span.End()
 
 	rec := newStatusRecorder(w)
-	forwardWithRuntime(enforcer, proxy, rec, r.WithContext(ctx), accountID)
+	proxy.Forward(rec, r.WithContext(ctx), "")
 	span.SetAttributes(
 		attribute.Int("http_status_code", rec.status),
 		attribute.String("outcome", outcomeLabel(rec.status)),

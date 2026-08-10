@@ -8,6 +8,7 @@ import (
 
 	"github.com/Usefused/engine/internal/shared/db"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
+	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
 	"github.com/google/uuid"
 )
 
@@ -50,7 +51,7 @@ func TestPostgresStore_WorkspaceExecutionPolicyOverride(t *testing.T) {
 	// Service-default tier: rate limit only.
 	serviceDefault, err := s.UpsertWorkspaceExecutionPolicyOverride(ctx, WorkspaceExecutionPolicyOverride{
 		ServiceID: serviceID,
-		RateLimit: &fusedobject.RateLimitConfig{Strategy: "fixed_window", RequestsPerSecond: 5},
+		RateLimit: testWorkspaceRateLimit(5),
 		TimeoutMs: &serviceTimeoutMs,
 	})
 	if err != nil {
@@ -68,7 +69,7 @@ func TestPostgresStore_WorkspaceExecutionPolicyOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get effective (fallback to service-default): %v", err)
 	}
-	if effective == nil || effective.RateLimit == nil || effective.RateLimit.RequestsPerSecond != 5 {
+	if effective == nil || workspaceRateLimitValue(effective.RateLimit) != 5 {
 		t.Fatalf("expected service-default fallback, got %#v", effective)
 	}
 	if effective.TimeoutMs == nil || *effective.TimeoutMs != serviceTimeoutMs {
@@ -129,7 +130,7 @@ func TestPostgresStore_WorkspaceExecutionPolicyOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get effective (unaffected version): %v", err)
 	}
-	if effective == nil || effective.RateLimit == nil || effective.RateLimit.RequestsPerSecond != 5 {
+	if effective == nil || workspaceRateLimitValue(effective.RateLimit) != 5 {
 		t.Fatalf("expected unaffected version to still see service-default, got %#v", effective)
 	}
 
@@ -165,7 +166,7 @@ func TestPostgresStore_WorkspaceExecutionPolicyOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get effective (after version-tier reset): %v", err)
 	}
-	if effective == nil || effective.RateLimit == nil || effective.RateLimit.RequestsPerSecond != 5 {
+	if effective == nil || workspaceRateLimitValue(effective.RateLimit) != 5 {
 		t.Fatalf("expected fallback to service-default after version-tier reset, got %#v", effective)
 	}
 
@@ -180,4 +181,19 @@ func TestPostgresStore_WorkspaceExecutionPolicyOverride(t *testing.T) {
 	if effective != nil {
 		t.Fatalf("expected no override after full reset, got %#v", effective)
 	}
+}
+
+func testWorkspaceRateLimit(limit int64) *fusedobject.RateLimitConfig {
+	return &fusedobject.RateLimitConfig{Version: 2, Policies: []ratelimitpolicy.Policy{{
+		Name: "requests", Unit: "requests", Scope: "service_version", DefaultCost: 1,
+		OperationCosts: map[string]int64{}, Algorithm: "fixed_window",
+		FixedWindow: &ratelimitpolicy.FixedWindow{Limit: limit, DurationMS: 1_000},
+	}}}
+}
+
+func workspaceRateLimitValue(config *fusedobject.RateLimitConfig) int64 {
+	if config == nil || len(config.Policies) == 0 || config.Policies[0].FixedWindow == nil {
+		return 0
+	}
+	return config.Policies[0].FixedWindow.Limit
 }

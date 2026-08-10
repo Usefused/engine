@@ -356,7 +356,7 @@ func TestEngineGraphQLConnectAuth_WorkspaceConnectConfigs(t *testing.T) {
 		workspaceConnectConfigs: []store.WorkspaceConnectConfig{{
 			ConnectConfig: store.ConnectConfig{
 				ID: uuid.New(), BucketID: bucketID, ServiceID: serviceID,
-				AuthType: "oauth", Enabled: true, EncryptedClientID: "enc:id", EncryptedClientSecret: "enc:secret",
+				AuthType: "oauth", AuthName: "primaryOAuth", Enabled: true, EncryptedClientID: "enc:id", EncryptedClientSecret: "enc:secret",
 				RedirectURI: "http://localhost:8081/connect/callback", CreatedAt: now, UpdatedAt: now,
 			},
 			BucketName: "github",
@@ -371,7 +371,7 @@ func TestEngineGraphQLConnectAuth_WorkspaceConnectConfigs(t *testing.T) {
 
 	query := `query {
 		workspaceConnectConfigs {
-			bucket_id bucket_name service_id auth_type enabled redirect_uri has_client_id has_client_secret
+			bucket_id bucket_name service_id auth_type auth_name enabled redirect_uri has_client_id has_client_secret
 			profiles { service_version_id auth_type provenance profile }
 		}
 	}`
@@ -382,7 +382,7 @@ func TestEngineGraphQLConnectAuth_WorkspaceConnectConfigs(t *testing.T) {
 		t.Fatalf("expected one workspace sync config, got %#v", workspaceConfigs)
 	}
 	exported := workspaceConfigs[0].(map[string]any)
-	if exported["bucket_name"] != "github" || exported["has_client_secret"] != true {
+	if exported["bucket_name"] != "github" || exported["auth_name"] != "primaryOAuth" || exported["has_client_secret"] != true {
 		t.Fatalf("unexpected workspace sync config: %#v", exported)
 	}
 	profiles := exported["profiles"].([]any)

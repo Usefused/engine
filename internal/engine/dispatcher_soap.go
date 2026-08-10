@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 
 	"github.com/Usefused/engine/internal/engine/store"
@@ -36,7 +37,10 @@ func (d *Dispatcher) executeSOAP(
 	tmpfile.Write([]byte(srv.RawWSDL))
 	tmpfile.Close()
 
-	client, err := gosoap.SoapClientWithConfig(tmpfile.Name(), d.client, &gosoap.Config{
+	// gosoap treats scheme-less paths as HTTP URLs. An explicit file URL keeps
+	// WSDL loading local so only Call crosses the provider-attempt boundary.
+	wsdlURL := (&url.URL{Scheme: "file", Path: tmpfile.Name()}).String()
+	client, err := gosoap.SoapClientWithConfig(wsdlURL, d.client, &gosoap.Config{
 		Dump: true, // Allows us to see the request/response
 	})
 	if err != nil {
@@ -50,6 +54,9 @@ func (d *Dispatcher) executeSOAP(
 
 	// The SOAP action name is typically the NormalizedPath.
 	actionName := obj.NormalizedPath
+	if _, err := d.awaitProviderRateLimit(ctx, srv, obj); err != nil {
+		return 429, err
+	}
 	res, err := client.Call(actionName, p)
 
 	// Check if network request itself failed

@@ -20,7 +20,7 @@ func concurrencyFixture(t *testing.T, vendorHandler http.HandlerFunc) (cache *ri
 	t.Helper()
 	vendor := httptest.NewServer(vendorHandler)
 	t.Cleanup(func() { vendor.Close() })
-	cache, endpoint = makePassthroughCache(t, vendor.URL)
+	cache, endpoint = makeAnonymousPassthroughCache(t, vendor.URL)
 	return cache, endpoint, vendor.URL
 }
 
@@ -135,7 +135,7 @@ func TestEngineExecuteCore_Concurrency_AllowsWhenUnderLimit(t *testing.T) {
 	}))
 	defer vendor.Close()
 
-	cache, endpoint := makePassthroughCache(t, vendor.URL)
+	cache, endpoint := makeAnonymousPassthroughCache(t, vendor.URL)
 	accID := uuid.New()
 	withEntitlement(t, models.RuntimeEntitlement{
 		MaxSandboxConcurrency: models.IntPtr(5),
@@ -163,7 +163,7 @@ func TestEngineExecuteCore_Concurrency_BlocksWhenAtLimit(t *testing.T) {
 	}))
 	defer vendor.Close()
 
-	cache, endpoint := makePassthroughCache(t, vendor.URL)
+	cache, endpoint := makeAnonymousPassthroughCache(t, vendor.URL)
 	accID := uuid.New()
 	withEntitlement(t, models.RuntimeEntitlement{
 		MaxSandboxConcurrency: models.IntPtr(2),
@@ -198,7 +198,7 @@ func TestEngineExecuteCore_Concurrency_MissingLimitIsUnlimited(t *testing.T) {
 	}))
 	defer vendor.Close()
 
-	cache, endpoint := makePassthroughCache(t, vendor.URL)
+	cache, endpoint := makeAnonymousPassthroughCache(t, vendor.URL)
 	accID := uuid.New()
 	withEntitlement(t, models.RuntimeEntitlement{
 		// MaxSandboxConcurrency left nil => unlimited
@@ -237,7 +237,7 @@ func TestEngineExecuteCore_Concurrency_NegativeOneIsUnlimited(t *testing.T) {
 	}))
 	defer vendor.Close()
 
-	cache, endpoint := makePassthroughCache(t, vendor.URL)
+	cache, endpoint := makeAnonymousPassthroughCache(t, vendor.URL)
 	accID := uuid.New()
 	withEntitlement(t, models.RuntimeEntitlement{
 		MaxSandboxConcurrency: models.IntPtr(-1),
@@ -275,7 +275,7 @@ func TestEngineExecuteCore_Concurrency_DecrementsOnEarlyReturn(t *testing.T) {
 	}))
 	defer vendor.Close()
 
-	cache, endpoint := makePassthroughCache(t, vendor.URL)
+	cache, endpoint := makeAnonymousPassthroughCache(t, vendor.URL)
 	accID := uuid.New()
 	withEntitlement(t, models.RuntimeEntitlement{
 		MaxSandboxConcurrency: models.IntPtr(1),
@@ -314,7 +314,7 @@ func TestEngineExecuteCore_Concurrency_DecrementsAfterCompletion(t *testing.T) {
 	}))
 	defer vendor.Close()
 
-	cache, endpoint := makePassthroughCache(t, vendor.URL)
+	cache, endpoint := makeAnonymousPassthroughCache(t, vendor.URL)
 	accID := uuid.New()
 	withEntitlement(t, models.RuntimeEntitlement{
 		MaxSandboxConcurrency: models.IntPtr(2),
@@ -350,7 +350,7 @@ func TestEngineExecuteCore_Concurrency_ZeroBlocksAll(t *testing.T) {
 	}))
 	defer vendor.Close()
 
-	cache, endpoint := makePassthroughCache(t, vendor.URL)
+	cache, endpoint := makeAnonymousPassthroughCache(t, vendor.URL)
 	accID := uuid.New()
 	withEntitlement(t, models.RuntimeEntitlement{
 		MaxSandboxConcurrency: models.IntPtr(0),

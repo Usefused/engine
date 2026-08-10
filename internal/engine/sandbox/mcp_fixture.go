@@ -16,15 +16,15 @@ import (
 // mapped onto this shape later without a schema rewrite -- the fixture is a
 // stand-in for a data *source*, not a different data *shape*.
 type FixtureOperation struct {
-	OperationID string             `json:"operation_id"`
-	ServiceID   string             `json:"service_id"`
-	Name        string             `json:"name"`
-	Description string             `json:"description"`
-	Method      string             `json:"method"`
-	Path        string             `json:"path"`
-	Parameters  []models.Parameter `json:"parameters"`
-	RequestBody *models.Schema     `json:"request_body,omitempty"`
-	Responses   models.Responses   `json:"responses"`
+	OperationID    string                 `json:"operation_id"`
+	ServiceID      string                 `json:"service_id"`
+	Name           string                 `json:"name"`
+	Description    string                 `json:"description"`
+	Method         string                 `json:"method"`
+	Path           string                 `json:"path"`
+	Parameters     []models.Parameter     `json:"parameters"`
+	RequestContent *models.RequestContent `json:"request_content,omitempty"`
+	Responses      models.Responses       `json:"responses"`
 }
 
 // Fixture is the top-level shape of fixture.json.

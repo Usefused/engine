@@ -195,6 +195,21 @@ func (s *workspaceTestStore) CountActiveServices(_ context.Context) (int, error)
 	return len(s.workspaceServices), nil
 }
 
+func (s *workspaceTestStore) CountProjectedActiveServices(_ context.Context, desiredIDs, removableIDs []uuid.UUID) (int, int, error) {
+	active := make(map[uuid.UUID]bool, len(s.workspaceServices))
+	for _, service := range s.workspaceServices {
+		active[service.ServiceID] = true
+	}
+	current := len(active)
+	for _, serviceID := range removableIDs {
+		delete(active, serviceID)
+	}
+	for _, serviceID := range desiredIDs {
+		active[serviceID] = true
+	}
+	return current, len(active), nil
+}
+
 func (s *workspaceTestStore) GetAppByFamilyAndVersion(_ context.Context, familyID uuid.UUID, version string) (*store.App, error) {
 	s.appMutex.Lock()
 	defer s.appMutex.Unlock()

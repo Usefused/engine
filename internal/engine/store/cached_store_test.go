@@ -6,6 +6,7 @@ import (
 
 	"github.com/Usefused/engine/internal/shared/cache"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
+	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
 	"github.com/google/uuid"
 )
 
@@ -123,6 +124,24 @@ func TestCachedStoreForwardsWorkspaceConnectSync(t *testing.T) {
 	}
 }
 
+func TestCachedStoreForwardsProviderRateLimits(t *testing.T) {
+	delegate := &cachedProviderRateLimitDelegate{}
+	cached := NewCachedStore(delegate, nil)
+	coordinator, ok := cached.(ProviderRateLimitStore)
+	if !ok {
+		t.Fatal("cached store does not expose provider rate-limit capability")
+	}
+	if _, err := coordinator.AcquireProviderRateLimit(context.Background(), ratelimitpolicy.AcquireRequest{}); err != nil {
+		t.Fatalf("forward provider rate-limit acquire: %v", err)
+	}
+	if err := coordinator.SyncProviderRateLimit(context.Background(), ratelimitpolicy.SyncRequest{}); err != nil {
+		t.Fatalf("forward provider rate-limit sync: %v", err)
+	}
+	if delegate.acquireCalls != 1 || delegate.syncCalls != 1 {
+		t.Fatalf("delegate calls acquire=%d sync=%d", delegate.acquireCalls, delegate.syncCalls)
+	}
+}
+
 type cachedProfileDelegate struct {
 	Store
 	WorkspaceProfileStore
@@ -138,6 +157,22 @@ type cachedWorkspaceConnectSyncDelegate struct {
 	Store
 	configCalls  int
 	profileCalls int
+}
+
+type cachedProviderRateLimitDelegate struct {
+	Store
+	acquireCalls int
+	syncCalls    int
+}
+
+func (d *cachedProviderRateLimitDelegate) AcquireProviderRateLimit(context.Context, ratelimitpolicy.AcquireRequest) (ratelimitpolicy.Decision, error) {
+	d.acquireCalls++
+	return ratelimitpolicy.Decision{Allowed: true}, nil
+}
+
+func (d *cachedProviderRateLimitDelegate) SyncProviderRateLimit(context.Context, ratelimitpolicy.SyncRequest) error {
+	d.syncCalls++
+	return nil
 }
 
 // ListWorkspaceConnectConfigs records forwarding of the config half of the

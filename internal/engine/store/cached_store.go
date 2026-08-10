@@ -14,6 +14,7 @@ import (
 	"github.com/Usefused/engine/internal/shared/messaging"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/observability"
+	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
 )
 
 // cachedStore wraps a store.Store with an in-memory cache to ensure
@@ -70,6 +71,38 @@ func (s *cachedStore) LoadDefaultBucketID(ctx context.Context) (uuid.UUID, error
 		return uuid.Nil, errors.New("store does not support default bucket lookup")
 	}
 	return loader.LoadDefaultBucketID(ctx)
+}
+
+func (s *cachedStore) CountProjectedActiveServices(ctx context.Context, desiredIDs, removableIDs []uuid.UUID) (int, int, error) {
+	counter, ok := s.Store.(WorkspaceServiceCapacityStore)
+	if !ok {
+		return 0, 0, errors.New("store does not support workspace service capacity")
+	}
+	return counter.CountProjectedActiveServices(ctx, desiredIDs, removableIDs)
+}
+
+func (s *cachedStore) AcquireProviderRateLimit(ctx context.Context, request ratelimitpolicy.AcquireRequest) (ratelimitpolicy.Decision, error) {
+	coordinator, err := s.providerRateLimitStore()
+	if err != nil {
+		return ratelimitpolicy.Decision{}, err
+	}
+	return coordinator.AcquireProviderRateLimit(ctx, request)
+}
+
+func (s *cachedStore) SyncProviderRateLimit(ctx context.Context, request ratelimitpolicy.SyncRequest) error {
+	coordinator, err := s.providerRateLimitStore()
+	if err != nil {
+		return err
+	}
+	return coordinator.SyncProviderRateLimit(ctx, request)
+}
+
+func (s *cachedStore) providerRateLimitStore() (ProviderRateLimitStore, error) {
+	coordinator, ok := s.Store.(ProviderRateLimitStore)
+	if !ok {
+		return nil, errors.New("store does not support provider rate limits")
+	}
+	return coordinator, nil
 }
 
 func (s *cachedStore) ListSDKPackageLeaseRenewals(ctx context.Context, after uuid.UUID, limit int) ([]models.SDKPackageLeaseRenewal, error) {
@@ -263,6 +296,12 @@ func (s *cachedStore) GetSecrets(ctx context.Context, bucketID, serviceID uuid.U
 	}
 	s.cacheFetchedSecrets(bucketID, serviceID, missing, fetched)
 	return append(cached, fetched...), nil
+}
+
+func (s *cachedStore) GetFirstCompleteSecretSet(ctx context.Context, bucketID, serviceID uuid.UUID, alternatives []SecretKeyAlternative) ([]WorkspaceSecret, error) {
+	// Selection must happen atomically in the database; composing per-key cache
+	// hits here could mix OR branches or turn the hot path into N+1 lookups.
+	return s.Store.GetFirstCompleteSecretSet(ctx, bucketID, serviceID, alternatives)
 }
 
 func (s *cachedStore) GetBucketValues(ctx context.Context, bucketID, serviceID uuid.UUID, keyNames []string) ([]BucketValue, error) {

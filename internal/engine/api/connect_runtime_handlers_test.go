@@ -187,6 +187,7 @@ func TestConnectCallbackHandlerDiscoversResources(t *testing.T) {
 	fixture.verifier.serviceMetadata.BaseURL = provider.URL
 	fixture.verifier.serviceMetadata.AuthConfigs[0].Type = "oauth2"
 	fixture.store.savedConfig.AuthType = "oauth"
+	fixture.store.session.AuthType = "oauth"
 	// This fixture exercises OAuth resource discovery; retaining the shared
 	// fixture's openid scope would correctly require an OIDC ID token and nonce.
 	fixture.verifier.serviceMetadata.AuthConfigs[0].Scopes = nil
@@ -224,7 +225,7 @@ func TestSelectRuntimeOAuthConfigMatchesConfiguredFamily(t *testing.T) {
 		{Name: "oauthScheme", Type: "oauth2", AuthorizationURL: "https://oauth.example/authorize", TokenURL: "https://oauth.example/token"},
 		{Name: "oidcScheme", Type: "openIdConnect", AuthorizationURL: "https://oidc.example/authorize", TokenURL: "https://oidc.example/token"},
 	}
-	auth, err := selectRuntimeOAuthConfig(auths, "oidc")
+	auth, err := selectRuntimeOAuthConfig(auths, "oidc", "oidcScheme")
 	if err != nil {
 		t.Fatalf("select oidc auth: %v", err)
 	}
@@ -255,10 +256,12 @@ func TestRediscoverConnectionResourcesReusesConnectedToken(t *testing.T) {
 	expires := time.Now().Add(time.Hour)
 	connection := &store.AuthConnection{
 		ID: uuid.New(), BucketID: fixture.bucketID, ServiceID: fixture.serviceID,
-		EndUserRef: "user-1", AuthType: "oauth", EncryptedDEK: wrapped,
+		EndUserRef: "user-1", AuthType: "oauth", AuthName: "oauthScheme", EncryptedDEK: wrapped,
 		EncryptedAccessToken: encrypted, TokenType: "Bearer", ExpiresAt: &expires, RefreshState: "ok",
 	}
 	fixture.store.savedConnection = connection
+	fixture.store.savedConfig.AuthType = "oauth"
+	fixture.store.savedConfig.AuthName = "oauthScheme"
 	fixture.verifier.serviceMetadata.ServiceVersionID = uuid.New()
 	fixture.verifier.serviceMetadata.BaseURL = provider.URL
 	fixture.verifier.serviceMetadata.AuthConfigs = fusedobject.AuthConfigs{{
@@ -334,6 +337,7 @@ func encryptedRuntimeConnectConfig(t *testing.T, fixture connectAdminFixture) st
 	t.Helper()
 	cfg, err := encryptConnectConfig(fixture.bucketID, fixture.serviceID, resolvedConnectConfigFields{
 		AuthType:     "oidc",
+		AuthName:     "bearerAuth",
 		Enabled:      true,
 		ClientID:     "client-id",
 		ClientSecret: "client-secret",
@@ -372,6 +376,8 @@ func connectRuntimeSession(t *testing.T, fixture connectRuntimeFixture, state, v
 		ID:                    uuid.New(),
 		BucketID:              fixture.bucketID,
 		ServiceID:             fixture.serviceID,
+		AuthType:              fixture.store.savedConfig.AuthType,
+		AuthName:              fixture.store.savedConfig.AuthName,
 		EndUserRef:            "user_123",
 		StateHash:             connectHash(state),
 		NonceHash:             connectHash("nonce-value"),

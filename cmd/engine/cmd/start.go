@@ -186,11 +186,6 @@ func runEngine() {
 	subscribeCacheInvalidation(natsClient, localObjectCache)
 
 	registryProxy := api.NewRegistryProxy(cfg.Engine.RegistryEndpoint, envLicense)
-	// localObjectCache, not registryClient directly, so rate_limit/retry_config
-	// enforcement reads the cached runtime contract snapshot (falling back to
-	// a live Registry call only when no snapshot exists yet) instead of
-	// making a live Registry call on every single proxied request.
-	runtimeEnforcer := enginemiddleware.NewRuntimeEnforcer(engineStore, localObjectCache)
 	masterKey := loadMasterKey(ctx)
 	browserCookies, browserSessionService := newBrowserSessionService(ctx, engineStore, registryClient, controlAuthenticator, masterKey)
 	managedLoginService := newManagedLoginService(ctx, engineStore, registryClient, controlAuthenticator, masterKey)
@@ -203,7 +198,6 @@ func runEngine() {
 		registryClient:   registryClient,
 		registryProxy:    registryProxy,
 		localObjectCache: localObjectCache,
-		runtimeEnforcer:  runtimeEnforcer,
 		configStore:      configStore,
 		masterKey:        masterKey,
 		controlAuth:      controlAuthenticator,
@@ -661,7 +655,6 @@ type engineRouterDeps struct {
 	registryClient   *sandbox.HTTPRegistryClient
 	registryProxy    api.Forwarder
 	localObjectCache sandbox.ObjectCache
-	runtimeEnforcer  *enginemiddleware.RuntimeEnforcer
 	configStore      store.ConfigRepository
 	masterKey        []byte
 	controlAuth      *accesscontrol.Authenticator
@@ -701,7 +694,7 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	// prefix mounts so /sdks/{app_id}/download resolves locally while generation
 	// and job-stream routes under /sdks continue through the Registry proxy.
 	registerNativeRESTControlRoutes(r, deps)
-	registerProxyRoutesWithRuntimeContracts(r, deps.registryProxy, deps.engineStore, deps.registryClient, deps.runtimeEnforcer)
+	registerProxyRoutesWithRuntimeContracts(r, deps.registryProxy, deps.engineStore, deps.registryClient)
 
 	engineEnvironment := observability.EngineEnvironment()
 	r.Get("/health", func(w http.ResponseWriter, req *http.Request) {

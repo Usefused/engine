@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/models"
 )
 
@@ -27,7 +28,10 @@ func TestDispatcher_Integration_VendorCall(t *testing.T) {
 	}))
 	defer vendor.Close()
 
-	obj := &models.IntegrationObject{Path: "/get", Method: "GET"}
+	obj := &models.IntegrationObject{
+		Path: "/get", Method: "GET",
+		SecurityRequirements: authrouting.Requirements{{Schemes: []authrouting.Requirement{{Scheme: "bearerAuth"}}}},
+	}
 	params := map[string]any{}
 	// Bearer credential to prove auth injection flows through the dispatcher.
 	creds := map[string]any{"bearerAuth": "tok-123"}
@@ -37,7 +41,7 @@ func TestDispatcher_Integration_VendorCall(t *testing.T) {
 	}
 
 	stream := NewBufferStream()
-	status, err := NewDispatcher().ExecuteStream(context.Background(), srv, obj, params, creds, nil, stream)
+	status, err := NewDispatcher().ExecuteStream(context.Background(), srv, explicitAnonymousEndpoint(obj), params, creds, nil, stream)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}

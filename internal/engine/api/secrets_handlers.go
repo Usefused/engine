@@ -179,7 +179,7 @@ func decodeSecretBulkUpsertPayload(r *http.Request) (SecretBulkUpsertPayload, er
 // encryption work and before the store transaction is opened.
 func validateSecretBulkPayload(payloads []SecretUpsertPayload, now time.Time) error {
 	for _, payload := range payloads {
-		if payload.ServiceID == uuid.Nil || strings.TrimSpace(payload.KeyName) == "" || strings.TrimSpace(payload.Value) == "" {
+		if payload.ServiceID == uuid.Nil || strings.TrimSpace(payload.KeyName) == "" || secretValueMissing(payload) {
 			return errors.New("service_id, key_name, and value are required")
 		}
 		if payload.ExpiresAt != nil && payload.ExpiresAt.Before(now) {
@@ -192,18 +192,27 @@ func validateSecretBulkPayload(payloads []SecretUpsertPayload, now time.Time) er
 	return validateBulkMTLSPairs(payloads, now)
 }
 
+// Empty Basic passwords are data, not missing input: several providers use
+// the username slot for an API key and require an explicitly empty password.
+func secretValueMissing(payload SecretUpsertPayload) bool {
+	if canonicalSecretCredentialType(payload.CredentialType) == "basic" && strings.HasSuffix(strings.TrimSpace(payload.KeyName), "_password") {
+		return false
+	}
+	return strings.TrimSpace(payload.Value) == ""
+}
+
 type mtlsBulkPair struct {
 	cert string
 	key  string
 }
 
 type basicBulkPair struct {
-	username string
-	password string
+	username    string
+	usernameSet bool
 }
 
-// validateBulkBasicPairs enforces the same all-or-none rule for Basic auth
-// that runtime resolution expects when it fetches username and password keys.
+// validateBulkBasicPairs rejects password-only writes while allowing the
+// provider-neutral required/optional/empty password modes to share one API.
 func validateBulkBasicPairs(payloads []SecretUpsertPayload) error {
 	pairs := map[string]*basicBulkPair{}
 	for _, payload := range payloads {
@@ -221,13 +230,12 @@ func validateBulkBasicPairs(payloads []SecretUpsertPayload) error {
 		}
 		if field == "username" {
 			pair.username = payload.Value
-		} else {
-			pair.password = payload.Value
+			pair.usernameSet = true
 		}
 	}
 	for _, pair := range pairs {
-		if strings.TrimSpace(pair.username) == "" || strings.TrimSpace(pair.password) == "" {
-			return errors.New("basic username/password must be saved together")
+		if !pair.usernameSet || strings.TrimSpace(pair.username) == "" {
+			return errors.New("basic username is required when saving Basic credentials")
 		}
 	}
 	return nil
