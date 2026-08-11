@@ -23,6 +23,13 @@ test("uses managed sign-in with API Key administrator access", () => {
   assert.doesNotMatch(loginSource, /setApiKey|sessionStorage/);
 });
 
+test("keeps managed sign-in failures generic and forces identity choice only on retry", () => {
+  assert.match(loginSource, /MANAGED_SIGN_IN_ERROR = "Sign-in could not be completed\."/);
+  assert.match(loginSource, /searchParams\.set\("reauthenticate", "true"\)/);
+  assert.match(loginSource, /managedRetry \? "Try again" : "Continue with email or SSO"/);
+  assert.doesNotMatch(loginSource, /invited to this Engine|Logto/i);
+});
+
 test("approves CLI enrollment without exposing a generated credential", () => {
   assert.match(loginSource, /loginDestination\(next\)/);
   assert.match(cliLoginSource, /window\.location\.hash/);

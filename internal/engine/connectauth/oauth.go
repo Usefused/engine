@@ -15,6 +15,8 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ClientCredentials is the decrypted OAuth app material Engine may use with a
@@ -87,20 +89,20 @@ func DecryptClientCredentials(cfg *store.ConnectConfig, masterKey []byte) (Clien
 // ExchangeAuthorizationCode builds the auth-code grant in one place so browser
 // callback and later tests share the same provider-facing behavior.
 func ExchangeAuthorizationCode(ctx context.Context, client *http.Client, auth fusedobject.AuthConfig, creds ClientCredentials, code, verifier string) (TokenResponse, error) {
-	form := tokenBaseForm(auth, creds)
-	form.Set("grant_type", "authorization_code")
-	form.Set("code", code)
-	form.Set("code_verifier", verifier)
-	return doTokenForm(ctx, client, auth, creds, form)
+	return executeTokenGrant(ctx, client, auth, creds, func(form url.Values) {
+		form.Set("grant_type", "authorization_code")
+		form.Set("code", code)
+		form.Set("code_verifier", verifier)
+	})
 }
 
 // RefreshAccessToken builds the refresh-token grant without touching browser
 // state; dispatch-time refresh should depend only on bucket-stored material.
 func RefreshAccessToken(ctx context.Context, client *http.Client, auth fusedobject.AuthConfig, creds ClientCredentials, refreshToken string) (TokenResponse, error) {
-	form := tokenBaseForm(auth, creds)
-	form.Set("grant_type", "refresh_token")
-	form.Set("refresh_token", refreshToken)
-	return doTokenForm(ctx, client, auth, creds, form)
+	return executeTokenGrant(ctx, client, auth, creds, func(form url.Values) {
+		form.Set("grant_type", "refresh_token")
+		form.Set("refresh_token", refreshToken)
+	})
 }
 
 // TokenScopeMetadata records the caller's fallback provenance so a selected
@@ -173,21 +175,69 @@ func ClaimBytes(claims map[string]any) []byte {
 	return raw
 }
 
-// tokenBaseForm respects provider auth mode because some providers reject
-// client_secret in the body when HTTP Basic token auth is configured.
-func tokenBaseForm(auth fusedobject.AuthConfig, creds ClientCredentials) url.Values {
-	form := url.Values{}
-	form.Set("redirect_uri", creds.RedirectURI)
-	if strings.EqualFold(auth.TokenEndpointAuth, "basic") {
-		form.Set("client_id", creds.ClientID)
-	} else {
-		form.Set("client_id", creds.ClientID)
-		form.Set("client_secret", creds.ClientSecret)
+func executeTokenGrant(ctx context.Context, client *http.Client, auth fusedobject.AuthConfig, creds ClientCredentials, configure func(url.Values)) (TokenResponse, error) {
+	method := auth.TokenEndpointAuthMethod
+	if err := validateTokenEndpointAuthContract(auth); err != nil {
+		recordTokenRequest(ctx, method, "rejected")
+		return TokenResponse{}, err
 	}
+	form := tokenBaseForm(auth, creds, method)
+	configure(form)
+	token, err := doTokenForm(ctx, client, auth, creds, form)
+	if err != nil {
+		recordTokenRequest(ctx, method, "failed")
+		return TokenResponse{}, err
+	}
+	recordTokenRequest(ctx, method, "success")
+	return token, nil
+}
+
+// tokenBaseForm applies provider metadata before credentials so neither an
+// imported parameter nor a caller can override the selected credential mode.
+func tokenBaseForm(auth fusedobject.AuthConfig, creds ClientCredentials, method fusedobject.TokenEndpointAuthMethod) url.Values {
+	form := url.Values{}
 	for key, value := range auth.ExtraTokenParams {
 		form.Set(key, value)
 	}
+	form.Set("redirect_uri", creds.RedirectURI)
+	if method == fusedobject.TokenEndpointAuthMethodClientSecretBasic {
+		form.Del("client_id")
+		form.Del("client_secret")
+		return form
+	}
+	form.Set("client_id", creds.ClientID)
+	form.Set("client_secret", creds.ClientSecret)
 	return form
+}
+
+func validateTokenEndpointAuthMethod(method fusedobject.TokenEndpointAuthMethod) error {
+	switch method {
+	case fusedobject.TokenEndpointAuthMethodClientSecretBasic, fusedobject.TokenEndpointAuthMethodClientSecretPost:
+		return nil
+	default:
+		return errors.New("token_endpoint_auth_method must be client_secret_basic or client_secret_post")
+	}
+}
+
+func validateTokenEndpointAuthContract(auth fusedobject.AuthConfig) error {
+	if auth.Type != "oauth2" {
+		return errors.New("token endpoint authentication requires OAuth2")
+	}
+	return validateTokenEndpointAuthMethod(auth.TokenEndpointAuthMethod)
+}
+
+func recordTokenRequest(ctx context.Context, method fusedobject.TokenEndpointAuthMethod, outcome string) {
+	trace.SpanFromContext(ctx).SetAttributes(
+		attribute.String("oauth.token_endpoint_auth_method", tokenEndpointAuthMethodAttribute(method)),
+		attribute.String("oauth.token_request_outcome", outcome),
+	)
+}
+
+func tokenEndpointAuthMethodAttribute(method fusedobject.TokenEndpointAuthMethod) string {
+	if validateTokenEndpointAuthMethod(method) != nil {
+		return "invalid"
+	}
+	return string(method)
 }
 
 // doTokenForm is the single provider HTTP boundary for token grants, so
@@ -203,16 +253,18 @@ func doTokenForm(ctx context.Context, client *http.Client, auth fusedobject.Auth
 // newTokenRequest keeps Basic auth construction next to request creation so
 // secrets are attached in exactly one provider-facing path.
 func newTokenRequest(ctx context.Context, auth fusedobject.AuthConfig, creds ClientCredentials, form url.Values) (*http.Request, error) {
+	if err := validateTokenEndpointAuthContract(auth); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, auth.TokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	// GitHub's OAuth token endpoint otherwise defaults to form-encoded output;
-	// asking for JSON keeps provider responses aligned with TokenResponse while
-	// the parser below still tolerates older OAuth-style form bodies.
+	// Asking for JSON keeps provider responses aligned with TokenResponse while
+	// the parser below still tolerates OAuth form bodies.
 	req.Header.Set("Accept", "application/json")
-	if strings.EqualFold(auth.TokenEndpointAuth, "basic") {
+	if auth.TokenEndpointAuthMethod == fusedobject.TokenEndpointAuthMethodClientSecretBasic {
 		req.SetBasicAuth(creds.ClientID, creds.ClientSecret)
 	}
 	return req, nil

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/Usefused/engine/internal/engine/connectresource"
@@ -19,6 +20,8 @@ type RuntimeEnvironmentResolution struct {
 	Source      string
 	Variables   []serverrouting.Variable
 }
+
+var errAbsoluteServerOverrideRequired = errors.New("service server URL requires an absolute workspace or connection-profile override")
 
 type EnvironmentNotSupportedError struct {
 	Code      string   `json:"code"`
@@ -106,10 +109,9 @@ func resolveRuntimeServerTemplate(metadata *fusedobject.ServiceMetadata, resolut
 		return resolution, nil
 	}
 	if len(resolution.Variables) == 0 {
-		// Registry may preserve a provider's protocol-relative source URL, but
-		// execution must never infer a scheme. A workspace override or trusted
-		// connection-resource binding has to resolve it to an absolute URL.
-		return resolution, serverrouting.ValidateResolvedURL(resolution.BaseURL)
+		// Registry preserves unresolved source references, but execution must not
+		// invent an origin. Workspace or trusted resource configuration owns it.
+		return resolution, validateStaticRuntimeServer(resolution.BaseURL)
 	}
 	supplied, err := serverVariableValues(credentials, values)
 	if err != nil {
@@ -117,7 +119,7 @@ func resolveRuntimeServerTemplate(metadata *fusedobject.ServiceMetadata, resolut
 	}
 	resolved, usedSupplied, err := serverrouting.Resolve(resolution.BaseURL, resolution.Variables, supplied)
 	if err != nil {
-		return RuntimeEnvironmentResolution{}, err
+		return RuntimeEnvironmentResolution{}, runtimeServerResolutionError(resolution.BaseURL, err)
 	}
 	if usedSupplied {
 		if err := connectresource.ValidateBaseURL(resolved, runtimeAllowedHosts(metadata.ConnectConfig)); err != nil {
@@ -127,6 +129,25 @@ func resolveRuntimeServerTemplate(metadata *fusedobject.ServiceMetadata, resolut
 	}
 	resolution.BaseURL = resolved
 	return resolution, nil
+}
+
+func validateStaticRuntimeServer(baseURL string) error {
+	if requiresAbsoluteServerOverride(baseURL) {
+		return errAbsoluteServerOverrideRequired
+	}
+	return serverrouting.ValidateResolvedURL(baseURL)
+}
+
+func runtimeServerResolutionError(baseURL string, err error) error {
+	if requiresAbsoluteServerOverride(baseURL) {
+		return errAbsoluteServerOverrideRequired
+	}
+	return err
+}
+
+func requiresAbsoluteServerOverride(value string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	return err == nil && !parsed.IsAbs()
 }
 
 func forcedRuntimeBaseURL(values []store.BucketValue) string {

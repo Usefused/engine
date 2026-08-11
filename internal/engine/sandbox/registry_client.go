@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
+	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
@@ -36,11 +37,8 @@ type RegistryClient interface {
 	// config's selected operations -- this resolves the whole operation
 	// list for a service in one Registry round trip instead.
 	FetchEndpointsByNames(ctx context.Context, serviceID uuid.UUID, serviceVersionID uuid.UUID, endpointNames []string) ([]fusedobject.Endpoint, error)
-	// FetchServiceOperations returns every endpoint on one service+version,
-	// unfiltered by name -- unlike FetchEndpointsByNames, which requires
-	// already knowing which names to ask for. Used to build a per-session MCP
-	// fixture (mcp_session_fixture.go) from an SDKSelection's EndpointIDs or
-	// SelectAll flag, neither of which carries endpoint names to fetch by.
+	// FetchServiceOperations returns the full operation contract used by
+	// connection-profile validation; MCP discovery reads local snapshots.
 	FetchServiceOperations(ctx context.Context, serviceID uuid.UUID, serviceVersionID uuid.UUID) ([]fusedobject.Endpoint, error)
 	FetchServiceVersionRevisions(ctx context.Context, refs []ServiceVersionRef, apiKey string) ([]ServiceVersionRevision, error)
 	SearchCatalogue(ctx context.Context, query string, page int, limit int) ([]CatalogueService, error)
@@ -81,6 +79,52 @@ type ServiceVersionAuthConfigs struct {
 	Version          string                  `json:"version"`
 	ServiceVersionID uuid.UUID               `json:"service_version_id"`
 	AuthConfigs      fusedobject.AuthConfigs `json:"auth_configs"`
+}
+
+// registryAuthConfigGraphQLFields is the complete credential-free provider
+// contract needed by connect and snapshot flows. Operation-aware auth keeps a
+// separate minimal projection because token exchange metadata is not needed
+// to select credentials for an individual provider request.
+const registryAuthConfigGraphQLFields = `
+	name
+	type
+	flow
+	scheme
+	basic_password_mode
+	location
+	key_name
+	token_url
+	token_endpoint_auth_method
+	authorization_url
+	open_id_connect_url
+	scopes
+	pkce_required
+	scopes_delimiter
+	extra_auth_params
+	extra_token_params
+	refresh_token_rotates
+`
+
+type ServiceVersionExecutionAuthSelection struct {
+	ServiceID      uuid.UUID `json:"service_id"`
+	Version        string    `json:"version"`
+	OperationNames []string  `json:"operation_names"`
+	SelectAll      bool      `json:"select_all"`
+}
+
+type OperationSecuritySummary struct {
+	Name                 string                   `json:"name"`
+	SecurityRequirements authrouting.Requirements `json:"security_requirements"`
+}
+
+type ServiceVersionExecutionAuthContract struct {
+	ServiceID        uuid.UUID                  `json:"service_id"`
+	Version          string                     `json:"version"`
+	ServiceVersionID uuid.UUID                  `json:"service_version_id"`
+	OperationNames   []string                   `json:"operation_names"`
+	SelectAll        bool                       `json:"select_all"`
+	AuthConfigs      fusedobject.AuthConfigs    `json:"auth_configs"`
+	Operations       []OperationSecuritySummary `json:"operations"`
 }
 
 type ServiceVersionRef = models.ServiceVersionRef
@@ -1067,7 +1111,7 @@ func (c *HTTPRegistryClient) FetchServiceVersionAuthConfigs(ctx context.Context,
 		Query: `query ServiceVersionAuthConfigs($refs: [ServiceVersionRefInput!]!) {
 			serviceVersionAuthConfigs(refs: $refs) {
 				service_id version service_version_id
-				auth_configs { name type flow scheme basic_password_mode location key_name token_url authorization_url open_id_connect_url scopes }
+				auth_configs {` + registryAuthConfigGraphQLFields + `}
 			}
 		}`,
 		Variables: map[string]interface{}{"refs": refs},
@@ -1106,6 +1150,56 @@ func (c *HTTPRegistryClient) FetchServiceVersionAuthConfigs(ctx context.Context,
 		return nil, fmt.Errorf("FetchServiceVersionAuthConfigs: graphql error: %s", decoded.Errors[0].Message)
 	}
 	return decoded.Data.Versions, nil
+}
+
+func (c *HTTPRegistryClient) FetchServiceVersionExecutionAuthContracts(ctx context.Context, selections []ServiceVersionExecutionAuthSelection, apiKey string) ([]ServiceVersionExecutionAuthContract, error) {
+	if len(selections) == 0 {
+		return nil, nil
+	}
+	reqBody := graphqlQuery{
+		Query: `query ServiceVersionExecutionAuthContracts($selections: [ServiceVersionExecutionAuthSelectionInput!]!) {
+			serviceVersionExecutionAuthContracts(selections: $selections) {
+				service_id version service_version_id operation_names select_all
+				auth_configs { name type scheme scopes }
+				operations { name security_requirements { schemes { scheme scopes } } }
+			}
+		}`,
+		Variables: map[string]interface{}{"selections": selections},
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("FetchServiceVersionExecutionAuthContracts: marshal query: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("FetchServiceVersionExecutionAuthContracts: create request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-API-Key", apiKey)
+	response, err := c.do(request)
+	if err != nil {
+		return nil, fmt.Errorf("FetchServiceVersionExecutionAuthContracts: request failed: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		return nil, fmt.Errorf("FetchServiceVersionExecutionAuthContracts: registry returned %d: %s", response.StatusCode, string(body))
+	}
+	var decoded struct {
+		Data struct {
+			Contracts []ServiceVersionExecutionAuthContract `json:"serviceVersionExecutionAuthContracts"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		return nil, fmt.Errorf("FetchServiceVersionExecutionAuthContracts: decode response: %w", err)
+	}
+	if len(decoded.Errors) > 0 {
+		return nil, fmt.Errorf("FetchServiceVersionExecutionAuthContracts: graphql error: %s", decoded.Errors[0].Message)
+	}
+	return decoded.Data.Contracts, nil
 }
 
 type ServiceVersionResolvedRef struct {
@@ -1544,11 +1638,8 @@ func (c *HTTPRegistryClient) fetchEndpointsByNames(ctx context.Context, serviceI
 }
 
 // FetchServiceOperations returns every endpoint on serviceID/serviceVersionID,
-// including the schema fields (parameters, request_content, responses)
-// FetchEndpointsByNames' query intentionally omits -- that query backs the
-// dispatch hot path's by-name lookups (cache.go's prefetchEndpoints/
-// GetEndpoint), which don't need full schema; this one backs building a
-// session's MCP fixture (mcp_session_fixture.go), which does.
+// including the schema fields used by connection-profile validation. MCP
+// discovery reads the same fields from Engine snapshots instead.
 func (c *HTTPRegistryClient) FetchServiceOperations(ctx context.Context, serviceID uuid.UUID, serviceVersionID uuid.UUID) ([]fusedobject.Endpoint, error) {
 	sfKey := "serviceOperations:" + serviceID.String() + ":" + serviceVersionID.String()
 	v, err, _ := c.sfGroup.Do(sfKey, func() (interface{}, error) {
@@ -1595,10 +1686,8 @@ func (c *HTTPRegistryClient) fetchServiceOperations(ctx context.Context, service
 		Query: query,
 		Variables: map[string]interface{}{
 			"serviceId": serviceID.String(),
-			// serviceOperations' "version" arg accepts either a version name or
-			// a service_version_id UUID. Passing the UUID directly here resolves
-			// the exact version an SDKSelection pinned, the same way
-			// FetchEndpointsByNames' serviceVersionId arg does.
+			// serviceOperations' "version" accepts the UUID, preserving the exact
+			// version required by connection-profile validation.
 			"version": serviceVersionID.String(),
 		},
 	}
@@ -1986,19 +2075,7 @@ func (c *HTTPRegistryClient) buildServiceMetadataRequest(ctx context.Context, se
 				}
 				default_headers
 				connect_config
-				auth_configs {
-					name
-					type
-					flow
-					scheme
-					basic_password_mode
-					location
-					key_name
-					token_url
-					authorization_url
-					open_id_connect_url
-					scopes
-				}
+				auth_configs {` + registryAuthConfigGraphQLFields + `}
 				rate_limit {` + runtimeRateLimitFields + `}
 				retry_config {
 					strategy

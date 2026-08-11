@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"context"
 	"encoding/base64"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -104,6 +106,30 @@ func TestSelectRequestAuthExplicitAnonymousAndNilContract(t *testing.T) {
 	}
 	if _, err := selectRequestAuth(nil, nil, nil); err == nil {
 		t.Fatal("nil requirements must be rejected")
+	}
+}
+
+func TestDispatcherAnonymousOperationDoesNotSendAuthorization(t *testing.T) {
+	dispatcher := NewDispatcher()
+	dispatcher.client = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if got := request.Header.Get("Authorization"); got != "" {
+			t.Fatalf("anonymous operation sent Authorization header %q", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			Request:    request,
+		}, nil
+	})}
+	service := &models.Service{
+		Name: "public", BaseURL: "https://provider.example",
+		AuthConfigs: models.AuthConfigs{{Name: "bearerAuth", Type: "http", Scheme: "bearer"}},
+	}
+	operation := explicitAnonymousEndpoint(&models.IntegrationObject{Name: "health", Method: http.MethodGet, Path: "/health"})
+	status, err := dispatcher.ExecuteStream(context.Background(), service, operation, nil, map[string]any{"bearerAuth": "stored-token"}, nil, &mockStream{})
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("anonymous dispatch status=%d err=%v", status, err)
 	}
 }
 

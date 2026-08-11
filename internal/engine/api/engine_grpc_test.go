@@ -33,7 +33,7 @@ func TestEngineGRPCStartConnectSessionCreatesAuthorizationURL(t *testing.T) {
 	// configStore/natsClient are nil: this test only exercises StartConnectSession,
 	// which (like GetConnection/ListConnectionResources) never touches the
 	// webhook-only fields SubscribeWebhooks added to EngineGRPCServer.
-	srv := NewEngineGRPCServer(runtimeStore, fixture.verifier, fixture.masterKey, nil, nil)
+	srv := NewEngineGRPCServer(runtimeStore, fixture.verifier, fixture.masterKey, nil, nil, auth.NewTokenValidator(runtimeStore))
 	ctx := grpcTestContext(appID)
 
 	resp, err := srv.StartConnectSession(ctx, &enginev1.StartConnectSessionRequest{
@@ -104,7 +104,7 @@ func TestEngineGRPCGetConnectionReturnsMetadataOnly(t *testing.T) {
 	}
 	// configStore/natsClient are nil -- see the identical note above; this
 	// test only exercises GetConnection.
-	srv := NewEngineGRPCServer(runtimeStore, &mockVerifier{}, []byte("12345678901234567890123456789012"), nil, nil)
+	srv := NewEngineGRPCServer(runtimeStore, &mockVerifier{}, []byte("12345678901234567890123456789012"), nil, nil, auth.NewTokenValidator(runtimeStore))
 
 	resp, err := srv.GetConnection(grpcTestContext(appID), &enginev1.GetConnectionRequest{ConnectionId: connectionID.String()})
 	if err != nil {

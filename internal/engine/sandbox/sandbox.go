@@ -20,6 +20,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/config"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/messaging"
@@ -385,7 +386,7 @@ func resolveTrackedExecutionIdentity(ctx context.Context, validator auth.TokenVa
 }
 
 func resolveMatchedExecutionCredentials(ctx context.Context, match *scopedEndpoint, obj *models.IntegrationObject, appID, accountID uuid.UUID, credentials map[string]any) (map[string]any, []store.BucketValue, error) {
-	credentials = credentialsWithSelectionAuth(credentials, match.selection)
+	credentials = credentialsWithSelectionAuth(credentials, match.selection, obj.SecurityRequirements)
 	request := CredentialRequest{
 		AccountID: accountID, AppID: appID, ServiceID: match.service.ID,
 		OperationID: obj.Name, Auths: match.service.AuthConfigs, Passthrough: credentials,
@@ -404,7 +405,13 @@ func resolveMatchedExecutionCredentials(ctx context.Context, match *scopedEndpoi
 // credentialsWithSelectionAuth adds only non-secret routing metadata resolved
 // during desired-config planning. Explicit SDK inputs still win for callers that
 // intentionally select another declared scheme on a general-purpose SDK.
-func credentialsWithSelectionAuth(credentials map[string]any, selection models.SDKSelection) map[string]any {
+func credentialsWithSelectionAuth(credentials map[string]any, selection models.SDKSelection, requirements authrouting.Requirements) map[string]any {
+	if credentialString(credentials, "fused_auth_type") != "" || credentialString(credentials, "fused_auth_name") != "" {
+		return credentials
+	}
+	if requirementsPermitAnonymous(requirements) {
+		return credentials
+	}
 	if selection.AuthType == "" && selection.AuthName == "" {
 		return credentials
 	}
@@ -412,13 +419,18 @@ func credentialsWithSelectionAuth(credentials map[string]any, selection models.S
 	for key, value := range credentials {
 		out[key] = value
 	}
-	if credentialString(out, "fused_auth_type") == "" {
-		out["fused_auth_type"] = selection.AuthType
-	}
-	if credentialString(out, "fused_auth_name") == "" {
-		out["fused_auth_name"] = selection.AuthName
-	}
+	out["fused_auth_type"] = selection.AuthType
+	out["fused_auth_name"] = selection.AuthName
 	return out
+}
+
+func requirementsPermitAnonymous(requirements authrouting.Requirements) bool {
+	for _, alternative := range requirements {
+		if len(alternative.Schemes) == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // withConnectedResourceRequirement rebuilds the credential envelope without

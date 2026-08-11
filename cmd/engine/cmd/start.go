@@ -23,6 +23,7 @@ import (
 	backend "github.com/Usefused/engine"
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/api"
+	"github.com/Usefused/engine/internal/engine/apptokeninvalidation"
 	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/browserauth"
 	"github.com/Usefused/engine/internal/engine/cliauth"
@@ -124,6 +125,14 @@ func runEngine() {
 	// ─── Engine Bootstrap ───
 	postgresStore := store.NewPostgresStore(database)
 	engineStore := store.NewCachedStore(postgresStore, natsClient)
+	tokenValidator := auth.NewTokenValidator(engineStore)
+	tokenRevoker, err := apptokeninvalidation.NewService(
+		engineStore, tokenValidator, apptokeninvalidation.NewPublisher(natsClient),
+	)
+	if err != nil {
+		slog.ErrorContext(ctx, "FATAL: Failed to initialize app-token invalidation", slog.String("error_code", "app_token_invalidation_init_failed"))
+		os.Exit(1)
+	}
 	rateLimits, err := newProviderRateLimitCoordinator(rateLimitKV, postgresStore)
 	if err != nil {
 		slog.ErrorContext(ctx, "FATAL: Failed to initialize provider rate-limit coordination", slog.Any("error", err))
@@ -155,7 +164,7 @@ func runEngine() {
 		entitlementpkg.LiveEntitlement.Store(entitlement)
 	}
 	backgroundStore := newSerializedBackgroundStore(engineStore)
-	engineWorkers := startEngineWorkers(ctx, engineStore, natsClient, cfg.Engine)
+	engineWorkers := startEngineWorkers(ctx, engineStore, natsClient, cfg.Engine, tokenValidator)
 	engineWorkers.providerRateLimits = startProviderRateLimitProjection(ctx, postgresStore, natsClient)
 	engineWorkers.packageLeases = startSDKPackageLeaseRenewal(ctx, backgroundStore, registryClient)
 	engineWorkers.publicInsights = startPublicServiceInsightReporting(ctx, backgroundStore, registryClient)
@@ -213,11 +222,13 @@ func runEngine() {
 		browserSession:     browserSessionService,
 		browserCookies:     browserCookies,
 		providerRateLimits: rateLimits,
+		tokenValidator:     tokenValidator,
+		appTokenRevoker:    tokenRevoker,
 	})
 
 	webhookSrv := startWebhookServer(ctx, r)
 	srv := startEngineHTTPServer(ctx, r)
-	grpcServer := startEngineGRPCServer(ctx, engineStore, registryClient, masterKey, configStore, natsClient)
+	grpcServer := startEngineGRPCServer(ctx, engineStore, registryClient, masterKey, configStore, natsClient, tokenValidator)
 
 	waitForEngineShutdown(ctx, cancel, srv, webhookSrv, grpcServer)
 }
@@ -317,15 +328,19 @@ func requireRegistryLicense(ctx context.Context) string {
 }
 
 type engineWorkers struct {
-	executionEvents    *worker.ExecutionEventWorker
-	retention          *worker.ExecutionRetentionWorker
-	publicInsights     *worker.PublicInsightWorker
-	usageCounter       *worker.UsageCounterWorker
-	packageLeases      *worker.SDKPackageLeaseWorker
-	providerRateLimits *worker.ProviderRateLimitProjectionWorker
+	appTokenInvalidations *apptokeninvalidation.Worker
+	executionEvents       *worker.ExecutionEventWorker
+	retention             *worker.ExecutionRetentionWorker
+	publicInsights        *worker.PublicInsightWorker
+	usageCounter          *worker.UsageCounterWorker
+	packageLeases         *worker.SDKPackageLeaseWorker
+	providerRateLimits    *worker.ProviderRateLimitProjectionWorker
 }
 
 func (w engineWorkers) Stop(ctx context.Context) {
+	if w.appTokenInvalidations != nil {
+		w.appTokenInvalidations.Stop()
+	}
 	if w.providerRateLimits != nil {
 		w.providerRateLimits.Stop(ctx)
 	}
@@ -367,7 +382,12 @@ type runtimeEntitlementStore interface {
 	GetRuntimeEntitlement(ctx context.Context) (models.RuntimeEntitlement, error)
 }
 
-func startEngineWorkers(ctx context.Context, engineStore store.Store, natsClient *messaging.NATSClient, cfg config.EngineConfig) engineWorkers {
+func startEngineWorkers(ctx context.Context, engineStore store.Store, natsClient *messaging.NATSClient, cfg config.EngineConfig, tokenInvalidator apptokeninvalidation.Invalidator) engineWorkers {
+	appTokenInvalidations, err := apptokeninvalidation.StartWorker(natsClient.JS, tokenInvalidator)
+	if err != nil {
+		slog.ErrorContext(ctx, "FATAL: Failed to start app-token invalidation subscriber", slog.Any("error", err))
+		os.Exit(1)
+	}
 	executionevent.SetPublisher(executionevent.NewPublisher(natsClient))
 	executionEventWorker, err := worker.StartExecutionEventWorker(ctx, engineStore, natsClient)
 	if err != nil {
@@ -383,7 +403,7 @@ func startEngineWorkers(ctx context.Context, engineStore store.Store, natsClient
 	retentionWorker := worker.StartDynamicExecutionRetentionWorker(ctx, engineStore, func() int {
 		return engineExecutionRetentionDays(entitlementpkg.LiveEntitlement.Load(), cfg.ExecutionRetentionDays)
 	}, cfg.ExecutionCleanupBatch)
-	return engineWorkers{executionEvents: executionEventWorker, retention: retentionWorker}
+	return engineWorkers{appTokenInvalidations: appTokenInvalidations, executionEvents: executionEventWorker, retention: retentionWorker}
 }
 
 func engineExecutionRetentionDays(entitlement models.RuntimeEntitlement, fallback int) int {
@@ -699,6 +719,8 @@ type engineRouterDeps struct {
 	browserSession     api.BrowserSessionService
 	browserCookies     *browserauth.CookieManager
 	providerRateLimits store.ProviderRateLimitStore
+	tokenValidator     auth.TokenValidator
+	appTokenRevoker    api.AppTokenRevoker
 }
 
 func buildEngineRouter(deps engineRouterDeps) chi.Router {
@@ -750,10 +772,9 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 		w.Write(body)
 	})
 
-	tokenValidator := auth.NewTokenValidator(deps.engineStore)
 	secretResolver := sandbox.NewSecretResolver(deps.engineStore, deps.masterKey)
 
-	sandbox.InitSandbox(r, deps.natsClient, deps.cfg, deps.localObjectCache, tokenValidator, secretResolver, deps.providerRateLimits, port)
+	sandbox.InitSandbox(r, deps.natsClient, deps.cfg, deps.localObjectCache, deps.tokenValidator, secretResolver, deps.providerRateLimits, port)
 	// SDK and MCP webhook delivery uses EngineGRPCServer.SubscribeWebhooks.
 	// Engine-native MCP GraphQL surface (list/deploy/kill/reactivate/delete +
 	// analytics) -- a distinct endpoint from POST /graphql, which is a pure
@@ -893,7 +914,7 @@ func serveHTTPServer(ctx context.Context, srv *http.Server, startMessage string,
 	}
 }
 
-func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient) *grpc.Server {
+func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient, tokenValidator auth.TokenValidator) *grpc.Server {
 	listenAddress := engineGRPCListenAddress(grpcHost, grpcPort)
 	lis, err := net.Listen("tcp", listenAddress)
 	if err != nil {
@@ -908,7 +929,7 @@ func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registr
 	)
 	// SubscribeWebhooks needs both dependencies to resolve the configured
 	// attachment and bridge its durable JetStream consumer to the gRPC stream.
-	enginev1.RegisterEngineServiceServer(grpcServer, api.NewEngineGRPCServer(engineStore, registryClient, masterKey, configStore, natsClient))
+	enginev1.RegisterEngineServiceServer(grpcServer, api.NewEngineGRPCServer(engineStore, registryClient, masterKey, configStore, natsClient, tokenValidator))
 
 	go serveGRPCServer(ctx, grpcServer, lis, listenAddress)
 	return grpcServer

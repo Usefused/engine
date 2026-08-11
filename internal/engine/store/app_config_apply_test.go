@@ -13,6 +13,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/shared/capability"
 	"github.com/Usefused/engine/internal/shared/db"
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -222,10 +223,11 @@ func newConcurrentArtifactApplyFixture(t *testing.T, configType ConfigType) conc
 				PlanID: plan.ID, BaseGeneration: plan.BaseGeneration, ExpectedRevision: plan.Revision, ApplyLeaseID: lease.ID,
 			},
 			Scope: AppRuntime{AccountID: accountID, AppID: appID, OwnerTeamID: ownerTeamID,
-				BucketID: bucketID, Selections: []byte("[]"), ScopeSchemaVersion: 2,
+				BucketID: bucketID, Selections: []byte("[]"), ScopeSchemaVersion: models.AppScopeSchemaVersion,
 				Kind: AppKind(configType), Name: "concurrent", Version: version, ConfigKey: configKey},
 			AuthorizedBucketName: bucketName,
 			TokenName:            "default", TargetLanguage: targetLanguage,
+			TokenPolicy:      AppTokenPolicy{AllowAll: true, AllowedOperations: []string{}},
 			GeneratorVersion: generatorVersion,
 		},
 	}

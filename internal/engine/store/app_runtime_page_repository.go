@@ -20,10 +20,10 @@ func normalizeAppKind(kind string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
 	case "":
 		return "", true
-	case "sdk":
-		return "sdk", true
-	case "mcp":
-		return "mcp", true
+	case string(AppKindSDK):
+		return AppKindSDK.String(), true
+	case string(AppKindMCP):
+		return AppKindMCP.String(), true
 	default:
 		return "", false
 	}

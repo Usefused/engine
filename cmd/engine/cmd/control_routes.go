@@ -10,6 +10,6 @@ import (
 // coverage tests, so adding a native REST endpoint without a policy fails CI.
 func registerNativeRESTControlRoutes(r chi.Router, deps engineRouterDeps) {
 	r.Get("/audit/export", api.AuditExportHandler(deps.engineStore))
-	r.Mount("/workspace", api.WorkspaceHandler(deps.engineStore, deps.registryClient, deps.masterKey))
+	r.Mount("/workspace", api.WorkspaceHandler(deps.engineStore, deps.registryClient, deps.masterKey, deps.appTokenRevoker))
 	api.MountConfigRoutes(r, deps.configStore, deps.engineStore, deps.registryClient, deps.registryProxy, deps.registryClient, deps.masterKey, deps.controlAuth)
 }

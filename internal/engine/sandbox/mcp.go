@@ -154,8 +154,8 @@ func validateMCPToken(ctx context.Context, appIDHex, token string) (auth.Runtime
 	if err != nil {
 		return auth.RuntimeIdentity{}, err
 	}
-	// Session establishment rechecks persistence every time so revocation takes
-	// effect immediately instead of leaving a catalog-access grace period.
+	// Every session passes through the process-shared validator. Valid entries
+	// are bounded to 30 seconds and precise revoke events evict them immediately.
 	return globalTokenValidator.Validate(ctx, appID, token)
 }
 
@@ -245,7 +245,7 @@ func prepareSessionFixture(ctx context.Context, appIDHex string, policy store.Ap
 	if err != nil {
 		return nil, fmt.Errorf("load app scope: %w", err)
 	}
-	fixture, err := buildSessionFixture(ctx, globalObjectCache, appIDHex, selections, policy)
+	fixture, err := buildSessionFixture(ctx, globalObjectCache, selections, policy)
 	if err != nil {
 		return nil, fmt.Errorf("build fixture: %w", err)
 	}

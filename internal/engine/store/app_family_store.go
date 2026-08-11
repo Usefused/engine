@@ -501,7 +501,7 @@ func (s *postgresStore) GetSDKPackageBuildRequest(ctx context.Context, accountID
 		return nil, fmt.Errorf("decode SDK package contract bindings: %w", err)
 	}
 	request.IdempotencyKey = planID.String()
-	request.TargetType = "sdk"
+	request.TargetType = AppKindSDK.String()
 	return &request, nil
 }
 
@@ -647,12 +647,12 @@ func (s *postgresStore) AuthorizeApp(ctx context.Context, appID uuid.UUID, token
 			WHERE token.id = matched.token_id
 			RETURNING token.id
 		)
-		SELECT account_id, app_family_id, app_id, version, kind, status,
+		SELECT account_id, app_family_id, app_id, token_id, version, kind, status,
 		       allow_all, allowed_operations, expires_at
 		FROM matched
 		WHERE EXISTS (SELECT 1 FROM touched)
 	`, appID, tokenHash).Scan(
-		&proj.AccountID, &proj.AppFamilyID, &proj.AppID, &proj.Version, &proj.Kind, &proj.AppStatus,
+		&proj.AccountID, &proj.AppFamilyID, &proj.AppID, &proj.TokenID, &proj.Version, &proj.Kind, &proj.AppStatus,
 		&proj.TokenPolicy.AllowAll, &proj.TokenPolicy.AllowedOperations, &proj.TokenPolicy.ExpiresAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -678,6 +678,10 @@ func (s *postgresStore) CreateAppToken(ctx context.Context, appFamilyID uuid.UUI
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.store.app_token.create")
 	defer span.End()
 
+	// PostgreSQL arrays distinguish NULL from empty; token policy does not. Bind
+	// an empty array so wildcard and deny-all policies preserve the table's
+	// non-null invariant regardless of which adapter created them.
+	allowedOperations := nonNilStrings(policy.AllowedOperations)
 	var tok AppTokenMetadata
 	err := s.db.QueryRow(ctx, `
 		INSERT INTO fused_app_tokens
@@ -685,7 +689,7 @@ func (s *postgresStore) CreateAppToken(ctx context.Context, appFamilyID uuid.UUI
 		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id, app_family_id, name, allow_all, allowed_operations, expires_at,
 		          last_used_at, created_at
-	`, appFamilyID, tokenHash, name, policy.AllowAll, policy.AllowedOperations, policy.ExpiresAt).Scan(
+	`, appFamilyID, tokenHash, name, policy.AllowAll, allowedOperations, policy.ExpiresAt).Scan(
 		&tok.ID, &tok.AppFamilyID, &tok.Name, &tok.AllowAll, &tok.AllowedOperations,
 		&tok.ExpiresAt, &tok.LastUsedAt, &tok.CreatedAt,
 	)
@@ -721,18 +725,20 @@ func (s *postgresStore) ListAppTokens(ctx context.Context, appFamilyID uuid.UUID
 	return tokens, rows.Err()
 }
 
-func (s *postgresStore) RevokeAppToken(ctx context.Context, appFamilyID uuid.UUID, name string) error {
-	tag, err := s.db.Exec(ctx, `
+func (s *postgresStore) RevokeAppToken(ctx context.Context, appFamilyID uuid.UUID, name string) (*AppTokenRevocation, error) {
+	var revocation AppTokenRevocation
+	err := s.db.QueryRow(ctx, `
 		DELETE FROM fused_app_tokens
 		WHERE app_family_id = $1 AND name = $2
-	`, appFamilyID, name)
+		RETURNING id, app_family_id, clock_timestamp()
+	`, appFamilyID, name).Scan(&revocation.TokenID, &revocation.AppFamilyID, &revocation.RevokedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrAppTokenNotFound
+	}
 	if err != nil {
-		return fmt.Errorf("revoke app token: %w", err)
+		return nil, fmt.Errorf("revoke app token: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrAppTokenNotFound
-	}
-	return nil
+	return &revocation, nil
 }
 
 // --- Family buckets ---

@@ -263,7 +263,7 @@ func (s *postgresStore) ListMCPAppsByAccount(ctx context.Context, accountID uuid
 }
 
 func (s *postgresStore) ListAuthorizedMCPAppsByAccount(ctx context.Context, accountID uuid.UUID, scope accesscontrol.AuthorizedScope, limit, offset int) ([]AppRuntime, int, error) {
-	return s.ListAuthorizedAppRuntimesByAccount(ctx, accountID, scope, "mcp", limit, offset)
+	return s.ListAuthorizedAppRuntimesByAccount(ctx, accountID, scope, AppKindMCP.String(), limit, offset)
 }
 
 func (s *postgresStore) ListAuthorizedAppRuntimesByAccount(ctx context.Context, accountID uuid.UUID, scope accesscontrol.AuthorizedScope, kind string, limit, offset int) ([]AppRuntime, int, error) {

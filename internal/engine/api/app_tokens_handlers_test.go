@@ -43,11 +43,11 @@ func (s *appTokenHandlerStore) CreateAppToken(_ context.Context, appFamilyID uui
 	}, nil
 }
 
-func (s *appTokenHandlerStore) RevokeAppToken(_ context.Context, appFamilyID uuid.UUID, name string) error {
+func (s *appTokenHandlerStore) RevokeAppToken(_ context.Context, appFamilyID uuid.UUID, name string) (*store.AppTokenRevocation, error) {
 	s.revokedFamilyID = appFamilyID
 	s.revokedName = name
 	s.revokeCalls++
-	return nil
+	return &store.AppTokenRevocation{TokenID: uuid.New(), AppFamilyID: appFamilyID, RevokedAt: time.Now().UTC()}, nil
 }
 
 func TestGenerateAppTokenHandlerCreatesScopedExpiringTokenOnce(t *testing.T) {

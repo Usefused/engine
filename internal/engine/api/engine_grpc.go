@@ -36,10 +36,9 @@ type EngineGRPCServer struct {
 	tokenValidator auth.TokenValidator
 }
 
-// NewEngineGRPCServer composes the existing sandbox execution server with
-// Engine-local auth management dependencies so SDK RPCs and UI GraphQL can
-// share the same connect/session helpers.
-func NewEngineGRPCServer(s store.Store, verifier ServiceVerifier, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient) *EngineGRPCServer {
+// NewEngineGRPCServer requires the process-shared validator so SDK execution,
+// MCP execution, and revocation can never accidentally use separate caches.
+func NewEngineGRPCServer(s store.Store, verifier ServiceVerifier, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient, tokenValidator auth.TokenValidator) *EngineGRPCServer {
 	return &EngineGRPCServer{
 		runtime:        sandbox.NewEngineGRPCServer(),
 		store:          s,
@@ -47,7 +46,7 @@ func NewEngineGRPCServer(s store.Store, verifier ServiceVerifier, masterKey []by
 		masterKey:      masterKey,
 		configStore:    configStore,
 		natsClient:     natsClient,
-		tokenValidator: auth.NewTokenValidator(s),
+		tokenValidator: tokenValidator,
 	}
 }
 

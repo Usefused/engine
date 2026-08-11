@@ -740,8 +740,9 @@ func applyParam(in, key string, val any, valStr, reqURL, method, pathEncoding st
 	case "body":
 		bodyParams[key] = val
 	default:
-		// If no location is known, fallback to query for GET/DELETE or body for others
-		if method == http.MethodGet || method == http.MethodDelete {
+		// HEAD shares GET's no-body semantics, so an incomplete legacy contract
+		// must not turn an undeclared argument into a request body.
+		if method == http.MethodGet || method == http.MethodHead || method == http.MethodDelete {
 			queryParams.Set(key, valStr)
 		} else {
 			bodyParams[key] = val

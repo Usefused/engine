@@ -89,7 +89,7 @@ func (m *autoRegisterMockStore) IsWorkspaceServiceEnabled(ctx context.Context, s
 
 func (s *autoRegisterMockStore) AddWorkspaceServiceVersion(ctx context.Context, serviceID uuid.UUID, serviceSlug string, version string, serviceVersionID uuid.UUID, serviceName string, addedBy uuid.UUID) error {
 	s.activateCalls++
-	s.lastActivateArgs = []any{serviceID, version, serviceVersionID, serviceName, addedBy}
+	s.lastActivateArgs = []any{serviceID, serviceSlug, version, serviceVersionID, serviceName, addedBy}
 	return s.activateErr
 }
 
@@ -114,7 +114,7 @@ func TestAutoRegisterImportedService_ActivatesWhenNotYetActivated(t *testing.T) 
 		t.Fatalf("expected AddWorkspaceServiceVersion called once, got %d", s.activateCalls)
 	}
 	got := s.lastActivateArgs
-	if got[0] != serviceID || got[1] != "2026-01-01" || got[2] != uuid.MustParse(testImportServiceVersionID) || got[3] != "Stripe Payments" || got[4] != accountID {
+	if got[0] != serviceID || got[1] != "stripe" || got[2] != "2026-01-01" || got[3] != uuid.MustParse(testImportServiceVersionID) || got[4] != "Stripe Payments" || got[5] != accountID {
 		t.Errorf("unexpected AddWorkspaceServiceVersion args: %#v", got)
 	}
 }
@@ -127,9 +127,33 @@ func TestAutoRegisterImportedService_FallsBackToSlugWhenNameIsMissing(t *testing
 	body := []byte(`{"status":"applied","service_id":"` + serviceID.String() + `","service_version_id":"` + testImportServiceVersionID + `","slug":"stripe","version":"2026-01-01"}`)
 	autoRegisterImportedService(autoRegisterTestContext(accountID), s, nil, accountID, "", body)
 
-	if got := s.lastActivateArgs[3]; got != "stripe" {
+	if got := s.lastActivateArgs[4]; got != "stripe" {
 		t.Errorf("expected slug fallback for an older Registry response, got %q", got)
 	}
+}
+
+func TestAutoRegisterImportedService_MissingSlugFailsClosed(t *testing.T) {
+	exporter := setupTestTracer(t)
+	accountID := uuid.New()
+	serviceID := uuid.New()
+	s := &autoRegisterMockStore{accountID: accountID}
+
+	body := []byte(`{"status":"applied","service_id":"` + serviceID.String() + `","service_version_id":"` + testImportServiceVersionID + `","name":"Stripe Payments","slug":"  ","version":"2026-01-01"}`)
+	autoRegisterImportedService(autoRegisterTestContext(accountID), s, nil, accountID, "", body)
+
+	if s.activateCalls != 0 {
+		t.Fatalf("activation without a stable Registry slug must fail closed, got %d calls", s.activateCalls)
+	}
+	spans := exporter.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("expected one failed auto-registration audit span, got %d", len(spans))
+	}
+	for _, attr := range spans[0].Attributes {
+		if attr.Key == "outcome" && attr.Value.AsString() == "missing_slug" {
+			return
+		}
+	}
+	t.Fatal("missing-slug activation did not emit outcome=missing_slug")
 }
 
 func TestAutoRegisterImportedService_EmitsMutationAuditSpan(t *testing.T) {
@@ -199,7 +223,7 @@ func TestAutoRegisterImportedService_MaterializesSnapshotBeforeActivation(t *tes
 		Version:          "2026-01-01",
 	}}
 
-	body := []byte(`{"status":"applied","service_id":"` + serviceID.String() + `","service_version_id":"` + testImportServiceVersionID + `","name":"Stripe Payments","version":"2026-01-01"}`)
+	body := []byte(`{"status":"applied","service_id":"` + serviceID.String() + `","service_version_id":"` + testImportServiceVersionID + `","name":"Stripe Payments","slug":"stripe","version":"2026-01-01"}`)
 	autoRegisterImportedService(autoRegisterTestContext(accountID), s, fetcher, accountID, "user-api-key", body)
 
 	if fetcher.calls != 1 || s.snapshotCalls != 1 {

@@ -19,6 +19,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/models"
 )
 
@@ -201,15 +202,84 @@ func TestValidateAppBucketReadinessReportsEveryMissingOAuthService(t *testing.T)
 		},
 	}
 	err := validateAppBucketReadiness(context.Background(), s, bucketID, []models.SDKSelection{
-		{ServiceID: first, AuthType: "oauth"}, {ServiceID: second, AuthType: "oidc"},
+		{ServiceID: first, RequiredAuth: []models.SDKRequiredAuth{{AuthType: "oauth", AuthName: "primaryOAuth"}}},
+		{ServiceID: second, RequiredAuth: []models.SDKRequiredAuth{{AuthType: "oidc", AuthName: "primaryOIDC"}}},
 	})
 	var httpErr workspaceConfigHTTPError
 	if !errors.As(err, &httpErr) {
 		t.Fatalf("expected a structured readiness error, got %v", err)
 	}
 	missing, ok := httpErr.details["missing"].([]string)
-	if !ok || !slices.Contains(missing, first.String()+" (oauth)") || !slices.Contains(missing, second.String()+" (oidc)") {
+	if !ok || !slices.Contains(missing, first.String()+" (oauth:primaryOAuth)") || !slices.Contains(missing, second.String()+" (oidc:primaryOIDC)") {
 		t.Fatalf("expected structured details containing both services, got %#v", httpErr.details)
+	}
+	if s.connectConfigsForBucketCalls != 1 || s.secretMetaCalls != 1 {
+		t.Fatalf("readiness queries = connect:%d secrets:%d, want one bucket-scoped read each", s.connectConfigsForBucketCalls, s.secretMetaCalls)
+	}
+}
+
+func TestValidateAppBucketReadinessValidatesOAuthAndMTLSAlternative(t *testing.T) {
+	bucketID, serviceID := uuid.New(), uuid.New()
+	s := &workspaceTestStore{
+		connectConfigs: map[string]*store.ConnectConfig{
+			bucketID.String() + ":" + serviceID.String(): {
+				BucketID: bucketID, ServiceID: serviceID, AuthType: "oauth", AuthName: "oauthAuth", Enabled: true,
+			},
+		},
+		secretMetas: map[uuid.UUID][]store.WorkspaceSecretMeta{bucketID: {
+			{ServiceID: serviceID, KeyName: "clientCertificate_cert"},
+			{ServiceID: serviceID, KeyName: "clientCertificate_key"},
+		}},
+	}
+	selection := models.SDKSelection{ServiceID: serviceID, RequiredAuth: []models.SDKRequiredAuth{
+		{AuthType: "oauth", AuthName: "oauthAuth"},
+		{AuthType: "mtls", AuthName: "clientCertificate"},
+	}}
+	if err := validateAppBucketReadiness(context.Background(), s, bucketID, []models.SDKSelection{selection}); err != nil {
+		t.Fatalf("OAuth+mTLS readiness = %v", err)
+	}
+}
+
+func TestValidateAppBucketReadinessValidatesEveryStaticScheme(t *testing.T) {
+	bucketID, serviceID := uuid.New(), uuid.New()
+	selection := models.SDKSelection{ServiceID: serviceID, RequiredAuth: []models.SDKRequiredAuth{
+		{AuthType: "api_key", AuthName: "apiKey"},
+		{AuthType: "api_key", AuthName: "apiToken"},
+	}}
+	s := &workspaceTestStore{secretMetas: map[uuid.UUID][]store.WorkspaceSecretMeta{bucketID: {
+		{ServiceID: serviceID, KeyName: "apiKey"}, {ServiceID: serviceID, KeyName: "apiToken"},
+	}}}
+	if err := validateAppBucketReadiness(context.Background(), s, bucketID, []models.SDKSelection{selection}); err != nil {
+		t.Fatalf("API key AND token readiness = %v", err)
+	}
+	s.secretMetas[bucketID] = s.secretMetas[bucketID][:1]
+	err := validateAppBucketReadiness(context.Background(), s, bucketID, []models.SDKSelection{selection})
+	var httpErr workspaceConfigHTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("missing secondary credential error = %v", err)
+	}
+	missing, _ := httpErr.details["missing"].([]string)
+	if !slices.Contains(missing, serviceID.String()+" (api_key:apiToken)") {
+		t.Fatalf("missing material = %#v", missing)
+	}
+}
+
+func TestAppRequiredSecretKeysHonorsBasicPasswordMode(t *testing.T) {
+	required := appRequiredSecretKeys(models.SDKRequiredAuth{AuthType: "basic", AuthName: "basicAuth", BasicPasswordMode: authrouting.BasicPasswordEmpty})
+	if len(required) != 1 || required[0] != "basicAuth_username" {
+		t.Fatalf("empty-password Basic keys = %#v", required)
+	}
+}
+
+func TestValidateAppBucketReadinessSkipsCredentialReadsForAnonymousAndWebhookSelections(t *testing.T) {
+	bucketID := uuid.New()
+	s := &workspaceTestStore{connectConfigsForBucketErr: errors.New("credential reads must be skipped")}
+	err := validateAppBucketReadiness(context.Background(), s, bucketID, []models.SDKSelection{
+		{ServiceID: uuid.New(), OperationNames: []string{"health"}},
+		{ServiceID: uuid.New(), WebhookNames: []string{"created"}},
+	})
+	if err != nil {
+		t.Fatalf("auth-free selections unexpectedly required credential material: %v", err)
 	}
 }
 
@@ -750,7 +820,7 @@ func TestExecuteSDKConfigApplyPersistsEngineScopeBeforeMarkingApplied(t *testing
 	registry := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
 		serviceID.String() + "|1.0": {ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"},
 	}}
-	proxy := &recordingForwarder{body: `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + endpointID.String() + `"],"operation_names":["listLogEvents"]}]}`}
+	proxy := &recordingForwarder{body: `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":3,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + endpointID.String() + `"],"operation_names":["listLogEvents"]}]}`}
 
 	result, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
 		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
@@ -810,7 +880,7 @@ func TestExecuteSDKConfigApplyDoesNotMarkAppliedWhenScopePersistenceFails(t *tes
 	registry := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
 		serviceID.String() + "|1.0": {ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"},
 	}}
-	proxy := &recordingForwarder{body: `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
+	proxy := &recordingForwarder{body: `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":3,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
 
 	_, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
 		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
@@ -843,7 +913,7 @@ func TestExecuteSDKConfigApplyDoesNotDeleteExistingArtifactWhenPersistenceFails(
 	registry := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
 		serviceID.String() + "|1.0": {ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"},
 	}}
-	proxy := &recordingForwarder{body: `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
+	proxy := &recordingForwarder{body: `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":3,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
 
 	_, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
 		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
@@ -876,7 +946,7 @@ func TestExecuteSDKConfigApplyRetainsLeaseWhenCompensationIsUnconfirmed(t *testi
 	}}
 	proxy := &recordingForwarder{
 		statuses: []int{http.StatusOK, http.StatusGatewayTimeout},
-		body:     `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`,
+		body:     `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":3,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`,
 	}
 	call := sdkApplyCall{apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash"}
 
@@ -1000,7 +1070,7 @@ func TestExecuteSDKConfigApplyConcurrentFirstApplyPreservesWinnerArtifact(t *tes
 	registry := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
 		serviceID.String() + "|1.0": {ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"},
 	}}
-	proxy := &recordingForwarder{body: `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
+	proxy := &recordingForwarder{body: `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":3,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
 	call := sdkApplyCall{apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash"}
 
 	start := make(chan struct{})
@@ -1049,7 +1119,7 @@ func TestExecuteSDKConfigApplyCompensatesPendingGenerationFailure(t *testing.T) 
 	registry := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
 		serviceID.String() + "|1.0": {ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"},
 	}}
-	pending := `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"pending","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`
+	pending := `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"pending","scope_schema_version":3,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`
 	proxy := &recordingForwarder{bodies: []string{pending, "data: {\"type\":\"error\",\"message\":\"generation failed\"}\n\n", ""}}
 
 	_, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
@@ -1137,7 +1207,7 @@ func TestExecuteSDKConfigApplyReusesExistingScopeCredentialOnRetry(t *testing.T)
 	registry := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
 		serviceID.String() + "|1.0": {ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"},
 	}}
-	proxy := &recordingForwarder{body: `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
+	proxy := &recordingForwarder{body: `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":3,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
 
 	result, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
 		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
@@ -1178,7 +1248,7 @@ func TestExecuteSDKConfigApplyRejectsExistingScopeOwnedByAnotherAccount(t *testi
 	registry := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
 		serviceID.String() + "|1.0": {ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"},
 	}}
-	proxy := &recordingForwarder{body: `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
+	proxy := &recordingForwarder{body: `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":3,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
 
 	_, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
 		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
@@ -1214,7 +1284,7 @@ func TestExecuteSDKConfigApplyAtomicPersistenceFailureDoesNotFinalize(t *testing
 	registry := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
 		serviceID.String() + "|1.0": {ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"},
 	}}
-	proxy := &recordingForwarder{body: `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
+	proxy := &recordingForwarder{body: `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":3,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
 
 	_, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
 		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
@@ -1285,7 +1355,7 @@ func TestExecuteSDKConfigApplyPendingGenerationFinalizesScopeAfterCompletion(t *
 		serviceID.String() + "|1.0": {ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"},
 	}}
 	endpointID := uuid.New()
-	pending := `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"pending","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + endpointID.String() + `"]}]}`
+	pending := `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"pending","scope_schema_version":3,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + endpointID.String() + `"]}]}`
 	complete := `data: {"type":"complete","integration_id":"` + appID.String() + `","message":"SDK Generation Complete!"}` + "\n\n"
 	proxy := &recordingForwarder{bodies: []string{pending, complete}}
 
@@ -1401,7 +1471,8 @@ func TestValidateGeneratedScopeSelectionsPreservesPortablePolicy(t *testing.T) {
 	planned := []models.SDKSelection{{
 		ServiceID: serviceID, ServiceVersionID: versionID, OperationNames: []string{"getIssue"},
 		AuthType: "oauth2", AuthName: "jiraOAuth", ConnectScopes: []string{"read:jira-work"},
-		Injections: []models.SDKInjectionConfig{{Location: "header", Name: "X-Tenant", Value: "$connection.tenant"}},
+		RequiredAuth: []models.SDKRequiredAuth{{AuthType: "oauth", AuthName: "jiraOAuth"}},
+		Injections:   []models.SDKInjectionConfig{{Location: "header", Name: "X-Tenant", Value: "$connection.tenant"}},
 	}}
 	returned := append([]models.SDKSelection(nil), planned...)
 	returned[0].EndpointIDs = []uuid.UUID{endpointID}
@@ -1411,6 +1482,12 @@ func TestValidateGeneratedScopeSelectionsPreservesPortablePolicy(t *testing.T) {
 	returned[0].AuthName = "different"
 	if err := validateGeneratedScopeSelections(planned, returned); err == nil {
 		t.Fatal("Registry auth-policy drift was accepted")
+	}
+	returned = append([]models.SDKSelection(nil), planned...)
+	returned[0].EndpointIDs = []uuid.UUID{endpointID}
+	returned[0].RequiredAuth = []models.SDKRequiredAuth{{AuthType: "oauth", AuthName: "different"}}
+	if err := validateGeneratedScopeSelections(planned, returned); err == nil {
+		t.Fatal("Registry required-auth drift was accepted")
 	}
 }
 
@@ -1488,7 +1565,7 @@ func TestExecuteSDKConfigApplyHasNoCompensatingDeleteWhenAtomicFinalizationFails
 	registry := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
 		serviceID.String() + "|1.0": {ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"},
 	}}
-	proxy := &recordingForwarder{body: `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
+	proxy := &recordingForwarder{body: `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":3,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
 
 	_, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
 		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
@@ -1526,7 +1603,7 @@ func TestExecuteSDKConfigApplyRejectsRegistryScopeMismatch(t *testing.T) {
 		serviceID.String() + "|1.0": {ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"},
 	}}
 	otherVersionID := uuid.New()
-	proxy := &recordingForwarder{body: `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + otherVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
+	proxy := &recordingForwarder{body: `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":3,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + otherVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`}
 
 	_, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
 		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",

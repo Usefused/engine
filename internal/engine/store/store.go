@@ -154,14 +154,25 @@ type AppTokenMetadata struct {
 	CreatedAt  time.Time
 }
 
+// AppTokenRevocation is the secret-free identity needed to invalidate one
+// revoked token across Engine replicas. The token value, hash, and user label
+// deliberately never leave the persistence boundary.
+type AppTokenRevocation struct {
+	TokenID     uuid.UUID
+	AppFamilyID uuid.UUID
+	RevokedAt   time.Time
+}
+
 // AppTokenPolicy is the shared SDK/MCP execution-token authorization policy.
-// The API renders AllowAll as ["*"]; storage keeps it explicit so a wildcard
-// can never collide with a provider operation ID.
+// The API renders AllowAll with AppTokenAllowAllWildcard; storage keeps it
+// explicit so a wildcard can never collide with a provider operation ID.
 type AppTokenPolicy struct {
 	AllowAll          bool
 	AllowedOperations []string
 	ExpiresAt         *time.Time
 }
+
+const AppTokenAllowAllWildcard = "*"
 
 // IsUnrestricted is explicit so an absent or malformed policy fails closed.
 // Apply-time tokens persist AllowAll=true, while strict tokens name every grant.
@@ -197,6 +208,7 @@ type AuthProjection struct {
 	AccountID   uuid.UUID
 	AppFamilyID uuid.UUID
 	AppID       uuid.UUID
+	TokenID     uuid.UUID
 	Version     string
 	Kind        AppKind
 	AppStatus   AppStatus
@@ -674,7 +686,7 @@ type Store interface {
 	// Family tokens
 	CreateAppToken(ctx context.Context, appFamilyID uuid.UUID, tokenHash, name string, policy AppTokenPolicy) (*AppTokenMetadata, error)
 	ListAppTokens(ctx context.Context, appFamilyID uuid.UUID) ([]AppTokenMetadata, error)
-	RevokeAppToken(ctx context.Context, appFamilyID uuid.UUID, name string) error
+	RevokeAppToken(ctx context.Context, appFamilyID uuid.UUID, name string) (*AppTokenRevocation, error)
 
 	// Family buckets
 	SetAppFamilyBucket(ctx context.Context, appFamilyID, bucketID uuid.UUID) error

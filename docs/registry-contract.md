@@ -124,7 +124,8 @@ webhook calls remain fully available in local Activity until canonical webhook
 events carry a stable Registry webhook-object identity.
 
 Owner-only aggregate reads also travel through Engine. The embedded UI calls
-Engine GraphQL, Engine applies local `service.read` and `audit.read`, Registry
+the Engine-native `POST /engine/graphql` endpoint, Engine applies local
+`service.read` and `audit.read`, Registry
 independently verifies service ownership, and Engine may return a short-lived
 cached result during a Registry outage. Local Activity does not depend on this
 cloud path.

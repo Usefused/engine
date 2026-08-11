@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -78,12 +79,55 @@ func TestRegistryGraphQLAuthorizationFailsClosedForUnknownRoot(t *testing.T) {
 	}
 }
 
-func TestRegistryGraphQLPolicyCoversCurrentRegistrySchema(t *testing.T) {
-	if got := len(registryGraphQLQueryPolicies) - 1; got != 25 {
-		t.Fatalf("classified Registry queries = %d, want 25", got)
+func TestRegistryGraphQLAuthorizationClassifiesRuntimeContractRoots(t *testing.T) {
+	roots := []string{"serviceRuntimeContracts", "serviceVersionExecutionAuthContracts", "serviceWebhookMetadata", "serviceVersionImportIdentities"}
+
+	for _, root := range roots {
+		t.Run(root, func(t *testing.T) {
+			body := []byte(`{"query":"query { ` + root + ` }"}`)
+			t.Run("catalogue read", func(t *testing.T) {
+				actor := registryPolicyActor(t, accesscontrol.PermissionCatalogueRead)
+				ctx := accesscontrol.ContextWithActor(context.Background(), actor)
+				operation, err := authorizeRegistryGraphQLOperation(ctx, body)
+				if err != nil || operation != "query" {
+					t.Fatalf("operation/error = %q/%v", operation, err)
+				}
+			})
+			t.Run("permission denied", func(t *testing.T) {
+				actor := registryPolicyActor(t)
+				ctx := accesscontrol.ContextWithActor(context.Background(), actor)
+				_, err := authorizeRegistryGraphQLOperation(ctx, body)
+				if !errors.Is(err, accesscontrol.ErrPermissionDenied) {
+					t.Fatalf("error = %v, want permission denied", err)
+				}
+			})
+		})
 	}
-	if got := len(registryGraphQLMutationPolicies) - 1; got != 3 {
-		t.Fatalf("classified Registry mutations = %d, want 3", got)
+}
+
+func TestRegistryGraphQLAuthorizationRejectsUnclassifiedRootKinds(t *testing.T) {
+	t.Setenv("FUSED_ENV", "production")
+	actor := registryPolicyActor(t, accesscontrol.AllPermissions()...)
+	ctx := accesscontrol.ContextWithActor(context.Background(), actor)
+	tests := []struct {
+		name  string
+		query string
+	}{
+		{name: "unknown query", query: `query { futureUnclassifiedField }`},
+		{name: "mutation root in query", query: `query { updateServicePublic }`},
+		{name: "query root in mutation", query: `mutation { serviceRuntimeContracts }`},
+		{name: "unknown mutation", query: `mutation { futureUnclassifiedMutation }`},
+		{name: "introspection", query: `query { __schema { queryType { name } } }`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := []byte(`{"query":` + strconv.Quote(test.query) + `}`)
+			_, err := authorizeRegistryGraphQLOperation(ctx, body)
+			if err == nil || !strings.Contains(err.Error(), "unclassified") {
+				t.Fatalf("error = %v, want unclassified policy error", err)
+			}
+		})
 	}
 }
 

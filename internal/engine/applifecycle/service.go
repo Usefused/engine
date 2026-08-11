@@ -28,6 +28,26 @@ import (
 
 var ErrTokenPolicyInvalid = errors.New("invalid app token policy")
 
+// LifecycleOutcome is the bounded telemetry vocabulary shared by lifecycle
+// operations and their transport adapters.
+type LifecycleOutcome string
+
+const (
+	OutcomeUnauthorized     LifecycleOutcome = "unauthorized"
+	OutcomeInvalid          LifecycleOutcome = "invalid"
+	OutcomeFailed           LifecycleOutcome = "failed"
+	OutcomeSuccess          LifecycleOutcome = "success"
+	OutcomeConflict         LifecycleOutcome = "conflict"
+	OutcomeExisting         LifecycleOutcome = "existing"
+	OutcomeCreated          LifecycleOutcome = "created"
+	OutcomeVersionImmutable LifecycleOutcome = "version_immutable"
+	OutcomeNoop             LifecycleOutcome = "noop"
+	OutcomeDeprecated       LifecycleOutcome = "deprecated"
+	OutcomeActive           LifecycleOutcome = "active"
+	OutcomeDeactivated      LifecycleOutcome = "deactivated"
+	OutcomeRevoked          LifecycleOutcome = "revoked"
+)
+
 // Service orchestrates app-family and app-version operations. It is the
 // single coordination point for SDK and MCP lifecycle; callers provide a
 // kind-specific adapter for package generation (SDK) or runtime setup (MCP).
@@ -71,16 +91,16 @@ func (svc *Service) ApplyConfigPlan(ctx context.Context, repository ConfigPlanRe
 		attribute.String("app.version", params.Scope.Version),
 	)
 	if !params.Scope.Kind.Valid() {
-		span.SetAttributes(attribute.String("outcome", "invalid"))
+		span.SetAttributes(attribute.String("outcome", string(OutcomeInvalid)))
 		return nil, store.ErrAppKindInvalid
 	}
 	result, err := repository.ApplyAppConfigPlan(ctx, params)
 	if err != nil {
-		span.SetAttributes(attribute.String("outcome", "failed"))
+		span.SetAttributes(attribute.String("outcome", string(OutcomeFailed)))
 		return nil, err
 	}
 	span.SetAttributes(
-		attribute.String("outcome", "success"),
+		attribute.String("outcome", string(OutcomeSuccess)),
 		attribute.Bool("app.version_created", result.VersionCreated),
 		attribute.Bool("app.token_created", result.TokenCreated),
 	)
@@ -97,7 +117,7 @@ func (svc *Service) CreateOrGetFamily(ctx context.Context, params CreateFamilyPa
 	defer span.End()
 	span.SetAttributes(attribute.String("app.kind", params.Kind.String()))
 	if !params.Kind.Valid() {
-		span.SetAttributes(attribute.String("outcome", "invalid"))
+		span.SetAttributes(attribute.String("outcome", string(OutcomeInvalid)))
 		return nil, false, store.ErrAppKindInvalid
 	}
 
@@ -113,20 +133,20 @@ func (svc *Service) CreateOrGetFamily(ctx context.Context, params CreateFamilyPa
 	}
 	result, created, err := svc.store.CreateOrGetAppFamily(ctx, family)
 	if err != nil {
-		span.SetAttributes(attribute.String("outcome", "failed"))
+		span.SetAttributes(attribute.String("outcome", string(OutcomeFailed)))
 		return nil, false, fmt.Errorf("create or get family: %w", err)
 	}
 	if !result.HasSameBinding(family) {
-		span.SetAttributes(attribute.String("outcome", "conflict"))
+		span.SetAttributes(attribute.String("outcome", string(OutcomeConflict)))
 		return nil, false, store.ErrAppOwnerMismatch
 	}
-	outcome := "existing"
+	outcome := OutcomeExisting
 	if created {
-		outcome = "created"
+		outcome = OutcomeCreated
 	}
 	span.SetAttributes(
 		attribute.String("app.family_id", result.AppFamilyID.String()),
-		attribute.String("outcome", outcome),
+		attribute.String("outcome", string(outcome)),
 		attribute.Bool("family.created", created),
 	)
 	return result, created, nil
@@ -143,13 +163,13 @@ func (svc *Service) PublishVersion(ctx context.Context, params PublishVersionPar
 		attribute.String("app.version", params.Version),
 	)
 	if !params.Kind.Valid() {
-		span.SetAttributes(attribute.String("outcome", "invalid"))
+		span.SetAttributes(attribute.String("outcome", string(OutcomeInvalid)))
 		return nil, store.ErrAppKindInvalid
 	}
 
 	capabilityKeys, capHash, err := capability.KeysAndHash(params.Selections)
 	if err != nil {
-		span.SetAttributes(attribute.String("outcome", "invalid"))
+		span.SetAttributes(attribute.String("outcome", string(OutcomeInvalid)))
 		return nil, fmt.Errorf("publish version: decode capabilities: %w", err)
 	}
 
@@ -173,19 +193,19 @@ func (svc *Service) PublishVersion(ctx context.Context, params PublishVersionPar
 	persisted, created, err := svc.store.PublishAppVersion(ctx, app)
 	if err != nil {
 		if errors.Is(err, store.ErrAppVersionImmutable) {
-			span.SetAttributes(attribute.String("outcome", "version_immutable"))
+			span.SetAttributes(attribute.String("outcome", string(OutcomeVersionImmutable)))
 		} else {
-			span.SetAttributes(attribute.String("outcome", "failed"))
+			span.SetAttributes(attribute.String("outcome", string(OutcomeFailed)))
 		}
 		return nil, err
 	}
 	if !created {
-		span.SetAttributes(attribute.String("outcome", "noop"), attribute.Bool("app.noop", true))
+		span.SetAttributes(attribute.String("outcome", string(OutcomeNoop)), attribute.Bool("app.noop", true))
 		return &PublishVersionResult{App: *persisted, NoOp: true}, nil
 	}
 
 	span.SetAttributes(
-		attribute.String("outcome", "created"),
+		attribute.String("outcome", string(OutcomeCreated)),
 		attribute.Bool("app.created", true),
 		attribute.String("app.id", app.AppID.String()),
 	)
@@ -223,10 +243,10 @@ func (svc *Service) Deprecate(ctx context.Context, appID uuid.UUID, message stri
 	span.SetAttributes(attribute.String("app.id", appID.String()))
 
 	if err := svc.store.DeprecateApp(ctx, appID, message, plannedDeactivationAt); err != nil {
-		span.SetAttributes(attribute.String("outcome", "failed"))
+		span.SetAttributes(attribute.String("outcome", string(OutcomeFailed)))
 		return fmt.Errorf("deprecate: %w", err)
 	}
-	span.SetAttributes(attribute.String("outcome", "deprecated"))
+	span.SetAttributes(attribute.String("outcome", string(OutcomeDeprecated)))
 	return nil
 }
 
@@ -237,10 +257,10 @@ func (svc *Service) Undeprecate(ctx context.Context, appID uuid.UUID) error {
 	span.SetAttributes(attribute.String("app.id", appID.String()))
 
 	if err := svc.store.UndeprecateApp(ctx, appID); err != nil {
-		span.SetAttributes(attribute.String("outcome", "failed"))
+		span.SetAttributes(attribute.String("outcome", string(OutcomeFailed)))
 		return fmt.Errorf("undeprecate: %w", err)
 	}
-	span.SetAttributes(attribute.String("outcome", "active"))
+	span.SetAttributes(attribute.String("outcome", string(OutcomeActive)))
 	return nil
 }
 
@@ -257,18 +277,18 @@ func (svc *Service) Deactivate(ctx context.Context, appID uuid.UUID, actorID uui
 
 	app, err := svc.store.GetApp(ctx, appID)
 	if err != nil {
-		span.SetAttributes(attribute.String("outcome", "failed"))
+		span.SetAttributes(attribute.String("outcome", string(OutcomeFailed)))
 		return fmt.Errorf("get app for deactivation: %w", err)
 	}
 	if err := svc.store.DeactivateAppVersion(ctx, appID, actorID); err != nil {
-		span.SetAttributes(attribute.String("outcome", "failed"))
+		span.SetAttributes(attribute.String("outcome", string(OutcomeFailed)))
 		return fmt.Errorf("deactivate app: %w", err)
 	}
 
 	span.SetAttributes(
 		attribute.String("app.family_id", app.AppFamilyID.String()),
 		attribute.String("app.version", app.Version),
-		attribute.String("outcome", "deactivated"),
+		attribute.String("outcome", string(OutcomeDeactivated)),
 	)
 	return nil
 }
@@ -296,7 +316,7 @@ func (svc *Service) GenerateToken(ctx context.Context, params GenerateTokenParam
 
 	policy, err := resolveTokenPolicy(params.Allow, params.ExpiresIn, time.Now())
 	if err != nil {
-		span.SetAttributes(attribute.String("outcome", "invalid"))
+		span.SetAttributes(attribute.String("outcome", string(OutcomeInvalid)))
 		return "", nil, err
 	}
 	span.SetAttributes(
@@ -306,18 +326,18 @@ func (svc *Service) GenerateToken(ctx context.Context, params GenerateTokenParam
 
 	plaintext, tokenHash, err := NewExecutionToken()
 	if err != nil {
-		span.SetAttributes(attribute.String("outcome", "failed"))
+		span.SetAttributes(attribute.String("outcome", string(OutcomeFailed)))
 		return "", nil, fmt.Errorf("generate app token: %w", err)
 	}
 
 	tok, err := svc.store.CreateAppToken(ctx, params.AppFamilyID, tokenHash, params.Name, policy)
 	if err != nil {
-		span.SetAttributes(attribute.String("outcome", "failed"))
+		span.SetAttributes(attribute.String("outcome", string(OutcomeFailed)))
 		return "", nil, fmt.Errorf("create app token: %w", err)
 	}
 
 	span.SetAttributes(
-		attribute.String("outcome", "created"),
+		attribute.String("outcome", string(OutcomeCreated)),
 	)
 	return plaintext, tok, nil
 }
@@ -363,7 +383,7 @@ func normalizeTokenAllow(allow []string) (bool, []string, error) {
 		}
 		unique[operation] = struct{}{}
 	}
-	if _, wildcard := unique["*"]; wildcard {
+	if _, wildcard := unique[store.AppTokenAllowAllWildcard]; wildcard {
 		if len(unique) != 1 {
 			return false, nil, fmt.Errorf("%w: * must be the only allow entry", ErrTokenPolicyInvalid)
 		}
