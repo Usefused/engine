@@ -16,6 +16,7 @@ export const meta: MetaFunction = ({ matches }) => {
 };
 
 const POLL_INTERVAL_MS = 1500;
+const MANAGED_SIGN_IN_ERROR = "Sign-in could not be completed.";
 
 type ManagedPollOutcome = "authenticated" | "closed" | "expired" | "cancelled";
 
@@ -38,6 +39,13 @@ function isolateManagedLoginPopup(popup: Window): boolean {
     popup.close();
     return false;
   }
+}
+
+function managedVerificationURL(raw: string, forceReauthentication: boolean): string {
+  if (!forceReauthentication) return raw;
+  const verificationURL = new URL(raw);
+  verificationURL.searchParams.set("reauthenticate", "true");
+  return verificationURL.toString();
 }
 
 function canRetryManagedPoll(error: unknown, failures: number): boolean {
@@ -73,6 +81,7 @@ export default function Login() {
   const [apiKey, setAPIKey] = useState("");
   const [error, setError] = useState("");
   const [managedLoading, setManagedLoading] = useState(false);
+  const [managedRetry, setManagedRetry] = useState(false);
   const [apiKeyLoading, setAPIKeyLoading] = useState(false);
   const cancelled = useRef(false);
   const pollController = useRef<AbortController | null>(null);
@@ -89,17 +98,24 @@ export default function Login() {
     };
   }, [next]);
 
-  async function handleManagedLogin() {
+  function failManagedLogin() {
+    // One public outcome avoids revealing whether an identity exists, was
+    // invited, or was rejected by the external identity provider.
+    setError(MANAGED_SIGN_IN_ERROR);
+    setManagedRetry(true);
+  }
+
+  async function handleManagedLogin(forceReauthentication: boolean) {
     // Embedded browsers can render cross-origin identity providers as a blank
     // page in popup-style windows. A fresh regular tab also avoids reusing a
     // completed cross-origin callback tab that this page can no longer navigate.
     const popup = window.open("about:blank", "_blank");
     if (!popup) {
-      setError("Allow pop-ups for this Engine to continue with managed sign-in.");
+      failManagedLogin();
       return;
     }
     if (!isolateManagedLoginPopup(popup)) {
-      setError("This browser could not open sign-in safely. Try another browser.");
+      failManagedLogin();
       return;
     }
     setManagedLoading(true);
@@ -109,7 +125,7 @@ export default function Login() {
     pollController.current = controller;
     try {
       const transaction = await api.auth.startManaged();
-      popup.location.replace(transaction.verification_url);
+      popup.location.replace(managedVerificationURL(transaction.verification_url, forceReauthentication));
       const outcome = await waitForManagedLogin(popup, transaction, controller.signal);
       if (outcome === "authenticated") {
         popup.close();
@@ -117,11 +133,10 @@ export default function Login() {
         return;
       }
       popup.close();
-      if (outcome === "closed") setError("Sign-in was closed before it completed.");
-      if (outcome === "expired") setError("Sign-in expired. Start again when you are ready.");
+      if (outcome !== "cancelled") failManagedLogin();
     } catch {
       popup.close();
-      setError("Managed sign-in could not be completed. Check that you were invited to this Engine.");
+      if (!controller.signal.aborted && !cancelled.current) failManagedLogin();
     } finally {
       controller.abort();
       if (pollController.current === controller) pollController.current = null;
@@ -160,12 +175,12 @@ export default function Login() {
             <button
               data-track="start_managed_login"
               type="button"
-              onClick={handleManagedLogin}
+              onClick={() => handleManagedLogin(managedRetry)}
               disabled={managedLoading || apiKeyLoading}
               className="mt-6 w-full inline-flex items-center justify-center gap-2 py-2.5 px-4 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition-colors"
             >
               {managedLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ExternalLink className="w-4 h-4" />}
-              {managedLoading ? "Waiting for sign-in…" : "Continue with email or SSO"}
+              {managedLoading ? "Waiting for sign-in…" : managedRetry ? "Try again" : "Continue with email or SSO"}
             </button>
 
             <div className="my-6 flex items-center gap-3 text-xs uppercase tracking-wide text-slate-400">

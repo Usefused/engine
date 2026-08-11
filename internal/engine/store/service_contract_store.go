@@ -47,7 +47,7 @@ type ServiceContractEndpointSelection struct {
 }
 
 // ServiceContractEndpointMatch contains only rows already intersected by the
-// app selection and token allowlist in PostgreSQL.
+// app selection and optional token allowlist in PostgreSQL.
 type ServiceContractEndpointMatch struct {
 	SelectionIndex int
 	Endpoint       fusedobject.Endpoint
@@ -273,7 +273,7 @@ func (s *postgresStore) ListServiceContractEndpointsByNames(ctx context.Context,
 }
 
 func (s *postgresStore) ListServiceContractEndpointsForSelections(ctx context.Context, selections []ServiceContractEndpointSelection, endpointNames []string) ([]ServiceContractEndpointMatch, error) {
-	if len(selections) == 0 || len(endpointNames) == 0 {
+	if len(selections) == 0 {
 		return nil, nil
 	}
 	payload, err := json.Marshal(selections)
@@ -300,7 +300,7 @@ func (s *postgresStore) ListServiceContractEndpointsForSelections(ctx context.Co
 		FROM resolved
 		LEFT JOIN fused_service_contract_endpoints endpoints
 		  ON endpoints.snapshot_id = resolved.snapshot_id
-		 AND endpoints.name = ANY($2)
+		 AND (COALESCE(cardinality($2::text[]), 0) = 0 OR endpoints.name = ANY($2::text[]))
 		 AND (
 		   resolved.select_all
 		   OR EXISTS (

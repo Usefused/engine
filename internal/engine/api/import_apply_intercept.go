@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
@@ -117,6 +118,13 @@ func decodeAutoRegistrationResponse(ctx context.Context, body []byte) (importApp
 			slog.String("service_version_id", resp.ServiceVersionID), slog.Any("error", err))
 		return resp, autoRegistrationAudit{outcome: "invalid_service_version_id", err: err}, false
 	}
+	resp.Slug = strings.TrimSpace(resp.Slug)
+	if resp.Slug == "" {
+		// The Registry slug is the stable config identity used by SDK/MCP plans.
+		// Activating without it would succeed here but fail later authorization
+		// when a desired config refers to the imported service by slug.
+		return resp, autoRegistrationAudit{serviceID: serviceID, serviceVersionID: serviceVersionID, outcome: "missing_slug"}, false
+	}
 	audit := autoRegistrationAudit{serviceID: serviceID, version: resp.Version, serviceVersionID: serviceVersionID}
 	if resp.Version == "" {
 		// AddWorkspaceServiceVersion requires a concrete version to pin to -- there's
@@ -162,7 +170,7 @@ func activateImportedService(ctx context.Context, s store.Store, contractFetcher
 		audit.outcome, audit.err = "contract_snapshot_failed", err
 		return audit
 	}
-	if err := s.AddWorkspaceServiceVersion(ctx, audit.serviceID, "", resp.Version, audit.serviceVersionID, importedServiceName(resp), accountID); err != nil {
+	if err := s.AddWorkspaceServiceVersion(ctx, audit.serviceID, resp.Slug, resp.Version, audit.serviceVersionID, importedServiceName(resp), accountID); err != nil {
 		slog.ErrorContext(ctx, "auto-register: AddWorkspaceServiceVersion failed", slog.Any("error", err))
 		audit.outcome, audit.err = "activation_failed", err
 		return audit

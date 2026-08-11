@@ -120,26 +120,33 @@ type RequestPart struct {
 type Responses map[string]Schema
 
 type AuthConfig struct {
-	Name                string                        `json:"name,omitempty"`
-	Type                string                        `json:"type"`
-	Flow                string                        `json:"flow,omitempty"`
-	Scheme              string                        `json:"scheme,omitempty"`
-	BasicPasswordMode   authrouting.BasicPasswordMode `json:"basic_password_mode,omitempty"`
-	Location            string                        `json:"location,omitempty"`
-	KeyName             string                        `json:"key_name,omitempty"`
-	TokenURL            string                        `json:"token_url,omitempty"`
-	AuthorizationURL    string                        `json:"authorization_url,omitempty"`
-	OpenIdConnectUrl    string                        `json:"open_id_connect_url,omitempty"`
-	Scopes              []string                      `json:"scopes,omitempty"`
-	PKCERequired        bool                          `json:"pkce_required,omitempty"`
-	ScopesDelimiter     string                        `json:"scopes_delimiter,omitempty"`
-	TokenEndpointAuth   string                        `json:"token_endpoint_auth,omitempty"`
-	ExtraAuthParams     map[string]string             `json:"extra_auth_params,omitempty"`
-	ExtraTokenParams    map[string]string             `json:"extra_token_params,omitempty"`
-	RefreshTokenRotates bool                          `json:"refresh_token_rotates,omitempty"`
+	Name                    string                        `json:"name,omitempty"`
+	Type                    string                        `json:"type"`
+	Flow                    string                        `json:"flow,omitempty"`
+	Scheme                  string                        `json:"scheme,omitempty"`
+	BasicPasswordMode       authrouting.BasicPasswordMode `json:"basic_password_mode,omitempty"`
+	Location                string                        `json:"location,omitempty"`
+	KeyName                 string                        `json:"key_name,omitempty"`
+	TokenURL                string                        `json:"token_url,omitempty"`
+	AuthorizationURL        string                        `json:"authorization_url,omitempty"`
+	OpenIdConnectUrl        string                        `json:"open_id_connect_url,omitempty"`
+	Scopes                  []string                      `json:"scopes,omitempty"`
+	PKCERequired            bool                          `json:"pkce_required,omitempty"`
+	ScopesDelimiter         string                        `json:"scopes_delimiter,omitempty"`
+	TokenEndpointAuthMethod TokenEndpointAuthMethod       `json:"token_endpoint_auth_method,omitempty"`
+	ExtraAuthParams         map[string]string             `json:"extra_auth_params,omitempty"`
+	ExtraTokenParams        map[string]string             `json:"extra_token_params,omitempty"`
+	RefreshTokenRotates     bool                          `json:"refresh_token_rotates,omitempty"`
 }
 
 type AuthConfigs []AuthConfig
+
+type TokenEndpointAuthMethod string
+
+const (
+	TokenEndpointAuthMethodClientSecretBasic TokenEndpointAuthMethod = "client_secret_basic"
+	TokenEndpointAuthMethodClientSecretPost  TokenEndpointAuthMethod = "client_secret_post"
+)
 
 type IncomingWebhookConfig struct {
 	AuthType            string   `json:"auth_type"`

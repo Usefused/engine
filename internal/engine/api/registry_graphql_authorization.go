@@ -26,7 +26,8 @@ var registryGraphQLQueryPolicies = registryGraphQLPolicies(
 	[]string{
 		"eligibleConnectionProfiles", "connectionProfileContracts", "connectionProfileRevision",
 		"services", "serviceIdBySlug", "serviceIdsBySlugs", "servicesByIds", "serviceVersions",
-		"latestServiceVersions", "serviceVersionAuthConfigs", "service", "resourceIntegrations", "getServiceComponent",
+		"latestServiceVersions", "serviceVersionAuthConfigs", "serviceVersionExecutionAuthContracts", "serviceRuntimeContracts", "serviceWebhookMetadata",
+		"serviceVersionImportIdentities", "service", "resourceIntegrations", "getServiceComponent",
 		"integration", "endpointByName", "endpointsByNames", "serviceOperations", "validateSDKSelections",
 		"searchEndpoints", "searchServices", "parseSDKIntent", "driftSnapshots", "driftSnapshotsForServices",
 		"serviceChangelogSince",

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine/store"
@@ -110,8 +109,8 @@ func TestResolveRuntimeServerTemplateRequiresAbsoluteProtocolRelativeOverride(t 
 	if err == nil {
 		resolution, err = resolveRuntimeServerTemplate(metadata, resolution, nil, nil)
 	}
-	if err == nil || !strings.Contains(err.Error(), "resolved server URL") {
-		t.Fatalf("resolution=%+v err=%v, want generic resolved URL failure", resolution, err)
+	if !errors.Is(err, errAbsoluteServerOverrideRequired) {
+		t.Fatalf("resolution=%+v err=%v, want absolute override requirement", resolution, err)
 	}
 
 	binding := []store.BucketValue{{
@@ -133,6 +132,21 @@ func TestResolveRuntimeServerTemplateRequiresAbsoluteProtocolRelativeOverride(t 
 	}
 	if err != nil || resolution.BaseURL != override.BaseURL || resolution.Source != "default" {
 		t.Fatalf("workspace override resolution=%+v err=%v", resolution, err)
+	}
+}
+
+func TestResolveRuntimeServerTemplateRequiresOverrideForPathRelativeSource(t *testing.T) {
+	defaultTenant := "acme"
+	metadata := &fusedobject.ServiceMetadata{Servers: fusedobject.Servers{{
+		URL: "/wiki/{tenant}", IsDefault: true,
+		Variables: []serverrouting.Variable{{Name: "tenant", Default: &defaultTenant, Required: true}},
+	}}}
+	resolution, err := resolveRuntimeEnvironment(metadata, "")
+	if err == nil {
+		resolution, err = resolveRuntimeServerTemplate(metadata, resolution, nil, nil)
+	}
+	if !errors.Is(err, errAbsoluteServerOverrideRequired) {
+		t.Fatalf("resolution=%+v err=%v, want absolute override requirement", resolution, err)
 	}
 }
 

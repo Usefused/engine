@@ -372,7 +372,7 @@ export interface AuthConfig {
   scopes?: string[];
   pkce_required?: boolean;
   scopes_delimiter?: string;
-  token_endpoint_auth?: string;
+  token_endpoint_auth_method?: 'client_secret_basic' | 'client_secret_post';
   extra_auth_params?: Record<string, string>;
   extra_token_params?: Record<string, string>;
   refresh_token_rotates?: boolean;

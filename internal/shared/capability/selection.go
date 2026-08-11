@@ -83,6 +83,15 @@ func addAuth(keys map[string]struct{}, prefix string, selection models.SDKSelect
 	if selection.AuthType != "" {
 		keys[prefix+":auth:"+selection.AuthType+":"+selection.AuthName] = struct{}{}
 	}
+	for _, required := range selection.RequiredAuth {
+		// Required AND-members constrain publication readiness even when no
+		// singular runtime selector exists, so they are part of immutable identity.
+		key := prefix + ":required-auth:" + required.AuthType + ":" + required.AuthName
+		if required.BasicPasswordMode != "" {
+			key += ":basic-password-mode:" + string(required.BasicPasswordMode)
+		}
+		keys[key] = struct{}{}
+	}
 }
 
 func addInjections(keys map[string]struct{}, prefix string, injections []models.SDKInjectionConfig) {

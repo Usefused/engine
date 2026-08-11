@@ -808,6 +808,9 @@ func publishConfigAppTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, para
 }
 
 func ensureAppFamilyTokenTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, params ApplyAppConfigPlanParams) (bool, error) {
+	// Apply shares the same non-null array invariant as standalone token issue;
+	// a nil Go slice still means no exact operations, never SQL NULL.
+	allowedOperations := nonNilStrings(params.TokenPolicy.AllowedOperations)
 	var created bool
 	err := tx.QueryRow(ctx, `
 		INSERT INTO fused_app_tokens
@@ -816,7 +819,7 @@ func ensureAppFamilyTokenTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, 
 		WHERE NOT EXISTS (SELECT 1 FROM fused_app_tokens WHERE app_family_id = $1)
 		RETURNING true
 	`, familyID, params.TokenHash, params.TokenName, params.TokenPolicy.AllowAll,
-		params.TokenPolicy.AllowedOperations, params.TokenPolicy.ExpiresAt).Scan(&created)
+		allowedOperations, params.TokenPolicy.ExpiresAt).Scan(&created)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}

@@ -3,7 +3,6 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -20,36 +19,26 @@ import (
 // enforcement engineExecuteCore/findEndpointInScope apply at dispatch time --
 // this makes the *catalog* match the *enforcement*, not just the enforcement
 // alone.
-func buildSessionFixture(ctx context.Context, cache ObjectCache, appID string, selections []models.SDKSelection, policy store.AppTokenPolicy) (*Fixture, error) {
-	if !policy.IsUnrestricted() {
-		return buildRestrictedSessionFixture(ctx, cache, selections, policy.AllowedOperations)
+func buildSessionFixture(ctx context.Context, cache ObjectCache, selections []models.SDKSelection, policy store.AppTokenPolicy) (*Fixture, error) {
+	names := policy.AllowedOperations
+	if policy.IsUnrestricted() {
+		names = nil
 	}
-	var ops []FixtureOperation
-	for _, sel := range selections {
-		endpoints, err := cache.ListEndpointsForSelection(ctx, appID, sel)
-		if err != nil {
-			return nil, fmt.Errorf("list endpoints for service %s: %w", sel.ServiceID, err)
-		}
-		ops, err = appendFixtureOperations(ops, sel, endpoints)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return newFixtureFromOperations(ctx, ops), nil
+	return buildBatchedSessionFixture(ctx, cache, selections, names)
 }
 
-type namedEndpointBatchLister interface {
-	ListEndpointsForSelectionsByNames(context.Context, []models.SDKSelection, []string) (map[int][]fusedobject.Endpoint, error)
+type endpointBatchLister interface {
+	ListEndpointsForSelections(context.Context, []models.SDKSelection, []string) (map[int][]fusedobject.Endpoint, error)
 }
 
-func buildRestrictedSessionFixture(ctx context.Context, cache ObjectCache, selections []models.SDKSelection, allowedOperations []string) (*Fixture, error) {
-	lister, ok := cache.(namedEndpointBatchLister)
+func buildBatchedSessionFixture(ctx context.Context, cache ObjectCache, selections []models.SDKSelection, allowedOperations []string) (*Fixture, error) {
+	lister, ok := cache.(endpointBatchLister)
 	if !ok {
-		return nil, errors.New("token-scoped endpoint lookup unavailable")
+		return nil, fmt.Errorf("app-scoped endpoint lookup unavailable")
 	}
-	endpointsBySelection, err := lister.ListEndpointsForSelectionsByNames(ctx, selections, allowedOperations)
+	endpointsBySelection, err := lister.ListEndpointsForSelections(ctx, selections, allowedOperations)
 	if err != nil {
-		return nil, fmt.Errorf("list token-scoped endpoints: %w", err)
+		return nil, fmt.Errorf("list app-scoped endpoints: %w", err)
 	}
 	var operations []FixtureOperation
 	for index, selection := range selections {

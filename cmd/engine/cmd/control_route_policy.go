@@ -37,6 +37,7 @@ const (
 	dynamicSDKGenerate        dynamicRequirementKind = "sdk_generate"
 	dynamicAppAccess          dynamicRequirementKind = "app_access"
 	dynamicAppTokenAccess     dynamicRequirementKind = "app_token_access"
+	workspaceAppTokensPath                           = "/workspace/app-tokens"
 )
 
 type controlRequirementResolver interface {
@@ -143,8 +144,8 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodPut, "/workspace/secrets", false, nil},
 	{http.MethodPut, "/workspace/secrets/bulk", false, nil},
 	{http.MethodDelete, "/workspace/secrets", false, nil},
-	{http.MethodPost, "/workspace/app-tokens", false, nil},
-	{http.MethodDelete, "/workspace/app-tokens", false, nil},
+	{http.MethodPost, workspaceAppTokensPath, false, nil},
+	{http.MethodDelete, workspaceAppTokensPath, false, nil},
 
 	{http.MethodPost, "/workspace/config/plan", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionWorkspaceRead),

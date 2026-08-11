@@ -203,14 +203,15 @@ func mapAuthConfigs(in fusedobject.AuthConfigs) models.AuthConfigs {
 	out := make(models.AuthConfigs, 0, len(in))
 	for _, a := range in {
 		out = append(out, models.AuthConfig{
-			Name:              authCredentialName(a),
-			Type:              a.Type,
-			Flow:              a.Flow,
-			Scheme:            a.Scheme,
-			BasicPasswordMode: a.BasicPasswordMode,
-			Location:          a.Location,
-			KeyName:           a.KeyName,
-			TokenURL:          a.TokenURL,
+			Name:                    authCredentialName(a),
+			Type:                    a.Type,
+			Flow:                    a.Flow,
+			Scheme:                  a.Scheme,
+			BasicPasswordMode:       a.BasicPasswordMode,
+			Location:                a.Location,
+			KeyName:                 a.KeyName,
+			TokenURL:                a.TokenURL,
+			TokenEndpointAuthMethod: models.TokenEndpointAuthMethod(a.TokenEndpointAuthMethod),
 		})
 	}
 	return out

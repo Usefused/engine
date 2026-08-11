@@ -42,13 +42,6 @@ func NewCachedStore(delegate Store, nc *messaging.NATSClient) Store {
 				cs.cache.DeletePrefix("secret:" + parts[4] + ":")
 			}
 		})
-
-		nc.Conn.Subscribe("engine.cache.invalidate.token.>", func(m *nats.Msg) {
-			parts := strings.Split(m.Subject, ".")
-			if len(parts) == 5 {
-				cs.cache.DeletePrefix("validate_token:" + parts[4] + ":")
-			}
-		})
 	}
 
 	return cs

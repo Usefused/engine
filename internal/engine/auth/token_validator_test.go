@@ -45,7 +45,7 @@ func TestTokenValidator(t *testing.T) {
 			mock: &mockStore{
 				authorizeAppFn: func(ctx context.Context, id uuid.UUID, hash string) (*store.AuthProjection, error) {
 					if id == appID && hash == hashedAppToken {
-						return &store.AuthProjection{AccountID: accountID, AppFamilyID: appFamilyID, AppID: appID, Version: "1.0.0", Kind: "sdk", AppStatus: "active"}, nil
+						return &store.AuthProjection{AccountID: accountID, AppFamilyID: appFamilyID, AppID: appID, Version: "1.0.0", Kind: store.AppKindSDK, AppStatus: store.AppStatusActive}, nil
 					}
 					return nil, errors.New("not found")
 				},
@@ -76,9 +76,8 @@ func TestTokenValidator(t *testing.T) {
 			expectedAccID: uuid.Nil,
 		},
 		{
-			// Empty token is rejected by Validate() itself before the store
-			// is ever called (token_validator.go:33-35), so the mock never
-			// needs validateTokenFn wired up here.
+			// Empty input fails before persistence, so the narrow mock deliberately
+			// has no authorization function.
 			name:          "Empty Token",
 			token:         "",
 			mock:          &mockStore{},
@@ -112,7 +111,7 @@ func TestTokenValidatorResolvesAppToken(t *testing.T) {
 	v := NewTokenValidator(&mockStore{
 		authorizeAppFn: func(ctx context.Context, id uuid.UUID, hash string) (*store.AuthProjection, error) {
 			if id == appID && hash == hashedToken {
-				return &store.AuthProjection{AccountID: accountID, AppFamilyID: appFamilyID, AppID: appID, Version: "1.0.0", Kind: "sdk", AppStatus: "active"}, nil
+				return &store.AuthProjection{AccountID: accountID, AppFamilyID: appFamilyID, AppID: appID, Version: "1.0.0", Kind: store.AppKindSDK, AppStatus: store.AppStatusActive}, nil
 			}
 			return nil, errors.New("not found")
 		},

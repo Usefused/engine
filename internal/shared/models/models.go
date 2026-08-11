@@ -763,15 +763,22 @@ type AuthConfig struct {
 
 	// Fused Auth: OAuth edge-case fields stored per AuthConfig (not per service, since a
 	// service can have multiple auth configs and these settings are per-config).
-	PKCERequired        bool              `json:"pkce_required,omitempty"`
-	ScopesDelimiter     string            `json:"scopes_delimiter,omitempty"`    // default "space"; set to "comma" when the provider requires it
-	TokenEndpointAuth   string            `json:"token_endpoint_auth,omitempty"` // "body" (default) | "basic"
-	ExtraAuthParams     map[string]string `json:"extra_auth_params,omitempty"`
-	ExtraTokenParams    map[string]string `json:"extra_token_params,omitempty"`
-	RefreshTokenRotates bool              `json:"refresh_token_rotates,omitempty"`
+	PKCERequired            bool                    `json:"pkce_required,omitempty"`
+	ScopesDelimiter         string                  `json:"scopes_delimiter,omitempty"` // default "space"; set to "comma" when the provider requires it
+	TokenEndpointAuthMethod TokenEndpointAuthMethod `json:"token_endpoint_auth_method,omitempty"`
+	ExtraAuthParams         map[string]string       `json:"extra_auth_params,omitempty"`
+	ExtraTokenParams        map[string]string       `json:"extra_token_params,omitempty"`
+	RefreshTokenRotates     bool                    `json:"refresh_token_rotates,omitempty"`
 }
 
 type AuthConfigs []AuthConfig
+
+type TokenEndpointAuthMethod string
+
+const (
+	TokenEndpointAuthMethodClientSecretBasic TokenEndpointAuthMethod = "client_secret_basic"
+	TokenEndpointAuthMethodClientSecretPost  TokenEndpointAuthMethod = "client_secret_post"
+)
 
 type IncomingWebhookConfig struct {
 	AuthType            string   `json:"auth_type"`               // "none", "static_token", "hmac_signature", "signature_header"
@@ -952,7 +959,13 @@ type Session struct {
 	UpdatedAt             time.Time                `json:"updated_at"`
 }
 
-const SDKDefinitionSchemaVersion = 1
+const SDKDefinitionSchemaVersion = 3
+
+type SDKRequiredAuth struct {
+	AuthType          string                        `json:"auth_type"`
+	AuthName          string                        `json:"auth_name"`
+	BasicPasswordMode authrouting.BasicPasswordMode `json:"basic_password_mode,omitempty"`
+}
 
 type SDKSelection struct {
 	ServiceID               uuid.UUID   `json:"service_id"`
@@ -973,11 +986,12 @@ type SDKSelection struct {
 	// WebhookSelectAll as equivalent for webhook matching -- either one means
 	// "all webhooks" -- while only SelectAll matches operations.
 	WebhookSelectAll bool `json:"webhook_select_all,omitempty"`
-	// AuthType and AuthName pin dispatch to the scheme selected when the
-	// app was planned. Runtime callers should not have to rediscover a
-	// provider's security-scheme spelling or rely on Registry ordering.
+	// AuthType and AuthName pin dispatch when the selected operations require
+	// authentication. Anonymous-only and webhook-only selections leave both
+	// empty so runtime calls preserve the operation security contract.
 	AuthType      string               `json:"auth_type,omitempty"`
 	AuthName      string               `json:"auth_name,omitempty"`
+	RequiredAuth  []SDKRequiredAuth    `json:"required_auth,omitempty"`
 	ConnectScopes []string             `json:"connect_scopes,omitempty"`
 	Injections    []SDKInjectionConfig `json:"injections,omitempty"`
 }
@@ -989,7 +1003,7 @@ type SDKInjectionConfig struct {
 	Mode     string `json:"mode,omitempty"`
 }
 
-const AppScopeSchemaVersion = 2
+const AppScopeSchemaVersion = 3
 
 const SDKGeneratorVersion = "registry-generator-v1"
 

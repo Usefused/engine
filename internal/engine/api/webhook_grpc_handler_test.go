@@ -33,7 +33,14 @@ func (s *webhookAuthTestStore) AuthorizeApp(ctx context.Context, appID uuid.UUID
 	if appID != s.wantAppID || tokenHash != s.wantTokenHash {
 		return nil, store.ErrAppNotFound
 	}
-	return &store.AuthProjection{AccountID: s.accountID, AppFamilyID: appID, AppID: appID, Version: "1.0.0", Kind: "sdk", AppStatus: "active"}, nil
+	return &store.AuthProjection{
+		AccountID: s.accountID, AppFamilyID: appID, AppID: appID, Version: "1.0.0",
+		Kind: store.AppKindSDK, AppStatus: store.AppStatusActive,
+	}, nil
+}
+
+func newWebhookAuthTestServer(s *webhookAuthTestStore) *EngineGRPCServer {
+	return NewEngineGRPCServer(s, nil, nil, nil, nil, auth.NewTokenValidator(s))
 }
 
 // TestAuthenticateWebhookSubscribe_ReadsAppIDAndTokenFromMetadata is the
@@ -52,7 +59,7 @@ func TestAuthenticateWebhookSubscribe_ReadsAppIDAndTokenFromMetadata(t *testing.
 		wantTokenHash: auth.HashToken(token),
 		accountID:     wantAccountID,
 	}
-	srv := NewEngineGRPCServer(s, nil, nil, nil, nil)
+	srv := newWebhookAuthTestServer(s)
 
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(
 		"x-api-key", token,
@@ -73,7 +80,7 @@ func TestAuthenticateWebhookSubscribe_ReadsAppIDAndTokenFromMetadata(t *testing.
 
 func TestAuthenticateWebhookSubscribe_MissingAppIDMetadataRejected(t *testing.T) {
 	s := &webhookAuthTestStore{}
-	srv := NewEngineGRPCServer(s, nil, nil, nil, nil)
+	srv := newWebhookAuthTestServer(s)
 
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-api-key", "fsk_test_token"))
 
@@ -85,7 +92,7 @@ func TestAuthenticateWebhookSubscribe_MissingAppIDMetadataRejected(t *testing.T)
 
 func TestAuthenticateWebhookSubscribe_InvalidAppIDFormatRejected(t *testing.T) {
 	s := &webhookAuthTestStore{}
-	srv := NewEngineGRPCServer(s, nil, nil, nil, nil)
+	srv := newWebhookAuthTestServer(s)
 
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(
 		"x-api-key", "fsk_test_token",
@@ -105,7 +112,7 @@ func TestAuthenticateWebhookSubscribe_WrongTokenRejected(t *testing.T) {
 		wantTokenHash: auth.HashToken("the-real-token"),
 		accountID:     uuid.New(),
 	}
-	srv := NewEngineGRPCServer(s, nil, nil, nil, nil)
+	srv := newWebhookAuthTestServer(s)
 
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(
 		"x-api-key", "wrong-token",

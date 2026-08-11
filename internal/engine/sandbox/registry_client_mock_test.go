@@ -18,13 +18,6 @@ type mockRegistryClient struct {
 	fetchedVersions     []string
 	endpointFetchCount  int // incremented by FetchEndpointsByNames
 	endpointByNameCount int
-
-	// serviceOperations/serviceOperationsErr configure FetchServiceOperations
-	// for tests that build a session MCP fixture (mcp_session_fixture_test.go);
-	// serviceOperationsCount records how many times it was called.
-	serviceOperations      []fusedobject.Endpoint
-	serviceOperationsErr   error
-	serviceOperationsCount int
 }
 
 func (m *mockRegistryClient) FetchServiceMetadata(ctx context.Context, serviceID uuid.UUID, version string) (*fusedobject.ServiceMetadata, error) {
@@ -50,12 +43,8 @@ func (m *mockRegistryClient) FetchEndpointsByNames(ctx context.Context, serviceI
 	return endpoints, nil
 }
 
-func (m *mockRegistryClient) FetchServiceOperations(ctx context.Context, serviceID uuid.UUID, serviceVersionID uuid.UUID) ([]fusedobject.Endpoint, error) {
-	m.serviceOperationsCount++
-	if m.serviceOperationsErr != nil {
-		return nil, m.serviceOperationsErr
-	}
-	return m.serviceOperations, nil
+func (m *mockRegistryClient) FetchServiceOperations(context.Context, uuid.UUID, uuid.UUID) ([]fusedobject.Endpoint, error) {
+	return nil, nil
 }
 
 func (m *mockRegistryClient) ValidateSDKSelections(ctx context.Context, selections []models.SDKSelection) error {

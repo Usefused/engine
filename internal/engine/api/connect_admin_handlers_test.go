@@ -386,7 +386,7 @@ func newConnectAdminFixture() connectAdminFixture {
 
 func buildConnectAdminRouter(s store.Store, accountID uuid.UUID, masterKey []byte) http.Handler {
 	r := newControlTestRouter(accountID)
-	r.Mount("/workspace", WorkspaceHandler(s, &mockVerifier{}, masterKey))
+	r.Mount("/workspace", WorkspaceHandler(s, &mockVerifier{}, masterKey, s))
 	return r
 }
 

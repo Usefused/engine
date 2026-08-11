@@ -8,7 +8,6 @@ import (
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
-	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 )
 
@@ -49,17 +48,6 @@ func (m *richMockCache) GetAppRuntime(ctx context.Context, appID string) (string
 }
 func (m *richMockCache) Invalidate(serviceID string)       {}
 func (m *richMockCache) InvalidateAppRuntime(appID string) {}
-
-// ListEndpointsForSelection mirrors GetEndpoint's permissive stub behavior:
-// this mock backs engineExecuteCore's dispatch path, not fixture-building
-// tests, so it just hands back the same fixed "list_items"/"do_thing" pair
-// GetEndpoint already recognizes.
-func (m *richMockCache) ListEndpointsForSelection(ctx context.Context, appID string, sel models.SDKSelection) ([]fusedobject.Endpoint, error) {
-	return []fusedobject.Endpoint{
-		{Name: "list_items", ID: m.epID, SecurityRequirements: m.testSecurityRequirements()},
-		{Name: "do_thing", ID: m.epID, SecurityRequirements: m.testSecurityRequirements()},
-	}, nil
-}
 
 func (m *richMockCache) testSecurityRequirements() authrouting.Requirements {
 	if m.securityRequirements != nil {

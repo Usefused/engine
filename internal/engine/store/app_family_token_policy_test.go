@@ -113,6 +113,9 @@ func TestAppTokenPolicyPersistenceAndExpiryAuthorization(t *testing.T) {
 	if projection.TokenPolicy.AllowAll || len(projection.TokenPolicy.AllowedOperations) != 2 {
 		t.Fatalf("unexpected authorization policy: %#v", projection.TokenPolicy)
 	}
+	if projection.TokenID != created.ID {
+		t.Fatalf("authorization token id = %s, want %s", projection.TokenID, created.ID)
+	}
 
 	expired := time.Now().Add(-time.Minute)
 	fixture.createToken(t, "expired", AppTokenPolicy{AllowAll: true, ExpiresAt: &expired})
@@ -127,6 +130,17 @@ func TestAppTokenPolicyPersistenceAndExpiryAuthorization(t *testing.T) {
 	}
 	if len(tokens) != 2 {
 		t.Fatalf("listed %d tokens, want 2", len(tokens))
+	}
+
+	revocation, err := fixture.repository.RevokeAppToken(fixture.ctx, fixture.familyID, "strict")
+	if err != nil {
+		t.Fatalf("revoke strict token: %v", err)
+	}
+	if revocation.TokenID != created.ID || revocation.AppFamilyID != fixture.familyID || revocation.RevokedAt.IsZero() {
+		t.Fatalf("revocation projection = %#v", revocation)
+	}
+	if _, err := fixture.repository.AuthorizeApp(fixture.ctx, fixture.appID, "strict-hash"); !errors.Is(err, ErrAppNotFound) {
+		t.Fatalf("revoked token authorization error = %v, want %v", err, ErrAppNotFound)
 	}
 }
 

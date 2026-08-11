@@ -160,6 +160,25 @@ func TestActivationStore(t *testing.T) {
 		}
 	})
 
+	t.Run("TestActivateService_PersistsSlugForBatchedConfigResolution", func(t *testing.T) {
+		svcID := uuid.New()
+		const slug = "github-e2e"
+		if err := s.AddWorkspaceServiceVersion(ctx, svcID, slug, "2026-03-10", uuid.New(), "GitHub E2E", accountID); err != nil {
+			t.Fatalf("AddWorkspaceServiceVersion: %v", err)
+		}
+
+		resolved, err := s.ResolveWorkspaceServiceIDsByKeys(ctx, []string{slug, "missing"})
+		if err != nil {
+			t.Fatalf("ResolveWorkspaceServiceIDsByKeys: %v", err)
+		}
+		if resolved[slug] != svcID {
+			t.Fatalf("slug %q resolved to %s, want %s", slug, resolved[slug], svcID)
+		}
+		if _, exists := resolved["missing"]; exists {
+			t.Fatalf("unexpected resolution for missing service: %#v", resolved)
+		}
+	})
+
 	t.Run("TestWorkspaceServiceVersions_StoresMultipleEnabledVersions", func(t *testing.T) {
 		svcID := uuid.New()
 

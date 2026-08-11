@@ -19,6 +19,7 @@ func TestEngineConsumesFrozenAuthRoutingFixture(t *testing.T) {
 	}
 	var fixture struct {
 		AuthConfig           fusedobject.AuthConfig   `json:"auth_config"`
+		OAuthAuthConfig      fusedobject.AuthConfig   `json:"oauth_auth_config"`
 		SecurityRequirements authrouting.Requirements `json:"security_requirements"`
 		Server               fusedobject.Server       `json:"server"`
 	}
@@ -27,6 +28,9 @@ func TestEngineConsumesFrozenAuthRoutingFixture(t *testing.T) {
 	}
 	if fixture.AuthConfig.Name != "chargebeeBasic" || fixture.AuthConfig.BasicPasswordMode != authrouting.BasicPasswordEmpty {
 		t.Fatalf("basic wire changed: %#v", fixture.AuthConfig)
+	}
+	if fixture.OAuthAuthConfig.TokenEndpointAuthMethod != fusedobject.TokenEndpointAuthMethodClientSecretBasic {
+		t.Fatalf("OAuth token endpoint auth method changed: %#v", fixture.OAuthAuthConfig)
 	}
 	wantFirst := []string{"wiseOAuth", "wiseMTLS"}
 	var gotFirst []string

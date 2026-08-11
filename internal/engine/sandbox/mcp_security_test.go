@@ -91,7 +91,7 @@ func TestBearerSchemeRejectedInMessageHandler(t *testing.T) {
 	}
 }
 
-// MCP session establishment always validates against current token state.
+// MCP session establishment always passes through the configured validator.
 
 func TestValidateMCPTokenRejectsInvalidToken(t *testing.T) {
 	orig := globalTokenValidator
@@ -104,7 +104,7 @@ func TestValidateMCPTokenRejectsInvalidToken(t *testing.T) {
 	}
 }
 
-func TestValidateMCPTokenRechecksEverySession(t *testing.T) {
+func TestValidateMCPTokenUsesValidatorForEverySession(t *testing.T) {
 	orig := globalTokenValidator
 	defer func() { globalTokenValidator = orig }()
 

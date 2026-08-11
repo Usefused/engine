@@ -378,12 +378,7 @@ func (r *secretResolver) decryptStoredSecret(serviceID uuid.UUID, sec store.Work
 // provider credential only inside Engine's execution path.
 func (r *secretResolver) resolveConnectedAuth(ctx context.Context, bucketID, serviceID uuid.UUID, auths fusedobject.AuthConfigs, requirements authrouting.Requirements, credentials map[string]any) error {
 	endUserRef := connectedEndUserRef(credentials)
-	if endUserRef == "" {
-		return nil
-	}
-	if selector := requestedAuthType(credentials); selector != "" && !isConnectedAuthSelector(selector) {
-		// A selected static scheme, such as basic or api_key, is satisfied from
-		// bucket secrets; endUserRef should remain harmless metadata in that path.
+	if !connectedAuthResolutionRequired(endUserRef, credentials, requirements) {
 		return nil
 	}
 	authName, err := selectedConnectedAuthName(credentials, auths, requirements)
@@ -417,6 +412,22 @@ func (r *secretResolver) resolveConnectedAuth(ctx context.Context, bucketID, ser
 	span.SetAttributes(authConnectionSpanAttrs(conn)...)
 	span.End()
 	return nil
+}
+
+func connectedAuthResolutionRequired(endUserRef string, credentials map[string]any, requirements authrouting.Requirements) bool {
+	if endUserRef == "" {
+		return false
+	}
+	selectorType := requestedAuthType(credentials)
+	selectorName := requestedAuthName(credentials)
+	if selectorType == "" && selectorName == "" {
+		// An end-user reference is identity context, not an instruction to turn
+		// an explicitly anonymous operation into an authenticated provider call.
+		return !requirementsPermitAnonymous(requirements)
+	}
+	// Static auth is satisfied from bucket secrets; carrying end-user context
+	// alongside it must not trigger a connected-account lookup.
+	return selectorType == "" || isConnectedAuthSelector(selectorType)
 }
 
 // maybeInjectConnectedResource avoids a resource-table query for ordinary

@@ -20,6 +20,11 @@ func TestKeysCapturesCapabilitySurfaceWithoutInjectionValues(t *testing.T) {
 		WebhookIDs: []uuid.UUID{webhookID}, WebhookNames: []string{"created"},
 		SelectAll: true, WebhookSelectAll: true,
 		AuthType: "oauth2", AuthName: "oauth", ConnectScopes: []string{"read"},
+		RequiredAuth: []models.SDKRequiredAuth{{
+			AuthType: "oauth2", AuthName: "oauth",
+		}, {
+			AuthType: "mtls", AuthName: "clientCertificate",
+		}},
 		Injections: []models.SDKInjectionConfig{{
 			Location: "header", Name: "X-Tenant", Mode: "required", Value: "secret://tenant",
 		}},
@@ -34,10 +39,40 @@ func TestKeysCapturesCapabilitySurfaceWithoutInjectionValues(t *testing.T) {
 	assert.Contains(t, keys, prefix+":webhook:"+webhookID.String())
 	assert.Contains(t, keys, prefix+":connect-scope:read")
 	assert.Contains(t, keys, prefix+":auth:oauth2:oauth")
+	assert.Contains(t, keys, prefix+":required-auth:oauth2:oauth")
+	assert.Contains(t, keys, prefix+":required-auth:mtls:clientCertificate")
 	assert.Contains(t, keys, prefix+":injection:header:X-Tenant:required")
 	for _, key := range keys {
 		assert.NotContains(t, key, "secret://tenant")
 	}
+}
+
+func TestKeysAndHashIncludesRequiredAuthDeterministically(t *testing.T) {
+	serviceID, versionID := uuid.New(), uuid.New()
+	first := requiredAuthSelectionJSON(t, serviceID, versionID, []models.SDKRequiredAuth{{
+		AuthType: "api_key", AuthName: "apiKey",
+	}, {
+		AuthType: "basic", AuthName: "apiToken", BasicPasswordMode: "empty",
+	}})
+	second := requiredAuthSelectionJSON(t, serviceID, versionID, []models.SDKRequiredAuth{{
+		AuthType: "basic", AuthName: "apiToken", BasicPasswordMode: "empty",
+	}, {
+		AuthType: "api_key", AuthName: "apiKey",
+	}})
+
+	firstKeys, firstHash, err := KeysAndHash(first)
+	require.NoError(t, err)
+	secondKeys, secondHash, err := KeysAndHash(second)
+	require.NoError(t, err)
+	assert.Equal(t, firstKeys, secondKeys)
+	assert.Equal(t, firstHash, secondHash)
+
+	changed := requiredAuthSelectionJSON(t, serviceID, versionID, []models.SDKRequiredAuth{{
+		AuthType: "api_key", AuthName: "apiKey",
+	}})
+	_, changedHash, err := KeysAndHash(changed)
+	require.NoError(t, err)
+	assert.NotEqual(t, firstHash, changedHash)
 }
 
 func TestKeysIsStableAcrossInputOrdering(t *testing.T) {
@@ -79,6 +114,15 @@ func selectionJSON(t *testing.T, serviceID, versionID uuid.UUID, operations []st
 	t.Helper()
 	raw, err := json.Marshal([]models.SDKSelection{{
 		ServiceID: serviceID, ServiceVersionID: versionID, OperationNames: operations,
+	}})
+	require.NoError(t, err)
+	return raw
+}
+
+func requiredAuthSelectionJSON(t *testing.T, serviceID, versionID uuid.UUID, required []models.SDKRequiredAuth) []byte {
+	t.Helper()
+	raw, err := json.Marshal([]models.SDKSelection{{
+		ServiceID: serviceID, ServiceVersionID: versionID, RequiredAuth: required,
 	}})
 	require.NoError(t, err)
 	return raw

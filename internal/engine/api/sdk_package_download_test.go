@@ -75,7 +75,7 @@ func TestSDKPackageDownloadRegeneratesPinnedCacheMissOnce(t *testing.T) {
 		sdkPackageResponse(http.StatusNotFound, `{"error":"SDK package not found"}`),
 		sdkPackageResponse(http.StatusOK, "regenerated-zip"),
 	}}
-	proxy := &sdkPackageGenerationForwarder{status: http.StatusAccepted, body: `{"app_id":"` + appID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":2,"generator_version":"registry-generator-v1"}`}
+	proxy := &sdkPackageGenerationForwarder{status: http.StatusAccepted, body: `{"app_id":"` + appID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":3,"generator_version":"registry-generator-v1"}`}
 	recorder := serveSDKPackageDownload(t, appID, build, proxy, packages)
 
 	if recorder.Code != http.StatusOK || recorder.Body.String() != "regenerated-zip" {

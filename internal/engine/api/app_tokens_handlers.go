@@ -23,6 +23,10 @@ type TokenGeneratePayload struct {
 	ExpiresIn *int64   `json:"expires_in"`
 }
 
+type AppTokenRevoker interface {
+	RevokeAppToken(context.Context, uuid.UUID, string) (*store.AppTokenRevocation, error)
+}
+
 func GenerateAppTokenHandler(s store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.app_tokens.generate")
@@ -30,7 +34,7 @@ func GenerateAppTokenHandler(s store.Store) http.HandlerFunc {
 
 		_, err := controlActorAccount(ctx)
 		if err != nil {
-			recordTokenMutationError(span, "unauthorized")
+			recordTokenMutationError(span, applifecycle.OutcomeUnauthorized)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -38,20 +42,20 @@ func GenerateAppTokenHandler(s store.Store) http.HandlerFunc {
 
 		familyID, err := uuid.Parse(r.URL.Query().Get("app_family_id"))
 		if err != nil {
-			recordTokenMutationError(span, "invalid")
+			recordTokenMutationError(span, applifecycle.OutcomeInvalid)
 			http.Error(w, "invalid app_family_id", http.StatusBadRequest)
 			return
 		}
 
 		var payload TokenGeneratePayload
 		if err := decodeOneStrictJSON(r.Body, &payload); err != nil {
-			recordTokenMutationError(span, "invalid")
+			recordTokenMutationError(span, applifecycle.OutcomeInvalid)
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
 		expiresIn, err := tokenExpiryDuration(payload.ExpiresIn)
 		if err != nil {
-			recordTokenMutationError(span, "invalid")
+			recordTokenMutationError(span, applifecycle.OutcomeInvalid)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -65,16 +69,16 @@ func GenerateAppTokenHandler(s store.Store) http.HandlerFunc {
 		})
 		if err != nil {
 			if errors.Is(err, applifecycle.ErrTokenPolicyInvalid) {
-				recordTokenMutationError(span, "invalid")
+				recordTokenMutationError(span, applifecycle.OutcomeInvalid)
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			recordTokenMutationError(span, "failed")
+			recordTokenMutationError(span, applifecycle.OutcomeFailed)
 			slog.ErrorContext(ctx, "failed to create app token", slog.String("error_code", "token_persistence_failed"))
 			http.Error(w, "failed to create token", http.StatusInternalServerError)
 			return
 		}
-		span.SetAttributes(attribute.String("outcome", "created"))
+		span.SetAttributes(attribute.String("outcome", string(applifecycle.OutcomeCreated)))
 
 		setOneTimeSecretResponseHeaders(w)
 		w.Header().Set("Content-Type", "application/json")
@@ -90,14 +94,14 @@ func GenerateAppTokenHandler(s store.Store) http.HandlerFunc {
 	}
 }
 
-func RevokeAppTokenHandler(s store.Store) http.HandlerFunc {
+func RevokeAppTokenHandler(revoker AppTokenRevoker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.app_tokens.revoke")
 		defer span.End()
 
 		_, err := controlActorAccount(ctx)
 		if err != nil {
-			recordTokenMutationError(span, "unauthorized")
+			recordTokenMutationError(span, applifecycle.OutcomeUnauthorized)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -105,14 +109,14 @@ func RevokeAppTokenHandler(s store.Store) http.HandlerFunc {
 
 		familyID, err := uuid.Parse(r.URL.Query().Get("app_family_id"))
 		if err != nil {
-			recordTokenMutationError(span, "invalid")
+			recordTokenMutationError(span, applifecycle.OutcomeInvalid)
 			http.Error(w, "invalid app_family_id", http.StatusBadRequest)
 			return
 		}
 
 		tokenName := r.URL.Query().Get("name")
 		if tokenName == "" {
-			recordTokenMutationError(span, "invalid")
+			recordTokenMutationError(span, applifecycle.OutcomeInvalid)
 			http.Error(w, "missing name", http.StatusBadRequest)
 			return
 		}
@@ -121,14 +125,14 @@ func RevokeAppTokenHandler(s store.Store) http.HandlerFunc {
 			attribute.String("app.family_id", familyID.String()),
 		)
 
-		if err := s.RevokeAppToken(ctx, familyID, tokenName); err != nil {
-			recordTokenMutationError(span, "failed")
+		if _, err := revoker.RevokeAppToken(ctx, familyID, tokenName); err != nil {
+			recordTokenMutationError(span, applifecycle.OutcomeFailed)
 			slog.ErrorContext(ctx, "failed to revoke token", slog.String("error_code", "token_revoke_failed"))
 			http.Error(w, "failed to revoke token", http.StatusInternalServerError)
 			return
 		}
 
-		span.SetAttributes(attribute.String("outcome", "revoked"))
+		span.SetAttributes(attribute.String("outcome", string(applifecycle.OutcomeRevoked)))
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -147,7 +151,7 @@ func tokenExpiryDuration(seconds *int64) (*time.Duration, error) {
 
 func projectTokenAllow(allowAll bool, operations []string) []string {
 	if allowAll {
-		return []string{"*"}
+		return []string{store.AppTokenAllowAllWildcard}
 	}
 	return operations
 }
@@ -158,7 +162,7 @@ func setTokenMutationActor(span trace.Span, ctx context.Context) {
 	}
 }
 
-func recordTokenMutationError(span trace.Span, outcome string) {
-	span.SetAttributes(attribute.String("outcome", outcome))
-	span.SetStatus(codes.Error, outcome)
+func recordTokenMutationError(span trace.Span, outcome applifecycle.LifecycleOutcome) {
+	span.SetAttributes(attribute.String("outcome", string(outcome)))
+	span.SetStatus(codes.Error, string(outcome))
 }

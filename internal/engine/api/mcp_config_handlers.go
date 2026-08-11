@@ -46,7 +46,7 @@ func MCPConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, ctx)
 			return
 		}
-		req, doc, err := decodeAppConfigPlanRequest(r, "mcp")
+		req, doc, err := decodeAppConfigPlanRequest(r, store.AppKindMCP.String())
 		if err != nil {
 			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, ctx)
 			return
@@ -106,7 +106,7 @@ func MCPConfigApplyHandler(configStore store.ConfigRepository, s store.Store, re
 		}
 		result.RuntimeURL = mcpURLForApp(r, result.RuntimeID)
 		span.SetAttributes(
-			attribute.String("outcome", "success"), attribute.String("app.kind", "mcp"),
+			attribute.String("outcome", "success"), attribute.String("app.kind", store.AppKindMCP.String()),
 			attribute.String("app.version", result.Version),
 			attribute.String("app.family_id", result.AppFamilyID.String()),
 			attribute.String("app.id", result.RuntimeID.String()),
@@ -180,7 +180,7 @@ func validateAppConfigDocument(doc sdkConfigDocument, kind string) error {
 }
 
 func validateMCPAppRestrictions(doc sdkConfigDocument, kind string) error {
-	if kind != "mcp" {
+	if kind != store.AppKindMCP.String() {
 		return nil
 	}
 	if strings.TrimSpace(doc.Language) != "" {
@@ -310,7 +310,7 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 	if err := ensureSDKContractBindingsCurrent(ctx, registryClient, call.apiKey, bindings); err != nil {
 		return mcpConfigApplyResult{}, workspaceConfigHTTPError{status: http.StatusConflict, message: err.Error()}
 	}
-	doc, payload, err := decodeAppApplyPlan(ctx, configStore, s, plan, "mcp")
+	doc, payload, err := decodeAppApplyPlan(ctx, configStore, s, plan, store.AppKindMCP.String())
 	if err != nil {
 		return mcpConfigApplyResult{}, err
 	}
@@ -319,7 +319,7 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 	scope, err := appRuntimeForApply(persistAppRuntimeParams{
 		accountID: call.accountID, appID: runtimeID, ownerSubjectID: planOwnerSubjectID(plan), ownerTeamID: planOwnerTeamID(plan), bucketID: payload.BucketID, bucketName: doc.Bucket,
 		selections: selections, scopeSchemaVersion: models.AppScopeSchemaVersion,
-		kind: "mcp", name: doc.Name, version: doc.Version, configKey: plan.ConfigKey,
+		kind: store.AppKindMCP, name: doc.Name, version: doc.Version, configKey: plan.ConfigKey,
 	})
 	if err != nil {
 		return mcpConfigApplyResult{}, err
@@ -343,14 +343,14 @@ func enforceMCPFamilyLimit(ctx context.Context, s store.Store, accountID uuid.UU
 	if err != nil {
 		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
 	}
-	_, err = s.GetAppFamilyByIdentity(ctx, accountID, "mcp", canonicalName)
+	_, err = s.GetAppFamilyByIdentity(ctx, accountID, store.AppKindMCP.String(), canonicalName)
 	if err == nil {
 		return nil
 	}
 	if !errors.Is(err, store.ErrAppFamilyNotFound) {
 		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_resolve_mcp_family"}
 	}
-	currentFamilies, err := s.CountAppFamilies(ctx, accountID, "mcp")
+	currentFamilies, err := s.CountAppFamilies(ctx, accountID, store.AppKindMCP.String())
 	if err != nil {
 		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_count_mcp_families"}
 	}

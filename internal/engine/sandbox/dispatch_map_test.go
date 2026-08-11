@@ -31,10 +31,11 @@ func TestMapAuthConfigsPreservesInvalidUnnamedBearerForValidation(t *testing.T) 
 
 func TestMapAuthConfigsPreservesInvalidUnnamedOAuthForValidation(t *testing.T) {
 	got := mapAuthConfigs(fusedobject.AuthConfigs{{
-		Type: "oauth2",
+		Type:                    "oauth2",
+		TokenEndpointAuthMethod: fusedobject.TokenEndpointAuthMethodClientSecretBasic,
 	}})
 
-	if len(got) != 1 || got[0].Name != "" {
+	if len(got) != 1 || got[0].Name != "" || got[0].TokenEndpointAuthMethod != models.TokenEndpointAuthMethodClientSecretBasic {
 		t.Fatalf("unnamed oauth auth must not gain a legacy fallback: %#v", got)
 	}
 }

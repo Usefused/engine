@@ -15,6 +15,15 @@ import (
 	"github.com/google/uuid"
 )
 
+func containsAll(value string, fragments ...string) bool {
+	for _, fragment := range fragments {
+		if !strings.Contains(value, fragment) {
+			return false
+		}
+	}
+	return true
+}
+
 func TestFetchServiceVersionAuthConfigsUsesGraphQLBatch(t *testing.T) {
 	serviceID := uuid.New()
 	versionID := uuid.New()
@@ -32,7 +41,7 @@ func TestFetchServiceVersionAuthConfigsUsesGraphQLBatch(t *testing.T) {
 			if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
 				t.Fatalf("decode request: %v", err)
 			}
-			body := `{"data":{"serviceVersionAuthConfigs":[{"service_id":"` + serviceID.String() + `","version":"1.0.0","service_version_id":"` + versionID.String() + `","auth_configs":[{"name":"apiKeyAuth","type":"apiKey","key_name":"X-API-Key"}]}]}}`
+			body := `{"data":{"serviceVersionAuthConfigs":[{"service_id":"` + serviceID.String() + `","version":"1.0.0","service_version_id":"` + versionID.String() + `","auth_configs":[{"name":"oauth","type":"oauth2","token_endpoint_auth_method":"client_secret_basic","pkce_required":true,"scopes_delimiter":"comma","extra_auth_params":{"prompt":"consent"},"extra_token_params":{"audience":"payments"},"refresh_token_rotates":true}]}]}}`
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 		})},
 	}
@@ -44,8 +53,18 @@ func TestFetchServiceVersionAuthConfigsUsesGraphQLBatch(t *testing.T) {
 	if len(configs) != 1 || configs[0].ServiceVersionID != versionID {
 		t.Fatalf("unexpected auth configs: %#v", configs)
 	}
+	if len(configs[0].AuthConfigs) != 1 || configs[0].AuthConfigs[0].TokenEndpointAuthMethod != "client_secret_basic" {
+		t.Fatalf("token endpoint auth method did not decode: %#v", configs[0].AuthConfigs)
+	}
+	auth := configs[0].AuthConfigs[0]
+	if !auth.PKCERequired || auth.ScopesDelimiter != "comma" || auth.ExtraAuthParams["prompt"] != "consent" || auth.ExtraTokenParams["audience"] != "payments" || !auth.RefreshTokenRotates {
+		t.Fatalf("OAuth edge policy did not decode: %#v", auth)
+	}
 	if !strings.Contains(requestBody.Query, "serviceVersionAuthConfigs") {
 		t.Fatalf("expected GraphQL auth-config query, got %q", requestBody.Query)
+	}
+	if strings.Contains(requestBody.Query, "operation_names") || !containsAll(requestBody.Query, "token_endpoint_auth_method", "pkce_required", "scopes_delimiter", "extra_auth_params", "extra_token_params", "refresh_token_rotates") {
+		t.Fatalf("legacy auth-config projection changed unexpectedly: %q", requestBody.Query)
 	}
 	refs, ok := requestBody.Variables["refs"].([]interface{})
 	if !ok || len(refs) != 1 {
@@ -54,6 +73,45 @@ func TestFetchServiceVersionAuthConfigsUsesGraphQLBatch(t *testing.T) {
 	ref, ok := refs[0].(map[string]interface{})
 	if !ok || ref["service_id"] != serviceID.String() || ref["version"] != versionID.String() {
 		t.Fatalf("unexpected batched service ref: %#v", refs[0])
+	}
+}
+
+func TestFetchServiceVersionExecutionAuthContractsDecodesOperationSecurity(t *testing.T) {
+	serviceID, versionID := uuid.New(), uuid.New()
+	var requestBody graphqlQuery
+	client := &HTTPRegistryClient{
+		endpoint: "https://registry.example/graphql", licenseKey: "engine-license-key",
+		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			body := `{"data":{"serviceVersionExecutionAuthContracts":[{"service_id":"` + serviceID.String() + `","version":"v1","service_version_id":"` + versionID.String() + `","operation_names":["listItems"],"select_all":false,"auth_configs":[{"name":"bearerAuth","type":"http","scheme":"bearer"}],"operations":[{"name":"listItems","security_requirements":[{"schemes":[{"scheme":"bearerAuth","scopes":[]}]}]}]}]}}`
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		})},
+	}
+
+	contracts, err := client.FetchServiceVersionExecutionAuthContracts(context.Background(), []ServiceVersionExecutionAuthSelection{{
+		ServiceID: serviceID, Version: "v1", OperationNames: []string{"listItems"},
+	}}, "ignored-user-key")
+	if err != nil {
+		t.Fatalf("FetchServiceVersionExecutionAuthContracts() error = %v", err)
+	}
+	if len(contracts) != 1 || len(contracts[0].Operations) != 1 || contracts[0].OperationNames[0] != "listItems" || contracts[0].Operations[0].SecurityRequirements[0].Schemes[0].Scheme != "bearerAuth" {
+		t.Fatalf("unexpected execution auth contracts: %#v", contracts)
+	}
+	if !strings.Contains(requestBody.Query, "serviceVersionExecutionAuthContracts") {
+		t.Fatalf("expected selection-aware GraphQL query, got %q", requestBody.Query)
+	}
+	if !strings.Contains(requestBody.Query, "operation_names select_all") || strings.Contains(requestBody.Query, "key_name") || strings.Contains(requestBody.Query, "token_endpoint_auth_method") {
+		t.Fatalf("execution auth contract did not use its minimal correlated projection: %q", requestBody.Query)
+	}
+	selections, ok := requestBody.Variables["selections"].([]interface{})
+	if !ok || len(selections) != 1 {
+		t.Fatalf("expected one batched selection, got %#v", requestBody.Variables)
+	}
+	selection := selections[0].(map[string]interface{})
+	if selection["service_id"] != serviceID.String() || selection["select_all"] != false {
+		t.Fatalf("unexpected selection payload: %#v", selection)
 	}
 }
 
@@ -219,14 +277,14 @@ func TestFetchRuntimeContractUsesBundledGraphQLProjection(t *testing.T) {
 					"servers":[{"url":"https://api.example.com","environment":"prod","is_default":true}],
 					"default_headers":{"X-Provider":"example"},
 					"connect_config":null,
-					"auth_configs":[{"name":"apiKeyAuth","type":"apiKey","location":"header","key_name":"X-API-Key"}],
+					"auth_configs":[{"name":"oauth","type":"oauth2","token_url":"https://auth.example/token","token_endpoint_auth_method":"client_secret_post","pkce_required":true,"scopes_delimiter":"comma","extra_auth_params":{"prompt":"consent"},"extra_token_params":{"audience":"payments"},"refresh_token_rotates":true}],
 					"rate_limit":{"version":2,"policies":[{"name":"requests","unit":"requests","scope":"service_version","default_cost":1,"operation_costs":{},"algorithm":"fixed_window","fixed_window":{"limit":10,"duration_ms":1000}}]},
 					"retry_config":{"strategy":"fixed","max_retries":2,"backoff_ms":100},
 					"timeout_ms":45000,
 					"event_extraction_path":"event.type",
 					"incoming_webhook_config":{"auth_type":"signature","signature_header":"X-Signature"}
 				},
-				"operations":[{"id":"` + endpointID.String() + `","name":"listInvoices","description":"List invoices","resource_name":"query","version":"2026-07-23","method":"POST","path":"/graphql","normalized_path":"/graphql","deprecated":false,"is_sse":false,"security_requirements":[{"schemes":[{"scheme":"apiKeyAuth","scopes":[]}]}],"parameters":[{"name":"resource","in":"path","required":true,"type":"string","description":"Resource","path_encoding":"preserve_slashes"}],"request_content":{"media_type":"application/vnd.api+json","serialization":"json","schema":{"type":"object"}},"responses":{"200":{"type":"object"}},"graphql_query":"query ListInvoices($limit: Int) { invoices(limit: $limit) { id } }","provider_protocol":"graphql","operation_kind":"query","pagination":{"version":2,"type":"cursor","cursor":{"request":{"location":"query","name":"cursor"},"next":{"location":"body","path":"$.next","value_type":"string"}},"items_path":"$.items","limits":{"max_pages":100,"max_items":10000,"max_bytes":16777216,"max_duration_ms":120000}}}],
+				"operations":[{"id":"` + endpointID.String() + `","name":"listInvoices","description":"List invoices","resource_name":"query","version":"2026-07-23","method":"POST","path":"/graphql","normalized_path":"/graphql","deprecated":false,"is_sse":false,"security_requirements":[{"schemes":[{"scheme":"oauth","scopes":[]}]}],"parameters":[{"name":"resource","in":"path","required":true,"type":"string","description":"Resource","path_encoding":"preserve_slashes"}],"request_content":{"media_type":"application/vnd.api+json","serialization":"json","schema":{"type":"object"}},"responses":{"200":{"type":"object"}},"graphql_query":"query ListInvoices($limit: Int) { invoices(limit: $limit) { id } }","provider_protocol":"graphql","operation_kind":"query","pagination":{"version":2,"type":"cursor","cursor":{"request":{"location":"query","name":"cursor"},"next":{"location":"body","path":"$.next","value_type":"string"}},"items_path":"$.items","limits":{"max_pages":100,"max_items":10000,"max_bytes":16777216,"max_duration_ms":120000}}}],
 				"webhooks":[{"id":"` + webhookID.String() + `","service_id":"` + serviceID.String() + `","name":"invoice.created","method":"POST","description":"Invoice created","request_body":{"type":"object"}}]
 			}]}}`
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
@@ -246,6 +304,13 @@ func TestFetchRuntimeContractUsesBundledGraphQLProjection(t *testing.T) {
 	if snapshot.ServiceMetadata.TimeoutMs == nil || *snapshot.ServiceMetadata.TimeoutMs != 45000 {
 		t.Fatalf("runtime timeout was not decoded: %v", snapshot.ServiceMetadata.TimeoutMs)
 	}
+	if len(snapshot.ServiceMetadata.AuthConfigs) != 1 || snapshot.ServiceMetadata.AuthConfigs[0].TokenEndpointAuthMethod != "client_secret_post" {
+		t.Fatalf("runtime OAuth token endpoint auth method was not decoded: %#v", snapshot.ServiceMetadata.AuthConfigs)
+	}
+	auth := snapshot.ServiceMetadata.AuthConfigs[0]
+	if !auth.PKCERequired || auth.ScopesDelimiter != "comma" || auth.ExtraAuthParams["prompt"] != "consent" || auth.ExtraTokenParams["audience"] != "payments" || !auth.RefreshTokenRotates {
+		t.Fatalf("runtime OAuth edge policy was not decoded: %#v", auth)
+	}
 	if len(snapshot.Endpoints) != 1 || snapshot.Endpoints[0].ID != endpointID || snapshot.Endpoints[0].Pagination == nil {
 		t.Fatalf("unexpected endpoints: %#v", snapshot.Endpoints)
 	}
@@ -261,7 +326,7 @@ func TestFetchRuntimeContractUsesBundledGraphQLProjection(t *testing.T) {
 	if len(snapshot.Webhooks) != 1 || snapshot.Webhooks[0].ID != webhookID {
 		t.Fatalf("unexpected webhooks: %#v", snapshot.Webhooks)
 	}
-	if !strings.Contains(requestBody.Query, "serviceRuntimeContracts") || !strings.Contains(requestBody.Query, "operations") || !strings.Contains(requestBody.Query, "webhooks") || !strings.Contains(requestBody.Query, "timeout_ms") || !strings.Contains(requestBody.Query, "request_content") || !strings.Contains(requestBody.Query, "path_encoding") || !strings.Contains(requestBody.Query, "graphql_query") || !strings.Contains(requestBody.Query, "provider_protocol") || !strings.Contains(requestBody.Query, "operation_kind") {
+	if !containsAll(requestBody.Query, "serviceRuntimeContracts", "operations", "webhooks", "timeout_ms", "request_content", "path_encoding", "graphql_query", "provider_protocol", "operation_kind", "token_endpoint_auth_method", "pkce_required", "scopes_delimiter", "extra_auth_params", "extra_token_params", "refresh_token_rotates") {
 		t.Fatalf("runtime contract query did not bundle service operations and webhooks: %s", requestBody.Query)
 	}
 	variablesJSON, _ := json.Marshal(requestBody.Variables)
@@ -948,7 +1013,7 @@ func TestFetchServiceMetadata_RequestsAndDecodesRawProviderRuntimeFields(t *test
 			t.Fatalf("decode request: %v", err)
 		}
 		gotQuery = body.Query
-		_, _ = w.Write([]byte(`{"data":{"service":{"id":"` + serviceID.String() + `","current_service_version":"2026-07-15","service_versions":[{"id":"` + serviceVersionID.String() + `","name":"2026-07-15"}],"name":"Widgets","description":"API","base_url":"https://provider.example.test","servers":[{"url":"https://provider.example.test","description":"Live endpoint","environment":"prod","is_default":true},{"url":"https://sandbox.example.test","description":"Developer test area","environment":"sandbox"}],"auth_configs":[{"name":"bearerAuth","type":"bearer"}],"rate_limit":{"version":2,"policies":[{"name":"requests","unit":"requests","scope":"service_version","default_cost":1,"operation_costs":{},"algorithm":"fixed_window","fixed_window":{"limit":3,"duration_ms":1000}}]},"retry_config":{"strategy":"linear","max_retries":6},"default_headers":{"X-Tenant":"one"}}}}`))
+		_, _ = w.Write([]byte(`{"data":{"service":{"id":"` + serviceID.String() + `","current_service_version":"2026-07-15","service_versions":[{"id":"` + serviceVersionID.String() + `","name":"2026-07-15"}],"name":"Widgets","description":"API","base_url":"https://provider.example.test","servers":[{"url":"https://provider.example.test","description":"Live endpoint","environment":"prod","is_default":true},{"url":"https://sandbox.example.test","description":"Developer test area","environment":"sandbox"}],"auth_configs":[{"name":"oauth","type":"oauth2","token_endpoint_auth_method":"client_secret_basic"}],"rate_limit":{"version":2,"policies":[{"name":"requests","unit":"requests","scope":"service_version","default_cost":1,"operation_costs":{},"algorithm":"fixed_window","fixed_window":{"limit":3,"duration_ms":1000}}]},"retry_config":{"strategy":"linear","max_retries":6},"default_headers":{"X-Tenant":"one"}}}}`))
 	}))
 	defer registryMock.Close()
 
@@ -972,13 +1037,13 @@ func TestFetchServiceMetadata_RequestsAndDecodesRawProviderRuntimeFields(t *test
 	if !strings.Contains(gotQuery, "current_service_version") || !strings.Contains(gotQuery, "service_versions") {
 		t.Fatalf("metadata query must resolve service version identity through service_versions: %s", gotQuery)
 	}
-	if !strings.Contains(gotQuery, "auth_configs") || !strings.Contains(gotQuery, "name") {
+	if !strings.Contains(gotQuery, "auth_configs") || !strings.Contains(gotQuery, "name") || !strings.Contains(gotQuery, "token_endpoint_auth_method") {
 		t.Fatalf("metadata query must request auth config names for connected-auth injection: %s", gotQuery)
 	}
 	if metadata.ServiceVersionID != serviceVersionID {
 		t.Fatalf("expected service version id %s, got %s", serviceVersionID, metadata.ServiceVersionID)
 	}
-	if len(metadata.AuthConfigs) != 1 || metadata.AuthConfigs[0].Name != "bearerAuth" {
+	if len(metadata.AuthConfigs) != 1 || metadata.AuthConfigs[0].Name != "oauth" || metadata.AuthConfigs[0].TokenEndpointAuthMethod != "client_secret_basic" {
 		t.Fatalf("expected auth config name to survive runtime metadata fetch, got %+v", metadata.AuthConfigs)
 	}
 	if metadata.BaseURL != "https://provider.example.test" || metadata.DefaultHeaders["X-Tenant"] != "one" {

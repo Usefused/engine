@@ -681,10 +681,11 @@ func TestSecretResolverResolveExecutionCredentialsRefreshesExpiringConnectedAuth
 	creds, _, err := resolver.ResolveExecutionCredentials(ctx, CredentialRequest{
 		AppID: appID, ServiceID: serviceID, AuthType: "oauth",
 		Auths: fusedobject.AuthConfigs{{
-			Name:     "bearerAuth",
-			Type:     "oauth2",
-			TokenURL: "https://provider.example/token",
-			Scopes:   []string{"account:read", "account:write"},
+			Name:                    "bearerAuth",
+			Type:                    "oauth2",
+			TokenURL:                "https://provider.example/token",
+			Scopes:                  []string{"account:read", "account:write"},
+			TokenEndpointAuthMethod: fusedobject.TokenEndpointAuthMethodClientSecretPost,
 		}},
 		Requirements: singleAuthRequirement("bearerAuth"),
 		Passthrough: map[string]any{
@@ -734,7 +735,10 @@ func TestSecretResolver_InvalidGrantRequiresReconnect(t *testing.T) {
 	resolver := NewSecretResolver(mockStore, masterKey)
 	_, _, err := resolver.ResolveExecutionCredentials(ctx, CredentialRequest{
 		AccountID: uuid.New(), AppID: appID, ServiceID: serviceID, AuthType: "oauth",
-		Auths:        fusedobject.AuthConfigs{{Name: "bearerAuth", Type: "oauth2", TokenURL: "https://provider.example/token"}},
+		Auths: fusedobject.AuthConfigs{{
+			Name: "bearerAuth", Type: "oauth2", TokenURL: "https://provider.example/token",
+			TokenEndpointAuthMethod: fusedobject.TokenEndpointAuthMethodClientSecretPost,
+		}},
 		Requirements: singleAuthRequirement("bearerAuth"),
 		Passthrough:  map[string]any{"fused_end_user_ref": "user_123", "fused_auth_name": "bearerAuth"},
 	})

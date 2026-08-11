@@ -22,13 +22,6 @@ type ObjectCache interface {
 	DisconnectSDK(appID string)
 	GetOrFetchServiceMetadata(ctx context.Context, appID string, serviceID string) (*fusedobject.ServiceMetadata, error)
 	GetEndpoint(ctx context.Context, appID string, serviceID string, endpointName string) (*fusedobject.Endpoint, error)
-	// ListEndpointsForSelection returns the endpoints one SDKSelection grants
-	// access to (SelectAll, or the ones named by EndpointIDs), resolved
-	// against the service+version's full operation list. Distinct from
-	// GetEndpoint's by-name lookup used on the dispatch hot path: this exists
-	// to build a per-session MCP fixture (mcp_session_fixture.go) from a
-	// selection that only carries opaque endpoint IDs, not names.
-	ListEndpointsForSelection(ctx context.Context, appID string, sel models.SDKSelection) ([]fusedobject.Endpoint, error)
 	Invalidate(serviceID string)
 	InvalidateAppRuntime(appID string)
 	GetAppRuntime(ctx context.Context, appID string) (string, []byte, error)
@@ -379,33 +372,10 @@ func (c *LocalObjectCache) GetEndpoint(ctx context.Context, appID string, servic
 	return ep, nil
 }
 
-// ListEndpointsForSelection resolves the endpoints one SDK selection grants.
-// Snapshot-backed reads filter endpoint IDs in SQL; Registry fallback keeps
-// old pre-snapshot activations usable until a refresh materializes them.
-// Results are also written into endpointMetadataCache so a later per-call
-// GetEndpoint for the same name is a cache hit.
-func (c *LocalObjectCache) ListEndpointsForSelection(ctx context.Context, appID string, sel models.SDKSelection) ([]fusedobject.Endpoint, error) {
-	all, err := c.listEndpointsForSelection(ctx, sel)
-	if err != nil {
-		return nil, fmt.Errorf("fetch service operations for %s: %w", sel.ServiceID, err)
-	}
-
-	svcID := sel.ServiceID.String()
-	version := sel.ServiceVersionID.String()
-	c.mu.Lock()
-	for i := range all {
-		cacheKey := svcID + ":" + version + ":" + all[i].Name
-		c.endpointMetadataCache[cacheKey] = &all[i]
-	}
-	c.mu.Unlock()
-
-	return all, nil
-}
-
-// ListEndpointsForSelectionsByNames constrains a restricted MCP catalog in one
-// snapshot query. PostgreSQL performs both policy intersections so neither a
-// full endpoint catalog nor one query per selected service reaches Go.
-func (c *LocalObjectCache) ListEndpointsForSelectionsByNames(ctx context.Context, selections []models.SDKSelection, names []string) (map[int][]fusedobject.Endpoint, error) {
+// ListEndpointsForSelections builds every MCP catalog through one snapshot
+// query. PostgreSQL always applies app scope and conditionally intersects the
+// token operation names, avoiding both N+1 lookups and Go-side filtering.
+func (c *LocalObjectCache) ListEndpointsForSelections(ctx context.Context, selections []models.SDKSelection, names []string) (map[int][]fusedobject.Endpoint, error) {
 	contractStore := c.serviceContractStore()
 	if contractStore == nil {
 		return nil, store.ErrServiceContractSnapshotNotFound
@@ -564,37 +534,6 @@ func (c *LocalObjectCache) fetchEndpointsByNames(ctx context.Context, serviceID,
 	return endpoints, "registry", err
 }
 
-func (c *LocalObjectCache) listEndpointsForSelection(ctx context.Context, sel models.SDKSelection) ([]fusedobject.Endpoint, error) {
-	if sel.SelectAll {
-		return c.listAllServiceOperations(ctx, sel.ServiceID, sel.ServiceVersionID)
-	}
-	if len(sel.EndpointIDs) == 0 {
-		return nil, nil
-	}
-	if endpoints, err := c.listSnapshotEndpointsByIDs(ctx, sel.ServiceID, sel.ServiceVersionID, sel.EndpointIDs); err == nil {
-		return endpoints, nil
-	} else if !isSnapshotAbsent(err) {
-		return nil, err
-	}
-	// Why fallback uses Registry's unfiltered operation list here: this path is
-	// only for pre-snapshot activations, and the subsequent ID filter preserves
-	// the SDK's existing scope semantics until refresh creates a local copy.
-	all, err := c.registryClient.FetchServiceOperations(ctx, sel.ServiceID, sel.ServiceVersionID)
-	if err != nil {
-		return nil, err
-	}
-	return filterEndpointsByIDs(all, sel.EndpointIDs), nil
-}
-
-func (c *LocalObjectCache) listAllServiceOperations(ctx context.Context, serviceID, serviceVersionID uuid.UUID) ([]fusedobject.Endpoint, error) {
-	if endpoints, err := c.listSnapshotServiceOperations(ctx, serviceID, serviceVersionID); err == nil {
-		return endpoints, nil
-	} else if !isSnapshotAbsent(err) {
-		return nil, err
-	}
-	return c.registryClient.FetchServiceOperations(ctx, serviceID, serviceVersionID)
-}
-
 func (c *LocalObjectCache) fetchSnapshotMetadata(ctx context.Context, serviceID, serviceVersionID uuid.UUID) (*fusedobject.ServiceMetadata, error) {
 	contractStore := c.serviceContractStore()
 	if contractStore == nil {
@@ -619,22 +558,6 @@ func (c *LocalObjectCache) fetchSnapshotEndpointsByNames(ctx context.Context, se
 	return contractStore.ListServiceContractEndpointsByNames(ctx, serviceID, serviceVersionID, endpointNames)
 }
 
-func (c *LocalObjectCache) listSnapshotEndpointsByIDs(ctx context.Context, serviceID, serviceVersionID uuid.UUID, endpointIDs []uuid.UUID) ([]fusedobject.Endpoint, error) {
-	contractStore := c.serviceContractStore()
-	if contractStore == nil {
-		return nil, store.ErrServiceContractSnapshotNotFound
-	}
-	return contractStore.ListServiceContractEndpointsByIDs(ctx, serviceID, serviceVersionID, endpointIDs)
-}
-
-func (c *LocalObjectCache) listSnapshotServiceOperations(ctx context.Context, serviceID, serviceVersionID uuid.UUID) ([]fusedobject.Endpoint, error) {
-	contractStore := c.serviceContractStore()
-	if contractStore == nil {
-		return nil, store.ErrServiceContractSnapshotNotFound
-	}
-	return contractStore.ListServiceContractOperations(ctx, serviceID, serviceVersionID)
-}
-
 func (c *LocalObjectCache) serviceContractStore() store.ServiceContractSnapshotStore {
 	contractStore, ok := c.db.(store.ServiceContractSnapshotStore)
 	if !ok {
@@ -650,23 +573,6 @@ func parseServiceVersionID(version string) (uuid.UUID, bool) {
 
 func isSnapshotAbsent(err error) bool {
 	return errors.Is(err, store.ErrServiceContractSnapshotNotFound)
-}
-
-// filterEndpointsByIDs keeps only the endpoints whose ID appears in ids,
-// preserving all's order. It is only used for Registry fallback during the
-// migration window; snapshot-backed scoped reads push this filter into SQL.
-func filterEndpointsByIDs(all []fusedobject.Endpoint, ids []uuid.UUID) []fusedobject.Endpoint {
-	wanted := make(map[uuid.UUID]struct{}, len(ids))
-	for _, id := range ids {
-		wanted[id] = struct{}{}
-	}
-	matched := make([]fusedobject.Endpoint, 0, len(ids))
-	for _, ep := range all {
-		if _, ok := wanted[ep.ID]; ok {
-			matched = append(matched, ep)
-		}
-	}
-	return matched
 }
 
 func (c *LocalObjectCache) InvalidateAppRuntime(appID string) {

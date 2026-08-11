@@ -193,7 +193,7 @@ export const clientLoader = async ({
         is_public watch_for_drift created_at updated_at
         source_url import_method
         import_warnings { id endpoint_id method path operation_id reasons recommendation source created_at }
-        auth_configs { type flow scheme location key_name token_url authorization_url open_id_connect_url scopes }
+        auth_configs { type flow scheme location key_name token_url token_endpoint_auth_method authorization_url open_id_connect_url scopes }
         event_extraction_path
         incoming_webhook_config { auth_type auth_location auth_key_name signature_header }
         rate_limit { ${RATE_LIMIT_GRAPHQL_FIELDS} }
@@ -217,7 +217,7 @@ export const clientLoader = async ({
         is_public watch_for_drift created_at updated_at
         source_url import_method
         import_warnings { id endpoint_id method path operation_id reasons recommendation source created_at }
-        auth_configs { type flow scheme location key_name token_url authorization_url open_id_connect_url scopes }
+        auth_configs { type flow scheme location key_name token_url token_endpoint_auth_method authorization_url open_id_connect_url scopes }
         event_extraction_path
         incoming_webhook_config { auth_type auth_location auth_key_name signature_header }
         rate_limit { ${RATE_LIMIT_GRAPHQL_FIELDS} }
@@ -848,6 +848,7 @@ export default function IntegrationDetail() {
             location
             key_name
             token_url
+            token_endpoint_auth_method
             authorization_url
             open_id_connect_url
             scopes
@@ -916,6 +917,7 @@ export default function IntegrationDetail() {
             location
             key_name
             token_url
+            token_endpoint_auth_method
             authorization_url
             open_id_connect_url
             scopes

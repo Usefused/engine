@@ -148,6 +148,13 @@ func TestPostgresStoreServiceContractSnapshotRoundTrip(t *testing.T) {
 	if len(intersection) != 2 || intersection[0].SelectionIndex != 0 || intersection[0].Endpoint.ID != updatedEndpoint.ID || intersection[1].SelectionIndex != 1 || intersection[1].Endpoint.ID != secondEndpoint.ID {
 		t.Fatalf("batched name/app-scope intersection returned %#v", intersection)
 	}
+	unrestricted, err := s.ListServiceContractEndpointsForSelections(ctx, []ServiceContractEndpointSelection{
+		{SelectionIndex: 0, ServiceID: serviceID, ServiceVersionID: versionID, EndpointIDs: []uuid.UUID{updatedEndpoint.ID}},
+		{SelectionIndex: 1, ServiceID: secondServiceID, ServiceVersionID: secondVersionID, SelectAll: true},
+	}, nil)
+	if err != nil || len(unrestricted) != 2 {
+		t.Fatalf("batched unrestricted app-scope intersection = %#v, %v", unrestricted, err)
+	}
 	_, err = s.ListServiceContractEndpointsForSelections(ctx, []ServiceContractEndpointSelection{{
 		SelectionIndex: 0, ServiceID: uuid.New(), ServiceVersionID: uuid.New(), SelectAll: true,
 	}}, []string{"createWidget"})

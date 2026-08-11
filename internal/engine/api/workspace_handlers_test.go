@@ -127,6 +127,9 @@ type workspaceTestStore struct {
 	upsertedConnectConfigs       []store.ConnectConfig
 	upsertConnectConfigErr       error
 	connectConfigs               map[string]*store.ConnectConfig
+	connectConfigsForBucketErr   error
+	connectConfigsForBucketCalls int
+	secretMetaCalls              int
 	serviceConnectConfigs        []store.ConnectConfig
 	workspaceConnectConfigs      []store.WorkspaceConnectConfig
 	workspaceConnectProfiles     []store.WorkspaceConnectionProfile
@@ -415,6 +418,33 @@ func (m *mockVerifier) FetchServiceVersionAuthConfigs(ctx context.Context, refs 
 	return m.authConfigVersions, nil
 }
 
+func (m *mockVerifier) FetchServiceVersionExecutionAuthContracts(_ context.Context, selections []sandbox.ServiceVersionExecutionAuthSelection, _ string) ([]sandbox.ServiceVersionExecutionAuthContract, error) {
+	if m.authConfigErr != nil {
+		return nil, m.authConfigErr
+	}
+	configs := make(map[uuid.UUID]fusedobject.AuthConfigs, len(m.authConfigVersions))
+	for _, version := range m.authConfigVersions {
+		configs[version.ServiceID] = version.AuthConfigs
+	}
+	return anonymousExecutionAuthContracts(selections, configs), nil
+}
+
+func anonymousExecutionAuthContracts(selections []sandbox.ServiceVersionExecutionAuthSelection, configs map[uuid.UUID]fusedobject.AuthConfigs) []sandbox.ServiceVersionExecutionAuthContract {
+	contracts := make([]sandbox.ServiceVersionExecutionAuthContract, 0, len(selections))
+	for _, selection := range selections {
+		operations := make([]sandbox.OperationSecuritySummary, 0, len(selection.OperationNames))
+		for _, name := range selection.OperationNames {
+			operations = append(operations, anonymousOperation(name))
+		}
+		contracts = append(contracts, sandbox.ServiceVersionExecutionAuthContract{
+			ServiceID: selection.ServiceID, Version: selection.Version,
+			OperationNames: selection.OperationNames, SelectAll: selection.SelectAll,
+			AuthConfigs: configs[selection.ServiceID], Operations: operations,
+		})
+	}
+	return contracts
+}
+
 func (m *mockVerifier) VerifyServiceExists(ctx context.Context, serviceID uuid.UUID, apiKey string) (string, string, string, uuid.UUID, error) {
 	m.verifyCalls++
 	m.gotService = serviceID
@@ -572,7 +602,7 @@ func (m *mockVerifier) FetchServiceVisibility(_ context.Context, serviceIDs []uu
 func buildWorkspaceRouter(s *workspaceTestStore, verifier ServiceVerifier) http.Handler {
 	r := newControlTestRouter(s.accountID)
 	dummyMasterKey := []byte("12345678901234567890123456789012")
-	r.Mount("/workspace", WorkspaceHandler(s, verifier, dummyMasterKey))
+	r.Mount("/workspace", WorkspaceHandler(s, verifier, dummyMasterKey, s))
 	return r
 }
 
@@ -1572,6 +1602,7 @@ func (s *workspaceTestStore) ListAppTokens(ctx context.Context, appFamilyID uuid
 }
 
 func (s *workspaceTestStore) ListSecretMeta(ctx context.Context, bucketID uuid.UUID) ([]store.WorkspaceSecretMeta, error) {
+	s.secretMetaCalls++
 	if s.secretMetas != nil {
 		return s.secretMetas[bucketID], nil
 	}
@@ -1834,6 +1865,10 @@ func (s *workspaceTestStore) GetConnectConfig(ctx context.Context, bucketID, ser
 // ListConnectConfigsForBucket keeps artifact readiness tests on the same
 // bounded bucket read as production without requiring a database fixture.
 func (s *workspaceTestStore) ListConnectConfigsForBucket(ctx context.Context, bucketID uuid.UUID) ([]store.ConnectConfig, error) {
+	s.connectConfigsForBucketCalls++
+	if s.connectConfigsForBucketErr != nil {
+		return nil, s.connectConfigsForBucketErr
+	}
 	var configs []store.ConnectConfig
 	for _, cfg := range s.connectConfigs {
 		if cfg != nil && cfg.BucketID == bucketID {

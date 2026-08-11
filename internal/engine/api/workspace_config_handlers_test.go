@@ -2479,6 +2479,16 @@ func (m *mockRegistryClient) FetchServiceVersionAuthConfigs(_ context.Context, r
 	return out, nil
 }
 
+func (m *mockRegistryClient) FetchServiceVersionExecutionAuthContracts(_ context.Context, selections []sandbox.ServiceVersionExecutionAuthSelection, _ string) ([]sandbox.ServiceVersionExecutionAuthContract, error) {
+	configs := make(map[uuid.UUID]fusedobject.AuthConfigs, len(selections))
+	if m.serviceMetadata != nil {
+		for _, selection := range selections {
+			configs[selection.ServiceID] = m.serviceMetadata.AuthConfigs
+		}
+	}
+	return anonymousExecutionAuthContracts(selections, configs), nil
+}
+
 type serviceVisibilityUpdate struct {
 	ServiceID uuid.UUID
 	Public    bool

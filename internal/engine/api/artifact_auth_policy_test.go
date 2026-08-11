@@ -1,33 +1,248 @@
 package api
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/Usefused/engine/internal/engine/sandbox"
+	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func TestResolveSelectionAuthPolicyPinsProviderScheme(t *testing.T) {
 	selection := models.SDKSelection{ServiceID: uuid.New(), AuthType: "oauth", ConnectScopes: []string{"read"}}
-	auths := fusedobject.AuthConfigs{
-		{Name: "basicAuth", Type: "http", Scheme: "basic"},
-		{Name: "oauthAuth", Type: "oauth2", Scopes: []string{"read", "write"}},
-	}
+	contract := executionAuthContract(selection.ServiceID,
+		fusedobject.AuthConfigs{{Name: "basicAuth", Type: "http", Scheme: "basic", BasicPasswordMode: authrouting.BasicPasswordRequired}, {Name: "oauthAuth", Type: "oauth2", Scopes: []string{"read", "write"}}},
+		securedOperation("listItems", "oauthAuth"),
+	)
 
-	if err := resolveSelectionAuthPolicy(&selection, auths); err != nil {
+	if err := resolveSelectionAuthPolicy(&selection, contract, &sdkAuthResolutionTelemetry{}); err != nil {
 		t.Fatalf("resolveSelectionAuthPolicy() error = %v", err)
 	}
 	if selection.AuthType != "oauth" || selection.AuthName != "oauthAuth" {
 		t.Fatalf("unexpected resolved auth policy: %#v", selection)
 	}
+	if len(selection.RequiredAuth) != 1 || selection.RequiredAuth[0].AuthName != "oauthAuth" {
+		t.Fatalf("required auth was not persisted: %#v", selection.RequiredAuth)
+	}
 }
 
 func TestResolveSelectionAuthPolicyRejectsBroaderScope(t *testing.T) {
 	selection := models.SDKSelection{ServiceID: uuid.New(), AuthType: "oauth", ConnectScopes: []string{"admin"}}
-	err := resolveSelectionAuthPolicy(&selection, fusedobject.AuthConfigs{{Name: "oauthAuth", Type: "oauth2", Scopes: []string{"read"}}})
+	contract := executionAuthContract(selection.ServiceID,
+		fusedobject.AuthConfigs{{Name: "oauthAuth", Type: "oauth2", Scopes: []string{"read"}}},
+		securedOperation("listItems", "oauthAuth"),
+	)
+	err := resolveSelectionAuthPolicy(&selection, contract, &sdkAuthResolutionTelemetry{})
 	if err == nil || !strings.Contains(err.Error(), "not provider-approved") {
 		t.Fatalf("expected provider scope ceiling error, got %v", err)
 	}
+}
+
+func TestResolveSelectionAuthPolicyLeavesAnonymousSelectionUnpinned(t *testing.T) {
+	selection := models.SDKSelection{ServiceID: uuid.New(), AuthType: "oauth", AuthName: "oauthAuth", ConnectScopes: []string{"read"}, OperationNames: []string{"health"}}
+	contract := executionAuthContract(selection.ServiceID,
+		fusedobject.AuthConfigs{{Name: "oauthAuth", Type: "oauth2", Scopes: []string{"read"}}},
+		anonymousOperation("health"),
+	)
+	telemetry := sdkAuthResolutionTelemetry{}
+	if err := resolveSelectionAuthPolicy(&selection, contract, &telemetry); err != nil {
+		t.Fatalf("resolveSelectionAuthPolicy() error = %v", err)
+	}
+	if selection.AuthType != "" || selection.AuthName != "" || len(selection.ConnectScopes) != 0 {
+		t.Fatalf("anonymous selection retained auth policy: %#v", selection)
+	}
+	if telemetry.anonymousOnly != 1 || telemetry.none != 1 {
+		t.Fatalf("unexpected telemetry: %#v", telemetry)
+	}
+}
+
+func TestResolveSelectionAuthPolicyPinsOneSchemeAcrossMixedSelection(t *testing.T) {
+	selection := models.SDKSelection{ServiceID: uuid.New(), OperationNames: []string{"health", "listItems"}}
+	contract := executionAuthContract(selection.ServiceID,
+		fusedobject.AuthConfigs{{Name: "basicAuth", Type: "http", Scheme: "basic", BasicPasswordMode: authrouting.BasicPasswordRequired}, {Name: "oauthAuth", Type: "oauth2"}},
+		anonymousOperation("health"), securedOperation("listItems", "oauthAuth"),
+	)
+	telemetry := sdkAuthResolutionTelemetry{}
+	if err := resolveSelectionAuthPolicy(&selection, contract, &telemetry); err != nil {
+		t.Fatalf("resolveSelectionAuthPolicy() error = %v", err)
+	}
+	if selection.AuthType != "oauth" || selection.AuthName != "oauthAuth" || telemetry.mixed != 1 || telemetry.inferred != 1 {
+		t.Fatalf("unexpected mixed auth resolution: selection=%#v telemetry=%#v", selection, telemetry)
+	}
+}
+
+func TestResolveSelectionAuthPolicySupportsDifferentSchemesAcrossSelectedOperations(t *testing.T) {
+	selection := models.SDKSelection{ServiceID: uuid.New(), OperationNames: []string{"one", "two"}}
+	contract := executionAuthContract(selection.ServiceID,
+		fusedobject.AuthConfigs{{Name: "basicAuth", Type: "http", Scheme: "basic", BasicPasswordMode: authrouting.BasicPasswordRequired}, {Name: "oauthAuth", Type: "oauth2"}},
+		securedOperation("one", "basicAuth"), securedOperation("two", "oauthAuth"),
+	)
+	if err := resolveSelectionAuthPolicy(&selection, contract, &sdkAuthResolutionTelemetry{}); err != nil {
+		t.Fatalf("resolveSelectionAuthPolicy() error = %v", err)
+	}
+	if selection.AuthType != "" || selection.AuthName != "" || len(selection.RequiredAuth) != 2 {
+		t.Fatalf("mixed operation auth policy = %#v", selection)
+	}
+}
+
+func TestResolveSelectionAuthPolicyPersistsOAuthAndMTLSAlternative(t *testing.T) {
+	selection := models.SDKSelection{ServiceID: uuid.New(), ConnectScopes: []string{"read"}}
+	contract := executionAuthContract(selection.ServiceID,
+		fusedobject.AuthConfigs{
+			{Name: "oauthAuth", Type: "oauth2", Scopes: []string{"read"}},
+			{Name: "clientCertificate", Type: "mutualTLS"},
+		},
+		securedOperationAlternatives("transfer", []string{"oauthAuth", "clientCertificate"}),
+	)
+	if err := resolveSelectionAuthPolicy(&selection, contract, &sdkAuthResolutionTelemetry{}); err != nil {
+		t.Fatalf("resolveSelectionAuthPolicy() error = %v", err)
+	}
+	if selection.AuthName != "oauthAuth" || len(selection.RequiredAuth) != 2 {
+		t.Fatalf("OAuth+mTLS policy = %#v", selection)
+	}
+}
+
+func TestResolveSelectionAuthPolicyPersistsAPIKeyAndAPIToken(t *testing.T) {
+	selection := models.SDKSelection{ServiceID: uuid.New()}
+	contract := executionAuthContract(selection.ServiceID,
+		fusedobject.AuthConfigs{{Name: "apiKey", Type: "apiKey"}, {Name: "apiToken", Type: "apiKey"}},
+		securedOperationAlternatives("write", []string{"apiKey", "apiToken"}),
+	)
+	if err := resolveSelectionAuthPolicy(&selection, contract, &sdkAuthResolutionTelemetry{}); err != nil {
+		t.Fatalf("resolveSelectionAuthPolicy() error = %v", err)
+	}
+	if len(selection.RequiredAuth) != 2 || selection.RequiredAuth[0].AuthName != "apiKey" || selection.RequiredAuth[1].AuthName != "apiToken" {
+		t.Fatalf("API key AND token policy = %#v", selection)
+	}
+}
+
+func TestResolveSelectionAuthPolicyUsesSourceOrderAndExplicitORChoice(t *testing.T) {
+	serviceID := uuid.New()
+	contract := executionAuthContract(serviceID,
+		fusedobject.AuthConfigs{{Name: "apiKey", Type: "apiKey"}, {Name: "oauthAuth", Type: "oauth2"}},
+		securedOperationAlternatives("read", []string{"apiKey"}, []string{"oauthAuth"}),
+	)
+	inferred := models.SDKSelection{ServiceID: serviceID}
+	if err := resolveSelectionAuthPolicy(&inferred, contract, &sdkAuthResolutionTelemetry{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(inferred.RequiredAuth) != 1 || inferred.RequiredAuth[0].AuthName != "apiKey" {
+		t.Fatalf("source-order branch = %#v", inferred)
+	}
+	explicit := models.SDKSelection{ServiceID: serviceID, AuthType: "oauth", AuthName: "oauthAuth"}
+	if err := resolveSelectionAuthPolicy(&explicit, contract, &sdkAuthResolutionTelemetry{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(explicit.RequiredAuth) != 1 || explicit.RequiredAuth[0].AuthName != "oauthAuth" {
+		t.Fatalf("explicit OR branch = %#v", explicit)
+	}
+}
+
+func TestResolveSelectionAuthPolicyRejectsExplicitSelectorMissingFromOneOperation(t *testing.T) {
+	selection := models.SDKSelection{ServiceID: uuid.New(), AuthType: "oauth", AuthName: "oauthAuth"}
+	contract := executionAuthContract(selection.ServiceID,
+		fusedobject.AuthConfigs{{Name: "apiKey", Type: "apiKey"}, {Name: "oauthAuth", Type: "oauth2"}},
+		securedOperationAlternatives("one", []string{"oauthAuth"}, []string{"apiKey"}),
+		securedOperation("two", "apiKey"),
+	)
+	err := resolveSelectionAuthPolicy(&selection, contract, &sdkAuthResolutionTelemetry{})
+	if err == nil || !strings.Contains(err.Error(), "compatible with every secured selected operation") {
+		t.Fatalf("expected explicit selector incompatibility, got %v", err)
+	}
+}
+
+func TestResolveSelectionAuthPolicyLeavesWebhookOnlySelectionUnpinned(t *testing.T) {
+	selection := models.SDKSelection{ServiceID: uuid.New(), WebhookNames: []string{"created"}, AuthType: "bearer", AuthName: "bearerAuth"}
+	contract := executionAuthContract(selection.ServiceID, fusedobject.AuthConfigs{{Name: "bearerAuth", Type: "http", Scheme: "bearer"}})
+	telemetry := sdkAuthResolutionTelemetry{}
+	if err := resolveSelectionAuthPolicy(&selection, contract, &telemetry); err != nil {
+		t.Fatalf("resolveSelectionAuthPolicy() error = %v", err)
+	}
+	if selection.AuthType != "" || selection.AuthName != "" || telemetry.webhookOnly != 1 {
+		t.Fatalf("unexpected webhook-only auth resolution: selection=%#v telemetry=%#v", selection, telemetry)
+	}
+}
+
+func TestResolveAppAuthPoliciesRejectsMissingOperation(t *testing.T) {
+	serviceID, versionID := uuid.New(), uuid.New()
+	registry := &sdkAuthContractRegistry{contracts: []sandbox.ServiceVersionExecutionAuthContract{{
+		ServiceID: serviceID, Version: "v1", ServiceVersionID: versionID,
+		Operations: []sandbox.OperationSecuritySummary{anonymousOperation("present")},
+	}}}
+	selections := []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: versionID, OperationNames: []string{"missing"}}}
+	err := resolveAppAuthPolicies(context.Background(), registry, "key", []sdkResolvedService{{ServiceID: serviceID, ServiceVersionID: versionID, Version: "v1"}}, selections)
+	if err == nil || !strings.Contains(err.Error(), "was not found") {
+		t.Fatalf("expected missing operation error, got %v", err)
+	}
+}
+
+func TestRecordSDKAuthResolutionUsesSafeAggregateAttributes(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	ctx, span := provider.Tracer("test").Start(context.Background(), "engine.sdk_config.plan")
+	recordSDKAuthResolution(ctx, sdkAuthResolutionTelemetry{anonymousOnly: 1, securedOnly: 2, explicit: 1, none: 1, required: 3, multiScheme: 1}, "success")
+	span.End()
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("expected one plan span, got %d", len(spans))
+	}
+	attributes := map[string]string{}
+	for _, item := range spans[0].Attributes() {
+		attributes[string(item.Key)] = item.Value.Emit()
+	}
+	if attributes["sdk.auth.anonymous_only_count"] != "1" || attributes["sdk.auth.secured_only_count"] != "2" || attributes["sdk.auth.required_scheme_count"] != "3" || attributes["sdk.auth.multi_scheme_selection_count"] != "1" || attributes["sdk.auth.decision_source"] != "explicit" || attributes["sdk.auth.decision_outcome"] != "success" {
+		t.Fatalf("unexpected SDK auth telemetry: %#v", attributes)
+	}
+	for key := range attributes {
+		if strings.Contains(key, "name") || strings.Contains(key, "url") || strings.Contains(key, "secret") {
+			t.Fatalf("unsafe auth attribute key %q", key)
+		}
+	}
+}
+
+type sdkAuthContractRegistry struct {
+	sandbox.RegistryClient
+	contracts []sandbox.ServiceVersionExecutionAuthContract
+}
+
+func (r *sdkAuthContractRegistry) FetchServiceVersionExecutionAuthContracts(_ context.Context, selections []sandbox.ServiceVersionExecutionAuthSelection, _ string) ([]sandbox.ServiceVersionExecutionAuthContract, error) {
+	contracts := append([]sandbox.ServiceVersionExecutionAuthContract(nil), r.contracts...)
+	for index := range contracts {
+		if index < len(selections) {
+			contracts[index].OperationNames = selections[index].OperationNames
+			contracts[index].SelectAll = selections[index].SelectAll
+		}
+	}
+	return contracts, nil
+}
+
+func executionAuthContract(serviceID uuid.UUID, auths fusedobject.AuthConfigs, operations ...sandbox.OperationSecuritySummary) sandbox.ServiceVersionExecutionAuthContract {
+	return sandbox.ServiceVersionExecutionAuthContract{ServiceID: serviceID, Version: "v1", AuthConfigs: auths, Operations: operations}
+}
+
+func anonymousOperation(name string) sandbox.OperationSecuritySummary {
+	return sandbox.OperationSecuritySummary{Name: name, SecurityRequirements: authrouting.Requirements{{Schemes: []authrouting.Requirement{}}}}
+}
+
+func securedOperation(name, scheme string) sandbox.OperationSecuritySummary {
+	return sandbox.OperationSecuritySummary{Name: name, SecurityRequirements: authrouting.Requirements{{Schemes: []authrouting.Requirement{{Scheme: scheme}}}}}
+}
+
+func securedOperationAlternatives(name string, alternatives ...[]string) sandbox.OperationSecuritySummary {
+	requirements := make(authrouting.Requirements, 0, len(alternatives))
+	for _, names := range alternatives {
+		alternative := authrouting.Alternative{Schemes: make([]authrouting.Requirement, 0, len(names))}
+		for _, authName := range names {
+			alternative.Schemes = append(alternative.Schemes, authrouting.Requirement{Scheme: authName})
+		}
+		requirements = append(requirements, alternative)
+	}
+	return sandbox.OperationSecuritySummary{Name: name, SecurityRequirements: requirements}
 }

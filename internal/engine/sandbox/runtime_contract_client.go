@@ -105,19 +105,7 @@ const runtimeContractServiceFields = `
 	}
 	default_headers
 	connect_config
-	auth_configs {
-		name
-		type
-		flow
-		scheme
-		basic_password_mode
-		location
-		key_name
-		token_url
-		authorization_url
-		open_id_connect_url
-		scopes
-	}
+	auth_configs {` + registryAuthConfigGraphQLFields + `}
 	rate_limit {` + runtimeRateLimitFields + `}
 	retry_config {
 		strategy

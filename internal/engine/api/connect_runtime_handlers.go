@@ -515,19 +515,23 @@ func buildConnectAuthorizeURL(auth fusedobject.AuthConfig, creds connectClientCr
 	if strings.TrimSpace(auth.AuthorizationURL) == "" {
 		return "", connectRuntimeHTTPError{status: http.StatusBadRequest, message: "authorization_url is required"}
 	}
+	delimiter, err := scopeDelimiter(auth.ScopesDelimiter)
+	if err != nil {
+		return "", connectRuntimeHTTPError{status: http.StatusBadRequest, message: err.Error()}
+	}
 	values := url.Values{}
+	for key, value := range auth.ExtraAuthParams {
+		values.Set(key, value)
+	}
 	values.Set("response_type", "code")
 	values.Set("client_id", creds.ClientID)
 	values.Set("redirect_uri", creds.RedirectURI)
 	values.Set("state", state)
 	values.Set("code_challenge", challenge)
 	values.Set("code_challenge_method", "S256")
-	values.Set("scope", strings.Join(auth.Scopes, scopeDelimiter(auth.ScopesDelimiter)))
+	values.Set("scope", strings.Join(auth.Scopes, delimiter))
 	if isOIDCAuth(auth) {
 		values.Set("nonce", nonce)
-	}
-	for key, value := range auth.ExtraAuthParams {
-		values.Set(key, value)
 	}
 	authURL, err := url.Parse(auth.AuthorizationURL)
 	if err != nil || authURL.Scheme == "" || authURL.Host == "" {
@@ -776,11 +780,15 @@ func isOIDCAuth(auth fusedobject.AuthConfig) bool {
 }
 
 // scopeDelimiter keeps provider quirks out of authorize URL construction.
-func scopeDelimiter(value string) string {
-	if strings.EqualFold(value, "comma") {
-		return ","
+func scopeDelimiter(value string) (string, error) {
+	switch value {
+	case "", "space":
+		return " ", nil
+	case "comma":
+		return ",", nil
+	default:
+		return "", errors.New("scopes_delimiter must be space or comma")
 	}
-	return " "
 }
 
 // mergeQuery lets provider-auth defaults exist while Engine-owned OAuth fields

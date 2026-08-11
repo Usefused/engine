@@ -28,6 +28,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 
+	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/canonical"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
@@ -374,7 +375,7 @@ func validateSDKIdentity(doc sdkConfigDocument) error {
 	if doc.APIVersion != "fused/v1" {
 		return errors.New("config apiVersion must be fused/v1")
 	}
-	if doc.Kind != "sdk" {
+	if doc.Kind != store.AppKindSDK.String() {
 		return errors.New("config kind must be sdk")
 	}
 	if strings.TrimSpace(doc.Name) == "" || strings.TrimSpace(doc.Version) == "" {
@@ -862,84 +863,436 @@ func appConnectScopes(connect *sdkAppConnectDoc) []string {
 	return sortedUniqueStrings(connect.Scopes)
 }
 
-type sdkServiceVersionAuthConfigFetcher interface {
-	FetchServiceVersionAuthConfigs(context.Context, []sandbox.ServiceVersionRef, string) ([]sandbox.ServiceVersionAuthConfigs, error)
+type sdkExecutionAuthContractFetcher interface {
+	FetchServiceVersionExecutionAuthContracts(context.Context, []sandbox.ServiceVersionExecutionAuthSelection, string) ([]sandbox.ServiceVersionExecutionAuthContract, error)
+}
+
+type sdkAuthResolutionTelemetry struct {
+	anonymousOnly int
+	securedOnly   int
+	mixed         int
+	webhookOnly   int
+	explicit      int
+	inferred      int
+	none          int
+	required      int
+	multiScheme   int
 }
 
 // resolveAppAuthPolicies turns human-facing auth selectors into the
 // exact Registry scheme used at dispatch. Doing this once during planning
 // keeps agents and SDK consumers from guessing provider-specific auth names.
 func resolveAppAuthPolicies(ctx context.Context, registryClient sandbox.RegistryClient, apiKey string, services []sdkResolvedService, selections []models.SDKSelection) error {
-	fetcher, ok := registryClient.(sdkServiceVersionAuthConfigFetcher)
+	fetcher, ok := registryClient.(sdkExecutionAuthContractFetcher)
 	if !ok {
-		return validateNoExplicitAuthPolicy(selections)
+		err := validateNoExecutionAuthContract(selections)
+		outcome := "success"
+		if err != nil {
+			outcome = "unavailable"
+		}
+		recordSDKAuthResolution(ctx, unavailableAuthTelemetry(selections), outcome)
+		return err
 	}
-	configs, err := fetcher.FetchServiceVersionAuthConfigs(ctx, sdkServiceVersionRefs(services), apiKey)
+	requests, err := sdkExecutionAuthContractSelections(services, selections)
 	if err != nil {
+		return err
+	}
+	contracts, err := fetcher.FetchServiceVersionExecutionAuthContracts(ctx, requests, apiKey)
+	if err != nil {
+		recordSDKAuthResolution(ctx, sdkAuthResolutionTelemetry{}, "registry_error")
 		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: "failed to resolve service auth policies"}
 	}
-	byService := make(map[uuid.UUID]sandbox.ServiceVersionAuthConfigs, len(configs))
-	for _, config := range configs {
-		byService[config.ServiceID] = config
+	bySelection := make(map[string]sandbox.ServiceVersionExecutionAuthContract, len(contracts))
+	for _, contract := range contracts {
+		bySelection[executionAuthContractKey(contract.ServiceID, contract.Version, contract.OperationNames, contract.SelectAll)] = contract
 	}
+	telemetry := sdkAuthResolutionTelemetry{}
 	for index := range selections {
-		if err := resolveSelectionAuthPolicy(&selections[index], byService[selections[index].ServiceID].AuthConfigs); err != nil {
+		contract, exists := bySelection[executionAuthContractKey(requests[index].ServiceID, requests[index].Version, requests[index].OperationNames, requests[index].SelectAll)]
+		if !exists {
+			recordSDKAuthResolution(ctx, telemetry, "invalid_selection")
+			return workspaceConfigHTTPError{status: http.StatusBadRequest, message: fmt.Sprintf("service %s version auth contract was not found", selections[index].ServiceID)}
+		}
+		if err := validateSelectedOperations(requests[index], contract.Operations); err != nil {
+			recordSDKAuthResolution(ctx, telemetry, "invalid_selection")
+			return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
+		}
+		if err := resolveSelectionAuthPolicy(&selections[index], contract, &telemetry); err != nil {
+			recordSDKAuthResolution(ctx, telemetry, "invalid_selection")
 			return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
 		}
 	}
+	recordSDKAuthResolution(ctx, telemetry, "success")
 	return nil
 }
 
-// validateNoExplicitAuthPolicy fails closed when Registry cannot resolve a
-// policy the user explicitly requested; auth-free apps remain usable.
-func validateNoExplicitAuthPolicy(selections []models.SDKSelection) error {
+func unavailableAuthTelemetry(selections []models.SDKSelection) sdkAuthResolutionTelemetry {
+	telemetry := sdkAuthResolutionTelemetry{}
 	for _, selection := range selections {
-		if selection.AuthType != "" || selection.AuthName != "" || len(selection.ConnectScopes) > 0 {
+		if !selection.SelectAll && len(selection.OperationNames) == 0 {
+			telemetry.webhookOnly++
+			telemetry.none++
+		}
+	}
+	return telemetry
+}
+
+func validateNoExecutionAuthContract(selections []models.SDKSelection) error {
+	for _, selection := range selections {
+		if selection.SelectAll || len(selection.OperationNames) > 0 || selection.AuthType != "" || selection.AuthName != "" || len(selection.ConnectScopes) > 0 || len(selection.RequiredAuth) > 0 {
 			return workspaceConfigHTTPError{status: http.StatusBadRequest, message: "registry auth policy resolution is unavailable"}
 		}
 	}
 	return nil
 }
 
-// resolveSelectionAuthPolicy pins one exact provider scheme and its approved
-// consent ceiling into the immutable runtime selection.
-func resolveSelectionAuthPolicy(selection *models.SDKSelection, auths fusedobject.AuthConfigs) error {
-	if len(auths) == 0 {
-		if selection.AuthType != "" || selection.AuthName != "" || len(selection.ConnectScopes) > 0 {
-			return fmt.Errorf("service %s does not declare authentication", selection.ServiceID)
+func sdkExecutionAuthContractSelections(services []sdkResolvedService, selections []models.SDKSelection) ([]sandbox.ServiceVersionExecutionAuthSelection, error) {
+	if len(services) != len(selections) {
+		return nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "resolved service selection mismatch"}
+	}
+	out := make([]sandbox.ServiceVersionExecutionAuthSelection, len(selections))
+	for index, selection := range selections {
+		out[index] = sandbox.ServiceVersionExecutionAuthSelection{
+			ServiceID: selection.ServiceID, Version: services[index].Version,
+			OperationNames: selection.OperationNames, SelectAll: selection.SelectAll,
 		}
+	}
+	return out, nil
+}
+
+func executionAuthContractKey(serviceID uuid.UUID, version string, operationNames []string, selectAll bool) string {
+	return serviceID.String() + "\x00" + version + "\x00" + strings.Join(sortedUniqueStrings(operationNames), "\x00") + fmt.Sprintf("\x00%t", selectAll)
+}
+
+func validateSelectedOperations(selection sandbox.ServiceVersionExecutionAuthSelection, operations []sandbox.OperationSecuritySummary) error {
+	if selection.SelectAll {
 		return nil
 	}
-	matches := matchingAppAuths(auths, selection.AuthType, selection.AuthName)
-	if len(matches) == 0 {
-		return fmt.Errorf("service %s does not support the selected authentication", selection.ServiceID)
+	returned := make(map[string]struct{}, len(operations))
+	for _, operation := range operations {
+		returned[operation.Name] = struct{}{}
 	}
-	if len(matches) > 1 {
-		return fmt.Errorf("service %s auth selection is ambiguous; set auth.name", selection.ServiceID)
+	for _, name := range selection.OperationNames {
+		if _, exists := returned[name]; !exists {
+			return fmt.Errorf("service %s selected operation %q was not found", selection.ServiceID, name)
+		}
 	}
-	selected := matches[0]
-	selection.AuthType = sandbox.CanonicalFusedAuthType(selected)
-	selection.AuthName = sandbox.AuthCredentialName(selected)
+	return nil
+}
+
+// resolveSelectionAuthPolicy pins a scheme only when at least one selected
+// operation cannot run anonymously. This keeps webhook-only and anonymous SDK
+// plans independent from provider credential readiness.
+func resolveSelectionAuthPolicy(selection *models.SDKSelection, contract sandbox.ServiceVersionExecutionAuthContract, telemetry *sdkAuthResolutionTelemetry) error {
+	secured := securedOperationSummaries(contract.Operations)
+	recordSelectionSecurityShape(telemetry, *selection, len(contract.Operations), len(secured))
+	if len(secured) == 0 {
+		selection.AuthType, selection.AuthName, selection.ConnectScopes, selection.RequiredAuth = "", "", nil, nil
+		telemetry.none++
+		return nil
+	}
+	preferred, explicit, err := preferredAppAuth(*selection, contract.AuthConfigs, secured)
+	if err != nil {
+		return err
+	}
+	alternatives, err := selectOperationAuthAlternatives(selection.ServiceID, secured, preferred)
+	if err != nil {
+		return err
+	}
+	required, err := requiredSDKAuth(contract.AuthConfigs, alternatives)
+	if err != nil {
+		return fmt.Errorf("service %s auth contract is invalid: %w", selection.ServiceID, err)
+	}
+	selection.RequiredAuth = required
+	telemetry.required += len(required)
+	if len(required) > 1 {
+		telemetry.multiScheme++
+	}
+	selected := preferred
+	if selected == nil {
+		selected = commonAlternativeAuth(contract.AuthConfigs, alternatives)
+	}
+	selection.AuthType, selection.AuthName = "", ""
+	if selected != nil {
+		selection.AuthType = sandbox.CanonicalFusedAuthType(*selected)
+		selection.AuthName = sandbox.AuthCredentialName(*selected)
+	}
+	if explicit {
+		telemetry.explicit++
+	} else {
+		telemetry.inferred++
+	}
+	if selected == nil {
+		return nil
+	}
 	return validateAppScopes(selection, selected.Scopes)
 }
 
-// matchingAppAuths defaults to the provider's first declared scheme but
-// requires a unique match whenever the app supplies selectors.
-func matchingAppAuths(auths fusedobject.AuthConfigs, authType, authName string) fusedobject.AuthConfigs {
-	if authType == "" && authName == "" {
-		return auths[:1]
+func preferredAppAuth(selection models.SDKSelection, auths fusedobject.AuthConfigs, operations []sandbox.OperationSecuritySummary) (*fusedobject.AuthConfig, bool, error) {
+	explicit := selection.AuthType != "" || selection.AuthName != ""
+	if !explicit && len(selection.ConnectScopes) == 0 {
+		return nil, false, nil
 	}
-	var matches fusedobject.AuthConfigs
+	matches := compatibleAppAuths(auths, operations, selection.AuthType, selection.AuthName)
+	scopeMatches := appAuthsAcceptingScopes(matches, selection.ConnectScopes)
+	if len(scopeMatches) == 0 && len(matches) > 0 && len(selection.ConnectScopes) > 0 {
+		candidate := selection
+		candidate.AuthType = sandbox.CanonicalFusedAuthType(matches[0])
+		candidate.AuthName = sandbox.AuthCredentialName(matches[0])
+		return nil, explicit, validateAppScopes(&candidate, matches[0].Scopes)
+	}
+	if len(scopeMatches) == 0 {
+		return nil, explicit, fmt.Errorf("service %s has no authentication scheme compatible with every secured selected operation", selection.ServiceID)
+	}
+	if explicit && len(scopeMatches) > 1 {
+		return nil, true, fmt.Errorf("service %s auth selection is ambiguous; set auth.name", selection.ServiceID)
+	}
+	selected := scopeMatches[0]
+	return &selected, explicit, nil
+}
+
+func selectOperationAuthAlternatives(serviceID uuid.UUID, operations []sandbox.OperationSecuritySummary, preferred *fusedobject.AuthConfig) ([]authrouting.Alternative, error) {
+	selected := make([]authrouting.Alternative, 0, len(operations))
+	preferredName := ""
+	if preferred != nil {
+		preferredName = preferred.Name
+	}
+	for _, operation := range operations {
+		alternative, ok := firstOperationAuthAlternative(operation.SecurityRequirements, preferredName)
+		if !ok {
+			return nil, fmt.Errorf("service %s auth selection cannot satisfy operation %q", serviceID, operation.Name)
+		}
+		selected = append(selected, alternative)
+	}
+	return selected, nil
+}
+
+func firstOperationAuthAlternative(requirements authrouting.Requirements, preferredName string) (authrouting.Alternative, bool) {
+	for _, alternative := range requirements {
+		if len(alternative.Schemes) == 0 {
+			continue
+		}
+		if preferredName == "" || alternativeContainsAuth(alternative, preferredName) {
+			return alternative, true
+		}
+	}
+	return authrouting.Alternative{}, false
+}
+
+func alternativeContainsAuth(alternative authrouting.Alternative, authName string) bool {
+	for _, requirement := range alternative.Schemes {
+		if requirement.Scheme == authName {
+			return true
+		}
+	}
+	return false
+}
+
+func requiredSDKAuth(auths fusedobject.AuthConfigs, alternatives []authrouting.Alternative) ([]models.SDKRequiredAuth, error) {
+	definitions, err := sdkAuthDefinitions(auths)
+	if err != nil {
+		return nil, err
+	}
+	required := make(map[string]models.SDKRequiredAuth)
+	for _, alternative := range alternatives {
+		for _, requirement := range alternative.Schemes {
+			auth, exists := definitions[requirement.Scheme]
+			if !exists {
+				return nil, fmt.Errorf("unknown auth scheme %q", requirement.Scheme)
+			}
+			required[auth.Name] = sdkRequiredAuth(auth)
+		}
+	}
+	return sortedRequiredSDKAuth(required), nil
+}
+
+func sdkAuthDefinitions(auths fusedobject.AuthConfigs) (map[string]fusedobject.AuthConfig, error) {
+	definitions := make(map[string]fusedobject.AuthConfig, len(auths))
 	for _, auth := range auths {
+		if auth.Name == "" || definitions[auth.Name].Name != "" {
+			return nil, errors.New("auth definitions require unique names")
+		}
+		definitions[auth.Name] = auth
+	}
+	return definitions, nil
+}
+
+func sdkRequiredAuth(auth fusedobject.AuthConfig) models.SDKRequiredAuth {
+	return models.SDKRequiredAuth{
+		AuthType: sandbox.CanonicalFusedAuthType(auth), AuthName: sandbox.AuthCredentialName(auth),
+		BasicPasswordMode: auth.BasicPasswordMode,
+	}
+}
+
+func sortedRequiredSDKAuth(required map[string]models.SDKRequiredAuth) []models.SDKRequiredAuth {
+	result := make([]models.SDKRequiredAuth, 0, len(required))
+	for _, auth := range required {
+		result = append(result, auth)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].AuthName == result[j].AuthName {
+			return result[i].AuthType < result[j].AuthType
+		}
+		return result[i].AuthName < result[j].AuthName
+	})
+	return result
+}
+
+func commonAlternativeAuth(auths fusedobject.AuthConfigs, alternatives []authrouting.Alternative) *fusedobject.AuthConfig {
+	if len(alternatives) == 0 {
+		return nil
+	}
+	definitions, err := sdkAuthDefinitions(auths)
+	if err != nil {
+		return nil
+	}
+	for _, requirement := range alternatives[0].Schemes {
+		if authAppearsInEveryAlternative(requirement.Scheme, alternatives) {
+			auth := definitions[requirement.Scheme]
+			return &auth
+		}
+	}
+	return nil
+}
+
+func authAppearsInEveryAlternative(authName string, alternatives []authrouting.Alternative) bool {
+	for _, alternative := range alternatives {
+		if !alternativeContainsAuth(alternative, authName) {
+			return false
+		}
+	}
+	return true
+}
+
+func appAuthsAcceptingScopes(auths fusedobject.AuthConfigs, scopes []string) fusedobject.AuthConfigs {
+	if len(scopes) == 0 {
+		return auths
+	}
+	matches := make(fusedobject.AuthConfigs, 0, len(auths))
+	for _, auth := range auths {
+		authType := sandbox.CanonicalFusedAuthType(auth)
+		if (authType == "oauth" || authType == "oidc") && scopesAllowed(scopes, auth.Scopes) {
+			matches = append(matches, auth)
+		}
+	}
+	return matches
+}
+
+func scopesAllowed(requested, allowed []string) bool {
+	allowedSet := stringSet(allowed)
+	for _, scope := range requested {
+		if !allowedSet[scope] {
+			return false
+		}
+	}
+	return true
+}
+
+func securedOperationSummaries(operations []sandbox.OperationSecuritySummary) []sandbox.OperationSecuritySummary {
+	secured := make([]sandbox.OperationSecuritySummary, 0, len(operations))
+	for _, operation := range operations {
+		if !operationPermitsAnonymous(operation) {
+			secured = append(secured, operation)
+		}
+	}
+	return secured
+}
+
+func operationPermitsAnonymous(operation sandbox.OperationSecuritySummary) bool {
+	for _, alternative := range operation.SecurityRequirements {
+		if len(alternative.Schemes) == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func compatibleAppAuths(auths fusedobject.AuthConfigs, operations []sandbox.OperationSecuritySummary, authType, authName string) fusedobject.AuthConfigs {
+	candidates := append(fusedobject.AuthConfigs(nil), auths...)
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].Name == candidates[j].Name {
+			return sandbox.CanonicalFusedAuthType(candidates[i]) < sandbox.CanonicalFusedAuthType(candidates[j])
+		}
+		return candidates[i].Name < candidates[j].Name
+	})
+	matches := make(fusedobject.AuthConfigs, 0, len(candidates))
+	for _, auth := range candidates {
 		if authName != "" && auth.Name != authName {
 			continue
 		}
 		if authType != "" && sandbox.CanonicalFusedAuthType(auth) != authType {
 			continue
 		}
-		matches = append(matches, auth)
+		if authSupportsEveryOperation(auth, operations) {
+			matches = append(matches, auth)
+		}
 	}
 	return matches
+}
+
+func authSupportsEveryOperation(auth fusedobject.AuthConfig, operations []sandbox.OperationSecuritySummary) bool {
+	for _, operation := range operations {
+		if !operationSupportsAuth(operation, auth.Name) {
+			return false
+		}
+	}
+	return true
+}
+
+func operationSupportsAuth(operation sandbox.OperationSecuritySummary, authName string) bool {
+	for _, alternative := range operation.SecurityRequirements {
+		for _, requirement := range alternative.Schemes {
+			if requirement.Scheme == authName {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func recordSelectionSecurityShape(telemetry *sdkAuthResolutionTelemetry, selection models.SDKSelection, operationCount, securedCount int) {
+	if !selection.SelectAll && len(selection.OperationNames) == 0 {
+		telemetry.webhookOnly++
+		return
+	}
+	if securedCount == 0 {
+		telemetry.anonymousOnly++
+		return
+	}
+	if securedCount == operationCount {
+		telemetry.securedOnly++
+		return
+	}
+	telemetry.mixed++
+}
+
+func recordSDKAuthResolution(ctx context.Context, telemetry sdkAuthResolutionTelemetry, outcome string) {
+	trace.SpanFromContext(ctx).SetAttributes(
+		attribute.Int("sdk.auth.anonymous_only_count", telemetry.anonymousOnly),
+		attribute.Int("sdk.auth.secured_only_count", telemetry.securedOnly),
+		attribute.Int("sdk.auth.mixed_count", telemetry.mixed),
+		attribute.Int("sdk.auth.webhook_only_count", telemetry.webhookOnly),
+		attribute.Int("sdk.auth.explicit_count", telemetry.explicit),
+		attribute.Int("sdk.auth.inferred_count", telemetry.inferred),
+		attribute.Int("sdk.auth.none_count", telemetry.none),
+		attribute.Int("sdk.auth.required_scheme_count", telemetry.required),
+		attribute.Int("sdk.auth.multi_scheme_selection_count", telemetry.multiScheme),
+		attribute.String("sdk.auth.decision_source", authDecisionSource(telemetry)),
+		attribute.String("sdk.auth.decision_outcome", outcome),
+	)
+}
+
+func authDecisionSource(telemetry sdkAuthResolutionTelemetry) string {
+	if telemetry.explicit > 0 && telemetry.inferred > 0 {
+		return "mixed"
+	}
+	if telemetry.explicit > 0 {
+		return "explicit"
+	}
+	if telemetry.inferred > 0 {
+		return "inferred"
+	}
+	return "none"
 }
 
 // validateAppScopes lets an app narrow OAuth/OIDC permissions while
@@ -1279,7 +1632,7 @@ func sdkGenerateRequest(doc sdkConfigDocument, selections []models.SDKSelection,
 		Version:          doc.Version,
 		Selections:       selections,
 		IncludeMCP:       false,
-		TargetType:       "sdk",
+		TargetType:       store.AppKindSDK.String(),
 		TargetLanguage:   doc.Language,
 		ContractBindings: bindings,
 	}
@@ -1532,7 +1885,7 @@ func prepareSDKGenerationForApply(
 	if err := ensureSDKContractBindingsCurrent(ctx, registryClient, call.apiKey, bindings); err != nil {
 		return sdkGenerationApplyInput{}, workspaceConfigHTTPError{status: http.StatusConflict, message: err.Error()}
 	}
-	doc, _, err := decodeAppApplyPlan(ctx, configStore, s, plan, "sdk")
+	doc, _, err := decodeAppApplyPlan(ctx, configStore, s, plan, store.AppKindSDK.String())
 	if err != nil {
 		return sdkGenerationApplyInput{}, err
 	}
@@ -2071,15 +2424,16 @@ func validateAppBucketIdentity(ctx context.Context, s store.Store, bucketName st
 	return nil
 }
 
-// validateAppBucketReadiness checks the one bucket selected by an
-// app before a plan is persisted and again during apply. OAuth/OIDC
-// selections need an enabled client application in that bucket; static
-// schemes intentionally remain bucket-secret managed and are resolved at
-// dispatch. One bucket-scoped read reports every missing OAuth/OIDC material
-// item together rather than failing selected services one at a time.
+// validateAppBucketReadiness checks the one bucket selected by an app before a
+// plan is persisted and again during apply. The planner's immutable chosen
+// alternatives let this pass validate every AND member from metadata without
+// decrypting values. One bucket-scoped pass reports all missing material.
 func validateAppBucketReadiness(ctx context.Context, s store.Store, bucketID uuid.UUID, selections []models.SDKSelection) error {
 	if bucketID == uuid.Nil {
 		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: "app config requires exactly one bucket"}
+	}
+	if !appSelectionsRequireAuth(selections) {
+		return nil
 	}
 	ready, secretKeys, err := loadAppBucketMaterial(ctx, s, bucketID)
 	if err != nil {
@@ -2103,6 +2457,15 @@ func validateAppBucketReadiness(ctx context.Context, s store.Store, bucketID uui
 	}
 }
 
+func appSelectionsRequireAuth(selections []models.SDKSelection) bool {
+	for _, selection := range selections {
+		if len(selection.RequiredAuth) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func loadAppBucketMaterial(ctx context.Context, s store.Store, bucketID uuid.UUID) (map[string]bool, map[string]bool, error) {
 	configs, err := s.ListConnectConfigsForBucket(ctx, bucketID)
 	if err != nil {
@@ -2115,7 +2478,7 @@ func loadAppBucketMaterial(ctx context.Context, s store.Store, bucketID uuid.UUI
 	ready := make(map[string]bool, len(configs))
 	for _, config := range configs {
 		if config.Enabled {
-			ready[config.ServiceID.String()+"\x00"+canonicalWorkspaceStaticAuthType(config.AuthType)] = true
+			ready[appConnectReadinessKey(config.ServiceID, config.AuthType, config.AuthName)] = true
 		}
 	}
 	secretKeys := make(map[string]bool, len(secretMetas))
@@ -2130,45 +2493,55 @@ func loadAppBucketMaterial(ctx context.Context, s store.Store, bucketID uuid.UUI
 }
 
 func missingAppBucketMaterial(selection models.SDKSelection, ready, secretKeys map[string]bool) []string {
-	authType := canonicalWorkspaceStaticAuthType(selection.AuthType)
-	serviceID := selection.ServiceID.String()
-	if authType == "oauth" || authType == "oidc" {
-		if ready[serviceID+"\x00"+authType] {
-			return nil
-		}
-		return []string{serviceID + " (" + authType + ")"}
-	}
 	missing := make([]string, 0)
-	for _, key := range appRequiredSecretKeys(selection, authType) {
-		if !secretKeys[serviceID+"\x00"+key] {
-			missing = append(missing, serviceID+" ("+authType+":"+key+")")
+	for _, required := range selection.RequiredAuth {
+		if required.AuthType == "oauth" || required.AuthType == "oidc" {
+			if !ready[appConnectReadinessKey(selection.ServiceID, required.AuthType, required.AuthName)] {
+				missing = append(missing, missingConnectedAuthMaterial(selection.ServiceID, required))
+			}
+			continue
+		}
+		for _, key := range appRequiredSecretKeys(required) {
+			if !secretKeys[selection.ServiceID.String()+"\x00"+key] {
+				missing = append(missing, selection.ServiceID.String()+" ("+required.AuthType+":"+key+")")
+			}
 		}
 	}
 	return missing
 }
 
-// appRequiredSecretKeys mirrors workspace auth material naming. AuthName
-// is pinned during Registry policy resolution, so readiness can identify every
-// static credential required without decrypting or loading its value.
-func appRequiredSecretKeys(selection models.SDKSelection, authType string) []string {
-	if authType == "" {
-		// Auth-free apps have no bucket material prerequisite. A populated
-		// auth selector is always pinned by Registry before it reaches this path.
-		return nil
-	}
-	name := strings.TrimSpace(selection.AuthName)
+func appConnectReadinessKey(serviceID uuid.UUID, authType, authName string) string {
+	return serviceID.String() + "\x00" + canonicalWorkspaceStaticAuthType(authType) + "\x00" + strings.TrimSpace(authName)
+}
+
+func missingConnectedAuthMaterial(serviceID uuid.UUID, required models.SDKRequiredAuth) string {
+	return serviceID.String() + " (" + required.AuthType + ":" + required.AuthName + ")"
+}
+
+// appRequiredSecretKeys mirrors workspace auth material naming. Exact scheme
+// identity and Basic mode were pinned during Registry policy resolution, so
+// readiness does not need provider rules or decrypted values.
+func appRequiredSecretKeys(required models.SDKRequiredAuth) []string {
+	name := strings.TrimSpace(required.AuthName)
 	if name == "" {
 		return []string{"<credential-name>"}
 	}
-	switch authType {
+	switch required.AuthType {
 	case "basic":
-		return []string{name + "_username", name + "_password"}
+		switch required.BasicPasswordMode {
+		case authrouting.BasicPasswordRequired:
+			return []string{name + "_username", name + "_password"}
+		case authrouting.BasicPasswordOptional, authrouting.BasicPasswordEmpty:
+			return []string{name + "_username"}
+		default:
+			return []string{"<invalid-basic-password-mode>"}
+		}
 	case "mtls":
 		return []string{name + "_cert", name + "_key"}
 	case "api_key", "bearer":
 		return []string{name}
 	default:
-		return nil
+		return []string{"<invalid-auth-type>"}
 	}
 }
 
@@ -2422,7 +2795,14 @@ func sameReturnedSelectionPolicy(planned, returned models.SDKSelection) bool {
 		return false
 	}
 	return planned.AuthType == returned.AuthType && planned.AuthName == returned.AuthName &&
+		sameRequiredAuth(planned.RequiredAuth, returned.RequiredAuth) &&
 		sameStrings(planned.ConnectScopes, returned.ConnectScopes) && sameInjections(planned.Injections, returned.Injections)
+}
+
+func sameRequiredAuth(expected, actual []models.SDKRequiredAuth) bool {
+	want, _ := json.Marshal(expected)
+	got, _ := json.Marshal(actual)
+	return bytes.Equal(want, got)
 }
 
 func sameStrings(expected, actual []string) bool {

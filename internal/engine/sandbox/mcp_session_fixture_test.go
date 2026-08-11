@@ -10,128 +10,13 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestListEndpointsForSelection_SelectAllReturnsEverything(t *testing.T) {
-	epA := uuid.New()
-	epB := uuid.New()
-	rc := &mockRegistryClient{
-		serviceOperations: []fusedobject.Endpoint{
-			{ID: epA, Name: "listUsers"},
-			{ID: epB, Name: "getUser"},
-		},
-	}
-	cache := NewLocalObjectCache(&mockCacheDB{}, rc)
-
-	sel := models.SDKSelection{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), SelectAll: true}
-	got, err := cache.ListEndpointsForSelection(context.Background(), "sdk-1", sel)
-	if err != nil {
-		t.Fatalf("ListEndpointsForSelection() error = %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("len(got) = %d, want 2 (SelectAll should return every endpoint)", len(got))
-	}
-}
-
-func TestListEndpointsForSelection_FiltersByEndpointIDs(t *testing.T) {
-	wanted := uuid.New()
-	other := uuid.New()
-	rc := &mockRegistryClient{
-		serviceOperations: []fusedobject.Endpoint{
-			{ID: wanted, Name: "listUsers"},
-			{ID: other, Name: "deleteUser"},
-		},
-	}
-	cache := NewLocalObjectCache(&mockCacheDB{}, rc)
-
-	sel := models.SDKSelection{
-		ServiceID:        uuid.New(),
-		ServiceVersionID: uuid.New(),
-		EndpointIDs:      []uuid.UUID{wanted},
-	}
-	got, err := cache.ListEndpointsForSelection(context.Background(), "sdk-1", sel)
-	if err != nil {
-		t.Fatalf("ListEndpointsForSelection() error = %v", err)
-	}
-	if len(got) != 1 || got[0].Name != "listUsers" {
-		t.Fatalf("got = %+v, want only the endpoint named in EndpointIDs", got)
-	}
-}
-
-func TestListEndpointsForSelection_UsesSnapshotIDFilter(t *testing.T) {
-	wanted := uuid.New()
-	other := uuid.New()
-	db := &mockCacheDB{
-		contractMetadata: &fusedobject.ServiceMetadata{ID: uuid.New(), Name: "SnapshotService"},
-		contractEndpoints: []fusedobject.Endpoint{
-			{ID: wanted, Name: "listUsers"},
-			{ID: other, Name: "deleteUser"},
-		},
-	}
-	rc := &mockRegistryClient{
-		serviceOperations: []fusedobject.Endpoint{{ID: other, Name: "registryOnly"}},
-	}
-	cache := NewLocalObjectCache(db, rc)
-
-	sel := models.SDKSelection{
-		ServiceID:        uuid.New(),
-		ServiceVersionID: uuid.New(),
-		EndpointIDs:      []uuid.UUID{wanted},
-	}
-	got, err := cache.ListEndpointsForSelection(context.Background(), "sdk-1", sel)
-	if err != nil {
-		t.Fatalf("ListEndpointsForSelection() error = %v", err)
-	}
-	if len(got) != 1 || got[0].ID != wanted {
-		t.Fatalf("got = %+v, want only the snapshot endpoint selected by id", got)
-	}
-	if db.contractIDCalls != 1 || rc.serviceOperationsCount != 0 {
-		t.Fatalf("expected one snapshot ID query and no registry list, got snapshot=%d registry=%d", db.contractIDCalls, rc.serviceOperationsCount)
-	}
-}
-
-func TestListEndpointsForSelection_EmptyEndpointIDsGrantsNothing(t *testing.T) {
-	// A non-SelectAll selection with no EndpointIDs is a scope with no
-	// endpoints, not a wildcard -- must not silently fall back to "everything".
-	rc := &mockRegistryClient{
-		serviceOperations: []fusedobject.Endpoint{{ID: uuid.New(), Name: "listUsers"}},
-	}
-	cache := NewLocalObjectCache(&mockCacheDB{}, rc)
-
-	sel := models.SDKSelection{ServiceID: uuid.New(), ServiceVersionID: uuid.New()}
-	got, err := cache.ListEndpointsForSelection(context.Background(), "sdk-1", sel)
-	if err != nil {
-		t.Fatalf("ListEndpointsForSelection() error = %v", err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("len(got) = %d, want 0", len(got))
-	}
-}
-
-func TestListEndpointsForSelection_RegistryErrorPropagates(t *testing.T) {
-	rc := &mockRegistryClient{serviceOperationsErr: errTestRegistryUnavailable}
-	cache := NewLocalObjectCache(&mockCacheDB{}, rc)
-
-	sel := models.SDKSelection{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), SelectAll: true}
-	_, err := cache.ListEndpointsForSelection(context.Background(), "sdk-1", sel)
-	if err == nil {
-		t.Fatal("ListEndpointsForSelection() error = nil, want propagated registry error")
-	}
-}
-
 func TestBuildSessionFixture_MapsEndpointsAcrossSelections(t *testing.T) {
 	svcA := uuid.New()
 	svcB := uuid.New()
 	epA := uuid.New()
 	epB := uuid.New()
 
-	rc := &mockRegistryClient{}
-	cache := NewLocalObjectCache(&mockCacheDB{}, rc)
-
-	// Different registry responses per service aren't representable by the
-	// shared mockRegistryClient's single serviceOperations field, so this
-	// test uses one selection with SelectAll -- enough to exercise the
-	// mapping (OperationID/ServiceID set, schema fields carried through)
-	// without needing a per-service-keyed fake.
-	rc.serviceOperations = []fusedobject.Endpoint{
+	endpoints := []fusedobject.Endpoint{
 		{
 			ID: epA, Name: "listUsers", Description: "List users", Method: "GET", Path: "/users",
 			Parameters: fusedobject.Parameters{{Name: "limit", In: "query", Type: "integer"}},
@@ -139,12 +24,14 @@ func TestBuildSessionFixture_MapsEndpointsAcrossSelections(t *testing.T) {
 		},
 		{ID: epB, Name: "getUser", Method: "GET", Path: "/users/{id}"},
 	}
+	db := &mockCacheDB{contractMetadata: &fusedobject.ServiceMetadata{ID: svcA}, contractEndpoints: endpoints}
+	cache := NewLocalObjectCache(db, &mockRegistryClient{})
 
 	selections := []models.SDKSelection{
 		{ServiceID: svcA, ServiceVersionID: svcB, SelectAll: true},
 	}
 
-	fixture, err := buildSessionFixture(context.Background(), cache, "sdk-1", selections, store.AppTokenPolicy{AllowAll: true})
+	fixture, err := buildSessionFixture(context.Background(), cache, selections, store.AppTokenPolicy{AllowAll: true})
 	if err != nil {
 		t.Fatalf("buildSessionFixture() error = %v", err)
 	}
@@ -153,6 +40,9 @@ func TestBuildSessionFixture_MapsEndpointsAcrossSelections(t *testing.T) {
 		t.Fatal(`fixture.Resolve("getUser") = not found, want found`)
 	}
 	assertListUsersOperation(t, fixture, svcA)
+	if db.contractBatchCalls != 1 {
+		t.Fatalf("unrestricted fixture snapshot queries = %d, want one batched query", db.contractBatchCalls)
+	}
 }
 
 // assertListUsersOperation checks the "listUsers" operation's fields, split
@@ -182,13 +72,12 @@ func assertListUsersOperation(t *testing.T, fixture *Fixture, wantServiceID uuid
 }
 
 func TestBuildSessionFixture_PropagatesListEndpointsError(t *testing.T) {
-	rc := &mockRegistryClient{serviceOperationsErr: errTestRegistryUnavailable}
-	cache := NewLocalObjectCache(&mockCacheDB{}, rc)
+	cache := NewLocalObjectCache(&mockCacheDB{contractErr: errTestRegistryUnavailable}, &mockRegistryClient{})
 
 	selections := []models.SDKSelection{
 		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), SelectAll: true},
 	}
-	_, err := buildSessionFixture(context.Background(), cache, "sdk-1", selections, store.AppTokenPolicy{AllowAll: true})
+	_, err := buildSessionFixture(context.Background(), cache, selections, store.AppTokenPolicy{AllowAll: true})
 	if err == nil {
 		t.Fatal("buildSessionFixture() error = nil, want propagated error")
 	}
@@ -210,7 +99,7 @@ func TestBuildSessionFixture_StrictTokenFetchesOnlyAllowedOperations(t *testing.
 		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), EndpointIDs: []uuid.UUID{allowedList}},
 	}
 
-	fixture, err := buildSessionFixture(context.Background(), cache, "mcp-1", selections, store.AppTokenPolicy{
+	fixture, err := buildSessionFixture(context.Background(), cache, selections, store.AppTokenPolicy{
 		AllowedOperations: []string{"getUser", "listUsers", "deleteUser"},
 	})
 	if err != nil {

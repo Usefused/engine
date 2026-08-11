@@ -937,6 +937,22 @@ func TestPrepareRequestParts_PathQueryHeaderSeparation(t *testing.T) {
 	}
 }
 
+func TestPrepareRequestParts_HEADUndeclaredParametersUseQuery(t *testing.T) {
+	srv := &models.Service{BaseURL: "https://api.example.com"}
+	obj := &models.IntegrationObject{Path: "/health", Method: http.MethodHead}
+
+	reqURL, _, bodyReader, err := prepareRequestParts(srv, obj, map[string]any{"probe": "ready"}, nil)
+	if err != nil {
+		t.Fatalf("prepareRequestParts failed: %v", err)
+	}
+	if reqURL != "https://api.example.com/health?probe=ready" {
+		t.Fatalf("HEAD URL = %q, want undeclared parameter in query", reqURL)
+	}
+	if bodyReader != nil {
+		t.Fatal("HEAD request must not synthesize a body for an undeclared parameter")
+	}
+}
+
 func TestPrepareRequestParts_FormURLEncoded(t *testing.T) {
 	srv := &models.Service{
 		BaseURL: "https://api.example.com",

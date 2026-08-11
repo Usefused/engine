@@ -178,14 +178,20 @@ func (m *mockCacheDB) ListServiceContractEndpointsForSelections(ctx context.Cont
 			ids[id] = struct{}{}
 		}
 		for _, endpoint := range m.contractEndpoints {
-			_, nameAllowed := names[endpoint.Name]
-			_, idAllowed := ids[endpoint.ID]
-			if nameAllowed && (selection.SelectAll || idAllowed) {
+			if mockSelectionAllowsEndpoint(selection, names, ids, endpoint) {
 				matches = append(matches, store.ServiceContractEndpointMatch{SelectionIndex: selection.SelectionIndex, Endpoint: endpoint})
 			}
 		}
 	}
 	return matches, nil
+}
+
+func mockSelectionAllowsEndpoint(selection store.ServiceContractEndpointSelection, names map[string]struct{}, ids map[uuid.UUID]struct{}, endpoint fusedobject.Endpoint) bool {
+	if _, allowed := names[endpoint.Name]; len(names) > 0 && !allowed {
+		return false
+	}
+	_, selected := ids[endpoint.ID]
+	return selection.SelectAll || selected
 }
 
 func (m *mockCacheDB) ListServiceContractEndpointsByIDs(ctx context.Context, serviceID, serviceVersionID uuid.UUID, endpointIDs []uuid.UUID) ([]fusedobject.Endpoint, error) {

@@ -46,8 +46,18 @@ var appSelectionGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"webhook_select_all":        &graphql.Field{Type: graphql.NewNonNull(graphql.Boolean)},
 		"auth_type":                 &graphql.Field{Type: graphql.String},
 		"auth_name":                 &graphql.Field{Type: graphql.String},
+		"required_auth":             &graphql.Field{Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(appRequiredAuthGraphQLType)))},
 		"connect_scopes":            &graphql.Field{Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(graphql.String)))},
 		"injections":                &graphql.Field{Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(appInjectionGraphQLType)))},
+	},
+})
+
+var appRequiredAuthGraphQLType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "AppRequiredAuth",
+	Fields: graphql.Fields{
+		"auth_type":           &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"auth_name":           &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"basic_password_mode": &graphql.Field{Type: graphql.String},
 	},
 })
 
@@ -239,10 +249,22 @@ func appSelectionFields(item store.AppCatalogItem) []map[string]interface{} {
 			"webhook_ids": webhookIDs, "webhook_names": nonNilStrings(selection.WebhookNames),
 			"select_all": selection.SelectAll, "webhook_select_all": selection.WebhookSelectAll,
 			"auth_type": selection.AuthType, "auth_name": selection.AuthName,
+			"required_auth":  appRequiredAuthFields(selection.RequiredAuth),
 			"connect_scopes": nonNilStrings(selection.ConnectScopes), "injections": appInjectionFields(selection.Injections),
 		})
 	}
 	return selections
+}
+
+func appRequiredAuthFields(items []models.SDKRequiredAuth) []map[string]interface{} {
+	projected := make([]map[string]interface{}, 0, len(items))
+	for _, item := range items {
+		projected = append(projected, map[string]interface{}{
+			"auth_type": item.AuthType, "auth_name": item.AuthName,
+			"basic_password_mode": string(item.BasicPasswordMode),
+		})
+	}
+	return projected
 }
 
 func nonNilStrings(items []string) []string {

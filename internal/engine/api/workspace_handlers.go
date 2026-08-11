@@ -18,6 +18,8 @@ import (
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 )
 
+const appTokensRoute = "/app-tokens"
+
 // ServiceVerifier is the Registry-lookup capability workspace membership
 // writes need: confirm a service ID is real and resolve version tags to exact
 // API-version IDs before Engine persists a workspace service version.
@@ -46,7 +48,7 @@ type ServiceVerifier interface {
 // Why separate from registerProxyRoutes: workspace membership lives in the
 // Engine's own DB. Proxying it to the Registry would
 // serve stale or wrong data; the Engine is the authoritative source here.
-func WorkspaceHandler(s store.Store, verifier ServiceVerifier, masterKey []byte) http.Handler {
+func WorkspaceHandler(s store.Store, verifier ServiceVerifier, masterKey []byte, tokenRevoker AppTokenRevoker) http.Handler {
 	r := chi.NewRouter()
 	r.Post("/services", addServiceHandler(s, verifier))
 	r.Post("/services/{id}/versions/{version_id}/refresh", RefreshServiceContractHandler(s, runtimeContractFetcher(verifier)))
@@ -68,8 +70,8 @@ func WorkspaceHandler(s store.Store, verifier ServiceVerifier, masterKey []byte)
 	r.Put("/secrets/bulk", UpsertSecretsHandler(s, masterKey))
 	r.Delete("/secrets", DeleteSecretHandler(s))
 
-	r.Post("/app-tokens", GenerateAppTokenHandler(s))
-	r.Delete("/app-tokens", RevokeAppTokenHandler(s))
+	r.Post(appTokensRoute, GenerateAppTokenHandler(s))
+	r.Delete(appTokensRoute, RevokeAppTokenHandler(tokenRevoker))
 
 	return r
 }

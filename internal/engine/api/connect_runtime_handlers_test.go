@@ -42,6 +42,9 @@ func TestStartConnectSessionHandlerCreatesAuthorizationURL(t *testing.T) {
 	if values.Get("client_id") != "client-id" || values.Get("response_type") != "code" {
 		t.Fatalf("unexpected authorize URL query: %#v", values)
 	}
+	if values.Get("scope") != "openid,profile" || values.Get("prompt") != "consent" || values.Get("state") == "metadata-state" {
+		t.Fatalf("OAuth edge policy was not applied safely: %#v", values)
+	}
 	if values.Get("code_challenge") == "" || values.Get("state") == "" || values.Get("nonce") == "" {
 		t.Fatalf("expected state, nonce, and PKCE challenge in authorize URL: %#v", values)
 	}
@@ -74,6 +77,14 @@ func TestResolveConnectScopesNarrowsAndNormalizes(t *testing.T) {
 	}
 	if strings.Join(scopes, " ") != "read write" {
 		t.Fatalf("unexpected normalized scopes: %#v", scopes)
+	}
+}
+
+func TestBuildConnectAuthorizeURLRejectsUnknownScopeDelimiter(t *testing.T) {
+	auth := fusedobject.AuthConfig{AuthorizationURL: "https://auth.example/authorize", ScopesDelimiter: "pipe"}
+	_, err := buildConnectAuthorizeURL(auth, connectClientCredentials{}, "state", "challenge", "nonce")
+	if err == nil || !strings.Contains(err.Error(), "scopes_delimiter") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
@@ -301,11 +312,17 @@ func newConnectRuntimeFixture(t *testing.T) connectRuntimeFixture {
 	metadata := &fusedobject.ServiceMetadata{
 		ID: admin.serviceID,
 		AuthConfigs: fusedobject.AuthConfigs{{
-			Name:             "bearerAuth",
-			Type:             "openIdConnect",
-			TokenURL:         "https://provider.example/token",
-			AuthorizationURL: "https://provider.example/authorize",
-			Scopes:           []string{"openid", "profile"},
+			Name:                    "bearerAuth",
+			Type:                    "oauth2",
+			Flow:                    "authorizationCode",
+			TokenURL:                "https://provider.example/token",
+			AuthorizationURL:        "https://provider.example/authorize",
+			Scopes:                  []string{"openid", "profile"},
+			PKCERequired:            true,
+			ScopesDelimiter:         "comma",
+			ExtraAuthParams:         map[string]string{"prompt": "consent", "state": "metadata-state", "client_id": "metadata-client"},
+			RefreshTokenRotates:     true,
+			TokenEndpointAuthMethod: fusedobject.TokenEndpointAuthMethodClientSecretPost,
 		}},
 	}
 	return connectRuntimeFixture{
@@ -321,7 +338,7 @@ func newConnectRuntimeFixture(t *testing.T) connectRuntimeFixture {
 // chi params and auth middleware behavior, not just handler internals.
 func buildConnectRuntimeRouter(f connectRuntimeFixture) http.Handler {
 	r := newControlTestRouter(f.store.accountID)
-	r.Mount("/workspace", WorkspaceHandler(f.store, f.verifier, f.masterKey))
+	r.Mount("/workspace", WorkspaceHandler(f.store, f.verifier, f.masterKey, f.store))
 	return r
 }
 

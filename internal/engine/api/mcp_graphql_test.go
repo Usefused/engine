@@ -947,7 +947,7 @@ func TestDeployMcpServer_CreatesActiveScopeWithNameAndKind(t *testing.T) {
 	if len(s.savedScopes) != 1 {
 		t.Fatalf("expected one saved scope, got %#v", s.savedScopes)
 	}
-	if s.savedScopes[0].kind != "mcp" || s.savedScopes[0].accountID != accountID || s.savedScopes[0].ownerTeamID != testAppOwnerTeamID {
+	if s.savedScopes[0].kind != store.AppKindMCP || s.savedScopes[0].accountID != accountID || s.savedScopes[0].ownerTeamID != testAppOwnerTeamID {
 		t.Errorf("expected kind=mcp for accountID %s, got %#v", accountID, s.savedScopes[0])
 	}
 	if revisionSink.revision != s.authorizationRevision || revisionSink.revision == 0 {
@@ -958,9 +958,9 @@ func TestDeployMcpServer_CreatesActiveScopeWithNameAndKind(t *testing.T) {
 // TestDeployMcpServer_SelectAllSkipsEndpointIds mirrors how the SDK
 // generation path (and config-as-code apply) already handle "select all"
 // service endpoints: send select_all:true with no endpoint_ids and let the
-// server resolve every endpoint at MCP-session-fixture-build time
-// (sandbox/cache.go's ListEndpointsForSelection), instead of requiring the
-// caller to enumerate ids up front.
+// server resolve every endpoint from the local contract snapshot at
+// MCP-session-fixture-build time, instead of requiring the caller to enumerate
+// IDs up front.
 func TestDeployMcpServer_SelectAllSkipsEndpointIds(t *testing.T) {
 	accountID := uuid.New()
 	serviceID := uuid.New()
@@ -1080,13 +1080,18 @@ func TestAppReadsExactEngineVersion(t *testing.T) {
 func TestAppSelectionFieldsPreserveSyncDefinition(t *testing.T) {
 	serviceID, serviceVersionID, endpointID := uuid.New(), uuid.New(), uuid.New()
 	fields := appSelectionFields(store.AppCatalogItem{Selections: []models.SDKSelection{{
-		ServiceID: serviceID, ServiceVersionID: serviceVersionID, DefinitionSchemaVersion: 2,
+		ServiceID: serviceID, ServiceVersionID: serviceVersionID, DefinitionSchemaVersion: 3,
 		EndpointIDs: []uuid.UUID{endpointID}, OperationNames: []string{"createIssue"},
 		AuthType: "oauth", AuthName: "atlassian", ConnectScopes: []string{"write:jira-work"},
-		Injections: []models.SDKInjectionConfig{{Location: "header", Name: "X-Tenant", Value: "${TENANT}", Mode: "template"}},
+		RequiredAuth: []models.SDKRequiredAuth{{AuthType: "oauth", AuthName: "atlassian"}, {AuthType: "mtls", AuthName: "clientCertificate"}},
+		Injections:   []models.SDKInjectionConfig{{Location: "header", Name: "X-Tenant", Value: "${TENANT}", Mode: "template"}},
 	}}})
-	if len(fields) != 1 || fields[0]["definition_schema_version"] != 2 || fields[0]["auth_name"] != "atlassian" {
+	if len(fields) != 1 || fields[0]["definition_schema_version"] != 3 || fields[0]["auth_name"] != "atlassian" {
 		t.Fatalf("selection metadata was not preserved: %#v", fields)
+	}
+	required := fields[0]["required_auth"].([]map[string]interface{})
+	if len(required) != 2 || required[1]["auth_name"] != "clientCertificate" {
+		t.Fatalf("selection required auth was not preserved: %#v", required)
 	}
 	injections := fields[0]["injections"].([]map[string]interface{})
 	if len(injections) != 1 || injections[0]["name"] != "X-Tenant" {
