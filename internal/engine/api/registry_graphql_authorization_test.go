@@ -79,8 +79,8 @@ func TestRegistryGraphQLAuthorizationFailsClosedForUnknownRoot(t *testing.T) {
 	}
 }
 
-func TestRegistryGraphQLAuthorizationClassifiesRuntimeContractRoots(t *testing.T) {
-	roots := []string{"serviceRuntimeContracts", "serviceVersionExecutionAuthContracts", "serviceWebhookMetadata", "serviceVersionImportIdentities"}
+func TestRegistryGraphQLAuthorizationClassifiesDiscoveryAndRuntimeContractRoots(t *testing.T) {
+	roots := []string{"endpointByName", "serviceRuntimeContracts", "serviceVersionExecutionAuthContracts", "serviceWebhookMetadata", "serviceVersionImportIdentities"}
 
 	for _, root := range roots {
 		t.Run(root, func(t *testing.T) {

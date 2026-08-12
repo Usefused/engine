@@ -192,6 +192,35 @@ func TestSelectRequestAuthRequiresPinnedOAuth2Flow(t *testing.T) {
 	}
 }
 
+// TestSelectRequestAuthSkipsUnselectedOAuthFlow proves an explicit bearer
+// choice reaches its provider alternative even when an ambiguous OAuth scheme
+// appears first in source order.
+func TestSelectRequestAuthSkipsUnselectedOAuthFlow(t *testing.T) {
+	auths := models.AuthConfigs{
+		{Name: "oauth2", Type: "oauth2", OAuth2Flows: models.OAuth2Flows{
+			"authorizationCode": {AuthorizationURL: "https://auth.example/authorize", TokenURL: "https://auth.example/token"},
+			"clientCredentials": {TokenURL: "https://auth.example/token"},
+		}},
+		{Name: "privateAccessToken", Type: "http", Scheme: "bearer"},
+	}
+	requirements := authrouting.Requirements{
+		{Schemes: []authrouting.Requirement{{Scheme: "oauth2"}}},
+		{Schemes: []authrouting.Requirement{{Scheme: "privateAccessToken"}}},
+	}
+	credentials := map[string]any{
+		"fused_auth_type": "bearer", "fused_auth_name": "privateAccessToken",
+		"privateAccessToken": "fake-provider-token",
+	}
+
+	selected, err := selectRequestAuth(auths, requirements, credentials)
+	if err != nil {
+		t.Fatalf("selectRequestAuth: %v", err)
+	}
+	if len(selected) != 1 || selected[0].Name != "privateAccessToken" {
+		t.Fatalf("selected auth = %#v", selected)
+	}
+}
+
 func TestOAuth1SigningIsProviderNeutral(t *testing.T) {
 	auth := models.AuthConfig{Name: "signed", Type: "oauth1", Strategy: &models.AuthRuntimeStrategy{
 		Kind: "oauth1_signature", OAuth1: &models.OAuth1Strategy{SignatureMethod: "hmac_sha256", ParameterLocation: "authorization_header"},

@@ -61,39 +61,53 @@ func authDefinitions(auths models.AuthConfigs) (map[string]models.AuthConfig, er
 	return definitions, nil
 }
 
+// satisfiableAlternative applies flow and credential checks only after the
+// complete alternative matches an explicit SDK selector. This lets a bearer
+// alternative follow OAuth without OAuth-specific input blocking it first.
 func satisfiableAlternative(alternative authrouting.Alternative, definitions map[string]models.AuthConfig, credentials map[string]any, selectorType, selectorName string) (models.AuthConfigs, bool, error) {
 	if len(alternative.Schemes) == 0 {
 		return models.AuthConfigs{}, selectorType == "" && selectorName == "", nil
 	}
-	selected := make(models.AuthConfigs, 0, len(alternative.Schemes))
-	typeMatched := selectorType == ""
-	nameMatched := selectorName == ""
-	seen := make(map[string]struct{}, len(alternative.Schemes))
-	for _, requirement := range alternative.Schemes {
-		auth, err := requiredAuth(requirement.Scheme, definitions, seen, credentials)
+	declared, matches, err := matchingAlternativeDefinitions(alternative, definitions, selectorType, selectorName)
+	if err != nil || !matches {
+		return nil, false, err
+	}
+	selected := make(models.AuthConfigs, 0, len(declared))
+	for _, definition := range declared {
+		auth, err := selectOAuth2Flow(definition, credentials)
 		if err != nil {
 			return nil, false, err
 		}
-		typeMatched = typeMatched || authrouting.CanonicalType(auth.Type, auth.Scheme) == selectorType
-		nameMatched = nameMatched || auth.Name == selectorName
 		if !authSatisfied(auth, credentials) {
 			return nil, false, nil
 		}
 		selected = append(selected, auth)
 	}
-	return selected, typeMatched && nameMatched, nil
+	return selected, true, nil
 }
 
-func requiredAuth(name string, definitions map[string]models.AuthConfig, seen map[string]struct{}, credentials map[string]any) (models.AuthConfig, error) {
-	auth, ok := definitions[name]
-	if !ok {
-		return models.AuthConfig{}, authRoutingError("invalid_contract")
+// matchingAlternativeDefinitions validates one AND-set and decides selector
+// compatibility without running scheme-specific logic from an alternative the
+// caller did not choose.
+func matchingAlternativeDefinitions(alternative authrouting.Alternative, definitions map[string]models.AuthConfig, selectorType, selectorName string) (models.AuthConfigs, bool, error) {
+	declared := make(models.AuthConfigs, 0, len(alternative.Schemes))
+	typeMatched := selectorType == ""
+	nameMatched := selectorName == ""
+	seen := make(map[string]struct{}, len(alternative.Schemes))
+	for _, requirement := range alternative.Schemes {
+		auth, ok := definitions[requirement.Scheme]
+		if !ok {
+			return nil, false, authRoutingError("invalid_contract")
+		}
+		if _, exists := seen[auth.Name]; exists {
+			return nil, false, authRoutingError("invalid_contract")
+		}
+		seen[auth.Name] = struct{}{}
+		typeMatched = typeMatched || authrouting.CanonicalType(auth.Type, auth.Scheme) == selectorType
+		nameMatched = nameMatched || auth.Name == selectorName
+		declared = append(declared, auth)
 	}
-	if _, exists := seen[name]; exists {
-		return models.AuthConfig{}, authRoutingError("invalid_contract")
-	}
-	seen[name] = struct{}{}
-	return selectOAuth2Flow(auth, credentials)
+	return declared, typeMatched && nameMatched, nil
 }
 
 func authSatisfied(auth models.AuthConfig, credentials map[string]any) bool {

@@ -54,6 +54,8 @@ func (d *Dispatcher) runPaginationV3(ctx context.Context, span trace.Span, srv *
 	return d.executePaginationV3Pages(ctx, runCtx, srv, obj, cloneParams(params), credentials, bucketValues, stream, policy, limits, state)
 }
 
+// executePaginationV3Pages buffers successful pages until it can publish one
+// aggregate, while forwarding a final provider failure without partial results.
 func (d *Dispatcher) executePaginationV3Pages(ctx, runCtx context.Context, srv *models.Service, obj *models.IntegrationObject, baseParams, credentials map[string]any, bucketValues []store.BucketValue, stream ResponseStream, policy *paginationpolicy.Config, limits paginationpolicy.Limits, state *paginationV3State) (status int, err error) {
 	aggregate := &paginationAggregate{}
 	for {
@@ -62,6 +64,9 @@ func (d *Dispatcher) executePaginationV3Pages(ctx, runCtx context.Context, srv *
 		status, response, page, err = d.executePaginationV3Page(ctx, runCtx, srv, obj, baseParams, credentials, bucketValues, policy, limits, state, aggregate)
 		if err != nil {
 			return status, err
+		}
+		if !paginationResponseIsSuccessful(status) {
+			return status, sendPaginationProviderResponse(stream, status, page)
 		}
 		stop, err := finishPaginationV3Page(policy, state, response, page)
 		if err != nil {
@@ -73,6 +78,8 @@ func (d *Dispatcher) executePaginationV3Pages(ctx, runCtx context.Context, srv *
 	}
 }
 
+// executePaginationV3Page decodes only successful responses because pagination
+// paths describe success documents and must never overwrite provider failures.
 func (d *Dispatcher) executePaginationV3Page(ctx, runCtx context.Context, srv *models.Service, obj *models.IntegrationObject, baseParams, credentials map[string]any, bucketValues []store.BucketValue, policy *paginationpolicy.Config, limits paginationpolicy.Limits, state *paginationV3State, aggregate *paginationAggregate) (int, paginationV3Response, *paginationPage, error) {
 	if err := checkPaginationV3Bounds(ctx, runCtx, state, limits); err != nil {
 		return 0, paginationV3Response{}, nil, err
@@ -82,6 +89,9 @@ func (d *Dispatcher) executePaginationV3Page(ctx, runCtx context.Context, srv *m
 	status, err := d.executeWithRetries(runCtx, srv, pageObj, pageParams, credentials, bucketValues, page)
 	if err != nil {
 		return status, paginationV3Response{}, page, paginationProviderError(ctx, err)
+	}
+	if !paginationResponseIsSuccessful(status) {
+		return status, paginationV3Response{}, page, nil
 	}
 	response, err := decodePaginationV3Page(page, policy, state)
 	if err != nil {

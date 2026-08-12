@@ -350,6 +350,56 @@ func TestPaginationV3RepeatedValuesAndBoundsFailSafely(t *testing.T) {
 	}
 }
 
+// TestPaginationV3PreservesProviderFailure proves an error response on a later
+// page replaces the private partial aggregate and retains SDK auth semantics.
+func TestPaginationV3PreservesProviderFailure(t *testing.T) {
+	caseData := v3TokenCase()
+	caseData.object.Pagination = modelPolicy(caseData.policy)
+	caseData.object.Responses = models.Responses{
+		"200":     {Representations: []models.ResponseRepresentation{{MediaType: "application/json"}}},
+		"default": {Representations: []models.ResponseRepresentation{{MediaType: "application/json"}}},
+	}
+	calls := 0
+	errorBody := `{"status":"error","category":"EXPIRED_AUTHENTICATION"}`
+	dispatcher := &Dispatcher{client: &http.Client{Transport: paginationRoundTripper(func(request *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return paginationResponse(request, `{"items":[1],"next":"second"}`, http.Header{"Content-Type": {"application/json"}}), nil
+		}
+		response := paginationResponse(request, errorBody, http.Header{"Content-Type": {"application/json"}})
+		response.StatusCode = http.StatusUnauthorized
+		return response, nil
+	})}}
+	stream := &mockStream{}
+	status, err := dispatcher.ExecuteStream(context.Background(), &models.Service{BaseURL: "https://provider.test"}, explicitAnonymousEndpoint(caseData.object), nil, nil, nil, stream)
+	if err != nil || status != http.StatusUnauthorized || calls != 2 {
+		t.Fatalf("status=%d err=%v calls=%d", status, err, calls)
+	}
+	if code := PaginationFailureCode(err); code != "" {
+		t.Fatalf("provider failure was overwritten by pagination code %q", code)
+	}
+	if len(stream.contracts) != 1 || stream.contracts[0] != (responseContractSignal{status: http.StatusUnauthorized, family: "json"}) {
+		t.Fatalf("response contract=%#v", stream.contracts)
+	}
+	if len(stream.chunks) != 1 || string(stream.chunks[0]) != errorBody || stream.bodyBeforeContract {
+		t.Fatalf("response chunks=%q bodyBeforeContract=%t", stream.chunks, stream.bodyBeforeContract)
+	}
+}
+
+// TestPaginationV3StillRejectsMalformedSuccess keeps response_invalid scoped to
+// successful provider documents that violate their declared pagination shape.
+func TestPaginationV3StillRejectsMalformedSuccess(t *testing.T) {
+	caseData := v3TokenCase()
+	caseData.object.Pagination = modelPolicy(caseData.policy)
+	dispatcher := &Dispatcher{client: &http.Client{Transport: paginationRoundTripper(func(request *http.Request) (*http.Response, error) {
+		return paginationResponse(request, `{"error":"not an items document"}`, nil), nil
+	})}}
+	status, err := dispatcher.ExecuteStream(context.Background(), &models.Service{BaseURL: "https://provider.test"}, explicitAnonymousEndpoint(caseData.object), nil, nil, nil, &mockStream{})
+	if status != http.StatusOK || PaginationFailureCode(err) != "response_invalid" {
+		t.Fatalf("status=%d code=%q err=%v", status, PaginationFailureCode(err), err)
+	}
+}
+
 func TestPaginationV3RejectsTargetTypeBeforeProviderDispatch(t *testing.T) {
 	caseData := v3TokenCase()
 	caseData.object.Parameters[0].Type = "integer"

@@ -39,11 +39,13 @@ func PaginationFailureCode(err error) string {
 }
 
 type paginationPage struct {
-	body       bytes.Buffer
-	headers    http.Header
-	requestURL *url.URL
-	maxBytes   int64
-	headerKeys map[string]struct{}
+	body        bytes.Buffer
+	headers     http.Header
+	requestURL  *url.URL
+	maxBytes    int64
+	headerKeys  map[string]struct{}
+	status      int
+	mediaFamily string
 }
 
 type paginationAggregate struct {
@@ -59,10 +61,22 @@ func (p *paginationPage) Send(chunk []byte) error {
 	return err
 }
 
+// ResetForRetry discards every response fact from an attempt that retry policy
+// rejected, preventing its status or body from leaking into the final result.
 func (p *paginationPage) ResetForRetry() {
 	p.body.Reset()
 	p.headers = make(http.Header)
 	p.requestURL = nil
+	p.status = 0
+	p.mediaFamily = ""
+}
+
+// SendResponseContract captures the provider status and reviewed media family
+// while pagination buffers a page; failed responses are later forwarded intact.
+func (p *paginationPage) SendResponseContract(status int, mediaFamily string) error {
+	p.status = status
+	p.mediaFamily = boundedResponseContractFamily(mediaFamily)
+	return nil
 }
 
 func (p *paginationPage) CaptureResponseMetadata(headers http.Header, requestURL *url.URL) {
@@ -128,6 +142,28 @@ func sendPaginationResult(stream ResponseStream, status int, aggregate *paginati
 		return err
 	}
 	return sendPaginationAggregate(stream, aggregate, itemsPath, maxBytes)
+}
+
+// paginationResponseIsSuccessful centralizes the boundary between documents
+// pagination may interpret and provider outcomes it must preserve unchanged.
+func paginationResponseIsSuccessful(status int) bool {
+	return status >= http.StatusOK && status < http.StatusMultipleChoices
+}
+
+// sendPaginationProviderResponse preserves non-success provider semantics
+// instead of interpreting an error document as a successful pagination page.
+func sendPaginationProviderResponse(stream ResponseStream, status int, page *paginationPage) error {
+	family := "unknown"
+	if page != nil && page.status == status {
+		family = page.mediaFamily
+	}
+	if err := SendResponseContract(stream, status, family); err != nil {
+		return err
+	}
+	if page == nil || page.body.Len() == 0 {
+		return nil
+	}
+	return stream.Send(page.body.Bytes())
 }
 
 func (a *paginationAggregate) result(itemsPath string) (any, bool) {
