@@ -8,6 +8,14 @@ import (
 	"github.com/Usefused/engine/internal/shared/config"
 )
 
+// TestStartCommandHasNoExternalUIOverride ensures operators cannot re-enable
+// cross-origin UI hosting through the retired hidden flag.
+func TestStartCommandHasNoExternalUIOverride(t *testing.T) {
+	if flag := startCmd.Flags().Lookup("ui-url"); flag != nil {
+		t.Fatal("Engine start command still exposes --ui-url")
+	}
+}
+
 func TestLoadEngineEnvKeepsDotEnvSeparateFromInheritedEnvironment(t *testing.T) {
 	preserveStartFlagValues(t)
 	t.Setenv("FUSED_LICENSE_KEY", "environment-license-key")
@@ -49,15 +57,13 @@ func TestApplyEngineOverridesIgnoresFusedAPIKey(t *testing.T) {
 	assertEnvValue(t, "FUSED_LICENSE_KEY", "")
 }
 
+// preserveStartFlagValues isolates process-global Cobra values between tests.
 func preserveStartFlagValues(t *testing.T) {
 	t.Helper()
 	previousLicenseKey := licenseKey
-	previousUIURL := uiURL
 	licenseKey = ""
-	uiURL = ""
 	t.Cleanup(func() {
 		licenseKey = previousLicenseKey
-		uiURL = previousUIURL
 	})
 }
 

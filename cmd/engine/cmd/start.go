@@ -39,7 +39,6 @@ import (
 	"github.com/Usefused/engine/internal/shared/config"
 	"github.com/Usefused/engine/internal/shared/db"
 	"github.com/Usefused/engine/internal/shared/messaging"
-	apimiddleware "github.com/Usefused/engine/internal/shared/middleware"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/observability"
 	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
@@ -56,7 +55,6 @@ var (
 	grpcHost    string
 	grpcPort    string
 	webhookPort string
-	uiURL       string
 	licenseKey  string
 	environment string
 )
@@ -89,15 +87,14 @@ var startCmd = &cobra.Command{
 	},
 }
 
+// init registers only runtime controls owned by Engine; UI origin selection is
+// absent because the bundled UI is served from this same HTTP listener.
 func init() {
 	RootCmd.AddCommand(startCmd)
 	startCmd.Flags().StringVar(&port, "port", "8081", "HTTP port for API and UI")
 	startCmd.Flags().StringVar(&grpcHost, "grpc-host", "127.0.0.1", "gRPC listen host")
 	startCmd.Flags().StringVar(&grpcPort, "grpc-port", "50051", "gRPC port for SDK connections")
 	startCmd.Flags().StringVar(&webhookPort, "webhook-port", "", "Dedicated HTTP port for Webhook Ingress (optional)")
-	startCmd.Flags().StringVar(&uiURL, "ui-url", "", "URL for the UI (overrides engine.yaml)")
-	// Hide ui-url from help since it's mainly for local dev overrides
-	startCmd.Flags().MarkHidden("ui-url")
 	startCmd.Flags().StringVar(&licenseKey, "license-key", "", "License Key for Registry handshake")
 	startCmd.Flags().StringVar(&environment, "environment", "", "Deployment environment label (e.g. production, staging) -- attached to OTel traces/logs/metrics and echoed on /health (overrides FUSED_ENGINE_ENVIRONMENT env var when set; defaults to \"production\")")
 }
@@ -290,10 +287,9 @@ func loadEngineEnvFiles(paths []string) config.EngineLicenseSources {
 	return sources
 }
 
+// applyEngineOverrides projects resolved secrets into dependencies that still
+// read process configuration, without creating a second UI configuration path.
 func applyEngineOverrides(cfg *config.Config) {
-	if uiURL != "" {
-		cfg.UIURL = uiURL
-	}
 	if cfg.Engine.LicenseKey == "" {
 		_ = os.Unsetenv("FUSED_LICENSE_KEY")
 	} else {
@@ -722,6 +718,8 @@ type engineRouterDeps struct {
 	appTokenRevoker    api.AppTokenRevoker
 }
 
+// buildEngineRouter serves API and embedded UI on one origin, so cross-origin
+// browser access is neither required nor enabled by Engine configuration.
 func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	// Router
 	r := chi.NewRouter()
@@ -729,7 +727,6 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
 	r.Use(enginemiddleware.LicenseEnforcement)
-	r.Use(apimiddleware.CORS(deps.cfg.UIURL))
 	// Embedded SPA assets are many small JS/CSS chunks; compressing here keeps
 	// local Engine hosting close to what a CDN would normally do for the UI.
 	// JSON stays uncompressed so proxied GraphQL does not add buffering while

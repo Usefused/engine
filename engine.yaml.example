@@ -13,8 +13,6 @@ encryption_key: "fused-default-encrypt-key-32b"
 # Override in production via FUSED_DATABASE_URL or DATABASE_URL environment variable.
 database:
   url: "postgres://fused:password@localhost:5432/fused?sslmode=disable"
-ui_url: "http://localhost:5173"
-
 engine:
   # license_key: License key for Registry handshake (authentication and entitlements).
   # Override in production via FUSED_LICENSE_KEY environment variable.
