@@ -54,9 +54,11 @@ func (d *Dispatcher) executeSOAP(
 
 	// The SOAP action name is typically the NormalizedPath.
 	actionName := obj.NormalizedPath
-	if _, err := d.awaitProviderRateLimit(ctx, srv, obj); err != nil {
+	_, permit, err := d.awaitProviderRateLimitPermit(ctx, srv, obj)
+	if err != nil {
 		return 429, err
 	}
+	defer d.releaseProviderRateLimit(ctx, permit)
 	res, err := client.Call(actionName, p)
 
 	// Check if network request itself failed

@@ -48,7 +48,7 @@ func TestEngineSchemaDefinesAccessControlFoundation(t *testing.T) {
 		"CREATE TABLE IF NOT EXISTS fused_authorization_state",
 		"CHECK (singleton_key = 1)",
 		"CREATE TABLE IF NOT EXISTS fused_audit_events",
-		"CHECK (outcome IN ('attempted', 'allowed', 'denied', 'succeeded', 'failed'))",
+		"CHECK (outcome IN ('attempted', 'allowed', 'denied', 'succeeded', 'failed', 'rolled_back', 'cancelled'))",
 		"missing_requirements jsonb NOT NULL DEFAULT '[]'::jsonb",
 		"metadata            jsonb NOT NULL DEFAULT '{}'::jsonb",
 		"idx_fused_audit_events_occurred_at",
@@ -135,12 +135,15 @@ func readEngineMigrationRecord(t *testing.T, ctx context.Context, pool *pgxpool.
 func assertEngineMigrationNotReplayed(t *testing.T, ctx context.Context, pool *pgxpool.Pool, first engineMigrationRecord) {
 	t.Helper()
 	var migrationRows int
-	var second engineMigrationRecord
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*), MIN(name), MIN(applied_at) FROM fused_engine_schema_migrations`).Scan(&migrationRows, &second.Name, &second.AppliedAt); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM fused_engine_schema_migrations`).Scan(&migrationRows); err != nil {
 		t.Fatalf("read Engine migration ledger after restart: %v", err)
 	}
 	if migrationRows != len(engineMigrations()) {
 		t.Fatalf("Engine migration ledger rows = %d, want %d", migrationRows, len(engineMigrations()))
+	}
+	var second engineMigrationRecord
+	if err := pool.QueryRow(ctx, `SELECT name, applied_at FROM fused_engine_schema_migrations WHERE version = $1`, engineMigrationVersion).Scan(&second.Name, &second.AppliedAt); err != nil {
+		t.Fatalf("read current Engine migration after restart: %v", err)
 	}
 	if first.Name != engineMigrationName || second.Name != first.Name {
 		t.Fatalf("Engine migration name changed across restart: first=%q second=%q", first.Name, second.Name)

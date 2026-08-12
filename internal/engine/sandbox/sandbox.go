@@ -9,9 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -148,8 +146,6 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, cache ObjectCache, validator auth.TokenValidator, resolver SecretResolver, rateLimits store.ProviderRateLimitStore, enginePort string) {
-	initSharedSandboxes()
-
 	cfg = appCfg
 	globalNATSClient = nc
 	globalObjectCache = cache
@@ -206,10 +202,10 @@ var EngineStreamExecuteFunc = func(ctx context.Context, appID, token, endpointNa
 // gRPC edge and the MCP path funnel through it: validate scope (governance
 // layer 2), audit, then stream the vendor response via the dispatcher.
 //
-// An OTEL thread is opened here for every user/agent-triggered execution.
-// Because the user owns the MCP executor, full params are safe to record in spans
-// for debugging and observability — credentials are the only exception and are
-// NEVER written to spans, attrs, or log lines (sanitiseParams strips them first).
+// An OTEL span is opened here for every user/agent-triggered execution. Raw
+// parameters are intentionally absent: request values can contain secrets or
+// provider payloads even when they are not named like credentials. Bounded
+// contract, outcome, timing, and identity metadata provide the audit signal.
 func engineExecuteCore(
 	ctx context.Context,
 	cache ObjectCache,
@@ -226,6 +222,9 @@ func engineExecuteCore(
 		attribute.String("endpoint_name", endpointName),
 		attribute.Bool("idempotency_key_present", idempotencyKeyFromContext(ctx) != ""),
 		attribute.Bool("request_body_hash_present", requestBodyHashFromContext(ctx) != ""),
+		attribute.Int("execution.contract_version", 0),
+		attribute.Int("execution.required_capabilities_count", 0),
+		attribute.String("execution.contract_negotiation.outcome", "not_reached"),
 	))
 	defer span.End()
 
@@ -265,7 +264,7 @@ func engineExecuteCore(
 	// branching within the repo's complexity budget. See that function's doc
 	// comment for the child span lifecycle it owns.
 	resolutionStarted := time.Now()
-	match, err := resolveScopedEndpoint(ctx, cache, span, appID, endpointName)
+	match, err := resolveExecutionContractScopedEndpoint(ctx, cache, span, appID, endpointName)
 	if err != nil {
 		return err
 	}
@@ -324,13 +323,29 @@ func engineExecuteCore(
 	return finishExecutionDispatch(ctx, span, auditState.providerHTTPStatus, executionTimeoutMs, err)
 }
 
+func resolveExecutionContractScopedEndpoint(ctx context.Context, cache ObjectCache, span trace.Span, appID, endpointName string) (*scopedEndpoint, error) {
+	match, err := resolveScopedEndpoint(ctx, cache, span, appID, endpointName)
+	if err != nil {
+		if _, incompatible := fusedobject.ExecutionContractCompatibilityDetails(err); incompatible {
+			recordExecutionContractNegotiation(span, fusedobject.ExecutionContractEnvelope{}, err)
+		}
+		return nil, err
+	}
+	err = fusedobject.ValidateExecutionContractEnvelope(match.service.ExecutionContractEnvelope)
+	recordExecutionContractNegotiation(span, match.service.ExecutionContractEnvelope, err)
+	if err != nil {
+		return nil, err
+	}
+	return match, nil
+}
+
 // Final status projection is kept separate from governance and dispatch so
 // adding a new provider outcome cannot make the execution boundary itself too
 // complex to audit reliably.
 func finishExecutionDispatch(ctx context.Context, span trace.Span, providerHTTPStatus, executionTimeoutMs int, dispatchErr error) error {
 	if dispatchErr != nil {
 		dispatchErr = normalizeExecutionTimeout(ctx, dispatchErr, executionTimeoutMs)
-		span.SetStatus(codes.Error, dispatchErr.Error())
+		span.SetStatus(codes.Error, executionFailureDescription(dispatchErr, providerHTTPStatus))
 		return dispatchErr
 	}
 	if providerHTTPStatus >= http.StatusBadRequest {
@@ -344,6 +359,14 @@ func finishExecutionDispatch(ctx context.Context, span trace.Span, providerHTTPS
 	return nil
 }
 
+func executionFailureDescription(dispatchErr error, providerHTTPStatus int) string {
+	_, code := classifyExecutionFailure(dispatchErr, providerHTTPStatus)
+	if code == "" {
+		return "request_failed"
+	}
+	return code
+}
+
 func contextWithProviderRateLimitIdentity(ctx context.Context, accountID uuid.UUID, credentials map[string]any) (context.Context, error) {
 	bucketID, err := optionalResolvedCredentialUUID(credentials, "fused_bucket_id")
 	if err != nil {
@@ -353,7 +376,19 @@ func contextWithProviderRateLimitIdentity(ctx context.Context, accountID uuid.UU
 	if err != nil {
 		return nil, err
 	}
-	return engine.WithProviderRateLimitIdentity(ctx, accountID, bucketID, connectionID), nil
+	metadata, err := resourceMetadataValues(credentials["fused_resource_metadata"])
+	if err != nil {
+		return nil, err
+	}
+	bindings := make(map[string]string, len(metadata)+1)
+	for key, value := range metadata {
+		bindings["connection."+key] = value
+	}
+	if resourceID := credentialString(credentials, "fused_resource_provider_id"); resourceID != "" {
+		bindings["resource.id"] = resourceID
+	}
+	ctx = engine.WithProviderRateLimitIdentity(ctx, accountID, bucketID, connectionID)
+	return engine.WithProviderQuotaBindings(ctx, bindings), nil
 }
 
 func optionalResolvedCredentialUUID(credentials map[string]any, key string) (uuid.UUID, error) {
@@ -563,6 +598,10 @@ func dispatchRuntimeEnvironment(
 		recordRuntimeEnvironmentAttrs(span, match, environment, "")
 		return RuntimeEnvironmentResolution{}, 0, err
 	}
+	if err := applyOperationRuntimeServer(match.service, srv, obj, resolution, credentials, bucketValues); err != nil {
+		recordRuntimeEnvironmentAttrs(span, match, environment, "")
+		return RuntimeEnvironmentResolution{}, 0, err
+	}
 	resourceSource := selectedConnectedResourceSource(credentials)
 	recordRuntimeEnvironmentAttrs(span, match, resolution.Environment, resolution.Source)
 	if resourceSource != "" {
@@ -689,6 +728,9 @@ func findEndpointInScope(ctx context.Context, cache ObjectCache, appID string, s
 		fusedObj, err := cache.GetOrFetchServiceMetadata(ctx, appID, sel.ServiceID.String())
 		engine.MeasureExecutionTiming(ctx, "service_metadata_resolution", serviceStarted)
 		if err != nil {
+			if _, incompatible := fusedobject.ExecutionContractCompatibilityDetails(err); incompatible {
+				return nil, err
+			}
 			continue
 		}
 
@@ -696,6 +738,9 @@ func findEndpointInScope(ctx context.Context, cache ObjectCache, appID string, s
 		ep, err := cache.GetEndpoint(ctx, appID, sel.ServiceID.String(), endpointName)
 		engine.MeasureExecutionTiming(ctx, "endpoint_lookup", endpointStarted)
 		if err != nil {
+			if _, incompatible := fusedobject.ExecutionContractCompatibilityDetails(err); incompatible {
+				return nil, err
+			}
 			// Not found in this service, try next
 			continue
 		}
@@ -722,6 +767,11 @@ func serviceForRuntimeEnvironment(metadata *fusedobject.ServiceMetadata, environ
 	}
 	srv := fusedToService(metadata)
 	srv.BaseURL = resolution.BaseURL
+	srv.ServiceBaseURL = resolution.BaseURL
+	srv.ServerSource = "service"
+	if resolution.Source == "connection_resource" {
+		srv.ServerSource = "connection_resource"
+	}
 	return srv, resolution, nil
 }
 
@@ -795,90 +845,4 @@ func credentialKeysFromAuthConfigs(auths models.AuthConfigs) []string {
 		}
 	}
 	return keys
-}
-
-// httpBlockPreloadScript is a Node.js --require preload that intercepts
-// require() of raw HTTP client modules before any sandboxed MCP tool code
-// runs, so outbound network access can only happen through the paths the
-// sandbox explicitly allows.
-const httpBlockPreloadScript = `'use strict';
-// Fused sandbox — HTTP access is blocked in this environment.
-// This preload intercepts require() before any user code runs.
-const Module = require('module');
-const _orig = Module._resolveFilename.bind(Module);
-const BLOCKED = new Set([
-  'http','node:http','https','node:https',
-  'node-fetch','axios','got','cross-fetch',
-  'undici','superagent','request','needle','node-fetch-native',
-]);
-Module._resolveFilename = function(req, parent, isMain, opts) {
-  const base = req.split('/')[0]; // handle "axios/lib/…" paths
-  if (BLOCKED.has(req) || BLOCKED.has(base))
-    throw new Error('[Sandbox] HTTP modules are disabled. Got: ' + req);
-  return _orig(req, parent, isMain, opts);
-};
-`
-
-// writeHTTPBlockPreload keeps the defense-in-depth preload available to legacy
-// sandbox execution paths while the current MCP runtime enforces network
-// access inside its dependency-complete embedded bundle.
-func writeHTTPBlockPreload(dir string) {
-	path := filepath.Join(dir, "http-block-preload.cjs")
-	if err := os.WriteFile(path, []byte(httpBlockPreloadScript), 0644); err != nil {
-		slog.Error("Failed to write HTTP block preload script", slog.Any("error", err), slog.String("path", path))
-	}
-}
-
-var legacySharedSandboxEntries = []string{"node_modules", "package.json", "package-lock.json"}
-
-func removeLegacySharedSandboxDependencies(sharedDir string) error {
-	for _, name := range legacySharedSandboxEntries {
-		path := filepath.Join(sharedDir, name)
-		if err := makeLegacyDependencyWritable(path); err != nil {
-			return fmt.Errorf("make legacy sandbox dependency %s writable: %w", name, err)
-		}
-		if err := os.RemoveAll(path); err != nil {
-			return fmt.Errorf("remove legacy sandbox dependency %s: %w", name, err)
-		}
-	}
-	return nil
-}
-
-func makeLegacyDependencyWritable(root string) error {
-	if _, err := os.Lstat(root); os.IsNotExist(err) {
-		return nil
-	} else if err != nil {
-		return err
-	}
-	// Older Engines deliberately made the cache read-only. Restore only owner
-	// write permission so the unprivileged Engine user can remove its own tree.
-	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		// npm bin links need no permission change, and following an unexpected
-		// symlink here could modify a target outside the retired cache tree.
-		if info.Mode()&os.ModeSymlink != 0 {
-			return nil
-		}
-		return os.Chmod(path, info.Mode().Perm()|0o200)
-	})
-}
-
-// initSharedSandboxes removes the retired per-tenant dependency cache. The
-// current MCP runtime and all of its npm dependencies are bundled by esbuild
-// and embedded in the Engine binary, so retaining this cache only wastes PVC
-// space. Exact known paths are removed to preserve any per-app directories.
-func initSharedSandboxes() {
-	sharedDir := sandboxesDir()
-	if err := os.MkdirAll(sharedDir, 0755); err != nil {
-		slog.Error("Failed to initialize sandbox data directory", slog.Any("error", err), slog.String("path", sharedDir))
-		return
-	}
-	if err := removeLegacySharedSandboxDependencies(sharedDir); err != nil {
-		slog.Warn("Failed to remove legacy sandbox dependencies", slog.Any("error", err))
-	}
-
-	// Keep this small compatibility asset current without installing packages.
-	writeHTTPBlockPreload(sharedDir)
 }

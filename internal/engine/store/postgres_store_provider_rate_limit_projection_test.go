@@ -69,8 +69,8 @@ func projectionRequest() ratelimitpolicy.AcquireRequest {
 	return ratelimitpolicy.AcquireRequest{
 		AccountID: uuid.New(), ServiceVersionID: versionID,
 		Policies: []ratelimitpolicy.ResolvedPolicy{
-			{Name: "minute", ScopeKind: "connection", ScopeID: scopeID.String(), Cost: 1, Algorithm: "fixed_window", ConfigHash: "minute", Limit: 10, DurationMS: 60_000},
-			{Name: "second", ScopeKind: "service_version", ScopeID: versionID.String(), Cost: 1, Algorithm: "fixed_window", ConfigHash: "second", Limit: 2, DurationMS: 1_000},
+			{Name: "minute", ScopeKind: "connection", ScopeID: scopeID.String(), Cost: 1, Algorithm: "fixed_window", ConfigHash: "minute", Limit: 10, DurationMs: 60_000},
+			{Name: "second", ScopeKind: "service_version", ScopeID: versionID.String(), Cost: 1, Algorithm: "fixed_window", ConfigHash: "second", Limit: 2, DurationMs: 1_000},
 		},
 	}
 }

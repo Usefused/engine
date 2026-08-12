@@ -205,7 +205,7 @@ func fixedWindowSync(request ratelimitpolicy.AcquireRequest, cooldown *time.Time
 		CooldownUntil: cooldown,
 		Observations: []ratelimitpolicy.ResponseObservation{{
 			PolicyName: policy.Name, ScopeKind: policy.ScopeKind, ScopeID: uuid.MustParse(policy.ScopeID),
-			Algorithm: policy.Algorithm, LocalLimit: policy.Limit, DurationMS: policy.DurationMS,
+			Algorithm: policy.Algorithm, LocalLimit: policy.Limit, DurationMs: policy.DurationMs,
 		}},
 	}
 }
@@ -255,7 +255,7 @@ func fixedWindowRequest(limit int64, duration time.Duration) ratelimitpolicy.Acq
 func resolvedFixedPolicy(name, scope string, scopeID uuid.UUID, limit int64, duration time.Duration) ratelimitpolicy.ResolvedPolicy {
 	return ratelimitpolicy.ResolvedPolicy{
 		Name: name, Unit: "request", ScopeKind: scope, ScopeID: scopeID.String(), Cost: 1,
-		Algorithm: "fixed_window", ConfigHash: name + "-config", Limit: limit, DurationMS: duration.Milliseconds(),
+		Algorithm: "fixed_window", ConfigHash: name + "-config", Limit: limit, DurationMs: duration.Milliseconds(),
 	}
 }
 
@@ -265,7 +265,7 @@ func tokenBucketRequest(capacity, refill int64, interval time.Duration) ratelimi
 		Policies: []ratelimitpolicy.ResolvedPolicy{{
 			Name: "primary", Unit: "request", ScopeKind: "connection", ScopeID: uuid.NewString(), Cost: 1,
 			Algorithm: "token_bucket", ConfigHash: "token-config", Capacity: capacity,
-			RefillUnits: refill, RefillIntervalMS: interval.Milliseconds(),
+			RefillUnits: refill, RefillIntervalMs: interval.Milliseconds(),
 		}},
 	}
 }

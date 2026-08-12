@@ -362,20 +362,32 @@ export interface Schema {
 
 export interface AuthConfig {
   type: string;
-  flow?: string;
   scheme?: string;
   location?: string;
   key_name?: string;
-  token_url?: string;
-  authorization_url?: string;
   open_id_connect_url?: string;
-  scopes?: string[];
+  oauth2_flows?: Partial<Record<OAuth2FlowName, OAuth2FlowContract>>;
   pkce_required?: boolean;
   scopes_delimiter?: string;
   token_endpoint_auth_method?: 'client_secret_basic' | 'client_secret_post';
   extra_auth_params?: Record<string, string>;
   extra_token_params?: Record<string, string>;
   refresh_token_rotates?: boolean;
+}
+
+export type OAuth2FlowName =
+  | "implicit"
+  | "password"
+  | "clientCredentials"
+  | "authorizationCode"
+  | "deviceAuthorization";
+
+export interface OAuth2FlowContract {
+  authorization_url?: string;
+  device_authorization_url?: string;
+  token_url?: string;
+  refresh_url?: string;
+  scopes: Record<string, string>;
 }
 
 export interface DriftSnapshot {

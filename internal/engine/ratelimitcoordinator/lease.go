@@ -137,11 +137,15 @@ func (h heldLeaseEntry) clearLease() {
 func leaseReservation(request ratelimitpolicy.AcquireRequest) (ratelimitpolicy.AcquireRequest, bool) {
 	calls := leaseTargetCalls
 	for _, policy := range request.Policies {
-		maximum := policy.Limit
-		if policy.Algorithm == "token_bucket" {
-			maximum = policy.Capacity
+		if policy.Cost == 0 {
+			continue
 		}
-		if possible := maximum / policy.Cost; possible < calls {
+		// Rolling history and in-flight concurrency must stay in the shared CAS
+		// document; local reservation would make either signal incomplete.
+		if policy.Algorithm == "rolling_window" || policy.Algorithm == "concurrency" || policy.Mode == "observe" {
+			return request, false
+		}
+		if possible := policyLeaseCalls(policy); possible < calls {
 			calls = possible
 		}
 	}
@@ -151,9 +155,19 @@ func leaseReservation(request ratelimitpolicy.AcquireRequest) (ratelimitpolicy.A
 	reserved := request
 	reserved.Policies = append([]ratelimitpolicy.ResolvedPolicy(nil), request.Policies...)
 	for index := range reserved.Policies {
-		reserved.Policies[index].Cost *= calls
+		if reserved.Policies[index].Cost > 0 {
+			reserved.Policies[index].Cost *= calls
+		}
 	}
 	return reserved, true
+}
+
+func policyLeaseCalls(policy ratelimitpolicy.ResolvedPolicy) int64 {
+	maximum := policy.Limit
+	if policy.Algorithm == "token_bucket" {
+		maximum = policy.Capacity
+	}
+	return maximum / policy.Cost
 }
 
 func usableLease(lease *localLease, policies []ratelimitpolicy.ResolvedPolicy, now time.Time, observedEpoch uint64) bool {
@@ -161,7 +175,7 @@ func usableLease(lease *localLease, policies []ratelimitpolicy.ResolvedPolicy, n
 		return false
 	}
 	for index, policy := range policies {
-		if lease.policies[index].configHash != policy.ConfigHash || lease.policies[index].remaining < policy.Cost {
+		if policy.Cost > 0 && (lease.policies[index].configHash != policy.ConfigHash || lease.policies[index].remaining < policy.Cost) {
 			return false
 		}
 	}
@@ -193,10 +207,10 @@ func leaseExpiry(state ratelimitpolicy.StateEnvelope, policies []ratelimitpolicy
 
 func policyLeaseExpiry(state ratelimitpolicy.PolicyState, policy ratelimitpolicy.ResolvedPolicy) (time.Time, bool) {
 	if policy.Algorithm == "fixed_window" && state.FixedWindowStartedAt != nil {
-		return state.FixedWindowStartedAt.Add(time.Duration(policy.DurationMS) * time.Millisecond), true
+		return state.FixedWindowStartedAt.Add(time.Duration(policy.DurationMs) * time.Millisecond), true
 	}
 	if policy.Algorithm == "token_bucket" && state.TokenRefilledAt != nil {
-		return state.TokenRefilledAt.Add(time.Duration(policy.RefillIntervalMS) * time.Millisecond), true
+		return state.TokenRefilledAt.Add(time.Duration(policy.RefillIntervalMs) * time.Millisecond), true
 	}
 	return time.Time{}, false
 }

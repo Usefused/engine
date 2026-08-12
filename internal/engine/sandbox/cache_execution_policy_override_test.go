@@ -120,10 +120,11 @@ func TestApplyExecutionPolicyOverride_StoreWithoutCapability_NoOp(t *testing.T) 
 }
 
 func executionPolicyFixedLimit(limit int64) *fusedobject.RateLimitConfig {
-	return &fusedobject.RateLimitConfig{Version: 2, Policies: []ratelimitpolicy.Policy{{
-		Name: "requests", Unit: "requests", Scope: "service_version", DefaultCost: 1,
-		OperationCosts: map[string]int64{}, Algorithm: "fixed_window",
-		FixedWindow: &ratelimitpolicy.FixedWindow{Limit: limit, DurationMS: 1_000},
+	return &fusedobject.RateLimitConfig{Version: ratelimitpolicy.Version, Policies: []ratelimitpolicy.Policy{{
+		Name: "requests", Mode: ratelimitpolicy.ModeEnforce, Unit: ratelimitpolicy.UnitRequests,
+		Identity: ratelimitpolicy.BucketIdentity{Inputs: []ratelimitpolicy.IdentityInput{{Kind: ratelimitpolicy.IdentityServiceVersion}}},
+		Cost:     ratelimitpolicy.CostPlan{Default: 1}, Algorithm: ratelimitpolicy.AlgorithmFixedWindow,
+		FixedWindow: &ratelimitpolicy.FixedWindow{Limit: limit, DurationMs: 1_000},
 	}}}
 }
 

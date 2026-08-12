@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine/store"
@@ -117,6 +118,9 @@ func (m *mockCacheDB) GetServiceContractMetadata(ctx context.Context, serviceID,
 	}
 	if m.contractMetadata == nil {
 		return nil, store.ErrServiceContractSnapshotNotFound
+	}
+	if m.contractMetadata.ContractVersion == 0 {
+		m.contractMetadata.ExecutionContractEnvelope = fusedobject.EngineExecutionContractSupport()
 	}
 	return m.contractMetadata, nil
 }
@@ -256,11 +260,9 @@ func TestLocalObjectCache_Refcounting(t *testing.T) {
 	scopeData, _ := json.Marshal(scopeSelections)
 
 	db := &mockCacheDB{
-		scopeData: scopeData,
+		scopeData: scopeData, contractMetadata: obj,
 	}
-	rc := &mockRegistryClient{fusedObj: obj}
-
-	cache := NewLocalObjectCache(db, rc)
+	cache := NewLocalObjectCache(db)
 
 	ctx := context.Background()
 
@@ -276,8 +278,8 @@ func TestLocalObjectCache_Refcounting(t *testing.T) {
 	if cache.objectRefCounts[mockID.String()+":"+"00000000-0000-0000-0000-000000000101"] != 1 {
 		t.Errorf("expected object refcount 1, got %d", cache.objectRefCounts[mockID.String()+":"+"00000000-0000-0000-0000-000000000101"])
 	}
-	if db.scopeCount != 1 || rc.fetchCount != 1 {
-		t.Errorf("expected 1 fetch from DB for scope and registry for object")
+	if db.scopeCount != 1 || db.contractMetaCalls != 1 {
+		t.Errorf("expected one scope and one snapshot fetch")
 	}
 
 	// 2. Connect SDK again (Conn 2)
@@ -292,7 +294,7 @@ func TestLocalObjectCache_Refcounting(t *testing.T) {
 	if cache.objectRefCounts[mockID.String()+":"+"00000000-0000-0000-0000-000000000101"] != 2 {
 		t.Errorf("expected object refcount 2, got %d", cache.objectRefCounts[mockID.String()+":"+"00000000-0000-0000-0000-000000000101"])
 	}
-	if db.scopeCount != 1 || rc.fetchCount != 1 {
+	if db.scopeCount != 1 || db.contractMetaCalls != 1 {
 		t.Errorf("expected 0 additional fetches, it should reuse cache")
 	}
 
@@ -337,15 +339,11 @@ func TestLocalObjectCache_ConnectSDKRequiresActivatedVersion(t *testing.T) {
 		scopeData:    scopeData,
 		activatedErr: errors.New("no activated version"),
 	}
-	rc := &mockRegistryClient{fusedObj: &fusedobject.ServiceMetadata{ID: mockID, Name: "Stripe"}}
-	cache := NewLocalObjectCache(db, rc)
+	cache := NewLocalObjectCache(db)
 
 	err := cache.ConnectSDK(context.Background(), appID.String())
 	if err == nil {
 		t.Fatal("expected missing activation version to fail SDK connect")
-	}
-	if rc.fetchCount != 0 {
-		t.Errorf("expected no Registry fetch without a pinned version, got %d", rc.fetchCount)
 	}
 }
 
@@ -360,22 +358,18 @@ func TestLocalObjectCache_ConnectSDKRequiresSelectionServiceVersionID(t *testing
 		scopeData:        scopeData,
 		activatedVersion: "workspace-latest-public-version",
 	}
-	rc := &mockRegistryClient{fusedObj: &fusedobject.ServiceMetadata{ID: serviceID, Name: "Stripe"}}
-	cache := NewLocalObjectCache(db, rc)
+	cache := NewLocalObjectCache(db)
 
 	err := cache.ConnectSDK(context.Background(), appID.String())
 	if err == nil {
 		t.Fatal("expected unpinned SDK scope to fail")
-	}
-	if rc.fetchCount != 0 {
-		t.Errorf("expected no Registry fetch for unpinned SDK scope, got %d", rc.fetchCount)
 	}
 	if db.activatedCalls != 0 {
 		t.Errorf("runtime SDK scope resolution must not read workspace latest-version state, got %d calls", db.activatedCalls)
 	}
 }
 
-func TestLocalObjectCache_ConnectSDKUsesSelectionServiceVersionID(t *testing.T) {
+func TestLocalObjectCache_ConnectSDKUsesSelectionServiceVersionSnapshot(t *testing.T) {
 	serviceID := uuid.New()
 	serviceVersionID := uuid.New()
 	appID := uuid.New()
@@ -387,15 +381,15 @@ func TestLocalObjectCache_ConnectSDKUsesSelectionServiceVersionID(t *testing.T) 
 	db := &mockCacheDB{
 		scopeData:        scopeData,
 		activatedVersion: "workspace-latest-public-version",
+		contractMetadata: &fusedobject.ServiceMetadata{ID: serviceID, Name: "SnapshotService"},
 	}
-	rc := &mockRegistryClient{fusedObj: &fusedobject.ServiceMetadata{ID: serviceID, Name: "Stripe"}}
-	cache := NewLocalObjectCache(db, rc)
+	cache := NewLocalObjectCache(db)
 
 	if err := cache.ConnectSDK(context.Background(), appID.String()); err != nil {
 		t.Fatalf("ConnectSDK: %v", err)
 	}
-	if len(rc.fetchedVersions) != 1 || rc.fetchedVersions[0] != serviceVersionID.String() {
-		t.Fatalf("expected Registry metadata fetch by service_version_id %s, got %#v", serviceVersionID, rc.fetchedVersions)
+	if db.contractMetaCalls != 1 {
+		t.Fatalf("expected one local snapshot lookup, got %d", db.contractMetaCalls)
 	}
 	if _, err := cache.GetOrFetchServiceMetadata(context.Background(), appID.String(), serviceID.String()); err != nil {
 		t.Fatalf("expected metadata cached under service_version_id identity: %v", err)
@@ -423,8 +417,7 @@ func TestLocalObjectCache_ConnectSDKUsesServiceContractSnapshot(t *testing.T) {
 			{ID: endpointID, Name: "listUsers", Method: "GET", Path: "/users"},
 		},
 	}
-	rc := &mockRegistryClient{fusedObj: &fusedobject.ServiceMetadata{ID: serviceID, Name: "RegistryService"}}
-	cache := NewLocalObjectCache(db, rc)
+	cache := NewLocalObjectCache(db)
 
 	if err := cache.ConnectSDK(context.Background(), appID.String()); err != nil {
 		t.Fatalf("ConnectSDK: %v", err)
@@ -442,9 +435,6 @@ func TestLocalObjectCache_ConnectSDKUsesServiceContractSnapshot(t *testing.T) {
 	}
 	if endpoint.ID != endpointID {
 		t.Fatalf("expected snapshot endpoint %s, got %#v", endpointID, endpoint)
-	}
-	if rc.fetchCount != 0 || rc.endpointFetchCount != 0 || rc.endpointByNameCount != 0 {
-		t.Fatalf("snapshot-backed connect must not call registry, got metadata=%d batched=%d byName=%d", rc.fetchCount, rc.endpointFetchCount, rc.endpointByNameCount)
 	}
 	if db.contractMetaCalls != 1 || db.contractNameCalls != 1 {
 		t.Fatalf("expected one snapshot metadata and one batched-name lookup, got metadata=%d names=%d", db.contractMetaCalls, db.contractNameCalls)
@@ -464,8 +454,7 @@ func TestLocalObjectCache_GetEndpointDoesNotFallbackWhenSnapshotExists(t *testin
 		scopeData:        scopeData,
 		contractMetadata: &fusedobject.ServiceMetadata{ID: serviceID, Name: "SnapshotService"},
 	}
-	rc := &mockRegistryClient{fusedObj: &fusedobject.ServiceMetadata{ID: serviceID, Name: "RegistryService"}}
-	cache := NewLocalObjectCache(db, rc)
+	cache := NewLocalObjectCache(db)
 
 	if err := cache.ConnectSDK(context.Background(), appID.String()); err != nil {
 		t.Fatalf("ConnectSDK: %v", err)
@@ -474,8 +463,55 @@ func TestLocalObjectCache_GetEndpointDoesNotFallbackWhenSnapshotExists(t *testin
 	if !errors.Is(err, store.ErrServiceContractEndpointNotFound) {
 		t.Fatalf("expected local snapshot endpoint miss, got %v", err)
 	}
-	if rc.endpointByNameCount != 0 {
-		t.Fatalf("existing snapshot endpoint miss must not drift to registry, got %d registry calls", rc.endpointByNameCount)
+}
+
+func TestLocalObjectCache_MissingSnapshotNeverFallsBackToRegistry(t *testing.T) {
+	serviceID, versionID := uuid.New(), uuid.New()
+	cache := NewLocalObjectCache(&mockCacheDB{})
+
+	if _, _, err := cache.fetchServiceMetadata(context.Background(), serviceID, versionID.String()); !errors.Is(err, store.ErrServiceContractSnapshotNotFound) {
+		t.Fatalf("metadata snapshot miss = %v", err)
+	}
+	if _, _, err := cache.fetchEndpointByName(context.Background(), serviceID, versionID, "listUsers"); !errors.Is(err, store.ErrServiceContractSnapshotNotFound) {
+		t.Fatalf("endpoint snapshot miss = %v", err)
+	}
+	if _, _, err := cache.fetchEndpointsByNames(context.Background(), serviceID, versionID, []string{"listUsers"}); !errors.Is(err, store.ErrServiceContractSnapshotNotFound) {
+		t.Fatalf("endpoint batch snapshot miss = %v", err)
+	}
+}
+
+func TestLocalObjectCache_ConnectFailsWhenNamedEndpointSnapshotIsIncomplete(t *testing.T) {
+	serviceID, versionID, appID := uuid.New(), uuid.New(), uuid.New()
+	scopeData, _ := json.Marshal([]models.SDKSelection{{
+		ServiceID: serviceID, ServiceVersionID: versionID, OperationNames: []string{"listUsers"},
+	}})
+	cache := NewLocalObjectCache(&mockCacheDB{
+		scopeData: scopeData, contractMetadata: &fusedobject.ServiceMetadata{ID: serviceID, Name: "SnapshotService"},
+	})
+
+	err := cache.ConnectSDK(context.Background(), appID.String())
+	if !errors.Is(err, store.ErrServiceContractEndpointNotFound) {
+		t.Fatalf("incomplete endpoint snapshot error = %v", err)
+	}
+	if cache.sdkVersions[appID.String()] != nil || len(cache.serviceMetadataCache) != 0 || len(cache.objectRefCounts) != 0 {
+		t.Fatalf("failed connect retained partial cache state: versions=%#v metadata=%d refs=%#v", cache.sdkVersions[appID.String()], len(cache.serviceMetadataCache), cache.objectRefCounts)
+	}
+}
+
+func TestLocalObjectCacheRejectsIncompatibleCachedContractBeforeDispatch(t *testing.T) {
+	serviceID, versionID, appID := uuid.New(), uuid.New(), uuid.New()
+	cache := NewLocalObjectCache(&mockCacheDB{})
+	cache.sdkVersions[appID.String()] = map[string]string{serviceID.String(): versionID.String()}
+	cache.serviceMetadataCache[serviceID.String()+":"+versionID.String()] = &fusedobject.ServiceMetadata{
+		ExecutionContractEnvelope: fusedobject.ExecutionContractEnvelope{
+			ContractVersion:      fusedobject.CurrentExecutionContractVersion,
+			RequiredCapabilities: []string{"http.future.v1"},
+		},
+	}
+
+	_, err := cache.GetOrFetchServiceMetadata(context.Background(), appID.String(), serviceID.String())
+	if err == nil || !strings.Contains(err.Error(), fusedobject.ExecutionCapabilityRequiredCode) {
+		t.Fatalf("cached compatibility error = %v", err)
 	}
 }
 
@@ -484,7 +520,7 @@ func TestLocalObjectCache_ConnectSDKRejectsUnsupportedScopeSchemaVersion(t *test
 	db := &mockCacheDB{
 		scopeData: []byte(`[]`),
 	}
-	c := NewLocalObjectCache(db, &mockRegistryClient{})
+	c := NewLocalObjectCache(db)
 	db.scopeVersion = models.AppScopeSchemaVersion + 1
 	if err := c.ConnectSDK(context.Background(), appID.String()); err == nil {
 		t.Fatal("expected unsupported scope schema version to fail")
@@ -506,18 +542,21 @@ func TestLocalObjectCache_EndpointsPrefetchedAtConnect(t *testing.T) {
 		EndpointIDs:      []uuid.UUID{uuid.New()},
 		OperationNames:   []string{"listUsers", "getUser"},
 	}})
-	db := &mockCacheDB{scopeData: scopeData}
-	rc := &mockRegistryClient{fusedObj: &fusedobject.ServiceMetadata{ID: serviceID, Name: "TestService"}}
-	cache := NewLocalObjectCache(db, rc)
+	db := &mockCacheDB{
+		scopeData:         scopeData,
+		contractMetadata:  &fusedobject.ServiceMetadata{ID: serviceID, Name: "TestService"},
+		contractEndpoints: []fusedobject.Endpoint{{Name: "listUsers"}, {Name: "getUser"}},
+	}
+	cache := NewLocalObjectCache(db)
 
 	if err := cache.ConnectSDK(context.Background(), appID.String()); err != nil {
 		t.Fatalf("ConnectSDK: %v", err)
 	}
 
-	// Exactly one FetchEndpointsByNames call should have been made at connect —
-	// covering both operation names in one Registry round trip.
-	if rc.endpointFetchCount != 1 {
-		t.Errorf("expected 1 FetchEndpointsByNames call at connect, got %d", rc.endpointFetchCount)
+	// Exactly one snapshot batch should cover both names without consulting the
+	// Registry on the execution path.
+	if db.contractNameCalls != 1 {
+		t.Errorf("expected one snapshot batch, got %d", db.contractNameCalls)
 	}
 
 	// GetEndpoint for a pre-warmed name must be a cache hit — endpointFetchCount
@@ -529,8 +568,8 @@ func TestLocalObjectCache_EndpointsPrefetchedAtConnect(t *testing.T) {
 	if ep.Name != "listUsers" {
 		t.Errorf("expected endpoint name 'listUsers', got %q", ep.Name)
 	}
-	if rc.endpointFetchCount != 1 {
-		t.Errorf("GetEndpoint after pre-warm must be a cache hit; expected endpointFetchCount=1, got %d", rc.endpointFetchCount)
+	if db.contractNameCalls != 1 {
+		t.Errorf("GetEndpoint after pre-warm must be a cache hit; snapshot calls=%d", db.contractNameCalls)
 	}
 }
 
@@ -548,15 +587,11 @@ func TestLocalObjectCache_EndpointsNotPrefetchedWhenOperationNamesEmpty(t *testi
 		EndpointIDs:      []uuid.UUID{uuid.New()},
 		// OperationNames intentionally omitted — simulates SelectAll scope.
 	}})
-	db := &mockCacheDB{scopeData: scopeData}
-	rc := &mockRegistryClient{fusedObj: &fusedobject.ServiceMetadata{ID: serviceID, Name: "TestService"}}
-	cache := NewLocalObjectCache(db, rc)
+	db := &mockCacheDB{scopeData: scopeData, contractMetadata: &fusedobject.ServiceMetadata{ID: serviceID, Name: "TestService"}}
+	cache := NewLocalObjectCache(db)
 
 	if err := cache.ConnectSDK(context.Background(), appID.String()); err != nil {
 		t.Fatalf("ConnectSDK: %v", err)
-	}
-	if rc.endpointFetchCount != 0 {
-		t.Errorf("expected no endpoint pre-warm for empty OperationNames, got %d", rc.endpointFetchCount)
 	}
 }
 

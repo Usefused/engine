@@ -98,7 +98,7 @@ func TestAuditEventsGraphQLPassesFiltersAndOpaqueCursorInOneCall(t *testing.T) {
 		Metadata:            map[string]any{"changed_fields": []string{"name"}},
 	}}, Total: 11, NextCursor: next}}
 	result := executeAccessInspectionGraphQL(t, repository, controlTestOwnerActor(workspaceID), `query Audit($actor:ID!){
-		auditEvents(actor_subject_id:$actor,actions:["team.update"],outcomes:[ATTEMPTED],from:"2026-08-01T00:00:00Z",to:"2026-08-02T00:00:00Z",limit:25){
+		auditEvents(actor_subject_id:$actor,actions:["team.update"],outcomes:[ATTEMPTED,ROLLED_BACK,CANCELLED],from:"2026-08-01T00:00:00Z",to:"2026-08-02T00:00:00Z",limit:25){
 			total next_cursor items{id action outcome missing_requirements{permission resource_type resource_id} metadata}
 		}
 	}`, map[string]interface{}{"actor": filteredActor.String()})
@@ -108,7 +108,7 @@ func TestAuditEventsGraphQLPassesFiltersAndOpaqueCursorInOneCall(t *testing.T) {
 	if repository.auditCalls != 1 || repository.auditQuery.Limit != 25 || repository.auditQuery.ActorSubjectID == nil || *repository.auditQuery.ActorSubjectID != filteredActor {
 		t.Fatalf("calls/query = %d/%#v", repository.auditCalls, repository.auditQuery)
 	}
-	if len(repository.auditQuery.Actions) != 1 || repository.auditQuery.Actions[0] != "team.update" || len(repository.auditQuery.Outcomes) != 1 || repository.auditQuery.Outcomes[0] != accesscontrol.AuditAttempted {
+	if len(repository.auditQuery.Actions) != 1 || repository.auditQuery.Actions[0] != "team.update" || len(repository.auditQuery.Outcomes) != 3 || repository.auditQuery.Outcomes[0] != accesscontrol.AuditAttempted || repository.auditQuery.Outcomes[1] != accesscontrol.AuditRolledBack || repository.auditQuery.Outcomes[2] != accesscontrol.AuditCancelled {
 		t.Fatalf("filters = actions %#v/outcomes %#v", repository.auditQuery.Actions, repository.auditQuery.Outcomes)
 	}
 	data := result.Data.(map[string]interface{})["auditEvents"].(map[string]interface{})

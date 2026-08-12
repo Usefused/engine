@@ -79,11 +79,19 @@ func Normalize(profile *Profile) {
 	if canonical := CanonicalAuthType(profile.AuthType); canonical != "" {
 		profile.AuthType = canonical
 	}
+	profile.AuthName = strings.TrimSpace(profile.AuthName)
+	profile.OAuth2Flow = strings.TrimSpace(profile.OAuth2Flow)
 	if profile.ResourceDiscovery == nil {
 		return
 	}
+	if profile.ResourceDiscovery.Version == 0 {
+		profile.ResourceDiscovery.Version = ResourceDiscoveryVersion
+	}
 	if strings.TrimSpace(profile.ResourceDiscovery.AutoRun) == "" {
 		profile.ResourceDiscovery.AutoRun = "after_oauth_callback"
+	}
+	if strings.TrimSpace(profile.ResourceDiscovery.Stage) == "" {
+		profile.ResourceDiscovery.Stage = "post_auth"
 	}
 	if strings.TrimSpace(profile.ResourceDiscovery.Lifecycle) == "" {
 		profile.ResourceDiscovery.Lifecycle = "authoritative"
@@ -102,15 +110,90 @@ func (v *profileValidator) validateTopLevel() {
 	if v.profile == nil {
 		return
 	}
-	if CanonicalAuthType(v.profile.AuthType) == "" {
-		v.addError("auth_type.invalid", "auth_type", "auth type must be oauth or oidc")
-	}
-	if v.profile.AuthType != "" && v.contract.Complete && !authTypeAvailable(v.profile.AuthType, v.contract.AuthTypes) {
-		v.addError("auth_type.unavailable", "auth_type", "auth type is not available on the pinned service version")
-	}
+	v.validateAuthIdentity()
 	if v.profile.ResourceDiscovery != nil && v.profile.ResourceInput != nil {
 		v.addError("resource_source.conflict", "resource_discovery", "resource discovery and resource input are mutually exclusive")
 	}
+}
+
+func (v *profileValidator) validateAuthIdentity() {
+	if CanonicalAuthType(v.profile.AuthType) == "" {
+		v.addError("auth_type.invalid", "auth_type", "auth type must be oauth or oidc")
+		return
+	}
+	if !validAuthName(v.profile.AuthName) {
+		v.addError("auth_name.invalid", "auth_name", "auth name is invalid")
+		return
+	}
+	if !validOAuth2FlowSelection(v.profile.AuthType, v.profile.OAuth2Flow) {
+		v.addError("oauth2_flow.invalid", "oauth2_flow", "OAuth2 flow must be a supported flow name and is only valid for OAuth")
+		return
+	}
+	if v.contract.Complete {
+		v.validatePinnedAuthIdentity(authConfigsForType(v.profile.AuthType, v.contract.AuthConfigs))
+	}
+}
+
+func validOAuth2FlowSelection(authType, flow string) bool {
+	if flow == "" {
+		return true
+	}
+	if CanonicalAuthType(authType) != "oauth" {
+		return false
+	}
+	switch flow {
+	case "implicit", "password", "clientCredentials", "authorizationCode":
+		return true
+	default:
+		return false
+	}
+}
+
+func (v *profileValidator) validatePinnedAuthIdentity(matches []AuthConfig) {
+	if len(matches) == 0 {
+		v.addError("auth_type.unavailable", "auth_type", "auth type is not available on the pinned service version")
+		return
+	}
+	if v.profile.AuthName == "" {
+		if len(matches) > 1 {
+			v.addError("auth_name.required", "auth_name", "auth name is required when several schemes use this auth type")
+		}
+		if len(matches) == 1 {
+			v.validateOAuth2Flow(matches[0])
+		}
+		return
+	}
+	if !authNameAvailable(v.profile.AuthName, matches) {
+		v.addError("auth_name.unavailable", "auth_name", "auth name is not available for the selected auth type")
+		return
+	}
+	for _, match := range matches {
+		if match.Name == v.profile.AuthName {
+			v.validateOAuth2Flow(match)
+			return
+		}
+	}
+}
+
+func (v *profileValidator) validateOAuth2Flow(config AuthConfig) {
+	selected := strings.TrimSpace(v.profile.OAuth2Flow)
+	if len(config.OAuth2Flows) == 0 {
+		if selected != "" {
+			v.addError("oauth2_flow.unavailable", "oauth2_flow", "OAuth2 flow is not declared by the selected auth scheme")
+		}
+		return
+	}
+	if selected == "" && len(config.OAuth2Flows) > 1 {
+		v.addError("oauth2_flow.required", "oauth2_flow", "OAuth2 flow is required when the selected auth scheme declares alternatives")
+		return
+	}
+	if selected != "" && !contains(config.OAuth2Flows, selected) {
+		v.addError("oauth2_flow.unavailable", "oauth2_flow", "OAuth2 flow is not declared by the selected auth scheme")
+	}
+}
+
+func validAuthName(name string) bool {
+	return len(name) <= 128 && !strings.ContainsAny(name, "\r\n\x00")
 }
 
 // validateDiscovery delegates independent concerns to keep each decision path
@@ -128,6 +211,9 @@ func (v *profileValidator) validateDiscovery() {
 // validateDiscoveryIdentity keeps extraction and lifecycle options within the
 // deliberately small feature set implemented by Engine.
 func (v *profileValidator) validateDiscoveryIdentity(discovery *ResourceDiscoveryConfig) {
+	if discovery.Version != ResourceDiscoveryVersion {
+		v.addError("discovery.version.invalid", "resource_discovery.version", "version must be 1")
+	}
 	if strings.TrimSpace(discovery.OperationID) == "" || strings.TrimSpace(discovery.IDPath) == "" || strings.TrimSpace(discovery.ResourceType) == "" {
 		v.addError("discovery.required", "resource_discovery", "operation_id, id_path, and resource_type are required")
 	}
@@ -137,6 +223,9 @@ func (v *profileValidator) validateDiscoveryIdentity(discovery *ResourceDiscover
 	v.validateJSONPath("resource_discovery.scopes_path", discovery.ScopesPath, false)
 	if discovery.AutoRun != "after_oauth_callback" {
 		v.addError("discovery.auto_run.invalid", "resource_discovery.auto_run", "auto_run must be after_oauth_callback")
+	}
+	if discovery.Stage != "post_auth" {
+		v.addError("discovery.stage.invalid", "resource_discovery.stage", "stage must be post_auth")
 	}
 	if discovery.Lifecycle != "authoritative" {
 		v.addError("discovery.lifecycle.invalid", "resource_discovery.lifecycle", "lifecycle must be authoritative")
@@ -452,10 +541,20 @@ func CanonicalAuthType(value string) string {
 
 // authTypeAvailable compares canonical families so Engine never falls back to
 // whichever auth declaration happens to be first.
-func authTypeAvailable(profileType string, available []string) bool {
+func authConfigsForType(profileType string, available []AuthConfig) []AuthConfig {
 	want := CanonicalAuthType(profileType)
-	for _, authType := range available {
-		if CanonicalAuthType(authType) == want {
+	matches := make([]AuthConfig, 0, len(available))
+	for _, auth := range available {
+		if CanonicalAuthType(auth.Type) == want {
+			matches = append(matches, auth)
+		}
+	}
+	return matches
+}
+
+func authNameAvailable(name string, available []AuthConfig) bool {
+	for _, auth := range available {
+		if auth.Name == name {
 			return true
 		}
 	}

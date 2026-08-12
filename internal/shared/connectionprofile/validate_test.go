@@ -8,9 +8,9 @@ import (
 func TestValidateCanonicalProfile(t *testing.T) {
 	profile := validProfile()
 	contract := Contract{
-		AuthTypes: []string{"oauth2"},
-		Servers:   []string{"api"},
-		Complete:  true,
+		AuthConfigs: []AuthConfig{{Name: "oauth", Type: "oauth2", OAuth2Flows: []string{"authorizationCode"}}},
+		Servers:     []string{"api"},
+		Complete:    true,
 		Operations: []Operation{
 			{ID: "getAccessibleResources", Method: "GET"},
 			{ID: "getAccount", Method: "GET", Parameters: []Parameter{{Name: "X-Account-ID", Location: "header"}}},

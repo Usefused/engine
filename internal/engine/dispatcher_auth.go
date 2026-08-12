@@ -70,14 +70,10 @@ func satisfiableAlternative(alternative authrouting.Alternative, definitions map
 	nameMatched := selectorName == ""
 	seen := make(map[string]struct{}, len(alternative.Schemes))
 	for _, requirement := range alternative.Schemes {
-		auth, ok := definitions[requirement.Scheme]
-		if !ok {
-			return nil, false, authRoutingError("invalid_contract")
+		auth, err := requiredAuth(requirement.Scheme, definitions, seen, credentials)
+		if err != nil {
+			return nil, false, err
 		}
-		if _, exists := seen[requirement.Scheme]; exists {
-			return nil, false, authRoutingError("invalid_contract")
-		}
-		seen[requirement.Scheme] = struct{}{}
 		typeMatched = typeMatched || authrouting.CanonicalType(auth.Type, auth.Scheme) == selectorType
 		nameMatched = nameMatched || auth.Name == selectorName
 		if !authSatisfied(auth, credentials) {
@@ -88,15 +84,53 @@ func satisfiableAlternative(alternative authrouting.Alternative, definitions map
 	return selected, typeMatched && nameMatched, nil
 }
 
+func requiredAuth(name string, definitions map[string]models.AuthConfig, seen map[string]struct{}, credentials map[string]any) (models.AuthConfig, error) {
+	auth, ok := definitions[name]
+	if !ok {
+		return models.AuthConfig{}, authRoutingError("invalid_contract")
+	}
+	if _, exists := seen[name]; exists {
+		return models.AuthConfig{}, authRoutingError("invalid_contract")
+	}
+	seen[name] = struct{}{}
+	return selectOAuth2Flow(auth, credentials)
+}
+
 func authSatisfied(auth models.AuthConfig, credentials map[string]any) bool {
 	switch authrouting.CanonicalType(auth.Type, auth.Scheme) {
 	case "basic":
 		return basicAuthSatisfied(auth, credentials)
 	case "mtls":
 		return credentialPresent(credentials, auth.Name+"_cert") && credentialPresent(credentials, auth.Name+"_key")
+	case "oauth1":
+		return credentialPresent(credentials, auth.Name+"_consumer_key") && credentialPresent(credentials, auth.Name+"_consumer_secret")
+	case "digest":
+		return credentialPresent(credentials, auth.Name+"_username") && credentialPresent(credentials, auth.Name+"_password")
 	default:
 		return credentialPresent(credentials, auth.Name)
 	}
+}
+
+func selectOAuth2Flow(auth models.AuthConfig, credentials map[string]any) (models.AuthConfig, error) {
+	canonical := authrouting.CanonicalType(auth.Type, auth.Scheme)
+	if (canonical != "oauth" && canonical != "oidc") || len(auth.OAuth2Flows) == 0 {
+		return auth, nil
+	}
+	selected := strings.TrimSpace(credentialValue(credentials, "fused_oauth2_flow"))
+	if selected == "" && len(auth.OAuth2Flows) == 1 {
+		for name := range auth.OAuth2Flows {
+			selected = name
+		}
+	}
+	flow, ok := auth.OAuth2Flows[selected]
+	if selected == "" {
+		return auth, authRoutingError("oauth2_flow_required")
+	}
+	if !ok {
+		return auth, authRoutingError("oauth2_flow_invalid")
+	}
+	auth.SelectedOAuth2Flow = &flow
+	return auth, nil
 }
 
 func basicAuthSatisfied(auth models.AuthConfig, credentials map[string]any) bool {
@@ -118,6 +152,10 @@ func basicAuthSatisfied(auth models.AuthConfig, credentials map[string]any) bool
 }
 
 func applySelectedAuth(req *http.Request, auths models.AuthConfigs, credentials map[string]any) {
+	_ = applySelectedAuthChecked(req, auths, credentials)
+}
+
+func applySelectedAuthChecked(req *http.Request, auths models.AuthConfigs, credentials map[string]any) error {
 	for _, auth := range auths {
 		switch authrouting.CanonicalType(auth.Type, auth.Scheme) {
 		case "basic", "bearer":
@@ -126,8 +164,16 @@ func applySelectedAuth(req *http.Request, auths models.AuthConfigs, credentials 
 			applyOAuth(req, auth, credentials)
 		case "api_key":
 			applyAPIKey(req, auth, credentials)
+		case "oauth1":
+			if err := applyOAuth1(req, auth, credentials); err != nil {
+				return err
+			}
+		case "digest", "mtls":
+		default:
+			return authRoutingError("unsupported_strategy")
 		}
 	}
+	return nil
 }
 
 func applyBasicAuth(req *http.Request, auth models.AuthConfig, credentials map[string]any) {
@@ -170,9 +216,25 @@ func recordAuthSelection(ctx context.Context, ctxSpan trace.Span, selected model
 	}
 	ctxSpan.SetAttributes(
 		attribute.Int("auth.scheme_count", len(selected)),
-		attribute.StringSlice("auth.scheme_names", names),
-		attribute.StringSlice("auth.scheme_types", types),
+		attribute.String("auth.strategy", authSelectionStrategy(types)),
 		attribute.String("auth.selection_outcome", outcome),
 	)
 	RecordAuthSummary(ctx, AuthExecutionSummary{SchemeNames: names, SchemeTypes: types, SchemeCount: int64(len(selected)), Outcome: outcome})
+}
+
+func authSelectionStrategy(types []string) string {
+	if len(types) == 0 {
+		return "anonymous"
+	}
+	if len(types) > 1 {
+		return "mixed"
+	}
+	switch types[0] {
+	case "oauth1":
+		return "oauth1_signature"
+	case "digest":
+		return "http_challenge"
+	default:
+		return types[0]
+	}
 }

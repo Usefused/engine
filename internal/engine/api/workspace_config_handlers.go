@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/mtlsauth"
 	"github.com/Usefused/engine/internal/engine/sandbox"
@@ -30,7 +33,9 @@ import (
 	"github.com/Usefused/engine/internal/shared/observability"
 	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
+	"github.com/Usefused/engine/internal/shared/retrypolicy"
 	"github.com/Usefused/engine/internal/shared/secretref"
+	"github.com/Usefused/engine/internal/shared/signaturepolicy"
 )
 
 const defaultWorkspaceConfigKey = "workspace"
@@ -170,6 +175,9 @@ type workspaceExecutionPolicy struct {
 	// publishes it into the provider contract, where it becomes every other
 	// consumer's effective "base_url" too.
 	BaseURL *string `json:"base_url,omitempty"`
+	// Concrete variable values stay Engine-local even when Public is true;
+	// publishing them would leak workspace routing into the provider contract.
+	ServerVariables map[string]string `json:"server_variables,omitempty"`
 	// EventExtractionPath and IncomingWebhookConfig are the provider's own
 	// outbound webhook verification recipe
 	// (plans/plan-service-config-restructure.md item 3) -- distinct from a
@@ -186,24 +194,36 @@ type workspaceExecutionPolicy struct {
 	Reset                 bool                 `json:"reset,omitempty"`
 }
 
+// registryExecutionPolicy is deliberately narrower than workspaceExecutionPolicy.
+// Workspace-only controls must not cross Registry's strict owner-publication
+// boundary, where they would either be rejected or expose local routing state.
+type registryExecutionPolicy struct {
+	RateLimit             *rateLimitConfig     `json:"rate_limit,omitempty"`
+	Retry                 *retryConfig         `json:"retry,omitempty"`
+	TimeoutMs             *int                 `json:"timeout_ms,omitempty"`
+	Pagination            *paginationConfig    `json:"pagination,omitempty"`
+	BaseURL               *string              `json:"base_url,omitempty"`
+	EventExtractionPath   *string              `json:"event_extraction_path,omitempty"`
+	IncomingWebhookConfig *webhookVerifyConfig `json:"incoming_webhook_config,omitempty"`
+}
+
 type rateLimitConfig = ratelimitpolicy.Config
 
-type retryConfig struct {
-	Strategy   string `json:"strategy"`
-	MaxRetries int    `json:"max_retries"`
-	BackoffMs  int    `json:"backoff_ms"`
-}
+// retryConfig aliases the canonical wire contract so workspace sync cannot
+// silently collapse ordered v3 rules into the legacy three-field shape.
+type retryConfig = retrypolicy.Config
 
 type paginationConfig = paginationpolicy.Config
 
 // webhookVerifyConfig mirrors cli/internal/configfile.WebhookVerify --
 // auth mechanism + where to find the signature, deliberately no secret field.
 type webhookVerifyConfig struct {
-	AuthType            string   `json:"auth_type,omitempty"`
-	AuthLocation        string   `json:"auth_location,omitempty"`
-	AuthKeyName         string   `json:"auth_key_name,omitempty"`
-	SignatureHeader     string   `json:"signature_header,omitempty"`
-	VerificationHeaders []string `json:"verification_headers,omitempty"`
+	AuthType            string                  `json:"auth_type,omitempty"`
+	AuthLocation        string                  `json:"auth_location,omitempty"`
+	AuthKeyName         string                  `json:"auth_key_name,omitempty"`
+	SignatureHeader     string                  `json:"signature_header,omitempty"`
+	VerificationHeaders []string                `json:"verification_headers,omitempty"`
+	SignaturePolicy     *signaturepolicy.Config `json:"signature_policy,omitempty"`
 }
 
 // workspaceConfigConnectionProfileIntent is one auth_type routing decision,
@@ -451,9 +471,8 @@ type ServiceVisibilityUpdater interface {
 	// PublishServiceExecutionPolicy publishes the workspace execution policy
 	// through the Registry API so downstream consumers inherit these
 	// provider-declared limits. Only called for owned services. The policy
-	// argument is marshalled to JSON as-is; callers pass
-	// *workspaceExecutionPolicy but the interface accepts any to avoid a
-	// cross-package unexported type dependency.
+	// argument is marshalled to JSON as-is; callers pass the Registry-only
+	// projection, while any avoids a cross-package unexported type dependency.
 	PublishServiceExecutionPolicy(ctx context.Context, serviceID uuid.UUID, policy any, apiKey string) error
 	// UpdateServiceVersionPublic is UpdateServicePublic's per-version sibling:
 	// it sets is_public on just one version, independent of the service's own
@@ -1663,7 +1682,16 @@ func validateWorkspaceExecutionPolicyTimeouts(services map[string]workspaceConfi
 }
 
 func validateWorkspaceExecutionPolicy(name, version string, policy *workspaceExecutionPolicy) error {
+	if err := validateWorkspaceExecutionPolicyShape(name, version, policy); err != nil {
+		return err
+	}
 	if err := validateWorkspaceExecutionPolicyTimeout(name, version, policy); err != nil {
+		return err
+	}
+	if err := validateWorkspaceRetryPolicy(name, version, policy); err != nil {
+		return err
+	}
+	if err := validateWorkspaceServerVariables(name, version, policy); err != nil {
 		return err
 	}
 	if policy == nil || policy.Pagination == nil {
@@ -1671,6 +1699,74 @@ func validateWorkspaceExecutionPolicy(name, version string, policy *workspaceExe
 	}
 	if err := paginationpolicy.Validate(policy.Pagination); err != nil {
 		return fmt.Errorf("service %q version %q execution_policy.pagination: %w", name, version, err)
+	}
+	return nil
+}
+
+func validateWorkspaceExecutionPolicyShape(name, version string, policy *workspaceExecutionPolicy) error {
+	if policy == nil {
+		return nil
+	}
+	if policy.Retry != nil && policy.RetryConfig != nil {
+		return workspaceExecutionPolicyError(name, version, "retry and retry_config cannot both be set")
+	}
+	if policy.Reset && workspaceExecutionPolicyHasResetConflict(policy) {
+		return workspaceExecutionPolicyError(name, version, "reset cannot include other execution policy fields")
+	}
+	return nil
+}
+
+func workspaceExecutionPolicyHasResetConflict(policy *workspaceExecutionPolicy) bool {
+	configured := []bool{
+		policy.Public != nil, policy.RateLimit != nil, policy.Retry != nil, policy.RetryConfig != nil,
+		policy.TimeoutMs != nil, policy.Pagination != nil, policy.BaseURL != nil,
+		len(policy.ServerVariables) > 0, policy.EventExtractionPath != nil, policy.IncomingWebhookConfig != nil,
+	}
+	for _, present := range configured {
+		if present {
+			return true
+		}
+	}
+	return false
+}
+
+func workspaceExecutionPolicyError(name, version, message string) error {
+	if version == "" {
+		return fmt.Errorf("service %q execution_policy %s", name, message)
+	}
+	return fmt.Errorf("service %q version %q execution_policy %s", name, version, message)
+}
+
+func workspaceRetryPolicy(policy *workspaceExecutionPolicy) *retryConfig {
+	if policy == nil {
+		return nil
+	}
+	if policy.Retry != nil {
+		return policy.Retry
+	}
+	return policy.RetryConfig
+}
+
+func validateWorkspaceRetryPolicy(name, version string, policy *workspaceExecutionPolicy) error {
+	if err := retrypolicy.Validate(workspaceRetryPolicy(policy)); err != nil {
+		return fmt.Errorf("service %q version %q execution_policy.retry: %w", name, version, err)
+	}
+	return nil
+}
+
+var workspaceServerVariableName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]*$`)
+
+func validateWorkspaceServerVariables(name, version string, policy *workspaceExecutionPolicy) error {
+	if policy == nil || len(policy.ServerVariables) == 0 {
+		return nil
+	}
+	if len(policy.ServerVariables) > 128 {
+		return fmt.Errorf("service %q version %q execution_policy.server_variables has too many entries", name, version)
+	}
+	for variable, value := range policy.ServerVariables {
+		if !workspaceServerVariableName.MatchString(variable) || len(value) > 512 || strings.ContainsAny(value, "\r\n") {
+			return fmt.Errorf("service %q version %q execution_policy.server_variables is invalid", name, version)
+		}
 	}
 	return nil
 }
@@ -2224,7 +2320,8 @@ func workspaceExecutionPolicyCandidates(desired workspaceDesiredState) []workspa
 func sameWorkspaceExecutionPolicy(expected, actual store.WorkspaceExecutionPolicyOverride) bool {
 	return reflect.DeepEqual(expected.RateLimit, actual.RateLimit) && reflect.DeepEqual(expected.RetryConfig, actual.RetryConfig) &&
 		reflect.DeepEqual(expected.TimeoutMs, actual.TimeoutMs) && reflect.DeepEqual(expected.Pagination, actual.Pagination) && reflect.DeepEqual(expected.EventExtractionPath, actual.EventExtractionPath) &&
-		reflect.DeepEqual(expected.IncomingWebhookConfig, actual.IncomingWebhookConfig) && reflect.DeepEqual(expected.BaseURL, actual.BaseURL)
+		reflect.DeepEqual(expected.IncomingWebhookConfig, actual.IncomingWebhookConfig) && reflect.DeepEqual(expected.BaseURL, actual.BaseURL) &&
+		reflect.DeepEqual(expected.ServerVariables, actual.ServerVariables)
 }
 
 type automaticWorkspaceProfileCandidate struct {
@@ -3652,7 +3749,7 @@ func workspaceProfileContracts(ctx context.Context, resolver any, apiKey string,
 	services := make(map[uuid.UUID]uuid.UUID, len(resolved))
 	for _, item := range resolved {
 		contracts[item.ServiceVersionID] = connectionprofile.Contract{
-			AuthTypes: item.AuthTypes, Servers: item.Servers, Operations: item.Operations, Complete: true,
+			AuthConfigs: item.AuthConfigs, Servers: item.Servers, Operations: item.Operations, Complete: true,
 		}
 		services[item.ServiceVersionID] = item.ServiceID
 	}
@@ -4094,10 +4191,14 @@ func workspaceConnectBucketName(bucketName string) string {
 // prepareWorkspaceWebhookRegistration is deliberately persistence-free so
 // batch app preparation can build every row without database calls in
 // its service loop.
-func prepareWorkspaceWebhookRegistration(serviceID, serviceVersionID uuid.UUID, label, secretRef string, secretBucketID *uuid.UUID, authShape fusedobject.IncomingWebhookConfig, eventExtractionPath, owningConfigKey string) (store.WorkspaceWebhook, error) {
+func prepareWorkspaceWebhookRegistration(serviceID, serviceVersionID uuid.UUID, label, secretRef string, secretBucketID *uuid.UUID, authShape fusedobject.IncomingWebhookConfig, eventExtractionPath, owningConfigKey, callbackBaseURL string) (store.WorkspaceWebhook, error) {
 	slug, err := webhookid.Generate()
 	if err != nil {
 		return store.WorkspaceWebhook{}, fmt.Errorf("generate webhook slug for %q: %w", label, err)
+	}
+	callbackURL, err := registeredCallbackURL(callbackBaseURL, slug)
+	if err != nil {
+		return store.WorkspaceWebhook{}, err
 	}
 	return store.WorkspaceWebhook{
 		ServiceID:           serviceID,
@@ -4109,6 +4210,8 @@ func prepareWorkspaceWebhookRegistration(serviceID, serviceVersionID uuid.UUID, 
 		AuthKeyName:         authShape.AuthKeyName,
 		SignatureHeader:     authShape.SignatureHeader,
 		VerificationHeaders: authShape.VerificationHeaders,
+		SignaturePolicy:     authShape.SignaturePolicy,
+		CallbackURL:         callbackURL,
 		EventExtractionPath: eventExtractionPath,
 		SecretRef:           secretRef,
 		SecretBucketID:      secretBucketID,
@@ -4116,14 +4219,44 @@ func prepareWorkspaceWebhookRegistration(serviceID, serviceVersionID uuid.UUID, 
 	}, nil
 }
 
+func registeredCallbackURL(baseURL, slug string) (string, error) {
+	if strings.TrimSpace(baseURL) == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", workspaceConfigHTTPError{status: http.StatusBadRequest, message: "callback_base_url is invalid"}
+	}
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackWebhookHost(parsed.Hostname())) {
+		return "", workspaceConfigHTTPError{status: http.StatusBadRequest, message: "callback_base_url must use HTTPS or loopback HTTP"}
+	}
+	// The exact route is immutable; ingress Host and forwarding headers can
+	// never change the bytes used by callback-URL signature recipes.
+	parsed.Path = strings.TrimSuffix(parsed.Path, "/") + "/webhook/" + slug
+	return parsed.String(), nil
+}
+
+func isLoopbackWebhookHost(host string) bool {
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
 func emitWebhookAppliedSpan(ctx context.Context, saved store.WorkspaceWebhook) {
 	_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.webhook_upserted")
 	span.SetAttributes(
 		attribute.String("service_id", saved.ServiceID.String()),
-		attribute.String("label", saved.Label),
 		attribute.String("webhook_id", saved.ID.String()),
+		attribute.String("outcome", "success"),
+		attribute.Bool("signature_policy.present", saved.SignaturePolicy != nil),
+		attribute.Int("signature_policy.version", signaturePolicyVersion(saved.SignaturePolicy)),
 	)
 	span.End()
+}
+
+func signaturePolicyVersion(policy *signaturepolicy.Config) int {
+	if policy == nil {
+		return 0
+	}
+	return policy.Version
 }
 
 // applyDeprecationActions pushes deprecation directives from the plan to the
@@ -4513,7 +4646,7 @@ func applyWorkspaceVersionExecutionPolicyPublishAction(
 	if policy == nil {
 		return nil
 	}
-	if err := updater.PublishServiceVersionExecutionPolicy(ctx, serviceID, action.Version, policy, apiKey); err != nil {
+	if err := updater.PublishServiceVersionExecutionPolicy(ctx, serviceID, action.Version, publicExecutionPolicy(policy), apiKey); err != nil {
 		return fmt.Errorf("publish execution policy for service %s version %s: %w", serviceID, action.Version, err)
 	}
 	_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.version_execution_policy_published")
@@ -4529,6 +4662,21 @@ func desiredVersionExecutionPolicy(svc workspaceDesiredService, version string) 
 		}
 	}
 	return nil
+}
+
+func publicExecutionPolicy(policy *workspaceExecutionPolicy) *registryExecutionPolicy {
+	if policy == nil {
+		return nil
+	}
+	return &registryExecutionPolicy{
+		RateLimit:             policy.RateLimit,
+		Retry:                 workspaceRetryPolicy(policy),
+		TimeoutMs:             policy.TimeoutMs,
+		Pagination:            policy.Pagination,
+		BaseURL:               policy.BaseURL,
+		EventExtractionPath:   policy.EventExtractionPath,
+		IncomingWebhookConfig: policy.IncomingWebhookConfig,
+	}
 }
 
 // applyWorkspaceExecutionPolicyPublishActions executes all
@@ -4575,7 +4723,7 @@ func applyWorkspaceExecutionPolicyPublishAction(
 	if !ok || svc.ExecutionPolicy == nil {
 		return nil
 	}
-	if err := updater.PublishServiceExecutionPolicy(ctx, serviceID, svc.ExecutionPolicy, apiKey); err != nil {
+	if err := updater.PublishServiceExecutionPolicy(ctx, serviceID, publicExecutionPolicy(svc.ExecutionPolicy), apiKey); err != nil {
 		return fmt.Errorf("publish execution policy for service %s: %w", serviceID, err)
 	}
 	_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.execution_policy_published")
@@ -4737,6 +4885,7 @@ func workspaceExecutionPolicyOverride(serviceID uuid.UUID, serviceVersionID *uui
 		TimeoutMs:           ep.TimeoutMs,
 		EventExtractionPath: ep.EventExtractionPath,
 		BaseURL:             ep.BaseURL,
+		ServerVariables:     ep.ServerVariables,
 	}
 	if ep.RateLimit != nil {
 		mapped := fusedobject.RateLimitConfig(*ep.RateLimit)
@@ -4746,16 +4895,10 @@ func workspaceExecutionPolicyOverride(serviceID uuid.UUID, serviceVersionID *uui
 	// field (see workspaceExecutionPolicy's json tags); Retry wins when both
 	// are set so the value that publishes is also the value that takes local
 	// effect.
-	retry := ep.RetryConfig
-	if ep.Retry != nil {
-		retry = ep.Retry
-	}
+	retry := workspaceRetryPolicy(ep)
 	if retry != nil {
-		override.RetryConfig = &fusedobject.RetryConfig{
-			Strategy:   retry.Strategy,
-			MaxRetries: retry.MaxRetries,
-			BackoffMs:  retry.BackoffMs,
-		}
+		mapped := fusedobject.RetryConfig(*retry)
+		override.RetryConfig = &mapped
 	}
 	if ep.Pagination != nil {
 		mapped := fusedobject.PaginationConfig(*ep.Pagination)
@@ -4768,6 +4911,7 @@ func workspaceExecutionPolicyOverride(serviceID uuid.UUID, serviceVersionID *uui
 			AuthKeyName:         ep.IncomingWebhookConfig.AuthKeyName,
 			SignatureHeader:     ep.IncomingWebhookConfig.SignatureHeader,
 			VerificationHeaders: ep.IncomingWebhookConfig.VerificationHeaders,
+			SignaturePolicy:     ep.IncomingWebhookConfig.SignaturePolicy,
 		}
 	}
 	return override
@@ -5302,6 +5446,7 @@ type workspaceConfigErrorBody struct {
 }
 
 func writeWorkspaceConfigError(w http.ResponseWriter, err error, contexts ...context.Context) {
+	markMutationAuditCancellation(err, contexts)
 	var httpErr workspaceConfigHTTPError
 	if errors.As(err, &httpErr) {
 		response := workspaceConfigErrorResponse{
@@ -5335,6 +5480,18 @@ func writeWorkspaceConfigError(w http.ResponseWriter, err error, contexts ...con
 			Retryable: true,
 		},
 	})
+}
+
+func markMutationAuditCancellation(err error, contexts []context.Context) {
+	for _, ctx := range contexts {
+		if ctx == nil {
+			continue
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			accesscontrol.MarkMutationAuditCancelled(ctx)
+			return
+		}
+	}
 }
 
 func workspaceConfigErrorCode(err workspaceConfigHTTPError) string {

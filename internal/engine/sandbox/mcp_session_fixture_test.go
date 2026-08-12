@@ -20,12 +20,12 @@ func TestBuildSessionFixture_MapsEndpointsAcrossSelections(t *testing.T) {
 		{
 			ID: epA, Name: "listUsers", Description: "List users", Method: "GET", Path: "/users",
 			Parameters: fusedobject.Parameters{{Name: "limit", In: "query", Type: "integer"}},
-			Responses:  fusedobject.Responses{"200": {Type: "object"}},
+			Responses:  fusedobject.Responses{"200": {Representations: []fusedobject.ResponseRepresentation{{Schema: &fusedobject.SchemaContract{Projection: fusedobject.Schema{Type: "object"}}}}}},
 		},
 		{ID: epB, Name: "getUser", Method: "GET", Path: "/users/{id}"},
 	}
 	db := &mockCacheDB{contractMetadata: &fusedobject.ServiceMetadata{ID: svcA}, contractEndpoints: endpoints}
-	cache := NewLocalObjectCache(db, &mockRegistryClient{})
+	cache := NewLocalObjectCache(db)
 
 	selections := []models.SDKSelection{
 		{ServiceID: svcA, ServiceVersionID: svcB, SelectAll: true},
@@ -72,7 +72,7 @@ func assertListUsersOperation(t *testing.T, fixture *Fixture, wantServiceID uuid
 }
 
 func TestBuildSessionFixture_PropagatesListEndpointsError(t *testing.T) {
-	cache := NewLocalObjectCache(&mockCacheDB{contractErr: errTestRegistryUnavailable}, &mockRegistryClient{})
+	cache := NewLocalObjectCache(&mockCacheDB{contractErr: errTestRegistryUnavailable})
 
 	selections := []models.SDKSelection{
 		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), SelectAll: true},
@@ -93,7 +93,7 @@ func TestBuildSessionFixture_StrictTokenFetchesOnlyAllowedOperations(t *testing.
 			{ID: allowedList, Name: "listUsers", Method: "GET", Path: "/users"},
 			{ID: uuid.New(), Name: "deleteUser", Method: "DELETE", Path: "/users/{id}"},
 		}}
-	cache := NewLocalObjectCache(db, &mockRegistryClient{})
+	cache := NewLocalObjectCache(db)
 	selections := []models.SDKSelection{
 		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), EndpointIDs: []uuid.UUID{allowedGet}},
 		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), EndpointIDs: []uuid.UUID{allowedList}},

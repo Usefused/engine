@@ -36,6 +36,12 @@ func TestAuditEventValidation(t *testing.T) {
 	if err := event.Validate(); err != nil {
 		t.Fatalf("Validate attempted outcome: %v", err)
 	}
+	for _, outcome := range []AuditOutcome{AuditRolledBack, AuditCancelled} {
+		event.Outcome = outcome
+		if err := event.Validate(); err != nil {
+			t.Fatalf("Validate %s outcome: %v", outcome, err)
+		}
+	}
 	event.Outcome = AuditSucceeded
 	event.Metadata["api_key"] = "must-not-persist"
 	if err := event.Validate(); !errors.Is(err, ErrUnsafeAuditMetadata) {

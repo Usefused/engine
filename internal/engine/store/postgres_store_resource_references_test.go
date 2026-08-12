@@ -46,29 +46,33 @@ func TestPostgresResourceReferencesResolveHumanKeysAndEnforceScope(t *testing.T)
 		INSERT INTO fused_workspace_services (service_id, service_slug, service_name) VALUES ($5, 'github', 'GitHub') RETURNING service_id
 	), inserted_version AS (
 		INSERT INTO fused_workspace_service_versions (service_id, service_version_id, version)
-		SELECT service_id, $11, 'v1' FROM inserted_service RETURNING service_version_id
+		SELECT service_id, $7, 'v1' FROM inserted_service RETURNING service_version_id
 	), inserted_credential AS (
 		INSERT INTO fused_control_credentials (id, subject_id, key_hash, key_prefix, name)
 		SELECT $6, subject_id, 'reference-hash', 'test', 'Laptop' FROM inserted_user RETURNING id
 	)
 	SELECT 1
 	FROM inserted_credential
-	`, teamID, subjectID, bucketID, hiddenBucketID, serviceID, credentialID, accountID, sdkV1ID, sdkV2ID, mcpV1ID, serviceVersionID); err != nil {
+	`, teamID, subjectID, bucketID, hiddenBucketID, serviceID, credentialID, serviceVersionID); err != nil {
 		t.Fatalf("seed references: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO fused_app_families
 			(app_family_id, account_id, kind, canonical_name, display_name, target_language, owner_subject_id)
 		VALUES ($1, $2, 'sdk', 'support', 'Support', 'typescript', $3),
-		       ($4, $2, 'mcp', 'support', 'Support', NULL, $3);
+		       ($4, $2, 'mcp', 'support', 'Support', NULL, $3)
+	`, sdkFamilyID, accountID, subjectID, mcpFamilyID); err != nil {
+		t.Fatalf("seed app families: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
 		INSERT INTO fused_apps
 			(app_id, app_family_id, account_id, version, config_key, source_hash, status, selections)
-		VALUES ($5, $1, $2, '1.0.0', 'sdk:support:1.0.0', 'sdk-v1', 'active', '[]'),
-		       ($6, $1, $2, '2.0.0', 'sdk:support:2.0.0', 'sdk-v2', 'active',
-		        jsonb_build_array(jsonb_build_object('service_id', $8::text, 'service_version_id', $9::text,
-		        'endpoint_ids', jsonb_build_array($5::text), 'webhook_ids', '[]'::jsonb))),
-		       ($7, $4, $2, '2.0.0', 'mcp:support:2.0.0', 'mcp-v2', 'active', '[]')
-	`, sdkFamilyID, accountID, subjectID, mcpFamilyID, sdkV1ID, sdkV2ID, mcpV1ID, serviceID, serviceVersionID); err != nil {
+		VALUES ($1, $4, $5, '1.0.0', 'sdk:support:1.0.0', 'sdk-v1', 'active', '[]'),
+		       ($2, $4, $5, '2.0.0', 'sdk:support:2.0.0', 'sdk-v2', 'active',
+		        jsonb_build_array(jsonb_build_object('service_id', $7::text, 'service_version_id', $8::text,
+		        'endpoint_ids', jsonb_build_array($1::text), 'webhook_ids', '[]'::jsonb))),
+		       ($3, $6, $5, '2.0.0', 'mcp:support:2.0.0', 'mcp-v2', 'active', '[]')
+	`, sdkV1ID, sdkV2ID, mcpV1ID, sdkFamilyID, accountID, mcpFamilyID, serviceID, serviceVersionID); err != nil {
 		t.Fatalf("seed app references: %v", err)
 	}
 

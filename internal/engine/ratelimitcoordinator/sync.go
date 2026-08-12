@@ -14,7 +14,7 @@ func applySynchronization(state *ratelimitpolicy.StateEnvelope, request ratelimi
 		if !ok {
 			continue
 		}
-		if applyObservation(&state.Policies[index], observation) {
+		if applyObservation(&state.Policies[index], observation, now) {
 			changed = true
 		}
 	}
@@ -47,20 +47,49 @@ func identityOfState(state ratelimitpolicy.PolicyState) policyIdentity {
 	return policyIdentity{state.Name, state.ScopeKind, state.ScopeID}
 }
 
-func applyObservation(state *ratelimitpolicy.PolicyState, observation ratelimitpolicy.ResponseObservation) bool {
+func applyObservation(state *ratelimitpolicy.PolicyState, observation ratelimitpolicy.ResponseObservation, now time.Time) bool {
+	changed := applyObservedCost(state, observation, now)
 	if observation.Algorithm == "fixed_window" {
-		return applyFixedWindowObservation(state, observation)
+		return applyFixedWindowObservation(state, observation) || changed
 	}
 	if observation.Algorithm == "token_bucket" {
-		return applyTokenObservation(state, observation)
+		return applyTokenObservation(state, observation) || changed
 	}
-	return false
+	return changed
+}
+
+func applyObservedCost(state *ratelimitpolicy.PolicyState, observation ratelimitpolicy.ResponseObservation, now time.Time) bool {
+	if observation.Cost == nil || *observation.Cost <= observation.LocalCost {
+		return false
+	}
+	delta := *observation.Cost - observation.LocalCost
+	switch observation.Algorithm {
+	case "fixed_window":
+		state.FixedWindowUsed = saturatingAdd(state.FixedWindowUsed, delta)
+	case "token_bucket":
+		if state.Tokens == nil {
+			return false
+		}
+		*state.Tokens -= min64(*state.Tokens, delta)
+	case "rolling_window":
+		consumeRolling(state, ratelimitpolicy.ResolvedPolicy{Cost: delta, RollingDurationMs: observation.DurationMs}, now)
+	default:
+		return false
+	}
+	return true
+}
+
+func min64(left, right int64) int64 {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func applyFixedWindowObservation(state *ratelimitpolicy.PolicyState, observation ratelimitpolicy.ResponseObservation) bool {
 	changed := false
 	if observation.ResetAt != nil {
-		startedAt := observation.ResetAt.Add(-time.Duration(observation.DurationMS) * time.Millisecond)
+		startedAt := observation.ResetAt.Add(-time.Duration(observation.DurationMs) * time.Millisecond)
 		if state.FixedWindowStartedAt == nil || startedAt.After(*state.FixedWindowStartedAt) {
 			state.FixedWindowStartedAt = &startedAt
 			changed = true

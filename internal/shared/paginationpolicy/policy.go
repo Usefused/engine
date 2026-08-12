@@ -7,30 +7,34 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/Usefused/engine/internal/shared/strictjson"
 )
 
-type Type string
 type RequestLocation string
 type SourceLocation string
 type ValueType string
 type IncrementMode string
+type PageApplication string
+type ConditionOperator string
+type ItemPosition string
+type ContinuationKind string
+type OriginMode string
+type RepeatedValueBehavior string
 
 const (
-	Version  = 2
-	Version2 = Version
+	Version = 3
 
-	TypeCursor     Type = "cursor"
-	TypeOffset     Type = "offset"
-	TypePageNumber Type = "page_number"
-	TypeNextURL    Type = "next_url"
+	RequestQuery           RequestLocation = "query"
+	RequestHeader          RequestLocation = "header"
+	RequestBody            RequestLocation = "body"
+	RequestGraphQLVariable RequestLocation = "graphql_variable"
 
-	RequestQuery  RequestLocation = "query"
-	RequestHeader RequestLocation = "header"
-	RequestBody   RequestLocation = "body"
-
-	SourceBody   SourceLocation = "body"
-	SourceHeader SourceLocation = "header"
-	SourceLink   SourceLocation = "link"
+	SourceBody    SourceLocation = "body"
+	SourceHeader  SourceLocation = "header"
+	SourceLink    SourceLocation = "link"
+	SourceItems   SourceLocation = "items"
+	SourceGraphQL SourceLocation = "graphql"
 
 	ValueString  ValueType = "string"
 	ValueInteger ValueType = "integer"
@@ -39,6 +43,30 @@ const (
 
 	IncrementFixed         IncrementMode = "fixed"
 	IncrementItemsReturned IncrementMode = "items_returned"
+
+	ApplyAll        PageApplication = "all"
+	ApplyFirst      PageApplication = "first"
+	ApplySubsequent PageApplication = "subsequent"
+
+	ConditionEquals    ConditionOperator = "equals"
+	ConditionNotEquals ConditionOperator = "not_equals"
+	ConditionPresent   ConditionOperator = "present"
+	ConditionAbsent    ConditionOperator = "absent"
+	ConditionStateGTE  ConditionOperator = "state_gte"
+
+	ItemLast ItemPosition = "last"
+
+	ContinuationToken   ContinuationKind = "token"
+	ContinuationOffset  ContinuationKind = "offset"
+	ContinuationPage    ContinuationKind = "page"
+	ContinuationRFCLink ContinuationKind = "rfc_link"
+	ContinuationNextURL ContinuationKind = "next_url"
+
+	OriginSame OriginMode = "same_origin"
+	OriginList OriginMode = "allowlist"
+
+	RepeatedStop  RepeatedValueBehavior = "stop"
+	RepeatedError RepeatedValueBehavior = "error"
 
 	DefaultMaxPages      = 100
 	DefaultMaxItems      = int64(10_000)
@@ -62,14 +90,13 @@ var (
 )
 
 type Config struct {
-	Version    int               `json:"version"`
-	Type       Type              `json:"type"`
-	Cursor     *CursorConfig     `json:"cursor,omitempty"`
-	Offset     *OffsetConfig     `json:"offset,omitempty"`
-	PageNumber *PageNumberConfig `json:"page_number,omitempty"`
-	NextURL    *NextURLConfig    `json:"next_url,omitempty"`
-	ItemsPath  string            `json:"items_path"`
-	Limits     Limits            `json:"limits"`
+	Version      int                `json:"version"`
+	Request      []RequestStep      `json:"request"`
+	Response     ResponsePlan       `json:"response"`
+	Continuation []ContinuationStep `json:"continuation"`
+	Termination  Termination        `json:"termination"`
+	GraphQL      *GraphQLPlan       `json:"graphql,omitempty"`
+	Limits       Limits             `json:"limits"`
 }
 
 type RequestTarget struct {
@@ -78,59 +105,115 @@ type RequestTarget struct {
 }
 
 type ValueSource struct {
-	Location  SourceLocation `json:"location"`
-	Path      string         `json:"path,omitempty"`
-	Name      string         `json:"name,omitempty"`
-	Relation  string         `json:"relation,omitempty"`
-	ValueType ValueType      `json:"value_type"`
+	Location  SourceLocation    `json:"location"`
+	Path      string            `json:"path,omitempty"`
+	Name      string            `json:"name,omitempty"`
+	Relation  string            `json:"relation,omitempty"`
+	ValueType ValueType         `json:"value_type"`
+	Paths     []ConditionalPath `json:"paths,omitempty"`
+	Item      *ItemSelector     `json:"item,omitempty"`
 }
 
 type Scalar struct {
 	Type    ValueType `json:"type"`
 	String  *string   `json:"string,omitempty"`
 	Integer *int64    `json:"integer,omitempty"`
+	Boolean *bool     `json:"boolean,omitempty"`
 }
 
-type CursorConfig struct {
-	Request RequestTarget `json:"request"`
-	Initial *Scalar       `json:"initial,omitempty"`
-	Next    ValueSource   `json:"next"`
-	HasMore *ValueSource  `json:"has_more,omitempty"`
+type RequestStep struct {
+	State     string          `json:"state,omitempty"`
+	Target    RequestTarget   `json:"target"`
+	ValueType ValueType       `json:"value_type"`
+	Initial   *Scalar         `json:"initial,omitempty"`
+	Constant  *Scalar         `json:"constant,omitempty"`
+	Apply     PageApplication `json:"apply"`
 }
 
-type OffsetIncrement struct {
+type ResponsePlan struct {
+	Items  ItemsSource     `json:"items"`
+	Values []ResponseValue `json:"values"`
+}
+
+type ItemsSource struct {
+	Path  string            `json:"path,omitempty"`
+	Paths []ConditionalPath `json:"paths,omitempty"`
+}
+
+type ResponseValue struct {
+	Name   string      `json:"name"`
+	Source ValueSource `json:"source"`
+}
+
+type ConditionalPath struct {
+	Path string           `json:"path"`
+	When RequestCondition `json:"when"`
+}
+
+type RequestCondition struct {
+	State    string            `json:"state"`
+	Operator ConditionOperator `json:"operator"`
+	Value    *Scalar           `json:"value,omitempty"`
+}
+
+type ItemSelector struct {
+	Position ItemPosition `json:"position"`
+	Path     string       `json:"path,omitempty"`
+}
+
+type ContinuationStep struct {
+	Kind          ContinuationKind `json:"kind"`
+	State         string           `json:"state"`
+	ResponseValue string           `json:"response_value,omitempty"`
+	Increment     *Increment       `json:"increment,omitempty"`
+	Origin        *OriginPolicy    `json:"origin,omitempty"`
+}
+
+type Increment struct {
 	Mode  IncrementMode `json:"mode"`
 	Value int64         `json:"value,omitempty"`
 }
 
-type PageSize struct {
-	Target RequestTarget `json:"target"`
-	Value  int64         `json:"value"`
+type OriginPolicy struct {
+	Mode           OriginMode `json:"mode"`
+	AllowedOrigins []string   `json:"allowed_origins,omitempty"`
 }
 
-type OffsetConfig struct {
-	Request         RequestTarget   `json:"request"`
-	Start           int64           `json:"start"`
-	Increment       OffsetIncrement `json:"increment"`
-	PageSize        *PageSize       `json:"page_size,omitempty"`
-	NextOffset      *ValueSource    `json:"next_offset,omitempty"`
-	TotalItems      *ValueSource    `json:"total_items,omitempty"`
-	HasMore         *ValueSource    `json:"has_more,omitempty"`
-	StopOnShortPage bool            `json:"stop_on_short_page,omitempty"`
+type Termination struct {
+	StopOnEmptyItems    bool                  `json:"stop_on_empty_items,omitempty"`
+	StopOnShortPage     *ShortPageTermination `json:"stop_on_short_page,omitempty"`
+	StopOnMissingValues []string              `json:"stop_on_missing_values,omitempty"`
+	Conditions          []ResponseCondition   `json:"conditions,omitempty"`
+	RepeatedValue       RepeatedValueBehavior `json:"repeated_value"`
 }
 
-type PageNumberConfig struct {
-	Request         RequestTarget `json:"request"`
-	Start           int64         `json:"start"`
-	Increment       int64         `json:"increment"`
-	PageSize        *PageSize     `json:"page_size,omitempty"`
-	TotalPages      *ValueSource  `json:"total_pages,omitempty"`
-	HasMore         *ValueSource  `json:"has_more,omitempty"`
-	StopOnShortPage bool          `json:"stop_on_short_page,omitempty"`
+type ShortPageTermination struct {
+	RequestState string `json:"request_state"`
 }
 
-type NextURLConfig struct {
-	Next ValueSource `json:"next"`
+type ResponseCondition struct {
+	ResponseValue string            `json:"response_value"`
+	State         string            `json:"state,omitempty"`
+	Operator      ConditionOperator `json:"operator"`
+	Value         *Scalar           `json:"value,omitempty"`
+}
+
+type GraphQLPlan struct {
+	Variables              []GraphQLVariable    `json:"variables"`
+	ResultAliases          []GraphQLResultAlias `json:"result_aliases"`
+	FirstPageTemplate      string               `json:"first_page_template"`
+	SubsequentPageTemplate string               `json:"subsequent_page_template"`
+}
+
+type GraphQLVariable struct {
+	Name      string    `json:"name"`
+	State     string    `json:"state"`
+	ValueType ValueType `json:"value_type"`
+}
+
+type GraphQLResultAlias struct {
+	Name  string `json:"name"`
+	Alias string `json:"alias"`
 }
 
 type Limits struct {
@@ -138,6 +221,16 @@ type Limits struct {
 	MaxItems      int64 `json:"max_items"`
 	MaxBytes      int64 `json:"max_bytes"`
 	MaxDurationMs int64 `json:"max_duration_ms"`
+}
+
+func (c *Config) UnmarshalJSON(data []byte) error {
+	type plain Config
+	var decoded plain
+	if err := strictjson.Decode(data, &decoded, "pagination config"); err != nil {
+		return err
+	}
+	*c = Config(decoded)
+	return Validate(c)
 }
 
 func EffectiveLimits(value Limits) Limits {
@@ -154,15 +247,9 @@ func Validate(config *Config) error {
 		return invalid("policy is required")
 	}
 	if config.Version != Version {
-		return invalid("pagination version must be 2")
+		return invalid("pagination version is unsupported")
 	}
-	if err := ValidateItemsPath(config.ItemsPath); err != nil {
-		return invalid("items_path: " + err.Error())
-	}
-	if err := validateLimits(EffectiveLimits(config.Limits)); err != nil {
-		return err
-	}
-	return validateStrategy(config)
+	return validateV3(config)
 }
 
 // ValidateItemsPath accepts the document root because some provider list
@@ -200,158 +287,6 @@ func validateLimits(value Limits) error {
 	return nil
 }
 
-func validateStrategy(config *Config) error {
-	if branchCount(config) != 1 {
-		return invalid("exactly one strategy branch is required")
-	}
-	switch config.Type {
-	case TypeCursor:
-		return validateCursor(config.Cursor)
-	case TypeOffset:
-		return validateOffset(config.Offset, config.ItemsPath)
-	case TypePageNumber:
-		return validatePageNumber(config.PageNumber, config.ItemsPath)
-	case TypeNextURL:
-		return validateNextURL(config.NextURL)
-	default:
-		return invalid("unsupported type")
-	}
-}
-
-func branchCount(config *Config) int {
-	count := 0
-	for _, present := range []bool{config.Cursor != nil, config.Offset != nil, config.PageNumber != nil, config.NextURL != nil} {
-		if present {
-			count++
-		}
-	}
-	return count
-}
-
-func validateCursor(config *CursorConfig) error {
-	if config == nil {
-		return invalid("cursor strategy is required")
-	}
-	if err := validateRequestTarget(config.Request); err != nil {
-		return err
-	}
-	if err := validateScalar(config.Initial); err != nil {
-		return err
-	}
-	if err := validateSource(config.Next, ValueString, ValueInteger); err != nil {
-		return err
-	}
-	return validateOptionalSource(config.HasMore, ValueBoolean)
-}
-
-func validateOffset(config *OffsetConfig, itemsPath string) error {
-	if config == nil {
-		return invalid("offset strategy and non-negative start are required")
-	}
-	if config.Start < 0 {
-		return invalid("offset strategy and non-negative start are required")
-	}
-	if err := validateRequestTarget(config.Request); err != nil {
-		return err
-	}
-	if err := validateOffsetIncrement(config.Increment, config.PageSize, itemsPath); err != nil {
-		return err
-	}
-	if err := validatePageSize(config.PageSize); err != nil {
-		return err
-	}
-	if err := validateOffsetStop(config); err != nil {
-		return err
-	}
-	return validateOffsetSources(config)
-}
-
-func validateOffsetStop(config *OffsetConfig) error {
-	stopSources := []bool{config.NextOffset != nil, config.TotalItems != nil, config.HasMore != nil, config.StopOnShortPage}
-	if !anyTrue(stopSources) {
-		return invalid("offset strategy requires a stop signal")
-	}
-	if config.StopOnShortPage && config.PageSize == nil {
-		return invalid("short-page stopping requires page_size")
-	}
-	return nil
-}
-
-func validateOffsetSources(config *OffsetConfig) error {
-	if err := validateOptionalSource(config.NextOffset, ValueInteger); err != nil {
-		return err
-	}
-	if err := validateOptionalSource(config.TotalItems, ValueInteger); err != nil {
-		return err
-	}
-	return validateOptionalSource(config.HasMore, ValueBoolean)
-}
-
-func validatePageNumber(config *PageNumberConfig, _ string) error {
-	if config == nil {
-		return invalid("page_number requires positive start and increment")
-	}
-	if config.Start < 1 || config.Increment < 1 {
-		return invalid("page_number requires positive start and increment")
-	}
-	if err := validateRequestTarget(config.Request); err != nil {
-		return err
-	}
-	if err := validatePageSize(config.PageSize); err != nil {
-		return err
-	}
-	if err := validatePageStop(config); err != nil {
-		return err
-	}
-	if err := validateOptionalSource(config.TotalPages, ValueInteger); err != nil {
-		return err
-	}
-	return validateOptionalSource(config.HasMore, ValueBoolean)
-}
-
-func validatePageStop(config *PageNumberConfig) error {
-	if !anyTrue([]bool{config.TotalPages != nil, config.HasMore != nil, config.StopOnShortPage}) {
-		return invalid("page_number strategy requires a stop signal")
-	}
-	if config.StopOnShortPage && config.PageSize == nil {
-		return invalid("short-page stopping requires page_size")
-	}
-	return nil
-}
-
-func validateNextURL(config *NextURLConfig) error {
-	if config == nil {
-		return invalid("next_url strategy is required")
-	}
-	return validateSource(config.Next, ValueURL)
-}
-
-func validateOffsetIncrement(value OffsetIncrement, pageSize *PageSize, itemsPath string) error {
-	switch value.Mode {
-	case IncrementFixed:
-		if value.Value < 1 {
-			return invalid("fixed offset increment must be positive")
-		}
-	case IncrementItemsReturned:
-		if value.Value != 0 || pageSize == nil || itemsPath == "" {
-			return invalid("items_returned increment requires page_size and items_path")
-		}
-	default:
-		return invalid("unsupported offset increment mode")
-	}
-	return nil
-}
-
-func validatePageSize(value *PageSize) error {
-	if value == nil {
-		return nil
-	}
-	if value.Value < 1 {
-		return invalid("page_size value must be positive")
-	}
-	return validateRequestTarget(value.Target)
-}
-
 func validateRequestTarget(value RequestTarget) error {
 	if value.Name == "" || len(value.Name) > maxNameLength || strings.ContainsAny(value.Name, "\r\n") {
 		return invalid("request target name is invalid")
@@ -369,13 +304,33 @@ func validateScalar(value *Scalar) error {
 	if value == nil {
 		return nil
 	}
-	if value.Type == ValueString && value.String != nil && value.Integer == nil {
-		return nil
-	}
-	if value.Type == ValueInteger && value.Integer != nil && value.String == nil {
+	if paginationScalarValueCount(value) == 1 && paginationScalarMatchesType(value) {
 		return nil
 	}
 	return invalid("initial cursor must contain exactly one typed scalar")
+}
+
+func paginationScalarValueCount(value *Scalar) int {
+	count := 0
+	for _, present := range []bool{value.String != nil, value.Integer != nil, value.Boolean != nil} {
+		if present {
+			count++
+		}
+	}
+	return count
+}
+
+func paginationScalarMatchesType(value *Scalar) bool {
+	switch value.Type {
+	case ValueString, ValueURL:
+		return value.String != nil
+	case ValueInteger:
+		return value.Integer != nil
+	case ValueBoolean:
+		return value.Boolean != nil
+	default:
+		return false
+	}
 }
 
 func validateOptionalSource(value *ValueSource, allowed ...ValueType) error {
@@ -419,7 +374,7 @@ func validateHeaderSource(value ValueSource) error {
 }
 
 func validateLinkSource(value ValueSource) error {
-	valid := value.Path == "" && validHeaderName(value.Name) && value.Relation == "next" && value.ValueType == ValueURL
+	valid := value.Path == "" && len(value.Paths) == 0 && value.Item == nil && validHeaderName(value.Name) && value.Relation == "next" && value.ValueType == ValueURL
 	if !valid {
 		return invalid("link source requires a header name, relation next, and URL value")
 	}

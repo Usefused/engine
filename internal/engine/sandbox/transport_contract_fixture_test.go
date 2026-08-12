@@ -11,8 +11,10 @@ import (
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 )
 
-func TestEngineConsumesFrozenAuthRoutingFixture(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "..", "contract-fixtures", "auth-routing", "v1_transport.json")
+// TestEngineConsumesTransportContractFixture proves Engine consumes the same
+// provider-neutral auth and server decisions as the control-plane clients.
+func TestEngineConsumesTransportContractFixture(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "..", "contract-fixtures", "security", "v1_transport.json")
 	payload, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
@@ -26,13 +28,13 @@ func TestEngineConsumesFrozenAuthRoutingFixture(t *testing.T) {
 	if err := json.Unmarshal(payload, &fixture); err != nil {
 		t.Fatalf("decode fixture: %v", err)
 	}
-	if fixture.AuthConfig.Name != "chargebeeBasic" || fixture.AuthConfig.BasicPasswordMode != authrouting.BasicPasswordEmpty {
+	if fixture.AuthConfig.Name != "emptyPasswordBasic" || fixture.AuthConfig.BasicPasswordMode != authrouting.BasicPasswordEmpty {
 		t.Fatalf("basic wire changed: %#v", fixture.AuthConfig)
 	}
 	if fixture.OAuthAuthConfig.TokenEndpointAuthMethod != fusedobject.TokenEndpointAuthMethodClientSecretBasic {
 		t.Fatalf("OAuth token endpoint auth method changed: %#v", fixture.OAuthAuthConfig)
 	}
-	wantFirst := []string{"wiseOAuth", "wiseMTLS"}
+	wantFirst := []string{"multiFlowOAuth", "clientCertificate"}
 	var gotFirst []string
 	for _, requirement := range fixture.SecurityRequirements[0].Schemes {
 		gotFirst = append(gotFirst, requirement.Scheme)
@@ -40,7 +42,7 @@ func TestEngineConsumesFrozenAuthRoutingFixture(t *testing.T) {
 	if !reflect.DeepEqual(gotFirst, wantFirst) || len(fixture.SecurityRequirements[2].Schemes) != 0 {
 		t.Fatalf("security wire changed: %#v", fixture.SecurityRequirements)
 	}
-	if fixture.Server.URL != "https://{your-domain}.atlassian.net" || len(fixture.Server.Variables) != 2 || fixture.Server.Variables[0].Name != "your-domain" {
+	if fixture.Server.URL != "https://{tenant}.example.test/{api-version}" || len(fixture.Server.Variables) != 2 || fixture.Server.Variables[0].Name != "tenant" {
 		t.Fatalf("server wire changed: %#v", fixture.Server)
 	}
 }

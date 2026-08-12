@@ -26,6 +26,9 @@ func (m *mockRegistryClient) FetchServiceMetadata(ctx context.Context, serviceID
 	if m.shouldFail {
 		return nil, errors.New("registry offline")
 	}
+	if m.fusedObj != nil && m.fusedObj.ContractVersion == 0 {
+		m.fusedObj.ExecutionContractEnvelope = fusedobject.EngineExecutionContractSupport()
+	}
 	return m.fusedObj, nil
 }
 

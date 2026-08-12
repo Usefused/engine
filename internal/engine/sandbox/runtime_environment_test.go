@@ -31,6 +31,19 @@ func TestResolveRuntimeEnvironmentUsesExplicitProviderLabelNotDescription(t *tes
 	}
 }
 
+func TestResolveRuntimeEnvironmentPrefersOpenAPI32ServerName(t *testing.T) {
+	metadata := &fusedobject.ServiceMetadata{Servers: fusedobject.Servers{{
+		URL: "https://api.example.test", Name: "Production", Environment: "legacy-prod", IsDefault: true,
+	}}}
+	resolved, err := resolveRuntimeEnvironment(metadata, "production")
+	if err != nil {
+		t.Fatalf("resolveRuntimeEnvironment: %v", err)
+	}
+	if resolved.BaseURL != "https://api.example.test" || resolved.Environment != "Production" {
+		t.Fatalf("named server resolution = %+v", resolved)
+	}
+}
+
 func TestResolveRuntimeServerTemplateUsesProviderDefaultWithoutAllowlist(t *testing.T) {
 	defaultTenant := "api"
 	metadata := &fusedobject.ServiceMetadata{Servers: fusedobject.Servers{{
@@ -121,17 +134,20 @@ func TestResolveRuntimeServerTemplateRequiresAbsoluteProtocolRelativeOverride(t 
 	if err == nil {
 		resolution, err = resolveRuntimeServerTemplate(metadata, resolution, nil, binding)
 	}
-	if err != nil || resolution.BaseURL != binding[0].Value || resolution.Source != "connection_resource" {
-		t.Fatalf("forced resolution=%+v err=%v", resolution, err)
-	}
+	assertRuntimeServerResolution(t, resolution, err, binding[0].Value, "connection_resource")
 
 	override := &fusedobject.ServiceMetadata{BaseURL: "https://acme.atlassian.net"}
 	resolution, err = resolveRuntimeEnvironment(override, "")
 	if err == nil {
 		resolution, err = resolveRuntimeServerTemplate(override, resolution, nil, nil)
 	}
-	if err != nil || resolution.BaseURL != override.BaseURL || resolution.Source != "default" {
-		t.Fatalf("workspace override resolution=%+v err=%v", resolution, err)
+	assertRuntimeServerResolution(t, resolution, err, override.BaseURL, "default")
+}
+
+func assertRuntimeServerResolution(t *testing.T, resolution RuntimeEnvironmentResolution, err error, wantURL, wantSource string) {
+	t.Helper()
+	if err != nil || resolution.BaseURL != wantURL || resolution.Source != wantSource {
+		t.Fatalf("resolution=%+v err=%v, want URL=%q source=%q", resolution, err, wantURL, wantSource)
 	}
 }
 
@@ -330,6 +346,27 @@ func TestSelectedConnectedResourceDoesNotMutateBaseURL(t *testing.T) {
 	})
 	if source != "connection_resource" || service.BaseURL != "https://api.example.test" {
 		t.Fatalf("resource selection bypassed binding engine: source=%q service=%#v", source, service)
+	}
+}
+
+func TestApplyOperationRuntimeServerUsesWorkspaceVariables(t *testing.T) {
+	defaultRegion := "us"
+	metadata := &fusedobject.ServiceMetadata{
+		ServerVariables: map[string]string{"region": "eu"},
+		ConnectConfig: &fusedobject.ServiceConnectConfig{ResourceInput: &fusedobject.ResourceInputConfig{
+			AllowedHosts: []string{"api.example.test"},
+		}},
+	}
+	service := &models.Service{BaseURL: "https://api.example.test", ServerSource: "service"}
+	operation := &models.IntegrationObject{OperationServers: models.Servers{{
+		URL: "/{region}/v2", IsDefault: true,
+		Variables: []serverrouting.Variable{{Name: "region", Default: &defaultRegion}},
+	}}}
+	if err := applyOperationRuntimeServer(metadata, service, operation, RuntimeEnvironmentResolution{}, nil, nil); err != nil {
+		t.Fatalf("applyOperationRuntimeServer: %v", err)
+	}
+	if service.BaseURL != "https://api.example.test/eu/v2" || service.ServerSource != "operation" {
+		t.Fatalf("service = %#v", service)
 	}
 }
 

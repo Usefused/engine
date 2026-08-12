@@ -162,9 +162,6 @@ func cleanupDeactivatedAppRuntime(ctx context.Context, app *store.App, proxy For
 		return
 	}
 	sandbox.KillMCPSessionsForSDK(app.AppID.String())
-	if err := sandbox.CleanupMCPSandboxDir(app.AppID.String()); err != nil {
-		slog.WarnContext(ctx, "MCP app sandbox cleanup pending", slog.Any("error", err), slog.String("app_id", app.AppID.String()))
-	}
 }
 
 func deleteRegistryPackage(ctx context.Context, proxy Forwarder, appID uuid.UUID) error {

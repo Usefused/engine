@@ -424,9 +424,10 @@ type WorkspaceExecutionPolicyOverride struct {
 	// BaseURL is this workspace's local override for a wrong or missing
 	// spec-derived base_url -- see LocalObjectCache.applyExecutionPolicyOverride,
 	// which is where this takes effect.
-	BaseURL   *string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	BaseURL         *string
+	ServerVariables map[string]string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 type WorkspaceExecutionPolicyRef struct {
@@ -447,6 +448,7 @@ type WorkspaceExecutionPolicyExactBatchStore interface {
 // eventual projection and cold recovery source.
 type ProviderRateLimitStore interface {
 	AcquireProviderRateLimit(ctx context.Context, request ratelimitpolicy.AcquireRequest) (ratelimitpolicy.Decision, error)
+	ReleaseProviderRateLimit(ctx context.Context, request ratelimitpolicy.ReleaseRequest) error
 	SyncProviderRateLimit(ctx context.Context, request ratelimitpolicy.SyncRequest) error
 }
 
@@ -804,8 +806,7 @@ type Store interface {
 	// workspace gate; engine_workspace_registration_plan.md, Task 2).
 	IsWorkspaceServiceEnabled(ctx context.Context, serviceID uuid.UUID) (bool, error)
 
-	// GetWorkspaceWebhookBySlug is the Engine's webhook ingress lookup -- the
-	// single indexed read that replaces the old NATS-to-Registry round trip.
+	// GetWorkspaceWebhookBySlug is the Engine's indexed webhook ingress lookup.
 	GetWorkspaceWebhookBySlug(ctx context.Context, slug string) (*WorkspaceWebhook, error)
 	// ListWorkspaceWebhooks returns every registration a workspace holds for
 	// one service, for CLI/visibility output.

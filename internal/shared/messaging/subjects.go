@@ -14,8 +14,7 @@ const (
 	EngineExecutionEventsSubject = "engine.execution.events.v1"
 	AppTokenInvalidatedSubject   = "engine.app_token.invalidated.v1"
 
-	FusedEngineKillSubscribe    = "fused_engine.kill.*"
-	FusedEngineCleanupSubscribe = "fused_engine.cleanup.*"
+	FusedEngineKillSubscribe = "fused_engine.kill.*"
 )
 
 func ProviderRateLimitKVStream() string {

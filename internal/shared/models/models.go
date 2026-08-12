@@ -16,11 +16,15 @@ import (
 	"strings"
 
 	"github.com/Usefused/engine/internal/shared/authrouting"
+	"github.com/Usefused/engine/internal/shared/catalogcontract"
 	"github.com/Usefused/engine/internal/shared/config"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
 	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
+	"github.com/Usefused/engine/internal/shared/retrypolicy"
 	"github.com/Usefused/engine/internal/shared/serverrouting"
+	"github.com/Usefused/engine/internal/shared/signaturepolicy"
+	"github.com/Usefused/engine/internal/shared/workflowcontract"
 	"github.com/google/uuid"
 	"github.com/pgvector/pgvector-go"
 	"github.com/sashabaranov/go-openai"
@@ -251,6 +255,7 @@ type PublicServiceInsights struct {
 
 type Server struct {
 	URL         string                   `json:"url"`
+	Name        string                   `json:"name,omitempty"`
 	Description string                   `json:"description,omitempty"`
 	Environment string                   `json:"environment,omitempty"`
 	IsDefault   bool                     `json:"is_default,omitempty"`
@@ -269,10 +274,14 @@ type ServiceProviderIdentity struct {
 type Service struct {
 	ID               uuid.UUID `json:"id"`
 	ServiceVersionID uuid.UUID `json:"service_version_id,omitempty"`
-	Name             string    `json:"name"` // e.g., "Stripe"
+	Name             string    `json:"name"`
 	Description      string    `json:"description"`
 	BaseURL          string    `json:"base_url"`
-	RequestedVersion string    `json:"-" db:"-"`
+	// ServerSource is runtime-only and intentionally bounded for secret-safe OTEL.
+	ServerSource     string            `json:"-" db:"-"`
+	ServiceBaseURL   string            `json:"-" db:"-"`
+	ServerVariables  map[string]string `json:"-" db:"-"`
+	RequestedVersion string            `json:"-" db:"-"`
 	// ResolvedVersion/ResolvedVersionChecked cache the provider version whose
 	// config fields (base_url, auth_configs, rate_limit, retry_config,
 	// incoming_webhook_config, default_headers) should be exposed for this
@@ -295,17 +304,19 @@ type Service struct {
 	// BaseURLOverride is the owner-editable execution_policy override of the
 	// spec-derived BaseURL above. nil means no override is published; consumers
 	// of the "base_url" field should prefer this value over BaseURL when set.
-	BaseURLOverride       *string                `json:"base_url_override,omitempty"`
-	DefaultHeaders        DefaultHeaders         `json:"default_headers,omitempty"`
-	EventExtractionPath   *string                `json:"event_extraction_path,omitempty"`
-	IncomingWebhookConfig *IncomingWebhookConfig `json:"incoming_webhook_config,omitempty"`
-	RawWSDL               string                 `json:"raw_wsdl,omitempty"`
-	Slug                  *string                `json:"slug,omitempty"`
-	Category              *string                `json:"category,omitempty"`
-	IsPublic              bool                   `json:"is_public"`
-	WatchForDrift         bool                   `json:"watch_for_drift"`
-	ImportWarnings        ImportWarnings         `json:"import_warnings,omitempty"`
-	AccountID             uuid.UUID              `json:"account_id,omitempty"`
+	BaseURLOverride       *string                      `json:"base_url_override,omitempty"`
+	DefaultHeaders        DefaultHeaders               `json:"default_headers,omitempty"`
+	EventExtractionPath   *string                      `json:"event_extraction_path,omitempty"`
+	IncomingWebhookConfig *IncomingWebhookConfig       `json:"incoming_webhook_config,omitempty"`
+	Catalog               *catalogcontract.Composition `json:"catalog,omitempty"`
+	Documentation         *ServiceDocumentation        `json:"documentation,omitempty"`
+	RawWSDL               string                       `json:"raw_wsdl,omitempty"`
+	Slug                  *string                      `json:"slug,omitempty"`
+	Category              *string                      `json:"category,omitempty"`
+	IsPublic              bool                         `json:"is_public"`
+	WatchForDrift         bool                         `json:"watch_for_drift"`
+	ImportWarnings        ImportWarnings               `json:"import_warnings,omitempty"`
+	AccountID             uuid.UUID                    `json:"account_id,omitempty"`
 	// ProviderIdentity is attached in one batched account lookup for GraphQL
 	// service results. Provider identity is shown for owned and foreign services
 	// alike; ownership remains the separate IsOwner capability signal.
@@ -367,13 +378,14 @@ type Component struct {
 // ─── Webhook Object ──────────────────────────────────────────────────────────
 
 type WebhookObject struct {
-	ID          uuid.UUID `json:"id"`
-	ServiceID   uuid.UUID `json:"service_id"`
-	Name        string    `json:"name"`
-	Version     *string   `json:"version,omitempty"`
-	Method      string    `json:"method"`
-	Description string    `json:"description"`
-	RequestBody *Schema   `json:"request_body,omitempty"`
+	ID          uuid.UUID                 `json:"id"`
+	ServiceID   uuid.UUID                 `json:"service_id"`
+	Name        string                    `json:"name"`
+	Version     *string                   `json:"version,omitempty"`
+	Method      string                    `json:"method"`
+	Description string                    `json:"description"`
+	RequestBody *Schema                   `json:"request_body,omitempty"`
+	Contract    *InboundOperationContract `json:"contract,omitempty"`
 	// ChannelName and Action identify the AsyncAPI channel and operation a
 	// webhook came from -- the closest analog to an endpoint's method+path,
 	// used to match a webhook across reimports. Always empty for
@@ -450,11 +462,12 @@ type ServiceVersion struct {
 	RetryConfig *RetryConfig      `json:"retry_config,omitempty"`
 	Pagination  *PaginationConfig `json:"pagination,omitempty"`
 	// BaseURLOverride mirrors Service.BaseURLOverride, scoped to this version.
-	BaseURLOverride       *string                `json:"base_url_override,omitempty"`
-	EventExtractionPath   *string                `json:"event_extraction_path,omitempty"`
-	IncomingWebhookConfig *IncomingWebhookConfig `json:"incoming_webhook_config,omitempty"`
-	ConnectConfig         *ServiceConnectConfig  `json:"connect_config,omitempty"`
-	DefaultHeaders        DefaultHeaders         `json:"default_headers,omitempty"`
+	BaseURLOverride       *string                      `json:"base_url_override,omitempty"`
+	EventExtractionPath   *string                      `json:"event_extraction_path,omitempty"`
+	IncomingWebhookConfig *IncomingWebhookConfig       `json:"incoming_webhook_config,omitempty"`
+	ConnectConfig         *ServiceConnectConfig        `json:"connect_config,omitempty"`
+	Catalog               *catalogcontract.Composition `json:"catalog,omitempty"`
+	DefaultHeaders        DefaultHeaders               `json:"default_headers,omitempty"`
 	// Servers mirrors PublishConfigPayload.Servers -- see that field's
 	// comment for why this exists alongside BaseURL instead of replacing it.
 	Servers  Servers `json:"servers,omitempty"`
@@ -471,7 +484,8 @@ type ServiceVersion struct {
 	// compares its spec's declared version against this field, not Name, to
 	// decide whether it's describing the version already live or a new one.
 	// nil for any version never populated by a spec import.
-	SourceSpecVersion *string `json:"source_spec_version,omitempty"`
+	SourceSpecVersion *string               `json:"source_spec_version,omitempty"`
+	Documentation     *ServiceDocumentation `json:"documentation,omitempty"`
 }
 
 // ServiceConnectConfig declares how a connected user maps to provider-side
@@ -570,11 +584,11 @@ type ServiceVersionAuthConfigs struct {
 // ServiceVersionConnectionContract is the bounded Registry response used to
 // validate local workspace profiles against exact pinned service versions.
 type ServiceVersionConnectionContract struct {
-	ServiceID        uuid.UUID                     `json:"service_id"`
-	ServiceVersionID uuid.UUID                     `json:"service_version_id"`
-	AuthTypes        []string                      `json:"auth_types"`
-	Servers          []string                      `json:"servers"`
-	Operations       []connectionprofile.Operation `json:"operations"`
+	ServiceID        uuid.UUID                      `json:"service_id"`
+	ServiceVersionID uuid.UUID                      `json:"service_version_id"`
+	AuthConfigs      []connectionprofile.AuthConfig `json:"auth_configs"`
+	Servers          []string                       `json:"servers"`
+	Operations       []connectionprofile.Operation  `json:"operations"`
 }
 
 type ServiceVersionRef struct {
@@ -657,15 +671,16 @@ type IntegrationObject struct {
 	Status            string           `json:"status"` // "active" | "drifted" | "updating"
 	SpecHash          string           `json:"spec_hash"`
 
-	Method          string          `json:"method"`
-	NormalizedPath  string          `json:"normalized_path"`
-	Path            string          `json:"path"`
-	Deprecated      bool            `json:"deprecated"`
-	DeprecationDate *time.Time      `json:"deprecation_date,omitempty"`
-	Parameters      Parameters      `json:"parameters"`
-	RequestContent  *RequestContent `json:"request_content,omitempty"`
-	Responses       Responses       `json:"responses"`
-	GraphQLQuery    *string         `json:"graphql_query,omitempty"`
+	Method           string          `json:"method"`
+	NormalizedPath   string          `json:"normalized_path"`
+	Path             string          `json:"path"`
+	OperationServers Servers         `json:"operation_servers,omitempty" db:"operation_servers"`
+	Deprecated       bool            `json:"deprecated"`
+	DeprecationDate  *time.Time      `json:"deprecation_date,omitempty"`
+	Parameters       Parameters      `json:"parameters"`
+	RequestContent   *RequestContent `json:"request_content,omitempty"`
+	Responses        Responses       `json:"responses"`
+	GraphQLQuery     *string         `json:"graphql_query,omitempty"`
 	// ProviderProtocol is the provider-facing wire contract, not the SDK/MCP
 	// execution transport recorded by activity and usage events.
 	ProviderProtocol string `json:"provider_protocol,omitempty"`
@@ -673,12 +688,9 @@ type IntegrationObject struct {
 	OperationKind        string                   `json:"operation_kind,omitempty"`
 	Pagination           *PaginationConfig        `json:"pagination,omitempty"`
 	SecurityRequirements authrouting.Requirements `json:"security_requirements"`
-	// IsSSE marks that this endpoint returns a Server-Sent Events stream.
-	// The Engine will set Accept: text/event-stream and parse the SSE wire format.
-	IsSSE bool `json:"is_sse,omitempty"`
-
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Documentation        *OperationDocumentation  `json:"documentation,omitempty"`
+	CreatedAt            time.Time                `json:"created_at"`
+	UpdatedAt            time.Time                `json:"updated_at"`
 }
 
 const (
@@ -703,12 +715,50 @@ func (p *PaginationOverrides) Scan(value interface{}) error {
 const PathEncodingPreserveSlashes = "preserve_slashes"
 
 type Parameter struct {
-	Name         string `json:"name"`
-	In           string `json:"in"` // "query" | "path" | "header"
-	Required     bool   `json:"required"`
-	Type         string `json:"type"`
-	Description  string `json:"description"`
-	PathEncoding string `json:"path_encoding,omitempty"`
+	Name          string                      `json:"name"`
+	In            string                      `json:"in"` // "query" | "path" | "header" | "cookie"
+	Required      bool                        `json:"required"`
+	Type          string                      `json:"type"`
+	Description   string                      `json:"description"`
+	PathEncoding  string                      `json:"path_encoding,omitempty"`
+	Serialization ParameterSerialization      `json:"serialization"`
+	Schema        *SchemaContract             `json:"schema,omitempty"`
+	Content       map[string]ParameterContent `json:"content,omitempty"`
+	Deprecated    *bool                       `json:"deprecated,omitempty"`
+	Example       any                         `json:"example,omitempty"`
+	Examples      map[string]any              `json:"examples,omitempty"`
+}
+
+type ParameterSerialization struct {
+	Style           string `json:"style"`
+	Explode         *bool  `json:"explode"`
+	AllowReserved   *bool  `json:"allow_reserved"`
+	AllowEmptyValue *bool  `json:"allow_empty_value"`
+}
+
+type ParameterContent struct {
+	Schema         *SchemaContract            `json:"schema,omitempty"`
+	ItemSchema     *SchemaContract            `json:"item_schema,omitempty"`
+	Encoding       map[string]RequestEncoding `json:"encoding,omitempty"`
+	PrefixEncoding []RequestEncoding          `json:"prefix_encoding,omitempty"`
+	ItemEncoding   *RequestEncoding           `json:"item_encoding,omitempty"`
+	Example        any                        `json:"example,omitempty"`
+	Examples       map[string]any             `json:"examples,omitempty"`
+}
+
+type SchemaContract struct {
+	Dialect               string                       `json:"dialect"`
+	Raw                   json.RawMessage              `json:"raw"`
+	ContentHash           string                       `json:"content_hash"`
+	Projection            Schema                       `json:"projection"`
+	ProjectionDiagnostics []SchemaProjectionDiagnostic `json:"projection_diagnostics,omitempty"`
+}
+
+type SchemaProjectionDiagnostic struct {
+	Code    string `json:"code"`
+	Keyword string `json:"keyword"`
+	Pointer string `json:"pointer"`
+	Message string `json:"message"`
 }
 
 type Schema struct {
@@ -734,33 +784,172 @@ const (
 // schema with its media type and serialization prevents downstream layers from
 // independently guessing how an otherwise identical object must be encoded.
 type RequestContent struct {
-	MediaType        string                 `json:"media_type"`
-	Serialization    string                 `json:"serialization"`
-	Required         bool                   `json:"required,omitempty"`
-	Schema           *Schema                `json:"schema,omitempty"`
-	PayloadParameter string                 `json:"payload_parameter,omitempty"`
-	BinaryEncoding   string                 `json:"binary_encoding,omitempty"`
-	Parts            map[string]RequestPart `json:"parts,omitempty"`
+	Required         bool                             `json:"required,omitempty"`
+	PayloadParameter string                           `json:"payload_parameter,omitempty"`
+	Representations  []RequestRepresentation          `json:"representations"`
+	DefaultMediaType string                           `json:"default_media_type,omitempty"`
+	UploadWorkflow   *workflowcontract.UploadWorkflow `json:"upload_workflow,omitempty"`
 }
 
-type RequestPart struct {
-	ContentType    string `json:"content_type,omitempty"`
-	BinaryEncoding string `json:"binary_encoding,omitempty"`
+type RequestRepresentation struct {
+	MediaType      string                     `json:"media_type"`
+	Serialization  string                     `json:"serialization"`
+	Schema         *SchemaContract            `json:"schema,omitempty"`
+	ItemSchema     *SchemaContract            `json:"item_schema,omitempty"`
+	Encoding       map[string]RequestEncoding `json:"encoding,omitempty"`
+	PrefixEncoding []RequestEncoding          `json:"prefix_encoding,omitempty"`
+	ItemEncoding   *RequestEncoding           `json:"item_encoding,omitempty"`
+	Example        any                        `json:"example,omitempty"`
+	Examples       map[string]any             `json:"examples,omitempty"`
+}
+
+type RequestEncoding struct {
+	ContentType    string                     `json:"content_type,omitempty"`
+	Headers        map[string]HeaderContract  `json:"headers,omitempty"`
+	Style          string                     `json:"style,omitempty"`
+	Explode        *bool                      `json:"explode,omitempty"`
+	AllowReserved  *bool                      `json:"allow_reserved,omitempty"`
+	Encoding       map[string]RequestEncoding `json:"encoding,omitempty"`
+	PrefixEncoding []RequestEncoding          `json:"prefix_encoding,omitempty"`
+	ItemEncoding   *RequestEncoding           `json:"item_encoding,omitempty"`
+	BinaryEncoding string                     `json:"binary_encoding,omitempty"`
+}
+
+type HeaderContract struct {
+	Description   string                      `json:"description,omitempty"`
+	Required      *bool                       `json:"required,omitempty"`
+	Deprecated    *bool                       `json:"deprecated,omitempty"`
+	Serialization ParameterSerialization      `json:"serialization"`
+	Schema        *SchemaContract             `json:"schema,omitempty"`
+	Content       map[string]ParameterContent `json:"content,omitempty"`
+	Example       any                         `json:"example,omitempty"`
+	Examples      map[string]any              `json:"examples,omitempty"`
+}
+
+type ResponseRepresentation struct {
+	MediaType      string               `json:"media_type"`
+	Schema         *SchemaContract      `json:"schema,omitempty"`
+	ItemSchema     *SchemaContract      `json:"item_schema,omitempty"`
+	SSE            *SSEResponseContract `json:"sse,omitempty"`
+	PrefixEncoding []RequestEncoding    `json:"prefix_encoding,omitempty"`
+	ItemEncoding   *RequestEncoding     `json:"item_encoding,omitempty"`
+	Example        any                  `json:"example,omitempty"`
+	Examples       map[string]any       `json:"examples,omitempty"`
+}
+
+type SSEResponseContract struct {
+	ItemMode     string  `json:"item_mode"`
+	DoneSentinel *string `json:"done_sentinel,omitempty"`
+}
+
+type LinkContract struct {
+	OperationRef string               `json:"operation_ref,omitempty"`
+	OperationID  string               `json:"operation_id,omitempty"`
+	Description  string               `json:"description,omitempty"`
+	Parameters   map[string]any       `json:"parameters,omitempty"`
+	RequestBody  any                  `json:"request_body,omitempty"`
+	Server       *Server              `json:"server,omitempty"`
+	Extensions   NamespacedExtensions `json:"extensions,omitempty"`
+}
+
+type InboundOperationContract struct {
+	Kind                 string                   `json:"kind"`
+	RuntimeExpression    string                   `json:"runtime_expression,omitempty"`
+	Parent               *CallbackParent          `json:"parent,omitempty"`
+	Path                 string                   `json:"path"`
+	Summary              string                   `json:"summary,omitempty"`
+	Description          string                   `json:"description,omitempty"`
+	Tags                 []string                 `json:"tags"`
+	ExternalDocs         *ExternalDocumentation   `json:"external_docs,omitempty"`
+	Deprecated           bool                     `json:"deprecated"`
+	OperationServers     Servers                  `json:"operation_servers,omitempty"`
+	Parameters           Parameters               `json:"parameters"`
+	RequestContent       *RequestContent          `json:"request_content,omitempty"`
+	Responses            Responses                `json:"responses"`
+	SecurityRequirements authrouting.Requirements `json:"security_requirements"`
+	Extensions           NamespacedExtensions     `json:"extensions,omitempty"`
+}
+
+const (
+	InboundOperationKindWebhook  = "webhook"
+	InboundOperationKindCallback = "callback"
+)
+
+type CallbackParent struct {
+	OperationID  string `json:"operation_id"`
+	Method       string `json:"method"`
+	Path         string `json:"path"`
+	CallbackName string `json:"callback_name"`
+}
+
+type OperationDocumentation struct {
+	Summary      string                 `json:"summary,omitempty"`
+	Description  string                 `json:"description,omitempty"`
+	Tags         []string               `json:"tags"`
+	ExternalDocs *ExternalDocumentation `json:"external_docs,omitempty"`
+	Extensions   NamespacedExtensions   `json:"extensions,omitempty"`
+}
+
+type ServiceDocumentation struct {
+	TermsOfService string                 `json:"terms_of_service,omitempty"`
+	Contact        *ContactDocumentation  `json:"contact,omitempty"`
+	License        *LicenseDocumentation  `json:"license,omitempty"`
+	Tags           []TagDocumentation     `json:"tags"`
+	ExternalDocs   *ExternalDocumentation `json:"external_docs,omitempty"`
+	Extensions     NamespacedExtensions   `json:"extensions,omitempty"`
+}
+
+type ContactDocumentation struct {
+	Name  string `json:"name,omitempty"`
+	URL   string `json:"url,omitempty"`
+	Email string `json:"email,omitempty"`
+}
+
+type LicenseDocumentation struct {
+	Name       string `json:"name,omitempty"`
+	Identifier string `json:"identifier,omitempty"`
+	URL        string `json:"url,omitempty"`
+}
+
+type TagDocumentation struct {
+	Name         string                 `json:"name"`
+	Summary      string                 `json:"summary,omitempty"`
+	Description  string                 `json:"description,omitempty"`
+	Parent       string                 `json:"parent,omitempty"`
+	Kind         string                 `json:"kind,omitempty"`
+	ExternalDocs *ExternalDocumentation `json:"external_docs,omitempty"`
+}
+
+type ExternalDocumentation struct {
+	Description string `json:"description,omitempty"`
+	URL         string `json:"url"`
+}
+
+type NamespacedExtensions map[string]NamespacedExtension
+
+type NamespacedExtension struct {
+	Value      json.RawMessage `json:"value"`
+	Provenance string          `json:"provenance"`
+}
+
+type ResponseContract struct {
+	Summary         string                    `json:"summary,omitempty"`
+	Description     string                    `json:"description"`
+	Headers         map[string]HeaderContract `json:"headers,omitempty"`
+	Representations []ResponseRepresentation  `json:"representations"`
+	Links           map[string]LinkContract   `json:"links,omitempty"`
 }
 
 type AuthConfig struct {
 	Name              string                        `json:"name,omitempty"`   // Logical name from OpenAPI securitySchemes (e.g. "bearerAuth")
 	Type              string                        `json:"type"`             // "apiKey", "http", "mutualTLS", "oauth2", "openIdConnect"
-	Flow              string                        `json:"flow,omitempty"`   // OAuth2 grant type: "clientCredentials", "authorizationCode", "password", "implicit"
 	Scheme            string                        `json:"scheme,omitempty"` // e.g., "bearer", "basic", "digest"
 	BasicPasswordMode authrouting.BasicPasswordMode `json:"basic_password_mode,omitempty"`
-	Location          string                        `json:"location,omitempty"`          // "header", "query", "cookie"
-	KeyName           string                        `json:"key_name,omitempty"`          // e.g., "Authorization", "X-API-Key"
-	TokenURL          string                        `json:"token_url,omitempty"`         // For oauth2
-	AuthorizationURL  string                        `json:"authorization_url,omitempty"` // For oauth2 authorizationCode/implicit only
+	Location          string                        `json:"location,omitempty"` // "header", "query", "cookie"
+	KeyName           string                        `json:"key_name,omitempty"` // e.g., "Authorization", "X-API-Key"
 	OpenIdConnectUrl  string                        `json:"open_id_connect_url,omitempty"`
-	Scopes            []string                      `json:"scopes,omitempty"`
-
+	OAuth2MetadataURL string                        `json:"oauth2_metadata_url,omitempty"`
+	Deprecated        *bool                         `json:"deprecated,omitempty"`
 	// Fused Auth: OAuth edge-case fields stored per AuthConfig (not per service, since a
 	// service can have multiple auth configs and these settings are per-config).
 	PKCERequired            bool                    `json:"pkce_required,omitempty"`
@@ -769,6 +958,35 @@ type AuthConfig struct {
 	ExtraAuthParams         map[string]string       `json:"extra_auth_params,omitempty"`
 	ExtraTokenParams        map[string]string       `json:"extra_token_params,omitempty"`
 	RefreshTokenRotates     bool                    `json:"refresh_token_rotates,omitempty"`
+	OAuth2Flows             OAuth2Flows             `json:"oauth2_flows,omitempty"`
+	SelectedOAuth2Flow      *OAuth2FlowContract     `json:"-"`
+	Strategy                *AuthRuntimeStrategy    `json:"strategy,omitempty"`
+	PolicyProvenance        map[string]string       `json:"policy_provenance,omitempty"`
+}
+
+type OAuth2Flows map[string]OAuth2FlowContract
+
+type OAuth2FlowContract struct {
+	AuthorizationURL       string            `json:"authorization_url,omitempty"`
+	DeviceAuthorizationURL string            `json:"device_authorization_url,omitempty"`
+	TokenURL               string            `json:"token_url,omitempty"`
+	RefreshURL             string            `json:"refresh_url,omitempty"`
+	Scopes                 map[string]string `json:"scopes"`
+}
+
+type AuthRuntimeStrategy struct {
+	Kind      string                 `json:"kind"`
+	OAuth1    *OAuth1Strategy        `json:"oauth1,omitempty"`
+	Challenge *HTTPChallengeStrategy `json:"challenge,omitempty"`
+}
+
+type OAuth1Strategy struct {
+	SignatureMethod   string `json:"signature_method"`
+	ParameterLocation string `json:"parameter_location"`
+}
+
+type HTTPChallengeStrategy struct {
+	Scheme string `json:"scheme"`
 }
 
 type AuthConfigs []AuthConfig
@@ -781,21 +999,17 @@ const (
 )
 
 type IncomingWebhookConfig struct {
-	AuthType            string   `json:"auth_type"`               // "none", "static_token", "hmac_signature", "signature_header"
-	AuthLocation        string   `json:"auth_location,omitempty"` // "header", "query"
-	AuthKeyName         string   `json:"auth_key_name,omitempty"`
-	SignatureHeader     string   `json:"signature_header,omitempty"`
-	SigningSecret       string   `json:"signing_secret,omitempty"`       // Usually encrypted at rest
-	VerificationHeaders []string `json:"verification_headers,omitempty"` // For signature_header: all required headers for PKI verification
+	AuthType            string                  `json:"auth_type"`               // "none", "static_token", "hmac_signature", "signature_header"
+	AuthLocation        string                  `json:"auth_location,omitempty"` // "header", "query"
+	AuthKeyName         string                  `json:"auth_key_name,omitempty"`
+	SignatureHeader     string                  `json:"signature_header,omitempty"`
+	VerificationHeaders []string                `json:"verification_headers,omitempty"` // For signature_header: all required headers for PKI verification
+	SignaturePolicy     *signaturepolicy.Config `json:"signature_policy,omitempty"`
 }
 
 type RateLimitConfig = ratelimitpolicy.Config
 
-type RetryConfig struct {
-	Strategy   string `json:"strategy"`
-	MaxRetries int    `json:"max_retries"`
-	BackoffMs  int    `json:"backoff_ms"`
-}
+type RetryConfig = retrypolicy.Config
 
 // ExecutionPolicy is a read-side snapshot of one published execution-policy
 // tier. It exists so the changelog hook can hold both a "before" and "after"
@@ -1262,8 +1476,8 @@ type WorkspaceExecutionAnalytics struct {
 
 // ─── Idempotency Cache ──────────────────────────────────────────────────────
 
-// IdempotencyTTL is how long a cached execution response stays valid, mirroring
-// Stripe's idempotency key retention convention: long enough to cover a client
+// IdempotencyTTL is how long a cached execution response stays valid: long
+// enough to cover a client
 // reconnecting well after Engine's own bounded retry loop has finished (which
 // completes in seconds), short enough to bound storage growth.
 const IdempotencyTTL = 24 * time.Hour
@@ -1278,15 +1492,16 @@ const IdempotencyTTL = 24 * time.Hour
 // caller in sandbox -- so a transient failure never gets "stuck" behind a
 // replayed error for the TTL window.
 type IdempotentExecution struct {
-	ID                 uuid.UUID `db:"id"`
-	AppID              uuid.UUID `db:"app_id"`
-	IdempotencyKeyHash string    `db:"idempotency_key_hash"`
-	RequestBodyHash    string    `db:"request_body_hash"`
-	Environment        string    `db:"environment"`
-	ResponseBody       []byte    `db:"response_body"`
-	ResponseStatus     int       `db:"response_status"`
-	CreatedAt          time.Time `db:"created_at"`
-	ExpiresAt          time.Time `db:"expires_at"`
+	ID                  uuid.UUID `db:"id"`
+	AppID               uuid.UUID `db:"app_id"`
+	IdempotencyKeyHash  string    `db:"idempotency_key_hash"`
+	RequestBodyHash     string    `db:"request_body_hash"`
+	Environment         string    `db:"environment"`
+	ResponseBody        []byte    `db:"response_body"`
+	ResponseStatus      int       `db:"response_status"`
+	ResponseMediaFamily string    `db:"response_media_family"`
+	CreatedAt           time.Time `db:"created_at"`
+	ExpiresAt           time.Time `db:"expires_at"`
 }
 
 // ─── Lead (Waitlist) ──────────────────────────────────────────────────────────
@@ -1318,7 +1533,7 @@ func scanJSONB(value interface{}, target interface{}) error {
 	return json.Unmarshal(b, target)
 }
 
-type Responses map[string]Schema
+type Responses map[string]ResponseContract
 
 func (r Responses) Value() (driver.Value, error)  { return json.Marshal(r) }
 func (r *Responses) Scan(value interface{}) error { return scanJSONB(value, r) }
@@ -1342,9 +1557,6 @@ func (s *AuthConfig) Scan(value interface{}) error { return scanJSONB(value, s) 
 
 func (s AuthConfigs) Value() (driver.Value, error)  { return json.Marshal(s) }
 func (s *AuthConfigs) Scan(value interface{}) error { return scanJSONB(value, s) }
-
-func (s RetryConfig) Value() (driver.Value, error)  { return json.Marshal(s) }
-func (s *RetryConfig) Scan(value interface{}) error { return scanJSONB(value, s) }
 
 func (p PaginationConfig) Value() (driver.Value, error)  { return json.Marshal(p) }
 func (p *PaginationConfig) Scan(value interface{}) error { return scanJSONB(value, p) }
@@ -1414,16 +1626,8 @@ func decrypt(ciphertextStr string) (string, error) {
 }
 
 func (i IncomingWebhookConfig) Value() (driver.Value, error) {
-	if i.SigningSecret != "" {
-		if _, err := decrypt(i.SigningSecret); err != nil {
-			// Decryption failed -> it is plaintext! Let's encrypt it.
-			encSecret, err := encrypt(i.SigningSecret)
-			if err != nil {
-				return nil, err
-			}
-			i.SigningSecret = encSecret
-		}
-	}
+	// Canonical webhook contracts are credential-free; secret_ref is bound in
+	// Engine registration storage and resolved only at verification time.
 	return json.Marshal(i)
 }
 

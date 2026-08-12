@@ -40,7 +40,7 @@ func TestAttachExecutionTimingsIncludesSafeRateLimitAggregate(t *testing.T) {
 		Units: []string{"points", "requests"}, UnitTotals: []int64{10, 1}, RetryOutcome: "waited",
 	})
 	engine.RecordRateLimitHeaderOutcome(ctx, "applied")
-	engine.AddExecutionTiming(ctx, "rate_limit_acquire", 3*time.Millisecond)
+	engine.AddExecutionTiming(ctx, "rate_limit_acquire_ms", 3*time.Millisecond)
 	event := models.EngineExecutionEvent{}
 
 	attachExecutionTimings(ctx, &event)
@@ -55,7 +55,7 @@ func TestAttachExecutionTimingsIncludesSafeRateLimitAggregate(t *testing.T) {
 	if err := json.Unmarshal(event.Timings, &timingSnapshot); err != nil {
 		t.Fatal(err)
 	}
-	if timingSnapshot["rate_limit_acquire"] != 3 {
+	if timingSnapshot["rate_limit_acquire_ms"] != 3 {
 		t.Fatalf("rate-limit acquisition timing = %#v", timingSnapshot)
 	}
 }

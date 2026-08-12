@@ -5,10 +5,33 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"os"
 	"testing"
 
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 )
+
+// TestDiscoveryContractFixture proves resource discovery is contract-driven rather than provider-dispatched.
+func TestDiscoveryContractFixture(t *testing.T) {
+	fixture, err := os.ReadFile("../../../../contract-fixtures/discovery/v1_post_auth_resource_discovery.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config fusedobject.ResourceDiscoveryConfig
+	if err := json.Unmarshal(fixture, &config); err != nil {
+		t.Fatal(err)
+	}
+	if config.Version != 1 || config.Stage != "post_auth" {
+		t.Fatalf("discovery lifecycle contract = %#v", config)
+	}
+	resources, err := Extract([]byte(`[{"id":"project-one","name":"One"}]`), &config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resources) != 1 || resources[0].BaseURL != "https://project-one.api.example.test" {
+		t.Fatalf("resources = %#v", resources)
+	}
+}
 
 // TestDiscoverRejectsMutatingOperation keeps the runtime defensive when
 // metadata bypasses the normal OpenAPI or Postman import validation.

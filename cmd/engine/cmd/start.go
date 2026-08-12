@@ -188,7 +188,6 @@ func runEngine() {
 		engineWorkers.Stop(stopCtx)
 	}()
 
-	sandbox.StartMCPCleanupWorker(ctx, database)
 	// configStore only needs the database, so create it once for both the
 	// changelog poller and the gRPC webhook subscription path.
 	configStore := store.NewPostgresConfigRepository(database)
@@ -198,7 +197,7 @@ func runEngine() {
 	// service or endpoint.
 	sandbox.StartServiceChangelogPoller(ctx, engineStore, configStore, registryClient, envLicense)
 
-	localObjectCache := sandbox.NewLocalObjectCache(engineStore, registryClient)
+	localObjectCache := sandbox.NewLocalObjectCache(engineStore)
 	subscribeCacheInvalidation(natsClient, localObjectCache)
 
 	registryProxy := api.NewRegistryProxy(cfg.Engine.RegistryEndpoint, envLicense)

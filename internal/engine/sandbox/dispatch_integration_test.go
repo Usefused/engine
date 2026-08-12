@@ -28,6 +28,7 @@ type richMockCache struct {
 	// the pathless behavior every other caller of this fixture already relies on.
 	path                 string
 	method               string
+	responses            fusedobject.Responses
 	securityRequirements authrouting.Requirements
 }
 
@@ -35,11 +36,14 @@ func (m *richMockCache) ConnectSDK(ctx context.Context, appID string) error { re
 func (m *richMockCache) DisconnectSDK(appID string)                         {}
 
 func (m *richMockCache) GetOrFetchServiceMetadata(ctx context.Context, appID string, serviceID string) (*fusedobject.ServiceMetadata, error) {
+	if m.obj != nil && m.obj.ContractVersion == 0 {
+		m.obj.ExecutionContractEnvelope = fusedobject.EngineExecutionContractSupport()
+	}
 	return m.obj, nil
 }
 func (c *richMockCache) GetEndpoint(ctx context.Context, appID string, serviceID string, endpointName string) (*fusedobject.Endpoint, error) {
 	if endpointName == "list_items" || endpointName == "do_thing" {
-		return &fusedobject.Endpoint{Name: endpointName, ID: c.epID, Path: c.path, Method: c.method, SecurityRequirements: c.testSecurityRequirements()}, nil
+		return &fusedobject.Endpoint{Name: endpointName, ID: c.epID, Path: c.path, Method: c.method, Responses: c.responses, SecurityRequirements: c.testSecurityRequirements()}, nil
 	}
 	return nil, fmt.Errorf("not found")
 }

@@ -1,8 +1,6 @@
 package sandbox
 
 import (
-	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 )
@@ -64,42 +62,5 @@ func TestKillMCPSessionsForSDK_CancelsOnlyMatchingSessions(t *testing.T) {
 	}
 	if !otherStillTracked {
 		t.Error("expected the untouched session to remain tracked")
-	}
-}
-
-// TestCleanupMCPSandboxDir_RemovesDirectory is the on-disk half of
-// api.DeleteSDKHandler's best-effort cleanup: it must remove the sandbox
-// working directory for the given appID, and must not error when the
-// directory never existed (delete-before-first-connect is a valid case).
-func TestCleanupMCPSandboxDir_RemovesDirectory(t *testing.T) {
-	const appIDHex = "sdk-cleanup-test"
-	// Redirect the sandbox root at a directory the test process actually
-	// owns and can unlink from -- t.TempDir() (not the repo checkout, which
-	// some environments mount read/write-but-not-delete) -- and restore it
-	// so other tests in this package keep resolving the real "./data"
-	// convention.
-	previousRoot := sandboxDataRoot
-	sandboxDataRoot = t.TempDir()
-	t.Cleanup(func() { sandboxDataRoot = previousRoot })
-
-	dir := sandboxDirFor(appIDHex)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("failed to set up sandbox dir fixture: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "marker.txt"), []byte("x"), 0o644); err != nil {
-		t.Fatalf("failed to write fixture file: %v", err)
-	}
-
-	if err := CleanupMCPSandboxDir(appIDHex); err != nil {
-		t.Fatalf("CleanupMCPSandboxDir: %v", err)
-	}
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatalf("expected sandbox dir to be removed, stat err = %v", err)
-	}
-}
-
-func TestCleanupMCPSandboxDir_NoOpWhenDirMissing(t *testing.T) {
-	if err := CleanupMCPSandboxDir("sdk-never-existed"); err != nil {
-		t.Fatalf("expected no error removing a non-existent sandbox dir, got %v", err)
 	}
 }

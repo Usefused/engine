@@ -14,10 +14,20 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
+func artifactOAuth(scopes ...string) fusedobject.AuthConfig {
+	declared := make(map[string]string, len(scopes))
+	for _, scope := range scopes {
+		declared[scope] = ""
+	}
+	return fusedobject.AuthConfig{Name: "oauthAuth", Type: "oauth2", OAuth2Flows: fusedobject.OAuth2Flows{"authorizationCode": {
+		AuthorizationURL: "https://auth.example/authorize", TokenURL: "https://auth.example/token", Scopes: declared,
+	}}}
+}
+
 func TestResolveSelectionAuthPolicyPinsProviderScheme(t *testing.T) {
 	selection := models.SDKSelection{ServiceID: uuid.New(), AuthType: "oauth", ConnectScopes: []string{"read"}}
 	contract := executionAuthContract(selection.ServiceID,
-		fusedobject.AuthConfigs{{Name: "basicAuth", Type: "http", Scheme: "basic", BasicPasswordMode: authrouting.BasicPasswordRequired}, {Name: "oauthAuth", Type: "oauth2", Scopes: []string{"read", "write"}}},
+		fusedobject.AuthConfigs{{Name: "basicAuth", Type: "http", Scheme: "basic", BasicPasswordMode: authrouting.BasicPasswordRequired}, artifactOAuth("read", "write")},
 		securedOperation("listItems", "oauthAuth"),
 	)
 
@@ -35,7 +45,7 @@ func TestResolveSelectionAuthPolicyPinsProviderScheme(t *testing.T) {
 func TestResolveSelectionAuthPolicyRejectsBroaderScope(t *testing.T) {
 	selection := models.SDKSelection{ServiceID: uuid.New(), AuthType: "oauth", ConnectScopes: []string{"admin"}}
 	contract := executionAuthContract(selection.ServiceID,
-		fusedobject.AuthConfigs{{Name: "oauthAuth", Type: "oauth2", Scopes: []string{"read"}}},
+		fusedobject.AuthConfigs{artifactOAuth("read")},
 		securedOperation("listItems", "oauthAuth"),
 	)
 	err := resolveSelectionAuthPolicy(&selection, contract, &sdkAuthResolutionTelemetry{})
@@ -47,7 +57,7 @@ func TestResolveSelectionAuthPolicyRejectsBroaderScope(t *testing.T) {
 func TestResolveSelectionAuthPolicyLeavesAnonymousSelectionUnpinned(t *testing.T) {
 	selection := models.SDKSelection{ServiceID: uuid.New(), AuthType: "oauth", AuthName: "oauthAuth", ConnectScopes: []string{"read"}, OperationNames: []string{"health"}}
 	contract := executionAuthContract(selection.ServiceID,
-		fusedobject.AuthConfigs{{Name: "oauthAuth", Type: "oauth2", Scopes: []string{"read"}}},
+		fusedobject.AuthConfigs{artifactOAuth("read")},
 		anonymousOperation("health"),
 	)
 	telemetry := sdkAuthResolutionTelemetry{}
@@ -95,7 +105,7 @@ func TestResolveSelectionAuthPolicyPersistsOAuthAndMTLSAlternative(t *testing.T)
 	selection := models.SDKSelection{ServiceID: uuid.New(), ConnectScopes: []string{"read"}}
 	contract := executionAuthContract(selection.ServiceID,
 		fusedobject.AuthConfigs{
-			{Name: "oauthAuth", Type: "oauth2", Scopes: []string{"read"}},
+			artifactOAuth("read"),
 			{Name: "clientCertificate", Type: "mutualTLS"},
 		},
 		securedOperationAlternatives("transfer", []string{"oauthAuth", "clientCertificate"}),

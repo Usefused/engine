@@ -11,6 +11,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/connectresource"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/serverrouting"
 )
 
@@ -87,12 +88,19 @@ type runtimeServer struct {
 func runtimeServers(metadata *fusedobject.ServiceMetadata) []runtimeServer {
 	out := make([]runtimeServer, 0, len(metadata.Servers))
 	for _, server := range metadata.Servers {
-		name := strings.TrimSpace(server.Environment)
+		name := runtimeServerName(server.Name, server.Environment)
 		if server.URL != "" {
 			out = append(out, runtimeServer{Name: name, URL: server.URL, IsDefault: server.IsDefault, Variables: server.Variables})
 		}
 	}
 	return out
+}
+
+func runtimeServerName(name, legacyEnvironment string) string {
+	if current := strings.TrimSpace(name); current != "" {
+		return current
+	}
+	return strings.TrimSpace(legacyEnvironment)
 }
 
 func resolveRuntimeServerTemplate(metadata *fusedobject.ServiceMetadata, resolution RuntimeEnvironmentResolution, credentials map[string]any, values []store.BucketValue) (RuntimeEnvironmentResolution, error) {
@@ -170,6 +178,70 @@ func serverVariableValues(credentials map[string]any, values []store.BucketValue
 		}
 	}
 	return result, nil
+}
+
+func applyOperationRuntimeServer(metadata *fusedobject.ServiceMetadata, service *models.Service, operation *models.IntegrationObject, resolution RuntimeEnvironmentResolution, credentials map[string]any, values []store.BucketValue) error {
+	if len(operation.OperationServers) == 0 || service.ServerSource == "connection_resource" {
+		return nil
+	}
+	server, ok := selectOperationServer(operation.OperationServers, resolution.Environment)
+	if !ok {
+		return nil
+	}
+	supplied, err := serverVariableValues(credentials, values)
+	if err != nil {
+		return err
+	}
+	for name, value := range metadata.ServerVariables {
+		supplied[name] = value
+	}
+	resolved, dynamic, err := resolveOperationServerURL(service.BaseURL, server, supplied)
+	if err != nil {
+		return err
+	}
+	if dynamic {
+		if err := connectresource.ValidateBaseURL(resolved, runtimeAllowedHosts(metadata.ConnectConfig)); err != nil {
+			return err
+		}
+	}
+	service.BaseURL = resolved
+	service.ServerSource = "operation"
+	return nil
+}
+
+func selectOperationServer(servers models.Servers, environment string) (models.Server, bool) {
+	for _, server := range servers {
+		name := runtimeServerName(server.Name, server.Environment)
+		if environment != "" && comparableEnvironmentName(name) == comparableEnvironmentName(environment) {
+			return server, true
+		}
+	}
+	for _, server := range servers {
+		if server.IsDefault {
+			return server, true
+		}
+	}
+	if len(servers) == 0 {
+		return models.Server{}, false
+	}
+	return servers[0], true
+}
+
+func resolveOperationServerURL(serviceBaseURL string, server models.Server, supplied map[string]string) (string, bool, error) {
+	reference, dynamic, err := serverrouting.ResolveReference(server.URL, server.Variables, supplied)
+	if err != nil {
+		return "", false, err
+	}
+	base, baseErr := url.Parse(serviceBaseURL)
+	relative, relativeErr := url.Parse(reference)
+	if baseErr != nil || relativeErr != nil || !base.IsAbs() {
+		return "", false, errors.New("operation server URL is invalid")
+	}
+	resolved := base.ResolveReference(relative).String()
+	if err := serverrouting.ValidateResolvedURL(resolved); err != nil {
+		return "", false, err
+	}
+	return resolved, dynamic, nil
 }
 
 func resourceMetadataValues(raw any) (map[string]string, error) {

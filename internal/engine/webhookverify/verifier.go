@@ -29,22 +29,37 @@ type Config struct {
 // OK=false means the event must be dropped; Reason is logged/traced.
 type VerifyResult struct {
 	OK     bool
+	Code   string
 	Reason string
 }
 
+const (
+	CodeVerified               = "verified"
+	CodeAuthUnsupported        = "auth_unsupported"
+	CodeConfigIncomplete       = "config_incomplete"
+	CodeMethodUnsupported      = "method_unsupported"
+	CodeCredentialMissing      = "credential_missing"
+	CodeCredentialInvalid      = "credential_invalid"
+	CodeVerificationHeaderMiss = "verification_header_missing"
+)
+
 // ok is a convenience constructor for a passing result.
-func ok() VerifyResult { return VerifyResult{OK: true} }
+func ok() VerifyResult { return VerifyResult{OK: true, Code: CodeVerified} }
 
 // fail is a convenience constructor for a rejection result.
-func fail(reason string) VerifyResult { return VerifyResult{OK: false, Reason: reason} }
+func fail(code, reason string) VerifyResult {
+	return VerifyResult{OK: false, Code: code, Reason: reason}
+}
 
 // Verify dispatches to the correct verification strategy based on cfg.AuthType.
-// Unknown or empty AuthType is treated as "no auth required" (allow-through) so
-// integrations that send plain payloads are not silently broken.
+// Empty and explicit "none" mean no auth was declared. Unknown declared modes
+// fail closed because silently accepting a misspelled policy bypasses verification.
 //
 // Complexity: 1 (switch) + 3 (cases) = 4
 func Verify(r *http.Request, body []byte, cfg Config) VerifyResult {
 	switch cfg.AuthType {
+	case "", "none":
+		return ok()
 	case "hmac_signature":
 		return VerifyHMAC(r, body, cfg)
 	case "signature_header":
@@ -52,50 +67,47 @@ func Verify(r *http.Request, body []byte, cfg Config) VerifyResult {
 	case "static_token":
 		return VerifyStaticToken(r, cfg)
 	default:
-		// No auth configured — allow through. This is a deliberate design
-		// decision: we prefer availability over accidental lockout when a
-		// provider hasn't declared a verification scheme yet.
-		return ok()
+		return fail(CodeAuthUnsupported, "unsupported webhook authentication type")
 	}
 }
 
-// VerifyHMAC validates the request body against an HMAC-SHA256 signature
-// contained in a provider-specific header (e.g. Stripe-Signature).
+// VerifyHMAC validates the request body against an HMAC-SHA256 signature in
+// the configured provider header.
 //
 // Complexity: 1 (empty guard) + 1 (method guard) + 1 (empty sig guard) + 1 (mismatch guard) = 4
 func VerifyHMAC(r *http.Request, body []byte, cfg Config) VerifyResult {
-	// Misconfigured secret header name → treat as skip, not an error.
-	// Locking out all events because an admin forgot a field would be worse.
-	if cfg.SignatureHeader == "" {
-		return ok()
+	// A declared policy with missing material is unsafe to execute: accepting it
+	// would turn a configuration defect into an authentication bypass.
+	if cfg.SignatureHeader == "" || cfg.SigningSecret == "" {
+		return fail(CodeConfigIncomplete, "HMAC verification configuration is incomplete")
 	}
 
 	// HMAC requires a body to sign; GET requests carry no body.
 	if r.Method == http.MethodGet {
-		return fail("HMAC signature verification is not supported for GET requests")
+		return fail(CodeMethodUnsupported, "HMAC signature verification is not supported for GET requests")
 	}
 
 	sig := r.Header.Get(cfg.SignatureHeader)
 	if sig == "" {
-		return fail("missing signature header")
+		return fail(CodeCredentialMissing, "missing signature header")
 	}
 
 	// Compute expected HMAC-SHA256 and check if it is present in the sig string.
-	// The "contains" check handles providers like Stripe that include metadata
-	// alongside the signature (e.g. "t=...,v1=<sig>").
+	// Some signature headers include metadata alongside the digest, so the
+	// configured header value may contain rather than equal the encoded digest.
 	mac := hmac.New(sha256.New, []byte(cfg.SigningSecret))
 	mac.Write(body)
 	expected := hex.EncodeToString(mac.Sum(nil))
 
 	if !strings.Contains(sig, expected) {
-		return fail("invalid signature")
+		return fail(CodeCredentialInvalid, "invalid signature")
 	}
 	return ok()
 }
 
 // VerifySignatureHeader checks that all required verification headers are present.
-// It does NOT validate their values — that is intentional: providers like GitHub
-// use asymmetric signatures that require the caller to verify externally, so we
+// It does NOT validate their values — that is intentional: asymmetric
+// signatures can require the caller to verify externally, so we
 // gate only on presence here.
 //
 // Complexity: 1 (fallback guard) + 1 (for loop) + 1 (empty guard) = 3
@@ -106,10 +118,13 @@ func VerifySignatureHeader(r *http.Request, cfg Config) VerifyResult {
 	if len(required) == 0 && cfg.SignatureHeader != "" {
 		required = []string{cfg.SignatureHeader}
 	}
+	if len(required) == 0 {
+		return fail(CodeConfigIncomplete, "signature header verification configuration is incomplete")
+	}
 
 	for _, h := range required {
 		if r.Header.Get(h) == "" {
-			return fail("missing required verification header: " + h)
+			return fail(CodeVerificationHeaderMiss, "missing required verification header: "+h)
 		}
 	}
 	return ok()
@@ -120,8 +135,8 @@ func VerifySignatureHeader(r *http.Request, cfg Config) VerifyResult {
 //
 // Complexity: 1 (empty guard) + 1 (location if/else) + 1 (empty token guard) + 1 (mismatch guard) = 4
 func VerifyStaticToken(r *http.Request, cfg Config) VerifyResult {
-	if cfg.AuthKeyName == "" {
-		return ok()
+	if cfg.AuthKeyName == "" || cfg.SigningSecret == "" {
+		return fail(CodeConfigIncomplete, "static token verification configuration is incomplete")
 	}
 
 	var token string
@@ -137,11 +152,11 @@ func VerifyStaticToken(r *http.Request, cfg Config) VerifyResult {
 	}
 
 	if token == "" {
-		return fail("missing static token")
+		return fail(CodeCredentialMissing, "missing static token")
 	}
 
 	if subtle.ConstantTimeCompare([]byte(token), []byte(cfg.SigningSecret)) != 1 {
-		return fail("invalid token")
+		return fail(CodeCredentialInvalid, "invalid token")
 	}
 	return ok()
 }

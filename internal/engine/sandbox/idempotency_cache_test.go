@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -12,8 +13,26 @@ import (
 
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 )
+
+type orderedReplayStream struct{ events []string }
+
+func (stream *orderedReplayStream) Send(body []byte) error {
+	stream.events = append(stream.events, "body:"+string(body))
+	return nil
+}
+
+func (stream *orderedReplayStream) SendStatus(status int) error {
+	stream.events = append(stream.events, fmt.Sprintf("status:%d", status))
+	return nil
+}
+
+func (stream *orderedReplayStream) SendResponseContract(status int, family string) error {
+	stream.events = append(stream.events, fmt.Sprintf("contract:%d:%s", status, family))
+	return nil
+}
 
 // fakeIdempotencyStore is an in-memory stand-in for the Postgres-backed
 // idempotency cache, keyed exactly like the real table: (appID, keyHash).
@@ -67,12 +86,15 @@ func TestIdempotency_CacheHit_SkipsVendorCall(t *testing.T) {
 	var vendorCalls int
 	vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		vendorCalls++
+		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true,"call":1}`))
 	}))
 	defer vendor.Close()
 
-	withIdempotencyStore(t, newFakeIdempotencyStore())
+	cacheStore := newFakeIdempotencyStore()
+	withIdempotencyStore(t, cacheStore)
 	cache, endpointName := makeAnonymousPassthroughCache(t, vendor.URL)
+	cache.responses = fusedobject.Responses{"200": {Representations: []fusedobject.ResponseRepresentation{{MediaType: "application/json"}}}}
 	appID := uuid.New().String()
 
 	ctx := contextWithExecutionIdentity(context.Background(), "idem-key-1", "body-hash-1")
@@ -82,16 +104,45 @@ func TestIdempotency_CacheHit_SkipsVendorCall(t *testing.T) {
 		t.Fatalf("first execute error: %v", err)
 	}
 
-	buf2 := engine.NewBufferStream()
-	if err := engineExecuteCore(ctx, cache, engine.NewDispatcher(), &dummyTokenValidator{}, appID, "tok", endpointName, map[string]any{}, nil, "", buf2); err != nil {
+	replay := &orderedReplayStream{}
+	if err := engineExecuteCore(ctx, cache, engine.NewDispatcher(), &dummyTokenValidator{}, appID, "tok", endpointName, map[string]any{}, nil, "", replay); err != nil {
 		t.Fatalf("second execute error: %v", err)
 	}
 
 	if vendorCalls != 1 {
 		t.Errorf("expected exactly 1 vendor call (second should replay from cache), got %d", vendorCalls)
 	}
-	if buf1.String() != buf2.String() {
-		t.Errorf("replayed response differs from original: got %q, want %q", buf2.String(), buf1.String())
+	wantEvents := []string{"contract:200:json", "body:" + buf1.String(), "status:200"}
+	if fmt.Sprint(replay.events) != fmt.Sprint(wantEvents) {
+		t.Errorf("replay order=%v, want %v", replay.events, wantEvents)
+	}
+}
+
+func TestIdempotency_MixedActualSSERemainsLiveAndIsNotCached(t *testing.T) {
+	var vendorCalls int
+	vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		vendorCalls++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: live\n\n"))
+	}))
+	defer vendor.Close()
+
+	cacheStore := newFakeIdempotencyStore()
+	withIdempotencyStore(t, cacheStore)
+	cache, endpointName := makeAnonymousPassthroughCache(t, vendor.URL)
+	cache.responses = fusedobject.Responses{"200": {Representations: []fusedobject.ResponseRepresentation{
+		{MediaType: "application/json"},
+		{MediaType: "text/event-stream", SSE: &fusedobject.SSEResponseContract{ItemMode: "data"}},
+	}}}
+	ctx := contextWithExecutionIdentity(context.Background(), "mixed-sse-key", "mixed-sse-body")
+	appID := uuid.New().String()
+	for call := 0; call < 2; call++ {
+		if err := engineExecuteCore(ctx, cache, engine.NewDispatcher(), &dummyTokenValidator{}, appID, "tok", endpointName, map[string]any{}, nil, "", engine.NewBufferStream()); err != nil {
+			t.Fatalf("execute %d: %v", call+1, err)
+		}
+	}
+	if vendorCalls != 2 || len(cacheStore.rows) != 0 {
+		t.Fatalf("actual SSE calls=%d cached rows=%d, want 2 and 0", vendorCalls, len(cacheStore.rows))
 	}
 }
 

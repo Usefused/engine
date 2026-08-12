@@ -174,7 +174,7 @@ func waitForWebhookApplyPlanLock(t *testing.T, ctx context.Context, pool *pgxpoo
 			SELECT EXISTS (
 				SELECT 1 FROM pg_stat_activity
 				WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock'
-				  AND query LIKE '%SELECT owner_team_id FROM fused_config_plans%'
+				  AND query LIKE '%fused_config_plans%'
 			)`).Scan(&waiting)
 		if err != nil {
 			t.Fatalf("inspect webhook apply lock wait: %v", err)

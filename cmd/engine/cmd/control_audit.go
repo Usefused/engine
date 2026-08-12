@@ -319,8 +319,11 @@ func serveGraphQLAuditRequest(w http.ResponseWriter, r *http.Request, next http.
 		return
 	}
 	captureContext, _ := accesscontrol.ContextWithRequiredPermissionsCapture(r.Context())
-	r = r.WithContext(captureContext)
 	operation, auditable := classifyGraphQLAudit(r)
+	if operation == "mutation" {
+		captureContext = accesscontrol.ContextWithMutationAuditEvidence(captureContext)
+	}
+	r = r.WithContext(captureContext)
 	requirements := auditRequirements(r.Context(), nil)
 	sensitiveRead, proceed := requireGraphQLAuditReceipt(w, r, recorder, actor, operation, auditable, requirements)
 	if !proceed {
@@ -396,6 +399,9 @@ func finalizeGraphQLAudit(r *http.Request, recorder accesscontrol.AuditRecorder,
 	}
 	requirements = auditRequirements(r.Context(), requirements)
 	event := newControlAuditEvent(r, actor, "control.graphql."+operation, r.URL.Path, requirements, outcome, status, reason)
+	if operation == "mutation" {
+		applyMutationAuditEvidence(r.Context(), &event)
+	}
 	err := recordControlAudit(r.Context(), recorder, event)
 	finishAuditedResponse(writer, operation != "mutation" && writer.deferCommit, err)
 }

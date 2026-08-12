@@ -3,7 +3,6 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -29,7 +28,6 @@ type ObjectCache interface {
 
 type LocalObjectCache struct {
 	db                    store.Store
-	registryClient        RegistryClient
 	mu                    sync.RWMutex
 	serviceMetadataCache  map[string]*fusedobject.ServiceMetadata
 	endpointMetadataCache map[string]*fusedobject.Endpoint // cache key: serviceID:endpointName
@@ -39,10 +37,11 @@ type LocalObjectCache struct {
 	objectRefCounts       map[string]int
 }
 
-func NewLocalObjectCache(db store.Store, rc RegistryClient) *LocalObjectCache {
+// NewLocalObjectCache accepts only the Engine store because execution must
+// never regain a live Registry fallback through constructor wiring.
+func NewLocalObjectCache(db store.Store) *LocalObjectCache {
 	return &LocalObjectCache{
 		db:                    db,
-		registryClient:        rc,
 		serviceMetadataCache:  make(map[string]*fusedobject.ServiceMetadata),
 		endpointMetadataCache: make(map[string]*fusedobject.Endpoint),
 		scopes:                make(map[string][]byte),
@@ -130,6 +129,14 @@ func (c *LocalObjectCache) loadAppRuntime(ctx context.Context, sdkUUID uuid.UUID
 }
 
 func (c *LocalObjectCache) cacheSDKSelections(ctx context.Context, appID string, selections []models.SDKSelection) error {
+	retained := make([]string, 0, len(selections))
+	attempted := make([]string, 0, len(selections))
+	committed := false
+	defer func() {
+		if !committed {
+			c.rollbackSDKSelectionCache(appID, retained, attempted)
+		}
+	}()
 	for _, sel := range selections {
 		if c.sdkVersions[appID] == nil {
 			c.sdkVersions[appID] = make(map[string]string)
@@ -147,7 +154,7 @@ func (c *LocalObjectCache) cacheSDKSelections(ctx context.Context, appID string,
 		if err := c.fetchServiceMetadataIfMissing(ctx, sel.ServiceID, version, cacheKey); err != nil {
 			return err
 		}
-		c.objectRefCounts[cacheKey]++
+		attempted = append(attempted, cacheKey)
 
 		// Pre-warm the endpoint cache for every operation in this selection so
 		// that the first dispatch to each endpoint is a cache hit rather than a
@@ -157,28 +164,50 @@ func (c *LocalObjectCache) cacheSDKSelections(ctx context.Context, appID string,
 		// scope-generation time), so those fall back to lazy fetch on first use.
 		if len(sel.OperationNames) > 0 {
 			if err := c.prefetchEndpoints(ctx, sel, svcID, version); err != nil {
-				// Endpoint pre-warm is best-effort. A failure means the first
-				// dispatch to each endpoint falls back to lazy fetch — the
-				// pre-existing behavior — so the SDK can still function.
-				slog.WarnContext(ctx, "Endpoint pre-warm failed; falling back to lazy fetch",
-					slog.String("service_id", svcID),
-					slog.Any("error", err),
-				)
+				// Named selections are part of the immutable app scope. Failing
+				// Connect here prevents a later execution from drifting to a live
+				// Registry contract when its local snapshot is incomplete.
+				return err
 			}
 		}
+		c.objectRefCounts[cacheKey]++
+		retained = append(retained, cacheKey)
 	}
+	committed = true
 	return nil
 }
 
+func (c *LocalObjectCache) rollbackSDKSelectionCache(appID string, retained, attempted []string) {
+	for _, cacheKey := range retained {
+		c.objectRefCounts[cacheKey]--
+	}
+	for _, cacheKey := range attempted {
+		if c.objectRefCounts[cacheKey] > 0 {
+			continue
+		}
+		delete(c.objectRefCounts, cacheKey)
+		delete(c.serviceMetadataCache, cacheKey)
+		prefix := cacheKey + ":"
+		for key := range c.endpointMetadataCache {
+			if len(key) > len(prefix) && key[:len(prefix)] == prefix {
+				delete(c.endpointMetadataCache, key)
+			}
+		}
+	}
+	delete(c.sdkVersions, appID)
+}
+
 // prefetchEndpoints batch-fetches all named endpoints for a selection from the
-// local snapshot when present, otherwise from Registry for migration-era
-// activations. Called with c.mu held (write lock from ConnectSDK →
+// local snapshot. Called with c.mu held (write lock from ConnectSDK →
 // cacheSDKSelections).
 func (c *LocalObjectCache) prefetchEndpoints(ctx context.Context, sel models.SDKSelection, svcID, version string) error {
 	prefetchStarted := time.Now()
 	eps, source, err := c.fetchEndpointsByNames(ctx, sel.ServiceID, sel.ServiceVersionID, sel.OperationNames)
 	if err != nil {
 		return fmt.Errorf("prefetch endpoints for %s: %w", svcID, err)
+	}
+	if !containsAllEndpointNames(eps, sel.OperationNames) {
+		return fmt.Errorf("prefetch endpoints for %s: %w", svcID, store.ErrServiceContractEndpointNotFound)
 	}
 	for i := range eps {
 		ep := &eps[i]
@@ -192,6 +221,19 @@ func (c *LocalObjectCache) prefetchEndpoints(ctx context.Context, sel models.SDK
 		slog.Float64("contract_fetch_ms", float64(time.Since(prefetchStarted).Microseconds())/1000),
 	)
 	return nil
+}
+
+func containsAllEndpointNames(endpoints []fusedobject.Endpoint, names []string) bool {
+	available := make(map[string]struct{}, len(endpoints))
+	for _, endpoint := range endpoints {
+		available[endpoint.Name] = struct{}{}
+	}
+	for _, name := range names {
+		if _, exists := available[name]; !exists {
+			return false
+		}
+	}
+	return true
 }
 
 func selectionVersionIdentity(sel models.SDKSelection) (string, error) {
@@ -300,6 +342,9 @@ func (c *LocalObjectCache) GetOrFetchServiceMetadata(ctx context.Context, appID 
 
 	if exists && entry != nil {
 		engine.RecordExecutionTiming(ctx, "service_metadata_cache_hit", 0)
+		if err := validateExecutionContractMetadata(entry); err != nil {
+			return nil, err
+		}
 		// Apply execution_policy overrides (base_url, rate_limit, etc.) at read
 		// time so a workspace apply that changes these fields takes effect
 		// immediately without requiring a cache eviction or Engine restart.
@@ -352,7 +397,10 @@ func (c *LocalObjectCache) GetEndpoint(ctx context.Context, appID string, servic
 
 	fetchStarted := time.Now()
 	versionID, hasVersionID := parseServiceVersionID(version)
-	ep, source, err := c.fetchEndpointByName(ctx, svcUUID, versionID, hasVersionID, version, endpointName)
+	if !hasVersionID {
+		return nil, fmt.Errorf("%w: service_version_id is required", store.ErrServiceContractSnapshotNotFound)
+	}
+	ep, source, err := c.fetchEndpointByName(ctx, svcUUID, versionID, endpointName)
 	engine.MeasureExecutionTiming(ctx, "endpoint_contract_fetch", fetchStarted)
 	if err != nil {
 		return nil, err
@@ -398,14 +446,9 @@ func (c *LocalObjectCache) ListEndpointsForSelections(ctx context.Context, selec
 	return grouped, nil
 }
 
-// FetchServiceMetadata implements middleware.MetadataFetcher, letting
-// RuntimeEnforcer (the HTTP proxy path) resolve rate_limit/retry_config/
-// pagination/incoming_webhook_config from the cached runtime contract
-// snapshot -- falling back to a live Registry call only when no snapshot
-// exists yet -- instead of always hitting the Registry directly on every
-// proxied request. This is the same resolution fetchServiceMetadata already
-// gives SDK dispatch; exporting it here is what makes it one choke point
-// instead of two.
+// FetchServiceMetadata resolves only the immutable local runtime snapshot.
+// Registry is a control-plane source; consulting it during execution would let
+// an app run a contract that was never applied to this Engine.
 func (c *LocalObjectCache) FetchServiceMetadata(ctx context.Context, serviceID uuid.UUID, version string) (*fusedobject.ServiceMetadata, error) {
 	metadata, _, err := c.fetchServiceMetadata(ctx, serviceID, version)
 	return metadata, err
@@ -413,37 +456,23 @@ func (c *LocalObjectCache) FetchServiceMetadata(ctx context.Context, serviceID u
 
 func (c *LocalObjectCache) fetchServiceMetadata(ctx context.Context, serviceID uuid.UUID, version string) (*fusedobject.ServiceMetadata, string, error) {
 	versionID, hasVersionID := parseServiceVersionID(version)
-	if hasVersionID {
-		metadata, err := c.fetchSnapshotMetadata(ctx, serviceID, versionID)
-		if err == nil {
-			return c.applyExecutionPolicyOverride(ctx, serviceID, versionID, metadata), "snapshot", nil
-		}
-		if !isSnapshotAbsent(err) {
-			return nil, "", err
-		}
+	if !hasVersionID {
+		return nil, "", fmt.Errorf("%w: service_version_id is required", store.ErrServiceContractSnapshotNotFound)
 	}
-	// Why fallback exists: old activations will not have snapshots until they
-	// are refreshed, so phase 1 can roll forward without stranding live SDKs.
-	metadata, err := c.registryClient.FetchServiceMetadata(ctx, serviceID, version)
+	metadata, err := c.fetchSnapshotMetadata(ctx, serviceID, versionID)
 	if err != nil {
 		return nil, "", err
 	}
-	return c.applyExecutionPolicyOverride(ctx, serviceID, versionID, metadata), "registry", nil
+	if err := validateExecutionContractMetadata(metadata); err != nil {
+		return nil, "", err
+	}
+	return c.applyExecutionPolicyOverride(ctx, serviceID, versionID, metadata), "snapshot", nil
 }
 
 // applyExecutionPolicyOverride is the single point where a workspace's local
-// execution_policy declaration (fused_workspace_execution_policies -- set for
-// a service the workspace does not own, or has not published) takes effect
-// over the Registry-sourced snapshot/live value, per field, when present.
-// This is resolved here rather than at snapshot-fetch time (see
-// plans/plan-service-config-restructure.md's local-enforcement gap and the
-// design decision to mirror GetEffectiveWorkspaceProfile's read-time
-// resolution) so every caller of fetchServiceMetadata -- SDK dispatch via
-// fusedToService, and the HTTP proxy via RuntimeEnforcer.fetchMetadata --
-// gets the override without each needing its own lookup. serviceVersionID may
-// be uuid.Nil when the caller only had a version name to resolve with; that
-// still correctly falls back to the service-default override tier (see
-// GetEffectiveWorkspaceExecutionPolicyOverride).
+// execution_policy declaration takes effect over the immutable service
+// snapshot. Resolving it at cache read time makes an applied local change
+// visible without evicting and rebuilding the canonical snapshot.
 //
 // A type assertion, not an added Store interface method, is how this reaches
 // the override store -- the same rollout idiom secret_resolver.go's
@@ -501,37 +530,29 @@ func mergeExecutionPolicyOverride(metadata *fusedobject.ServiceMetadata, overrid
 		// doesn't prioritize an original IsDefault server over the override.
 		overridden.Servers = nil
 	}
+	if override.ServerVariables != nil {
+		overridden.ServerVariables = override.ServerVariables
+	}
 	if override.IncomingWebhookConfig != nil {
 		overridden.IncomingWebhookConfig = override.IncomingWebhookConfig
 	}
 	return &overridden
 }
 
-func (c *LocalObjectCache) fetchEndpointByName(ctx context.Context, serviceID, serviceVersionID uuid.UUID, hasVersionID bool, version, endpointName string) (*fusedobject.Endpoint, string, error) {
-	if hasVersionID {
-		endpoint, err := c.fetchSnapshotEndpointByName(ctx, serviceID, serviceVersionID, endpointName)
-		if err == nil {
-			return endpoint, "snapshot", nil
-		}
-		if !isSnapshotAbsent(err) {
-			return nil, "", err
-		}
+func (c *LocalObjectCache) fetchEndpointByName(ctx context.Context, serviceID, serviceVersionID uuid.UUID, endpointName string) (*fusedobject.Endpoint, string, error) {
+	if serviceVersionID == uuid.Nil {
+		return nil, "", fmt.Errorf("%w: service_version_id is required", store.ErrServiceContractSnapshotNotFound)
 	}
-	endpoint, err := c.registryClient.FetchEndpointByName(ctx, serviceID, version, endpointName)
-	return endpoint, "registry", err
+	endpoint, err := c.fetchSnapshotEndpointByName(ctx, serviceID, serviceVersionID, endpointName)
+	return endpoint, "snapshot", err
 }
 
 func (c *LocalObjectCache) fetchEndpointsByNames(ctx context.Context, serviceID, serviceVersionID uuid.UUID, names []string) ([]fusedobject.Endpoint, string, error) {
 	if len(names) == 0 {
 		return nil, "none", nil
 	}
-	if endpoints, err := c.fetchSnapshotEndpointsByNames(ctx, serviceID, serviceVersionID, names); err == nil {
-		return endpoints, "snapshot", nil
-	} else if !isSnapshotAbsent(err) {
-		return nil, "", err
-	}
-	endpoints, err := c.registryClient.FetchEndpointsByNames(ctx, serviceID, serviceVersionID, names)
-	return endpoints, "registry", err
+	endpoints, err := c.fetchSnapshotEndpointsByNames(ctx, serviceID, serviceVersionID, names)
+	return endpoints, "snapshot", err
 }
 
 func (c *LocalObjectCache) fetchSnapshotMetadata(ctx context.Context, serviceID, serviceVersionID uuid.UUID) (*fusedobject.ServiceMetadata, error) {
@@ -540,6 +561,16 @@ func (c *LocalObjectCache) fetchSnapshotMetadata(ctx context.Context, serviceID,
 		return nil, store.ErrServiceContractSnapshotNotFound
 	}
 	return contractStore.GetServiceContractMetadata(ctx, serviceID, serviceVersionID)
+}
+
+func validateExecutionContractMetadata(metadata *fusedobject.ServiceMetadata) error {
+	if metadata == nil {
+		return store.ErrServiceContractSnapshotNotFound
+	}
+	if err := fusedobject.ValidateExecutionContractEnvelope(metadata.ExecutionContractEnvelope); err != nil {
+		return fmt.Errorf("runtime service contract: %w", err)
+	}
+	return nil
 }
 
 func (c *LocalObjectCache) fetchSnapshotEndpointByName(ctx context.Context, serviceID, serviceVersionID uuid.UUID, endpointName string) (*fusedobject.Endpoint, error) {
@@ -569,10 +600,6 @@ func (c *LocalObjectCache) serviceContractStore() store.ServiceContractSnapshotS
 func parseServiceVersionID(version string) (uuid.UUID, bool) {
 	id, err := uuid.Parse(version)
 	return id, err == nil && id != uuid.Nil
-}
-
-func isSnapshotAbsent(err error) bool {
-	return errors.Is(err, store.ErrServiceContractSnapshotNotFound)
 }
 
 func (c *LocalObjectCache) InvalidateAppRuntime(appID string) {

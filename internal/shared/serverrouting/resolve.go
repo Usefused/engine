@@ -13,6 +13,20 @@ var (
 )
 
 func Resolve(template string, variables []Variable, supplied map[string]string) (string, bool, error) {
+	resolved, usedSupplied, err := ResolveReference(template, variables, supplied)
+	if err != nil {
+		return "", false, err
+	}
+	if err := ValidateResolvedURL(resolved); err != nil {
+		return "", false, err
+	}
+	return resolved, usedSupplied, nil
+}
+
+// ResolveReference performs template substitution without requiring an
+// absolute URL. Operation-level OpenAPI servers may be relative and are
+// validated after they are resolved against the selected service origin.
+func ResolveReference(template string, variables []Variable, supplied map[string]string) (string, bool, error) {
 	resolved := template
 	usedSupplied := false
 	definitions := make(map[string]Variable, len(variables))
@@ -33,9 +47,6 @@ func Resolve(template string, variables []Variable, supplied map[string]string) 
 	}
 	if placeholderPattern.MatchString(resolved) || strings.ContainsAny(resolved, "{}\r\n") {
 		return "", false, errors.New("server template remains unresolved")
-	}
-	if err := ValidateResolvedURL(resolved); err != nil {
-		return "", false, err
 	}
 	return resolved, usedSupplied, nil
 }

@@ -121,6 +121,109 @@ func TestControlAuditRecordsMutationOutcome(t *testing.T) {
 	if event.Outcome != accesscontrol.AuditSucceeded || event.Permission != accesscontrol.PermissionAccountManage || event.Path != "/account" {
 		t.Fatalf("event = %#v", event)
 	}
+	if _, present := event.Metadata["changed"]; present {
+		t.Fatalf("ordinary mutation must not invent change evidence: %#v", event)
+	}
+}
+
+func TestControlAuditRecordsBoundedNoopEvidenceOnFinalOutcome(t *testing.T) {
+	principal := controlTestPrincipal()
+	principal.EffectiveGrants = append(principal.EffectiveGrants, accesscontrol.Grant{
+		Permission: accesscontrol.PermissionAccountManage,
+		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: principal.WorkspaceID},
+	})
+	loader := &controlPrincipalLoaderStub{principal: principal}
+	authenticator, _ := accesscontrol.NewAuthenticator(loader, 1, accesscontrol.AuthenticatorOptions{})
+	recorder := &controlAuditRecorderStub{}
+	handler := controlActorMiddleware(authenticator)(
+		controlAuthorizationMiddlewareWithAudit(accesscontrol.SnapshotAuthorizer{}, nil, recorder)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			accesscontrol.MarkMutationAuditUnchanged(r.Context())
+			w.WriteHeader(http.StatusNoContent)
+		})),
+	)
+	request := httptest.NewRequest(http.MethodPut, "/account", nil)
+	request.Header.Set("X-API-Key", "fsk_license")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent || len(recorder.events) != 2 {
+		t.Fatalf("status/events = %d/%#v", response.Code, recorder.events)
+	}
+	if metadata := recorder.events[1].Metadata; recorder.events[1].Outcome != accesscontrol.AuditSucceeded || metadata["changed"] != false {
+		t.Fatalf("final no-op audit = %#v", recorder.events[1])
+	}
+	if _, present := recorder.events[0].Metadata["changed"]; present {
+		t.Fatalf("preflight audit must not claim a mutation result: %#v", recorder.events[0])
+	}
+}
+
+func TestControlAuditRecordsRolledBackMutationOutcome(t *testing.T) {
+	workspaceID := uuid.New()
+	actor := actorWithGrants(t, workspaceID, accesscontrol.Grant{
+		Permission: accesscontrol.PermissionAccountManage,
+		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID},
+	})
+	recorder := &controlAuditRecorderStub{}
+	handler := controlAuthorizationMiddlewareWithAudit(accesscontrol.SnapshotAuthorizer{}, nil, recorder)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accesscontrol.MarkMutationAuditRolledBack(r.Context())
+		w.WriteHeader(http.StatusConflict)
+	}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, requestWithActor(t, http.MethodPut, "/account", actor))
+
+	if response.Code != http.StatusConflict || len(recorder.events) != 2 {
+		t.Fatalf("status/events = %d/%#v", response.Code, recorder.events)
+	}
+	final := recorder.events[1]
+	if final.Outcome != accesscontrol.AuditRolledBack || final.ReasonCode != "transaction_rolled_back" {
+		t.Fatalf("rolled-back audit = %#v", final)
+	}
+}
+
+func TestControlAuditRecordsCancelledMutationAndRollbackFact(t *testing.T) {
+	workspaceID := uuid.New()
+	actor := actorWithGrants(t, workspaceID, accesscontrol.Grant{
+		Permission: accesscontrol.PermissionAccountManage,
+		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID},
+	})
+	recorder := &controlAuditRecorderStub{}
+	handler := controlAuthorizationMiddlewareWithAudit(accesscontrol.SnapshotAuthorizer{}, nil, recorder)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accesscontrol.MarkMutationAuditCancelled(r.Context())
+		accesscontrol.MarkMutationAuditRolledBack(r.Context())
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, requestWithActor(t, http.MethodPut, "/account", actor))
+
+	if response.Code != http.StatusInternalServerError || len(recorder.events) != 2 {
+		t.Fatalf("status/events = %d/%#v", response.Code, recorder.events)
+	}
+	final := recorder.events[1]
+	if final.Outcome != accesscontrol.AuditCancelled || final.ReasonCode != "transaction_rolled_back" {
+		t.Fatalf("cancelled audit = %#v", final)
+	}
+}
+
+func TestControlAuditRecordsExactFailedImportApplyOutcome(t *testing.T) {
+	workspaceID := uuid.New()
+	actor := actorWithGrants(t, workspaceID, accesscontrol.Grant{
+		Permission: accesscontrol.PermissionCatalogueImport,
+		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID},
+	})
+	recorder := &controlAuditRecorderStub{}
+	handler := controlAuthorizationMiddlewareWithAudit(accesscontrol.SnapshotAuthorizer{}, nil, recorder)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+	}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, requestWithActor(t, http.MethodPost, "/integrations/import/apply", actor))
+
+	if response.Code != http.StatusConflict || len(recorder.events) != 2 {
+		t.Fatalf("status/events = %d/%#v", response.Code, recorder.events)
+	}
+	final := recorder.events[1]
+	if final.Outcome != accesscontrol.AuditFailed || final.StatusCode != http.StatusConflict || final.Path != "/integrations/import/apply" {
+		t.Fatalf("failed import audit = %#v", final)
+	}
 }
 
 func TestControlAuditFailureBlocksMutationBeforeExecution(t *testing.T) {

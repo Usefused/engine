@@ -22,6 +22,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
@@ -122,7 +123,7 @@ func TestPrepareWorkspaceProfileSeparatesDeclarationFromCompiledValues(t *testin
 		workspaceConnectMaterial{BindingValues: map[string]string{"SHOPIFY_API_VERSION": "2026-07"}},
 		nil,
 		workspaceVersionProfile{Version: "v1", VersionID: versionID, AuthType: "oauth", Profile: profile},
-		connectionprofile.Contract{AuthTypes: []string{"oauth"}, Complete: true}, nil, &plan,
+		connectionprofile.Contract{AuthConfigs: []connectionprofile.AuthConfig{{Name: "oauth", Type: "oauth"}}, Complete: true}, nil, &plan,
 	)
 	if err != nil {
 		t.Fatalf("prepareWorkspaceProfile: %v", err)
@@ -291,16 +292,18 @@ func TestWorkspaceProfileDetachSkipsRegistryResolution(t *testing.T) {
 // this pins the tag names directly.
 func TestWorkspaceExecutionPolicy_PaginationSurvivesJSONRoundTrip(t *testing.T) {
 	timeoutMs := 45000
+	initialCursor := ""
 	original := workspaceExecutionPolicy{
 		Public:    boolPtrEngineTest(true),
 		RateLimit: apiRateLimitFixture(10),
 		TimeoutMs: &timeoutMs,
 		Pagination: &paginationConfig{
-			Version: 2, Type: "cursor", ItemsPath: "$.items",
-			Cursor: &paginationpolicy.CursorConfig{
-				Request: paginationpolicy.RequestTarget{Location: "query", Name: "after"},
-				Next:    paginationpolicy.ValueSource{Location: "body", Path: "$.page.next", ValueType: "string"},
-			},
+			Version:      paginationpolicy.Version,
+			Request:      []paginationpolicy.RequestStep{{State: "cursor", Target: paginationpolicy.RequestTarget{Location: "query", Name: "after"}, ValueType: "string", Initial: &paginationpolicy.Scalar{Type: "string", String: &initialCursor}, Apply: "all"}},
+			Response:     paginationpolicy.ResponsePlan{Items: paginationpolicy.ItemsSource{Path: "$.items"}, Values: []paginationpolicy.ResponseValue{{Name: "next", Source: paginationpolicy.ValueSource{Location: "body", Path: "$.page.next", ValueType: "string"}}}},
+			Continuation: []paginationpolicy.ContinuationStep{{Kind: "token", State: "cursor", ResponseValue: "next"}},
+			Termination:  paginationpolicy.Termination{StopOnEmptyItems: true, StopOnMissingValues: []string{"next"}, RepeatedValue: "error"},
+			Limits:       paginationpolicy.Limits{MaxPages: 100, MaxItems: 10_000, MaxBytes: 16_777_216, MaxDurationMs: 120_000},
 		},
 	}
 
@@ -308,7 +311,7 @@ func TestWorkspaceExecutionPolicy_PaginationSurvivesJSONRoundTrip(t *testing.T) 
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if !strings.Contains(string(raw), `"pagination":{"version":2,"type":"cursor"`) || !strings.Contains(string(raw), `"items_path":"$.items"`) {
+	if !strings.Contains(string(raw), `"pagination":{"version":3`) || !strings.Contains(string(raw), `"items":{"path":"$.items"}`) {
 		t.Fatalf("expected pagination to marshal under the registry's json tags, got %s", raw)
 	}
 
@@ -325,10 +328,10 @@ func TestWorkspaceExecutionPolicy_PaginationSurvivesJSONRoundTrip(t *testing.T) 
 }
 
 func apiRateLimitFixture(limit int64) *rateLimitConfig {
-	return &rateLimitConfig{Version: 2, Policies: []ratelimitpolicy.Policy{{
-		Name: "requests", Unit: "requests", Scope: "service_version", DefaultCost: 1,
-		OperationCosts: map[string]int64{}, Algorithm: "fixed_window",
-		FixedWindow: &ratelimitpolicy.FixedWindow{Limit: limit, DurationMS: 1_000},
+	return &rateLimitConfig{Version: ratelimitpolicy.Version, Policies: []ratelimitpolicy.Policy{{
+		Name: "requests", Mode: ratelimitpolicy.ModeEnforce, Unit: ratelimitpolicy.UnitRequests,
+		Identity: ratelimitpolicy.BucketIdentity{Inputs: []ratelimitpolicy.IdentityInput{{Kind: ratelimitpolicy.IdentityServiceVersion}}}, Cost: ratelimitpolicy.CostPlan{Default: 1}, Algorithm: ratelimitpolicy.AlgorithmFixedWindow,
+		FixedWindow: &ratelimitpolicy.FixedWindow{Limit: limit, DurationMs: 1_000},
 	}}}
 }
 
@@ -526,7 +529,7 @@ func TestPrepareWorkspaceProfilesMaterializesEveryVersion(t *testing.T) {
 		},
 	}
 	contracts := map[uuid.UUID]connectionprofile.Contract{
-		first: {AuthTypes: []string{"oauth2"}, Complete: true}, second: {AuthTypes: []string{"oauth2"}, Complete: true},
+		first: {AuthConfigs: []connectionprofile.AuthConfig{{Name: "oauth", Type: "oauth2"}}, Complete: true}, second: {AuthConfigs: []connectionprofile.AuthConfig{{Name: "oauth", Type: "oauth2"}}, Complete: true},
 	}
 	var plan workspaceProfilePlan
 	if err := prepareWorkspaceServiceProfilePlan(svc, workspaceConnectMaterial{}, nil, contracts, map[string]*store.WorkspaceConnectionProfile{}, &plan); err != nil {
@@ -988,6 +991,19 @@ func TestWorkspaceApplyLeaseContextCancelsWhenRenewalIsLost(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("apply context remained live after lease renewal failed")
+	}
+}
+
+func TestWorkspaceConfigErrorMarksCancelledMutationEvidence(t *testing.T) {
+	ctx, cancel := context.WithCancel(accesscontrol.ContextWithMutationAuditEvidence(context.Background()))
+	cancel()
+	response := httptest.NewRecorder()
+
+	writeWorkspaceConfigError(response, context.Canceled, ctx)
+
+	evidence, ok := accesscontrol.MutationAuditEvidenceFromContext(ctx)
+	if response.Code != http.StatusInternalServerError || !ok || !evidence.Cancelled {
+		t.Fatalf("status/evidence = %d/%#v/%v", response.Code, evidence, ok)
 	}
 }
 
@@ -1533,7 +1549,7 @@ func TestWorkspaceConfigPlanHandler_PlansVersionPublicAndExecutionPolicyChange(t
 					"versions": [{
 						"version": "2026-07-01",
 						"public": false,
-						"execution_policy": {"public": true, "rate_limit": {"version":2,"policies":[{"name":"requests","unit":"requests","scope":"service_version","default_cost":1,"operation_costs":{},"algorithm":"fixed_window","fixed_window":{"limit":5,"duration_ms":1000}}]}}
+						"execution_policy": {"public": true, "rate_limit": {"version":3,"policies":[{"name":"requests","mode":"enforce","unit":"requests","identity":{"inputs":[{"kind":"service_version"}]},"cost":{"default":1,"rules":[]},"algorithm":"fixed_window","fixed_window":{"limit":5,"duration_ms":1000}}]}}
 					}]
 				}
 			}
@@ -2430,7 +2446,8 @@ type mockRegistryClient struct {
 	visibilityUpdates        []serviceVisibilityUpdate
 	// configUpdates records service-level policy publishes so tests can assert
 	// the execution policy was published with the correct service ID.
-	configUpdates []uuid.UUID
+	configUpdates  []uuid.UUID
+	configPolicies []any
 	// versionVisibilityUpdates and versionConfigUpdates are the per-version
 	// equivalents of visibilityUpdates/configUpdates above.
 	versionVisibilityUpdates []serviceVersionVisibilityUpdate
@@ -2521,8 +2538,9 @@ func (m *mockRegistryClient) UpdateServicePublic(_ context.Context, serviceID uu
 	return nil
 }
 
-func (m *mockRegistryClient) PublishServiceExecutionPolicy(_ context.Context, serviceID uuid.UUID, _ any, _ string) error {
+func (m *mockRegistryClient) PublishServiceExecutionPolicy(_ context.Context, serviceID uuid.UUID, policy any, _ string) error {
 	m.configUpdates = append(m.configUpdates, serviceID)
+	m.configPolicies = append(m.configPolicies, policy)
 	return nil
 }
 
@@ -2535,6 +2553,7 @@ type serviceVersionVisibilityUpdate struct {
 type serviceVersionConfigUpdate struct {
 	ServiceID uuid.UUID
 	Version   string
+	Policy    any
 }
 
 func (m *mockRegistryClient) UpdateServiceVersionPublic(_ context.Context, serviceID uuid.UUID, version string, isPublic bool, _ string) error {
@@ -2542,8 +2561,8 @@ func (m *mockRegistryClient) UpdateServiceVersionPublic(_ context.Context, servi
 	return nil
 }
 
-func (m *mockRegistryClient) PublishServiceVersionExecutionPolicy(_ context.Context, serviceID uuid.UUID, version string, _ any, _ string) error {
-	m.versionConfigUpdates = append(m.versionConfigUpdates, serviceVersionConfigUpdate{ServiceID: serviceID, Version: version})
+func (m *mockRegistryClient) PublishServiceVersionExecutionPolicy(_ context.Context, serviceID uuid.UUID, version string, policy any, _ string) error {
+	m.versionConfigUpdates = append(m.versionConfigUpdates, serviceVersionConfigUpdate{ServiceID: serviceID, Version: version, Policy: policy})
 	return nil
 }
 
@@ -2776,7 +2795,7 @@ func TestWorkspaceConfigApplyHandler_AppliesVersionPublicAndExecutionPolicyChang
 	s := &workspaceTestStore{accountID: uuid.New()}
 	resolved := []byte(`{"services":{"stripe":{` +
 		`"service_id":"` + svcID.String() + `",` +
-		`"versions":[{"version":"2026-07-01","service_version_id":"` + versionID.String() + `","public":false,"execution_policy":{"public":true,"rate_limit":{"version":2,"policies":[{"name":"requests","unit":"requests","scope":"service_version","default_cost":1,"operation_costs":{},"algorithm":"fixed_window","fixed_window":{"limit":5,"duration_ms":1000}}]}}}]` +
+		`"versions":[{"version":"2026-07-01","service_version_id":"` + versionID.String() + `","public":false,"execution_policy":{"public":true,"rate_limit":{"version":3,"policies":[{"name":"requests","mode":"enforce","unit":"requests","identity":{"inputs":[{"kind":"service_version"}]},"cost":{"default":1,"rules":[]},"algorithm":"fixed_window","fixed_window":{"limit":5,"duration_ms":1000}}]}}}]` +
 		`}}}`)
 	actions := []byte(`[` +
 		`{"id":"set_service_version_private:` + svcID.String() + `:2026-07-01","type":"set_service_version_private","service_id":"` + svcID.String() + `","version":"2026-07-01","public":false},` +
@@ -3210,7 +3229,8 @@ func TestRejectConfiguredRegistryVisibility(t *testing.T) {
 
 func TestReconcileWorkspaceExecutionPolicyActionsUsesExactCurrentTier(t *testing.T) {
 	serviceID := uuid.New()
-	policy := &workspaceExecutionPolicy{Retry: &retryConfig{Strategy: "exponential_backoff", MaxRetries: 2, BackoffMs: 250}}
+	retry := canonicalWorkspaceRetryTest(t)
+	policy := &workspaceExecutionPolicy{Retry: &retry}
 	desired := workspaceDesiredState{Services: map[uuid.UUID]workspaceDesiredService{serviceID: {ServiceID: serviceID, ExecutionPolicy: policy}}}
 	expected := workspaceExecutionPolicyOverride(serviceID, nil, policy)
 	ref := store.WorkspaceExecutionPolicyRef{ServiceID: serviceID}
@@ -3223,7 +3243,9 @@ func TestReconcileWorkspaceExecutionPolicyActionsUsesExactCurrentTier(t *testing
 		t.Fatalf("unchanged exact policy produced actions: %+v", summary.Actions)
 	}
 	drifted := expected
-	drifted.RetryConfig = &fusedobject.RetryConfig{Strategy: "fixed", MaxRetries: 1, BackoffMs: 10}
+	driftedRetry := canonicalWorkspaceRetryTest(t)
+	driftedRetry.Rules[0].Action.MaxAttempts++
+	drifted.RetryConfig = &driftedRetry
 	s.exactExecutionPolicies[ref] = &drifted
 	summary.Actions = desiredExecutionPolicyLocalActions(desired)
 	if err := reconcileWorkspaceExecutionPolicyPlanActions(context.Background(), s, desired, &summary); err != nil || len(summary.Actions) != 1 {

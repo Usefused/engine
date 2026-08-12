@@ -237,9 +237,9 @@ func sharedRuntimeEntrypointPath() string {
 	return ""
 }
 
-// prepareSessionFixture loads the MCP app version's scope and derives its
-// fixture from it (mcp_session_fixture.go) -- split out of mcpSseHandler so
-// that handler's own error-handling stays a single branch instead of two.
+// prepareSessionFixture derives discovery from the exact authorized app scope.
+// Keeping this outside the handler preserves one failure boundary for missing
+// or incomplete immutable snapshots.
 func prepareSessionFixture(ctx context.Context, appIDHex string, policy store.AppTokenPolicy) (*Fixture, error) {
 	selections, err := validateAndParseScope(ctx, globalObjectCache, appIDHex)
 	if err != nil {
@@ -253,7 +253,7 @@ func prepareSessionFixture(ctx context.Context, appIDHex string, policy store.Ap
 }
 
 // writeSessionFixture serializes fixture to sessionTmpDir/fixture.json in the
-// same {"operations": [...]} shape LoadFixture/fixture.ts parse, so the
+// same {"operations": [...]} shape fixture.ts parses, so the
 // spawned Node process reads the exact catalog validated by the Go middleware.
 // sessionTmpDir already exists
 // (buildMCPCommand creates it) and is cleaned up by cleanupMCPSession, so

@@ -1728,7 +1728,7 @@ func connectionDiscoveryContract(ctx context.Context, s store.Store, verifier Se
 	if err != nil {
 		return nil, nil, fusedobject.AuthConfig{}, errors.New("resource discovery operation is unavailable")
 	}
-	auth, err := selectRuntimeOAuthConfig(metadata.AuthConfigs, connection.AuthType, connection.AuthName)
+	auth, _, err := selectRuntimeOAuthConfig(metadata.AuthConfigs, connection.AuthType, connection.AuthName, "authorizationCode")
 	if err != nil {
 		return nil, nil, fusedobject.AuthConfig{}, err
 	}

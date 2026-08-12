@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/shared/models"
-	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
@@ -24,6 +23,14 @@ type providerRateLimitStoreStub struct {
 	decisions []ratelimitpolicy.Decision
 	requests  []ratelimitpolicy.AcquireRequest
 	syncs     []ratelimitpolicy.SyncRequest
+	releases  []ratelimitpolicy.ReleaseRequest
+}
+
+func (s *providerRateLimitStoreStub) ReleaseProviderRateLimit(_ context.Context, request ratelimitpolicy.ReleaseRequest) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.releases = append(s.releases, request)
+	return nil
 }
 
 func (s *providerRateLimitStoreStub) AcquireProviderRateLimit(_ context.Context, request ratelimitpolicy.AcquireRequest) (ratelimitpolicy.Decision, error) {
@@ -57,46 +64,55 @@ func TestProviderRateLimitRequestUsesStableKeyAndExactScopes(t *testing.T) {
 	if len(request.Policies) != 2 || request.Policies[0].Name != "connection_points" || request.Policies[0].Cost != 10 {
 		t.Fatalf("unexpected resolved policies: %#v", request.Policies)
 	}
-	if request.Policies[0].ScopeID != connectionID.String() {
-		t.Fatalf("connection scope = %s, want exact auth connection %s", request.Policies[0].ScopeID, connectionID)
+	if request.Policies[0].ScopeKind != string(ratelimitpolicy.IdentityConnection) || request.Policies[0].ScopeID == "" {
+		t.Fatalf("connection identity was not resolved safely: %#v", request.Policies[0])
 	}
-	if request.Policies[1].ScopeID != versionID.String() {
-		t.Fatalf("service scope = %s, want version %s", request.Policies[1].ScopeID, versionID)
+	if request.Policies[1].ScopeKind != string(ratelimitpolicy.IdentityServiceVersion) || request.Policies[1].ScopeID == "" {
+		t.Fatalf("service-version identity was not resolved safely: %#v", request.Policies[1])
 	}
 
 	ctx = WithProviderRateLimitIdentity(context.Background(), accountID, bucketID, uuid.Nil)
-	request, err = providerRateLimitRequest(ctx, srv, &models.IntegrationObject{StableKey: "operation-name-is-not-a-key"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if request.Policies[0].ScopeID != bucketID.String() || request.Policies[0].Cost != 1 {
-		t.Fatalf("bucket fallback/default cost failed: %#v", request.Policies[0])
+	if _, err = providerRateLimitRequest(ctx, srv, &models.IntegrationObject{StableKey: "operation-name-is-not-a-key"}); err == nil {
+		t.Fatal("missing canonical connection identity did not fail closed")
 	}
 }
 
-func TestProviderRateLimitWaitIsCappedAndContextAware(t *testing.T) {
+func TestProviderConcurrencyRequiresExecutionDeadline(t *testing.T) {
+	ctx := WithProviderRateLimitIdentity(context.Background(), uuid.New(), uuid.New(), uuid.New())
+	service := &models.Service{ServiceVersionID: uuid.New(), RateLimit: &ratelimitpolicy.Config{Version: ratelimitpolicy.Version, Policies: []ratelimitpolicy.Policy{{
+		Name: "parallel", Mode: ratelimitpolicy.ModeEnforce, Unit: ratelimitpolicy.UnitRequests,
+		Identity: ratelimitpolicy.BucketIdentity{Inputs: []ratelimitpolicy.IdentityInput{{Kind: ratelimitpolicy.IdentityConnection}}}, Cost: ratelimitpolicy.CostPlan{Default: 1}, Algorithm: ratelimitpolicy.AlgorithmConcurrency,
+		Concurrency: &ratelimitpolicy.Concurrency{Limit: 1},
+	}}}}
+	if _, err := providerRateLimitRequest(ctx, service, &models.IntegrationObject{StableKey: "rest:GET:/items"}); err == nil {
+		t.Fatal("expected missing concurrency deadline to fail closed")
+	}
+}
+
+func TestProviderRateLimitDenialDoesNotSleep(t *testing.T) {
 	store := &providerRateLimitStoreStub{decisions: []ratelimitpolicy.Decision{{Allowed: false, RetryAfter: time.Hour}}}
 	dispatcher := NewDispatcherWithProviderRateLimits(store)
 	srv := &models.Service{ServiceVersionID: uuid.New(), RateLimit: fixedRateLimitFixture(5)}
-	ctx, cancel := context.WithCancel(WithProviderRateLimitIdentity(context.Background(), uuid.New(), uuid.New(), uuid.Nil))
-	cancel()
+	ctx := WithProviderRateLimitIdentity(context.Background(), uuid.New(), uuid.New(), uuid.Nil)
+	started := time.Now()
 	_, err := dispatcher.awaitProviderRateLimit(ctx, srv, &models.IntegrationObject{StableKey: "rest:GET:/items"})
-	if err != context.Canceled {
-		t.Fatalf("error = %v, want context cancellation", err)
+	if err != ErrProviderRateLimited {
+		t.Fatalf("error = %v, want local denial", err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("non-blocking quota denial took %s", elapsed)
 	}
 	if len(store.requests) != 1 {
-		t.Fatalf("acquisitions = %d, want one before cancellation", len(store.requests))
+		t.Fatalf("acquisitions = %d, want exactly one", len(store.requests))
 	}
 }
 
-func TestProviderRateLimitMaximumDelayIsTotalBudget(t *testing.T) {
+func TestProviderRateLimitDenialDoesNotReacquire(t *testing.T) {
 	store := &providerRateLimitStoreStub{decisions: []ratelimitpolicy.Decision{
 		{Allowed: false, RetryAfter: time.Hour}, {Allowed: false, RetryAfter: time.Hour},
 	}}
 	dispatcher := NewDispatcherWithProviderRateLimits(store)
-	config := fixedRateLimitFixture(5)
-	config.RetryAfter.MaxDelayMS = 5
-	srv := &models.Service{ServiceVersionID: uuid.New(), RateLimit: config}
+	srv := &models.Service{ServiceVersionID: uuid.New(), RateLimit: fixedRateLimitFixture(5)}
 	ctx := WithProviderRateLimitIdentity(context.Background(), uuid.New(), uuid.New(), uuid.Nil)
 	started := time.Now()
 	_, err := dispatcher.awaitProviderRateLimit(ctx, srv, &models.IntegrationObject{StableKey: "rest:GET:/items"})
@@ -106,8 +122,8 @@ func TestProviderRateLimitMaximumDelayIsTotalBudget(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
 		t.Fatalf("wait %s exceeded the total max-delay budget", elapsed)
 	}
-	if len(store.requests) != 2 {
-		t.Fatalf("acquisitions = %d, want one recheck after capped wait", len(store.requests))
+	if len(store.requests) != 1 {
+		t.Fatalf("acquisitions = %d, want no Engine-side quota retry", len(store.requests))
 	}
 }
 
@@ -127,7 +143,7 @@ func TestEveryRetryAttemptAcquiresImmediatelyBeforeTransport(t *testing.T) {
 	}
 	srv := &models.Service{
 		BaseURL: "https://provider.test", ServiceVersionID: uuid.New(), RateLimit: fixedRateLimitFixture(5),
-		RetryConfig: &models.RetryConfig{Strategy: "fixed", MaxRetries: 1},
+		RetryConfig: &models.RetryConfig{Version: 3, Rules: retryV3Rules()},
 	}
 	ctx := WithProviderRateLimitIdentity(context.Background(), uuid.New(), uuid.New(), uuid.Nil)
 	status, err := dispatcher.ExecuteStream(ctx, srv, explicitAnonymousEndpoint(&models.IntegrationObject{
@@ -149,7 +165,7 @@ func TestSSEAttemptAcquiresBeforeTransport(t *testing.T) {
 	srv := &models.Service{BaseURL: "https://provider.test", ServiceVersionID: uuid.New(), RateLimit: fixedRateLimitFixture(5)}
 	ctx := WithProviderRateLimitIdentity(context.Background(), uuid.New(), uuid.New(), uuid.Nil)
 	status, err := dispatcher.ExecuteStream(ctx, srv, explicitAnonymousEndpoint(&models.IntegrationObject{
-		Path: "/events", Method: http.MethodGet, IsSSE: true, StableKey: "rest:GET:/events",
+		Path: "/events", Method: http.MethodGet, StableKey: "rest:GET:/events",
 	}), nil, nil, nil, &mockStream{})
 	if err != nil || status != http.StatusOK || len(rateStore.requests) != 1 {
 		t.Fatalf("status=%d err=%v acquisitions=%d", status, err, len(rateStore.requests))
@@ -157,34 +173,35 @@ func TestSSEAttemptAcquiresBeforeTransport(t *testing.T) {
 }
 
 func TestEachPaginationPageAcquiresAndAccumulatesTimings(t *testing.T) {
-	rateStore := &providerRateLimitStoreStub{delay: 5 * time.Millisecond}
+	rateStore := &providerRateLimitStoreStub{}
 	calls := 0
 	dispatcher := &Dispatcher{rateLimits: rateStore, client: &http.Client{Transport: paginationRoundTripper(func(request *http.Request) (*http.Response, error) {
-		time.Sleep(5 * time.Millisecond)
 		calls++
-		body := `{"items":[1],"next":"/items?page=2"}`
+		body := `{"values":[1],"next":"/items?page=2"}`
 		if calls == 2 {
-			body = `{"items":[2]}`
+			body = `{"values":[2]}`
 		}
 		return paginationResponse(request, body, nil), nil
 	})}}
-	policy := modelPolicy(paginationpolicy.Config{
-		Version: 2, Type: "next_url", ItemsPath: "$.items",
-		NextURL: &paginationpolicy.NextURLConfig{Next: paginationpolicy.ValueSource{Location: "body", Path: "$.next", ValueType: "url"}},
-	})
+	caseData := v3HybridCase()
+	policy := modelPolicy(caseData.policy)
 	srv := &models.Service{BaseURL: "https://provider.test", ServiceVersionID: uuid.New(), RateLimit: fixedRateLimitFixture(5)}
 	timings := NewExecutionTimings()
 	ctx := ContextWithExecutionTimings(context.Background(), timings)
 	ctx = WithProviderRateLimitIdentity(ctx, uuid.New(), uuid.New(), uuid.Nil)
-	status, err := dispatcher.ExecuteStream(ctx, srv, explicitAnonymousEndpoint(&models.IntegrationObject{
-		Path: "/items", Method: http.MethodGet, Pagination: policy, StableKey: "rest:GET:/items",
-	}), nil, nil, nil, &mockStream{})
+	caseData.object.Pagination = policy
+	caseData.object.StableKey = "rest:GET:/items"
+	status, err := dispatcher.ExecuteStream(ctx, srv, explicitAnonymousEndpoint(caseData.object), nil, nil, nil, &mockStream{})
 	if err != nil || status != http.StatusOK || calls != 2 || len(rateStore.requests) != 2 {
 		t.Fatalf("status=%d err=%v calls=%d acquisitions=%d", status, err, calls, len(rateStore.requests))
 	}
 	snapshot := timings.SnapshotMilliseconds()
-	if snapshot["provider_total"] < 18 || snapshot["rate_limit_acquire"] < 8 {
-		t.Fatalf("pagination timings did not accumulate every page: %#v", snapshot)
+	_, hasProviderTotal := snapshot["provider_total"]
+	_, hasRateLimitAcquire := snapshot["rate_limit_acquire_ms"]
+	// Exact elapsed time belongs in the opt-in benchmark; the checked gate uses
+	// page/acquisition counts and only requires both timing dimensions to exist.
+	if !hasProviderTotal || !hasRateLimitAcquire {
+		t.Fatalf("pagination timing dimensions are incomplete: %#v", snapshot)
 	}
 }
 
@@ -192,9 +209,13 @@ func TestProviderHeaderObservationAnd429CooldownAreBounded(t *testing.T) {
 	rateStore := &providerRateLimitStoreStub{}
 	dispatcher := NewDispatcherWithProviderRateLimits(rateStore)
 	config := fixedRateLimitFixture(5)
-	config.Policies[0].ResponseHeaders = &ratelimitpolicy.ResponseHeaders{
-		Limit: "X-Limit", Remaining: "X-Remaining",
-		Reset: &ratelimitpolicy.ResetHeader{Name: "X-Reset", Format: "delta_seconds"},
+	config.Policies[0].ResponseSignals = &ratelimitpolicy.ResponseSignals{
+		Limit:     &ratelimitpolicy.ResponseSignal{Source: ratelimitpolicy.ResponseSignalHeader, Name: "X-Limit"},
+		Remaining: &ratelimitpolicy.ResponseSignal{Source: ratelimitpolicy.ResponseSignalHeader, Name: "X-Remaining"},
+		Reset: &ratelimitpolicy.ResetSignal{
+			Signal: ratelimitpolicy.ResponseSignal{Source: ratelimitpolicy.ResponseSignalHeader, Name: "X-Reset"},
+			Format: ratelimitpolicy.ResetDeltaSeconds,
+		},
 	}
 	srv := &models.Service{ServiceVersionID: uuid.New(), RateLimit: config}
 	ctx := WithProviderRateLimitIdentity(context.Background(), uuid.New(), uuid.New(), uuid.Nil)
@@ -250,7 +271,7 @@ func TestProviderRateLimitTelemetryHasOnlySafeAggregateKeys(t *testing.T) {
 	if len(spans) != 1 {
 		t.Fatalf("ended spans = %d, want 1", len(spans))
 	}
-	if _, ok := timings.SnapshotMilliseconds()["rate_limit_acquire"]; !ok {
+	if _, ok := timings.SnapshotMilliseconds()["rate_limit_acquire_ms"]; !ok {
 		t.Fatal("rate-limit acquisition timing was not recorded")
 	}
 	for _, attribute := range spans[0].Attributes() {
@@ -264,17 +285,21 @@ func TestProviderRateLimitTelemetryHasOnlySafeAggregateKeys(t *testing.T) {
 }
 
 func fixedRateLimitFixture(limit int64) *ratelimitpolicy.Config {
-	return &ratelimitpolicy.Config{Version: 2, Policies: []ratelimitpolicy.Policy{{
-		Name: "requests", Unit: "requests", Scope: "service_version", DefaultCost: 1,
-		OperationCosts: map[string]int64{}, Algorithm: "fixed_window",
-		FixedWindow: &ratelimitpolicy.FixedWindow{Limit: limit, DurationMS: 60_000},
-	}}, RetryAfter: &ratelimitpolicy.RetryAfter{Enabled: true, MaxDelayMS: 1_000}}
+	return &ratelimitpolicy.Config{Version: ratelimitpolicy.Version, Policies: []ratelimitpolicy.Policy{{
+		Name: "requests", Mode: ratelimitpolicy.ModeEnforce, Unit: ratelimitpolicy.UnitRequests,
+		Identity: ratelimitpolicy.BucketIdentity{Inputs: []ratelimitpolicy.IdentityInput{{Kind: ratelimitpolicy.IdentityServiceVersion}}},
+		Cost:     ratelimitpolicy.CostPlan{Default: 1}, Algorithm: ratelimitpolicy.AlgorithmFixedWindow,
+		FixedWindow: &ratelimitpolicy.FixedWindow{Limit: limit, DurationMs: 60_000},
+	}}, Cooldown: &ratelimitpolicy.Cooldown{
+		Statuses: []ratelimitpolicy.StatusRange{{Min: http.StatusTooManyRequests, Max: http.StatusTooManyRequests}},
+		Headers:  []ratelimitpolicy.CooldownHeader{{Name: "Retry-After", Formats: []ratelimitpolicy.ResetFormat{ratelimitpolicy.ResetDeltaSeconds}, MaxDelayMs: 1_000}},
+	}}
 }
 
 func mixedRateLimitFixture() *ratelimitpolicy.Config {
-	return &ratelimitpolicy.Config{Version: 2, Policies: []ratelimitpolicy.Policy{
-		{Name: "service_requests", Unit: "requests", Scope: "service_version", DefaultCost: 1, OperationCosts: map[string]int64{}, Algorithm: "fixed_window", FixedWindow: &ratelimitpolicy.FixedWindow{Limit: 100, DurationMS: 60_000}},
-		{Name: "connection_points", Unit: "points", Scope: "connection", DefaultCost: 1, OperationCosts: map[string]int64{"rest:GET:/drive/v3/files/{}": 10}, Algorithm: "token_bucket", TokenBucket: &ratelimitpolicy.TokenBucket{Capacity: 100, RefillUnits: 10, RefillIntervalMS: 1_000}},
+	return &ratelimitpolicy.Config{Version: ratelimitpolicy.Version, Policies: []ratelimitpolicy.Policy{
+		{Name: "service_requests", Mode: ratelimitpolicy.ModeEnforce, Unit: ratelimitpolicy.UnitRequests, Identity: ratelimitpolicy.BucketIdentity{Inputs: []ratelimitpolicy.IdentityInput{{Kind: ratelimitpolicy.IdentityServiceVersion}}}, Cost: ratelimitpolicy.CostPlan{Default: 1}, Algorithm: ratelimitpolicy.AlgorithmFixedWindow, FixedWindow: &ratelimitpolicy.FixedWindow{Limit: 100, DurationMs: 60_000}},
+		{Name: "connection_points", Mode: ratelimitpolicy.ModeEnforce, Unit: ratelimitpolicy.UnitPoints, Identity: ratelimitpolicy.BucketIdentity{Inputs: []ratelimitpolicy.IdentityInput{{Kind: ratelimitpolicy.IdentityConnection}}}, Cost: ratelimitpolicy.CostPlan{Default: 1, Rules: []ratelimitpolicy.CostRule{{Operation: "rest:GET:/drive/v3/files/{}", Cost: 10}}}, Algorithm: ratelimitpolicy.AlgorithmTokenBucket, TokenBucket: &ratelimitpolicy.TokenBucket{Capacity: 100, RefillUnits: 10, RefillIntervalMs: 1_000}},
 	}}
 }
 

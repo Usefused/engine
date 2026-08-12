@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { createContext, useContext, useState, useEffect, useRef } from "react";
 import {
   useParams,
   Link,
@@ -9,30 +9,36 @@ import {
   type MetaFunction,
 } from "@remix-run/react";
 
+function serviceMetaTitle(service?: Service | null) {
+  if (!service?.name) return "Service details - Fused";
+  return `${service.name.charAt(0).toUpperCase() + service.name.slice(1)} - Fused`;
+}
+
+function serviceMetaDescription(service?: Service | null) {
+  if (service?.description) return service.description;
+  const name = service?.name
+    ? service.name.charAt(0).toUpperCase() + service.name.slice(1)
+    : "";
+  return `Explore the ${name} API integration on Fused — generate typed SDKs, webhook receivers, and MCP servers.`;
+}
+
+function serviceMetaURL(service: Service | null | undefined, provider?: string) {
+  const providerSegment = provider ? `${provider}/` : "";
+  const serviceSegment = service?.slug ?? service?.id ?? "";
+  return `https://usefused.com/integrations/${providerSegment}${serviceSegment}`;
+}
+
 export const meta: MetaFunction<typeof clientLoader> = ({
   data,
   matches,
   params,
 }) => {
   const service = data?.initialServiceData?.service;
-  const title = service?.name
-    ? `${
-        service.name.charAt(0).toUpperCase() + service.name.slice(1)
-      } - Fused`
-    : "Service details - Fused";
-  const description =
-    service?.description ||
-    `Explore the ${
-      service?.name
-        ? service.name.charAt(0).toUpperCase() + service.name.slice(1)
-        : ""
-    } API integration on Fused — generate typed SDKs, webhook receivers, and MCP servers.`;
+  const title = serviceMetaTitle(service);
+  const description = serviceMetaDescription(service);
   // params.provider is only present when this meta function is reused by
   // integrations.$provider.$id.tsx (the cross-account public-browsing route).
-  const providerSegment = params.provider ? `${params.provider}/` : "";
-  const url = `https://usefused.com/integrations/${providerSegment}${
-    service?.slug ?? service?.id ?? ""
-  }`;
+  const url = serviceMetaURL(service, params.provider);
 
   const parentMeta = matches
     .filter((m) => m.id === "root")
@@ -75,6 +81,7 @@ import {
   type EngineExecutionEventEntry,
   type EngineExecutionAnalyticsSummary,
   type ServiceConsumerEntry,
+  type AuthConfig,
 } from "~/lib/api";
 import EndpointsTab from "~/components/EndpointsTab";
 import WebhooksTab from "~/components/WebhooksTab";
@@ -114,6 +121,7 @@ import {
   RATE_LIMIT_GRAPHQL_FIELDS,
   rateLimitSummary,
 } from "~/lib/rate-limit";
+import { oauth2FlowEntries, oauth2ScopeNames } from "~/lib/oauth2-flows";
 
 function requireRemoteSource(sourceURL?: string): string {
   const value = sourceURL || "";
@@ -164,6 +172,230 @@ function canManageService(
   return !provider && !!routeId && !isUUID(routeId);
 }
 
+type DetailTab = "endpoints" | "webhooks" | "analytics";
+
+function resolvedRouteID(loaderID: string | null | undefined, routeID?: string) {
+  return loaderID ?? routeID;
+}
+
+function resolvedDetailTab(value: string | null): DetailTab {
+  const tabs: DetailTab[] = ["endpoints", "webhooks", "analytics"];
+  return tabs.includes(value as DetailTab) ? (value as DetailTab) : "endpoints";
+}
+
+function positivePage(value: string | null): number {
+  const page = Number.parseInt(value ?? "1", 10);
+  return Number.isNaN(page) || page < 1 ? 1 : page;
+}
+
+function serviceNotificationsFor(
+  serviceId: string | undefined,
+  notifications: ReturnType<typeof useWorkspaceNotifications>["unresolved"]
+) {
+  if (!serviceId) return [];
+  return notifications.filter(
+    (item) => isPending(item) && matchesService(item, serviceId)
+  );
+}
+
+function selectedServiceVersions(
+  current: ServiceVersion[] | undefined,
+  initial: ServiceVersion[] | undefined
+) {
+  return current ?? initial ?? [];
+}
+
+function selectedVersionName(version: string, fallback?: string) {
+  return version || fallback || "";
+}
+
+function endpointTotal(
+  searchResults: IntegrationObject[] | null,
+  service: Service
+): number {
+  if (searchResults !== null) return searchResults.length;
+  return (
+    service.resources?.reduce(
+      (sum: number, resource) => sum + (resource.endpointCount || 0),
+      0
+    ) ?? 0
+  );
+}
+
+function serviceStatus(integrations: IntegrationObject[]) {
+  return integrations.some((integration) => integration.status === "drifted")
+    ? "drifted"
+    : "active";
+}
+
+function serviceStatusColor(status: string) {
+  const colors: Record<string, string> = {
+    active: "bg-green-50 text-green-700",
+    drifted: "bg-yellow-50 text-yellow-700",
+    updating: "bg-blue-50 text-blue-700",
+  };
+  return colors[status] ?? "bg-slate-50 text-slate-700";
+}
+
+type InitialServicePayload = {
+  service?: Service | null;
+  serviceVersions?: ServiceVersion[];
+} | null;
+
+function loaderInitialData(loaderData: {
+  initialServiceData?: InitialServicePayload;
+} | undefined): InitialServicePayload {
+  return loaderData ? loaderData.initialServiceData ?? null : null;
+}
+
+function loaderResolvedID(
+  loaderData: { resolvedId?: string | null } | undefined,
+  routeID?: string
+) {
+  return resolvedRouteID(loaderData ? loaderData.resolvedId : null, routeID);
+}
+
+function loaderErrorMessage(loaderData: { error?: string | null } | undefined) {
+  return loaderData ? loaderData.error ?? "" : "";
+}
+
+function generatedService(result: ServiceGenerationResult | null) {
+  return result ? result.service : undefined;
+}
+
+function generatedServiceVersions(result: ServiceGenerationResult | null) {
+  return result ? result.serviceVersions : undefined;
+}
+
+function serviceResources(result: ServiceGenerationResult | null) {
+  return result ? result.service.resources : undefined;
+}
+
+function webhookRequestParams(input: {
+  serviceId: string;
+  page: number;
+  limit: number;
+  eventName: string;
+  startDate: string;
+  endDate: string;
+}): Parameters<typeof api.workspace.listWebhookEvents>[0] {
+  const params: Parameters<typeof api.workspace.listWebhookEvents>[0] = {
+    serviceId: input.serviceId,
+    limit: input.limit,
+    offset: (input.page - 1) * input.limit,
+  };
+  if (input.eventName) params.eventName = input.eventName;
+  if (input.startDate) params.startDate = new Date(input.startDate).toISOString();
+  if (input.endDate) {
+    const end = new Date(input.endDate);
+    end.setHours(23, 59, 59, 999);
+    params.endDate = end.toISOString();
+  }
+  return params;
+}
+
+function OAuth2FlowDetails({ auth }: { auth: AuthConfig }) {
+  const entries = oauth2FlowEntries(auth);
+  if (entries.length === 0) return null;
+
+  return (
+    <div className="mt-2 space-y-2">
+      {entries.map(([name, flow]) => {
+        const scopes = oauth2ScopeNames(flow);
+        return (
+          <div key={name} className="min-w-0 rounded-md border border-slate-200 bg-white p-2">
+            <div className="flex justify-between">
+              <span className="text-slate-500">Flow</span>
+              <span className="font-medium text-slate-900">{name}</span>
+            </div>
+            {scopes.length > 0 && (
+              <div className="mt-2 min-w-0">
+                <span className="mb-1 block text-slate-500">Scopes ({scopes.length})</span>
+                <ul className="max-h-40 divide-y divide-slate-100 overflow-y-auto overscroll-contain rounded-md border border-slate-200 [scrollbar-gutter:stable]">
+                  {scopes.map((scope) => (
+                    <li key={scope} className="break-words px-2 py-1.5 font-mono text-[11px] leading-4 text-slate-700">
+                      {scope}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function serviceDetailQuery(provider?: string): string {
+  if (provider) {
+    return `
+      query($id: String!, $version: String, $provider: String) {
+        service(id: $id, version: $version, provider: $provider) {
+          id name slug description base_url current_service_version servers { url description environment is_default }
+          is_public watch_for_drift created_at updated_at source_url import_method
+          import_warnings { id endpoint_id method path operation_id reasons recommendation source created_at }
+          auth_configs { type scheme location key_name token_endpoint_auth_method open_id_connect_url oauth2_flows }
+          event_extraction_path
+          incoming_webhook_config { auth_type auth_location auth_key_name signature_header }
+          rate_limit { ${RATE_LIMIT_GRAPHQL_FIELDS} }
+          retry_config { strategy max_retries backoff_ms }
+          default_headers provider { name handle } canonical_ref is_owner webhook_count endpoint_count
+          webhooks { id name description method request_body }
+          resources { id name endpointCount }
+        }
+        serviceVersions(serviceId: $id, provider: $provider) { id name is_public status created_at updated_at }
+      }
+    `;
+  }
+  return `
+    query($id: String!, $version: String) {
+      service(id: $id, version: $version) {
+        id name slug description base_url current_service_version servers { url description environment is_default }
+        is_public watch_for_drift created_at updated_at source_url import_method
+        import_warnings { id endpoint_id method path operation_id reasons recommendation source created_at }
+        auth_configs { type scheme location key_name token_endpoint_auth_method open_id_connect_url oauth2_flows }
+        event_extraction_path
+        incoming_webhook_config { auth_type auth_location auth_key_name signature_header }
+        rate_limit { ${RATE_LIMIT_GRAPHQL_FIELDS} }
+        retry_config { strategy max_retries backoff_ms }
+        default_headers provider { name handle } canonical_ref is_owner webhook_count endpoint_count
+        webhooks { id name description method request_body }
+        resources { id name endpointCount }
+      }
+      serviceVersions(serviceId: $id) { id name is_public status created_at updated_at }
+    }
+  `;
+}
+
+function canonicalServiceRedirect(
+  id: string,
+  provider: string | undefined,
+  service: Service | null | undefined,
+  search: string
+) {
+  if (!isUUID(id) || !service?.slug || service.slug === id) return null;
+  const prefix = provider ? `/integrations/${provider}` : "/integrations";
+  return redirect(`${prefix}/${service.slug}${search}`);
+}
+
+function loaderErrorRedirect(
+  error: unknown,
+  isAuthenticated: boolean,
+  next: string
+) {
+  if (
+    isAuthenticated &&
+    error instanceof APIRequestError &&
+    error.status === 401
+  ) {
+    // Session status clears invalid cookies on the login page. A permission
+    // denial is intentionally not a logout because the session remains valid.
+    throw redirect(`/login?next=${encodeURIComponent(next)}`);
+  }
+  return error instanceof Error ? error.message : "";
+}
+
 export const clientLoader = async ({
   params,
   request,
@@ -180,107 +412,52 @@ export const clientLoader = async ({
   if (!id)
     return { resolvedId: null, initialServiceData: null, error: "No ID provided" };
 
-	const session = await api.auth.session().catch(() => ({ authenticated: false }));
-	const isAuthenticated = session.authenticated;
+  const session = await api.auth.session().catch(() => ({ authenticated: false }));
+  const isAuthenticated = session.authenticated;
   const url = new URL(request.url);
   const version = url.searchParams.get("version");
-
-  const queryStr = provider
-    ? `
-    query($id: String!, $version: String, $provider: String) {
-      service(id: $id, version: $version, provider: $provider) {
-        id name slug description base_url current_service_version servers { url description environment is_default }
-        is_public watch_for_drift created_at updated_at
-        source_url import_method
-        import_warnings { id endpoint_id method path operation_id reasons recommendation source created_at }
-        auth_configs { type flow scheme location key_name token_url token_endpoint_auth_method authorization_url open_id_connect_url scopes }
-        event_extraction_path
-        incoming_webhook_config { auth_type auth_location auth_key_name signature_header }
-        rate_limit { ${RATE_LIMIT_GRAPHQL_FIELDS} }
-        retry_config { strategy max_retries backoff_ms }
-        default_headers
-        provider { name handle }
-        canonical_ref
-        is_owner
-        webhook_count
-        endpoint_count
-        webhooks { id name description method request_body }
-        resources { id name endpointCount }
-      }
-      serviceVersions(serviceId: $id, provider: $provider) { id name is_public status created_at updated_at }
-    }
-  `
-    : `
-    query($id: String!, $version: String) {
-      service(id: $id, version: $version) {
-        id name slug description base_url current_service_version servers { url description environment is_default }
-        is_public watch_for_drift created_at updated_at
-        source_url import_method
-        import_warnings { id endpoint_id method path operation_id reasons recommendation source created_at }
-        auth_configs { type flow scheme location key_name token_url token_endpoint_auth_method authorization_url open_id_connect_url scopes }
-        event_extraction_path
-        incoming_webhook_config { auth_type auth_location auth_key_name signature_header }
-        rate_limit { ${RATE_LIMIT_GRAPHQL_FIELDS} }
-        retry_config { strategy max_retries backoff_ms }
-        default_headers
-        provider { name handle }
-        canonical_ref
-        is_owner
-        webhook_count
-        endpoint_count
-        webhooks { id name description method request_body }
-        resources { id name endpointCount }
-      }
-      serviceVersions(serviceId: $id) { id name is_public status created_at updated_at }
-    }
-  `;
 
   let initialServiceData = null;
   let resolvedId = id;
   let error = null;
   try {
     const variables: Record<string, string> = {
-      id: id as string,
-      version: version || "",
+      id,
+      version: version ?? "",
     };
     if (provider) variables.provider = provider;
-		const res = await api.graphql<{
+    const res = await api.graphql<{
       service: Service | null;
       serviceVersions?: ServiceVersion[];
-		}>(queryStr, variables);
+    }>(serviceDetailQuery(provider), variables);
     initialServiceData = res;
 
-		if (!initialServiceData?.service && !isAuthenticated) {
+    if (!initialServiceData.service && !isAuthenticated) {
       return redirect(
         `/login?next=${encodeURIComponent(url.pathname + url.search)}`
       );
     }
 
     // The resolver returns the canonical UUID; use it so client always has the UUID
-    if (initialServiceData?.service?.id) {
+    if (initialServiceData.service?.id) {
       resolvedId = initialServiceData.service.id;
     }
 
     // Redirect UUID-based URLs to the canonical slug URL (preserving the
     // provider segment, if this is the cross-account route).
-    if (
-      isUUID(id) &&
-      initialServiceData?.service?.slug &&
-      initialServiceData.service.slug !== id
-    ) {
-      const canonicalPath = provider
-        ? `/integrations/${provider}/${initialServiceData.service.slug}`
-        : `/integrations/${initialServiceData.service.slug}`;
-      return redirect(`${canonicalPath}${url.search}`);
-    }
+    const canonicalRedirect = canonicalServiceRedirect(
+      id,
+      provider,
+      initialServiceData.service,
+      url.search
+    );
+    if (canonicalRedirect) return canonicalRedirect;
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "";
-    if (isAuthenticated && err instanceof APIRequestError && err.status === 401) {
-      // Session status clears invalid cookies on the login page. A permission
-      // denial is intentionally not a logout because the session remains valid.
-      throw redirect(`/login?next=${encodeURIComponent(url.pathname + url.search)}`);
-    }
-    error = msg;
+    error = loaderErrorRedirect(
+      err,
+      isAuthenticated,
+      url.pathname + url.search
+    );
   }
 
   return {
@@ -365,7 +542,7 @@ function AddToWorkspaceButton({
   );
 }
 
-export default function IntegrationDetail() {
+function useIntegrationDetailModel() {
   const toast = useToast();
   const loaderData = useLoaderData<typeof clientLoader>();
   const { id: paramId, provider } = useParams<{
@@ -373,14 +550,16 @@ export default function IntegrationDetail() {
     provider?: string;
   }>();
   const location = useLocation();
-  const id = loaderData?.resolvedId || paramId;
+  const id = loaderResolvedID(loaderData, paramId);
   const rootData = useRouteLoaderData<{ isAuth: boolean }>("root");
-  const isAuth = rootData?.isAuth ?? false;
+  const isAuth = Boolean(rootData && rootData.isAuth);
+  const initialServiceData = loaderInitialData(loaderData);
+  const initialService = initialServiceData ? initialServiceData.service : null;
 
   const [res, setRes] = useState<ServiceGenerationResult | null>(() => {
-    if (loaderData?.initialServiceData?.service) {
+    if (initialService) {
       return {
-        service: loaderData.initialServiceData.service,
+        service: initialService,
         integrations: [],
       };
     }
@@ -388,7 +567,6 @@ export default function IntegrationDetail() {
   });
 
   useEffect(() => {
-    const initialServiceData = loaderData?.initialServiceData;
     const service = initialServiceData?.service;
     if (!service) return;
     setRes((prev) => {
@@ -405,11 +583,11 @@ export default function IntegrationDetail() {
         service: newService,
       };
     });
-  }, [loaderData?.initialServiceData]);
+  }, [initialServiceData]);
 
   // Only the loaded service row gives us the Engine/Registry UUID. The route
   // param may be a slug, so UUID-only admin panels must wait for `res`.
-  const serviceId = res?.service?.id;
+  const serviceId = generatedService(res)?.id;
 
   const [workspaceServiceActive, setWorkspaceServiceActive] = useState<
     boolean | null
@@ -441,9 +619,9 @@ export default function IntegrationDetail() {
 
   const [drift, setDrift] = useState<DriftSnapshot[]>([]);
   const [loading, setLoading] = useState(
-    !loaderData?.initialServiceData?.service
+    !initialService
   );
-  const [error, setError] = useState(loaderData?.error || "");
+  const [error, setError] = useState(loaderErrorMessage(loaderData));
   const [driftAction, setDriftAction] = useState<string | null>(null);
   const [showShareMenu, setShowShareMenu] = useState(false);
   const shareMenuRef = useRef<HTMLDivElement>(null);
@@ -478,7 +656,7 @@ export default function IntegrationDetail() {
   const [searchParams, setSearchParams] = useSearchParams();
   // The selected provider version is URL-addressable so client-side refreshes
   // preserve the same immutable contract view as the initial loader.
-  const version = searchParams.get("version") || "";
+  const version = searchParams.get("version") ?? "";
 
   const {
     resourceVersions,
@@ -492,16 +670,10 @@ export default function IntegrationDetail() {
     loadMoreEndpoints,
   } = useResourceLoader(serviceId, version);
 
-  const urlTab = searchParams.get("tab") as
-    | "endpoints"
-    | "webhooks"
-    | "analytics";
-  const activeTab = ["endpoints", "webhooks", "analytics"].includes(urlTab)
-    ? urlTab
-    : "endpoints";
-  const urlWPage = parseInt(searchParams.get("wPage") || "1", 10);
-  const urlWStartDate = searchParams.get("wStartDate") || "";
-  const urlWEndDate = searchParams.get("wEndDate") || "";
+  const activeTab = resolvedDetailTab(searchParams.get("tab"));
+  const urlWPage = positivePage(searchParams.get("wPage"));
+  const urlWStartDate = searchParams.get("wStartDate") ?? "";
+  const urlWEndDate = searchParams.get("wEndDate") ?? "";
   const importSessionId = searchParams.get("importSession");
 
   const [isClientFetchingTab, setIsClientFetchingTab] = useState(false);
@@ -548,9 +720,7 @@ export default function IntegrationDetail() {
   };
 
   const [webhookEvents, setWebhookEvents] = useState<WebhookEventEntry[]>([]);
-  const [webhookPage, setWebhookPage] = useState(
-    isNaN(urlWPage) || urlWPage < 1 ? 1 : urlWPage
-  );
+  const [webhookPage, setWebhookPage] = useState(urlWPage);
   const [webhookTotal, setWebhookTotal] = useState(0);
   const webhookLimit = 10;
   const [webhookFilterEvent, setWebhookFilterEvent] = useState<string>("");
@@ -591,9 +761,10 @@ export default function IntegrationDetail() {
   // Detail banners are action-oriented. Acknowledged items remain available
   // in the bell and full notifications page, but should not interrupt a
   // service view after the user has already marked them read.
-  const serviceNotifications = serviceId
-    ? allNotifications.filter((item) => isPending(item) && matchesService(item, serviceId))
-    : [];
+  const serviceNotifications = serviceNotificationsFor(
+    serviceId,
+    allNotifications
+  );
 
   useEffect(() => {
     if (selectedEndpoint?.status === "drifted") {
@@ -684,13 +855,7 @@ export default function IntegrationDetail() {
   }, [selectedEndpoint]);
 
   async function loadWebhookData() {
-    if (
-      !id ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-        id
-      )
-    )
-      return;
+    if (!isUUID(id)) return;
     if (!isAuth || workspaceServiceActive !== true) return;
     if (!serviceId) return;
     setIsClientFetchingTab(true);
@@ -699,23 +864,14 @@ export default function IntegrationDetail() {
       // directly from the Engine (BACKEND_URL) via api.workspace.* -- this
       // deliberately does NOT go through api.graphql (Registry). See
       // internal/engine/api/webhook_analytics_handlers.go.
-      const offset = (webhookPage - 1) * webhookLimit;
-      const params: Parameters<typeof api.workspace.listWebhookEvents>[0] = {
+      const params = webhookRequestParams({
         serviceId,
+        page: webhookPage,
         limit: webhookLimit,
-        offset,
-      };
-      if (webhookFilterEvent) {
-        params.eventName = webhookFilterEvent;
-      }
-      if (webhookStartDate) {
-        params.startDate = new Date(webhookStartDate).toISOString();
-      }
-      if (webhookEndDate) {
-        const end = new Date(webhookEndDate);
-        end.setHours(23, 59, 59, 999);
-        params.endDate = end.toISOString();
-      }
+        eventName: webhookFilterEvent,
+        startDate: webhookStartDate,
+        endDate: webhookEndDate,
+      });
       const [events, analytics] = await Promise.all([
         api.workspace.listWebhookEvents(params),
         api.workspace.getWebhookAnalytics(params),
@@ -843,15 +999,12 @@ export default function IntegrationDetail() {
           }
           auth_configs {
             type
-            flow
             scheme
             location
             key_name
-            token_url
             token_endpoint_auth_method
-            authorization_url
             open_id_connect_url
-            scopes
+            oauth2_flows
           }
           event_extraction_path
           incoming_webhook_config {
@@ -912,15 +1065,12 @@ export default function IntegrationDetail() {
           }
           auth_configs {
             type
-            flow
             scheme
             location
             key_name
-            token_url
             token_endpoint_auth_method
-            authorization_url
             open_id_connect_url
-            scopes
+            oauth2_flows
           }
           event_extraction_path
           incoming_webhook_config {
@@ -1040,7 +1190,7 @@ export default function IntegrationDetail() {
         }
       });
     }
-  }, [res?.service?.id, res?.service?.resources]); // toggleResource intentionally omitted so it only triggers on service change
+  }, [serviceId, serviceResources(res)]); // toggleResource intentionally omitted so it only triggers on service change
 
   useEffect(() => {
     if (res?.service?.name) {
@@ -1139,6 +1289,18 @@ export default function IntegrationDetail() {
     }
   }
 
+  const serviceVersions = selectedServiceVersions(
+    generatedServiceVersions(res),
+    initialServiceData ? initialServiceData.serviceVersions : undefined
+  );
+  const selectedVersion = selectedVersionName(
+    version,
+    generatedService(res)?.current_service_version
+  );
+  const currentVersionEntry = serviceVersions.find(
+    (item) => item.name === selectedVersion
+  );
+
   // handleToggleVersionPublic is handleTogglePublic's per-version sibling: it
   // flips is_public for just the currently viewed version (the same one
   // VersionSelector shows/selects), independent of the service-level Public
@@ -1178,688 +1340,674 @@ export default function IntegrationDetail() {
     }
   }
 
-  if (loading && !res)
+  return {
+    toast, loaderData, paramId, provider, id, isAuth, res, serviceId,
+    serviceVersions, currentVersionEntry,
+    workspaceServiceActive, setWorkspaceServiceActive, drift, loading, error,
+    driftAction, showShareMenu, setShowShareMenu, shareMenuRef,
+    showVisibilityMenu, setShowVisibilityMenu, visibilityMenuRef, savingDrift,
+    selectedEndpoint, setSelectedEndpoint, version, resourceVersions,
+    setResourceVersions, expandedResources, integrationsByResource,
+    loadingResources, hasMoreResources, toggleResource, loadMoreEndpoints,
+    activeTab, isClientFetchingTab, handleTabChange, syncWebhookParams,
+    webhookEvents, webhookPage, setWebhookPage, webhookTotal, webhookLimit,
+    webhookFilterEvent, setWebhookFilterEvent, webhookStartDate,
+    setWebhookStartDate, webhookEndDate, setWebhookEndDate, webhookAnalytics,
+    executionEvents, executionTotal, executionPage, setExecutionPage,
+    executionLimit, executionTransport, setExecutionTransport, executionStatus,
+    setExecutionStatus, executionAnalytics, dependentSDKs, dependentMCPs,
+    searchQuery, setSearchQuery, isSearching, searchResults, hasMoreSearch,
+    handleSearch, loadMoreSearchResults, handleClearSearch,
+    notificationServiceRefs, markNotificationRead, dismissNotification,
+    serviceNotifications, importProgress, loadWebhookData, handleDismiss,
+    handleApply, handleToggleDriftWatch, handleTogglePublic,
+    handleToggleVersionPublic, handleClearImportWarnings,
+  };
+}
+
+type DetailModel = ReturnType<typeof useIntegrationDetailModel>;
+
+const DetailContext = createContext<DetailModel | null>(null);
+
+function useDetail(): DetailModel {
+  const detail = useContext(DetailContext);
+  if (!detail) throw new Error("Integration detail context is unavailable");
+  return detail;
+}
+
+export default function IntegrationDetail() {
+  const detail = useIntegrationDetailModel();
+  return (
+    <DetailContext.Provider value={detail}>
+      <DetailState />
+    </DetailContext.Provider>
+  );
+}
+
+function DetailState() {
+  const { loading, error, res } = useDetail();
+  if (loading && !res) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center min-h-[400px] text-slate-400">
-        <Loader2 className="w-8 h-8 text-blue-500 animate-spin mb-4" />
-        <p className="animate-pulse font-medium text-slate-500">
-          Loading service details...
-        </p>
+      <div className="flex min-h-[400px] flex-1 flex-col items-center justify-center text-slate-400">
+        <Loader2 className="mb-4 h-8 w-8 animate-spin text-blue-500" />
+        <p className="animate-pulse font-medium text-slate-500">Loading service details...</p>
       </div>
     );
+  }
   if (error && !res) return <p className="text-sm text-red-600">{error}</p>;
   if (!res) return null;
+  return <LoadedDetail />;
+}
 
-  const srv = res.service;
-  const canManage = canManageService(isAuth, srv.is_owner, paramId, provider);
-  const serviceVersions =
-    res.serviceVersions ||
-    loaderData?.initialServiceData?.serviceVersions ||
-    [];
-  // currentVersionEntry backs the selected version state: the same
-  // "currently viewed version" resolution WorkspaceConnectionProfileSection
-  // already uses below (URL ?version= param, falling back to the service's
-  // default version).
-  const currentVersionEntry = serviceVersions.find(
-    (v) => v.name === (version || srv.current_service_version)
-  );
-  const integrations = res.integrations || [];
-  const totalEndpoints =
-    searchResults !== null
-      ? searchResults.length
-      : srv.resources?.reduce(
-          (sum: number, r) => sum + (r.endpointCount || 0),
-          0
-        ) || 0;
-  const hasDrift = integrations.some((i) => i.status === "drifted");
-  const importWarnings = srv.import_warnings || [];
-  const overallStatus = hasDrift ? "drifted" : "active";
-  const statusColor =
-    {
-      active: "bg-green-50 text-green-700",
-      drifted: "bg-yellow-50 text-yellow-700",
-      updating: "bg-blue-50 text-blue-700",
-    }[overallStatus] || "bg-slate-50 text-slate-700";
+function LoadedDetail() {
+  const detail = useDetail();
+  const srv = detail.res!.service;
+  const integrations = detail.res!.integrations ?? [];
+  const overallStatus = serviceStatus(integrations);
+  const importWarnings = srv.import_warnings ?? [];
+  const totalEndpoints = endpointTotal(detail.searchResults, srv);
 
   return (
     <div className="min-w-0 space-y-5 sm:space-y-6">
-      {/* Header */}
-      <div className="flex min-w-0 flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-3 mb-1">
-            <Link
-              to="/integrations"
-              className="text-sm text-slate-400 hover:text-slate-600"
-            >
-              Back to services
-            </Link>
-          </div>
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <h1 className="text-xl font-semibold text-slate-900">
-              {formatServiceName(srv.name)}
-            </h1>
-            <VersionSelector
-              currentVersionTag={srv.current_service_version}
-              versions={serviceVersions}
-            />
-            {currentVersionEntry?.status === "deprecated" ? (
-              <Badge label="DEPRECATED VERSION" color="bg-amber-50 text-amber-700" />
-            ) : currentVersionEntry?.status === "draft" ? (
-              <Badge label="DRAFT VERSION" color="bg-slate-100 text-slate-600" />
-            ) : currentVersionEntry?.status === "public" ||
-              currentVersionEntry?.is_public ? (
-              <Badge label="PUBLIC VERSION" color="bg-slate-100 text-slate-600" />
-            ) : null}
-            {overallStatus !== "active" && (
-              <Badge label={overallStatus} color={statusColor} />
-            )}
-            <ServiceHeaderWarningIcon warningCount={importWarnings.length} />
-            <div className="relative" ref={shareMenuRef}>
-              <button
-                data-track="open_share_menu"
-                onClick={() => setShowShareMenu(!showShareMenu)}
-                className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-md transition-colors"
-                title="Share Integration"
-              >
-                <Share2 className="w-4 h-4" />
-              </button>
-              {showShareMenu && (
-                <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-slate-200 rounded-lg shadow-lg z-50 py-1 overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200 sm:left-0 sm:right-auto">
-                  <button
-                    data-track="share_on_twitter"
-                    onClick={() => {
-                      const url = window.location.href;
-                      window.open(
-                        `https://twitter.com/intent/tweet?url=${encodeURIComponent(
-                          url
-                        )}&text=${encodeURIComponent(
-                          `Check out the ${srv.name} integration on Fused!`
-                        )}`,
-                        "_blank"
-                      );
-                      setShowShareMenu(false);
-                    }}
-                    className="w-full px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 flex items-center gap-2"
-                  >
-                    <MessageSquare className="w-4 h-4 text-sky-500" />
-                    Share on Twitter
-                  </button>
-                  <button
-                    data-track="share_on_linkedin"
-                    onClick={() => {
-                      const url = window.location.href;
-                      window.open(
-                        `https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent(
-                          url
-                        )}`,
-                        "_blank"
-                      );
-                      setShowShareMenu(false);
-                    }}
-                    className="w-full px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 flex items-center gap-2"
-                  >
-                    <Briefcase className="w-4 h-4 text-blue-600" />
-                    Share on LinkedIn
-                  </button>
-                  <button
-                    data-track="copy_integration_link"
-                    onClick={() => {
-                      navigator.clipboard.writeText(window.location.href);
-                      toast.success("Link copied to clipboard");
-                      setShowShareMenu(false);
-                    }}
-                    className="w-full px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 flex items-center gap-2 border-t border-slate-100 mt-1"
-                  >
-                    <Copy className="w-4 h-4 text-slate-400" />
-                    Copy Link
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-          {(srv.provider || srv.canonical_ref) && (
-            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-sm text-slate-500">
-              {srv.provider && <span className="break-words">Provider: {srv.provider.name}</span>}
-              {srv.provider && srv.canonical_ref && <span>·</span>}
-              {srv.canonical_ref && <CopyableCanonicalRef text={srv.canonical_ref} />}
-            </div>
-          )}
-          <ServerDisplay srv={srv} isAuth={false} />
-        </div>
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 xl:justify-end">
-          {canManage ? (
-            <div className="relative" ref={visibilityMenuRef}>
-              <button
-                type="button"
-                aria-expanded={showVisibilityMenu}
-                aria-haspopup="dialog"
-                onClick={() => setShowVisibilityMenu((open) => !open)}
-                className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:border-slate-300 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1"
-              >
-                {srv.is_public ? (
-                  <Globe2 className="h-4 w-4 text-blue-600" />
-                ) : (
-                  <Lock className="h-4 w-4 text-slate-500" />
-                )}
-                {srv.is_public ? "Public service" : "Private service"}
-                <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
-              </button>
-              {showVisibilityMenu && (
-                <div
-                  role="dialog"
-                  aria-label="Service visibility"
-                  className="absolute left-0 top-full z-50 mt-2 w-[min(22rem,calc(100vw-2rem))] rounded-md border border-slate-200 bg-white p-4 shadow-xl xl:left-auto xl:right-0"
-                >
-                  <h2 className="text-sm font-semibold text-slate-900">Visibility</h2>
-                  <div className="mt-3 divide-y divide-slate-100">
-                    <div className="flex items-start justify-between gap-4 pb-3">
-                      <div>
-                        <p className="text-sm font-medium text-slate-800">Service</p>
-                        <p className="mt-0.5 text-xs leading-5 text-slate-500">
-                          {srv.is_public
-                            ? "Discoverable outside your workspace."
-                            : "Only your workspace can discover it."}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-label="Make service public"
-                        aria-checked={!!srv.is_public}
-                        onClick={handleTogglePublic}
-                        className={`relative mt-0.5 inline-flex h-5 w-9 shrink-0 rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
-                          srv.is_public ? "bg-slate-900" : "bg-slate-300"
-                        }`}
-                      >
-                        <span
-                          className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
-                            srv.is_public ? "translate-x-4" : "translate-x-0.5"
-                          }`}
-                        />
-                      </button>
-                    </div>
-                    {currentVersionEntry && (
-                      <div className="flex items-start justify-between gap-4 pt-3">
-                        <div>
-                          <p className="text-sm font-medium text-slate-800">Consumer access</p>
-                          <p className="mt-0.5 text-xs leading-5 text-slate-500">
-                            {currentVersionEntry.is_public
-                              ? "Available when the service is public."
-                              : "This version is held back from consumers."}
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-label="Allow consumer access to this version"
-                          aria-checked={!!currentVersionEntry.is_public}
-                          onClick={handleToggleVersionPublic}
-                          className={`relative mt-0.5 inline-flex h-5 w-9 shrink-0 rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
-                            currentVersionEntry.is_public
-                              ? "bg-slate-900"
-                              : "bg-slate-300"
-                          }`}
-                        >
-                          <span
-                            className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
-                              currentVersionEntry.is_public
-                                ? "translate-x-4"
-                                : "translate-x-0.5"
-                            }`}
-                          />
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          ) : srv.is_public ? (
-            <Badge label="PUBLIC SERVICE" color="bg-blue-50 text-blue-700" />
-          ) : (
-            <Badge label="PRIVATE SERVICE" color="bg-slate-100 text-slate-600" />
-          )}
-          {canManage && (
-            <div className="flex flex-col items-start group relative">
-              <label
-                className={`flex items-center gap-2 text-sm transition-colors ${
-                  srv.source_url === "uploaded://spec"
-                    ? "text-slate-400 cursor-not-allowed"
-                    : "text-slate-700 cursor-pointer hover:text-slate-900"
-                }`}
-              >
-                <input
-                  type="checkbox"
-                  checked={!!srv.watch_for_drift}
-                  onChange={handleToggleDriftWatch}
-                  disabled={savingDrift || srv.source_url === "uploaded://spec"}
-                  className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 disabled:opacity-50"
-                />
-                Watch for Drift
-              </label>
-              {srv.source_url === "uploaded://spec" && (
-                <div className="absolute top-full mt-1 hidden group-hover:block z-10 w-48 bg-slate-800 text-white text-xs rounded p-2 shadow-lg">
-                  We can't monitor this for changes. To enable drift detection,
-                  provide a URL.
-                </div>
-              )}
-            </div>
-          )}
-          {isAuth && workspaceServiceActive === false && (
-            <AddToWorkspaceButton
-              serviceId={srv.id}
-              serviceName={srv.name}
-              versionTag={srv.current_service_version}
-              onAdded={() => setWorkspaceServiceActive(true)}
-            />
-          )}
-        </div>
-      </div>
-
-      <div className="flex gap-4 mb-4 text-xs">
-        {srv.import_method && canManage && (
-          <span className="bg-slate-100 text-slate-600 px-2 py-1 rounded-md font-medium border border-slate-200 uppercase tracking-wider">
-            {srv.import_method === "openapi"
-              ? "Imported via OpenAPI"
-              : "Imported via Docs"}
-          </span>
-        )}
-      </div>
-
-      {srv.description && (
-        <p className="text-sm text-slate-600">{srv.description}</p>
-      )}
-
-      <ImportWarningPanel
-        warnings={importWarnings}
-        onClear={handleClearImportWarnings}
+      <DetailHeader
+        srv={srv}
+        overallStatus={overallStatus}
+        importWarnings={importWarnings}
       />
+      <DetailNotices srv={srv} importWarnings={importWarnings} />
+      <ServiceConfiguration srv={srv} />
+      <WebhookConfiguration srv={srv} />
+      <ConnectionProfile srv={srv} />
+      <DetailTabs srv={srv} totalEndpoints={totalEndpoints} />
+      <ServiceMetadata srv={srv} />
+      <SelectedEndpointSidebar srv={srv} />
+    </div>
+  );
+}
 
-      {isAuth && serviceNotifications.length > 0 && (
-        <NotificationBanner
-          items={serviceNotifications}
-          serviceRefs={notificationServiceRefs}
-          onMarkRead={markNotificationRead}
-          onDismiss={dismissNotification}
-        />
-      )}
-
-      {importProgress && (
-        <div
-          className={`border rounded-lg px-4 py-3 flex items-start gap-3 ${
-            importProgress.error
-              ? "bg-red-50 border-red-200 text-red-700"
-              : importProgress.active
-              ? "bg-blue-50 border-blue-200 text-blue-800"
-              : "bg-green-50 border-green-200 text-green-700"
-          }`}
-        >
-          {importProgress.error ? (
-            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
-          ) : importProgress.active ? (
-            <Loader2 className="w-4 h-4 mt-0.5 shrink-0 animate-spin" />
-          ) : (
-            <Check className="w-4 h-4 mt-0.5 shrink-0" />
-          )}
-          <div>
-            <p className="text-sm font-medium">
-              {importProgress.active
-                ? "Still Extracting"
-                : importProgress.error
-                ? "Extraction Failed"
-                : "Extraction Complete"}
-            </p>
-            <p className="text-sm opacity-90">
-              {importProgress.error || importProgress.status}
-            </p>
-          </div>
+function DetailHeader({
+  srv,
+  overallStatus,
+  importWarnings,
+}: {
+  srv: Service;
+  overallStatus: string;
+  importWarnings: NonNullable<Service["import_warnings"]>;
+}) {
+  const { serviceVersions, currentVersionEntry } = useDetail();
+  return (
+    <div className="flex min-w-0 flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+      <div className="min-w-0 flex-1">
+        <div className="mb-1 flex items-center gap-3">
+          <Link to="/integrations" className="text-sm text-slate-400 hover:text-slate-600">
+            Back to services
+          </Link>
         </div>
-      )}
-      <section className="bg-white border border-slate-200 rounded-lg p-4 sm:p-5">
-        <h2 className="text-sm font-semibold text-slate-900 mb-4">
-          Service configuration
-        </h2>
-        <dl className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
-          {/* Base URL */}
-          <details className={`group bg-slate-50 border border-slate-100 rounded-lg p-3 ${srv.servers && srv.servers.length > 1 ? "cursor-pointer hover:bg-slate-100 transition-colors" : ""}`}>
-            <summary className="list-none flex items-start justify-between outline-none">
-              <div>
-                <dt className="text-xs text-slate-500">Base URL</dt>
-                <dd className="mt-1 font-mono text-xs break-all text-slate-800">
-                  {srv.base_url || (srv.servers?.[0]?.url) || "Not declared"}
-                </dd>
-              </div>
-              {srv.servers && srv.servers.length > 1 && (
-                <ChevronDown className="w-4 h-4 text-slate-400 mt-1 transition-transform group-open:rotate-180 shrink-0" />
-              )}
-            </summary>
-            {srv.servers && srv.servers.length > 1 && (
-              <div className="mt-3 pt-3 border-t border-slate-200 text-xs text-slate-700 space-y-2">
-                {srv.servers.map((server, i: number) => (
-                  <div key={i}>
-                    <div className="font-mono text-slate-800 break-all">{server.url}</div>
-                    <div className="flex gap-2 text-slate-500 mt-0.5">
-                      {server.environment && <span>{server.environment}</span>}
-                      {server.is_default && <span className="bg-blue-100 text-blue-700 px-1 rounded text-[10px] uppercase font-bold">Default</span>}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </details>
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <h1 className="text-xl font-semibold text-slate-900">{formatServiceName(srv.name)}</h1>
+          <VersionSelector currentVersionTag={srv.current_service_version} versions={serviceVersions} />
+          <VersionStatusBadge version={currentVersionEntry} />
+          <DriftStatusBadge status={overallStatus} />
+          <ServiceHeaderWarningIcon warningCount={importWarnings.length} />
+          <ShareControl serviceName={srv.name} />
+        </div>
+        <ProviderIdentity srv={srv} />
+        <ServerDisplay srv={srv} isAuth={false} />
+      </div>
+      <HeaderActions srv={srv} />
+    </div>
+  );
+}
 
-          {/* Authentication */}
-          <details className={`group bg-slate-50 border border-slate-100 rounded-lg p-3 ${srv.auth_configs && srv.auth_configs.length > 0 ? "cursor-pointer hover:bg-slate-100 transition-colors" : ""}`}>
-            <summary className="list-none flex items-start justify-between outline-none">
-              <div>
-                <dt className="text-xs text-slate-500">Authentication</dt>
-                <dd className="mt-1 text-slate-800">
-                  {srv.auth_configs?.map((auth) => auth.type).join(", ") || "None"}
-                </dd>
-              </div>
-              {srv.auth_configs && srv.auth_configs.length > 0 && (
-                <ChevronDown className="w-4 h-4 text-slate-400 mt-1 transition-transform group-open:rotate-180 shrink-0" />
-              )}
-            </summary>
-            {srv.auth_configs && srv.auth_configs.length > 0 && (
-              <div className="mt-3 pt-3 border-t border-slate-200 text-xs text-slate-700 space-y-3">
-                {srv.auth_configs.map((auth, i: number) => (
-                  <div key={i} className={i > 0 ? "pt-3 border-t border-slate-200" : ""}>
-                    {auth.type && <div className="flex justify-between"><span className="text-slate-500">Type</span><span className="font-medium text-slate-900">{auth.type}</span></div>}
-                    {auth.flow && <div className="flex justify-between mt-1"><span className="text-slate-500">Flow</span><span className="font-medium text-slate-900">{auth.flow}</span></div>}
-                    {auth.scheme && <div className="flex justify-between mt-1"><span className="text-slate-500">Scheme</span><span className="font-medium text-slate-900">{auth.scheme}</span></div>}
-                    {auth.location && <div className="flex justify-between mt-1"><span className="text-slate-500">Location</span><span className="font-medium text-slate-900">{auth.location}</span></div>}
-                    {auth.key_name && <div className="flex justify-between mt-1"><span className="text-slate-500">Key</span><span className="font-mono text-slate-900">{auth.key_name}</span></div>}
-                    {auth.scopes && auth.scopes.length > 0 && (
-                      <div className="mt-2 min-w-0">
-                        <span className="mb-1 block text-slate-500">
-                          Scopes ({auth.scopes.length})
-                        </span>
-                        <div className="max-h-40 overflow-y-auto overscroll-contain rounded-md border border-slate-200 bg-white [scrollbar-gutter:stable]">
-                          <ul className="divide-y divide-slate-100">
-                            {auth.scopes.map((scope: string, scopeIndex: number) => (
-                              <li
-                                key={`${scope}-${scopeIndex}`}
-                                className="break-words px-2 py-1.5 font-mono text-[11px] leading-4 text-slate-700"
-                              >
-                                {scope}
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </details>
+function VersionStatusBadge({ version }: { version?: ServiceVersion }) {
+  if (version?.status === "deprecated") {
+    return <Badge label="DEPRECATED VERSION" color="bg-amber-50 text-amber-700" />;
+  }
+  if (version?.status === "draft") {
+    return <Badge label="DRAFT VERSION" color="bg-slate-100 text-slate-600" />;
+  }
+  if (version?.status === "public" || version?.is_public) {
+    return <Badge label="PUBLIC VERSION" color="bg-slate-100 text-slate-600" />;
+  }
+  return null;
+}
 
-          {/* Rate limit */}
-          <details className={`group bg-slate-50 border border-slate-100 rounded-lg p-3 ${srv.rate_limit ? "cursor-pointer hover:bg-slate-100 transition-colors" : ""}`}>
-            <summary className="list-none flex items-start justify-between outline-none">
-              <div>
-                <dt className="text-xs text-slate-500">Rate limit</dt>
-                <dd className="mt-1 text-slate-800">
-                  {rateLimitSummary(srv.rate_limit)}
-                </dd>
-              </div>
-              {srv.rate_limit && (
-                <ChevronDown className="w-4 h-4 text-slate-400 mt-1 transition-transform group-open:rotate-180 shrink-0" />
-              )}
-            </summary>
-            {srv.rate_limit && (
-              <div className="mt-3 space-y-2 border-t border-slate-200 pt-3 text-xs text-slate-700">
-                {srv.rate_limit.policies.map((policy) => (
-                  <div key={policy.name} className="rounded border border-slate-200 bg-white p-2">
-                    <div className="flex justify-between gap-3"><span className="font-medium text-slate-900">{policy.name}</span><span>{policy.unit} · {policy.scope}</span></div>
-                    <div className="mt-1 flex justify-between gap-3"><span className="text-slate-500">Algorithm</span><span>{policy.algorithm}</span></div>
-                    <div className="flex justify-between gap-3"><span className="text-slate-500">Default cost</span><span>{policy.default_cost}</span></div>
-                    {policy.fixed_window && (
-                      <div className="flex justify-between gap-3"><span className="text-slate-500">Window</span><span>{policy.fixed_window.limit} / {policy.fixed_window.duration_ms} ms</span></div>
-                    )}
-                    {policy.token_bucket && (
-                      <div className="flex justify-between gap-3"><span className="text-slate-500">Bucket</span><span>{policy.token_bucket.capacity}; +{policy.token_bucket.refill_units} / {policy.token_bucket.refill_interval_ms} ms</span></div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </details>
+function DriftStatusBadge({ status }: { status: string }) {
+  if (status === "active") return null;
+  return <Badge label={status} color={serviceStatusColor(status)} />;
+}
 
-          {/* Retry */}
-          <details className={`group bg-slate-50 border border-slate-100 rounded-lg p-3 ${srv.retry_config ? "cursor-pointer hover:bg-slate-100 transition-colors" : ""}`}>
-            <summary className="list-none flex items-start justify-between outline-none">
-              <div>
-                <dt className="text-xs text-slate-500">Retry</dt>
-                <dd className="mt-1 text-slate-800">
-                  {srv.retry_config?.strategy || "Not declared"}
-                </dd>
-              </div>
-              {srv.retry_config && (
-                <ChevronDown className="w-4 h-4 text-slate-400 mt-1 transition-transform group-open:rotate-180 shrink-0" />
-              )}
-            </summary>
-            {srv.retry_config && (
-              <div className="mt-3 pt-3 border-t border-slate-200 text-xs text-slate-700 space-y-1">
-                <div className="flex justify-between"><span className="text-slate-500">Strategy</span><span className="font-medium text-slate-900">{srv.retry_config.strategy}</span></div>
-                {srv.retry_config.max_retries != null && (
-                  <div className="flex justify-between"><span className="text-slate-500">Max retries</span><span className="font-medium text-slate-900">{srv.retry_config.max_retries}</span></div>
-                )}
-                {srv.retry_config.backoff_ms != null && (
-                  <div className="flex justify-between"><span className="text-slate-500">Backoff</span><span className="font-medium text-slate-900">{srv.retry_config.backoff_ms}ms</span></div>
-                )}
-              </div>
-            )}
-          </details>
-        </dl>
-      </section>
-
-      {srv.incoming_webhook_config && (
-        <section className="bg-white border border-slate-200 rounded-lg p-4 mt-6 mb-6 sm:p-5">
-          <h2 className="text-sm font-semibold text-slate-900 mb-4">
-            Webhook configuration
-          </h2>
-          <dl className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
-            {/* Webhook verification */}
-            <details className={`group bg-slate-50 border border-slate-100 rounded-lg p-3 ${srv.incoming_webhook_config ? "cursor-pointer hover:bg-slate-100 transition-colors" : ""}`}>
-              <summary className="list-none flex items-start justify-between outline-none">
-                <div>
-                  <dt className="text-xs text-slate-500">Webhook verification</dt>
-                  <dd className="mt-1 text-slate-800">
-                    {srv.incoming_webhook_config.auth_type || "None"}
-                  </dd>
-                </div>
-                {srv.incoming_webhook_config && (
-                  <ChevronDown className="w-4 h-4 text-slate-400 mt-1 transition-transform group-open:rotate-180 shrink-0" />
-                )}
-              </summary>
-              {srv.incoming_webhook_config && (
-                <div className="mt-3 pt-3 border-t border-slate-200 text-xs text-slate-700 space-y-1">
-                  {srv.incoming_webhook_config.auth_type && <div className="flex justify-between"><span className="text-slate-500">Auth type</span><span className="font-medium text-slate-900">{srv.incoming_webhook_config.auth_type}</span></div>}
-                  {srv.incoming_webhook_config.auth_location && <div className="flex justify-between"><span className="text-slate-500">Location</span><span className="font-medium text-slate-900">{srv.incoming_webhook_config.auth_location}</span></div>}
-                  {srv.incoming_webhook_config.auth_key_name && <div className="flex justify-between"><span className="text-slate-500">Key name</span><span className="font-mono text-slate-900">{srv.incoming_webhook_config.auth_key_name}</span></div>}
-                  {srv.incoming_webhook_config.signature_header && <div className="flex justify-between"><span className="text-slate-500">Sig. header</span><span className="font-mono text-slate-900">{srv.incoming_webhook_config.signature_header}</span></div>}
-                </div>
-              )}
-            </details>
-          </dl>
-        </section>
-      )}
-
-
-      {serviceId && (
-        <WorkspaceConnectionProfileSection
-          serviceId={serviceId}
-          serviceVersionId={
-            serviceVersions.find(
-              (item) => item.name === (version || srv.current_service_version)
-            )?.id
-          }
-          serviceVersion={version || srv.current_service_version || ""}
-          authConfigs={srv.auth_configs || []}
-          isOwner={canManage}
-        />
-      )}
-
-      {/* Tabs */}
-      <div className="flex max-w-full overflow-x-auto whitespace-nowrap rounded-lg bg-slate-100/80 p-1 mb-6 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        <button
-          data-track="view_endpoints_tab"
-          onClick={() => handleTabChange("endpoints")}
-          className={`shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-all cursor-pointer sm:px-4 sm:text-sm ${
-            activeTab === "endpoints"
-              ? "bg-white text-slate-900 shadow-sm"
-              : "text-slate-500 hover:text-slate-700"
-          }`}
-        >
-          Operations ({totalEndpoints})
-        </button>
-        <button
-          data-track="view_webhooks_tab"
-          onClick={() => handleTabChange("webhooks")}
-          className={`shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-all cursor-pointer sm:px-4 sm:text-sm ${
-            activeTab === "webhooks"
-              ? "bg-white text-slate-900 shadow-sm"
-              : "text-slate-500 hover:text-slate-700"
-          }`}
-        >
-          Webhooks ({srv.webhook_count ?? 0})
-        </button>
-        {isAuth && workspaceServiceActive === true && (
+function ShareControl({ serviceName }: { serviceName: string }) {
+  const { toast, showShareMenu, setShowShareMenu, shareMenuRef } = useDetail();
+  return (
+    <div className="relative" ref={shareMenuRef}>
+      <button
+        data-track="open_share_menu"
+        onClick={() => setShowShareMenu(!showShareMenu)}
+        className="rounded-md p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
+        title="Share Integration"
+      >
+        <Share2 className="h-4 w-4" />
+      </button>
+      {showShareMenu && (
+        <div className="absolute right-0 top-full z-50 mt-1 w-48 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg sm:left-0 sm:right-auto">
           <button
-            data-track="view_activity_tab"
-            onClick={() => handleTabChange("analytics")}
-            className={`shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-all cursor-pointer sm:px-4 sm:text-sm ${
-              activeTab === "analytics"
-                ? "bg-white text-slate-900 shadow-sm"
-                : "text-slate-500 hover:text-slate-700"
-            }`}
+            data-track="share_on_twitter"
+            onClick={() => {
+              window.open(`https://twitter.com/intent/tweet?url=${encodeURIComponent(window.location.href)}&text=${encodeURIComponent(`Check out the ${serviceName} integration on Fused!`)}`, "_blank");
+              setShowShareMenu(false);
+            }}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
           >
-            Activity
+            <MessageSquare className="h-4 w-4 text-sky-500" /> Share on Twitter
           </button>
-        )}
-      </div>
-
-      {isClientFetchingTab && (
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-10 flex flex-col items-center justify-center bg-white/80 backdrop-blur-sm p-4 rounded-lg shadow-sm border border-slate-100">
-          <Loader2 className="w-6 h-6 text-blue-500 animate-spin mb-2" />
-          <p className="text-xs font-medium text-slate-500">Updating...</p>
+          <button
+            data-track="share_on_linkedin"
+            onClick={() => {
+              window.open(`https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent(window.location.href)}`, "_blank");
+              setShowShareMenu(false);
+            }}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
+          >
+            <Briefcase className="h-4 w-4 text-blue-600" /> Share on LinkedIn
+          </button>
+          <button
+            data-track="copy_integration_link"
+            onClick={() => {
+              navigator.clipboard.writeText(window.location.href);
+              toast.success("Link copied to clipboard");
+              setShowShareMenu(false);
+            }}
+            className="mt-1 flex w-full items-center gap-2 border-t border-slate-100 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
+          >
+            <Copy className="h-4 w-4 text-slate-400" /> Copy Link
+          </button>
         </div>
-      )}
-
-      <div className="relative">
-        <>
-          {/* Endpoints Tab */}
-          {activeTab === "endpoints" && (
-            <EndpointsTab
-              res={res}
-              searchQuery={searchQuery}
-              setSearchQuery={setSearchQuery}
-              searchResults={searchResults}
-              isSearching={isSearching}
-              handleSearch={handleSearch}
-              handleClearSearch={handleClearSearch}
-              resourceVersions={resourceVersions}
-              setResourceVersions={setResourceVersions}
-              expandedResources={expandedResources}
-              integrationsByResource={integrationsByResource}
-              loadingResources={loadingResources}
-              toggleResource={toggleResource}
-              hasMoreResources={hasMoreResources}
-              loadMoreEndpoints={loadMoreEndpoints}
-              hasMoreSearch={hasMoreSearch}
-              loadMoreSearchResults={loadMoreSearchResults}
-              selectedEndpoint={selectedEndpoint}
-              setSelectedEndpoint={setSelectedEndpoint}
-            />
-          )}
-
-          {/* Webhooks Tab */}
-          {activeTab === "webhooks" && (
-            <WebhooksTab srv={srv} setSelectedEndpoint={setSelectedEndpoint} />
-          )}
-
-          {/* Activity Tab */}
-          {activeTab === "analytics" && (
-            <ActivityTab
-              res={res}
-              executionEvents={executionEvents}
-              executionTotal={executionTotal}
-              executionPage={executionPage}
-              setExecutionPage={setExecutionPage}
-              executionLimit={executionLimit}
-              executionTransport={executionTransport}
-              setExecutionTransport={(transport) => {
-                setExecutionPage(1);
-                setExecutionTransport(transport);
-              }}
-              executionStatus={executionStatus}
-              setExecutionStatus={(status) => {
-                setExecutionPage(1);
-                setExecutionStatus(status);
-              }}
-              executionAnalytics={executionAnalytics}
-              webhookEvents={webhookEvents}
-              webhookTotal={webhookTotal}
-              webhookPage={webhookPage}
-              setWebhookPage={(page) => {
-                const nextPage =
-                  typeof page === "function" ? page(webhookPage) : page;
-                setWebhookPage(nextPage);
-                syncWebhookParams({ page: nextPage });
-              }}
-              webhookLimit={webhookLimit}
-              webhookFilterEvent={webhookFilterEvent}
-              setWebhookFilterEvent={setWebhookFilterEvent}
-              webhookStartDate={webhookStartDate}
-              setWebhookStartDate={(date) => {
-                setWebhookStartDate(date);
-                syncWebhookParams({ startDate: date });
-              }}
-              webhookEndDate={webhookEndDate}
-              setWebhookEndDate={(date) => {
-                setWebhookEndDate(date);
-                syncWebhookParams({ endDate: date });
-              }}
-              webhookAnalytics={webhookAnalytics}
-              loadWebhookData={loadWebhookData}
-              dependentSDKs={dependentSDKs}
-              dependentMCPs={dependentMCPs}
-            />
-          )}
-        </>
-      </div>
-
-      {/* Metadata */}
-      <div className="text-xs text-slate-400 flex flex-col sm:flex-row sm:items-center sm:flex-wrap gap-2 sm:gap-6 border-t border-slate-100 pt-6 mt-8">
-        <span suppressHydrationWarning>
-          Created {new Date(srv.created_at).toLocaleString()}
-        </span>
-        <span suppressHydrationWarning>
-          Updated {new Date(srv.updated_at).toLocaleString()}
-        </span>
-        <span className="font-mono break-all">
-          Source: {srv.source_url || "N/A"}
-        </span>
-      </div>
-
-      {/* Side Panel for Endpoint Details */}
-      {selectedEndpoint && (
-        <EndpointDetailsSidebar
-          selectedEndpoint={selectedEndpoint}
-          setSelectedEndpoint={setSelectedEndpoint}
-          srv={srv}
-          drift={drift}
-          driftAction={driftAction}
-          handleDismiss={handleDismiss}
-          handleApply={handleApply}
-        />
       )}
     </div>
   );
 }
-// To be moved to top
+
+function ProviderIdentity({ srv }: { srv: Service }) {
+  if (!srv.provider && !srv.canonical_ref) return null;
+  return (
+    <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-sm text-slate-500">
+      {srv.provider && <span className="break-words">Provider: {srv.provider.name}</span>}
+      {srv.provider && srv.canonical_ref && <span>·</span>}
+      {srv.canonical_ref && <CopyableCanonicalRef text={srv.canonical_ref} />}
+    </div>
+  );
+}
+
+function HeaderActions({ srv }: { srv: Service }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 xl:justify-end">
+      <VisibilityControl srv={srv} />
+      <DriftWatchControl srv={srv} />
+      <WorkspaceAddControl srv={srv} />
+    </div>
+  );
+}
+
+function VisibilityControl({ srv }: { srv: Service }) {
+  const detail = useDetail();
+  const canManage = canManageService(detail.isAuth, srv.is_owner, detail.paramId, detail.provider);
+  if (!canManage) {
+    return srv.is_public
+      ? <Badge label="PUBLIC SERVICE" color="bg-blue-50 text-blue-700" />
+      : <Badge label="PRIVATE SERVICE" color="bg-slate-100 text-slate-600" />;
+  }
+  return (
+    <div className="relative" ref={detail.visibilityMenuRef}>
+      <button
+        type="button"
+        aria-expanded={detail.showVisibilityMenu}
+        aria-haspopup="dialog"
+        onClick={() => detail.setShowVisibilityMenu((open) => !open)}
+        className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
+      >
+        {srv.is_public ? <Globe2 className="h-4 w-4 text-blue-600" /> : <Lock className="h-4 w-4 text-slate-500" />}
+        {srv.is_public ? "Public service" : "Private service"}
+        <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+      </button>
+      {detail.showVisibilityMenu && <VisibilityMenu srv={srv} />}
+    </div>
+  );
+}
+
+function VisibilitySwitch({
+  label,
+  checked,
+  onClick,
+}: {
+  label: string;
+  checked: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-label={label}
+      aria-checked={checked}
+      onClick={onClick}
+      className={`relative mt-0.5 inline-flex h-5 w-9 shrink-0 rounded-full ${checked ? "bg-slate-900" : "bg-slate-300"}`}
+    >
+      <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${checked ? "translate-x-4" : "translate-x-0.5"}`} />
+    </button>
+  );
+}
+
+function VisibilityMenu({ srv }: { srv: Service }) {
+  const { currentVersionEntry, handleTogglePublic, handleToggleVersionPublic } = useDetail();
+  return (
+    <div role="dialog" aria-label="Service visibility" className="absolute left-0 top-full z-50 mt-2 w-[min(22rem,calc(100vw-2rem))] rounded-md border border-slate-200 bg-white p-4 shadow-xl xl:left-auto xl:right-0">
+      <h2 className="text-sm font-semibold text-slate-900">Visibility</h2>
+      <div className="mt-3 divide-y divide-slate-100">
+        <div className="flex items-start justify-between gap-4 pb-3">
+          <div>
+            <p className="text-sm font-medium text-slate-800">Service</p>
+            <p className="mt-0.5 text-xs leading-5 text-slate-500">{srv.is_public ? "Discoverable outside your workspace." : "Only your workspace can discover it."}</p>
+          </div>
+          <VisibilitySwitch label="Make service public" checked={Boolean(srv.is_public)} onClick={handleTogglePublic} />
+        </div>
+        {currentVersionEntry && (
+          <div className="flex items-start justify-between gap-4 pt-3">
+            <div>
+              <p className="text-sm font-medium text-slate-800">Consumer access</p>
+              <p className="mt-0.5 text-xs leading-5 text-slate-500">{currentVersionEntry.is_public ? "Available when the service is public." : "This version is held back from consumers."}</p>
+            </div>
+            <VisibilitySwitch label="Allow consumer access to this version" checked={Boolean(currentVersionEntry.is_public)} onClick={handleToggleVersionPublic} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DriftWatchControl({ srv }: { srv: Service }) {
+  const detail = useDetail();
+  const canManage = canManageService(detail.isAuth, srv.is_owner, detail.paramId, detail.provider);
+  if (!canManage) return null;
+  const uploaded = srv.source_url === "uploaded://spec";
+  return (
+    <div className="group relative flex flex-col items-start">
+      <label className={`flex items-center gap-2 text-sm ${uploaded ? "cursor-not-allowed text-slate-400" : "cursor-pointer text-slate-700"}`}>
+        <input type="checkbox" checked={Boolean(srv.watch_for_drift)} onChange={detail.handleToggleDriftWatch} disabled={detail.savingDrift || uploaded} className="h-4 w-4 rounded border-slate-300 text-blue-600" />
+        Watch for Drift
+      </label>
+      {uploaded && <div className="absolute top-full z-10 mt-1 hidden w-48 rounded bg-slate-800 p-2 text-xs text-white group-hover:block">We can't monitor this for changes. To enable drift detection, provide a URL.</div>}
+    </div>
+  );
+}
+
+function WorkspaceAddControl({ srv }: { srv: Service }) {
+  const { isAuth, workspaceServiceActive, setWorkspaceServiceActive } = useDetail();
+  if (!isAuth || workspaceServiceActive !== false) return null;
+  return <AddToWorkspaceButton serviceId={srv.id} serviceName={srv.name} versionTag={srv.current_service_version} onAdded={() => setWorkspaceServiceActive(true)} />;
+}
+
+function DetailNotices({ srv, importWarnings }: { srv: Service; importWarnings: NonNullable<Service["import_warnings"]> }) {
+  const detail = useDetail();
+  const canManage = canManageService(detail.isAuth, srv.is_owner, detail.paramId, detail.provider);
+  return (
+    <>
+      <ImportMethodBadge method={srv.import_method} canManage={canManage} />
+      {srv.description && <p className="text-sm text-slate-600">{srv.description}</p>}
+      <ImportWarningPanel warnings={importWarnings} onClear={detail.handleClearImportWarnings} />
+      <ServiceNotificationBanner />
+      <ImportProgressPanel />
+    </>
+  );
+}
+
+function ImportMethodBadge({ method, canManage }: { method?: string; canManage: boolean }) {
+  if (!method || !canManage) return <div className="mb-4" />;
+  return (
+    <div className="mb-4 flex gap-4 text-xs">
+      <span className="rounded-md border border-slate-200 bg-slate-100 px-2 py-1 font-medium uppercase tracking-wider text-slate-600">
+        {method === "openapi" ? "Imported via OpenAPI" : "Imported via Docs"}
+      </span>
+    </div>
+  );
+}
+
+function ServiceNotificationBanner() {
+  const detail = useDetail();
+  if (!detail.isAuth || detail.serviceNotifications.length === 0) return null;
+  return <NotificationBanner items={detail.serviceNotifications} serviceRefs={detail.notificationServiceRefs} onMarkRead={detail.markNotificationRead} onDismiss={detail.dismissNotification} />;
+}
+
+function ImportProgressPanel() {
+  const { importProgress } = useDetail();
+  if (!importProgress) return null;
+  const tone = importProgress.error
+    ? "bg-red-50 border-red-200 text-red-700"
+    : importProgress.active
+      ? "bg-blue-50 border-blue-200 text-blue-800"
+      : "bg-green-50 border-green-200 text-green-700";
+  const title = importProgress.active ? "Still Extracting" : importProgress.error ? "Extraction Failed" : "Extraction Complete";
+  return (
+    <div className={`flex items-start gap-3 rounded-lg border px-4 py-3 ${tone}`}>
+      <ImportProgressIcon active={importProgress.active} error={Boolean(importProgress.error)} />
+      <div><p className="text-sm font-medium">{title}</p><p className="text-sm opacity-90">{importProgress.error || importProgress.status}</p></div>
+    </div>
+  );
+}
+
+function ImportProgressIcon({ active, error }: { active: boolean; error: boolean }) {
+  if (error) return <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />;
+  if (active) return <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin" />;
+  return <Check className="mt-0.5 h-4 w-4 shrink-0" />;
+}
+
+const configCardClass = "group rounded-lg border border-slate-100 bg-slate-50 p-3";
+
+function ServiceConfiguration({ srv }: { srv: Service }) {
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-4 sm:p-5">
+      <h2 className="mb-4 text-sm font-semibold text-slate-900">Service configuration</h2>
+      <dl className="grid gap-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
+        <ServerConfigCard srv={srv} />
+        <AuthConfigCard srv={srv} />
+        <RateLimitConfigCard srv={srv} />
+        <RetryConfigCard srv={srv} />
+      </dl>
+    </section>
+  );
+}
+
+function ServerConfigCard({ srv }: { srv: Service }) {
+  const multiple = Boolean(srv.servers && srv.servers.length > 1);
+  return (
+    <details className={`${configCardClass} ${multiple ? "cursor-pointer hover:bg-slate-100" : ""}`}>
+      <summary className="flex list-none items-start justify-between outline-none">
+        <div><dt className="text-xs text-slate-500">Base URL</dt><dd className="mt-1 break-all font-mono text-xs text-slate-800">{srv.base_url || srv.servers?.[0]?.url || "Not declared"}</dd></div>
+        {multiple && <ChevronDown className="mt-1 h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" />}
+      </summary>
+      {multiple && (
+        <div className="mt-3 space-y-2 border-t border-slate-200 pt-3 text-xs text-slate-700">
+          {srv.servers?.map((server, index) => (
+            <div key={index}>
+              <div className="break-all font-mono text-slate-800">{server.url}</div>
+              <div className="mt-0.5 flex gap-2 text-slate-500">
+                {server.environment && <span>{server.environment}</span>}
+                {server.is_default && <span className="rounded bg-blue-100 px-1 text-[10px] font-bold uppercase text-blue-700">Default</span>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </details>
+  );
+}
+
+function AuthConfigCard({ srv }: { srv: Service }) {
+  const authConfigs = srv.auth_configs ?? [];
+  const hasAuth = authConfigs.length > 0;
+  return (
+    <details className={`${configCardClass} ${hasAuth ? "cursor-pointer hover:bg-slate-100" : ""}`}>
+      <summary className="flex list-none items-start justify-between outline-none">
+        <div><dt className="text-xs text-slate-500">Authentication</dt><dd className="mt-1 text-slate-800">{authConfigs.map((auth) => auth.type).join(", ") || "None"}</dd></div>
+        {hasAuth && <ChevronDown className="mt-1 h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" />}
+      </summary>
+      {hasAuth && <AuthConfigDetails authConfigs={authConfigs} />}
+    </details>
+  );
+}
+
+function AuthConfigDetails({ authConfigs }: { authConfigs: AuthConfig[] }) {
+  return (
+    <div className="mt-3 space-y-3 border-t border-slate-200 pt-3 text-xs text-slate-700">
+      {authConfigs.map((auth, index) => (
+        <div key={index} className={index > 0 ? "border-t border-slate-200 pt-3" : ""}>
+          {auth.type && <ConfigRow label="Type" value={auth.type} />}
+          {auth.scheme && <ConfigRow label="Scheme" value={auth.scheme} />}
+          {auth.location && <ConfigRow label="Location" value={auth.location} />}
+          {auth.key_name && <ConfigRow label="Key" value={auth.key_name} mono />}
+          <OAuth2FlowDetails auth={auth} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ConfigRow({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return <div className="mt-1 flex justify-between"><span className="text-slate-500">{label}</span><span className={mono ? "font-mono text-slate-900" : "font-medium text-slate-900"}>{value}</span></div>;
+}
+
+function RateLimitConfigCard({ srv }: { srv: Service }) {
+  const rateLimit = srv.rate_limit;
+  return (
+    <details className={`${configCardClass} ${rateLimit ? "cursor-pointer hover:bg-slate-100" : ""}`}>
+      <summary className="flex list-none items-start justify-between outline-none">
+        <div><dt className="text-xs text-slate-500">Rate limit</dt><dd className="mt-1 text-slate-800">{rateLimitSummary(rateLimit)}</dd></div>
+        {rateLimit && <ChevronDown className="mt-1 h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" />}
+      </summary>
+      {rateLimit && (
+        <div className="mt-3 space-y-2 border-t border-slate-200 pt-3 text-xs text-slate-700">
+          {rateLimit.policies.map((policy) => <RateLimitPolicyCard key={policy.name} policy={policy} />)}
+        </div>
+      )}
+    </details>
+  );
+}
+
+function RateLimitPolicyCard({ policy }: { policy: NonNullable<Service["rate_limit"]>["policies"][number] }) {
+  return (
+    <div className="rounded border border-slate-200 bg-white p-2">
+      <div className="flex justify-between gap-3"><span className="font-medium text-slate-900">{policy.name}</span><span>{policy.unit} · {policy.scope}</span></div>
+      <div className="mt-1 flex justify-between gap-3"><span className="text-slate-500">Algorithm</span><span>{policy.algorithm}</span></div>
+      <div className="flex justify-between gap-3"><span className="text-slate-500">Default cost</span><span>{policy.default_cost}</span></div>
+      {policy.fixed_window && <div className="flex justify-between gap-3"><span className="text-slate-500">Window</span><span>{policy.fixed_window.limit} / {policy.fixed_window.duration_ms} ms</span></div>}
+      {policy.token_bucket && <div className="flex justify-between gap-3"><span className="text-slate-500">Bucket</span><span>{policy.token_bucket.capacity}; +{policy.token_bucket.refill_units} / {policy.token_bucket.refill_interval_ms} ms</span></div>}
+    </div>
+  );
+}
+
+function RetryConfigCard({ srv }: { srv: Service }) {
+  const retry = srv.retry_config;
+  return (
+    <details className={`${configCardClass} ${retry ? "cursor-pointer hover:bg-slate-100" : ""}`}>
+      <summary className="flex list-none items-start justify-between outline-none">
+        <div><dt className="text-xs text-slate-500">Retry</dt><dd className="mt-1 text-slate-800">{retry?.strategy || "Not declared"}</dd></div>
+        {retry && <ChevronDown className="mt-1 h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" />}
+      </summary>
+      {retry && (
+        <div className="mt-3 space-y-1 border-t border-slate-200 pt-3 text-xs text-slate-700">
+          <ConfigRow label="Strategy" value={retry.strategy || "Not declared"} />
+          {retry.max_retries != null && <ConfigRow label="Max retries" value={String(retry.max_retries)} />}
+          {retry.backoff_ms != null && <ConfigRow label="Backoff" value={`${retry.backoff_ms}ms`} />}
+        </div>
+      )}
+    </details>
+  );
+}
+
+function WebhookConfiguration({ srv }: { srv: Service }) {
+  const webhook = srv.incoming_webhook_config;
+  if (!webhook) return null;
+  return (
+    <section className="mb-6 mt-6 rounded-lg border border-slate-200 bg-white p-4 sm:p-5">
+      <h2 className="mb-4 text-sm font-semibold text-slate-900">Webhook configuration</h2>
+      <dl className="grid gap-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
+        <details className={`${configCardClass} cursor-pointer hover:bg-slate-100`}>
+          <summary className="flex list-none items-start justify-between outline-none">
+            <div><dt className="text-xs text-slate-500">Webhook verification</dt><dd className="mt-1 text-slate-800">{webhook.auth_type || "None"}</dd></div>
+            <ChevronDown className="mt-1 h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" />
+          </summary>
+          <div className="mt-3 space-y-1 border-t border-slate-200 pt-3 text-xs text-slate-700">
+            {webhook.auth_type && <ConfigRow label="Auth type" value={webhook.auth_type} />}
+            {webhook.auth_location && <ConfigRow label="Location" value={webhook.auth_location} />}
+            {webhook.auth_key_name && <ConfigRow label="Key name" value={webhook.auth_key_name} mono />}
+            {webhook.signature_header && <ConfigRow label="Sig. header" value={webhook.signature_header} mono />}
+          </div>
+        </details>
+      </dl>
+    </section>
+  );
+}
+
+function ConnectionProfile({ srv }: { srv: Service }) {
+  const { serviceId, serviceVersions, version } = useDetail();
+  if (!serviceId) return null;
+  const serviceVersion = selectedVersionName(version, srv.current_service_version);
+  const versionID = serviceVersions.find((item) => item.name === serviceVersion)?.id;
+  const detail = useDetail();
+  return <WorkspaceConnectionProfileSection serviceId={serviceId} serviceVersionId={versionID} serviceVersion={serviceVersion} authConfigs={srv.auth_configs ?? []} isOwner={canManageService(detail.isAuth, srv.is_owner, detail.paramId, detail.provider)} />;
+}
+
+function tabClass(active: boolean) {
+  return `shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-all sm:px-4 sm:text-sm ${active ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`;
+}
+
+function DetailTabs({ srv, totalEndpoints }: { srv: Service; totalEndpoints: number }) {
+  return (
+    <>
+      <TabNavigation srv={srv} totalEndpoints={totalEndpoints} />
+      <TabLoadingIndicator />
+      <div className="relative"><ActiveTabContent srv={srv} /></div>
+    </>
+  );
+}
+
+function TabNavigation({ srv, totalEndpoints }: { srv: Service; totalEndpoints: number }) {
+  const { activeTab, handleTabChange, isAuth, workspaceServiceActive } = useDetail();
+  return (
+    <div className="mb-6 flex max-w-full overflow-x-auto whitespace-nowrap rounded-lg bg-slate-100/80 p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <button data-track="view_endpoints_tab" onClick={() => handleTabChange("endpoints")} className={tabClass(activeTab === "endpoints")}>Operations ({totalEndpoints})</button>
+      <button data-track="view_webhooks_tab" onClick={() => handleTabChange("webhooks")} className={tabClass(activeTab === "webhooks")}>Webhooks ({srv.webhook_count ?? 0})</button>
+      {isAuth && workspaceServiceActive === true && (
+        <button data-track="view_activity_tab" onClick={() => handleTabChange("analytics")} className={tabClass(activeTab === "analytics")}>Activity</button>
+      )}
+    </div>
+  );
+}
+
+function TabLoadingIndicator() {
+  const { isClientFetchingTab } = useDetail();
+  if (!isClientFetchingTab) return null;
+  return (
+    <div className="absolute left-1/2 top-1/2 z-10 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center justify-center rounded-lg border border-slate-100 bg-white/80 p-4 shadow-sm backdrop-blur-sm">
+      <Loader2 className="mb-2 h-6 w-6 animate-spin text-blue-500" />
+      <p className="text-xs font-medium text-slate-500">Updating...</p>
+    </div>
+  );
+}
+
+function ActiveTabContent({ srv }: { srv: Service }) {
+  const { activeTab, setSelectedEndpoint } = useDetail();
+  if (activeTab === "endpoints") return <EndpointTabContent />;
+  if (activeTab === "webhooks") return <WebhooksTab srv={srv} setSelectedEndpoint={setSelectedEndpoint} />;
+  return <ActivityTabContent />;
+}
+
+function EndpointTabContent() {
+  const detail = useDetail();
+  return (
+    <EndpointsTab
+      res={detail.res!}
+      searchQuery={detail.searchQuery}
+      setSearchQuery={detail.setSearchQuery}
+      searchResults={detail.searchResults}
+      isSearching={detail.isSearching}
+      handleSearch={detail.handleSearch}
+      handleClearSearch={detail.handleClearSearch}
+      resourceVersions={detail.resourceVersions}
+      setResourceVersions={detail.setResourceVersions}
+      expandedResources={detail.expandedResources}
+      integrationsByResource={detail.integrationsByResource}
+      loadingResources={detail.loadingResources}
+      toggleResource={detail.toggleResource}
+      hasMoreResources={detail.hasMoreResources}
+      loadMoreEndpoints={detail.loadMoreEndpoints}
+      hasMoreSearch={detail.hasMoreSearch}
+      loadMoreSearchResults={detail.loadMoreSearchResults}
+      selectedEndpoint={detail.selectedEndpoint}
+      setSelectedEndpoint={detail.setSelectedEndpoint}
+    />
+  );
+}
+
+function nextPageValue(page: number | ((value: number) => number), current: number) {
+  return typeof page === "function" ? page(current) : page;
+}
+
+function ActivityTabContent() {
+  const detail = useDetail();
+  return (
+    <ActivityTab
+      res={detail.res!}
+      executionEvents={detail.executionEvents}
+      executionTotal={detail.executionTotal}
+      executionPage={detail.executionPage}
+      setExecutionPage={detail.setExecutionPage}
+      executionLimit={detail.executionLimit}
+      executionTransport={detail.executionTransport}
+      setExecutionTransport={(transport) => {
+        detail.setExecutionPage(1);
+        detail.setExecutionTransport(transport);
+      }}
+      executionStatus={detail.executionStatus}
+      setExecutionStatus={(status) => {
+        detail.setExecutionPage(1);
+        detail.setExecutionStatus(status);
+      }}
+      executionAnalytics={detail.executionAnalytics}
+      webhookEvents={detail.webhookEvents}
+      webhookTotal={detail.webhookTotal}
+      webhookPage={detail.webhookPage}
+      setWebhookPage={(page) => {
+        const nextPage = nextPageValue(page, detail.webhookPage);
+        detail.setWebhookPage(nextPage);
+        detail.syncWebhookParams({ page: nextPage });
+      }}
+      webhookLimit={detail.webhookLimit}
+      webhookFilterEvent={detail.webhookFilterEvent}
+      setWebhookFilterEvent={detail.setWebhookFilterEvent}
+      webhookStartDate={detail.webhookStartDate}
+      setWebhookStartDate={(date) => {
+        detail.setWebhookStartDate(date);
+        detail.syncWebhookParams({ startDate: date });
+      }}
+      webhookEndDate={detail.webhookEndDate}
+      setWebhookEndDate={(date) => {
+        detail.setWebhookEndDate(date);
+        detail.syncWebhookParams({ endDate: date });
+      }}
+      webhookAnalytics={detail.webhookAnalytics}
+      loadWebhookData={detail.loadWebhookData}
+      dependentSDKs={detail.dependentSDKs}
+      dependentMCPs={detail.dependentMCPs}
+    />
+  );
+}
+
+function ServiceMetadata({ srv }: { srv: Service }) {
+  return (
+    <div className="mt-8 flex flex-col gap-2 border-t border-slate-100 pt-6 text-xs text-slate-400 sm:flex-row sm:flex-wrap sm:items-center sm:gap-6">
+      <span suppressHydrationWarning>Created {new Date(srv.created_at).toLocaleString()}</span>
+      <span suppressHydrationWarning>Updated {new Date(srv.updated_at).toLocaleString()}</span>
+      <span className="break-all font-mono">Source: {srv.source_url || "N/A"}</span>
+    </div>
+  );
+}
+
+function SelectedEndpointSidebar({ srv }: { srv: Service }) {
+  const detail = useDetail();
+  if (!detail.selectedEndpoint) return null;
+  return (
+    <EndpointDetailsSidebar
+      selectedEndpoint={detail.selectedEndpoint}
+      setSelectedEndpoint={detail.setSelectedEndpoint}
+      srv={srv}
+      drift={detail.drift}
+      driftAction={detail.driftAction}
+      handleDismiss={detail.handleDismiss}
+      handleApply={detail.handleApply}
+    />
+  );
+}
 
 function CopyableCanonicalRef({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);

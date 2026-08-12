@@ -37,6 +37,10 @@ func (s *postgresStore) UpsertWorkspaceExecutionPolicyOverride(ctx context.Conte
 	if err != nil {
 		return nil, fmt.Errorf("marshal incoming_webhook_config: %w", err)
 	}
+	serverVariables, err := json.Marshal(override.ServerVariables)
+	if err != nil {
+		return nil, fmt.Errorf("marshal server_variables: %w", err)
+	}
 
 	conflictTarget := "(service_id) WHERE service_version_id IS NULL"
 	if override.ServiceVersionID != nil {
@@ -45,9 +49,9 @@ func (s *postgresStore) UpsertWorkspaceExecutionPolicyOverride(ctx context.Conte
 	query := fmt.Sprintf(`
 		INSERT INTO fused_workspace_execution_policies (
 			service_id, service_version_id, rate_limit, retry_config,
-			timeout_ms, pagination, event_extraction_path, incoming_webhook_config, base_url
+			timeout_ms, pagination, event_extraction_path, incoming_webhook_config, base_url, server_variables
 		)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		ON CONFLICT %s DO UPDATE SET
 			rate_limit = EXCLUDED.rate_limit,
 			retry_config = EXCLUDED.retry_config,
@@ -56,13 +60,14 @@ func (s *postgresStore) UpsertWorkspaceExecutionPolicyOverride(ctx context.Conte
 			event_extraction_path = EXCLUDED.event_extraction_path,
 			incoming_webhook_config = EXCLUDED.incoming_webhook_config,
 			base_url = EXCLUDED.base_url,
+			server_variables = EXCLUDED.server_variables,
 			updated_at = NOW()
 		RETURNING id, service_id, service_version_id, rate_limit, retry_config,
 		          timeout_ms, pagination, event_extraction_path, incoming_webhook_config,
-		          base_url, created_at, updated_at`, conflictTarget)
+		          base_url, server_variables, created_at, updated_at`, conflictTarget)
 	row := s.db.QueryRow(ctx, query, override.ServiceID, override.ServiceVersionID,
 		nullableJSON(rateLimit), nullableJSON(retryConfig), override.TimeoutMs, nullableJSON(pagination),
-		override.EventExtractionPath, nullableJSON(incomingWebhookConfig), override.BaseURL)
+		override.EventExtractionPath, nullableJSON(incomingWebhookConfig), override.BaseURL, nullableJSON(serverVariables))
 	return scanWorkspaceExecutionPolicyOverride(row)
 }
 
@@ -76,7 +81,7 @@ func (s *postgresStore) GetEffectiveWorkspaceExecutionPolicyOverride(ctx context
 	query := `
 		SELECT id, service_id, service_version_id, rate_limit, retry_config, timeout_ms,
 		       pagination, event_extraction_path, incoming_webhook_config,
-		       base_url, created_at, updated_at
+		       base_url, server_variables, created_at, updated_at
 		FROM fused_workspace_execution_policies
 		WHERE service_id = $1 AND (service_version_id = $2 OR service_version_id IS NULL)
 		ORDER BY service_version_id NULLS LAST
@@ -99,7 +104,7 @@ func (s *postgresStore) GetEffectiveWorkspaceExecutionPolicyOverrides(ctx contex
 		       policy.id, policy.service_id, policy.service_version_id,
 		       policy.rate_limit, policy.retry_config, policy.timeout_ms, policy.pagination,
 		       policy.event_extraction_path, policy.incoming_webhook_config,
-		       policy.base_url, policy.created_at, policy.updated_at
+		       policy.base_url, policy.server_variables, policy.created_at, policy.updated_at
 		FROM unnest($1::uuid[], $2::uuid[]) AS input(service_id, service_version_id)
 		JOIN LATERAL (
 			SELECT * FROM fused_workspace_execution_policies candidate
@@ -125,7 +130,7 @@ func (s *postgresStore) GetWorkspaceExecutionPolicyOverrides(ctx context.Context
 		       policy.id, policy.service_id, policy.service_version_id,
 		       policy.rate_limit, policy.retry_config, policy.timeout_ms, policy.pagination,
 		       policy.event_extraction_path, policy.incoming_webhook_config,
-		       policy.base_url, policy.created_at, policy.updated_at
+		       policy.base_url, policy.server_variables, policy.created_at, policy.updated_at
 		FROM unnest($1::uuid[], $2::uuid[]) AS input(service_id, service_version_id)
 		JOIN fused_workspace_execution_policies policy
 		  ON policy.service_id = input.service_id
@@ -157,13 +162,13 @@ func collectWorkspaceExecutionPolicyOverrides(rows workspaceExecutionPolicyRows,
 	for rows.Next() {
 		var ref WorkspaceExecutionPolicyRef
 		var override WorkspaceExecutionPolicyOverride
-		var rateLimit, retryConfig, pagination, incomingWebhookConfig []byte
+		var rateLimit, retryConfig, pagination, incomingWebhookConfig, serverVariables []byte
 		if err := rows.Scan(&ref.ServiceID, &ref.ServiceVersionID, &override.ID, &override.ServiceID, &override.ServiceVersionID,
 			&rateLimit, &retryConfig, &override.TimeoutMs, &pagination, &override.EventExtractionPath,
-			&incomingWebhookConfig, &override.BaseURL, &override.CreatedAt, &override.UpdatedAt); err != nil {
+			&incomingWebhookConfig, &override.BaseURL, &serverVariables, &override.CreatedAt, &override.UpdatedAt); err != nil {
 			return nil, err
 		}
-		if err := decodeWorkspaceExecutionPolicyJSON(&override, rateLimit, retryConfig, pagination, incomingWebhookConfig); err != nil {
+		if err := decodeWorkspaceExecutionPolicyJSON(&override, rateLimit, retryConfig, pagination, incomingWebhookConfig, serverVariables); err != nil {
 			return nil, err
 		}
 		result[ref] = &override
@@ -195,20 +200,20 @@ func nullableJSON(payload []byte) []byte {
 // by the upsert's RETURNING clause and the effective-row read.
 func scanWorkspaceExecutionPolicyOverride(row interface{ Scan(...any) error }) (*WorkspaceExecutionPolicyOverride, error) {
 	var override WorkspaceExecutionPolicyOverride
-	var rateLimit, retryConfig, pagination, incomingWebhookConfig []byte
+	var rateLimit, retryConfig, pagination, incomingWebhookConfig, serverVariables []byte
 	err := row.Scan(&override.ID, &override.ServiceID, &override.ServiceVersionID,
 		&rateLimit, &retryConfig, &override.TimeoutMs, &pagination, &override.EventExtractionPath,
-		&incomingWebhookConfig, &override.BaseURL, &override.CreatedAt, &override.UpdatedAt)
+		&incomingWebhookConfig, &override.BaseURL, &serverVariables, &override.CreatedAt, &override.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
-	if err := decodeWorkspaceExecutionPolicyJSON(&override, rateLimit, retryConfig, pagination, incomingWebhookConfig); err != nil {
+	if err := decodeWorkspaceExecutionPolicyJSON(&override, rateLimit, retryConfig, pagination, incomingWebhookConfig, serverVariables); err != nil {
 		return nil, err
 	}
 	return &override, nil
 }
 
-func decodeWorkspaceExecutionPolicyJSON(override *WorkspaceExecutionPolicyOverride, rateLimit, retryConfig, pagination, incomingWebhookConfig []byte) error {
+func decodeWorkspaceExecutionPolicyJSON(override *WorkspaceExecutionPolicyOverride, rateLimit, retryConfig, pagination, incomingWebhookConfig, serverVariables []byte) error {
 	if err := unmarshalIfPresent(rateLimit, &override.RateLimit); err != nil {
 		return fmt.Errorf("decode rate_limit: %w", err)
 	}
@@ -225,6 +230,12 @@ func decodeWorkspaceExecutionPolicyJSON(override *WorkspaceExecutionPolicyOverri
 	}
 	if err := unmarshalIfPresent(incomingWebhookConfig, &override.IncomingWebhookConfig); err != nil {
 		return fmt.Errorf("decode incoming_webhook_config: %w", err)
+	}
+	if len(serverVariables) > 0 {
+		err := json.Unmarshal(serverVariables, &override.ServerVariables)
+		if err != nil {
+			return fmt.Errorf("decode server_variables: %w", err)
+		}
 	}
 	return nil
 }

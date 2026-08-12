@@ -128,10 +128,12 @@ func (rows *webhookBatchRows) Scan(dest ...any) error {
 	*dest[3].(*string), *dest[4].(*string) = webhook.Label, webhook.Slug
 	*dest[5].(*string), *dest[6].(*string), *dest[7].(*string) = webhook.AuthType, webhook.AuthLocation, webhook.AuthKeyName
 	*dest[8].(*string), *dest[9].(*[]string), *dest[10].(*string) = webhook.SignatureHeader, webhook.VerificationHeaders, webhook.EventExtractionPath
-	*dest[11].(*string) = webhook.SecretRef
-	*dest[12].(**uuid.UUID) = webhook.SecretBucketID
-	*dest[13].(*string) = webhook.OwningConfigKey
-	*dest[14].(*time.Time), *dest[15].(*time.Time) = webhook.CreatedAt, webhook.UpdatedAt
+	*dest[11].(*[]byte) = nil
+	*dest[12].(*string) = webhook.CallbackURL
+	*dest[13].(*string) = webhook.SecretRef
+	*dest[14].(**uuid.UUID) = webhook.SecretBucketID
+	*dest[15].(*string) = webhook.OwningConfigKey
+	*dest[16].(*time.Time), *dest[17].(*time.Time) = webhook.CreatedAt, webhook.UpdatedAt
 	return nil
 }
 

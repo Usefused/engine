@@ -167,12 +167,22 @@ func TestExecuteSDKConfigApplyNoopDoesNotCallRegistryOrRotateToken(t *testing.T)
 	s := &workspaceTestStore{mockScopes: map[uuid.UUID]*store.AppRuntime{
 		appID: {AppID: appID, AccountID: accountID, Version: "1.0.0", ConfigKey: state.ConfigKey},
 	}}
-	result, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, &mockRegistryClient{}, sdkApplyCall{
+	auditCtx := accesscontrol.ContextWithMutationAuditEvidence(context.Background())
+	result, err := executeSDKConfigApply(auditCtx, configStore, s, proxy, &mockRegistryClient{}, sdkApplyCall{
 		accountID: accountID, planID: planID, planRevision: 1, sourceHash: "same",
 	})
 	if err != nil {
 		t.Fatalf("no-op apply: %v", err)
 	}
+	assertNoopSDKApplyResult(t, configStore, proxy, result, appID)
+	evidence, present := accesscontrol.MutationAuditEvidenceFromContext(auditCtx)
+	if !present || !evidence.Unchanged {
+		t.Fatalf("no-op audit evidence = %#v/%v", evidence, present)
+	}
+}
+
+func assertNoopSDKApplyResult(t *testing.T, configStore *mockConfigStore, proxy *recordingForwarder, result sdkGenerationResult, appID uuid.UUID) {
+	t.Helper()
 	if proxy.forwardCalled || proxy.forwardAndInspectCalled {
 		t.Fatal("no-op apply contacted Registry generation")
 	}

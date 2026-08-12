@@ -8,8 +8,10 @@ import (
 	"testing"
 )
 
+// TestFrozenFixtures explicitly validates the complete policy inventory so no
+// fixture relies solely on a broad CLI filename glob for coverage.
 func TestFrozenFixtures(t *testing.T) {
-	for _, name := range []string{"v2_fixed_window.json", "v2_token_bucket.json", "v2_mixed.json"} {
+	for _, name := range []string{"v3_shared_credential.json", "v3_method_concurrency.json", "v3_simultaneous_windows.json", "v3_weighted_burst_tenant.json", "v3_dynamic_headers.json", "v3_quota_units.json", "v3_complexity.json", "v3_composite_identity.json", "v3_concurrency.json", "v3_account_operation_concurrency.json", "v3_hourly_connection.json"} {
 		t.Run(name, func(t *testing.T) {
 			var config Config
 			if err := json.Unmarshal(readFixture(t, name), &config); err != nil {
@@ -34,11 +36,11 @@ func TestFrozenInvalidFixturesFailClosed(t *testing.T) {
 }
 
 func TestOperationCostUsesOnlyTransportedStableKey(t *testing.T) {
-	policy := Policy{DefaultCost: 1, OperationCosts: map[string]int64{"rest:GET:/drive/v3/files/{}": 10}}
-	if got := policy.Cost("rest:GET:/drive/v3/files/{}"); got != 10 {
+	policy := Policy{Cost: CostPlan{Default: 1, Rules: []CostRule{{Operation: "rest:GET:/drive/v3/files/{}", Cost: 10}}}}
+	if got := policy.ResolvedCost("rest:GET:/drive/v3/files/{}"); got != 10 {
 		t.Fatalf("matching stable key cost = %d, want 10", got)
 	}
-	if got := policy.Cost("getFile"); got != 1 {
+	if got := policy.ResolvedCost("getFile"); got != 1 {
 		t.Fatalf("unmatched operation name cost = %d, want default 1", got)
 	}
 }
@@ -49,17 +51,16 @@ func TestStrictValidationBounds(t *testing.T) {
 		"duplicate names":       func(c *Config) { c.Policies = append(c.Policies, c.Policies[0]) },
 		"invalid name":          func(c *Config) { c.Policies[0].Name = "bad name" },
 		"invalid unit":          func(c *Config) { c.Policies[0].Unit = "widgets" },
-		"negative default cost": func(c *Config) { c.Policies[0].DefaultCost = -1 },
-		"no positive cost":      func(c *Config) { c.Policies[0].DefaultCost = 0 },
+		"negative default cost": func(c *Config) { c.Policies[0].Cost.Default = -1 },
+		"no positive cost":      func(c *Config) { c.Policies[0].Cost.Default = 0 },
 		"oversized limit":       func(c *Config) { c.Policies[0].FixedWindow.Limit = maxPolicyValue + 1 },
-		"oversized interval":    func(c *Config) { c.Policies[0].FixedWindow.DurationMS = maxIntervalMS + 1 },
-		"empty headers":         func(c *Config) { c.Policies[0].ResponseHeaders = &ResponseHeaders{} },
+		"oversized interval":    func(c *Config) { c.Policies[0].FixedWindow.DurationMs = maxIntervalMS + 1 },
+		"empty headers":         func(c *Config) { c.Policies[0].ResponseSignals = &ResponseSignals{} },
 		"invalid reset format": func(c *Config) {
-			c.Policies[0].ResponseHeaders = &ResponseHeaders{Reset: &ResetHeader{Name: "X-Reset", Format: "date"}}
+			c.Policies[0].ResponseSignals = &ResponseSignals{Reset: &ResetSignal{Signal: ResponseSignal{Source: ResponseSignalHeader, Name: "X-Reset"}, Format: "date"}}
 		},
-		"disabled retry pointer":  func(c *Config) { c.RetryAfter = &RetryAfter{MaxDelayMS: 1} },
-		"untrimmed operation key": func(c *Config) { c.Policies[0].OperationCosts[" key"] = 1 },
-		"newline operation key":   func(c *Config) { c.Policies[0].OperationCosts["key\nnext"] = 1 },
+		"untrimmed operation key": func(c *Config) { c.Policies[0].Cost.Rules = []CostRule{{Operation: " key", Cost: 1}} },
+		"newline operation key":   func(c *Config) { c.Policies[0].Cost.Rules = []CostRule{{Operation: "key\nnext", Cost: 1}} },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -77,7 +78,7 @@ func TestScanNilClearsReusedReceiver(t *testing.T) {
 	if err := config.Scan(nil); err != nil {
 		t.Fatal(err)
 	}
-	if config.Version != 0 || config.Policies != nil || config.RetryAfter != nil {
+	if config.Version != 0 || config.Policies != nil || config.Cooldown != nil {
 		t.Fatalf("nil scan retained stale state: %#v", config)
 	}
 }
@@ -111,9 +112,9 @@ func TestMaximumPolicyAndOperationCounts(t *testing.T) {
 	}
 
 	config = fixedWindowConfig()
-	config.Policies[0].OperationCosts = make(map[string]int64, maxOperationCosts+1)
-	for i := 0; i <= maxOperationCosts; i++ {
-		config.Policies[0].OperationCosts[strings.Repeat("x", i%500+1)+string(rune(i))] = 1
+	config.Policies[0].Cost.Rules = make([]CostRule, maxCostRules+1)
+	for i := 0; i <= maxCostRules; i++ {
+		config.Policies[0].Cost.Rules[i] = CostRule{Operation: strings.Repeat("x", i%500+1) + string(rune(i)), Cost: 1}
 	}
 	if err := config.Validate(); err == nil {
 		t.Fatal("expected operation cost count overflow")
@@ -122,9 +123,9 @@ func TestMaximumPolicyAndOperationCounts(t *testing.T) {
 
 func fixedWindowConfig() Config {
 	return Config{Version: Version, Policies: []Policy{{
-		Name: "requests", Unit: "requests", Scope: "service_version", DefaultCost: 1,
-		OperationCosts: map[string]int64{}, Algorithm: "fixed_window",
-		FixedWindow: &FixedWindow{Limit: 100, DurationMS: 60_000},
+		Name: "requests", Mode: ModeEnforce, Unit: UnitRequests,
+		Identity: BucketIdentity{Inputs: []IdentityInput{{Kind: IdentityServiceVersion}}}, Cost: CostPlan{Default: 1}, Algorithm: AlgorithmFixedWindow,
+		FixedWindow: &FixedWindow{Limit: 100, DurationMs: 60_000},
 	}}}
 }
 

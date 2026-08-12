@@ -8,13 +8,9 @@ import (
 	"github.com/Usefused/engine/internal/shared/models"
 )
 
-// FixtureOperation is the spike's stand-in for a registered IntegrationObject,
-// scoped to exactly what search_docs and call() need to resolve, route params
-// for, and validate a call against one operation (sprint/lighter_mcp_runtime_spike_plan.md,
-// Task 2). It intentionally reuses models.Parameter/models.Schema/models.Responses
-// rather than inventing parallel types, so a real IntegrationObject can be
-// mapped onto this shape later without a schema rewrite -- the fixture is a
-// stand-in for a data *source*, not a different data *shape*.
+// FixtureOperation is the bounded MCP view of an app-scoped operation. It
+// intentionally reuses canonical execution-contract types so search_docs and
+// call validation cannot drift into a second request or response schema.
 type FixtureOperation struct {
 	OperationID    string                 `json:"operation_id"`
 	ServiceID      string                 `json:"service_id"`
@@ -27,20 +23,18 @@ type FixtureOperation struct {
 	Responses      models.Responses       `json:"responses"`
 }
 
-// Fixture is the top-level shape of fixture.json.
+// Fixture is the app-scoped operation catalogue serialized for the shared MCP runtime.
 type Fixture struct {
 	Operations []FixtureOperation `json:"operations"`
 
-	// byOperationID is built once at load time so Resolve is an O(1) map
-	// lookup rather than a linear scan on every call() -- matters once this
-	// stands in for a real catalog with more than a handful of operations.
+	// byOperationID is built once so repeated tool calls do not scan the app's
+	// complete selected operation set.
 	byOperationID map[string]*FixtureOperation
 }
 
-// LoadFixture reads and parses fixture.json from path, indexing operations by
-// OperationID. This is the single load path used by both search_docs (Task 3,
-// Node side, reading the same file) and call()'s Go-side resolution (Task 5/6)
-// -- one source of truth for what an operationId means, per the design doc.
+// LoadFixture reads a serialized catalogue for contract tests and offline
+// validation. Live MCP sessions build the same shape from immutable local
+// snapshots, which keeps execution independent from Registry availability.
 func LoadFixture(path string) (*Fixture, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -67,11 +61,8 @@ func LoadFixture(path string) (*Fixture, error) {
 	return &f, nil
 }
 
-// Resolve looks up an operation by operationId. Returns false if the ID isn't
-// in this MCP server's registered set -- this is the mechanical enforcement
-// point for Trust and Governance Model tier 1 (design doc): an operationId
-// outside the set simply fails to resolve, there's no downstream path that
-// could act on an ID that was never registered.
+// Resolve uses only the app-scoped catalogue; an unknown operation cannot fall
+// through to broader Registry or provider discovery.
 func (f *Fixture) Resolve(operationID string) (*FixtureOperation, bool) {
 	if f == nil {
 		return nil, false

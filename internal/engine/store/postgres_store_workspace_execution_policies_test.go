@@ -9,6 +9,7 @@ import (
 	"github.com/Usefused/engine/internal/shared/db"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
+	"github.com/Usefused/engine/internal/shared/retrypolicy"
 	"github.com/google/uuid"
 )
 
@@ -82,7 +83,7 @@ func TestPostgresStore_WorkspaceExecutionPolicyOverride(t *testing.T) {
 	versionOverride, err := s.UpsertWorkspaceExecutionPolicyOverride(ctx, WorkspaceExecutionPolicyOverride{
 		ServiceID:        serviceID,
 		ServiceVersionID: &versionID,
-		RetryConfig:      &fusedobject.RetryConfig{Strategy: "exponential", MaxRetries: 3, BackoffMs: 200},
+		RetryConfig:      testWorkspaceRetry(3),
 		TimeoutMs:        &versionTimeoutMs,
 	})
 	if err != nil {
@@ -115,7 +116,7 @@ func TestPostgresStore_WorkspaceExecutionPolicyOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get effective (version-tier wins): %v", err)
 	}
-	if effective == nil || effective.RetryConfig == nil || effective.RetryConfig.MaxRetries != 3 {
+	if effective == nil || effective.RetryConfig == nil || effective.RetryConfig.Rules[0].Action.MaxAttempts != 3 {
 		t.Fatalf("expected version-tier override to win, got %#v", effective)
 	}
 	if effective.TimeoutMs == nil || *effective.TimeoutMs != versionTimeoutMs {
@@ -138,7 +139,7 @@ func TestPostgresStore_WorkspaceExecutionPolicyOverride(t *testing.T) {
 	_, err = s.UpsertWorkspaceExecutionPolicyOverride(ctx, WorkspaceExecutionPolicyOverride{
 		ServiceID:        serviceID,
 		ServiceVersionID: &versionID,
-		RetryConfig:      &fusedobject.RetryConfig{Strategy: "exponential", MaxRetries: 7, BackoffMs: 500},
+		RetryConfig:      testWorkspaceRetry(7),
 	})
 	if err != nil {
 		t.Fatalf("re-upsert version-tier override: %v", err)
@@ -154,8 +155,8 @@ func TestPostgresStore_WorkspaceExecutionPolicyOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get effective (after re-upsert): %v", err)
 	}
-	if effective.RetryConfig.MaxRetries != 7 {
-		t.Fatalf("re-upsert did not take effect, got MaxRetries=%d", effective.RetryConfig.MaxRetries)
+	if effective.RetryConfig.Rules[0].Action.MaxAttempts != 7 {
+		t.Fatalf("re-upsert did not take effect, got max_attempts=%d", effective.RetryConfig.Rules[0].Action.MaxAttempts)
 	}
 
 	// Resetting the version tier leaves the service-default tier untouched.
@@ -184,10 +185,21 @@ func TestPostgresStore_WorkspaceExecutionPolicyOverride(t *testing.T) {
 }
 
 func testWorkspaceRateLimit(limit int64) *fusedobject.RateLimitConfig {
-	return &fusedobject.RateLimitConfig{Version: 2, Policies: []ratelimitpolicy.Policy{{
-		Name: "requests", Unit: "requests", Scope: "service_version", DefaultCost: 1,
-		OperationCosts: map[string]int64{}, Algorithm: "fixed_window",
-		FixedWindow: &ratelimitpolicy.FixedWindow{Limit: limit, DurationMS: 1_000},
+	return &fusedobject.RateLimitConfig{Version: ratelimitpolicy.Version, Policies: []ratelimitpolicy.Policy{{
+		Name: "requests", Mode: ratelimitpolicy.ModeEnforce, Unit: ratelimitpolicy.UnitRequests,
+		Identity: ratelimitpolicy.BucketIdentity{Inputs: []ratelimitpolicy.IdentityInput{{Kind: ratelimitpolicy.IdentityServiceVersion}}}, Cost: ratelimitpolicy.CostPlan{Default: 1}, Algorithm: ratelimitpolicy.AlgorithmFixedWindow,
+		FixedWindow: &ratelimitpolicy.FixedWindow{Limit: limit, DurationMs: 1_000},
+	}}}
+}
+
+func testWorkspaceRetry(maxAttempts int) *fusedobject.RetryConfig {
+	return &fusedobject.RetryConfig{Version: retrypolicy.Version, Rules: []retrypolicy.Rule{{
+		Predicates: retrypolicy.Predicates{
+			Methods: []string{"GET"}, OperationKinds: []retrypolicy.OperationKind{retrypolicy.OperationRead},
+			Statuses: []retrypolicy.StatusRange{{Min: 500, Max: 599}}, BodyReplayability: retrypolicy.BodyAny,
+			IdempotencyKey: retrypolicy.IdempotencyKeyPredicate{Requirement: retrypolicy.IdempotencyKeyAny},
+		},
+		Action: retrypolicy.Action{MaxAttempts: maxAttempts, MaxElapsedMs: 5_000, Backoff: retrypolicy.Backoff{Strategy: retrypolicy.BackoffExponential, BaseDelayMs: 100, MaxDelayMs: 500}},
 	}}}
 }
 

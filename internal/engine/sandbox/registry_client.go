@@ -88,21 +88,22 @@ type ServiceVersionAuthConfigs struct {
 const registryAuthConfigGraphQLFields = `
 	name
 	type
-	flow
 	scheme
 	basic_password_mode
 	location
 	key_name
-	token_url
+	oauth2_metadata_url
+	deprecated
 	token_endpoint_auth_method
-	authorization_url
 	open_id_connect_url
-	scopes
 	pkce_required
 	scopes_delimiter
 	extra_auth_params
 	extra_token_params
 	refresh_token_rotates
+	oauth2_flows
+	strategy
+	policy_provenance
 `
 
 type ServiceVersionExecutionAuthSelection struct {
@@ -502,20 +503,39 @@ func decodeVerifyServiceResponse(resp *http.Response) (string, string, string, u
 	return gr.Data.Service.Name, gr.Data.Service.Slug, gr.Data.Service.CurrentServiceVersion, uuid.Nil, nil
 }
 
+type registryServiceVersionEnvelope struct {
+	ID                   string   `json:"id"`
+	Name                 string   `json:"name"`
+	ContractVersion      int      `json:"contract_version"`
+	RequiredCapabilities []string `json:"required_capabilities"`
+}
+
 func currentServiceVersionID(current string, versions []struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 }) uuid.UUID {
+	for _, version := range versions {
+		if version.Name == current {
+			id, _ := uuid.Parse(version.ID)
+			return id
+		}
+	}
+	return uuid.Nil
+}
+
+func currentServiceVersionContract(current string, versions []registryServiceVersionEnvelope) (uuid.UUID, fusedobject.ExecutionContractEnvelope) {
 	for _, version := range versions {
 		if version.Name != current {
 			continue
 		}
 		id, err := uuid.Parse(version.ID)
 		if err == nil {
-			return id
+			return id, fusedobject.ExecutionContractEnvelope{
+				ContractVersion: version.ContractVersion, RequiredCapabilities: version.RequiredCapabilities,
+			}
 		}
 	}
-	return uuid.Nil
+	return uuid.Nil, fusedobject.ExecutionContractEnvelope{}
 }
 
 func (c *HTTPRegistryClient) FetchServiceVisibility(ctx context.Context, serviceIDs []uuid.UUID, apiKey string) (map[uuid.UUID]ServiceVisibility, error) {
@@ -634,8 +654,8 @@ func (c *HTTPRegistryClient) UpdateServicePublic(ctx context.Context, serviceID 
 }
 
 // PublishServiceExecutionPolicy publishes service-level execution policy
-// through the Registry API. The request body mirrors the Engine's
-// workspaceExecutionPolicy shape so no field mapping is required.
+// through the Registry API. Its caller owns the strict Registry projection so
+// this transport remains unaware of workspace-only policy controls.
 func (c *HTTPRegistryClient) PublishServiceExecutionPolicy(ctx context.Context, serviceID uuid.UUID, policy any, apiKey string) error {
 	body, err := json.Marshal(policy)
 	if err != nil {
@@ -1160,7 +1180,7 @@ func (c *HTTPRegistryClient) FetchServiceVersionExecutionAuthContracts(ctx conte
 		Query: `query ServiceVersionExecutionAuthContracts($selections: [ServiceVersionExecutionAuthSelectionInput!]!) {
 			serviceVersionExecutionAuthContracts(selections: $selections) {
 				service_id version service_version_id operation_names select_all
-				auth_configs { name type scheme scopes }
+				auth_configs { name type scheme oauth2_flows }
 				operations { name security_requirements { schemes { scheme scopes } } }
 			}
 		}`,
@@ -1440,6 +1460,7 @@ func decodeServiceMetadataBatch(body io.Reader, refs []ServiceMetadataRef) (map[
 				Name                  string                             `json:"name"`
 				EventExtractionPath   string                             `json:"event_extraction_path"`
 				IncomingWebhookConfig *fusedobject.IncomingWebhookConfig `json:"incoming_webhook_config"`
+				Documentation         *fusedobject.ServiceDocumentation  `json:"documentation"`
 			} `json:"serviceWebhookMetadata"`
 		} `json:"data"`
 		Errors []struct {
@@ -1502,12 +1523,9 @@ func (c *HTTPRegistryClient) fetchServiceMetadata(ctx context.Context, serviceID
 	var gr struct {
 		Data struct {
 			Service *struct {
-				ID                    uuid.UUID `json:"id"`
-				CurrentServiceVersion string    `json:"current_service_version"`
-				ServiceVersions       []struct {
-					ID   string `json:"id"`
-					Name string `json:"name"`
-				} `json:"service_versions"`
+				ID                    uuid.UUID                          `json:"id"`
+				CurrentServiceVersion string                             `json:"current_service_version"`
+				ServiceVersions       []registryServiceVersionEnvelope   `json:"service_versions"`
 				Name                  string                             `json:"name"`
 				Description           string                             `json:"description"`
 				BaseURL               string                             `json:"base_url"`
@@ -1521,6 +1539,7 @@ func (c *HTTPRegistryClient) fetchServiceMetadata(ctx context.Context, serviceID
 				ConnectConfig         *fusedobject.ServiceConnectConfig  `json:"connect_config"`
 				EventExtractionPath   string                             `json:"event_extraction_path"`
 				IncomingWebhookConfig *fusedobject.IncomingWebhookConfig `json:"incoming_webhook_config"`
+				Documentation         *fusedobject.ServiceDocumentation  `json:"documentation"`
 			} `json:"service"`
 		} `json:"data"`
 		Errors []struct {
@@ -1541,23 +1560,29 @@ func (c *HTTPRegistryClient) fetchServiceMetadata(ctx context.Context, serviceID
 	}
 
 	srv := gr.Data.Service
+	serviceVersionID, envelope := currentServiceVersionContract(srv.CurrentServiceVersion, srv.ServiceVersions)
+	if err := fusedobject.ValidateExecutionContractEnvelope(envelope); err != nil {
+		return nil, fmt.Errorf("FetchServiceMetadata: incompatible contract: %w", err)
+	}
 
 	fo := &fusedobject.ServiceMetadata{
-		ID:                    srv.ID,
-		ServiceVersionID:      currentServiceVersionID(srv.CurrentServiceVersion, srv.ServiceVersions),
-		Name:                  srv.Name,
-		Description:           srv.Description,
-		BaseURL:               srv.BaseURL,
-		Servers:               srv.Servers,
-		AuthConfigs:           srv.AuthConfigs,
-		RateLimit:             srv.RateLimit,
-		RetryConfig:           srv.RetryConfig,
-		TimeoutMs:             srv.TimeoutMs,
-		Pagination:            srv.Pagination,
-		DefaultHeaders:        srv.DefaultHeaders,
-		ConnectConfig:         srv.ConnectConfig,
-		EventExtractionPath:   srv.EventExtractionPath,
-		IncomingWebhookConfig: srv.IncomingWebhookConfig,
+		ExecutionContractEnvelope: envelope,
+		ID:                        srv.ID,
+		ServiceVersionID:          serviceVersionID,
+		Name:                      srv.Name,
+		Description:               srv.Description,
+		BaseURL:                   srv.BaseURL,
+		Servers:                   srv.Servers,
+		AuthConfigs:               srv.AuthConfigs,
+		RateLimit:                 srv.RateLimit,
+		RetryConfig:               srv.RetryConfig,
+		TimeoutMs:                 srv.TimeoutMs,
+		Pagination:                srv.Pagination,
+		DefaultHeaders:            srv.DefaultHeaders,
+		ConnectConfig:             srv.ConnectConfig,
+		EventExtractionPath:       srv.EventExtractionPath,
+		IncomingWebhookConfig:     srv.IncomingWebhookConfig,
+		Documentation:             srv.Documentation,
 	}
 
 	slog.InfoContext(ctx, "Successfully fetched ServiceMetadata from Registry", slog.String("serviceID", serviceID.String()))
@@ -1662,7 +1687,6 @@ func (c *HTTPRegistryClient) fetchServiceOperations(ctx context.Context, service
 				method
 				path
 				normalized_path
-				is_sse
 				deprecated
 				parameters {
 					name
@@ -1679,6 +1703,7 @@ func (c *HTTPRegistryClient) fetchServiceOperations(ctx context.Context, service
 				operation_kind
 				pagination {` + runtimePaginationFields + `}
 				security_requirements {` + runtimeSecurityRequirementFields + `}
+				documentation
 			}
 		}
 	`
@@ -2061,6 +2086,8 @@ func (c *HTTPRegistryClient) buildServiceMetadataRequest(ctx context.Context, se
 				service_versions {
 					id
 					name
+					contract_version
+					required_capabilities
 				}
 				name
 				description
@@ -2077,11 +2104,7 @@ func (c *HTTPRegistryClient) buildServiceMetadataRequest(ctx context.Context, se
 				connect_config
 				auth_configs {` + registryAuthConfigGraphQLFields + `}
 				rate_limit {` + runtimeRateLimitFields + `}
-				retry_config {
-					strategy
-					max_retries
-					backoff_ms
-				}
+				retry_config {` + runtimeRetryFields + `}
 				timeout_ms
 				pagination {` + runtimePaginationFields + `}
 				event_extraction_path
@@ -2092,6 +2115,7 @@ func (c *HTTPRegistryClient) buildServiceMetadataRequest(ctx context.Context, se
 					signature_header
 					verification_headers
 				}
+				documentation
 			}
 		}
 	`
@@ -2136,7 +2160,6 @@ func (c *HTTPRegistryClient) buildEndpointsByNamesRequest(ctx context.Context, s
 				method
 				path
 				normalized_path
-				is_sse
 				deprecated
 				parameters {
 					name
@@ -2153,6 +2176,7 @@ func (c *HTTPRegistryClient) buildEndpointsByNamesRequest(ctx context.Context, s
 				operation_kind
 				pagination {` + runtimePaginationFields + `}
 				security_requirements {` + runtimeSecurityRequirementFields + `}
+				documentation
 			}
 		}
 	`

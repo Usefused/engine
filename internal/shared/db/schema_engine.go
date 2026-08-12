@@ -10,12 +10,16 @@ import (
 )
 
 const (
-	engineMigrationAdvisoryLockKey int64 = 0x465553454E47494E
-	engineMigrationLockQuery             = `SELECT pg_advisory_xact_lock($1)`
-	engineMigrationVersion         int64 = 1
-	engineMigrationName                  = "20260810_engine_schema_convergence"
-	appTokenPolicyMigrationVersion int64 = 2
-	appTokenPolicyMigrationName          = "20260810_app_token_policy"
+	engineMigrationAdvisoryLockKey   int64 = 0x465553454E47494E
+	engineMigrationLockQuery               = `SELECT pg_advisory_xact_lock($1)`
+	engineMigrationVersion           int64 = 1
+	engineMigrationName                    = "20260810_engine_schema_convergence"
+	appTokenPolicyMigrationVersion   int64 = 2
+	appTokenPolicyMigrationName            = "20260810_app_token_policy"
+	contractEnvelopeMigrationVersion int64 = 3
+	contractEnvelopeMigrationName          = "20260811_execution_contract_envelope"
+	idempotencyMediaMigrationVersion int64 = 4
+	idempotencyMediaMigrationName          = "20260811_idempotency_response_media"
 )
 
 type engineMigration struct {
@@ -98,6 +102,8 @@ func engineMigrations() []engineMigration {
 	return []engineMigration{
 		{Version: engineMigrationVersion, Name: engineMigrationName, Queries: engineMigrationV1Queries()},
 		{Version: appTokenPolicyMigrationVersion, Name: appTokenPolicyMigrationName, Queries: appTokenPolicyMigrationQueries()},
+		{Version: contractEnvelopeMigrationVersion, Name: contractEnvelopeMigrationName, Queries: contractEnvelopeMigrationQueries()},
+		{Version: idempotencyMediaMigrationVersion, Name: idempotencyMediaMigrationName, Queries: idempotencyMediaMigrationQueries()},
 	}
 }
 
@@ -397,7 +403,7 @@ func engineSchemaQueries() []string {
 			missing_requirements jsonb NOT NULL DEFAULT '[]'::jsonb,
 			metadata            jsonb NOT NULL DEFAULT '{}'::jsonb,
 			CONSTRAINT chk_fused_audit_events_outcome
-				CHECK (outcome IN ('attempted', 'allowed', 'denied', 'succeeded', 'failed')),
+				CHECK (outcome IN ('attempted', 'allowed', 'denied', 'succeeded', 'failed', 'rolled_back', 'cancelled')),
 			CONSTRAINT chk_fused_audit_events_resource_type
 				CHECK (resource_type IS NULL OR resource_type IN ('workspace', 'service', 'bucket', 'app')),
 			CONSTRAINT chk_fused_audit_events_status_code
@@ -769,6 +775,8 @@ func engineSchemaQueries() []string {
 			service_id         uuid NOT NULL,
 			service_version_id uuid NOT NULL UNIQUE,
 			version            text NOT NULL,
+			contract_version   integer NOT NULL,
+			required_capabilities text[] NOT NULL,
 			revision           integer NOT NULL DEFAULT 0,
 			source_hash        text NOT NULL DEFAULT '',
 			contract_hash      text NOT NULL,
@@ -840,9 +848,8 @@ func engineSchemaQueries() []string {
 		`CREATE INDEX IF NOT EXISTS idx_fused_service_changelog_cache_service_id
 		ON fused_service_changelog_cache(service_id, registry_created_at DESC);`,
 
-		// Webhook registrations are Engine-owned (not Registry-owned) so
-		// ingress resolves a request with a single indexed local read instead
-		// of a NATS round trip to the Registry. auth_type/auth_location/
+		// Webhook registrations are workspace-local so ingress resolves a request
+		// with one indexed read. auth_type/auth_location/
 		// auth_key_name/signature_header/verification_headers/
 		// event_extraction_path are denormalized from the service's
 		// IncomingWebhookConfig at apply time rather than joined per request
@@ -863,6 +870,8 @@ func engineSchemaQueries() []string {
 			signature_header      text NOT NULL DEFAULT '',
 			verification_headers  text[] NOT NULL DEFAULT '{}',
 			event_extraction_path text NOT NULL DEFAULT '',
+			signature_policy      jsonb,
+			callback_url          text NOT NULL DEFAULT '',
 			-- The canonical reference preserves the configured key while the
 			-- immutable bucket ID prevents delete/recreate of the same name from
 			-- silently redirecting webhook verification to another team's bucket.
@@ -990,7 +999,7 @@ func engineSchemaQueries() []string {
 		// Idempotency cache: stores the final response of an Execute call keyed
 		// by (app_id, idempotency_key_hash) so a retried/duplicate request with
 		// the same key replays the original result instead of re-hitting the
-		// vendor. 24h TTL mirrors Stripe's idempotency key retention. The key
+		// provider. A 24h TTL covers delayed reconnects while bounding storage. The key
 		// itself is hashed before storage, consistent with how execution audit
 		// events already only ever store idempotency_key_hash, never the raw key.
 		`CREATE TABLE IF NOT EXISTS fused_engine_idempotency_keys (
@@ -1001,8 +1010,10 @@ func engineSchemaQueries() []string {
 			environment text,
 			response_body bytea,
 			response_status integer NOT NULL DEFAULT 200,
+			response_media_family text NOT NULL DEFAULT 'unknown',
 			created_at timestamptz NOT NULL DEFAULT NOW(),
 			expires_at timestamptz NOT NULL,
+			CONSTRAINT chk_fused_engine_idempotency_response_media_family CHECK (response_media_family IN ('sse', 'json', 'binary', 'xml', 'text', 'other', 'unknown')),
 			UNIQUE(app_id, idempotency_key_hash)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_engine_idempotency_keys_expires
@@ -1152,6 +1163,7 @@ func engineSchemaQueries() []string {
 			-- immediately on apply regardless of publish, same as every other
 			-- column on this table (see LocalObjectCache.applyExecutionPolicyOverride).
 			base_url                text,
+			server_variables        jsonb,
 			created_at timestamptz NOT NULL DEFAULT NOW(),
 			updated_at timestamptz NOT NULL DEFAULT NOW(),
 			CHECK (timeout_ms IS NULL OR timeout_ms BETWEEN 1 AND 86400000)
@@ -1178,12 +1190,15 @@ func engineSchemaQueries() []string {
 			fixed_window_used         bigint NOT NULL DEFAULT 0,
 			tokens                     bigint,
 			token_refilled_at          timestamptz,
+			rolling_usage              jsonb NOT NULL DEFAULT '[]'::jsonb,
+			concurrency_used            bigint NOT NULL DEFAULT 0,
+			concurrency_holders         jsonb NOT NULL DEFAULT '{}'::jsonb,
 			cooldown_until             timestamptz,
 			state_sequence             bigint NOT NULL DEFAULT 0,
 			updated_at                 timestamptz NOT NULL DEFAULT NOW(),
 			PRIMARY KEY (account_id, service_version_id, policy_name, scope_kind, scope_id),
-			CHECK (scope_kind IN ('service_version', 'connection')),
-			CHECK (algorithm IN ('fixed_window', 'token_bucket')),
+			CHECK (length(scope_kind) BETWEEN 1 AND 256),
+			CHECK (algorithm IN ('fixed_window', 'rolling_window', 'token_bucket', 'concurrency')),
 			CHECK (fixed_window_used >= 0),
 			CHECK (tokens IS NULL OR tokens >= 0)
 		);`,
@@ -1323,6 +1338,20 @@ func engineSchemaQueries() []string {
 	}
 }
 
+// Existing snapshots predate capability negotiation and therefore cannot be
+// proven executable. Dropping only this rebuildable Registry cache prevents an
+// upgrade from blessing unknown semantics with today's version number.
+func contractEnvelopeMigrationQueries() []string {
+	return []string{
+		`ALTER TABLE fused_service_contract_snapshots ADD COLUMN IF NOT EXISTS contract_version integer;`,
+		`ALTER TABLE fused_service_contract_snapshots ADD COLUMN IF NOT EXISTS required_capabilities text[];`,
+		`DELETE FROM fused_service_contract_snapshots
+		 WHERE contract_version IS NULL OR required_capabilities IS NULL;`,
+		`ALTER TABLE fused_service_contract_snapshots ALTER COLUMN contract_version SET NOT NULL;`,
+		`ALTER TABLE fused_service_contract_snapshots ALTER COLUMN required_capabilities SET NOT NULL;`,
+	}
+}
+
 // Token policy is an additive upgrade over the app-family schema. The ledger
 // keeps it one-shot, while IF NOT EXISTS lets fresh databases run the same
 // migration after creating the canonical table shape.
@@ -1336,6 +1365,19 @@ func appTokenPolicyMigrationQueries() []string {
 			(allow_all AND cardinality(allowed_operations) = 0)
 			OR (NOT allow_all AND cardinality(allowed_operations) > 0 AND NOT ('*' = ANY(allowed_operations)))
 		);`,
+	}
+}
+
+func idempotencyMediaMigrationQueries() []string {
+	return []string{
+		`ALTER TABLE fused_engine_idempotency_keys ADD COLUMN IF NOT EXISTS response_media_family text;`,
+		// Rows written before media-family persistence cannot safely satisfy an
+		// adaptive client, so invalidate them instead of replaying guessed metadata.
+		`DELETE FROM fused_engine_idempotency_keys WHERE response_media_family IS NULL OR response_media_family = 'unknown';`,
+		`ALTER TABLE fused_engine_idempotency_keys ALTER COLUMN response_media_family SET DEFAULT 'unknown';`,
+		`ALTER TABLE fused_engine_idempotency_keys ALTER COLUMN response_media_family SET NOT NULL;`,
+		`ALTER TABLE fused_engine_idempotency_keys DROP CONSTRAINT IF EXISTS chk_fused_engine_idempotency_response_media_family;`,
+		`ALTER TABLE fused_engine_idempotency_keys ADD CONSTRAINT chk_fused_engine_idempotency_response_media_family CHECK (response_media_family IN ('sse', 'json', 'binary', 'xml', 'text', 'other', 'unknown'));`,
 	}
 }
 
@@ -1599,12 +1641,18 @@ func engineMigrationV1Queries() []string {
 
 		// Ensure the base_url override column exists for execution policies.
 		`ALTER TABLE fused_workspace_execution_policies ADD COLUMN IF NOT EXISTS base_url text;`,
-		// Legacy rate-limit JSON has no unambiguous v2 meaning. Clear only that
-		// column so retry, pagination, webhook, and base URL overrides survive.
+		`ALTER TABLE fused_workspace_execution_policies ADD COLUMN IF NOT EXISTS server_variables jsonb;`,
+		// The Engine executes only canonical v3 quota policy. Clearing any other
+		// version fails closed without discarding unrelated workspace overrides.
 		`UPDATE fused_workspace_execution_policies
 		SET rate_limit = NULL
 		WHERE rate_limit IS NOT NULL
-		  AND rate_limit->>'version' IS DISTINCT FROM '2';`,
+		  AND rate_limit->>'version' IS DISTINCT FROM '3';`,
 		`ALTER TABLE fused_provider_rate_limit_states ADD COLUMN IF NOT EXISTS state_sequence bigint NOT NULL DEFAULT 0;`,
+		`ALTER TABLE fused_provider_rate_limit_states ADD COLUMN IF NOT EXISTS rolling_usage jsonb NOT NULL DEFAULT '[]'::jsonb;`,
+		`ALTER TABLE fused_provider_rate_limit_states ADD COLUMN IF NOT EXISTS concurrency_used bigint NOT NULL DEFAULT 0;`,
+		`ALTER TABLE fused_provider_rate_limit_states ADD COLUMN IF NOT EXISTS concurrency_holders jsonb NOT NULL DEFAULT '{}'::jsonb;`,
+		`ALTER TABLE fused_provider_rate_limit_states DROP CONSTRAINT IF EXISTS fused_provider_rate_limit_states_scope_kind_check;`,
+		`ALTER TABLE fused_provider_rate_limit_states DROP CONSTRAINT IF EXISTS fused_provider_rate_limit_states_algorithm_check;`,
 	}
 }

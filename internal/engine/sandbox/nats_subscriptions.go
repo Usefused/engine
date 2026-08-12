@@ -2,8 +2,6 @@ package sandbox
 
 import (
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/nats-io/nats.go"
@@ -17,7 +15,6 @@ func setupNATSSubscriptions(natsClient *messaging.NATSClient) {
 	// Core NATS so sandbox restarts do not replay retained JetStream history.
 	setupCoreNATSSubscriptions(natsClient)
 
-	setupCleanupSubscription(natsClient)
 }
 
 // setupCoreNATSSubscriptions configures subscriptions using fallback Core NATS.
@@ -69,49 +66,4 @@ func purgeKillCommand(subject string) {
 	if err := globalNATSClient.JS.PurgeStream(messaging.FusedEngineStream, &nats.StreamPurgeRequest{Subject: subject}); err != nil {
 		slog.Warn("Failed to purge handled fused_engine.kill command from JetStream", slog.Any("error", err), slog.String("subject", subject))
 	}
-}
-
-// setupCleanupSubscription binds to the fused_engine.cleanup topic to remove sandbox files from disk.
-func setupCleanupSubscription(natsClient *messaging.NATSClient) {
-	_, err := natsClient.Subscribe(messaging.FusedEngineCleanupSubscribe, func(msg *nats.Msg) {
-		parts := strings.Split(msg.Subject, ".")
-		if len(parts) != 3 {
-			// Ignore malformed cleanup messages.
-			return
-		}
-		appIDHex := parts[2]
-
-		if err := CleanupMCPSandboxDir(appIDHex); err != nil {
-			slog.Error("Failed to remove sandbox directory via NATS", slog.Any("error", err), slog.String("sandbox_id", appIDHex))
-			return
-		}
-		slog.Info("Sandbox directory cleaned up via NATS message", slog.String("sandbox_id", appIDHex))
-	})
-	if err != nil {
-		slog.Error("Failed to subscribe to fused_engine.cleanup.*", slog.Any("error", err))
-	}
-}
-
-// CleanupMCPSandboxDir removes the per-SDK sandbox directory from disk.
-// Exported for the same reason as KillMCPSessionsForSDK above -- the
-// direct DELETE /sdk-config/{id} handler calls this in-process rather than
-// publishing a NATS message to itself.
-func CleanupMCPSandboxDir(appIDHex string) error {
-	return os.RemoveAll(sandboxDirFor(appIDHex))
-}
-
-// sandboxDataRoot is the parent of the legacy per-SDK "data/sandboxes" tree.
-// Current MCP dependencies are embedded in the Engine binary, but cleanup
-// remains for data created by older versions. It is a variable solely so tests
-// can point it at a t.TempDir().
-var sandboxDataRoot = "."
-
-// sandboxesDir remains the single source of truth for legacy cleanup.
-func sandboxesDir() string {
-	return filepath.Join(sandboxDataRoot, "data", "sandboxes")
-}
-
-// sandboxDirFor is the per-SDK sandbox working directory for appIDHex.
-func sandboxDirFor(appIDHex string) string {
-	return filepath.Join(sandboxesDir(), appIDHex)
 }

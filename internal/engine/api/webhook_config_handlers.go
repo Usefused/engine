@@ -16,6 +16,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/secretref"
+	"github.com/Usefused/engine/internal/shared/signaturepolicy"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -30,10 +31,11 @@ import (
 // plans/plan-webhook-kind.md and store.WorkspaceWebhook.OwningConfigKey's
 // doc comment for why there's no per-service label anymore.
 type webhookConfigDocument struct {
-	APIVersion string                             `json:"apiVersion"`
-	Kind       string                             `json:"kind"`
-	Name       string                             `json:"name"`
-	Services   map[string]webhookConfigServiceDoc `json:"services"`
+	APIVersion      string                             `json:"apiVersion"`
+	Kind            string                             `json:"kind"`
+	Name            string                             `json:"name"`
+	CallbackBaseURL string                             `json:"callback_base_url,omitempty"`
+	Services        map[string]webhookConfigServiceDoc `json:"services"`
 }
 
 type webhookConfigServiceDoc struct {
@@ -355,18 +357,58 @@ func prepareWebhookRegistrations(ctx context.Context, s store.Store, verifier Se
 		keepServiceIDs = append(keepServiceIDs, r.ServiceID)
 		shape := authShapes[name]
 		binding := secretBindings[name]
+		if err := validateSignaturePolicyBinding(shape.Auth.SignaturePolicy, binding.Reference, doc.CallbackBaseURL); err != nil {
+			return nil, nil, err
+		}
 		var bucketID *uuid.UUID
 		if binding.BucketID != uuid.Nil {
 			id := binding.BucketID
 			bucketID = &id
 		}
-		registration, err := prepareWorkspaceWebhookRegistration(r.ServiceID, r.ServiceVersionID, doc.Name, binding.Reference, bucketID, shape.Auth, shape.EventExtractionPath, configKey)
+		registration, err := prepareWorkspaceWebhookRegistration(r.ServiceID, r.ServiceVersionID, doc.Name, binding.Reference, bucketID, shape.Auth, shape.EventExtractionPath, configKey, doc.CallbackBaseURL)
 		if err != nil {
 			return nil, nil, err
 		}
 		registrations = append(registrations, registration)
 	}
 	return registrations, keepServiceIDs, nil
+}
+
+func validateSignaturePolicyBinding(policy *signaturepolicy.Config, secretRef, callbackBaseURL string) error {
+	if policy == nil {
+		return nil
+	}
+	for _, rule := range policy.Rules {
+		if ref := verificationSecretRef(rule.Verification); ref != "" && ref != secretRef {
+			return workspaceConfigHTTPError{status: http.StatusBadRequest, message: "webhook signature policy secret_ref must match the registration secret"}
+		}
+		if recipeUsesCallbackURL(rule.Verification.Signature) && strings.TrimSpace(callbackBaseURL) == "" {
+			return workspaceConfigHTTPError{status: http.StatusBadRequest, message: "callback_base_url is required by the webhook signature policy"}
+		}
+	}
+	return nil
+}
+
+func verificationSecretRef(verification signaturepolicy.Verification) string {
+	if verification.Signature != nil {
+		return verification.Signature.SecretRef
+	}
+	if verification.JWT != nil {
+		return verification.JWT.SecretRef
+	}
+	return ""
+}
+
+func recipeUsesCallbackURL(recipe *signaturepolicy.SignatureVerification) bool {
+	if recipe == nil {
+		return false
+	}
+	for _, component := range recipe.Components {
+		if component.Kind == signaturepolicy.ComponentExactCallbackURL {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveWebhookSecretBindings(ctx context.Context, s store.Store, label string, resolved map[string]webhookResolvedService, names []string) (map[string]webhookSecretBinding, []store.Bucket, error) {

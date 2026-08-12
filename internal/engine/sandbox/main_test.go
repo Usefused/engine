@@ -1,7 +1,6 @@
 package sandbox
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -318,124 +317,6 @@ func TestTrackPendingRequest_IgnoresNonToolsCall(t *testing.T) {
 	}
 	if len(sess.pendingRequests) != 0 {
 		t.Error("expected no pending requests to be recorded for tools/list")
-	}
-}
-
-// ─── HTTP-block preload tests ──────────────────────────────────────────────────
-
-func TestWriteHTTPBlockPreload_CreatesFile(t *testing.T) {
-	dir := t.TempDir()
-	writeHTTPBlockPreload(dir)
-
-	preloadPath := dir + "/http-block-preload.cjs"
-	data, err := os.ReadFile(preloadPath)
-	if err != nil {
-		t.Fatalf("preload file not created: %v", err)
-	}
-	content := string(data)
-
-	// Must patch Module._resolveFilename
-	if !bytes.Contains(data, []byte("Module._resolveFilename")) {
-		t.Error("preload script does not patch Module._resolveFilename")
-	}
-	// Must block key HTTP modules
-	for _, mod := range []string{"axios", "node-fetch", "undici", "got", "https"} {
-		if !bytes.Contains(data, []byte(mod)) {
-			t.Errorf("preload script does not block '%s'", mod)
-		}
-	}
-	_ = content
-}
-
-func TestWriteHTTPBlockPreload_NodeCanLoadIt(t *testing.T) {
-	if _, err := exec.LookPath("node"); err != nil {
-		t.Skip("node not available in PATH, skipping runtime test")
-	}
-
-	dir := t.TempDir()
-	writeHTTPBlockPreload(dir)
-	preloadPath := dir + "/http-block-preload.cjs"
-
-	// The preload itself must load without error (no syntax errors).
-	cmd := exec.Command("node", "--require", preloadPath, "-e", "console.log('ok')")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("preload script has errors: %v\nOutput: %s", err, out)
-	}
-
-	// require('http') must throw after the preload is applied.
-	cmd2 := exec.Command("node", "--require", preloadPath, "-e", "require('http')")
-	if err := cmd2.Run(); err == nil {
-		t.Fatal("expected require('http') to throw after preload, but it succeeded")
-	}
-
-	// require('axios') must throw.
-	cmd3 := exec.Command("node", "--require", preloadPath, "-e", "require('axios')")
-	if err := cmd3.Run(); err == nil {
-		t.Fatal("expected require('axios') to throw after preload, but it succeeded")
-	}
-}
-
-// ─── Config defaults test ──────────────────────────────────────────────────────
-
-func TestInitSharedSandboxesRemovesOnlyLegacyDependencyCache(t *testing.T) {
-	originalRoot := sandboxDataRoot
-	sandboxDataRoot = t.TempDir()
-	t.Cleanup(func() { sandboxDataRoot = originalRoot })
-
-	sharedDir, perAppDir, outsidePath := createLegacySandboxFixture(t)
-	initSharedSandboxes()
-	assertLegacySandboxCleanup(t, sharedDir, perAppDir, outsidePath)
-}
-
-func createLegacySandboxFixture(t *testing.T) (string, string, string) {
-	t.Helper()
-	sharedDir := sandboxesDir()
-	legacyModuleDir, perAppDir := sharedDir+"/node_modules/example", sharedDir+"/app-123"
-	if err := os.MkdirAll(legacyModuleDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(perAppDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for path, contents := range map[string]string{
-		legacyModuleDir + "/index.js": "module.exports = {};",
-		sharedDir + "/package.json":   `{}`,
-		perAppDir + "/keep.txt":       "tenant data",
-	} {
-		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	outsidePath := sandboxDataRoot + "/outside.txt"
-	if err := os.WriteFile(outsidePath, []byte("outside cache"), 0o444); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outsidePath, legacyModuleDir+"/outside-link"); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(legacyModuleDir, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	return sharedDir, perAppDir, outsidePath
-}
-
-func assertLegacySandboxCleanup(t *testing.T, sharedDir, perAppDir, outsidePath string) {
-	t.Helper()
-	for _, name := range legacySharedSandboxEntries {
-		if _, err := os.Stat(sharedDir + "/" + name); !os.IsNotExist(err) {
-			t.Fatalf("legacy dependency %q was not removed", name)
-		}
-	}
-	if data, err := os.ReadFile(perAppDir + "/keep.txt"); err != nil || string(data) != "tenant data" {
-		t.Fatalf("per-app data changed: data=%q err=%v", data, err)
-	}
-	info, err := os.Stat(outsidePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o444 {
-		t.Fatalf("symlink target permissions changed: mode=%v", info.Mode().Perm())
 	}
 }
 

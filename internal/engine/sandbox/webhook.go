@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -23,6 +25,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/webhookid"
 	"github.com/Usefused/engine/internal/engine/webhookverify"
 	"github.com/Usefused/engine/internal/shared/observability"
+	"github.com/Usefused/engine/internal/shared/signaturepolicy"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -61,6 +64,8 @@ type webhookConfig struct {
 	AuthKeyName         string
 	SignatureHeader     string
 	VerificationHeaders []string
+	SignaturePolicy     *signaturepolicy.Config
+	CallbackURL         string
 	// SecretBucketID is the immutable apply-time binding used for runtime
 	// lookup; SecretRef supplies only its validated secret key.
 	SecretBucketID uuid.UUID
@@ -95,8 +100,8 @@ func webhookIngressHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Plunk/Stripe appends event names to the slug, normalize to the fixed
-	// token width. This must be a fixed-width cut, never a delimiter search:
+	// Providers may append routing segments to the slug, so normalize to the
+	// fixed token width. This must be a fixed-width cut, never a delimiter search:
 	// the nanoid alphabet itself includes '-', the same character separating
 	// the token from its decorative "-serviceSlug" suffix, so "find the
 	// first '-'" would truncate a legitimate token early.
@@ -106,13 +111,19 @@ func webhookIngressHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Open an OTEL span for the full ingress lifecycle.
 	ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.webhook.ingest", trace.WithAttributes(
-		attribute.String("slug", urlSlug),
+		attribute.Bool("webhook.registration.present", true),
 	))
 	defer span.End()
 
-	body, err := parseWebhookPayload(r)
+	rawBody, err := captureWebhookBody(r)
 	if err != nil {
-		span.SetStatus(codes.Error, "parse error: "+err.Error())
+		span.SetStatus(codes.Error, "payload_capture_failed")
+		writeError(w, http.StatusBadRequest, "invalid request payload")
+		return
+	}
+	body, err := parseWebhookPayload(r, rawBody)
+	if err != nil {
+		span.SetStatus(codes.Error, "payload_parse_failed")
 		writeError(w, http.StatusBadRequest, "invalid request payload")
 		return
 	}
@@ -137,8 +148,8 @@ func webhookIngressHandler(w http.ResponseWriter, r *http.Request) {
 		attribute.String("service_id", config.ServiceID),
 	)
 
-	if !validateWebhookAuth(ctx, w, r, body, config) {
-		span.SetStatus(codes.Error, "auth rejected")
+	authOutcome := validateWebhookAuth(ctx, w, r, rawBody, config)
+	if webhookAuthStopsIngress(span, authOutcome) {
 		return
 	}
 
@@ -150,8 +161,6 @@ func webhookIngressHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	span.SetAttributes(attribute.String("event_name", eventName))
-
 	_, pubSpan := otel.Tracer("engine").Start(ctx, "engine.webhook.publish")
 	publishWebhookEvent(w, r, body, urlSlug, eventName, config)
 	pubSpan.SetStatus(codes.Ok, "published")
@@ -160,8 +169,36 @@ func webhookIngressHandler(w http.ResponseWriter, r *http.Request) {
 	span.SetStatus(codes.Ok, "webhook ingested")
 }
 
+func webhookAuthStopsIngress(span trace.Span, outcome webhookAuthOutcome) bool {
+	if outcome == webhookAuthAccepted {
+		return false
+	}
+	if outcome == webhookAuthRejected {
+		span.SetStatus(codes.Error, "auth rejected")
+	} else {
+		span.SetStatus(codes.Ok, "challenge responded")
+	}
+	return true
+}
+
 // parseWebhookPayload reads the request payload, adapting for form data or JSON.
-func parseWebhookPayload(r *http.Request) ([]byte, error) {
+const maxWebhookBodyBytes = 2 << 20
+
+func captureWebhookBody(r *http.Request) ([]byte, error) {
+	if r.Method == http.MethodGet || r.Body == nil {
+		return nil, nil
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBodyBytes+1))
+	if err != nil || len(body) > maxWebhookBodyBytes {
+		return nil, errors.New("webhook body is invalid")
+	}
+	// Downstream parsing reads only this immutable capture, so verification and
+	// event extraction cannot observe different bytes.
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	return body, nil
+}
+
+func parseWebhookPayload(r *http.Request, rawBody []byte) ([]byte, error) {
 	contentType := r.Header.Get("Content-Type")
 
 	// If it's a GET request, encode the URL query parameters as JSON.
@@ -171,32 +208,25 @@ func parseWebhookPayload(r *http.Request) ([]byte, error) {
 
 	// If it's URL encoded form data, parse the form and convert to JSON.
 	if strings.HasPrefix(contentType, "application/x-www-form-urlencoded") {
-		if err := r.ParseForm(); err != nil {
+		form, err := url.ParseQuery(string(rawBody))
+		if err != nil {
 			return nil, fmt.Errorf("failed to parse form data")
 		}
-		return queryOrFormToJSON(r.Form)
+		return queryOrFormToJSON(form)
 	}
 
 	// Fallback to reading the raw body (typically for application/json).
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read body")
-	}
-
 	// If body is empty but query parameters exist on POST/PUT, use the query params.
-	if len(body) == 0 && len(r.URL.Query()) > 0 {
+	if len(rawBody) == 0 && len(r.URL.Query()) > 0 {
 		return queryOrFormToJSON(r.URL.Query())
 	}
 
-	return body, nil
+	return rawBody, nil
 }
 
 // fetchWebhookConfig resolves an inbound webhook slug against the Engine's
-// own fused_workspace_webhooks table -- a single indexed Postgres read that
-// replaces the old NATS-to-Registry round trip (engine_owned_webhooks_plan.md,
-// Task 6). No cache layer sits in front of this: a local indexed read is
-// already as cheap as the in-memory cache it replaces was trying to save a
-// network hop for, and dropping the cache means a slug rotation or a
+// own fused_workspace_webhooks table using a single indexed Postgres read.
+// No cache layer sits in front of this, so a slug rotation or a
 // registration's removal takes effect immediately instead of within a TTL
 // window.
 func fetchWebhookConfig(ctx context.Context, urlSlug string) (*webhookConfig, error) {
@@ -222,6 +252,8 @@ func fetchWebhookConfig(ctx context.Context, urlSlug string) (*webhookConfig, er
 		AuthKeyName:         ww.AuthKeyName,
 		SignatureHeader:     ww.SignatureHeader,
 		VerificationHeaders: ww.VerificationHeaders,
+		SignaturePolicy:     ww.SignaturePolicy,
+		CallbackURL:         ww.CallbackURL,
 		SecretBucketID:      secretBucketID,
 		SecretRef:           ww.SecretRef,
 		Label:               ww.Label,
@@ -233,9 +265,20 @@ func fetchWebhookConfig(ctx context.Context, urlSlug string) (*webhookConfig, er
 // retains HTTP response writing so the verifier stays pure and testable.
 //
 // Complexity: 1 (verify call) + 1 (result check) = 2
-func validateWebhookAuth(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte, config *webhookConfig) bool {
+type webhookAuthOutcome string
+
+const (
+	webhookAuthAccepted webhookAuthOutcome = "accepted"
+	webhookAuthHandled  webhookAuthOutcome = "handled"
+	webhookAuthRejected webhookAuthOutcome = "rejected"
+)
+
+func validateWebhookAuth(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte, config *webhookConfig) webhookAuthOutcome {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.webhook.verify")
 	defer span.End()
+	if config.SignaturePolicy != nil {
+		return validateSignaturePolicy(ctx, span, w, r, body, config)
+	}
 
 	var signingSecret string
 	if config.AuthType != "" && config.AuthType != "none" {
@@ -244,7 +287,7 @@ func validateWebhookAuth(ctx context.Context, w http.ResponseWriter, r *http.Req
 			span.SetStatus(codes.Error, "failed to resolve webhook secret")
 			publishRejection(ctx, config, "UNKNOWN", "internal config error", len(body))
 			writeError(w, http.StatusInternalServerError, "internal server error")
-			return false
+			return webhookAuthRejected
 		}
 		signingSecret = secret
 	}
@@ -259,16 +302,53 @@ func validateWebhookAuth(ctx context.Context, w http.ResponseWriter, r *http.Req
 	})
 
 	observability.WebhookVerify.Add(ctx, 1)
+	span.SetAttributes(attribute.String("webhook.verification.result", result.Code))
 
 	if result.OK {
 		span.SetStatus(codes.Ok, "verified")
-		return true
+		return webhookAuthAccepted
 	}
 
-	span.SetStatus(codes.Error, result.Reason)
-	publishRejection(ctx, config, "", result.Reason, len(body))
+	// Keep telemetry dimensions bounded; the human-readable reason can include
+	// configured header names and belongs only in the scoped rejection response.
+	span.SetStatus(codes.Error, "verification rejected")
+	// Durable analytics accepts only the bounded verifier code. The response may
+	// name a configured header for an operator, but that value is not safe as a
+	// metric/event dimension and must not outlive this request.
+	publishRejection(ctx, config, "", result.Code, len(body))
 	writeError(w, http.StatusUnauthorized, result.Reason)
-	return false
+	return webhookAuthRejected
+}
+
+func validateSignaturePolicy(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, body []byte, config *webhookConfig) webhookAuthOutcome {
+	result := webhookverify.VerifyPolicy(ctx, config.SignaturePolicy, webhookverify.PolicyInput{
+		Request: r, RawBody: body, CallbackURL: config.CallbackURL,
+		Resolve: func(resolveCtx context.Context, ref string) (string, error) {
+			// The reviewed recipe may select the key but never a different bucket
+			// binding than the immutable registration resolved at apply time.
+			if ref != config.SecretRef {
+				return "", errors.New("signature secret reference does not match registration")
+			}
+			return globalSecretResolver.GetWebhookSecret(resolveCtx, uuid.MustParse(config.AccountID), config.SecretBucketID, ref)
+		},
+	})
+	observability.WebhookVerify.Add(ctx, 1)
+	span.SetAttributes(attribute.String("webhook.verification.result", result.Code))
+	if !result.OK {
+		span.SetStatus(codes.Error, "verification rejected")
+		publishRejection(ctx, config, "", result.Code, len(body))
+		writeError(w, http.StatusUnauthorized, result.Reason)
+		return webhookAuthRejected
+	}
+	if result.Code != webhookverify.CodeChallengeResponded {
+		span.SetStatus(codes.Ok, "verified")
+		return webhookAuthAccepted
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(result.StatusCode)
+	_, _ = w.Write(result.ChallengeBody)
+	span.SetStatus(codes.Ok, "challenge responded")
+	return webhookAuthHandled
 }
 
 // extractEventName resolves the event name from the request using the configured JSON path or header.
