@@ -9,25 +9,19 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/webhookverify"
 	"github.com/Usefused/engine/internal/shared/signaturepolicy"
+	"github.com/Usefused/engine/internal/testcontract"
 )
 
+// loadSignatureFixture resolves semantic recipe names through the single local
+// test-contract owner rather than filesystem or provider-name dispatch.
 func loadSignatureFixture(t *testing.T, name string) signaturepolicy.Config {
 	t.Helper()
-	body, err := os.ReadFile("../../../../contract-fixtures/signature/" + name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var policy signaturepolicy.Config
-	if err := json.Unmarshal(body, &policy); err != nil {
-		t.Fatal(err)
-	}
-	return policy
+	return testcontract.SignaturePolicy(name)
 }
 
 func fixtureResolver(secret string) func(context.Context, string) (string, error) {
@@ -37,7 +31,7 @@ func fixtureResolver(secret string) func(context.Context, string) (string, error
 // TestRawBodyCallbackSignatureUsesTrustedURL proves untrusted request metadata
 // cannot replace the callback URL committed by the runtime contract.
 func TestRawBodyCallbackSignatureUsesTrustedURL(t *testing.T) {
-	policy := loadSignatureFixture(t, "v1_raw_body_callback_signature.json")
+	policy := loadSignatureFixture(t, "raw_body_callback")
 	body := []byte(`{"action":"update"}`)
 	callbackURL := "https://hooks.example.test/webhook/immutable"
 	mac := hmac.New(sha1.New, []byte("secret"))
@@ -59,7 +53,7 @@ func TestRawBodyCallbackSignatureUsesTrustedURL(t *testing.T) {
 // TestURLFormSignatureSortsRepeatedPairs protects deterministic signing when a
 // form repeats the same field name.
 func TestURLFormSignatureSortsRepeatedPairs(t *testing.T) {
-	policy := loadSignatureFixture(t, "v1_url_form_signature.json")
+	policy := loadSignatureFixture(t, "url_form")
 	callbackURL := "https://hooks.example.test/webhook/form"
 	body := []byte("Digits=2&CallSid=B&CallSid=A")
 	mac := hmac.New(sha1.New, []byte("token"))
@@ -76,7 +70,7 @@ func TestURLFormSignatureSortsRepeatedPairs(t *testing.T) {
 
 // TestConditionalChallengePrecedesJWT preserves first-match rule ordering.
 func TestConditionalChallengePrecedesJWT(t *testing.T) {
-	policy := loadSignatureFixture(t, "v1_conditional_challenge_jwt.json")
+	policy := loadSignatureFixture(t, "conditional_challenge_jwt")
 	req := httptest.NewRequest(http.MethodPost, "/webhook", nil)
 	result := webhookverify.VerifyPolicy(context.Background(), &policy, webhookverify.PolicyInput{
 		Request: req, RawBody: []byte(`{"challenge":"abc"}`),
@@ -88,7 +82,7 @@ func TestConditionalChallengePrecedesJWT(t *testing.T) {
 
 // TestConditionalEventVerifiesBoundJWT checks issuer and audience remain bound.
 func TestConditionalEventVerifiesBoundJWT(t *testing.T) {
-	policy := loadSignatureFixture(t, "v1_conditional_challenge_jwt.json")
+	policy := loadSignatureFixture(t, "conditional_challenge_jwt")
 	now := time.Unix(2_000_000_000, 0)
 	token := signedJWT(t, "secret", map[string]any{"alg": "HS256", "typ": "JWT"}, map[string]any{
 		"aud": "webhook", "exp": now.Add(time.Minute).Unix(),

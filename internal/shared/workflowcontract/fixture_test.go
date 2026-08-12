@@ -1,24 +1,16 @@
 package workflowcontract_test
 
 import (
-	"encoding/json"
-	"os"
 	"testing"
 
 	"github.com/Usefused/engine/internal/shared/workflowcontract"
+	"github.com/Usefused/engine/internal/testcontract"
 )
 
-// TestMediaUploadFixtureValidates keeps upload behavior executable without
+// TestMediaUploadContractValidates keeps upload behavior executable without
 // making a provider label part of the workflow contract.
-func TestMediaUploadFixtureValidates(t *testing.T) {
-	body, err := os.ReadFile("../../../../contract-fixtures/workflow/v1_media_upload.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var workflow workflowcontract.UploadWorkflow
-	if err := json.Unmarshal(body, &workflow); err != nil {
-		t.Fatal(err)
-	}
+func TestMediaUploadContractValidates(t *testing.T) {
+	workflow := testcontract.UploadWorkflow()
 	if err := workflowcontract.Validate(&workflow); err != nil {
 		t.Fatal(err)
 	}

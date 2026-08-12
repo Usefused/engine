@@ -2,33 +2,32 @@ package ratelimitpolicy
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// TestFrozenFixtures explicitly validates the complete policy inventory so no
-// fixture relies solely on a broad CLI filename glob for coverage.
-func TestFrozenFixtures(t *testing.T) {
-	for _, name := range []string{"v3_shared_credential.json", "v3_method_concurrency.json", "v3_simultaneous_windows.json", "v3_weighted_burst_tenant.json", "v3_dynamic_headers.json", "v3_quota_units.json", "v3_complexity.json", "v3_composite_identity.json", "v3_concurrency.json", "v3_account_operation_concurrency.json", "v3_hourly_connection.json"} {
+// TestCanonicalAlgorithmsValidate validates every Engine algorithm from local typed cases;
+// cross-runtime fixture inventory coverage belongs to the integration suite.
+func TestCanonicalAlgorithmsValidate(t *testing.T) {
+	for name, config := range canonicalRateLimitCases() {
 		t.Run(name, func(t *testing.T) {
-			var config Config
-			if err := json.Unmarshal(readFixture(t, name), &config); err != nil {
-				t.Fatalf("decode fixture: %v", err)
-			}
-			if config.Version != Version {
-				t.Fatalf("version = %d, want %d", config.Version, Version)
+			if err := config.Validate(); err != nil {
+				t.Fatalf("validate %s: %v", name, err)
 			}
 		})
 	}
 }
 
-func TestFrozenInvalidFixturesFailClosed(t *testing.T) {
-	for _, name := range []string{"invalid_legacy.json", "invalid_discriminator.json"} {
+// TestInvalidContractsFailClosed retains representative obsolete and
+// discriminator-conflict inputs as inline negative evidence only.
+func TestInvalidContractsFailClosed(t *testing.T) {
+	for name, raw := range map[string]string{
+		"legacy":        `{"version":2,"scope":"connection","default_cost":1}`,
+		"discriminator": `{"version":3,"policies":[{"name":"requests","mode":"enforce","unit":"requests","identity":{"inputs":[{"kind":"service_version"}]},"cost":{"default":1,"rules":[]},"algorithm":"fixed_window","fixed_window":{"limit":100,"duration_ms":60000},"concurrency":{"limit":2}}]}`,
+	} {
 		t.Run(name, func(t *testing.T) {
 			var config Config
-			if err := json.Unmarshal(readFixture(t, name), &config); err == nil {
+			if err := json.Unmarshal([]byte(raw), &config); err == nil {
 				t.Fatal("expected invalid rate-limit contract")
 			}
 		})
@@ -121,12 +120,35 @@ func TestMaximumPolicyAndOperationCounts(t *testing.T) {
 	}
 }
 
+// fixedWindowConfig is the canonical base used by mutation and algorithm tests
+// so validation differences come only from the behavior under test.
 func fixedWindowConfig() Config {
 	return Config{Version: Version, Policies: []Policy{{
 		Name: "requests", Mode: ModeEnforce, Unit: UnitRequests,
 		Identity: BucketIdentity{Inputs: []IdentityInput{{Kind: IdentityServiceVersion}}}, Cost: CostPlan{Default: 1}, Algorithm: AlgorithmFixedWindow,
 		FixedWindow: &FixedWindow{Limit: 100, DurationMs: 60_000},
 	}}}
+}
+
+// canonicalRateLimitCases derives every algorithm from one valid base so
+// identity and cost semantics cannot drift between standalone Engine tests.
+func canonicalRateLimitCases() map[string]Config {
+	rolling := fixedWindowConfig()
+	rolling.Policies[0].Algorithm = AlgorithmRollingWindow
+	rolling.Policies[0].FixedWindow = nil
+	rolling.Policies[0].RollingWindow = &RollingWindow{Limit: 100, DurationMs: 60_000}
+	token := fixedWindowConfig()
+	token.Policies[0].Algorithm = AlgorithmTokenBucket
+	token.Policies[0].FixedWindow = nil
+	token.Policies[0].TokenBucket = &TokenBucket{Capacity: 100, RefillUnits: 10, RefillIntervalMs: 1_000}
+	concurrency := fixedWindowConfig()
+	concurrency.Policies[0].Algorithm = AlgorithmConcurrency
+	concurrency.Policies[0].FixedWindow = nil
+	concurrency.Policies[0].Concurrency = &Concurrency{Limit: 4}
+	return map[string]Config{
+		"fixed_window": fixedWindowConfig(), "rolling_window": rolling,
+		"token_bucket": token, "concurrency": concurrency,
+	}
 }
 
 func cloneConfig(t *testing.T, config Config) Config {
@@ -140,14 +162,4 @@ func cloneConfig(t *testing.T, config Config) Config {
 		t.Fatal(err)
 	}
 	return clone
-}
-
-func readFixture(t *testing.T, name string) []byte {
-	t.Helper()
-	path := filepath.Join("..", "..", "..", "..", "contract-fixtures", "rate-limit", name)
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read fixture: %v", err)
-	}
-	return raw
 }

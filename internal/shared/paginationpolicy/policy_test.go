@@ -2,25 +2,14 @@ package paginationpolicy
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
-func TestContractFixtures(t *testing.T) {
-	valid := []string{
-		"v3_token.json",
-		"v3_offset.json",
-		"v3_hybrid.json",
-		"v3_rfc_link.json",
-		"v3_graphql.json",
-		"v3_graphql_templates.json",
-		"v3_conditional_items.json",
-		"v3_bare_array_cursor.json",
-	}
-	for _, name := range valid {
+// TestCanonicalContractsValidate validates representative Engine-owned state graphs;
+// cross-runtime corpus coverage remains in the integration workspace.
+func TestCanonicalContractsValidate(t *testing.T) {
+	for name, config := range canonicalPaginationCases() {
 		t.Run(name, func(t *testing.T) {
-			config := readContractFixture(t, name)
 			if err := Validate(&config); err != nil {
 				t.Fatalf("Validate: %v", err)
 			}
@@ -28,17 +17,17 @@ func TestContractFixtures(t *testing.T) {
 	}
 }
 
-func TestLegacyContractFixturesFailClosed(t *testing.T) {
-	for _, name := range []string{
-		"v2_cursor_body.json",
-		"v2_cursor_header_numeric.json",
-		"v2_offset.json",
-		"v2_offset_root_array.json",
-		"v2_page_number.json",
-		"v2_next_url_link.json",
+// TestLegacyContractsFailClosed keeps representative removed shapes as
+// negative evidence without making Engine depend on a legacy fixture tree.
+func TestLegacyContractsFailClosed(t *testing.T) {
+	for name, raw := range map[string]string{
+		"cursor":      `{"version":2,"type":"cursor","cursor":{"request_parameter":"cursor"}}`,
+		"offset":      `{"version":2,"type":"offset","offset":{"request_parameter":"offset"}}`,
+		"page_number": `{"version":2,"type":"page_number","page_number":{"request_parameter":"page"}}`,
+		"next_url":    `{"version":2,"type":"next_url","next_url":{"path":"$.next"}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			assertContractDecodeFails(t, name)
+			assertContractDecodeFails(t, raw)
 		})
 	}
 }
@@ -52,10 +41,15 @@ func TestRootPathIsLimitedToItems(t *testing.T) {
 	}
 }
 
-func TestInvalidContractFixturesFailClosed(t *testing.T) {
-	for _, name := range []string{"invalid_legacy_shape.json", "invalid_multiple_strategies.json"} {
+// TestInvalidContractsFailClosed covers invalid canonical composition
+// locally; the shared golden inventory is tested outside standalone Engine CI.
+func TestInvalidContractsFailClosed(t *testing.T) {
+	for name, raw := range map[string]string{
+		"legacy_shape":    `{"type":"cursor","cursor":{"request_parameter":"cursor"}}`,
+		"duplicate_state": `{"version":3,"request":[],"response":{"items":{"path":"$"},"values":[]},"continuation":[{"kind":"next_url","state":"next","response_value":"missing","origin":{"mode":"same_origin"}},{"kind":"next_url","state":"next","response_value":"missing","origin":{"mode":"same_origin"}}],"termination":{"stop_on_empty_items":true,"repeated_value":"stop"},"limits":{}}`,
+	} {
 		t.Run(name, func(t *testing.T) {
-			assertContractDecodeFails(t, name)
+			assertContractDecodeFails(t, raw)
 		})
 	}
 }
@@ -79,29 +73,40 @@ func TestEffectiveLimitsAppliesFrozenDefaults(t *testing.T) {
 	}
 }
 
-func readContractFixture(t *testing.T, name string) Config {
-	t.Helper()
-	path := filepath.Join("..", "..", "..", "..", "contract-fixtures", "pagination", name)
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read fixture: %v", err)
+// canonicalPaginationCases keeps each continuation family explicit while
+// avoiding duplicated filesystem inventories inside the Engine repository.
+func canonicalPaginationCases() map[string]Config {
+	zero := int64(0)
+	return map[string]Config{
+		"token": {
+			Version:      Version,
+			Request:      []RequestStep{{State: "cursor", Target: RequestTarget{Location: RequestQuery, Name: "cursor"}, ValueType: ValueString, Apply: ApplyAll}},
+			Response:     ResponsePlan{Items: ItemsSource{Path: "$.items"}, Values: []ResponseValue{{Name: "next", Source: ValueSource{Location: SourceBody, Path: "$.next", ValueType: ValueString}}}},
+			Continuation: []ContinuationStep{{Kind: ContinuationToken, State: "cursor", ResponseValue: "next"}},
+			Termination:  Termination{StopOnMissingValues: []string{"next"}, RepeatedValue: RepeatedStop},
+		},
+		"offset": {
+			Version:      Version,
+			Request:      []RequestStep{{State: "offset", Target: RequestTarget{Location: RequestQuery, Name: "offset"}, ValueType: ValueInteger, Initial: &Scalar{Type: ValueInteger, Integer: &zero}, Apply: ApplyAll}},
+			Response:     ResponsePlan{Items: ItemsSource{Path: "$.items"}},
+			Continuation: []ContinuationStep{{Kind: ContinuationOffset, State: "offset", Increment: &Increment{Mode: IncrementItemsReturned}}},
+			Termination:  Termination{StopOnEmptyItems: true, RepeatedValue: RepeatedStop},
+		},
+		"next_url": {
+			Version:      Version,
+			Response:     ResponsePlan{Items: ItemsSource{Path: "$.items"}, Values: []ResponseValue{{Name: "next", Source: ValueSource{Location: SourceBody, Path: "$.next", ValueType: ValueURL}}}},
+			Continuation: []ContinuationStep{{Kind: ContinuationNextURL, State: "next_url", ResponseValue: "next", Origin: &OriginPolicy{Mode: OriginSame}}},
+			Termination:  Termination{StopOnMissingValues: []string{"next"}, RepeatedValue: RepeatedStop},
+		},
 	}
-	var config Config
-	if err := json.Unmarshal(raw, &config); err != nil {
-		t.Fatalf("unmarshal fixture: %v", err)
-	}
-	return config
 }
 
-func assertContractDecodeFails(t *testing.T, name string) {
+// assertContractDecodeFails proves strict JSON decoding rejects obsolete or
+// internally inconsistent inputs before they reach pagination execution.
+func assertContractDecodeFails(t *testing.T, raw string) {
 	t.Helper()
-	path := filepath.Join("..", "..", "..", "..", "contract-fixtures", "pagination", name)
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read fixture: %v", err)
-	}
 	var config Config
-	if err := json.Unmarshal(raw, &config); err == nil {
+	if err := json.Unmarshal([]byte(raw), &config); err == nil {
 		t.Fatal("non-canonical pagination contract unexpectedly accepted")
 	}
 }
