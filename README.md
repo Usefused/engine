@@ -7,7 +7,7 @@
 
 ---
 
-[Fused](https://usefused.com) is an integration control plane for managing third-party APIs, webhooks, and AI-agent tools.
+[Fused](https://usefused.com) is the integration harness — one place to define, run, and control the integrations your apps and agents depend on. The Engine is the self-hosted control plane that applies workspace policies, injects credentials, and routes configured API calls, MCP sessions, and webhook ingress.
 
 The **Fused Engine** is the self-hosted runtime that applies workspace policies created in Fused. Deploy it in your own infrastructure to run configured API calls, MCP sessions, and webhook ingress close to your systems.
 
@@ -138,10 +138,6 @@ FUSED_DATABASE_MAX_CONN_IDLE_TIME=30m
 
 # Your organization's Fused Cloud license key for the Engine (Required)
 FUSED_LICENSE_KEY="<provided-by-fused>"
-
-# Tell the Engine where the Admin UI is hosted to configure CORS properly.
-# (Defaults to the embedded Engine UI on http://localhost:8081, or you can use the --ui-url flag)
-FUSED_UI_URL="https://admin.your-company.com"
 
 # (Optional) If you have a separate external NATS cluster, set this to override the embedded server.
 # Leave blank to boot the internal embedded NATS.
