@@ -3,33 +3,24 @@ package uploadworkflow_test
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"runtime"
 	"sync"
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine/uploadworkflow"
 	"github.com/Usefused/engine/internal/shared/workflowcontract"
+	"github.com/Usefused/engine/internal/testcontract"
 )
 
 // loadWorkflow centralizes the provider-neutral reviewed workflow used by all
 // execution-mode tests so they cannot drift onto hand-built variants.
 func loadWorkflow(t *testing.T) workflowcontract.UploadWorkflow {
 	t.Helper()
-	body, err := os.ReadFile("../../../../contract-fixtures/workflow/v1_media_upload.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var workflow workflowcontract.UploadWorkflow
-	if err := json.Unmarshal(body, &workflow); err != nil {
-		t.Fatal(err)
-	}
-	return workflow
+	return testcontract.UploadWorkflow()
 }
 
 // TestResumableWorkflowUsesBoundedChunksAndExactStatuses uses the shared

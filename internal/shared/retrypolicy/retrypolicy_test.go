@@ -2,18 +2,16 @@ package retrypolicy
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
-func TestCanonicalFixtureValidates(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "contract-fixtures", "retry", "v3_idempotency_predicates.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
+const canonicalRetryV3 = `{"version":3,"rules":[{"predicates":{"methods":["GET"],"operation_kinds":["read"],"statuses":[{"min":429,"max":429}],"errors":[],"body_replayability":"any","idempotency_key":{"requirement":"any"},"required_provider_headers":[]},"action":{"max_attempts":3,"max_elapsed_ms":30000,"backoff":{"strategy":"exponential","base_delay_ms":250,"max_delay_ms":5000,"jitter_ms":100},"retry_after_headers":[]}}]}`
+
+// TestCanonicalRetryV3Validates proves the standalone Engine accepts its exact
+// retry v3 boundary without loading data from a sibling repository.
+func TestCanonicalRetryV3Validates(t *testing.T) {
 	var config Config
-	if err := json.Unmarshal(raw, &config); err != nil {
+	if err := json.Unmarshal([]byte(canonicalRetryV3), &config); err != nil {
 		t.Fatal(err)
 	}
 	if err := Validate(&config); err != nil {

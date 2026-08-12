@@ -2,11 +2,10 @@ package api
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"reflect"
 	"testing"
 
+	"github.com/Usefused/engine/internal/testcontract"
 	"github.com/google/uuid"
 )
 
@@ -92,13 +91,13 @@ func workspaceResetConflictCases() []workspaceResetConflictCase {
 	}
 }
 
+// readEngineWorkspaceRetryFixture returns the Engine-owned policy used to prove
+// workspace publication and local overrides preserve exact v3 semantics.
 func readEngineWorkspaceRetryFixture(t *testing.T) []byte {
 	t.Helper()
-	payload, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "contract-fixtures", "retry", "v3_idempotency_predicates.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return payload
+	// Engine owns this policy input; cross-runtime fixture equality is verified
+	// by the integration workspace rather than a hidden parent checkout.
+	return testcontract.RetryV3JSON()
 }
 
 func encodedPolicyRetry(t *testing.T, policy []byte) []byte {

@@ -1,33 +1,18 @@
 package sandbox
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"reflect"
 	"testing"
 
 	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
+	"github.com/Usefused/engine/internal/testcontract"
 )
 
-// TestEngineConsumesTransportContractFixture proves Engine consumes the same
-// provider-neutral auth and server decisions as the control-plane clients.
-func TestEngineConsumesTransportContractFixture(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "..", "contract-fixtures", "security", "v1_transport.json")
-	payload, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read fixture: %v", err)
-	}
-	var fixture struct {
-		AuthConfig           fusedobject.AuthConfig   `json:"auth_config"`
-		OAuthAuthConfig      fusedobject.AuthConfig   `json:"oauth_auth_config"`
-		SecurityRequirements authrouting.Requirements `json:"security_requirements"`
-		Server               fusedobject.Server       `json:"server"`
-	}
-	if err := json.Unmarshal(payload, &fixture); err != nil {
-		t.Fatalf("decode fixture: %v", err)
-	}
+// TestEngineConsumesTransportContract proves Engine consumes provider-neutral
+// auth and server decisions without importing control-plane test data.
+func TestEngineConsumesTransportContract(t *testing.T) {
+	fixture := testcontract.Transport()
 	if fixture.AuthConfig.Name != "emptyPasswordBasic" || fixture.AuthConfig.BasicPasswordMode != authrouting.BasicPasswordEmpty {
 		t.Fatalf("basic wire changed: %#v", fixture.AuthConfig)
 	}

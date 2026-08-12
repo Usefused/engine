@@ -2,9 +2,6 @@ package engine
 
 import (
 	"context"
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,23 +13,14 @@ import (
 
 // TestContractPoliciesResolveWithoutProviderBranches proves generic policy data, rather than provider names, drives quota coordination.
 func TestContractPoliciesResolveWithoutProviderBranches(t *testing.T) {
-	root := filepath.Join("..", "..", "..", "contract-fixtures", "rate-limit")
-	fixtures := map[string]string{
-		"v3_shared_credential.json": "rest:GET:/items", "v3_method_concurrency.json": "rest:GET:/api/v2/invoices",
-		"v3_simultaneous_windows.json": "rest:GET:/items", "v3_weighted_burst_tenant.json": "rest:POST:/wiki/api/v2/search",
-		"v3_dynamic_headers.json": "rest:GET:/items", "v3_quota_units.json": "rest:POST:/v1/resources/send",
-		"v3_complexity.json": "graphql:query:Items", "v3_composite_identity.json": "rest:GET:/items", "v3_concurrency.json": "rest:GET:/items",
-	}
-	for name, stableKey := range fixtures {
-		t.Run(name, func(t *testing.T) { assertQuotaFixtureResolves(t, filepath.Join(root, name), stableKey) })
+	for name, contract := range quotaContractCases() {
+		t.Run(name, func(t *testing.T) { assertQuotaFixtureResolves(t, contract.config, contract.stableKey) })
 	}
 }
 
 // assertQuotaFixtureResolves also verifies that resolved identity material is hashed before crossing the coordinator boundary.
-func assertQuotaFixtureResolves(t *testing.T, path, stableKey string) {
+func assertQuotaFixtureResolves(t *testing.T, config ratelimitpolicy.Config, stableKey string) {
 	t.Helper()
-	var config ratelimitpolicy.Config
-	decodeFixtureFile(t, path, &config)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	ctx = WithProviderRateLimitIdentity(ctx, uuid.New(), uuid.New(), uuid.New())
@@ -53,14 +41,37 @@ func assertQuotaFixtureResolves(t *testing.T, path, stableKey string) {
 	}
 }
 
-// decodeFixtureFile keeps fixture decoding strict enough that malformed policy JSON fails at the test boundary.
-func decodeFixtureFile(t *testing.T, path string, target any) {
-	t.Helper()
-	payload, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+type quotaContractCase struct {
+	config    ratelimitpolicy.Config
+	stableKey string
+}
+
+// quotaContractCases keeps algorithm and identity coverage local to Engine;
+// provider-specific acceptance mapping is deliberately outside this repo.
+func quotaContractCases() map[string]quotaContractCase {
+	return map[string]quotaContractCase{
+		"fixed_service": {
+			config:    quotaConfig(ratelimitpolicy.Policy{Name: "requests", Mode: ratelimitpolicy.ModeEnforce, Unit: ratelimitpolicy.UnitRequests, Identity: quotaIdentity(ratelimitpolicy.IdentityServiceVersion, ""), Cost: ratelimitpolicy.CostPlan{Default: 1}, Algorithm: ratelimitpolicy.AlgorithmFixedWindow, FixedWindow: &ratelimitpolicy.FixedWindow{Limit: 100, DurationMs: 60_000}}),
+			stableKey: "rest:GET:/items",
+		},
+		"token_tenant": {
+			config:    quotaConfig(ratelimitpolicy.Policy{Name: "points", Mode: ratelimitpolicy.ModeEnforce, Unit: ratelimitpolicy.UnitPoints, Identity: quotaIdentity(ratelimitpolicy.IdentityTenant, "connection.tenant_id"), Cost: ratelimitpolicy.CostPlan{Default: 1, Rules: []ratelimitpolicy.CostRule{{Operation: "rest:POST:/search", Cost: 5}}}, Algorithm: ratelimitpolicy.AlgorithmTokenBucket, TokenBucket: &ratelimitpolicy.TokenBucket{Capacity: 100, RefillUnits: 10, RefillIntervalMs: 1_000}}),
+			stableKey: "rest:POST:/search",
+		},
+		"connection_concurrency": {
+			config:    quotaConfig(ratelimitpolicy.Policy{Name: "concurrency", Mode: ratelimitpolicy.ModeEnforce, Unit: ratelimitpolicy.UnitRequests, Identity: quotaIdentity(ratelimitpolicy.IdentityConnection, ""), Cost: ratelimitpolicy.CostPlan{Default: 1}, Algorithm: ratelimitpolicy.AlgorithmConcurrency, Concurrency: &ratelimitpolicy.Concurrency{Limit: 4}}),
+			stableKey: "rest:GET:/items",
+		},
 	}
-	if err := json.Unmarshal(payload, target); err != nil {
-		t.Fatalf("decode %s: %v", path, err)
-	}
+}
+
+// quotaConfig applies the canonical v3 envelope once for every local policy.
+func quotaConfig(policy ratelimitpolicy.Policy) ratelimitpolicy.Config {
+	return ratelimitpolicy.Config{Version: ratelimitpolicy.Version, Policies: []ratelimitpolicy.Policy{policy}}
+}
+
+// quotaIdentity keeps binding requirements explicit because Engine must hash
+// resolved identity material before coordinator transport.
+func quotaIdentity(kind ratelimitpolicy.IdentityKind, binding string) ratelimitpolicy.BucketIdentity {
+	return ratelimitpolicy.BucketIdentity{Inputs: []ratelimitpolicy.IdentityInput{{Kind: kind, Binding: binding}}}
 }
