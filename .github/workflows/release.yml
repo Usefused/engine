@@ -32,12 +32,40 @@ jobs:
             echo "new_tag=$CURRENT_TAG" >> $GITHUB_OUTPUT
             exit 0
           fi
+
+          # Determine bump level from conventional commits since last tag
+          # 0=patch (fix, chore, docs, etc.), 1=minor (feat), 2=major (BREAKING CHANGE or !)
+          BUMP=0
+          if git describe --tags --abbrev=0 >/dev/null 2>&1; then
+            COMMITS=$(git log "${LATEST_TAG}..HEAD" --format="%s")
+          else
+            COMMITS=$(git log --format="%s")
+          fi
+
+          while IFS= read -r msg; do
+            case "$msg" in
+              *BREAKING\ CHANGE*|*BREAKING-CHANGE*|*!\:*)
+                BUMP=2
+                break
+                ;;
+              feat\(*\):*|feat:*)
+                [ "$BUMP" -lt 1 ] && BUMP=1
+                ;;
+            esac
+          done <<< "$COMMITS"
+
           MAJOR=$(echo "${LATEST_TAG#v}" | cut -d. -f1)
           MINOR=$(echo "${LATEST_TAG#v}" | cut -d. -f2)
           PATCH=$(echo "${LATEST_TAG#v}" | cut -d. -f3)
-          NEW_PATCH=$((PATCH + 1))
-          NEW_TAG="v${MAJOR}.${MINOR}.${NEW_PATCH}"
-          echo "Latest tag: $LATEST_TAG → New tag: $NEW_TAG"
+
+          case $BUMP in
+            2) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            1) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            0) PATCH=$((PATCH + 1)) ;;
+          esac
+
+          NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "Bump: $BUMP (0=patch, 1=minor, 2=major) | $LATEST_TAG → $NEW_TAG"
           echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
