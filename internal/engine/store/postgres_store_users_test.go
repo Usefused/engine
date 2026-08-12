@@ -79,11 +79,11 @@ func TestPostgresUserLifecycleCredentialIsOneTimeAndAuditIsSecretSafe(t *testing
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
 	principalActor, err := authenticator.AuthenticateControlCredential(ctx, issued.RawKey)
-	if err != nil || principalActor.SubjectID != created.User.ID || principalActor.DisplayName != created.User.DisplayName || principalActor.Email != created.User.Email {
+	if err != nil || principalActor.SubjectID != updated.User.ID || principalActor.DisplayName != updated.User.DisplayName || principalActor.Email != updated.User.Email || principalActor.CredentialSource != "api_key" {
 		t.Fatalf("AuthenticateControlCredential = %#v, %v", principalActor, err)
 	}
 	principal, err := repository.LoadControlPrincipal(ctx, accesscontrol.HashControlCredential(issued.RawKey))
-	if err != nil || principal.SubjectID != created.User.ID || principal.Kind != accesscontrol.SubjectUser || principal.DisplayName != created.User.DisplayName || principal.Email != created.User.Email {
+	if err != nil || principal.SubjectID != updated.User.ID || principal.Kind != accesscontrol.SubjectUser || principal.DisplayName != updated.User.DisplayName || principal.Email != updated.User.Email || principal.CredentialSource != "api_key" {
 		t.Fatalf("issued principal = %#v, %v", principal, err)
 	}
 	if _, err := repository.LoadControlPrincipal(ctx, accesscontrol.HashControlCredential(created.User.Email)); !errors.Is(err, accesscontrol.ErrAuthenticationRequired) {

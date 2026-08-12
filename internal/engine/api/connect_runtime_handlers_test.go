@@ -19,6 +19,16 @@ import (
 	"github.com/google/uuid"
 )
 
+func connectTestOAuthFlow(scopes ...string) fusedobject.OAuth2FlowContract {
+	declared := make(map[string]string, len(scopes))
+	for _, scope := range scopes {
+		declared[scope] = ""
+	}
+	return fusedobject.OAuth2FlowContract{
+		AuthorizationURL: "https://auth.example/authorize", TokenURL: "https://auth.example/token", Scopes: declared,
+	}
+}
+
 // TestStartConnectSessionHandlerCreatesAuthorizationURL verifies the start
 // endpoint emits browser-safe auth material while storing server-only state.
 func TestStartConnectSessionHandlerCreatesAuthorizationURL(t *testing.T) {
@@ -70,8 +80,8 @@ func attachConnectTestArtifact(fixture *connectRuntimeFixture) uuid.UUID {
 // TestResolveConnectScopesNarrowsAndNormalizes proves callers can request a
 // least-privilege subset without duplicate or order-dependent consent values.
 func TestResolveConnectScopesNarrowsAndNormalizes(t *testing.T) {
-	auth := fusedobject.AuthConfig{Type: "oauth2", Scopes: []string{"write", "read", "offline_access"}}
-	scopes, err := resolveConnectScopes(auth, []string{"write", "read", "write"})
+	auth := fusedobject.AuthConfig{Type: "oauth2"}
+	scopes, err := resolveConnectScopes(auth, connectTestOAuthFlow("write", "read", "offline_access"), []string{"write", "read", "write"})
 	if err != nil {
 		t.Fatalf("resolve scopes: %v", err)
 	}
@@ -81,8 +91,8 @@ func TestResolveConnectScopesNarrowsAndNormalizes(t *testing.T) {
 }
 
 func TestBuildConnectAuthorizeURLRejectsUnknownScopeDelimiter(t *testing.T) {
-	auth := fusedobject.AuthConfig{AuthorizationURL: "https://auth.example/authorize", ScopesDelimiter: "pipe"}
-	_, err := buildConnectAuthorizeURL(auth, connectClientCredentials{}, "state", "challenge", "nonce")
+	auth := fusedobject.AuthConfig{ScopesDelimiter: "pipe"}
+	_, err := buildConnectAuthorizeURL(auth, connectTestOAuthFlow(), nil, connectClientCredentials{}, "state", "challenge", "nonce")
 	if err == nil || !strings.Contains(err.Error(), "scopes_delimiter") {
 		t.Fatalf("error = %v", err)
 	}
@@ -91,8 +101,8 @@ func TestBuildConnectAuthorizeURLRejectsUnknownScopeDelimiter(t *testing.T) {
 // TestResolveConnectScopesRejectsUndeclared prevents an app caller from using
 // startConnectSession to expand beyond the pinned service contract.
 func TestResolveConnectScopesRejectsUndeclared(t *testing.T) {
-	auth := fusedobject.AuthConfig{Type: "oauth2", Scopes: []string{"read"}}
-	if _, err := resolveConnectScopes(auth, []string{"admin"}); err == nil || !strings.Contains(err.Error(), "not declared") {
+	auth := fusedobject.AuthConfig{Type: "oauth2"}
+	if _, err := resolveConnectScopes(auth, connectTestOAuthFlow("read"), []string{"admin"}); err == nil || !strings.Contains(err.Error(), "not declared") {
 		t.Fatalf("expected undeclared scope rejection, got %v", err)
 	}
 }
@@ -100,8 +110,8 @@ func TestResolveConnectScopesRejectsUndeclared(t *testing.T) {
 // TestResolveConnectScopesRequiresOpenID keeps OIDC nonce/id-token validation
 // active even when a caller narrows the provider's broader scope catalogue.
 func TestResolveConnectScopesRequiresOpenID(t *testing.T) {
-	auth := fusedobject.AuthConfig{Type: "openIdConnect", Scopes: []string{"openid", "profile"}}
-	if _, err := resolveConnectScopes(auth, []string{"profile"}); err == nil || !strings.Contains(err.Error(), "include openid") {
+	auth := fusedobject.AuthConfig{Type: "openIdConnect"}
+	if _, err := resolveConnectScopes(auth, connectTestOAuthFlow("openid", "profile"), []string{"profile"}); err == nil || !strings.Contains(err.Error(), "include openid") {
 		t.Fatalf("expected openid requirement, got %v", err)
 	}
 }
@@ -201,8 +211,9 @@ func TestConnectCallbackHandlerDiscoversResources(t *testing.T) {
 	fixture.store.session.AuthType = "oauth"
 	// This fixture exercises OAuth resource discovery; retaining the shared
 	// fixture's openid scope would correctly require an OIDC ID token and nonce.
-	fixture.verifier.serviceMetadata.AuthConfigs[0].Scopes = nil
-	fixture.verifier.serviceMetadata.AuthConfigs[0].TokenURL = provider.URL + "/token"
+	fixture.verifier.serviceMetadata.AuthConfigs[0].OAuth2Flows = fusedobject.OAuth2Flows{"authorizationCode": {
+		AuthorizationURL: provider.URL + "/authorize", TokenURL: provider.URL + "/token", Scopes: map[string]string{},
+	}}
 	fixture.verifier.serviceMetadata.ConnectConfig = &fusedobject.ServiceConnectConfig{
 		ResourceDiscovery: &fusedobject.ResourceDiscoveryConfig{
 			OperationID: "getAccessibleResources", IDPath: "$[*].id", NamePath: "$[*].name",
@@ -233,10 +244,10 @@ func TestConnectCallbackHandlerDiscoversResources(t *testing.T) {
 // services from silently choosing whichever declaration happened to come first.
 func TestSelectRuntimeOAuthConfigMatchesConfiguredFamily(t *testing.T) {
 	auths := fusedobject.AuthConfigs{
-		{Name: "oauthScheme", Type: "oauth2", AuthorizationURL: "https://oauth.example/authorize", TokenURL: "https://oauth.example/token"},
-		{Name: "oidcScheme", Type: "openIdConnect", AuthorizationURL: "https://oidc.example/authorize", TokenURL: "https://oidc.example/token"},
+		{Name: "oauthScheme", Type: "oauth2", OAuth2Flows: fusedobject.OAuth2Flows{"authorizationCode": connectTestOAuthFlow()}},
+		{Name: "oidcScheme", Type: "openIdConnect", OAuth2Flows: fusedobject.OAuth2Flows{"authorizationCode": connectTestOAuthFlow()}},
 	}
-	auth, err := selectRuntimeOAuthConfig(auths, "oidc", "oidcScheme")
+	auth, _, err := selectRuntimeOAuthConfig(auths, "oidc", "oidcScheme", "authorizationCode")
 	if err != nil {
 		t.Fatalf("select oidc auth: %v", err)
 	}
@@ -276,7 +287,9 @@ func TestRediscoverConnectionResourcesReusesConnectedToken(t *testing.T) {
 	fixture.verifier.serviceMetadata.ServiceVersionID = uuid.New()
 	fixture.verifier.serviceMetadata.BaseURL = provider.URL
 	fixture.verifier.serviceMetadata.AuthConfigs = fusedobject.AuthConfigs{{
-		Name: "oauthScheme", Type: "oauth2", AuthorizationURL: provider.URL + "/authorize", TokenURL: provider.URL + "/token",
+		Name: "oauthScheme", Type: "oauth2", OAuth2Flows: fusedobject.OAuth2Flows{"authorizationCode": {
+			AuthorizationURL: provider.URL + "/authorize", TokenURL: provider.URL + "/token", Scopes: map[string]string{},
+		}},
 	}}
 	fixture.verifier.serviceMetadata.ConnectConfig = &fusedobject.ServiceConnectConfig{
 		AuthType: "oauth",
@@ -314,10 +327,7 @@ func newConnectRuntimeFixture(t *testing.T) connectRuntimeFixture {
 		AuthConfigs: fusedobject.AuthConfigs{{
 			Name:                    "bearerAuth",
 			Type:                    "oauth2",
-			Flow:                    "authorizationCode",
-			TokenURL:                "https://provider.example/token",
-			AuthorizationURL:        "https://provider.example/authorize",
-			Scopes:                  []string{"openid", "profile"},
+			OAuth2Flows:             fusedobject.OAuth2Flows{"authorizationCode": connectTestOAuthFlow("openid", "profile")},
 			PKCERequired:            true,
 			ScopesDelimiter:         "comma",
 			ExtraAuthParams:         map[string]string{"prompt": "consent", "state": "metadata-state", "client_id": "metadata-client"},

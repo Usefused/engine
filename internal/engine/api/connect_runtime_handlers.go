@@ -106,7 +106,6 @@ func ConnectCallbackHandler(s store.Store, verifier ServiceVerifier, masterKey [
 		}
 		// Callback fallback scope metadata must describe what the user actually
 		// consented to, not every scope the provider integration supports.
-		resolved.auth.Scopes = append([]string(nil), session.RequestedScopes...)
 		token, err := exchangeConnectCallbackToken(ctx, r, session, resolved, masterKey)
 		if err != nil {
 			writeConnectCallbackFailure(w, r, session, err)
@@ -139,6 +138,7 @@ func ConnectCallbackHandler(s store.Store, verifier ServiceVerifier, masterKey [
 type connectRuntimeConfig struct {
 	config      *store.ConnectConfig
 	auth        fusedobject.AuthConfig
+	flow        fusedobject.OAuth2FlowContract
 	credentials connectClientCredentials
 	metadata    *fusedobject.ServiceMetadata
 }
@@ -191,11 +191,11 @@ func resolveConnectRuntimeConfig(ctx context.Context, s store.Store, verifier Se
 	if err != nil {
 		return connectRuntimeConfig{}, fmt.Errorf("load service metadata: %w", err)
 	}
-	auth, err := selectRuntimeOAuthConfig(metadata.AuthConfigs, cfg.AuthType, cfg.AuthName)
+	metadata, err = attachedConnectMetadata(ctx, s, call, cfg.AuthType, metadata)
 	if err != nil {
 		return connectRuntimeConfig{}, err
 	}
-	metadata, err = attachedConnectMetadata(ctx, s, call, cfg.AuthType, metadata)
+	auth, flow, err := selectRuntimeOAuthConfig(metadata.AuthConfigs, cfg.AuthType, cfg.AuthName, connectOAuth2FlowName(metadata))
 	if err != nil {
 		return connectRuntimeConfig{}, err
 	}
@@ -203,7 +203,14 @@ func resolveConnectRuntimeConfig(ctx context.Context, s store.Store, verifier Se
 	if err != nil {
 		return connectRuntimeConfig{}, fmt.Errorf("decrypt connect client credentials: %w", err)
 	}
-	return connectRuntimeConfig{config: cfg, auth: auth, credentials: creds, metadata: metadata}, nil
+	return connectRuntimeConfig{config: cfg, auth: auth, flow: flow, credentials: creds, metadata: metadata}, nil
+}
+
+func connectOAuth2FlowName(metadata *fusedobject.ServiceMetadata) string {
+	if metadata != nil && metadata.ConnectConfig != nil && strings.TrimSpace(metadata.ConnectConfig.OAuth2Flow) != "" {
+		return metadata.ConnectConfig.OAuth2Flow
+	}
+	return "authorizationCode"
 }
 
 // attachedConnectMetadata overlays only the Engine-pinned effective profile
@@ -263,7 +270,7 @@ func createConnectSession(ctx context.Context, s store.Store, call connectAdminC
 	if err != nil {
 		return connectSessionStartResponse{}, err
 	}
-	effectiveScopes, err := resolveConnectScopes(resolved.auth, requestedScopes)
+	effectiveScopes, err := resolveConnectScopes(resolved.auth, resolved.flow, requestedScopes)
 	if err != nil {
 		return connectSessionStartResponse{}, err
 	}
@@ -287,8 +294,7 @@ func createConnectSession(ctx context.Context, s store.Store, call connectAdminC
 	}
 	// Only the verifier is encrypted into the session; the browser receives the
 	// derived challenge, which keeps the token exchange bound to this Engine.
-	resolved.auth.Scopes = effectiveScopes
-	authURL, err := buildConnectAuthorizeURL(resolved.auth, resolved.credentials, state, pkceChallenge(verifier), nonce)
+	authURL, err := buildConnectAuthorizeURL(resolved.auth, resolved.flow, effectiveScopes, resolved.credentials, state, pkceChallenge(verifier), nonce)
 	if err != nil {
 		return connectSessionStartResponse{}, err
 	}
@@ -343,8 +349,8 @@ func appScopesForService(selections []models.SDKSelection, serviceID uuid.UUID) 
 
 // resolveConnectScopes lets callers reduce consent without allowing a runtime
 // request to expand beyond the pinned service version's provider contract.
-func resolveConnectScopes(auth fusedobject.AuthConfig, requested []string) ([]string, error) {
-	approved := normalizedConnectScopes(auth.Scopes)
+func resolveConnectScopes(auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, requested []string) ([]string, error) {
+	approved := normalizedOAuth2FlowScopes(flow)
 	if len(requested) == 0 {
 		return approved, nil
 	}
@@ -365,6 +371,14 @@ func resolveConnectScopes(auth fusedobject.AuthConfig, requested []string) ([]st
 		return nil, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "OIDC connect scopes must include openid"}
 	}
 	return selected, nil
+}
+
+func normalizedOAuth2FlowScopes(flow fusedobject.OAuth2FlowContract) []string {
+	values := make([]string, 0, len(flow.Scopes))
+	for scope := range flow.Scopes {
+		values = append(values, scope)
+	}
+	return normalizedConnectScopes(values)
 }
 
 // normalizedConnectScopes makes consent URLs and stored fallback metadata
@@ -496,7 +510,7 @@ func exchangeConnectCallbackToken(ctx context.Context, r *http.Request, session 
 	if err != nil {
 		return oauthTokenResponse{}, fmt.Errorf("decrypt PKCE verifier: %w", err)
 	}
-	token, err := exchangeOAuthCode(ctx, http.DefaultClient, resolved.auth, resolved.credentials, r.URL.Query().Get("code"), verifier)
+	token, err := exchangeOAuthCode(ctx, http.DefaultClient, resolved.auth, resolved.flow, resolved.credentials, r.URL.Query().Get("code"), verifier)
 	if err != nil {
 		return oauthTokenResponse{}, connectRuntimeHTTPError{status: http.StatusBadGateway, message: "token exchange failed"}
 	}
@@ -511,8 +525,8 @@ func exchangeConnectCallbackToken(ctx context.Context, r *http.Request, session 
 
 // buildConnectAuthorizeURL preserves provider-supplied static query params
 // while overriding security-sensitive OAuth fields from Engine-owned state.
-func buildConnectAuthorizeURL(auth fusedobject.AuthConfig, creds connectClientCredentials, state, challenge, nonce string) (string, error) {
-	if strings.TrimSpace(auth.AuthorizationURL) == "" {
+func buildConnectAuthorizeURL(auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, scopes []string, creds connectClientCredentials, state, challenge, nonce string) (string, error) {
+	if strings.TrimSpace(flow.AuthorizationURL) == "" {
 		return "", connectRuntimeHTTPError{status: http.StatusBadRequest, message: "authorization_url is required"}
 	}
 	delimiter, err := scopeDelimiter(auth.ScopesDelimiter)
@@ -529,11 +543,11 @@ func buildConnectAuthorizeURL(auth fusedobject.AuthConfig, creds connectClientCr
 	values.Set("state", state)
 	values.Set("code_challenge", challenge)
 	values.Set("code_challenge_method", "S256")
-	values.Set("scope", strings.Join(auth.Scopes, delimiter))
+	values.Set("scope", strings.Join(scopes, delimiter))
 	if isOIDCAuth(auth) {
 		values.Set("nonce", nonce)
 	}
-	authURL, err := url.Parse(auth.AuthorizationURL)
+	authURL, err := url.Parse(flow.AuthorizationURL)
 	if err != nil || authURL.Scheme == "" || authURL.Host == "" {
 		return "", connectRuntimeHTTPError{status: http.StatusBadRequest, message: "authorization_url must be absolute"}
 	}
@@ -543,8 +557,8 @@ func buildConnectAuthorizeURL(auth fusedobject.AuthConfig, creds connectClientCr
 
 // exchangeOAuthCode builds the standards-shaped code exchange in one place so
 // refresh support can reuse the lower-level request/response handling later.
-func exchangeOAuthCode(ctx context.Context, client *http.Client, auth fusedobject.AuthConfig, creds connectClientCredentials, code, verifier string) (oauthTokenResponse, error) {
-	return connectauth.ExchangeAuthorizationCode(ctx, client, auth, creds, code, verifier)
+func exchangeOAuthCode(ctx context.Context, client *http.Client, auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, creds connectClientCredentials, code, verifier string) (oauthTokenResponse, error) {
+	return connectauth.ExchangeAuthorizationCode(ctx, client, auth, flow, creds, code, verifier)
 }
 
 // encryptAuthConnectionFromToken converts a provider token response into the
@@ -563,7 +577,7 @@ func encryptAuthConnectionFromToken(session *store.ConnectSession, resolved conn
 		return store.AuthConnection{}, err
 	}
 	claims := connectauth.OIDCClaims(token.IDToken)
-	scopeSet := connectauth.TokenScopeMetadata(token, resolved.auth.Scopes, "request")
+	scopeSet := connectauth.TokenScopeMetadata(token, session.RequestedScopes, "request")
 	return store.AuthConnection{
 		BucketID:              session.BucketID,
 		ServiceID:             session.ServiceID,
@@ -658,14 +672,15 @@ func writeConnectCallbackFallback(w http.ResponseWriter, status int, message str
 
 // selectRuntimeOAuthConfig matches the bucket's chosen auth family instead of
 // relying on registry order, which can differ between equivalent imports.
-func selectRuntimeOAuthConfig(auths fusedobject.AuthConfigs, configuredType, configuredName string) (fusedobject.AuthConfig, error) {
+func selectRuntimeOAuthConfig(auths fusedobject.AuthConfigs, configuredType, configuredName, flowName string) (fusedobject.AuthConfig, fusedobject.OAuth2FlowContract, error) {
 	want := canonicalConnectAuthType(configuredType)
 	for _, auth := range auths {
 		if runtimeConnectAuthType(auth) == want && auth.Name == configuredName {
-			return auth, validateRuntimeOAuthConfig(auth)
+			flow, err := validateRuntimeOAuthConfig(auth, flowName)
+			return auth, flow, err
 		}
 	}
-	return fusedobject.AuthConfig{}, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "service has no configured auth_name for " + want}
+	return fusedobject.AuthConfig{}, fusedobject.OAuth2FlowContract{}, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "service has no configured auth_name for " + want}
 }
 
 // runtimeConnectAuthType maps provider metadata into the small set of connect
@@ -682,14 +697,18 @@ func runtimeConnectAuthType(auth fusedobject.AuthConfig) string {
 
 // validateRuntimeOAuthConfig catches incomplete registry metadata before a
 // user is sent to a browser flow that cannot complete.
-func validateRuntimeOAuthConfig(auth fusedobject.AuthConfig) error {
-	if strings.TrimSpace(auth.TokenURL) == "" {
-		return connectRuntimeHTTPError{status: http.StatusBadRequest, message: "token_url is required"}
+func validateRuntimeOAuthConfig(auth fusedobject.AuthConfig, flowName string) (fusedobject.OAuth2FlowContract, error) {
+	if flowName != "authorizationCode" {
+		return fusedobject.OAuth2FlowContract{}, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "connect requires the authorizationCode OAuth2 flow"}
 	}
-	if strings.TrimSpace(auth.AuthorizationURL) == "" {
-		return connectRuntimeHTTPError{status: http.StatusBadRequest, message: "authorization_url is required"}
+	flow, ok := auth.OAuth2Flows[flowName]
+	if !ok || strings.TrimSpace(flow.TokenURL) == "" {
+		return fusedobject.OAuth2FlowContract{}, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "selected OAuth2 flow requires token_url"}
 	}
-	return nil
+	if strings.TrimSpace(flow.AuthorizationURL) == "" {
+		return fusedobject.OAuth2FlowContract{}, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "selected OAuth2 flow requires authorization_url"}
+	}
+	return flow, nil
 }
 
 // decryptConnectClientCredentials unwraps apply-time OAuth app material only
@@ -773,10 +792,18 @@ func isRuntimeOAuthAuth(auth fusedobject.AuthConfig) bool {
 	return auth.Type == "oauth2" || auth.Type == "openIdConnect" || auth.Type == "oidc"
 }
 
-// isOIDCAuth also checks scopes so OAuth2 specs that request openid still get
-// nonce validation even if their scheme type stayed oauth2.
+// OAuth2 specs that declare openid in any canonical flow still require nonce
+// validation even when their scheme type was not normalized to OpenID Connect.
 func isOIDCAuth(auth fusedobject.AuthConfig) bool {
-	return auth.Type == "openIdConnect" || strings.EqualFold(auth.Type, "oidc") || connectContainsString(auth.Scopes, "openid")
+	if auth.Type == "openIdConnect" || strings.EqualFold(auth.Type, "oidc") {
+		return true
+	}
+	for _, flow := range auth.OAuth2Flows {
+		if _, ok := flow.Scopes["openid"]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // scopeDelimiter keeps provider quirks out of authorize URL construction.

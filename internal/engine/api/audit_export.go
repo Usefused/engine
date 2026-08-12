@@ -113,7 +113,7 @@ func queryAuditOutcomes(values []string) ([]accesscontrol.AuditOutcome, error) {
 	for _, value := range cleanQueryValues(values) {
 		outcome := accesscontrol.AuditOutcome(value)
 		switch outcome {
-		case accesscontrol.AuditAttempted, accesscontrol.AuditAllowed, accesscontrol.AuditDenied, accesscontrol.AuditSucceeded, accesscontrol.AuditFailed:
+		case accesscontrol.AuditAttempted, accesscontrol.AuditAllowed, accesscontrol.AuditDenied, accesscontrol.AuditSucceeded, accesscontrol.AuditFailed, accesscontrol.AuditRolledBack, accesscontrol.AuditCancelled:
 			outcomes = append(outcomes, outcome)
 		default:
 			return nil, errors.New("invalid outcome")

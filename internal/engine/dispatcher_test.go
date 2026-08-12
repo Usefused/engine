@@ -20,18 +20,43 @@ import (
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/models"
-	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type mockStream struct {
-	chunks [][]byte
+	chunks             [][]byte
+	contracts          []responseContractSignal
+	bodyBeforeContract bool
+}
+
+type responseContractSignal struct {
+	status int
+	family string
 }
 
 func testRequestContent(mediaType, serialization string) *models.RequestContent {
-	return &models.RequestContent{MediaType: mediaType, Serialization: serialization}
+	return &models.RequestContent{Representations: []models.RequestRepresentation{{
+		MediaType: mediaType, Serialization: serialization,
+		Schema: &models.SchemaContract{Projection: models.Schema{Type: "object", AdditionalProperties: &models.Schema{}}},
+	}}}
+}
+
+func testRequestContentWithSchema(mediaType, serialization string, schema models.Schema) *models.RequestContent {
+	content := testRequestContent(mediaType, serialization)
+	content.Representations[0].Schema = &models.SchemaContract{Projection: schema}
+	return content
+}
+
+func rawTestRequestContent(mediaType string, binary bool) *models.RequestContent {
+	schema := models.Schema{Type: "string"}
+	if binary {
+		schema.Format = "binary"
+	}
+	content := testRequestContentWithSchema(mediaType, models.RequestSerializationRaw, schema)
+	content.PayloadParameter = "body"
+	return content
 }
 
 func TestPrepareRequestPartsBindingPrecedence(t *testing.T) {
@@ -39,7 +64,7 @@ func TestPrepareRequestPartsBindingPrecedence(t *testing.T) {
 	obj := &models.IntegrationObject{
 		Path: "/accounts/{accountId}", Method: http.MethodGet,
 		Parameters: models.Parameters{
-			{Name: "accountId", In: "path"}, {Name: "portal", In: "query"}, {Name: "X-Tenant", In: "header"},
+			{Name: "accountId", In: "path"}, {Name: "portal", In: "query"}, {Name: "tenant", In: "query"}, {Name: "X-Tenant", In: "header"},
 		},
 	}
 	bindings := []store.BucketValue{
@@ -151,9 +176,17 @@ func TestPrepareRequestPartsRejectsUnsafeResolvedHeaders(t *testing.T) {
 }
 
 func (m *mockStream) Send(chunk []byte) error {
+	if len(m.contracts) == 0 {
+		m.bodyBeforeContract = true
+	}
 	copied := make([]byte, len(chunk))
 	copy(copied, chunk)
 	m.chunks = append(m.chunks, copied)
+	return nil
+}
+
+func (m *mockStream) SendResponseContract(status int, mediaFamily string) error {
+	m.contracts = append(m.contracts, responseContractSignal{status: status, family: mediaFamily})
 	return nil
 }
 
@@ -354,7 +387,7 @@ func TestDispatcherExecuteStream_Retry(t *testing.T) {
 	defer server.Close()
 
 	d := NewDispatcher()
-	srv := &models.Service{BaseURL: server.URL, RetryConfig: &models.RetryConfig{MaxRetries: 2}}
+	srv := &models.Service{BaseURL: server.URL, RetryConfig: &models.RetryConfig{Version: 3, Rules: retryV3Rules()}, DefaultHeaders: models.DefaultHeaders{"Idempotency-Key": "stable-test-key"}}
 	obj := &models.IntegrationObject{Path: "/test", Method: http.MethodGet}
 
 	stream := &mockStream{}
@@ -393,13 +426,12 @@ func TestDispatcherExecuteStream_GraphQLReusesRESTExecutionSystem(t *testing.T) 
 
 	d := NewDispatcher()
 	query := `query Viewer($id: ID!) { viewer(id: $id) { login } }`
-	srv := &models.Service{BaseURL: server.URL, RetryConfig: &models.RetryConfig{MaxRetries: 2}}
-	obj := &models.IntegrationObject{Path: "/graphql", Method: http.MethodPost, GraphQLQuery: &query}
+	srv := &models.Service{BaseURL: server.URL, RetryConfig: &models.RetryConfig{Version: 3, Rules: retryV3Rules()}, DefaultHeaders: models.DefaultHeaders{"Idempotency-Key": "stable-test-key"}}
+	obj := &models.IntegrationObject{Path: "/graphql", Method: http.MethodPost, GraphQLQuery: &query, ProviderProtocol: models.ProviderProtocolGraphQL, OperationKind: models.OperationKindQuery, RequestContent: testRequestContent("application/json", models.RequestSerializationJSON)}
 	params := map[string]any{"id": "u_123"}
 
-	ctx := ContextWithIdempotencyKeyPresent(context.Background(), true)
 	stream := &mockStream{}
-	status, err := d.ExecuteStream(ctx, srv, explicitAnonymousEndpoint(obj), params, nil, nil, stream)
+	status, err := d.ExecuteStream(context.Background(), srv, explicitAnonymousEndpoint(obj), params, nil, nil, stream)
 	if err != nil {
 		t.Fatalf("ExecuteStream failed: %v", err)
 	}
@@ -431,8 +463,8 @@ func TestDispatcherExecuteStream_GraphQLPOSTWithoutIdempotencyKey_NoRetry(t *tes
 
 	d := NewDispatcher()
 	query := `mutation CreateWidget($name: String!) { createWidget(name: $name) { id } }`
-	srv := &models.Service{BaseURL: server.URL, RetryConfig: &models.RetryConfig{MaxRetries: 2}}
-	obj := &models.IntegrationObject{Path: "/graphql", Method: http.MethodPost, GraphQLQuery: &query}
+	srv := &models.Service{BaseURL: server.URL, RetryConfig: &models.RetryConfig{Version: 3, Rules: retryV3Rules()}}
+	obj := &models.IntegrationObject{Path: "/graphql", Method: http.MethodPost, GraphQLQuery: &query, ProviderProtocol: models.ProviderProtocolGraphQL, OperationKind: models.OperationKindMutation, RequestContent: testRequestContent("application/json", models.RequestSerializationJSON)}
 
 	stream := &mockStream{}
 	_, err := d.ExecuteStream(context.Background(), srv, explicitAnonymousEndpoint(obj), map[string]any{"name": "widget"}, nil, nil, stream)
@@ -538,8 +570,8 @@ func TestRequestContentTelemetryUsesBoundedValues(t *testing.T) {
 		{name: "multipart", operation: &models.IntegrationObject{RequestContent: testRequestContent("multipart/form-data", models.RequestSerializationMultipart)}, serialization: "multipart", mediaFamily: "multipart"},
 		{name: "raw text", operation: &models.IntegrationObject{RequestContent: testRequestContent("text/plain; charset=utf-8", models.RequestSerializationRaw)}, serialization: "raw", mediaFamily: "text"},
 		{name: "raw binary", operation: &models.IntegrationObject{RequestContent: testRequestContent("application/octet-stream", models.RequestSerializationRaw)}, serialization: "raw", mediaFamily: "binary"},
-		{name: "unknown", operation: &models.IntegrationObject{RequestContent: testRequestContent("application/vnd.unbounded", "provider-specific")}, serialization: "unknown", mediaFamily: "other"},
-		{name: "GraphQL", operation: &models.IntegrationObject{GraphQLQuery: &query}, serialization: "graphql", mediaFamily: "json"},
+		{name: "invalid representation", operation: &models.IntegrationObject{RequestContent: testRequestContent("application/vnd.unbounded", "provider-specific")}, serialization: "none", mediaFamily: "none"},
+		{name: "GraphQL", operation: &models.IntegrationObject{GraphQLQuery: &query, ProviderProtocol: models.ProviderProtocolGraphQL, OperationKind: models.OperationKindQuery}, serialization: "graphql", mediaFamily: "json"},
 	}
 
 	for _, tt := range tests {
@@ -553,8 +585,8 @@ func TestRequestContentTelemetryUsesBoundedValues(t *testing.T) {
 }
 
 // TestDispatcherExecuteStream_NoRetryWithoutConfig is the strict half of the
-// "no hardcoded retries" rule: a service with no RetryConfig and no
-// RetryOverride in context gets exactly one attempt, even on a 500.
+// "no hardcoded retries" rule: a service with no RetryConfig gets exactly
+// one attempt, even on a 500.
 func TestDispatcherExecuteStream_NoRetryWithoutConfig(t *testing.T) {
 	attempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -569,48 +601,13 @@ func TestDispatcherExecuteStream_NoRetryWithoutConfig(t *testing.T) {
 	obj := &models.IntegrationObject{Path: "/test", Method: http.MethodGet}
 
 	stream := &mockStream{}
-	_, err := d.ExecuteStream(context.Background(), srv, explicitAnonymousEndpoint(obj), nil, nil, nil, stream)
+	status, err := d.ExecuteStream(context.Background(), srv, explicitAnonymousEndpoint(obj), nil, nil, nil, stream)
 
-	if err == nil {
-		t.Fatal("expected an error from the single failed attempt")
+	if err != nil || status != http.StatusInternalServerError {
+		t.Fatalf("expected the single provider response, status=%d err=%v", status, err)
 	}
 	if attempts != 1 {
 		t.Errorf("expected exactly 1 attempt with no retry config, got %d", attempts)
-	}
-}
-
-// TestDispatcherExecuteStream_SDKOverrideWithoutServiceConfig verifies that a
-// caller-supplied RetryOverride is honored when the service has no
-// RetryConfig of its own, clamped to the hard SDK ceiling.
-func TestDispatcherExecuteStream_SDKOverrideWithoutServiceConfig(t *testing.T) {
-	attempts := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts++
-		if attempts < 3 {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	d := NewDispatcher()
-	srv := &models.Service{BaseURL: server.URL}
-	obj := &models.IntegrationObject{Path: "/test", Method: http.MethodGet}
-
-	maxRetries := 2
-	ctx := ContextWithRetryOverride(context.Background(), &RetryOverride{MaxRetries: &maxRetries})
-	stream := &mockStream{}
-	status, err := d.ExecuteStream(ctx, srv, explicitAnonymousEndpoint(obj), nil, nil, nil, stream)
-
-	if err != nil {
-		t.Fatalf("ExecuteStream failed: %v", err)
-	}
-	if status != http.StatusOK {
-		t.Errorf("expected status 200, got %d", status)
-	}
-	if attempts != 3 {
-		t.Errorf("expected 3 attempts (1 + 2 retries), got %d", attempts)
 	}
 }
 
@@ -628,7 +625,7 @@ func TestDispatcherExecuteStream_POSTWithoutIdempotencyKey_NoRetry(t *testing.T)
 	defer server.Close()
 
 	d := NewDispatcher()
-	srv := &models.Service{BaseURL: server.URL, RetryConfig: &models.RetryConfig{MaxRetries: 3}}
+	srv := &models.Service{BaseURL: server.URL, RetryConfig: &models.RetryConfig{Version: 3, Rules: retryV3Rules()}}
 	obj := &models.IntegrationObject{Path: "/test", Method: http.MethodPost}
 
 	stream := &mockStream{}
@@ -658,12 +655,11 @@ func TestDispatcherExecuteStream_POSTWithIdempotencyKey_Retries(t *testing.T) {
 	defer server.Close()
 
 	d := NewDispatcher()
-	srv := &models.Service{BaseURL: server.URL, RetryConfig: &models.RetryConfig{MaxRetries: 2}}
+	srv := &models.Service{BaseURL: server.URL, RetryConfig: &models.RetryConfig{Version: 3, Rules: retryV3Rules()}, DefaultHeaders: models.DefaultHeaders{"Idempotency-Key": "stable-test-key"}}
 	obj := &models.IntegrationObject{Path: "/test", Method: http.MethodPost}
 
-	ctx := ContextWithIdempotencyKeyPresent(context.Background(), true)
 	stream := &mockStream{}
-	status, err := d.ExecuteStream(ctx, srv, explicitAnonymousEndpoint(obj), nil, nil, nil, stream)
+	status, err := d.ExecuteStream(context.Background(), srv, explicitAnonymousEndpoint(obj), nil, nil, nil, stream)
 
 	if err != nil {
 		t.Fatalf("ExecuteStream failed: %v", err)
@@ -693,7 +689,7 @@ func TestDispatcherExecuteStream_GETWithoutIdempotencyKey_StillRetries(t *testin
 	defer server.Close()
 
 	d := NewDispatcher()
-	srv := &models.Service{BaseURL: server.URL, RetryConfig: &models.RetryConfig{MaxRetries: 2}}
+	srv := &models.Service{BaseURL: server.URL, RetryConfig: &models.RetryConfig{Version: 3, Rules: retryV3Rules()}}
 	obj := &models.IntegrationObject{Path: "/test", Method: http.MethodGet}
 
 	stream := &mockStream{}
@@ -710,44 +706,19 @@ func TestDispatcherExecuteStream_GETWithoutIdempotencyKey_StillRetries(t *testin
 	}
 }
 
-// TestDispatcherExecuteStream_SDKOverrideClampedToServiceCeiling verifies the
-// override can only narrow a service's own RetryConfig, never widen it: the
-// SDK asks for more retries than the service allows, and gets the service's
-// ceiling instead.
-func TestDispatcherExecuteStream_SDKOverrideClampedToServiceCeiling(t *testing.T) {
-	attempts := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts++
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer server.Close()
-
-	d := NewDispatcher()
-	srv := &models.Service{BaseURL: server.URL, RetryConfig: &models.RetryConfig{MaxRetries: 1}}
-	obj := &models.IntegrationObject{Path: "/test", Method: http.MethodGet}
-
-	requested := 10
-	ctx := ContextWithRetryOverride(context.Background(), &RetryOverride{MaxRetries: &requested})
-	stream := &mockStream{}
-	_, _ = d.ExecuteStream(ctx, srv, explicitAnonymousEndpoint(obj), nil, nil, nil, stream)
-
-	if attempts != 2 {
-		t.Errorf("expected attempts clamped to service ceiling (1 retry = 2 attempts), got %d", attempts)
-	}
-}
-
 func TestDispatcherExecuteStream_Paginated(t *testing.T) {
+	caseData := v3TokenCase()
 	pagesServed := 0
 	// Mock a server that serves exactly 2 pages using cursor parameter.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pagesServed++
-		cursor := r.URL.Query().Get("cursor")
+		cursor := r.URL.Query().Get("pageToken")
 		w.WriteHeader(http.StatusOK)
 
 		if cursor == "" {
-			w.Write([]byte(`{"data":["item1"],"meta":{"next_cursor":"page2"}}`))
+			w.Write([]byte(`{"items":["item1"],"next":"page2"}`))
 		} else if cursor == "page2" {
-			w.Write([]byte(`{"data":["item2"],"meta":{"next_cursor":""}}`))
+			w.Write([]byte(`{"items":["item2"]}`))
 		} else {
 			t.Errorf("Unexpected cursor: %s", cursor)
 		}
@@ -757,17 +728,10 @@ func TestDispatcherExecuteStream_Paginated(t *testing.T) {
 	d := NewDispatcher()
 	srv := &models.Service{BaseURL: server.URL}
 	obj := &models.IntegrationObject{
-		Path:   "/test",
-		Method: http.MethodGet,
-		Pagination: &models.PaginationConfig{
-			Version:   2,
-			Type:      "cursor",
-			ItemsPath: "$.data",
-			Cursor: &paginationpolicy.CursorConfig{
-				Request: paginationpolicy.RequestTarget{Location: "query", Name: "cursor"},
-				Next:    paginationpolicy.ValueSource{Location: "body", Path: "$.meta.next_cursor", ValueType: "string"},
-			},
-		},
+		Path:       "/test",
+		Method:     http.MethodGet,
+		Parameters: caseData.object.Parameters,
+		Pagination: modelPolicy(caseData.policy),
 	}
 	stream := &mockStream{}
 
@@ -824,7 +788,9 @@ func TestParseSSEEvents_DoneSentinel(t *testing.T) {
 	raw := "data: {\"n\":1}\n\ndata: [DONE]\n\ndata: {\"n\":2}\n\n"
 	stream := &mockStream{}
 
-	if err := parseSSEEvents(strings.NewReader(raw), stream); err != nil {
+	done := "[DONE]"
+	contract := &models.SSEResponseContract{ItemMode: "data", DoneSentinel: &done}
+	if err := parseSSEEvents(strings.NewReader(raw), stream, contract); err != nil {
 		t.Fatalf("parseSSEEvents returned error: %v", err)
 	}
 
@@ -834,6 +800,27 @@ func TestParseSSEEvents_DoneSentinel(t *testing.T) {
 	}
 	if string(stream.chunks[0]) != `{"n":1}` {
 		t.Errorf("expected {\"n\":1}, got %s", stream.chunks[0])
+	}
+}
+
+func TestParseSSEEvents_UndeclaredSentinelIsData(t *testing.T) {
+	stream := &mockStream{}
+	if err := parseSSEEvents(strings.NewReader("data: [DONE]\n\n"), stream); err != nil {
+		t.Fatalf("parseSSEEvents returned error: %v", err)
+	}
+	if len(stream.chunks) != 1 || string(stream.chunks[0]) != "[DONE]" {
+		t.Fatalf("undeclared sentinel was not preserved: %#v", stream.chunks)
+	}
+}
+
+func TestParseSSEEvents_DataOnlyIncludesEmptyAndIgnoresMetadata(t *testing.T) {
+	raw := ": comment\nevent: update\nid: 42\nretry: 1000\ndata:\n\n"
+	stream := &mockStream{}
+	if err := parseSSEEvents(strings.NewReader(raw), stream); err != nil {
+		t.Fatalf("parseSSEEvents returned error: %v", err)
+	}
+	if len(stream.chunks) != 1 || string(stream.chunks[0]) != `""` {
+		t.Fatalf("expected one empty decoded data item, got %#v", stream.chunks)
 	}
 }
 
@@ -855,9 +842,8 @@ func TestParseSSEEvents_MultiLineData(t *testing.T) {
 	}
 }
 
-// TestDispatcherExecuteStream_SSE validates full SSE routing through
-// ExecuteStream when obj.IsSSE is true: the Engine sends the correct
-// Accept header and each parsed event is forwarded as a separate chunk.
+// TestDispatcherExecuteStream_SSE validates that the matched response
+// representation drives framing and Accept negotiation.
 func TestDispatcherExecuteStream_SSE(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Accept") != "text/event-stream" {
@@ -874,7 +860,9 @@ func TestDispatcherExecuteStream_SSE(t *testing.T) {
 	obj := &models.IntegrationObject{
 		Path:   "/stream",
 		Method: http.MethodGet,
-		IsSSE:  true,
+		Responses: models.Responses{"200": {Representations: []models.ResponseRepresentation{{
+			MediaType: "text/event-stream", SSE: &models.SSEResponseContract{ItemMode: "data", DoneSentinel: stringPointer("[DONE]")},
+		}}}},
 	}
 	stream := &mockStream{}
 
@@ -897,6 +885,78 @@ func TestDispatcherExecuteStream_SSE(t *testing.T) {
 	}
 }
 
+func TestDispatcherExecuteStream_SelectsDecoderFromActualStatusAndMedia(t *testing.T) {
+	done := "[END]"
+	operation := &models.IntegrationObject{
+		Path: "/mixed", Method: http.MethodGet,
+		Parameters: models.Parameters{{Name: "X-Variant", In: "header"}},
+		Responses: models.Responses{
+			"200": {Representations: []models.ResponseRepresentation{{MediaType: "text/event-stream", SSE: &models.SSEResponseContract{ItemMode: "data", DoneSentinel: &done}}}},
+			"201": {Representations: []models.ResponseRepresentation{{MediaType: "application/vnd.acme+json"}}},
+			"206": {Representations: []models.ResponseRepresentation{{MediaType: "application/octet-stream"}}},
+		},
+	}
+	binaryBody := bytes.Repeat([]byte{0x00, 0xff, 0x7f}, 2000)
+	provider := httptest.NewServer(mixedResponseProvider(t, binaryBody))
+	defer provider.Close()
+
+	tests := []mixedResponseCase{
+		{"sse", 200, "sse", []byte("one\ntwo"), 1}, {"json", 201, "json", []byte(`{"kind":"json"}`), 1}, {"binary", 206, "binary", binaryBody, 2},
+	}
+	for _, test := range tests {
+		t.Run(test.variant, func(t *testing.T) { assertMixedResponseCase(t, provider.URL, operation, test) })
+	}
+}
+
+type mixedResponseCase struct {
+	variant string
+	status  int
+	family  string
+	body    []byte
+	chunks  int
+}
+
+func mixedResponseProvider(t *testing.T, binaryBody []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Accept") != "application/octet-stream, application/vnd.acme+json, text/event-stream" {
+			t.Errorf("unexpected Accept header: %q", request.Header.Get("Accept"))
+		}
+		switch request.Header.Get("X-Variant") {
+		case "sse":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "event: update\ndata: one\ndata: two\n\ndata: [END]\n\n")
+		case "json":
+			w.Header().Set("Content-Type", "application/vnd.acme+json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"kind":"json"}`)
+		default:
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(binaryBody)
+		}
+	}
+}
+
+func assertMixedResponseCase(t *testing.T, providerURL string, operation *models.IntegrationObject, test mixedResponseCase) {
+	stream := &mockStream{}
+	status, err := NewDispatcher().ExecuteStream(context.Background(), &models.Service{BaseURL: providerURL}, explicitAnonymousEndpoint(operation), map[string]any{"X-Variant": test.variant}, nil, nil, stream)
+	if err != nil {
+		t.Fatalf("ExecuteStream: %v", err)
+	}
+	if status != test.status || !bytes.Equal(bytes.Join(stream.chunks, nil), test.body) {
+		t.Fatalf("status=%d chunks=%d body=%q", status, len(stream.chunks), bytes.Join(stream.chunks, nil))
+	}
+	if len(stream.chunks) != test.chunks {
+		t.Fatalf("chunks=%d, want %d", len(stream.chunks), test.chunks)
+	}
+	if len(stream.contracts) != 1 || stream.contracts[0] != (responseContractSignal{status: test.status, family: test.family}) {
+		t.Fatalf("response contract signals = %#v", stream.contracts)
+	}
+	if stream.bodyBeforeContract {
+		t.Fatal("body was sent before the response contract signal")
+	}
+}
+
 func TestPrepareRequestParts_PathQueryHeaderSeparation(t *testing.T) {
 	srv := &models.Service{BaseURL: "https://api.example.com"}
 	obj := &models.IntegrationObject{
@@ -912,7 +972,6 @@ func TestPrepareRequestParts_PathQueryHeaderSeparation(t *testing.T) {
 		"user_id":         "octocat",
 		"sort":            "desc",
 		"X-Custom-Header": "foo",
-		"extra_query":     "bar", // fallback to query for GET
 	}
 
 	reqURL, headers, bodyReader, err := prepareRequestParts(srv, obj, params, nil)
@@ -926,9 +985,6 @@ func TestPrepareRequestParts_PathQueryHeaderSeparation(t *testing.T) {
 	if !strings.Contains(reqURL, "sort=desc") {
 		t.Errorf("Query parameter 'sort' missing. Got: %s", reqURL)
 	}
-	if !strings.Contains(reqURL, "extra_query=bar") {
-		t.Errorf("Fallback query parameter 'extra_query' missing. Got: %s", reqURL)
-	}
 	if headers["X-Custom-Header"] != "foo" {
 		t.Errorf("Header parameter missing or incorrect. Got: %s", headers["X-Custom-Header"])
 	}
@@ -937,19 +993,12 @@ func TestPrepareRequestParts_PathQueryHeaderSeparation(t *testing.T) {
 	}
 }
 
-func TestPrepareRequestParts_HEADUndeclaredParametersUseQuery(t *testing.T) {
+func TestPrepareRequestPartsRejectsUndeclaredHEADParameter(t *testing.T) {
 	srv := &models.Service{BaseURL: "https://api.example.com"}
 	obj := &models.IntegrationObject{Path: "/health", Method: http.MethodHead}
 
-	reqURL, _, bodyReader, err := prepareRequestParts(srv, obj, map[string]any{"probe": "ready"}, nil)
-	if err != nil {
-		t.Fatalf("prepareRequestParts failed: %v", err)
-	}
-	if reqURL != "https://api.example.com/health?probe=ready" {
-		t.Fatalf("HEAD URL = %q, want undeclared parameter in query", reqURL)
-	}
-	if bodyReader != nil {
-		t.Fatal("HEAD request must not synthesize a body for an undeclared parameter")
+	if _, _, _, err := prepareRequestParts(srv, obj, map[string]any{"probe": "ready"}, nil); err == nil || !strings.Contains(err.Error(), `undeclared execution parameter "probe"`) {
+		t.Fatalf("undeclared HEAD parameter error = %v", err)
 	}
 }
 
@@ -997,7 +1046,7 @@ func TestPrepareRequestParts_FormURLEncoded(t *testing.T) {
 	}
 }
 
-func TestPrepareRequestParts_PathParameterLeaks(t *testing.T) {
+func TestPrepareRequestPartsRejectsUndeclaredPathPlaceholders(t *testing.T) {
 	srv := &models.Service{BaseURL: "https://api.example.com"}
 	obj := &models.IntegrationObject{
 		Path:   "/repos/{owner}/{repo}/issues",
@@ -1015,24 +1064,8 @@ func TestPrepareRequestParts_PathParameterLeaks(t *testing.T) {
 		"title": "Bug report",
 	}
 
-	reqURL, _, bodyReader, err := prepareRequestParts(srv, obj, params, nil)
-	if err != nil {
-		t.Fatalf("prepareRequestParts failed: %v", err)
-	}
-
-	if reqURL != "https://api.example.com/repos/test-owner/test-repo/issues" {
-		t.Errorf("Path parameters not correctly replaced or case-insensitive match failed. Got: %s", reqURL)
-	}
-
-	buf := new(bytes.Buffer)
-	buf.ReadFrom(bodyReader)
-	bodyStr := buf.String()
-
-	if strings.Contains(bodyStr, "test-owner") || strings.Contains(bodyStr, "test-repo") {
-		t.Errorf("Path parameters leaked into JSON payload! Got body: %s", bodyStr)
-	}
-	if !strings.Contains(bodyStr, "title") {
-		t.Errorf("Expected parameter 'title' in body, got: %s", bodyStr)
+	if _, _, _, err := prepareRequestParts(srv, obj, params, nil); err == nil || !strings.Contains(err.Error(), `undeclared or unresolved path parameter "owner"`) {
+		t.Fatalf("undeclared path placeholder error = %v", err)
 	}
 }
 
@@ -1044,7 +1077,6 @@ func TestPrepareRequestParts_HeaderInjection(t *testing.T) {
 	}
 
 	params := map[string]any{
-		"param1": "value1",
 		"_headers": map[string]any{
 			"X-Stripe-Version": "2023-10-16",
 			"User-Agent":       "Fused-Agent",
@@ -1111,7 +1143,7 @@ func TestPrepareRequestParts_PreservesReviewedJSONMediaType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepareRequestParts failed: %v", err)
 	}
-	if headers["Content-Type"] != obj.RequestContent.MediaType || headers["content-type"] != "" {
+	if headers["Content-Type"] != obj.RequestContent.Representations[0].MediaType || headers["content-type"] != "" {
 		t.Fatalf("headers = %#v, want authoritative imported media type", headers)
 	}
 	var body map[string]any
@@ -1150,8 +1182,8 @@ func TestDispatcherExecuteStream_RequestContentOverridesServiceDefault(t *testin
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want %d", status, http.StatusOK)
 	}
-	if gotContentType != endpoint.RequestContent.MediaType {
-		t.Fatalf("provider Content-Type = %q, want %q", gotContentType, endpoint.RequestContent.MediaType)
+	if gotContentType != endpoint.RequestContent.Representations[0].MediaType {
+		t.Fatalf("provider Content-Type = %q, want %q", gotContentType, endpoint.RequestContent.Representations[0].MediaType)
 	}
 }
 
@@ -1159,9 +1191,12 @@ func TestPrepareRequestParts_GraphQLWithVariables(t *testing.T) {
 	srv := &models.Service{BaseURL: "https://api.example.com"}
 	query := `query Viewer($id: ID!) { viewer(id: $id) { login } }`
 	obj := &models.IntegrationObject{
-		Path:         "/graphql",
-		Method:       http.MethodPost,
-		GraphQLQuery: &query,
+		Path:             "/graphql",
+		Method:           http.MethodPost,
+		GraphQLQuery:     &query,
+		ProviderProtocol: models.ProviderProtocolGraphQL,
+		OperationKind:    models.OperationKindQuery,
+		RequestContent:   testRequestContent("application/json", models.RequestSerializationJSON),
 	}
 	params := map[string]any{"id": "u_123"}
 
@@ -1197,7 +1232,7 @@ func TestPrepareRequestParts_GraphQLWithVariables(t *testing.T) {
 func TestPrepareRequestParts_GraphQLUnwrapsGeneratedSDKEnvelope(t *testing.T) {
 	srv := &models.Service{BaseURL: "https://api.example.com"}
 	query := `query Viewer($id: ID!) { viewer(id: $id) { login } }`
-	obj := &models.IntegrationObject{Path: "/graphql", Method: http.MethodPost, GraphQLQuery: &query}
+	obj := &models.IntegrationObject{Path: "/graphql", Method: http.MethodPost, GraphQLQuery: &query, ProviderProtocol: models.ProviderProtocolGraphQL, OperationKind: models.OperationKindQuery, RequestContent: testRequestContent("application/json", models.RequestSerializationJSON)}
 	params := map[string]any{
 		"query":     `mutation DeleteAccount { deleteAccount }`,
 		"variables": map[string]any{"id": "u_123"},
@@ -1234,9 +1269,11 @@ func TestPrepareRequestParts_GraphQLOmitsVariablesWhenEmpty(t *testing.T) {
 	srv := &models.Service{BaseURL: "https://api.example.com"}
 	query := `query Health { health }`
 	obj := &models.IntegrationObject{
-		Path:         "/graphql",
-		Method:       http.MethodPost,
-		GraphQLQuery: &query,
+		Path:             "/graphql",
+		Method:           http.MethodPost,
+		GraphQLQuery:     &query,
+		ProviderProtocol: models.ProviderProtocolGraphQL,
+		OperationKind:    models.OperationKindQuery,
 	}
 
 	_, _, bodyReader, err := prepareRequestParts(srv, obj, nil, nil)
@@ -1259,9 +1296,11 @@ func TestPrepareRequestParts_GraphQLBypassesGetDeleteBodySuppression(t *testing.
 	srv := &models.Service{BaseURL: "https://api.example.com"}
 	query := `query Health { health }`
 	obj := &models.IntegrationObject{
-		Path:         "/graphql",
-		Method:       http.MethodGet,
-		GraphQLQuery: &query,
+		Path:             "/graphql",
+		Method:           http.MethodGet,
+		GraphQLQuery:     &query,
+		ProviderProtocol: models.ProviderProtocolGraphQL,
+		OperationKind:    models.OperationKindQuery,
 	}
 
 	_, _, bodyReader, err := prepareRequestParts(srv, obj, nil, nil)
@@ -1293,16 +1332,103 @@ func TestBuildBaseURL(t *testing.T) {
 	}
 }
 
-func TestPrepareRequestParts_NilRequestContentMeansNoRESTBody(t *testing.T) {
+func TestPrepareRequestParts_NilRequestContentRejectsBodyInput(t *testing.T) {
 	service := &models.Service{BaseURL: "https://api.example.com"}
 	endpoint := &models.IntegrationObject{Path: "/widgets", Method: http.MethodPost}
-	_, headers, body, err := prepareRequestParts(service, endpoint, map[string]any{"name": "ignored"}, nil)
+	if _, _, _, err := prepareRequestParts(service, endpoint, map[string]any{"name": "ignored"}, nil); err == nil || !strings.Contains(err.Error(), `undeclared execution parameter "name"`) {
+		t.Fatalf("nil request content error = %v", err)
+	}
+}
+
+func TestBuildRESTRequestBodyJSONPreservesRootPayloadShape(t *testing.T) {
+	root := testRequestContent("application/json", models.RequestSerializationJSON)
+	root.PayloadParameter = "body"
+	for name, test := range map[string]struct {
+		value any
+		want  string
+	}{
+		"scalar": {value: 7, want: "7"},
+		"array":  {value: []any{1, 2}, want: "[1,2]"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			body, err := buildRESTRequestBody(root, map[string]string{}, map[string]any{"body": test.value})
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := io.ReadAll(body)
+			if err != nil || string(encoded) != test.want {
+				t.Fatalf("root JSON body = %q, %v", encoded, err)
+			}
+		})
+	}
+	object := testRequestContent("application/json", models.RequestSerializationJSON)
+	body, err := buildRESTRequestBody(object, map[string]string{}, map[string]any{"name": "one"})
 	if err != nil {
-		t.Fatalf("prepareRequestParts: %v", err)
+		t.Fatal(err)
 	}
-	if body != nil || headers["Content-Type"] != "" {
-		t.Fatalf("nil request content produced body=%v headers=%#v", body, headers)
+	encoded, err := io.ReadAll(body)
+	if err != nil || string(encoded) != `{"name":"one"}` {
+		t.Fatalf("object JSON body = %q, %v", encoded, err)
 	}
+}
+
+func TestMultipartRetryReusesExecutionLocalBoundaryAndBytes(t *testing.T) {
+	content := testRequestContent("multipart/form-data", models.RequestSerializationMultipart)
+	content.Representations[0].Encoding = map[string]models.RequestEncoding{"name": {ContentType: "text/plain"}}
+	params := map[string]any{"name": "replay-value"}
+	ctx := withMultipartReplayBoundary(context.Background())
+	firstType, firstBody := encodedMultipartAttempt(t, ctx, content, params)
+	secondType, secondBody := encodedMultipartAttempt(t, ctx, content, params)
+	if firstType != secondType || !bytes.Equal(firstBody, secondBody) {
+		t.Fatalf("multipart retry changed bytes/content type: %q/%q", firstType, secondType)
+	}
+	otherType, _ := encodedMultipartAttempt(t, withMultipartReplayBoundary(context.Background()), content, params)
+	if otherType == firstType {
+		t.Fatal("independent executions reused a multipart boundary")
+	}
+}
+
+func TestPositionalMultipartRetryReusesExecutionLocalBoundaryAndBytes(t *testing.T) {
+	content := positionalTestContent("multipart/mixed", "items", "string", "", models.RequestEncoding{ContentType: "text/plain"})
+	params := map[string]any{"items": []any{"first", "second"}}
+	ctx := withMultipartReplayBoundary(context.Background())
+	firstType, firstBody := encodedSelectedMultipartAttempt(t, ctx, content, params)
+	secondType, secondBody := encodedSelectedMultipartAttempt(t, ctx, content, params)
+	if firstType != secondType || !bytes.Equal(firstBody, secondBody) {
+		t.Fatalf("positional multipart retry changed bytes/content type: %q/%q", firstType, secondType)
+	}
+}
+
+func encodedMultipartAttempt(t *testing.T, ctx context.Context, content *models.RequestContent, params map[string]any) (string, []byte) {
+	t.Helper()
+	selected, _, err := SelectRequestContent(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers := map[string]string{}
+	body, err := buildMultipartRequestBodyWithContext(ctx, selected, headers, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return headers["Content-Type"], encoded
+}
+
+func encodedSelectedMultipartAttempt(t *testing.T, ctx context.Context, content *SelectedRequestRepresentation, params map[string]any) (string, []byte) {
+	t.Helper()
+	headers := map[string]string{}
+	body, err := buildMultipartRequestBodyWithContext(ctx, content, headers, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return headers["Content-Type"], encoded
 }
 
 func TestPrepareRequestParts_RequestContentRequiresMediaType(t *testing.T) {
@@ -1361,11 +1487,10 @@ func TestPrepareRequestParts_MultipartUsesReviewedPartEncoding(t *testing.T) {
 	endpoint := &models.IntegrationObject{
 		Path: "/uploads", Method: http.MethodPost,
 		RequestContent: &models.RequestContent{
-			MediaType: "multipart/form-data", Serialization: models.RequestSerializationMultipart,
-			Parts: map[string]models.RequestPart{
+			Representations: []models.RequestRepresentation{{MediaType: "multipart/form-data", Serialization: models.RequestSerializationMultipart, Encoding: map[string]models.RequestEncoding{
 				"file": {ContentType: "image/png", BinaryEncoding: models.RequestBinaryEncodingBase64},
 				"blob": {BinaryEncoding: models.RequestBinaryEncodingBase64},
-			},
+			}, Schema: &models.SchemaContract{Projection: models.Schema{Type: "object", AdditionalProperties: &models.Schema{}}}}},
 		},
 	}
 	_, headers, body, err := prepareRequestParts(&models.Service{BaseURL: "https://api.example.com"}, endpoint, map[string]any{
@@ -1393,20 +1518,19 @@ func TestPrepareRequestParts_MultipartUsesReviewedPartEncoding(t *testing.T) {
 func TestPrepareRequestParts_MultipartRejectsUnsafeValues(t *testing.T) {
 	tests := []struct {
 		name        string
-		part        models.RequestPart
+		part        models.RequestEncoding
 		value       any
 		wantMessage string
 	}{
-		{name: "base64 type", part: models.RequestPart{BinaryEncoding: "base64"}, value: 42, wantMessage: `requires a base64 string`},
-		{name: "invalid base64", part: models.RequestPart{BinaryEncoding: "base64"}, value: "not-base64", wantMessage: `contains invalid base64`},
-		{name: "unsupported encoding", part: models.RequestPart{BinaryEncoding: "hex"}, value: "00", wantMessage: `unsupported binary_encoding`},
-		{name: "invalid content type", part: models.RequestPart{ContentType: "bad\r\nInjected: yes"}, value: "value", wantMessage: `invalid content_type`},
+		{name: "base64 type", part: models.RequestEncoding{BinaryEncoding: "base64"}, value: 42, wantMessage: `requires a base64 string`},
+		{name: "invalid base64", part: models.RequestEncoding{BinaryEncoding: "base64"}, value: "not-base64", wantMessage: `contains invalid base64`},
+		{name: "unsupported encoding", part: models.RequestEncoding{BinaryEncoding: "hex"}, value: "00", wantMessage: `unsupported binary_encoding`},
+		{name: "invalid content type", part: models.RequestEncoding{ContentType: "bad\r\nInjected: yes"}, value: "value", wantMessage: `invalid content_type`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			endpoint := &models.IntegrationObject{Path: "/uploads", Method: http.MethodPost, RequestContent: &models.RequestContent{
-				MediaType: "multipart/form-data", Serialization: models.RequestSerializationMultipart,
-				Parts: map[string]models.RequestPart{"file": tt.part},
+				Representations: []models.RequestRepresentation{{MediaType: "multipart/form-data", Serialization: models.RequestSerializationMultipart, Encoding: map[string]models.RequestEncoding{"file": tt.part}}},
 			}}
 			_, _, _, err := prepareRequestParts(&models.Service{BaseURL: "https://api.example.com"}, endpoint, map[string]any{"file": tt.value}, nil)
 			if err == nil || !strings.Contains(err.Error(), tt.wantMessage) {
@@ -1429,10 +1553,13 @@ func TestPrepareRequestParts_RawUsesConfiguredPayload(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			endpoint := &models.IntegrationObject{Path: "/raw", Method: http.MethodPost, RequestContent: &models.RequestContent{
-				MediaType: "application/octet-stream", Serialization: models.RequestSerializationRaw,
-				PayloadParameter: "body", BinaryEncoding: tt.binaryEncoding,
-			}}
+			schema := models.Schema{Type: "string"}
+			if tt.binaryEncoding == models.RequestBinaryEncodingBase64 {
+				schema.Format = "binary"
+			}
+			content := testRequestContentWithSchema("application/octet-stream", models.RequestSerializationRaw, schema)
+			content.PayloadParameter = "body"
+			endpoint := &models.IntegrationObject{Path: "/raw", Method: http.MethodPost, RequestContent: content}
 			_, _, body, err := prepareRequestParts(&models.Service{BaseURL: "https://api.example.com"}, endpoint, map[string]any{"body": tt.value}, nil)
 			if err != nil {
 				t.Fatalf("prepareRequestParts: %v", err)
@@ -1453,11 +1580,10 @@ func TestPrepareRequestParts_RawRejectsInvalidPayload(t *testing.T) {
 		wantMessage string
 	}{
 		{name: "missing convention", content: testRequestContent("text/plain", models.RequestSerializationRaw), params: map[string]any{"body": "x"}, wantMessage: `payload_parameter is required`},
-		{name: "missing payload", content: &models.RequestContent{MediaType: "text/plain", Serialization: models.RequestSerializationRaw, PayloadParameter: "body"}, params: map[string]any{}, wantMessage: `missing raw request payload parameter "body"`},
-		{name: "ambiguous extras", content: &models.RequestContent{MediaType: "text/plain", Serialization: models.RequestSerializationRaw, PayloadParameter: "body"}, params: map[string]any{"body": "value", "extra": "lossy"}, wantMessage: `parameters outside payload_parameter "body"`},
-		{name: "wrong type", content: &models.RequestContent{MediaType: "text/plain", Serialization: models.RequestSerializationRaw, PayloadParameter: "body"}, params: map[string]any{"body": map[string]any{"not": "JSON"}}, wantMessage: `must be a string or byte array`},
-		{name: "invalid base64", content: &models.RequestContent{MediaType: "application/octet-stream", Serialization: models.RequestSerializationRaw, PayloadParameter: "body", BinaryEncoding: "base64"}, params: map[string]any{"body": "not-base64"}, wantMessage: `contains invalid base64`},
-		{name: "unsupported encoding", content: &models.RequestContent{MediaType: "application/octet-stream", Serialization: models.RequestSerializationRaw, PayloadParameter: "body", BinaryEncoding: "hex"}, params: map[string]any{"body": "00"}, wantMessage: `unsupported binary_encoding`},
+		{name: "missing payload", content: rawTestRequestContent("text/plain", false), params: map[string]any{}, wantMessage: `missing raw request payload parameter "body"`},
+		{name: "ambiguous extras", content: rawTestRequestContent("text/plain", false), params: map[string]any{"body": "value", "extra": "lossy"}, wantMessage: `undeclared execution parameter "extra"`},
+		{name: "wrong type", content: rawTestRequestContent("text/plain", false), params: map[string]any{"body": map[string]any{"not": "JSON"}}, wantMessage: `must be a string or byte array`},
+		{name: "invalid base64", content: rawTestRequestContent("application/octet-stream", true), params: map[string]any{"body": "not-base64"}, wantMessage: `contains invalid base64`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1474,6 +1600,9 @@ func TestPrepareRequestParts_RequiredRequestContentRejectsEmptyBody(t *testing.T
 	for _, serialization := range []string{models.RequestSerializationJSON, models.RequestSerializationForm, models.RequestSerializationMultipart} {
 		t.Run(serialization, func(t *testing.T) {
 			mediaType := "application/json"
+			if serialization == models.RequestSerializationForm {
+				mediaType = "application/x-www-form-urlencoded"
+			}
 			if serialization == models.RequestSerializationMultipart {
 				mediaType = "multipart/form-data"
 			}

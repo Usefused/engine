@@ -25,15 +25,18 @@ func widgetCreateOperation() *FixtureOperation {
 		Method:      "POST",
 		Path:        "/widgets",
 		RequestContent: &models.RequestContent{
-			MediaType: "application/json", Serialization: models.RequestSerializationJSON, Required: true,
-			Schema: &models.Schema{
-				Type:     "object",
-				Required: []string{"name"},
-				Properties: map[string]models.Schema{
-					"name":  {Type: "string"},
-					"count": {Type: "integer"},
-				},
-			},
+			Required: true,
+			Representations: []models.RequestRepresentation{{
+				MediaType: "application/json", Serialization: models.RequestSerializationJSON,
+				Schema: &models.SchemaContract{Projection: models.Schema{
+					Type:     "object",
+					Required: []string{"name"},
+					Properties: map[string]models.Schema{
+						"name":  {Type: "string"},
+						"count": {Type: "integer"},
+					},
+				}},
+			}},
 		},
 	}
 }
@@ -42,8 +45,10 @@ func rawUploadOperation() *FixtureOperation {
 	return &FixtureOperation{
 		OperationID: "test.uploadWidget",
 		RequestContent: &models.RequestContent{
-			MediaType: "application/octet-stream", Serialization: models.RequestSerializationRaw,
-			PayloadParameter: "body", Schema: &models.Schema{Type: "string"},
+			PayloadParameter: "body", Representations: []models.RequestRepresentation{{
+				MediaType: "application/octet-stream", Serialization: models.RequestSerializationRaw,
+				Schema: &models.SchemaContract{Projection: models.Schema{Type: "string"}},
+			}},
 		},
 	}
 }
@@ -97,6 +102,25 @@ func TestValidateCallParams_RequestContentWrongTypeRejected(t *testing.T) {
 	}
 }
 
+func TestValidateCallParamsUsesRegistrySchemaProjectionOnly(t *testing.T) {
+	raw := []byte(`{"oneOf":[{"type":"string"},{"type":"null"}]}`)
+	op := &FixtureOperation{
+		OperationID: "projected", Method: "POST", Path: "/projected",
+		RequestContent: &models.RequestContent{Representations: []models.RequestRepresentation{{
+			MediaType: "application/json", Serialization: models.RequestSerializationJSON,
+			Schema: &models.SchemaContract{Raw: raw, Projection: models.Schema{
+				Type: "object", Required: []string{"name"}, Properties: map[string]models.Schema{"name": {Type: "string"}},
+			}},
+		}}},
+	}
+	if err := validateCallParams(op, map[string]any{"name": "ok"}); err != nil {
+		t.Fatalf("projection should accept request: %v", err)
+	}
+	if err := validateCallParams(op, map[string]any{}); err == nil {
+		t.Fatal("projection-required property was not enforced")
+	}
+}
+
 func TestValidateCallParams_RequiredRequestContentRejectsEmptyBody(t *testing.T) {
 	err := validateCallParams(widgetCreateOperation(), map[string]any{})
 	if err == nil || !strings.Contains(err.Error(), "required request body") {
@@ -104,13 +128,10 @@ func TestValidateCallParams_RequiredRequestContentRejectsEmptyBody(t *testing.T)
 	}
 }
 
-func TestValidateCallParams_NoRequestContentDeclaredSkipsBodyValidation(t *testing.T) {
-	// widgetGetOperation has no RequestContent at all -- extra keys beyond the
-	// declared path/query parameters are simply not something this operation
-	// has a schema to validate them against.
+func TestValidateCallParams_NoRequestContentRejectsUndeclaredInput(t *testing.T) {
 	err := validateCallParams(widgetGetOperation(), map[string]any{"id": "widget-1", "unrelated": "value"})
-	if err != nil {
-		t.Errorf("validateCallParams() with no RequestContent declared = %v, want nil", err)
+	if err == nil || !strings.Contains(err.Error(), `undeclared execution parameter "unrelated"`) {
+		t.Errorf("validateCallParams() undeclared input error = %v", err)
 	}
 }
 
@@ -125,7 +146,7 @@ func TestValidateCallParams_RawRequiresPayloadConvention(t *testing.T) {
 	op := rawUploadOperation()
 	op.RequestContent.PayloadParameter = ""
 	err := validateCallParams(op, map[string]any{"body": "payload"})
-	if err == nil || !strings.Contains(err.Error(), "payload_parameter is required") {
+	if err == nil || !strings.Contains(err.Error(), `undeclared execution parameter "body"`) {
 		t.Fatalf("raw payload convention error = %v", err)
 	}
 }
@@ -138,15 +159,16 @@ func TestValidateCallParams_RawRejectsMissingOrInvalidPayload(t *testing.T) {
 		wantMessage string
 	}{
 		{name: "missing", params: map[string]any{}, wantMessage: `missing raw request payload parameter "body"`},
-		{name: "ambiguous extras", params: map[string]any{"body": "value", "extra": "lossy"}, wantMessage: `parameters outside payload_parameter "body"`},
+		{name: "ambiguous extras", params: map[string]any{"body": "value", "extra": "lossy"}, wantMessage: `undeclared execution parameter "extra"`},
 		{name: "wrong type", params: map[string]any{"body": map[string]any{"no": "json"}}, wantMessage: "string or byte array"},
 		{name: "invalid base64", params: map[string]any{"body": "not-base64"}, binary: "base64", wantMessage: "invalid base64"},
-		{name: "unsupported encoding", params: map[string]any{"body": "00"}, binary: "hex", wantMessage: "unsupported binary_encoding"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			op := rawUploadOperation()
-			op.RequestContent.BinaryEncoding = tt.binary
+			if tt.binary == models.RequestBinaryEncodingBase64 {
+				op.RequestContent.Representations[0].Schema.Projection.Format = "binary"
+			}
 			err := validateCallParams(op, tt.params)
 			if err == nil || !strings.Contains(err.Error(), tt.wantMessage) {
 				t.Fatalf("raw validation error = %v, want %q", err, tt.wantMessage)

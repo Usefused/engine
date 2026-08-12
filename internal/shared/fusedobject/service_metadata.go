@@ -1,6 +1,7 @@
 package fusedobject
 
 import (
+	"github.com/Usefused/engine/internal/shared/catalogcontract"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
 	"github.com/google/uuid"
 )
@@ -8,14 +9,21 @@ import (
 // ServiceMetadata represents the high-level configuration of a service.
 // It acts as a lightweight version of FusedObject without containing every single endpoint.
 type ServiceMetadata struct {
-	ID               uuid.UUID   `json:"id"`
-	ServiceVersionID uuid.UUID   `json:"service_version_id"`
-	Name             string      `json:"name"`
-	Description      string      `json:"description"`
-	BaseURL          string      `json:"base_url"`
-	Servers          Servers     `json:"servers,omitempty"`
-	AuthConfigs      AuthConfigs `json:"auth_configs"`
-	RawWSDL          string      `json:"raw_wsdl,omitempty"`
+	// ExecutionContractEnvelope is runtime-only metadata populated from the
+	// snapshot columns. Keeping it out of nested JSON avoids inventing a second
+	// wire location while allowing every cache hit and dispatch to revalidate it.
+	ExecutionContractEnvelope `json:"-"`
+	ID                        uuid.UUID `json:"id"`
+	ServiceVersionID          uuid.UUID `json:"service_version_id"`
+	Name                      string    `json:"name"`
+	Description               string    `json:"description"`
+	BaseURL                   string    `json:"base_url"`
+	Servers                   Servers   `json:"servers,omitempty"`
+	// ServerVariables are workspace-local execution inputs and must never be
+	// persisted in Registry snapshots or emitted through runtime telemetry.
+	ServerVariables map[string]string `json:"-"`
+	AuthConfigs     AuthConfigs       `json:"auth_configs"`
+	RawWSDL         string            `json:"raw_wsdl,omitempty"`
 
 	// EventExtractionPath and IncomingWebhookConfig describe how this
 	// service's provider signs and shapes inbound webhook events. Populated
@@ -34,9 +42,11 @@ type ServiceMetadata struct {
 	// plans/plan-service-config-restructure.md item 1). Endpoint.Pagination
 	// still wins whenever the spec declared it -- this is only consulted when
 	// that field is nil.
-	Pagination     *PaginationConfig     `json:"pagination,omitempty"`
-	DefaultHeaders DefaultHeaders        `json:"default_headers,omitempty"`
-	ConnectConfig  *ServiceConnectConfig `json:"connect_config,omitempty"`
+	Pagination     *PaginationConfig            `json:"pagination,omitempty"`
+	DefaultHeaders DefaultHeaders               `json:"default_headers,omitempty"`
+	ConnectConfig  *ServiceConnectConfig        `json:"connect_config,omitempty"`
+	Documentation  *ServiceDocumentation        `json:"documentation,omitempty"`
+	Catalog        *catalogcontract.Composition `json:"catalog,omitempty"`
 }
 
 // ServiceConnectConfig is the Engine-facing projection of Registry's

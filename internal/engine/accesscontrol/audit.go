@@ -25,11 +25,13 @@ func ValidateAuditableRequirementCount(requirements []Requirement) error {
 type AuditOutcome string
 
 const (
-	AuditAttempted AuditOutcome = "attempted"
-	AuditAllowed   AuditOutcome = "allowed"
-	AuditDenied    AuditOutcome = "denied"
-	AuditSucceeded AuditOutcome = "succeeded"
-	AuditFailed    AuditOutcome = "failed"
+	AuditAttempted  AuditOutcome = "attempted"
+	AuditAllowed    AuditOutcome = "allowed"
+	AuditDenied     AuditOutcome = "denied"
+	AuditSucceeded  AuditOutcome = "succeeded"
+	AuditFailed     AuditOutcome = "failed"
+	AuditRolledBack AuditOutcome = "rolled_back"
+	AuditCancelled  AuditOutcome = "cancelled"
 )
 
 type AuditEvent struct {
@@ -162,7 +164,7 @@ func validateAuditText(name, value string, max int, required bool) error {
 
 func validAuditOutcome(outcome AuditOutcome) bool {
 	switch outcome {
-	case AuditAttempted, AuditAllowed, AuditDenied, AuditSucceeded, AuditFailed:
+	case AuditAttempted, AuditAllowed, AuditDenied, AuditSucceeded, AuditFailed, AuditRolledBack, AuditCancelled:
 		return true
 	default:
 		return false

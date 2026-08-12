@@ -1,33 +1,40 @@
 package engine
 
-import "testing"
+import (
+	"bytes"
+	"errors"
+	"net/http"
+	"testing"
+)
 
-// TestBufferStream_Accumulates verifies the shared buffering ResponseStream
-// accumulates chunks in order and exposes them as bytes and string.
-func TestBufferStream_Accumulates(t *testing.T) {
-	b := NewBufferStream()
-
-	if b.String() != "" {
-		t.Errorf("expected empty buffer, got %q", b.String())
+func TestDeferredResponseStreamBoundsDiscardableAttemptBody(t *testing.T) {
+	inner := &mockStream{}
+	stream := newDeferredResponseStream(inner, func(int) bool { return true })
+	if err := stream.SendResponseContract(http.StatusServiceUnavailable, "json"); err != nil {
+		t.Fatal(err)
 	}
-
-	if err := b.Send([]byte("hello ")); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err := stream.Send(bytes.Repeat([]byte("x"), maxDeferredResponseBytes+1)); !errors.Is(err, errDeferredResponseTooLarge) {
+		t.Fatalf("oversized deferred body error=%v", err)
 	}
-	if err := b.Send([]byte("world")); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err := stream.Commit(); !errors.Is(err, errDeferredResponseTooLarge) {
+		t.Fatalf("oversized deferred commit error=%v", err)
 	}
-
-	if got := b.String(); got != "hello world" {
-		t.Errorf("expected 'hello world', got %q", got)
-	}
-	if got := string(b.Bytes()); got != "hello world" {
-		t.Errorf("Bytes() mismatch, got %q", got)
+	if len(inner.contracts) != 0 || len(inner.chunks) != 0 {
+		t.Fatalf("oversized discarded attempt escaped: contracts=%#v chunks=%d", inner.contracts, len(inner.chunks))
 	}
 }
 
-// TestBufferStream_SatisfiesResponseStream is a compile-time assertion that
-// BufferStream implements the ResponseStream interface used by the dispatcher.
-func TestBufferStream_SatisfiesResponseStream(t *testing.T) {
-	var _ ResponseStream = NewBufferStream()
+func TestDeferredResponseStreamDoesNotCapFinalAttempt(t *testing.T) {
+	inner := &mockStream{}
+	stream := newDeferredResponseStream(inner, func(int) bool { return false })
+	payload := bytes.Repeat([]byte("x"), maxDeferredResponseBytes+1)
+	if err := stream.SendResponseContract(http.StatusServiceUnavailable, "json"); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Send(payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(inner.contracts) != 1 || !bytes.Equal(bytes.Join(inner.chunks, nil), payload) {
+		t.Fatal("final attempt did not stream directly")
+	}
 }

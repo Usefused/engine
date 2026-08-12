@@ -88,7 +88,8 @@ func scanProviderRateLimitProjectionRow(row pgx.Row) (ratelimitpolicy.PolicyStat
 	err := row.Scan(
 		&state.Name, &state.ScopeKind, &state.ScopeID, &state.ConfigHash, &state.Algorithm,
 		&state.FixedWindowStartedAt, &state.FixedWindowUsed, &state.Tokens,
-		&state.TokenRefilledAt, &cooldown, &sequence, &updatedAt,
+		&state.TokenRefilledAt, &state.RollingUsage, &state.ConcurrencyUsed,
+		&state.ConcurrencyHolders, &cooldown, &sequence, &updatedAt,
 	)
 	if err != nil {
 		return state, nil, 0, time.Time{}, fmt.Errorf("scan provider rate-limit projection: %w", err)
@@ -120,12 +121,18 @@ WITH envelopes AS MATERIALIZED (
 		policy.config_hash, policy.algorithm,
 		policy.fixed_window_started_at, policy.fixed_window_used,
 		policy.tokens, policy.token_refilled_at,
+		-- Empty algorithm state is omitted by JSON but remains an explicit,
+		-- non-null collection in the relational recovery contract.
+		COALESCE(policy.rolling_usage, '[]'::jsonb) AS rolling_usage,
+		policy.concurrency_used,
+		COALESCE(policy.concurrency_holders, '{}'::jsonb) AS concurrency_holders,
 		envelope.cooldown_until, envelope.sequence AS state_sequence, envelope.updated_at
 	FROM envelopes envelope
 	CROSS JOIN LATERAL jsonb_to_recordset(envelope.policies) AS policy(
 		name text, scope_kind text, scope_id uuid, config_hash text, algorithm text,
 		fixed_window_started_at timestamptz, fixed_window_used bigint,
-		tokens bigint, token_refilled_at timestamptz
+		tokens bigint, token_refilled_at timestamptz, rolling_usage jsonb,
+		concurrency_used bigint, concurrency_holders jsonb
 	)
 ), latest AS (
 	SELECT DISTINCT ON (account_id, service_version_id, policy_name, scope_kind, scope_id) *
@@ -135,11 +142,13 @@ WITH envelopes AS MATERIALIZED (
 INSERT INTO fused_provider_rate_limit_states AS current (
 	account_id, service_version_id, policy_name, scope_kind, scope_id,
 	config_hash, algorithm, fixed_window_started_at, fixed_window_used,
-	tokens, token_refilled_at, cooldown_until, state_sequence, updated_at
+	tokens, token_refilled_at, rolling_usage, concurrency_used,
+	concurrency_holders, cooldown_until, state_sequence, updated_at
 )
 SELECT account_id, service_version_id, policy_name, scope_kind, scope_id,
 	config_hash, algorithm, fixed_window_started_at, fixed_window_used,
-	tokens, token_refilled_at, cooldown_until, state_sequence, updated_at
+	tokens, token_refilled_at, rolling_usage, concurrency_used,
+	concurrency_holders, cooldown_until, state_sequence, updated_at
 FROM latest
 ON CONFLICT (account_id, service_version_id, policy_name, scope_kind, scope_id)
 DO UPDATE SET
@@ -149,6 +158,9 @@ DO UPDATE SET
 	fixed_window_used = EXCLUDED.fixed_window_used,
 	tokens = EXCLUDED.tokens,
 	token_refilled_at = EXCLUDED.token_refilled_at,
+	rolling_usage = EXCLUDED.rolling_usage,
+	concurrency_used = EXCLUDED.concurrency_used,
+	concurrency_holders = EXCLUDED.concurrency_holders,
 	cooldown_until = EXCLUDED.cooldown_until,
 	state_sequence = EXCLUDED.state_sequence,
 	updated_at = EXCLUDED.updated_at
@@ -166,6 +178,7 @@ WITH requested AS MATERIALIZED (
 SELECT state.policy_name, state.scope_kind, state.scope_id,
 	state.config_hash, state.algorithm, state.fixed_window_started_at,
 	state.fixed_window_used, state.tokens, state.token_refilled_at,
+	state.rolling_usage, state.concurrency_used, state.concurrency_holders,
 	state.cooldown_until, state.state_sequence, state.updated_at
 FROM fused_provider_rate_limit_states state
 JOIN requested ON requested.name = state.policy_name

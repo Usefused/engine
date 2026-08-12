@@ -795,7 +795,6 @@ func deactivateAppGraphQLField(s store.Store) *graphql.Field {
 			}
 			if app.GeneratorVersion == "" {
 				sandbox.KillMCPSessionsForSDK(app.AppID.String())
-				_ = sandbox.CleanupMCPSandboxDir(app.AppID.String())
 			}
 			span.SetAttributes(attribute.String("outcome", "deactivated"))
 			return true, nil

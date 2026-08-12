@@ -88,8 +88,8 @@ func DecryptClientCredentials(cfg *store.ConnectConfig, masterKey []byte) (Clien
 
 // ExchangeAuthorizationCode builds the auth-code grant in one place so browser
 // callback and later tests share the same provider-facing behavior.
-func ExchangeAuthorizationCode(ctx context.Context, client *http.Client, auth fusedobject.AuthConfig, creds ClientCredentials, code, verifier string) (TokenResponse, error) {
-	return executeTokenGrant(ctx, client, auth, creds, func(form url.Values) {
+func ExchangeAuthorizationCode(ctx context.Context, client *http.Client, auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, creds ClientCredentials, code, verifier string) (TokenResponse, error) {
+	return executeTokenGrant(ctx, client, auth, flow, creds, func(form url.Values) {
 		form.Set("grant_type", "authorization_code")
 		form.Set("code", code)
 		form.Set("code_verifier", verifier)
@@ -98,8 +98,8 @@ func ExchangeAuthorizationCode(ctx context.Context, client *http.Client, auth fu
 
 // RefreshAccessToken builds the refresh-token grant without touching browser
 // state; dispatch-time refresh should depend only on bucket-stored material.
-func RefreshAccessToken(ctx context.Context, client *http.Client, auth fusedobject.AuthConfig, creds ClientCredentials, refreshToken string) (TokenResponse, error) {
-	return executeTokenGrant(ctx, client, auth, creds, func(form url.Values) {
+func RefreshAccessToken(ctx context.Context, client *http.Client, auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, creds ClientCredentials, refreshToken string) (TokenResponse, error) {
+	return executeTokenGrant(ctx, client, auth, flow, creds, func(form url.Values) {
 		form.Set("grant_type", "refresh_token")
 		form.Set("refresh_token", refreshToken)
 	})
@@ -175,7 +175,7 @@ func ClaimBytes(claims map[string]any) []byte {
 	return raw
 }
 
-func executeTokenGrant(ctx context.Context, client *http.Client, auth fusedobject.AuthConfig, creds ClientCredentials, configure func(url.Values)) (TokenResponse, error) {
+func executeTokenGrant(ctx context.Context, client *http.Client, auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, creds ClientCredentials, configure func(url.Values)) (TokenResponse, error) {
 	method := auth.TokenEndpointAuthMethod
 	if err := validateTokenEndpointAuthContract(auth); err != nil {
 		recordTokenRequest(ctx, method, "rejected")
@@ -183,7 +183,7 @@ func executeTokenGrant(ctx context.Context, client *http.Client, auth fusedobjec
 	}
 	form := tokenBaseForm(auth, creds, method)
 	configure(form)
-	token, err := doTokenForm(ctx, client, auth, creds, form)
+	token, err := doTokenForm(ctx, client, auth, flow, creds, form)
 	if err != nil {
 		recordTokenRequest(ctx, method, "failed")
 		return TokenResponse{}, err
@@ -242,8 +242,8 @@ func tokenEndpointAuthMethodAttribute(method fusedobject.TokenEndpointAuthMethod
 
 // doTokenForm is the single provider HTTP boundary for token grants, so
 // malformed responses fail before any bucket credential row is updated.
-func doTokenForm(ctx context.Context, client *http.Client, auth fusedobject.AuthConfig, creds ClientCredentials, form url.Values) (TokenResponse, error) {
-	req, err := newTokenRequest(ctx, auth, creds, form)
+func doTokenForm(ctx context.Context, client *http.Client, auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, creds ClientCredentials, form url.Values) (TokenResponse, error) {
+	req, err := newTokenRequest(ctx, auth, flow, creds, form)
 	if err != nil {
 		return TokenResponse{}, err
 	}
@@ -252,11 +252,14 @@ func doTokenForm(ctx context.Context, client *http.Client, auth fusedobject.Auth
 
 // newTokenRequest keeps Basic auth construction next to request creation so
 // secrets are attached in exactly one provider-facing path.
-func newTokenRequest(ctx context.Context, auth fusedobject.AuthConfig, creds ClientCredentials, form url.Values) (*http.Request, error) {
+func newTokenRequest(ctx context.Context, auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, creds ClientCredentials, form url.Values) (*http.Request, error) {
 	if err := validateTokenEndpointAuthContract(auth); err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, auth.TokenURL, strings.NewReader(form.Encode()))
+	if strings.TrimSpace(flow.TokenURL) == "" {
+		return nil, errors.New("selected OAuth2 flow requires token_url")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, flow.TokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}

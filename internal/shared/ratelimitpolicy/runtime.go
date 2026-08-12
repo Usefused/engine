@@ -11,25 +11,36 @@ import (
 // quota coordinator.
 // It contains no credentials or provider response values.
 type ResolvedPolicy struct {
-	Name             string `json:"name"`
-	Unit             string `json:"unit"`
-	ScopeKind        string `json:"scope_kind"`
-	ScopeID          string `json:"scope_id"`
-	Cost             int64  `json:"cost"`
-	Algorithm        string `json:"algorithm"`
-	ConfigHash       string `json:"config_hash"`
-	Limit            int64  `json:"limit"`
-	DurationMS       int64  `json:"duration_ms"`
-	Capacity         int64  `json:"capacity"`
-	RefillUnits      int64  `json:"refill_units"`
-	RefillIntervalMS int64  `json:"refill_interval_ms"`
+	Name              string `json:"name"`
+	Unit              string `json:"unit"`
+	ScopeKind         string `json:"scope_kind"`
+	ScopeID           string `json:"scope_id"`
+	Mode              string `json:"mode"`
+	Cost              int64  `json:"cost"`
+	Algorithm         string `json:"algorithm"`
+	ConfigHash        string `json:"config_hash"`
+	Limit             int64  `json:"limit"`
+	DurationMs        int64  `json:"duration_ms"`
+	Capacity          int64  `json:"capacity"`
+	RefillUnits       int64  `json:"refill_units"`
+	RefillIntervalMs  int64  `json:"refill_interval_ms"`
+	RollingLimit      int64  `json:"rolling_limit"`
+	RollingDurationMs int64  `json:"rolling_duration_ms"`
+	ConcurrencyLimit  int64  `json:"concurrency_limit"`
 }
 
 type AcquireRequest struct {
 	AccountID        uuid.UUID
 	ServiceVersionID uuid.UUID
+	PermitID         uuid.UUID
+	PermitExpiresAt  time.Time
 	Policies         []ResolvedPolicy
 }
+
+// ReleaseRequest carries the exact identities acquired for concurrency
+// policies. Reusing the resolved snapshot prevents a later config refresh from
+// releasing a different bucket.
+type ReleaseRequest = AcquireRequest
 
 type Decision struct {
 	Allowed    bool
@@ -42,6 +53,8 @@ type Decision struct {
 	ScopeKinds           []string
 	UnitTotals           map[string]int64
 	HeaderOutcome        string
+	ObservedDenials      int64
+	ConcurrencyDenied    bool
 }
 
 // ResponseObservation contains only parsed numeric/timestamp bounds. Header
@@ -52,10 +65,12 @@ type ResponseObservation struct {
 	ScopeID    uuid.UUID  `json:"scope_id"`
 	Algorithm  string     `json:"algorithm"`
 	LocalLimit int64      `json:"local_limit"`
-	DurationMS int64      `json:"duration_ms"`
+	DurationMs int64      `json:"duration_ms"`
 	Limit      *int64     `json:"limit,omitempty"`
 	Remaining  *int64     `json:"remaining,omitempty"`
 	ResetAt    *time.Time `json:"reset_at,omitempty"`
+	Cost       *int64     `json:"cost,omitempty"`
+	LocalCost  int64      `json:"local_cost"`
 }
 
 type SyncRequest struct {
@@ -66,6 +81,7 @@ type SyncRequest struct {
 }
 
 const ProviderRateLimitStateSchemaVersion = 1
+const MaxRollingStateBuckets = 256
 
 // StateEnvelope is the complete, atomically replaced JetStream value for one
 // execution quota scope. Keeping every AND policy in one document avoids a
@@ -84,15 +100,28 @@ type StateEnvelope struct {
 // PolicyState is safe coordination state. Provider credentials, response
 // header values, and resolved URLs must never enter JetStream or PostgreSQL.
 type PolicyState struct {
-	Name                 string     `json:"name"`
-	ScopeKind            string     `json:"scope_kind"`
-	ScopeID              uuid.UUID  `json:"scope_id"`
-	ConfigHash           string     `json:"config_hash"`
-	Algorithm            string     `json:"algorithm"`
-	FixedWindowStartedAt *time.Time `json:"fixed_window_started_at,omitempty"`
-	FixedWindowUsed      int64      `json:"fixed_window_used"`
-	Tokens               *int64     `json:"tokens,omitempty"`
-	TokenRefilledAt      *time.Time `json:"token_refilled_at,omitempty"`
+	Name                 string                       `json:"name"`
+	ScopeKind            string                       `json:"scope_kind"`
+	ScopeID              uuid.UUID                    `json:"scope_id"`
+	ConfigHash           string                       `json:"config_hash"`
+	Algorithm            string                       `json:"algorithm"`
+	FixedWindowStartedAt *time.Time                   `json:"fixed_window_started_at,omitempty"`
+	FixedWindowUsed      int64                        `json:"fixed_window_used"`
+	Tokens               *int64                       `json:"tokens,omitempty"`
+	TokenRefilledAt      *time.Time                   `json:"token_refilled_at,omitempty"`
+	RollingUsage         []RollingUsage               `json:"rolling_usage,omitempty"`
+	ConcurrencyUsed      int64                        `json:"concurrency_used"`
+	ConcurrencyHolders   map[string]ConcurrencyHolder `json:"concurrency_holders,omitempty"`
+}
+
+type ConcurrencyHolder struct {
+	Cost      int64     `json:"cost"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type RollingUsage struct {
+	At   time.Time `json:"at"`
+	Cost int64     `json:"cost"`
 }
 
 func (s StateEnvelope) Validate() error {
@@ -114,28 +143,77 @@ func (s PolicyState) validate() error {
 	if err := s.validateIdentity(); err != nil {
 		return err
 	}
-	switch s.Algorithm {
-	case "fixed_window":
-		if s.FixedWindowStartedAt != nil && s.Tokens == nil && s.TokenRefilledAt == nil {
-			return nil
-		}
-	case "token_bucket":
-		if validTokenState(s) {
-			return nil
-		}
+	if !validAlgorithmState(s) {
+		return errors.New("provider rate-limit policy algorithm state is invalid")
 	}
-	return errors.New("provider rate-limit policy algorithm state is invalid")
+	return nil
 }
 
+func validAlgorithmState(s PolicyState) bool {
+	switch s.Algorithm {
+	case "fixed_window":
+		return s.FixedWindowStartedAt != nil && noTokenState(s)
+	case "token_bucket":
+		return validTokenState(s)
+	case "rolling_window":
+		return s.FixedWindowStartedAt == nil && noTokenState(s)
+	case "concurrency":
+		return s.FixedWindowStartedAt == nil && noTokenState(s) && len(s.RollingUsage) == 0
+	default:
+		return false
+	}
+}
+
+func noTokenState(s PolicyState) bool { return s.Tokens == nil && s.TokenRefilledAt == nil }
+
 func (s PolicyState) validateIdentity() error {
-	if s.Name == "" || s.ScopeID == uuid.Nil || s.ConfigHash == "" {
+	if !s.validBaseIdentity() {
 		return errors.New("provider rate-limit policy state is invalid")
 	}
-	if s.ScopeKind != "service_version" && s.ScopeKind != "connection" {
-		return errors.New("provider rate-limit policy scope is invalid")
+	if !s.validUsageBounds() {
+		return errors.New("provider rate-limit policy dynamic state is invalid")
 	}
-	if s.FixedWindowUsed < 0 || s.FixedWindowUsed > maxPolicyValue {
-		return errors.New("provider rate-limit policy usage is invalid")
+	if err := validateRollingUsage(s.RollingUsage); err != nil {
+		return err
+	}
+	return validateConcurrencyHolders(s.ConcurrencyHolders, s.ConcurrencyUsed)
+}
+
+func (s PolicyState) validBaseIdentity() bool {
+	return s.Name != "" && s.ScopeID != uuid.Nil && s.ConfigHash != "" && s.ScopeKind != "" && len(s.ScopeKind) <= 256
+}
+
+func (s PolicyState) validUsageBounds() bool {
+	return s.FixedWindowUsed >= 0 && s.FixedWindowUsed <= maxPolicyValue && s.ConcurrencyUsed >= 0 && s.ConcurrencyUsed <= maxPolicyValue && len(s.RollingUsage) <= MaxRollingStateBuckets && len(s.ConcurrencyHolders) <= 10_000
+}
+
+func validateRollingUsage(values []RollingUsage) error {
+	var previous time.Time
+	for _, usage := range values {
+		if usage.At.IsZero() || usage.Cost < 0 || usage.Cost > maxPolicyValue {
+			return errors.New("provider rolling-window state is invalid")
+		}
+		if !previous.IsZero() && !usage.At.After(previous) {
+			return errors.New("provider rolling-window state is unordered")
+		}
+		previous = usage.At
+	}
+	return nil
+}
+
+func validateConcurrencyHolders(values map[string]ConcurrencyHolder, expected int64) error {
+	holderTotal := int64(0)
+	for _, holder := range values {
+		if holder.Cost < 1 || holder.Cost > maxPolicyValue || holder.ExpiresAt.IsZero() {
+			return errors.New("provider concurrency holder is invalid")
+		}
+		if holder.Cost > maxPolicyValue-holderTotal {
+			return errors.New("provider concurrency holder total overflowed")
+		}
+		holderTotal += holder.Cost
+	}
+	if holderTotal != expected {
+		return errors.New("provider concurrency usage is inconsistent")
 	}
 	return nil
 }

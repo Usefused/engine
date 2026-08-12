@@ -65,7 +65,7 @@ func integrationProjectionRequest() ratelimitpolicy.AcquireRequest {
 		Policies: []ratelimitpolicy.ResolvedPolicy{{
 			Name: "minute", Unit: "request", ScopeKind: "connection", ScopeID: uuid.NewString(),
 			Cost: 1, Algorithm: "fixed_window", ConfigHash: "integration-config",
-			Limit: 10, DurationMS: time.Minute.Milliseconds(),
+			Limit: 10, DurationMs: time.Minute.Milliseconds(),
 		}},
 	}
 }

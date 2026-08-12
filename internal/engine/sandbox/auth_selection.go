@@ -29,7 +29,7 @@ func canonicalAuthSelector(raw string) string {
 	authType := strings.ToLower(strings.TrimSpace(raw))
 	authType = strings.ReplaceAll(authType, "-", "_")
 	switch authType {
-	case "api_key", "oauth", "oidc", "basic", "bearer", "mtls":
+	case "api_key", "oauth", "oidc", "basic", "bearer", "mtls", "oauth1", "digest":
 		return authType
 	default:
 		// User-facing selectors intentionally reject imported/OpenAPI spellings
@@ -68,6 +68,8 @@ func canonicalAuthConfigType(rawType, scheme string) string {
 		return "oidc"
 	case "mutualtls", "mutual_tls", "mtls":
 		return "mtls"
+	case "oauth1":
+		return "oauth1"
 	case "basic", "bearer":
 		return authType
 	case "http":
@@ -85,6 +87,8 @@ func canonicalHTTPScheme(scheme string) string {
 		return "basic"
 	case "bearer":
 		return "bearer"
+	case "digest":
+		return "digest"
 	default:
 		return "http"
 	}
@@ -247,6 +251,10 @@ func staticSecretKeysForAuth(auth fusedobject.AuthConfig) []string {
 		return []string{name + "_username", name + "_password"}
 	case "mtls":
 		return []string{name + "_cert", name + "_key"}
+	case "oauth1":
+		return []string{name + "_consumer_key", name + "_consumer_secret"}
+	case "digest":
+		return []string{name + "_username", name + "_password"}
 	default:
 		return []string{name}
 	}

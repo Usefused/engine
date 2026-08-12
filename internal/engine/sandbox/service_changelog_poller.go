@@ -14,10 +14,8 @@ import (
 )
 
 // serviceChangelogPollInterval matches the general cadence of this
-// codebase's other periodic workers (see plans/plan-service-changelog.md,
-// "## Phase 2" -- StartMCPCleanupWorker's daily sweep is far coarser since
-// it's disk cleanup, not something a user is waiting to see). A plain,
-// easily-adjusted constant, not a hard requirement.
+// codebase's periodic workers (see plans/plan-service-changelog.md,
+// "## Phase 2"). A plain, easily-adjusted constant, not a hard requirement.
 const serviceChangelogPollInterval = 5 * time.Minute
 
 // serviceChangelogPollIntervalEnvVar overrides serviceChangelogPollInterval
@@ -50,8 +48,7 @@ func serviceChangelogPollIntervalFromEnv() time.Duration {
 // service, reads that service's own poll cursor, asks Registry for anything
 // new since then, caches the results locally, then matches each freshly
 // cached row against this workspace's actual usage, notifying only when
-// something actually affects it. Mirrors StartMCPCleanupWorker's
-// ticker+initial-run shape. configStore was added to create workspace
+// something actually affects it. configStore was added to create workspace
 // notifications; engineStore/registryClient/apiKey are unchanged from
 // Phase 2.
 func StartServiceChangelogPoller(ctx context.Context, engineStore store.Store, configStore store.ConfigRepository, registryClient RegistryClient, apiKey string) {
@@ -69,9 +66,8 @@ func StartServiceChangelogPoller(ctx context.Context, engineStore store.Store, c
 		}
 	}()
 
-	// Run an initial poll shortly after startup, same delay
-	// StartMCPCleanupWorker uses, so a fresh Engine doesn't wait a full
-	// interval before its first capture. Deliberately reuses interval (not
+	// Run an initial poll shortly after startup so a fresh Engine doesn't wait a
+	// full interval before its first capture. Deliberately reuses interval (not
 	// the serviceChangelogPollInterval constant) so overriding the env var
 	// also shortens this first-run wait -- otherwise a fresh e2e-test Engine
 	// process would still sit through a real 5-minute delay before its very

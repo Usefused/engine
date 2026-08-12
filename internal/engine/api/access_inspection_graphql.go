@@ -30,11 +30,13 @@ var accessResourceTypeGraphQLEnum = graphql.NewEnum(graphql.EnumConfig{
 var auditOutcomeGraphQLEnum = graphql.NewEnum(graphql.EnumConfig{
 	Name: "AuditOutcome",
 	Values: graphql.EnumValueConfigMap{
-		"ATTEMPTED": &graphql.EnumValueConfig{Value: accesscontrol.AuditAttempted},
-		"ALLOWED":   &graphql.EnumValueConfig{Value: accesscontrol.AuditAllowed},
-		"DENIED":    &graphql.EnumValueConfig{Value: accesscontrol.AuditDenied},
-		"SUCCEEDED": &graphql.EnumValueConfig{Value: accesscontrol.AuditSucceeded},
-		"FAILED":    &graphql.EnumValueConfig{Value: accesscontrol.AuditFailed},
+		"ATTEMPTED":   &graphql.EnumValueConfig{Value: accesscontrol.AuditAttempted},
+		"ALLOWED":     &graphql.EnumValueConfig{Value: accesscontrol.AuditAllowed},
+		"DENIED":      &graphql.EnumValueConfig{Value: accesscontrol.AuditDenied},
+		"SUCCEEDED":   &graphql.EnumValueConfig{Value: accesscontrol.AuditSucceeded},
+		"FAILED":      &graphql.EnumValueConfig{Value: accesscontrol.AuditFailed},
+		"ROLLED_BACK": &graphql.EnumValueConfig{Value: accesscontrol.AuditRolledBack},
+		"CANCELLED":   &graphql.EnumValueConfig{Value: accesscontrol.AuditCancelled},
 	},
 })
 

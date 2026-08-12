@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Usefused/engine/internal/shared/signaturepolicy"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -32,6 +33,8 @@ type WorkspaceWebhook struct {
 	AuthKeyName         string
 	SignatureHeader     string
 	VerificationHeaders []string
+	SignaturePolicy     *signaturepolicy.Config
+	CallbackURL         string
 	EventExtractionPath string
 	// SecretRef is a canonical "${bucket.<name>.secret.<key>}" reference (see
 	// internal/shared/secretref) into the generic bucket-scoped named-secret
@@ -68,19 +71,21 @@ type workspaceWebhookQueryer interface {
 }
 
 type workspaceWebhookBatchRow struct {
-	ServiceID           uuid.UUID  `json:"service_id"`
-	ServiceVersionID    uuid.UUID  `json:"service_version_id"`
-	Label               string     `json:"label"`
-	Slug                string     `json:"slug"`
-	AuthType            string     `json:"auth_type"`
-	AuthLocation        string     `json:"auth_location"`
-	AuthKeyName         string     `json:"auth_key_name"`
-	SignatureHeader     string     `json:"signature_header"`
-	VerificationHeaders []string   `json:"verification_headers"`
-	EventExtractionPath string     `json:"event_extraction_path"`
-	SecretRef           string     `json:"secret_ref"`
-	SecretBucketID      *uuid.UUID `json:"secret_bucket_id"`
-	OwningConfigKey     string     `json:"owning_config_key"`
+	ServiceID           uuid.UUID               `json:"service_id"`
+	ServiceVersionID    uuid.UUID               `json:"service_version_id"`
+	Label               string                  `json:"label"`
+	Slug                string                  `json:"slug"`
+	AuthType            string                  `json:"auth_type"`
+	AuthLocation        string                  `json:"auth_location"`
+	AuthKeyName         string                  `json:"auth_key_name"`
+	SignatureHeader     string                  `json:"signature_header"`
+	VerificationHeaders []string                `json:"verification_headers"`
+	EventExtractionPath string                  `json:"event_extraction_path"`
+	SignaturePolicy     *signaturepolicy.Config `json:"signature_policy"`
+	CallbackURL         string                  `json:"callback_url"`
+	SecretRef           string                  `json:"secret_ref"`
+	SecretBucketID      *uuid.UUID              `json:"secret_bucket_id"`
+	OwningConfigKey     string                  `json:"owning_config_key"`
 }
 
 // upsertWorkspaceWebhooks sends the complete reconciliation batch to
@@ -132,6 +137,7 @@ func marshalWorkspaceWebhookBatch(registrations []WorkspaceWebhook) ([]byte, err
 			AuthType: registration.AuthType, AuthLocation: registration.AuthLocation,
 			AuthKeyName: registration.AuthKeyName, SignatureHeader: registration.SignatureHeader,
 			VerificationHeaders: headers, EventExtractionPath: registration.EventExtractionPath,
+			SignaturePolicy: registration.SignaturePolicy, CallbackURL: registration.CallbackURL,
 			SecretRef: registration.SecretRef, SecretBucketID: registration.SecretBucketID,
 			OwningConfigKey: registration.OwningConfigKey,
 		}
@@ -216,28 +222,39 @@ type rowScanner interface {
 
 func scanWorkspaceWebhookRows(row rowScanner) (WorkspaceWebhook, error) {
 	var w WorkspaceWebhook
+	var signaturePolicy []byte
 	err := row.Scan(
 		&w.ID, &w.ServiceID, &w.ServiceVersionID, &w.Label, &w.Slug,
 		&w.AuthType, &w.AuthLocation, &w.AuthKeyName,
 		&w.SignatureHeader, &w.VerificationHeaders, &w.EventExtractionPath,
+		&signaturePolicy, &w.CallbackURL,
 		&w.SecretRef, &w.SecretBucketID, &w.OwningConfigKey,
 		&w.CreatedAt, &w.UpdatedAt,
 	)
-	return w, err
+	return w, scanSignaturePolicy(signaturePolicy, err, &w)
 }
 
 // scanWorkspaceWebhookWithAccount scans the one extra trailing column
 // selectWorkspaceWebhookBySlugSQL adds on top of workspaceWebhookColumns.
 func scanWorkspaceWebhookWithAccount(row rowScanner) (WorkspaceWebhook, error) {
 	var w WorkspaceWebhook
+	var signaturePolicy []byte
 	err := row.Scan(
 		&w.ID, &w.ServiceID, &w.ServiceVersionID, &w.Label, &w.Slug,
 		&w.AuthType, &w.AuthLocation, &w.AuthKeyName,
 		&w.SignatureHeader, &w.VerificationHeaders, &w.EventExtractionPath,
+		&signaturePolicy, &w.CallbackURL,
 		&w.SecretRef, &w.SecretBucketID, &w.OwningConfigKey,
 		&w.CreatedAt, &w.UpdatedAt, &w.AccountID,
 	)
-	return w, err
+	return w, scanSignaturePolicy(signaturePolicy, err, &w)
+}
+
+func scanSignaturePolicy(raw []byte, scanErr error, webhook *WorkspaceWebhook) error {
+	if scanErr != nil || len(raw) == 0 || string(raw) == "null" {
+		return scanErr
+	}
+	return json.Unmarshal(raw, &webhook.SignaturePolicy)
 }
 
 const workspaceWebhookColumns = `
@@ -245,6 +262,7 @@ const workspaceWebhookColumns = `
 	label, slug,
 	auth_type, auth_location, auth_key_name,
 	signature_header, verification_headers, event_extraction_path,
+	signature_policy, callback_url,
 	secret_ref, secret_bucket_id, owning_config_key,
 	created_at, updated_at`
 
@@ -261,6 +279,7 @@ const selectWorkspaceWebhookBySlugSQL = `SELECT
 		w.label, w.slug,
 		w.auth_type, w.auth_location, w.auth_key_name,
 		w.signature_header, w.verification_headers, w.event_extraction_path,
+		w.signature_policy, w.callback_url,
 		w.secret_ref, w.secret_bucket_id, w.owning_config_key,
 		w.created_at, w.updated_at,
 		fused_workspaces.account_id
@@ -284,6 +303,8 @@ const upsertWorkspaceWebhooksSQL = `
 			entry.value->>'signature_header' AS signature_header,
 			ARRAY(SELECT jsonb_array_elements_text(entry.value->'verification_headers')) AS verification_headers,
 			entry.value->>'event_extraction_path' AS event_extraction_path,
+			entry.value->'signature_policy' AS signature_policy,
+			entry.value->>'callback_url' AS callback_url,
 			entry.value->>'secret_ref' AS secret_ref,
 			(entry.value->>'secret_bucket_id')::uuid AS secret_bucket_id,
 			entry.value->>'owning_config_key' AS owning_config_key
@@ -313,10 +334,12 @@ const upsertWorkspaceWebhooksSQL = `
 		INSERT INTO fused_workspace_webhooks (
 			service_id, service_version_id, label, slug,
 			auth_type, auth_location, auth_key_name, signature_header, verification_headers, event_extraction_path,
+			signature_policy, callback_url,
 			secret_ref, secret_bucket_id, owning_config_key
 		)
 		SELECT service_id, service_version_id, label, first_slug,
 			auth_type, auth_location, auth_key_name, signature_header, verification_headers, event_extraction_path,
+			signature_policy, callback_url,
 			secret_ref, secret_bucket_id, owning_config_key
 		FROM candidates
 		WHERE NOT EXISTS (SELECT 1 FROM ownership_conflict)
@@ -329,6 +352,8 @@ const upsertWorkspaceWebhooksSQL = `
 			signature_header = EXCLUDED.signature_header,
 			verification_headers = EXCLUDED.verification_headers,
 			event_extraction_path = EXCLUDED.event_extraction_path,
+			signature_policy = EXCLUDED.signature_policy,
+			callback_url = EXCLUDED.callback_url,
 			secret_ref = EXCLUDED.secret_ref,
 			secret_bucket_id = EXCLUDED.secret_bucket_id,
 			updated_at = NOW()
@@ -339,6 +364,7 @@ const upsertWorkspaceWebhooksSQL = `
 		input.label, upserted.slug,
 		input.auth_type, input.auth_location, input.auth_key_name,
 		input.signature_header, input.verification_headers, input.event_extraction_path,
+		input.signature_policy, input.callback_url,
 		input.secret_ref, input.secret_bucket_id, input.owning_config_key,
 		upserted.created_at, upserted.updated_at
 	FROM upserted

@@ -62,7 +62,7 @@ func TestMcpCallHandlerUsesOnlySessionFixture(t *testing.T) {
 		Method:      "GET",
 		Path:        "/session/{id}",
 		Parameters:  []models.Parameter{{Name: "id", In: "path", Required: true}},
-		Responses:   models.Responses{"200": {Type: "object"}},
+		Responses:   models.Responses{"200": {Representations: []models.ResponseRepresentation{{Schema: &models.SchemaContract{Projection: models.Schema{Type: "object"}}}}}},
 	}})
 	sessionID := registerTestMCPSession(t, "tok", sessionFixture)
 

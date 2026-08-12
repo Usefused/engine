@@ -14,6 +14,7 @@ import (
 	"github.com/Usefused/engine/internal/shared/canonical"
 	"github.com/Usefused/engine/internal/shared/capability"
 	"github.com/Usefused/engine/internal/shared/secretref"
+	"github.com/Usefused/engine/internal/shared/signaturepolicy"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -407,25 +408,25 @@ func (r *postgresConfigRepository) ApplyConfigPlan(ctx context.Context, params A
 
 func applyConfigPlanTx(ctx context.Context, tx pgx.Tx, params ApplyConfigPlanParams) (*ConfigState, error) {
 	if err := lockConfigGeneration(ctx, tx, params); err != nil {
-		return nil, err
+		return nil, rollbackConfigMutation(ctx, tx, err)
 	}
 	ownerSubjectID, ownerTeamID, err := loadApplyOwner(ctx, tx, params)
 	if err != nil {
-		return nil, err
+		return nil, rollbackConfigMutation(ctx, tx, err)
 	}
 	// Apply ownership is read from the locked plan. A request cannot replace
 	// the actor or team selected and authorized during planning.
 	params.State.OwnerSubjectID = ownerSubjectID
 	params.State.OwnerTeamID = ownerTeamID
 	if err := validateStateParams(&params.State); err != nil {
-		return nil, err
+		return nil, rollbackConfigMutation(ctx, tx, err)
 	}
 	state, err := upsertConfigState(ctx, tx, params.State)
 	if err != nil {
-		return nil, err
+		return nil, rollbackConfigMutation(ctx, tx, err)
 	}
 	if err := markConfigPlanApplied(ctx, tx, params); err != nil {
-		return nil, err
+		return nil, rollbackConfigMutation(ctx, tx, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("ApplyConfigPlan: commit: %w", err)
@@ -459,28 +460,28 @@ func (r *postgresConfigRepository) ApplyWebhookConfigPlan(ctx context.Context, p
 
 func applyWebhookConfigPlanTx(ctx context.Context, tx pgx.Tx, params ApplyWebhookConfigPlanParams) (*ApplyWebhookConfigPlanResult, error) {
 	if err := lockActiveWebhookOwner(ctx, tx, params.Plan); err != nil {
-		return nil, err
+		return nil, rollbackConfigMutation(ctx, tx, err)
 	}
 	if err := lockConfigGeneration(ctx, tx, params.Plan); err != nil {
-		return nil, err
+		return nil, rollbackConfigMutation(ctx, tx, err)
 	}
 	ownerSubjectID, ownerTeamID, err := loadApplyOwner(ctx, tx, params.Plan)
 	if err != nil {
-		return nil, err
+		return nil, rollbackConfigMutation(ctx, tx, err)
 	}
 	params.Plan.State.OwnerSubjectID = ownerSubjectID
 	params.Plan.State.OwnerTeamID = ownerTeamID
 
 	saved, err := reconcileWebhookRegistrations(ctx, tx, params)
 	if err != nil {
-		return nil, err
+		return nil, rollbackConfigMutation(ctx, tx, err)
 	}
 	state, err := upsertConfigState(ctx, tx, params.Plan.State)
 	if err != nil {
-		return nil, err
+		return nil, rollbackConfigMutation(ctx, tx, err)
 	}
 	if err := markConfigPlanApplied(ctx, tx, params.Plan); err != nil {
-		return nil, err
+		return nil, rollbackConfigMutation(ctx, tx, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("ApplyWebhookConfigPlan: commit: %w", err)
@@ -528,6 +529,9 @@ func validateWebhookRegistration(registration WorkspaceWebhook, configKey string
 	}
 	if err := validateWebhookSecretBinding(registration); err != nil {
 		return err
+	}
+	if err := signaturepolicy.Validate(registration.SignaturePolicy); err != nil {
+		return ErrWorkspaceWebhookNotFound
 	}
 	return nil
 }
@@ -625,17 +629,31 @@ func (r *postgresConfigRepository) ApplyAppConfigPlan(ctx context.Context, param
 	}
 	defer tx.Rollback(ctx)
 	if _, err := lockAuthorizationState(ctx, tx); err != nil {
-		return nil, err
+		return nil, rollbackConfigMutation(ctx, tx, err)
 	}
 	result, err := applyAppConfigPlanTx(ctx, tx, &params)
 	if err != nil {
-		return nil, err
+		return nil, rollbackConfigMutation(ctx, tx, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("ApplyAppConfigPlan: commit: %w", err)
 	}
 	span.SetAttributes(attribute.String("outcome", "success"))
 	return result, nil
+}
+
+func rollbackConfigMutation(ctx context.Context, tx pgx.Tx, mutationErr error) error {
+	// A commit error can be ambiguous, so callers invoke this helper only on
+	// pre-commit failures. Only a successful rollback becomes durable evidence.
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := tx.Rollback(rollbackCtx); err == nil {
+		accesscontrol.MarkMutationAuditRolledBack(ctx)
+	}
+	if errors.Is(mutationErr, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		accesscontrol.MarkMutationAuditCancelled(ctx)
+	}
+	return mutationErr
 }
 
 func applyAppConfigPlanTx(ctx context.Context, tx pgx.Tx, params *ApplyAppConfigPlanParams) (*ApplyAppConfigPlanResult, error) {

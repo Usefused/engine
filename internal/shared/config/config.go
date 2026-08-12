@@ -48,14 +48,6 @@ const DefaultInitialCreditBalance = 10_000_000.0
 
 var GlobalEncryptionKey []byte
 
-type StorageConfig struct {
-	Endpoint  string `yaml:"endpoint"`
-	Bucket    string `yaml:"bucket"`
-	Region    string `yaml:"region"`
-	AccessKey string `yaml:"access_key"`
-	SecretKey string `yaml:"secret_key"`
-}
-
 type EngineConfig struct {
 	RegistryEndpoint       string `yaml:"registry_endpoint"`
 	AccountID              string `yaml:"account_id"`
@@ -102,7 +94,6 @@ type Config struct {
 	HomepageURL   string              `yaml:"homepage_url"`
 	Credits       CreditConfig        `yaml:"credits"`
 	Sandbox       SandboxConfig       `yaml:"sandbox"`
-	Storage       StorageConfig       `yaml:"storage"`
 	Engine        EngineConfig        `yaml:"engine"`
 	Observability ObservabilityConfig `yaml:"observability"`
 }
@@ -192,23 +183,6 @@ func applyEnvironment(cfg *Config) {
 	}
 	if envUIURL := os.Getenv("FUSED_UI_URL"); envUIURL != "" {
 		cfg.UIURL = envUIURL
-	}
-
-	// S3 Storage Environment Variables
-	if ep := os.Getenv("FUSED_S3_ENDPOINT"); ep != "" {
-		cfg.Storage.Endpoint = ep
-	}
-	if bkt := os.Getenv("FUSED_S3_BUCKET"); bkt != "" {
-		cfg.Storage.Bucket = bkt
-	}
-	if reg := os.Getenv("FUSED_S3_REGION"); reg != "" {
-		cfg.Storage.Region = reg
-	}
-	if ak := os.Getenv("FUSED_S3_ACCESS_KEY"); ak != "" {
-		cfg.Storage.AccessKey = ak
-	}
-	if sk := os.Getenv("FUSED_S3_SECRET_KEY"); sk != "" {
-		cfg.Storage.SecretKey = sk
 	}
 }
 

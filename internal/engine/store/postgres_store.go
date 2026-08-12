@@ -901,14 +901,14 @@ func (s *postgresStore) GetWebhookAnalytics(ctx context.Context, accountID, serv
 // correctness (though one could trim storage over time as a follow-up).
 func (s *postgresStore) GetIdempotentExecution(ctx context.Context, appID uuid.UUID, idempotencyKeyHash, requestBodyHash string) (*models.IdempotentExecution, error) {
 	query := `
-		SELECT id, app_id, idempotency_key_hash, request_body_hash, environment, response_body, response_status, created_at, expires_at
+		SELECT id, app_id, idempotency_key_hash, request_body_hash, environment, response_body, response_status, response_media_family, created_at, expires_at
 		FROM fused_engine_idempotency_keys
 		WHERE app_id = $1 AND idempotency_key_hash = $2 AND expires_at > NOW()
 	`
 	var exec models.IdempotentExecution
 	err := s.db.QueryRow(ctx, query, appID, idempotencyKeyHash).Scan(
 		&exec.ID, &exec.AppID, &exec.IdempotencyKeyHash, &exec.RequestBodyHash,
-		&exec.Environment, &exec.ResponseBody, &exec.ResponseStatus, &exec.CreatedAt, &exec.ExpiresAt,
+		&exec.Environment, &exec.ResponseBody, &exec.ResponseStatus, &exec.ResponseMediaFamily, &exec.CreatedAt, &exec.ExpiresAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrIdempotentExecutionNotFound
@@ -930,11 +930,11 @@ func (s *postgresStore) GetIdempotentExecution(ctx context.Context, appID uuid.U
 func (s *postgresStore) SaveIdempotentExecution(ctx context.Context, exec *models.IdempotentExecution) error {
 	query := `
 		INSERT INTO fused_engine_idempotency_keys
-			(id, app_id, idempotency_key_hash, request_body_hash, environment, response_body, response_status, created_at, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8)
+			(id, app_id, idempotency_key_hash, request_body_hash, environment, response_body, response_status, response_media_family, created_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9)
 		ON CONFLICT (app_id, idempotency_key_hash) DO NOTHING
 	`
-	_, err := s.db.Exec(ctx, query, exec.AppID, exec.IdempotencyKeyHash, exec.RequestBodyHash, exec.Environment, exec.ResponseBody, exec.ResponseStatus, exec.ExpiresAt)
+	_, err := s.db.Exec(ctx, query, exec.AppID, exec.IdempotencyKeyHash, exec.RequestBodyHash, exec.Environment, exec.ResponseBody, exec.ResponseStatus, exec.ResponseMediaFamily, exec.ExpiresAt)
 	return err
 }
 

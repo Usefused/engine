@@ -15,7 +15,13 @@ const (
 type Requirements []Alternative
 
 type Alternative struct {
-	Schemes []Requirement `json:"schemes"`
+	Schemes         []Requirement    `json:"schemes"`
+	ServerSelection *ServerSelection `json:"server_selection,omitempty"`
+}
+
+type ServerSelection struct {
+	Scheme    string `json:"scheme"`
+	ServerURL string `json:"server_url"`
 }
 
 type Requirement struct {
@@ -31,6 +37,8 @@ func CanonicalType(rawType, scheme string) string {
 		return "api_key"
 	case "oauth", "oauth2", "oauth2_authorization_code":
 		return "oauth"
+	case "oauth1", "oauth_1":
+		return "oauth1"
 	case "openidconnect", "open_id_connect", "oidc":
 		return "oidc"
 	case "mutualtls", "mutual_tls", "mtls":

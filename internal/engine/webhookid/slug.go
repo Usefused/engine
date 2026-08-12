@@ -6,8 +6,8 @@
 // same fixed character width: the apply path (engine/api) generates a slug
 // once when a webhook registration is created, and the ingress path
 // (engine/sandbox) truncates an inbound URL segment to that same width to
-// discard the decorative "-{serviceSlug}" suffix and anything a provider
-// glues onto the path after it (e.g. Plunk/Stripe appending an event name).
+// discard the decorative "-{serviceSlug}" suffix and any provider-defined
+// routing suffix appended to the callback path.
 // One shared constant means those two call sites can never drift apart.
 package webhookid
 

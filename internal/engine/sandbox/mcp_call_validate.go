@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	engine "github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/getkin/kin-openapi/openapi3"
 )
@@ -18,11 +19,22 @@ import (
 // touches a vendor. A rejection here is a clean, script-visible error --
 // never a malformed request reaching the vendor.
 func validateCallParams(op *FixtureOperation, params map[string]any) error {
+	var selected *engine.SelectedRequestRepresentation
+	if op.RequestContent != nil {
+		var err error
+		selected, _, err = engine.SelectRequestContent(op.RequestContent)
+		if err != nil {
+			return err
+		}
+	}
+	if err := engine.ValidateDeclaredExecutionParameters(op.Parameters, selected, params); err != nil {
+		return err
+	}
 	if err := validateRequiredParameters(op.Parameters, params); err != nil {
 		return err
 	}
-	if op.RequestContent != nil {
-		if err := validateRequestBody(op, params); err != nil {
+	if selected != nil {
+		if err := validateRequestBody(op, selected, params); err != nil {
 			return err
 		}
 	}
@@ -51,7 +63,7 @@ func validateRequiredParameters(declared []models.Parameter, params map[string]a
 // shape -- means validation checks the request the same way it will
 // eventually be routed, with one source of truth for what "the body" means
 // for a flat params map.
-func validateRequestBody(op *FixtureOperation, params map[string]any) error {
+func validateRequestBody(op *FixtureOperation, content *engine.SelectedRequestRepresentation, params map[string]any) error {
 	declaredNames := make(map[string]struct{}, len(op.Parameters))
 	for _, p := range op.Parameters {
 		declaredNames[p.Name] = struct{}{}
@@ -63,15 +75,15 @@ func validateRequestBody(op *FixtureOperation, params map[string]any) error {
 			bodyParams[k] = v
 		}
 	}
-	validationValue, err := requestValidationValue(op, bodyParams)
+	validationValue, err := requestValidationValue(op, content, bodyParams)
 	if err != nil {
 		return err
 	}
-	if op.RequestContent.Schema == nil {
+	if content.Schema == nil {
 		return nil
 	}
 
-	schema, err := modelSchemaToOpenAPI(op.RequestContent.Schema)
+	schema, err := modelSchemaToOpenAPI(content.Schema)
 	if err != nil {
 		return fmt.Errorf("invalid operation schema for %q: %w", op.OperationID, err)
 	}
@@ -82,8 +94,7 @@ func validateRequestBody(op *FixtureOperation, params map[string]any) error {
 	return nil
 }
 
-func requestValidationValue(op *FixtureOperation, bodyParams map[string]any) (any, error) {
-	content := op.RequestContent
+func requestValidationValue(op *FixtureOperation, content *engine.SelectedRequestRepresentation, bodyParams map[string]any) (any, error) {
 	if content.Serialization != models.RequestSerializationRaw {
 		if content.Required && len(bodyParams) == 0 {
 			return nil, fmt.Errorf("missing required request body for %q", op.OperationID)
@@ -101,7 +112,11 @@ func requestValidationValue(op *FixtureOperation, bodyParams map[string]any) (an
 	if len(bodyParams) != 1 {
 		return nil, fmt.Errorf("raw request contains parameters outside payload_parameter %q", name)
 	}
-	if err := validateRawBinaryValue(name, value, content.BinaryEncoding); err != nil {
+	binaryEncoding := ""
+	if content.Schema != nil && content.Schema.Format == "binary" {
+		binaryEncoding = models.RequestBinaryEncodingBase64
+	}
+	if err := validateRawBinaryValue(name, value, binaryEncoding); err != nil {
 		return nil, err
 	}
 	return value, nil

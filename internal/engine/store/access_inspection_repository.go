@@ -154,7 +154,7 @@ func validateAuditActions(actions []string) error {
 func validateAuditOutcomes(outcomes []accesscontrol.AuditOutcome) error {
 	for _, outcome := range outcomes {
 		switch outcome {
-		case accesscontrol.AuditAttempted, accesscontrol.AuditAllowed, accesscontrol.AuditDenied, accesscontrol.AuditSucceeded, accesscontrol.AuditFailed:
+		case accesscontrol.AuditAttempted, accesscontrol.AuditAllowed, accesscontrol.AuditDenied, accesscontrol.AuditSucceeded, accesscontrol.AuditFailed, accesscontrol.AuditRolledBack, accesscontrol.AuditCancelled:
 		default:
 			return ErrInvalidAuditQuery
 		}

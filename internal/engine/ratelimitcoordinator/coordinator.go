@@ -64,6 +64,42 @@ func (c *Coordinator) AcquireProviderRateLimit(ctx context.Context, request rate
 	return c.acquireReservation(ctx, held, key, request)
 }
 
+func (c *Coordinator) ReleaseProviderRateLimit(ctx context.Context, request ratelimitpolicy.ReleaseRequest) error {
+	policies, key, err := validateAcquireRequest(request)
+	if err != nil {
+		return err
+	}
+	request.Policies = policies
+	for attempt := 0; attempt < maxCASAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err = c.releaseAttempt(key, request)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, nats.ErrKeyExists) {
+			return err
+		}
+	}
+	return errors.New("provider concurrency release exceeded retry budget")
+}
+
+func (c *Coordinator) releaseAttempt(key string, request ratelimitpolicy.ReleaseRequest) error {
+	entry, err := c.kv.Get(key)
+	if errors.Is(err, nats.ErrKeyNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load provider concurrency state: %w", err)
+	}
+	state, err := decodeState(entry.Value())
+	if err != nil || !applyRelease(&state, request, c.now().UTC()) {
+		return err
+	}
+	return updateState(c.kv, key, state, entry.Revision())
+}
+
 func (c *Coordinator) consumeLocalLease(held heldLeaseEntry, request ratelimitpolicy.AcquireRequest) (ratelimitpolicy.Decision, bool) {
 	if c.leaseEnabled.Load() {
 		return held.consume(request.Policies, c.now().UTC())
@@ -143,6 +179,9 @@ func (c *Coordinator) createAndAcquire(ctx context.Context, key string, request 
 		return acquireResult{}, err
 	}
 	decision, _ := applyAcquisition(&state, request, c.now().UTC())
+	if err := validateState(state); err != nil {
+		return acquireResult{}, err
+	}
 	payload, err := json.Marshal(state)
 	if err != nil {
 		return acquireResult{}, fmt.Errorf("encode provider rate-limit state: %w", err)
@@ -228,6 +267,9 @@ func (c *Coordinator) watchControlEpochs(watcher nats.KeyWatcher) {
 }
 
 func updateState(kv nats.KeyValue, key string, state ratelimitpolicy.StateEnvelope, revision uint64) error {
+	if err := validateState(state); err != nil {
+		return err
+	}
 	payload, err := json.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("encode provider rate-limit state: %w", err)

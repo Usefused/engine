@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,13 +43,14 @@ type AuthExecutionSummary struct {
 }
 
 type RateLimitExecutionSummary struct {
-	Decision      string
-	PolicyCount   int64
-	ScopeKinds    []string
-	Units         []string
-	UnitTotals    []int64
-	RetryOutcome  string
-	HeaderOutcome string
+	Decision        string
+	PolicyCount     int64
+	ScopeKinds      []string
+	Units           []string
+	UnitTotals      []int64
+	RetryOutcome    string
+	HeaderOutcome   string
+	ObservedDenials int64
 }
 
 func NewExecutionTimings() *ExecutionTimings {
@@ -219,6 +221,7 @@ func mergeRateLimitSummary(current, next RateLimitExecutionSummary) RateLimitExe
 	if next.PolicyCount < current.PolicyCount {
 		next.PolicyCount = current.PolicyCount
 	}
+	next.ObservedDenials += current.ObservedDenials
 	next.HeaderOutcome = mergeRateLimitHeaderOutcome(current.HeaderOutcome, next.HeaderOutcome)
 	return next
 }
@@ -307,7 +310,11 @@ func (t *ExecutionTimings) Attributes() []attribute.KeyValue {
 
 	attrs := make([]attribute.KeyValue, 0, len(keys))
 	for _, key := range keys {
-		attrs = append(attrs, attribute.Float64(fmt.Sprintf("engine.timing.%s_ms", key), snapshot[key]))
+		attributeName := fmt.Sprintf("engine.timing.%s_ms", key)
+		if strings.HasSuffix(key, "_ms") {
+			attributeName = "engine.timing." + key
+		}
+		attrs = append(attrs, attribute.Float64(attributeName, snapshot[key]))
 	}
 	return attrs
 }

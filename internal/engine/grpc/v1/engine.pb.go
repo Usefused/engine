@@ -209,13 +209,8 @@ type ExecuteRequest struct {
 	// request_body_hash is the SHA-256 hex digest of the exact JSON params bytes
 	// sent by the SDK for this Execute call.
 	RequestBodyHash string `protobuf:"bytes,8,opt,name=request_body_hash,json=requestBodyHash,proto3" json:"request_body_hash,omitempty"`
-	// retry_override lets the SDK request retry bounds for this single Execute
-	// call. It can only ever narrow what a service-level RetryConfig already
-	// allows (or a fixed hard ceiling when the service has none) -- never
-	// widen it. See resolveRetryPolicy in internal/engine/retry_policy.go.
-	RetryOverride *RetryOverride `protobuf:"bytes,9,opt,name=retry_override,json=retryOverride,proto3" json:"retry_override,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ExecuteRequest) Reset() {
@@ -304,70 +299,6 @@ func (x *ExecuteRequest) GetRequestBodyHash() string {
 	return ""
 }
 
-func (x *ExecuteRequest) GetRetryOverride() *RetryOverride {
-	if x != nil {
-		return x.RetryOverride
-	}
-	return nil
-}
-
-// RetryOverride is intentionally numeric-only: max_retries and backoff_ms
-// are optional so "not set" is distinguishable from "explicitly 0". There is
-// no strategy field here -- the backoff algorithm (fixed vs exponential) is
-// always owned by the service's RetryConfig, never the caller, so there is
-// never a conflict between two different retry "logics" for the same call.
-type RetryOverride struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	MaxRetries    *int32                 `protobuf:"varint,1,opt,name=max_retries,json=maxRetries,proto3,oneof" json:"max_retries,omitempty"`
-	BackoffMs     *int32                 `protobuf:"varint,2,opt,name=backoff_ms,json=backoffMs,proto3,oneof" json:"backoff_ms,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *RetryOverride) Reset() {
-	*x = RetryOverride{}
-	mi := &file_engine_v1_engine_proto_msgTypes[5]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *RetryOverride) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RetryOverride) ProtoMessage() {}
-
-func (x *RetryOverride) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_v1_engine_proto_msgTypes[5]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RetryOverride.ProtoReflect.Descriptor instead.
-func (*RetryOverride) Descriptor() ([]byte, []int) {
-	return file_engine_v1_engine_proto_rawDescGZIP(), []int{5}
-}
-
-func (x *RetryOverride) GetMaxRetries() int32 {
-	if x != nil && x.MaxRetries != nil {
-		return *x.MaxRetries
-	}
-	return 0
-}
-
-func (x *RetryOverride) GetBackoffMs() int32 {
-	if x != nil && x.BackoffMs != nil {
-		return *x.BackoffMs
-	}
-	return 0
-}
-
 type ExecuteResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Result        []byte                 `protobuf:"bytes,1,opt,name=result,proto3" json:"result,omitempty"`                            // JSON-encoded response chunk or full response
@@ -379,7 +310,7 @@ type ExecuteResponse struct {
 
 func (x *ExecuteResponse) Reset() {
 	*x = ExecuteResponse{}
-	mi := &file_engine_v1_engine_proto_msgTypes[6]
+	mi := &file_engine_v1_engine_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -391,7 +322,7 @@ func (x *ExecuteResponse) String() string {
 func (*ExecuteResponse) ProtoMessage() {}
 
 func (x *ExecuteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_v1_engine_proto_msgTypes[6]
+	mi := &file_engine_v1_engine_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -404,7 +335,7 @@ func (x *ExecuteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecuteResponse.ProtoReflect.Descriptor instead.
 func (*ExecuteResponse) Descriptor() ([]byte, []int) {
-	return file_engine_v1_engine_proto_rawDescGZIP(), []int{6}
+	return file_engine_v1_engine_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ExecuteResponse) GetResult() []byte {
@@ -446,7 +377,7 @@ type StartConnectSessionRequest struct {
 
 func (x *StartConnectSessionRequest) Reset() {
 	*x = StartConnectSessionRequest{}
-	mi := &file_engine_v1_engine_proto_msgTypes[7]
+	mi := &file_engine_v1_engine_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -458,7 +389,7 @@ func (x *StartConnectSessionRequest) String() string {
 func (*StartConnectSessionRequest) ProtoMessage() {}
 
 func (x *StartConnectSessionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_v1_engine_proto_msgTypes[7]
+	mi := &file_engine_v1_engine_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -471,7 +402,7 @@ func (x *StartConnectSessionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartConnectSessionRequest.ProtoReflect.Descriptor instead.
 func (*StartConnectSessionRequest) Descriptor() ([]byte, []int) {
-	return file_engine_v1_engine_proto_rawDescGZIP(), []int{7}
+	return file_engine_v1_engine_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *StartConnectSessionRequest) GetBucketId() string {
@@ -533,7 +464,7 @@ type StartConnectSessionResponse struct {
 
 func (x *StartConnectSessionResponse) Reset() {
 	*x = StartConnectSessionResponse{}
-	mi := &file_engine_v1_engine_proto_msgTypes[8]
+	mi := &file_engine_v1_engine_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -545,7 +476,7 @@ func (x *StartConnectSessionResponse) String() string {
 func (*StartConnectSessionResponse) ProtoMessage() {}
 
 func (x *StartConnectSessionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_v1_engine_proto_msgTypes[8]
+	mi := &file_engine_v1_engine_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -558,7 +489,7 @@ func (x *StartConnectSessionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartConnectSessionResponse.ProtoReflect.Descriptor instead.
 func (*StartConnectSessionResponse) Descriptor() ([]byte, []int) {
-	return file_engine_v1_engine_proto_rawDescGZIP(), []int{8}
+	return file_engine_v1_engine_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *StartConnectSessionResponse) GetAuthorizeUrl() string {
@@ -584,7 +515,7 @@ type GetConnectionRequest struct {
 
 func (x *GetConnectionRequest) Reset() {
 	*x = GetConnectionRequest{}
-	mi := &file_engine_v1_engine_proto_msgTypes[9]
+	mi := &file_engine_v1_engine_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -596,7 +527,7 @@ func (x *GetConnectionRequest) String() string {
 func (*GetConnectionRequest) ProtoMessage() {}
 
 func (x *GetConnectionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_v1_engine_proto_msgTypes[9]
+	mi := &file_engine_v1_engine_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -609,7 +540,7 @@ func (x *GetConnectionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetConnectionRequest.ProtoReflect.Descriptor instead.
 func (*GetConnectionRequest) Descriptor() ([]byte, []int) {
-	return file_engine_v1_engine_proto_rawDescGZIP(), []int{9}
+	return file_engine_v1_engine_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *GetConnectionRequest) GetConnectionId() string {
@@ -629,7 +560,7 @@ type GetConnectionResponse struct {
 
 func (x *GetConnectionResponse) Reset() {
 	*x = GetConnectionResponse{}
-	mi := &file_engine_v1_engine_proto_msgTypes[10]
+	mi := &file_engine_v1_engine_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -641,7 +572,7 @@ func (x *GetConnectionResponse) String() string {
 func (*GetConnectionResponse) ProtoMessage() {}
 
 func (x *GetConnectionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_v1_engine_proto_msgTypes[10]
+	mi := &file_engine_v1_engine_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -654,7 +585,7 @@ func (x *GetConnectionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetConnectionResponse.ProtoReflect.Descriptor instead.
 func (*GetConnectionResponse) Descriptor() ([]byte, []int) {
-	return file_engine_v1_engine_proto_rawDescGZIP(), []int{10}
+	return file_engine_v1_engine_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GetConnectionResponse) GetConnection() *AuthConnection {
@@ -696,7 +627,7 @@ type AuthConnection struct {
 
 func (x *AuthConnection) Reset() {
 	*x = AuthConnection{}
-	mi := &file_engine_v1_engine_proto_msgTypes[11]
+	mi := &file_engine_v1_engine_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -708,7 +639,7 @@ func (x *AuthConnection) String() string {
 func (*AuthConnection) ProtoMessage() {}
 
 func (x *AuthConnection) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_v1_engine_proto_msgTypes[11]
+	mi := &file_engine_v1_engine_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -721,7 +652,7 @@ func (x *AuthConnection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuthConnection.ProtoReflect.Descriptor instead.
 func (*AuthConnection) Descriptor() ([]byte, []int) {
-	return file_engine_v1_engine_proto_rawDescGZIP(), []int{11}
+	return file_engine_v1_engine_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *AuthConnection) GetId() string {
@@ -852,7 +783,7 @@ type ListConnectionResourcesRequest struct {
 
 func (x *ListConnectionResourcesRequest) Reset() {
 	*x = ListConnectionResourcesRequest{}
-	mi := &file_engine_v1_engine_proto_msgTypes[12]
+	mi := &file_engine_v1_engine_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -864,7 +795,7 @@ func (x *ListConnectionResourcesRequest) String() string {
 func (*ListConnectionResourcesRequest) ProtoMessage() {}
 
 func (x *ListConnectionResourcesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_v1_engine_proto_msgTypes[12]
+	mi := &file_engine_v1_engine_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -877,7 +808,7 @@ func (x *ListConnectionResourcesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListConnectionResourcesRequest.ProtoReflect.Descriptor instead.
 func (*ListConnectionResourcesRequest) Descriptor() ([]byte, []int) {
-	return file_engine_v1_engine_proto_rawDescGZIP(), []int{12}
+	return file_engine_v1_engine_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ListConnectionResourcesRequest) GetConnectionId() string {
@@ -896,7 +827,7 @@ type ListConnectionResourcesResponse struct {
 
 func (x *ListConnectionResourcesResponse) Reset() {
 	*x = ListConnectionResourcesResponse{}
-	mi := &file_engine_v1_engine_proto_msgTypes[13]
+	mi := &file_engine_v1_engine_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -908,7 +839,7 @@ func (x *ListConnectionResourcesResponse) String() string {
 func (*ListConnectionResourcesResponse) ProtoMessage() {}
 
 func (x *ListConnectionResourcesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_v1_engine_proto_msgTypes[13]
+	mi := &file_engine_v1_engine_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -921,7 +852,7 @@ func (x *ListConnectionResourcesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListConnectionResourcesResponse.ProtoReflect.Descriptor instead.
 func (*ListConnectionResourcesResponse) Descriptor() ([]byte, []int) {
-	return file_engine_v1_engine_proto_rawDescGZIP(), []int{13}
+	return file_engine_v1_engine_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ListConnectionResourcesResponse) GetResources() []*ConnectionResource {
@@ -948,7 +879,7 @@ type ConnectionResource struct {
 
 func (x *ConnectionResource) Reset() {
 	*x = ConnectionResource{}
-	mi := &file_engine_v1_engine_proto_msgTypes[14]
+	mi := &file_engine_v1_engine_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -960,7 +891,7 @@ func (x *ConnectionResource) String() string {
 func (*ConnectionResource) ProtoMessage() {}
 
 func (x *ConnectionResource) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_v1_engine_proto_msgTypes[14]
+	mi := &file_engine_v1_engine_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -973,7 +904,7 @@ func (x *ConnectionResource) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConnectionResource.ProtoReflect.Descriptor instead.
 func (*ConnectionResource) Descriptor() ([]byte, []int) {
-	return file_engine_v1_engine_proto_rawDescGZIP(), []int{14}
+	return file_engine_v1_engine_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ConnectionResource) GetId() string {
@@ -1053,7 +984,7 @@ type WebhookClientMessage struct {
 
 func (x *WebhookClientMessage) Reset() {
 	*x = WebhookClientMessage{}
-	mi := &file_engine_v1_engine_proto_msgTypes[15]
+	mi := &file_engine_v1_engine_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1065,7 +996,7 @@ func (x *WebhookClientMessage) String() string {
 func (*WebhookClientMessage) ProtoMessage() {}
 
 func (x *WebhookClientMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_v1_engine_proto_msgTypes[15]
+	mi := &file_engine_v1_engine_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1078,7 +1009,7 @@ func (x *WebhookClientMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WebhookClientMessage.ProtoReflect.Descriptor instead.
 func (*WebhookClientMessage) Descriptor() ([]byte, []int) {
-	return file_engine_v1_engine_proto_rawDescGZIP(), []int{15}
+	return file_engine_v1_engine_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *WebhookClientMessage) GetPayload() isWebhookClientMessage_Payload {
@@ -1154,7 +1085,7 @@ type WebhookSubscribe struct {
 
 func (x *WebhookSubscribe) Reset() {
 	*x = WebhookSubscribe{}
-	mi := &file_engine_v1_engine_proto_msgTypes[16]
+	mi := &file_engine_v1_engine_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1166,7 +1097,7 @@ func (x *WebhookSubscribe) String() string {
 func (*WebhookSubscribe) ProtoMessage() {}
 
 func (x *WebhookSubscribe) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_v1_engine_proto_msgTypes[16]
+	mi := &file_engine_v1_engine_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1179,7 +1110,7 @@ func (x *WebhookSubscribe) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WebhookSubscribe.ProtoReflect.Descriptor instead.
 func (*WebhookSubscribe) Descriptor() ([]byte, []int) {
-	return file_engine_v1_engine_proto_rawDescGZIP(), []int{16}
+	return file_engine_v1_engine_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *WebhookSubscribe) GetReceiverName() string {
@@ -1205,7 +1136,7 @@ type WebhookAck struct {
 
 func (x *WebhookAck) Reset() {
 	*x = WebhookAck{}
-	mi := &file_engine_v1_engine_proto_msgTypes[17]
+	mi := &file_engine_v1_engine_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1217,7 +1148,7 @@ func (x *WebhookAck) String() string {
 func (*WebhookAck) ProtoMessage() {}
 
 func (x *WebhookAck) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_v1_engine_proto_msgTypes[17]
+	mi := &file_engine_v1_engine_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1230,7 +1161,7 @@ func (x *WebhookAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WebhookAck.ProtoReflect.Descriptor instead.
 func (*WebhookAck) Descriptor() ([]byte, []int) {
-	return file_engine_v1_engine_proto_rawDescGZIP(), []int{17}
+	return file_engine_v1_engine_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *WebhookAck) GetEventId() string {
@@ -1250,7 +1181,7 @@ type WebhookNack struct {
 
 func (x *WebhookNack) Reset() {
 	*x = WebhookNack{}
-	mi := &file_engine_v1_engine_proto_msgTypes[18]
+	mi := &file_engine_v1_engine_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1262,7 +1193,7 @@ func (x *WebhookNack) String() string {
 func (*WebhookNack) ProtoMessage() {}
 
 func (x *WebhookNack) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_v1_engine_proto_msgTypes[18]
+	mi := &file_engine_v1_engine_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1275,7 +1206,7 @@ func (x *WebhookNack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WebhookNack.ProtoReflect.Descriptor instead.
 func (*WebhookNack) Descriptor() ([]byte, []int) {
-	return file_engine_v1_engine_proto_rawDescGZIP(), []int{18}
+	return file_engine_v1_engine_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *WebhookNack) GetEventId() string {
@@ -1305,7 +1236,7 @@ type WebhookServerMessage struct {
 
 func (x *WebhookServerMessage) Reset() {
 	*x = WebhookServerMessage{}
-	mi := &file_engine_v1_engine_proto_msgTypes[19]
+	mi := &file_engine_v1_engine_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1317,7 +1248,7 @@ func (x *WebhookServerMessage) String() string {
 func (*WebhookServerMessage) ProtoMessage() {}
 
 func (x *WebhookServerMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_v1_engine_proto_msgTypes[19]
+	mi := &file_engine_v1_engine_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1330,7 +1261,7 @@ func (x *WebhookServerMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WebhookServerMessage.ProtoReflect.Descriptor instead.
 func (*WebhookServerMessage) Descriptor() ([]byte, []int) {
-	return file_engine_v1_engine_proto_rawDescGZIP(), []int{19}
+	return file_engine_v1_engine_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *WebhookServerMessage) GetPayload() isWebhookServerMessage_Payload {
@@ -1383,7 +1314,7 @@ type WebhookSubscribeAck struct {
 
 func (x *WebhookSubscribeAck) Reset() {
 	*x = WebhookSubscribeAck{}
-	mi := &file_engine_v1_engine_proto_msgTypes[20]
+	mi := &file_engine_v1_engine_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1395,7 +1326,7 @@ func (x *WebhookSubscribeAck) String() string {
 func (*WebhookSubscribeAck) ProtoMessage() {}
 
 func (x *WebhookSubscribeAck) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_v1_engine_proto_msgTypes[20]
+	mi := &file_engine_v1_engine_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1408,7 +1339,7 @@ func (x *WebhookSubscribeAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WebhookSubscribeAck.ProtoReflect.Descriptor instead.
 func (*WebhookSubscribeAck) Descriptor() ([]byte, []int) {
-	return file_engine_v1_engine_proto_rawDescGZIP(), []int{20}
+	return file_engine_v1_engine_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *WebhookSubscribeAck) GetReceiverName() string {
@@ -1429,7 +1360,7 @@ type WebhookEvent struct {
 
 func (x *WebhookEvent) Reset() {
 	*x = WebhookEvent{}
-	mi := &file_engine_v1_engine_proto_msgTypes[21]
+	mi := &file_engine_v1_engine_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1441,7 +1372,7 @@ func (x *WebhookEvent) String() string {
 func (*WebhookEvent) ProtoMessage() {}
 
 func (x *WebhookEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_v1_engine_proto_msgTypes[21]
+	mi := &file_engine_v1_engine_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1454,7 +1385,7 @@ func (x *WebhookEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WebhookEvent.ProtoReflect.Descriptor instead.
 func (*WebhookEvent) Descriptor() ([]byte, []int) {
-	return file_engine_v1_engine_proto_rawDescGZIP(), []int{21}
+	return file_engine_v1_engine_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *WebhookEvent) GetId() string {
@@ -1489,7 +1420,7 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\x0fConnectResponse\"*\n" +
 	"\x11DisconnectRequest\x12\x15\n" +
 	"\x06app_id\x18\x01 \x01(\tR\x05appId\"\x14\n" +
-	"\x12DisconnectResponse\"\xc0\x03\n" +
+	"\x12DisconnectResponse\"\x95\x03\n" +
 	"\x0eExecuteRequest\x12\x15\n" +
 	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12\x14\n" +
 	"\x05token\x18\x02 \x01(\tR\x05token\x12#\n" +
@@ -1498,18 +1429,11 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\vcredentials\x18\x05 \x03(\v2*.engine.v1.ExecuteRequest.CredentialsEntryR\vcredentials\x12 \n" +
 	"\venvironment\x18\x06 \x01(\tR\venvironment\x12'\n" +
 	"\x0fidempotency_key\x18\a \x01(\tR\x0eidempotencyKey\x12*\n" +
-	"\x11request_body_hash\x18\b \x01(\tR\x0frequestBodyHash\x12?\n" +
-	"\x0eretry_override\x18\t \x01(\v2\x18.engine.v1.RetryOverrideR\rretryOverride\x1a>\n" +
+	"\x11request_body_hash\x18\b \x01(\tR\x0frequestBodyHash\x1a>\n" +
 	"\x10CredentialsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"x\n" +
-	"\rRetryOverride\x12$\n" +
-	"\vmax_retries\x18\x01 \x01(\x05H\x00R\n" +
-	"maxRetries\x88\x01\x01\x12\"\n" +
-	"\n" +
-	"backoff_ms\x18\x02 \x01(\x05H\x01R\tbackoffMs\x88\x01\x01B\x0e\n" +
-	"\f_max_retriesB\r\n" +
-	"\v_backoff_ms\"`\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\t\x10\n" +
+	"R\x0eretry_override\"`\n" +
 	"\x0fExecuteResponse\x12\x16\n" +
 	"\x06result\x18\x01 \x01(\fR\x06result\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12\x1f\n" +
@@ -1632,63 +1556,61 @@ func file_engine_v1_engine_proto_rawDescGZIP() []byte {
 	return file_engine_v1_engine_proto_rawDescData
 }
 
-var file_engine_v1_engine_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_engine_v1_engine_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_engine_v1_engine_proto_goTypes = []any{
 	(*ConnectRequest)(nil),                  // 0: engine.v1.ConnectRequest
 	(*ConnectResponse)(nil),                 // 1: engine.v1.ConnectResponse
 	(*DisconnectRequest)(nil),               // 2: engine.v1.DisconnectRequest
 	(*DisconnectResponse)(nil),              // 3: engine.v1.DisconnectResponse
 	(*ExecuteRequest)(nil),                  // 4: engine.v1.ExecuteRequest
-	(*RetryOverride)(nil),                   // 5: engine.v1.RetryOverride
-	(*ExecuteResponse)(nil),                 // 6: engine.v1.ExecuteResponse
-	(*StartConnectSessionRequest)(nil),      // 7: engine.v1.StartConnectSessionRequest
-	(*StartConnectSessionResponse)(nil),     // 8: engine.v1.StartConnectSessionResponse
-	(*GetConnectionRequest)(nil),            // 9: engine.v1.GetConnectionRequest
-	(*GetConnectionResponse)(nil),           // 10: engine.v1.GetConnectionResponse
-	(*AuthConnection)(nil),                  // 11: engine.v1.AuthConnection
-	(*ListConnectionResourcesRequest)(nil),  // 12: engine.v1.ListConnectionResourcesRequest
-	(*ListConnectionResourcesResponse)(nil), // 13: engine.v1.ListConnectionResourcesResponse
-	(*ConnectionResource)(nil),              // 14: engine.v1.ConnectionResource
-	(*WebhookClientMessage)(nil),            // 15: engine.v1.WebhookClientMessage
-	(*WebhookSubscribe)(nil),                // 16: engine.v1.WebhookSubscribe
-	(*WebhookAck)(nil),                      // 17: engine.v1.WebhookAck
-	(*WebhookNack)(nil),                     // 18: engine.v1.WebhookNack
-	(*WebhookServerMessage)(nil),            // 19: engine.v1.WebhookServerMessage
-	(*WebhookSubscribeAck)(nil),             // 20: engine.v1.WebhookSubscribeAck
-	(*WebhookEvent)(nil),                    // 21: engine.v1.WebhookEvent
-	nil,                                     // 22: engine.v1.ExecuteRequest.CredentialsEntry
-	nil,                                     // 23: engine.v1.StartConnectSessionRequest.ResourceInputEntry
+	(*ExecuteResponse)(nil),                 // 5: engine.v1.ExecuteResponse
+	(*StartConnectSessionRequest)(nil),      // 6: engine.v1.StartConnectSessionRequest
+	(*StartConnectSessionResponse)(nil),     // 7: engine.v1.StartConnectSessionResponse
+	(*GetConnectionRequest)(nil),            // 8: engine.v1.GetConnectionRequest
+	(*GetConnectionResponse)(nil),           // 9: engine.v1.GetConnectionResponse
+	(*AuthConnection)(nil),                  // 10: engine.v1.AuthConnection
+	(*ListConnectionResourcesRequest)(nil),  // 11: engine.v1.ListConnectionResourcesRequest
+	(*ListConnectionResourcesResponse)(nil), // 12: engine.v1.ListConnectionResourcesResponse
+	(*ConnectionResource)(nil),              // 13: engine.v1.ConnectionResource
+	(*WebhookClientMessage)(nil),            // 14: engine.v1.WebhookClientMessage
+	(*WebhookSubscribe)(nil),                // 15: engine.v1.WebhookSubscribe
+	(*WebhookAck)(nil),                      // 16: engine.v1.WebhookAck
+	(*WebhookNack)(nil),                     // 17: engine.v1.WebhookNack
+	(*WebhookServerMessage)(nil),            // 18: engine.v1.WebhookServerMessage
+	(*WebhookSubscribeAck)(nil),             // 19: engine.v1.WebhookSubscribeAck
+	(*WebhookEvent)(nil),                    // 20: engine.v1.WebhookEvent
+	nil,                                     // 21: engine.v1.ExecuteRequest.CredentialsEntry
+	nil,                                     // 22: engine.v1.StartConnectSessionRequest.ResourceInputEntry
 }
 var file_engine_v1_engine_proto_depIdxs = []int32{
-	22, // 0: engine.v1.ExecuteRequest.credentials:type_name -> engine.v1.ExecuteRequest.CredentialsEntry
-	5,  // 1: engine.v1.ExecuteRequest.retry_override:type_name -> engine.v1.RetryOverride
-	23, // 2: engine.v1.StartConnectSessionRequest.resource_input:type_name -> engine.v1.StartConnectSessionRequest.ResourceInputEntry
-	11, // 3: engine.v1.GetConnectionResponse.connection:type_name -> engine.v1.AuthConnection
-	14, // 4: engine.v1.ListConnectionResourcesResponse.resources:type_name -> engine.v1.ConnectionResource
-	16, // 5: engine.v1.WebhookClientMessage.subscribe:type_name -> engine.v1.WebhookSubscribe
-	17, // 6: engine.v1.WebhookClientMessage.ack:type_name -> engine.v1.WebhookAck
-	18, // 7: engine.v1.WebhookClientMessage.nack:type_name -> engine.v1.WebhookNack
-	20, // 8: engine.v1.WebhookServerMessage.subscribed:type_name -> engine.v1.WebhookSubscribeAck
-	21, // 9: engine.v1.WebhookServerMessage.event:type_name -> engine.v1.WebhookEvent
-	0,  // 10: engine.v1.EngineService.Connect:input_type -> engine.v1.ConnectRequest
-	2,  // 11: engine.v1.EngineService.Disconnect:input_type -> engine.v1.DisconnectRequest
-	4,  // 12: engine.v1.EngineService.Execute:input_type -> engine.v1.ExecuteRequest
-	7,  // 13: engine.v1.EngineService.StartConnectSession:input_type -> engine.v1.StartConnectSessionRequest
-	9,  // 14: engine.v1.EngineService.GetConnection:input_type -> engine.v1.GetConnectionRequest
-	12, // 15: engine.v1.EngineService.ListConnectionResources:input_type -> engine.v1.ListConnectionResourcesRequest
-	15, // 16: engine.v1.EngineService.SubscribeWebhooks:input_type -> engine.v1.WebhookClientMessage
-	1,  // 17: engine.v1.EngineService.Connect:output_type -> engine.v1.ConnectResponse
-	3,  // 18: engine.v1.EngineService.Disconnect:output_type -> engine.v1.DisconnectResponse
-	6,  // 19: engine.v1.EngineService.Execute:output_type -> engine.v1.ExecuteResponse
-	8,  // 20: engine.v1.EngineService.StartConnectSession:output_type -> engine.v1.StartConnectSessionResponse
-	10, // 21: engine.v1.EngineService.GetConnection:output_type -> engine.v1.GetConnectionResponse
-	13, // 22: engine.v1.EngineService.ListConnectionResources:output_type -> engine.v1.ListConnectionResourcesResponse
-	19, // 23: engine.v1.EngineService.SubscribeWebhooks:output_type -> engine.v1.WebhookServerMessage
-	17, // [17:24] is the sub-list for method output_type
-	10, // [10:17] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	21, // 0: engine.v1.ExecuteRequest.credentials:type_name -> engine.v1.ExecuteRequest.CredentialsEntry
+	22, // 1: engine.v1.StartConnectSessionRequest.resource_input:type_name -> engine.v1.StartConnectSessionRequest.ResourceInputEntry
+	10, // 2: engine.v1.GetConnectionResponse.connection:type_name -> engine.v1.AuthConnection
+	13, // 3: engine.v1.ListConnectionResourcesResponse.resources:type_name -> engine.v1.ConnectionResource
+	15, // 4: engine.v1.WebhookClientMessage.subscribe:type_name -> engine.v1.WebhookSubscribe
+	16, // 5: engine.v1.WebhookClientMessage.ack:type_name -> engine.v1.WebhookAck
+	17, // 6: engine.v1.WebhookClientMessage.nack:type_name -> engine.v1.WebhookNack
+	19, // 7: engine.v1.WebhookServerMessage.subscribed:type_name -> engine.v1.WebhookSubscribeAck
+	20, // 8: engine.v1.WebhookServerMessage.event:type_name -> engine.v1.WebhookEvent
+	0,  // 9: engine.v1.EngineService.Connect:input_type -> engine.v1.ConnectRequest
+	2,  // 10: engine.v1.EngineService.Disconnect:input_type -> engine.v1.DisconnectRequest
+	4,  // 11: engine.v1.EngineService.Execute:input_type -> engine.v1.ExecuteRequest
+	6,  // 12: engine.v1.EngineService.StartConnectSession:input_type -> engine.v1.StartConnectSessionRequest
+	8,  // 13: engine.v1.EngineService.GetConnection:input_type -> engine.v1.GetConnectionRequest
+	11, // 14: engine.v1.EngineService.ListConnectionResources:input_type -> engine.v1.ListConnectionResourcesRequest
+	14, // 15: engine.v1.EngineService.SubscribeWebhooks:input_type -> engine.v1.WebhookClientMessage
+	1,  // 16: engine.v1.EngineService.Connect:output_type -> engine.v1.ConnectResponse
+	3,  // 17: engine.v1.EngineService.Disconnect:output_type -> engine.v1.DisconnectResponse
+	5,  // 18: engine.v1.EngineService.Execute:output_type -> engine.v1.ExecuteResponse
+	7,  // 19: engine.v1.EngineService.StartConnectSession:output_type -> engine.v1.StartConnectSessionResponse
+	9,  // 20: engine.v1.EngineService.GetConnection:output_type -> engine.v1.GetConnectionResponse
+	12, // 21: engine.v1.EngineService.ListConnectionResources:output_type -> engine.v1.ListConnectionResourcesResponse
+	18, // 22: engine.v1.EngineService.SubscribeWebhooks:output_type -> engine.v1.WebhookServerMessage
+	16, // [16:23] is the sub-list for method output_type
+	9,  // [9:16] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_engine_v1_engine_proto_init() }
@@ -1696,13 +1618,12 @@ func file_engine_v1_engine_proto_init() {
 	if File_engine_v1_engine_proto != nil {
 		return
 	}
-	file_engine_v1_engine_proto_msgTypes[5].OneofWrappers = []any{}
-	file_engine_v1_engine_proto_msgTypes[15].OneofWrappers = []any{
+	file_engine_v1_engine_proto_msgTypes[14].OneofWrappers = []any{
 		(*WebhookClientMessage_Subscribe)(nil),
 		(*WebhookClientMessage_Ack)(nil),
 		(*WebhookClientMessage_Nack)(nil),
 	}
-	file_engine_v1_engine_proto_msgTypes[19].OneofWrappers = []any{
+	file_engine_v1_engine_proto_msgTypes[18].OneofWrappers = []any{
 		(*WebhookServerMessage_Subscribed)(nil),
 		(*WebhookServerMessage_Event)(nil),
 	}
@@ -1712,7 +1633,7 @@ func file_engine_v1_engine_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_engine_v1_engine_proto_rawDesc), len(file_engine_v1_engine_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   24,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

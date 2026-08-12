@@ -10,17 +10,11 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
-	"github.com/Usefused/engine/internal/shared/observability"
 	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/trace"
 )
 
 var ErrPagination = errors.New("pagination execution failed")
@@ -42,17 +36,6 @@ func PaginationFailureCode(err error) string {
 		return target.Code
 	}
 	return ""
-}
-
-type paginationState struct {
-	value       any
-	nextURL     *url.URL
-	visited     map[string]struct{}
-	itemsSeen   int64
-	pagesSeen   int64
-	bytesSeen   int64
-	stopReason  string
-	requestBase *url.URL
 }
 
 type paginationPage struct {
@@ -109,70 +92,7 @@ func (d *Dispatcher) runPagination(
 	if validationErr := paginationpolicy.Validate(policy); validationErr != nil {
 		return 0, paginationError("invalid_config")
 	}
-	limits := paginationpolicy.EffectiveLimits(policy.Limits)
-	runCtx, cancel := context.WithTimeout(ctx, time.Duration(limits.MaxDurationMs)*time.Millisecond)
-	defer cancel()
-	state := newPaginationState(policy)
-	defer func() {
-		recordPaginationOutcome(ctx, span, state, policy.Type, err)
-	}()
-	return d.executePaginationPages(ctx, runCtx, srv, obj, cloneParams(params), credentials, bucketValues, stream, policy, limits, state)
-}
-
-func (d *Dispatcher) executePaginationPages(
-	ctx, runCtx context.Context,
-	srv *models.Service,
-	obj *models.IntegrationObject,
-	baseParams map[string]any,
-	credentials map[string]any,
-	bucketValues []store.BucketValue,
-	stream ResponseStream,
-	policy *paginationpolicy.Config,
-	limits paginationpolicy.Limits,
-	state *paginationState,
-) (status int, err error) {
-	aggregate := &paginationAggregate{}
-	for {
-		if err := checkPaginationContext(ctx, runCtx); err != nil {
-			return status, err
-		}
-		if state.pagesSeen >= int64(limits.MaxPages) {
-			return status, paginationError("max_pages")
-		}
-
-		pageObj, pageParams := paginationRequest(obj, baseParams, state)
-		page := &paginationPage{
-			maxBytes:   int64(limits.MaxBytes) - state.bytesSeen,
-			headerKeys: paginationHeaderKeys(policy),
-		}
-		status, err = d.executeWithRetries(runCtx, srv, pageObj, pageParams, credentials, bucketValues, page)
-		if err != nil {
-			return status, paginationProviderError(ctx, err)
-		}
-
-		document, itemCount, decodeErr := decodePaginationPage(page.body.Bytes(), obj.Pagination.ItemsPath)
-		if decodeErr != nil {
-			return status, decodeErr
-		}
-		if state.itemsSeen+itemCount > int64(limits.MaxItems) {
-			return status, paginationError("max_items")
-		}
-		if aggregateErr := aggregate.Add(document, obj.Pagination.ItemsPath); aggregateErr != nil {
-			return status, aggregateErr
-		}
-
-		state.pagesSeen++
-		state.itemsSeen += itemCount
-		state.bytesSeen += int64(page.body.Len())
-		observability.PaginationTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("type", string(obj.Pagination.Type))))
-		continued, advanceErr := advancePagination(policy, state, document, page, itemCount)
-		if advanceErr != nil {
-			return status, advanceErr
-		}
-		if !continued {
-			return status, sendPaginationAggregate(stream, aggregate, obj.Pagination.ItemsPath, limits.MaxBytes)
-		}
-	}
+	return d.runPaginationV3(ctx, span, srv, obj, params, credentials, bucketValues, stream, policy)
 }
 
 func (a *paginationAggregate) Add(document any, itemsPath string) error {
@@ -203,6 +123,13 @@ func sendPaginationAggregate(stream ResponseStream, aggregate *paginationAggrega
 	return stream.Send(payload)
 }
 
+func sendPaginationResult(stream ResponseStream, status int, aggregate *paginationAggregate, itemsPath string, maxBytes int64) error {
+	if err := SendResponseContract(stream, status, "json"); err != nil {
+		return err
+	}
+	return sendPaginationAggregate(stream, aggregate, itemsPath, maxBytes)
+}
+
 func (a *paginationAggregate) result(itemsPath string) (any, bool) {
 	if a == nil || a.document == nil {
 		return nil, false
@@ -225,27 +152,6 @@ func paginationProviderError(parent context.Context, err error) error {
 	return err
 }
 
-func recordPaginationOutcome(ctx context.Context, span trace.Span, state *paginationState, policyType paginationpolicy.Type, err error) {
-	summary := PaginationExecutionSummary{
-		Type: string(policyType), PageCount: state.pagesSeen, ItemCount: state.itemsSeen,
-		ByteCount: state.bytesSeen, StopReason: state.stopReason,
-	}
-	if summary.StopReason == "" && err != nil {
-		summary.StopReason = PaginationFailureCode(err)
-	}
-	RecordPaginationSummary(ctx, summary)
-	span.SetAttributes(
-		attribute.String("pagination.type", summary.Type),
-		attribute.Int64("pagination.page_count", summary.PageCount),
-		attribute.Int64("pagination.item_count", summary.ItemCount),
-		attribute.Int64("pagination.byte_count", summary.ByteCount),
-		attribute.String("pagination.stop_reason", summary.StopReason),
-	)
-	if err != nil {
-		span.SetStatus(codes.Error, summary.StopReason)
-	}
-}
-
 func checkPaginationContext(parent, run context.Context) error {
 	select {
 	case <-run.Done():
@@ -255,53 +161,6 @@ func checkPaginationContext(parent, run context.Context) error {
 		return paginationError("max_duration")
 	default:
 		return nil
-	}
-}
-
-func newPaginationState(config *paginationpolicy.Config) *paginationState {
-	state := &paginationState{visited: make(map[string]struct{})}
-	switch config.Type {
-	case paginationpolicy.TypeCursor:
-		if config.Cursor.Initial != nil {
-			state.value = scalarValue(*config.Cursor.Initial)
-			state.visited[scalarKey(state.value)] = struct{}{}
-		}
-	case paginationpolicy.TypeOffset:
-		state.value = config.Offset.Start
-		state.visited[scalarKey(state.value)] = struct{}{}
-	case paginationpolicy.TypePageNumber:
-		state.value = config.PageNumber.Start
-		state.visited[scalarKey(state.value)] = struct{}{}
-	}
-	return state
-}
-
-func paginationRequest(obj *models.IntegrationObject, params map[string]any, state *paginationState) (*models.IntegrationObject, map[string]any) {
-	pageObj := *obj
-	pageObj.Parameters = append(models.Parameters(nil), obj.Parameters...)
-	pageParams := cloneParams(params)
-	if state.nextURL != nil {
-		pageObj.Path = state.nextURL.String()
-		pageParams = headerParamsOnly(pageParams, obj.Parameters)
-	}
-	switch obj.Pagination.Type {
-	case paginationpolicy.TypeCursor:
-		if state.value != nil {
-			injectPaginationTarget(&pageObj, pageParams, obj.Pagination.Cursor.Request, state.value)
-		}
-	case paginationpolicy.TypeOffset:
-		injectPaginationTarget(&pageObj, pageParams, obj.Pagination.Offset.Request, state.value)
-		injectPageSize(&pageObj, pageParams, obj.Pagination.Offset.PageSize)
-	case paginationpolicy.TypePageNumber:
-		injectPaginationTarget(&pageObj, pageParams, obj.Pagination.PageNumber.Request, state.value)
-		injectPageSize(&pageObj, pageParams, obj.Pagination.PageNumber.PageSize)
-	}
-	return &pageObj, pageParams
-}
-
-func injectPageSize(obj *models.IntegrationObject, params map[string]any, pageSize *paginationpolicy.PageSize) {
-	if pageSize != nil {
-		injectPaginationTarget(obj, params, pageSize.Target, pageSize.Value)
 	}
 }
 
@@ -337,215 +196,6 @@ func headerParamsOnly(params map[string]any, definitions models.Parameters) map[
 		}
 	}
 	return result
-}
-
-func decodePaginationPage(payload []byte, itemsPath string) (any, int64, error) {
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.UseNumber()
-	var document any
-	if err := decoder.Decode(&document); err != nil {
-		return nil, 0, paginationError("response_invalid")
-	}
-	items, found := valueAtPath(document, itemsPath)
-	if !found {
-		return nil, 0, paginationError("response_invalid")
-	}
-	list, ok := items.([]any)
-	if !ok {
-		return nil, 0, paginationError("response_invalid")
-	}
-	return document, int64(len(list)), nil
-}
-
-func advancePagination(config *paginationpolicy.Config, state *paginationState, document any, page *paginationPage, itemCount int64) (bool, error) {
-	switch config.Type {
-	case paginationpolicy.TypeCursor:
-		return advanceCursor(config.Cursor, state, document, page)
-	case paginationpolicy.TypeOffset:
-		return advanceOffset(config.Offset, state, document, page, itemCount)
-	case paginationpolicy.TypePageNumber:
-		return advancePageNumber(config.PageNumber, state, document, page, itemCount)
-	case paginationpolicy.TypeNextURL:
-		return advanceNextURL(config.NextURL, state, document, page)
-	default:
-		return false, paginationError("invalid_config")
-	}
-}
-
-func advanceCursor(config *paginationpolicy.CursorConfig, state *paginationState, document any, page *paginationPage) (bool, error) {
-	if stop, err := sourceSaysStop(config.HasMore, document, page); stop || err != nil {
-		if stop {
-			state.stopReason = "has_more_false"
-		}
-		return false, err
-	}
-	next, found, err := readSource(config.Next, document, page)
-	if err != nil {
-		return false, err
-	}
-	if !found || next == "" {
-		state.stopReason = "missing_next"
-		return false, nil
-	}
-	if err := rememberContinuation(state, next); err != nil {
-		return false, err
-	}
-	state.value = next
-	return true, nil
-}
-
-func advanceOffset(config *paginationpolicy.OffsetConfig, state *paginationState, document any, page *paginationPage, itemCount int64) (bool, error) {
-	if done, reason, err := commonPageStop(config.HasMore, config.TotalItems, nil, config.PageSize, config.StopOnShortPage, state, document, page, itemCount); done || err != nil {
-		state.stopReason = reason
-		return false, err
-	}
-	current := state.value.(int64)
-	next := current
-	if config.NextOffset != nil {
-		value, found, err := readSource(*config.NextOffset, document, page)
-		if err != nil {
-			return false, err
-		}
-		if !found {
-			state.stopReason = "missing_next"
-			return false, nil
-		}
-		next = value.(int64)
-	} else if config.Increment.Mode == "fixed" {
-		next += config.Increment.Value
-	} else {
-		next += itemCount
-	}
-	if err := rememberContinuation(state, next); err != nil {
-		return false, err
-	}
-	state.value = next
-	return true, nil
-}
-
-func advancePageNumber(config *paginationpolicy.PageNumberConfig, state *paginationState, document any, page *paginationPage, itemCount int64) (bool, error) {
-	if done, reason, err := commonPageStop(config.HasMore, nil, config.TotalPages, config.PageSize, config.StopOnShortPage, state, document, page, itemCount); done || err != nil {
-		state.stopReason = reason
-		return false, err
-	}
-	next := state.value.(int64) + config.Increment
-	if err := rememberContinuation(state, next); err != nil {
-		return false, err
-	}
-	state.value = next
-	return true, nil
-}
-
-func commonPageStop(hasMore, totalItems, totalPages *paginationpolicy.ValueSource, pageSize *paginationpolicy.PageSize, shortPage bool, state *paginationState, document any, page *paginationPage, itemCount int64) (bool, string, error) {
-	if decision := booleanStopDecision(hasMore, document, page); decision.done {
-		return decision.stop, "has_more_false", decision.err
-	}
-	if decision := totalStopDecision(totalItems, state.itemsSeen, document, page); decision.done {
-		return decision.stop, "total_reached", decision.err
-	}
-	if decision := totalStopDecision(totalPages, state.value.(int64), document, page); decision.done {
-		return decision.stop, "total_pages_reached", decision.err
-	}
-	return itemCountStop(pageSize, shortPage, itemCount)
-}
-
-type paginationStopDecision struct {
-	done bool
-	stop bool
-	err  error
-}
-
-func booleanStopDecision(source *paginationpolicy.ValueSource, document any, page *paginationPage) paginationStopDecision {
-	stop, err := sourceSaysStop(source, document, page)
-	return paginationStopDecision{done: stop || err != nil, stop: stop, err: err}
-}
-
-func totalStopDecision(source *paginationpolicy.ValueSource, current int64, document any, page *paginationPage) paginationStopDecision {
-	stop, err := reachedTotal(source, current, document, page)
-	return paginationStopDecision{done: stop || err != nil, stop: stop, err: err}
-}
-
-func itemCountStop(pageSize *paginationpolicy.PageSize, shortPage bool, itemCount int64) (bool, string, error) {
-	if itemCount == 0 {
-		return true, "empty_page", nil
-	}
-	if shortPage && pageSize != nil && itemCount < pageSize.Value {
-		return true, "short_page", nil
-	}
-	return false, "", nil
-}
-
-func sourceSaysStop(source *paginationpolicy.ValueSource, document any, page *paginationPage) (bool, error) {
-	if source == nil {
-		return false, nil
-	}
-	value, found, err := readSource(*source, document, page)
-	if err != nil {
-		return false, err
-	}
-	if !found {
-		return false, paginationError("response_invalid")
-	}
-	return !value.(bool), nil
-}
-
-func reachedTotal(source *paginationpolicy.ValueSource, current int64, document any, page *paginationPage) (bool, error) {
-	if source == nil {
-		return false, nil
-	}
-	value, found, err := readSource(*source, document, page)
-	if err != nil {
-		return false, err
-	}
-	if !found {
-		return false, paginationError("response_invalid")
-	}
-	return current >= value.(int64), nil
-}
-
-func advanceNextURL(config *paginationpolicy.NextURLConfig, state *paginationState, document any, page *paginationPage) (bool, error) {
-	next, found, err := readSource(config.Next, document, page)
-	if err != nil {
-		return false, err
-	}
-	if !found || next == "" {
-		state.stopReason = "missing_next"
-		return false, nil
-	}
-	resolved, err := trustedNextURL(page.requestURL, next.(string))
-	if err != nil {
-		return false, err
-	}
-	key := resolved.String()
-	if _, exists := state.visited[key]; exists {
-		return false, paginationError("cycle")
-	}
-	state.visited[key] = struct{}{}
-	state.nextURL = resolved
-	return true, nil
-}
-
-func readSource(source paginationpolicy.ValueSource, document any, page *paginationPage) (any, bool, error) {
-	var value any
-	var found bool
-	switch source.Location {
-	case "body":
-		value, found = valueAtPath(document, source.Path)
-	case "header":
-		value, found = headerValue(page.headers, source.Name)
-	case "link":
-		value, found = linkValue(page.headers.Values(source.Name), source.Relation)
-	default:
-		return nil, false, paginationError("invalid_config")
-	}
-	if !found || value == nil {
-		return nil, false, nil
-	}
-	converted, err := convertSourceValue(value, string(source.ValueType))
-	if err != nil {
-		return nil, false, err
-	}
-	return converted, true, nil
 }
 
 func valueAtPath(document any, path string) (any, bool) {
@@ -713,13 +363,6 @@ func convertIntegerSource(value any) (any, error) {
 	return nil, paginationError("response_invalid")
 }
 
-func scalarValue(value paginationpolicy.Scalar) any {
-	if value.Type == "integer" {
-		return *value.Integer
-	}
-	return *value.String
-}
-
 func scalarKey(value any) string {
 	switch typed := value.(type) {
 	case int64:
@@ -727,72 +370,4 @@ func scalarKey(value any) string {
 	default:
 		return "s:" + fmt.Sprint(typed)
 	}
-}
-
-func rememberContinuation(state *paginationState, value any) error {
-	key := scalarKey(value)
-	if _, exists := state.visited[key]; exists {
-		return paginationError("cycle")
-	}
-	state.visited[key] = struct{}{}
-	return nil
-}
-
-func paginationHeaderKeys(config *paginationpolicy.Config) map[string]struct{} {
-	keys := make(map[string]struct{})
-	for _, source := range paginationSources(config) {
-		if source != nil && (source.Location == "header" || source.Location == "link") {
-			keys[http.CanonicalHeaderKey(source.Name)] = struct{}{}
-		}
-	}
-	return keys
-}
-
-func paginationSources(config *paginationpolicy.Config) []*paginationpolicy.ValueSource {
-	switch config.Type {
-	case paginationpolicy.TypeCursor:
-		return []*paginationpolicy.ValueSource{&config.Cursor.Next, config.Cursor.HasMore}
-	case paginationpolicy.TypeOffset:
-		return []*paginationpolicy.ValueSource{config.Offset.NextOffset, config.Offset.TotalItems, config.Offset.HasMore}
-	case paginationpolicy.TypePageNumber:
-		return []*paginationpolicy.ValueSource{config.PageNumber.TotalPages, config.PageNumber.HasMore}
-	case paginationpolicy.TypeNextURL:
-		return []*paginationpolicy.ValueSource{&config.NextURL.Next}
-	default:
-		return nil
-	}
-}
-
-func trustedNextURL(previous *url.URL, raw string) (*url.URL, error) {
-	if previous == nil || previous.User != nil || len(raw) > 4096 {
-		return nil, paginationError("untrusted_next_url")
-	}
-	next, err := url.Parse(raw)
-	if err != nil || next.User != nil || next.Fragment != "" {
-		return nil, paginationError("untrusted_next_url")
-	}
-	resolved := previous.ResolveReference(next)
-	if !sameOrigin(previous, resolved) {
-		return nil, paginationError("untrusted_next_url")
-	}
-	return resolved, nil
-}
-
-func sameOrigin(left, right *url.URL) bool {
-	if left == nil || right == nil || (right.Scheme != "http" && right.Scheme != "https") {
-		return false
-	}
-	return strings.EqualFold(left.Scheme, right.Scheme) &&
-		strings.EqualFold(left.Hostname(), right.Hostname()) &&
-		effectivePort(left) == effectivePort(right)
-}
-
-func effectivePort(value *url.URL) string {
-	if value.Port() != "" {
-		return value.Port()
-	}
-	if value.Scheme == "https" {
-		return "443"
-	}
-	return "80"
 }

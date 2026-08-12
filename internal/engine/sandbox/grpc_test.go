@@ -21,6 +21,7 @@ type fakeExecuteStream struct {
 	enginev1.EngineService_ExecuteServer // embed to satisfy interface
 	sent                                 []*enginev1.ExecuteResponse
 	ctx                                  context.Context
+	header                               metadata.MD
 }
 
 func (f *fakeExecuteStream) Send(r *enginev1.ExecuteResponse) error {
@@ -33,7 +34,10 @@ func (f *fakeExecuteStream) Context() context.Context {
 }
 
 func (f *fakeExecuteStream) SetHeader(metadata.MD) error  { return nil }
-func (f *fakeExecuteStream) SendHeader(metadata.MD) error { return nil }
+func (f *fakeExecuteStream) SendHeader(header metadata.MD) error {
+	f.header = header.Copy()
+	return nil
+}
 func (f *fakeExecuteStream) SetTrailer(metadata.MD)       {}
 func (f *fakeExecuteStream) RecvMsg(any) error            { return nil }
 func (f *fakeExecuteStream) SendMsg(any) error            { return nil }
@@ -56,6 +60,7 @@ func TestExecute_EndpointNamePropagated(t *testing.T) {
 		_ map[string]any, _ map[string]any, _ string, stream engine.ResponseStream,
 	) error {
 		gotEndpoint = endpointName
+		_ = engine.SendResponseContract(stream, 202, "tenant/private+json")
 		_ = engine.SendResponseStatus(stream, 202)
 		return nil
 	}
@@ -80,6 +85,12 @@ func TestExecute_EndpointNamePropagated(t *testing.T) {
 	}
 	if len(stream.sent) != 1 || stream.sent[0].StatusCode != 202 {
 		t.Fatalf("provider status frame was not propagated: %#v", stream.sent)
+	}
+	if got := stream.header.Get("fused-response-status"); len(got) != 1 || got[0] != "202" {
+		t.Fatalf("response status metadata = %#v", stream.header)
+	}
+	if got := stream.header.Get("fused-response-media-family"); len(got) != 1 || got[0] != "unknown" {
+		t.Fatalf("response media metadata was not bounded: %#v", stream.header)
 	}
 }
 

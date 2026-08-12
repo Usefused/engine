@@ -33,7 +33,7 @@ func TestRefreshAccessTokenClassifiesInvalidGrant(t *testing.T) {
 		}, nil
 	})}
 
-	_, err := RefreshAccessToken(context.Background(), client, testAuthConfig(), testClientCredentials(), "revoked-refresh")
+	_, err := RefreshAccessToken(context.Background(), client, testAuthConfig(), testOAuth2Flow(), testClientCredentials(), "revoked-refresh")
 	var endpointErr *TokenEndpointError
 	if !errors.As(err, &endpointErr) {
 		t.Fatalf("RefreshAccessToken error = %T %v, want TokenEndpointError", err, err)
@@ -57,7 +57,7 @@ func TestRefreshAccessTokenDoesNotClassifyProviderOutage(t *testing.T) {
 		}, nil
 	})}
 
-	_, err := RefreshAccessToken(context.Background(), client, testAuthConfig(), testClientCredentials(), "refresh")
+	_, err := RefreshAccessToken(context.Background(), client, testAuthConfig(), testOAuth2Flow(), testClientCredentials(), "refresh")
 	if IsReconnectRequiredRefreshError(err) {
 		t.Fatalf("transient provider error must not require reconnect: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestExchangeAuthorizationCodeRequestsJSON(t *testing.T) {
 		return jsonTokenResponse(), nil
 	})}
 
-	token, err := ExchangeAuthorizationCode(context.Background(), client, testAuthConfig(), testClientCredentials(), "code", "verifier")
+	token, err := ExchangeAuthorizationCode(context.Background(), client, testAuthConfig(), testOAuth2Flow(), testClientCredentials(), "code", "verifier")
 	if err != nil {
 		t.Fatalf("ExchangeAuthorizationCode: %v", err)
 	}
@@ -90,10 +90,10 @@ func TestTokenGrantsUseExactEndpointAuthMethod(t *testing.T) {
 		want string
 	}{
 		{name: "authorization code", call: func(ctx context.Context, client *http.Client, auth fusedobject.AuthConfig, creds ClientCredentials) (TokenResponse, error) {
-			return ExchangeAuthorizationCode(ctx, client, auth, creds, "authorization-code", "pkce-verifier")
+			return ExchangeAuthorizationCode(ctx, client, auth, testOAuth2Flow(), creds, "authorization-code", "pkce-verifier")
 		}, key: "code", want: "authorization-code"},
 		{name: "refresh", call: func(ctx context.Context, client *http.Client, auth fusedobject.AuthConfig, creds ClientCredentials) (TokenResponse, error) {
-			return RefreshAccessToken(ctx, client, auth, creds, "refresh-token")
+			return RefreshAccessToken(ctx, client, auth, testOAuth2Flow(), creds, "refresh-token")
 		}, key: "refresh_token", want: "refresh-token"},
 	}
 	methods := []fusedobject.TokenEndpointAuthMethod{
@@ -141,7 +141,7 @@ func TestTokenGrantsRejectUnknownOrEmptyMethodBeforeHTTP(t *testing.T) {
 			auth := testAuthConfig()
 			auth.Type = test.authType
 			auth.TokenEndpointAuthMethod = test.method
-			_, err := RefreshAccessToken(context.Background(), client, auth, testClientCredentials(), "refresh-token")
+			_, err := RefreshAccessToken(context.Background(), client, auth, testOAuth2Flow(), testClientCredentials(), "refresh-token")
 			if err == nil || requests.Load() != 0 {
 				t.Fatalf("error/requests = %v/%d", err, requests.Load())
 			}
@@ -157,7 +157,7 @@ func TestTokenGrantAnnotatesExistingSpanWithBoundedMethodAndOutcome(t *testing.T
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
 	ctx, span := provider.Tracer("test").Start(context.Background(), "existing.connect.span")
 	auth := testAuthConfig()
-	_, err := ExchangeAuthorizationCode(ctx, tokenRequestAssertionClient(t, auth.TokenEndpointAuthMethod, "code", "authorization-code", false), auth, testClientCredentials(), "authorization-code", "pkce-verifier")
+	_, err := ExchangeAuthorizationCode(ctx, tokenRequestAssertionClient(t, auth.TokenEndpointAuthMethod, "code", "authorization-code", false), auth, testOAuth2Flow(), testClientCredentials(), "authorization-code", "pkce-verifier")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestRejectedTokenGrantAnnotatesExistingSpanWithoutRawMethod(t *testing.T) {
 	ctx, span := provider.Tracer("test").Start(context.Background(), "existing.refresh.span")
 	auth := testAuthConfig()
 	auth.TokenEndpointAuthMethod = "client-secret-marker"
-	_, err := RefreshAccessToken(ctx, http.DefaultClient, auth, testClientCredentials(), "refresh-token")
+	_, err := RefreshAccessToken(ctx, http.DefaultClient, auth, testOAuth2Flow(), testClientCredentials(), "refresh-token")
 	if err == nil {
 		t.Fatal("expected invalid runtime method")
 	}
@@ -203,7 +203,7 @@ func TestExchangeAuthorizationCodeAcceptsFormEncodedTokenResponse(t *testing.T) 
 		return formTokenResponse(), nil
 	})}
 
-	token, err := ExchangeAuthorizationCode(context.Background(), client, testAuthConfig(), testClientCredentials(), "code", "verifier")
+	token, err := ExchangeAuthorizationCode(context.Background(), client, testAuthConfig(), testOAuth2Flow(), testClientCredentials(), "code", "verifier")
 	if err != nil {
 		t.Fatalf("ExchangeAuthorizationCode: %v", err)
 	}
@@ -239,9 +239,13 @@ func TestTokenScopeMetadata(t *testing.T) {
 // provider response behavior it is proving.
 func testAuthConfig() fusedobject.AuthConfig {
 	return fusedobject.AuthConfig{
-		Type: "oauth2", TokenURL: "https://provider.example/token",
+		Type: "oauth2", OAuth2Flows: fusedobject.OAuth2Flows{"authorizationCode": testOAuth2Flow()},
 		TokenEndpointAuthMethod: fusedobject.TokenEndpointAuthMethodClientSecretPost,
 	}
+}
+
+func testOAuth2Flow() fusedobject.OAuth2FlowContract {
+	return fusedobject.OAuth2FlowContract{TokenURL: "https://provider.example/token", Scopes: map[string]string{}}
 }
 
 func tokenRequestAssertionClient(t *testing.T, method fusedobject.TokenEndpointAuthMethod, grantKey, grantValue string, wantAudience bool) *http.Client {

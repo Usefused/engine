@@ -43,11 +43,10 @@ func SetIdempotencyStore(s idempotencyStore) {
 }
 
 // idempotencyEligible reports whether a call can be cached and replayed at
-// all. Only the plain request/response path qualifies -- SOAP, SSE, and
-// paginated calls are stateful/multi-chunk and don't fit "cache one
-// response", so they're excluded regardless of whether an idempotency key is
-// present. A missing idempotency key also disqualifies a call: there's
-// nothing to key the cache on.
+// all. SOAP and paginated calls cannot be represented by one cached response.
+// SSE eligibility is decided only after the provider's actual status/media is
+// matched; the tee then discards streamed bytes while finite alternatives on
+// the same operation remain cacheable.
 func idempotencyEligible(ctx context.Context, obj *models.IntegrationObject) bool {
 	if idempotencyKeyFromContext(ctx) == "" {
 		return false
@@ -55,7 +54,7 @@ func idempotencyEligible(ctx context.Context, obj *models.IntegrationObject) boo
 	if obj == nil {
 		return false
 	}
-	return obj.Method != "SOAP" && !obj.IsSSE && obj.Pagination == nil
+	return obj.Method != "SOAP" && obj.Pagination == nil
 }
 
 // lookupCachedExecution returns a cached response for the current context's
@@ -92,7 +91,7 @@ func lookupCachedExecution(ctx context.Context, appID uuid.UUID) (exec *models.I
 // transient failure is never cached, so it can't get "stuck" replaying an
 // error for the TTL window. Best-effort: a save failure is not surfaced to
 // the caller, who already has their real response.
-func saveCachedExecution(ctx context.Context, appID uuid.UUID, responseBody []byte, environment string, responseStatus int) {
+func saveCachedExecution(ctx context.Context, appID uuid.UUID, responseBody []byte, environment string, responseStatus int, responseMediaFamily string) {
 	if globalIdempotencyStore == nil {
 		return
 	}
@@ -102,15 +101,16 @@ func saveCachedExecution(ctx context.Context, appID uuid.UUID, responseBody []by
 	}
 	now := time.Now()
 	_ = globalIdempotencyStore.SaveIdempotentExecution(ctx, &models.IdempotentExecution{
-		ID:                 uuid.New(),
-		AppID:              appID,
-		IdempotencyKeyHash: keyHash,
-		RequestBodyHash:    requestBodyHashFromContext(ctx),
-		Environment:        environment,
-		ResponseBody:       responseBody,
-		ResponseStatus:     responseStatus,
-		CreatedAt:          now,
-		ExpiresAt:          now.Add(models.IdempotencyTTL),
+		ID:                  uuid.New(),
+		AppID:               appID,
+		IdempotencyKeyHash:  keyHash,
+		RequestBodyHash:     requestBodyHashFromContext(ctx),
+		Environment:         environment,
+		ResponseBody:        responseBody,
+		ResponseStatus:      responseStatus,
+		ResponseMediaFamily: responseMediaFamily,
+		CreatedAt:           now,
+		ExpiresAt:           now.Add(models.IdempotencyTTL),
 	})
 }
 
@@ -150,6 +150,10 @@ func tryReplayFromIdempotencyCache(
 	auditState.idempotencyReplayed = true
 	auditState.selectedEnvironment = cached.Environment
 	auditState.providerHTTPStatus = cached.ResponseStatus
+	if contractErr := engine.SendResponseContract(stream, cached.ResponseStatus, cached.ResponseMediaFamily); contractErr != nil {
+		span.SetStatus(codes.Error, contractErr.Error())
+		return false, contractErr
+	}
 	if sendErr := stream.Send(cached.ResponseBody); sendErr != nil {
 		span.SetStatus(codes.Error, sendErr.Error())
 		return false, sendErr
@@ -185,15 +189,15 @@ func dispatchAndCache(
 	dispatchStream := stream
 	var tee *teeResponseStream
 	if eligible {
-		tee = &teeResponseStream{inner: stream}
+		tee = &teeResponseStream{inner: stream, cacheable: true}
 		dispatchStream = tee
 	}
 	resolution, providerHTTPStatus, err = dispatchRuntimeEnvironment(ctx, dispatcher, match, obj, params, credentials, bucketValues, environment, dispatchStream, span)
 	if err != nil {
 		return resolution, providerHTTPStatus, err
 	}
-	if tee != nil && providerHTTPStatus >= 200 && providerHTTPStatus < 400 {
-		saveCachedExecution(ctx, appID, tee.Bytes(), resolution.Environment, providerHTTPStatus)
+	if tee != nil && tee.Cacheable() && providerHTTPStatus >= 200 && providerHTTPStatus < 400 {
+		saveCachedExecution(ctx, appID, tee.Bytes(), resolution.Environment, providerHTTPStatus, tee.MediaFamily())
 	}
 	return resolution, providerHTTPStatus, nil
 }
@@ -203,12 +207,16 @@ func dispatchAndCache(
 // captured for the idempotency cache without changing what the caller (gRPC
 // edge or MCP buffer) actually receives.
 type teeResponseStream struct {
-	inner engine.ResponseStream
-	buf   bytes.Buffer
+	inner       engine.ResponseStream
+	buf         bytes.Buffer
+	mediaFamily string
+	cacheable   bool
 }
 
 func (t *teeResponseStream) Send(chunk []byte) error {
-	t.buf.Write(chunk)
+	if t.cacheable {
+		t.buf.Write(chunk)
+	}
 	return t.inner.Send(chunk)
 }
 
@@ -216,4 +224,23 @@ func (t *teeResponseStream) SendStatus(status int) error {
 	return engine.SendResponseStatus(t.inner, status)
 }
 
-func (t *teeResponseStream) Bytes() []byte { return t.buf.Bytes() }
+func (t *teeResponseStream) SendResponseContract(status int, mediaFamily string) error {
+	t.mediaFamily = mediaFamily
+	if mediaFamily == "sse" {
+		// Runtime media selection is authoritative for mixed operations. SSE is
+		// live and potentially unbounded, so it must never enter the one-body
+		// idempotency cache.
+		t.cacheable = false
+		t.buf.Reset()
+	}
+	return engine.SendResponseContract(t.inner, status, mediaFamily)
+}
+
+func (t *teeResponseStream) Bytes() []byte   { return t.buf.Bytes() }
+func (t *teeResponseStream) Cacheable() bool { return t.cacheable }
+func (t *teeResponseStream) MediaFamily() string {
+	if t.mediaFamily == "" {
+		return "unknown"
+	}
+	return t.mediaFamily
+}

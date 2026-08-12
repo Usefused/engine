@@ -323,9 +323,9 @@ func authorizeControlRequirements(w http.ResponseWriter, r *http.Request, record
 }
 
 func serveAuthorizedControlRequest(w http.ResponseWriter, r *http.Request, next http.Handler, recorder accesscontrol.AuditRecorder, actor accesscontrol.Actor, requirements []accesscontrol.Requirement, policy string) {
-	authorizedRequest := r.WithContext(accesscontrol.ContextWithRequiredPermissions(r.Context(), requirements))
 	mutation := isControlMutation(r.Method)
 	sensitiveRead := !mutation && requiresSensitiveReadAudit(requirements)
+	authorizedRequest := requestWithControlAuditEvidence(r, requirements, mutation)
 	if !mutation && !sensitiveRead {
 		next.ServeHTTP(w, authorizedRequest)
 		return
@@ -339,10 +339,18 @@ func serveAuthorizedControlRequest(w http.ResponseWriter, r *http.Request, next 
 	streamingRead := sensitiveRead && isStreamingControlRequest(r.URL.Path)
 	writer := newAuditStatusWriter(w, mutation || (sensitiveRead && !streamingRead), false, mutation)
 	if recovered, panicked := serveAuditedHandler(next, writer, authorizedRequest); panicked {
-		recordAuthorizedControlPanic(r, recorder, actor, requirements, policy)
+		recordAuthorizedControlPanic(authorizedRequest, recorder, actor, requirements, policy)
 		panic(recovered)
 	}
-	finalizeAuthorizedControlAudit(r, recorder, actor, requirements, policy, sensitiveRead && !streamingRead, writer)
+	finalizeAuthorizedControlAudit(authorizedRequest, recorder, actor, requirements, policy, sensitiveRead && !streamingRead, writer)
+}
+
+func requestWithControlAuditEvidence(r *http.Request, requirements []accesscontrol.Requirement, mutation bool) *http.Request {
+	authorizedContext := accesscontrol.ContextWithRequiredPermissions(r.Context(), requirements)
+	if mutation {
+		authorizedContext = accesscontrol.ContextWithMutationAuditEvidence(authorizedContext)
+	}
+	return r.WithContext(authorizedContext)
 }
 
 func isControlMutation(method string) bool {
@@ -372,8 +380,36 @@ func finalizeAuthorizedControlAudit(r *http.Request, recorder accesscontrol.Audi
 		status, outcome, reason = http.StatusServiceUnavailable, accesscontrol.AuditFailed, "response_too_large"
 	}
 	event := newControlAuditEvent(r, actor, controlAuditAction(r.Method), policy, requirements, outcome, status, reason)
+	applyMutationAuditEvidence(r.Context(), &event)
 	err := recordControlAudit(r.Context(), recorder, event)
 	finishAuditedResponse(writer, failClosed, err)
+}
+
+func applyMutationAuditEvidence(ctx context.Context, event *accesscontrol.AuditEvent) {
+	evidence, ok := accesscontrol.MutationAuditEvidenceFromContext(ctx)
+	if !ok {
+		return
+	}
+	if event.Outcome == accesscontrol.AuditFailed && evidence.Cancelled {
+		event.Outcome = accesscontrol.AuditCancelled
+		event.ReasonCode = "request_cancelled"
+		if evidence.RolledBack {
+			// Cancellation is the primary result, while this bounded reason retains
+			// the stronger transaction fact without persisting an error string.
+			event.ReasonCode = "transaction_rolled_back"
+		}
+		return
+	}
+	if event.Outcome == accesscontrol.AuditFailed && evidence.RolledBack {
+		event.Outcome = accesscontrol.AuditRolledBack
+		event.ReasonCode = "transaction_rolled_back"
+		return
+	}
+	if event.Outcome == accesscontrol.AuditSucceeded && evidence.Unchanged {
+		// Immutable convergence remains a success. The existing allowlisted
+		// boolean distinguishes it without inspecting a response or plan body.
+		event.Metadata["changed"] = false
+	}
 }
 
 func isStreamingControlRequest(path string) bool {

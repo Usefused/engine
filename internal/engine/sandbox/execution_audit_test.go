@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -121,8 +123,63 @@ func TestRecordEngineExecutionAuditTreatsProviderAuthResponseAsFailure(t *testin
 	if envelope.Event.Status != models.EngineExecutionStatusFailed || envelope.Event.FailureCategory != "auth" || envelope.Event.FailureCode != "provider_auth" {
 		t.Fatalf("provider auth response was not classified as a failure: %#v", envelope.Event)
 	}
-	if envelope.Event.FailureReason != "provider returned HTTP 401" {
+	if envelope.Event.FailureReason != "provider_auth" {
 		t.Fatalf("failure reason = %q", envelope.Event.FailureReason)
+	}
+}
+
+func TestTransportFailureIsSanitizedInAuditAndOTEL(t *testing.T) {
+	capture := &captureJetStreamPublisher{}
+	executionevent.SetPublisher(executionevent.NewPublisher(capture))
+	t.Cleanup(func() { executionevent.SetPublisher(nil) })
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	ctx, span := provider.Tracer("test").Start(context.Background(), "transport-failure")
+
+	const secretURL = "https://api.example.com/items?token=secret"
+	raw := &url.Error{Op: "COPY", URL: secretURL, Err: errors.New("Authorization=Bearer-secret")}
+	normalized := finishExecutionDispatch(ctx, span, 0, 0, raw)
+	recordEngineExecutionAudit(ctx, span, executionAuditState{
+		identity:     auth.RuntimeIdentity{AccountID: uuid.New(), AppFamilyID: uuid.New(), AppID: uuid.New(), AppVersion: "1.0.0"},
+		endpointName: "items.copy", startedAt: time.Now(), providerHost: "api.example.com",
+		match: &scopedEndpoint{service: &fusedobject.ServiceMetadata{ID: uuid.New()}, serviceVersionID: "v1", endpoint: fusedobject.Endpoint{ID: uuid.New(), Method: "COPY", NormalizedPath: "/items"}},
+	}, normalized)
+	span.End()
+
+	event := decodeExecutionAuditEvent(t, capture.message)
+	if event.FailureReason != "request_failed" || event.FailureCategory != "network" || event.FailureCode != "request_failed" || event.HTTPMethod != "CUSTOM" {
+		t.Fatalf("sanitized failure event = %#v", event)
+	}
+	assertNoTransportSecret(t, []string{secretURL, "Bearer-secret", "token=secret", "COPY"}, string(capture.message.Data), recorder.Ended())
+}
+
+func decodeExecutionAuditEvent(t *testing.T, message *nats.Msg) models.EngineExecutionEvent {
+	t.Helper()
+	if message == nil {
+		t.Fatal("execution audit was not published")
+	}
+	var envelope models.EngineExecutionEventEnvelope
+	if err := json.Unmarshal(message.Data, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	return envelope.Event
+}
+
+func assertNoTransportSecret(t *testing.T, prohibited []string, audit string, spans []sdktrace.ReadOnlySpan) {
+	t.Helper()
+	for _, value := range prohibited {
+		if strings.Contains(audit, value) {
+			t.Fatalf("transport value %q leaked into audit: %s", value, audit)
+		}
+	}
+	for _, span := range spans {
+		serialized := fmt.Sprint(span.Status(), span.Attributes(), span.Events())
+		for _, value := range prohibited {
+			if strings.Contains(serialized, value) {
+				t.Fatalf("transport value %q leaked into span: %s", value, serialized)
+			}
+		}
 	}
 }
 
@@ -161,7 +218,11 @@ func TestEngineExecuteCoreAuditsAndTracesTokenScopeDenial(t *testing.T) {
 		t.Fatalf("scope denial classification = %s/%s", envelope.Event.FailureCategory, envelope.Event.FailureCode)
 	}
 
-	spans := recorder.Ended()
+	assertTokenScopeDenialSpan(t, recorder.Ended())
+}
+
+func assertTokenScopeDenialSpan(t *testing.T, spans []sdktrace.ReadOnlySpan) {
+	t.Helper()
 	if len(spans) != 1 {
 		t.Fatalf("execution span count = %d, want 1", len(spans))
 	}
@@ -174,6 +235,111 @@ func TestEngineExecuteCoreAuditsAndTracesTokenScopeDenial(t *testing.T) {
 	if attributes["authorization.outcome"] != "denied" || attributes["execution.failure_code"] != "scope_denied" {
 		t.Fatalf("scope denial OTEL attributes = %#v", attributes)
 	}
+}
+
+func TestEngineExecuteCoreRejectsUnknownExecutionContractWithSafeTelemetry(t *testing.T) {
+	capture := &captureJetStreamPublisher{}
+	executionevent.SetPublisher(executionevent.NewPublisher(capture))
+	t.Cleanup(func() { executionevent.SetPublisher(nil) })
+
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	previous := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		otel.SetTracerProvider(previous)
+	})
+
+	serviceID, endpointID, appID := uuid.New(), uuid.New(), uuid.New()
+	selections, err := json.Marshal([]models.SDKSelection{{ServiceID: serviceID, EndpointIDs: []uuid.UUID{endpointID}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const unknownCapability = "http.secret-tenant-capability.v1"
+	cache := &richMockCache{
+		scopeJSON: selections,
+		obj: &fusedobject.ServiceMetadata{ExecutionContractEnvelope: fusedobject.ExecutionContractEnvelope{
+			ContractVersion: fusedobject.CurrentExecutionContractVersion, RequiredCapabilities: []string{unknownCapability},
+		}},
+		epID: endpointID,
+	}
+	validator := fixedPolicyValidator{identity: auth.RuntimeIdentity{
+		AccountID: uuid.New(), AppFamilyID: uuid.New(), AppVersion: "1.0.0",
+		Kind: store.AppKindSDK, Status: store.AppStatusActive, TokenPolicy: store.AppTokenPolicy{AllowAll: true},
+	}}
+
+	err = engineExecuteCore(context.Background(), cache, nil, validator, appID.String(), "secret-token", "list_items", nil, nil, "", engine.NewBufferStream())
+	assertExecutionContractCompatibilityError(t, err, unknownCapability)
+	assertExecutionContractAudit(t, capture.message)
+	assertExecutionContractTelemetry(t, executionSpanByName(t, recorder.Ended(), "engine.dispatch.execute"), unknownCapability)
+}
+
+func assertExecutionContractCompatibilityError(t *testing.T, err error, unknownCapability string) {
+	t.Helper()
+	if err == nil || !strings.Contains(err.Error(), fusedobject.ExecutionCapabilityRequiredCode) || strings.Contains(err.Error(), unknownCapability) {
+		t.Fatalf("compatibility error = %v", err)
+	}
+}
+
+func assertExecutionContractAudit(t *testing.T, message *nats.Msg) {
+	t.Helper()
+	if message == nil {
+		t.Fatal("pre-dispatch compatibility rejection did not publish an audit event")
+	}
+	var eventEnvelope models.EngineExecutionEventEnvelope
+	if err := json.Unmarshal(message.Data, &eventEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if eventEnvelope.Event.FailureCategory != "contract" || eventEnvelope.Event.FailureCode != fusedobject.ExecutionCapabilityRequiredCode {
+		t.Fatalf("audit classification = %s/%s", eventEnvelope.Event.FailureCategory, eventEnvelope.Event.FailureCode)
+	}
+}
+
+func assertExecutionContractTelemetry(t *testing.T, executionSpan sdktrace.ReadOnlySpan, unknownCapability string) {
+	t.Helper()
+	attributes := executionSpan.Attributes()
+	if stringSpanAttribute(attributes, "execution.contract_negotiation.outcome") != "rejected" ||
+		stringSpanAttribute(attributes, "execution.contract_negotiation.reason") != fusedobject.ExecutionContractReasonUnsupportedCapability ||
+		stringSpanAttribute(attributes, "execution.failure_code") != fusedobject.ExecutionCapabilityRequiredCode ||
+		intSpanAttribute(attributes, "execution.contract_version") != fusedobject.CurrentExecutionContractVersion ||
+		intSpanAttribute(attributes, "execution.required_capabilities_count") != 1 {
+		t.Fatalf("contract negotiation attributes = %#v", attributes)
+	}
+	for _, value := range attributes {
+		if strings.Contains(value.Value.Emit(), unknownCapability) {
+			t.Fatalf("unknown capability leaked into OTEL attribute %s", value.Key)
+		}
+	}
+}
+
+func executionSpanByName(t *testing.T, spans []sdktrace.ReadOnlySpan, name string) sdktrace.ReadOnlySpan {
+	t.Helper()
+	for _, span := range spans {
+		if span.Name() == name {
+			return span
+		}
+	}
+	t.Fatalf("span %q not found", name)
+	return nil
+}
+
+func stringSpanAttribute(attributes []attribute.KeyValue, key attribute.Key) string {
+	for _, value := range attributes {
+		if value.Key == key && value.Value.Type() == attribute.STRING {
+			return value.Value.AsString()
+		}
+	}
+	return ""
+}
+
+func intSpanAttribute(attributes []attribute.KeyValue, key attribute.Key) int {
+	for _, value := range attributes {
+		if value.Key == key && value.Value.Type() == attribute.INT64 {
+			return int(value.Value.AsInt64())
+		}
+	}
+	return 0
 }
 
 func TestEngineExecuteCoreRequiresTokenAndAppScope(t *testing.T) {

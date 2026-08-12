@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/Usefused/engine/internal/engine/sandbox"
@@ -346,16 +347,22 @@ func engineProfileContract(ctx context.Context, verifier ServiceVerifier, regist
 		return connectionprofile.Contract{}, err
 	}
 	return connectionprofile.Contract{
-		AuthTypes: engineAuthTypes(metadata.AuthConfigs), Servers: engineServerNames(metadata.Servers),
+		AuthConfigs: engineAuthConfigs(metadata.AuthConfigs), Servers: engineServerNames(metadata.Servers),
 		Operations: engineProfileOperations(operations), Complete: true,
 	}, nil
 }
 
-// engineAuthTypes projects only auth families needed by profile validation.
-func engineAuthTypes(configs fusedobject.AuthConfigs) []string {
-	values := make([]string, 0, len(configs))
+// engineAuthConfigs keeps identity and flow names because a profile must pin
+// one exact OAuth flow instead of inheriting parser iteration order.
+func engineAuthConfigs(configs fusedobject.AuthConfigs) []connectionprofile.AuthConfig {
+	values := make([]connectionprofile.AuthConfig, 0, len(configs))
 	for _, config := range configs {
-		values = append(values, config.Type)
+		flows := make([]string, 0, len(config.OAuth2Flows))
+		for name := range config.OAuth2Flows {
+			flows = append(flows, name)
+		}
+		sort.Strings(flows)
+		values = append(values, connectionprofile.AuthConfig{Name: config.Name, Type: config.Type, OAuth2Flows: flows})
 	}
 	return values
 }
@@ -364,8 +371,12 @@ func engineAuthTypes(configs fusedobject.AuthConfigs) []string {
 func engineServerNames(servers fusedobject.Servers) []string {
 	values := make([]string, 0, len(servers))
 	for _, server := range servers {
-		if server.Environment != "" {
-			values = append(values, server.Environment)
+		name := strings.TrimSpace(server.Name)
+		if name == "" {
+			name = strings.TrimSpace(server.Environment)
+		}
+		if name != "" {
+			values = append(values, name)
 		}
 	}
 	return values

@@ -13,6 +13,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/requestbinding"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/authrouting"
+	"github.com/Usefused/engine/internal/shared/connectionprofile"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/secretref"
@@ -89,6 +90,12 @@ func (r *secretResolver) ResolveExecutionCredentials(ctx context.Context, reques
 	bindings = appendInjectionBindings(bindings, scope.Selections, request.ServiceID)
 
 	finalCreds := copyPassthroughCredentials(request.Passthrough)
+	// Flow selection is configuration, not a per-call credential. Removing the
+	// caller value prevents an SDK request from bypassing the reviewed profile.
+	delete(finalCreds, "fused_oauth2_flow")
+	if err := r.applyWorkspaceOAuthProfile(ctx, request, finalCreds); err != nil {
+		return nil, nil, err
+	}
 	// The dispatcher needs the exact resolved bucket only to derive the fallback
 	// connection scope; this internal routing value is stripped before telemetry.
 	finalCreds["fused_bucket_id"] = scope.BucketID.String()
@@ -111,6 +118,46 @@ func (r *secretResolver) ResolveExecutionCredentials(ctx context.Context, reques
 	}
 
 	return finalCreds, values, nil
+}
+
+func (r *secretResolver) applyWorkspaceOAuthProfile(ctx context.Context, request CredentialRequest, credentials map[string]any) error {
+	authType, required := workspaceOAuthProfileLookup(request)
+	if !required {
+		return nil
+	}
+	profileStore, ok := r.db.(store.WorkspaceProfileStore)
+	if !ok {
+		return errors.New("workspace OAuth flow selection is unavailable")
+	}
+	stored, err := profileStore.GetEffectiveWorkspaceProfile(ctx, request.ServiceID, request.ServiceVersionID, authType)
+	if err != nil {
+		return fmt.Errorf("failed to load workspace OAuth flow selection: %w", err)
+	}
+	if stored == nil {
+		return nil
+	}
+	var profile connectionprofile.Profile
+	if err := json.Unmarshal(stored.ProfileSnapshot, &profile); err != nil {
+		return errors.New("workspace OAuth profile snapshot is invalid")
+	}
+	if profile.AuthName != "" {
+		credentials[credentialKeyFusedAuthName] = profile.AuthName
+	}
+	if profile.OAuth2Flow != "" {
+		credentials["fused_oauth2_flow"] = profile.OAuth2Flow
+	}
+	return nil
+}
+
+func workspaceOAuthProfileLookup(request CredentialRequest) (string, bool) {
+	selector := canonicalAuthSelector(request.AuthType)
+	for _, auth := range request.Auths {
+		canonical := canonicalFusedAuthType(auth)
+		if (selector == "" || selector == canonical) && canonical == "oauth" && len(auth.OAuth2Flows) > 1 {
+			return "oauth", true
+		}
+	}
+	return "", false
 }
 
 func appendInjectionBindings(bindings []store.WorkspaceConnectionBinding, selectionsRaw []byte, serviceID uuid.UUID) []store.WorkspaceConnectionBinding {
@@ -609,7 +656,7 @@ func (r *secretResolver) refreshAuthConnection(ctx context.Context, conn *store.
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.auth_connection.refresh")
 	defer span.End()
 	span.SetAttributes(authConnectionSpanAttrs(conn)...)
-	auth, err := connectedRefreshAuth(authName, auths)
+	auth, flow, err := connectedRefreshAuth(authName, auths)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
@@ -633,7 +680,7 @@ func (r *secretResolver) refreshAuthConnection(ctx context.Context, conn *store.
 		span.SetStatus(codes.Error, "decrypt refresh token")
 		return nil, fmt.Errorf("decrypt refresh token: %w", err)
 	}
-	token, err := connectauth.RefreshAccessToken(ctx, http.DefaultClient, auth, creds, refreshToken)
+	token, err := connectauth.RefreshAccessToken(ctx, http.DefaultClient, auth, flow, creds, refreshToken)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
@@ -719,22 +766,23 @@ func refreshIdentityClaims(token connectauth.TokenResponse, conn *store.AuthConn
 
 // connectedRefreshAuth selects by the dispatcher auth name first so refresh
 // uses the same provider config that will receive the access token.
-func connectedRefreshAuth(authName string, auths fusedobject.AuthConfigs) (fusedobject.AuthConfig, error) {
+func connectedRefreshAuth(authName string, auths fusedobject.AuthConfigs) (fusedobject.AuthConfig, fusedobject.OAuth2FlowContract, error) {
 	for _, auth := range auths {
 		if authCredentialName(auth) == authName && isRefreshableAuth(auth) {
 			return validateRefreshableAuth(auth)
 		}
 	}
-	return fusedobject.AuthConfig{}, errors.New("refreshable auth config not found")
+	return fusedobject.AuthConfig{}, fusedobject.OAuth2FlowContract{}, errors.New("refreshable auth config not found")
 }
 
 // validateRefreshableAuth fails before network I/O when registry metadata
 // cannot support OAuth refresh.
-func validateRefreshableAuth(auth fusedobject.AuthConfig) (fusedobject.AuthConfig, error) {
-	if strings.TrimSpace(auth.TokenURL) == "" {
-		return fusedobject.AuthConfig{}, errors.New("refresh token_url is required")
+func validateRefreshableAuth(auth fusedobject.AuthConfig) (fusedobject.AuthConfig, fusedobject.OAuth2FlowContract, error) {
+	flow, ok := auth.OAuth2Flows["authorizationCode"]
+	if !ok || strings.TrimSpace(flow.TokenURL) == "" {
+		return fusedobject.AuthConfig{}, fusedobject.OAuth2FlowContract{}, errors.New("refresh authorizationCode flow requires token_url")
 	}
-	return auth, nil
+	return auth, flow, nil
 }
 
 // isRefreshableAuth mirrors Engine-owned connect support so static/API-key

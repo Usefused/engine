@@ -33,17 +33,22 @@ func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 	}
 
 	migrations := engineMigrations()
-	if len(migrations) != 2 {
-		t.Fatalf("Engine migration count = %d, want 2", len(migrations))
+	if len(migrations) != 4 {
+		t.Fatalf("Engine migration count = %d, want 4", len(migrations))
 	}
-	if migrations[0].Version != engineMigrationVersion || migrations[0].Name != engineMigrationName {
-		t.Fatalf("Engine migration identity = (%d, %q), want (%d, %q)", migrations[0].Version, migrations[0].Name, engineMigrationVersion, engineMigrationName)
-	}
-	if migrations[1].Version != appTokenPolicyMigrationVersion || migrations[1].Name != appTokenPolicyMigrationName {
-		t.Fatalf("app token migration identity = (%d, %q), want (%d, %q)", migrations[1].Version, migrations[1].Name, appTokenPolicyMigrationVersion, appTokenPolicyMigrationName)
-	}
+	assertMigrationIdentity(t, migrations[0], engineMigrationVersion, engineMigrationName)
+	assertMigrationIdentity(t, migrations[1], appTokenPolicyMigrationVersion, appTokenPolicyMigrationName)
+	assertMigrationIdentity(t, migrations[2], contractEnvelopeMigrationVersion, contractEnvelopeMigrationName)
+	assertMigrationIdentity(t, migrations[3], idempotencyMediaMigrationVersion, idempotencyMediaMigrationName)
 	if engineMigrationLockQuery != "SELECT pg_advisory_xact_lock($1)" {
 		t.Fatalf("Engine migrations must use a transaction-scoped advisory lock, got %q", engineMigrationLockQuery)
+	}
+}
+
+func assertMigrationIdentity(t *testing.T, migration engineMigration, version int64, name string) {
+	t.Helper()
+	if migration.Version != version || migration.Name != name {
+		t.Fatalf("migration identity = (%d, %q), want (%d, %q)", migration.Version, migration.Name, version, name)
 	}
 }
 
@@ -105,12 +110,12 @@ func TestEngineSchemaDefinesExecutionTimeoutWithoutCompatibilityMigration(t *tes
 	}
 }
 
-func TestEngineMigrationClearsOnlyLegacyRateLimitJSON(t *testing.T) {
+func TestEngineMigrationPreservesOnlyCanonicalRateLimitJSON(t *testing.T) {
 	migrations := strings.Join(engineMigrationQueries(), "\n")
 	for _, expected := range []string{
 		"UPDATE fused_workspace_execution_policies",
 		"SET rate_limit = NULL",
-		"rate_limit->>'version' IS DISTINCT FROM '2'",
+		"rate_limit->>'version' IS DISTINCT FROM '3'",
 	} {
 		if !strings.Contains(migrations, expected) {
 			t.Fatalf("rate-limit migration missing %q", expected)
@@ -242,17 +247,25 @@ func TestEngineFreshSchemaDoesNotCreateLegacyArtifactPersistence(t *testing.T) {
 func TestEngineRuntimeTablesUseExactAppIdentity(t *testing.T) {
 	schemaQueries := engineSchemaQueries()
 	migrationQueries := engineMigrationQueries()
-	assertSchemaContainsAll(t, strings.Join(schemaQueries, "\n"), "fresh runtime schema missing %q", []string{
+	freshSchema := strings.Join(schemaQueries, "\n")
+	assertSchemaContainsAll(t, freshSchema, "fresh runtime schema missing %q", []string{
 		"CREATE TABLE IF NOT EXISTS fused_mcp_sessions",
 		"app_id uuid",
 		"CREATE TABLE IF NOT EXISTS fused_engine_idempotency_keys",
 		"UNIQUE(app_id, idempotency_key_hash)",
+		"response_media_family text NOT NULL DEFAULT 'unknown'",
 	})
+	if count := strings.Count(freshSchema, "CONSTRAINT chk_fused_engine_idempotency_response_media_family"); count != 1 {
+		t.Fatalf("fresh runtime schema response media constraint count=%d, want 1", count)
+	}
 	assertSchemaContainsAll(t, strings.Join(migrationQueries, "\n"), "runtime identity migration missing %q", []string{
 		"UPDATE fused_mcp_sessions SET app_id = artifact_id",
 		"UPDATE fused_engine_idempotency_keys SET app_id = artifact_id",
 		"fused_mcp_sessions DROP COLUMN IF EXISTS artifact_id",
 		"fused_engine_idempotency_keys DROP COLUMN IF EXISTS artifact_id",
+		"ADD COLUMN IF NOT EXISTS response_media_family text",
+		"DELETE FROM fused_engine_idempotency_keys WHERE response_media_family IS NULL OR response_media_family = 'unknown'",
+		"ALTER COLUMN response_media_family SET NOT NULL",
 	})
 	assertAppIdentityIndexesRunAfterLegacyColumns(t, schemaQueries, migrationQueries)
 	assertSchemaOrder(t, migrationQueries, "fused_mcp_sessions ADD COLUMN IF NOT EXISTS app_id uuid", "idx_fused_mcp_sessions_app_started")
@@ -285,13 +298,13 @@ func TestEngineSchemaSupportsWorkspaceResourcePrincipalsWithoutLegacyMigration(t
 	}
 }
 
-func TestEngineSchemaAllowsAttemptedAuditOutcome(t *testing.T) {
+func TestEngineSchemaAllowsCanonicalAuditOutcomes(t *testing.T) {
 	joined := strings.Join(engineSchemaQueries(), "\n")
-	if !strings.Contains(joined, "'attempted', 'allowed', 'denied', 'succeeded', 'failed'") {
-		t.Fatal("current audit schema must distinguish attempted from allowed")
+	if !strings.Contains(joined, "'attempted', 'allowed', 'denied', 'succeeded', 'failed', 'rolled_back', 'cancelled'") {
+		t.Fatal("current audit schema must distinguish attempts, authorization, mutation results, rollback, and cancellation")
 	}
-	if strings.Contains(strings.Join(engineMigrationQueries(), "\n"), "attempted") {
-		t.Fatal("attempted audit outcome belongs in the clean schema, not a legacy migration")
+	if strings.Contains(strings.Join(engineMigrationQueries(), "\n"), "rolled_back") {
+		t.Fatal("canonical audit outcomes belong in the clean schema, not a legacy migration")
 	}
 }
 
@@ -490,6 +503,8 @@ func TestEngineSchemaDefinesActivatedContractSnapshots(t *testing.T) {
 	required := []string{
 		"CREATE TABLE IF NOT EXISTS fused_service_contract_snapshots",
 		"service_version_id uuid NOT NULL UNIQUE",
+		"contract_version   integer NOT NULL",
+		"required_capabilities text[] NOT NULL",
 		"contract_hash      text NOT NULL",
 		"contract_status    text NOT NULL DEFAULT 'active'",
 		"service_metadata   jsonb NOT NULL",
@@ -517,6 +532,22 @@ func TestEngineSchemaDefinesActivatedContractSnapshots(t *testing.T) {
 	for _, fragment := range forbidden {
 		if strings.Contains(snapshotSection[:snapshotEnd], fragment) {
 			t.Fatalf("contract snapshots must not contain raw source fragment %q", fragment)
+		}
+	}
+}
+
+func TestContractEnvelopeMigrationFailsClosedForExistingSnapshots(t *testing.T) {
+	migration := strings.Join(contractEnvelopeMigrationQueries(), "\n")
+	required := []string{
+		"ADD COLUMN IF NOT EXISTS contract_version integer",
+		"ADD COLUMN IF NOT EXISTS required_capabilities text[]",
+		"WHERE contract_version IS NULL OR required_capabilities IS NULL",
+		"ALTER COLUMN contract_version SET NOT NULL",
+		"ALTER COLUMN required_capabilities SET NOT NULL",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(migration, fragment) {
+			t.Fatalf("contract envelope migration missing %q", fragment)
 		}
 	}
 }

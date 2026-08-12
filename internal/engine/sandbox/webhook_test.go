@@ -4,14 +4,20 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/sha1"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 
+	"github.com/Usefused/engine/internal/engine/executionevent"
+	"github.com/Usefused/engine/internal/engine/webhookverify"
 	"github.com/Usefused/engine/internal/shared/models"
+	"github.com/Usefused/engine/internal/shared/signaturepolicy"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
@@ -91,6 +97,8 @@ func seedConfig(slug string, cfg *webhookConfig, signingSecret string) {
 		AuthKeyName:         cfg.AuthKeyName,
 		SignatureHeader:     cfg.SignatureHeader,
 		VerificationHeaders: cfg.VerificationHeaders,
+		SignaturePolicy:     cfg.SignaturePolicy,
+		CallbackURL:         cfg.CallbackURL,
 	}
 	if signingSecret != "" {
 		ww.SecretRef = secretRef
@@ -144,6 +152,34 @@ func TestWebhookHandler_BadHMAC_EventDropped(t *testing.T) {
 	}
 }
 
+func TestWebhookHandler_RejectionEventDeniesConfiguredHeaderName(t *testing.T) {
+	withEntitlement(t, models.RuntimeEntitlement{WebhookIngestionEnabled: true})
+	const slug = "slug-bounded"
+	const headerName = "X-Customer-Secret-Header"
+	seedConfig(slug, &webhookConfig{
+		AuthType: "signature_header", VerificationHeaders: []string{headerName},
+	}, "")
+	capture := &captureJetStreamPublisher{}
+	executionevent.SetPublisher(executionevent.NewPublisher(capture))
+	t.Cleanup(func() { executionevent.SetPublisher(nil) })
+
+	w := httptest.NewRecorder()
+	webhookIngressHandler(w, makeWebhookRequest(http.MethodPost, slug, `{}`, nil))
+	if w.Code != http.StatusUnauthorized || capture.message == nil {
+		t.Fatalf("expected rejected request and audit event, status=%d event=%v", w.Code, capture.message != nil)
+	}
+	var envelope models.EngineExecutionEventEnvelope
+	if err := json.Unmarshal(capture.message.Data, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Event.FailureReason != webhookverify.CodeVerificationHeaderMiss {
+		t.Fatalf("failure reason = %q", envelope.Event.FailureReason)
+	}
+	if bytes.Contains(capture.message.Data, []byte(headerName)) {
+		t.Fatal("configured header name leaked into durable execution event")
+	}
+}
+
 // ─── Auth gate: valid HMAC → event IS published ───────────────────────────────
 
 // TestWebhookHandler_ValidHMAC_EventPublished proves that a correctly signed
@@ -181,6 +217,38 @@ func TestWebhookHandler_ValidHMAC_EventPublished(t *testing.T) {
 	}
 	if published != 1 {
 		t.Errorf("expected publishWebhookEvent to be called once, got %d", published)
+	}
+}
+
+func TestWebhookHandler_StructuredCallbackSignatureIgnoresSpoofedHost(t *testing.T) {
+	withEntitlement(t, models.RuntimeEntitlement{WebhookIngestionEnabled: true})
+	const slug = "structured-callback"
+	const callbackURL = "https://trusted.example/webhook/structured-callback"
+	const secretRef = "${bucket.default.secret.test-label}"
+	const body = `{"event":"updated"}`
+	policy := &signaturepolicy.Config{Version: 1, Rules: []signaturepolicy.Rule{{
+		Name: "event", Kind: signaturepolicy.RuleEvent, Verification: signaturepolicy.Verification{
+			Kind: signaturepolicy.VerificationSignature, Signature: &signaturepolicy.SignatureVerification{
+				SecretRef: secretRef, Signature: signaturepolicy.ValueSource{Location: signaturepolicy.LocationHeader, Name: "X-Signature"},
+				Components: []signaturepolicy.InputComponent{{Kind: signaturepolicy.ComponentRawBody}, {Kind: signaturepolicy.ComponentExactCallbackURL}},
+				Algorithm:  signaturepolicy.AlgorithmHMACSHA1, Encoding: signaturepolicy.EncodingBase64, Comparison: signaturepolicy.ComparisonConstantTime,
+			},
+		},
+	}}}
+	seedConfig(slug, &webhookConfig{SignaturePolicy: policy, CallbackURL: callbackURL, EventExtractionPath: "body.event"}, "secret")
+	mac := hmac.New(sha1.New, []byte("secret"))
+	_, _ = mac.Write([]byte(body + callbackURL))
+	req := makeWebhookRequest(http.MethodPost, slug, body, map[string]string{
+		"X-Signature": base64.StdEncoding.EncodeToString(mac.Sum(nil)), "X-Forwarded-Host": "attacker.invalid",
+	})
+	req.Host = "attacker.invalid"
+	previous := webhookPublishFunc
+	webhookPublishFunc = func(*nats.Msg) error { return nil }
+	t.Cleanup(func() { webhookPublishFunc = previous })
+	w := httptest.NewRecorder()
+	webhookIngressHandler(w, req)
+	if w.Code == http.StatusUnauthorized {
+		t.Fatalf("trusted callback signature rejected: %s", w.Body.String())
 	}
 }
 

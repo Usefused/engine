@@ -3,6 +3,7 @@ package sandbox
 import (
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
+	"github.com/Usefused/engine/internal/shared/retrypolicy"
 )
 
 // fusedToService projects the connection-cached Fused object onto the lean
@@ -15,12 +16,24 @@ func fusedToService(o *fusedobject.ServiceMetadata) *models.Service {
 		ServiceVersionID: o.ServiceVersionID,
 		Name:             o.Name,
 		BaseURL:          o.BaseURL,
+		ServiceBaseURL:   o.BaseURL,
+		ServerVariables:  cloneStringMap(o.ServerVariables),
+		Servers:          mapServers(o.Servers),
 		AuthConfigs:      mapAuthConfigs(o.AuthConfigs),
 		DefaultHeaders:   models.DefaultHeaders(o.DefaultHeaders),
 		RawWSDL:          o.RawWSDL,
 		RateLimit:        o.RateLimit,
 		RetryConfig:      mapRetryConfig(o.RetryConfig),
+		Documentation:    mapServiceDocumentation(o.Documentation),
 	}
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 // mapRetryConfig converts the wire retry config to the models type
@@ -29,11 +42,9 @@ func mapRetryConfig(r *fusedobject.RetryConfig) *models.RetryConfig {
 	if r == nil {
 		return nil
 	}
-	return &models.RetryConfig{
-		Strategy:   r.Strategy,
-		MaxRetries: r.MaxRetries,
-		BackoffMs:  r.BackoffMs,
-	}
+	mapped := *r
+	mapped.Rules = append([]retrypolicy.Rule(nil), r.Rules...)
+	return &mapped
 }
 
 // fusedToIntegrationObject projects a single Fused endpoint onto the
@@ -58,17 +69,18 @@ func fusedToIntegrationObject(o *fusedobject.ServiceMetadata, ep fusedobject.End
 		Version:              ep.Version,
 		Method:               ep.Method,
 		Path:                 ep.Path,
+		OperationServers:     mapServers(ep.OperationServers),
 		NormalizedPath:       ep.NormalizedPath,
 		Deprecated:           ep.Deprecated,
-		IsSSE:                ep.IsSSE,
 		Parameters:           mapParameters(ep.Parameters),
 		RequestContent:       mapRequestContent(ep.RequestContent),
 		Responses:            mapResponses(ep.Responses),
 		GraphQLQuery:         ep.GraphQLQuery,
-		ProviderProtocol:     effectiveProviderProtocol(ep),
-		OperationKind:        effectiveOperationKind(ep),
+		ProviderProtocol:     ep.ProviderProtocol,
+		OperationKind:        ep.OperationKind,
 		Pagination:           resolvePagination(ep.Pagination, o.Pagination),
 		SecurityRequirements: ep.SecurityRequirements,
+		Documentation:        mapOperationDocumentation(ep.Documentation),
 	}
 }
 
@@ -77,52 +89,73 @@ func mapRequestContent(content *fusedobject.RequestContent) *models.RequestConte
 		return nil
 	}
 	return &models.RequestContent{
-		MediaType: content.MediaType, Serialization: content.Serialization,
-		Required: content.Required, Schema: mapSchema(content.Schema),
-		PayloadParameter: content.PayloadParameter, BinaryEncoding: content.BinaryEncoding,
-		Parts: mapRequestParts(content.Parts),
+		Required: content.Required, PayloadParameter: content.PayloadParameter,
+		Representations: mapRequestRepresentations(content.Representations), DefaultMediaType: content.DefaultMediaType,
+		UploadWorkflow: content.UploadWorkflow,
 	}
 }
 
-func mapRequestParts(parts map[string]fusedobject.RequestPart) map[string]models.RequestPart {
-	if parts == nil {
+func mapRequestRepresentations(values []fusedobject.RequestRepresentation) []models.RequestRepresentation {
+	if values == nil {
 		return nil
 	}
-	mapped := make(map[string]models.RequestPart, len(parts))
-	for name, part := range parts {
-		mapped[name] = models.RequestPart{ContentType: part.ContentType, BinaryEncoding: part.BinaryEncoding}
+	mapped := make([]models.RequestRepresentation, len(values))
+	for i, value := range values {
+		mapped[i] = models.RequestRepresentation{
+			MediaType: value.MediaType, Serialization: value.Serialization,
+			Schema: mapSchemaContract(value.Schema), ItemSchema: mapSchemaContract(value.ItemSchema),
+			Encoding: mapRequestEncodings(value.Encoding), PrefixEncoding: mapRequestEncodingSlice(value.PrefixEncoding),
+			ItemEncoding: mapOptionalRequestEncoding(value.ItemEncoding),
+			Example:      value.Example, Examples: value.Examples,
+		}
 	}
 	return mapped
 }
 
-// effectiveProviderProtocol keeps snapshots written before the explicit field
-// executable. The query document is authoritative enough for this one-way
-// migration, while new snapshots always carry the provider protocol directly.
-func effectiveProviderProtocol(ep fusedobject.Endpoint) string {
-	if ep.ProviderProtocol != "" {
-		return ep.ProviderProtocol
+func mapRequestEncodings(values map[string]fusedobject.RequestEncoding) map[string]models.RequestEncoding {
+	if len(values) == 0 {
+		return nil
 	}
-	if ep.GraphQLQuery != nil {
-		return models.ProviderProtocolGraphQL
+	mapped := make(map[string]models.RequestEncoding, len(values))
+	for name, value := range values {
+		mapped[name] = mapRequestEncoding(value)
 	}
-	return models.ProviderProtocolREST
+	return mapped
 }
 
-// effectiveOperationKind uses the legacy resource bucket only for old GraphQL
-// snapshots; new contracts persist the semantic kind explicitly.
-func effectiveOperationKind(ep fusedobject.Endpoint) string {
-	if ep.OperationKind != "" {
-		return ep.OperationKind
+func mapRequestEncoding(value fusedobject.RequestEncoding) models.RequestEncoding {
+	return models.RequestEncoding{
+		ContentType: value.ContentType, Headers: mapHeaderContracts(value.Headers), Style: value.Style,
+		Explode: value.Explode, AllowReserved: value.AllowReserved, BinaryEncoding: value.BinaryEncoding,
+		Encoding: mapRequestEncodings(value.Encoding), PrefixEncoding: mapRequestEncodingSlice(value.PrefixEncoding),
+		ItemEncoding: mapOptionalRequestEncoding(value.ItemEncoding),
 	}
-	if ep.ProviderProtocol == "" && ep.GraphQLQuery == nil {
-		return ""
+}
+
+func mapRequestEncodingSlice(values []fusedobject.RequestEncoding) []models.RequestEncoding {
+	if values == nil {
+		return nil
 	}
-	switch ep.ResourceName {
-	case models.OperationKindQuery, models.OperationKindMutation:
-		return ep.ResourceName
-	default:
-		return ""
+	mapped := make([]models.RequestEncoding, len(values))
+	for index, value := range values {
+		mapped[index] = mapRequestEncoding(value)
 	}
+	return mapped
+}
+
+func mapOptionalRequestEncoding(value *fusedobject.RequestEncoding) *models.RequestEncoding {
+	if value == nil {
+		return nil
+	}
+	mapped := mapRequestEncoding(*value)
+	return &mapped
+}
+
+// effectiveProviderProtocol is shared with execution auditing so the receipt
+// records the exact reviewed contract instead of deriving protocol semantics
+// from unrelated fields.
+func effectiveProviderProtocol(ep fusedobject.Endpoint) string {
+	return ep.ProviderProtocol
 }
 
 func mapParameters(parameters fusedobject.Parameters) models.Parameters {
@@ -133,7 +166,71 @@ func mapParameters(parameters fusedobject.Parameters) models.Parameters {
 	for i, parameter := range parameters {
 		mapped[i] = models.Parameter{
 			Name: parameter.Name, In: parameter.In, Required: parameter.Required,
-			Type: parameter.Type, Description: parameter.Description, PathEncoding: parameter.PathEncoding,
+			Description: parameter.Description, PathEncoding: parameter.PathEncoding,
+			Serialization: models.ParameterSerialization{
+				Style: parameter.Serialization.Style, Explode: parameter.Serialization.Explode,
+				AllowReserved: parameter.Serialization.AllowReserved, AllowEmptyValue: parameter.Serialization.AllowEmptyValue,
+			},
+			Schema: mapSchemaContract(parameter.Schema), Content: mapParameterContent(parameter.Content),
+			Deprecated: parameter.Deprecated, Example: parameter.Example, Examples: parameter.Examples,
+		}
+		if parameter.Schema == nil && len(parameter.Content) == 0 {
+			// Direct Type is the baseline parameter contract. Once a canonical
+			// schema/content contract exists it is authoritative, so carrying Type
+			// as a second shape would let pagination and validation disagree.
+			mapped[i].Type = parameter.Type
+		}
+	}
+	return mapped
+}
+
+func mapServers(servers fusedobject.Servers) models.Servers {
+	if len(servers) == 0 {
+		return nil
+	}
+	mapped := make(models.Servers, len(servers))
+	for i, server := range servers {
+		mapped[i] = models.Server{
+			URL: server.URL, Description: server.Description, Name: server.Name, Environment: server.Environment,
+			IsDefault: server.IsDefault, Variables: server.Variables,
+		}
+	}
+	return mapped
+}
+
+func mapParameterContent(content map[string]fusedobject.ParameterContent) map[string]models.ParameterContent {
+	if len(content) == 0 {
+		return nil
+	}
+	mapped := make(map[string]models.ParameterContent, len(content))
+	for mediaType, value := range content {
+		mapped[mediaType] = models.ParameterContent{
+			Schema: mapSchemaContract(value.Schema), ItemSchema: mapSchemaContract(value.ItemSchema),
+			Encoding: mapRequestEncodings(value.Encoding), PrefixEncoding: mapRequestEncodingSlice(value.PrefixEncoding), ItemEncoding: mapOptionalRequestEncoding(value.ItemEncoding),
+			Example: value.Example, Examples: value.Examples,
+		}
+	}
+	return mapped
+}
+
+func mapSchemaContract(contract *fusedobject.SchemaContract) *models.SchemaContract {
+	if contract == nil {
+		return nil
+	}
+	return &models.SchemaContract{
+		Dialect: contract.Dialect, Raw: append([]byte(nil), contract.Raw...), ContentHash: contract.ContentHash,
+		Projection: *mapSchema(&contract.Projection), ProjectionDiagnostics: mapProjectionDiagnostics(contract.ProjectionDiagnostics),
+	}
+}
+
+func mapProjectionDiagnostics(values []fusedobject.SchemaProjectionDiagnostic) []models.SchemaProjectionDiagnostic {
+	if values == nil {
+		return nil
+	}
+	mapped := make([]models.SchemaProjectionDiagnostic, len(values))
+	for i, value := range values {
+		mapped[i] = models.SchemaProjectionDiagnostic{
+			Code: value.Code, Keyword: value.Keyword, Pointer: value.Pointer, Message: value.Message,
 		}
 	}
 	return mapped
@@ -165,9 +262,161 @@ func mapResponses(responses fusedobject.Responses) models.Responses {
 	}
 	mapped := make(models.Responses, len(responses))
 	for status, response := range responses {
-		mapped[status] = *mapSchema(&response)
+		mapped[status] = models.ResponseContract{
+			Summary: response.Summary, Description: response.Description, Headers: mapHeaderContracts(response.Headers),
+			Representations: mapResponseRepresentations(response.Representations), Links: mapLinkContracts(response.Links),
+		}
 	}
 	return mapped
+}
+
+func mapHeaderContracts(values map[string]fusedobject.HeaderContract) map[string]models.HeaderContract {
+	if len(values) == 0 {
+		return nil
+	}
+	mapped := make(map[string]models.HeaderContract, len(values))
+	for name, value := range values {
+		mapped[name] = models.HeaderContract{
+			Description: value.Description, Required: value.Required, Deprecated: value.Deprecated,
+			Serialization: models.ParameterSerialization(value.Serialization), Schema: mapSchemaContract(value.Schema),
+			Content: mapParameterContent(value.Content), Example: value.Example, Examples: value.Examples,
+		}
+	}
+	return mapped
+}
+
+func mapResponseRepresentations(values []fusedobject.ResponseRepresentation) []models.ResponseRepresentation {
+	if values == nil {
+		return nil
+	}
+	mapped := make([]models.ResponseRepresentation, len(values))
+	for i, value := range values {
+		mapped[i] = models.ResponseRepresentation{
+			MediaType: value.MediaType, Schema: mapSchemaContract(value.Schema), ItemSchema: mapSchemaContract(value.ItemSchema),
+			SSE:            mapSSEResponseContract(value.SSE),
+			PrefixEncoding: mapRequestEncodingSlice(value.PrefixEncoding), ItemEncoding: mapOptionalRequestEncoding(value.ItemEncoding),
+			Example: value.Example, Examples: value.Examples,
+		}
+	}
+	return mapped
+}
+
+func mapSSEResponseContract(value *fusedobject.SSEResponseContract) *models.SSEResponseContract {
+	if value == nil {
+		return nil
+	}
+	return &models.SSEResponseContract{ItemMode: value.ItemMode, DoneSentinel: cloneOptionalString(value.DoneSentinel)}
+}
+
+func cloneOptionalString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func mapLinkContracts(values map[string]fusedobject.LinkContract) map[string]models.LinkContract {
+	if len(values) == 0 {
+		return nil
+	}
+	mapped := make(map[string]models.LinkContract, len(values))
+	for name, value := range values {
+		mapped[name] = models.LinkContract{
+			OperationRef: value.OperationRef, OperationID: value.OperationID, Description: value.Description,
+			Parameters: value.Parameters, RequestBody: value.RequestBody, Server: mapServer(value.Server), Extensions: mapNamespacedExtensions(value.Extensions),
+		}
+	}
+	return mapped
+}
+
+func mapInboundOperationContract(value *fusedobject.InboundOperationContract) *models.InboundOperationContract {
+	if value == nil {
+		return nil
+	}
+	return &models.InboundOperationContract{
+		Kind: value.Kind, RuntimeExpression: value.RuntimeExpression, Parent: mapCallbackParent(value.Parent), Path: value.Path,
+		Summary: value.Summary, Description: value.Description, Tags: append([]string(nil), value.Tags...),
+		ExternalDocs: mapExternalDocumentation(value.ExternalDocs), Deprecated: value.Deprecated,
+		OperationServers: mapServers(value.OperationServers), Parameters: mapParameters(value.Parameters),
+		RequestContent: mapRequestContent(value.RequestContent), Responses: mapResponses(value.Responses),
+		SecurityRequirements: value.SecurityRequirements, Extensions: mapNamespacedExtensions(value.Extensions),
+	}
+}
+
+func mapCallbackParent(value *fusedobject.CallbackParent) *models.CallbackParent {
+	if value == nil {
+		return nil
+	}
+	return &models.CallbackParent{OperationID: value.OperationID, Method: value.Method, Path: value.Path, CallbackName: value.CallbackName}
+}
+
+func mapOperationDocumentation(value *fusedobject.OperationDocumentation) *models.OperationDocumentation {
+	if value == nil {
+		return nil
+	}
+	return &models.OperationDocumentation{
+		Summary: value.Summary, Description: value.Description, Tags: append([]string(nil), value.Tags...),
+		ExternalDocs: mapExternalDocumentation(value.ExternalDocs), Extensions: mapNamespacedExtensions(value.Extensions),
+	}
+}
+
+func mapServiceDocumentation(value *fusedobject.ServiceDocumentation) *models.ServiceDocumentation {
+	if value == nil {
+		return nil
+	}
+	mapped := &models.ServiceDocumentation{
+		TermsOfService: value.TermsOfService, Contact: mapContactDocumentation(value.Contact),
+		License: mapLicenseDocumentation(value.License), ExternalDocs: mapExternalDocumentation(value.ExternalDocs),
+		Extensions: mapNamespacedExtensions(value.Extensions), Tags: make([]models.TagDocumentation, len(value.Tags)),
+	}
+	for index, tag := range value.Tags {
+		mapped.Tags[index] = models.TagDocumentation{
+			Name: tag.Name, Summary: tag.Summary, Description: tag.Description,
+			Parent: tag.Parent, Kind: tag.Kind, ExternalDocs: mapExternalDocumentation(tag.ExternalDocs),
+		}
+	}
+	return mapped
+}
+
+func mapContactDocumentation(value *fusedobject.ContactDocumentation) *models.ContactDocumentation {
+	if value == nil {
+		return nil
+	}
+	return &models.ContactDocumentation{Name: value.Name, URL: value.URL, Email: value.Email}
+}
+
+func mapLicenseDocumentation(value *fusedobject.LicenseDocumentation) *models.LicenseDocumentation {
+	if value == nil {
+		return nil
+	}
+	return &models.LicenseDocumentation{Name: value.Name, Identifier: value.Identifier, URL: value.URL}
+}
+
+func mapExternalDocumentation(value *fusedobject.ExternalDocumentation) *models.ExternalDocumentation {
+	if value == nil {
+		return nil
+	}
+	return &models.ExternalDocumentation{Description: value.Description, URL: value.URL}
+}
+
+func mapNamespacedExtensions(values fusedobject.NamespacedExtensions) models.NamespacedExtensions {
+	if values == nil {
+		return nil
+	}
+	mapped := make(models.NamespacedExtensions, len(values))
+	for name, value := range values {
+		mapped[name] = models.NamespacedExtension{Value: append([]byte(nil), value.Value...), Provenance: value.Provenance}
+	}
+	return mapped
+}
+
+func mapServer(server *fusedobject.Server) *models.Server {
+	if server == nil {
+		return nil
+	}
+	mapped := mapServers(fusedobject.Servers{*server})
+	return &mapped[0]
 }
 
 // resolvePagination applies the endpoint-wins-over-service fallback rule
@@ -205,14 +454,48 @@ func mapAuthConfigs(in fusedobject.AuthConfigs) models.AuthConfigs {
 		out = append(out, models.AuthConfig{
 			Name:                    authCredentialName(a),
 			Type:                    a.Type,
-			Flow:                    a.Flow,
 			Scheme:                  a.Scheme,
 			BasicPasswordMode:       a.BasicPasswordMode,
 			Location:                a.Location,
 			KeyName:                 a.KeyName,
-			TokenURL:                a.TokenURL,
 			TokenEndpointAuthMethod: models.TokenEndpointAuthMethod(a.TokenEndpointAuthMethod),
+			OpenIdConnectUrl:        a.OpenIdConnectUrl,
+			OAuth2MetadataURL:       a.OAuth2MetadataURL, Deprecated: a.Deprecated,
+			PKCERequired: a.PKCERequired, ScopesDelimiter: a.ScopesDelimiter,
+			ExtraAuthParams: a.ExtraAuthParams, ExtraTokenParams: a.ExtraTokenParams,
+			RefreshTokenRotates: a.RefreshTokenRotates, OAuth2Flows: mapOAuth2Flows(a.OAuth2Flows),
+			Strategy: mapAuthStrategy(a.Strategy), PolicyProvenance: a.PolicyProvenance,
 		})
 	}
 	return out
+}
+
+func mapOAuth2Flows(values map[string]fusedobject.OAuth2FlowContract) map[string]models.OAuth2FlowContract {
+	if len(values) == 0 {
+		return nil
+	}
+	mapped := make(map[string]models.OAuth2FlowContract, len(values))
+	for name, value := range values {
+		mapped[name] = models.OAuth2FlowContract{
+			AuthorizationURL: value.AuthorizationURL, DeviceAuthorizationURL: value.DeviceAuthorizationURL, TokenURL: value.TokenURL,
+			RefreshURL: value.RefreshURL, Scopes: value.Scopes,
+		}
+	}
+	return mapped
+}
+
+func mapAuthStrategy(value *fusedobject.AuthRuntimeStrategy) *models.AuthRuntimeStrategy {
+	if value == nil {
+		return nil
+	}
+	mapped := &models.AuthRuntimeStrategy{Kind: value.Kind}
+	if value.OAuth1 != nil {
+		mapped.OAuth1 = &models.OAuth1Strategy{
+			SignatureMethod: value.OAuth1.SignatureMethod, ParameterLocation: value.OAuth1.ParameterLocation,
+		}
+	}
+	if value.Challenge != nil {
+		mapped.Challenge = &models.HTTPChallengeStrategy{Scheme: value.Challenge.Scheme}
+	}
+	return mapped
 }

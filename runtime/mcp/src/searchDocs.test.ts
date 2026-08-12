@@ -10,10 +10,16 @@ const listRepos: FixtureOperation = {
   method: "GET",
   path: "/users/{username}/repos",
   parameters: [
-    { name: "username", in: "path", required: true, type: "string" },
-    { name: "per_page", in: "query", required: false, type: "integer" },
+    {
+      name: "username", in: "path", required: true, type: "string", description: "",
+      serialization: { style: "simple", explode: false, allow_reserved: false, allow_empty_value: false },
+    },
+    {
+      name: "per_page", in: "query", required: false, type: "integer", description: "",
+      serialization: { style: "form", explode: true, allow_reserved: false, allow_empty_value: false },
+    },
   ],
-  responses: { "200": { type: "array" } },
+  responses: { "200": { description: "Repositories", representations: [] } },
 };
 
 const getRepo: FixtureOperation = {
@@ -24,18 +30,36 @@ const getRepo: FixtureOperation = {
   method: "GET",
   path: "/repos/{owner}/{repo}",
   parameters: [
-    { name: "owner", in: "path", required: true, type: "string" },
-    { name: "repo", in: "path", required: true, type: "string" },
+    {
+      name: "owner", in: "path", required: true, type: "string", description: "",
+      serialization: { style: "simple", explode: false, allow_reserved: false, allow_empty_value: false },
+    },
+    {
+      name: "repo", in: "path", required: true, type: "string", description: "",
+      serialization: { style: "simple", explode: false, allow_reserved: false, allow_empty_value: false },
+    },
   ],
   request_content: {
-    media_type: "application/octet-stream",
-    serialization: "raw",
     required: true,
-    schema: { type: "string" },
     payload_parameter: "body",
-    binary_encoding: "base64",
+    representations: [{
+      media_type: "application/octet-stream",
+      serialization: "raw",
+      schema: {
+        dialect: "https://json-schema.org/draft/2020-12/schema",
+        raw: { type: "string" },
+        content_hash: "sha256:test",
+        projection: { type: "string" },
+      },
+      item_encoding: { binary_encoding: "base64" },
+    }],
   },
-  responses: { "200": { type: "object" } },
+  responses: {
+    "200": {
+      description: "Repository",
+      representations: [{ media_type: "application/json" }],
+    },
+  },
 };
 
 function testFixture(): Fixture {

@@ -77,7 +77,7 @@ func stripMCPAuthParameters(operation *FixtureOperation, authName string) {
 	operation.Parameters = filtered
 }
 
-// endpointToFixtureOperation maps a Registry-resolved endpoint onto the
+// endpointToFixtureOperation maps a locally snapshotted endpoint onto the
 // fixture shape search_docs/call() expect. fusedobject.Endpoint and
 // FixtureOperation/models.* are structurally identical on the wire (same
 // json tags) but distinct Go types in different packages -- round-tripping
@@ -115,7 +115,7 @@ func endpointToFixtureOperation(serviceID string, ep fusedobject.Endpoint) (Fixt
 // names (sandbox.go), so the fixture describing that dispatch path
 // shouldn't be stricter than the path itself. LoadFixture keeps its own
 // hard-fail-on-duplicate behavior for fixture files, where a duplicate is an
-// authoring mistake rather than a live scope's cross-vendor name collision.
+// authoring mistake rather than a live scope's cross-service name collision.
 func newFixtureFromOperations(ctx context.Context, ops []FixtureOperation) *Fixture {
 	f := &Fixture{}
 	seen := make(map[string]struct{}, len(ops))

@@ -1025,7 +1025,7 @@ func resolveSelectionAuthPolicy(selection *models.SDKSelection, contract sandbox
 	if selected == nil {
 		return nil
 	}
-	return validateAppScopes(selection, selected.Scopes)
+	return validateAppScopes(selection, declaredOAuth2Scopes(*selected))
 }
 
 func preferredAppAuth(selection models.SDKSelection, auths fusedobject.AuthConfigs, operations []sandbox.OperationSecuritySummary) (*fusedobject.AuthConfig, bool, error) {
@@ -1039,7 +1039,7 @@ func preferredAppAuth(selection models.SDKSelection, auths fusedobject.AuthConfi
 		candidate := selection
 		candidate.AuthType = sandbox.CanonicalFusedAuthType(matches[0])
 		candidate.AuthName = sandbox.AuthCredentialName(matches[0])
-		return nil, explicit, validateAppScopes(&candidate, matches[0].Scopes)
+		return nil, explicit, validateAppScopes(&candidate, declaredOAuth2Scopes(matches[0]))
 	}
 	if len(scopeMatches) == 0 {
 		return nil, explicit, fmt.Errorf("service %s has no authentication scheme compatible with every secured selected operation", selection.ServiceID)
@@ -1171,11 +1171,26 @@ func appAuthsAcceptingScopes(auths fusedobject.AuthConfigs, scopes []string) fus
 	matches := make(fusedobject.AuthConfigs, 0, len(auths))
 	for _, auth := range auths {
 		authType := sandbox.CanonicalFusedAuthType(auth)
-		if (authType == "oauth" || authType == "oidc") && scopesAllowed(scopes, auth.Scopes) {
+		if (authType == "oauth" || authType == "oidc") && scopesAllowed(scopes, declaredOAuth2Scopes(auth)) {
 			matches = append(matches, auth)
 		}
 	}
 	return matches
+}
+
+func declaredOAuth2Scopes(auth fusedobject.AuthConfig) []string {
+	values := make(map[string]struct{})
+	for _, flow := range auth.OAuth2Flows {
+		for scope := range flow.Scopes {
+			values[scope] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(values))
+	for scope := range values {
+		result = append(result, scope)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func scopesAllowed(requested, allowed []string) bool {
@@ -1820,6 +1835,9 @@ func applyNoopSDKPlan(ctx context.Context, configStore store.ConfigRepository, s
 	span := trace.SpanFromContext(ctx)
 	span.SetAttributes(attribute.String("sdk.apply_mode", "noop"), attribute.String("outcome", "success"))
 	span.AddEvent("sdk configuration apply skipped registry generation")
+	// Why: immutable no-op convergence is a meaningful mutation outcome, while
+	// the response and plan payload are intentionally excluded from durable audit.
+	accesscontrol.MarkMutationAuditUnchanged(ctx)
 	return sdkGenerationResult{SDKGenerationResult: models.SDKGenerationResult{
 		AppFamilyID: app.AppFamilyID,
 		AppID:       app.AppID,

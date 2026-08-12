@@ -3,7 +3,7 @@ import {
   FixtureOperation,
   FixtureParameter,
   FixtureRequestContent,
-  FixtureSchema,
+  FixtureResponseContract,
 } from "./fixture.js";
 import { bestScore } from "./fuzzyMatch.js";
 
@@ -29,7 +29,7 @@ export interface OperationDetail {
   description?: string;
   parameters: FixtureParameter[];
   request_content?: FixtureRequestContent | null;
-  responses: Record<string, FixtureSchema>;
+  responses: Record<string, FixtureResponseContract>;
 }
 
 export interface SearchDocsArgs {
@@ -97,6 +97,8 @@ function toSummary(op: FixtureOperation): OperationSummary {
   };
 }
 
+// Keep this a shallow projection so documentation cannot diverge from the
+// exact nested request/response contracts authorized by Engine.
 function toDetail(op: FixtureOperation): OperationDetail {
   return {
     operation_id: op.operation_id,

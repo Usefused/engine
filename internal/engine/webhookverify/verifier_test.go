@@ -95,8 +95,7 @@ func TestVerifyHMAC_GetMethodRejected(t *testing.T) {
 	}
 }
 
-func TestVerifyHMAC_NoSignatureHeaderConfigured_Passthrough(t *testing.T) {
-	// Misconfigured (no header name) → treated as skip, allow through.
+func TestVerifyHMAC_NoSignatureHeaderConfigured_Rejects(t *testing.T) {
 	req := makeReq(http.MethodPost, `{}`, nil)
 	cfg := webhookverify.Config{
 		AuthType:      "hmac_signature",
@@ -104,8 +103,18 @@ func TestVerifyHMAC_NoSignatureHeaderConfigured_Passthrough(t *testing.T) {
 		// SignatureHeader intentionally empty
 	}
 	result := webhookverify.Verify(req, []byte(`{}`), cfg)
-	if !result.OK {
-		t.Errorf("expected passthrough for misconfigured HMAC, got: %s", result.Reason)
+	if result.OK || result.Code != webhookverify.CodeConfigIncomplete {
+		t.Fatalf("expected incomplete configuration rejection, got: %#v", result)
+	}
+}
+
+func TestVerifyHMAC_NoSecretConfigured_Rejects(t *testing.T) {
+	req := makeReq(http.MethodPost, `{}`, nil)
+	result := webhookverify.Verify(req, []byte(`{}`), webhookverify.Config{
+		AuthType: "hmac_signature", SignatureHeader: "X-Signature",
+	})
+	if result.OK || result.Code != webhookverify.CodeConfigIncomplete {
+		t.Fatalf("expected incomplete configuration rejection, got: %#v", result)
 	}
 }
 
@@ -154,6 +163,14 @@ func TestVerifySignatureHeader_FallsBackToSignatureHeader(t *testing.T) {
 	result := webhookverify.Verify(req, []byte(`{}`), cfg)
 	if !result.OK {
 		t.Errorf("expected OK=true when fallback SignatureHeader is present, got: %s", result.Reason)
+	}
+}
+
+func TestVerifySignatureHeader_NoHeadersConfigured_Rejects(t *testing.T) {
+	req := makeReq(http.MethodPost, `{}`, nil)
+	result := webhookverify.Verify(req, []byte(`{}`), webhookverify.Config{AuthType: "signature_header"})
+	if result.OK || result.Code != webhookverify.CodeConfigIncomplete {
+		t.Fatalf("expected incomplete configuration rejection, got: %#v", result)
 	}
 }
 
@@ -235,9 +252,17 @@ func TestVerifyStaticToken_QueryValid(t *testing.T) {
 	}
 }
 
+func TestVerifyStaticToken_IncompleteConfigurationRejects(t *testing.T) {
+	req := makeReq(http.MethodPost, `{}`, nil)
+	result := webhookverify.Verify(req, []byte(`{}`), webhookverify.Config{AuthType: "static_token"})
+	if result.OK || result.Code != webhookverify.CodeConfigIncomplete {
+		t.Fatalf("expected incomplete configuration rejection, got: %#v", result)
+	}
+}
+
 // ─── Unknown/unset auth type ──────────────────────────────────────────────────
 
-func TestVerify_UnknownAuthType_Passthrough(t *testing.T) {
+func TestVerify_UnsetAuthType_Passthrough(t *testing.T) {
 	req := makeReq(http.MethodPost, `{}`, nil)
 	cfg := webhookverify.Config{
 		AuthType: "", // unset → allow through
@@ -245,5 +270,19 @@ func TestVerify_UnknownAuthType_Passthrough(t *testing.T) {
 	result := webhookverify.Verify(req, []byte(`{}`), cfg)
 	if !result.OK {
 		t.Errorf("expected passthrough for unknown/unset auth type, got: %s", result.Reason)
+	}
+}
+
+func TestVerify_ExplicitNoneAuthType_Passthrough(t *testing.T) {
+	result := webhookverify.Verify(makeReq(http.MethodPost, `{}`, nil), []byte(`{}`), webhookverify.Config{AuthType: "none"})
+	if !result.OK {
+		t.Fatalf("expected passthrough for explicit none auth, got: %#v", result)
+	}
+}
+
+func TestVerify_UnknownDeclaredAuthType_Rejects(t *testing.T) {
+	result := webhookverify.Verify(makeReq(http.MethodPost, `{}`, nil), []byte(`{}`), webhookverify.Config{AuthType: "hmca_signature"})
+	if result.OK || result.Code != webhookverify.CodeAuthUnsupported {
+		t.Fatalf("expected unsupported auth rejection, got: %#v", result)
 	}
 }

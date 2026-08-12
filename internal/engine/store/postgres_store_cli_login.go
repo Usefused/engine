@@ -129,9 +129,9 @@ func auditCLILogout(ctx context.Context, tx pgx.Tx, actor MutationActor, revisio
 			actor_subject_id, actor_credential_id, action, resource_type,
 			resource_id, request_id, trace_id, outcome, metadata
 		)
-		SELECT $1, $2, 'user.cli_credential.revoke', 'workspace', workspace.id,
+		SELECT $1::uuid, $2::uuid, 'user.cli_credential.revoke', 'workspace', workspace.id,
 			$3, $4, 'succeeded', jsonb_build_object(
-				'credential_id', $2::text,
+				'credential_id', ($2::uuid)::text,
 				'credential_source', 'managed_cli_login',
 				'authorization_revision', $5::bigint,
 				'client_type', 'cli'

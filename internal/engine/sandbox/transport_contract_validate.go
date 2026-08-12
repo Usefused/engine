@@ -6,14 +6,29 @@ import (
 	"strings"
 
 	"github.com/Usefused/engine/internal/shared/authrouting"
+	"github.com/Usefused/engine/internal/shared/catalogcontract"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
+	"github.com/Usefused/engine/internal/shared/serverrouting"
+	"github.com/Usefused/engine/internal/shared/signaturepolicy"
 )
 
 var serverPlaceholderPattern = regexp.MustCompile(`\{([A-Za-z_][A-Za-z0-9_.-]*)\}`)
 
-func validateTransportContract(metadata *fusedobject.ServiceMetadata, endpoints []fusedobject.Endpoint) error {
+// OpenAPI permits an unbounded OR list. Keep a generous runtime bound so the
+// Engine accepts canonical generated contracts without accepting unbounded data.
+const maxRuntimeSecurityAlternatives = 256
+
+// validateTransportContract is the single snapshot-admission boundary so every
+// operation is rejected before persistence when any executable surface drifts.
+func validateTransportContract(metadata *fusedobject.ServiceMetadata, endpoints []fusedobject.Endpoint, webhooks []fusedobject.Webhook) error {
 	if metadata == nil {
 		return errors.New("runtime transport contract is missing")
+	}
+	if err := catalogcontract.Validate(metadata.Catalog); err != nil {
+		return err
+	}
+	if err := validateIncomingWebhookContract(metadata); err != nil {
+		return err
 	}
 	definitions, err := validateAuthDefinitions(metadata.AuthConfigs)
 	if err != nil {
@@ -22,8 +37,28 @@ func validateTransportContract(metadata *fusedobject.ServiceMetadata, endpoints 
 	if err := validateRuntimeServers(metadata.Servers); err != nil {
 		return err
 	}
+	if err := validateEndpointContracts(endpoints, definitions); err != nil {
+		return err
+	}
+	return validatePassiveContracts(metadata, endpoints, webhooks, definitions)
+}
+
+func validateIncomingWebhookContract(metadata *fusedobject.ServiceMetadata) error {
+	if metadata.IncomingWebhookConfig == nil {
+		return nil
+	}
+	return signaturepolicy.Validate(metadata.IncomingWebhookConfig.SignaturePolicy)
+}
+
+func validateEndpointContracts(endpoints []fusedobject.Endpoint, definitions map[string]string) error {
 	for _, endpoint := range endpoints {
+		if err := validateEndpointTransport(endpoint); err != nil {
+			return err
+		}
 		if err := validateSecurityRequirements(endpoint.SecurityRequirements, definitions); err != nil {
+			return err
+		}
+		if err := validateSecurityServerSelections(endpoint.SecurityRequirements, endpoint.OperationServers); err != nil {
 			return err
 		}
 	}
@@ -41,6 +76,9 @@ func validateAuthDefinitions(auths fusedobject.AuthConfigs) (map[string]string, 
 		}
 		seen[auth.Name] = authrouting.CanonicalType(auth.Type, auth.Scheme)
 		if err := validateBasicMode(auth); err != nil {
+			return nil, err
+		}
+		if err := validateAuthRuntimeContract(auth); err != nil {
 			return nil, err
 		}
 	}
@@ -64,7 +102,7 @@ func validateBasicMode(auth fusedobject.AuthConfig) error {
 }
 
 func validateSecurityRequirements(requirements authrouting.Requirements, definitions map[string]string) error {
-	if requirements == nil || len(requirements) == 0 || len(requirements) > 32 {
+	if requirements == nil || len(requirements) == 0 || len(requirements) > maxRuntimeSecurityAlternatives {
 		return errors.New("runtime security requirements are invalid")
 	}
 	for _, alternative := range requirements {
@@ -117,24 +155,62 @@ func validateRequirementScopes(authType string, scopes []string) error {
 }
 
 func validateRuntimeServers(servers fusedobject.Servers) error {
+	if err := validateRuntimeServerNames(servers); err != nil {
+		return err
+	}
 	for _, server := range servers {
-		placeholders := serverPlaceholders(server.URL)
-		variables := make(map[string]struct{}, len(server.Variables))
-		for _, variable := range server.Variables {
-			if variable.Name == "" || len(variable.Name) > 128 {
-				return errors.New("runtime server variable name is invalid")
-			}
-			if _, exists := variables[variable.Name]; exists {
-				return errors.New("runtime server variable is duplicated")
-			}
-			variables[variable.Name] = struct{}{}
-			if variable.Default != nil && len(variable.Enum) > 0 && !stringInList(variable.Enum, *variable.Default) {
-				return errors.New("runtime server variable default is outside enum")
-			}
+		if err := validateRuntimeServer(server); err != nil {
+			return err
 		}
-		if !sameStringSet(placeholders, variables) {
-			return errors.New("runtime server variables do not match template")
+	}
+	return nil
+}
+
+func validateRuntimeServer(server fusedobject.Server) error {
+	placeholders := serverPlaceholders(server.URL)
+	variables := make(map[string]struct{}, len(server.Variables))
+	for _, variable := range server.Variables {
+		if err := addRuntimeServerVariable(variables, variable); err != nil {
+			return err
 		}
+	}
+	if !sameStringSet(placeholders, variables) {
+		return errors.New("runtime server variables do not match template")
+	}
+	return nil
+}
+
+func addRuntimeServerVariable(variables map[string]struct{}, variable serverrouting.Variable) error {
+	if variable.Name == "" || len(variable.Name) > 128 {
+		return errors.New("runtime server variable name is invalid")
+	}
+	if _, exists := variables[variable.Name]; exists {
+		return errors.New("runtime server variable is duplicated")
+	}
+	variables[variable.Name] = struct{}{}
+	if variable.Default != nil && len(variable.Enum) > 0 && !stringInList(variable.Enum, *variable.Default) {
+		return errors.New("runtime server variable default is outside enum")
+	}
+	return nil
+}
+
+// validateRuntimeServerNames compares canonical selectors case-insensitively;
+// two SDK choices must never resolve to different servers by casing alone.
+func validateRuntimeServerNames(servers fusedobject.Servers) error {
+	seen := make(map[string]struct{}, len(servers))
+	for _, server := range servers {
+		name := runtimeServerName(server.Name, server.Environment)
+		if len(name) > 128 || strings.ContainsAny(name, "\r\n") {
+			return errors.New("runtime server name is invalid")
+		}
+		key := strings.ToLower(name)
+		if key == "" {
+			continue
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return errors.New("runtime server name is duplicated")
+		}
+		seen[key] = struct{}{}
 	}
 	return nil
 }

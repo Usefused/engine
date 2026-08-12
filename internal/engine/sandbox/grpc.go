@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -81,29 +82,6 @@ func (s *EngineGRPCServer) Disconnect(ctx context.Context, req *enginev1.Disconn
 	return &enginev1.DisconnectResponse{}, nil
 }
 
-// retryOverrideFromRequest converts the wire-level RetryOverride (proto
-// int32 pointers) to the dispatcher's engine.RetryOverride (int pointers). A
-// nil or empty proto message yields a nil override, which
-// engine.ContextWithRetryOverride treats as a no-op.
-func retryOverrideFromRequest(o *enginev1.RetryOverride) *engine.RetryOverride {
-	if o == nil {
-		return nil
-	}
-	out := &engine.RetryOverride{}
-	if o.MaxRetries != nil {
-		v := int(*o.MaxRetries)
-		out.MaxRetries = &v
-	}
-	if o.BackoffMs != nil {
-		v := int(*o.BackoffMs)
-		out.BackoffMs = &v
-	}
-	if out.MaxRetries == nil && out.BackoffMs == nil {
-		return nil
-	}
-	return out
-}
-
 // grpcResponseStream adapts the gRPC server stream to the dispatcher's
 // engine.ResponseStream interface, so vendor response chunks (including SSE and
 // pagination pages) relay straight back on the open stream.
@@ -119,13 +97,19 @@ func (g *grpcResponseStream) SendStatus(status int) error {
 	return g.stream.Send(&enginev1.ExecuteResponse{StatusCode: int32(status)})
 }
 
+func (g *grpcResponseStream) SendResponseContract(status int, mediaFamily string) error {
+	return g.stream.SendHeader(metadata.Pairs(
+		"fused-response-status", strconv.Itoa(status),
+		"fused-response-media-family", mediaFamily,
+	))
+}
+
 func (s *EngineGRPCServer) Execute(req *enginev1.ExecuteRequest, stream enginev1.EngineService_ExecuteServer) error {
 	requestStarted := time.Now()
 	timings := engine.NewExecutionTimings()
 	ctx := engine.ContextWithExecutionTimings(stream.Context(), timings)
 	ctx = contextWithExecutionIdentity(ctx, req.IdempotencyKey, req.RequestBodyHash)
 	ctx = contextWithExecutionTransport(ctx, models.EngineExecutionTransportSDK)
-	ctx = engine.ContextWithRetryOverride(ctx, retryOverrideFromRequest(req.RetryOverride))
 	ctx = engine.ContextWithIdempotencyKeyPresent(ctx, strings.TrimSpace(req.IdempotencyKey) != "")
 
 	decodeStarted := time.Now()

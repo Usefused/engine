@@ -17,18 +17,29 @@ func validateAcquireRequest(request ratelimitpolicy.AcquireRequest) ([]ratelimit
 	}
 	policies := append([]ratelimitpolicy.ResolvedPolicy(nil), request.Policies...)
 	sortPolicies(policies)
+	identities, err := validateResolvedPolicies(policies, request)
+	if err != nil {
+		return nil, "", err
+	}
+	return policies, stateKey(request.AccountID, request.ServiceVersionID, identities), nil
+}
+
+func validateResolvedPolicies(policies []ratelimitpolicy.ResolvedPolicy, request ratelimitpolicy.AcquireRequest) ([]policyIdentity, error) {
 	identities := make([]policyIdentity, len(policies))
 	for index, policy := range policies {
+		if policy.Algorithm == "concurrency" && policy.Cost > 0 && (request.PermitID == uuid.Nil || request.PermitExpiresAt.IsZero()) {
+			return nil, errors.New("provider concurrency permit identity is incomplete")
+		}
 		identity, err := validatedPolicyIdentity(policy)
 		if err != nil {
-			return nil, "", err
+			return nil, err
 		}
 		if index > 0 && identity == identities[index-1] {
-			return nil, "", errors.New("provider rate-limit policy identity is duplicated")
+			return nil, errors.New("provider rate-limit policy identity is duplicated")
 		}
 		identities[index] = identity
 	}
-	return policies, stateKey(request.AccountID, request.ServiceVersionID, identities), nil
+	return identities, nil
 }
 
 func validateSyncRequest(request ratelimitpolicy.SyncRequest) (string, error) {
@@ -69,7 +80,7 @@ func (p policyIdentity) less(other policyIdentity) bool {
 
 func validatedPolicyIdentity(policy ratelimitpolicy.ResolvedPolicy) (policyIdentity, error) {
 	scopeID, err := uuid.Parse(policy.ScopeID)
-	if err != nil || policy.Name == "" || policy.ScopeKind == "" || policy.ConfigHash == "" || policy.Cost < 1 {
+	if err != nil || policy.Name == "" || policy.ScopeKind == "" || policy.ConfigHash == "" || policy.Cost < 0 {
 		return policyIdentity{}, errors.New("provider rate-limit policy is incomplete")
 	}
 	return policyIdentity{policy.Name, policy.ScopeKind, scopeID}, nil

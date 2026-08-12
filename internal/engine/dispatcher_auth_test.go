@@ -12,6 +12,7 @@ import (
 
 	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/models"
+	"github.com/Usefused/engine/internal/shared/serverrouting"
 )
 
 func explicitAnonymousEndpoint(endpoint *models.IntegrationObject) *models.IntegrationObject {
@@ -45,7 +46,7 @@ func TestSelectRequestAuthChargebeeEmptyBasicPassword(t *testing.T) {
 func TestSelectRequestAuthWiseOAuthAndMTLS(t *testing.T) {
 	certPEM, keyPEM := testMTLSPair(t, time.Now().Add(time.Hour))
 	auths := models.AuthConfigs{
-		{Name: "UserToken", Type: "oauth2", Flow: "authorizationCode"},
+		{Name: "UserToken", Type: "oauth2", OAuth2Flows: models.OAuth2Flows{"authorizationCode": {AuthorizationURL: "https://provider.example/authorize", TokenURL: "https://provider.example/token", Scopes: map[string]string{}}}},
 		{Name: "WiseMTLS", Type: "mutualTLS"},
 	}
 	requirements := authrouting.Requirements{{Schemes: []authrouting.Requirement{
@@ -173,3 +174,81 @@ func TestBasicPasswordModes(t *testing.T) {
 		})
 	}
 }
+
+func TestSelectRequestAuthRequiresPinnedOAuth2Flow(t *testing.T) {
+	auths := models.AuthConfigs{{Name: "oauth", Type: "oauth2", OAuth2Flows: map[string]models.OAuth2FlowContract{
+		"authorizationCode": {AuthorizationURL: "https://provider.example/authorize", TokenURL: "https://provider.example/token", Scopes: map[string]string{"read": "Read"}},
+		"clientCredentials": {TokenURL: "https://provider.example/token", Scopes: map[string]string{}},
+	}}}
+	requirements := authrouting.Requirements{{Schemes: []authrouting.Requirement{{Scheme: "oauth"}}}}
+	credentials := map[string]any{"oauth": "token"}
+	if _, err := selectRequestAuth(auths, requirements, credentials); err == nil || err.(*AuthRoutingError).Code != "oauth2_flow_required" {
+		t.Fatalf("missing profile flow error = %v", err)
+	}
+	credentials["fused_oauth2_flow"] = "authorizationCode"
+	selected, err := selectRequestAuth(auths, requirements, credentials)
+	if err != nil || selected[0].SelectedOAuth2Flow == nil || selected[0].SelectedOAuth2Flow.Scopes["read"] != "Read" {
+		t.Fatalf("selected=%#v err=%v", selected, err)
+	}
+}
+
+func TestOAuth1SigningIsProviderNeutral(t *testing.T) {
+	auth := models.AuthConfig{Name: "signed", Type: "oauth1", Strategy: &models.AuthRuntimeStrategy{
+		Kind: "oauth1_signature", OAuth1: &models.OAuth1Strategy{SignatureMethod: "hmac_sha256", ParameterLocation: "authorization_header"},
+	}}
+	req, _ := http.NewRequest(http.MethodPost, "https://vendor.example/items?include=all", strings.NewReader("name=value"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	err := applySelectedAuthChecked(req, models.AuthConfigs{auth}, map[string]any{
+		"signed_consumer_key": "consumer", "signed_consumer_secret": "secret", "signed_token": "token", "signed_token_secret": "token-secret",
+	})
+	header := req.Header.Get("Authorization")
+	if err != nil || !strings.HasPrefix(header, "OAuth ") {
+		t.Fatalf("OAuth1 header=%q err=%v", header, err)
+	}
+	for _, field := range []string{"oauth_consumer_key", "oauth_nonce", "oauth_signature_method", "oauth_signature", "oauth_timestamp", "oauth_token"} {
+		if !strings.Contains(header, field+"=") {
+			t.Fatalf("OAuth1 header missing %s: %q", field, header)
+		}
+	}
+}
+
+func TestDigestChallengeRetriesWithoutProviderBranch(t *testing.T) {
+	auth := models.AuthConfig{Name: "login", Type: "http", Scheme: "digest", Strategy: &models.AuthRuntimeStrategy{
+		Kind: "http_challenge", Challenge: &models.HTTPChallengeStrategy{Scheme: "digest"},
+	}}
+	requests := 0
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		if requests == 1 {
+			return &http.Response{StatusCode: http.StatusUnauthorized, Header: http.Header{"Www-Authenticate": {`Digest realm="area", nonce="abc", algorithm=SHA-256, qop="auth"`}}, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+		}
+		if !strings.HasPrefix(req.Header.Get("Authorization"), "Digest ") || !strings.Contains(req.Header.Get("Authorization"), "response=") {
+			t.Fatalf("digest Authorization = %q", req.Header.Get("Authorization"))
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("ok")), Request: req}, nil
+	})}
+	req, _ := http.NewRequest(http.MethodGet, "https://vendor.example/private", nil)
+	initial, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, err := retryHTTPChallenge(context.Background(), client, req, initial, models.AuthConfigs{auth}, map[string]any{"login_username": "user", "login_password": "pass"})
+	if err != nil || final.StatusCode != http.StatusOK || requests != 2 {
+		t.Fatalf("status=%v requests=%d err=%v", final.StatusCode, requests, err)
+	}
+}
+
+func TestSecurityAlternativeSelectsDeclaredMTLSServer(t *testing.T) {
+	service := &models.Service{BaseURL: "https://api.example/v1", ServiceBaseURL: "https://api.example/v1", Servers: models.Servers{{URL: "https://mtls.example/{region}", Variables: []serverrouting.Variable{{Name: "region", Default: stringPointer("eu")}}}}}
+	operation := &models.IntegrationObject{SecurityRequirements: authrouting.Requirements{{
+		Schemes: []authrouting.Requirement{{Scheme: "cert"}}, ServerSelection: &authrouting.ServerSelection{Scheme: "cert", ServerURL: "https://mtls.example/{region}"},
+	}}}
+	if err := applySelectedSecurityServer(service, operation, models.AuthConfigs{{Name: "cert", Type: "mutualTLS"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if service.BaseURL != "https://mtls.example/eu" || service.ServerSource != "operation" {
+		t.Fatalf("service server=%q source=%q", service.BaseURL, service.ServerSource)
+	}
+}
+
+func stringPointer(value string) *string { return &value }

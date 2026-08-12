@@ -7,10 +7,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 )
@@ -22,6 +24,24 @@ func containsAll(value string, fragments ...string) bool {
 		}
 	}
 	return true
+}
+
+func TestRuntimeRateLimitProjectionExcludesLegacyV2Fields(t *testing.T) {
+	// Why: Registry normalizes v2 inputs before persistence and deliberately
+	// omits those compatibility-only fields from its GraphQL execution contract.
+	for _, field := range []string{"scope", "default_cost", "operation_costs", "response_headers", "retry_after"} {
+		if strings.Contains(runtimeRateLimitFields, field) {
+			t.Fatalf("runtime rate-limit projection still requests legacy field %q", field)
+		}
+	}
+}
+
+func TestRuntimeRetryProjectionExcludesLegacyV2Fields(t *testing.T) {
+	// Why: retry strategy/max-retries/backoff are normalized into v3 rules and
+	// are intentionally absent from Registry's runtime GraphQL projection.
+	if strings.Contains(runtimeRetryFields, "\n\tstrategy max_retries backoff_ms") {
+		t.Fatal("runtime retry projection still requests legacy v2 fields")
+	}
 }
 
 func TestFetchServiceVersionAuthConfigsUsesGraphQLBatch(t *testing.T) {
@@ -118,22 +138,29 @@ func TestFetchServiceVersionExecutionAuthContractsDecodesOperationSecurity(t *te
 func TestPublishExecutionPoliciesUseRegistryRESTOrigin(t *testing.T) {
 	serviceID := uuid.New()
 	requests := make([]string, 0, 2)
+	bodies := make([]map[string]any, 0, 2)
 	client := &HTTPRegistryClient{
 		endpoint:   "https://registry.example/graphql/",
 		licenseKey: "engine-license-key",
 		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 			requests = append(requests, request.URL.Path)
-			if request.Method != http.MethodPut || request.Header.Get("X-API-Key") != "engine-license-key" {
+			if request.Method != http.MethodPut || request.Header.Get("X-API-Key") != "engine-license-key" || request.Header.Get("Content-Type") != "application/json" {
 				t.Fatalf("unexpected policy request: %s %s", request.Method, request.Header.Get("X-API-Key"))
 			}
+			var body map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Fatalf("decode policy body: %v", err)
+			}
+			bodies = append(bodies, body)
 			return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Header: make(http.Header)}, nil
 		})},
 	}
 
-	if err := client.PublishServiceExecutionPolicy(context.Background(), serviceID, map[string]any{"allow": true}, "user-api-key"); err != nil {
+	policy := map[string]any{"timeout_ms": 1500, "retry": map[string]any{"version": 3, "rules": []any{}}}
+	if err := client.PublishServiceExecutionPolicy(context.Background(), serviceID, policy, "user-api-key"); err != nil {
 		t.Fatalf("PublishServiceExecutionPolicy() error = %v", err)
 	}
-	if err := client.PublishServiceVersionExecutionPolicy(context.Background(), serviceID, "2026-08-03", map[string]any{"allow": true}, "user-api-key"); err != nil {
+	if err := client.PublishServiceVersionExecutionPolicy(context.Background(), serviceID, "2026-08-03", policy, "user-api-key"); err != nil {
 		t.Fatalf("PublishServiceVersionExecutionPolicy() error = %v", err)
 	}
 	want := []string{
@@ -142,6 +169,9 @@ func TestPublishExecutionPoliciesUseRegistryRESTOrigin(t *testing.T) {
 	}
 	if len(requests) != len(want) || requests[0] != want[0] || requests[1] != want[1] {
 		t.Fatalf("policy paths = %#v, want %#v", requests, want)
+	}
+	if len(bodies) != 2 || !reflect.DeepEqual(bodies[0], bodies[1]) || len(bodies[0]) != 2 || bodies[0]["timeout_ms"] != float64(1500) {
+		t.Fatalf("policy bodies = %#v", bodies)
 	}
 }
 
@@ -265,6 +295,8 @@ func TestFetchRuntimeContractUsesBundledGraphQLProjection(t *testing.T) {
 				t.Fatalf("decode request: %v", err)
 			}
 			body := `{"data":{"serviceRuntimeContracts":[{
+				"contract_version":2,
+				"required_capabilities":[],
 				"service_id":"` + serviceID.String() + `",
 				"service_version_id":"` + serviceVersionID.String() + `",
 				"version":"2026-07-23",
@@ -277,14 +309,14 @@ func TestFetchRuntimeContractUsesBundledGraphQLProjection(t *testing.T) {
 					"servers":[{"url":"https://api.example.com","environment":"prod","is_default":true}],
 					"default_headers":{"X-Provider":"example"},
 					"connect_config":null,
-					"auth_configs":[{"name":"oauth","type":"oauth2","token_url":"https://auth.example/token","token_endpoint_auth_method":"client_secret_post","pkce_required":true,"scopes_delimiter":"comma","extra_auth_params":{"prompt":"consent"},"extra_token_params":{"audience":"payments"},"refresh_token_rotates":true}],
-					"rate_limit":{"version":2,"policies":[{"name":"requests","unit":"requests","scope":"service_version","default_cost":1,"operation_costs":{},"algorithm":"fixed_window","fixed_window":{"limit":10,"duration_ms":1000}}]},
-					"retry_config":{"strategy":"fixed","max_retries":2,"backoff_ms":100},
+					"auth_configs":[{"name":"oauth","type":"oauth2","oauth2_flows":{"authorizationCode":{"authorization_url":"https://auth.example/authorize","token_url":"https://auth.example/token","scopes":{}}},"token_endpoint_auth_method":"client_secret_post","pkce_required":true,"scopes_delimiter":"comma","extra_auth_params":{"prompt":"consent"},"extra_token_params":{"audience":"payments"},"refresh_token_rotates":true}],
+					"rate_limit":{"version":3,"policies":[{"name":"requests","mode":"enforce","unit":"requests","identity":{"inputs":[{"kind":"service_version"}]},"cost":{"default":1,"rules":[]},"algorithm":"fixed_window","fixed_window":{"limit":10,"duration_ms":1000}}]},
+					"retry_config":{"version":3,"rules":[{"predicates":{"methods":["POST"],"operation_kinds":["query"],"statuses":[{"min":500,"max":599}],"errors":[],"body_replayability":"replayable","idempotency_key":{"requirement":"required","header":"Idempotency-Key"},"required_provider_headers":[]},"action":{"max_attempts":3,"max_elapsed_ms":1000,"backoff":{"strategy":"fixed","base_delay_ms":100,"max_delay_ms":100,"jitter_ms":0},"retry_after_headers":[]}}]},
 					"timeout_ms":45000,
 					"event_extraction_path":"event.type",
 					"incoming_webhook_config":{"auth_type":"signature","signature_header":"X-Signature"}
 				},
-				"operations":[{"id":"` + endpointID.String() + `","name":"listInvoices","description":"List invoices","resource_name":"query","version":"2026-07-23","method":"POST","path":"/graphql","normalized_path":"/graphql","deprecated":false,"is_sse":false,"security_requirements":[{"schemes":[{"scheme":"oauth","scopes":[]}]}],"parameters":[{"name":"resource","in":"path","required":true,"type":"string","description":"Resource","path_encoding":"preserve_slashes"}],"request_content":{"media_type":"application/vnd.api+json","serialization":"json","schema":{"type":"object"}},"responses":{"200":{"type":"object"}},"graphql_query":"query ListInvoices($limit: Int) { invoices(limit: $limit) { id } }","provider_protocol":"graphql","operation_kind":"query","pagination":{"version":2,"type":"cursor","cursor":{"request":{"location":"query","name":"cursor"},"next":{"location":"body","path":"$.next","value_type":"string"}},"items_path":"$.items","limits":{"max_pages":100,"max_items":10000,"max_bytes":16777216,"max_duration_ms":120000}}}],
+				"operations":[{"id":"` + endpointID.String() + `","name":"listInvoices","description":"List invoices","resource_name":"query","version":"2026-07-23","method":"POST","path":"/graphql/{resource}","normalized_path":"/graphql/{resource}","deprecated":false,"security_requirements":[{"schemes":[{"scheme":"oauth","scopes":[]}]}],"parameters":[{"name":"resource","in":"path","required":true,"type":"string","description":"Resource","path_encoding":"preserve_slashes"},{"name":"cursor","in":"query","required":false,"type":"string"}],"request_content":{"representations":[{"media_type":"application/vnd.api+json","serialization":"json"}]},"responses":{"200":{"description":"ok","representations":[]}},"graphql_query":"query ListInvoices($limit: Int) { invoices(limit: $limit) { id } }","provider_protocol":"graphql","operation_kind":"query","pagination":{"version":3,"request":[{"state":"cursor","target":{"location":"query","name":"cursor"},"value_type":"string","initial":{"type":"string","string":""},"apply":"all"}],"response":{"items":{"path":"$.items"},"values":[{"name":"next","source":{"location":"body","path":"$.next","value_type":"string"}}]},"continuation":[{"kind":"token","state":"cursor","response_value":"next"}],"termination":{"stop_on_empty_items":true,"stop_on_missing_values":["next"],"repeated_value":"error"},"limits":{"max_pages":100,"max_items":10000,"max_bytes":16777216,"max_duration_ms":120000}}}],
 				"webhooks":[{"id":"` + webhookID.String() + `","service_id":"` + serviceID.String() + `","name":"invoice.created","method":"POST","description":"Invoice created","request_body":{"type":"object"}}]
 			}]}}`
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
@@ -317,21 +349,73 @@ func TestFetchRuntimeContractUsesBundledGraphQLProjection(t *testing.T) {
 	if snapshot.Endpoints[0].GraphQLQuery == nil || snapshot.Endpoints[0].ProviderProtocol != "graphql" || snapshot.Endpoints[0].OperationKind != "query" {
 		t.Fatalf("GraphQL execution metadata was not decoded: %#v", snapshot.Endpoints[0])
 	}
-	if snapshot.Endpoints[0].RequestContent == nil || snapshot.Endpoints[0].RequestContent.MediaType != "application/vnd.api+json" || snapshot.Endpoints[0].RequestContent.Serialization != "json" {
+	if snapshot.Endpoints[0].RequestContent == nil || len(snapshot.Endpoints[0].RequestContent.Representations) != 1 || snapshot.Endpoints[0].RequestContent.Representations[0].MediaType != "application/vnd.api+json" || snapshot.Endpoints[0].RequestContent.Representations[0].Serialization != "json" {
 		t.Fatalf("request content was not decoded: %#v", snapshot.Endpoints[0])
 	}
-	if len(snapshot.Endpoints[0].Parameters) != 1 || snapshot.Endpoints[0].Parameters[0].PathEncoding != "preserve_slashes" {
+	if len(snapshot.Endpoints[0].Parameters) != 2 || snapshot.Endpoints[0].Parameters[0].PathEncoding != "preserve_slashes" {
 		t.Fatalf("path encoding was not decoded: %#v", snapshot.Endpoints[0].Parameters)
 	}
 	if len(snapshot.Webhooks) != 1 || snapshot.Webhooks[0].ID != webhookID {
 		t.Fatalf("unexpected webhooks: %#v", snapshot.Webhooks)
 	}
-	if !containsAll(requestBody.Query, "serviceRuntimeContracts", "operations", "webhooks", "timeout_ms", "request_content", "path_encoding", "graphql_query", "provider_protocol", "operation_kind", "token_endpoint_auth_method", "pkce_required", "scopes_delimiter", "extra_auth_params", "extra_token_params", "refresh_token_rotates") {
+	if !containsAll(requestBody.Query, "serviceRuntimeContracts", "contract_version", "required_capabilities", "operations", "webhooks", "timeout_ms", "request_content", "path_encoding", "graphql_query", "provider_protocol", "operation_kind", "token_endpoint_auth_method", "pkce_required", "scopes_delimiter", "extra_auth_params", "extra_token_params", "refresh_token_rotates") {
 		t.Fatalf("runtime contract query did not bundle service operations and webhooks: %s", requestBody.Query)
 	}
 	variablesJSON, _ := json.Marshal(requestBody.Variables)
 	if !bytes.Contains(variablesJSON, []byte(serviceID.String())) || !bytes.Contains(variablesJSON, []byte(serviceVersionID.String())) {
 		t.Fatalf("unexpected runtime contract variables: %#v", requestBody.Variables)
+	}
+	if requestBody.Variables["engine_contract_version"] != float64(2) && requestBody.Variables["engine_contract_version"] != 2 {
+		t.Fatalf("engine contract version = %#v", requestBody.Variables["engine_contract_version"])
+	}
+	capabilities, ok := requestBody.Variables["engine_capabilities"].([]interface{})
+	assertEngineCapabilities(t, capabilities, ok, variablesJSON)
+}
+
+func TestFetchRuntimeContractPreservesTagHierarchy(t *testing.T) {
+	serviceID, versionID := uuid.New(), uuid.New()
+	client := &HTTPRegistryClient{
+		endpoint: "https://registry.example/graphql", licenseKey: "engine-license-key",
+		httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			body := `{"data":{"serviceRuntimeContracts":[{"contract_version":2,"required_capabilities":[],"service_id":"` + serviceID.String() + `","service_version_id":"` + versionID.String() + `","version":"2026-07-23","service":` + runtimeContractServiceJSON(serviceID, versionID, "Tagged") + `,"operations":[],"webhooks":[]}]}}`
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		})},
+	}
+	snapshot, err := client.FetchRuntimeContract(context.Background(), serviceID, versionID, "", "user-api-key")
+	if err != nil {
+		t.Fatalf("FetchRuntimeContract: %v", err)
+	}
+	assertRuntimeTagHierarchy(t, fusedToService(&snapshot.ServiceMetadata))
+}
+
+func assertRuntimeTagHierarchy(t *testing.T, service *models.Service) {
+	t.Helper()
+	if service.Documentation == nil {
+		t.Fatalf("runtime service tag documentation = %#v", service.Documentation)
+	}
+	if len(service.Documentation.Tags) != 1 {
+		t.Fatalf("runtime service tags = %#v", service.Documentation.Tags)
+	}
+	tag := service.Documentation.Tags[0]
+	want := models.TagDocumentation{
+		Name: "orders", Summary: "Order operations", Description: "Order APIs", Parent: "commerce", Kind: "badge",
+		ExternalDocs: &models.ExternalDocumentation{Description: "Tag guide", URL: "https://docs.example.com/tags/orders"},
+	}
+	if !reflect.DeepEqual(tag, want) {
+		t.Fatalf("runtime tag hierarchy = %#v, want %#v", tag, want)
+	}
+}
+
+func assertEngineCapabilities(t *testing.T, capabilities []interface{}, decoded bool, variablesJSON []byte) {
+	t.Helper()
+	supported := fusedobject.EngineExecutionContractSupport().RequiredCapabilities
+	if !decoded || len(capabilities) != len(supported) {
+		t.Fatalf("engine capabilities = %#v, want current supported set", capabilities)
+	}
+	for _, capability := range supported {
+		if !bytes.Contains(variablesJSON, []byte(capability)) {
+			t.Fatalf("engine capabilities = %#v, missing %q", capabilities, capability)
+		}
 	}
 }
 
@@ -354,8 +438,8 @@ func TestFetchRuntimeContractsUsesSingleSetBasedGraphQLRequest(t *testing.T) {
 				t.Fatalf("decode request: %v", err)
 			}
 			body := `{"data":{"serviceRuntimeContracts":[
-				{"service_id":"` + firstServiceID.String() + `","service_version_id":"` + firstVersionID.String() + `","version":"2026-07-22","service":` + runtimeContractServiceJSON(firstServiceID, firstVersionID, "First") + `,"operations":[{"id":"` + uuid.NewString() + `","name":"firstOp","method":"GET","path":"/first","security_requirements":[{"schemes":[]}]}],"webhooks":[]},
-				{"service_id":"` + secondServiceID.String() + `","service_version_id":"` + secondVersionID.String() + `","version":"2026-07-23","service":` + runtimeContractServiceJSON(secondServiceID, secondVersionID, "Second") + `,"operations":[{"id":"` + uuid.NewString() + `","name":"secondOp","method":"POST","path":"/second","security_requirements":[{"schemes":[]}]}],"webhooks":[]}
+				{"contract_version":2,"required_capabilities":[],"service_id":"` + firstServiceID.String() + `","service_version_id":"` + firstVersionID.String() + `","version":"2026-07-22","service":` + runtimeContractServiceJSON(firstServiceID, firstVersionID, "First") + `,"operations":[{"id":"` + uuid.NewString() + `","name":"firstOp","method":"GET","path":"/first","provider_protocol":"rest","security_requirements":[{"schemes":[]}]}],"webhooks":[]},
+				{"contract_version":2,"required_capabilities":[],"service_id":"` + secondServiceID.String() + `","service_version_id":"` + secondVersionID.String() + `","version":"2026-07-23","service":` + runtimeContractServiceJSON(secondServiceID, secondVersionID, "Second") + `,"operations":[{"id":"` + uuid.NewString() + `","name":"secondOp","method":"POST","path":"/second","provider_protocol":"rest","security_requirements":[{"schemes":[]}]}],"webhooks":[]}
 			]}}`
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 		})},
@@ -374,12 +458,39 @@ func TestFetchRuntimeContractsUsesSingleSetBasedGraphQLRequest(t *testing.T) {
 	if len(snapshots) != 2 || snapshots[0].ServiceID != firstServiceID || snapshots[1].ServiceID != secondServiceID {
 		t.Fatalf("unexpected snapshots: %#v", snapshots)
 	}
-	if !strings.Contains(requestBody.Query, "serviceRuntimeContracts(refs: $refs)") || strings.Contains(requestBody.Query, "service0: service") {
+	if !strings.Contains(requestBody.Query, "serviceRuntimeContracts(refs: $refs, engine_contract_version: $engine_contract_version, engine_capabilities: $engine_capabilities)") || strings.Contains(requestBody.Query, "service0: service") {
 		t.Fatalf("expected set-based runtime contract query, got %s", requestBody.Query)
 	}
 	variablesJSON, _ := json.Marshal(requestBody.Variables)
 	if !bytes.Contains(variablesJSON, []byte(firstServiceID.String())) || !bytes.Contains(variablesJSON, []byte(secondVersionID.String())) {
 		t.Fatalf("unexpected variables: %#v", requestBody.Variables)
+	}
+}
+
+func TestDecodeRuntimeContractsResponseRejectsIncompatibleEnvelope(t *testing.T) {
+	serviceID := uuid.New()
+	versionID := uuid.New()
+	requested := []store.WorkspaceServiceVersion{{ServiceID: serviceID, ServiceVersionID: versionID, Version: "2026-08-11"}}
+	tests := []struct {
+		name     string
+		envelope string
+		wantErr  string
+	}{
+		{name: "missing envelope", envelope: ``, wantErr: fusedobject.ExecutionContractReasonUnsupportedVersion},
+		{name: "future version", envelope: `"contract_version":3,"required_capabilities":[],`, wantErr: fusedobject.ExecutionContractReasonUnsupportedVersion},
+		{name: "missing capabilities", envelope: `"contract_version":2,`, wantErr: fusedobject.ExecutionContractReasonMissingCapabilities},
+		{name: "unknown capability", envelope: `"contract_version":2,"required_capabilities":["http.future.v1"],`, wantErr: fusedobject.ExecutionContractReasonUnsupportedCapability},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := `{"data":{"serviceRuntimeContracts":[{` + test.envelope +
+				`"service_id":"` + serviceID.String() + `","service_version_id":"` + versionID.String() + `","version":"2026-08-11","service":` +
+				runtimeContractServiceJSON(serviceID, versionID, "Envelope") + `,"operations":[],"webhooks":[]}]}}`
+			_, err := decodeRuntimeContractsResponse(strings.NewReader(body), requested)
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("decodeRuntimeContractsResponse() error = %v, want containing %q", err, test.wantErr)
+			}
+		})
 	}
 }
 
@@ -396,6 +507,7 @@ func runtimeContractServiceJSON(serviceID, _ uuid.UUID, name string) string {
 		"auth_configs":[],
 		"rate_limit":null,
 		"retry_config":null,
+		"documentation":{"tags":[{"name":"orders","summary":"Order operations","description":"Order APIs","parent":"commerce","kind":"badge","external_docs":{"description":"Tag guide","url":"https://docs.example.com/tags/orders"}}]},
 		"event_extraction_path":"",
 		"incoming_webhook_config":null
 	}`
@@ -890,7 +1002,7 @@ func TestFetchEndpointsByNames_UsesSingleGraphQLRequest(t *testing.T) {
 		gotQuery = body.Query
 		gotVariables = body.Variables
 		_, _ = w.Write([]byte(`{"data":{"endpointsByNames":[
-			{"id":"` + uuid.New().String() + `","name":"listLogEvents","method":"POST","path":"/logs","request_content":{"media_type":"multipart/form-data","serialization":"multipart","parts":{"attachment":{"content_type":"application/pdf","binary_encoding":"base64"}}},"pagination":{"version":2,"type":"cursor","cursor":{"request":{"location":"query","name":"after"},"next":{"location":"body","path":"$.page.next","value_type":"string"}},"items_path":"$.items","limits":{"max_pages":100,"max_items":10000,"max_bytes":16777216,"max_duration_ms":120000}}},
+			{"id":"` + uuid.New().String() + `","name":"listLogEvents","method":"POST","path":"/logs","request_content":{"representations":[{"media_type":"multipart/form-data","serialization":"multipart","encoding":{"attachment":{"content_type":"application/pdf","binary_encoding":"base64"}}}]},"pagination":{"version":3,"request":[{"state":"cursor","target":{"location":"query","name":"after"},"value_type":"string","apply":"all"}],"response":{"items":{"path":"$.items"},"values":[{"name":"next","source":{"location":"body","path":"$.page.next","value_type":"string"}}]},"continuation":[{"kind":"token","state":"cursor","response_value":"next"}],"termination":{"stop_on_empty_items":true,"stop_on_missing_values":["next"],"repeated_value":"stop"},"limits":{"max_pages":100,"max_items":10000,"max_bytes":16777216,"max_duration_ms":120000}}},
 			{"id":"` + uuid.New().String() + `","name":"getUser","method":"GET","path":"/users/{id}","parameters":[{"name":"id","in":"path","required":true,"type":"string","path_encoding":"preserve_slashes"}]}
 		]}}`))
 	}))
@@ -928,10 +1040,10 @@ func TestFetchEndpointsByNames_UsesSingleGraphQLRequest(t *testing.T) {
 	if len(endpoints) != 2 {
 		t.Fatalf("expected 2 endpoints, got %d", len(endpoints))
 	}
-	if endpoints[0].Pagination == nil || endpoints[0].Pagination.Cursor == nil || endpoints[0].Pagination.Cursor.Request.Name != "after" {
+	if endpoints[0].Pagination == nil || endpoints[0].Pagination.Request[0].Target.Name != "after" || endpoints[0].Pagination.Response.Values[0].Source.Path != "$.page.next" {
 		t.Fatalf("expected decoded runtime pagination, got %+v", endpoints[0].Pagination)
 	}
-	if endpoints[0].RequestContent == nil || endpoints[0].RequestContent.Serialization != "multipart" || endpoints[0].RequestContent.Parts["attachment"].BinaryEncoding != "base64" {
+	if endpoints[0].RequestContent == nil || endpoints[0].RequestContent.Representations[0].Serialization != "multipart" || endpoints[0].RequestContent.Representations[0].Encoding["attachment"].BinaryEncoding != "base64" {
 		t.Fatalf("expected decoded request content, got %#v", endpoints[0].RequestContent)
 	}
 	if len(endpoints[1].Parameters) != 1 || endpoints[1].Parameters[0].PathEncoding != "preserve_slashes" {
@@ -985,7 +1097,7 @@ func TestFetchServiceOperations_RequestsAndDecodesRequestContent(t *testing.T) {
 			t.Fatalf("decode request: %v", err)
 		}
 		gotQuery = body.Query
-		_, _ = w.Write([]byte(`{"data":{"serviceOperations":[{"id":"` + endpointID.String() + `","name":"uploadWidget","method":"POST","path":"/widgets","request_content":{"media_type":"application/octet-stream","serialization":"raw","payload_parameter":"body","binary_encoding":"base64"}}]}}`))
+		_, _ = w.Write([]byte(`{"data":{"serviceOperations":[{"id":"` + endpointID.String() + `","name":"uploadWidget","method":"POST","path":"/widgets","request_content":{"payload_parameter":"body","representations":[{"media_type":"application/octet-stream","serialization":"raw","schema":{"projection":{"type":"string","format":"binary"}}}]}}]}}`))
 	}))
 	defer registryMock.Close()
 
@@ -998,7 +1110,7 @@ func TestFetchServiceOperations_RequestsAndDecodesRequestContent(t *testing.T) {
 	if !strings.Contains(gotQuery, "request_content") {
 		t.Fatalf("service operations projection omitted request_content: %s", gotQuery)
 	}
-	if len(operations) != 1 || operations[0].RequestContent == nil || operations[0].RequestContent.PayloadParameter != "body" || operations[0].RequestContent.BinaryEncoding != "base64" {
+	if len(operations) != 1 || operations[0].RequestContent == nil || operations[0].RequestContent.PayloadParameter != "body" || operations[0].RequestContent.Representations[0].Schema.Projection.Format != "binary" {
 		t.Fatalf("expected decoded operation request content, got %#v", operations)
 	}
 }
@@ -1013,7 +1125,7 @@ func TestFetchServiceMetadata_RequestsAndDecodesRawProviderRuntimeFields(t *test
 			t.Fatalf("decode request: %v", err)
 		}
 		gotQuery = body.Query
-		_, _ = w.Write([]byte(`{"data":{"service":{"id":"` + serviceID.String() + `","current_service_version":"2026-07-15","service_versions":[{"id":"` + serviceVersionID.String() + `","name":"2026-07-15"}],"name":"Widgets","description":"API","base_url":"https://provider.example.test","servers":[{"url":"https://provider.example.test","description":"Live endpoint","environment":"prod","is_default":true},{"url":"https://sandbox.example.test","description":"Developer test area","environment":"sandbox"}],"auth_configs":[{"name":"oauth","type":"oauth2","token_endpoint_auth_method":"client_secret_basic"}],"rate_limit":{"version":2,"policies":[{"name":"requests","unit":"requests","scope":"service_version","default_cost":1,"operation_costs":{},"algorithm":"fixed_window","fixed_window":{"limit":3,"duration_ms":1000}}]},"retry_config":{"strategy":"linear","max_retries":6},"default_headers":{"X-Tenant":"one"}}}}`))
+		_, _ = w.Write([]byte(`{"data":{"service":{"id":"` + serviceID.String() + `","current_service_version":"2026-07-15","service_versions":[{"id":"` + serviceVersionID.String() + `","name":"2026-07-15","contract_version":2,"required_capabilities":[]}],"name":"Widgets","description":"API","base_url":"https://provider.example.test","servers":[{"url":"https://provider.example.test","description":"Live endpoint","environment":"prod","is_default":true},{"url":"https://sandbox.example.test","description":"Developer test area","environment":"sandbox"}],"auth_configs":[{"name":"oauth","type":"oauth2","token_endpoint_auth_method":"client_secret_basic"}],"rate_limit":{"version":3,"policies":[{"name":"requests","mode":"enforce","unit":"requests","identity":{"inputs":[{"kind":"service_version"}]},"cost":{"default":1,"rules":[]},"algorithm":"fixed_window","fixed_window":{"limit":3,"duration_ms":1000}}]},"retry_config":{"version":3,"rules":[{"predicates":{"methods":["GET"],"operation_kinds":["read"],"statuses":[{"min":500,"max":599}],"errors":[],"body_replayability":"any","idempotency_key":{"requirement":"any"},"required_provider_headers":[]},"action":{"max_attempts":2,"max_elapsed_ms":1000,"backoff":{"strategy":"fixed","base_delay_ms":0,"max_delay_ms":1,"jitter_ms":0},"retry_after_headers":[]}}]},"default_headers":{"X-Tenant":"one"}}}}`))
 	}))
 	defer registryMock.Close()
 
@@ -1034,7 +1146,7 @@ func TestFetchServiceMetadata_RequestsAndDecodesRawProviderRuntimeFields(t *test
 	if strings.Contains(gotQuery, "service_version_id") {
 		t.Fatalf("metadata query must not request removed root service_version_id field: %s", gotQuery)
 	}
-	if !strings.Contains(gotQuery, "current_service_version") || !strings.Contains(gotQuery, "service_versions") {
+	if !strings.Contains(gotQuery, "current_service_version") || !strings.Contains(gotQuery, "service_versions") || !strings.Contains(gotQuery, "contract_version") || !strings.Contains(gotQuery, "required_capabilities") {
 		t.Fatalf("metadata query must resolve service version identity through service_versions: %s", gotQuery)
 	}
 	if !strings.Contains(gotQuery, "auth_configs") || !strings.Contains(gotQuery, "name") || !strings.Contains(gotQuery, "token_endpoint_auth_method") {

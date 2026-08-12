@@ -10,11 +10,11 @@ import (
 
 func testCursorPagination(name, path string) *fusedobject.PaginationConfig {
 	return &fusedobject.PaginationConfig{
-		Version: 2, Type: "cursor", ItemsPath: "$.items",
-		Cursor: &paginationpolicy.CursorConfig{
-			Request: paginationpolicy.RequestTarget{Location: "query", Name: name},
-			Next:    paginationpolicy.ValueSource{Location: "body", Path: path, ValueType: "string"},
-		},
+		Version:      paginationpolicy.Version,
+		Request:      []paginationpolicy.RequestStep{{State: "cursor", Target: paginationpolicy.RequestTarget{Location: paginationpolicy.RequestQuery, Name: name}, ValueType: paginationpolicy.ValueString, Apply: paginationpolicy.ApplyAll}},
+		Response:     paginationpolicy.ResponsePlan{Items: paginationpolicy.ItemsSource{Path: "$.items"}, Values: []paginationpolicy.ResponseValue{{Name: "next", Source: paginationpolicy.ValueSource{Location: paginationpolicy.SourceBody, Path: path, ValueType: paginationpolicy.ValueString}}}},
+		Continuation: []paginationpolicy.ContinuationStep{{Kind: paginationpolicy.ContinuationToken, State: "cursor", ResponseValue: "next"}},
+		Termination:  paginationpolicy.Termination{StopOnEmptyItems: true, StopOnMissingValues: []string{"next"}, RepeatedValue: paginationpolicy.RepeatedStop},
 	}
 }
 
@@ -54,7 +54,7 @@ func TestFusedToIntegrationObject_EndpointPaginationWinsOverService(t *testing.T
 
 	got := fusedToIntegrationObject(svc, ep)
 
-	if got.Pagination == nil || got.Pagination.Type != "cursor" {
+	if got.Pagination == nil || got.Pagination.Request[0].Target.Name != "cursor" {
 		t.Fatalf("expected endpoint pagination to win, got %#v", got.Pagination)
 	}
 }
@@ -71,7 +71,7 @@ func TestFusedToIntegrationObject_FallsBackToServicePagination(t *testing.T) {
 
 	got := fusedToIntegrationObject(svc, ep)
 
-	if got.Pagination == nil || got.Pagination.Type != "cursor" || got.Pagination.Cursor == nil || got.Pagination.Cursor.Request.Name != "after" || got.Pagination.Cursor.Next.Path != "$.page.next" {
+	if got.Pagination == nil || got.Pagination.Request[0].Target.Name != "after" || got.Pagination.Response.Values[0].Source.Path != "$.page.next" {
 		t.Fatalf("expected fallback to service pagination, got %#v", got.Pagination)
 	}
 }
@@ -89,29 +89,87 @@ func TestFusedToIntegrationObject_NoPaginationAnywhereStaysNil(t *testing.T) {
 
 func TestFusedToIntegrationObject_PreservesRequestContent(t *testing.T) {
 	requestContent := &fusedobject.RequestContent{
-		MediaType: "application/vnd.api+json", Serialization: fusedobject.RequestSerializationJSON,
-		Required: true, Schema: &fusedobject.Schema{Type: "object", Required: []string{"id"}},
-		PayloadParameter: "body", BinaryEncoding: fusedobject.RequestBinaryEncodingBase64,
-		Parts: map[string]fusedobject.RequestPart{
-			"file": {ContentType: "image/png", BinaryEncoding: fusedobject.RequestBinaryEncodingBase64},
-		},
+		Required: true, PayloadParameter: "body", Representations: []fusedobject.RequestRepresentation{{
+			MediaType: "application/vnd.api+json", Serialization: fusedobject.RequestSerializationJSON,
+			Schema:   &fusedobject.SchemaContract{Projection: fusedobject.Schema{Type: "object", Required: []string{"id"}}},
+			Encoding: map[string]fusedobject.RequestEncoding{"file": {ContentType: "image/png", BinaryEncoding: fusedobject.RequestBinaryEncodingBase64}},
+		}},
 	}
 	got := fusedToIntegrationObject(&fusedobject.ServiceMetadata{}, fusedobject.Endpoint{
 		RequestContent: requestContent,
 	})
+	assertMappedRequestContent(t, got.RequestContent)
+	assertMappedRequestOwnership(t, requestContent, got.RequestContent)
+}
 
-	if got.RequestContent == nil || got.RequestContent.MediaType != "application/vnd.api+json" || got.RequestContent.Serialization != "json" {
-		t.Fatalf("expected request content to reach dispatcher model, got %#v", got.RequestContent)
+func assertMappedRequestContent(t *testing.T, got *models.RequestContent) {
+	t.Helper()
+	if got == nil || len(got.Representations) != 1 || got.Representations[0].MediaType != "application/vnd.api+json" || got.Representations[0].Serialization != "json" {
+		t.Fatalf("expected request content to reach dispatcher model, got %#v", got)
 	}
-	if !got.RequestContent.Required || got.RequestContent.Schema == nil || got.RequestContent.Schema.Required[0] != "id" {
-		t.Fatalf("request content schema was not preserved: %#v", got.RequestContent)
+	if !got.Required || got.Representations[0].Schema == nil || got.Representations[0].Schema.Projection.Required[0] != "id" {
+		t.Fatalf("request content schema was not preserved: %#v", got)
 	}
-	if got.RequestContent.PayloadParameter != "body" || got.RequestContent.BinaryEncoding != "base64" || got.RequestContent.Parts["file"].ContentType != "image/png" {
-		t.Fatalf("request content wire metadata was not preserved: %#v", got.RequestContent)
+	if got.PayloadParameter != "body" || got.Representations[0].Encoding["file"].BinaryEncoding != "base64" || got.Representations[0].Encoding["file"].ContentType != "image/png" {
+		t.Fatalf("request content wire metadata was not preserved: %#v", got)
 	}
-	got.RequestContent.Parts["file"] = models.RequestPart{ContentType: "changed"}
-	if requestContent.Parts["file"].ContentType != "image/png" {
-		t.Fatal("expected mapped parts to be independently owned")
+}
+
+func assertMappedRequestOwnership(t *testing.T, source *fusedobject.RequestContent, got *models.RequestContent) {
+	t.Helper()
+	got.Representations[0].Encoding["file"] = models.RequestEncoding{ContentType: "changed"}
+	if source.Representations[0].Encoding["file"].ContentType != "image/png" {
+		t.Fatal("expected mapped encodings to be independently owned")
+	}
+}
+
+func TestFusedToServicePreservesTagHierarchy(t *testing.T) {
+	source := &fusedobject.ServiceMetadata{Documentation: &fusedobject.ServiceDocumentation{
+		Tags: []fusedobject.TagDocumentation{{
+			Name: "orders", Summary: "Order operations", Description: "Order APIs",
+			Parent: "commerce", Kind: "badge",
+		}},
+	}}
+
+	got := fusedToService(source)
+	if got.Documentation == nil || len(got.Documentation.Tags) != 1 {
+		t.Fatalf("mapped service documentation = %#v", got.Documentation)
+	}
+	tag := got.Documentation.Tags[0]
+	if tag.Name != "orders" || tag.Summary != "Order operations" || tag.Description != "Order APIs" || tag.Parent != "commerce" || tag.Kind != "badge" {
+		t.Fatalf("tag hierarchy metadata was lost: %#v", tag)
+	}
+}
+
+func TestFusedToIntegrationObjectPreservesFullMediaContracts(t *testing.T) {
+	raw := []byte(`{"oneOf":[{"type":"string"},{"type":"null"}]}`)
+	contract := &fusedobject.SchemaContract{
+		Dialect: "https://json-schema.org/draft/2020-12/schema", Raw: raw, ContentHash: "hash",
+		Projection: fusedobject.Schema{Type: "string"},
+	}
+	ep := fusedobject.Endpoint{
+		RequestContent: &fusedobject.RequestContent{
+			DefaultMediaType: "application/vnd.test+json",
+			Representations: []fusedobject.RequestRepresentation{{
+				MediaType: "application/vnd.test+json", Serialization: fusedobject.RequestSerializationJSON, Schema: contract,
+				Encoding: map[string]fusedobject.RequestEncoding{"file": {ContentType: "image/png", BinaryEncoding: "base64"}},
+			}},
+		},
+		Responses: fusedobject.Responses{"2XX": {
+			Description: "ok", Representations: []fusedobject.ResponseRepresentation{{MediaType: "application/vnd.test+json", Schema: contract}},
+		}},
+	}
+	got := fusedToIntegrationObject(&fusedobject.ServiceMetadata{}, ep)
+	representation := got.RequestContent.Representations[0]
+	if got.RequestContent.DefaultMediaType != "application/vnd.test+json" || string(representation.Schema.Raw) != string(raw) || representation.Schema.Projection.Type != "string" {
+		t.Fatalf("request representation lost fidelity: %#v", got.RequestContent)
+	}
+	if got.Responses["2XX"].Representations[0].MediaType != "application/vnd.test+json" {
+		t.Fatalf("response representation lost fidelity: %#v", got.Responses)
+	}
+	raw[0] = '['
+	if string(representation.Schema.Raw)[0] != '{' {
+		t.Fatal("mapped raw schema aliases Registry snapshot memory")
 	}
 }
 
@@ -147,10 +205,10 @@ func TestFusedToIntegrationObject_PreservesGraphQLExecutionContract(t *testing.T
 		ProviderProtocol: "graphql", OperationKind: "query",
 		Parameters: fusedobject.Parameters{{Name: "id", Required: true, Type: "string"}},
 		RequestContent: &fusedobject.RequestContent{
-			MediaType: "application/json", Serialization: fusedobject.RequestSerializationJSON,
-			Schema: &fusedobject.Schema{Type: "object", Required: []string{"id"}},
+			Representations: []fusedobject.RequestRepresentation{{MediaType: "application/json", Serialization: fusedobject.RequestSerializationJSON,
+				Schema: &fusedobject.SchemaContract{Projection: fusedobject.Schema{Type: "object", Required: []string{"id"}}}}},
 		},
-		Responses: fusedobject.Responses{"200": {Type: "object"}},
+		Responses: fusedobject.Responses{"200": {Representations: []fusedobject.ResponseRepresentation{{Schema: &fusedobject.SchemaContract{Projection: fusedobject.Schema{Type: "object"}}}}}},
 	}
 
 	got := fusedToIntegrationObject(&fusedobject.ServiceMetadata{}, ep)
@@ -161,7 +219,7 @@ func TestFusedToIntegrationObject_PreservesGraphQLExecutionContract(t *testing.T
 	if got.ProviderProtocol != "graphql" || got.OperationKind != "query" {
 		t.Fatalf("unexpected execution metadata: protocol=%q kind=%q", got.ProviderProtocol, got.OperationKind)
 	}
-	if len(got.Parameters) != 1 || got.RequestContent == nil || got.RequestContent.Schema == nil || got.Responses["200"].Type != "object" {
+	if len(got.Parameters) != 1 || got.RequestContent == nil || got.RequestContent.Representations[0].Schema == nil || got.Responses["200"].Representations[0].Schema.Projection.Type != "object" {
 		t.Fatalf("operation schemas were not preserved: %#v", got)
 	}
 }
@@ -176,13 +234,26 @@ func TestFusedToIntegrationObject_TransportsStableKeyVerbatim(t *testing.T) {
 	}
 }
 
-func TestFusedToIntegrationObject_RecognizesLegacyGraphQLSnapshot(t *testing.T) {
+func TestFusedToIntegrationObject_DoesNotInferCanonicalExecutionFields(t *testing.T) {
 	query := `query Viewer { viewer { id } }`
 	got := fusedToIntegrationObject(&fusedobject.ServiceMetadata{}, fusedobject.Endpoint{
 		GraphQLQuery: &query, ResourceName: "query",
+		Parameters: fusedobject.Parameters{{
+			Name: "id", In: "query", Type: "string",
+			Schema: &fusedobject.SchemaContract{Projection: fusedobject.Schema{Type: "integer"}},
+		}},
 	})
 
-	if got.ProviderProtocol != "graphql" || got.OperationKind != "query" {
-		t.Fatalf("legacy GraphQL snapshot was not upgraded: %#v", got)
+	if got.ProviderProtocol != "" || got.OperationKind != "" || got.Parameters[0].Type != "" {
+		t.Fatalf("legacy execution fields were inferred: %#v", got)
+	}
+}
+
+func TestFusedToIntegrationObject_PreservesBaselineParameterType(t *testing.T) {
+	got := fusedToIntegrationObject(&fusedobject.ServiceMetadata{}, fusedobject.Endpoint{
+		Parameters: fusedobject.Parameters{{Name: "limit", In: "query", Type: "integer"}},
+	})
+	if len(got.Parameters) != 1 || got.Parameters[0].Type != "integer" {
+		t.Fatalf("baseline parameter type was not preserved: %#v", got.Parameters)
 	}
 }

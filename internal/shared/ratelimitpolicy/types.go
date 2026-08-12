@@ -1,23 +1,64 @@
 package ratelimitpolicy
 
 import (
-	"bytes"
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"regexp"
 	"strings"
+
+	"github.com/Usefused/engine/internal/shared/strictjson"
 )
 
-const Version = 2
+type Unit string
+type Mode string
+type IdentityKind string
+type Algorithm string
+type ResponseSignalSource string
+type ResetFormat string
 
 const (
-	MaxPolicies       = 16
-	maxPolicyValue    = int64(1_000_000_000_000)
-	maxIntervalMS     = int64(2_678_400_000)
-	maxOperationCosts = 10_000
+	Version = 3
+
+	ModeEnforce Mode = "enforce"
+	ModeObserve Mode = "observe"
+
+	UnitRequests   Unit = "requests"
+	UnitPoints     Unit = "points"
+	UnitComplexity Unit = "complexity"
+	UnitQuotaUnits Unit = "quota_units"
+
+	IdentityAccount                     IdentityKind = "account"
+	IdentityServiceVersion              IdentityKind = "service_version"
+	IdentityConnection                  IdentityKind = "connection"
+	IdentityProject                     IdentityKind = "project"
+	IdentityTenant                      IdentityKind = "tenant"
+	IdentityResource                    IdentityKind = "resource"
+	IdentityIPClass                     IdentityKind = "ip_class"
+	IdentityNamedSharedCredentialFamily IdentityKind = "named_shared_credential_family"
+
+	AlgorithmFixedWindow   Algorithm = "fixed_window"
+	AlgorithmRollingWindow Algorithm = "rolling_window"
+	AlgorithmTokenBucket   Algorithm = "token_bucket"
+	AlgorithmConcurrency   Algorithm = "concurrency"
+
+	ResponseSignalHeader ResponseSignalSource = "header"
+	ResponseSignalBody   ResponseSignalSource = "body"
+
+	ResetDeltaSeconds      ResetFormat = "delta_seconds"
+	ResetDeltaMilliseconds ResetFormat = "delta_milliseconds"
+	ResetUnixSeconds       ResetFormat = "unix_seconds"
+	ResetUnixMilliseconds  ResetFormat = "unix_milliseconds"
+	ResetRFC3339           ResetFormat = "rfc3339"
+	ResetHTTPDate          ResetFormat = "http_date"
+)
+
+const MaxRuntimePolicyValue = maxPolicyValue
+
+const (
+	MaxPolicies    = 16
+	maxPolicyValue = int64(1_000_000_000_000)
+	maxIntervalMS  = int64(2_678_400_000)
 )
 
 var (
@@ -26,60 +67,105 @@ var (
 )
 
 type Config struct {
-	Version    int         `json:"version"`
-	Policies   []Policy    `json:"policies"`
-	RetryAfter *RetryAfter `json:"retry_after,omitempty"`
+	Version  int       `json:"version" yaml:"version"`
+	Policies []Policy  `json:"policies" yaml:"policies"`
+	Cooldown *Cooldown `json:"cooldown,omitempty" yaml:"cooldown,omitempty"`
 }
 
 type Policy struct {
-	Name            string           `json:"name"`
-	Unit            string           `json:"unit"`
-	Scope           string           `json:"scope"`
-	DefaultCost     int64            `json:"default_cost"`
-	OperationCosts  map[string]int64 `json:"operation_costs"`
-	Algorithm       string           `json:"algorithm"`
-	FixedWindow     *FixedWindow     `json:"fixed_window,omitempty"`
-	TokenBucket     *TokenBucket     `json:"token_bucket,omitempty"`
-	ResponseHeaders *ResponseHeaders `json:"response_headers,omitempty"`
+	Name      string         `json:"name" yaml:"name"`
+	Mode      Mode           `json:"mode" yaml:"mode"`
+	Unit      Unit           `json:"unit" yaml:"unit"`
+	Identity  BucketIdentity `json:"identity" yaml:"identity"`
+	Cost      CostPlan       `json:"cost" yaml:"cost"`
+	Algorithm Algorithm      `json:"algorithm" yaml:"algorithm"`
+
+	FixedWindow     *FixedWindow     `json:"fixed_window,omitempty" yaml:"fixed_window,omitempty"`
+	RollingWindow   *RollingWindow   `json:"rolling_window,omitempty" yaml:"rolling_window,omitempty"`
+	TokenBucket     *TokenBucket     `json:"token_bucket,omitempty" yaml:"token_bucket,omitempty"`
+	Concurrency     *Concurrency     `json:"concurrency,omitempty" yaml:"concurrency,omitempty"`
+	ResponseSignals *ResponseSignals `json:"response_signals,omitempty" yaml:"response_signals,omitempty"`
+}
+
+type BucketIdentity struct {
+	Inputs []IdentityInput `json:"inputs" yaml:"inputs"`
+}
+
+type IdentityInput struct {
+	Kind    IdentityKind `json:"kind" yaml:"kind"`
+	Binding string       `json:"binding,omitempty" yaml:"binding,omitempty"`
+	Name    string       `json:"name,omitempty" yaml:"name,omitempty"`
+}
+
+type CostPlan struct {
+	Default int64      `json:"default" yaml:"default"`
+	Rules   []CostRule `json:"rules" yaml:"rules"`
+}
+
+type CostRule struct {
+	Operation string `json:"operation" yaml:"operation"`
+	Cost      int64  `json:"cost" yaml:"cost"`
 }
 
 type FixedWindow struct {
-	Limit      int64 `json:"limit"`
-	DurationMS int64 `json:"duration_ms"`
+	Limit      int64 `json:"limit" yaml:"limit"`
+	DurationMs int64 `json:"duration_ms" yaml:"duration_ms"`
+}
+
+type RollingWindow struct {
+	Limit      int64 `json:"limit" yaml:"limit"`
+	DurationMs int64 `json:"duration_ms" yaml:"duration_ms"`
 }
 
 type TokenBucket struct {
-	Capacity         int64 `json:"capacity"`
-	RefillUnits      int64 `json:"refill_units"`
-	RefillIntervalMS int64 `json:"refill_interval_ms"`
+	Capacity         int64 `json:"capacity" yaml:"capacity"`
+	RefillUnits      int64 `json:"refill_units" yaml:"refill_units"`
+	RefillIntervalMs int64 `json:"refill_interval_ms" yaml:"refill_interval_ms"`
 }
 
-type ResponseHeaders struct {
-	Limit     string       `json:"limit,omitempty"`
-	Remaining string       `json:"remaining,omitempty"`
-	Reset     *ResetHeader `json:"reset,omitempty"`
+type Concurrency struct {
+	Limit int64 `json:"limit" yaml:"limit"`
 }
 
-type ResetHeader struct {
-	Name   string `json:"name"`
-	Format string `json:"format"`
+type ResponseSignals struct {
+	Limit     *ResponseSignal `json:"limit,omitempty" yaml:"limit,omitempty"`
+	Remaining *ResponseSignal `json:"remaining,omitempty" yaml:"remaining,omitempty"`
+	Reset     *ResetSignal    `json:"reset,omitempty" yaml:"reset,omitempty"`
+	Cost      *ResponseSignal `json:"cost,omitempty" yaml:"cost,omitempty"`
 }
 
-type RetryAfter struct {
-	Enabled    bool  `json:"enabled"`
-	MaxDelayMS int64 `json:"max_delay_ms"`
+type ResponseSignal struct {
+	Source ResponseSignalSource `json:"source" yaml:"source"`
+	Name   string               `json:"name,omitempty" yaml:"name,omitempty"`
+	Path   string               `json:"path,omitempty" yaml:"path,omitempty"`
+}
+
+type ResetSignal struct {
+	Signal ResponseSignal `json:"signal" yaml:"signal"`
+	Format ResetFormat    `json:"format" yaml:"format"`
+}
+
+type Cooldown struct {
+	Statuses []StatusRange    `json:"statuses" yaml:"statuses"`
+	Headers  []CooldownHeader `json:"headers" yaml:"headers"`
+}
+
+type StatusRange struct {
+	Min int `json:"min" yaml:"min"`
+	Max int `json:"max" yaml:"max"`
+}
+
+type CooldownHeader struct {
+	Name       string        `json:"name" yaml:"name"`
+	Formats    []ResetFormat `json:"formats" yaml:"formats"`
+	MaxDelayMs int64         `json:"max_delay_ms" yaml:"max_delay_ms"`
 }
 
 func (c *Config) UnmarshalJSON(data []byte) error {
 	type plain Config
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
 	var decoded plain
-	if err := decoder.Decode(&decoded); err != nil {
+	if err := strictjson.Decode(data, &decoded, "rate limit config"); err != nil {
 		return err
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return errors.New("rate limit config contains trailing data")
 	}
 	*c = Config(decoded)
 	return c.Validate()
@@ -120,144 +206,12 @@ func jsonBytes(value interface{}) ([]byte, error) {
 }
 
 func (c Config) Validate() error {
-	if c.Version != Version || len(c.Policies) == 0 || len(c.Policies) > MaxPolicies {
-		return errors.New("rate limit v2 config is invalid")
-	}
-	seen := make(map[string]struct{}, len(c.Policies))
-	for _, policy := range c.Policies {
-		if err := validatePolicy(policy, seen); err != nil {
-			return err
-		}
-	}
-	if c.RetryAfter != nil && (!c.RetryAfter.Enabled || c.RetryAfter.MaxDelayMS < 1 || c.RetryAfter.MaxDelayMS > 86_400_000) {
-		return errors.New("rate limit retry_after is invalid")
-	}
-	return nil
-}
-
-func validatePolicy(policy Policy, seen map[string]struct{}) error {
-	if err := validatePolicyIdentity(policy, seen); err != nil {
-		return err
-	}
-	if err := validatePolicyCosts(policy); err != nil {
-		return err
-	}
-	if err := validateAlgorithm(policy); err != nil {
-		return fmt.Errorf("rate limit policy %q: %w", policy.Name, err)
-	}
-	return validateResponseHeaders(policy.ResponseHeaders)
-}
-
-func validatePolicyIdentity(policy Policy, seen map[string]struct{}) error {
-	if policy.Name == "" || len(policy.Name) > 64 || !policyNamePattern.MatchString(policy.Name) {
-		return errors.New("rate limit policy name is invalid")
-	}
-	if _, exists := seen[policy.Name]; exists {
-		return errors.New("rate limit policy name is duplicated")
-	}
-	seen[policy.Name] = struct{}{}
-	if !validUnit(policy.Unit) || !validScope(policy.Scope) {
-		return errors.New("rate limit policy unit or scope is invalid")
-	}
-	return nil
-}
-
-func validatePolicyCosts(policy Policy) error {
-	if policy.DefaultCost < 0 || policy.DefaultCost > maxPolicyValue || len(policy.OperationCosts) > maxOperationCosts {
-		return errors.New("rate limit policy cost is invalid")
-	}
-	positiveCost := policy.DefaultCost > 0
-	for key, cost := range policy.OperationCosts {
-		if !validOperationKey(key) || cost < 0 || cost > maxPolicyValue {
-			return errors.New("rate limit operation cost is invalid")
-		}
-		positiveCost = positiveCost || cost > 0
-	}
-	if !positiveCost {
-		return errors.New("rate limit policy requires a positive cost")
-	}
-	return nil
-}
-
-func validUnit(unit string) bool {
-	switch unit {
-	case "requests", "points", "quota_units":
-		return true
-	default:
-		return false
-	}
-}
-
-func validScope(scope string) bool {
-	return scope == "service_version" || scope == "connection"
+	return validateV3Config(c)
 }
 
 func validOperationKey(key string) bool {
 	return key != "" && key == strings.TrimSpace(key) && len(key) <= 512 &&
 		!strings.ContainsAny(key, "\x00\r\n")
-}
-
-func validateAlgorithm(policy Policy) error {
-	switch policy.Algorithm {
-	case "fixed_window":
-		return validateFixedWindow(policy)
-	case "token_bucket":
-		return validateTokenBucket(policy)
-	default:
-		return errors.New("algorithm is invalid")
-	}
-}
-
-func validateFixedWindow(policy Policy) error {
-	if policy.FixedWindow == nil || policy.TokenBucket != nil {
-		return errors.New("fixed_window discriminator is invalid")
-	}
-	if !validPolicyValue(policy.FixedWindow.Limit) || !validInterval(policy.FixedWindow.DurationMS) {
-		return errors.New("fixed_window discriminator is invalid")
-	}
-	return nil
-}
-
-func validateTokenBucket(policy Policy) error {
-	if policy.TokenBucket == nil || policy.FixedWindow != nil {
-		return errors.New("token_bucket discriminator is invalid")
-	}
-	if !validPolicyValue(policy.TokenBucket.Capacity) || !validPolicyValue(policy.TokenBucket.RefillUnits) || !validInterval(policy.TokenBucket.RefillIntervalMS) {
-		return errors.New("token_bucket discriminator is invalid")
-	}
-	return nil
-}
-
-func validateResponseHeaders(headers *ResponseHeaders) error {
-	if headers == nil {
-		return nil
-	}
-	if headers.Limit == "" && headers.Remaining == "" && headers.Reset == nil {
-		return errors.New("rate limit response headers are empty")
-	}
-	if !validOptionalHeaderName(headers.Limit) || !validOptionalHeaderName(headers.Remaining) {
-		return errors.New("rate limit response header is invalid")
-	}
-	if headers.Reset == nil {
-		return nil
-	}
-	return validateResetHeader(headers.Reset)
-}
-
-func validateResetHeader(reset *ResetHeader) error {
-	if !validHeaderName(reset.Name) {
-		return errors.New("rate limit reset header is invalid")
-	}
-	switch reset.Format {
-	case "delta_seconds", "unix_seconds", "unix_milliseconds", "rfc3339":
-		return nil
-	default:
-		return errors.New("rate limit reset header format is invalid")
-	}
-}
-
-func validOptionalHeaderName(value string) bool {
-	return value == "" || validHeaderName(value)
 }
 
 func validHeaderName(value string) bool {
@@ -272,9 +226,11 @@ func validInterval(value int64) bool {
 	return value >= 1 && value <= maxIntervalMS
 }
 
-func (p Policy) Cost(stableOperationKey string) int64 {
-	if cost, ok := p.OperationCosts[stableOperationKey]; ok {
-		return cost
+func (p Policy) ResolvedCost(stableOperationKey string) int64 {
+	for _, rule := range p.Cost.Rules {
+		if rule.Operation == stableOperationKey {
+			return rule.Cost
+		}
 	}
-	return p.DefaultCost
+	return p.Cost.Default
 }

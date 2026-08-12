@@ -10,11 +10,15 @@ import (
 	"github.com/google/uuid"
 )
 
+const ResourceDiscoveryVersion = 1
+
 // Profile is the canonical, versioned provider behavior attached to a bucket.
 // Publication provenance and visibility intentionally live outside this
 // caller-controlled configuration object.
 type Profile struct {
 	AuthType          string                   `json:"auth_type,omitempty" yaml:"auth_type,omitempty"`
+	AuthName          string                   `json:"auth_name,omitempty" yaml:"auth_name,omitempty"`
+	OAuth2Flow        string                   `json:"oauth2_flow,omitempty" yaml:"oauth2_flow,omitempty"`
 	ResourceDiscovery *ResourceDiscoveryConfig `json:"resource_discovery,omitempty" yaml:"resource_discovery,omitempty"`
 	ResourceInput     *ResourceInputConfig     `json:"resource_input,omitempty" yaml:"resource_input,omitempty"`
 	Metadata          map[string]string        `json:"metadata,omitempty" yaml:"metadata,omitempty"`
@@ -45,6 +49,8 @@ func (p *Profile) UnmarshalJSON(data []byte) error {
 }
 
 type ResourceDiscoveryConfig struct {
+	Version         int      `json:"version" yaml:"version"`
+	Stage           string   `json:"stage" yaml:"stage"`
 	OperationID     string   `json:"operation_id" yaml:"operation_id"`
 	Server          string   `json:"server,omitempty" yaml:"server,omitempty"`
 	IDPath          string   `json:"id_path" yaml:"id_path"`
@@ -109,13 +115,19 @@ type Parameter struct {
 	Location string `json:"location"`
 }
 
+type AuthConfig struct {
+	Name        string   `json:"name"`
+	Type        string   `json:"type"`
+	OAuth2Flows []string `json:"oauth2_flows,omitempty"`
+}
+
 // Contract supplies the pinned service-version facts needed for authoritative
 // validation without coupling this package to Registry database models.
 type Contract struct {
-	AuthTypes  []string
-	Servers    []string
-	Operations []Operation
-	Complete   bool
+	AuthConfigs []AuthConfig
+	Servers     []string
+	Operations  []Operation
+	Complete    bool
 }
 
 type Severity string

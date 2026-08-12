@@ -133,6 +133,34 @@ func TestPostgresAccessControlBootstrapAndAuthentication(t *testing.T) {
 	if err != nil || len(decodedMissing) != 1 || decodedMissing[0].Permission != accesscontrol.PermissionWorkspaceUpdate {
 		t.Fatalf("missing audit requirements = %#v, %v", decodedMissing, err)
 	}
+	for _, result := range []struct {
+		action   string
+		outcome  accesscontrol.AuditOutcome
+		reason   string
+		metadata map[string]any
+	}{
+		{action: "workspace.rollback", outcome: accesscontrol.AuditRolledBack, reason: "transaction_rolled_back"},
+		{action: "workspace.cancel", outcome: accesscontrol.AuditCancelled, reason: "request_cancelled"},
+		{action: "workspace.noop", outcome: accesscontrol.AuditSucceeded, metadata: map[string]any{"changed": false}},
+	} {
+		resultEvent := event
+		resultEvent.ID, resultEvent.Action, resultEvent.Outcome = uuid.New(), result.action, result.outcome
+		resultEvent.ReasonCode, resultEvent.Metadata = result.reason, result.metadata
+		if err := repository.RecordAuthorizationAudit(ctx, resultEvent); err != nil {
+			t.Fatalf("RecordAuthorizationAudit(%s): %v", result.outcome, err)
+		}
+		var storedOutcome, storedReason string
+		var changed *bool
+		if err := pool.QueryRow(ctx, `
+			SELECT outcome, reason_code, (metadata->>'changed')::boolean
+			FROM fused_audit_events WHERE id = $1
+		`, resultEvent.ID).Scan(&storedOutcome, &storedReason, &changed); err != nil {
+			t.Fatalf("load %s audit: %v", result.outcome, err)
+		}
+		if storedOutcome != string(result.outcome) || storedReason != result.reason || (result.action == "workspace.noop" && (changed == nil || *changed)) {
+			t.Fatalf("stored %s audit = %q/%q/%v", result.outcome, storedOutcome, storedReason, changed)
+		}
+	}
 	event.Metadata = map[string]any{"api_key": "must-not-persist"}
 	if err := repository.RecordAuthorizationAudit(ctx, event); !errors.Is(err, accesscontrol.ErrUnsafeAuditMetadata) {
 		t.Fatalf("unsafe audit error = %v", err)
@@ -198,11 +226,15 @@ func TestResolveAppFamilyAccessIncludesTombstonesAndScopesAccount(t *testing.T) 
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO fused_app_families
 			(app_family_id, account_id, kind, canonical_name, display_name, target_language, owner_subject_id)
-		VALUES ($1, $2, 'sdk', 'historical-sdk', 'Historical SDK', 'typescript', $3);
+		VALUES ($1, $2, 'sdk', 'historical-sdk', 'Historical SDK', 'typescript', $3)
+	`, familyID, accountID, owner.SubjectID); err != nil {
+		t.Fatalf("insert tombstoned app family: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
 		INSERT INTO fused_app_tombstones
 			(app_id, app_family_id, account_id, version, source_hash, deactivated_by)
-		VALUES ($4, $1, $2, '1.0.0', 'sha256:deleted', $3)
-	`, familyID, accountID, owner.SubjectID, deletedAppID); err != nil {
+		VALUES ($1, $2, $3, '1.0.0', 'sha256:deleted', $4)
+	`, deletedAppID, familyID, accountID, owner.SubjectID); err != nil {
 		t.Fatalf("insert tombstoned app identity: %v", err)
 	}
 
@@ -301,10 +333,14 @@ func TestPostgresWorkspaceShareGrantsUsersAndOwningTeamsBoundedUse(t *testing.T)
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO fused_app_families
 			(app_family_id, account_id, kind, canonical_name, display_name, target_language, owner_subject_id)
-		VALUES ($1, $2, 'sdk', 'retired-sdk', 'Retired SDK', 'typescript', $3);
+		VALUES ($1, $2, 'sdk', 'retired-sdk', 'Retired SDK', 'typescript', $3)
+	`, inactiveFamilyID, accountID, owner.SubjectID); err != nil {
+		t.Fatalf("insert inactive app family: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
 		INSERT INTO fused_app_tombstones (app_id, app_family_id, account_id, version, source_hash)
-		VALUES ($4, $1, $2, '1.0.0', 'retired')
-	`, inactiveFamilyID, accountID, owner.SubjectID, inactiveAppID); err != nil {
+		VALUES ($1, $2, $3, '1.0.0', 'retired')
+	`, inactiveAppID, inactiveFamilyID, accountID); err != nil {
 		t.Fatalf("insert inactive app: %v", err)
 	}
 	_, err = repository.GrantWorkspaceShare(ctx, WorkspaceShareMutation{

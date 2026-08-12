@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/executionevent"
+	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
@@ -143,6 +145,9 @@ func providerStatusClass(status int, execErr error) string {
 }
 
 func classifyExecutionFailure(execErr error, status int) (string, string) {
+	if _, incompatible := fusedobject.ExecutionContractCompatibilityDetails(execErr); incompatible {
+		return "contract", fusedobject.ExecutionCapabilityRequiredCode
+	}
 	if code := engine.PaginationFailureCode(execErr); code != "" {
 		return "pagination", code
 	}
@@ -151,6 +156,9 @@ func classifyExecutionFailure(execErr error, status int) (string, string) {
 	}
 	if errors.Is(execErr, context.Canceled) {
 		return "engine", "cancelled"
+	}
+	if isTransportExecutionFailure(execErr) {
+		return "network", "request_failed"
 	}
 	if status >= http.StatusBadRequest {
 		return classifyExecutionFailureByStatus("", status)
@@ -161,15 +169,19 @@ func classifyExecutionFailure(execErr error, status int) (string, string) {
 	return classifyExecutionFailureByStatus(execErr.Error(), status)
 }
 
+func isTransportExecutionFailure(execErr error) bool {
+	var transport *url.Error
+	return errors.As(execErr, &transport)
+}
+
 func executionFailed(execErr error, status int) bool {
 	return execErr != nil || status >= http.StatusBadRequest
 }
 
 func executionFailureReason(execErr error, status int) string {
-	if execErr != nil {
-		return execErr.Error()
-	}
-	return providerStatusError(status)
+	// Durable receipts carry the same closed classification as OTEL. Raw
+	// transport errors can embed URLs, query values, headers, or credentials.
+	return executionFailureDescription(execErr, status)
 }
 
 func classifyExecutionFailureByStatus(message string, status int) (string, string) {
@@ -196,7 +208,13 @@ func executionHTTPMethod(match *scopedEndpoint) string {
 	if match == nil {
 		return ""
 	}
-	return match.endpoint.Method
+	switch strings.ToUpper(match.endpoint.Method) {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace, "QUERY", "SOAP":
+		return strings.ToUpper(match.endpoint.Method)
+	default:
+		return "CUSTOM"
+	}
 }
 
 func executionRequestPath(match *scopedEndpoint) string {

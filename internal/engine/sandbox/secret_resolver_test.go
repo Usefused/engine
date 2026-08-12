@@ -17,6 +17,16 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+func refreshOAuth2Flows(scopes ...string) fusedobject.OAuth2Flows {
+	declared := make(map[string]string, len(scopes))
+	for _, scope := range scopes {
+		declared[scope] = ""
+	}
+	return fusedobject.OAuth2Flows{"authorizationCode": {
+		AuthorizationURL: "https://provider.example/authorize", TokenURL: "https://provider.example/token", Scopes: declared,
+	}}
+}
+
 func singleAuthRequirement(name string) authrouting.Requirements {
 	return authrouting.Requirements{{Schemes: []authrouting.Requirement{{Scheme: name}}}}
 }
@@ -683,8 +693,7 @@ func TestSecretResolverResolveExecutionCredentialsRefreshesExpiringConnectedAuth
 		Auths: fusedobject.AuthConfigs{{
 			Name:                    "bearerAuth",
 			Type:                    "oauth2",
-			TokenURL:                "https://provider.example/token",
-			Scopes:                  []string{"account:read", "account:write"},
+			OAuth2Flows:             refreshOAuth2Flows("account:read", "account:write"),
 			TokenEndpointAuthMethod: fusedobject.TokenEndpointAuthMethodClientSecretPost,
 		}},
 		Requirements: singleAuthRequirement("bearerAuth"),
@@ -736,7 +745,7 @@ func TestSecretResolver_InvalidGrantRequiresReconnect(t *testing.T) {
 	_, _, err := resolver.ResolveExecutionCredentials(ctx, CredentialRequest{
 		AccountID: uuid.New(), AppID: appID, ServiceID: serviceID, AuthType: "oauth",
 		Auths: fusedobject.AuthConfigs{{
-			Name: "bearerAuth", Type: "oauth2", TokenURL: "https://provider.example/token",
+			Name: "bearerAuth", Type: "oauth2", OAuth2Flows: refreshOAuth2Flows(),
 			TokenEndpointAuthMethod: fusedobject.TokenEndpointAuthMethodClientSecretPost,
 		}},
 		Requirements: singleAuthRequirement("bearerAuth"),
@@ -771,7 +780,7 @@ func TestSecretResolver_ExpiredAccessWithoutRefreshRequiresReconnect(t *testing.
 	resolver := NewSecretResolver(mockStore, masterKey)
 	_, _, err := resolver.ResolveExecutionCredentials(ctx, CredentialRequest{
 		AccountID: uuid.New(), AppID: appID, ServiceID: serviceID, AuthType: "oauth",
-		Auths:        fusedobject.AuthConfigs{{Name: "bearerAuth", Type: "oauth2", TokenURL: "https://provider.example/token"}},
+		Auths:        fusedobject.AuthConfigs{{Name: "bearerAuth", Type: "oauth2", OAuth2Flows: refreshOAuth2Flows()}},
 		Requirements: singleAuthRequirement("bearerAuth"),
 		Passthrough:  map[string]any{"fused_end_user_ref": "user_456", "fused_auth_name": "bearerAuth"},
 	})

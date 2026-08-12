@@ -78,21 +78,11 @@ message ExecuteRequest {
   // request_body_hash is the SHA-256 hex digest of the exact JSON params bytes
   // sent by the SDK for this Execute call.
   string request_body_hash = 8;
-  // retry_override lets the SDK request retry bounds for this single Execute
-  // call. It can only ever narrow what a service-level RetryConfig already
-  // allows (or a fixed hard ceiling when the service has none) -- never
-  // widen it. See resolveRetryPolicy in internal/engine/retry_policy.go.
-  RetryOverride retry_override = 9;
-}
 
-// RetryOverride is intentionally numeric-only: max_retries and backoff_ms
-// are optional so "not set" is distinguishable from "explicitly 0". There is
-// no strategy field here -- the backoff algorithm (fixed vs exponential) is
-// always owned by the service's RetryConfig, never the caller, so there is
-// never a conflict between two different retry "logics" for the same call.
-message RetryOverride {
-  optional int32 max_retries = 1;
-  optional int32 backoff_ms = 2;
+  // Retry is part of the immutable service contract and is executed only by
+  // Engine, so callers cannot override it per request.
+  reserved 9;
+  reserved "retry_override";
 }
 
 message ExecuteResponse {

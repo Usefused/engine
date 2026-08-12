@@ -117,9 +117,14 @@ func TestApplyAppConfigPlanRejectsSameNameBucketReplacementAtomically(t *testing
 	}
 
 	fixture.params.TokenHash = "replacement-race-" + uuid.NewString()
-	_, err := fixture.repository.ApplyAppConfigPlan(fixture.ctx, fixture.params)
+	auditCtx := accesscontrol.ContextWithMutationAuditEvidence(fixture.ctx)
+	_, err := fixture.repository.ApplyAppConfigPlan(auditCtx, fixture.params)
 	if !errors.Is(err, ErrSDKBucketImmutable) {
 		t.Fatalf("ApplyAppConfigPlan(stale bucket) = %v, want ErrSDKBucketImmutable", err)
+	}
+	evidence, ok := accesscontrol.MutationAuditEvidenceFromContext(auditCtx)
+	if !ok || !evidence.RolledBack || evidence.Cancelled {
+		t.Fatalf("transaction audit evidence = %#v/%v", evidence, ok)
 	}
 	assertRejectedArtifactApplyState(t, fixture, replacementID)
 }
