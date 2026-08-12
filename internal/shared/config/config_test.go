@@ -3,12 +3,24 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
-// TestLoad_HomepageURL_DefaultsWhenNoFile covers the no-config-file path
-// (Load returns defaults when the path doesn't exist) -- must include the
-// new HomepageURL default alongside the existing UIURL default.
+// TestConfigHasNoExternalUIOrigin prevents environment/YAML wiring from
+// returning through a differently named field after Engine becomes same-origin.
+func TestConfigHasNoExternalUIOrigin(t *testing.T) {
+	configType := reflect.TypeOf(Config{})
+	for index := 0; index < configType.NumField(); index++ {
+		field := configType.Field(index)
+		if field.Name == "UIURL" || field.Tag.Get("yaml") == "ui_url" {
+			t.Fatalf("external UI origin remains configurable through %s", field.Name)
+		}
+	}
+}
+
+// TestLoad_HomepageURL_DefaultsWhenNoFile keeps the shared homepage default
+// stable without reintroducing an Engine-specific external UI origin.
 func TestLoad_HomepageURL_DefaultsWhenNoFile(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
 	if err != nil {
@@ -17,18 +29,14 @@ func TestLoad_HomepageURL_DefaultsWhenNoFile(t *testing.T) {
 	if cfg.HomepageURL != "http://localhost:3000" {
 		t.Errorf("expected default HomepageURL %q, got %q", "http://localhost:3000", cfg.HomepageURL)
 	}
-	if cfg.UIURL != "http://localhost:5173" {
-		t.Errorf("expected default UIURL %q, got %q", "http://localhost:5173", cfg.UIURL)
-	}
 }
 
-// TestLoad_HomepageURL_OverriddenByYAML covers the Registry's actual
-// registry.yaml shape: homepage_url alongside ui_url, both overriding
-// defaults.
+// TestLoad_HomepageURL_OverriddenByYAML verifies shared configuration can
+// still override its Registry-oriented homepage value independently.
 func TestLoad_HomepageURL_OverriddenByYAML(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "registry.yaml")
-	yamlContent := "ui_url: \"https://app.usefused.com\"\nhomepage_url: \"https://usefused.com\"\n"
+	yamlContent := "homepage_url: \"https://usefused.com\"\n"
 	if err := os.WriteFile(path, []byte(yamlContent), 0o644); err != nil {
 		t.Fatalf("failed to write test config file: %v", err)
 	}
@@ -39,21 +47,6 @@ func TestLoad_HomepageURL_OverriddenByYAML(t *testing.T) {
 	}
 	if cfg.HomepageURL != "https://usefused.com" {
 		t.Errorf("expected HomepageURL %q, got %q", "https://usefused.com", cfg.HomepageURL)
-	}
-	if cfg.UIURL != "https://app.usefused.com" {
-		t.Errorf("expected UIURL %q, got %q", "https://app.usefused.com", cfg.UIURL)
-	}
-}
-
-func TestLoad_UIURL_OverriddenByEnv(t *testing.T) {
-	t.Setenv("FUSED_UI_URL", "https://engine.example.com")
-
-	cfg, err := Load(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
-	if err != nil {
-		t.Fatalf("Load returned error: %v", err)
-	}
-	if cfg.UIURL != "https://engine.example.com" {
-		t.Errorf("expected UIURL from FUSED_UI_URL, got %q", cfg.UIURL)
 	}
 }
 

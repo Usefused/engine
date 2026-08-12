@@ -86,11 +86,8 @@ type Config struct {
 	} `yaml:"database"`
 	WorkerPool      WorkerPoolConfig `yaml:"worker_pool"`
 	DriftWorkerPool WorkerPoolConfig `yaml:"drift_worker_pool"`
-	UIURL           string           `yaml:"ui_url"`
-	// HomepageURL is the public marketing site's origin (homepage/, split out
-	// in Sprint 3). The Registry's CORS allowlist needs both this and UIURL --
-	// two separate deployments, two separate origins. The Engine never needs
-	// this: its UI only ever calls the Engine directly, never the Registry.
+	// HomepageURL remains shared configuration for Registry-oriented packages;
+	// Engine's embedded UI is same-origin and needs no configurable UI origin.
 	HomepageURL   string              `yaml:"homepage_url"`
 	Credits       CreditConfig        `yaml:"credits"`
 	Sandbox       SandboxConfig       `yaml:"sandbox"`
@@ -118,6 +115,8 @@ func Load(path string, options ...LoadOption) (*Config, error) {
 	return cfg, nil
 }
 
+// defaultConfig supplies non-secret development defaults while leaving
+// deployment identity and credentials to explicit Engine configuration.
 func defaultConfig() *Config {
 	return &Config{
 		EncryptionKey: "fused-default-encrypt-key-32b",
@@ -127,7 +126,6 @@ func defaultConfig() *Config {
 		DriftWorkerPool: WorkerPoolConfig{
 			Size: 3, // Default drift worker pool size
 		},
-		UIURL:       "http://localhost:5173", // Default UI URL
 		HomepageURL: "http://localhost:3000", // Default homepage URL (matches homepage/Dockerfile's PORT=3000)
 		Sandbox: SandboxConfig{
 			ToolCallTimeoutSeconds: 45,
@@ -174,15 +172,14 @@ func loadYAML(path string, cfg *Config) error {
 	return yaml.Unmarshal(data, cfg)
 }
 
+// applyEnvironment accepts only Engine-owned process overrides; an external UI
+// origin is intentionally absent because both Engine variants are same-origin or headless.
 func applyEnvironment(cfg *Config) {
 	if envKey := os.Getenv("FUSED_ENCRYPTION_KEY"); envKey != "" {
 		cfg.EncryptionKey = envKey
 	}
 	if envRegistryEndpoint := os.Getenv("FUSED_REGISTRY_ENDPOINT"); envRegistryEndpoint != "" {
 		cfg.Engine.RegistryEndpoint = envRegistryEndpoint
-	}
-	if envUIURL := os.Getenv("FUSED_UI_URL"); envUIURL != "" {
-		cfg.UIURL = envUIURL
 	}
 }
 
