@@ -117,16 +117,18 @@ type appResolvedPayload struct {
 	IncludeMCP       bool                  `json:"include_mcp,omitempty"`
 	TargetType       string                `json:"target_type,omitempty"`
 	TargetLanguage   string                `json:"target_language,omitempty"`
+	DefaultEngineURL string                `json:"default_engine_url,omitempty"`
 	SkipSandbox      bool                  `json:"skip_sandbox,omitempty"`
 	ContractBindings []sdkContractBinding  `json:"contract_bindings,omitempty"`
 }
 
 type sdkPlanCall struct {
-	apiKey    string
-	accountID uuid.UUID
-	actor     accesscontrol.Actor
-	request   SDKConfigPlanRequest
-	document  sdkConfigDocument
+	apiKey           string
+	accountID        uuid.UUID
+	actor            accesscontrol.Actor
+	request          SDKConfigPlanRequest
+	document         sdkConfigDocument
+	defaultEngineURL string
 }
 
 type sdkPlanResult struct {
@@ -185,7 +187,11 @@ type sdkServiceSlugResolver interface {
 }
 
 // SDKConfigPlanHandler handles POST /sdk-config/plan.
-func SDKConfigPlanHandler(configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient) http.HandlerFunc {
+func SDKConfigPlanHandler(configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, defaultEngineURLs ...string) http.HandlerFunc {
+	defaultEngineURL := ""
+	if len(defaultEngineURLs) > 0 {
+		defaultEngineURL = strings.TrimSpace(defaultEngineURLs[0])
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.sdk_config.plan")
 		defer span.End()
@@ -203,11 +209,12 @@ func SDKConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 		}
 		setSDKConfigSpanAttributes(span, req.ConfigKey, doc)
 		result, err := createSDKConfigPlan(ctx, configStore, s, registryClient, sdkPlanCall{
-			apiKey:    r.Header.Get("X-API-Key"),
-			accountID: actor.AccountID,
-			actor:     actor,
-			request:   req,
-			document:  doc,
+			apiKey:           r.Header.Get("X-API-Key"),
+			accountID:        actor.AccountID,
+			actor:            actor,
+			request:          req,
+			document:         doc,
+			defaultEngineURL: defaultEngineURL,
 		})
 		if err != nil {
 			writeSDKConfigError(w, err, ctx)
@@ -641,7 +648,7 @@ func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepos
 	if err != nil {
 		return sdkPlanDefinition{}, err
 	}
-	resolvedPayload, _ := json.Marshal(resolvedSDKPayload(sdkGenerateRequest(call.document, selections, bindings), bucketID, appID, noop))
+	resolvedPayload, _ := json.Marshal(resolvedSDKPayload(sdkGenerateRequest(call.document, selections, bindings, call.defaultEngineURL), bucketID, appID, noop))
 	return sdkPlanDefinition{services: services, resolvedServices: resolvedServices, desiredState: desiredState, resolvedPayload: resolvedPayload, noop: noop}, nil
 }
 
@@ -1640,7 +1647,7 @@ func previousSDKDocument(state *store.ConfigState) sdkConfigDocument {
 	return previous
 }
 
-func sdkGenerateRequest(doc sdkConfigDocument, selections []models.SDKSelection, bindings []sdkContractBinding) GenerateSDKRequest {
+func sdkGenerateRequest(doc sdkConfigDocument, selections []models.SDKSelection, bindings []sdkContractBinding, defaultEngineURL string) GenerateSDKRequest {
 	return GenerateSDKRequest{
 		Name:             doc.Name,
 		Description:      fmt.Sprintf("GitOps managed SDK %s", doc.Name),
@@ -1649,6 +1656,7 @@ func sdkGenerateRequest(doc sdkConfigDocument, selections []models.SDKSelection,
 		IncludeMCP:       false,
 		TargetType:       store.AppKindSDK.String(),
 		TargetLanguage:   doc.Language,
+		DefaultEngineURL: strings.TrimSpace(defaultEngineURL),
 		ContractBindings: bindings,
 	}
 }
@@ -1657,7 +1665,8 @@ func resolvedSDKPayload(request GenerateSDKRequest, bucketID, appID uuid.UUID, n
 	return appResolvedPayload{
 		AppID: appID, Noop: noop, BucketID: bucketID, Name: request.Name, Description: request.Description, Version: request.Version,
 		Selections: request.Selections, IncludeMCP: request.IncludeMCP, TargetType: request.TargetType,
-		TargetLanguage: request.TargetLanguage, SkipSandbox: request.SkipSandbox, ContractBindings: request.ContractBindings,
+		TargetLanguage: request.TargetLanguage, DefaultEngineURL: request.DefaultEngineURL,
+		SkipSandbox: request.SkipSandbox, ContractBindings: request.ContractBindings,
 	}
 }
 

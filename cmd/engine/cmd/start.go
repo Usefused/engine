@@ -736,7 +736,10 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	// This middleware must run before proxy routes: paths such as /integrations
 	// are both SPA routes and Registry API routes, so the request shape decides.
 	uiFS := backend.GetUIFS()
-	r.Use(api.EmbeddedUIMiddleware(uiFS))
+	r.Use(api.EmbeddedUIMiddleware(uiFS, api.EmbeddedUIRuntimeConfig{
+		EnginePublicURL:     deps.cfg.Engine.PublicURL,
+		EnginePublicGRPCURL: deps.cfg.Engine.PublicGRPCURL,
+	}))
 	auditRecorder, _ := deps.engineStore.(accesscontrol.AuditRecorder)
 	r.Use(controlActorMiddlewareWithAudit(deps.controlAuth, auditRecorder, deps.browserCookies))
 	r.Use(controlGraphQLAuditMiddleware(auditRecorder))

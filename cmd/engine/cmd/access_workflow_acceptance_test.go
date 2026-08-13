@@ -194,7 +194,7 @@ func accessWorkflowRouter(t *testing.T, engineStore store.Store, configStore sto
 	router.Use(controlActorMiddlewareWithAudit(authenticator, auditRecorder))
 	router.Use(controlGraphQLAuditMiddleware(auditRecorder))
 	router.Use(controlAuthorizationMiddlewareWithAudit(accesscontrol.SnapshotAuthorizer{}, newControlRequirementResolver(engineStore, configStore), auditRecorder))
-	api.MountConfigRoutes(router, configStore, engineStore, registryClient, registryProxy, registryClient, nil)
+	api.MountConfigRoutes(router, configStore, engineStore, registryClient, registryProxy, registryClient, nil, "")
 	if err := api.MountMCPGraphQLRoute(router, configStore, engineStore, registryClient, registryClient, nil, authenticator); err != nil {
 		t.Fatalf("mount Engine GraphQL: %v", err)
 	}

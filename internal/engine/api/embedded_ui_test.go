@@ -23,6 +23,15 @@ func TestEmbeddedUIMiddleware(t *testing.T) {
 		wantCache  string
 	}{
 		{
+			name:       "serves runtime endpoint configuration",
+			method:     http.MethodGet,
+			path:       "/env.js",
+			accept:     "*/*",
+			wantStatus: http.StatusOK,
+			wantBody:   `window.__FUSED_ENV={"BACKEND_URL":"","ENGINE_PUBLIC_URL":"https://acme.example.com","ENGINE_PUBLIC_GRPC_URL":"https://acme-grpc.example.com:443"};`,
+			wantCache:  "no-cache",
+		},
+		{
 			name:       "serves spa for browser route",
 			method:     http.MethodGet,
 			path:       "/integrations/stripe",
@@ -103,7 +112,7 @@ func TestEmbeddedUIMiddleware(t *testing.T) {
 			if tt.wantCache != "" && rec.Header().Get("Cache-Control") != tt.wantCache {
 				t.Fatalf("cache-control = %q, want %q", rec.Header().Get("Cache-Control"), tt.wantCache)
 			}
-			if tt.wantStatus == http.StatusOK {
+			if tt.wantStatus == http.StatusOK && tt.path != "/env.js" {
 				assertEmbeddedUIServerTiming(t, rec.Header().Get("Server-Timing"))
 			} else if rec.Header().Get("Server-Timing") != "" {
 				t.Fatalf("Server-Timing = %q, want empty for pass-through", rec.Header().Get("Server-Timing"))
@@ -169,5 +178,8 @@ func testEmbeddedUIHandler() http.Handler {
 		w.WriteHeader(http.StatusTeapot)
 		_, _ = w.Write([]byte("next"))
 	})
-	return EmbeddedUIMiddleware(uiFS)(next)
+	return EmbeddedUIMiddleware(uiFS, EmbeddedUIRuntimeConfig{
+		EnginePublicURL:     "https://acme.example.com",
+		EnginePublicGRPCURL: "https://acme-grpc.example.com:443",
+	})(next)
 }

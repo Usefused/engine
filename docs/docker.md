@@ -40,6 +40,9 @@ Containers need:
 - `FUSED_DATABASE_MAX_CONN_IDLE_TIME` to release unused pool connections;
   standalone defaults to `30m`, while Fused-hosted starter Engines use `2m`
 - `FUSED_ENCRYPTION_KEY`
+- `FUSED_ENGINE_PUBLIC_URL` and `FUSED_ENGINE_PUBLIC_GRPC_URL` when the
+  embedded UI should show copy-ready external HTTP and gRPC addresses; these
+  values describe routes and do not create DNS or load-balancer configuration
 - `FUSED_REGISTRY_ENDPOINT` only when Fused support directs you away from the
   production Fused Cloud Registry default
 

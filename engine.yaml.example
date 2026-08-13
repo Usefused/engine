@@ -16,6 +16,8 @@ database:
 engine:
   # license_key: License key for Registry handshake (authentication and entitlements).
   # Override in production via FUSED_LICENSE_KEY environment variable.
+  # public_url: "https://engine.example.com"
+  # public_grpc_url: "https://engine-exec.example.com"
   worker_counts:
     mcp_analytics: 2
     webhook_config: 2

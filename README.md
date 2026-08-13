@@ -139,6 +139,11 @@ FUSED_DATABASE_MAX_CONN_IDLE_TIME=30m
 # Your organization's Fused Cloud license key for the Engine (Required)
 FUSED_LICENSE_KEY="<provided-by-fused>"
 
+# Public addresses shown in the Engine Settings page. These do not create DNS
+# or ingress routes; set them to the routes configured by your operator.
+FUSED_ENGINE_PUBLIC_URL="https://engine.example.com"
+FUSED_ENGINE_PUBLIC_GRPC_URL="https://engine-exec.example.com"
+
 # (Optional) If you have a separate external NATS cluster, set this to override the embedded server.
 # Leave blank to boot the internal embedded NATS.
 # NATS_URL="nats://nats:4222" 
@@ -169,6 +174,12 @@ OTEL_EXPORTER_OTLP_ENDPOINT="http://jaeger:4318"
 # Optional: override the Fused Cloud Registry endpoint only when directed by Fused support.
 # FUSED_REGISTRY_ENDPOINT="https://registry.usefused.com/graphql"
 ```
+
+Newly generated TypeScript and Python SDK versions embed
+`FUSED_ENGINE_PUBLIC_GRPC_URL` as their default Engine target. Applications can
+override it with the SDK constructor option (`engineUrl` / `engine_url`) or the
+`FUSED_ENGINE_GRPC_URL` and legacy `FUSED_ENGINE_URL` environment variables.
+Existing generated versions remain immutable when this setting changes.
 
 Provider quota admission uses JetStream KV as the live cluster-wide authority.
 PostgreSQL receives an asynchronous, monotonic projection for recovery and

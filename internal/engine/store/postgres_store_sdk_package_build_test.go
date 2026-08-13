@@ -57,7 +57,8 @@ func TestGetSDKPackageBuildRequestUsesExactAppliedPlan(t *testing.T) {
 	}
 	binding := models.SDKContractBinding{ServiceID: selection.ServiceID, ServiceVersionID: selection.ServiceVersionID, Version: "2026-01", Revision: 7, SourceHash: "contract"}
 	resolved, _ := json.Marshal(map[string]any{
-		"description": "Pinned Jira SDK", "contract_bindings": []models.SDKContractBinding{binding},
+		"description": "Pinned Jira SDK", "default_engine_url": "https://tenant-exec.example.com:443",
+		"contract_bindings": []models.SDKContractBinding{binding},
 	})
 	_, err = pool.Exec(ctx, `
 		INSERT INTO fused_config_plans
@@ -79,6 +80,9 @@ func TestGetSDKPackageBuildRequestUsesExactAppliedPlan(t *testing.T) {
 	}
 	if request.Name != "Jira-SDK" || request.Version != "2.0.0" || request.Description != "Pinned Jira SDK" {
 		t.Fatalf("unexpected SDK metadata: %#v", request)
+	}
+	if request.DefaultEngineURL != "https://tenant-exec.example.com:443" {
+		t.Fatalf("default Engine URL = %q", request.DefaultEngineURL)
 	}
 	if len(request.Selections) != 1 || request.Selections[0].ServiceVersionID != selection.ServiceVersionID || len(request.ContractBindings) != 1 || request.ContractBindings[0].Revision != 7 {
 		t.Fatalf("unexpected pinned definition: %#v", request)

@@ -50,6 +50,8 @@ var GlobalEncryptionKey []byte
 
 type EngineConfig struct {
 	RegistryEndpoint       string `yaml:"registry_endpoint"`
+	PublicURL              string `yaml:"public_url"`
+	PublicGRPCURL          string `yaml:"public_grpc_url"`
 	AccountID              string `yaml:"account_id"`
 	LicenseKey             string `yaml:"license_key"`
 	LicenseKeySource       string `yaml:"-"`
@@ -180,6 +182,12 @@ func applyEnvironment(cfg *Config) {
 	}
 	if envRegistryEndpoint := os.Getenv("FUSED_REGISTRY_ENDPOINT"); envRegistryEndpoint != "" {
 		cfg.Engine.RegistryEndpoint = envRegistryEndpoint
+	}
+	if publicURL := os.Getenv("FUSED_ENGINE_PUBLIC_URL"); publicURL != "" {
+		cfg.Engine.PublicURL = publicURL
+	}
+	if publicGRPCURL := os.Getenv("FUSED_ENGINE_PUBLIC_GRPC_URL"); publicGRPCURL != "" {
+		cfg.Engine.PublicGRPCURL = publicGRPCURL
 	}
 }
 
