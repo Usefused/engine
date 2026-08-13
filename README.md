@@ -7,7 +7,7 @@
 
 ---
 
-[Fused](https://usefused.com) is the integration harness — one place to define, run, and control the integrations your apps and agents depend on. The Engine is the self-hosted control plane that applies workspace policies, injects credentials, and routes configured API calls, MCP sessions, and webhook ingress.
+[Fused](https://usefused.com) is the integration gateway — one place to define, run, and control the integrations your apps and agents depend on. The Engine is the self-hosted control plane that applies workspace policies, injects credentials, and routes configured API calls, MCP sessions, and webhook ingress.
 
 The **Fused Engine** is the self-hosted runtime that applies workspace policies created in Fused. Deploy it in your own infrastructure to run configured API calls, MCP sessions, and webhook ingress close to your systems.
 
