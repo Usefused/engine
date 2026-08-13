@@ -30,6 +30,12 @@ test("keeps managed sign-in failures generic and forces identity choice only on 
   assert.doesNotMatch(loginSource, /invited to this Engine|Logto/i);
 });
 
+test("polls an approved managed transaction before accepting an auto-closed tab", () => {
+  const pollPosition = loginSource.indexOf("await api.auth.pollManaged");
+  const closedPosition = loginSource.indexOf('if (popup.closed) return "closed"');
+  assert.ok(pollPosition >= 0 && closedPosition > pollPosition);
+});
+
 test("approves CLI enrollment without exposing a generated credential", () => {
   assert.match(loginSource, /loginDestination\(next\)/);
   assert.match(cliLoginSource, /window\.location\.hash/);

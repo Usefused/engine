@@ -60,7 +60,6 @@ async function waitForManagedLogin(
   const expiresAt = Date.parse(transaction.expires_at);
   let failures = 0;
   while (!signal.aborted && Date.now() < expiresAt) {
-    if (popup.closed) return "closed";
     try {
       const result = await api.auth.pollManaged(transaction.transaction_id, transaction.poll_token, signal);
       failures = 0;
@@ -70,6 +69,9 @@ async function waitForManagedLogin(
       failures += 1;
       if (!canRetryManagedPoll(error, failures)) throw error;
     }
+    // A successful callback closes its auxiliary tab. Polling once before
+    // observing that close prevents the completion signal racing the Engine.
+    if (popup.closed) return "closed";
     await new Promise((resolve) => window.setTimeout(resolve, POLL_INTERVAL_MS));
   }
   return signal.aborted ? "cancelled" : "expired";
