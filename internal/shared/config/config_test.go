@@ -122,3 +122,28 @@ func TestLoadExecutionRetentionDefaultsAndYAMLOverrides(t *testing.T) {
 		t.Fatalf("retention config = %d days/%d rows", configured.Engine.ExecutionRetentionDays, configured.Engine.ExecutionCleanupBatch)
 	}
 }
+
+func TestLoadEnginePublicEndpoints(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "engine.yaml")
+	if err := os.WriteFile(path, []byte("engine:\n  public_url: https://yaml.example.com\n  public_grpc_url: https://yaml-grpc.example.com:443\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	configured, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load YAML endpoints: %v", err)
+	}
+	if configured.Engine.PublicURL != "https://yaml.example.com" || configured.Engine.PublicGRPCURL != "https://yaml-grpc.example.com:443" {
+		t.Fatalf("YAML public endpoints = %q/%q", configured.Engine.PublicURL, configured.Engine.PublicGRPCURL)
+	}
+
+	t.Setenv("FUSED_ENGINE_PUBLIC_URL", "https://env.example.com")
+	t.Setenv("FUSED_ENGINE_PUBLIC_GRPC_URL", "https://env-grpc.example.com:443")
+	configured, err = Load(path)
+	if err != nil {
+		t.Fatalf("Load environment endpoints: %v", err)
+	}
+	if configured.Engine.PublicURL != "https://env.example.com" || configured.Engine.PublicGRPCURL != "https://env-grpc.example.com:443" {
+		t.Fatalf("environment public endpoints = %q/%q", configured.Engine.PublicURL, configured.Engine.PublicGRPCURL)
+	}
+}

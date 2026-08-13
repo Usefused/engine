@@ -1219,7 +1219,7 @@ type SDKInjectionConfig struct {
 
 const AppScopeSchemaVersion = 3
 
-const SDKGeneratorVersion = "registry-generator-v1"
+const SDKGeneratorVersion = "registry-generator-v3"
 
 const (
 	SDKGenerationStatusPending  = "pending"
@@ -1248,6 +1248,7 @@ type SDKGenerationRequest struct {
 	IncludeMCP       bool                 `json:"include_mcp"`
 	TargetType       string               `json:"target_type"`
 	TargetLanguage   string               `json:"target_language"`
+	DefaultEngineURL string               `json:"default_engine_url,omitempty"`
 	SkipSandbox      bool                 `json:"skip_sandbox"`
 	ContractBindings []SDKContractBinding `json:"contract_bindings,omitempty"`
 }

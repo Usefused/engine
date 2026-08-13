@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"path"
 	"strings"
@@ -9,10 +10,17 @@ import (
 
 const embeddedUIIndex = "index.html"
 
+type EmbeddedUIRuntimeConfig struct {
+	BackendURL          string `json:"BACKEND_URL"`
+	EnginePublicURL     string `json:"ENGINE_PUBLIC_URL"`
+	EnginePublicGRPCURL string `json:"ENGINE_PUBLIC_GRPC_URL"`
+}
+
 // EmbeddedUIMiddleware serves the embedded SPA without taking over Engine API
 // routes. Real build artifacts are served first because service workers,
 // logos, and other root-level files do not live under /assets.
-func EmbeddedUIMiddleware(uiFS http.FileSystem) func(http.Handler) http.Handler {
+func EmbeddedUIMiddleware(uiFS http.FileSystem, runtimeConfigs ...EmbeddedUIRuntimeConfig) func(http.Handler) http.Handler {
+	runtimeConfig := firstEmbeddedUIRuntimeConfig(runtimeConfigs)
 	return func(next http.Handler) http.Handler {
 		if uiFS == nil {
 			return next
@@ -20,6 +28,10 @@ func EmbeddedUIMiddleware(uiFS http.FileSystem) func(http.Handler) http.Handler 
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !isUIReadMethod(r.Method) {
 				next.ServeHTTP(w, r)
+				return
+			}
+			if embeddedUIAssetPath(r.URL.Path) == "env.js" {
+				serveEmbeddedUIRuntimeConfig(w, r, runtimeConfig)
 				return
 			}
 			if serveEmbeddedUIFile(w, r, uiFS, embeddedUIAssetPath(r.URL.Path), "asset") {
@@ -30,6 +42,23 @@ func EmbeddedUIMiddleware(uiFS http.FileSystem) func(http.Handler) http.Handler 
 			}
 			next.ServeHTTP(w, r)
 		})
+	}
+}
+
+func firstEmbeddedUIRuntimeConfig(configs []EmbeddedUIRuntimeConfig) EmbeddedUIRuntimeConfig {
+	if len(configs) == 0 {
+		return EmbeddedUIRuntimeConfig{}
+	}
+	return configs[0]
+}
+
+func serveEmbeddedUIRuntimeConfig(w http.ResponseWriter, r *http.Request, config EmbeddedUIRuntimeConfig) {
+	payload, _ := json.Marshal(config)
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(append(append([]byte("window.__FUSED_ENV="), payload...), ';'))
 	}
 }
 

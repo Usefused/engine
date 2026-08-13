@@ -421,7 +421,7 @@ func TestSDKConfigPlanHandler_UsesOperations(t *testing.T) {
 	}}
 
 	r := newControlTestRouter(s.accountID)
-	r.Post("/sdk-config/plan", SDKConfigPlanHandler(configStore, s, registryClient))
+	r.Post("/sdk-config/plan", SDKConfigPlanHandler(configStore, s, registryClient, "https://tenant-exec.example.com:443"))
 
 	body := []byte(`{
 		"source_hash": "abc",
@@ -463,6 +463,9 @@ func TestSDKConfigPlanHandler_UsesOperations(t *testing.T) {
 	}
 	if resolved.Selections[0].ServiceID != serviceID {
 		t.Fatalf("expected service %s, got %s", serviceID, resolved.Selections[0].ServiceID)
+	}
+	if resolved.DefaultEngineURL != "https://tenant-exec.example.com:443" {
+		t.Fatalf("default Engine URL = %q", resolved.DefaultEngineURL)
 	}
 	var response struct {
 		RequiredPermissions []requiredPermissionResponse `json:"required_permissions"`
@@ -1321,7 +1324,7 @@ func TestValidateRegistryArtifactIdentityRejectsReplacement(t *testing.T) {
 func TestSDKGenerationPayloadForPlanPreservesCanonicalSourceHash(t *testing.T) {
 	planID, familyID, appID := uuid.New(), uuid.New(), uuid.New()
 	sourceHash := "sha256:" + strings.Repeat("b", 64)
-	base, err := json.Marshal(GenerateSDKRequest{Name: "jira-sdk", Version: "2.0.0"})
+	base, err := json.Marshal(GenerateSDKRequest{Name: "jira-sdk", Version: "2.0.0", DefaultEngineURL: "https://tenant-exec.example.com:443"})
 	if err != nil {
 		t.Fatalf("marshal base request: %v", err)
 	}
@@ -1338,6 +1341,9 @@ func TestSDKGenerationPayloadForPlanPreservesCanonicalSourceHash(t *testing.T) {
 	}
 	if request.IdempotencyKey != planID.String() || request.GeneratorVersion != models.SDKGeneratorVersion {
 		t.Fatalf("generation contract = %#v, want plan idempotency and pinned generator", request)
+	}
+	if request.DefaultEngineURL != "https://tenant-exec.example.com:443" {
+		t.Fatalf("default Engine URL = %q, want preserved plan URL", request.DefaultEngineURL)
 	}
 }
 

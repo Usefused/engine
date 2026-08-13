@@ -1,8 +1,8 @@
 /// <reference types="vite/client" />
 
-import 'react';
+import "react";
 
-declare module 'react' {
+declare module "react" {
   interface HTMLAttributes<T> extends AriaAttributes, DOMAttributes<T> {
     toolname?: string;
     tooldescription?: string;
@@ -14,7 +14,12 @@ declare module 'react' {
 declare global {
   interface Window {
     // Injected by the Go backend before hydration (see root.tsx clientLoader).
-    __FUSED_ENV?: { BACKEND_URL?: string; [key: string]: unknown };
+    __FUSED_ENV?: {
+      BACKEND_URL?: string;
+      ENGINE_PUBLIC_URL?: string;
+      ENGINE_PUBLIC_GRPC_URL?: string;
+      [key: string]: unknown;
+    };
     // Re-exposed subset of __FUSED_ENV plus loader-derived values, read by
     // client components that need it outside the route loader tree.
     ENV?: {

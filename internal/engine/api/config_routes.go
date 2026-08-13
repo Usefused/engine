@@ -8,7 +8,7 @@ import (
 )
 
 // MountConfigRoutes attaches all the config-as-code endpoints to the main Engine router.
-func MountConfigRoutes(r chi.Router, configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, proxy Forwarder, registryClient sandbox.RegistryClient, masterKey []byte, revisionSinks ...authorizationRevisionSink) {
+func MountConfigRoutes(r chi.Router, configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, proxy Forwarder, registryClient sandbox.RegistryClient, masterKey []byte, enginePublicGRPCURL string, revisionSinks ...authorizationRevisionSink) {
 	revisionSink := firstAuthorizationRevisionSink(revisionSinks)
 	revisionLoader, _ := s.(accesscontrol.AuthorizationRevisionLoader)
 	// Workspace config routes (mounted alongside the existing /workspace routes)
@@ -25,7 +25,7 @@ func MountConfigRoutes(r chi.Router, configStore store.ConfigRepository, s store
 	// SDK config routes
 	packageClient, _ := registryClient.(SDKPackageClient)
 	r.Route("/sdk-config", func(r chi.Router) {
-		r.Post("/plan", SDKConfigPlanHandler(configStore, s, registryClient))
+		r.Post("/plan", SDKConfigPlanHandler(configStore, s, registryClient, enginePublicGRPCURL))
 		r.Post("/apply", authorizationRevisionSyncHandler(revisionLoader, revisionSink, SDKConfigApplyHandler(configStore, s, proxy, registryClient)))
 	})
 	r.Get("/sdks/{app_id}/download", SDKPackageDownloadHandler(s, proxy, packageClient))

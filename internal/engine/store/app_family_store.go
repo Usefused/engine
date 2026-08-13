@@ -464,6 +464,7 @@ func (s *postgresStore) GetSDKPackageBuildRequest(ctx context.Context, accountID
 		       COALESCE(plan.resolved_payload->>'description', ''),
 		       COALESCE((plan.resolved_payload->>'include_mcp')::boolean, false),
 		       COALESCE((plan.resolved_payload->>'skip_sandbox')::boolean, false),
+		       COALESCE(plan.resolved_payload->>'default_engine_url', ''),
 		       COALESCE(plan.resolved_payload->'contract_bindings', '[]'::jsonb),
 		       plan.id
 		FROM fused_apps app
@@ -476,6 +477,7 @@ func (s *postgresStore) GetSDKPackageBuildRequest(ctx context.Context, accountID
 			WHERE applied.config_key = app.config_key
 			  AND applied.source_hash = app.source_hash
 			  AND applied.status = 'applied'
+			  AND NOT COALESCE((applied.resolved_payload->>'noop')::boolean, false)
 			ORDER BY applied.applied_at DESC, applied.created_at DESC
 			LIMIT 1
 		) plan ON true
@@ -486,7 +488,7 @@ func (s *postgresStore) GetSDKPackageBuildRequest(ctx context.Context, accountID
 		&request.Name, &request.Version, &request.AppFamilyID, &request.AppID,
 		&request.SourceHash, &request.GeneratorVersion, &request.TargetLanguage,
 		&selections, &request.Description, &request.IncludeMCP, &request.SkipSandbox,
-		&bindings, &planID,
+		&request.DefaultEngineURL, &bindings, &planID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrAppNotFound

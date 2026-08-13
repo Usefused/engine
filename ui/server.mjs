@@ -9,6 +9,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const clientDir = path.join(__dirname, "build", "client");
 const port = Number(process.env.PORT || 3000);
 const backendURL = process.env.BACKEND_URL || "http://localhost:8081";
+const enginePublicURL = process.env.FUSED_ENGINE_PUBLIC_URL || "";
+const enginePublicGRPCURL = process.env.FUSED_ENGINE_PUBLIC_GRPC_URL || "";
 
 const contentTypes = {
 	".css": "text/css; charset=utf-8",
@@ -58,7 +60,13 @@ function serveEnv(res) {
 		"Content-Type": "text/javascript; charset=utf-8",
 		"Vary": "Accept-Encoding",
 	});
-	res.end(`window.__FUSED_ENV=${JSON.stringify({ BACKEND_URL: backendURL })};`);
+	res.end(
+		`window.__FUSED_ENV=${JSON.stringify({
+			BACKEND_URL: backendURL,
+			ENGINE_PUBLIC_URL: enginePublicURL,
+			ENGINE_PUBLIC_GRPC_URL: enginePublicGRPCURL,
+		})};`
+	);
 }
 
 function resolveAssetPath(rawPath) {
