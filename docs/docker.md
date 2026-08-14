@@ -46,6 +46,11 @@ Containers need:
 - `FUSED_REGISTRY_ENDPOINT` only when Fused support directs you away from the
   production Fused Cloud Registry default
 
+Engine accepts one standard PostgreSQL DSN and has no provider-specific
+database branching. It creates or upgrades its own tables through that
+connection during startup. Moving an existing database between providers is a
+separate operator-run data migration.
+
 External NATS is required when horizontally replicating Engine. Set `NATS_URL`
 without embedded credentials, then configure exactly one of
 `NATS_CREDS_FILE`, `NATS_NKEY_SEED_FILE`, `NATS_TOKEN`, or the paired

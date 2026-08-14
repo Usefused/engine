@@ -113,6 +113,7 @@ func runEngine() {
 	defer observability.CloseMetrics(ctx)
 
 	cfg, database, natsClient, rateLimitKV := initDependencies(ctx, config.WithEngineLicenseSources(licenseSources))
+	defer database.Close()
 	defer natsClient.Close()
 
 	applyEngineOverrides(cfg)
