@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -20,7 +19,11 @@ func InitEnginePostgres(ctx context.Context, dsn string) (*pgxpool.Pool, error) 
 	return initPostgresWithSchema(ctx, dsn, initEngineSchema)
 }
 
-func initPostgresWithSchema(ctx context.Context, dsn string, schemaInitFunc func(context.Context, *pgxpool.Pool) error) (*pgxpool.Pool, error) {
+func initPostgresWithSchema(
+	ctx context.Context,
+	dsn string,
+	schemaInitFunc func(context.Context, *pgxpool.Pool) error,
+) (*pgxpool.Pool, error) {
 	config, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, err
@@ -28,7 +31,6 @@ func initPostgresWithSchema(ctx context.Context, dsn string, schemaInitFunc func
 	if err := applyEngineDatabasePoolPolicy(config); err != nil {
 		return nil, err
 	}
-
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, err
@@ -37,8 +39,8 @@ func initPostgresWithSchema(ctx context.Context, dsn string, schemaInitFunc func
 	// Engine owns its local runtime tables, so startup must reconcile that schema
 	// even when Registry migrations are disabled in a neighbouring deployment.
 	if err := schemaInitFunc(ctx, pool); err != nil {
-		log.Printf("Schema initialization failed: %v", err)
-		return nil, err
+		pool.Close()
+		return nil, fmt.Errorf("initialize Engine schema: %w", err)
 	}
 
 	return pool, nil

@@ -175,6 +175,15 @@ OTEL_EXPORTER_OTLP_ENDPOINT="http://jaeger:4318"
 # FUSED_REGISTRY_ENDPOINT="https://registry.usefused.com/graphql"
 ```
 
+Engine is PostgreSQL-provider neutral and resolves one standard PostgreSQL DSN.
+Hosted deployments supply it through `FUSED_DATABASE_URL`; existing
+self-hosted YAML and `DATABASE_URL` settings are alternative configuration
+sources, not additional connections. Engine contains no provider-specific
+routing, port, or username rules. On startup, it creates or upgrades the tables
+it owns through that connection before serving requests. Moving an existing
+Engine database and its data between providers remains an operator-run
+migration.
+
 Newly generated TypeScript and Python SDK versions embed
 `FUSED_ENGINE_PUBLIC_GRPC_URL` as their default Engine target. Applications can
 override it with the SDK constructor option (`engineUrl` / `engine_url`) or the
