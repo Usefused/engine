@@ -1180,7 +1180,7 @@ func (c *HTTPRegistryClient) FetchServiceVersionExecutionAuthContracts(ctx conte
 		Query: `query ServiceVersionExecutionAuthContracts($selections: [ServiceVersionExecutionAuthSelectionInput!]!) {
 			serviceVersionExecutionAuthContracts(selections: $selections) {
 				service_id version service_version_id operation_names select_all
-				auth_configs { name type scheme oauth2_flows }
+				auth_configs { name type scheme basic_password_mode oauth2_flows }
 				operations { name security_requirements { schemes { scheme scopes } } }
 			}
 		}`,

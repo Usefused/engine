@@ -2003,17 +2003,38 @@ func reserveSDKVersionIdentity(ctx context.Context, s store.Store, planID, famil
 
 func runTrackedSDKGeneration(ctx context.Context, proxy Forwarder, apiKey string, payload json.RawMessage) (sdkGenerationResult, error) {
 	result := sdkGenerationResult{registryGenerationAttempted: true}
-	generated, err := runSDKGeneration(ctx, proxy, apiKey, payload)
-	if err != nil {
+	for attempt := 0; ; attempt++ {
+		generated, err := runSDKGeneration(ctx, proxy, apiKey, payload)
+		if err == nil {
+			generated.registryGenerationAttempted = true
+			return generated, nil
+		}
 		var proxyErr sdkProxyError
 		if errors.As(err, &proxyErr) && proxyErr.status >= 400 && proxyErr.status < 500 {
 			result.registryGenerationOutcomeConfirmed = true
+			return result, err
 		}
-		return result, err
+		if attempt >= len(sdkGenerationRequestRetryDelays) || !waitForSDKGenerationRetry(ctx, sdkGenerationRequestRetryDelays[attempt]) {
+			return result, err
+		}
 	}
-	result = generated
-	result.registryGenerationAttempted = true
-	return result, nil
+}
+
+// Registry generation is durably idempotent on the plan ID and deterministic
+// app identity embedded in payload. Replaying the exact request while this
+// apply still owns its lease resolves transient proxy/5xx ambiguity without
+// allowing a second package or app version to be created.
+var sdkGenerationRequestRetryDelays = [...]time.Duration{100 * time.Millisecond, 500 * time.Millisecond}
+
+func waitForSDKGenerationRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func compensateNewRegistryPackage(ctx context.Context, proxy Forwarder, result sdkGenerationResult) bool {

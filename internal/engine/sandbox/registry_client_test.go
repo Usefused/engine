@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
@@ -105,7 +106,7 @@ func TestFetchServiceVersionExecutionAuthContractsDecodesOperationSecurity(t *te
 			if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
 				t.Fatalf("decode request: %v", err)
 			}
-			body := `{"data":{"serviceVersionExecutionAuthContracts":[{"service_id":"` + serviceID.String() + `","version":"v1","service_version_id":"` + versionID.String() + `","operation_names":["listItems"],"select_all":false,"auth_configs":[{"name":"bearerAuth","type":"http","scheme":"bearer"}],"operations":[{"name":"listItems","security_requirements":[{"schemes":[{"scheme":"bearerAuth","scopes":[]}]}]}]}]}}`
+			body := `{"data":{"serviceVersionExecutionAuthContracts":[{"service_id":"` + serviceID.String() + `","version":"v1","service_version_id":"` + versionID.String() + `","operation_names":["listItems"],"select_all":false,"auth_configs":[{"name":"bearerAuth","type":"http","scheme":"bearer"},{"name":"basicAuth","type":"http","scheme":"basic","basic_password_mode":"required"}],"operations":[{"name":"listItems","security_requirements":[{"schemes":[{"scheme":"bearerAuth","scopes":[]}]}]}]}]}}`
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 		})},
 	}
@@ -119,10 +120,13 @@ func TestFetchServiceVersionExecutionAuthContractsDecodesOperationSecurity(t *te
 	if len(contracts) != 1 || len(contracts[0].Operations) != 1 || contracts[0].OperationNames[0] != "listItems" || contracts[0].Operations[0].SecurityRequirements[0].Schemes[0].Scheme != "bearerAuth" {
 		t.Fatalf("unexpected execution auth contracts: %#v", contracts)
 	}
+	if len(contracts[0].AuthConfigs) != 2 || contracts[0].AuthConfigs[1].BasicPasswordMode != authrouting.BasicPasswordRequired {
+		t.Fatalf("basic password mode was not preserved: %#v", contracts[0].AuthConfigs)
+	}
 	if !strings.Contains(requestBody.Query, "serviceVersionExecutionAuthContracts") {
 		t.Fatalf("expected selection-aware GraphQL query, got %q", requestBody.Query)
 	}
-	if !strings.Contains(requestBody.Query, "operation_names select_all") || strings.Contains(requestBody.Query, "key_name") || strings.Contains(requestBody.Query, "token_endpoint_auth_method") {
+	if !strings.Contains(requestBody.Query, "operation_names select_all") || !strings.Contains(requestBody.Query, "basic_password_mode") || strings.Contains(requestBody.Query, "key_name") || strings.Contains(requestBody.Query, "token_endpoint_auth_method") {
 		t.Fatalf("execution auth contract did not use its minimal correlated projection: %q", requestBody.Query)
 	}
 	selections, ok := requestBody.Variables["selections"].([]interface{})
