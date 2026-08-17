@@ -1031,10 +1031,47 @@ func TestExecuteSDKConfigApplyRetainsLeaseForAmbiguousGenerationResponse(t *test
 			if _, err := executeSDKConfigApply(context.Background(), fixture.configStore, fixture.engineStore, proxy, fixture.registry, fixture.call); err == nil || !strings.Contains(err.Error(), "plan_apply_in_progress") {
 				t.Fatalf("retry error = %v, want active plan lease", err)
 			}
-			if len(proxy.forwardMethods) != 1 {
+			if len(proxy.forwardMethods) != 1+len(sdkGenerationRequestRetryDelays) {
 				t.Fatalf("fenced retry reached Registry: methods=%v", proxy.forwardMethods)
 			}
 		})
+	}
+}
+
+func TestRunTrackedSDKGenerationRecoversTransientGatewayFailure(t *testing.T) {
+	appID := uuid.New()
+	proxy := &recordingForwarder{
+		statuses: []int{http.StatusBadGateway, http.StatusAccepted},
+		bodies: []string{
+			`{"error":"temporary upstream failure"}`,
+			`{"app_id":"` + appID.String() + `","status":"complete"}`,
+		},
+	}
+
+	result, err := runTrackedSDKGeneration(context.Background(), proxy, "fsk_test", json.RawMessage(`{"idempotency_key":"plan-1"}`))
+	if err != nil {
+		t.Fatalf("runTrackedSDKGeneration() error = %v", err)
+	}
+	if result.AppID != appID || !result.registryGenerationAttempted || result.registryGenerationOutcomeConfirmed {
+		t.Fatalf("unexpected recovered result: %#v", result)
+	}
+	if len(proxy.forwardMethods) != 2 {
+		t.Fatalf("generation attempts = %d, want 2", len(proxy.forwardMethods))
+	}
+}
+
+func TestRunTrackedSDKGenerationDoesNotRetryConfirmedClientFailure(t *testing.T) {
+	proxy := &recordingForwarder{status: http.StatusBadRequest, body: `{"error":"invalid request"}`}
+
+	result, err := runTrackedSDKGeneration(context.Background(), proxy, "fsk_test", json.RawMessage(`{"idempotency_key":"plan-1"}`))
+	if err == nil {
+		t.Fatal("expected Registry client failure")
+	}
+	if !result.registryGenerationAttempted || !result.registryGenerationOutcomeConfirmed {
+		t.Fatalf("unexpected confirmed-failure result: %#v", result)
+	}
+	if len(proxy.forwardMethods) != 1 {
+		t.Fatalf("generation attempts = %d, want 1", len(proxy.forwardMethods))
 	}
 }
 
