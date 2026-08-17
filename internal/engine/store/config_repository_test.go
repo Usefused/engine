@@ -634,6 +634,10 @@ func TestConfigRepositoryPostgres(t *testing.T) {
 			if !errors.Is(reserveErr, ErrConfigPlanApplyInProgress) {
 				t.Fatalf("reservation loser error = %v, want ErrConfigPlanApplyInProgress", reserveErr)
 			}
+			var inProgress *ConfigPlanApplyInProgressError
+			if !errors.As(reserveErr, &inProgress) || inProgress.ExpiresAt.IsZero() {
+				t.Fatalf("reservation loser error = %#v, want lease expiry", reserveErr)
+			}
 		}
 		if winner == nil {
 			t.Fatalf("no reservation succeeded: %v", errs)

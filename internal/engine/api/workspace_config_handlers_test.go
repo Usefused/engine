@@ -3392,3 +3392,27 @@ func TestApplyDeprecationActions_SkipsAlreadyApplied(t *testing.T) {
 		t.Errorf("expected only 2026-06-01 to be deprecated, got %v", rc.deprecatedVersions)
 	}
 }
+
+// TestConfigPlanApplyReservationErrorReturnsRetryTiming verifies the public 409 contract.
+func TestConfigPlanApplyReservationErrorReturnsRetryTiming(t *testing.T) {
+	expiresAt := time.Now().Add(45 * time.Second).UTC()
+	httpErr := configPlanApplyReservationHTTPError(&store.ConfigPlanApplyInProgressError{ExpiresAt: expiresAt})
+	recorder := httptest.NewRecorder()
+	writeWorkspaceConfigError(recorder, httpErr)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", recorder.Code)
+	}
+	if recorder.Header().Get("Retry-After") == "" {
+		t.Fatal("Retry-After header is missing")
+	}
+	var response workspaceConfigErrorResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Error.Code != "plan_apply_in_progress" || !response.Error.Retryable {
+		t.Fatalf("error = %#v", response.Error)
+	}
+	if response.Error.Details["apply_lease_expires_at"] == "" || response.Error.Details["retry_after_seconds"] == nil {
+		t.Fatalf("details = %#v", response.Error.Details)
+	}
+}

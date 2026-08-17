@@ -111,6 +111,23 @@ var (
 	ErrWorkspaceNotificationImmutable = errors.New("workspace notification is dismissed and cannot be changed")
 )
 
+// ConfigPlanApplyInProgressError preserves the database-owned lease expiry so
+// control clients can make a bounded retry decision instead of treating a 409
+// as a permanent lock.
+type ConfigPlanApplyInProgressError struct {
+	ExpiresAt time.Time
+}
+
+// Error returns the stable apply-in-progress sentinel message.
+func (e *ConfigPlanApplyInProgressError) Error() string {
+	return ErrConfigPlanApplyInProgress.Error()
+}
+
+// Is makes the timed error compatible with ErrConfigPlanApplyInProgress checks.
+func (e *ConfigPlanApplyInProgressError) Is(target error) bool {
+	return target == ErrConfigPlanApplyInProgress
+}
+
 type ConfigState struct {
 	ID               uuid.UUID       `json:"id"`
 	ConfigKey        string          `json:"config_key"`
@@ -1160,12 +1177,25 @@ func (r *postgresConfigRepository) ReserveConfigPlanApply(ctx context.Context, p
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("ReserveConfigPlanApply: %w", err)
 	}
-	plan, getErr := r.GetConfigPlan(ctx, planID)
-	if getErr != nil {
-		return nil, getErr
+	var status ConfigPlanStatus
+	var revision int
+	var leaseActive bool
+	var expiresAt time.Time
+	getErr := r.db.QueryRow(ctx, `
+		SELECT status, revision,
+		       apply_lease_id IS NOT NULL AND apply_lease_expires_at > NOW(),
+		       COALESCE(apply_lease_expires_at, NOW())
+		FROM fused_config_plans
+		WHERE id = $1
+	`, planID).Scan(&status, &revision, &leaseActive, &expiresAt)
+	if errors.Is(getErr, pgx.ErrNoRows) {
+		return nil, ErrConfigPlanNotFound
 	}
-	if plan.Status == ConfigPlanStatusPending && plan.Revision == expectedRevision {
-		return nil, ErrConfigPlanApplyInProgress
+	if getErr != nil {
+		return nil, fmt.Errorf("read config plan apply lease: %w", getErr)
+	}
+	if status == ConfigPlanStatusPending && revision == expectedRevision && leaseActive {
+		return nil, &ConfigPlanApplyInProgressError{ExpiresAt: expiresAt}
 	}
 	return nil, ErrConfigPlanRevisionMismatch
 }

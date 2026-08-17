@@ -447,13 +447,14 @@ type workspacePlanBlocker struct {
 }
 
 type workspaceConfigHTTPError struct {
-	status      int
-	code        string
-	message     string
-	category    string
-	retryable   bool
-	details     map[string]any
-	remediation string
+	status            int
+	code              string
+	message           string
+	category          string
+	retryable         bool
+	details           map[string]any
+	remediation       string
+	retryAfterSeconds int
 }
 
 func (e workspaceConfigHTTPError) Error() string { return e.message }
@@ -621,6 +622,47 @@ func configPlanSaveHTTPError(err error) workspaceConfigHTTPError {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "config apply is in progress"}
 	}
 	return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to save plan"}
+}
+
+// configPlanApplyReservationHTTPError preserves lease timing and revision semantics.
+func configPlanApplyReservationHTTPError(err error) workspaceConfigHTTPError {
+	var inProgress *store.ConfigPlanApplyInProgressError
+	if errors.As(err, &inProgress) {
+		retryAfter := int(time.Until(inProgress.ExpiresAt).Seconds())
+		if time.Now().Add(time.Duration(retryAfter) * time.Second).Before(inProgress.ExpiresAt) {
+			retryAfter++
+		}
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		return workspaceConfigHTTPError{
+			status: http.StatusConflict, code: "plan_apply_in_progress",
+			message: "plan_apply_in_progress: this plan is already being applied", category: "conflict", retryable: true,
+			remediation: "Retry after the active apply lease expires.", retryAfterSeconds: retryAfter,
+			details: map[string]any{
+				"apply_lease_expires_at": inProgress.ExpiresAt.UTC().Format(time.RFC3339Nano),
+				"retry_after_seconds":    retryAfter,
+			},
+		}
+	}
+	if errors.Is(err, store.ErrConfigPlanApplyInProgress) {
+		return workspaceConfigHTTPError{
+			status: http.StatusConflict, code: "plan_apply_in_progress",
+			message: "plan_apply_in_progress: this plan is already being applied", category: "conflict", retryable: true,
+			remediation: "Retry after the active apply finishes.",
+		}
+	}
+	if errors.Is(err, store.ErrConfigPlanRevisionMismatch) {
+		return workspaceConfigHTTPError{
+			status: http.StatusConflict, code: "plan_revision_changed",
+			message: "The reviewed plan revision changed.", category: "conflict",
+			remediation: "Create a new plan before applying again.",
+		}
+	}
+	return workspaceConfigHTTPError{
+		status: http.StatusInternalServerError, code: "plan_apply_reservation_failed",
+		message: "The Engine could not reserve this plan for apply.", category: "internal", retryable: true,
+	}
 }
 
 // collectWorkspacePlanNotifications gathers Engine-local notifications
@@ -801,7 +843,7 @@ func executeWorkspaceConfigApply(
 	}
 	lease, err := configStore.ReserveConfigPlanApply(ctx, plan.ID, call.planRevision)
 	if err != nil {
-		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "plan_apply_in_progress_or_revision_changed"}
+		return nil, configPlanApplyReservationHTTPError(err)
 	}
 	leaseGuard := workspaceApplyLeaseGuard{configStore: configStore, planID: plan.ID, revision: call.planRevision, leaseID: lease.ID, releasable: true}
 	defer leaseGuard.release()
@@ -5466,6 +5508,9 @@ func writeWorkspaceConfigError(w http.ResponseWriter, err error, contexts ...con
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if httpErr.retryAfterSeconds > 0 {
+			w.Header().Set("Retry-After", fmt.Sprint(httpErr.retryAfterSeconds))
+		}
 		w.WriteHeader(httpErr.status)
 		_ = json.NewEncoder(w).Encode(response)
 		return

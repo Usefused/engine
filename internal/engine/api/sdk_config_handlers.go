@@ -1747,7 +1747,7 @@ func executeSDKConfigApply(
 	}
 	lease, err := configStore.ReserveConfigPlanApply(ctx, call.planID, call.planRevision)
 	if err != nil {
-		return sdkGenerationResult{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "plan_apply_in_progress_or_revision_changed"}
+		return sdkGenerationResult{}, configPlanApplyReservationHTTPError(err)
 	}
 	leaseGuard := workspaceApplyLeaseGuard{configStore: configStore, planID: call.planID, revision: call.planRevision, leaseID: lease.ID, releasable: true}
 	defer leaseGuard.release()
@@ -2975,7 +2975,7 @@ func writeSDKConfigError(w http.ResponseWriter, err error, contexts ...context.C
 			message:   "The Registry could not complete SDK generation.",
 			category:  "dependency",
 			retryable: proxyErr.status >= http.StatusInternalServerError,
-			details:   map[string]any{"http_status": proxyErr.status},
+			details:   map[string]any{"stage": "registry_generation", "http_status": proxyErr.status},
 		}, contexts...)
 		return
 	}
