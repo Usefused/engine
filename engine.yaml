@@ -8,8 +8,6 @@
 encryption_key: <32-byte AES key>
 database:
   url: <database_url>
-ui_url: "http://localhost:8081"
-
 engine:
   registry_endpoint: "http://127.0.0.1:8080/graphql"
   license_key: <license_key>

@@ -66,7 +66,7 @@ WORKDIR /app
 # isolated processes. Their JavaScript dependencies are already bundled into
 # the Go binary, so containers never run npm against tenant storage.
 RUN apk upgrade --no-cache && \
-    apk add --no-cache bash su-exec nats-server tini
+    apk add --no-cache bash ca-certificates su-exec nats-server tini
 
 RUN addgroup -S fused && adduser -S -G fused fused && \
     mkdir -p /app/data/sandboxes && \
