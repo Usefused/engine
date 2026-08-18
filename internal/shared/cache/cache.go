@@ -3,7 +3,6 @@ package cache
 import (
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -17,38 +16,42 @@ type CacheService interface {
 }
 
 type item struct {
-	value      any
-	ttl        time.Duration
-	expiration *atomic.Int64 // unix nano
+	value     any
+	expiresAt time.Time
+	version   uint64
 }
 
 // InMemoryCache provides a simple thread-safe, memory-based cache.
 type InMemoryCache struct {
 	mu    sync.RWMutex
 	items map[string]item
+	now   func() time.Time
+	next  uint64
 }
 
 // NewInMemoryCache creates a new InMemoryCache.
 func NewInMemoryCache() *InMemoryCache {
 	return &InMemoryCache{
 		items: make(map[string]item),
+		now:   time.Now,
 	}
 }
 
 // Set adds an item to the cache with the given TTL.
 // A TTL of 0 means the item never expires.
 func (c *InMemoryCache) Set(key string, val any, ttl time.Duration) {
-	exp := &atomic.Int64{}
+	var expiresAt time.Time
 	if ttl > 0 {
-		exp.Store(time.Now().Add(ttl).UnixNano())
+		expiresAt = c.now().Add(ttl)
 	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.next++
 	c.items[key] = item{
-		value:      val,
-		ttl:        ttl,
-		expiration: exp,
+		value:     val,
+		expiresAt: expiresAt,
+		version:   c.next,
 	}
 }
 
@@ -62,20 +65,24 @@ func (c *InMemoryCache) Get(key string) (any, bool) {
 		return nil, false
 	}
 
-	// Check expiration
-	exp := itm.expiration.Load()
-	if exp > 0 && time.Now().UnixNano() > exp {
-		// Lazily delete expired item
-		c.Delete(key)
+	if !itm.expiresAt.IsZero() && !c.now().Before(itm.expiresAt) {
+		// Expiration is fixed at insertion so a missed invalidation cannot let a
+		// frequently-read stale entry live forever.
+		c.deleteVersion(key, itm.version)
 		return nil, false
 	}
 
-	// Sliding expiration
-	if itm.ttl > 0 {
-		itm.expiration.Store(time.Now().Add(itm.ttl).UnixNano())
-	}
-
 	return itm.value, true
+}
+
+// deleteVersion removes only the expired generation observed by Get; a
+// concurrent Set must not be erased by a reader holding an older item copy.
+func (c *InMemoryCache) deleteVersion(key string, version uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if current, ok := c.items[key]; ok && current.version == version {
+		delete(c.items, key)
+	}
 }
 
 // Delete removes an item from the cache.
