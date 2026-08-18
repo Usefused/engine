@@ -3,11 +3,9 @@ package store
 import (
 	"context"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/nats-io/nats.go"
 
 	"github.com/Usefused/engine/internal/shared/cache"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
@@ -21,28 +19,19 @@ import (
 // offline resilience across the Engine API surface.
 type cachedStore struct {
 	Store
-	cache *cache.InMemoryCache
-	nc    *messaging.NATSClient
+	cache   *cache.InMemoryCache
+	runtime *runtimeCacheState
+	nc      *messaging.NATSClient
 }
 
 func NewCachedStore(delegate Store, nc *messaging.NATSClient) Store {
 	cs := &cachedStore{
-		Store: delegate,
-		cache: cache.NewInMemoryCache(),
-		nc:    nc,
+		Store:   delegate,
+		cache:   cache.NewInMemoryCache(),
+		runtime: newRuntimeCacheState(),
+		nc:      nc,
 	}
-
-	if nc != nil && nc.Conn != nil {
-		nc.Conn.Subscribe("engine.cache.invalidate.secrets.>", func(m *nats.Msg) {
-			parts := strings.Split(m.Subject, ".")
-			if len(parts) == 5 {
-				// Secret writes are bucket-scoped; clear both old broad-list keys
-				// and exact point keys so rotated credentials do not linger.
-				cs.cache.DeletePrefix("list_secrets:" + parts[4] + ":")
-				cs.cache.DeletePrefix("secret:" + parts[4] + ":")
-			}
-		})
-	}
+	cs.subscribeCacheInvalidations()
 
 	return cs
 }
@@ -149,10 +138,12 @@ func (s *cachedStore) invalidateSecretCaches(bucketID uuid.UUID, secrets []Works
 	}
 }
 
-func (s *cachedStore) NotifyAppRuntimeChanged(_ context.Context, appID uuid.UUID) {
-	if s.nc != nil && s.nc.Conn != nil {
-		s.nc.Conn.Publish("engine.cache.invalidate.sdk_scope."+appID.String(), nil)
-	}
+// NotifyAppRuntimeChanged invalidates both the store DTOs and the connected
+// SDK object cache because an apply can change selections and derived metadata.
+func (s *cachedStore) NotifyAppRuntimeChanged(ctx context.Context, appID uuid.UUID) {
+	s.invalidateRuntimeConfiguration(ctx)
+	propagation := s.publishCacheInvalidation(sdkScopeInvalidationSubject + appID.String())
+	recordRuntimeCacheInvalidation(ctx, "sdk_scope", propagation)
 }
 
 // IsWorkspaceServiceVersionActive forwards the exact SQL lookup rather than
@@ -337,24 +328,32 @@ func (s *cachedStore) workspaceProfileStore() (WorkspaceProfileStore, error) {
 	return delegate, nil
 }
 
-// UpsertWorkspaceProfileOverride delegates atomic profile writes because
-// bindings are queried directly and are not cached by this wrapper.
+// UpsertWorkspaceProfileOverride invalidates only after the atomic profile and
+// binding replacement commits, so execution never caches a half-written view.
 func (s *cachedStore) UpsertWorkspaceProfileOverride(ctx context.Context, profile WorkspaceConnectionProfile, bindings []WorkspaceConnectionBinding) (*WorkspaceConnectionProfile, error) {
 	delegate, err := s.workspaceProfileStore()
 	if err != nil {
 		return nil, err
 	}
-	return delegate.UpsertWorkspaceProfileOverride(ctx, profile, bindings)
+	stored, err := delegate.UpsertWorkspaceProfileOverride(ctx, profile, bindings)
+	if err == nil {
+		s.invalidateRuntimeConfiguration(ctx)
+	}
+	return stored, err
 }
 
-// ResetWorkspaceProfile forwards exact override removal without introducing a
-// stale cache entry for subsequent execution.
+// ResetWorkspaceProfile clears the effective binding cache after the baseline
+// fallback becomes visible in the database.
 func (s *cachedStore) ResetWorkspaceProfile(ctx context.Context, serviceID, serviceVersionID uuid.UUID, authType string) error {
 	delegate, err := s.workspaceProfileStore()
 	if err != nil {
 		return err
 	}
-	return delegate.ResetWorkspaceProfile(ctx, serviceID, serviceVersionID, authType)
+	err = delegate.ResetWorkspaceProfile(ctx, serviceID, serviceVersionID, authType)
+	if err == nil {
+		s.invalidateRuntimeConfiguration(ctx)
+	}
+	return err
 }
 
 // GetEffectiveWorkspaceProfile preserves the delegate's exact composite lookup semantics.
@@ -385,14 +384,17 @@ func (s *cachedStore) ListWorkspaceProfileBindings(ctx context.Context, serviceI
 	return delegate.ListWorkspaceProfileBindings(ctx, serviceID, serviceVersionID, authType)
 }
 
-// ListWorkspaceBindingsForExecution preserves SQL-side operation filtering on
-// the hot path; adding a cache here would require profile-aware invalidation.
+// ListWorkspaceBindingsForExecution caches the complete SQL-filtered result;
+// it never broad-loads bindings for filtering in Go.
 func (s *cachedStore) ListWorkspaceBindingsForExecution(ctx context.Context, bucketID, serviceID, serviceVersionID uuid.UUID, authType, operationID string) ([]WorkspaceConnectionBinding, error) {
 	delegate, err := s.workspaceProfileStore()
 	if err != nil {
 		return nil, err
 	}
-	return delegate.ListWorkspaceBindingsForExecution(ctx, bucketID, serviceID, serviceVersionID, authType, operationID)
+	key := runtimeBindingsKey(bucketID, serviceID, serviceVersionID, authType, operationID)
+	return loadRuntimeValue(ctx, s.runtime, key, "workspace_bindings", cloneWorkspaceBindings, func(loadCtx context.Context) ([]WorkspaceConnectionBinding, error) {
+		return delegate.ListWorkspaceBindingsForExecution(loadCtx, bucketID, serviceID, serviceVersionID, authType, operationID)
+	})
 }
 
 // MarkWorkspaceProfilePublished is bookkeeping only (no cached read depends on
@@ -412,7 +414,11 @@ func (s *cachedStore) ReconcileWorkspaceProfiles(ctx context.Context, replacemen
 	if !ok {
 		return errors.New("connection profile batch store is unavailable")
 	}
-	return delegate.ReconcileWorkspaceProfiles(ctx, replacements, deletes)
+	err := delegate.ReconcileWorkspaceProfiles(ctx, replacements, deletes)
+	if err == nil {
+		s.invalidateRuntimeConfiguration(ctx)
+	}
+	return err
 }
 
 func (s *cachedStore) SaveRuntimeEntitlement(ctx context.Context, entitlement models.RuntimeEntitlement) error {
@@ -539,20 +545,35 @@ func (s *cachedStore) workspaceExecutionPolicyStore() (WorkspaceExecutionPolicyS
 	return delegate, nil
 }
 
+// UpsertWorkspaceExecutionPolicyOverride invalidates after commit so runtime
+// metadata cannot retain the policy that the user or agent just replaced.
 func (s *cachedStore) UpsertWorkspaceExecutionPolicyOverride(ctx context.Context, override WorkspaceExecutionPolicyOverride) (*WorkspaceExecutionPolicyOverride, error) {
 	delegate, err := s.workspaceExecutionPolicyStore()
 	if err != nil {
 		return nil, err
 	}
-	return delegate.UpsertWorkspaceExecutionPolicyOverride(ctx, override)
+	stored, err := delegate.UpsertWorkspaceExecutionPolicyOverride(ctx, override)
+	if err == nil {
+		s.invalidateRuntimeConfiguration(ctx)
+	}
+	return stored, err
 }
 
+// GetEffectiveWorkspaceExecutionPolicyOverride caches the delegate's complete
+// precedence-resolved row, including nil, rather than querying both layers.
 func (s *cachedStore) GetEffectiveWorkspaceExecutionPolicyOverride(ctx context.Context, serviceID, serviceVersionID uuid.UUID) (*WorkspaceExecutionPolicyOverride, error) {
 	delegate, err := s.workspaceExecutionPolicyStore()
 	if err != nil {
 		return nil, err
 	}
-	return delegate.GetEffectiveWorkspaceExecutionPolicyOverride(ctx, serviceID, serviceVersionID)
+	value, err := loadRuntimeValue(ctx, s.runtime, runtimePolicyKey(serviceID, serviceVersionID), "execution_policy", cloneRuntimePolicyValue, func(loadCtx context.Context) (runtimePolicyValue, error) {
+		override, loadErr := delegate.GetEffectiveWorkspaceExecutionPolicyOverride(loadCtx, serviceID, serviceVersionID)
+		return encodeRuntimePolicyValue(override, loadErr)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return decodeRuntimePolicyValue(value)
 }
 
 func (s *cachedStore) GetEffectiveWorkspaceExecutionPolicyOverrides(ctx context.Context, refs []WorkspaceExecutionPolicyRef) (map[WorkspaceExecutionPolicyRef]*WorkspaceExecutionPolicyOverride, error) {
@@ -571,12 +592,18 @@ func (s *cachedStore) GetWorkspaceExecutionPolicyOverrides(ctx context.Context, 
 	return delegate.GetWorkspaceExecutionPolicyOverrides(ctx, refs)
 }
 
+// ResetWorkspaceExecutionPolicyOverride invalidates after deletion so the
+// immutable snapshot becomes the effective value on the next runtime read.
 func (s *cachedStore) ResetWorkspaceExecutionPolicyOverride(ctx context.Context, serviceID uuid.UUID, serviceVersionID *uuid.UUID) error {
 	delegate, err := s.workspaceExecutionPolicyStore()
 	if err != nil {
 		return err
 	}
-	return delegate.ResetWorkspaceExecutionPolicyOverride(ctx, serviceID, serviceVersionID)
+	err = delegate.ResetWorkspaceExecutionPolicyOverride(ctx, serviceID, serviceVersionID)
+	if err == nil {
+		s.invalidateRuntimeConfiguration(ctx)
+	}
+	return err
 }
 
 func (s *cachedStore) serviceContractSnapshotStore() (ServiceContractSnapshotStore, error) {
