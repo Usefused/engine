@@ -332,38 +332,28 @@ func testConnectionResourceLifecycle(t *testing.T, f connectAuthFixture) {
 // in-memory transaction model.
 func testCallbackConnectionAtomicity(t *testing.T, f connectAuthFixture) {
 	t.Helper()
-	callbackStore := requireCallbackConnectionStore(t, f)
-	savedPrior := seedAtomicCallbackGrant(t, f, callbackStore)
-	assertAtomicCallbackRollback(t, f, callbackStore)
+	savedPrior := seedAtomicCallbackGrant(t, f)
+	assertAtomicCallbackRollback(t, f)
 	assertPostgresCallbackGrant(t, f, savedPrior.ID, "atomic_user_a", "prior-access", "prior-cloud")
-	reconnectAtomicCallbackGrant(t, f, callbackStore, savedPrior.ID)
+	reconnectAtomicCallbackGrant(t, f, savedPrior.ID)
 	assertPostgresCallbackGrant(t, f, savedPrior.ID, "atomic_user_a", "reconnected-access", "selected-cloud")
-	savedSecond := connectSecondAtomicCallbackUser(t, f, callbackStore, savedPrior.ID)
+	savedSecond := connectSecondAtomicCallbackUser(t, f, savedPrior.ID)
 	assertPostgresCallbackGrant(t, f, savedSecond.ID, "atomic_user_b", "second-user-access", "second-user-cloud")
 	assertPostgresCallbackGrant(t, f, savedPrior.ID, "atomic_user_a", "reconnected-access", "selected-cloud")
 }
 
-// requireCallbackConnectionStore fails the integration at its capability
-// boundary instead of letting the test silently use split store calls.
-func requireCallbackConnectionStore(t *testing.T, f connectAuthFixture) CallbackConnectionStore {
-	t.Helper()
-	callbackStore, ok := f.store.(CallbackConnectionStore)
-	if !ok {
-		t.Fatal("store does not implement callback connection transaction")
-	}
-	return callbackStore
-}
-
 // seedAtomicCallbackGrant creates the previous committed state used by both
 // rollback and reconnect assertions.
-func seedAtomicCallbackGrant(t *testing.T, f connectAuthFixture, callbackStore CallbackConnectionStore) *AuthConnection {
+func seedAtomicCallbackGrant(t *testing.T, f connectAuthFixture) *AuthConnection {
 	t.Helper()
 	connection := callbackAuthConnection(t, f, "atomic_user_a", "prior-access")
 	resource := callbackConnectionResource(f, "prior-cloud")
-	saved, rows, err := callbackStore.UpsertAuthConnectionAndReconcileResources(f.ctx, connection, []ConnectionResource{resource})
+	saved, rows, err := f.store.UpsertAuthConnectionAndReconcileResources(f.ctx, connection, []ConnectionResource{resource})
+	// The initial atomic grant must persist both halves before rollback testing begins.
 	if err != nil {
 		t.Fatalf("seed callback grant: %v", err)
 	}
+	// One authoritative provider resource is the complete seeded routing set.
 	if len(rows) != 1 {
 		t.Fatalf("seed callback resources = %#v", rows)
 	}
@@ -372,29 +362,33 @@ func seedAtomicCallbackGrant(t *testing.T, f connectAuthFixture, callbackStore C
 
 // assertAtomicCallbackRollback injects an ownership failure after credential
 // upsert has executed inside the transaction.
-func assertAtomicCallbackRollback(t *testing.T, f connectAuthFixture, callbackStore CallbackConnectionStore) {
+func assertAtomicCallbackRollback(t *testing.T, f connectAuthFixture) {
 	t.Helper()
 	connection := callbackAuthConnection(t, f, "atomic_user_a", "rejected-access")
 	resource := callbackConnectionResource(f, "rejected-cloud")
 	resource.BucketID = f.bucketB
-	if _, _, err := callbackStore.UpsertAuthConnectionAndReconcileResources(f.ctx, connection, []ConnectionResource{resource}); err == nil {
+	// Cross-bucket routing must reject the entire credential-and-resource transaction.
+	if _, _, err := f.store.UpsertAuthConnectionAndReconcileResources(f.ctx, connection, []ConnectionResource{resource}); err == nil {
 		t.Fatal("expected ownership failure to roll back callback transaction")
 	}
 }
 
 // reconnectAtomicCallbackGrant replaces both halves of an existing grant and
 // verifies the natural-key connection identity remains stable.
-func reconnectAtomicCallbackGrant(t *testing.T, f connectAuthFixture, callbackStore CallbackConnectionStore, priorID uuid.UUID) {
+func reconnectAtomicCallbackGrant(t *testing.T, f connectAuthFixture, priorID uuid.UUID) {
 	t.Helper()
 	connection := callbackAuthConnection(t, f, "atomic_user_a", "reconnected-access")
 	resource := callbackConnectionResource(f, "selected-cloud")
-	saved, rows, err := callbackStore.UpsertAuthConnectionAndReconcileResources(f.ctx, connection, []ConnectionResource{resource})
+	saved, rows, err := f.store.UpsertAuthConnectionAndReconcileResources(f.ctx, connection, []ConnectionResource{resource})
+	// Reconnect must atomically replace the prior grant without a partial result.
 	if err != nil {
 		t.Fatalf("reconnect callback grant: %v", err)
 	}
+	// Natural-key stability lets existing selectors continue to reference the connection.
 	if saved.ID != priorID {
 		t.Fatalf("reconnect connection ID = %s want %s", saved.ID, priorID)
 	}
+	// The returned routing set must contain only the authoritative replacement.
 	if len(rows) != 1 || rows[0].ProviderResourceID != "selected-cloud" {
 		t.Fatalf("reconnect callback resources = %#v", rows)
 	}
@@ -402,17 +396,20 @@ func reconnectAtomicCallbackGrant(t *testing.T, f connectAuthFixture, callbackSt
 
 // connectSecondAtomicCallbackUser proves the same service and bucket retain an
 // independent natural key and resource set for another product end user.
-func connectSecondAtomicCallbackUser(t *testing.T, f connectAuthFixture, callbackStore CallbackConnectionStore, priorID uuid.UUID) *AuthConnection {
+func connectSecondAtomicCallbackUser(t *testing.T, f connectAuthFixture, priorID uuid.UUID) *AuthConnection {
 	t.Helper()
 	connection := callbackAuthConnection(t, f, "atomic_user_b", "second-user-access")
 	resource := callbackConnectionResource(f, "second-user-cloud")
-	saved, rows, err := callbackStore.UpsertAuthConnectionAndReconcileResources(f.ctx, connection, []ConnectionResource{resource})
+	saved, rows, err := f.store.UpsertAuthConnectionAndReconcileResources(f.ctx, connection, []ConnectionResource{resource})
+	// A second end user must receive an independent atomic grant.
 	if err != nil {
 		t.Fatalf("second user callback grant: %v", err)
 	}
+	// Reusing the first user's ID would collapse the multi-user isolation boundary.
 	if saved.ID == priorID {
 		t.Fatal("second user reused the first user's connection")
 	}
+	// The second user receives only their own authoritative routing row.
 	if len(rows) != 1 {
 		t.Fatalf("second user callback resources = %#v", rows)
 	}

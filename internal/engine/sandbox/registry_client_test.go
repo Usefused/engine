@@ -45,6 +45,45 @@ func TestRuntimeRetryProjectionExcludesLegacyV2Fields(t *testing.T) {
 	}
 }
 
+// TestFetchEligibleConnectionProfilesTransportsExactAuthName proves named and unnamed Registry streams remain distinct on the Engine boundary.
+func TestFetchEligibleConnectionProfilesTransportsExactAuthName(t *testing.T) {
+	versionID, profileID := uuid.New(), uuid.New()
+	var requestBody graphqlQuery
+	client := &HTTPRegistryClient{
+		endpoint: "https://registry.example/graphql", licenseKey: "engine-license-key",
+		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			// Capturing the decoded GraphQL envelope verifies transport rather than string-building internals.
+			if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			body := `{"data":{"eligibleConnectionProfiles":[{"profile_id":"` + profileID.String() + `","service_id":"` + uuid.NewString() + `","service_version_id":"` + versionID.String() + `","name":"Jira","auth_type":"oauth","auth_name":"jiraOAuth","revision":2,"profile_hash":"hash","config":{"auth_type":"oauth","auth_name":"jiraOAuth"},"provenance":"provider"}]}}`
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		})},
+	}
+
+	profiles, err := client.FetchEligibleConnectionProfiles(context.Background(), []ConnectionProfileRef{
+		{ServiceVersionID: versionID, AuthType: "oauth", AuthName: "jiraOAuth"},
+		{ServiceVersionID: versionID, AuthType: "oauth", AuthName: ""},
+	}, "api-key")
+	// A valid named Registry response must decode through the Engine DTO.
+	if err != nil {
+		t.Fatalf("FetchEligibleConnectionProfiles() error = %v", err)
+	}
+	// Response identity is needed again for exact plan grouping.
+	if len(profiles) != 1 || profiles[0].AuthName != "jiraOAuth" {
+		t.Fatalf("auth_name response was not decoded: %#v", profiles)
+	}
+	// Omitting auth_name from the projection would silently decode every response as legacy unnamed.
+	if !strings.Contains(requestBody.Query, "auth_type auth_name revision") {
+		t.Fatalf("eligible profile projection omitted auth_name: %q", requestBody.Query)
+	}
+	refs := requestBody.Variables["refs"].([]interface{})
+	// Explicit empty transport distinguishes legacy exact matching from an omitted wildcard interpretation.
+	if refs[0].(map[string]interface{})["auth_name"] != "jiraOAuth" || refs[1].(map[string]interface{})["auth_name"] != "" {
+		t.Fatalf("named or legacy ref changed: %#v", refs)
+	}
+}
+
 func TestFetchServiceVersionAuthConfigsUsesGraphQLBatch(t *testing.T) {
 	serviceID := uuid.New()
 	versionID := uuid.New()

@@ -3,11 +3,11 @@
 package connectionprofile
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
-	"time"
-
-	"github.com/google/uuid"
+	"fmt"
+	"io"
 )
 
 const ResourceDiscoveryVersion = 1
@@ -30,22 +30,51 @@ type Profile struct {
 func (p *Profile) UnmarshalJSON(data []byte) error {
 	type profileAlias Profile
 	var raw map[string]json.RawMessage
+	// The raw pass detects forbidden authority fields which the typed profile deliberately does not expose.
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 	// Publication authority belongs to authenticated write paths, so fields
 	// ignored by ordinary JSON decoding are rejected rather than accepted.
 	for _, key := range []string{"visibility", "provenance", "scope", "public", "owner", "owner_account_id"} {
+		// Rejecting any caller-controlled publication field keeps ownership at the authenticated write boundary.
 		if _, ok := raw[key]; ok {
 			return errors.New("connection profile config cannot set publication controls")
 		}
 	}
 	var decoded profileAlias
-	if err := json.Unmarshal(data, &decoded); err != nil {
+	// The strict typed pass closes every nested contract after publication controls have been screened.
+	if err := decodeStrictProfileJSON(data, &decoded); err != nil {
 		return err
 	}
 	*p = Profile(decoded)
 	return nil
+}
+
+// decodeStrictProfileJSON rejects unknown nested fields and trailing values so every Engine ingress observes one closed profile contract.
+func decodeStrictProfileJSON(data []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	// Decode exactly one profile document so concatenated JSON cannot hide unaudited configuration.
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	return requireProfileJSONEOF(decoder)
+}
+
+// requireProfileJSONEOF distinguishes harmless trailing whitespace from a second unaudited JSON value.
+func requireProfileJSONEOF(decoder *json.Decoder) error {
+	var trailing any
+	err := decoder.Decode(&trailing)
+	// EOF is the only successful completion because the profile contract contains exactly one value.
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	// A decoder failure still identifies malformed trailing input without exposing profile values.
+	if err != nil {
+		return fmt.Errorf("invalid trailing connection profile data: %w", err)
+	}
+	return errors.New("invalid trailing connection profile data")
 }
 
 type ResourceDiscoveryConfig struct {
@@ -153,24 +182,6 @@ type Issue struct {
 
 type Result struct {
 	Issues []Issue `json:"issues,omitempty"`
-}
-
-type Revision struct {
-	ID               uuid.UUID `json:"id"`
-	ProfileID        uuid.UUID `json:"profile_id"`
-	ServiceID        uuid.UUID `json:"service_id"`
-	ServiceVersionID uuid.UUID `json:"service_version_id"`
-	OwnerAccountID   uuid.UUID `json:"owner_account_id"`
-	Name             string    `json:"name"`
-	AuthType         string    `json:"auth_type"`
-	Revision         int       `json:"revision"`
-	ProfileHash      string    `json:"profile_hash"`
-	Config           Profile   `json:"config"`
-	Provenance       string    `json:"provenance"`
-	Visibility       string    `json:"visibility"`
-	CreatedBy        uuid.UUID `json:"created_by"`
-	CreatedAt        time.Time `json:"created_at"`
-	PublishedAt      time.Time `json:"published_at"`
 }
 
 // HasErrors lets callers accept warnings without duplicating severity policy.

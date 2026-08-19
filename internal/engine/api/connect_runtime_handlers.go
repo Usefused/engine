@@ -573,22 +573,17 @@ type callbackResourcePlan struct {
 	matchedCount     int
 }
 
-// persistCallbackConnection uses the callback-only transactional store when
+// persistCallbackConnection uses the required transactional store method when
 // resources are authoritative; profiles without resource routing retain the
 // ordinary credential-only upsert.
 func persistCallbackConnection(ctx context.Context, s store.Store, conn store.AuthConnection, plan callbackResourcePlan) (*store.AuthConnection, int, error) {
 	if !plan.reconcile {
+		// Profiles without authoritative resource discovery need only credential persistence.
 		saved, err := s.UpsertAuthConnection(ctx, conn)
 		return saved, 0, err
 	}
-	callbackStore, ok := s.(store.CallbackConnectionStore)
-	// Failing closed prevents a store adapter from reintroducing split token and
-	// resource writes when the active profile requires authoritative routing.
-	if !ok {
-		return nil, 0, errors.New("callback resource transaction is unavailable")
-	}
 	stored := projectConnectionResources(conn, plan.resources)
-	saved, resources, err := callbackStore.UpsertAuthConnectionAndReconcileResources(ctx, conn, stored)
+	saved, resources, err := s.UpsertAuthConnectionAndReconcileResources(ctx, conn, stored)
 	return saved, len(resources), err
 }
 
@@ -691,8 +686,10 @@ func prepareDiscoveredCallbackResources(ctx context.Context, verifier ServiceVer
 // connectSessionResourceInput decodes the canonical map persisted by either
 // direct start or hosted submission before callback validation.
 func connectSessionResourceInput(session *store.ConnectSession) (map[string]string, error) {
-	values := map[string]string{}
-	if err := json.Unmarshal(session.ResourceInputJSON, &values); err != nil {
+	values, err := decodeConnectInputValues(session.ResourceInputJSON)
+	// Callback responses keep stored JSON failures coarse while reusing the same
+	// canonical string-map decoder as the hosted input path.
+	if err != nil {
 		return nil, errors.New("resource input is invalid")
 	}
 	return values, nil
@@ -972,10 +969,8 @@ var connectCallbackTemplate = template.Must(template.New("connect-callback").Par
 // with validated branding and the same restrictive headers as hosted input.
 func writeConnectCallbackFallback(ctx context.Context, s store.Store, w http.ResponseWriter, status int, message string, failed bool) {
 	branding := loadHostedConnectBranding(ctx, s)
-	writeConnectInputSecurityHeaders(w, "", branding.LogoOrigin)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(status)
-	_ = connectCallbackTemplate.Execute(w, connectCallbackPage{Branding: branding, Message: message, Failed: failed})
+	page := connectCallbackPage{Branding: branding, Message: message, Failed: failed}
+	writeHostedConnectHTML(w, status, "", branding, connectCallbackTemplate, page)
 }
 
 // writeConnectCallbackRuntimeError preserves the bounded status class while

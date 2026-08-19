@@ -89,6 +89,20 @@ type ServiceContractEndpointMatch struct {
 	Endpoint       fusedobject.Endpoint
 }
 
+// ServiceContractMetadataRef identifies one immutable service contract
+// snapshot without exposing SDK wire models to the persistence layer.
+type ServiceContractMetadataRef struct {
+	ServiceID        uuid.UUID
+	ServiceVersionID uuid.UUID
+}
+
+// ServiceContractMetadataBatchStore resolves metadata for an app scope in one
+// set-based read so cold runtime initialization does not scale query count with
+// the number of selected services.
+type ServiceContractMetadataBatchStore interface {
+	ListServiceContractMetadata(ctx context.Context, refs []ServiceContractMetadataRef) (map[ServiceContractMetadataRef]*fusedobject.ServiceMetadata, error)
+}
+
 type ServiceContractSnapshotStore interface {
 	UpsertServiceContractSnapshot(ctx context.Context, snapshot ServiceContractSnapshot) (*ServiceContractSnapshot, error)
 	GetServiceContractMetadata(ctx context.Context, serviceID, serviceVersionID uuid.UUID) (*fusedobject.ServiceMetadata, error)
@@ -342,6 +356,85 @@ func (s *postgresStore) GetServiceContractMetadata(ctx context.Context, serviceI
 	}
 	metadata.ExecutionContractEnvelope = envelope
 	return &metadata, nil
+}
+
+// ListServiceContractMetadata resolves every exact snapshot reference through
+// one SQL statement and rejects the whole batch when any snapshot is absent.
+func (s *postgresStore) ListServiceContractMetadata(ctx context.Context, refs []ServiceContractMetadataRef) (map[ServiceContractMetadataRef]*fusedobject.ServiceMetadata, error) {
+	result := make(map[ServiceContractMetadataRef]*fusedobject.ServiceMetadata, len(refs))
+	// Empty app scopes avoid issuing a query while retaining a non-nil result.
+	if len(refs) == 0 {
+		return result, nil
+	}
+	serviceIDs, versionIDs := serviceContractMetadataRefArrays(refs)
+	rows, err := s.db.Query(ctx, `
+		SELECT input.service_id, input.service_version_id,
+		       snapshots.contract_version, snapshots.required_capabilities,
+		       snapshots.service_metadata
+		FROM unnest($1::uuid[], $2::uuid[]) AS input(service_id, service_version_id)
+		LEFT JOIN fused_service_contract_snapshots snapshots
+		  ON snapshots.service_id = input.service_id
+		 AND snapshots.service_version_id = input.service_version_id`, serviceIDs, versionIDs)
+	// Query failures remain distinguishable from missing exact snapshots.
+	if err != nil {
+		return nil, fmt.Errorf("list service contract metadata: query: %w", err)
+	}
+	defer rows.Close()
+	return collectServiceContractMetadata(rows, result)
+}
+
+// serviceContractMetadataRefArrays prepares parallel typed arrays for the
+// PostgreSQL set input without serializing application scope into ad hoc SQL.
+func serviceContractMetadataRefArrays(refs []ServiceContractMetadataRef) ([]uuid.UUID, []uuid.UUID) {
+	serviceIDs := make([]uuid.UUID, len(refs))
+	versionIDs := make([]uuid.UUID, len(refs))
+	for index, ref := range refs {
+		serviceIDs[index], versionIDs[index] = ref.ServiceID, ref.ServiceVersionID
+	}
+	return serviceIDs, versionIDs
+}
+
+// serviceContractMetadataRows captures the pgx row surface needed by the
+// collector and keeps decoding independently testable.
+type serviceContractMetadataRows interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+}
+
+// collectServiceContractMetadata validates each persisted execution envelope
+// before admitting metadata to the runtime cache.
+func collectServiceContractMetadata(rows serviceContractMetadataRows, result map[ServiceContractMetadataRef]*fusedobject.ServiceMetadata) (map[ServiceContractMetadataRef]*fusedobject.ServiceMetadata, error) {
+	for rows.Next() {
+		var ref ServiceContractMetadataRef
+		var contractVersion *int
+		var requiredCapabilities []string
+		var payload []byte
+		// Scan errors abort the whole batch because partial runtime metadata must
+		// never be admitted to the cache.
+		if err := rows.Scan(&ref.ServiceID, &ref.ServiceVersionID, &contractVersion, &requiredCapabilities, &payload); err != nil {
+			return nil, err
+		}
+		// A missing joined row means the requested immutable runtime contract was
+		// never applied locally, so the app cannot safely start from a partial set.
+		if contractVersion == nil || payload == nil {
+			return nil, ErrServiceContractSnapshotNotFound
+		}
+		envelope := fusedobject.ExecutionContractEnvelope{ContractVersion: *contractVersion, RequiredCapabilities: requiredCapabilities}
+		// Compatibility validation runs before JSON decoding so unsupported
+		// execution semantics fail closed at the local contract boundary.
+		if err := validatePersistedExecutionContract(envelope); err != nil {
+			return nil, err
+		}
+		var metadata fusedobject.ServiceMetadata
+		// Malformed persisted JSON invalidates the complete cold-cache batch.
+		if err := json.Unmarshal(payload, &metadata); err != nil {
+			return nil, fmt.Errorf("decode service contract metadata: %w", err)
+		}
+		metadata.ExecutionContractEnvelope = envelope
+		result[ref] = &metadata
+	}
+	return result, rows.Err()
 }
 
 func (s *postgresStore) GetServiceContractEndpointByName(ctx context.Context, serviceID, serviceVersionID uuid.UUID, endpointName string) (*fusedobject.Endpoint, error) {

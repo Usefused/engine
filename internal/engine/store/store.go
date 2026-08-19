@@ -673,13 +673,6 @@ type ConnectionResource struct {
 	UpdatedAt          time.Time
 }
 
-// CallbackConnectionStore commits newly exchanged OAuth material together
-// with its authoritative resource projection so reconnects cannot expose a
-// new token beside routing rows validated for an older grant.
-type CallbackConnectionStore interface {
-	UpsertAuthConnectionAndReconcileResources(ctx context.Context, conn AuthConnection, resources []ConnectionResource) (*AuthConnection, []ConnectionResource, error)
-}
-
 type Store interface {
 	// BootstrapWorkspace initializes the Engine's one local workspace after a
 	// successful Registry handshake. It is idempotent for the owning account
@@ -846,6 +839,9 @@ type Store interface {
 	GetActiveConnectInputSessionByTokenHash(ctx context.Context, tokenHash string) (*ConnectInputSession, error)
 	CompleteConnectInputSession(ctx context.Context, tokenHash, contractHash string, usedAt time.Time, session ConnectSession) (*ConnectSession, error)
 	DeleteExpiredConnectSessions(ctx context.Context, before time.Time) (int64, error)
+	// UpsertAuthConnectionAndReconcileResources commits callback credentials and
+	// their authoritative routing projection in one required transaction.
+	UpsertAuthConnectionAndReconcileResources(ctx context.Context, conn AuthConnection, resources []ConnectionResource) (*AuthConnection, []ConnectionResource, error)
 	// ReconcileConnectionResources atomically upserts the latest authoritative
 	// discovery result and deactivates resources the provider no longer returns.
 	ReconcileConnectionResources(ctx context.Context, connectionID uuid.UUID, resources []ConnectionResource) ([]ConnectionResource, error)

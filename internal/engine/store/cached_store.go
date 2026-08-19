@@ -36,20 +36,6 @@ func NewCachedStore(delegate Store, nc *messaging.NATSClient) Store {
 	return cs
 }
 
-// UpsertAuthConnectionAndReconcileResources preserves the delegate's atomic
-// callback capability across the cache wrapper. Optional interface methods are
-// not promoted through an embedded Store interface, so explicit forwarding is
-// required before live callback handlers can reach the PostgreSQL transaction.
-func (s *cachedStore) UpsertAuthConnectionAndReconcileResources(ctx context.Context, conn AuthConnection, resources []ConnectionResource) (*AuthConnection, []ConnectionResource, error) {
-	callbackStore, ok := s.Store.(CallbackConnectionStore)
-	// A wrapper around a non-transactional adapter must fail closed instead of
-	// falling back to separate credential and routing writes.
-	if !ok {
-		return nil, nil, errors.New("store does not support atomic callback persistence")
-	}
-	return callbackStore.UpsertAuthConnectionAndReconcileResources(ctx, conn, resources)
-}
-
 func (s *cachedStore) LoadEngineInstallationID(ctx context.Context) (uuid.UUID, error) {
 	repository, ok := s.Store.(EngineInstallationStore)
 	if !ok {
@@ -499,6 +485,17 @@ func (s *cachedStore) GetServiceContractMetadata(ctx context.Context, serviceID,
 		return nil, err
 	}
 	return delegate.GetServiceContractMetadata(ctx, serviceID, serviceVersionID)
+}
+
+// ListServiceContractMetadata forwards the fixed-query cold-cache read because
+// the runtime cache, rather than this wrapper, owns app-scope refcounts.
+func (s *cachedStore) ListServiceContractMetadata(ctx context.Context, refs []ServiceContractMetadataRef) (map[ServiceContractMetadataRef]*fusedobject.ServiceMetadata, error) {
+	delegate, ok := s.Store.(ServiceContractMetadataBatchStore)
+	// Refusing a scalar fallback keeps cold initialization query count bounded.
+	if !ok {
+		return nil, errors.New("service contract metadata batch store is unavailable")
+	}
+	return delegate.ListServiceContractMetadata(ctx, refs)
 }
 
 func (s *cachedStore) GetServiceContractEndpointByName(ctx context.Context, serviceID, serviceVersionID uuid.UUID, endpointName string) (*fusedobject.Endpoint, error) {

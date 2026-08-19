@@ -32,30 +32,19 @@ func (d *callbackForwardingDelegate) UpsertAuthConnectionAndReconcileResources(_
 func TestCachedStoreForwardsAtomicCallbackPersistence(t *testing.T) {
 	delegate := &callbackForwardingDelegate{}
 	cached := NewCachedStore(delegate, nil)
-	callbackStore, ok := cached.(CallbackConnectionStore)
-	if !ok {
-		t.Fatal("cached store does not expose atomic callback persistence")
-	}
 	connection := AuthConnection{BucketID: uuid.New(), ServiceID: uuid.New(), EndUserRef: "opaque-user"}
 	resources := []ConnectionResource{{ProviderResourceID: "provider-resource"}}
-	saved, returned, err := callbackStore.UpsertAuthConnectionAndReconcileResources(context.Background(), connection, resources)
+	saved, returned, err := cached.UpsertAuthConnectionAndReconcileResources(context.Background(), connection, resources)
+	// The required Store method must cross the embedded cache wrapper unchanged.
 	if err != nil {
 		t.Fatalf("forward callback persistence: %v", err)
 	}
+	// One delegate call proves the wrapper did not split or replay the transaction.
 	if delegate.calls != 1 || delegate.connection.BucketID != connection.BucketID {
 		t.Fatalf("delegate call = %d connection = %#v", delegate.calls, delegate.connection)
 	}
+	// The delegate's saved connection and authoritative resources must be returned intact.
 	if saved == nil || saved.ID == uuid.Nil || len(returned) != 1 || len(delegate.resources) != 1 {
 		t.Fatalf("forwarded result = %#v resources = %#v", saved, returned)
-	}
-}
-
-// TestCachedStoreAtomicCallbackPersistenceFailsClosed ensures unsupported
-// adapters cannot silently reintroduce non-transactional callback writes.
-func TestCachedStoreAtomicCallbackPersistenceFailsClosed(t *testing.T) {
-	cached := NewCachedStore(&runtimeCacheDelegate{}, nil)
-	callbackStore := cached.(CallbackConnectionStore)
-	if _, _, err := callbackStore.UpsertAuthConnectionAndReconcileResources(context.Background(), AuthConnection{}, nil); err == nil {
-		t.Fatal("expected unsupported callback persistence to fail")
 	}
 }

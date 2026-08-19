@@ -233,6 +233,7 @@ type webhookVerifyConfig struct {
 // rejected if a caller supplies them -- see rejectConfiguredResolvedProfiles.
 type workspaceConfigConnectionProfileIntent struct {
 	AuthType  string                     `json:"auth_type"`
+	AuthName  string                     `json:"auth_name,omitempty"`
 	ProfileID string                     `json:"profile_id,omitempty"`
 	Profile   *connectionprofile.Profile `json:"profile,omitempty"`
 	Reset     bool                       `json:"reset,omitempty"`
@@ -343,6 +344,7 @@ type workspaceDesiredConnectionProfile struct {
 	Version   string
 	VersionID uuid.UUID
 	AuthType  string
+	AuthName  string
 	ProfileID string
 	Profile   *connectionprofile.Profile
 	Reset     bool
@@ -1329,6 +1331,11 @@ func workspaceConnectionProfileRequests(services map[string]workspaceConfigServi
 				if intent.Profile != nil || intent.Reset {
 					continue
 				}
+				authName, err := normalizedWorkspaceConnectionProfileAuthName(key, intent)
+				// Invalid selectors stop the whole deterministic batch before Registry receives a partial request.
+				if err != nil {
+					return nil, nil, err
+				}
 				versionID, err := uuid.Parse(strings.TrimSpace(version.ServiceVersionID))
 				if err != nil {
 					// resolveWorkspaceServiceVersions must have already run
@@ -1336,7 +1343,7 @@ func workspaceConnectionProfileRequests(services map[string]workspaceConfigServi
 					// this version's identity was never actually resolved.
 					return nil, nil, fmt.Errorf("service %q connection profile: version %s has no resolved service_version_id", key, version.Version)
 				}
-				refs = append(refs, sandbox.ConnectionProfileRef{ServiceVersionID: versionID, AuthType: canonicalConnectAuthType(intent.AuthType)})
+				refs = append(refs, sandbox.ConnectionProfileRef{ServiceVersionID: versionID, AuthType: canonicalConnectAuthType(intent.AuthType), AuthName: authName})
 				targets = append(targets, workspaceProfileRequestTarget{ServiceKey: key, VersionIndex: versionIndex, ProfileIndex: profileIndex, Version: version.Version})
 			}
 		}
@@ -1349,7 +1356,7 @@ func workspaceConnectionProfileRequests(services map[string]workspaceConfigServi
 func groupEligibleProfiles(profiles []sandbox.ConnectionProfileRevision) map[string][]sandbox.ConnectionProfileRevision {
 	grouped := map[string][]sandbox.ConnectionProfileRevision{}
 	for _, profile := range profiles {
-		key := connectionProfileRefKey(sandbox.ConnectionProfileRef{ServiceVersionID: profile.ServiceVersionID, AuthType: profile.AuthType})
+		key := connectionProfileRefKey(sandbox.ConnectionProfileRef{ServiceVersionID: profile.ServiceVersionID, AuthType: profile.AuthType, AuthName: profile.AuthName})
 		grouped[key] = append(grouped[key], profile)
 	}
 	return grouped
@@ -1358,7 +1365,7 @@ func groupEligibleProfiles(profiles []sandbox.ConnectionProfileRevision) map[str
 // connectionProfileRefKey uses a separator that cannot occur in UUID or auth
 // values, preventing ambiguous composite keys in plan-time indexes.
 func connectionProfileRefKey(ref sandbox.ConnectionProfileRef) string {
-	return ref.ServiceVersionID.String() + "\x00" + connectionprofile.CanonicalAuthType(ref.AuthType)
+	return ref.ServiceVersionID.String() + "\x00" + connectionprofile.CanonicalAuthType(ref.AuthType) + "\x00" + strings.TrimSpace(ref.AuthName)
 }
 
 // workspaceProfileSelection is selectWorkspaceConnectionProfile's total
@@ -2034,6 +2041,11 @@ func normalizeWorkspaceConnectionProfileIntent(key, version string, item workspa
 	if !isSupportedConnectAuthType(authType) {
 		return workspaceDesiredConnectionProfile{}, fmt.Errorf("service %q connection_profiles has unsupported auth_type", key)
 	}
+	authName, err := normalizedWorkspaceConnectionProfileAuthName(key, item)
+	// Normalization failures must precede reset/profile validation because the selector belongs to the intent itself.
+	if err != nil {
+		return workspaceDesiredConnectionProfile{}, err
+	}
 	if item.Reset && (item.Profile != nil || strings.TrimSpace(item.ProfileID) != "") {
 		// Reset means "clear whatever override exists" -- combining it with a
 		// concrete profile/profile_id would be a self-contradictory intent.
@@ -2050,7 +2062,7 @@ func normalizeWorkspaceConnectionProfileIntent(key, version string, item workspa
 		}
 	}
 	return workspaceDesiredConnectionProfile{
-		Version: version, VersionID: versionIDs[version], AuthType: authType,
+		Version: version, VersionID: versionIDs[version], AuthType: authType, AuthName: authName,
 		ProfileID: strings.TrimSpace(item.ProfileID), Profile: item.Profile, Reset: item.Reset,
 		Public: item.Public,
 		// Resolved/Ambiguous/Reason are Engine-populated during plan resolution
@@ -2059,6 +2071,38 @@ func normalizeWorkspaceConnectionProfileIntent(key, version string, item workspa
 		// time, since apply never re-runs automatic selection itself.
 		Resolved: item.Resolved, Ambiguous: item.Ambiguous, Reason: item.Reason,
 	}, nil
+}
+
+// normalizedWorkspaceConnectionProfileAuthName retains the Registry stream selector while accepting inline profiles authored before the outer field existed.
+func normalizedWorkspaceConnectionProfileAuthName(key string, item workspaceConfigConnectionProfileIntent) (string, error) {
+	outer := strings.TrimSpace(item.AuthName)
+	// Registry accepts only bounded single-line auth scheme names at its lookup boundary.
+	if !validWorkspaceConnectionProfileAuthName(outer) {
+		return "", fmt.Errorf("service %q connection profile auth_name is invalid", key)
+	}
+	if item.Profile == nil {
+		// Reference-only intents have no profile body from which to recover a named Registry stream.
+		return outer, nil
+	}
+	inner := strings.TrimSpace(item.Profile.AuthName)
+	if !validWorkspaceConnectionProfileAuthName(inner) {
+		// Inferred selectors cross the same Registry boundary as explicitly authored outer values.
+		return "", fmt.Errorf("service %q connection profile profile.auth_name is invalid", key)
+	}
+	if outer == "" {
+		// Existing inline YAML stored auth_name inside profile, so inference keeps those plans compatible.
+		return inner, nil
+	}
+	if outer != inner {
+		// Conflicting selectors could approve one Registry stream while persisting another runtime scheme.
+		return "", fmt.Errorf("service %q connection profile auth_name must match profile.auth_name", key)
+	}
+	return outer, nil
+}
+
+// validWorkspaceConnectionProfileAuthName mirrors Registry ref validation so malformed selectors fail before a remote lookup.
+func validWorkspaceConnectionProfileAuthName(name string) bool {
+	return len(name) <= 128 && !strings.ContainsAny(name, "\r\n\x00")
 }
 
 func validateWorkspaceAuthConfigIntent(key string, auth *WorkspaceAuthConfig) error {
@@ -3871,7 +3915,7 @@ func resolvedWorkspaceProfileRefs(desired workspaceDesiredState) ([]sandbox.Conn
 			if intent.Resolved == nil {
 				continue
 			}
-			refs = append(refs, sandbox.ConnectionProfileRef{ServiceVersionID: intent.VersionID, AuthType: intent.AuthType})
+			refs = append(refs, sandbox.ConnectionProfileRef{ServiceVersionID: intent.VersionID, AuthType: intent.AuthType, AuthName: intent.AuthName})
 			expected[resolvedProfileIdentityKey(intent.Resolved.ProfileID, intent.VersionID)] = *intent.Resolved
 		}
 	}
