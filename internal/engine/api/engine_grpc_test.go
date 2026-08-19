@@ -23,17 +23,7 @@ import (
 // as REST/GraphQL instead of minting provider URLs client-side.
 func TestEngineGRPCStartConnectSessionCreatesAuthorizationURL(t *testing.T) {
 	fixture := newConnectRuntimeFixture(t)
-	appID := attachConnectTestArtifact(&fixture)
-	runtimeStore := &grpcRuntimeStore{
-		Store:     fixture.store,
-		accountID: fixture.store.accountID,
-		appID:     appID,
-		scope:     fixture.store.appRuntimes[appID],
-	}
-	// configStore/natsClient are nil: this test only exercises StartConnectSession,
-	// which (like GetConnection/ListConnectionResources) never touches the
-	// webhook-only fields SubscribeWebhooks added to EngineGRPCServer.
-	srv := NewEngineGRPCServer(runtimeStore, fixture.verifier, fixture.masterKey, nil, nil, auth.NewTokenValidator(runtimeStore))
+	srv, appID := newConnectGRPCTestServer(fixture)
 	ctx := grpcTestContext(appID)
 
 	resp, err := srv.StartConnectSession(ctx, &enginev1.StartConnectSessionRequest{
@@ -63,6 +53,38 @@ func TestEngineGRPCStartConnectSessionCreatesAuthorizationURL(t *testing.T) {
 	if strings.Contains(resp.GetAuthorizeUrl(), "client-secret") {
 		t.Fatalf("authorize_url must not contain client secret: %s", resp.GetAuthorizeUrl())
 	}
+}
+
+// TestEngineGRPCStartConnectSessionDefersAuthorizationForMissingInput proves
+// generated SDK traffic receives the same hosted pre-authorisation page as the
+// REST entrypoint and creates no OAuth state before the form is complete.
+func TestEngineGRPCStartConnectSessionDefersAuthorizationForMissingInput(t *testing.T) {
+	fixture := newResourceInputRuntimeFixture(t)
+	srv, appID := newConnectGRPCTestServer(fixture)
+	response, err := srv.StartConnectSession(grpcTestContext(appID), &enginev1.StartConnectSessionRequest{
+		BucketId: fixture.bucketID.String(), ServiceId: fixture.serviceID.String(),
+		EndUserRef: "user_123", CreatedByAppId: appID.String(),
+	})
+	if err != nil {
+		t.Fatalf("StartConnectSession() error = %v", err)
+	}
+	if !strings.Contains(response.GetAuthorizeUrl(), "/workspace/connect/input?token=") || len(fixture.store.inputSessions) != 1 || len(fixture.store.createdSessions) != 0 {
+		t.Fatalf("deferred response=%#v pending=%d provider=%d", response, len(fixture.store.inputSessions), len(fixture.store.createdSessions))
+	}
+}
+
+// newConnectGRPCTestServer builds the shared app-authenticated Engine edge so
+// direct and deferred connect tests cannot drift in token or bucket setup.
+func newConnectGRPCTestServer(fixture connectRuntimeFixture) (*EngineGRPCServer, uuid.UUID) {
+	appID := attachConnectTestArtifact(&fixture)
+	runtimeStore := &grpcRuntimeStore{
+		Store: fixture.store, accountID: fixture.store.accountID,
+		appID: appID, scope: fixture.store.appRuntimes[appID],
+	}
+	// Connect metadata RPCs do not touch the webhook-only configuration or NATS
+	// dependencies, so nil keeps this fixture scoped to its actual boundary.
+	server := NewEngineGRPCServer(runtimeStore, fixture.verifier, fixture.masterKey, nil, nil, auth.NewTokenValidator(runtimeStore))
+	return server, appID
 }
 
 // TestEngineGRPCGetConnectionReturnsMetadataOnly verifies the callback

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,8 +35,16 @@ func TestPostgresStore_BucketAttachedConnectAuth(t *testing.T) {
 		testConnectSessionLifecycle(t, fixture)
 	})
 
+	t.Run("connect input completion is one-time and atomic", func(t *testing.T) {
+		testConnectInputSessionLifecycle(t, fixture)
+	})
+
 	t.Run("connection resources reconcile and select without broad reads", func(t *testing.T) {
 		testConnectionResourceLifecycle(t, fixture)
+	})
+
+	t.Run("callback token and exact resource commit atomically", func(t *testing.T) {
+		testCallbackConnectionAtomicity(t, fixture)
 	})
 
 	t.Run("workspace profile layers resolve precedence and stay version/operation scoped", func(t *testing.T) {
@@ -315,6 +324,138 @@ func testConnectionResourceLifecycle(t *testing.T, f connectAuthFixture) {
 	resources, err = f.store.ReconcileConnectionResources(f.ctx, connection.ID, second[1:])
 	if err != nil || len(resources) != 1 || resources[0].ProviderResourceID != "cloud-b" || !resources[0].IsDefault {
 		t.Fatalf("authoritative removal: resources=%#v err=%v", resources, err)
+	}
+}
+
+// testCallbackConnectionAtomicity proves reconnect rollback, exact resource
+// replacement, and per-end-user isolation against PostgreSQL rather than an
+// in-memory transaction model.
+func testCallbackConnectionAtomicity(t *testing.T, f connectAuthFixture) {
+	t.Helper()
+	callbackStore := requireCallbackConnectionStore(t, f)
+	savedPrior := seedAtomicCallbackGrant(t, f, callbackStore)
+	assertAtomicCallbackRollback(t, f, callbackStore)
+	assertPostgresCallbackGrant(t, f, savedPrior.ID, "atomic_user_a", "prior-access", "prior-cloud")
+	reconnectAtomicCallbackGrant(t, f, callbackStore, savedPrior.ID)
+	assertPostgresCallbackGrant(t, f, savedPrior.ID, "atomic_user_a", "reconnected-access", "selected-cloud")
+	savedSecond := connectSecondAtomicCallbackUser(t, f, callbackStore, savedPrior.ID)
+	assertPostgresCallbackGrant(t, f, savedSecond.ID, "atomic_user_b", "second-user-access", "second-user-cloud")
+	assertPostgresCallbackGrant(t, f, savedPrior.ID, "atomic_user_a", "reconnected-access", "selected-cloud")
+}
+
+// requireCallbackConnectionStore fails the integration at its capability
+// boundary instead of letting the test silently use split store calls.
+func requireCallbackConnectionStore(t *testing.T, f connectAuthFixture) CallbackConnectionStore {
+	t.Helper()
+	callbackStore, ok := f.store.(CallbackConnectionStore)
+	if !ok {
+		t.Fatal("store does not implement callback connection transaction")
+	}
+	return callbackStore
+}
+
+// seedAtomicCallbackGrant creates the previous committed state used by both
+// rollback and reconnect assertions.
+func seedAtomicCallbackGrant(t *testing.T, f connectAuthFixture, callbackStore CallbackConnectionStore) *AuthConnection {
+	t.Helper()
+	connection := callbackAuthConnection(t, f, "atomic_user_a", "prior-access")
+	resource := callbackConnectionResource(f, "prior-cloud")
+	saved, rows, err := callbackStore.UpsertAuthConnectionAndReconcileResources(f.ctx, connection, []ConnectionResource{resource})
+	if err != nil {
+		t.Fatalf("seed callback grant: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("seed callback resources = %#v", rows)
+	}
+	return saved
+}
+
+// assertAtomicCallbackRollback injects an ownership failure after credential
+// upsert has executed inside the transaction.
+func assertAtomicCallbackRollback(t *testing.T, f connectAuthFixture, callbackStore CallbackConnectionStore) {
+	t.Helper()
+	connection := callbackAuthConnection(t, f, "atomic_user_a", "rejected-access")
+	resource := callbackConnectionResource(f, "rejected-cloud")
+	resource.BucketID = f.bucketB
+	if _, _, err := callbackStore.UpsertAuthConnectionAndReconcileResources(f.ctx, connection, []ConnectionResource{resource}); err == nil {
+		t.Fatal("expected ownership failure to roll back callback transaction")
+	}
+}
+
+// reconnectAtomicCallbackGrant replaces both halves of an existing grant and
+// verifies the natural-key connection identity remains stable.
+func reconnectAtomicCallbackGrant(t *testing.T, f connectAuthFixture, callbackStore CallbackConnectionStore, priorID uuid.UUID) {
+	t.Helper()
+	connection := callbackAuthConnection(t, f, "atomic_user_a", "reconnected-access")
+	resource := callbackConnectionResource(f, "selected-cloud")
+	saved, rows, err := callbackStore.UpsertAuthConnectionAndReconcileResources(f.ctx, connection, []ConnectionResource{resource})
+	if err != nil {
+		t.Fatalf("reconnect callback grant: %v", err)
+	}
+	if saved.ID != priorID {
+		t.Fatalf("reconnect connection ID = %s want %s", saved.ID, priorID)
+	}
+	if len(rows) != 1 || rows[0].ProviderResourceID != "selected-cloud" {
+		t.Fatalf("reconnect callback resources = %#v", rows)
+	}
+}
+
+// connectSecondAtomicCallbackUser proves the same service and bucket retain an
+// independent natural key and resource set for another product end user.
+func connectSecondAtomicCallbackUser(t *testing.T, f connectAuthFixture, callbackStore CallbackConnectionStore, priorID uuid.UUID) *AuthConnection {
+	t.Helper()
+	connection := callbackAuthConnection(t, f, "atomic_user_b", "second-user-access")
+	resource := callbackConnectionResource(f, "second-user-cloud")
+	saved, rows, err := callbackStore.UpsertAuthConnectionAndReconcileResources(f.ctx, connection, []ConnectionResource{resource})
+	if err != nil {
+		t.Fatalf("second user callback grant: %v", err)
+	}
+	if saved.ID == priorID {
+		t.Fatal("second user reused the first user's connection")
+	}
+	if len(rows) != 1 {
+		t.Fatalf("second user callback resources = %#v", rows)
+	}
+	return saved
+}
+
+// callbackAuthConnection creates fresh encrypted token material for one
+// callback natural key without sharing ciphertext across users or reconnects.
+func callbackAuthConnection(t *testing.T, f connectAuthFixture, endUserRef, token string) AuthConnection {
+	t.Helper()
+	encrypted := encryptConnectAuthValues(t, token)
+	return AuthConnection{
+		BucketID: f.bucketA, ServiceID: f.serviceID, EndUserRef: endUserRef,
+		AuthType: "oauth", AuthName: "oauth", EncryptedDEK: encrypted.dek,
+		EncryptedAccessToken: encrypted.values[0], TokenType: "Bearer", RefreshState: "ok",
+	}
+}
+
+// callbackConnectionResource creates one provider-selected route while leaving
+// connection identity for the transactional store to assign after upsert.
+func callbackConnectionResource(f connectAuthFixture, providerID string) ConnectionResource {
+	return ConnectionResource{
+		BucketID: f.bucketA, ServiceID: f.serviceID, ProviderResourceID: providerID,
+		ResourceType: "jira_site", DisplayName: providerID,
+		BaseURL:      "https://api.atlassian.com/ex/jira/" + providerID,
+		MetadataJSON: []byte(`{"site_url":"https://tenant.atlassian.net"}`), IsActive: true,
+	}
+}
+
+// assertPostgresCallbackGrant reloads both sides of a grant through public
+// store methods so rollback assertions cannot pass on stale local values.
+func assertPostgresCallbackGrant(t *testing.T, f connectAuthFixture, connectionID uuid.UUID, endUserRef, token, providerID string) {
+	t.Helper()
+	connection, err := f.store.GetAuthConnection(f.ctx, f.bucketA, f.serviceID, endUserRef, "oauth")
+	if err != nil || connection == nil || connection.ID != connectionID {
+		t.Fatalf("load callback connection: connection=%#v err=%v", connection, err)
+	}
+	if got := decryptConnectAuthValue(t, connection.EncryptedDEK, connection.EncryptedAccessToken); got != token {
+		t.Fatalf("callback token = %q want %q", got, token)
+	}
+	resources, err := f.store.ListConnectionResources(f.ctx, connection.ID)
+	if err != nil || len(resources) != 1 || resources[0].ProviderResourceID != providerID {
+		t.Fatalf("callback resources = %#v want %q err=%v", resources, providerID, err)
 	}
 }
 
@@ -811,6 +952,102 @@ func deleteExpiredConnectSession(t *testing.T, f connectAuthFixture) {
 	}
 	if deleted == 0 {
 		t.Fatal("expected expired session cleanup to delete at least one row")
+	}
+}
+
+// testConnectInputSessionLifecycle verifies PostgreSQL owns the one-time
+// transition from a hashed form token to an encrypted provider callback
+// session, including replay denial and exact indexed lookup.
+func testConnectInputSessionLifecycle(t *testing.T, f connectAuthFixture) {
+	t.Helper()
+	now := time.Now().UTC()
+	tokenHash := "input-" + uuid.NewString()
+	pending, err := f.store.CreateConnectInputSession(f.ctx, ConnectInputSession{
+		BucketID: f.bucketA, ServiceID: f.serviceID, AuthType: "oauth", AuthName: "oauth",
+		ContractHash: "sha256:" + strings.Repeat("a", 64), EndUserRef: "user_input", TokenHash: tokenHash, CreatedByAppID: f.appID,
+		ReturnURL: "https://app.example.com/oauth/done", ResourceInputJSON: []byte(`{"subdomain":"acme"}`),
+		RequestedScopes: []string{"read"}, ExpiresAt: now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateConnectInputSession: %v", err)
+	}
+	found, err := f.store.GetActiveConnectInputSessionByTokenHash(f.ctx, tokenHash)
+	if err != nil || found == nil || found.ID != pending.ID || found.EndUserRef != "user_input" {
+		t.Fatalf("GetActiveConnectInputSessionByTokenHash = %#v err=%v", found, err)
+	}
+
+	providerSession := postgresInputCompletionSession(t, f, now)
+	mismatched := providerSession
+	mismatched.EndUserRef = "different_user"
+	if _, err := f.store.CompleteConnectInputSession(f.ctx, tokenHash, pending.ContractHash, now, mismatched); !errors.Is(err, ErrConnectSessionUnavailable) {
+		t.Fatalf("identity-mismatched CompleteConnectInputSession error = %v", err)
+	}
+	created, err := f.store.CompleteConnectInputSession(f.ctx, tokenHash, pending.ContractHash, now, providerSession)
+	if err != nil || created == nil {
+		t.Fatalf("CompleteConnectInputSession = %#v err=%v", created, err)
+	}
+	if _, err := f.store.CompleteConnectInputSession(f.ctx, tokenHash, pending.ContractHash, now.Add(time.Second), providerSession); !errors.Is(err, ErrConnectSessionUnavailable) {
+		t.Fatalf("replayed CompleteConnectInputSession error = %v", err)
+	}
+	stored, err := f.store.GetConnectSessionByStateHash(f.ctx, providerSession.StateHash)
+	if err != nil || stored == nil || stored.EndUserRef != "user_input" {
+		t.Fatalf("completed provider session = %#v err=%v", stored, err)
+	}
+	assertConcurrentConnectInputReplay(t, f, now.Add(time.Second))
+}
+
+// assertConcurrentConnectInputReplay proves the conditional UPDATE serializes
+// racing browser submissions so exactly one callback session can be inserted.
+func assertConcurrentConnectInputReplay(t *testing.T, f connectAuthFixture, now time.Time) {
+	t.Helper()
+	tokenHash := "concurrent-" + uuid.NewString()
+	contractHash := "sha256:" + strings.Repeat("b", 64)
+	_, err := f.store.CreateConnectInputSession(f.ctx, ConnectInputSession{
+		BucketID: f.bucketA, ServiceID: f.serviceID, AuthType: "oauth", AuthName: "oauth",
+		ContractHash: contractHash, EndUserRef: "user_input", TokenHash: tokenHash, CreatedByAppID: f.appID,
+		ReturnURL: "https://app.example.com/oauth/done", ResourceInputJSON: []byte(`{"subdomain":"acme"}`),
+		RequestedScopes: []string{"read"}, ExpiresAt: now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateConnectInputSession for race: %v", err)
+	}
+	providerSession := postgresInputCompletionSession(t, f, now)
+	results := make(chan error, 2)
+	start := make(chan struct{})
+	for range 2 {
+		go func() {
+			<-start
+			_, completeErr := f.store.CompleteConnectInputSession(f.ctx, tokenHash, contractHash, now, providerSession)
+			results <- completeErr
+		}()
+	}
+	close(start)
+	succeeded, unavailable := 0, 0
+	for range 2 {
+		err := <-results
+		if err == nil {
+			succeeded++
+		} else if errors.Is(err, ErrConnectSessionUnavailable) {
+			unavailable++
+		}
+	}
+	if succeeded != 1 || unavailable != 1 {
+		t.Fatalf("concurrent completion outcomes success=%d unavailable=%d", succeeded, unavailable)
+	}
+}
+
+// postgresInputCompletionSession builds callback material independently of the
+// pending form row so the integration test detects accidental pre-authorisation
+// state reuse or unencrypted verifier persistence.
+func postgresInputCompletionSession(t *testing.T, f connectAuthFixture, now time.Time) ConnectSession {
+	t.Helper()
+	encrypted := encryptConnectAuthValues(t, "form-pkce-verifier")
+	return ConnectSession{
+		BucketID: f.bucketA, ServiceID: f.serviceID, AuthType: "oauth", AuthName: "oauth",
+		EndUserRef: "user_input", StateHash: "provider-" + uuid.NewString(), NonceHash: "nonce-hash",
+		EncryptedDEK: encrypted.dek, EncryptedPKCEVerifier: encrypted.values[0], CreatedByAppID: f.appID,
+		ReturnURL: "https://app.example.com/oauth/done", ResourceInputJSON: []byte(`{"subdomain":"acme"}`),
+		RequestedScopes: []string{"read"}, ExpiresAt: now.Add(10 * time.Minute),
 	}
 }
 

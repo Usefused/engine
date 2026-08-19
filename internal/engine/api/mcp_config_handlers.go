@@ -179,12 +179,16 @@ func validateAppConfigDocument(doc sdkConfigDocument, kind string) error {
 	return validateAppServiceDocs(doc.Services)
 }
 
+// validateMCPAppRestrictions rejects malformed mcp app restrictions before it can cross the Unified operation boundary.
 func validateMCPAppRestrictions(doc sdkConfigDocument, kind string) error {
 	if kind != store.AppKindMCP.String() {
 		return nil
 	}
 	if strings.TrimSpace(doc.Language) != "" {
 		return errors.New("mcp config must not set language")
+	}
+	if len(doc.UnifiedOperations) > 0 {
+		return errors.New("mcp config cannot declare Unified Operations")
 	}
 	for name, service := range doc.Services {
 		// MCP is operation-only; webhook attachment belongs to SDK apps.

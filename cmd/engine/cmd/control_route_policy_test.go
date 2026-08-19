@@ -224,6 +224,7 @@ func TestControlAuthorizationPreservesRuntimePublicAndGraphQLBoundaries(t *testi
 		"/mcp/server/sse",
 		"/webhook/example",
 		"/workspace/connect/callback",
+		"/workspace/connect/input",
 		"/graphql",
 		"/engine/graphql",
 	}
@@ -236,6 +237,30 @@ func TestControlAuthorizationPreservesRuntimePublicAndGraphQLBoundaries(t *testi
 	}
 	if called != len(paths) {
 		t.Fatalf("handler calls = %d, want %d", called, len(paths))
+	}
+}
+
+// TestConnectBrandingRoutesRequireWorkspacePermissions locks the settings read
+// and mutation to their distinct least-privilege workspace capabilities.
+func TestConnectBrandingRoutesRequireWorkspacePermissions(t *testing.T) {
+	wants := map[string]accesscontrol.Permission{
+		http.MethodGet + " /workspace/connect-branding": accesscontrol.PermissionWorkspaceRead,
+		http.MethodPut + " /workspace/connect-branding": accesscontrol.PermissionWorkspaceUpdate,
+	}
+	for key, want := range wants {
+		found := false
+		for _, policy := range controlRESTPolicies {
+			if policy.method+" "+policy.pattern != key {
+				continue
+			}
+			found = true
+			if len(policy.requirements) != 1 || policy.requirements[0].permission != want || policy.requirements[0].resourceType != accesscontrol.ResourceWorkspace {
+				t.Fatalf("branding policy %s = %#v, want workspace %s", key, policy.requirements, want)
+			}
+		}
+		if !found {
+			t.Fatalf("branding policy %s is missing", key)
+		}
 	}
 }
 

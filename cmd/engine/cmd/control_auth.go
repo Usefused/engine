@@ -172,5 +172,8 @@ func classifyEngineRequest(r *http.Request) engineRequestClass {
 }
 
 func isRuntimeControlExclusion(path string) bool {
-	return path == "/workspace/connect/callback"
+	// Provider callbacks and one-time input forms authenticate with opaque
+	// browser state, so requiring a control credential would expose or break the
+	// generated SDK connect flow.
+	return path == "/workspace/connect/callback" || path == "/workspace/connect/input"
 }

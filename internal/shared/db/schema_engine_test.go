@@ -5,6 +5,54 @@ import (
 	"testing"
 )
 
+// TestEngineSchemaDefinesIsolatedConnectInputSessions locks the pre-OAuth form
+// session to a hashed, expiring, one-time token without callback credentials.
+func TestEngineSchemaDefinesIsolatedConnectInputSessions(t *testing.T) {
+	table := engineSchemaTable(t, "fused_connect_input_sessions")
+	for _, expected := range []string{
+		"token_hash         text NOT NULL UNIQUE",
+		"contract_hash      text NOT NULL CHECK",
+		"expires_at         timestamptz NOT NULL",
+		"used_at            timestamptz",
+	} {
+		// The clean schema must directly encode one-time token storage and expiry.
+		if !strings.Contains(table, expected) {
+			t.Fatalf("connect input session schema missing %q", expected)
+		}
+	}
+	for _, forbidden := range []string{
+		"state_hash",
+		"nonce_hash",
+		"pkce_verifier",
+		"encrypted_dek",
+	} {
+		// OAuth callback material belongs only to the session created after form completion.
+		if strings.Contains(table, forbidden) {
+			t.Fatalf("connect input session schema contains OAuth field %q", forbidden)
+		}
+	}
+}
+
+// engineSchemaTable extracts one clean-schema CREATE TABLE statement so
+// forbidden-field checks do not match neighboring tables with different duties.
+func engineSchemaTable(t *testing.T, tableName string) string {
+	t.Helper()
+	schema := strings.Join(engineSchemaQueries(), "\n")
+	marker := "CREATE TABLE IF NOT EXISTS " + tableName + " ("
+	start := strings.Index(schema, marker)
+	// A missing table is reported explicitly instead of returning an unrelated slice.
+	if start < 0 {
+		t.Fatalf("Engine schema table %q is missing", tableName)
+	}
+	remainder := schema[start:]
+	end := strings.Index(remainder, ");")
+	// An unterminated definition indicates the clean schema cannot be inspected safely.
+	if end < 0 {
+		t.Fatalf("Engine schema table %q is unterminated", tableName)
+	}
+	return remainder[:end+2]
+}
+
 func TestEngineSchemaDefinesStableInstallationIdentity(t *testing.T) {
 	joined := strings.Join(engineSchemaQueries(), "\n")
 	for _, expected := range []string{
@@ -19,6 +67,8 @@ func TestEngineSchemaDefinesStableInstallationIdentity(t *testing.T) {
 	}
 }
 
+// TestEngineSchemaDefinesVersionedMigrationLedger locks migration identities so
+// an already-recorded version can never silently acquire different queries.
 func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 	joined := strings.Join(engineSchemaQueries(), "\n")
 	for _, expected := range []string{
@@ -33,15 +83,147 @@ func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 	}
 
 	migrations := engineMigrations()
-	if len(migrations) != 4 {
-		t.Fatalf("Engine migration count = %d, want 4", len(migrations))
+	if len(migrations) != 6 {
+		t.Fatalf("Engine migration count = %d, want 6", len(migrations))
 	}
 	assertMigrationIdentity(t, migrations[0], engineMigrationVersion, engineMigrationName)
 	assertMigrationIdentity(t, migrations[1], appTokenPolicyMigrationVersion, appTokenPolicyMigrationName)
 	assertMigrationIdentity(t, migrations[2], contractEnvelopeMigrationVersion, contractEnvelopeMigrationName)
 	assertMigrationIdentity(t, migrations[3], idempotencyMediaMigrationVersion, idempotencyMediaMigrationName)
+	assertMigrationIdentity(t, migrations[4], connectBrandingMigrationVersion, connectBrandingMigrationName)
+	assertMigrationIdentity(t, migrations[5], connectBrandColorMigrationVersion, connectBrandColorMigrationName)
 	if engineMigrationLockQuery != "SELECT pg_advisory_xact_lock($1)" {
 		t.Fatalf("Engine migrations must use a transaction-scoped advisory lock, got %q", engineMigrationLockQuery)
+	}
+}
+
+// TestEngineSchemaDefinesConnectBrandingDefaults keeps fresh databases aligned
+// with the Engine chrome while preserving the immutable version-five shape.
+func TestEngineSchemaDefinesConnectBrandingDefaults(t *testing.T) {
+	table := engineSchemaTable(t, "fused_workspaces")
+	for _, expected := range []string{
+		"connect_display_name text NOT NULL DEFAULT 'Fused'",
+		"connect_logo_url text NOT NULL DEFAULT ''",
+		"connect_primary_color text NOT NULL DEFAULT '#2563eb'",
+		"connect_primary_color_customized boolean NOT NULL DEFAULT false",
+		"connect_support_url text NOT NULL DEFAULT ''",
+		"connect_privacy_url text NOT NULL DEFAULT ''",
+	} {
+		// Every clean-schema field must carry its intended safe default directly.
+		if !strings.Contains(table, expected) {
+			t.Fatalf("workspace schema missing connect branding field %q", expected)
+		}
+	}
+	legacy := strings.Join(connectBrandingMigrationQueries(), "\n")
+	// Version five has already been recordable and cannot be retroactively edited.
+	if !strings.Contains(legacy, "connect_primary_color text NOT NULL DEFAULT '#18181b'") || strings.Contains(legacy, "#2563eb") {
+		t.Fatalf("version-five branding migration was rewritten: %s", legacy)
+	}
+}
+
+// TestConnectBrandColorMigrationConvergesOnlyUntouchedLegacyDefaults locks the
+// version-six predicate and ordering that protect previously edited branding.
+func TestConnectBrandColorMigrationConvergesOnlyUntouchedLegacyDefaults(t *testing.T) {
+	queries := connectBrandColorMigrationQueries()
+	// The count catches accidental replacement or reordering through query splits.
+	if len(queries) != 4 {
+		t.Fatalf("brand-colour migration query count = %d, want 4", len(queries))
+	}
+	joined := strings.Join(queries, "\n")
+	for _, expected := range []string{
+		"connect_primary_color_customized boolean NOT NULL DEFAULT false",
+		"connect_primary_color IS DISTINCT FROM '#18181b'",
+		"audit.resource_id = workspace.id",
+		"audit.action = 'control.http.put'",
+		"audit.path = '/workspace/connect-branding'",
+		"audit.permission = 'workspace.update'",
+		"audit.outcome = 'succeeded'",
+		`audit.metadata @> '{"primary_color_changed": true}'::jsonb`,
+		"connect_primary_color_customized = false",
+		"connect_primary_color = '#18181b'",
+		"connect_primary_color = '#2563eb'",
+		"SET DEFAULT '#2563eb'",
+	} {
+		// Each predicate is part of the data-preservation contract for upgrades.
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("brand-colour migration missing %q: %s", expected, joined)
+		}
+	}
+	// Generic workspace timestamps cannot distinguish a colour choice from an
+	// unrelated workspace mutation, so only the bounded audit fact is accepted.
+	if strings.Contains(joined, "updated_at") {
+		t.Fatalf("brand-colour migration uses ambiguous workspace timestamps: %s", joined)
+	}
+	// Protection must be established before any old default is replaced.
+	if strings.Index(joined, "connect_primary_color_customized = true") > strings.Index(joined, "connect_primary_color = '#2563eb'") {
+		t.Fatal("brand-colour migration must classify customized rows before converging defaults")
+	}
+}
+
+// TestEngineSchemaDefinesImmutableUnifiedOperations verifies the fresh schema
+// and unversioned convergence path both enforce the same final v2 shape.
+func TestEngineSchemaDefinesImmutableUnifiedOperations(t *testing.T) {
+	assertUnifiedFreshSchema(t, strings.Join(engineSchemaQueries(), "\n"))
+	assertUnifiedConvergenceSchema(t, strings.Join(unifiedSchemaConvergenceQueries(), "\n"))
+	assertUnifiedMigrationAbsent(t, strings.Join(engineMigrationQueries(), "\n"))
+}
+
+// assertUnifiedFreshSchema checks clean databases receive the exact final-v2 columns and checks.
+func assertUnifiedFreshSchema(t *testing.T, schema string) {
+	t.Helper()
+	for _, expected := range []string{
+		"unified_definition_schema_version integer NOT NULL DEFAULT 2",
+		"unified_definitions    jsonb NOT NULL DEFAULT '[]'::jsonb",
+		"CONSTRAINT chk_fused_apps_unified_definition_shape",
+		"CONSTRAINT chk_fused_apps_unified_hashes",
+	} {
+		if !strings.Contains(schema, expected) {
+			t.Fatalf("Unified app schema missing %q", expected)
+		}
+	}
+}
+
+// assertUnifiedConvergenceSchema checks live reconciliation adds only the canonical v2 shape.
+func assertUnifiedConvergenceSchema(t *testing.T, convergence string) {
+	t.Helper()
+	for _, expected := range []string{
+		"ADD COLUMN IF NOT EXISTS unified_definition_schema_version integer NOT NULL DEFAULT 2",
+		"ALTER COLUMN unified_definition_schema_version SET DEFAULT 2",
+		"ALTER COLUMN unified_definition_schema_version SET NOT NULL",
+		"ADD CONSTRAINT chk_fused_apps_unified_definition_shape",
+		"ADD CONSTRAINT chk_fused_apps_unified_hashes",
+		"IF NOT EXISTS",
+		"reset the Engine database before enabling Unified Operations",
+	} {
+		if !strings.Contains(convergence, expected) {
+			t.Fatalf("Unified schema convergence missing %q", expected)
+		}
+	}
+	for _, forbidden := range []string{"UPDATE fused_apps", "DROP CONSTRAINT"} {
+		if strings.Contains(convergence, forbidden) {
+			t.Fatalf("Unified schema convergence contains draft promotion %q", forbidden)
+		}
+	}
+	// One conditional add per constraint prevents repeated startup validation.
+	if strings.Count(convergence, "ADD CONSTRAINT chk_fused_apps_unified_definition_shape") != 1 ||
+		strings.Count(convergence, "ADD CONSTRAINT chk_fused_apps_unified_hashes") != 1 {
+		t.Fatal("Unified convergence must add each absent constraint exactly once")
+	}
+}
+
+// assertUnifiedMigrationAbsent keeps canonical reconciliation outside the immutable ledger.
+func assertUnifiedMigrationAbsent(t *testing.T, migrations string) {
+	t.Helper()
+	for _, forbidden := range []string{
+		"unified_definition_schema_version",
+		"unified_definitions",
+		"unified_definition_hash",
+		"unified_codegen_descriptor_hash",
+		"chk_fused_apps_unified",
+	} {
+		if strings.Contains(migrations, forbidden) {
+			t.Fatalf("Unified clean schema must not have migration fragment %q", forbidden)
+		}
 	}
 }
 
@@ -582,13 +764,14 @@ func TestEngineMigrationsDropOldBucketOwnedProfileTables(t *testing.T) {
 	}
 }
 
+// TestEngineSchemaContainsNoLegacyPersistence admits only the explicit Unified
+// convergence statements at the otherwise clean canonical schema boundary.
 func TestEngineSchemaContainsNoLegacyPersistence(t *testing.T) {
 	joined := strings.Join(engineSchemaQueries(), "\n")
 	forbidden := []string{
 		"fused_accounts",
 		"fused_api_keys",
 		"fused_workspace_configs",
-		"ALTER TABLE",
 		"DROP TABLE",
 		"DROP INDEX",
 		"DELETE FROM",
@@ -598,6 +781,20 @@ func TestEngineSchemaContainsNoLegacyPersistence(t *testing.T) {
 	for _, fragment := range forbidden {
 		if strings.Contains(joined, fragment) {
 			t.Fatalf("Engine schema must not contain legacy persistence fragment %q", fragment)
+		}
+	}
+	allowedAlter := make(map[string]struct{}, len(unifiedSchemaConvergenceQueries()))
+	for _, query := range unifiedSchemaConvergenceQueries() {
+		allowedAlter[query] = struct{}{}
+	}
+	for _, query := range engineSchemaQueries() {
+		if !strings.HasPrefix(strings.TrimSpace(query), "ALTER TABLE") {
+			continue
+		}
+		// Final-v2 Unified convergence is the only unversioned live-table
+		// adjustment admitted at the clean schema boundary.
+		if _, allowed := allowedAlter[query]; !allowed {
+			t.Fatalf("Engine schema contains unapproved convergence statement %q", query)
 		}
 	}
 }

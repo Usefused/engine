@@ -315,6 +315,7 @@ type AuthConfig struct {
 	PKCERequired            bool                          `json:"pkce_required,omitempty"`
 	ScopesDelimiter         string                        `json:"scopes_delimiter,omitempty"`
 	TokenEndpointAuthMethod TokenEndpointAuthMethod       `json:"token_endpoint_auth_method,omitempty"`
+	TokenRequestMediaType   TokenRequestMediaType         `json:"token_request_media_type,omitempty"`
 	ExtraAuthParams         map[string]string             `json:"extra_auth_params,omitempty"`
 	ExtraTokenParams        map[string]string             `json:"extra_token_params,omitempty"`
 	RefreshTokenRotates     bool                          `json:"refresh_token_rotates,omitempty"`
@@ -352,9 +353,15 @@ type AuthConfigs []AuthConfig
 
 type TokenEndpointAuthMethod string
 
+// TokenRequestMediaType names the exact provider-facing token body format;
+// the empty value intentionally retains OAuth's form-encoded default.
+type TokenRequestMediaType string
+
 const (
 	TokenEndpointAuthMethodClientSecretBasic TokenEndpointAuthMethod = "client_secret_basic"
 	TokenEndpointAuthMethodClientSecretPost  TokenEndpointAuthMethod = "client_secret_post"
+	TokenRequestMediaTypeForm                TokenRequestMediaType   = "application/x-www-form-urlencoded"
+	TokenRequestMediaTypeJSON                TokenRequestMediaType   = "application/json"
 )
 
 type IncomingWebhookConfig struct {

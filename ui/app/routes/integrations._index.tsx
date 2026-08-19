@@ -14,6 +14,7 @@ import IntegrationsListTab, { fromService, fromActivatedService } from "~/compon
 import IntegrationsPendingTab from "~/components/IntegrationsPendingTab";
 import { DefineServiceDrawer } from "~/components/DefineServiceDrawer";
 import { useToast } from "~/components/Toast";
+import { isImportVersionRequired } from "~/lib/authorization-error";
 
 type ImportSource = { url?: string; content?: string };
 type ImportIdentity = { name: string; slug?: string; version?: string };
@@ -31,6 +32,8 @@ function canStartImport(method: "openapi" | "docs", sourceType: "url" | "text", 
   return sourceType === "text" ? Boolean(source.content) : Boolean(source.url);
 }
 
+// createSpecificationPlan lets source-aware Registry validation reveal fields
+// that cannot be inferred reliably in the browser.
 async function createSpecificationPlan(
   source: ImportSource,
   identity: ImportIdentity,
@@ -45,13 +48,9 @@ async function createSpecificationPlan(
   } catch (error: unknown) {
     // Only the Registry parser can reliably determine whether each supported
     // specification format declares a version.
-    if (isMissingImportVersion(error)) setRequireVersion(true);
+    if (isImportVersionRequired(error)) setRequireVersion(true);
     throw error;
   }
-}
-
-function isMissingImportVersion(error: unknown): boolean {
-  return error instanceof Error && error.message.includes("version is required when the imported source does not declare one");
 }
 
 export default function IntegrationsIndex() {

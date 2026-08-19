@@ -235,6 +235,7 @@ func readRuntimeCache[T any](runtimeCache *cache.InMemoryCache, key string, clon
 // cloneAppRuntime protects the cached JSON selection bytes from caller edits.
 func cloneAppRuntime(value AppRuntime) AppRuntime {
 	value.Selections = append([]byte(nil), value.Selections...)
+	value.UnifiedDefinitions = append([]byte(nil), value.UnifiedDefinitions...)
 	return value
 }
 

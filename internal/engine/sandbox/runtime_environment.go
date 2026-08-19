@@ -280,15 +280,19 @@ func resourceMetadataBytes(raw any) ([]byte, bool) {
 	}
 }
 
+// runtimeAllowedHosts selects the allowlist that owns the persisted route.
+// Discovery is authoritative when both collection and discovery are present;
+// the supplied site identifies a provider-discovered API route but is never
+// itself used as the execution base URL.
 func runtimeAllowedHosts(config *fusedobject.ServiceConnectConfig) []string {
 	if config == nil {
 		return nil
 	}
-	if config.ResourceInput != nil {
-		return config.ResourceInput.AllowedHosts
-	}
 	if config.ResourceDiscovery != nil {
 		return config.ResourceDiscovery.AllowedHosts
+	}
+	if config.ResourceInput != nil {
+		return config.ResourceInput.AllowedHosts
 	}
 	return nil
 }
@@ -363,6 +367,18 @@ func encodeRuntimeError(err error) string {
 	// resolver and dispatcher layers instead of degrading to a plain string.
 	if errors.As(err, &reconnectErr) {
 		return mustJSONError(reconnectErr)
+	}
+	var connectionErr *ConnectionRequiredError
+	// callers can start the exact missing Engine connection without seeing
+	// provider credential material or parsing resolver text.
+	if errors.As(err, &connectionErr) {
+		return mustJSONError(connectionErr)
+	}
+	var resourceErr *ResourceSelectionRequiredError
+	// resource selection is a bounded user action rather than an opaque
+	// provider execution failure.
+	if errors.As(err, &resourceErr) {
+		return mustJSONError(resourceErr)
 	}
 	if _, ok := err.(*EnvironmentNotSupportedError); ok {
 		return mustJSONError(err)

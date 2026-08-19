@@ -45,17 +45,26 @@ var (
 	ErrIdempotencyKeyConflict = errors.New("idempotency key reused with a different request body")
 )
 
+const (
+	UnifiedDefinitionSchemaVersion = 2
+	EmptyUnifiedSetHash            = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+)
+
 type AppRuntime struct {
 	AccountID uuid.UUID
 	AppID     uuid.UUID
 	// Exactly one owner is set. Subject ownership is the safe default derived
 	// from the authenticated actor; team ownership is an explicit sharing
 	// decision resolved from a stable team slug by the Engine.
-	OwnerSubjectID     uuid.UUID
-	OwnerTeamID        uuid.UUID
-	BucketID           uuid.UUID
-	Selections         []byte
-	ScopeSchemaVersion int
+	OwnerSubjectID                 uuid.UUID
+	OwnerTeamID                    uuid.UUID
+	BucketID                       uuid.UUID
+	Selections                     []byte
+	ScopeSchemaVersion             int
+	UnifiedDefinitionSchemaVersion int
+	UnifiedDefinitions             []byte
+	UnifiedDefinitionHash          string
+	UnifiedCodegenDescriptorHash   string
 	// Status is projected from the exact app version. Hard-deactivated versions
 	// have no runtime row, while deprecated versions remain executable until
 	// their configured deactivation is applied.
@@ -99,23 +108,27 @@ type AppFamily struct {
 // App is one immutable version within an AppFamily. Migration preserves the
 // existing version identity as AppID.
 type App struct {
-	AppID                 uuid.UUID
-	AppFamilyID           uuid.UUID
-	AccountID             uuid.UUID
-	Version               string
-	ConfigKey             string
-	SourceHash            string
-	CapabilityHash        string
-	CapabilityKeys        []string
-	ScopeSchemaVersion    int
-	Selections            []byte // jsonb
-	GeneratorVersion      string // SDK only, empty for MCP
-	Status                AppStatus
-	DeprecationMessage    string
-	PlannedDeactivationAt *time.Time
-	CreatedBy             uuid.UUID
-	CreatedAt             time.Time
-	ActivatedAt           *time.Time
+	AppID                          uuid.UUID
+	AppFamilyID                    uuid.UUID
+	AccountID                      uuid.UUID
+	Version                        string
+	ConfigKey                      string
+	SourceHash                     string
+	CapabilityHash                 string
+	CapabilityKeys                 []string
+	ScopeSchemaVersion             int
+	Selections                     []byte // jsonb
+	UnifiedDefinitionSchemaVersion int
+	UnifiedDefinitions             []byte // jsonb
+	UnifiedDefinitionHash          string
+	UnifiedCodegenDescriptorHash   string
+	GeneratorVersion               string // SDK only, empty for MCP
+	Status                         AppStatus
+	DeprecationMessage             string
+	PlannedDeactivationAt          *time.Time
+	CreatedBy                      uuid.UUID
+	CreatedAt                      time.Time
+	ActivatedAt                    *time.Time
 	// ExpectedFamilyKind is a publication precondition, not another persisted
 	// copy of family.kind. It prevents an adapter from publishing into a family
 	// owned by the other runtime kind.
@@ -248,6 +261,29 @@ type BucketConnectSummary struct {
 	BucketID           uuid.UUID
 	ConnectConfigCount int
 	ConnectedUserCount int
+}
+
+const (
+	DefaultConnectBrandingDisplayName  = "Fused"
+	DefaultConnectBrandingPrimaryColor = "#2563eb"
+)
+
+// ConnectBranding is the Engine-local presentation contract for hosted connect pages.
+// URLs remain references only; the Engine never retrieves or proxies their content.
+type ConnectBranding struct {
+	DisplayName  string `json:"display_name"`
+	LogoURL      string `json:"logo_url"`
+	PrimaryColor string `json:"primary_color"`
+	SupportURL   string `json:"support_url"`
+	PrivacyURL   string `json:"privacy_url"`
+}
+
+// DefaultConnectBranding returns the compiled fallback used before customization.
+func DefaultConnectBranding() ConnectBranding {
+	return ConnectBranding{
+		DisplayName:  DefaultConnectBrandingDisplayName,
+		PrimaryColor: DefaultConnectBrandingPrimaryColor,
+	}
 }
 
 type BucketServiceSummary struct {
@@ -596,6 +632,28 @@ type ConnectSession struct {
 	CreatedAt             time.Time
 }
 
+// ConnectInputSession is a one-time browser handoff used only when a caller
+// omitted required, non-secret provider routing fields. The raw browser token
+// is never persisted; completing this row and creating the OAuth session is
+// one atomic store operation.
+type ConnectInputSession struct {
+	ID                uuid.UUID
+	BucketID          uuid.UUID
+	ServiceID         uuid.UUID
+	AuthType          string
+	AuthName          string
+	ContractHash      string
+	EndUserRef        string
+	TokenHash         string
+	CreatedByAppID    uuid.UUID
+	ReturnURL         string
+	ResourceInputJSON []byte
+	RequestedScopes   []string
+	ExpiresAt         time.Time
+	UsedAt            *time.Time
+	CreatedAt         time.Time
+}
+
 // ConnectionResource is non-secret provider context discovered for one
 // connected user. Provider tokens remain exclusively on AuthConnection.
 type ConnectionResource struct {
@@ -615,11 +673,22 @@ type ConnectionResource struct {
 	UpdatedAt          time.Time
 }
 
+// CallbackConnectionStore commits newly exchanged OAuth material together
+// with its authoritative resource projection so reconnects cannot expose a
+// new token beside routing rows validated for an older grant.
+type CallbackConnectionStore interface {
+	UpsertAuthConnectionAndReconcileResources(ctx context.Context, conn AuthConnection, resources []ConnectionResource) (*AuthConnection, []ConnectionResource, error)
+}
+
 type Store interface {
 	// BootstrapWorkspace initializes the Engine's one local workspace after a
 	// successful Registry handshake. It is idempotent for the owning account
 	// and returns ErrWorkspaceOwnerMismatch for any other account.
 	BootstrapWorkspace(ctx context.Context, accountID uuid.UUID, name string) (uuid.UUID, error)
+	// GetConnectBranding reads the singleton workspace branding in one query.
+	GetConnectBranding(ctx context.Context) (ConnectBranding, error)
+	// UpsertConnectBranding replaces the singleton workspace branding atomically.
+	UpsertConnectBranding(ctx context.Context, branding ConnectBranding) (ConnectBranding, error)
 	// AddWorkspaceServiceVersion captures
 	// the cached service name (for offline resilience) and the account that
 	// triggered the add (for the compliance audit trail).
@@ -773,6 +842,9 @@ type Store interface {
 	CreateConnectSession(ctx context.Context, session ConnectSession) (*ConnectSession, error)
 	GetConnectSessionByStateHash(ctx context.Context, stateHash string) (*ConnectSession, error)
 	MarkConnectSessionUsed(ctx context.Context, stateHash string, usedAt time.Time) error
+	CreateConnectInputSession(ctx context.Context, session ConnectInputSession) (*ConnectInputSession, error)
+	GetActiveConnectInputSessionByTokenHash(ctx context.Context, tokenHash string) (*ConnectInputSession, error)
+	CompleteConnectInputSession(ctx context.Context, tokenHash, contractHash string, usedAt time.Time, session ConnectSession) (*ConnectSession, error)
 	DeleteExpiredConnectSessions(ctx context.Context, before time.Time) (int64, error)
 	// ReconcileConnectionResources atomically upserts the latest authoritative
 	// discovery result and deactivates resources the provider no longer returns.

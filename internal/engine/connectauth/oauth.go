@@ -1,6 +1,7 @@
 package connectauth
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -92,7 +93,14 @@ func ExchangeAuthorizationCode(ctx context.Context, client *http.Client, auth fu
 	return executeTokenGrant(ctx, client, auth, flow, creds, func(form url.Values) {
 		form.Set("grant_type", "authorization_code")
 		form.Set("code", code)
-		form.Set("code_verifier", verifier)
+		form.Set("redirect_uri", creds.RedirectURI)
+		form.Del("code_verifier")
+		// A verifier is meaningful only for a PKCE authorize request; providers
+		// without PKCE can reject an unexpected token parameter, and deleting the
+		// metadata value first keeps reviewed extras from overriding this decision.
+		if auth.PKCERequired {
+			form.Set("code_verifier", verifier)
+		}
 	})
 }
 
@@ -100,6 +108,11 @@ func ExchangeAuthorizationCode(ctx context.Context, client *http.Client, auth fu
 // state; dispatch-time refresh should depend only on bucket-stored material.
 func RefreshAccessToken(ctx context.Context, client *http.Client, auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, creds ClientCredentials, refreshToken string) (TokenResponse, error) {
 	return executeTokenGrant(ctx, client, auth, flow, creds, func(form url.Values) {
+		// Refresh grants do not own a browser redirect, and removing metadata's
+		// values keeps provider extras from smuggling reserved browser/PKCE
+		// parameters into this distinct grant.
+		form.Del("redirect_uri")
+		form.Del("code_verifier")
 		form.Set("grant_type", "refresh_token")
 		form.Set("refresh_token", refreshToken)
 	})
@@ -175,20 +188,23 @@ func ClaimBytes(claims map[string]any) []byte {
 	return raw
 }
 
+// executeTokenGrant validates provider metadata before issuing one token HTTP
+// request and records only bounded contract/outcome attributes on the caller span.
 func executeTokenGrant(ctx context.Context, client *http.Client, auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, creds ClientCredentials, configure func(url.Values)) (TokenResponse, error) {
 	method := auth.TokenEndpointAuthMethod
-	if err := validateTokenEndpointAuthContract(auth); err != nil {
-		recordTokenRequest(ctx, method, "rejected")
+	mediaType, err := validateTokenEndpointAuthContract(auth)
+	if err != nil {
+		recordTokenRequest(ctx, method, tokenRequestMediaTypeAttribute(auth.TokenRequestMediaType), "rejected")
 		return TokenResponse{}, err
 	}
 	form := tokenBaseForm(auth, creds, method)
 	configure(form)
-	token, err := doTokenForm(ctx, client, auth, flow, creds, form)
+	token, err := doTokenGrant(ctx, client, auth, flow, creds, mediaType, form)
 	if err != nil {
-		recordTokenRequest(ctx, method, "failed")
+		recordTokenRequest(ctx, method, mediaType, "failed")
 		return TokenResponse{}, err
 	}
-	recordTokenRequest(ctx, method, "success")
+	recordTokenRequest(ctx, method, mediaType, "success")
 	return token, nil
 }
 
@@ -199,7 +215,6 @@ func tokenBaseForm(auth fusedobject.AuthConfig, creds ClientCredentials, method 
 	for key, value := range auth.ExtraTokenParams {
 		form.Set(key, value)
 	}
-	form.Set("redirect_uri", creds.RedirectURI)
 	if method == fusedobject.TokenEndpointAuthMethodClientSecretBasic {
 		form.Del("client_id")
 		form.Del("client_secret")
@@ -210,6 +225,8 @@ func tokenBaseForm(auth fusedobject.AuthConfig, creds ClientCredentials, method 
 	return form
 }
 
+// validateTokenEndpointAuthMethod rejects implicit credential placement so a
+// missing Registry policy cannot silently change the provider wire request.
 func validateTokenEndpointAuthMethod(method fusedobject.TokenEndpointAuthMethod) error {
 	switch method {
 	case fusedobject.TokenEndpointAuthMethodClientSecretBasic, fusedobject.TokenEndpointAuthMethodClientSecretPost:
@@ -219,20 +236,44 @@ func validateTokenEndpointAuthMethod(method fusedobject.TokenEndpointAuthMethod)
 	}
 }
 
-func validateTokenEndpointAuthContract(auth fusedobject.AuthConfig) error {
+// validateTokenEndpointAuthContract resolves the default request media type
+// while rejecting metadata that cannot safely describe an OAuth token grant.
+func validateTokenEndpointAuthContract(auth fusedobject.AuthConfig) (fusedobject.TokenRequestMediaType, error) {
 	if auth.Type != "oauth2" {
-		return errors.New("token endpoint authentication requires OAuth2")
+		return "", errors.New("token endpoint authentication requires OAuth2")
 	}
-	return validateTokenEndpointAuthMethod(auth.TokenEndpointAuthMethod)
+	if err := validateTokenEndpointAuthMethod(auth.TokenEndpointAuthMethod); err != nil {
+		return "", err
+	}
+	return tokenRequestMediaType(auth.TokenRequestMediaType)
 }
 
-func recordTokenRequest(ctx context.Context, method fusedobject.TokenEndpointAuthMethod, outcome string) {
+// tokenRequestMediaType applies OAuth's established form default while
+// allowing reviewed providers to opt into the exact JSON request contract.
+func tokenRequestMediaType(value fusedobject.TokenRequestMediaType) (fusedobject.TokenRequestMediaType, error) {
+	if value == "" {
+		return fusedobject.TokenRequestMediaTypeForm, nil
+	}
+	switch value {
+	case fusedobject.TokenRequestMediaTypeForm, fusedobject.TokenRequestMediaTypeJSON:
+		return value, nil
+	default:
+		return "", errors.New("token_request_media_type must be application/x-www-form-urlencoded or application/json")
+	}
+}
+
+// recordTokenRequest annotates the existing connect span with bounded policy
+// and outcome dimensions; token URLs, credentials, and grant values stay out.
+func recordTokenRequest(ctx context.Context, method fusedobject.TokenEndpointAuthMethod, mediaType fusedobject.TokenRequestMediaType, outcome string) {
 	trace.SpanFromContext(ctx).SetAttributes(
 		attribute.String("oauth.token_endpoint_auth_method", tokenEndpointAuthMethodAttribute(method)),
+		attribute.String("oauth.token_request_media_type", string(mediaType)),
 		attribute.String("oauth.token_request_outcome", outcome),
 	)
 }
 
+// tokenEndpointAuthMethodAttribute bounds unreviewed method strings to one
+// invalid value rather than turning metadata into an OTEL cardinality source.
 func tokenEndpointAuthMethodAttribute(method fusedobject.TokenEndpointAuthMethod) string {
 	if validateTokenEndpointAuthMethod(method) != nil {
 		return "invalid"
@@ -240,10 +281,20 @@ func tokenEndpointAuthMethodAttribute(method fusedobject.TokenEndpointAuthMethod
 	return string(method)
 }
 
-// doTokenForm is the single provider HTTP boundary for token grants, so
+// tokenRequestMediaTypeAttribute bounds unreviewed media strings while
+// preserving the effective form default in observability.
+func tokenRequestMediaTypeAttribute(value fusedobject.TokenRequestMediaType) fusedobject.TokenRequestMediaType {
+	mediaType, err := tokenRequestMediaType(value)
+	if err != nil {
+		return "invalid"
+	}
+	return mediaType
+}
+
+// doTokenGrant is the single provider HTTP boundary for token grants, so
 // malformed responses fail before any bucket credential row is updated.
-func doTokenForm(ctx context.Context, client *http.Client, auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, creds ClientCredentials, form url.Values) (TokenResponse, error) {
-	req, err := newTokenRequest(ctx, auth, flow, creds, form)
+func doTokenGrant(ctx context.Context, client *http.Client, auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, creds ClientCredentials, mediaType fusedobject.TokenRequestMediaType, form url.Values) (TokenResponse, error) {
+	req, err := newTokenRequest(ctx, auth, flow, creds, mediaType, form)
 	if err != nil {
 		return TokenResponse{}, err
 	}
@@ -252,18 +303,19 @@ func doTokenForm(ctx context.Context, client *http.Client, auth fusedobject.Auth
 
 // newTokenRequest keeps Basic auth construction next to request creation so
 // secrets are attached in exactly one provider-facing path.
-func newTokenRequest(ctx context.Context, auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, creds ClientCredentials, form url.Values) (*http.Request, error) {
-	if err := validateTokenEndpointAuthContract(auth); err != nil {
-		return nil, err
-	}
+func newTokenRequest(ctx context.Context, auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, creds ClientCredentials, mediaType fusedobject.TokenRequestMediaType, form url.Values) (*http.Request, error) {
 	if strings.TrimSpace(flow.TokenURL) == "" {
 		return nil, errors.New("selected OAuth2 flow requires token_url")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, flow.TokenURL, strings.NewReader(form.Encode()))
+	body, err := encodeTokenRequestBody(mediaType, form)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, flow.TokenURL, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", string(mediaType))
 	// Asking for JSON keeps provider responses aligned with TokenResponse while
 	// the parser below still tolerates OAuth form bodies.
 	req.Header.Set("Accept", "application/json")
@@ -271,6 +323,26 @@ func newTokenRequest(ctx context.Context, auth fusedobject.AuthConfig, flow fuse
 		req.SetBasicAuth(creds.ClientID, creds.ClientSecret)
 	}
 	return req, nil
+}
+
+// encodeTokenRequestBody serializes singular OAuth grant parameters using the
+// Registry-selected media contract without retaining or logging secret values.
+func encodeTokenRequestBody(mediaType fusedobject.TokenRequestMediaType, form url.Values) (io.Reader, error) {
+	if mediaType == fusedobject.TokenRequestMediaTypeForm {
+		return strings.NewReader(form.Encode()), nil
+	}
+	if mediaType != fusedobject.TokenRequestMediaTypeJSON {
+		return nil, errors.New("unsupported token request media type")
+	}
+	payload := make(map[string]string, len(form))
+	for key := range form {
+		payload[key] = form.Get(key)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.NewReader(encoded), nil
 }
 
 // doTokenRequest fails closed on malformed token responses so the bucket never

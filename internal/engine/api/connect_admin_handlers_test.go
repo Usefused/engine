@@ -342,22 +342,35 @@ type connectAdminFixture struct {
 
 type connectAdminMockStore struct {
 	store.Store
-	accountID           uuid.UUID
-	workspaceID         uuid.UUID
-	bucketID            uuid.UUID
-	serviceID           uuid.UUID
-	bucketErr           error
-	savedConfig         *store.ConnectConfig
-	createdSessions     []store.ConnectSession
-	session             *store.ConnectSession
-	markedStateHash     string
-	savedConnection     *store.AuthConnection
-	connections         []store.AuthConnection
-	deletedConnectionID uuid.UUID
-	deleteErr           error
-	latestVersion       string
-	reconciledResources []store.ConnectionResource
-	appRuntimes         map[uuid.UUID]*store.AppRuntime
+	accountID            uuid.UUID
+	workspaceID          uuid.UUID
+	bucketID             uuid.UUID
+	serviceID            uuid.UUID
+	bucketErr            error
+	savedConfig          *store.ConnectConfig
+	createdSessions      []store.ConnectSession
+	inputSessions        []store.ConnectInputSession
+	session              *store.ConnectSession
+	markedStateHash      string
+	savedConnection      *store.AuthConnection
+	connections          []store.AuthConnection
+	deletedConnectionID  uuid.UUID
+	deleteErr            error
+	latestVersion        string
+	reconciledResources  []store.ConnectionResource
+	callbackPersistErr   error
+	callbackPersistCalls int
+	appRuntimes          map[uuid.UUID]*store.AppRuntime
+	connectBranding      store.ConnectBranding
+}
+
+// GetConnectBranding returns the configured test identity or the compiled
+// fallback so existing connect tests exercise the same presentation path.
+func (s *connectAdminMockStore) GetConnectBranding(_ context.Context) (store.ConnectBranding, error) {
+	if s.connectBranding.DisplayName == "" {
+		return store.DefaultConnectBranding(), nil
+	}
+	return s.connectBranding, nil
 }
 
 func (s *connectAdminMockStore) GetAppRuntime(_ context.Context, id uuid.UUID) (*store.AppRuntime, error) {
@@ -466,6 +479,32 @@ func (s *connectAdminMockStore) UpsertAuthConnection(_ context.Context, conn sto
 	conn.UpdatedAt = conn.CreatedAt
 	s.savedConnection = &conn
 	return &conn, nil
+}
+
+// UpsertAuthConnectionAndReconcileResources models the production all-or-none
+// callback commit and mutates fixture state only after its injected failure
+// boundary has passed.
+func (s *connectAdminMockStore) UpsertAuthConnectionAndReconcileResources(_ context.Context, conn store.AuthConnection, resources []store.ConnectionResource) (*store.AuthConnection, []store.ConnectionResource, error) {
+	s.callbackPersistCalls++
+	if s.callbackPersistErr != nil {
+		return nil, nil, s.callbackPersistErr
+	}
+	if s.savedConnection != nil && s.savedConnection.BucketID == conn.BucketID && s.savedConnection.ServiceID == conn.ServiceID && s.savedConnection.EndUserRef == conn.EndUserRef && s.savedConnection.AuthName == conn.AuthName {
+		conn.ID = s.savedConnection.ID
+	} else {
+		conn.ID = uuid.New()
+	}
+	conn.UpdatedAt = time.Now().UTC()
+	if conn.CreatedAt.IsZero() {
+		conn.CreatedAt = conn.UpdatedAt
+	}
+	stored := append([]store.ConnectionResource(nil), resources...)
+	for index := range stored {
+		stored[index].ConnectionID = conn.ID
+	}
+	s.savedConnection = &conn
+	s.reconciledResources = stored
+	return &conn, append([]store.ConnectionResource(nil), stored...), nil
 }
 
 // ReconcileConnectionResources captures the all-at-once callback write so the

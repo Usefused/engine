@@ -432,7 +432,7 @@ func (c *LocalObjectCache) ListEndpointsForSelections(ctx context.Context, selec
 	for index, selection := range selections {
 		requested = append(requested, store.ServiceContractEndpointSelection{
 			SelectionIndex: index, ServiceID: selection.ServiceID, ServiceVersionID: selection.ServiceVersionID,
-			SelectAll: selection.SelectAll, EndpointIDs: selection.EndpointIDs,
+			SelectAll: selection.SelectAll, EndpointIDs: selection.EndpointIDs, OperationNames: selection.OperationNames,
 		})
 	}
 	matches, err := contractStore.ListServiceContractEndpointsForSelections(ctx, requested, names)

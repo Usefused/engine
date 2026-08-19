@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -154,6 +155,27 @@ func TestControlAuditRecordsBoundedNoopEvidenceOnFinalOutcome(t *testing.T) {
 	}
 	if _, present := recorder.events[0].Metadata["changed"]; present {
 		t.Fatalf("preflight audit must not claim a mutation result: %#v", recorder.events[0])
+	}
+}
+
+// TestApplyConnectBrandingAuditEvidenceUsesOnlyFixedBooleansAndCount verifies
+// the final control audit receives no customer-entered branding values.
+func TestApplyConnectBrandingAuditEvidenceUsesOnlyFixedBooleansAndCount(t *testing.T) {
+	event := accesscontrol.AuditEvent{Metadata: map[string]any{}}
+	applyConnectBrandingAuditEvidence(&event, accesscontrol.ConnectBrandingAuditChanges{
+		Present: true, DisplayName: true, LogoURL: true, Count: 2,
+	})
+	if event.Metadata["display_name_changed"] != true || event.Metadata["logo_url_changed"] != true || event.Metadata["changed_field_count"] != 2 {
+		t.Fatalf("branding audit metadata = %#v", event.Metadata)
+	}
+	if _, err := accesscontrol.SanitizeAuditMetadata(event.Metadata); err != nil {
+		t.Fatalf("branding audit metadata was rejected: %v", err)
+	}
+	encoded := fmt.Sprint(event.Metadata)
+	for _, forbidden := range []string{"Sentinel Customer", "secret-assets.example", "https://", "#123456"} {
+		if strings.Contains(encoded, forbidden) {
+			t.Fatalf("branding audit leaked %q: %s", forbidden, encoded)
+		}
 	}
 }
 

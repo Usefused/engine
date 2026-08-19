@@ -95,6 +95,7 @@ const registryAuthConfigGraphQLFields = `
 	oauth2_metadata_url
 	deprecated
 	token_endpoint_auth_method
+	token_request_media_type
 	open_id_connect_url
 	pkce_required
 	scopes_delimiter

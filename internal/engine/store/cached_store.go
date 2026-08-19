@@ -36,6 +36,20 @@ func NewCachedStore(delegate Store, nc *messaging.NATSClient) Store {
 	return cs
 }
 
+// UpsertAuthConnectionAndReconcileResources preserves the delegate's atomic
+// callback capability across the cache wrapper. Optional interface methods are
+// not promoted through an embedded Store interface, so explicit forwarding is
+// required before live callback handlers can reach the PostgreSQL transaction.
+func (s *cachedStore) UpsertAuthConnectionAndReconcileResources(ctx context.Context, conn AuthConnection, resources []ConnectionResource) (*AuthConnection, []ConnectionResource, error) {
+	callbackStore, ok := s.Store.(CallbackConnectionStore)
+	// A wrapper around a non-transactional adapter must fail closed instead of
+	// falling back to separate credential and routing writes.
+	if !ok {
+		return nil, nil, errors.New("store does not support atomic callback persistence")
+	}
+	return callbackStore.UpsertAuthConnectionAndReconcileResources(ctx, conn, resources)
+}
+
 func (s *cachedStore) LoadEngineInstallationID(ctx context.Context) (uuid.UUID, error) {
 	repository, ok := s.Store.(EngineInstallationStore)
 	if !ok {

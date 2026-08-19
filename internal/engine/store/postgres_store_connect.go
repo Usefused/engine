@@ -26,6 +26,10 @@ const connectSessionColumns = `
 	id,  bucket_id, service_id, auth_type, auth_name, end_user_ref, state_hash,
 	nonce_hash, encrypted_dek, pkce_verifier, created_by_app_id, return_url, resource_input, requested_scopes, expires_at, used_at, created_at`
 
+const connectInputSessionColumns = `
+	id, bucket_id, service_id, auth_type, auth_name, contract_hash, end_user_ref, token_hash,
+	created_by_app_id, return_url, resource_input, requested_scopes, expires_at, used_at, created_at`
+
 func (s *postgresStore) UpsertConnectConfig(ctx context.Context, cfg ConnectConfig) (*ConnectConfig, error) {
 	if err := validateConnectConfigMaterial(cfg); err != nil {
 		return nil, err
@@ -130,10 +134,23 @@ func (s *postgresStore) GetBucketConnectSummary(ctx context.Context, bucketID uu
 	return &summary, nil
 }
 
+// UpsertAuthConnection writes standalone credential refreshes through the same
+// validated row helper used by callback transactions.
 func (s *postgresStore) UpsertAuthConnection(ctx context.Context, conn AuthConnection) (*AuthConnection, error) {
 	if err := validateAuthConnectionMaterial(conn); err != nil {
 		return nil, err
 	}
+	return upsertAuthConnectionRow(ctx, s.db, conn)
+}
+
+type authConnectionRowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// upsertAuthConnectionRow keeps the credential write identical for standalone
+// refreshes and callback transactions while allowing the latter to share one
+// PostgreSQL commit with resource reconciliation.
+func upsertAuthConnectionRow(ctx context.Context, querier authConnectionRowQuerier, conn AuthConnection) (*AuthConnection, error) {
 	query := `
 		INSERT INTO fused_auth_connections (
 			bucket_id, service_id, end_user_ref, created_by_app_id,
@@ -168,7 +185,7 @@ func (s *postgresStore) UpsertAuthConnection(ctx context.Context, conn AuthConne
 			last_failure_trace_id = EXCLUDED.last_failure_trace_id,
 			updated_at = NOW()
 		RETURNING ` + authConnectionColumns
-	return scanAuthConnection(s.db.QueryRow(ctx, query,
+	return scanAuthConnection(querier.QueryRow(ctx, query,
 		conn.BucketID, conn.ServiceID, conn.EndUserRef, uuidOrNil(conn.CreatedByAppID),
 		conn.AuthType, conn.AuthName, conn.EncryptedDEK, conn.EncryptedAccessToken, emptyStringOrNil(conn.EncryptedRefreshToken), emptyStringOrNil(conn.EncryptedIDToken),
 		defaultString(conn.TokenType, "Bearer"), nonNilStrings(conn.Scopes), defaultString(conn.ScopeSource, "none"), conn.Issuer, conn.Subject,
@@ -309,7 +326,19 @@ func (s *postgresStore) ListAuthConnectionsNeedingRefresh(ctx context.Context, c
 	return collectAuthConnections(rows)
 }
 
+// CreateConnectSession uses the shared insert path so direct connect starts and
+// form completions persist an identical provider callback record.
 func (s *postgresStore) CreateConnectSession(ctx context.Context, session ConnectSession) (*ConnectSession, error) {
+	return insertConnectSession(ctx, s.db, session)
+}
+
+type connectQueryRower interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+// insertConnectSession accepts either the pool or an existing transaction so
+// form-token consumption can be atomic without duplicating insert SQL.
+func insertConnectSession(ctx context.Context, db connectQueryRower, session ConnectSession) (*ConnectSession, error) {
 	if strings.TrimSpace(session.AuthType) == "" || strings.TrimSpace(session.AuthName) == "" {
 		return nil, ErrInvalidEncryptedAuthMaterial
 	}
@@ -325,7 +354,7 @@ func (s *postgresStore) CreateConnectSession(ctx context.Context, session Connec
 			FROM fused_buckets b
 			WHERE b.id = $1
 			RETURNING ` + connectSessionColumns
-	return scanConnectSession(s.db.QueryRow(ctx, query,
+	return scanConnectSession(db.QueryRow(ctx, query,
 		session.BucketID, session.ServiceID, session.AuthType, session.AuthName, session.EndUserRef,
 		session.StateHash, session.NonceHash, session.EncryptedDEK, session.EncryptedPKCEVerifier,
 		uuidOrNil(session.CreatedByAppID), session.ReturnURL, jsonObjectBytes(session.ResourceInputJSON), session.RequestedScopes, session.ExpiresAt,
@@ -352,12 +381,105 @@ func (s *postgresStore) MarkConnectSessionUsed(ctx context.Context, stateHash st
 	return nil
 }
 
+// CreateConnectInputSession stores the pre-authorisation browser handoff under
+// a hash, keeping its raw bearer token exclusively in the returned URL.
+func (s *postgresStore) CreateConnectInputSession(ctx context.Context, session ConnectInputSession) (*ConnectInputSession, error) {
+	query := `
+		INSERT INTO fused_connect_input_sessions (
+			bucket_id, service_id, auth_type, auth_name, contract_hash, end_user_ref, token_hash,
+			created_by_app_id, return_url, resource_input, requested_scopes, expires_at
+		)
+		SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+		FROM fused_buckets b
+		WHERE b.id = $1
+		RETURNING ` + connectInputSessionColumns
+	return scanConnectInputSession(s.db.QueryRow(ctx, query,
+		session.BucketID, session.ServiceID, session.AuthType, session.AuthName, session.ContractHash,
+		session.EndUserRef, session.TokenHash, uuidOrNil(session.CreatedByAppID),
+		session.ReturnURL, jsonObjectBytes(session.ResourceInputJSON), session.RequestedScopes, session.ExpiresAt,
+	))
+}
+
+// GetActiveConnectInputSessionByTokenHash performs one exact indexed lookup
+// with replay and expiry predicates in SQL, so inactive rows never enter Go.
+func (s *postgresStore) GetActiveConnectInputSessionByTokenHash(ctx context.Context, tokenHash string) (*ConnectInputSession, error) {
+	query := `SELECT ` + connectInputSessionColumns + ` FROM fused_connect_input_sessions WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW()`
+	session, err := scanConnectInputSession(s.db.QueryRow(ctx, query, tokenHash))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	return session, err
+}
+
+// CompleteConnectInputSession consumes the browser form token and inserts the
+// provider callback session in one transaction. A duplicate form submission
+// cannot mint a second authorization request, while insertion failure leaves
+// the input session retryable.
+func (s *postgresStore) CompleteConnectInputSession(ctx context.Context, tokenHash, contractHash string, usedAt time.Time, session ConnectSession) (*ConnectSession, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// Identity predicates bind the inserted callback session to the exact
+	// pre-authorisation request without loading the pending row into Go. The
+	// completed resource JSON is intentionally different because it now includes
+	// the fields collected by the browser form.
+	tag, err := tx.Exec(ctx, `
+		UPDATE fused_connect_input_sessions
+		SET used_at = $2
+		WHERE token_hash = $1
+		  AND used_at IS NULL
+		  AND expires_at > $2
+		  AND bucket_id = $3
+		  AND service_id = $4
+		  AND auth_type = $5
+		  AND auth_name = $6
+		  AND end_user_ref = $7
+		  AND created_by_app_id IS NOT DISTINCT FROM $8
+		  AND return_url = $9
+		  AND requested_scopes = $10
+		  AND contract_hash = $11`,
+		tokenHash, usedAt, session.BucketID, session.ServiceID, session.AuthType,
+		session.AuthName, session.EndUserRef, uuidOrNil(session.CreatedByAppID),
+		session.ReturnURL, session.RequestedScopes, contractHash,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, ErrConnectSessionUnavailable
+	}
+	created, err := insertConnectSession(ctx, tx, session)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+// DeleteExpiredConnectSessions removes provider and pre-authorisation sessions
+// in one bounded transaction so cleanup cannot leave either lifecycle behind.
 func (s *postgresStore) DeleteExpiredConnectSessions(ctx context.Context, before time.Time) (int64, error) {
-	tag, err := s.db.Exec(ctx, `DELETE FROM fused_connect_sessions WHERE expires_at < $1`, before)
+	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return tag.RowsAffected(), nil
+	defer func() { _ = tx.Rollback(ctx) }()
+	providerTag, err := tx.Exec(ctx, `DELETE FROM fused_connect_sessions WHERE expires_at < $1`, before)
+	if err != nil {
+		return 0, err
+	}
+	inputTag, err := tx.Exec(ctx, `DELETE FROM fused_connect_input_sessions WHERE expires_at < $1`, before)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return providerTag.RowsAffected() + inputTag.RowsAffected(), nil
 }
 
 type rowsScanner interface {
@@ -451,6 +573,22 @@ func scanConnectSession(row rowScanner) (*ConnectSession, error) {
 		&session.ID, &session.BucketID, &session.ServiceID, &session.AuthType, &session.AuthName, &session.EndUserRef,
 		&session.StateHash, &session.NonceHash, &session.EncryptedDEK, &session.EncryptedPKCEVerifier, &createdBy,
 		&session.ReturnURL, &session.ResourceInputJSON, &session.RequestedScopes, &session.ExpiresAt, &session.UsedAt, &session.CreatedAt,
+	)
+	if createdBy != nil {
+		session.CreatedByAppID = *createdBy
+	}
+	return &session, err
+}
+
+// scanConnectInputSession centralizes the exact SQL projection used by create
+// and lookup paths so column order cannot drift between browser-flow methods.
+func scanConnectInputSession(row rowScanner) (*ConnectInputSession, error) {
+	var session ConnectInputSession
+	var createdBy *uuid.UUID
+	err := row.Scan(
+		&session.ID, &session.BucketID, &session.ServiceID, &session.AuthType, &session.AuthName, &session.ContractHash,
+		&session.EndUserRef, &session.TokenHash, &createdBy, &session.ReturnURL,
+		&session.ResourceInputJSON, &session.RequestedScopes, &session.ExpiresAt, &session.UsedAt, &session.CreatedAt,
 	)
 	if createdBy != nil {
 		session.CreatedByAppID = *createdBy

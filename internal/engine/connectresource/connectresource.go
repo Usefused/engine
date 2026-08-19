@@ -21,6 +21,13 @@ import (
 
 const maxDiscoveryBodyBytes = 2 << 20
 
+var (
+	// ErrDiscoveryInputNoMatch keeps an ungranted customer-selected tenant out of routing state.
+	ErrDiscoveryInputNoMatch = errors.New("resource input did not match a discovered resource")
+	// ErrDiscoveryInputAmbiguous prevents duplicate provider grants from selecting an arbitrary tenant.
+	ErrDiscoveryInputAmbiguous = errors.New("resource input matched multiple discovered resources")
+)
+
 type Resource struct {
 	ProviderID string
 	Type       string
@@ -137,22 +144,12 @@ func discoveryScalarString(value any) (string, bool) {
 // FromInput validates pre-authorisation tenant values and derives one resource
 // without allowing callers to submit an arbitrary URL directly.
 func FromInput(config *fusedobject.ResourceInputConfig, values map[string]string) (Resource, error) {
-	normalized := make(map[string]string, len(config.Fields))
-	// Only declared input fields participate in template rendering or persistence.
-	for _, field := range config.Fields {
-		value := strings.TrimSpace(values[field.Name])
-		// Required fields fail before OAuth so an unusable tenant cannot consume a session.
-		if field.Required && value == "" {
-			return Resource{}, fmt.Errorf("resource input %q is required", field.Name)
-		}
-		// Optional values are validated only when supplied.
-		if field.Pattern != "" && value != "" {
-			matched, err := regexp.MatchString(field.Pattern, value)
-			if err != nil || !matched {
-				return Resource{}, fmt.Errorf("resource input %q is invalid", field.Name)
-			}
-		}
-		normalized[field.Name] = value
+	normalized, missing, err := NormalizeInput(config, values)
+	if err != nil {
+		return Resource{}, err
+	}
+	if len(missing) != 0 {
+		return Resource{}, fmt.Errorf("resource input %q is required", missing[0])
 	}
 	baseURL := renderTemplate(config.BaseURLTemplate, normalized)
 	if err := ValidateBaseURL(baseURL, config.AllowedHosts); err != nil {
@@ -167,6 +164,130 @@ func FromInput(config *fusedobject.ResourceInputConfig, values map[string]string
 		BaseURL:    baseURL,
 		Metadata:   canonical,
 	}, nil
+}
+
+// MatchDiscoveredInput retains the single provider-granted resource whose
+// declared metadata URL equals the validated URL derived from customer input.
+func MatchDiscoveredInput(config *fusedobject.ResourceInputConfig, values map[string]string, resources []Resource) (Resource, error) {
+	// Runtime callers fail closed if unvalidated metadata omitted the explicit match contract.
+	if config == nil || config.DiscoveryMatch == nil {
+		return Resource{}, errors.New("resource discovery match is not configured")
+	}
+	expected, err := FromInput(config, values)
+	// Invalid or incomplete customer input cannot fall back to provider-only selection.
+	if err != nil {
+		return Resource{}, err
+	}
+	expectedURL, err := canonicalDiscoveryMatchURL(expected.BaseURL, config.AllowedHosts)
+	// The derived URL must satisfy the same canonical routing boundary used for provider metadata.
+	if err != nil {
+		return Resource{}, err
+	}
+	matched, matchCount, err := matchingDiscoveredResource(resources, config.DiscoveryMatch.MetadataKey, expectedURL, config.AllowedHosts)
+	// Any malformed grant invalidates the complete provider response.
+	if err != nil {
+		return Resource{}, err
+	}
+	// Exactly one grant prevents missing input matches and ambiguous duplicate
+	// provider rows from becoming usable routing state.
+	if matchCount == 0 {
+		return Resource{}, ErrDiscoveryInputNoMatch
+	}
+	if matchCount > 1 {
+		return Resource{}, ErrDiscoveryInputAmbiguous
+	}
+	return matched, nil
+}
+
+// matchingDiscoveredResource counts exact grants without retaining provider
+// metadata beyond the single original resource needed by routing.
+func matchingDiscoveredResource(resources []Resource, metadataKey, expectedURL string, allowedHosts []string) (Resource, int, error) {
+	var matched Resource
+	matchCount := 0
+	// Every provider row is evaluated once so duplicate matches remain observable.
+	for _, resource := range resources {
+		candidate, err := discoveryMatchMetadataValue(resource.Metadata, metadataKey)
+		// Malformed declared metadata invalidates the grant set instead of being silently ignored.
+		if err != nil {
+			return Resource{}, 0, err
+		}
+		// Missing optional metadata cannot satisfy the explicit customer constraint.
+		if candidate == "" {
+			continue
+		}
+		candidateURL, err := canonicalDiscoveryMatchURL(candidate, allowedHosts)
+		// Provider-returned match values obey the same host boundary as customer-derived URLs.
+		if err != nil {
+			return Resource{}, 0, errors.New("discovery match metadata is invalid")
+		}
+		// Equality is evaluated only after safe structural canonicalization.
+		if candidateURL == expectedURL {
+			matched = resource
+			matchCount++
+		}
+	}
+	return matched, matchCount, nil
+}
+
+// discoveryMatchMetadataValue reads one declared scalar without exposing the
+// remaining provider metadata to matching or error output.
+func discoveryMatchMetadataValue(raw []byte, key string) (string, error) {
+	values := map[string]string{}
+	// Only scalar strings are valid URL match values; structured metadata fails closed.
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return "", errors.New("discovery match metadata is invalid")
+	}
+	return strings.TrimSpace(values[key]), nil
+}
+
+// canonicalDiscoveryMatchURL normalizes only safe structural URL differences;
+// path case remains significant and query/fragment values are rejected.
+func canonicalDiscoveryMatchURL(raw string, allowedHosts []string) (string, error) {
+	// Match URLs inherit the reviewed resource-input host boundary.
+	if err := ValidateBaseURL(raw, allowedHosts); err != nil {
+		return "", err
+	}
+	parsed, _ := url.Parse(raw)
+	// Query and fragment data must not influence tenant identity.
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("discovery match URL cannot contain query or fragment")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	return parsed.String(), nil
+}
+
+// NormalizeInput validates every supplied declared field while reporting
+// required omissions separately. Connect callers can therefore launch a
+// collection page only for absent data, without turning invalid submitted data
+// into an interactive fallback or persisting undeclared values.
+func NormalizeInput(config *fusedobject.ResourceInputConfig, values map[string]string) (map[string]string, []string, error) {
+	normalized := make(map[string]string, len(config.Fields))
+	missing := make([]string, 0, len(config.Fields))
+	declared := make(map[string]struct{}, len(config.Fields))
+	for _, field := range config.Fields {
+		declared[field.Name] = struct{}{}
+		value := strings.TrimSpace(values[field.Name])
+		if field.Required && value == "" {
+			missing = append(missing, field.Name)
+		}
+		if field.Pattern != "" && value != "" {
+			matched, err := regexp.MatchString(field.Pattern, value)
+			if err != nil || !matched {
+				return nil, nil, fmt.Errorf("resource input %q is invalid", field.Name)
+			}
+		}
+		normalized[field.Name] = value
+	}
+	// Undeclared keys fail before persistence so caller mistakes cannot become
+	// unreviewed customer metadata or collide with future routing controls.
+	for name := range values {
+		if _, ok := declared[name]; !ok {
+			return nil, nil, fmt.Errorf("resource input %q is not declared", name)
+		}
+	}
+	return normalized, missing, nil
 }
 
 // ValidateBaseURL confines dynamic routing to HTTPS hosts authorized by the

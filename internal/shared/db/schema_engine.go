@@ -10,16 +10,21 @@ import (
 )
 
 const (
-	engineMigrationAdvisoryLockKey   int64 = 0x465553454E47494E
-	engineMigrationLockQuery               = `SELECT pg_advisory_xact_lock($1)`
-	engineMigrationVersion           int64 = 1
-	engineMigrationName                    = "20260810_engine_schema_convergence"
-	appTokenPolicyMigrationVersion   int64 = 2
-	appTokenPolicyMigrationName            = "20260810_app_token_policy"
-	contractEnvelopeMigrationVersion int64 = 3
-	contractEnvelopeMigrationName          = "20260811_execution_contract_envelope"
-	idempotencyMediaMigrationVersion int64 = 4
-	idempotencyMediaMigrationName          = "20260811_idempotency_response_media"
+	engineMigrationAdvisoryLockKey    int64 = 0x465553454E47494E
+	engineMigrationLockQuery                = `SELECT pg_advisory_xact_lock($1)`
+	engineMigrationVersion            int64 = 1
+	engineMigrationName                     = "20260810_engine_schema_convergence"
+	appTokenPolicyMigrationVersion    int64 = 2
+	appTokenPolicyMigrationName             = "20260810_app_token_policy"
+	contractEnvelopeMigrationVersion  int64 = 3
+	contractEnvelopeMigrationName           = "20260811_execution_contract_envelope"
+	idempotencyMediaMigrationVersion  int64 = 4
+	idempotencyMediaMigrationName           = "20260811_idempotency_response_media"
+	connectBrandingMigrationVersion   int64 = 5
+	connectBrandingMigrationName            = "20260819_connect_branding"
+	connectBrandColorMigrationVersion int64 = 6
+	connectBrandColorMigrationName          = "20260819_connect_brand_color"
+	unifiedEmptySetHash                     = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
 )
 
 type engineMigration struct {
@@ -98,15 +103,19 @@ func engineMigrationApplied(ctx context.Context, tx pgx.Tx, migration engineMigr
 	return versionExists, nil
 }
 
+// engineMigrations returns the immutable ordered migration ledger.
 func engineMigrations() []engineMigration {
 	return []engineMigration{
 		{Version: engineMigrationVersion, Name: engineMigrationName, Queries: engineMigrationV1Queries()},
 		{Version: appTokenPolicyMigrationVersion, Name: appTokenPolicyMigrationName, Queries: appTokenPolicyMigrationQueries()},
 		{Version: contractEnvelopeMigrationVersion, Name: contractEnvelopeMigrationName, Queries: contractEnvelopeMigrationQueries()},
 		{Version: idempotencyMediaMigrationVersion, Name: idempotencyMediaMigrationName, Queries: idempotencyMediaMigrationQueries()},
+		{Version: connectBrandingMigrationVersion, Name: connectBrandingMigrationName, Queries: connectBrandingMigrationQueries()},
+		{Version: connectBrandColorMigrationVersion, Name: connectBrandColorMigrationName, Queries: connectBrandColorMigrationQueries()},
 	}
 }
 
+// engineMigrationQueries flattens the immutable ledger for schema contract tests.
 func engineMigrationQueries() []string {
 	var queries []string
 	for _, migration := range engineMigrations() {
@@ -115,14 +124,21 @@ func engineMigrationQueries() []string {
 	return queries
 }
 
+// engineSchemaQueries returns the canonical schema plus unversioned live-table convergence.
 func engineSchemaQueries() []string {
-	return []string{
+	queries := []string{
 		// Workspaces
 		`CREATE TABLE IF NOT EXISTS fused_workspaces (
 			id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 			account_id uuid NOT NULL,
 			name text NOT NULL,
 			slug text NOT NULL UNIQUE,
+			connect_display_name text NOT NULL DEFAULT 'Fused',
+			connect_logo_url text NOT NULL DEFAULT '',
+			connect_primary_color text NOT NULL DEFAULT '#2563eb',
+			connect_primary_color_customized boolean NOT NULL DEFAULT false,
+			connect_support_url text NOT NULL DEFAULT '',
+			connect_privacy_url text NOT NULL DEFAULT '',
 			singleton_key smallint NOT NULL DEFAULT 1 UNIQUE,
 			created_at timestamptz DEFAULT NOW(),
 			updated_at timestamptz DEFAULT NOW(),
@@ -551,7 +567,34 @@ func engineSchemaQueries() []string {
 		`CREATE INDEX IF NOT EXISTS idx_fused_connect_sessions_state_hash
 			ON fused_connect_sessions(state_hash);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_connect_sessions_expires
-		ON fused_connect_sessions(expires_at);`,
+			ON fused_connect_sessions(expires_at);`,
+
+		// Input sessions exist only when an SDK/CLI caller omits a required
+		// provider-routing field. Keeping them separate ensures OAuth state,
+		// nonce, and PKCE material are not created until the browser form has
+		// produced a complete validated input set. Only a hash of the one-time
+		// browser token is stored.
+		`CREATE TABLE IF NOT EXISTS fused_connect_input_sessions (
+			id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			bucket_id          uuid NOT NULL REFERENCES fused_buckets(id) ON DELETE CASCADE,
+			service_id         uuid NOT NULL,
+			auth_type          text NOT NULL,
+			auth_name          text NOT NULL,
+			contract_hash      text NOT NULL CHECK (contract_hash ~ '^sha256:[0-9a-f]{64}$'),
+			end_user_ref       text NOT NULL,
+			token_hash         text NOT NULL UNIQUE,
+			created_by_app_id  uuid,
+			return_url         text NOT NULL DEFAULT '',
+			resource_input     jsonb NOT NULL DEFAULT '{}'::jsonb,
+			requested_scopes   text[] NOT NULL DEFAULT '{}',
+			expires_at         timestamptz NOT NULL,
+			used_at            timestamptz,
+			created_at         timestamptz NOT NULL DEFAULT NOW()
+		);`,
+		// The UNIQUE token_hash constraint already supplies the exact lookup
+		// index, so only expiry needs a separate cleanup index.
+		`CREATE INDEX IF NOT EXISTS idx_fused_connect_input_sessions_expires
+			ON fused_connect_input_sessions(expires_at);`,
 
 		// MCP Sessions
 		`CREATE TABLE IF NOT EXISTS fused_mcp_sessions (
@@ -1251,6 +1294,10 @@ func engineSchemaQueries() []string {
 			capability_hash        text NOT NULL DEFAULT '',
 			scope_schema_version   integer NOT NULL DEFAULT 1,
 			selections             jsonb NOT NULL DEFAULT '[]'::jsonb,
+			unified_definition_schema_version integer NOT NULL DEFAULT 2,
+			unified_definitions    jsonb NOT NULL DEFAULT '[]'::jsonb,
+			unified_definition_hash text NOT NULL DEFAULT '` + unifiedEmptySetHash + `',
+			unified_codegen_descriptor_hash text NOT NULL DEFAULT '` + unifiedEmptySetHash + `',
 			generator_version      text,
 			status                 text NOT NULL
 			                       CHECK (status IN ('building', 'active', 'deprecated')),
@@ -1264,7 +1311,16 @@ func engineSchemaQueries() []string {
 			UNIQUE (account_id, config_key),
 			FOREIGN KEY (app_family_id, account_id)
 				REFERENCES fused_app_families(app_family_id, account_id)
-				ON DELETE RESTRICT
+				ON DELETE RESTRICT,
+			CONSTRAINT chk_fused_apps_unified_definition_shape CHECK (
+				unified_definition_schema_version = 2
+				AND jsonb_typeof(unified_definitions) = 'array'
+				AND octet_length(unified_definitions::text) <= 1048576
+			),
+			CONSTRAINT chk_fused_apps_unified_hashes CHECK (
+				unified_definition_hash ~ '^sha256:[0-9a-f]{64}$'
+				AND unified_codegen_descriptor_hash ~ '^sha256:[0-9a-f]{64}$'
+			)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_apps_family_status
 			ON fused_apps(app_family_id, status, created_at DESC);`,
@@ -1336,6 +1392,67 @@ func engineSchemaQueries() []string {
 		`CREATE INDEX IF NOT EXISTS idx_fused_app_tokens_family
 			ON fused_app_tokens(app_family_id, created_at DESC);`,
 	}
+	return append(queries, unifiedSchemaConvergenceQueries()...)
+}
+
+// unifiedSchemaConvergenceQueries adds the unreleased final-v2 Unified shape
+// to live pre-Unified app tables without creating a migration-ledger identity.
+func unifiedSchemaConvergenceQueries() []string {
+	return []string{
+		`ALTER TABLE fused_apps ADD COLUMN IF NOT EXISTS unified_definition_schema_version integer NOT NULL DEFAULT 2;`,
+		`ALTER TABLE fused_apps ADD COLUMN IF NOT EXISTS unified_definitions jsonb NOT NULL DEFAULT '[]'::jsonb;`,
+		`ALTER TABLE fused_apps ADD COLUMN IF NOT EXISTS unified_definition_hash text NOT NULL DEFAULT '` + unifiedEmptySetHash + `';`,
+		`ALTER TABLE fused_apps ADD COLUMN IF NOT EXISTS unified_codegen_descriptor_hash text NOT NULL DEFAULT '` + unifiedEmptySetHash + `';`,
+		`ALTER TABLE fused_apps ALTER COLUMN unified_definition_schema_version SET DEFAULT 2;`,
+		`ALTER TABLE fused_apps ALTER COLUMN unified_definitions SET DEFAULT '[]'::jsonb;`,
+		`ALTER TABLE fused_apps ALTER COLUMN unified_definition_hash SET DEFAULT '` + unifiedEmptySetHash + `';`,
+		`ALTER TABLE fused_apps ALTER COLUMN unified_codegen_descriptor_hash SET DEFAULT '` + unifiedEmptySetHash + `';`,
+		`ALTER TABLE fused_apps ALTER COLUMN unified_definition_schema_version SET NOT NULL;`,
+		`ALTER TABLE fused_apps ALTER COLUMN unified_definitions SET NOT NULL;`,
+		`ALTER TABLE fused_apps ALTER COLUMN unified_definition_hash SET NOT NULL;`,
+		`ALTER TABLE fused_apps ALTER COLUMN unified_codegen_descriptor_hash SET NOT NULL;`,
+		`DO $$
+		BEGIN
+			-- The lock prevents concurrent first startups from both adding the same constraint.
+			LOCK TABLE fused_apps IN SHARE ROW EXCLUSIVE MODE;
+			-- Draft v1 data cannot be promoted without inventing compatibility semantics.
+			IF EXISTS (
+				SELECT 1
+				FROM pg_constraint
+				WHERE conrelid = 'fused_apps'::regclass
+				  AND conname = 'chk_fused_apps_unified_definition_shape'
+				  AND pg_get_constraintdef(oid) LIKE '%unified_definition_schema_version = 1%'
+			) THEN
+				RAISE EXCEPTION 'Unified draft schema v1 is unsupported; reset the Engine database before enabling Unified Operations';
+			END IF;
+			-- Existing final-v2 constraints stay untouched to avoid repeated table validation.
+			IF NOT EXISTS (
+				SELECT 1
+				FROM pg_constraint
+				WHERE conrelid = 'fused_apps'::regclass
+				  AND conname = 'chk_fused_apps_unified_definition_shape'
+			) THEN
+				ALTER TABLE fused_apps ADD CONSTRAINT chk_fused_apps_unified_definition_shape CHECK (
+					unified_definition_schema_version = 2
+					AND jsonb_typeof(unified_definitions) = 'array'
+					AND octet_length(unified_definitions::text) <= 1048576
+				);
+			END IF;
+			-- Existing final-v2 constraints stay untouched to avoid repeated table validation.
+			IF NOT EXISTS (
+				SELECT 1
+				FROM pg_constraint
+				WHERE conrelid = 'fused_apps'::regclass
+				  AND conname = 'chk_fused_apps_unified_hashes'
+			) THEN
+				ALTER TABLE fused_apps ADD CONSTRAINT chk_fused_apps_unified_hashes CHECK (
+					unified_definition_hash ~ '^sha256:[0-9a-f]{64}$'
+					AND unified_codegen_descriptor_hash ~ '^sha256:[0-9a-f]{64}$'
+				);
+			END IF;
+		END
+		$$;`,
+	}
 }
 
 // Existing snapshots predate capability negotiation and therefore cannot be
@@ -1378,6 +1495,49 @@ func idempotencyMediaMigrationQueries() []string {
 		`ALTER TABLE fused_engine_idempotency_keys ALTER COLUMN response_media_family SET NOT NULL;`,
 		`ALTER TABLE fused_engine_idempotency_keys DROP CONSTRAINT IF EXISTS chk_fused_engine_idempotency_response_media_family;`,
 		`ALTER TABLE fused_engine_idempotency_keys ADD CONSTRAINT chk_fused_engine_idempotency_response_media_family CHECK (response_media_family IN ('sse', 'json', 'binary', 'xml', 'text', 'other', 'unknown'));`,
+	}
+}
+
+// connectBrandingMigrationQueries adds presentation-only workspace fields to
+// existing Engine databases while preserving the compiled fallback defaults.
+func connectBrandingMigrationQueries() []string {
+	return []string{
+		`ALTER TABLE fused_workspaces ADD COLUMN IF NOT EXISTS connect_display_name text NOT NULL DEFAULT 'Fused';`,
+		`ALTER TABLE fused_workspaces ADD COLUMN IF NOT EXISTS connect_logo_url text NOT NULL DEFAULT '';`,
+		`ALTER TABLE fused_workspaces ADD COLUMN IF NOT EXISTS connect_primary_color text NOT NULL DEFAULT '#18181b';`,
+		`ALTER TABLE fused_workspaces ADD COLUMN IF NOT EXISTS connect_support_url text NOT NULL DEFAULT '';`,
+		`ALTER TABLE fused_workspaces ADD COLUMN IF NOT EXISTS connect_privacy_url text NOT NULL DEFAULT '';`,
+	}
+}
+
+// connectBrandColorMigrationQueries upgrades only untouched legacy defaults
+// while retaining every row with evidence of a prior branding replacement.
+func connectBrandColorMigrationQueries() []string {
+	return []string{
+		// The marker gives future migrations durable evidence without exposing a colour value.
+		`ALTER TABLE fused_workspaces ADD COLUMN IF NOT EXISTS connect_primary_color_customized boolean NOT NULL DEFAULT false;`,
+		// A visibly different colour or the bounded mutation audit protects an explicit choice.
+		`UPDATE fused_workspaces AS workspace
+		 SET connect_primary_color_customized = true
+		 WHERE connect_primary_color IS DISTINCT FROM '#18181b'
+		    OR EXISTS (
+		       SELECT 1
+		       FROM fused_audit_events AS audit
+		       WHERE audit.resource_type = 'workspace'
+		         AND audit.resource_id = workspace.id
+		         AND audit.action = 'control.http.put'
+		         AND audit.path = '/workspace/connect-branding'
+		         AND audit.permission = 'workspace.update'
+		         AND audit.outcome = 'succeeded'
+		         AND audit.metadata @> '{"primary_color_changed": true}'::jsonb
+		    );`,
+		// Only the unprotected legacy default is safe to converge to Engine blue.
+		`UPDATE fused_workspaces
+		 SET connect_primary_color = '#2563eb'
+		 WHERE connect_primary_color_customized = false
+		   AND connect_primary_color = '#18181b';`,
+		// New workspaces inherit the same primary colour as the compiled fallback.
+		`ALTER TABLE fused_workspaces ALTER COLUMN connect_primary_color SET DEFAULT '#2563eb';`,
 	}
 }
 

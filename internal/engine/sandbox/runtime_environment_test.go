@@ -111,6 +111,54 @@ func TestResolveRuntimeServerTemplateAppliesForcedBaseURLBeforeVariables(t *test
 	}
 }
 
+// TestResolveRuntimeServerTemplateUsesDiscoveryAllowlistForMatchedInput proves
+// a customer-selected Jira site can resolve to Atlassian's trusted API proxy.
+func TestResolveRuntimeServerTemplateUsesDiscoveryAllowlistForMatchedInput(t *testing.T) {
+	metadata := &fusedobject.ServiceMetadata{
+		BaseURL: "https://api.atlassian.com",
+		ConnectConfig: &fusedobject.ServiceConnectConfig{
+			ResourceInput:     &fusedobject.ResourceInputConfig{AllowedHosts: []string{"*.atlassian.net"}},
+			ResourceDiscovery: &fusedobject.ResourceDiscoveryConfig{AllowedHosts: []string{"api.atlassian.com"}},
+		},
+	}
+	resolution, err := resolveRuntimeEnvironment(metadata, "")
+	bindings := []store.BucketValue{{
+		Location: "base_url", SourceKind: "connection_resource", Mode: "force",
+		Value: "https://api.atlassian.com/ex/jira/cloud-a",
+	}}
+	// Runtime must validate the discovered route before it can replace the
+	// static service base URL used during contract import.
+	if err == nil {
+		resolution, err = resolveRuntimeServerTemplate(metadata, resolution, nil, bindings)
+	}
+	assertRuntimeServerResolution(t, resolution, err, bindings[0].Value, "connection_resource")
+}
+
+// TestResolveRuntimeServerTemplateRejectsInputHostAfterDiscovery prevents the
+// selector allowlist from becoming an alternate execution-route allowlist.
+func TestResolveRuntimeServerTemplateRejectsInputHostAfterDiscovery(t *testing.T) {
+	metadata := &fusedobject.ServiceMetadata{
+		BaseURL: "https://api.atlassian.com",
+		ConnectConfig: &fusedobject.ServiceConnectConfig{
+			ResourceInput:     &fusedobject.ResourceInputConfig{AllowedHosts: []string{"*.atlassian.net"}},
+			ResourceDiscovery: &fusedobject.ResourceDiscoveryConfig{AllowedHosts: []string{"api.atlassian.com"}},
+		},
+	}
+	resolution, err := resolveRuntimeEnvironment(metadata, "")
+	bindings := []store.BucketValue{{
+		Location: "base_url", SourceKind: "connection_resource", Mode: "force",
+		Value: "https://acme.atlassian.net/rest/api/3",
+	}}
+	// A discovered connection must never dispatch through the customer-supplied
+	// site even when that host was valid as a pre-consent selector.
+	if err == nil {
+		_, err = resolveRuntimeServerTemplate(metadata, resolution, nil, bindings)
+	}
+	if err == nil {
+		t.Fatal("input-only host was accepted as a discovered execution route")
+	}
+}
+
 func TestResolveRuntimeServerTemplateRequiresAbsoluteProtocolRelativeOverride(t *testing.T) {
 	metadata := &fusedobject.ServiceMetadata{
 		Servers: fusedobject.Servers{{URL: "//your-domain.atlassian.net", IsDefault: true}},

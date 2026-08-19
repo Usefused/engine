@@ -26,6 +26,13 @@ func EmbeddedUIMiddleware(uiFS http.FileSystem, runtimeConfigs ...EmbeddedUIRunt
 			return next
 		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Connect browser routes are server-rendered runtime handoffs. Letting
+			// the SPA fallback claim them would strand provider callbacks and input
+			// collection on an unrelated application shell.
+			if isEmbeddedUIRuntimeBrowserRoute(r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
 			if !isUIReadMethod(r.Method) {
 				next.ServeHTTP(w, r)
 				return
@@ -43,6 +50,12 @@ func EmbeddedUIMiddleware(uiFS http.FileSystem, runtimeConfigs ...EmbeddedUIRunt
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// isEmbeddedUIRuntimeBrowserRoute reserves exact Engine-owned browser paths
+// without weakening SPA navigation behavior for neighboring workspace routes.
+func isEmbeddedUIRuntimeBrowserRoute(rawPath string) bool {
+	return rawPath == "/workspace/connect/input" || rawPath == "/workspace/connect/callback"
 }
 
 func firstEmbeddedUIRuntimeConfig(configs []EmbeddedUIRuntimeConfig) EmbeddedUIRuntimeConfig {

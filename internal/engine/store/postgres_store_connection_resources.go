@@ -14,6 +14,50 @@ const connectionResourceColumns = `
 	resource_type, display_name, base_url, metadata_json, scopes,
 	is_default, is_active, created_at, updated_at`
 
+// UpsertAuthConnectionAndReconcileResources makes callback persistence one
+// commit: any ownership, batch-write, normalization, or commit failure leaves
+// the previous credential and routing rows intact. Its six set-based statements
+// are constant regardless of authoritative resource row count.
+func (s *postgresStore) UpsertAuthConnectionAndReconcileResources(ctx context.Context, conn AuthConnection, resources []ConnectionResource) (*AuthConnection, []ConnectionResource, error) {
+	if err := validateAuthConnectionMaterial(conn); err != nil {
+		return nil, nil, err
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	saved, err := upsertAuthConnectionRow(ctx, tx, conn)
+	if err != nil {
+		return nil, nil, err
+	}
+	owned := callbackOwnedResources(saved.ID, resources)
+	if err := reconcileConnectionResourcesTx(ctx, tx, saved.ID, owned); err != nil {
+		return nil, nil, err
+	}
+	result, err := listConnectionResources(ctx, tx, saved.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, err
+	}
+	return saved, result, nil
+}
+
+// callbackOwnedResources binds only the transaction-created connection ID;
+// bucket and service identities remain caller-supplied so ownership drift is
+// rejected inside the same transaction instead of silently rewritten.
+func callbackOwnedResources(connectionID uuid.UUID, resources []ConnectionResource) []ConnectionResource {
+	owned := make([]ConnectionResource, len(resources))
+	copy(owned, resources)
+	for index := range owned {
+		owned[index].ConnectionID = connectionID
+	}
+	return owned
+}
+
 // ReconcileConnectionResources makes one discovery response authoritative in
 // a transaction so callers never observe a half-refreshed tenant list.
 func (s *postgresStore) ReconcileConnectionResources(ctx context.Context, connectionID uuid.UUID, resources []ConnectionResource) ([]ConnectionResource, error) {
@@ -23,22 +67,28 @@ func (s *postgresStore) ReconcileConnectionResources(ctx context.Context, connec
 	}
 	defer tx.Rollback(ctx)
 
-	if err := verifyResourceOwnership(ctx, tx, connectionID, resources); err != nil {
-		return nil, err
-	}
-	if err := deactivateMissingResources(ctx, tx, connectionID, resources); err != nil {
-		return nil, err
-	}
-	if err := upsertConnectionResources(ctx, tx, connectionID, resources); err != nil {
-		return nil, err
-	}
-	if err := normalizeConnectionResourceDefault(ctx, tx, connectionID); err != nil {
+	if err := reconcileConnectionResourcesTx(ctx, tx, connectionID, resources); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return s.ListConnectionResources(ctx, connectionID)
+}
+
+// reconcileConnectionResourcesTx is the shared set-based reconciliation used
+// by manual discovery and callback credential transactions.
+func reconcileConnectionResourcesTx(ctx context.Context, tx pgx.Tx, connectionID uuid.UUID, resources []ConnectionResource) error {
+	if err := verifyResourceOwnership(ctx, tx, connectionID, resources); err != nil {
+		return err
+	}
+	if err := deactivateMissingResources(ctx, tx, connectionID, resources); err != nil {
+		return err
+	}
+	if err := upsertConnectionResources(ctx, tx, connectionID, resources); err != nil {
+		return err
+	}
+	return normalizeConnectionResourceDefault(ctx, tx, connectionID)
 }
 
 // verifyResourceOwnership rejects mixed batches before SQL can persist routing
@@ -173,7 +223,17 @@ func (s *postgresStore) GetConnectionResourceForExecution(ctx context.Context, c
 // ListConnectionResources returns active resources already filtered and
 // ordered by SQL for UI, CLI, and generated SDK inspection.
 func (s *postgresStore) ListConnectionResources(ctx context.Context, connectionID uuid.UUID) ([]ConnectionResource, error) {
-	rows, err := s.db.Query(ctx, `SELECT `+connectionResourceColumns+` FROM fused_connection_resources WHERE connection_id = $1 AND is_active ORDER BY is_default DESC, display_name, id`, connectionID)
+	return listConnectionResources(ctx, s.db, connectionID)
+}
+
+type connectionResourceQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// listConnectionResources projects active rows through either the pool or the
+// still-open callback transaction, preventing a pre-commit visibility gap.
+func listConnectionResources(ctx context.Context, querier connectionResourceQuerier, connectionID uuid.UUID) ([]ConnectionResource, error) {
+	rows, err := querier.Query(ctx, `SELECT `+connectionResourceColumns+` FROM fused_connection_resources WHERE connection_id = $1 AND is_active ORDER BY is_default DESC, display_name, id`, connectionID)
 	if err != nil {
 		return nil, err
 	}

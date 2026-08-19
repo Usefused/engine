@@ -65,10 +65,17 @@ type ResourceDiscoveryConfig struct {
 }
 
 type ResourceInputConfig struct {
-	Fields          []ResourceInputField `json:"fields" yaml:"fields"`
-	BaseURLTemplate string               `json:"base_url_template" yaml:"base_url_template"`
-	ResourceType    string               `json:"resource_type" yaml:"resource_type"`
-	AllowedHosts    []string             `json:"allowed_hosts,omitempty" yaml:"allowed_hosts,omitempty"`
+	Fields          []ResourceInputField         `json:"fields" yaml:"fields"`
+	BaseURLTemplate string                       `json:"base_url_template" yaml:"base_url_template"`
+	ResourceType    string                       `json:"resource_type" yaml:"resource_type"`
+	AllowedHosts    []string                     `json:"allowed_hosts,omitempty" yaml:"allowed_hosts,omitempty"`
+	DiscoveryMatch  *ResourceInputDiscoveryMatch `json:"discovery_match,omitempty" yaml:"discovery_match,omitempty"`
+}
+
+// ResourceInputDiscoveryMatch makes customer input a constraint on provider
+// discovery instead of a second competing source of routing records.
+type ResourceInputDiscoveryMatch struct {
+	MetadataKey string `json:"metadata_key" yaml:"metadata_key"`
 }
 
 type ResourceInputField struct {

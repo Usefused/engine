@@ -3,13 +3,90 @@ package connectresource
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
+	"reflect"
 	"testing"
 
+	"github.com/Usefused/engine/internal/shared/connectionprofile"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/testcontract"
 )
+
+// TestNormalizeInputAcceptsPartialOptionalInput confirms callers can omit an
+// optional field without being sent through the browser collection flow.
+func TestNormalizeInputAcceptsPartialOptionalInput(t *testing.T) {
+	config := normalizeInputTestConfig()
+	normalized, missing, err := NormalizeInput(config, map[string]string{"subdomain": " acme "})
+	// A declared required value is sufficient even when optional context is absent.
+	if err != nil {
+		t.Fatalf("NormalizeInput: %v", err)
+	}
+	// Missing is reserved for required fields that the collection page must request.
+	if len(missing) != 0 {
+		t.Fatalf("missing fields = %#v, want none", missing)
+	}
+	want := map[string]string{"subdomain": "acme", "region": ""}
+	// Normalization retains the complete declared shape for deterministic persistence.
+	if !reflect.DeepEqual(normalized, want) {
+		t.Fatalf("normalized input = %#v, want %#v", normalized, want)
+	}
+}
+
+// TestNormalizeInputReportsMissingRequiredInput confirms incomplete data is
+// distinguishable from invalid data so the caller can safely launch the form.
+func TestNormalizeInputReportsMissingRequiredInput(t *testing.T) {
+	config := normalizeInputTestConfig()
+	normalized, missing, err := NormalizeInput(config, map[string]string{"region": "eu"})
+	// A required omission is a form-routing result rather than a validation error.
+	if err != nil {
+		t.Fatalf("NormalizeInput: %v", err)
+	}
+	// Only the absent required field should be requested from the customer.
+	if !reflect.DeepEqual(missing, []string{"subdomain"}) {
+		t.Fatalf("missing fields = %#v, want [subdomain]", missing)
+	}
+	want := map[string]string{"subdomain": "", "region": "eu"}
+	// Valid partial context survives so the form does not ask for it again.
+	if !reflect.DeepEqual(normalized, want) {
+		t.Fatalf("normalized input = %#v, want %#v", normalized, want)
+	}
+}
+
+// TestNormalizeInputRejectsInvalidDeclaredValue keeps malformed tenant data
+// from being converted into a browser fallback that obscures caller errors.
+func TestNormalizeInputRejectsInvalidDeclaredValue(t *testing.T) {
+	config := normalizeInputTestConfig()
+	_, _, err := NormalizeInput(config, map[string]string{"subdomain": "evil.example.com"})
+	// Pattern failures must stop before any input or OAuth session is created.
+	if err == nil {
+		t.Fatal("expected invalid declared resource input to be rejected")
+	}
+}
+
+// TestNormalizeInputRejectsUndeclaredValue prevents callers from persisting
+// arbitrary customer data outside the reviewed resource-input contract.
+func TestNormalizeInputRejectsUndeclaredValue(t *testing.T) {
+	config := normalizeInputTestConfig()
+	_, _, err := NormalizeInput(config, map[string]string{
+		"subdomain": "acme",
+		"secret":    "must-not-be-stored",
+	})
+	// Undeclared values fail closed instead of entering routing metadata.
+	if err == nil {
+		t.Fatal("expected undeclared resource input to be rejected")
+	}
+}
+
+// normalizeInputTestConfig defines one required routing field and one optional
+// context field so tests exercise both collection branches with the same contract.
+func normalizeInputTestConfig() *fusedobject.ResourceInputConfig {
+	return &fusedobject.ResourceInputConfig{Fields: []fusedobject.ResourceInputField{
+		{Name: "subdomain", Required: true, Pattern: `^[a-z0-9-]+$`},
+		{Name: "region", Pattern: `^(eu|us)$`},
+	}}
+}
 
 // TestDiscoveryContractExecutes proves resource discovery is contract-driven rather than provider-dispatched.
 func TestDiscoveryContractExecutes(t *testing.T) {
@@ -143,6 +220,65 @@ func TestFromInputValidatesTemplateHost(t *testing.T) {
 	}
 	if _, err := FromInput(config, map[string]string{"subdomain": "evil.example.com"}); err == nil {
 		t.Fatal("expected invalid subdomain to be rejected")
+	}
+}
+
+// TestMatchDiscoveredInputSelectsExactGrant proves customer input constrains
+// the provider grant while preserving its cloud-ID dispatch URL.
+func TestMatchDiscoveredInputSelectsExactGrant(t *testing.T) {
+	config := matchedResourceInputConfig()
+	resources := []Resource{
+		{ProviderID: "cloud-a", BaseURL: "https://api.atlassian.com/ex/jira/cloud-a", Metadata: []byte(`{"site_url":"https://acme.atlassian.net"}`)},
+		{ProviderID: "cloud-b", BaseURL: "https://api.atlassian.com/ex/jira/cloud-b", Metadata: []byte(`{"site_url":"https://beta.atlassian.net"}`)},
+	}
+	matched, err := MatchDiscoveredInput(config, map[string]string{"subdomain": "Acme"}, resources)
+	// A valid exact grant is required before asserting which routing record survived.
+	if err != nil {
+		t.Fatalf("MatchDiscoveredInput: %v", err)
+	}
+	// Matching must preserve the provider cloud ID and API dispatch URL, not the decorative site URL.
+	if matched.ProviderID != "cloud-a" || matched.BaseURL != resources[0].BaseURL {
+		t.Fatalf("matched resource = %#v", matched)
+	}
+}
+
+// TestMatchDiscoveredInputRejectsZeroAndMultipleGrants prevents a missing or
+// ambiguous provider tenant from producing usable routing state.
+func TestMatchDiscoveredInputRejectsZeroAndMultipleGrants(t *testing.T) {
+	config := matchedResourceInputConfig()
+	noMatch := []Resource{{ProviderID: "cloud-b", Metadata: []byte(`{"site_url":"https://beta.atlassian.net"}`)}}
+	// An ungranted customer subdomain cannot create a connected resource.
+	if _, err := MatchDiscoveredInput(config, map[string]string{"subdomain": "acme"}, noMatch); !errors.Is(err, ErrDiscoveryInputNoMatch) {
+		t.Fatalf("zero-match error = %v", err)
+	}
+	duplicate := []Resource{
+		{ProviderID: "cloud-a", Metadata: []byte(`{"site_url":"https://acme.atlassian.net"}`)},
+		{ProviderID: "cloud-a-duplicate", Metadata: []byte(`{"site_url":"https://acme.atlassian.net/"}`)},
+	}
+	// Canonically duplicate grants cannot select an arbitrary provider row.
+	if _, err := MatchDiscoveredInput(config, map[string]string{"subdomain": "acme"}, duplicate); !errors.Is(err, ErrDiscoveryInputAmbiguous) {
+		t.Fatalf("multiple-match error = %v", err)
+	}
+}
+
+// TestMatchDiscoveredInputRejectsUnsafeMetadata fails closed when provider
+// metadata cannot be treated as a constrained tenant URL.
+func TestMatchDiscoveredInputRejectsUnsafeMetadata(t *testing.T) {
+	resources := []Resource{{ProviderID: "cloud-a", Metadata: []byte(`{"site_url":"https://acme.atlassian.net.attacker.test"}`)}}
+	// Provider metadata remains inside the same reviewed host allowlist as customer input.
+	if _, err := MatchDiscoveredInput(matchedResourceInputConfig(), map[string]string{"subdomain": "acme"}, resources); err == nil {
+		t.Fatal("unsafe provider metadata matched")
+	}
+}
+
+// matchedResourceInputConfig centralizes the exact URL and metadata boundary
+// shared by discovery-input matching tests.
+func matchedResourceInputConfig() *fusedobject.ResourceInputConfig {
+	return &fusedobject.ResourceInputConfig{
+		Fields:          []fusedobject.ResourceInputField{{Name: "subdomain", Required: true, Pattern: `^[A-Za-z0-9-]+$`}},
+		BaseURLTemplate: "https://{subdomain}.atlassian.net", ResourceType: "jira_site",
+		AllowedHosts:   []string{"*.atlassian.net"},
+		DiscoveryMatch: &connectionprofile.ResourceInputDiscoveryMatch{MetadataKey: "site_url"},
 	}
 }
 

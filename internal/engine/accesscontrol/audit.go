@@ -192,6 +192,14 @@ var allowedAuditMetadata = map[string]struct{}{
 	"credential_id":          {},
 	"membership_role":        {},
 	"created_user":           {},
+	// Hosted-connect branding records only fixed field-change facts; the
+	// submitted display name, URLs, and color remain outside durable audit.
+	"display_name_changed":  {},
+	"logo_url_changed":      {},
+	"primary_color_changed": {},
+	"support_url_changed":   {},
+	"privacy_url_changed":   {},
+	"changed_field_count":   {},
 	// App ownership is identity metadata, not credential material. These fields
 	// are emitted by the atomic desired-config transaction and must remain in the
 	// same allowlist used when records are read back through GraphQL.

@@ -115,6 +115,12 @@ export function isAuthenticationFailure(
   ].includes(code || "");
 }
 
+// isImportVersionRequired keys UI recovery off the Registry's stable code so
+// wording changes cannot suppress the version input again.
+export function isImportVersionRequired(error: unknown): boolean {
+  return error instanceof APIRequestError && error.code === "import_version_required";
+}
+
 function permissionDeniedMessage(
   missing: PermissionRequirement[] | undefined
 ): string {

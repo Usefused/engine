@@ -202,6 +202,7 @@ func TestControlActorMiddlewareExcludesRuntimeAndPublicRoutes(t *testing.T) {
 		"/mcp/server/sse",
 		"/webhook/example",
 		"/workspace/connect/callback",
+		"/workspace/connect/input",
 	}
 	for _, path := range paths {
 		response := httptest.NewRecorder()
@@ -236,6 +237,8 @@ func TestClassifyEngineRequest(t *testing.T) {
 		{method: http.MethodOptions, path: "/workspace/services", want: requestClassPublic},
 		{method: http.MethodPost, path: "/mcp/example", want: requestClassRuntimeExcluded},
 		{method: http.MethodPost, path: "/workspace/connect/callback", want: requestClassRuntimeExcluded},
+		{method: http.MethodGet, path: "/workspace/connect/input", want: requestClassRuntimeExcluded},
+		{method: http.MethodPost, path: "/workspace/connect/input", want: requestClassRuntimeExcluded},
 		{method: http.MethodPost, path: "/workspace/buckets/" + uuid.NewString() + "/services/" + uuid.NewString() + "/connect/sessions", want: requestClassControl},
 		{method: http.MethodGet, path: "/workspace/services", want: requestClassControl},
 		{method: http.MethodGet, path: "/audit/export", want: requestClassControl},

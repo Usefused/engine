@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/engine"
+	"github.com/Usefused/engine/internal/engine/auth"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
@@ -25,6 +27,47 @@ type EngineGRPCServer struct {
 
 func NewEngineGRPCServer() *EngineGRPCServer {
 	return &EngineGRPCServer{}
+}
+
+// ResolveExactPhysicalOperations resolves exact physical operations from immutable app scope before provider dispatch.
+func (*EngineGRPCServer) ResolveExactPhysicalOperations(
+	ctx context.Context,
+	appID uuid.UUID,
+	bindings []ExactOperationBinding,
+) ([]ResolvedPhysicalOperation, error) {
+	if globalObjectCache == nil {
+		return nil, errors.New("Engine runtime cache is unavailable")
+	}
+	return ResolveExactPhysicalOperations(ctx, globalObjectCache, appID, bindings)
+}
+
+// ExecuteResolvedPhysicalJSON routes admitted work through the canonical sandbox runtime adapter boundary and accounting path.
+func (*EngineGRPCServer) ExecuteResolvedPhysicalJSON(
+	ctx context.Context,
+	identity auth.RuntimeIdentity,
+	operation ResolvedPhysicalOperation,
+	request PhysicalExecutionRequest,
+) (PhysicalExecutionResult, error) {
+	return ExecuteResolvedPhysicalJSON(ctx, globalDispatcher, identity, operation, request)
+}
+
+// ExecuteResolvedPhysicalSuccess executes one pre-resolved compensation while
+// allowing a successful response with no JSON body.
+func (*EngineGRPCServer) ExecuteResolvedPhysicalSuccess(
+	ctx context.Context,
+	identity auth.RuntimeIdentity,
+	operation ResolvedPhysicalOperation,
+	request PhysicalExecutionRequest,
+) error {
+	return ExecuteResolvedPhysicalSuccess(ctx, globalDispatcher, identity, operation, request)
+}
+
+// ValidateResolvedPhysicalSelectors rejects malformed resolved physical selectors before it can cross the sandbox runtime adaptation boundary.
+func (*EngineGRPCServer) ValidateResolvedPhysicalSelectors(
+	operation ResolvedPhysicalOperation,
+	selectors PhysicalExecutionSelectors,
+) error {
+	return operation.ValidateSelectors(selectors)
 }
 
 func authFromIncomingContext(ctx context.Context) (appID, token string) {

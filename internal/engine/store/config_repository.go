@@ -821,6 +821,7 @@ func bindAppFamilyBucketTx(ctx context.Context, tx pgx.Tx, familyID, bucketID uu
 	return nil
 }
 
+// publishConfigAppTx persists immutable app publication identity atomically while preserving immutability checks.
 func publishConfigAppTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, params ApplyAppConfigPlanParams) (uuid.UUID, bool, error) {
 	capabilityKeys, capabilityHash, err := capability.KeysAndHash(params.Scope.Selections)
 	if err != nil {
@@ -832,7 +833,11 @@ func publishConfigAppTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, para
 		ConfigKey: params.Plan.State.ConfigKey, SourceHash: params.Plan.State.SourceHash,
 		CapabilityHash: capabilityHash, CapabilityKeys: capabilityKeys,
 		ScopeSchemaVersion: params.Scope.ScopeSchemaVersion, Selections: params.Scope.Selections,
-		GeneratorVersion: params.GeneratorVersion, Status: AppStatusActive,
+		UnifiedDefinitionSchemaVersion: params.Scope.UnifiedDefinitionSchemaVersion,
+		UnifiedDefinitions:             params.Scope.UnifiedDefinitions,
+		UnifiedDefinitionHash:          params.Scope.UnifiedDefinitionHash,
+		UnifiedCodegenDescriptorHash:   params.Scope.UnifiedCodegenDescriptorHash,
+		GeneratorVersion:               params.GeneratorVersion, Status: AppStatusActive,
 		ExpectedFamilyKind: params.Scope.Kind,
 	}
 	persisted, created, err := publishAppVersionTx(ctx, tx, app)
