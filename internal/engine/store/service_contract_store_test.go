@@ -782,6 +782,14 @@ func insertSecondContractSnapshot(t *testing.T, ctx context.Context, store *post
 // stay isolated by service version even when operation names collide.
 func assertContractSelectionQueries(t *testing.T, ctx context.Context, store *postgresStore, snapshot ServiceContractSnapshot, updated fusedobject.Endpoint, secondServiceID, secondVersionID uuid.UUID, second fusedobject.Endpoint) {
 	t.Helper()
+	metadata, err := store.ListServiceContractMetadata(ctx, []ServiceContractMetadataRef{
+		{ServiceID: snapshot.ServiceID, ServiceVersionID: snapshot.ServiceVersionID},
+		{ServiceID: secondServiceID, ServiceVersionID: secondVersionID},
+	})
+	firstMetadata := metadata[ServiceContractMetadataRef{ServiceID: snapshot.ServiceID, ServiceVersionID: snapshot.ServiceVersionID}]
+	if err != nil || len(metadata) != 2 || firstMetadata == nil || firstMetadata.Name != "Widgets v2" {
+		t.Fatalf("batched metadata = %#v, err %v", metadata, err)
+	}
 	selections := []ServiceContractEndpointSelection{
 		{SelectionIndex: 0, ServiceID: snapshot.ServiceID, ServiceVersionID: snapshot.ServiceVersionID, EndpointIDs: []uuid.UUID{updated.ID}},
 		{SelectionIndex: 1, ServiceID: secondServiceID, ServiceVersionID: secondVersionID, SelectAll: true},

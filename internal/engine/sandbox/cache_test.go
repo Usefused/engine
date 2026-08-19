@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -24,7 +26,14 @@ type mockCacheDB struct {
 	contractMetadata   *fusedobject.ServiceMetadata
 	contractEndpoints  []fusedobject.Endpoint
 	contractErr        error
+	contractBatchErr   error
+	policyBatchErr     error
 	contractMetaCalls  int
+	metadataBatchCalls int
+	metadataBatchRefs  int
+	policyBatchCalls   int
+	policyBatchRefs    int
+	policyOverrides    map[store.WorkspaceExecutionPolicyRef]*store.WorkspaceExecutionPolicyOverride
 	contractNameCalls  int
 	contractIDCalls    int
 	contractListCalls  int
@@ -116,6 +125,7 @@ func (m *mockCacheDB) GetServiceContractMetadata(ctx context.Context, serviceID,
 	if m.contractErr != nil {
 		return nil, m.contractErr
 	}
+	// An absent fixture represents a missing local immutable snapshot.
 	if m.contractMetadata == nil {
 		return nil, store.ErrServiceContractSnapshotNotFound
 	}
@@ -123,6 +133,46 @@ func (m *mockCacheDB) GetServiceContractMetadata(ctx context.Context, serviceID,
 		m.contractMetadata.ExecutionContractEnvelope = fusedobject.EngineExecutionContractSupport()
 	}
 	return m.contractMetadata, nil
+}
+
+// ListServiceContractMetadata models the production set-based snapshot read
+// and records one call regardless of the requested app-scope cardinality.
+func (m *mockCacheDB) ListServiceContractMetadata(_ context.Context, refs []store.ServiceContractMetadataRef) (map[store.ServiceContractMetadataRef]*fusedobject.ServiceMetadata, error) {
+	m.metadataBatchCalls++
+	m.metadataBatchRefs += len(refs)
+	// Metadata failures terminate cold prewarm before any cache state commits.
+	if m.contractErr != nil {
+		return nil, m.contractErr
+	}
+	// An absent batch fixture models a requested snapshot missing from Engine.
+	if m.contractMetadata == nil {
+		return nil, store.ErrServiceContractSnapshotNotFound
+	}
+	result := make(map[store.ServiceContractMetadataRef]*fusedobject.ServiceMetadata, len(refs))
+	for _, ref := range refs {
+		metadata := *m.contractMetadata
+		// Fixtures without an explicit envelope represent current compatible
+		// contracts, matching the scalar mock behavior above.
+		if metadata.ContractVersion == 0 {
+			metadata.ExecutionContractEnvelope = fusedobject.EngineExecutionContractSupport()
+		}
+		metadata.ID = ref.ServiceID
+		metadata.ServiceVersionID = ref.ServiceVersionID
+		result[ref] = &metadata
+	}
+	return result, nil
+}
+
+// GetEffectiveWorkspaceExecutionPolicyOverrides models the second cold-cache
+// batch and returns no local overlays unless a test supplies an error.
+func (m *mockCacheDB) GetEffectiveWorkspaceExecutionPolicyOverrides(_ context.Context, refs []store.WorkspaceExecutionPolicyRef) (map[store.WorkspaceExecutionPolicyRef]*store.WorkspaceExecutionPolicyOverride, error) {
+	m.policyBatchCalls++
+	m.policyBatchRefs += len(refs)
+	// Policy lookup errors are soft failures, preserving immutable metadata.
+	if m.policyBatchErr != nil {
+		return nil, m.policyBatchErr
+	}
+	return m.policyOverrides, nil
 }
 
 func (m *mockCacheDB) UpsertServiceContractSnapshot(ctx context.Context, snapshot store.ServiceContractSnapshot) (*store.ServiceContractSnapshot, error) {
@@ -150,6 +200,7 @@ func (m *mockCacheDB) ListServiceContractEndpointsByNames(ctx context.Context, s
 	if m.contractErr != nil {
 		return nil, m.contractErr
 	}
+	// Endpoint rows cannot exist without their parent snapshot fixture.
 	if m.contractMetadata == nil {
 		return nil, store.ErrServiceContractSnapshotNotFound
 	}
@@ -163,11 +214,20 @@ func (m *mockCacheDB) ListServiceContractEndpointsByNames(ctx context.Context, s
 	}), nil
 }
 
+// ListServiceContractEndpointsForSelections models the exact set-based endpoint
+// read and records one call for the complete app scope.
 func (m *mockCacheDB) ListServiceContractEndpointsForSelections(ctx context.Context, selections []store.ServiceContractEndpointSelection, endpointNames []string) ([]store.ServiceContractEndpointMatch, error) {
 	m.contractBatchCalls++
+	// A dedicated endpoint failure lets rollback tests prove earlier successful
+	// metadata and policy reads were not committed.
+	if m.contractBatchErr != nil {
+		return nil, m.contractBatchErr
+	}
+	// Shared fixture errors still model failures common to every contract read.
 	if m.contractErr != nil {
 		return nil, m.contractErr
 	}
+	// Endpoint rows cannot exist without their parent snapshot fixture.
 	if m.contractMetadata == nil {
 		return nil, store.ErrServiceContractSnapshotNotFound
 	}
@@ -190,8 +250,16 @@ func (m *mockCacheDB) ListServiceContractEndpointsForSelections(ctx context.Cont
 	return matches, nil
 }
 
+// mockSelectionAllowsEndpoint mirrors the SQL intersection used by the batch
+// store without replacing production query coverage.
 func mockSelectionAllowsEndpoint(selection store.ServiceContractEndpointSelection, names map[string]struct{}, ids map[uuid.UUID]struct{}, endpoint fusedobject.Endpoint) bool {
+	// A global caller allowlist narrows every selection before its local scope.
 	if _, allowed := names[endpoint.Name]; len(names) > 0 && !allowed {
+		return false
+	}
+	// Per-selection names keep overlapping service catalogs isolated inside a
+	// single batch, mirroring the SQL endpoint_names predicate.
+	if len(selection.EndpointNames) > 0 && !slices.Contains(selection.EndpointNames, endpoint.Name) {
 		return false
 	}
 	_, selected := ids[endpoint.ID]
@@ -278,7 +346,7 @@ func TestLocalObjectCache_Refcounting(t *testing.T) {
 	if cache.objectRefCounts[mockID.String()+":"+"00000000-0000-0000-0000-000000000101"] != 1 {
 		t.Errorf("expected object refcount 1, got %d", cache.objectRefCounts[mockID.String()+":"+"00000000-0000-0000-0000-000000000101"])
 	}
-	if db.scopeCount != 1 || db.contractMetaCalls != 1 {
+	if db.scopeCount != 1 || db.metadataBatchCalls != 1 {
 		t.Errorf("expected one scope and one snapshot fetch")
 	}
 
@@ -294,7 +362,7 @@ func TestLocalObjectCache_Refcounting(t *testing.T) {
 	if cache.objectRefCounts[mockID.String()+":"+"00000000-0000-0000-0000-000000000101"] != 2 {
 		t.Errorf("expected object refcount 2, got %d", cache.objectRefCounts[mockID.String()+":"+"00000000-0000-0000-0000-000000000101"])
 	}
-	if db.scopeCount != 1 || db.contractMetaCalls != 1 {
+	if db.scopeCount != 1 || db.metadataBatchCalls != 1 {
 		t.Errorf("expected 0 additional fetches, it should reuse cache")
 	}
 
@@ -388,8 +456,8 @@ func TestLocalObjectCache_ConnectSDKUsesSelectionServiceVersionSnapshot(t *testi
 	if err := cache.ConnectSDK(context.Background(), appID.String()); err != nil {
 		t.Fatalf("ConnectSDK: %v", err)
 	}
-	if db.contractMetaCalls != 1 {
-		t.Fatalf("expected one local snapshot lookup, got %d", db.contractMetaCalls)
+	if db.metadataBatchCalls != 1 {
+		t.Fatalf("expected one local snapshot batch, got %d", db.metadataBatchCalls)
 	}
 	if _, err := cache.GetOrFetchServiceMetadata(context.Background(), appID.String(), serviceID.String()); err != nil {
 		t.Fatalf("expected metadata cached under service_version_id identity: %v", err)
@@ -436,8 +504,8 @@ func TestLocalObjectCache_ConnectSDKUsesServiceContractSnapshot(t *testing.T) {
 	if endpoint.ID != endpointID {
 		t.Fatalf("expected snapshot endpoint %s, got %#v", endpointID, endpoint)
 	}
-	if db.contractMetaCalls != 1 || db.contractNameCalls != 1 {
-		t.Fatalf("expected one snapshot metadata and one batched-name lookup, got metadata=%d names=%d", db.contractMetaCalls, db.contractNameCalls)
+	if db.metadataBatchCalls != 1 || db.contractBatchCalls != 1 {
+		t.Fatalf("expected one metadata and one endpoint batch, got metadata=%d endpoints=%d", db.metadataBatchCalls, db.contractBatchCalls)
 	}
 }
 
@@ -528,9 +596,8 @@ func TestLocalObjectCache_ConnectSDKRejectsUnsupportedScopeSchemaVersion(t *test
 }
 
 // TestLocalObjectCache_EndpointsPrefetchedAtConnect verifies the pre-warm path:
-// when OperationNames is set in the SDK scope, ConnectSDK must call
-// FetchEndpointsByNames once so that the first GetEndpoint call for each
-// operation is served from the in-memory cache — no additional Registry fetch.
+// when OperationNames is set in the SDK scope, ConnectSDK must include it in
+// one set-based snapshot read so the first dispatch uses the in-memory cache.
 func TestLocalObjectCache_EndpointsPrefetchedAtConnect(t *testing.T) {
 	serviceID := uuid.New()
 	serviceVersionID := uuid.New()
@@ -555,8 +622,8 @@ func TestLocalObjectCache_EndpointsPrefetchedAtConnect(t *testing.T) {
 
 	// Exactly one snapshot batch should cover both names without consulting the
 	// Registry on the execution path.
-	if db.contractNameCalls != 1 {
-		t.Errorf("expected one snapshot batch, got %d", db.contractNameCalls)
+	if db.contractBatchCalls != 1 {
+		t.Errorf("expected one snapshot batch, got %d", db.contractBatchCalls)
 	}
 
 	// GetEndpoint for a pre-warmed name must be a cache hit — endpointFetchCount
@@ -568,14 +635,174 @@ func TestLocalObjectCache_EndpointsPrefetchedAtConnect(t *testing.T) {
 	if ep.Name != "listUsers" {
 		t.Errorf("expected endpoint name 'listUsers', got %q", ep.Name)
 	}
-	if db.contractNameCalls != 1 {
-		t.Errorf("GetEndpoint after pre-warm must be a cache hit; snapshot calls=%d", db.contractNameCalls)
+	if db.contractNameCalls != 0 || db.contractBatchCalls != 1 {
+		t.Errorf("GetEndpoint after pre-warm must be a cache hit; scalar=%d batch=%d", db.contractNameCalls, db.contractBatchCalls)
+	}
+}
+
+// TestLocalObjectCacheColdPrewarmUsesConstantQueryCount proves app-scope size
+// changes row cardinality but not metadata, policy, or endpoint round trips.
+func TestLocalObjectCacheColdPrewarmUsesConstantQueryCount(t *testing.T) {
+	for _, selectionCount := range []int{1, 100, 1000} {
+		t.Run(fmt.Sprintf("selections_%d", selectionCount), func(t *testing.T) {
+			selections := make([]models.SDKSelection, selectionCount)
+			for index := range selections {
+				selections[index] = models.SDKSelection{
+					ServiceID: uuid.New(), ServiceVersionID: uuid.New(), OperationNames: []string{"listItems"},
+				}
+			}
+			database := &mockCacheDB{
+				contractMetadata:  &fusedobject.ServiceMetadata{Name: "BatchService"},
+				contractEndpoints: []fusedobject.Endpoint{{Name: "listItems"}},
+			}
+			cache := NewLocalObjectCache(database)
+			if err := cache.cacheSDKSelections(context.Background(), uuid.NewString(), selections); err != nil {
+				t.Fatalf("cacheSDKSelections: %v", err)
+			}
+			if database.metadataBatchCalls != 1 || database.policyBatchCalls != 1 || database.contractBatchCalls != 1 {
+				t.Fatalf("batch calls metadata=%d policy=%d endpoints=%d", database.metadataBatchCalls, database.policyBatchCalls, database.contractBatchCalls)
+			}
+			if database.contractMetaCalls != 0 || database.contractNameCalls != 0 {
+				t.Fatalf("scalar calls metadata=%d endpoints=%d", database.contractMetaCalls, database.contractNameCalls)
+			}
+		})
+	}
+}
+
+// TestLocalObjectCacheColdPrewarmReusesWarmMetadata proves a second app can
+// retain shared metadata without repeating either metadata or policy reads.
+func TestLocalObjectCacheColdPrewarmReusesWarmMetadata(t *testing.T) {
+	serviceID, versionID := uuid.New(), uuid.New()
+	cacheKey := serviceID.String() + ":" + versionID.String()
+	database := &mockCacheDB{contractMetadata: &fusedobject.ServiceMetadata{Name: "Unused"}}
+	cache := NewLocalObjectCache(database)
+	cache.serviceMetadataCache[cacheKey] = &fusedobject.ServiceMetadata{Name: "Warm"}
+	selection := models.SDKSelection{ServiceID: serviceID, ServiceVersionID: versionID, SelectAll: true}
+	if err := cache.cacheSDKSelections(context.Background(), uuid.NewString(), []models.SDKSelection{selection}); err != nil {
+		t.Fatalf("cacheSDKSelections: %v", err)
+	}
+	if database.metadataBatchCalls != 0 || database.policyBatchCalls != 0 || database.contractBatchCalls != 0 {
+		t.Fatalf("warm selection queried metadata=%d policy=%d endpoints=%d", database.metadataBatchCalls, database.policyBatchCalls, database.contractBatchCalls)
+	}
+	if cache.objectRefCounts[cacheKey] != 1 || cache.serviceMetadataCache[cacheKey].Name != "Warm" {
+		t.Fatalf("warm entry was not retained: refs=%d metadata=%#v", cache.objectRefCounts[cacheKey], cache.serviceMetadataCache[cacheKey])
+	}
+}
+
+// TestLocalObjectCacheColdPrewarmDeduplicatesMetadataRefs ensures duplicate
+// app selections share batch input while retaining one reference per selection.
+func TestLocalObjectCacheColdPrewarmDeduplicatesMetadataRefs(t *testing.T) {
+	serviceID, versionID := uuid.New(), uuid.New()
+	selection := models.SDKSelection{ServiceID: serviceID, ServiceVersionID: versionID, SelectAll: true}
+	database := &mockCacheDB{contractMetadata: &fusedobject.ServiceMetadata{Name: "Duplicate"}}
+	cache := NewLocalObjectCache(database)
+	if err := cache.cacheSDKSelections(context.Background(), uuid.NewString(), []models.SDKSelection{selection, selection}); err != nil {
+		t.Fatalf("cacheSDKSelections: %v", err)
+	}
+	cacheKey := serviceID.String() + ":" + versionID.String()
+	if database.metadataBatchRefs != 1 || database.policyBatchRefs != 1 {
+		t.Fatalf("duplicate batch refs metadata=%d policy=%d", database.metadataBatchRefs, database.policyBatchRefs)
+	}
+	if cache.objectRefCounts[cacheKey] != 2 || len(cache.serviceMetadataCache) != 1 {
+		t.Fatalf("duplicate refcounts=%#v metadata=%d", cache.objectRefCounts, len(cache.serviceMetadataCache))
+	}
+}
+
+// TestLocalObjectCacheColdPrewarmAppliesBatchedPolicy verifies workspace policy
+// rows are merged into staged metadata before the cache commit.
+func TestLocalObjectCacheColdPrewarmAppliesBatchedPolicy(t *testing.T) {
+	serviceID, versionID := uuid.New(), uuid.New()
+	ref := store.WorkspaceExecutionPolicyRef{ServiceID: serviceID, ServiceVersionID: versionID}
+	overriddenBaseURL := "https://workspace.example.com"
+	database := &mockCacheDB{
+		contractMetadata: &fusedobject.ServiceMetadata{Name: "Policy", BaseURL: "https://provider.example.com"},
+		policyOverrides: map[store.WorkspaceExecutionPolicyRef]*store.WorkspaceExecutionPolicyOverride{
+			ref: {BaseURL: &overriddenBaseURL},
+		},
+	}
+	cache := NewLocalObjectCache(database)
+	selection := models.SDKSelection{ServiceID: serviceID, ServiceVersionID: versionID, SelectAll: true}
+	if err := cache.cacheSDKSelections(context.Background(), uuid.NewString(), []models.SDKSelection{selection}); err != nil {
+		t.Fatalf("cacheSDKSelections: %v", err)
+	}
+	cacheKey := serviceID.String() + ":" + versionID.String()
+	if cache.serviceMetadataCache[cacheKey].BaseURL != overriddenBaseURL || len(cache.serviceMetadataCache[cacheKey].Servers) != 0 {
+		t.Fatalf("batched policy metadata = %#v", cache.serviceMetadataCache[cacheKey])
+	}
+}
+
+// TestLocalObjectCacheColdPrewarmPreservesPerSelectionNames verifies the one
+// endpoint batch does not populate either service with another selection's API.
+func TestLocalObjectCacheColdPrewarmPreservesPerSelectionNames(t *testing.T) {
+	firstServiceID, firstVersionID := uuid.New(), uuid.New()
+	secondServiceID, secondVersionID := uuid.New(), uuid.New()
+	selections := []models.SDKSelection{
+		{ServiceID: firstServiceID, ServiceVersionID: firstVersionID, OperationNames: []string{"listFirst"}},
+		{ServiceID: secondServiceID, ServiceVersionID: secondVersionID, OperationNames: []string{"listSecond"}},
+	}
+	database := &mockCacheDB{
+		contractMetadata: &fusedobject.ServiceMetadata{Name: "Scoped"},
+		contractEndpoints: []fusedobject.Endpoint{
+			{Name: "listFirst"}, {Name: "listSecond"},
+		},
+	}
+	cache := NewLocalObjectCache(database)
+	if err := cache.cacheSDKSelections(context.Background(), uuid.NewString(), selections); err != nil {
+		t.Fatalf("cacheSDKSelections: %v", err)
+	}
+	firstPrefix := firstServiceID.String() + ":" + firstVersionID.String() + ":"
+	secondPrefix := secondServiceID.String() + ":" + secondVersionID.String() + ":"
+	if cache.endpointMetadataCache[firstPrefix+"listFirst"] == nil || cache.endpointMetadataCache[firstPrefix+"listSecond"] != nil {
+		t.Fatalf("first selection endpoint cache = %#v", cache.endpointMetadataCache)
+	}
+	if cache.endpointMetadataCache[secondPrefix+"listSecond"] == nil || cache.endpointMetadataCache[secondPrefix+"listFirst"] != nil {
+		t.Fatalf("second selection endpoint cache = %#v", cache.endpointMetadataCache)
+	}
+}
+
+// TestLocalObjectCacheColdPrewarmMetadataFailurePreservesCacheState proves the
+// first batch cannot publish versions, metadata, endpoints, or refcounts.
+func TestLocalObjectCacheColdPrewarmMetadataFailurePreservesCacheState(t *testing.T) {
+	cache := NewLocalObjectCache(&mockCacheDB{contractErr: errors.New("metadata batch unavailable")})
+	selection := models.SDKSelection{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), SelectAll: true}
+	appID := uuid.NewString()
+	err := cache.cacheSDKSelections(context.Background(), appID, []models.SDKSelection{selection})
+	if err == nil || !strings.Contains(err.Error(), "metadata batch unavailable") {
+		t.Fatalf("cacheSDKSelections error = %v", err)
+	}
+	if cache.sdkVersions[appID] != nil || len(cache.serviceMetadataCache) != 0 || len(cache.objectRefCounts) != 0 || len(cache.endpointMetadataCache) != 0 {
+		t.Fatalf("metadata failure changed cache: versions=%#v metadata=%#v refs=%#v endpoints=%#v", cache.sdkVersions[appID], cache.serviceMetadataCache, cache.objectRefCounts, cache.endpointMetadataCache)
+	}
+}
+
+// TestLocalObjectCacheColdPrewarmFailurePreservesCacheState verifies the
+// staged transaction leaves both existing entries and new refcounts untouched.
+func TestLocalObjectCacheColdPrewarmFailurePreservesCacheState(t *testing.T) {
+	retainedServiceID, retainedVersionID := uuid.New(), uuid.New()
+	retainedKey := retainedServiceID.String() + ":" + retainedVersionID.String()
+	database := &mockCacheDB{
+		contractMetadata: &fusedobject.ServiceMetadata{Name: "BatchService"},
+		contractBatchErr: errors.New("endpoint batch unavailable"),
+	}
+	cache := NewLocalObjectCache(database)
+	cache.serviceMetadataCache[retainedKey] = &fusedobject.ServiceMetadata{Name: "Retained"}
+	cache.objectRefCounts[retainedKey] = 2
+	selections := []models.SDKSelection{{
+		ServiceID: uuid.New(), ServiceVersionID: uuid.New(), OperationNames: []string{"listItems"},
+	}}
+	appID := uuid.NewString()
+	err := cache.cacheSDKSelections(context.Background(), appID, selections)
+	if err == nil || !strings.Contains(err.Error(), "endpoint batch unavailable") {
+		t.Fatalf("cacheSDKSelections error = %v", err)
+	}
+	if cache.sdkVersions[appID] != nil || len(cache.serviceMetadataCache) != 1 || cache.objectRefCounts[retainedKey] != 2 || len(cache.endpointMetadataCache) != 0 {
+		t.Fatalf("failed prewarm changed cache: versions=%#v metadata=%#v refs=%#v endpoints=%#v", cache.sdkVersions[appID], cache.serviceMetadataCache, cache.objectRefCounts, cache.endpointMetadataCache)
 	}
 }
 
 // TestLocalObjectCache_EndpointsNotPrefetchedWhenOperationNamesEmpty confirms
 // that a scope with no OperationNames (SelectAll=true, or an older scope) does
-// NOT trigger FetchEndpointsByNames at connect — lazy fetch still applies.
+// not trigger a snapshot endpoint batch at connect; lazy fetch still applies.
 func TestLocalObjectCache_EndpointsNotPrefetchedWhenOperationNamesEmpty(t *testing.T) {
 	serviceID := uuid.New()
 	serviceVersionID := uuid.New()
@@ -592,6 +819,9 @@ func TestLocalObjectCache_EndpointsNotPrefetchedWhenOperationNamesEmpty(t *testi
 
 	if err := cache.ConnectSDK(context.Background(), appID.String()); err != nil {
 		t.Fatalf("ConnectSDK: %v", err)
+	}
+	if db.contractBatchCalls != 0 {
+		t.Fatalf("select-all prewarm endpoint batches = %d, want 0", db.contractBatchCalls)
 	}
 }
 

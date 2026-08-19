@@ -2,6 +2,8 @@ import type { ConnectBranding, ConnectBrandingInput } from "./api";
 
 export type ConnectBrandingField = keyof ConnectBrandingInput;
 export type ConnectBrandingErrors = Partial<Record<ConnectBrandingField, string>>;
+// The default follows the Engine UI's canonical --brand-violet token.
+export const DEFAULT_CONNECT_BRANDING_PRIMARY_COLOR = "#2563eb";
 
 export interface ConnectBrandingConfirmationSummary {
   displayNameChanged: boolean;
@@ -19,7 +21,7 @@ export function emptyConnectBrandingInput(): ConnectBrandingInput {
   return {
     display_name: "",
     logo_url: "",
-    primary_color: "#2563eb",
+    primary_color: DEFAULT_CONNECT_BRANDING_PRIMARY_COLOR,
     support_url: "",
     privacy_url: "",
   };
@@ -86,16 +88,16 @@ export function validateConnectBrandingInput(
   if (!/^#[0-9a-fA-F]{6}$/.test(branding.primary_color.trim())) {
     errors.primary_color = "Choose a six-digit hexadecimal colour.";
   }
-  addHTTPSURLValidation(errors, "logo_url", branding.logo_url, true);
-  addHTTPSURLValidation(errors, "support_url", branding.support_url, true);
-  addHTTPSURLValidation(errors, "privacy_url", branding.privacy_url, true);
+  addOptionalHTTPSURLValidation(errors, "logo_url", branding.logo_url);
+  addOptionalHTTPSURLValidation(errors, "support_url", branding.support_url);
+  addOptionalHTTPSURLValidation(errors, "privacy_url", branding.privacy_url);
   return errors;
 }
 
 // safeLogoPreviewURL permits the browser to request only a logo URL accepted by the settings contract.
 export function safeLogoPreviewURL(value: string): string | null {
   const errors: ConnectBrandingErrors = {};
-  addHTTPSURLValidation(errors, "logo_url", value, true);
+  addOptionalHTTPSURLValidation(errors, "logo_url", value);
   // Invalid and empty values both use the same local preview fallback without starting a request.
   if (errors.logo_url || !value.trim()) return null;
   return value.trim();
@@ -111,25 +113,21 @@ export function connectBrandingPreviewName(value: string): string {
 // safePrimaryColour limits inline preview styles to validated hexadecimal colours.
 export function safePrimaryColour(value: string): string {
   // Incomplete colour edits must never create an invalid inline style.
-  if (!/^#[0-9a-fA-F]{6}$/.test(value)) return "#2563eb";
+  if (!/^#[0-9a-fA-F]{6}$/.test(value)) {
+    return DEFAULT_CONNECT_BRANDING_PRIMARY_COLOR;
+  }
   return value;
 }
 
-// addHTTPSURLValidation shares the same absolute HTTPS rule across every externally rendered link.
-function addHTTPSURLValidation(
+// addOptionalHTTPSURLValidation shares the same optional HTTPS rule across every externally rendered link.
+function addOptionalHTTPSURLValidation(
   errors: ConnectBrandingErrors,
   field: "logo_url" | "support_url" | "privacy_url",
   value: string,
-  optional: boolean,
 ): void {
   const candidate = value.trim();
   // Optional blank links deliberately select the Engine's built-in fallback behavior.
-  if (!candidate && optional) return;
-  // Required URL fields need an actionable message distinct from malformed input.
-  if (!candidate) {
-    errors[field] = "Enter an absolute HTTPS URL.";
-    return;
-  }
+  if (!candidate) return;
   const validationError = httpsURLValidationError(candidate);
   // A single validator keeps persisted links and the live logo preview on the same safety boundary.
   if (validationError) errors[field] = validationError;

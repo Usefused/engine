@@ -314,19 +314,23 @@ func connectInputFormOrigin(raw string) string {
 // validation-error forms because both responses contain a one-time bearer
 // token and may contain customer-supplied non-secret routing values.
 func writeConnectInputPage(w http.ResponseWriter, status int, page connectInputPage) {
-	writeConnectInputSecurityHeaders(w, page.FormOrigin, page.Branding.LogoOrigin)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(status)
-	_ = connectInputTemplate.Execute(w, page)
+	writeHostedConnectHTML(w, status, page.FormOrigin, page.Branding, connectInputTemplate, page)
 }
 
 // writeConnectInputProviderPage ends the form-submission navigation before
 // starting provider navigation, so CSP cannot block a provider redirect chain.
 func writeConnectInputProviderPage(w http.ResponseWriter, authorizeURL string, branding hostedConnectBranding) {
-	writeConnectInputSecurityHeaders(w, "", branding.LogoOrigin)
+	page := connectInputProviderPage{AuthorizeURL: authorizeURL, Branding: branding}
+	writeHostedConnectHTML(w, http.StatusOK, "", branding, connectInputProviderTemplate, page)
+}
+
+// writeHostedConnectHTML applies the shared hardened response envelope before
+// executing one page-specific escaped template.
+func writeHostedConnectHTML(w http.ResponseWriter, status int, formOrigin string, branding hostedConnectBranding, pageTemplate *template.Template, data any) {
+	writeConnectInputSecurityHeaders(w, formOrigin, branding.LogoOrigin)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = connectInputProviderTemplate.Execute(w, connectInputProviderPage{AuthorizeURL: authorizeURL, Branding: branding})
+	w.WriteHeader(status)
+	_ = pageTemplate.Execute(w, data)
 }
 
 // writeConnectInputSecurityHeaders protects both rendered forms and provider

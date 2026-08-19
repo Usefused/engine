@@ -86,6 +86,13 @@ func TestCachedStoreForwardsProfileCapabilities(t *testing.T) {
 	if _, err := snapshots.GetServiceContractMetadata(context.Background(), uuid.New(), uuid.New()); err != nil {
 		t.Fatalf("forward service contract metadata: %v", err)
 	}
+	metadataBatch, ok := cached.(ServiceContractMetadataBatchStore)
+	if !ok {
+		t.Fatal("cached store does not expose service contract metadata batch capability")
+	}
+	if _, err := metadataBatch.ListServiceContractMetadata(context.Background(), []ServiceContractMetadataRef{{ServiceID: uuid.New(), ServiceVersionID: uuid.New()}}); err != nil {
+		t.Fatalf("forward service contract metadata batch: %v", err)
+	}
 	if _, err := snapshots.GetServiceContractEndpointByName(context.Background(), uuid.New(), uuid.New(), "getIssue"); err != nil {
 		t.Fatalf("forward service contract endpoint by name: %v", err)
 	}
@@ -98,7 +105,7 @@ func TestCachedStoreForwardsProfileCapabilities(t *testing.T) {
 	if _, err := snapshots.ListServiceContractOperations(context.Background(), uuid.New(), uuid.New()); err != nil {
 		t.Fatalf("forward service contract operations: %v", err)
 	}
-	if delegate.executionCalls != 1 || delegate.batchCalls != 1 || delegate.statusCalls != 1 || delegate.lookupCalls != 1 || delegate.backfillCalls != 1 || delegate.snapshotCalls != 5 {
+	if delegate.executionCalls != 1 || delegate.batchCalls != 1 || delegate.statusCalls != 1 || delegate.lookupCalls != 1 || delegate.backfillCalls != 1 || delegate.snapshotCalls != 6 {
 		t.Fatalf("delegate calls execution=%d batch=%d status=%d lookup=%d backfill=%d snapshots=%d", delegate.executionCalls, delegate.batchCalls, delegate.statusCalls, delegate.lookupCalls, delegate.backfillCalls, delegate.snapshotCalls)
 	}
 }
@@ -190,6 +197,13 @@ func (d *cachedProfileDelegate) UpsertServiceContractSnapshot(context.Context, S
 func (d *cachedProfileDelegate) GetServiceContractMetadata(context.Context, uuid.UUID, uuid.UUID) (*fusedobject.ServiceMetadata, error) {
 	d.snapshotCalls++
 	return &fusedobject.ServiceMetadata{}, nil
+}
+
+// ListServiceContractMetadata records forwarding of the set-based cold-cache
+// metadata read separately from the scalar compatibility method.
+func (d *cachedProfileDelegate) ListServiceContractMetadata(context.Context, []ServiceContractMetadataRef) (map[ServiceContractMetadataRef]*fusedobject.ServiceMetadata, error) {
+	d.snapshotCalls++
+	return map[ServiceContractMetadataRef]*fusedobject.ServiceMetadata{}, nil
 }
 
 func (d *cachedProfileDelegate) GetServiceContractEndpointByName(context.Context, uuid.UUID, uuid.UUID, string) (*fusedobject.Endpoint, error) {

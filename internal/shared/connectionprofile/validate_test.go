@@ -6,6 +6,23 @@ import (
 	"testing"
 )
 
+// TestProfileJSONRejectsUnknownFieldsRecursively proves Engine profile decoding stays closed at every nested boundary.
+func TestProfileJSONRejectsUnknownFieldsRecursively(t *testing.T) {
+	payloads := []string{
+		`{"auth_type":"oauth","resource_discovery":{"version":1,"stage":"post_auth","operation_id":"list","id_path":"$.id","resource_type":"tenant","unknown":true}}`,
+		`{"auth_type":"oauth","resource_input":{"fields":[{"name":"tenant","unknown":true}],"base_url_template":"https://{tenant}.example.com","resource_type":"tenant"}}`,
+		`{"auth_type":"oauth"} {"auth_type":"oauth"}`,
+	}
+	// Each payload targets a different nested or trailing-data bypass of ordinary JSON decoding.
+	for _, payload := range payloads {
+		var profile Profile
+		// Unknown nested fields and second values must never survive into validation or persistence.
+		if err := json.Unmarshal([]byte(payload), &profile); err == nil {
+			t.Fatalf("expected strict decode failure for %s", payload)
+		}
+	}
+}
+
 // TestValidateDiscoveryInputMatch permits customer input only as an exact
 // constraint on provider-discovered metadata and canonicalizes its key.
 func TestValidateDiscoveryInputMatch(t *testing.T) {

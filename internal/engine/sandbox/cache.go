@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -128,99 +129,208 @@ func (c *LocalObjectCache) loadAppRuntime(ctx context.Context, sdkUUID uuid.UUID
 	return scope.Selections, selections, nil
 }
 
+// sdkSelectionCacheEntry carries the exact immutable identity used by both the
+// store batches and the in-memory cache commit.
+type sdkSelectionCacheEntry struct {
+	selection models.SDKSelection
+	ref       store.ServiceContractMetadataRef
+	cacheKey  string
+}
+
+// sdkSelectionCachePlan contains query inputs and the final version map so
+// validation and I/O can finish before shared cache state changes.
+type sdkSelectionCachePlan struct {
+	entries         []sdkSelectionCacheEntry
+	missingMetadata []store.ServiceContractMetadataRef
+	namedSelections []store.ServiceContractEndpointSelection
+	versions        map[string]string
+}
+
+// cacheSDKSelections preloads one app scope with a constant number of store
+// reads and commits only after every required local snapshot row is present.
 func (c *LocalObjectCache) cacheSDKSelections(ctx context.Context, appID string, selections []models.SDKSelection) error {
-	retained := make([]string, 0, len(selections))
-	attempted := make([]string, 0, len(selections))
-	committed := false
-	defer func() {
-		if !committed {
-			c.rollbackSDKSelectionCache(appID, retained, attempted)
-		}
-	}()
-	for _, sel := range selections {
-		if c.sdkVersions[appID] == nil {
-			c.sdkVersions[appID] = make(map[string]string)
-		}
-
-		version, err := selectionVersionIdentity(sel)
-		if err != nil {
-			return err
-		}
-
-		svcID := sel.ServiceID.String()
-		c.sdkVersions[appID][svcID] = version
-		cacheKey := svcID + ":" + version
-
-		if err := c.fetchServiceMetadataIfMissing(ctx, sel.ServiceID, version, cacheKey); err != nil {
-			return err
-		}
-		attempted = append(attempted, cacheKey)
-
-		// Pre-warm the endpoint cache for every operation in this selection so
-		// that the first dispatch to each endpoint is a cache hit rather than a
-		// synchronous Registry round trip on the hot execution path.
-		//
-		// SelectAll scopes omit OperationNames (the full list isn't known at
-		// scope-generation time), so those fall back to lazy fetch on first use.
-		if len(sel.OperationNames) > 0 {
-			if err := c.prefetchEndpoints(ctx, sel, svcID, version); err != nil {
-				// Named selections are part of the immutable app scope. Failing
-				// Connect here prevents a later execution from drifting to a live
-				// Registry contract when its local snapshot is incomplete.
-				return err
-			}
-		}
-		c.objectRefCounts[cacheKey]++
-		retained = append(retained, cacheKey)
+	plan, err := c.planSDKSelectionCache(selections)
+	// Invalid unpinned selections are rejected before any database work.
+	if err != nil {
+		return err
 	}
-	committed = true
+	metadata, err := c.loadSDKSelectionMetadata(ctx, plan.missingMetadata)
+	// Snapshot batch failures leave the staged plan uncommitted.
+	if err != nil {
+		return err
+	}
+	endpoints, err := c.loadSDKSelectionEndpoints(ctx, plan.namedSelections)
+	// Endpoint batch failures likewise leave shared entries and refcounts intact.
+	if err != nil {
+		return err
+	}
+	// Endpoint completeness is checked before commit so a missing named
+	// operation cannot leave metadata or refcounts retained by a failed app.
+	if err := validateSDKSelectionEndpoints(plan.entries, endpoints); err != nil {
+		return err
+	}
+	c.commitSDKSelectionCache(appID, plan, metadata, endpoints)
 	return nil
 }
 
-func (c *LocalObjectCache) rollbackSDKSelectionCache(appID string, retained, attempted []string) {
-	for _, cacheKey := range retained {
-		c.objectRefCounts[cacheKey]--
+// planSDKSelectionCache validates all pinned versions and deduplicates only
+// request identities; persisted rows remain filtered by the set-based SQL.
+func (c *LocalObjectCache) planSDKSelectionCache(selections []models.SDKSelection) (sdkSelectionCachePlan, error) {
+	plan := sdkSelectionCachePlan{entries: make([]sdkSelectionCacheEntry, 0, len(selections)), versions: make(map[string]string)}
+	missing := make(map[store.ServiceContractMetadataRef]struct{}, len(selections))
+	for index, selection := range selections {
+		version, err := selectionVersionIdentity(selection)
+		// All selections are validated before a plan can reach a store batch.
+		if err != nil {
+			return sdkSelectionCachePlan{}, err
+		}
+		serviceID := selection.ServiceID.String()
+		cacheKey := serviceID + ":" + version
+		ref := store.ServiceContractMetadataRef{ServiceID: selection.ServiceID, ServiceVersionID: selection.ServiceVersionID}
+		plan.entries = append(plan.entries, sdkSelectionCacheEntry{selection: selection, ref: ref, cacheKey: cacheKey})
+		plan.versions[serviceID] = version
+		// Existing shared metadata already carries the workspace overlay and does
+		// not need another database read for this app connection.
+		if _, cached := c.serviceMetadataCache[cacheKey]; !cached {
+			// Duplicate selections retain distinct refcounts but share one metadata
+			// and policy batch input.
+			if _, planned := missing[ref]; !planned {
+				missing[ref] = struct{}{}
+				plan.missingMetadata = append(plan.missingMetadata, ref)
+			}
+		}
+		// Empty operation names represent select-all scopes and intentionally
+		// retain lazy endpoint loading rather than materializing full contracts.
+		if len(selection.OperationNames) > 0 {
+			plan.namedSelections = append(plan.namedSelections, store.ServiceContractEndpointSelection{
+				SelectionIndex: index, ServiceID: selection.ServiceID, ServiceVersionID: selection.ServiceVersionID,
+				SelectAll: true, EndpointNames: selection.OperationNames,
+			})
+		}
 	}
-	for _, cacheKey := range attempted {
-		if c.objectRefCounts[cacheKey] > 0 {
+	return plan, nil
+}
+
+// loadSDKSelectionMetadata fetches all missing immutable metadata and applies
+// workspace policy rows obtained by a second fixed-count batch.
+func (c *LocalObjectCache) loadSDKSelectionMetadata(ctx context.Context, refs []store.ServiceContractMetadataRef) (map[store.ServiceContractMetadataRef]*fusedobject.ServiceMetadata, error) {
+	result := make(map[store.ServiceContractMetadataRef]*fusedobject.ServiceMetadata, len(refs))
+	// A fully warm metadata set avoids both metadata and policy store reads.
+	if len(refs) == 0 {
+		return result, nil
+	}
+	batchStore, ok := c.db.(store.ServiceContractMetadataBatchStore)
+	// A scalar compatibility fallback would restore N+1 behavior, so stores
+	// used for execution must expose the batch capability.
+	if !ok {
+		return nil, errors.New("service contract metadata batch store is unavailable")
+	}
+	metadata, err := batchStore.ListServiceContractMetadata(ctx, refs)
+	// Metadata is mandatory, unlike optional workspace policy overlays.
+	if err != nil {
+		return nil, err
+	}
+	overrides := c.loadSDKSelectionPolicyOverrides(ctx, refs)
+	for _, ref := range refs {
+		value := metadata[ref]
+		// Every requested reference must be represented even when a test or
+		// alternate adapter does not enforce PostgreSQL's strict left join.
+		if err := validateExecutionContractMetadata(value); err != nil {
+			return nil, err
+		}
+		result[ref] = mergeExecutionPolicyOverride(value, overrides[ref])
+	}
+	return result, nil
+}
+
+// loadSDKSelectionPolicyOverrides preserves the existing soft-failure policy:
+// immutable snapshot values remain executable when a local override read fails.
+func (c *LocalObjectCache) loadSDKSelectionPolicyOverrides(ctx context.Context, refs []store.ServiceContractMetadataRef) map[store.ServiceContractMetadataRef]*store.WorkspaceExecutionPolicyOverride {
+	result := make(map[store.ServiceContractMetadataRef]*store.WorkspaceExecutionPolicyOverride, len(refs))
+	batchStore, ok := c.db.(store.WorkspaceExecutionPolicyBatchStore)
+	// Narrow test adapters and staged deployments may not expose workspace
+	// overlays, in which case immutable snapshot policy remains authoritative.
+	if !ok {
+		return result
+	}
+	policyRefs := make([]store.WorkspaceExecutionPolicyRef, len(refs))
+	for index, ref := range refs {
+		policyRefs[index] = store.WorkspaceExecutionPolicyRef{ServiceID: ref.ServiceID, ServiceVersionID: ref.ServiceVersionID}
+	}
+	overrides, err := batchStore.GetEffectiveWorkspaceExecutionPolicyOverrides(ctx, policyRefs)
+	// A local policy read failure is observable but does not make an immutable
+	// service contract unusable, matching single-metadata runtime fetches.
+	if err != nil {
+		slog.WarnContext(ctx, "execution policy override batch lookup failed, serving snapshot values", slog.Any("error", err))
+		return result
+	}
+	for ref, override := range overrides {
+		result[store.ServiceContractMetadataRef{ServiceID: ref.ServiceID, ServiceVersionID: ref.ServiceVersionID}] = override
+	}
+	return result
+}
+
+// loadSDKSelectionEndpoints resolves every named selection in one local
+// snapshot query while leaving select-all selections absent and lazy.
+func (c *LocalObjectCache) loadSDKSelectionEndpoints(ctx context.Context, selections []store.ServiceContractEndpointSelection) (map[int][]fusedobject.Endpoint, error) {
+	result := make(map[int][]fusedobject.Endpoint, len(selections))
+	// No named selections means endpoint prewarming requires no query.
+	if len(selections) == 0 {
+		return result, nil
+	}
+	contractStore := c.serviceContractStore()
+	// Runtime execution cannot consult Registry when its local contract store
+	// capability is absent.
+	if contractStore == nil {
+		return nil, store.ErrServiceContractSnapshotNotFound
+	}
+	matches, err := contractStore.ListServiceContractEndpointsForSelections(ctx, selections, nil)
+	// A single failed endpoint batch aborts the staged app connection.
+	if err != nil {
+		return nil, err
+	}
+	for _, match := range matches {
+		result[match.SelectionIndex] = append(result[match.SelectionIndex], match.Endpoint)
+	}
+	return result, nil
+}
+
+// validateSDKSelectionEndpoints ensures every immutable named operation was
+// applied locally before the cache transaction is committed.
+func validateSDKSelectionEndpoints(entries []sdkSelectionCacheEntry, endpoints map[int][]fusedobject.Endpoint) error {
+	for index, entry := range entries {
+		// Select-all selections intentionally have no prewarm completeness check.
+		if len(entry.selection.OperationNames) == 0 {
 			continue
 		}
-		delete(c.objectRefCounts, cacheKey)
-		delete(c.serviceMetadataCache, cacheKey)
-		prefix := cacheKey + ":"
-		for key := range c.endpointMetadataCache {
-			if len(key) > len(prefix) && key[:len(prefix)] == prefix {
-				delete(c.endpointMetadataCache, key)
-			}
+		// Named operations are immutable app capabilities and must all exist in
+		// the Engine-local snapshot before execution begins.
+		if !containsAllEndpointNames(endpoints[index], entry.selection.OperationNames) {
+			return fmt.Errorf("prefetch endpoints for %s: %w", entry.ref.ServiceID, store.ErrServiceContractEndpointNotFound)
 		}
 	}
-	delete(c.sdkVersions, appID)
+	return nil
 }
 
-// prefetchEndpoints batch-fetches all named endpoints for a selection from the
-// local snapshot. Called with c.mu held (write lock from ConnectSDK →
-// cacheSDKSelections).
-func (c *LocalObjectCache) prefetchEndpoints(ctx context.Context, sel models.SDKSelection, svcID, version string) error {
-	prefetchStarted := time.Now()
-	eps, source, err := c.fetchEndpointsByNames(ctx, sel.ServiceID, sel.ServiceVersionID, sel.OperationNames)
-	if err != nil {
-		return fmt.Errorf("prefetch endpoints for %s: %w", svcID, err)
+// commitSDKSelectionCache applies a fully validated plan while ConnectSDK
+// holds the cache write lock, preserving refcounts shared by other apps.
+func (c *LocalObjectCache) commitSDKSelectionCache(appID string, plan sdkSelectionCachePlan, metadata map[store.ServiceContractMetadataRef]*fusedobject.ServiceMetadata, endpoints map[int][]fusedobject.Endpoint) {
+	c.sdkVersions[appID] = plan.versions
+	for _, entry := range plan.entries {
+		// Only missing rows were fetched, so assigning from the staged map cannot
+		// replace metadata already retained by another connected app.
+		if value, missing := metadata[entry.ref]; missing {
+			c.serviceMetadataCache[entry.cacheKey] = value
+		}
+		c.objectRefCounts[entry.cacheKey]++
 	}
-	if !containsAllEndpointNames(eps, sel.OperationNames) {
-		return fmt.Errorf("prefetch endpoints for %s: %w", svcID, store.ErrServiceContractEndpointNotFound)
+	for index, values := range endpoints {
+		entry := plan.entries[index]
+		for endpointIndex := range values {
+			endpoint := values[endpointIndex]
+			c.endpointMetadataCache[entry.cacheKey+":"+endpoint.Name] = &endpoint
+		}
 	}
-	for i := range eps {
-		ep := &eps[i]
-		cacheKey := svcID + ":" + version + ":" + ep.Name
-		c.endpointMetadataCache[cacheKey] = ep
-	}
-	slog.InfoContext(ctx, "Endpoint cache pre-warmed",
-		slog.String("service_id", svcID),
-		slog.Int("endpoint_count", len(eps)),
-		slog.String("source", source),
-		slog.Float64("contract_fetch_ms", float64(time.Since(prefetchStarted).Microseconds())/1000),
-	)
-	return nil
 }
 
 func containsAllEndpointNames(endpoints []fusedobject.Endpoint, names []string) bool {
@@ -241,31 +351,6 @@ func selectionVersionIdentity(sel models.SDKSelection) (string, error) {
 		return sel.ServiceVersionID.String(), nil
 	}
 	return "", fmt.Errorf("ScopeError: service_version_id required for service %s", sel.ServiceID)
-}
-
-func (c *LocalObjectCache) fetchServiceMetadataIfMissing(ctx context.Context, serviceID uuid.UUID, version, cacheKey string) error {
-	if _, exists := c.serviceMetadataCache[cacheKey]; exists {
-		slog.DebugContext(ctx, "Service metadata cache hit",
-			slog.String("service_id", serviceID.String()),
-			slog.String("service_version_id", version),
-		)
-		return nil
-	}
-	fetchStarted := time.Now()
-	fo, source, err := c.fetchServiceMetadata(ctx, serviceID, version)
-	fetchDuration := time.Since(fetchStarted)
-	if err != nil {
-		return fmt.Errorf("failed to fetch service metadata %s: %w", serviceID, err)
-	}
-
-	c.serviceMetadataCache[cacheKey] = fo
-	slog.InfoContext(ctx, "Service metadata fetched for SDK cache",
-		slog.String("service_id", serviceID.String()),
-		slog.String("service_version_id", version),
-		slog.String("source", source),
-		slog.Float64("contract_fetch_ms", float64(fetchDuration.Microseconds())/1000),
-	)
-	return nil
 }
 
 func (c *LocalObjectCache) DisconnectSDK(appID string) {
@@ -501,20 +586,33 @@ func (c *LocalObjectCache) applyExecutionPolicyOverride(ctx context.Context, ser
 	return mergeExecutionPolicyOverride(metadata, override)
 }
 
+// mergeExecutionPolicyOverride copies immutable metadata only when a workspace
+// row has fields to overlay, keeping the canonical snapshot unmodified.
 func mergeExecutionPolicyOverride(metadata *fusedobject.ServiceMetadata, override *store.WorkspaceExecutionPolicyOverride) *fusedobject.ServiceMetadata {
+	// An absent workspace row leaves the immutable contract pointer unchanged.
+	if override == nil {
+		return metadata
+	}
 	overridden := *metadata
+	// Each non-nil field represents an intentional workspace override; nil
+	// continues to inherit the provider's immutable contract value.
 	if override.RateLimit != nil {
 		overridden.RateLimit = override.RateLimit
 	}
+	// Retry configuration follows the same per-field inheritance rule.
 	if override.RetryConfig != nil {
 		overridden.RetryConfig = override.RetryConfig
 	}
+	// Timeout remains provider-owned unless explicitly set for this workspace.
 	if override.TimeoutMs != nil {
 		overridden.TimeoutMs = override.TimeoutMs
 	}
+	// Pagination can be replaced independently of other execution policy fields.
 	if override.Pagination != nil {
 		overridden.Pagination = override.Pagination
 	}
+	// Event extraction overrides affect webhook parsing without replacing the
+	// surrounding metadata document.
 	if override.EventExtractionPath != nil {
 		overridden.EventExtractionPath = *override.EventExtractionPath
 	}
@@ -530,9 +628,11 @@ func mergeExecutionPolicyOverride(metadata *fusedobject.ServiceMetadata, overrid
 		// doesn't prioritize an original IsDefault server over the override.
 		overridden.Servers = nil
 	}
+	// Server variables remain inherited unless the workspace supplied a map.
 	if override.ServerVariables != nil {
 		overridden.ServerVariables = override.ServerVariables
 	}
+	// Incoming webhook settings can be overridden without changing dispatch.
 	if override.IncomingWebhookConfig != nil {
 		overridden.IncomingWebhookConfig = override.IncomingWebhookConfig
 	}

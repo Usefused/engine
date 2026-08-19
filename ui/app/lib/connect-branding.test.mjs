@@ -7,6 +7,7 @@ import {
   connectBrandingInput,
   connectBrandingConfirmationSummary,
   connectBrandingPreviewName,
+  DEFAULT_CONNECT_BRANDING_PRIMARY_COLOR,
   emptyConnectBrandingInput,
   normalizeConnectBrandingInput,
   safeLogoPreviewURL,
@@ -14,11 +15,22 @@ import {
   validateConnectBrandingInput,
 } from "./connect-branding.ts";
 
+const apiSource = readFileSync(new URL("./api.ts", import.meta.url), "utf8");
+const settingsSource = readFileSync(
+  new URL("../routes/integrations.settings.tsx", import.meta.url),
+  "utf8",
+);
+const cardSource = readFileSync(
+  new URL("../components/settings/ConnectBrandingCard.tsx", import.meta.url),
+  "utf8",
+);
+
 test("provides a controlled form with a valid fallback colour", () => {
+  assert.equal(DEFAULT_CONNECT_BRANDING_PRIMARY_COLOR, "#2563eb");
   assert.deepEqual(emptyConnectBrandingInput(), {
     display_name: "",
     logo_url: "",
-    primary_color: "#2563eb",
+    primary_color: DEFAULT_CONNECT_BRANDING_PRIMARY_COLOR,
     support_url: "",
     privacy_url: "",
   });
@@ -192,44 +204,32 @@ test("rejects URL control, length, host, and port edge cases locally", () => {
 });
 
 test("settings uses the Engine branding endpoint and a non-referring image preview", () => {
-  const api = readFileSync(new URL("./api.ts", import.meta.url), "utf8");
-  const settings = readFileSync(
-    new URL("../routes/integrations.settings.tsx", import.meta.url),
-    "utf8",
-  );
-  const card = readFileSync(
-    new URL("../components/settings/ConnectBrandingCard.tsx", import.meta.url),
-    "utf8",
-  );
-
-  assert.match(api, /req<ConnectBranding>\("\/workspace\/connect-branding"\)/);
-  assert.match(api, /method: "PUT"/);
-  assert.match(settings, /<ConnectBrandingCard \/>/);
-  assert.match(card, /referrerPolicy="no-referrer"/);
-  assert.doesNotMatch(card, /dangerouslySetInnerHTML/);
+  assert.match(apiSource, /req<ConnectBranding>\("\/workspace\/connect-branding"\)/);
+  assert.match(apiSource, /method: "PUT"/);
+  assert.match(settingsSource, /<ConnectBrandingCard \/>/);
+  assert.match(cardSource, /referrerPolicy="no-referrer"/);
+  assert.doesNotMatch(cardSource, /dangerouslySetInnerHTML/);
 });
 
 // This source contract keeps PUT behind confirmation and prevents confirmation markup from reading raw draft URLs.
 test("branding save requires a safe confirmation before PUT", () => {
-  const card = readFileSync(
-    new URL("../components/settings/ConnectBrandingCard.tsx", import.meta.url),
-    "utf8",
-  );
-  const submitStart = card.indexOf("function handleSubmit");
-  const confirmStart = card.indexOf("function handleConfirmSave");
-  const cancelStart = card.indexOf("function handleCancelSave");
-  const submitHandler = card.slice(submitStart, confirmStart);
-  const confirmHandler = card.slice(confirmStart, cancelStart);
-  const promptStart = card.indexOf("function BrandingConfirmation");
-  const promptEnd = card.indexOf("function changeLabel");
-  const prompt = card.slice(promptStart, promptEnd);
+  const submitStart = cardSource.indexOf("function handleSubmit");
+  const confirmStart = cardSource.indexOf("function handleConfirmSave");
+  const cancelStart = cardSource.indexOf("function handleCancelSave");
+  const promptStart = cardSource.indexOf("function BrandingConfirmation");
+  const promptEnd = cardSource.indexOf("function changeLabel");
+  // Named boundaries make a missing or reordered confirmation handler fail before slices can mask it.
+  assert.ok([submitStart, confirmStart, cancelStart, promptStart, promptEnd].every((index) => index >= 0));
+  const submitHandler = cardSource.slice(submitStart, confirmStart);
+  const confirmHandler = cardSource.slice(confirmStart, cancelStart);
+  const prompt = cardSource.slice(promptStart, promptEnd);
 
   assert.doesNotMatch(submitHandler, /api\.connectBranding\.update/);
   assert.match(confirmHandler, /api\.connectBranding\.update\(pendingSave\)/);
   assert.match(prompt, /role="alertdialog"/);
   assert.match(prompt, /autoFocus/);
   assert.doesNotMatch(prompt, /draft\.(?:logo_url|support_url|privacy_url)/);
-  assert.match(card, /if \(pendingSave \|\| saving\) return/);
-  assert.match(card, /if \(!pendingSave \|\| saving\) return/);
-  assert.equal([...card.matchAll(/\{content\}/g)].length, 1);
+  assert.match(cardSource, /if \(pendingSave \|\| saving\) return/);
+  assert.match(cardSource, /if \(!pendingSave \|\| saving\) return/);
+  assert.equal([...cardSource.matchAll(/\{content\}/g)].length, 1);
 });

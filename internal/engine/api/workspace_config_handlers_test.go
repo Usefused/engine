@@ -171,23 +171,28 @@ func TestDesiredConnectionProfileActionsNeverExposeLiteralValues(t *testing.T) {
 	}
 }
 
+// TestResolveWorkspaceConnectionProfilesBatchesAndSelectsSoleMatch proves exact names share one batch without mixing same-family streams.
 func TestResolveWorkspaceConnectionProfilesBatchesAndSelectsSoleMatch(t *testing.T) {
 	versionA := uuid.New()
 	versionB := uuid.New()
 	profileA := sandbox.ConnectionProfileRevision{
-		ProfileID: uuid.New(), ServiceVersionID: versionA, AuthType: "oauth", Revision: 2,
-		ProfileHash: "hash-a", Provenance: "provider", Config: connectionprofile.Profile{AuthType: "oauth"},
+		ProfileID: uuid.New(), ServiceVersionID: versionA, AuthType: "oauth", AuthName: "jiraOAuth", Revision: 2,
+		ProfileHash: "hash-a", Provenance: "provider", Config: connectionprofile.Profile{AuthType: "oauth", AuthName: "jiraOAuth"},
 	}
 	profileB := sandbox.ConnectionProfileRevision{
 		ProfileID: uuid.New(), ServiceVersionID: versionB, AuthType: "oidc", Revision: 4,
 		ProfileHash: "hash-b", Provenance: "fused", Config: connectionprofile.Profile{AuthType: "oidc"},
 	}
-	resolver := &workspaceProfileResolver{profiles: []sandbox.ConnectionProfileRevision{profileA, profileB}}
+	distractor := sandbox.ConnectionProfileRevision{
+		ProfileID: uuid.New(), ServiceVersionID: versionA, AuthType: "oauth", AuthName: "adminOAuth", Revision: 1,
+		ProfileHash: "other", Provenance: "provider", Config: connectionprofile.Profile{AuthType: "oauth", AuthName: "adminOAuth"},
+	}
+	resolver := &workspaceProfileResolver{profiles: []sandbox.ConnectionProfileRevision{profileA, distractor, profileB}}
 	doc := workspaceConfigDocument{Services: map[string]workspaceConfigService{
 		"a": {
 			Versions: []workspaceConfigServiceVersion{{
 				Version: "v1", ServiceVersionID: versionA.String(),
-				ConnectionProfiles: []workspaceConfigConnectionProfileIntent{{AuthType: "oauth"}},
+				ConnectionProfiles: []workspaceConfigConnectionProfileIntent{{AuthType: "oauth", AuthName: "jiraOAuth"}},
 			}},
 		},
 		"b": {
@@ -200,10 +205,16 @@ func TestResolveWorkspaceConnectionProfilesBatchesAndSelectsSoleMatch(t *testing
 	if err := resolveWorkspaceConnectionProfiles(context.Background(), resolver, "api-key", &doc); err != nil {
 		t.Fatalf("resolveWorkspaceConnectionProfiles: %v", err)
 	}
+	// Both intents must reach Registry in one bounded lookup.
 	if resolver.calls != 1 || len(resolver.refs) != 2 {
 		t.Fatalf("expected one batched profile lookup, calls=%d refs=%#v", resolver.calls, resolver.refs)
 	}
+	// The named Jira stream and unnamed legacy stream must remain exact.
+	if resolver.refs[0].AuthName != "jiraOAuth" || resolver.refs[1].AuthName != "" {
+		t.Fatalf("named and legacy profile refs changed: %#v", resolver.refs)
+	}
 	resolvedA, resolvedB := doc.Services["a"].Versions[0].ConnectionProfiles[0].Resolved, doc.Services["b"].Versions[0].ConnectionProfiles[0].Resolved
+	// The same-family distractor must not make Jira ambiguous or replace its approved profile.
 	if resolvedA == nil || resolvedA.ProfileID != profileA.ProfileID.String() || resolvedB == nil || resolvedB.ProfileID != profileB.ProfileID.String() {
 		t.Fatalf("sole profiles were not attached: %#v", doc.Services)
 	}
@@ -496,6 +507,7 @@ func TestPrepareWorkspaceBucketSecrets_ErrorsWhenMaterialMissing(t *testing.T) {
 	}
 }
 
+// TestVerifyResolvedWorkspaceProfilesRejectsRevisionDrift confirms apply rechecks the approved named stream before rejecting changed content.
 func TestVerifyResolvedWorkspaceProfilesRejectsRevisionDrift(t *testing.T) {
 	serviceID := uuid.New()
 	versionID := uuid.New()
@@ -504,16 +516,21 @@ func TestVerifyResolvedWorkspaceProfilesRejectsRevisionDrift(t *testing.T) {
 		serviceID: {
 			Key: "jira", ServiceID: serviceID, Versions: []string{"v1"}, VersionIDs: map[string]uuid.UUID{"v1": versionID},
 			ConnectionProfiles: []workspaceDesiredConnectionProfile{{
-				Version: "v1", VersionID: versionID, AuthType: "oauth",
-				Resolved: &workspaceResolvedConnectionProfile{ProfileID: profileID.String(), Revision: 3, ProfileHash: "planned", Provenance: "provider", Config: connectionprofile.Profile{AuthType: "oauth"}},
+				Version: "v1", VersionID: versionID, AuthType: "oauth", AuthName: "jiraOAuth",
+				Resolved: &workspaceResolvedConnectionProfile{ProfileID: profileID.String(), Revision: 3, ProfileHash: "planned", Provenance: "provider", Config: connectionprofile.Profile{AuthType: "oauth", AuthName: "jiraOAuth"}},
 			}},
 		},
 	}}
 	resolver := &workspaceProfileResolver{profiles: []sandbox.ConnectionProfileRevision{{
-		ProfileID: profileID, ServiceVersionID: versionID, AuthType: "oauth", Revision: 4, ProfileHash: "changed",
+		ProfileID: profileID, ServiceVersionID: versionID, AuthType: "oauth", AuthName: "jiraOAuth", Revision: 4, ProfileHash: "changed",
 	}}}
+	// Revision drift remains a hard apply-time failure after exact-name transport.
 	if err := verifyResolvedWorkspaceProfiles(context.Background(), resolver, "api-key", desired); err == nil || !strings.Contains(err.Error(), "run plan again") {
 		t.Fatalf("revision drift should block apply: %v", err)
+	}
+	// Verification must query the same named stream approved by plan.
+	if len(resolver.refs) != 1 || resolver.refs[0].AuthName != "jiraOAuth" {
+		t.Fatalf("apply verification omitted the approved auth_name: %#v", resolver.refs)
 	}
 }
 
@@ -692,6 +709,35 @@ func TestValidateWorkspaceConnectProfileIntentRejectsConflictingDetach(t *testin
 	item := workspaceConfigConnectionProfileIntent{AuthType: "oauth", Reset: true, ProfileID: uuid.NewString()}
 	if _, err := normalizeWorkspaceConnectionProfileIntent("jira", "v1", item, map[string]uuid.UUID{"v1": versionID}); err == nil {
 		t.Fatal("detach with profile_id was accepted")
+	}
+}
+
+// TestNormalizeWorkspaceConnectionProfileAuthNamePreservesCompatibility pins outer selection, nested-only inference, and exact mismatch handling.
+func TestNormalizeWorkspaceConnectionProfileAuthNamePreservesCompatibility(t *testing.T) {
+	versionID := uuid.New()
+	versions := map[string]uuid.UUID{"v1": versionID}
+	legacy := workspaceConfigConnectionProfileIntent{AuthType: "oauth", Profile: &connectionprofile.Profile{AuthType: "oauth", AuthName: "jiraOAuth"}}
+	desired, err := normalizeWorkspaceConnectionProfileIntent("jira", "v1", legacy, versions)
+	// Nested-only profiles are the deployed compatibility shape this transport must retain.
+	if err != nil || desired.AuthName != "jiraOAuth" {
+		t.Fatalf("nested-only auth_name was not inferred: desired=%#v err=%v", desired, err)
+	}
+	unnamed, err := normalizeWorkspaceConnectionProfileIntent("jira", "v1", workspaceConfigConnectionProfileIntent{AuthType: "oauth", ProfileID: uuid.NewString()}, versions)
+	// Empty names continue to identify only the legacy unnamed Registry stream.
+	if err != nil || unnamed.AuthName != "" {
+		t.Fatalf("legacy unnamed selector changed: desired=%#v err=%v", unnamed, err)
+	}
+	mismatch := legacy
+	mismatch.AuthName = "otherOAuth"
+	// Two authored identities cannot safely select and persist different schemes.
+	if _, err := normalizeWorkspaceConnectionProfileIntent("jira", "v1", mismatch, versions); err == nil || !strings.Contains(err.Error(), "must match") {
+		t.Fatalf("conflicting auth names were accepted: %v", err)
+	}
+	invalid := legacy
+	invalid.Profile = &connectionprofile.Profile{AuthType: "oauth", AuthName: strings.Repeat("x", 129)}
+	// Inference must not bypass the explicit outer selector's Registry validation contract.
+	if _, err := normalizeWorkspaceConnectionProfileIntent("jira", "v1", invalid, versions); err == nil || !strings.Contains(err.Error(), "profile.auth_name is invalid") {
+		t.Fatalf("invalid inferred auth name was accepted: %v", err)
 	}
 }
 

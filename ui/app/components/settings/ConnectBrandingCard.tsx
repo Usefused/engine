@@ -53,8 +53,6 @@ export function ConnectBrandingCard() {
 
     // loadBranding applies a response only while this card remains mounted.
     async function loadBranding() {
-      setLoading(true);
-      setLoadError("");
       try {
         const branding = await api.connectBranding.get();
         // Mounted cards alone may accept an asynchronous response.
@@ -109,29 +107,9 @@ export function ConnectBrandingCard() {
     setPendingSave(null);
   }
 
-  // handleDisplayNameChange maps the display-name input onto the typed branding draft.
-  function handleDisplayNameChange(event: React.ChangeEvent<HTMLInputElement>) {
-    updateField("display_name", event.target.value);
-  }
-
-  // handleLogoURLChange maps the logo URL input onto the typed branding draft.
-  function handleLogoURLChange(event: React.ChangeEvent<HTMLInputElement>) {
-    updateField("logo_url", event.target.value);
-  }
-
-  // handlePrimaryColourChange keeps the colour picker and text value synchronized.
-  function handlePrimaryColourChange(event: React.ChangeEvent<HTMLInputElement>) {
-    updateField("primary_color", event.target.value);
-  }
-
-  // handleSupportURLChange maps the optional support link onto the typed branding draft.
-  function handleSupportURLChange(event: React.ChangeEvent<HTMLInputElement>) {
-    updateField("support_url", event.target.value);
-  }
-
-  // handlePrivacyURLChange maps the optional privacy link onto the typed branding draft.
-  function handlePrivacyURLChange(event: React.ChangeEvent<HTMLInputElement>) {
-    updateField("privacy_url", event.target.value);
+  // handleFieldChange routes every named branding control through one typed draft updater.
+  function handleFieldChange(event: React.ChangeEvent<HTMLInputElement>) {
+    updateField(event.currentTarget.name as ConnectBrandingField, event.currentTarget.value);
   }
 
   // handleLogoError replaces a failed external image with the deterministic monogram fallback.
@@ -164,7 +142,6 @@ export function ConnectBrandingCard() {
     if (!pendingSave || saving) return;
     setSaving(true);
     setSaveError("");
-    setSaved(false);
     try {
       const branding = await api.connectBranding.update(pendingSave);
       const savedInput = connectBrandingInput(branding);
@@ -213,11 +190,7 @@ export function ConnectBrandingCard() {
       onSubmit={handleSubmit}
       onConfirmSave={handleConfirmSave}
       onCancelSave={handleCancelSave}
-      onDisplayNameChange={handleDisplayNameChange}
-      onLogoURLChange={handleLogoURLChange}
-      onPrimaryColourChange={handlePrimaryColourChange}
-      onSupportURLChange={handleSupportURLChange}
-      onPrivacyURLChange={handlePrivacyURLChange}
+      onFieldChange={handleFieldChange}
       onLogoError={handleLogoError}
     />
   );
@@ -257,11 +230,7 @@ interface ConnectBrandingEditorProps {
   onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
   onConfirmSave: () => void;
   onCancelSave: () => void;
-  onDisplayNameChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
-  onLogoURLChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
-  onPrimaryColourChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
-  onSupportURLChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
-  onPrivacyURLChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  onFieldChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onLogoError: () => void;
 }
 
@@ -272,8 +241,20 @@ function ConnectBrandingEditor(props: ConnectBrandingEditorProps) {
       <InlineError message={props.loadError} extraClass="mb-5" />
       <form className="space-y-5" onSubmit={props.onSubmit} noValidate toolname="save_connect_branding" tooldescription="Save the branding displayed on hosted connection pages.">
         <div className="grid gap-6 lg:grid-cols-2">
-          <BrandingFields {...props} />
-          <BrandingPreview {...props} />
+          <BrandingFields
+            draft={props.draft}
+            errors={props.errors}
+            saving={props.saving}
+            previewColour={props.previewColour}
+            onFieldChange={props.onFieldChange}
+          />
+          <BrandingPreview
+            previewName={props.previewName}
+            previewColour={props.previewColour}
+            previewLogoURL={props.previewLogoURL}
+            logoFailed={props.logoFailed}
+            onLogoError={props.onLogoError}
+          />
         </div>
         <InlineError message={props.saveError} />
         <SaveControls saving={props.saving} saved={props.saved} disabled={Boolean(props.loadError) || Boolean(props.pendingSummary)} />
@@ -309,7 +290,6 @@ function BrandingConfirmation({
   return (
     <div
       role="alertdialog"
-      aria-modal="false"
       aria-labelledby="connect-branding-confirm-title"
       aria-describedby="connect-branding-confirm-description"
       className="mt-5 rounded-lg border border-blue-200 bg-blue-50 p-4"
@@ -374,37 +354,53 @@ function SummaryFact({ label, value }: { label: string; value: string }) {
   );
 }
 
-// BrandingFields groups the editable values while reusing the card's typed event handlers.
-function BrandingFields(props: ConnectBrandingEditorProps) {
+interface BrandingFieldsProps {
+  draft: ConnectBrandingInput;
+  errors: ConnectBrandingErrors;
+  saving: boolean;
+  previewColour: string;
+  onFieldChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
+}
+
+// BrandingFields groups the editable values behind one named-control change handler.
+function BrandingFields(props: BrandingFieldsProps) {
   return (
     <fieldset disabled={props.saving} className="space-y-4">
       <div>
         <label htmlFor="connect-display-name" className="mb-1 block text-sm font-medium text-slate-700">App name</label>
-        <input id="connect-display-name" name="display_name" type="text" required value={props.draft.display_name} onChange={props.onDisplayNameChange} className={INPUT_CLASS} aria-invalid={Boolean(props.errors.display_name)} />
+        <input id="connect-display-name" name="display_name" type="text" required value={props.draft.display_name} onChange={props.onFieldChange} className={INPUT_CLASS} aria-invalid={Boolean(props.errors.display_name)} />
         <FieldError message={props.errors.display_name} />
       </div>
       <div>
         <label htmlFor="connect-logo-url" className="mb-1 block text-sm font-medium text-slate-700">Logo URL <span className="font-normal text-slate-400">(optional)</span></label>
-        <input id="connect-logo-url" name="logo_url" type="url" inputMode="url" maxLength={2048} placeholder="https://assets.example.com/logo.png" value={props.draft.logo_url} onChange={props.onLogoURLChange} className={INPUT_CLASS} aria-invalid={Boolean(props.errors.logo_url)} />
+        <input id="connect-logo-url" name="logo_url" type="url" inputMode="url" maxLength={2048} placeholder="https://assets.example.com/logo.png" value={props.draft.logo_url} onChange={props.onFieldChange} className={INPUT_CLASS} aria-invalid={Boolean(props.errors.logo_url)} />
         <p className="mt-1 text-xs text-slate-500">Use an absolute HTTPS image URL. Leave blank to use the built-in fallback.</p>
         <FieldError message={props.errors.logo_url} />
       </div>
       <div>
         <label htmlFor="connect-primary-color" className="mb-1 block text-sm font-medium text-slate-700">Primary colour</label>
         <div className="flex gap-2">
-          <input id="connect-primary-color-picker" type="color" value={props.previewColour} onChange={props.onPrimaryColourChange} className="h-10 w-12 cursor-pointer rounded border border-slate-300 bg-white p-1" aria-label="Choose primary colour" />
-          <input id="connect-primary-color" name="primary_color" type="text" maxLength={7} required value={props.draft.primary_color} onChange={props.onPrimaryColourChange} className={INPUT_CLASS} aria-invalid={Boolean(props.errors.primary_color)} />
+          <input id="connect-primary-color-picker" name="primary_color" type="color" value={props.previewColour} onChange={props.onFieldChange} className="h-10 w-12 cursor-pointer rounded border border-slate-300 bg-white p-1" aria-label="Choose primary colour" />
+          <input id="connect-primary-color" name="primary_color" type="text" maxLength={7} required value={props.draft.primary_color} onChange={props.onFieldChange} className={INPUT_CLASS} aria-invalid={Boolean(props.errors.primary_color)} />
         </div>
         <FieldError message={props.errors.primary_color} />
       </div>
-      <URLField id="connect-support-url" label="Support URL" value={props.draft.support_url} error={props.errors.support_url} onChange={props.onSupportURLChange} />
-      <URLField id="connect-privacy-url" label="Privacy-policy URL" value={props.draft.privacy_url} error={props.errors.privacy_url} onChange={props.onPrivacyURLChange} />
+      <URLField id="connect-support-url" name="support_url" label="Support URL" value={props.draft.support_url} error={props.errors.support_url} onChange={props.onFieldChange} />
+      <URLField id="connect-privacy-url" name="privacy_url" label="Privacy-policy URL" value={props.draft.privacy_url} error={props.errors.privacy_url} onChange={props.onFieldChange} />
     </fieldset>
   );
 }
 
+interface BrandingPreviewProps {
+  previewName: string;
+  previewColour: string;
+  previewLogoURL: string | null;
+  logoFailed: boolean;
+  onLogoError: () => void;
+}
+
 // BrandingPreview confines external content to a validated image and inert text/button-like elements.
-function BrandingPreview(props: ConnectBrandingEditorProps) {
+function BrandingPreview(props: BrandingPreviewProps) {
   return (
     <div>
       <p className="mb-2 text-sm font-medium text-slate-700">Live preview</p>
@@ -422,7 +418,7 @@ function BrandingPreview(props: ConnectBrandingEditorProps) {
 }
 
 // PreviewLogo falls back to a local monogram when the external URL is absent, invalid, or unavailable.
-function PreviewLogo(props: ConnectBrandingEditorProps) {
+function PreviewLogo(props: BrandingPreviewProps) {
   // A validated, successfully loaded external image takes precedence over the local mark.
   if (props.previewLogoURL && !props.logoFailed) {
     return <img src={props.previewLogoURL} alt={`${props.previewName} logo`} referrerPolicy="no-referrer" onError={props.onLogoError} className="mb-5 max-h-16 max-w-44 object-contain" />;
@@ -469,6 +465,7 @@ function SavedStatus({ saved }: { saved: boolean }) {
 
 interface URLFieldProps {
   id: string;
+  name: "support_url" | "privacy_url";
   label: string;
   value: string;
   error?: string;
@@ -476,7 +473,7 @@ interface URLFieldProps {
 }
 
 // URLField keeps optional HTTPS link inputs visually and behaviorally consistent.
-function URLField({ id, label, value, error, onChange }: URLFieldProps) {
+function URLField({ id, name, label, value, error, onChange }: URLFieldProps) {
   return (
     <div>
       <label htmlFor={id} className="mb-1 block text-sm font-medium text-slate-700">
@@ -484,6 +481,7 @@ function URLField({ id, label, value, error, onChange }: URLFieldProps) {
       </label>
       <input
         id={id}
+        name={name}
         type="url"
         inputMode="url"
         maxLength={2048}

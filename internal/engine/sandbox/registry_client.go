@@ -264,6 +264,7 @@ type rawRuntimeEntitlement struct {
 type ConnectionProfileRef struct {
 	ServiceVersionID uuid.UUID `json:"service_version_id"`
 	AuthType         string    `json:"auth_type"`
+	AuthName         string    `json:"auth_name"`
 }
 
 type ConnectionProfileRevision struct {
@@ -272,6 +273,7 @@ type ConnectionProfileRevision struct {
 	ServiceVersionID uuid.UUID                 `json:"service_version_id"`
 	Name             string                    `json:"name"`
 	AuthType         string                    `json:"auth_type"`
+	AuthName         string                    `json:"auth_name"`
 	Revision         int                       `json:"revision"`
 	ProfileHash      string                    `json:"profile_hash"`
 	Config           connectionprofile.Profile `json:"config"`
@@ -328,18 +330,20 @@ func (c *HTTPRegistryClient) FetchConnectionProfileContracts(ctx context.Context
 	return result.Data.Contracts, nil
 }
 
+// FetchEligibleConnectionProfiles resolves exact Registry publication streams in one bounded request.
 func (c *HTTPRegistryClient) FetchEligibleConnectionProfiles(ctx context.Context, refs []ConnectionProfileRef, apiKey string) ([]ConnectionProfileRevision, error) {
 	if len(refs) == 0 {
 		return nil, nil
 	}
 	variables := make([]map[string]interface{}, 0, len(refs))
 	for _, ref := range refs {
-		variables = append(variables, map[string]interface{}{"service_version_id": ref.ServiceVersionID.String(), "auth_type": ref.AuthType})
+		// Sending the empty name explicitly preserves Registry's legacy unnamed stream instead of broadening the lookup to every same-family scheme.
+		variables = append(variables, map[string]interface{}{"service_version_id": ref.ServiceVersionID.String(), "auth_type": ref.AuthType, "auth_name": ref.AuthName})
 	}
 	req, err := c.newGraphQLRequest(ctx, graphqlQuery{
 		Query: `query EligibleConnectionProfiles($refs: [ConnectionProfileRefInput!]!) {
 			eligibleConnectionProfiles(refs: $refs) {
-				profile_id service_id service_version_id name auth_type revision profile_hash config provenance
+				profile_id service_id service_version_id name auth_type auth_name revision profile_hash config provenance
 			}
 		}`,
 		Variables: map[string]interface{}{"refs": variables},
@@ -770,7 +774,7 @@ func (c *HTTPRegistryClient) PublishConnectionProfile(ctx context.Context, servi
 		Query: `
 			mutation SetConnectionProfile($serviceId: String!, $serviceVersionId: String!, $name: String!, $config: JSON!) {
 				setConnectionProfile(service_id: $serviceId, service_version_id: $serviceVersionId, name: $name, config: $config) {
-					profile_id service_id service_version_id name auth_type revision profile_hash config provenance
+					profile_id service_id service_version_id name auth_type auth_name revision profile_hash config provenance
 				}
 			}
 		`,
