@@ -9,7 +9,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -37,9 +39,11 @@ type connectSessionStartRequest struct {
 }
 
 type connectSessionStartResponse struct {
-	AuthorizeURL string    `json:"authorize_url"`
-	ExpiresAt    time.Time `json:"expires_at"`
-	Scopes       []string  `json:"-"`
+	AuthorizeURL      string    `json:"authorize_url"`
+	ExpiresAt         time.Time `json:"expires_at"`
+	Scopes            []string  `json:"-"`
+	Route             string    `json:"-"`
+	MissingFieldCount int       `json:"-"`
 }
 
 type oauthTokenResponse = connectauth.TokenResponse
@@ -51,6 +55,9 @@ func StartConnectSessionHandler(s store.Store, verifier ServiceVerifier, masterK
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.connect.session.start")
 		defer span.End()
+		// A failed default ensures every early validation/authorization return is
+		// auditable; the bounded success projection overwrites it after persistence.
+		span.SetAttributes(attribute.String("outcome", "failed"))
 
 		call, ok := resolveConnectAdminCall(w, r, s)
 		if !ok {
@@ -77,7 +84,7 @@ func StartConnectSessionHandler(s store.Store, verifier ServiceVerifier, masterK
 			return
 		}
 		span.SetAttributes(connectAdminAttrs("connect.session.start", call)...)
-		span.SetAttributes(attribute.Int("scope_count", len(response.Scopes)))
+		span.SetAttributes(connectSessionStartTelemetry(response)...)
 		writeConnectJSON(w, http.StatusOK, response)
 	}
 }
@@ -88,50 +95,70 @@ func ConnectCallbackHandler(s store.Store, verifier ServiceVerifier, masterKey [
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.connect.callback")
 		defer span.End()
+		// Defaults make session, configuration, and provider failures observable
+		// without copying raw callback or customer data into span attributes.
+		span.SetAttributes(
+			attribute.String("outcome", "failed"),
+			attribute.String("resource_validation_status", "not_started"),
+			attribute.Int("resource_discovered_count", 0),
+			attribute.Int("resource_matched_count", 0),
+			attribute.String("resource_persistence_status", "not_started"),
+		)
+		// Entry logging proves whether the browser returned from the provider while
+		// retaining only bounded presence flags; code, state, errors, and URLs stay out.
+		slog.InfoContext(ctx, "connect callback request received",
+			"has_code", strings.TrimSpace(r.URL.Query().Get("code")) != "",
+			"has_error", strings.TrimSpace(r.URL.Query().Get("error")) != "",
+		)
 
 		session, err := consumeConnectCallbackSession(ctx, s, r)
 		if err != nil {
-			writeConnectRuntimeError(w, err)
+			writeConnectCallbackRuntimeError(ctx, s, w, err)
 			return
 		}
 		call := connectAdminCall{bucketID: session.BucketID, serviceID: session.ServiceID}
+		span.SetAttributes(connectAdminAttrs("connect.callback", call)...)
 		resolved, err := resolveConnectRuntimeConfig(ctx, s, verifier, call, masterKey)
 		if err != nil {
-			writeConnectCallbackFailure(w, r, session, err)
+			writeConnectCallbackFailure(ctx, s, w, r, session, err)
 			return
 		}
 		if session.AuthType != resolved.config.AuthType || session.AuthName != resolved.config.AuthName {
-			writeConnectCallbackFailure(w, r, session, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "connect auth configuration changed"})
+			writeConnectCallbackFailure(ctx, s, w, r, session, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "connect auth configuration changed"})
 			return
 		}
 		// Callback fallback scope metadata must describe what the user actually
 		// consented to, not every scope the provider integration supports.
 		token, err := exchangeConnectCallbackToken(ctx, r, session, resolved, masterKey)
 		if err != nil {
-			writeConnectCallbackFailure(w, r, session, err)
+			writeConnectCallbackFailure(ctx, s, w, r, session, err)
+			return
+		}
+		plan, err := prepareCallbackResources(ctx, verifier, session, resolved.metadata, token)
+		span.SetAttributes(callbackResourceValidationAttrs(plan)...)
+		if err != nil {
+			span.SetAttributes(attribute.String("resource_persistence_status", "not_started"))
+			writeConnectCallbackFailure(ctx, s, w, r, session, connectRuntimeHTTPError{status: http.StatusBadGateway, message: err.Error()})
 			return
 		}
 		conn, err := encryptAuthConnectionFromToken(session, resolved, token, masterKey)
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to encrypt auth connection", slog.Any("error", err))
-			writeConnectCallbackFailure(w, r, session, connectRuntimeHTTPError{status: http.StatusInternalServerError, message: "failed to store auth connection"})
+			span.SetAttributes(attribute.String("resource_persistence_status", "failed"))
+			writeConnectCallbackFailure(ctx, s, w, r, session, connectRuntimeHTTPError{status: http.StatusInternalServerError, message: "failed to store auth connection"})
 			return
 		}
-		saved, err := s.UpsertAuthConnection(ctx, conn)
+		saved, resourceCount, err := persistCallbackConnection(ctx, s, conn, plan)
 		if err != nil {
-			slog.ErrorContext(ctx, "failed to upsert auth connection", slog.Any("error", err))
-			writeConnectCallbackFailure(w, r, session, connectRuntimeHTTPError{status: http.StatusInternalServerError, message: "failed to store auth connection"})
+			// Database errors may embed row values, so the control log records only
+			// the fixed failing stage while the returned response remains generic.
+			slog.ErrorContext(ctx, "failed to persist callback connection")
+			span.SetAttributes(attribute.String("resource_persistence_status", "failed"))
+			writeConnectCallbackFailure(ctx, s, w, r, session, connectRuntimeHTTPError{status: http.StatusInternalServerError, message: "failed to store auth connection"})
 			return
 		}
-		resourceCount, err := reconcileCallbackResources(ctx, s, verifier, session, saved, resolved, token)
-		if err != nil {
-			span.SetAttributes(attribute.String("resource_discovery_status", "failed"))
-			writeConnectCallbackFailure(w, r, session, connectRuntimeHTTPError{status: http.StatusBadGateway, message: err.Error()})
-			return
-		}
-		span.SetAttributes(connectAdminAttrs("connect.callback", call)...)
-		span.SetAttributes(attribute.String("resource_discovery_status", "ok"), attribute.Int("resource_count", resourceCount))
-		writeConnectCallbackSuccess(w, r, session, saved.ID)
+		span.SetAttributes(attribute.String("outcome", "success"), attribute.String("resource_persistence_status", "committed"), attribute.Int("resource_count", boundedCallbackResourceCount(resourceCount)))
+		writeConnectCallbackSuccess(ctx, s, w, r, session, saved.ID)
 	}
 }
 
@@ -141,6 +168,15 @@ type connectRuntimeConfig struct {
 	flow        fusedobject.OAuth2FlowContract
 	credentials connectClientCredentials
 	metadata    *fusedobject.ServiceMetadata
+}
+
+type connectInputContractIdentity struct {
+	ServiceVersionID string                            `json:"service_version_id"`
+	AuthType         string                            `json:"auth_type"`
+	AuthName         string                            `json:"auth_name"`
+	Auth             fusedobject.AuthConfig            `json:"auth"`
+	Flow             fusedobject.OAuth2FlowContract    `json:"flow"`
+	Connect          *fusedobject.ServiceConnectConfig `json:"connect"`
 }
 
 // decodeConnectSessionStartRequest keeps request validation at the HTTP edge
@@ -250,19 +286,12 @@ func canonicalConnectAuthType(authType string) string {
 	}
 }
 
-// createConnectSession stores only hashed browser state and encrypted PKCE
-// material so a stolen session row is not enough to complete token exchange.
+// createConnectSession validates caller-supplied routing data before deciding
+// whether the next browser hop is the provider or Engine's collection page.
+// OAuth state, nonce, and PKCE material are deliberately created only on the
+// complete-input path so the form remains a pre-authorisation step.
 func createConnectSession(ctx context.Context, s store.Store, call connectAdminCall, endUserRef string, createdByAppID uuid.UUID, returnURL string, resourceInput map[string]string, requestedScopes []string, resolved connectRuntimeConfig, masterKey []byte) (connectSessionStartResponse, error) {
-	state, verifier, nonce, err := newConnectSessionSecrets()
-	if err != nil {
-		return connectSessionStartResponse{}, err
-	}
-	encrypted, err := encryptConnectPKCEVerifier(masterKey, verifier)
-	if err != nil {
-		return connectSessionStartResponse{}, err
-	}
-	expiresAt := time.Now().UTC().Add(connectSessionTTL)
-	resourceInputJSON, err := validateConnectResourceInput(resolved.metadata.ConnectConfig, resourceInput)
+	prepared, err := prepareConnectResourceInput(resolved.metadata.ConnectConfig, resourceInput)
 	if err != nil {
 		return connectSessionStartResponse{}, err
 	}
@@ -274,7 +303,134 @@ func createConnectSession(ctx context.Context, s store.Store, call connectAdminC
 	if err != nil {
 		return connectSessionStartResponse{}, err
 	}
-	if _, err := s.CreateConnectSession(ctx, store.ConnectSession{
+	// Missing required fields are the only reason to launch Engine UI. Invalid
+	// supplied values remain API errors so automation cannot silently change
+	// from a fail-fast call into an interactive browser flow.
+	if len(prepared.missing) != 0 {
+		return createConnectInputSession(ctx, s, call, endUserRef, createdByAppID, returnURL, prepared.normalized, effectiveScopes, len(prepared.missing), resolved)
+	}
+	return createProviderConnectSession(ctx, s, call, endUserRef, createdByAppID, returnURL, prepared.canonical, effectiveScopes, resolved, masterKey)
+}
+
+type preparedConnectResourceInput struct {
+	normalized map[string]string
+	missing    []string
+	canonical  []byte
+}
+
+// prepareConnectResourceInput separates omission detection from full resource
+// derivation. Partial values are canonicalized for the one-time form, while a
+// complete set also proves the final allowlisted provider base URL is valid.
+func prepareConnectResourceInput(config *fusedobject.ServiceConnectConfig, values map[string]string) (preparedConnectResourceInput, error) {
+	if config == nil || config.ResourceInput == nil {
+		// A service without a declared input contract cannot safely assign meaning
+		// to caller-provided customer fields, so non-empty input fails closed.
+		if len(values) != 0 {
+			return preparedConnectResourceInput{}, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "resource input is not supported"}
+		}
+		return preparedConnectResourceInput{normalized: map[string]string{}, canonical: []byte(`{}`)}, nil
+	}
+	normalized, missing, err := connectresource.NormalizeInput(config.ResourceInput, values)
+	if err != nil {
+		return preparedConnectResourceInput{}, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "resource input is invalid"}
+	}
+	if len(missing) != 0 {
+		canonical, err := json.Marshal(normalized)
+		return preparedConnectResourceInput{normalized: normalized, missing: missing, canonical: canonical}, err
+	}
+	resource, err := connectresource.FromInput(config.ResourceInput, normalized)
+	if err != nil {
+		return preparedConnectResourceInput{}, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "resource input is invalid"}
+	}
+	return preparedConnectResourceInput{normalized: normalized, canonical: resource.Metadata}, nil
+}
+
+// createConnectInputSession persists only a hashed one-time form token and
+// non-secret request context. It does not allocate provider callback state,
+// which keeps incomplete customer data outside the OAuth session lifecycle.
+func createConnectInputSession(ctx context.Context, s store.Store, call connectAdminCall, endUserRef string, createdByAppID uuid.UUID, returnURL string, resourceInput map[string]string, scopes []string, missingFieldCount int, resolved connectRuntimeConfig) (connectSessionStartResponse, error) {
+	token, err := randomURLToken(32)
+	if err != nil {
+		return connectSessionStartResponse{}, err
+	}
+	canonical, err := json.Marshal(resourceInput)
+	if err != nil {
+		return connectSessionStartResponse{}, err
+	}
+	contractHash, err := connectInputContractHash(resolved)
+	if err != nil {
+		return connectSessionStartResponse{}, err
+	}
+	expiresAt := time.Now().UTC().Add(connectSessionTTL)
+	inputURL, err := buildConnectInputURL(resolved.credentials.RedirectURI, token)
+	if err != nil {
+		return connectSessionStartResponse{}, err
+	}
+	// Persistence is last so an invalid public callback origin cannot leave an
+	// unreachable pending browser session behind.
+	if _, err := s.CreateConnectInputSession(ctx, store.ConnectInputSession{
+		BucketID: call.bucketID, ServiceID: call.serviceID,
+		AuthType: resolved.config.AuthType, AuthName: resolved.config.AuthName, ContractHash: contractHash,
+		EndUserRef: endUserRef, TokenHash: connectHash(token), CreatedByAppID: createdByAppID,
+		ReturnURL: returnURL, ResourceInputJSON: canonical, RequestedScopes: scopes, ExpiresAt: expiresAt,
+	}); err != nil {
+		return connectSessionStartResponse{}, err
+	}
+	return connectSessionStartResponse{
+		AuthorizeURL: inputURL, ExpiresAt: expiresAt, Scopes: scopes,
+		Route: "hosted_form", MissingFieldCount: missingFieldCount,
+	}, nil
+}
+
+// connectInputContractHash pins the service version, selected auth flow, and
+// resource-input profile across the short browser handoff. The hash contains
+// no OAuth client credential and is never exposed in telemetry or URLs.
+func connectInputContractHash(resolved connectRuntimeConfig) (string, error) {
+	identity := connectInputContractIdentity{
+		ServiceVersionID: resolved.metadata.ServiceVersionID.String(),
+		AuthType:         resolved.config.AuthType, AuthName: resolved.config.AuthName,
+		Auth: resolved.auth, Flow: resolved.flow, Connect: resolved.metadata.ConnectConfig,
+	}
+	encoded, err := json.Marshal(identity)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(encoded)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+// createProviderConnectSession creates the actual OAuth callback session only
+// after resource input is complete. The helper is shared by direct API calls
+// and successful hosted-form submissions to prevent two auth implementations.
+func createProviderConnectSession(ctx context.Context, s store.Store, call connectAdminCall, endUserRef string, createdByAppID uuid.UUID, returnURL string, resourceInputJSON []byte, scopes []string, resolved connectRuntimeConfig, masterKey []byte) (connectSessionStartResponse, error) {
+	session, response, err := buildProviderConnectSession(call, endUserRef, createdByAppID, returnURL, resourceInputJSON, scopes, resolved, masterKey)
+	if err != nil {
+		return connectSessionStartResponse{}, err
+	}
+	if _, err := s.CreateConnectSession(ctx, session); err != nil {
+		return connectSessionStartResponse{}, err
+	}
+	return response, nil
+}
+
+// buildProviderConnectSession prepares a provider authorization request without
+// persistence so hosted-form completion can atomically consume its one-time
+// token and insert the resulting callback session in one store transaction.
+func buildProviderConnectSession(call connectAdminCall, endUserRef string, createdByAppID uuid.UUID, returnURL string, resourceInputJSON []byte, scopes []string, resolved connectRuntimeConfig, masterKey []byte) (store.ConnectSession, connectSessionStartResponse, error) {
+	state, verifier, nonce, err := newConnectSessionSecrets()
+	if err != nil {
+		return store.ConnectSession{}, connectSessionStartResponse{}, err
+	}
+	encrypted, err := encryptConnectPKCEVerifier(masterKey, verifier)
+	if err != nil {
+		return store.ConnectSession{}, connectSessionStartResponse{}, err
+	}
+	expiresAt := time.Now().UTC().Add(connectSessionTTL)
+	authURL, err := buildConnectAuthorizeURL(resolved.auth, resolved.flow, scopes, resolved.credentials, state, pkceChallenge(verifier), nonce)
+	if err != nil {
+		return store.ConnectSession{}, connectSessionStartResponse{}, err
+	}
+	session := store.ConnectSession{
 		BucketID:              call.bucketID,
 		ServiceID:             call.serviceID,
 		AuthType:              resolved.config.AuthType,
@@ -287,18 +443,22 @@ func createConnectSession(ctx context.Context, s store.Store, call connectAdminC
 		CreatedByAppID:        createdByAppID,
 		ReturnURL:             returnURL,
 		ResourceInputJSON:     resourceInputJSON,
-		RequestedScopes:       effectiveScopes,
+		RequestedScopes:       scopes,
 		ExpiresAt:             expiresAt,
-	}); err != nil {
-		return connectSessionStartResponse{}, err
 	}
-	// Only the verifier is encrypted into the session; the browser receives the
-	// derived challenge, which keeps the token exchange bound to this Engine.
-	authURL, err := buildConnectAuthorizeURL(resolved.auth, resolved.flow, effectiveScopes, resolved.credentials, state, pkceChallenge(verifier), nonce)
-	if err != nil {
-		return connectSessionStartResponse{}, err
+	return session, connectSessionStartResponse{AuthorizeURL: authURL, ExpiresAt: expiresAt, Scopes: scopes, Route: "direct"}, nil
+}
+
+// connectSessionStartTelemetry keeps REST, GraphQL, and gRPC start spans on one
+// bounded attribute contract. Customer values, field names, URLs, scopes, and
+// OAuth session material are intentionally excluded.
+func connectSessionStartTelemetry(response connectSessionStartResponse) []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String("outcome", "success"),
+		attribute.String("connect.input.route", response.Route),
+		attribute.Int("connect.input.missing_field_count", response.MissingFieldCount),
+		attribute.Int("scope_count", len(response.Scopes)),
 	}
-	return connectSessionStartResponse{AuthorizeURL: authURL, ExpiresAt: expiresAt, Scopes: effectiveScopes}, nil
 }
 
 // applyAppConnectScopePolicy makes an app version's validated scope subset
@@ -405,77 +565,171 @@ type connectionDiscoveryVerifier interface {
 	FetchEndpointByName(ctx context.Context, serviceID uuid.UUID, version string, endpointName string) (*fusedobject.Endpoint, error)
 }
 
-// reconcileCallbackResources runs only after token storage and only commits a
-// complete discovery/input result, preserving old resources on provider errors.
-func reconcileCallbackResources(ctx context.Context, s store.Store, verifier ServiceVerifier, session *store.ConnectSession, connection *store.AuthConnection, resolved connectRuntimeConfig, token oauthTokenResponse) (int, error) {
-	config := resolved.metadata.ConnectConfig
-	if config == nil {
-		return 0, nil
+type callbackResourcePlan struct {
+	resources        []connectresource.Resource
+	reconcile        bool
+	validationStatus string
+	discoveredCount  int
+	matchedCount     int
+}
+
+// persistCallbackConnection uses the callback-only transactional store when
+// resources are authoritative; profiles without resource routing retain the
+// ordinary credential-only upsert.
+func persistCallbackConnection(ctx context.Context, s store.Store, conn store.AuthConnection, plan callbackResourcePlan) (*store.AuthConnection, int, error) {
+	if !plan.reconcile {
+		saved, err := s.UpsertAuthConnection(ctx, conn)
+		return saved, 0, err
 	}
-	resources, err := callbackResources(ctx, verifier, session, resolved.metadata, token)
-	if err != nil {
-		return 0, err
+	callbackStore, ok := s.(store.CallbackConnectionStore)
+	// Failing closed prevents a store adapter from reintroducing split token and
+	// resource writes when the active profile requires authoritative routing.
+	if !ok {
+		return nil, 0, errors.New("callback resource transaction is unavailable")
 	}
-	return storeConnectionResources(ctx, s, connection, resources)
+	stored := projectConnectionResources(conn, plan.resources)
+	saved, resources, err := callbackStore.UpsertAuthConnectionAndReconcileResources(ctx, conn, stored)
+	return saved, len(resources), err
 }
 
 // storeConnectionResources centralizes the non-secret projection used by
 // callback and manual discovery before authoritative reconciliation.
 func storeConnectionResources(ctx context.Context, s store.Store, connection *store.AuthConnection, resources []connectresource.Resource) (int, error) {
-	stored := make([]store.ConnectionResource, 0, len(resources))
-	for _, resource := range resources {
-		stored = append(stored, store.ConnectionResource{
-			ConnectionID: connection.ID, BucketID: connection.BucketID, ServiceID: connection.ServiceID,
-			ProviderResourceID: resource.ProviderID, ResourceType: resource.Type, DisplayName: resource.Name,
-			BaseURL: resource.BaseURL, MetadataJSON: resource.Metadata, Scopes: resource.Scopes, IsActive: true,
-		})
+	stored := projectConnectionResources(*connection, resources)
+	for index := range stored {
+		stored[index].ConnectionID = connection.ID
 	}
 	result, err := s.ReconcileConnectionResources(ctx, connection.ID, stored)
 	return len(result), err
 }
 
-// callbackResources chooses one declarative source; discovery takes precedence
-// because it reflects the provider's post-consent access grant.
-func callbackResources(ctx context.Context, verifier ServiceVerifier, session *store.ConnectSession, metadata *fusedobject.ServiceMetadata, token oauthTokenResponse) ([]connectresource.Resource, error) {
+// projectConnectionResources converts provider discovery output to the
+// credential-free routing rows accepted by both callback and manual stores.
+func projectConnectionResources(connection store.AuthConnection, resources []connectresource.Resource) []store.ConnectionResource {
+	stored := make([]store.ConnectionResource, 0, len(resources))
+	for _, resource := range resources {
+		stored = append(stored, store.ConnectionResource{
+			BucketID: connection.BucketID, ServiceID: connection.ServiceID,
+			ProviderResourceID: resource.ProviderID, ResourceType: resource.Type, DisplayName: resource.Name,
+			BaseURL: resource.BaseURL, MetadataJSON: resource.Metadata, Scopes: resource.Scopes, IsActive: true,
+		})
+	}
+	return stored
+}
+
+// prepareCallbackResources completes provider discovery and exact input
+// matching before any new credential material reaches PostgreSQL.
+func prepareCallbackResources(ctx context.Context, verifier ServiceVerifier, session *store.ConnectSession, metadata *fusedobject.ServiceMetadata, token oauthTokenResponse) (callbackResourcePlan, error) {
+	plan := callbackResourcePlan{validationStatus: "not_required"}
+	if metadata == nil || metadata.ConnectConfig == nil {
+		return plan, nil
+	}
 	config := metadata.ConnectConfig
 	if config.ResourceDiscovery != nil && (config.ResourceDiscovery.AutoRun == "" || config.ResourceDiscovery.AutoRun == "after_oauth_callback") {
-		discoveryVerifier, ok := verifier.(connectionDiscoveryVerifier)
-		if !ok {
-			return nil, errors.New("resource discovery is unavailable")
-		}
-		endpoint, err := discoveryVerifier.FetchEndpointByName(ctx, session.ServiceID, metadata.ServiceVersionID.String(), config.ResourceDiscovery.OperationID)
-		if err != nil {
-			return nil, errors.New("resource discovery operation is unavailable")
-		}
-		return connectresource.Discover(ctx, metadata, endpoint, token.AccessToken, token.TokenType)
+		return prepareDiscoveredCallbackResources(ctx, verifier, session, metadata, token)
 	}
 	if config.ResourceInput == nil {
-		return nil, nil
+		return plan, nil
 	}
+	plan.reconcile = true
+	values, err := connectSessionResourceInput(session)
+	if err != nil {
+		plan.validationStatus = "input_invalid"
+		return plan, err
+	}
+	resource, err := connectresource.FromInput(config.ResourceInput, values)
+	if err != nil {
+		plan.validationStatus = "input_invalid"
+		return plan, err
+	}
+	plan.resources = []connectresource.Resource{resource}
+	plan.matchedCount = 1
+	plan.validationStatus = "input_validated"
+	return plan, nil
+}
+
+// prepareDiscoveredCallbackResources fetches the provider grant once and, for
+// combined profiles, retains exactly the resource selected by validated input.
+func prepareDiscoveredCallbackResources(ctx context.Context, verifier ServiceVerifier, session *store.ConnectSession, metadata *fusedobject.ServiceMetadata, token oauthTokenResponse) (callbackResourcePlan, error) {
+	plan := callbackResourcePlan{reconcile: true, validationStatus: "discovery_failed"}
+	discoveryVerifier, ok := verifier.(connectionDiscoveryVerifier)
+	if !ok {
+		return plan, errors.New("resource discovery is unavailable")
+	}
+	config := metadata.ConnectConfig
+	endpoint, err := discoveryVerifier.FetchEndpointByName(ctx, session.ServiceID, metadata.ServiceVersionID.String(), config.ResourceDiscovery.OperationID)
+	if err != nil {
+		return plan, errors.New("resource discovery operation is unavailable")
+	}
+	resources, err := connectresource.Discover(ctx, metadata, endpoint, token.AccessToken, token.TokenType)
+	if err != nil {
+		return plan, err
+	}
+	plan.discoveredCount = len(resources)
+	if config.ResourceInput == nil {
+		plan.resources = resources
+		plan.matchedCount = len(resources)
+		plan.validationStatus = "discovery_validated"
+		return plan, nil
+	}
+	values, err := connectSessionResourceInput(session)
+	if err != nil {
+		plan.validationStatus = "input_invalid"
+		return plan, err
+	}
+	matched, err := connectresource.MatchDiscoveredInput(config.ResourceInput, values, resources)
+	if err != nil {
+		plan.validationStatus = callbackResourceMatchFailureStatus(err)
+		return plan, err
+	}
+	plan.resources = []connectresource.Resource{matched}
+	plan.matchedCount = 1
+	plan.validationStatus = "match_validated"
+	return plan, nil
+}
+
+// connectSessionResourceInput decodes the canonical map persisted by either
+// direct start or hosted submission before callback validation.
+func connectSessionResourceInput(session *store.ConnectSession) (map[string]string, error) {
 	values := map[string]string{}
 	if err := json.Unmarshal(session.ResourceInputJSON, &values); err != nil {
 		return nil, errors.New("resource input is invalid")
 	}
-	resource, err := connectresource.FromInput(config.ResourceInput, values)
-	if err != nil {
-		return nil, err
-	}
-	return []connectresource.Resource{resource}, nil
+	return values, nil
 }
 
-// validateConnectResourceInput binds only declared fields into the one-time
-// session; undeclared values are discarded before they can reach metadata.
-func validateConnectResourceInput(config *fusedobject.ServiceConnectConfig, values map[string]string) ([]byte, error) {
-	if config == nil || config.ResourceInput == nil {
-		return []byte(`{}`), nil
+// callbackResourceMatchFailureStatus maps matcher errors to a small telemetry
+// enum without recording input, provider metadata, URLs, or raw error text.
+func callbackResourceMatchFailureStatus(err error) string {
+	if errors.Is(err, connectresource.ErrDiscoveryInputNoMatch) {
+		return "match_not_found"
 	}
-	resource, err := connectresource.FromInput(config.ResourceInput, values)
-	if err != nil {
-		return nil, err
+	if errors.Is(err, connectresource.ErrDiscoveryInputAmbiguous) {
+		return "match_ambiguous"
 	}
-	// FromInput's metadata contains only normalized declared fields and is safe
-	// to bind to callback state; it never contains provider credentials.
-	return resource.Metadata, nil
+	return "match_failed"
+}
+
+// callbackResourceValidationAttrs returns only bounded counts and a fixed
+// status enum for callback auditing.
+func callbackResourceValidationAttrs(plan callbackResourcePlan) []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String("resource_validation_status", plan.validationStatus),
+		attribute.Int("resource_discovered_count", boundedCallbackResourceCount(plan.discoveredCount)),
+		attribute.Int("resource_matched_count", boundedCallbackResourceCount(plan.matchedCount)),
+	}
+}
+
+// boundedCallbackResourceCount caps telemetry cardinality while the complete
+// authoritative set remains available to the transactional store.
+func boundedCallbackResourceCount(count int) int {
+	if count < 0 {
+		return 0
+	}
+	if count > 1000 {
+		return 1000
+	}
+	return count
 }
 
 // consumeConnectCallbackSession enforces one-time callback use before token
@@ -541,18 +795,51 @@ func buildConnectAuthorizeURL(auth fusedobject.AuthConfig, flow fusedobject.OAut
 	values.Set("client_id", creds.ClientID)
 	values.Set("redirect_uri", creds.RedirectURI)
 	values.Set("state", state)
-	values.Set("code_challenge", challenge)
-	values.Set("code_challenge_method", "S256")
+	values.Del("code_challenge")
+	values.Del("code_challenge_method")
+	// Providers that do not declare PKCE may reject its extension parameters,
+	// so Engine strips provider extras and emits only the Engine-owned challenge
+	// when the reviewed auth contract asks.
+	if auth.PKCERequired {
+		values.Set("code_challenge", challenge)
+		values.Set("code_challenge_method", "S256")
+	}
 	values.Set("scope", strings.Join(scopes, delimiter))
 	if isOIDCAuth(auth) {
 		values.Set("nonce", nonce)
 	}
-	authURL, err := url.Parse(flow.AuthorizationURL)
-	if err != nil || authURL.Scheme == "" || authURL.Host == "" {
+	authURL, err := parseConnectAuthorizationURL(flow.AuthorizationURL)
+	if err != nil {
 		return "", connectRuntimeHTTPError{status: http.StatusBadRequest, message: "authorization_url must be absolute"}
 	}
 	authURL.RawQuery = mergeQuery(authURL.Query(), values).Encode()
 	return authURL.String(), nil
+}
+
+// parseConnectAuthorizationURL admits secure provider endpoints and loopback
+// HTTP used by local provider fixtures while rejecting active or ambiguous URLs.
+func parseConnectAuthorizationURL(raw string) (*url.URL, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Opaque != "" || parsed.User != nil || parsed.Hostname() == "" || strings.ContainsAny(parsed.Host, " \t\r\n;,\"'`") {
+		return nil, errors.New("authorization URL is invalid")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	// Real provider authorization must use HTTPS; loopback HTTP remains available
+	// for isolated tests without weakening non-local service contracts.
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isConnectLoopbackHost(parsed.Hostname())) {
+		return nil, errors.New("authorization URL transport is invalid")
+	}
+	return parsed, nil
+}
+
+// isConnectLoopbackHost recognizes browser-local OAuth fixtures without
+// treating arbitrary HTTP hosts as trusted authorization providers.
+func isConnectLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
+		return true
+	}
+	parsed := net.ParseIP(host)
+	return parsed != nil && parsed.IsLoopback()
 }
 
 // exchangeOAuthCode builds the standards-shaped code exchange in one place so
@@ -603,9 +890,10 @@ func encryptAuthConnectionFromToken(session *store.ConnectSession, resolved conn
 
 // writeConnectCallbackSuccess returns browsers to the stored return_url with
 // only a connection handle; connection metadata is fetched server-side later.
-func writeConnectCallbackSuccess(w http.ResponseWriter, r *http.Request, session *store.ConnectSession, connectionID uuid.UUID) {
+func writeConnectCallbackSuccess(ctx context.Context, s store.Store, w http.ResponseWriter, r *http.Request, session *store.ConnectSession, connectionID uuid.UUID) {
 	if session.ReturnURL == "" {
-		writeConnectCallbackFallback(w, http.StatusOK, "Connection complete. You can close this tab.")
+		// Without an application destination, the Engine owns the completion page.
+		writeConnectCallbackFallback(ctx, s, w, http.StatusOK, "Connection complete. You can close this tab.", false)
 		return
 	}
 	redirect, err := connectCallbackReturnURL(session.ReturnURL, map[string]string{
@@ -613,7 +901,8 @@ func writeConnectCallbackSuccess(w http.ResponseWriter, r *http.Request, session
 		"connection_id": connectionID.String(),
 	})
 	if err != nil {
-		writeConnectCallbackFallback(w, http.StatusOK, "Connection complete. You can close this tab.")
+		// A malformed stored destination cannot displace the safe local completion.
+		writeConnectCallbackFallback(ctx, s, w, http.StatusOK, "Connection complete. You can close this tab.", false)
 		return
 	}
 	http.Redirect(w, r, redirect, http.StatusFound)
@@ -621,9 +910,10 @@ func writeConnectCallbackSuccess(w http.ResponseWriter, r *http.Request, session
 
 // writeConnectCallbackFailure avoids JSON browser responses for completed
 // sessions while keeping error details coarse and URL-safe.
-func writeConnectCallbackFailure(w http.ResponseWriter, r *http.Request, session *store.ConnectSession, err error) {
+func writeConnectCallbackFailure(ctx context.Context, s store.Store, w http.ResponseWriter, r *http.Request, session *store.ConnectSession, err error) {
 	if session.ReturnURL == "" {
-		writeConnectRuntimeError(w, err)
+		// The Engine renders stable guidance when no application owns the result.
+		writeConnectCallbackRuntimeError(ctx, s, w, err)
 		return
 	}
 	redirect, redirectErr := connectCallbackReturnURL(session.ReturnURL, map[string]string{
@@ -631,7 +921,8 @@ func writeConnectCallbackFailure(w http.ResponseWriter, r *http.Request, session
 		"error_code":    connectCallbackErrorCode(err),
 	})
 	if redirectErr != nil {
-		writeConnectRuntimeError(w, err)
+		// Invalid stored return metadata fails back to the hardened local page.
+		writeConnectCallbackRuntimeError(ctx, s, w, err)
 		return
 	}
 	http.Redirect(w, r, redirect, http.StatusFound)
@@ -662,12 +953,41 @@ func connectCallbackErrorCode(err error) string {
 	return "connect_runtime_failed"
 }
 
-// writeConnectCallbackFallback is the no-return-url browser fallback; it keeps
-// the response human-readable without exposing connection JSON.
-func writeConnectCallbackFallback(w http.ResponseWriter, status int, message string) {
+type connectCallbackPage struct {
+	Branding hostedConnectBranding
+	Message  string
+	Failed   bool
+}
+
+var connectCallbackTemplate = template.Must(template.New("connect-callback").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{if .Failed}}Connection failed{{else}}Connection complete{{end}} · {{.Branding.DisplayName}}</title>
+<style>:root{color-scheme:light dark;font-family:Inter,ui-sans-serif,system-ui,sans-serif}body{margin:0;background:#f7f7f8;color:#18181b}main{max-width:28rem;margin:8vh auto;padding:2rem;background:#fff;border:1px solid #e4e4e7;border-radius:1rem;box-shadow:0 12px 32px rgba(0,0,0,.08)}header{display:flex;align-items:center;gap:.75rem;margin-bottom:1.5rem;font-weight:700}header img{width:48px;height:48px;object-fit:contain}.status{width:.75rem;height:.75rem;border-radius:999px;display:inline-block;margin-right:.5rem}p{color:#52525b;line-height:1.5}.links{display:flex;gap:1rem;margin-top:1.5rem;font-size:.875rem}.links a{color:inherit}@media(prefers-color-scheme:dark){body{background:#09090b;color:#fafafa}main{background:#18181b;border-color:#3f3f46}p{color:#d4d4d8}}</style>
+</head><body><main><header>{{if .Branding.LogoURL}}<img src="{{.Branding.LogoURL}}" width="48" height="48" alt="{{.Branding.DisplayName}} logo" referrerpolicy="no-referrer">{{end}}<span>{{.Branding.DisplayName}}</span></header>
+<h1><span class="status" style="background-color:{{.Branding.PrimaryColor}}"></span>{{if .Failed}}Connection failed{{else}}Connection complete{{end}}</h1><p>{{.Message}}</p>
+{{if or .Branding.SupportURL .Branding.PrivacyURL}}<div class="links">{{if .Branding.SupportURL}}<a href="{{.Branding.SupportURL}}" rel="noreferrer">Support</a>{{end}}{{if .Branding.PrivacyURL}}<a href="{{.Branding.PrivacyURL}}" rel="noreferrer">Privacy</a>{{end}}</div>{{end}}
+</main></body></html>`))
+
+// writeConnectCallbackFallback renders the Engine-owned terminal browser page
+// with validated branding and the same restrictive headers as hosted input.
+func writeConnectCallbackFallback(ctx context.Context, s store.Store, w http.ResponseWriter, status int, message string, failed bool) {
+	branding := loadHostedConnectBranding(ctx, s)
+	writeConnectInputSecurityHeaders(w, "", branding.LogoOrigin)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	_, _ = fmt.Fprintf(w, "<!doctype html><title>Fused Connect</title><p>%s</p>", message)
+	_ = connectCallbackTemplate.Execute(w, connectCallbackPage{Branding: branding, Message: message, Failed: failed})
+}
+
+// writeConnectCallbackRuntimeError preserves the bounded status class while
+// replacing internal/provider detail with stable browser-safe guidance.
+func writeConnectCallbackRuntimeError(ctx context.Context, s store.Store, w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	var httpErr connectRuntimeHTTPError
+	if errors.As(err, &httpErr) {
+		// Only the preclassified HTTP status crosses into the browser response.
+		status = httpErr.status
+	}
+	writeConnectCallbackFallback(ctx, s, w, status, "Return to the application and start the connection again.", true)
 }
 
 // selectRuntimeOAuthConfig matches the bucket's chosen auth family instead of

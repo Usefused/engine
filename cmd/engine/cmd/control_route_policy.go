@@ -116,6 +116,12 @@ var controlRESTPolicies = []controlRoutePolicy{
 		pathRequirement(accesscontrol.PermissionServiceManage, accesscontrol.ResourceService, "service_id"),
 	}},
 	{http.MethodPost, "/workspace/services", false, nil},
+	{http.MethodGet, "/workspace/connect-branding", false, []routeRequirement{
+		workspaceRequirement(accesscontrol.PermissionWorkspaceRead),
+	}},
+	{http.MethodPut, "/workspace/connect-branding", false, []routeRequirement{
+		workspaceRequirement(accesscontrol.PermissionWorkspaceUpdate),
+	}},
 	{http.MethodPut, "/workspace/buckets/{bucket_id}/values", false, []routeRequirement{
 		pathRequirement(accesscontrol.PermissionBucketManage, accesscontrol.ResourceBucket, "bucket_id"),
 	}},
@@ -385,11 +391,15 @@ func finalizeAuthorizedControlAudit(r *http.Request, recorder accesscontrol.Audi
 	finishAuditedResponse(writer, failClosed, err)
 }
 
+// applyMutationAuditEvidence maps bounded handler result facts onto the one
+// canonical final control audit event.
 func applyMutationAuditEvidence(ctx context.Context, event *accesscontrol.AuditEvent) {
 	evidence, ok := accesscontrol.MutationAuditEvidenceFromContext(ctx)
 	if !ok {
+		// Reads and unaudited paths have no mutation result to project.
 		return
 	}
+	applyConnectBrandingAuditEvidence(event, evidence.ConnectBrandingChanges)
 	if event.Outcome == accesscontrol.AuditFailed && evidence.Cancelled {
 		event.Outcome = accesscontrol.AuditCancelled
 		event.ReasonCode = "request_cancelled"
@@ -410,6 +420,21 @@ func applyMutationAuditEvidence(ctx context.Context, event *accesscontrol.AuditE
 		// boolean distinguishes it without inspecting a response or plan body.
 		event.Metadata["changed"] = false
 	}
+}
+
+// applyConnectBrandingAuditEvidence adds the fixed mutation diff only for the
+// branding route; a zero count keeps unrelated control audit records unchanged.
+func applyConnectBrandingAuditEvidence(event *accesscontrol.AuditEvent, changes accesscontrol.ConnectBrandingAuditChanges) {
+	if !changes.Present {
+		// Unrelated mutations retain their existing compact metadata shape.
+		return
+	}
+	event.Metadata["display_name_changed"] = changes.DisplayName
+	event.Metadata["logo_url_changed"] = changes.LogoURL
+	event.Metadata["primary_color_changed"] = changes.PrimaryColor
+	event.Metadata["support_url_changed"] = changes.SupportURL
+	event.Metadata["privacy_url_changed"] = changes.PrivacyURL
+	event.Metadata["changed_field_count"] = changes.Count
 }
 
 func isStreamingControlRequest(path string) bool {

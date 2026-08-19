@@ -81,6 +81,10 @@ func Normalize(profile *Profile) {
 	}
 	profile.AuthName = strings.TrimSpace(profile.AuthName)
 	profile.OAuth2Flow = strings.TrimSpace(profile.OAuth2Flow)
+	// Canonicalizing the lookup key keeps persisted profile hashes and runtime metadata access aligned.
+	if profile.ResourceInput != nil && profile.ResourceInput.DiscoveryMatch != nil {
+		profile.ResourceInput.DiscoveryMatch.MetadataKey = strings.TrimSpace(profile.ResourceInput.DiscoveryMatch.MetadataKey)
+	}
 	if profile.ResourceDiscovery == nil {
 		return
 	}
@@ -111,8 +115,44 @@ func (v *profileValidator) validateTopLevel() {
 		return
 	}
 	v.validateAuthIdentity()
-	if v.profile.ResourceDiscovery != nil && v.profile.ResourceInput != nil {
-		v.addError("resource_source.conflict", "resource_discovery", "resource discovery and resource input are mutually exclusive")
+	v.validateResourceSourceComposition()
+}
+
+// validateResourceSourceComposition permits input to constrain discovery only
+// when the profile declares an exact provider-returned metadata value to match.
+func (v *profileValidator) validateResourceSourceComposition() {
+	input := v.profile.ResourceInput
+	discovery := v.profile.ResourceDiscovery
+	// Profiles without customer resource input retain ordinary discovery behavior.
+	if input == nil {
+		return
+	}
+	// Input-only profiles remain valid unless they claim a provider-discovery equality rule.
+	if discovery == nil {
+		// A matcher without discovery can never observe provider-granted resources.
+		if input.DiscoveryMatch != nil {
+			v.addError("resource_input.discovery_match.unavailable", "resource_input.discovery_match", "discovery match requires resource discovery")
+		}
+		return
+	}
+	// Combining sources requires a declared equality rule rather than implicit precedence.
+	if input.DiscoveryMatch == nil {
+		v.addError("resource_source.conflict", "resource_input.discovery_match", "resource input can accompany discovery only with an explicit discovery match")
+		return
+	}
+	// Matching across resource types could bind a valid URL to the wrong routing domain.
+	if input.ResourceType != discovery.ResourceType {
+		v.addError("resource_input.discovery_match.resource_type", "resource_input.resource_type", "input and discovery resource types must match")
+	}
+	key := strings.TrimSpace(input.DiscoveryMatch.MetadataKey)
+	// Match keys use the same safe identifier grammar as stored metadata fields.
+	if !identifierPattern.MatchString(key) {
+		v.addError("resource_input.discovery_match.metadata_key", "resource_input.discovery_match.metadata_key", "metadata key is invalid")
+		return
+	}
+	// Runtime lookup is valid only for metadata extracted by this same profile.
+	if _, ok := v.profile.Metadata[key]; !ok {
+		v.addError("resource_input.discovery_match.metadata_missing", "resource_input.discovery_match.metadata_key", "metadata key must be declared by the profile")
 	}
 }
 

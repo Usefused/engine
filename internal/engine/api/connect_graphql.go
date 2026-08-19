@@ -1801,6 +1801,9 @@ func startConnectSessionGraphQLField(s store.Store, verifier ServiceVerifier, ma
 			}
 			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.connect_session.start")
 			defer span.End()
+			// GraphQL validation can return before session creation, so establish a
+			// secret-safe failed outcome and replace it only after persistence.
+			span.SetAttributes(attribute.String("outcome", "failed"))
 			span.SetAttributes(connectAdminAttrs("connect.session.start", call)...)
 			endUserRef := strings.TrimSpace(fmt.Sprint(p.Args["end_user_ref"]))
 			if endUserRef == "" {
@@ -1823,7 +1826,7 @@ func startConnectSessionGraphQLField(s store.Store, verifier ServiceVerifier, ma
 			if err != nil {
 				return nil, fmt.Errorf("create connect session: %w", err)
 			}
-			span.SetAttributes(attribute.String("outcome", "success"), attribute.Int("scope_count", len(response.Scopes)))
+			span.SetAttributes(connectSessionStartTelemetry(response)...)
 			return projectGraphQLConnectSession(response), nil
 		},
 	}

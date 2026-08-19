@@ -6,6 +6,7 @@ import {
   advancedPermissionDiagnostics,
   apiErrorMessage,
   isAuthenticationFailure,
+  isImportVersionRequired,
   normalizeAPIErrorPayload,
 } from "./authorization-error.ts";
 
@@ -165,6 +166,37 @@ test("preserves structured Engine errors and diagnostics", () => {
   assert.equal(error.retryable, true);
   assert.deepEqual(error.details, { http_status: 503 });
   assert.equal(error.traceId, "0123456789abcdef0123456789abcdef");
+});
+
+// This recovery test keeps the UI keyed to bounded server identity rather than
+// mutable or potentially unsafe error wording.
+test("preserves the version-required code for import recovery", () => {
+  const payload = normalizeAPIErrorPayload({
+    error: {
+      message: "The imported source does not declare a version.",
+      code: "import_version_required",
+      category: "validation",
+      retryable: false,
+      remediation: "Enter a version and try again.",
+    },
+  });
+  const error = new APIRequestError(400, payload);
+
+  assert.equal(isImportVersionRequired(error), true);
+  assert.equal(
+    error.message,
+    "The imported source does not declare a version. Enter a version and try again."
+  );
+  assert.equal(error.category, "validation");
+  assert.equal(error.retryable, false);
+  assert.equal(
+    isImportVersionRequired(new Error("version is required when the imported source does not declare one")),
+    false
+  );
+  assert.equal(
+    isImportVersionRequired(new APIRequestError(400, { error: "other", code: "other" })),
+    false
+  );
 });
 
 test("does not treat a removed top-level plan error shape as structured", () => {

@@ -135,6 +135,7 @@ func (s *postgresStore) GetLatestWorkspaceServiceVersion(ctx context.Context, ac
 	return version, nil
 }
 
+// GetLatestWorkspaceServiceVersionID returns exact latest workspace service version id through one app-scoped query or cache lookup.
 func (s *postgresStore) GetLatestWorkspaceServiceVersionID(ctx context.Context, accountID uuid.UUID, serviceID uuid.UUID) (uuid.UUID, error) {
 	err := s.VerifyWorkspaceOwner(ctx, accountID)
 	if err != nil {
@@ -150,7 +151,11 @@ func (s *postgresStore) GetLatestWorkspaceServiceVersionID(ctx context.Context, 
 // appRuntimeSelectColumns is shared by GetAppRuntime/ListAppRuntimes/
 // ListMCPAppsByAccount so their SELECT lists and Scan order can't drift
 // apart from each other.
-const appRuntimeSelectColumns = "a.account_id, a.app_id, f.owner_subject_id, f.owner_team_id, fb.bucket_id, a.scope_schema_version, a.selections, a.status, f.kind, f.display_name, a.version, a.config_key, a.created_at"
+const appRuntimeSelectColumns = `a.account_id, a.app_id, f.owner_subject_id, f.owner_team_id,
+fb.bucket_id, a.scope_schema_version, a.selections,
+a.unified_definition_schema_version, a.unified_definitions,
+a.unified_definition_hash, a.unified_codegen_descriptor_hash,
+a.status, f.kind, f.display_name, a.version, a.config_key, a.created_at`
 
 func scanAppRuntime(row pgx.Row) (*AppRuntime, error) {
 	scope, _, err := scanAppRuntimeRow(row, false)
@@ -161,6 +166,7 @@ func scanAppRuntimeWithTotal(row pgx.Row) (*AppRuntime, int, error) {
 	return scanAppRuntimeRow(row, true)
 }
 
+// scanAppRuntimeRow maps the stable query column order into one Engine persistence value.
 func scanAppRuntimeRow(row pgx.Row, includeTotal bool) (*AppRuntime, int, error) {
 	var scope AppRuntime
 	var bucketID *uuid.UUID
@@ -170,7 +176,9 @@ func scanAppRuntimeRow(row pgx.Row, includeTotal bool) (*AppRuntime, int, error)
 	total := 0
 	targets := []any{
 		&scope.AccountID, &scope.AppID, &ownerSubjectID, &ownerTeamID,
-		&bucketID, &scope.ScopeSchemaVersion, &scope.Selections, &scope.Status,
+		&bucketID, &scope.ScopeSchemaVersion, &scope.Selections,
+		&scope.UnifiedDefinitionSchemaVersion, &scope.UnifiedDefinitions,
+		&scope.UnifiedDefinitionHash, &scope.UnifiedCodegenDescriptorHash, &scope.Status,
 		&scope.Kind, &name, &version, &configKey, &scope.CreatedAt,
 	}
 	if includeTotal {
@@ -928,14 +936,30 @@ func (s *postgresStore) GetIdempotentExecution(ctx context.Context, appID uuid.U
 // both callers already have their (equivalent) response in hand from their
 // own dispatch, this table only serves future lookups.
 func (s *postgresStore) SaveIdempotentExecution(ctx context.Context, exec *models.IdempotentExecution) error {
-	query := `
+	_, err := s.db.Exec(ctx, saveIdempotentExecutionQuery, idempotentExecutionInsertArgs(exec)...)
+	return err
+}
+
+const saveIdempotentExecutionQuery = `
 		INSERT INTO fused_engine_idempotency_keys
 			(id, app_id, idempotency_key_hash, request_body_hash, environment, response_body, response_status, response_media_family, created_at, expires_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9)
 		ON CONFLICT (app_id, idempotency_key_hash) DO NOTHING
 	`
-	_, err := s.db.Exec(ctx, query, exec.AppID, exec.IdempotencyKeyHash, exec.RequestBodyHash, exec.Environment, exec.ResponseBody, exec.ResponseStatus, exec.ResponseMediaFamily, exec.ExpiresAt)
-	return err
+
+// idempotentExecutionInsertArgs keeps INSERT argument order aligned with the persisted replay media contract.
+func idempotentExecutionInsertArgs(exec *models.IdempotentExecution) []any {
+	return []any{
+		exec.ID,
+		exec.AppID,
+		exec.IdempotencyKeyHash,
+		exec.RequestBodyHash,
+		exec.Environment,
+		exec.ResponseBody,
+		exec.ResponseStatus,
+		exec.ResponseMediaFamily,
+		exec.ExpiresAt,
+	}
 }
 
 func (s *postgresStore) DeleteSecret(ctx context.Context, bucketID uuid.UUID, serviceID uuid.UUID, keyName string) error {

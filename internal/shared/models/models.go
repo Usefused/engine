@@ -955,6 +955,7 @@ type AuthConfig struct {
 	PKCERequired            bool                    `json:"pkce_required,omitempty"`
 	ScopesDelimiter         string                  `json:"scopes_delimiter,omitempty"` // default "space"; set to "comma" when the provider requires it
 	TokenEndpointAuthMethod TokenEndpointAuthMethod `json:"token_endpoint_auth_method,omitempty"`
+	TokenRequestMediaType   TokenRequestMediaType   `json:"token_request_media_type,omitempty"`
 	ExtraAuthParams         map[string]string       `json:"extra_auth_params,omitempty"`
 	ExtraTokenParams        map[string]string       `json:"extra_token_params,omitempty"`
 	RefreshTokenRotates     bool                    `json:"refresh_token_rotates,omitempty"`
@@ -992,6 +993,10 @@ type HTTPChallengeStrategy struct {
 type AuthConfigs []AuthConfig
 
 type TokenEndpointAuthMethod string
+
+// TokenRequestMediaType carries the provider-facing OAuth token body format
+// through dispatch without broadening its value to unrelated media types.
+type TokenRequestMediaType string
 
 const (
 	TokenEndpointAuthMethodClientSecretBasic TokenEndpointAuthMethod = "client_secret_basic"
@@ -1235,22 +1240,62 @@ type SDKContractBinding struct {
 	SourceHash       string    `json:"source_hash"`
 }
 
+const SDKUnifiedDescriptorSchemaVersion = 2
+
+// SDKUnifiedOperationDescriptors is the credential-free contract Registry
+// needs to render Unified methods. Runtime mappings stay Engine-local so a
+// generated package cannot become a second execution policy.
+type SDKUnifiedOperationDescriptors struct {
+	SchemaVersion int                             `json:"schema_version"`
+	Operations    []SDKUnifiedOperationDescriptor `json:"operations"`
+}
+
+type SDKUnifiedOperationDescriptor struct {
+	Name         string                       `json:"name"`
+	Description  string                       `json:"description,omitempty"`
+	InputSchema  json.RawMessage              `json:"input_schema"`
+	OutputSchema json.RawMessage              `json:"output_schema,omitempty"`
+	Targets      []SDKUnifiedTargetDescriptor `json:"targets"`
+}
+
+type SDKUnifiedTargetDescriptor struct {
+	PublicTarget     string                        `json:"public_target"`
+	ServiceTarget    string                        `json:"service_target,omitempty"`
+	OperationID      string                        `json:"operation_id"`
+	ServiceID        uuid.UUID                     `json:"service_id"`
+	ServiceVersionID uuid.UUID                     `json:"service_version_id"`
+	EndpointID       uuid.UUID                     `json:"endpoint_id"`
+	DependsOn        []string                      `json:"depends_on,omitempty"`
+	Rollback         *SDKUnifiedRollbackDescriptor `json:"rollback,omitempty"`
+	OutputSchema     json.RawMessage               `json:"output_schema,omitempty"`
+}
+
+// SDKUnifiedRollbackDescriptor exposes only the exact public operation
+// identity required for code generation validation; its mapping stays private.
+type SDKUnifiedRollbackDescriptor struct {
+	OperationID      string    `json:"operation_id"`
+	ServiceID        uuid.UUID `json:"service_id"`
+	ServiceVersionID uuid.UUID `json:"service_version_id"`
+	EndpointID       uuid.UUID `json:"endpoint_id"`
+}
+
 type SDKGenerationRequest struct {
-	Name             string               `json:"name"`
-	Description      string               `json:"description"`
-	Version          string               `json:"version"`
-	AppFamilyID      uuid.UUID            `json:"app_family_id"`
-	AppID            uuid.UUID            `json:"app_id"`
-	SourceHash       string               `json:"source_hash"`
-	GeneratorVersion string               `json:"generator_version"`
-	IdempotencyKey   string               `json:"idempotency_key,omitempty"`
-	Selections       []SDKSelection       `json:"selections"`
-	IncludeMCP       bool                 `json:"include_mcp"`
-	TargetType       string               `json:"target_type"`
-	TargetLanguage   string               `json:"target_language"`
-	DefaultEngineURL string               `json:"default_engine_url,omitempty"`
-	SkipSandbox      bool                 `json:"skip_sandbox"`
-	ContractBindings []SDKContractBinding `json:"contract_bindings,omitempty"`
+	Name              string                          `json:"name"`
+	Description       string                          `json:"description"`
+	Version           string                          `json:"version"`
+	AppFamilyID       uuid.UUID                       `json:"app_family_id"`
+	AppID             uuid.UUID                       `json:"app_id"`
+	SourceHash        string                          `json:"source_hash"`
+	GeneratorVersion  string                          `json:"generator_version"`
+	IdempotencyKey    string                          `json:"idempotency_key,omitempty"`
+	Selections        []SDKSelection                  `json:"selections"`
+	IncludeMCP        bool                            `json:"include_mcp"`
+	TargetType        string                          `json:"target_type"`
+	TargetLanguage    string                          `json:"target_language"`
+	DefaultEngineURL  string                          `json:"default_engine_url,omitempty"`
+	SkipSandbox       bool                            `json:"skip_sandbox"`
+	ContractBindings  []SDKContractBinding            `json:"contract_bindings,omitempty"`
+	UnifiedOperations *SDKUnifiedOperationDescriptors `json:"unified_operations,omitempty"`
 }
 
 type SDKGenerationResult struct {

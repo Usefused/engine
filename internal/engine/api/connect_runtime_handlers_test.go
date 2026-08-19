@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,10 +16,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/connectresource"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/connectionprofile"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func connectTestOAuthFlow(scopes ...string) fusedobject.OAuth2FlowContract {
@@ -237,6 +245,220 @@ func TestConnectCallbackHandlerDiscoversResources(t *testing.T) {
 	}
 	if fixture.store.savedConnection.ScopeSource != "request" || strings.Join(fixture.store.savedConnection.Scopes, " ") != "account:read" {
 		t.Fatalf("expected requested scope fallback, got source=%q scopes=%#v", fixture.store.savedConnection.ScopeSource, fixture.store.savedConnection.Scopes)
+	}
+}
+
+// TestConnectCallbackHandlerMatchesBeforeAtomicCommit proves customer input
+// selects one provider-granted Jira tenant and persists the discovered cloud
+// route rather than the input-derived site URL.
+func TestConnectCallbackHandlerMatchesBeforeAtomicCommit(t *testing.T) {
+	provider := newCombinedConnectProvider(t, `[
+		{"id":"cloud-a","name":"Acme","url":"https://acme.atlassian.net"},
+		{"id":"cloud-b","name":"Beta","url":"https://beta.atlassian.net"}
+	]`)
+	defer provider.Close()
+	fixture, state := combinedConnectRuntimeFixture(t, provider.URL, "acme")
+
+	rr := serveConnectCallback(fixture, state)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if fixture.store.callbackPersistCalls != 1 || len(fixture.store.reconciledResources) != 1 {
+		t.Fatalf("atomic callback writes = %d resources=%#v", fixture.store.callbackPersistCalls, fixture.store.reconciledResources)
+	}
+	resource := fixture.store.reconciledResources[0]
+	if resource.ProviderResourceID != "cloud-a" || resource.BaseURL != "https://api.atlassian.com/ex/jira/cloud-a" {
+		t.Fatalf("persisted resource = %#v", resource)
+	}
+}
+
+// TestConnectCallbackHandlerMismatchPreservesPriorGrant verifies provider
+// discovery and exact matching finish before callback persistence begins.
+func TestConnectCallbackHandlerMismatchPreservesPriorGrant(t *testing.T) {
+	provider := newCombinedConnectProvider(t, `[{"id":"cloud-b","name":"Beta","url":"https://beta.atlassian.net"}]`)
+	defer provider.Close()
+	fixture, state := combinedConnectRuntimeFixture(t, provider.URL, "acme")
+	seedPriorCallbackGrant(&fixture)
+
+	rr := serveConnectCallback(fixture, state)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", rr.Code, rr.Body.String())
+	}
+	assertPriorCallbackGrant(t, fixture, 0)
+}
+
+// TestConnectCallbackHandlerPersistFailurePreservesPriorGrant exercises the
+// store failure boundary after a successful exact match.
+func TestConnectCallbackHandlerPersistFailurePreservesPriorGrant(t *testing.T) {
+	provider := newCombinedConnectProvider(t, `[{"id":"cloud-a","name":"Acme","url":"https://acme.atlassian.net"}]`)
+	defer provider.Close()
+	fixture, state := combinedConnectRuntimeFixture(t, provider.URL, "acme")
+	seedPriorCallbackGrant(&fixture)
+	fixture.store.callbackPersistErr = errors.New("injected transaction failure")
+
+	rr := serveConnectCallback(fixture, state)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rr.Code, rr.Body.String())
+	}
+	assertPriorCallbackGrant(t, fixture, 1)
+}
+
+// TestCallbackResourceValidationAttrsAreBounded asserts the callback span has
+// only the fixed status and capped aggregate counts, independent of resource
+// values held by the plan.
+func TestCallbackResourceValidationAttrsAreBounded(t *testing.T) {
+	attrs := callbackResourceValidationAttrs(callbackResourcePlan{
+		validationStatus: "match_validated", discoveredCount: 5000, matchedCount: 1,
+		resources: []connectresource.Resource{{ProviderID: "customer-cloud", BaseURL: "https://customer.invalid"}},
+	})
+	if len(attrs) != 3 {
+		t.Fatalf("attributes = %#v", attrs)
+	}
+	values := map[string]any{}
+	for _, attr := range attrs {
+		values[string(attr.Key)] = attr.Value.AsInterface()
+	}
+	if values["resource_validation_status"] != "match_validated" || values["resource_discovered_count"] != int64(1000) || values["resource_matched_count"] != int64(1) {
+		t.Fatalf("bounded attributes = %#v", values)
+	}
+	encoded := fmt.Sprint(values)
+	if strings.Contains(encoded, "customer-cloud") || strings.Contains(encoded, "customer.invalid") {
+		t.Fatalf("customer values leaked into callback telemetry: %s", encoded)
+	}
+}
+
+// TestConnectCallbackEarlyFailureTelemetryHasSafeDefaults proves failures
+// before session lookup still close a diagnosable callback span without
+// callback query values or raw errors.
+func TestConnectCallbackEarlyFailureTelemetryHasSafeDefaults(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	previous := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		otel.SetTracerProvider(previous)
+		slog.SetDefault(previousLogger)
+	})
+
+	fixture := newConnectRuntimeFixture(t)
+	request := httptest.NewRequest(http.MethodGet, "/workspace/connect/callback?state=customer-state", nil)
+	buildConnectRuntimeRouter(fixture).ServeHTTP(httptest.NewRecorder(), request)
+	encoded := encodedConnectInputSpan(recorder.Ended(), "engine.connect.callback") + logs.String()
+	for _, expected := range []string{
+		"outcome=failed", "resource_validation_status=not_started",
+		"resource_discovered_count=0", "resource_matched_count=0",
+		"resource_persistence_status=not_started", `"msg":"connect callback request received"`,
+		`"has_code":false`, `"has_error":false`,
+	} {
+		if !strings.Contains(encoded, expected) {
+			t.Fatalf("callback telemetry missing %q: %s", expected, encoded)
+		}
+	}
+	if strings.Contains(encoded, "customer-state") || strings.Contains(encoded, "state and code") {
+		t.Fatalf("callback telemetry leaked request or error text: %s", encoded)
+	}
+}
+
+// newCombinedConnectProvider serves one token exchange and one Jira-style
+// accessible-resources response for callback unit tests.
+func newCombinedConnectProvider(t *testing.T, resources string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"fresh-token","token_type":"Bearer","expires_in":3600}`))
+		case "/resources":
+			if r.Header.Get("Authorization") != "Bearer fresh-token" {
+				t.Fatalf("discovery authorization = %q", r.Header.Get("Authorization"))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(resources))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+// combinedConnectRuntimeFixture configures the real callback handler with a
+// combined input/discovery contract and a callback-ready user session.
+func combinedConnectRuntimeFixture(t *testing.T, providerURL, subdomain string) (connectRuntimeFixture, string) {
+	t.Helper()
+	fixture := newConnectRuntimeFixture(t)
+	state := "combined-" + uuid.NewString()
+	fixture.store.session = connectRuntimeSession(t, fixture, state, "pkce-verifier")
+	fixture.store.session.ResourceInputJSON = []byte(`{"subdomain":"` + subdomain + `"}`)
+	fixture.verifier.serviceMetadata.ServiceVersionID = uuid.New()
+	fixture.verifier.serviceMetadata.BaseURL = providerURL
+	fixture.verifier.serviceMetadata.AuthConfigs[0].Type = "oauth2"
+	fixture.verifier.serviceMetadata.AuthConfigs[0].OAuth2Flows = fusedobject.OAuth2Flows{"authorizationCode": {
+		AuthorizationURL: providerURL + "/authorize", TokenURL: providerURL + "/token", Scopes: map[string]string{},
+	}}
+	fixture.store.savedConfig.AuthType = "oauth"
+	fixture.store.session.AuthType = "oauth"
+	fixture.verifier.serviceMetadata.ConnectConfig = combinedConnectProfile()
+	fixture.verifier.discoveryEndpoint = &fusedobject.Endpoint{Name: "getAccessibleResources", Method: http.MethodGet, Path: "/resources"}
+	return fixture, state
+}
+
+// combinedConnectProfile mirrors Jira's accessible-resources shape while
+// keeping its provider-neutral input-to-discovery matching contract explicit.
+func combinedConnectProfile() *fusedobject.ServiceConnectConfig {
+	return &fusedobject.ServiceConnectConfig{
+		ResourceDiscovery: &fusedobject.ResourceDiscoveryConfig{
+			OperationID: "getAccessibleResources", IDPath: "$[*].id", NamePath: "$[*].name",
+			BaseURLTemplate: "https://api.atlassian.com/ex/jira/{id}", ResourceType: "jira_site",
+			AutoRun: "after_oauth_callback", AllowedHosts: []string{"api.atlassian.com"},
+		},
+		ResourceInput: &fusedobject.ResourceInputConfig{
+			Fields:          []fusedobject.ResourceInputField{{Name: "subdomain", Required: true, Pattern: `^[A-Za-z0-9-]+$`}},
+			BaseURLTemplate: "https://{subdomain}.atlassian.net", ResourceType: "jira_site",
+			AllowedHosts:   []string{"*.atlassian.net"},
+			DiscoveryMatch: &connectionprofile.ResourceInputDiscoveryMatch{MetadataKey: "site_url"},
+		},
+		Metadata: map[string]string{"site_url": "$[*].url"},
+	}
+}
+
+// serveConnectCallback drives the routed callback so response assertions cover
+// middleware, session consumption, token exchange, validation, and storage.
+func serveConnectCallback(fixture connectRuntimeFixture, state string) *httptest.ResponseRecorder {
+	router := buildConnectRuntimeRouter(fixture)
+	req := httptest.NewRequest(http.MethodGet, "/workspace/connect/callback?state="+url.QueryEscape(state)+"&code=auth-code", nil)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	return rr
+}
+
+// seedPriorCallbackGrant installs a previous token/resource pair so failure
+// tests can prove neither half is replaced independently.
+func seedPriorCallbackGrant(fixture *connectRuntimeFixture) {
+	fixture.store.savedConnection = &store.AuthConnection{
+		ID: uuid.New(), BucketID: fixture.bucketID, ServiceID: fixture.serviceID,
+		EndUserRef: "user_123", AuthName: "bearerAuth", EncryptedAccessToken: "prior-token",
+	}
+	fixture.store.reconciledResources = []store.ConnectionResource{{
+		ConnectionID: fixture.store.savedConnection.ID, BucketID: fixture.bucketID, ServiceID: fixture.serviceID,
+		ProviderResourceID: "prior-cloud", ResourceType: "jira_site", BaseURL: "https://api.atlassian.com/ex/jira/prior-cloud",
+	}}
+}
+
+// assertPriorCallbackGrant checks both credential and resource fixture state
+// after a failed callback and verifies the expected transactional call count.
+func assertPriorCallbackGrant(t *testing.T, fixture connectRuntimeFixture, wantCalls int) {
+	t.Helper()
+	if fixture.store.callbackPersistCalls != wantCalls {
+		t.Fatalf("callback persist calls = %d want %d", fixture.store.callbackPersistCalls, wantCalls)
+	}
+	if fixture.store.savedConnection.EncryptedAccessToken != "prior-token" || len(fixture.store.reconciledResources) != 1 || fixture.store.reconciledResources[0].ProviderResourceID != "prior-cloud" {
+		t.Fatalf("prior grant changed: connection=%#v resources=%#v", fixture.store.savedConnection, fixture.store.reconciledResources)
 	}
 }
 

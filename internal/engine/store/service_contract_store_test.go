@@ -759,15 +759,18 @@ func assertContractReplacement(t *testing.T, ctx context.Context, store *postgre
 	return updated
 }
 
+// insertSecondContractSnapshot persists a different service/version with the
+// same operation name to catch cross-snapshot name matching.
 func insertSecondContractSnapshot(t *testing.T, ctx context.Context, store *postgresStore) (uuid.UUID, uuid.UUID, fusedobject.Endpoint) {
 	t.Helper()
 	serviceID, versionID := uuid.New(), uuid.New()
 	endpoint := fusedobject.Endpoint{ID: uuid.New(), Name: "listGadgets", Method: "GET", Path: "/gadgets"}
+	unrelated := fusedobject.Endpoint{ID: uuid.New(), Name: "deleteGadget", Method: "DELETE", Path: "/gadgets/{id}"}
 	_, err := store.UpsertServiceContractSnapshot(ctx, ServiceContractSnapshot{
 		ExecutionContractEnvelope: fusedobject.EngineExecutionContractSupport(),
 		ServiceID:                 serviceID, ServiceVersionID: versionID, Version: "2026-07-24",
 		ServiceMetadata: fusedobject.ServiceMetadata{ID: serviceID, ServiceVersionID: versionID, Name: "Gadgets"},
-		Endpoints:       []fusedobject.Endpoint{endpoint},
+		Endpoints:       []fusedobject.Endpoint{endpoint, unrelated},
 	})
 	if err != nil {
 		t.Fatalf("UpsertServiceContractSnapshot second selection: %v", err)
@@ -775,6 +778,8 @@ func insertSecondContractSnapshot(t *testing.T, ctx context.Context, store *post
 	return serviceID, versionID, endpoint
 }
 
+// assertContractSelectionQueries proves mixed select-all and exact-ID requests
+// stay isolated by service version even when operation names collide.
 func assertContractSelectionQueries(t *testing.T, ctx context.Context, store *postgresStore, snapshot ServiceContractSnapshot, updated fusedobject.Endpoint, secondServiceID, secondVersionID uuid.UUID, second fusedobject.Endpoint) {
 	t.Helper()
 	selections := []ServiceContractEndpointSelection{
@@ -786,8 +791,16 @@ func assertContractSelectionQueries(t *testing.T, ctx context.Context, store *po
 		t.Fatalf("ListServiceContractEndpointsForSelections: %v", err)
 	}
 	assertContractIntersection(t, intersection, updated, second)
+	perSelection := append([]ServiceContractEndpointSelection(nil), selections...)
+	perSelection[0].EndpointNames = []string{updated.Name}
+	perSelection[1].EndpointNames = []string{second.Name}
+	bound, err := store.ListServiceContractEndpointsForSelections(ctx, perSelection, nil)
+	if err != nil {
+		t.Fatalf("per-selection endpoint lookup: %v", err)
+	}
+	assertContractIntersection(t, bound, updated, second)
 	unrestricted, err := store.ListServiceContractEndpointsForSelections(ctx, selections, nil)
-	if err != nil || len(unrestricted) != 2 {
+	if err != nil || len(unrestricted) != 3 {
 		t.Fatalf("batched unrestricted app-scope intersection = %#v, %v", unrestricted, err)
 	}
 	assertMissingContractSelection(t, ctx, store, updated.Name)

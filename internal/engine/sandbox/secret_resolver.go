@@ -504,7 +504,7 @@ func (r *secretResolver) injectConnectedResource(ctx context.Context, conn *stor
 		return fmt.Errorf("resolve connection resource: %w", err)
 	}
 	if resource == nil {
-		if err := connectionResourceSelectionError(resourceID, activeCount); err != nil {
+		if err := connectionResourceSelectionError(conn, resourceID, activeCount); err != nil {
 			return err
 		}
 		// Connections created for services without x-fused-connect legitimately
@@ -536,12 +536,12 @@ func optionalConnectionResourceID(credentials map[string]any) (*uuid.UUID, error
 
 // connectionResourceSelectionError distinguishes services without resource
 // routing from an invalid explicit choice and a genuinely ambiguous tenant.
-func connectionResourceSelectionError(requested *uuid.UUID, activeCount int) error {
+func connectionResourceSelectionError(conn *store.AuthConnection, requested *uuid.UUID, activeCount int) error {
 	if requested != nil {
-		return errors.New("connection resource not found for connected user")
+		return newResourceSelectionRequiredError(conn, "resource_not_found")
 	}
 	if activeCount > 1 {
-		return errors.New("resource_selection_required: pass fused.resourceId")
+		return newResourceSelectionRequiredError(conn, "multiple_resources")
 	}
 	return nil
 }
@@ -598,7 +598,7 @@ func (r *secretResolver) usableAuthConnection(ctx context.Context, bucketID, ser
 		return nil, fmt.Errorf("failed to fetch auth connection: %w", err)
 	}
 	if conn == nil {
-		return nil, store.ErrAuthConnectionNotFound
+		return nil, newConnectionRequiredError(bucketID.String(), serviceID.String(), endUserRef)
 	}
 	// Once Engine has classified the grant as permanently unusable, later SDK
 	// calls must receive the same action instead of dispatching a stale token.

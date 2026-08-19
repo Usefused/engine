@@ -1,9 +1,89 @@
 package connectionprofile
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
+
+// TestValidateDiscoveryInputMatch permits customer input only as an exact
+// constraint on provider-discovered metadata and canonicalizes its key.
+func TestValidateDiscoveryInputMatch(t *testing.T) {
+	profile := validProfile()
+	profile.Metadata["site_url"] = "$[*].url"
+	profile.ResourceInput = validMatchedInput(" site_url ")
+	result := Validate(&profile, Contract{})
+	// The explicit equality constraint is the only safe composition of both resource sources.
+	if result.HasErrors() {
+		t.Fatalf("Validate errors = %#v", result.Issues)
+	}
+	// Validation normalizes the persisted lookup key before hashing or runtime use.
+	if profile.ResourceInput.DiscoveryMatch.MetadataKey != "site_url" {
+		t.Fatalf("normalized match key = %q", profile.ResourceInput.DiscoveryMatch.MetadataKey)
+	}
+}
+
+// TestNormalizeDiscoveryInputMatchIsHashStable proves insignificant key
+// whitespace cannot produce a different persisted profile representation.
+func TestNormalizeDiscoveryInputMatchIsHashStable(t *testing.T) {
+	spaced := validProfile()
+	spaced.Metadata["site_url"] = "$[*].url"
+	spaced.ResourceInput = validMatchedInput(" site_url ")
+	canonical := validProfile()
+	canonical.Metadata["site_url"] = "$[*].url"
+	canonical.ResourceInput = validMatchedInput("site_url")
+	Normalize(&spaced)
+	Normalize(&canonical)
+	spacedJSON, _ := json.Marshal(spaced)
+	canonicalJSON, _ := json.Marshal(canonical)
+	// Equivalent author input must produce byte-identical canonical JSON.
+	if string(spacedJSON) != string(canonicalJSON) {
+		t.Fatalf("normalized profiles differ: %s != %s", spacedJSON, canonicalJSON)
+	}
+}
+
+// TestValidateRejectsUnsafeDiscoveryInputComposition covers every profile
+// shape that would make customer selection decorative or ambiguous.
+func TestValidateRejectsUnsafeDiscoveryInputComposition(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(*Profile)
+		code string
+	}{
+		{"missing matcher", func(profile *Profile) {
+			profile.ResourceInput = validMatchedInput("")
+			profile.ResourceInput.DiscoveryMatch = nil
+		}, "resource_source.conflict"},
+		{"missing metadata", func(profile *Profile) { profile.ResourceInput = validMatchedInput("site_url") }, "resource_input.discovery_match.metadata_missing"},
+		{"resource type mismatch", func(profile *Profile) {
+			profile.Metadata["site_url"] = "$[*].url"
+			profile.ResourceInput = validMatchedInput("site_url")
+			profile.ResourceInput.ResourceType = "other"
+		}, "resource_input.discovery_match.resource_type"},
+		{"matcher without discovery", func(profile *Profile) {
+			profile.ResourceDiscovery = nil
+			profile.ResourceInput = validMatchedInput("site_url")
+		}, "resource_input.discovery_match.unavailable"},
+	}
+	// Each invalid composition must surface its stable public issue code.
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			profile := validProfile()
+			test.edit(&profile)
+			assertIssueCodes(t, Validate(&profile, Contract{}), test.code)
+		})
+	}
+}
+
+// validMatchedInput returns the constrained Jira-style input used by
+// composition tests without duplicating security-sensitive routing fields.
+func validMatchedInput(metadataKey string) *ResourceInputConfig {
+	return &ResourceInputConfig{
+		Fields:          []ResourceInputField{{Name: "subdomain", Required: true, Pattern: `^[a-z0-9-]+$`}},
+		BaseURLTemplate: "https://{subdomain}.atlassian.net", ResourceType: "jira_site",
+		AllowedHosts: []string{"*.atlassian.net"}, DiscoveryMatch: &ResourceInputDiscoveryMatch{MetadataKey: metadataKey},
+	}
+}
 
 func TestValidateCanonicalProfile(t *testing.T) {
 	profile := validProfile()

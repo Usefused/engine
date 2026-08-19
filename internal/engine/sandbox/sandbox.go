@@ -76,6 +76,16 @@ var globalDispatcher *engine.Dispatcher
 var globalTokenValidator auth.TokenValidator
 var globalSecretResolver SecretResolver
 
+// SetSecretResolver replaces the process-wide resolver used by every physical
+// execution path and returns the prior value for bounded fixture restoration.
+// Startup and integrations use this boundary so direct and Unified calls cannot
+// accidentally resolve credentials differently.
+func SetSecretResolver(resolver SecretResolver) SecretResolver {
+	previous := globalSecretResolver
+	globalSecretResolver = resolver
+	return previous
+}
+
 // globalEnginePort is this process's own HTTP port, handed to shared-runtime
 // sessions (as FUSED_ENGINE_PORT, see mcp.go buildMCPCommand) so their
 // call() implementation knows where to reach POST /mcp/call. It is not
@@ -154,7 +164,7 @@ func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, 
 		globalDispatcher = engine.NewDispatcherWithProviderRateLimits(rateLimits)
 	}
 	globalTokenValidator = validator
-	globalSecretResolver = resolver
+	SetSecretResolver(resolver)
 	globalEnginePort = enginePort
 
 	// Initialise rate limiters from config.
@@ -269,58 +279,8 @@ func engineExecuteCore(
 		return err
 	}
 	auditState.match = match
-	ctx, cancelExecution, executionTimeoutMs := contextWithExecutionPolicyTimeout(ctx, match.service.TimeoutMs, span)
-	defer cancelExecution()
-	defer func() {
-		err = normalizeExecutionTimeout(ctx, err, executionTimeoutMs)
-	}()
-
-	// 3. Map the resolved Fused endpoint to dispatcher inputs, then execute. The
-	//    dispatcher applies auth from credentials and streams the response
-	//    (SSE/pagination) back through stream.
-	if dispatcher == nil {
-		span.SetStatus(codes.Error, "dispatcher not initialized")
-		return fmt.Errorf("engine dispatcher not initialized")
-	}
-	headersStarted := time.Now()
-	params = paramsWithExecutionHeaders(params, idempotencyKeyFromContext(ctx), requestBodyHashFromContext(ctx))
-	engine.MeasureExecutionTiming(ctx, "execution_headers_inject", headersStarted)
-	objectMapStarted := time.Now()
-	obj := fusedToIntegrationObject(match.service, match.endpoint)
-	engine.MeasureExecutionTiming(ctx, "integration_object_map", objectMapStarted)
-
-	// Idempotency cache-and-replay lives in idempotency_cache.go, split into two
-	// steps (separation of concerns: "can we skip the vendor" vs "how do we
-	// dispatch and remember the result" are different decisions with different
-	// failure modes). A cache hit fully handles the response and this function
-	// returns immediately; a lookup error (e.g. the key was reused with a
-	// different body) fails the request without ever reaching the vendor.
-	if replayed, replayErr := tryReplayFromIdempotencyCache(ctx, span, identity.AppID, obj, stream, &auditState); replayErr != nil {
-		return replayErr
-	} else if replayed {
-		engine.MeasureExecutionTiming(ctx, "engine_resolution_total", resolutionStarted)
-		return nil
-	}
-
-	// 4. Resolve Secrets (Workspace Defaults / SDK Overrides)
-	credentials = withConnectedResourceRequirement(credentials, match.service.ConnectConfig)
-	credentials, bucketVals, err := resolveMatchedExecutionCredentials(ctx, match, obj, identity.AppID, identity.AccountID, credentials)
-	if err != nil {
-		return err
-	}
-	ctx, err = contextWithProviderRateLimitIdentity(ctx, identity.AccountID, credentials)
-	if err != nil {
-		return err
-	}
-
-	engine.MeasureExecutionTiming(ctx, "engine_resolution_total", resolutionStarted)
-
-	var runtimeResolution RuntimeEnvironmentResolution
-	runtimeResolution, auditState.providerHTTPStatus, err = dispatchAndCache(ctx, dispatcher, match, obj, params, credentials, bucketVals, environment, stream, span, identity.AppID)
-	auditState.selectedEnvironment = runtimeResolution.Environment
-	auditState.environmentSource = runtimeResolution.Source
-	auditState.providerHost = providerHost(runtimeResolution.BaseURL)
-	return finishExecutionDispatch(ctx, span, auditState.providerHTTPStatus, executionTimeoutMs, err)
+	request := PhysicalExecutionRequest{Params: params, Credentials: credentials, Environment: environment}
+	return executeResolvedProviderOperation(ctx, dispatcher, identity, match, request, stream, span, &auditState, resolutionStarted)
 }
 
 func resolveExecutionContractScopedEndpoint(ctx context.Context, cache ObjectCache, span trace.Span, appID, endpointName string) (*scopedEndpoint, error) {
@@ -403,21 +363,28 @@ func optionalResolvedCredentialUUID(credentials map[string]any, key string) (uui
 	return id, nil
 }
 
+// resolveTrackedExecutionIdentity resolves tracked execution identity from immutable app scope before provider dispatch.
 func resolveTrackedExecutionIdentity(ctx context.Context, validator auth.TokenValidator, appID, token string, span trace.Span) (auth.RuntimeIdentity, func(), error) {
 	identity, err := resolveExecutionIdentity(ctx, validator, appID, token)
 	if err != nil {
 		return auth.RuntimeIdentity{}, func() {}, err
 	}
+	decrement, err := trackAuthenticatedExecution(identity, span)
+	return identity, decrement, err
+}
+
+// trackAuthenticatedExecution charges the authenticated account concurrency counter and rolls it back on denial.
+func trackAuthenticatedExecution(identity auth.RuntimeIdentity, span trace.Span) (func(), error) {
 	if identity.AccountID == uuid.Nil {
-		return identity, func() {}, nil
+		return func() {}, nil
 	}
 	current, decrement := trackExecutionStart(identity.AccountID)
 	limitErr := entitlement.CheckLimit(span, "sandbox_concurrency", current-1, entitlement.LiveEntitlement.Load().MaxSandboxConcurrency)
 	if limitErr != nil {
 		decrement()
-		return auth.RuntimeIdentity{}, func() {}, limitErr
+		return func() {}, limitErr
 	}
-	return identity, decrement, nil
+	return decrement, nil
 }
 
 func resolveMatchedExecutionCredentials(ctx context.Context, match *scopedEndpoint, obj *models.IntegrationObject, appID, accountID uuid.UUID, credentials map[string]any) (map[string]any, []store.BucketValue, error) {

@@ -23,10 +23,11 @@ import (
 
 type EngineGRPCServer struct {
 	enginev1.UnimplementedEngineServiceServer
-	runtime   *sandbox.EngineGRPCServer
-	store     store.Store
-	verifier  ServiceVerifier
-	masterKey []byte
+	runtime        *sandbox.EngineGRPCServer
+	unifiedRuntime unifiedPhysicalRuntime
+	store          store.Store
+	verifier       ServiceVerifier
+	masterKey      []byte
 	// configStore and natsClient are only needed by SubscribeWebhooks
 	// (webhook_grpc_handler.go) -- resolving a connecting SDK/MCP's
 	// webhook_attachment label and bridging to the NATS JetStream durable
@@ -39,8 +40,10 @@ type EngineGRPCServer struct {
 // NewEngineGRPCServer requires the process-shared validator so SDK execution,
 // MCP execution, and revocation can never accidentally use separate caches.
 func NewEngineGRPCServer(s store.Store, verifier ServiceVerifier, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient, tokenValidator auth.TokenValidator) *EngineGRPCServer {
+	runtime := sandbox.NewEngineGRPCServer()
 	return &EngineGRPCServer{
-		runtime:        sandbox.NewEngineGRPCServer(),
+		runtime:        runtime,
+		unifiedRuntime: runtime,
 		store:          s,
 		verifier:       verifier,
 		masterKey:      masterKey,
@@ -80,6 +83,9 @@ func (s *EngineGRPCServer) Execute(req *enginev1.ExecuteRequest, stream enginev1
 func (s *EngineGRPCServer) StartConnectSession(ctx context.Context, req *enginev1.StartConnectSessionRequest) (*enginev1.StartConnectSessionResponse, error) {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.grpc.connect_session.start")
 	defer span.End()
+	// Early authentication and validation exits retain a bounded audit outcome;
+	// successful persistence replaces it through the shared start projection.
+	span.SetAttributes(attribute.String("outcome", "failed"))
 
 	call, appID, err := s.authenticatedConnectCallFromGRPC(ctx, req.GetBucketId(), req.GetServiceId())
 	if err != nil {
@@ -108,7 +114,7 @@ func (s *EngineGRPCServer) StartConnectSession(ctx context.Context, req *enginev
 	if err != nil {
 		return nil, grpcConnectError(err)
 	}
-	span.SetAttributes(append(connectAdminAttrs("connect.session.start", call), attribute.String("outcome", "success"), attribute.Int("scope_count", len(response.Scopes)))...)
+	span.SetAttributes(append(connectAdminAttrs("connect.session.start", call), connectSessionStartTelemetry(response)...)...)
 	return &enginev1.StartConnectSessionResponse{
 		AuthorizeUrl: response.AuthorizeURL,
 		ExpiresAt:    formatProtoTime(response.ExpiresAt),
@@ -188,19 +194,25 @@ func (s *EngineGRPCServer) authenticatedConnectCallFromGRPC(ctx context.Context,
 // authenticateAppFromGRPC deliberately avoids control credentials: SDK
 // runtime identity is the exact app ID plus a token issued for its family.
 func (s *EngineGRPCServer) authenticateAppFromGRPC(ctx context.Context) (*store.AppRuntime, error) {
+	scope, _, err := s.authenticatedAppRuntimeFromGRPC(ctx)
+	return scope, err
+}
+
+// authenticatedAppRuntimeFromGRPC returns the immutable app scope and validated token identity from one authentication pass.
+func (s *EngineGRPCServer) authenticatedAppRuntimeFromGRPC(ctx context.Context) (*store.AppRuntime, auth.RuntimeIdentity, error) {
 	appID, err := uuid.Parse(strings.TrimSpace(grpcAppID(ctx)))
 	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, "app authentication is required")
+		return nil, auth.RuntimeIdentity{}, status.Error(codes.Unauthenticated, "app authentication is required")
 	}
 	identity, err := s.tokenValidator.Validate(ctx, appID, grpcAPIKey(ctx))
 	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, "app authentication failed")
+		return nil, auth.RuntimeIdentity{}, status.Error(codes.Unauthenticated, "app authentication failed")
 	}
 	scope, err := s.store.GetAppRuntime(ctx, appID)
-	if err != nil || scope.AccountID != identity.AccountID || scope.AppID != appID || scope.BucketID == uuid.Nil {
-		return nil, status.Error(codes.PermissionDenied, "app scope is unavailable")
+	if err != nil || scope == nil || scope.AccountID != identity.AccountID || scope.AppID != identity.AppID || scope.AppID != appID || scope.BucketID == uuid.Nil {
+		return nil, auth.RuntimeIdentity{}, status.Error(codes.PermissionDenied, "app scope is unavailable")
 	}
-	return scope, nil
+	return scope, identity, nil
 }
 
 func appRuntimeSelectsService(raw []byte, serviceID uuid.UUID) bool {

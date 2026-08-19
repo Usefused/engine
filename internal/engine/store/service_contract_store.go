@@ -74,6 +74,12 @@ type ServiceContractEndpointSelection struct {
 	ServiceVersionID uuid.UUID   `json:"service_version_id"`
 	SelectAll        bool        `json:"select_all"`
 	EndpointIDs      []uuid.UUID `json:"endpoint_ids"`
+	OperationNames   []string    `json:"operation_names,omitempty"`
+	// EndpointNames narrows this selection independently from every other
+	// selection in the batch. Unified bindings need this because two services
+	// may expose the same operationId without admitting either service's other
+	// selected operations into the result set.
+	EndpointNames []string `json:"endpoint_names,omitempty"`
 }
 
 // ServiceContractEndpointMatch contains only rows already intersected by the
@@ -385,6 +391,7 @@ func (s *postgresStore) ListServiceContractEndpointsByNames(ctx context.Context,
 	)
 }
 
+// ListServiceContractEndpointsForSelections returns exact service contract endpoints for selections through one app-scoped query or cache lookup.
 func (s *postgresStore) ListServiceContractEndpointsForSelections(ctx context.Context, selections []ServiceContractEndpointSelection, endpointNames []string) ([]ServiceContractEndpointMatch, error) {
 	if len(selections) == 0 {
 		return nil, nil
@@ -400,7 +407,11 @@ func (s *postgresStore) ListServiceContractEndpointsForSelections(ctx context.Co
 			       (item->>'service_version_id')::uuid AS service_version_id,
 			       COALESCE((item->>'select_all')::boolean, false) AS select_all,
 			       CASE WHEN jsonb_typeof(item->'endpoint_ids') = 'array'
-			            THEN item->'endpoint_ids' ELSE '[]'::jsonb END AS endpoint_ids
+			            THEN item->'endpoint_ids' ELSE '[]'::jsonb END AS endpoint_ids,
+			       CASE WHEN jsonb_typeof(item->'operation_names') = 'array'
+			            THEN item->'operation_names' ELSE '[]'::jsonb END AS operation_names,
+			       CASE WHEN jsonb_typeof(item->'endpoint_names') = 'array'
+			            THEN item->'endpoint_names' ELSE '[]'::jsonb END AS endpoint_names
 			FROM jsonb_array_elements($1::jsonb) AS item
 		), resolved AS (
 			SELECT requested.*, snapshots.id AS snapshot_id
@@ -419,11 +430,24 @@ func (s *postgresStore) ListServiceContractEndpointsForSelections(ctx context.Co
 		  ON endpoints.snapshot_id = resolved.snapshot_id
 		 AND (COALESCE(cardinality($2::text[]), 0) = 0 OR endpoints.name = ANY($2::text[]))
 		 AND (
+		   jsonb_array_length(resolved.endpoint_names) = 0
+		   OR EXISTS (
+		     SELECT 1
+		     FROM jsonb_array_elements_text(resolved.endpoint_names) allowed(endpoint_name)
+		     WHERE allowed.endpoint_name = endpoints.name
+		   )
+		 )
+		 AND (
 		   resolved.select_all
 		   OR EXISTS (
 		     SELECT 1
 		     FROM jsonb_array_elements_text(resolved.endpoint_ids) allowed(endpoint_id)
 		     WHERE allowed.endpoint_id::uuid = endpoints.endpoint_id
+		   )
+		   OR EXISTS (
+		     SELECT 1
+		     FROM jsonb_array_elements_text(resolved.operation_names) allowed(operation_name)
+		     WHERE allowed.operation_name = endpoints.name
 		   )
 		 )
 		ORDER BY resolved.selection_index, endpoints.name`, payload, endpointNames)

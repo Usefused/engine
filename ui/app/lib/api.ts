@@ -106,6 +106,19 @@ export interface Account {
   updated_at: string;
 }
 
+export interface ConnectBrandingInput {
+  display_name: string;
+  logo_url: string;
+  primary_color: string;
+  support_url: string;
+  privacy_url: string;
+}
+
+export interface ConnectBranding extends ConnectBrandingInput {
+  created_at?: string;
+  updated_at?: string;
+}
+
 export interface CreditBundle {
   id: string;
   name: string;
@@ -858,6 +871,17 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ enabled, threshold, bundle_id: bundleId }),
     }),
+
+  connectBranding: {
+    // get loads the Engine-owned appearance used by hosted connection pages.
+    get: () => req<ConnectBranding>("/workspace/connect-branding"),
+    // update sends only editable branding fields and lets Engine authorization enforce workspace.update.
+    update: (input: ConnectBrandingInput) =>
+      req<ConnectBranding>("/workspace/connect-branding", {
+        method: "PUT",
+        body: JSON.stringify(input),
+      }),
+  },
 
   credits: {
     getPricing: () => req<CreditsPricing>("/credits/pricing"),

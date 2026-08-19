@@ -75,6 +75,22 @@ func TestEmbeddedUIMiddleware(t *testing.T) {
 			wantBody:   "next",
 		},
 		{
+			name:       "passes hosted connect input browser navigation through",
+			method:     http.MethodGet,
+			path:       "/workspace/connect/input?token=opaque",
+			accept:     "text/html,application/xhtml+xml",
+			wantStatus: http.StatusTeapot,
+			wantBody:   "next",
+		},
+		{
+			name:       "passes provider callback browser navigation through",
+			method:     http.MethodGet,
+			path:       "/workspace/connect/callback?state=opaque&code=value",
+			accept:     "text/html,application/xhtml+xml",
+			wantStatus: http.StatusTeapot,
+			wantBody:   "next",
+		},
+		{
 			name:       "passes writes through",
 			method:     http.MethodPost,
 			path:       "/integrations",

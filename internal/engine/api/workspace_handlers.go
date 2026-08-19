@@ -45,8 +45,7 @@ type ServiceVerifier interface {
 // It is mounted at /workspace in main.go and handles Engine-local workspace
 // membership — it is NOT a proxy to the Registry.
 //
-// Why separate from registerProxyRoutes: workspace membership lives in the
-// Engine's own DB. Proxying it to the Registry would
+// Workspace membership lives in the Engine's own DB. Proxying it to the Registry would
 // serve stale or wrong data; the Engine is the authoritative source here.
 func WorkspaceHandler(s store.Store, verifier ServiceVerifier, masterKey []byte, tokenRevoker AppTokenRevoker) http.Handler {
 	r := chi.NewRouter()
@@ -56,6 +55,8 @@ func WorkspaceHandler(s store.Store, verifier ServiceVerifier, masterKey []byte,
 
 	r.Post("/buckets", CreateBucketHandler(s))
 	r.Delete("/buckets/{name}", DeleteBucketHandler(s))
+	r.Get("/connect-branding", GetConnectBrandingHandler(s))
+	r.Put("/connect-branding", UpsertConnectBrandingHandler(s))
 
 	r.Put("/buckets/{id}/values", UpsertBucketValueHandler(s))
 	r.Delete("/buckets/{id}/values", DeleteBucketValueHandler(s))
@@ -63,6 +64,10 @@ func WorkspaceHandler(s store.Store, verifier ServiceVerifier, masterKey []byte,
 	r.Put("/buckets/{bucket_id}/services/{service_id}/connect-config", UpsertConnectConfigHandler(s, masterKey))
 	r.Get("/buckets/{bucket_id}/services/{service_id}/connect-config", GetConnectConfigHandler(s))
 	r.Post("/buckets/{bucket_id}/services/{service_id}/connect/sessions", StartConnectSessionHandler(s, verifier, masterKey))
+	// These token-authenticated browser routes stay beside the provider callback
+	// because they are runtime handoffs, not control-plane form mutations.
+	r.Get("/connect/input", ConnectInputPageHandler(s, verifier, masterKey))
+	r.Post("/connect/input", ConnectInputSubmitHandler(s, verifier, masterKey))
 	r.Delete("/buckets/{bucket_id}/auth/connections/{connection_id}", DeleteAuthConnectionHandler(s))
 	r.Get("/connect/callback", ConnectCallbackHandler(s, verifier, masterKey))
 
