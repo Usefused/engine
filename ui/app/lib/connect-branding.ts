@@ -3,7 +3,7 @@ import type { ConnectBranding, ConnectBrandingInput } from "./api";
 export type ConnectBrandingField = keyof ConnectBrandingInput;
 export type ConnectBrandingErrors = Partial<Record<ConnectBrandingField, string>>;
 // The default follows the Engine UI's canonical --brand-violet token.
-export const DEFAULT_CONNECT_BRANDING_PRIMARY_COLOR = "#2563eb";
+export const DEFAULT_CONNECT_BRANDING_PRIMARY_COLOR = "#6941ff";
 
 export interface ConnectBrandingConfirmationSummary {
   displayNameChanged: boolean;

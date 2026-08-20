@@ -336,11 +336,24 @@ func TestCallbackFallbackUsesBrandingForSuccessAndFailure(t *testing.T) {
 	} {
 		response := httptest.NewRecorder()
 		writeConnectCallbackFallback(context.Background(), testStore, response, http.StatusOK, "Browser message", test.failed)
-		if !strings.Contains(response.Body.String(), test.want) || !strings.Contains(response.Body.String(), "Acme") {
+		if !strings.Contains(response.Body.String(), test.want) || !strings.Contains(response.Body.String(), "Acme") || !strings.Contains(response.Body.String(), "#123456") {
 			t.Fatalf("callback page failed=%v body=%s", test.failed, response.Body.String())
 		}
 		if !strings.Contains(response.Header().Get("Content-Security-Policy"), "img-src 'self' https://assets.example.com") {
 			t.Fatalf("callback CSP failed=%v: %s", test.failed, response.Header().Get("Content-Security-Policy"))
 		}
+	}
+}
+
+// TestCallbackFallbackUsesCanonicalEngineViolet locks the compiled completion
+// accent to the same primary token used by the embedded Engine UI.
+func TestCallbackFallbackUsesCanonicalEngineViolet(t *testing.T) {
+	testStore := &connectBrandingTestStore{branding: store.DefaultConnectBranding()}
+	response := httptest.NewRecorder()
+	writeConnectCallbackFallback(context.Background(), testStore, response, http.StatusOK, "Browser message", false)
+	body := response.Body.String()
+	want := "background-color:" + store.DefaultConnectBrandingPrimaryColor
+	if !strings.Contains(body, want) {
+		t.Fatalf("callback completion accent did not use Engine violet: %s", body)
 	}
 }

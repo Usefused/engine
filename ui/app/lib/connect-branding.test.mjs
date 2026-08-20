@@ -24,9 +24,10 @@ const cardSource = readFileSync(
   new URL("../components/settings/ConnectBrandingCard.tsx", import.meta.url),
   "utf8",
 );
+const tailwindSource = readFileSync(new URL("../tailwind.css", import.meta.url), "utf8");
 
 test("provides a controlled form with a valid fallback colour", () => {
-  assert.equal(DEFAULT_CONNECT_BRANDING_PRIMARY_COLOR, "#2563eb");
+  assert.equal(DEFAULT_CONNECT_BRANDING_PRIMARY_COLOR, "#6941ff");
   assert.deepEqual(emptyConnectBrandingInput(), {
     display_name: "",
     logo_url: "",
@@ -63,7 +64,7 @@ test("confirmation summaries contain only change and presence facts", () => {
   const current = {
     display_name: "Fused",
     logo_url: "",
-    primary_color: "#2563eb",
+    primary_color: DEFAULT_CONNECT_BRANDING_PRIMARY_COLOR,
     support_url: "https://example.com/help",
     privacy_url: "",
   };
@@ -130,7 +131,7 @@ test("rejects unsafe logo sources, credentials, and malformed colours", () => {
     "https://assets.example/logo.png",
   );
   assert.equal(connectBrandingPreviewName("  "), "Your app");
-  assert.equal(safePrimaryColour("red"), "#2563eb");
+  assert.equal(safePrimaryColour("red"), DEFAULT_CONNECT_BRANDING_PRIMARY_COLOR);
   assert.equal(safePrimaryColour("#112233"), "#112233");
 });
 
@@ -138,7 +139,7 @@ test("matches Engine display-name rune and control-character limits", () => {
   const valid = {
     display_name: "😀".repeat(100),
     logo_url: "",
-    primary_color: "#2563eb",
+    primary_color: DEFAULT_CONNECT_BRANDING_PRIMARY_COLOR,
     support_url: "",
     privacy_url: "",
   };
@@ -173,7 +174,7 @@ test("rejects URL control, length, host, and port edge cases locally", () => {
     const errors = validateConnectBrandingInput({
       display_name: "Fused",
       logo_url,
-      primary_color: "#2563eb",
+      primary_color: DEFAULT_CONNECT_BRANDING_PRIMARY_COLOR,
       support_url: "",
       privacy_url: "",
     });
@@ -185,7 +186,7 @@ test("rejects URL control, length, host, and port edge cases locally", () => {
     validateConnectBrandingInput({
       display_name: "Fused",
       logo_url: "https://xn--xample-9ua.com/logo.png",
-      primary_color: "#2563eb",
+      primary_color: DEFAULT_CONNECT_BRANDING_PRIMARY_COLOR,
       support_url: "",
       privacy_url: "",
     }).logo_url,
@@ -195,7 +196,7 @@ test("rejects URL control, length, host, and port edge cases locally", () => {
     validateConnectBrandingInput({
       display_name: "Fused",
       logo_url: "HTTPS://example.com/logo%20file.png?version=a%20b",
-      primary_color: "#2563eb",
+      primary_color: DEFAULT_CONNECT_BRANDING_PRIMARY_COLOR,
       support_url: "",
       privacy_url: "",
     }).logo_url,
@@ -209,6 +210,16 @@ test("settings uses the Engine branding endpoint and a non-referring image previ
   assert.match(settingsSource, /<ConnectBrandingCard \/>/);
   assert.match(cardSource, /referrerPolicy="no-referrer"/);
   assert.doesNotMatch(cardSource, /dangerouslySetInnerHTML/);
+});
+
+// The hosted fallback and embedded chrome must use one canonical accent family.
+test("matches the Engine violet design tokens", () => {
+  const primaryToken = /--brand-violet:\s*(#[0-9a-f]{6})/.exec(tailwindSource)?.[1];
+  assert.equal(primaryToken, DEFAULT_CONNECT_BRANDING_PRIMARY_COLOR);
+  assert.equal(primaryToken, "#6941ff");
+  assert.match(tailwindSource, /--brand-violet-hover:\s*#4f2bd4/);
+  assert.match(tailwindSource, /--brand-violet-tint:\s*#eee9ff/);
+  assert.doesNotMatch(tailwindSource, /--brand-violet:\s*#2563eb/);
 });
 
 // This source contract keeps PUT behind confirmation and prevents confirmation markup from reading raw draft URLs.
