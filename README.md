@@ -121,7 +121,7 @@ precedence is `--license-key`, local `.env`, `engine.yaml`, then the inherited
 `FUSED_LICENSE_KEY` environment variable. `FUSED_API_KEY` is a caller
 control-plane credential and is never used to start the Engine.
 
-For audit details, see [Registry contract](docs/registry-contract.md), [license key behavior](docs/license-key.md), [telemetry](docs/telemetry.md), [Docker](docs/docker.md), and [threat model](THREAT_MODEL.md).
+For API and audit details, see [REST app execution and per-version OpenAPI export](docs/app-execution-rest.md), [Registry contract](docs/registry-contract.md), [license key behavior](docs/license-key.md), [telemetry](docs/telemetry.md), [Docker](docs/docker.md), and [threat model](THREAT_MODEL.md).
 
 ### Essential Environment Variables
 

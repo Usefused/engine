@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import type { MetaFunction } from "@remix-run/react";
-import { UserPlus, Users } from "lucide-react";
+import { UserPlus, Users, X } from "lucide-react";
 import { useToast } from "~/components/Toast";
 import { PersonalCredentialPanel } from "~/components/access/PersonalCredentialPanel";
 import { WorkspacePermissionGate, useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
@@ -25,6 +25,9 @@ import {
 } from "~/lib/people";
 
 export const meta: MetaFunction = () => [{ title: "People - Fused" }];
+
+type PersonEditorProps = { user: User | null; email: string; name: string; saving: boolean; issued: IssuedCredentialPayload | null; canManage: boolean; ownerProtected: boolean; currentSubjectId: string; onEmail: (value: string) => void; onName: (value: string) => void; onUpdate: (event: FormEvent) => void; onStatus: () => void; onIssue: (name: string) => void; onRevoke: (id: string) => void; onClearSecret: () => void };
+type PersonDetailsDrawerProps = PersonEditorProps & { onClose: () => void };
 
 export default function PeoplePage() {
 	const { access } = useCurrentActorAccess();
@@ -60,6 +63,8 @@ function PeopleManager({ canManage, canManageOwners }: { canManage: boolean; can
     const page = await listUsers(appliedSearch, includeSuspended);
     setUsers(page.items);
     setUserTotal(page.total);
+    // A selection survives refreshes only while its person remains visible;
+    // the list otherwise stays full-width until someone explicitly opens it.
     setSelectedId((current) => selectAvailableUser(page.items, preferredId || current));
   }, [appliedSearch, includeSuspended]);
 
@@ -70,6 +75,9 @@ function PeopleManager({ canManage, canManageOwners }: { canManage: boolean; can
       setSelectedOwnerProtected(false);
       return;
     }
+	// Clear the prior record before loading another selection so the drawer
+	// never presents one person's controls under another person's row state.
+	setSelected(null);
 	// Fail closed while the target's protected status is being resolved. The
 	// server enforces this too; the UI avoids presenting controls that will fail.
 	setSelectedOwnerProtected(true);
@@ -167,10 +175,8 @@ function PeopleManager({ canManage, canManageOwners }: { canManage: boolean; can
   return <div className="space-y-6">
     <header><p className="text-sm font-medium text-blue-600">Access</p><h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2"><Users className="w-6 h-6" /> People</h1><p className="text-slate-500 mt-1">Add people, manage their status, and create personal sign-in keys.</p></header>
     {canManage && <AddPersonForm email={newEmail} name={newName} saving={saving} onEmail={setNewEmail} onName={setNewName} onSubmit={handleCreate} />}
-    <div className={`grid gap-6 ${selected ? "lg:grid-cols-[300px_1fr]" : ""}`}>
-      <PeopleList users={users} total={userTotal} search={search} selectedId={selectedId} loading={loading} includeSuspended={includeSuspended} onSearch={setSearch} onApplySearch={() => setAppliedSearch(search.trim())} onIncludeSuspended={setIncludeSuspended} onSelect={setSelectedId} />
-      {selected && <PersonEditor user={selected} email={editEmail} name={editName} saving={saving} issued={issued} canManage={canManage && (canManageOwners || !selectedOwnerProtected)} ownerProtected={selectedOwnerProtected && !canManageOwners} currentSubjectId={currentSubjectId} onEmail={setEditEmail} onName={setEditName} onUpdate={handleUpdate} onStatus={handleStatus} onIssue={handleIssue} onRevoke={handleRevoke} onClearSecret={() => setIssued(null)} />}
-    </div>
+    <PeopleList users={users} total={userTotal} search={search} selectedId={selectedId} loading={loading} includeSuspended={includeSuspended} onSearch={setSearch} onApplySearch={() => setAppliedSearch(search.trim())} onIncludeSuspended={setIncludeSuspended} onSelect={setSelectedId} />
+    {selectedId && <PersonDetailsDrawer user={selected} email={editEmail} name={editName} saving={saving} issued={issued} canManage={canManage && (canManageOwners || !selectedOwnerProtected)} ownerProtected={selectedOwnerProtected && !canManageOwners} currentSubjectId={currentSubjectId} onClose={() => setSelectedId("")} onEmail={setEditEmail} onName={setEditName} onUpdate={handleUpdate} onStatus={handleStatus} onIssue={handleIssue} onRevoke={handleRevoke} onClearSecret={() => setIssued(null)} />}
   </div>;
 }
 
@@ -192,15 +198,55 @@ function AddPersonForm(props: { email: string; name: string; saving: boolean; on
   </section>;
 }
 
+// PeopleList uses the available content width so identity fields remain easy
+// to scan before a row opens its independent detail surface.
 function PeopleList(props: { users: UserSummary[]; total: number; search: string; selectedId: string; loading: boolean; includeSuspended: boolean; onSearch: (value: string) => void; onApplySearch: () => void; onIncludeSuspended: (value: boolean) => void; onSelect: (id: string) => void }) {
-  return <section className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden"><div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between"><h2 className="font-semibold text-slate-900">People</h2><label className="text-xs text-slate-500 flex items-center gap-1.5"><input type="checkbox" checked={props.includeSuspended} onChange={(event) => props.onIncludeSuspended(event.target.checked)} /> Suspended</label></div><form onSubmit={(event) => { event.preventDefault(); props.onApplySearch(); }} className="flex gap-2 border-b border-slate-100 p-3"><input type="search" value={props.search} onChange={(event) => props.onSearch(event.target.value)} placeholder="Search people" aria-label="Search people" className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm" /><button type="submit" className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700">Search</button></form>{!props.loading && props.total > props.users.length && <p className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900" role="status">Showing {props.users.length} of {props.total} people. Search by name or email to find someone outside this list.</p>}<div className="divide-y divide-slate-100">{props.loading && <p className="p-4 text-sm text-slate-500">Loading people…</p>}{!props.loading && props.users.length === 0 && <p className="p-4 text-sm text-slate-500">No people found.</p>}{props.users.map((user) => <button key={user.id} type="button" onClick={() => props.onSelect(user.id)} className={`w-full text-left px-4 py-3 ${user.id === props.selectedId ? "bg-blue-50 text-blue-800" : "hover:bg-slate-50 text-slate-700"}`}><span className="block text-sm font-medium truncate">{user.display_name}</span><span className="block text-xs text-slate-500 truncate mt-0.5">{user.email} · {statusLabel(user.status)}</span></button>)}</div></section>;
+  return <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+    <div className="flex flex-col gap-3 border-b border-slate-200 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+      <div><h2 className="font-semibold text-slate-900">People</h2><p className="mt-0.5 text-xs text-slate-500">{props.total} {props.total === 1 ? "person" : "people"}</p></div>
+      <label className="flex items-center gap-1.5 text-xs text-slate-500"><input type="checkbox" checked={props.includeSuspended} onChange={(event) => props.onIncludeSuspended(event.target.checked)} /> Include suspended</label>
+    </div>
+    <form onSubmit={(event) => { event.preventDefault(); props.onApplySearch(); }} className="flex gap-2 border-b border-slate-100 p-4"><input type="search" value={props.search} onChange={(event) => props.onSearch(event.target.value)} placeholder="Search people" aria-label="Search people" className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm" /><button type="submit" className="rounded-lg border border-slate-300 px-4 py-2 text-xs font-semibold text-slate-700">Search</button></form>
+    {!props.loading && props.total > props.users.length && <p className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900" role="status">Showing {props.users.length} of {props.total} people. Search by name or email to find someone outside this list.</p>}
+    <div className="hidden grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto] gap-4 border-b border-slate-100 bg-slate-50 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500 sm:grid"><span>Name</span><span>Email</span><span>Status</span></div>
+    <div className="divide-y divide-slate-100">
+      {props.loading && <p className="p-4 text-sm text-slate-500">Loading people…</p>}
+      {!props.loading && props.users.length === 0 && <p className="p-4 text-sm text-slate-500">No people found.</p>}
+      {props.users.map((user) => <button key={user.id} type="button" onClick={() => props.onSelect(user.id)} aria-label={`Open details for ${user.display_name}`} className={`grid w-full gap-1 px-4 py-3 text-left transition-colors sm:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto] sm:items-center sm:gap-4 ${user.id === props.selectedId ? "bg-blue-50 text-blue-800" : "text-slate-700 hover:bg-slate-50"}`}><span className="truncate text-sm font-medium">{user.display_name}</span><span className="truncate text-xs text-slate-500 sm:text-sm">{user.email}</span><span className="text-xs font-medium text-slate-500">{statusLabel(user.status)}</span></button>)}
+    </div>
+  </section>;
 }
 
-function PersonEditor(props: { user: User | null; email: string; name: string; saving: boolean; issued: IssuedCredentialPayload | null; canManage: boolean; ownerProtected: boolean; currentSubjectId: string; onEmail: (value: string) => void; onName: (value: string) => void; onUpdate: (event: FormEvent) => void; onStatus: () => void; onIssue: (name: string) => void; onRevoke: (id: string) => void; onClearSecret: () => void }) {
-  if (!props.user) return <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm"><p className="text-sm text-slate-500">Select a person to manage them.</p></section>;
+// PersonDetailsDrawer keeps the list available at full width and reveals one
+// person's controls only after an explicit row selection.
+function PersonDetailsDrawer(props: PersonDetailsDrawerProps) {
+  return <>
+    <div className="fixed inset-0 z-40 bg-slate-900/20 transition-opacity" onClick={props.onClose} />
+    <aside role="dialog" aria-modal="true" aria-labelledby="person-details-title" className="fixed inset-y-0 right-0 z-50 flex w-full flex-col overflow-y-auto overflow-x-hidden border-l border-slate-200 bg-white shadow-2xl md:w-[calc(100vw-4rem)] md:max-w-[940px] xl:max-w-[1080px]">
+      <div className="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-slate-100 bg-white/90 px-5 py-4 backdrop-blur sm:px-6">
+        <div><h2 id="person-details-title" className="text-lg font-semibold text-slate-900">Person details</h2><p className="mt-0.5 text-xs text-slate-500">Manage profile, teams, and personal keys.</p></div>
+        <button type="button" onClick={props.onClose} aria-label="Close person details" className="rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"><X className="h-5 w-5" /></button>
+      </div>
+      <div className="p-5 sm:p-6">
+        {props.user ? <PersonEditor {...props} /> : <p className="text-sm text-slate-500" role="status">Loading person details…</p>}
+      </div>
+    </aside>
+  </>;
+}
+
+// PersonEditor keeps the sections in one vertical flow so the wide drawer
+// never requires sideways scrolling or hides controls behind navigation.
+function PersonEditor(props: PersonEditorProps) {
+  if (!props.user) return null;
   const archived = props.user.status === "ARCHIVED";
   const isSelf = props.user.id === props.currentSubjectId;
-  return <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-6"><PersonEditorHeader user={props.user} canManage={props.canManage} saving={props.saving} archived={archived} isSelf={isSelf} onStatus={props.onStatus} />{!props.canManage && <p className="text-xs text-slate-500" role="status">{props.ownerProtected ? "Only a workspace Owner can change this person." : "You have read-only access to people."}</p>}<PersonDetailsForm email={props.email} name={props.name} canManage={props.canManage} saving={props.saving} archived={archived} onEmail={props.onEmail} onName={props.onName} onUpdate={props.onUpdate} /><MembershipSummary memberships={props.user.memberships} truncated={props.user.memberships_truncated} /><PersonalCredentialPanel credentials={props.user.credentials} truncated={props.user.credentials_truncated} issuedSecret={props.issued?.secret ?? null} disabled={!props.canManage || props.saving || archived} onIssue={props.onIssue} onRevoke={props.onRevoke} onClearSecret={props.onClearSecret} /></section>;
+  return <div className="space-y-6">
+    <PersonEditorHeader user={props.user} canManage={props.canManage} saving={props.saving} archived={archived} isSelf={isSelf} onStatus={props.onStatus} />
+    {!props.canManage && <p className="text-xs text-slate-500" role="status">{props.ownerProtected ? "Only a workspace Owner can change this person." : "You have read-only access to people."}</p>}
+    <PersonDetailsForm email={props.email} name={props.name} canManage={props.canManage} saving={props.saving} archived={archived} onEmail={props.onEmail} onName={props.onName} onUpdate={props.onUpdate} />
+    <MembershipSummary memberships={props.user.memberships} truncated={props.user.memberships_truncated} />
+    <PersonalCredentialPanel credentials={props.user.credentials} truncated={props.user.credentials_truncated} issuedSecret={props.issued?.secret ?? null} disabled={!props.canManage || props.saving || archived} onIssue={props.onIssue} onRevoke={props.onRevoke} onClearSecret={props.onClearSecret} />
+  </div>;
 }
 
 function PersonEditorHeader({ user, canManage, saving, archived, isSelf, onStatus }: { user: User; canManage: boolean; saving: boolean; archived: boolean; isSelf: boolean; onStatus: () => void }) {
@@ -226,8 +272,10 @@ function MembershipSummary({ memberships, truncated }: { memberships: User["memb
 }
 
 function selectAvailableUser(users: UserSummary[], preferredId: string): string {
+  // Missing results close the drawer instead of silently opening the first
+  // person, preserving explicit user selection as the only open action.
   if (preferredId && users.some((user) => user.id === preferredId)) return preferredId;
-  return users[0]?.id ?? "";
+  return "";
 }
 
 function statusLabel(status: User["status"]): string {

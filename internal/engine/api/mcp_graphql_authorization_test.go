@@ -51,6 +51,8 @@ func TestGraphQLAppRequirementsResolveFamiliesInOneCall(t *testing.T) {
 	}
 }
 
+// TestMCPAnalyticsAuthorizationResolvesAppIDToFamily keeps both execution
+// permissions bound to the exact app family selected by the immutable app ID.
 func TestMCPAnalyticsAuthorizationResolvesAppIDToFamily(t *testing.T) {
 	appID, familyID, workspaceID := uuid.New(), uuid.New(), uuid.New()
 	baseStore := &workspaceTestStore{}
@@ -65,7 +67,7 @@ func TestMCPAnalyticsAuthorizationResolvesAppIDToFamily(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
-	if len(plan.apps) != 1 || plan.apps[0].appID != appID {
+	if len(plan.apps) != 2 || plan.apps[0].appID != appID || plan.apps[1].appID != appID {
 		t.Fatalf("app requirements = %#v, want exact app id %s", plan.apps, appID)
 	}
 
@@ -74,12 +76,17 @@ func TestMCPAnalyticsAuthorizationResolvesAppIDToFamily(t *testing.T) {
 		families:           map[uuid.UUID]uuid.UUID{appID: familyID},
 	}
 	requirements, err := (graphQLAuthorizationResources{store: resolverStore}).resolveApps(t.Context(), workspaceID, plan.apps)
-	want := accesscontrol.Requirement{
-		Permission: accesscontrol.PermissionAppRead,
-		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID},
+	want := map[accesscontrol.Permission]bool{
+		accesscontrol.PermissionAppRead:   true,
+		accesscontrol.PermissionAuditRead: true,
 	}
-	if err != nil || resolverStore.calls != 1 || len(requirements) != 1 || requirements[0] != want {
-		t.Fatalf("requirements/calls/error = %#v/%d/%v, want %#v/1/nil", requirements, resolverStore.calls, err, want)
+	if err != nil || resolverStore.calls != 1 || len(requirements) != len(want) {
+		t.Fatalf("requirements/calls/error = %#v/%d/%v, want two requirements/1/nil", requirements, resolverStore.calls, err)
+	}
+	for _, requirement := range requirements {
+		if !want[requirement.Permission] || requirement.Resource != (accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID}) {
+			t.Fatalf("unexpected resolved requirement: %#v", requirement)
+		}
 	}
 }
 
@@ -106,6 +113,62 @@ func TestWorkspaceExecutionAnalyticsRequiresAuditRead(t *testing.T) {
 	}
 	if s.workspaceExecutionCalls != 0 {
 		t.Fatalf("resolver calls = %d, want 0", s.workspaceExecutionCalls)
+	}
+}
+
+// TestWorkspaceNotificationsRequiresWorkspaceRead keeps notification discovery
+// separate from execution-audit visibility.
+func TestWorkspaceNotificationsRequiresWorkspaceRead(t *testing.T) {
+	workspaceID := uuid.New()
+	schema := authorizationTestSchema(t, &workspaceTestStore{})
+	handler := mcpGraphQLHandler(schema)
+	actor := actorWithWorkspacePermissions(t, workspaceID, accesscontrol.PermissionAuditRead)
+	request := httptest.NewRequest(http.MethodPost, "/engine/graphql", strings.NewReader(`{"query":"query { workspaceNotifications { total_count } }"}`))
+	request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), actor))
+	response := httptest.NewRecorder()
+
+	handler(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: %s", response.Code, response.Body.String())
+	}
+}
+
+// TestMCPAnalyticsRequiresAppAndAuditRead proves app visibility alone cannot
+// expose MCP execution history and that the complete capability set succeeds.
+func TestMCPAnalyticsRequiresAppAndAuditRead(t *testing.T) {
+	appID, familyID, workspaceID := uuid.New(), uuid.New(), uuid.New()
+	baseStore := &workspaceTestStore{}
+	schema := authorizationTestSchema(t, baseStore)
+	resolverStore := &appAccessResolverTestStore{
+		workspaceTestStore: baseStore,
+		families:           map[uuid.UUID]uuid.UUID{appID: familyID},
+	}
+	handler := mcpGraphQLHandler(schema, graphQLAuthorizationResources{store: resolverStore})
+	body := `{"query":"query { mcpAnalytics(app_id: \"` + appID.String() + `\") { total_requests } }"}`
+	appOnly := actorWithResourcePermissions(t, workspaceID, accesscontrol.Grant{
+		Permission: accesscontrol.PermissionAppRead,
+		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID},
+	})
+	request := httptest.NewRequest(http.MethodPost, "/engine/graphql", strings.NewReader(body))
+	request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), appOnly))
+	response := httptest.NewRecorder()
+
+	handler(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("app-only status = %d, want 403: %s", response.Code, response.Body.String())
+	}
+	complete := actorWithResourcePermissions(t, workspaceID,
+		accesscontrol.Grant{Permission: accesscontrol.PermissionAppRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID}},
+		accesscontrol.Grant{Permission: accesscontrol.PermissionAuditRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
+	)
+	request = httptest.NewRequest(http.MethodPost, "/engine/graphql", strings.NewReader(body))
+	request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), complete))
+	response = httptest.NewRecorder()
+	handler(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("complete status = %d, want 200: %s", response.Code, response.Body.String())
 	}
 }
 

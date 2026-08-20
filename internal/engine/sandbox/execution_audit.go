@@ -48,10 +48,20 @@ type executionAuditState struct {
 	idempotencyReplayed bool
 }
 
+// contextWithExecutionTransport attaches one server-owned low-cardinality
+// execution ingress label to every physical receipt emitted below it.
 func contextWithExecutionTransport(ctx context.Context, transport string) context.Context {
 	return context.WithValue(ctx, executionTransportContextKey{}, transport)
 }
 
+// ContextWithRESTExecutionTransport marks an in-process REST execution without
+// exposing the generic transport setter outside the sandbox package.
+func ContextWithRESTExecutionTransport(ctx context.Context) context.Context {
+	return contextWithExecutionTransport(ctx, models.EngineExecutionTransportREST)
+}
+
+// executionTransportFromContext defaults older in-process callers to SDK while
+// preserving explicit MCP and REST ingress labels.
 func executionTransportFromContext(ctx context.Context) string {
 	if transport, ok := ctx.Value(executionTransportContextKey{}).(string); ok && transport != "" {
 		return transport

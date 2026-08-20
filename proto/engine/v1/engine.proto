@@ -194,6 +194,14 @@ message AuthConnection {
   string refresh_state = 15;
   string created_at = 16;
   string updated_at = 17;
+  string service_version_id = 18;
+  string auth_name = 19;
+  string last_refresh_attempt_at = 20;
+  string last_refreshed_at = 21;
+  string refresh_retry_not_before = 22;
+  string last_failure_code = 23;
+  string last_failure_at = 24;
+  string last_failure_trace_id = 25;
 }
 
 message ListConnectionResourcesRequest {

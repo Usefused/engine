@@ -83,8 +83,8 @@ func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 	}
 
 	migrations := engineMigrations()
-	if len(migrations) != 7 {
-		t.Fatalf("Engine migration count = %d, want 7", len(migrations))
+	if len(migrations) != 9 {
+		t.Fatalf("Engine migration count = %d, want 9", len(migrations))
 	}
 	assertMigrationIdentity(t, migrations[0], engineMigrationVersion, engineMigrationName)
 	assertMigrationIdentity(t, migrations[1], appTokenPolicyMigrationVersion, appTokenPolicyMigrationName)
@@ -93,8 +93,27 @@ func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 	assertMigrationIdentity(t, migrations[4], connectBrandingMigrationVersion, connectBrandingMigrationName)
 	assertMigrationIdentity(t, migrations[5], connectBrandColorMigrationVersion, connectBrandColorMigrationName)
 	assertMigrationIdentity(t, migrations[6], connectBrandVioletMigrationVersion, connectBrandVioletMigrationName)
+	assertMigrationIdentity(t, migrations[7], managedOAuthRefreshMigrationVersion, managedOAuthRefreshMigrationName)
+	assertMigrationIdentity(t, migrations[8], restExecutionMigrationVersion, restExecutionMigrationName)
 	if engineMigrationLockQuery != "SELECT pg_advisory_xact_lock($1)" {
 		t.Fatalf("Engine migrations must use a transaction-scoped advisory lock, got %q", engineMigrationLockQuery)
+	}
+}
+
+// TestRESTExecutionTransportOwnsOnlyMigrationNine protects the immutable v1
+// receipt constraint while ensuring fresh and upgraded databases accept REST.
+func TestRESTExecutionTransportOwnsOnlyMigrationNine(t *testing.T) {
+	fresh := schemaQueryContaining(engineSchemaQueries(), "CREATE TABLE IF NOT EXISTS fused_engine_execution_events")
+	v1 := strings.Join(engineMigrationV1Queries(), "\n")
+	v9 := strings.Join(restExecutionMigrationQueries(), "\n")
+	if !strings.Contains(fresh, "('sdk', 'mcp', 'rest')") {
+		t.Fatal("fresh execution receipt constraint does not include REST")
+	}
+	if strings.Contains(v1, "'rest'") {
+		t.Fatal("immutable migration v1 was changed to include REST")
+	}
+	if !strings.Contains(v9, "('sdk', 'mcp', 'rest')") {
+		t.Fatal("migration v9 does not own REST receipt constraint widening")
 	}
 }
 
@@ -534,6 +553,13 @@ func TestEngineSchemaDefinesBucketAttachedConnectAuth(t *testing.T) {
 		"last_failure_code  text NOT NULL DEFAULT ''",
 		"last_failure_at    timestamptz",
 		"last_failure_trace_id text NOT NULL DEFAULT ''",
+		"service_version_id uuid",
+		"last_refresh_attempt_at timestamptz",
+		"last_refreshed_at  timestamptz",
+		"refresh_retry_not_before timestamptz",
+		"refresh_lease_token uuid",
+		"refresh_lease_expires_at timestamptz",
+		"chk_fused_auth_connections_refresh_lease",
 		"CREATE INDEX IF NOT EXISTS idx_fused_auth_connections_refresh",
 		"CREATE INDEX IF NOT EXISTS idx_fused_connect_sessions_expires",
 	}
@@ -541,6 +567,31 @@ func TestEngineSchemaDefinesBucketAttachedConnectAuth(t *testing.T) {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("expected bucket-attached Connect auth schema containing %q", expected)
 		}
+	}
+}
+
+// TestManagedOAuthRefreshMigrationPinsOnlyUnambiguousLegacyRows locks the
+// additive v8 schema and its fail-closed legacy service-version backfill.
+func TestManagedOAuthRefreshMigrationPinsOnlyUnambiguousLegacyRows(t *testing.T) {
+	joined := strings.Join(managedOAuthRefreshMigrationQueries(), "\n")
+	for _, expected := range []string{
+		"ADD COLUMN IF NOT EXISTS service_version_id uuid",
+		"HAVING COUNT(*) = 1",
+		"status <> 'deprecated'",
+		"last_refresh_attempt_at timestamptz",
+		"refresh_lease_token uuid",
+		"refresh_retry_not_before timestamptz",
+		"CHECK (service_version_id IS NOT NULL) NOT VALID",
+		"service_version_id IS NOT NULL",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("managed OAuth refresh migration missing %q", expected)
+		}
+	}
+	// Why: choosing MIN or latest without the count guard would silently bind a
+	// credential to one of several different provider token contracts.
+	if strings.Contains(joined, "ORDER BY enabled_at DESC") {
+		t.Fatal("legacy refresh backfill must not choose a latest version")
 	}
 }
 

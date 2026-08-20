@@ -25,7 +25,14 @@ type PhysicalExecutionRequest struct {
 	Environment     string
 	IdempotencyKey  string
 	RequestBodyHash string
+	// Transport is a server-owned ingress label. Public callers cannot set it;
+	// adapters use it to preserve REST across Unified child goroutines.
+	Transport string
 }
+
+// ErrPhysicalOperationNotAllowed is the stable pre-provider authorization
+// decision exposed to in-process transport adapters.
+var ErrPhysicalOperationNotAllowed = errors.New("ScopeError: operation not allowed by token")
 
 type physicalResultValidator func() error
 
@@ -103,11 +110,16 @@ func executeResolvedPhysicalBoundary(
 	return err
 }
 
-// preparePhysicalExecutionContext attaches replay identity, timings, and SDK transport to one physical child context.
+// preparePhysicalExecutionContext attaches replay identity, timings, and an
+// optional server-owned transport to one physical child context.
 func preparePhysicalExecutionContext(ctx context.Context, request PhysicalExecutionRequest) context.Context {
 	ctx = engine.ContextWithExecutionTimings(ctx, engine.NewExecutionTimings())
 	ctx = contextWithExecutionIdentity(ctx, request.IdempotencyKey, request.RequestBodyHash)
-	ctx = contextWithExecutionTransport(ctx, models.EngineExecutionTransportSDK)
+	// Empty transport preserves the historical SDK default. Explicit REST is
+	// carried on each child so scheduler goroutines cannot lose attribution.
+	if request.Transport != "" {
+		ctx = contextWithExecutionTransport(ctx, request.Transport)
+	}
 	return engine.ContextWithIdempotencyKeyPresent(ctx, strings.TrimSpace(request.IdempotencyKey) != "")
 }
 
@@ -142,7 +154,7 @@ func authorizePhysicalOperation(identity auth.RuntimeIdentity, endpointName stri
 		return nil
 	}
 	span.SetAttributes(attribute.String("authorization.outcome", "denied"))
-	err := errors.New("ScopeError: operation not allowed by token")
+	err := ErrPhysicalOperationNotAllowed
 	span.SetStatus(codes.Error, err.Error())
 	return err
 }

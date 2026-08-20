@@ -1386,6 +1386,7 @@ type MCPAnalyticsDashboard struct {
 const (
 	EngineExecutionTransportSDK     = "sdk"
 	EngineExecutionTransportMCP     = "mcp"
+	EngineExecutionTransportREST    = "rest"
 	EngineExecutionTransportWebhook = "webhook"
 
 	EngineExecutionDirectionOutbound = "outbound"
@@ -1400,18 +1401,23 @@ const (
 // compact so user-facing history and dependency checks do not depend on an
 // observability backend being configured.
 type EngineExecutionEvent struct {
-	ID                     uuid.UUID `json:"id" db:"id"`
-	TraceID                string    `json:"trace_id,omitempty" db:"trace_id"`
-	SpanID                 string    `json:"span_id,omitempty" db:"span_id"`
-	AccountID              uuid.UUID `json:"account_id,omitempty" db:"account_id"`
-	AppFamilyID            uuid.UUID `json:"app_family_id,omitempty" db:"app_family_id"`
-	AppID                  uuid.UUID `json:"app_id,omitempty" db:"app_id"`
-	AppVersion             string    `json:"app_version,omitempty" db:"app_version"`
-	Transport              string    `json:"transport" db:"transport"`
-	ProviderProtocol       string    `json:"provider_protocol,omitempty" db:"provider_protocol"`
-	Direction              string    `json:"direction" db:"direction"`
-	ServiceID              uuid.UUID `json:"service_id,omitempty" db:"service_id"`
-	ServiceVersionID       string    `json:"service_version_id" db:"service_version_id"`
+	ID               uuid.UUID `json:"id" db:"id"`
+	TraceID          string    `json:"trace_id,omitempty" db:"trace_id"`
+	SpanID           string    `json:"span_id,omitempty" db:"span_id"`
+	AccountID        uuid.UUID `json:"account_id,omitempty" db:"account_id"`
+	AppFamilyID      uuid.UUID `json:"app_family_id,omitempty" db:"app_family_id"`
+	AppID            uuid.UUID `json:"app_id,omitempty" db:"app_id"`
+	AppVersion       string    `json:"app_version,omitempty" db:"app_version"`
+	Transport        string    `json:"transport" db:"transport"`
+	ProviderProtocol string    `json:"provider_protocol,omitempty" db:"provider_protocol"`
+	Direction        string    `json:"direction" db:"direction"`
+	ServiceID        uuid.UUID `json:"service_id,omitempty" db:"service_id"`
+	ServiceVersionID string    `json:"service_version_id" db:"service_version_id"`
+	// Service display fields are query-time projections from the Engine-local
+	// workspace snapshot. They never expand the durable execution-event wire.
+	ServiceName            string    `json:"-" db:"-"`
+	ServiceSlug            string    `json:"-" db:"-"`
+	ServiceVersion         string    `json:"-" db:"-"`
 	OperationID            uuid.UUID `json:"operation_id,omitempty" db:"operation_id"`
 	WebhookID              uuid.UUID `json:"webhook_id,omitempty" db:"webhook_id"`
 	EndpointName           string    `json:"endpoint_name" db:"endpoint_name"`
@@ -1489,6 +1495,7 @@ type EngineExecutionBreakdown struct {
 	Key          string  `json:"key"`
 	Label        string  `json:"label"`
 	TotalCalls   int64   `json:"total_calls"`
+	InboundCalls int64   `json:"inbound_calls"`
 	FailedCalls  int64   `json:"failed_calls"`
 	P95LatencyMs float64 `json:"p95_latency_ms"`
 }
@@ -1500,24 +1507,14 @@ type AppExecutionAnalytics struct {
 	ByService []EngineExecutionBreakdown `json:"by_service"`
 }
 
-type EngineExecutionFailure struct {
-	ID              uuid.UUID `json:"id"`
-	ServiceID       uuid.UUID `json:"service_id"`
-	ServiceName     string    `json:"service_name"`
-	Operation       string    `json:"operation"`
-	Transport       string    `json:"transport"`
-	FailureCategory string    `json:"failure_category"`
-	FailureCode     string    `json:"failure_code"`
-	FailureReason   string    `json:"failure_reason"`
-	LatencyMs       int64     `json:"latency_ms"`
-	StartedAt       time.Time `json:"started_at"`
-}
-
 type WorkspaceExecutionAnalytics struct {
 	EngineExecutionAnalytics
-	ByService      []EngineExecutionBreakdown `json:"by_service"`
-	ByTransport    []EngineExecutionBreakdown `json:"by_transport"`
-	RecentFailures []EngineExecutionFailure   `json:"recent_failures"`
+	InboundCalls      int64                      `json:"inbound_calls"`
+	ByService         []EngineExecutionBreakdown `json:"by_service"`
+	MostUsedSDK       *EngineExecutionBreakdown  `json:"most_used_sdk,omitempty"`
+	MostUsedService   *EngineExecutionBreakdown  `json:"most_used_service,omitempty"`
+	MostFailedService *EngineExecutionBreakdown  `json:"most_failed_service,omitempty"`
+	MostUsedBucket    *EngineExecutionBreakdown  `json:"most_used_bucket,omitempty"`
 }
 
 // ─── Idempotency Cache ──────────────────────────────────────────────────────

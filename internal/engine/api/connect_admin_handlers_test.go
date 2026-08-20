@@ -357,6 +357,7 @@ type connectAdminMockStore struct {
 	deletedConnectionID  uuid.UUID
 	deleteErr            error
 	latestVersion        string
+	exactVersions        map[uuid.UUID]string
 	reconciledResources  []store.ConnectionResource
 	callbackPersistErr   error
 	callbackPersistCalls int
@@ -442,6 +443,22 @@ func (s *connectAdminMockStore) GetLatestWorkspaceServiceVersionByWorkspace(cont
 		return s.latestVersion, nil
 	}
 	return "2026-07-01", nil
+}
+
+// GetWorkspaceServiceVersion gives callback tests the exact locally activated
+// version requested by their persisted Connect session.
+func (s *connectAdminMockStore) GetWorkspaceServiceVersion(_ context.Context, serviceID, serviceVersionID uuid.UUID) (*store.WorkspaceServiceVersion, error) {
+	if serviceID != s.serviceID || serviceVersionID == uuid.Nil {
+		return nil, store.ErrWorkspaceServiceVersionNotFound
+	}
+	version := s.latestVersion
+	if exact, ok := s.exactVersions[serviceVersionID]; ok {
+		version = exact
+	}
+	if version == "" {
+		version = "2026-07-01"
+	}
+	return &store.WorkspaceServiceVersion{ServiceID: serviceID, ServiceVersionID: serviceVersionID, Version: version, Status: "public"}, nil
 }
 
 func (s *connectAdminMockStore) CreateConnectSession(_ context.Context, session store.ConnectSession) (*store.ConnectSession, error) {

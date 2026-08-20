@@ -5,6 +5,10 @@ import { URL } from "node:url";
 
 import {
   RATE_LIMIT_GRAPHQL_FIELDS,
+  rateLimitAlgorithmLabel,
+  rateLimitDurationLabel,
+  rateLimitPolicyName,
+  rateLimitPolicyQuotaLabel,
   rateLimitSummary,
 } from "./rate-limit.ts";
 
@@ -48,6 +52,46 @@ test("summarizes absent, singular, and multiple policies", () => {
   assert.equal(
     rateLimitSummary({ version: 3, policies: [policy, { ...policy, name: "burst" }] }),
     "2 policies"
+  );
+});
+
+// This test keeps compact policy copy readable without rounding exact windows.
+test("formats policy names, algorithms, durations, and effective quotas", () => {
+  assert.equal(rateLimitPolicyName("second_requests"), "Second requests");
+  assert.equal(rateLimitPolicyName(""), "Policy");
+  assert.equal(rateLimitAlgorithmLabel("fixed_window"), "Fixed window");
+  assert.equal(rateLimitDurationLabel(1000), "1 sec");
+  assert.equal(rateLimitDurationLabel(60_000), "1 min");
+  assert.equal(rateLimitDurationLabel(3_600_000), "1 hr");
+  assert.equal(rateLimitDurationLabel(1500), "1500 ms");
+
+  const fixedWindow = {
+    name: "second_requests",
+    mode: "enforce",
+    unit: "requests",
+    identity: { inputs: [{ kind: "connection" }] },
+    cost: { default: 1, rules: [] },
+    algorithm: "fixed_window",
+    fixed_window: { limit: 100, duration_ms: 1000 },
+  };
+  assert.equal(rateLimitPolicyQuotaLabel(fixedWindow), "100 requests / 1 sec");
+  assert.equal(
+    rateLimitPolicyQuotaLabel({
+      ...fixedWindow,
+      algorithm: "token_bucket",
+      fixed_window: undefined,
+      token_bucket: { capacity: 20, refill_units: 5, refill_interval_ms: 60_000 },
+    }),
+    "20 requests · +5 / 1 min"
+  );
+  assert.equal(
+    rateLimitPolicyQuotaLabel({
+      ...fixedWindow,
+      algorithm: "concurrency",
+      fixed_window: undefined,
+      concurrency: { limit: 4 },
+    }),
+    "4 concurrent requests"
   );
 });
 

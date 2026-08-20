@@ -123,6 +123,78 @@ func TestLoadExecutionRetentionDefaultsAndYAMLOverrides(t *testing.T) {
 	}
 }
 
+// TestLoadConnectedAuthRefreshWorkersDefaultAndYAML verifies the operator can
+// select bounded OAuth refresh concurrency through Engine YAML.
+func TestLoadConnectedAuthRefreshWorkersDefaultAndYAML(t *testing.T) {
+	t.Setenv("FUSED_ENGINE_CONNECTED_AUTH_REFRESH_WORKERS", "")
+	defaults, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
+	if err != nil {
+		t.Fatalf("Load defaults: %v", err)
+	}
+	if defaults.Engine.ConnectedAuthRefreshWorkers != DefaultConnectedAuthRefreshWorkers {
+		t.Fatalf("default connected auth workers = %d, want %d", defaults.Engine.ConnectedAuthRefreshWorkers, DefaultConnectedAuthRefreshWorkers)
+	}
+
+	path := filepath.Join(t.TempDir(), "engine.yaml")
+	if err := os.WriteFile(path, []byte("engine:\n  connected_auth_refresh_workers: 12\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	configured, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load YAML workers: %v", err)
+	}
+	if configured.Engine.ConnectedAuthRefreshWorkers != 12 {
+		t.Fatalf("YAML connected auth workers = %d, want 12", configured.Engine.ConnectedAuthRefreshWorkers)
+	}
+}
+
+// TestLoadConnectedAuthRefreshWorkersEnvironment verifies the documented
+// process override takes precedence over Engine YAML.
+func TestLoadConnectedAuthRefreshWorkersEnvironment(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "engine.yaml")
+	if err := os.WriteFile(path, []byte("engine:\n  connected_auth_refresh_workers: 12\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("FUSED_ENGINE_CONNECTED_AUTH_REFRESH_WORKERS", "7")
+
+	configured, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load environment workers: %v", err)
+	}
+	if configured.Engine.ConnectedAuthRefreshWorkers != 7 {
+		t.Fatalf("environment connected auth workers = %d, want 7", configured.Engine.ConnectedAuthRefreshWorkers)
+	}
+}
+
+// TestLoadRejectsInvalidConnectedAuthRefreshWorkers ensures malformed and
+// unsafe concurrency settings fail startup instead of silently changing value.
+func TestLoadRejectsInvalidConnectedAuthRefreshWorkers(t *testing.T) {
+	tests := []struct {
+		name     string
+		yaml     string
+		envValue string
+	}{
+		{name: "zero YAML", yaml: "engine:\n  connected_auth_refresh_workers: 0\n"},
+		{name: "negative YAML", yaml: "engine:\n  connected_auth_refresh_workers: -1\n"},
+		{name: "excessive YAML", yaml: "engine:\n  connected_auth_refresh_workers: 65\n"},
+		{name: "malformed environment", yaml: "engine:\n  connected_auth_refresh_workers: 4\n", envValue: "many"},
+		{name: "zero environment", yaml: "engine:\n  connected_auth_refresh_workers: 4\n", envValue: "0"},
+		{name: "excessive environment", yaml: "engine:\n  connected_auth_refresh_workers: 4\n", envValue: "65"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("FUSED_ENGINE_CONNECTED_AUTH_REFRESH_WORKERS", test.envValue)
+			path := filepath.Join(t.TempDir(), "engine.yaml")
+			if err := os.WriteFile(path, []byte(test.yaml), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatal("Load accepted invalid connected auth refresh workers")
+			}
+		})
+	}
+}
+
 func TestLoadEnginePublicEndpoints(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "engine.yaml")
 	if err := os.WriteFile(path, []byte("engine:\n  public_url: https://yaml.example.com\n  public_grpc_url: https://yaml-grpc.example.com:443\n"), 0o644); err != nil {

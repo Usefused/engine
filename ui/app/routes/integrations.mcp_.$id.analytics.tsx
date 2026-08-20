@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { useParams, Link, useSearchParams, type MetaFunction } from "@remix-run/react";
 
+// meta retains the workspace chrome metadata while identifying the scoped MCP
+// Activity page in the browser title.
 export const meta: MetaFunction = ({ matches }) => {
   const parentMeta = matches.filter((m) => m.id === "root").flatMap((m) => m.meta ?? []);
   return [
@@ -19,8 +21,8 @@ import { hasAnyPermission, hasWorkspacePermission } from "~/lib/current-actor-ac
 /** Loads MCP overview data and separately gates request receipts. */
 export default function McpAnalyticsDashboard() {
   const { access, loading: accessLoading } = useCurrentActorAccess();
-  const canReadOverview = hasAnyPermission(access, "app.read");
-  const canReadRequests = hasWorkspacePermission(access, "audit.read");
+  const canReadOverview = hasAnyPermission(access, "app.read") && hasWorkspacePermission(access, "audit.read");
+  const canReadRequests = canReadOverview;
   const { id } = useParams();
   const [data, setData] = useState<McpAnalyticsData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -28,6 +30,8 @@ export default function McpAnalyticsDashboard() {
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab = mcpActivityTab(searchParams.get("tab"));
 
+  // handleTabChange keeps Overview as the canonical URL and records only
+  // non-default Activity selections in the query string.
   const handleTabChange = (newTab: "overview" | "requests" | "sessions") => {
     setSearchParams(prev => {
       if (newTab === "overview") prev.delete("tab");
@@ -102,6 +106,7 @@ export default function McpAnalyticsDashboard() {
 
 type McpActivityTab = "overview" | "requests" | "sessions";
 
+// mcpActivityTab accepts only known Activity sections from the URL.
 function mcpActivityTab(value: string | null): McpActivityTab {
   return value === "requests" || value === "sessions" ? value : "overview";
 }
@@ -133,13 +138,13 @@ function McpActivityContent({ id, data, activeTab, onTabChange, canReadRequests 
   canReadRequests: boolean;
 }) {
   return (
-    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-5xl mx-auto">
-      <div className="flex items-center gap-4">
-        <Link to="/integrations/mcp" className="p-2 bg-white border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 hover:text-slate-900 transition-colors shadow-sm">
+    <div className="mx-auto min-w-0 max-w-5xl space-y-5 overflow-x-hidden animate-in fade-in slide-in-from-bottom-4 duration-500 sm:space-y-6">
+      <div className="flex min-w-0 items-center gap-3 sm:gap-4">
+        <Link to="/integrations/mcp" aria-label="Back to MCP servers" className="shrink-0 rounded-lg border border-slate-200 bg-white p-2 text-slate-600 shadow-sm transition-colors hover:bg-slate-50 hover:text-slate-900">
           <ArrowLeft className="w-4 h-4" />
         </Link>
-        <div>
-          <h1 className="text-xl font-bold text-slate-900 tracking-tight">MCP server activity</h1>
+        <div className="min-w-0">
+          <h1 className="text-lg font-bold tracking-tight text-slate-900 sm:text-xl">MCP server activity</h1>
           <p className="text-sm text-slate-500 mt-1">Requests and sessions for this server.</p>
         </div>
       </div>
@@ -156,13 +161,43 @@ function McpActivityContent({ id, data, activeTab, onTabChange, canReadRequests 
       />
 
       {activeTab === "overview" && <McpAnalyticsPanel data={data} />}
-      {activeTab === "requests" && canReadRequests && id && <AppRequestsPanel appId={id} transport="mcp" />}
+      {activeTab === "requests" && canReadRequests && id && <AppRequestsPanel appId={id} consumerName="MCP server" transport="mcp" />}
       {activeTab === "requests" && !canReadRequests && <div className="rounded-lg border border-slate-200 bg-white px-6 py-12 text-center text-sm text-slate-500">Request activity access is not available for your account.</div>}
       {activeTab === "sessions" && <McpSessionsPanel sessions={data.recent_sessions || []} />}
     </div>
   );
 }
 
+// McpSessionCard keeps long session identifiers and timestamps within the
+// mobile viewport while preserving the same status shown by the desktop row.
+function McpSessionCard({ session }: { session: NonNullable<McpAnalyticsData["recent_sessions"]>[number] }) {
+  const isLive = !session.ended_at;
+  return (
+    <div className="p-4">
+      <div className="flex min-w-0 items-start justify-between gap-3">
+        <span className="min-w-0 break-all font-mono text-sm text-slate-700">{session.session_id}</span>
+        <SessionStatus live={isLive} />
+      </div>
+      <dl className="mt-4 grid gap-3 text-sm">
+        <div><dt className="text-xs text-slate-500">Started</dt><dd className="mt-0.5 text-slate-700">{new Date(session.started_at).toLocaleString()}</dd></div>
+        <div><dt className="text-xs text-slate-500">Ended</dt><dd className="mt-0.5 text-slate-700">{session.ended_at ? new Date(session.ended_at).toLocaleString() : "Not ended"}</dd></div>
+      </dl>
+    </div>
+  );
+}
+
+// SessionStatus centralizes the live and disconnected status treatment across
+// mobile cards and desktop rows.
+function SessionStatus({ live }: { live: boolean }) {
+  // Live sessions use the active treatment; completed sessions remain static.
+  if (live) {
+    return <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-emerald-100 bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-600"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500 motion-safe:animate-pulse" />Live</span>;
+  }
+  return <span className="inline-flex shrink-0 items-center rounded-full border border-slate-200 bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">Disconnected</span>;
+}
+
+// McpSessionsPanel presents session history as mobile cards and retains the
+// comparative table at wider breakpoints.
 function McpSessionsPanel({ sessions }: { sessions: NonNullable<McpAnalyticsData["recent_sessions"]> }) {
   return (
     <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
@@ -176,7 +211,11 @@ function McpSessionsPanel({ sessions }: { sessions: NonNullable<McpAnalyticsData
             No sessions recorded yet.
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <>
+          <div className="divide-y divide-slate-100 md:hidden">
+            {sessions.map((session) => <McpSessionCard key={session.id} session={session} />)}
+          </div>
+          <div className="hidden overflow-x-auto md:block">
             <table className="w-full text-sm text-left">
               <thead className="bg-slate-50/50 text-slate-500 text-xs uppercase tracking-wider">
                 <tr>
@@ -196,24 +235,14 @@ function McpSessionsPanel({ sessions }: { sessions: NonNullable<McpAnalyticsData
                       <td className="px-6 py-4 text-slate-500">
                         {sess.ended_at ? new Date(sess.ended_at).toLocaleString() : "-"}
                       </td>
-                      <td className="px-6 py-4 text-right">
-                        {isLive ? (
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-600 border border-emerald-100">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                            Live
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-600 border border-slate-200">
-                            Disconnected
-                          </span>
-                        )}
-                      </td>
+                      <td className="px-6 py-4 text-right"><SessionStatus live={isLive} /></td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
           </div>
+          </>
         )}
       </div>
     </div>

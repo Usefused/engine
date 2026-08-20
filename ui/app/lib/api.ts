@@ -583,11 +583,14 @@ export interface EngineExecutionEventEntry {
   app_id?: string;
   app_version?: string;
   app_kind?: "sdk" | "mcp" | "webhook";
-  transport: "sdk" | "mcp" | "webhook";
+  transport: "sdk" | "mcp" | "rest" | "webhook";
   provider_protocol?: "rest" | "graphql";
   direction: "inbound" | "outbound";
   service_id: string;
   service_version_id: string;
+  service_name?: string;
+  service_slug?: string;
+  service_version?: string;
   operation_id?: string;
   webhook_id?: string;
   operation: string;
@@ -647,6 +650,9 @@ const engineExecutionEventSelection = `
   direction
   service_id
   service_version_id
+  service_name
+  service_slug
+  service_version
   operation_id
   webhook_id
   operation
@@ -705,6 +711,7 @@ export interface EngineExecutionBreakdown {
   label: string;
   total_calls: number;
   failed_calls: number;
+  inbound_calls: number;
   p95_latency_ms: number;
 }
 
@@ -712,23 +719,13 @@ export interface AppExecutionAnalytics extends EngineExecutionAnalyticsSummary {
   by_service: EngineExecutionBreakdown[];
 }
 
-export interface EngineExecutionFailure {
-  id: string;
-  service_id: string;
-  service_name: string;
-  operation: string;
-  transport: string;
-  failure_category?: string;
-  failure_code?: string;
-  failure_reason?: string;
-  latency_ms: number;
-  started_at: string;
-}
-
 export interface WorkspaceExecutionAnalytics extends EngineExecutionAnalyticsSummary {
+  inbound_calls: number;
   by_service: EngineExecutionBreakdown[];
-  by_transport: EngineExecutionBreakdown[];
-  recent_failures: EngineExecutionFailure[];
+  most_used_sdk?: EngineExecutionBreakdown | null;
+  most_used_service?: EngineExecutionBreakdown | null;
+  most_failed_service?: EngineExecutionBreakdown | null;
+  most_used_bucket?: EngineExecutionBreakdown | null;
 }
 
 export interface PublicServiceInsights {
@@ -1427,7 +1424,7 @@ export const api = {
               average_latency_ms
               median_latency_ms
               p95_latency_ms
-              by_service { key label total_calls failed_calls p95_latency_ms }
+              by_service { key label total_calls failed_calls inbound_calls p95_latency_ms }
             }
           }`,
           {
@@ -1484,10 +1481,12 @@ export const api = {
         .mcpGraphql<{ workspaceExecutionAnalytics: WorkspaceExecutionAnalytics }>(
           `query WorkspaceExecutionAnalytics($startDate: String, $endDate: String) {
             workspaceExecutionAnalytics(start_date: $startDate, end_date: $endDate) {
-              total_calls successful_calls failed_calls average_latency_ms median_latency_ms p95_latency_ms
-              by_service { key label total_calls failed_calls p95_latency_ms }
-              by_transport { key label total_calls failed_calls p95_latency_ms }
-              recent_failures { id service_id service_name operation transport failure_category failure_code failure_reason latency_ms started_at }
+              total_calls successful_calls failed_calls inbound_calls average_latency_ms median_latency_ms p95_latency_ms
+              by_service { key label total_calls failed_calls inbound_calls p95_latency_ms }
+              most_used_sdk { key label total_calls failed_calls inbound_calls p95_latency_ms }
+              most_used_service { key label total_calls failed_calls inbound_calls p95_latency_ms }
+              most_failed_service { key label total_calls failed_calls inbound_calls p95_latency_ms }
+              most_used_bucket { key label total_calls failed_calls inbound_calls p95_latency_ms }
             }
           }`,
           { startDate: params.startDate || null, endDate: params.endDate || null }
@@ -1504,7 +1503,7 @@ export const api = {
       serviceVersionId?: string;
       registryObjectKind?: "endpoint" | "webhook";
       registryObjectId?: string;
-      transport?: "sdk" | "mcp" | "webhook";
+      transport?: "sdk" | "mcp" | "rest" | "webhook";
     }) =>
       api
         .mcpGraphql<{ publicServiceInsights: PublicServiceInsights }>(

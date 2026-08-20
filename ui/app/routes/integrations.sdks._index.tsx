@@ -12,6 +12,7 @@ import { Download, Package, Plus, Trash2, Loader2, Search, X } from "lucide-reac
 import { api } from "~/lib/api";
 import { useToast } from "~/components/Toast";
 import { AppRuntimeStatus } from "~/components/apps/AppRuntimeStatus";
+import { formatAppDownloadCount } from "~/lib/app-downloads";
 
 interface SdkListItem {
   app_id: string;
@@ -27,7 +28,7 @@ interface SdkListItem {
   has_deprecated_endpoints?: boolean;
   created_at?: string;
   killed_at?: string;
-  downloads?: number;
+  downloads?: string | null;
   status: string;
 }
 
@@ -52,7 +53,7 @@ function readSdkPage(query: string, page: number): Promise<SdkPage> {
   const document = `
     query SDKApps($search: String!, $version: String!, $limit: Int!, $offset: Int!) {
       apps(kind: "sdk", search: $search, version: $version, limit: $limit, offset: $offset) {
-        items { app_id app_family_id name description version target_language created_at status }
+        items { app_id app_family_id name description version target_language created_at status downloads }
         total
       }
     }
@@ -216,7 +217,7 @@ function SdkRow({ sdk, selectedIds, setSelectedIds, onNavigate, onDownload, onDe
         <SdkVersionBadges sdk={sdk} />
       </td>
       <td className="hidden md:table-cell px-6 py-4 text-slate-500 font-medium">
-        {sdk.downloads || 0}
+        {formatAppDownloadCount(sdk.downloads)}
       </td>
       <td className="hidden lg:table-cell px-6 py-4 text-slate-500">
         {sdk.created_at ? new Date(sdk.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : ""}
@@ -447,6 +448,7 @@ export default function SdkHistory() {
   const handleDownload = async (id: string, name: string, version: string) => {
     try {
       await api.sdks.download(id, name, version);
+      await fetchSdks(query, page);
     } catch {
       toast.error("Failed to download SDK");
     }

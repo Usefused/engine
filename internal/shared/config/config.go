@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 
 	"gopkg.in/yaml.v3"
 )
@@ -57,7 +58,19 @@ type EngineConfig struct {
 	LicenseKeySource       string `yaml:"-"`
 	ExecutionRetentionDays int    `yaml:"execution_retention_days"`
 	ExecutionCleanupBatch  int    `yaml:"execution_cleanup_batch"`
+	// ConnectedAuthRefreshWorkers is the exact bounded OAuth refresh pool size
+	// selected by the Engine operator.
+	ConnectedAuthRefreshWorkers int `yaml:"connected_auth_refresh_workers"`
 }
+
+const (
+	// DefaultConnectedAuthRefreshWorkers keeps provider token traffic conservative
+	// while still allowing independent connections to make progress in parallel.
+	DefaultConnectedAuthRefreshWorkers = 4
+	// MaxConnectedAuthRefreshWorkers bounds provider and database pressure caused
+	// by an accidental or hostile deployment configuration.
+	MaxConnectedAuthRefreshWorkers = 64
+)
 
 type EngineLicenseSources struct {
 	Flag        string
@@ -108,11 +121,16 @@ func Load(path string, options ...LoadOption) (*Config, error) {
 	for _, option := range options {
 		option(&settings)
 	}
-	applyEnvironment(cfg)
+	if err := applyEnvironment(cfg); err != nil {
+		return nil, err
+	}
 	resolveEngineLicense(cfg, settings)
 	finalizeEncryptionKey(cfg)
 	if cfg.WorkerPool.Size <= 0 {
 		cfg.WorkerPool.Size = 1
+	}
+	if err := validateConnectedAuthRefreshWorkers(cfg.Engine.ConnectedAuthRefreshWorkers); err != nil {
+		return nil, err
 	}
 	return cfg, nil
 }
@@ -156,9 +174,10 @@ func defaultConfig() *Config {
 			},
 		},
 		Engine: EngineConfig{
-			RegistryEndpoint:       "https://registry.usefused.com/graphql",
-			ExecutionRetentionDays: 30,
-			ExecutionCleanupBatch:  1000,
+			RegistryEndpoint:            "https://registry.usefused.com/graphql",
+			ExecutionRetentionDays:      30,
+			ExecutionCleanupBatch:       1000,
+			ConnectedAuthRefreshWorkers: DefaultConnectedAuthRefreshWorkers,
 		},
 	}
 }
@@ -174,9 +193,9 @@ func loadYAML(path string, cfg *Config) error {
 	return yaml.Unmarshal(data, cfg)
 }
 
-// applyEnvironment accepts only Engine-owned process overrides; an external UI
-// origin is intentionally absent because both Engine variants are same-origin or headless.
-func applyEnvironment(cfg *Config) {
+// applyEnvironment accepts only Engine-owned process overrides and rejects
+// malformed values before the Engine can start with unexpected concurrency.
+func applyEnvironment(cfg *Config) error {
 	if envKey := os.Getenv("FUSED_ENCRYPTION_KEY"); envKey != "" {
 		cfg.EncryptionKey = envKey
 	}
@@ -189,6 +208,27 @@ func applyEnvironment(cfg *Config) {
 	if publicGRPCURL := os.Getenv("FUSED_ENGINE_PUBLIC_GRPC_URL"); publicGRPCURL != "" {
 		cfg.Engine.PublicGRPCURL = publicGRPCURL
 	}
+	if rawWorkers := os.Getenv("FUSED_ENGINE_CONNECTED_AUTH_REFRESH_WORKERS"); rawWorkers != "" {
+		workers, err := strconv.Atoi(rawWorkers)
+		if err != nil {
+			// Why: an operator-provided override must not quietly become a
+			// different concurrency level after a typo.
+			return fmt.Errorf("parse FUSED_ENGINE_CONNECTED_AUTH_REFRESH_WORKERS: %w", err)
+		}
+		cfg.Engine.ConnectedAuthRefreshWorkers = workers
+	}
+	return nil
+}
+
+// validateConnectedAuthRefreshWorkers enforces the supported provider-refresh
+// concurrency range for both YAML and environment configuration.
+func validateConnectedAuthRefreshWorkers(workers int) error {
+	if workers < 1 || workers > MaxConnectedAuthRefreshWorkers {
+		// Why: zero disables a required reliability path, while an excessive
+		// value can overload provider token endpoints and the Engine database.
+		return fmt.Errorf("engine.connected_auth_refresh_workers must be between 1 and %d, got %d", MaxConnectedAuthRefreshWorkers, workers)
+	}
+	return nil
 }
 
 func resolveEngineLicense(cfg *Config, options loadOptions) {

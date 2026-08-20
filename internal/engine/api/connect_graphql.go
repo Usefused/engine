@@ -282,6 +282,9 @@ var engineExecutionEventGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"direction":                 &graphql.Field{Type: graphql.String},
 		"service_id":                &graphql.Field{Type: graphql.String},
 		"service_version_id":        &graphql.Field{Type: graphql.String},
+		"service_name":              &graphql.Field{Type: graphql.String},
+		"service_slug":              &graphql.Field{Type: graphql.String},
+		"service_version":           &graphql.Field{Type: graphql.String},
 		"operation_id":              &graphql.Field{Type: graphql.String},
 		"webhook_id":                &graphql.Field{Type: graphql.String},
 		"operation":                 &graphql.Field{Type: graphql.String},
@@ -382,39 +385,27 @@ var engineExecutionBreakdownGraphQLType = graphql.NewObject(graphql.ObjectConfig
 		"key":            &graphql.Field{Type: graphql.String},
 		"label":          &graphql.Field{Type: graphql.String},
 		"total_calls":    &graphql.Field{Type: graphql.Int},
+		"inbound_calls":  &graphql.Field{Type: graphql.Int},
 		"failed_calls":   &graphql.Field{Type: graphql.Int},
 		"p95_latency_ms": &graphql.Field{Type: graphql.Float},
-	},
-})
-
-var engineExecutionFailureGraphQLType = graphql.NewObject(graphql.ObjectConfig{
-	Name: "EngineExecutionFailure",
-	Fields: graphql.Fields{
-		"id":               &graphql.Field{Type: graphql.String},
-		"service_id":       &graphql.Field{Type: graphql.String},
-		"service_name":     &graphql.Field{Type: graphql.String},
-		"operation":        &graphql.Field{Type: graphql.String},
-		"transport":        &graphql.Field{Type: graphql.String},
-		"failure_category": &graphql.Field{Type: graphql.String},
-		"failure_code":     &graphql.Field{Type: graphql.String},
-		"failure_reason":   &graphql.Field{Type: graphql.String},
-		"latency_ms":       &graphql.Field{Type: graphql.Int},
-		"started_at":       &graphql.Field{Type: graphql.String},
 	},
 })
 
 var workspaceExecutionAnalyticsGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "WorkspaceExecutionAnalytics",
 	Fields: graphql.Fields{
-		"total_calls":        &graphql.Field{Type: graphql.Int},
-		"successful_calls":   &graphql.Field{Type: graphql.Int},
-		"failed_calls":       &graphql.Field{Type: graphql.Int},
-		"average_latency_ms": &graphql.Field{Type: graphql.Float},
-		"median_latency_ms":  &graphql.Field{Type: graphql.Float},
-		"p95_latency_ms":     &graphql.Field{Type: graphql.Float},
-		"by_service":         &graphql.Field{Type: graphql.NewList(engineExecutionBreakdownGraphQLType)},
-		"by_transport":       &graphql.Field{Type: graphql.NewList(engineExecutionBreakdownGraphQLType)},
-		"recent_failures":    &graphql.Field{Type: graphql.NewList(engineExecutionFailureGraphQLType)},
+		"total_calls":         &graphql.Field{Type: graphql.Int},
+		"inbound_calls":       &graphql.Field{Type: graphql.Int},
+		"successful_calls":    &graphql.Field{Type: graphql.Int},
+		"failed_calls":        &graphql.Field{Type: graphql.Int},
+		"average_latency_ms":  &graphql.Field{Type: graphql.Float},
+		"median_latency_ms":   &graphql.Field{Type: graphql.Float},
+		"p95_latency_ms":      &graphql.Field{Type: graphql.Float},
+		"by_service":          &graphql.Field{Type: graphql.NewList(engineExecutionBreakdownGraphQLType)},
+		"most_used_sdk":       &graphql.Field{Type: engineExecutionBreakdownGraphQLType},
+		"most_used_service":   &graphql.Field{Type: engineExecutionBreakdownGraphQLType},
+		"most_failed_service": &graphql.Field{Type: engineExecutionBreakdownGraphQLType},
+		"most_used_bucket":    &graphql.Field{Type: engineExecutionBreakdownGraphQLType},
 	},
 })
 
@@ -522,9 +513,11 @@ var authConnectionGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"id":                       &graphql.Field{Type: graphql.String},
 		"bucket_id":                &graphql.Field{Type: graphql.String},
 		"service_id":               &graphql.Field{Type: graphql.String},
+		"service_version_id":       &graphql.Field{Type: graphql.String},
 		"end_user_ref":             &graphql.Field{Type: graphql.String},
 		"created_by_app_id":        &graphql.Field{Type: graphql.String},
 		"auth_type":                &graphql.Field{Type: graphql.String},
+		"auth_name":                &graphql.Field{Type: graphql.String},
 		"token_type":               &graphql.Field{Type: graphql.String},
 		"scopes":                   &graphql.Field{Type: graphql.NewList(graphql.String)},
 		"scope_source":             &graphql.Field{Type: graphql.String},
@@ -533,6 +526,9 @@ var authConnectionGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"expires_at":               &graphql.Field{Type: graphql.String},
 		"refresh_token_expires_at": &graphql.Field{Type: graphql.String},
 		"last_used_at":             &graphql.Field{Type: graphql.String},
+		"last_refresh_attempt_at":  &graphql.Field{Type: graphql.String},
+		"last_refreshed_at":        &graphql.Field{Type: graphql.String},
+		"refresh_retry_not_before": &graphql.Field{Type: graphql.String},
 		"refresh_state":            &graphql.Field{Type: graphql.String},
 		"last_failure_code":        &graphql.Field{Type: graphql.String},
 		"last_failure_at":          &graphql.Field{Type: graphql.String},
@@ -995,7 +991,9 @@ func workspaceExecutionAnalyticsGraphQLField(s store.Store) *graphql.Field {
 			if err != nil {
 				return nil, err
 			}
-			span.SetAttributes(attribute.String("range.start", startDate.Format(time.RFC3339)), attribute.String("range.end", endDate.Format(time.RFC3339)))
+			// A bounded duration keeps reporting reads diagnosable without turning
+			// caller-selected timestamps into high-cardinality telemetry dimensions.
+			span.SetAttributes(attribute.Int("range.duration_hours", int(endDate.Sub(startDate).Hours())))
 			analytics, err := s.GetWorkspaceExecutionAnalytics(ctx, actor.accountID, startDate, endDate)
 			if err != nil {
 				return nil, fmt.Errorf("get workspace execution analytics: %w", err)
@@ -1005,6 +1003,8 @@ func workspaceExecutionAnalyticsGraphQLField(s store.Store) *graphql.Field {
 	}
 }
 
+// workspaceExecutionRange accepts exact UTC-capable timestamps while bounding
+// default and caller-selected scans to the workspace reporting window.
 func workspaceExecutionRange(p graphql.ResolveParams) (time.Time, time.Time, error) {
 	endDate := time.Now().UTC()
 	if value, err := parseOptionalRFC3339(graphQLStringArg(p, "end_date")); err != nil {
@@ -1685,7 +1685,7 @@ func rediscoverConnectionResources(ctx context.Context, s store.Store, verifier 
 	if err != nil {
 		return nil, err
 	}
-	token, err := sandbox.ResolveConnectionAccessToken(ctx, s, masterKey, connection, sandbox.AuthCredentialName(auth), metadata.AuthConfigs)
+	token, err := sandbox.ResolveConnectionAccessToken(ctx, s, masterKey, connection, metadata.ServiceVersionID, sandbox.AuthCredentialName(auth))
 	if err != nil {
 		return nil, errors.New("connected token is unavailable")
 	}
@@ -1703,21 +1703,9 @@ func rediscoverConnectionResources(ctx context.Context, s store.Store, verifier 
 // Registry contract and bucket attachment, keeping caller-controlled URLs out
 // of manual lifecycle actions.
 func connectionDiscoveryContract(ctx context.Context, s store.Store, verifier ServiceVerifier, connection *store.AuthConnection) (*fusedobject.ServiceMetadata, *fusedobject.Endpoint, fusedobject.AuthConfig, error) {
-	version, err := s.GetLatestWorkspaceServiceVersionByWorkspace(ctx, connection.ServiceID)
-	if err != nil {
-		return nil, nil, fusedobject.AuthConfig{}, fmt.Errorf("load workspace service version: %w", err)
-	}
-	metadata, err := verifier.FetchServiceMetadata(ctx, connection.ServiceID, version)
-	if err != nil {
-		return nil, nil, fusedobject.AuthConfig{}, fmt.Errorf("load service metadata: %w", err)
-	}
-	call := connectAdminCall{bucketID: connection.BucketID, serviceID: connection.ServiceID}
-	metadata, err = attachedConnectMetadata(ctx, s, call, connection.AuthType, metadata)
+	metadata, err := connectionDiscoveryMetadata(ctx, s, verifier, connection)
 	if err != nil {
 		return nil, nil, fusedobject.AuthConfig{}, err
-	}
-	if metadata.ConnectConfig == nil || metadata.ConnectConfig.ResourceDiscovery == nil {
-		return nil, nil, fusedobject.AuthConfig{}, errors.New("connection does not have resource discovery configured")
 	}
 	discoveryVerifier, ok := verifier.(connectionDiscoveryVerifier)
 	if !ok {
@@ -1733,6 +1721,49 @@ func connectionDiscoveryContract(ctx context.Context, s store.Store, verifier Se
 		return nil, nil, fusedobject.AuthConfig{}, err
 	}
 	return metadata, endpoint, auth, nil
+}
+
+// connectionDiscoveryMetadata loads and attaches the exact provider profile
+// before endpoint and auth selection inspect its discovery declaration.
+func connectionDiscoveryMetadata(ctx context.Context, s store.Store, verifier ServiceVerifier, connection *store.AuthConnection) (*fusedobject.ServiceMetadata, error) {
+	version, err := connectionDiscoveryVersion(ctx, s, connection)
+	if err != nil {
+		return nil, fmt.Errorf("load workspace service version: %w", err)
+	}
+	metadata, err := verifier.FetchServiceMetadata(ctx, connection.ServiceID, version)
+	if err != nil {
+		return nil, fmt.Errorf("load service metadata: %w", err)
+	}
+	if metadata == nil || metadata.ServiceVersionID == uuid.Nil ||
+		(connection.ServiceVersionID != uuid.Nil && metadata.ServiceVersionID != connection.ServiceVersionID) {
+		return nil, errors.New("resource discovery service version does not match the connection")
+	}
+	call := connectAdminCall{bucketID: connection.BucketID, serviceID: connection.ServiceID}
+	metadata, err = attachedConnectMetadata(ctx, s, call, connection.AuthType, metadata)
+	if err != nil {
+		return nil, err
+	}
+	if metadata.ConnectConfig == nil || metadata.ConnectConfig.ResourceDiscovery == nil {
+		return nil, errors.New("connection does not have resource discovery configured")
+	}
+	return metadata, nil
+}
+
+// connectionDiscoveryVersion preserves a connection's consent-time contract;
+// only a legacy unpinned row may resolve the current activated version once.
+func connectionDiscoveryVersion(ctx context.Context, s store.Store, connection *store.AuthConnection) (string, error) {
+	if connection.ServiceVersionID == uuid.Nil {
+		return s.GetLatestWorkspaceServiceVersionByWorkspace(ctx, connection.ServiceID)
+	}
+	lookup, ok := s.(store.WorkspaceServiceVersionLookupStore)
+	if !ok {
+		return "", errors.New("exact workspace service version lookup is unavailable")
+	}
+	version, err := lookup.GetWorkspaceServiceVersion(ctx, connection.ServiceID, connection.ServiceVersionID)
+	if err != nil || version == nil {
+		return "", errors.New("exact workspace service version is unavailable")
+	}
+	return version.Version, nil
 }
 
 type graphQLResolvedConnectionsContextKey struct{}
@@ -2027,7 +2058,7 @@ func engineExecutionActivityFilterFromArgs(p graphql.ResolveParams) (engineExecu
 
 func engineExecutionDimensionsFromArgs(p graphql.ResolveParams) (string, string, string, error) {
 	transport := strings.ToLower(strings.TrimSpace(graphQLStringArg(p, "transport")))
-	if err := validateOptionalExecutionDimension(transport, "transport", models.EngineExecutionTransportSDK, models.EngineExecutionTransportMCP, models.EngineExecutionTransportWebhook); err != nil {
+	if err := validateOptionalExecutionDimension(transport, "transport", models.EngineExecutionTransportSDK, models.EngineExecutionTransportMCP, models.EngineExecutionTransportREST, models.EngineExecutionTransportWebhook); err != nil {
 		return "", "", "", err
 	}
 	direction := strings.ToLower(strings.TrimSpace(graphQLStringArg(p, "direction")))
@@ -2718,11 +2749,13 @@ func projectGraphQLEngineExecutionEvents(events []models.EngineExecutionEvent) [
 		items = append(items, map[string]interface{}{
 			"id": event.ID.String(), "trace_id": event.TraceID, "span_id": event.SpanID,
 			"app_family_id": optionalGraphQLUUID(event.AppFamilyID), "app_id": optionalGraphQLUUID(event.AppID),
-			"app_version": event.AppVersion, "app_kind": event.Transport,
+			"app_version": event.AppVersion, "app_kind": executionAppKind(event.Transport),
 			"transport": event.Transport, "provider_protocol": event.ProviderProtocol,
 			"direction": event.Direction, "service_id": event.ServiceID.String(),
-			"service_version_id": event.ServiceVersionID, "operation_id": optionalGraphQLUUID(event.OperationID),
-			"webhook_id": optionalGraphQLUUID(event.WebhookID), "operation": event.EndpointName, "event_name": event.EventName,
+			"service_version_id": event.ServiceVersionID,
+			"service_name":       event.ServiceName, "service_slug": event.ServiceSlug, "service_version": event.ServiceVersion,
+			"operation_id": optionalGraphQLUUID(event.OperationID),
+			"webhook_id":   optionalGraphQLUUID(event.WebhookID), "operation": event.EndpointName, "event_name": event.EventName,
 			"http_method": event.HTTPMethod, "request_path": event.RequestPath,
 			"environment": event.Environment, "environment_source": event.EnvironmentSource,
 			"provider_host": event.ProviderHost, "provider_http_status": providerHTTPStatus, "provider_status_class": event.ProviderStatusClass,
@@ -2746,6 +2779,15 @@ func projectGraphQLEngineExecutionEvents(events []models.EngineExecutionEvent) [
 		})
 	}
 	return items
+}
+
+// executionAppKind keeps ingress transport separate from immutable app kind;
+// REST receipts belong to SDK apps even though their transport remains rest.
+func executionAppKind(transport string) string {
+	if transport == models.EngineExecutionTransportREST {
+		return string(store.AppKindSDK)
+	}
+	return transport
 }
 
 func graphQLInt64Strings(values []int64) []string {
@@ -2796,37 +2838,37 @@ func projectGraphQLAppExecutionAnalytics(analytics models.AppExecutionAnalytics)
 
 func projectGraphQLWorkspaceExecutionAnalytics(analytics models.WorkspaceExecutionAnalytics) map[string]interface{} {
 	return map[string]interface{}{
-		"total_calls": int(analytics.TotalCalls), "successful_calls": int(analytics.SuccessfulCalls),
-		"failed_calls": int(analytics.FailedCalls), "average_latency_ms": analytics.AverageLatencyMs,
+		"total_calls": int(analytics.TotalCalls), "inbound_calls": int(analytics.InboundCalls),
+		"successful_calls": int(analytics.SuccessfulCalls),
+		"failed_calls":     int(analytics.FailedCalls), "average_latency_ms": analytics.AverageLatencyMs,
 		"median_latency_ms": analytics.MedianLatencyMs, "p95_latency_ms": analytics.P95LatencyMs,
-		"by_service":      projectGraphQLExecutionBreakdowns(analytics.ByService),
-		"by_transport":    projectGraphQLExecutionBreakdowns(analytics.ByTransport),
-		"recent_failures": projectGraphQLExecutionFailures(analytics.RecentFailures),
+		"by_service":          projectGraphQLExecutionBreakdowns(analytics.ByService),
+		"most_used_sdk":       projectGraphQLExecutionBreakdown(analytics.MostUsedSDK),
+		"most_used_service":   projectGraphQLExecutionBreakdown(analytics.MostUsedService),
+		"most_failed_service": projectGraphQLExecutionBreakdown(analytics.MostFailedService),
+		"most_used_bucket":    projectGraphQLExecutionBreakdown(analytics.MostUsedBucket),
 	}
 }
 
 func projectGraphQLExecutionBreakdowns(items []models.EngineExecutionBreakdown) []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(items))
 	for _, item := range items {
-		result = append(result, map[string]interface{}{
-			"key": item.Key, "label": item.Label, "total_calls": int(item.TotalCalls),
-			"failed_calls": int(item.FailedCalls), "p95_latency_ms": item.P95LatencyMs,
-		})
+		result = append(result, projectGraphQLExecutionBreakdown(&item))
 	}
 	return result
 }
 
-func projectGraphQLExecutionFailures(items []models.EngineExecutionFailure) []map[string]interface{} {
-	result := make([]map[string]interface{}, 0, len(items))
-	for _, item := range items {
-		result = append(result, map[string]interface{}{
-			"id": item.ID.String(), "service_id": item.ServiceID.String(), "service_name": item.ServiceName,
-			"operation": item.Operation, "transport": item.Transport, "failure_category": item.FailureCategory,
-			"failure_code": item.FailureCode, "failure_reason": item.FailureReason,
-			"latency_ms": int(item.LatencyMs), "started_at": formatGraphQLTime(item.StartedAt),
-		})
+// projectGraphQLExecutionBreakdown keeps highlight and service-row projections
+// identical while preserving GraphQL null for a range with no matching group.
+func projectGraphQLExecutionBreakdown(item *models.EngineExecutionBreakdown) map[string]interface{} {
+	if item == nil {
+		return nil
 	}
-	return result
+	return map[string]interface{}{
+		"key": item.Key, "label": item.Label, "total_calls": int(item.TotalCalls),
+		"inbound_calls": int(item.InboundCalls), "failed_calls": int(item.FailedCalls),
+		"p95_latency_ms": item.P95LatencyMs,
+	}
 }
 
 func projectGraphQLWorkspaceNotificationInbox(inbox workspaceNotificationInboxResponse) map[string]interface{} {
@@ -2943,18 +2985,31 @@ func projectGraphQLAuthConnection(conn store.AuthConnection) map[string]interfac
 	resp := projectAuthConnection(conn)
 	return map[string]interface{}{
 		"id": resp.ID.String(), "bucket_id": resp.BucketID.String(), "service_id": resp.ServiceID.String(),
-		"end_user_ref": resp.EndUserRef, "created_by_app_id": resp.CreatedByAppID.String(),
-		"auth_type": resp.AuthType, "token_type": resp.TokenType, "scopes": resp.Scopes,
+		"service_version_id": formatOptionalGraphQLUUID(resp.ServiceVersionID),
+		"end_user_ref":       resp.EndUserRef, "created_by_app_id": resp.CreatedByAppID.String(),
+		"auth_type": resp.AuthType, "auth_name": resp.AuthName, "token_type": resp.TokenType, "scopes": resp.Scopes,
 		"scope_source": resp.ScopeSource, "issuer": resp.Issuer, "subject": resp.Subject,
 		"expires_at":               formatOptionalGraphQLTime(resp.ExpiresAt),
 		"refresh_token_expires_at": formatOptionalGraphQLTime(resp.RefreshTokenExpiresAt),
 		"last_used_at":             formatOptionalGraphQLTime(resp.LastUsedAt),
+		"last_refresh_attempt_at":  formatOptionalGraphQLTime(resp.LastRefreshAttemptAt),
+		"last_refreshed_at":        formatOptionalGraphQLTime(resp.LastRefreshedAt),
+		"refresh_retry_not_before": formatOptionalGraphQLTime(resp.RefreshRetryNotBefore),
 		"refresh_state":            resp.RefreshState,
 		"last_failure_code":        resp.LastFailureCode,
 		"last_failure_at":          formatOptionalGraphQLTime(resp.LastFailureAt),
 		"last_failure_trace_id":    resp.LastFailureTraceID,
 		"created_at":               formatGraphQLTime(resp.CreatedAt), "updated_at": formatGraphQLTime(resp.UpdatedAt),
 	}
+}
+
+// formatOptionalGraphQLUUID preserves null for unpinned legacy connections
+// while returning ordinary version identities as stable strings.
+func formatOptionalGraphQLUUID(value *uuid.UUID) interface{} {
+	if value == nil {
+		return nil
+	}
+	return value.String()
 }
 
 // projectGraphQLConnectionResources shares one safe projection for list and

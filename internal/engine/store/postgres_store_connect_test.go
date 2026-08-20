@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var connectAuthTestMasterKey = []byte("12345678901234567890123456789012")
@@ -50,6 +52,414 @@ func TestPostgresStore_BucketAttachedConnectAuth(t *testing.T) {
 	t.Run("workspace profile layers resolve precedence and stay version/operation scoped", func(t *testing.T) {
 		testWorkspaceConnectionProfileLifecycle(t, fixture)
 	})
+}
+
+// TestPostgresStoreAuthConnectionRefreshLeases exercises cross-replica claims,
+// CAS completion, retry throttling, recovery, and exact legacy version binding.
+func TestPostgresStoreAuthConnectionRefreshLeases(t *testing.T) {
+	fixture := setupConnectAuthStore(t)
+	versionID := uuid.New()
+	if err := fixture.store.AddWorkspaceServiceVersion(fixture.ctx, fixture.serviceID, "", "v-refresh", versionID, "Refresh Service", fixture.accountID); err != nil {
+		t.Fatalf("activate refresh fixture version: %v", err)
+	}
+	refreshStore := fixture.store.(AuthConnectionRefreshStore)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	early := upsertRefreshLeaseConnection(t, fixture, "refresh-early", versionID, now.Add(-2*time.Minute))
+	later := upsertRefreshLeaseConnection(t, fixture, "refresh-later", versionID, now.Add(-time.Minute))
+	_ = upsertRefreshLeaseConnection(t, fixture, "refresh-future", versionID, now.Add(2*time.Hour))
+	legacy := upsertRefreshLeaseConnection(t, fixture, "refresh-legacy", uuid.Nil, now.Add(-time.Minute))
+
+	first, second, leaseUntil := claimRefreshLeasePages(t, refreshStore, now, early.ID, later.ID)
+	assertRefreshLeaseContention(t, refreshStore, first, versionID, now, leaseUntil)
+	recovered := recoverExpiredRefreshLease(t, refreshStore, first, leaseUntil)
+	completeRecoveredRefresh(t, refreshStore, first, recovered, leaseUntil)
+	releaseWorkerRefreshTransiently(t, refreshStore, second, now)
+	assertRefreshPassDoesNotReclaimCompleted(t, refreshStore, early.ID, now, leaseUntil)
+	assertForegroundRetryAndReconnect(t, fixture, refreshStore, versionID, now)
+	assertLegacyRefreshVersionBinding(t, refreshStore, legacy.ID, versionID, now)
+	// The second page remains a valid independently leased claim, proving the
+	// page-one worker did not serialize every due connection behind one lock.
+	if second.LeaseToken == uuid.Nil || second.Connection.ID != later.ID {
+		t.Fatalf("second refresh claim = %#v", second)
+	}
+}
+
+// TestPostgresStoreAuthConnectionRefreshClaimsMissingRefreshToken verifies the
+// managed worker can convert an expired access-only OAuth grant into reconnect.
+func TestPostgresStoreAuthConnectionRefreshClaimsMissingRefreshToken(t *testing.T) {
+	fixture := setupConnectAuthStore(t)
+	versionID := uuid.New()
+	if err := fixture.store.AddWorkspaceServiceVersion(fixture.ctx, fixture.serviceID, "", "v-access-only", versionID, "Access Only Service", fixture.accountID); err != nil {
+		t.Fatalf("activate access-only fixture version: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	encrypted := encryptConnectAuthValues(t, "expired-access-only")
+	expiresAt := now.Add(-time.Minute)
+	connection, err := fixture.store.UpsertAuthConnection(fixture.ctx, AuthConnection{
+		BucketID: fixture.bucketA, ServiceID: fixture.serviceID, ServiceVersionID: versionID,
+		EndUserRef: "worker-refresh-token-missing", AuthType: "oauth", AuthName: "oauth",
+		EncryptedDEK: encrypted.dek, EncryptedAccessToken: encrypted.values[0],
+		TokenType: "Bearer", ExpiresAt: &expiresAt, RefreshState: "ok",
+	})
+	if err != nil {
+		t.Fatalf("upsert access-only worker connection: %v", err)
+	}
+	validExpiresAt := now.Add(5 * time.Minute)
+	valid, err := fixture.store.UpsertAuthConnection(fixture.ctx, AuthConnection{
+		BucketID: fixture.bucketA, ServiceID: fixture.serviceID, ServiceVersionID: versionID,
+		EndUserRef: "worker-refresh-token-missing-valid", AuthType: "oauth", AuthName: "oauth",
+		EncryptedDEK: encrypted.dek, EncryptedAccessToken: encrypted.values[0],
+		TokenType: "Bearer", ExpiresAt: &validExpiresAt, RefreshState: "ok",
+	})
+	if err != nil {
+		t.Fatalf("upsert valid access-only worker connection: %v", err)
+	}
+	refreshStore := fixture.store.(AuthConnectionRefreshStore)
+	claims := claimRefreshPage(t, refreshStore, now.Add(70*time.Minute), now, now, now.Add(time.Minute), 10)
+	if len(claims) != 1 || claims[0].Connection.ID != connection.ID || claims[0].Connection.EncryptedRefreshToken != "" {
+		t.Fatalf("access-only worker claims = %#v", claims)
+	}
+	if containsAuthConnectionClaim(claims, valid.ID) {
+		t.Fatalf("still-valid access-only connection was claimed early: %#v", claims)
+	}
+	marked, err := refreshStore.MarkAuthConnectionReconnectRequired(fixture.ctx, connection.ID, claims[0].LeaseToken, "refresh_token_missing", "trace-worker-missing", now.Add(time.Second))
+	if err != nil || !marked {
+		t.Fatalf("mark worker access-only reconnect required marked=%t err=%v", marked, err)
+	}
+}
+
+// TestPostgresStoreAuthConnectionRefreshClaimsLegacyRetryableStates verifies
+// v7 failed/expired rows are not stranded while reconnect_required stays final.
+func TestPostgresStoreAuthConnectionRefreshClaimsLegacyRetryableStates(t *testing.T) {
+	fixture := setupConnectAuthStore(t)
+	versionID := uuid.New()
+	if err := fixture.store.AddWorkspaceServiceVersion(fixture.ctx, fixture.serviceID, "", "v-legacy-states", versionID, "Legacy State Service", fixture.accountID); err != nil {
+		t.Fatalf("activate legacy refresh-state fixture version: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	failed := upsertRefreshLeaseConnectionState(t, fixture, "legacy-failed", versionID, now.Add(-2*time.Minute), "failed")
+	expired := upsertRefreshLeaseConnectionState(t, fixture, "legacy-expired", versionID, now.Add(-time.Minute), "expired")
+	reconnect := upsertRefreshLeaseConnectionState(t, fixture, "legacy-reconnect", versionID, now.Add(-3*time.Minute), "reconnect_required")
+	refreshStore := fixture.store.(AuthConnectionRefreshStore)
+	claims := claimRefreshPage(t, refreshStore, now.Add(70*time.Minute), now, now, now.Add(time.Minute), 10)
+	if len(claims) != 2 || !containsAuthConnectionClaim(claims, failed.ID) || !containsAuthConnectionClaim(claims, expired.ID) || containsAuthConnectionClaim(claims, reconnect.ID) {
+		t.Fatalf("legacy refresh-state claims = %#v", claims)
+	}
+}
+
+// TestPostgresStoreAuthConnectionRefreshClaimsEarlierRefreshExpiry proves the
+// worker schedules against the earlier provider-declared token deadline.
+func TestPostgresStoreAuthConnectionRefreshClaimsEarlierRefreshExpiry(t *testing.T) {
+	fixture := setupConnectAuthStore(t)
+	versionID := uuid.New()
+	if err := fixture.store.AddWorkspaceServiceVersion(fixture.ctx, fixture.serviceID, "", "v-refresh-ttl", versionID, "Refresh TTL Service", fixture.accountID); err != nil {
+		t.Fatalf("activate refresh TTL fixture version: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	connection := upsertRefreshLeaseConnection(t, fixture, "earlier-refresh-expiry", versionID, now.Add(24*time.Hour))
+	refreshExpiry := now.Add(30 * time.Minute)
+	connection.RefreshTokenExpiresAt = &refreshExpiry
+	stored, err := fixture.store.UpsertAuthConnection(fixture.ctx, *connection)
+	if err != nil || stored == nil {
+		t.Fatalf("persist earlier refresh-token expiry connection=%v error=%v", stored != nil, err)
+	}
+
+	claims := claimRefreshPage(t, fixture.store.(AuthConnectionRefreshStore), now.Add(70*time.Minute), now, now, now.Add(time.Minute), 10)
+	if len(claims) != 1 || claims[0].Connection.ID != stored.ID {
+		t.Fatalf("earlier refresh-expiry claims = %#v", claims)
+	}
+}
+
+// TestPostgresStoreAuthConnectionRefreshHonorsSuccessEligibility proves a
+// later replica pass waits for the persisted post-success boundary.
+func TestPostgresStoreAuthConnectionRefreshHonorsSuccessEligibility(t *testing.T) {
+	fixture := setupConnectAuthStore(t)
+	versionID := uuid.New()
+	if err := fixture.store.AddWorkspaceServiceVersion(fixture.ctx, fixture.serviceID, "", "v-success-boundary", versionID, "Success Boundary Service", fixture.accountID); err != nil {
+		t.Fatalf("activate success-boundary fixture version: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	connection := upsertRefreshLeaseConnection(t, fixture, "success-boundary", versionID, now.Add(-time.Minute))
+	refreshStore := fixture.store.(AuthConnectionRefreshStore)
+	claims := claimRefreshPage(t, refreshStore, now.Add(70*time.Minute), now, now, now.Add(time.Minute), 10)
+	if len(claims) != 1 || claims[0].Connection.ID != connection.ID {
+		t.Fatalf("initial success-boundary claims = %#v", claims)
+	}
+	refreshedAt := now.Add(time.Second)
+	nextEligibleAt := now.Add(20 * time.Minute)
+	updated := refreshedAuthConnectionFixture(t, now.Add(30*time.Minute))
+	updated.RefreshRetryNotBefore = &nextEligibleAt
+	completeCurrentRefreshClaim(t, refreshStore, claims[0], updated, refreshedAt)
+
+	assertStaggeredPassHonorsSuccessEligibility(t, refreshStore, connection.ID, refreshedAt)
+	eligibleAt := nextEligibleAt.Add(time.Second)
+	claims = claimRefreshPage(t, refreshStore, eligibleAt.Add(70*time.Minute), eligibleAt, eligibleAt, eligibleAt.Add(time.Minute), 10)
+	if len(claims) != 1 || claims[0].Connection.ID != connection.ID {
+		t.Fatalf("post-success-boundary claims = %#v", claims)
+	}
+}
+
+// releaseWorkerRefreshTransiently makes retry eligibility elapse inside the
+// same pass so the attempt watermark, rather than delay length, prevents reuse.
+func releaseWorkerRefreshTransiently(t *testing.T, refreshStore AuthConnectionRefreshStore, claim AuthConnectionRefreshClaim, now time.Time) {
+	t.Helper()
+	released, err := refreshStore.ReleaseAuthConnectionRefresh(context.Background(), claim.Connection.ID, claim.LeaseToken, now.Add(2*time.Second), "provider_unavailable", "trace-worker", now.Add(time.Second))
+	if err != nil || !released {
+		t.Fatalf("release worker refresh transiently released=%t err=%v", released, err)
+	}
+}
+
+// claimRefreshLeasePages proves ordered limit-one pages skip an already leased
+// row and exclude future and unpinned legacy credentials from worker discovery.
+func claimRefreshLeasePages(t *testing.T, refreshStore AuthConnectionRefreshStore, now time.Time, earlyID, laterID uuid.UUID) (AuthConnectionRefreshClaim, AuthConnectionRefreshClaim, time.Time) {
+	t.Helper()
+	leaseUntil := now.Add(time.Minute)
+	first := claimRefreshPage(t, refreshStore, now.Add(70*time.Minute), now, now, leaseUntil, 1)
+	second := claimRefreshPage(t, refreshStore, now.Add(70*time.Minute), now, now, leaseUntil, 1)
+	third := claimRefreshPage(t, refreshStore, now.Add(70*time.Minute), now, now, leaseUntil, 10)
+	if len(first) != 1 || first[0].Connection.ID != earlyID || len(second) != 1 || second[0].Connection.ID != laterID || len(third) != 0 {
+		t.Fatalf("ordered refresh pages first=%#v second=%#v third=%#v", first, second, third)
+	}
+	if first[0].LeaseToken == second[0].LeaseToken {
+		t.Fatal("each claimed connection must receive a unique lease token")
+	}
+	return first[0], second[0], leaseUntil
+}
+
+// claimRefreshPage wraps the worker claim with a focused failure message while
+// retaining explicit pass and clock inputs for deterministic lease assertions.
+func claimRefreshPage(t *testing.T, refreshStore AuthConnectionRefreshStore, cutoff, passStartedAt, now, leaseUntil time.Time, limit int) []AuthConnectionRefreshClaim {
+	t.Helper()
+	claims, err := refreshStore.ClaimAuthConnectionsForRefresh(context.Background(), cutoff, passStartedAt, now, leaseUntil, limit)
+	if err != nil {
+		t.Fatalf("ClaimAuthConnectionsForRefresh: %v", err)
+	}
+	return claims
+}
+
+// assertRefreshLeaseContention proves an SDK fallback cannot take a worker's
+// live lease and that an exact version mismatch never rewrites stored identity.
+func assertRefreshLeaseContention(t *testing.T, refreshStore AuthConnectionRefreshStore, claim AuthConnectionRefreshClaim, versionID uuid.UUID, now, leaseUntil time.Time) {
+	t.Helper()
+	contended, err := refreshStore.TryClaimAuthConnectionRefresh(context.Background(), claim.Connection.ID, versionID, now, leaseUntil)
+	if err != nil || contended != nil {
+		t.Fatalf("live lease contention claim=%#v err=%v", contended, err)
+	}
+	concurrentFallback, err := refreshStore.TryClaimAuthConnectionRefresh(context.Background(), claim.Connection.ID, uuid.New(), now, leaseUntil)
+	if err != nil || concurrentFallback != nil {
+		t.Fatalf("concurrent fallback version claim=%#v err=%v", concurrentFallback, err)
+	}
+}
+
+// recoverExpiredRefreshLease advances the injected clock beyond lease expiry
+// and verifies another worker can claim the earliest still-due connection.
+func recoverExpiredRefreshLease(t *testing.T, refreshStore AuthConnectionRefreshStore, original AuthConnectionRefreshClaim, leaseUntil time.Time) AuthConnectionRefreshClaim {
+	t.Helper()
+	recoveryNow := leaseUntil.Add(time.Second)
+	claims := claimRefreshPage(t, refreshStore, recoveryNow.Add(70*time.Minute), recoveryNow, recoveryNow, recoveryNow.Add(time.Minute), 1)
+	if len(claims) != 1 || claims[0].Connection.ID != original.Connection.ID || claims[0].LeaseToken == original.LeaseToken {
+		t.Fatalf("recovered refresh claim = %#v", claims)
+	}
+	return claims[0]
+}
+
+// completeRecoveredRefresh rejects the first worker's stale token, then stores
+// rotated ciphertext and safe refresh timing under the recovered lease CAS.
+func completeRecoveredRefresh(t *testing.T, refreshStore AuthConnectionRefreshStore, stale, recovered AuthConnectionRefreshClaim, leaseUntil time.Time) {
+	t.Helper()
+	refreshedAt := leaseUntil.Add(2 * time.Second)
+	updated := refreshedAuthConnectionFixture(t, refreshedAt.Add(30*time.Minute))
+	nextEligibleAt := refreshedAt.Add(20 * time.Minute)
+	updated.RefreshRetryNotBefore = &nextEligibleAt
+	assertStaleRefreshCompletionRejected(t, refreshStore, stale, updated, refreshedAt)
+	connection := completeCurrentRefreshClaim(t, refreshStore, recovered, updated, refreshedAt)
+	if connection.RefreshRetryNotBefore == nil || !connection.RefreshRetryNotBefore.Equal(nextEligibleAt) {
+		t.Fatalf("successful refresh eligibility = %#v, want %v", connection.RefreshRetryNotBefore, nextEligibleAt)
+	}
+	duplicate, err := refreshStore.TryClaimAuthConnectionRefresh(context.Background(), recovered.Connection.ID, recovered.Connection.ServiceVersionID, refreshedAt, refreshedAt.Add(time.Minute))
+	if err != nil || duplicate != nil {
+		t.Fatalf("freshly completed foreground claim=%#v err=%v", duplicate, err)
+	}
+}
+
+// assertStaggeredPassHonorsSuccessEligibility proves a later replica pass does
+// not rotate a newly refreshed token until the durable success boundary.
+func assertStaggeredPassHonorsSuccessEligibility(t *testing.T, refreshStore AuthConnectionRefreshStore, connectionID uuid.UUID, refreshedAt time.Time) {
+	t.Helper()
+	staggeredAt := refreshedAt.Add(5 * time.Minute)
+	claims := claimRefreshPage(t, refreshStore, staggeredAt.Add(70*time.Minute), staggeredAt, staggeredAt, staggeredAt.Add(time.Minute), 10)
+	if containsAuthConnectionClaim(claims, connectionID) {
+		t.Fatalf("staggered replica reclaimed connection before success boundary: %#v", claims)
+	}
+}
+
+// assertStaleRefreshCompletionRejected verifies an expired/replaced worker CAS
+// cannot overwrite token material owned by the recovered lease.
+func assertStaleRefreshCompletionRejected(t *testing.T, refreshStore AuthConnectionRefreshStore, stale AuthConnectionRefreshClaim, updated AuthConnection, refreshedAt time.Time) {
+	t.Helper()
+	if connection, completed, err := refreshStore.CompleteAuthConnectionRefresh(context.Background(), stale.Connection.ID, stale.LeaseToken, updated, refreshedAt); err != nil || completed || connection != nil {
+		t.Fatalf("stale refresh completion connection=%#v completed=%t err=%v", connection, completed, err)
+	}
+}
+
+// completeCurrentRefreshClaim stores a successful rotation and verifies its
+// safe timing metadata before returning the reloaded connection.
+func completeCurrentRefreshClaim(t *testing.T, refreshStore AuthConnectionRefreshStore, recovered AuthConnectionRefreshClaim, updated AuthConnection, refreshedAt time.Time) *AuthConnection {
+	t.Helper()
+	connection, completed, err := refreshStore.CompleteAuthConnectionRefresh(context.Background(), recovered.Connection.ID, recovered.LeaseToken, updated, refreshedAt)
+	if err != nil || !completed || connection == nil || connection.LastRefreshedAt == nil || !connection.LastRefreshedAt.Equal(refreshedAt) {
+		t.Fatalf("recovered refresh completion connection=%#v completed=%t err=%v", connection, completed, err)
+	}
+	return connection
+}
+
+// assertRefreshPassDoesNotReclaimCompleted locks the pass-start exclusion that
+// prevents short-lived provider tokens from causing an infinite drain loop.
+func assertRefreshPassDoesNotReclaimCompleted(t *testing.T, refreshStore AuthConnectionRefreshStore, completedID uuid.UUID, passStartedAt, leaseUntil time.Time) {
+	t.Helper()
+	now := leaseUntil.Add(3 * time.Second)
+	claims := claimRefreshPage(t, refreshStore, now.Add(70*time.Minute), passStartedAt, now, now.Add(time.Minute), 10)
+	if len(claims) != 0 || containsAuthConnectionClaim(claims, completedID) {
+		t.Fatalf("same pass reclaimed attempted connections after completion %s: %#v", completedID, claims)
+	}
+}
+
+// assertForegroundRetryAndReconnect proves a transient retry suppresses both
+// near-expiry and expired requests until the persisted retry deadline elapses.
+func assertForegroundRetryAndReconnect(t *testing.T, fixture connectAuthFixture, refreshStore AuthConnectionRefreshStore, versionID uuid.UUID, now time.Time) {
+	t.Helper()
+	connection := upsertRefreshLeaseConnection(t, fixture, "refresh-foreground", versionID, now.Add(5*time.Minute))
+	claimAndReleaseForegroundRefresh(t, fixture, refreshStore, connection.ID, versionID, now)
+	expired := assertForegroundRetryThrottleThenEligibility(t, fixture, refreshStore, connection.ID, versionID, now)
+	markForegroundReconnectRequired(t, fixture, refreshStore, connection.ID, expired.LeaseToken, now)
+	assertMissingRefreshTokenCanReconnect(t, fixture, refreshStore, versionID, now)
+}
+
+// claimAndReleaseForegroundRefresh records one transient failure and a future
+// retry deadline while the still-valid access token remains usable.
+func claimAndReleaseForegroundRefresh(t *testing.T, fixture connectAuthFixture, refreshStore AuthConnectionRefreshStore, connectionID, versionID uuid.UUID, now time.Time) {
+	t.Helper()
+	claim, err := refreshStore.TryClaimAuthConnectionRefresh(fixture.ctx, connectionID, versionID, now, now.Add(time.Minute))
+	if err != nil || claim == nil {
+		t.Fatalf("foreground refresh claim=%#v err=%v", claim, err)
+	}
+	retryAt := now.Add(10 * time.Minute)
+	released, err := refreshStore.ReleaseAuthConnectionRefresh(fixture.ctx, connectionID, claim.LeaseToken, retryAt, "provider_unavailable", "trace-bounded", now.Add(time.Second))
+	if err != nil || !released {
+		t.Fatalf("release transient refresh released=%t err=%v", released, err)
+	}
+}
+
+// assertForegroundRetryThrottleThenEligibility proves the persisted deadline
+// prevents tight loops even after expiry, then permits the next bounded retry.
+func assertForegroundRetryThrottleThenEligibility(t *testing.T, fixture connectAuthFixture, refreshStore AuthConnectionRefreshStore, connectionID, versionID uuid.UUID, now time.Time) AuthConnectionRefreshClaim {
+	t.Helper()
+	throttled, err := refreshStore.TryClaimAuthConnectionRefresh(fixture.ctx, connectionID, versionID, now.Add(2*time.Minute), now.Add(3*time.Minute))
+	if err != nil || throttled != nil {
+		t.Fatalf("near-expiry retry throttle claim=%#v err=%v", throttled, err)
+	}
+	expiredThrottled, err := refreshStore.TryClaimAuthConnectionRefresh(fixture.ctx, connectionID, versionID, now.Add(6*time.Minute), now.Add(7*time.Minute))
+	if err != nil || expiredThrottled != nil {
+		t.Fatalf("expired retry throttle claim=%#v err=%v", expiredThrottled, err)
+	}
+	eligible, err := refreshStore.TryClaimAuthConnectionRefresh(fixture.ctx, connectionID, versionID, now.Add(11*time.Minute), now.Add(12*time.Minute))
+	if err != nil || eligible == nil {
+		t.Fatalf("post-retry claim=%#v err=%v", eligible, err)
+	}
+	return *eligible
+}
+
+// markForegroundReconnectRequired persists the provider's permanent grant
+// rejection and verifies retry scheduling is cleared.
+func markForegroundReconnectRequired(t *testing.T, fixture connectAuthFixture, refreshStore AuthConnectionRefreshStore, connectionID, leaseToken uuid.UUID, now time.Time) {
+	t.Helper()
+	marked, err := refreshStore.MarkAuthConnectionReconnectRequired(fixture.ctx, connectionID, leaseToken, "invalid_grant", "trace-reconnect", now.Add(11*time.Minute+time.Second))
+	if err != nil || !marked {
+		t.Fatalf("mark reconnect required marked=%t err=%v", marked, err)
+	}
+	stored, err := refreshStore.GetAuthConnectionByID(fixture.ctx, connectionID)
+	if err != nil || stored == nil || stored.RefreshState != "reconnect_required" || stored.RefreshRetryNotBefore != nil {
+		t.Fatalf("reconnect-required connection=%#v err=%v", stored, err)
+	}
+}
+
+// assertMissingRefreshTokenCanReconnect proves an expired access-only grant
+// can still be leased so the coordinator records a typed reconnect requirement.
+func assertMissingRefreshTokenCanReconnect(t *testing.T, fixture connectAuthFixture, refreshStore AuthConnectionRefreshStore, versionID uuid.UUID, now time.Time) {
+	t.Helper()
+	encrypted := encryptConnectAuthValues(t, "access-without-refresh")
+	expiresAt := now.Add(-time.Minute)
+	connection, err := fixture.store.UpsertAuthConnection(fixture.ctx, AuthConnection{
+		BucketID: fixture.bucketA, ServiceID: fixture.serviceID, ServiceVersionID: versionID,
+		EndUserRef: "refresh-token-missing", AuthType: "oauth", AuthName: "oauth",
+		EncryptedDEK: encrypted.dek, EncryptedAccessToken: encrypted.values[0], TokenType: "Bearer",
+		ExpiresAt: &expiresAt, RefreshState: "ok",
+	})
+	if err != nil {
+		t.Fatalf("upsert access-only refresh connection: %v", err)
+	}
+	claim, err := refreshStore.TryClaimAuthConnectionRefresh(fixture.ctx, connection.ID, versionID, now, now.Add(time.Minute))
+	if err != nil || claim == nil {
+		t.Fatalf("claim access-only expired connection=%#v err=%v", claim, err)
+	}
+	marked, err := refreshStore.MarkAuthConnectionReconnectRequired(fixture.ctx, connection.ID, claim.LeaseToken, "refresh_token_missing", "trace-missing", now.Add(time.Second))
+	if err != nil || !marked {
+		t.Fatalf("mark access-only reconnect required marked=%t err=%v", marked, err)
+	}
+}
+
+// assertLegacyRefreshVersionBinding verifies an unpinned row is atomically
+// bound from foreground exact metadata and never by background discovery.
+func assertLegacyRefreshVersionBinding(t *testing.T, refreshStore AuthConnectionRefreshStore, connectionID, versionID uuid.UUID, now time.Time) {
+	t.Helper()
+	claim, err := refreshStore.TryClaimAuthConnectionRefresh(context.Background(), connectionID, versionID, now, now.Add(time.Minute))
+	if err != nil || claim == nil || claim.Connection.ServiceVersionID != versionID {
+		t.Fatalf("legacy exact binding claim=%#v err=%v", claim, err)
+	}
+	retryAt := now.Add(time.Second)
+	released, err := refreshStore.ReleaseAuthConnectionRefresh(context.Background(), connectionID, claim.LeaseToken, retryAt, "provider_unavailable", "trace-legacy", now.Add(500*time.Millisecond))
+	if err != nil || !released {
+		t.Fatalf("release legacy binding claim released=%t err=%v", released, err)
+	}
+	reused, err := refreshStore.TryClaimAuthConnectionRefresh(context.Background(), connectionID, uuid.New(), now.Add(2*time.Second), now.Add(time.Minute))
+	if err != nil || reused == nil || reused.Connection.ServiceVersionID != versionID {
+		t.Fatalf("legacy binding reuse claim=%#v err=%v", reused, err)
+	}
+}
+
+// upsertRefreshLeaseConnection creates encrypted refreshable fixture material
+// with a caller-selected expiry and optional exact service-version identity.
+func upsertRefreshLeaseConnection(t *testing.T, fixture connectAuthFixture, endUserRef string, versionID uuid.UUID, expiresAt time.Time) *AuthConnection {
+	return upsertRefreshLeaseConnectionState(t, fixture, endUserRef, versionID, expiresAt, "ok")
+}
+
+// upsertRefreshLeaseConnectionState creates a refresh fixture in one explicit
+// legacy state while retaining the shared encrypted token construction.
+func upsertRefreshLeaseConnectionState(t *testing.T, fixture connectAuthFixture, endUserRef string, versionID uuid.UUID, expiresAt time.Time, refreshState string) *AuthConnection {
+	t.Helper()
+	encrypted := encryptConnectAuthValues(t, "access-"+endUserRef, "refresh-"+endUserRef)
+	connection, err := fixture.store.UpsertAuthConnection(fixture.ctx, AuthConnection{
+		BucketID: fixture.bucketA, ServiceID: fixture.serviceID, ServiceVersionID: versionID,
+		EndUserRef: endUserRef, AuthType: "oauth", AuthName: "oauth",
+		EncryptedDEK: encrypted.dek, EncryptedAccessToken: encrypted.values[0],
+		EncryptedRefreshToken: encrypted.values[1], TokenType: "Bearer", ExpiresAt: &expiresAt, RefreshState: refreshState,
+	})
+	if err != nil {
+		t.Fatalf("upsert refresh lease connection %q: %v", endUserRef, err)
+	}
+	return connection
+}
+
+// refreshedAuthConnectionFixture returns valid rotated ciphertext without
+// copying identity or lease fields into completion persistence.
+func refreshedAuthConnectionFixture(t *testing.T, expiresAt time.Time) AuthConnection {
+	t.Helper()
+	encrypted := encryptConnectAuthValues(t, "rotated-access", "rotated-refresh")
+	return AuthConnection{
+		AuthName: "oauth", EncryptedDEK: encrypted.dek,
+		EncryptedAccessToken: encrypted.values[0], EncryptedRefreshToken: encrypted.values[1],
+		TokenType: "Bearer", ScopeSource: "provider", ExpiresAt: &expiresAt, RefreshState: "ok",
+	}
 }
 
 // testGetBucketsByNames verifies plan-time lookup returns requested workspace
@@ -422,7 +832,7 @@ func callbackAuthConnection(t *testing.T, f connectAuthFixture, endUserRef, toke
 	t.Helper()
 	encrypted := encryptConnectAuthValues(t, token)
 	return AuthConnection{
-		BucketID: f.bucketA, ServiceID: f.serviceID, EndUserRef: endUserRef,
+		BucketID: f.bucketA, ServiceID: f.serviceID, ServiceVersionID: fixtureServiceVersionID(t, f), EndUserRef: endUserRef,
 		AuthType: "oauth", AuthName: "oauth", EncryptedDEK: encrypted.dek,
 		EncryptedAccessToken: encrypted.values[0], TokenType: "Bearer", RefreshState: "ok",
 	}
@@ -462,7 +872,7 @@ func upsertOAuthConnectionForUser(t *testing.T, f connectAuthFixture, endUserRef
 	t.Helper()
 	encrypted := encryptConnectAuthValues(t, "resource-access")
 	connection, err := f.store.UpsertAuthConnection(f.ctx, AuthConnection{
-		BucketID: f.bucketA, ServiceID: f.serviceID,
+		BucketID: f.bucketA, ServiceID: f.serviceID, ServiceVersionID: fixtureServiceVersionID(t, f),
 		EndUserRef: endUserRef, AuthType: "oauth", AuthName: "oauth", EncryptedDEK: encrypted.dek,
 		EncryptedAccessToken: encrypted.values[0], TokenType: "Bearer", RefreshState: "ok",
 	})
@@ -525,11 +935,7 @@ func setupConnectAuthStore(t *testing.T) connectAuthFixture {
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	pool, err := db.InitEnginePostgres(ctx, dbURL)
-	if err != nil {
-		cancel()
-		t.Fatalf("failed to connect to DB: %v", err)
-	}
+	pool := isolatedConnectAuthPool(t, ctx, dbURL)
 	workspaceID, accountID, ownsWorkspace := connectAuthWorkspace(t, ctx, pool)
 	fixture := connectAuthFixture{
 		ctx:           ctx,
@@ -555,6 +961,41 @@ func setupConnectAuthStore(t *testing.T) connectAuthFixture {
 	})
 	seedConnectAuthFixture(t, pool, fixture)
 	return fixture
+}
+
+// isolatedConnectAuthPool gives each integration test a UUID-named schema so
+// failed prior runs and developer Engine rows cannot affect ordered assertions.
+func isolatedConnectAuthPool(t *testing.T, ctx context.Context, databaseURL string) *pgxpool.Pool {
+	t.Helper()
+	admin, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect Connect auth test database: %v", err)
+	}
+	t.Cleanup(admin.Close)
+	schema := "engine_connect_auth_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	identifier := pgx.Identifier{schema}.Sanitize()
+	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+identifier); err != nil {
+		t.Fatalf("create isolated Connect auth schema: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := admin.Exec(cleanupCtx, "DROP SCHEMA "+identifier+" CASCADE"); err != nil {
+			t.Errorf("drop isolated Connect auth schema: %v", err)
+		}
+	})
+	parsed, err := url.Parse(databaseURL)
+	if err != nil || parsed.Scheme == "" {
+		t.Fatal("DATABASE_URL must be a PostgreSQL URL")
+	}
+	query := parsed.Query()
+	query.Set("search_path", schema)
+	parsed.RawQuery = query.Encode()
+	pool, err := db.InitEnginePostgres(ctx, parsed.String())
+	if err != nil {
+		t.Fatalf("initialize isolated Connect auth schema: %v", err)
+	}
+	return pool
 }
 
 // connectAuthWorkspace reuses the Engine singleton when present because
@@ -710,7 +1151,7 @@ func assertReconnectUpsertReplacesConnection(t *testing.T, f connectAuthFixture,
 	encrypted := encryptConnectAuthValues(t, "reconnected-access", "reconnected-refresh")
 	expiresAt := time.Now().UTC().Add(2 * time.Minute)
 	reconnected, err := f.store.UpsertAuthConnection(f.ctx, AuthConnection{
-		BucketID: f.bucketA, ServiceID: f.serviceID,
+		BucketID: f.bucketA, ServiceID: f.serviceID, ServiceVersionID: fixtureServiceVersionID(t, f),
 		EndUserRef: "user_123", CreatedByAppID: f.appID, AuthType: "oauth", AuthName: "oauth",
 		EncryptedDEK: encrypted.dek, EncryptedAccessToken: encrypted.values[0],
 		EncryptedRefreshToken: encrypted.values[1], TokenType: "Bearer", ExpiresAt: &expiresAt, RefreshState: "ok",
@@ -737,6 +1178,8 @@ func upsertConnectConfigForSummary(t *testing.T, f connectAuthFixture) {
 	}
 }
 
+// upsertOAuthConnection stores one expiring, exact-version OAuth credential
+// used by bucket reuse and worker discovery assertions.
 func upsertOAuthConnection(t *testing.T, f connectAuthFixture) *AuthConnection {
 	t.Helper()
 	expiresAt := time.Now().UTC().Add(2 * time.Minute)
@@ -744,6 +1187,7 @@ func upsertOAuthConnection(t *testing.T, f connectAuthFixture) *AuthConnection {
 	conn, err := f.store.UpsertAuthConnection(f.ctx, AuthConnection{
 		BucketID:              f.bucketA,
 		ServiceID:             f.serviceID,
+		ServiceVersionID:      fixtureServiceVersionID(t, f),
 		EndUserRef:            "user_123",
 		CreatedByAppID:        f.appID,
 		AuthType:              "oauth",
@@ -836,6 +1280,8 @@ func assertCrossBucketDeleteBlocked(t *testing.T, f connectAuthFixture, connID u
 	}
 }
 
+// assertConnectionListAndRefreshQuery verifies authorized listing and the
+// initial worker claim shape against OAuth versus API-key rows.
 func assertConnectionListAndRefreshQuery(t *testing.T, f connectAuthFixture, connAID, connBID uuid.UUID) {
 	t.Helper()
 	connectionsByID, err := f.store.GetAuthConnectionsByIDs(f.ctx, []uuid.UUID{connAID, connBID, connAID})
@@ -854,12 +1300,20 @@ func assertConnectionListAndRefreshQuery(t *testing.T, f connectAuthFixture, con
 	if len(listed) != 1 || listed[0].ID != connAID {
 		t.Fatalf("expected one bucket-filtered connection, got %#v", listed)
 	}
+	assertWorkerClaimsOAuthNotAPIKey(t, f, connAID, connBID)
+}
 
-	refreshable, err := f.store.ListAuthConnectionsNeedingRefresh(f.ctx, time.Now().UTC().Add(5*time.Minute), 10)
+// assertWorkerClaimsOAuthNotAPIKey verifies due discovery admits connected
+// OAuth credentials without treating non-refreshable API keys as jobs.
+func assertWorkerClaimsOAuthNotAPIKey(t *testing.T, f connectAuthFixture, connAID, connBID uuid.UUID) {
+	t.Helper()
+	refreshStore := f.store.(AuthConnectionRefreshStore)
+	now := time.Now().UTC()
+	refreshable, err := refreshStore.ClaimAuthConnectionsForRefresh(f.ctx, now.Add(5*time.Minute), now, now, now.Add(time.Minute), 10)
 	if err != nil {
-		t.Fatalf("ListAuthConnectionsNeedingRefresh: %v", err)
+		t.Fatalf("ClaimAuthConnectionsForRefresh: %v", err)
 	}
-	if !containsAuthConnection(refreshable, connAID) || containsAuthConnection(refreshable, connBID) {
+	if !containsAuthConnectionClaim(refreshable, connAID) || containsAuthConnectionClaim(refreshable, connBID) {
 		t.Fatalf("expected only OAuth connection with refresh token to need refresh, got %#v", refreshable)
 	}
 }
@@ -883,12 +1337,15 @@ func testConnectSessionLifecycle(t *testing.T, f connectAuthFixture) {
 	deleteExpiredConnectSession(t, f)
 }
 
+// createConnectSession persists one exact-version callback session for lookup,
+// consumption, and expiry cleanup assertions.
 func createConnectSession(t *testing.T, f connectAuthFixture) *ConnectSession {
 	t.Helper()
 	encrypted := encryptConnectAuthValues(t, "pkce-verifier")
 	session, err := f.store.CreateConnectSession(f.ctx, ConnectSession{
 		BucketID:              f.bucketA,
 		ServiceID:             f.serviceID,
+		ServiceVersionID:      fixtureServiceVersionID(t, f),
 		AuthType:              "oauth",
 		AuthName:              "oauth",
 		EndUserRef:            "user_456",
@@ -1040,7 +1497,7 @@ func postgresInputCompletionSession(t *testing.T, f connectAuthFixture, now time
 	t.Helper()
 	encrypted := encryptConnectAuthValues(t, "form-pkce-verifier")
 	return ConnectSession{
-		BucketID: f.bucketA, ServiceID: f.serviceID, AuthType: "oauth", AuthName: "oauth",
+		BucketID: f.bucketA, ServiceID: f.serviceID, ServiceVersionID: fixtureServiceVersionID(t, f), AuthType: "oauth", AuthName: "oauth",
 		EndUserRef: "user_input", StateHash: "provider-" + uuid.NewString(), NonceHash: "nonce-hash",
 		EncryptedDEK: encrypted.dek, EncryptedPKCEVerifier: encrypted.values[0], CreatedByAppID: f.appID,
 		ReturnURL: "https://app.example.com/oauth/done", ResourceInputJSON: []byte(`{"subdomain":"acme"}`),
@@ -1048,13 +1505,26 @@ func postgresInputCompletionSession(t *testing.T, f connectAuthFixture, now time
 	}
 }
 
-func containsAuthConnection(connections []AuthConnection, id uuid.UUID) bool {
-	for _, conn := range connections {
-		if conn.ID == id {
+// containsAuthConnectionClaim reports whether a claimed refresh page contains
+// one connection ID without inspecting its private lease token.
+func containsAuthConnectionClaim(claims []AuthConnectionRefreshClaim, id uuid.UUID) bool {
+	for _, claim := range claims {
+		if claim.Connection.ID == id {
 			return true
 		}
 	}
 	return false
+}
+
+// fixtureServiceVersionID resolves the exact active version seeded by the
+// first fixture phase so every persisted callback credential is pinned.
+func fixtureServiceVersionID(t *testing.T, f connectAuthFixture) uuid.UUID {
+	t.Helper()
+	versionID, err := f.store.GetLatestWorkspaceServiceVersionIDByWorkspace(f.ctx, f.serviceID)
+	if err != nil {
+		t.Fatalf("resolve fixture service version ID: %v", err)
+	}
+	return versionID
 }
 
 type encryptedConnectAuthValues struct {

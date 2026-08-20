@@ -36,6 +36,7 @@ interface McpServerCardProps {
   onReactivate: (id: string) => void;
   onCopyUrl: (url: string) => void;
   canManage: boolean;
+  canReadActivity: boolean;
 }
 
 function McpServerStatusBadge({ status }: { status: string }) {
@@ -105,8 +106,23 @@ function McpKillReactivateButton({ server, onKill, onReactivate }: { server: Mcp
   );
 }
 
+// McpActivityLink keeps execution analytics undiscoverable until the exact
+// app and workspace audit capabilities are both present.
+function McpActivityLink({ serverId, visible }: { serverId: string; visible: boolean }) {
+  if (!visible) return null;
+  return (
+    <Link
+      to={`/integrations/mcp/${serverId}/analytics`}
+      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 hover:text-slate-900 rounded-lg text-xs font-semibold transition-colors border border-slate-200 cursor-pointer"
+    >
+      <BarChart2 className="w-3.5 h-3.5" />
+      Analytics
+    </Link>
+  );
+}
+
 /** Renders one MCP server with lifecycle controls scoped to its app family. */
-function McpServerCard({ server, isSelected, anySelected, onToggleSelect, onDelete, onKill, onReactivate, onCopyUrl, canManage }: McpServerCardProps) {
+function McpServerCard({ server, isSelected, anySelected, onToggleSelect, onDelete, onKill, onReactivate, onCopyUrl, canManage, canReadActivity }: McpServerCardProps) {
   return (
     <div className={mcpServerCardClass(server.active)}>
       <div className="p-5 border-b border-slate-100 flex items-start justify-between">
@@ -153,13 +169,7 @@ function McpServerCard({ server, isSelected, anySelected, onToggleSelect, onDele
           </span>
           <div className="flex items-center gap-2">
             {canManage && <McpKillReactivateButton server={server} onKill={onKill} onReactivate={onReactivate} />}
-            <Link
-              to={`/integrations/mcp/${server.id}/analytics`}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 hover:text-slate-900 rounded-lg text-xs font-semibold transition-colors border border-slate-200 cursor-pointer"
-            >
-              <BarChart2 className="w-3.5 h-3.5" />
-              Analytics
-            </Link>
+            <McpActivityLink serverId={server.id} visible={canReadActivity} />
           </div>
         </div>
       </div>
@@ -432,6 +442,7 @@ export default function McpServers() {
               onReactivate={handleReactivate}
               onCopyUrl={(url) => { navigator.clipboard.writeText(url); toast.success("URL copied to clipboard!"); }}
               canManage={hasResourcePermission(access, "app.manage", "APP", server.app_family_id)}
+              canReadActivity={hasWorkspacePermission(access, "audit.read") && hasResourcePermission(access, "app.read", "APP", server.app_family_id)}
             />
           ))}
         </div>

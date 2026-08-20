@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ComponentType } from "react";
 import { Activity, AlertTriangle, Clock3, Download, FileCode, ServerCrash } from "lucide-react";
 import { api, type AppExecutionAnalytics, type EngineExecutionBreakdown } from "~/lib/api";
 import { appActivityIssue, type AppActivityIssue } from "~/lib/app-activity-error";
+import { formatAppDownloadCount } from "~/lib/app-downloads";
 
 export interface AppActivityService {
   service_id: string;
@@ -10,7 +11,7 @@ export interface AppActivityService {
 
 interface AppActivityOverviewProps {
   appId: string;
-  downloads: number;
+  downloads: string | null;
   pendingDriftCount: number;
   services: AppActivityService[];
 }
@@ -19,31 +20,57 @@ interface ServiceUsageRow extends EngineExecutionBreakdown {
   name: string;
 }
 
+// formatLatency keeps millisecond values compact while preserving readable
+// seconds for slower providers.
 function formatLatency(value: number): string {
   if (value < 1000) return `${Math.round(value)} ms`;
   return `${(value / 1000).toFixed(2)} s`;
 }
 
+// failureRate presents an empty app as a stable zero-rate state.
 function failureRate(analytics: AppExecutionAnalytics | null): string {
   if (!analytics?.total_calls) return "0%";
   return `${((analytics.failed_calls / analytics.total_calls) * 100).toFixed(1)}%`;
 }
 
+// usageRows joins bundled-service labels to the already aggregated receipt
+// response without introducing per-service requests.
 function usageRows(services: AppActivityService[], analytics: AppExecutionAnalytics | null): ServiceUsageRow[] {
   const usageByService = new Map((analytics?.by_service ?? []).map((item) => [item.key, item]));
-  return services.map((service) => {
-    const usage = usageByService.get(service.service_id);
-    return {
-      key: service.service_id,
-      label: usage?.label ?? service.service_id,
-      name: service.service_name || "Unnamed service",
-      total_calls: usage?.total_calls ?? 0,
-      failed_calls: usage?.failed_calls ?? 0,
-      p95_latency_ms: usage?.p95_latency_ms ?? 0,
-    };
-  });
+  return services.map((service) => serviceUsageRow(service, usageByService.get(service.service_id)));
 }
 
+// serviceUsageRow fills absent receipt aggregates with stable empty values for
+// one bundled service.
+function serviceUsageRow(service: AppActivityService, usage?: EngineExecutionBreakdown): ServiceUsageRow {
+  // A missing aggregate remains a zero row so bundled services stay visible
+  // before their first execution.
+  const values = usage || {
+    key: service.service_id,
+    label: service.service_id,
+    total_calls: 0,
+    failed_calls: 0,
+    inbound_calls: 0,
+    p95_latency_ms: 0,
+  };
+  return {
+    key: service.service_id,
+    label: values.label,
+    name: service.service_name || "Unnamed service",
+    total_calls: values.total_calls,
+    failed_calls: values.failed_calls,
+    inbound_calls: values.inbound_calls,
+    p95_latency_ms: values.p95_latency_ms,
+  };
+}
+
+// serviceSuccessRate provides one calculation for both card and table layouts.
+function serviceSuccessRate(row: ServiceUsageRow): number {
+  if (row.total_calls === 0) return 0;
+  return ((row.total_calls - row.failed_calls) / row.total_calls) * 100;
+}
+
+// Metric renders one bounded app statistic in the responsive summary grid.
 function Metric({ label, value, detail, icon: Icon }: { label: string; value: string | number; detail?: string; icon: ComponentType<{ className?: string }> }) {
   return (
     <div className="relative overflow-hidden rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -55,6 +82,24 @@ function Metric({ label, value, detail, icon: Icon }: { label: string; value: st
   );
 }
 
+// ServiceUsageCard keeps every service measure visible without horizontal
+// scrolling on narrow screens.
+function ServiceUsageCard({ row }: { row: ServiceUsageRow }) {
+  return (
+    <div className="p-4">
+      <div className="min-w-0 break-words font-medium text-slate-800">{row.name}</div>
+      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+        <div><dt className="text-xs text-slate-500">Requests</dt><dd className="mt-0.5 tabular-nums text-slate-800">{row.total_calls.toLocaleString()}</dd></div>
+        <div><dt className="text-xs text-slate-500">Failed</dt><dd className={`mt-0.5 tabular-nums ${row.failed_calls > 0 ? "font-medium text-red-600" : "text-slate-400"}`}>{row.failed_calls.toLocaleString()}</dd></div>
+        <div><dt className="text-xs text-slate-500">P95 latency</dt><dd className="mt-0.5 tabular-nums text-slate-700">{formatLatency(row.p95_latency_ms)}</dd></div>
+        <div><dt className="text-xs text-slate-500">Success rate</dt><dd className="mt-0.5 tabular-nums text-slate-700">{serviceSuccessRate(row).toFixed(1)}%</dd></div>
+      </dl>
+    </div>
+  );
+}
+
+// ServiceUsageTable switches presentation at the responsive breakpoint while
+// retaining the same aggregated rows and labels.
 function ServiceUsageTable({ rows }: { rows: ServiceUsageRow[] }) {
   return (
     <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
@@ -65,14 +110,18 @@ function ServiceUsageTable({ rows }: { rows: ServiceUsageRow[] }) {
       {rows.length === 0 ? (
         <div className="py-12 text-center text-sm text-slate-500">No services are bundled in this app.</div>
       ) : (
-        <div className="overflow-x-auto">
+        <>
+        <div className="divide-y divide-slate-100 md:hidden">
+          {rows.map((row) => <ServiceUsageCard key={row.key} row={row} />)}
+        </div>
+        <div className="hidden overflow-x-auto md:block">
           <table className="w-full min-w-[640px] text-left text-sm">
             <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
               <tr><th className="px-5 py-3">Service</th><th className="px-5 py-3 text-right">Requests</th><th className="px-5 py-3 text-right">Failed</th><th className="px-5 py-3 text-right">P95 latency</th><th className="px-5 py-3 text-right">Success rate</th></tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {rows.map((row) => {
-                const successRate = row.total_calls === 0 ? 0 : ((row.total_calls - row.failed_calls) / row.total_calls) * 100;
+                const successRate = serviceSuccessRate(row);
                 return (
                   <tr key={row.key}>
                     <td className="px-5 py-4 font-medium text-slate-800">{row.name}</td>
@@ -86,11 +135,14 @@ function ServiceUsageTable({ rows }: { rows: ServiceUsageRow[] }) {
             </tbody>
           </table>
         </div>
+        </>
       )}
     </div>
   );
 }
 
+// AppActivityOverview loads one app-scoped aggregate and renders its responsive
+// metrics and service usage views.
 export function AppActivityOverview({ appId, downloads, pendingDriftCount, services }: AppActivityOverviewProps) {
 	const [analytics, setAnalytics] = useState<AppExecutionAnalytics | null>(null);
 	const [issue, setIssue] = useState<AppActivityIssue | null>(null);
@@ -98,7 +150,9 @@ export function AppActivityOverview({ appId, downloads, pendingDriftCount, servi
 
   useEffect(() => {
     setIssue(null);
-	api.workspace.getAppExecutionAnalytics({ appId, includeAllVersions, transport: "sdk" })
+	// SDK activity includes generated-client and direct REST ingress because
+	// both receipts carry the same immutable app-family identity.
+	api.workspace.getAppExecutionAnalytics({ appId, includeAllVersions })
       .then(setAnalytics)
       .catch((cause) => setIssue(appActivityIssue(cause, "sdk")));
 	}, [appId, includeAllVersions]);
@@ -127,7 +181,7 @@ export function AppActivityOverview({ appId, downloads, pendingDriftCount, servi
         <Metric label="Requests" value={requestValue} detail="Executed with this app" icon={Activity} />
         <Metric label="Failed requests" value={failedValue} detail={`${failureRate(analytics)} failure rate`} icon={ServerCrash} />
         <Metric label="Average latency" value={latencyValue} icon={Clock3} />
-        <Metric label="Total downloads" value={downloads.toLocaleString()} icon={Download} />
+        <Metric label="Total downloads" value={formatAppDownloadCount(downloads)} icon={Download} />
         <Metric label="Connected services" value={services.length.toLocaleString()} icon={FileCode} />
         <Metric label="Pending drift" value={pendingDriftCount.toLocaleString()} icon={AlertTriangle} />
       </div>

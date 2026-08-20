@@ -3,6 +3,7 @@ import { api, NotificationServiceRef, WorkspaceNotification } from "~/lib/api";
 import { isPending, isUnresolved } from "./notificationHelpers";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasWorkspacePermission } from "~/lib/current-actor-access";
+import { canReadWorkspaceNotifications } from "~/lib/activity-access";
 
 // useWorkspaceNotifications is the single data-fetching hook backing both the
 // bell panel and the contextual per-page banners, so they never drift out of
@@ -17,8 +18,12 @@ import { hasWorkspacePermission } from "~/lib/current-actor-access";
 // fix for a real bug: the bell panel was rendering raw service_id UUIDs as
 // the row's title with no way to tell what was actually affected.
 export function useWorkspaceNotifications(enabled = true) {
-  const { access } = useCurrentActorAccess();
+  const { access, loading: accessLoading, failed: accessFailed } = useCurrentActorAccess();
+  const canRead = canReadWorkspaceNotifications(access);
   const canUpdate = hasWorkspacePermission(access, "notification.update");
+  // Waiting for the complete snapshot avoids a speculative request that the
+  // Engine would correctly deny and prevents notification UI from flashing.
+  const shouldLoad = enabled && !accessLoading && !accessFailed && canRead;
   const [items, setItems] = useState<WorkspaceNotification[]>([]);
   const [serviceRefs, setServiceRefs] = useState<Record<string, NotificationServiceRef>>({});
   const [loading, setLoading] = useState(false);
@@ -45,7 +50,7 @@ export function useWorkspaceNotifications(enabled = true) {
   }, []);
 
   const refresh = useCallback(() => {
-		if (!enabled) return Promise.resolve();
+		if (!shouldLoad) return Promise.resolve();
 		setLoading(true);
     setError(null);
     return api.workspace
@@ -60,11 +65,11 @@ export function useWorkspaceNotifications(enabled = true) {
         setError("Failed to load notifications");
       })
       .finally(() => setLoading(false));
-  }, [enabled, loadServiceRefs]);
+  }, [shouldLoad, loadServiceRefs]);
 
   useEffect(() => {
-    if (enabled) refresh();
-  }, [enabled, refresh]);
+    if (shouldLoad) refresh();
+  }, [shouldLoad, refresh]);
 
   // Optimistic update: apply the new status locally immediately, then
   // reconcile with the server. If the server rejects it (e.g. someone else
@@ -92,5 +97,5 @@ export function useWorkspaceNotifications(enabled = true) {
   const unresolved = items.filter(isUnresolved);
   const pendingCount = items.filter(isPending).length;
 
-  return { items, unresolved, pendingCount, serviceRefs, loading, error, refresh, markRead, dismiss, canUpdate };
+  return { items, unresolved, pendingCount, serviceRefs, loading, error, refresh, markRead, dismiss, canRead, canUpdate };
 }

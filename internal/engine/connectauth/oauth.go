@@ -239,13 +239,19 @@ func validateTokenEndpointAuthMethod(method fusedobject.TokenEndpointAuthMethod)
 // validateTokenEndpointAuthContract resolves the default request media type
 // while rejecting metadata that cannot safely describe an OAuth token grant.
 func validateTokenEndpointAuthContract(auth fusedobject.AuthConfig) (fusedobject.TokenRequestMediaType, error) {
-	if auth.Type != "oauth2" {
-		return "", errors.New("token endpoint authentication requires OAuth2")
+	if !isOAuthTokenEndpointAuthType(auth.Type) {
+		return "", errors.New("token endpoint authentication requires OAuth2 or OIDC")
 	}
 	if err := validateTokenEndpointAuthMethod(auth.TokenEndpointAuthMethod); err != nil {
 		return "", err
 	}
 	return tokenRequestMediaType(auth.TokenRequestMediaType)
+}
+
+// isOAuthTokenEndpointAuthType recognizes the OpenAPI spellings that share
+// OAuth token endpoint authentication and refresh grant semantics.
+func isOAuthTokenEndpointAuthType(authType string) bool {
+	return authType == "oauth2" || authType == "openIdConnect" || authType == "oidc"
 }
 
 // tokenRequestMediaType applies OAuth's established form default while

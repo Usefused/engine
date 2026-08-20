@@ -4,6 +4,7 @@ import { Logo } from "~/components/Logo";
 import { Layers, Boxes, Bot, KeyRound, ShieldCheck, Activity, Settings, LogOut, ChevronLeft, ChevronRight, Menu, X, LogIn, PlusCircle } from "lucide-react";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasAnyPermission, hasWorkspacePermission, type CurrentActorAccess } from "~/lib/current-actor-access";
+import { workspaceActivityTabs } from "~/lib/activity-access";
 
 interface IntegrationsSidebarProps {
   isAuth: boolean;
@@ -48,13 +49,6 @@ const AUTH_NAV_ITEMS: SidebarItem[] = [
     visible: (access) => hasAnyPermission(access, "app.read"),
   },
   {
-    to: "/integrations/builder",
-    label: "Create app",
-    Icon: PlusCircle,
-    isActive: (pathname) => pathname.startsWith("/integrations/builder"),
-    visible: (access) => hasWorkspacePermission(access, "app.create"),
-  },
-  {
     to: "/integrations/buckets",
     label: "Credentials",
     Icon: KeyRound,
@@ -71,7 +65,7 @@ const AUTH_NAV_ITEMS: SidebarItem[] = [
     to: "/integrations/activity",
     label: "Activity",
     Icon: Activity,
-    visible: (access) => hasWorkspacePermission(access, "audit.read"),
+    visible: (access) => workspaceActivityTabs(access).length > 0,
   },
   { to: "/integrations/settings", label: "Settings", Icon: Settings, visible: (access) => hasWorkspacePermission(access, "account.read") },
 ];

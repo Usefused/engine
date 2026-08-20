@@ -212,7 +212,6 @@ func TestConnectCallbackHandlerDiscoversResources(t *testing.T) {
 	state := "discovery-state"
 	fixture.store.session = connectRuntimeSession(t, fixture, state, "pkce-verifier")
 	fixture.store.session.RequestedScopes = []string{"account:read"}
-	fixture.verifier.serviceMetadata.ServiceVersionID = uuid.New()
 	fixture.verifier.serviceMetadata.BaseURL = provider.URL
 	fixture.verifier.serviceMetadata.AuthConfigs[0].Type = "oauth2"
 	fixture.store.savedConfig.AuthType = "oauth"
@@ -395,7 +394,6 @@ func combinedConnectRuntimeFixture(t *testing.T, providerURL, subdomain string) 
 	state := "combined-" + uuid.NewString()
 	fixture.store.session = connectRuntimeSession(t, fixture, state, "pkce-verifier")
 	fixture.store.session.ResourceInputJSON = []byte(`{"subdomain":"` + subdomain + `"}`)
-	fixture.verifier.serviceMetadata.ServiceVersionID = uuid.New()
 	fixture.verifier.serviceMetadata.BaseURL = providerURL
 	fixture.verifier.serviceMetadata.AuthConfigs[0].Type = "oauth2"
 	fixture.verifier.serviceMetadata.AuthConfigs[0].OAuth2Flows = fusedobject.OAuth2Flows{"authorizationCode": {
@@ -498,15 +496,19 @@ func TestRediscoverConnectionResourcesReusesConnectedToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	expires := time.Now().Add(time.Hour)
+	consentedVersionID := uuid.New()
 	connection := &store.AuthConnection{
 		ID: uuid.New(), BucketID: fixture.bucketID, ServiceID: fixture.serviceID,
-		EndUserRef: "user-1", AuthType: "oauth", AuthName: "oauthScheme", EncryptedDEK: wrapped,
+		ServiceVersionID: consentedVersionID,
+		EndUserRef:       "user-1", AuthType: "oauth", AuthName: "oauthScheme", EncryptedDEK: wrapped,
 		EncryptedAccessToken: encrypted, TokenType: "Bearer", ExpiresAt: &expires, RefreshState: "ok",
 	}
 	fixture.store.savedConnection = connection
+	fixture.store.latestVersion = "2.0.0"
+	fixture.store.exactVersions = map[uuid.UUID]string{consentedVersionID: "1.0.0"}
 	fixture.store.savedConfig.AuthType = "oauth"
 	fixture.store.savedConfig.AuthName = "oauthScheme"
-	fixture.verifier.serviceMetadata.ServiceVersionID = uuid.New()
+	fixture.verifier.serviceMetadata.ServiceVersionID = consentedVersionID
 	fixture.verifier.serviceMetadata.BaseURL = provider.URL
 	fixture.verifier.serviceMetadata.AuthConfigs = fusedobject.AuthConfigs{{
 		Name: "oauthScheme", Type: "oauth2", OAuth2Flows: fusedobject.OAuth2Flows{"authorizationCode": {
@@ -527,6 +529,9 @@ func TestRediscoverConnectionResourcesReusesConnectedToken(t *testing.T) {
 	if len(resources) != 1 || resources[0].ProviderResourceID != "portal-1" || resources[0].BaseURL != "" {
 		t.Fatalf("resources = %#v", resources)
 	}
+	if len(fixture.verifier.fetchMetadataVersions) == 0 || fixture.verifier.fetchMetadataVersions[len(fixture.verifier.fetchMetadataVersions)-1] != "1.0.0" {
+		t.Fatalf("rediscovery metadata versions = %v, want pinned 1.0.0", fixture.verifier.fetchMetadataVersions)
+	}
 }
 
 type connectRuntimeFixture struct {
@@ -545,7 +550,7 @@ func newConnectRuntimeFixture(t *testing.T) connectRuntimeFixture {
 	cfg := encryptedRuntimeConnectConfig(t, admin)
 	admin.store.savedConfig = &cfg
 	metadata := &fusedobject.ServiceMetadata{
-		ID: admin.serviceID,
+		ID: admin.serviceID, ServiceVersionID: uuid.New(),
 		AuthConfigs: fusedobject.AuthConfigs{{
 			Name:                    "bearerAuth",
 			Type:                    "oauth2",
@@ -625,6 +630,7 @@ func connectRuntimeSession(t *testing.T, fixture connectRuntimeFixture, state, v
 		ID:                    uuid.New(),
 		BucketID:              fixture.bucketID,
 		ServiceID:             fixture.serviceID,
+		ServiceVersionID:      fixture.verifier.serviceMetadata.ServiceVersionID,
 		AuthType:              fixture.store.savedConfig.AuthType,
 		AuthName:              fixture.store.savedConfig.AuthName,
 		EndUserRef:            "user_123",
@@ -684,18 +690,39 @@ func assertRuntimeAuthConnectionEncrypted(t *testing.T, conn *store.AuthConnecti
 	if conn == nil {
 		t.Fatal("expected auth connection to be saved")
 	}
-	if conn.BucketID != fixture.bucketID || conn.ServiceID != fixture.serviceID || conn.EndUserRef != "user_123" {
+	assertRuntimeAuthConnectionIdentity(t, conn, fixture)
+	assertRuntimeAuthTokenEncryption(t, conn, fixture.masterKey)
+	assertRuntimeAuthMetadata(t, conn)
+}
+
+// assertRuntimeAuthConnectionIdentity verifies callback persistence retains the
+// exact session-pinned service version and bucket/user boundary.
+func assertRuntimeAuthConnectionIdentity(t *testing.T, conn *store.AuthConnection, fixture connectRuntimeFixture) {
+	t.Helper()
+	if conn.BucketID != fixture.bucketID || conn.ServiceID != fixture.serviceID || conn.ServiceVersionID != fixture.verifier.serviceMetadata.ServiceVersionID || conn.EndUserRef != "user_123" {
 		t.Fatalf("unexpected auth connection identity: %#v", conn)
 	}
+}
+
+// assertRuntimeAuthTokenEncryption verifies both provider tokens are ciphertext
+// at rest and remain decryptable with the Engine master-key hierarchy.
+func assertRuntimeAuthTokenEncryption(t *testing.T, conn *store.AuthConnection, masterKey []byte) {
+	t.Helper()
 	if conn.EncryptedAccessToken == "access-token" || conn.EncryptedRefreshToken == "refresh-token" {
 		t.Fatalf("auth connection tokens must be encrypted: %#v", conn)
 	}
-	dek, err := store.UnwrapDEK(fixture.masterKey, conn.EncryptedDEK)
+	dek, err := store.UnwrapDEK(masterKey, conn.EncryptedDEK)
 	if err != nil {
 		t.Fatalf("unwrap auth connection DEK: %v", err)
 	}
 	assertDecryptedValue(t, dek, conn.EncryptedAccessToken, "access-token")
 	assertDecryptedValue(t, dek, conn.EncryptedRefreshToken, "refresh-token")
+}
+
+// assertRuntimeAuthMetadata verifies bounded OIDC, scope, and refresh-expiry
+// metadata survives callback encryption without exposing raw credentials.
+func assertRuntimeAuthMetadata(t *testing.T, conn *store.AuthConnection) {
+	t.Helper()
 	if conn.Issuer != "https://issuer.example" || conn.Subject != "subject_123" {
 		t.Fatalf("expected OIDC claims to be stored, got %#v", conn)
 	}

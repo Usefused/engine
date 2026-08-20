@@ -96,9 +96,16 @@ test("access routes gate reads before mounting data loaders and gate management 
 
 test("restricted access navigation is permission-aware and direct denial is explicit", () => {
   const sidebar = source("../components/layout/IntegrationsSidebar.tsx");
+  const apps = source("../routes/integrations.sdks._index.tsx");
+  const mcpServers = source("../routes/integrations.mcp.tsx");
   const gate = source("../components/access/CurrentActorAccess.tsx");
   assert.match(sidebar, /label: "Access"/);
   assert.match(sidebar, /label: "Credentials"/);
+  assert.doesNotMatch(sidebar, /label: "Create app"/);
+  assert.match(apps, /to="\/integrations\/builder"/);
+  assert.match(apps, />\s*Create app\s*</);
+  assert.match(mcpServers, /to="\/integrations\/builder\?tab=mcp"/);
+  assert.match(mcpServers, />\s*Create MCP server\s*</);
   assert.match(sidebar, /visible: \(access\) => hasAnyPermission\(access, "bucket\.read"\)/);
   assert.match(sidebar, /visible: \(access\) => hasWorkspacePermission\(access, "access\.read"\)/);
   assert.match(gate, /Access not available/);

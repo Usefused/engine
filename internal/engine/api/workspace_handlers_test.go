@@ -366,9 +366,10 @@ type mockVerifier struct {
 	// (upsertWorkspaceServiceWebhooks). Defaults to an empty-but-non-nil
 	// metadata object so callers that don't care about webhooks still get a
 	// usable value instead of a nil pointer.
-	serviceMetadata    *fusedobject.ServiceMetadata
-	fetchMetadataErr   error
-	fetchMetadataCalls int
+	serviceMetadata       *fusedobject.ServiceMetadata
+	fetchMetadataErr      error
+	fetchMetadataCalls    int
+	fetchMetadataVersions []string
 	// visibilityErr/visibilityCalls drive/observe FetchServiceVisibility for
 	// Engine GraphQL workspaceServices display-slug lookups.
 	visibilityErr      error
@@ -522,6 +523,7 @@ func (m *mockVerifier) ResolveServiceIDsBySlugs(ctx context.Context, slugs []str
 
 func (m *mockVerifier) FetchServiceMetadata(_ context.Context, serviceID uuid.UUID, version string) (*fusedobject.ServiceMetadata, error) {
 	m.fetchMetadataCalls++
+	m.fetchMetadataVersions = append(m.fetchMetadataVersions, version)
 	if m.fetchMetadataErr != nil {
 		return nil, m.fetchMetadataErr
 	}

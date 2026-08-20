@@ -20,6 +20,7 @@ import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasAnyPermission, hasResourcePermission, hasWorkspacePermission } from "~/lib/current-actor-access";
 import type { CurrentActorAccess } from "~/lib/current-actor-access";
 import {
+  appSelectionDisplayRows,
   requireAppSelectionsV3,
   type AppSelectionPayload,
   type AppSelectionV3,
@@ -130,7 +131,7 @@ type Sdk = {
   sandbox_url?: string;
   is_downloadable?: boolean;
   created_at?: string;
-  downloads?: number;
+  downloads?: string | null;
   readme?: string;
   detailed_selections?: SdkSelection[];
   status: string;
@@ -210,17 +211,23 @@ function BundledServicesSection({ selections }: { selections: SdkSelection[] }) 
   const fetchServiceMetadata = (serviceId: string) => {
     setLoadingServices(prev => ({ ...prev, [serviceId]: true }));
     const selection = selections.find(item => item.service_id === serviceId);
-    // Exact selections are persisted with the app version. Present those IDs
-    // directly instead of consulting Registry state that may have changed.
+    // Exact names are persisted with the app version, so the detail view does
+    // not consult mutable Registry state to relabel an immutable selection.
     setResourceGroupsData(prev => ({ ...prev, [serviceId]: selection?.endpoint_ids?.length ? ["Selected operations"] : [] }));
-    setWebhooksData(prev => ({ ...prev, [serviceId]: (selection?.webhook_ids ?? []).map(id => ({ id })) }));
+    setWebhooksData(prev => ({
+      ...prev,
+      [serviceId]: appSelectionDisplayRows(selection?.webhook_ids ?? [], selection?.webhook_names),
+    }));
     setLoadingServices(prev => ({ ...prev, [serviceId]: false }));
   };
 
   const fetchResourceEndpoints = (serviceId: string, _resourceName: string, groupKey: string) => {
     setLoadingEndpoints(prev => ({ ...prev, [groupKey]: true }));
     const selection = selections.find(item => item.service_id === serviceId);
-    setEndpointsData(prev => ({ ...prev, [groupKey]: (selection?.endpoint_ids ?? []).map(id => ({ id, name: id })) }));
+    setEndpointsData(prev => ({
+      ...prev,
+      [groupKey]: appSelectionDisplayRows(selection?.endpoint_ids ?? [], selection?.operation_names),
+    }));
     setLoadingEndpoints(prev => ({ ...prev, [groupKey]: false }));
   };
 
@@ -441,8 +448,8 @@ export default function SdkDetails() {
   const [sdk, setSdk] = useState<Sdk | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const activeTab = sdkPrimaryTab(searchParams.get("tab"));
-  const activitySection = sdkActivitySection(searchParams.get("activity"));
+  const requestedActiveTab = sdkPrimaryTab(searchParams.get("tab"));
+  const requestedActivitySection = sdkActivitySection(searchParams.get("activity"));
 
   const [versions, setVersions] = useState<Array<{ id: string; version: string; created_at: string }>>([]);
   const [bucket, setBucket] = useState<Bucket | null>(null);
@@ -481,7 +488,8 @@ export default function SdkDetails() {
           created_at
           readme
           status
-          selections { service_id service_version_id definition_schema_version endpoint_ids webhook_ids select_all webhook_select_all }
+          downloads
+          selections { service_id service_version_id definition_schema_version endpoint_ids operation_names webhook_ids webhook_names select_all webhook_select_all }
         }
         appServices(app_id: $appId) { service_id service_slug service_name version select_all endpoint_count webhook_count }
       }
@@ -519,6 +527,10 @@ export default function SdkDetails() {
   }, [access, sdk?.app_family_id]);
 
   const canReadActivity = canReadSdkActivity(access, sdk);
+  // A direct Activity URL falls back to Overview until the complete execution
+  // read capability is available, so denied panels and queries never mount.
+  const activeTab = requestedActiveTab === "analytics" && !canReadActivity ? "overview" : requestedActiveTab;
+  const activitySection = requestedActivitySection;
 
   /** Loads the readable immutable versions in one app family. */
   const fetchVersions = (appFamilyId: string) => {
@@ -582,6 +594,7 @@ export default function SdkDetails() {
     if (!sdk) return;
     try {
       await api.sdks.download(sdk.app_id, sdk.name, sdk.version);
+      await fetchSdk(sdk.app_id);
     } catch {
       toast.error("Failed to download app package");
     }
@@ -707,8 +720,10 @@ function SdkLoadedContent({
         ))}
       </div>
 
+      {/* The immutable app key resets disclosure state when switching versions or families. */}
       {optionalNode(sdkNotifications.length > 0, (
         <NotificationBanner
+          key={sdk.app_id}
           items={sdkNotifications}
           serviceRefs={notificationServiceRefs}
           onMarkRead={markNotificationRead}
@@ -751,12 +766,15 @@ function SdkLoadedContent({
             Docs
           </button>
         ))}
-        <button
-          onClick={() => setActiveTab("analytics")}
-          className={sdkTabClass(activeTab === "analytics")}
-        >
-          Activity
-        </button>
+        {/* Execution Activity is discoverable only with the exact app and audit capability. */}
+        {optionalNode(canReadActivity, (
+          <button
+            onClick={() => setActiveTab("analytics")}
+            className={sdkTabClass(activeTab === "analytics")}
+          >
+            Activity
+          </button>
+        ))}
       </div>
 
       {/* Tab Content */}
@@ -879,7 +897,7 @@ function SdkLoadedContent({
         ))}
 
         {optionalNode(activeTab === "analytics", (
-          <div className="space-y-6">
+          <div className="min-w-0 max-w-full space-y-5 overflow-x-hidden sm:space-y-6">
             <NestedActivityTabs
               active={activitySection}
               ariaLabel="App activity"
@@ -891,23 +909,17 @@ function SdkLoadedContent({
               ]}
             />
 
-            {optionalNode(!canReadActivity && activitySection !== "changes", (
-              <div className="rounded-lg border border-slate-200 bg-white px-6 py-12 text-center text-sm text-slate-500">
-                App activity access is not available for your account.
-              </div>
-            ))}
-
             {optionalNode(canReadActivity && activitySection === "overview", (
               <AppActivityOverview
                 appId={sdk.app_id}
-                downloads={sdk.downloads ?? 0}
+                downloads={sdk.downloads ?? null}
                 pendingDriftCount={0}
                 services={sdk.detailed_selections ?? []}
               />
             ))}
 
             {optionalNode(canReadActivity && activitySection === "requests", (
-              <AppRequestsPanel appId={sdk.app_id} transport={sdkTransport(sdk)} />
+              <AppRequestsPanel appId={sdk.app_id} consumerName={sdk.name} transport={sdkTransport(sdk)} />
             ))}
 
             {optionalNode(activitySection === "changes", <div className="space-y-6">
@@ -915,9 +927,9 @@ function SdkLoadedContent({
                 <div className="border-b border-slate-100 bg-slate-50 px-5 py-3"><h4 className="text-sm font-semibold text-slate-800">Version history</h4></div>
                 <div className="divide-y divide-slate-100">
                   {versions.map((version) => (
-                    <div key={version.id} className="flex items-center justify-between px-5 py-3 text-sm">
-                      <button type="button" onClick={() => handleVersionSwitch(version.id)} className="font-medium text-slate-800 hover:text-blue-600">{version.version}</button>
-                      <span className="text-xs text-slate-400">{new Date(version.created_at).toLocaleDateString()}</span>
+                    <div key={version.id} className="flex min-w-0 items-center justify-between gap-3 px-4 py-3 text-sm sm:px-5">
+                      <button type="button" onClick={() => handleVersionSwitch(version.id)} className="min-w-0 break-all text-left font-medium text-slate-800 hover:text-blue-600">{version.version}</button>
+                      <span className="shrink-0 text-xs text-slate-400">{new Date(version.created_at).toLocaleDateString()}</span>
                     </div>
                   ))}
                 </div>

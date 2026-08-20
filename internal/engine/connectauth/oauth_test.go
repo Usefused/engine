@@ -199,7 +199,7 @@ func TestTokenGrantsRejectUnknownOrEmptyMethodBeforeHTTP(t *testing.T) {
 		{name: "legacy Basic", authType: "oauth2", method: "basic"},
 		{name: "legacy body", authType: "oauth2", method: "body"},
 		{name: "unknown", authType: "oauth2", method: "unexpected"},
-		{name: "non OAuth", authType: "openIdConnect", method: fusedobject.TokenEndpointAuthMethodClientSecretPost},
+		{name: "non OAuth", authType: "apiKey", method: fusedobject.TokenEndpointAuthMethodClientSecretPost},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

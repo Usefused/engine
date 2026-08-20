@@ -357,6 +357,7 @@ var mcpAnalyticsDashboardType = graphql.NewObject(graphql.ObjectConfig{
 
 func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient, masterKey []byte) (graphql.Schema, error) {
 	publicInsightReader := newPublicInsightReader(registryClient)
+	packageDownloads, _ := registryClient.(sandbox.SDKPackageDownloadCountClient)
 	query := graphql.NewObject(graphql.ObjectConfig{
 		// The endpoint started with MCP operations, but it now owns broader
 		// Engine reads like buckets and Connect auth. The root type name appears
@@ -364,9 +365,9 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 		Name: "EngineQuery",
 		Fields: graphql.Fields{
 			"currentActorAccess":          currentActorAccessGraphQLField(),
-			"app":                         appGraphQLField(s),
-			"apps":                        appsGraphQLField(s),
-			"appVersions":                 appVersionsGraphQLField(s),
+			"app":                         appGraphQLField(s, packageDownloads),
+			"apps":                        appsGraphQLField(s, packageDownloads),
+			"appVersions":                 appVersionsGraphQLField(s, packageDownloads),
 			"appServices":                 appServicesGraphQLField(s),
 			"accessExplanation":           accessExplanationGraphQLField(s),
 			"auditEvents":                 auditEventsGraphQLField(s),

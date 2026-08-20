@@ -15,10 +15,10 @@ const PANEL_LIMIT = 6;
 export function NotificationBell() {
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
-  const { unresolved, pendingCount, serviceRefs, markRead, dismiss, canUpdate } = useWorkspaceNotifications();
+  const { unresolved, pendingCount, serviceRefs, markRead, dismiss, canRead, canUpdate } = useWorkspaceNotifications();
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || !canRead) return;
     const handleClickOutside = (e: MouseEvent) => {
       if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
         setOpen(false);
@@ -26,10 +26,14 @@ export function NotificationBell() {
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [open]);
+  }, [canRead, open]);
 
   const previewItems = unresolved.slice(0, PANEL_LIMIT);
   const hasMore = unresolved.length > PANEL_LIMIT;
+
+  // The bell is a notification read surface, so hiding it also prevents an
+  // unauthorized actor from discovering a tab they cannot query.
+  if (!canRead) return null;
 
   return (
     <div ref={panelRef} className="relative z-20">

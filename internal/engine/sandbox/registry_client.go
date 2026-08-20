@@ -165,6 +165,25 @@ type sdkPackageLeaseResponse struct {
 	Renewed int64 `json:"renewed"`
 }
 
+type sdkPackageDownloadCountsRequest struct {
+	AppIDs []uuid.UUID `json:"app_ids"`
+}
+
+type sdkPackageDownloadCount struct {
+	AppID     uuid.UUID `json:"app_id"`
+	Downloads int64     `json:"downloads"`
+}
+
+type sdkPackageDownloadCountsResponse struct {
+	Counts []sdkPackageDownloadCount `json:"counts"`
+}
+
+// SDKPackageDownloadCountClient is the narrow analytics projection consumed
+// by Engine GraphQL; package bytes remain on the separate download interface.
+type SDKPackageDownloadCountClient interface {
+	FetchSDKPackageDownloadCounts(context.Context, []uuid.UUID) (map[uuid.UUID]int64, error)
+}
+
 type publicInsightEligibilityRequest struct {
 	ServiceIDs []uuid.UUID `json:"service_ids"`
 }
@@ -1978,6 +1997,26 @@ func (c *HTTPRegistryClient) DownloadSDKPackage(ctx context.Context, appID uuid.
 		return nil, fmt.Errorf("SDK package download: request failed: %w", err)
 	}
 	return response, nil
+}
+
+// FetchSDKPackageDownloadCounts returns completed Registry download events for
+// an exact, bounded app batch without exposing event rows to the browser.
+func (c *HTTPRegistryClient) FetchSDKPackageDownloadCounts(ctx context.Context, appIDs []uuid.UUID) (map[uuid.UUID]int64, error) {
+	counts := make(map[uuid.UUID]int64, len(appIDs))
+	if len(appIDs) == 0 {
+		return counts, nil
+	}
+	if len(appIDs) > 100 {
+		return nil, errors.New("SDK package download count batch exceeds 100 apps")
+	}
+	var response sdkPackageDownloadCountsResponse
+	if err := c.postSignedEngineJSON(ctx, "/sdk-packages/download-counts", sdkPackageDownloadCountsRequest{AppIDs: appIDs}, &response); err != nil {
+		return nil, fmt.Errorf("fetch SDK package download counts: %w", err)
+	}
+	for _, item := range response.Counts {
+		counts[item.AppID] = item.Downloads
+	}
+	return counts, nil
 }
 
 func (c *HTTPRegistryClient) FetchPublicServiceInsightEligibility(ctx context.Context, serviceIDs []uuid.UUID) (map[uuid.UUID]bool, error) {

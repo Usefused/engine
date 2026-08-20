@@ -26,7 +26,7 @@ func LicenseEnforcement(next http.Handler) http.Handler {
 			_, _ = w.Write([]byte(`{"error":"license suspended"}`))
 			return
 		}
-		if entitlement.EngineHeartbeatLeaseExpired.Load() && licenseRuntimeHTTPPath(r.URL.Path) {
+		if entitlement.EngineHeartbeatLeaseExpired.Load() && licenseRuntimeHTTPRequest(r) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = w.Write([]byte(`{"error":"license verification expired"}`))
@@ -40,8 +40,20 @@ func licenseRecoveryHTTPPath(path string) bool {
 	return path == "/health" || path == "/auth" || strings.HasPrefix(path, "/auth/")
 }
 
-func licenseRuntimeHTTPPath(path string) bool {
-	return path == "/mcp/message" || path == "/mcp/call" || strings.HasPrefix(path, "/mcp/") || strings.HasPrefix(path, "/webhook/")
+// licenseRuntimeHTTPRequest identifies data-plane HTTP calls whose execution
+// must stop when the Registry heartbeat lease is no longer valid.
+func licenseRuntimeHTTPRequest(request *http.Request) bool {
+	path := request.URL.Path
+	if path == "/mcp/message" || path == "/mcp/call" || strings.HasPrefix(path, "/mcp/") || strings.HasPrefix(path, "/webhook/") {
+		return true
+	}
+	if request.Method != http.MethodPost || !strings.HasPrefix(path, "/v1/apps/") {
+		return false
+	}
+	// Match the mounted chi route exactly so administrative methods, trailing
+	// slashes, and future app subresources retain their own license policy.
+	parts := strings.Split(strings.TrimPrefix(path, "/v1/apps/"), "/")
+	return len(parts) == 2 && parts[0] != "" && parts[1] == "executions"
 }
 
 // UnaryLicenseEnforcement and StreamLicenseEnforcement apply the same runtime

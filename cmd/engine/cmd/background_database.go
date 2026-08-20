@@ -56,16 +56,31 @@ type serializedBackgroundStore struct {
 	revisionLoader accesscontrol.AuthorizationRevisionLoader
 	usageReports   worker.RuntimeUsageReportStore
 	packageLeases  worker.SDKPackageLeaseStore
+	authRefresh    worker.ConnectedAuthRefreshStore
 }
 
+// newSerializedBackgroundStore discovers optional worker capabilities once and
+// applies one shared gate only to their short scheduled database probes.
 func newSerializedBackgroundStore(source store.Store) *serializedBackgroundStore {
 	revisionLoader, _ := source.(accesscontrol.AuthorizationRevisionLoader)
 	usageReports, _ := source.(worker.RuntimeUsageReportStore)
 	packageLeases, _ := source.(worker.SDKPackageLeaseStore)
+	authRefresh, _ := source.(worker.ConnectedAuthRefreshStore)
 	return &serializedBackgroundStore{
 		Store: source, gate: newBackgroundDatabaseGate(), revisionLoader: revisionLoader,
-		usageReports: usageReports, packageLeases: packageLeases,
+		usageReports: usageReports, packageLeases: packageLeases, authRefresh: authRefresh,
 	}
+}
+
+// connectedAuthRefreshCapability returns the gated claim view only when the
+// wrapped Engine store can actually persist cross-replica refresh leases.
+func (s *serializedBackgroundStore) connectedAuthRefreshCapability() (worker.ConnectedAuthRefreshStore, error) {
+	if s == nil || s.authRefresh == nil {
+		// Why: returning the wrapper itself would defer a missing capability to
+		// hourly runtime failures and silently let OAuth grants expire.
+		return nil, errBackgroundStoreCapability
+	}
+	return s, nil
 }
 
 func (s *serializedBackgroundStore) LoadAuthorizationRevision(ctx context.Context) (int64, error) {
@@ -99,6 +114,17 @@ func (s *serializedBackgroundStore) ListSDKPackageLeaseRenewals(ctx context.Cont
 	}
 	return backgroundDatabaseValue(ctx, s.gate, func() ([]models.SDKPackageLeaseRenewal, error) {
 		return s.packageLeases.ListSDKPackageLeaseRenewals(ctx, after, limit)
+	})
+}
+
+// ClaimAuthConnectionsForRefresh serializes only the due-row discovery and
+// lease claim; token-provider calls and completion writes bypass this gate.
+func (s *serializedBackgroundStore) ClaimAuthConnectionsForRefresh(ctx context.Context, cutoff, passStartedAt, now, leaseExpiresAt time.Time, limit int) ([]store.AuthConnectionRefreshClaim, error) {
+	if s.authRefresh == nil {
+		return nil, errBackgroundStoreCapability
+	}
+	return backgroundDatabaseValue(ctx, s.gate, func() ([]store.AuthConnectionRefreshClaim, error) {
+		return s.authRefresh.ClaimAuthConnectionsForRefresh(ctx, cutoff, passStartedAt, now, leaseExpiresAt, limit)
 	})
 }
 

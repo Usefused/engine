@@ -14,14 +14,15 @@ import (
 )
 
 var (
-	ErrAppRuntimeNotFound           = errors.New("sdk scope not found")
-	ErrSDKBucketImmutable           = errors.New("sdk bucket assignment is immutable")
-	ErrBucketNotFound               = errors.New("bucket not found")
-	ErrBucketBound                  = errors.New("bucket is bound to an app")
-	ErrDefaultBucketProtected       = errors.New("default bucket cannot be deleted")
-	ErrAuthConnectionNotFound       = errors.New("auth connection not found")
-	ErrConnectSessionUnavailable    = errors.New("connect session not found or already used")
-	ErrInvalidEncryptedAuthMaterial = errors.New("invalid encrypted auth material")
+	ErrAppRuntimeNotFound                = errors.New("sdk scope not found")
+	ErrSDKBucketImmutable                = errors.New("sdk bucket assignment is immutable")
+	ErrBucketNotFound                    = errors.New("bucket not found")
+	ErrBucketBound                       = errors.New("bucket is bound to an app")
+	ErrDefaultBucketProtected            = errors.New("default bucket cannot be deleted")
+	ErrAuthConnectionNotFound            = errors.New("auth connection not found")
+	ErrInvalidAuthConnectionRefreshClaim = errors.New("invalid auth connection refresh claim")
+	ErrConnectSessionUnavailable         = errors.New("connect session not found or already used")
+	ErrInvalidEncryptedAuthMaterial      = errors.New("invalid encrypted auth material")
 
 	// App-family errors
 	ErrAppFamilyNotFound     = errors.New("app family not found")
@@ -585,6 +586,7 @@ type AuthConnection struct {
 	ID                    uuid.UUID
 	BucketID              uuid.UUID
 	ServiceID             uuid.UUID
+	ServiceVersionID      uuid.UUID
 	EndUserRef            string
 	CreatedByAppID        uuid.UUID
 	AuthType              string
@@ -602,6 +604,9 @@ type AuthConnection struct {
 	ExpiresAt             *time.Time
 	RefreshTokenExpiresAt *time.Time
 	LastUsedAt            *time.Time
+	LastRefreshAttemptAt  *time.Time
+	LastRefreshedAt       *time.Time
+	RefreshRetryNotBefore *time.Time
 	RefreshState          string
 	// Failure metadata is deliberately limited to stable codes and OTEL
 	// correlation; raw provider responses and user identifiers do not belong here.
@@ -612,10 +617,31 @@ type AuthConnection struct {
 	UpdatedAt          time.Time
 }
 
+// AuthConnectionRefreshClaim carries the private CAS token beside, rather than
+// inside, the user-facing connection model so lease material cannot leak into
+// GraphQL projections that expose AuthConnection fields.
+type AuthConnectionRefreshClaim struct {
+	Connection     AuthConnection
+	LeaseToken     uuid.UUID
+	LeaseExpiresAt time.Time
+}
+
+// AuthConnectionRefreshStore is the narrow persistence boundary shared by the
+// background worker and request-time fallback refresh coordinator.
+type AuthConnectionRefreshStore interface {
+	ClaimAuthConnectionsForRefresh(ctx context.Context, cutoff, passStartedAt, now, leaseExpiresAt time.Time, limit int) ([]AuthConnectionRefreshClaim, error)
+	TryClaimAuthConnectionRefresh(ctx context.Context, id, serviceVersionID uuid.UUID, now, leaseExpiresAt time.Time) (*AuthConnectionRefreshClaim, error)
+	CompleteAuthConnectionRefresh(ctx context.Context, id, leaseToken uuid.UUID, refreshed AuthConnection, refreshedAt time.Time) (*AuthConnection, bool, error)
+	ReleaseAuthConnectionRefresh(ctx context.Context, id, leaseToken uuid.UUID, retryNotBefore time.Time, failureCode, traceID string, failedAt time.Time) (bool, error)
+	MarkAuthConnectionReconnectRequired(ctx context.Context, id, leaseToken uuid.UUID, failureCode, traceID string, failedAt time.Time) (bool, error)
+	GetAuthConnectionByID(ctx context.Context, id uuid.UUID) (*AuthConnection, error)
+}
+
 type ConnectSession struct {
 	ID                    uuid.UUID
 	BucketID              uuid.UUID
 	ServiceID             uuid.UUID
+	ServiceVersionID      uuid.UUID
 	AuthType              string
 	AuthName              string
 	EndUserRef            string
@@ -831,7 +857,6 @@ type Store interface {
 	// RecordAuthConnectionFailure updates only sanitized operational metadata so
 	// observing a provider response cannot overwrite connection credentials.
 	RecordAuthConnectionFailure(ctx context.Context, id uuid.UUID, code, traceID string, failedAt time.Time) error
-	ListAuthConnectionsNeedingRefresh(ctx context.Context, cutoff time.Time, limit int) ([]AuthConnection, error)
 	CreateConnectSession(ctx context.Context, session ConnectSession) (*ConnectSession, error)
 	GetConnectSessionByStateHash(ctx context.Context, stateHash string) (*ConnectSession, error)
 	MarkConnectSessionUsed(ctx context.Context, stateHash string, usedAt time.Time) error

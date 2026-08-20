@@ -5,6 +5,7 @@ import { NotificationList } from "~/components/notifications/NotificationList";
 
 type SeverityFilter = "all" | "breaking" | "non-breaking";
 
+// matchesNotificationSearch searches only fields already present on the current page.
 function matchesNotificationSearch(
   item: { message?: string; version?: string; config_key?: string; service_id?: string },
   serviceRefs: Record<string, { name?: string } | undefined>,
@@ -15,6 +16,7 @@ function matchesNotificationSearch(
   return haystacks.some((value) => (value || "").toLowerCase().includes(query));
 }
 
+// notificationsEmptyMessage keeps each filter state explicit when its current page is empty.
 function notificationsEmptyMessage(filter: SeverityFilter, readFilter: string): string {
   if (filter !== "all") return `No ${filter} notifications`;
   if (readFilter === "unread") return "No unread notifications";
@@ -67,24 +69,26 @@ interface NotificationsPaginationProps {
   setPage: (page: number) => void;
 }
 
+// NotificationsPagination keeps mobile controls bounded while desktop retains direct page access.
 function NotificationsPagination({ page, totalPages, totalCount, setPage }: NotificationsPaginationProps) {
   if (totalPages <= 1) return null;
   return (
-    <div className="flex items-center justify-between border-t border-slate-100 dark:border-slate-800 px-4 py-3 text-xs text-slate-500">
+    <div className="flex flex-col gap-3 border-t border-slate-100 px-4 py-3 text-xs text-slate-500 min-[380px]:flex-row min-[380px]:items-center min-[380px]:justify-between dark:border-slate-800">
       <span>
         Page {page} of {totalPages} · {totalCount} total
       </span>
-      <div className="flex items-center gap-1">
+      <div className="flex w-full items-center justify-between gap-1 min-[380px]:w-auto min-[380px]:justify-start">
         <button
           type="button"
           data-track="notifications_prev_page"
           onClick={() => setPage(Math.max(1, page - 1))}
           disabled={page <= 1}
-          className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40"
+          className="flex h-9 w-9 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40"
           aria-label="Previous page"
         >
           <ChevronLeft className="h-4 w-4" />
         </button>
+        <div className="hidden items-center gap-1 sm:flex">
         {Array.from({ length: totalPages }, (_, i) => i + 1).map((p) => (
           <button
             key={p}
@@ -100,12 +104,13 @@ function NotificationsPagination({ page, totalPages, totalCount, setPage }: Noti
             {p}
           </button>
         ))}
+        </div>
         <button
           type="button"
           data-track="notifications_next_page"
           onClick={() => setPage(Math.min(totalPages, page + 1))}
           disabled={page >= totalPages}
-          className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40"
+          className="flex h-9 w-9 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40"
           aria-label="Next page"
         >
           <ChevronRight className="h-4 w-4" />
@@ -115,6 +120,7 @@ function NotificationsPagination({ page, totalPages, totalCount, setPage }: Noti
   );
 }
 
+// notificationsFooterLabel summarizes the backend-filtered notification count.
 function notificationsFooterLabel(readFilter: string, totalCount: number): string {
   const kind = readFilter === "all" ? "total" : readFilter;
   const plural = totalCount === 1 ? "" : "s";
@@ -165,9 +171,9 @@ export function NotificationsContent() {
   const nonBreakingCount = items.length - breakingCount;
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div className="flex items-center gap-1 p-1 bg-slate-100/80 rounded-lg w-fit">
+    <div className="min-w-0 space-y-5 sm:space-y-6">
+      <div className="flex min-w-0 flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <div className="grid w-full grid-cols-3 gap-1 rounded-lg bg-slate-100/80 p-1 md:flex md:w-fit">
           {([
             ["all", `All (${items.length})`],
             ["breaking", `Breaking (${breakingCount})`],
@@ -178,7 +184,7 @@ export function NotificationsContent() {
               data-track={`filter_notifications_${value}`}
               type="button"
               onClick={() => setFilter(value)}
-              className={`px-3 py-1.5 text-sm font-medium rounded-md transition-all cursor-pointer ${
+              className={`min-w-0 truncate rounded-md px-1.5 py-2 text-[11px] font-medium transition-all cursor-pointer sm:px-3 sm:py-1.5 sm:text-sm ${
                 filter === value ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"
               }`}
             >
@@ -187,21 +193,21 @@ export function NotificationsContent() {
           ))}
         </div>
 
-        <div className="flex items-center gap-4">
-          <div className="relative">
+        <div className="flex w-full min-w-0 flex-col gap-3 md:w-auto md:flex-row md:items-center md:gap-4">
+          <div className="relative w-full md:w-64">
             <Search className="w-4 h-4 absolute left-2.5 top-2.5 text-slate-400" />
             <input
               type="text"
               placeholder="Filter notifications..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="pl-9 pr-3 py-1.5 text-sm border border-slate-200 rounded-lg w-full sm:w-64 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className="w-full rounded-lg border border-slate-200 py-2 pl-9 pr-3 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500 md:py-1.5"
             />
           </div>
-          <div className="flex bg-slate-100 p-0.5 rounded-lg border border-slate-200">
+          <div className="grid w-full grid-cols-3 rounded-lg border border-slate-200 bg-slate-100 p-0.5 md:flex md:w-auto">
             <button
               onClick={() => setReadFilter("unread")}
-              className={`px-3 py-1 text-sm font-medium rounded-md transition-colors ${
+              className={`rounded-md px-3 py-2 text-sm font-medium transition-colors md:py-1 ${
                 readFilter === "unread" ? "bg-white text-slate-900 shadow-sm" : "text-slate-600 hover:text-slate-900"
               }`}
             >
@@ -209,7 +215,7 @@ export function NotificationsContent() {
             </button>
             <button
               onClick={() => setReadFilter("read")}
-              className={`px-3 py-1 text-sm font-medium rounded-md transition-colors ${
+              className={`rounded-md px-3 py-2 text-sm font-medium transition-colors md:py-1 ${
                 readFilter === "read" ? "bg-white text-slate-900 shadow-sm" : "text-slate-600 hover:text-slate-900"
               }`}
             >
@@ -217,7 +223,7 @@ export function NotificationsContent() {
             </button>
             <button
               onClick={() => setReadFilter("all")}
-              className={`px-3 py-1 text-sm font-medium rounded-md transition-colors ${
+              className={`rounded-md px-3 py-2 text-sm font-medium transition-colors md:py-1 ${
                 readFilter === "all" ? "bg-white text-slate-900 shadow-sm" : "text-slate-600 hover:text-slate-900"
               }`}
             >
@@ -227,7 +233,7 @@ export function NotificationsContent() {
         </div>
       </div>
 
-      <div className="bg-white border-y border-slate-200 overflow-hidden">
+      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
         <NotificationsBody
           loading={loading}
           error={error}
@@ -244,7 +250,7 @@ export function NotificationsContent() {
         <NotificationsPagination page={page} totalPages={totalPages} totalCount={totalCount} setPage={setPage} />
       </div>
 
-      <p className="text-xs text-slate-400 text-center">
+      <p className="px-2 text-center text-xs leading-5 text-slate-400">
         {notificationsFooterLabel(readFilter, totalCount)}. Dismissing is
         permanent -- there's no undo. Marking one read just de-emphasizes it here; either action also stops it
         from appearing on <code className="text-slate-500">fused-cli plan</code>/

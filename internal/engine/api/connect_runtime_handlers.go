@@ -118,7 +118,13 @@ func ConnectCallbackHandler(s store.Store, verifier ServiceVerifier, masterKey [
 		}
 		call := connectAdminCall{bucketID: session.BucketID, serviceID: session.ServiceID}
 		span.SetAttributes(connectAdminAttrs("connect.callback", call)...)
-		resolved, err := resolveConnectRuntimeConfig(ctx, s, verifier, call, masterKey)
+		// Legacy sessions without an unambiguous migration backfill fail closed;
+		// the callback must never float to a newer provider contract.
+		if session.ServiceVersionID == uuid.Nil {
+			writeConnectCallbackFailure(ctx, s, w, r, session, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "connect session service version is unavailable"})
+			return
+		}
+		resolved, err := resolveConnectRuntimeConfigForVersion(ctx, s, verifier, call, session.ServiceVersionID, masterKey)
 		if err != nil {
 			writeConnectCallbackFailure(ctx, s, w, r, session, err)
 			return
@@ -209,6 +215,12 @@ func decodeConnectSessionStartRequest(w http.ResponseWriter, r *http.Request) (c
 // service version, which prevents onboarding against auth metadata the
 // workspace will not use at runtime.
 func resolveConnectRuntimeConfig(ctx context.Context, s store.Store, verifier ServiceVerifier, call connectAdminCall, masterKey []byte) (connectRuntimeConfig, error) {
+	return resolveConnectRuntimeConfigForVersion(ctx, s, verifier, call, uuid.Nil, masterKey)
+}
+
+// resolveConnectRuntimeConfigForVersion resolves either the latest start-time
+// version or the exact immutable version pinned on a callback session.
+func resolveConnectRuntimeConfigForVersion(ctx context.Context, s store.Store, verifier ServiceVerifier, call connectAdminCall, serviceVersionID uuid.UUID, masterKey []byte) (connectRuntimeConfig, error) {
 	cfg, err := s.GetConnectConfig(ctx, call.bucketID, call.serviceID)
 	if err != nil {
 		return connectRuntimeConfig{}, fmt.Errorf("load connect config: %w", err)
@@ -216,18 +228,7 @@ func resolveConnectRuntimeConfig(ctx context.Context, s store.Store, verifier Se
 	if cfg == nil || !cfg.Enabled {
 		return connectRuntimeConfig{}, connectRuntimeHTTPError{status: http.StatusNotFound, message: "connect config not found"}
 	}
-	version, err := s.GetLatestWorkspaceServiceVersionByWorkspace(ctx, call.serviceID)
-	if err != nil {
-		return connectRuntimeConfig{}, fmt.Errorf("load workspace service version: %w", err)
-	}
-	// Connect follows the workspace-pinned service metadata, not arbitrary
-	// registry latest, so auth URLs/scopes match the version the Engine will
-	// dispatch for this bucket.
-	metadata, err := verifier.FetchServiceMetadata(ctx, call.serviceID, version)
-	if err != nil {
-		return connectRuntimeConfig{}, fmt.Errorf("load service metadata: %w", err)
-	}
-	metadata, err = attachedConnectMetadata(ctx, s, call, cfg.AuthType, metadata)
+	metadata, err := loadConnectRuntimeMetadata(ctx, s, verifier, call, cfg.AuthType, serviceVersionID)
 	if err != nil {
 		return connectRuntimeConfig{}, err
 	}
@@ -240,6 +241,51 @@ func resolveConnectRuntimeConfig(ctx context.Context, s store.Store, verifier Se
 		return connectRuntimeConfig{}, fmt.Errorf("decrypt connect client credentials: %w", err)
 	}
 	return connectRuntimeConfig{config: cfg, auth: auth, flow: flow, credentials: creds, metadata: metadata}, nil
+}
+
+// loadConnectRuntimeMetadata loads and verifies one pinned service contract,
+// then applies the effective workspace-owned connection profile snapshot.
+func loadConnectRuntimeMetadata(ctx context.Context, s store.Store, verifier ServiceVerifier, call connectAdminCall, authType string, serviceVersionID uuid.UUID) (*fusedobject.ServiceMetadata, error) {
+	version, err := resolveConnectRuntimeVersion(ctx, s, call.serviceID, serviceVersionID)
+	if err != nil {
+		return nil, fmt.Errorf("load workspace service version: %w", err)
+	}
+	// Connect follows the workspace-pinned service metadata, not arbitrary
+	// registry latest, so auth URLs/scopes match the version the Engine will
+	// dispatch for this bucket.
+	metadata, err := verifier.FetchServiceMetadata(ctx, call.serviceID, version)
+	if err != nil {
+		return nil, fmt.Errorf("load service metadata: %w", err)
+	}
+	// A Registry response must match the session's immutable identity; accepting
+	// only its version label would permit metadata drift across the browser hop.
+	if serviceVersionID != uuid.Nil && metadata.ServiceVersionID != serviceVersionID {
+		return nil, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "connect service version changed"}
+	}
+	metadata, err = attachedConnectMetadata(ctx, s, call, authType, metadata)
+	if err != nil {
+		return nil, err
+	}
+	return metadata, nil
+}
+
+// resolveConnectRuntimeVersion maps an exact local service-version ID back to
+// its Registry version label, while preserving latest-version behavior at start.
+func resolveConnectRuntimeVersion(ctx context.Context, s store.Store, serviceID, serviceVersionID uuid.UUID) (string, error) {
+	if serviceVersionID == uuid.Nil {
+		return s.GetLatestWorkspaceServiceVersionByWorkspace(ctx, serviceID)
+	}
+	versionStore, ok := s.(store.WorkspaceServiceVersionLookupStore)
+	// Exact callback resolution is an optional narrow capability so unrelated
+	// Store test doubles do not acquire another method merely for Connect auth.
+	if !ok {
+		return "", errors.New("exact workspace service version lookup is unavailable")
+	}
+	version, err := versionStore.GetWorkspaceServiceVersion(ctx, serviceID, serviceVersionID)
+	if err != nil {
+		return "", err
+	}
+	return version.Version, nil
 }
 
 func connectOAuth2FlowName(metadata *fusedobject.ServiceMetadata) string {
@@ -433,6 +479,7 @@ func buildProviderConnectSession(call connectAdminCall, endUserRef string, creat
 	session := store.ConnectSession{
 		BucketID:              call.bucketID,
 		ServiceID:             call.serviceID,
+		ServiceVersionID:      resolved.metadata.ServiceVersionID,
 		AuthType:              resolved.config.AuthType,
 		AuthName:              resolved.config.AuthName,
 		EndUserRef:            endUserRef,
@@ -865,6 +912,7 @@ func encryptAuthConnectionFromToken(session *store.ConnectSession, resolved conn
 	return store.AuthConnection{
 		BucketID:              session.BucketID,
 		ServiceID:             session.ServiceID,
+		ServiceVersionID:      session.ServiceVersionID,
 		EndUserRef:            session.EndUserRef,
 		CreatedByAppID:        session.CreatedByAppID,
 		AuthType:              resolved.config.AuthType,

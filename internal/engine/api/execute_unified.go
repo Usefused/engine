@@ -8,6 +8,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/engine/unified"
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
@@ -38,6 +39,7 @@ type preparedUnifiedCall struct {
 	appID          uuid.UUID
 	operation      string
 	idempotencyKey string
+	transport      string
 	input          any
 	targets        []preparedUnifiedTarget
 }
@@ -78,7 +80,7 @@ func (s *EngineGRPCServer) ExecuteUnified(ctx context.Context, request *enginev1
 		return nil, err
 	}
 	stage = "validation"
-	call, err := s.prepareUnifiedCall(ctx, scope, identity, request)
+	call, err := s.prepareUnifiedCall(ctx, scope, identity, request, models.EngineExecutionTransportSDK)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +98,7 @@ func boundedUnifiedTargetCount(request *enginev1.ExecuteUnifiedRequest) int {
 }
 
 // prepareUnifiedCall authenticates, validates, resolves, and preflights the complete logical call before scheduling.
-func (s *EngineGRPCServer) prepareUnifiedCall(ctx context.Context, scope *store.AppRuntime, identity auth.RuntimeIdentity, request *enginev1.ExecuteUnifiedRequest) (preparedUnifiedCall, error) {
+func (s *EngineGRPCServer) prepareUnifiedCall(ctx context.Context, scope *store.AppRuntime, identity auth.RuntimeIdentity, request *enginev1.ExecuteUnifiedRequest, transport string) (preparedUnifiedCall, error) {
 	validated, err := validateUnifiedRequest(scope, request)
 	if err != nil {
 		return preparedUnifiedCall{}, err
@@ -133,7 +135,8 @@ func (s *EngineGRPCServer) prepareUnifiedCall(ctx context.Context, scope *store.
 	}
 	return preparedUnifiedCall{
 		identity: identity, appID: scope.AppID, operation: definition.Name,
-		idempotencyKey: validated.idempotencyKey, input: validated.input, targets: targets,
+		idempotencyKey: validated.idempotencyKey, transport: transport,
+		input: validated.input, targets: targets,
 	}, nil
 }
 

@@ -89,7 +89,7 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		"workspaceConnectConfigs":     permissions(accesscontrol.PermissionConnectionRead),
 		"mcpServers":                  collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
 		"mcpServerByName":             permissions(accesscontrol.PermissionAppRead),
-		"mcpAnalytics":                appArgumentPermissions("app_id", accesscontrol.PermissionAppRead),
+		"mcpAnalytics":                appArgumentPermissions("app_id", accesscontrol.PermissionAppRead, accesscontrol.PermissionAuditRead),
 		"bucketSummaries":             collectionPermissions(accesscontrol.ResourceBucket, accesscontrol.PermissionBucketRead),
 		"bucketSummary":               argumentPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionBucketRead),
 		"bucketSummaryPage":           collectionPermissions(accesscontrol.ResourceBucket, accesscontrol.PermissionBucketRead),

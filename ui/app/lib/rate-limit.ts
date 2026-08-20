@@ -112,3 +112,58 @@ export function rateLimitSummary(config?: RateLimitConfig | null): string {
   const count = config.policies.length;
   return `${count} ${count === 1 ? "policy" : "policies"}`;
 }
+
+// rateLimitDurationLabel turns exact millisecond windows into compact labels
+// that remain legible inside the narrow service-configuration cards.
+export function rateLimitDurationLabel(durationMs: number): string {
+  // Prefer the largest exact unit so the label never rounds a configured limit.
+  if (durationMs > 0 && durationMs % 3_600_000 === 0) {
+    return `${durationMs / 3_600_000} hr`;
+  }
+  if (durationMs > 0 && durationMs % 60_000 === 0) {
+    return `${durationMs / 60_000} min`;
+  }
+  if (durationMs > 0 && durationMs % 1_000 === 0) {
+    return `${durationMs / 1_000} sec`;
+  }
+  return `${durationMs} ms`;
+}
+
+// rateLimitAlgorithmLabel presents contract identifiers as readable UI copy.
+export function rateLimitAlgorithmLabel(algorithm: RateLimitAlgorithm): string {
+  const labels: Record<RateLimitAlgorithm, string> = {
+    fixed_window: "Fixed window",
+    rolling_window: "Rolling window",
+    token_bucket: "Token bucket",
+    concurrency: "Concurrency",
+  };
+  return labels[algorithm];
+}
+
+// rateLimitPolicyName preserves the configured words while removing identifier
+// punctuation that creates awkward wrapping in compact cards.
+export function rateLimitPolicyName(name: string): string {
+  const readable = name.replace(/[_-]+/g, " ").trim();
+  // Empty names are invalid upstream, but retaining a stable fallback keeps the
+  // details view usable if it encounters an older malformed snapshot.
+  if (!readable) return "Policy";
+  return readable.charAt(0).toUpperCase() + readable.slice(1);
+}
+
+// rateLimitPolicyQuotaLabel makes the effective quota the primary policy detail.
+export function rateLimitPolicyQuotaLabel(policy: RateLimitPolicy): string {
+  const window = policy.fixed_window ?? policy.rolling_window;
+  if (window) {
+    return `${window.limit} ${policy.unit} / ${rateLimitDurationLabel(window.duration_ms)}`;
+  }
+  if (policy.token_bucket) {
+    const refill = rateLimitDurationLabel(policy.token_bucket.refill_interval_ms);
+    return `${policy.token_bucket.capacity} ${policy.unit} · +${policy.token_bucket.refill_units} / ${refill}`;
+  }
+  if (policy.concurrency) {
+    return `${policy.concurrency.limit} concurrent ${policy.unit}`;
+  }
+  // The algorithm-specific object is required by the contract; this fallback
+  // avoids inventing a quota when rendering a partially migrated snapshot.
+  return `${policy.unit} policy`;
+}

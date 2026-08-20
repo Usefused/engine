@@ -94,9 +94,14 @@ func TestEngineGRPCGetConnectionReturnsMetadataOnly(t *testing.T) {
 	workspaceID := uuid.New()
 	bucketID := uuid.New()
 	serviceID := uuid.New()
+	serviceVersionID := uuid.New()
 	connectionID := uuid.New()
 	now := time.Now().UTC()
 	expiresAt := now.Add(time.Hour)
+	lastAttemptAt := now.Add(-time.Minute)
+	lastRefreshedAt := now.Add(-30 * time.Second)
+	nextRefreshAt := now.Add(30 * time.Minute)
+	lastFailureAt := now.Add(-2 * time.Minute)
 	s := &workspaceTestStore{
 		accountID:   uuid.New(),
 		workspaceID: workspaceID,
@@ -105,9 +110,11 @@ func TestEngineGRPCGetConnectionReturnsMetadataOnly(t *testing.T) {
 			CreatedAt: now, UpdatedAt: now,
 		}},
 		authConnections: []store.AuthConnection{{
-			ID: connectionID, BucketID: bucketID, ServiceID: serviceID,
-			EndUserRef: "user_123", AuthType: "oauth", TokenType: "bearer", Scopes: []string{"user:email"},
+			ID: connectionID, BucketID: bucketID, ServiceID: serviceID, ServiceVersionID: serviceVersionID,
+			EndUserRef: "user_123", AuthType: "oauth", AuthName: "OAuth2", TokenType: "bearer", Scopes: []string{"user:email"},
 			ScopeSource: "provider", ExpiresAt: &expiresAt, RefreshState: "ok", CreatedAt: now, UpdatedAt: now,
+			LastRefreshAttemptAt: &lastAttemptAt, LastRefreshedAt: &lastRefreshedAt, RefreshRetryNotBefore: &nextRefreshAt,
+			LastFailureCode: "provider_refresh_failed", LastFailureAt: &lastFailureAt, LastFailureTraceID: "trace-safe",
 			EncryptedAccessToken: "encrypted-access-token",
 		}},
 	}
@@ -134,6 +141,12 @@ func TestEngineGRPCGetConnectionReturnsMetadataOnly(t *testing.T) {
 	}
 	if !resp.GetFound() || resp.GetConnection().GetEndUserRef() != "user_123" {
 		t.Fatalf("unexpected connection response: %#v", resp)
+	}
+	connection := resp.GetConnection()
+	if connection.GetServiceVersionId() != serviceVersionID.String() || connection.GetAuthName() != "OAuth2" ||
+		connection.GetLastRefreshAttemptAt() == "" || connection.GetLastRefreshedAt() == "" || connection.GetRefreshRetryNotBefore() == "" ||
+		connection.GetLastFailureCode() != "provider_refresh_failed" || connection.GetLastFailureAt() == "" || connection.GetLastFailureTraceId() != "trace-safe" {
+		t.Fatalf("managed refresh metadata missing from gRPC response: %#v", connection)
 	}
 	if strings.Contains(resp.String(), "encrypted-access-token") {
 		t.Fatalf("connection response leaked encrypted token material: %s", resp.String())

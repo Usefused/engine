@@ -119,6 +119,9 @@ import { redirect } from "@remix-run/react";
 import { APIRequestError } from "~/lib/authorization-error";
 import {
   RATE_LIMIT_GRAPHQL_FIELDS,
+  rateLimitAlgorithmLabel,
+  rateLimitPolicyName,
+  rateLimitPolicyQuotaLabel,
   rateLimitSummary,
 } from "~/lib/rate-limit";
 import { RETRY_GRAPHQL_FIELDS, retrySummary } from "~/lib/retry-policy";
@@ -1638,10 +1641,12 @@ function ImportMethodBadge({ method, canManage }: { method?: string; canManage: 
   );
 }
 
+// ServiceNotificationBanner resets contextual disclosure state when navigation selects another service.
 function ServiceNotificationBanner() {
   const detail = useDetail();
-  if (!detail.isAuth || detail.serviceNotifications.length === 0) return null;
-  return <NotificationBanner items={detail.serviceNotifications} serviceRefs={detail.notificationServiceRefs} onMarkRead={detail.markNotificationRead} onDismiss={detail.dismissNotification} canUpdate={detail.canUpdateNotifications} />;
+  // Unauthenticated and empty contexts do not reserve space for notifications.
+  if (!detail.isAuth || !detail.res || detail.serviceNotifications.length === 0) return null;
+  return <NotificationBanner key={detail.res.service.id} items={detail.serviceNotifications} serviceRefs={detail.notificationServiceRefs} onMarkRead={detail.markNotificationRead} onDismiss={detail.dismissNotification} canUpdate={detail.canUpdateNotifications} />;
 }
 
 function ImportProgressPanel() {
@@ -1764,21 +1769,42 @@ function RateLimitConfigCard({ srv }: { srv: Service }) {
 function rateLimitIdentityLabel(policy: NonNullable<Service["rate_limit"]>["policies"][number]): string {
   return policy.identity.inputs
     .map((input) => input.name || input.binding || input.kind)
+    .map((value) => value.replace(/[_-]+/g, " "))
     .join(" + ");
 }
 
 // RateLimitPolicyCard renders every supported v3 rate-limit algorithm without legacy aliases.
 function RateLimitPolicyCard({ policy }: { policy: NonNullable<Service["rate_limit"]>["policies"][number] }) {
+  // Mode uses a restrained semantic tint so the quota remains the visual focus.
+  const modeClass = policy.mode === "observe"
+    ? "bg-amber-50 text-amber-700 ring-amber-200"
+    : "bg-emerald-50 text-emerald-700 ring-emerald-200";
   return (
-    <div className="rounded border border-slate-200 bg-white p-2">
-      <div className="flex justify-between gap-3"><span className="font-medium text-slate-900">{policy.name}</span><span>{policy.unit} · {policy.mode}</span></div>
-      <div className="mt-1 flex justify-between gap-3"><span className="text-slate-500">Algorithm</span><span>{policy.algorithm}</span></div>
-      <div className="flex justify-between gap-3"><span className="text-slate-500">Identity</span><span>{rateLimitIdentityLabel(policy) || "Unscoped"}</span></div>
-      <div className="flex justify-between gap-3"><span className="text-slate-500">Default cost</span><span>{policy.cost.default}</span></div>
-      {policy.fixed_window && <div className="flex justify-between gap-3"><span className="text-slate-500">Window</span><span>{policy.fixed_window.limit} / {policy.fixed_window.duration_ms} ms</span></div>}
-      {policy.rolling_window && <div className="flex justify-between gap-3"><span className="text-slate-500">Rolling window</span><span>{policy.rolling_window.limit} / {policy.rolling_window.duration_ms} ms</span></div>}
-      {policy.token_bucket && <div className="flex justify-between gap-3"><span className="text-slate-500">Bucket</span><span>{policy.token_bucket.capacity}; +{policy.token_bucket.refill_units} / {policy.token_bucket.refill_interval_ms} ms</span></div>}
-      {policy.concurrency && <div className="flex justify-between gap-3"><span className="text-slate-500">Concurrency</span><span>{policy.concurrency.limit}</span></div>}
+    <div className="overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm">
+      <div className="p-2.5">
+        <div className="flex min-w-0 items-center justify-between gap-2">
+          <span className="truncate font-semibold text-slate-900" title={policy.name}>
+            {rateLimitPolicyName(policy.name)}
+          </span>
+          <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold capitalize ring-1 ring-inset ${modeClass}`}>
+            {policy.mode}
+          </span>
+        </div>
+        <div className="mt-2 text-sm font-semibold tracking-tight text-slate-900">
+          {rateLimitPolicyQuotaLabel(policy)}
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-1.5 border-t border-slate-100 bg-slate-50/80 px-2.5 py-2 text-[10px] font-medium text-slate-600">
+        <span className="rounded-full bg-white px-1.5 py-0.5 ring-1 ring-inset ring-slate-200">
+          {rateLimitAlgorithmLabel(policy.algorithm)}
+        </span>
+        <span className="rounded-full bg-white px-1.5 py-0.5 ring-1 ring-inset ring-slate-200">
+          {rateLimitIdentityLabel(policy) || "Unscoped"}
+        </span>
+        <span className="rounded-full bg-white px-1.5 py-0.5 ring-1 ring-inset ring-slate-200">
+          Cost {policy.cost.default}
+        </span>
+      </div>
     </div>
   );
 }
@@ -1880,12 +1906,12 @@ function DetailTabs({ srv, totalEndpoints }: { srv: Service; totalEndpoints: num
 }
 
 function TabNavigation({ srv, totalEndpoints }: { srv: Service; totalEndpoints: number }) {
-  const { activeTab, handleTabChange, isAuth, workspaceServiceActive } = useDetail();
+  const { activeTab, handleTabChange, isAuth, workspaceServiceActive, canReadActivity } = useDetail();
   return (
     <div className="mb-6 flex max-w-full overflow-x-auto whitespace-nowrap rounded-lg bg-slate-100/80 p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       <button data-track="view_endpoints_tab" onClick={() => handleTabChange("endpoints")} className={tabClass(activeTab === "endpoints")}>Operations ({totalEndpoints})</button>
       <button data-track="view_webhooks_tab" onClick={() => handleTabChange("webhooks")} className={tabClass(activeTab === "webhooks")}>Webhooks ({srv.webhook_count ?? 0})</button>
-      {isAuth && workspaceServiceActive === true && (
+      {isAuth && workspaceServiceActive === true && canReadActivity && (
         <button data-track="view_activity_tab" onClick={() => handleTabChange("analytics")} className={tabClass(activeTab === "analytics")}>Activity</button>
       )}
     </div>
@@ -1904,10 +1930,12 @@ function TabLoadingIndicator() {
 }
 
 function ActiveTabContent({ srv }: { srv: Service }) {
-  const { activeTab, setSelectedEndpoint } = useDetail();
+  const { activeTab, setSelectedEndpoint, canReadActivity } = useDetail();
   if (activeTab === "endpoints") return <EndpointTabContent />;
   if (activeTab === "webhooks") return <WebhooksTab srv={srv} setSelectedEndpoint={setSelectedEndpoint} />;
-  return <ActivityTabContent />;
+  // A direct analytics URL must fall back to ordinary service content when
+  // the Activity capability is absent; its data effects are also gated.
+  return canReadActivity ? <ActivityTabContent /> : <EndpointTabContent />;
 }
 
 function EndpointTabContent() {
@@ -1944,13 +1972,6 @@ function nextPageValue(page: number | ((value: number) => number), current: numb
 /** Renders service activity only after its audit permission is established. */
 function ActivityTabContent() {
   const detail = useDetail();
-  if (!detail.canReadActivity) {
-    return (
-      <section className="rounded-lg border border-slate-200 bg-white px-6 py-12 text-center text-sm text-slate-500">
-        Service activity access is not available for your account.
-      </section>
-    );
-  }
   return (
     <ActivityTab
       res={detail.res!}

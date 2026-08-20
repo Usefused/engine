@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +28,21 @@ type artifactReferenceGraphQLTestStore struct {
 	services     []store.AppServiceSummary
 	lastQuery    store.ResourceReferenceQuery
 	referenceErr error
+}
+
+type appSelectionGraphQLTestStore struct {
+	*artifactReferenceGraphQLTestStore
+	item store.AppCatalogItem
+}
+
+// GetAuthorizedApp returns one exact app catalogue projection so the GraphQL contract test does not reconstruct selections from runtime fixtures.
+func (s *appSelectionGraphQLTestStore) GetAuthorizedApp(_ context.Context, accountID, appID uuid.UUID, _ accesscontrol.AuthorizedScope) (*store.AppCatalogItem, error) {
+	// Exact account and app matching keeps the fixture subject to the same isolation boundary as the production repository.
+	if s.item.AppID != appID || s.item.AppID == uuid.Nil || accountID != s.workspaceTestStore.accountID {
+		return nil, store.ErrAppNotFound
+	}
+	item := s.item
+	return &item, nil
 }
 
 func (s *artifactReferenceGraphQLTestStore) ListAuthorizedAppsByAccount(_ context.Context, accountID uuid.UUID, _ accesscontrol.AuthorizedScope, kind, _, _ string, _, _ int) ([]store.AppCatalogItem, int, error) {
@@ -158,6 +174,9 @@ func withGraphQLTestOwner(t *testing.T, s store.Store, next http.HandlerFunc) ht
 		accountID = fixture.accountID
 	case *artifactReferenceGraphQLTestStore:
 		accountID = fixture.accountID
+	case *appSelectionGraphQLTestStore:
+		// The projection fixture wraps the ordinary catalogue fixture, so the actor must inherit its account identity.
+		accountID = fixture.workspaceTestStore.accountID
 	}
 	workspaceID := uuid.New()
 	grants := make([]accesscontrol.Grant, 0, len(accesscontrol.AllPermissions()))
@@ -473,11 +492,13 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 		},
 		engineExecutionEvents: []models.EngineExecutionEvent{{
 			ID: uuid.New(), AppFamilyID: appID, AppID: appID, AppVersion: "1.0.0", ServiceID: serviceID, ServiceVersionID: serviceVersionID.String(),
+			ServiceName: "Linear", ServiceSlug: "linear", ServiceVersion: "2026-07-21",
 			Transport: models.EngineExecutionTransportSDK, EndpointName: "issues.list", HTTPMethod: "GET", RequestPath: "/issues",
 			Environment: "production", EnvironmentSource: "provider", ProviderHost: "api.linear.app",
 			Status: models.EngineExecutionStatusSuccess, LatencyMs: 41, StartedAt: now, EndedAt: now, CreatedAt: now,
 		}, {
 			ID: uuid.New(), AppFamilyID: mcpAppID, AppID: mcpAppID, AppVersion: "1.0.0", ServiceID: serviceID, ServiceVersionID: serviceVersionID.String(),
+			ServiceName: "Linear", ServiceSlug: "linear", ServiceVersion: "2026-07-21",
 			Transport: models.EngineExecutionTransportMCP, EndpointName: "issues.list", HTTPMethod: "GET", RequestPath: "/issues",
 			Environment: "production", EnvironmentSource: "provider", ProviderHost: "api.linear.app",
 			Status: models.EngineExecutionStatusSuccess, LatencyMs: 52, StartedAt: now, EndedAt: now, CreatedAt: now,
@@ -495,7 +516,10 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 		},
 		workspaceExecutionAnalytics: models.WorkspaceExecutionAnalytics{
 			EngineExecutionAnalytics: models.EngineExecutionAnalytics{TotalCalls: 1, SuccessfulCalls: 1, P95LatencyMs: 41},
-			ByTransport:              []models.EngineExecutionBreakdown{{Key: "sdk", Label: "SDK", TotalCalls: 1, P95LatencyMs: 41}},
+			ByService:                []models.EngineExecutionBreakdown{{Key: serviceID.String(), Label: "Linear", TotalCalls: 1, P95LatencyMs: 41}},
+			MostUsedSDK:              &models.EngineExecutionBreakdown{Key: appID.String(), Label: "jira-activity-smoke", TotalCalls: 1, P95LatencyMs: 41},
+			MostUsedService:          &models.EngineExecutionBreakdown{Key: serviceID.String(), Label: "Linear", TotalCalls: 1, P95LatencyMs: 41},
+			MostUsedBucket:           &models.EngineExecutionBreakdown{Key: attachedBucketID.String(), Label: "prod-users", TotalCalls: 1, P95LatencyMs: 41},
 		},
 		appTokens: []store.AppTokenMetadata{{
 			ID: tokenID, AppFamilyID: appID, Name: "agent",
@@ -570,12 +594,12 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 		workspaceWebhooks(service_id: "` + serviceID.String() + `") { label slug created_at }
 		webhookEvents(service_id: "` + serviceID.String() + `", event_name: "repo.created", limit: 10, offset: 0) { total items { msg_id event_name delivery_status latency_ms credits_consumed created_at } }
 		webhookAnalytics(service_id: "` + serviceID.String() + `", event_name: "repo.created") { total_ingested total_delivered total_rejected total_failed }
-		engineExecutionEvents(service_id: "` + serviceID.String() + `", transport: "sdk", status: "success", limit: 10, offset: 0) { total items { app_family_id app_id app_version app_kind transport operation http_method request_path environment environment_source provider_host status latency_ms started_at timings { name duration_ms } } }
+		engineExecutionEvents(service_id: "` + serviceID.String() + `", transport: "sdk", status: "success", limit: 10, offset: 0) { total items { app_family_id app_id app_version app_kind transport service_name service_slug service_version operation http_method request_path environment environment_source provider_host status latency_ms started_at timings { name duration_ms } } }
 		appExecutionEvents(app_id: "` + appID.String() + `", transport: "sdk", status: "success", limit: 10, offset: 0) { total items { app_family_id app_id app_version service_id transport operation http_method request_path provider_host status latency_ms } }
 		appExecutionAnalytics(app_id: "` + appID.String() + `", transport: "sdk") { total_calls successful_calls failed_calls average_latency_ms p95_latency_ms by_service { key total_calls failed_calls p95_latency_ms } }
 		mcpAppExecutionEvents: appExecutionEvents(app_id: "` + mcpAppID.String() + `", transport: "mcp", status: "success", limit: 10, offset: 0) { total items { app_id app_version transport operation status latency_ms } }
 		engineExecutionAnalytics(service_id: "` + serviceID.String() + `", transport: "sdk", status: "success") { total_calls successful_calls failed_calls average_latency_ms }
-		workspaceExecutionAnalytics { total_calls successful_calls failed_calls p95_latency_ms by_transport { key total_calls } }
+		workspaceExecutionAnalytics { total_calls inbound_calls successful_calls failed_calls p95_latency_ms by_service { key label total_calls inbound_calls } most_used_sdk { key label total_calls } most_used_service { key label total_calls } most_failed_service { key label failed_calls } most_used_bucket { key label total_calls } }
 		serviceConsumers(service_id: "` + serviceID.String() + `") { id name version kind active service_version_id select_all operation_count webhook_count created_at }
 		appTokens(app_family_id: "` + appID.String() + `") { id app_family_id name allow expires_at created_at last_used_at }
 		sdkBuckets(app_family_id: "` + appID.String() + `") { id name is_default }
@@ -658,6 +682,9 @@ func assertWebhookAndTokenGraphQLData(t *testing.T, data map[string]any) {
 	assertGraphQLField(t, execution, "app_version", "1.0.0", "engineExecutionEvents.items[0]")
 	assertGraphQLField(t, execution, "app_kind", "sdk", "engineExecutionEvents.items[0]")
 	assertGraphQLField(t, execution, "transport", "sdk", "engineExecutionEvents.items[0]")
+	assertGraphQLField(t, execution, "service_name", "Linear", "engineExecutionEvents.items[0]")
+	assertGraphQLField(t, execution, "service_slug", "linear", "engineExecutionEvents.items[0]")
+	assertGraphQLField(t, execution, "service_version", "2026-07-21", "engineExecutionEvents.items[0]")
 	assertGraphQLField(t, execution, "http_method", "GET", "engineExecutionEvents.items[0]")
 	assertGraphQLField(t, execution, "request_path", "/issues", "engineExecutionEvents.items[0]")
 	assertGraphQLField(t, execution, "provider_host", "api.linear.app", "engineExecutionEvents.items[0]")
@@ -693,7 +720,9 @@ func assertWebhookAndTokenGraphQLData(t *testing.T, data map[string]any) {
 	assertGraphQLField(t, executionAnalytics, "successful_calls", float64(1), "engineExecutionAnalytics")
 	workspaceAnalytics := graphQLMap(t, data["workspaceExecutionAnalytics"], "workspaceExecutionAnalytics")
 	assertGraphQLField(t, workspaceAnalytics, "total_calls", float64(1), "workspaceExecutionAnalytics")
-	assertGraphQLLen(t, graphQLList(t, workspaceAnalytics["by_transport"], "workspaceExecutionAnalytics.by_transport"), 1, "workspaceExecutionAnalytics.by_transport")
+	assertGraphQLLen(t, graphQLList(t, workspaceAnalytics["by_service"], "workspaceExecutionAnalytics.by_service"), 1, "workspaceExecutionAnalytics.by_service")
+	assertGraphQLField(t, graphQLMap(t, workspaceAnalytics["most_used_sdk"], "workspaceExecutionAnalytics.most_used_sdk"), "label", "jira-activity-smoke", "workspaceExecutionAnalytics.most_used_sdk")
+	assertGraphQLField(t, graphQLMap(t, workspaceAnalytics["most_used_bucket"], "workspaceExecutionAnalytics.most_used_bucket"), "label", "prod-users", "workspaceExecutionAnalytics.most_used_bucket")
 	tokens := graphQLList(t, data["appTokens"], "appTokens")
 	assertGraphQLLen(t, tokens, 1, "appTokens")
 	token := graphQLMap(t, tokens[0], "appTokens[0]")
@@ -1063,6 +1092,54 @@ func TestAppsListSDKAndMCPVersionsForAccount(t *testing.T) {
 	}
 }
 
+type sdkDownloadCountRegistryClient struct {
+	*mockRegistryClient
+	counts   map[uuid.UUID]int64
+	requests [][]uuid.UUID
+	err      error
+}
+
+// FetchSDKPackageDownloadCounts captures the exact app batch requested by an
+// Engine GraphQL catalogue resolver.
+func (c *sdkDownloadCountRegistryClient) FetchSDKPackageDownloadCounts(_ context.Context, appIDs []uuid.UUID) (map[uuid.UUID]int64, error) {
+	c.requests = append(c.requests, append([]uuid.UUID(nil), appIDs...))
+	return c.counts, c.err
+}
+
+// TestAppsDownloadCountsUseOneOptionalRegistryBatch proves fragment-selected
+// counts use one SDK-only batch and remain absent when not selected.
+func TestAppsDownloadCountsUseOneOptionalRegistryBatch(t *testing.T) {
+	accountID := uuid.New()
+	sdkID, mcpID := uuid.New(), uuid.New()
+	fixture := &workspaceTestStore{accountID: accountID, mockScopes: map[uuid.UUID]*store.AppRuntime{
+		sdkID: {AccountID: accountID, AppID: sdkID, Kind: "sdk", Name: "support", Version: "1.0.0", CreatedAt: time.Now()},
+		mcpID: {AccountID: accountID, AppID: mcpID, Kind: "mcp", Name: "support-agent", Version: "1.0.0", CreatedAt: time.Now()},
+	}}
+	client := &sdkDownloadCountRegistryClient{mockRegistryClient: &mockRegistryClient{}, counts: map[uuid.UUID]int64{sdkID: 7}}
+	h := mountMCPGraphQLTestHandlerWithRegistry(t, &artifactReferenceGraphQLTestStore{workspaceTestStore: fixture}, client)
+	data := doMCPGraphQLRequest(t, h, `
+		fragment PackageEvidence on AppSummary { downloads }
+		query { apps(limit: 20, offset: 0) { items { app_id kind ...PackageEvidence } } }
+	`)
+	items := data["apps"].(map[string]any)["items"].([]any)
+	byKind := make(map[string]map[string]any, len(items))
+	for _, raw := range items {
+		item := raw.(map[string]any)
+		byKind[fmt.Sprint(item["kind"])] = item
+	}
+	if len(client.requests) != 1 || !reflect.DeepEqual(client.requests[0], []uuid.UUID{sdkID}) {
+		t.Fatalf("download count requests = %v, want one SDK-only batch", client.requests)
+	}
+	if byKind["sdk"]["downloads"] != "7" || byKind["mcp"]["downloads"] != nil {
+		t.Fatalf("unexpected download projections: %#v", byKind)
+	}
+
+	doMCPGraphQLRequest(t, h, `query { apps(limit: 20, offset: 0) { items { app_id kind } } }`)
+	if len(client.requests) != 1 {
+		t.Fatalf("unselected downloads triggered another Registry read: %v", client.requests)
+	}
+}
+
 func TestAppReadsExactEngineVersion(t *testing.T) {
 	accountID, appID := uuid.New(), uuid.New()
 	fixture := &workspaceTestStore{accountID: accountID, mockScopes: map[uuid.UUID]*store.AppRuntime{
@@ -1089,6 +1166,10 @@ func TestAppSelectionFieldsPreserveSyncDefinition(t *testing.T) {
 	if len(fields) != 1 || fields[0]["definition_schema_version"] != 3 || fields[0]["auth_name"] != "atlassian" {
 		t.Fatalf("selection metadata was not preserved: %#v", fields)
 	}
+	operationNames := fields[0]["operation_names"].([]string)
+	if len(operationNames) != 1 || operationNames[0] != "createIssue" {
+		t.Fatalf("selection operation names were not preserved: %#v", operationNames)
+	}
 	required := fields[0]["required_auth"].([]map[string]interface{})
 	if len(required) != 2 || required[1]["auth_name"] != "clientCertificate" {
 		t.Fatalf("selection required auth was not preserved: %#v", required)
@@ -1096,6 +1177,38 @@ func TestAppSelectionFieldsPreserveSyncDefinition(t *testing.T) {
 	injections := fields[0]["injections"].([]map[string]interface{})
 	if len(injections) != 1 || injections[0]["name"] != "X-Tenant" {
 		t.Fatalf("selection injections were not preserved: %#v", injections)
+	}
+}
+
+// TestAppSelectionGraphQLReturnsOperationNames proves app details can render semantic operation IDs without resolving endpoint UUIDs again.
+func TestAppSelectionGraphQLReturnsOperationNames(t *testing.T) {
+	accountID, appID := uuid.New(), uuid.New()
+	serviceID, serviceVersionID := uuid.New(), uuid.New()
+	endpointIDs := []uuid.UUID{uuid.New(), uuid.New()}
+	s := &appSelectionGraphQLTestStore{
+		artifactReferenceGraphQLTestStore: &artifactReferenceGraphQLTestStore{
+			workspaceTestStore: &workspaceTestStore{accountID: accountID},
+		},
+		item: store.AppCatalogItem{
+			AppFamilyID: appID, AppID: appID, Name: "jira", Version: "1.0.0",
+			Kind: store.AppKindSDK, Status: store.AppStatusActive, CreatedAt: time.Now(),
+			Selections: []models.SDKSelection{{
+				ServiceID: serviceID, ServiceVersionID: serviceVersionID, DefinitionSchemaVersion: models.SDKDefinitionSchemaVersion,
+				EndpointIDs: endpointIDs, OperationNames: []string{"listProjects", "createIssue"},
+			}},
+		},
+	}
+	h := mountMCPGraphQLTestHandler(t, s)
+	data := doMCPGraphQLRequest(t, h, `query { app(app_id: "`+appID.String()+`") { selections { endpoint_ids operation_names } } }`)
+	selections := data["app"].(map[string]any)["selections"].([]any)
+	selection := selections[0].(map[string]any)
+	operationNames := selection["operation_names"].([]any)
+	if fmt.Sprint(operationNames[0]) != "listProjects" || fmt.Sprint(operationNames[1]) != "createIssue" {
+		t.Fatalf("unexpected operation names: %#v", operationNames)
+	}
+	projectedIDs := selection["endpoint_ids"].([]any)
+	if fmt.Sprint(projectedIDs[0]) != endpointIDs[0].String() || fmt.Sprint(projectedIDs[1]) != endpointIDs[1].String() {
+		t.Fatalf("unexpected endpoint IDs: %#v", projectedIDs)
 	}
 }
 

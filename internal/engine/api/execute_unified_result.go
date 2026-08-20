@@ -57,6 +57,7 @@ func prepareUnifiedPhysicalRequest(call preparedUnifiedCall, target preparedUnif
 		Params: params, Credentials: unifiedSelectorCredentials(target.selector),
 		Environment:    unifiedSelectorEnvironment(target.selector),
 		IdempotencyKey: idempotencyKey, RequestBodyHash: requestHash,
+		Transport: call.transport,
 	}, nil
 }
 

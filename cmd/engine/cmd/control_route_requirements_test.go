@@ -50,6 +50,7 @@ func TestAppAccessRequirementsUseFamilyBoundary(t *testing.T) {
 	}{
 		{method: http.MethodPost, path: "/apps/" + appID.String() + "/deprecate", permission: accesscontrol.PermissionAppManage},
 		{method: http.MethodGet, path: "/sdks/" + appID.String() + "/download", permission: accesscontrol.PermissionAppRead},
+		{method: http.MethodGet, path: "/apps/" + appID.String() + "/openapi", permission: accesscontrol.PermissionAppRead},
 	}
 	for _, test := range tests {
 		request := httptest.NewRequest(test.method, test.path, nil)

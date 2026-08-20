@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -672,24 +673,25 @@ func TestSecretResolverResolveExecutionCredentialsRefreshesExpiringConnectedAuth
 	appID := uuid.New()
 	bucketID := uuid.New()
 	serviceID := uuid.New()
+	serviceVersionID := uuid.New()
 	masterKey := []byte("12345678901234567890123456789012")
 	conn := encryptedAuthConnection(t, masterKey, bucketID, serviceID, "user_123", "old-access", "old-refresh", time.Now().UTC().Add(time.Minute))
+	conn.ServiceVersionID = serviceVersionID
 	conn.Scopes = []string{"account:read"}
 	conn.ScopeSource = "request"
 	failedAt := time.Now().UTC().Add(-time.Minute)
 	conn.LastFailureCode, conn.LastFailureAt, conn.LastFailureTraceID = "provider_unauthorized", &failedAt, "old-trace"
 	cfg := encryptedResolverConnectConfig(t, masterKey, bucketID, serviceID)
 	mockStore := &resolverMockStore{
-		appRuntime:     &store.AppRuntime{AppID: appID, BucketID: bucketID},
-		authConnection: &conn,
-		connectConfig:  &cfg,
+		appRuntime:      &store.AppRuntime{AppID: appID, BucketID: bucketID},
+		authConnection:  &conn,
+		connectConfig:   &cfg,
+		serviceMetadata: refreshServiceMetadata("bearerAuth"),
 	}
-	restoreClient := replaceResolverHTTPClient(refreshRoundTripper(t))
-	defer restoreClient()
 
-	resolver := NewSecretResolver(mockStore, masterKey)
+	resolver := newRefreshTestSecretResolver(mockStore, masterKey, refreshRoundTripper(t))
 	creds, _, err := resolver.ResolveExecutionCredentials(ctx, CredentialRequest{
-		AppID: appID, ServiceID: serviceID, AuthType: "oauth",
+		AppID: appID, ServiceID: serviceID, ServiceVersionID: serviceVersionID, AuthType: "oauth",
 		Auths: fusedobject.AuthConfigs{{
 			Name:                    "bearerAuth",
 			Type:                    "oauth2",
@@ -724,26 +726,26 @@ func TestSecretResolverResolveExecutionCredentialsRefreshesExpiringConnectedAuth
 // failure becomes durable state and a typed SDK-facing execution decision.
 func TestSecretResolver_InvalidGrantRequiresReconnect(t *testing.T) {
 	ctx := context.Background()
-	bucketID, serviceID, appID := uuid.New(), uuid.New(), uuid.New()
+	bucketID, serviceID, serviceVersionID, appID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	masterKey := []byte("12345678901234567890123456789012")
 	conn := encryptedAuthConnection(t, masterKey, bucketID, serviceID, "user_123", "old-access", "old-refresh", time.Now().UTC().Add(time.Minute))
+	conn.ServiceVersionID = serviceVersionID
 	cfg := encryptedResolverConnectConfig(t, masterKey, bucketID, serviceID)
 	mockStore := &resolverMockStore{
-		appRuntime:     &store.AppRuntime{AppID: appID, BucketID: bucketID},
-		authConnection: &conn, connectConfig: &cfg,
+		appRuntime: &store.AppRuntime{AppID: appID, BucketID: bucketID}, authConnection: &conn,
+		connectConfig: &cfg, serviceMetadata: refreshServiceMetadata("bearerAuth"),
 	}
-	restoreClient := replaceResolverHTTPClient(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusBadRequest,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
 			Body:       io.NopCloser(strings.NewReader(`{"error":"invalid_grant"}`)),
 		}, nil
-	}))
-	defer restoreClient()
+	})
 
-	resolver := NewSecretResolver(mockStore, masterKey)
+	resolver := newRefreshTestSecretResolver(mockStore, masterKey, transport)
 	_, _, err := resolver.ResolveExecutionCredentials(ctx, CredentialRequest{
-		AccountID: uuid.New(), AppID: appID, ServiceID: serviceID, AuthType: "oauth",
+		AccountID: uuid.New(), AppID: appID, ServiceID: serviceID, ServiceVersionID: serviceVersionID, AuthType: "oauth",
 		Auths: fusedobject.AuthConfigs{{
 			Name: "bearerAuth", Type: "oauth2", OAuth2Flows: refreshOAuth2Flows(),
 			TokenEndpointAuthMethod: fusedobject.TokenEndpointAuthMethodClientSecretPost,
@@ -770,16 +772,18 @@ func TestSecretResolver_InvalidGrantRequiresReconnect(t *testing.T) {
 // providers that issue access-only grants where another consent is the repair.
 func TestSecretResolver_ExpiredAccessWithoutRefreshRequiresReconnect(t *testing.T) {
 	ctx := context.Background()
-	bucketID, serviceID, appID := uuid.New(), uuid.New(), uuid.New()
+	bucketID, serviceID, serviceVersionID, appID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	masterKey := []byte("12345678901234567890123456789012")
 	conn := encryptedAuthConnection(t, masterKey, bucketID, serviceID, "user_456", "expired-access", "", time.Now().UTC().Add(-time.Minute))
+	conn.ServiceVersionID = serviceVersionID
 	mockStore := &resolverMockStore{
 		appRuntime: &store.AppRuntime{AppID: appID, BucketID: bucketID}, authConnection: &conn,
+		serviceMetadata: refreshServiceMetadata("bearerAuth"),
 	}
 
 	resolver := NewSecretResolver(mockStore, masterKey)
 	_, _, err := resolver.ResolveExecutionCredentials(ctx, CredentialRequest{
-		AccountID: uuid.New(), AppID: appID, ServiceID: serviceID, AuthType: "oauth",
+		AccountID: uuid.New(), AppID: appID, ServiceID: serviceID, ServiceVersionID: serviceVersionID, AuthType: "oauth",
 		Auths:        fusedobject.AuthConfigs{{Name: "bearerAuth", Type: "oauth2", OAuth2Flows: refreshOAuth2Flows()}},
 		Requirements: singleAuthRequirement("bearerAuth"),
 		Passthrough:  map[string]any{"fused_end_user_ref": "user_456", "fused_auth_name": "bearerAuth"},
@@ -795,6 +799,7 @@ func TestSecretResolver_ExpiredAccessWithoutRefreshRequiresReconnect(t *testing.
 
 type resolverMockStore struct {
 	store.Store
+	refreshMu                 sync.Mutex
 	appRuntime                *store.AppRuntime
 	secrets                   []store.WorkspaceSecret
 	getSecretKeys             []string
@@ -805,6 +810,12 @@ type resolverMockStore struct {
 	authConnectionID          uuid.UUID
 	touchedConnectionID       uuid.UUID
 	connectConfig             *store.ConnectConfig
+	serviceMetadata           *fusedobject.ServiceMetadata
+	refreshLeaseToken         uuid.UUID
+	refreshLeaseExpiresAt     time.Time
+	refreshCompleteDelay      time.Duration
+	refreshClaimAttempts      int
+	forceRefreshClaimMiss     bool
 	connectionResource        *store.ConnectionResource
 	connectionResourceCount   int
 	bindings                  []store.WorkspaceConnectionBinding
@@ -980,11 +991,14 @@ func (m *resolverMockStore) GetBucketByName(ctx context.Context, name string) (*
 // GetAuthConnection lets the resolver test prove the lookup is bucket/service
 // scoped rather than a broad user-ref search.
 func (m *resolverMockStore) GetAuthConnection(ctx context.Context, bucketID, serviceID uuid.UUID, endUserRef, authName string) (*store.AuthConnection, error) {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
 	if m.authConnection == nil {
 		return nil, nil
 	}
 	if m.authConnection.BucketID == bucketID && m.authConnection.ServiceID == serviceID && m.authConnection.EndUserRef == endUserRef && m.authConnection.AuthName == authName {
-		return m.authConnection, nil
+		connection := *m.authConnection
+		return &connection, nil
 	}
 	return nil, nil
 }
@@ -999,6 +1013,8 @@ func (m *resolverMockStore) TouchAuthConnectionLastUsed(ctx context.Context, id 
 // GetConnectConfig lets refresh tests prove OAuth app credentials stay bucket
 // scoped instead of being supplied by SDK runtime input.
 func (m *resolverMockStore) GetConnectConfig(ctx context.Context, bucketID, serviceID uuid.UUID) (*store.ConnectConfig, error) {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
 	if m.connectConfig == nil {
 		return nil, nil
 	}
@@ -1006,6 +1022,119 @@ func (m *resolverMockStore) GetConnectConfig(ctx context.Context, bucketID, serv
 		return m.connectConfig, nil
 	}
 	return nil, nil
+}
+
+// GetServiceContractMetadata returns the immutable version-pinned auth surface
+// used by refresh coordinator tests.
+func (m *resolverMockStore) GetServiceContractMetadata(_ context.Context, serviceID, serviceVersionID uuid.UUID) (*fusedobject.ServiceMetadata, error) {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+	if m.authConnection == nil || m.serviceMetadata == nil {
+		return nil, store.ErrServiceContractSnapshotNotFound
+	}
+	if m.authConnection.ServiceID != serviceID || m.authConnection.ServiceVersionID != serviceVersionID {
+		return nil, store.ErrServiceContractSnapshotNotFound
+	}
+	return m.serviceMetadata, nil
+}
+
+// TryClaimAuthConnectionRefresh gives one foreground caller a mock CAS lease.
+func (m *resolverMockStore) TryClaimAuthConnectionRefresh(_ context.Context, id, serviceVersionID uuid.UUID, now, leaseExpiresAt time.Time) (*store.AuthConnectionRefreshClaim, error) {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+	m.refreshClaimAttempts++
+	if m.forceRefreshClaimMiss {
+		return nil, nil
+	}
+	if m.authConnection == nil || m.authConnection.ID != id || m.refreshLeaseToken != uuid.Nil {
+		return nil, nil
+	}
+	if !authConnectionNeedsRefresh(m.authConnection, now) {
+		return nil, nil
+	}
+	if authConnectionRefreshRetryScheduled(m.authConnection, now) {
+		return nil, nil
+	}
+	if m.authConnection.ServiceVersionID == uuid.Nil {
+		m.authConnection.ServiceVersionID = serviceVersionID
+	}
+	if m.authConnection.ServiceVersionID != serviceVersionID {
+		return nil, nil
+	}
+	m.refreshLeaseToken = uuid.New()
+	m.refreshLeaseExpiresAt = leaseExpiresAt
+	m.authConnection.LastRefreshAttemptAt = &now
+	return &store.AuthConnectionRefreshClaim{Connection: *m.authConnection, LeaseToken: m.refreshLeaseToken, LeaseExpiresAt: leaseExpiresAt}, nil
+}
+
+// ClaimAuthConnectionsForRefresh is unused by resolver tests because workers
+// receive dedicated store coverage.
+func (m *resolverMockStore) ClaimAuthConnectionsForRefresh(_ context.Context, cutoff, passStartedAt, now, leaseExpiresAt time.Time, limit int) ([]store.AuthConnectionRefreshClaim, error) {
+	return nil, nil
+}
+
+// CompleteAuthConnectionRefresh applies rotated material only for the mock lease owner.
+func (m *resolverMockStore) CompleteAuthConnectionRefresh(ctx context.Context, id, leaseToken uuid.UUID, refreshed store.AuthConnection, refreshedAt time.Time) (*store.AuthConnection, bool, error) {
+	if m.refreshCompleteDelay > 0 {
+		select {
+		case <-time.After(m.refreshCompleteDelay):
+		case <-ctx.Done():
+			return nil, false, ctx.Err()
+		}
+	}
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+	if m.authConnection == nil || m.authConnection.ID != id || m.refreshLeaseToken != leaseToken || !m.refreshLeaseExpiresAt.After(refreshedAt) {
+		return nil, false, nil
+	}
+	refreshed.LastRefreshedAt = &refreshedAt
+	m.authConnection = &refreshed
+	m.refreshLeaseToken = uuid.Nil
+	m.refreshLeaseExpiresAt = time.Time{}
+	return m.authConnection, true, nil
+}
+
+// ReleaseAuthConnectionRefresh records only stable retry diagnostics in the mock row.
+func (m *resolverMockStore) ReleaseAuthConnectionRefresh(_ context.Context, id, leaseToken uuid.UUID, retryNotBefore time.Time, failureCode, traceID string, failedAt time.Time) (bool, error) {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+	if m.authConnection == nil || m.authConnection.ID != id || m.refreshLeaseToken != leaseToken || !m.refreshLeaseExpiresAt.After(failedAt) {
+		return false, nil
+	}
+	m.authConnection.RefreshRetryNotBefore = &retryNotBefore
+	m.authConnection.LastFailureCode = failureCode
+	m.authConnection.LastFailureAt = &failedAt
+	m.authConnection.LastFailureTraceID = traceID
+	m.refreshLeaseToken = uuid.Nil
+	m.refreshLeaseExpiresAt = time.Time{}
+	return true, nil
+}
+
+// MarkAuthConnectionReconnectRequired records the durable typed action through mock CAS.
+func (m *resolverMockStore) MarkAuthConnectionReconnectRequired(_ context.Context, id, leaseToken uuid.UUID, failureCode, traceID string, failedAt time.Time) (bool, error) {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+	if m.authConnection == nil || m.authConnection.ID != id || m.refreshLeaseToken != leaseToken || !m.refreshLeaseExpiresAt.After(failedAt) {
+		return false, nil
+	}
+	m.authConnection.RefreshState = reconnectRequiredCode
+	m.authConnection.LastFailureCode = failureCode
+	m.authConnection.LastFailureAt = &failedAt
+	m.authConnection.LastFailureTraceID = traceID
+	m.refreshLeaseToken = uuid.Nil
+	m.refreshLeaseExpiresAt = time.Time{}
+	return true, nil
+}
+
+// GetAuthConnectionByID reloads the single mock row after lease contention.
+func (m *resolverMockStore) GetAuthConnectionByID(_ context.Context, id uuid.UUID) (*store.AuthConnection, error) {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+	if m.authConnection == nil || m.authConnection.ID != id {
+		return nil, nil
+	}
+	connection := *m.authConnection
+	return &connection, nil
 }
 
 // UpsertAuthConnection updates the mock row by natural key so refresh tests
@@ -1086,6 +1215,27 @@ func encryptedResolverConnectConfig(t *testing.T, masterKey []byte, bucketID, se
 	}
 }
 
+// refreshServiceMetadata builds the exact persisted OAuth contract used by coordinator tests.
+func refreshServiceMetadata(authName string) *fusedobject.ServiceMetadata {
+	return &fusedobject.ServiceMetadata{AuthConfigs: fusedobject.AuthConfigs{{
+		Name:                    authName,
+		Type:                    "oauth2",
+		OAuth2Flows:             refreshOAuth2Flows("account:read", "account:write"),
+		TokenEndpointAuthMethod: fusedobject.TokenEndpointAuthMethodClientSecretPost,
+	}}}
+}
+
+// newRefreshTestSecretResolver injects a deterministic provider client while
+// keeping the production resolver and worker on the same coordinator path.
+func newRefreshTestSecretResolver(db store.Store, masterKey []byte, transport http.RoundTripper) SecretResolver {
+	client := &http.Client{Transport: transport, Timeout: time.Second}
+	return &secretResolver{
+		db:                 db,
+		masterKey:          masterKey,
+		refreshCoordinator: NewAuthRefreshCoordinator(db, masterKey, WithAuthRefreshHTTPClient(client)),
+	}
+}
+
 // refreshRoundTripper validates the refresh grant form before returning new
 // provider token material to persist.
 func refreshRoundTripper(t *testing.T) http.RoundTripper {
@@ -1113,14 +1263,6 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 // inspect provider requests without opening a network listener.
 func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return fn(req)
-}
-
-// replaceResolverHTTPClient scopes the global HTTP client swap used by the
-// resolver refresh path to one test.
-func replaceResolverHTTPClient(transport http.RoundTripper) func() {
-	previous := http.DefaultClient
-	http.DefaultClient = &http.Client{Transport: transport}
-	return func() { http.DefaultClient = previous }
 }
 
 // testDecryptAuthConnectionToken verifies persisted refresh results using the

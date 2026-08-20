@@ -5,9 +5,16 @@ export type AppSelectionPayload = {
   service_version_id?: string | null;
   definition_schema_version: number;
   endpoint_ids: string[];
+  operation_names?: string[];
   webhook_ids: string[];
+  webhook_names?: string[];
   select_all: boolean;
   webhook_select_all: boolean;
+};
+
+export type AppSelectionDisplayRow = {
+  id: string;
+  name: string;
 };
 
 export type AppSelectionV3 = Omit<
@@ -40,4 +47,17 @@ export function requireAppSelectionV3(selection: AppSelectionPayload): AppSelect
 /** Validates the complete app selection list before detail rendering begins. */
 export function requireAppSelectionsV3(selections: AppSelectionPayload[]): AppSelectionV3[] {
   return selections.map(requireAppSelectionV3);
+}
+
+/** Builds stable display rows from the semantic names stored with an immutable app selection. */
+export function appSelectionDisplayRows(ids: string[], names: string[] | undefined): AppSelectionDisplayRow[] {
+  const labels = names ?? [];
+  // Semantic names are the immutable authored selection and do not need to be
+  // positionally paired with Registry endpoint identities for presentation.
+  if (labels.length > 0) {
+    return labels.map((name, index) => ({ id: `semantic:${index}:${name}`, name }));
+  }
+  // The UUID fallback keeps historical ID-only rows visible without consulting
+  // mutable Registry state to relabel an already-applied app version.
+  return ids.map((id) => ({ id, name: id }));
 }

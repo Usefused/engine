@@ -14,6 +14,46 @@ export interface McpAnalyticsData {
   recent_sessions?: Array<{ id: string; session_id: string; started_at: string; ended_at?: string }>;
 }
 
+interface McpUsageCardEntry {
+  key: string;
+  name: string;
+  count: number;
+  failed: number;
+  averageLatency: number;
+  accent: "slate" | "emerald";
+}
+
+// usageSuccessRate keeps empty rows deterministic across mobile cards and
+// desktop tables.
+function usageSuccessRate(count: number, failed: number): string {
+  if (count === 0) return "0.0";
+  return (((count - failed) / count) * 100).toFixed(1);
+}
+
+// McpUsageCards exposes the complete usage summary as stacked cards when a
+// five-column table would exceed the viewport.
+function McpUsageCards({ entries }: { entries: McpUsageCardEntry[] }) {
+  return (
+    <div className="divide-y divide-slate-100 md:hidden">
+      {entries.map((entry) => {
+        const successRate = usageSuccessRate(entry.count, entry.failed);
+        return (
+          <div key={entry.key} className="p-4">
+            <div className={`break-all font-mono text-sm font-medium ${entry.accent === "emerald" ? "text-emerald-700" : "text-slate-800"}`}>{entry.name}</div>
+            <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+              <div><dt className="text-xs text-slate-500">Calls</dt><dd className="mt-0.5 font-medium tabular-nums text-slate-800">{entry.count.toLocaleString()}</dd></div>
+              <div><dt className="text-xs text-slate-500">Failed</dt><dd className={`mt-0.5 tabular-nums ${entry.failed > 0 ? "font-semibold text-red-600" : "text-slate-400"}`}>{entry.failed.toLocaleString()}</dd></div>
+              <div><dt className="text-xs text-slate-500">Average latency</dt><dd className="mt-0.5 tabular-nums text-slate-700">{Math.round(entry.averageLatency || 0)} ms</dd></div>
+              <div><dt className="text-xs text-slate-500">Success rate</dt><dd className={`mt-0.5 tabular-nums ${entry.failed > 0 ? "text-amber-600" : "text-emerald-600"}`}>{successRate}%</dd></div>
+            </dl>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// McpAnalyticsStats renders the high-level MCP measures in a responsive grid.
 export function McpAnalyticsStats({ data }: { data: McpAnalyticsData }) {
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -60,7 +100,10 @@ export function McpAnalyticsStats({ data }: { data: McpAnalyticsData }) {
   );
 }
 
+// McpToolUsageTable presents tool aggregation as cards on mobile and a dense
+// table when enough width is available.
 export function McpToolUsageTable({ toolUsage }: { toolUsage: NonNullable<McpAnalyticsData["tool_usage"]> }) {
+  const mobileEntries = toolUsage.map((tool) => ({ key: tool.tool_name, name: tool.tool_name, count: tool.count, failed: tool.failed, averageLatency: tool.average_latency, accent: "slate" as const }));
   return (
     <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
       <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
@@ -73,7 +116,9 @@ export function McpToolUsageTable({ toolUsage }: { toolUsage: NonNullable<McpAna
             No tools have been called yet.
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <>
+          <McpUsageCards entries={mobileEntries} />
+          <div className="hidden overflow-x-auto md:block">
             <table className="w-full text-sm text-left">
               <thead className="bg-slate-50/50 text-slate-500 text-xs uppercase tracking-wider">
                 <tr>
@@ -86,9 +131,7 @@ export function McpToolUsageTable({ toolUsage }: { toolUsage: NonNullable<McpAna
               </thead>
               <tbody className="divide-y divide-slate-100 text-slate-700">
                 {toolUsage.map((tool) => {
-                  const successRate = tool.count > 0
-                    ? (((tool.count - tool.failed) / tool.count) * 100).toFixed(1)
-                    : 0;
+                  const successRate = usageSuccessRate(tool.count, tool.failed);
                   return (
                     <tr key={tool.tool_name} className="hover:bg-slate-50 transition-colors">
                       <td className="px-6 py-4 font-mono text-slate-700">{tool.tool_name}</td>
@@ -118,13 +161,17 @@ export function McpToolUsageTable({ toolUsage }: { toolUsage: NonNullable<McpAna
               </tbody>
             </table>
           </div>
+          </>
         )}
       </div>
     </div>
   );
 }
 
+// McpServiceUsageTable presents service aggregation without page-level
+// horizontal overflow on narrow screens.
 export function McpServiceUsageTable({ serviceUsage }: { serviceUsage: NonNullable<McpAnalyticsData["service_usage"]> }) {
+  const mobileEntries = serviceUsage.map((service) => ({ key: service.service_name, name: service.service_name, count: service.count, failed: service.failed, averageLatency: service.average_latency, accent: "emerald" as const }));
   return (
     <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
       <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
@@ -137,7 +184,9 @@ export function McpServiceUsageTable({ serviceUsage }: { serviceUsage: NonNullab
             No services have been hit yet.
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <>
+          <McpUsageCards entries={mobileEntries} />
+          <div className="hidden overflow-x-auto md:block">
             <table className="w-full text-sm text-left">
               <thead className="bg-slate-50/50 text-slate-500 text-xs uppercase tracking-wider">
                 <tr>
@@ -150,9 +199,7 @@ export function McpServiceUsageTable({ serviceUsage }: { serviceUsage: NonNullab
               </thead>
               <tbody className="divide-y divide-slate-100 text-slate-700">
                 {serviceUsage.map((svc) => {
-                  const successRate = svc.count > 0
-                    ? (((svc.count - svc.failed) / svc.count) * 100).toFixed(1)
-                    : 0;
+                  const successRate = usageSuccessRate(svc.count, svc.failed);
                   return (
                     <tr key={svc.service_name} className="hover:bg-slate-50 transition-colors">
                       <td className="px-6 py-4 font-mono text-emerald-600">{svc.service_name}</td>
@@ -182,6 +229,7 @@ export function McpServiceUsageTable({ serviceUsage }: { serviceUsage: NonNullab
               </tbody>
             </table>
           </div>
+          </>
         )}
       </div>
     </div>

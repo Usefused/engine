@@ -13,6 +13,9 @@ engine:
   license_key: <license_key>
   execution_retention_days: 30
   execution_cleanup_batch: 1000
+  # Bounded OAuth refresh concurrency. Override with
+  # FUSED_ENGINE_CONNECTED_AUTH_REFRESH_WORKERS; accepted range is 1..64.
+  connected_auth_refresh_workers: 4
 
 observability:
   otel_target: "localhost:4317"

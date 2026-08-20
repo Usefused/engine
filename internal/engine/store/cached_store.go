@@ -24,6 +24,8 @@ type cachedStore struct {
 	nc      *messaging.NATSClient
 }
 
+var _ AuthConnectionRefreshStore = (*cachedStore)(nil)
+
 func NewCachedStore(delegate Store, nc *messaging.NATSClient) Store {
 	cs := &cachedStore{
 		Store:   delegate,
@@ -162,6 +164,76 @@ func (s *cachedStore) GetWorkspaceServiceVersion(ctx context.Context, serviceID,
 		return nil, errors.New("workspace service version lookup store is unavailable")
 	}
 	return delegate.GetWorkspaceServiceVersion(ctx, serviceID, serviceVersionID)
+}
+
+// authConnectionRefreshDelegate resolves the optional refresh capability from
+// the wrapped store without bypassing the Engine's production cache wrapper.
+func (s *cachedStore) authConnectionRefreshDelegate() (AuthConnectionRefreshStore, error) {
+	delegate, ok := s.Store.(AuthConnectionRefreshStore)
+	if !ok {
+		return nil, errors.New("auth connection refresh store is unavailable")
+	}
+	return delegate, nil
+}
+
+// ClaimAuthConnectionsForRefresh forwards the worker's atomic SKIP LOCKED page
+// claim unchanged; token rows are intentionally never cached.
+func (s *cachedStore) ClaimAuthConnectionsForRefresh(ctx context.Context, cutoff, passStartedAt, now, leaseExpiresAt time.Time, limit int) ([]AuthConnectionRefreshClaim, error) {
+	delegate, err := s.authConnectionRefreshDelegate()
+	if err != nil {
+		return nil, err
+	}
+	return delegate.ClaimAuthConnectionsForRefresh(ctx, cutoff, passStartedAt, now, leaseExpiresAt, limit)
+}
+
+// TryClaimAuthConnectionRefresh forwards the request-time exact-version lease
+// without populating any credential cache entry.
+func (s *cachedStore) TryClaimAuthConnectionRefresh(ctx context.Context, id, serviceVersionID uuid.UUID, now, leaseExpiresAt time.Time) (*AuthConnectionRefreshClaim, error) {
+	delegate, err := s.authConnectionRefreshDelegate()
+	if err != nil {
+		return nil, err
+	}
+	return delegate.TryClaimAuthConnectionRefresh(ctx, id, serviceVersionID, now, leaseExpiresAt)
+}
+
+// CompleteAuthConnectionRefresh forwards the lease-token CAS so rotated token
+// material is committed only by the current owner.
+func (s *cachedStore) CompleteAuthConnectionRefresh(ctx context.Context, id, leaseToken uuid.UUID, refreshed AuthConnection, refreshedAt time.Time) (*AuthConnection, bool, error) {
+	delegate, err := s.authConnectionRefreshDelegate()
+	if err != nil {
+		return nil, false, err
+	}
+	return delegate.CompleteAuthConnectionRefresh(ctx, id, leaseToken, refreshed, refreshedAt)
+}
+
+// ReleaseAuthConnectionRefresh forwards transient retry state while preserving
+// the raw PostgreSQL adapter as the only lease transition implementation.
+func (s *cachedStore) ReleaseAuthConnectionRefresh(ctx context.Context, id, leaseToken uuid.UUID, retryNotBefore time.Time, failureCode, traceID string, failedAt time.Time) (bool, error) {
+	delegate, err := s.authConnectionRefreshDelegate()
+	if err != nil {
+		return false, err
+	}
+	return delegate.ReleaseAuthConnectionRefresh(ctx, id, leaseToken, retryNotBefore, failureCode, traceID, failedAt)
+}
+
+// MarkAuthConnectionReconnectRequired forwards the permanent provider-grant
+// transition without caching security-sensitive connection state.
+func (s *cachedStore) MarkAuthConnectionReconnectRequired(ctx context.Context, id, leaseToken uuid.UUID, failureCode, traceID string, failedAt time.Time) (bool, error) {
+	delegate, err := s.authConnectionRefreshDelegate()
+	if err != nil {
+		return false, err
+	}
+	return delegate.MarkAuthConnectionReconnectRequired(ctx, id, leaseToken, failureCode, traceID, failedAt)
+}
+
+// GetAuthConnectionByID forwards an internal contention reload; tenant-facing
+// paths still use bucket-authorized connection lookups from Store.
+func (s *cachedStore) GetAuthConnectionByID(ctx context.Context, id uuid.UUID) (*AuthConnection, error) {
+	delegate, err := s.authConnectionRefreshDelegate()
+	if err != nil {
+		return nil, err
+	}
+	return delegate.GetAuthConnectionByID(ctx, id)
 }
 
 func (s *cachedStore) ListWorkspaceServiceVersionsMissingContractSnapshots(ctx context.Context, limit int) ([]WorkspaceServiceVersion, error) {

@@ -158,7 +158,7 @@ func classifyEngineRequest(r *http.Request) engineRequestClass {
 	// Runtime tokens and provider callbacks have their own authenticators. A
 	// control-plane API key check here would conflate those independent trust
 	// boundaries and break generated SDK/MCP traffic.
-	if isRuntimeControlExclusion(r.URL.Path) || strings.HasPrefix(r.URL.Path, "/mcp/") || strings.HasPrefix(r.URL.Path, "/webhook/") {
+	if isRuntimeControlExclusion(r) || strings.HasPrefix(r.URL.Path, "/mcp/") || strings.HasPrefix(r.URL.Path, "/webhook/") {
 		return requestClassRuntimeExcluded
 	}
 	for _, prefix := range controlPlanePrefixes {
@@ -171,9 +171,24 @@ func classifyEngineRequest(r *http.Request) engineRequestClass {
 	return requestClassUnclassified
 }
 
-func isRuntimeControlExclusion(path string) bool {
+// isRuntimeControlExclusion recognizes only runtime routes that own an
+// authenticator independent from the control-plane credential middleware.
+func isRuntimeControlExclusion(request *http.Request) bool {
 	// Provider callbacks and one-time input forms authenticate with opaque
 	// browser state, so requiring a control credential would expose or break the
-	// generated SDK connect flow.
-	return path == "/workspace/connect/callback" || path == "/workspace/connect/input"
+	// generated SDK connect flow. App execution similarly authenticates only an
+	// exact family token at its dedicated runtime boundary.
+	path := request.URL.Path
+	if path == "/workspace/connect/callback" || path == "/workspace/connect/input" {
+		return true
+	}
+	if request.Method != http.MethodPost {
+		return false
+	}
+	const prefix = "/v1/apps/"
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, prefix), "/")
+	return len(parts) == 2 && parts[0] != "" && parts[1] == "executions"
 }
