@@ -121,7 +121,13 @@ import {
   RATE_LIMIT_GRAPHQL_FIELDS,
   rateLimitSummary,
 } from "~/lib/rate-limit";
+import { RETRY_GRAPHQL_FIELDS, retrySummary } from "~/lib/retry-policy";
 import { oauth2FlowEntries, oauth2ScopeNames } from "~/lib/oauth2-flows";
+import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
+import {
+  hasResourcePermission,
+  hasWorkspacePermission,
+} from "~/lib/current-actor-access";
 
 function requireRemoteSource(sourceURL?: string): string {
   const value = sourceURL || "";
@@ -207,6 +213,61 @@ function selectedServiceVersions(
 
 function selectedVersionName(version: string, fallback?: string) {
   return version || fallback || "";
+}
+
+// routeAuthenticated normalizes optional root-loader session state.
+function routeAuthenticated(rootData?: { isAuth: boolean }): boolean {
+  return Boolean(rootData?.isAuth);
+}
+
+// initialDetailService extracts the nullable service returned by the loader.
+function initialDetailService(data: InitialServicePayload): Service | null {
+  return data?.service || null;
+}
+
+// detailServiceVersions chooses refreshed rows before loader bootstrap rows.
+function detailServiceVersions(
+  result: ServiceGenerationResult | null,
+  initialData: InitialServicePayload
+): ServiceVersion[] {
+  return selectedServiceVersions(
+    generatedServiceVersions(result),
+    initialData?.serviceVersions
+  );
+}
+
+// detailSelectedVersion resolves the URL pin against the effective version.
+function detailSelectedVersion(
+  requested: string,
+  result: ServiceGenerationResult | null,
+  initialService: Service | null
+): string {
+  return selectedVersionName(
+    requested,
+    generatedService(result)?.current_service_version ||
+      initialService?.current_service_version
+  );
+}
+
+// queryValue returns a stable empty string for absent optional URL state.
+function queryValue(params: URLSearchParams, key: string): string {
+  return params.get(key) || "";
+}
+
+// serviceReadAllowed checks the exact service grant only after identity exists.
+function serviceReadAllowed(
+  access: Parameters<typeof hasResourcePermission>[0],
+  serviceId?: string
+): boolean {
+  return hasResourcePermission(access, "service.read", "SERVICE", serviceId || "");
+}
+
+// activityReadAllowed combines service visibility with workspace audit access.
+function activityReadAllowed(
+  access: Parameters<typeof hasWorkspacePermission>[0],
+  canReadService: boolean
+): boolean {
+  return canReadService && hasWorkspacePermission(access, "audit.read");
 }
 
 function endpointTotal(
@@ -327,6 +388,7 @@ function OAuth2FlowDetails({ auth }: { auth: AuthConfig }) {
   );
 }
 
+// serviceDetailQuery keeps initial and refreshed service reads on one schema projection.
 function serviceDetailQuery(provider?: string): string {
   if (provider) {
     return `
@@ -335,11 +397,15 @@ function serviceDetailQuery(provider?: string): string {
           id name slug description base_url current_service_version servers { url description environment is_default }
           is_public watch_for_drift created_at updated_at source_url import_method
           import_warnings { id endpoint_id method path operation_id reasons recommendation source created_at }
-          auth_configs { type scheme location key_name token_endpoint_auth_method open_id_connect_url oauth2_flows }
+          auth_configs {
+            name type scheme basic_password_mode location key_name open_id_connect_url oauth2_metadata_url
+            deprecated token_endpoint_auth_method token_request_media_type pkce_required scopes_delimiter
+            extra_auth_params extra_token_params refresh_token_rotates oauth2_flows strategy policy_provenance
+          }
           event_extraction_path
           incoming_webhook_config { auth_type auth_location auth_key_name signature_header }
           rate_limit { ${RATE_LIMIT_GRAPHQL_FIELDS} }
-          retry_config { strategy max_retries backoff_ms }
+          retry_config { ${RETRY_GRAPHQL_FIELDS} }
           default_headers provider { name handle } canonical_ref is_owner webhook_count endpoint_count
           webhooks { id name description method request_body }
           resources { id name endpointCount }
@@ -354,11 +420,15 @@ function serviceDetailQuery(provider?: string): string {
         id name slug description base_url current_service_version servers { url description environment is_default }
         is_public watch_for_drift created_at updated_at source_url import_method
         import_warnings { id endpoint_id method path operation_id reasons recommendation source created_at }
-        auth_configs { type scheme location key_name token_endpoint_auth_method open_id_connect_url oauth2_flows }
+        auth_configs {
+          name type scheme basic_password_mode location key_name open_id_connect_url oauth2_metadata_url
+          deprecated token_endpoint_auth_method token_request_media_type pkce_required scopes_delimiter
+          extra_auth_params extra_token_params refresh_token_rotates oauth2_flows strategy policy_provenance
+        }
         event_extraction_path
         incoming_webhook_config { auth_type auth_location auth_key_name signature_header }
         rate_limit { ${RATE_LIMIT_GRAPHQL_FIELDS} }
-        retry_config { strategy max_retries backoff_ms }
+        retry_config { ${RETRY_GRAPHQL_FIELDS} }
         default_headers provider { name handle } canonical_ref is_owner webhook_count endpoint_count
         webhooks { id name description method request_body }
         resources { id name endpointCount }
@@ -542,8 +612,11 @@ function AddToWorkspaceButton({
   );
 }
 
+// useIntegrationDetailModel owns version-pinned service detail state and actions.
+/** Builds the service-detail state while keeping protected activity reads gated. */
 function useIntegrationDetailModel() {
   const toast = useToast();
+  const { access } = useCurrentActorAccess();
   const loaderData = useLoaderData<typeof clientLoader>();
   const { id: paramId, provider } = useParams<{
     id: string;
@@ -552,9 +625,9 @@ function useIntegrationDetailModel() {
   const location = useLocation();
   const id = loaderResolvedID(loaderData, paramId);
   const rootData = useRouteLoaderData<{ isAuth: boolean }>("root");
-  const isAuth = Boolean(rootData && rootData.isAuth);
+  const isAuth = routeAuthenticated(rootData);
   const initialServiceData = loaderInitialData(loaderData);
-  const initialService = initialServiceData ? initialServiceData.service : null;
+  const initialService = initialDetailService(initialServiceData);
 
   const [res, setRes] = useState<ServiceGenerationResult | null>(() => {
     if (initialService) {
@@ -588,6 +661,8 @@ function useIntegrationDetailModel() {
   // Only the loaded service row gives us the Engine/Registry UUID. The route
   // param may be a slug, so UUID-only admin panels must wait for `res`.
   const serviceId = generatedService(res)?.id;
+  const canReadService = serviceReadAllowed(access, serviceId);
+  const canReadActivity = activityReadAllowed(access, canReadService);
 
   const [workspaceServiceActive, setWorkspaceServiceActive] = useState<
     boolean | null
@@ -656,7 +731,12 @@ function useIntegrationDetailModel() {
   const [searchParams, setSearchParams] = useSearchParams();
   // The selected provider version is URL-addressable so client-side refreshes
   // preserve the same immutable contract view as the initial loader.
-  const version = searchParams.get("version") ?? "";
+  const version = queryValue(searchParams, "version");
+  const serviceVersions = detailServiceVersions(res, initialServiceData);
+  const selectedVersion = detailSelectedVersion(version, res, initialService);
+  const currentVersionEntry = serviceVersions.find(
+    (item) => item.name === selectedVersion
+  );
 
   const {
     resourceVersions,
@@ -668,12 +748,12 @@ function useIntegrationDetailModel() {
     hasMoreResources,
     toggleResource,
     loadMoreEndpoints,
-  } = useResourceLoader(serviceId, version);
+  } = useResourceLoader(serviceId, currentVersionEntry?.id);
 
   const activeTab = resolvedDetailTab(searchParams.get("tab"));
   const urlWPage = positivePage(searchParams.get("wPage"));
-  const urlWStartDate = searchParams.get("wStartDate") ?? "";
-  const urlWEndDate = searchParams.get("wEndDate") ?? "";
+  const urlWStartDate = queryValue(searchParams, "wStartDate");
+  const urlWEndDate = queryValue(searchParams, "wEndDate");
   const importSessionId = searchParams.get("importSession");
 
   const [isClientFetchingTab, setIsClientFetchingTab] = useState(false);
@@ -746,7 +826,12 @@ function useIntegrationDetailModel() {
     handleSearch,
     loadMoreSearchResults,
     handleClearSearch,
-  } = useEndpointSearch(serviceId, res, integrationsByResource);
+  } = useEndpointSearch(
+    serviceId,
+    selectedVersion,
+    res,
+    integrationsByResource
+  );
 
   // Contextual notification banner: filtered to just this service, via the
   // same matchesService rule the SDK/MCP-page banner mirrors with
@@ -757,6 +842,7 @@ function useIntegrationDetailModel() {
     serviceRefs: notificationServiceRefs,
     markRead: markNotificationRead,
     dismiss: dismissNotification,
+    canUpdate: canUpdateNotifications,
   } = useWorkspaceNotifications(isAuth);
   // Detail banners are action-oriented. Acknowledged items remain available
   // in the bell and full notifications page, but should not interrupt a
@@ -773,12 +859,14 @@ function useIntegrationDetailModel() {
           driftSnapshots(serviceId: $serviceId) {
             id
             integration_object_id
-            created_at
+            detected_at
             status
             diff {
               field
               old_value
               new_value
+              severity
+              description
             }
           }
         }
@@ -801,29 +889,41 @@ function useIntegrationDetailModel() {
     if (
       selectedEndpoint &&
       !selectedEndpoint.isWebhook &&
-      !selectedEndpoint._detailsLoaded
+      !selectedEndpoint._detailsLoaded &&
+      currentVersionEntry?.id
     ) {
       api
         .graphql<{ integration: IntegrationObject }>(
           `
-        query($id: String!, $serviceId: String!) {
-          integration(id: $id, serviceId: $serviceId) {
+        query($id: String!, $serviceId: String!, $serviceVersionId: String!) {
+          integration(id: $id, serviceId: $serviceId, service_version_id: $serviceVersionId) {
             id
             description
+            stable_key
+            normalized_path
+            provider_protocol
+            operation_kind
             parameters {
               name
               in
               required
               type
               description
+              path_encoding
             }
-            request_body
+            request_content
             responses
+            security_requirements { schemes { scheme scopes } server_selection }
+            pagination { version limits { max_pages max_items max_bytes max_duration_ms } }
             graphql_query
           }
         }
       `,
-          { id: selectedEndpoint.id, serviceId: selectedEndpoint.service_id }
+          {
+            id: selectedEndpoint.id,
+            serviceId: selectedEndpoint.service_id,
+            serviceVersionId: currentVersionEntry?.id,
+          }
         )
         .then((data) => {
           // Merge fetched detail fields onto the existing list item object.
@@ -852,9 +952,11 @@ function useIntegrationDetailModel() {
           );
         });
     }
-  }, [selectedEndpoint]);
+  }, [selectedEndpoint, currentVersionEntry?.id]);
 
+  /** Loads webhook receipts and aggregates for authorized service auditors. */
   async function loadWebhookData() {
+    if (!canReadActivity) return;
     if (!isUUID(id)) return;
     if (!isAuth || workspaceServiceActive !== true) return;
     if (!serviceId) return;
@@ -886,7 +988,9 @@ function useIntegrationDetailModel() {
     }
   }
 
+  /** Loads outbound execution receipts for authorized service auditors. */
   async function loadExecutionData() {
+    if (!canReadActivity) return;
     if (!isAuth || workspaceServiceActive !== true || !serviceId) return;
     setIsClientFetchingTab(true);
     try {
@@ -923,6 +1027,7 @@ function useIntegrationDetailModel() {
     webhookPage,
     activeTab,
     workspaceServiceActive,
+    canReadActivity,
   ]);
 
   useEffect(() => {
@@ -934,9 +1039,12 @@ function useIntegrationDetailModel() {
     executionTransport,
     executionStatus,
     workspaceServiceActive,
+    canReadActivity,
   ]);
 
+  /** Loads service consumers used to label authorized activity rows. */
   async function loadAnalyticsData() {
+    if (!canReadActivity) return;
     if (!id) return;
     if (!isAuth || workspaceServiceActive !== true || !serviceId) return;
     setIsClientFetchingTab(true);
@@ -955,148 +1063,16 @@ function useIntegrationDetailModel() {
     if (activeTab === "analytics") {
       loadAnalyticsData();
     }
-  }, [id, activeTab, workspaceServiceActive]);
+  }, [id, activeTab, workspaceServiceActive, canReadActivity]);
 
+  // loadData refreshes the same service projection used by the route loader.
   async function loadData() {
     if (!id) return;
 
     setLoading(true);
     autoExpandedServiceId.current = null;
-    // provider is only set when this component is rendered under
-    // integrations.$provider.$id.tsx (cross-account public-browsing route)
-    const queryStr = provider
-      ? `
-      query($id: String!, $version: String, $provider: String) {
-        service(id: $id, version: $version, provider: $provider) {
-          id
-          name
-          slug
-          description
-          base_url
-          current_service_version
-          servers {
-            url
-            description
-            environment
-            is_default
-          }
-          is_public
-          watch_for_drift
-          created_at
-          updated_at
-          source_url
-          import_method
-          import_warnings {
-            id
-            endpoint_id
-            method
-            path
-            operation_id
-            reasons
-            recommendation
-            source
-            created_at
-          }
-          auth_configs {
-            type
-            scheme
-            location
-            key_name
-            token_endpoint_auth_method
-            open_id_connect_url
-            oauth2_flows
-          }
-          event_extraction_path
-          incoming_webhook_config {
-            auth_type
-            auth_location
-            auth_key_name
-            signature_header
-          }
-          rate_limit { ${RATE_LIMIT_GRAPHQL_FIELDS} }
-          retry_config {
-            strategy
-            max_retries
-            backoff_ms
-          }
-          default_headers
-          provider { name handle }
-          canonical_ref
-          is_owner
-          webhook_count
-          endpoint_count
-          webhooks { id name description method request_body }
-          resources { id name endpointCount }
-        }
-        serviceVersions(serviceId: $id, provider: $provider) { id name is_public status created_at updated_at }
-      }
-    `
-      : `
-      query($id: String!, $version: String) {
-        service(id: $id, version: $version) {
-          id
-          name
-          slug
-          description
-          base_url
-          current_service_version
-          servers {
-            url
-            description
-            environment
-            is_default
-          }
-          is_public
-          watch_for_drift
-          created_at
-          updated_at
-          source_url
-          import_method
-          import_warnings {
-            id
-            endpoint_id
-            method
-            path
-            operation_id
-            reasons
-            recommendation
-            source
-            created_at
-          }
-          auth_configs {
-            type
-            scheme
-            location
-            key_name
-            token_endpoint_auth_method
-            open_id_connect_url
-            oauth2_flows
-          }
-          event_extraction_path
-          incoming_webhook_config {
-            auth_type
-            auth_location
-            auth_key_name
-            signature_header
-          }
-          rate_limit { ${RATE_LIMIT_GRAPHQL_FIELDS} }
-          retry_config {
-            strategy
-            max_retries
-            backoff_ms
-          }
-          default_headers
-          provider { name handle }
-          canonical_ref
-          is_owner
-          webhook_count
-          endpoint_count
-          webhooks { id name description method request_body }
-          resources { id name endpointCount }
-        }
-        serviceVersions(serviceId: $id) { id name is_public status created_at updated_at }
-      }
-    `;
+    // One document prevents client refreshes from drifting from loader fields.
+    const queryStr = serviceDetailQuery(provider);
     const variables: Record<string, string | undefined> = {
       id: id as string,
       version,
@@ -1289,18 +1265,6 @@ function useIntegrationDetailModel() {
     }
   }
 
-  const serviceVersions = selectedServiceVersions(
-    generatedServiceVersions(res),
-    initialServiceData ? initialServiceData.serviceVersions : undefined
-  );
-  const selectedVersion = selectedVersionName(
-    version,
-    generatedService(res)?.current_service_version
-  );
-  const currentVersionEntry = serviceVersions.find(
-    (item) => item.name === selectedVersion
-  );
-
   // handleToggleVersionPublic is handleTogglePublic's per-version sibling: it
   // flips is_public for just the currently viewed version (the same one
   // VersionSelector shows/selects), independent of the service-level Public
@@ -1342,6 +1306,7 @@ function useIntegrationDetailModel() {
 
   return {
     toast, loaderData, paramId, provider, id, isAuth, res, serviceId,
+    access, canReadActivity,
     serviceVersions, currentVersionEntry,
     workspaceServiceActive, setWorkspaceServiceActive, drift, loading, error,
     driftAction, showShareMenu, setShowShareMenu, shareMenuRef,
@@ -1359,6 +1324,7 @@ function useIntegrationDetailModel() {
     searchQuery, setSearchQuery, isSearching, searchResults, hasMoreSearch,
     handleSearch, loadMoreSearchResults, handleClearSearch,
     notificationServiceRefs, markNotificationRead, dismissNotification,
+    canUpdateNotifications,
     serviceNotifications, importProgress, loadWebhookData, handleDismiss,
     handleApply, handleToggleDriftWatch, handleTogglePublic,
     handleToggleVersionPublic, handleClearImportWarnings,
@@ -1675,7 +1641,7 @@ function ImportMethodBadge({ method, canManage }: { method?: string; canManage: 
 function ServiceNotificationBanner() {
   const detail = useDetail();
   if (!detail.isAuth || detail.serviceNotifications.length === 0) return null;
-  return <NotificationBanner items={detail.serviceNotifications} serviceRefs={detail.notificationServiceRefs} onMarkRead={detail.markNotificationRead} onDismiss={detail.dismissNotification} />;
+  return <NotificationBanner items={detail.serviceNotifications} serviceRefs={detail.notificationServiceRefs} onMarkRead={detail.markNotificationRead} onDismiss={detail.dismissNotification} canUpdate={detail.canUpdateNotifications} />;
 }
 
 function ImportProgressPanel() {
@@ -1776,6 +1742,7 @@ function ConfigRow({ label, value, mono = false }: { label: string; value: strin
   return <div className="mt-1 flex justify-between"><span className="text-slate-500">{label}</span><span className={mono ? "font-mono text-slate-900" : "font-medium text-slate-900"}>{value}</span></div>;
 }
 
+// RateLimitConfigCard summarizes the v3 policy set and reveals exact policy details on demand.
 function RateLimitConfigCard({ srv }: { srv: Service }) {
   const rateLimit = srv.rate_limit;
   return (
@@ -1793,31 +1760,65 @@ function RateLimitConfigCard({ srv }: { srv: Service }) {
   );
 }
 
+// rateLimitIdentityLabel renders the ordered dimensions that form a provider quota bucket.
+function rateLimitIdentityLabel(policy: NonNullable<Service["rate_limit"]>["policies"][number]): string {
+  return policy.identity.inputs
+    .map((input) => input.name || input.binding || input.kind)
+    .join(" + ");
+}
+
+// RateLimitPolicyCard renders every supported v3 rate-limit algorithm without legacy aliases.
 function RateLimitPolicyCard({ policy }: { policy: NonNullable<Service["rate_limit"]>["policies"][number] }) {
   return (
     <div className="rounded border border-slate-200 bg-white p-2">
-      <div className="flex justify-between gap-3"><span className="font-medium text-slate-900">{policy.name}</span><span>{policy.unit} · {policy.scope}</span></div>
+      <div className="flex justify-between gap-3"><span className="font-medium text-slate-900">{policy.name}</span><span>{policy.unit} · {policy.mode}</span></div>
       <div className="mt-1 flex justify-between gap-3"><span className="text-slate-500">Algorithm</span><span>{policy.algorithm}</span></div>
-      <div className="flex justify-between gap-3"><span className="text-slate-500">Default cost</span><span>{policy.default_cost}</span></div>
+      <div className="flex justify-between gap-3"><span className="text-slate-500">Identity</span><span>{rateLimitIdentityLabel(policy) || "Unscoped"}</span></div>
+      <div className="flex justify-between gap-3"><span className="text-slate-500">Default cost</span><span>{policy.cost.default}</span></div>
       {policy.fixed_window && <div className="flex justify-between gap-3"><span className="text-slate-500">Window</span><span>{policy.fixed_window.limit} / {policy.fixed_window.duration_ms} ms</span></div>}
+      {policy.rolling_window && <div className="flex justify-between gap-3"><span className="text-slate-500">Rolling window</span><span>{policy.rolling_window.limit} / {policy.rolling_window.duration_ms} ms</span></div>}
       {policy.token_bucket && <div className="flex justify-between gap-3"><span className="text-slate-500">Bucket</span><span>{policy.token_bucket.capacity}; +{policy.token_bucket.refill_units} / {policy.token_bucket.refill_interval_ms} ms</span></div>}
+      {policy.concurrency && <div className="flex justify-between gap-3"><span className="text-slate-500">Concurrency</span><span>{policy.concurrency.limit}</span></div>}
     </div>
   );
 }
 
+// retryPredicateSummary condenses a rule's independently optional predicates for the card header.
+function retryPredicateSummary(rule: NonNullable<Service["retry_config"]>["rules"][number]): string {
+  const predicates = rule.predicates;
+  const labels = [
+    ...predicates.methods,
+    ...predicates.operation_kinds,
+    ...predicates.statuses.map((status) => `${status.min}-${status.max}`),
+    ...predicates.errors,
+  ];
+  return labels.join(", ") || "Any admitted request";
+}
+
+// RetryRuleCard displays the bounded action paired with one exact v3 predicate set.
+function RetryRuleCard({ rule }: { rule: NonNullable<Service["retry_config"]>["rules"][number] }) {
+  return (
+    <div className="rounded border border-slate-200 bg-white p-2">
+      <div className="font-medium text-slate-900">{retryPredicateSummary(rule)}</div>
+      <ConfigRow label="Max attempts" value={String(rule.action.max_attempts)} />
+      <ConfigRow label="Max elapsed" value={`${rule.action.max_elapsed_ms}ms`} />
+      <ConfigRow label="Backoff" value={rule.action.backoff.strategy} />
+    </div>
+  );
+}
+
+// RetryConfigCard summarizes v3 rules instead of reading the removed legacy strategy fields.
 function RetryConfigCard({ srv }: { srv: Service }) {
   const retry = srv.retry_config;
   return (
     <details className={`${configCardClass} ${retry ? "cursor-pointer hover:bg-slate-100" : ""}`}>
       <summary className="flex list-none items-start justify-between outline-none">
-        <div><dt className="text-xs text-slate-500">Retry</dt><dd className="mt-1 text-slate-800">{retry?.strategy || "Not declared"}</dd></div>
+        <div><dt className="text-xs text-slate-500">Retry</dt><dd className="mt-1 text-slate-800">{retrySummary(retry)}</dd></div>
         {retry && <ChevronDown className="mt-1 h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" />}
       </summary>
       {retry && (
-        <div className="mt-3 space-y-1 border-t border-slate-200 pt-3 text-xs text-slate-700">
-          <ConfigRow label="Strategy" value={retry.strategy || "Not declared"} />
-          {retry.max_retries != null && <ConfigRow label="Max retries" value={String(retry.max_retries)} />}
-          {retry.backoff_ms != null && <ConfigRow label="Backoff" value={`${retry.backoff_ms}ms`} />}
+        <div className="mt-3 space-y-2 border-t border-slate-200 pt-3 text-xs text-slate-700">
+          {retry.rules.map((rule, index) => <RetryRuleCard key={index} rule={rule} />)}
         </div>
       )}
     </details>
@@ -1848,13 +1849,20 @@ function WebhookConfiguration({ srv }: { srv: Service }) {
   );
 }
 
+/** Resolves read and manage grants for the selected service profile. */
 function ConnectionProfile({ srv }: { srv: Service }) {
   const { serviceId, serviceVersions, version } = useDetail();
   if (!serviceId) return null;
   const serviceVersion = selectedVersionName(version, srv.current_service_version);
   const versionID = serviceVersions.find((item) => item.name === serviceVersion)?.id;
   const detail = useDetail();
-  return <WorkspaceConnectionProfileSection serviceId={serviceId} serviceVersionId={versionID} serviceVersion={serviceVersion} authConfigs={srv.auth_configs ?? []} isOwner={canManageService(detail.isAuth, srv.is_owner, detail.paramId, detail.provider)} />;
+  const canRead =
+    hasResourcePermission(detail.access, "service.read", "SERVICE", serviceId) &&
+    hasWorkspacePermission(detail.access, "credentials.metadata.read");
+  const canManage =
+    canRead &&
+    hasResourcePermission(detail.access, "service.manage", "SERVICE", serviceId);
+  return <WorkspaceConnectionProfileSection serviceId={serviceId} serviceVersionId={versionID} serviceVersion={serviceVersion} authConfigs={srv.auth_configs ?? []} canRead={canRead} canManage={canManage} />;
 }
 
 function tabClass(active: boolean) {
@@ -1933,8 +1941,16 @@ function nextPageValue(page: number | ((value: number) => number), current: numb
   return typeof page === "function" ? page(current) : page;
 }
 
+/** Renders service activity only after its audit permission is established. */
 function ActivityTabContent() {
   const detail = useDetail();
+  if (!detail.canReadActivity) {
+    return (
+      <section className="rounded-lg border border-slate-200 bg-white px-6 py-12 text-center text-sm text-slate-500">
+        Service activity access is not available for your account.
+      </section>
+    );
+  }
   return (
     <ActivityTab
       res={detail.res!}
@@ -1993,9 +2009,15 @@ function ServiceMetadata({ srv }: { srv: Service }) {
   );
 }
 
+// SelectedEndpointSidebar scopes component expansion to the Registry's latest component snapshot.
 function SelectedEndpointSidebar({ srv }: { srv: Service }) {
   const detail = useDetail();
   if (!detail.selectedEndpoint) return null;
+  const componentScope = detail.currentVersionEntry?.id || "unresolved";
+  const allowRemoteRefs = Boolean(
+    detail.currentVersionEntry?.id &&
+    detail.serviceVersions[0]?.id === detail.currentVersionEntry.id
+  );
   return (
     <EndpointDetailsSidebar
       selectedEndpoint={detail.selectedEndpoint}
@@ -2005,6 +2027,8 @@ function SelectedEndpointSidebar({ srv }: { srv: Service }) {
       driftAction={detail.driftAction}
       handleDismiss={detail.handleDismiss}
       handleApply={detail.handleApply}
+      componentScope={componentScope}
+      allowRemoteRefs={allowRemoteRefs}
     />
   );
 }

@@ -30,11 +30,13 @@ interface NotificationsBodyProps {
   serviceRefs: ReturnType<typeof usePaginatedWorkspaceNotifications>["serviceRefs"];
   markRead: ReturnType<typeof usePaginatedWorkspaceNotifications>["markRead"];
   dismiss: ReturnType<typeof usePaginatedWorkspaceNotifications>["dismiss"];
+  canUpdate: boolean;
   filter: SeverityFilter;
   readFilter: string;
 }
 
-function NotificationsBody({ loading, error, itemsLoaded, filtered, serviceRefs, markRead, dismiss, filter, readFilter }: NotificationsBodyProps) {
+/** Renders the paginated notification body and forwards update authorization. */
+function NotificationsBody({ loading, error, itemsLoaded, filtered, serviceRefs, markRead, dismiss, canUpdate, filter, readFilter }: NotificationsBodyProps) {
   if (loading && !itemsLoaded) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-slate-400">
@@ -53,6 +55,7 @@ function NotificationsBody({ loading, error, itemsLoaded, filtered, serviceRefs,
       onMarkRead={markRead}
       onDismiss={dismiss}
       emptyMessage={notificationsEmptyMessage(filter, readFilter)}
+      canUpdate={canUpdate}
     />
   );
 }
@@ -140,6 +143,7 @@ export function NotificationsContent() {
     error,
     markRead,
     dismiss,
+    canUpdate,
   } = usePaginatedWorkspaceNotifications();
   const [filter, setFilter] = useState<SeverityFilter>("all");
   const [search, setSearch] = useState("");
@@ -232,6 +236,7 @@ export function NotificationsContent() {
           serviceRefs={serviceRefs}
           markRead={markRead}
           dismiss={dismiss}
+          canUpdate={canUpdate}
           filter={filter}
           readFilter={readFilter}
         />

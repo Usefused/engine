@@ -15,7 +15,7 @@ const PANEL_LIMIT = 6;
 export function NotificationBell() {
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
-  const { unresolved, pendingCount, serviceRefs, markRead, dismiss } = useWorkspaceNotifications();
+  const { unresolved, pendingCount, serviceRefs, markRead, dismiss, canUpdate } = useWorkspaceNotifications();
 
   useEffect(() => {
     if (!open) return;
@@ -65,6 +65,7 @@ export function NotificationBell() {
               serviceRefs={serviceRefs}
               onMarkRead={markRead}
               onDismiss={dismiss}
+              canUpdate={canUpdate}
             />
           </div>
           <Link

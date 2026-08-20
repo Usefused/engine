@@ -3,8 +3,20 @@ import { useSearchParams } from "@remix-run/react";
 import { api, type IntegrationObject } from "~/lib/api";
 import { useToast } from "~/components/Toast";
 
+// endpointSearchContract fails closed until an exact service version is known.
+function endpointSearchContract(
+  serviceId: string | undefined,
+  version: string | undefined,
+  result: unknown
+): { serviceId: string; version: string } | null {
+  if (!serviceId || !version || !result) return null;
+  return { serviceId, version };
+}
+
+// useEndpointSearch searches operations without crossing service-version pins.
 export function useEndpointSearch(
   serviceId: string | undefined,
+  version: string | undefined,
   res: unknown,
   integrationsByResource: Record<string, IntegrationObject[]>
 ) {
@@ -18,6 +30,14 @@ export function useEndpointSearch(
 
   const hasTriggeredSearch = useRef(false);
 
+  // Reset version-bound results before a new immutable contract is searched.
+  useEffect(() => {
+    hasTriggeredSearch.current = false;
+    setSearchResults(null);
+    setSearchOffset(0);
+    setHasMoreSearch(false);
+  }, [serviceId, version]);
+
   useEffect(() => {
     const qParam = searchParams.get("q");
     if (res && !hasTriggeredSearch.current) {
@@ -26,17 +46,19 @@ export function useEndpointSearch(
         handleSearch(qParam);
       }
     }
-  }, [res, searchParams]);
+  }, [res, searchParams, serviceId, version]);
 
   useEffect(() => {
     if (!res || (searchQuery === (searchParams.get("q") || "") && hasTriggeredSearch.current)) return;
     const timeoutId = setTimeout(() => handleSearch(searchQuery), 400);
     return () => clearTimeout(timeoutId);
-  }, [searchQuery, res]);
+  }, [searchQuery, res, version]);
 
-  async function handleSearch(overrideQuery?: string) {
-    const q = overrideQuery !== undefined ? overrideQuery : searchQuery;
-    if (!serviceId || !res) return;
+  // handleSearch prefers already-loaded exact-version rows before Registry search.
+  async function handleSearch(overrideQuery = searchQuery) {
+    const q = overrideQuery;
+    const contract = endpointSearchContract(serviceId, version, res);
+    if (!contract) return;
     if (!q.trim()) {
       setSearchResults(null);
       if (searchParams.has("q")) {
@@ -69,12 +91,12 @@ export function useEndpointSearch(
 
     try {
       const data = await api.graphql<{ searchEndpoints: IntegrationObject[] }>(`
-        query($serviceId: String!, $q: String!, $limit: Int, $offset: Int) {
-          searchEndpoints(serviceId: $serviceId, q: $q, limit: $limit, offset: $offset) {
+        query($serviceId: String!, $version: String!, $q: String!, $limit: Int, $offset: Int) {
+          searchEndpoints(serviceId: $serviceId, version: $version, q: $q, limit: $limit, offset: $offset) {
             id service_id name description version status method path deprecated
           }
         }
-      `, { serviceId, q, limit: 50, offset: 0 });
+      `, { ...contract, q, limit: 50, offset: 0 });
       const enriched = data.searchEndpoints.map(ep => {
         const existing = allLoaded.find(i => i.id === ep.id);
         return existing ? { ...ep, resource: existing.resource } : { ...ep, resource: "Search Results" };
@@ -89,18 +111,20 @@ export function useEndpointSearch(
     }
   }
 
+  // loadMoreSearchResults appends the next page for the same version and query.
   async function loadMoreSearchResults() {
-    if (!serviceId || !res || isSearching || !hasMoreSearch) return;
+    const contract = endpointSearchContract(serviceId, version, res);
+    if (!contract || isSearching || !hasMoreSearch) return;
     setIsSearching(true);
     try {
       const allLoaded = Object.values(integrationsByResource).flat();
       const data = await api.graphql<{ searchEndpoints: IntegrationObject[] }>(`
-        query($serviceId: String!, $q: String!, $limit: Int, $offset: Int) {
-          searchEndpoints(serviceId: $serviceId, q: $q, limit: $limit, offset: $offset) {
+        query($serviceId: String!, $version: String!, $q: String!, $limit: Int, $offset: Int) {
+          searchEndpoints(serviceId: $serviceId, version: $version, q: $q, limit: $limit, offset: $offset) {
             id service_id name description version status method path deprecated
           }
         }
-      `, { serviceId, q: searchQuery, limit: 50, offset: searchOffset });
+      `, { ...contract, q: searchQuery, limit: 50, offset: searchOffset });
       const enriched = data.searchEndpoints.map(ep => {
         const existing = allLoaded.find(i => i.id === ep.id);
         return existing ? { ...ep, resource: existing.resource } : { ...ep, resource: "Search Results" };
@@ -115,6 +139,7 @@ export function useEndpointSearch(
     }
   }
 
+  // handleClearSearch restores the resource browse view and URL state.
   function handleClearSearch() {
     setSearchQuery("");
     setSearchResults(null);

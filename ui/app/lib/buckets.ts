@@ -41,6 +41,14 @@ export type BucketContentPages = {
   connectionServices: BucketPageRequest & { search?: string };
 };
 
+export type BucketContentAccess = {
+  values: boolean;
+  secrets: boolean;
+  connections: boolean;
+  apps: boolean;
+  services: boolean;
+};
+
 export type BucketPageRequest = {
   limit: number;
   offset: number;
@@ -69,13 +77,12 @@ export type ValueFormPayload = {
   value: string;
 };
 
+/** Loads one authorized page of credential-set summaries. */
 export function readBuckets(limit = 20, offset = 0): Promise<BucketPageState> {
-  return readBucketSummaries(limit, offset).catch((err) => {
-    if (!isUnknownGraphQLField(err, "bucketSummaries")) throw err;
-    return readBucketsWithoutSummaries();
-  });
+  return readBucketSummaries(limit, offset);
 }
 
+/** Loads the authorized page of aggregate credential-set summaries. */
 function readBucketSummaries(
   limit: number,
   offset: number
@@ -87,7 +94,7 @@ function readBucketSummaries(
       `query($limit: Int!, $offset: Int!) {
         bucketSummaryPage(limit: $limit, offset: $offset) {
           total
-          items { id name is_default secret_count value_count created_at updated_at }
+          items { id name is_default secret_count value_count connected_user_count created_at updated_at }
         }
       }`,
       { limit, offset }
@@ -95,153 +102,198 @@ function readBucketSummaries(
     .then(({ bucketSummaryPage }) => ({
       bucketSummaries: bucketSummaryPage.items,
       total: bucketSummaryPage.total,
-    }))
-    .catch((err) => {
-      if (!isUnknownGraphQLField(err, "bucketSummaryPage")) throw err;
-      return api
-        .mcpGraphql<BucketPageState>(
-          `query {
-          bucketSummaries { id name is_default secret_count value_count connected_user_count created_at updated_at }
-        }`
-        )
-        .then((state) => ({ ...state, total: state.bucketSummaries.length }));
-    });
-}
-
-function readBucketsWithoutSummaries(): Promise<BucketPageState> {
-  return api
-    .mcpGraphql<{ buckets: Bucket[] }>(
-      `query {
-        buckets { id name is_default created_at updated_at }
-      }`
-    )
-    .then(({ buckets }) => ({
-      // Older Engine processes may still be live while the UI has already
-      // shipped the aggregate field. Keep the page usable with a GraphQL-only
-      // read, then real counts appear once that process is restarted.
-      bucketSummaries: buckets.map((bucket) => ({
-        ...bucket,
-        secret_count: 0,
-        value_count: 0,
-        connected_user_count: 0,
-      })),
-      total: buckets.length,
     }));
 }
 
+/** Loads only credential-set sections the current actor is authorized to read. */
 export function readBucketContents(
   bucketId: string,
-  pages: BucketContentPages
+  pages: BucketContentPages,
+  access: BucketContentAccess
 ): Promise<BucketContentState> {
-  return readBucketContentPages(bucketId, pages).catch((err) => {
-    if (!isUnknownGraphQLField(err, "bucketValuePage")) throw err;
-    return readBucketEntries(bucketId);
-  });
+  // These are a fixed set of independent page reads, not row-driven fan-out;
+  // separating them prevents one protected section from invalidating all data.
+  const reads: Promise<BucketContentState>[] = [];
+  if (access.values) reads.push(readBucketValues(bucketId, pages.values));
+  if (access.secrets) reads.push(readBucketSecrets(bucketId, pages.secrets));
+  if (access.connections) {
+    reads.push(readBucketConnections(bucketId, pages.connections));
+    reads.push(readBucketConnectSummary(bucketId));
+  }
+  // Service visibility is independent from connection visibility, so the
+  // connected-user filter must never make an otherwise permitted read fail.
+  if (access.connections && access.services) {
+    reads.push(readBucketConnectionServices(bucketId, pages.connectionServices));
+  }
+  if (access.apps) reads.push(readBucketApps(bucketId, pages.sdks));
+  if (access.services) reads.push(readBucketServices(bucketId, pages));
+  return Promise.all(reads).then((states) => Object.assign({}, ...states));
 }
 
+/** Loads one aggregate credential-set summary. */
 export function readBucketSummary(bucketId: string): Promise<BucketSummary> {
   return api
     .mcpGraphql<{ bucketSummary: BucketSummary }>(
       `query($bucketId: String!) {
-        bucketSummary(bucket_id: $bucketId) { id name is_default secret_count value_count created_at updated_at }
+        bucketSummary(bucket_id: $bucketId) { id name is_default secret_count value_count connected_user_count created_at updated_at }
       }`,
       { bucketId }
     )
     .then(({ bucketSummary }) => bucketSummary);
 }
 
-function readBucketContentPages(
+/** Loads a page of plaintext bucket values when workspace-level value access exists. */
+function readBucketValues(
+  bucketId: string,
+  page: BucketPageRequest
+): Promise<BucketContentState> {
+  return api
+    .mcpGraphql<{ bucketValuePage: GraphQLPage<BucketValue> }>(
+      `query($bucketId: String!, $limit: Int!, $offset: Int!) {
+        bucketValuePage(bucket_id: $bucketId, limit: $limit, offset: $offset) {
+          total
+          items { id bucket_id service_id key_name location value created_at updated_at }
+        }
+      }`,
+      { bucketId, limit: page.limit, offset: page.offset }
+    )
+    .then(({ bucketValuePage }) => ({
+      bucketValues: bucketValuePage.items,
+      bucketValueTotal: bucketValuePage.total,
+    }));
+}
+
+/** Loads a page of secret metadata without requesting encrypted values. */
+function readBucketSecrets(
+  bucketId: string,
+  page: BucketPageRequest
+): Promise<BucketContentState> {
+  return api
+    .mcpGraphql<{ secretMetaPage: GraphQLPage<SecretMeta> }>(
+      `query($bucketId: String!, $limit: Int!, $offset: Int!) {
+        secretMetaPage(bucket_id: $bucketId, limit: $limit, offset: $offset) {
+          total
+          items { id bucket_id service_id key_name key_names credential_type last_used_at expires_at created_at updated_at }
+        }
+      }`,
+      { bucketId, limit: page.limit, offset: page.offset }
+    )
+    .then(({ secretMetaPage }) => ({
+      secretMetas: secretMetaPage.items,
+      secretMetaTotal: secretMetaPage.total,
+    }));
+}
+
+/** Loads one page of connected users under connection-read permission. */
+function readBucketConnections(
+  bucketId: string,
+  page: BucketContentPages["connections"]
+): Promise<BucketContentState> {
+  return api
+    .mcpGraphql<{ authConnectionPage: GraphQLPage<AuthConnection> }>(
+      `query BucketConnections($bucketId: String!, $limit: Int!, $offset: Int!, $serviceId: String) {
+        authConnectionPage(bucket_id: $bucketId, service_id: $serviceId, limit: $limit, offset: $offset) {
+          total
+          items { id bucket_id service_id end_user_ref auth_type token_type scopes scope_source issuer subject expires_at refresh_token_expires_at last_used_at refresh_state last_failure_code last_failure_at last_failure_trace_id created_at updated_at }
+        }
+      }`,
+      {
+        bucketId,
+        limit: page.limit,
+        offset: page.offset,
+        serviceId: page.serviceId || "",
+      }
+    )
+    .then(({ authConnectionPage }) => ({
+      authConnections: authConnectionPage.items,
+      authConnectionTotal: authConnectionPage.total,
+    }));
+}
+
+/** Loads connected-user service filters only when service-read access exists. */
+function readBucketConnectionServices(
+  bucketId: string,
+  page: BucketContentPages["connectionServices"]
+): Promise<BucketContentState> {
+  return api
+    .mcpGraphql<{ connectionServicePage: GraphQLPage<BucketServiceSummary> }>(
+      `query BucketConnectionServices($bucketId: String!, $search: String, $limit: Int!, $offset: Int!) {
+        connectionServicePage: bucketServicePage(bucket_id: $bucketId, search: $search, limit: $limit, offset: $offset) {
+          total
+          items { service_id service_name secret_count value_count connect_config_count connected_user_count }
+        }
+      }`,
+      {
+        bucketId,
+        search: page.search || "",
+        limit: page.limit,
+        offset: page.offset,
+      }
+    )
+    .then(({ connectionServicePage }) => ({
+      connectionServices: connectionServicePage.items,
+    }));
+}
+
+/** Loads the bucket-level connection aggregate separately from service data. */
+function readBucketConnectSummary(bucketId: string): Promise<BucketContentState> {
+  return api
+    .mcpGraphql<{ connectSummary: BucketConnectSummary | null }>(
+      `query BucketConnectSummary($bucketId: String!) {
+        connectSummary: bucketConnectSummary(bucket_id: $bucketId) {
+          bucket_id connect_config_count connected_user_count
+        }
+      }`,
+      { bucketId }
+    )
+    .then(({ connectSummary }) => ({ connectSummary }));
+}
+
+/** Loads SDKs associated with one credential set. */
+function readBucketApps(bucketId: string, page: BucketPageRequest): Promise<BucketContentState> {
+  return api
+    .mcpGraphql<{ bucketSDKPage: GraphQLPage<BucketSDKSummary> }>(
+      `query($bucketId: String!, $limit: Int!, $offset: Int!) {
+        bucketSDKPage(bucket_id: $bucketId, limit: $limit, offset: $offset) {
+          total
+          items { id name kind active created_at }
+        }
+      }`,
+      { bucketId, limit: page.limit, offset: page.offset }
+    )
+    .then(({ bucketSDKPage }) => ({
+      bucketSDKs: bucketSDKPage.items,
+      bucketSDKTotal: bucketSDKPage.total,
+    }));
+}
+
+/** Loads services associated with one credential set. */
+function readBucketServices(
   bucketId: string,
   pages: BucketContentPages
 ): Promise<BucketContentState> {
   return api
-    .mcpGraphql<{
-      bucketValuePage: GraphQLPage<BucketValue>;
-      secretMetaPage: GraphQLPage<SecretMeta>;
-      authConnectionPage: GraphQLPage<AuthConnection>;
-      bucketSDKPage: GraphQLPage<BucketSDKSummary>;
-      connectionServicePage: GraphQLPage<BucketServiceSummary>;
-      bucketServicePage: GraphQLPage<BucketServiceSummary>;
-      connectSummary: BucketConnectSummary | null;
-    }>(
-      `query(
-        $bucketId: String!,
-        $secretLimit: Int!, $secretOffset: Int!,
-        $valueLimit: Int!, $valueOffset: Int!,
-        $connectionLimit: Int!, $connectionOffset: Int!, $connectionServiceId: String,
-        $connectionServiceSearch: String,
-        $sdkLimit: Int!, $sdkOffset: Int!,
-        $serviceLimit: Int!, $serviceOffset: Int!, $serviceSearch: String
-      ) {
-        bucketValuePage(bucket_id: $bucketId, limit: $valueLimit, offset: $valueOffset) {
-          total
-          items { id bucket_id service_id key_name location value created_at updated_at }
-        }
-        secretMetaPage(bucket_id: $bucketId, limit: $secretLimit, offset: $secretOffset) {
-          total
-          items { id bucket_id service_id key_name key_names credential_type last_used_at expires_at created_at updated_at }
-        }
-        authConnectionPage(bucket_id: $bucketId, service_id: $connectionServiceId, limit: $connectionLimit, offset: $connectionOffset) {
-          total
-          items { id bucket_id service_id end_user_ref auth_type token_type scopes scope_source issuer subject expires_at refresh_token_expires_at last_used_at refresh_state last_failure_code last_failure_at last_failure_trace_id created_at updated_at }
-        }
-        bucketSDKPage(bucket_id: $bucketId, limit: $sdkLimit, offset: $sdkOffset) {
-          total
-          items { id name kind active created_at }
-        }
-        connectionServicePage: bucketServicePage(bucket_id: $bucketId, search: $connectionServiceSearch, limit: 20, offset: 0) {
-          items { service_id service_name secret_count value_count connect_config_count connected_user_count }
-        }
-        bucketServicePage(bucket_id: $bucketId, search: $serviceSearch, limit: $serviceLimit, offset: $serviceOffset) {
+    .mcpGraphql<{ bucketServicePage: GraphQLPage<BucketServiceSummary> }>(
+      `query($bucketId: String!, $limit: Int!, $offset: Int!, $search: String) {
+        bucketServicePage(bucket_id: $bucketId, search: $search, limit: $limit, offset: $offset) {
           total
           items { service_id service_name secret_count value_count connect_config_count connected_user_count }
         }
-        connectSummary: bucketConnectSummary(bucket_id: $bucketId) { bucket_id connect_config_count connected_user_count }
       }`,
       {
         bucketId,
-        secretLimit: pages.secrets.limit,
-        secretOffset: pages.secrets.offset,
-        valueLimit: pages.values.limit,
-        valueOffset: pages.values.offset,
-        connectionLimit: pages.connections.limit,
-        connectionOffset: pages.connections.offset,
-        connectionServiceId: pages.connections.serviceId || "",
-        connectionServiceSearch: pages.connectionServices.search || "",
-        sdkLimit: pages.sdks.limit,
-        sdkOffset: pages.sdks.offset,
-        serviceLimit: pages.services.limit,
-        serviceOffset: pages.services.offset,
-        serviceSearch: pages.services.search || "",
+        limit: pages.services.limit,
+        offset: pages.services.offset,
+        search: pages.services.search || "",
       }
     )
-    .then((state) => ({
-      bucketValues: state.bucketValuePage.items,
-      bucketValueTotal: state.bucketValuePage.total,
-      secretMetas: state.secretMetaPage.items,
-      secretMetaTotal: state.secretMetaPage.total,
-      authConnections: state.authConnectionPage.items,
-      authConnectionTotal: state.authConnectionPage.total,
-      bucketSDKs: state.bucketSDKPage.items,
-      bucketSDKTotal: state.bucketSDKPage.total,
-      bucketServices: state.bucketServicePage.items,
-      bucketServiceTotal: state.bucketServicePage.total,
-      connectionServices: state.connectionServicePage.items,
-      connectSummary: state.connectSummary,
+    .then(({ bucketServicePage }) => ({
+      bucketServices: bucketServicePage.items,
+      bucketServiceTotal: bucketServicePage.total,
     }));
 }
 
-function readBucketEntries(bucketId: string): Promise<BucketContentState> {
-  return api.mcpGraphql<BucketContentState>(
-    `query($bucketId: String!) {
-      bucketValues(bucket_id: $bucketId) { id bucket_id service_id key_name location value created_at updated_at }
-      secretMetas(bucket_id: $bucketId) { id bucket_id service_id key_name credential_type last_used_at expires_at created_at updated_at }
-      authConnections(bucket_id: $bucketId) { id bucket_id service_id end_user_ref auth_type token_type scopes scope_source issuer subject expires_at refresh_token_expires_at last_used_at refresh_state last_failure_code last_failure_at last_failure_trace_id created_at updated_at }
-    }`,
-    { bucketId }
-  );
-}
-
+/** Loads workspace services for credential composers and labels. */
 export function readWorkspaceServices(): Promise<ActivatedService[]> {
   return api
     .mcpGraphql<{ workspaceServices: ActivatedService[] }>(
@@ -264,10 +316,11 @@ export function readWorkspaceServices(): Promise<ActivatedService[]> {
     .then(({ workspaceServices }) => workspaceServices);
 }
 
+/** Loads the visible credential sets and those already attached to an SDK. */
 export function readBucketsForSDK(appFamilyId: string): Promise<SDKBucketState> {
   return api.mcpGraphql<SDKBucketState>(
     `query($appFamilyId: String!) {
-      buckets { id name is_default created_at updated_at }
+      buckets: bucketSummaries { id name is_default created_at updated_at }
       sdkBuckets(app_family_id: $appFamilyId) { id name is_default created_at updated_at }
     }`,
     { appFamilyId }
@@ -334,11 +387,4 @@ export function formatExpiry(value?: string): string {
 
 export function errorMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
-}
-
-function isUnknownGraphQLField(err: unknown, fieldName: string): boolean {
-  return (
-    err instanceof Error &&
-    err.message.includes(`Cannot query field "${fieldName}"`)
-  );
 }

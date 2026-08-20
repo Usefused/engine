@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, NotificationServiceRef, WorkspaceNotification } from "~/lib/api";
+import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
+import { hasWorkspacePermission } from "~/lib/current-actor-access";
 
 const PAGE_SIZE = 20;
 
@@ -15,6 +17,8 @@ const PAGE_SIZE = 20;
 // depend on its exact current unbounded behavior, and neither needs
 // numbered pages.
 export function usePaginatedWorkspaceNotifications() {
+  const { access } = useCurrentActorAccess();
+  const canUpdate = hasWorkspacePermission(access, "notification.update");
   const [page, setPage] = useState(1);
   const [filter, setFilter] = useState<"unread" | "read" | "all">("unread");
   const [items, setItems] = useState<WorkspaceNotification[]>([]);
@@ -81,6 +85,8 @@ export function usePaginatedWorkspaceNotifications() {
 
   const updateStatus = useCallback(
     (id: string, status: "acknowledged" | "dismissed") => {
+      // Do not optimistically mutate rows when the actor lacks the mutation permission.
+      if (!canUpdate) return Promise.reject(new Error("Notification update access is not available"));
       setItems((prev) => prev.map((item) => (item.id === id ? { ...item, status } : item)));
       return api.workspace
         .updateNotificationStatus(id, status)
@@ -91,7 +97,7 @@ export function usePaginatedWorkspaceNotifications() {
           throw err;
         });
     },
-    [refresh]
+    [canUpdate, refresh]
   );
 
   const markRead = useCallback((id: string) => updateStatus(id, "acknowledged"), [updateStatus]);
@@ -117,5 +123,6 @@ export function usePaginatedWorkspaceNotifications() {
     refresh,
     markRead,
     dismiss,
+    canUpdate,
   };
 }

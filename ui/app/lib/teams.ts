@@ -1,4 +1,5 @@
 import { api } from "./api";
+import { readAllBoundedPages, type BoundedPage } from "./bounded-pages";
 import { TEAM_OPERATIONS } from "./teams-contract";
 
 export type TeamStatus = "active" | "archived";
@@ -52,6 +53,17 @@ export interface TeamEditorData {
   buckets: Array<{ id: string; name: string }>;
 }
 
+export interface TeamEditorAccess {
+  services: boolean;
+  buckets: boolean;
+}
+
+type TeamResource = { id: string; name: string };
+type TeamResourcePage = BoundedPage<TeamResource>;
+
+const TEAM_RESOURCE_PAGE_SIZE = 100;
+const TEAM_RESOURCE_MAX_PAGES = 1000;
+
 export async function listTeams(search = "", includeArchived = false): Promise<TeamPage> {
   const data = await api.mcpGraphql<{ teams: TeamPage }>(TEAM_OPERATIONS.list, {
     search,
@@ -62,18 +74,52 @@ export async function listTeams(search = "", includeArchived = false): Promise<T
   return data.teams;
 }
 
-export async function loadTeamEditor(teamId: string): Promise<TeamEditorData> {
-  const data = await api.mcpGraphql<{
-    team: Team | null;
-    workspaceServicePage: { data: Array<{ service_id: string; service_name: string }> };
-    bucketSummaryPage: { items: Array<{ id: string; name: string }> };
-  }>(TEAM_OPERATIONS.editor, { id: teamId });
+/** Loads team metadata and only the independently authorized selector lists. */
+export async function loadTeamEditor(teamId: string, access: TeamEditorAccess): Promise<TeamEditorData> {
+  // Separate roots keep service or bucket visibility from denying the team
+  // itself; the fixed reads remain parallel and never fan out per resource.
+  const [team, services, buckets] = await Promise.all([
+    loadTeam(teamId),
+    access.services ? loadTeamServices() : Promise.resolve([]),
+    access.buckets ? loadTeamBuckets() : Promise.resolve([]),
+  ]);
+  return { team, services, buckets };
+}
+
+/** Loads one team without coupling it to resource catalogue permissions. */
+async function loadTeam(teamId: string): Promise<Team> {
+  const data = await api.mcpGraphql<{ team: Team | null }>(TEAM_OPERATIONS.editor, { id: teamId });
   if (!data.team) throw new Error("Team not found.");
-  return {
-    team: data.team,
-    services: data.workspaceServicePage.data.map((service) => ({ id: service.service_id, name: service.service_name })),
-    buckets: data.bucketSummaryPage.items.map((bucket) => ({ id: bucket.id, name: bucket.name })),
-  };
+  return data.team;
+}
+
+/** Loads every visible service in bounded pages for the access editor. */
+function loadTeamServices(): Promise<TeamResource[]> {
+  return readAllBoundedPages(async (limit, offset) => {
+    const data = await api.mcpGraphql<{
+      workspaceServicePage: {
+        data: Array<{ service_id: string; service_name: string }>;
+        total: number;
+      };
+    }>(TEAM_OPERATIONS.services, { limit, offset });
+    return {
+      items: data.workspaceServicePage.data.map((service) => ({
+        id: service.service_id,
+        name: service.service_name,
+      })),
+      total: data.workspaceServicePage.total,
+    };
+  }, TEAM_RESOURCE_PAGE_SIZE, TEAM_RESOURCE_MAX_PAGES);
+}
+
+/** Loads every visible bucket in bounded pages for the access editor. */
+function loadTeamBuckets(): Promise<TeamResource[]> {
+  return readAllBoundedPages(async (limit, offset) => {
+    const data = await api.mcpGraphql<{
+      bucketSummaryPage: TeamResourcePage;
+    }>(TEAM_OPERATIONS.buckets, { limit, offset });
+    return data.bucketSummaryPage;
+  }, TEAM_RESOURCE_PAGE_SIZE, TEAM_RESOURCE_MAX_PAGES);
 }
 
 export async function createTeam(input: { name: string; description?: string }): Promise<TeamMutationPayload> {

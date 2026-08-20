@@ -23,8 +23,11 @@ type BucketOverviewProps = {
   onSDKPageChange: (page: number) => void;
   onServicePageChange: (page: number) => void;
   onServiceSearchChange: (search: string) => void;
+  showApps: boolean;
+  showServices: boolean;
 };
 
+/** Renders only related-resource lists the actor may enumerate. */
 export function BucketOverview({
   sdks,
   sdkTotal,
@@ -38,10 +41,12 @@ export function BucketOverview({
   onSDKPageChange,
   onServicePageChange,
   onServiceSearchChange,
+  showApps,
+  showServices,
 }: BucketOverviewProps) {
   return (
     <section className="grid gap-4 border-b border-slate-100 px-6 py-4 lg:grid-cols-2">
-      <OverviewList
+      {showApps && <OverviewList
         title="Apps using this set"
         total={sdkTotal}
         empty="No apps use this credential set yet."
@@ -52,8 +57,8 @@ export function BucketOverview({
         {sdks.map((sdk) => (
           <SDKRow key={sdk.id} sdk={sdk} />
         ))}
-      </OverviewList>
-      <OverviewList
+      </OverviewList>}
+      {showServices && <OverviewList
         title="Services using this set"
         total={serviceTotal}
         empty={serviceEmptyText(serviceSearch)}
@@ -82,7 +87,7 @@ export function BucketOverview({
             workspaceServices={workspaceServices}
           />
         ))}
-      </OverviewList>
+      </OverviewList>}
     </section>
   );
 }

@@ -31,6 +31,43 @@ interface SdkListItem {
   status: string;
 }
 
+type SdkPage = { items: SdkListItem[]; total: number };
+
+const SDK_PAGE_SIZE = 20;
+
+/** Splits an optional version suffix without changing scoped package names. */
+function sdkSearchParts(query: string): { search: string; version: string } {
+  const trimmed = query.trim();
+  const atIndex = trimmed.lastIndexOf("@");
+  if (atIndex <= 0) return { search: trimmed, version: "" };
+  return {
+    search: trimmed.substring(0, atIndex),
+    version: trimmed.substring(atIndex + 1),
+  };
+}
+
+/** Reads one exact server-backed page instead of truncating the catalogue. */
+function readSdkPage(query: string, page: number): Promise<SdkPage> {
+  const { search, version } = sdkSearchParts(query);
+  const document = `
+    query SDKApps($search: String!, $version: String!, $limit: Int!, $offset: Int!) {
+      apps(kind: "sdk", search: $search, version: $version, limit: $limit, offset: $offset) {
+        items { app_id app_family_id name description version target_language created_at status }
+        total
+      }
+    }
+  `;
+  return api
+    .mcpGraphql<{ apps: SdkPage }>(document, {
+      search,
+      version,
+      limit: SDK_PAGE_SIZE,
+      offset: page * SDK_PAGE_SIZE,
+    })
+    .then(({ apps }) => apps);
+}
+
+/** Renders the compact language mark used in catalogue rows. */
 function LanguageBadge({ targetLanguage }: { targetLanguage?: string }) {
   if (targetLanguage === "python") {
     return (
@@ -62,6 +99,7 @@ interface SdkRowProps {
   onDeactivate: (id: string, name: string) => void;
 }
 
+/** Renders app identity and runtime state without duplicating row actions. */
 function SdkNameCell({ sdk }: { sdk: SdkListItem }) {
   return (
     <div className="min-w-0">
@@ -81,6 +119,7 @@ function SdkNameCell({ sdk }: { sdk: SdkListItem }) {
   );
 }
 
+/** Renders version and lifecycle badges for one immutable app. */
 function SdkVersionBadges({ sdk }: { sdk: SdkListItem }) {
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -112,6 +151,7 @@ interface SdkActionButtonsProps {
   onDeactivate: (id: string, name: string) => void;
 }
 
+/** Renders download and irreversible deactivation actions for one row. */
 function SdkActionButtons({ sdk, onDownload, onDeactivate }: SdkActionButtonsProps) {
   return (
     <div className="flex justify-end gap-1 sm:gap-2">
@@ -143,15 +183,7 @@ function SdkActionButtons({ sdk, onDownload, onDeactivate }: SdkActionButtonsPro
   );
 }
 
-interface SdkRowProps {
-  sdk: SdkListItem;
-  selectedIds: string[];
-  setSelectedIds: React.Dispatch<React.SetStateAction<string[]>>;
-  onNavigate: (id: string) => void;
-  onDownload: (id: string, name: string, version: string) => void;
-  onDeactivate: (id: string, name: string) => void;
-}
-
+/** Renders one selectable catalogue row keyed by immutable app ID. */
 function SdkRow({ sdk, selectedIds, setSelectedIds, onNavigate, onDownload, onDeactivate }: SdkRowProps) {
   const isSelected = selectedIds.includes(sdk.app_id);
   const showCheckbox = selectedIds.length > 0 || isSelected;
@@ -208,6 +240,7 @@ interface SdkListContentProps {
   onDeactivate: (id: string, name: string) => void;
 }
 
+/** Selects the loading, empty, or populated app-list presentation. */
 function SdkListContent({ loading, searching, sdks, query, selectedIds, setSelectedIds, navigate, onDownload, onDeactivate }: SdkListContentProps) {
   if (loading || searching) {
     return (
@@ -291,6 +324,40 @@ function SdkListContent({ loading, searching, sdks, query, selectedIds, setSelec
   );
 }
 
+/** Renders bounded page navigation from the server-reported total. */
+function SdkPagination({ page, total, onPage }: {
+  page: number;
+  total: number;
+  onPage: (page: number) => void;
+}) {
+  const pageCount = Math.max(1, Math.ceil(total / SDK_PAGE_SIZE));
+  if (pageCount <= 1) return null;
+  return (
+    <div className="flex items-center justify-between gap-4 text-sm text-slate-600">
+      <span>Page {page + 1} of {pageCount}</span>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          disabled={page === 0}
+          onClick={() => onPage(page - 1)}
+          className="rounded-lg border border-slate-300 px-3 py-1.5 disabled:opacity-40"
+        >
+          Previous
+        </button>
+        <button
+          type="button"
+          disabled={page + 1 >= pageCount}
+          onClick={() => onPage(page + 1)}
+          className="rounded-lg border border-slate-300 px-3 py-1.5 disabled:opacity-40"
+        >
+          Next
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Renders the paged SDK catalogue and its lifecycle controls. */
 export default function SdkHistory() {
   const toast = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -299,38 +366,42 @@ export default function SdkHistory() {
   const [error, setError] = useState("");
   const [query, setQuery] = useState(searchParams.get("q") ?? "");
   const [searching, setSearching] = useState(false);
+  const [page, setPage] = useState(0);
+  const [total, setTotal] = useState(0);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [isDeactivatingMultiple, setIsDeactivatingMultiple] = useState(false);
   const navigate = useNavigate();
 
-  const fetchSdks = () => {
-    setLoading(true);
-    const queryStr = `
-      query {
-        apps(kind: "sdk", limit: 100, offset: 0) {
-          items {
-            app_id
-            app_family_id
-            name
-            description
-            version
-            target_language
-            created_at
-            status
-          }
-          total
+  /** Loads one list or search page through the same paged contract. */
+  const fetchSdks = (search: string, pageNumber: number) => {
+    const isSearch = Boolean(search.trim());
+    setLoading(!isSearch);
+    setSearching(isSearch);
+    setError("");
+    return readSdkPage(search, pageNumber)
+      .then(result => {
+        // Deactivation can empty the last page; rewinding avoids presenting a
+        // false empty state while earlier authorized results still exist.
+        if (pageNumber > 0 && result.items.length === 0 && result.total > 0) {
+          setPage(pageNumber - 1);
+          return;
         }
-      }
-    `;
-    api.mcpGraphql<{ apps: { items: SdkListItem[]; total: number } }>(queryStr)
-      .then(res => {
-        setSdks((res.apps.items ?? []).map(item => ({ ...item, target_type: "sdk", is_downloadable: true })));
+        setSdks((result.items ?? []).map(item => ({ ...item, target_type: "sdk", is_downloadable: true })));
+        setTotal(result.total);
         setSelectedIds([]);
       })
-      .catch(e => setError(e instanceof Error ? e.message : "Failed to load apps"))
-      .finally(() => setLoading(false));
+      .catch(e => {
+        setSdks([]);
+        setTotal(0);
+        setError(e instanceof Error ? e.message : "Failed to load apps");
+      })
+      .finally(() => {
+        setLoading(false);
+        setSearching(false);
+      });
   };
 
+  /** Selects the first page for an explicitly submitted search. */
   async function runSearch(q: string) {
     if (!q.trim()) return;
     setSearchParams(prev => {
@@ -338,59 +409,41 @@ export default function SdkHistory() {
       next.set("q", q);
       return next;
     }, { replace: true });
-    setSearching(true);
-    setError("");
-
-    let searchName = q.trim();
-    let searchVersion = "";
-    const trimmedQ = q.trim();
-    const atIndex = trimmedQ.lastIndexOf("@");
-    // Only split if @ is not the first character (to support @org/package format if any)
-    if (atIndex > 0) {
-      searchName = trimmedQ.substring(0, atIndex);
-      searchVersion = trimmedQ.substring(atIndex + 1);
-    }
-
-    try {
-      const queryStr = `query($search: String!, $version: String!) { apps(kind: "sdk", search: $search, version: $version, limit: 100, offset: 0) { items { app_id app_family_id name description version target_language created_at status } } }`;
-      const res = await api.mcpGraphql<{ apps: { items: SdkListItem[] } }>(queryStr, { search: searchName, version: searchVersion });
-      setSdks((res.apps.items ?? []).map(item => ({ ...item, target_type: "sdk", is_downloadable: true })));
-    } catch {
-      setSdks([]);
-    } finally {
-      setSearching(false);
-    }
+    // Changing pages triggers the shared effect; an already-first page needs
+    // the explicit read so submitting can refresh without duplicate requests.
+    if (page > 0) setPage(0);
+    else await fetchSdks(q, 0);
   }
 
   // Debounced search on type
   useEffect(() => {
     if (!query.trim()) {
-      setSearching(false);
-      fetchSdks();
+      fetchSdks("", page);
       return;
     }
-    setLoading(false);
-    setSearching(true);
-    const id = setTimeout(() => runSearch(query), 400);
+    const id = setTimeout(() => fetchSdks(query, page), 400);
     return () => clearTimeout(id);
-  }, [query]);
+  }, [page, query]);
 
-  async function handleSearch(e: React.FormEvent) {
+  /** Runs the current search immediately when the form is submitted. */
+  function handleSearch(e: React.FormEvent) {
     e.preventDefault();
     runSearch(query);
   }
 
-  async function handleClear() {
+  /** Clears search state and lets the list effect load the first page. */
+  function handleClear() {
     setQuery("");
+    setPage(0);
     setSearchParams(prev => {
       const next = new URLSearchParams(prev);
       next.delete("q");
       return next;
     }, { replace: true });
     setSelectedIds([]);
-    fetchSdks();
   }
 
+  /** Downloads the exact immutable package selected by the row. */
   const handleDownload = async (id: string, name: string, version: string) => {
     try {
       await api.sdks.download(id, name, version);
@@ -399,12 +452,13 @@ export default function SdkHistory() {
     }
   };
 
+  /** Confirms and deactivates one immutable SDK version. */
   const handleDeactivate = async (id: string, name: string) => {
     const confirmed = await toast.confirm(`Deactivate SDK version "${name}"? This permanently removes its runtime and package.`);
     if (!confirmed) return;
     try {
       await api.sdks.deactivate(id);
-      fetchSdks();
+      fetchSdks(query, page);
       toast.success(`SDK version "${name}" deactivated.`);
       setSelectedIds(prev => prev.filter(i => i !== id));
     } catch (err) {
@@ -412,6 +466,7 @@ export default function SdkHistory() {
     }
   };
 
+  /** Confirms and deactivates the selected immutable versions in parallel. */
   const handleDeactivateMultiple = async () => {
     if (selectedIds.length === 0) return;
     const confirmed = await toast.confirm(`Deactivate ${selectedIds.length} SDK version(s)? This permanently removes their runtimes and packages.`);
@@ -420,12 +475,12 @@ export default function SdkHistory() {
     setIsDeactivatingMultiple(true);
     try {
       await Promise.all(selectedIds.map(id => api.sdks.deactivate(id)));
-      fetchSdks();
+      fetchSdks(query, page);
       setSelectedIds([]);
       toast.success(`Deactivated ${selectedIds.length} SDK version(s).`);
     } catch (err) {
       toast.error(`Failed to deactivate some SDKs: ${err instanceof Error ? err.message : "Unknown error"}`);
-      fetchSdks();
+      fetchSdks(query, page);
     } finally {
 		setIsDeactivatingMultiple(false);
     }
@@ -478,7 +533,10 @@ export default function SdkHistory() {
         <input
           type="text"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setPage(0);
+          }}
           placeholder="Search apps..."
           className="w-full text-sm border border-slate-300 rounded-lg pl-9 pr-8 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
@@ -510,6 +568,7 @@ export default function SdkHistory() {
         onDownload={handleDownload}
         onDeactivate={handleDeactivate}
       />
+      {!loading && !searching && <SdkPagination page={page} total={total} onPage={setPage} />}
     </div>
   );
 }

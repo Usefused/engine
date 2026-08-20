@@ -5,6 +5,7 @@ import { URL } from "node:url";
 
 import {
   hasAnyPermission,
+  hasResourcePermission,
   hasWorkspacePermission,
 } from "./current-actor-permissions.ts";
 
@@ -32,6 +33,46 @@ test("uses the uppercase GraphQL ResourceType wire contract", () => {
     grants: [{ permission: "workspace.read", resource_type: "workspace", resource_id: "workspace-1" }],
   };
   assert.equal(hasWorkspacePermission(lowercase, "workspace.read"), false);
+});
+
+test("resource permission checks honor exact bucket grants and workspace inheritance", () => {
+  const bucketAccess = {
+    ...access,
+    grants: [
+      { permission: "credentials.metadata.read", resource_type: "BUCKET", resource_id: "bucket-1" },
+      { permission: "connection.manage", resource_type: "BUCKET", resource_id: "bucket-2" },
+      { permission: "bucket.manage", resource_type: "WORKSPACE", resource_id: "workspace-1" },
+    ],
+  };
+  assert.equal(hasResourcePermission(bucketAccess, "credentials.metadata.read", "BUCKET", "bucket-1"), true);
+  assert.equal(hasResourcePermission(bucketAccess, "credentials.metadata.read", "BUCKET", "bucket-2"), false);
+  assert.equal(hasResourcePermission(bucketAccess, "connection.manage", "BUCKET", "bucket-1"), false);
+  assert.equal(hasResourcePermission(bucketAccess, "bucket.manage", "BUCKET", "bucket-9"), true);
+  assert.equal(hasResourcePermission(bucketAccess, "bucket.manage", "SERVICE", "service-1"), true);
+  assert.equal(hasResourcePermission(null, "bucket.manage", "BUCKET", "bucket-1"), false);
+});
+
+test("credential and lifecycle surfaces gate protected queries and actions", () => {
+  const buckets = source("../routes/integrations.buckets.tsx");
+  const bucketQueries = source("./buckets.ts");
+  const mcp = source("../routes/integrations.mcp.tsx");
+  const profile = source("../components/integration-details/WorkspaceConnectionProfileSection.tsx");
+  const notifications = source("../components/notifications/NotificationList.tsx");
+  const notificationActions = source("../components/notifications/notificationActions.ts");
+  const builder = source("../routes/integrations.builder.tsx");
+
+  assert.match(buckets, /values: hasWorkspacePermission\(access, "bucket\.values\.read"\)/);
+  assert.match(buckets, /credentials\.metadata\.read/);
+  assert.match(buckets, /canCreateBucket = hasWorkspacePermission\(access, "bucket\.manage"\)/);
+  assert.match(bucketQueries, /buckets: bucketSummaries/);
+  assert.doesNotMatch(bucketQueries, /query \{\s*buckets \{/);
+  assert.match(mcp, /hasResourcePermission\(access, "app\.manage", "APP", server\.app_family_id\)/);
+  assert.match(profile, /if \(!canRead\)/);
+  assert.match(profile, /\{canManage && \(/);
+  assert.match(notifications, /canMutateNotification\(item\.source, canUpdate\) && <NotificationActions/);
+  assert.match(notificationActions, /canUpdate && source === "engine"/);
+  assert.match(builder, /if \(!canReadApps\)/);
+  assert.match(builder, /isAuth && canReadServices && workspaceServicesLoaded/);
 });
 
 test("access routes gate reads before mounting data loaders and gate management controls separately", () => {
@@ -65,6 +106,7 @@ test("restricted access navigation is permission-aware and direct denial is expl
   assert.doesNotMatch(gate, /No teams yet/);
 });
 
+// Reads a colocated UI source file for permission-contract assertions.
 function source(relativePath) {
   return readFileSync(new URL(relativePath, import.meta.url), "utf8");
 }

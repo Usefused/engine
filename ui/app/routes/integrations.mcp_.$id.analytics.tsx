@@ -13,8 +13,14 @@ import { api } from "~/lib/api";
 import { McpAnalyticsPanel, type McpAnalyticsData } from "~/components/mcp/McpAnalyticsPanel";
 import { AppRequestsPanel } from "~/components/activity/AppRequestsPanel";
 import { NestedActivityTabs } from "~/components/activity/NestedActivityTabs";
+import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
+import { hasAnyPermission, hasWorkspacePermission } from "~/lib/current-actor-access";
 
+/** Loads MCP overview data and separately gates request receipts. */
 export default function McpAnalyticsDashboard() {
+  const { access, loading: accessLoading } = useCurrentActorAccess();
+  const canReadOverview = hasAnyPermission(access, "app.read");
+  const canReadRequests = hasWorkspacePermission(access, "audit.read");
   const { id } = useParams();
   const [data, setData] = useState<McpAnalyticsData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -30,8 +36,12 @@ export default function McpAnalyticsDashboard() {
     }, { replace: true });
   };
 
+  /** Refreshes analytics only after the broad client-side access preflight. */
   const fetchAnalytics = () => {
-    if (!id) return;
+    // The route carries an immutable app ID while grants use family IDs, so
+    // this preflight prevents known denials and the Engine enforces the exact
+    // family permission when resolving mcpAnalytics.
+    if (!id || !canReadOverview) return;
     setLoading(true);
     const queryStr = `
       query($id: String!) {
@@ -73,13 +83,20 @@ export default function McpAnalyticsDashboard() {
   };
 
   useEffect(() => {
+    if (accessLoading) return;
+    if (!canReadOverview) {
+      setLoading(false);
+      setData(null);
+      setError("");
+      return;
+    }
     fetchAnalytics();
     const interval = setInterval(fetchAnalytics, 60000);
     return () => clearInterval(interval);
-  }, [id]);
+  }, [accessLoading, canReadOverview, id]);
 
   return (
-    <McpActivityState id={id} data={data} loading={loading} error={error} activeTab={activeTab} onTabChange={handleTabChange} />
+    <McpActivityState id={id} data={data} loading={loading || accessLoading} error={error} activeTab={activeTab} onTabChange={handleTabChange} canReadOverview={canReadOverview} canReadRequests={canReadRequests} />
   );
 }
 
@@ -89,25 +106,31 @@ function mcpActivityTab(value: string | null): McpActivityTab {
   return value === "requests" || value === "sessions" ? value : "overview";
 }
 
-function McpActivityState({ id, data, loading, error, activeTab, onTabChange }: {
+/** Selects the MCP activity loading, error, or content state. */
+function McpActivityState({ id, data, loading, error, activeTab, onTabChange, canReadOverview, canReadRequests }: {
   id?: string;
   data: McpAnalyticsData | null;
   loading: boolean;
   error: string;
   activeTab: McpActivityTab;
   onTabChange: (tab: McpActivityTab) => void;
+  canReadOverview: boolean;
+  canReadRequests: boolean;
 }) {
   if (loading && !data) return <div className="text-center py-12 text-slate-500">Loading analytics...</div>;
+  if (!canReadOverview) return <div className="rounded-lg border border-slate-200 bg-white px-6 py-12 text-center text-sm text-slate-500">MCP activity access is not available for your account.</div>;
   if (error) return <div className="text-center py-12 text-red-500">Error: {error}</div>;
   if (!data) return null;
-  return <McpActivityContent id={id} data={data} activeTab={activeTab} onTabChange={onTabChange} />;
+  return <McpActivityContent id={id} data={data} activeTab={activeTab} onTabChange={onTabChange} canReadRequests={canReadRequests} />;
 }
 
-function McpActivityContent({ id, data, activeTab, onTabChange }: {
+/** Renders MCP activity tabs without mounting protected request data. */
+function McpActivityContent({ id, data, activeTab, onTabChange, canReadRequests }: {
   id?: string;
   data: McpAnalyticsData;
   activeTab: McpActivityTab;
   onTabChange: (tab: McpActivityTab) => void;
+  canReadRequests: boolean;
 }) {
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-5xl mx-auto">
@@ -133,7 +156,8 @@ function McpActivityContent({ id, data, activeTab, onTabChange }: {
       />
 
       {activeTab === "overview" && <McpAnalyticsPanel data={data} />}
-      {activeTab === "requests" && id && <AppRequestsPanel appId={id} transport="mcp" />}
+      {activeTab === "requests" && canReadRequests && id && <AppRequestsPanel appId={id} transport="mcp" />}
+      {activeTab === "requests" && !canReadRequests && <div className="rounded-lg border border-slate-200 bg-white px-6 py-12 text-center text-sm text-slate-500">Request activity access is not available for your account.</div>}
       {activeTab === "sessions" && <McpSessionsPanel sessions={data.recent_sessions || []} />}
     </div>
   );

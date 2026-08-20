@@ -71,8 +71,22 @@ type BucketDetailsPanelProps = {
   onServiceSearchChange: (search: string) => void;
   onConnectionServiceSearchChange: (search: string) => void;
   onConnectedServiceFilterChange: (serviceId: string) => void;
+  permissions: BucketDetailsPermissions;
 };
 
+type BucketDetailsPermissions = {
+  readSecrets: boolean;
+  readValues: boolean;
+  readConnections: boolean;
+  readApps: boolean;
+  readServices: boolean;
+  manageBucket: boolean;
+  manageCredentials: boolean;
+  manageValues: boolean;
+  manageConnections: boolean;
+};
+
+/** Renders a credential-set drawer with permission-aware sections and actions. */
 export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
   if (!props.bucket) return null;
 
@@ -91,9 +105,10 @@ export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
           onRefresh={props.onRefresh}
           onDeleteBucket={props.onDeleteBucket}
           onAddEntry={props.onAddEntry}
+          permissions={props.permissions}
         />
-        <BucketConnectUsage summary={props.connectSummary} />
-        <BucketOverview
+        {props.permissions.readConnections && <BucketConnectUsage summary={props.connectSummary} />}
+        {(props.permissions.readApps || props.permissions.readServices) && <BucketOverview
           sdks={props.bucketSDKs}
           sdkTotal={props.bucketSDKTotal}
           services={props.bucketServices}
@@ -106,8 +121,10 @@ export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
           onSDKPageChange={props.onSDKPageChange}
           onServicePageChange={props.onServicePageChange}
           onServiceSearchChange={props.onServiceSearchChange}
-        />
-        <BucketEntryComposer
+          showApps={props.permissions.readApps}
+          showServices={props.permissions.readServices}
+        />}
+        {(props.permissions.manageCredentials || props.permissions.manageValues) && <BucketEntryComposer
           kind={props.entryKind}
           saving={props.saving}
           services={props.services}
@@ -115,7 +132,7 @@ export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
           onSaveSecret={props.onSaveSecret}
           onSaveSecrets={props.onSaveSecrets}
           onSaveValue={props.onSaveValue}
-        />
+        />}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-6 py-3">
           <span className="text-sm font-medium text-slate-700">
             Credentials and values
@@ -129,6 +146,7 @@ export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
               props.connections.length
             }
             onTabChange={props.onTabChange}
+            permissions={props.permissions}
           />
         </div>
         <div className="flex-1 overflow-y-auto">
@@ -139,28 +157,32 @@ export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
   );
 }
 
+/** Builds the tab set from readable credential sections. */
 function BucketTabs({
   activeTab,
   secretCount,
   valueCount,
   connectedUserCount,
   onTabChange,
+  permissions,
 }: {
   activeTab: BucketDetailTab;
   secretCount: number;
   valueCount: number;
   connectedUserCount: number;
   onTabChange: (tab: BucketDetailTab) => void;
+  permissions: BucketDetailsPermissions;
 }) {
-  const tabs: Array<{ key: BucketDetailTab; label: string; count: number }> = [
-    { key: "secrets", label: "Secrets", count: secretCount },
-    { key: "env", label: "Values", count: valueCount },
+  const tabs: Array<{ key: BucketDetailTab; label: string; count: number; visible: boolean }> = ([
+    { key: "secrets", label: "Secrets", count: secretCount, visible: permissions.readSecrets },
+    { key: "env", label: "Values", count: valueCount, visible: permissions.readValues },
     {
       key: "connected-users",
       label: "Connected users",
       count: connectedUserCount,
+      visible: permissions.readConnections,
     },
-  ];
+  ] satisfies Array<{ key: BucketDetailTab; label: string; count: number; visible: boolean }>).filter((tab) => tab.visible);
   return (
     <div className="flex rounded-md border border-slate-200 bg-slate-50 p-0.5">
       {tabs.map((tab) => (
@@ -181,7 +203,11 @@ function BucketTabs({
   );
 }
 
+/** Renders the selected detail section or an explicit access notice. */
 function BucketTabPanel(props: BucketDetailsPanelProps) {
+  if (!canReadActiveTab(props.activeTab, props.permissions)) {
+    return <p className="px-6 py-10 text-sm text-slate-500">You do not have access to this credential section.</p>;
+  }
   if (props.activeTab === "connected-users") {
     return (
       <BucketConnectedUsersTable
@@ -199,6 +225,7 @@ function BucketTabPanel(props: BucketDetailsPanelProps) {
         onServiceSearchChange={props.onConnectionServiceSearchChange}
         onServiceFilterChange={props.onConnectedServiceFilterChange}
         onRemoveConnection={props.onRemoveConnection}
+        canManage={props.permissions.manageConnections}
       />
     );
   }
@@ -220,8 +247,20 @@ function BucketTabPanel(props: BucketDetailsPanelProps) {
           ? props.onSecretPageChange
           : props.onValuePageChange
       }
+      canRemove={
+        props.activeTab === "secrets"
+          ? props.permissions.manageCredentials
+          : props.permissions.manageValues
+      }
     />
   );
+}
+
+/** Maps a selected tab to the permission required for its data. */
+function canReadActiveTab(tab: BucketDetailTab, permissions: BucketDetailsPermissions): boolean {
+  if (tab === "secrets") return permissions.readSecrets;
+  if (tab === "env") return permissions.readValues;
+  return permissions.readConnections;
 }
 
 type BucketDetailsHeaderProps = {
@@ -232,8 +271,10 @@ type BucketDetailsHeaderProps = {
   onRefresh: (bucketId: string) => void;
   onDeleteBucket: () => void;
   onAddEntry: (kind: BucketEntryKind) => void;
+  permissions: BucketDetailsPermissions;
 };
 
+/** Renders safe refresh controls and authorized credential-set mutations. */
 function BucketDetailsHeader({
   bucket,
   loading,
@@ -242,6 +283,7 @@ function BucketDetailsHeader({
   onRefresh,
   onDeleteBucket,
   onAddEntry,
+  permissions,
 }: BucketDetailsHeaderProps) {
   const deleteDisabledReason = bucketDeleteDisabledReason(bucket, saving);
   return (
@@ -272,7 +314,7 @@ function BucketDetailsHeader({
         >
           <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
         </button>
-        <button
+        {permissions.manageBucket && <button
           type="button"
           onClick={onDeleteBucket}
           disabled={!!deleteDisabledReason}
@@ -281,8 +323,17 @@ function BucketDetailsHeader({
         >
           <Trash2 className="w-4 h-4" />
           Remove
-        </button>
-        <BucketAddDropdown disabled={saving} onSelect={onAddEntry} />
+        </button>}
+        {(permissions.manageCredentials || permissions.manageValues) && (
+          <BucketAddDropdown
+            disabled={saving}
+            onSelect={onAddEntry}
+            allowedKinds={[
+              ...(permissions.manageCredentials ? ["secret" as const] : []),
+              ...(permissions.manageValues ? ["value" as const] : []),
+            ]}
+          />
+        )}
         <button
           type="button"
           onClick={onClose}

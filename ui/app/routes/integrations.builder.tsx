@@ -2,6 +2,7 @@ import { useState, useEffect, type FormEvent } from "react";
 import { useSearchParams, useLoaderData, type MetaFunction } from "@remix-run/react";
 import { redirect } from "@remix-run/react";
 
+// meta preserves shared metadata while naming the app builder route.
 export const meta: MetaFunction = ({ matches }) => {
   const parentMeta = matches.filter((m) => m.id === "root").flatMap((m) => m.meta ?? []);
   return [
@@ -23,8 +24,14 @@ import { fetchEventSource } from "@microsoft/fetch-event-source";
 import { CheckSquare, Square, ChevronDown, ChevronRight, Search, Loader2, X, ChevronLeft } from "lucide-react";
 import EndpointSelectionList from "~/components/EndpointSelectionList";
 import WebhookSelectionList from "~/components/WebhookSelectionList";
-import { ConsumerGenerationPanel } from "~/components/consumer/ConsumerGenerationPanel";
+import {
+  ConsumerGenerationPanel,
+  type ConsumerGenerationPanelProps,
+} from "~/components/consumer/ConsumerGenerationPanel";
+import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
+import { hasAnyPermission } from "~/lib/current-actor-access";
 
+// clientLoader requires an authenticated Engine session before building an app.
 export const clientLoader = async ({ request }: { request: Request }) => {
 	const session = await api.auth.session().catch(() => ({ authenticated: false }));
 	const url = new URL(request.url);
@@ -59,10 +66,344 @@ type AppSelection = {
   service_version_id?: string;
 };
 
+type GenerationMode = "sdk" | "mcp";
+
+type SelectionMaps = {
+  selections: Record<string, Set<string>>;
+  selectAllServices: Set<string>;
+  webhookSelections: Record<string, Set<string>>;
+  versionSelections: Record<string, string>;
+};
+
+type GenerationInput = {
+  selections: AppSelection[];
+  data: ServiceData[];
+  sdkName: string;
+  generationMode: GenerationMode;
+  availableBuckets: AppBuildSelector[];
+  bucketId: string;
+  ownerTeamId: string;
+  webhookAttachment: string;
+};
+
+type GenerationValidation =
+  | { ok: false; severity: "error" | "warning"; message: string }
+  | { ok: true; bucket: AppBuildSelector; hasWebhookSelections: boolean };
+
+type GenerationStreamEvent =
+  | { type: "thinking"; message?: string }
+  | { type: "complete"; integration_id: string }
+  | { type: "error"; message?: string };
+
+type SDKStreamContext = {
+  controller: AbortController;
+  appId: string;
+  jobId: string;
+  sdkName: string;
+  appVersion: string;
+  executionToken: string;
+  setStatus: (status: string) => void;
+  setDeployment: (deployment: { id: string; name: string; version: string; token: string }) => void;
+};
+
+// hasServiceSelection keeps every selection gate aligned with the generated payload.
+function hasServiceSelection(serviceId: string, maps: SelectionMaps): boolean {
+  return maps.selectAllServices.has(serviceId) ||
+    (maps.selections[serviceId]?.size || 0) > 0 ||
+    (maps.webhookSelections[serviceId]?.size || 0) > 0;
+}
+
+// buildAppSelection creates one exact-version service selection for plan/apply.
+function buildAppSelection(
+  serviceId: string,
+  data: ServiceData[],
+  maps: SelectionMaps
+): AppSelection {
+  const serviceData = data.find((candidate) => candidate.service.id === serviceId);
+  const serviceVersionId = maps.versionSelections[serviceId] || serviceData?.serviceVersions[0]?.id;
+  const endpointIds = maps.selectAllServices.has(serviceId)
+    ? []
+    : Array.from(maps.selections[serviceId] || new Set<string>());
+  return {
+    service_id: serviceId,
+    service_name: serviceData?.service.name,
+    service_slug: serviceData?.service.slug,
+    select_all: maps.selectAllServices.has(serviceId),
+    endpoint_ids: endpointIds,
+    webhook_ids: Array.from(maps.webhookSelections[serviceId] || new Set<string>()),
+    service_version_id: serviceVersionId,
+  };
+}
+
+// buildAppSelections includes every service with at least one selected capability.
+function buildAppSelections(data: ServiceData[], maps: SelectionMaps): AppSelection[] {
+  const serviceIds = new Set([
+    ...Object.keys(maps.selections),
+    ...maps.selectAllServices,
+    ...Object.keys(maps.webhookSelections),
+  ]);
+  return Array.from(serviceIds)
+    .filter((serviceId) => hasServiceSelection(serviceId, maps))
+    .map((serviceId) => buildAppSelection(serviceId, data, maps));
+}
+
+// webhookConfigurationError explains the first selected webhook contract that cannot execute.
+function webhookConfigurationError(selections: AppSelection[], data: ServiceData[]): string {
+  for (const selection of selections) {
+    if (selection.webhook_ids.length === 0) continue;
+    const serviceData = data.find((candidate) => candidate.service.id === selection.service_id);
+    if (serviceData && (!serviceData.service.event_extraction_path || !serviceData.service.incoming_webhook_config)) {
+      return `Service '${serviceData.service.name}' has webhooks selected but is missing proper webhook configuration. Please configure Webhook Setup in the service settings and ensure an event extraction path is set before generating an SDK.`;
+    }
+  }
+  return "";
+}
+
+// baseURLConfigurationError explains the first selected operation contract that cannot execute.
+function baseURLConfigurationError(selections: AppSelection[], data: ServiceData[]): string {
+  for (const selection of selections) {
+    if (selection.endpoint_ids.length === 0 && !selection.select_all) continue;
+    const serviceData = data.find((candidate) => candidate.service.id === selection.service_id);
+    if (serviceData && !serviceData.service.base_url) {
+      return `Service '${serviceData.service.name}' is missing an API URL. Please configure the API Base URL in the service settings before generating an SDK.`;
+    }
+  }
+  return "";
+}
+
+// generationArtifactName returns the user-facing artifact name for validation copy.
+function generationArtifactName(mode: GenerationMode): string {
+  return mode === "mcp" ? "MCP server" : "App";
+}
+
+// validateGenerationInput resolves all local prerequisites before starting plan/apply.
+function validateGenerationInput(input: GenerationInput): GenerationValidation {
+  if (input.selections.length === 0) {
+    return { ok: false, severity: "warning", message: "Please select at least one endpoint or webhook to generate an SDK." };
+  }
+  if (input.selections.some((selection) => !selection.service_version_id)) {
+    return { ok: false, severity: "error", message: "Each selected service needs a service version before generating an SDK." };
+  }
+  const serviceError = webhookConfigurationError(input.selections, input.data) ||
+    baseURLConfigurationError(input.selections, input.data);
+  if (serviceError) return { ok: false, severity: "error", message: serviceError };
+  if (!input.sdkName.trim()) {
+    return { ok: false, severity: "warning", message: `${generationArtifactName(input.generationMode)} name is required.` };
+  }
+  const bucket = input.availableBuckets.find((candidate) => candidate.resource_id === input.bucketId);
+  if (!bucket) {
+    const message = input.ownerTeamId
+      ? "Choose a credential set available to both you and the owning team."
+      : "Choose a credential set you can use.";
+    return { ok: false, severity: "warning", message };
+  }
+  const hasWebhookSelections = input.selections.some((selection) => selection.webhook_ids.length > 0);
+  if (hasWebhookSelections && !input.webhookAttachment.trim()) {
+    return { ok: false, severity: "warning", message: "Enter the webhook bundle that supplies the selected events." };
+  }
+  return { ok: true, bucket, hasWebhookSelections };
+}
+
+// reportGenerationValidation shows a validation result at its intended severity.
+function reportGenerationValidation(
+  toast: ReturnType<typeof useToast>,
+  validation: Extract<GenerationValidation, { ok: false }>
+) {
+  if (validation.severity === "error") toast.error(validation.message);
+  else toast.warning(validation.message);
+}
+
+// confirmDuplicateGeneration protects an existing immutable SDK version from accidental replacement.
+async function confirmDuplicateGeneration(input: {
+  toast: ReturnType<typeof useToast>;
+  mode: GenerationMode;
+  duplicate: boolean;
+  name: string;
+  version: string;
+}): Promise<boolean> {
+  if (input.mode !== "sdk" || !input.duplicate) return true;
+  return input.toast.confirm(
+    `An SDK with name "${input.name.trim()}" and version "${input.version.trim()}" already exists. Generating it again will overwrite the existing package file. Are you sure you want to continue?`
+  );
+}
+
+// generationFailureMessage keeps mode-specific failure copy consistent.
+function generationFailureMessage(mode: GenerationMode, cause: unknown): string {
+  const prefix = mode === "mcp" ? "Failed to deploy MCP server" : "Failed to generate SDK";
+  const detail = cause instanceof Error ? cause.message : "Unknown error";
+  return `${prefix}: ${detail}`;
+}
+
+// buildGenerationConfig serializes the validated builder form into the shared app contract.
+function buildGenerationConfig(input: {
+  mode: GenerationMode;
+  name: string;
+  version: string;
+  bucket: string;
+  selections: AppSelection[];
+  data: ServiceData[];
+  language: "typescript" | "python";
+  webhookAttachment: string;
+  hasWebhookSelections: boolean;
+}): Record<string, unknown> {
+  const config: Record<string, unknown> = {
+    apiVersion: "fused/v1",
+    kind: input.mode,
+    name: input.name.trim(),
+    version: input.version.trim(),
+    bucket: input.bucket,
+    services: appServicesConfig(input.selections, input.data),
+  };
+  if (input.mode === "sdk") config.language = input.language;
+  if (input.hasWebhookSelections) config.webhook_attachment = input.webhookAttachment.trim();
+  return config;
+}
+
+// processGenerationStreamEvent applies progress or completion from one SDK stream event.
+function processGenerationStreamEvent(
+  context: SDKStreamContext,
+  event: GenerationStreamEvent,
+  resolve: () => void,
+  reject: (reason?: unknown) => void
+) {
+  if (event.type === "thinking") {
+    context.setStatus(event.message || "Generating...");
+    return;
+  }
+  if (event.type === "complete") {
+    context.controller.abort();
+    context.setStatus("Downloading...");
+    api.sdks.download(event.integration_id, context.sdkName, context.appVersion).then(() => {
+      context.setDeployment({
+        id: context.appId,
+        name: context.sdkName.trim(),
+        version: context.appVersion.trim(),
+        token: context.executionToken,
+      });
+      context.setStatus("App ready");
+      resolve();
+    }).catch(reject);
+    return;
+  }
+  if (event.type === "error") {
+    context.controller.abort();
+    reject(new Error(event.message || "Unknown generation error"));
+  }
+}
+
+// waitForSDKGeneration follows the Engine job stream through download completion.
+async function waitForSDKGeneration(context: SDKStreamContext): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    fetchEventSource(`${BASE}/sdks/job/${context.jobId}/stream`, {
+      credentials: "include",
+      signal: context.controller.signal,
+      async onopen(response) {
+        handleCredentialedResponse(response);
+        if (response.status === 401) context.controller.abort();
+        if (!response.ok) throw new Error(`Failed to connect to generation stream: ${response.status}`);
+      },
+      onmessage(message) {
+        try {
+          processGenerationStreamEvent(context, JSON.parse(message.data), resolve, reject);
+        } catch {
+          console.error("Failed to parse SSE event", message.data);
+        }
+      },
+      onerror(cause) {
+        if (context.controller.signal.aborted) throw cause;
+        context.controller.abort();
+        reject(new Error("Connection to server lost during generation"));
+        // Throwing prevents the SSE client from retrying a failed generation.
+        throw cause;
+      },
+      onclose() {
+        // A close before completion is an incomplete generation, not success.
+        throw new Error("Server closed connection gracefully");
+      },
+    });
+  });
+}
+
+const BUILDER_RESOURCE_GQL = `
+  query($resourceId: String!, $serviceId: String!, $serviceVersionId: String!, $limit: Int, $offset: Int) {
+    resourceIntegrations(resourceId: $resourceId, serviceId: $serviceId, service_version_id: $serviceVersionId, limit: $limit, offset: $offset) {
+      id service_id name description version status method path deprecated deprecation_date
+    }
+  }
+`;
+
+type BuilderVersionService = Pick<
+  Service,
+  "current_service_version" | "resources"
+> & { webhooks?: WebhookObject[] };
+
+type BuilderVersionContract = { service: BuilderVersionService | null };
+
+type BuilderServiceBootstrap = {
+  service: Pick<
+    Service,
+    | "current_service_version"
+    | "resources"
+    | "webhooks"
+    | "endpoint_count"
+    | "webhook_count"
+    | "event_extraction_path"
+    | "incoming_webhook_config"
+  > | null;
+  serviceVersions: SdkServiceVersion[];
+};
+
+// canLoadBuilderService prevents duplicate service-contract requests.
+function canLoadBuilderService(
+  service: ServiceData | undefined,
+  loaded: boolean,
+  loading: boolean
+): boolean {
+  return Boolean(service) && !loaded && !loading;
+}
+
+// builderBootstrapRows normalizes nullable GraphQL lists for builder state.
+function builderBootstrapRows(response: BuilderServiceBootstrap) {
+  return {
+    service: response.service,
+    webhooks: response.service?.webhooks || [],
+    versions: response.serviceVersions || [],
+  };
+}
+
+// effectiveBuilderVersion selects the version that produced the bootstrap service.
+function effectiveBuilderVersion(
+  versions: SdkServiceVersion[],
+  currentVersion?: string
+): SdkServiceVersion | undefined {
+  return versions.find((candidate) => candidate.name === currentVersion) || versions[0];
+}
+
+// loadBuilderVersionContract returns resources and webhooks from one immutable
+// service version after the user changes the builder pin.
+async function loadBuilderVersionContract(
+  serviceId: string,
+  version: string
+): Promise<BuilderVersionService> {
+  const response = await api.graphql<BuilderVersionContract>(`
+    query($id: String!, $version: String!) {
+      service(id: $id, version: $version) {
+        current_service_version
+        resources { id name }
+        webhooks { id name description method }
+      }
+    }
+  `, { id: serviceId, version });
+  if (!response.service) throw new Error("Selected service version was not found");
+  return response.service;
+}
+
+// appServicesConfig keys selected service contracts by their stable SDK identity.
 function appServicesConfig(selections: AppSelection[], services: ServiceData[]): Record<string, unknown> {
   return Object.fromEntries(selections.map((selection) => appServiceEntry(selection, services)));
 }
 
+// appServiceEntry serializes one selected service into declarative config.
 function appServiceEntry(selection: AppSelection, services: ServiceData[]): [string, Record<string, unknown>] {
   const service = services.find((item) => item.service.id === selection.service_id);
   return [appSelectionKey(selection), {
@@ -73,34 +414,37 @@ function appServiceEntry(selection: AppSelection, services: ServiceData[]): [str
   }];
 }
 
+// appSelectionKey prefers portable service identities over Registry row IDs.
 function appSelectionKey(selection: AppSelection): string {
   return selection.service_slug || selection.service_name || selection.service_id;
 }
 
+// appOperations maps selected endpoint IDs back to operation names.
 function appOperations(selection: AppSelection, service?: ServiceData): string[] {
   if (selection.select_all) return [];
   const selected = new Set(selection.endpoint_ids);
   return (service?.integrations || []).filter((endpoint) => selected.has(endpoint.id)).map((endpoint) => endpoint.name);
 }
 
+// appWebhooks maps selected webhook IDs back to event names.
 function appWebhooks(selection: AppSelection, service?: ServiceData): string[] {
   const selected = new Set(selection.webhook_ids);
   return (service?.webhooks || []).filter((webhook) => selected.has(webhook.id)).map((webhook) => webhook.name);
 }
 
+// capitalizeFirstLetter formats service names without changing their stored identity.
 const capitalizeFirstLetter = (value?: string | null) => {
   if (!value) return "";
   return value.charAt(0).toUpperCase() + value.slice(1);
 };
 
+// loadRegistryServicesByIDs hydrates authorized selector results from the Registry.
 async function loadRegistryServicesByIDs(serviceIds: string[]): Promise<Service[]> {
   if (serviceIds.length === 0) return [];
   const response = await api.graphql<{ servicesByIds: Service[] }>(`
     query AppBuilderServices($serviceIds: [String!]!) {
       servicesByIds(serviceIds: $serviceIds) {
-        id name slug canonical_ref provider { name handle } description base_url endpoint_count webhook_count
-        event_extraction_path incoming_webhook_config { auth_type }
-        resources { id name }
+        id name slug canonical_ref provider { name handle } description
       }
     }
   `, { serviceIds });
@@ -130,6 +474,7 @@ function AddSelectedServiceToWorkspaceButton({
   const [error, setError] = useState<string | null>(null);
   const hasExactVersion = Boolean(versionTag && serviceVersionId);
 
+  // handleAdd activates the exact selected version in the current workspace.
   const handleAdd = async () => {
     if (adding || !hasExactVersion) return;
     setAdding(true);
@@ -159,15 +504,643 @@ function AddSelectedServiceToWorkspaceButton({
   );
 }
 
+type BuilderServiceInteractions = {
+  expanded: Record<string, boolean>;
+  loadedServices: Record<string, boolean>;
+  selections: Record<string, Set<string>>;
+  webhookSelections: Record<string, Set<string>>;
+  selectAllServices: Set<string>;
+  loadingService: Record<string, boolean>;
+  expandedSections: Record<string, { endpoints: boolean; webhooks: boolean }>;
+  versionSelections: Record<string, string>;
+  hasMoreResources: Record<string, boolean>;
+  loadingResourceByName: Record<string, boolean>;
+  toggleExpand: (serviceId: string) => void;
+  toggleSection: (serviceId: string, section: "endpoints" | "webhooks") => void;
+  toggleEndpoint: (serviceId: string, endpointId: string) => void;
+  toggleWebhook: (serviceId: string, webhookId: string) => void;
+  toggleSelectAllEndpoints: (serviceId: string) => void;
+  toggleSelectAllWebhooks: (serviceId: string, webhooks: WebhookObject[]) => void;
+  handleVersionSelection: (serviceId: string, serviceVersionId: string) => void;
+  loadMoreResource: (serviceId: string, resourceName: string) => void;
+  loadResourceEndpoints: (serviceId: string, resourceId: string, resourceName: string) => void;
+};
+
+type BuilderSelectionPaneProps = BuilderServiceInteractions & {
+  data: ServiceData[];
+  generationMode: GenerationMode;
+  query: string;
+  setQuery: (query: string) => void;
+  searching: boolean;
+  handleSearch: (event: FormEvent) => void;
+  handleClear: () => void;
+  workspaceServicesLoaded: boolean;
+  workspaceServiceCount: number;
+  ownerTeamId: string;
+  loading: boolean;
+  page: number;
+  totalPages: number;
+  totalItems: number;
+  setPage: (page: number | ((previous: number) => number)) => void;
+};
+
+type BuilderPageProps = {
+  generationMode: GenerationMode;
+  error: string;
+  loading: boolean;
+  selection: BuilderSelectionPaneProps;
+  generation: ConsumerGenerationPanelProps;
+};
+
+type ServiceCardView = {
+  expanded: boolean;
+  loaded: boolean;
+  selectedEndpoints: Set<string>;
+  selectedWebhooks: Set<string>;
+  selectAll: boolean;
+  endpointCount: number;
+  webhookCount: number;
+  totalSelected: number;
+};
+
+// reportedCapabilityCount prefers Registry totals while retaining loaded-row fallback.
+function reportedCapabilityCount(reported: number | undefined, loaded: number): number {
+  if (reported) return reported;
+  return loaded;
+}
+
+// serviceCardView derives display-only counts and selection state for one service.
+function serviceCardView(item: ServiceData, state: BuilderServiceInteractions): ServiceCardView {
+  const serviceId = item.service.id;
+  const selectedEndpoints = state.selections[serviceId] || new Set<string>();
+  const selectedWebhooks = state.webhookSelections[serviceId] || new Set<string>();
+  const selectAll = state.selectAllServices.has(serviceId);
+  const endpointCount = reportedCapabilityCount(item.service.endpoint_count, item.integrations.length);
+  const webhookCount = reportedCapabilityCount(item.service.webhook_count, item.webhooks.length);
+  const selectedEndpointCount = selectAll ? endpointCount : selectedEndpoints.size;
+  return {
+    expanded: Boolean(state.expanded[serviceId]),
+    loaded: Boolean(state.loadedServices[serviceId]),
+    selectedEndpoints,
+    selectedWebhooks,
+    selectAll,
+    endpointCount,
+    webhookCount,
+    totalSelected: selectedEndpointCount + selectedWebhooks.size,
+  };
+}
+
+// serviceReference renders the stable canonical or provider-scoped identity.
+function serviceReference(service: Service): string {
+  if (service.canonical_ref) return service.canonical_ref;
+  if (service.provider) return `@${service.provider.handle}/${service.slug}`;
+  return "";
+}
+
+// serviceSelectionSummary explains the service-card expansion state.
+function serviceSelectionSummary(loaded: boolean, selected: number): string {
+  if (loaded && selected > 0) return `${selected} selected`;
+  return "Expand to view endpoints and webhooks";
+}
+
+// BuilderServiceCardHeader renders the compact identity and selected count.
+function BuilderServiceCardHeader({
+  item,
+  view,
+  onExpand,
+}: {
+  item: ServiceData;
+  view: ServiceCardView;
+  onExpand: () => void;
+}) {
+  const reference = serviceReference(item.service);
+  const roundedClass = view.expanded ? "rounded-t-xl" : "rounded-xl";
+  return (
+    <div
+      className={`flex items-center justify-between p-4 cursor-pointer hover:bg-slate-50 transition-colors ${roundedClass}`}
+      onClick={onExpand}
+    >
+      <div className="flex min-w-0 items-center gap-3">
+        <button className="shrink-0 text-slate-400 hover:text-slate-600 transition-colors">
+          {view.expanded ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
+        </button>
+        <div className="min-w-0">
+          <h3 className="font-semibold text-slate-900 flex items-center gap-2">
+            <span className="truncate">{capitalizeFirstLetter(item.service.name)}</span>
+          </h3>
+          <p className="truncate text-xs text-slate-400">
+            {reference}{reference ? " · " : ""}
+            {serviceSelectionSummary(view.loaded, view.totalSelected)}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// BuilderVersionPicker pins all subsequent resource loads to one immutable version.
+function BuilderVersionPicker({
+  serviceId,
+  versions,
+  selectedVersionId,
+  generationMode,
+  onSelect,
+}: {
+  serviceId: string;
+  versions: SdkServiceVersion[];
+  selectedVersionId: string;
+  generationMode: GenerationMode;
+  onSelect: (serviceId: string, versionId: string) => void;
+}) {
+  if (versions.length === 0) return null;
+  const selectedVersion = versions.find((version) => version.id === selectedVersionId) || versions[0];
+  const title = selectedVersion?.header_value || selectedVersion?.name || "";
+  return (
+    <div className="flex min-w-0 flex-col gap-3 border-b border-slate-100 bg-slate-50 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+      <div className="flex min-w-0 flex-col">
+        <span className="text-sm font-semibold text-slate-800">Service Version</span>
+        <span className="text-xs text-slate-500">
+          Select the version this {generationArtifactName(generationMode).toLowerCase()} will use
+        </span>
+      </div>
+      <select
+        value={selectedVersionId}
+        onChange={(event) => onSelect(serviceId, event.target.value)}
+        title={title}
+        className="block w-full min-w-0 truncate rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm shadow-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500 sm:w-[min(55%,22rem)]"
+      >
+        {versions.map((version) => (
+          <option key={version.id} value={version.id}>{version.header_value || version.name}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+// EndpointSelectAllButton toggles the compact all-operations representation.
+function EndpointSelectAllButton({
+  serviceId,
+  view,
+  onToggle,
+}: {
+  serviceId: string;
+  view: ServiceCardView;
+  onToggle: (serviceId: string) => void;
+}) {
+  if (view.endpointCount === 0) return null;
+  return (
+    <button
+      type="button"
+      onClick={(event) => {
+        event.stopPropagation();
+        onToggle(serviceId);
+      }}
+      className="text-[10px] font-medium px-2 py-1 rounded text-slate-500 hover:text-slate-700 hover:bg-slate-200 transition-colors flex items-center gap-1.5"
+    >
+      {view.selectAll ? (
+        <><CheckSquare className="w-3.5 h-3.5 text-blue-600" />Deselect All</>
+      ) : (
+        <>
+          {view.selectedEndpoints.size > 0
+            ? <Square className="w-3.5 h-3.5 text-slate-400 fill-slate-200" />
+            : <Square className="w-3.5 h-3.5 text-slate-400" />}
+          Select All ({view.endpointCount})
+        </>
+      )}
+    </button>
+  );
+}
+
+// BuilderEndpointsSection renders exact-version operation resources and paging.
+function BuilderEndpointsSection({
+  item,
+  view,
+  sections,
+  state,
+}: {
+  item: ServiceData;
+  view: ServiceCardView;
+  sections: { endpoints: boolean; webhooks: boolean };
+  state: BuilderServiceInteractions;
+}) {
+  const serviceId = item.service.id;
+  return (
+    <>
+      <div
+        onClick={() => state.toggleSection(serviceId, "endpoints")}
+        className="w-full flex items-center justify-between px-3 py-2 hover:bg-slate-100 transition-colors cursor-pointer group"
+      >
+        <div className="flex items-center gap-2">
+          {sections.endpoints
+            ? <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+            : <ChevronRight className="w-3.5 h-3.5 text-slate-400" />}
+          <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
+            Endpoints {view.endpointCount > 0 ? `(${view.endpointCount})` : ""}
+          </span>
+        </div>
+        <EndpointSelectAllButton serviceId={serviceId} view={view} onToggle={state.toggleSelectAllEndpoints} />
+      </div>
+      {sections.endpoints && (
+        <div className="px-2 pb-2">
+          <EndpointSelectionList
+            endpoints={item.integrations}
+            selectedIds={view.selectedEndpoints}
+            isSelectAll={view.selectAll}
+            onToggle={(endpointId) => state.toggleEndpoint(serviceId, endpointId)}
+            getId={(endpoint) => endpoint.id}
+            maxHeightClass=""
+            hasMoreResources={state.hasMoreResources}
+            onLoadMoreResource={(resourceName) => state.loadMoreResource(serviceId, resourceName)}
+            resourceMetadata={item.service.resources || []}
+            loadingResources={state.loadingResourceByName}
+            onResourceExpand={(resourceId, resourceName) => state.loadResourceEndpoints(serviceId, resourceId, resourceName)}
+          />
+        </div>
+      )}
+    </>
+  );
+}
+
+// WebhookSelectAllButton toggles every currently loaded webhook for a service.
+function WebhookSelectAllButton({
+  item,
+  view,
+  onToggle,
+}: {
+  item: ServiceData;
+  view: ServiceCardView;
+  onToggle: (serviceId: string, webhooks: WebhookObject[]) => void;
+}) {
+  if (view.webhookCount === 0 || !view.loaded) return null;
+  const allSelected = view.selectedWebhooks.size === item.webhooks.length;
+  return (
+    <button
+      type="button"
+      onClick={(event) => {
+        event.stopPropagation();
+        onToggle(item.service.id, item.webhooks);
+      }}
+      className="text-[10px] font-medium px-2 py-1 rounded text-slate-500 hover:text-slate-700 hover:bg-slate-200 transition-colors flex items-center gap-1.5"
+    >
+      {allSelected ? (
+        <><CheckSquare className="w-3.5 h-3.5 text-blue-600" />Deselect All</>
+      ) : (
+        <>
+          {view.selectedWebhooks.size > 0
+            ? <Square className="w-3.5 h-3.5 text-slate-400 fill-slate-200" />
+            : <Square className="w-3.5 h-3.5 text-slate-400" />}
+          Select All ({view.webhookCount})
+        </>
+      )}
+    </button>
+  );
+}
+
+// BuilderWebhooksSection renders webhook choices shared by SDK and MCP plans.
+function BuilderWebhooksSection({
+  item,
+  view,
+  sections,
+  state,
+}: {
+  item: ServiceData;
+  view: ServiceCardView;
+  sections: { endpoints: boolean; webhooks: boolean };
+  state: BuilderServiceInteractions;
+}) {
+  const hasWebhooks = view.webhookCount > 0;
+  const headerClass = hasWebhooks
+    ? "hover:bg-slate-100 cursor-pointer"
+    : "cursor-default opacity-40";
+  return (
+    <>
+      <div
+        onClick={() => {
+          if (hasWebhooks) state.toggleSection(item.service.id, "webhooks");
+        }}
+        className={`w-full flex items-center justify-between px-3 py-2 transition-colors border-t border-slate-100 group ${headerClass}`}
+      >
+        <div className="flex items-center gap-2">
+          {sections.webhooks
+            ? <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+            : <ChevronRight className="w-3.5 h-3.5 text-slate-400" />}
+          <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
+            Webhooks {view.webhookCount > 0 ? `(${view.webhookCount})` : ""}
+          </span>
+          {!hasWebhooks && (
+            <span className="ml-2 text-[10px] text-slate-400 font-normal normal-case tracking-normal">Not configured</span>
+          )}
+        </div>
+        <WebhookSelectAllButton item={item} view={view} onToggle={state.toggleSelectAllWebhooks} />
+      </div>
+      {sections.webhooks && hasWebhooks && (
+        <div className="px-2 pb-2">
+          <WebhookSelectionList
+            webhooks={item.webhooks}
+            selectedIds={view.selectedWebhooks}
+            onToggle={(webhookId) => state.toggleWebhook(item.service.id, webhookId)}
+            getId={(webhook) => webhook.id}
+            maxHeightClass=""
+          />
+        </div>
+      )}
+    </>
+  );
+}
+
+// BuilderExpandedService composes version, operation, and webhook selectors.
+function BuilderExpandedService({
+  item,
+  view,
+  generationMode,
+  state,
+}: {
+  item: ServiceData;
+  view: ServiceCardView;
+  generationMode: GenerationMode;
+  state: BuilderServiceInteractions;
+}) {
+  const serviceId = item.service.id;
+  const sections = state.expandedSections[serviceId] || { endpoints: true, webhooks: true };
+  const selectedVersionId = state.versionSelections[serviceId] || item.serviceVersions[0]?.id || "";
+  return (
+    <div>
+      <BuilderVersionPicker
+        serviceId={serviceId}
+        versions={item.serviceVersions}
+        selectedVersionId={selectedVersionId}
+        generationMode={generationMode}
+        onSelect={state.handleVersionSelection}
+      />
+      <BuilderEndpointsSection item={item} view={view} sections={sections} state={state} />
+      {/* SDK and MCP share the same webhook bundle selection contract. */}
+      <BuilderWebhooksSection item={item} view={view} sections={sections} state={state} />
+    </div>
+  );
+}
+
+// BuilderServiceCard renders one collapsible service selection surface.
+function BuilderServiceCard({
+  item,
+  generationMode,
+  state,
+}: {
+  item: ServiceData;
+  generationMode: GenerationMode;
+  state: BuilderServiceInteractions;
+}) {
+  const view = serviceCardView(item, state);
+  return (
+    <div className="min-w-0 overflow-hidden bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow">
+      <BuilderServiceCardHeader
+        item={item}
+        view={view}
+        onExpand={() => state.toggleExpand(item.service.id)}
+      />
+      {view.expanded && (
+        <div className="min-w-0 overflow-x-hidden border-t border-slate-100 bg-slate-50/50 max-h-[500px] overflow-y-auto">
+          {state.loadingService[item.service.id] ? (
+            <div className="flex items-center justify-center gap-2 py-6 text-slate-400">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span className="text-sm">Loading...</span>
+            </div>
+          ) : (
+            <BuilderExpandedService item={item} view={view} generationMode={generationMode} state={state} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// emptyServiceCopy selects the most useful recovery guidance for an empty catalog.
+function emptyServiceCopy(input: {
+  query: string;
+  workspaceServicesLoaded: boolean;
+  workspaceServiceCount: number;
+  ownerTeamId: string;
+}): { title: string; detail: string } {
+  if (input.query) {
+    return {
+      title: "No services in your workspace match your search.",
+      detail: "Try another service name or activate one from the service catalog.",
+    };
+  }
+  if (input.workspaceServicesLoaded && input.workspaceServiceCount === 0) {
+    return {
+      title: "No services added yet.",
+      detail: "Define and activate a service before creating an app or MCP server.",
+    };
+  }
+  if (input.ownerTeamId) {
+    return {
+      title: "No shared services are available.",
+      detail: "Ask an access administrator to give both you and the team access.",
+    };
+  }
+  return {
+    title: "No services are available with your access.",
+    detail: "Ask a workspace administrator for access to the services and credential sets you need.",
+  };
+}
+
+// BuilderEmptyServices renders access-aware guidance when no services are available.
+function BuilderEmptyServices(props: Pick<
+  BuilderSelectionPaneProps,
+  "query" | "workspaceServicesLoaded" | "workspaceServiceCount" | "ownerTeamId"
+>) {
+  const copy = emptyServiceCopy(props);
+  return (
+    <div className="text-center py-12 text-slate-400 bg-white rounded-xl border border-dashed border-slate-200">
+      <p className="font-medium text-slate-600">{copy.title}</p>
+      <p className="mt-1 text-sm">{copy.detail}</p>
+    </div>
+  );
+}
+
+// BuilderSearchForm controls server-backed service search without local filtering.
+function BuilderSearchForm({
+  query,
+  setQuery,
+  searching,
+  handleSearch,
+  handleClear,
+}: Pick<BuilderSelectionPaneProps, "query" | "setQuery" | "searching" | "handleSearch" | "handleClear">) {
+  return (
+    <form
+      onSubmit={handleSearch}
+      className="relative w-full mb-4"
+      toolname="search_services_sdk"
+      tooldescription="Search for services or endpoints to include in the SDK."
+    >
+      <button
+        data-track="search_services"
+        type="submit"
+        disabled={searching}
+        className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 disabled:opacity-50 cursor-pointer"
+        title="Search"
+      >
+        {searching ? <Loader2 className="w-5 h-5 animate-spin" /> : <Search className="w-5 h-5" />}
+      </button>
+      <input
+        type="text"
+        placeholder="Search for a service (e.g. Stripe, Shopify...)"
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+        className="w-full pl-10 pr-10 py-3 rounded-xl border border-slate-200 text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 shadow-sm transition-all bg-white"
+      />
+      {query && (
+        <button
+          data-track="clear_service_search"
+          type="button"
+          onClick={handleClear}
+          className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+          title="Clear search"
+        >
+          <X className="w-5 h-5" />
+        </button>
+      )}
+    </form>
+  );
+}
+
+// BuilderServiceList delegates each service to a bounded-complexity card.
+function BuilderServiceList(props: BuilderSelectionPaneProps) {
+  if (props.data.length === 0) return <BuilderEmptyServices {...props} />;
+  return (
+    <>
+      {props.data.map((item) => (
+        <BuilderServiceCard key={item.service.id} item={item} generationMode={props.generationMode} state={props} />
+      ))}
+    </>
+  );
+}
+
+// BuilderPagination renders server-backed pages only for unfiltered catalogs.
+function BuilderPagination(props: Pick<
+  BuilderSelectionPaneProps,
+  "loading" | "query" | "page" | "totalPages" | "totalItems" | "setPage"
+>) {
+  if (props.loading || props.query || props.totalPages <= 1) return null;
+  const start = props.totalItems === 0 ? 0 : (props.page - 1) * 20 + 1;
+  return (
+    <div className="flex items-center justify-between gap-3 border border-slate-200 px-4 py-3 bg-white rounded-xl shadow-sm mt-4">
+      <p className="text-xs text-slate-500">
+        {start}-{Math.min(props.totalItems, props.page * 20)} of {props.totalItems}
+      </p>
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          data-track="paginate_previous"
+          onClick={() => props.setPage((page) => Math.max(1, page - 1))}
+          disabled={props.page === 1}
+          className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 disabled:opacity-40 disabled:hover:bg-transparent"
+          aria-label="Previous page"
+          title="Previous"
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </button>
+        <span className="text-xs text-slate-500 pl-2">Page</span>
+        <select
+          className="bg-white border border-slate-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 mx-1 cursor-pointer"
+          value={props.page}
+          onChange={(event) => props.setPage(parseInt(event.target.value, 10))}
+        >
+          {Array.from({ length: props.totalPages }, (_, index) => index + 1).map((page) => (
+            <option key={page} value={page}>{page}</option>
+          ))}
+        </select>
+        <span className="text-xs font-medium text-slate-500 pr-2">of {props.totalPages}</span>
+        <button
+          type="button"
+          data-track="paginate_next"
+          onClick={() => props.setPage((page) => page + 1)}
+          disabled={props.page >= props.totalPages}
+          className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 disabled:opacity-40 disabled:hover:bg-transparent"
+          aria-label="Next page"
+          title="Next"
+        >
+          <ChevronRight className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// BuilderSelectionPane composes search, service cards, and pagination.
+function BuilderSelectionPane(props: BuilderSelectionPaneProps) {
+  return (
+    <div className="flex-1 flex flex-col min-h-0 min-w-0">
+      <BuilderSearchForm {...props} />
+      <div className="flex-1 overflow-y-auto pr-2 pb-8 space-y-4">
+        <BuilderServiceList {...props} />
+        <BuilderPagination {...props} />
+      </div>
+    </div>
+  );
+}
+
+// BuilderPageHeader names the artifact being configured.
+function BuilderPageHeader({ generationMode }: { generationMode: GenerationMode }) {
+  const isMCP = generationMode === "mcp";
+  return (
+    <div className="flex items-center justify-between mb-8">
+      <div>
+        <h1 className="text-3xl font-bold text-slate-900 tracking-tight mb-1">
+          {isMCP ? "Create MCP server" : "Create app"}
+        </h1>
+        <p className="text-slate-500">
+          {isMCP
+            ? "Choose the services and operations to make available through MCP."
+            : "Choose the services and operations this app can use."}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// BuilderPage renders the builder shell without owning execution state.
+function BuilderPage({ generationMode, error, loading, selection, generation }: BuilderPageProps) {
+  return (
+    <div className="max-w-6xl mx-auto py-8 px-4 h-full flex flex-col">
+      <BuilderPageHeader generationMode={generationMode} />
+      {error && (
+        <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700 font-medium">
+          {error}
+        </div>
+      )}
+      {loading ? (
+        <div className="flex-1 flex flex-col items-center justify-center min-h-[400px] text-slate-400">
+          <Loader2 className="w-8 h-8 text-blue-500 animate-spin mb-4" />
+          <p className="animate-pulse font-medium text-slate-500">Loading available integrations...</p>
+        </div>
+      ) : (
+        <div className="flex flex-col lg:flex-row gap-8 flex-1 min-h-0 min-w-0">
+          <BuilderSelectionPane {...selection} />
+          <ConsumerGenerationPanel {...generation} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// initialBuilderServiceId resolves a route-selected service only when the loader is unambiguous.
+function initialBuilderServiceId(searchParams: URLSearchParams, services: Service[]): string | undefined {
+  const selected = searchParams.get("serviceId") || searchParams.get("service") || searchParams.get("slug");
+  if (!selected || services.length !== 1) return undefined;
+  return services[0]?.id;
+}
+
+// SdkBuilder assembles exact-version service selections into an app contract.
 export default function SdkBuilder() {
+  const { access } = useCurrentActorAccess();
+  const canReadApps = hasAnyPermission(access, "app.read");
+  const canReadServices = hasAnyPermission(access, "service.read");
   const toast = useToast();
   const loaderData = useLoaderData<typeof clientLoader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const isAuth = loaderData.isAuth;
-  const selectedServiceParam = searchParams.get("serviceId") || searchParams.get("service") || searchParams.get("slug");
-  const initialSelectedServiceId = selectedServiceParam && loaderData.services.length === 1
-    ? loaderData.services[0]?.id
-    : undefined;
+  const initialSelectedServiceId = initialBuilderServiceId(searchParams, loaderData.services);
 
   const [data, setData] = useState<ServiceData[]>([]);
   const [loading, setLoading] = useState(false);
@@ -189,6 +1162,7 @@ export default function SdkBuilder() {
   const [loadingService, setLoadingService] = useState<Record<string, boolean>>({});
   // Per-service sub-section expand state
   const [expandedSections, setExpandedSections] = useState<Record<string, { endpoints: boolean; webhooks: boolean }>>({});
+  // toggleSection expands one capability group without affecting sibling services.
   const toggleSection = (serviceId: string, section: "endpoints" | "webhooks") => {
     setExpandedSections(prev => {
       const current = prev[serviceId] ?? { endpoints: true, webhooks: true };
@@ -232,8 +1206,6 @@ export default function SdkBuilder() {
   });
   const [language, setLanguage] = useState<"typescript" | "python">("typescript");
 
-  const targetType = generationMode === "mcp" ? "mcp" : "sdk";
-
   useEffect(() => {
     document.title = generationMode === "mcp" ? "Create MCP server - Fused" : "Create app - Fused";
   }, [generationMode]);
@@ -241,6 +1213,7 @@ export default function SdkBuilder() {
   const [searching, setSearching] = useState(false);
   const pageParam = searchParams.get("page");
   const page = pageParam ? parseInt(pageParam, 10) : 1;
+  // setPage keeps server-backed pagination reflected in the route URL.
   const setPage = (p: number | ((prev: number) => number)) => {
     const newPage = typeof p === 'function' ? p(page) : p;
     setSearchParams(prev => {
@@ -259,6 +1232,7 @@ export default function SdkBuilder() {
     serviceVersions?: SdkServiceVersion[];
   };
 
+  // processResponse normalizes authorized service rows into builder state.
   const processResponse = (servicesData: RawServiceWithExtras[], total: number) => {
     const validResults: ServiceData[] = servicesData.map(s => {
       const integrations: IntegrationObject[] = [];
@@ -300,6 +1274,7 @@ export default function SdkBuilder() {
     });
   };
 
+  // loadData fetches one authorized selector page and hydrates its services.
   async function loadData(pageNum: number, search = "") {
     setLoading(true);
     setError("");
@@ -317,6 +1292,7 @@ export default function SdkBuilder() {
     }
   }
 
+  // runSearch resets pagination and performs a server-backed service search.
   async function runSearch(q: string) {
     setSearchParams(prev => {
       const next = new URLSearchParams(prev);
@@ -350,11 +1326,13 @@ export default function SdkBuilder() {
     return () => clearTimeout(id);
   }, [query]);
 
+  // handleSearch submits the current service query without navigation.
   async function handleSearch(e: FormEvent) {
     e.preventDefault();
     runSearch(query);
   }
 
+  // handleClear restores the unfiltered first selector page.
   async function handleClear() {
     setQuery("");
     setSearchParams(prev => {
@@ -379,6 +1357,7 @@ export default function SdkBuilder() {
       .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Could not load owning teams."));
   }, []);
 
+  // loadAvailableBuckets refreshes credential sets usable by both actor and owner.
   const loadAvailableBuckets = () =>
     listAppBuildSelectors(ownerTeamId, "BUCKET", "", 100, 0).then((bucketPage) => {
       setAvailableBuckets(bucketPage.items);
@@ -410,6 +1389,7 @@ export default function SdkBuilder() {
     return () => window.removeEventListener("focus", refreshAfterCredentialTab);
   }, [ownerTeamId]);
 
+  // createCredential preserves builder state while opening credential creation.
   const createCredential = () => {
     if (!openAuthenticatedTab(CREATE_CREDENTIAL_PATH)) {
       toast.warning("Allow pop-ups to create a credential without losing this build.");
@@ -428,12 +1408,17 @@ export default function SdkBuilder() {
   // failure here just means pin-syncing after generate is skipped for this
   // session; it must never block SDK generation itself.
   useEffect(() => {
-    if (!isAuth) return;
+    if (!isAuth || !canReadServices) {
+      // Builder-only actors rely on plan/apply for authoritative workspace
+      // validation instead of issuing a service.read query they cannot use.
+      setWorkspaceServicesLoaded(false);
+      return;
+    }
     api.workspace.getServices()
       .then(services => setWorkspaceServiceIds(new Set(services.map(s => s.service_id))))
       .catch(() => {})
       .finally(() => setWorkspaceServicesLoaded(true));
-  }, [isAuth]);
+  }, [canReadServices, isAuth]);
 
   // After a successful generate, keep the workspace's pinned version in
   // sync with whatever was just generated -- otherwise a workspace could
@@ -466,6 +1451,7 @@ export default function SdkBuilder() {
     }));
   };
 
+  // loadMoreResource appends operations without crossing the selected version.
   const loadMoreResource = async (serviceId: string, resourceName: string) => {
     // Find the resourceId based on the first endpoint's resource_id in this service
     const serviceData = data.find(s => s.service.id === serviceId);
@@ -474,27 +1460,21 @@ export default function SdkBuilder() {
     if (!sample || !sample.resource_id) return;
     
     const resourceId = sample.resource_id;
+    const serviceVersionId = versionSelections[serviceId];
+    // Exact SDK scopes must never load an unversioned union of operations.
+    if (!serviceVersionId) return;
     if (loadingResource[resourceId] || !hasMoreResources[resourceId]) return;
     
     setLoadingResource(prev => ({ ...prev, [resourceId]: true }));
     try {
       const currentOffset = resourceOffsets[resourceId] || 0;
-      const queryStr = `
-        query($resourceId: String!, $serviceId: String, $limit: Int, $offset: Int) {
-          resourceIntegrations(resourceId: $resourceId, serviceId: $serviceId, limit: $limit, offset: $offset) {
-            id
-            service_id
-            name
-            description
-            version
-            status
-            method
-            path
-            deprecated
-          }
-        }
-      `;
-      const response = await api.graphql<{ resourceIntegrations: IntegrationObject[] }>(queryStr, { resourceId, serviceId: serviceId, limit: 50, offset: currentOffset });
+      const response = await api.graphql<{ resourceIntegrations: IntegrationObject[] }>(BUILDER_RESOURCE_GQL, {
+        resourceId,
+        serviceId,
+        serviceVersionId,
+        limit: 50,
+        offset: currentOffset,
+      });
       const enriched = response.resourceIntegrations.map(ep => ({ ...ep, resource: resourceName, resource_id: resourceId }));
       
       setData(prev => {
@@ -518,27 +1498,53 @@ export default function SdkBuilder() {
     }
   };
 
+  // loadServiceIntegrations loads versions plus the effective version contract.
   const loadServiceIntegrations = async (serviceId: string) => {
     const serviceData = data.find(s => s.service.id === serviceId);
-    if (!serviceData || loadedServices[serviceId] || loadingService[serviceId]) return;
+    if (!canLoadBuilderService(serviceData, loadedServices[serviceId], loadingService[serviceId])) return;
 
     setLoadingService(prev => ({ ...prev, [serviceId]: true }));
     try {
       // Only fetch webhooks and service versions on expand — endpoints load lazily per resource
-      const webhookRes = await api.graphql<{ service: { webhooks: WebhookObject[] }, serviceVersions: SdkServiceVersion[] }>(`
+      const webhookRes = await api.graphql<BuilderServiceBootstrap>(`
         query($id: String!) {
-          service(id: $id) { webhooks { id name description method } }
+          service(id: $id) {
+            current_service_version
+            endpoint_count
+            webhook_count
+            event_extraction_path
+            incoming_webhook_config { auth_type }
+            resources { id name }
+            webhooks { id name description method }
+          }
           serviceVersions(serviceId: $id) { id name header_value status }
         }
       `, { id: serviceId });
 
-      const webhooks = webhookRes?.service?.webhooks || [];
-      const serviceVersions = webhookRes?.serviceVersions || [];
+      const bootstrap = builderBootstrapRows(webhookRes);
       setData(prev => prev.map(s =>
-        s.service.id === serviceId ? { ...s, webhooks, serviceVersions } : s
+        s.service.id === serviceId
+          ? {
+              ...s,
+              service: {
+                ...s.service,
+                current_service_version: bootstrap.service?.current_service_version,
+                resources: bootstrap.service?.resources || [],
+                endpoint_count: bootstrap.service?.endpoint_count,
+                webhook_count: bootstrap.service?.webhook_count,
+                event_extraction_path: bootstrap.service?.event_extraction_path,
+                incoming_webhook_config: bootstrap.service?.incoming_webhook_config,
+              },
+              webhooks: bootstrap.webhooks,
+              serviceVersions: bootstrap.versions,
+            }
+          : s
       ));
       
-      const serviceVersion = serviceVersions[0];
+      const serviceVersion = effectiveBuilderVersion(
+        bootstrap.versions,
+        bootstrap.service?.current_service_version
+      );
       if (serviceVersion) {
         setVersionSelections(prev => ({ ...prev, [serviceId]: serviceVersion.id }));
       }
@@ -551,19 +1557,62 @@ export default function SdkBuilder() {
     }
   };
 
+  // handleVersionSelection replaces all version-bound builder rows together.
+  async function handleVersionSelection(serviceId: string, serviceVersionId: string) {
+    const serviceData = data.find((candidate) => candidate.service.id === serviceId);
+    const selected = serviceData?.serviceVersions.find(
+      (candidate) => candidate.id === serviceVersionId
+    );
+    if (!serviceData || !selected) return;
+
+    const previousVersionId = versionSelections[serviceId];
+    setVersionSelections((previous) => ({ ...previous, [serviceId]: serviceVersionId }));
+    try {
+      const contract = await loadBuilderVersionContract(serviceId, selected.name);
+      setData((previous) => previous.map((candidate) =>
+        candidate.service.id === serviceId
+          ? {
+              ...candidate,
+              service: {
+                ...candidate.service,
+                current_service_version: contract.current_service_version,
+                resources: contract.resources || [],
+              },
+              integrations: [],
+              webhooks: contract.webhooks || [],
+            }
+          : candidate
+      ));
+      // Explicit IDs belong to a version, so carrying them across a pin change
+      // could generate a selection the Registry correctly rejects.
+      setSelections((previous) => ({ ...previous, [serviceId]: new Set() }));
+      setWebhookSelections((previous) => ({ ...previous, [serviceId]: new Set() }));
+      setSelectAllServices((previous) => {
+        const next = new Set(previous);
+        next.delete(serviceId);
+        return next;
+      });
+    } catch (cause) {
+      setVersionSelections((previous) => {
+        const next = { ...previous };
+        if (previousVersionId) next[serviceId] = previousVersionId;
+        else delete next[serviceId];
+        return next;
+      });
+      toast.error(cause instanceof Error ? cause.message : "Failed to load the selected service version");
+    }
+  }
+
+  // loadResourceEndpoints loads the first operation page for the selected version.
   const loadResourceEndpoints = async (serviceId: string, resourceId: string, resourceName: string) => {
+    const serviceVersionId = versionSelections[serviceId];
+    if (!serviceVersionId) return;
     if (loadingResourceByName[resourceName]) return;
     setLoadingResourceByName(prev => ({ ...prev, [resourceName]: true }));
     try {
-      const queryStr = `
-        query($resourceId: String!, $serviceId: String, $limit: Int, $offset: Int) {
-          resourceIntegrations(resourceId: $resourceId, serviceId: $serviceId, limit: $limit, offset: $offset) {
-            id service_id name description version status method path deprecated deprecation_date
-          }
-        }
-      `;
       const response = await api.graphql<{ resourceIntegrations: IntegrationObject[] }>(
-        queryStr, { resourceId, serviceId, limit: 50, offset: 0 }
+        BUILDER_RESOURCE_GQL,
+        { resourceId, serviceId, serviceVersionId, limit: 50, offset: 0 }
       );
       const enriched = response.resourceIntegrations.map(ep => ({ ...ep, resource: resourceName, resource_id: resourceId }));
       setData(prev => prev.map(s => {
@@ -572,10 +1621,9 @@ export default function SdkBuilder() {
         const existing = new Set(s.integrations.map(e => e.id));
         return { ...s, integrations: [...s.integrations, ...enriched.filter(e => !existing.has(e.id))] };
       }));
-      if (response.resourceIntegrations.length === 50) {
-        setHasMoreResources(prev => ({ ...prev, [resourceId]: true }));
-        setResourceOffsets(prev => ({ ...prev, [resourceId]: 50 }));
-      }
+      const hasMore = response.resourceIntegrations.length === 50;
+      setHasMoreResources(prev => ({ ...prev, [resourceId]: hasMore }));
+      setResourceOffsets(prev => ({ ...prev, [resourceId]: hasMore ? 50 : 0 }));
     } catch (err) {
       toast.error("Failed to load endpoints for " + resourceName + ": " + (err instanceof Error ? err.message : String(err)));
     } finally {
@@ -583,6 +1631,7 @@ export default function SdkBuilder() {
     }
   };
 
+  // toggleExpand lazily loads immutable service metadata on first expansion.
   const toggleExpand = (serviceId: string) => {
     const willExpand = !expanded[serviceId];
     setExpanded(prev => ({ ...prev, [serviceId]: willExpand }));
@@ -591,6 +1640,7 @@ export default function SdkBuilder() {
     }
   };
 
+  // toggleEndpoint changes one explicit operation selection.
   const toggleEndpoint = (serviceId: string, endpointId: string) => {
     setSelections(prev => {
       const nextSet = new Set(prev[serviceId]);
@@ -603,6 +1653,7 @@ export default function SdkBuilder() {
     });
   };
 
+  // toggleWebhook changes one explicit event selection.
   const toggleWebhook = (serviceId: string, webhookId: string) => {
     setWebhookSelections(prev => {
       const nextSet = new Set(prev[serviceId]);
@@ -615,6 +1666,7 @@ export default function SdkBuilder() {
     });
   };
 
+  // toggleSelectAllEndpoints switches between compact all and explicit operation IDs.
   const toggleSelectAllEndpoints = (serviceId: string) => {
     const isSelectAll = selectAllServices.has(serviceId);
     if (isSelectAll) {
@@ -626,6 +1678,7 @@ export default function SdkBuilder() {
     }
   };
 
+  // toggleSelectAllWebhooks selects or clears every loaded webhook for a service.
   const toggleSelectAllWebhooks = (serviceId: string, webhooks: WebhookObject[]) => {
     if (webhooks.length === 0) return;
     const allSelected = (webhookSelections[serviceId]?.size || 0) === webhooks.length;
@@ -663,23 +1716,34 @@ export default function SdkBuilder() {
       (webhookSelections[service.id]?.size || 0) > 0
     )
     .map(({ service }) => service.id);
-  const unactivatedSelectedServiceIds = isAuth
+  const unactivatedSelectedServiceIds = isAuth && canReadServices && workspaceServicesLoaded
     ? selectedServiceIdsForGate.filter(id => !workspaceServiceIds.has(id))
     : [];
 
+  // handleServiceAddedToWorkspace updates the local activation gate after success.
   const handleServiceAddedToWorkspace = (serviceId: string) => {
     setWorkspaceServiceIds(prev => new Set(prev).add(serviceId));
   };
 
+  /** Previews duplicate versions when app-read access is available. */
   const checkDuplicateSDK = async () => {
     if (!sdkName.trim() || !appVersion.trim()) {
       setIsDuplicate(false);
       return;
     }
+    if (!canReadApps) {
+      // Immutable-version conflicts are still rejected by plan/apply; skipping
+      // this optional preview avoids turning app.create into implicit app.read.
+      setIsDuplicate(false);
+      return;
+    }
     setCheckingDuplicate(true);
     try {
-      const queryStr = `query($search: String!) { apps(kind: "sdk", search: $search, limit: 100, offset: 0) { items { name version } } }`;
-      const res = await api.mcpGraphql<{ apps: { items: { name: string; version: string }[] } }>(queryStr, { search: sdkName.trim() });
+      const queryStr = `query($search: String!, $version: String!) { apps(kind: "sdk", search: $search, version: $version, limit: 1, offset: 0) { items { name version } } }`;
+      const res = await api.mcpGraphql<{ apps: { items: { name: string; version: string }[] } }>(queryStr, {
+        search: sdkName.trim(),
+        version: appVersion.trim(),
+      });
       setIsDuplicate(res.apps.items.some(item => item.name === sdkName.trim() && item.version === appVersion.trim()));
     } catch {
       setIsDuplicate(false);
@@ -688,86 +1752,38 @@ export default function SdkBuilder() {
     }
   };
 
+  // handleGenerate validates, plans, applies, and reports one app build.
   const handleGenerate = async (e: FormEvent) => {
     e.preventDefault();
-    const allServiceIds = new Set([
-      ...Object.keys(selections),
-      ...selectAllServices,
-      ...Object.keys(webhookSelections),
-    ]);
-    const selectionPayload = Array.from(allServiceIds)
-      .filter(serviceId =>
-        selectAllServices.has(serviceId) ||
-        (selections[serviceId]?.size || 0) > 0 ||
-        (webhookSelections[serviceId]?.size || 0) > 0
-      )
-      .map(serviceId => {
-        const svcData = data.find(d => d.service.id === serviceId);
-        const selectedVersionID = versionSelections[serviceId] || svcData?.serviceVersions?.[0]?.id;
-        return {
-          service_id: serviceId,
-          service_name: svcData?.service.name,
-          service_slug: svcData?.service.slug,
-          select_all: selectAllServices.has(serviceId),
-          endpoint_ids: selectAllServices.has(serviceId) ? [] : Array.from(selections[serviceId] || new Set<string>()),
-          webhook_ids: Array.from(webhookSelections[serviceId] || new Set<string>()),
-          service_version_id: selectedVersionID,
-        };
-      });
-
-    if (selectionPayload.length === 0) {
-      toast.warning("Please select at least one endpoint or webhook to generate an SDK.");
-      return;
-    }
-    if (selectionPayload.some(sel => !sel.service_version_id)) {
-      toast.error("Each selected service needs a service version before generating an SDK.");
+    const selectionPayload = buildAppSelections(data, {
+      selections,
+      selectAllServices,
+      webhookSelections,
+      versionSelections,
+    });
+    const validation = validateGenerationInput({
+      selections: selectionPayload,
+      data,
+      sdkName,
+      generationMode,
+      availableBuckets,
+      bucketId,
+      ownerTeamId,
+      webhookAttachment,
+    });
+    if (!validation.ok) {
+      reportGenerationValidation(toast, validation);
       return;
     }
 
-    // Validate webhook configuration
-    for (const sel of selectionPayload) {
-      if (sel.webhook_ids.length > 0) {
-        const svcData = data.find(d => d.service.id === sel.service_id);
-        if (svcData && (!svcData.service.event_extraction_path || !svcData.service.incoming_webhook_config)) {
-          toast.error(`Service '${svcData.service.name}' has webhooks selected but is missing proper webhook configuration. Please configure Webhook Setup in the service settings and ensure an event extraction path is set before generating an SDK.`);
-          return;
-        }
-      }
-    }
-
-    // Validate API URL configuration
-    for (const sel of selectionPayload) {
-      if (sel.endpoint_ids.length > 0 || sel.select_all) {
-        const svcData = data.find(d => d.service.id === sel.service_id);
-        if (svcData && !svcData.service.base_url) {
-          toast.error(`Service '${svcData.service.name}' is missing an API URL. Please configure the API Base URL in the service settings before generating an SDK.`);
-          return;
-        }
-      }
-    }
-
-    if (!sdkName.trim()) {
-      toast.warning(`${generationMode === "mcp" ? "MCP server" : "App"} name is required.`);
-      return;
-    }
-
-    const selectedBucket = availableBuckets.find((bucket) => bucket.resource_id === bucketId);
-    if (!selectedBucket) {
-      toast.warning(ownerTeamId ? "Choose a credential set available to both you and the owning team." : "Choose a credential set you can use.");
-      return;
-    }
-    const hasWebhookSelections = selectionPayload.some((selection) => selection.webhook_ids.length > 0);
-    if (hasWebhookSelections && !webhookAttachment.trim()) {
-      toast.warning("Enter the webhook bundle that supplies the selected events.");
-      return;
-    }
-
-    if (generationMode === "sdk" && isDuplicate) {
-      const confirmed = await toast.confirm(`An SDK with name "${sdkName.trim()}" and version "${appVersion.trim()}" already exists. Generating it again will overwrite the existing package file. Are you sure you want to continue?`);
-      if (!confirmed) {
-        return;
-      }
-    }
+    const confirmed = await confirmDuplicateGeneration({
+      toast,
+      mode: generationMode,
+      duplicate: isDuplicate,
+      name: sdkName,
+      version: appVersion,
+    });
+    if (!confirmed) return;
 
     setGenerating(true);
     setGenerateStatus("Starting generation...");
@@ -777,17 +1793,17 @@ export default function SdkBuilder() {
     setMcpTokenCopied(false);
     try {
       const ownerTeamSlug = ownerTeams.find((team) => team.id === ownerTeamId)?.slug || "";
-      const services = appServicesConfig(selectionPayload, data);
-      const config: Record<string, unknown> = {
-        apiVersion: "fused/v1",
-        kind: generationMode,
-        name: sdkName.trim(),
-        version: appVersion.trim(),
-        bucket: selectedBucket.display_name,
-        services,
-      };
-      if (generationMode === "sdk") config.language = language;
-      if (hasWebhookSelections) config.webhook_attachment = webhookAttachment.trim();
+      const config = buildGenerationConfig({
+        mode: generationMode,
+        name: sdkName,
+        version: appVersion,
+        bucket: validation.bucket.display_name,
+        selections: selectionPayload,
+        data,
+        language,
+        webhookAttachment,
+        hasWebhookSelections: validation.hasWebhookSelections,
+      });
 
       if (generationMode === "mcp") {
         setGenerateStatus("Deploying MCP server...");
@@ -799,75 +1815,16 @@ export default function SdkBuilder() {
       }
 
       setGenerateStatus("Planning and generating SDK...");
-	  const res = await planAndApplyApp<{ app_id: string; job_id: string; execution_token?: string }>("sdk", ownerTeamSlug, config);
-
-      const ctrl = new AbortController();
-      type GenerationStreamEvent =
-        | { type: "thinking"; message?: string }
-        | { type: "complete"; integration_id: string }
-        | { type: "error"; message?: string };
-      const processGenerationStreamEvent = (
-        event: GenerationStreamEvent,
-        resolve: () => void,
-        reject: (reason?: unknown) => void,
-      ) => {
-        if (event.type === "thinking") {
-          setGenerateStatus(event.message || "Generating...");
-          return;
-        }
-
-        if (event.type === "complete") {
-          ctrl.abort();
-          setGenerateStatus("Downloading...");
-          api.sdks.download(event.integration_id, sdkName, appVersion).then(() => {
-            setSdkDeployment({
-			  id: res.app_id,
-              name: sdkName.trim(),
-              version: appVersion.trim(),
-              token: res.execution_token || "",
-            });
-            setGenerateStatus("App ready");
-            resolve();
-          }).catch(reject);
-          return;
-        }
-
-        if (event.type === "error") {
-          ctrl.abort();
-          reject(new Error(event.message || "Unknown generation error"));
-        }
-      };
-
-      await new Promise<void>((resolve, reject) => {
-		fetchEventSource(`${BASE}/sdks/job/${res.job_id}/stream`, {
-			credentials: "include",
-          signal: ctrl.signal,
-          async onopen(response) {
-            handleCredentialedResponse(response);
-            if (response.status === 401) ctrl.abort();
-            if (!response.ok) throw new Error(`Failed to connect to generation stream: ${response.status}`);
-          },
-          onmessage(ev) {
-            try {
-              const event = JSON.parse(ev.data);
-              processGenerationStreamEvent(event, resolve, reject);
-            } catch {
-              console.error("Failed to parse SSE event", ev.data);
-            }
-          },
-          onerror(err) {
-            if (ctrl.signal.aborted) {
-              throw err;
-            }
-            ctrl.abort();
-            reject(new Error("Connection to server lost during generation"));
-            throw err; // Prevent fetchEventSource from retrying
-          },
-          onclose() {
-            // Prevent fetchEventSource from retrying when server gracefully closes
-            throw new Error("Server closed connection gracefully");
-          }
-        });
+      const result = await planAndApplyApp<{ app_id: string; job_id: string; execution_token?: string }>("sdk", ownerTeamSlug, config);
+      await waitForSDKGeneration({
+        controller: new AbortController(),
+        appId: result.app_id,
+        jobId: result.job_id,
+        sdkName,
+        appVersion,
+        executionToken: result.execution_token || "",
+        setStatus: setGenerateStatus,
+        setDeployment: setSdkDeployment,
       });
 
       // Reaching here means every step above resolved without throwing --
@@ -876,368 +1833,99 @@ export default function SdkBuilder() {
       await syncWorkspacePinsAfterGenerate(selectionPayload);
 
     } catch (err) {
-      toast.error(`${generationMode === "mcp" ? "Failed to deploy MCP server" : "Failed to generate SDK"}: ${err instanceof Error ? err.message : "Unknown error"}`, 0);
+      toast.error(generationFailureMessage(generationMode, err), 0);
     } finally {
       setGenerating(false);
       setGenerateStatus("");
     }
   };
 
-  // No local filtering needed anymore since backend handles search and pagination
-  const filteredData = data;
+  const serviceInteractions: BuilderServiceInteractions = {
+    expanded,
+    loadedServices,
+    selections,
+    webhookSelections,
+    selectAllServices,
+    loadingService,
+    expandedSections,
+    versionSelections,
+    hasMoreResources,
+    loadingResourceByName,
+    toggleExpand,
+    toggleSection,
+    toggleEndpoint,
+    toggleWebhook,
+    toggleSelectAllEndpoints,
+    toggleSelectAllWebhooks,
+    handleVersionSelection,
+    loadMoreResource,
+    loadResourceEndpoints,
+  };
+  const selection: BuilderSelectionPaneProps = {
+    ...serviceInteractions,
+    data,
+    generationMode,
+    query,
+    setQuery,
+    searching,
+    handleSearch,
+    handleClear,
+    workspaceServicesLoaded,
+    workspaceServiceCount: workspaceServiceIds.size,
+    ownerTeamId,
+    loading,
+    page,
+    totalPages,
+    totalItems,
+    setPage,
+  };
+  const generation: ConsumerGenerationPanelProps = {
+    generationMode,
+    ownerTeams,
+    ownerTeamId,
+    setOwnerTeamId,
+    availableBuckets,
+    bucketId,
+    setBucketId,
+    onCreateCredential: createCredential,
+    sdkName,
+    setSdkName,
+    setIsDuplicate,
+    checkDuplicateSDK,
+    totalSelectedWebhooks,
+    webhookAttachment,
+    setWebhookAttachment,
+    appVersion,
+    setAppVersion,
+    checkingDuplicate,
+    isDuplicate,
+    language,
+    setLanguage,
+    totalSelectedServices,
+    totalSelected,
+    unactivatedSelectedServiceIds,
+    data,
+    versionSelections,
+    handleServiceAddedToWorkspace,
+    handleGenerate,
+    generating,
+    generateStatus,
+    sdkDeployment,
+    sdkTokenCopied,
+    setSdkTokenCopied,
+    mcpDeployment,
+    mcpTokenCopied,
+    setMcpTokenCopied,
+    AddSelectedServiceToWorkspaceButton,
+  };
 
   return (
-    <div className="max-w-6xl mx-auto py-8 px-4 h-full flex flex-col">
-      <div className="flex items-center justify-between mb-8">
-        <div>
-          <h1 className="text-3xl font-bold text-slate-900 tracking-tight mb-1">{generationMode === "mcp" ? "Create MCP server" : "Create app"}</h1>
-          <p className="text-slate-500">{generationMode === "mcp" ? "Choose the services and operations to make available through MCP." : "Choose the services and operations this app can use."}</p>
-        </div>
-      </div>
-
-      {error && (
-        <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700 font-medium">
-          {error}
-        </div>
-      )}
-
-      {loading ? (
-        <div className="flex-1 flex flex-col items-center justify-center min-h-[400px] text-slate-400">
-          <Loader2 className="w-8 h-8 text-blue-500 animate-spin mb-4" />
-          <p className="animate-pulse font-medium text-slate-500">Loading available integrations...</p>
-        </div>
-      ) : (
-        <div className="flex flex-col lg:flex-row gap-8 flex-1 min-h-0 min-w-0">
-          {/* Left Column: Selection */}
-          <div className="flex-1 flex flex-col min-h-0 min-w-0">
-            <form 
-              onSubmit={handleSearch} 
-              className="relative w-full mb-4"
-              toolname="search_services_sdk"
-              tooldescription="Search for services or endpoints to include in the SDK."
-            >
-              <button
-                data-track="search_services"
-                type="submit"
-                disabled={searching}
-                className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 disabled:opacity-50 cursor-pointer"
-                title="Search"
-              >
-                {searching ? (
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                ) : (
-                  <Search className="w-5 h-5" />
-                )}
-              </button>
-              <input
-                type="text"
-                placeholder="Search for a service (e.g. Stripe, Shopify...)"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                className="w-full pl-10 pr-10 py-3 rounded-xl border border-slate-200 text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 shadow-sm transition-all bg-white"
-              />
-              {query && (
-                <button
-                  data-track="clear_service_search"
-                  type="button"
-                  onClick={handleClear}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
-                  title="Clear search"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              )}
-            </form>
-
-            <div className="flex-1 overflow-y-auto pr-2 pb-8 space-y-4">
-              {filteredData.length === 0 ? (
-                <div className="text-center py-12 text-slate-400 bg-white rounded-xl border border-dashed border-slate-200">
-                  <p className="font-medium text-slate-600">
-                    {query
-                      ? "No services in your workspace match your search."
-                      : workspaceServicesLoaded && workspaceServiceIds.size === 0
-                        ? "No services added yet."
-                        : ownerTeamId
-                          ? "No shared services are available."
-                          : "No services are available with your access."}
-                  </p>
-                  <p className="mt-1 text-sm">
-                    {query
-                      ? "Try another service name or activate one from the service catalog."
-                      : workspaceServicesLoaded && workspaceServiceIds.size === 0
-                        ? "Define and activate a service before creating an app or MCP server."
-                        : ownerTeamId
-                          ? "Ask an access administrator to give both you and the team access."
-                          : "Ask a workspace administrator for access to the services and credential sets you need."}
-                  </p>
-                </div>
-              ) : (
-                filteredData.map(({ service, integrations, webhooks, serviceVersions }) => {
-                  const isExpanded = expanded[service.id];
-                  const isLoaded = loadedServices[service.id];
-                  const selectedSet = selections[service.id];
-                  const selectedWebhookSet = webhookSelections[service.id] || new Set();
-                  const isSelectAll = selectAllServices.has(service.id);
-                  const serviceEndpointCount = service.endpoint_count || integrations.length || 0;
-                  const serviceWebhookCount = service.webhook_count || webhooks.length || 0;
-                  const totalSelectedItems = (isSelectAll ? serviceEndpointCount : (selectedSet?.size || 0)) + selectedWebhookSet.size;
-                  return (
-                    <div key={service.id} className="min-w-0 overflow-hidden bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow">
-                      <div 
-                        className={`flex items-center justify-between p-4 cursor-pointer hover:bg-slate-50 transition-colors ${isExpanded ? 'rounded-t-xl' : 'rounded-xl'}`}
-                        onClick={() => toggleExpand(service.id)}
-                      >
-                        <div className="flex min-w-0 items-center gap-3">
-                          <button className="shrink-0 text-slate-400 hover:text-slate-600 transition-colors">
-                            {isExpanded ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
-                          </button>
-                          <div className="min-w-0">
-                            <h3 className="font-semibold text-slate-900 flex items-center gap-2">
-                              <span className="truncate">{capitalizeFirstLetter(service.name)}</span>
-                            </h3>
-                            <p className="truncate text-xs text-slate-400">
-                              {service.canonical_ref || (service.provider ? `@${service.provider.handle}/${service.slug}` : "")}
-                              {(service.canonical_ref || service.provider) && " · "}
-                              {isLoaded && totalSelectedItems > 0 ? `${totalSelectedItems} selected` : "Expand to view endpoints and webhooks"}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                      
-                      {isExpanded && (
-                        <div className="min-w-0 overflow-x-hidden border-t border-slate-100 bg-slate-50/50 max-h-[500px] overflow-y-auto">
-                          {loadingService[service.id] ? (
-                            <div className="flex items-center justify-center gap-2 py-6 text-slate-400">
-                              <Loader2 className="w-4 h-4 animate-spin" />
-                              <span className="text-sm">Loading...</span>
-                            </div>
-                          ) : (() => {
-                            const sections = expandedSections[service.id] ?? { endpoints: true, webhooks: true };
-                            const hasWebhooks = (service.webhook_count || webhooks.length) > 0;
-                            const versions = serviceVersions || [];
-                            const selectedVersionId = versionSelections[service.id] || versions[0]?.id || "";
-                            const selectedVersion = versions.find((version) => version.id === selectedVersionId) || versions[0];
-                            return (
-                              <div>
-                                {versions.length > 0 && (
-                                  <div className="flex min-w-0 flex-col gap-3 border-b border-slate-100 bg-slate-50 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
-                                    <div className="flex min-w-0 flex-col">
-                                      <span className="text-sm font-semibold text-slate-800">Service Version</span>
-                                      <span className="text-xs text-slate-500">Select the version this {generationMode === "mcp" ? "MCP server" : "app"} will use</span>
-                                    </div>
-                                    <select
-                                      value={selectedVersionId}
-                                      onChange={(e) => setVersionSelections(prev => ({ ...prev, [service.id]: e.target.value }))}
-                                      title={selectedVersion?.header_value || selectedVersion?.name || ""}
-                                      className="block w-full min-w-0 truncate rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm shadow-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500 sm:w-[min(55%,22rem)]"
-                                    >
-                                      {versions.map((v) => (
-                                        <option key={v.id} value={v.id}>{v.header_value || v.name}</option>
-                                      ))}
-                                    </select>
-                                  </div>
-                                )}
-                                {/* Endpoints section */}
-                                <div
-                                  onClick={() => toggleSection(service.id, "endpoints")}
-                                  className="w-full flex items-center justify-between px-3 py-2 hover:bg-slate-100 transition-colors cursor-pointer group"
-                                >
-                                  <div className="flex items-center gap-2">
-                                    {sections.endpoints ? <ChevronDown className="w-3.5 h-3.5 text-slate-400" /> : <ChevronRight className="w-3.5 h-3.5 text-slate-400" />}
-                                    <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                                      Endpoints {serviceEndpointCount > 0 && `(${serviceEndpointCount})`}
-                                    </span>
-                                  </div>
-                                  {serviceEndpointCount > 0 && (
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        toggleSelectAllEndpoints(service.id);
-                                      }}
-                                      className="text-[10px] font-medium px-2 py-1 rounded text-slate-500 hover:text-slate-700 hover:bg-slate-200 transition-colors flex items-center gap-1.5"
-                                    >
-                                      {selectAllServices.has(service.id) ? (
-                                        <>
-                                          <CheckSquare className="w-3.5 h-3.5 text-blue-600" />
-                                          Deselect All
-                                        </>
-                                      ) : (
-                                        <>
-                                          {((selectedSet?.size || 0) > 0) ? <Square className="w-3.5 h-3.5 text-slate-400 fill-slate-200" /> : <Square className="w-3.5 h-3.5 text-slate-400" />}
-                                          Select All {serviceEndpointCount > 0 && `(${serviceEndpointCount})`}
-                                        </>
-                                      )}
-                                    </button>
-                                  )}
-                                </div>
-                                {sections.endpoints && (
-                                  <div className="px-2 pb-2">
-                                    <EndpointSelectionList
-                                      endpoints={integrations}
-                                      selectedIds={selectedSet || new Set()}
-                                      isSelectAll={isSelectAll}
-                                      onToggle={(id) => toggleEndpoint(service.id, id)}
-                                      getId={(ep) => ep.id}
-                                      maxHeightClass=""
-                                      hasMoreResources={hasMoreResources}
-                                      onLoadMoreResource={(resourceName) => loadMoreResource(service.id, resourceName)}
-                                      resourceMetadata={service.resources || []}
-                                      loadingResources={loadingResourceByName}
-                                      onResourceExpand={(resourceId, resourceName) => loadResourceEndpoints(service.id, resourceId, resourceName)}
-                                    />
-                                  </div>
-                                )}
-
-                                {/* SDK and MCP now share the same Engine plan
-                                    contract, including webhook bundle selections. */}
-                                  <>
-                                    <div
-                                      onClick={() => hasWebhooks && toggleSection(service.id, "webhooks")}
-                                      className={`w-full flex items-center justify-between px-3 py-2 transition-colors border-t border-slate-100 group ${hasWebhooks ? "hover:bg-slate-100 cursor-pointer" : "cursor-default opacity-40"}`}
-                                    >
-                                      <div className="flex items-center gap-2">
-                                        {sections.webhooks ? <ChevronDown className="w-3.5 h-3.5 text-slate-400" /> : <ChevronRight className="w-3.5 h-3.5 text-slate-400" />}
-                                        <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                                          Webhooks {serviceWebhookCount > 0 && `(${serviceWebhookCount})`}
-                                        </span>
-                                        {!hasWebhooks && (
-                                          <span className="ml-2 text-[10px] text-slate-400 font-normal normal-case tracking-normal">Not configured</span>
-                                        )}
-                                      </div>
-                                      {hasWebhooks && isLoaded && (
-                                        <button
-                                          type="button"
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            toggleSelectAllWebhooks(service.id, webhooks);
-                                          }}
-                                          className="text-[10px] font-medium px-2 py-1 rounded text-slate-500 hover:text-slate-700 hover:bg-slate-200 transition-colors flex items-center gap-1.5"
-                                        >
-                                          {((webhookSelections[service.id]?.size || 0) === webhooks.length) ? (
-                                            <>
-                                              <CheckSquare className="w-3.5 h-3.5 text-blue-600" />
-                                              Deselect All
-                                            </>
-                                          ) : (
-                                            <>
-                                              {((webhookSelections[service.id]?.size || 0) > 0) ? <Square className="w-3.5 h-3.5 text-slate-400 fill-slate-200" /> : <Square className="w-3.5 h-3.5 text-slate-400" />}
-                                              Select All {serviceWebhookCount > 0 && `(${serviceWebhookCount})`}
-                                            </>
-                                          )}
-                                        </button>
-                                      )}
-                                    </div>
-                                    {sections.webhooks && hasWebhooks && (
-                                      <div className="px-2 pb-2">
-                                        <WebhookSelectionList
-                                          webhooks={webhooks}
-                                          selectedIds={selectedWebhookSet}
-                                          onToggle={(id) => toggleWebhook(service.id, id)}
-                                          getId={(wh) => wh.id}
-                                          maxHeightClass=""
-                                        />
-                                      </div>
-                                    )}
-                                  </>
-                              </div>
-                            );
-                          })()}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })
-              )}
-
-              {!loading && !query && totalPages > 1 && (
-                <div className="flex items-center justify-between gap-3 border border-slate-200 px-4 py-3 bg-white rounded-xl shadow-sm mt-4">
-                  <p className="text-xs text-slate-500">
-                    {totalItems === 0 ? 0 : (page - 1) * 20 + 1}-{Math.min(totalItems, page * 20)} of {totalItems}
-                  </p>
-                  <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      data-track="paginate_previous"
-                      onClick={() => setPage(p => Math.max(1, p - 1))}
-                      disabled={page === 1}
-                      className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 disabled:opacity-40 disabled:hover:bg-transparent"
-                      aria-label="Previous page"
-                      title="Previous"
-                    >
-                      <ChevronLeft className="w-4 h-4" />
-                    </button>
-                    <span className="text-xs text-slate-500 pl-2">Page</span>
-                    <select
-                      className="bg-white border border-slate-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 mx-1 cursor-pointer"
-                      value={page}
-                      onChange={(e) => setPage(parseInt(e.target.value, 10))}
-                    >
-                      {Array.from({ length: totalPages }, (_, i) => i + 1).map(p => (
-                        <option key={p} value={p}>{p}</option>
-                      ))}
-                    </select>
-                    <span className="text-xs font-medium text-slate-500 pr-2">of {totalPages}</span>
-                    <button
-                      type="button"
-                      data-track="paginate_next"
-                      onClick={() => setPage(p => p + 1)}
-                      disabled={page >= totalPages}
-                      className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 disabled:opacity-40 disabled:hover:bg-transparent"
-                      aria-label="Next page"
-                      title="Next"
-                    >
-                      <ChevronRight className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Right Column: Generation Form */}
-          <ConsumerGenerationPanel
-            generationMode={generationMode}
-            ownerTeams={ownerTeams}
-            ownerTeamId={ownerTeamId}
-            setOwnerTeamId={setOwnerTeamId}
-            availableBuckets={availableBuckets}
-            bucketId={bucketId}
-            setBucketId={setBucketId}
-            onCreateCredential={createCredential}
-            sdkName={sdkName}
-            setSdkName={setSdkName}
-            setIsDuplicate={setIsDuplicate}
-            checkDuplicateSDK={checkDuplicateSDK}
-            totalSelectedWebhooks={totalSelectedWebhooks}
-            webhookAttachment={webhookAttachment}
-            setWebhookAttachment={setWebhookAttachment}
-            appVersion={appVersion}
-            setAppVersion={setAppVersion}
-            checkingDuplicate={checkingDuplicate}
-            isDuplicate={isDuplicate}
-            language={language}
-            setLanguage={setLanguage}
-            totalSelectedServices={totalSelectedServices}
-            totalSelected={totalSelected}
-            unactivatedSelectedServiceIds={unactivatedSelectedServiceIds}
-            data={data}
-            versionSelections={versionSelections}
-            handleServiceAddedToWorkspace={handleServiceAddedToWorkspace}
-            handleGenerate={handleGenerate}
-            generating={generating}
-            generateStatus={generateStatus}
-            sdkDeployment={sdkDeployment}
-            sdkTokenCopied={sdkTokenCopied}
-            setSdkTokenCopied={setSdkTokenCopied}
-            mcpDeployment={mcpDeployment}
-            mcpTokenCopied={mcpTokenCopied}
-            setMcpTokenCopied={setMcpTokenCopied}
-            AddSelectedServiceToWorkspaceButton={AddSelectedServiceToWorkspaceButton}
-          />
-        </div>
-      )}
-
-    </div>
+    <BuilderPage
+      generationMode={generationMode}
+      error={error}
+      loading={loading}
+      selection={selection}
+      generation={generation}
+    />
   );
 }

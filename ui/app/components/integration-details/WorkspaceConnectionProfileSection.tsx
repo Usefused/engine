@@ -8,7 +8,8 @@ interface Props {
   serviceVersionId?: string;
   serviceVersion?: string;
   authConfigs: AuthConfig[];
-  isOwner: boolean;
+  canRead: boolean;
+  canManage: boolean;
 }
 
 // WorkspaceConnectionProfileSection is deliberately independent of buckets:
@@ -18,18 +19,27 @@ export function WorkspaceConnectionProfileSection({
   serviceVersionId,
   serviceVersion,
   authConfigs,
-  isOwner,
+  canRead,
+  canManage,
 }: Props) {
   const toast = useToast();
-  const authType = useMemo(() => profileAuthType(authConfigs), [authConfigs]);
+  const authTypes = useMemo(() => profileAuthTypes(authConfigs), [authConfigs]);
+  const [authType, setAuthType] = useState(authTypes[0] || "");
+  const ambiguousAuthType = profileAuthConfigs(authConfigs, authType).length > 1;
   const [profile, setProfile] = useState<WorkspaceConnectionProfile | null>(null);
   const [source, setSource] = useState("");
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
+  // Keep the selection valid when a version exposes a different set of auth families.
   useEffect(() => {
-    if (!serviceVersionId || !authType) return;
+    if (!authTypes.includes(authType)) setAuthType(authTypes[0] || "");
+  }, [authType, authTypes]);
+
+  // Reads the protected profile only after both required grants are known.
+  useEffect(() => {
+    if (!canRead || !serviceVersionId || !authType || ambiguousAuthType) return;
     setError("");
     api.workspace.getWorkspaceConnectionProfile({ serviceId, serviceVersionId, authType })
       .then((value) => {
@@ -37,18 +47,39 @@ export function WorkspaceConnectionProfileSection({
         setSource(JSON.stringify(value?.profile || { auth_type: authType }, null, 2));
       })
       .catch((reason) => setError(reason instanceof Error ? reason.message : "Failed to load connection profile"));
-  }, [serviceId, serviceVersionId, authType]);
+  }, [canRead, serviceId, serviceVersionId, authType, ambiguousAuthType]);
 
-  if (!serviceVersionId || !serviceVersion || !authType) return null;
+  if (!hasProfileIdentity(serviceVersionId, serviceVersion, authType)) return null;
+  // The guard above establishes the exact tuple before callbacks capture it.
+  const exactVersionID = serviceVersionId as string;
+  const exactVersion = serviceVersion as string;
+  if (!canRead) {
+    return (
+      <section className="rounded-lg border border-slate-200 bg-white p-4 text-sm text-slate-500">
+        Connection profile access is not available for your account.
+      </section>
+    );
+  }
+  if (ambiguousAuthType) {
+    return (
+      <section className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+        <AuthTypeSelect authTypes={authTypes} authType={authType} setAuthType={setAuthType} />
+        <p className="mt-3">
+          This version defines multiple {authType.toUpperCase()} schemes. Workspace connection profiles are currently auth-type scoped, so an explicit per-scheme profile cannot be edited here safely.
+        </p>
+      </section>
+    );
+  }
 
+  // save validates and replaces the selected auth-family override.
   const save = async () => {
     setSaving(true);
     setError("");
     try {
       const updated = await api.workspace.setWorkspaceConnectionProfile({
         serviceId,
-        serviceVersionId,
-        version: serviceVersion,
+        serviceVersionId: exactVersionID,
+        version: exactVersion,
         authType,
         profile: JSON.parse(source) as Record<string, unknown>,
       });
@@ -63,6 +94,7 @@ export function WorkspaceConnectionProfileSection({
     }
   };
 
+  // reset removes the selected auth-family override after explicit confirmation.
   const reset = async () => {
     if (!profile?.has_workspace_override) return;
     const confirmed = await toast.confirm(
@@ -72,7 +104,7 @@ export function WorkspaceConnectionProfileSection({
     setSaving(true);
     setError("");
     try {
-      const updated = await api.workspace.resetWorkspaceConnectionProfile({ serviceId, serviceVersionId, authType });
+      const updated = await api.workspace.resetWorkspaceConnectionProfile({ serviceId, serviceVersionId: exactVersionID, authType });
       setProfile(updated);
       setSource(JSON.stringify(updated?.profile || { auth_type: authType }, null, 2));
       setEditing(false);
@@ -93,6 +125,7 @@ export function WorkspaceConnectionProfileSection({
           <p className="mt-0.5 text-xs text-slate-500">{profileSource(profile?.provenance)}</p>
         </div>
       </div>
+      <AuthTypeSelect authTypes={authTypes} authType={authType} setAuthType={setAuthType} />
       {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
       <details className="group mt-4 border-t border-slate-200 pt-4">
         <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-slate-800 [&::-webkit-details-marker]:hidden">
@@ -107,7 +140,7 @@ export function WorkspaceConnectionProfileSection({
           spellCheck={false}
           className="mt-3 w-full resize-y rounded-md border border-slate-200 bg-slate-50 p-3 font-mono text-xs text-slate-700 focus:border-blue-500 focus:ring-blue-500"
         />
-        {isOwner && (
+        {canManage && (
           <ConnectionProfileActions
             editing={editing}
             saving={saving}
@@ -123,6 +156,11 @@ export function WorkspaceConnectionProfileSection({
   );
 }
 
+// hasProfileIdentity keeps the UI from issuing partial profile tuple reads.
+function hasProfileIdentity(serviceVersionId?: string, serviceVersion?: string, authType?: string): boolean {
+  return Boolean(serviceVersionId && serviceVersion && authType);
+}
+
 interface ConnectionProfileActionsProps {
   editing: boolean;
   saving: boolean;
@@ -133,6 +171,7 @@ interface ConnectionProfileActionsProps {
   onSave: () => void;
 }
 
+// ConnectionProfileActions keeps edit-state controls separate from profile data flow.
 function ConnectionProfileActions({ editing, saving, hasOverride, onCancel, onEdit, onReset, onSave }: ConnectionProfileActionsProps) {
   if (!editing) {
     return (
@@ -160,12 +199,45 @@ function ConnectionProfileActions({ editing, saving, hasOverride, onCancel, onEd
   );
 }
 
-function profileAuthType(authConfigs: AuthConfig[]): string {
-  const auth = authConfigs.find((item) => ["oauth", "oidc", "oauth2", "openIdConnect"].includes(item.type));
-  if (!auth) return "";
-  return auth.type === "openIdConnect" ? "oidc" : auth.type === "oauth2" ? "oauth" : auth.type;
+// AuthTypeSelect switches between Engine-supported profile families when necessary.
+function AuthTypeSelect({ authTypes, authType, setAuthType }: {
+  authTypes: string[];
+  authType: string;
+  setAuthType: (value: string) => void;
+}) {
+  if (authTypes.length < 2) return null;
+  return (
+    <label className="mt-4 block text-xs font-medium text-slate-700">
+      Authentication family
+      <select
+        value={authType}
+        onChange={(event) => setAuthType(event.target.value)}
+        className="mt-1 block w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
+      >
+        {authTypes.map((value) => <option key={value} value={value}>{value.toUpperCase()}</option>)}
+      </select>
+    </label>
+  );
 }
 
+// canonicalProfileAuthType maps Registry spellings onto Engine profile families.
+function canonicalProfileAuthType(auth: AuthConfig): string {
+  if (auth.type === "openIdConnect") return "oidc";
+  if (auth.type === "oauth2") return "oauth";
+  return ["oauth", "oidc"].includes(auth.type) ? auth.type : "";
+}
+
+// profileAuthTypes returns each editable Engine profile family once.
+function profileAuthTypes(authConfigs: AuthConfig[]): string[] {
+  return Array.from(new Set(authConfigs.map(canonicalProfileAuthType).filter(Boolean)));
+}
+
+// profileAuthConfigs identifies ambiguity the auth-type-only Engine store cannot represent.
+function profileAuthConfigs(authConfigs: AuthConfig[], authType: string): AuthConfig[] {
+  return authConfigs.filter((auth) => canonicalProfileAuthType(auth) === authType);
+}
+
+// profileSource converts stored provenance into a concise UI label.
 function profileSource(provenance?: WorkspaceConnectionProfile["provenance"]): string {
   return ({ provider: "Provider default", fused: "Fused default", workspace: "Workspace customization" }[provenance || "workspace"]);
 }

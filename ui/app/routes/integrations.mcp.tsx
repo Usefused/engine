@@ -11,6 +11,8 @@ export const meta: MetaFunction = ({ matches }) => {
 import { Trash2, Copy, TerminalSquare, AlertCircle, Play, ServerCrash, BarChart2, Info } from "lucide-react";
 import { api } from "~/lib/api";
 import { useToast } from "~/components/Toast";
+import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
+import { hasResourcePermission, hasWorkspacePermission } from "~/lib/current-actor-access";
 
 interface McpServerItem {
   id: string;
@@ -33,6 +35,7 @@ interface McpServerCardProps {
   onKill: (id: string, name: string) => void;
   onReactivate: (id: string) => void;
   onCopyUrl: (url: string) => void;
+  canManage: boolean;
 }
 
 function McpServerStatusBadge({ status }: { status: string }) {
@@ -102,19 +105,20 @@ function McpKillReactivateButton({ server, onKill, onReactivate }: { server: Mcp
   );
 }
 
-function McpServerCard({ server, isSelected, anySelected, onToggleSelect, onDelete, onKill, onReactivate, onCopyUrl }: McpServerCardProps) {
+/** Renders one MCP server with lifecycle controls scoped to its app family. */
+function McpServerCard({ server, isSelected, anySelected, onToggleSelect, onDelete, onKill, onReactivate, onCopyUrl, canManage }: McpServerCardProps) {
   return (
-    <div className={`group bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm transition-shadow ${!server.active ? 'opacity-75' : 'hover:shadow-md'}`}>
+    <div className={mcpServerCardClass(server.active)}>
       <div className="p-5 border-b border-slate-100 flex items-start justify-between">
         <div className="flex items-start gap-3">
-          <div className={`pt-2 transition-opacity duration-200 ${anySelected || isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}`}>
+          {canManage && <div className={`pt-2 transition-opacity duration-200 ${anySelected || isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}`}>
             <input
               type="checkbox"
               className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
               checked={isSelected}
               onChange={() => onToggleSelect(server.id)}
             />
-          </div>
+          </div>}
           <div className={`w-10 h-10 rounded-lg border flex items-center justify-center shrink-0 ${server.active ? 'bg-slate-100 border-slate-200' : 'bg-slate-50 border-slate-200'}`}>
             <TerminalSquare className={`w-5 h-5 ${server.active ? 'text-slate-700' : 'text-slate-400'}`} />
           </div>
@@ -125,14 +129,14 @@ function McpServerCard({ server, isSelected, anySelected, onToggleSelect, onDele
             </div>
           </div>
         </div>
-        <button
+        {canManage && <button
           data-track="delete_mcp_server"
           onClick={() => onDelete(server.id, server.name)}
           className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
           title="Delete server"
         >
           <Trash2 className="w-4 h-4" />
-        </button>
+        </button>}
       </div>
 
       <div className="p-5 bg-slate-50/50 space-y-4">
@@ -148,7 +152,7 @@ function McpServerCard({ server, isSelected, anySelected, onToggleSelect, onDele
             Created {server.created_at ? new Date(server.created_at).toLocaleDateString() : ""}
           </span>
           <div className="flex items-center gap-2">
-            <McpKillReactivateButton server={server} onKill={onKill} onReactivate={onReactivate} />
+            {canManage && <McpKillReactivateButton server={server} onKill={onKill} onReactivate={onReactivate} />}
             <Link
               to={`/integrations/mcp/${server.id}/analytics`}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 hover:text-slate-900 rounded-lg text-xs font-semibold transition-colors border border-slate-200 cursor-pointer"
@@ -161,6 +165,11 @@ function McpServerCard({ server, isSelected, anySelected, onToggleSelect, onDele
       </div>
     </div>
   );
+}
+
+/** Selects the inactive or hoverable MCP card presentation. */
+function mcpServerCardClass(active: boolean): string {
+  return `group bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm transition-shadow ${active ? "hover:shadow-md" : "opacity-75"}`;
 }
 
 function McpConnectionGuide({ show }: { show: boolean }) {
@@ -246,8 +255,11 @@ function McpPagination({ page, limit, total, onPrevious, onNext }: { page: numbe
   );
 }
 
+/** Lists readable MCP servers and gates create and lifecycle operations. */
 export default function McpServers() {
   const toast = useToast();
+  const { access } = useCurrentActorAccess();
+  const canCreate = hasWorkspacePermission(access, "app.create");
   const [mcpServers, setMcpServers] = useState<McpServerItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -258,11 +270,12 @@ export default function McpServers() {
   const [isDeletingMultiple, setIsDeletingMultiple] = useState(false);
   const limit = 10;
 
+  /** Loads one variable-bound page of readable MCP app versions. */
   const fetchServers = () => {
     setLoading(true);
     const queryStr = `
-      query {
-        apps(kind: "mcp", limit: ${limit}, offset: ${(page - 1) * limit}) {
+      query($limit: Int!, $offset: Int!) {
+        apps(kind: "mcp", limit: $limit, offset: $offset) {
           items {
             app_id
             app_family_id
@@ -276,7 +289,7 @@ export default function McpServers() {
       }
     `;
     type MCPApp = Omit<McpServerItem, "id" | "active" | "mcp_url"> & { app_id: string; status: string };
-    api.mcpGraphql<{ apps: { items: MCPApp[], total: number } }>(queryStr)
+    api.mcpGraphql<{ apps: { items: MCPApp[], total: number } }>(queryStr, { limit, offset: (page - 1) * limit })
       .then(res => {
         setMcpServers(res.apps.items.map(app => ({
           ...app,
@@ -295,11 +308,12 @@ export default function McpServers() {
     setSelectedIds([]);
   }, [page]);
 
+  /** Deprecates one manageable MCP app after confirmation. */
   const handleKill = async (id: string, name: string) => {
     const confirmed = await toast.confirm(`Deprecate MCP app "${name}"? Existing clients can continue while teammates move to another version.`);
     if (!confirmed) return;
     try {
-      await api.mcpGraphql(`mutation { deprecateApp(app_id: "${id}", message: "A newer MCP app version is available") }`);
+      await api.mcpGraphql(`mutation($appId: String!, $message: String!) { deprecateApp(app_id: $appId, message: $message) }`, { appId: id, message: "A newer MCP app version is available" });
       fetchServers();
       toast.success(`MCP app "${name}" deprecated.`);
     } catch (err) {
@@ -307,11 +321,12 @@ export default function McpServers() {
     }
   };
 
+  /** Deactivates one manageable MCP app after confirmation. */
   const handleDelete = async (id: string, name: string) => {
     const confirmed = await toast.confirm(`Are you sure you want to completely delete the MCP server "${name}"? This cannot be undone.`);
     if (!confirmed) return;
     try {
-      await api.mcpGraphql(`mutation { deactivateApp(app_id: "${id}") }`);
+      await api.mcpGraphql(`mutation($appId: String!) { deactivateApp(app_id: $appId) }`, { appId: id });
       fetchServers();
       toast.success(`Server "${name}" deleted successfully.`);
       setSelectedIds(prev => prev.filter(i => i !== id));
@@ -320,6 +335,7 @@ export default function McpServers() {
     }
   };
 
+  /** Deactivates the selected manageable MCP apps as one UI action. */
   const handleDeleteMultiple = async () => {
     if (selectedIds.length === 0) return;
     const confirmed = await toast.confirm(`Are you sure you want to completely delete ${selectedIds.length} MCP server(s)? This cannot be undone.`);
@@ -327,7 +343,7 @@ export default function McpServers() {
 
     setIsDeletingMultiple(true);
     try {
-      await Promise.all(selectedIds.map(id => api.mcpGraphql(`mutation { deactivateApp(app_id: "${id}") }`)));
+      await Promise.all(selectedIds.map(id => api.mcpGraphql(`mutation($appId: String!) { deactivateApp(app_id: $appId) }`, { appId: id })));
       fetchServers();
       setSelectedIds([]);
       toast.success(`Successfully deleted ${selectedIds.length} server(s).`);
@@ -339,15 +355,20 @@ export default function McpServers() {
     }
   };
 
+  /** Restores one deprecated MCP app. */
   const handleReactivate = async (id: string) => {
     try {
-      await api.mcpGraphql(`mutation { undeprecateApp(app_id: "${id}") }`);
+      await api.mcpGraphql(`mutation($appId: String!) { undeprecateApp(app_id: $appId) }`, { appId: id });
       fetchServers();
       toast.success("MCP app restored.");
     } catch (err) {
       toast.error(`Failed to reactivate server: ${err instanceof Error ? err.message : "Unknown error"}`);
     }
   };
+
+  const manageableServerIds = mcpServers
+    .filter((server) => hasResourcePermission(access, "app.manage", "APP", server.app_family_id))
+    .map((server) => server.id);
 
   if (loading) return <div className="text-center py-12 text-slate-500">Loading MCP servers...</div>;
   if (error) return <div className="text-center py-12 text-red-500">Error: {error}</div>;
@@ -371,13 +392,13 @@ export default function McpServers() {
         </div>
         <div className="flex items-center gap-3">
           <DeleteSelectedButton count={selectedIds.length} isDeleting={isDeletingMultiple} onClick={handleDeleteMultiple} />
-          <Link
+          {canCreate && <Link
             to="/integrations/builder?tab=mcp"
             className="inline-flex items-center gap-2 px-4 py-2 bg-slate-950 text-white text-sm font-medium rounded-lg hover:bg-slate-800 transition-colors shadow-sm self-start sm:self-auto"
           >
             <Play className="w-4 h-4" />
             Create MCP server
-          </Link>
+          </Link>}
         </div>
       </div>
 
@@ -395,8 +416,8 @@ export default function McpServers() {
         <div className="space-y-4">
           <SelectAllRow
             selectedCount={selectedIds.length}
-            allSelected={selectedIds.length === mcpServers.length && mcpServers.length > 0}
-            onToggle={() => setSelectedIds(prev => prev.length === mcpServers.length ? [] : mcpServers.map(s => s.id))}
+            allSelected={selectedIds.length === manageableServerIds.length && manageableServerIds.length > 0}
+            onToggle={() => setSelectedIds(prev => prev.length === manageableServerIds.length ? [] : manageableServerIds)}
           />
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {mcpServers.map(server => (
@@ -410,6 +431,7 @@ export default function McpServers() {
               onKill={handleKill}
               onReactivate={handleReactivate}
               onCopyUrl={(url) => { navigator.clipboard.writeText(url); toast.success("URL copied to clipboard!"); }}
+              canManage={hasResourcePermission(access, "app.manage", "APP", server.app_family_id)}
             />
           ))}
         </div>

@@ -2,10 +2,26 @@ import { useState } from "react";
 import { AlertTriangle, ChevronDown, ChevronUp, Loader2, Copy, Check } from "lucide-react";
 import { SchemaViewer } from "~/components/SchemaViewer";
 import { type JsonSchemaNode } from "~/components/SchemaViewer";
-import { type IntegrationObject, type DriftSnapshot } from "~/lib/api";
+import {
+  type DriftSnapshot,
+  type IntegrationObject,
+  type RequestContentContract,
+  type ResponseContract,
+  type SchemaContract,
+} from "~/lib/api";
 import { stripLinks } from "~/lib/format";
 
-function ResponseSchemaViewer({ code, schema, serviceId }: { code: string; schema: JsonSchemaNode; serviceId: string }) {
+interface ComponentReferenceScope {
+  componentScope: string;
+  allowRemoteRefs: boolean;
+}
+
+// ResponseSchemaViewer renders one canonical response representation on demand.
+function ResponseSchemaViewer({ code, schema, serviceId, componentScope, allowRemoteRefs }: {
+  code: string;
+  schema: JsonSchemaNode;
+  serviceId: string;
+} & ComponentReferenceScope) {
   const [isOpen, setIsOpen] = useState(false);
 
   const codeStyle = code.startsWith('2')
@@ -34,8 +50,92 @@ function ResponseSchemaViewer({ code, schema, serviceId }: { code: string; schem
       </button>
       {isOpen && (
         <div className="bg-[#161c27] p-4 animate-in fade-in slide-in-from-top-1 duration-200">
-          <SchemaViewer schema={schema} serviceId={serviceId} />
+          <SchemaViewer schema={schema} serviceId={serviceId} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />
         </div>
+      )}
+    </div>
+  );
+}
+
+// schemaContractProjection prefers the bounded projection while retaining raw-schema compatibility.
+function schemaContractProjection(contract?: SchemaContract): JsonSchemaNode | undefined {
+  return contract?.projection || contract?.raw;
+}
+
+// representationSchema normalizes object and item contracts into one renderable schema.
+function representationSchema(schema?: SchemaContract, itemSchema?: SchemaContract): JsonSchemaNode | undefined {
+  const direct = schemaContractProjection(schema);
+  if (direct) return direct;
+  const item = schemaContractProjection(itemSchema);
+  return item ? { type: "array", items: item } : undefined;
+}
+
+// requestContentSchema selects the declared default media type before falling back to source order.
+function requestContentSchema(content?: RequestContentContract): JsonSchemaNode | undefined {
+  const representations = content?.representations || [];
+  const selected = representations.find((item) => item.media_type === content?.default_media_type) || representations[0];
+  return representationSchema(selected?.schema, selected?.item_schema);
+}
+
+interface CanonicalResponseSchema {
+  key: string;
+  label: string;
+  schema: JsonSchemaNode;
+}
+
+// canonicalResponseSchemas preserves every v3 response media alternative.
+function canonicalResponseSchemas(responses?: Record<string, ResponseContract>): CanonicalResponseSchema[] {
+  const result: CanonicalResponseSchema[] = [];
+  for (const [code, response] of Object.entries(responses || {})) {
+    for (const [index, representation] of (response.representations || []).entries()) {
+      const schema = representationSchema(representation.schema, representation.item_schema);
+      if (!schema) continue;
+      const mediaType = representation.media_type || `representation-${index + 1}`;
+      result.push({ key: `${code}:${mediaType}:${index}`, label: `${code} · ${mediaType}`, schema });
+    }
+  }
+  return result;
+}
+
+// responseContractsMatch checks canonical response media without reverting to legacy schema fields.
+function responseContractsMatch(responses: Record<string, ResponseContract> | undefined, predicate: (response: ResponseContract) => boolean): boolean {
+  return Object.values(responses || {}).some(predicate);
+}
+
+// operationDisplayType derives the badge from canonical protocol and response contracts.
+function operationDisplayType(endpoint: IntegrationObject): string {
+  if (endpoint.isWebhook) return "Webhook";
+  if (endpoint.provider_protocol === "graphql" || endpoint.graphql_query || endpoint.method === "GRAPHQL") return "GraphQL";
+  if (responseContractsMatch(endpoint.responses, (response) => response.representations?.some((item) => item.media_type === "application/octet-stream") === true)) return "File Transfer";
+  if (responseContractsMatch(endpoint.responses, (response) => response.representations?.some((item) => Boolean(item.sse)) === true)) return "Event Stream";
+  return "REST API";
+}
+
+// OperationMetadata surfaces persisted v3 identity and policy instead of hiding it in the raw response.
+function OperationMetadata({ endpoint }: { endpoint: IntegrationObject }) {
+  const facts = [
+    endpoint.provider_protocol && ["Protocol", endpoint.provider_protocol],
+    endpoint.operation_kind && ["Operation", endpoint.operation_kind],
+    endpoint.normalized_path && ["Normalized path", endpoint.normalized_path],
+    endpoint.stable_key && ["Stable key", endpoint.stable_key],
+  ].filter(Boolean) as string[][];
+  const hasPolicy = Boolean(endpoint.pagination || endpoint.security_requirements?.length);
+  if (facts.length === 0 && !hasPolicy) return null;
+  return (
+    <div className="mt-2 space-y-2 text-xs text-slate-500">
+      {facts.map(([label, value]) => (
+        <div key={label} className="flex min-w-0 gap-2">
+          <span className="shrink-0 font-medium text-slate-600">{label}</span>
+          <code className="min-w-0 break-all text-slate-500">{value}</code>
+        </div>
+      ))}
+      {hasPolicy && (
+        <details>
+          <summary className="cursor-pointer font-medium text-slate-600">Execution metadata</summary>
+          <pre className="mt-2 max-h-48 overflow-auto rounded-md bg-slate-950 p-3 text-[10px] text-slate-200">
+            {JSON.stringify({ pagination: endpoint.pagination, security_requirements: endpoint.security_requirements }, null, 2)}
+          </pre>
+        </details>
       )}
     </div>
   );
@@ -49,8 +149,11 @@ export interface EndpointDetailsSidebarProps {
   driftAction: string | null;
   handleDismiss: (id: string) => void;
 	handleApply: (id: string) => void;
+  componentScope: string;
+  allowRemoteRefs: boolean;
 }
 
+// EndpointDetailsSidebar presents an exact-version operation contract and its drift state.
 export default function EndpointDetailsSidebar({
   selectedEndpoint,
   setSelectedEndpoint,
@@ -59,270 +162,170 @@ export default function EndpointDetailsSidebar({
   driftAction,
 	handleDismiss,
 	handleApply,
+  componentScope,
+  allowRemoteRefs,
 }: EndpointDetailsSidebarProps) {
-  const [reqSchemaOpen, setReqSchemaOpen] = useState(false);
   const [copiedPath, setCopiedPath] = useState(false);
-
   const isLoading = !selectedEndpoint._detailsLoaded && !selectedEndpoint.isWebhook;
-
-  let endpointType = "REST API";
-  if (selectedEndpoint.isWebhook) {
-    endpointType = "Webhook";
-  } else if (selectedEndpoint.graphql_query || selectedEndpoint.method === "GRAPHQL") {
-    endpointType = "GraphQL";
-  } else if (selectedEndpoint.responses && Object.values(selectedEndpoint.responses).some(r => r?.format === "binary" || r?.type === "file")) {
-    endpointType = "File Transfer";
-  } else if (selectedEndpoint.responses && Object.values(selectedEndpoint.responses).some(r => r?.format === "sse" || r?.format === "stream")) {
-    endpointType = "Event Stream";
-  }
+  const endpointType = operationDisplayType(selectedEndpoint);
+  const requestSchema = selectedEndpoint.isWebhook
+    ? selectedEndpoint.request_body
+    : requestContentSchema(selectedEndpoint.request_content);
+  const responseSchemas = canonicalResponseSchemas(selectedEndpoint.responses);
+  const endpointDrift = drift.filter((snapshot) => snapshot.integration_object_id === selectedEndpoint.id);
 
   return (
     <>
-      <div 
-        className="fixed inset-0 bg-slate-900/20 z-40 transition-opacity" 
-        onClick={() => setSelectedEndpoint(null)}
-      />
+      <div className="fixed inset-0 bg-slate-900/20 z-40 transition-opacity" onClick={() => setSelectedEndpoint(null)} />
       <div className="fixed inset-y-0 right-0 w-full md:w-[600px] bg-white shadow-2xl z-50 overflow-y-auto overflow-x-hidden transform transition-transform border-l border-slate-200 flex flex-col">
-        <div className="sticky top-0 z-10 flex min-w-0 items-start justify-between gap-2 border-b border-slate-100 bg-white/90 p-4 backdrop-blur sm:items-center sm:p-6">
-          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 overflow-hidden sm:gap-3">
-            <span className={`shrink-0 text-xs font-bold px-2 py-1 rounded ${
-              selectedEndpoint.isWebhook ? "bg-purple-100 text-purple-700" :
-              selectedEndpoint.method === "SOAP" ? "bg-purple-100 text-purple-700" :
-              selectedEndpoint.method === "GET" ? "bg-green-100 text-green-700" :
-              selectedEndpoint.method === "POST" ? "bg-blue-100 text-blue-700" :
-              selectedEndpoint.method === "DELETE" ? "bg-red-100 text-red-700" :
-              "bg-slate-100 text-slate-700"
-            }`}>
-              {selectedEndpoint.isWebhook ? "WEBHOOK" : selectedEndpoint.method}
-            </span>
-            <div className="group flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
-              <code className="text-sm text-slate-800 break-all min-w-0 overflow-hidden">{selectedEndpoint.path}</code>
-              <button
-                data-track="copy_endpoint_path"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  navigator.clipboard.writeText(selectedEndpoint.path);
-                  setCopiedPath(true);
-                  setTimeout(() => setCopiedPath(false), 2000);
-                }}
-                className="shrink-0 rounded p-1 text-slate-400 opacity-100 transition-opacity cursor-pointer hover:bg-slate-100 hover:text-slate-600 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100"
-                title="Copy Path"
-              >
-                {copiedPath ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
-              </button>
-            </div>
-            
-            {!selectedEndpoint.isWebhook && (
-              <span className={`shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider border ${
-                endpointType === "GraphQL" ? "bg-pink-50 text-pink-700 border-pink-200" :
-                endpointType === "File Transfer" ? "bg-indigo-50 text-indigo-700 border-indigo-200" :
-                endpointType === "Event Stream" ? "bg-cyan-50 text-cyan-700 border-cyan-200" :
-                "bg-slate-50 text-slate-500 border-slate-200"
-              }`}>
-                {endpointType}
-              </span>
-            )}
-
-            {selectedEndpoint.deprecated && (
-              <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-red-50 text-red-700 border border-red-200 uppercase tracking-wider">
-                Deprecated
-              </span>
-            )}
-          </div>
-		  <div className="flex items-center gap-1">
-            <button
-              data-track="close_endpoint_sidebar"
-              onClick={() => setSelectedEndpoint(null)}
-              className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-full transition-colors cursor-pointer"
-            >
-              ✕
-            </button>
-          </div>
-        </div>
-
-        {selectedEndpoint.status === "drifted" && drift.some(s => s.integration_object_id === selectedEndpoint.id) && (
-          <div className="border-b border-orange-100 bg-orange-50 p-4 sm:p-6">
-            <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <h3 className="text-sm font-bold text-orange-900 flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 text-orange-600" />
-                Pending Semantic Drift Detected
-              </h3>
-              <div className="flex flex-wrap gap-2">
-                {drift.filter(s => s.integration_object_id === selectedEndpoint.id).map(snap => (
-                  <div key={snap.id} className="flex gap-2">
-                    <button
-                      data-track="dismiss_drift_change"
-                      onClick={() => handleDismiss(snap.id)}
-                      disabled={driftAction === snap.id}
-                      className="px-3 py-1.5 text-xs font-semibold text-orange-800 bg-white hover:bg-orange-100 border border-orange-200 rounded-md transition-colors disabled:opacity-50 cursor-pointer"
-                    >
-                      {driftAction === snap.id ? "Dismissing..." : "Dismiss"}
-                    </button>
-                    <button
-                      data-track="review_drift_import"
-                      onClick={() => handleApply(snap.id)}
-                      disabled={driftAction === snap.id}
-                      className="px-3 py-1.5 text-xs font-semibold text-white bg-orange-600 hover:bg-orange-700 rounded-md shadow-sm transition-colors disabled:opacity-50 cursor-pointer"
-                    >
-                      {driftAction === snap.id ? "Planning..." : "Review Import"}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-            
-            <div className="space-y-4">
-              {drift.filter(s => s.integration_object_id === selectedEndpoint.id).map(snap => (
-                <div key={snap.id} className="space-y-3">
-                  <p className="text-xs text-orange-800/80 mb-2">Detected at {new Date(snap.detected_at).toLocaleString()}</p>
-                  {snap.diff.map((change, idx) => (
-                    <div key={idx} className="bg-white rounded-lg border border-orange-200 overflow-hidden">
-                      <div className="bg-orange-100/50 px-3 py-2 border-b border-orange-200 flex items-center justify-between">
-                        <code className="text-xs font-bold text-orange-900">{change.field}</code>
-                        {change.severity === "breaking" && (
-                          <span className="text-[10px] font-bold uppercase tracking-wider text-red-600 bg-red-100 px-1.5 py-0.5 rounded border border-red-200">Breaking</span>
-                        )}
-                      </div>
-                      {change.description && (
-                        <div className="px-3 py-2.5 bg-orange-50/50 border-b border-orange-100/50">
-                          <p className="text-xs text-orange-800 leading-relaxed font-medium">
-                           {change.description}
-                          </p>
-                        </div>
-                      )}
-                      <div className="grid grid-cols-1 divide-y divide-slate-100 sm:grid-cols-2 sm:divide-x sm:divide-y-0">
-                        <div className="p-3 bg-red-50/30">
-                          <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Previous</div>
-                          <pre className="text-xs text-red-900 whitespace-pre-wrap break-words font-mono max-h-[400px] overflow-y-auto custom-scrollbar">
-                            {typeof change.old_value === 'object' ? JSON.stringify(change.old_value, null, 2) : String(change.old_value || "null")}
-                          </pre>
-                        </div>
-                        <div className="p-3 bg-green-50/30">
-                          <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">New</div>
-                          <pre className="text-xs text-green-900 whitespace-pre-wrap break-words font-mono max-h-[400px] overflow-y-auto custom-scrollbar">
-                            {typeof change.new_value === 'object' ? JSON.stringify(change.new_value, null, 2) : String(change.new_value || "null")}
-                          </pre>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-        
-        <div className="flex flex-1 flex-col space-y-8 p-4 sm:p-6">
-          {isLoading ? (
-            <div className="flex-1 flex flex-col items-center justify-center text-slate-400 min-h-[300px]">
-              <Loader2 className="w-8 h-8 text-blue-500 animate-spin mb-4" />
-              <p className="text-sm font-medium">Loading endpoint details...</p>
-            </div>
-          ) : (
-            <>
-              <div>
-                <h2 className="text-lg font-semibold text-slate-900">{selectedEndpoint.name}</h2>
-                {(selectedEndpoint.deprecated || selectedEndpoint.deprecation_date) && (
-                  <div className="mt-3 bg-red-50 border border-red-200 rounded-lg p-3 flex gap-2">
-                    <AlertTriangle className="w-5 h-5 text-red-500 shrink-0" />
-                    <div>
-                      <h4 className="text-sm font-semibold text-red-800">Endpoint Deprecated</h4>
-                      <p className="text-xs text-red-700 mt-1">
-                        {selectedEndpoint.deprecation_date
-                          ? `This endpoint will be removed on ${new Date(selectedEndpoint.deprecation_date).toLocaleDateString()}. Please migrate to a newer version.`
-                          : "This endpoint is deprecated and should no longer be used."}
-                      </p>
-                    </div>
-                  </div>
-                )}
-                {selectedEndpoint.description && (
-                  <div 
-                    className="text-sm text-slate-600 mt-2 [&_p]:mb-1 last:[&_p]:mb-0 [&_code]:bg-slate-100 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded" 
-                    dangerouslySetInnerHTML={{ __html: stripLinks(selectedEndpoint.description) }} 
-                  />
-                )}
-              </div>
-
-              {selectedEndpoint.parameters && selectedEndpoint.parameters.length > 0 && (
-                <div>
-                  <h3 className="text-sm font-semibold text-slate-800 mb-3 border-b border-slate-100 pb-2">Parameters</h3>
-                  <div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50">
-                    <table className="min-w-[480px] w-full text-left text-sm">
-                      <thead className="bg-slate-100 text-slate-600">
-                        <tr>
-                          <th className="px-4 py-2 font-medium">Name</th>
-                          <th className="px-4 py-2 font-medium">In</th>
-                          <th className="px-4 py-2 font-medium">Type</th>
-                          <th className="px-4 py-2 font-medium">Required</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-200">
-                        {selectedEndpoint.parameters.map((p, idx) => (
-                          <tr key={idx}>
-                            <td className="px-4 py-3 font-mono text-xs text-slate-800">{p.name}</td>
-                            <td className="px-4 py-3 text-slate-600">{p.in}</td>
-                            <td className="px-4 py-3 font-mono text-xs text-slate-500">{p.type}</td>
-                            <td className="px-4 py-3">
-                              {p.required ? (
-                                <span className="text-red-600 font-medium">Yes</span>
-                              ) : (
-                                <span className="text-slate-400">No</span>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-
-              {selectedEndpoint.request_body && (
-                <div className="mb-6">
-                  <h3 className="text-sm font-semibold text-slate-800 mb-3 border-b border-slate-100 pb-2">Request</h3>
-                  <div className="border border-slate-200 rounded-xl overflow-hidden shadow-sm">
-                    <button
-                      data-track="toggle_request_schema"
-                      onClick={() => setReqSchemaOpen(!reqSchemaOpen)}
-                      className={`w-full px-4 py-2.5 flex items-center justify-between cursor-pointer transition-colors focus:outline-none ${reqSchemaOpen ? 'bg-slate-50 border-b border-slate-200' : 'bg-white hover:bg-slate-50/50'}`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200 uppercase tracking-wider">
-                          {selectedEndpoint.isWebhook ? "PAYLOAD" : "BODY"}
-                        </span>
-                        <span className="text-xs font-medium text-slate-900">
-                          {selectedEndpoint.isWebhook ? "Event Schema" : "Request Schema"}
-                        </span>
-                      </div>
-                      {reqSchemaOpen ? (
-                        <ChevronUp className="w-4 h-4 text-slate-500" />
-                      ) : (
-                        <ChevronDown className="w-4 h-4 text-slate-500" />
-                      )}
-                    </button>
-                    {reqSchemaOpen && (
-                      <div className="bg-[#161c27] p-4 animate-in fade-in slide-in-from-top-1 duration-200">
-                        <SchemaViewer schema={selectedEndpoint.request_body} serviceId={srv.id} />
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {selectedEndpoint.responses && Object.keys(selectedEndpoint.responses).length > 0 && (
-                <div>
-                  <h3 className="text-sm font-semibold text-gray-800 mb-3 border-b border-gray-100 pb-2">Responses</h3>
-                  <div className="space-y-4">
-                    {Object.entries(selectedEndpoint.responses).map(([code, schema]) => (
-                      <ResponseSchemaViewer key={code} code={code} schema={schema} serviceId={srv.id} />
-                    ))}
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-        </div>
+        <EndpointSidebarHeader endpoint={selectedEndpoint} endpointType={endpointType} copiedPath={copiedPath} setCopiedPath={setCopiedPath} close={() => setSelectedEndpoint(null)} />
+        <EndpointDriftPanel snapshots={endpointDrift} driftAction={driftAction} handleDismiss={handleDismiss} handleApply={handleApply} />
+        <EndpointContractContent endpoint={selectedEndpoint} isLoading={isLoading} requestSchema={requestSchema} responseSchemas={responseSchemas} serviceId={srv.id} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />
       </div>
     </>
   );
+}
+
+// methodBadgeClass maps operation verbs to stable header colors.
+function methodBadgeClass(endpoint: IntegrationObject): string {
+  if (endpoint.isWebhook || endpoint.method === "SOAP") return "bg-purple-100 text-purple-700";
+  if (endpoint.method === "GET") return "bg-green-100 text-green-700";
+  if (endpoint.method === "POST") return "bg-blue-100 text-blue-700";
+  if (endpoint.method === "DELETE") return "bg-red-100 text-red-700";
+  return "bg-slate-100 text-slate-700";
+}
+
+// endpointTypeClass maps operation contract kinds to a secondary badge.
+function endpointTypeClass(endpointType: string): string {
+  if (endpointType === "GraphQL") return "bg-pink-50 text-pink-700 border-pink-200";
+  if (endpointType === "File Transfer") return "bg-indigo-50 text-indigo-700 border-indigo-200";
+  if (endpointType === "Event Stream") return "bg-cyan-50 text-cyan-700 border-cyan-200";
+  return "bg-slate-50 text-slate-500 border-slate-200";
+}
+
+// EndpointSidebarHeader renders identity, copy, and close controls.
+function EndpointSidebarHeader({ endpoint, endpointType, copiedPath, setCopiedPath, close }: {
+  endpoint: IntegrationObject;
+  endpointType: string;
+  copiedPath: boolean;
+  setCopiedPath: (value: boolean) => void;
+  close: () => void;
+}) {
+  // copyPath provides brief feedback without changing the selected operation.
+  function copyPath(event: React.MouseEvent) {
+    event.stopPropagation();
+    navigator.clipboard.writeText(endpoint.path);
+    setCopiedPath(true);
+    setTimeout(() => setCopiedPath(false), 2000);
+  }
+  return (
+    <div className="sticky top-0 z-10 flex min-w-0 items-center justify-between gap-2 border-b border-slate-100 bg-white/90 p-4 backdrop-blur sm:p-6">
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+        <span className={`shrink-0 rounded px-2 py-1 text-xs font-bold ${methodBadgeClass(endpoint)}`}>{endpoint.isWebhook ? "WEBHOOK" : endpoint.method}</span>
+        <code className="min-w-0 flex-1 break-all text-sm text-slate-800">{endpoint.path}</code>
+        <button data-track="copy_endpoint_path" onClick={copyPath} className="rounded p-1 text-slate-400 hover:bg-slate-100" title="Copy Path">
+          {copiedPath ? <Check className="h-3.5 w-3.5 text-green-500" /> : <Copy className="h-3.5 w-3.5" />}
+        </button>
+        {!endpoint.isWebhook && <span className={`rounded border px-1.5 py-0.5 text-[10px] font-bold uppercase ${endpointTypeClass(endpointType)}`}>{endpointType}</span>}
+        {endpoint.deprecated && <span className="rounded border border-red-200 bg-red-50 px-2 py-0.5 text-xs font-semibold uppercase text-red-700">Deprecated</span>}
+      </div>
+      <button data-track="close_endpoint_sidebar" onClick={close} className="rounded-full p-2 text-slate-400 hover:bg-slate-100">✕</button>
+    </div>
+  );
+}
+
+// EndpointDriftPanel renders only drift snapshots belonging to the selected operation.
+function EndpointDriftPanel({ snapshots, driftAction, handleDismiss, handleApply }: {
+  snapshots: DriftSnapshot[];
+  driftAction: string | null;
+  handleDismiss: (id: string) => void;
+  handleApply: (id: string) => void;
+}) {
+  if (snapshots.length === 0) return null;
+  return (
+    <div className="border-b border-orange-100 bg-orange-50 p-4 sm:p-6">
+      <h3 className="mb-4 flex items-center gap-2 text-sm font-bold text-orange-900"><AlertTriangle className="h-4 w-4" />Pending Semantic Drift Detected</h3>
+      {snapshots.map((snapshot) => (
+        <div key={snapshot.id} className="mb-4 space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-xs text-orange-800/80">Detected at {new Date(snapshot.detected_at).toLocaleString()}</p>
+            <div className="flex gap-2">
+              <button data-track="dismiss_drift_change" onClick={() => handleDismiss(snapshot.id)} disabled={driftAction === snapshot.id} className="rounded border border-orange-200 bg-white px-3 py-1.5 text-xs font-semibold text-orange-800">Dismiss</button>
+              <button data-track="review_drift_import" onClick={() => handleApply(snapshot.id)} disabled={driftAction === snapshot.id} className="rounded bg-orange-600 px-3 py-1.5 text-xs font-semibold text-white">Review Import</button>
+            </div>
+          </div>
+          {snapshot.diff.map((change, index) => <DriftChangeCard key={`${change.field}:${index}`} change={change} />)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// DriftChangeCard compares one previous and current contract value.
+function DriftChangeCard({ change }: { change: DriftSnapshot["diff"][number] }) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-orange-200 bg-white">
+      <div className="flex items-center justify-between bg-orange-100/50 px-3 py-2">
+        <code className="text-xs font-bold text-orange-900">{change.field}</code>
+        {change.severity === "breaking" && <span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-bold uppercase text-red-600">Breaking</span>}
+      </div>
+      {change.description && <p className="border-t border-orange-100 px-3 py-2 text-xs text-orange-800">{change.description}</p>}
+      <div className="grid grid-cols-1 sm:grid-cols-2">
+        <ContractValue label="Previous" value={change.old_value} className="bg-red-50/30 text-red-900" />
+        <ContractValue label="New" value={change.new_value} className="bg-green-50/30 text-green-900" />
+      </div>
+    </div>
+  );
+}
+
+// ContractValue formats arbitrary drift values without losing structured data.
+function ContractValue({ label, value, className }: { label: string; value: unknown; className: string }) {
+  const rendered = typeof value === "object" ? JSON.stringify(value, null, 2) : String(value ?? "null");
+  return <div className={`p-3 ${className}`}><div className="mb-1 text-[10px] font-semibold uppercase text-slate-400">{label}</div><pre className="max-h-[400px] overflow-auto whitespace-pre-wrap break-words text-xs">{rendered}</pre></div>;
+}
+
+// EndpointContractContent switches between loading and exact contract sections.
+function EndpointContractContent({ endpoint, isLoading, requestSchema, responseSchemas, serviceId, componentScope, allowRemoteRefs }: {
+  endpoint: IntegrationObject;
+  isLoading: boolean;
+  requestSchema?: JsonSchemaNode;
+  responseSchemas: CanonicalResponseSchema[];
+  serviceId: string;
+} & ComponentReferenceScope) {
+  if (isLoading) return <div className="flex min-h-[300px] flex-1 items-center justify-center text-slate-400"><Loader2 className="mr-3 h-8 w-8 animate-spin text-blue-500" />Loading endpoint details...</div>;
+  return (
+    <div className="flex flex-1 flex-col space-y-8 p-4 sm:p-6">
+      <EndpointSummary endpoint={endpoint} />
+      <ParameterTable endpoint={endpoint} />
+      <RequestSchemaSection endpoint={endpoint} schema={requestSchema} serviceId={serviceId} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />
+      <ResponseSchemasSection responses={responseSchemas} serviceId={serviceId} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />
+    </div>
+  );
+}
+
+// EndpointSummary displays descriptive and deprecation metadata.
+function EndpointSummary({ endpoint }: { endpoint: IntegrationObject }) {
+  const deprecation = endpoint.deprecation_date
+    ? `This endpoint will be removed on ${new Date(endpoint.deprecation_date).toLocaleDateString()}.`
+    : "This endpoint is deprecated and should no longer be used.";
+  return <div><h2 className="text-lg font-semibold text-slate-900">{endpoint.name}</h2><OperationMetadata endpoint={endpoint} />{(endpoint.deprecated || endpoint.deprecation_date) && <p className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">{deprecation}</p>}{endpoint.description && <div className="mt-2 text-sm text-slate-600" dangerouslySetInnerHTML={{ __html: stripLinks(endpoint.description) }} />}</div>;
+}
+
+// ParameterTable exposes exact wire location and path encoding decisions.
+function ParameterTable({ endpoint }: { endpoint: IntegrationObject }) {
+  if (!endpoint.parameters?.length) return null;
+  return <div><h3 className="mb-3 border-b pb-2 text-sm font-semibold">Parameters</h3><div className="overflow-x-auto rounded-lg border"><table className="min-w-[640px] w-full text-left text-sm"><thead className="bg-slate-100"><tr>{["Name", "In", "Type", "Encoding", "Required"].map((label) => <th key={label} className="px-4 py-2">{label}</th>)}</tr></thead><tbody>{endpoint.parameters.map((parameter) => <tr key={`${parameter.in}:${parameter.name}`} className="border-t"><td className="px-4 py-3 font-mono text-xs">{parameter.name}</td><td className="px-4 py-3">{parameter.in}</td><td className="px-4 py-3 font-mono text-xs">{parameter.type}</td><td className="px-4 py-3 font-mono text-xs">{parameter.path_encoding || "default"}</td><td className="px-4 py-3">{parameter.required ? "Yes" : "No"}</td></tr>)}</tbody></table></div></div>;
+}
+
+// RequestSchemaSection renders the canonical default request representation.
+function RequestSchemaSection({ endpoint, schema, serviceId, componentScope, allowRemoteRefs }: { endpoint: IntegrationObject; schema?: JsonSchemaNode; serviceId: string } & ComponentReferenceScope) {
+  const [open, setOpen] = useState(false);
+  if (!schema) return null;
+  return <div><button data-track="toggle_request_schema" onClick={() => setOpen(!open)} className="flex w-full justify-between rounded border p-3 text-xs font-medium"><span>{endpoint.isWebhook ? "Event Schema" : "Request Schema"}</span>{open ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}</button>{open && <div className="bg-[#161c27] p-4"><SchemaViewer schema={schema} serviceId={serviceId} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} /></div>}</div>;
+}
+
+// ResponseSchemasSection renders every canonical response media representation.
+function ResponseSchemasSection({ responses, serviceId, componentScope, allowRemoteRefs }: { responses: CanonicalResponseSchema[]; serviceId: string } & ComponentReferenceScope) {
+  if (responses.length === 0) return null;
+  return <div><h3 className="mb-3 border-b pb-2 text-sm font-semibold">Responses</h3><div className="space-y-4">{responses.map((response) => <ResponseSchemaViewer key={response.key} code={response.label} schema={response.schema} serviceId={serviceId} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />)}</div></div>;
 }

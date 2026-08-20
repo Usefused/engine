@@ -6,6 +6,7 @@
   "scripts": {
     "lint": "eslint app/",
     "test": "node --experimental-strip-types --test app/lib/*.test.mjs",
+    "graphql:manifest": "node scripts/extract-graphql-documents.mjs --write-manifest",
     "dev": "remix vite:dev",
     "build": "remix vite:build",
     "start": "node ./server.mjs"
