@@ -9,7 +9,7 @@ import {
 } from "~/components/access/TeamAccessControls";
 import { TeamMembersControls } from "~/components/access/TeamMembersControls";
 import { WorkspacePermissionGate, useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
-import { hasWorkspacePermission } from "~/lib/current-actor-access";
+import { hasAnyPermission, hasWorkspacePermission } from "~/lib/current-actor-access";
 import {
   addTeamMember,
   listTeamMembers,
@@ -47,12 +47,23 @@ export default function TeamsPage() {
 	return <>
 		<SectionTabs tabs={ACCESS_TABS} />
 		<WorkspacePermissionGate permission="access.read" area="teams and workspace access">
-			<TeamsManager canManage={hasWorkspacePermission(access, "access.manage")} canManageOwners={hasWorkspacePermission(access, "account.manage")} />
+			<TeamsManager
+        canManage={hasWorkspacePermission(access, "access.manage")}
+        canManageOwners={hasWorkspacePermission(access, "account.manage")}
+        canReadServices={hasAnyPermission(access, "service.read")}
+        canReadBuckets={hasAnyPermission(access, "bucket.read")}
+      />
 		</WorkspacePermissionGate>
 	</>;
 }
 
-function TeamsManager({ canManage, canManageOwners }: { canManage: boolean; canManageOwners: boolean }) {
+/** Coordinates independently authorized team metadata and resource selectors. */
+function TeamsManager({ canManage, canManageOwners, canReadServices, canReadBuckets }: {
+  canManage: boolean;
+  canManageOwners: boolean;
+  canReadServices: boolean;
+  canReadBuckets: boolean;
+}) {
   const toast = useToast();
   const [teams, setTeams] = useState<Team[]>([]);
   const [selectedId, setSelectedId] = useState("");
@@ -78,12 +89,15 @@ function TeamsManager({ canManage, canManageOwners }: { canManage: boolean; canM
       setMembers([]);
       return;
     }
-    const [data, memberPage] = await Promise.all([loadTeamEditor(selectedId), listTeamMembers(selectedId)]);
+    const [data, memberPage] = await Promise.all([
+      loadTeamEditor(selectedId, { services: canReadServices, buckets: canReadBuckets }),
+      listTeamMembers(selectedId),
+    ]);
     setEditor(data);
     setMembers(memberPage.items);
     setEditName(data.team.name);
     setEditDescription(data.team.description);
-  }, [selectedId]);
+  }, [canReadBuckets, canReadServices, selectedId]);
 
   useEffect(() => {
     setLoading(true);

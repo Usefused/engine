@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, NotificationServiceRef, WorkspaceNotification } from "~/lib/api";
 import { isPending, isUnresolved } from "./notificationHelpers";
+import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
+import { hasWorkspacePermission } from "~/lib/current-actor-access";
 
 // useWorkspaceNotifications is the single data-fetching hook backing both the
 // bell panel and the contextual per-page banners, so they never drift out of
@@ -15,6 +17,8 @@ import { isPending, isUnresolved } from "./notificationHelpers";
 // fix for a real bug: the bell panel was rendering raw service_id UUIDs as
 // the row's title with no way to tell what was actually affected.
 export function useWorkspaceNotifications(enabled = true) {
+  const { access } = useCurrentActorAccess();
+  const canUpdate = hasWorkspacePermission(access, "notification.update");
   const [items, setItems] = useState<WorkspaceNotification[]>([]);
   const [serviceRefs, setServiceRefs] = useState<Record<string, NotificationServiceRef>>({});
   const [loading, setLoading] = useState(false);
@@ -67,6 +71,9 @@ export function useWorkspaceNotifications(enabled = true) {
   // already dismissed it), refresh() re-syncs to the true state.
   const updateStatus = useCallback(
     (id: string, status: "acknowledged" | "dismissed") => {
+      // UI actions fail closed while access is unavailable; the Engine remains
+      // authoritative if a caller bypasses this presentation layer.
+      if (!canUpdate) return Promise.reject(new Error("Notification update access is not available"));
       setItems((prev) =>
         prev.map((item) => (item.id === id ? { ...item, status } : item))
       );
@@ -76,7 +83,7 @@ export function useWorkspaceNotifications(enabled = true) {
         throw err;
       });
     },
-    [refresh]
+    [canUpdate, refresh]
   );
 
   const markRead = useCallback((id: string) => updateStatus(id, "acknowledged"), [updateStatus]);
@@ -85,5 +92,5 @@ export function useWorkspaceNotifications(enabled = true) {
   const unresolved = items.filter(isUnresolved);
   const pendingCount = items.filter(isPending).length;
 
-  return { items, unresolved, pendingCount, serviceRefs, loading, error, refresh, markRead, dismiss };
+  return { items, unresolved, pendingCount, serviceRefs, loading, error, refresh, markRead, dismiss, canUpdate };
 }

@@ -2,6 +2,9 @@ import { getCSRFToken, purgeLegacyBrowserCredential } from "./session";
 import { credentialedRequestInit } from "./browser-request";
 import type { ServiceAuthOption } from "./service-auth";
 import type { RateLimitConfig } from "./rate-limit";
+import type { RetryConfig } from "./retry-policy";
+import { unwrapGraphQLResponse, type GraphQLResponse } from "./graphql-response";
+import { mutableWorkspaceNotificationID } from "./workspace-notification";
 import {
   APIRequestError,
   isAuthenticationFailure,
@@ -49,9 +52,10 @@ function sameOriginBaseURL(value: string): string {
 /** @deprecated prefer getBaseURL() which reads window.ENV lazily */
 export const BASE = getBaseURL();
 
+/** Sends one credentialed JSON request and normalizes HTTP authentication failures. */
 async function req<T>(
-	path: string,
-	init: RequestInit = {}
+  path: string,
+  init: RequestInit = {}
 ): Promise<T> {
   const base = getBaseURL();
   const res = await fetch(`${base}${path}`, credentialedRequestInit(init, getCSRFToken()));
@@ -164,11 +168,7 @@ export interface Service {
   resources?: { id: string; name: string; endpointCount?: number }[];
   auth_configs: AuthConfig[];
   rate_limit?: RateLimitConfig;
-  retry_config?: {
-    strategy: string;
-    max_retries?: number;
-    backoff_ms?: number;
-  };
+  retry_config?: RetryConfig;
   default_headers?: Record<string, string>;
   is_public: boolean;
   watch_for_drift: boolean;
@@ -225,12 +225,7 @@ export interface ServiceVersion {
   base_url?: string;
   auth_configs?: AuthConfig[];
   rate_limit?: RateLimitConfig;
-  retry_config?: {
-    strategy: string;
-    max_retries?: number;
-    backoff_ms?: number;
-    retry_on?: number[];
-  };
+  retry_config?: RetryConfig;
   event_extraction_path?: string;
   incoming_webhook_config?: {
     auth_type: string;
@@ -276,11 +271,19 @@ export interface IntegrationObject {
   version: string;
   method: string;
   path: string;
+  normalized_path?: string;
+  stable_key?: string;
+  provider_protocol?: string;
+  operation_kind?: string;
   deprecated?: boolean;
   deprecation_date?: string;
   parameters: Parameter[];
+  request_content?: RequestContentContract;
+  // Webhook rows share the details sidebar but retain their distinct payload field.
   request_body?: Schema;
-  responses?: Record<string, Schema>;
+  responses?: Record<string, ResponseContract>;
+  security_requirements?: unknown[];
+  pagination?: unknown;
   graphql_query?: string;
   spec_hash: string;
   created_at: string;
@@ -306,6 +309,7 @@ export interface Parameter {
   required: boolean;
   type: string;
   description: string;
+  path_encoding?: string;
 }
 
 export interface EndpointIdentifier {
@@ -373,19 +377,51 @@ export interface Schema {
   format?: string;
 }
 
+export interface SchemaContract {
+  raw?: Schema;
+  projection?: Schema;
+}
+
+export interface RequestContentContract {
+  default_media_type?: string;
+  representations?: Array<{
+    media_type?: string;
+    serialization?: string;
+    schema?: SchemaContract;
+    item_schema?: SchemaContract;
+  }>;
+}
+
+export interface ResponseContract {
+  description?: string;
+  representations?: Array<{
+    media_type?: string;
+    schema?: SchemaContract;
+    item_schema?: SchemaContract;
+    sse?: unknown;
+  }>;
+}
+
 export interface AuthConfig {
+  name?: string;
   type: string;
   scheme?: string;
+  basic_password_mode?: string;
   location?: string;
   key_name?: string;
   open_id_connect_url?: string;
+  oauth2_metadata_url?: string;
+  deprecated?: boolean;
   oauth2_flows?: Partial<Record<OAuth2FlowName, OAuth2FlowContract>>;
   pkce_required?: boolean;
   scopes_delimiter?: string;
   token_endpoint_auth_method?: 'client_secret_basic' | 'client_secret_post';
+  token_request_media_type?: string;
   extra_auth_params?: Record<string, string>;
   extra_token_params?: Record<string, string>;
   refresh_token_rotates?: boolean;
+  strategy?: Record<string, unknown>;
+  policy_provenance?: Record<string, unknown>;
 }
 
 export type OAuth2FlowName =
@@ -488,15 +524,14 @@ export interface PaginatedResponse<T> {
 
 // ─── API methods ──────────────────────────────────────────────────────────────
 
-// ActivatedService mirrors Engine GraphQL workspaceServices. New rows are
-// pinned; empty version only represents historical activations created before
-// Sprint 5 pinning.
+// ActivatedService mirrors Engine GraphQL workspaceServices. The singular
+// version tuple is the latest enabled version used for service-level display;
+// enabled_versions is the authoritative set of exact runnable versions.
 export interface ActivatedService {
   id: string;
-  workspace_id: string;
   service_id: string;
   service_version_id: string;
-  /** Empty string only for historical unpinned rows. */
+  /** Latest non-deprecated enabled version, not the service's only version. */
   version: string;
   /** Cached at add-time for offline resilience (Engine can list without Registry). */
   service_name: string;
@@ -544,12 +579,12 @@ export interface EngineExecutionEventEntry {
   id: string;
   trace_id?: string;
   span_id?: string;
-	app_family_id?: string;
-	app_id?: string;
-	app_version?: string;
-	app_kind?: "sdk" | "mcp";
-	transport: "sdk" | "mcp" | "webhook";
-	provider_protocol?: "rest" | "graphql";
+  app_family_id?: string;
+  app_id?: string;
+  app_version?: string;
+  app_kind?: "sdk" | "mcp" | "webhook";
+  transport: "sdk" | "mcp" | "webhook";
+  provider_protocol?: "rest" | "graphql";
   direction: "inbound" | "outbound";
   service_id: string;
   service_version_id: string;
@@ -571,6 +606,24 @@ export interface EngineExecutionEventEntry {
   latency_ms: number;
   provider_latency_ms?: number;
   attempt_count: number;
+  auth_scheme_names?: string[];
+  auth_scheme_types?: string[];
+  auth_scheme_count: number;
+  auth_selection_outcome?: string;
+  pagination_type?: string;
+  pagination_page_count: number;
+  pagination_item_count: number;
+  pagination_byte_count: number;
+  pagination_stop_reason?: string;
+  rate_limit_decision?: string;
+  rate_limit_policy_count: number;
+  rate_limit_scope_kinds?: string[];
+  rate_limit_units?: string[];
+  // Totals stay strings because GraphQL Int cannot safely represent int64
+  // counters without narrowing them to 32 bits.
+  rate_limit_unit_totals?: string[];
+  rate_limit_retry_outcome?: string;
+  rate_limit_header_outcome?: string;
   request_bytes: number;
   response_bytes: number;
   verification_status?: string;
@@ -585,12 +638,12 @@ const engineExecutionEventSelection = `
   id
   trace_id
   span_id
-	app_family_id
-	app_id
-	app_version
-	app_kind
-	transport
-	provider_protocol
+  app_family_id
+  app_id
+  app_version
+  app_kind
+  transport
+  provider_protocol
   direction
   service_id
   service_version_id
@@ -612,6 +665,22 @@ const engineExecutionEventSelection = `
   latency_ms
   provider_latency_ms
   attempt_count
+  auth_scheme_names
+  auth_scheme_types
+  auth_scheme_count
+  auth_selection_outcome
+  pagination_type
+  pagination_page_count
+  pagination_item_count
+  pagination_byte_count
+  pagination_stop_reason
+  rate_limit_decision
+  rate_limit_policy_count
+  rate_limit_scope_kinds
+  rate_limit_units
+  rate_limit_unit_totals
+  rate_limit_retry_outcome
+  rate_limit_header_outcome
   request_bytes
   response_bytes
   verification_status
@@ -672,10 +741,19 @@ export interface PublicServiceInsights {
   failed_calls: number;
   p50_latency_ms: number;
   p95_latency_ms: number;
-  time_series: EngineExecutionBreakdown[];
-  top_operations: EngineExecutionBreakdown[];
-  version_breakdown: EngineExecutionBreakdown[];
-  transport_breakdown: EngineExecutionBreakdown[];
+  time_series: PublicServiceInsightPoint[];
+  top_operations: PublicServiceInsightPoint[];
+  version_breakdown: PublicServiceInsightPoint[];
+  transport_breakdown: PublicServiceInsightPoint[];
+}
+
+export interface PublicServiceInsightPoint {
+  key: string;
+  label: string;
+  total_calls: number;
+  failed_calls: number;
+  p50_latency_ms: number;
+  p95_latency_ms: number;
 }
 
 export interface ServiceConsumerEntry {
@@ -781,21 +859,48 @@ export interface WorkspaceConnectionBinding {
   mode: "default" | "force";
   provenance: "workspace" | "provider" | "fused";
   source_profile_revision?: number;
-  locally_overridden?: boolean;
 }
 
 export interface WorkspaceConnectionProfile {
   service_id: string;
   service_version_id: string;
   auth_type: "oauth" | "oidc";
+  registry_profile_id?: string;
   profile_revision: number;
   profile_hash: string;
   provenance: "workspace" | "provider" | "fused";
   source?: "workspace" | "provider" | "fused";
   has_workspace_override?: boolean;
+  is_public: boolean;
   profile: Record<string, unknown>;
   bindings: WorkspaceConnectionBinding[];
 }
+
+const workspaceConnectionProfileSelection = `
+  service_id
+  service_version_id
+  auth_type
+  registry_profile_id
+  profile_revision
+  profile_hash
+  provenance
+  source
+  has_workspace_override
+  is_public
+  profile
+  bindings {
+    id
+    source_kind
+    literal_value
+    source_path
+    target_location
+    target_name
+    operation_ids
+    mode
+    provenance
+    source_profile_revision
+  }
+`;
 
 export interface SecretMeta {
   id: string;
@@ -887,40 +992,35 @@ export const api = {
     getPricing: () => req<CreditsPricing>("/credits/pricing"),
   },
 
-	graphql: <T>(query: string, variables?: Record<string, unknown>) =>
-    req<{ data: T; errors?: { message: string }[] }>(
+  // graphql sends Registry documents and rejects GraphQL error envelopes.
+  graphql: <T>(query: string, variables?: Record<string, unknown>) =>
+    req<GraphQLResponse<T>>(
       "/graphql",
       {
         method: "POST",
         body: JSON.stringify({ query, variables }),
-		}
-    ).then((res) => {
-      if (res.errors && res.errors.length > 0)
-        throw new Error(res.errors[0].message);
-      return res.data;
-    }),
+      }
+    ).then(unwrapGraphQLResponse),
 
   // mcpGraphql hits the Engine's own MCP GraphQL schema (list/deploy/kill/
   // reactivate/delete + analytics -- internal/engine/api/mcp_graphql.go),
   // a separate endpoint from api.graphql above, which is a pure Registry
   // forward-proxy with no MCP-aware resolvers of its own.
   mcpGraphql: <T>(query: string, variables?: Record<string, unknown>) =>
-    req<{ data: T; errors?: { message: string }[] }>("/engine/graphql", {
+    req<GraphQLResponse<T>>("/engine/graphql", {
       method: "POST",
       body: JSON.stringify({ query, variables }),
-    }).then((res) => {
-      if (res.errors && res.errors.length > 0)
-        throw new Error(res.errors[0].message);
-      return res.data;
-    }),
+    }).then(unwrapGraphQLResponse),
 
-	appConfig: {
-		plan: <T>(kind: "sdk" | "mcp", input: {
-			owner_team?: string;
+  appConfig: {
+    // plan validates a versioned SDK or MCP config without changing active state.
+    plan: <T>(kind: "sdk" | "mcp", input: {
+      owner_team?: string;
       config_key: string;
       source_hash: string;
       config: Record<string, unknown>;
     }) => req<T>(`/${kind}-config/plan`, { method: "POST", body: JSON.stringify(input) }),
+    // apply activates a previously validated immutable config plan.
     apply: <T>(kind: "sdk" | "mcp", input: { plan_id: string; source_hash: string }) =>
       req<T>(`/${kind}-config/apply`, { method: "POST", body: JSON.stringify(input) }),
   },
@@ -1109,13 +1209,13 @@ export const api = {
     removeService: (serviceId: string) =>
       req<void>(`/workspace/services/${serviceId}`, { method: "DELETE" }),
 
+    // getServices returns service membership plus every exact enabled version.
     getServices: () =>
       api
         .mcpGraphql<{ workspaceServices: ActivatedService[] }>(
           `query {
             workspaceServices {
               id
-              workspace_id
               service_id
               service_version_id
               version
@@ -1130,6 +1230,7 @@ export const api = {
         )
         .then(({ workspaceServices }) => workspaceServices),
 
+    // getServicesPage pages the same exact-version membership projection.
     getServicesPage: (limit: number, offset: number, names?: string[]) =>
       api
         .mcpGraphql<{ workspaceServicePage: { total: number; page: number; limit: number; data: ActivatedService[] } }>(
@@ -1137,7 +1238,6 @@ export const api = {
             workspaceServicePage(limit: $limit, offset: $offset, names: $names) {
               total page limit data {
                 id
-                workspace_id
                 service_id
                 service_version_id
                 version
@@ -1227,6 +1327,7 @@ export const api = {
         )
         .then(({ webhookAnalytics }) => webhookAnalytics),
 
+    // listEngineExecutionEvents pages service-wide execution receipts.
     listEngineExecutionEvents: (params: {
       serviceId: string;
       transport?: string;
@@ -1265,9 +1366,10 @@ export const api = {
         )
         .then(({ engineExecutionEvents }) => engineExecutionEvents),
 
-	listAppExecutionEvents: (params: {
-		appId: string;
-		includeAllVersions?: boolean;
+    // listAppExecutionEvents scopes receipts to one app version or its family.
+    listAppExecutionEvents: (params: {
+      appId: string;
+      includeAllVersions?: boolean;
       transport?: string;
       direction?: string;
       status?: string;
@@ -1278,13 +1380,13 @@ export const api = {
     }) =>
       api
         .mcpGraphql<{
-			appExecutionEvents: {
+          appExecutionEvents: {
             items: EngineExecutionEventEntry[];
             total: number;
           };
         }>(
-			`query AppExecutionEvents($appId: String!, $includeAllVersions: Boolean, $transport: String, $direction: String, $status: String, $limit: Int, $offset: Int, $startDate: String, $endDate: String) {
-				appExecutionEvents(app_id: $appId, include_all_versions: $includeAllVersions, transport: $transport, direction: $direction, status: $status, limit: $limit, offset: $offset, start_date: $startDate, end_date: $endDate) {
+          `query AppExecutionEvents($appId: String!, $includeAllVersions: Boolean, $transport: String, $direction: String, $status: String, $limit: Int, $offset: Int, $startDate: String, $endDate: String) {
+            appExecutionEvents(app_id: $appId, include_all_versions: $includeAllVersions, transport: $transport, direction: $direction, status: $status, limit: $limit, offset: $offset, start_date: $startDate, end_date: $endDate) {
               total
               items {
                 ${engineExecutionEventSelection}
@@ -1292,8 +1394,8 @@ export const api = {
             }
           }`,
           {
-			appId: params.appId,
-			includeAllVersions: params.includeAllVersions ?? false,
+            appId: params.appId,
+            includeAllVersions: params.includeAllVersions ?? false,
             transport: params.transport || null,
             direction: params.direction || null,
             status: params.status || null,
@@ -1303,11 +1405,12 @@ export const api = {
             endDate: params.endDate || null,
           }
         )
-		.then(({ appExecutionEvents }) => appExecutionEvents),
+        .then(({ appExecutionEvents }) => appExecutionEvents),
 
-	getAppExecutionAnalytics: (params: {
-		appId: string;
-		includeAllVersions?: boolean;
+    // getAppExecutionAnalytics summarizes one app version or its whole family.
+    getAppExecutionAnalytics: (params: {
+      appId: string;
+      includeAllVersions?: boolean;
       transport?: string;
       direction?: string;
       status?: string;
@@ -1315,9 +1418,9 @@ export const api = {
       endDate?: string;
     }) =>
       api
-		.mcpGraphql<{ appExecutionAnalytics: AppExecutionAnalytics }>(
-			`query AppExecutionAnalytics($appId: String!, $includeAllVersions: Boolean, $transport: String, $direction: String, $status: String, $startDate: String, $endDate: String) {
-				appExecutionAnalytics(app_id: $appId, include_all_versions: $includeAllVersions, transport: $transport, direction: $direction, status: $status, start_date: $startDate, end_date: $endDate) {
+        .mcpGraphql<{ appExecutionAnalytics: AppExecutionAnalytics }>(
+          `query AppExecutionAnalytics($appId: String!, $includeAllVersions: Boolean, $transport: String, $direction: String, $status: String, $startDate: String, $endDate: String) {
+            appExecutionAnalytics(app_id: $appId, include_all_versions: $includeAllVersions, transport: $transport, direction: $direction, status: $status, start_date: $startDate, end_date: $endDate) {
               total_calls
               successful_calls
               failed_calls
@@ -1328,8 +1431,8 @@ export const api = {
             }
           }`,
           {
-			appId: params.appId,
-			includeAllVersions: params.includeAllVersions ?? false,
+            appId: params.appId,
+            includeAllVersions: params.includeAllVersions ?? false,
             transport: params.transport || null,
             direction: params.direction || null,
             status: params.status || null,
@@ -1337,8 +1440,9 @@ export const api = {
             endDate: params.endDate || null,
           }
         )
-		.then(({ appExecutionAnalytics }) => appExecutionAnalytics),
+        .then(({ appExecutionAnalytics }) => appExecutionAnalytics),
 
+    // getEngineExecutionAnalytics summarizes service-wide execution receipts.
     getEngineExecutionAnalytics: (params: {
       serviceId: string;
       transport?: string;
@@ -1372,31 +1476,40 @@ export const api = {
         )
         .then(({ engineExecutionAnalytics }) => engineExecutionAnalytics),
 
-    getWorkspaceExecutionAnalytics: (params: { startDate?: string; endDate?: string } = {}) =>
-	  api
-		.mcpGraphql<{ workspaceExecutionAnalytics: WorkspaceExecutionAnalytics }>(
-		  `query WorkspaceExecutionAnalytics($startDate: String, $endDate: String) {
-			workspaceExecutionAnalytics(start_date: $startDate, end_date: $endDate) {
-			  total_calls successful_calls failed_calls average_latency_ms median_latency_ms p95_latency_ms
-			  by_service { key label total_calls failed_calls p95_latency_ms }
-			  by_transport { key label total_calls failed_calls p95_latency_ms }
-			  recent_failures { id service_id service_name operation transport failure_category failure_code failure_reason latency_ms started_at }
-			}
-		  }`,
-		  { startDate: params.startDate || null, endDate: params.endDate || null }
-		)
-		.then(({ workspaceExecutionAnalytics }) => workspaceExecutionAnalytics),
+    // getWorkspaceExecutionAnalytics summarizes the actor's authorized workspace.
+    getWorkspaceExecutionAnalytics: (
+      params: { startDate?: string; endDate?: string } = {}
+    ) =>
+      api
+        .mcpGraphql<{ workspaceExecutionAnalytics: WorkspaceExecutionAnalytics }>(
+          `query WorkspaceExecutionAnalytics($startDate: String, $endDate: String) {
+            workspaceExecutionAnalytics(start_date: $startDate, end_date: $endDate) {
+              total_calls successful_calls failed_calls average_latency_ms median_latency_ms p95_latency_ms
+              by_service { key label total_calls failed_calls p95_latency_ms }
+              by_transport { key label total_calls failed_calls p95_latency_ms }
+              recent_failures { id service_id service_name operation transport failure_category failure_code failure_reason latency_ms started_at }
+            }
+          }`,
+          { startDate: params.startDate || null, endDate: params.endDate || null }
+        )
+        .then(({ workspaceExecutionAnalytics }) => workspaceExecutionAnalytics),
 
+    // getPublicServiceInsights forwards every current aggregate scope supported
+    // by Engine so callers can choose exact-version or service-wide results.
     getPublicServiceInsights: (params: {
       serviceId: string;
       startDate: string;
       endDate: string;
       granularity?: "hour" | "day";
+      serviceVersionId?: string;
+      registryObjectKind?: "endpoint" | "webhook";
+      registryObjectId?: string;
+      transport?: "sdk" | "mcp" | "webhook";
     }) =>
       api
         .mcpGraphql<{ publicServiceInsights: PublicServiceInsights }>(
-          `query PublicServiceInsights($serviceId: String!, $startDate: String!, $endDate: String!, $granularity: String) {
-            publicServiceInsights(service_id: $serviceId, start_date: $startDate, end_date: $endDate, granularity: $granularity) {
+          `query PublicServiceInsights($serviceId: String!, $startDate: String!, $endDate: String!, $granularity: String, $serviceVersionId: String, $registryObjectKind: String, $registryObjectId: String, $transport: String) {
+            publicServiceInsights(service_id: $serviceId, start_date: $startDate, end_date: $endDate, granularity: $granularity, service_version_id: $serviceVersionId, registry_object_kind: $registryObjectKind, registry_object_id: $registryObjectId, transport: $transport) {
               source generated_at data_through partial_data total_calls successful_calls failed_calls p50_latency_ms p95_latency_ms
               time_series { key label total_calls failed_calls p50_latency_ms p95_latency_ms }
               top_operations { key label total_calls failed_calls p50_latency_ms p95_latency_ms }
@@ -1404,7 +1517,16 @@ export const api = {
               transport_breakdown { key label total_calls failed_calls p50_latency_ms p95_latency_ms }
             }
           }`,
-          { serviceId: params.serviceId, startDate: params.startDate, endDate: params.endDate, granularity: params.granularity || "day" }
+          {
+            serviceId: params.serviceId,
+            startDate: params.startDate,
+            endDate: params.endDate,
+            granularity: params.granularity || "day",
+            serviceVersionId: params.serviceVersionId || null,
+            registryObjectKind: params.registryObjectKind || null,
+            registryObjectId: params.registryObjectId || null,
+            transport: params.transport || null,
+          }
         )
         .then(({ publicServiceInsights }) => publicServiceInsights),
 
@@ -1560,6 +1682,7 @@ export const api = {
           ({ rediscoverConnectionResources }) => rediscoverConnectionResources
         ),
 
+    // getWorkspaceConnectionProfile reads the exact service-version/auth tuple.
     getWorkspaceConnectionProfile: (input: {
       serviceId: string;
       serviceVersionId: string;
@@ -1575,18 +1698,15 @@ export const api = {
               service_version_id: $serviceVersionId,
               auth_type: $authType
             ) {
-              service_id service_version_id auth_type
-              profile_revision profile_hash provenance source has_workspace_override profile
-              bindings {
-                id source_kind source_path target_location target_name
-                operation_ids mode provenance source_profile_revision
-              }
+              ${workspaceConnectionProfileSelection}
             }
           }`,
           input
         )
         .then(({ workspaceConnectionProfile }) => workspaceConnectionProfile),
 
+    // setWorkspaceConnectionProfile validates and replaces one exact workspace
+    // override without floating to another service version.
     setWorkspaceConnectionProfile: (input: {
       serviceId: string;
       serviceVersionId: string;
@@ -1602,18 +1722,15 @@ export const api = {
               service_version_id: $serviceVersionId, version: $version,
               auth_type: $authType, profile: $profile
             ) {
-              service_id service_version_id auth_type
-              profile_revision profile_hash provenance source has_workspace_override profile
-              bindings {
-                id source_kind source_path target_location target_name
-                operation_ids mode provenance source_profile_revision
-              }
+              ${workspaceConnectionProfileSelection}
             }
           }`,
           input
         )
         .then(({ setWorkspaceConnectionProfile }) => setWorkspaceConnectionProfile),
 
+    // resetWorkspaceConnectionProfile removes only the tuple's workspace
+    // override and leaves its Registry or Fused baseline intact.
     resetWorkspaceConnectionProfile: (input: {
       serviceId: string;
       serviceVersionId: string;
@@ -1626,12 +1743,7 @@ export const api = {
               service_id: $serviceId,
               service_version_id: $serviceVersionId, auth_type: $authType
             ) {
-              service_id service_version_id auth_type
-              profile_revision profile_hash provenance source has_workspace_override profile
-              bindings {
-                id source_kind source_path target_location target_name
-                operation_ids mode provenance source_profile_revision
-              }
+              ${workspaceConnectionProfileSelection}
             }
           }`,
           input
@@ -1687,13 +1799,13 @@ export const api = {
         )
         .then(({ workspaceNotifications }) => workspaceNotifications),
 
-    // updateNotificationStatus is the one write path Phase 4 adds -- "id"
+    // updateNotificationStatus changes only persisted Engine notifications -- "id"
     // must be a store.WorkspaceNotification's own id (source: "engine"),
     // never a "registry:"-prefixed live drift item's composite id; those
     // aren't notifications this mutation can act on (see the backend
     // resolver's own doc comment for why).
     updateNotificationStatus: (id: string, status: "acknowledged" | "dismissed") => {
-      const rawId = id.replace(/^(engine|registry):/, "");
+      const rawId = mutableWorkspaceNotificationID(id);
       return api
         .mcpGraphql<{ updateWorkspaceNotificationStatus: WorkspaceNotification }>(
           `mutation($id: String!, $status: String!) {

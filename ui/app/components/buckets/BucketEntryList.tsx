@@ -14,6 +14,7 @@ type BucketEntryListProps = {
   onRemoveSecret: (item: SecretMeta) => void;
   onRemoveValue: (item: BucketValue) => void;
   onPageChange: (page: number) => void;
+  canRemove?: boolean;
 };
 
 type EntryRowModel = {
@@ -25,6 +26,7 @@ type EntryRowModel = {
   onRemove: () => void;
 };
 
+/** Renders one authorized page of secrets or values. */
 export function BucketEntryList({
   loading,
   kind,
@@ -36,6 +38,7 @@ export function BucketEntryList({
   onRemoveSecret,
   onRemoveValue,
   onPageChange,
+  canRemove = true,
 }: BucketEntryListProps) {
   if (loading)
     return (
@@ -70,7 +73,7 @@ export function BucketEntryList({
     <div>
       <div className="divide-y divide-slate-100">
         {entries.map((entry) => (
-          <EntryRow key={entry.id} entry={entry} />
+          <EntryRow key={entry.id} entry={entry} canRemove={canRemove} />
         ))}
       </div>
       <BucketPagination
@@ -144,7 +147,8 @@ function valueEntry(
   };
 }
 
-function EntryRow({ entry }: { entry: EntryRowModel }) {
+/** Renders one entry while omitting destructive controls without manage access. */
+function EntryRow({ entry, canRemove }: { entry: EntryRowModel; canRemove: boolean }) {
   const canCopy = entry.kind === "value" && entry.value !== "-";
   return (
     <div className="grid grid-cols-[minmax(0,0.9fr)_minmax(220px,1.4fr)_auto_auto] items-center gap-3 px-4 py-3">
@@ -160,7 +164,7 @@ function EntryRow({ entry }: { entry: EntryRowModel }) {
         </div>
       </div>
       <EntryValue entry={entry} />
-      <button
+      {canRemove && <button
         type="button"
         onClick={() => copyEntryValue(entry.value)}
         disabled={!canCopy}
@@ -169,7 +173,7 @@ function EntryRow({ entry }: { entry: EntryRowModel }) {
         title={canCopy ? "Copy value" : "Copy unavailable"}
       >
         <Copy className="h-4 w-4" />
-      </button>
+      </button>}
       <button
         type="button"
         onClick={entry.onRemove}

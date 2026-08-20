@@ -31,3 +31,22 @@ export function hasAnyPermission(access: CurrentActorAccess | null, permission: 
   // queries still filter the rows and totals to the actor's authorized scope.
   return Boolean(access?.grants.some((grant) => grant.permission === permission));
 }
+
+/** Checks a permission against either the current workspace or one exact resource. */
+export function hasResourcePermission(
+  access: CurrentActorAccess | null,
+  permission: string,
+  resourceType: CurrentActorGrant["resource_type"],
+  resourceId: string
+): boolean {
+  if (!access || !resourceId) return false;
+  // Workspace grants intentionally cover their child resources, while scoped
+  // grants never leak to a sibling resource of the same type.
+  return access.grants.some(
+    (grant) =>
+      grant.permission === permission &&
+      ((grant.resource_type === "WORKSPACE" &&
+        grant.resource_id === access.workspace_id) ||
+        (grant.resource_type === resourceType && grant.resource_id === resourceId))
+  );
+}

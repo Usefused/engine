@@ -3,16 +3,17 @@ import { api, type IntegrationObject } from "~/lib/api";
 import { useToast } from "~/components/Toast";
 
 const RESOURCE_GQL = `
-  query($resourceId: String!, $serviceId: String, $limit: Int, $offset: Int) {
-    resourceIntegrations(resourceId: $resourceId, serviceId: $serviceId, limit: $limit, offset: $offset) {
+  query($resourceId: String!, $serviceId: String!, $serviceVersionId: String!, $limit: Int, $offset: Int) {
+    resourceIntegrations(resourceId: $resourceId, serviceId: $serviceId, service_version_id: $serviceVersionId, limit: $limit, offset: $offset) {
       id service_id name description version status method path deprecated
     }
   }
 `;
 
+// useResourceLoader pages operations for one immutable service version.
 export function useResourceLoader(
   serviceId: string | undefined,
-  version?: string | null
+  serviceVersionId?: string
 ) {
   const toast = useToast();
   const [resourceVersions, setResourceVersions] = useState<Record<string, string>>({});
@@ -27,17 +28,18 @@ export function useResourceLoader(
   useEffect(() => {
     setIntegrationsByResource({});
     setExpandedResources({});
-  }, [serviceId, version]);
+  }, [serviceId, serviceVersionId]);
 
+  // toggleResource expands a resource and loads its first exact-version page.
   async function toggleResource(resourceId: string, resourceName: string) {
     const isExpanding = !expandedResources[resourceName];
     setExpandedResources(prev => ({ ...prev, [resourceName]: isExpanding }));
 
-    if (isExpanding && !integrationsByResource[resourceId] && !loadingResources[resourceId]) {
+    if (isExpanding && serviceVersionId && !integrationsByResource[resourceId] && !loadingResources[resourceId]) {
       setLoadingResources(prev => ({ ...prev, [resourceId]: true }));
       try {
         const data = await api.graphql<{ resourceIntegrations: IntegrationObject[] }>(
-          RESOURCE_GQL, { resourceId, serviceId, limit: 500, offset: 0 }
+          RESOURCE_GQL, { resourceId, serviceId, serviceVersionId, limit: 500, offset: 0 }
         );
         const enriched = data.resourceIntegrations.map(ep => ({ ...ep, resource: resourceName }));
         setIntegrationsByResource(prev => ({ ...prev, [resourceId]: enriched }));
@@ -51,13 +53,14 @@ export function useResourceLoader(
     }
   }
 
+  // loadMoreEndpoints appends the next exact-version resource page.
   async function loadMoreEndpoints(resourceId: string, resourceName: string) {
-    if (loadingResources[resourceId] || !hasMoreResources[resourceId]) return;
+    if (!serviceVersionId || loadingResources[resourceId] || !hasMoreResources[resourceId]) return;
     setLoadingResources(prev => ({ ...prev, [resourceId]: true }));
     try {
       const currentOffset = resourceOffsets[resourceId] || 0;
       const data = await api.graphql<{ resourceIntegrations: IntegrationObject[] }>(
-        RESOURCE_GQL, { resourceId, serviceId, limit: 500, offset: currentOffset }
+        RESOURCE_GQL, { resourceId, serviceId, serviceVersionId, limit: 500, offset: currentOffset }
       );
       const enriched = data.resourceIntegrations.map(ep => ({ ...ep, resource: resourceName }));
       setIntegrationsByResource(prev => ({ ...prev, [resourceId]: [...(prev[resourceId] || []), ...enriched] }));
@@ -70,6 +73,7 @@ export function useResourceLoader(
     }
   }
 
+  // resetResources clears loaded operations while preserving hook identity.
   function resetResources() {
     setIntegrationsByResource({});
     setExpandedResources({});

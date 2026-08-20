@@ -18,10 +18,20 @@ export const TEAM_OPERATIONS = {
   editor: `
     query TeamAccessEditor($id: ID!) {
       team(id: $id) { ${TEAM_FIELDS} }
-      workspaceServicePage(limit: 100, offset: 0) {
+    }
+  `,
+  services: `
+    query TeamAccessServices($limit: Int!, $offset: Int!) {
+      workspaceServicePage(limit: $limit, offset: $offset) {
+        total
         data { service_id service_name }
       }
-      bucketSummaryPage(limit: 100, offset: 0) {
+    }
+  `,
+  buckets: `
+    query TeamAccessBuckets($limit: Int!, $offset: Int!) {
+      bucketSummaryPage(limit: $limit, offset: $offset) {
+        total
         items { id name }
       }
     }

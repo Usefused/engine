@@ -32,6 +32,12 @@ import {
   type SecretFormPayload,
   type ValueFormPayload,
 } from "~/lib/buckets";
+import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
+import {
+  hasAnyPermission,
+  hasResourcePermission,
+  hasWorkspacePermission,
+} from "~/lib/current-actor-access";
 import { useToast } from "~/components/Toast";
 import {
   consumeCredentialCreationRequest,
@@ -44,8 +50,10 @@ const BUCKET_PAGE_SIZE = 12;
 const BUCKET_CONTENT_PAGE_SIZE = 10;
 const BUCKET_OVERVIEW_PAGE_SIZE = 5;
 
+/** Renders credential sets using only sections authorized for the current actor. */
 export default function BucketsPage() {
   const toast = useToast();
+  const { access, loading: accessLoading } = useCurrentActorAccess();
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedBucketId = searchParams.get("bucket") || "";
   const [buckets, setBuckets] = useState<BucketSummary[]>([]);
@@ -91,15 +99,57 @@ export default function BucketsPage() {
   );
   const contentRequestID = useRef(0);
   const activeTab = bucketTabFromSearch(searchParams);
+  const contentAccess = useMemo(
+    () => ({
+      // The value field is additionally protected at workspace scope, so a
+      // bucket-scoped grant alone cannot safely request plaintext values.
+      values: hasWorkspacePermission(access, "bucket.values.read"),
+      secrets: hasResourcePermission(
+        access,
+        "credentials.metadata.read",
+        "BUCKET",
+        selectedBucketId
+      ),
+      connections: hasResourcePermission(
+        access,
+        "connection.read",
+        "BUCKET",
+        selectedBucketId
+      ),
+      apps: hasAnyPermission(access, "app.read"),
+      services: hasAnyPermission(access, "service.read"),
+    }),
+    [access, selectedBucketId]
+  );
+  const canManageBucket = hasResourcePermission(
+    access,
+    "bucket.manage",
+    "BUCKET",
+    selectedBucketId
+  );
+  const canCreateBucket = hasWorkspacePermission(access, "bucket.manage");
+  const canManageCredentials = hasResourcePermission(
+    access,
+    "credentials.manage",
+    "BUCKET",
+    selectedBucketId
+  );
+  const canManageConnections = hasResourcePermission(
+    access,
+    "connection.manage",
+    "BUCKET",
+    selectedBucketId
+  );
 
+  // Consumes one-shot credential creation navigation only with create access.
   useEffect(() => {
     if (!requestsCredentialCreation(searchParams)) return;
-    setModalOpen(true);
+    if (canCreateBucket) setModalOpen(true);
     // Consume the command so refreshes do not reopen a modal the user closed.
     setSearchParams(consumeCredentialCreationRequest(searchParams), {
       replace: true,
     });
-  }, [searchParams, setSearchParams]);
+  }, [canCreateBucket, searchParams, setSearchParams]);
 
   const selectedBucket = useMemo(
     () =>
@@ -214,10 +264,12 @@ export default function BucketsPage() {
       .finally(() => setLoadingBuckets(false));
   };
 
+  /** Loads authorized detail sections without issuing known-denied fields. */
   const loadContents = (bucketId: string) => {
+    if (accessLoading) return;
     const requestID = ++contentRequestID.current;
     setLoadingContents(true);
-    readBucketContents(bucketId, contentPages)
+    readBucketContents(bucketId, contentPages, contentAccess)
       .then((state) => {
         if (requestID !== contentRequestID.current) return;
         applyBucketContents(state, {
@@ -252,7 +304,12 @@ export default function BucketsPage() {
       );
   };
 
+  /** Loads service labels only when the actor may enumerate services. */
   const loadServices = () => {
+    if (!contentAccess.services) {
+      setServices([]);
+      return;
+    }
     readWorkspaceServices()
       .then(setServices)
       .catch((err) =>
@@ -269,10 +326,12 @@ export default function BucketsPage() {
     loadBucketList();
   }, [page]);
 
+  // Service labels are optional and must not trigger a forbidden collection read.
   useEffect(() => {
     loadServices();
-  }, []);
+  }, [contentAccess.services]);
 
+  // Keeps the selected drawer synchronized after paging or access changes.
   useEffect(() => {
     syncSelectedBucket(
       selectedBucket,
@@ -293,7 +352,7 @@ export default function BucketsPage() {
       setConnectionServices,
       setConnectSummary
     );
-  }, [selectedBucket?.id, selectedBucketId, contentPages]);
+  }, [selectedBucket?.id, selectedBucketId, contentPages, contentAccess, accessLoading]);
 
   useEffect(
     () =>
@@ -429,7 +488,7 @@ export default function BucketsPage() {
 
   return (
     <div className="space-y-6">
-      <BucketPageHeader onCreateClick={() => setModalOpen(true)} />
+      <BucketPageHeader canCreate={canCreateBucket} onCreateClick={() => setModalOpen(true)} />
       <BucketList
         buckets={buckets}
         selectedBucketId={selectedBucket?.id || ""}
@@ -497,12 +556,23 @@ export default function BucketsPage() {
           setConnectedServiceFilter(serviceId);
           setConnectionPage(0);
         }}
+        permissions={{
+          readSecrets: contentAccess.secrets,
+          readValues: contentAccess.values,
+          readConnections: contentAccess.connections,
+          readApps: contentAccess.apps,
+          readServices: contentAccess.services,
+          manageBucket: canManageBucket,
+          manageCredentials: canManageCredentials,
+          manageValues: contentAccess.values && canManageBucket,
+          manageConnections: canManageConnections,
+        }}
       />
-      <BucketCreateModal
+      {canCreateBucket && <BucketCreateModal
         open={modalOpen}
         onClose={() => setModalOpen(false)}
         onCreated={onBucketCreated}
-      />
+      />}
     </div>
   );
 }

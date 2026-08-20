@@ -5,9 +5,11 @@ import { type BucketEntryKind } from "~/lib/buckets";
 type BucketAddDropdownProps = {
   disabled?: boolean;
   onSelect: (kind: BucketEntryKind) => void;
+  allowedKinds: BucketEntryKind[];
 };
 
-export function BucketAddDropdown({ disabled, onSelect }: BucketAddDropdownProps) {
+/** Offers only entry kinds the actor is allowed to create. */
+export function BucketAddDropdown({ disabled, onSelect, allowedKinds }: BucketAddDropdownProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -40,8 +42,8 @@ export function BucketAddDropdown({ disabled, onSelect }: BucketAddDropdownProps
       </button>
       {open && (
         <div className="absolute right-0 top-full z-20 mt-2 w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
-          <MenuItem icon={<KeyRound className="w-4 h-4" />} label="Secret" onClick={() => choose("secret")} />
-          <MenuItem icon={<Database className="w-4 h-4" />} label="Value" onClick={() => choose("value")} />
+          {allowedKinds.includes("secret") && <MenuItem icon={<KeyRound className="w-4 h-4" />} label="Secret" onClick={() => choose("secret")} />}
+          {allowedKinds.includes("value") && <MenuItem icon={<Database className="w-4 h-4" />} label="Value" onClick={() => choose("value")} />}
         </div>
       )}
     </div>

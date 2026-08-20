@@ -27,26 +27,34 @@ export interface JsonSchemaNode {
 // Global cache for fetched $ref components
 const componentCache: Record<string, JsonSchemaNode> = {};
 
+interface ComponentResolutionContext {
+  componentScope: string;
+  allowRemoteRefs: boolean;
+}
+
+const ComponentResolutionContext = React.createContext<ComponentResolutionContext>({
+  componentScope: "",
+  allowRemoteRefs: true,
+});
+
 // ─── Type system ──────────────────────────────────────────────────────────────
 
 type SchemaType =
   | "object" | "array" | "string" | "number" | "integer"
   | "boolean" | "null" | "ref" | "oneOf" | "anyOf" | "allOf" | "unknown";
 
+// inferType classifies permissive JSON Schema nodes for the recursive renderer.
 function inferType(node: unknown): SchemaType {
-  if (!node || typeof node !== "object") return "unknown";
+  if (!node) return "unknown";
+  if (typeof node !== "object") return "unknown";
   const obj = node as JsonSchemaNode;
   if (obj.$ref)    return "ref";
   if (obj.oneOf)   return "oneOf";
   if (obj.anyOf)   return "anyOf";
   if (obj.allOf)   return "allOf";
-  if (obj.type === "object" || obj.properties) return "object";
-  if (obj.type === "array"  || obj.items)      return "array";
-  if (obj.type === "string")  return "string";
-  if (obj.type === "number")  return "number";
-  if (obj.type === "integer") return "integer";
-  if (obj.type === "boolean") return "boolean";
-  if (obj.type === "null")    return "null";
+  if (obj.properties) return "object";
+  if (obj.items) return "array";
+  if (["object", "array", "string", "number", "integer", "boolean", "null"].includes(String(obj.type))) return obj.type as SchemaType;
   return "unknown";
 }
 
@@ -114,17 +122,22 @@ function TreeGuide({ children }: { children: React.ReactNode }) {
 interface SchemaViewerProps {
   schema: JsonSchemaNode | null | undefined;
   serviceId: string;
+  componentScope?: string;
+  allowRemoteRefs?: boolean;
   isWebhookEvent?: boolean;
 }
 
-export function SchemaViewer({ schema, serviceId, isWebhookEvent }: SchemaViewerProps) {
+// SchemaViewer renders a schema tree and scopes any remote component expansion.
+export function SchemaViewer({ schema, serviceId, componentScope = "latest", allowRemoteRefs = true, isWebhookEvent }: SchemaViewerProps) {
   if (!schema) {
     return <p className="text-[11px] text-slate-500 italic py-1.5">No schema defined.</p>;
   }
   return (
-    <div className="text-[11px] leading-normal select-text w-full">
-      <SchemaNode node={schema} serviceId={serviceId} depth={0} isWebhookEvent={isWebhookEvent} />
-    </div>
+    <ComponentResolutionContext.Provider value={{ componentScope, allowRemoteRefs }}>
+      <div className="text-[11px] leading-normal select-text w-full">
+        <SchemaNode node={schema} serviceId={serviceId} depth={0} isWebhookEvent={isWebhookEvent} />
+      </div>
+    </ComponentResolutionContext.Provider>
   );
 }
 
@@ -348,19 +361,22 @@ function CompositeNode({ node, serviceId, depth, ctype, name, required }: { node
 
 // ─── $ref ─────────────────────────────────────────────────────────────────────
 
+// RefNode expands latest-version component references while historical views fail closed.
 function RefNode({ refStr, serviceId, name, required }: { refStr: string; serviceId: string; depth: number; name?: string; required?: boolean }) {
   const [open, setOpen]       = useState(false);
   const [loading, setLoading] = useState(false);
   const [data, setData]       = useState<JsonSchemaNode | null>(null);
   const [err, setErr]         = useState<string | null>(null);
   const refName = getRefName(refStr);
+  const { componentScope, allowRemoteRefs } = React.useContext(ComponentResolutionContext);
 
+  // toggle resolves a component only when the selected contract shares the latest component scope.
   const toggle = async () => {
     // If already open, collapse
     if (open) { setOpen(false); return; }
     // Open immediately so loading state is visible
     setOpen(true);
-    const key = `${serviceId}:${refName}`;
+    const key = `${serviceId}:${componentScope}:${refName}`;
     // Cache hit — data already set, nothing more to do
     if (componentCache[key]) { setData(componentCache[key]); return; }
     // Fetch
@@ -389,7 +405,7 @@ function RefNode({ refStr, serviceId, name, required }: { refStr: string; servic
 
   return (
     <div>
-      <Row name={name} required={required} onToggle={toggle} expanded={open}>
+      <Row name={name} required={required} onToggle={allowRemoteRefs ? toggle : undefined} expanded={open}>
         <div className="flex items-center gap-1.5 flex-wrap">
           <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium font-mono leading-none ${BADGE.ref}`}>
             <Link2 className="w-2.5 h-2.5 shrink-0" />
@@ -398,6 +414,11 @@ function RefNode({ refStr, serviceId, name, required }: { refStr: string; servic
           {loading && <Loader2 className="w-2.5 h-2.5 text-indigo-400 animate-spin shrink-0" />}
         </div>
       </Row>
+      {!allowRemoteRefs && (
+        <p className="ml-6 text-[10px] italic text-slate-500">
+          Reference expansion is unavailable for historical versions.
+        </p>
+      )}
       {open && (
         <TreeGuide>
           {err && (

@@ -19,6 +19,35 @@ import { isImportVersionRequired } from "~/lib/authorization-error";
 type ImportSource = { url?: string; content?: string };
 type ImportIdentity = { name: string; slug?: string; version?: string };
 type ServicesView = "workspace" | "catalog" | "pending";
+type CatalogPage = {
+  data: Service[];
+  total: number;
+  page: number;
+  limit: number;
+};
+
+const CATALOG_SEARCH_QUERY = `
+  query($q: String!) {
+    searchServices(q: $q) {
+      id name base_url servers { url description }
+      is_public is_owner slug provider { name handle } canonical_ref
+    }
+  }
+`;
+
+// searchCatalogServices returns the same public-plus-owned projection for every actor.
+async function searchCatalogServices(q: string): Promise<Service[]> {
+  const response = await api.graphql<{ searchServices: Service[] | null }>(CATALOG_SEARCH_QUERY, { q });
+  return response.searchServices || [];
+}
+
+// fetchCatalogPage describes the Registry's bounded browse result as one honest UI page.
+async function fetchCatalogPage(): Promise<CatalogPage> {
+  const data = await searchCatalogServices("");
+  // The blank public search is deliberately capped in SQL, so advertising a
+  // second page would promise a pagination contract this query does not have.
+  return { data, total: data.length, page: 1, limit: Math.max(data.length, 1) };
+}
 
 function importSource(method: "openapi" | "docs", sourceType: "url" | "text", url: string, content: string): ImportSource {
   if (method === "openapi" && sourceType === "text") {
@@ -135,6 +164,7 @@ function ExtractionSessionPanel({ sessionID, onClose, onComplete }: {
   return <ExtractionWizard sessionId={sessionID} onClose={onClose} onComplete={onComplete} />;
 }
 
+// IntegrationsIndex coordinates workspace, public catalog, and import views.
 export default function IntegrationsIndex() {
   const toast = useToast();
   const rootData = useRouteLoaderData<{ isAuth: boolean }>("root");
@@ -202,46 +232,24 @@ export default function IntegrationsIndex() {
 
   const [importPlan, setImportPlan] = useState<SpecificationImportPlan | null>(null);
 
-  const loadCatalogData = useCallback(async (p: number = page) => {
+  // loadCatalogData normalizes authenticated and public catalog pages for UI state.
+  const loadCatalogData = useCallback(async () => {
     setLoading(true);
     try {
-      const queryStr = `
-        query($page: Int, $limit: Int) {
-          services(page: $page, limit: $limit) {
-            data {
-              id
-              name
-              base_url
-              servers {
-                url
-                description
-              }
-              is_public
-              is_owner
-              slug
-              provider { name handle }
-              canonical_ref
-            }
-            total
-            page
-            limit
-          }
-        }
-      `;
-      const [res, wsRes, wsPageRes] = await Promise.all([
-        api.graphql<{ services: { data: Service[]; total: number; page: number; limit: number }; globalServiceAnalytics: unknown }>(queryStr, { page: p, limit: 10 }),
+      const [catalogPage, wsRes, wsPageRes] = await Promise.all([
+        fetchCatalogPage(),
         isAuth ? api.workspace.getServices() : Promise.resolve([]),
         Promise.resolve(null)
       ]);
-      setIntegrations(res.services.data);
+      setIntegrations(catalogPage.data);
       setWorkspaceServices(wsRes);
       setWorkspaceServicePageData(wsPageRes);
-      lastLoadedPageRef.current = { page: res.services.page, isAuth, view: "catalog" };
-      if (res.services.page !== page) {
-        setPage(res.services.page);
+      lastLoadedPageRef.current = { page: catalogPage.page, isAuth, view: "catalog" };
+      if (catalogPage.page !== page) {
+        setPage(catalogPage.page);
       }
-      setTotalPages(Math.ceil(res.services.total / res.services.limit) || 1);
-      setTotalItems(res.services.total);
+      setTotalPages(Math.ceil(catalogPage.total / catalogPage.limit) || 1);
+      setTotalItems(catalogPage.total);
 
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load services");
@@ -269,7 +277,7 @@ export default function IntegrationsIndex() {
 
   const loadVisibleData = useCallback(async (p: number = page) => {
     if (view === "catalog" || !isAuth) {
-      await loadCatalogData(p);
+      await loadCatalogData();
       return;
     }
 
@@ -310,6 +318,7 @@ export default function IntegrationsIndex() {
 
 
 
+  // runSearch applies the same Registry visibility semantics used by catalog browse.
   async function runSearch(q: string) {
     if (!q.trim()) return;
     setSearchParams(prev => {
@@ -320,26 +329,11 @@ export default function IntegrationsIndex() {
     setSearching(true);
     setError("");
     try {
-      const queryStr = `
-        query($q: String!) {
-          searchServices(q: $q) {
-            id
-            name
-            base_url
-            servers {
-              url
-              description
-            }
-            is_public
-            is_owner
-            slug
-            provider { name handle }
-            canonical_ref
-          }
-        }
-      `;
-      const res = await api.graphql<{ searchServices: Service[] }>(queryStr, { q });
-      setIntegrations(res.searchServices);
+      const services = await searchCatalogServices(q);
+      setIntegrations(services);
+      setTotalItems(services.length);
+      setTotalPages(1);
+      if (page !== 1) setPage(1);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Search failed");
     } finally {

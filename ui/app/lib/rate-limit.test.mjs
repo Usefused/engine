@@ -1,57 +1,66 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { URL } from "node:url";
 
 import {
   RATE_LIMIT_GRAPHQL_FIELDS,
-  createRateLimitConfig,
-  policyWithAlgorithm,
   rateLimitSummary,
 } from "./rate-limit.ts";
 
-test("projects the complete frozen v2 GraphQL contract without legacy fields", () => {
+// This test locks the UI query to the Registry's complete v3 rate-limit shape.
+test("projects the complete v3 GraphQL contract without removed v2 fields", () => {
   for (const field of [
     "version",
     "policies",
-    "default_cost",
-    "operation_costs",
+    "mode",
+    "identity",
+    "cost",
     "fixed_window",
-    "duration_ms",
+    "rolling_window",
     "token_bucket",
-    "refill_units",
-    "refill_interval_ms",
-    "response_headers",
-    "retry_after",
+    "concurrency",
+    "response_signals",
+    "cooldown",
     "max_delay_ms",
   ]) {
     assert.match(RATE_LIMIT_GRAPHQL_FIELDS, new RegExp(`\\b${field}\\b`));
   }
   assert.doesNotMatch(
     RATE_LIMIT_GRAPHQL_FIELDS,
-    /requests_per_second|requests_per_minute|\bburst\b|\bstrategy\b/
+    /\bscope\b|default_cost|operation_costs|response_headers|retry_after/
   );
 });
 
-test("creates exact v2 policies and switches discriminator branches atomically", () => {
-  const config = createRateLimitConfig();
-  assert.equal(config.version, 2);
-  assert.equal(config.policies[0].algorithm, "fixed_window");
-  assert.ok(config.policies[0].fixed_window);
-  assert.equal(config.policies[0].token_bucket, undefined);
-
-  const bucket = policyWithAlgorithm(config.policies[0], "token_bucket");
-  assert.equal(bucket.fixed_window, undefined);
-  assert.deepEqual(bucket.token_bucket, {
-    capacity: 100,
-    refill_units: 10,
-    refill_interval_ms: 1000,
-  });
-  assert.equal("burst" in bucket.token_bucket, false);
-});
-
+// This test keeps the summary stable for absent, singular, and plural policies.
 test("summarizes absent, singular, and multiple policies", () => {
   assert.equal(rateLimitSummary(null), "Not declared");
-  const config = createRateLimitConfig();
-  assert.equal(rateLimitSummary(config), "1 policy");
-  config.policies.push({ ...config.policies[0], name: "burst" });
-  assert.equal(rateLimitSummary(config), "2 policies");
+  const policy = {
+    name: "requests",
+    mode: "enforce",
+    unit: "requests",
+    identity: { inputs: [{ kind: "service_version" }] },
+    cost: { default: 1, rules: [] },
+    algorithm: "fixed_window",
+    fixed_window: { limit: 10, duration_ms: 1000 },
+  };
+  assert.equal(rateLimitSummary({ version: 3, policies: [policy] }), "1 policy");
+  assert.equal(
+    rateLimitSummary({ version: 3, policies: [policy, { ...policy, name: "burst" }] }),
+    "2 policies"
+  );
+});
+
+// This test protects the actual service route that produced the hosted schema error.
+test("service details uses only the shared v3 rate and retry projections", () => {
+  const source = readFileSync(
+    new URL("../routes/integrations.$id.tsx", import.meta.url),
+    "utf8"
+  );
+  assert.match(source, /rate_limit \{ \$\{RATE_LIMIT_GRAPHQL_FIELDS\} \}/);
+  assert.match(source, /retry_config \{ \$\{RETRY_GRAPHQL_FIELDS\} \}/);
+  assert.doesNotMatch(
+    source,
+    /policy\.scope|policy\.default_cost|retry\.strategy|retry\.max_retries|retry\.backoff_ms/
+  );
 });

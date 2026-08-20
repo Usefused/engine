@@ -34,8 +34,10 @@ type BucketConnectedUsersTableProps = {
   onServiceSearchChange: (search: string) => void;
   onServiceFilterChange: (serviceId: string) => void;
   onRemoveConnection: (connection: AuthConnection) => void;
+  canManage: boolean;
 };
 
+/** Renders connected users and gates all connection mutations. */
 export function BucketConnectedUsersTable({
   loading,
   connections,
@@ -51,6 +53,7 @@ export function BucketConnectedUsersTable({
   onServiceSearchChange,
   onServiceFilterChange,
   onRemoveConnection,
+  canManage,
 }: BucketConnectedUsersTableProps) {
   return (
     <div>
@@ -81,6 +84,7 @@ export function BucketConnectedUsersTable({
               )}
               deleting={deletingConnectionId === connection.id}
               onRemoveConnection={onRemoveConnection}
+              canManage={canManage}
             />
           ))}
         </div>
@@ -127,16 +131,19 @@ function ConnectedUserToolbar({
   );
 }
 
+/** Renders one connection and exposes resource mutations only to managers. */
 function ConnectedUserRow({
   connection,
   serviceName,
   deleting,
   onRemoveConnection,
+  canManage,
 }: {
   connection: AuthConnection;
   serviceName: string;
   deleting: boolean;
   onRemoveConnection: (connection: AuthConnection) => void;
+  canManage: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [resources, setResources] = useState<ConnectionResource[]>([]);
@@ -238,8 +245,9 @@ function ConnectedUserRow({
             onSetDefault={setDefaultResource}
 			onRediscover={rediscoverResources}
 			rediscovering={rediscovering}
+            canManage={canManage}
           />
-          <div className="mt-4 flex justify-end">
+          {canManage && <div className="mt-4 flex justify-end">
             <button
               type="button"
               onClick={() => onRemoveConnection(connection)}
@@ -253,7 +261,7 @@ function ConnectedUserRow({
               )}
               Remove Connection
             </button>
-          </div>
+          </div>}
         </div>
       )}
     </div>
@@ -268,12 +276,14 @@ function ConnectionResources({
   onSetDefault,
 	onRediscover,
 	rediscovering,
+  canManage,
 }: {
   resources: ConnectionResource[];
   loading: boolean;
   onSetDefault: (resourceId: string) => void;
 	onRediscover: () => void;
 	rediscovering: boolean;
+  canManage: boolean;
 }) {
   if (loading) {
     return (
@@ -284,7 +294,7 @@ function ConnectionResources({
     <div className="mt-4 border-t border-slate-200 pt-3">
 	  <div className="mb-2 flex items-center justify-between gap-2">
 		<p className="text-xs font-medium text-slate-700">Provider resources</p>
-		<button
+		{canManage && <button
 		  type="button"
 		  onClick={onRediscover}
 		  disabled={rediscovering}
@@ -292,7 +302,7 @@ function ConnectionResources({
 		  className="rounded-md p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-50"
 		>
 		  <RefreshCw className={`h-3.5 w-3.5 ${rediscovering ? "animate-spin" : ""}`} />
-		</button>
+		</button>}
 	  </div>
 	  {resources.length === 0 ? (
 		<p className="text-xs text-slate-400">No active resources.</p>
@@ -319,7 +329,7 @@ function ConnectionResources({
                 <MapPin className="h-3.5 w-3.5" />
                 Default
               </span>
-            ) : (
+            ) : canManage ? (
               <button
                 type="button"
                 onClick={() => onSetDefault(resource.id)}
@@ -327,7 +337,7 @@ function ConnectionResources({
               >
                 Set default
               </button>
-            )}
+            ) : null}
           </div>
         ))}
       </div>

@@ -53,19 +53,25 @@ test("keeps aggregate service usage inside Outbound calls as a select option", a
 });
 
 test("reads exact app versions and family state from the Engine catalogue", async () => {
-  const [appIndex, appRoute, runtimeStatus] = await Promise.all([
+  const [appIndex, appRoute, mcpRoute, runtimeStatus] = await Promise.all([
     readFile(appIndexPath, "utf8"),
     readFile(appRoutePath, "utf8"),
+    readFile(mcpRoutePath, "utf8"),
     readFile(runtimeStatusPath, "utf8"),
   ]);
-  assert.match(appIndex, /api\.mcpGraphql<\{ apps:/);
+  assert.match(appIndex, /\.mcpGraphql<\{ apps: SdkPage/);
   assert.match(appIndex, /app_id/);
   assert.match(appIndex, /app_family_id/);
+  assert.match(appIndex, /query SDKApps\(\$search: String!, \$version: String!, \$limit: Int!, \$offset: Int!\)/);
+  assert.match(appIndex, /<SdkPagination page=\{page\} total=\{total\}/);
   assert.doesNotMatch(appIndex, /artifactSnapshots/);
   assert.match(appIndex, /<AppRuntimeStatus className="mt-0\.5" status=\{sdk\.status\}/);
   assert.match(appRoute, /app\(app_id:/);
   assert.match(appRoute, /appVersions\(app_family_id:/);
   assert.match(appRoute, /appServices\(app_id:/);
+  assert.match(appRoute, /definition_schema_version/);
+  assert.match(appRoute, /requireAppSelectionsV3\(res\.app\.selections\)/);
+  assert.match(mcpRoute, /hasAnyPermission\(access, "app\.read"\)/);
   assert.doesNotMatch(appRoute, /artifactSnapshot|sdkAnalytics|sdkSelectionResources/);
   assert.match(runtimeStatus, /status === "deprecated"/);
   assert.match(runtimeStatus, /Deprecated/);

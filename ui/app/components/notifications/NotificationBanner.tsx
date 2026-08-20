@@ -17,11 +17,13 @@ export function NotificationBanner({
   serviceRefs,
   onMarkRead,
   onDismiss,
+  canUpdate = false,
 }: {
   items: WorkspaceNotification[];
   serviceRefs: Record<string, NotificationServiceRef>;
   onMarkRead: (id: string) => void;
   onDismiss: (id: string) => void;
+  canUpdate?: boolean;
 }) {
   if (items.length === 0) return null;
 
@@ -62,7 +64,7 @@ export function NotificationBanner({
         </div>
       </div>
       <div className={`mt-3 divide-y ${isBreaking ? "divide-red-200/70 border-red-200/70" : "divide-blue-200/70 border-blue-200/70"} border-t`}>
-        <NotificationList items={items} serviceRefs={serviceRefs} onMarkRead={onMarkRead} onDismiss={onDismiss} dense />
+        <NotificationList items={items} serviceRefs={serviceRefs} onMarkRead={onMarkRead} onDismiss={onDismiss} canUpdate={canUpdate} dense />
       </div>
     </div>
   );

@@ -3,6 +3,7 @@ import type { CurrentActorAccess } from "./current-actor-permissions";
 
 export {
   hasAnyPermission,
+  hasResourcePermission,
   hasWorkspacePermission,
 } from "./current-actor-permissions";
 export type { CurrentActorAccess, CurrentActorGrant } from "./current-actor-permissions";
