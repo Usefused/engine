@@ -29,6 +29,8 @@ func MountConfigRoutes(r chi.Router, configStore store.ConfigRepository, s store
 		r.Post("/apply", authorizationRevisionSyncHandler(revisionLoader, revisionSink, SDKConfigApplyHandler(configStore, s, proxy, registryClient)))
 	})
 	r.Get("/sdks/{app_id}/download", SDKPackageDownloadHandler(s, proxy, packageClient))
+	contractStore, _ := s.(appOpenAPIContractStore)
+	r.Get("/apps/{app_id}/openapi", AppOpenAPIHandler(s, contractStore))
 
 	// SDK and MCP versions share lifecycle semantics. There is deliberately no
 	// activate/reactivate endpoint: deactivation is an irreversible hard delete.

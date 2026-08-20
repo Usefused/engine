@@ -75,6 +75,19 @@ func TestPublisherRejectsSDKEventWithoutVersionIdentity(t *testing.T) {
 	}
 }
 
+// TestPublisherTreatsRESTAsAppTransport proves REST receipts require the same
+// immutable identity as generated SDK and MCP calls.
+func TestPublisherTreatsRESTAsAppTransport(t *testing.T) {
+	now := time.Now()
+	err := NewPublisher(&publisherStub{}).Publish(context.Background(), models.EngineExecutionEvent{
+		Transport: models.EngineExecutionTransportREST, Status: models.EngineExecutionStatusSuccess,
+		StartedAt: now.Add(-time.Millisecond), EndedAt: now,
+	})
+	if err == nil {
+		t.Fatal("REST event without app identity was accepted")
+	}
+}
+
 func TestWebhookEventUsesStableMessageIdentity(t *testing.T) {
 	input := WebhookEventInput{MessageID: "message-1", DeliveryStatus: "success", OccurredAt: time.Now()}
 	first := NewWebhookEvent(input)

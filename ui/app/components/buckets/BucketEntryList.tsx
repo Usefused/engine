@@ -1,6 +1,7 @@
 import { Copy, MoreVertical } from "lucide-react";
 import { type BucketValue, type SecretMeta } from "~/lib/api";
 import { formatExpiry } from "~/lib/buckets";
+import { bucketEntryActions } from "~/lib/bucket-entry-actions";
 import { BucketPagination } from "~/components/buckets/BucketPagination";
 
 type BucketEntryListProps = {
@@ -149,9 +150,9 @@ function valueEntry(
 
 /** Renders one entry while omitting destructive controls without manage access. */
 function EntryRow({ entry, canRemove }: { entry: EntryRowModel; canRemove: boolean }) {
-  const canCopy = entry.kind === "value" && entry.value !== "-";
+  const actions = bucketEntryActions(entry.kind, entry.value, canRemove);
   return (
-    <div className="grid grid-cols-[minmax(0,0.9fr)_minmax(220px,1.4fr)_auto_auto] items-center gap-3 px-4 py-3">
+    <div className="grid grid-cols-[minmax(0,0.9fr)_minmax(220px,1.4fr)_auto] items-center gap-3 px-4 py-3">
       <div className="flex min-w-0 items-center gap-3">
         <span className="font-mono text-xs text-slate-400">
           {entry.kind === "secret" ? "{}" : "[]"}
@@ -164,25 +165,30 @@ function EntryRow({ entry, canRemove }: { entry: EntryRowModel; canRemove: boole
         </div>
       </div>
       <EntryValue entry={entry} />
-      {canRemove && <button
-        type="button"
-        onClick={() => copyEntryValue(entry.value)}
-        disabled={!canCopy}
-        className="rounded-md p-1.5 text-slate-400 hover:bg-slate-50 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-30"
-        aria-label={`Copy ${entry.name}`}
-        title={canCopy ? "Copy value" : "Copy unavailable"}
-      >
-        <Copy className="h-4 w-4" />
-      </button>}
-      <button
-        type="button"
-        onClick={entry.onRemove}
-        className="rounded-md p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600"
-        aria-label={`Remove ${entry.name}`}
-        title="Remove"
-      >
-        <MoreVertical className="h-4 w-4" />
-      </button>
+      <div className="flex items-center gap-1">
+        {actions.canCopy && (
+          <button
+            type="button"
+            onClick={() => copyEntryValue(entry.value)}
+            className="rounded-md p-1.5 text-slate-400 hover:bg-slate-50 hover:text-slate-700"
+            aria-label={`Copy ${entry.name}`}
+            title="Copy value"
+          >
+            <Copy className="h-4 w-4" />
+          </button>
+        )}
+        {actions.canRemove && (
+          <button
+            type="button"
+            onClick={entry.onRemove}
+            className="rounded-md p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600"
+            aria-label={`Remove ${entry.name}`}
+            title="Remove"
+          >
+            <MoreVertical className="h-4 w-4" />
+          </button>
+        )}
+      </div>
     </div>
   );
 }

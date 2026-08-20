@@ -50,6 +50,7 @@ type authConnectionResponse struct {
 	ID                    uuid.UUID  `json:"id"`
 	BucketID              uuid.UUID  `json:"bucket_id"`
 	ServiceID             uuid.UUID  `json:"service_id"`
+	ServiceVersionID      *uuid.UUID `json:"service_version_id,omitempty"`
 	EndUserRef            string     `json:"end_user_ref"`
 	CreatedByAppID        uuid.UUID  `json:"created_by_app_id,omitempty"`
 	AuthType              string     `json:"auth_type"`
@@ -62,6 +63,9 @@ type authConnectionResponse struct {
 	ExpiresAt             *time.Time `json:"expires_at,omitempty"`
 	RefreshTokenExpiresAt *time.Time `json:"refresh_token_expires_at,omitempty"`
 	LastUsedAt            *time.Time `json:"last_used_at,omitempty"`
+	LastRefreshAttemptAt  *time.Time `json:"last_refresh_attempt_at,omitempty"`
+	LastRefreshedAt       *time.Time `json:"last_refreshed_at,omitempty"`
+	RefreshRetryNotBefore *time.Time `json:"refresh_retry_not_before,omitempty"`
 	RefreshState          string     `json:"refresh_state"`
 	LastFailureCode       string     `json:"last_failure_code,omitempty"`
 	LastFailureAt         *time.Time `json:"last_failure_at,omitempty"`
@@ -513,11 +517,14 @@ func projectConnectConfig(cfg *store.ConnectConfig) connectConfigResponse {
 	}
 }
 
+// projectAuthConnection exposes version-pinned refresh lifecycle metadata while
+// deliberately omitting encrypted tokens and private lease ownership fields.
 func projectAuthConnection(conn store.AuthConnection) authConnectionResponse {
 	return authConnectionResponse{
 		ID:                    conn.ID,
 		BucketID:              conn.BucketID,
 		ServiceID:             conn.ServiceID,
+		ServiceVersionID:      optionalConnectionUUID(conn.ServiceVersionID),
 		EndUserRef:            conn.EndUserRef,
 		CreatedByAppID:        conn.CreatedByAppID,
 		AuthType:              conn.AuthType,
@@ -530,6 +537,9 @@ func projectAuthConnection(conn store.AuthConnection) authConnectionResponse {
 		ExpiresAt:             conn.ExpiresAt,
 		RefreshTokenExpiresAt: conn.RefreshTokenExpiresAt,
 		LastUsedAt:            conn.LastUsedAt,
+		LastRefreshAttemptAt:  conn.LastRefreshAttemptAt,
+		LastRefreshedAt:       conn.LastRefreshedAt,
+		RefreshRetryNotBefore: conn.RefreshRetryNotBefore,
 		RefreshState:          conn.RefreshState,
 		LastFailureCode:       conn.LastFailureCode,
 		LastFailureAt:         conn.LastFailureAt,
@@ -537,6 +547,15 @@ func projectAuthConnection(conn store.AuthConnection) authConnectionResponse {
 		CreatedAt:             conn.CreatedAt,
 		UpdatedAt:             conn.UpdatedAt,
 	}
+}
+
+// optionalConnectionUUID keeps ambiguous legacy service-version identity null
+// instead of projecting the all-zero UUID as if it were a real contract pin.
+func optionalConnectionUUID(id uuid.UUID) *uuid.UUID {
+	if id == uuid.Nil {
+		return nil
+	}
+	return &id
 }
 
 func parseUUIDParam(w http.ResponseWriter, r *http.Request, name string) (uuid.UUID, bool) {

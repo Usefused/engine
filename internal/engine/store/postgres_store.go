@@ -587,8 +587,11 @@ func nonNilInt64s(values []int64) []int64 {
 	return values
 }
 
+// validateExecutionEventIdentity keeps all app-authenticated transports on the
+// same exact family/app/version receipt invariant.
 func validateExecutionEventIdentity(event models.EngineExecutionEvent) error {
-	if event.Transport != models.EngineExecutionTransportSDK && event.Transport != models.EngineExecutionTransportMCP {
+	if event.Transport != models.EngineExecutionTransportSDK && event.Transport != models.EngineExecutionTransportMCP &&
+		event.Transport != models.EngineExecutionTransportREST {
 		return nil
 	}
 	if event.AppFamilyID == uuid.Nil || event.AppID == uuid.Nil || strings.TrimSpace(event.AppVersion) == "" {
@@ -650,15 +653,20 @@ type AppExecutionAnalyticsReader interface {
 }
 
 func engineExecutionWhereClause(filter EngineExecutionFilter) (string, []any) {
-	whereClause := "WHERE account_id = $1 AND service_id = $2"
-	args := []any{filter.AccountID, filter.ServiceID}
+	whereClause := "WHERE account_id = $1"
+	args := []any{filter.AccountID}
 	if filter.AppFamilyID != uuid.Nil {
-		whereClause = "WHERE account_id = $1 AND app_family_id = $2"
-		args = []any{filter.AccountID, filter.AppFamilyID}
+		whereClause += " AND app_family_id = $2"
+		args = append(args, filter.AppFamilyID)
 		if filter.AppID != uuid.Nil {
 			whereClause += " AND app_id = $3"
 			args = append(args, filter.AppID)
 		}
+	} else if filter.ServiceID != uuid.Nil {
+		// Service reads retain their exact resource predicate instead of relying
+		// on application-side filtering after a broader account query.
+		whereClause += " AND service_id = $2"
+		args = append(args, filter.ServiceID)
 	}
 	// Keeping tenant and resource scope in the same SQL predicate prevents a
 	// caller from receiving broad workspace data and filtering it in memory.
@@ -709,22 +717,32 @@ func (s *postgresStore) listEngineExecutionEvents(ctx context.Context, filter En
 	}
 
 	argIdx := len(args) + 1
-	query := `SELECT id, COALESCE(trace_id, ''), COALESCE(span_id, ''), COALESCE(account_id, '00000000-0000-0000-0000-000000000000'::uuid),
-		COALESCE(app_family_id, '00000000-0000-0000-0000-000000000000'::uuid),
-		COALESCE(app_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(app_version, ''),
-		transport, COALESCE(provider_protocol, ''), direction, service_id, COALESCE(service_version_id, ''),
-		COALESCE(operation_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(webhook_id, '00000000-0000-0000-0000-000000000000'::uuid),
-		endpoint_name, COALESCE(external_id, ''), COALESCE(event_name, ''), COALESCE(http_method, ''), COALESCE(request_path, ''), COALESCE(environment, ''),
-		COALESCE(environment_source, ''), COALESCE(provider_host, ''), provider_http_status, COALESCE(provider_status_class, ''),
-		status, COALESCE(failure_reason, ''), COALESCE(failure_category, ''), COALESCE(failure_code, ''), latency_ms, provider_latency_ms,
-		attempt_count, auth_scheme_names, auth_scheme_types, auth_scheme_count, COALESCE(auth_selection_outcome, ''),
-		COALESCE(pagination_type, ''), pagination_page_count, pagination_item_count, pagination_byte_count,
-		COALESCE(pagination_stop_reason, ''), COALESCE(rate_limit_decision, ''), rate_limit_policy_count,
-		rate_limit_scope_kinds, rate_limit_units, rate_limit_unit_totals,
-		COALESCE(rate_limit_retry_outcome, ''), COALESCE(rate_limit_header_outcome, ''),
-		request_bytes, response_bytes, COALESCE(verification_status, ''), COALESCE(delivery_status, ''),
-		idempotency_replayed, COALESCE(timings, '{}'::jsonb), started_at, ended_at, created_at
-		FROM fused_engine_execution_events ` + whereClause + fmt.Sprintf(" ORDER BY started_at DESC LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
+	// Page the canonical receipt rows before joining display metadata so query
+	// cost remains bounded by the requested receipt limit rather than workspace size.
+	query := `WITH event_page AS (
+		SELECT * FROM fused_engine_execution_events ` + whereClause + fmt.Sprintf(" ORDER BY started_at DESC LIMIT $%d OFFSET $%d", argIdx, argIdx+1) + `
+	)
+	SELECT event.id, COALESCE(event.trace_id, ''), COALESCE(event.span_id, ''), COALESCE(event.account_id, '00000000-0000-0000-0000-000000000000'::uuid),
+		COALESCE(event.app_family_id, '00000000-0000-0000-0000-000000000000'::uuid),
+		COALESCE(event.app_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(event.app_version, ''),
+		event.transport, COALESCE(event.provider_protocol, ''), event.direction, event.service_id, COALESCE(event.service_version_id, ''),
+		COALESCE(service.service_name, ''), COALESCE(service.service_slug, ''), COALESCE(version.version, ''),
+		COALESCE(event.operation_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(event.webhook_id, '00000000-0000-0000-0000-000000000000'::uuid),
+		event.endpoint_name, COALESCE(event.external_id, ''), COALESCE(event.event_name, ''), COALESCE(event.http_method, ''), COALESCE(event.request_path, ''), COALESCE(event.environment, ''),
+		COALESCE(event.environment_source, ''), COALESCE(event.provider_host, ''), event.provider_http_status, COALESCE(event.provider_status_class, ''),
+		event.status, COALESCE(event.failure_reason, ''), COALESCE(event.failure_category, ''), COALESCE(event.failure_code, ''), event.latency_ms, event.provider_latency_ms,
+		event.attempt_count, event.auth_scheme_names, event.auth_scheme_types, event.auth_scheme_count, COALESCE(event.auth_selection_outcome, ''),
+		COALESCE(event.pagination_type, ''), event.pagination_page_count, event.pagination_item_count, event.pagination_byte_count,
+		COALESCE(event.pagination_stop_reason, ''), COALESCE(event.rate_limit_decision, ''), event.rate_limit_policy_count,
+		event.rate_limit_scope_kinds, event.rate_limit_units, event.rate_limit_unit_totals,
+		COALESCE(event.rate_limit_retry_outcome, ''), COALESCE(event.rate_limit_header_outcome, ''),
+		event.request_bytes, event.response_bytes, COALESCE(event.verification_status, ''), COALESCE(event.delivery_status, ''),
+		event.idempotency_replayed, COALESCE(event.timings, '{}'::jsonb), event.started_at, event.ended_at, event.created_at
+	FROM event_page event
+	LEFT JOIN fused_workspace_services service ON service.service_id = event.service_id
+	LEFT JOIN fused_workspace_service_versions version
+		ON version.service_id = event.service_id AND version.service_version_id::text = event.service_version_id
+	ORDER BY event.started_at DESC`
 	args = append(args, filter.Limit, filter.Offset)
 	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
@@ -738,7 +756,8 @@ func (s *postgresStore) listEngineExecutionEvents(ctx context.Context, filter En
 		if err := rows.Scan(
 			&event.ID, &event.TraceID, &event.SpanID, &event.AccountID, &event.AppFamilyID, &event.AppID,
 			&event.AppVersion, &event.Transport, &event.ProviderProtocol, &event.Direction, &event.ServiceID,
-			&event.ServiceVersionID, &event.OperationID, &event.WebhookID, &event.EndpointName,
+			&event.ServiceVersionID, &event.ServiceName, &event.ServiceSlug, &event.ServiceVersion,
+			&event.OperationID, &event.WebhookID, &event.EndpointName,
 			&event.ExternalID, &event.EventName, &event.HTTPMethod, &event.RequestPath, &event.Environment, &event.EnvironmentSource,
 			&event.ProviderHost, &event.ProviderHTTPStatus, &event.ProviderStatusClass, &event.Status, &event.FailureReason,
 			&event.FailureCategory, &event.FailureCode, &event.LatencyMs, &event.ProviderLatencyMs, &event.AttemptCount,

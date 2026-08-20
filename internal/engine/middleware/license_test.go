@@ -74,6 +74,53 @@ func TestLicenseEnforcement_BlocksRequestsAfterHeartbeatGraceExpires(t *testing.
 	}
 }
 
+// TestLicenseEnforcement_BlocksRESTExecutionAfterHeartbeatGraceExpires proves
+// the direct app data plane observes the same runtime lease as SDK and MCP.
+func TestLicenseEnforcement_BlocksRESTExecutionAfterHeartbeatGraceExpires(t *testing.T) {
+	entitlement.LiveEntitlement.Reset()
+	t.Cleanup(entitlement.LiveEntitlement.Reset)
+	entitlement.EngineHeartbeatLeaseExpired.Store(true)
+	called := false
+	handler := LicenseEnforcement(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/apps/app-id/executions", nil))
+	if rec.Code != http.StatusServiceUnavailable || called {
+		t.Fatalf("expired REST execution status=%d called=%t", rec.Code, called)
+	}
+}
+
+// TestLicenseEnforcement_RESTExecutionMatcherIsExact proves route-like app
+// control requests do not accidentally inherit the runtime heartbeat gate.
+func TestLicenseEnforcement_RESTExecutionMatcherIsExact(t *testing.T) {
+	entitlement.LiveEntitlement.Reset()
+	t.Cleanup(entitlement.LiveEntitlement.Reset)
+	entitlement.EngineHeartbeatLeaseExpired.Store(true)
+	handler := LicenseEnforcement(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	requests := []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: "/v1/apps/app-id/executions"},
+		{method: http.MethodPost, path: "/v1/apps/app-id/executions/"},
+		{method: http.MethodPost, path: "/v1/apps/app-id/executions/retry"},
+		{method: http.MethodPost, path: "/v1/apps//executions"},
+	}
+	for _, request := range requests {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(request.method, request.path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s %s status=%d, want unchanged administrative handling", request.method, request.path, rec.Code)
+		}
+	}
+}
+
 func TestLicenseEnforcement_AllowsHealthAndAuthenticationDuringRestriction(t *testing.T) {
 	entitlement.LiveEntitlement.Reset()
 	t.Cleanup(entitlement.LiveEntitlement.Reset)

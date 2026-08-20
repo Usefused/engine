@@ -25,6 +25,7 @@ type EngineGRPCServer struct {
 	enginev1.UnimplementedEngineServiceServer
 	runtime        *sandbox.EngineGRPCServer
 	unifiedRuntime unifiedPhysicalRuntime
+	restRuntime    restExecutionRuntime
 	store          store.Store
 	verifier       ServiceVerifier
 	masterKey      []byte
@@ -44,6 +45,7 @@ func NewEngineGRPCServer(s store.Store, verifier ServiceVerifier, masterKey []by
 	return &EngineGRPCServer{
 		runtime:        runtime,
 		unifiedRuntime: runtime,
+		restRuntime:    runtime,
 		store:          s,
 		verifier:       verifier,
 		masterKey:      masterKey,
@@ -311,7 +313,24 @@ func projectProtoAuthConnection(conn store.AuthConnection) *enginev1.AuthConnect
 		RefreshState:          resp.RefreshState,
 		CreatedAt:             formatProtoTime(resp.CreatedAt),
 		UpdatedAt:             formatProtoTime(resp.UpdatedAt),
+		ServiceVersionId:      formatOptionalProtoUUID(resp.ServiceVersionID),
+		AuthName:              resp.AuthName,
+		LastRefreshAttemptAt:  formatOptionalProtoTime(resp.LastRefreshAttemptAt),
+		LastRefreshedAt:       formatOptionalProtoTime(resp.LastRefreshedAt),
+		RefreshRetryNotBefore: formatOptionalProtoTime(resp.RefreshRetryNotBefore),
+		LastFailureCode:       resp.LastFailureCode,
+		LastFailureAt:         formatOptionalProtoTime(resp.LastFailureAt),
+		LastFailureTraceId:    resp.LastFailureTraceID,
 	}
+}
+
+// formatOptionalProtoUUID renders absent legacy identities as the protobuf
+// string zero value without inventing a service-version association.
+func formatOptionalProtoUUID(value *uuid.UUID) string {
+	if value == nil {
+		return ""
+	}
+	return value.String()
 }
 
 // projectProtoConnectionResources intentionally omits base URLs and provider

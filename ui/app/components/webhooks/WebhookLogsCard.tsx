@@ -1,4 +1,7 @@
+import { useState } from "react";
 import { RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
+import { activateReceiptRow } from "~/components/activity/receiptRow";
+import { WebhookEventDetailsDrawer } from "~/components/webhooks/WebhookEventDetailsDrawer";
 import { type WebhookEventEntry, type WebhookAnalyticsSummary } from "~/lib/api";
 
 function Badge({ label, color }: { label: string; color: string }) {
@@ -25,10 +28,11 @@ function desktopDeliveryColor(status: string): string {
   return "bg-slate-100 text-slate-700";
 }
 
-function WebhookEventCard({ event }: { event: WebhookEventEntry }) {
+// WebhookEventCard makes the complete mobile receipt a native inspection control.
+function WebhookEventCard({ event, onSelect }: { event: WebhookEventEntry; onSelect: (id: string) => void }) {
   const status = deliveryStatus(event);
   return (
-    <article className="space-y-3 p-4">
+    <button type="button" aria-haspopup="dialog" onClick={() => onSelect(event.id)} className="block w-full space-y-3 p-4 text-left transition-colors hover:bg-slate-50">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="break-words text-sm font-medium text-slate-950">{event.event_name}</div>
@@ -45,7 +49,7 @@ function WebhookEventCard({ event }: { event: WebhookEventEntry }) {
         <div><dt className="text-slate-400">Received</dt><dd className="mt-0.5 text-slate-700">{new Date(event.created_at).toLocaleString()}</dd></div>
       </dl>
       {event.error_reason ? <div className="text-xs text-red-700">{event.error_reason}</div> : null}
-    </article>
+    </button>
   );
 }
 
@@ -61,10 +65,11 @@ function VerificationCell({ status }: { status?: string }) {
   return <Badge label={status} color={status === "passed" ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-700"} />;
 }
 
-function WebhookEventRow({ ev }: { ev: WebhookEventEntry }) {
+// WebhookEventRow provides equivalent mouse and keyboard inspection on desktop.
+function WebhookEventRow({ ev, onSelect }: { ev: WebhookEventEntry; onSelect: (id: string) => void }) {
   const status = deliveryStatus(ev);
   return (
-    <tr className="hover:bg-slate-50 transition-colors">
+    <tr role="button" tabIndex={0} aria-haspopup="dialog" aria-label={`Inspect ${ev.event_name || "webhook"}`} onClick={() => onSelect(ev.id)} onKeyDown={(keyboardEvent) => activateReceiptRow(keyboardEvent, () => onSelect(ev.id))} className="cursor-pointer transition-colors hover:bg-slate-50 focus:bg-slate-50 focus:outline-none">
       <td className="break-words px-4 py-3 font-medium text-slate-900">{ev.event_name}</td>
       <td className="px-4 py-3">
         <code className="text-[10px] text-slate-400 truncate max-w-[80px] block" title={ev.msg_id}>{ev.msg_id}</code>
@@ -134,6 +139,8 @@ export function WebhookLogsCard({
   webhookAnalytics,
   loadWebhookData,
 }: WebhookLogsCardProps) {
+  const [selectedEventID, setSelectedEventID] = useState("");
+  const selectedEvent = webhookEvents.find((event) => event.id === selectedEventID) ?? null;
   return (
     <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
       <div className="flex flex-col gap-3 border-b border-slate-100 bg-slate-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
@@ -203,7 +210,7 @@ export function WebhookLogsCard({
 
       <div className="divide-y divide-slate-100 md:hidden">
         {webhookEvents.length > 0 ? webhookEvents.map((event, index) => (
-          <WebhookEventCard key={event.id || event.msg_id || index} event={event} />
+          <WebhookEventCard key={event.id || event.msg_id || index} event={event} onSelect={setSelectedEventID} />
         )) : (
           <div className="px-5 py-10 text-center text-sm text-slate-500">No incoming webhooks yet.</div>
         )}
@@ -227,7 +234,7 @@ export function WebhookLogsCard({
           <tbody className="divide-y divide-slate-100">
             {webhookEvents.length > 0 ? (
               webhookEvents.map((ev, index) => (
-                <WebhookEventRow key={ev.id || ev.msg_id || index} ev={ev} />
+                <WebhookEventRow key={ev.id || ev.msg_id || index} ev={ev} onSelect={setSelectedEventID} />
               ))
             ) : (
               <tr>
@@ -284,6 +291,7 @@ export function WebhookLogsCard({
           </div>
         </div>
       )}
+      {selectedEvent ? <WebhookEventDetailsDrawer event={selectedEvent} onClose={() => setSelectedEventID("")} /> : null}
     </div>
   );
 }

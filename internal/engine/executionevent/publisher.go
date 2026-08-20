@@ -171,8 +171,11 @@ func validateAppIdentity(event models.EngineExecutionEvent) error {
 	return nil
 }
 
+// appTransport identifies every execution ingress that must carry exact app
+// family, version, and immutable app identity.
 func appTransport(transport string) bool {
-	return transport == models.EngineExecutionTransportSDK || transport == models.EngineExecutionTransportMCP
+	return transport == models.EngineExecutionTransportSDK || transport == models.EngineExecutionTransportMCP ||
+		transport == models.EngineExecutionTransportREST
 }
 
 func recordPublish(ctx context.Context, event models.EngineExecutionEvent, publishErr error) {

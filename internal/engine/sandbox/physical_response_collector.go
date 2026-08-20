@@ -19,7 +19,8 @@ var (
 // PhysicalExecutionResult carries only the bounded canonical provider body
 // consumed by the Unified interpreter.
 type PhysicalExecutionResult struct {
-	Body []byte
+	Body       []byte
+	StatusCode int
 }
 
 // boundedJSONResponseCollector deliberately implements only the dispatcher's
@@ -127,7 +128,7 @@ func (collector *boundedJSONResponseCollector) Result() (PhysicalExecutionResult
 	if err != nil {
 		return PhysicalExecutionResult{}, ErrPhysicalResponseNotJSON
 	}
-	return PhysicalExecutionResult{Body: bytes.Clone(canonical)}, nil
+	return PhysicalExecutionResult{Body: bytes.Clone(canonical), StatusCode: collector.status}, nil
 }
 
 // captureStatus ignores empty status frames and rejects conflicting nonzero statuses.

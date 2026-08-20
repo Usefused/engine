@@ -10,23 +10,27 @@ import (
 )
 
 const (
-	engineMigrationAdvisoryLockKey     int64 = 0x465553454E47494E
-	engineMigrationLockQuery                 = `SELECT pg_advisory_xact_lock($1)`
-	engineMigrationVersion             int64 = 1
-	engineMigrationName                      = "20260810_engine_schema_convergence"
-	appTokenPolicyMigrationVersion     int64 = 2
-	appTokenPolicyMigrationName              = "20260810_app_token_policy"
-	contractEnvelopeMigrationVersion   int64 = 3
-	contractEnvelopeMigrationName            = "20260811_execution_contract_envelope"
-	idempotencyMediaMigrationVersion   int64 = 4
-	idempotencyMediaMigrationName            = "20260811_idempotency_response_media"
-	connectBrandingMigrationVersion    int64 = 5
-	connectBrandingMigrationName             = "20260819_connect_branding"
-	connectBrandColorMigrationVersion  int64 = 6
-	connectBrandColorMigrationName           = "20260819_connect_brand_color"
-	connectBrandVioletMigrationVersion int64 = 7
-	connectBrandVioletMigrationName          = "20260819_connect_brand_violet"
-	unifiedEmptySetHash                      = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+	engineMigrationAdvisoryLockKey      int64 = 0x465553454E47494E
+	engineMigrationLockQuery                  = `SELECT pg_advisory_xact_lock($1)`
+	engineMigrationVersion              int64 = 1
+	engineMigrationName                       = "20260810_engine_schema_convergence"
+	appTokenPolicyMigrationVersion      int64 = 2
+	appTokenPolicyMigrationName               = "20260810_app_token_policy"
+	contractEnvelopeMigrationVersion    int64 = 3
+	contractEnvelopeMigrationName             = "20260811_execution_contract_envelope"
+	idempotencyMediaMigrationVersion    int64 = 4
+	idempotencyMediaMigrationName             = "20260811_idempotency_response_media"
+	connectBrandingMigrationVersion     int64 = 5
+	connectBrandingMigrationName              = "20260819_connect_branding"
+	connectBrandColorMigrationVersion   int64 = 6
+	connectBrandColorMigrationName            = "20260819_connect_brand_color"
+	connectBrandVioletMigrationVersion  int64 = 7
+	connectBrandVioletMigrationName           = "20260819_connect_brand_violet"
+	managedOAuthRefreshMigrationVersion int64 = 8
+	managedOAuthRefreshMigrationName          = "20260820_managed_oauth_refresh"
+	restExecutionMigrationVersion       int64 = 9
+	restExecutionMigrationName                = "20260820_rest_execution_transport"
+	unifiedEmptySetHash                       = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
 )
 
 type engineMigration struct {
@@ -115,6 +119,8 @@ func engineMigrations() []engineMigration {
 		{Version: connectBrandingMigrationVersion, Name: connectBrandingMigrationName, Queries: connectBrandingMigrationQueries()},
 		{Version: connectBrandColorMigrationVersion, Name: connectBrandColorMigrationName, Queries: connectBrandColorMigrationQueries()},
 		{Version: connectBrandVioletMigrationVersion, Name: connectBrandVioletMigrationName, Queries: connectBrandVioletMigrationQueries()},
+		{Version: managedOAuthRefreshMigrationVersion, Name: managedOAuthRefreshMigrationName, Queries: managedOAuthRefreshMigrationQueries()},
+		{Version: restExecutionMigrationVersion, Name: restExecutionMigrationName, Queries: restExecutionMigrationQueries()},
 	}
 }
 
@@ -472,6 +478,7 @@ func engineSchemaQueries() []string {
 			id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 			bucket_id          uuid NOT NULL REFERENCES fused_buckets(id) ON DELETE CASCADE,
 			service_id         uuid NOT NULL,
+			service_version_id uuid,
 			end_user_ref       text NOT NULL,
 			created_by_app_id       uuid,
 			auth_type          text NOT NULL,
@@ -494,6 +501,11 @@ func engineSchemaQueries() []string {
 			-- reconnect before refresh material becomes unusable.
 			refresh_token_expires_at timestamptz,
 			last_used_at       timestamptz,
+			last_refresh_attempt_at timestamptz,
+			last_refreshed_at  timestamptz,
+			refresh_retry_not_before timestamptz,
+			refresh_lease_token uuid,
+			refresh_lease_expires_at timestamptz,
 			refresh_state      text NOT NULL DEFAULT 'ok',
 			-- Failure diagnostics contain stable codes and trace
 			-- correlation only; provider bodies, user references, and
@@ -505,13 +517,16 @@ func engineSchemaQueries() []string {
 			updated_at         timestamptz DEFAULT NOW(),
 			CONSTRAINT uq_fused_auth_connections UNIQUE (bucket_id, service_id, end_user_ref, auth_name),
 			CONSTRAINT chk_fused_auth_connections_refresh_state
-				CHECK (refresh_state IN ('ok', 'failed', 'expired', 'reconnect_required'))
+				CHECK (refresh_state IN ('ok', 'failed', 'expired', 'reconnect_required')),
+			CONSTRAINT chk_fused_auth_connections_refresh_lease
+				CHECK ((refresh_lease_token IS NULL) = (refresh_lease_expires_at IS NULL))
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_auth_connections_bucket_service
 		ON fused_auth_connections(bucket_id, service_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_auth_connections_refresh
-		ON fused_auth_connections(expires_at)
-		WHERE refresh_token IS NOT NULL AND refresh_state = 'ok';`,
+		ON fused_auth_connections(expires_at, id)
+		WHERE refresh_state IN ('ok', 'failed', 'expired')
+		  AND lower(auth_type) IN ('oauth', 'oauth2', 'oidc', 'openidconnect', 'open_id_connect');`,
 
 		// Provider resources carry routing context only. Keeping them separate
 		// from token rows lets one connection own several tenant endpoints without
@@ -552,6 +567,7 @@ func engineSchemaQueries() []string {
 			id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 				bucket_id          uuid NOT NULL REFERENCES fused_buckets(id) ON DELETE CASCADE,
 				service_id         uuid NOT NULL,
+				service_version_id uuid NOT NULL,
 				auth_type          text NOT NULL,
 				auth_name          text NOT NULL,
 				end_user_ref       text NOT NULL,
@@ -676,7 +692,7 @@ func engineSchemaQueries() []string {
 			created_at timestamp with time zone DEFAULT NOW(),
 			idempotency_replayed boolean NOT NULL DEFAULT false,
 			CONSTRAINT chk_fused_execution_app_identity CHECK (
-				transport NOT IN ('sdk', 'mcp') OR (
+				transport NOT IN ('sdk', 'mcp', 'rest') OR (
 					app_family_id IS NOT NULL AND app_id IS NOT NULL
 					AND NULLIF(BTRIM(app_version), '') IS NOT NULL
 				)
@@ -691,6 +707,10 @@ func engineSchemaQueries() []string {
 		ON fused_engine_execution_events(service_id, started_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_started
 		ON fused_engine_execution_events(started_at);`,
+		// Workspace Activity always scopes date-range aggregation by account; this
+		// order lets PostgreSQL bound the tenant slice before grouping dimensions.
+		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_account_started
+		ON fused_engine_execution_events(account_id, started_at DESC);`,
 		// Public-service insight reporting starts from committed canonical events.
 		// The projection marker and outbox are updated in one transaction so a
 		// Registry outage never blocks execution or causes double counting.
@@ -1555,6 +1575,77 @@ func connectBrandVioletMigrationQueries() []string {
 		   AND connect_primary_color = '#2563eb';`,
 		// New workspaces must use the same token as the compiled and embedded UI fallbacks.
 		`ALTER TABLE fused_workspaces ALTER COLUMN connect_primary_color SET DEFAULT '#6941ff';`,
+	}
+}
+
+// managedOAuthRefreshMigrationQueries adds exact contract identity and durable
+// lease state without rewriting any previously recorded Engine migration.
+func managedOAuthRefreshMigrationQueries() []string {
+	return []string{
+		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS service_version_id uuid;`,
+		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS last_refresh_attempt_at timestamptz;`,
+		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS last_refreshed_at timestamptz;`,
+		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS refresh_retry_not_before timestamptz;`,
+		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS refresh_lease_token uuid;`,
+		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS refresh_lease_expires_at timestamptz;`,
+		`ALTER TABLE fused_connect_sessions ADD COLUMN IF NOT EXISTS service_version_id uuid;`,
+		// A legacy credential can be pinned only when exactly one active local
+		// version exists. Ambiguous rows remain nil for foreground exact binding.
+		`WITH unambiguous_versions AS (
+			SELECT service_id, MIN(service_version_id::text)::uuid AS service_version_id
+			FROM fused_workspace_service_versions
+			WHERE status <> 'deprecated'
+			GROUP BY service_id
+			HAVING COUNT(*) = 1
+		)
+		UPDATE fused_auth_connections AS connection
+		SET service_version_id = version.service_version_id
+		FROM unambiguous_versions AS version
+		WHERE connection.service_id = version.service_id
+		  AND connection.service_version_id IS NULL;`,
+		// Pending browser sessions are equally safe to recover when their service
+		// has one active version; ambiguous legacy sessions fail closed in API code.
+		`WITH unambiguous_versions AS (
+			SELECT service_id, MIN(service_version_id::text)::uuid AS service_version_id
+			FROM fused_workspace_service_versions
+			WHERE status <> 'deprecated'
+			GROUP BY service_id
+			HAVING COUNT(*) = 1
+		)
+		UPDATE fused_connect_sessions AS session
+		SET service_version_id = version.service_version_id
+		FROM unambiguous_versions AS version
+		WHERE session.service_id = version.service_id
+		  AND session.service_version_id IS NULL;`,
+		`ALTER TABLE fused_auth_connections DROP CONSTRAINT IF EXISTS chk_fused_auth_connections_refresh_lease;`,
+		`ALTER TABLE fused_auth_connections ADD CONSTRAINT chk_fused_auth_connections_refresh_lease
+			CHECK ((refresh_lease_token IS NULL) = (refresh_lease_expires_at IS NULL));`,
+		// NOT VALID preserves ambiguous in-flight legacy sessions while enforcing
+		// exact service-version identity on every session created after migration.
+		`ALTER TABLE fused_connect_sessions DROP CONSTRAINT IF EXISTS chk_fused_connect_sessions_service_version;`,
+		`ALTER TABLE fused_connect_sessions ADD CONSTRAINT chk_fused_connect_sessions_service_version
+			CHECK (service_version_id IS NOT NULL) NOT VALID;`,
+		`DROP INDEX IF EXISTS idx_fused_auth_connections_refresh;`,
+		`CREATE INDEX idx_fused_auth_connections_refresh
+			ON fused_auth_connections(
+				COALESCE(LEAST(expires_at, refresh_token_expires_at), expires_at, refresh_token_expires_at), id
+			)
+			WHERE refresh_state IN ('ok', 'failed', 'expired')
+			  AND service_version_id IS NOT NULL
+			  AND lower(auth_type) IN ('oauth', 'oauth2', 'oidc', 'openidconnect', 'open_id_connect');`,
+	}
+}
+
+// restExecutionMigrationQueries widens the live execution-receipt identity
+// constraint without mutating any already-recorded Engine migration.
+func restExecutionMigrationQueries() []string {
+	return []string{
+		`ALTER TABLE fused_engine_execution_events DROP CONSTRAINT IF EXISTS chk_fused_execution_app_identity;`,
+		`ALTER TABLE fused_engine_execution_events ADD CONSTRAINT chk_fused_execution_app_identity
+			CHECK (transport NOT IN ('sdk', 'mcp', 'rest') OR (
+				app_family_id IS NOT NULL AND app_id IS NOT NULL
+				AND NULLIF(BTRIM(app_version), '') IS NOT NULL
+			)) NOT VALID;`,
 	}
 }
 

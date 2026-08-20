@@ -10,6 +10,7 @@ import {
   type SchemaContract,
 } from "~/lib/api";
 import { stripLinks } from "~/lib/format";
+import { typescriptSDKCallExample } from "~/lib/sdk-code-example";
 
 interface ComponentReferenceScope {
   componentScope: string;
@@ -114,6 +115,7 @@ function operationDisplayType(endpoint: IntegrationObject): string {
 // OperationMetadata surfaces persisted v3 identity and policy instead of hiding it in the raw response.
 function OperationMetadata({ endpoint }: { endpoint: IntegrationObject }) {
   const facts = [
+    ["Operation ID", endpoint.name],
     endpoint.provider_protocol && ["Protocol", endpoint.provider_protocol],
     endpoint.operation_kind && ["Operation", endpoint.operation_kind],
     endpoint.normalized_path && ["Normalized path", endpoint.normalized_path],
@@ -144,7 +146,7 @@ function OperationMetadata({ endpoint }: { endpoint: IntegrationObject }) {
 export interface EndpointDetailsSidebarProps {
   selectedEndpoint: IntegrationObject;
   setSelectedEndpoint: (ep: IntegrationObject | null) => void;
-  srv: { id: string };
+  srv: { id: string; name: string };
   drift: DriftSnapshot[];
   driftAction: string | null;
   handleDismiss: (id: string) => void;
@@ -180,7 +182,7 @@ export default function EndpointDetailsSidebar({
       <div className="fixed inset-y-0 right-0 w-full md:w-[600px] bg-white shadow-2xl z-50 overflow-y-auto overflow-x-hidden transform transition-transform border-l border-slate-200 flex flex-col">
         <EndpointSidebarHeader endpoint={selectedEndpoint} endpointType={endpointType} copiedPath={copiedPath} setCopiedPath={setCopiedPath} close={() => setSelectedEndpoint(null)} />
         <EndpointDriftPanel snapshots={endpointDrift} driftAction={driftAction} handleDismiss={handleDismiss} handleApply={handleApply} />
-        <EndpointContractContent endpoint={selectedEndpoint} isLoading={isLoading} requestSchema={requestSchema} responseSchemas={responseSchemas} serviceId={srv.id} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />
+        <EndpointContractContent endpoint={selectedEndpoint} isLoading={isLoading} requestSchema={requestSchema} responseSchemas={responseSchemas} serviceId={srv.id} serviceName={srv.name} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />
       </div>
     </>
   );
@@ -285,17 +287,19 @@ function ContractValue({ label, value, className }: { label: string; value: unkn
 }
 
 // EndpointContractContent switches between loading and exact contract sections.
-function EndpointContractContent({ endpoint, isLoading, requestSchema, responseSchemas, serviceId, componentScope, allowRemoteRefs }: {
+function EndpointContractContent({ endpoint, isLoading, requestSchema, responseSchemas, serviceId, serviceName, componentScope, allowRemoteRefs }: {
   endpoint: IntegrationObject;
   isLoading: boolean;
   requestSchema?: JsonSchemaNode;
   responseSchemas: CanonicalResponseSchema[];
   serviceId: string;
+  serviceName: string;
 } & ComponentReferenceScope) {
   if (isLoading) return <div className="flex min-h-[300px] flex-1 items-center justify-center text-slate-400"><Loader2 className="mr-3 h-8 w-8 animate-spin text-blue-500" />Loading endpoint details...</div>;
   return (
     <div className="flex flex-1 flex-col space-y-8 p-4 sm:p-6">
       <EndpointSummary endpoint={endpoint} />
+      <GeneratedSDKExample endpoint={endpoint} serviceName={serviceName} requestSchema={requestSchema} />
       <ParameterTable endpoint={endpoint} />
       <RequestSchemaSection endpoint={endpoint} schema={requestSchema} serviceId={serviceId} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />
       <ResponseSchemasSection responses={responseSchemas} serviceId={serviceId} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />
@@ -311,10 +315,97 @@ function EndpointSummary({ endpoint }: { endpoint: IntegrationObject }) {
   return <div><h2 className="text-lg font-semibold text-slate-900">{endpoint.name}</h2><OperationMetadata endpoint={endpoint} />{(endpoint.deprecated || endpoint.deprecation_date) && <p className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">{deprecation}</p>}{endpoint.description && <div className="mt-2 text-sm text-slate-600" dangerouslySetInnerHTML={{ __html: stripLinks(endpoint.description) }} />}</div>;
 }
 
-// ParameterTable exposes exact wire location and path encoding decisions.
+// GeneratedSDKExample connects the exact operationId to a copyable generated
+// TypeScript call without exposing credentials or provider-derived examples.
+function GeneratedSDKExample({ endpoint, serviceName, requestSchema }: { endpoint: IntegrationObject; serviceName: string; requestSchema?: JsonSchemaNode }) {
+  const [copied, setCopied] = useState(false);
+  const code = typescriptSDKCallExample(serviceName, endpoint, requestSchema);
+
+  // copyExample reports a short-lived local state change and never sends the
+  // generated snippet or operation metadata to another service.
+  function copyExample() {
+    navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
+
+  return (
+    <details className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+      <summary className="flex cursor-pointer list-none items-center justify-between px-3 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+        <span>Generated SDK example</span>
+        <span className="rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700">TypeScript</span>
+      </summary>
+      <div className="relative border-t border-slate-200 bg-slate-950">
+        <button onClick={copyExample} className="absolute right-2 top-2 rounded p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white" title="Copy generated example" aria-label="Copy generated SDK example">
+          {copied ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+        </button>
+        <pre className="overflow-x-auto p-4 pr-10 text-[11px] leading-5 text-slate-200"><code>{code}</code></pre>
+      </div>
+    </details>
+  );
+}
+
+type EndpointParameter = NonNullable<IntegrationObject["parameters"]>[number];
+
+// ParameterEncodingNote surfaces only an explicit non-default wire decision so
+// ordinary textual parameters are not burdened with a meaningless default.
+function ParameterEncodingNote({ pathEncoding }: { pathEncoding?: string }) {
+  if (!pathEncoding) return null;
+  // Slash preservation is the only currently supported override and deserves
+  // product language instead of its internal contract identifier.
+  const label = pathEncoding === "preserve_slashes"
+    ? "Preserves slashes"
+    : `Encoding: ${pathEncoding.replace(/[_-]+/g, " ")}`;
+  return <span className="mt-1 block break-words font-sans text-[10px] text-slate-500">{label}</span>;
+}
+
+// ParameterRequirementBadge makes required state scannable without consuming
+// the width of separate Yes and No values.
+function ParameterRequirementBadge({ required }: { required: boolean }) {
+  const style = required
+    ? "bg-blue-50 text-blue-700 ring-blue-200"
+    : "bg-slate-50 text-slate-500 ring-slate-200";
+  return <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ring-1 ring-inset ${style}`}>{required ? "Required" : "Optional"}</span>;
+}
+
+// ParameterRow keeps long identifiers contained while retaining the complete
+// name in both visible wrapped text and the native hover tooltip.
+function ParameterRow({ parameter }: { parameter: EndpointParameter }) {
+  return (
+    <tr className="border-t border-slate-200 align-top">
+      <td className="w-[46%] px-3 py-3 sm:px-4">
+        <code className="break-all text-xs text-slate-900" title={parameter.name}>{parameter.name}</code>
+        <ParameterEncodingNote pathEncoding={parameter.path_encoding} />
+      </td>
+      <td className="w-[18%] px-2 py-3 text-xs capitalize text-slate-600 sm:px-4">{parameter.in}</td>
+      <td className="w-[18%] break-all px-2 py-3 font-mono text-xs text-slate-700 sm:px-4">{parameter.type}</td>
+      <td className="w-[18%] px-2 py-3 sm:px-4"><ParameterRequirementBadge required={parameter.required} /></td>
+    </tr>
+  );
+}
+
+// ParameterTable presents exact type and location data without forcing the
+// sidebar into a horizontally scrolling desktop-width table.
 function ParameterTable({ endpoint }: { endpoint: IntegrationObject }) {
   if (!endpoint.parameters?.length) return null;
-  return <div><h3 className="mb-3 border-b pb-2 text-sm font-semibold">Parameters</h3><div className="overflow-x-auto rounded-lg border"><table className="min-w-[640px] w-full text-left text-sm"><thead className="bg-slate-100"><tr>{["Name", "In", "Type", "Encoding", "Required"].map((label) => <th key={label} className="px-4 py-2">{label}</th>)}</tr></thead><tbody>{endpoint.parameters.map((parameter) => <tr key={`${parameter.in}:${parameter.name}`} className="border-t"><td className="px-4 py-3 font-mono text-xs">{parameter.name}</td><td className="px-4 py-3">{parameter.in}</td><td className="px-4 py-3 font-mono text-xs">{parameter.type}</td><td className="px-4 py-3 font-mono text-xs">{parameter.path_encoding || "default"}</td><td className="px-4 py-3">{parameter.required ? "Yes" : "No"}</td></tr>)}</tbody></table></div></div>;
+  return (
+    <div>
+      <h3 className="mb-3 border-b pb-2 text-sm font-semibold">Parameters</h3>
+      <div className="overflow-hidden rounded-lg border border-slate-200">
+        <table className="w-full table-fixed text-left text-sm">
+          <thead className="bg-slate-100 text-xs text-slate-700">
+            <tr>
+              <th className="w-[46%] px-3 py-2 sm:px-4">Name</th>
+              <th className="w-[18%] px-2 py-2 sm:px-4">Location</th>
+              <th className="w-[18%] px-2 py-2 sm:px-4">Type</th>
+              <th className="w-[18%] px-2 py-2 sm:px-4">Requirement</th>
+            </tr>
+          </thead>
+          <tbody>{endpoint.parameters.map((parameter) => <ParameterRow key={`${parameter.in}:${parameter.name}`} parameter={parameter} />)}</tbody>
+        </table>
+      </div>
+    </div>
+  );
 }
 
 // RequestSchemaSection renders the canonical default request representation.

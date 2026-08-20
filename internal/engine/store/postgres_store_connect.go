@@ -17,13 +17,14 @@ const connectConfigColumns = `
 	created_at, updated_at`
 
 const authConnectionColumns = `
-	id,  bucket_id, service_id, end_user_ref, created_by_app_id,
+	id,  bucket_id, service_id, service_version_id, end_user_ref, created_by_app_id,
 	auth_type, auth_name, encrypted_dek, access_token, refresh_token, id_token, token_type,
 	scopes, scope_source, issuer, subject, identity_claims, expires_at, refresh_token_expires_at, last_used_at,
-	refresh_state, last_failure_code, last_failure_at, last_failure_trace_id, created_at, updated_at`
+	last_refresh_attempt_at, last_refreshed_at, refresh_retry_not_before, refresh_state,
+	last_failure_code, last_failure_at, last_failure_trace_id, created_at, updated_at`
 
 const connectSessionColumns = `
-	id,  bucket_id, service_id, auth_type, auth_name, end_user_ref, state_hash,
+	id,  bucket_id, service_id, service_version_id, auth_type, auth_name, end_user_ref, state_hash,
 	nonce_hash, encrypted_dek, pkce_verifier, created_by_app_id, return_url, resource_input, requested_scopes, expires_at, used_at, created_at`
 
 const connectInputSessionColumns = `
@@ -111,9 +112,21 @@ func (s *postgresStore) ListWorkspaceConnectConfigs(ctx context.Context) ([]Work
 // prefixedConnectConfigColumns keeps joined connect-config reads aligned with
 // the canonical scanner while avoiding ambiguous column names in SQL joins.
 func prefixedConnectConfigColumns(alias string) string {
-	columns := strings.Split(strings.TrimSpace(connectConfigColumns), ",")
-	// Each selected column belongs to the connect-config alias; qualifying at
-	// construction time keeps the shared column order as the single contract.
+	return prefixedColumns(connectConfigColumns, alias)
+}
+
+// prefixedAuthConnectionColumns qualifies the canonical credential projection
+// used inside UPDATE CTEs where unqualified RETURNING names are ambiguous.
+func prefixedAuthConnectionColumns(alias string) string {
+	return prefixedColumns(authConnectionColumns, alias)
+}
+
+// prefixedColumns preserves a scanner's canonical order while qualifying every
+// field for joined or data-modifying CTE projections.
+func prefixedColumns(columnList, alias string) string {
+	columns := strings.Split(strings.TrimSpace(columnList), ",")
+	// Every selected column belongs to the supplied alias; qualifying at
+	// construction time keeps each shared scanner order as the single contract.
 	for index := range columns {
 		columns[index] = alias + "." + strings.TrimSpace(columns[index])
 	}
@@ -153,17 +166,18 @@ type authConnectionRowQuerier interface {
 func upsertAuthConnectionRow(ctx context.Context, querier authConnectionRowQuerier, conn AuthConnection) (*AuthConnection, error) {
 	query := `
 		INSERT INTO fused_auth_connections (
-			bucket_id, service_id, end_user_ref, created_by_app_id,
+			bucket_id, service_id, service_version_id, end_user_ref, created_by_app_id,
 			auth_type, auth_name, encrypted_dek, access_token, refresh_token, id_token,
 			token_type, scopes, scope_source, issuer, subject, identity_claims, expires_at, refresh_token_expires_at,
 			refresh_state, last_failure_code, last_failure_at, last_failure_trace_id
 		)
-		SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18,
-		       $19, $20, $21, $22
+		SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18, $19,
+		       $20, $21, $22, $23
 		FROM fused_buckets b
 		WHERE b.id = $1
 		ON CONFLICT ON CONSTRAINT uq_fused_auth_connections
 		DO UPDATE SET
+			service_version_id = COALESCE(EXCLUDED.service_version_id, fused_auth_connections.service_version_id),
 			created_by_app_id = EXCLUDED.created_by_app_id,
 			auth_type = EXCLUDED.auth_type,
 			auth_name = EXCLUDED.auth_name,
@@ -183,10 +197,13 @@ func upsertAuthConnectionRow(ctx context.Context, querier authConnectionRowQueri
 			last_failure_code = EXCLUDED.last_failure_code,
 			last_failure_at = EXCLUDED.last_failure_at,
 			last_failure_trace_id = EXCLUDED.last_failure_trace_id,
+			refresh_retry_not_before = NULL,
+			refresh_lease_token = NULL,
+			refresh_lease_expires_at = NULL,
 			updated_at = NOW()
 		RETURNING ` + authConnectionColumns
 	return scanAuthConnection(querier.QueryRow(ctx, query,
-		conn.BucketID, conn.ServiceID, conn.EndUserRef, uuidOrNil(conn.CreatedByAppID),
+		conn.BucketID, conn.ServiceID, uuidOrNil(conn.ServiceVersionID), conn.EndUserRef, uuidOrNil(conn.CreatedByAppID),
 		conn.AuthType, conn.AuthName, conn.EncryptedDEK, conn.EncryptedAccessToken, emptyStringOrNil(conn.EncryptedRefreshToken), emptyStringOrNil(conn.EncryptedIDToken),
 		defaultString(conn.TokenType, "Bearer"), nonNilStrings(conn.Scopes), defaultString(conn.ScopeSource, "none"), conn.Issuer, conn.Subject,
 		jsonObjectBytes(conn.IdentityClaims), conn.ExpiresAt, conn.RefreshTokenExpiresAt, defaultString(conn.RefreshState, "ok"),
@@ -308,22 +325,163 @@ func (s *postgresStore) RecordAuthConnectionFailure(ctx context.Context, id uuid
 	return nil
 }
 
-func (s *postgresStore) ListAuthConnectionsNeedingRefresh(ctx context.Context, cutoff time.Time, limit int) ([]AuthConnection, error) {
-	query := `
-		SELECT ` + authConnectionColumns + `
+// ClaimAuthConnectionsForRefresh atomically leases one ordered worker page;
+// SKIP LOCKED lets Engine replicas drain the same due set without blocking.
+func (s *postgresStore) ClaimAuthConnectionsForRefresh(ctx context.Context, cutoff, passStartedAt, now, leaseExpiresAt time.Time, limit int) ([]AuthConnectionRefreshClaim, error) {
+	if limit <= 0 || !leaseExpiresAt.After(now) {
+		return nil, ErrInvalidAuthConnectionRefreshClaim
+	}
+	query := `WITH candidates AS (
+		SELECT id
 		FROM fused_auth_connections
-		WHERE refresh_token IS NOT NULL
-		AND refresh_state = 'ok'
-		AND expires_at IS NOT NULL
-		AND expires_at <= $1
-		ORDER BY expires_at ASC
-		LIMIT $2`
-	rows, err := s.db.Query(ctx, query, cutoff, limit)
+		WHERE service_version_id IS NOT NULL
+		  AND lower(auth_type) IN ('oauth', 'oauth2', 'oidc', 'openidconnect', 'open_id_connect')
+		  AND refresh_state IN ('ok', 'failed', 'expired')
+		  AND COALESCE(LEAST(expires_at, refresh_token_expires_at), expires_at, refresh_token_expires_at) <= $1
+		  AND (refresh_token IS NOT NULL OR expires_at <= $3)
+		  AND (refresh_retry_not_before IS NULL OR refresh_retry_not_before <= $3)
+		  AND (refresh_lease_expires_at IS NULL OR refresh_lease_expires_at <= $3)
+		  AND (last_refresh_attempt_at IS NULL OR last_refresh_attempt_at < $2)
+		ORDER BY COALESCE(LEAST(expires_at, refresh_token_expires_at), expires_at, refresh_token_expires_at) ASC, id ASC
+		FOR UPDATE SKIP LOCKED
+		LIMIT $5
+	), claimed AS (
+		UPDATE fused_auth_connections AS connection
+		SET refresh_lease_token = gen_random_uuid(),
+			refresh_lease_expires_at = $4,
+			last_refresh_attempt_at = $3,
+			updated_at = $3
+		FROM candidates
+		WHERE connection.id = candidates.id
+		RETURNING ` + prefixedAuthConnectionColumns("connection") + `,
+			connection.refresh_lease_token, connection.refresh_lease_expires_at
+	)
+	SELECT * FROM claimed
+	ORDER BY COALESCE(LEAST(expires_at, refresh_token_expires_at), expires_at, refresh_token_expires_at) ASC, id ASC`
+	rows, err := s.db.Query(ctx, query, cutoff, passStartedAt, now, leaseExpiresAt, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return collectAuthConnections(rows)
+	return collectAuthConnectionRefreshClaims(rows)
+}
+
+// TryClaimAuthConnectionRefresh leases one foreground connection and binds a
+// legacy nil version only to the exact version already resolved for execution.
+func (s *postgresStore) TryClaimAuthConnectionRefresh(ctx context.Context, id, serviceVersionID uuid.UUID, now, leaseExpiresAt time.Time) (*AuthConnectionRefreshClaim, error) {
+	if id == uuid.Nil || serviceVersionID == uuid.Nil || !leaseExpiresAt.After(now) {
+		return nil, ErrInvalidAuthConnectionRefreshClaim
+	}
+	query := `UPDATE fused_auth_connections
+		SET service_version_id = COALESCE(service_version_id, $2),
+			refresh_lease_token = gen_random_uuid(),
+			refresh_lease_expires_at = $4,
+			last_refresh_attempt_at = $3,
+			updated_at = $3
+		WHERE id = $1
+		  AND refresh_state IN ('ok', 'failed', 'expired')
+		  AND COALESCE(LEAST(expires_at, refresh_token_expires_at), expires_at, refresh_token_expires_at) <= $3::timestamptz + INTERVAL '5 minutes'
+		  AND (refresh_token IS NOT NULL OR expires_at <= $3)
+		  AND (refresh_lease_expires_at IS NULL OR refresh_lease_expires_at <= $3)
+		  AND (refresh_retry_not_before IS NULL OR refresh_retry_not_before <= $3)
+		RETURNING ` + authConnectionColumns + `, refresh_lease_token, refresh_lease_expires_at`
+	claim, err := scanAuthConnectionRefreshClaim(s.db.QueryRow(ctx, query, id, serviceVersionID, now, leaseExpiresAt))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	return claim, err
+}
+
+// CompleteAuthConnectionRefresh stores rotated encrypted material only while
+// the caller still owns the lease, rejecting stale cross-replica completions.
+func (s *postgresStore) CompleteAuthConnectionRefresh(ctx context.Context, id, leaseToken uuid.UUID, refreshed AuthConnection, refreshedAt time.Time) (*AuthConnection, bool, error) {
+	if leaseToken == uuid.Nil || validateAuthConnectionMaterial(refreshed) != nil {
+		return nil, false, ErrInvalidEncryptedAuthMaterial
+	}
+	query := `UPDATE fused_auth_connections
+		SET encrypted_dek = $3,
+			access_token = $4,
+			refresh_token = COALESCE($5, refresh_token),
+			id_token = COALESCE($6, id_token),
+			token_type = $7,
+			scopes = $8,
+			scope_source = $9,
+			issuer = $10,
+			subject = $11,
+			identity_claims = $12::jsonb,
+			expires_at = $13,
+			refresh_token_expires_at = $14,
+			last_refreshed_at = $15,
+			refresh_retry_not_before = $16,
+			refresh_state = 'ok',
+			last_failure_code = '',
+			last_failure_at = NULL,
+			last_failure_trace_id = '',
+			refresh_lease_token = NULL,
+			refresh_lease_expires_at = NULL,
+			updated_at = $15
+		WHERE id = $1
+		  AND refresh_lease_token = $2
+		  AND refresh_lease_expires_at > $15
+		RETURNING ` + authConnectionColumns
+	connection, err := scanAuthConnection(s.db.QueryRow(ctx, query,
+		id, leaseToken, refreshed.EncryptedDEK, refreshed.EncryptedAccessToken,
+		emptyStringOrNil(refreshed.EncryptedRefreshToken), emptyStringOrNil(refreshed.EncryptedIDToken),
+		defaultString(refreshed.TokenType, "Bearer"), nonNilStrings(refreshed.Scopes),
+		defaultString(refreshed.ScopeSource, "none"), refreshed.Issuer, refreshed.Subject,
+		jsonObjectBytes(refreshed.IdentityClaims), refreshed.ExpiresAt, refreshed.RefreshTokenExpiresAt, refreshedAt,
+		refreshed.RefreshRetryNotBefore,
+	))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	return connection, err == nil, err
+}
+
+// ReleaseAuthConnectionRefresh records a bounded transient failure and retry
+// time while keeping refresh_state ok so a later worker pass can retry it.
+func (s *postgresStore) ReleaseAuthConnectionRefresh(ctx context.Context, id, leaseToken uuid.UUID, retryNotBefore time.Time, failureCode, traceID string, failedAt time.Time) (bool, error) {
+	return s.finishAuthConnectionRefreshLease(ctx, id, leaseToken, "ok", &retryNotBefore, failureCode, traceID, failedAt)
+}
+
+// MarkAuthConnectionReconnectRequired permanently stops managed refresh after
+// the provider rejects the grant and exposes only sanitized failure metadata.
+func (s *postgresStore) MarkAuthConnectionReconnectRequired(ctx context.Context, id, leaseToken uuid.UUID, failureCode, traceID string, failedAt time.Time) (bool, error) {
+	return s.finishAuthConnectionRefreshLease(ctx, id, leaseToken, "reconnect_required", nil, failureCode, traceID, failedAt)
+}
+
+// finishAuthConnectionRefreshLease performs the shared lease-token CAS for
+// transient release and permanent reconnect state transitions.
+func (s *postgresStore) finishAuthConnectionRefreshLease(ctx context.Context, id, leaseToken uuid.UUID, state string, retryNotBefore *time.Time, failureCode, traceID string, failedAt time.Time) (bool, error) {
+	if id == uuid.Nil || leaseToken == uuid.Nil {
+		return false, ErrInvalidAuthConnectionRefreshClaim
+	}
+	tag, err := s.db.Exec(ctx, `UPDATE fused_auth_connections
+		SET refresh_state = $3,
+			refresh_retry_not_before = $4,
+			last_failure_code = $5,
+			last_failure_at = $6,
+			last_failure_trace_id = $7,
+			refresh_lease_token = NULL,
+			refresh_lease_expires_at = NULL,
+			updated_at = $6
+		WHERE id = $1
+		  AND refresh_lease_token = $2
+		  AND refresh_lease_expires_at > $6`, id, leaseToken, state, retryNotBefore, failureCode, failedAt, traceID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// GetAuthConnectionByID reloads one connection for internal lease contention;
+// tenant-facing handlers must continue using bucket-authorized lookup methods.
+func (s *postgresStore) GetAuthConnectionByID(ctx context.Context, id uuid.UUID) (*AuthConnection, error) {
+	connection, err := scanAuthConnection(s.db.QueryRow(ctx, `SELECT `+authConnectionColumns+` FROM fused_auth_connections WHERE id = $1`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	return connection, err
 }
 
 // CreateConnectSession uses the shared insert path so direct connect starts and
@@ -339,7 +497,7 @@ type connectQueryRower interface {
 // insertConnectSession accepts either the pool or an existing transaction so
 // form-token consumption can be atomic without duplicating insert SQL.
 func insertConnectSession(ctx context.Context, db connectQueryRower, session ConnectSession) (*ConnectSession, error) {
-	if strings.TrimSpace(session.AuthType) == "" || strings.TrimSpace(session.AuthName) == "" {
+	if session.ServiceVersionID == uuid.Nil || strings.TrimSpace(session.AuthType) == "" || strings.TrimSpace(session.AuthName) == "" {
 		return nil, ErrInvalidEncryptedAuthMaterial
 	}
 	if session.EncryptedPKCEVerifier != "" && (!looksWrappedDEK(session.EncryptedDEK) || !looksEncryptedValue(session.EncryptedPKCEVerifier)) {
@@ -347,15 +505,15 @@ func insertConnectSession(ctx context.Context, db connectQueryRower, session Con
 	}
 	query := `
 		INSERT INTO fused_connect_sessions (
-			bucket_id, service_id, auth_type, auth_name, end_user_ref, state_hash,
+			bucket_id, service_id, service_version_id, auth_type, auth_name, end_user_ref, state_hash,
 			nonce_hash, encrypted_dek, pkce_verifier, created_by_app_id, return_url, resource_input, requested_scopes, expires_at
 			)
-			SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+			SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
 			FROM fused_buckets b
 			WHERE b.id = $1
 			RETURNING ` + connectSessionColumns
 	return scanConnectSession(db.QueryRow(ctx, query,
-		session.BucketID, session.ServiceID, session.AuthType, session.AuthName, session.EndUserRef,
+		session.BucketID, session.ServiceID, session.ServiceVersionID, session.AuthType, session.AuthName, session.EndUserRef,
 		session.StateHash, session.NonceHash, session.EncryptedDEK, session.EncryptedPKCEVerifier,
 		uuidOrNil(session.CreatedByAppID), session.ReturnURL, jsonObjectBytes(session.ResourceInputJSON), session.RequestedScopes, session.ExpiresAt,
 	))
@@ -532,18 +690,31 @@ func collectWorkspaceConnectConfigs(rows rowsScanner) ([]WorkspaceConnectConfig,
 	return configs, rows.Err()
 }
 
+// scanAuthConnection reads the canonical credential projection without private
+// lease suffix fields used by worker claims.
 func scanAuthConnection(row rowScanner) (*AuthConnection, error) {
+	return scanAuthConnectionWithSuffix(row)
+}
+
+// scanAuthConnectionWithSuffix scans the canonical connection projection plus
+// optional private columns used only by refresh-claim persistence.
+func scanAuthConnectionWithSuffix(row rowScanner, suffix ...any) (*AuthConnection, error) {
 	var conn AuthConnection
-	var createdBy *uuid.UUID
+	var createdBy, serviceVersionID *uuid.UUID
 	var refreshToken, idToken *string
-	err := row.Scan(
-		&conn.ID, &conn.BucketID, &conn.ServiceID, &conn.EndUserRef, &createdBy,
+	targets := []any{
+		&conn.ID, &conn.BucketID, &conn.ServiceID, &serviceVersionID, &conn.EndUserRef, &createdBy,
 		&conn.AuthType, &conn.AuthName, &conn.EncryptedDEK, &conn.EncryptedAccessToken, &refreshToken, &idToken, &conn.TokenType,
 		&conn.Scopes, &conn.ScopeSource, &conn.Issuer, &conn.Subject, &conn.IdentityClaims, &conn.ExpiresAt, &conn.RefreshTokenExpiresAt, &conn.LastUsedAt,
+		&conn.LastRefreshAttemptAt, &conn.LastRefreshedAt, &conn.RefreshRetryNotBefore,
 		&conn.RefreshState, &conn.LastFailureCode, &conn.LastFailureAt, &conn.LastFailureTraceID, &conn.CreatedAt, &conn.UpdatedAt,
-	)
+	}
+	err := row.Scan(append(targets, suffix...)...)
 	if createdBy != nil {
 		conn.CreatedByAppID = *createdBy
+	}
+	if serviceVersionID != nil {
+		conn.ServiceVersionID = *serviceVersionID
 	}
 	if refreshToken != nil {
 		conn.EncryptedRefreshToken = *refreshToken
@@ -552,6 +723,32 @@ func scanAuthConnection(row rowScanner) (*AuthConnection, error) {
 		conn.EncryptedIDToken = *idToken
 	}
 	return &conn, err
+}
+
+// scanAuthConnectionRefreshClaim keeps lease fields outside AuthConnection
+// while reusing its exact canonical database projection.
+func scanAuthConnectionRefreshClaim(row rowScanner) (*AuthConnectionRefreshClaim, error) {
+	var claim AuthConnectionRefreshClaim
+	connection, err := scanAuthConnectionWithSuffix(row, &claim.LeaseToken, &claim.LeaseExpiresAt)
+	if err != nil {
+		return nil, err
+	}
+	claim.Connection = *connection
+	return &claim, nil
+}
+
+// collectAuthConnectionRefreshClaims scans one claimed worker page and reports
+// any cursor error after all rows have been consumed.
+func collectAuthConnectionRefreshClaims(rows rowsScanner) ([]AuthConnectionRefreshClaim, error) {
+	var claims []AuthConnectionRefreshClaim
+	for rows.Next() {
+		claim, err := scanAuthConnectionRefreshClaim(rows)
+		if err != nil {
+			return nil, err
+		}
+		claims = append(claims, *claim)
+	}
+	return claims, rows.Err()
 }
 
 func collectAuthConnections(rows rowsScanner) ([]AuthConnection, error) {
@@ -566,16 +763,21 @@ func collectAuthConnections(rows rowsScanner) ([]AuthConnection, error) {
 	return connections, rows.Err()
 }
 
+// scanConnectSession tolerates legacy nil version IDs so callback code can fail
+// those ambiguous sessions closed with a typed browser response.
 func scanConnectSession(row rowScanner) (*ConnectSession, error) {
 	var session ConnectSession
-	var createdBy *uuid.UUID
+	var createdBy, serviceVersionID *uuid.UUID
 	err := row.Scan(
-		&session.ID, &session.BucketID, &session.ServiceID, &session.AuthType, &session.AuthName, &session.EndUserRef,
+		&session.ID, &session.BucketID, &session.ServiceID, &serviceVersionID, &session.AuthType, &session.AuthName, &session.EndUserRef,
 		&session.StateHash, &session.NonceHash, &session.EncryptedDEK, &session.EncryptedPKCEVerifier, &createdBy,
 		&session.ReturnURL, &session.ResourceInputJSON, &session.RequestedScopes, &session.ExpiresAt, &session.UsedAt, &session.CreatedAt,
 	)
 	if createdBy != nil {
 		session.CreatedByAppID = *createdBy
+	}
+	if serviceVersionID != nil {
+		session.ServiceVersionID = *serviceVersionID
 	}
 	return &session, err
 }

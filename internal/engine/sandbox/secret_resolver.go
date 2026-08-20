@@ -5,11 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
-	"github.com/Usefused/engine/internal/engine/connectauth"
 	"github.com/Usefused/engine/internal/engine/requestbinding"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/authrouting"
@@ -60,14 +58,18 @@ type CredentialRequest struct {
 }
 
 type secretResolver struct {
-	db        store.Store
-	masterKey []byte
+	db                 store.Store
+	masterKey          []byte
+	refreshCoordinator *AuthRefreshCoordinator
 }
 
+// NewSecretResolver creates the request credential resolver and its shared
+// lease-aware connected-auth refresh coordinator.
 func NewSecretResolver(db store.Store, masterKey []byte) SecretResolver {
 	return &secretResolver{
-		db:        db,
-		masterKey: masterKey,
+		db:                 db,
+		masterKey:          masterKey,
+		refreshCoordinator: NewAuthRefreshCoordinator(db, masterKey),
 	}
 }
 
@@ -105,7 +107,7 @@ func (r *secretResolver) ResolveExecutionCredentials(ctx context.Context, reques
 	if err := r.mergeStoredSecrets(ctx, scope.BucketID, request.ServiceID, finalCreds, request.Auths, request.Requirements); err != nil {
 		return nil, nil, err
 	}
-	if err := r.resolveConnectedAuth(ctx, scope.BucketID, request.ServiceID, request.Auths, request.Requirements, finalCreds); err != nil {
+	if err := r.resolveConnectedAuth(ctx, scope.BucketID, request.ServiceID, request.ServiceVersionID, request.Auths, request.Requirements, finalCreds); err != nil {
 		return nil, nil, err
 	}
 	values, err := resolveRequestBindings(bindings, finalCreds, scope.BucketID)
@@ -423,7 +425,7 @@ func (r *secretResolver) decryptStoredSecret(serviceID uuid.UUID, sec store.Work
 
 // resolveConnectedAuth turns a stable end-user reference into the actual
 // provider credential only inside Engine's execution path.
-func (r *secretResolver) resolveConnectedAuth(ctx context.Context, bucketID, serviceID uuid.UUID, auths fusedobject.AuthConfigs, requirements authrouting.Requirements, credentials map[string]any) error {
+func (r *secretResolver) resolveConnectedAuth(ctx context.Context, bucketID, serviceID, serviceVersionID uuid.UUID, auths fusedobject.AuthConfigs, requirements authrouting.Requirements, credentials map[string]any) error {
 	endUserRef := connectedEndUserRef(credentials)
 	if !connectedAuthResolutionRequired(endUserRef, credentials, requirements) {
 		return nil
@@ -437,7 +439,7 @@ func (r *secretResolver) resolveConnectedAuth(ctx context.Context, bucketID, ser
 		// the dispatcher which provider slot receives the decrypted access token.
 		return errors.New("connected auth requires fused_auth_name or fused_auth_type")
 	}
-	conn, err := r.usableAuthConnection(ctx, bucketID, serviceID, endUserRef, authName, auths)
+	conn, err := r.usableAuthConnection(ctx, bucketID, serviceID, serviceVersionID, endUserRef, authName)
 	if err != nil {
 		return err
 	}
@@ -592,7 +594,7 @@ func selectedConnectedAuthName(credentials map[string]any, auths fusedobject.Aut
 
 // usableAuthConnection refreshes near-expiry tokens before dispatch while
 // still allowing a currently-valid token through if the provider is flaky.
-func (r *secretResolver) usableAuthConnection(ctx context.Context, bucketID, serviceID uuid.UUID, endUserRef, authName string, auths fusedobject.AuthConfigs) (*store.AuthConnection, error) {
+func (r *secretResolver) usableAuthConnection(ctx context.Context, bucketID, serviceID, serviceVersionID uuid.UUID, endUserRef, authName string) (*store.AuthConnection, error) {
 	conn, err := r.db.GetAuthConnection(ctx, bucketID, serviceID, endUserRef, authName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch auth connection: %w", err)
@@ -605,254 +607,13 @@ func (r *secretResolver) usableAuthConnection(ctx context.Context, bucketID, ser
 	if conn.RefreshState == reconnectRequiredCode {
 		return nil, newReconnectRequiredError(conn, "stored_grant_unusable")
 	}
-	now := time.Now().UTC()
-	if refreshed, err := r.refreshIfDue(ctx, conn, authName, auths, now); err != nil {
-		return nil, err
-	} else if refreshed != nil {
-		return refreshed, nil
+	coordinator := r.refreshCoordinator
+	if coordinator == nil {
+		// Focused legacy constructions may instantiate secretResolver directly;
+		// building the same coordinator lazily keeps production and tests on one path.
+		coordinator = NewAuthRefreshCoordinator(r.db, r.masterKey)
 	}
-	return conn, nil
-}
-
-// refreshIfDue starts refresh inside the proactive window; permanent grant
-// failures block immediately while transient failures wait for access expiry.
-func (r *secretResolver) refreshIfDue(ctx context.Context, conn *store.AuthConnection, authName string, auths fusedobject.AuthConfigs, now time.Time) (*store.AuthConnection, error) {
-	if !authConnectionNeedsRefresh(conn, now) {
-		return nil, nil
-	}
-	// A provider-declared refresh expiry is permanent, so waiting for a network
-	// request would only obscure the action the customer application must take.
-	if authConnectionRefreshTokenExpired(conn, now) {
-		return nil, r.reconnectRequiredError(ctx, conn, "refresh_token_expired")
-	}
-	// Access-only grants remain usable until access expiry; forcing consent in
-	// the proactive window would throw away provider-authorized token lifetime.
-	if conn.EncryptedRefreshToken == "" {
-		return nil, r.expiredConnectionError(ctx, conn, now)
-	}
-	refreshed, err := r.refreshAuthConnection(ctx, conn, authName, auths)
-	if err == nil {
-		return refreshed, nil
-	}
-	// invalid_grant means retries cannot repair this user's revoked or replaced
-	// grant, even when the old access token has a few minutes left to live.
-	if connectauth.IsReconnectRequiredRefreshError(err) {
-		return nil, r.reconnectRequiredError(ctx, conn, "refresh_token_rejected")
-	}
-	// Transient refresh failures block only after access expiry, preserving
-	// availability while never dispatching an already-expired credential.
-	if authConnectionExpired(conn, now) {
-		if markErr := r.markAuthConnectionRefreshState(ctx, conn, "failed", "refresh_failed_after_expiry"); markErr != nil {
-			return nil, fmt.Errorf("mark failed auth refresh: %w", markErr)
-		}
-		return nil, fmt.Errorf("refresh connected auth: %w", err)
-	}
-	return nil, nil
-}
-
-// refreshAuthConnection performs the provider refresh and persists the updated
-// encrypted token material back to the bucket-owned connection row.
-func (r *secretResolver) refreshAuthConnection(ctx context.Context, conn *store.AuthConnection, authName string, auths fusedobject.AuthConfigs) (*store.AuthConnection, error) {
-	ctx, span := otel.Tracer("engine").Start(ctx, "engine.auth_connection.refresh")
-	defer span.End()
-	span.SetAttributes(authConnectionSpanAttrs(conn)...)
-	auth, flow, err := connectedRefreshAuth(authName, auths)
-	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
-		return nil, err
-	}
-	cfg, err := r.db.GetConnectConfig(ctx, conn.BucketID, conn.ServiceID)
-	if err != nil {
-		span.SetStatus(codes.Error, "load connect config for refresh")
-		return nil, fmt.Errorf("load connect config for refresh: %w", err)
-	}
-	if cfg == nil || !cfg.Enabled {
-		span.SetStatus(codes.Error, "connect config not found for refresh")
-		return nil, errors.New("connect config not found for refresh")
-	}
-	creds, err := connectauth.DecryptClientCredentials(cfg, r.masterKey)
-	if err != nil {
-		span.SetStatus(codes.Error, "decrypt connect config for refresh")
-		return nil, fmt.Errorf("decrypt connect config for refresh: %w", err)
-	}
-	refreshToken, err := decryptAuthConnectionToken(r.masterKey, conn.EncryptedDEK, conn.EncryptedRefreshToken)
-	if err != nil {
-		span.SetStatus(codes.Error, "decrypt refresh token")
-		return nil, fmt.Errorf("decrypt refresh token: %w", err)
-	}
-	token, err := connectauth.RefreshAccessToken(ctx, http.DefaultClient, auth, flow, creds, refreshToken)
-	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
-		return nil, err
-	}
-	updated, err := r.connectionFromRefreshToken(conn, auth, token)
-	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
-		return nil, err
-	}
-	saved, err := r.db.UpsertAuthConnection(ctx, updated)
-	if err != nil {
-		span.SetStatus(codes.Error, "persist refreshed auth connection")
-		return nil, err
-	}
-	span.SetStatus(codes.Ok, "auth connection refreshed")
-	return saved, nil
-}
-
-// connectionFromRefreshToken reuses the existing connection identity and DEK so
-// refresh updates only the provider token material, not bucket ownership.
-func (r *secretResolver) connectionFromRefreshToken(conn *store.AuthConnection, auth fusedobject.AuthConfig, token connectauth.TokenResponse) (store.AuthConnection, error) {
-	dek, err := store.UnwrapDEK(r.masterKey, conn.EncryptedDEK)
-	if err != nil {
-		return store.AuthConnection{}, err
-	}
-	access, err := store.EncryptWithDEK(dek, token.AccessToken)
-	if err != nil {
-		return store.AuthConnection{}, err
-	}
-	refresh, err := refreshedOptionalToken(dek, token.RefreshToken, conn.EncryptedRefreshToken)
-	if err != nil {
-		return store.AuthConnection{}, err
-	}
-	idToken, err := refreshedOptionalToken(dek, token.IDToken, conn.EncryptedIDToken)
-	if err != nil {
-		return store.AuthConnection{}, err
-	}
-	claims := refreshIdentityClaims(token, conn)
-	updated := *conn
-	updated.EncryptedAccessToken = access
-	updated.EncryptedRefreshToken = refresh
-	updated.EncryptedIDToken = idToken
-	updated.TokenType = connectauth.DefaultTokenType(token.TokenType)
-	// Refresh responses commonly omit scope; preserving the connection's last
-	// known set avoids reporting the service's broader catalogue as granted.
-	scopeSet := connectauth.TokenScopeMetadata(token, conn.Scopes, conn.ScopeSource)
-	updated.Scopes = scopeSet.Scopes
-	updated.ScopeSource = scopeSet.Source
-	updated.Issuer = connectauth.ClaimString(claims, "iss")
-	updated.Subject = connectauth.ClaimString(claims, "sub")
-	updated.IdentityClaims = connectauth.ClaimBytes(claims)
-	updated.ExpiresAt = connectauth.TokenExpiresAt(token.ExpiresIn)
-	if refreshExpiresAt := connectauth.RefreshTokenExpiresAt(token.RefreshTokenExpiresIn); refreshExpiresAt != nil {
-		// Providers that omit refresh-token TTL on refresh are saying "no new
-		// information"; keep the previous reconnect deadline instead of
-		// accidentally making long-lived refresh material look unbounded.
-		updated.RefreshTokenExpiresAt = refreshExpiresAt
-	}
-	updated.RefreshState = "ok"
-	// A successful refresh is authoritative evidence that any prior diagnostic
-	// is stale, so the connection returns to a clean operator-visible state.
-	updated.LastFailureCode = ""
-	updated.LastFailureAt = nil
-	updated.LastFailureTraceID = ""
-	return updated, nil
-}
-
-// refreshIdentityClaims preserves existing OIDC metadata when a provider
-// refreshes only the access token and omits a new id_token.
-func refreshIdentityClaims(token connectauth.TokenResponse, conn *store.AuthConnection) map[string]any {
-	if strings.TrimSpace(token.IDToken) != "" {
-		return connectauth.OIDCClaims(token.IDToken)
-	}
-	var claims map[string]any
-	if len(conn.IdentityClaims) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(conn.IdentityClaims, &claims); err != nil {
-		return nil
-	}
-	return claims
-}
-
-// connectedRefreshAuth selects by the dispatcher auth name first so refresh
-// uses the same provider config that will receive the access token.
-func connectedRefreshAuth(authName string, auths fusedobject.AuthConfigs) (fusedobject.AuthConfig, fusedobject.OAuth2FlowContract, error) {
-	for _, auth := range auths {
-		if authCredentialName(auth) == authName && isRefreshableAuth(auth) {
-			return validateRefreshableAuth(auth)
-		}
-	}
-	return fusedobject.AuthConfig{}, fusedobject.OAuth2FlowContract{}, errors.New("refreshable auth config not found")
-}
-
-// validateRefreshableAuth fails before network I/O when registry metadata
-// cannot support OAuth refresh.
-func validateRefreshableAuth(auth fusedobject.AuthConfig) (fusedobject.AuthConfig, fusedobject.OAuth2FlowContract, error) {
-	flow, ok := auth.OAuth2Flows["authorizationCode"]
-	if !ok || strings.TrimSpace(flow.TokenURL) == "" {
-		return fusedobject.AuthConfig{}, fusedobject.OAuth2FlowContract{}, errors.New("refresh authorizationCode flow requires token_url")
-	}
-	return auth, flow, nil
-}
-
-// isRefreshableAuth mirrors Engine-owned connect support so static/API-key
-// credentials never enter OAuth refresh paths.
-func isRefreshableAuth(auth fusedobject.AuthConfig) bool {
-	return auth.Type == "oauth2" || auth.Type == "openIdConnect" || auth.Type == "oidc"
-}
-
-// authConnectionNeedsRefresh keeps refresh work scoped to tokens with known
-// expiry that are already inside the proactive window.
-func authConnectionNeedsRefresh(conn *store.AuthConnection, now time.Time) bool {
-	return conn.ExpiresAt != nil && !conn.ExpiresAt.After(now.Add(connectedAuthRefreshWindow))
-}
-
-// authConnectionExpired is separate from needs-refresh because failed proactive
-// refresh should not block a still-valid request.
-func authConnectionExpired(conn *store.AuthConnection, now time.Time) bool {
-	return conn.ExpiresAt != nil && !conn.ExpiresAt.After(now)
-}
-
-// authConnectionRefreshTokenExpired trusts a known provider TTL while treating
-// an omitted TTL as unknown rather than inventing an early reconnect deadline.
-func authConnectionRefreshTokenExpired(conn *store.AuthConnection, now time.Time) bool {
-	return conn.RefreshTokenExpiresAt != nil && !conn.RefreshTokenExpiresAt.After(now)
-}
-
-// expiredConnectionError marks permanently unusable connections for admin
-// visibility, then returns the fail-closed execution error.
-func (r *secretResolver) expiredConnectionError(ctx context.Context, conn *store.AuthConnection, now time.Time) error {
-	if !authConnectionExpired(conn, now) {
-		return nil
-	}
-	return r.reconnectRequiredError(ctx, conn, "refresh_token_missing")
-}
-
-// reconnectRequiredError persists the durable operator-visible state before
-// telling an SDK to begin consent, preventing execution and UI views diverging.
-func (r *secretResolver) reconnectRequiredError(ctx context.Context, conn *store.AuthConnection, reason string) error {
-	if err := r.markAuthConnectionRefreshState(ctx, conn, reconnectRequiredCode, reason); err != nil {
-		return fmt.Errorf("mark reconnect-required auth connection: %w", err)
-	}
-	return newReconnectRequiredError(conn, reason)
-}
-
-// markAuthConnectionRefreshState reuses the existing encrypted token material
-// so state transitions do not accidentally clear credentials.
-func (r *secretResolver) markAuthConnectionRefreshState(ctx context.Context, conn *store.AuthConnection, state, reason string) error {
-	ctx, span := otel.Tracer("engine").Start(ctx, "engine.auth_connection.refresh_state")
-	defer span.End()
-	span.SetAttributes(append(authConnectionSpanAttrs(conn), attribute.String("refresh_state", state))...)
-	// The reason is low-cardinality decision metadata and contains no provider
-	// response text, making it safe for audit/debug telemetry.
-	if reason != "" {
-		span.SetAttributes(attribute.String("refresh_state_reason", reason))
-	}
-	updated := *conn
-	updated.RefreshState = state
-	// Only stable Engine decision codes are persisted; raw provider errors could
-	// contain user data or credential-adjacent response details.
-	updated.LastFailureCode = reason
-	failedAt := time.Now().UTC()
-	updated.LastFailureAt = &failedAt
-	updated.LastFailureTraceID = executionTraceID(ctx)
-	_, err := r.db.UpsertAuthConnection(ctx, updated)
-	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
-		return err
-	}
-	span.SetStatus(codes.Ok, "auth connection refresh state updated")
-	return err
+	return coordinator.ensureForegroundConnectionFresh(ctx, conn, serviceVersionID)
 }
 
 // recordConnectedAuthFailure stores provider authorization diagnostics without
@@ -900,26 +661,6 @@ func authConnectionSpanAttrs(conn *store.AuthConnection) []attribute.KeyValue {
 		attribute.String("service_id", conn.ServiceID.String()),
 		attribute.String("connection_id", conn.ID.String()),
 	}
-}
-
-// refreshedOptionalToken preserves the existing encrypted token when providers
-// omit optional fields during refresh, which avoids bricking rotating-token
-// providers that return a refresh token only on some responses.
-func refreshedOptionalToken(dek []byte, value, fallbackEncrypted string) (string, error) {
-	if strings.TrimSpace(value) == "" {
-		return fallbackEncrypted, nil
-	}
-	return store.EncryptWithDEK(dek, value)
-}
-
-// decryptAuthConnectionToken decrypts token fields by explicit ciphertext so
-// access and refresh token paths cannot accidentally swap stored fields.
-func decryptAuthConnectionToken(masterKey []byte, encryptedDEK, encryptedValue string) (string, error) {
-	dek, err := store.UnwrapDEK(masterKey, encryptedDEK)
-	if err != nil {
-		return "", err
-	}
-	return store.DecryptWithDEK(dek, encryptedValue)
 }
 
 // WithDefaultConnectedAuthName lets generated SDKs avoid service-specific auth
@@ -1003,9 +744,9 @@ func decryptAuthConnectionAccessToken(masterKey []byte, conn *store.AuthConnecti
 
 // ResolveConnectionAccessToken applies the same proactive refresh policy used
 // by SDK dispatch before returning a token for an Engine-owned control action.
-func ResolveConnectionAccessToken(ctx context.Context, db store.Store, masterKey []byte, conn *store.AuthConnection, authName string, auths fusedobject.AuthConfigs) (string, error) {
-	resolver := &secretResolver{db: db, masterKey: masterKey}
-	usable, err := resolver.usableAuthConnection(ctx, conn.BucketID, conn.ServiceID, conn.EndUserRef, authName, auths)
+func ResolveConnectionAccessToken(ctx context.Context, db store.Store, masterKey []byte, conn *store.AuthConnection, serviceVersionID uuid.UUID, authName string) (string, error) {
+	resolver := &secretResolver{db: db, masterKey: masterKey, refreshCoordinator: NewAuthRefreshCoordinator(db, masterKey)}
+	usable, err := resolver.usableAuthConnection(ctx, conn.BucketID, conn.ServiceID, serviceVersionID, conn.EndUserRef, authName)
 	if err != nil {
 		return "", err
 	}

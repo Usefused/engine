@@ -16,8 +16,8 @@ interface NestedActivityTabsProps<T extends string> {
 // filled primary tabs that select the parent page section.
 export function NestedActivityTabs<T extends string>({ active, ariaLabel, onChange, options }: NestedActivityTabsProps<T>) {
   return (
-    <div className="overflow-x-auto border-b border-slate-200">
-      <div className="flex min-w-max gap-6" role="tablist" aria-label={ariaLabel}>
+    <div className="max-w-full overflow-x-auto overscroll-x-contain border-b border-slate-200 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <div className="flex min-w-max touch-pan-x gap-4 sm:gap-6" role="tablist" aria-label={ariaLabel}>
         {options.map((option) => (
           <button
             key={option.value}
@@ -26,7 +26,7 @@ export function NestedActivityTabs<T extends string>({ active, ariaLabel, onChan
             aria-selected={active === option.value}
             data-track={option.trackingId}
             onClick={() => onChange(option.value)}
-            className={`flex items-center gap-2 border-b-2 pb-3 text-sm font-medium transition-colors ${
+            className={`flex shrink-0 items-center gap-2 border-b-2 px-0.5 pb-3 text-sm font-medium transition-colors ${
               active === option.value
                 ? "border-slate-900 text-slate-900"
                 : "border-transparent text-slate-500 hover:text-slate-800"

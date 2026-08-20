@@ -167,23 +167,39 @@ func validUnifiedAuthType(value string) bool {
 
 // loadUnifiedDefinition resolves unified definition from immutable app scope before provider dispatch.
 func loadUnifiedDefinition(scope *store.AppRuntime, operation string) (unified.OperationDefinition, error) {
-	if scope.UnifiedDefinitionSchemaVersion != unified.DefinitionSchemaVersion || len(scope.UnifiedDefinitions) == 0 {
-		return unified.OperationDefinition{}, status.Error(codes.FailedPrecondition, "Unified definitions are unavailable")
+	definition, found, err := lookupUnifiedDefinition(scope, operation)
+	if err != nil {
+		return unified.OperationDefinition{}, err
+	}
+	if found {
+		return definition, nil
+	}
+	return unified.OperationDefinition{}, status.Error(codes.InvalidArgument, "Unified operation is not defined for this SDK version")
+}
+
+// lookupUnifiedDefinition distinguishes an absent exact name from corrupted
+// immutable definition state so REST classification can fail closed.
+func lookupUnifiedDefinition(scope *store.AppRuntime, operation string) (unified.OperationDefinition, bool, error) {
+	if scope == nil || len(scope.UnifiedDefinitions) == 0 {
+		return unified.OperationDefinition{}, false, nil
+	}
+	if scope.UnifiedDefinitionSchemaVersion != unified.DefinitionSchemaVersion {
+		return unified.OperationDefinition{}, false, status.Error(codes.FailedPrecondition, "Unified definitions are unavailable")
 	}
 	hash, err := unifiedCanonicalHash(scope.UnifiedDefinitions)
 	if err != nil || hash != scope.UnifiedDefinitionHash {
-		return unified.OperationDefinition{}, status.Error(codes.FailedPrecondition, "Unified definitions failed integrity validation")
+		return unified.OperationDefinition{}, false, status.Error(codes.FailedPrecondition, "Unified definitions failed integrity validation")
 	}
 	definitions, err := unified.DecodeDefinitions(scope.UnifiedDefinitions, unified.DefaultLimits())
 	if err != nil {
-		return unified.OperationDefinition{}, status.Error(codes.FailedPrecondition, "Unified definitions are invalid")
+		return unified.OperationDefinition{}, false, status.Error(codes.FailedPrecondition, "Unified definitions are invalid")
 	}
 	for _, definition := range definitions {
 		if definition.Name == operation {
-			return definition, nil
+			return definition, true, nil
 		}
 	}
-	return unified.OperationDefinition{}, status.Error(codes.InvalidArgument, "Unified operation is not defined for this SDK version")
+	return unified.OperationDefinition{}, false, nil
 }
 
 // selectUnifiedBindings narrows immutable Unified preflight admission state to selected targets without adding hidden work.

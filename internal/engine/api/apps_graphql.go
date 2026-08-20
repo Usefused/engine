@@ -3,12 +3,16 @@ package api
 import (
 	"errors"
 	"fmt"
+	"log/slog"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
 	"github.com/graphql-go/graphql"
+	"github.com/graphql-go/graphql/language/ast"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
+	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
 )
@@ -26,6 +30,7 @@ var appSummaryGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"created_at":              &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
 		"target_language":         &graphql.Field{Type: graphql.String},
 		"generator_version":       &graphql.Field{Type: graphql.String},
+		"downloads":               &graphql.Field{Type: graphql.String},
 		"readme":                  &graphql.Field{Type: graphql.String},
 		"selections":              &graphql.Field{Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(appSelectionGraphQLType)))},
 		"planned_deactivation_at": &graphql.Field{Type: graphql.String},
@@ -92,7 +97,9 @@ var appServiceSummaryGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
-func appsGraphQLField(s store.Store) *graphql.Field {
+// appsGraphQLField lists authorized app versions and enriches selected SDK
+// download counts through one optional Registry batch.
+func appsGraphQLField(s store.Store, downloadClient sandbox.SDKPackageDownloadCountClient) *graphql.Field {
 	return &graphql.Field{Type: appSummaryPageGraphQLType, Args: graphql.FieldConfigArgument{
 		"kind":    &graphql.ArgumentConfig{Type: graphql.String, DefaultValue: ""},
 		"search":  &graphql.ArgumentConfig{Type: graphql.String, DefaultValue: ""},
@@ -112,11 +119,14 @@ func appsGraphQLField(s store.Store) *graphql.Field {
 		if err != nil {
 			return nil, err
 		}
-		return map[string]interface{}{"items": appSummaryFields(items), "total": total}, nil
+		counts, available := appDownloadCounts(p, downloadClient, items)
+		return map[string]interface{}{"items": appSummaryFields(items, counts, available), "total": total}, nil
 	}}
 }
 
-func appGraphQLField(s store.Store) *graphql.Field {
+// appGraphQLField reads one exact authorized app and its optional durable SDK
+// download count without changing lifecycle ownership.
+func appGraphQLField(s store.Store, downloadClient sandbox.SDKPackageDownloadCountClient) *graphql.Field {
 	return &graphql.Field{Type: appSummaryGraphQLType, Args: graphql.FieldConfigArgument{
 		"app_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
 	}, Resolve: func(p graphql.ResolveParams) (interface{}, error) {
@@ -132,11 +142,14 @@ func appGraphQLField(s store.Store) *graphql.Field {
 		if err != nil {
 			return nil, errors.New("app was not found")
 		}
-		return appSummaryField(*item), nil
+		counts, available := appDownloadCounts(p, downloadClient, []store.AppCatalogItem{*item})
+		return appSummaryField(*item, counts, available), nil
 	}}
 }
 
-func appVersionsGraphQLField(s store.Store) *graphql.Field {
+// appVersionsGraphQLField lists one authorized family and batches any selected
+// SDK download counts across its immutable app versions.
+func appVersionsGraphQLField(s store.Store, downloadClient sandbox.SDKPackageDownloadCountClient) *graphql.Field {
 	return &graphql.Field{Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(appSummaryGraphQLType))), Args: graphql.FieldConfigArgument{
 		"app_family_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
 	}, Resolve: func(p graphql.ResolveParams) (interface{}, error) {
@@ -152,7 +165,8 @@ func appVersionsGraphQLField(s store.Store) *graphql.Field {
 		if err != nil {
 			return nil, err
 		}
-		return appSummaryFields(items), nil
+		counts, available := appDownloadCounts(p, downloadClient, items)
+		return appSummaryFields(items, counts, available), nil
 	}}
 }
 
@@ -205,26 +219,116 @@ func boundedAppPage(args map[string]interface{}) (int, int) {
 	return limit, offset
 }
 
-func appSummaryFields(items []store.AppCatalogItem) []map[string]interface{} {
+// appSummaryFields projects a stable GraphQL row for every Engine-owned app.
+func appSummaryFields(items []store.AppCatalogItem, counts map[uuid.UUID]int64, countsAvailable bool) []map[string]interface{} {
 	projected := make([]map[string]interface{}, 0, len(items))
 	for _, item := range items {
-		projected = append(projected, appSummaryField(item))
+		projected = append(projected, appSummaryField(item, counts, countsAvailable))
 	}
 	return projected
 }
 
-func appSummaryField(item store.AppCatalogItem) map[string]interface{} {
+// appSummaryField keeps Registry analytics nullable while preserving exact
+// decimal counts beyond JavaScript's safe integer range.
+func appSummaryField(item store.AppCatalogItem, counts map[uuid.UUID]int64, countsAvailable bool) map[string]interface{} {
 	planned := ""
 	if item.PlannedDeactivationAt != nil {
 		planned = item.PlannedDeactivationAt.Format(mcpGraphQLTimeFormat)
 	}
-	return map[string]interface{}{
+	fields := map[string]interface{}{
 		"app_family_id": item.AppFamilyID.String(), "app_id": item.AppID.String(),
 		"name": item.Name, "description": item.Description, "version": item.Version,
 		"kind": item.Kind, "status": item.Status, "created_at": item.CreatedAt.Format(mcpGraphQLTimeFormat),
 		"target_language": item.TargetLanguage, "generator_version": item.GeneratorVersion,
 		"readme": item.Readme, "selections": appSelectionFields(item), "planned_deactivation_at": planned,
 	}
+	if item.Kind == store.AppKindSDK && countsAvailable {
+		fields["downloads"] = strconv.FormatInt(counts[item.AppID], 10)
+	}
+	return fields
+}
+
+// appDownloadCounts performs one exact Registry batch only when the caller
+// selected downloads; Registry outages leave that nullable field unavailable
+// without hiding Engine-owned app lifecycle state.
+func appDownloadCounts(p graphql.ResolveParams, client sandbox.SDKPackageDownloadCountClient, items []store.AppCatalogItem) (map[uuid.UUID]int64, bool) {
+	if client == nil || !appDownloadsRequested(p.Info) {
+		return nil, false
+	}
+	appIDs := sdkAppIDs(items)
+	if len(appIDs) == 0 {
+		return map[uuid.UUID]int64{}, true
+	}
+	counts, err := client.FetchSDKPackageDownloadCounts(p.Context, appIDs)
+	if err != nil {
+		slog.WarnContext(p.Context, "SDK package download counts unavailable", slog.String("failure_code", "registry_count_failed"))
+		return nil, false
+	}
+	return counts, true
+}
+
+// sdkAppIDs keeps MCP identities outside Registry's SDK package analytics
+// boundary while preserving the requested catalogue order.
+func sdkAppIDs(items []store.AppCatalogItem) []uuid.UUID {
+	ids := make([]uuid.UUID, 0, len(items))
+	for _, item := range items {
+		if item.Kind == store.AppKindSDK {
+			ids = append(ids, item.AppID)
+		}
+	}
+	return ids
+}
+
+// appDownloadsRequested recognizes aliases and fragments so GraphQL never
+// creates an unrequested Registry analytics dependency.
+func appDownloadsRequested(info graphql.ResolveInfo) bool {
+	for _, field := range info.FieldASTs {
+		if appSelectionRequestsDownloads(field.SelectionSet, info.Fragments, map[string]bool{}) {
+			return true
+		}
+	}
+	return false
+}
+
+// appSelectionRequestsDownloads walks one validated selection tree without
+// allowing fragment cycles to create unbounded work.
+func appSelectionRequestsDownloads(selectionSet *ast.SelectionSet, fragments map[string]ast.Definition, visiting map[string]bool) bool {
+	if selectionSet == nil {
+		return false
+	}
+	for _, selection := range selectionSet.Selections {
+		if appSelectionRequestsDownload(selection, fragments, visiting) {
+			return true
+		}
+	}
+	return false
+}
+
+// appSelectionRequestsDownload evaluates one field or fragment edge.
+func appSelectionRequestsDownload(selection ast.Selection, fragments map[string]ast.Definition, visiting map[string]bool) bool {
+	switch selected := selection.(type) {
+	case *ast.Field:
+		return selected.Name.Value == "downloads" || appSelectionRequestsDownloads(selected.SelectionSet, fragments, visiting)
+	case *ast.InlineFragment:
+		return appSelectionRequestsDownloads(selected.SelectionSet, fragments, visiting)
+	case *ast.FragmentSpread:
+		return appFragmentRequestsDownloads(selected, fragments, visiting)
+	default:
+		return false
+	}
+}
+
+// appFragmentRequestsDownloads resolves each named fragment at most once on
+// the active recursion path.
+func appFragmentRequestsDownloads(spread *ast.FragmentSpread, fragments map[string]ast.Definition, visiting map[string]bool) bool {
+	name := spread.Name.Value
+	fragment, ok := fragments[name].(*ast.FragmentDefinition)
+	if !ok || visiting[name] {
+		return false
+	}
+	visiting[name] = true
+	defer delete(visiting, name)
+	return appSelectionRequestsDownloads(fragment.SelectionSet, fragments, visiting)
 }
 
 func appSelectionFields(item store.AppCatalogItem) []map[string]interface{} {

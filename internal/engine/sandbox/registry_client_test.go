@@ -290,6 +290,42 @@ func TestDownloadSDKPackageUsesExactAppCacheRoute(t *testing.T) {
 	}
 }
 
+// TestFetchSDKPackageDownloadCountsUsesOneSignedBatch proves the UI analytics
+// projection never turns a catalogue page into one Registry call per app.
+func TestFetchSDKPackageDownloadCountsUsesOneSignedBatch(t *testing.T) {
+	first, second := uuid.New(), uuid.New()
+	requests := 0
+	client := &HTTPRegistryClient{
+		endpoint: "https://registry.example/graphql", licenseKey: "engine-license-key",
+		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			requests++
+			if request.Method != http.MethodPost || request.URL.Path != "/sdk-packages/download-counts" {
+				t.Fatalf("unexpected count request: %s %s", request.Method, request.URL.Path)
+			}
+			if request.Header.Get("X-Engine-Signature") == "" || request.Header.Get("X-API-Key") != "engine-license-key" {
+				t.Fatal("count request did not use the signed Engine identity")
+			}
+			var body sdkPackageDownloadCountsRequest
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(body.AppIDs, []uuid.UUID{first, second}) {
+				t.Fatalf("unexpected count batch: %v", body.AppIDs)
+			}
+			payload := `{"counts":[{"app_id":"` + first.String() + `","downloads":3},{"app_id":"` + second.String() + `","downloads":0}]}`
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(payload)), Header: make(http.Header)}, nil
+		})},
+	}
+
+	counts, err := client.FetchSDKPackageDownloadCounts(context.Background(), []uuid.UUID{first, second})
+	if err != nil {
+		t.Fatalf("FetchSDKPackageDownloadCounts() error = %v", err)
+	}
+	if requests != 1 || counts[first] != 3 || counts[second] != 0 {
+		t.Fatalf("requests=%d counts=%v", requests, counts)
+	}
+}
+
 func TestFetchServiceMetadataBatchUsesOneSetBasedGraphQLRequest(t *testing.T) {
 	first, second := uuid.New(), uuid.New()
 	requestCount := 0

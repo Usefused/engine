@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   APP_SELECTION_DEFINITION_SCHEMA_VERSION,
+  appSelectionDisplayRows,
   requireAppSelectionV3,
   requireAppSelectionsV3,
 } from "./app-selection-v3.ts";
@@ -37,4 +38,23 @@ test("rejects a v3 selection without an immutable service version", () => {
     () => requireAppSelectionV3(selection({ service_version_id: null })),
     /missing its service version/
   );
+});
+
+test("renders immutable operation names without positionally pairing endpoint IDs", () => {
+  assert.deepEqual(
+    appSelectionDisplayRows(
+      ["endpoint-1", "endpoint-2"],
+      ["listProjects", "createIssue"]
+    ),
+    [
+      { id: "semantic:0:listProjects", name: "listProjects" },
+      { id: "semantic:1:createIssue", name: "createIssue" },
+    ]
+  );
+});
+
+test("keeps historical ID-only selections visible without a Registry lookup", () => {
+  assert.deepEqual(appSelectionDisplayRows(["endpoint-1"], undefined), [
+    { id: "endpoint-1", name: "endpoint-1" },
+  ]);
 });

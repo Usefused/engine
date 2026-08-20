@@ -3,10 +3,8 @@ import { useEffect, useState, type ReactNode } from "react";
 import {
   Bot,
   CheckCircle2,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
-  ChevronUp,
   Clock3,
   Code2,
   RotateCcw,
@@ -26,6 +24,8 @@ import type {
 import { api } from "~/lib/api";
 import { WebhookLogsCard } from "~/components/webhooks/WebhookLogsCard";
 import { NestedActivityTabs } from "~/components/activity/NestedActivityTabs";
+import { ExecutionDetailsDrawer } from "~/components/activity/ExecutionDetailsDrawer";
+import { activateReceiptRow } from "~/components/activity/receiptRow";
 
 interface ActivityTabProps {
   res: ServiceGenerationResult;
@@ -109,6 +109,7 @@ function ExecutionSource({
   );
 }
 
+// ActivityTab keeps service-scoped receipt selection local to the Activity surface.
 export default function ActivityTab({
   res,
   executionEvents,
@@ -145,7 +146,7 @@ export default function ActivityTab({
   const selectedExecution = executionEvents.find((event) => event.id === selectedExecutionID) || null;
 
   return (
-    <div className="space-y-8">
+    <div className="min-w-0 space-y-8">
       <LocalActivity
         res={res} view={view} setView={setView} source={source} setSource={setSource}
         executionEvents={executionEvents} executionTotal={executionTotal}
@@ -157,10 +158,10 @@ export default function ActivityTab({
         webhookStartDate={webhookStartDate} setWebhookStartDate={setWebhookStartDate} webhookEndDate={webhookEndDate}
         setWebhookEndDate={setWebhookEndDate} webhookAnalytics={webhookAnalytics} loadWebhookData={loadWebhookData}
         appNames={appNames} selectedExecutionID={selectedExecutionID} setSelectedExecutionID={setSelectedExecutionID}
-        selectedExecution={selectedExecution}
       />
 
       <Consumers consumers={consumers} />
+      {selectedExecution ? <ExecutionDetailsDrawer event={selectedExecution} onClose={() => setSelectedExecutionID("")}><ExecutionDetails event={selectedExecution} appNames={appNames} /></ExecutionDetailsDrawer> : null}
     </div>
   );
 }
@@ -173,7 +174,6 @@ type LocalActivityProps = Omit<ActivityTabProps, "dependentSDKs" | "dependentMCP
   appNames: Map<string, string>;
   selectedExecutionID: string;
   setSelectedExecutionID: (id: string) => void;
-  selectedExecution: EngineExecutionEventEntry | null;
 };
 
 function LocalActivity(props: LocalActivityProps) {
@@ -205,16 +205,17 @@ function LocalActivity(props: LocalActivityProps) {
   );
 }
 
+// OutboundActivity lets owners switch data scope without adding another navigation tier.
 function OutboundActivity(props: LocalActivityProps) {
   return (
-    <section aria-label="Outbound calls" className="space-y-5">
+    <section aria-label="Outbound calls" className="min-w-0 space-y-5">
       {props.res.service.is_owner ? (
         <div className="flex justify-end">
           <select
             value={props.source}
             onChange={(event) => props.setSource(event.target.value as "local" | "cross-engine")}
             aria-label="Outbound analytics source"
-            className="h-9 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            className="h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 sm:w-auto"
           >
             <option value="local">Workspace calls</option>
             <option value="cross-engine">Aggregate usage</option>
@@ -269,13 +270,13 @@ function LocalOutboundActivity(props: LocalActivityProps) {
         setSelectedExecutionID={props.setSelectedExecutionID}
       />
       <ExecutionPagination total={props.executionTotal} limit={props.executionLimit} page={props.executionPage} setPage={props.setExecutionPage} />
-      <SelectedExecutionPanel event={props.selectedExecution} eventsExist={props.executionEvents.length > 0} appNames={props.appNames} />
     </>
   );
 }
 
+// ExecutionMetrics collapses to one column only on widths that cannot support readable metric pairs.
 function ExecutionMetrics({ analytics }: { analytics: EngineExecutionAnalyticsSummary | null }) {
-  return <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+  return <div className="grid grid-cols-1 gap-2 min-[360px]:grid-cols-2 sm:gap-3 lg:grid-cols-4">
     <Metric label="Calls" value={analytics?.total_calls ?? 0} icon={Code2} />
     <Metric label="Failed" value={analytics?.failed_calls ?? 0} icon={XCircle} />
     <Metric label="P50 latency" value={formatLatency(analytics?.median_latency_ms ?? 0)} icon={Clock3} />
@@ -295,12 +296,7 @@ function ExecutionPagination({ total, limit, page, setPage }: { total: number; l
   </div>;
 }
 
-function SelectedExecutionPanel({ event, eventsExist, appNames }: { event: EngineExecutionEventEntry | null; eventsExist: boolean; appNames: Map<string, string> }) {
-  if (event) return <ExecutionDetails event={event} appNames={appNames} />;
-  if (!eventsExist) return null;
-  return <div className="border-y border-slate-200 py-5 text-sm text-slate-500">Select a receipt to inspect its target, timing, and trace context.</div>;
-}
-
+// CrossEngineInsights keeps delayed public aggregates separate from local receipt history.
 function CrossEngineInsights({ serviceId, isPublic }: { serviceId: string; isPublic: boolean }) {
   const [insights, setInsights] = useState<PublicServiceInsights | null>(null);
   const [loading, setLoading] = useState(isPublic);
@@ -319,7 +315,7 @@ function CrossEngineInsights({ serviceId, isPublic }: { serviceId: string; isPub
   if (!insights || insights.total_calls === 0) return <ActivityNotice>No other Fused users have used this service in the last 30 days.</ActivityNotice>;
   return (
     <section className="space-y-6" aria-label="Cross-engine service activity">
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-2 min-[360px]:grid-cols-2 sm:gap-3 lg:grid-cols-4">
         <Metric label="Calls" value={insights.total_calls} icon={Code2} />
         <Metric label="Failed" value={insights.failed_calls} icon={XCircle} />
         <Metric label="P50 latency" value={formatLatency(insights.p50_latency_ms)} icon={Clock3} />
@@ -342,9 +338,10 @@ function ActivityNotice({ children }: { children: ReactNode }) {
   return <div className="rounded-lg border border-slate-200 bg-white px-6 py-12 text-center text-sm text-slate-500">{children}</div>;
 }
 
+// Metric remains shrinkable so long localized values cannot widen the mobile page.
 function Metric({ label, value, icon: Icon }: { label: string; value: string | number; icon: typeof Code2 }) {
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-4">
+    <div className="min-w-0 rounded-lg border border-slate-200 bg-white p-3 sm:p-4">
       <div className="flex items-center gap-2 text-xs font-medium text-slate-500">
         <Icon className="h-4 w-4 text-slate-400" />
         {label}
@@ -354,6 +351,7 @@ function Metric({ label, value, icon: Icon }: { label: string; value: string | n
   );
 }
 
+// ExecutionHistory uses scan-friendly cards on phones and the denser table at desktop widths.
 function ExecutionHistory({
   events,
   appNames,
@@ -365,6 +363,7 @@ function ExecutionHistory({
   selectedExecutionID: string;
   setSelectedExecutionID: (id: string) => void;
 }) {
+  // The empty state stays in the same bounded card footprint as populated receipts.
   if (events.length === 0) {
     return (
       <div className="rounded-lg border border-slate-200 bg-white px-6 py-14 text-center">
@@ -376,27 +375,32 @@ function ExecutionHistory({
   }
 
   return (
-    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+    <div className="min-w-0 overflow-hidden rounded-lg border border-slate-200 bg-white">
       <div className="divide-y divide-slate-100 md:hidden">
         {events.map((event) => {
-          const expanded = event.id === selectedExecutionID;
+          const selected = event.id === selectedExecutionID;
           return (
             <button
               key={event.id}
               type="button"
-              onClick={() => setSelectedExecutionID(expanded ? "" : event.id)}
-              className={`block w-full p-4 text-left ${expanded ? "bg-slate-50" : "bg-white"}`}
-              aria-expanded={expanded}
+              onClick={() => setSelectedExecutionID(event.id)}
+              className={`group block w-full min-w-0 p-4 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${selected ? "bg-slate-50" : "bg-white hover:bg-slate-50/70"}`}
+              aria-haspopup="dialog"
+              aria-label={`Inspect ${event.operation}`}
             >
               <div className="flex items-start justify-between gap-3">
                 <RequestIdentity event={event} />
-                {expanded ? <ChevronUp className="h-4 w-4 shrink-0 text-slate-400" /> : <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />}
+                <ChevronRight className="mt-0.5 h-4 w-4 shrink-0 text-slate-400 transition-transform group-hover:translate-x-0.5" />
               </div>
-              <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
-                <ExecutionSource event={event} appNames={appNames} />
-                <Result event={event} />
-                <span className="text-slate-600">{formatLatency(event.latency_ms)}</span>
-                <span className="text-right text-slate-500">{formatTime(event.started_at)}</span>
+              <div className="mt-3 space-y-2.5">
+                <div className="flex min-w-0 items-center justify-between gap-3">
+                  <div className="min-w-0 flex-1"><ExecutionSource event={event} appNames={appNames} /></div>
+                  <Result event={event} />
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-t border-slate-100 pt-2 text-[11px] text-slate-500">
+                  <span><span className="text-slate-400">Total</span> <span className="font-medium tabular-nums text-slate-700">{formatLatency(event.latency_ms)}</span></span>
+                  <time dateTime={event.started_at}>{formatTime(event.started_at)}</time>
+                </div>
               </div>
             </button>
           );
@@ -417,26 +421,15 @@ function ExecutionHistory({
           </thead>
           <tbody className="divide-y divide-slate-100">
             {events.map((event) => {
-              const expanded = event.id === selectedExecutionID;
+              const selected = event.id === selectedExecutionID;
               return (
-                <tr key={event.id} className={expanded ? "bg-slate-50" : "hover:bg-slate-50/70"}>
+                <tr key={event.id} role="button" tabIndex={0} aria-haspopup="dialog" aria-label={`Inspect ${event.operation}`} onClick={() => setSelectedExecutionID(event.id)} onKeyDown={(keyboardEvent) => activateReceiptRow(keyboardEvent, () => setSelectedExecutionID(event.id))} className={`cursor-pointer focus:outline-none ${selected ? "bg-slate-50" : "hover:bg-slate-50/70"}`}>
                   <td className="px-4 py-3"><RequestIdentity event={event} /></td>
                   <td className="px-4 py-3"><ExecutionSource event={event} appNames={appNames} /></td>
                   <td className="px-4 py-3"><Result event={event} /></td>
                   <td className="px-4 py-3 tabular-nums text-slate-700">{formatLatency(event.latency_ms)}</td>
                   <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-500">{formatTime(event.started_at)}</td>
-                  <td className="px-2 py-3">
-                    <button
-                      type="button"
-                      title={expanded ? "Close details" : "Inspect receipt"}
-                      aria-label={expanded ? "Close receipt details" : "Inspect receipt"}
-                      aria-expanded={expanded}
-                      onClick={() => setSelectedExecutionID(expanded ? "" : event.id)}
-                      className="rounded-md p-1.5 text-slate-500 hover:bg-white hover:text-slate-900"
-                    >
-                      {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-                    </button>
-                  </td>
+                  <td className="px-2 py-3 text-slate-400"><ChevronRight className="h-4 w-4" /></td>
                 </tr>
               );
             })}
@@ -447,12 +440,13 @@ function ExecutionHistory({
   );
 }
 
+// RequestIdentity permits two path lines on phones while preserving the compact desktop row.
 function RequestIdentity({ event }: { event: EngineExecutionEventEntry }) {
   const request = [event.http_method, event.request_path].filter(Boolean).join(" ");
   return (
     <div className="min-w-0">
       <div className="break-words font-mono text-xs font-medium text-slate-950">{event.operation}</div>
-      <div className="mt-1 truncate font-mono text-[11px] text-slate-400" title={request || undefined}>
+      <div className="mt-1 line-clamp-2 break-all font-mono text-[11px] leading-4 text-slate-400 md:block md:truncate" title={request || undefined}>
         {request || "Provider request details not recorded"}
       </div>
     </div>
@@ -470,7 +464,7 @@ function Result({ event }: { event: EngineExecutionEventEntry }) {
   );
 }
 
-function ExecutionDetails({ event, appNames }: { event: EngineExecutionEventEntry; appNames: Map<string, string> }) {
+export function ExecutionDetails({ event, appNames }: { event: EngineExecutionEventEntry; appNames: Map<string, string> }) {
   const timingRows = executionTimingRows(event);
 
   return (
@@ -490,9 +484,11 @@ function ExecutionDetails({ event, appNames }: { event: EngineExecutionEventEntr
       <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_1fr_1.15fr]">
         <DetailGroup title="Request">
           <Detail label="Operation" value={event.operation} mono />
+          <Detail label="Service" value={serviceDisplayName(event)} />
+          <Detail label="Service slug" value={recordedLabel(event.service_slug)} mono />
+          <Detail label="Service version" value={recordedLabel(event.service_version)} />
           <Detail label="Provider request" value={providerRequestLabel(event)} mono />
           <Detail label="Provider" value={recordedLabel(event.provider_host)} mono />
-          <Detail label="Service version" value={recordedLabel(event.service_version_id)} mono />
         </DetailGroup>
 
         <DetailGroup title="Execution context">
@@ -514,9 +510,11 @@ function ExecutionDetails({ event, appNames }: { event: EngineExecutionEventEntr
         </DetailGroup>
       </div>
 
-      <div className="mt-6 grid gap-4 border-t border-slate-200 pt-5 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="mt-6 grid gap-4 border-t border-slate-200 pt-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <Detail label="Started" value={formatTime(event.started_at)} />
         <Detail label="Provider status" value={providerStatusLabel(event)} />
+        <Detail label="Service ID" value={recordedLabel(event.service_id)} mono />
+        <Detail label="Service version ID" value={recordedLabel(event.service_version_id)} mono />
         <Detail label="Trace ID" value={recordedLabel(event.trace_id)} mono />
         <Detail label="Receipt ID" value={event.id} mono />
       </div>
@@ -535,6 +533,8 @@ function executionTimingRows(event: EngineExecutionEventEntry) {
 }
 
 function recordedLabel(value?: string) { return value || "Not recorded"; }
+/** Prefers current Engine-local service metadata without presenting a UUID as a human title. */
+function serviceDisplayName(event: EngineExecutionEventEntry) { return event.service_name || event.service_slug || "Service metadata unavailable"; }
 function providerRequestLabel(event: EngineExecutionEventEntry) { return recordedLabel([event.http_method, event.request_path].filter(Boolean).join(" ")); }
 function accessPathLabel(event: EngineExecutionEventEntry) { return (event.app_kind || event.transport).toUpperCase(); }
 function cacheReplayLabel(event: EngineExecutionEventEntry) { return event.idempotency_replayed ? "Yes, provider was not called" : "No"; }

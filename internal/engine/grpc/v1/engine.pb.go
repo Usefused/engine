@@ -1068,6 +1068,14 @@ type AuthConnection struct {
 	RefreshState          string                 `protobuf:"bytes,15,opt,name=refresh_state,json=refreshState,proto3" json:"refresh_state,omitempty"`
 	CreatedAt             string                 `protobuf:"bytes,16,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	UpdatedAt             string                 `protobuf:"bytes,17,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	ServiceVersionId      string                 `protobuf:"bytes,18,opt,name=service_version_id,json=serviceVersionId,proto3" json:"service_version_id,omitempty"`
+	AuthName              string                 `protobuf:"bytes,19,opt,name=auth_name,json=authName,proto3" json:"auth_name,omitempty"`
+	LastRefreshAttemptAt  string                 `protobuf:"bytes,20,opt,name=last_refresh_attempt_at,json=lastRefreshAttemptAt,proto3" json:"last_refresh_attempt_at,omitempty"`
+	LastRefreshedAt       string                 `protobuf:"bytes,21,opt,name=last_refreshed_at,json=lastRefreshedAt,proto3" json:"last_refreshed_at,omitempty"`
+	RefreshRetryNotBefore string                 `protobuf:"bytes,22,opt,name=refresh_retry_not_before,json=refreshRetryNotBefore,proto3" json:"refresh_retry_not_before,omitempty"`
+	LastFailureCode       string                 `protobuf:"bytes,23,opt,name=last_failure_code,json=lastFailureCode,proto3" json:"last_failure_code,omitempty"`
+	LastFailureAt         string                 `protobuf:"bytes,24,opt,name=last_failure_at,json=lastFailureAt,proto3" json:"last_failure_at,omitempty"`
+	LastFailureTraceId    string                 `protobuf:"bytes,25,opt,name=last_failure_trace_id,json=lastFailureTraceId,proto3" json:"last_failure_trace_id,omitempty"`
 	unknownFields         protoimpl.UnknownFields
 	sizeCache             protoimpl.SizeCache
 }
@@ -1217,6 +1225,62 @@ func (x *AuthConnection) GetCreatedAt() string {
 func (x *AuthConnection) GetUpdatedAt() string {
 	if x != nil {
 		return x.UpdatedAt
+	}
+	return ""
+}
+
+func (x *AuthConnection) GetServiceVersionId() string {
+	if x != nil {
+		return x.ServiceVersionId
+	}
+	return ""
+}
+
+func (x *AuthConnection) GetAuthName() string {
+	if x != nil {
+		return x.AuthName
+	}
+	return ""
+}
+
+func (x *AuthConnection) GetLastRefreshAttemptAt() string {
+	if x != nil {
+		return x.LastRefreshAttemptAt
+	}
+	return ""
+}
+
+func (x *AuthConnection) GetLastRefreshedAt() string {
+	if x != nil {
+		return x.LastRefreshedAt
+	}
+	return ""
+}
+
+func (x *AuthConnection) GetRefreshRetryNotBefore() string {
+	if x != nil {
+		return x.RefreshRetryNotBefore
+	}
+	return ""
+}
+
+func (x *AuthConnection) GetLastFailureCode() string {
+	if x != nil {
+		return x.LastFailureCode
+	}
+	return ""
+}
+
+func (x *AuthConnection) GetLastFailureAt() string {
+	if x != nil {
+		return x.LastFailureAt
+	}
+	return ""
+}
+
+func (x *AuthConnection) GetLastFailureTraceId() string {
+	if x != nil {
+		return x.LastFailureTraceId
 	}
 	return ""
 }
@@ -1956,7 +2020,7 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\n" +
 	"connection\x18\x01 \x01(\v2\x19.engine.v1.AuthConnectionR\n" +
 	"connection\x12\x14\n" +
-	"\x05found\x18\x02 \x01(\bR\x05found\"\xaf\x04\n" +
+	"\x05found\x18\x02 \x01(\bR\x05found\"\x9d\a\n" +
 	"\x0eAuthConnection\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\tbucket_id\x18\x02 \x01(\tR\bbucketId\x12\x1d\n" +
@@ -1982,7 +2046,15 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\n" +
 	"created_at\x18\x10 \x01(\tR\tcreatedAt\x12\x1d\n" +
 	"\n" +
-	"updated_at\x18\x11 \x01(\tR\tupdatedAt\"E\n" +
+	"updated_at\x18\x11 \x01(\tR\tupdatedAt\x12,\n" +
+	"\x12service_version_id\x18\x12 \x01(\tR\x10serviceVersionId\x12\x1b\n" +
+	"\tauth_name\x18\x13 \x01(\tR\bauthName\x125\n" +
+	"\x17last_refresh_attempt_at\x18\x14 \x01(\tR\x14lastRefreshAttemptAt\x12*\n" +
+	"\x11last_refreshed_at\x18\x15 \x01(\tR\x0flastRefreshedAt\x127\n" +
+	"\x18refresh_retry_not_before\x18\x16 \x01(\tR\x15refreshRetryNotBefore\x12*\n" +
+	"\x11last_failure_code\x18\x17 \x01(\tR\x0flastFailureCode\x12&\n" +
+	"\x0flast_failure_at\x18\x18 \x01(\tR\rlastFailureAt\x121\n" +
+	"\x15last_failure_trace_id\x18\x19 \x01(\tR\x12lastFailureTraceId\"E\n" +
 	"\x1eListConnectionResourcesRequest\x12#\n" +
 	"\rconnection_id\x18\x01 \x01(\tR\fconnectionId\"^\n" +
 	"\x1fListConnectionResourcesResponse\x12;\n" +

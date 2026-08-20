@@ -200,6 +200,25 @@ func runEngine() {
 
 	registryProxy := api.NewRegistryProxy(cfg.Engine.RegistryEndpoint, envLicense)
 	masterKey := loadMasterKey(ctx)
+	authRefreshStore, err := backgroundStore.connectedAuthRefreshCapability()
+	if err != nil {
+		// Why: managed refresh cannot operate safely without durable claims;
+		// failing startup is clearer than allowing user grants to expire silently.
+		slog.ErrorContext(ctx, "FATAL: Connected auth refresh store is unavailable",
+			slog.String("error_code", "connected_auth_refresh_store_unavailable"))
+		os.Exit(1)
+	}
+	authRefreshCoordinator := sandbox.NewAuthRefreshCoordinator(engineStore, masterKey)
+	engineWorkers.connectedAuthRefresh, err = startConnectedAuthRefreshWorker(
+		ctx, authRefreshStore, authRefreshCoordinator, cfg.Engine.ConnectedAuthRefreshWorkers,
+	)
+	if err != nil {
+		// Why: managed refresh is part of connected-auth correctness, so an
+		// invalid or incomplete worker must fail startup rather than run degraded.
+		slog.ErrorContext(ctx, "FATAL: Failed to start connected auth refresh worker",
+			slog.String("error_code", "connected_auth_refresh_worker_start_failed"))
+		os.Exit(1)
+	}
 	browserCookies, browserSessionService := newBrowserSessionService(ctx, engineStore, registryClient, controlAuthenticator, masterKey)
 	managedLoginService := newManagedLoginService(ctx, engineStore, registryClient, controlAuthenticator, masterKey)
 	cliLoginService := newCLILoginService(ctx, engineStore, controlAuthenticator)
@@ -331,8 +350,11 @@ type engineWorkers struct {
 	usageCounter          *worker.UsageCounterWorker
 	packageLeases         *worker.SDKPackageLeaseWorker
 	providerRateLimits    *worker.ProviderRateLimitProjectionWorker
+	connectedAuthRefresh  *worker.ConnectedAuthRefreshWorker
 }
 
+// Stop cancels every Engine-owned background worker and lets each one honor the
+// caller's shared bounded shutdown context.
 func (w engineWorkers) Stop(ctx context.Context) {
 	if w.appTokenInvalidations != nil {
 		w.appTokenInvalidations.Stop()
@@ -354,6 +376,9 @@ func (w engineWorkers) Stop(ctx context.Context) {
 	}
 	if w.packageLeases != nil {
 		w.packageLeases.Stop(ctx)
+	}
+	if w.connectedAuthRefresh != nil {
+		w.connectedAuthRefresh.Stop(ctx)
 	}
 }
 
@@ -420,6 +445,17 @@ func startSDKPackageLeaseRenewal(ctx context.Context, engineStore store.Store, r
 	// arming the periodic timer. Registry availability never gates Engine runtime.
 	leaseWorker.Start(ctx)
 	return leaseWorker
+}
+
+// startConnectedAuthRefreshWorker constructs and starts the managed OAuth
+// refresh scheduler using the exact operator-selected pool size.
+func startConnectedAuthRefreshWorker(ctx context.Context, refreshStore worker.ConnectedAuthRefreshStore, executor worker.ConnectedAuthRefreshExecutor, workerCount int) (*worker.ConnectedAuthRefreshWorker, error) {
+	refreshWorker, err := worker.NewConnectedAuthRefreshWorker(refreshStore, executor, worker.ConnectedAuthRefreshOptions{WorkerCount: workerCount})
+	if err != nil {
+		return nil, err
+	}
+	refreshWorker.Start(ctx)
+	return refreshWorker, nil
 }
 
 func startEngineUsageCounter(ctx context.Context, engineStore store.Store, entitlement models.RuntimeEntitlement) *worker.UsageCounterWorker {
@@ -775,6 +811,11 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	secretResolver := sandbox.NewSecretResolver(deps.engineStore, deps.masterKey)
 
 	sandbox.InitSandbox(r, deps.natsClient, deps.cfg, deps.localObjectCache, deps.tokenValidator, secretResolver, deps.providerRateLimits, port)
+	// Runtime REST execution reuses the same process-wide sandbox cache and
+	// dispatcher initialized above; it never loops back through network gRPC.
+	api.MountAppExecutionRoute(r, api.NewEngineGRPCServer(
+		deps.engineStore, deps.registryClient, deps.masterKey, deps.configStore, deps.natsClient, deps.tokenValidator,
+	))
 	// SDK and MCP webhook delivery uses EngineGRPCServer.SubscribeWebhooks.
 	// Engine-native MCP GraphQL surface (list/deploy/kill/reactivate/delete +
 	// analytics) -- a distinct endpoint from POST /graphql, which is a pure

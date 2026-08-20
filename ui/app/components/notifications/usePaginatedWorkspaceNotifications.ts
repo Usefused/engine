@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, NotificationServiceRef, WorkspaceNotification } from "~/lib/api";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasWorkspacePermission } from "~/lib/current-actor-access";
+import { canReadWorkspaceNotifications } from "~/lib/activity-access";
 
 const PAGE_SIZE = 20;
 
@@ -17,8 +18,11 @@ const PAGE_SIZE = 20;
 // depend on its exact current unbounded behavior, and neither needs
 // numbered pages.
 export function usePaginatedWorkspaceNotifications() {
-  const { access } = useCurrentActorAccess();
+  const { access, loading: accessLoading, failed: accessFailed } = useCurrentActorAccess();
+  const canRead = canReadWorkspaceNotifications(access);
   const canUpdate = hasWorkspacePermission(access, "notification.update");
+  // The paginated surface shares the bell's fail-closed read preflight.
+  const shouldLoad = !accessLoading && !accessFailed && canRead;
   const [page, setPage] = useState(1);
   const [filter, setFilter] = useState<"unread" | "read" | "all">("unread");
   const [items, setItems] = useState<WorkspaceNotification[]>([]);
@@ -49,6 +53,7 @@ export function usePaginatedWorkspaceNotifications() {
   }, []);
 
   const refresh = useCallback(() => {
+		if (!shouldLoad) return Promise.resolve();
 		setLoading(true);
     setError(null);
     return api.workspace
@@ -65,11 +70,11 @@ export function usePaginatedWorkspaceNotifications() {
         setError("Failed to load notifications");
       })
       .finally(() => setLoading(false));
-  }, [page, filter, loadServiceRefs]);
+  }, [page, filter, loadServiceRefs, shouldLoad]);
 
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    if (shouldLoad) refresh();
+  }, [refresh, shouldLoad]);
 
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
 
@@ -124,5 +129,6 @@ export function usePaginatedWorkspaceNotifications() {
     markRead,
     dismiss,
     canUpdate,
+    canRead,
   };
 }

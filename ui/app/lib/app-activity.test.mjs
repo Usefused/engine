@@ -13,6 +13,8 @@ const appIndexPath = fileURLToPath(import.meta.resolve("../routes/integrations.s
 const runtimeStatusPath = fileURLToPath(import.meta.resolve("../components/apps/AppRuntimeStatus.tsx"));
 const apiPath = fileURLToPath(import.meta.resolve("./api.ts"));
 const appBuilderPath = fileURLToPath(import.meta.resolve("../routes/integrations.builder.tsx"));
+const appOverviewPath = fileURLToPath(import.meta.resolve("../components/activity/AppActivityOverview.tsx"));
+const appRequestsPath = fileURLToPath(import.meta.resolve("../components/activity/AppRequestsPanel.tsx"));
 
 test("translates a missing local app without exposing an internal store error", () => {
   assert.deepEqual(appActivityIssue(new Error("app not found"), "sdk"), {
@@ -62,6 +64,8 @@ test("reads exact app versions and family state from the Engine catalogue", asyn
   assert.match(appIndex, /\.mcpGraphql<\{ apps: SdkPage/);
   assert.match(appIndex, /app_id/);
   assert.match(appIndex, /app_family_id/);
+  assert.match(appIndex, /status downloads/);
+  assert.match(appIndex, /await fetchSdks\(query, page\)/);
   assert.match(appIndex, /query SDKApps\(\$search: String!, \$version: String!, \$limit: Int!, \$offset: Int!\)/);
   assert.match(appIndex, /<SdkPagination page=\{page\} total=\{total\}/);
   assert.doesNotMatch(appIndex, /artifactSnapshots/);
@@ -70,6 +74,8 @@ test("reads exact app versions and family state from the Engine catalogue", asyn
   assert.match(appRoute, /appVersions\(app_family_id:/);
   assert.match(appRoute, /appServices\(app_id:/);
   assert.match(appRoute, /definition_schema_version/);
+  assert.match(appRoute, /status\s+downloads/);
+  assert.match(appRoute, /await fetchSdk\(sdk\.app_id\)/);
   assert.match(appRoute, /requireAppSelectionsV3\(res\.app\.selections\)/);
   assert.match(mcpRoute, /hasAnyPermission\(access, "app\.read"\)/);
   assert.doesNotMatch(appRoute, /artifactSnapshot|sdkAnalytics|sdkSelectionResources/);
@@ -89,4 +95,15 @@ test("uses only exact Engine app lifecycle and package routes", async () => {
 	assert.doesNotMatch(api, /upgrade_from|upgradeAsync|generateAsync|\/sdk-config\/\$\{id\}/);
 	assert.doesNotMatch(appIndex, /Upgrade SDK|onUpgrade|api\.sdks\.delete/);
 	assert.doesNotMatch(appBuilder, /upgrade_from|upgradeFrom|lockedSelections|lockedWebhookSelections/);
+});
+
+test("groups generated SDK and direct REST receipts under the same app", async () => {
+	const [overview, requests, api] = await Promise.all([
+		readFile(appOverviewPath, "utf8"),
+		readFile(appRequestsPath, "utf8"),
+		readFile(apiPath, "utf8"),
+	]);
+	assert.match(overview, /getAppExecutionAnalytics\(\{ appId, includeAllVersions \}\)/);
+	assert.match(requests, /transport: transport === "mcp" \? "mcp" : undefined/);
+	assert.match(api, /transport: "sdk" \| "mcp" \| "rest" \| "webhook"/);
 });
