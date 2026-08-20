@@ -265,7 +265,7 @@ type BucketConnectSummary struct {
 
 const (
 	DefaultConnectBrandingDisplayName  = "Fused"
-	DefaultConnectBrandingPrimaryColor = "#2563eb"
+	DefaultConnectBrandingPrimaryColor = "#6941ff"
 )
 
 // ConnectBranding is the Engine-local presentation contract for hosted connect pages.

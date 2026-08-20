@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, type FormEvent } from "react";
+import { useState, useEffect, useRef, useCallback, type ComponentProps, type FormEvent } from "react";
 import { useNavigate, useSearchParams, useRouteLoaderData, type MetaFunction } from "@remix-run/react";
 
 export const meta: MetaFunction = ({ matches }) => {
@@ -18,6 +18,7 @@ import { isImportVersionRequired } from "~/lib/authorization-error";
 
 type ImportSource = { url?: string; content?: string };
 type ImportIdentity = { name: string; slug?: string; version?: string };
+type ServicesView = "workspace" | "catalog" | "pending";
 
 function importSource(method: "openapi" | "docs", sourceType: "url" | "text", url: string, content: string): ImportSource {
   if (method === "openapi" && sourceType === "text") {
@@ -53,6 +54,87 @@ async function createSpecificationPlan(
   }
 }
 
+// selectedServicesView converts an untrusted URL tab into one supported view.
+function selectedServicesView(tab: string | null): ServicesView {
+  if (tab === "pending" || tab === "catalog") return tab;
+  return "workspace";
+}
+
+// workspaceListProjection derives stable empty-state and pagination values from one optional page response.
+function workspaceListProjection(page: { data: ActivatedService[]; total: number } | null) {
+  const data = page?.data ?? [];
+  const total = page?.total ?? 0;
+  return { integrations: data.map(fromActivatedService), total, pages: Math.ceil(total / 10) || 1 };
+}
+
+// ServicesTabs renders authenticated navigation without coupling its decisions to page state management.
+function ServicesTabs({ isAuth, view, activeSessions, setView }: {
+  isAuth: boolean;
+  view: ServicesView;
+  activeSessions: AgentSession[];
+  setView: (view: ServicesView) => void;
+}) {
+  if (!isAuth) return null;
+  return (
+    <div className="flex bg-slate-100 p-1 rounded-lg w-full sm:w-fit mb-6">
+      <button data-track="view_workspace_tab" type="button" onClick={() => setView("workspace")}
+        className={`flex-1 sm:flex-none px-3 sm:px-4 py-1.5 text-sm font-medium rounded-md transition-all ${view === "workspace" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"} cursor-pointer`}>
+        Workspace services
+      </button>
+      <button data-track="view_catalog_tab" type="button" onClick={() => setView("catalog")}
+        className={`flex-1 sm:flex-none px-3 sm:px-4 py-1.5 text-sm font-medium rounded-md transition-all ${view === "catalog" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"} cursor-pointer`}>
+        Catalog
+      </button>
+      <button data-track="view_imports_tab" type="button" onClick={() => setView("pending")}
+        className={`relative flex-1 sm:flex-none px-3 sm:px-4 py-1.5 text-sm font-medium rounded-md transition-all ${view === "pending" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"} cursor-pointer`}>
+        Imports
+        {activeSessions.length > 0 && <span className="ml-2 text-[10px] font-bold text-amber-700">{activeSessions.length}</span>}
+      </button>
+    </div>
+  );
+}
+
+// PendingImports renders active extraction work only in its authenticated view.
+function PendingImports({ isAuth, view, props }: {
+  isAuth: boolean;
+  view: ServicesView;
+  props: ComponentProps<typeof IntegrationsPendingTab>;
+}) {
+  if (!isAuth || view !== "pending") return null;
+  return <div className="mb-6"><IntegrationsPendingTab {...props} /></div>;
+}
+
+// ServicesContent chooses one list projection while keeping pagination decisions outside the route component.
+function ServicesContent({ isAuth, view, catalog, workspace }: {
+  isAuth: boolean;
+  view: ServicesView;
+  catalog: ComponentProps<typeof IntegrationsListTab>;
+  workspace: ComponentProps<typeof IntegrationsListTab>;
+}) {
+  if (view === "catalog" || !isAuth) return <IntegrationsListTab {...catalog} />;
+  if (view === "workspace") return <IntegrationsListTab {...workspace} />;
+  return null;
+}
+
+// DefineServicePanel keeps drawer visibility out of the route's orchestration complexity.
+function DefineServicePanel({ visible, props }: {
+  visible: boolean;
+  props: ComponentProps<typeof DefineServiceDrawer>;
+}) {
+  if (!visible) return null;
+  return <DefineServiceDrawer {...props} />;
+}
+
+// ExtractionSessionPanel renders one active wizard and leaves its lifecycle callbacks with the route owner.
+function ExtractionSessionPanel({ sessionID, onClose, onComplete }: {
+  sessionID: string | null;
+  onClose: () => void;
+  onComplete: () => void;
+}) {
+  if (!sessionID) return null;
+  return <ExtractionWizard sessionId={sessionID} onClose={onClose} onComplete={onComplete} />;
+}
+
 export default function IntegrationsIndex() {
   const toast = useToast();
   const rootData = useRouteLoaderData<{ isAuth: boolean }>("root");
@@ -72,7 +154,7 @@ export default function IntegrationsIndex() {
   const [totalItems, setTotalItems] = useState(0);
   const navigate = useNavigate();
   const urlTab = searchParams.get("tab");
-  const view = (urlTab === "pending" || urlTab === "catalog") ? urlTab : "workspace";
+  const view = selectedServicesView(urlTab);
 
     // Pagination
   const pageParam = searchParams.get("page");
@@ -420,6 +502,8 @@ export default function IntegrationsIndex() {
     }
   }
 
+  const workspaceList = workspaceListProjection(workspaceServicePageData);
+
   return (
     <div>
       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 mb-6">
@@ -438,98 +522,31 @@ export default function IntegrationsIndex() {
         </div>
       </div>
 
-      {isAuth && (
-        <div className="flex bg-slate-100 p-1 rounded-lg w-full sm:w-fit mb-6">
-          <button
-            data-track="view_workspace_tab"
-            type="button"
-            onClick={() => setView("workspace")}
-            className={`flex-1 sm:flex-none px-3 sm:px-4 py-1.5 text-sm font-medium rounded-md transition-all ${view === "workspace" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"} cursor-pointer`}
-          >
-            Workspace services
-          </button>
-          <button
-            data-track="view_catalog_tab"
-            type="button"
-            onClick={() => setView("catalog")}
-            className={`flex-1 sm:flex-none px-3 sm:px-4 py-1.5 text-sm font-medium rounded-md transition-all ${view === "catalog" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"} cursor-pointer`}
-          >
-            Catalog
-          </button>
-          <button
-            data-track="view_imports_tab"
-            type="button"
-            onClick={() => setView("pending")}
-            className={`relative flex-1 sm:flex-none px-3 sm:px-4 py-1.5 text-sm font-medium rounded-md transition-all ${view === "pending" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"} cursor-pointer`}
-          >
-            Imports
-            {activeSessions.length > 0 && <span className="ml-2 text-[10px] font-bold text-amber-700">{activeSessions.length}</span>}
-          </button>
-        </div>
-      )}
+      <ServicesTabs isAuth={isAuth} view={view} activeSessions={activeSessions} setView={setView} />
+      <PendingImports isAuth={isAuth} view={view} props={{ activeSessions, setNewSessionId, onRefresh: refreshSessions }} />
+      <ServicesContent
+        isAuth={isAuth}
+        view={view}
+        catalog={{
+          integrations: integrations.map(fromService), loading, error, query, setQuery, handleSearch, handleClear,
+          searching, handleDelete, setShowNewPanel, page, onPageChange: setPage, totalPages, totalItems, isAuth,
+          viewType: "catalog", handleAddWorkspace, handleRemoveWorkspace,
+          activeServiceIds: workspaceServices.map(service => service.service_id),
+        }}
+        workspace={{
+          integrations: workspaceList.integrations, loading, error, query,
+          setQuery, handleSearch, handleClear, searching, handleDelete, setShowNewPanel, page, onPageChange: setPage,
+          totalPages: workspaceList.pages, totalItems: workspaceList.total, isAuth, viewType: "workspace",
+          handleAddWorkspace, handleRemoveWorkspace,
+        }}
+      />
 
-      {/* Active Sessions View */}
-      {isAuth && view === "pending" && (
-        <div className="mb-6">
-          <IntegrationsPendingTab
-            activeSessions={activeSessions}
-            setNewSessionId={setNewSessionId}
-            onRefresh={refreshSessions}
-          />
-        </div>
-      )}
-
-      {view === "catalog" || !isAuth ? (
-          <IntegrationsListTab
-            integrations={integrations.map(fromService)}
-            loading={loading}
-            error={error}
-            query={query}
-            setQuery={setQuery}
-            handleSearch={handleSearch}
-            handleClear={handleClear}
-            searching={searching}
-            handleDelete={handleDelete}
-            setShowNewPanel={setShowNewPanel}
-            page={page}
-            onPageChange={setPage}
-            totalPages={totalPages}
-            totalItems={totalItems}
-            isAuth={isAuth}
-            viewType="catalog"
-            handleAddWorkspace={handleAddWorkspace}
-            handleRemoveWorkspace={handleRemoveWorkspace}
-            activeServiceIds={workspaceServices.map(s => s.service_id)}
-          />
-      ) : view === "workspace" && isAuth ? (
-          <IntegrationsListTab
-            integrations={(workspaceServicePageData?.data || []).map(fromActivatedService)}
-            loading={loading}
-            error={error}
-            query={query}
-            setQuery={setQuery}
-            handleSearch={handleSearch}
-            handleClear={handleClear}
-            searching={searching}
-            handleDelete={handleDelete}
-            setShowNewPanel={setShowNewPanel}
-            page={page}
-            onPageChange={setPage}
-            totalPages={Math.ceil((workspaceServicePageData?.total || 0) / 10) || 1}
-            totalItems={workspaceServicePageData?.total || 0}
-            isAuth={isAuth}
-            viewType="workspace"
-            handleAddWorkspace={handleAddWorkspace}
-            handleRemoveWorkspace={handleRemoveWorkspace}
-          />
-      ) : null}
-
-      {/* Define a service side panel */}
-      {showNewPanel && (
-        <DefineServiceDrawer
-          isAuth={isAuth}
-          onClose={() => setShowNewPanel(false)}
-          onCancel={() => {
+      <DefineServicePanel
+        visible={showNewPanel}
+        props={{
+          isAuth,
+          onClose: () => setShowNewPanel(false),
+          onCancel: () => {
             setShowNewPanel(false);
             setImportPlan(null);
             setNewName("");
@@ -540,53 +557,25 @@ export default function IntegrationsIndex() {
             setFileName("");
             setTargetContext("");
             setStartError("");
-          }}
-          importPlan={importPlan}
-          newName={newName}
-          setNewName={setNewName}
-          isSlugManuallyEdited={isSlugManuallyEdited}
-          setIsSlugManuallyEdited={setIsSlugManuallyEdited}
-          newSlug={newSlug}
-          setNewSlug={setNewSlug}
-          requireVersion={requireVersion}
-          setRequireVersion={setRequireVersion}
-          importMethod={importMethod}
-          setImportMethod={setImportMethod}
-          newVersion={newVersion}
-          setNewVersion={setNewVersion}
-          sourceType={sourceType}
-          setSourceType={setSourceType}
-          newUrl={newUrl}
-          setNewUrl={setNewUrl}
-          newContent={newContent}
-          setNewContent={setNewContent}
-          fileName={fileName}
-          setFileName={setFileName}
-          starting={starting}
-          startError={startError}
-          setStartError={setStartError}
-          handleStart={handleStart}
-          handleChangeImportSource={handleChangeImportSource}
-        />
-      )}
-
-      {/* Extraction Wizard Overlay */}
-      {newSessionId && (
-        <ExtractionWizard 
-          sessionId={newSessionId} 
-          onClose={() => {
-            if (newSessionId) {
-              api.integrations.cancelSession(newSessionId).catch(console.error);
-              api.integrations.deleteSession(newSessionId).catch(console.error);
-            }
-            setNewSessionId(null);
-            loadVisibleData();
-          }}
-          onComplete={() => {
-            setNewSessionId(null);
-          }}
-        />
-      )}
+          },
+          importPlan, newName, setNewName, isSlugManuallyEdited, setIsSlugManuallyEdited, newSlug, setNewSlug,
+          requireVersion, setRequireVersion, importMethod, setImportMethod, newVersion, setNewVersion, sourceType,
+          setSourceType, newUrl, setNewUrl, newContent, setNewContent, fileName, setFileName, starting, startError,
+          setStartError, handleStart, handleChangeImportSource,
+        }}
+      />
+      <ExtractionSessionPanel
+        sessionID={newSessionId}
+        onClose={() => {
+          if (newSessionId) {
+            api.integrations.cancelSession(newSessionId).catch(console.error);
+            api.integrations.deleteSession(newSessionId).catch(console.error);
+          }
+          setNewSessionId(null);
+          loadVisibleData();
+        }}
+        onComplete={() => setNewSessionId(null)}
+      />
     </div>
   );
 }

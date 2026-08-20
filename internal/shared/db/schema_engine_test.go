@@ -83,8 +83,8 @@ func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 	}
 
 	migrations := engineMigrations()
-	if len(migrations) != 6 {
-		t.Fatalf("Engine migration count = %d, want 6", len(migrations))
+	if len(migrations) != 7 {
+		t.Fatalf("Engine migration count = %d, want 7", len(migrations))
 	}
 	assertMigrationIdentity(t, migrations[0], engineMigrationVersion, engineMigrationName)
 	assertMigrationIdentity(t, migrations[1], appTokenPolicyMigrationVersion, appTokenPolicyMigrationName)
@@ -92,19 +92,20 @@ func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 	assertMigrationIdentity(t, migrations[3], idempotencyMediaMigrationVersion, idempotencyMediaMigrationName)
 	assertMigrationIdentity(t, migrations[4], connectBrandingMigrationVersion, connectBrandingMigrationName)
 	assertMigrationIdentity(t, migrations[5], connectBrandColorMigrationVersion, connectBrandColorMigrationName)
+	assertMigrationIdentity(t, migrations[6], connectBrandVioletMigrationVersion, connectBrandVioletMigrationName)
 	if engineMigrationLockQuery != "SELECT pg_advisory_xact_lock($1)" {
 		t.Fatalf("Engine migrations must use a transaction-scoped advisory lock, got %q", engineMigrationLockQuery)
 	}
 }
 
 // TestEngineSchemaDefinesConnectBrandingDefaults keeps fresh databases aligned
-// with the Engine chrome while preserving the immutable version-five shape.
+// with the Engine chrome while preserving the immutable earlier migration shapes.
 func TestEngineSchemaDefinesConnectBrandingDefaults(t *testing.T) {
 	table := engineSchemaTable(t, "fused_workspaces")
 	for _, expected := range []string{
 		"connect_display_name text NOT NULL DEFAULT 'Fused'",
 		"connect_logo_url text NOT NULL DEFAULT ''",
-		"connect_primary_color text NOT NULL DEFAULT '#2563eb'",
+		"connect_primary_color text NOT NULL DEFAULT '#6941ff'",
 		"connect_primary_color_customized boolean NOT NULL DEFAULT false",
 		"connect_support_url text NOT NULL DEFAULT ''",
 		"connect_privacy_url text NOT NULL DEFAULT ''",
@@ -118,6 +119,28 @@ func TestEngineSchemaDefinesConnectBrandingDefaults(t *testing.T) {
 	// Version five has already been recordable and cannot be retroactively edited.
 	if !strings.Contains(legacy, "connect_primary_color text NOT NULL DEFAULT '#18181b'") || strings.Contains(legacy, "#2563eb") {
 		t.Fatalf("version-five branding migration was rewritten: %s", legacy)
+	}
+}
+
+// TestConnectBrandVioletMigrationConvergesOnlyUntouchedBlueDefaults locks the
+// additive migration that aligns existing workspaces without replacing choices.
+func TestConnectBrandVioletMigrationConvergesOnlyUntouchedBlueDefaults(t *testing.T) {
+	queries := connectBrandVioletMigrationQueries()
+	// Two statements keep row convergence and the insertion default independently auditable.
+	if len(queries) != 2 {
+		t.Fatalf("brand-violet migration query count = %d, want 2", len(queries))
+	}
+	joined := strings.Join(queries, "\n")
+	for _, expected := range []string{
+		"connect_primary_color = '#6941ff'",
+		"connect_primary_color_customized = false",
+		"connect_primary_color = '#2563eb'",
+		"SET DEFAULT '#6941ff'",
+	} {
+		// Every predicate protects the boundary between a generated default and customer input.
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("brand-violet migration missing %q: %s", expected, joined)
+		}
 	}
 }
 

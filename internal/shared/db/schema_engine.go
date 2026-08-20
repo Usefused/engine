@@ -10,21 +10,23 @@ import (
 )
 
 const (
-	engineMigrationAdvisoryLockKey    int64 = 0x465553454E47494E
-	engineMigrationLockQuery                = `SELECT pg_advisory_xact_lock($1)`
-	engineMigrationVersion            int64 = 1
-	engineMigrationName                     = "20260810_engine_schema_convergence"
-	appTokenPolicyMigrationVersion    int64 = 2
-	appTokenPolicyMigrationName             = "20260810_app_token_policy"
-	contractEnvelopeMigrationVersion  int64 = 3
-	contractEnvelopeMigrationName           = "20260811_execution_contract_envelope"
-	idempotencyMediaMigrationVersion  int64 = 4
-	idempotencyMediaMigrationName           = "20260811_idempotency_response_media"
-	connectBrandingMigrationVersion   int64 = 5
-	connectBrandingMigrationName            = "20260819_connect_branding"
-	connectBrandColorMigrationVersion int64 = 6
-	connectBrandColorMigrationName          = "20260819_connect_brand_color"
-	unifiedEmptySetHash                     = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+	engineMigrationAdvisoryLockKey     int64 = 0x465553454E47494E
+	engineMigrationLockQuery                 = `SELECT pg_advisory_xact_lock($1)`
+	engineMigrationVersion             int64 = 1
+	engineMigrationName                      = "20260810_engine_schema_convergence"
+	appTokenPolicyMigrationVersion     int64 = 2
+	appTokenPolicyMigrationName              = "20260810_app_token_policy"
+	contractEnvelopeMigrationVersion   int64 = 3
+	contractEnvelopeMigrationName            = "20260811_execution_contract_envelope"
+	idempotencyMediaMigrationVersion   int64 = 4
+	idempotencyMediaMigrationName            = "20260811_idempotency_response_media"
+	connectBrandingMigrationVersion    int64 = 5
+	connectBrandingMigrationName             = "20260819_connect_branding"
+	connectBrandColorMigrationVersion  int64 = 6
+	connectBrandColorMigrationName           = "20260819_connect_brand_color"
+	connectBrandVioletMigrationVersion int64 = 7
+	connectBrandVioletMigrationName          = "20260819_connect_brand_violet"
+	unifiedEmptySetHash                      = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
 )
 
 type engineMigration struct {
@@ -112,6 +114,7 @@ func engineMigrations() []engineMigration {
 		{Version: idempotencyMediaMigrationVersion, Name: idempotencyMediaMigrationName, Queries: idempotencyMediaMigrationQueries()},
 		{Version: connectBrandingMigrationVersion, Name: connectBrandingMigrationName, Queries: connectBrandingMigrationQueries()},
 		{Version: connectBrandColorMigrationVersion, Name: connectBrandColorMigrationName, Queries: connectBrandColorMigrationQueries()},
+		{Version: connectBrandVioletMigrationVersion, Name: connectBrandVioletMigrationName, Queries: connectBrandVioletMigrationQueries()},
 	}
 }
 
@@ -135,7 +138,7 @@ func engineSchemaQueries() []string {
 			slug text NOT NULL UNIQUE,
 			connect_display_name text NOT NULL DEFAULT 'Fused',
 			connect_logo_url text NOT NULL DEFAULT '',
-			connect_primary_color text NOT NULL DEFAULT '#2563eb',
+			connect_primary_color text NOT NULL DEFAULT '#6941ff',
 			connect_primary_color_customized boolean NOT NULL DEFAULT false,
 			connect_support_url text NOT NULL DEFAULT '',
 			connect_privacy_url text NOT NULL DEFAULT '',
@@ -1538,6 +1541,20 @@ func connectBrandColorMigrationQueries() []string {
 		   AND connect_primary_color = '#18181b';`,
 		// New workspaces inherit the same primary colour as the compiled fallback.
 		`ALTER TABLE fused_workspaces ALTER COLUMN connect_primary_color SET DEFAULT '#2563eb';`,
+	}
+}
+
+// connectBrandVioletMigrationQueries aligns untouched Engine defaults with the
+// canonical violet token while preserving every explicitly selected colour.
+func connectBrandVioletMigrationQueries() []string {
+	return []string{
+		// Only rows still carrying the prior generated default are safe to converge.
+		`UPDATE fused_workspaces
+		 SET connect_primary_color = '#6941ff'
+		 WHERE connect_primary_color_customized = false
+		   AND connect_primary_color = '#2563eb';`,
+		// New workspaces must use the same token as the compiled and embedded UI fallbacks.
+		`ALTER TABLE fused_workspaces ALTER COLUMN connect_primary_color SET DEFAULT '#6941ff';`,
 	}
 }
 

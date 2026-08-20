@@ -48,6 +48,33 @@ func TestConnectBrandColorMigrationPreservesExplicitChoices(t *testing.T) {
 	assertConnectBrandColorMigrationStates(t, ctx, tx)
 }
 
+// TestConnectBrandVioletMigrationPreservesExplicitBlueChoice proves the
+// additive migration changes only the prior generated default and insertion default.
+func TestConnectBrandVioletMigrationPreservesExplicitBlueChoice(t *testing.T) {
+	databaseURL := os.Getenv("CONNECT_BRANDING_TEST_DATABASE_URL")
+	// A dedicated database is required because the fixture shadows production table names.
+	if databaseURL == "" {
+		t.Skip("CONNECT_BRANDING_TEST_DATABASE_URL is required for isolated PostgreSQL coverage")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	conn, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect isolated PostgreSQL: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin brand-violet migration fixture: %v", err)
+	}
+	// Transaction rollback makes the migration proof safe for a reused test database.
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	createConnectBrandVioletMigrationFixture(t, ctx, tx)
+	applyConnectBrandVioletMigration(t, ctx, tx)
+	assertConnectBrandVioletMigrationStates(t, ctx, tx)
+}
+
 // createConnectBrandColorMigrationFixture shadows production table names with
 // transaction-local tables representing untouched, audited, and visible edits.
 func createConnectBrandColorMigrationFixture(t *testing.T, ctx context.Context, tx pgx.Tx) {
@@ -155,5 +182,75 @@ func assertConnectBrandColorMigrationStates(t *testing.T, ctx context.Context, t
 	// Fresh rows must remain uncustomized so future default migrations can converge them.
 	if want := (connectBrandColorMigrationState{color: "#2563eb", customized: false}); inserted != want {
 		t.Fatalf("post-migration brand colour default = %#v, want %#v", inserted, want)
+	}
+}
+
+// createConnectBrandVioletMigrationFixture represents generated blue, chosen
+// blue, and a distinct explicit customer colour after migration version six.
+func createConnectBrandVioletMigrationFixture(t *testing.T, ctx context.Context, tx pgx.Tx) {
+	t.Helper()
+	if _, err := tx.Exec(ctx, `CREATE TEMP TABLE fused_workspaces (
+		id uuid PRIMARY KEY,
+		connect_primary_color text NOT NULL DEFAULT '#2563eb',
+		connect_primary_color_customized boolean NOT NULL DEFAULT false
+	) ON COMMIT DROP`); err != nil {
+		t.Fatalf("create prior brand-colour fixture: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO fused_workspaces (id, connect_primary_color, connect_primary_color_customized) VALUES
+		('00000000-0000-0000-0000-000000000201', '#2563eb', false),
+		('00000000-0000-0000-0000-000000000202', '#2563eb', true),
+		('00000000-0000-0000-0000-000000000203', '#123456', true)`); err != nil {
+		t.Fatalf("seed prior brand-colour fixture: %v", err)
+	}
+}
+
+// applyConnectBrandVioletMigration executes the immutable version-seven sequence.
+func applyConnectBrandVioletMigration(t *testing.T, ctx context.Context, tx pgx.Tx) {
+	t.Helper()
+	for _, query := range connectBrandVioletMigrationQueries() {
+		// The exact query identifies any PostgreSQL or ordering regression without row data.
+		if _, err := tx.Exec(ctx, query); err != nil {
+			t.Fatalf("apply connect brand-violet migration %q: %v", query, err)
+		}
+	}
+}
+
+// assertConnectBrandVioletMigrationStates verifies row preservation and the new default.
+func assertConnectBrandVioletMigrationStates(t *testing.T, ctx context.Context, tx pgx.Tx) {
+	t.Helper()
+	rows, err := tx.Query(ctx, `SELECT id::text, connect_primary_color, connect_primary_color_customized FROM fused_workspaces ORDER BY id`)
+	if err != nil {
+		t.Fatalf("read migrated brand-violet colours: %v", err)
+	}
+	defer rows.Close()
+	wants := []connectBrandColorMigrationState{
+		{color: "#6941ff", customized: false},
+		{color: "#2563eb", customized: true},
+		{color: "#123456", customized: true},
+	}
+	seen := 0
+	for rows.Next() {
+		var id string
+		var got connectBrandColorMigrationState
+		if err := rows.Scan(&id, &got.color, &got.customized); err != nil {
+			t.Fatalf("scan migrated brand-violet colour: %v", err)
+		}
+		if seen >= len(wants) || got != wants[seen] {
+			t.Fatalf("migrated brand-violet colour %s = %#v", id, got)
+		}
+		seen++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate migrated brand-violet colours: %v", err)
+	}
+	if seen != len(wants) {
+		t.Fatalf("migrated brand-violet row count = %d, want %d", seen, len(wants))
+	}
+	var inserted connectBrandColorMigrationState
+	if err := tx.QueryRow(ctx, `INSERT INTO fused_workspaces (id) VALUES ('00000000-0000-0000-0000-000000000204') RETURNING connect_primary_color, connect_primary_color_customized`).Scan(&inserted.color, &inserted.customized); err != nil {
+		t.Fatalf("insert workspace with brand-violet defaults: %v", err)
+	}
+	if want := (connectBrandColorMigrationState{color: "#6941ff", customized: false}); inserted != want {
+		t.Fatalf("post-migration brand-violet default = %#v, want %#v", inserted, want)
 	}
 }
