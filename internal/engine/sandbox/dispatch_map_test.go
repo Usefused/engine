@@ -33,9 +33,10 @@ func TestMapAuthConfigsPreservesInvalidUnnamedOAuthForValidation(t *testing.T) {
 	got := mapAuthConfigs(fusedobject.AuthConfigs{{
 		Type:                    "oauth2",
 		TokenEndpointAuthMethod: fusedobject.TokenEndpointAuthMethodClientSecretBasic,
+		RefreshTokenRequired:    true,
 	}})
 
-	if len(got) != 1 || got[0].Name != "" || got[0].TokenEndpointAuthMethod != models.TokenEndpointAuthMethodClientSecretBasic {
+	if len(got) != 1 || got[0].Name != "" || got[0].TokenEndpointAuthMethod != models.TokenEndpointAuthMethodClientSecretBasic || !got[0].RefreshTokenRequired {
 		t.Fatalf("unnamed oauth auth must not gain a legacy fallback: %#v", got)
 	}
 }

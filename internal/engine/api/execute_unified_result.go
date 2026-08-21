@@ -4,14 +4,19 @@ import (
 	"context"
 	"errors"
 
+	"github.com/Usefused/engine/internal/engine"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/unified"
 )
 
+// unifiedTargetOutcome keeps the raw response used by dependency/rollback
+// mappings separate from the effective value exposed to final output mapping.
 type unifiedTargetOutcome struct {
 	result           *enginev1.UnifiedTargetResult
 	response         any
+	output           any
+	outputReady      bool
 	forwardSucceeded bool
 }
 
@@ -27,7 +32,7 @@ func (s *EngineGRPCServer) executeUnifiedTarget(ctx context.Context, call prepar
 		classified := classifyUnifiedPhysicalError(err)
 		return unifiedTargetOutcome{result: unifiedErrorResult(target.name, classified.code, classified.action)}
 	}
-	data, response, responseReady, code := projectUnifiedOutput(call.input, target, physical.Body)
+	data, response, output, responseReady, code := projectUnifiedOutput(call.input, target, physical.Body)
 	// projection belongs outside the provider call. A bad user mapping is a
 	// public result error, but the confirmed raw response remains usable by direct
 	// dependants and must not trigger compensation.
@@ -39,7 +44,7 @@ func (s *EngineGRPCServer) executeUnifiedTarget(ctx context.Context, call prepar
 	}
 	return unifiedTargetOutcome{
 		result:   &enginev1.UnifiedTargetResult{Target: target.name, Status: "success", DataJson: data},
-		response: response, forwardSucceeded: true,
+		response: response, output: output, outputReady: true, forwardSucceeded: true,
 	}
 }
 
@@ -50,6 +55,7 @@ func prepareUnifiedPhysicalRequest(call preparedUnifiedCall, target preparedUnif
 	if err != nil {
 		return sandbox.PhysicalExecutionRequest{}, err
 	}
+	pagination := forwardPaginationIntent(target, phase)
 	idempotencyKey, requestHash := deriveUnifiedChildIdentity(
 		call.appID, call.operation, target.name, phase, call.idempotencyKey, canonical, target.selector,
 	)
@@ -57,34 +63,62 @@ func prepareUnifiedPhysicalRequest(call preparedUnifiedCall, target preparedUnif
 		Params: params, Credentials: unifiedSelectorCredentials(target.selector),
 		Environment:    unifiedSelectorEnvironment(target.selector),
 		IdempotencyKey: idempotencyKey, RequestBodyHash: requestHash,
-		Transport: call.transport,
+		Pagination: pagination, Transport: call.transport,
 	}, nil
+}
+
+// forwardPaginationIntent prevents a caller's result-size preference from changing compensation behavior.
+func forwardPaginationIntent(target preparedUnifiedTarget, phase string) *engine.PaginationIntent {
+	// Rollbacks execute their immutable contract fully and never inherit forward target controls.
+	if phase != "forward" {
+		return nil
+	}
+	return target.pagination
 }
 
 // projectUnifiedOutput decodes one successful provider body and applies only
 // the current target's configured output projection.
-func projectUnifiedOutput(input any, target preparedUnifiedTarget, responseBody []byte) ([]byte, any, bool, string) {
+func projectUnifiedOutput(input any, target preparedUnifiedTarget, responseBody []byte) ([]byte, any, any, bool, string) {
 	canonical, response, err := decodeCanonicalUnifiedValue(responseBody)
 	if err != nil {
-		return nil, nil, false, "response_not_json"
+		return nil, nil, nil, false, "response_not_json"
 	}
 	if target.output == nil {
-		return canonical, response, true, ""
+		return canonical, response, response, true, ""
 	}
 	mapped, err := target.output.program.Evaluate(unified.EvaluationContext{
 		Input: input, Target: target.name, Response: response,
 	})
 	if err != nil || unified.IsOmitted(mapped) {
-		return nil, response, true, "output_mapping_failed"
+		return nil, response, nil, true, "output_mapping_failed"
 	}
 	if err := target.output.schema.VisitJSON(mapped); err != nil {
-		return nil, response, true, "output_validation_failed"
+		return nil, response, nil, true, "output_validation_failed"
 	}
 	canonical, err = encodeCanonicalUnifiedValue(mapped)
 	if err != nil {
-		return nil, response, true, "output_encoding_failed"
+		return nil, response, nil, true, "output_encoding_failed"
 	}
-	return canonical, response, true, ""
+	return canonical, response, mapped, true, ""
+}
+
+// projectUnifiedOperationOutput evaluates one final result after every selected binding has settled.
+func projectUnifiedOperationOutput(input any, output *preparedUnifiedOutput, responses map[string]any) ([]byte, string) {
+	if output == nil {
+		return nil, ""
+	}
+	mapped, err := output.program.Evaluate(unified.EvaluationContext{Input: input, Responses: responses})
+	if err != nil || unified.IsOmitted(mapped) {
+		return nil, "output_mapping_failed"
+	}
+	if err := output.schema.VisitJSON(mapped); err != nil {
+		return nil, "output_validation_failed"
+	}
+	encoded, err := encodeCanonicalUnifiedValue(mapped)
+	if err != nil {
+		return nil, "output_encoding_failed"
+	}
+	return encoded, ""
 }
 
 type classifiedUnifiedError struct {

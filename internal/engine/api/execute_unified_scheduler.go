@@ -31,12 +31,21 @@ type unifiedRollbackCompletion struct {
 	result   *enginev1.UnifiedRollbackResult
 }
 
+// unifiedGraphOutcome separates caller-visible target receipts from effective
+// binding values consumed by the final operation output projection.
+type unifiedGraphOutcome struct {
+	results   []*enginev1.UnifiedTargetResult
+	rollbacks []*enginev1.UnifiedRollbackResult
+	outputs   map[string]any
+}
+
 // executeUnifiedGraph starts each target as soon as its own direct dependencies
 // succeed, then waits for all forwards before beginning compensation.
-func (s *EngineGRPCServer) executeUnifiedGraph(ctx context.Context, call preparedUnifiedCall) ([]*enginev1.UnifiedTargetResult, []*enginev1.UnifiedRollbackResult) {
+func (s *EngineGRPCServer) executeUnifiedGraph(ctx context.Context, call preparedUnifiedCall) unifiedGraphOutcome {
 	results := make([]*enginev1.UnifiedTargetResult, len(call.targets))
 	states := make([]unifiedExecutionState, len(call.targets))
 	responses := make(map[string]any, len(call.targets))
+	outputs := make(map[string]any, len(call.targets))
 	byTarget := indexPreparedUnifiedTargets(call.targets)
 	ready, completed := discoverUnifiedForwardWork(call.targets, results, states, byTarget)
 	completions := make(chan unifiedForwardCompletion, len(call.targets))
@@ -61,6 +70,9 @@ func (s *EngineGRPCServer) executeUnifiedGraph(ctx context.Context, call prepare
 		if completion.outcome.forwardSucceeded {
 			states[completion.index] = unifiedStateSucceeded
 			responses[call.targets[completion.index].name] = completion.outcome.response
+			if completion.outcome.outputReady {
+				outputs[call.targets[completion.index].name] = completion.outcome.output
+			}
 		} else {
 			states[completion.index] = unifiedStateFailed
 		}
@@ -69,7 +81,7 @@ func (s *EngineGRPCServer) executeUnifiedGraph(ctx context.Context, call prepare
 		completed += skipped
 	}
 	rollbacks := s.executeUnifiedRollbacks(ctx, call, results, states, responses, byTarget)
-	return results, rollbacks
+	return unifiedGraphOutcome{results: results, rollbacks: rollbacks, outputs: outputs}
 }
 
 // indexPreparedUnifiedTargets maps exact public targets to stable result order.

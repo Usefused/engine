@@ -15,6 +15,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/unified"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
+	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"github.com/google/uuid"
 )
 
@@ -400,10 +401,14 @@ func unifiedAppOpenAPIOperation(definition unified.OperationDefinition) appOpenA
 		services[service] = struct{}{}
 	}
 	input := normalizeOpenAPISchema(decodeOpenAPISchema(definition.InputSchema))
+	response := unifiedOpenAPIResponseSchema(definition.Name, targets)
+	if definition.Output != nil {
+		response = normalizeOpenAPISchema(decodeOpenAPISchema(definition.Output.Schema))
+	}
 	return appOpenAPIOperation{
 		name:           definition.Name,
 		requestSchema:  executionRequestSchema(definition.Name, input, true, unifiedRoutingSchema(targets, services)),
-		responseSchema: unifiedOpenAPIResponseSchema(definition.Name, targets),
+		responseSchema: response,
 	}
 }
 
@@ -418,9 +423,11 @@ func executionRequestSchema(operation string, input map[string]any, isUnified bo
 	if isUnified {
 		properties["targets"] = routing["targets"]
 		properties["selectors"] = routing["selectors"]
+		properties["target_pagination"] = routing["target_pagination"]
 		required = append(required, "targets")
 	} else {
 		properties["selector"] = map[string]any{"$ref": "#/components/schemas/ExecutionSelector"}
+		properties["pagination"] = map[string]any{"$ref": "#/components/schemas/PaginationIntent"}
 	}
 	return map[string]any{"type": "object", "additionalProperties": false, "required": required, "properties": properties}
 }
@@ -433,12 +440,17 @@ func unifiedRoutingSchema(targets []string, services map[string]struct{}) map[st
 	for service := range services {
 		selectorProperties[service] = map[string]any{"$ref": "#/components/schemas/ExecutionSelector"}
 	}
+	paginationProperties := make(map[string]any, len(targets))
+	for _, target := range targets {
+		paginationProperties[target] = map[string]any{"$ref": "#/components/schemas/PaginationIntent"}
+	}
 	return map[string]any{
 		"targets": map[string]any{
 			"type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true,
 			"items": map[string]any{"type": "string", "enum": targets},
 		},
-		"selectors": map[string]any{"type": "object", "additionalProperties": false, "properties": selectorProperties},
+		"selectors":         map[string]any{"type": "object", "additionalProperties": false, "properties": selectorProperties},
+		"target_pagination": map[string]any{"type": "object", "additionalProperties": false, "properties": paginationProperties},
 	}
 }
 
@@ -930,6 +942,7 @@ func unifiedAuthActionOpenAPISchema() map[string]any {
 func composeAppOpenAPIDocument(app *store.App, family *store.AppFamily, operations []appOpenAPIOperation) map[string]any {
 	components := map[string]any{
 		"ExecutionSelector": executionSelectorOpenAPISchema(),
+		"PaginationIntent":  paginationIntentOpenAPISchema(),
 		"ExecutionError":    executionErrorOpenAPISchema(),
 	}
 	requestRefs, responseRefs, mapping := operationOpenAPIComponents(components, operations)
@@ -948,6 +961,16 @@ func composeAppOpenAPIDocument(app *store.App, family *store.AppFamily, operatio
 		"x-fused-app-id": app.AppID.String(), "x-fused-app-family-id": app.AppFamilyID.String(),
 		"x-fused-app-name": family.DisplayName, "x-fused-app-version": app.Version,
 		"x-fused-operation-count": len(operations),
+	}
+}
+
+// paginationIntentOpenAPISchema exposes only the request-level page cap and the shared hard ceiling.
+func paginationIntentOpenAPISchema() map[string]any {
+	return map[string]any{
+		"type": "object", "additionalProperties": false, "required": []string{"max_pages"},
+		"properties": map[string]any{
+			"max_pages": map[string]any{"type": "integer", "minimum": 1, "maximum": paginationpolicy.CeilingMaxPages},
+		},
 	}
 }
 

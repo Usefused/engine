@@ -132,7 +132,7 @@ func encodeDefinition(value OperationDefinition, limits Limits) (wireOperationDe
 	if err := validateBindingGraph(bindings); err != nil {
 		return wireOperationDefinition{}, err
 	}
-	encodedBindings, err := encodeBindings(bindings, targets, value.Output != nil, limits)
+	encodedBindings, err := encodeBindings(bindings, targets, limits)
 	if err != nil {
 		return wireOperationDefinition{}, err
 	}
@@ -159,7 +159,7 @@ func decodeDefinition(value wireOperationDefinition, limits Limits) (OperationDe
 	if err != nil {
 		return OperationDefinition{}, err
 	}
-	decodedBindings, err := decodeBindings(bindings, targets, value.Output != nil, limits)
+	decodedBindings, err := decodeBindings(bindings, targets, limits)
 	if err != nil {
 		return OperationDefinition{}, err
 	}
@@ -224,10 +224,10 @@ func admitDefinitionTarget(target string, previous []string, index int) error {
 }
 
 // encodeBindings serializes bindings into canonical private bytes for stable hashing.
-func encodeBindings(values []BindingDefinition, targets []string, hasRootOutput bool, limits Limits) ([]wireBindingDefinition, error) {
+func encodeBindings(values []BindingDefinition, targets []string, limits Limits) ([]wireBindingDefinition, error) {
 	encoded := make([]wireBindingDefinition, 0, len(values))
 	for _, value := range values {
-		binding, err := encodeBinding(value, targets, hasRootOutput, limits)
+		binding, err := encodeBinding(value, targets, limits)
 		if err != nil {
 			return nil, err
 		}
@@ -237,18 +237,13 @@ func encodeBindings(values []BindingDefinition, targets []string, hasRootOutput 
 }
 
 // encodeBinding serializes binding into canonical private bytes for stable hashing.
-func encodeBinding(value BindingDefinition, targets []string, hasRootOutput bool, limits Limits) (wireBindingDefinition, error) {
+func encodeBinding(value BindingDefinition, targets []string, limits Limits) (wireBindingDefinition, error) {
 	if err := validateBindingMetadata(value.OperationID, value.ServiceID, value.ServiceVersionID, value.EndpointID); err != nil {
 		return wireBindingDefinition{}, err
 	}
 	serviceTarget, err := canonicalServiceTarget(value.PublicTarget, value.ServiceTarget)
 	if err != nil {
 		return wireBindingDefinition{}, err
-	}
-	// One persisted operation must choose either a service-independent root
-	// result or provider-specific binding results, never both interpretations.
-	if hasRootOutput && value.Output != nil {
-		return wireBindingDefinition{}, definitionError("root and binding outputs are mutually exclusive", nil)
 	}
 	dependsOn, err := canonicalDependencies(value.PublicTarget, value.DependsOn, targets)
 	if err != nil {
@@ -277,10 +272,10 @@ func encodeBinding(value BindingDefinition, targets []string, hasRootOutput bool
 }
 
 // decodeBindings restores bindings only after strict shape, limit, and namespace checks.
-func decodeBindings(values []wireBindingDefinition, targets []string, hasRootOutput bool, limits Limits) ([]BindingDefinition, error) {
+func decodeBindings(values []wireBindingDefinition, targets []string, limits Limits) ([]BindingDefinition, error) {
 	decoded := make([]BindingDefinition, 0, len(values))
 	for _, value := range values {
-		binding, err := decodeBinding(value, targets, hasRootOutput, limits)
+		binding, err := decodeBinding(value, targets, limits)
 		if err != nil {
 			return nil, err
 		}
@@ -290,12 +285,7 @@ func decodeBindings(values []wireBindingDefinition, targets []string, hasRootOut
 }
 
 // decodeBinding restores binding only after strict shape, limit, and namespace checks.
-func decodeBinding(value wireBindingDefinition, targets []string, hasRootOutput bool, limits Limits) (BindingDefinition, error) {
-	// Decoding reasserts the output-mode invariant so corrupted persisted
-	// definitions cannot introduce two competing public response contracts.
-	if hasRootOutput && value.Output != nil {
-		return BindingDefinition{}, definitionError("root and binding outputs are mutually exclusive", nil)
-	}
+func decodeBinding(value wireBindingDefinition, targets []string, limits Limits) (BindingDefinition, error) {
 	identities, err := decodeBindingIdentities(value)
 	if err != nil {
 		return BindingDefinition{}, err

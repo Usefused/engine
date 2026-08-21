@@ -16,7 +16,8 @@ service EngineService {
   rpc Disconnect(DisconnectRequest) returns (DisconnectResponse);
 
   // Execute an integration endpoint through the Engine.
-  // The response is streamed to support server-sent events (SSE) and pagination automatically.
+  // The response stream carries server-sent events and transport response chunks.
+  // Paginated operations still return one buffered aggregate response.
   rpc Execute(ExecuteRequest) returns (stream ExecuteResponse);
 
   // ExecuteUnified invokes one SDK-defined operation for an ordered set of
@@ -88,6 +89,10 @@ message ExecuteRequest {
   // Engine, so callers cannot override it per request.
   reserved 9;
   reserved "retry_override";
+
+  // pagination is optional caller intent that may only tighten the immutable
+  // provider pagination policy. max_pages=1 requests the first page only.
+  PaginationIntent pagination = 10;
 }
 
 message ExecuteResponse {
@@ -106,6 +111,12 @@ message ExecutionSelectors {
   string resource_id = 5;
 }
 
+// PaginationIntent bounds one logical response without exposing provider
+// cursors, offsets, URLs, or policy-owned safety controls.
+message PaginationIntent {
+  uint32 max_pages = 1;
+}
+
 message ExecuteUnifiedRequest {
   string operation = 1;
   repeated string targets = 2; // Ordered target names; duplicates are invalid.
@@ -113,6 +124,9 @@ message ExecuteUnifiedRequest {
   map<string, ExecutionSelectors> target_selectors = 4;
   // Generated SDKs supply one non-blank key per logical Unified request.
   string idempotency_key = 5;
+  // target_pagination keys are selected public target names. Forward targets
+  // may be tightened independently; rollback operations never inherit intent.
+  map<string, PaginationIntent> target_pagination = 6;
 }
 
 message UnifiedTargetResult {
@@ -147,6 +161,8 @@ message UnifiedRollbackResult {
 message ExecuteUnifiedResponse {
   repeated UnifiedTargetResult results = 1; // Preserves request target order.
   repeated UnifiedRollbackResult rollback_results = 2;
+  bytes output_json = 3; // Exact final operation output when configured.
+  string output_error_code = 4;
 }
 
 message StartConnectSessionRequest {

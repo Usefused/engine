@@ -61,6 +61,53 @@ func TestProgramCodecRoundTripIsDeterministic(t *testing.T) {
 	}
 }
 
+// TestProgramCodecUsesBaseSchemaForNonInterpolation proves a simple mapping
+// uses the minimum canonical bytecode schema and retains stable no-op identity.
+func TestProgramCodecUsesBaseSchemaForNonInterpolation(t *testing.T) {
+	encoded, err := EncodeProgram(mustCompile(t, "${input.value}"), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`"schema_version":1`)) {
+		t.Fatalf("base program used an unexpected schema: %s", encoded)
+	}
+}
+
+// TestProgramCodecPersistsInterpolationAsSchemaTwo proves only the additive
+// template node opts into v2 and remains deterministic after strict decode.
+func TestProgramCodecPersistsInterpolationAsSchemaTwo(t *testing.T) {
+	program, err := CompileWithTargets(
+		"File ${response.drive.files.2.id} for ${input.owner}",
+		DefaultLimits(), []string{"drive"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := EncodeProgram(program, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(first, []byte(`"schema_version":2`)) || !bytes.Contains(first, []byte(`"kind":"template"`)) {
+		t.Fatalf("interpolation program = %s", first)
+	}
+	restored, err := DecodeProgram(first, DefaultLimits(), []string{"drive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := EncodeProgram(restored, DefaultLimits())
+	if err != nil || !bytes.Equal(first, second) {
+		t.Fatalf("round trip = %s / %v", second, err)
+	}
+	got, err := restored.Evaluate(EvaluationContext{
+		Input: map[string]any{"owner": "Ada"}, Responses: map[string]any{"drive": map[string]any{
+			"files": []any{map[string]any{"id": "1"}, map[string]any{"id": "2"}, map[string]any{"id": "3"}},
+		}},
+	})
+	if err != nil || got != "File 3 for Ada" {
+		t.Fatalf("Evaluate() = %#v, %v", got, err)
+	}
+}
+
 // TestProgramCodecPreservesEmptyComposites protects the rule that empty objects and arrays remain distinct valid JSON values through persistence.
 func TestProgramCodecPreservesEmptyComposites(t *testing.T) {
 	program := mustCompile(t, map[string]any{"object": map[string]any{}, "array": []any{}})
@@ -83,7 +130,11 @@ func TestProgramCodecPreservesEmptyComposites(t *testing.T) {
 // bytecode cannot add fields, duplicate keys, or opt into an unknown schema.
 func TestDecodeProgramRejectsCorruptionAndUnknownVersion(t *testing.T) {
 	tests := [][]byte{
+		[]byte(`{"schema_version":3,"root":{"kind":"literal","literal":true}}`),
 		[]byte(`{"schema_version":2,"root":{"kind":"literal","literal":true}}`),
+		[]byte(`{"schema_version":1,"root":{"kind":"template","items":[{"kind":"literal","literal":"x"},{"kind":"reference","references":[{"source":"input","path":["name"]}]}]}}`),
+		[]byte(`{"schema_version":2,"root":{"kind":"template","items":[{"kind":"literal","literal":"x"},{"kind":"literal","literal":"y"}]}}`),
+		[]byte(`{"schema_version":2,"root":{"kind":"template","items":[{"kind":"literal","literal":"x"},{"kind":"array","items":[]}]}}`),
 		[]byte(`{"schema_version":1,"root":{"kind":"literal","literal":true},"unknown":1}`),
 		[]byte(`{"schema_version":1,"root":{"kind":"literal","literal":true,"items":[]}}`),
 		[]byte(`{"schema_version":1,"root":{"kind":"reference","references":[]}}`),
@@ -134,11 +185,23 @@ func TestProgramCodecEnforcesBounds(t *testing.T) {
 			limit: func(value *Limits, _ int) { value.MaxExpressions = 1 },
 		},
 		{
+			name: "interpolation expressions", program: mustCompile(t, "${input.a}${input.b}"),
+			limit: func(value *Limits, _ int) { value.MaxExpressions = 1 },
+		},
+		{
+			name: "interpolation nodes", program: mustCompile(t, "value=${input.a}"),
+			limit: func(value *Limits, _ int) { value.MaxNodes = 2 },
+		},
+		{
 			name: "path", program: mustCompile(t, "${input.a.b}"),
 			limit: func(value *Limits, _ int) { value.MaxPathSegments = 1 },
 		},
 		{
 			name: "expression length", program: mustCompile(t, "${input.a ?? input.b}"),
+			limit: func(value *Limits, _ int) { value.MaxExpressionLength = 12 },
+		},
+		{
+			name: "interpolation length", program: mustCompile(t, "value=${input.a}"),
 			limit: func(value *Limits, _ int) { value.MaxExpressionLength = 12 },
 		},
 		{

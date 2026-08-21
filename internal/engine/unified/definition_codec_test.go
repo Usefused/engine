@@ -99,7 +99,6 @@ func TestDefinitionsCodecPreservesCanonicalEmptySet(t *testing.T) {
 func TestDecodeDefinitionsRejectsMalformedPrivateData(t *testing.T) {
 	binding := validWireBinding(`{"schema_version":1,"root":{"kind":"literal","literal":true}}`)
 	operation := validWireOperation(binding)
-	output := `{"schema":{"type":"object"},"mapping":{"schema_version":1,"root":{"kind":"literal","literal":true}}}`
 	tests := map[string]string{
 		"not array":            `{}`,
 		"unknown field":        `[{"unknown":true,` + strings.TrimPrefix(operation, `{`),
@@ -111,7 +110,6 @@ func TestDecodeDefinitionsRejectsMalformedPrivateData(t *testing.T) {
 		"non-object schema":    `[` + strings.Replace(operation, `"input_schema":{"type":"object"}`, `"input_schema":[]`, 1) + `]`,
 		"program version":      `[` + strings.Replace(operation, `"schema_version":1`, `"schema_version":2`, 1) + `]`,
 		"missing mapping":      `[{"name":"issues.create","input_schema":{},"bindings":[` + binding + `],"output":{"schema":{}}}]`,
-		"mixed outputs":        `[{"name":"issues.create","input_schema":{},"bindings":[` + strings.TrimSuffix(binding, `}`) + `,"output":` + output + `}],"output":` + output + `}]`,
 	}
 	for name, raw := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -120,6 +118,42 @@ func TestDecodeDefinitionsRejectsMalformedPrivateData(t *testing.T) {
 				t.Fatalf("DecodeDefinitions(%s) error = %v, want ErrInvalidDefinitions", raw, err)
 			}
 		})
+	}
+}
+
+func TestDefinitionsCodecPreservesBindingAndOperationOutputsTogether(t *testing.T) {
+	bindingMapping, err := CompileWithTargets(
+		map[string]any{"ticketId": "${response.github.id}"}, DefaultLimits(), []string{"github"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootMapping, err := CompileWithTargets(
+		map[string]any{"id": "${response.github.ticketId}"}, DefaultLimits(), []string{"github"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition := definitionFixture("issues.create", "github", nil, &OutputDefinition{
+		Schema: []byte(`{"type":"object","properties":{"id":{"type":"string"}}}`), Mapping: rootMapping,
+	})
+	definition.Bindings[0].Output = &OutputDefinition{
+		Schema: []byte(`{"type":"object","properties":{"ticketId":{"type":"string"}}}`), Mapping: bindingMapping,
+	}
+
+	restored := mustDecodeDefinitions(t, mustEncodeDefinitions(t, []OperationDefinition{definition}))[0]
+	if restored.Output == nil || restored.Bindings[0].Output == nil {
+		t.Fatalf("restored outputs = root:%#v binding:%#v", restored.Output, restored.Bindings[0].Output)
+	}
+	bindingValue, err := restored.Bindings[0].Output.Mapping.Evaluate(EvaluationContext{
+		Target: "github", Response: map[string]any{"id": "issue-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootValue, err := restored.Output.Mapping.Evaluate(EvaluationContext{Responses: map[string]any{"github": bindingValue}})
+	if err != nil || rootValue.(map[string]any)["id"] != "issue-1" {
+		t.Fatalf("root output = %#v, %v", rootValue, err)
 	}
 }
 

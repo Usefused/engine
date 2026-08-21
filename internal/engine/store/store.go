@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/unified"
 	"github.com/google/uuid"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
@@ -47,7 +48,9 @@ var (
 )
 
 const (
-	UnifiedDefinitionSchemaVersion = 2
+	// UnifiedDefinitionSchemaVersion aliases the private codec owner so store
+	// defaults cannot drift from runtime admission after future schema changes.
+	UnifiedDefinitionSchemaVersion = unified.DefinitionSchemaVersion
 	EmptyUnifiedSetHash            = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
 )
 

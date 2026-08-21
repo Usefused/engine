@@ -203,18 +203,19 @@ func TestConnectBrandColorMigrationConvergesOnlyUntouchedLegacyDefaults(t *testi
 }
 
 // TestEngineSchemaDefinesImmutableUnifiedOperations verifies the fresh schema
-// and unversioned convergence path both enforce the same final v2 shape.
+// and unversioned convergence path both admit current v3 definitions.
 func TestEngineSchemaDefinesImmutableUnifiedOperations(t *testing.T) {
 	assertUnifiedFreshSchema(t, strings.Join(engineSchemaQueries(), "\n"))
 	assertUnifiedConvergenceSchema(t, strings.Join(unifiedSchemaConvergenceQueries(), "\n"))
 	assertUnifiedMigrationAbsent(t, strings.Join(engineMigrationQueries(), "\n"))
 }
 
-// assertUnifiedFreshSchema checks clean databases receive the exact final-v2 columns and checks.
+// assertUnifiedFreshSchema checks clean databases receive the current columns and checks.
 func assertUnifiedFreshSchema(t *testing.T, schema string) {
 	t.Helper()
 	for _, expected := range []string{
-		"unified_definition_schema_version integer NOT NULL DEFAULT 2",
+		"unified_definition_schema_version integer NOT NULL DEFAULT 3",
+		"unified_definition_schema_version = 3",
 		"unified_definitions    jsonb NOT NULL DEFAULT '[]'::jsonb",
 		"CONSTRAINT chk_fused_apps_unified_definition_shape",
 		"CONSTRAINT chk_fused_apps_unified_hashes",
@@ -225,23 +226,27 @@ func assertUnifiedFreshSchema(t *testing.T, schema string) {
 	}
 }
 
-// assertUnifiedConvergenceSchema checks live reconciliation adds only the canonical v2 shape.
+// assertUnifiedConvergenceSchema checks live reconciliation admits only new v3 writes without rewriting history.
 func assertUnifiedConvergenceSchema(t *testing.T, convergence string) {
 	t.Helper()
 	for _, expected := range []string{
-		"ADD COLUMN IF NOT EXISTS unified_definition_schema_version integer NOT NULL DEFAULT 2",
-		"ALTER COLUMN unified_definition_schema_version SET DEFAULT 2",
+		"ADD COLUMN IF NOT EXISTS unified_definition_schema_version integer NOT NULL DEFAULT 3",
+		"ALTER COLUMN unified_definition_schema_version SET DEFAULT 3",
 		"ALTER COLUMN unified_definition_schema_version SET NOT NULL",
 		"ADD CONSTRAINT chk_fused_apps_unified_definition_shape",
 		"ADD CONSTRAINT chk_fused_apps_unified_hashes",
 		"IF NOT EXISTS",
-		"reset the Engine database before enabling Unified Operations",
+		"unified_definition_schema_version = 3",
+		"DROP CONSTRAINT chk_fused_apps_unified_definition_shape",
+		"NOT VALID",
+		"VALIDATE CONSTRAINT chk_fused_apps_unified_definition_shape",
+		"unified_definition_schema_version <> 3",
 	} {
 		if !strings.Contains(convergence, expected) {
 			t.Fatalf("Unified schema convergence missing %q", expected)
 		}
 	}
-	for _, forbidden := range []string{"UPDATE fused_apps", "DROP CONSTRAINT"} {
+	for _, forbidden := range []string{"UPDATE fused_apps", "IN (2, 3)", "schema v1", "schema v2"} {
 		if strings.Contains(convergence, forbidden) {
 			t.Fatalf("Unified schema convergence contains draft promotion %q", forbidden)
 		}

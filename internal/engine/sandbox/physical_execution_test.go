@@ -52,6 +52,38 @@ func TestExecuteResolvedPhysicalJSONAccountsCollectorFailureOnce(t *testing.T) {
 	}
 }
 
+// TestValidateResolvedPhysicalPaginationIntentUsesExactOperation proves admission reads the resolved endpoint policy without provider work.
+func TestValidateResolvedPhysicalPaginationIntentUsesExactOperation(t *testing.T) {
+	_, operation := physicalExecutionTestOperation("https://provider.invalid")
+	operation.match.endpoint.Pagination = testCursorPagination("cursor", "$.next")
+
+	if err := ValidateResolvedPhysicalPaginationIntent(operation, &engine.PaginationIntent{MaxPages: 1}); err != nil {
+		t.Fatalf("strict pagination intent error = %v", err)
+	}
+	operation.match.endpoint.Pagination = nil
+	if !errors.Is(ValidateResolvedPhysicalPaginationIntent(operation, &engine.PaginationIntent{MaxPages: 1}), engine.ErrPaginationIntentInvalid) {
+		t.Fatal("non-paginated operation accepted a pagination intent")
+	}
+}
+
+// TestPreparePhysicalExecutionContextBindsPaginationOnce proves replay identity changes at the shared physical boundary.
+func TestPreparePhysicalExecutionContextBindsPaginationOnce(t *testing.T) {
+	intent := &engine.PaginationIntent{MaxPages: 2}
+	ctx := preparePhysicalExecutionContext(context.Background(), PhysicalExecutionRequest{
+		RequestBodyHash: "base-hash",
+		Pagination:      intent,
+	})
+
+	wantHash := engine.BindPaginationIntentRequestHash("base-hash", intent)
+	if got := requestBodyHashFromContext(ctx); got != wantHash {
+		t.Fatalf("request hash = %q, want %q", got, wantHash)
+	}
+	gotIntent, ok := engine.PaginationIntentFromContext(ctx)
+	if !ok || gotIntent.MaxPages != 2 {
+		t.Fatalf("pagination intent = %+v, found %t", gotIntent, ok)
+	}
+}
+
 // physicalExecutionTestOperation builds an exact app-scoped operation that still
 // traverses the production dispatcher, authorization, and accounting boundary.
 func physicalExecutionTestOperation(providerURL string) (auth.RuntimeIdentity, ResolvedPhysicalOperation) {

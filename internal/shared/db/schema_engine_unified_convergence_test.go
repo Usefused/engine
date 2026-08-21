@@ -23,7 +23,7 @@ type unifiedConvergenceRow struct {
 }
 
 // TestUnifiedSchemaConvergencePreservesExistingApps proves live pre-Unified
-// tables reach the final v2 shape without losing rows or recording a migration.
+// tables reach the current v3 default without losing rows or recording a migration.
 func TestUnifiedSchemaConvergencePreservesExistingApps(t *testing.T) {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
@@ -127,7 +127,7 @@ func assertUnifiedConstraintIdentity(t *testing.T, first, second unifiedConverge
 }
 
 // assertUnifiedConvergedRows checks both the preserved row and a post-convergence
-// insert receive the canonical v2 defaults without application-side backfill.
+// insert receive the canonical v3 defaults without application-side backfill.
 func assertUnifiedConvergedRows(t *testing.T, ctx context.Context, tx pgx.Tx) {
 	t.Helper()
 	assertUnifiedConvergedRow(t, ctx, tx, "00000000-0000-0000-0000-000000000101", "keep-me")
@@ -172,8 +172,8 @@ func assertUnifiedConvergedRow(t *testing.T, ctx context.Context, tx pgx.Tx, app
 	); err != nil {
 		t.Fatalf("read converged app %s: %v", appID, err)
 	}
-	if row.marker != marker || row.schemaVersion != 2 || row.definitions != "[]" {
-		t.Fatalf("converged app %s state = %+v, want marker=%q schema=2 definitions=[]", appID, row, marker)
+	if row.marker != marker || row.schemaVersion != 3 || row.definitions != "[]" {
+		t.Fatalf("converged app %s state = %+v, want marker=%q schema=3 definitions=[]", appID, row, marker)
 	}
 	if row.definitionHash != unifiedEmptySetHash || row.descriptorHash != unifiedEmptySetHash {
 		t.Fatalf("converged app %s hashes = (%q, %q), want empty-set hash", appID, row.definitionHash, row.descriptorHash)
@@ -181,12 +181,15 @@ func assertUnifiedConvergedRow(t *testing.T, ctx context.Context, tx pgx.Tx, app
 }
 
 // assertUnifiedConstraintsEnforced proves PostgreSQL rejects each invalid
-// final-v2 shape while allowing the surrounding test transaction to continue.
+// admitted shape while allowing the surrounding test transaction to continue.
 func assertUnifiedConstraintsEnforced(t *testing.T, ctx context.Context, tx pgx.Tx) {
 	t.Helper()
 	assertUnifiedWriteRejected(t, ctx, tx, `INSERT INTO fused_apps (
 		app_id, marker, unified_definition_schema_version
 	) VALUES ('00000000-0000-0000-0000-000000000103', 'bad-version', 1)`)
+	assertUnifiedWriteRejected(t, ctx, tx, `INSERT INTO fused_apps (
+		app_id, marker, unified_definition_schema_version
+	) VALUES ('00000000-0000-0000-0000-000000000106', 'removed-version', 2)`)
 	assertUnifiedWriteRejected(t, ctx, tx, `INSERT INTO fused_apps (
 		app_id, marker, unified_definitions
 	) VALUES ('00000000-0000-0000-0000-000000000104', 'bad-definitions', '{}'::jsonb)`)

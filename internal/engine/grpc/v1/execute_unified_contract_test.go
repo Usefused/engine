@@ -19,6 +19,7 @@ func TestExecuteUnifiedGeneratedContract(t *testing.T) {
 	t.Parallel()
 
 	assertExecuteUnifiedMethod(t)
+	assertPaginationIntentContract(t)
 	assertProtoMessageFields(t, "ExecutionSelectors", []expectedProtoField{
 		{name: "environment", number: 1, kind: protoreflect.StringKind, cardinality: protoreflect.Optional},
 		{name: "end_user_ref", number: 2, kind: protoreflect.StringKind, cardinality: protoreflect.Optional},
@@ -32,6 +33,7 @@ func TestExecuteUnifiedGeneratedContract(t *testing.T) {
 		{name: "input_json", number: 3, kind: protoreflect.BytesKind, cardinality: protoreflect.Optional},
 		{name: "target_selectors", number: 4, kind: protoreflect.MessageKind, cardinality: protoreflect.Repeated},
 		{name: "idempotency_key", number: 5, kind: protoreflect.StringKind, cardinality: protoreflect.Optional},
+		{name: "target_pagination", number: 6, kind: protoreflect.MessageKind, cardinality: protoreflect.Repeated},
 	})
 	assertProtoMessageFields(t, "UnifiedTargetResult", []expectedProtoField{
 		{name: "target", number: 1, kind: protoreflect.StringKind, cardinality: protoreflect.Optional},
@@ -58,8 +60,23 @@ func TestExecuteUnifiedGeneratedContract(t *testing.T) {
 	assertProtoMessageFields(t, "ExecuteUnifiedResponse", []expectedProtoField{
 		{name: "results", number: 1, kind: protoreflect.MessageKind, cardinality: protoreflect.Repeated},
 		{name: "rollback_results", number: 2, kind: protoreflect.MessageKind, cardinality: protoreflect.Repeated},
+		{name: "output_json", number: 3, kind: protoreflect.BytesKind, cardinality: protoreflect.Optional},
+		{name: "output_error_code", number: 4, kind: protoreflect.StringKind, cardinality: protoreflect.Optional},
 	})
 	assertUnifiedMessageReferences(t)
+}
+
+// assertPaginationIntentContract locks the shared caller-bound message and both additive request references.
+func assertPaginationIntentContract(t *testing.T) {
+	t.Helper()
+	assertProtoMessageFields(t, "PaginationIntent", []expectedProtoField{
+		{name: "max_pages", number: 1, kind: protoreflect.Uint32Kind, cardinality: protoreflect.Optional},
+	})
+	execute := File_engine_v1_engine_proto.Messages().ByName("ExecuteRequest")
+	pagination := execute.Fields().ByName("pagination")
+	if pagination == nil || pagination.Number() != 10 || pagination.Message().FullName() != "engine.v1.PaginationIntent" {
+		t.Fatal("ExecuteRequest.pagination must be field 10 with PaginationIntent type")
+	}
 }
 
 // assertExecuteUnifiedMethod locks the unary RPC input/output descriptors and
@@ -130,6 +147,10 @@ func assertUnifiedMessageReferences(t *testing.T) {
 	selectors := request.Fields().ByName("target_selectors")
 	if !selectors.IsMap() || selectors.MapValue().Message().FullName() != "engine.v1.ExecutionSelectors" {
 		t.Fatal("ExecuteUnifiedRequest.target_selectors must map strings to ExecutionSelectors")
+	}
+	pagination := request.Fields().ByName("target_pagination")
+	if !pagination.IsMap() || pagination.MapValue().Message().FullName() != "engine.v1.PaginationIntent" {
+		t.Fatal("ExecuteUnifiedRequest.target_pagination must map strings to PaginationIntent")
 	}
 	response := File_engine_v1_engine_proto.Messages().ByName("ExecuteUnifiedResponse")
 	results := response.Fields().ByName("results")

@@ -12,6 +12,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/unified"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
+	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/google/uuid"
 )
@@ -145,7 +146,8 @@ func assertFlatOpenAPIInput(t *testing.T, payload []byte, operation string) {
 		t.Fatalf("decode generated document: %v", err)
 	}
 	request := openAPITestOperationRequest(t, document, operation)
-	properties := request["properties"].(map[string]any)["input"].(map[string]any)["properties"].(map[string]any)
+	requestProperties := request["properties"].(map[string]any)
+	properties := requestProperties["input"].(map[string]any)["properties"].(map[string]any)
 	for _, name := range []string{"project", "title", "priority", "attachment", "_headers"} {
 		if _, ok := properties[name]; !ok {
 			t.Fatalf("flat input is missing %q: %#v", name, properties)
@@ -158,6 +160,16 @@ func assertFlatOpenAPIInput(t *testing.T, payload []byte, operation string) {
 	additional := input["additionalProperties"].(map[string]any)
 	if additional["type"] != "string" || !containsAllStrings(stringSlice(input["required"]), "project", "title") {
 		t.Fatalf("flat input requirements/additional schema are invalid: %#v", input)
+	}
+	pagination := requestProperties["pagination"].(map[string]any)
+	if pagination["$ref"] != "#/components/schemas/PaginationIntent" {
+		t.Fatalf("physical pagination intent schema is missing: %#v", pagination)
+	}
+	components := document["components"].(map[string]any)["schemas"].(map[string]any)
+	intent := components["PaginationIntent"].(map[string]any)
+	maxPages := intent["properties"].(map[string]any)["max_pages"].(map[string]any)
+	if maxPages["minimum"] != float64(1) || maxPages["maximum"] != float64(paginationpolicy.CeilingMaxPages) {
+		t.Fatalf("pagination intent bounds are invalid: %#v", intent)
 	}
 }
 
@@ -247,6 +259,33 @@ func TestAppOpenAPIHandlerProjectsUnifiedPublicContract(t *testing.T) {
 	assertUnifiedOpenAPIResultTypes(t, response)
 }
 
+func TestAppOpenAPIHandlerProjectsExactUnifiedRootOutput(t *testing.T) {
+	s, _ := newAppOpenAPIFixture(t)
+	operation := "searchAndEmail"
+	s.app.UnifiedDefinitions = encodeAppOpenAPITestDefinitionsWithOutput(t, operation)
+	s.app.UnifiedDefinitionHash = mustAppOpenAPIHash(t, s.app.UnifiedDefinitions)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/apps/"+s.app.AppID.String()+"/openapi?operation="+operation, nil)
+	mountAppOpenAPITestHandler(s).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var document map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+	response := openAPITestOperationResponse(t, document, operation)
+	properties := response["properties"].(map[string]any)
+	if properties["name"].(map[string]any)["type"] != "string" {
+		t.Fatalf("root output schema = %#v", response)
+	}
+	for _, wrapper := range []string{"results", "rollbacks", "data"} {
+		if _, exists := properties[wrapper]; exists {
+			t.Fatalf("root output schema retained %q wrapper: %#v", wrapper, response)
+		}
+	}
+}
+
 // assertUnifiedOpenAPIRouting checks target and service selector namespaces.
 func assertUnifiedOpenAPIRouting(t *testing.T, properties map[string]any) {
 	t.Helper()
@@ -258,6 +297,13 @@ func assertUnifiedOpenAPIRouting(t *testing.T, properties map[string]any) {
 	selectors := properties["selectors"].(map[string]any)["properties"].(map[string]any)
 	if _, ok := selectors["jira"]; !ok {
 		t.Fatalf("Unified service selector is missing: %#v", selectors)
+	}
+	pagination := properties["target_pagination"].(map[string]any)["properties"].(map[string]any)
+	if _, ok := pagination["issue"]; !ok {
+		t.Fatalf("Unified public target pagination is missing: %#v", pagination)
+	}
+	if _, leaked := pagination["jira"]; leaked {
+		t.Fatalf("Unified pagination exposed a private service namespace: %#v", pagination)
 	}
 }
 
@@ -298,6 +344,25 @@ func encodeAppOpenAPITestDefinitions(t *testing.T, name string) []byte {
 			PublicTarget: "issue", ServiceTarget: "jira", OperationID: "provider-private-operation",
 			ServiceID: uuid.New(), ServiceVersionID: uuid.New(), EndpointID: uuid.New(),
 		}},
+	}}, unified.DefaultLimits())
+	if err != nil {
+		t.Fatalf("encode Unified definitions: %v", err)
+	}
+	return encoded
+}
+
+func encodeAppOpenAPITestDefinitionsWithOutput(t *testing.T, name string) []byte {
+	t.Helper()
+	encoded, err := unified.EncodeDefinitions([]unified.OperationDefinition{{
+		Name: name, InputSchema: json.RawMessage(`{"type":"object"}`),
+		Bindings: []unified.BindingDefinition{{
+			PublicTarget: "issue", ServiceTarget: "jira", OperationID: "provider-private-operation",
+			ServiceID: uuid.New(), ServiceVersionID: uuid.New(), EndpointID: uuid.New(),
+		}},
+		Output: &unified.OutputDefinition{
+			Schema:  json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}`),
+			Mapping: mustCompileUnifiedProgram(t, map[string]any{"name": "${response.issue.name}"}, []string{"issue"}),
+		},
 	}}, unified.DefaultLimits())
 	if err != nil {
 		t.Fatalf("encode Unified definitions: %v", err)

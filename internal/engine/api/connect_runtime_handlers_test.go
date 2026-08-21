@@ -165,6 +165,7 @@ func TestStartConnectSessionHandlerRejectsUndeclaredScope(t *testing.T) {
 // exchange consumes the session and stores provider tokens encrypted.
 func TestConnectCallbackHandlerStoresEncryptedAuthConnection(t *testing.T) {
 	fixture := newConnectRuntimeFixture(t)
+	fixture.verifier.serviceMetadata.AuthConfigs[0].RefreshTokenRequired = true
 	state := "state-value"
 	verifier := "pkce-verifier"
 	fixture.store.session = connectRuntimeSession(t, fixture, state, verifier)
@@ -186,6 +187,56 @@ func TestConnectCallbackHandlerStoresEncryptedAuthConnection(t *testing.T) {
 	}
 	assertRuntimeAuthConnectionEncrypted(t, fixture.store.savedConnection, fixture)
 	assertCallbackRedirectLocation(t, rr.Header().Get("Location"), fixture.store.savedConnection.ID)
+}
+
+// TestConnectCallbackHandlerRejectsMissingRequiredRefreshToken proves an
+// access-only grant never reaches the auth/resource persistence transaction.
+func TestConnectCallbackHandlerRejectsMissingRequiredRefreshToken(t *testing.T) {
+	fixture := newConnectRuntimeFixture(t)
+	fixture.verifier.serviceMetadata.AuthConfigs[0].RefreshTokenRequired = true
+	state := "missing-refresh-state"
+	verifier := "pkce-verifier"
+	fixture.store.session = connectRuntimeSession(t, fixture, state, verifier)
+	payload := `{"access_token":"access-token","refresh_token":"   ","id_token":"header.` + testJWTClaims(t) + `.sig","token_type":"Bearer","expires_in":3600}`
+	restoreClient := replaceDefaultHTTPClient(tokenRoundTripperWithPayload(t, verifier, payload))
+	defer restoreClient()
+
+	rr := serveConnectCallback(fixture, state)
+
+	// The callback response gives the user a safe recovery step without exposing
+	// provider payloads or token-exchange internals.
+	if rr.Code != http.StatusBadGateway || !strings.Contains(rr.Body.String(), "did not grant offline access") {
+		t.Fatalf("missing refresh response = %d: %s", rr.Code, rr.Body.String())
+	}
+	// Session consumption prevents code replay, while the atomic credential and
+	// resource write boundary must remain untouched for an unusable grant.
+	if fixture.store.markedStateHash != connectHash(state) || fixture.store.callbackPersistCalls != 0 || fixture.store.savedConnection != nil || len(fixture.store.reconciledResources) != 0 {
+		t.Fatalf("unexpected callback writes: marked=%q persists=%d connection=%#v resources=%#v", fixture.store.markedStateHash, fixture.store.callbackPersistCalls, fixture.store.savedConnection, fixture.store.reconciledResources)
+	}
+}
+
+// TestValidateCallbackRefreshTokenRecordsBoundedStatus verifies audit spans
+// distinguish a missing offline grant without recording the provider value.
+func TestValidateCallbackRefreshTokenRecordsBoundedStatus(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	missingCtx, missingSpan := provider.Tracer("test").Start(context.Background(), "missing")
+	missingErr := validateCallbackRefreshToken(missingCtx, fusedobject.AuthConfig{RefreshTokenRequired: true}, oauthTokenResponse{RefreshToken: "   "})
+	missingSpan.End()
+	satisfiedCtx, satisfiedSpan := provider.Tracer("test").Start(context.Background(), "satisfied")
+	satisfiedErr := validateCallbackRefreshToken(satisfiedCtx, fusedobject.AuthConfig{RefreshTokenRequired: true}, oauthTokenResponse{RefreshToken: "customer-refresh-secret"})
+	satisfiedSpan.End()
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+
+	// Missing and present grants must take opposite admission paths.
+	if missingErr == nil || satisfiedErr != nil {
+		t.Fatalf("refresh validation errors: missing=%v satisfied=%v", missingErr, satisfiedErr)
+	}
+	encoded := encodedConnectInputSpan(recorder.Ended(), "missing") + encodedConnectInputSpan(recorder.Ended(), "satisfied")
+	// Telemetry carries only the fixed result classes, never the test credential.
+	if !strings.Contains(encoded, "refresh_token_requirement_status=missing") || !strings.Contains(encoded, "refresh_token_requirement_status=satisfied") || strings.Contains(encoded, "customer-refresh-secret") {
+		t.Fatalf("refresh token telemetry = %s", encoded)
+	}
 }
 
 // TestConnectCallbackHandlerDiscoversResources covers token exchange followed
@@ -654,6 +705,14 @@ func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 // material, so callback storage only succeeds for correct PKCE/code exchange.
 func tokenRoundTripper(t *testing.T, wantVerifier string) http.RoundTripper {
 	t.Helper()
+	payload := `{"access_token":"access-token","refresh_token":"refresh-token","id_token":"header.` + testJWTClaims(t) + `.sig","token_type":"Bearer","expires_in":3600,"refresh_token_expires_in":7200,"scope":"openid profile"}`
+	return tokenRoundTripperWithPayload(t, wantVerifier, payload)
+}
+
+// tokenRoundTripperWithPayload returns a caller-selected provider response
+// after applying the same PKCE and authorization-code request assertions.
+func tokenRoundTripperWithPayload(t *testing.T, wantVerifier, payload string) http.RoundTripper {
+	t.Helper()
 	return roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		raw, _ := io.ReadAll(req.Body)
 		values, _ := url.ParseQuery(string(raw))
@@ -663,7 +722,7 @@ func tokenRoundTripper(t *testing.T, wantVerifier string) http.RoundTripper {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"access_token":"access-token","refresh_token":"refresh-token","id_token":"header.` + testJWTClaims(t) + `.sig","token_type":"Bearer","expires_in":3600,"refresh_token_expires_in":7200,"scope":"openid profile"}`)),
+			Body:       io.NopCloser(strings.NewReader(payload)),
 		}, nil
 	})
 }

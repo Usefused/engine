@@ -52,7 +52,7 @@ func TestExecuteUnifiedRollbackTelemetryUsesBoundedExactCounts(t *testing.T) {
 		t.Fatalf("physical work = resolve:%d bindings:%d execute:%d", baseRuntime.resolveCalls, len(baseRuntime.bindings), baseRuntime.executeCalls)
 	}
 	assertUnifiedWrapperTelemetry(t, exporter, map[string]string{
-		"unified.schema_version": "2", "unified.stage": "dispatch", "unified.outcome": "partial",
+		"unified.schema_version": "3", "unified.stage": "dispatch", "unified.outcome": "partial",
 		"unified.target_count": "2", "unified.success_count": "1", "unified.error_count": "1",
 		"unified.skipped_count": "0", "unified.rollback_count": "1",
 		"unified.rollback_success_count": "1", "unified.rollback_error_count": "0",

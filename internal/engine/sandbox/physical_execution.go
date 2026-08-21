@@ -25,9 +25,24 @@ type PhysicalExecutionRequest struct {
 	Environment     string
 	IdempotencyKey  string
 	RequestBodyHash string
+	Pagination      *engine.PaginationIntent
 	// Transport is a server-owned ingress label. Public callers cannot set it;
 	// adapters use it to preserve REST across Unified child goroutines.
 	Transport string
+}
+
+// ValidateResolvedPhysicalPaginationIntent checks request controls against the exact immutable operation before fanout begins.
+func ValidateResolvedPhysicalPaginationIntent(operation ResolvedPhysicalOperation, intent *engine.PaginationIntent) error {
+	// Omitted intent preserves the resolved operation's automatic pagination behavior.
+	if intent == nil {
+		return nil
+	}
+	// Invalid opaque handles must fail closed before their cached service metadata is read.
+	if operation.match == nil || operation.match.service == nil || !operation.match.allowed {
+		return engine.ErrPaginationIntentInvalid
+	}
+	object := fusedToIntegrationObject(operation.match.service, operation.match.endpoint)
+	return engine.ValidatePaginationIntentPolicy(intent, object.Pagination)
 }
 
 // ErrPhysicalOperationNotAllowed is the stable pre-provider authorization
@@ -114,7 +129,9 @@ func executeResolvedPhysicalBoundary(
 // optional server-owned transport to one physical child context.
 func preparePhysicalExecutionContext(ctx context.Context, request PhysicalExecutionRequest) context.Context {
 	ctx = engine.ContextWithExecutionTimings(ctx, engine.NewExecutionTimings())
-	ctx = contextWithExecutionIdentity(ctx, request.IdempotencyKey, request.RequestBodyHash)
+	requestHash := engine.BindPaginationIntentRequestHash(request.RequestBodyHash, request.Pagination)
+	ctx = contextWithExecutionIdentity(ctx, request.IdempotencyKey, requestHash)
+	ctx = engine.ContextWithPaginationIntent(ctx, request.Pagination)
 	// Empty transport preserves the historical SDK default. Explicit REST is
 	// carried on each child so scheduler goroutines cannot lose attribution.
 	if request.Transport != "" {

@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const connectSessionTTL = 10 * time.Minute
@@ -801,7 +802,7 @@ func consumeConnectCallbackSession(ctx context.Context, s store.Store, r *http.R
 }
 
 // exchangeConnectCallbackToken centralizes callback token validation so code
-// storage only happens after PKCE and OIDC session checks have both passed.
+// storage follows PKCE, offline-grant, and OIDC session checks.
 func exchangeConnectCallbackToken(ctx context.Context, r *http.Request, session *store.ConnectSession, resolved connectRuntimeConfig, masterKey []byte) (oauthTokenResponse, error) {
 	verifier, err := decryptConnectPKCEVerifier(session, masterKey)
 	if err != nil {
@@ -811,6 +812,11 @@ func exchangeConnectCallbackToken(ctx context.Context, r *http.Request, session 
 	if err != nil {
 		return oauthTokenResponse{}, connectRuntimeHTTPError{status: http.StatusBadGateway, message: "token exchange failed"}
 	}
+	// A provider-declared offline grant is part of the immutable auth contract;
+	// accepting an access-only response would create a connection that fails later.
+	if err := validateCallbackRefreshToken(ctx, resolved.auth, token); err != nil {
+		return oauthTokenResponse{}, err
+	}
 	// OIDC nonce checking is the callback's proof that the id_token belongs to
 	// the browser auth session we started, not just to any successful token
 	// response from the provider.
@@ -818,6 +824,34 @@ func exchangeConnectCallbackToken(ctx context.Context, r *http.Request, session 
 		return oauthTokenResponse{}, connectRuntimeHTTPError{status: http.StatusBadRequest, message: err.Error()}
 	}
 	return token, nil
+}
+
+// validateCallbackRefreshToken enforces provider-neutral offline grant policy
+// before discovery, encryption, or the atomic connection/resource transaction.
+func validateCallbackRefreshToken(ctx context.Context, auth fusedobject.AuthConfig, token oauthTokenResponse) error {
+	status := "not_required"
+	// Required grants must contain a usable value; whitespace cannot become a
+	// stored credential or defer the failure to background refresh.
+	if auth.RefreshTokenRequired {
+		status = "satisfied"
+		if strings.TrimSpace(token.RefreshToken) == "" {
+			status = "missing"
+			recordRefreshTokenRequirement(ctx, status)
+			return connectRuntimeHTTPError{
+				status:        http.StatusBadGateway,
+				message:       "provider did not issue a required refresh token",
+				publicMessage: "The provider did not grant offline access. Return to the application, start the connection again, and approve access when prompted.",
+			}
+		}
+	}
+	recordRefreshTokenRequirement(ctx, status)
+	return nil
+}
+
+// recordRefreshTokenRequirement emits only a fixed decision class and never
+// records token content, provider responses, customer identity, or URLs.
+func recordRefreshTokenRequirement(ctx context.Context, status string) {
+	trace.SpanFromContext(ctx).SetAttributes(attribute.String("refresh_token_requirement_status", status))
 }
 
 // buildConnectAuthorizeURL preserves provider-supplied static query params
@@ -1025,12 +1059,18 @@ func writeConnectCallbackFallback(ctx context.Context, s store.Store, w http.Res
 // replacing internal/provider detail with stable browser-safe guidance.
 func writeConnectCallbackRuntimeError(ctx context.Context, s store.Store, w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
+	message := "Return to the application and start the connection again."
 	var httpErr connectRuntimeHTTPError
 	if errors.As(err, &httpErr) {
 		// Only the preclassified HTTP status crosses into the browser response.
 		status = httpErr.status
+		// Stable public guidance may be shown when it contains no provider payload,
+		// token material, customer values, or internal failure details.
+		if httpErr.publicMessage != "" {
+			message = httpErr.publicMessage
+		}
 	}
-	writeConnectCallbackFallback(ctx, s, w, status, "Return to the application and start the connection again.", true)
+	writeConnectCallbackFallback(ctx, s, w, status, message, true)
 }
 
 // selectRuntimeOAuthConfig matches the bucket's chosen auth family instead of
@@ -1253,8 +1293,9 @@ func connectContainsString(values []string, want string) bool {
 }
 
 type connectRuntimeHTTPError struct {
-	status  int
-	message string
+	status        int
+	message       string
+	publicMessage string
 }
 
 // Error lets connect helpers preserve HTTP-safe failure messages without

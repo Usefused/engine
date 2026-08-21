@@ -49,8 +49,9 @@ type paginationPage struct {
 }
 
 type paginationAggregate struct {
-	document any
-	items    []any
+	document    any
+	items       []any
+	removePaths []string
 }
 
 func (p *paginationPage) Send(chunk []byte) error {
@@ -178,6 +179,12 @@ func (a *paginationAggregate) result(itemsPath string) (any, bool) {
 	if !setValueAtPath(a.document, itemsPath, a.items) {
 		return nil, false
 	}
+	// Continuation fields describe a page that has already been consumed and must not survive as a misleading next cursor.
+	for _, path := range a.removePaths {
+		if path != itemsPath {
+			deleteValueAtPath(a.document, path)
+		}
+	}
 	return a.document, true
 }
 
@@ -279,6 +286,33 @@ func setValueAtPath(document any, path string, value any) bool {
 		return false
 	}
 	current[leaf] = value
+	return true
+}
+
+// deleteValueAtPath removes one existing nested response field without materializing or filtering the document elsewhere.
+func deleteValueAtPath(document any, path string) bool {
+	parts := strings.Split(strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(path), "$"), "."), ".")
+	current, ok := document.(map[string]any)
+	// Root documents and malformed paths cannot name a removable object field.
+	if !ok || len(parts) == 0 || parts[0] == "" {
+		return false
+	}
+	for _, part := range parts[:len(parts)-1] {
+		next, exists := current[part]
+		if !exists {
+			return false
+		}
+		current, ok = next.(map[string]any)
+		if !ok {
+			return false
+		}
+	}
+	leaf := parts[len(parts)-1]
+	// Returning false for absent fields keeps conditional pagination paths harmless.
+	if _, exists := current[leaf]; !exists {
+		return false
+	}
+	delete(current, leaf)
 	return true
 }
 

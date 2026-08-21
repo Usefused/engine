@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/sandbox"
@@ -214,6 +215,78 @@ func TestUnifiedSchedulerTreatsOutputSchemaFailureAsForwardSuccess(t *testing.T)
 	assertScriptedCalls(t, runtime, []string{"A", "B"}, nil)
 }
 
+func TestUnifiedSchedulerComposesRootFromEffectiveBindingOutput(t *testing.T) {
+	runtime := newScriptedUnifiedRuntime()
+	target := preparedUnifiedTargetFixture(t, "A", nil, false)
+	target.output = preparedUnifiedOutputFixture(
+		t,
+		map[string]any{"ticketId": "${response.A.id}"},
+		`{"type":"object","properties":{"ticketId":{"type":"string"}},"required":["ticketId"]}`,
+		[]string{"A"},
+	)
+	call := preparedUnifiedCallFixture(t, target)
+	call.output = preparedUnifiedOutputFixture(
+		t,
+		map[string]any{"name": "${response.A.ticketId}"},
+		`{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}`,
+		[]string{"A"},
+	)
+
+	response := executePreparedUnifiedCallWithCall(runtime, call)
+	if got := string(response.GetResults()[0].GetDataJson()); got != `{"ticketId":"A-id"}` {
+		t.Fatalf("binding output = %s", got)
+	}
+	if got := string(response.GetOutputJson()); got != `{"name":"A-id"}` {
+		t.Fatalf("root output = %s", got)
+	}
+	if response.GetOutputErrorCode() != "" {
+		t.Fatalf("root output error = %q", response.GetOutputErrorCode())
+	}
+}
+
+func TestUnifiedSchedulerKeepsEnvelopeWhenRootOutputIsAbsent(t *testing.T) {
+	response := executePreparedUnifiedCall(t, newScriptedUnifiedRuntime(), preparedUnifiedTargetFixture(t, "A", nil, false))
+	if len(response.GetOutputJson()) != 0 || response.GetOutputErrorCode() != "" {
+		t.Fatalf("unexpected root projection = %s / %q", response.GetOutputJson(), response.GetOutputErrorCode())
+	}
+	if len(response.GetResults()) != 1 || response.GetResults()[0].GetStatus() != "success" {
+		t.Fatalf("all-settled envelope = %#v", response)
+	}
+}
+
+func TestUnifiedSchedulerReportsRootProjectionFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		output *preparedUnifiedOutput
+		code   string
+	}{
+		{
+			name: "mapping",
+			output: preparedUnifiedOutputFixture(
+				t, "${response.A.missing}", `{"type":"string"}`, []string{"A"},
+			),
+			code: "output_mapping_failed",
+		},
+		{
+			name: "schema",
+			output: preparedUnifiedOutputFixture(
+				t, "${response.A.id}", `{"type":"integer"}`, []string{"A"},
+			),
+			code: "output_validation_failed",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			call := preparedUnifiedCallFixture(t, preparedUnifiedTargetFixture(t, "A", nil, false))
+			call.output = test.output
+			response := executePreparedUnifiedCallWithCall(newScriptedUnifiedRuntime(), call)
+			if response.GetOutputErrorCode() != test.code || len(response.GetOutputJson()) != 0 {
+				t.Fatalf("root projection = %s / %q", response.GetOutputJson(), response.GetOutputErrorCode())
+			}
+		})
+	}
+}
+
 // TestUnifiedSchedulerReturnsActionableAuthForForwardAndRollback proves typed
 // connected-auth decisions survive both physical execution phases.
 func TestUnifiedSchedulerReturnsActionableAuthForForwardAndRollback(t *testing.T) {
@@ -253,9 +326,9 @@ func TestUnifiedSchedulerRollbackSurvivesCallerCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	server := &EngineGRPCServer{unifiedRuntime: runtime}
-	_, rollbacks := server.executeUnifiedGraph(ctx, call)
-	if len(rollbacks) != 1 || rollbacks[0].GetStatus() != "success" {
-		t.Fatalf("rollbacks = %#v", rollbacks)
+	outcome := server.executeUnifiedGraph(ctx, call)
+	if len(outcome.rollbacks) != 1 || outcome.rollbacks[0].GetStatus() != "success" {
+		t.Fatalf("rollbacks = %#v", outcome.rollbacks)
 	}
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
@@ -303,6 +376,28 @@ func preparedUnifiedTargetFixture(t *testing.T, name string, dependencies []stri
 	return target
 }
 
+// TestPrepareUnifiedPhysicalRequestLimitsOnlyForwardWork proves compensation never inherits a caller result-size preference.
+func TestPrepareUnifiedPhysicalRequestLimitsOnlyForwardWork(t *testing.T) {
+	target := preparedUnifiedTargetFixture(t, "A", nil, true)
+	target.pagination = &engine.PaginationIntent{MaxPages: 1}
+	call := preparedUnifiedCallFixture(t, target)
+
+	forward, err := prepareUnifiedPhysicalRequest(call, target, target.input, nil, "forward")
+	if err != nil {
+		t.Fatalf("forward request error = %v", err)
+	}
+	rollback, err := prepareUnifiedPhysicalRequest(call, target, target.rollback.input, map[string]any{"A": map[string]any{"id": "1"}}, "rollback")
+	if err != nil {
+		t.Fatalf("rollback request error = %v", err)
+	}
+	if forward.Pagination == nil || forward.Pagination.MaxPages != 1 {
+		t.Fatalf("forward pagination = %#v", forward.Pagination)
+	}
+	if rollback.Pagination != nil {
+		t.Fatalf("rollback pagination = %#v, want nil", rollback.Pagination)
+	}
+}
+
 // invalidUnifiedOutputFixture creates a reviewed current-target mapping whose
 // required field is absent from the scripted provider response.
 func invalidUnifiedOutputFixture(t *testing.T, target string) *preparedUnifiedOutput {
@@ -321,6 +416,16 @@ func invalidUnifiedOutputSchemaFixture(t *testing.T, target string) *preparedUni
 	t.Helper()
 	program := mustCompileUnifiedProgram(t, "${response."+target+".id}", []string{target})
 	schema, err := compileUnifiedSchema([]byte(`{"type":"integer"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &preparedUnifiedOutput{program: program, schema: schema}
+}
+
+func preparedUnifiedOutputFixture(t *testing.T, mapping any, schemaJSON string, targets []string) *preparedUnifiedOutput {
+	t.Helper()
+	program := mustCompileUnifiedProgram(t, mapping, targets)
+	schema, err := compileUnifiedSchema([]byte(schemaJSON))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,8 +460,12 @@ func executePreparedUnifiedCall(t *testing.T, runtime *scriptedUnifiedRuntime, t
 // executePreparedUnifiedCallWithCall returns the same response envelope as the RPC.
 func executePreparedUnifiedCallWithCall(runtime *scriptedUnifiedRuntime, call preparedUnifiedCall) *enginev1.ExecuteUnifiedResponse {
 	server := &EngineGRPCServer{unifiedRuntime: runtime}
-	results, rollbacks := server.executeUnifiedGraph(context.Background(), call)
-	return &enginev1.ExecuteUnifiedResponse{Results: results, RollbackResults: rollbacks}
+	outcome := server.executeUnifiedGraph(context.Background(), call)
+	output, outputCode := projectUnifiedOperationOutput(call.input, call.output, outcome.outputs)
+	return &enginev1.ExecuteUnifiedResponse{
+		Results: outcome.results, RollbackResults: outcome.rollbacks,
+		OutputJson: output, OutputErrorCode: outputCode,
+	}
 }
 
 // waitUnifiedSignal bounds concurrency assertions so failures cannot hang CI.

@@ -6,7 +6,10 @@ import (
 	"github.com/google/uuid"
 )
 
-const DefinitionSchemaVersion = 2
+// DefinitionSchemaVersion identifies the immutable recursive-output format.
+// Any persisted definition with a different version fails closed; this package
+// contains no decoder or translation path for superseded authoring contracts.
+const DefinitionSchemaVersion = 3
 
 // OperationDefinition is the Engine-private, immutable representation of one
 // Unified Operation. Exact provider identities prevent runtime name lookup from
@@ -19,6 +22,9 @@ type OperationDefinition struct {
 	Output      *OutputDefinition   `json:"output,omitempty"`
 }
 
+// BindingDefinition pins one public graph step to an exact physical endpoint.
+// Output controls only the caller-visible projection; dependants and rollback
+// mappings continue to consume the successful raw provider response.
 type BindingDefinition struct {
 	PublicTarget     string              `json:"public_target"`
 	ServiceTarget    string              `json:"service_target"`

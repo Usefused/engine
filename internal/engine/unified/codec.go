@@ -16,6 +16,7 @@ const (
 	wireArray         = "array"
 	wireReferenceNode = "reference"
 	wireCoalesce      = "coalesce"
+	wireTemplate      = "template"
 )
 
 type wireProgram struct {
@@ -58,7 +59,8 @@ func EncodeProgram(program *Program, limits Limits) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	encoded, err := json.Marshal(wireProgram{SchemaVersion: ProgramSchemaVersion, Root: root})
+	schemaVersion := requiredProgramSchemaVersion(root)
+	encoded, err := json.Marshal(wireProgram{SchemaVersion: schemaVersion, Root: root})
 	if err != nil {
 		return nil, fmt.Errorf("%w: encode", ErrInvalidProgram)
 	}
@@ -86,13 +88,16 @@ func DecodeProgram(encoded []byte, limits Limits, allowedTargets []string) (*Pro
 	if err := decodeStrictJSON(encoded, &persisted); err != nil {
 		return nil, fmt.Errorf("%w: decode", ErrInvalidProgram)
 	}
-	if persisted.SchemaVersion != ProgramSchemaVersion {
+	if persisted.SchemaVersion < baseProgramSchemaVersion || persisted.SchemaVersion > ProgramSchemaVersion {
 		return nil, fmt.Errorf("%w: unsupported schema version", ErrInvalidProgram)
 	}
-	state := codecState{limits: limits, allowedTargets: targets}
+	state := codecState{limits: limits, allowedTargets: targets, schemaVersion: persisted.SchemaVersion}
 	root, err := state.decodeNode(persisted.Root, 0)
 	if err != nil {
 		return nil, err
+	}
+	if persisted.SchemaVersion != requiredProgramSchemaVersion(persisted.Root) {
+		return nil, fmt.Errorf("%w: noncanonical schema version", ErrInvalidProgram)
 	}
 	return &Program{root: root}, nil
 }
@@ -102,6 +107,7 @@ type codecState struct {
 	allowedTargets []string
 	nodes          int
 	expressions    int
+	schemaVersion  int
 }
 
 // admitNode charges shared limits and rejects unsupported private DynamicValue bytecode shapes before allocation grows.
@@ -132,9 +138,28 @@ func (s *codecState) encodeNode(value node, depth int) (wireNode, error) {
 		return s.encodeReferences(wireReferenceNode, typed.references)
 	case coalesceNode:
 		return s.encodeReferences(wireCoalesce, typed.references)
+	case templateNode:
+		return s.encodeTemplate(typed, depth)
 	default:
 		return wireNode{}, fmt.Errorf("%w: unknown node", ErrInvalidProgram)
 	}
+}
+
+// encodeTemplate serializes ordered literal/expression parts after enforcing
+// the same canonical shape and length accepted by compilation.
+func (s *codecState) encodeTemplate(value templateNode, depth int) (wireNode, error) {
+	if err := validateTemplateParts(value.parts, s.limits); err != nil {
+		return wireNode{}, err
+	}
+	items := make([]wireNode, 0, len(value.parts))
+	for _, part := range value.parts {
+		child, err := s.encodeNode(part, depth+1)
+		if err != nil {
+			return wireNode{}, err
+		}
+		items = append(items, child)
+	}
+	return wireNode{Kind: wireTemplate, Items: items}, nil
 }
 
 // encodeLiteral serializes literal into canonical private bytes for stable hashing.
@@ -228,6 +253,11 @@ func (s *codecState) decodeNode(value wireNode, depth int) (node, error) {
 		return s.decodeReferences(value.References, false)
 	case wireCoalesce:
 		return s.decodeReferences(value.References, true)
+	case wireTemplate:
+		if s.schemaVersion < ProgramSchemaVersion {
+			return nil, fmt.Errorf("%w: template requires current schema", ErrInvalidProgram)
+		}
+		return s.decodeTemplate(value.Items, depth)
 	default:
 		return nil, fmt.Errorf("%w: unknown node kind", ErrInvalidProgram)
 	}
@@ -244,9 +274,20 @@ func validateWireNodeShape(value wireNode) error {
 		return validateArrayNodeShape(value)
 	case wireReferenceNode, wireCoalesce:
 		return validateReferenceNodeShape(value)
+	case wireTemplate:
+		return validateTemplateNodeShape(value)
 	default:
 		return invalidNodeShape()
 	}
+}
+
+// validateTemplateNodeShape permits only the ordered child collection used by
+// persisted interpolation programs.
+func validateTemplateNodeShape(value wireNode) error {
+	if value.Literal != nil || value.Fields != nil || value.References != nil || value.Items == nil {
+		return invalidNodeShape()
+	}
+	return nil
 }
 
 // validateLiteralNodeShape rejects malformed literal node shape before it can cross the private DynamicValue bytecode boundary.
@@ -332,6 +373,80 @@ func (s *codecState) decodeArray(values []wireNode, depth int) (node, error) {
 	return arrayNode{items: items}, nil
 }
 
+// decodeTemplate restores only canonical literal/expression children and sets
+// the runtime rendered-string bound from the admitted decoder limits.
+func (s *codecState) decodeTemplate(values []wireNode, depth int) (node, error) {
+	parts := make([]node, 0, len(values))
+	for _, value := range values {
+		child, err := s.decodeNode(value, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, child)
+	}
+	if err := validateTemplateParts(parts, s.limits); err != nil {
+		return nil, err
+	}
+	return templateNode{parts: parts, maxBytes: s.limits.MaxEncodedBytes}, nil
+}
+
+// validateTemplateParts rejects non-scalar child programs, adjacent literals,
+// and source shapes that could not have been emitted by compileTemplate.
+func validateTemplateParts(parts []node, limits Limits) error {
+	if len(parts) < 2 {
+		return fmt.Errorf("%w: template part count", ErrInvalidProgram)
+	}
+	expressions := 0
+	previousLiteral := false
+	sourceLength := 0
+	for _, part := range parts {
+		length, literal, err := templatePartSourceLength(part, limits)
+		if err != nil {
+			return err
+		}
+		if literal && previousLiteral {
+			return fmt.Errorf("%w: template part shape", ErrInvalidProgram)
+		}
+		if !literal {
+			expressions++
+		}
+		previousLiteral = literal
+		sourceLength += length
+	}
+	if expressions == 0 {
+		return fmt.Errorf("%w: template requires an expression", ErrInvalidProgram)
+	}
+	if sourceLength > limits.MaxExpressionLength {
+		return fmt.Errorf("%w: template expression length", ErrLimitExceeded)
+	}
+	return nil
+}
+
+// templatePartSourceLength returns the minimal source length and whether a
+// child is a literal, without serializing provider-derived values.
+func templatePartSourceLength(part node, limits Limits) (int, bool, error) {
+	switch typed := part.(type) {
+	case literalNode:
+		value, ok := typed.value.(string)
+		if !ok || value == "" {
+			return 0, true, ErrInvalidProgram
+		}
+		return len(value), true, nil
+	case expressionNode:
+		if err := validateCompiledExpressionLength(typed.references, limits); err != nil {
+			return 0, false, err
+		}
+		return compiledExpressionLength(typed.references), false, nil
+	case coalesceNode:
+		if err := validateCompiledExpressionLength(typed.references, limits); err != nil {
+			return 0, false, err
+		}
+		return compiledExpressionLength(typed.references), false, nil
+	default:
+		return 0, false, ErrInvalidProgram
+	}
+}
+
 // decodeReferences restores references only after strict shape, limit, and namespace checks.
 func (s *codecState) decodeReferences(values []wireReference, coalesce bool) (node, error) {
 	if err := validateWireReferenceCount(len(values), coalesce); err != nil {
@@ -410,6 +525,14 @@ func validateCompiledReference(value reference, limits Limits, allowedTargets []
 
 // validateCompiledExpressionLength rejects malformed compiled expression length before it can cross the private DynamicValue bytecode boundary.
 func validateCompiledExpressionLength(values []reference, limits Limits) error {
+	if compiledExpressionLength(values) > limits.MaxExpressionLength {
+		return fmt.Errorf("%w: maximum expression length exceeded", ErrLimitExceeded)
+	}
+	return nil
+}
+
+// compiledExpressionLength measures one canonical `${...}` source expression.
+func compiledExpressionLength(values []reference) int {
 	length := 3
 	for index, value := range values {
 		if index > 0 {
@@ -417,10 +540,31 @@ func validateCompiledExpressionLength(values []reference, limits Limits) error {
 		}
 		length += compiledReferenceOperandLength(value)
 	}
-	if length > limits.MaxExpressionLength {
-		return fmt.Errorf("%w: maximum expression length exceeded", ErrLimitExceeded)
+	return length
+}
+
+// requiredProgramSchemaVersion selects the minimum bytecode schema required by
+// the actual wire tree, keeping canonical identity independent of compiler age.
+func requiredProgramSchemaVersion(root wireNode) int {
+	if root.Kind == wireTemplate {
+		return ProgramSchemaVersion
 	}
-	return nil
+	version := baseProgramSchemaVersion
+	for _, field := range root.Fields {
+		version = maxProgramSchemaVersion(version, requiredProgramSchemaVersion(field.Value))
+	}
+	for _, item := range root.Items {
+		version = maxProgramSchemaVersion(version, requiredProgramSchemaVersion(item))
+	}
+	return version
+}
+
+// maxProgramSchemaVersion returns the newer of two private schema versions.
+func maxProgramSchemaVersion(left, right int) int {
+	if right > left {
+		return right
+	}
+	return left
 }
 
 // validateReferenceShape rejects malformed reference shape before it can cross the private DynamicValue bytecode boundary.

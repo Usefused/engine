@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -54,6 +55,199 @@ func TestPaginationV3ComposableStrategies(t *testing.T) {
 				t.Fatalf("response contract=%#v bodyBeforeContract=%t", stream.contracts, stream.bodyBeforeContract)
 			}
 			assertV3Items(t, stream.chunks[0], test.itemsPath, test.wantItems)
+		})
+	}
+}
+
+// TestPaginationV3CallerMaxPagesReturnsOneCleanAggregate proves first-page intent is successful, buffered, and cursor-free.
+func TestPaginationV3CallerMaxPagesReturnsOneCleanAggregate(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	previous := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		otel.SetTracerProvider(previous)
+	})
+	caseData := v3TokenCase()
+	caseData.object.Pagination = modelPolicy(caseData.policy)
+	calls := 0
+	dispatcher := &Dispatcher{client: &http.Client{Transport: paginationRoundTripper(func(request *http.Request) (*http.Response, error) {
+		body, headers := caseData.respond(t, request, calls)
+		calls++
+		return paginationResponse(request, body, headers), nil
+	})}}
+	timings := NewExecutionTimings()
+	ctx := ContextWithExecutionTimings(context.Background(), timings)
+	ctx = ContextWithPaginationIntent(ctx, &PaginationIntent{MaxPages: 1})
+	stream := &mockStream{}
+	status, err := dispatcher.ExecuteStream(ctx, &models.Service{BaseURL: "https://provider.test"}, explicitAnonymousEndpoint(caseData.object), nil, nil, nil, stream)
+	if err != nil || status != http.StatusOK || calls != 1 || len(stream.chunks) != 1 {
+		t.Fatalf("status=%d err=%v calls=%d chunks=%d", status, err, calls, len(stream.chunks))
+	}
+	assertV3Items(t, stream.chunks[0], "$.items", []int{1})
+	var document map[string]any
+	if err := json.Unmarshal(stream.chunks[0], &document); err != nil {
+		t.Fatal(err)
+	}
+	// The consumed continuation token cannot invite callers to bypass Engine-owned pagination.
+	if _, stale := document["next"]; stale {
+		t.Fatalf("aggregate retained stale continuation: %s", stream.chunks[0])
+	}
+	summary := timings.PaginationSummary()
+	if summary.StopReason != "caller_max_pages" || summary.PageCount != 1 || summary.ItemCount != 1 {
+		t.Fatalf("pagination summary = %+v", summary)
+	}
+	attributes := paginationV3SpanAttributes(t, recorder.Ended())
+	if attributes["pagination.requested_max_pages"] != "1" || attributes["pagination.policy_max_pages"] != "10" || attributes["pagination.caller_limit_applied"] != "true" {
+		t.Fatalf("caller pagination telemetry = %#v", attributes)
+	}
+}
+
+// TestPaginationV3CallerMaxPagesStopsBeforeThirdProviderCall proves a multi-page caller cap wins while continuation remains available.
+func TestPaginationV3CallerMaxPagesStopsBeforeThirdProviderCall(t *testing.T) {
+	caseData := v3TokenCase()
+	caseData.object.Pagination = modelPolicy(caseData.policy)
+	calls := 0
+	dispatcher := &Dispatcher{client: &http.Client{Transport: paginationRoundTripper(func(request *http.Request) (*http.Response, error) {
+		wantTokens := []string{"", "second"}
+		// Any third call would exceed the caller's admitted bound and fail this fixture immediately.
+		if calls >= len(wantTokens) {
+			t.Fatalf("unexpected provider call %d", calls+1)
+		}
+		if got := request.URL.Query().Get("pageToken"); got != wantTokens[calls] {
+			t.Fatalf("page token = %q, want %q", got, wantTokens[calls])
+		}
+		bodies := []string{
+			`{"items":[1],"next":"second"}`,
+			`{"items":[2],"next":"third"}`,
+		}
+		body := bodies[calls]
+		calls++
+		return paginationResponse(request, body, nil), nil
+	})}}
+	timings := NewExecutionTimings()
+	ctx := ContextWithExecutionTimings(context.Background(), timings)
+	ctx = ContextWithPaginationIntent(ctx, &PaginationIntent{MaxPages: 2})
+	stream := &mockStream{}
+	status, err := dispatcher.ExecuteStream(ctx, &models.Service{BaseURL: "https://provider.test"}, explicitAnonymousEndpoint(caseData.object), nil, nil, nil, stream)
+	if err != nil || status != http.StatusOK || calls != 2 || len(stream.chunks) != 1 {
+		t.Fatalf("status=%d err=%v calls=%d chunks=%d", status, err, calls, len(stream.chunks))
+	}
+	assertV3Items(t, stream.chunks[0], "$.items", []int{1, 2})
+	if summary := timings.PaginationSummary(); summary.StopReason != "caller_max_pages" || summary.PageCount != 2 {
+		t.Fatalf("pagination summary = %+v", summary)
+	}
+}
+
+// TestPaginationV3CleanupRetainsUnselectedConditionalBodyPath prevents one reviewed alternative from deleting unrelated first-page data.
+func TestPaginationV3CleanupRetainsUnselectedConditionalBodyPath(t *testing.T) {
+	policy := baseV3Policy("$.items")
+	policy.Request = []paginationpolicy.RequestStep{
+		{State: "primary", Target: v3Target("query", "primary"), ValueType: "boolean", Constant: v3Boolean(true), Apply: "all"},
+		{State: "cursor", Target: v3Target("query", "cursor"), ValueType: "string", Apply: "subsequent"},
+	}
+	policy.Response.Values = []paginationpolicy.ResponseValue{{Name: "next", Source: paginationpolicy.ValueSource{
+		Location: "body", ValueType: "string", Paths: []paginationpolicy.ConditionalPath{
+			{Path: "$.selected_next", When: paginationpolicy.RequestCondition{State: "primary", Operator: "equals", Value: v3Boolean(true)}},
+			{Path: "$.fallback_next", When: paginationpolicy.RequestCondition{State: "primary", Operator: "equals", Value: v3Boolean(false)}},
+		},
+	}}}
+	policy.Continuation = []paginationpolicy.ContinuationStep{{Kind: "token", State: "cursor", ResponseValue: "next"}}
+	policy.Termination.StopOnMissingValues = []string{"next"}
+	object := v3Object(http.MethodGet, "/items",
+		models.Parameter{Name: "primary", In: "query", Type: "boolean"},
+		models.Parameter{Name: "cursor", In: "query", Type: "string"},
+	)
+	document := executeCallerLimitedV3Document(t, policy, object, `{"items":[1],"selected_next":"c2","fallback_next":"keep"}`)
+	if _, found := document["selected_next"]; found {
+		t.Fatal("selected continuation path remained in the aggregate")
+	}
+	if document["fallback_next"] != "keep" {
+		t.Fatalf("unselected conditional path was removed: %#v", document)
+	}
+}
+
+// TestPaginationV3CleanupUsesGraphQLResultAlias removes the consumed aliased cursor without touching the provider-name sibling.
+func TestPaginationV3CleanupUsesGraphQLResultAlias(t *testing.T) {
+	caseData := v3GraphQLCase()
+	document := executeCallerLimitedV3Document(t, caseData.policy, caseData.object,
+		`{"data":{"repositories":{"nodes":[1],"pageInfo":{"endCursor":"c2"}},"items":{"pageInfo":{"endCursor":"keep"}}}}`)
+	if _, found := valueAtPath(document, "$.data.repositories.pageInfo.endCursor"); found {
+		t.Fatal("selected aliased continuation path remained in the aggregate")
+	}
+	if retained, found := valueAtPath(document, "$.data.items.pageInfo.endCursor"); !found || retained != "keep" {
+		t.Fatalf("provider-name sibling was removed: %#v", document)
+	}
+}
+
+// executeCallerLimitedV3Document runs one provider page and decodes its caller-capped aggregate for cleanup assertions.
+func executeCallerLimitedV3Document(t *testing.T, policy paginationpolicy.Config, object *models.IntegrationObject, body string) map[string]any {
+	t.Helper()
+	object.Pagination = modelPolicy(policy)
+	calls := 0
+	dispatcher := &Dispatcher{client: &http.Client{Transport: paginationRoundTripper(func(request *http.Request) (*http.Response, error) {
+		calls++
+		return paginationResponse(request, body, nil), nil
+	})}}
+	ctx := ContextWithPaginationIntent(context.Background(), &PaginationIntent{MaxPages: 1})
+	stream := &mockStream{}
+	status, err := dispatcher.ExecuteStream(ctx, &models.Service{BaseURL: "https://provider.test"}, explicitAnonymousEndpoint(object), nil, nil, nil, stream)
+	if err != nil || status != http.StatusOK || calls != 1 || len(stream.chunks) != 1 {
+		t.Fatalf("status=%d err=%v calls=%d chunks=%d", status, err, calls, len(stream.chunks))
+	}
+	var document map[string]any
+	if err := json.Unmarshal(stream.chunks[0], &document); err != nil {
+		t.Fatal(err)
+	}
+	return document
+}
+
+// TestPaginationV3ProviderTerminationPrecedesCallerCap retains the provider-owned reason on the same final page.
+func TestPaginationV3ProviderTerminationPrecedesCallerCap(t *testing.T) {
+	caseData := v3TokenCase()
+	caseData.object.Pagination = modelPolicy(caseData.policy)
+	calls := 0
+	dispatcher := &Dispatcher{client: &http.Client{Transport: paginationRoundTripper(func(request *http.Request) (*http.Response, error) {
+		body, headers := caseData.respond(t, request, calls)
+		calls++
+		return paginationResponse(request, body, headers), nil
+	})}}
+	timings := NewExecutionTimings()
+	ctx := ContextWithExecutionTimings(context.Background(), timings)
+	ctx = ContextWithPaginationIntent(ctx, &PaginationIntent{MaxPages: 2})
+	_, err := dispatcher.ExecuteStream(ctx, &models.Service{BaseURL: "https://provider.test"}, explicitAnonymousEndpoint(caseData.object), nil, nil, nil, &mockStream{})
+	if err != nil || calls != 2 || timings.PaginationSummary().StopReason != "missing_next" {
+		t.Fatalf("err=%v calls=%d summary=%+v", err, calls, timings.PaginationSummary())
+	}
+}
+
+// TestPaginationIntentRejectsNonTighteningControlsBeforeProviderDispatch covers non-paginated, equal, and larger bounds.
+func TestPaginationIntentRejectsNonTighteningControlsBeforeProviderDispatch(t *testing.T) {
+	caseData := v3TokenCase()
+	caseData.object.Pagination = modelPolicy(caseData.policy)
+	tests := []struct {
+		name   string
+		object *models.IntegrationObject
+		pages  int
+	}{
+		{name: "non paginated", object: v3Object(http.MethodGet, "/items"), pages: 1},
+		{name: "equal policy", object: caseData.object, pages: caseData.policy.Limits.MaxPages},
+		{name: "above policy", object: caseData.object, pages: caseData.policy.Limits.MaxPages + 1},
+	}
+	// Every rejected caller control must stop before the first provider call.
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			dispatcher := &Dispatcher{client: &http.Client{Transport: paginationRoundTripper(func(request *http.Request) (*http.Response, error) {
+				calls++
+				return paginationResponse(request, `{"items":[]}`, nil), nil
+			})}}
+			ctx := ContextWithPaginationIntent(context.Background(), &PaginationIntent{MaxPages: test.pages})
+			_, err := dispatcher.ExecuteStream(ctx, &models.Service{BaseURL: "https://provider.test"}, explicitAnonymousEndpoint(test.object), nil, nil, nil, &mockStream{})
+			if !errors.Is(err, ErrPaginationIntentInvalid) || calls != 0 {
+				t.Fatalf("err=%v provider calls=%d", err, calls)
+			}
 		})
 	}
 }
