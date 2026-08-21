@@ -141,13 +141,16 @@ func TestExecuteUnifiedFansOutConcurrentlyAndNormalizesRootOutput(t *testing.T) 
 	if result.err != nil {
 		t.Fatalf("ExecuteUnified() error = %v", result.err)
 	}
-	assertUnifiedResults(t, result.response, []string{"github", "@acme/custom-crm"}, []string{`{"id":"gh-1"}`, `{"id":"crm-1"}`})
+	assertUnifiedResults(t, result.response, []string{"github", "@acme/custom-crm"}, []string{`{"id":"gh-1"}`, `{"iid":"crm-1"}`})
+	if got := string(result.response.GetOutputJson()); got != `{"id":"gh-1"}` || result.response.GetOutputErrorCode() != "" {
+		t.Fatalf("root output = %s / %q", got, result.response.GetOutputErrorCode())
+	}
 	if runtime.resolveCalls != 1 || runtime.executeCalls != 2 || len(runtime.bindings) != 2 {
 		t.Fatalf("runtime calls = resolve:%d execute:%d bindings:%d", runtime.resolveCalls, runtime.executeCalls, len(runtime.bindings))
 	}
 	assertUnifiedChildRequests(t, runtime.calls)
 	assertUnifiedWrapperTelemetry(t, exporter, map[string]string{
-		"unified.schema_version": "2", "unified.stage": "dispatch", "unified.outcome": "success",
+		"unified.schema_version": "3", "unified.stage": "dispatch", "unified.outcome": "success",
 		"unified.target_count": "2", "unified.success_count": "2", "unified.error_count": "0",
 		"unified.skipped_count": "0", "unified.rollback_count": "0",
 		"unified.rollback_success_count": "0", "unified.rollback_error_count": "0",
@@ -171,7 +174,7 @@ func TestExecuteUnifiedReturnsOrderedMixedResults(t *testing.T) {
 		t.Fatalf("unexpected failure result: %#v", failure)
 	}
 	assertUnifiedWrapperTelemetry(t, exporter, map[string]string{
-		"unified.schema_version": "2", "unified.stage": "dispatch", "unified.outcome": "partial",
+		"unified.schema_version": "3", "unified.stage": "dispatch", "unified.outcome": "partial",
 		"unified.target_count": "2", "unified.success_count": "1", "unified.error_count": "1",
 		"unified.skipped_count": "0", "unified.rollback_count": "0",
 		"unified.rollback_success_count": "0", "unified.rollback_error_count": "0",
@@ -191,7 +194,7 @@ func TestExecuteUnifiedRejectsUnderlyingOperationBeforeResolution(t *testing.T) 
 		t.Fatalf("predispatch rejection touched runtime: resolve=%d execute=%d", runtime.resolveCalls, runtime.executeCalls)
 	}
 	assertUnifiedWrapperTelemetry(t, exporter, map[string]string{
-		"unified.schema_version": "2", "unified.stage": "validation", "unified.outcome": "rejected",
+		"unified.schema_version": "3", "unified.stage": "validation", "unified.outcome": "rejected",
 		"unified.target_count": "2", "unified.error_code": "operation_not_allowed",
 	}, "issues.create", "github", "@acme/custom-crm", "Bug", "sandbox", "user-1", "githubOAuth", "logical-request-1")
 }

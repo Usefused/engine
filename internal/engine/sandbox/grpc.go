@@ -151,7 +151,14 @@ func (s *EngineGRPCServer) Execute(req *enginev1.ExecuteRequest, stream enginev1
 	requestStarted := time.Now()
 	timings := engine.NewExecutionTimings()
 	ctx := engine.ContextWithExecutionTimings(stream.Context(), timings)
-	ctx = contextWithExecutionIdentity(ctx, req.IdempotencyKey, req.RequestBodyHash)
+	intent, err := PaginationIntentFromProto(req.GetPagination())
+	// Invalid caller controls are rejected before authentication, cache resolution, or provider dispatch.
+	if err != nil {
+		return status.Error(codes.InvalidArgument, "pagination intent is invalid")
+	}
+	requestHash := engine.BindPaginationIntentRequestHash(req.RequestBodyHash, intent)
+	ctx = contextWithExecutionIdentity(ctx, req.IdempotencyKey, requestHash)
+	ctx = engine.ContextWithPaginationIntent(ctx, intent)
 	ctx = contextWithExecutionTransport(ctx, models.EngineExecutionTransportSDK)
 	ctx = engine.ContextWithIdempotencyKeyPresent(ctx, strings.TrimSpace(req.IdempotencyKey) != "")
 

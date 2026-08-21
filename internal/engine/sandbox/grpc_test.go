@@ -33,14 +33,14 @@ func (f *fakeExecuteStream) Context() context.Context {
 	return f.ctx
 }
 
-func (f *fakeExecuteStream) SetHeader(metadata.MD) error  { return nil }
+func (f *fakeExecuteStream) SetHeader(metadata.MD) error { return nil }
 func (f *fakeExecuteStream) SendHeader(header metadata.MD) error {
 	f.header = header.Copy()
 	return nil
 }
-func (f *fakeExecuteStream) SetTrailer(metadata.MD)       {}
-func (f *fakeExecuteStream) RecvMsg(any) error            { return nil }
-func (f *fakeExecuteStream) SendMsg(any) error            { return nil }
+func (f *fakeExecuteStream) SetTrailer(metadata.MD) {}
+func (f *fakeExecuteStream) RecvMsg(any) error      { return nil }
+func (f *fakeExecuteStream) SendMsg(any) error      { return nil }
 
 // --- Task 2.3 ---
 
@@ -91,6 +91,68 @@ func TestExecute_EndpointNamePropagated(t *testing.T) {
 	}
 	if got := stream.header.Get("fused-response-media-family"); len(got) != 1 || got[0] != "unknown" {
 		t.Fatalf("response media metadata was not bounded: %#v", stream.header)
+	}
+}
+
+// TestExecute_InvalidPaginationIntentStopsBeforeExecution proves malformed caller controls cannot reach resolution or provider dispatch.
+func TestExecute_InvalidPaginationIntentStopsBeforeExecution(t *testing.T) {
+	calls := 0
+	orig := EngineStreamExecuteFunc
+	t.Cleanup(func() { EngineStreamExecuteFunc = orig })
+	EngineStreamExecuteFunc = func(
+		_ context.Context, _, _, _ string,
+		_ map[string]any, _ map[string]any, _ string, _ engine.ResponseStream,
+	) error {
+		calls++
+		return nil
+	}
+
+	req := &enginev1.ExecuteRequest{
+		AppId:        "sdk",
+		EndpointName: "items.list",
+		Pagination:   &enginev1.PaginationIntent{MaxPages: 0},
+	}
+	err := NewEngineGRPCServer().Execute(req, &fakeExecuteStream{ctx: context.Background()})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("Execute() code = %s, want %s: %v", status.Code(err), codes.InvalidArgument, err)
+	}
+	if calls != 0 {
+		t.Fatalf("execution entrypoint calls = %d, want 0", calls)
+	}
+}
+
+// TestExecute_PaginationIntentBindsContextAndReplayHash proves direct gRPC requests carry one bounded intent into the runtime identity.
+func TestExecute_PaginationIntentBindsContextAndReplayHash(t *testing.T) {
+	var capturedIntent engine.PaginationIntent
+	var capturedIntentFound bool
+	var capturedHash string
+	orig := EngineStreamExecuteFunc
+	t.Cleanup(func() { EngineStreamExecuteFunc = orig })
+	EngineStreamExecuteFunc = func(
+		ctx context.Context, _, _, _ string,
+		_ map[string]any, _ map[string]any, _ string, _ engine.ResponseStream,
+	) error {
+		capturedIntent, capturedIntentFound = engine.PaginationIntentFromContext(ctx)
+		capturedHash = requestBodyHashFromContext(ctx)
+		return nil
+	}
+
+	req := &enginev1.ExecuteRequest{
+		AppId:           "sdk",
+		EndpointName:    "items.list",
+		RequestBodyHash: "base-hash",
+		Pagination:      &enginev1.PaginationIntent{MaxPages: 1},
+	}
+	err := NewEngineGRPCServer().Execute(req, &fakeExecuteStream{ctx: context.Background()})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !capturedIntentFound || capturedIntent.MaxPages != 1 {
+		t.Fatalf("pagination intent = %+v, found %t", capturedIntent, capturedIntentFound)
+	}
+	wantHash := engine.BindPaginationIntentRequestHash("base-hash", &engine.PaginationIntent{MaxPages: 1})
+	if capturedHash != wantHash {
+		t.Fatalf("request hash = %q, want %q", capturedHash, wantHash)
 	}
 }
 

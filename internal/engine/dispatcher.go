@@ -120,6 +120,13 @@ func (d *Dispatcher) ExecuteStream(
 	bucketValues []store.BucketValue,
 	stream ResponseStream,
 ) (int, error) {
+	intent, hasIntent := PaginationIntentFromContext(ctx)
+	// Request pagination controls fail before content selection or provider I/O and may only tighten reviewed pagination.
+	if hasIntent {
+		if err := ValidatePaginationIntentPolicy(&intent, obj.Pagination); err != nil {
+			return 0, err
+		}
+	}
 	selectedContent, selectionOutcome, err := SelectRequestContent(obj.RequestContent)
 	setRequestContentSpanAttributes(ctx, obj, selectedContent, selectionOutcome)
 	if err != nil {

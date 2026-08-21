@@ -464,8 +464,9 @@ func mapAuthConfigs(in fusedobject.AuthConfigs) models.AuthConfigs {
 			OAuth2MetadataURL:       a.OAuth2MetadataURL, Deprecated: a.Deprecated,
 			PKCERequired: a.PKCERequired, ScopesDelimiter: a.ScopesDelimiter,
 			ExtraAuthParams: a.ExtraAuthParams, ExtraTokenParams: a.ExtraTokenParams,
-			RefreshTokenRotates: a.RefreshTokenRotates, OAuth2Flows: mapOAuth2Flows(a.OAuth2Flows),
-			Strategy: mapAuthStrategy(a.Strategy), PolicyProvenance: a.PolicyProvenance,
+			RefreshTokenRotates: a.RefreshTokenRotates, RefreshTokenRequired: a.RefreshTokenRequired,
+			OAuth2Flows: mapOAuth2Flows(a.OAuth2Flows),
+			Strategy:    mapAuthStrategy(a.Strategy), PolicyProvenance: a.PolicyProvenance,
 		})
 	}
 	return out

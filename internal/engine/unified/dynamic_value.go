@@ -12,7 +12,11 @@ const (
 	DefaultMaxExpressionLength = 4 << 10
 	DefaultMaxEncodedBytes     = 1 << 20
 
-	ProgramSchemaVersion = 1
+	// ProgramSchemaVersion is the newest private DynamicValue bytecode schema.
+	// The base schema remains canonical for trees that do not need a template
+	// node; version 2 is selected only when interpolation is actually present.
+	ProgramSchemaVersion     = 2
+	baseProgramSchemaVersion = 1
 )
 
 var (

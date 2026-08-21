@@ -261,10 +261,11 @@ func newUnifiedCompileFixture() unifiedCompileFixture {
 			"github":           {Operation: "createIssue", Input: json.RawMessage(`{"title":"${input.title}"}`)},
 			"@acme/custom-crm": {Operation: "createTicket", Input: json.RawMessage(`{"summary":"${input.title}"}`)},
 		},
-		Output: &sdkUnifiedOutputDoc{
-			Schema:  json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"}}}`),
-			Mapping: json.RawMessage(`{"id":"${response.github.id ?? response.@acme/custom-crm.iid}"}`),
-		},
+		Output: json.RawMessage(`{
+			"type":"object",
+			"properties":{"id":"${response.github.id ?? response.@acme/custom-crm.iid}"},
+			"required":["id"]
+		}`),
 	}
 	compileStore := &unifiedCompileStore{
 		workspaceTestStore: &workspaceTestStore{},
@@ -335,7 +336,7 @@ func newUnifiedRollbackCompileFixture() unifiedCompileFixture {
 // canonical encoding did not change its target-specific response semantics.
 func assertUnifiedMappedResult(t *testing.T, definition unified.OperationDefinition, target string, response map[string]any, want string) {
 	t.Helper()
-	got, err := definition.Output.Mapping.Evaluate(unified.EvaluationContext{Target: target, Response: response})
+	got, err := definition.Output.Mapping.Evaluate(unified.EvaluationContext{Responses: map[string]any{target: response}})
 	if err != nil {
 		t.Fatalf("Evaluate(%q) error = %v", target, err)
 	}

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/sandbox"
@@ -29,6 +30,7 @@ type validatedUnifiedRequest struct {
 	targets        []string
 	input          any
 	idempotencyKey string
+	pagination     map[string]*engine.PaginationIntent
 }
 
 // validateUnifiedRequest rejects malformed unified request before it can cross the Unified preflight admission boundary.
@@ -43,11 +45,8 @@ func validateUnifiedRequest(scope *store.AppRuntime, request *enginev1.ExecuteUn
 	if err != nil {
 		return validatedUnifiedRequest{}, status.Error(codes.InvalidArgument, "Unified operation name is invalid")
 	}
-	targets, err := validateUnifiedTargets(request.GetTargets())
+	targets, pagination, err := validateUnifiedRouting(request)
 	if err != nil {
-		return validatedUnifiedRequest{}, err
-	}
-	if err := validateUnifiedSelectors(request.GetTargetSelectors()); err != nil {
 		return validatedUnifiedRequest{}, err
 	}
 	idempotencyKey, err := validateUnifiedName(request.GetIdempotencyKey(), maxUnifiedSelector)
@@ -58,7 +57,43 @@ func validateUnifiedRequest(scope *store.AppRuntime, request *enginev1.ExecuteUn
 	if err != nil {
 		return validatedUnifiedRequest{}, status.Error(codes.InvalidArgument, "Unified input must be one bounded JSON document")
 	}
-	return validatedUnifiedRequest{operation: operation, targets: targets, input: input, idempotencyKey: idempotencyKey}, nil
+	return validatedUnifiedRequest{operation: operation, targets: targets, input: input, idempotencyKey: idempotencyKey, pagination: pagination}, nil
+}
+
+// validateUnifiedRouting keeps target, selector, and pagination namespaces on one admission boundary.
+func validateUnifiedRouting(request *enginev1.ExecuteUnifiedRequest) ([]string, map[string]*engine.PaginationIntent, error) {
+	targets, err := validateUnifiedTargets(request.GetTargets())
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := validateUnifiedSelectors(request.GetTargetSelectors()); err != nil {
+		return nil, nil, err
+	}
+	pagination, err := validateUnifiedPaginationIntents(request.GetTargetPagination(), targets)
+	if err != nil {
+		return nil, nil, err
+	}
+	return targets, pagination, nil
+}
+
+// validateUnifiedPaginationIntents accepts controls only for exact selected public target names.
+func validateUnifiedPaginationIntents(values map[string]*enginev1.PaginationIntent, targets []string) (map[string]*engine.PaginationIntent, error) {
+	intents, err := sandbox.PaginationIntentsFromProto(values)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "Unified pagination intent is invalid")
+	}
+	selected := make(map[string]struct{}, len(targets))
+	// Public target names are the stable namespace for per-target result-size intent.
+	for _, target := range targets {
+		selected[target] = struct{}{}
+	}
+	for target := range intents {
+		// Unselected keys cannot silently add controls or reveal binding metadata.
+		if _, ok := selected[target]; !ok {
+			return nil, status.Error(codes.InvalidArgument, "Unified pagination target was not selected")
+		}
+	}
+	return intents, nil
 }
 
 // validateUnifiedName rejects malformed unified name before it can cross the Unified preflight admission boundary.
@@ -356,24 +391,36 @@ func physicalUnifiedSelectors(selector *enginev1.ExecutionSelectors) sandbox.Phy
 
 // prepareUnifiedTargets compiles output schemas and captures only prevalidated
 // execution metadata; dependency inputs are evaluated after prerequisites run.
-func prepareUnifiedTargets(definition unified.OperationDefinition, bindings []resolvedUnifiedBinding, selectors map[string]*enginev1.ExecutionSelectors) ([]preparedUnifiedTarget, error) {
+func prepareUnifiedTargets(bindings []resolvedUnifiedBinding, selectors map[string]*enginev1.ExecutionSelectors, pagination map[string]*engine.PaginationIntent) ([]preparedUnifiedTarget, error) {
 	targets := make([]preparedUnifiedTarget, len(bindings))
 	for index, resolved := range bindings {
 		binding := resolved.definition
-		output, err := prepareUnifiedOutput(definition.Output, binding.Output)
+		output, err := prepareUnifiedOutput(binding.Output)
 		if err != nil {
 			return nil, status.Error(codes.FailedPrecondition, "Unified output definition is invalid")
 		}
 		targets[index] = preparedUnifiedTarget{
 			name: binding.PublicTarget, dependsOn: append([]string(nil), binding.DependsOn...),
 			operation: resolved.operation, input: binding.Input,
-			selector: selectors[effectiveUnifiedServiceTarget(binding)], output: output,
+			selector: selectors[effectiveUnifiedServiceTarget(binding)], pagination: pagination[binding.PublicTarget], output: output,
 		}
 		if binding.Rollback != nil && resolved.rollback != nil {
 			targets[index].rollback = &preparedUnifiedRollback{operation: *resolved.rollback, input: binding.Rollback.Input}
 		}
 	}
 	return targets, nil
+}
+
+// validateResolvedUnifiedPaginationIntents rejects incompatible controls for the complete selected graph before scheduler fanout.
+func validateResolvedUnifiedPaginationIntents(bindings []resolvedUnifiedBinding, intents map[string]*engine.PaginationIntent) error {
+	// Each resolved forward operation is checked even when it has no intent so target lookup remains deterministic.
+	for _, resolved := range bindings {
+		intent := intents[resolved.definition.PublicTarget]
+		if err := sandbox.ValidateResolvedPhysicalPaginationIntent(resolved.operation, intent); err != nil {
+			return status.Error(codes.InvalidArgument, "Unified pagination intent is incompatible with a selected target")
+		}
+	}
+	return nil
 }
 
 // evaluateUnifiedInput maps one forward or rollback input against only the
@@ -403,11 +450,7 @@ func evaluateUnifiedInput(program *unified.Program, input any, target string, re
 }
 
 // prepareUnifiedOutput assembles unified output without starting persistence, accounting, or provider work.
-func prepareUnifiedOutput(root, binding *unified.OutputDefinition) (*preparedUnifiedOutput, error) {
-	definition := root
-	if definition == nil {
-		definition = binding
-	}
+func prepareUnifiedOutput(definition *unified.OutputDefinition) (*preparedUnifiedOutput, error) {
 	if definition == nil {
 		return nil, nil
 	}

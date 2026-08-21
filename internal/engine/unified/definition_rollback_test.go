@@ -8,7 +8,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// TestDefinitionCodecRoundTripsDependenciesAndRollback proves schema v2 keeps
+// TestDefinitionCodecRoundTripsDependenciesAndRollback proves schema v3 keeps
 // exact DAG edges, compensation identity, and private mappings executable.
 func TestDefinitionCodecRoundTripsDependenciesAndRollback(t *testing.T) {
 	var rootInput *Program
@@ -38,7 +38,7 @@ func TestDefinitionCodecRoundTripsDependenciesAndRollback(t *testing.T) {
 	}
 }
 
-// TestDefinitionCodecDefaultsOptionalGraphFields proves a minimal v2 binding
+// TestDefinitionCodecDefaultsOptionalGraphFields proves a minimal v3 binding
 // decodes with no dependencies or rollback when those fields are absent.
 func TestDefinitionCodecDefaultsOptionalGraphFields(t *testing.T) {
 	program := `{"schema_version":1,"root":{"kind":"literal","literal":true}}`

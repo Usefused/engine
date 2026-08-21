@@ -11,7 +11,7 @@ func TestDecodeSDKUnifiedOperationsAcceptsCompactAndExpandedBindings(t *testing.
 	doc := decodeUnifiedDocument(t, `{
 		"github":"createIssue",
 		"@acme/custom-crm":{"operation":"meta/get","input":{"title":"${input.title}"}}
-	}`, `null`, "typescript")
+	}`, ``, "typescript")
 	if err := validateSDKConfigDocument(doc); err != nil {
 		t.Fatalf("validateSDKConfigDocument() error = %v", err)
 	}
@@ -26,7 +26,7 @@ func TestValidateSDKUnifiedOperationsAcceptsServiceAliases(t *testing.T) {
 	doc := decodeUnifiedDocument(t, `{
 		"github_lookup":{"service":"github","operation":"createIssue"},
 		"github":{"operation":"createIssue","depends_on":["github_lookup"]}
-	}`, `null`, "typescript")
+	}`, ``, "typescript")
 	if err := validateSDKConfigDocument(doc); err != nil {
 		t.Fatalf("validateSDKConfigDocument() error = %v", err)
 	}
@@ -39,7 +39,7 @@ func TestValidateSDKUnifiedOperationsAcceptsServiceAliases(t *testing.T) {
 // TestValidateSDKUnifiedOperationsRejectsUnknownAliasedService keeps an alias
 // from escaping the SDK's explicitly selected service set.
 func TestValidateSDKUnifiedOperationsRejectsUnknownAliasedService(t *testing.T) {
-	doc := decodeUnifiedDocument(t, `{"github_lookup":{"service":"missing","operation":"createIssue"}}`, `null`, "typescript")
+	doc := decodeUnifiedDocument(t, `{"github_lookup":{"service":"missing","operation":"createIssue"}}`, ``, "typescript")
 	err := validateSDKConfigDocument(doc)
 	if err == nil || !strings.Contains(err.Error(), "configured service") {
 		t.Fatalf("validateSDKConfigDocument() error = %v, want configured service", err)
@@ -47,7 +47,7 @@ func TestValidateSDKUnifiedOperationsRejectsUnknownAliasedService(t *testing.T) 
 }
 
 // TestValidateSDKUnifiedOperationsRejectsInvalidShapes covers unresolved
-// services/operations, competing output modes, and unsupported SDK languages.
+// services/operations, removed output authoring, and unsupported SDK languages.
 func TestValidateSDKUnifiedOperationsRejectsInvalidShapes(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -56,10 +56,10 @@ func TestValidateSDKUnifiedOperationsRejectsInvalidShapes(t *testing.T) {
 		language string
 		want     string
 	}{
-		{name: "missing service", bindings: `{"missing":"createIssue"}`, output: `null`, language: "typescript", want: "configured service"},
-		{name: "unselected operation", bindings: `{"github":"deleteIssue"}`, output: `null`, language: "typescript", want: "is not selected"},
-		{name: "root and binding output", bindings: `{"github":{"operation":"createIssue","output":{"schema":{"type":"object"},"mapping":{"id":"${response.github.id}"}}}}`, output: `{"schema":{"type":"object"},"mapping":{"id":"${response.github.id}"}}`, language: "typescript", want: "cannot combine"},
-		{name: "unsupported language", bindings: `{"github":"createIssue"}`, output: `null`, language: "go", want: "TypeScript or Python"},
+		{name: "missing service", bindings: `{"missing":"createIssue"}`, language: "typescript", want: "configured service"},
+		{name: "unselected operation", bindings: `{"github":"deleteIssue"}`, language: "typescript", want: "is not selected"},
+		{name: "removed output form", bindings: `{"github":"createIssue"}`, output: `{"schema":{"type":"object"},"mapping":{"id":"${response.github.id}"}}`, language: "typescript", want: "root output"},
+		{name: "unsupported language", bindings: `{"github":"createIssue"}`, language: "go", want: "TypeScript or Python"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -69,6 +69,22 @@ func TestValidateSDKUnifiedOperationsRejectsInvalidShapes(t *testing.T) {
 				t.Fatalf("validateSDKConfigDocument() error = %v, want containing %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestValidateSDKUnifiedOperationsAcceptsBindingAndRootOutputs(t *testing.T) {
+	doc := decodeUnifiedDocument(t, `{
+		"github":{
+			"operation":"createIssue",
+			"output":{"type":"object","properties":{"issueId":"${response.github.id}"},"required":["issueId"]}
+		}
+	}`, `{
+		"type":"object",
+		"properties":{"id":"${response.github.issueId}"},
+		"required":["id"]
+	}`, "typescript")
+	if err := validateSDKConfigDocument(doc); err != nil {
+		t.Fatalf("validateSDKConfigDocument() error = %v", err)
 	}
 }
 
@@ -88,7 +104,7 @@ func TestValidateSDKUnifiedDependenciesAndRollback(t *testing.T) {
 	valid := decodeUnifiedDocument(t, `{
 		"github":{"operation":"createIssue","depends_on":["@acme/custom-crm"]},
 		"@acme/custom-crm":{"operation":"meta/get","rollback":{"operation":"meta/get","input":{"id":"${response.@acme/custom-crm.id}"}}}
-	}`, `null`, "typescript")
+	}`, ``, "typescript")
 	if err := validateSDKConfigDocument(valid); err != nil {
 		t.Fatalf("valid dependency config: %v", err)
 	}
@@ -105,7 +121,7 @@ func TestValidateSDKUnifiedDependenciesAndRollback(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			doc := decodeUnifiedDocument(t, test.bindings, `null`, "typescript")
+			doc := decodeUnifiedDocument(t, test.bindings, ``, "typescript")
 			err := validateSDKConfigDocument(doc)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("validation error = %v, want %q", err, test.want)
@@ -117,7 +133,7 @@ func TestValidateSDKUnifiedDependenciesAndRollback(t *testing.T) {
 // TestValidateSDKUnifiedOperationsRejectsGeneratedNamespaceCollision prevents
 // two operation paths from generating the same language namespace.
 func TestValidateSDKUnifiedOperationsRejectsGeneratedNamespaceCollision(t *testing.T) {
-	doc := decodeUnifiedDocument(t, `{"github":"createIssue"}`, `null`, "python")
+	doc := decodeUnifiedDocument(t, `{"github":"createIssue"}`, ``, "python")
 	doc.UnifiedOperations["issues"] = doc.UnifiedOperations["issues.create"]
 	err := validateSDKConfigDocument(doc)
 	if err == nil || !strings.Contains(err.Error(), "collide as generated namespace paths") {
@@ -140,7 +156,7 @@ func TestValidateSDKUnifiedOperationsRejectsUnsafeGeneratedNames(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			doc := decodeUnifiedDocument(t, `{"github":"createIssue"}`, `null`, test.language)
+			doc := decodeUnifiedDocument(t, `{"github":"createIssue"}`, ``, test.language)
 			base := doc.UnifiedOperations["issues.create"]
 			delete(doc.UnifiedOperations, "issues.create")
 			if test.name == "normalized type" {
@@ -160,8 +176,8 @@ func TestValidateSDKUnifiedOperationsRejectsUnsafeGeneratedNames(t *testing.T) {
 
 // TestCanonicalAppStateNormalizesUnifiedJSONMembers protects the rule that equivalent configuration produces identical immutable bytes and hashes.
 func TestCanonicalAppStateNormalizesUnifiedJSONMembers(t *testing.T) {
-	first := decodeUnifiedDocument(t, `{"github":{"operation":"createIssue","input":{"b":2,"a":1}}}`, `null`, "typescript")
-	second := decodeUnifiedDocument(t, `{"github":{"input":{"a":1,"b":2},"operation":"createIssue"}}`, `null`, "typescript")
+	first := decodeUnifiedDocument(t, `{"github":{"operation":"createIssue","input":{"b":2,"a":1}}}`, ``, "typescript")
+	second := decodeUnifiedDocument(t, `{"github":{"input":{"a":1,"b":2},"operation":"createIssue"}}`, ``, "typescript")
 	left, err := canonicalAppState(first)
 	if err != nil {
 		t.Fatal(err)
@@ -179,6 +195,10 @@ func TestCanonicalAppStateNormalizesUnifiedJSONMembers(t *testing.T) {
 // document and fails the test at the strict JSON decoding boundary.
 func decodeUnifiedDocument(t *testing.T, bindings, output, language string) sdkConfigDocument {
 	t.Helper()
+	outputField := ""
+	if output != "" {
+		outputField = `,"output":` + output
+	}
 	raw := `{
 		"apiVersion":"fused/v1","kind":"sdk","name":"engineering","version":"1.0.0",
 		"language":` + quoteJSON(language) + `,"bucket":"default",
@@ -189,8 +209,7 @@ func decodeUnifiedDocument(t *testing.T, bindings, output, language string) sdkC
 		"unified_operations":{
 			"issues.create":{
 				"input":{"type":"object","properties":{"title":{"type":"string"}}},
-				"bindings":` + bindings + `,
-				"output":` + output + `
+				"bindings":` + bindings + outputField + `
 			}
 		}
 	}`

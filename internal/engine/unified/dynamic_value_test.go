@@ -187,19 +187,105 @@ func TestOptionalRootReturnsOmissionSentinel(t *testing.T) {
 	}
 }
 
-// TestCompileRejectsInterpolationAndExecutableSyntax protects the rule that mappings remain declarative values rather than executable templates.
-func TestCompileRejectsInterpolationAndExecutableSyntax(t *testing.T) {
+// TestEvaluateScalarInterpolation proves mixed strings can read indexed response
+// values while complete expressions keep their native JSON type.
+func TestEvaluateScalarInterpolation(t *testing.T) {
+	program, err := CompileWithTargets(map[string]any{
+		"summary":  "File ${response.drive.files.2.id} has ${response.drive.count} versions and archived=${response.drive.archived}",
+		"fallback": "Name ${response.drive.missing? ?? response.drive.files.2.name}",
+		"optional": "Note: ${input.note?}",
+		"files":    "${response.drive.files}",
+	}, DefaultLimits(), []string{"drive"})
+	if err != nil {
+		t.Fatalf("CompileWithTargets() error = %v", err)
+	}
+	files := []any{
+		map[string]any{"id": "one"}, map[string]any{"id": "two"},
+		map[string]any{"id": "three", "name": "Quarterly plan"},
+	}
+	got, err := program.Evaluate(EvaluationContext{Responses: map[string]any{"drive": map[string]any{
+		"files": files, "count": json.Number("9007199254740993"), "archived": false,
+	}}})
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	want := map[string]any{
+		"summary":  "File three has 9007199254740993 versions and archived=false",
+		"fallback": "Name Quarterly plan", "optional": "Note: ", "files": files,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Evaluate() = %#v, want %#v", got, want)
+	}
+	_, err = program.Evaluate(EvaluationContext{Responses: map[string]any{"drive": map[string]any{
+		"files": files[:2], "count": json.Number("2"), "archived": false,
+	}}})
+	if !errors.Is(err, ErrMissingValue) {
+		t.Fatalf("short array error = %v, want ErrMissingValue", err)
+	}
+}
+
+// TestEvaluateInterpolationEscapesLiteralOpeningDelimiter proves authoring can
+// include `${` text without creating an executable reference.
+func TestEvaluateInterpolationEscapesLiteralOpeningDelimiter(t *testing.T) {
+	program := mustCompile(t, "literal $${input.name}; rendered ${input.name}")
+	got, err := program.Evaluate(EvaluationContext{Input: map[string]any{"name": "Ada"}})
+	if err != nil || got != "literal ${input.name}; rendered Ada" {
+		t.Fatalf("Evaluate() = %#v, %v", got, err)
+	}
+	escaped := mustCompile(t, "$${input.name}")
+	got, err = escaped.Evaluate(EvaluationContext{Input: map[string]any{"name": "ignored"}})
+	if err != nil || got != "${input.name}" {
+		t.Fatalf("escaped Evaluate() = %#v, %v", got, err)
+	}
+}
+
+// TestEvaluateInterpolationRejectsNonScalarValues keeps objects, arrays, and
+// null typed unless the complete mapping value is one expression.
+func TestEvaluateInterpolationRejectsNonScalarValues(t *testing.T) {
+	program := mustCompile(t, "value=${input.value}")
+	for _, value := range []any{nil, []any{"one"}, map[string]any{"id": "one"}} {
+		_, err := program.Evaluate(EvaluationContext{Input: map[string]any{"value": value}})
+		if !errors.Is(err, ErrInvalidValue) {
+			t.Errorf("Evaluate(%#v) error = %v, want ErrInvalidValue", value, err)
+		}
+	}
+	typed := mustCompile(t, "${input.value}")
+	value := []any{"one", "two"}
+	got, err := typed.Evaluate(EvaluationContext{Input: map[string]any{"value": value}})
+	if err != nil || !reflect.DeepEqual(got, value) {
+		t.Fatalf("typed Evaluate() = %#v, %v", got, err)
+	}
+}
+
+// TestEvaluateInterpolationEnforcesRenderedSize prevents a short mapping from
+// expanding one provider-derived scalar beyond its admitted runtime budget.
+func TestEvaluateInterpolationEnforcesRenderedSize(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MaxEncodedBytes = 32
+	program, err := CompileWithTargets("value=${input.value}", limits, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = program.Evaluate(EvaluationContext{Input: map[string]any{"value": strings.Repeat("x", 32)}})
+	if !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("Evaluate() error = %v, want ErrLimitExceeded", err)
+	}
+}
+
+// TestCompileRejectsExecutableTemplateSyntax protects the rule that mappings
+// remain bounded declarative templates rather than executable programs.
+func TestCompileRejectsExecutableTemplateSyntax(t *testing.T) {
 	tests := []any{
-		"prefix ${input.title}",
-		"${input.title} suffix",
 		"${upper(input.title)}",
 		"${input.title + input.body}",
-		"${input.title}${input.body}",
 		"${input.title ?? }",
 		"${ input.title}",
 		"${input.title }",
 		"${target?}",
 		"${response.github}",
+		"prefix ${input.title",
+		"prefix ${}",
+		"prefix ${input.${title}}",
 	}
 	for _, value := range tests {
 		if _, err := CompileWithTargets(value, DefaultLimits(), nil); !errors.Is(err, ErrInvalidExpression) {
@@ -227,6 +313,8 @@ func TestCompileEnforcesLimits(t *testing.T) {
 		{name: "depth", value: map[string]any{"nested": map[string]any{"value": true}}, limits: testLimits(1, 10)},
 		{name: "nodes", value: []any{1, 2}, limits: testLimits(3, 2)},
 		{name: "expressions", value: []any{"${input.one}", "${input.two}"}, limits: Limits{MaxDepth: 3, MaxNodes: 3, MaxExpressions: 1, MaxPathSegments: 5, MaxExpressionLength: 100, MaxEncodedBytes: 1000}},
+		{name: "interpolation expressions", value: "${input.one}${input.two}", limits: Limits{MaxDepth: 3, MaxNodes: 3, MaxExpressions: 1, MaxPathSegments: 5, MaxExpressionLength: 100, MaxEncodedBytes: 1000}},
+		{name: "interpolation nodes", value: "value=${input.one}", limits: Limits{MaxDepth: 3, MaxNodes: 2, MaxExpressions: 1, MaxPathSegments: 5, MaxExpressionLength: 100, MaxEncodedBytes: 1000}},
 		{name: "path", value: "${input.one.two.three}", limits: Limits{MaxDepth: 1, MaxNodes: 1, MaxExpressions: 1, MaxPathSegments: 2, MaxExpressionLength: 100, MaxEncodedBytes: 1000}},
 		{name: "expression", value: "${input." + strings.Repeat("a", 20) + "}", limits: Limits{MaxDepth: 1, MaxNodes: 1, MaxExpressions: 1, MaxPathSegments: 5, MaxExpressionLength: 10, MaxEncodedBytes: 1000}},
 		{name: "encoded", value: strings.Repeat("a", 20), limits: Limits{MaxDepth: 1, MaxNodes: 1, MaxExpressions: 1, MaxPathSegments: 5, MaxExpressionLength: 100, MaxEncodedBytes: 10}},

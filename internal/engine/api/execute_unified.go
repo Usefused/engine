@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 
+	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/sandbox"
@@ -42,16 +43,18 @@ type preparedUnifiedCall struct {
 	transport      string
 	input          any
 	targets        []preparedUnifiedTarget
+	output         *preparedUnifiedOutput
 }
 
 type preparedUnifiedTarget struct {
-	name      string
-	dependsOn []string
-	operation sandbox.ResolvedPhysicalOperation
-	input     *unified.Program
-	selector  *enginev1.ExecutionSelectors
-	output    *preparedUnifiedOutput
-	rollback  *preparedUnifiedRollback
+	name       string
+	dependsOn  []string
+	operation  sandbox.ResolvedPhysicalOperation
+	input      *unified.Program
+	selector   *enginev1.ExecutionSelectors
+	pagination *engine.PaginationIntent
+	output     *preparedUnifiedOutput
+	rollback   *preparedUnifiedRollback
 }
 
 // preparedUnifiedRollback contains one exact, preauthorized compensation and
@@ -61,6 +64,8 @@ type preparedUnifiedRollback struct {
 	input     *unified.Program
 }
 
+// preparedUnifiedOutput pairs one immutable projection program with the
+// schema that validates its evaluated JSON value before it becomes public.
 type preparedUnifiedOutput struct {
 	program *unified.Program
 	schema  *openapi3.Schema
@@ -85,8 +90,12 @@ func (s *EngineGRPCServer) ExecuteUnified(ctx context.Context, request *enginev1
 		return nil, err
 	}
 	stage = "dispatch"
-	results, rollbacks := s.executeUnifiedGraph(ctx, call)
-	return &enginev1.ExecuteUnifiedResponse{Results: results, RollbackResults: rollbacks}, nil
+	graph := s.executeUnifiedGraph(ctx, call)
+	output, outputCode := projectUnifiedOperationOutput(call.input, call.output, graph.outputs)
+	return &enginev1.ExecuteUnifiedResponse{
+		Results: graph.results, RollbackResults: graph.rollbacks,
+		OutputJson: output, OutputErrorCode: outputCode,
+	}, nil
 }
 
 // boundedUnifiedTargetCount caps target-derived span metadata before any caller value reaches telemetry.
@@ -129,15 +138,36 @@ func (s *EngineGRPCServer) prepareUnifiedCall(ctx context.Context, scope *store.
 	if err := validateResolvedUnifiedSelectors(s.unifiedRuntime, resolved, request.GetTargetSelectors()); err != nil {
 		return preparedUnifiedCall{}, err
 	}
-	targets, err := prepareUnifiedTargets(definition, resolved, request.GetTargetSelectors())
+	targets, err := prepareResolvedUnifiedTargets(resolved, request.GetTargetSelectors(), validated.pagination)
+	if err != nil {
+		return preparedUnifiedCall{}, err
+	}
+	output, err := prepareUnifiedOperationOutput(definition.Output)
 	if err != nil {
 		return preparedUnifiedCall{}, err
 	}
 	return preparedUnifiedCall{
 		identity: identity, appID: scope.AppID, operation: definition.Name,
 		idempotencyKey: validated.idempotencyKey, transport: transport,
-		input: validated.input, targets: targets,
+		input: validated.input, targets: targets, output: output,
 	}, nil
+}
+
+// prepareResolvedUnifiedTargets applies request-scoped controls before compiling immutable binding programs.
+func prepareResolvedUnifiedTargets(resolved []resolvedUnifiedBinding, selectors map[string]*enginev1.ExecutionSelectors, pagination map[string]*engine.PaginationIntent) ([]preparedUnifiedTarget, error) {
+	if err := validateResolvedUnifiedPaginationIntents(resolved, pagination); err != nil {
+		return nil, err
+	}
+	return prepareUnifiedTargets(resolved, selectors, pagination)
+}
+
+// prepareUnifiedOperationOutput translates immutable output corruption into one stable pre-dispatch error.
+func prepareUnifiedOperationOutput(definition *unified.OutputDefinition) (*preparedUnifiedOutput, error) {
+	output, err := prepareUnifiedOutput(definition)
+	if err != nil {
+		return nil, status.Error(codes.FailedPrecondition, "Unified output definition is invalid")
+	}
+	return output, nil
 }
 
 // admitUnifiedBindings validates logical input, graph authority, and service
@@ -173,6 +203,12 @@ func finishUnifiedSpan(span trace.Span, stage string, response *enginev1.Execute
 	outcome := "success"
 	if counts.errors > 0 || counts.skipped > 0 || counts.rollbackErrors > 0 {
 		outcome = "partial"
+	}
+	outputCode := response.GetOutputErrorCode()
+	if outputCode != "" {
+		outcome = "failed"
+		attributes = append(attributes, attribute.String("unified.output_error_code", outputCode))
+		span.SetStatus(otelcodes.Error, outputCode)
 	}
 	span.SetAttributes(append(attributes,
 		attribute.String("unified.outcome", outcome),

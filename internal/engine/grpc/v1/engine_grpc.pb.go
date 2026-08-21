@@ -42,7 +42,8 @@ type EngineServiceClient interface {
 	// SDK closes its channel so refcounts decrement and objects can be evicted.
 	Disconnect(ctx context.Context, in *DisconnectRequest, opts ...grpc.CallOption) (*DisconnectResponse, error)
 	// Execute an integration endpoint through the Engine.
-	// The response is streamed to support server-sent events (SSE) and pagination automatically.
+	// The response stream carries server-sent events and transport response chunks.
+	// Paginated operations still return one buffered aggregate response.
 	Execute(ctx context.Context, in *ExecuteRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ExecuteResponse], error)
 	// ExecuteUnified invokes one SDK-defined operation for an ordered set of
 	// explicitly selected targets. Authentication remains in x-app-id and
@@ -185,7 +186,8 @@ type EngineServiceServer interface {
 	// SDK closes its channel so refcounts decrement and objects can be evicted.
 	Disconnect(context.Context, *DisconnectRequest) (*DisconnectResponse, error)
 	// Execute an integration endpoint through the Engine.
-	// The response is streamed to support server-sent events (SSE) and pagination automatically.
+	// The response stream carries server-sent events and transport response chunks.
+	// Paginated operations still return one buffered aggregate response.
 	Execute(*ExecuteRequest, grpc.ServerStreamingServer[ExecuteResponse]) error
 	// ExecuteUnified invokes one SDK-defined operation for an ordered set of
 	// explicitly selected targets. Authentication remains in x-app-id and

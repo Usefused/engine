@@ -959,6 +959,7 @@ type AuthConfig struct {
 	ExtraAuthParams         map[string]string       `json:"extra_auth_params,omitempty"`
 	ExtraTokenParams        map[string]string       `json:"extra_token_params,omitempty"`
 	RefreshTokenRotates     bool                    `json:"refresh_token_rotates,omitempty"`
+	RefreshTokenRequired    bool                    `json:"refresh_token_required,omitempty"`
 	OAuth2Flows             OAuth2Flows             `json:"oauth2_flows,omitempty"`
 	SelectedOAuth2Flow      *OAuth2FlowContract     `json:"-"`
 	Strategy                *AuthRuntimeStrategy    `json:"strategy,omitempty"`
@@ -1240,7 +1241,9 @@ type SDKContractBinding struct {
 	SourceHash       string    `json:"source_hash"`
 }
 
-const SDKUnifiedDescriptorSchemaVersion = 2
+// SDKUnifiedDescriptorSchemaVersion identifies the credential-free generator
+// contract that permits binding and final-operation output schemas together.
+const SDKUnifiedDescriptorSchemaVersion = 3
 
 // SDKUnifiedOperationDescriptors is the credential-free contract Registry
 // needs to render Unified methods. Runtime mappings stay Engine-local so a
@@ -1250,6 +1253,9 @@ type SDKUnifiedOperationDescriptors struct {
 	Operations    []SDKUnifiedOperationDescriptor `json:"operations"`
 }
 
+// SDKUnifiedOperationDescriptor describes one generated public method. Its
+// OutputSchema types the exact final return value; executable mappings remain
+// in the Engine-private definition.
 type SDKUnifiedOperationDescriptor struct {
 	Name         string                       `json:"name"`
 	Description  string                       `json:"description,omitempty"`
@@ -1258,6 +1264,8 @@ type SDKUnifiedOperationDescriptor struct {
 	Targets      []SDKUnifiedTargetDescriptor `json:"targets"`
 }
 
+// SDKUnifiedTargetDescriptor exposes the immutable physical identity and
+// caller-visible binding result schema needed for safe client generation.
 type SDKUnifiedTargetDescriptor struct {
 	PublicTarget     string                        `json:"public_target"`
 	ServiceTarget    string                        `json:"service_target,omitempty"`

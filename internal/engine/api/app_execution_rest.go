@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/sandbox"
@@ -39,11 +40,18 @@ type restExecutionRuntime interface {
 }
 
 type restExecutionRequest struct {
-	Operation string                            `json:"operation"`
-	Input     json.RawMessage                   `json:"input"`
-	Targets   []string                          `json:"targets,omitempty"`
-	Selector  *restExecutionSelector            `json:"selector,omitempty"`
-	Selectors map[string]*restExecutionSelector `json:"selectors,omitempty"`
+	Operation        string                            `json:"operation"`
+	Input            json.RawMessage                   `json:"input"`
+	Targets          []string                          `json:"targets,omitempty"`
+	Selector         *restExecutionSelector            `json:"selector,omitempty"`
+	Selectors        map[string]*restExecutionSelector `json:"selectors,omitempty"`
+	Pagination       *restPaginationIntent             `json:"pagination,omitempty"`
+	TargetPagination map[string]*restPaginationIntent  `json:"target_pagination,omitempty"`
+}
+
+// restPaginationIntent mirrors the provider-neutral public control without accepting policy-owned limits.
+type restPaginationIntent struct {
+	MaxPages int `json:"max_pages"`
 }
 
 type restExecutionSelector struct {
@@ -67,6 +75,9 @@ type restExecutionSuccess struct {
 	StatusCode int    `json:"status_code,omitempty"`
 	Results    any    `json:"results"`
 	Rollbacks  any    `json:"rollbacks,omitempty"`
+	// Direct bypasses the standard execution envelope only when a Unified
+	// operation declares an exact final output contract.
+	Direct json.RawMessage `json:"-"`
 }
 
 type restUnifiedResult struct {
@@ -148,6 +159,10 @@ func (s *EngineGRPCServer) handleRESTExecution(writer http.ResponseWriter, reque
 	response, requestErr := s.executeRESTPlan(ctx, scope, identity, decoded, canonical, plan, idempotencyKey)
 	if requestErr != nil {
 		writeRESTExecutionError(writer, requestErr)
+		return
+	}
+	if response.Direct != nil {
+		writeRESTExecutionJSON(writer, http.StatusOK, response.Direct)
 		return
 	}
 	writeRESTExecutionJSON(writer, http.StatusOK, response)
@@ -249,6 +264,31 @@ func validateRESTExecutionRequest(request restExecutionRequest) *restExecutionEr
 			return err
 		}
 	}
+	if err := validateRESTPaginationIntent(request.Pagination); err != nil {
+		return err
+	}
+	// Every target control is bounded before operation classification can reveal runtime definitions.
+	for _, intent := range request.TargetPagination {
+		// A selected target entry must contain an explicit bound instead of JSON null.
+		if intent == nil {
+			return newRESTExecutionError(http.StatusBadRequest, "pagination_invalid", "target pagination intent is invalid")
+		}
+		if err := validateRESTPaginationIntent(intent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateRESTPaginationIntent applies the shared caller bound while retaining REST's stable error envelope.
+func validateRESTPaginationIntent(value *restPaginationIntent) *restExecutionError {
+	// Omitted intent retains the operation's automatic pagination behavior.
+	if value == nil {
+		return nil
+	}
+	if err := engine.ValidatePaginationIntent(&engine.PaginationIntent{MaxPages: value.MaxPages}); err != nil {
+		return newRESTExecutionError(http.StatusBadRequest, "pagination_invalid", "pagination intent is invalid")
+	}
 	return nil
 }
 
@@ -334,21 +374,25 @@ func (s *EngineGRPCServer) executeRESTPlan(ctx context.Context, scope *store.App
 // executeRESTPhysical validates its singular selector, binds full public
 // intent to idempotency, and collects one successful bounded JSON response.
 func (s *EngineGRPCServer) executeRESTPhysical(ctx context.Context, identity auth.RuntimeIdentity, request restExecutionRequest, canonical []byte, plan restExecutionPlan, idempotencyKey string) (restExecutionSuccess, *restExecutionError) {
-	if len(request.Targets) != 0 || len(request.Selectors) != 0 {
-		return restExecutionSuccess{}, newRESTExecutionError(http.StatusBadRequest, "invalid_request", "targets and selectors apply only to Unified operations")
+	if len(request.Targets) != 0 || len(request.Selectors) != 0 || len(request.TargetPagination) != 0 {
+		return restExecutionSuccess{}, newRESTExecutionError(http.StatusBadRequest, "invalid_request", "targets, selectors, and target_pagination apply only to Unified operations")
 	}
 	selectors := physicalRESTSelectors(request.Selector)
 	if err := s.restRuntime.ValidateResolvedPhysicalSelectors(plan.physical, selectors); err != nil {
 		return restExecutionSuccess{}, newRESTExecutionError(http.StatusBadRequest, "selector_invalid", "selector is incompatible with this operation")
 	}
+	pagination := runtimeRESTPaginationIntent(request.Pagination)
+	if err := sandbox.ValidateResolvedPhysicalPaginationIntent(plan.physical, pagination); err != nil {
+		return restExecutionSuccess{}, newRESTExecutionError(http.StatusBadRequest, "pagination_invalid", "pagination intent is incompatible with this operation")
+	}
 	input, err := decodeRESTInput(request.Input)
 	if err != nil {
 		return restExecutionSuccess{}, newRESTExecutionError(http.StatusBadRequest, "invalid_request", "input must be a JSON object")
 	}
-	digest := sha256.Sum256(canonical)
+	requestHash := restPhysicalRequestHash(request, canonical)
 	result, err := s.restRuntime.ExecuteResolvedPhysicalJSON(ctx, identity, plan.physical, sandbox.PhysicalExecutionRequest{
 		Params: input, Credentials: physicalRESTCredentials(request.Selector), Environment: selectors.Environment,
-		IdempotencyKey: idempotencyKey, RequestBodyHash: hex.EncodeToString(digest[:]), Transport: models.EngineExecutionTransportREST,
+		IdempotencyKey: idempotencyKey, RequestBodyHash: requestHash, Pagination: pagination, Transport: models.EngineExecutionTransportREST,
 	})
 	if err != nil {
 		return restExecutionSuccess{}, restErrorFromExecution(err)
@@ -359,15 +403,38 @@ func (s *EngineGRPCServer) executeRESTPhysical(ctx context.Context, identity aut
 	}, nil
 }
 
+// restPhysicalRequestHash leaves pagination for the shared physical hash binder while retaining every other public REST input.
+func restPhysicalRequestHash(request restExecutionRequest, fallback []byte) string {
+	// Requests without pagination already have the complete canonical replay identity.
+	if request.Pagination == nil {
+		digest := sha256.Sum256(fallback)
+		return hex.EncodeToString(digest[:])
+	}
+	request.Pagination = nil
+	encoded, err := json.Marshal(request)
+	// Strict decoding makes marshal failure unreachable, but the original canonical request remains a safe deterministic fallback.
+	if err != nil {
+		digest := sha256.Sum256(fallback)
+		return hex.EncodeToString(digest[:])
+	}
+	canonical, err := canonicaljson.Canonicalize(encoded)
+	if err != nil {
+		digest := sha256.Sum256(fallback)
+		return hex.EncodeToString(digest[:])
+	}
+	digest := sha256.Sum256(canonical)
+	return hex.EncodeToString(digest[:])
+}
+
 // executeRESTUnified reuses the canonical preflight and scheduler while
 // retaining only bounded wrapper telemetry and physical child receipts.
 func (s *EngineGRPCServer) executeRESTUnified(ctx context.Context, scope *store.AppRuntime, identity auth.RuntimeIdentity, request restExecutionRequest, plan restExecutionPlan, idempotencyKey string) (response restExecutionSuccess, requestErr *restExecutionError) {
-	if request.Selector != nil {
-		return restExecutionSuccess{}, newRESTExecutionError(http.StatusBadRequest, "invalid_request", "selector applies only to physical operations")
+	if request.Selector != nil || request.Pagination != nil {
+		return restExecutionSuccess{}, newRESTExecutionError(http.StatusBadRequest, "invalid_request", "selector and pagination apply only to physical operations")
 	}
 	protoRequest := &enginev1.ExecuteUnifiedRequest{
 		Operation: plan.operation, Targets: request.Targets, InputJson: request.Input,
-		TargetSelectors: protoRESTSelectors(request.Selectors), IdempotencyKey: idempotencyKey,
+		TargetSelectors: protoRESTSelectors(request.Selectors), TargetPagination: protoRESTTargetPagination(request.TargetPagination), IdempotencyKey: idempotencyKey,
 	}
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.unified.execute")
 	span.SetAttributes(attribute.Int("unified.target_count", boundedUnifiedTargetCount(protoRequest)))
@@ -380,12 +447,46 @@ func (s *EngineGRPCServer) executeRESTUnified(ctx context.Context, scope *store.
 		return restExecutionSuccess{}, restErrorFromExecution(execErr)
 	}
 	stage = "dispatch"
-	results, rollbacks := s.executeUnifiedGraph(ctx, call)
-	protoResponse = &enginev1.ExecuteUnifiedResponse{Results: results, RollbackResults: rollbacks}
+	graph := s.executeUnifiedGraph(ctx, call)
+	output, outputCode := projectUnifiedOperationOutput(call.input, call.output, graph.outputs)
+	protoResponse = &enginev1.ExecuteUnifiedResponse{
+		Results: graph.results, RollbackResults: graph.rollbacks,
+		OutputJson: output, OutputErrorCode: outputCode,
+	}
+	if call.output != nil && outputCode != "" {
+		return restExecutionSuccess{}, newRESTExecutionErrorWithDetails(
+			http.StatusUnprocessableEntity, outputCode, "Unified output could not be produced",
+			projectRESTUnifiedDiagnostics(graph.results),
+		)
+	}
+	if call.output != nil {
+		return restExecutionSuccess{Direct: json.RawMessage(output)}, nil
+	}
 	return restExecutionSuccess{
 		AppID: identity.AppID.String(), Operation: plan.operation, Kind: plan.kind,
-		Results: projectRESTUnifiedResults(results), Rollbacks: projectRESTUnifiedRollbacks(rollbacks),
+		Results: projectRESTUnifiedResults(graph.results), Rollbacks: projectRESTUnifiedRollbacks(graph.rollbacks),
 	}, nil
+}
+
+// runtimeRESTPaginationIntent copies a validated REST control into the internal physical request.
+func runtimeRESTPaginationIntent(value *restPaginationIntent) *engine.PaginationIntent {
+	// Message absence must remain distinguishable from a present invalid zero value.
+	if value == nil {
+		return nil
+	}
+	return &engine.PaginationIntent{MaxPages: value.MaxPages}
+}
+
+// protoRESTTargetPagination maps selected target controls onto the canonical Unified protobuf contract.
+func protoRESTTargetPagination(values map[string]*restPaginationIntent) map[string]*enginev1.PaginationIntent {
+	mapped := make(map[string]*enginev1.PaginationIntent, len(values))
+	// Values were bounded during strict REST decoding, so mapping cannot introduce new semantics.
+	for target, value := range values {
+		if value != nil {
+			mapped[target] = &enginev1.PaginationIntent{MaxPages: uint32(value.MaxPages)}
+		}
+	}
+	return mapped
 }
 
 // decodeRESTInput preserves JSON number precision by using json.Number until
@@ -469,6 +570,15 @@ func projectRESTUnifiedResults(results []*enginev1.UnifiedTargetResult) []restUn
 			Target: result.GetTarget(), Status: result.GetStatus(), Data: json.RawMessage(result.GetDataJson()),
 			ErrorCode: result.GetErrorCode(), AuthAction: result.GetAuthAction(),
 		})
+	}
+	return projected
+}
+
+// projectRESTUnifiedDiagnostics keeps output failures from bypassing the configured response transformation.
+func projectRESTUnifiedDiagnostics(results []*enginev1.UnifiedTargetResult) []restUnifiedResult {
+	projected := projectRESTUnifiedResults(results)
+	for index := range projected {
+		projected[index].Data = nil
 	}
 	return projected
 }

@@ -22,22 +22,31 @@ import (
 )
 
 type paginationV3State struct {
-	values     map[string]any
-	visited    map[string]map[string]struct{}
-	nextURL    *url.URL
-	pages      int64
-	items      int64
-	bytes      int64
-	itemsPath  string
-	stopReason string
+	values         map[string]any
+	visited        map[string]map[string]struct{}
+	nextURL        *url.URL
+	pages          int64
+	items          int64
+	bytes          int64
+	itemsPath      string
+	stopReason     string
+	callerMaxPages int64
 }
 
 type paginationV3Response struct {
-	document  any
-	itemsPath string
-	itemCount int64
-	values    map[string]any
-	present   map[string]bool
+	document    any
+	itemsPath   string
+	itemCount   int64
+	values      map[string]any
+	present     map[string]bool
+	sourcePaths map[string]string
+}
+
+// paginationV3SourceResult retains the response path selected for one body or GraphQL value.
+type paginationV3SourceResult struct {
+	value any
+	found bool
+	path  string
 }
 
 // runPaginationV3 owns the complete provider loop so generated clients observe
@@ -50,6 +59,11 @@ func (d *Dispatcher) runPaginationV3(ctx context.Context, span trace.Span, srv *
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(limits.MaxDurationMs)*time.Millisecond)
 	defer cancel()
 	state := newPaginationV3State(policy)
+	intent, hasIntent := PaginationIntentFromContext(ctx)
+	// Dispatcher validation guarantees a present caller limit is a strict reduction of the reviewed policy maximum.
+	if hasIntent {
+		state.callerMaxPages = int64(intent.MaxPages)
+	}
 	defer func() { recordPaginationV3Outcome(ctx, span, state, policy, err) }()
 	return d.executePaginationV3Pages(ctx, runCtx, srv, obj, cloneParams(params), credentials, bucketValues, stream, policy, limits, state)
 }
@@ -103,6 +117,10 @@ func (d *Dispatcher) executePaginationV3Page(ctx, runCtx context.Context, srv *m
 	if state.itemsPath == "" {
 		state.itemsPath = response.itemsPath
 	}
+	// The aggregate owns the first document, so only its selected continuation paths are eligible for cleanup.
+	if state.pages == 0 {
+		aggregate.removePaths = paginationV3ConsumedContinuationPaths(policy, response)
+	}
 	if err := aggregate.Add(response.document, response.itemsPath); err != nil {
 		return status, response, page, err
 	}
@@ -121,6 +139,11 @@ func finishPaginationV3Page(policy *paginationpolicy.Config, state *paginationV3
 	stop, err := terminatePaginationV3(policy, state, response)
 	if err != nil || stop {
 		return stop, err
+	}
+	// Caller truncation is successful only after provider-owned termination had the first chance to describe the final page.
+	if state.callerMaxPages > 0 && state.pages >= state.callerMaxPages {
+		state.stopReason = "caller_max_pages"
+		return true, nil
 	}
 	return advancePaginationV3(policy, state, response, page)
 }
@@ -226,11 +249,11 @@ func decodePaginationV3Page(page *paginationPage, policy *paginationpolicy.Confi
 	if !found || !valid {
 		return paginationV3Response{}, paginationError("response_invalid")
 	}
-	values, present, err := readPaginationV3Values(policy, state, document, list, page)
+	values, present, sourcePaths, err := readPaginationV3Values(policy, state, document, list, page)
 	if err != nil {
 		return paginationV3Response{}, err
 	}
-	return paginationV3Response{document: document, itemsPath: itemsPath, itemCount: int64(len(list)), values: values, present: present}, nil
+	return paginationV3Response{document: document, itemsPath: itemsPath, itemCount: int64(len(list)), values: values, present: present, sourcePaths: sourcePaths}, nil
 }
 
 func decodePaginationDocument(payload []byte) (any, error) {
@@ -242,45 +265,61 @@ func decodePaginationDocument(payload []byte) (any, error) {
 	return document, nil
 }
 
-func readPaginationV3Values(policy *paginationpolicy.Config, state *paginationV3State, document any, items []any, page *paginationPage) (map[string]any, map[string]bool, error) {
+func readPaginationV3Values(policy *paginationpolicy.Config, state *paginationV3State, document any, items []any, page *paginationPage) (map[string]any, map[string]bool, map[string]string, error) {
 	values := make(map[string]any, len(policy.Response.Values))
 	present := make(map[string]bool, len(policy.Response.Values))
+	sourcePaths := make(map[string]string, len(policy.Response.Values))
 	for _, response := range policy.Response.Values {
-		value, found, err := readPaginationV3Source(response.Source, policy.GraphQL, state.values, document, items, page)
+		located, err := readPaginationV3Source(response.Source, policy.GraphQL, state.values, document, items, page)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		present[response.Name] = found
-		if found {
-			values[response.Name] = value
+		present[response.Name] = located.found
+		// Only a value actually read from this document can identify a consumed cleanup path.
+		if located.found {
+			values[response.Name] = located.value
+			if located.path != "" {
+				sourcePaths[response.Name] = located.path
+			}
 		}
 	}
-	return values, present, nil
+	return values, present, sourcePaths, nil
 }
 
-func readPaginationV3Source(source paginationpolicy.ValueSource, graphQL *paginationpolicy.GraphQLPlan, state map[string]any, document any, items []any, page *paginationPage) (any, bool, error) {
+// readPaginationV3Source extracts one reviewed value and records only the body path selected for this page.
+func readPaginationV3Source(source paginationpolicy.ValueSource, graphQL *paginationpolicy.GraphQLPlan, state map[string]any, document any, items []any, page *paginationPage) (paginationV3SourceResult, error) {
 	switch source.Location {
 	case paginationpolicy.SourceHeader:
 		value, found := headerValue(page.headers, source.Name)
-		return convertLocatedValue(value, found, source.ValueType)
+		return convertPaginationV3Source(value, found, source.ValueType, "")
 	case paginationpolicy.SourceLink:
 		value, found := linkValue(page.headers.Values(source.Name), source.Relation)
-		return convertLocatedValue(value, found, source.ValueType)
+		return convertPaginationV3Source(value, found, source.ValueType, "")
 	case paginationpolicy.SourceItems:
-		return readPaginationItemSource(source, items)
+		value, found, err := readPaginationItemSource(source, items)
+		return paginationV3SourceResult{value: value, found: found}, err
 	case paginationpolicy.SourceBody, paginationpolicy.SourceGraphQL:
 		path, ok := selectSourcePath(source.Path, source.Paths, state)
 		if !ok {
-			return nil, false, nil
+			return paginationV3SourceResult{}, nil
 		}
 		if source.Location == paginationpolicy.SourceGraphQL {
 			path = applyGraphQLResultAliases(path, graphQL)
 		}
 		value, found := valueAtPath(document, path)
-		return convertLocatedValue(value, found, source.ValueType)
+		return convertPaginationV3Source(value, found, source.ValueType, path)
 	default:
-		return nil, false, paginationError("invalid_config")
+		return paginationV3SourceResult{}, paginationError("invalid_config")
 	}
+}
+
+// convertPaginationV3Source keeps a cleanup path only when conversion confirms that the value was present and usable.
+func convertPaginationV3Source(value any, found bool, valueType paginationpolicy.ValueType, path string) (paginationV3SourceResult, error) {
+	converted, present, err := convertLocatedValue(value, found, valueType)
+	if err != nil || !present {
+		return paginationV3SourceResult{found: present}, err
+	}
+	return paginationV3SourceResult{value: converted, found: true, path: path}, nil
 }
 
 func convertLocatedValue(value any, found bool, valueType paginationpolicy.ValueType) (any, bool, error) {
@@ -654,7 +693,8 @@ func recordPaginationV3Outcome(ctx context.Context, span trace.Span, state *pagi
 	summary := PaginationExecutionSummary{Type: "composable", PageCount: state.pages, ItemCount: state.items, ByteCount: state.bytes, StopReason: stop}
 	RecordPaginationSummary(ctx, summary)
 	kinds := paginationV3ContinuationKinds(policy)
-	span.SetAttributes(attribute.String("pagination.type", summary.Type), attribute.Int64("pagination.page_count", summary.PageCount), attribute.Int64("pagination.item_count", summary.ItemCount), attribute.Int64("pagination.byte_count", summary.ByteCount), attribute.String("pagination.stop_reason", summary.StopReason), attribute.StringSlice("pagination.continuation_kinds", kinds), attribute.Int("pagination.continuation_step_count", len(policy.Continuation)))
+	policyMaxPages := paginationpolicy.EffectiveLimits(policy.Limits).MaxPages
+	span.SetAttributes(attribute.String("pagination.type", summary.Type), attribute.Int64("pagination.page_count", summary.PageCount), attribute.Int64("pagination.item_count", summary.ItemCount), attribute.Int64("pagination.byte_count", summary.ByteCount), attribute.String("pagination.stop_reason", summary.StopReason), attribute.StringSlice("pagination.continuation_kinds", kinds), attribute.Int("pagination.continuation_step_count", len(policy.Continuation)), attribute.Int64("pagination.requested_max_pages", state.callerMaxPages), attribute.Int("pagination.policy_max_pages", policyMaxPages), attribute.Bool("pagination.caller_limit_applied", state.callerMaxPages > 0))
 	if err != nil {
 		span.SetStatus(codes.Error, summary.StopReason)
 	}
@@ -671,6 +711,23 @@ func paginationV3ContinuationKinds(policy *paginationpolicy.Config) []string {
 	}
 	sort.Strings(kinds)
 	return kinds
+}
+
+// paginationV3ConsumedContinuationPaths returns first-page paths actually selected for continuation values.
+func paginationV3ConsumedContinuationPaths(policy *paginationpolicy.Config, response paginationV3Response) []string {
+	paths := make(map[string]struct{})
+	// Increment-only, header, link, item, missing, and unselected alternatives have no selected response path.
+	for _, step := range policy.Continuation {
+		if path := response.sourcePaths[step.ResponseValue]; path != "" {
+			paths[path] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(paths))
+	for path := range paths {
+		result = append(result, path)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func jsonDecoder(payload []byte) *json.Decoder {

@@ -101,7 +101,7 @@ func TestFetchServiceVersionAuthConfigsUsesGraphQLBatch(t *testing.T) {
 			if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
 				t.Fatalf("decode request: %v", err)
 			}
-			body := `{"data":{"serviceVersionAuthConfigs":[{"service_id":"` + serviceID.String() + `","version":"1.0.0","service_version_id":"` + versionID.String() + `","auth_configs":[{"name":"oauth","type":"oauth2","token_endpoint_auth_method":"client_secret_basic","pkce_required":true,"scopes_delimiter":"comma","extra_auth_params":{"prompt":"consent"},"extra_token_params":{"audience":"payments"},"refresh_token_rotates":true}]}]}}`
+			body := `{"data":{"serviceVersionAuthConfigs":[{"service_id":"` + serviceID.String() + `","version":"1.0.0","service_version_id":"` + versionID.String() + `","auth_configs":[{"name":"oauth","type":"oauth2","token_endpoint_auth_method":"client_secret_basic","pkce_required":true,"scopes_delimiter":"comma","extra_auth_params":{"prompt":"consent"},"extra_token_params":{"audience":"payments"},"refresh_token_rotates":true,"refresh_token_required":true}]}]}}`
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 		})},
 	}
@@ -117,13 +117,13 @@ func TestFetchServiceVersionAuthConfigsUsesGraphQLBatch(t *testing.T) {
 		t.Fatalf("token endpoint auth method did not decode: %#v", configs[0].AuthConfigs)
 	}
 	auth := configs[0].AuthConfigs[0]
-	if !auth.PKCERequired || auth.ScopesDelimiter != "comma" || auth.ExtraAuthParams["prompt"] != "consent" || auth.ExtraTokenParams["audience"] != "payments" || !auth.RefreshTokenRotates {
+	if !auth.PKCERequired || auth.ScopesDelimiter != "comma" || auth.ExtraAuthParams["prompt"] != "consent" || auth.ExtraTokenParams["audience"] != "payments" || !auth.RefreshTokenRotates || !auth.RefreshTokenRequired {
 		t.Fatalf("OAuth edge policy did not decode: %#v", auth)
 	}
 	if !strings.Contains(requestBody.Query, "serviceVersionAuthConfigs") {
 		t.Fatalf("expected GraphQL auth-config query, got %q", requestBody.Query)
 	}
-	if strings.Contains(requestBody.Query, "operation_names") || !containsAll(requestBody.Query, "token_endpoint_auth_method", "pkce_required", "scopes_delimiter", "extra_auth_params", "extra_token_params", "refresh_token_rotates") {
+	if strings.Contains(requestBody.Query, "operation_names") || !containsAll(requestBody.Query, "token_endpoint_auth_method", "pkce_required", "scopes_delimiter", "extra_auth_params", "extra_token_params", "refresh_token_rotates", "refresh_token_required") {
 		t.Fatalf("legacy auth-config projection changed unexpectedly: %q", requestBody.Query)
 	}
 	refs, ok := requestBody.Variables["refs"].([]interface{})
@@ -388,7 +388,7 @@ func TestFetchRuntimeContractUsesBundledGraphQLProjection(t *testing.T) {
 					"servers":[{"url":"https://api.example.com","environment":"prod","is_default":true}],
 					"default_headers":{"X-Provider":"example"},
 					"connect_config":null,
-					"auth_configs":[{"name":"oauth","type":"oauth2","oauth2_flows":{"authorizationCode":{"authorization_url":"https://auth.example/authorize","token_url":"https://auth.example/token","scopes":{}}},"token_endpoint_auth_method":"client_secret_post","pkce_required":true,"scopes_delimiter":"comma","extra_auth_params":{"prompt":"consent"},"extra_token_params":{"audience":"payments"},"refresh_token_rotates":true}],
+					"auth_configs":[{"name":"oauth","type":"oauth2","oauth2_flows":{"authorizationCode":{"authorization_url":"https://auth.example/authorize","token_url":"https://auth.example/token","scopes":{}}},"token_endpoint_auth_method":"client_secret_post","pkce_required":true,"scopes_delimiter":"comma","extra_auth_params":{"prompt":"consent"},"extra_token_params":{"audience":"payments"},"refresh_token_rotates":true,"refresh_token_required":true}],
 					"rate_limit":{"version":3,"policies":[{"name":"requests","mode":"enforce","unit":"requests","identity":{"inputs":[{"kind":"service_version"}]},"cost":{"default":1,"rules":[]},"algorithm":"fixed_window","fixed_window":{"limit":10,"duration_ms":1000}}]},
 					"retry_config":{"version":3,"rules":[{"predicates":{"methods":["POST"],"operation_kinds":["query"],"statuses":[{"min":500,"max":599}],"errors":[],"body_replayability":"replayable","idempotency_key":{"requirement":"required","header":"Idempotency-Key"},"required_provider_headers":[]},"action":{"max_attempts":3,"max_elapsed_ms":1000,"backoff":{"strategy":"fixed","base_delay_ms":100,"max_delay_ms":100,"jitter_ms":0},"retry_after_headers":[]}}]},
 					"timeout_ms":45000,
@@ -419,7 +419,7 @@ func TestFetchRuntimeContractUsesBundledGraphQLProjection(t *testing.T) {
 		t.Fatalf("runtime OAuth token endpoint auth method was not decoded: %#v", snapshot.ServiceMetadata.AuthConfigs)
 	}
 	auth := snapshot.ServiceMetadata.AuthConfigs[0]
-	if !auth.PKCERequired || auth.ScopesDelimiter != "comma" || auth.ExtraAuthParams["prompt"] != "consent" || auth.ExtraTokenParams["audience"] != "payments" || !auth.RefreshTokenRotates {
+	if !auth.PKCERequired || auth.ScopesDelimiter != "comma" || auth.ExtraAuthParams["prompt"] != "consent" || auth.ExtraTokenParams["audience"] != "payments" || !auth.RefreshTokenRotates || !auth.RefreshTokenRequired {
 		t.Fatalf("runtime OAuth edge policy was not decoded: %#v", auth)
 	}
 	if len(snapshot.Endpoints) != 1 || snapshot.Endpoints[0].ID != endpointID || snapshot.Endpoints[0].Pagination == nil {
@@ -437,7 +437,7 @@ func TestFetchRuntimeContractUsesBundledGraphQLProjection(t *testing.T) {
 	if len(snapshot.Webhooks) != 1 || snapshot.Webhooks[0].ID != webhookID {
 		t.Fatalf("unexpected webhooks: %#v", snapshot.Webhooks)
 	}
-	if !containsAll(requestBody.Query, "serviceRuntimeContracts", "contract_version", "required_capabilities", "operations", "webhooks", "timeout_ms", "request_content", "path_encoding", "graphql_query", "provider_protocol", "operation_kind", "token_endpoint_auth_method", "pkce_required", "scopes_delimiter", "extra_auth_params", "extra_token_params", "refresh_token_rotates") {
+	if !containsAll(requestBody.Query, "serviceRuntimeContracts", "contract_version", "required_capabilities", "operations", "webhooks", "timeout_ms", "request_content", "path_encoding", "graphql_query", "provider_protocol", "operation_kind", "token_endpoint_auth_method", "pkce_required", "scopes_delimiter", "extra_auth_params", "extra_token_params", "refresh_token_rotates", "refresh_token_required") {
 		t.Fatalf("runtime contract query did not bundle service operations and webhooks: %s", requestBody.Query)
 	}
 	variablesJSON, _ := json.Marshal(requestBody.Variables)

@@ -1,8 +1,10 @@
 package unified
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 type literalNode struct {
@@ -78,6 +80,74 @@ func (n expressionNode) evaluate(ctx EvaluationContext) (any, error) {
 
 type coalesceNode struct {
 	references []reference
+}
+
+type templateNode struct {
+	parts    []node
+	maxBytes int
+}
+
+// evaluate renders a mixed string while preserving expression-only mappings
+// as typed values in their existing expression nodes.
+func (n templateNode) evaluate(ctx EvaluationContext) (any, error) {
+	var result strings.Builder
+	for _, part := range n.parts {
+		value, err := part.evaluate(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if IsOmitted(value) {
+			continue
+		}
+		text, err := interpolationScalar(value)
+		if err != nil {
+			return nil, err
+		}
+		if len(text) > n.maxBytes-result.Len() {
+			return nil, fmt.Errorf("%w: maximum interpolated size exceeded", ErrLimitExceeded)
+		}
+		result.WriteString(text)
+	}
+	return result.String(), nil
+}
+
+// interpolationScalar formats only values with one deterministic JSON scalar
+// spelling. Objects, arrays, and null must be mapped as complete expressions.
+func interpolationScalar(value any) (string, error) {
+	switch typed := value.(type) {
+	case string:
+		return typed, nil
+	case bool:
+		return strconv.FormatBool(typed), nil
+	case json.Number:
+		encoded, err := json.Marshal(typed)
+		if err != nil {
+			return "", fmt.Errorf("%w: interpolation requires a finite JSON scalar", ErrInvalidValue)
+		}
+		return string(encoded), nil
+	default:
+		if !isJSONNumeric(value) {
+			return "", fmt.Errorf("%w: interpolation requires a non-null scalar", ErrInvalidValue)
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return "", fmt.Errorf("%w: interpolation requires a finite JSON scalar", ErrInvalidValue)
+		}
+		return string(encoded), nil
+	}
+}
+
+// isJSONNumeric admits runtime numeric forms without widening interpolation to
+// nil, objects, arrays, or arbitrary Stringer implementations.
+func isJSONNumeric(value any) bool {
+	switch value.(type) {
+	case int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64:
+		return true
+	default:
+		return false
+	}
 }
 
 // evaluate returns the first non-null reference in a compiled fallback chain.

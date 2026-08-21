@@ -76,7 +76,7 @@ func (c *compiler) compile(value any, depth int) (node, error) {
 	case []any:
 		return c.compileArray(typed, depth)
 	case string:
-		return c.compileString(typed)
+		return c.compileString(typed, depth)
 	default:
 		if isJSONScalar(typed) {
 			return compileLiteral(typed)
@@ -147,9 +147,9 @@ func (c *compiler) compileArray(value []any, depth int) (node, error) {
 	return arrayNode{items: items}, nil
 }
 
-// compileString treats only complete DynamicValue expressions as executable;
-// all other strings remain literal JSON data.
-func (c *compiler) compileString(value string) (node, error) {
+// compileString preserves complete expressions as typed values and compiles
+// mixed literal/reference strings into bounded scalar interpolation.
+func (c *compiler) compileString(value string, depth int) (node, error) {
 	if !strings.Contains(value, "${") {
 		return literalNode{value: value}, nil
 	}
@@ -157,14 +157,109 @@ func (c *compiler) compileString(value string) (node, error) {
 		return nil, fmt.Errorf("%w: maximum expression length exceeded", ErrLimitExceeded)
 	}
 	expression, ok := completeExpression(value)
-	if !ok {
-		return nil, fmt.Errorf("%w: expressions must occupy the complete scalar", ErrInvalidExpression)
+	if ok {
+		return c.compileExpressionNode(expression)
 	}
+	return c.compileTemplate(value, depth)
+}
+
+// compileExpressionNode charges the shared expression budget before parsing
+// one complete expression or one interpolation segment.
+func (c *compiler) compileExpressionNode(expression string) (node, error) {
 	c.expressions++
 	if c.expressions > c.limits.MaxExpressions {
 		return nil, fmt.Errorf("%w: maximum expression count exceeded", ErrLimitExceeded)
 	}
 	return compileExpression(expression, c.limits, c.allowedTargets)
+}
+
+// compileTemplate parses interpolation without admitting functions, operators,
+// nested expressions, or an unbounded runtime string.
+func (c *compiler) compileTemplate(value string, depth int) (node, error) {
+	segments, expressionCount, err := parseTemplateSegments(value)
+	if err != nil {
+		return nil, err
+	}
+	if expressionCount == 0 {
+		return literalNode{value: segments[0].literal}, nil
+	}
+	parts := make([]node, 0, len(segments))
+	for _, segment := range segments {
+		part, err := c.compileTemplateSegment(segment, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, part)
+	}
+	return templateNode{parts: parts, maxBytes: c.limits.MaxEncodedBytes}, nil
+}
+
+type templateSourceSegment struct {
+	literal    string
+	expression string
+}
+
+// compileTemplateSegment turns one already-bounded source segment into a
+// literal or expression child while retaining the ordinary node budget.
+func (c *compiler) compileTemplateSegment(segment templateSourceSegment, depth int) (node, error) {
+	if err := c.admitNode(depth); err != nil {
+		return nil, err
+	}
+	if segment.expression == "" {
+		return literalNode{value: segment.literal}, nil
+	}
+	return c.compileExpressionNode(segment.expression)
+}
+
+// parseTemplateSegments recognizes `${...}` references and `$${` as the
+// explicit literal `${` escape. It never recursively parses expression text.
+func parseTemplateSegments(value string) ([]templateSourceSegment, int, error) {
+	segments := make([]templateSourceSegment, 0, 3)
+	literal := strings.Builder{}
+	expressionCount := 0
+	for index := 0; index < len(value); {
+		if strings.HasPrefix(value[index:], "$${") {
+			literal.WriteString("${")
+			index += 3
+			continue
+		}
+		if !strings.HasPrefix(value[index:], "${") {
+			literal.WriteByte(value[index])
+			index++
+			continue
+		}
+		segments = appendLiteralTemplateSegment(segments, literal.String())
+		literal.Reset()
+		end := strings.IndexByte(value[index+2:], '}')
+		if end < 0 {
+			return nil, 0, fmt.Errorf("%w: unterminated interpolation", ErrInvalidExpression)
+		}
+		expression := value[index+2 : index+2+end]
+		if expression == "" || expression != strings.TrimSpace(expression) || strings.Contains(expression, "${") {
+			return nil, 0, fmt.Errorf("%w: invalid interpolation", ErrInvalidExpression)
+		}
+		segments = append(segments, templateSourceSegment{expression: expression})
+		expressionCount++
+		index += end + 3
+	}
+	segments = appendLiteralTemplateSegment(segments, literal.String())
+	if len(segments) == 0 {
+		segments = append(segments, templateSourceSegment{literal: ""})
+	}
+	return segments, expressionCount, nil
+}
+
+// appendLiteralTemplateSegment coalesces literal runs and omits empty runs
+// beside expressions so equivalent source has one canonical program.
+func appendLiteralTemplateSegment(segments []templateSourceSegment, value string) []templateSourceSegment {
+	if value == "" {
+		return segments
+	}
+	if len(segments) > 0 && segments[len(segments)-1].expression == "" {
+		segments[len(segments)-1].literal += value
+		return segments
+	}
+	return append(segments, templateSourceSegment{literal: value})
 }
 
 // completeExpression requires an entire string to be one DynamicValue expression rather than interpolation.

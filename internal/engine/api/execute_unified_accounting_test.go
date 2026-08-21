@@ -413,7 +413,7 @@ func TestExecuteUnifiedProducesOnlyPhysicalAccounting(t *testing.T) {
 	if err != nil || len(response.GetResults()) != 2 {
 		t.Fatalf("ExecuteUnified() = (%#v, %v)", response, err)
 	}
-	assertUnifiedResults(t, response, []string{"github", "@acme/custom-crm"}, []string{`{"id":"gh-1"}`, `{"id":"crm-1"}`})
+	assertUnifiedResults(t, response, []string{"github", "@acme/custom-crm"}, []string{`{"id":"gh-1"}`, `{"iid":"crm-1"}`})
 	if len(events.messages) != 2 {
 		t.Fatalf("execution events = %d, want two physical events and no wrapper event", len(events.messages))
 	}

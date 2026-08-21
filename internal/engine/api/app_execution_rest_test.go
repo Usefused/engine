@@ -9,11 +9,13 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
+	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -75,6 +77,39 @@ func TestRESTExecutionPhysicalUsesCanonicalOperationLimit(t *testing.T) {
 	assertRESTErrorCode(t, rejected, http.StatusBadRequest, "invalid_request")
 	if runtime.connects != 1 || runtime.disconnects != 1 {
 		t.Fatalf("oversized operation reached cache lifecycle: %d/%d", runtime.connects, runtime.disconnects)
+	}
+}
+
+// TestValidateRESTExecutionRequestBoundsPagination proves REST rejects malformed controls before runtime classification or resolution.
+func TestValidateRESTExecutionRequestBoundsPagination(t *testing.T) {
+	tests := []restExecutionRequest{
+		{Operation: "items.list", Input: json.RawMessage(`{}`), Pagination: &restPaginationIntent{MaxPages: 0}},
+		{Operation: "items.list", Input: json.RawMessage(`{}`), Pagination: &restPaginationIntent{MaxPages: paginationpolicy.CeilingMaxPages + 1}},
+		{Operation: "items.list", Input: json.RawMessage(`{}`), TargetPagination: map[string]*restPaginationIntent{"jira": nil}},
+	}
+	// Each malformed shape must retain the same bounded public error code.
+	for index, request := range tests {
+		if err := validateRESTExecutionRequest(request); err == nil || err.code != "pagination_invalid" {
+			t.Fatalf("case %d error = %#v", index, err)
+		}
+	}
+}
+
+// TestRESTPhysicalPaginationHashBindsOnlyAtPhysicalBoundary proves pagination participates once in replay conflict identity.
+func TestRESTPhysicalPaginationHashBindsOnlyAtPhysicalBoundary(t *testing.T) {
+	first := restExecutionRequest{Operation: "items.list", Input: json.RawMessage(`{}`), Pagination: &restPaginationIntent{MaxPages: 1}}
+	second := restExecutionRequest{Operation: "items.list", Input: json.RawMessage(`{}`), Pagination: &restPaginationIntent{MaxPages: 2}}
+	firstCanonical := []byte(`{"input":{},"operation":"items.list","pagination":{"max_pages":1}}`)
+	secondCanonical := []byte(`{"input":{},"operation":"items.list","pagination":{"max_pages":2}}`)
+	firstBase := restPhysicalRequestHash(first, firstCanonical)
+	secondBase := restPhysicalRequestHash(second, secondCanonical)
+	if firstBase != secondBase {
+		t.Fatal("REST base hash included pagination before the shared physical binder")
+	}
+	firstBound := engine.BindPaginationIntentRequestHash(firstBase, runtimeRESTPaginationIntent(first.Pagination))
+	secondBound := engine.BindPaginationIntentRequestHash(secondBase, runtimeRESTPaginationIntent(second.Pagination))
+	if firstBound == secondBound {
+		t.Fatal("different pagination intents produced the same physical replay identity")
 	}
 }
 
@@ -292,6 +327,7 @@ func TestRESTExecutionUnifiedAcceptsScalarWhenItsSchemaDoes(t *testing.T) {
 	fixture := newUnifiedCompileFixture()
 	operation := fixture.document.UnifiedOperations["issues.create"]
 	operation.Input = json.RawMessage(`{"type":"integer"}`)
+	operation.Output = nil
 	fixture.document.UnifiedOperations["issues.create"] = operation
 	server, _, appID := newUnifiedRuntimeServerFromFixture(t, fixture, store.AppTokenPolicy{AllowAll: true})
 	runtime := &restRuntimeTestDouble{}
@@ -308,7 +344,11 @@ func TestRESTExecutionUnifiedAcceptsScalarWhenItsSchemaDoes(t *testing.T) {
 // TestRESTExecutionUnifiedMatchesCanonicalResultAndChildTransport proves REST
 // uses the same preflight/scheduler and labels every physical child as REST.
 func TestRESTExecutionUnifiedMatchesCanonicalResultAndChildTransport(t *testing.T) {
-	server, _, appID := newUnifiedRuntimeServer(t, store.AppTokenPolicy{AllowAll: true})
+	fixture := newUnifiedCompileFixture()
+	operation := fixture.document.UnifiedOperations["issues.create"]
+	operation.Output = nil
+	fixture.document.UnifiedOperations["issues.create"] = operation
+	server, _, appID := newUnifiedRuntimeServerFromFixture(t, fixture, store.AppTokenPolicy{AllowAll: true})
 	runtime := &restRuntimeTestDouble{}
 	server.restRuntime, server.unifiedRuntime = runtime, runtime
 	response := performRESTExecution(t, server, appID, "fsk_test", `{
@@ -329,6 +369,49 @@ func TestRESTExecutionUnifiedMatchesCanonicalResultAndChildTransport(t *testing.
 		if call.Transport != models.EngineExecutionTransportREST {
 			t.Fatalf("Unified child %d transport = %q", index, call.Transport)
 		}
+	}
+}
+
+func TestRESTExecutionUnifiedReturnsExactRootOutput(t *testing.T) {
+	server, _, appID := newUnifiedRuntimeServer(t, store.AppTokenPolicy{AllowAll: true})
+	runtime := &restRuntimeTestDouble{}
+	server.restRuntime, server.unifiedRuntime = runtime, runtime
+	response := performRESTExecution(t, server, appID, "fsk_test", `{
+		"operation":"issues.create","input":{"title":"Bug"},
+		"targets":["github","@acme/custom-crm"]
+	}`, "logical-root-output")
+	if response.Code != http.StatusOK {
+		t.Fatalf("Unified status = %d body=%s", response.Code, response.Body.String())
+	}
+	if got := strings.TrimSpace(response.Body.String()); got != `{"id":"gh-1"}` {
+		t.Fatalf("exact Unified output = %s", got)
+	}
+	for _, wrapperField := range []string{`"results"`, `"rollbacks"`, `"data"`, `"kind"`} {
+		if strings.Contains(response.Body.String(), wrapperField) {
+			t.Fatalf("root output retained wrapper field %s: %s", wrapperField, response.Body.String())
+		}
+	}
+}
+
+func TestRESTExecutionUnifiedReturnsBoundedRootOutputError(t *testing.T) {
+	fixture := newUnifiedCompileFixture()
+	operation := fixture.document.UnifiedOperations["issues.create"]
+	operation.Output = json.RawMessage(`{
+		"type":"object",
+		"properties":{"id":"${response.github.missing}"},
+		"required":["id"]
+	}`)
+	fixture.document.UnifiedOperations["issues.create"] = operation
+	server, _, appID := newUnifiedRuntimeServerFromFixture(t, fixture, store.AppTokenPolicy{AllowAll: true})
+	runtime := &restRuntimeTestDouble{}
+	server.restRuntime, server.unifiedRuntime = runtime, runtime
+	response := performRESTExecution(t, server, appID, "fsk_test", `{
+		"operation":"issues.create","input":{"title":"Bug"},
+		"targets":["github","@acme/custom-crm"]
+	}`, "logical-root-error")
+	assertRESTErrorCode(t, response, http.StatusUnprocessableEntity, "output_mapping_failed")
+	if strings.Contains(response.Body.String(), "missing") || strings.Contains(response.Body.String(), "gh-1") {
+		t.Fatalf("root projection error leaked mapping or provider data: %s", response.Body.String())
 	}
 }
 

@@ -102,6 +102,7 @@ const registryAuthConfigGraphQLFields = `
 	extra_auth_params
 	extra_token_params
 	refresh_token_rotates
+	refresh_token_required
 	oauth2_flows
 	strategy
 	policy_provenance

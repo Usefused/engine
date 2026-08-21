@@ -29,7 +29,7 @@ type sdkUnifiedOperationDoc struct {
 	Description string                          `json:"description,omitempty"`
 	Input       json.RawMessage                 `json:"input"`
 	Bindings    map[string]sdkUnifiedBindingDoc `json:"bindings"`
-	Output      *sdkUnifiedOutputDoc            `json:"output,omitempty"`
+	Output      json.RawMessage                 `json:"output,omitempty"`
 }
 
 type sdkUnifiedBindingDoc struct {
@@ -37,7 +37,7 @@ type sdkUnifiedBindingDoc struct {
 	Service   string                 `json:"service,omitempty"`
 	DependsOn []string               `json:"depends_on,omitempty"`
 	Input     json.RawMessage        `json:"input,omitempty"`
-	Output    *sdkUnifiedOutputDoc   `json:"output,omitempty"`
+	Output    json.RawMessage        `json:"output,omitempty"`
 	Rollback  *sdkUnifiedRollbackDoc `json:"rollback,omitempty"`
 }
 
@@ -46,11 +46,6 @@ type sdkUnifiedBindingDoc struct {
 type sdkUnifiedRollbackDoc struct {
 	Operation string          `json:"operation"`
 	Input     json.RawMessage `json:"input,omitempty"`
-}
-
-type sdkUnifiedOutputDoc struct {
-	Schema  json.RawMessage `json:"schema"`
-	Mapping json.RawMessage `json:"mapping"`
 }
 
 // UnmarshalJSON restores json only after strict shape, limit, and namespace checks.
@@ -314,33 +309,22 @@ func validateUnifiedOutputMode(name string, operation sdkUnifiedOperationDoc) er
 	if err := validateUnifiedOutput(name, operation.Output); err != nil {
 		return err
 	}
-	// A root output means the caller wants one service-independent result;
-	// binding outputs instead preserve provider-specific result shapes.
-	if operation.Output == nil {
-		return nil
-	}
 	for _, target := range sortedUnifiedBindingTargets(operation.Bindings) {
 		binding := operation.Bindings[target]
-		if binding.Output != nil {
-			return fmt.Errorf("Unified Operation %q cannot combine root output with binding %q output", name, target)
+		if err := validateUnifiedOutput(name+" binding "+target, binding.Output); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// validateUnifiedOutput rejects malformed unified output before it can cross the SDK Unified configuration boundary.
-func validateUnifiedOutput(name string, output *sdkUnifiedOutputDoc) error {
-	if output == nil {
+// validateUnifiedOutput rejects malformed recursive output before endpoint resolution begins.
+func validateUnifiedOutput(name string, output json.RawMessage) error {
+	if len(output) == 0 {
 		return nil
 	}
-	if err := validateUnifiedSchema(name+" output", output.Schema); err != nil {
-		return err
-	}
-	if len(output.Mapping) == 0 {
-		return fmt.Errorf("%s requires output mapping", name)
-	}
-	if _, err := canonicaljson.Canonicalize(output.Mapping); err != nil {
-		return fmt.Errorf("%s output mapping is invalid: %w", name, err)
+	if _, _, err := compileSDKUnifiedOutputDocument(output, nil); err != nil {
+		return fmt.Errorf("%s output is invalid: %w", name, err)
 	}
 	return nil
 }
@@ -428,14 +412,14 @@ func canonicalizeUnifiedOperations(operations map[string]sdkUnifiedOperationDoc)
 	for name, operation := range operations {
 		operation.Description = strings.TrimSpace(operation.Description)
 		operation.Input = canonicalUnifiedJSON(operation.Input)
-		operation.Output = canonicalUnifiedOutput(operation.Output)
+		operation.Output = canonicalUnifiedJSON(operation.Output)
 		bindings := make(map[string]sdkUnifiedBindingDoc, len(operation.Bindings))
 		for target, binding := range operation.Bindings {
 			binding.Operation = strings.TrimSpace(binding.Operation)
 			binding.Service = strings.TrimSpace(binding.Service)
 			binding.DependsOn = canonicalUnifiedDependencies(binding.DependsOn)
 			binding.Input = canonicalUnifiedJSON(binding.Input)
-			binding.Output = canonicalUnifiedOutput(binding.Output)
+			binding.Output = canonicalUnifiedJSON(binding.Output)
 			binding.Rollback = canonicalUnifiedRollback(binding.Rollback)
 			bindings[target] = binding
 		}
@@ -465,17 +449,6 @@ func canonicalUnifiedRollback(rollback *sdkUnifiedRollbackDoc) *sdkUnifiedRollba
 	copy := *rollback
 	copy.Operation = strings.TrimSpace(copy.Operation)
 	copy.Input = canonicalUnifiedJSON(copy.Input)
-	return &copy
-}
-
-// canonicalUnifiedOutput normalizes SDK Unified configuration ordering and bytes so hashes are reproducible.
-func canonicalUnifiedOutput(output *sdkUnifiedOutputDoc) *sdkUnifiedOutputDoc {
-	if output == nil {
-		return nil
-	}
-	copy := *output
-	copy.Schema = canonicalUnifiedJSON(copy.Schema)
-	copy.Mapping = canonicalUnifiedJSON(copy.Mapping)
 	return &copy
 }
 

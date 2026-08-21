@@ -319,6 +319,7 @@ type AuthConfig struct {
 	ExtraAuthParams         map[string]string             `json:"extra_auth_params,omitempty"`
 	ExtraTokenParams        map[string]string             `json:"extra_token_params,omitempty"`
 	RefreshTokenRotates     bool                          `json:"refresh_token_rotates,omitempty"`
+	RefreshTokenRequired    bool                          `json:"refresh_token_required,omitempty"`
 	OAuth2Flows             OAuth2Flows                   `json:"oauth2_flows,omitempty"`
 	Strategy                *AuthRuntimeStrategy          `json:"strategy,omitempty"`
 	PolicyProvenance        map[string]string             `json:"policy_provenance,omitempty"`

@@ -321,15 +321,19 @@ func compileSDKUnifiedRollback(request sdkUnifiedBindingRequest, match store.Ser
 
 // compileSDKUnifiedOutput pairs one canonical schema with its private mapping,
 // or leaves output provider-specific when no root projection is declared.
-func compileSDKUnifiedOutput(output *sdkUnifiedOutputDoc, allowedTargets []string) (*unified.OutputDefinition, error) {
-	if output == nil {
+func compileSDKUnifiedOutput(output json.RawMessage, allowedTargets []string) (*unified.OutputDefinition, error) {
+	if len(output) == 0 {
 		return nil, nil
 	}
-	mapping, err := compileSDKUnifiedDynamicValue(output.Mapping, allowedTargets)
+	schema, source, err := compileSDKUnifiedOutputDocument(output, allowedTargets)
+	if err != nil {
+		return nil, unifiedCompileError("output_definition_invalid")
+	}
+	mapping, err := compileSDKUnifiedDynamicValue(source.raw, source.allowedTargets)
 	if err != nil || mapping == nil {
 		return nil, unifiedCompileError("output_mapping_invalid")
 	}
-	return &unified.OutputDefinition{Schema: canonicalUnifiedJSON(output.Schema), Mapping: mapping}, nil
+	return &unified.OutputDefinition{Schema: schema, Mapping: mapping}, nil
 }
 
 // compileSDKUnifiedDynamicValue converts strict JSON into bounded bytecode and
