@@ -1,0 +1,1206 @@
+{
+  "call_count": 83,
+  "document_count": 100,
+  "calls": [
+    {
+      "endpoint": "registry",
+      "file": "app/components/SchemaViewer.tsx",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/hooks/useEndpointSearch.ts",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/hooks/useEndpointSearch.ts",
+      "call": 2,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/hooks/useResourceLoader.ts",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/hooks/useResourceLoader.ts",
+      "call": 2,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 2,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 3,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 4,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 5,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 6,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 7,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 8,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 9,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 10,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 11,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 12,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 13,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 14,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 15,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 16,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 17,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 18,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 19,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 20,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 21,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 22,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/api.ts",
+      "call": 23,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/app-builder.ts",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/app-builder.ts",
+      "call": 2,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 2,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 3,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 4,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 5,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 6,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 7,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 8,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 9,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 10,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 11,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 12,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/current-actor-access.ts",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 2,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 3,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 4,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 5,
+      "document_count": 2
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 6,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 7,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 8,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 9,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 10,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 2,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 3,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 4,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 5,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 6,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 7,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 8,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 9,
+      "document_count": 14
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 10,
+      "document_count": 2
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations._index.tsx",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations.$id.tsx",
+      "call": 1,
+      "document_count": 2
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations.$id.tsx",
+      "call": 2,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations.$id.tsx",
+      "call": 3,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations.$id.tsx",
+      "call": 4,
+      "document_count": 2
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations.builder.tsx",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations.builder.tsx",
+      "call": 2,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations.builder.tsx",
+      "call": 3,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations.builder.tsx",
+      "call": 4,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations.builder.tsx",
+      "call": 5,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.builder.tsx",
+      "call": 6,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.mcp_.$id.analytics.tsx",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.mcp.tsx",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.mcp.tsx",
+      "call": 2,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.mcp.tsx",
+      "call": 3,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.mcp.tsx",
+      "call": 4,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.mcp.tsx",
+      "call": 5,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.sdks._index.tsx",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.sdks.$id.tsx",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.sdks.$id.tsx",
+      "call": 2,
+      "document_count": 1
+    }
+  ],
+  "documents": [
+    {
+      "endpoint": "registry",
+      "file": "app/components/SchemaViewer.tsx",
+      "call": 1,
+      "variant": 1,
+      "document": "\n        query GetServiceComponent($serviceId: String!, $name: String!) {\n          getServiceComponent(serviceId: $serviceId, name: $name) { id name schema }\n        }\n      "
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/hooks/useEndpointSearch.ts",
+      "call": 1,
+      "variant": 1,
+      "document": "\n        query($serviceId: String!, $version: String!, $q: String!, $limit: Int, $offset: Int) {\n          searchEndpoints(serviceId: $serviceId, version: $version, q: $q, limit: $limit, offset: $offset) {\n            id service_id name description version status method path deprecated\n          }\n        }\n      "
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/hooks/useEndpointSearch.ts",
+      "call": 2,
+      "variant": 1,
+      "document": "\n        query($serviceId: String!, $version: String!, $q: String!, $limit: Int, $offset: Int) {\n          searchEndpoints(serviceId: $serviceId, version: $version, q: $q, limit: $limit, offset: $offset) {\n            id service_id name description version status method path deprecated\n          }\n        }\n      "
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/hooks/useResourceLoader.ts",
+      "call": 1,
+      "variant": 1,
+      "document": "\n  query($resourceId: String!, $serviceId: String!, $serviceVersionId: String!, $limit: Int, $offset: Int) {\n    resourceIntegrations(resourceId: $resourceId, serviceId: $serviceId, service_version_id: $serviceVersionId, limit: $limit, offset: $offset) {\n      id service_id name description version status method path deprecated\n    }\n  }\n"
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/hooks/useResourceLoader.ts",
+      "call": 2,
+      "variant": 1,
+      "document": "\n  query($resourceId: String!, $serviceId: String!, $serviceVersionId: String!, $limit: Int, $offset: Int) {\n    resourceIntegrations(resourceId: $resourceId, serviceId: $serviceId, service_version_id: $serviceVersionId, limit: $limit, offset: $offset) {\n      id service_id name description version status method path deprecated\n    }\n  }\n"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 1,
+      "variant": 1,
+      "document": "query {\n            workspaceServices {\n              id\n              service_id\n              service_version_id\n              version\n              service_name\n              service_slug\n              added_by\n              created_at\n              enabled_versions { id service_version_id version status created_at enabled_at }\n              auth_options { id label auth_type credential_type key_name key_prefix required_fields supports_connected_users }\n            }\n          }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 2,
+      "variant": 1,
+      "document": "query WorkspaceServicePage($limit: Int, $offset: Int, $names: [String]) {\n            workspaceServicePage(limit: $limit, offset: $offset, names: $names) {\n              total page limit data {\n                id\n                service_id\n                service_version_id\n                version\n                service_name\n                service_slug\n                added_by\n                created_at\n                enabled_versions { id service_version_id version status created_at enabled_at }\n                auth_options { id label auth_type credential_type key_name key_prefix required_fields supports_connected_users }\n              }\n            }\n          }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 3,
+      "variant": 1,
+      "document": "query WebhookEvents($serviceId: String!, $eventName: String, $limit: Int, $offset: Int, $startDate: String, $endDate: String) {\n            webhookEvents(service_id: $serviceId, event_name: $eventName, limit: $limit, offset: $offset, start_date: $startDate, end_date: $endDate) {\n              total\n              items {\n                id\n                account_id\n                service_id\n                msg_id\n                event_name\n                status\n                delivery_status\n                verification_status\n                environment\n                latency_ms\n                retry_count\n                credits_consumed\n                sdk_record_id\n                error_reason\n                payload_size\n                created_at\n              }\n            }\n          }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 4,
+      "variant": 1,
+      "document": "query WebhookAnalytics($serviceId: String!, $eventName: String, $startDate: String, $endDate: String) {\n            webhookAnalytics(service_id: $serviceId, event_name: $eventName, start_date: $startDate, end_date: $endDate) {\n              total_ingested\n              total_delivered\n              total_rejected\n              total_failed\n            }\n          }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 5,
+      "variant": 1,
+      "document": "query EngineExecutionEvents($serviceId: String!, $transport: String, $direction: String, $status: String, $limit: Int, $offset: Int, $startDate: String, $endDate: String) {\n            engineExecutionEvents(service_id: $serviceId, transport: $transport, direction: $direction, status: $status, limit: $limit, offset: $offset, start_date: $startDate, end_date: $endDate) {\n              total\n              items {\n                \n  id\n  trace_id\n  span_id\n  app_family_id\n  app_id\n  app_version\n  app_kind\n  transport\n  provider_protocol\n  direction\n  service_id\n  service_version_id\n  service_name\n  service_slug\n  service_version\n  operation_id\n  webhook_id\n  operation\n  event_name\n  http_method\n  request_path\n  environment\n  environment_source\n  provider_host\n  provider_http_status\n  provider_status_class\n  status\n  failure_reason\n  failure_category\n  failure_code\n  latency_ms\n  provider_latency_ms\n  attempt_count\n  auth_scheme_names\n  auth_scheme_types\n  auth_scheme_count\n  auth_selection_outcome\n  pagination_type\n  pagination_page_count\n  pagination_item_count\n  pagination_byte_count\n  pagination_stop_reason\n  rate_limit_decision\n  rate_limit_policy_count\n  rate_limit_scope_kinds\n  rate_limit_units\n  rate_limit_unit_totals\n  rate_limit_retry_outcome\n  rate_limit_header_outcome\n  request_bytes\n  response_bytes\n  verification_status\n  delivery_status\n  idempotency_replayed\n  started_at\n  ended_at\n  timings { name duration_ms }\n\n              }\n            }\n          }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 6,
+      "variant": 1,
+      "document": "query AppExecutionEvents($appId: String!, $includeAllVersions: Boolean, $transport: String, $direction: String, $status: String, $limit: Int, $offset: Int, $startDate: String, $endDate: String) {\n            appExecutionEvents(app_id: $appId, include_all_versions: $includeAllVersions, transport: $transport, direction: $direction, status: $status, limit: $limit, offset: $offset, start_date: $startDate, end_date: $endDate) {\n              total\n              items {\n                \n  id\n  trace_id\n  span_id\n  app_family_id\n  app_id\n  app_version\n  app_kind\n  transport\n  provider_protocol\n  direction\n  service_id\n  service_version_id\n  service_name\n  service_slug\n  service_version\n  operation_id\n  webhook_id\n  operation\n  event_name\n  http_method\n  request_path\n  environment\n  environment_source\n  provider_host\n  provider_http_status\n  provider_status_class\n  status\n  failure_reason\n  failure_category\n  failure_code\n  latency_ms\n  provider_latency_ms\n  attempt_count\n  auth_scheme_names\n  auth_scheme_types\n  auth_scheme_count\n  auth_selection_outcome\n  pagination_type\n  pagination_page_count\n  pagination_item_count\n  pagination_byte_count\n  pagination_stop_reason\n  rate_limit_decision\n  rate_limit_policy_count\n  rate_limit_scope_kinds\n  rate_limit_units\n  rate_limit_unit_totals\n  rate_limit_retry_outcome\n  rate_limit_header_outcome\n  request_bytes\n  response_bytes\n  verification_status\n  delivery_status\n  idempotency_replayed\n  started_at\n  ended_at\n  timings { name duration_ms }\n\n              }\n            }\n          }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 7,
+      "variant": 1,
+      "document": "query AppExecutionAnalytics($appId: String!, $includeAllVersions: Boolean, $transport: String, $direction: String, $status: String, $startDate: String, $endDate: String) {\n            appExecutionAnalytics(app_id: $appId, include_all_versions: $includeAllVersions, transport: $transport, direction: $direction, status: $status, start_date: $startDate, end_date: $endDate) {\n              total_calls\n              successful_calls\n              failed_calls\n              average_latency_ms\n              median_latency_ms\n              p95_latency_ms\n              by_service { key label total_calls failed_calls inbound_calls p95_latency_ms }\n            }\n          }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 8,
+      "variant": 1,
+      "document": "query EngineExecutionAnalytics($serviceId: String!, $transport: String, $direction: String, $status: String, $startDate: String, $endDate: String) {\n            engineExecutionAnalytics(service_id: $serviceId, transport: $transport, direction: $direction, status: $status, start_date: $startDate, end_date: $endDate) {\n              total_calls\n              successful_calls\n              failed_calls\n              average_latency_ms\n              median_latency_ms\n              p95_latency_ms\n            }\n          }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 9,
+      "variant": 1,
+      "document": "query WorkspaceExecutionAnalytics($startDate: String, $endDate: String) {\n            workspaceExecutionAnalytics(start_date: $startDate, end_date: $endDate) {\n              total_calls successful_calls failed_calls inbound_calls average_latency_ms median_latency_ms p95_latency_ms\n              by_service { key label total_calls failed_calls inbound_calls p95_latency_ms }\n              most_used_sdk { key label total_calls failed_calls inbound_calls p95_latency_ms }\n              most_used_service { key label total_calls failed_calls inbound_calls p95_latency_ms }\n              most_failed_service { key label total_calls failed_calls inbound_calls p95_latency_ms }\n              most_used_bucket { key label total_calls failed_calls inbound_calls p95_latency_ms }\n            }\n          }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 10,
+      "variant": 1,
+      "document": "query PublicServiceInsights($serviceId: String!, $startDate: String!, $endDate: String!, $granularity: String, $serviceVersionId: String, $registryObjectKind: String, $registryObjectId: String, $transport: String) {\n            publicServiceInsights(service_id: $serviceId, start_date: $startDate, end_date: $endDate, granularity: $granularity, service_version_id: $serviceVersionId, registry_object_kind: $registryObjectKind, registry_object_id: $registryObjectId, transport: $transport) {\n              source generated_at data_through partial_data total_calls successful_calls failed_calls p50_latency_ms p95_latency_ms\n              time_series { key label total_calls failed_calls p50_latency_ms p95_latency_ms }\n              top_operations { key label total_calls failed_calls p50_latency_ms p95_latency_ms }\n              version_breakdown { key label total_calls failed_calls p50_latency_ms p95_latency_ms }\n              transport_breakdown { key label total_calls failed_calls p50_latency_ms p95_latency_ms }\n            }\n          }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 11,
+      "variant": 1,
+      "document": "query ServiceConsumers($serviceId: String!) {\n            serviceConsumers(service_id: $serviceId) {\n              id\n              name\n              version\n              kind\n              active\n              service_version_id\n              select_all\n              operation_count\n              webhook_count\n              created_at\n            }\n          }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 12,
+      "variant": 1,
+      "document": "mutation($bucketId: String!, $secrets: [SecretUpsertInput]!) {\n          upsertSecrets(bucket_id: $bucketId, secrets: $secrets)\n        }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 13,
+      "variant": 1,
+      "document": "mutation($bucketId: String!, $serviceId: String!, $keyNames: [String!]!) {\n          deleteSecrets(bucket_id: $bucketId, service_id: $serviceId, key_names: $keyNames)\n        }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 14,
+      "variant": 1,
+      "document": "query($connectionId: String!) {\n            connectionResources(connection_id: $connectionId) {\n              id connection_id service_id provider_resource_id resource_type\n              display_name base_url scopes is_default created_at updated_at\n            }\n          }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 15,
+      "variant": 1,
+      "document": "mutation($connectionId: String!, $resourceId: String!) {\n            setDefaultConnectionResource(connection_id: $connectionId, resource_id: $resourceId) {\n              id connection_id service_id provider_resource_id resource_type\n              display_name base_url scopes is_default created_at updated_at\n            }\n          }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 16,
+      "variant": 1,
+      "document": "mutation($connectionId: String!) {\n            rediscoverConnectionResources(connection_id: $connectionId) {\n              id connection_id service_id provider_resource_id resource_type\n              display_name base_url scopes is_default created_at updated_at\n            }\n          }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 17,
+      "variant": 1,
+      "document": "query($serviceId: String!, $serviceVersionId: String!, $authType: String!) {\n            workspaceConnectionProfile(\n              service_id: $serviceId,\n              service_version_id: $serviceVersionId,\n              auth_type: $authType\n            ) {\n              \n  service_id\n  service_version_id\n  auth_type\n  registry_profile_id\n  profile_revision\n  profile_hash\n  provenance\n  source\n  has_workspace_override\n  is_public\n  profile\n  bindings {\n    id\n    source_kind\n    literal_value\n    source_path\n    target_location\n    target_name\n    operation_ids\n    mode\n    provenance\n    source_profile_revision\n  }\n\n            }\n          }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 18,
+      "variant": 1,
+      "document": "mutation($serviceId: String!, $serviceVersionId: String!, $version: String!, $authType: String!, $profile: EngineJSON!) {\n            setWorkspaceConnectionProfile(\n              service_id: $serviceId,\n              service_version_id: $serviceVersionId, version: $version,\n              auth_type: $authType, profile: $profile\n            ) {\n              \n  service_id\n  service_version_id\n  auth_type\n  registry_profile_id\n  profile_revision\n  profile_hash\n  provenance\n  source\n  has_workspace_override\n  is_public\n  profile\n  bindings {\n    id\n    source_kind\n    literal_value\n    source_path\n    target_location\n    target_name\n    operation_ids\n    mode\n    provenance\n    source_profile_revision\n  }\n\n            }\n          }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 19,
+      "variant": 1,
+      "document": "mutation($serviceId: String!, $serviceVersionId: String!, $authType: String!) {\n            resetWorkspaceConnectionProfile(\n              service_id: $serviceId,\n              service_version_id: $serviceVersionId, auth_type: $authType\n            ) {\n              \n  service_id\n  service_version_id\n  auth_type\n  registry_profile_id\n  profile_revision\n  profile_hash\n  provenance\n  source\n  has_workspace_override\n  is_public\n  profile\n  bindings {\n    id\n    source_kind\n    literal_value\n    source_path\n    target_location\n    target_name\n    operation_ids\n    mode\n    provenance\n    source_profile_revision\n  }\n\n            }\n          }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 20,
+      "variant": 1,
+      "document": "query {\n            workspaceNotifications {\n              items {\n                id source type severity status service_id version config_key\n                message integration_object_id webhook_object_id detected_at\n                diff { field old_value new_value severity description }\n              }\n              warnings\n              total_count\n              pending_count\n            }\n          }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 21,
+      "variant": 1,
+      "document": "query($page: Int!, $limit: Int!, $unreadOnly: Boolean!, $readOnly: Boolean!) {\n            workspaceNotifications(page: $page, limit: $limit, unread_only: $unreadOnly, read_only: $readOnly) {\n              items {\n                id source type severity status service_id version config_key\n                message integration_object_id webhook_object_id detected_at\n                diff { field old_value new_value severity description }\n              }\n              warnings\n              total_count\n              pending_count\n            }\n          }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 22,
+      "variant": 1,
+      "document": "mutation($id: String!, $status: String!) {\n            updateWorkspaceNotificationStatus(id: $id, status: $status) {\n              id source type severity status service_id version config_key\n              message integration_object_id webhook_object_id detected_at\n              diff { field old_value new_value severity description }\n            }\n          }"
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/api.ts",
+      "call": 23,
+      "variant": 1,
+      "document": "query($serviceIds: [String!]!) {\n                servicesByIds(serviceIds: $serviceIds) {\n                  id name slug\n                }\n              }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/app-builder.ts",
+      "call": 1,
+      "variant": 1,
+      "document": "\n    query AppOwningTeams($search: String, $limit: Int!, $offset: Int!) {\n      appOwningTeams(search: $search, limit: $limit, offset: $offset) {\n        total\n        items { id name slug }\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/app-builder.ts",
+      "call": 2,
+      "variant": 1,
+      "document": "\n    query AppBuildSelectors($ownerTeamId: ID, $resourceType: AppSelectorResourceType!, $search: String, $limit: Int!, $offset: Int!) {\n      appBuildSelectors(owner_team_id: $ownerTeamId, resource_type: $resourceType, search: $search, limit: $limit, offset: $offset) {\n        total\n        items {\n          resource_type resource_id display_name\n        }\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 1,
+      "variant": 1,
+      "document": "query($limit: Int!, $offset: Int!) {\n        bucketSummaryPage(limit: $limit, offset: $offset) {\n          total\n          items { id name is_default secret_count value_count connected_user_count created_at updated_at }\n        }\n      }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 2,
+      "variant": 1,
+      "document": "query($bucketId: String!) {\n        bucketSummary(bucket_id: $bucketId) { id name is_default secret_count value_count connected_user_count created_at updated_at }\n      }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 3,
+      "variant": 1,
+      "document": "query($bucketId: String!, $limit: Int!, $offset: Int!) {\n        bucketValuePage(bucket_id: $bucketId, limit: $limit, offset: $offset) {\n          total\n          items { id bucket_id service_id key_name location value created_at updated_at }\n        }\n      }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 4,
+      "variant": 1,
+      "document": "query($bucketId: String!, $limit: Int!, $offset: Int!) {\n        secretMetaPage(bucket_id: $bucketId, limit: $limit, offset: $offset) {\n          total\n          items { id bucket_id service_id key_name key_names credential_type last_used_at expires_at created_at updated_at }\n        }\n      }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 5,
+      "variant": 1,
+      "document": "query BucketConnections($bucketId: String!, $limit: Int!, $offset: Int!, $serviceId: String) {\n        authConnectionPage(bucket_id: $bucketId, service_id: $serviceId, limit: $limit, offset: $offset) {\n          total\n          items { id bucket_id service_id end_user_ref auth_type token_type scopes scope_source issuer subject expires_at refresh_token_expires_at last_used_at refresh_state last_failure_code last_failure_at last_failure_trace_id created_at updated_at }\n        }\n      }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 6,
+      "variant": 1,
+      "document": "query BucketConnectionServices($bucketId: String!, $search: String, $limit: Int!, $offset: Int!) {\n        connectionServicePage: bucketServicePage(bucket_id: $bucketId, search: $search, limit: $limit, offset: $offset) {\n          total\n          items { service_id service_name secret_count value_count connect_config_count connected_user_count }\n        }\n      }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 7,
+      "variant": 1,
+      "document": "query BucketConnectSummary($bucketId: String!) {\n        connectSummary: bucketConnectSummary(bucket_id: $bucketId) {\n          bucket_id connect_config_count connected_user_count\n        }\n      }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 8,
+      "variant": 1,
+      "document": "query($bucketId: String!, $limit: Int!, $offset: Int!) {\n        bucketSDKPage(bucket_id: $bucketId, limit: $limit, offset: $offset) {\n          total\n          items { id name kind active created_at }\n        }\n      }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 9,
+      "variant": 1,
+      "document": "query($bucketId: String!, $limit: Int!, $offset: Int!, $search: String) {\n        bucketServicePage(bucket_id: $bucketId, search: $search, limit: $limit, offset: $offset) {\n          total\n          items { service_id service_name secret_count value_count connect_config_count connected_user_count }\n        }\n      }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 10,
+      "variant": 1,
+      "document": "query {\n        workspaceServices {\n          id\n          workspace_id\n          service_id\n          service_name\n          service_slug\n          version\n          service_version_id\n          added_by\n          created_at\n          enabled_versions { id service_version_id version status created_at enabled_at }\n          auth_options { id label auth_type credential_type key_name key_prefix required_fields supports_connected_users }\n        }\n      }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 11,
+      "variant": 1,
+      "document": "query($appFamilyId: String!) {\n      buckets: bucketSummaries { id name is_default created_at updated_at }\n      sdkBuckets(app_family_id: $appFamilyId) { id name is_default created_at updated_at }\n    }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/buckets.ts",
+      "call": 12,
+      "variant": 1,
+      "document": "mutation($bucketId: String!, $connectionId: String!) {\n      deleteAuthConnection(bucket_id: $bucketId, connection_id: $connectionId)\n    }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/current-actor-access.ts",
+      "call": 1,
+      "variant": 1,
+      "document": "query CurrentActorAccess {\n  currentActorAccess {\n    subject_id\n    workspace_id\n    kind\n    authorization_revision\n    grants { permission resource_type resource_id }\n  }\n}"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 1,
+      "variant": 1,
+      "document": "query Users($search: String!, $limit: Int!, $offset: Int!, $includeSuspended: Boolean!) {\n    users(search: $search, limit: $limit, offset: $offset, include_suspended: $includeSuspended) {\n      total items { id email display_name status owner_protected created_at updated_at }\n    }\n  }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 2,
+      "variant": 1,
+      "document": "query User($id: ID!) { user(id: $id) { id email display_name status owner_protected created_at updated_at\n  memberships_truncated credentials_truncated\n  memberships { team_id team_name team_slug membership_role created_at }\n  credentials { id name key_prefix expires_at last_used_at revoked_at created_at }\n } }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 3,
+      "variant": 1,
+      "document": "mutation CreateUser($input: CreateUserInput!) {\n    createUser(input: $input) { user { id email display_name status owner_protected created_at updated_at\n  memberships_truncated credentials_truncated\n  memberships { team_id team_name team_slug membership_role created_at }\n  credentials { id name key_prefix expires_at last_used_at revoked_at created_at }\n } authorization_revision changed }\n  }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 4,
+      "variant": 1,
+      "document": "mutation UpdateUser($id: ID!, $input: UpdateUserInput!) {\n    updateUser(id: $id, input: $input) { user { id email display_name status owner_protected created_at updated_at\n  memberships_truncated credentials_truncated\n  memberships { team_id team_name team_slug membership_role created_at }\n  credentials { id name key_prefix expires_at last_used_at revoked_at created_at }\n } authorization_revision changed }\n  }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 5,
+      "variant": 1,
+      "document": "mutation SuspendUser($id: ID!) {\n    suspendUser(id: $id) { user { id email display_name status owner_protected created_at updated_at\n  memberships_truncated credentials_truncated\n  memberships { team_id team_name team_slug membership_role created_at }\n  credentials { id name key_prefix expires_at last_used_at revoked_at created_at }\n } authorization_revision changed }\n  }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 5,
+      "variant": 2,
+      "document": "mutation ReactivateUser($id: ID!) {\n    reactivateUser(id: $id) { user { id email display_name status owner_protected created_at updated_at\n  memberships_truncated credentials_truncated\n  memberships { team_id team_name team_slug membership_role created_at }\n  credentials { id name key_prefix expires_at last_used_at revoked_at created_at }\n } authorization_revision changed }\n  }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 6,
+      "variant": 1,
+      "document": "mutation IssueUserCredential($userId: ID!, $name: String!) {\n    issueUserCredential(user_id: $userId, name: $name) {\n      credential { id name key_prefix expires_at last_used_at revoked_at created_at }\n      secret authorization_revision changed\n    }\n  }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 7,
+      "variant": 1,
+      "document": "mutation RevokeUserCredential($userId: ID!, $credentialId: ID!) {\n    revokeUserCredential(user_id: $userId, credential_id: $credentialId) {\n      credential { id name key_prefix expires_at last_used_at revoked_at created_at }\n      authorization_revision changed\n    }\n  }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 8,
+      "variant": 1,
+      "document": "query TeamMembers($teamId: ID!, $limit: Int!, $offset: Int!) {\n    teamMembers(team_id: $teamId, limit: $limit, offset: $offset) {\n      total items { user_id email display_name status membership_role created_at }\n    }\n  }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 9,
+      "variant": 1,
+      "document": "mutation AddTeamMember($teamId: ID!, $email: String!, $role: TeamMembershipRole!) {\n    addTeamMember(team_id: $teamId, email: $email, membership_role: $role) {\n      membership { user_id email display_name status membership_role created_at }\n      authorization_revision changed\n    }\n  }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/people.ts",
+      "call": 10,
+      "variant": 1,
+      "document": "mutation RemoveTeamMember($teamId: ID!, $userId: ID!) {\n    removeTeamMember(team_id: $teamId, user_id: $userId) {\n      membership { user_id email display_name status membership_role created_at }\n      authorization_revision changed\n    }\n  }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 1,
+      "variant": 1,
+      "document": "\n    query Teams($search: String!, $limit: Int!, $offset: Int!, $includeArchived: Boolean!) {\n      teams(search: $search, limit: $limit, offset: $offset, include_archived: $includeArchived) {\n        total\n        items { \n  id name slug description status created_at updated_at\n  bindings {\n    id team_id role_slug role_display_name resource_type resource_id\n    resource_display_name created_at\n  }\n }\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 2,
+      "variant": 1,
+      "document": "\n    query TeamAccessEditor($id: ID!) {\n      team(id: $id) { \n  id name slug description status created_at updated_at\n  bindings {\n    id team_id role_slug role_display_name resource_type resource_id\n    resource_display_name created_at\n  }\n }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 3,
+      "variant": 1,
+      "document": "\n    query TeamAccessServices($limit: Int!, $offset: Int!) {\n      workspaceServicePage(limit: $limit, offset: $offset) {\n        total\n        data { service_id service_name }\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 4,
+      "variant": 1,
+      "document": "\n    query TeamAccessBuckets($limit: Int!, $offset: Int!) {\n      bucketSummaryPage(limit: $limit, offset: $offset) {\n        total\n        items { id name }\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 5,
+      "variant": 1,
+      "document": "\n    mutation CreateTeam($input: CreateTeamInput!) {\n      createTeam(input: $input) {\n        team { \n  id name slug description status created_at updated_at\n  bindings {\n    id team_id role_slug role_display_name resource_type resource_id\n    resource_display_name created_at\n  }\n }\n        authorization_revision changed\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 6,
+      "variant": 1,
+      "document": "\n    mutation UpdateTeam($id: ID!, $input: UpdateTeamInput!) {\n      updateTeam(id: $id, input: $input) {\n        team { \n  id name slug description status created_at updated_at\n  bindings {\n    id team_id role_slug role_display_name resource_type resource_id\n    resource_display_name created_at\n  }\n }\n        authorization_revision changed\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 7,
+      "variant": 1,
+      "document": "\n    mutation ArchiveTeam($id: ID!) {\n      archiveTeam(id: $id) {\n        team { \n  id name slug description status created_at updated_at\n  bindings {\n    id team_id role_slug role_display_name resource_type resource_id\n    resource_display_name created_at\n  }\n }\n        authorization_revision changed\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 8,
+      "variant": 1,
+      "document": "\n    mutation SetTeamWorkspaceRole($teamId: ID!, $role: TeamWorkspaceRole) {\n      setTeamWorkspaceRole(team_id: $teamId, role: $role) {\n        binding { id team_id role_slug role_display_name resource_type resource_id resource_display_name created_at }\n        authorization_revision changed\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 9,
+      "variant": 1,
+      "document": "\n    query Teams($search: String!, $limit: Int!, $offset: Int!, $includeArchived: Boolean!) {\n      teams(search: $search, limit: $limit, offset: $offset, include_archived: $includeArchived) {\n        total\n        items { \n  id name slug description status created_at updated_at\n  bindings {\n    id team_id role_slug role_display_name resource_type resource_id\n    resource_display_name created_at\n  }\n }\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 9,
+      "variant": 2,
+      "document": "\n    query TeamAccessEditor($id: ID!) {\n      team(id: $id) { \n  id name slug description status created_at updated_at\n  bindings {\n    id team_id role_slug role_display_name resource_type resource_id\n    resource_display_name created_at\n  }\n }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 9,
+      "variant": 3,
+      "document": "\n    query TeamAccessServices($limit: Int!, $offset: Int!) {\n      workspaceServicePage(limit: $limit, offset: $offset) {\n        total\n        data { service_id service_name }\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 9,
+      "variant": 4,
+      "document": "\n    query TeamAccessBuckets($limit: Int!, $offset: Int!) {\n      bucketSummaryPage(limit: $limit, offset: $offset) {\n        total\n        items { id name }\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 9,
+      "variant": 5,
+      "document": "\n    mutation CreateTeam($input: CreateTeamInput!) {\n      createTeam(input: $input) {\n        team { \n  id name slug description status created_at updated_at\n  bindings {\n    id team_id role_slug role_display_name resource_type resource_id\n    resource_display_name created_at\n  }\n }\n        authorization_revision changed\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 9,
+      "variant": 6,
+      "document": "\n    mutation UpdateTeam($id: ID!, $input: UpdateTeamInput!) {\n      updateTeam(id: $id, input: $input) {\n        team { \n  id name slug description status created_at updated_at\n  bindings {\n    id team_id role_slug role_display_name resource_type resource_id\n    resource_display_name created_at\n  }\n }\n        authorization_revision changed\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 9,
+      "variant": 7,
+      "document": "\n    mutation ArchiveTeam($id: ID!) {\n      archiveTeam(id: $id) {\n        team { \n  id name slug description status created_at updated_at\n  bindings {\n    id team_id role_slug role_display_name resource_type resource_id\n    resource_display_name created_at\n  }\n }\n        authorization_revision changed\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 9,
+      "variant": 8,
+      "document": "\n    mutation SetTeamWorkspaceRole($teamId: ID!, $role: TeamWorkspaceRole) {\n      setTeamWorkspaceRole(team_id: $teamId, role: $role) {\n        binding { id team_id role_slug role_display_name resource_type resource_id resource_display_name created_at }\n        authorization_revision changed\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 9,
+      "variant": 9,
+      "document": "\n    mutation GrantTeamServiceAccess($teamId: ID!, $resourceId: ID!, $level: TeamAccessLevel!) {\n      grantTeamServiceAccess(team_id: $teamId, service_id: $resourceId, level: $level) {\n        binding { id team_id role_slug role_display_name resource_type resource_id resource_display_name created_at }\n        authorization_revision changed\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 9,
+      "variant": 10,
+      "document": "\n    mutation RevokeTeamServiceAccess($teamId: ID!, $resourceId: ID!, $level: TeamAccessLevel!) {\n      revokeTeamServiceAccess(team_id: $teamId, service_id: $resourceId, level: $level) {\n        binding { id team_id role_slug role_display_name resource_type resource_id resource_display_name created_at }\n        authorization_revision changed\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 9,
+      "variant": 11,
+      "document": "\n    mutation GrantTeamBucketAccess($teamId: ID!, $resourceId: ID!, $level: TeamAccessLevel!) {\n      grantTeamBucketAccess(team_id: $teamId, bucket_id: $resourceId, level: $level) {\n        binding { id team_id role_slug role_display_name resource_type resource_id resource_display_name created_at }\n        authorization_revision changed\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 9,
+      "variant": 12,
+      "document": "\n    mutation RevokeTeamBucketAccess($teamId: ID!, $resourceId: ID!, $level: TeamAccessLevel!) {\n      revokeTeamBucketAccess(team_id: $teamId, bucket_id: $resourceId, level: $level) {\n        binding { id team_id role_slug role_display_name resource_type resource_id resource_display_name created_at }\n        authorization_revision changed\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 9,
+      "variant": 13,
+      "document": "\n    mutation GrantTeamAppAccess($teamId: ID!, $resourceId: ID!, $level: TeamAppAccessLevel!) {\n      grantTeamAppAccess(team_id: $teamId, app_family_id: $resourceId, level: $level) {\n        binding { id team_id role_slug role_display_name resource_type resource_id resource_display_name created_at }\n        authorization_revision changed\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 9,
+      "variant": 14,
+      "document": "\n    mutation RevokeTeamAppAccess($teamId: ID!, $resourceId: ID!, $level: TeamAppAccessLevel!) {\n      revokeTeamAppAccess(team_id: $teamId, app_family_id: $resourceId, level: $level) {\n        binding { id team_id role_slug role_display_name resource_type resource_id resource_display_name created_at }\n        authorization_revision changed\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 10,
+      "variant": 1,
+      "document": "\n    mutation GrantTeamAppAccess($teamId: ID!, $resourceId: ID!, $level: TeamAppAccessLevel!) {\n      grantTeamAppAccess(team_id: $teamId, app_family_id: $resourceId, level: $level) {\n        binding { id team_id role_slug role_display_name resource_type resource_id resource_display_name created_at }\n        authorization_revision changed\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/teams.ts",
+      "call": 10,
+      "variant": 2,
+      "document": "\n    mutation RevokeTeamAppAccess($teamId: ID!, $resourceId: ID!, $level: TeamAppAccessLevel!) {\n      revokeTeamAppAccess(team_id: $teamId, app_family_id: $resourceId, level: $level) {\n        binding { id team_id role_slug role_display_name resource_type resource_id resource_display_name created_at }\n        authorization_revision changed\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations._index.tsx",
+      "call": 1,
+      "variant": 1,
+      "document": "\n  query($q: String!) {\n    searchServices(q: $q) {\n      id name base_url servers { url description }\n      is_public is_owner slug provider { name handle } canonical_ref\n    }\n  }\n"
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations.$id.tsx",
+      "call": 1,
+      "variant": 1,
+      "document": "\n      query($id: String!, $version: String, $provider: String) {\n        service(id: $id, version: $version, provider: $provider) {\n          id name slug description base_url current_service_version servers { url description environment is_default }\n          is_public watch_for_drift created_at updated_at source_url import_method\n          import_warnings { id endpoint_id method path operation_id reasons recommendation source created_at }\n          auth_configs {\n            name type scheme basic_password_mode location key_name open_id_connect_url oauth2_metadata_url\n            deprecated token_endpoint_auth_method token_request_media_type pkce_required scopes_delimiter\n            extra_auth_params extra_token_params refresh_token_rotates oauth2_flows strategy policy_provenance\n          }\n          event_extraction_path\n          incoming_webhook_config { auth_type auth_location auth_key_name signature_header }\n          rate_limit { \n  version\n  policies {\n    name\n    mode\n    unit\n    identity { inputs { kind binding name } }\n    cost { default rules { operation cost } }\n    algorithm\n    fixed_window { limit duration_ms }\n    rolling_window { limit duration_ms }\n    token_bucket { capacity refill_units refill_interval_ms }\n    concurrency { limit }\n    response_signals {\n      limit { source name path }\n      remaining { source name path }\n      reset { signal { source name path } format }\n      cost { source name path }\n    }\n  }\n  cooldown {\n    statuses { min max }\n    headers { name formats max_delay_ms }\n  }\n }\n          retry_config { \n  version\n  rules {\n    predicates {\n      methods\n      operation_kinds\n      statuses { min max }\n      errors\n      body_replayability\n      idempotency_key { requirement header }\n      required_provider_headers\n    }\n    action {\n      max_attempts\n      max_elapsed_ms\n      backoff { strategy base_delay_ms max_delay_ms jitter_ms }\n      retry_after_headers { name formats max_delay_ms }\n    }\n  }\n }\n          default_headers provider { name handle } canonical_ref is_owner webhook_count endpoint_count\n          webhooks { id name description method request_body }\n          resources { id name endpointCount }\n        }\n        serviceVersions(serviceId: $id, provider: $provider) { id name is_public status created_at updated_at }\n      }\n    "
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations.$id.tsx",
+      "call": 1,
+      "variant": 2,
+      "document": "\n    query($id: String!, $version: String) {\n      service(id: $id, version: $version) {\n        id name slug description base_url current_service_version servers { url description environment is_default }\n        is_public watch_for_drift created_at updated_at source_url import_method\n        import_warnings { id endpoint_id method path operation_id reasons recommendation source created_at }\n        auth_configs {\n          name type scheme basic_password_mode location key_name open_id_connect_url oauth2_metadata_url\n          deprecated token_endpoint_auth_method token_request_media_type pkce_required scopes_delimiter\n          extra_auth_params extra_token_params refresh_token_rotates oauth2_flows strategy policy_provenance\n        }\n        event_extraction_path\n        incoming_webhook_config { auth_type auth_location auth_key_name signature_header }\n        rate_limit { \n  version\n  policies {\n    name\n    mode\n    unit\n    identity { inputs { kind binding name } }\n    cost { default rules { operation cost } }\n    algorithm\n    fixed_window { limit duration_ms }\n    rolling_window { limit duration_ms }\n    token_bucket { capacity refill_units refill_interval_ms }\n    concurrency { limit }\n    response_signals {\n      limit { source name path }\n      remaining { source name path }\n      reset { signal { source name path } format }\n      cost { source name path }\n    }\n  }\n  cooldown {\n    statuses { min max }\n    headers { name formats max_delay_ms }\n  }\n }\n        retry_config { \n  version\n  rules {\n    predicates {\n      methods\n      operation_kinds\n      statuses { min max }\n      errors\n      body_replayability\n      idempotency_key { requirement header }\n      required_provider_headers\n    }\n    action {\n      max_attempts\n      max_elapsed_ms\n      backoff { strategy base_delay_ms max_delay_ms jitter_ms }\n      retry_after_headers { name formats max_delay_ms }\n    }\n  }\n }\n        default_headers provider { name handle } canonical_ref is_owner webhook_count endpoint_count\n        webhooks { id name description method request_body }\n        resources { id name endpointCount }\n      }\n      serviceVersions(serviceId: $id) { id name is_public status created_at updated_at }\n    }\n  "
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations.$id.tsx",
+      "call": 2,
+      "variant": 1,
+      "document": "\n        query($serviceId: String!) {\n          driftSnapshots(serviceId: $serviceId) {\n            id\n            integration_object_id\n            detected_at\n            status\n            diff {\n              field\n              old_value\n              new_value\n              severity\n              description\n            }\n          }\n        }\n      "
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations.$id.tsx",
+      "call": 3,
+      "variant": 1,
+      "document": "\n        query($id: String!, $serviceId: String!, $serviceVersionId: String!) {\n          integration(id: $id, serviceId: $serviceId, service_version_id: $serviceVersionId) {\n            id\n            description\n            stable_key\n            normalized_path\n            provider_protocol\n            operation_kind\n            parameters {\n              name\n              in\n              required\n              type\n              description\n              path_encoding\n            }\n            request_content\n            responses\n            security_requirements { schemes { scheme scopes } server_selection }\n            pagination { version limits { max_pages max_items max_bytes max_duration_ms } }\n            graphql_query\n          }\n        }\n      "
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations.$id.tsx",
+      "call": 4,
+      "variant": 1,
+      "document": "\n      query($id: String!, $version: String, $provider: String) {\n        service(id: $id, version: $version, provider: $provider) {\n          id name slug description base_url current_service_version servers { url description environment is_default }\n          is_public watch_for_drift created_at updated_at source_url import_method\n          import_warnings { id endpoint_id method path operation_id reasons recommendation source created_at }\n          auth_configs {\n            name type scheme basic_password_mode location key_name open_id_connect_url oauth2_metadata_url\n            deprecated token_endpoint_auth_method token_request_media_type pkce_required scopes_delimiter\n            extra_auth_params extra_token_params refresh_token_rotates oauth2_flows strategy policy_provenance\n          }\n          event_extraction_path\n          incoming_webhook_config { auth_type auth_location auth_key_name signature_header }\n          rate_limit { \n  version\n  policies {\n    name\n    mode\n    unit\n    identity { inputs { kind binding name } }\n    cost { default rules { operation cost } }\n    algorithm\n    fixed_window { limit duration_ms }\n    rolling_window { limit duration_ms }\n    token_bucket { capacity refill_units refill_interval_ms }\n    concurrency { limit }\n    response_signals {\n      limit { source name path }\n      remaining { source name path }\n      reset { signal { source name path } format }\n      cost { source name path }\n    }\n  }\n  cooldown {\n    statuses { min max }\n    headers { name formats max_delay_ms }\n  }\n }\n          retry_config { \n  version\n  rules {\n    predicates {\n      methods\n      operation_kinds\n      statuses { min max }\n      errors\n      body_replayability\n      idempotency_key { requirement header }\n      required_provider_headers\n    }\n    action {\n      max_attempts\n      max_elapsed_ms\n      backoff { strategy base_delay_ms max_delay_ms jitter_ms }\n      retry_after_headers { name formats max_delay_ms }\n    }\n  }\n }\n          default_headers provider { name handle } canonical_ref is_owner webhook_count endpoint_count\n          webhooks { id name description method request_body }\n          resources { id name endpointCount }\n        }\n        serviceVersions(serviceId: $id, provider: $provider) { id name is_public status created_at updated_at }\n      }\n    "
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations.$id.tsx",
+      "call": 4,
+      "variant": 2,
+      "document": "\n    query($id: String!, $version: String) {\n      service(id: $id, version: $version) {\n        id name slug description base_url current_service_version servers { url description environment is_default }\n        is_public watch_for_drift created_at updated_at source_url import_method\n        import_warnings { id endpoint_id method path operation_id reasons recommendation source created_at }\n        auth_configs {\n          name type scheme basic_password_mode location key_name open_id_connect_url oauth2_metadata_url\n          deprecated token_endpoint_auth_method token_request_media_type pkce_required scopes_delimiter\n          extra_auth_params extra_token_params refresh_token_rotates oauth2_flows strategy policy_provenance\n        }\n        event_extraction_path\n        incoming_webhook_config { auth_type auth_location auth_key_name signature_header }\n        rate_limit { \n  version\n  policies {\n    name\n    mode\n    unit\n    identity { inputs { kind binding name } }\n    cost { default rules { operation cost } }\n    algorithm\n    fixed_window { limit duration_ms }\n    rolling_window { limit duration_ms }\n    token_bucket { capacity refill_units refill_interval_ms }\n    concurrency { limit }\n    response_signals {\n      limit { source name path }\n      remaining { source name path }\n      reset { signal { source name path } format }\n      cost { source name path }\n    }\n  }\n  cooldown {\n    statuses { min max }\n    headers { name formats max_delay_ms }\n  }\n }\n        retry_config { \n  version\n  rules {\n    predicates {\n      methods\n      operation_kinds\n      statuses { min max }\n      errors\n      body_replayability\n      idempotency_key { requirement header }\n      required_provider_headers\n    }\n    action {\n      max_attempts\n      max_elapsed_ms\n      backoff { strategy base_delay_ms max_delay_ms jitter_ms }\n      retry_after_headers { name formats max_delay_ms }\n    }\n  }\n }\n        default_headers provider { name handle } canonical_ref is_owner webhook_count endpoint_count\n        webhooks { id name description method request_body }\n        resources { id name endpointCount }\n      }\n      serviceVersions(serviceId: $id) { id name is_public status created_at updated_at }\n    }\n  "
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations.builder.tsx",
+      "call": 1,
+      "variant": 1,
+      "document": "\n    query($id: String!, $version: String!) {\n      service(id: $id, version: $version) {\n        current_service_version\n        resources { id name }\n        webhooks { id name description method }\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations.builder.tsx",
+      "call": 2,
+      "variant": 1,
+      "document": "\n    query AppBuilderServices($serviceIds: [String!]!) {\n      servicesByIds(serviceIds: $serviceIds) {\n        id name slug canonical_ref provider { name handle } description\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations.builder.tsx",
+      "call": 3,
+      "variant": 1,
+      "document": "\n  query($resourceId: String!, $serviceId: String!, $serviceVersionId: String!, $limit: Int, $offset: Int) {\n    resourceIntegrations(resourceId: $resourceId, serviceId: $serviceId, service_version_id: $serviceVersionId, limit: $limit, offset: $offset) {\n      id service_id name description version status method path deprecated deprecation_date\n    }\n  }\n"
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations.builder.tsx",
+      "call": 4,
+      "variant": 1,
+      "document": "\n        query($id: String!) {\n          service(id: $id) {\n            current_service_version\n            endpoint_count\n            webhook_count\n            event_extraction_path\n            incoming_webhook_config { auth_type }\n            resources { id name }\n            webhooks { id name description method }\n          }\n          serviceVersions(serviceId: $id) { id name header_value status }\n        }\n      "
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations.builder.tsx",
+      "call": 5,
+      "variant": 1,
+      "document": "\n  query($resourceId: String!, $serviceId: String!, $serviceVersionId: String!, $limit: Int, $offset: Int) {\n    resourceIntegrations(resourceId: $resourceId, serviceId: $serviceId, service_version_id: $serviceVersionId, limit: $limit, offset: $offset) {\n      id service_id name description version status method path deprecated deprecation_date\n    }\n  }\n"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.builder.tsx",
+      "call": 6,
+      "variant": 1,
+      "document": "query($search: String!, $version: String!) { apps(kind: \"sdk\", search: $search, version: $version, limit: 1, offset: 0) { items { name version } } }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.mcp_.$id.analytics.tsx",
+      "call": 1,
+      "variant": 1,
+      "document": "\n      query($id: String!) {\n        mcpAnalytics(app_id: $id) {\n          total_requests\n          failed_requests\n          average_latency\n          active_agents\n          tool_usage {\n            tool_name\n            count\n            failed\n            average_latency\n          }\n          service_usage {\n            service_name\n            count\n            failed\n            average_latency\n          }\n          recent_sessions {\n            id\n            session_id\n            started_at\n            ended_at\n          }\n        }\n      }\n    "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.mcp.tsx",
+      "call": 1,
+      "variant": 1,
+      "document": "\n      query($limit: Int!, $offset: Int!) {\n        apps(kind: \"mcp\", limit: $limit, offset: $offset) {\n          items {\n            app_id\n            app_family_id\n            name\n            version\n            status\n            created_at\n          }\n          total\n        }\n      }\n    "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.mcp.tsx",
+      "call": 2,
+      "variant": 1,
+      "document": "mutation($appId: String!, $message: String!) { deprecateApp(app_id: $appId, message: $message) }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.mcp.tsx",
+      "call": 3,
+      "variant": 1,
+      "document": "mutation($appId: String!) { deactivateApp(app_id: $appId) }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.mcp.tsx",
+      "call": 4,
+      "variant": 1,
+      "document": "mutation($appId: String!) { deactivateApp(app_id: $appId) }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.mcp.tsx",
+      "call": 5,
+      "variant": 1,
+      "document": "mutation($appId: String!) { undeprecateApp(app_id: $appId) }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.sdks._index.tsx",
+      "call": 1,
+      "variant": 1,
+      "document": "\n    query SDKApps($search: String!, $version: String!, $limit: Int!, $offset: Int!) {\n      apps(kind: \"sdk\", search: $search, version: $version, limit: $limit, offset: $offset) {\n        items { app_id app_family_id name description version target_language created_at status downloads }\n        total\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.sdks.$id.tsx",
+      "call": 1,
+      "variant": 1,
+      "document": "\n      query($appId: String!) {\n        app(app_id: $appId) {\n          app_id\n          app_family_id\n          name\n          description\n          version\n          kind\n          target_language\n          created_at\n          readme\n          status\n          downloads\n          selections { service_id service_version_id definition_schema_version endpoint_ids operation_names webhook_ids webhook_names select_all webhook_select_all }\n        }\n        appServices(app_id: $appId) { service_id service_slug service_name version select_all endpoint_count webhook_count }\n      }\n    "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.sdks.$id.tsx",
+      "call": 2,
+      "variant": 1,
+      "document": "\n      query($appFamilyId: String!) {\n        appVersions(app_family_id: $appFamilyId) {\n            app_id\n            version\n            created_at\n        }\n      }\n    "
+    }
+  ]
+}
