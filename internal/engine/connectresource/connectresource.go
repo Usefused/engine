@@ -15,11 +15,16 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/Usefused/engine/internal/shared/connectionprofile"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 )
 
-const maxDiscoveryBodyBytes = 2 << 20
+const (
+	maxDiscoveryBodyBytes      = 2 << 20
+	maxResourceInputValueRunes = 2048
+)
 
 var (
 	// ErrDiscoveryInputNoMatch keeps an ungranted customer-selected tenant out of routing state.
@@ -272,11 +277,8 @@ func NormalizeInput(config *fusedobject.ResourceInputConfig, values map[string]s
 		if field.Required && value == "" {
 			missing = append(missing, field.Name)
 		}
-		if field.Pattern != "" && value != "" {
-			matched, err := regexp.MatchString(field.Pattern, value)
-			if err != nil || !matched {
-				return nil, nil, fmt.Errorf("resource input %q is invalid", field.Name)
-			}
+		if err := validateNormalizedInputValue(field, value); err != nil {
+			return nil, nil, fmt.Errorf("resource input %q is invalid", field.Name)
 		}
 		normalized[field.Name] = value
 	}
@@ -288,6 +290,49 @@ func NormalizeInput(config *fusedobject.ResourceInputConfig, values map[string]s
 		}
 	}
 	return normalized, missing, nil
+}
+
+// validateNormalizedInputValue applies the bounded type-specific rules after
+// whitespace normalization and treats empty optional values as absent.
+func validateNormalizedInputValue(field fusedobject.ResourceInputField, value string) error {
+	if value == "" {
+		return nil
+	}
+	if utf8.RuneCountInString(value) > maxResourceInputValueRunes {
+		return errors.New("resource input value limit exceeded")
+	}
+	switch connectionprofile.ResourceInputFieldType(strings.ToLower(strings.TrimSpace(string(field.Type)))) {
+	case "", connectionprofile.ResourceInputFieldTypeText:
+		return validateTextInputValue(field.Pattern, value)
+	case connectionprofile.ResourceInputFieldTypeSelect:
+		return validateSelectInputValue(field.Options, value)
+	default:
+		return errors.New("resource input type is invalid")
+	}
+}
+
+// validateTextInputValue applies the reviewed RE2 rule while preserving free
+// text behavior for fields without a pattern.
+func validateTextInputValue(pattern, value string) error {
+	if pattern == "" {
+		return nil
+	}
+	matched, err := regexp.MatchString(pattern, value)
+	if err != nil || !matched {
+		return errors.New("resource input pattern did not match")
+	}
+	return nil
+}
+
+// validateSelectInputValue rejects tampered values that were not declared in
+// the provider-neutral select allowlist.
+func validateSelectInputValue(options []connectionprofile.ResourceInputOption, value string) error {
+	for _, option := range options {
+		if option.Value == value {
+			return nil
+		}
+	}
+	return errors.New("resource input option is not allowed")
 }
 
 // ValidateBaseURL confines dynamic routing to HTTPS hosts authorized by the

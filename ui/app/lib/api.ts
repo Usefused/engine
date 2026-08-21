@@ -188,9 +188,13 @@ export interface Service {
     resource_input?: {
       fields: Array<{
         name: string;
+        type?: "text" | "select";
         label?: string;
+        placeholder?: string;
+        description?: string;
         required?: boolean;
         pattern?: string;
+        options?: Array<{ value: string; label?: string }>;
       }>;
     };
   };

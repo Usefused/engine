@@ -107,11 +107,35 @@ type ResourceInputDiscoveryMatch struct {
 	MetadataKey string `json:"metadata_key" yaml:"metadata_key"`
 }
 
+// ResourceInputFieldType identifies the bounded presentation and validation
+// behavior for one customer-supplied routing value.
+type ResourceInputFieldType string
+
+const (
+	// ResourceInputFieldTypeText preserves the existing free-form string input.
+	ResourceInputFieldTypeText ResourceInputFieldType = "text"
+	// ResourceInputFieldTypeSelect restricts input to a reviewed option value.
+	ResourceInputFieldTypeSelect ResourceInputFieldType = "select"
+)
+
+// ResourceInputOption declares one provider-neutral choice without changing
+// the string-only transport used by SDK, CLI, and Engine APIs.
+type ResourceInputOption struct {
+	Value string `json:"value" yaml:"value"`
+	Label string `json:"label,omitempty" yaml:"label,omitempty"`
+}
+
+// ResourceInputField declares one non-secret customer routing input and its
+// bounded hosted-form presentation metadata.
 type ResourceInputField struct {
-	Name     string `json:"name" yaml:"name"`
-	Label    string `json:"label,omitempty" yaml:"label,omitempty"`
-	Required bool   `json:"required,omitempty" yaml:"required,omitempty"`
-	Pattern  string `json:"pattern,omitempty" yaml:"pattern,omitempty"`
+	Name        string                 `json:"name" yaml:"name"`
+	Type        ResourceInputFieldType `json:"type,omitempty" yaml:"type,omitempty"`
+	Label       string                 `json:"label,omitempty" yaml:"label,omitempty"`
+	Placeholder string                 `json:"placeholder,omitempty" yaml:"placeholder,omitempty"`
+	Description string                 `json:"description,omitempty" yaml:"description,omitempty"`
+	Required    bool                   `json:"required,omitempty" yaml:"required,omitempty"`
+	Pattern     string                 `json:"pattern,omitempty" yaml:"pattern,omitempty"`
+	Options     []ResourceInputOption  `json:"options,omitempty" yaml:"options,omitempty"`
 }
 
 type Binding struct {

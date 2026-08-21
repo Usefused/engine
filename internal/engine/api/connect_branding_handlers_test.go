@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -352,8 +353,93 @@ func TestCallbackFallbackUsesCanonicalEngineViolet(t *testing.T) {
 	response := httptest.NewRecorder()
 	writeConnectCallbackFallback(context.Background(), testStore, response, http.StatusOK, "Browser message", false)
 	body := response.Body.String()
-	want := "background-color:" + store.DefaultConnectBrandingPrimaryColor
+	want := "--connect-accent:" + store.DefaultConnectBrandingPrimaryColor
 	if !strings.Contains(body, want) {
 		t.Fatalf("callback completion accent did not use Engine violet: %s", body)
+	}
+}
+
+// TestHostedConnectAccentForegroundKeepsActionsReadable covers dark, light,
+// canonical, and malformed accents without mutating the configured colour.
+func TestHostedConnectAccentForegroundKeepsActionsReadable(t *testing.T) {
+	tests := map[string]string{
+		"#6941ff": "#ffffff",
+		"#000000": "#ffffff",
+		"#ffffff": "#000000",
+		"#facc15": "#000000",
+		"invalid": "#ffffff",
+	}
+	for accent, want := range tests {
+		branding := hostedConnectBranding{ConnectBranding: store.ConnectBranding{PrimaryColor: accent}}
+		// Each accent resolves to the one foreground that satisfies the bounded contrast rule.
+		if got := branding.AccentForeground(); got != want {
+			t.Errorf("AccentForeground(%q) = %q, want %q", accent, got, want)
+		}
+	}
+}
+
+// TestHostedConnectTerminalStatesDoNotRenderStatusDot keeps semantic state in
+// explicit text instead of decorative, brand-coloured callback markers.
+func TestHostedConnectTerminalStatesDoNotRenderStatusDot(t *testing.T) {
+	testStore := &connectBrandingTestStore{branding: store.DefaultConnectBranding()}
+	for _, failed := range []bool{false, true} {
+		response := httptest.NewRecorder()
+		writeConnectCallbackFallback(context.Background(), testStore, response, http.StatusOK, "Browser message", failed)
+		body := response.Body.String()
+		// Neither terminal branch may retain the old status class or dot markup.
+		for _, forbidden := range []string{`class="status"`, `.status{`, `<span class="status"`} {
+			if strings.Contains(body, forbidden) {
+				t.Errorf("callback failed=%v retained %q: %s", failed, forbidden, body)
+			}
+		}
+		if !strings.Contains(body, `class="connect-eyebrow"`) || !strings.Contains(body, "Connection") {
+			t.Errorf("callback failed=%v omitted textual state: %s", failed, body)
+		}
+	}
+}
+
+// TestHostedConnectStatesUseCanonicalLightShell prevents browser dark-mode
+// preferences from replacing Engine paper, ink, and line colours.
+func TestHostedConnectStatesUseCanonicalLightShell(t *testing.T) {
+	branding := hostedConnectBranding{ConnectBranding: store.DefaultConnectBranding()}
+	testStore := &connectBrandingTestStore{branding: store.DefaultConnectBranding()}
+	pages := map[string]*httptest.ResponseRecorder{}
+
+	normal := httptest.NewRecorder()
+	writeConnectInputPage(normal, http.StatusOK, connectInputPage{Branding: branding, Action: "/workspace/connect/input", Fields: []connectInputPageField{{Name: "site", Label: "Site"}}})
+	pages["input"] = normal
+
+	invalid := httptest.NewRecorder()
+	writeConnectInputPage(invalid, http.StatusBadRequest, connectInputPage{Branding: branding, Action: "/workspace/connect/input", Error: "Invalid value"})
+	pages["validation"] = invalid
+
+	expired := httptest.NewRecorder()
+	writeConnectInputUnavailable(expired, branding)
+	pages["expired"] = expired
+
+	handoff := httptest.NewRecorder()
+	writeConnectInputProviderPage(handoff, "https://provider.example/authorize", branding)
+	pages["handoff"] = handoff
+
+	for _, failed := range []bool{false, true} {
+		callback := httptest.NewRecorder()
+		writeConnectCallbackFallback(context.Background(), testStore, callback, http.StatusOK, "Browser message", failed)
+		pages[fmt.Sprintf("callback-failed-%t", failed)] = callback
+	}
+
+	for name, page := range pages {
+		body := page.Body.String()
+		// Every state uses the same Engine surface contract and visible accent.
+		for _, required := range []string{"color-scheme:only light", "background:#fbfaf8", "color:#15121c", "border:1px solid #e7e2ea", "border-top:3px solid var(--connect-accent)", "--connect-accent:#6941ff"} {
+			if !strings.Contains(body, required) {
+				t.Errorf("%s page missing %q: %s", name, required, body)
+			}
+		}
+		// Hosted pages remain light even when the browser prefers dark mode.
+		for _, forbidden := range []string{"prefers-color-scheme:dark", "color-scheme:light dark", "#09090b", "#18181b"} {
+			if strings.Contains(body, forbidden) {
+				t.Errorf("%s page retained dark-shell token %q: %s", name, forbidden, body)
+			}
+		}
 	}
 }

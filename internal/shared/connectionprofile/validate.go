@@ -7,11 +7,18 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
-	maxMetadataKeys = 32
-	maxBindings     = 128
+	maxMetadataKeys                   = 32
+	maxBindings                       = 128
+	maxResourceInputFields            = 32
+	maxResourceInputPresentationRunes = 256
+	maxResourceInputDescriptionRunes  = 512
+	maxResourceInputPatternBytes      = 1024
+	maxResourceInputOptions           = 100
+	maxResourceInputOptionValueRunes  = 256
 )
 
 var (
@@ -81,6 +88,9 @@ func Normalize(profile *Profile) {
 	}
 	profile.AuthName = strings.TrimSpace(profile.AuthName)
 	profile.OAuth2Flow = strings.TrimSpace(profile.OAuth2Flow)
+	// Resource-input presentation values are canonicalized before hashing so
+	// whitespace-only authoring differences do not create distinct profiles.
+	normalizeResourceInput(profile.ResourceInput)
 	// Canonicalizing the lookup key keeps persisted profile hashes and runtime metadata access aligned.
 	if profile.ResourceInput != nil && profile.ResourceInput.DiscoveryMatch != nil {
 		profile.ResourceInput.DiscoveryMatch.MetadataKey = strings.TrimSpace(profile.ResourceInput.DiscoveryMatch.MetadataKey)
@@ -99,6 +109,29 @@ func Normalize(profile *Profile) {
 	}
 	if strings.TrimSpace(profile.ResourceDiscovery.Lifecycle) == "" {
 		profile.ResourceDiscovery.Lifecycle = "authoritative"
+	}
+}
+
+// normalizeResourceInput applies the default field type and trims bounded
+// presentation values while retaining patterns and routing templates exactly.
+func normalizeResourceInput(input *ResourceInputConfig) {
+	if input == nil {
+		return
+	}
+	for index := range input.Fields {
+		field := &input.Fields[index]
+		field.Type = ResourceInputFieldType(strings.ToLower(strings.TrimSpace(string(field.Type))))
+		// Existing profiles omitted a type, so text remains the canonical default.
+		if field.Type == "" {
+			field.Type = ResourceInputFieldTypeText
+		}
+		field.Label = strings.TrimSpace(field.Label)
+		field.Placeholder = strings.TrimSpace(field.Placeholder)
+		field.Description = strings.TrimSpace(field.Description)
+		for optionIndex := range field.Options {
+			field.Options[optionIndex].Value = strings.TrimSpace(field.Options[optionIndex].Value)
+			field.Options[optionIndex].Label = strings.TrimSpace(field.Options[optionIndex].Label)
+		}
 	}
 }
 
@@ -313,6 +346,10 @@ func (v *profileValidator) validateInput() {
 	if len(input.Fields) == 0 || strings.TrimSpace(input.BaseURLTemplate) == "" || strings.TrimSpace(input.ResourceType) == "" {
 		v.addError("resource_input.required", "resource_input", "fields, base_url_template, and resource_type are required")
 	}
+	// A fixed field limit bounds validation, hosted-form projection, and stored profile size.
+	if len(input.Fields) > maxResourceInputFields {
+		v.addError("resource_input.fields.limit", "resource_input.fields", "resource input field limit exceeded")
+	}
 	seen := v.validateInputFields(input.Fields)
 	v.validateInputRouting(input, seen)
 }
@@ -330,13 +367,90 @@ func (v *profileValidator) validateInputFields(fields []ResourceInputField) map[
 			v.addError("resource_input.name.duplicate", path+".name", "field name must be unique")
 		}
 		seen[field.Name] = struct{}{}
-		if field.Pattern != "" {
-			if _, err := regexp.Compile(field.Pattern); err != nil {
-				v.addError("resource_input.pattern.invalid", path+".pattern", "field pattern is invalid")
-			}
-		}
+		v.validateInputFieldPresentation(path, field)
+		v.validateInputFieldContract(path, field)
 	}
 	return seen
+}
+
+// validateInputFieldPresentation bounds human-facing copy independently from
+// routing values so rendering costs remain predictable.
+func (v *profileValidator) validateInputFieldPresentation(path string, field ResourceInputField) {
+	if utf8.RuneCountInString(field.Label) > maxResourceInputPresentationRunes {
+		v.addError("resource_input.label.limit", path+".label", "field label limit exceeded")
+	}
+	if utf8.RuneCountInString(field.Placeholder) > maxResourceInputPresentationRunes {
+		v.addError("resource_input.placeholder.limit", path+".placeholder", "field placeholder limit exceeded")
+	}
+	if utf8.RuneCountInString(field.Description) > maxResourceInputDescriptionRunes {
+		v.addError("resource_input.description.limit", path+".description", "field description limit exceeded")
+	}
+}
+
+// validateInputFieldContract enforces the closed text/select grammar before a
+// profile can reach runtime or hosted-form projection.
+func (v *profileValidator) validateInputFieldContract(path string, field ResourceInputField) {
+	switch field.Type {
+	case ResourceInputFieldTypeText:
+		// Text patterns stay server-side RE2 and select options are not meaningful.
+		if len(field.Options) != 0 {
+			v.addError("resource_input.options.unavailable", path+".options", "text fields cannot declare options")
+		}
+		v.validateInputPattern(path, field.Pattern)
+	case ResourceInputFieldTypeSelect:
+		// Select allowlists replace regular expressions with exact reviewed values.
+		if field.Pattern != "" {
+			v.addError("resource_input.pattern.unavailable", path+".pattern", "select fields cannot declare a pattern")
+		}
+		v.validateInputOptions(path, field.Options)
+	default:
+		v.addError("resource_input.type.invalid", path+".type", "field type is invalid")
+	}
+}
+
+// validateInputPattern bounds and compiles the RE2 expression once at profile
+// validation rather than accepting runtime-only failures.
+func (v *profileValidator) validateInputPattern(path, pattern string) {
+	if pattern == "" {
+		return
+	}
+	if len(pattern) > maxResourceInputPatternBytes {
+		v.addError("resource_input.pattern.limit", path+".pattern", "field pattern limit exceeded")
+		return
+	}
+	if _, err := regexp.Compile(pattern); err != nil {
+		v.addError("resource_input.pattern.invalid", path+".pattern", "field pattern is invalid")
+	}
+}
+
+// validateInputOptions enforces a bounded exact string allowlist for select
+// fields so browser presentation cannot become the authorization boundary.
+func (v *profileValidator) validateInputOptions(path string, options []ResourceInputOption) {
+	if len(options) == 0 {
+		v.addError("resource_input.options.required", path+".options", "select fields require options")
+		return
+	}
+	if len(options) > maxResourceInputOptions {
+		v.addError("resource_input.options.limit", path+".options", "select option limit exceeded")
+	}
+	seen := make(map[string]struct{}, len(options))
+	for index, option := range options {
+		optionPath := fmt.Sprintf("%s.options[%d]", path, index)
+		if option.Value == "" {
+			v.addError("resource_input.option.value.required", optionPath+".value", "select option value is required")
+		}
+		if utf8.RuneCountInString(option.Value) > maxResourceInputOptionValueRunes {
+			v.addError("resource_input.option.value.limit", optionPath+".value", "select option value limit exceeded")
+		}
+		if utf8.RuneCountInString(option.Label) > maxResourceInputPresentationRunes {
+			v.addError("resource_input.option.label.limit", optionPath+".label", "select option label limit exceeded")
+		}
+		// Exact uniqueness keeps persisted values deterministic across every transport.
+		if _, exists := seen[option.Value]; exists {
+			v.addError("resource_input.option.value.duplicate", optionPath+".value", "select option value must be unique")
+		}
+		seen[option.Value] = struct{}{}
+	}
 }
 
 // validateInputRouting applies the same trusted-host boundary used for URLs

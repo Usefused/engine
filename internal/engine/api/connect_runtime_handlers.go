@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"log/slog"
 	"net"
 	"net/http"
@@ -1004,14 +1003,15 @@ type connectCallbackPage struct {
 	Failed   bool
 }
 
-var connectCallbackTemplate = template.Must(template.New("connect-callback").Parse(`<!doctype html>
+var connectCallbackTemplate = parseHostedConnectTemplate("connect-callback", `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{if .Failed}}Connection failed{{else}}Connection complete{{end}} · {{.Branding.DisplayName}}</title>
-<style>:root{color-scheme:light dark;font-family:Inter,ui-sans-serif,system-ui,sans-serif}body{margin:0;background:#f7f7f8;color:#18181b}main{max-width:28rem;margin:8vh auto;padding:2rem;background:#fff;border:1px solid #e4e4e7;border-radius:1rem;box-shadow:0 12px 32px rgba(0,0,0,.08)}header{display:flex;align-items:center;gap:.75rem;margin-bottom:1.5rem;font-weight:700}header img{width:48px;height:48px;object-fit:contain}.status{width:.75rem;height:.75rem;border-radius:999px;display:inline-block;margin-right:.5rem}p{color:#52525b;line-height:1.5}.links{display:flex;gap:1rem;margin-top:1.5rem;font-size:.875rem}.links a{color:inherit}@media(prefers-color-scheme:dark){body{background:#09090b;color:#fafafa}main{background:#18181b;border-color:#3f3f46}p{color:#d4d4d8}}</style>
-</head><body><main><header>{{if .Branding.LogoURL}}<img src="{{.Branding.LogoURL}}" width="48" height="48" alt="{{.Branding.DisplayName}} logo" referrerpolicy="no-referrer">{{end}}<span>{{.Branding.DisplayName}}</span></header>
-<h1><span class="status" style="background-color:{{.Branding.PrimaryColor}}"></span>{{if .Failed}}Connection failed{{else}}Connection complete{{end}}</h1><p>{{.Message}}</p>
-{{if or .Branding.SupportURL .Branding.PrivacyURL}}<div class="links">{{if .Branding.SupportURL}}<a href="{{.Branding.SupportURL}}" rel="noreferrer">Support</a>{{end}}{{if .Branding.PrivacyURL}}<a href="{{.Branding.PrivacyURL}}" rel="noreferrer">Privacy</a>{{end}}</div>{{end}}
-</main></body></html>`))
+{{template "hosted-connect-shell-style"}}
+</head><body><main style="--connect-accent:{{.Branding.PrimaryColor}};--connect-accent-foreground:{{.Branding.AccentForeground}}"><header class="connect-brand">{{if .Branding.LogoURL}}<img class="connect-logo" src="{{.Branding.LogoURL}}" width="48" height="48" alt="" referrerpolicy="no-referrer">{{end}}<span>{{.Branding.DisplayName}}</span></header>
+<p class="connect-eyebrow" data-tone="{{if .Failed}}danger{{else}}success{{end}}">{{if .Failed}}Connection not completed{{else}}Connected{{end}}</p>
+<h1>{{if .Failed}}Connection failed{{else}}Connection complete{{end}}</h1><p class="connect-copy">{{.Message}}</p>
+{{if or .Branding.SupportURL .Branding.PrivacyURL}}<div class="connect-links">{{if .Branding.SupportURL}}<a href="{{.Branding.SupportURL}}" rel="noreferrer">Support</a>{{end}}{{if .Branding.PrivacyURL}}<a href="{{.Branding.PrivacyURL}}" rel="noreferrer">Privacy</a>{{end}}</div>{{end}}
+</main></body></html>`)
 
 // writeConnectCallbackFallback renders the Engine-owned terminal browser page
 // with validated branding and the same restrictive headers as hosted input.
