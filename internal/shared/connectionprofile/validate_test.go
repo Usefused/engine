@@ -2,6 +2,7 @@ package connectionprofile
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -200,6 +201,96 @@ func TestValidateInputTemplateAndPatterns(t *testing.T) {
 	}}
 	result := Validate(&profile, Contract{})
 	assertIssueCodes(t, result, "resource_input.pattern.invalid", "resource_input.name.duplicate", "resource_input.template.unknown_field", "resource_input.allowed_hosts.required")
+}
+
+// TestNormalizeResourceInputFieldsCanonicalizesPresentation proves legacy text
+// defaults and insignificant presentation whitespace share one stored profile.
+func TestNormalizeResourceInputFieldsCanonicalizesPresentation(t *testing.T) {
+	profile := resourceInputProfile([]ResourceInputField{
+		{Name: "tenant", Label: " Tenant ", Placeholder: " Example ", Description: " Pick one ", Options: nil},
+		{Name: "region", Type: " SELECT ", Options: []ResourceInputOption{{Value: " eu ", Label: " Europe "}}},
+	})
+	Normalize(&profile)
+	textField, selectField := profile.ResourceInput.Fields[0], profile.ResourceInput.Fields[1]
+	// Omitted types retain the existing text behavior after canonicalization.
+	if textField.Type != ResourceInputFieldTypeText || textField.Label != "Tenant" || textField.Placeholder != "Example" || textField.Description != "Pick one" {
+		t.Fatalf("normalized text field = %#v", textField)
+	}
+	// Select identity and option presentation values are canonical before hashing.
+	if selectField.Type != ResourceInputFieldTypeSelect || selectField.Options[0] != (ResourceInputOption{Value: "eu", Label: "Europe"}) {
+		t.Fatalf("normalized select field = %#v", selectField)
+	}
+}
+
+// TestValidateResourceInputFieldTypes accepts the closed provider-neutral text
+// and select grammar while preserving the legacy omitted-type form.
+func TestValidateResourceInputFieldTypes(t *testing.T) {
+	fields := []ResourceInputField{
+		{Name: "tenant", Required: true, Pattern: `^[a-z]+$`},
+		{Name: "region", Type: ResourceInputFieldTypeSelect, Options: []ResourceInputOption{{Value: "eu", Label: "Europe"}, {Value: "us"}}},
+	}
+	result := Validate(resourceInputProfilePointer(fields), Contract{})
+	// Both field kinds remain string-valued and pass the same routing validation.
+	if result.HasErrors() {
+		t.Fatalf("Validate errors = %#v", result.Issues)
+	}
+}
+
+// TestValidateResourceInputFieldConstraints covers every bounded type,
+// presentation, pattern, and option failure with stable issue codes.
+func TestValidateResourceInputFieldConstraints(t *testing.T) {
+	tests := []struct {
+		name   string
+		fields []ResourceInputField
+		codes  []string
+	}{
+		{name: "unknown type", fields: []ResourceInputField{{Name: "tenant", Type: "radio"}}, codes: []string{"resource_input.type.invalid"}},
+		{name: "text options", fields: []ResourceInputField{{Name: "tenant", Options: []ResourceInputOption{{Value: "one"}}}}, codes: []string{"resource_input.options.unavailable"}},
+		{name: "select options required", fields: []ResourceInputField{{Name: "tenant", Type: ResourceInputFieldTypeSelect}}, codes: []string{"resource_input.options.required"}},
+		{name: "select pattern unavailable", fields: []ResourceInputField{{Name: "tenant", Type: ResourceInputFieldTypeSelect, Pattern: "tenant", Options: []ResourceInputOption{{Value: "one"}}}}, codes: []string{"resource_input.pattern.unavailable"}},
+		{name: "presentation limits", fields: []ResourceInputField{{Name: "tenant", Label: strings.Repeat("界", 257), Placeholder: strings.Repeat("界", 257), Description: strings.Repeat("界", 513)}}, codes: []string{"resource_input.label.limit", "resource_input.placeholder.limit", "resource_input.description.limit"}},
+		{name: "pattern limit", fields: []ResourceInputField{{Name: "tenant", Pattern: strings.Repeat("a", 1025)}}, codes: []string{"resource_input.pattern.limit"}},
+		{name: "option values", fields: []ResourceInputField{{Name: "tenant", Type: ResourceInputFieldTypeSelect, Options: []ResourceInputOption{{Value: "", Label: strings.Repeat("界", 257)}, {Value: "same"}, {Value: "same"}, {Value: strings.Repeat("界", 257)}}}}, codes: []string{"resource_input.option.value.required", "resource_input.option.label.limit", "resource_input.option.value.duplicate", "resource_input.option.value.limit"}},
+	}
+	// Each malformed declaration must fail at profile validation, not hosted-form submission.
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assertIssueCodes(t, Validate(resourceInputProfilePointer(test.fields), Contract{}), test.codes...)
+		})
+	}
+}
+
+// TestValidateResourceInputCollectionLimits bounds both fields and select
+// options before profile persistence or hosted-form projection.
+func TestValidateResourceInputCollectionLimits(t *testing.T) {
+	fields := make([]ResourceInputField, 33)
+	for index := range fields {
+		fields[index] = ResourceInputField{Name: fmt.Sprintf("field_%d", index)}
+	}
+	profile := resourceInputProfilePointer(fields)
+	profile.ResourceInput.BaseURLTemplate = "https://{field_0}.example.com"
+	assertIssueCodes(t, Validate(profile, Contract{}), "resource_input.fields.limit")
+	options := make([]ResourceInputOption, 101)
+	for index := range options {
+		options[index] = ResourceInputOption{Value: fmt.Sprintf("option_%d", index)}
+	}
+	selectField := []ResourceInputField{{Name: "tenant", Type: ResourceInputFieldTypeSelect, Options: options}}
+	assertIssueCodes(t, Validate(resourceInputProfilePointer(selectField), Contract{}), "resource_input.options.limit")
+}
+
+// resourceInputProfilePointer returns a complete input-only profile for focused
+// field validation without introducing discovery composition errors.
+func resourceInputProfilePointer(fields []ResourceInputField) *Profile {
+	profile := resourceInputProfile(fields)
+	return &profile
+}
+
+// resourceInputProfile returns a complete input-only profile whose routing
+// template references the tenant field used by focused validation tests.
+func resourceInputProfile(fields []ResourceInputField) Profile {
+	return Profile{AuthType: "oauth", ResourceInput: &ResourceInputConfig{
+		Fields: fields, BaseURLTemplate: "https://{tenant}.example.com", ResourceType: "tenant", AllowedHosts: []string{"*.example.com"},
+	}}
 }
 
 func TestValidationErrorsDoNotLeakSensitiveConfig(t *testing.T) {

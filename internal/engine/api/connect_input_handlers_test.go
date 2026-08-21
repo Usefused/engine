@@ -167,6 +167,43 @@ func TestHostedConnectInputSubmissionCreatesProviderStateAfterValidation(t *test
 	}
 }
 
+// TestHostedConnectInputRendersClosedFieldTypes verifies that profile metadata
+// becomes only the reviewed text and select controls with accessible guidance.
+func TestHostedConnectInputRendersClosedFieldTypes(t *testing.T) {
+	config := &fusedobject.ResourceInputConfig{Fields: []fusedobject.ResourceInputField{
+		{
+			Name: "subdomain", Label: "Jira <site>", Placeholder: "acme", Description: "Enter the provider site.",
+			Required: true, Pattern: `^[a-z0-9-]+$`,
+		},
+		{
+			Name: "region", Type: "select", Label: "Data region", Placeholder: "Choose a region",
+			Description: "Controls regional routing.", Options: []fusedobject.ResourceInputOption{
+				{Value: "eu", Label: "Europe & UK"}, {Value: "us", Label: "United States"},
+			},
+		},
+	}}
+	page := newConnectInputPage("capability", config, "https://engine.example/connect/callback", map[string]string{"region": "eu"}, "", hostedConnectBranding{ConnectBranding: store.DefaultConnectBranding()})
+	response := httptest.NewRecorder()
+	writeConnectInputPage(response, http.StatusOK, page)
+	body := response.Body.String()
+
+	// Text remains the legacy default and RE2 never crosses into browser grammar.
+	for _, expected := range []string{
+		`<input type="text" id="field-subdomain"`, `placeholder="acme"`, `required`,
+		`<select id="field-region"`, `Choose a region`, `<option value="eu" selected>Europe &amp; UK</option>`,
+		`Jira &lt;site&gt;`, `Enter the provider site.`, `Controls regional routing.`, `Required`, `Optional`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("hosted form missing %q: %s", expected, body)
+		}
+	}
+	for _, forbidden := range []string{`pattern=`, `type="password"`, `type="number"`, `type="url"`} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("hosted form exposed unsupported browser contract %q: %s", forbidden, body)
+		}
+	}
+}
+
 // TestConnectInputFormOriginRejectsNonBrowserSchemes keeps malformed or
 // active-content callback endpoints outside the hosted page's CSP.
 func TestConnectInputFormOriginRejectsNonBrowserSchemes(t *testing.T) {

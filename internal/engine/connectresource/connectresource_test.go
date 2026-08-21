@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
@@ -76,6 +77,36 @@ func TestNormalizeInputRejectsUndeclaredValue(t *testing.T) {
 	// Undeclared values fail closed instead of entering routing metadata.
 	if err == nil {
 		t.Fatal("expected undeclared resource input to be rejected")
+	}
+}
+
+// TestNormalizeInputEnforcesSelectOptions proves the reviewed option list is
+// authoritative even when callers bypass the hosted form.
+func TestNormalizeInputEnforcesSelectOptions(t *testing.T) {
+	config := &fusedobject.ResourceInputConfig{Fields: []fusedobject.ResourceInputField{{
+		Name: "region", Type: connectionprofile.ResourceInputFieldTypeSelect,
+		Options: []connectionprofile.ResourceInputOption{{Value: "eu"}, {Value: "us"}},
+	}}}
+	normalized, missing, err := NormalizeInput(config, map[string]string{"region": " eu "})
+	// Exact declared values remain valid after the shared whitespace normalization.
+	if err != nil || len(missing) != 0 || normalized["region"] != "eu" {
+		t.Fatalf("NormalizeInput valid select = %#v, %#v, %v", normalized, missing, err)
+	}
+	// A tampered option fails rather than becoming arbitrary persisted metadata.
+	if _, _, err := NormalizeInput(config, map[string]string{"region": "apac"}); err == nil {
+		t.Fatal("expected undeclared select option to fail")
+	}
+}
+
+// TestNormalizeInputBoundsUnicodeValues applies the input limit in runes so
+// multibyte customer text has predictable semantics across transports.
+func TestNormalizeInputBoundsUnicodeValues(t *testing.T) {
+	config := &fusedobject.ResourceInputConfig{Fields: []fusedobject.ResourceInputField{{Name: "tenant"}}}
+	if _, _, err := NormalizeInput(config, map[string]string{"tenant": strings.Repeat("界", 2048)}); err != nil {
+		t.Fatalf("expected value at rune limit to pass: %v", err)
+	}
+	if _, _, err := NormalizeInput(config, map[string]string{"tenant": strings.Repeat("界", 2049)}); err == nil {
+		t.Fatal("expected value above rune limit to fail")
 	}
 }
 

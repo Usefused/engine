@@ -55,4 +55,5 @@ type ServiceConnectConfig = connectionprofile.Profile
 type ResourceDiscoveryConfig = connectionprofile.ResourceDiscoveryConfig
 type ResourceInputConfig = connectionprofile.ResourceInputConfig
 type ResourceInputField = connectionprofile.ResourceInputField
+type ResourceInputOption = connectionprofile.ResourceInputOption
 type ConnectionBinding = connectionprofile.Binding
