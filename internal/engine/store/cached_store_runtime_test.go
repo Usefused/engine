@@ -165,8 +165,19 @@ func TestCachedStoreRuntimeInvalidationFansOutAcrossNATSConnections(t *testing.T
 	flushRuntimeCacheNATS(t, firstClient.Conn)
 	flushRuntimeCacheNATS(t, secondClient.Conn)
 
-	if runtime := mustGetRuntime(t, second, appID); runtime.Version != "v2" {
-		t.Fatalf("peer runtime version after NATS invalidation = %q, want v2", runtime.Version)
+	// The peer subscription callback is dispatched asynchronously by the NATS
+	// client, so wait for the invalidation to be observed instead of racing the
+	// flush round trip against callback delivery.
+	deadline := time.Now().Add(time.Second)
+	for {
+		runtime := mustGetRuntime(t, second, appID)
+		if runtime.Version == "v2" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("peer runtime version after NATS invalidation = %q, want v2", runtime.Version)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	if calls := secondDelegate.loadCount(); calls != 2 {
 		t.Fatalf("peer delegate loads = %d, want cache fill plus post-event reload", calls)
