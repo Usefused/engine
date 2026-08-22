@@ -133,7 +133,9 @@ func (s *Service) RevokeAppToken(ctx context.Context, appFamilyID uuid.UUID, nam
 		return nil, err
 	}
 	invalidated := s.invalidator.InvalidateToken(revocation.TokenID)
-	span.SetAttributes(attribute.Int("auth.cache.entries_invalidated", invalidated))
+	// The fanout can evict validator cache entries and terminate live sessions,
+	// so the metric names the shared runtime boundary rather than one consumer.
+	span.SetAttributes(attribute.Int("auth.runtime_entries_invalidated", invalidated))
 	if err := s.publisher.Publish(ctx, *revocation); err != nil {
 		// The error text may include infrastructure details, so logs and OTEL use
 		// only stable classifications and secret-free family identity.
@@ -195,7 +197,7 @@ func consume(message *nats.Msg, invalidator Invalidator) {
 	invalidated := invalidator.InvalidateToken(event.TokenID)
 	span.SetAttributes(
 		attribute.String("app.family_id", event.AppFamilyID.String()),
-		attribute.Int("auth.cache.entries_invalidated", invalidated),
+		attribute.Int("auth.runtime_entries_invalidated", invalidated),
 		attribute.String("outcome", string(outcomeInvalidated)),
 	)
 	_ = message.Ack()

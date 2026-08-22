@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/shared/cache"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/messaging"
@@ -244,6 +245,18 @@ func (s *cachedStore) ListWorkspaceServiceVersionsMissingContractSnapshots(ctx c
 	return delegate.ListWorkspaceServiceVersionsMissingContractSnapshots(ctx, limit)
 }
 
+// ResolveAuthorizedAppScaffoldSelections forwards the bounded read because
+// mutable authoring keys must always be resolved against current SQL state.
+func (s *cachedStore) ResolveAuthorizedAppScaffoldSelections(ctx context.Context, scope accesscontrol.AuthorizedScope, refs []AppScaffoldSelectionRef) ([]AppScaffoldResolvedSelection, error) {
+	delegate, ok := s.Store.(AppScaffoldSelectionStore)
+	// A scalar or cached fallback would either create N+1 reads or retain stale
+	// workspace authorization, so this capability fails closed when unavailable.
+	if !ok {
+		return nil, errors.New("app scaffold selection store is unavailable")
+	}
+	return delegate.ResolveAuthorizedAppScaffoldSelections(ctx, scope, refs)
+}
+
 func (s *cachedStore) DeleteSecret(ctx context.Context, bucketID uuid.UUID, serviceID uuid.UUID, keyName string) error {
 	err := s.Store.DeleteSecret(ctx, bucketID, serviceID, keyName)
 	if err == nil {
@@ -333,6 +346,16 @@ func (s *cachedStore) GetFirstCompleteSecretSet(ctx context.Context, bucketID, s
 	// Selection must happen atomically in the database; composing per-key cache
 	// hits here could mix OR branches or turn the hot path into N+1 lookups.
 	return s.Store.GetFirstCompleteSecretSet(ctx, bucketID, serviceID, alternatives)
+}
+
+func (s *cachedStore) GetAppBucketCredentialPresence(ctx context.Context, bucketID uuid.UUID, requirements []AppCredentialRequirement) ([]AppCredentialPresence, error) {
+	repository, ok := s.Store.(AppBucketReadinessStore)
+	if !ok {
+		return nil, errors.New("store does not support app bucket readiness")
+	}
+	// Readiness intentionally bypasses the per-secret cache: the database must
+	// evaluate the complete requested set atomically for both plan and apply.
+	return repository.GetAppBucketCredentialPresence(ctx, bucketID, requirements)
 }
 
 func (s *cachedStore) GetBucketValues(ctx context.Context, bucketID, serviceID uuid.UUID, keyNames []string) ([]BucketValue, error) {

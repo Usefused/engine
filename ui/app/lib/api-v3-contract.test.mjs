@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { mutableWorkspaceNotificationID } from "./workspace-notification.ts";
 
 const apiPath = fileURLToPath(import.meta.resolve("./api.ts"));
+const integrationsIndexPath = fileURLToPath(import.meta.resolve("../routes/integrations._index.tsx"));
+const integrationDetailPath = fileURLToPath(import.meta.resolve("../routes/integrations.$id.tsx"));
 
 // sourceSection isolates one API contract so unrelated fields cannot satisfy assertions.
 function sourceSection(source, start, end) {
@@ -71,6 +73,31 @@ test("connection profiles request v3 identity, visibility, and literal bindings"
   // Read, set, and reset must return the same effective-profile shape.
   assert.equal(methods.match(/\$\{workspaceConnectionProfileSelection\}/g)?.length, 3);
   assert.doesNotMatch(selection, /\blocally_overridden\b/);
+});
+
+test("specification import apply submits the reviewed artifact receipt", async () => {
+  const [apiSource, indexSource, detailSource] = await Promise.all([
+    readFile(apiPath, "utf8"),
+    readFile(integrationsIndexPath, "utf8"),
+    readFile(integrationDetailPath, "utf8"),
+  ]);
+  const planType = sourceSection(apiSource, "export interface SpecificationImportPlan", "export interface SpecificationImportApplyResult");
+  const importsAPI = sourceSection(apiSource, "integrations: {", "start: (");
+
+  assert.match(planType, /\breview_hash:\s*string/);
+  assert.match(importsAPI, /applyImport:\s*\(planId:\s*string,\s*reviewHash:\s*string\)/);
+  assert.match(importsAPI, /JSON\.stringify\(\{\s*plan_id:\s*planId,\s*review_hash:\s*reviewHash\s*\}\)/);
+  assert.doesNotMatch(importsAPI, /applyImport[\s\S]*source_hash:\s*sourceHash/);
+  assert.match(indexSource, /applyImport\(importPlan\.plan_id,\s*importPlan\.review_hash\)/);
+  assert.match(detailSource, /applyImport\(plan\.plan_id,\s*plan\.review_hash\)/);
+});
+
+test("service catalog requests only public Registry services", async () => {
+  const source = await readFile(integrationsIndexPath, "utf8");
+  const catalogQuery = sourceSection(source, "const CATALOG_SEARCH_QUERY", "// searchCatalogServices");
+
+  assert.match(catalogQuery, /searchServices\(q:\s*\$q,\s*publicOnly:\s*true\)/);
+  assert.match(catalogQuery, /\bis_public\b/);
 });
 
 test("notification mutations reject live Registry snapshots", () => {

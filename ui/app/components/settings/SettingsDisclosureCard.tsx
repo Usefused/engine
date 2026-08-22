@@ -14,7 +14,9 @@ export function SettingsDisclosureCard({
   description,
   children,
 }: SettingsDisclosureCardProps) {
-  const [expanded, setExpanded] = useState(true);
+  // Engine Endpoints is the first, always-visible settings card. Every
+  // disclosure that follows starts collapsed to keep the page scannable.
+  const [expanded, setExpanded] = useState(false);
   const contentID = `${id}-content`;
   const descriptionID = `${id}-description`;
 

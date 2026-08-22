@@ -240,7 +240,7 @@ func prepareResolvedProviderCredentials(
 	credentials map[string]any,
 ) (map[string]any, []store.BucketValue, error) {
 	credentials = withConnectedResourceRequirement(credentials, match.service.ConnectConfig)
-	return resolveMatchedExecutionCredentials(ctx, match, object, identity.AppID, identity.AccountID, credentials)
+	return resolveMatchedExecutionCredentials(ctx, match, object, identity, credentials)
 }
 
 // dispatchResolvedProvider records resolved environment and HTTP status around the existing dispatcher and cache path.

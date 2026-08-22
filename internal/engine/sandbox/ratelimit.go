@@ -99,15 +99,15 @@ func (s *rateLimitStore) evictLoop() {
 // ---------------------------------------------------------------------------
 
 var (
-	// sseRateLimiter limits new SSE connections per SDK-ID.
-	sseRateLimiter *rateLimitStore
-	// messageRateLimiter limits tools/call messages per SDK-ID.
+	// sessionStartRateLimiter is shared by SSE and Streamable HTTP handshakes.
+	sessionStartRateLimiter *rateLimitStore
+	// messageRateLimiter limits tools/call messages per immutable app version.
 	messageRateLimiter *rateLimitStore
 )
 
 // initRateLimiters creates the global rate limiter stores from config values.
-func initRateLimiters(ssePerMinute, sseBurst, msgPerMinute, msgBurst int) {
-	sseRateLimiter = newRateLimitStore(ssePerMinute, sseBurst)
+func initRateLimiters(sessionStartsPerMinute, sessionStartBurst, msgPerMinute, msgBurst int) {
+	sessionStartRateLimiter = newRateLimitStore(sessionStartsPerMinute, sessionStartBurst)
 	messageRateLimiter = newRateLimitStore(msgPerMinute, msgBurst)
 }
 
@@ -115,10 +115,10 @@ func initRateLimiters(ssePerMinute, sseBurst, msgPerMinute, msgBurst int) {
 // Guard helpers — call these at the top of each handler.
 // ---------------------------------------------------------------------------
 
-// allowSSEConnect returns true and does nothing if the SDK-ID is within the
-// SSE connection rate limit. Otherwise it writes HTTP 429 and returns false.
-func allowSSEConnect(w http.ResponseWriter, appID string) bool {
-	if sseRateLimiter != nil && !sseRateLimiter.allow(appID) {
+// allowMCPSessionStart applies one handshake limit to both transports so a
+// caller cannot bypass admission control by switching protocols.
+func allowMCPSessionStart(w http.ResponseWriter, appID string) bool {
+	if sessionStartRateLimiter != nil && !sessionStartRateLimiter.allow(appID) {
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, "too many connections for this MCP server, please slow down")
 		return false
@@ -126,7 +126,7 @@ func allowSSEConnect(w http.ResponseWriter, appID string) bool {
 	return true
 }
 
-// allowMessage returns true and does nothing if the SDK-ID is within the
+// allowMessage returns true and does nothing if the app ID is within the
 // message-rate limit. Otherwise it writes HTTP 429 and returns false.
 func allowMessage(w http.ResponseWriter, appID string) bool {
 	if messageRateLimiter != nil && !messageRateLimiter.allow(appID) {

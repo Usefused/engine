@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -32,6 +33,8 @@ var appSummaryGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"generator_version":       &graphql.Field{Type: graphql.String},
 		"downloads":               &graphql.Field{Type: graphql.String},
 		"readme":                  &graphql.Field{Type: graphql.String},
+		"default_transport":       &graphql.Field{Type: graphql.String},
+		"transport_urls":          &graphql.Field{Type: mcpTransportURLsGraphQLType},
 		"selections":              &graphql.Field{Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(appSelectionGraphQLType)))},
 		"planned_deactivation_at": &graphql.Field{Type: graphql.String},
 	},
@@ -120,7 +123,7 @@ func appsGraphQLField(s store.Store, downloadClient sandbox.SDKPackageDownloadCo
 			return nil, err
 		}
 		counts, available := appDownloadCounts(p, downloadClient, items)
-		return map[string]interface{}{"items": appSummaryFields(items, counts, available), "total": total}, nil
+		return map[string]interface{}{"items": appSummaryFields(requestFromContext(p.Context), items, counts, available), "total": total}, nil
 	}}
 }
 
@@ -143,7 +146,7 @@ func appGraphQLField(s store.Store, downloadClient sandbox.SDKPackageDownloadCou
 			return nil, errors.New("app was not found")
 		}
 		counts, available := appDownloadCounts(p, downloadClient, []store.AppCatalogItem{*item})
-		return appSummaryField(*item, counts, available), nil
+		return appSummaryField(requestFromContext(p.Context), *item, counts, available), nil
 	}}
 }
 
@@ -166,7 +169,7 @@ func appVersionsGraphQLField(s store.Store, downloadClient sandbox.SDKPackageDow
 			return nil, err
 		}
 		counts, available := appDownloadCounts(p, downloadClient, items)
-		return appSummaryFields(items, counts, available), nil
+		return appSummaryFields(requestFromContext(p.Context), items, counts, available), nil
 	}}
 }
 
@@ -220,17 +223,17 @@ func boundedAppPage(args map[string]interface{}) (int, int) {
 }
 
 // appSummaryFields projects a stable GraphQL row for every Engine-owned app.
-func appSummaryFields(items []store.AppCatalogItem, counts map[uuid.UUID]int64, countsAvailable bool) []map[string]interface{} {
+func appSummaryFields(r *http.Request, items []store.AppCatalogItem, counts map[uuid.UUID]int64, countsAvailable bool) []map[string]interface{} {
 	projected := make([]map[string]interface{}, 0, len(items))
 	for _, item := range items {
-		projected = append(projected, appSummaryField(item, counts, countsAvailable))
+		projected = append(projected, appSummaryField(r, item, counts, countsAvailable))
 	}
 	return projected
 }
 
 // appSummaryField keeps Registry analytics nullable while preserving exact
 // decimal counts beyond JavaScript's safe integer range.
-func appSummaryField(item store.AppCatalogItem, counts map[uuid.UUID]int64, countsAvailable bool) map[string]interface{} {
+func appSummaryField(r *http.Request, item store.AppCatalogItem, counts map[uuid.UUID]int64, countsAvailable bool) map[string]interface{} {
 	planned := ""
 	if item.PlannedDeactivationAt != nil {
 		planned = item.PlannedDeactivationAt.Format(mcpGraphQLTimeFormat)
@@ -244,6 +247,13 @@ func appSummaryField(item store.AppCatalogItem, counts map[uuid.UUID]int64, coun
 	}
 	if item.Kind == store.AppKindSDK && countsAvailable {
 		fields["downloads"] = strconv.FormatInt(counts[item.AppID], 10)
+	}
+	if item.Kind == store.AppKindMCP {
+		// Transport discovery belongs to Engine projection so reverse-proxy
+		// origins and legacy compatibility never drift across CLI and UI clients.
+		transportURLs := mcpTransportURLsForApp(r, item.AppID)
+		fields["default_transport"] = mcpDefaultTransport
+		fields["transport_urls"] = mcpTransportURLsGraphQLValue(transportURLs)
 	}
 	return fields
 }

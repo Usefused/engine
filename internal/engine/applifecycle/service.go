@@ -66,7 +66,7 @@ type Repository interface {
 	UndeprecateApp(context.Context, uuid.UUID) error
 	GetApp(context.Context, uuid.UUID) (*store.App, error)
 	DeactivateAppVersion(context.Context, uuid.UUID, uuid.UUID) error
-	CreateAppToken(context.Context, uuid.UUID, string, string, store.AppTokenPolicy) (*store.AppTokenMetadata, error)
+	CreateAppToken(context.Context, store.AppTokenIssue) (*store.AppTokenMetadata, error)
 }
 
 // ConfigPlanRepository is the atomic desired-state apply boundary. The SQL
@@ -323,6 +323,17 @@ func (svc *Service) GenerateToken(ctx context.Context, params GenerateTokenParam
 		attribute.Bool("app.token.allow_all", policy.AllowAll),
 		attribute.Bool("app.token.expiry_present", policy.ExpiresAt != nil),
 	)
+	bindingMode, err := resolveTokenBindingMode(params.BindingMode, params.Bindings)
+	if err != nil {
+		span.SetAttributes(attribute.String("outcome", string(OutcomeInvalid)))
+		return "", nil, err
+	}
+	// Counts and mode are enough to debug issuance without copying connected-user
+	// selectors or Engine-owned connection identifiers into telemetry.
+	span.SetAttributes(
+		attribute.String("app.token.binding_mode", string(bindingMode)),
+		attribute.Int("app.token.binding_count", len(params.Bindings)),
+	)
 
 	plaintext, tokenHash, err := NewExecutionToken()
 	if err != nil {
@@ -330,7 +341,17 @@ func (svc *Service) GenerateToken(ctx context.Context, params GenerateTokenParam
 		return "", nil, fmt.Errorf("generate app token: %w", err)
 	}
 
-	tok, err := svc.store.CreateAppToken(ctx, params.AppFamilyID, tokenHash, params.Name, policy)
+	tok, err := svc.store.CreateAppToken(ctx, store.AppTokenIssue{
+		ID:                   uuid.New(),
+		AppFamilyID:          params.AppFamilyID,
+		TokenHash:            tokenHash,
+		Name:                 params.Name,
+		Policy:               policy,
+		BindingMode:          bindingMode,
+		Bindings:             params.Bindings,
+		IssuedBySubjectID:    params.IssuedBySubjectID,
+		IssuedByCredentialID: params.IssuedByCredentialID,
+	})
 	if err != nil {
 		span.SetAttributes(attribute.String("outcome", string(OutcomeFailed)))
 		return "", nil, fmt.Errorf("create app token: %w", err)
@@ -340,6 +361,25 @@ func (svc *Service) GenerateToken(ctx context.Context, params GenerateTokenParam
 		attribute.String("outcome", string(OutcomeCreated)),
 	)
 	return plaintext, tok, nil
+}
+
+func resolveTokenBindingMode(mode store.AppTokenBindingMode, bindings []store.AppTokenBindingRequest) (store.AppTokenBindingMode, error) {
+	if mode == "" {
+		if len(bindings) > 0 {
+			return store.AppTokenBindingFixed, nil
+		}
+		return store.AppTokenBindingDynamic, nil
+	}
+	if !mode.Valid() {
+		return "", fmt.Errorf("%w: invalid binding_mode", ErrTokenPolicyInvalid)
+	}
+	if mode == store.AppTokenBindingDynamic && len(bindings) > 0 {
+		return "", fmt.Errorf("%w: dynamic tokens cannot declare fixed bindings", ErrTokenPolicyInvalid)
+	}
+	if mode == store.AppTokenBindingFixed && len(bindings) == 0 {
+		return "", fmt.Errorf("%w: fixed tokens require at least one binding", ErrTokenPolicyInvalid)
+	}
+	return mode, nil
 }
 
 // FullAccessTokenPolicy is the apply-time default. Keeping it in the lifecycle
@@ -415,10 +455,14 @@ type CreateFamilyParams struct {
 // GenerateTokenParams is adapter-neutral. MCP exposes scope/expiry controls;
 // SDK callers currently use the default policy through the same service.
 type GenerateTokenParams struct {
-	AppFamilyID uuid.UUID
-	Name        string
-	Allow       []string
-	ExpiresIn   *time.Duration
+	AppFamilyID          uuid.UUID
+	Name                 string
+	Allow                []string
+	ExpiresIn            *time.Duration
+	BindingMode          store.AppTokenBindingMode
+	Bindings             []store.AppTokenBindingRequest
+	IssuedBySubjectID    *uuid.UUID
+	IssuedByCredentialID *uuid.UUID
 }
 
 // PublishVersionParams contains the immutable version data.

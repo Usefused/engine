@@ -24,6 +24,18 @@ type RuntimeEnvironmentResolution struct {
 
 var errAbsoluteServerOverrideRequired = errors.New("service server URL requires an absolute workspace or connection-profile override")
 
+const (
+	serverVariableBindingLocation  = "server_variable"
+	serverVariableSourceConnection = "connection_resource"
+	serverVariableSourceApp        = "app_injection"
+	serverVariableSourceWorkspace  = "workspace_policy"
+)
+
+type serverVariableInputs struct {
+	values  map[string]string
+	sources map[string]string
+}
+
 type EnvironmentNotSupportedError struct {
 	Code      string   `json:"code"`
 	Requested string   `json:"requested"`
@@ -121,19 +133,23 @@ func resolveRuntimeServerTemplate(metadata *fusedobject.ServiceMetadata, resolut
 		// invent an origin. Workspace or trusted resource configuration owns it.
 		return resolution, validateStaticRuntimeServer(resolution.BaseURL)
 	}
-	supplied, err := serverVariableValues(credentials, values)
+	supplied, err := serverVariableValues(credentials, values, metadata.ServerVariables)
 	if err != nil {
 		return RuntimeEnvironmentResolution{}, err
 	}
-	resolved, usedSupplied, err := serverrouting.Resolve(resolution.BaseURL, resolution.Variables, supplied)
+	resolved, usedSupplied, err := serverrouting.Resolve(resolution.BaseURL, resolution.Variables, supplied.values)
 	if err != nil {
 		return RuntimeEnvironmentResolution{}, runtimeServerResolutionError(resolution.BaseURL, err)
 	}
+	// Provider defaults do not change the resolution source; supplied inputs may
+	// require an additional trust-boundary decision.
 	if usedSupplied {
-		if err := connectresource.ValidateBaseURL(resolved, runtimeAllowedHosts(metadata.ConnectConfig)); err != nil {
+		if err := validateSuppliedServerRouting(metadata, resolution.BaseURL, resolved, resolution.Variables, supplied.sources); err != nil {
 			return RuntimeEnvironmentResolution{}, err
 		}
-		resolution.Source = "connection_resource"
+		// The bounded winning layer makes user/agent routing changes auditable
+		// without recording variable names, values, URLs, or hostnames.
+		resolution.Source = resolvedServerVariableSource(resolution.Variables, supplied.sources, resolution.Source)
 	}
 	resolution.BaseURL = resolved
 	return resolution, nil
@@ -167,46 +183,155 @@ func forcedRuntimeBaseURL(values []store.BucketValue) string {
 	return ""
 }
 
-func serverVariableValues(credentials map[string]any, values []store.BucketValue) (map[string]string, error) {
+func serverVariableValues(credentials map[string]any, values []store.BucketValue, configured map[string]string) (serverVariableInputs, error) {
 	result, err := resourceMetadataValues(credentials["fused_resource_metadata"])
 	if err != nil {
-		return nil, err
+		return serverVariableInputs{}, err
 	}
+	inputs := serverVariableInputs{values: result, sources: make(map[string]string, len(result))}
+	// Provider resource metadata is trusted only after its connection profile
+	// has passed the existing resource and host validation path.
+	for name := range result {
+		inputs.sources[name] = serverVariableSourceConnection
+	}
+	// One pass merges the already-resolved connection and app bindings without
+	// introducing another bucket read or a second precedence implementation.
 	for _, value := range values {
-		if value.SourceKind == "connection_resource" && value.KeyName != "" {
-			result[value.KeyName] = value.Value
+		// A consumed connection binding wins before app mode is evaluated.
+		if applyConnectionServerVariable(&inputs, value) {
+			continue
 		}
+		applyAppServerVariable(&inputs, value)
 	}
-	return result, nil
+	// Workspace policy remains the final local authority, matching the existing
+	// operation-server precedence while also covering service-level templates.
+	for name, value := range configured {
+		inputs.values[name] = value
+		inputs.sources[name] = serverVariableSourceWorkspace
+	}
+	return inputs, nil
 }
 
-func applyOperationRuntimeServer(metadata *fusedobject.ServiceMetadata, service *models.Service, operation *models.IntegrationObject, resolution RuntimeEnvironmentResolution, credentials map[string]any, values []store.BucketValue) error {
-	if len(operation.OperationServers) == 0 || service.ServerSource == "connection_resource" {
-		return nil
+// applyConnectionServerVariable preserves the provenance already attached by
+// the compiled connection-resource binding path.
+func applyConnectionServerVariable(inputs *serverVariableInputs, value store.BucketValue) bool {
+	// Empty targets cannot contribute to a declared provider variable.
+	if value.SourceKind != "connection_resource" || value.KeyName == "" {
+		return false
 	}
-	server, ok := selectOperationServer(operation.OperationServers, resolution.Environment)
-	if !ok {
-		return nil
+	inputs.values[value.KeyName] = value.Value
+	inputs.sources[value.KeyName] = serverVariableSourceConnection
+	return true
+}
+
+// applyAppServerVariable applies mode precedence to values already resolved
+// through the app bucket's existing batched ingestion path.
+func applyAppServerVariable(inputs *serverVariableInputs, value store.BucketValue) {
+	// Ordinary request injections remain owned by the dispatcher.
+	if value.Location != serverVariableBindingLocation || value.SourceKind != "literal" || value.KeyName == "" {
+		return
 	}
-	supplied, err := serverVariableValues(credentials, values)
-	if err != nil {
-		return err
+	// Default mode preserves a value already selected by a resource profile.
+	if value.Mode == "default" && inputs.values[value.KeyName] != "" {
+		return
 	}
-	for name, value := range metadata.ServerVariables {
-		supplied[name] = value
+	// Plans admit only these modes; omission is retained for legacy app rows
+	// and has the same forced meaning as current canonical plans.
+	if value.Mode != "force" && value.Mode != "" && value.Mode != "default" {
+		return
 	}
-	resolved, dynamic, err := resolveOperationServerURL(service.BaseURL, server, supplied)
-	if err != nil {
-		return err
+	inputs.values[value.KeyName] = value.Value
+	inputs.sources[value.KeyName] = serverVariableSourceApp
+}
+
+// usesConnectionResourceVariable applies the stronger allowlist only when the
+// selected template actually consumes connection-resource data.
+func usesServerVariableSource(variables []serverrouting.Variable, sources map[string]string, source string) bool {
+	// The declared variable set bounds which resolved inputs can affect the URL.
+	for _, variable := range variables {
+		// Provenance is tracked after precedence so an overridden lower layer does
+		// not retain authority over the final routing decision.
+		if sources[variable.Name] == source {
+			return true
+		}
 	}
-	if dynamic {
+	return false
+}
+
+// resolvedServerVariableSource reports only the highest-precedence consumed
+// layer so OTEL and durable Activity explain who selected the route safely.
+func resolvedServerVariableSource(variables []serverrouting.Variable, sources map[string]string, fallback string) string {
+	// Explicit priority checks make the aggregate independent of provider
+	// variable ordering while preserving the runtime merge precedence.
+	if usesServerVariableSource(variables, sources, serverVariableSourceWorkspace) {
+		return serverVariableSourceWorkspace
+	}
+	if usesServerVariableSource(variables, sources, serverVariableSourceApp) {
+		return serverVariableSourceApp
+	}
+	if usesServerVariableSource(variables, sources, serverVariableSourceConnection) {
+		return serverVariableSourceConnection
+	}
+	return fallback
+}
+
+// validateSuppliedServerRouting keeps resource/workspace allowlists intact and
+// confines app bucket values to a provider-owned registrable domain.
+func validateSuppliedServerRouting(metadata *fusedobject.ServiceMetadata, template, resolved string, variables []serverrouting.Variable, sources map[string]string) error {
+	usesConnection := usesServerVariableSource(variables, sources, serverVariableSourceConnection)
+	usesWorkspace := usesServerVariableSource(variables, sources, serverVariableSourceWorkspace)
+	// Resource and workspace routing retain the reviewed ConnectConfig allowlist
+	// used before app server-variable support was introduced.
+	if usesConnection || usesWorkspace {
 		if err := connectresource.ValidateBaseURL(resolved, runtimeAllowedHosts(metadata.ConnectConfig)); err != nil {
 			return err
 		}
 	}
+	return serverrouting.ValidateResolvedHostAnchor(template, resolved, unboundedServerVariablesBySource(variables, sources, serverVariableSourceApp))
+}
+
+// unboundedServerVariablesBySource selects only non-enum inputs because the
+// resolver already confines enum-bound values to the provider declaration.
+func unboundedServerVariablesBySource(variables []serverrouting.Variable, sources map[string]string, source string) map[string]bool {
+	selected := make(map[string]bool)
+	// Only variables consumed by the selected template can affect its route.
+	for _, variable := range variables {
+		// Enum-bound host variables are an immutable provider allowlist already.
+		if sources[variable.Name] == source && len(variable.Enum) == 0 {
+			selected[variable.Name] = true
+		}
+	}
+	return selected
+}
+
+func applyOperationRuntimeServer(metadata *fusedobject.ServiceMetadata, service *models.Service, operation *models.IntegrationObject, resolution RuntimeEnvironmentResolution, credentials map[string]any, values []store.BucketValue) (RuntimeEnvironmentResolution, error) {
+	if len(operation.OperationServers) == 0 || service.ServerSource == "connection_resource" {
+		return resolution, nil
+	}
+	server, ok := selectOperationServer(operation.OperationServers, resolution.Environment)
+	if !ok {
+		return resolution, nil
+	}
+	supplied, err := serverVariableValues(credentials, values, metadata.ServerVariables)
+	if err != nil {
+		return resolution, err
+	}
+	resolved, dynamic, err := resolveOperationServerURL(service.BaseURL, server, supplied.values)
+	if err != nil {
+		return resolution, err
+	}
+	// Dynamic operation servers reuse the same source-specific trust boundary as
+	// service-level templates before replacing the request origin.
+	if dynamic {
+		if err := validateSuppliedServerRouting(metadata, server.URL, resolved, server.Variables, supplied.sources); err != nil {
+			return resolution, err
+		}
+	}
 	service.BaseURL = resolved
 	service.ServerSource = "operation"
-	return nil
+	resolution.BaseURL = resolved
+	resolution.Source = resolvedServerVariableSource(server.Variables, supplied.sources, "operation")
+	return resolution, nil
 }
 
 func selectOperationServer(servers models.Servers, environment string) (models.Server, bool) {

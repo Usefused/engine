@@ -1,9 +1,7 @@
 import { Activity, Clock, ServerCrash, Users, Wrench } from "lucide-react";
 
-// Shared with the per-server /integrations/mcp/:id/analytics route and the
-// Observability page's MCP tab -- both fetch the exact same
-// `mcpAnalytics(app_id)` query from the Engine's MCP GraphQL schema
-// (internal/engine/api/mcp_graphql.go) and just hand the result here.
+// The per-server activity route owns data loading; this component renders its
+// overview without coupling presentation to GraphQL or route state.
 export interface McpAnalyticsData {
   total_requests: number;
   failed_requests: number;
@@ -11,7 +9,29 @@ export interface McpAnalyticsData {
   active_agents: number;
   tool_usage?: Array<{ tool_name: string; count: number; failed: number; average_latency: number }>;
   service_usage?: Array<{ service_name: string; count: number; failed: number; average_latency: number }>;
-  recent_sessions?: Array<{ id: string; session_id: string; started_at: string; ended_at?: string }>;
+  recent_sessions?: Array<{
+    id: string;
+    app_token_id?: string;
+    session_id: string;
+    protocol_version: string;
+    started_at: string;
+    last_activity_at: string;
+    ended_at?: string;
+    end_reason?: string;
+  }>;
+  token_activity?: Array<{
+    id: string;
+    name: string;
+    binding_mode: "dynamic" | "fixed";
+    status: "active" | "expired" | "revoked";
+    issued_by_subject_id?: string;
+    execution_count: number;
+    session_count: number;
+    created_at: string;
+    last_used_at?: string;
+    terminated_at?: string;
+    termination_reason?: string;
+  }>;
 }
 
 interface McpUsageCardEntry {
@@ -54,7 +74,7 @@ function McpUsageCards({ entries }: { entries: McpUsageCardEntry[] }) {
 }
 
 // McpAnalyticsStats renders the high-level MCP measures in a responsive grid.
-export function McpAnalyticsStats({ data }: { data: McpAnalyticsData }) {
+function McpAnalyticsStats({ data }: { data: McpAnalyticsData }) {
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
       <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col relative overflow-hidden">
@@ -102,7 +122,7 @@ export function McpAnalyticsStats({ data }: { data: McpAnalyticsData }) {
 
 // McpToolUsageTable presents tool aggregation as cards on mobile and a dense
 // table when enough width is available.
-export function McpToolUsageTable({ toolUsage }: { toolUsage: NonNullable<McpAnalyticsData["tool_usage"]> }) {
+function McpToolUsageTable({ toolUsage }: { toolUsage: NonNullable<McpAnalyticsData["tool_usage"]> }) {
   const mobileEntries = toolUsage.map((tool) => ({ key: tool.tool_name, name: tool.tool_name, count: tool.count, failed: tool.failed, averageLatency: tool.average_latency, accent: "slate" as const }));
   return (
     <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
@@ -170,7 +190,7 @@ export function McpToolUsageTable({ toolUsage }: { toolUsage: NonNullable<McpAna
 
 // McpServiceUsageTable presents service aggregation without page-level
 // horizontal overflow on narrow screens.
-export function McpServiceUsageTable({ serviceUsage }: { serviceUsage: NonNullable<McpAnalyticsData["service_usage"]> }) {
+function McpServiceUsageTable({ serviceUsage }: { serviceUsage: NonNullable<McpAnalyticsData["service_usage"]> }) {
   const mobileEntries = serviceUsage.map((service) => ({ key: service.service_name, name: service.service_name, count: service.count, failed: service.failed, averageLatency: service.average_latency, accent: "emerald" as const }));
   return (
     <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">

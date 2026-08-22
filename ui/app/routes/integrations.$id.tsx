@@ -1208,7 +1208,7 @@ function useIntegrationDetailModel() {
     });
     const confirmed = await toast.confirm(importPlanConfirmation(plan));
     if (!confirmed) return;
-    await api.integrations.applyImport(plan.plan_id, plan.source_hash);
+    await api.integrations.applyImport(plan.plan_id, plan.review_hash);
     await api.integrations.dismissDrift(serviceId, driftId);
     setDrift((items) => items.filter((item) => item.id !== driftId));
     await loadData();

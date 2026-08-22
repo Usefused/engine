@@ -186,7 +186,7 @@ migration.
 
 Newly generated TypeScript and Python SDK versions embed
 `FUSED_ENGINE_PUBLIC_GRPC_URL` as their default Engine target. Applications can
-override it with the SDK constructor option (`engineUrl` / `engine_url`) or the
+override it with the SDK constructor option (`grpcUrl` / `grpc_url`) or the
 `FUSED_ENGINE_GRPC_URL` and legacy `FUSED_ENGINE_URL` environment variables.
 Existing generated versions remain immutable when this setting changes.
 

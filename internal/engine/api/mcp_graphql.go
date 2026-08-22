@@ -289,18 +289,27 @@ func writeEngineGraphQLAuthorizationError(w http.ResponseWriter, err error) {
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
+var mcpTransportURLsGraphQLType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "MCPTransportURLs",
+	Fields: graphql.Fields{
+		"streamable_http": &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"sse":             &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+	},
+})
+
 var mcpServerType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "MCPServer",
 	Fields: graphql.Fields{
-		"id":              &graphql.Field{Type: graphql.String},
-		"name":            &graphql.Field{Type: graphql.String},
-		"version":         &graphql.Field{Type: graphql.String},
-		"config_key":      &graphql.Field{Type: graphql.String},
-		"mcp_url":         &graphql.Field{Type: graphql.String},
-		"execution_token": &graphql.Field{Type: graphql.String},
-		"active":          &graphql.Field{Type: graphql.Boolean},
-		"deactivated_at":  &graphql.Field{Type: graphql.String},
-		"created_at":      &graphql.Field{Type: graphql.String},
+		"id":                &graphql.Field{Type: graphql.String},
+		"name":              &graphql.Field{Type: graphql.String},
+		"version":           &graphql.Field{Type: graphql.String},
+		"config_key":        &graphql.Field{Type: graphql.String},
+		"default_transport": &graphql.Field{Type: graphql.String},
+		"transport_urls":    &graphql.Field{Type: mcpTransportURLsGraphQLType},
+		"execution_token":   &graphql.Field{Type: graphql.String},
+		"active":            &graphql.Field{Type: graphql.Boolean},
+		"deactivated_at":    &graphql.Field{Type: graphql.String},
+		"created_at":        &graphql.Field{Type: graphql.String},
 	},
 })
 
@@ -335,10 +344,31 @@ var mcpServiceUsageType = graphql.NewObject(graphql.ObjectConfig{
 var mcpSessionSummaryType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "MCPSessionSummary",
 	Fields: graphql.Fields{
-		"id":         &graphql.Field{Type: graphql.String},
-		"session_id": &graphql.Field{Type: graphql.String},
-		"started_at": &graphql.Field{Type: graphql.String},
-		"ended_at":   &graphql.Field{Type: graphql.String},
+		"id":               &graphql.Field{Type: graphql.String},
+		"app_token_id":     &graphql.Field{Type: graphql.String},
+		"session_id":       &graphql.Field{Type: graphql.String},
+		"protocol_version": &graphql.Field{Type: graphql.String},
+		"started_at":       &graphql.Field{Type: graphql.String},
+		"last_activity_at": &graphql.Field{Type: graphql.String},
+		"ended_at":         &graphql.Field{Type: graphql.String},
+		"end_reason":       &graphql.Field{Type: graphql.String},
+	},
+})
+
+var mcpTokenActivityType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "MCPTokenActivity",
+	Fields: graphql.Fields{
+		"id":                   &graphql.Field{Type: graphql.String},
+		"name":                 &graphql.Field{Type: graphql.String},
+		"binding_mode":         &graphql.Field{Type: graphql.String},
+		"status":               &graphql.Field{Type: graphql.String},
+		"issued_by_subject_id": &graphql.Field{Type: graphql.String},
+		"execution_count":      &graphql.Field{Type: graphql.Float},
+		"session_count":        &graphql.Field{Type: graphql.Float},
+		"created_at":           &graphql.Field{Type: graphql.String},
+		"last_used_at":         &graphql.Field{Type: graphql.String},
+		"terminated_at":        &graphql.Field{Type: graphql.String},
+		"termination_reason":   &graphql.Field{Type: graphql.String},
 	},
 })
 
@@ -352,6 +382,7 @@ var mcpAnalyticsDashboardType = graphql.NewObject(graphql.ObjectConfig{
 		"tool_usage":      &graphql.Field{Type: graphql.NewList(mcpToolUsageType)},
 		"service_usage":   &graphql.Field{Type: graphql.NewList(mcpServiceUsageType)},
 		"recent_sessions": &graphql.Field{Type: graphql.NewList(mcpSessionSummaryType)},
+		"token_activity":  &graphql.Field{Type: graphql.NewList(mcpTokenActivityType)},
 	},
 })
 
@@ -364,6 +395,7 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 		// in GraphQL validation errors, so keep it aligned with that surface.
 		Name: "EngineQuery",
 		Fields: graphql.Fields{
+			"appScaffoldRequirements":     appScaffoldRequirementsGraphQLField(s),
 			"currentActorAccess":          currentActorAccessGraphQLField(),
 			"app":                         appGraphQLField(s, packageDownloads),
 			"apps":                        appsGraphQLField(s, packageDownloads),
@@ -562,34 +594,18 @@ func mcpServerByNameField(s store.Store) *graphql.Field {
 // could drift on which fields it exposes.
 func mcpServerFields(r *http.Request, scope store.AppRuntime) map[string]interface{} {
 	active := scope.Status == "" || scope.Status.Runnable()
+	transportURLs := mcpTransportURLsForApp(r, scope.AppID)
 	return map[string]interface{}{
-		"id":             scope.AppID.String(),
-		"name":           scope.Name,
-		"version":        scope.Version,
-		"config_key":     scope.ConfigKey,
-		"mcp_url":        mcpURLForApp(r, scope.AppID),
-		"active":         active,
-		"deactivated_at": "",
-		"created_at":     scope.CreatedAt.Format(mcpGraphQLTimeFormat),
+		"id":                scope.AppID.String(),
+		"name":              scope.Name,
+		"version":           scope.Version,
+		"config_key":        scope.ConfigKey,
+		"default_transport": mcpDefaultTransport,
+		"transport_urls":    mcpTransportURLsGraphQLValue(transportURLs),
+		"active":            active,
+		"deactivated_at":    "",
+		"created_at":        scope.CreatedAt.Format(mcpGraphQLTimeFormat),
 	}
-}
-
-func mcpURLForApp(r *http.Request, appID uuid.UUID) string {
-	if r == nil {
-		return "/mcp/" + appID.String() + "/sse"
-	}
-	scheme := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
-	if scheme == "" {
-		scheme = "http"
-		if r.TLS != nil {
-			scheme = "https"
-		}
-	}
-	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
-	if host == "" {
-		host = r.Host
-	}
-	return scheme + "://" + host + "/mcp/" + appID.String() + "/sse"
 }
 
 const mcpGraphQLTimeFormat = "2006-01-02T15:04:05Z07:00"
@@ -599,6 +615,13 @@ func formatOptionalTime(t *time.Time) string {
 		return ""
 	}
 	return t.Format(mcpGraphQLTimeFormat)
+}
+
+func optionalGraphQLUUIDValue(value uuid.UUID) interface{} {
+	if value == uuid.Nil {
+		return nil
+	}
+	return value.String()
 }
 
 // ─── mcpAnalytics(app_id) ────────────────────────────────────────────────────
@@ -618,19 +641,24 @@ func mcpAnalyticsField(s store.Store) *graphql.Field {
 			if err != nil {
 				return nil, fmt.Errorf("invalid app_id")
 			}
-			if _, err := appOwnedBy(p.Context, s, actor.accountID, appID); err != nil {
+			app, err := appOwnedBy(p.Context, s, actor.accountID, appID)
+			if err != nil {
 				return nil, err
 			}
 			dashboard, err := s.GetMCPAnalyticsDashboard(p.Context, appID)
 			if err != nil {
 				return nil, fmt.Errorf("load mcp analytics: %w", err)
 			}
-			return mcpAnalyticsDashboardFields(dashboard), nil
+			tokens, err := s.ListAppTokens(p.Context, app.AppFamilyID)
+			if err != nil {
+				return nil, fmt.Errorf("load mcp token activity: %w", err)
+			}
+			return mcpAnalyticsDashboardFields(dashboard, tokens), nil
 		},
 	}
 }
 
-func mcpAnalyticsDashboardFields(d *models.MCPAnalyticsDashboard) map[string]interface{} {
+func mcpAnalyticsDashboardFields(d *models.MCPAnalyticsDashboard, tokens []store.AppTokenMetadata) map[string]interface{} {
 	toolUsage := make([]map[string]interface{}, 0, len(d.ToolUsage))
 	for _, u := range d.ToolUsage {
 		toolUsage = append(toolUsage, map[string]interface{}{
@@ -650,15 +678,36 @@ func mcpAnalyticsDashboardFields(d *models.MCPAnalyticsDashboard) map[string]int
 			endedAt = sess.EndedAt.Format(mcpGraphQLTimeFormat)
 		}
 		sessions = append(sessions, map[string]interface{}{
-			"id": sess.ID.String(), "session_id": sess.SessionID,
-			"started_at": sess.StartedAt.Format(mcpGraphQLTimeFormat), "ended_at": endedAt,
+			"id": sess.ID.String(), "app_token_id": optionalGraphQLUUIDValue(sess.AppTokenID),
+			"session_id": sess.SessionID, "protocol_version": sess.ProtocolVersion,
+			"started_at":       sess.StartedAt.Format(mcpGraphQLTimeFormat),
+			"last_activity_at": sess.LastActivityAt.Format(mcpGraphQLTimeFormat),
+			"ended_at":         endedAt, "end_reason": sess.EndReason,
 		})
 	}
 	return map[string]interface{}{
 		"total_requests": d.TotalRequests, "failed_requests": d.FailedRequests,
 		"average_latency": d.AverageLatencyMs, "active_agents": d.ActiveAgents,
 		"tool_usage": toolUsage, "service_usage": serviceUsage, "recent_sessions": sessions,
+		"token_activity": mcpTokenActivityFields(tokens),
 	}
+}
+
+func mcpTokenActivityFields(tokens []store.AppTokenMetadata) []map[string]interface{} {
+	items := make([]map[string]interface{}, 0, len(tokens))
+	for _, token := range tokens {
+		// Activity intentionally omits raw allowlists and credential IDs. Audit
+		// readers need lifecycle/use evidence, not another token-management API.
+		items = append(items, map[string]interface{}{
+			"id": token.ID.String(), "name": token.Name,
+			"binding_mode": string(token.BindingMode), "status": string(token.Status),
+			"issued_by_subject_id": formatOptionalGraphQLUUID(token.IssuedBySubjectID),
+			"execution_count":      float64(token.ExecutionCount), "session_count": float64(token.SessionCount),
+			"created_at": formatGraphQLTime(token.CreatedAt), "last_used_at": formatOptionalGraphQLTime(token.LastUsedAt),
+			"terminated_at": formatOptionalGraphQLTime(token.TerminatedAt), "termination_reason": token.TerminationReason,
+		})
+	}
+	return items
 }
 
 // ─── deployMcpServer and shared app lifecycle ────────────────────────────────
@@ -795,7 +844,7 @@ func deactivateAppGraphQLField(s store.Store) *graphql.Field {
 				return nil, fmt.Errorf("deactivate app: %w", err)
 			}
 			if app.GeneratorVersion == "" {
-				sandbox.KillMCPSessionsForSDK(app.AppID.String())
+				sandbox.TerminateMCPSessionsForApp(app.AppID.String())
 			}
 			span.SetAttributes(attribute.String("outcome", "deactivated"))
 			return true, nil

@@ -24,8 +24,8 @@ func fixtureForTest(t *testing.T, raw string) *Fixture {
 	return fixture
 }
 
-// registerTestMCPSession inserts a session directly into mcpSessions --
-// the same package-level map mcpSseHandler populates in production -- so
+// registerTestMCPSession inserts a session directly into the transport-neutral
+// registry both MCP handlers populate in production, so
 // mcpCallHandler's session lookup has something real to find. Returns the
 // session ID to use as the request's bearer token, and registers cleanup.
 func registerTestMCPSession(t *testing.T, token string, fixture *Fixture) string {
@@ -36,7 +36,7 @@ func registerTestMCPSession(t *testing.T, token string, fixture *Fixture) string
 		appID:           uuid.NewString(),
 		sessionID:       sessionID,
 		token:           token,
-		pendingRequests: make(map[string]pendingReq),
+		pendingRequests: make(map[string]struct{}),
 		fixture:         fixture,
 	}
 	mcpSessions.Unlock()

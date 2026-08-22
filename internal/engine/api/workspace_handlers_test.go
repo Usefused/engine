@@ -130,6 +130,7 @@ type workspaceTestStore struct {
 	connectConfigsForBucketErr   error
 	connectConfigsForBucketCalls int
 	secretMetaCalls              int
+	appBucketReadinessCalls      int
 	serviceConnectConfigs        []store.ConnectConfig
 	workspaceConnectConfigs      []store.WorkspaceConnectConfig
 	workspaceConnectProfiles     []store.WorkspaceConnectionProfile
@@ -1609,6 +1610,31 @@ func (s *workspaceTestStore) ListSecretMeta(ctx context.Context, bucketID uuid.U
 		return s.secretMetas[bucketID], nil
 	}
 	return nil, nil
+}
+
+func (s *workspaceTestStore) GetAppBucketCredentialPresence(_ context.Context, bucketID uuid.UUID, requirements []store.AppCredentialRequirement) ([]store.AppCredentialPresence, error) {
+	s.appBucketReadinessCalls++
+	if s.connectConfigsForBucketErr != nil {
+		return nil, s.connectConfigsForBucketErr
+	}
+	presence := make([]store.AppCredentialPresence, 0, len(requirements))
+	for _, requirement := range requirements {
+		item := store.AppCredentialPresence{
+			ServiceID: requirement.ServiceID, AuthType: requirement.AuthType, AuthName: requirement.AuthName,
+		}
+		if config := s.connectConfigs[bucketID.String()+":"+requirement.ServiceID.String()]; config != nil {
+			item.Connected = config.Enabled && canonicalWorkspaceStaticAuthType(config.AuthType) == requirement.AuthType && strings.TrimSpace(config.AuthName) == requirement.AuthName
+		}
+		for _, requiredKey := range requirement.SecretKeys {
+			for _, secret := range s.secretMetas[bucketID] {
+				if secret.ServiceID == requirement.ServiceID && secret.KeyName == requiredKey {
+					item.SecretKeys = append(item.SecretKeys, requiredKey)
+				}
+			}
+		}
+		presence = append(presence, item)
+	}
+	return presence, nil
 }
 
 func (s *workspaceTestStore) ListSecretMetaPage(ctx context.Context, bucketID uuid.UUID, limit, offset int) ([]store.WorkspaceSecretMeta, int, error) {

@@ -33,6 +33,7 @@ import (
 	"github.com/Usefused/engine/internal/shared/canonical"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
+	"github.com/Usefused/engine/internal/shared/serverrouting"
 )
 
 type SDKConfigPlanRequest struct {
@@ -74,6 +75,8 @@ type sdkConfigDocument struct {
 const maxAppVersionLength = 128
 
 var appVersionPattern = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
+
+const appServerVariableLocation = "server_variable"
 
 type sdkConfigServiceDoc struct {
 	Version    string   `json:"version"`
@@ -486,10 +489,11 @@ func decodeAppApplyPlan(ctx context.Context, configStore store.ConfigRepository,
 	if json.Unmarshal(plan.DesiredState, &doc) != nil || json.Unmarshal(plan.ResolvedPayload, &payload) != nil {
 		return sdkConfigDocument{}, appResolvedPayload{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid resolved " + kind + " plan"}
 	}
-	if err := validateAppBucketIdentity(ctx, s, doc.Bucket, payload.BucketID); err != nil {
+	bucket, err := validateAppBucketIdentity(ctx, s, doc.Bucket, payload.BucketID)
+	if err != nil {
 		return sdkConfigDocument{}, appResolvedPayload{}, err
 	}
-	if err := validateAppBucketReadiness(ctx, s, payload.BucketID, payload.Selections); err != nil {
+	if err := validateAppBucketReadiness(ctx, s, *bucket, payload.Selections, nil); err != nil {
 		return sdkConfigDocument{}, appResolvedPayload{}, err
 	}
 	if err := validateWebhookAttachmentCoverage(ctx, configStore, doc); err != nil {
@@ -541,6 +545,10 @@ func validateAppServiceDoc(name string, service sdkConfigServiceDoc) error {
 	if len(service.Operations) == 0 && !service.SelectAll && len(service.Webhooks) == 0 && !service.WebhooksSelectAll {
 		return fmt.Errorf("service %s requires at least one operation or webhook", name)
 	}
+	// Injection grammar must fail before any Registry or bucket lookup begins.
+	if err := validateAppInjectionDocs(name, service.Injections); err != nil {
+		return err
+	}
 	if service.Auth == nil {
 		return nil
 	}
@@ -549,6 +557,41 @@ func validateAppServiceDoc(name string, service sdkConfigServiceDoc) error {
 	}
 	if !validAppAuthType(service.Auth.Type) {
 		return fmt.Errorf("service %s auth type must be one of basic, bearer, api_key, oauth, oidc, or mtls", name)
+	}
+	return nil
+}
+
+// validateAppInjectionDocs reserves host-template binding for non-secret
+// values from the app's own bucket and rejects ambiguous duplicate targets.
+func validateAppInjectionDocs(service string, injections []InjectionConfig) error {
+	serverTargets := make(map[string]struct{})
+	// Other injection locations retain their established transport behavior;
+	// this boundary owns only the new privileged server-template target.
+	for _, injection := range injections {
+		// Non-routing targets continue through their existing transport owners.
+		if !strings.EqualFold(strings.TrimSpace(injection.Location), appServerVariableLocation) {
+			continue
+		}
+		name := strings.TrimSpace(injection.Name)
+		// Target names must match the canonical provider placeholder grammar.
+		if !serverrouting.IsVariableName(name) {
+			return fmt.Errorf("service %s server_variable injection name is invalid", service)
+		}
+		// URL material must not pull from secret storage because resolved hosts
+		// and paths are provider routing data rather than credential transport.
+		if !sandbox.IsExactNonSecretBucketReference(strings.TrimSpace(injection.Value)) {
+			return fmt.Errorf("service %s server_variable injection %q requires ${bucket.env.*} or ${bucket.values.*}", service, name)
+		}
+		mode := strings.ToLower(strings.TrimSpace(injection.Mode))
+		// Closed mode admission prevents an ignored binding from looking valid.
+		if mode != "" && mode != "force" && mode != "default" {
+			return fmt.Errorf("service %s server_variable injection %q mode must be force or default", service, name)
+		}
+		// A single app must not provide two competing values for one placeholder.
+		if _, duplicate := serverTargets[name]; duplicate {
+			return fmt.Errorf("service %s has duplicate server_variable injection %q", service, name)
+		}
+		serverTargets[name] = struct{}{}
 	}
 	return nil
 }
@@ -605,7 +648,7 @@ func createSDKConfigPlan(
 		return sdkPlanResult{}, err
 	}
 	call.request.OwnerSubjectID, call.request.OwnerTeamID = owner.subjectID, owner.teamID
-	definition, err := resolveSDKPlanDefinition(ctx, configStore, s, registryClient, call, currentState, bucket.ID, appID)
+	definition, err := resolveSDKPlanDefinition(ctx, configStore, s, registryClient, call, currentState, *bucket, appID)
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
@@ -648,8 +691,8 @@ func createSDKConfigPlan(
 }
 
 // resolveSDKPlanDefinition resolves sdk plan definition from immutable app scope before provider dispatch.
-func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkPlanCall, current *store.ConfigState, bucketID, appID uuid.UUID) (sdkPlanDefinition, error) {
-	selections, services, resolvedServices, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current), bucketID)
+func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkPlanCall, current *store.ConfigState, bucket store.Bucket, appID uuid.UUID) (sdkPlanDefinition, error) {
+	selections, services, resolvedServices, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current), bucket)
 	if err != nil {
 		return sdkPlanDefinition{}, err
 	}
@@ -670,7 +713,7 @@ func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepos
 	}
 	generationRequest := sdkGenerateRequest(call.document, selections, bindings, call.defaultEngineURL)
 	generationRequest.UnifiedOperations = unifiedCompilation.Descriptors
-	payload := resolvedSDKPayload(generationRequest, bucketID, appID, noop)
+	payload := resolvedSDKPayload(generationRequest, bucket.ID, appID, noop)
 	payload.UnifiedDefinitionSchemaVersion = unified.DefinitionSchemaVersion
 	payload.UnifiedDefinitions = unifiedCompilation.DefinitionJSON
 	payload.UnifiedDefinitionHash = unifiedCompilation.DefinitionHash
@@ -770,7 +813,7 @@ func resolveSDKSelections(
 
 	doc sdkConfigDocument,
 	previous sdkConfigDocument,
-	bucketID uuid.UUID,
+	bucket store.Bucket,
 ) ([]models.SDKSelection, []map[string]any, []sdkResolvedService, sdkConfigDocument, error) {
 	doc = canonicalAppDocument(doc)
 	services, err := workspaceServicesByConfigKey(ctx, s, registryClient, apiKey, doc)
@@ -818,7 +861,7 @@ func resolveSDKSelections(
 		})
 		stateDoc.Services[activation.ServiceName] = serviceDoc
 	}
-	if err := validateResolvedSDKSelections(ctx, configStore, s, registryClient, apiKey, bucketID, doc, resolved, selections); err != nil {
+	if err := validateResolvedSDKSelections(ctx, configStore, s, registryClient, apiKey, bucket, doc, resolved, selections); err != nil {
 		return nil, nil, nil, sdkConfigDocument{}, err
 	}
 
@@ -826,7 +869,7 @@ func resolveSDKSelections(
 }
 
 // validateResolvedSDKSelections rejects malformed resolved sdk selections before it can cross the Unified operation boundary.
-func validateResolvedSDKSelections(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, apiKey string, bucketID uuid.UUID, doc sdkConfigDocument, resolved []sdkResolvedService, selections []models.SDKSelection) error {
+func validateResolvedSDKSelections(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, apiKey string, bucket store.Bucket, doc sdkConfigDocument, resolved []sdkResolvedService, selections []models.SDKSelection) error {
 	// public target uniqueness becomes execution authority only when Unified
 	// bindings can address those targets; ordinary SDK services keep legacy names.
 	if len(doc.UnifiedOperations) > 0 {
@@ -837,7 +880,7 @@ func validateResolvedSDKSelections(ctx context.Context, configStore store.Config
 	if err := resolveAppAuthPolicies(ctx, registryClient, apiKey, resolved, selections); err != nil {
 		return err
 	}
-	if err := validateAppBucketReadiness(ctx, s, bucketID, selections); err != nil {
+	if err := validateAppBucketReadiness(ctx, s, bucket, selections, appReadinessServiceNames(resolved)); err != nil {
 		return err
 	}
 	if err := validateWebhookAttachmentCoverage(ctx, configStore, doc); err != nil {
@@ -880,7 +923,33 @@ func canonicalAppDocument(doc sdkConfigDocument) sdkConfigDocument {
 			connect.Scopes = sortedUniqueStrings(connect.Scopes)
 			service.Connect = &connect
 		}
+		service.Injections = canonicalAppInjections(service.Injections)
 		canonical.Services[strings.TrimSpace(name)] = service
+	}
+	return canonical
+}
+
+// canonicalAppInjections gives server-variable bindings deterministic mode and
+// casing while preserving order for existing request-transport injections.
+func canonicalAppInjections(injections []InjectionConfig) []InjectionConfig {
+	canonical := append([]InjectionConfig(nil), injections...)
+	// Order remains meaningful for legacy transport targets, so normalization
+	// changes fields in place instead of sorting the slice.
+	for index := range canonical {
+		// Existing transport targets remain byte-for-byte unchanged because their
+		// names and values may be case- or whitespace-sensitive.
+		if !strings.EqualFold(strings.TrimSpace(canonical[index].Location), appServerVariableLocation) {
+			continue
+		}
+		canonical[index].Location = strings.ToLower(strings.TrimSpace(canonical[index].Location))
+		canonical[index].Name = strings.TrimSpace(canonical[index].Name)
+		canonical[index].Value = strings.TrimSpace(canonical[index].Value)
+		canonical[index].Mode = strings.ToLower(strings.TrimSpace(canonical[index].Mode))
+		// A server variable is app-owned routing input, so omission means the same
+		// forced binding documented for this target rather than no action.
+		if canonical[index].Mode == "" {
+			canonical[index].Mode = "force"
+		}
 	}
 	return canonical
 }
@@ -2574,45 +2643,84 @@ func resolveAppBucket(ctx context.Context, s store.Store, bucketName string) (*s
 	return b, nil
 }
 
-func validateAppBucketIdentity(ctx context.Context, s store.Store, bucketName string, authorizedBucketID uuid.UUID) error {
+func validateAppBucketIdentity(ctx context.Context, s store.Store, bucketName string, authorizedBucketID uuid.UUID) (*store.Bucket, error) {
 	bucket, err := resolveAppBucket(ctx, s, bucketName)
 	if err != nil || authorizedBucketID == uuid.Nil || bucket.ID != authorizedBucketID {
-		return workspaceConfigHTTPError{status: http.StatusConflict, message: "app bucket identity changed; create a new plan"}
+		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app bucket identity changed; create a new plan"}
 	}
-	return nil
+	return bucket, nil
+}
+
+type appReadinessBucket struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type appMissingCredential struct {
+	ServiceID         string                        `json:"service_id"`
+	Service           string                        `json:"service,omitempty"`
+	AuthType          string                        `json:"auth_type"`
+	AuthName          string                        `json:"auth_name"`
+	BasicPasswordMode authrouting.BasicPasswordMode `json:"basic_password_mode,omitempty"`
+	RequiredFields    []appMissingCredentialField   `json:"required_fields"`
+}
+
+type appMissingCredentialField struct {
+	Name      string `json:"name"`
+	SecretKey string `json:"secret_key,omitempty"`
 }
 
 // validateAppBucketReadiness checks the one bucket selected by an app before a
 // plan is persisted and again during apply. The planner's immutable chosen
 // alternatives let this pass validate every AND member from metadata without
-// decrypting values. One bucket-scoped pass reports all missing material.
-func validateAppBucketReadiness(ctx context.Context, s store.Store, bucketID uuid.UUID, selections []models.SDKSelection) error {
-	if bucketID == uuid.Nil {
+// decrypting values. One bucket-scoped pass reports all missing material, and
+// its typed response contains prompt labels and secret-key names only so a CLI
+// can remediate without parsing prose or exposing credential values.
+func validateAppBucketReadiness(ctx context.Context, s store.Store, bucket store.Bucket, selections []models.SDKSelection, serviceNames map[uuid.UUID]string) error {
+	if bucket.ID == uuid.Nil {
 		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: "app config requires exactly one bucket"}
 	}
 	if !appSelectionsRequireAuth(selections) {
 		return nil
 	}
-	ready, secretKeys, err := loadAppBucketMaterial(ctx, s, bucketID)
+	ready, secretKeys, err := loadAppBucketMaterial(ctx, s, bucket.ID, selections)
 	if err != nil {
 		return err
 	}
-	missing := make([]string, 0)
+	missing := make([]appMissingCredential, 0)
 	for _, selection := range selections {
-		missing = append(missing, missingAppBucketMaterial(selection, ready, secretKeys)...)
+		missing = append(missing, missingAppBucketMaterial(selection, serviceNames[selection.ServiceID], ready, secretKeys)...)
 	}
 	if len(missing) == 0 {
 		return nil
 	}
-	sort.Strings(missing)
+	sort.Slice(missing, func(i, j int) bool { return appMissingCredentialKey(missing[i]) < appMissingCredentialKey(missing[j]) })
 	return workspaceConfigHTTPError{
-		status:      http.StatusBadRequest,
-		code:        "bucket_credentials_missing",
-		message:     "The selected credential set is missing required authentication material.",
-		category:    "validation",
-		details:     map[string]any{"missing": missing},
+		status:   http.StatusBadRequest,
+		code:     "bucket_credentials_missing",
+		message:  "The selected credential set is missing required authentication material.",
+		category: "validation",
+		details: map[string]any{
+			"bucket":              appReadinessBucket{ID: bucket.ID.String(), Name: bucket.Name},
+			"missing_credentials": missing,
+		},
 		remediation: "Add the required credentials to the credential set and create the plan again.",
 	}
+}
+
+func appMissingCredentialKey(missing appMissingCredential) string {
+	return missing.ServiceID + "\x00" + missing.AuthType + "\x00" + missing.AuthName
+}
+
+// appReadinessServiceNames reuses the bounded plan resolution result for
+// friendlier prompts. Apply intentionally passes no names because the persisted
+// execution scope is ID-authoritative and readiness must never add a lookup.
+func appReadinessServiceNames(resolved []sdkResolvedService) map[uuid.UUID]string {
+	names := make(map[uuid.UUID]string, len(resolved))
+	for _, service := range resolved {
+		names[service.ServiceID] = service.ServiceName
+	}
+	return names
 }
 
 func appSelectionsRequireAuth(selections []models.SDKSelection) bool {
@@ -2624,82 +2732,120 @@ func appSelectionsRequireAuth(selections []models.SDKSelection) bool {
 	return false
 }
 
-func loadAppBucketMaterial(ctx context.Context, s store.Store, bucketID uuid.UUID) (map[string]bool, map[string]bool, error) {
-	configs, err := s.ListConnectConfigsForBucket(ctx, bucketID)
+func loadAppBucketMaterial(ctx context.Context, s store.Store, bucketID uuid.UUID, selections []models.SDKSelection) (map[string]bool, map[string]bool, error) {
+	repository, ok := s.(store.AppBucketReadinessStore)
+	if !ok {
+		return nil, nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to read bucket readiness"}
+	}
+	requirements := appBucketCredentialRequirements(selections)
+	presence, err := repository.GetAppBucketCredentialPresence(ctx, bucketID, requirements)
 	if err != nil {
 		return nil, nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to read bucket readiness"}
 	}
-	secretMetas, err := s.ListSecretMeta(ctx, bucketID)
-	if err != nil {
-		return nil, nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to read bucket readiness"}
-	}
-	ready := make(map[string]bool, len(configs))
-	for _, config := range configs {
-		if config.Enabled {
-			ready[appConnectReadinessKey(config.ServiceID, config.AuthType, config.AuthName)] = true
+	ready := make(map[string]bool, len(presence))
+	secretKeys := make(map[string]bool)
+	for _, item := range presence {
+		if item.Connected {
+			ready[appConnectReadinessKey(item.ServiceID, item.AuthType, item.AuthName)] = true
+		}
+		for _, key := range item.SecretKeys {
+			secretKeys[item.ServiceID.String()+"\x00"+key] = true
 		}
 	}
-	secretKeys := make(map[string]bool, len(secretMetas))
-	for _, secret := range secretMetas {
-		secretKeys[secret.ServiceID.String()+"\x00"+secret.KeyName] = true
-	}
 	trace.SpanFromContext(ctx).SetAttributes(
-		attribute.Int("bucket_connect_config_count", len(configs)),
-		attribute.Int("bucket_secret_metadata_count", len(secretMetas)),
+		attribute.Int("bucket_credential_requirement_count", len(requirements)),
+		attribute.Int("bucket_credential_presence_count", len(presence)),
 	)
 	return ready, secretKeys, nil
 }
 
-func missingAppBucketMaterial(selection models.SDKSelection, ready, secretKeys map[string]bool) []string {
-	missing := make([]string, 0)
+func appBucketCredentialRequirements(selections []models.SDKSelection) []store.AppCredentialRequirement {
+	requirements := make([]store.AppCredentialRequirement, 0)
+	for _, selection := range selections {
+		for _, required := range selection.RequiredAuth {
+			keys := make([]string, 0)
+			for _, field := range appRequiredSecretFields(required) {
+				if field.SecretKey != "" {
+					keys = append(keys, field.SecretKey)
+				}
+			}
+			requirements = append(requirements, store.AppCredentialRequirement{
+				ServiceID: selection.ServiceID, AuthType: canonicalWorkspaceStaticAuthType(required.AuthType),
+				AuthName: strings.TrimSpace(required.AuthName), SecretKeys: keys,
+			})
+		}
+	}
+	return requirements
+}
+
+func missingAppBucketMaterial(selection models.SDKSelection, serviceName string, ready, secretKeys map[string]bool) []appMissingCredential {
+	missing := make([]appMissingCredential, 0)
 	for _, required := range selection.RequiredAuth {
 		if required.AuthType == "oauth" || required.AuthType == "oidc" {
 			if !ready[appConnectReadinessKey(selection.ServiceID, required.AuthType, required.AuthName)] {
-				missing = append(missing, missingConnectedAuthMaterial(selection.ServiceID, required))
+				missing = append(missing, newAppMissingCredential(selection.ServiceID, serviceName, required, []appMissingCredentialField{{Name: "connection"}}))
 			}
 			continue
 		}
-		for _, key := range appRequiredSecretKeys(required) {
-			if !secretKeys[selection.ServiceID.String()+"\x00"+key] {
-				missing = append(missing, selection.ServiceID.String()+" ("+required.AuthType+":"+key+")")
-			}
+		fields := missingAppSecretFields(selection.ServiceID, required, secretKeys)
+		if len(fields) > 0 {
+			missing = append(missing, newAppMissingCredential(selection.ServiceID, serviceName, required, fields))
 		}
 	}
 	return missing
+}
+
+func newAppMissingCredential(serviceID uuid.UUID, serviceName string, required models.SDKRequiredAuth, fields []appMissingCredentialField) appMissingCredential {
+	return appMissingCredential{
+		ServiceID: serviceID.String(), Service: serviceName,
+		AuthType: canonicalWorkspaceStaticAuthType(required.AuthType), AuthName: strings.TrimSpace(required.AuthName), BasicPasswordMode: required.BasicPasswordMode,
+		RequiredFields: fields,
+	}
+}
+
+func missingAppSecretFields(serviceID uuid.UUID, required models.SDKRequiredAuth, secretKeys map[string]bool) []appMissingCredentialField {
+	fields := make([]appMissingCredentialField, 0)
+	for _, field := range appRequiredSecretFields(required) {
+		if !secretKeys[serviceID.String()+"\x00"+field.SecretKey] {
+			fields = append(fields, field)
+		}
+	}
+	return fields
 }
 
 func appConnectReadinessKey(serviceID uuid.UUID, authType, authName string) string {
 	return serviceID.String() + "\x00" + canonicalWorkspaceStaticAuthType(authType) + "\x00" + strings.TrimSpace(authName)
 }
 
-func missingConnectedAuthMaterial(serviceID uuid.UUID, required models.SDKRequiredAuth) string {
-	return serviceID.String() + " (" + required.AuthType + ":" + required.AuthName + ")"
-}
-
-// appRequiredSecretKeys mirrors workspace auth material naming. Exact scheme
-// identity and Basic mode were pinned during Registry policy resolution, so
-// readiness does not need provider rules or decrypted values.
-func appRequiredSecretKeys(required models.SDKRequiredAuth) []string {
+// appRequiredSecretFields keeps prompt-safe field labels beside the exact
+// Engine secret keys. Exact scheme identity and Basic mode were pinned during
+// Registry policy resolution, so readiness needs neither provider rules nor
+// decrypted values.
+func appRequiredSecretFields(required models.SDKRequiredAuth) []appMissingCredentialField {
 	name := strings.TrimSpace(required.AuthName)
 	if name == "" {
-		return []string{"<credential-name>"}
+		return []appMissingCredentialField{{Name: "credential_name", SecretKey: "<credential-name>"}}
 	}
 	switch required.AuthType {
 	case "basic":
 		switch required.BasicPasswordMode {
 		case authrouting.BasicPasswordRequired:
-			return []string{name + "_username", name + "_password"}
+			return []appMissingCredentialField{{Name: "username", SecretKey: name + "_username"}, {Name: "password", SecretKey: name + "_password"}}
 		case authrouting.BasicPasswordOptional, authrouting.BasicPasswordEmpty:
-			return []string{name + "_username"}
+			return []appMissingCredentialField{{Name: "username", SecretKey: name + "_username"}}
 		default:
-			return []string{"<invalid-basic-password-mode>"}
+			return []appMissingCredentialField{{Name: "invalid_basic_password_mode", SecretKey: "<invalid-basic-password-mode>"}}
 		}
 	case "mtls":
-		return []string{name + "_cert", name + "_key"}
-	case "api_key", "bearer":
-		return []string{name}
+		return []appMissingCredentialField{{Name: "certificate", SecretKey: name + "_cert"}, {Name: "private_key", SecretKey: name + "_key"}}
+	case "api_key":
+		return []appMissingCredentialField{{Name: "api_key", SecretKey: name}}
+	case "bearer":
+		return []appMissingCredentialField{{Name: "token", SecretKey: name}}
+	case "oauth", "oidc":
+		return nil
 	default:
-		return []string{"<invalid-auth-type>"}
+		return []appMissingCredentialField{{Name: "invalid_auth_type", SecretKey: "<invalid-auth-type>"}}
 	}
 }
 
@@ -2819,7 +2965,9 @@ func applyAppConfigRuntime(ctx context.Context, configStore store.ConfigReposito
 			ApplyLeaseID: call.applyLeaseID,
 		},
 		Scope: scope, AuthorizedBucketName: authorizedBucketName,
-		TokenHash: tokenHash, TokenName: "default", TokenPolicy: applifecycle.FullAccessTokenPolicy(), TargetLanguage: targetLanguage,
+		TokenHash: tokenHash, TokenName: "default", TokenPolicy: applifecycle.FullAccessTokenPolicy(),
+		TokenIssuedBySubjectID: optionalActorID(call.actor.SubjectID), TokenIssuedByCredentialID: optionalActorID(call.actor.CredentialID),
+		TargetLanguage:   targetLanguage,
 		GeneratorVersion: generatorVersion,
 	})
 	if err != nil {

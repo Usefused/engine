@@ -124,8 +124,11 @@ func runEngine() {
 	postgresStore := store.NewPostgresStore(database)
 	engineStore := store.NewCachedStore(postgresStore, natsClient)
 	tokenValidator := auth.NewTokenValidator(engineStore)
+	runtimeTokenInvalidator := apptokeninvalidation.NewFanoutInvalidator(
+		tokenValidator, sandbox.MCPSessionTokenInvalidator{},
+	)
 	tokenRevoker, err := apptokeninvalidation.NewService(
-		engineStore, tokenValidator, apptokeninvalidation.NewPublisher(natsClient),
+		engineStore, runtimeTokenInvalidator, apptokeninvalidation.NewPublisher(natsClient),
 	)
 	if err != nil {
 		slog.ErrorContext(ctx, "FATAL: Failed to initialize app-token invalidation", slog.String("error_code", "app_token_invalidation_init_failed"))
@@ -162,7 +165,7 @@ func runEngine() {
 		entitlementpkg.LiveEntitlement.Store(entitlement)
 	}
 	backgroundStore := newSerializedBackgroundStore(engineStore)
-	engineWorkers := startEngineWorkers(ctx, engineStore, natsClient, cfg.Engine, tokenValidator)
+	engineWorkers := startEngineWorkers(ctx, engineStore, natsClient, cfg.Engine, runtimeTokenInvalidator)
 	engineWorkers.providerRateLimits = startProviderRateLimitProjection(ctx, postgresStore, natsClient)
 	engineWorkers.packageLeases = startSDKPackageLeaseRenewal(ctx, backgroundStore, registryClient)
 	engineWorkers.publicInsights = startPublicServiceInsightReporting(ctx, backgroundStore, registryClient)
@@ -344,6 +347,7 @@ func requireRegistryLicense(ctx context.Context) string {
 
 type engineWorkers struct {
 	appTokenInvalidations *apptokeninvalidation.Worker
+	appTokenExpiry        *worker.AppTokenExpiryWorker
 	executionEvents       *worker.ExecutionEventWorker
 	retention             *worker.ExecutionRetentionWorker
 	publicInsights        *worker.PublicInsightWorker
@@ -358,6 +362,9 @@ type engineWorkers struct {
 func (w engineWorkers) Stop(ctx context.Context) {
 	if w.appTokenInvalidations != nil {
 		w.appTokenInvalidations.Stop()
+	}
+	if w.appTokenExpiry != nil {
+		w.appTokenExpiry.Stop(ctx)
 	}
 	if w.providerRateLimits != nil {
 		w.providerRateLimits.Stop(ctx)
@@ -424,7 +431,13 @@ func startEngineWorkers(ctx context.Context, engineStore store.Store, natsClient
 	retentionWorker := worker.StartDynamicExecutionRetentionWorker(ctx, engineStore, func() int {
 		return engineExecutionRetentionDays(entitlementpkg.LiveEntitlement.Load(), cfg.ExecutionRetentionDays)
 	}, cfg.ExecutionCleanupBatch)
-	return engineWorkers{appTokenInvalidations: appTokenInvalidations, executionEvents: executionEventWorker, retention: retentionWorker}
+	// A short bounded cleanup keeps credential hashes out of the active table
+	// soon after expiry while the separate history row remains auditable.
+	tokenExpiryWorker := worker.StartAppTokenExpiryWorker(ctx, engineStore, 250)
+	return engineWorkers{
+		appTokenInvalidations: appTokenInvalidations, appTokenExpiry: tokenExpiryWorker,
+		executionEvents: executionEventWorker, retention: retentionWorker,
+	}
 }
 
 func engineExecutionRetentionDays(entitlement models.RuntimeEntitlement, fallback int) int {

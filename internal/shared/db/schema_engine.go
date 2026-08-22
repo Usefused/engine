@@ -30,6 +30,10 @@ const (
 	managedOAuthRefreshMigrationName          = "20260820_managed_oauth_refresh"
 	restExecutionMigrationVersion       int64 = 9
 	restExecutionMigrationName                = "20260820_rest_execution_transport"
+	appTokenHistoryMigrationVersion     int64 = 10
+	appTokenHistoryMigrationName              = "20260822_app_token_history"
+	appTokenCleanupMigrationVersion     int64 = 11
+	appTokenCleanupMigrationName              = "20260822_app_token_history_cleanup"
 	unifiedEmptySetHash                       = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
 )
 
@@ -121,6 +125,8 @@ func engineMigrations() []engineMigration {
 		{Version: connectBrandVioletMigrationVersion, Name: connectBrandVioletMigrationName, Queries: connectBrandVioletMigrationQueries()},
 		{Version: managedOAuthRefreshMigrationVersion, Name: managedOAuthRefreshMigrationName, Queries: managedOAuthRefreshMigrationQueries()},
 		{Version: restExecutionMigrationVersion, Name: restExecutionMigrationName, Queries: restExecutionMigrationQueries()},
+		{Version: appTokenHistoryMigrationVersion, Name: appTokenHistoryMigrationName, Queries: appTokenHistoryMigrationQueries()},
+		{Version: appTokenCleanupMigrationVersion, Name: appTokenCleanupMigrationName, Queries: appTokenCleanupMigrationQueries()},
 	}
 }
 
@@ -619,11 +625,19 @@ func engineSchemaQueries() []string {
 		`CREATE TABLE IF NOT EXISTS fused_mcp_sessions (
 			id uuid PRIMARY KEY,
 			app_id uuid,
+			app_token_id uuid,
 			session_id text,
+			protocol_version text NOT NULL DEFAULT '2024-11-05',
 			started_at timestamp with time zone DEFAULT NOW(),
 			ended_at timestamp with time zone,
-			last_ping_at timestamp with time zone DEFAULT NOW(),
-			client_info jsonb
+			last_activity_at timestamp with time zone DEFAULT NOW(),
+			end_reason text,
+			CONSTRAINT chk_fused_mcp_sessions_end_reason CHECK (
+				end_reason IS NULL OR end_reason IN (
+					'client_terminated', 'client_disconnected', 'idle_timeout', 'token_expired',
+					'token_revoked', 'app_deactivated', 'engine_shutdown', 'runtime_failed', 'tool_call_timeout'
+				)
+			)
 		);`,
 		// App-scoped indexes are created by the additive migration after legacy
 		// tables receive app_id. Keeping one definition also prevents fresh and
@@ -639,6 +653,7 @@ func engineSchemaQueries() []string {
 			account_id uuid,
 			app_family_id uuid,
 			app_id uuid,
+			app_token_id uuid,
 			app_version text,
 			transport text NOT NULL,
 			provider_protocol text,
@@ -1391,11 +1406,54 @@ func engineSchemaQueries() []string {
 			updated_at    timestamptz NOT NULL DEFAULT NOW()
 		);`,
 
+		// Token history is credential-free and outlives the active hash. Activity
+		// can therefore explain who issued an expired token without retaining a
+		// credential that could ever become executable again.
+		`CREATE TABLE IF NOT EXISTS fused_app_token_history (
+			id                    uuid PRIMARY KEY,
+			app_family_id         uuid NOT NULL
+			                      REFERENCES fused_app_families(app_family_id)
+			                      ON DELETE CASCADE,
+			name                  text NOT NULL,
+			allow_all             boolean NOT NULL DEFAULT true,
+			allowed_operations    text[] NOT NULL DEFAULT '{}',
+			binding_mode          text NOT NULL DEFAULT 'dynamic',
+			expires_at            timestamptz,
+			issued_by_subject_id  uuid,
+			issued_by_credential_id uuid,
+			status                text NOT NULL DEFAULT 'active',
+			terminated_at         timestamptz,
+			termination_reason     text,
+			terminated_by_subject_id uuid,
+			terminated_by_credential_id uuid,
+			created_at            timestamptz NOT NULL DEFAULT NOW(),
+			CONSTRAINT chk_fused_app_token_history_allow CHECK (
+				(allow_all AND cardinality(allowed_operations) = 0)
+				OR (NOT allow_all AND cardinality(allowed_operations) > 0 AND NOT ('*' = ANY(allowed_operations)))
+			),
+			CONSTRAINT chk_fused_app_token_history_binding_mode
+				CHECK (binding_mode IN ('dynamic', 'fixed')),
+			CONSTRAINT chk_fused_app_token_history_status
+				CHECK (status IN ('active', 'expired', 'revoked')),
+			CONSTRAINT chk_fused_app_token_history_terminal CHECK (
+				(status = 'active' AND terminated_at IS NULL)
+				OR (status <> 'active' AND terminated_at IS NOT NULL)
+			),
+			CONSTRAINT chk_fused_app_token_history_reason CHECK (
+				(status = 'active' AND termination_reason IS NULL)
+				OR (status = 'expired' AND termination_reason = 'expired')
+				OR (status = 'revoked' AND termination_reason = 'revoked')
+			)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_app_token_history_family
+			ON fused_app_token_history(app_family_id, created_at DESC);`,
+
 		// Family-level execution tokens authorize all active and deprecated
-		// versions without duplicating credentials for each immutable app.
-		// Plaintext is one-time output; only the hash is stored.
+		// versions without duplicating credentials for each immutable app. The
+		// active row is disposable: plaintext is one-time output and only the
+		// hash remains until expiry or revocation removes it.
 		`CREATE TABLE IF NOT EXISTS fused_app_tokens (
-			id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			id              uuid PRIMARY KEY,
 			app_family_id   uuid NOT NULL
 			                REFERENCES fused_app_families(app_family_id)
 			                ON DELETE CASCADE,
@@ -1403,6 +1461,7 @@ func engineSchemaQueries() []string {
 			name            text NOT NULL,
 			allow_all       boolean NOT NULL DEFAULT true,
 			allowed_operations text[] NOT NULL DEFAULT '{}',
+			binding_mode    text NOT NULL DEFAULT 'dynamic',
 			expires_at      timestamptz,
 			last_used_at    timestamptz,
 			created_at      timestamptz NOT NULL DEFAULT NOW(),
@@ -1410,10 +1469,28 @@ func engineSchemaQueries() []string {
 				(allow_all AND cardinality(allowed_operations) = 0)
 				OR (NOT allow_all AND cardinality(allowed_operations) > 0 AND NOT ('*' = ANY(allowed_operations)))
 			),
+			CONSTRAINT chk_fused_app_tokens_binding_mode
+				CHECK (binding_mode IN ('dynamic', 'fixed')),
+			CONSTRAINT fk_fused_app_tokens_history
+				FOREIGN KEY (id) REFERENCES fused_app_token_history(id) ON DELETE RESTRICT,
 			UNIQUE (app_family_id, name)
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_app_tokens_family
-			ON fused_app_tokens(app_family_id, created_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_app_tokens_expiry
+			ON fused_app_tokens(expires_at, id) WHERE expires_at IS NOT NULL;`,
+		// Fixed bindings resolve user-authored selectors once at issue time. The
+		// runtime receives only Engine-owned connection identities and deletion
+		// of the active token removes the complete executable binding set.
+		`CREATE TABLE IF NOT EXISTS fused_app_token_bindings (
+			token_id           uuid NOT NULL REFERENCES fused_app_tokens(id) ON DELETE CASCADE,
+			service_id         uuid NOT NULL,
+			auth_name          text NOT NULL DEFAULT '',
+			auth_connection_id uuid NOT NULL REFERENCES fused_auth_connections(id) ON DELETE CASCADE,
+			resource_id        uuid REFERENCES fused_connection_resources(id) ON DELETE CASCADE,
+			created_at         timestamptz NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (token_id, service_id, auth_name)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_app_token_bindings_connection
+			ON fused_app_token_bindings(auth_connection_id);`,
 	}
 	return append(queries, unifiedSchemaConvergenceQueries()...)
 }
@@ -1655,6 +1732,107 @@ func restExecutionMigrationQueries() []string {
 				app_family_id IS NOT NULL AND app_id IS NOT NULL
 				AND NULLIF(BTRIM(app_version), '') IS NOT NULL
 			)) NOT VALID;`,
+	}
+}
+
+// appTokenHistoryMigrationQueries separates executable hashes from durable
+// lifecycle identity before receipts and sessions begin referring to token IDs.
+// The set-based backfill keeps query count constant for installations with many
+// tokens and leaves actor provenance empty where older rows never recorded it.
+func appTokenHistoryMigrationQueries() []string {
+	return []string{
+		`CREATE TABLE IF NOT EXISTS fused_app_token_history (
+			id uuid PRIMARY KEY,
+			app_family_id uuid NOT NULL REFERENCES fused_app_families(app_family_id) ON DELETE CASCADE,
+			name text NOT NULL,
+			allow_all boolean NOT NULL DEFAULT true,
+			allowed_operations text[] NOT NULL DEFAULT '{}',
+			binding_mode text NOT NULL DEFAULT 'dynamic' CHECK (binding_mode IN ('dynamic', 'fixed')),
+			expires_at timestamptz,
+			issued_by_subject_id uuid,
+			issued_by_credential_id uuid,
+			status text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'expired', 'revoked')),
+			terminated_at timestamptz,
+			terminated_by_subject_id uuid,
+			terminated_by_credential_id uuid,
+			created_at timestamptz NOT NULL DEFAULT NOW(),
+			CONSTRAINT chk_fused_app_token_history_allow CHECK (
+				(allow_all AND cardinality(allowed_operations) = 0)
+				OR (NOT allow_all AND cardinality(allowed_operations) > 0 AND NOT ('*' = ANY(allowed_operations)))
+			),
+			CONSTRAINT chk_fused_app_token_history_terminal CHECK (
+				(status = 'active' AND terminated_at IS NULL)
+				OR (status <> 'active' AND terminated_at IS NOT NULL)
+			)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_app_token_history_family
+			ON fused_app_token_history(app_family_id, created_at DESC);`,
+		`ALTER TABLE fused_app_tokens ADD COLUMN IF NOT EXISTS binding_mode text NOT NULL DEFAULT 'dynamic';`,
+		`ALTER TABLE fused_app_tokens DROP CONSTRAINT IF EXISTS chk_fused_app_tokens_binding_mode;`,
+		`ALTER TABLE fused_app_tokens ADD CONSTRAINT chk_fused_app_tokens_binding_mode CHECK (binding_mode IN ('dynamic', 'fixed'));`,
+		`INSERT INTO fused_app_token_history
+			(id, app_family_id, name, allow_all, allowed_operations, binding_mode, expires_at, status, terminated_at, created_at)
+		 SELECT id, app_family_id, name, allow_all, allowed_operations, binding_mode, expires_at,
+		        CASE WHEN expires_at IS NOT NULL AND expires_at <= NOW() THEN 'expired' ELSE 'active' END,
+		        CASE WHEN expires_at IS NOT NULL AND expires_at <= NOW() THEN expires_at ELSE NULL END,
+		        created_at
+		 FROM fused_app_tokens
+		 ON CONFLICT (id) DO NOTHING;`,
+		`ALTER TABLE fused_app_tokens DROP CONSTRAINT IF EXISTS fk_fused_app_tokens_history;`,
+		`ALTER TABLE fused_app_tokens ADD CONSTRAINT fk_fused_app_tokens_history
+			FOREIGN KEY (id) REFERENCES fused_app_token_history(id) ON DELETE RESTRICT NOT VALID;`,
+		`ALTER TABLE fused_app_tokens VALIDATE CONSTRAINT fk_fused_app_tokens_history;`,
+		`CREATE TABLE IF NOT EXISTS fused_app_token_bindings (
+			token_id uuid NOT NULL REFERENCES fused_app_tokens(id) ON DELETE CASCADE,
+			service_id uuid NOT NULL,
+			auth_name text NOT NULL DEFAULT '',
+			auth_connection_id uuid NOT NULL REFERENCES fused_auth_connections(id) ON DELETE CASCADE,
+			resource_id uuid REFERENCES fused_connection_resources(id) ON DELETE CASCADE,
+			created_at timestamptz NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (token_id, service_id, auth_name)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_app_token_bindings_connection
+			ON fused_app_token_bindings(auth_connection_id);`,
+		`ALTER TABLE fused_mcp_sessions ADD COLUMN IF NOT EXISTS app_token_id uuid;`,
+		`ALTER TABLE fused_mcp_sessions ADD COLUMN IF NOT EXISTS protocol_version text NOT NULL DEFAULT '2024-11-05';`,
+		`ALTER TABLE fused_mcp_sessions ADD COLUMN IF NOT EXISTS last_activity_at timestamptz NOT NULL DEFAULT NOW();`,
+		`ALTER TABLE fused_mcp_sessions ADD COLUMN IF NOT EXISTS end_reason text;`,
+		`ALTER TABLE fused_mcp_sessions DROP CONSTRAINT IF EXISTS chk_fused_mcp_sessions_end_reason;`,
+		`ALTER TABLE fused_mcp_sessions ADD CONSTRAINT chk_fused_mcp_sessions_end_reason
+			CHECK (end_reason IS NULL OR end_reason IN ('client_terminated', 'client_disconnected', 'idle_timeout', 'token_expired', 'token_revoked', 'app_deactivated', 'engine_shutdown', 'runtime_failed'));`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_mcp_sessions_token_started
+			ON fused_mcp_sessions(app_token_id, started_at DESC) WHERE app_token_id IS NOT NULL;`,
+		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS app_token_id uuid;`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_token_started
+			ON fused_engine_execution_events(app_token_id, started_at DESC) WHERE app_token_id IS NOT NULL;`,
+	}
+}
+
+// appTokenCleanupMigrationQueries repairs lifecycle evidence without mutating
+// migration 10, which may already be recorded in an Engine database. It also
+// replaces the old token-list index with the bounded expiry worker's access path.
+func appTokenCleanupMigrationQueries() []string {
+	return []string{
+		`ALTER TABLE fused_app_token_history ADD COLUMN IF NOT EXISTS termination_reason text;`,
+		`UPDATE fused_app_token_history
+		 SET termination_reason = status
+		 WHERE status IN ('expired', 'revoked') AND termination_reason IS NULL;`,
+		`ALTER TABLE fused_app_token_history DROP CONSTRAINT IF EXISTS chk_fused_app_token_history_reason;`,
+		`ALTER TABLE fused_app_token_history ADD CONSTRAINT chk_fused_app_token_history_reason CHECK (
+			(status = 'active' AND termination_reason IS NULL)
+			OR (status = 'expired' AND termination_reason = 'expired')
+			OR (status = 'revoked' AND termination_reason = 'revoked')
+		);`,
+		`ALTER TABLE fused_mcp_sessions DROP CONSTRAINT IF EXISTS chk_fused_mcp_sessions_end_reason;`,
+		`ALTER TABLE fused_mcp_sessions ADD CONSTRAINT chk_fused_mcp_sessions_end_reason CHECK (
+			end_reason IS NULL OR end_reason IN (
+				'client_terminated', 'client_disconnected', 'idle_timeout', 'token_expired',
+				'token_revoked', 'app_deactivated', 'engine_shutdown', 'runtime_failed', 'tool_call_timeout'
+			)
+		);`,
+		`DROP INDEX IF EXISTS idx_fused_app_tokens_family;`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_app_tokens_expiry
+			ON fused_app_tokens(expires_at, id) WHERE expires_at IS NOT NULL;`,
 	}
 }
 

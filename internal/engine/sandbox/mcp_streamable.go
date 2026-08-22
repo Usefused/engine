@@ -1,0 +1,409 @@
+package sandbox
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/Usefused/engine/internal/engine/auth"
+	"github.com/Usefused/engine/internal/engine/entitlement"
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+)
+
+const (
+	mcpSessionIDHeader       = "Mcp-Session-Id"
+	mcpProtocolVersionHeader = "MCP-Protocol-Version"
+	mcpStreamableTransport   = "streamable_http"
+)
+
+type mcpJSONRPCRequest struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params"`
+}
+
+type mcpInitializeParams struct {
+	ProtocolVersion string `json:"protocolVersion"`
+}
+
+func mcpStreamableHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.sandbox.mcp.streamable_http")
+	defer span.End()
+	span.SetAttributes(attribute.String("http.request.method", r.Method))
+	appID, token, ok := extractMCPParams(w, r)
+	if !ok {
+		recordMCPStreamableOutcome(span, "unauthorized", true)
+		return
+	}
+	span.SetAttributes(attribute.String("app.id", appID))
+	switch r.Method {
+	case http.MethodPost:
+		handleMCPStreamablePost(ctx, span, w, r, appID, token)
+	case http.MethodGet:
+		handleMCPStreamableGet(ctx, span, w, r, appID, token)
+	case http.MethodDelete:
+		handleMCPStreamableDelete(ctx, span, w, r, appID, token)
+	default:
+		w.Header().Set("Allow", "POST, GET, DELETE")
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		recordMCPStreamableOutcome(span, "method_not_allowed", true)
+	}
+}
+
+func handleMCPStreamablePost(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, appID, token string) {
+	body, err := readBoundedMCPMessageBody(w, r)
+	if err != nil {
+		recordMCPStreamableOutcome(span, "invalid", true)
+		return
+	}
+	request, err := parseMCPJSONRPCRequest(body)
+	if err != nil {
+		writeMCPJSONRPCError(w, nil, -32700, "invalid JSON-RPC request", http.StatusBadRequest)
+		recordMCPStreamableOutcome(span, "invalid", true)
+		return
+	}
+	sessionID := strings.TrimSpace(r.Header.Get(mcpSessionIDHeader))
+	if sessionID == "" {
+		handleMCPStreamableInitialize(ctx, span, w, r, appID, token, body, request)
+		return
+	}
+	sess, status, err := authenticateMCPStreamableSession(ctx, appID, token, sessionID, r.Header.Get(mcpProtocolVersionHeader))
+	if err != nil {
+		writeError(w, status, err.Error())
+		recordMCPStreamableOutcome(span, "denied", true)
+		return
+	}
+	if request.Method == "initialize" {
+		writeMCPJSONRPCError(w, request.ID, -32600, "session is already initialized", http.StatusBadRequest)
+		recordMCPStreamableOutcome(span, "invalid", true)
+		return
+	}
+	if !allowMessage(w, sess.appID) {
+		recordMCPStreamableOutcome(span, "rate_limited", true)
+		return
+	}
+	serveMCPStreamableRequest(ctx, span, w, sess, body, request)
+}
+
+func handleMCPStreamableInitialize(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, appID, token string, body []byte, request mcpJSONRPCRequest) {
+	if request.Method != "initialize" || len(request.ID) == 0 {
+		writeMCPJSONRPCError(w, request.ID, -32600, "initialize is required before creating a session", http.StatusBadRequest)
+		recordMCPStreamableOutcome(span, "invalid", true)
+		return
+	}
+	if !allowMCPStreamableStart(ctx, span, w, appID) {
+		return
+	}
+	protocolVersion, err := initializeMCPProtocolVersion(request.Params)
+	if err != nil {
+		writeMCPJSONRPCError(w, request.ID, -32602, err.Error(), http.StatusBadRequest)
+		recordMCPStreamableOutcome(span, "invalid", true)
+		return
+	}
+	authContext, err := mcpSessionAuthContext(r.Header)
+	if err != nil {
+		writeMCPJSONRPCError(w, request.ID, -32602, err.Error(), http.StatusBadRequest)
+		recordMCPStreamableOutcome(span, "invalid", true)
+		return
+	}
+	identity, err := validateMCPToken(ctx, appID, token)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid token")
+		recordMCPStreamableOutcome(span, "denied", true)
+		return
+	}
+	sess, err := startMCPStreamableSession(ctx, appID, token, protocolVersion, authContext, identity)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to establish MCP session")
+		recordMCPStreamableOutcome(span, "start_failed", true)
+		return
+	}
+	w.Header().Set(mcpSessionIDHeader, sess.sessionID)
+	w.Header().Set(mcpProtocolVersionHeader, sess.protocolVersion)
+	if !serveMCPStreamableRequest(ctx, span, w, sess, body, request) {
+		terminateMCPSession(sess.sessionID, "runtime_failed")
+	}
+}
+
+func allowMCPStreamableStart(ctx context.Context, span trace.Span, w http.ResponseWriter, appID string) bool {
+	if !allowMCPSessionStart(w, appID) {
+		recordMCPStreamableOutcome(span, "rate_limited", true)
+		return false
+	}
+	return allowMCPStreamableConcurrency(ctx, span, w)
+}
+
+func allowMCPStreamableConcurrency(ctx context.Context, span trace.Span, w http.ResponseWriter) bool {
+	limitErr := entitlement.CheckLimit(span, "mcp_sandbox_concurrency", activeMCPSessionCount(), entitlement.LiveEntitlement.Load().MaxSandboxConcurrency)
+	if limitErr == nil {
+		return true
+	}
+	writeError(w, http.StatusPaymentRequired, limitErr.Error())
+	recordMCPStreamableOutcome(span, "concurrency_limited", true)
+	return false
+}
+
+func startMCPStreamableSession(ctx context.Context, appID, token, protocolVersion string, authContext map[string]any, identity auth.RuntimeIdentity) (*mcpSession, error) {
+	if err := globalObjectCache.ConnectSDK(ctx, appID); err != nil {
+		return nil, err
+	}
+	sessionID := uuid.NewString()
+	runtimeCtx, cancel := mcpSessionContext(context.WithoutCancel(ctx), identity.TokenPolicy.ExpiresAt)
+	fixture, err := prepareSessionFixture(runtimeCtx, appID, identity.TokenPolicy)
+	if err != nil {
+		cleanupFailedMCPStreamableStart(appID, sessionID, cancel)
+		return nil, err
+	}
+	cmd, err := buildMCPCommand(runtimeCtx, sessionID, fixture)
+	if err != nil {
+		cleanupFailedMCPStreamableStart(appID, sessionID, cancel)
+		return nil, err
+	}
+	stdin, stdout, err := setupPipesAndStart(cmd)
+	if err != nil {
+		cleanupFailedMCPStreamableStart(appID, sessionID, cancel)
+		return nil, err
+	}
+	sess := &mcpSession{
+		appID: appID, sessionID: sessionID, tokenID: identity.TokenID,
+		protocolVersion: protocolVersion, transport: mcpStreamableTransport,
+		cmd: cmd, stdin: stdin, cancel: cancel, responses: make(chan string, 32),
+		token: token, fixture: fixture, authContext: authContext,
+	}
+	registerMCPSession(runtimeCtx, sess)
+	go pumpMCPStreamableResponses(runtimeCtx, sess, stdout)
+	return sess, nil
+}
+
+func cleanupFailedMCPStreamableStart(appID, sessionID string, cancel context.CancelFunc) {
+	cancel()
+	os.RemoveAll(mcpSessionTmpDir(sessionID))
+	globalObjectCache.DisconnectSDK(appID)
+}
+
+func pumpMCPStreamableResponses(ctx context.Context, sess *mcpSession, stdout io.ReadCloser) {
+	defer close(sess.responses)
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		select {
+		case sess.responses <- line:
+		case <-ctx.Done():
+			return
+		}
+	}
+	terminateMCPSession(sess.sessionID, "runtime_failed")
+}
+
+func serveMCPStreamableRequest(ctx context.Context, span trace.Span, w http.ResponseWriter, sess *mcpSession, body []byte, request mcpJSONRPCRequest) bool {
+	sess.requestMu.Lock()
+	defer sess.requestMu.Unlock()
+	callID := trackMCPToolCall(request, sess)
+	resetMCPSessionIdleTimer(sess)
+	if _, err := sess.stdin.Write(append(body, '\n')); err != nil {
+		completeMCPToolCall(sess, callID)
+		writeMCPJSONRPCError(w, request.ID, -32603, "failed to dispatch request", http.StatusBadGateway)
+		recordMCPStreamableOutcome(span, "dispatch_failed", true)
+		terminateMCPSession(sess.sessionID, "runtime_failed")
+		return false
+	}
+	touchMCPSession(sess)
+	if len(request.ID) == 0 {
+		w.WriteHeader(http.StatusAccepted)
+		recordMCPStreamableOutcome(span, "accepted", false)
+		return true
+	}
+	response, err := waitForMCPStreamableResponse(ctx, sess, request.ID)
+	if err != nil {
+		completeMCPToolCall(sess, callID)
+		writeMCPJSONRPCError(w, request.ID, -32603, "MCP runtime did not respond", http.StatusBadGateway)
+		recordMCPStreamableOutcome(span, "runtime_failed", true)
+		terminateMCPSession(sess.sessionID, "runtime_failed")
+		return false
+	}
+	completeMCPToolCall(sess, callID)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, response)
+	recordMCPStreamableOutcome(span, "success", false)
+	return true
+}
+
+func waitForMCPStreamableResponse(ctx context.Context, sess *mcpSession, requestID json.RawMessage) (string, error) {
+	timer := time.NewTimer(time.Duration(cfg.Sandbox.ToolCallTimeoutSeconds) * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-timer.C:
+			return "", context.DeadlineExceeded
+		case response, ok := <-sess.responses:
+			if !ok {
+				return "", io.EOF
+			}
+			if mcpJSONRPCResponseMatches(response, requestID) {
+				return response, nil
+			}
+		}
+	}
+}
+
+func mcpJSONRPCResponseMatches(response string, requestID json.RawMessage) bool {
+	var envelope struct {
+		ID json.RawMessage `json:"id"`
+	}
+	if json.Unmarshal([]byte(response), &envelope) != nil || len(envelope.ID) == 0 {
+		return false
+	}
+	return bytes.Equal(compactJSON(envelope.ID), compactJSON(requestID))
+}
+
+func compactJSON(value json.RawMessage) []byte {
+	var buffer bytes.Buffer
+	if json.Compact(&buffer, value) != nil {
+		return value
+	}
+	return buffer.Bytes()
+}
+
+func resetMCPSessionIdleTimer(sess *mcpSession) {
+	if sess.idleTimer != nil {
+		sess.idleTimer.Reset(mcpSessionIdleTimeout())
+	}
+}
+
+func handleMCPStreamableGet(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, appID, token string) {
+	sess, status, err := authenticateMCPStreamableSession(ctx, appID, token, r.Header.Get(mcpSessionIDHeader), r.Header.Get(mcpProtocolVersionHeader))
+	if err != nil {
+		writeError(w, status, err.Error())
+		recordMCPStreamableOutcome(span, "denied", true)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming unsupported")
+		recordMCPStreamableOutcome(span, "unsupported", true)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	touchMCPSession(sess)
+	_, _ = io.WriteString(w, ": connected\n\n")
+	flusher.Flush()
+	streamMCPKeepAlives(ctx, w, flusher, sess.sessionID)
+	recordMCPStreamableOutcome(span, "closed", false)
+}
+
+func streamMCPKeepAlives(ctx context.Context, w io.Writer, flusher http.Flusher, sessionID string) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, ok := lookupMCPSession(sessionID); !ok {
+				return
+			}
+			_, _ = io.WriteString(w, ": ping\n\n")
+			flusher.Flush()
+		}
+	}
+}
+
+func handleMCPStreamableDelete(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, appID, token string) {
+	sess, status, err := authenticateMCPStreamableSession(ctx, appID, token, r.Header.Get(mcpSessionIDHeader), r.Header.Get(mcpProtocolVersionHeader))
+	if err != nil {
+		writeError(w, status, err.Error())
+		recordMCPStreamableOutcome(span, "denied", true)
+		return
+	}
+	touchMCPSession(sess)
+	terminateMCPSession(sess.sessionID, "client_terminated")
+	w.WriteHeader(http.StatusNoContent)
+	recordMCPStreamableOutcome(span, "deleted", false)
+}
+
+func authenticateMCPStreamableSession(ctx context.Context, appID, token, sessionID, protocolVersion string) (*mcpSession, int, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, http.StatusBadRequest, errors.New("Mcp-Session-Id header is required")
+	}
+	sess, ok := lookupMCPSession(sessionID)
+	if !ok || sess.transport != mcpStreamableTransport || sess.appID != appID {
+		return nil, http.StatusNotFound, errors.New("mcp session not found or expired")
+	}
+	if subtle.ConstantTimeCompare([]byte(token), []byte(sess.token)) != 1 {
+		return nil, http.StatusUnauthorized, errors.New("invalid Authorization header")
+	}
+	identity, err := validateMCPToken(ctx, appID, token)
+	if err != nil || identity.TokenID != sess.tokenID {
+		return nil, http.StatusUnauthorized, errors.New("invalid token")
+	}
+	if protocolVersion != "" && protocolVersion != sess.protocolVersion {
+		return nil, http.StatusBadRequest, errors.New("MCP-Protocol-Version does not match the session")
+	}
+	resetMCPSessionIdleTimer(sess)
+	return sess, http.StatusOK, nil
+}
+
+func parseMCPJSONRPCRequest(body []byte) (mcpJSONRPCRequest, error) {
+	var request mcpJSONRPCRequest
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		return mcpJSONRPCRequest{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return mcpJSONRPCRequest{}, errors.New("request must contain one JSON document")
+	}
+	if request.JSONRPC != "2.0" || strings.TrimSpace(request.Method) == "" {
+		return mcpJSONRPCRequest{}, errors.New("invalid JSON-RPC envelope")
+	}
+	return request, nil
+}
+
+func initializeMCPProtocolVersion(params json.RawMessage) (string, error) {
+	var initialize mcpInitializeParams
+	if json.Unmarshal(params, &initialize) != nil {
+		return "", errors.New("initialize params are invalid")
+	}
+	version := strings.TrimSpace(initialize.ProtocolVersion)
+	if version == "" || len(version) > 32 || strings.ContainsAny(version, " \t\r\n") {
+		return "", errors.New("initialize protocolVersion must be a non-empty token of at most 32 characters")
+	}
+	return version, nil
+}
+
+func writeMCPJSONRPCError(w http.ResponseWriter, id json.RawMessage, code int, message string, status int) {
+	if len(id) == 0 {
+		id = json.RawMessage("null")
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"jsonrpc": "2.0", "id": id,
+		"error": map[string]any{"code": code, "message": message},
+	})
+}
+
+func recordMCPStreamableOutcome(span trace.Span, outcome string, failed bool) {
+	span.SetAttributes(attribute.String("outcome", outcome))
+	if failed {
+		span.SetStatus(codes.Error, outcome)
+	}
+}

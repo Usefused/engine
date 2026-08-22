@@ -181,7 +181,9 @@ func newConcurrentArtifactApplyFixture(t *testing.T, configType ConfigType) conc
 	if _, err := accessRepository.BootstrapWorkspace(ctx, accountID, "Artifact Apply Workspace"); err != nil {
 		t.Fatalf("BootstrapWorkspace: %v", err)
 	}
-	if _, err := accesscontrol.BootstrapOwner(ctx, accessRepository, accountID, "fsk_artifact_apply_"+uuid.NewString()); err != nil {
+	owner, err := accesscontrol.BootstrapOwner(ctx, accessRepository, accountID, "fsk_artifact_apply_"+uuid.NewString())
+	// The fixture needs persisted subject and credential IDs to verify durable attribution.
+	if err != nil {
 		t.Fatalf("BootstrapOwner: %v", err)
 	}
 	ownerTeamID := seedAppOwnerTeam(t, ctx, pool)
@@ -230,10 +232,13 @@ func newConcurrentArtifactApplyFixture(t *testing.T, configType ConfigType) conc
 			Scope: AppRuntime{AccountID: accountID, AppID: appID, OwnerTeamID: ownerTeamID,
 				BucketID: bucketID, Selections: []byte("[]"), ScopeSchemaVersion: models.AppScopeSchemaVersion,
 				Kind: AppKind(configType), Name: "concurrent", Version: version, ConfigKey: configKey},
-			AuthorizedBucketName: bucketName,
-			TokenName:            "default", TargetLanguage: targetLanguage,
-			TokenPolicy:      AppTokenPolicy{AllowAll: true, AllowedOperations: []string{}},
-			GeneratorVersion: generatorVersion,
+			AuthorizedBucketName:      bucketName,
+			TokenName:                 "default",
+			TokenPolicy:               AppTokenPolicy{AllowAll: true, AllowedOperations: []string{}},
+			TokenIssuedBySubjectID:    &owner.SubjectID,
+			TokenIssuedByCredentialID: &owner.CredentialID,
+			TargetLanguage:            targetLanguage,
+			GeneratorVersion:          generatorVersion,
 		},
 	}
 }
@@ -259,7 +264,30 @@ func assertAtomicArtifactApplyState(t *testing.T, fixture concurrentArtifactAppl
 	if scopes != 1 || tokens != 1 || states != 1 || applied != 1 {
 		t.Fatalf("atomic artifact state scopes=%d tokens=%d states=%d applied=%d", scopes, tokens, states, applied)
 	}
+	assertArtifactTokenAuditActor(t, fixture)
 	assertCanonicalCapabilityHash(t, fixture)
+}
+
+// assertArtifactTokenAuditActor proves account-level config attribution cannot
+// be substituted for the authenticated local subject at the audit boundary.
+func assertArtifactTokenAuditActor(t *testing.T, fixture concurrentArtifactApplyFixture) {
+	t.Helper()
+	var subjectID, credentialID uuid.UUID
+	err := fixture.pool.QueryRow(fixture.ctx, `
+		SELECT actor_subject_id, actor_credential_id
+		FROM fused_audit_events
+		WHERE action = 'app.token.generate'
+		  AND resource_id = (SELECT app_family_id FROM fused_apps WHERE app_id = $1)
+	`, fixture.params.Scope.AppID).Scan(&subjectID, &credentialID)
+	// A missing audit row fails the atomic-apply contract before identity comparison.
+	if err != nil {
+		t.Fatalf("read app token audit actor: %v", err)
+	}
+	// Both foreign keys must identify the authenticated principal supplied to apply.
+	if fixture.params.TokenIssuedBySubjectID == nil || fixture.params.TokenIssuedByCredentialID == nil ||
+		subjectID != *fixture.params.TokenIssuedBySubjectID || credentialID != *fixture.params.TokenIssuedByCredentialID {
+		t.Fatalf("app token audit actor = %s/%s, want %v/%v", subjectID, credentialID, fixture.params.TokenIssuedBySubjectID, fixture.params.TokenIssuedByCredentialID)
+	}
 }
 
 func assertCanonicalCapabilityHash(t *testing.T, fixture concurrentArtifactApplyFixture) {

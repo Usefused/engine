@@ -22,24 +22,23 @@ import (
 
 type appTokenHandlerStore struct {
 	store.Store
-	createdFamilyID uuid.UUID
-	createdHash     string
-	createdName     string
-	createdPolicy   store.AppTokenPolicy
+	createdIssue    store.AppTokenIssue
 	createCalls     int
+	createErr       error
 	revokedFamilyID uuid.UUID
 	revokedName     string
 	revokeCalls     int
 }
 
-func (s *appTokenHandlerStore) CreateAppToken(_ context.Context, appFamilyID uuid.UUID, tokenHash, name string, policy store.AppTokenPolicy) (*store.AppTokenMetadata, error) {
-	s.createdFamilyID = appFamilyID
-	s.createdHash = tokenHash
-	s.createdName = name
-	s.createdPolicy = policy
+func (s *appTokenHandlerStore) CreateAppToken(_ context.Context, issue store.AppTokenIssue) (*store.AppTokenMetadata, error) {
+	s.createdIssue = issue
 	s.createCalls++
+	if s.createErr != nil {
+		return nil, s.createErr
+	}
 	return &store.AppTokenMetadata{
-		ID: uuid.New(), AppFamilyID: appFamilyID, Name: name, AppTokenPolicy: policy, CreatedAt: time.Now().UTC(),
+		ID: issue.ID, AppFamilyID: issue.AppFamilyID, Name: issue.Name, AppTokenPolicy: issue.Policy,
+		BindingMode: issue.BindingMode, CreatedAt: time.Now().UTC(),
 	}, nil
 }
 
@@ -61,45 +60,9 @@ func TestGenerateAppTokenHandlerCreatesScopedExpiringTokenOnce(t *testing.T) {
 	response := httptest.NewRecorder()
 
 	GenerateAppTokenHandler(repository).ServeHTTP(response, request)
-
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
-	}
-	if response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("Pragma") != "no-cache" {
-		t.Fatalf("one-time token cache headers = %#v", response.Header())
-	}
-	if repository.createCalls != 1 || repository.createdFamilyID != familyID || repository.createdName != "support-agent" {
-		t.Fatalf("create call = %d/%s/%q", repository.createCalls, repository.createdFamilyID, repository.createdName)
-	}
-	if repository.createdPolicy.AllowAll || len(repository.createdPolicy.AllowedOperations) != 2 || repository.createdPolicy.ExpiresAt == nil {
-		t.Fatalf("persisted policy = %#v, want scoped expiring policy", repository.createdPolicy)
-	}
-	if remaining := time.Until(*repository.createdPolicy.ExpiresAt); remaining < 295*time.Second || remaining > 301*time.Second {
-		t.Fatalf("persisted expiry remaining = %s, want about 5m", remaining)
-	}
-
-	var payload struct {
-		Token     string     `json:"token"`
-		Allow     []string   `json:"allow"`
-		ExpiresAt *time.Time `json:"expires_at"`
-	}
-	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if payload.Token == "" || payload.ExpiresAt == nil {
-		t.Fatalf("response payload = %#v, want one-time token and expiry", payload)
-	}
-	digest := sha256.Sum256([]byte(payload.Token))
-	if repository.createdHash != hex.EncodeToString(digest[:]) {
-		t.Fatal("repository did not receive the hash of the one-time plaintext token")
-	}
-	if repository.createdHash == payload.Token || strings.Contains(response.Body.String(), repository.createdHash) {
-		t.Fatal("response exposed the persisted token hash")
-	}
-	if strings.Join(payload.Allow, ",") != "tickets.close,tickets.read" {
-		t.Fatalf("response allow = %#v, want normalized operations", payload.Allow)
-	}
-	assertAppTokenSpansAreSafe(t, exporter.GetSpans(), payload.Token, repository.createdHash)
+	payload := decodeTokenGenerateResponse(t, response)
+	assertScopedTokenIssue(t, response, repository, familyID, payload)
+	assertAppTokenSpansAreSafe(t, exporter.GetSpans(), payload.Token, repository.createdIssue.TokenHash)
 }
 
 func TestGenerateAppTokenHandlerDefaultsToUnrestrictedNonExpiringToken(t *testing.T) {
@@ -114,8 +77,8 @@ func TestGenerateAppTokenHandlerDefaultsToUnrestrictedNonExpiringToken(t *testin
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
 	}
-	if !repository.createdPolicy.AllowAll || len(repository.createdPolicy.AllowedOperations) != 0 || repository.createdPolicy.ExpiresAt != nil {
-		t.Fatalf("default policy = %#v, want unrestricted non-expiring", repository.createdPolicy)
+	if !repository.createdIssue.Policy.AllowAll || len(repository.createdIssue.Policy.AllowedOperations) != 0 || repository.createdIssue.Policy.ExpiresAt != nil {
+		t.Fatalf("default policy = %#v, want unrestricted non-expiring", repository.createdIssue.Policy)
 	}
 	var payload struct {
 		Allow     []string   `json:"allow"`
@@ -129,6 +92,70 @@ func TestGenerateAppTokenHandlerDefaultsToUnrestrictedNonExpiringToken(t *testin
 	}
 }
 
+type tokenGenerateResponse struct {
+	Token        string                    `json:"token"`
+	Allow        []string                  `json:"allow"`
+	ExpiresAt    *time.Time                `json:"expires_at"`
+	BindingMode  store.AppTokenBindingMode `json:"binding_mode"`
+	BindingCount int                       `json:"binding_count"`
+}
+
+func decodeTokenGenerateResponse(t *testing.T, response *httptest.ResponseRecorder) tokenGenerateResponse {
+	t.Helper()
+	var payload tokenGenerateResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	return payload
+}
+
+func assertScopedTokenIssue(t *testing.T, response *httptest.ResponseRecorder, repository *appTokenHandlerStore, familyID uuid.UUID, payload tokenGenerateResponse) {
+	t.Helper()
+	assertTokenResponseHeaders(t, response)
+	assertTokenIssueIdentity(t, repository, familyID)
+	assertScopedTokenPolicy(t, repository.createdIssue.Policy)
+	assertOneTimeTokenResponse(t, response, repository.createdIssue.TokenHash, payload)
+}
+
+func assertTokenResponseHeaders(t *testing.T, response *httptest.ResponseRecorder) {
+	t.Helper()
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("Pragma") != "no-cache" {
+		t.Fatalf("token response status/headers = %d/%#v", response.Code, response.Header())
+	}
+}
+
+func assertTokenIssueIdentity(t *testing.T, repository *appTokenHandlerStore, familyID uuid.UUID) {
+	t.Helper()
+	issue := repository.createdIssue
+	if repository.createCalls != 1 || issue.AppFamilyID != familyID || issue.Name != "support-agent" || issue.IssuedBySubjectID == nil || issue.IssuedByCredentialID == nil {
+		t.Fatalf("create issue = %#v (calls %d)", issue, repository.createCalls)
+	}
+}
+
+func assertScopedTokenPolicy(t *testing.T, policy store.AppTokenPolicy) {
+	t.Helper()
+	if policy.AllowAll || len(policy.AllowedOperations) != 2 || policy.ExpiresAt == nil {
+		t.Fatalf("persisted policy = %#v, want scoped expiring policy", policy)
+	}
+	if remaining := time.Until(*policy.ExpiresAt); remaining < 295*time.Second || remaining > 301*time.Second {
+		t.Fatalf("persisted expiry remaining = %s, want about 5m", remaining)
+	}
+}
+
+func assertOneTimeTokenResponse(t *testing.T, response *httptest.ResponseRecorder, tokenHash string, payload tokenGenerateResponse) {
+	t.Helper()
+	if payload.Token == "" || payload.ExpiresAt == nil || payload.BindingMode != store.AppTokenBindingDynamic || payload.BindingCount != 0 {
+		t.Fatalf("response payload = %#v, want one-time dynamic token and expiry", payload)
+	}
+	digest := sha256.Sum256([]byte(payload.Token))
+	if tokenHash != hex.EncodeToString(digest[:]) || tokenHash == payload.Token || strings.Contains(response.Body.String(), tokenHash) {
+		t.Fatal("one-time token/hash boundary was not preserved")
+	}
+	if strings.Join(payload.Allow, ",") != "tickets.close,tickets.read" {
+		t.Fatalf("response allow = %#v, want normalized operations", payload.Allow)
+	}
+}
+
 func TestGenerateAppTokenHandlerRejectsInvalidPolicyAndJSON(t *testing.T) {
 	tests := []struct {
 		name string
@@ -138,6 +165,8 @@ func TestGenerateAppTokenHandlerRejectsInvalidPolicyAndJSON(t *testing.T) {
 		{name: "wildcard mixed with operation", body: `{"name":"agent","allow":["*","tickets.read"]}`},
 		{name: "non-positive expiry", body: `{"name":"agent","expires_in":0}`},
 		{name: "unknown field", body: `{"name":"agent","permissions":["tickets.read"]}`},
+		{name: "legacy service id binding", body: `{"name":"agent","binding_mode":"fixed","bindings":[{"service_id":"de305d54-75b4-431b-adb2-eb6b9e546014","auth_name":"oauth2","end_user_ref":"customer"}]}`},
+		{name: "fixed without bindings", body: `{"name":"agent","binding_mode":"fixed"}`},
 		{name: "trailing json", body: `{"name":"agent"} {}`},
 	}
 	for _, test := range tests {
@@ -156,6 +185,26 @@ func TestGenerateAppTokenHandlerRejectsInvalidPolicyAndJSON(t *testing.T) {
 				t.Fatalf("CreateAppToken called %d time(s) for invalid request", repository.createCalls)
 			}
 		})
+	}
+}
+
+func TestGenerateAppTokenHandlerReportsUnavailableFixedBindingAsInvalid(t *testing.T) {
+	repository := &appTokenHandlerStore{createErr: store.ErrAppTokenBindingInvalid}
+	request := httptest.NewRequest(http.MethodPost, "/workspace/app-tokens?app_family_id="+uuid.NewString(), strings.NewReader(`{
+		"name":"agent","binding_mode":"fixed","bindings":[{
+			"service_slug":"google-drive","auth_name":"google","end_user_ref":"customer-1"
+		}]
+	}`))
+	request = controlTestRequest(request, uuid.New())
+	response := httptest.NewRecorder()
+
+	GenerateAppTokenHandler(repository).ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest || repository.createCalls != 1 {
+		t.Fatalf("status/create calls = %d/%d, want 400/1: %s", response.Code, repository.createCalls, response.Body.String())
+	}
+	if len(repository.createdIssue.Bindings) != 1 || repository.createdIssue.Bindings[0].ServiceSlug != "google-drive" {
+		t.Fatalf("fixed binding forwarded as %#v", repository.createdIssue.Bindings)
 	}
 }
 

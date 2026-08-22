@@ -1,8 +1,10 @@
 import type { FormEvent } from "react";
 import { AlertTriangle, Check, Copy, Download, Server } from "lucide-react";
 import { AppOwnerControls } from "~/components/access/AppOwnerControls";
+import { McpTransportEndpoints, type McpTransportEndpointData } from "~/components/mcp/McpTransportEndpoints";
 import type { AppBuildSelector, AppOwningTeam } from "~/lib/app-builder-contract";
 import type { ServiceVersion } from "~/lib/api";
+import { formatVersion } from "~/lib/format";
 
 // The right-hand "generate" form from the Create-a-consumer page (SDK vs
 // MCP server config + submit). Pulled out of routes/integrations.builder.tsx
@@ -42,7 +44,7 @@ export interface ConsumerGenerationPanelProps {
   sdkDeployment: { id: string; name: string; version: string; token: string } | null;
   sdkTokenCopied: boolean;
   setSdkTokenCopied: (value: boolean) => void;
-  mcpDeployment: { id: string; url: string; token: string } | null;
+  mcpDeployment: ({ id: string; token: string } & McpTransportEndpointData) | null;
   mcpTokenCopied: boolean;
   setMcpTokenCopied: (value: boolean) => void;
   AddSelectedServiceToWorkspaceButton: React.ComponentType<{
@@ -333,7 +335,7 @@ function SdkDeploymentResult({ sdkDeployment, sdkTokenCopied, setSdkTokenCopied 
         href={`/integrations/sdks/${sdkDeployment.id}`}
         className="mt-3 inline-flex text-xs font-medium text-blue-700 hover:underline"
       >
-        View {sdkDeployment.name} v{sdkDeployment.version}
+        View {sdkDeployment.name} {formatVersion(sdkDeployment.version)}
       </a>
     </div>
   );
@@ -348,7 +350,9 @@ function McpDeploymentResult({ mcpDeployment, mcpTokenCopied, setMcpTokenCopied 
       <div className="flex items-center gap-2 font-semibold text-slate-900">
         <Check className="h-4 w-4 text-emerald-600" /> MCP server ready
       </div>
-      <p className="mt-2 break-all font-mono text-xs">{mcpDeployment.url}</p>
+      <div className="mt-3">
+        <McpTransportEndpoints endpoints={mcpDeployment} />
+      </div>
       {mcpDeployment.token && (
         <ExecutionTokenField token={mcpDeployment.token} copied={mcpTokenCopied} onCopy={() => setMcpTokenCopied(true)} />
       )}

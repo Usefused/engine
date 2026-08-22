@@ -43,7 +43,7 @@ export function BucketAddDropdown({ disabled, onSelect, allowedKinds }: BucketAd
       {open && (
         <div className="absolute right-0 top-full z-20 mt-2 w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
           {allowedKinds.includes("secret") && <MenuItem icon={<KeyRound className="w-4 h-4" />} label="Secret" onClick={() => choose("secret")} />}
-          {allowedKinds.includes("value") && <MenuItem icon={<Database className="w-4 h-4" />} label="Value" onClick={() => choose("value")} />}
+          {allowedKinds.includes("value") && <MenuItem icon={<Database className="w-4 h-4" />} label="Env" onClick={() => choose("value")} />}
         </div>
       )}
     </div>

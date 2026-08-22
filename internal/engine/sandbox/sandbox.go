@@ -32,27 +32,23 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-type pendingReq struct {
-	endpointName string
-	serviceName  string
-	startTime    time.Time
-	// arguments is retained only until the response arrives so
-	// enforceToolCallTimeout can match the request; it is never
-	// written to analytics or telemetry storage.
-	arguments map[string]any
-}
-
 type mcpSession struct {
 	appID           string
 	sessionID       string
+	tokenID         uuid.UUID
+	protocolVersion string
+	transport       string
 	cmd             *exec.Cmd
 	stdin           io.WriteCloser
 	cancel          context.CancelFunc
-	pendingRequests map[string]pendingReq
+	requestMu       sync.Mutex
+	pendingRequests map[string]struct{}
 	pendingMu       sync.Mutex
 	idleTimer       *time.Timer
-	injectedResp    chan string
+	responses       chan string
 	token           string
+	activityMu      sync.Mutex
+	lastActivityAt  time.Time
 
 	// fixture is this session's own operation catalog, built at connect time
 	// from the app version's AppRuntime.Selections (mcp_session_fixture.go), scoping
@@ -138,7 +134,7 @@ func trackExecutionStart(accountID uuid.UUID) (current int, decrement func()) {
 }
 
 // activeMCPSessionCount returns the total number of active MCP sessions
-// currently registered across all SDK IDs.
+// currently registered across all immutable app versions.
 func activeMCPSessionCount() int {
 	mcpSessions.RLock()
 	defer mcpSessions.RUnlock()
@@ -171,14 +167,16 @@ func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, 
 	rl := cfg.Sandbox.RateLimit
 	initRateLimiters(rl.SSEConnectionsPerMinute, rl.SSEBurst, rl.MessagesPerMinute, rl.MessagesBurst)
 
-	// Setup NATS subscriptions
-	setupNATSSubscriptions(nc)
-
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
+	registerMCPRoutes(r)
+}
+
+func registerMCPRoutes(r chi.Router) {
 	r.Get("/mcp/{id}/sse", mcpSseHandler)
+	r.HandleFunc("/mcp/{id}", mcpStreamableHandler)
 	r.Post("/mcp/message", mcpMessageHandler)
 	r.Post("/mcp/call", mcpCallHandler)
 }
@@ -387,10 +385,11 @@ func trackAuthenticatedExecution(identity auth.RuntimeIdentity, span trace.Span)
 	return decrement, nil
 }
 
-func resolveMatchedExecutionCredentials(ctx context.Context, match *scopedEndpoint, obj *models.IntegrationObject, appID, accountID uuid.UUID, credentials map[string]any) (map[string]any, []store.BucketValue, error) {
+func resolveMatchedExecutionCredentials(ctx context.Context, match *scopedEndpoint, obj *models.IntegrationObject, identity auth.RuntimeIdentity, credentials map[string]any) (map[string]any, []store.BucketValue, error) {
 	credentials = credentialsWithSelectionAuth(credentials, match.selection, obj.SecurityRequirements)
 	request := CredentialRequest{
-		AccountID: accountID, AppID: appID, ServiceID: match.service.ID,
+		AccountID: identity.AccountID, AppID: identity.AppID, TokenID: identity.TokenID,
+		BindingMode: identity.BindingMode, ServiceID: match.service.ID,
 		OperationID: obj.Name, Auths: match.service.AuthConfigs, Passthrough: credentials,
 		Requirements: obj.SecurityRequirements,
 	}
@@ -565,7 +564,8 @@ func dispatchRuntimeEnvironment(
 		recordRuntimeEnvironmentAttrs(span, match, environment, "")
 		return RuntimeEnvironmentResolution{}, 0, err
 	}
-	if err := applyOperationRuntimeServer(match.service, srv, obj, resolution, credentials, bucketValues); err != nil {
+	resolution, err = applyOperationRuntimeServer(match.service, srv, obj, resolution, credentials, bucketValues)
+	if err != nil {
 		recordRuntimeEnvironmentAttrs(span, match, environment, "")
 		return RuntimeEnvironmentResolution{}, 0, err
 	}

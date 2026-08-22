@@ -36,6 +36,19 @@ func TestFirstCompleteSecretSetSQLIsOrderedAndExpiryAware(t *testing.T) {
 	}
 }
 
+func TestAppBucketCredentialPresenceSQLUsesExactSecretFreeRequirements(t *testing.T) {
+	for _, required := range []string{"jsonb_to_recordset", "config.bucket_id = $1", "config.service_id = requirement.service_id", "secret.key_name = requested_key.key_name"} {
+		if !strings.Contains(appBucketCredentialPresenceSQL, required) {
+			t.Fatalf("credential readiness query is missing %q: %s", required, appBucketCredentialPresenceSQL)
+		}
+	}
+	for _, forbidden := range []string{"encrypted_value", "encrypted_dek", "encrypted_client_id", "encrypted_client_secret"} {
+		if strings.Contains(strings.ToLower(appBucketCredentialPresenceSQL), forbidden) {
+			t.Fatalf("credential readiness query must not select secret material %q", forbidden)
+		}
+	}
+}
+
 func TestPostgresStore_WorkspaceSecrets(t *testing.T) {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {

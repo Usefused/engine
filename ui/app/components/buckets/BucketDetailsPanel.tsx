@@ -175,7 +175,7 @@ function BucketTabs({
 }) {
   const tabs: Array<{ key: BucketDetailTab; label: string; count: number; visible: boolean }> = ([
     { key: "secrets", label: "Secrets", count: secretCount, visible: permissions.readSecrets },
-    { key: "env", label: "Values", count: valueCount, visible: permissions.readValues },
+    { key: "env", label: "Env", count: valueCount, visible: permissions.readValues },
     {
       key: "connected-users",
       label: "Connected users",

@@ -10,11 +10,8 @@ const (
 	ProviderRateLimitBucket = "FUSED_PROVIDER_RATE_LIMITS"
 
 	FusedEngineSessionWildcard   = "fused_engine.session.>"
-	FusedEngineKillWildcard      = "fused_engine.kill.>"
 	EngineExecutionEventsSubject = "engine.execution.events.v1"
 	AppTokenInvalidatedSubject   = "engine.app_token.invalidated.v1"
-
-	FusedEngineKillSubscribe = "fused_engine.kill.*"
 )
 
 func ProviderRateLimitKVStream() string {
@@ -28,7 +25,6 @@ func ProviderRateLimitKVSubject() string {
 func FusedEngineStreamSubjects() []string {
 	return []string{
 		FusedEngineSessionWildcard,
-		FusedEngineKillWildcard,
 		EngineExecutionEventsSubject,
 		AppTokenInvalidatedSubject,
 	}

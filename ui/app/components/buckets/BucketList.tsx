@@ -94,7 +94,7 @@ function BucketRow({ bucket, selected, onSelect }: { bucket: BucketSummary; sele
           <KeyRound className="w-3.5 h-3.5" />
           {bucket.secret_count}
         </span>
-        <span className="inline-flex items-center gap-1.5" title="Values">
+        <span className="inline-flex items-center gap-1.5" title="Env">
           <Database className="w-3.5 h-3.5" />
           {bucket.value_count}
         </span>

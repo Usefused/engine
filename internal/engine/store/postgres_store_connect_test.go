@@ -29,6 +29,10 @@ func TestPostgresStore_BucketAttachedConnectAuth(t *testing.T) {
 		testConnectConfigOwnership(t, fixture)
 	})
 
+	t.Run("app readiness selects only exact requested credential metadata", func(t *testing.T) {
+		testAppBucketCredentialPresence(t, fixture)
+	})
+
 	t.Run("connections are reusable by bucket and isolated across buckets", func(t *testing.T) {
 		testAuthConnectionsReusableByBucket(t, fixture)
 	})
@@ -1111,6 +1115,36 @@ func connectConfigForFixture(t *testing.T, f connectAuthFixture) ConnectConfig {
 		EncryptedClientID:     encrypted.values[0],
 		EncryptedClientSecret: encrypted.values[1],
 		RedirectURI:           "https://engine.example.com/connect/callback",
+	}
+}
+
+func testAppBucketCredentialPresence(t *testing.T, f connectAuthFixture) {
+	t.Helper()
+	if err := f.store.UpsertSecret(f.ctx, WorkspaceSecret{
+		WorkspaceSecretMeta: WorkspaceSecretMeta{
+			BucketID: f.bucketA, ServiceID: f.serviceID, KeyName: "bearerAuth", CredentialType: "bearer",
+		},
+		EncryptedDEK: "wrapped-metadata-only", EncryptedValue: "encrypted-metadata-only",
+	}); err != nil {
+		t.Fatalf("seed readiness secret: %v", err)
+	}
+	repository := f.store.(AppBucketReadinessStore)
+	presence, err := repository.GetAppBucketCredentialPresence(f.ctx, f.bucketA, []AppCredentialRequirement{
+		{ServiceID: f.serviceID, AuthType: "oauth", AuthName: "oauth"},
+		{ServiceID: f.serviceID, AuthType: "bearer", AuthName: "bearerAuth", SecretKeys: []string{"bearerAuth", "missingKey"}},
+	})
+	if err != nil {
+		t.Fatalf("GetAppBucketCredentialPresence: %v", err)
+	}
+	byType := make(map[string]AppCredentialPresence, len(presence))
+	for _, item := range presence {
+		byType[item.AuthType] = item
+	}
+	if !byType["oauth"].Connected || len(byType["oauth"].SecretKeys) != 0 {
+		t.Fatalf("OAuth readiness presence = %#v", byType["oauth"])
+	}
+	if got := byType["bearer"].SecretKeys; len(got) != 1 || got[0] != "bearerAuth" || byType["bearer"].Connected {
+		t.Fatalf("Bearer readiness presence = %#v", byType["bearer"])
 	}
 }
 

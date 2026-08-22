@@ -221,6 +221,7 @@ func TestControlAuthorizationPreservesRuntimePublicAndGraphQLBoundaries(t *testi
 	}))
 	paths := []string{
 		"/health",
+		"/mcp/server",
 		"/mcp/server/sse",
 		"/webhook/example",
 		"/workspace/connect/callback",

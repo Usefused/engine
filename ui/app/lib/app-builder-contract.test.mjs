@@ -1,12 +1,25 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   APP_BUILDER_OPERATIONS,
   appApplyInput,
   appConfigKey,
   appPlanInput,
+  effectiveAppBuilderServiceURL,
 } from "./app-builder-contract.ts";
+
+const appBuilderPath = fileURLToPath(import.meta.resolve("../routes/integrations.builder.tsx"));
+
+function sourceSection(source, start, end) {
+  const startIndex = source.indexOf(start);
+  const endIndex = source.indexOf(end, startIndex + start.length);
+  assert.notEqual(startIndex, -1, `missing section start: ${start}`);
+  assert.notEqual(endIndex, -1, `missing section end: ${end}`);
+  return source.slice(startIndex, endIndex);
+}
 
 test("uses exact owner-team and authorized selector GraphQL contracts", () => {
   assert.match(APP_BUILDER_OPERATIONS.owningTeams, /appOwningTeams\(search: \$search, limit: \$limit, offset: \$offset\)/);
@@ -51,4 +64,31 @@ test("places ownership only on plan intent and makes apply owner-proof", () => {
 		source_hash: "sha256:abc",
 		config,
 	});
+});
+
+test("resolves the executable URL from an imported service contract", () => {
+  assert.equal(effectiveAppBuilderServiceURL({ base_url: " https://api.example.test/v2 " }), "https://api.example.test/v2");
+  assert.equal(effectiveAppBuilderServiceURL({
+    base_url: "",
+    servers: [
+      { url: "https://sandbox.example.test" },
+      { url: "https://api.example.test", is_default: true },
+    ],
+  }), "https://api.example.test");
+  assert.equal(effectiveAppBuilderServiceURL({ base_url: null, servers: [] }), "");
+});
+
+test("hydrates the effective URL for catalog, expansion, and version changes", async () => {
+  const source = await readFile(appBuilderPath, "utf8");
+  const sections = [
+    sourceSection(source, "async function loadRegistryServicesByIDs", "// AddSelectedServiceToWorkspaceButton"),
+    sourceSection(source, "async function loadBuilderVersionContract", "// appServicesConfig"),
+    sourceSection(source, "const webhookRes = await api.graphql", "const bootstrap = builderBootstrapRows"),
+  ];
+
+  for (const section of sections) {
+    assert.match(section, /\bbase_url\b/);
+    assert.match(section, /servers\s*\{\s*url\b/);
+  }
+  assert.match(source, /effectiveAppBuilderServiceURL\(serviceData\.service\)/);
 });

@@ -8,22 +8,21 @@ export const meta: MetaFunction = ({ matches }) => {
     { title: "MCP servers - Fused" },
   ];
 };
-import { Trash2, Copy, TerminalSquare, AlertCircle, Play, ServerCrash, BarChart2, Info } from "lucide-react";
+import { Trash2, TerminalSquare, AlertCircle, Play, ServerCrash, BarChart2, Info } from "lucide-react";
 import { api } from "~/lib/api";
 import { useToast } from "~/components/Toast";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasResourcePermission, hasWorkspacePermission } from "~/lib/current-actor-access";
+import { McpTransportEndpoints, type McpTransportEndpointData } from "~/components/mcp/McpTransportEndpoints";
 
-interface McpServerItem {
+interface McpServerItem extends McpTransportEndpointData {
   id: string;
   app_family_id: string;
   name: string;
   version: string;
   status: string;
-  active: boolean;
-  mcp_url?: string;
-  deactivated_at?: string;
-  created_at?: string;
+	active: boolean;
+	created_at?: string;
 }
 
 interface McpServerCardProps {
@@ -34,7 +33,7 @@ interface McpServerCardProps {
   onDelete: (id: string, name: string) => void;
   onKill: (id: string, name: string) => void;
   onReactivate: (id: string) => void;
-  onCopyUrl: (url: string) => void;
+  onEndpointCopied: (transport: "streamable_http" | "sse") => void;
   canManage: boolean;
   canReadActivity: boolean;
 }
@@ -51,36 +50,10 @@ function McpServerStatusBadge({ status }: { status: string }) {
   );
 }
 
-function McpConnectionUrlRow({ server, onCopyUrl }: { server: McpServerItem; onCopyUrl: (url: string) => void }) {
-  if (!server.active) {
-    return (
-      <code className="flex-1 bg-white px-3 py-2 rounded-lg border border-slate-200 text-xs font-mono text-slate-800 break-all shadow-sm">
-        <span className="text-slate-400 italic">Server killed -- reactivate to reconnect</span>
-      </code>
-    );
-  }
-  return (
-    <>
-      <code className="flex-1 bg-white px-3 py-2 rounded-lg border border-slate-200 text-xs font-mono text-slate-800 break-all shadow-sm">
-        {server.mcp_url}
-      </code>
-      <button
-        data-track="copy_mcp_sandbox_url"
-        onClick={() => onCopyUrl(server.mcp_url || "")}
-        className="p-2 bg-white border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 hover:text-slate-900 transition-colors shadow-sm cursor-pointer"
-        title="Copy URL"
-      >
-        <Copy className="w-4 h-4" />
-      </button>
-    </>
-  );
-}
-
 // Kill/Reactivate toggle, not Restart -- Kill just flips `active` (deployment
 // and its selections are untouched), so "restarting" is the same server
-// coming back, not a redeploy. There's also no token-regenerate button here
-// anymore: the Engine schema has no mutation for it, since the scope's auth
-// token is tied to the deploy itself.
+// coming back, not a redeploy. Execution-token lifecycle stays separate from
+// app-version lifecycle so ending a client session never mutates credentials.
 function McpKillReactivateButton({ server, onKill, onReactivate }: { server: McpServerItem; onKill: (id: string, name: string) => void; onReactivate: (id: string) => void }) {
   if (server.status === "active") {
     return (
@@ -122,7 +95,7 @@ function McpActivityLink({ serverId, visible }: { serverId: string; visible: boo
 }
 
 /** Renders one MCP server with lifecycle controls scoped to its app family. */
-function McpServerCard({ server, isSelected, anySelected, onToggleSelect, onDelete, onKill, onReactivate, onCopyUrl, canManage, canReadActivity }: McpServerCardProps) {
+function McpServerCard({ server, isSelected, anySelected, onToggleSelect, onDelete, onKill, onReactivate, onEndpointCopied, canManage, canReadActivity }: McpServerCardProps) {
   return (
     <div className={mcpServerCardClass(server.active)}>
       <div className="p-5 border-b border-slate-100 flex items-start justify-between">
@@ -157,10 +130,8 @@ function McpServerCard({ server, isSelected, anySelected, onToggleSelect, onDele
 
       <div className="p-5 bg-slate-50/50 space-y-4">
         <div>
-          <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 block">Connection URL</label>
-          <div className="flex items-center gap-2">
-            <McpConnectionUrlRow server={server} onCopyUrl={onCopyUrl} />
-          </div>
+          <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 block">Connection endpoints</label>
+          <McpTransportEndpoints endpoints={server} enabled={server.active} onCopied={onEndpointCopied} />
         </div>
 
         <div className="flex items-center justify-between pt-2">
@@ -192,7 +163,7 @@ function McpConnectionGuide({ show }: { show: boolean }) {
       </h4>
       <div className="space-y-2 text-sm text-slate-700 leading-relaxed">
         <p>
-          Use the server's <strong>Connection URL</strong> and send its execution token in the authorization header:
+          Use the server's recommended <strong>Streamable HTTP endpoint</strong> and send its execution token in the authorization header:
         </p>
         <code className="inline-block max-w-full break-all rounded bg-slate-200/70 px-2 py-1 font-mono text-xs text-slate-900">
           Authorization: Bearer &lt;execution-token&gt;
@@ -293,19 +264,20 @@ export default function McpServers() {
             version
             status
             created_at
+            default_transport
+            transport_urls { streamable_http sse }
           }
           total
         }
       }
     `;
-    type MCPApp = Omit<McpServerItem, "id" | "active" | "mcp_url"> & { app_id: string; status: string };
+    type MCPApp = Omit<McpServerItem, "id" | "active"> & { app_id: string; status: string };
     api.mcpGraphql<{ apps: { items: MCPApp[], total: number } }>(queryStr, { limit, offset: (page - 1) * limit })
       .then(res => {
         setMcpServers(res.apps.items.map(app => ({
           ...app,
           id: app.app_id,
           active: app.status === "active" || app.status === "deprecated",
-          mcp_url: `${window.location.origin}/mcp/${app.app_id}/sse`,
         })));
         setTotal(res.apps.total);
       })
@@ -440,7 +412,7 @@ export default function McpServers() {
               onDelete={handleDelete}
               onKill={handleKill}
               onReactivate={handleReactivate}
-              onCopyUrl={(url) => { navigator.clipboard.writeText(url); toast.success("URL copied to clipboard!"); }}
+              onEndpointCopied={(transport) => toast.success(`${transport === "streamable_http" ? "Streamable HTTP" : "SSE"} URL copied to clipboard!`)}
               canManage={hasResourcePermission(access, "app.manage", "APP", server.app_family_id)}
               canReadActivity={hasWorkspacePermission(access, "audit.read") && hasResourcePermission(access, "app.read", "APP", server.app_family_id)}
             />

@@ -277,7 +277,7 @@ func newExecutionActivityFixture(t *testing.T) executionActivityFixture {
 	serviceID, serviceVersionID := uuid.New(), uuid.New()
 	now := time.Now().UTC()
 	return executionActivityFixture{ctx: ctx, pool: pool, repository: repository, event: models.EngineExecutionEvent{
-		ID: uuid.New(), AccountID: accountID, AppFamilyID: familyID, AppID: appID,
+		ID: uuid.New(), AccountID: accountID, AppFamilyID: familyID, AppID: appID, AppTokenID: uuid.New(),
 		AppVersion: "2.0.0", Transport: models.EngineExecutionTransportMCP,
 		ProviderProtocol: "graphql", Direction: models.EngineExecutionDirectionOutbound,
 		ServiceID: serviceID, ServiceVersionID: serviceVersionID.String(), EndpointName: "issues.list", Status: models.EngineExecutionStatusSuccess,
@@ -365,7 +365,7 @@ func requireSingleExecutionEvent(t *testing.T, rows []models.EngineExecutionEven
 // assertExecutionCoreIdentity verifies persisted app and protocol fields.
 func assertExecutionCoreIdentity(t *testing.T, event models.EngineExecutionEvent) {
 	t.Helper()
-	if event.AppVersion != "2.0.0" || event.ProviderProtocol != "graphql" {
+	if event.AppVersion != "2.0.0" || event.ProviderProtocol != "graphql" || event.AppTokenID == uuid.Nil {
 		t.Fatalf("persisted identity = %#v", event)
 	}
 }

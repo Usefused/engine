@@ -65,6 +65,7 @@ type graphQLAuthorizationPolicy struct {
 // policy is therefore a fail-closed server configuration error.
 var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 	queryRoots: map[string]graphQLFieldPolicy{
+		"appScaffoldRequirements":     collectionPermissions(accesscontrol.ResourceService, accesscontrol.PermissionServiceRead),
 		"currentActorAccess":          authenticatedOnly(),
 		"app":                         collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
 		"apps":                        collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),

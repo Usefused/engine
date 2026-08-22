@@ -253,8 +253,12 @@ type ApplyAppConfigPlanParams struct {
 	TokenHash            string
 	TokenName            string
 	TokenPolicy          AppTokenPolicy
-	TargetLanguage       string
-	GeneratorVersion     string
+	// Token issuer identity is distinct from the account-level config author so
+	// durable token audit references the authenticated local principal.
+	TokenIssuedBySubjectID    *uuid.UUID
+	TokenIssuedByCredentialID *uuid.UUID
+	TargetLanguage            string
+	GeneratorVersion          string
 }
 
 type ApplyAppConfigPlanResult struct {
@@ -848,25 +852,31 @@ func publishConfigAppTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, para
 }
 
 func ensureAppFamilyTokenTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, params ApplyAppConfigPlanParams) (bool, error) {
-	// Apply shares the same non-null array invariant as standalone token issue;
-	// a nil Go slice still means no exact operations, never SQL NULL.
-	allowedOperations := nonNilStrings(params.TokenPolicy.AllowedOperations)
-	var created bool
+	var tokenExists bool
+	// Locking the family serializes the check-and-create boundary across app
+	// versions without widening uniqueness rules onto retained token history.
 	err := tx.QueryRow(ctx, `
-		INSERT INTO fused_app_tokens
-			(app_family_id, token_hash, name, allow_all, allowed_operations, expires_at)
-		SELECT $1, $2, $3, $4, $5, $6
-		WHERE NOT EXISTS (SELECT 1 FROM fused_app_tokens WHERE app_family_id = $1)
-		RETURNING true
-	`, familyID, params.TokenHash, params.TokenName, params.TokenPolicy.AllowAll,
-		allowedOperations, params.TokenPolicy.ExpiresAt).Scan(&created)
-	if errors.Is(err, pgx.ErrNoRows) {
+		SELECT EXISTS (SELECT 1 FROM fused_app_tokens WHERE app_family_id = family.app_family_id)
+		FROM fused_app_families family WHERE family.app_family_id = $1
+		FOR UPDATE
+	`, familyID).Scan(&tokenExists)
+	if err != nil {
+		return false, fmt.Errorf("ApplyAppConfigPlan: inspect family token: %w", err)
+	}
+	if tokenExists {
 		return false, nil
 	}
+	_, err = createAppTokenTx(ctx, tx, AppTokenIssue{
+		ID: uuid.New(), AppFamilyID: familyID, TokenHash: params.TokenHash,
+		Name: params.TokenName, Policy: params.TokenPolicy,
+		BindingMode:          AppTokenBindingDynamic,
+		IssuedBySubjectID:    params.TokenIssuedBySubjectID,
+		IssuedByCredentialID: params.TokenIssuedByCredentialID,
+	})
 	if err != nil {
 		return false, fmt.Errorf("ApplyAppConfigPlan: create family token: %w", err)
 	}
-	return created, nil
+	return true, nil
 }
 
 func validateAppApplyParams(params ApplyAppConfigPlanParams) error {

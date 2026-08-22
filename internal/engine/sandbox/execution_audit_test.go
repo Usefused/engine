@@ -198,8 +198,9 @@ func TestEngineExecuteCoreAuditsAndTracesTokenScopeDenial(t *testing.T) {
 	})
 
 	appID := uuid.New()
+	tokenID := uuid.New()
 	validator := fixedPolicyValidator{identity: auth.RuntimeIdentity{
-		AccountID: uuid.New(), AppFamilyID: uuid.New(), AppVersion: "1.0.0",
+		AccountID: uuid.New(), AppFamilyID: uuid.New(), TokenID: tokenID, AppVersion: "1.0.0",
 		Kind: store.AppKindMCP, Status: store.AppStatusActive,
 		TokenPolicy: store.AppTokenPolicy{AllowedOperations: []string{"users.get"}},
 	}}
@@ -214,7 +215,7 @@ func TestEngineExecuteCoreAuditsAndTracesTokenScopeDenial(t *testing.T) {
 	if err := json.Unmarshal(capture.message.Data, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if envelope.Event.FailureCategory != "policy" || envelope.Event.FailureCode != "scope_denied" {
+	if envelope.Event.FailureCategory != "policy" || envelope.Event.FailureCode != "scope_denied" || envelope.Event.AppTokenID != tokenID {
 		t.Fatalf("scope denial classification = %s/%s", envelope.Event.FailureCategory, envelope.Event.FailureCode)
 	}
 

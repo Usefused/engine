@@ -43,6 +43,14 @@ export interface AppApplyInput {
   source_hash: string;
 }
 
+export interface AppBuilderServiceURL {
+  base_url?: string | null;
+  servers?: Array<{
+    url?: string | null;
+    is_default?: boolean;
+  }> | null;
+}
+
 export const APP_BUILDER_OPERATIONS = {
   owningTeams: `
     query AppOwningTeams($search: String, $limit: Int!, $offset: Int!) {
@@ -88,6 +96,15 @@ export function appApplyInput(plan: AppPlanResponse): AppApplyInput {
   // Apply proves intent with the saved plan and hash. It deliberately has no
   // owner override, preventing a browser or agent from changing ownership.
   return { plan_id: plan.plan_id, source_hash: plan.source_hash };
+}
+
+// effectiveAppBuilderServiceURL accepts the Registry's effective base URL and
+// retains a server-list fallback for contracts that only declare servers.
+export function effectiveAppBuilderServiceURL(service: AppBuilderServiceURL): string {
+  const baseURL = service.base_url?.trim();
+  if (baseURL) return baseURL;
+  const servers = service.servers || [];
+  return (servers.find((server) => server.is_default)?.url || servers[0]?.url || "").trim();
 }
 
 function requiredAppText(value: unknown, field: string): string {

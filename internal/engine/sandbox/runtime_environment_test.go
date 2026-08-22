@@ -410,11 +410,12 @@ func TestApplyOperationRuntimeServerUsesWorkspaceVariables(t *testing.T) {
 		URL: "/{region}/v2", IsDefault: true,
 		Variables: []serverrouting.Variable{{Name: "region", Default: &defaultRegion}},
 	}}}
-	if err := applyOperationRuntimeServer(metadata, service, operation, RuntimeEnvironmentResolution{}, nil, nil); err != nil {
+	resolution, err := applyOperationRuntimeServer(metadata, service, operation, RuntimeEnvironmentResolution{}, nil, nil)
+	if err != nil {
 		t.Fatalf("applyOperationRuntimeServer: %v", err)
 	}
-	if service.BaseURL != "https://api.example.test/eu/v2" || service.ServerSource != "operation" {
-		t.Fatalf("service = %#v", service)
+	if service.BaseURL != "https://api.example.test/eu/v2" || service.ServerSource != "operation" || resolution.BaseURL != service.BaseURL || resolution.Source != serverVariableSourceWorkspace {
+		t.Fatalf("service = %#v resolution = %#v", service, resolution)
 	}
 }
 
