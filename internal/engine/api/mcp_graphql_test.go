@@ -524,7 +524,9 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 		appTokens: []store.AppTokenMetadata{{
 			ID: tokenID, AppFamilyID: appID, Name: "agent",
 			AppTokenPolicy: store.AppTokenPolicy{AllowedOperations: []string{"issues.list"}, ExpiresAt: &tokenLastUsedAt},
-			LastUsedAt:     &tokenLastUsedAt, CreatedAt: now,
+			BindingMode:    store.AppTokenBindingFixed, Status: store.AppTokenStatusRevoked,
+			IssuedBySubjectID: &accountID, LastUsedAt: &tokenLastUsedAt,
+			ExecutionCount: 4, SessionCount: 2, TerminatedAt: &now, TerminationReason: "revoked", CreatedAt: now,
 		}},
 		appRuntimesForBucket: map[uuid.UUID][]store.AppRuntime{
 			attachedBucketID: {{AccountID: accountID, AppID: appID, BucketID: attachedBucketID, Kind: "sdk", Name: "prod sdk", CreatedAt: now}},
@@ -601,7 +603,7 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 		engineExecutionAnalytics(service_id: "` + serviceID.String() + `", transport: "sdk", status: "success") { total_calls successful_calls failed_calls average_latency_ms }
 		workspaceExecutionAnalytics { total_calls inbound_calls successful_calls failed_calls p95_latency_ms by_service { key label total_calls inbound_calls } most_used_sdk { key label total_calls } most_used_service { key label total_calls } most_failed_service { key label failed_calls } most_used_bucket { key label total_calls } }
 		serviceConsumers(service_id: "` + serviceID.String() + `") { id name version kind active service_version_id select_all operation_count webhook_count created_at }
-		appTokens(app_family_id: "` + appID.String() + `") { id app_family_id name allow expires_at created_at last_used_at }
+		appTokens(app_family_id: "` + appID.String() + `") { id app_family_id name allow binding_mode status expires_at created_at last_used_at execution_count session_count issued_by_subject_id terminated_at termination_reason }
 		sdkBuckets(app_family_id: "` + appID.String() + `") { id name is_default }
 		bucketSDKPage(bucket_id: "` + attachedBucketID.String() + `", limit: 10, offset: 0) { total items { id name kind active } }
 		bucketServicePage(bucket_id: "` + attachedBucketID.String() + `", search: "Lin", limit: 10, offset: 0) { total items { service_id service_name secret_count value_count connect_config_count connected_user_count } }
@@ -616,7 +618,7 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 
 	assertLinkedBucketGraphQLData(t, data, attachedBucketID)
 	assertWorkspaceServiceGraphQLData(t, data, verifier)
-	assertWebhookAndTokenGraphQLData(t, data)
+	assertWebhookAndTokenGraphQLData(t, data, accountID)
 	assertBucketUsageGraphQLData(t, data)
 	assertSecretAndConnectGraphQLData(t, data)
 }
@@ -663,7 +665,7 @@ func assertWorkspaceServiceGraphQLData(t *testing.T, data map[string]any, verifi
 	assertGraphQLLen(t, verifier.authConfigCalls[0], 1, "authConfigCalls[0]")
 }
 
-func assertWebhookAndTokenGraphQLData(t *testing.T, data map[string]any) {
+func assertWebhookAndTokenGraphQLData(t *testing.T, data map[string]any, issuerID uuid.UUID) {
 	webhooks := graphQLList(t, data["workspaceWebhooks"], "workspaceWebhooks")
 	assertGraphQLLen(t, webhooks, 1, "workspaceWebhooks")
 	assertGraphQLField(t, graphQLMap(t, webhooks[0], "workspaceWebhooks[0]"), "label", "repo", "workspaceWebhooks[0]")
@@ -727,8 +729,15 @@ func assertWebhookAndTokenGraphQLData(t *testing.T, data map[string]any) {
 	assertGraphQLLen(t, tokens, 1, "appTokens")
 	token := graphQLMap(t, tokens[0], "appTokens[0]")
 	assertGraphQLField(t, token, "name", "agent", "appTokens[0]")
+	assertGraphQLField(t, token, "binding_mode", "fixed", "appTokens[0]")
+	assertGraphQLField(t, token, "status", "revoked", "appTokens[0]")
+	assertGraphQLField(t, token, "execution_count", float64(4), "appTokens[0]")
+	assertGraphQLField(t, token, "session_count", float64(2), "appTokens[0]")
+	assertGraphQLField(t, token, "issued_by_subject_id", issuerID.String(), "appTokens[0]")
+	assertGraphQLField(t, token, "termination_reason", "revoked", "appTokens[0]")
 	assertGraphQLNonEmpty(t, token, "expires_at", "appTokens[0]")
 	assertGraphQLNonEmpty(t, token, "last_used_at", "appTokens[0]")
+	assertGraphQLNonEmpty(t, token, "terminated_at", "appTokens[0]")
 	allow := graphQLList(t, token["allow"], "appTokens[0].allow")
 	assertGraphQLLen(t, allow, 1, "appTokens[0].allow")
 	if allow[0] != "issues.list" {
@@ -950,37 +959,53 @@ func TestDeployMcpServer_CreatesActiveScopeWithNameAndKind(t *testing.T) {
 			name
 			version
 			active
-			mcp_url
+			default_transport
+			transport_urls { streamable_http sse }
 		}
 	}`
 	data := doMCPGraphQLRequestWithVariables(t, h, query, map[string]any{"owner": "platform", "config": map[string]any{
 		"apiVersion": "fused/v1", "kind": "mcp", "name": "stripe-mcp", "version": "1.0.0", "bucket": "default",
 		"services": map[string]any{"Stripe": map[string]any{"version": "2026-07-01", "operations": []string{"listCharges"}}},
 	}})
+	assertDeployedMCPServer(t, data)
+	assertSavedMCPServerScope(t, s, accountID)
+	assertMCPAuthorizationRevision(t, revisionSink, s.authorizationRevision)
+}
 
+func assertDeployedMCPServer(t *testing.T, data map[string]any) {
+	t.Helper()
 	deployed, ok := data["deployMcpServer"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected deployMcpServer object, got %#v", data)
 	}
-	if deployed["name"] != "stripe-mcp" {
-		t.Errorf("name = %v, want stripe-mcp", deployed["name"])
+	if deployed["name"] != "stripe-mcp" || deployed["active"] != true {
+		t.Errorf("deployed MCP identity/status = %#v", deployed)
 	}
-	if deployed["active"] != true {
-		t.Errorf("active = %v, want true", deployed["active"])
+	if deployed["default_transport"] != mcpDefaultTransport {
+		t.Errorf("default_transport = %#v, want %q", deployed["default_transport"], mcpDefaultTransport)
 	}
-	mcpURL, _ := deployed["mcp_url"].(string)
-	if !strings.Contains(mcpURL, "/mcp/") || !strings.Contains(mcpURL, "/sse") {
-		t.Errorf("mcp_url = %q, want an /mcp/{id}/sse URL", mcpURL)
+	transportURLs, _ := deployed["transport_urls"].(map[string]any)
+	streamableHTTP, _ := transportURLs["streamable_http"].(string)
+	sse, _ := transportURLs["sse"].(string)
+	if !strings.Contains(streamableHTTP, "/mcp/") || strings.HasSuffix(streamableHTTP, "/sse") || sse != streamableHTTP+"/sse" {
+		t.Errorf("transport_urls = %#v, want Streamable HTTP primary and matching legacy SSE", transportURLs)
 	}
+}
 
-	if len(s.savedScopes) != 1 {
-		t.Fatalf("expected one saved scope, got %#v", s.savedScopes)
+func assertSavedMCPServerScope(t *testing.T, fixture *workspaceTestStore, accountID uuid.UUID) {
+	t.Helper()
+	if len(fixture.savedScopes) != 1 {
+		t.Fatalf("expected one saved scope, got %#v", fixture.savedScopes)
 	}
-	if s.savedScopes[0].kind != store.AppKindMCP || s.savedScopes[0].accountID != accountID || s.savedScopes[0].ownerTeamID != testAppOwnerTeamID {
-		t.Errorf("expected kind=mcp for accountID %s, got %#v", accountID, s.savedScopes[0])
+	if fixture.savedScopes[0].kind != store.AppKindMCP || fixture.savedScopes[0].accountID != accountID || fixture.savedScopes[0].ownerTeamID != testAppOwnerTeamID {
+		t.Errorf("expected kind=mcp for accountID %s, got %#v", accountID, fixture.savedScopes[0])
 	}
-	if revisionSink.revision != s.authorizationRevision || revisionSink.revision == 0 {
-		t.Errorf("authorization revision = %d, want committed revision %d", revisionSink.revision, s.authorizationRevision)
+}
+
+func assertMCPAuthorizationRevision(t *testing.T, sink *revisionSyncSinkStub, want int64) {
+	t.Helper()
+	if sink.revision != want || sink.revision == 0 {
+		t.Errorf("authorization revision = %d, want committed revision %d", sink.revision, want)
 	}
 }
 
@@ -1073,22 +1098,39 @@ func TestAppsListSDKAndMCPVersionsForAccount(t *testing.T) {
 	}}
 	s := &artifactReferenceGraphQLTestStore{workspaceTestStore: fixture}
 	h := mountMCPGraphQLTestHandler(t, s)
-	data := doMCPGraphQLRequest(t, h, `query { apps(limit: 20, offset: 0) { total items { app_id app_family_id name version kind status } } }`)
+	data := doMCPGraphQLRequest(t, h, `query { apps(limit: 20, offset: 0) { total items { app_id app_family_id name version kind status default_transport transport_urls { streamable_http sse } } } }`)
 	page := data["apps"].(map[string]any)
 	if page["total"] != float64(2) {
 		t.Fatalf("app total = %#v, want 2", page["total"])
 	}
 	items := page["items"].([]any)
 	kinds := map[string]bool{}
+	var mcpItem map[string]any
 	for _, raw := range items {
 		item := raw.(map[string]any)
 		kinds[fmt.Sprint(item["kind"])] = true
+		if item["kind"] == "mcp" {
+			mcpItem = item
+		}
 		if item["app_id"] == "" || item["app_family_id"] == "" {
 			t.Fatalf("app identity is incomplete: %#v", item)
 		}
 	}
 	if len(items) != 2 || !kinds["sdk"] || !kinds["mcp"] {
 		t.Fatalf("unexpected app items: %#v", items)
+	}
+	assertMCPTransportProjection(t, mcpItem)
+}
+
+func assertMCPTransportProjection(t *testing.T, item map[string]any) {
+	t.Helper()
+	if item["default_transport"] != mcpDefaultTransport {
+		t.Fatalf("MCP default transport = %#v", item["default_transport"])
+	}
+	transportURLs, _ := item["transport_urls"].(map[string]any)
+	streamableHTTP, _ := transportURLs["streamable_http"].(string)
+	if streamableHTTP == "" || transportURLs["sse"] != streamableHTTP+"/sse" {
+		t.Fatalf("MCP transport URLs = %#v", transportURLs)
 	}
 }
 
@@ -1313,15 +1355,28 @@ func TestDeactivateAppMutationRejectsAnotherAccount(t *testing.T) {
 
 func TestMcpAnalytics_ReturnsDashboardForOwnedScope(t *testing.T) {
 	accountID := uuid.New()
-	appID := uuid.New()
+	appID, familyID, tokenID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
 	s := &workspaceTestStore{
 		accountID: accountID,
+		apps:      map[uuid.UUID]store.App{appID: {AppID: appID, AppFamilyID: familyID, AccountID: accountID, Status: store.AppStatusActive}},
 		mockScopes: map[uuid.UUID]*store.AppRuntime{
 			appID: {AccountID: accountID, AppID: appID, Kind: "mcp"},
 		},
+		appTokens: []store.AppTokenMetadata{{
+			ID: tokenID, AppFamilyID: familyID, Name: "customer-agent",
+			BindingMode: store.AppTokenBindingFixed, Status: store.AppTokenStatusRevoked,
+			IssuedBySubjectID: &accountID, ExecutionCount: 7, SessionCount: 2,
+			CreatedAt: now, LastUsedAt: &now, TerminatedAt: &now, TerminationReason: "revoked",
+		}},
 		mcpAnalyticsDashboard: &models.MCPAnalyticsDashboard{
 			TotalRequests: 42, FailedRequests: 2, AverageLatencyMs: 123.5, ActiveAgents: 3,
 			ToolUsage: []models.MCPToolUsage{{ToolName: "listUsers", Count: 40, Failed: 2, AverageLatencyMs: 100}},
+			RecentSessions: []models.MCPSession{{
+				ID: uuid.New(), AppID: appID, AppTokenID: tokenID, SessionID: "session-1",
+				ProtocolVersion: "2025-06-18", StartedAt: now, LastActivityAt: now,
+				EndedAt: &now, EndReason: "client_terminated",
+			}},
 		},
 	}
 	h := mountMCPGraphQLTestHandler(t, s)
@@ -1329,8 +1384,14 @@ func TestMcpAnalytics_ReturnsDashboardForOwnedScope(t *testing.T) {
 	data := doMCPGraphQLRequest(t, h, `query { mcpAnalytics(app_id: "`+appID.String()+`") {
 		total_requests failed_requests active_agents
 		tool_usage { tool_name count failed average_latency }
+		recent_sessions { id app_token_id session_id protocol_version started_at last_activity_at ended_at end_reason }
+		token_activity { id name binding_mode status issued_by_subject_id execution_count session_count created_at last_used_at terminated_at termination_reason }
 	} }`)
+	assertMCPAnalyticsDashboard(t, data, accountID, tokenID)
+}
 
+func assertMCPAnalyticsDashboard(t *testing.T, data map[string]any, issuerID, tokenID uuid.UUID) {
+	t.Helper()
 	dashboard, ok := data["mcpAnalytics"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected mcpAnalytics object, got %#v", data)
@@ -1346,6 +1407,25 @@ func TestMcpAnalytics_ReturnsDashboardForOwnedScope(t *testing.T) {
 	if entry["tool_name"] != "listUsers" || entry["count"] != float64(40) {
 		t.Errorf("unexpected tool usage entry: %#v", entry)
 	}
+	tokenActivity := graphQLList(t, dashboard["token_activity"], "mcpAnalytics.token_activity")
+	assertGraphQLLen(t, tokenActivity, 1, "mcpAnalytics.token_activity")
+	token := graphQLMap(t, tokenActivity[0], "mcpAnalytics.token_activity[0]")
+	assertGraphQLField(t, token, "id", tokenID.String(), "mcpAnalytics.token_activity[0]")
+	assertGraphQLField(t, token, "issued_by_subject_id", issuerID.String(), "mcpAnalytics.token_activity[0]")
+	assertGraphQLField(t, token, "execution_count", float64(7), "mcpAnalytics.token_activity[0]")
+	assertGraphQLField(t, token, "session_count", float64(2), "mcpAnalytics.token_activity[0]")
+	assertMCPRecentSession(t, dashboard, tokenID)
+}
+
+func assertMCPRecentSession(t *testing.T, dashboard map[string]any, tokenID uuid.UUID) {
+	t.Helper()
+	sessions := graphQLList(t, dashboard["recent_sessions"], "mcpAnalytics.recent_sessions")
+	assertGraphQLLen(t, sessions, 1, "mcpAnalytics.recent_sessions")
+	session := graphQLMap(t, sessions[0], "mcpAnalytics.recent_sessions[0]")
+	assertGraphQLField(t, session, "app_token_id", tokenID.String(), "mcpAnalytics.recent_sessions[0]")
+	assertGraphQLField(t, session, "protocol_version", "2025-06-18", "mcpAnalytics.recent_sessions[0]")
+	assertGraphQLField(t, session, "end_reason", "client_terminated", "mcpAnalytics.recent_sessions[0]")
+	assertGraphQLNonEmpty(t, session, "last_activity_at", "mcpAnalytics.recent_sessions[0]")
 }
 
 func TestMcpAnalytics_RejectsAnotherAccountsScope(t *testing.T) {

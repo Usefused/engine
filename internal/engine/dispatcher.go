@@ -98,7 +98,6 @@ func requestWithProviderHTTPTrace(ctx context.Context, req *http.Request, srv *m
 				slog.String("service", srv.Name),
 				slog.String("endpoint", obj.Name),
 				slog.String("method_family", boundedProviderMethod(obj.Method)),
-				slog.String("host", req.URL.Host),
 				slog.Bool("reused", info.Reused),
 				slog.Bool("was_idle", info.WasIdle),
 				slog.Float64("idle_time_ms", idleMs),
@@ -320,7 +319,7 @@ func (d *Dispatcher) executeOnce(
 	resp, err := client.Do(req)
 	if err != nil {
 		recordRetryTransportError(ctx, err)
-		return 0, fmt.Errorf("network request failed: %w", err)
+		return 0, &providerTransportError{err: err}
 	}
 	resp, err = retryHTTPChallengeWithDo(ctx, req, resp, selectedAuths, credentials, func(retry *http.Request) (*http.Response, error) {
 		d.releaseProviderRateLimit(ctx, permit)

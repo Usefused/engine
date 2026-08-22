@@ -686,7 +686,8 @@ func (s *postgresStore) AuthorizeApp(ctx context.Context, appID uuid.UUID, token
 	err := s.db.QueryRow(ctx, `
 		WITH matched AS (
 			SELECT a.account_id, f.app_family_id, a.app_id, a.version, f.kind, a.status,
-			       t.id AS token_id, t.allow_all, t.allowed_operations, t.expires_at
+			       t.id AS token_id, t.allow_all, t.allowed_operations, t.expires_at,
+			       t.binding_mode
 			FROM fused_apps a
 			JOIN fused_app_families f
 			  ON f.app_family_id = a.app_family_id AND f.account_id = a.account_id
@@ -702,12 +703,13 @@ func (s *postgresStore) AuthorizeApp(ctx context.Context, appID uuid.UUID, token
 			RETURNING token.id
 		)
 		SELECT account_id, app_family_id, app_id, token_id, version, kind, status,
-		       allow_all, allowed_operations, expires_at
+		       allow_all, allowed_operations, expires_at, binding_mode
 		FROM matched
 		WHERE EXISTS (SELECT 1 FROM touched)
 	`, appID, tokenHash).Scan(
 		&proj.AccountID, &proj.AppFamilyID, &proj.AppID, &proj.TokenID, &proj.Version, &proj.Kind, &proj.AppStatus,
 		&proj.TokenPolicy.AllowAll, &proj.TokenPolicy.AllowedOperations, &proj.TokenPolicy.ExpiresAt,
+		&proj.BindingMode,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		span.SetAttributes(attribute.String("outcome", "denied"))
@@ -724,75 +726,6 @@ func (s *postgresStore) AuthorizeApp(ctx context.Context, appID uuid.UUID, token
 		attribute.String("outcome", "allowed"),
 	)
 	return &proj, nil
-}
-
-// --- Family tokens ---
-
-func (s *postgresStore) CreateAppToken(ctx context.Context, appFamilyID uuid.UUID, tokenHash, name string, policy AppTokenPolicy) (*AppTokenMetadata, error) {
-	ctx, span := otel.Tracer("engine").Start(ctx, "engine.store.app_token.create")
-	defer span.End()
-
-	// PostgreSQL arrays distinguish NULL from empty; token policy does not. Bind
-	// an empty array so wildcard and deny-all policies preserve the table's
-	// non-null invariant regardless of which adapter created them.
-	allowedOperations := nonNilStrings(policy.AllowedOperations)
-	var tok AppTokenMetadata
-	err := s.db.QueryRow(ctx, `
-		INSERT INTO fused_app_tokens
-			(app_family_id, token_hash, name, allow_all, allowed_operations, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		RETURNING id, app_family_id, name, allow_all, allowed_operations, expires_at,
-		          last_used_at, created_at
-	`, appFamilyID, tokenHash, name, policy.AllowAll, allowedOperations, policy.ExpiresAt).Scan(
-		&tok.ID, &tok.AppFamilyID, &tok.Name, &tok.AllowAll, &tok.AllowedOperations,
-		&tok.ExpiresAt, &tok.LastUsedAt, &tok.CreatedAt,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create app token: %w", err)
-	}
-	return &tok, nil
-}
-
-func (s *postgresStore) ListAppTokens(ctx context.Context, appFamilyID uuid.UUID) ([]AppTokenMetadata, error) {
-	rows, err := s.db.Query(ctx, `
-		SELECT id, app_family_id, name, allow_all, allowed_operations, expires_at,
-		       last_used_at, created_at
-		FROM fused_app_tokens
-		WHERE app_family_id = $1
-		ORDER BY created_at DESC
-		LIMIT $2
-	`, appFamilyID, appFamilyCollectionLimit)
-	if err != nil {
-		return nil, fmt.Errorf("list app tokens: %w", err)
-	}
-	defer rows.Close()
-
-	var tokens []AppTokenMetadata
-	for rows.Next() {
-		var t AppTokenMetadata
-		if err := rows.Scan(&t.ID, &t.AppFamilyID, &t.Name, &t.AllowAll,
-			&t.AllowedOperations, &t.ExpiresAt, &t.LastUsedAt, &t.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan app token: %w", err)
-		}
-		tokens = append(tokens, t)
-	}
-	return tokens, rows.Err()
-}
-
-func (s *postgresStore) RevokeAppToken(ctx context.Context, appFamilyID uuid.UUID, name string) (*AppTokenRevocation, error) {
-	var revocation AppTokenRevocation
-	err := s.db.QueryRow(ctx, `
-		DELETE FROM fused_app_tokens
-		WHERE app_family_id = $1 AND name = $2
-		RETURNING id, app_family_id, clock_timestamp()
-	`, appFamilyID, name).Scan(&revocation.TokenID, &revocation.AppFamilyID, &revocation.RevokedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrAppTokenNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("revoke app token: %w", err)
-	}
-	return &revocation, nil
 }
 
 // --- Family buckets ---

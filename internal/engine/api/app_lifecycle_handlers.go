@@ -161,7 +161,7 @@ func cleanupDeactivatedAppRuntime(ctx context.Context, app *store.App, proxy For
 		}
 		return
 	}
-	sandbox.KillMCPSessionsForSDK(app.AppID.String())
+	sandbox.TerminateMCPSessionsForApp(app.AppID.String())
 }
 
 func deleteRegistryPackage(ctx context.Context, proxy Forwarder, appID uuid.UUID) error {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
@@ -18,9 +19,18 @@ import (
 )
 
 type TokenGeneratePayload struct {
-	Name      string   `json:"name"`
-	Allow     []string `json:"allow"`
-	ExpiresIn *int64   `json:"expires_in"`
+	Name        string                    `json:"name"`
+	Allow       []string                  `json:"allow"`
+	ExpiresIn   *int64                    `json:"expires_in"`
+	BindingMode store.AppTokenBindingMode `json:"binding_mode"`
+	Bindings    []TokenBindingPayload     `json:"bindings"`
+}
+
+type TokenBindingPayload struct {
+	ServiceSlug string     `json:"service_slug"`
+	AuthName    string     `json:"auth_name"`
+	EndUserRef  string     `json:"end_user_ref"`
+	ResourceID  *uuid.UUID `json:"resource_id"`
 }
 
 type AppTokenRevoker interface {
@@ -59,6 +69,13 @@ func GenerateAppTokenHandler(s store.Store) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		bindings, err := tokenBindingRequests(payload.Bindings)
+		if err != nil {
+			recordTokenMutationError(span, applifecycle.OutcomeInvalid)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		actor, _ := accesscontrol.ActorFromContext(ctx)
 
 		span.SetAttributes(
 			attribute.String("app.family_id", familyID.String()),
@@ -66,9 +83,11 @@ func GenerateAppTokenHandler(s store.Store) http.HandlerFunc {
 
 		tokenVal, tok, err := applifecycle.New(s).GenerateToken(ctx, applifecycle.GenerateTokenParams{
 			AppFamilyID: familyID, Name: payload.Name, Allow: payload.Allow, ExpiresIn: expiresIn,
+			BindingMode: payload.BindingMode, Bindings: bindings,
+			IssuedBySubjectID: optionalActorID(actor.SubjectID), IssuedByCredentialID: optionalActorID(actor.CredentialID),
 		})
 		if err != nil {
-			if errors.Is(err, applifecycle.ErrTokenPolicyInvalid) {
+			if errors.Is(err, applifecycle.ErrTokenPolicyInvalid) || errors.Is(err, store.ErrAppTokenBindingInvalid) {
 				recordTokenMutationError(span, applifecycle.OutcomeInvalid)
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
@@ -88,10 +107,35 @@ func GenerateAppTokenHandler(s store.Store) http.HandlerFunc {
 			"name":          tok.Name,
 			"allow":         projectTokenAllow(tok.AllowAll, tok.AllowedOperations),
 			"expires_at":    tok.ExpiresAt,
+			"binding_mode":  tok.BindingMode,
+			"binding_count": len(bindings),
 			"token":         tokenVal, // ONLY RETURNED ONCE!
 			"created_at":    tok.CreatedAt,
 		})
 	}
+}
+
+func tokenBindingRequests(payload []TokenBindingPayload) ([]store.AppTokenBindingRequest, error) {
+	bindings := make([]store.AppTokenBindingRequest, len(payload))
+	for index, item := range payload {
+		serviceSlug := strings.TrimSpace(item.ServiceSlug)
+		authName, endUserRef := strings.TrimSpace(item.AuthName), strings.TrimSpace(item.EndUserRef)
+		if serviceSlug == "" || authName == "" || endUserRef == "" {
+			return nil, errors.New("each binding requires service_slug, auth_name, and end_user_ref")
+		}
+		bindings[index] = store.AppTokenBindingRequest{
+			ServiceSlug: serviceSlug, AuthName: authName,
+			EndUserRef: endUserRef, ResourceID: item.ResourceID,
+		}
+	}
+	return bindings, nil
+}
+
+func optionalActorID(id uuid.UUID) *uuid.UUID {
+	if id == uuid.Nil {
+		return nil
+	}
+	return &id
 }
 
 func RevokeAppTokenHandler(revoker AppTokenRevoker) http.HandlerFunc {

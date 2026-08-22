@@ -24,7 +24,6 @@ import (
 type mcpConfigApplyResult struct {
 	AppFamilyID    uuid.UUID
 	RuntimeID      uuid.UUID
-	RuntimeURL     string
 	ExecutionToken string
 	ConfigKey      string
 	Name           string
@@ -104,7 +103,6 @@ func MCPConfigApplyHandler(configStore store.ConfigRepository, s store.Store, re
 			writeSDKConfigError(w, err, ctx)
 			return
 		}
-		result.RuntimeURL = mcpURLForApp(r, result.RuntimeID)
 		span.SetAttributes(
 			attribute.String("outcome", "success"), attribute.String("app.kind", store.AppKindMCP.String()),
 			attribute.String("app.version", result.Version),
@@ -114,18 +112,18 @@ func MCPConfigApplyHandler(configStore store.ConfigRepository, s store.Store, re
 		if result.ExecutionToken != "" {
 			setOneTimeSecretResponseHeaders(w)
 		}
-		writeJSON(w, mcpConfigApplyResponse(planID, result))
+		writeJSON(w, mcpConfigApplyResponse(planID, result, mcpTransportURLsForApp(r, result.RuntimeID)))
 	}
 }
 
 // mcpConfigApplyResponse keeps MCP's one-time token on the shared app
 // wire key so fused-cli can use one decoder for SDK and MCP apply responses.
-func mcpConfigApplyResponse(planID uuid.UUID, result mcpConfigApplyResult) map[string]any {
+func mcpConfigApplyResponse(planID uuid.UUID, result mcpConfigApplyResult, transportURLs mcpTransportURLs) map[string]any {
 	resp := map[string]any{
 		"status": "applied", "plan_id": planID.String(), "config_key": result.ConfigKey,
 		"name": result.Name, "version": result.Version,
 		"app_family_id": result.AppFamilyID.String(), "app_id": result.RuntimeID.String(),
-		"mcp_url": result.RuntimeURL,
+		"default_transport": mcpDefaultTransport, "transport_urls": transportURLs,
 	}
 	if result.ExecutionToken != "" {
 		// Token is only present on first creation. Absent on idempotent re-apply.
@@ -213,7 +211,7 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 		return sdkPlanResult{}, err
 	}
 	call.request.OwnerSubjectID, call.request.OwnerTeamID = owner.subjectID, owner.teamID
-	selections, services, resolved, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current), bucket.ID)
+	selections, services, resolved, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current), *bucket)
 	if err != nil {
 		return sdkPlanResult{}, err
 	}

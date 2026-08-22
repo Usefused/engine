@@ -3,7 +3,6 @@ package sandbox
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -55,6 +54,7 @@ func TestBearerSchemeRejectedInMessageHandler(t *testing.T) {
 	sess := &mcpSession{
 		appID:     uuid.New().String(),
 		sessionID: sessionID,
+		transport: "sse",
 		token:     "correct-token",
 		idleTimer: time.AfterFunc(time.Hour, func() {}),
 	}
@@ -156,6 +156,7 @@ func TestMCPMessageHandlerRejectsWrongToken(t *testing.T) {
 	sess := &mcpSession{
 		appID:     uuid.New().String(),
 		sessionID: sessionID,
+		transport: "sse",
 		token:     "correct-token",
 		idleTimer: time.AfterFunc(time.Hour, func() {}),
 	}
@@ -201,6 +202,7 @@ func TestMCPMessageHandlerEnforcesBodySizeLimit(t *testing.T) {
 	sess := &mcpSession{
 		appID:     uuid.New().String(),
 		sessionID: sessionID,
+		transport: "sse",
 		token:     "tok",
 		idleTimer: time.AfterFunc(time.Hour, func() {}),
 	}
@@ -247,92 +249,5 @@ func TestSessionTmpDirIsPerSessionNotPerSDK(t *testing.T) {
 	// Verify the new prefix is "fused-sandbox-" not the old "opensync-sandbox-".
 	if strings.HasPrefix(dirA, "opensync-sandbox-") {
 		t.Fatalf("expected fused-sandbox- prefix, got opensync-sandbox-")
-	}
-}
-
-// ─── Blocker 3b: Span key allowlist ──────────────────────────────────────────
-
-func TestHandleFusedSpanAllowlistLogic(t *testing.T) {
-	allowed := map[string]struct{}{
-		"operation_id": {},
-		"latency_ms":   {},
-		"status":       {},
-	}
-
-	cases := []struct {
-		name    string
-		payload string
-		want    bool
-	}{
-		{"all allowed keys", `{"operation_id":"foo","latency_ms":5,"status":"ok"}`, true},
-		{"foreign key injected", `{"operation_id":"foo","malicious_key":"steal"}`, false},
-		{"server-controlled artifact_id spoofed", `{"artifact_id":"attacker","operation_id":"x"}`, false},
-		{"empty payload", `{}`, true},
-		{"subset of allowed", `{"latency_ms":10}`, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var data map[string]any
-			json.Unmarshal([]byte(tc.payload), &data)
-			pass := true
-			for k := range data {
-				if _, ok := allowed[k]; !ok {
-					pass = false
-					break
-				}
-			}
-			if pass != tc.want {
-				t.Errorf("payload %q: want allowed=%v, got %v", tc.payload, tc.want, pass)
-			}
-		})
-	}
-}
-
-// ─── Blocker 3a: Analytics omits params and result ───────────────────────────
-
-func TestPublishAnalyticsOmitsParamsAndResult(t *testing.T) {
-	// Reconstruct the event map the same way publishAnalyticsForRequest does.
-	req := pendingReq{
-		endpointName: "listRepos",
-		startTime:    time.Now().Add(-50 * time.Millisecond),
-		arguments:    map[string]any{"token": "secret", "query": "fused"},
-	}
-	msg := map[string]any{
-		"id":     "1",
-		"result": map[string]any{"content": []any{"repo1", "repo2"}},
-	}
-
-	latencyMs := time.Since(req.startTime).Milliseconds()
-	failed := false
-	if _, hasErr := msg["error"]; hasErr {
-		failed = true
-	} else if res, hasRes := msg["result"].(map[string]any); hasRes {
-		if isErr, _ := res["isError"].(bool); isErr {
-			failed = true
-		}
-	}
-	event := map[string]any{
-		"artifact_id":   "test-sdk",
-		"session_id":    "test-session",
-		"endpoint_name": req.endpointName,
-		"latency_ms":    latencyMs,
-		"failed":        failed,
-		"timestamp":     time.Now(),
-	}
-
-	if _, has := event["params"]; has {
-		t.Error("analytics event must not contain params")
-	}
-	if _, has := event["result"]; has {
-		t.Error("analytics event must not contain result")
-	}
-	if event["endpoint_name"] != "listRepos" {
-		t.Errorf("expected endpoint_name=listRepos, got %v", event["endpoint_name"])
-	}
-	if _, has := event["latency_ms"]; !has {
-		t.Error("analytics event must contain latency_ms")
-	}
-	if _, has := event["failed"]; !has {
-		t.Error("analytics event must contain failed flag")
 	}
 }

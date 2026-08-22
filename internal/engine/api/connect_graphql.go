@@ -209,13 +209,21 @@ var workspaceWebhookGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 var appTokenGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "AppToken",
 	Fields: graphql.Fields{
-		"id":            &graphql.Field{Type: graphql.String},
-		"app_family_id": &graphql.Field{Type: graphql.String},
-		"name":          &graphql.Field{Type: graphql.String},
-		"allow":         &graphql.Field{Type: graphql.NewList(graphql.String)},
-		"expires_at":    &graphql.Field{Type: graphql.String},
-		"created_at":    &graphql.Field{Type: graphql.String},
-		"last_used_at":  &graphql.Field{Type: graphql.String},
+		"id":                      &graphql.Field{Type: graphql.String},
+		"app_family_id":           &graphql.Field{Type: graphql.String},
+		"name":                    &graphql.Field{Type: graphql.String},
+		"allow":                   &graphql.Field{Type: graphql.NewList(graphql.String)},
+		"binding_mode":            &graphql.Field{Type: graphql.String},
+		"status":                  &graphql.Field{Type: graphql.String},
+		"expires_at":              &graphql.Field{Type: graphql.String},
+		"created_at":              &graphql.Field{Type: graphql.String},
+		"last_used_at":            &graphql.Field{Type: graphql.String},
+		"execution_count":         &graphql.Field{Type: graphql.Float},
+		"session_count":           &graphql.Field{Type: graphql.Float},
+		"issued_by_subject_id":    &graphql.Field{Type: graphql.String},
+		"issued_by_credential_id": &graphql.Field{Type: graphql.String},
+		"terminated_at":           &graphql.Field{Type: graphql.String},
+		"termination_reason":      &graphql.Field{Type: graphql.String},
 	},
 })
 
@@ -2691,9 +2699,14 @@ func projectGraphQLAppTokens(tokens []store.AppTokenMetadata) []map[string]inter
 	for _, token := range tokens {
 		items = append(items, map[string]interface{}{
 			"id": token.ID.String(), "app_family_id": token.AppFamilyID.String(), "name": token.Name,
-			"allow":      projectTokenAllow(token.AllowAll, token.AllowedOperations),
-			"expires_at": formatOptionalGraphQLTime(token.ExpiresAt),
-			"created_at": formatGraphQLTime(token.CreatedAt), "last_used_at": formatOptionalGraphQLTime(token.LastUsedAt),
+			"allow":        projectTokenAllow(token.AllowAll, token.AllowedOperations),
+			"binding_mode": string(token.BindingMode), "status": string(token.Status),
+			"expires_at": formatOptionalGraphQLTime(token.ExpiresAt), "created_at": formatGraphQLTime(token.CreatedAt),
+			"last_used_at":    formatOptionalGraphQLTime(token.LastUsedAt),
+			"execution_count": float64(token.ExecutionCount), "session_count": float64(token.SessionCount),
+			"issued_by_subject_id":    formatOptionalGraphQLUUID(token.IssuedBySubjectID),
+			"issued_by_credential_id": formatOptionalGraphQLUUID(token.IssuedByCredentialID),
+			"terminated_at":           formatOptionalGraphQLTime(token.TerminatedAt), "termination_reason": token.TerminationReason,
 		})
 	}
 	return items

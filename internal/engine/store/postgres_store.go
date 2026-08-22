@@ -376,12 +376,19 @@ func (s *postgresStore) VerifyWorkspaceOwner(ctx context.Context, accountID uuid
 
 func (s *postgresStore) UpsertMCPSession(ctx context.Context, session *models.MCPSession) error {
 	query := `
-		INSERT INTO fused_mcp_sessions (id, app_id, session_id, started_at, ended_at)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO fused_mcp_sessions
+			(id, app_id, app_token_id, session_id, protocol_version, started_at, last_activity_at, ended_at, end_reason)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''))
 		ON CONFLICT (id) DO UPDATE SET
-			ended_at = EXCLUDED.ended_at
+			app_token_id = COALESCE(fused_mcp_sessions.app_token_id, EXCLUDED.app_token_id),
+			protocol_version = EXCLUDED.protocol_version,
+			last_activity_at = GREATEST(fused_mcp_sessions.last_activity_at, EXCLUDED.last_activity_at),
+			ended_at = COALESCE(EXCLUDED.ended_at, fused_mcp_sessions.ended_at),
+			end_reason = COALESCE(EXCLUDED.end_reason, fused_mcp_sessions.end_reason)
 	`
-	_, err := s.db.Exec(ctx, query, session.ID, session.AppID, session.SessionID, session.StartedAt, session.EndedAt)
+	_, err := s.db.Exec(ctx, query, session.ID, session.AppID, nullableUUID(session.AppTokenID),
+		session.SessionID, session.ProtocolVersion, session.StartedAt, session.LastActivityAt,
+		session.EndedAt, session.EndReason)
 	return err
 }
 
@@ -481,7 +488,8 @@ func queryMCPServiceUsage(ctx context.Context, db *pgxpool.Pool, appID uuid.UUID
 // not a full session history browser.
 func queryRecentMCPSessions(ctx context.Context, db *pgxpool.Pool, appID uuid.UUID) ([]models.MCPSession, error) {
 	query := `
-		SELECT id, app_id, session_id, started_at, ended_at
+		SELECT id, app_id, COALESCE(app_token_id, '00000000-0000-0000-0000-000000000000'::uuid),
+		       session_id, protocol_version, started_at, last_activity_at, ended_at, COALESCE(end_reason, '')
 		FROM fused_mcp_sessions
 		WHERE app_id = $1
 		ORDER BY started_at DESC
@@ -496,7 +504,9 @@ func queryRecentMCPSessions(ctx context.Context, db *pgxpool.Pool, appID uuid.UU
 	var sessions []models.MCPSession
 	for rows.Next() {
 		var sess models.MCPSession
-		if err := rows.Scan(&sess.ID, &sess.AppID, &sess.SessionID, &sess.StartedAt, &sess.EndedAt); err != nil {
+		if err := rows.Scan(&sess.ID, &sess.AppID, &sess.AppTokenID, &sess.SessionID,
+			&sess.ProtocolVersion, &sess.StartedAt, &sess.LastActivityAt, &sess.EndedAt,
+			&sess.EndReason); err != nil {
 			return nil, fmt.Errorf("scan mcp session: %w", err)
 		}
 		sessions = append(sessions, sess)
@@ -511,7 +521,7 @@ func (s *postgresStore) BatchCreateEngineExecutionEvents(ctx context.Context, ev
 	b := &pgx.Batch{}
 	query := `
 		INSERT INTO fused_engine_execution_events (
-			id, trace_id, span_id, account_id, app_family_id, app_id, app_version, transport,
+			id, trace_id, span_id, account_id, app_family_id, app_id, app_token_id, app_version, transport,
 			provider_protocol, direction, service_id, service_version_id, operation_id, webhook_id,
 			endpoint_name, external_id, event_name, http_method, request_path, environment,
 			environment_source, provider_host, provider_http_status, provider_status_class, status,
@@ -525,7 +535,7 @@ func (s *postgresStore) BatchCreateEngineExecutionEvents(ctx context.Context, ev
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
 			$21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40,
-			$41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58)
+			$41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59)
 		ON CONFLICT (id) DO UPDATE SET
 			status = EXCLUDED.status,
 			failure_reason = EXCLUDED.failure_reason,
@@ -561,7 +571,7 @@ func (s *postgresStore) BatchCreateEngineExecutionEvents(ctx context.Context, ev
 		}
 		b.Queue(query,
 			event.ID, event.TraceID, event.SpanID, nullableUUID(event.AccountID), nullableUUID(event.AppFamilyID),
-			nullableUUID(event.AppID), event.AppVersion, event.Transport, event.ProviderProtocol, event.Direction,
+			nullableUUID(event.AppID), nullableUUID(event.AppTokenID), event.AppVersion, event.Transport, event.ProviderProtocol, event.Direction,
 			nullableUUID(event.ServiceID), event.ServiceVersionID, nullableUUID(event.OperationID), nullableUUID(event.WebhookID),
 			event.EndpointName, event.ExternalID, event.EventName, event.HTTPMethod, event.RequestPath, event.Environment,
 			event.EnvironmentSource, event.ProviderHost, event.ProviderHTTPStatus, event.ProviderStatusClass, event.Status,
@@ -724,7 +734,8 @@ func (s *postgresStore) listEngineExecutionEvents(ctx context.Context, filter En
 	)
 	SELECT event.id, COALESCE(event.trace_id, ''), COALESCE(event.span_id, ''), COALESCE(event.account_id, '00000000-0000-0000-0000-000000000000'::uuid),
 		COALESCE(event.app_family_id, '00000000-0000-0000-0000-000000000000'::uuid),
-		COALESCE(event.app_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(event.app_version, ''),
+		COALESCE(event.app_id, '00000000-0000-0000-0000-000000000000'::uuid),
+		COALESCE(event.app_token_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(event.app_version, ''),
 		event.transport, COALESCE(event.provider_protocol, ''), event.direction, event.service_id, COALESCE(event.service_version_id, ''),
 		COALESCE(service.service_name, ''), COALESCE(service.service_slug, ''), COALESCE(version.version, ''),
 		COALESCE(event.operation_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(event.webhook_id, '00000000-0000-0000-0000-000000000000'::uuid),
@@ -754,7 +765,7 @@ func (s *postgresStore) listEngineExecutionEvents(ctx context.Context, filter En
 	for rows.Next() {
 		var event models.EngineExecutionEvent
 		if err := rows.Scan(
-			&event.ID, &event.TraceID, &event.SpanID, &event.AccountID, &event.AppFamilyID, &event.AppID,
+			&event.ID, &event.TraceID, &event.SpanID, &event.AccountID, &event.AppFamilyID, &event.AppID, &event.AppTokenID,
 			&event.AppVersion, &event.Transport, &event.ProviderProtocol, &event.Direction, &event.ServiceID,
 			&event.ServiceVersionID, &event.ServiceName, &event.ServiceSlug, &event.ServiceVersion,
 			&event.OperationID, &event.WebhookID, &event.EndpointName,
@@ -1004,6 +1015,75 @@ func (s *postgresStore) ListSecretMeta(ctx context.Context, bucketID uuid.UUID) 
 	}
 	defer rows.Close()
 	return collectSecretMetas(rows)
+}
+
+const appBucketCredentialPresenceSQL = `
+	WITH requirements AS (
+		SELECT
+			requirement.service_id,
+			LOWER(REPLACE(BTRIM(requirement.auth_type), '-', '_')) AS auth_type,
+			BTRIM(requirement.auth_name) AS auth_name,
+			COALESCE(requirement.secret_keys, '[]'::jsonb) AS secret_keys
+		FROM jsonb_to_recordset($2::jsonb) AS requirement(
+			service_id uuid,
+			auth_type text,
+			auth_name text,
+			secret_keys jsonb
+		)
+	)
+	SELECT
+		requirement.service_id,
+		requirement.auth_type,
+		requirement.auth_name,
+		EXISTS (
+			SELECT 1
+			FROM fused_connect_configs config
+			WHERE config.bucket_id = $1
+			  AND config.service_id = requirement.service_id
+			  AND config.enabled = TRUE
+			  AND LOWER(REPLACE(BTRIM(config.auth_type), '-', '_')) = requirement.auth_type
+			  AND BTRIM(config.auth_name) = requirement.auth_name
+		) AS connected,
+		COALESCE(ARRAY(
+			SELECT requested_key.key_name
+			FROM jsonb_array_elements_text(requirement.secret_keys) AS requested_key(key_name)
+			WHERE EXISTS (
+				SELECT 1
+				FROM fused_workspace_secrets secret
+				WHERE secret.bucket_id = $1
+				  AND secret.service_id = requirement.service_id
+				  AND secret.key_name = requested_key.key_name
+			)
+			ORDER BY requested_key.key_name
+		), ARRAY[]::text[]) AS secret_keys
+	FROM requirements requirement
+	ORDER BY requirement.service_id, requirement.auth_type, requirement.auth_name`
+
+// GetAppBucketCredentialPresence selects only the requested credential tuples
+// and metadata. Keeping matching in SQL prevents a large bucket from being
+// copied into Engine memory merely to answer one app plan.
+func (s *postgresStore) GetAppBucketCredentialPresence(ctx context.Context, bucketID uuid.UUID, requirements []AppCredentialRequirement) ([]AppCredentialPresence, error) {
+	if len(requirements) == 0 {
+		return []AppCredentialPresence{}, nil
+	}
+	payload, err := json.Marshal(requirements)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(ctx, appBucketCredentialPresenceSQL, bucketID, payload)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	presence := make([]AppCredentialPresence, 0, len(requirements))
+	for rows.Next() {
+		var item AppCredentialPresence
+		if err := rows.Scan(&item.ServiceID, &item.AuthType, &item.AuthName, &item.Connected, &item.SecretKeys); err != nil {
+			return nil, err
+		}
+		presence = append(presence, item)
+	}
+	return presence, rows.Err()
 }
 
 func (s *postgresStore) ListSecretMetaPage(ctx context.Context, bucketID uuid.UUID, limit, offset int) ([]WorkspaceSecretMeta, int, error) {

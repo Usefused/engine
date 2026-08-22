@@ -347,6 +347,7 @@ export interface PreviewOpenAPIResult {
 export interface SpecificationImportPlan {
   plan_id: string;
   source_hash: string;
+  review_hash: string;
   service_id?: string;
   slug?: string;
   name: string;
@@ -1039,10 +1040,10 @@ export const api = {
         body: JSON.stringify(input),
       }),
 
-    applyImport: (planId: string, sourceHash: string) =>
+    applyImport: (planId: string, reviewHash: string) =>
       req<SpecificationImportApplyResult>("/integrations/import/apply", {
         method: "POST",
-        body: JSON.stringify({ plan_id: planId, source_hash: sourceHash }),
+        body: JSON.stringify({ plan_id: planId, review_hash: reviewHash }),
       }),
 
     start: (

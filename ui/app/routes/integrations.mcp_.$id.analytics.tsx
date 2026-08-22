@@ -10,7 +10,7 @@ export const meta: MetaFunction = ({ matches }) => {
     { title: "MCP server activity - Fused" },
   ];
 };
-import { ArrowLeft, Clock } from "lucide-react";
+import { ArrowLeft, Clock, KeyRound } from "lucide-react";
 import { api } from "~/lib/api";
 import { McpAnalyticsPanel, type McpAnalyticsData } from "~/components/mcp/McpAnalyticsPanel";
 import { AppRequestsPanel } from "~/components/activity/AppRequestsPanel";
@@ -32,7 +32,7 @@ export default function McpAnalyticsDashboard() {
 
   // handleTabChange keeps Overview as the canonical URL and records only
   // non-default Activity selections in the query string.
-  const handleTabChange = (newTab: "overview" | "requests" | "sessions") => {
+  const handleTabChange = (newTab: McpActivityTab) => {
     setSearchParams(prev => {
       if (newTab === "overview") prev.delete("tab");
       else prev.set("tab", newTab);
@@ -68,9 +68,26 @@ export default function McpAnalyticsDashboard() {
           }
           recent_sessions {
             id
+            app_token_id
             session_id
+            protocol_version
             started_at
+            last_activity_at
             ended_at
+            end_reason
+          }
+          token_activity {
+            id
+            name
+            binding_mode
+            status
+            issued_by_subject_id
+            execution_count
+            session_count
+            created_at
+            last_used_at
+            terminated_at
+            termination_reason
           }
         }
       }
@@ -104,11 +121,11 @@ export default function McpAnalyticsDashboard() {
   );
 }
 
-type McpActivityTab = "overview" | "requests" | "sessions";
+type McpActivityTab = "overview" | "requests" | "sessions" | "tokens";
 
 // mcpActivityTab accepts only known Activity sections from the URL.
 function mcpActivityTab(value: string | null): McpActivityTab {
-  return value === "requests" || value === "sessions" ? value : "overview";
+  return value === "requests" || value === "sessions" || value === "tokens" ? value : "overview";
 }
 
 /** Selects the MCP activity loading, error, or content state. */
@@ -157,14 +174,115 @@ function McpActivityContent({ id, data, activeTab, onTabChange, canReadRequests 
           { value: "overview", label: "Overview", trackingId: "view_mcp_overview_tab" },
           { value: "requests", label: "Requests", trackingId: "view_mcp_requests_tab" },
           { value: "sessions", label: "Sessions", badge: data.recent_sessions?.length, trackingId: "view_mcp_sessions_tab" },
+          { value: "tokens", label: "Tokens", badge: data.token_activity?.length, trackingId: "view_mcp_tokens_tab" },
         ]}
       />
 
-      {activeTab === "overview" && <McpAnalyticsPanel data={data} />}
-      {activeTab === "requests" && canReadRequests && id && <AppRequestsPanel appId={id} consumerName="MCP server" transport="mcp" />}
-      {activeTab === "requests" && !canReadRequests && <div className="rounded-lg border border-slate-200 bg-white px-6 py-12 text-center text-sm text-slate-500">Request activity access is not available for your account.</div>}
-      {activeTab === "sessions" && <McpSessionsPanel sessions={data.recent_sessions || []} />}
+      <McpActivityTabContent activeTab={activeTab} id={id} data={data} canReadRequests={canReadRequests} />
     </div>
+  );
+}
+
+function McpActivityTabContent({ activeTab, id, data, canReadRequests }: { activeTab: McpActivityTab; id?: string; data: McpAnalyticsData; canReadRequests: boolean }) {
+  switch (activeTab) {
+    case "requests":
+      if (!canReadRequests || !id) return <div className="rounded-lg border border-slate-200 bg-white px-6 py-12 text-center text-sm text-slate-500">Request activity access is not available for your account.</div>;
+      return <AppRequestsPanel appId={id} consumerName="MCP server" transport="mcp" />;
+    case "sessions":
+      return <McpSessionsPanel sessions={data.recent_sessions || []} />;
+    case "tokens":
+      return <McpTokenActivityPanel tokens={data.token_activity || []} />;
+    default:
+      return <McpAnalyticsPanel data={data} />;
+  }
+}
+
+type McpTokenActivity = NonNullable<McpAnalyticsData["token_activity"]>[number];
+
+function McpTokenStatus({ status }: { status: McpTokenActivity["status"] }) {
+  const style = status === "active"
+    ? "border-emerald-100 bg-emerald-50 text-emerald-700"
+    : status === "expired"
+      ? "border-amber-100 bg-amber-50 text-amber-700"
+      : "border-rose-100 bg-rose-50 text-rose-700";
+  return <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium capitalize ${style}`}>{status}</span>;
+}
+
+function tokenActivityTime(value?: string): string {
+  return value ? new Date(value).toLocaleString() : "Never";
+}
+
+function tokenTermination(token: McpTokenActivity): string {
+  if (token.status === "active") return "—";
+  const reason = (token.termination_reason || token.status).replaceAll("_", " ");
+  return `${reason} · ${tokenActivityTime(token.terminated_at)}`;
+}
+
+function McpTokenActivityCard({ token }: { token: McpTokenActivity }) {
+  return (
+    <article className="space-y-4 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h4 className="truncate text-sm font-semibold text-slate-900">{token.name}</h4>
+          <p className="mt-1 truncate font-mono text-xs text-slate-500" title={token.id}>{token.id}</p>
+        </div>
+        <McpTokenStatus status={token.status} />
+      </div>
+      <dl className="grid grid-cols-2 gap-3 text-sm">
+        <div><dt className="text-xs text-slate-500">Binding</dt><dd className="mt-0.5 capitalize text-slate-700">{token.binding_mode}</dd></div>
+        <div><dt className="text-xs text-slate-500">Usage</dt><dd className="mt-0.5 tabular-nums text-slate-700">{token.execution_count} calls · {token.session_count} sessions</dd></div>
+        <div><dt className="text-xs text-slate-500">Issued</dt><dd className="mt-0.5 text-slate-700">{tokenActivityTime(token.created_at)}</dd></div>
+        <div><dt className="text-xs text-slate-500">Last used</dt><dd className="mt-0.5 text-slate-700">{tokenActivityTime(token.last_used_at)}</dd></div>
+      </dl>
+      {token.issued_by_subject_id && <p className="truncate text-xs text-slate-500" title={token.issued_by_subject_id}>Issued by {token.issued_by_subject_id}</p>}
+      {token.status !== "active" && <p className="text-xs text-slate-500">Ended: <span className="font-medium capitalize text-slate-700">{tokenTermination(token)}</span></p>}
+    </article>
+  );
+}
+
+function McpTokenActivityPanel({ tokens }: { tokens: McpTokenActivity[] }) {
+  return (
+    <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      <header className="flex items-center gap-2 border-b border-slate-100 px-5 py-4">
+        <KeyRound className="h-4 w-4 text-blue-500" />
+        <div>
+          <h3 className="font-semibold text-slate-900">Execution token activity</h3>
+          <p className="mt-0.5 text-xs text-slate-500">Credential-free issue, use, expiry, and revocation history.</p>
+        </div>
+      </header>
+      {tokens.length === 0 ? <div className="px-6 py-12 text-center text-sm text-slate-500">No execution tokens recorded yet.</div> : <McpTokenActivityRows tokens={tokens} />}
+    </section>
+  );
+}
+
+function McpTokenActivityRows({ tokens }: { tokens: McpTokenActivity[] }) {
+  return (
+    <>
+      <div className="divide-y divide-slate-100 md:hidden">{tokens.map((token) => <McpTokenActivityCard key={token.id} token={token} />)}</div>
+      <div className="hidden overflow-x-auto md:block">
+        <table className="w-full min-w-[900px] text-left text-sm">
+          <thead className="bg-slate-50/50 text-xs uppercase tracking-wider text-slate-500">
+            <tr><th className="px-5 py-3 font-medium">Token</th><th className="px-5 py-3 font-medium">Status</th><th className="px-5 py-3 font-medium">Binding</th><th className="px-5 py-3 text-right font-medium">Executions</th><th className="px-5 py-3 text-right font-medium">Sessions</th><th className="px-5 py-3 font-medium">Last used</th><th className="px-5 py-3 font-medium">Ended</th><th className="px-5 py-3 font-medium">Issued by</th></tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100 text-slate-700">{tokens.map((token) => <McpTokenActivityTableRow key={token.id} token={token} />)}</tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+function McpTokenActivityTableRow({ token }: { token: McpTokenActivity }) {
+  return (
+    <tr className="hover:bg-slate-50">
+      <td className="px-5 py-4"><div className="font-medium text-slate-900">{token.name}</div><div className="mt-1 max-w-44 truncate font-mono text-xs text-slate-400" title={token.id}>{token.id}</div></td>
+      <td className="px-5 py-4"><McpTokenStatus status={token.status} /></td>
+      <td className="px-5 py-4 capitalize">{token.binding_mode}</td>
+      <td className="px-5 py-4 text-right tabular-nums">{token.execution_count}</td>
+      <td className="px-5 py-4 text-right tabular-nums">{token.session_count}</td>
+      <td className="whitespace-nowrap px-5 py-4">{tokenActivityTime(token.last_used_at)}</td>
+      <td className="whitespace-nowrap px-5 py-4 capitalize">{tokenTermination(token)}</td>
+      <td className="max-w-52 truncate px-5 py-4 font-mono text-xs" title={token.issued_by_subject_id}>{token.issued_by_subject_id || "Unknown"}</td>
+    </tr>
   );
 }
 
@@ -178,10 +296,14 @@ function McpSessionCard({ session }: { session: NonNullable<McpAnalyticsData["re
         <span className="min-w-0 break-all font-mono text-sm text-slate-700">{session.session_id}</span>
         <SessionStatus live={isLive} />
       </div>
-      <dl className="mt-4 grid gap-3 text-sm">
+      <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
         <div><dt className="text-xs text-slate-500">Started</dt><dd className="mt-0.5 text-slate-700">{new Date(session.started_at).toLocaleString()}</dd></div>
         <div><dt className="text-xs text-slate-500">Ended</dt><dd className="mt-0.5 text-slate-700">{session.ended_at ? new Date(session.ended_at).toLocaleString() : "Not ended"}</dd></div>
+        <div><dt className="text-xs text-slate-500">Protocol</dt><dd className="mt-0.5 font-mono text-slate-700">{session.protocol_version}</dd></div>
+        <div><dt className="text-xs text-slate-500">Last activity</dt><dd className="mt-0.5 text-slate-700">{tokenActivityTime(session.last_activity_at)}</dd></div>
       </dl>
+      {session.app_token_id && <p className="truncate font-mono text-xs text-slate-500" title={session.app_token_id}>Token {session.app_token_id}</p>}
+      {session.end_reason && <p className="text-xs text-slate-500">Ended because: <span className="font-medium text-slate-700">{session.end_reason.replaceAll("_", " ")}</span></p>}
     </div>
   );
 }
@@ -216,11 +338,14 @@ function McpSessionsPanel({ sessions }: { sessions: NonNullable<McpAnalyticsData
             {sessions.map((session) => <McpSessionCard key={session.id} session={session} />)}
           </div>
           <div className="hidden overflow-x-auto md:block">
-            <table className="w-full text-sm text-left">
+            <table className="w-full min-w-[1050px] text-sm text-left">
               <thead className="bg-slate-50/50 text-slate-500 text-xs uppercase tracking-wider">
                 <tr>
                   <th className="px-6 py-3 font-medium">Session ID</th>
+                  <th className="px-6 py-3 font-medium">Token ID</th>
+                  <th className="px-6 py-3 font-medium">Protocol</th>
                   <th className="px-6 py-3 font-medium">Started At</th>
+                  <th className="px-6 py-3 font-medium">Last Activity</th>
                   <th className="px-6 py-3 font-medium">Ended At</th>
                   <th className="px-6 py-3 font-medium text-right">Status</th>
                 </tr>
@@ -231,7 +356,10 @@ function McpSessionsPanel({ sessions }: { sessions: NonNullable<McpAnalyticsData
                   return (
                     <tr key={sess.id} className="hover:bg-slate-50 transition-colors">
                       <td className="px-6 py-4 font-mono text-slate-600">{sess.session_id}</td>
+                      <td className="max-w-48 truncate px-6 py-4 font-mono text-xs text-slate-500" title={sess.app_token_id}>{sess.app_token_id || "Legacy"}</td>
+                      <td className="px-6 py-4 font-mono text-xs text-slate-600">{sess.protocol_version}</td>
                       <td className="px-6 py-4">{new Date(sess.started_at).toLocaleString()}</td>
+                      <td className="px-6 py-4">{tokenActivityTime(sess.last_activity_at)}</td>
                       <td className="px-6 py-4 text-slate-500">
                         {sess.ended_at ? new Date(sess.ended_at).toLocaleString() : "-"}
                       </td>

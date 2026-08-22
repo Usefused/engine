@@ -83,8 +83,8 @@ func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 	}
 
 	migrations := engineMigrations()
-	if len(migrations) != 9 {
-		t.Fatalf("Engine migration count = %d, want 9", len(migrations))
+	if len(migrations) != 11 {
+		t.Fatalf("Engine migration count = %d, want 11", len(migrations))
 	}
 	assertMigrationIdentity(t, migrations[0], engineMigrationVersion, engineMigrationName)
 	assertMigrationIdentity(t, migrations[1], appTokenPolicyMigrationVersion, appTokenPolicyMigrationName)
@@ -95,9 +95,54 @@ func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 	assertMigrationIdentity(t, migrations[6], connectBrandVioletMigrationVersion, connectBrandVioletMigrationName)
 	assertMigrationIdentity(t, migrations[7], managedOAuthRefreshMigrationVersion, managedOAuthRefreshMigrationName)
 	assertMigrationIdentity(t, migrations[8], restExecutionMigrationVersion, restExecutionMigrationName)
+	assertMigrationIdentity(t, migrations[9], appTokenHistoryMigrationVersion, appTokenHistoryMigrationName)
+	assertMigrationIdentity(t, migrations[10], appTokenCleanupMigrationVersion, appTokenCleanupMigrationName)
 	if engineMigrationLockQuery != "SELECT pg_advisory_xact_lock($1)" {
 		t.Fatalf("Engine migrations must use a transaction-scoped advisory lock, got %q", engineMigrationLockQuery)
 	}
+}
+
+// TestAppTokenHistoryMigrationPreservesEvidenceWithoutCredentialMaterial locks
+// the split between durable token identity and the deletable active hash.
+func TestAppTokenHistoryMigrationPreservesEvidenceWithoutCredentialMaterial(t *testing.T) {
+	history := engineSchemaTable(t, "fused_app_token_history")
+	active := engineSchemaTable(t, "fused_app_tokens")
+	bindings := engineSchemaTable(t, "fused_app_token_bindings")
+	events := engineSchemaTable(t, "fused_engine_execution_events")
+	sessions := engineSchemaTable(t, "fused_mcp_sessions")
+
+	assertSchemaContainsAll(t, history, "token history schema missing %q", []string{
+		"issued_by_subject_id", "issued_by_credential_id", "status", "terminated_at", "termination_reason", "binding_mode",
+	})
+	if strings.Contains(history, "token_hash") {
+		t.Fatal("token history must not retain an executable credential hash")
+	}
+	assertSchemaContainsAll(t, active, "active token schema missing %q", []string{
+		"token_hash", "binding_mode", "fk_fused_app_tokens_history",
+	})
+	assertSchemaContainsAll(t, bindings, "token binding schema missing %q", []string{
+		"auth_connection_id", "resource_id", "PRIMARY KEY (token_id, service_id, auth_name)",
+	})
+	assertSchemaContainsAll(t, events, "execution receipt schema missing %q", []string{"app_token_id uuid"})
+	assertSchemaContainsAll(t, sessions, "MCP session schema missing %q", []string{
+		"app_token_id uuid", "protocol_version", "last_activity_at", "end_reason", "tool_call_timeout",
+	})
+	for _, stale := range []string{"last_ping_at", "client_info"} {
+		if strings.Contains(sessions, stale) {
+			t.Fatalf("fresh MCP session schema retained unused field %q", stale)
+		}
+	}
+
+	migration := strings.Join(appTokenHistoryMigrationQueries(), "\n")
+	assertSchemaContainsAll(t, migration, "token history migration missing %q", []string{
+		"INSERT INTO fused_app_token_history", "FROM fused_app_tokens", "ON CONFLICT (id) DO NOTHING",
+		"ADD COLUMN IF NOT EXISTS app_token_id", "idx_fused_engine_execution_events_token_started",
+	})
+	cleanup := strings.Join(appTokenCleanupMigrationQueries(), "\n")
+	assertSchemaContainsAll(t, cleanup, "token cleanup migration missing %q", []string{
+		"ADD COLUMN IF NOT EXISTS termination_reason", "tool_call_timeout",
+		"DROP INDEX IF EXISTS idx_fused_app_tokens_family", "idx_fused_app_tokens_expiry",
+	})
 }
 
 // TestRESTExecutionTransportOwnsOnlyMigrationNine protects the immutable v1

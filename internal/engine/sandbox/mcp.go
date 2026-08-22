@@ -27,7 +27,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 )
 
 const maxMCPMessageBodyBytes = 256 * 1024
@@ -46,13 +45,10 @@ func mcpSseHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	// ── Rate limit: SSE connections per app ID ─────────────────────────────
-	if !allowSSEConnect(w, appIDHex) {
+	if !allowMCPSessionStart(w, appIDHex) {
 		return
 	}
 
-	// ── Entitlement: MaxSandboxConcurrency gate ────────────────────────────
 	ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.sandbox.mcp.concurrency_check")
 	if limitErr := entitlement.CheckLimit(span, "mcp_sandbox_concurrency", activeMCPSessionCount(), entitlement.LiveEntitlement.Load().MaxSandboxConcurrency); limitErr != nil {
 		slog.InfoContext(ctx, "mcp sse denied: max sandbox concurrency reached", "limit", limitErr.Limit, "current", limitErr.Current)
@@ -66,53 +62,43 @@ func mcpSseHandler(w http.ResponseWriter, r *http.Request) {
 	if !connected {
 		return
 	}
-	defer globalObjectCache.DisconnectSDK(appIDHex)
-
 	sessionID := uuid.NewString()
-
-	// Each session gets a context. It will be cancelled if the client disconnects,
-	// or if the idle timer fires (see registerMCPSession).
 	ctx, cancel := mcpSessionContext(r.Context(), identity.TokenPolicy.ExpiresAt)
-
-	// Sessions get an operation catalog scoped to exactly what this app's
-	// owner selected; catalog construction must succeed before the child starts.
-	// Built from the Engine snapshot, so a failure here is treated the same as
-	// the app-cache handshake failure above -- the session never starts
-	// rather than serving a session whose search_docs/call() catalog can't be
-	// trusted to match its actual scope.
 	fixture, err := prepareSessionFixture(ctx, appIDHex, identity.TokenPolicy)
 	if err != nil {
 		cancel()
+		globalObjectCache.DisconnectSDK(appIDHex)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to build mcp fixture: %v", err))
 		return
 	}
-
 	cmd, err := buildMCPCommand(ctx, sessionID, fixture)
 	if err != nil {
 		cancel()
+		globalObjectCache.DisconnectSDK(appIDHex)
 		writeError(w, http.StatusInternalServerError, "failed to prepare mcp runtime")
 		return
 	}
-
 	stdin, stdout, err := setupPipesAndStart(cmd)
 	if err != nil {
 		cancel()
+		globalObjectCache.DisconnectSDK(appIDHex)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	injectedResp := make(chan string, 100)
-	registerMCPSession(sessionID, appIDHex, token, cmd, stdin, cancel, injectedResp, fixture, authContext)
-	publishMCPSessionEvent(appIDHex, sessionID, "started")
-
-	defer cleanupMCPSession(sessionID, appIDHex, cmd, cancel)
+	registerMCPSession(ctx, &mcpSession{
+		appID: appIDHex, sessionID: sessionID, tokenID: identity.TokenID,
+		protocolVersion: "2024-11-05", transport: "sse", cmd: cmd, stdin: stdin,
+		cancel: cancel, token: token,
+		fixture: fixture, authContext: authContext,
+	})
+	defer terminateMCPSession(sessionID, "client_disconnected")
 
 	flusher, ok := setupSSEResponse(w, sessionID)
 	if !ok {
 		return
 	}
-
-	processMCPStream(ctx, w, flusher, stdout, appIDHex, sessionID, injectedResp)
+	processMCPStream(ctx, w, flusher, stdout, sessionID)
 }
 
 func connectMCPApp(w http.ResponseWriter, ctx context.Context, appID, token string) (auth.RuntimeIdentity, bool) {
@@ -180,7 +166,7 @@ func extractBearerAuthToken(authHeader string) (string, bool) {
 //  1. Memory cap via NODE_OPTIONS (64 MB heap, 4 MB semi-space).
 //  2. HOME and TMPDIR are redirected so the process cannot write to the
 //     user home directory. TMPDIR is scoped to a per-session directory
-//     that is cleaned up by cleanupMCPSession.
+//     that is cleaned up when the MCP session terminates.
 //  3. applySysProcAttr sets Pdeathsig+Setpgid on Linux (no-op on macOS).
 //
 // The fixed runtime receives only a session identifier, Engine port, and
@@ -256,7 +242,7 @@ func prepareSessionFixture(ctx context.Context, appIDHex string, policy store.Ap
 // same {"operations": [...]} shape fixture.ts parses, so the
 // spawned Node process reads the exact catalog validated by the Go middleware.
 // sessionTmpDir already exists
-// (buildMCPCommand creates it) and is cleaned up by cleanupMCPSession, so
+// (buildMCPCommand creates it) and is cleaned up by terminateMCPSession, so
 // this file needs no cleanup of its own.
 func writeSessionFixture(sessionTmpDir string, fixture *Fixture) (string, error) {
 	if fixture == nil {
@@ -302,52 +288,49 @@ func setupPipesAndStart(cmd *exec.Cmd) (io.WriteCloser, io.ReadCloser, error) {
 	return stdin, stdout, nil
 }
 
-// registerMCPSession saves the session state safely in the global map and starts the idle timer.
-func registerMCPSession(sessionID, appIDHex, token string, cmd *exec.Cmd, stdin io.WriteCloser, cancel context.CancelFunc, injectedResp chan string, fixture *Fixture, authContext map[string]any) {
-	sessionIdleTimeout := time.Duration(cfg.Sandbox.SessionMaxAgeSeconds) * time.Second
-
-	sess := &mcpSession{
-		appID:           appIDHex,
-		sessionID:       sessionID,
-		cmd:             cmd,
-		stdin:           stdin,
-		cancel:          cancel,
-		pendingRequests: make(map[string]pendingReq),
-		injectedResp:    injectedResp,
-		token:           token,
-		fixture:         fixture,
-		authContext:     authContext,
-	}
-
-	// The idle timer kills the session if no activity occurs within the timeout.
-	sess.idleTimer = time.AfterFunc(sessionIdleTimeout, func() {
-		mcpSessions.RLock()
-		s, ok := mcpSessions.m[sessionID]
-		mcpSessions.RUnlock()
-		if !ok {
-			return
-		}
-
-		s.pendingMu.Lock()
-		hasPending := len(s.pendingRequests) > 0
-		s.pendingMu.Unlock()
-
-		if !hasPending {
-			// Idle timeout reached with no pending requests — terminate session.
-			if s.cmd.Process != nil {
-				s.cmd.Process.Kill()
-			}
-			s.cancel()
-		} else {
-			// Something is in flight, give it more time. The toolCallTimeout will
-			// catch it if it hangs.
-			s.idleTimer.Reset(sessionIdleTimeout)
-		}
-	})
-
+// registerMCPSession is shared by SSE and Streamable HTTP so expiry, idle
+// termination, history events, and cleanup cannot drift by transport.
+func registerMCPSession(ctx context.Context, sess *mcpSession) {
+	sess.pendingRequests = make(map[string]struct{})
+	touchMCPSession(sess)
+	sess.idleTimer = time.AfterFunc(mcpSessionIdleTimeout(), func() { handleMCPSessionIdle(sess.sessionID) })
 	mcpSessions.Lock()
-	mcpSessions.m[sessionID] = sess
+	mcpSessions.m[sess.sessionID] = sess
 	mcpSessions.Unlock()
+	publishMCPSessionEvent(sess, "started", "")
+	go terminateMCPSessionWhenContextEnds(ctx, sess.sessionID)
+}
+
+func mcpSessionIdleTimeout() time.Duration {
+	return time.Duration(cfg.Sandbox.SessionMaxAgeSeconds) * time.Second
+}
+
+func handleMCPSessionIdle(sessionID string) {
+	sess, ok := lookupMCPSession(sessionID)
+	if !ok {
+		return
+	}
+	sess.pendingMu.Lock()
+	hasPending := len(sess.pendingRequests) > 0
+	sess.pendingMu.Unlock()
+	if hasPending {
+		sess.idleTimer.Reset(mcpSessionIdleTimeout())
+		return
+	}
+	terminateMCPSession(sessionID, "idle_timeout")
+}
+
+func terminateMCPSessionWhenContextEnds(ctx context.Context, sessionID string) {
+	<-ctx.Done()
+	reason := "engine_shutdown"
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		reason = "token_expired"
+	} else if sess, ok := lookupMCPSession(sessionID); ok && sess.transport == "sse" {
+		// An SSE session is deliberately tied to its request context, so ordinary
+		// cancellation means the client closed that transport connection.
+		reason = "client_disconnected"
+	}
+	terminateMCPSession(sessionID, reason)
 }
 
 // mcpSessionAuthContext accepts the same stable connected-user selectors a
@@ -374,40 +357,59 @@ func mcpSessionAuthContext(headers http.Header) (map[string]any, error) {
 	return context, nil
 }
 
-// cleanupMCPSession kills the Node process, removes the session from the
-// registry, cleans up the per-session temp dir, and publishes an end event.
-func cleanupMCPSession(sessionID, appIDHex string, cmd *exec.Cmd, cancel context.CancelFunc) {
-	// Kill the process explicitly before cancelling the context so there is no
-	// race between context cancellation and process termination.
-	if cmd.Process != nil {
-		cmd.Process.Kill()
-	}
-	cancel()
-
+// terminateMCPSession deletes only the transport session. The execution token
+// remains independently revocable/expirable, while history keeps the reason.
+func terminateMCPSession(sessionID, reason string) bool {
 	mcpSessions.Lock()
-	if sess, ok := mcpSessions.m[sessionID]; ok && sess.idleTimer != nil {
+	sess, ok := mcpSessions.m[sessionID]
+	if ok {
+		delete(mcpSessions.m, sessionID)
+	}
+	mcpSessions.Unlock()
+	if !ok {
+		return false
+	}
+	if sess.idleTimer != nil {
 		sess.idleTimer.Stop()
 	}
-	delete(mcpSessions.m, sessionID)
-	mcpSessions.Unlock()
-
-	// Clean up the per-session temp directory.
+	if sess.cmd != nil && sess.cmd.Process != nil {
+		_ = sess.cmd.Process.Kill()
+	}
+	if sess.cancel != nil {
+		sess.cancel()
+	}
 	os.RemoveAll(mcpSessionTmpDir(sessionID))
-
-	publishMCPSessionEvent(appIDHex, sessionID, "ended")
+	if globalObjectCache != nil {
+		globalObjectCache.DisconnectSDK(sess.appID)
+	}
+	publishMCPSessionEvent(sess, "ended", reason)
+	return true
 }
 
 // publishMCPSessionEvent sends a session lifecycle event to NATS JetStream.
-func publishMCPSessionEvent(appIDHex, sessionID, eventType string) {
+func publishMCPSessionEvent(sess *mcpSession, eventType, endReason string) {
 	if globalNATSClient != nil && globalNATSClient.JS != nil {
+		occurredAt := time.Now().UTC()
 		eventData, _ := json.Marshal(map[string]any{
-			"app_id":     appIDHex,
-			"session_id": sessionID,
-			"type":       eventType,
-			"timestamp":  time.Now(),
+			"app_id": sess.appID, "app_token_id": sess.tokenID,
+			"session_id": sess.sessionID, "protocol_version": sess.protocolVersion,
+			"type": eventType, "end_reason": endReason, "timestamp": occurredAt,
+			"last_activity_at": mcpSessionLastActivity(sess),
 		})
-		globalNATSClient.PublishJS(messaging.FusedEngineSessionSubject(appIDHex), eventData)
+		globalNATSClient.PublishJS(messaging.FusedEngineSessionSubject(sess.appID), eventData)
 	}
+}
+
+func touchMCPSession(sess *mcpSession) {
+	sess.activityMu.Lock()
+	sess.lastActivityAt = time.Now().UTC()
+	sess.activityMu.Unlock()
+}
+
+func mcpSessionLastActivity(sess *mcpSession) time.Time {
+	sess.activityMu.Lock()
+	defer sess.activityMu.Unlock()
+	return sess.lastActivityAt
 }
 
 // setupSSEResponse configures the HTTP response for SSE streaming.
@@ -415,135 +417,75 @@ func setupSSEResponse(w http.ResponseWriter, sessionID string) (http.Flusher, bo
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming unsupported")
 		return nil, false
 	}
-
 	fmt.Fprintf(w, "event: endpoint\ndata: /mcp/message?sessionId=%s\n\n", sessionID)
 	flusher.Flush()
 	return flusher, true
 }
 
-// processMCPStream reads stdout from the Node process and forwards to the client.
-func processMCPStream(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, stdout io.ReadCloser, appIDHex, sessionID string, injectedResp chan string) {
+// processMCPStream forwards one session's child-process responses and keeps
+// the SSE connection alive without sharing process state between sessions.
+func processMCPStream(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, stdout io.ReadCloser, sessionID string) {
 	stdoutLines := make(chan string)
-
 	go func() {
 		scanner := bufio.NewScanner(stdout)
-		buf := make([]byte, 1*1024*1024)
-		scanner.Buffer(buf, 1*1024*1024) // 1 MB per line
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 		for scanner.Scan() {
 			stdoutLines <- scanner.Text()
 		}
 		close(stdoutLines)
 	}()
 
-	// Send a keep-alive ping every 15 seconds to prevent proxies from dropping the connection
 	pingTicker := time.NewTicker(15 * time.Second)
 	defer pingTicker.Stop()
-
-	// multiplex node stdout and native Go dispatcher responses.
 	for {
 		select {
 		case <-ctx.Done():
-			// Client disconnected or session was forcefully canceled
 			return
-
 		case <-pingTicker.C:
-			fmt.Fprintf(w, ": ping\n\n")
+			fmt.Fprint(w, ": ping\n\n")
 			flusher.Flush()
-
 		case line, ok := <-stdoutLines:
 			if !ok {
 				return
 			}
-			if strings.HasPrefix(line, "___FUSED_SPAN___:") {
-				recordMCPExecutorSpan(line, appIDHex, sessionID)
-				continue
-			}
-			fmt.Fprintf(w, "event: message\ndata: %s\n\n", line)
-			flusher.Flush()
-			handleMCPResponse(line, sessionID)
-
-		case line, ok := <-injectedResp:
-			if !ok {
-				return
-			}
 			fmt.Fprintf(w, "event: message\ndata: %s\n\n", line)
 			flusher.Flush()
 			handleMCPResponse(line, sessionID)
 		}
 	}
-}
-
-// recordMCPExecutorSpan keeps child-process executions in the operator's OTEL
-// trace stream without reviving the removed analytics persistence channel.
-func recordMCPExecutorSpan(line, appIDHex, sessionID string) {
-	var spanData struct {
-		EndpointName string `json:"endpoint_name"`
-		Failed       bool   `json:"failed"`
-	}
-	if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "___FUSED_SPAN___:")), &spanData); err != nil {
-		return
-	}
-	_, span := otel.Tracer("engine").Start(context.Background(), "engine.mcp.executor")
-	span.SetAttributes(
-		attribute.String("app.id", appIDHex),
-		attribute.String("mcp.session_id", sessionID),
-		attribute.String("execution.operation", spanData.EndpointName),
-		attribute.Bool("execution.failed", spanData.Failed),
-	)
-	span.End()
 }
 
 func handleMCPResponse(line, sessionID string) {
-	var msg map[string]any
-	if err := json.Unmarshal([]byte(line), &msg); err != nil {
+	var msg struct {
+		ID json.RawMessage `json:"id"`
+	}
+	if json.Unmarshal([]byte(line), &msg) != nil {
 		return
 	}
-
-	idVal, ok := msg["id"]
+	if len(msg.ID) == 0 {
+		return
+	}
+	sess, ok := lookupMCPSession(sessionID)
 	if !ok {
 		return
 	}
-	idStr := fmt.Sprintf("%v", idVal)
-
-	mcpSessions.RLock()
-	sess, ok := mcpSessions.m[sessionID]
-	mcpSessions.RUnlock()
-
-	if ok {
-		sess.pendingMu.Lock()
-		_, found := sess.pendingRequests[idStr]
-		if found {
-			delete(sess.pendingRequests, idStr)
-		}
-		sess.pendingMu.Unlock()
-
-		if found {
-			// Reset idle timer when a tool call completes.
-			sessionIdleTimeout := time.Duration(cfg.Sandbox.SessionMaxAgeSeconds) * time.Second
-			sess.idleTimer.Reset(sessionIdleTimeout)
-		}
-	}
+	completeMCPToolCall(sess, string(compactJSON(msg.ID)))
 }
 
-// mcpMessageHandler handles incoming messages sent to the MCP server.
+// mcpMessageHandler accepts JSON-RPC messages for an authenticated SSE session.
 func mcpMessageHandler(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.URL.Query().Get("sessionId")
 	if sessionID == "" {
 		writeError(w, http.StatusBadRequest, "sessionId query param required")
 		return
 	}
-
-	mcpSessions.RLock()
-	sess, ok := mcpSessions.m[sessionID]
-	mcpSessions.RUnlock()
-
-	if !ok {
+	sess, ok := lookupMCPSession(sessionID)
+	if !ok || sess.transport != "sse" {
 		writeError(w, http.StatusNotFound, "mcp session not found or expired")
 		return
 	}
@@ -551,35 +493,23 @@ func mcpMessageHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid Authorization header")
 		return
 	}
-
-	// ── Rate limit: tools/call messages per app ID ─────────────────────────
 	if !allowMessage(w, sess.appID) {
 		return
 	}
-
 	body, err := readBoundedMCPMessageBody(w, r)
 	if err != nil {
 		return
 	}
-
-	callID, endpointName, _ := trackPendingRequest(body, sess)
-
-	// Enforce the per-tool-call timeout. If the Node process does not respond
-	// within the configured window, the entire session is killed.
+	callID := trackPendingRequest(body, sess)
 	if callID != "" {
-		go enforceToolCallTimeout(sess, callID, endpointName)
+		go enforceToolCallTimeout(sess, callID)
 	}
-
-	// Reset idle timer when a new message is received.
-	sessionIdleTimeout := time.Duration(cfg.Sandbox.SessionMaxAgeSeconds) * time.Second
-	sess.idleTimer.Reset(sessionIdleTimeout)
-
-	_, err = sess.stdin.Write(append(body, '\n'))
-	if err != nil {
+	resetMCPSessionIdleTimer(sess)
+	if _, err = sess.stdin.Write(append(body, '\n')); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to send message to mcp server")
 		return
 	}
-
+	touchMCPSession(sess)
 	w.WriteHeader(http.StatusAccepted)
 }
 
@@ -588,9 +518,8 @@ func messageUsesSessionToken(r *http.Request, sess *mcpSession) bool {
 	if !ok {
 		return false
 	}
-	// Why compare to the session token instead of trusting sessionId alone:
-	// /mcp/message carries only a public-ish session id in the URL, so the
-	// bearer must still prove it owns the authenticated SSE session.
+	// A session ID can appear in a URL or log, so the bearer still has to prove
+	// ownership of the authenticated SSE session before dispatch is allowed.
 	return subtle.ConstantTimeCompare([]byte(token), []byte(sess.token)) == 1
 }
 
@@ -641,69 +570,59 @@ func hashRequestBody(params map[string]any) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// enforceToolCallTimeout waits for the configured tool-call deadline. If the
-// pending request is still in-flight when the timer fires, the session is
-// killed and the client's SSE stream will close.
-func enforceToolCallTimeout(sess *mcpSession, callID, endpointName string) {
-	timeout := time.Duration(cfg.Sandbox.ToolCallTimeoutSeconds) * time.Second
-	timer := time.NewTimer(timeout)
+// enforceToolCallTimeout terminates an SSE session whose child runtime never
+// completes a tracked tool call, preventing pending work from defeating idle cleanup.
+func enforceToolCallTimeout(sess *mcpSession, callID string) {
+	timer := time.NewTimer(time.Duration(cfg.Sandbox.ToolCallTimeoutSeconds) * time.Second)
 	defer timer.Stop()
-
 	<-timer.C
-
 	sess.pendingMu.Lock()
 	_, stillPending := sess.pendingRequests[callID]
 	if stillPending {
 		delete(sess.pendingRequests, callID)
 	}
 	sess.pendingMu.Unlock()
-
 	if stillPending {
-		// The tool call did not complete in time — kill the session.
-		if sess.cmd != nil && sess.cmd.Process != nil {
-			sess.cmd.Process.Kill()
-		}
-		if sess.cancel != nil {
-			sess.cancel()
-		}
+		terminateMCPSession(sess.sessionID, "tool_call_timeout")
 	}
 }
 
-// trackPendingRequest parses the JSON-RPC request and records it for latency
-// tracking and timeout enforcement. Returns the call ID and tool name (empty
-// strings if the message is not a tools/call).
-func trackPendingRequest(body []byte, sess *mcpSession) (callID, endpointName string, params map[string]any) {
-	var msg map[string]any
-	if err := json.Unmarshal(body, &msg); err != nil {
-		return "", "", nil
+// trackPendingRequest retains only an opaque request ID. Provider arguments
+// are unnecessary for timeouts and must not become session state.
+func trackPendingRequest(body []byte, sess *mcpSession) string {
+	var request mcpJSONRPCRequest
+	if json.Unmarshal(body, &request) != nil {
+		return ""
 	}
+	return trackMCPToolCall(request, sess)
+}
 
-	method, _ := msg["method"].(string)
-	if method != "tools/call" {
-		return "", "", nil
+func trackMCPToolCall(request mcpJSONRPCRequest, sess *mcpSession) string {
+	if request.Method != "tools/call" || len(request.ID) == 0 {
+		return ""
 	}
-
-	idVal, ok := msg["id"]
-	if !ok {
-		return "", "", nil
+	callID := string(compactJSON(request.ID))
+	if callID == "null" {
+		return ""
 	}
-	idStr := fmt.Sprintf("%v", idVal)
-
-	p, ok := msg["params"].(map[string]any)
-	if !ok {
-		return "", "", nil
-	}
-	name, _ := p["name"].(string)
-
-	arguments, _ := p["arguments"].(map[string]any)
-
 	sess.pendingMu.Lock()
-	sess.pendingRequests[idStr] = pendingReq{
-		endpointName: name,
-		startTime:    time.Now(),
-		arguments:    arguments,
+	sess.pendingRequests[callID] = struct{}{}
+	sess.pendingMu.Unlock()
+	return callID
+}
+
+func completeMCPToolCall(sess *mcpSession, callID string) {
+	if callID == "" {
+		return
+	}
+	sess.pendingMu.Lock()
+	_, found := sess.pendingRequests[callID]
+	if found {
+		delete(sess.pendingRequests, callID)
 	}
 	sess.pendingMu.Unlock()
-
-	return idStr, name, arguments
+	if found {
+		resetMCPSessionIdleTimer(sess)
+		touchMCPSession(sess)
+	}
 }

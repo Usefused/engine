@@ -5,20 +5,16 @@ import (
 	"testing"
 )
 
-// TestKillMCPSessionsForSDK_CancelsOnlyMatchingSessions is the direct-call
-// path exercised by app-version hard deactivation: it calls
-// this function in-process (rather than round-tripping through NATS) to
-// force-kill every live MCP session for a deactivated/deleted appID, without
-// touching sessions belonging to other SDKs.
-func TestKillMCPSessionsForSDK_CancelsOnlyMatchingSessions(t *testing.T) {
+// TestTerminateMCPSessionsForAppCancelsOnlyMatchingSessions exercises the
+// in-process hard-deactivation path without touching another app's sessions.
+func TestTerminateMCPSessionsForAppCancelsOnlyMatchingSessions(t *testing.T) {
 	var mu sync.Mutex
 	targetCancelled := false
 	otherCancelled := false
 
 	mcpSessions.Lock()
 	mcpSessions.m["sess-target"] = &mcpSession{
-		appID:     "sdk-target",
-		sessionID: "sess-target",
+		appID: "sdk-target", sessionID: "sess-target",
 		cancel: func() {
 			mu.Lock()
 			targetCancelled = true
@@ -26,8 +22,7 @@ func TestKillMCPSessionsForSDK_CancelsOnlyMatchingSessions(t *testing.T) {
 		},
 	}
 	mcpSessions.m["sess-other"] = &mcpSession{
-		appID:     "sdk-other",
-		sessionID: "sess-other",
+		appID: "sdk-other", sessionID: "sess-other",
 		cancel: func() {
 			mu.Lock()
 			otherCancelled = true
@@ -42,7 +37,7 @@ func TestKillMCPSessionsForSDK_CancelsOnlyMatchingSessions(t *testing.T) {
 		mcpSessions.Unlock()
 	})
 
-	KillMCPSessionsForSDK("sdk-target")
+	TerminateMCPSessionsForApp("sdk-target")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -58,9 +53,9 @@ func TestKillMCPSessionsForSDK_CancelsOnlyMatchingSessions(t *testing.T) {
 	_, otherStillTracked := mcpSessions.m["sess-other"]
 	mcpSessions.RUnlock()
 	if targetStillTracked {
-		t.Error("expected the killed session to be removed from mcpSessions")
+		t.Error("expected the terminated session to be removed")
 	}
 	if !otherStillTracked {
-		t.Error("expected the untouched session to remain tracked")
+		t.Error("expected the unrelated session to remain tracked")
 	}
 }

@@ -213,21 +213,61 @@ func (s *postgresStore) ListAuthorizedWorkspaceServices(ctx context.Context, sco
 	return services, rows.Err()
 }
 
+// workspaceServiceSlugReferenceMatchSQL is the Engine's canonical matcher for
+// public service slugs. Provider qualification is normalized only after first
+// checking an exact stored slug, so an exact workspace identity always wins.
+const workspaceServiceSlugReferenceMatchSQL = `(
+	service.service_slug = input.key
+	OR service.service_slug = CASE
+		WHEN input.key LIKE '@%/%' THEN split_part(input.key, '/', 2)
+		ELSE input.key
+	END
+)`
+
+const workspaceServiceSlugReferencePrioritySQL = `CASE
+	WHEN service.service_slug = input.key THEN 0
+	ELSE 1
+END`
+
+// workspaceServiceResolutionSQL centralizes matching, exact-slug priority, and
+// fail-closed ambiguity handling. Token issuance disables legacy display names
+// because its public field is explicitly service_slug; workspace lookup keeps
+// them for interactive compatibility without allowing a name to shadow a slug.
+func workspaceServiceResolutionSQL(inputRelation string, includeDisplayNames bool) string {
+	matchSQL := workspaceServiceSlugReferenceMatchSQL
+	prioritySQL := workspaceServiceSlugReferencePrioritySQL
+	if includeDisplayNames {
+		matchSQL = `(` + matchSQL + ` OR service.service_name = input.key)`
+		prioritySQL = `CASE
+			WHEN service.service_slug = input.key THEN 0
+			WHEN ` + workspaceServiceSlugReferenceMatchSQL + ` THEN 1
+			ELSE 2
+		END`
+	}
+	return `
+	WITH service_reference_input AS (
+		SELECT DISTINCT key FROM ` + inputRelation + `
+	), candidates AS (
+		SELECT input.key, service.service_id, ` + prioritySQL + ` AS match_priority
+		FROM service_reference_input input
+		JOIN fused_workspace_services service ON ` + matchSQL + `
+	), ranked AS (
+		SELECT candidates.*,
+		       MIN(match_priority) OVER (PARTITION BY key) AS best_priority,
+		       COUNT(*) OVER (PARTITION BY key, match_priority) AS priority_matches
+		FROM candidates
+	)
+	SELECT key, service_id FROM ranked
+	WHERE match_priority = best_priority AND priority_matches = 1`
+}
+
+var resolveWorkspaceServiceIDsByKeysSQL = workspaceServiceResolutionSQL(`unnest($1::text[]) AS input(key)`, true)
+
 func (s *postgresStore) ResolveWorkspaceServiceIDsByKeys(ctx context.Context, keys []string) (map[string]uuid.UUID, error) {
 	if len(keys) == 0 {
 		return map[string]uuid.UUID{}, nil
 	}
-	rows, err := s.db.Query(ctx, `
-		SELECT DISTINCT ON (input.key) input.key, service.service_id
-		FROM unnest($1::text[]) AS input(key)
-		JOIN fused_workspace_services service
-		  ON service.service_name = input.key
-		  OR service.service_slug = input.key
-		  OR service.service_slug = CASE
-			WHEN input.key LIKE '@%/%' THEN split_part(input.key, '/', 2)
-			ELSE input.key
-		  END
-		ORDER BY input.key, service.created_at DESC`, keys)
+	rows, err := s.db.Query(ctx, resolveWorkspaceServiceIDsByKeysSQL, keys)
 	if err != nil {
 		return nil, fmt.Errorf("ResolveWorkspaceServiceIDsByKeys: query: %w", err)
 	}

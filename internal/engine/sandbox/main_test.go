@@ -136,19 +136,19 @@ func TestRateLimiter_RefillsOverTime(t *testing.T) {
 	}
 }
 
-func TestAllowSSEConnect_Returns429WhenExhausted(t *testing.T) {
-	initRateLimiters(1, 1, 60, 10) // burst=1 for SSE
+func TestAllowMCPSessionStartReturns429WhenExhausted(t *testing.T) {
+	initRateLimiters(1, 1, 60, 10)
 
 	// First connection: allowed
 	w := httptest.NewRecorder()
-	if !allowSSEConnect(w, "sdk-test") {
-		t.Fatal("first SSE connection should be allowed")
+	if !allowMCPSessionStart(w, "sdk-test") {
+		t.Fatal("first MCP session should be allowed")
 	}
 
 	// Second connection immediately: denied → 429
 	w2 := httptest.NewRecorder()
-	if allowSSEConnect(w2, "sdk-test") {
-		t.Fatal("second SSE connection should be rate-limited")
+	if allowMCPSessionStart(w2, "sdk-test") {
+		t.Fatal("second MCP session should be rate-limited")
 	}
 	if w2.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 429, got %d", w2.Code)
@@ -189,16 +189,19 @@ func TestEnforceToolCallTimeout_KillsSessionOnTimeout(t *testing.T) {
 	defer cancel()
 
 	sess := &mcpSession{
-		appID:     "sdk-timeout-test",
-		sessionID: "sess-timeout-test",
-		cmd:       cmd,
-		cancel:    cancel,
-		pendingRequests: map[string]pendingReq{
-			"call-1": {endpointName: "slow_tool", startTime: time.Now()},
-		},
+		appID:           "sdk-timeout-test",
+		sessionID:       "sess-timeout-test",
+		cmd:             cmd,
+		cancel:          cancel,
+		pendingRequests: map[string]struct{}{"call-1": {}},
+		idleTimer:       time.AfterFunc(time.Hour, func() {}),
 	}
+	mcpSessions.Lock()
+	mcpSessions.m[sess.sessionID] = sess
+	mcpSessions.Unlock()
+	t.Cleanup(func() { terminateMCPSession(sess.sessionID, "test_cleanup") })
 
-	go enforceToolCallTimeout(sess, "call-1", "slow_tool")
+	go enforceToolCallTimeout(sess, "call-1")
 
 	// Give the timeout goroutine time to fire (1s) + a small buffer.
 	time.Sleep(1500 * time.Millisecond)
@@ -218,6 +221,9 @@ func TestEnforceToolCallTimeout_KillsSessionOnTimeout(t *testing.T) {
 	sess.pendingMu.Unlock()
 	if stillPending {
 		t.Fatal("expected pending request to be removed after timeout")
+	}
+	if _, active := lookupMCPSession(sess.sessionID); active {
+		t.Fatal("timed-out session remained registered")
 	}
 }
 
@@ -242,12 +248,10 @@ func TestEnforceToolCallTimeout_DoesNotKillIfCompleted(t *testing.T) {
 			mu.Unlock()
 			cancel()
 		},
-		pendingRequests: map[string]pendingReq{
-			"call-2": {endpointName: "fast_tool", startTime: time.Now()},
-		},
+		pendingRequests: map[string]struct{}{"call-2": {}},
 	}
 
-	go enforceToolCallTimeout(sess, "call-2", "fast_tool")
+	go enforceToolCallTimeout(sess, "call-2")
 
 	// Simulate the tool call completing before the timeout fires.
 	sess.pendingMu.Lock()
@@ -271,7 +275,7 @@ func TestEnforceToolCallTimeout_DoesNotKillIfCompleted(t *testing.T) {
 
 func TestTrackPendingRequest_TracksToolsCall(t *testing.T) {
 	sess := &mcpSession{
-		pendingRequests: make(map[string]pendingReq),
+		pendingRequests: make(map[string]struct{}),
 	}
 
 	body, _ := json.Marshal(map[string]any{
@@ -280,30 +284,27 @@ func TestTrackPendingRequest_TracksToolsCall(t *testing.T) {
 		"params": map[string]any{"name": "get_user"},
 	})
 
-	callID, endpointName, _ := trackPendingRequest(body, sess)
+	callID := trackPendingRequest(body, sess)
 
-	if callID != "42" {
-		t.Errorf("expected callID '42', got '%s'", callID)
+	if callID != `"42"` {
+		t.Errorf("expected JSON request id %q, got %q", `"42"`, callID)
 	}
-	if endpointName != "get_user" {
-		t.Errorf("expected endpointName 'get_user', got '%s'", endpointName)
-	}
-
 	sess.pendingMu.Lock()
-	req, ok := sess.pendingRequests["42"]
+	_, ok := sess.pendingRequests[`"42"`]
 	sess.pendingMu.Unlock()
 
 	if !ok {
 		t.Fatal("expected pending request to be recorded")
 	}
-	if req.endpointName != "get_user" {
-		t.Errorf("expected endpointName 'get_user' in pending req, got '%s'", req.endpointName)
+	completeMCPToolCall(sess, `"42"`)
+	if len(sess.pendingRequests) != 0 {
+		t.Fatal("completed request remained pending")
 	}
 }
 
 func TestTrackPendingRequest_IgnoresNonToolsCall(t *testing.T) {
 	sess := &mcpSession{
-		pendingRequests: make(map[string]pendingReq),
+		pendingRequests: make(map[string]struct{}),
 	}
 
 	body, _ := json.Marshal(map[string]any{
@@ -311,7 +312,7 @@ func TestTrackPendingRequest_IgnoresNonToolsCall(t *testing.T) {
 		"id":     "1",
 	})
 
-	callID, _, _ := trackPendingRequest(body, sess)
+	callID := trackPendingRequest(body, sess)
 	if callID != "" {
 		t.Errorf("expected empty callID for non-tools/call method, got '%s'", callID)
 	}

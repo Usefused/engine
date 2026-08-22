@@ -28,14 +28,15 @@ type CatalogPage = {
 
 const CATALOG_SEARCH_QUERY = `
   query($q: String!) {
-    searchServices(q: $q) {
+    searchServices(q: $q, publicOnly: true) {
       id name base_url servers { url description }
       is_public is_owner slug provider { name handle } canonical_ref
     }
   }
 `;
 
-// searchCatalogServices returns the same public-plus-owned projection for every actor.
+// searchCatalogServices keeps the global catalog public-only even for owners,
+// whose private services remain available through Workspace services.
 async function searchCatalogServices(q: string): Promise<Service[]> {
   const response = await api.graphql<{ searchServices: Service[] | null }>(CATALOG_SEARCH_QUERY, { q });
   return response.searchServices || [];
@@ -414,7 +415,7 @@ export default function IntegrationsIndex() {
       setImportPlan(plan);
       return;
     }
-    const applied = await api.integrations.applyImport(importPlan.plan_id, importPlan.source_hash);
+    const applied = await api.integrations.applyImport(importPlan.plan_id, importPlan.review_hash);
     setShowNewPanel(false);
     setImportPlan(null);
     navigate(`/integrations/${applied.service_id}`);

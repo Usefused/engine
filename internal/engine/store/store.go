@@ -26,16 +26,17 @@ var (
 	ErrInvalidEncryptedAuthMaterial      = errors.New("invalid encrypted auth material")
 
 	// App-family errors
-	ErrAppFamilyNotFound     = errors.New("app family not found")
-	ErrAppNotFound           = errors.New("app not found")
-	ErrAppVersionImmutable   = errors.New("app version is immutable: same version with changed source or scope")
-	ErrAppVersionExists      = errors.New("app version already exists in family")
-	ErrAppDeactivated        = errors.New("app is deactivated")
-	ErrAppTokenNotFound      = errors.New("app token not found")
-	ErrAppTombstoneExists    = errors.New("app version was deactivated and cannot be reused")
-	ErrAppKindInvalid        = errors.New("app kind is invalid")
-	ErrAppFamilyKindMismatch = errors.New("app kind does not match app family")
-	ErrAppStatusInvalid      = errors.New("app status is invalid")
+	ErrAppFamilyNotFound      = errors.New("app family not found")
+	ErrAppNotFound            = errors.New("app not found")
+	ErrAppVersionImmutable    = errors.New("app version is immutable: same version with changed source or scope")
+	ErrAppVersionExists       = errors.New("app version already exists in family")
+	ErrAppDeactivated         = errors.New("app is deactivated")
+	ErrAppTokenNotFound       = errors.New("app token not found")
+	ErrAppTokenBindingInvalid = errors.New("app token binding is invalid or unavailable")
+	ErrAppTombstoneExists     = errors.New("app version was deactivated and cannot be reused")
+	ErrAppKindInvalid         = errors.New("app kind is invalid")
+	ErrAppFamilyKindMismatch  = errors.New("app kind does not match app family")
+	ErrAppStatusInvalid       = errors.New("app status is invalid")
 
 	// ErrIdempotentExecutionNotFound means there's no unexpired cached
 	// response for the given (app_id, idempotency key) -- the caller should
@@ -167,8 +168,16 @@ type AppTokenMetadata struct {
 	AppFamilyID uuid.UUID
 	Name        string
 	AppTokenPolicy
-	LastUsedAt *time.Time
-	CreatedAt  time.Time
+	BindingMode          AppTokenBindingMode
+	Status               AppTokenStatus
+	IssuedBySubjectID    *uuid.UUID
+	IssuedByCredentialID *uuid.UUID
+	LastUsedAt           *time.Time
+	ExecutionCount       int64
+	SessionCount         int64
+	TerminatedAt         *time.Time
+	TerminationReason    string
+	CreatedAt            time.Time
 }
 
 // AppTokenRevocation is the secret-free identity needed to invalidate one
@@ -179,6 +188,62 @@ type AppTokenRevocation struct {
 	AppFamilyID uuid.UUID
 	RevokedAt   time.Time
 }
+
+// AppTokenIssue is the persistence boundary for one executable credential.
+// Keeping the hash and its safe lifecycle evidence in one value makes it hard
+// for adapters to create a live token without the retained history row that
+// explains who issued it and what it could access.
+type AppTokenIssue struct {
+	ID                   uuid.UUID
+	AppFamilyID          uuid.UUID
+	TokenHash            string
+	Name                 string
+	Policy               AppTokenPolicy
+	BindingMode          AppTokenBindingMode
+	Bindings             []AppTokenBindingRequest
+	IssuedBySubjectID    *uuid.UUID
+	IssuedByCredentialID *uuid.UUID
+}
+
+// AppTokenBindingRequest names a connected-user grant without exposing its
+// provider credentials. Persistence resolves every request against the app
+// family's bucket in one set-based query before the token becomes usable.
+type AppTokenBindingRequest struct {
+	ServiceSlug string
+	AuthName    string
+	EndUserRef  string
+	ResourceID  *uuid.UUID
+}
+
+// AppTokenBinding is the resolved, Engine-owned identity used at execution.
+// The user reference is intentionally absent so runtime selection cannot drift
+// when a caller supplies a different selector after issuance.
+type AppTokenBinding struct {
+	TokenID          uuid.UUID
+	ServiceID        uuid.UUID
+	AuthName         string
+	AuthConnectionID uuid.UUID
+	ResourceID       *uuid.UUID
+}
+
+type AppTokenBindingMode string
+
+const (
+	AppTokenBindingDynamic AppTokenBindingMode = "dynamic"
+	AppTokenBindingFixed   AppTokenBindingMode = "fixed"
+)
+
+func (mode AppTokenBindingMode) Valid() bool {
+	return mode == AppTokenBindingDynamic || mode == AppTokenBindingFixed
+}
+
+type AppTokenStatus string
+
+const (
+	AppTokenStatusActive  AppTokenStatus = "active"
+	AppTokenStatusExpired AppTokenStatus = "expired"
+	AppTokenStatusRevoked AppTokenStatus = "revoked"
+)
 
 // AppTokenPolicy is the shared SDK/MCP execution-token authorization policy.
 // The API renders AllowAll with AppTokenAllowAllWildcard; storage keeps it
@@ -230,6 +295,7 @@ type AuthProjection struct {
 	Kind        AppKind
 	AppStatus   AppStatus
 	TokenPolicy AppTokenPolicy
+	BindingMode AppTokenBindingMode
 }
 
 // CapabilityDiff describes what changed between two versions for plan output
@@ -535,6 +601,33 @@ type WorkspaceSecret struct {
 	EncryptedValue string
 }
 
+// AppCredentialRequirement is the secret-free exact credential tuple an app
+// plan needs to validate. SecretKeys contains storage identifiers only; values
+// never cross this read-only readiness boundary.
+type AppCredentialRequirement struct {
+	ServiceID  uuid.UUID `json:"service_id"`
+	AuthType   string    `json:"auth_type"`
+	AuthName   string    `json:"auth_name"`
+	SecretKeys []string  `json:"secret_keys"`
+}
+
+// AppCredentialPresence reports only material that exists for one requested
+// tuple. It deliberately excludes encrypted and plaintext credential columns.
+type AppCredentialPresence struct {
+	ServiceID  uuid.UUID
+	AuthType   string
+	AuthName   string
+	Connected  bool
+	SecretKeys []string
+}
+
+// AppBucketReadinessStore keeps app planning on one set-based query over the
+// exact requested tuples, rather than listing a bucket and filtering secrets
+// or connection configurations in Go.
+type AppBucketReadinessStore interface {
+	GetAppBucketCredentialPresence(ctx context.Context, bucketID uuid.UUID, requirements []AppCredentialRequirement) ([]AppCredentialPresence, error)
+}
+
 // SecretKeyAlternative describes one ordered OR branch. Required keys decide
 // satisfiability; optional keys are returned only when the chosen branch has
 // them, which lets optional Basic passwords remain useful without making them
@@ -777,9 +870,11 @@ type Store interface {
 	AuthorizeApp(ctx context.Context, appID uuid.UUID, tokenHash string) (*AuthProjection, error)
 
 	// Family tokens
-	CreateAppToken(ctx context.Context, appFamilyID uuid.UUID, tokenHash, name string, policy AppTokenPolicy) (*AppTokenMetadata, error)
+	CreateAppToken(ctx context.Context, issue AppTokenIssue) (*AppTokenMetadata, error)
 	ListAppTokens(ctx context.Context, appFamilyID uuid.UUID) ([]AppTokenMetadata, error)
 	RevokeAppToken(ctx context.Context, appFamilyID uuid.UUID, name string) (*AppTokenRevocation, error)
+	ExpireAppTokens(ctx context.Context, limit int) (int, error)
+	GetAppTokenBinding(ctx context.Context, tokenID, serviceID uuid.UUID, authName string) (*AppTokenBinding, error)
 
 	// Family buckets
 	SetAppFamilyBucket(ctx context.Context, appFamilyID, bucketID uuid.UUID) error

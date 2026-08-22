@@ -32,16 +32,19 @@ type AppAuthorizer interface {
 }
 
 // RuntimeIdentity carries only safe identity metadata from authorization into
-// execution receipts. Bucket, selection, and token data remain inside the
-// authorization/store boundary.
+// execution receipts and Engine-owned credential selection. TokenID is an
+// opaque database identity; bearer values, hashes, and user-auth selectors
+// remain inside their dedicated authorization and persistence boundaries.
 type RuntimeIdentity struct {
 	AccountID   uuid.UUID
 	AppFamilyID uuid.UUID
 	AppID       uuid.UUID
+	TokenID     uuid.UUID
 	AppVersion  string
 	Kind        store.AppKind
 	Status      store.AppStatus
 	TokenPolicy store.AppTokenPolicy
+	BindingMode store.AppTokenBindingMode
 	// The validator builds this immutable set once so every tool dispatch does
 	// not linearly scan the persisted wire-order slice.
 	allowedOperations map[string]struct{}
@@ -69,7 +72,6 @@ type tokenCacheKey struct {
 
 type tokenCacheEntry struct {
 	identity  RuntimeIdentity
-	tokenID   uuid.UUID
 	expiresAt time.Time
 	cacheID   uint64
 }
@@ -175,7 +177,7 @@ func (v *CachedTokenValidator) acquire(key tokenCacheKey) tokenCacheLookup {
 		if now.Before(entry.expiresAt) {
 			return tokenCacheLookup{identity: cloneRuntimeIdentity(entry.identity), hit: true}
 		}
-		v.removeEntryLocked(key, entry.tokenID)
+		v.removeEntryLocked(key, entry.identity.TokenID)
 	}
 	if load, ok := v.loads[key]; ok {
 		return tokenCacheLookup{load: load}
@@ -188,22 +190,23 @@ func (v *CachedTokenValidator) acquire(key tokenCacheKey) tokenCacheLookup {
 func (v *CachedTokenValidator) loadAndFinish(ctx context.Context, key tokenCacheKey, load *tokenLoad) {
 	loadCtx, cancel := context.WithTimeout(ctx, tokenCacheLoadTimeout)
 	defer cancel()
-	identity, tokenID, expiresAt, err := v.load(loadCtx, key)
-	v.finishLoad(key, load, identity, tokenID, expiresAt, err)
+	identity, expiresAt, err := v.load(loadCtx, key)
+	v.finishLoad(key, load, identity, expiresAt, err)
 }
 
-func (v *CachedTokenValidator) load(ctx context.Context, key tokenCacheKey) (RuntimeIdentity, uuid.UUID, time.Time, error) {
+func (v *CachedTokenValidator) load(ctx context.Context, key tokenCacheKey) (RuntimeIdentity, time.Time, error) {
 	// PostgreSQL stores the portable hex encoding, while the hot in-memory path
 	// keeps the fixed-size digest to avoid allocating a string on every hit.
 	tokenHash := hex.EncodeToString(key.tokenDigest[:])
 	projection, err := v.store.AuthorizeApp(ctx, key.appID, tokenHash)
 	if err != nil {
-		return RuntimeIdentity{}, uuid.Nil, time.Time{}, ErrUnauthorized
+		return RuntimeIdentity{}, time.Time{}, ErrUnauthorized
 	}
 	identity := RuntimeIdentity{
 		AccountID: projection.AccountID, AppFamilyID: projection.AppFamilyID,
-		AppID: projection.AppID, AppVersion: projection.Version,
+		AppID: projection.AppID, TokenID: projection.TokenID, AppVersion: projection.Version,
 		Kind: projection.Kind, Status: projection.AppStatus, TokenPolicy: projection.TokenPolicy,
+		BindingMode: projection.BindingMode,
 	}
 	if !projection.TokenPolicy.IsUnrestricted() {
 		identity.allowedOperations = make(map[string]struct{}, len(projection.TokenPolicy.AllowedOperations))
@@ -216,23 +219,23 @@ func (v *CachedTokenValidator) load(ctx context.Context, key tokenCacheKey) (Run
 		expiresAt = *projection.TokenPolicy.ExpiresAt
 	}
 	if !v.now().Before(expiresAt) {
-		return RuntimeIdentity{}, uuid.Nil, time.Time{}, ErrUnauthorized
+		return RuntimeIdentity{}, time.Time{}, ErrUnauthorized
 	}
-	return identity, projection.TokenID, expiresAt, nil
+	return identity, expiresAt, nil
 }
 
-func (v *CachedTokenValidator) finishLoad(key tokenCacheKey, load *tokenLoad, identity RuntimeIdentity, tokenID uuid.UUID, expiresAt time.Time, err error) {
+func (v *CachedTokenValidator) finishLoad(key tokenCacheKey, load *tokenLoad, identity RuntimeIdentity, expiresAt time.Time, err error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	// A DELETE that committed after this lookup began makes its snapshot stale.
 	// Poison only that token's shared result; unrelated revocations do not make
 	// valid callers retry PostgreSQL.
-	if v.invalidations[tokenID] > load.generation {
+	if v.invalidations[identity.TokenID] > load.generation {
 		identity, err = RuntimeIdentity{}, ErrUnauthorized
 	}
 	load.identity, load.err = cloneRuntimeIdentity(identity), err
-	if err == nil && tokenID != uuid.Nil {
-		v.addEntryLocked(key, tokenCacheEntry{identity: cloneRuntimeIdentity(identity), tokenID: tokenID, expiresAt: expiresAt})
+	if err == nil && identity.TokenID != uuid.Nil {
+		v.addEntryLocked(key, tokenCacheEntry{identity: cloneRuntimeIdentity(identity), expiresAt: expiresAt})
 	}
 	delete(v.loads, key)
 	v.cleanupInvalidationsLocked()
@@ -253,10 +256,10 @@ func (v *CachedTokenValidator) addEntryLocked(key tokenCacheKey, entry tokenCach
 	entry.cacheID = v.cacheID
 	v.entries[key] = entry
 	heap.Push(&v.expiries, tokenCacheExpiry{key: key, expiresAt: entry.expiresAt, cacheID: entry.cacheID})
-	keys := v.keysByToken[entry.tokenID]
+	keys := v.keysByToken[entry.identity.TokenID]
 	if keys == nil {
 		keys = make(map[tokenCacheKey]struct{})
-		v.keysByToken[entry.tokenID] = keys
+		v.keysByToken[entry.identity.TokenID] = keys
 	}
 	keys[key] = struct{}{}
 }
@@ -284,7 +287,7 @@ func (v *CachedTokenValidator) sweepExpiredLocked(now time.Time) {
 		// Exact invalidation leaves a harmless heap tombstone. The insertion ID
 		// prevents it from removing a newer replacement with the same expiry.
 		if ok && entry.cacheID == expired.cacheID {
-			v.removeEntryLocked(expired.key, entry.tokenID)
+			v.removeEntryLocked(expired.key, entry.identity.TokenID)
 		}
 	}
 }

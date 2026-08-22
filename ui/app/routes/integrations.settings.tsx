@@ -118,7 +118,7 @@ export default function SettingsPage() {
           <div className="space-y-5">
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">
-                Engine URL
+                Engine Admin URL
               </label>
               <div className="flex items-center gap-2">
                 <code className="flex-1 block px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-sm text-slate-800 break-all">
@@ -140,7 +140,7 @@ export default function SettingsPage() {
 
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">
-                gRPC URL
+                Engine gRPC URL
               </label>
               <div className="flex items-center gap-2">
                 <code className="flex-1 block px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-sm text-slate-800 break-all">

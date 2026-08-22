@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/shared/cache"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/google/uuid"
@@ -93,6 +94,15 @@ func TestCachedStoreForwardsProfileCapabilities(t *testing.T) {
 	if _, err := metadataBatch.ListServiceContractMetadata(context.Background(), []ServiceContractMetadataRef{{ServiceID: uuid.New(), ServiceVersionID: uuid.New()}}); err != nil {
 		t.Fatalf("forward service contract metadata batch: %v", err)
 	}
+	scaffoldSelections, ok := cached.(AppScaffoldSelectionStore)
+	// Production wraps PostgreSQL in cachedStore, so optional capability promotion is required.
+	if !ok {
+		t.Fatal("cached store does not expose app scaffold selection capability")
+	}
+	// The forwarding call proves the wrapper does not invent a cached resolution path.
+	if _, err := scaffoldSelections.ResolveAuthorizedAppScaffoldSelections(context.Background(), accesscontrol.AuthorizedScope{All: true}, []AppScaffoldSelectionRef{{SelectionIndex: 0, ServiceKey: "sendbird", Version: "v1"}}); err != nil {
+		t.Fatalf("forward app scaffold selections: %v", err)
+	}
 	if _, err := snapshots.GetServiceContractEndpointByName(context.Background(), uuid.New(), uuid.New(), "getIssue"); err != nil {
 		t.Fatalf("forward service contract endpoint by name: %v", err)
 	}
@@ -105,8 +115,8 @@ func TestCachedStoreForwardsProfileCapabilities(t *testing.T) {
 	if _, err := snapshots.ListServiceContractOperations(context.Background(), uuid.New(), uuid.New()); err != nil {
 		t.Fatalf("forward service contract operations: %v", err)
 	}
-	if delegate.executionCalls != 1 || delegate.batchCalls != 1 || delegate.statusCalls != 1 || delegate.lookupCalls != 1 || delegate.backfillCalls != 1 || delegate.snapshotCalls != 6 {
-		t.Fatalf("delegate calls execution=%d batch=%d status=%d lookup=%d backfill=%d snapshots=%d", delegate.executionCalls, delegate.batchCalls, delegate.statusCalls, delegate.lookupCalls, delegate.backfillCalls, delegate.snapshotCalls)
+	if delegate.executionCalls != 1 || delegate.batchCalls != 1 || delegate.statusCalls != 1 || delegate.lookupCalls != 1 || delegate.backfillCalls != 1 || delegate.scaffoldCalls != 1 || delegate.snapshotCalls != 6 {
+		t.Fatalf("delegate calls execution=%d batch=%d status=%d lookup=%d backfill=%d scaffold=%d snapshots=%d", delegate.executionCalls, delegate.batchCalls, delegate.statusCalls, delegate.lookupCalls, delegate.backfillCalls, delegate.scaffoldCalls, delegate.snapshotCalls)
 	}
 }
 
@@ -138,6 +148,7 @@ type cachedProfileDelegate struct {
 	statusCalls    int
 	lookupCalls    int
 	backfillCalls  int
+	scaffoldCalls  int
 	snapshotCalls  int
 }
 
@@ -186,6 +197,13 @@ func (d *cachedProfileDelegate) GetWorkspaceServiceVersion(context.Context, uuid
 
 func (d *cachedProfileDelegate) ListWorkspaceServiceVersionsMissingContractSnapshots(context.Context, int) ([]WorkspaceServiceVersion, error) {
 	d.backfillCalls++
+	return nil, nil
+}
+
+// ResolveAuthorizedAppScaffoldSelections records forwarding of the current-state
+// authorization query without permitting a cached or scalar substitute.
+func (d *cachedProfileDelegate) ResolveAuthorizedAppScaffoldSelections(context.Context, accesscontrol.AuthorizedScope, []AppScaffoldSelectionRef) ([]AppScaffoldResolvedSelection, error) {
+	d.scaffoldCalls++
 	return nil, nil
 }
 

@@ -1225,7 +1225,7 @@ type SDKInjectionConfig struct {
 
 const AppScopeSchemaVersion = 3
 
-const SDKGeneratorVersion = "registry-generator-v3"
+const SDKGeneratorVersion = "registry-generator-v4"
 
 const (
 	SDKGenerationStatusPending  = "pending"
@@ -1343,11 +1343,15 @@ type SDKPackageLeaseRenewal struct {
 // ─── MCP Analytics ────────────────────────────────────────────────────────────
 
 type MCPSession struct {
-	ID        uuid.UUID  `json:"id"`
-	AppID     uuid.UUID  `json:"app_id"`
-	SessionID string     `json:"session_id"`
-	StartedAt time.Time  `json:"started_at"`
-	EndedAt   *time.Time `json:"ended_at,omitempty"`
+	ID              uuid.UUID  `json:"id"`
+	AppID           uuid.UUID  `json:"app_id"`
+	AppTokenID      uuid.UUID  `json:"app_token_id,omitempty"`
+	SessionID       string     `json:"session_id"`
+	ProtocolVersion string     `json:"protocol_version"`
+	StartedAt       time.Time  `json:"started_at"`
+	LastActivityAt  time.Time  `json:"last_activity_at"`
+	EndedAt         *time.Time `json:"ended_at,omitempty"`
+	EndReason       string     `json:"end_reason,omitempty"`
 }
 
 // MCPToolUsage/MCPServiceUsage are the per-dimension breakdowns
@@ -1415,6 +1419,7 @@ type EngineExecutionEvent struct {
 	AccountID        uuid.UUID `json:"account_id,omitempty" db:"account_id"`
 	AppFamilyID      uuid.UUID `json:"app_family_id,omitempty" db:"app_family_id"`
 	AppID            uuid.UUID `json:"app_id,omitempty" db:"app_id"`
+	AppTokenID       uuid.UUID `json:"app_token_id,omitempty" db:"app_token_id"`
 	AppVersion       string    `json:"app_version,omitempty" db:"app_version"`
 	Transport        string    `json:"transport" db:"transport"`
 	ProviderProtocol string    `json:"provider_protocol,omitempty" db:"provider_protocol"`
@@ -1477,7 +1482,7 @@ type EngineExecutionEvent struct {
 	CreatedAt           time.Time `json:"created_at" db:"created_at"`
 }
 
-const EngineExecutionEventSchemaVersion = 4
+const EngineExecutionEventSchemaVersion = 5
 
 // EngineExecutionEventEnvelope keeps the NATS contract versioned independently
 // from the database schema so a malformed or future message can be rejected

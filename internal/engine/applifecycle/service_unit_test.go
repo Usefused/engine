@@ -25,10 +25,8 @@ type recordingConfigPlanRepository struct {
 
 type recordingTokenRepository struct {
 	Repository
-	tokenHash string
-	tokenName string
-	policy    store.AppTokenPolicy
-	token     *store.AppTokenMetadata
+	issue store.AppTokenIssue
+	token *store.AppTokenMetadata
 }
 
 type recordingLifecycleRepository struct {
@@ -47,13 +45,11 @@ func (repository *recordingLifecycleRepository) PublishAppVersion(_ context.Cont
 	return &repository.app, true, nil
 }
 
-func (repository *recordingTokenRepository) CreateAppToken(_ context.Context, familyID uuid.UUID, tokenHash, name string, policy store.AppTokenPolicy) (*store.AppTokenMetadata, error) {
-	repository.tokenHash = tokenHash
-	repository.tokenName = name
-	repository.policy = policy
+func (repository *recordingTokenRepository) CreateAppToken(_ context.Context, issue store.AppTokenIssue) (*store.AppTokenMetadata, error) {
+	repository.issue = issue
 	repository.token = &store.AppTokenMetadata{
-		ID: uuid.New(), AppFamilyID: familyID, Name: name,
-		AppTokenPolicy: policy, CreatedAt: time.Now(),
+		ID: issue.ID, AppFamilyID: issue.AppFamilyID, Name: issue.Name,
+		AppTokenPolicy: issue.Policy, BindingMode: issue.BindingMode, CreatedAt: time.Now(),
 	}
 	return repository.token, nil
 }
@@ -74,28 +70,12 @@ func TestApplyConfigPlanRecordsSafeLifecycleTelemetry(t *testing.T) {
 		AppID: appID, Kind: store.AppKindMCP, Version: "1.0.0",
 	}}
 	result, err := New(nil).ApplyConfigPlan(context.Background(), repository, params)
-	if err != nil {
-		t.Fatalf("ApplyConfigPlan: %v", err)
-	}
-	if result != repository.result || repository.params.Scope.AppID != appID {
-		t.Fatal("atomic apply request or result was not preserved")
-	}
-
-	spans := recorder.Ended()
-	if len(spans) != 1 || spans[0].Name() != "engine.applifecycle.apply_config_plan" {
-		t.Fatalf("unexpected lifecycle spans: %#v", spans)
-	}
-	attributes := spanAttributes(spans[0].Attributes())
+	assertConfigPlanLifecycleResult(t, result, repository, appID, err)
+	attributes := requireLifecycleSpanAttributes(t, recorder.Ended(), "engine.applifecycle.apply_config_plan")
 	if attributes["app.id"] != appID.String() || attributes["app.kind"] != "mcp" || attributes["app.version"] != "1.0.0" || attributes["outcome"] != "success" {
 		t.Fatalf("unexpected safe lifecycle attributes: %#v", attributes)
 	}
-	for key := range attributes {
-		for _, prohibited := range []string{"token", "hash", "selection", "source"} {
-			if strings.Contains(key, prohibited) {
-				t.Fatalf("prohibited lifecycle attribute %q was emitted", key)
-			}
-		}
-	}
+	assertNoAttributeFragments(t, attributes, "token", "hash", "selection", "source")
 }
 
 func TestGenerateTokenPersistsOnlyHashAndRecordsOutcome(t *testing.T) {
@@ -106,29 +86,59 @@ func TestGenerateTokenPersistsOnlyHashAndRecordsOutcome(t *testing.T) {
 		AppFamilyID: familyID,
 		Name:        "automation",
 	})
-	if err != nil {
-		t.Fatalf("GenerateToken: %v", err)
-	}
-	if token != repository.token || repository.tokenHash != auth.HashToken(plaintext) || repository.tokenHash == plaintext {
-		t.Fatal("family token persistence did not preserve the one-time plaintext boundary")
-	}
-	if repository.tokenName != "automation" {
-		t.Fatalf("token name = %q, want automation", repository.tokenName)
-	}
-	if !repository.policy.AllowAll || len(repository.policy.AllowedOperations) != 0 || repository.policy.ExpiresAt != nil {
-		t.Fatalf("default token policy = %#v, want unrestricted non-expiring policy", repository.policy)
-	}
-	spans := recorder.Ended()
-	if len(spans) != 1 || spans[0].Name() != "engine.applifecycle.generate_token" {
-		t.Fatalf("unexpected token spans: %#v", spans)
-	}
-	attributes := spanAttributes(spans[0].Attributes())
+	assertGeneratedTokenPersistence(t, plaintext, token, repository, err)
+	attributes := requireLifecycleSpanAttributes(t, recorder.Ended(), "engine.applifecycle.generate_token")
 	if attributes["app.family_id"] != familyID.String() || attributes["outcome"] != "created" {
 		t.Fatalf("unexpected token attributes: %#v", attributes)
 	}
+	assertNoAttributeFragments(t, attributes, "hash", "plaintext", "allowed_operations")
+}
+
+func TestResolveTokenBindingModeRejectsFixedModeWithoutBindings(t *testing.T) {
+	if _, err := resolveTokenBindingMode(store.AppTokenBindingFixed, nil); !errors.Is(err, ErrTokenPolicyInvalid) {
+		t.Fatalf("fixed mode without bindings error = %v, want %v", err, ErrTokenPolicyInvalid)
+	}
+}
+
+func assertConfigPlanLifecycleResult(t *testing.T, result *store.ApplyAppConfigPlanResult, repository *recordingConfigPlanRepository, appID uuid.UUID, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("ApplyConfigPlan: %v", err)
+	}
+	if result != repository.result || repository.params.Scope.AppID != appID {
+		t.Fatal("atomic apply request or result was not preserved")
+	}
+}
+
+func assertGeneratedTokenPersistence(t *testing.T, plaintext string, token *store.AppTokenMetadata, repository *recordingTokenRepository, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	if token != repository.token || repository.issue.TokenHash != auth.HashToken(plaintext) || repository.issue.TokenHash == plaintext {
+		t.Fatal("family token persistence did not preserve the one-time plaintext boundary")
+	}
+	if repository.issue.Name != "automation" || repository.issue.BindingMode != store.AppTokenBindingDynamic {
+		t.Fatalf("token identity = %q/%q, want automation/dynamic", repository.issue.Name, repository.issue.BindingMode)
+	}
+	if !repository.issue.Policy.AllowAll || len(repository.issue.Policy.AllowedOperations) != 0 || repository.issue.Policy.ExpiresAt != nil {
+		t.Fatalf("default token policy = %#v, want unrestricted non-expiring policy", repository.issue.Policy)
+	}
+}
+
+func requireLifecycleSpanAttributes(t *testing.T, spans []sdktrace.ReadOnlySpan, name string) map[string]string {
+	t.Helper()
+	if len(spans) != 1 || spans[0].Name() != name {
+		t.Fatalf("unexpected lifecycle spans: %#v", spans)
+	}
+	return spanAttributes(spans[0].Attributes())
+}
+
+func assertNoAttributeFragments(t *testing.T, attributes map[string]string, prohibited ...string) {
+	t.Helper()
 	for key := range attributes {
-		for _, prohibited := range []string{"hash", "plaintext", "allowed_operations"} {
-			if strings.Contains(key, prohibited) {
+		for _, fragment := range prohibited {
+			if strings.Contains(key, fragment) {
 				t.Fatalf("token secret or scope leaked into OTEL attribute %q", key)
 			}
 		}

@@ -26,6 +26,7 @@ import { WebhookLogsCard } from "~/components/webhooks/WebhookLogsCard";
 import { NestedActivityTabs } from "~/components/activity/NestedActivityTabs";
 import { ExecutionDetailsDrawer } from "~/components/activity/ExecutionDetailsDrawer";
 import { activateReceiptRow } from "~/components/activity/receiptRow";
+import { formatVersion } from "~/lib/format";
 
 interface ActivityTabProps {
   res: ServiceGenerationResult;
@@ -608,7 +609,7 @@ function Consumers({ consumers }: { consumers: ServiceConsumerEntry[] }) {
                     </div>
                   </div>
                   <div className="flex items-center gap-4 pl-7 text-xs sm:pl-0">
-                    {consumer.version ? <span className="text-slate-500">v{consumer.version}</span> : null}
+                    {consumer.version ? <span className="text-slate-500">{formatVersion(consumer.version)}</span> : null}
                     <span className={`inline-flex items-center gap-1.5 font-medium ${consumer.active ? "text-emerald-700" : "text-slate-400"}`}>
                       {consumer.active ? <CheckCircle2 className="h-3.5 w-3.5" /> : <RotateCcw className="h-3.5 w-3.5" />}
                       {consumer.active ? "Active" : "Inactive"}

@@ -34,6 +34,8 @@ test("MCP Activity uses responsive cards for usage and sessions", () => {
   assertResponsivePair(route, "MCP sessions");
   assert.match(analytics, /function McpUsageCards/, "Tool and service mobile layouts must share one card implementation");
   assert.match(route, /function McpSessionCard/, "Session history must expose its mobile card layout");
+  assert.match(route, /function McpTokenActivityCard/, "Token history must expose its mobile card layout");
+  assert.match(route, /tokenTermination\(token\)/, "Expired and revoked tokens must render retained termination evidence");
   assert.match(route, /min-w-0 max-w-5xl.*overflow-x-hidden/, "The MCP Activity shell must contain narrow-width content");
 });
 

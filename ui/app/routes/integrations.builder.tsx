@@ -16,7 +16,11 @@ import {
   listAppOwningTeams,
   planAndApplyApp,
 } from "~/lib/app-builder";
-import type { AppBuildSelector, AppOwningTeam } from "~/lib/app-builder-contract";
+import {
+  effectiveAppBuilderServiceURL,
+  type AppBuildSelector,
+  type AppOwningTeam,
+} from "~/lib/app-builder-contract";
 import { openAuthenticatedTab } from "~/lib/session";
 import { CREATE_CREDENTIAL_PATH } from "~/lib/credential-navigation";
 import { useToast } from "~/components/Toast";
@@ -28,6 +32,7 @@ import {
   ConsumerGenerationPanel,
   type ConsumerGenerationPanelProps,
 } from "~/components/consumer/ConsumerGenerationPanel";
+import type { McpTransportEndpointData } from "~/components/mcp/McpTransportEndpoints";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasAnyPermission } from "~/lib/current-actor-access";
 
@@ -164,7 +169,7 @@ function baseURLConfigurationError(selections: AppSelection[], data: ServiceData
   for (const selection of selections) {
     if (selection.endpoint_ids.length === 0 && !selection.select_all) continue;
     const serviceData = data.find((candidate) => candidate.service.id === selection.service_id);
-    if (serviceData && !serviceData.service.base_url) {
+    if (serviceData && !effectiveAppBuilderServiceURL(serviceData.service)) {
       return `Service '${serviceData.service.name}' is missing an API URL. Please configure the API Base URL in the service settings before generating an SDK.`;
     }
   }
@@ -334,7 +339,7 @@ const BUILDER_RESOURCE_GQL = `
 
 type BuilderVersionService = Pick<
   Service,
-  "current_service_version" | "resources"
+  "current_service_version" | "base_url" | "servers" | "resources"
 > & { webhooks?: WebhookObject[] };
 
 type BuilderVersionContract = { service: BuilderVersionService | null };
@@ -343,6 +348,8 @@ type BuilderServiceBootstrap = {
   service: Pick<
     Service,
     | "current_service_version"
+    | "base_url"
+    | "servers"
     | "resources"
     | "webhooks"
     | "endpoint_count"
@@ -389,6 +396,8 @@ async function loadBuilderVersionContract(
     query($id: String!, $version: String!) {
       service(id: $id, version: $version) {
         current_service_version
+        base_url
+        servers { url description environment is_default }
         resources { id name }
         webhooks { id name description method }
       }
@@ -444,7 +453,8 @@ async function loadRegistryServicesByIDs(serviceIds: string[]): Promise<Service[
   const response = await api.graphql<{ servicesByIds: Service[] }>(`
     query AppBuilderServices($serviceIds: [String!]!) {
       servicesByIds(serviceIds: $serviceIds) {
-        id name slug canonical_ref provider { name handle } description
+        id name slug canonical_ref provider { name handle } description base_url
+        servers { url description environment is_default }
       }
     }
   `, { serviceIds });
@@ -1196,7 +1206,7 @@ export default function SdkBuilder() {
   const [generateStatus, setGenerateStatus] = useState("");
   const [sdkDeployment, setSdkDeployment] = useState<{ id: string; name: string; version: string; token: string } | null>(null);
   const [sdkTokenCopied, setSdkTokenCopied] = useState(false);
-  const [mcpDeployment, setMcpDeployment] = useState<{ id: string; url: string; token: string } | null>(null);
+  const [mcpDeployment, setMcpDeployment] = useState<({ id: string; token: string } & McpTransportEndpointData) | null>(null);
   const [mcpTokenCopied, setMcpTokenCopied] = useState(false);
   const [isDuplicate, setIsDuplicate] = useState(false);
   const [checkingDuplicate, setCheckingDuplicate] = useState(false);
@@ -1510,6 +1520,8 @@ export default function SdkBuilder() {
         query($id: String!) {
           service(id: $id) {
             current_service_version
+            base_url
+            servers { url description environment is_default }
             endpoint_count
             webhook_count
             event_extraction_path
@@ -1529,6 +1541,8 @@ export default function SdkBuilder() {
               service: {
                 ...s.service,
                 current_service_version: bootstrap.service?.current_service_version,
+                base_url: bootstrap.service?.base_url || "",
+                servers: bootstrap.service?.servers || [],
                 resources: bootstrap.service?.resources || [],
                 endpoint_count: bootstrap.service?.endpoint_count,
                 webhook_count: bootstrap.service?.webhook_count,
@@ -1576,6 +1590,8 @@ export default function SdkBuilder() {
               service: {
                 ...candidate.service,
                 current_service_version: contract.current_service_version,
+                base_url: contract.base_url || "",
+                servers: contract.servers || [],
                 resources: contract.resources || [],
               },
               integrations: [],
@@ -1807,9 +1823,14 @@ export default function SdkBuilder() {
 
       if (generationMode === "mcp") {
         setGenerateStatus("Deploying MCP server...");
-		const result = await planAndApplyApp<{ app_id: string; mcp_url: string; execution_token?: string }>("mcp", ownerTeamSlug, config);
+        const result = await planAndApplyApp<{ app_id: string; default_transport: string; transport_urls: McpTransportEndpointData["transport_urls"]; execution_token?: string }>("mcp", ownerTeamSlug, config);
         await syncWorkspacePinsAfterGenerate(selectionPayload);
-		setMcpDeployment({ id: result.app_id, url: result.mcp_url, token: result.execution_token || "" });
+        setMcpDeployment({
+          id: result.app_id,
+          default_transport: result.default_transport,
+          transport_urls: result.transport_urls,
+          token: result.execution_token || "",
+        });
         setGenerateStatus("MCP server deployed");
         return;
       }

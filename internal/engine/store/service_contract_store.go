@@ -103,6 +103,12 @@ type ServiceContractMetadataBatchStore interface {
 	ListServiceContractMetadata(ctx context.Context, refs []ServiceContractMetadataRef) (map[ServiceContractMetadataRef]*fusedobject.ServiceMetadata, error)
 }
 
+// ServiceContractEndpointSelectionBatchStore exposes only the set-based
+// operation projection needed by read-only app initialization callers.
+type ServiceContractEndpointSelectionBatchStore interface {
+	ListServiceContractEndpointsForSelections(ctx context.Context, selections []ServiceContractEndpointSelection, endpointNames []string) ([]ServiceContractEndpointMatch, error)
+}
+
 type ServiceContractSnapshotStore interface {
 	UpsertServiceContractSnapshot(ctx context.Context, snapshot ServiceContractSnapshot) (*ServiceContractSnapshot, error)
 	GetServiceContractMetadata(ctx context.Context, serviceID, serviceVersionID uuid.UUID) (*fusedobject.ServiceMetadata, error)

@@ -464,7 +464,9 @@ func (f *accessWorkflowFixture) appMutationSnapshot(t *testing.T) string {
 		COALESCE((SELECT jsonb_agg(to_jsonb(row_data) ORDER BY row_data.app_family_id)::text FROM fused_app_families row_data), '[]') ||
 		COALESCE((SELECT jsonb_agg(to_jsonb(row_data) ORDER BY row_data.app_id)::text FROM fused_apps row_data), '[]') ||
 		COALESCE((SELECT jsonb_agg(to_jsonb(row_data) ORDER BY row_data.app_id, row_data.capability_key)::text FROM fused_app_capabilities row_data), '[]') ||
+		COALESCE((SELECT jsonb_agg(to_jsonb(row_data) ORDER BY row_data.id)::text FROM fused_app_token_history row_data), '[]') ||
 		COALESCE((SELECT jsonb_agg(to_jsonb(row_data) ORDER BY row_data.id)::text FROM fused_app_tokens row_data), '[]') ||
+		COALESCE((SELECT jsonb_agg(to_jsonb(row_data) ORDER BY row_data.token_id, row_data.service_id, row_data.auth_name)::text FROM fused_app_token_bindings row_data), '[]') ||
 		COALESCE((SELECT jsonb_agg(to_jsonb(row_data) ORDER BY row_data.app_family_id)::text FROM fused_app_family_buckets row_data), '[]'))`
 	var snapshot string
 	if err := f.pool.QueryRow(f.ctx, query).Scan(&snapshot); err != nil {

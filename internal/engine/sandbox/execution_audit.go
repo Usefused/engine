@@ -75,6 +75,7 @@ func recordEngineExecutionAudit(ctx context.Context, span trace.Span, state exec
 		AccountID:           state.identity.AccountID,
 		AppFamilyID:         state.identity.AppFamilyID,
 		AppID:               state.identity.AppID,
+		AppTokenID:          state.identity.TokenID,
 		AppVersion:          state.identity.AppVersion,
 		Transport:           executionTransportFromContext(ctx),
 		Direction:           models.EngineExecutionDirectionOutbound,

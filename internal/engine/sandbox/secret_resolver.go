@@ -48,6 +48,8 @@ type connectedAuthFailureRecorder interface {
 type CredentialRequest struct {
 	AccountID        uuid.UUID
 	AppID            uuid.UUID
+	TokenID          uuid.UUID
+	BindingMode      store.AppTokenBindingMode
 	ServiceID        uuid.UUID
 	ServiceVersionID uuid.UUID
 	OperationID      string
@@ -98,6 +100,9 @@ func (r *secretResolver) ResolveExecutionCredentials(ctx context.Context, reques
 	if err := r.applyWorkspaceOAuthProfile(ctx, request, finalCreds); err != nil {
 		return nil, nil, err
 	}
+	if err := r.applyAppTokenBinding(ctx, request, finalCreds); err != nil {
+		return nil, nil, err
+	}
 	// The dispatcher needs the exact resolved bucket only to derive the fallback
 	// connection scope; this internal routing value is stripped before telemetry.
 	finalCreds["fused_bucket_id"] = scope.BucketID.String()
@@ -120,6 +125,37 @@ func (r *secretResolver) ResolveExecutionCredentials(ctx context.Context, reques
 	}
 
 	return finalCreds, values, nil
+}
+
+func (r *secretResolver) applyAppTokenBinding(ctx context.Context, request CredentialRequest, credentials map[string]any) error {
+	if request.BindingMode != store.AppTokenBindingFixed {
+		return nil
+	}
+	authName, err := selectedConnectedAuthName(credentials, request.Auths, request.Requirements)
+	if err != nil {
+		return err
+	}
+	if authName == "" {
+		return nil
+	}
+	binding, err := r.db.GetAppTokenBinding(ctx, request.TokenID, request.ServiceID, authName)
+	if err != nil {
+		return fmt.Errorf("resolve fixed app token binding: %w", err)
+	}
+	if binding == nil {
+		return store.ErrAppTokenBindingInvalid
+	}
+	// Fixed tokens ignore caller selectors by construction; only opaque IDs
+	// resolved and validated at issuance may reach connected-auth lookup.
+	delete(credentials, "fused_end_user_ref")
+	delete(credentials, "end_user_ref")
+	delete(credentials, "fused_resource_id")
+	credentials["fused_auth_name"] = binding.AuthName
+	credentials["fused_connection_id"] = binding.AuthConnectionID.String()
+	if binding.ResourceID != nil {
+		credentials["fused_resource_id"] = binding.ResourceID.String()
+	}
+	return nil
 }
 
 func (r *secretResolver) applyWorkspaceOAuthProfile(ctx context.Context, request CredentialRequest, credentials map[string]any) error {
@@ -174,6 +210,7 @@ func appendInjectionBindings(bindings []store.WorkspaceConnectionBinding, select
 						TargetName:     inj.Name,
 						SourceKind:     "literal",
 						LiteralValue:   &injVal,
+						Mode:           inj.Mode,
 					})
 				}
 			}
@@ -278,6 +315,18 @@ func classifyDynamicKey(k string) (dynamicKey, error) {
 	default:
 		return dynamicKey{}, nil
 	}
+}
+
+// IsExactNonSecretBucketReference lets app validation reuse the same key
+// classifier that owns runtime's targeted bucket ingestion.
+func IsExactNonSecretBucketReference(input string) bool {
+	keys := requestbinding.ExtractVariables(input)
+	// URL routing accepts one complete token so literals cannot surround it.
+	if len(keys) != 1 || input != "${"+keys[0]+"}" {
+		return false
+	}
+	key, err := classifyDynamicKey(keys[0])
+	return err == nil && key.store == dynamicKeyBucket && key.name != ""
 }
 
 // fetchDynamicSecrets retrieves requested environment variables and secrets via batch DB calls.
@@ -439,7 +488,7 @@ func (r *secretResolver) resolveConnectedAuth(ctx context.Context, bucketID, ser
 		// the dispatcher which provider slot receives the decrypted access token.
 		return errors.New("connected auth requires fused_auth_name or fused_auth_type")
 	}
-	conn, err := r.usableAuthConnection(ctx, bucketID, serviceID, serviceVersionID, endUserRef, authName)
+	conn, err := r.selectedUsableAuthConnection(ctx, bucketID, serviceID, serviceVersionID, endUserRef, authName, credentials)
 	if err != nil {
 		return err
 	}
@@ -464,7 +513,7 @@ func (r *secretResolver) resolveConnectedAuth(ctx context.Context, bucketID, ser
 }
 
 func connectedAuthResolutionRequired(endUserRef string, credentials map[string]any, requirements authrouting.Requirements) bool {
-	if endUserRef == "" {
+	if endUserRef == "" && credentialString(credentials, "fused_connection_id") == "" {
 		return false
 	}
 	selectorType := requestedAuthType(credentials)
@@ -602,6 +651,29 @@ func (r *secretResolver) usableAuthConnection(ctx context.Context, bucketID, ser
 	if conn == nil {
 		return nil, newConnectionRequiredError(bucketID.String(), serviceID.String(), endUserRef)
 	}
+	return r.ensureUsableAuthConnection(ctx, conn, serviceVersionID)
+}
+
+func (r *secretResolver) selectedUsableAuthConnection(ctx context.Context, bucketID, serviceID, serviceVersionID uuid.UUID, endUserRef, authName string, credentials map[string]any) (*store.AuthConnection, error) {
+	connectionID := credentialString(credentials, "fused_connection_id")
+	if connectionID == "" {
+		return r.usableAuthConnection(ctx, bucketID, serviceID, serviceVersionID, endUserRef, authName)
+	}
+	id, err := uuid.Parse(connectionID)
+	if err != nil {
+		return nil, errors.New("fixed app token connection identity is invalid")
+	}
+	conn, err := r.db.GetAuthConnectionByIDForBuckets(ctx, id, []uuid.UUID{bucketID})
+	if err != nil {
+		return nil, fmt.Errorf("load fixed app token connection: %w", err)
+	}
+	if conn == nil || conn.BucketID != bucketID || conn.ServiceID != serviceID || conn.AuthName != authName {
+		return nil, store.ErrAppTokenBindingInvalid
+	}
+	return r.ensureUsableAuthConnection(ctx, conn, serviceVersionID)
+}
+
+func (r *secretResolver) ensureUsableAuthConnection(ctx context.Context, conn *store.AuthConnection, serviceVersionID uuid.UUID) (*store.AuthConnection, error) {
 	// Once Engine has classified the grant as permanently unusable, later SDK
 	// calls must receive the same action instead of dispatching a stale token.
 	if conn.RefreshState == reconnectRequiredCode {
