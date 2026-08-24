@@ -1231,6 +1231,12 @@ const (
 	SDKGenerationStatusPending  = "pending"
 	SDKGenerationStatusComplete = "complete"
 	SDKGenerationStatusFailed   = "failed"
+	// SDKGenerationStatusSkipped is terminal like complete, but records that no
+	// package was ever built because the request asked for the resolved
+	// contract only (sdk.yaml generate: false). Scope, selections, and
+	// generator version on the result stay authoritative; only the
+	// downloadable artifact is absent.
+	SDKGenerationStatusSkipped = "skipped"
 )
 
 type SDKContractBinding struct {
@@ -1288,20 +1294,26 @@ type SDKUnifiedRollbackDescriptor struct {
 }
 
 type SDKGenerationRequest struct {
-	Name              string                          `json:"name"`
-	Description       string                          `json:"description"`
-	Version           string                          `json:"version"`
-	AppFamilyID       uuid.UUID                       `json:"app_family_id"`
-	AppID             uuid.UUID                       `json:"app_id"`
-	SourceHash        string                          `json:"source_hash"`
-	GeneratorVersion  string                          `json:"generator_version"`
-	IdempotencyKey    string                          `json:"idempotency_key,omitempty"`
-	Selections        []SDKSelection                  `json:"selections"`
-	IncludeMCP        bool                            `json:"include_mcp"`
-	TargetType        string                          `json:"target_type"`
-	TargetLanguage    string                          `json:"target_language"`
-	DefaultEngineURL  string                          `json:"default_engine_url,omitempty"`
-	SkipSandbox       bool                            `json:"skip_sandbox"`
+	Name             string         `json:"name"`
+	Description      string         `json:"description"`
+	Version          string         `json:"version"`
+	AppFamilyID      uuid.UUID      `json:"app_family_id"`
+	AppID            uuid.UUID      `json:"app_id"`
+	SourceHash       string         `json:"source_hash"`
+	GeneratorVersion string         `json:"generator_version"`
+	IdempotencyKey   string         `json:"idempotency_key,omitempty"`
+	Selections       []SDKSelection `json:"selections"`
+	IncludeMCP       bool           `json:"include_mcp"`
+	TargetType       string         `json:"target_type"`
+	TargetLanguage   string         `json:"target_language"`
+	DefaultEngineURL string         `json:"default_engine_url,omitempty"`
+	SkipSandbox      bool           `json:"skip_sandbox"`
+	// SkipPackaging resolves the scope and publishes the app version without
+	// building a downloadable package (sdk.yaml generate: false). Everything
+	// validated here -- selections, generator version, scope schema version --
+	// comes from Registry request preparation, so the published version is
+	// identical either way; only codegen and upload are skipped.
+	SkipPackaging     bool                            `json:"skip_packaging"`
 	ContractBindings  []SDKContractBinding            `json:"contract_bindings,omitempty"`
 	UnifiedOperations *SDKUnifiedOperationDescriptors `json:"unified_operations,omitempty"`
 }

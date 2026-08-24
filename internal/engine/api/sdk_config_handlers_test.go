@@ -2318,3 +2318,71 @@ func TestCollectSDKPlanNotifications_DriftMonitoringEnabled_CallsRegistry(t *tes
 }
 
 var _ = models.SDKSelection{}
+
+// TestSDKGenerateRequestCarriesSkipPackagingFromDocument proves the tri-state
+// generate: field reaches Registry, and that absent keeps the historical
+// build-a-package default.
+func TestSDKGenerateRequestCarriesSkipPackagingFromDocument(t *testing.T) {
+	no := false
+	yes := true
+	for name, testCase := range map[string]struct {
+		generate *bool
+		want     bool
+	}{
+		"absent means build":         {generate: nil, want: false},
+		"explicit true means build":  {generate: &yes, want: false},
+		"explicit false skips build": {generate: &no, want: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			doc := sdkConfigDocument{Name: "ledger", Version: "1.0.0", Language: "typescript", Generate: testCase.generate}
+			request := sdkGenerateRequest(doc, nil, nil, "https://engine.example.com")
+			if request.SkipPackaging != testCase.want {
+				t.Fatalf("SkipPackaging = %v, want %v", request.SkipPackaging, testCase.want)
+			}
+			// The plan payload is what apply decodes back into a request, so the
+			// flag has to survive that round trip or apply would silently build.
+			payload := resolvedSDKPayload(request, uuid.New(), uuid.New(), false)
+			encoded, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal resolved payload: %v", err)
+			}
+			var roundTripped GenerateSDKRequest
+			if err := json.Unmarshal(encoded, &roundTripped); err != nil {
+				t.Fatalf("unmarshal resolved payload: %v", err)
+			}
+			if roundTripped.SkipPackaging != testCase.want {
+				t.Fatalf("SkipPackaging after plan round trip = %v, want %v", roundTripped.SkipPackaging, testCase.want)
+			}
+		})
+	}
+}
+
+// TestValidateSDKGenerationResultSkippedOnlyWhenRequested accepts a terminal
+// skipped result for a request that asked for one, and refuses it otherwise --
+// Registry dropping packaging unasked would publish a version with nothing
+// behind it.
+func TestValidateSDKGenerationResultSkippedOnlyWhenRequested(t *testing.T) {
+	serviceID := uuid.New()
+	serviceVersionID := uuid.New()
+	call := sdkApplyCall{accountID: uuid.New()}
+	result := models.SDKGenerationResult{
+		AppID:              uuid.New(),
+		AccountID:          call.accountID,
+		JobID:              "job-1",
+		Status:             models.SDKGenerationStatusSkipped,
+		ScopeSchemaVersion: models.AppScopeSchemaVersion,
+		Selections:         models.SDKSelections{{ServiceID: serviceID, ServiceVersionID: serviceVersionID, EndpointIDs: []uuid.UUID{uuid.New()}}},
+	}
+	selections := []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID}}
+
+	requested, _ := json.Marshal(GenerateSDKRequest{Selections: selections, SkipPackaging: true})
+	if err := validateSDKGenerationResult(requested, call, result); err != nil {
+		t.Fatalf("a requested skip is a valid terminal result: %v", err)
+	}
+
+	notRequested, _ := json.Marshal(GenerateSDKRequest{Selections: selections})
+	err := validateSDKGenerationResult(notRequested, call, result)
+	if err == nil || !strings.Contains(err.Error(), "sdk_generation_unexpectedly_skipped") {
+		t.Fatalf("expected an unrequested skip to be rejected, got %v", err)
+	}
+}
