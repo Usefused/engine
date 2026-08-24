@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -830,6 +832,9 @@ type resolverMockStore struct {
 	// never match a secret seeded ahead of time.
 	bucketsByName        map[string]*store.Bucket
 	verifyWorkspaceOwner error
+	// preserveInvalidRuntime is set only by fail-closed schema tests; ordinary
+	// resolver fixtures receive a current minimal runtime selection by default.
+	preserveInvalidRuntime bool
 }
 
 // VerifyWorkspaceOwner defaults to success; set verifyWorkspaceOwner to
@@ -864,9 +869,24 @@ func (m *resolverMockStore) GetWorkspaceIDForAccount(ctx context.Context, accoun
 
 func (m *resolverMockStore) GetAppRuntime(ctx context.Context, appID uuid.UUID) (*store.AppRuntime, error) {
 	if m.appRuntime != nil {
-		return m.appRuntime, nil
+		if m.preserveInvalidRuntime {
+			return m.appRuntime, nil
+		}
+		copy := *m.appRuntime
+		if copy.ScopeSchemaVersion == 0 {
+			copy.ScopeSchemaVersion = models.AppScopeSchemaVersion
+		}
+		if len(copy.Selections) == 0 {
+			copy.Selections, _ = json.Marshal([]models.SDKSelection{{
+				ServiceID: uuid.New(), ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion,
+			}})
+		}
+		return &copy, nil
 	}
-	return &store.AppRuntime{BucketID: uuid.New()}, nil
+	selections, _ := json.Marshal([]models.SDKSelection{{
+		ServiceID: uuid.New(), ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion,
+	}})
+	return &store.AppRuntime{BucketID: uuid.New(), ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: selections}, nil
 }
 
 func (m *resolverMockStore) ListSecretsForBucket(ctx context.Context, bucketID, serviceID uuid.UUID) ([]store.WorkspaceSecret, error) {

@@ -997,8 +997,27 @@ func assertSavedMCPServerScope(t *testing.T, fixture *workspaceTestStore, accoun
 	if len(fixture.savedScopes) != 1 {
 		t.Fatalf("expected one saved scope, got %#v", fixture.savedScopes)
 	}
-	if fixture.savedScopes[0].kind != store.AppKindMCP || fixture.savedScopes[0].accountID != accountID || fixture.savedScopes[0].ownerTeamID != testAppOwnerTeamID {
-		t.Errorf("expected kind=mcp for accountID %s, got %#v", accountID, fixture.savedScopes[0])
+	saved := fixture.savedScopes[0]
+	if saved.kind != store.AppKindMCP || saved.accountID != accountID || saved.ownerTeamID != testAppOwnerTeamID {
+		t.Errorf("expected kind=mcp for accountID %s, got %#v", accountID, saved)
+	}
+	if saved.scopeSchemaVersion != models.AppScopeSchemaVersion {
+		t.Errorf("scope schema version = %d, want %d", saved.scopeSchemaVersion, models.AppScopeSchemaVersion)
+	}
+	var selections []models.SDKSelection
+	if err := json.Unmarshal(saved.selections, &selections); err != nil {
+		t.Fatalf("decode saved selections: %v", err)
+	}
+	if len(selections) != 1 {
+		t.Fatalf("saved selection count = %d, want 1", len(selections))
+	}
+	// MCP details reject ambiguous selection payloads, so apply must persist
+	// both schema identity and the exact immutable service version together.
+	if selections[0].SchemaVersion != models.AppSelectionSchemaVersion {
+		t.Errorf("selection schema version = %d, want %d", selections[0].SchemaVersion, models.AppSelectionSchemaVersion)
+	}
+	if selections[0].ServiceVersionID == uuid.Nil {
+		t.Error("saved MCP selection is missing its immutable service version")
 	}
 }
 
@@ -1199,13 +1218,13 @@ func TestAppReadsExactEngineVersion(t *testing.T) {
 func TestAppSelectionFieldsPreserveSyncDefinition(t *testing.T) {
 	serviceID, serviceVersionID, endpointID := uuid.New(), uuid.New(), uuid.New()
 	fields := appSelectionFields(store.AppCatalogItem{Selections: []models.SDKSelection{{
-		ServiceID: serviceID, ServiceVersionID: serviceVersionID, DefinitionSchemaVersion: 3,
+		ServiceID: serviceID, ServiceVersionID: serviceVersionID, SchemaVersion: 3,
 		EndpointIDs: []uuid.UUID{endpointID}, OperationNames: []string{"createIssue"},
 		AuthType: "oauth", AuthName: "atlassian", ConnectScopes: []string{"write:jira-work"},
 		RequiredAuth: []models.SDKRequiredAuth{{AuthType: "oauth", AuthName: "atlassian"}, {AuthType: "mtls", AuthName: "clientCertificate"}},
 		Injections:   []models.SDKInjectionConfig{{Location: "header", Name: "X-Tenant", Value: "${TENANT}", Mode: "template"}},
 	}}})
-	if len(fields) != 1 || fields[0]["definition_schema_version"] != 3 || fields[0]["auth_name"] != "atlassian" {
+	if len(fields) != 1 || fields[0]["schema_version"] != 3 || fields[0]["auth_name"] != "atlassian" {
 		t.Fatalf("selection metadata was not preserved: %#v", fields)
 	}
 	operationNames := fields[0]["operation_names"].([]string)
@@ -1235,7 +1254,7 @@ func TestAppSelectionGraphQLReturnsOperationNames(t *testing.T) {
 			AppFamilyID: appID, AppID: appID, Name: "jira", Version: "1.0.0",
 			Kind: store.AppKindSDK, Status: store.AppStatusActive, CreatedAt: time.Now(),
 			Selections: []models.SDKSelection{{
-				ServiceID: serviceID, ServiceVersionID: serviceVersionID, DefinitionSchemaVersion: models.SDKDefinitionSchemaVersion,
+				ServiceID: serviceID, ServiceVersionID: serviceVersionID, SchemaVersion: models.AppSelectionSchemaVersion,
 				EndpointIDs: endpointIDs, OperationNames: []string{"listProjects", "createIssue"},
 			}},
 		},

@@ -522,8 +522,8 @@ func applyAppConnectScopePolicy(ctx context.Context, s store.Store, bucketID, se
 	if err != nil || scope.BucketID != bucketID {
 		return nil, connectRuntimeHTTPError{status: http.StatusForbidden, message: "app scope is unavailable"}
 	}
-	var selections []models.SDKSelection
-	if err := json.Unmarshal(scope.Selections, &selections); err != nil {
+	selections, err := models.DecodeAppSelections(scope.ScopeSchemaVersion, scope.Selections)
+	if err != nil {
 		return nil, connectRuntimeHTTPError{status: http.StatusConflict, message: "app scope is invalid"}
 	}
 	policy := appScopesForService(selections, serviceID)

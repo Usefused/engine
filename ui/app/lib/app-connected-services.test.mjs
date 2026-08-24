@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { appConnectedServiceSelections } from "./app-connected-services.ts";
-import { APP_SELECTION_DEFINITION_SCHEMA_VERSION } from "./app-selection-v3.ts";
+import { APP_SELECTION_SCHEMA_VERSION } from "./app-selection-v3.ts";
 
 function selection(overrides = {}) {
   return {
     service_id: "jira-service",
     service_version_id: "jira-version",
-    definition_schema_version: APP_SELECTION_DEFINITION_SCHEMA_VERSION,
+    schema_version: APP_SELECTION_SCHEMA_VERSION,
     endpoint_ids: ["endpoint-uuid"],
     operation_names: ["createIssue"],
     webhook_ids: [],
@@ -45,7 +45,7 @@ test("keeps an authorized immutable selection visible when its label snapshot is
 
 test("rejects legacy selection schemas before either app detail adapter renders them", () => {
   assert.throws(
-    () => appConnectedServiceSelections([selection({ definition_schema_version: 2 })], []),
+    () => appConnectedServiceSelections([selection({ schema_version: 2 })], []),
     /unsupported selection schema version/,
   );
 });

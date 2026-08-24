@@ -77,7 +77,10 @@ func TestWorkspaceConnectionProfileDispatch(t *testing.T) {
 		BaseURL:     vendor.URL,
 		AuthConfigs: fusedobject.AuthConfigs{{Name: "bearerAuth", Type: "oauth2"}},
 	}
-	selections := []models.SDKSelection{{ServiceID: f.serviceID, ServiceVersionID: f.versionID, EndpointIDs: []uuid.UUID{f.epID}}}
+	selections := []models.SDKSelection{{
+		ServiceID: f.serviceID, ServiceVersionID: f.versionID,
+		SchemaVersion: models.AppSelectionSchemaVersion, EndpointIDs: []uuid.UUID{f.epID},
+	}}
 	scopeJSON, err := json.Marshal(selections)
 	if err != nil {
 		t.Fatalf("marshal scope selections: %v", err)
@@ -364,7 +367,10 @@ func setupDispatchProfileFixture(t *testing.T, ctx context.Context, pool *pgxpoo
 
 	// The persisted scope selects only service A -- this is the artifact's
 	// durable scope the "rejects out-of-scope service" subtest depends on.
-	selections := []models.SDKSelection{{ServiceID: f.serviceID, ServiceVersionID: f.versionID, EndpointIDs: []uuid.UUID{f.epID}}}
+	selections := []models.SDKSelection{{
+		ServiceID: f.serviceID, ServiceVersionID: f.versionID,
+		SchemaVersion: models.AppSelectionSchemaVersion, EndpointIDs: []uuid.UUID{f.epID},
+	}}
 	selectionsJSON, err := json.Marshal(selections)
 	if err != nil {
 		t.Fatalf("marshal sdk scope selections: %v", err)

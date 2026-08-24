@@ -700,7 +700,7 @@ func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepos
 	if err != nil {
 		return sdkPlanDefinition{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "failed to bind service contract revisions"}
 	}
-	selections = attachSDKServiceVersionIDs(selections, bindings)
+	selections = finalizeAppSelections(selections, bindings)
 	unifiedCompilation, err := compileSDKUnifiedOperations(ctx, s, call.document, selections, resolvedServices)
 	if err != nil {
 		return sdkPlanDefinition{}, err
@@ -2410,9 +2410,13 @@ func sdkBindingFromRevision(revision sandbox.ServiceVersionRevision) sdkContract
 	}
 }
 
-func attachSDKServiceVersionIDs(selections []models.SDKSelection, bindings []sdkContractBinding) []models.SDKSelection {
+// finalizeAppSelections pins every selection to the current selection schema and exact service revision.
+func finalizeAppSelections(selections []models.SDKSelection, bindings []sdkContractBinding) []models.SDKSelection {
 	byService := sdkBindingMap(bindings)
 	for i := range selections {
+		// Consumers must validate schema identity rather than infer it from a missing value.
+		selections[i].SchemaVersion = models.AppSelectionSchemaVersion
+		// A resolved binding is the only authoritative source for an immutable service version ID.
 		if binding, ok := byService[selections[i].ServiceID]; ok && binding.ServiceVersionID != uuid.Nil {
 			selections[i].ServiceVersionID = binding.ServiceVersionID
 		}
@@ -2858,7 +2862,7 @@ type persistAppRuntimeParams struct {
 	ownerTeamID        uuid.UUID
 	bucketID           uuid.UUID
 	bucketName         string
-	selections         json.RawMessage
+	selections         []models.SDKSelection
 	scopeSchemaVersion int
 	// Kind and name label the exact version for the app catalogue.
 	kind                           store.AppKind
@@ -2880,13 +2884,20 @@ func appRuntimeForApply(p persistAppRuntimeParams) (store.AppRuntime, error) {
 	if p.bucketID == uuid.Nil || strings.TrimSpace(p.bucketName) == "" {
 		return store.AppRuntime{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "app bucket identity unavailable"}
 	}
+	if err := validateAppRuntimeSelections(p.scopeSchemaVersion, p.selections); err != nil {
+		return store.AppRuntime{}, err
+	}
+	selections, err := json.Marshal(p.selections)
+	if err != nil {
+		return store.AppRuntime{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "app selections are invalid"}
+	}
 	return store.AppRuntime{
 		AccountID:                      p.accountID,
 		AppID:                          p.appID,
 		OwnerSubjectID:                 p.ownerSubjectID,
 		OwnerTeamID:                    p.ownerTeamID,
 		BucketID:                       p.bucketID,
-		Selections:                     p.selections,
+		Selections:                     selections,
 		ScopeSchemaVersion:             p.scopeSchemaVersion,
 		UnifiedDefinitionSchemaVersion: p.unifiedDefinitionSchemaVersion,
 		UnifiedDefinitions:             append([]byte(nil), p.unifiedDefinitions...),
@@ -2897,6 +2908,19 @@ func appRuntimeForApply(p persistAppRuntimeParams) (store.AppRuntime, error) {
 		Version:                        p.version,
 		ConfigKey:                      p.configKey,
 	}, nil
+}
+
+// validateAppRuntimeSelections keeps an incomplete plan or Registry response
+// from becoming durable app state that SDK and MCP detail readers cannot use.
+func validateAppRuntimeSelections(scopeSchemaVersion int, selections []models.SDKSelection) error {
+	if err := models.ValidateAppSelections(scopeSchemaVersion, selections); err != nil {
+		return appSelectionSchemaMismatchError()
+	}
+	return nil
+}
+
+func appSelectionSchemaMismatchError() error {
+	return workspaceConfigHTTPError{status: http.StatusConflict, message: "app_selection_schema_version_mismatch"}
 }
 
 // applyGeneratedAppRuntime persists Unified operation identity atomically while preserving immutability checks.
@@ -2917,7 +2941,9 @@ func applyGeneratedAppRuntime(
 	if err != nil {
 		return "", uuid.Nil, uuid.Nil, false, err
 	}
-	selections, _ := json.Marshal(result.Selections)
+	// Registry resolves concrete operation IDs, while Engine remains the owner
+	// of schema identity and immutable service-version bindings.
+	selections := finalizeAppSelections(result.Selections, payload.ContractBindings)
 	return applyAppConfigPlan(ctx, configStore, s, call, plan, persistAppRuntimeParams{
 		accountID:                      call.accountID,
 		appID:                          result.AppID,

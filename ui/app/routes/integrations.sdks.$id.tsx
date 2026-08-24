@@ -246,7 +246,7 @@ export default function SdkDetails() {
           readme
           status
           downloads
-          selections { service_id service_version_id definition_schema_version endpoint_ids operation_names webhook_ids webhook_names select_all webhook_select_all }
+          selections { service_id service_version_id schema_version endpoint_ids operation_names webhook_ids webhook_names select_all webhook_select_all }
         }
         appServices(app_id: $appId) { service_id service_slug service_name version select_all endpoint_count webhook_count }
       }

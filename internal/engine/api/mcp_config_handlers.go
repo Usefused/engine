@@ -219,7 +219,7 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	if err != nil {
 		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "failed to bind service contract revisions"}
 	}
-	selections = attachSDKServiceVersionIDs(selections, bindings)
+	selections = finalizeAppSelections(selections, bindings)
 
 	selections, err = resolveMCPEndpointIDs(ctx, registryClient, selections)
 	if err != nil {
@@ -317,10 +317,9 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 		return mcpConfigApplyResult{}, err
 	}
 	runtimeID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(plan.ConfigKey))
-	selections, _ := json.Marshal(payload.Selections)
 	scope, err := appRuntimeForApply(persistAppRuntimeParams{
 		accountID: call.accountID, appID: runtimeID, ownerSubjectID: planOwnerSubjectID(plan), ownerTeamID: planOwnerTeamID(plan), bucketID: payload.BucketID, bucketName: doc.Bucket,
-		selections: selections, scopeSchemaVersion: models.AppScopeSchemaVersion,
+		selections: payload.Selections, scopeSchemaVersion: models.AppScopeSchemaVersion,
 		kind: store.AppKindMCP, name: doc.Name, version: doc.Version, configKey: plan.ConfigKey,
 	})
 	if err != nil {

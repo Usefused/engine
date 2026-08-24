@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  APP_SELECTION_DEFINITION_SCHEMA_VERSION,
+  APP_SELECTION_SCHEMA_VERSION,
   appSelectionDisplayRows,
   requireAppSelectionV3,
   requireAppSelectionsV3,
@@ -13,7 +13,7 @@ function selection(overrides = {}) {
   return {
     service_id: "service-1",
     service_version_id: "version-1",
-    definition_schema_version: APP_SELECTION_DEFINITION_SCHEMA_VERSION,
+    schema_version: APP_SELECTION_SCHEMA_VERSION,
     endpoint_ids: ["endpoint-1"],
     webhook_ids: [],
     select_all: false,
@@ -28,7 +28,18 @@ test("accepts selections that pin the v3 schema and service version", () => {
 
 test("rejects legacy selection schemas before the detail view consumes them", () => {
   assert.throws(
-    () => requireAppSelectionV3(selection({ definition_schema_version: 2 })),
+    () => requireAppSelectionV3(selection({ schema_version: 2 })),
+    /unsupported selection schema version/
+  );
+});
+
+test("does not accept the removed definition schema field as an alias", () => {
+  const { schema_version, ...withoutSchemaVersion } = selection();
+  assert.throws(
+    () => requireAppSelectionV3({
+      ...withoutSchemaVersion,
+      definition_schema_version: schema_version,
+    }),
     /unsupported selection schema version/
   );
 });

@@ -151,7 +151,7 @@ func decodeAppOpenAPISelections(payload []byte) ([]models.SDKSelection, error) {
 	}
 	identities := make(map[store.ServiceContractMetadataRef]struct{}, len(selections))
 	for _, selection := range selections {
-		if selection.DefinitionSchemaVersion != models.SDKDefinitionSchemaVersion || selection.ServiceID == uuid.Nil || selection.ServiceVersionID == uuid.Nil {
+		if selection.SchemaVersion != models.AppSelectionSchemaVersion || selection.ServiceID == uuid.Nil || selection.ServiceVersionID == uuid.Nil {
 			return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app selections are incompatible"}
 		}
 		identity := store.ServiceContractMetadataRef{ServiceID: selection.ServiceID, ServiceVersionID: selection.ServiceVersionID}

@@ -231,6 +231,11 @@ func (s *postgresStore) GetAppRuntime(ctx context.Context, appID uuid.UUID) (*Ap
 		}
 		return nil, err
 	}
+	// Exact runtime reads fail closed before callers can cache or execute a row
+	// whose removed selection field decoded as a zero value.
+	if _, err := models.DecodeAppSelections(scope.ScopeSchemaVersion, scope.Selections); err != nil {
+		return nil, err
+	}
 	return scope, nil
 }
 

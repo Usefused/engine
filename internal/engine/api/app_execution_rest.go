@@ -196,6 +196,11 @@ func (s *EngineGRPCServer) authenticateRESTApp(request *http.Request, appID uuid
 	if err != nil || !validRESTAppScope(scope, identity, appID) {
 		return nil, auth.RuntimeIdentity{}, newRESTExecutionError(http.StatusForbidden, "app_scope_unavailable", "app scope is unavailable")
 	}
+	// Authentication succeeds only for a runtime whose nested selection
+	// contract is current; otherwise a removed field could widen execution.
+	if _, err := models.DecodeAppSelections(scope.ScopeSchemaVersion, scope.Selections); err != nil {
+		return nil, auth.RuntimeIdentity{}, newRESTExecutionError(http.StatusForbidden, "app_scope_unavailable", "app scope is unavailable")
+	}
 	return scope, identity, nil
 }
 

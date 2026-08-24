@@ -18,7 +18,7 @@ import (
 func TestAppServerVariableInjectionResolvesThroughOneBucketBatch(t *testing.T) {
 	appID, bucketID, serviceID := uuid.New(), uuid.New(), uuid.New()
 	selections, err := json.Marshal([]models.SDKSelection{{
-		ServiceID: serviceID,
+		ServiceID: serviceID, ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion,
 		Injections: []models.SDKInjectionConfig{{
 			Location: serverVariableBindingLocation, Name: "app_id", Value: "${bucket.values.SENDBIRD_APP_ID}", Mode: "force",
 		}},
@@ -27,7 +27,7 @@ func TestAppServerVariableInjectionResolvesThroughOneBucketBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	repository := &serverVariableResolverStore{
-		resolverMockStore: &resolverMockStore{appRuntime: &store.AppRuntime{AppID: appID, BucketID: bucketID, Selections: selections}},
+		resolverMockStore: &resolverMockStore{appRuntime: &store.AppRuntime{AppID: appID, BucketID: bucketID, ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: selections}},
 		bucketValue:       store.BucketValue{BucketID: bucketID, ServiceID: serviceID, KeyName: "SENDBIRD_APP_ID", Value: "sandbox-123"},
 	}
 	resolver := NewSecretResolver(repository, []byte("12345678901234567890123456789012"))

@@ -67,7 +67,7 @@ func newAppOpenAPIFixture(t *testing.T) (*appOpenAPITestStore, fusedobject.Endpo
 	accountID, familyID, appID := uuid.New(), uuid.New(), uuid.New()
 	endpoint := fusedobject.Endpoint{ID: uuid.New(), Name: "createIssue", Responses: fusedobject.Responses{}}
 	selections, err := json.Marshal([]models.SDKSelection{{
-		ServiceID: uuid.New(), ServiceVersionID: uuid.New(), DefinitionSchemaVersion: models.SDKDefinitionSchemaVersion,
+		ServiceID: uuid.New(), ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion,
 		EndpointIDs: []uuid.UUID{endpoint.ID}, OperationNames: []string{endpoint.Name},
 	}})
 	if err != nil {
@@ -427,7 +427,7 @@ func TestAppOpenAPIHandlerRejectsUncallablePhysicalOperationName(t *testing.T) {
 	name := strings.Repeat("x", maxRESTOperationBytes+1)
 	s.matches[0].Endpoint.Name = name
 	selections := []models.SDKSelection{{
-		ServiceID: uuid.New(), ServiceVersionID: uuid.New(), DefinitionSchemaVersion: models.SDKDefinitionSchemaVersion,
+		ServiceID: uuid.New(), ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion,
 		EndpointIDs: []uuid.UUID{s.matches[0].Endpoint.ID}, OperationNames: []string{name},
 	}}
 	s.app.Selections = mustJSON(t, selections)

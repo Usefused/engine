@@ -81,6 +81,73 @@ func TestAppResolvedPayloadHasNoTarget(t *testing.T) {
 	}
 }
 
+// TestFinalizeAppSelectionsPinsSchemaAndRevision verifies persisted SDK and MCP selections are self-describing.
+func TestFinalizeAppSelectionsPinsSchemaAndRevision(t *testing.T) {
+	boundServiceID := uuid.New()
+	boundVersionID := uuid.New()
+	unboundServiceID := uuid.New()
+	selections := []models.SDKSelection{
+		{ServiceID: boundServiceID},
+		{ServiceID: unboundServiceID},
+	}
+
+	got := finalizeAppSelections(selections, []sdkContractBinding{{
+		ServiceID:        boundServiceID,
+		ServiceVersionID: boundVersionID,
+	}})
+
+	for index, selection := range got {
+		if selection.SchemaVersion != models.AppSelectionSchemaVersion {
+			t.Fatalf("selection %d schema version = %d, want %d", index, selection.SchemaVersion, models.AppSelectionSchemaVersion)
+		}
+	}
+	if got[0].ServiceVersionID != boundVersionID {
+		t.Fatalf("bound service version = %s, want %s", got[0].ServiceVersionID, boundVersionID)
+	}
+	// Missing bindings remain explicit validation failures instead of receiving an invented revision.
+	if got[1].ServiceVersionID != uuid.Nil {
+		t.Fatalf("unbound service version = %s, want nil", got[1].ServiceVersionID)
+	}
+}
+
+// TestValidateAppRuntimeSelectionsRequiresCompleteV3Identity proves invalid selections cannot reach durable app state.
+func TestValidateAppRuntimeSelectionsRequiresCompleteV3Identity(t *testing.T) {
+	valid := models.SDKSelection{
+		ServiceID: uuid.New(), ServiceVersionID: uuid.New(),
+		SchemaVersion: models.AppSelectionSchemaVersion,
+	}
+	tests := []struct {
+		name       string
+		scope      int
+		selections []models.SDKSelection
+		wantError  bool
+	}{
+		{name: "complete v3 selection", scope: models.AppScopeSchemaVersion, selections: []models.SDKSelection{valid}},
+		{name: "old scope", scope: models.AppScopeSchemaVersion - 1, selections: []models.SDKSelection{valid}, wantError: true},
+		{name: "missing selection version", scope: models.AppScopeSchemaVersion, selections: []models.SDKSelection{{ServiceID: valid.ServiceID, ServiceVersionID: valid.ServiceVersionID}}, wantError: true},
+		{name: "missing service version", scope: models.AppScopeSchemaVersion, selections: []models.SDKSelection{{ServiceID: valid.ServiceID, SchemaVersion: models.AppSelectionSchemaVersion}}, wantError: true},
+		{name: "empty selections", scope: models.AppScopeSchemaVersion, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateAppRuntimeSelections(test.scope, test.selections)
+			if (err != nil) != test.wantError {
+				t.Fatalf("validateAppRuntimeSelections() error = %v, wantError %v", err, test.wantError)
+			}
+		})
+	}
+
+	// The removed wire key must decode as missing so persistence cannot silently
+	// treat it as the current selection schema.
+	var removedField []models.SDKSelection
+	if err := json.Unmarshal([]byte(`[{"service_id":"`+valid.ServiceID.String()+`","service_version_id":"`+valid.ServiceVersionID.String()+`","definition_schema_version":3}]`), &removedField); err != nil {
+		t.Fatalf("decode removed selection field fixture: %v", err)
+	}
+	if err := validateAppRuntimeSelections(models.AppScopeSchemaVersion, removedField); err == nil {
+		t.Fatal("removed definition schema field was accepted as an alias")
+	}
+}
+
 func TestPlannedAppIDUsesResolvedIdentityWithoutAppliedState(t *testing.T) {
 	id := uuid.New()
 	plan := &store.ConfigPlan{ResolvedPayload: json.RawMessage(`{"app_id":"` + id.String() + `"}`)}

@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -214,12 +213,15 @@ func (s *EngineGRPCServer) authenticatedAppRuntimeFromGRPC(ctx context.Context) 
 	if err != nil || scope == nil || scope.AccountID != identity.AccountID || scope.AppID != identity.AppID || scope.AppID != appID || scope.BucketID == uuid.Nil {
 		return nil, auth.RuntimeIdentity{}, status.Error(codes.PermissionDenied, "app scope is unavailable")
 	}
+	if _, err := models.DecodeAppSelections(scope.ScopeSchemaVersion, scope.Selections); err != nil {
+		return nil, auth.RuntimeIdentity{}, status.Error(codes.PermissionDenied, "app scope is unavailable")
+	}
 	return scope, identity, nil
 }
 
 func appRuntimeSelectsService(raw []byte, serviceID uuid.UUID) bool {
-	var selections []models.SDKSelection
-	if err := json.Unmarshal(raw, &selections); err != nil {
+	selections, err := models.DecodeAppSelections(models.AppScopeSchemaVersion, raw)
+	if err != nil {
 		return false
 	}
 	for _, selection := range selections {

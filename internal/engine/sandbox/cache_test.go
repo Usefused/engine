@@ -322,6 +322,7 @@ func TestLocalObjectCache_Refcounting(t *testing.T) {
 		{
 			"service_id":         mockID.String(),
 			"service_version_id": "00000000-0000-0000-0000-000000000101",
+			"schema_version":     models.AppSelectionSchemaVersion,
 			"endpoint_ids":       []string{uuid.New().String()},
 		},
 	}
@@ -399,8 +400,9 @@ func TestLocalObjectCache_ConnectSDKRequiresActivatedVersion(t *testing.T) {
 	appID := uuid.New()
 	scopeData, _ := json.Marshal([]map[string]interface{}{
 		{
-			"service_id":   mockID.String(),
-			"endpoint_ids": []string{uuid.New().String()},
+			"service_id":     mockID.String(),
+			"schema_version": models.AppSelectionSchemaVersion,
+			"endpoint_ids":   []string{uuid.New().String()},
 		},
 	})
 	db := &mockCacheDB{
@@ -419,8 +421,9 @@ func TestLocalObjectCache_ConnectSDKRequiresSelectionServiceVersionID(t *testing
 	serviceID := uuid.New()
 	appID := uuid.New()
 	scopeData, _ := json.Marshal([]models.SDKSelection{{
-		ServiceID:   serviceID,
-		EndpointIDs: []uuid.UUID{uuid.New()},
+		ServiceID:     serviceID,
+		SchemaVersion: models.AppSelectionSchemaVersion,
+		EndpointIDs:   []uuid.UUID{uuid.New()},
 	}})
 	db := &mockCacheDB{
 		scopeData:        scopeData,
@@ -444,6 +447,7 @@ func TestLocalObjectCache_ConnectSDKUsesSelectionServiceVersionSnapshot(t *testi
 	scopeData, _ := json.Marshal([]models.SDKSelection{{
 		ServiceID:        serviceID,
 		ServiceVersionID: serviceVersionID,
+		SchemaVersion:    models.AppSelectionSchemaVersion,
 		EndpointIDs:      []uuid.UUID{uuid.New()},
 	}})
 	db := &mockCacheDB{
@@ -475,6 +479,7 @@ func TestLocalObjectCache_ConnectSDKUsesServiceContractSnapshot(t *testing.T) {
 	scopeData, _ := json.Marshal([]models.SDKSelection{{
 		ServiceID:        serviceID,
 		ServiceVersionID: serviceVersionID,
+		SchemaVersion:    models.AppSelectionSchemaVersion,
 		EndpointIDs:      []uuid.UUID{endpointID},
 		OperationNames:   []string{"listUsers"},
 	}})
@@ -516,6 +521,7 @@ func TestLocalObjectCache_GetEndpointDoesNotFallbackWhenSnapshotExists(t *testin
 	scopeData, _ := json.Marshal([]models.SDKSelection{{
 		ServiceID:        serviceID,
 		ServiceVersionID: serviceVersionID,
+		SchemaVersion:    models.AppSelectionSchemaVersion,
 		EndpointIDs:      []uuid.UUID{uuid.New()},
 	}})
 	db := &mockCacheDB{
@@ -551,7 +557,7 @@ func TestLocalObjectCache_MissingSnapshotNeverFallsBackToRegistry(t *testing.T) 
 func TestLocalObjectCache_ConnectFailsWhenNamedEndpointSnapshotIsIncomplete(t *testing.T) {
 	serviceID, versionID, appID := uuid.New(), uuid.New(), uuid.New()
 	scopeData, _ := json.Marshal([]models.SDKSelection{{
-		ServiceID: serviceID, ServiceVersionID: versionID, OperationNames: []string{"listUsers"},
+		ServiceID: serviceID, ServiceVersionID: versionID, SchemaVersion: models.AppSelectionSchemaVersion, OperationNames: []string{"listUsers"},
 	}})
 	cache := NewLocalObjectCache(&mockCacheDB{
 		scopeData: scopeData, contractMetadata: &fusedobject.ServiceMetadata{ID: serviceID, Name: "SnapshotService"},
@@ -595,6 +601,31 @@ func TestLocalObjectCache_ConnectSDKRejectsUnsupportedScopeSchemaVersion(t *test
 	}
 }
 
+func TestLocalObjectCacheConnectRejectsUnsupportedSelectionSchemaBeforeSnapshotReads(t *testing.T) {
+	serviceID, serviceVersionID := uuid.New(), uuid.New()
+	tests := []struct {
+		name    string
+		payload []byte
+	}{
+		{name: "missing", payload: []byte(`[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `"}]`)},
+		{name: "old", payload: []byte(`[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","schema_version":2}]`)},
+		{name: "future", payload: []byte(`[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","schema_version":4}]`)},
+		{name: "removed field", payload: []byte(`[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","definition_schema_version":3}]`)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db := &mockCacheDB{scopeData: test.payload}
+			cache := NewLocalObjectCache(db)
+			if err := cache.ConnectSDK(context.Background(), uuid.NewString()); err == nil {
+				t.Fatal("expected unsupported selection schema to fail")
+			}
+			if db.metadataBatchCalls != 0 || db.contractBatchCalls != 0 {
+				t.Fatalf("invalid selection reached snapshot reads: metadata=%d endpoints=%d", db.metadataBatchCalls, db.contractBatchCalls)
+			}
+		})
+	}
+}
+
 // TestLocalObjectCache_EndpointsPrefetchedAtConnect verifies the pre-warm path:
 // when OperationNames is set in the SDK scope, ConnectSDK must include it in
 // one set-based snapshot read so the first dispatch uses the in-memory cache.
@@ -606,6 +637,7 @@ func TestLocalObjectCache_EndpointsPrefetchedAtConnect(t *testing.T) {
 	scopeData, _ := json.Marshal([]models.SDKSelection{{
 		ServiceID:        serviceID,
 		ServiceVersionID: serviceVersionID,
+		SchemaVersion:    models.AppSelectionSchemaVersion,
 		EndpointIDs:      []uuid.UUID{uuid.New()},
 		OperationNames:   []string{"listUsers", "getUser"},
 	}})
@@ -811,6 +843,7 @@ func TestLocalObjectCache_EndpointsNotPrefetchedWhenOperationNamesEmpty(t *testi
 	scopeData, _ := json.Marshal([]models.SDKSelection{{
 		ServiceID:        serviceID,
 		ServiceVersionID: serviceVersionID,
+		SchemaVersion:    models.AppSelectionSchemaVersion,
 		EndpointIDs:      []uuid.UUID{uuid.New()},
 		// OperationNames intentionally omitted — simulates SelectAll scope.
 	}})

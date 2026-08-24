@@ -78,9 +78,11 @@ func TestStartConnectSessionHandlerCreatesAuthorizationURL(t *testing.T) {
 // scope because production rejects attribution to an unknown SDK/MCP ID.
 func attachConnectTestArtifact(fixture *connectRuntimeFixture) uuid.UUID {
 	appID := uuid.New()
-	selections, _ := json.Marshal([]models.SDKSelection{{ServiceID: fixture.serviceID}})
+	selections, _ := json.Marshal([]models.SDKSelection{{
+		ServiceID: fixture.serviceID, ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion,
+	}})
 	fixture.store.appRuntimes = map[uuid.UUID]*store.AppRuntime{
-		appID: {AccountID: fixture.store.accountID, AppID: appID, BucketID: fixture.bucketID, Selections: selections},
+		appID: {AccountID: fixture.store.accountID, AppID: appID, BucketID: fixture.bucketID, ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: selections},
 	}
 	return appID
 }
@@ -127,9 +129,11 @@ func TestResolveConnectScopesRequiresOpenID(t *testing.T) {
 func TestArtifactConnectScopePolicyIsAppliedBeforeProviderScopes(t *testing.T) {
 	fixture := newConnectAdminFixture()
 	appID := uuid.New()
-	selections, _ := json.Marshal([]models.SDKSelection{{ServiceID: fixture.serviceID, ConnectScopes: []string{"read"}}})
+	selections, _ := json.Marshal([]models.SDKSelection{{
+		ServiceID: fixture.serviceID, ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion, ConnectScopes: []string{"read"},
+	}})
 	fixture.store.appRuntimes = map[uuid.UUID]*store.AppRuntime{
-		appID: {AccountID: fixture.store.accountID, AppID: appID, BucketID: fixture.bucketID, Selections: selections},
+		appID: {AccountID: fixture.store.accountID, AppID: appID, BucketID: fixture.bucketID, ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: selections},
 	}
 
 	scopes, err := applyAppConnectScopePolicy(context.Background(), fixture.store, fixture.bucketID, fixture.serviceID, appID, nil)
@@ -138,6 +142,26 @@ func TestArtifactConnectScopePolicyIsAppliedBeforeProviderScopes(t *testing.T) {
 	}
 	if _, err := applyAppConnectScopePolicy(context.Background(), fixture.store, fixture.bucketID, fixture.serviceID, appID, []string{"write"}); err == nil {
 		t.Fatal("expected a scope outside the artifact policy to be rejected")
+	}
+}
+
+// TestArtifactConnectScopePolicyRejectsRemovedSelectionField proves connect
+// cannot grant provider scopes from an obsolete persisted app contract.
+func TestArtifactConnectScopePolicyRejectsRemovedSelectionField(t *testing.T) {
+	fixture := newConnectAdminFixture()
+	appID := uuid.New()
+	fixture.store.appRuntimes = map[uuid.UUID]*store.AppRuntime{
+		appID: {
+			AccountID: fixture.store.accountID, AppID: appID, BucketID: fixture.bucketID,
+			ScopeSchemaVersion: models.AppScopeSchemaVersion,
+			Selections:         []byte(`[{"service_id":"` + fixture.serviceID.String() + `","service_version_id":"` + uuid.NewString() + `","definition_schema_version":3}]`),
+		},
+	}
+
+	_, err := applyAppConnectScopePolicy(context.Background(), fixture.store, fixture.bucketID, fixture.serviceID, appID, nil)
+	var runtimeErr connectRuntimeHTTPError
+	if !errors.As(err, &runtimeErr) || runtimeErr.status != http.StatusConflict {
+		t.Fatalf("legacy selection policy error = %#v, want conflict", err)
 	}
 }
 
