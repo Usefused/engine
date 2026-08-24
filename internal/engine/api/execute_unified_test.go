@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -338,9 +340,21 @@ func newUnifiedRuntimeServerFromFixture(t *testing.T, fixture unifiedCompileFixt
 	if err != nil {
 		t.Fatal(err)
 	}
+	selections := make([]models.SDKSelection, len(fixture.selections))
+	copy(selections, fixture.selections)
+	for index := range selections {
+		// Authoring fixtures omit persistence metadata; the runtime fixture must
+		// model the exact immutable selection contract enforced in production.
+		selections[index].SchemaVersion = models.AppSelectionSchemaVersion
+	}
+	encodedSelections, err := json.Marshal(selections)
+	if err != nil {
+		t.Fatal(err)
+	}
 	accountID, appID := uuid.New(), uuid.New()
 	scope := &store.AppRuntime{
 		AccountID: accountID, AppID: appID, BucketID: uuid.New(), Kind: store.AppKindSDK,
+		ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: encodedSelections,
 		UnifiedDefinitionSchemaVersion: store.UnifiedDefinitionSchemaVersion,
 		UnifiedDefinitions:             compiled.DefinitionJSON, UnifiedDefinitionHash: compiled.DefinitionHash,
 	}

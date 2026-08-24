@@ -119,7 +119,9 @@ func TestEngineGRPCGetConnectionReturnsMetadataOnly(t *testing.T) {
 		}},
 	}
 	appID := uuid.New()
-	selections, err := json.Marshal([]models.SDKSelection{{ServiceID: serviceID}})
+	selections, err := json.Marshal([]models.SDKSelection{{
+		ServiceID: serviceID, ServiceVersionID: serviceVersionID, SchemaVersion: models.AppSelectionSchemaVersion,
+	}})
 	if err != nil {
 		t.Fatalf("marshal selections: %v", err)
 	}
@@ -128,7 +130,8 @@ func TestEngineGRPCGetConnectionReturnsMetadataOnly(t *testing.T) {
 		accountID: s.accountID,
 		appID:     appID,
 		scope: &store.AppRuntime{
-			AccountID: s.accountID, AppID: appID, BucketID: bucketID, Selections: selections,
+			AccountID: s.accountID, AppID: appID, BucketID: bucketID,
+			ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: selections,
 		},
 	}
 	// configStore/natsClient are nil -- see the identical note above; this
@@ -160,7 +163,9 @@ func TestEngineGRPCGetConnectionReturnsMetadataOnly(t *testing.T) {
 		t.Fatalf("control credential error = %v, want Unauthenticated", err)
 	}
 
-	otherSelections, err := json.Marshal([]models.SDKSelection{{ServiceID: uuid.New()}})
+	otherSelections, err := json.Marshal([]models.SDKSelection{{
+		ServiceID: uuid.New(), ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion,
+	}})
 	if err != nil {
 		t.Fatalf("marshal other selections: %v", err)
 	}
@@ -172,6 +177,26 @@ func TestEngineGRPCGetConnectionReturnsMetadataOnly(t *testing.T) {
 	_, err = srv.ListConnectionResources(grpcTestContext(appID), &enginev1.ListConnectionResourcesRequest{ConnectionId: connectionID.String()})
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("cross-service ListConnectionResources error = %v, want NotFound", err)
+	}
+
+}
+
+// TestEngineGRPCRejectsRemovedSelectionField proves a removed nested field
+// fails before connection metadata can be used by an SDK or agent call.
+func TestEngineGRPCRejectsRemovedSelectionField(t *testing.T) {
+	accountID, appID := uuid.New(), uuid.New()
+	runtimeStore := &grpcRuntimeStore{
+		Store: &workspaceTestStore{accountID: accountID}, accountID: accountID, appID: appID,
+		scope: &store.AppRuntime{
+			AccountID: accountID, AppID: appID, BucketID: uuid.New(), ScopeSchemaVersion: models.AppScopeSchemaVersion,
+			Selections: []byte(`[{"service_id":"` + uuid.NewString() + `","service_version_id":"` + uuid.NewString() + `","definition_schema_version":3}]`),
+		},
+	}
+	server := NewEngineGRPCServer(runtimeStore, &mockVerifier{}, nil, nil, nil, auth.NewTokenValidator(runtimeStore))
+
+	_, err := server.GetConnection(grpcTestContext(appID), &enginev1.GetConnectionRequest{ConnectionId: uuid.NewString()})
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("legacy selection GetConnection error = %v, want PermissionDenied", err)
 	}
 }
 

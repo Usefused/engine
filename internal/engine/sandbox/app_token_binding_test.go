@@ -8,6 +8,7 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 )
 
@@ -81,6 +82,26 @@ func TestSecretResolverFixedTokenBindingFailsClosedWhenMissing(t *testing.T) {
 	})
 	if !errors.Is(err, store.ErrAppTokenBindingInvalid) {
 		t.Fatalf("missing fixed binding error = %v, want ErrAppTokenBindingInvalid", err)
+	}
+}
+
+func TestSecretResolverRejectsRemovedSelectionFieldBeforeBindingLookup(t *testing.T) {
+	serviceID, serviceVersionID, tokenID := uuid.New(), uuid.New(), uuid.New()
+	repository := &fixedBindingResolverStore{resolverMockStore: &resolverMockStore{
+		preserveInvalidRuntime: true,
+		appRuntime: &store.AppRuntime{
+			AppID: uuid.New(), BucketID: uuid.New(), ScopeSchemaVersion: models.AppScopeSchemaVersion,
+			Selections: []byte(`[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","definition_schema_version":3}]`),
+		},
+	}}
+	_, _, err := NewSecretResolver(repository, []byte("12345678901234567890123456789012")).ResolveExecutionCredentials(context.Background(), CredentialRequest{
+		AppID: repository.appRuntime.AppID, TokenID: tokenID, BindingMode: store.AppTokenBindingFixed,
+		ServiceID: serviceID, AuthType: "oauth",
+		Auths:        fusedobject.AuthConfigs{{Name: "bearerAuth", Type: "oauth2"}},
+		Requirements: singleAuthRequirement("bearerAuth"),
+	})
+	if err == nil || repository.requestedToken != uuid.Nil {
+		t.Fatalf("legacy selection error = %v, binding token = %s", err, repository.requestedToken)
 	}
 }
 

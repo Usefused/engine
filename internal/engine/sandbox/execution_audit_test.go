@@ -252,8 +252,11 @@ func TestEngineExecuteCoreRejectsUnknownExecutionContractWithSafeTelemetry(t *te
 		otel.SetTracerProvider(previous)
 	})
 
-	serviceID, endpointID, appID := uuid.New(), uuid.New(), uuid.New()
-	selections, err := json.Marshal([]models.SDKSelection{{ServiceID: serviceID, EndpointIDs: []uuid.UUID{endpointID}}})
+	serviceID, serviceVersionID, endpointID, appID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	selections, err := json.Marshal([]models.SDKSelection{{
+		ServiceID: serviceID, ServiceVersionID: serviceVersionID,
+		SchemaVersion: models.AppSelectionSchemaVersion, EndpointIDs: []uuid.UUID{endpointID},
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,12 +349,13 @@ func intSpanAttribute(attributes []attribute.KeyValue, key attribute.Key) int {
 func TestEngineExecuteCoreRequiresTokenAndAppScope(t *testing.T) {
 	appID := uuid.New()
 	serviceID := uuid.New()
+	serviceVersionID := uuid.New()
 	selectedEndpointID := uuid.New()
 	otherEndpointID := uuid.New()
 	appScope := func(endpointID uuid.UUID) *richMockCache {
 		selections, err := json.Marshal([]models.SDKSelection{{
-			ServiceID:   serviceID,
-			EndpointIDs: []uuid.UUID{endpointID},
+			ServiceID: serviceID, ServiceVersionID: serviceVersionID,
+			SchemaVersion: models.AppSelectionSchemaVersion, EndpointIDs: []uuid.UUID{endpointID},
 		}})
 		if err != nil {
 			t.Fatal(err)

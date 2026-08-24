@@ -82,16 +82,16 @@ func (r *secretResolver) ResolveExecutionCredentials(ctx context.Context, reques
 	ctx, span := otel.Tracer("engine").Start(ctx, "ResolveCredentials")
 	defer span.End()
 
-	scope, err := r.db.GetAppRuntime(ctx, request.AppID)
+	scope, selections, err := r.loadExecutionScope(ctx, request.AppID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to load SDK scope for secrets: %w", err)
+		return nil, nil, err
 	}
 	bindings, err := r.loadBucketBindings(ctx, scope.BucketID, request)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	bindings = appendInjectionBindings(bindings, scope.Selections, request.ServiceID)
+	bindings = appendInjectionBindings(bindings, selections, request.ServiceID)
 
 	finalCreds := copyPassthroughCredentials(request.Passthrough)
 	// Flow selection is configuration, not a per-call credential. Removing the
@@ -125,6 +125,23 @@ func (r *secretResolver) ResolveExecutionCredentials(ctx context.Context, reques
 	}
 
 	return finalCreds, values, nil
+}
+
+// loadExecutionScope keeps the persisted contract check ahead of bucket and
+// secret reads while emitting only a bounded outcome on the execution span.
+func (r *secretResolver) loadExecutionScope(ctx context.Context, appID uuid.UUID) (*store.AppRuntime, []models.SDKSelection, error) {
+	scope, err := r.db.GetAppRuntime(ctx, appID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load SDK scope for secrets: %w", err)
+	}
+	selections, err := models.DecodeAppSelections(scope.ScopeSchemaVersion, scope.Selections)
+	if err != nil {
+		span := trace.SpanFromContext(ctx)
+		span.SetAttributes(attribute.String("app.selection_schema.outcome", "rejected"))
+		span.SetStatus(codes.Error, "unsupported app selection schema")
+		return nil, nil, fmt.Errorf("failed to load SDK scope for secrets: unsupported app selection schema")
+	}
+	return scope, selections, nil
 }
 
 func (r *secretResolver) applyAppTokenBinding(ctx context.Context, request CredentialRequest, credentials map[string]any) error {
@@ -198,21 +215,18 @@ func workspaceOAuthProfileLookup(request CredentialRequest) (string, bool) {
 	return "", false
 }
 
-func appendInjectionBindings(bindings []store.WorkspaceConnectionBinding, selectionsRaw []byte, serviceID uuid.UUID) []store.WorkspaceConnectionBinding {
-	var selections []models.SDKSelection
-	if err := json.Unmarshal(selectionsRaw, &selections); err == nil {
-		for _, sel := range selections {
-			if sel.ServiceID == serviceID {
-				for _, inj := range sel.Injections {
-					injVal := inj.Value
-					bindings = append(bindings, store.WorkspaceConnectionBinding{
-						TargetLocation: inj.Location,
-						TargetName:     inj.Name,
-						SourceKind:     "literal",
-						LiteralValue:   &injVal,
-						Mode:           inj.Mode,
-					})
-				}
+func appendInjectionBindings(bindings []store.WorkspaceConnectionBinding, selections []models.SDKSelection, serviceID uuid.UUID) []store.WorkspaceConnectionBinding {
+	for _, sel := range selections {
+		if sel.ServiceID == serviceID {
+			for _, inj := range sel.Injections {
+				injVal := inj.Value
+				bindings = append(bindings, store.WorkspaceConnectionBinding{
+					TargetLocation: inj.Location,
+					TargetName:     inj.Name,
+					SourceKind:     "literal",
+					LiteralValue:   &injVal,
+					Mode:           inj.Mode,
+				})
 			}
 		}
 	}

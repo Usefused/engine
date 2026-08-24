@@ -1179,7 +1179,7 @@ type Session struct {
 	UpdatedAt             time.Time                `json:"updated_at"`
 }
 
-const SDKDefinitionSchemaVersion = 3
+const AppSelectionSchemaVersion = 3
 
 type SDKRequiredAuth struct {
 	AuthType          string                        `json:"auth_type"`
@@ -1188,14 +1188,14 @@ type SDKRequiredAuth struct {
 }
 
 type SDKSelection struct {
-	ServiceID               uuid.UUID   `json:"service_id"`
-	ServiceVersionID        uuid.UUID   `json:"service_version_id"`
-	DefinitionSchemaVersion int         `json:"definition_schema_version,omitempty"`
-	EndpointIDs             []uuid.UUID `json:"endpoint_ids"`
-	OperationNames          []string    `json:"operation_names,omitempty"`
-	WebhookIDs              []uuid.UUID `json:"webhook_ids,omitempty"`
-	WebhookNames            []string    `json:"webhook_names,omitempty"`
-	SelectAll               bool        `json:"select_all,omitempty"`
+	ServiceID        uuid.UUID   `json:"service_id"`
+	ServiceVersionID uuid.UUID   `json:"service_version_id"`
+	SchemaVersion    int         `json:"schema_version,omitempty"`
+	EndpointIDs      []uuid.UUID `json:"endpoint_ids"`
+	OperationNames   []string    `json:"operation_names,omitempty"`
+	WebhookIDs       []uuid.UUID `json:"webhook_ids,omitempty"`
+	WebhookNames     []string    `json:"webhook_names,omitempty"`
+	SelectAll        bool        `json:"select_all,omitempty"`
 	// WebhookSelectAll is the webhook-only counterpart to SelectAll -- a
 	// service can select every operation and only an explicit subset of
 	// webhooks, or vice versa (see cli/internal/configfile's

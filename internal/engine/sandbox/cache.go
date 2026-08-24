@@ -118,13 +118,9 @@ func (c *LocalObjectCache) loadAppRuntime(ctx context.Context, sdkUUID uuid.UUID
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to fetch sdk scope: %w", err)
 	}
-	if scope.ScopeSchemaVersion != models.AppScopeSchemaVersion {
-		return nil, nil, fmt.Errorf("ScopeError: unsupported scope schema version")
-	}
-
-	var selections []models.SDKSelection
-	if err := json.Unmarshal(scope.Selections, &selections); err != nil {
-		return nil, nil, fmt.Errorf("ScopeError: invalid scope format")
+	selections, err := models.DecodeAppSelections(scope.ScopeSchemaVersion, scope.Selections)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ScopeError: unsupported app selection schema")
 	}
 	return scope.Selections, selections, nil
 }

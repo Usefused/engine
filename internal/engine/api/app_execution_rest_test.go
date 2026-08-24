@@ -223,6 +223,21 @@ func TestRESTExecutionRejectsWrongTokenBeforeCacheConnect(t *testing.T) {
 	}
 }
 
+// TestRESTExecutionRejectsRemovedSelectionFieldBeforeCacheConnect proves a
+// persisted legacy row cannot reach runtime dispatch through REST.
+func TestRESTExecutionRejectsRemovedSelectionFieldBeforeCacheConnect(t *testing.T) {
+	runtime := &restRuntimeTestDouble{physicalFound: true}
+	server, appID := newRESTPhysicalServer(runtime)
+	scope := server.store.(*grpcRuntimeStore).scope
+	scope.Selections = []byte(`[{"service_id":"` + uuid.NewString() + `","service_version_id":"` + uuid.NewString() + `","definition_schema_version":3}]`)
+
+	response := performRESTExecution(t, server, appID, "fsk_test", `{"operation":"issues.get","input":{}}`, "")
+	assertRESTErrorCode(t, response, http.StatusForbidden, "app_scope_unavailable")
+	if runtime.connects != 0 || runtime.disconnects != 0 {
+		t.Fatalf("legacy selection reached cache lifecycle: %d/%d", runtime.connects, runtime.disconnects)
+	}
+}
+
 // TestRESTExecutionRejectsSecretShapedSelectorFields proves the strict public DTO cannot become a credential passthrough.
 func TestRESTExecutionRejectsSecretShapedSelectorFields(t *testing.T) {
 	runtime := &restRuntimeTestDouble{physicalFound: true}
@@ -479,8 +494,12 @@ func TestRESTExecutionProjectsActionableErrorsWithSafeDetails(t *testing.T) {
 // newRESTPhysicalServer builds one exact SDK app plus an injectable in-process runtime.
 func newRESTPhysicalServer(runtime *restRuntimeTestDouble) (*EngineGRPCServer, uuid.UUID) {
 	accountID, appID := uuid.New(), uuid.New()
+	selections, _ := json.Marshal([]models.SDKSelection{{
+		ServiceID: uuid.New(), ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion,
+	}})
 	scope := &store.AppRuntime{
 		AccountID: accountID, AppID: appID, BucketID: uuid.New(), Kind: store.AppKindSDK,
+		ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: selections,
 	}
 	identity := auth.RuntimeIdentity{
 		AccountID: accountID, AppFamilyID: uuid.New(), AppID: appID, AppVersion: "1.0.0",

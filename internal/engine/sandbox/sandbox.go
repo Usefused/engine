@@ -671,6 +671,11 @@ func validateAndParseScope(ctx context.Context, cache ObjectCache, appID string)
 	if err := json.Unmarshal(selectionsJSON, &selections); err != nil {
 		return nil, fmt.Errorf("ScopeError: invalid scope format")
 	}
+	// ObjectCache implementations expose only the nested payload, so enforce
+	// its exact schema again before any endpoint can be resolved or dispatched.
+	if err := models.ValidateAppSelections(models.AppScopeSchemaVersion, selections); err != nil {
+		return nil, fmt.Errorf("ScopeError: unsupported app selection schema")
+	}
 
 	return selections, nil
 }

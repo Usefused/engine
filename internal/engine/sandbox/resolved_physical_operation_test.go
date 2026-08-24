@@ -64,6 +64,11 @@ func exactResolverTestCache(
 	endpoints []fusedobject.Endpoint,
 ) (*LocalObjectCache, *mockCacheDB) {
 	t.Helper()
+	for index := range selections {
+		// These fixtures model already-persisted app scopes; authoring-only
+		// selection tests remain free to exercise partial draft values elsewhere.
+		selections[index].SchemaVersion = models.AppSelectionSchemaVersion
+	}
 	scopeJSON, err := json.Marshal(selections)
 	if err != nil {
 		t.Fatal(err)

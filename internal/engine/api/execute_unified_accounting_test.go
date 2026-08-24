@@ -84,7 +84,10 @@ func newUnifiedAccountingCache(appID uuid.UUID, providerURL string, bindings []s
 	services := make(map[string]*fusedobject.ServiceMetadata, len(bindings))
 	endpoints := make(map[string]fusedobject.Endpoint, len(bindings))
 	for index, binding := range bindings {
-		selections[index] = models.SDKSelection{ServiceID: binding.ServiceID, ServiceVersionID: binding.ServiceVersionID, SelectAll: true}
+		selections[index] = models.SDKSelection{
+			ServiceID: binding.ServiceID, ServiceVersionID: binding.ServiceVersionID,
+			SchemaVersion: models.AppSelectionSchemaVersion, SelectAll: true,
+		}
 		service := &fusedobject.ServiceMetadata{
 			ID: binding.ServiceID, ServiceVersionID: binding.ServiceVersionID, BaseURL: providerURL,
 			ExecutionContractEnvelope: fusedobject.EngineExecutionContractSupport(),
@@ -328,8 +331,13 @@ func newUnifiedConnectedAuthStore(t *testing.T, appID uuid.UUID, test unifiedCon
 	t.Helper()
 	bucketID := uuid.New()
 	serviceID := uuid.MustParse("11111111-1111-4111-8111-111111111111")
+	selections, _ := json.Marshal([]models.SDKSelection{{
+		ServiceID: serviceID, ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion,
+	}})
 	fixture := &unifiedConnectedAuthStore{
-		appRuntime:    &store.AppRuntime{AppID: appID, BucketID: bucketID},
+		appRuntime: &store.AppRuntime{
+			AppID: appID, BucketID: bucketID, ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: selections,
+		},
 		resourceCount: test.resourceCount,
 	}
 	if test.connectionState == "missing" {

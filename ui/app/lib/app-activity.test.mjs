@@ -75,7 +75,7 @@ test("reads exact app versions and family state from the Engine catalogue", asyn
   assert.match(appRoute, /app\(app_id:/);
   assert.match(appRoute, /appVersions\(app_family_id:/);
   assert.match(appRoute, /appServices\(app_id:/);
-  assert.match(appRoute, /definition_schema_version/);
+  assert.match(appRoute, /schema_version/);
   assert.match(appRoute, /status\s+downloads/);
   assert.match(appRoute, /await fetchSdk\(sdk\.app_id\)/);
   assert.match(appRoute, /appConnectedServiceSelections\(res\.app\.selections, res\.appServices\)/);

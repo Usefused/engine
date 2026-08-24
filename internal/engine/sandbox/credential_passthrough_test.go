@@ -45,7 +45,10 @@ func makePassthroughCache(t *testing.T, vendorURL string) (*richMockCache, strin
 	}
 	// Runtime dispatch is version-pinned, so the shared fixture must model the
 	// same immutable selection contract used by generated SDKs and MCP servers.
-	selections := []models.SDKSelection{{ServiceID: svcID, ServiceVersionID: serviceVersionID, EndpointIDs: []uuid.UUID{epID}}}
+	selections := []models.SDKSelection{{
+		ServiceID: svcID, ServiceVersionID: serviceVersionID,
+		SchemaVersion: models.AppSelectionSchemaVersion, EndpointIDs: []uuid.UUID{epID},
+	}}
 	scopeJSON, _ := json.Marshal(selections)
 	return &richMockCache{
 		scopeJSON: scopeJSON, obj: obj, epID: epID,
