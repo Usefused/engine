@@ -1,6 +1,6 @@
 {
   "call_count": 83,
-  "document_count": 100,
+  "document_count": 102,
   "calls": [
     {
       "endpoint": "registry",
@@ -454,6 +454,18 @@
     },
     {
       "endpoint": "engine",
+      "file": "app/routes/integrations.mcp_.$id.tsx",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.mcp_.$id.tsx",
+      "call": 2,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
       "file": "app/routes/integrations.mcp.tsx",
       "call": 1,
       "document_count": 1
@@ -462,24 +474,12 @@
       "endpoint": "engine",
       "file": "app/routes/integrations.mcp.tsx",
       "call": 2,
-      "document_count": 1
+      "document_count": 3
     },
     {
       "endpoint": "engine",
       "file": "app/routes/integrations.mcp.tsx",
       "call": 3,
-      "document_count": 1
-    },
-    {
-      "endpoint": "engine",
-      "file": "app/routes/integrations.mcp.tsx",
-      "call": 4,
-      "document_count": 1
-    },
-    {
-      "endpoint": "engine",
-      "file": "app/routes/integrations.mcp.tsx",
-      "call": 5,
       "document_count": 1
     },
     {
@@ -1053,7 +1053,7 @@
       "file": "app/routes/integrations._index.tsx",
       "call": 1,
       "variant": 1,
-      "document": "\n  query($q: String!) {\n    searchServices(q: $q) {\n      id name base_url servers { url description }\n      is_public is_owner slug provider { name handle } canonical_ref\n    }\n  }\n"
+      "document": "\n  query($q: String!) {\n    searchServices(q: $q, publicOnly: true) {\n      id name base_url servers { url description }\n      is_public is_owner slug provider { name handle } canonical_ref\n    }\n  }\n"
     },
     {
       "endpoint": "registry",
@@ -1102,14 +1102,14 @@
       "file": "app/routes/integrations.builder.tsx",
       "call": 1,
       "variant": 1,
-      "document": "\n    query($id: String!, $version: String!) {\n      service(id: $id, version: $version) {\n        current_service_version\n        resources { id name }\n        webhooks { id name description method }\n      }\n    }\n  "
+      "document": "\n    query($id: String!, $version: String!) {\n      service(id: $id, version: $version) {\n        current_service_version\n        base_url\n        servers { url description environment is_default }\n        resources { id name }\n        webhooks { id name description method }\n      }\n    }\n  "
     },
     {
       "endpoint": "registry",
       "file": "app/routes/integrations.builder.tsx",
       "call": 2,
       "variant": 1,
-      "document": "\n    query AppBuilderServices($serviceIds: [String!]!) {\n      servicesByIds(serviceIds: $serviceIds) {\n        id name slug canonical_ref provider { name handle } description\n      }\n    }\n  "
+      "document": "\n    query AppBuilderServices($serviceIds: [String!]!) {\n      servicesByIds(serviceIds: $serviceIds) {\n        id name slug canonical_ref provider { name handle } description base_url\n        servers { url description environment is_default }\n      }\n    }\n  "
     },
     {
       "endpoint": "registry",
@@ -1123,7 +1123,7 @@
       "file": "app/routes/integrations.builder.tsx",
       "call": 4,
       "variant": 1,
-      "document": "\n        query($id: String!) {\n          service(id: $id) {\n            current_service_version\n            endpoint_count\n            webhook_count\n            event_extraction_path\n            incoming_webhook_config { auth_type }\n            resources { id name }\n            webhooks { id name description method }\n          }\n          serviceVersions(serviceId: $id) { id name header_value status }\n        }\n      "
+      "document": "\n        query($id: String!) {\n          service(id: $id) {\n            current_service_version\n            base_url\n            servers { url description environment is_default }\n            endpoint_count\n            webhook_count\n            event_extraction_path\n            incoming_webhook_config { auth_type }\n            resources { id name }\n            webhooks { id name description method }\n          }\n          serviceVersions(serviceId: $id) { id name header_value status }\n        }\n      "
     },
     {
       "endpoint": "registry",
@@ -1144,14 +1144,28 @@
       "file": "app/routes/integrations.mcp_.$id.analytics.tsx",
       "call": 1,
       "variant": 1,
-      "document": "\n      query($id: String!) {\n        mcpAnalytics(app_id: $id) {\n          total_requests\n          failed_requests\n          average_latency\n          active_agents\n          tool_usage {\n            tool_name\n            count\n            failed\n            average_latency\n          }\n          service_usage {\n            service_name\n            count\n            failed\n            average_latency\n          }\n          recent_sessions {\n            id\n            session_id\n            started_at\n            ended_at\n          }\n        }\n      }\n    "
+      "document": "\n      query($id: String!) {\n        mcpAnalytics(app_id: $id) {\n          total_requests\n          failed_requests\n          average_latency\n          active_agents\n          tool_usage {\n            tool_name\n            count\n            failed\n            average_latency\n          }\n          service_usage {\n            service_name\n            count\n            failed\n            average_latency\n          }\n          recent_sessions {\n            id\n            app_token_id\n            session_id\n            protocol_version\n            started_at\n            last_activity_at\n            ended_at\n            end_reason\n          }\n          token_activity {\n            id\n            name\n            binding_mode\n            status\n            issued_by_subject_id\n            execution_count\n            session_count\n            created_at\n            last_used_at\n            terminated_at\n            termination_reason\n          }\n        }\n      }\n    "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.mcp_.$id.tsx",
+      "call": 1,
+      "variant": 1,
+      "document": "\n    query MCPServerDetails($appId: String!) {\n      app(app_id: $appId) {\n        app_id\n        app_family_id\n        name\n        description\n        version\n        kind\n        status\n        created_at\n        default_transport\n        transport_urls { streamable_http sse }\n        selections { service_id service_version_id schema_version endpoint_ids operation_names webhook_ids webhook_names select_all webhook_select_all }\n      }\n      appServices(app_id: $appId) { service_id service_slug service_name version select_all endpoint_count webhook_count }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.mcp_.$id.tsx",
+      "call": 2,
+      "variant": 1,
+      "document": "\n    query MCPServerVersions($appFamilyId: String!) {\n      appVersions(app_family_id: $appFamilyId) { app_id version created_at }\n    }\n  "
     },
     {
       "endpoint": "engine",
       "file": "app/routes/integrations.mcp.tsx",
       "call": 1,
       "variant": 1,
-      "document": "\n      query($limit: Int!, $offset: Int!) {\n        apps(kind: \"mcp\", limit: $limit, offset: $offset) {\n          items {\n            app_id\n            app_family_id\n            name\n            version\n            status\n            created_at\n          }\n          total\n        }\n      }\n    "
+      "document": "\n    query MCPApps($search: String!, $version: String!, $limit: Int!, $offset: Int!) {\n      apps(kind: \"mcp\", search: $search, version: $version, limit: $limit, offset: $offset) {\n        items { app_id app_family_id name description version status created_at }\n        total\n      }\n    }\n  "
     },
     {
       "endpoint": "engine",
@@ -1163,23 +1177,23 @@
     {
       "endpoint": "engine",
       "file": "app/routes/integrations.mcp.tsx",
+      "call": 2,
+      "variant": 2,
+      "document": "mutation($appId: String!) { undeprecateApp(app_id: $appId) }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.mcp.tsx",
+      "call": 2,
+      "variant": 3,
+      "document": "mutation($appId: String!) { deactivateApp(app_id: $appId) }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.mcp.tsx",
       "call": 3,
       "variant": 1,
       "document": "mutation($appId: String!) { deactivateApp(app_id: $appId) }"
-    },
-    {
-      "endpoint": "engine",
-      "file": "app/routes/integrations.mcp.tsx",
-      "call": 4,
-      "variant": 1,
-      "document": "mutation($appId: String!) { deactivateApp(app_id: $appId) }"
-    },
-    {
-      "endpoint": "engine",
-      "file": "app/routes/integrations.mcp.tsx",
-      "call": 5,
-      "variant": 1,
-      "document": "mutation($appId: String!) { undeprecateApp(app_id: $appId) }"
     },
     {
       "endpoint": "engine",
@@ -1193,7 +1207,7 @@
       "file": "app/routes/integrations.sdks.$id.tsx",
       "call": 1,
       "variant": 1,
-      "document": "\n      query($appId: String!) {\n        app(app_id: $appId) {\n          app_id\n          app_family_id\n          name\n          description\n          version\n          kind\n          target_language\n          created_at\n          readme\n          status\n          downloads\n          selections { service_id service_version_id definition_schema_version endpoint_ids operation_names webhook_ids webhook_names select_all webhook_select_all }\n        }\n        appServices(app_id: $appId) { service_id service_slug service_name version select_all endpoint_count webhook_count }\n      }\n    "
+      "document": "\n      query($appId: String!) {\n        app(app_id: $appId) {\n          app_id\n          app_family_id\n          name\n          description\n          version\n          kind\n          target_language\n          created_at\n          readme\n          status\n          downloads\n          selections { service_id service_version_id schema_version endpoint_ids operation_names webhook_ids webhook_names select_all webhook_select_all }\n        }\n        appServices(app_id: $appId) { service_id service_slug service_name version select_all endpoint_count webhook_count }\n      }\n    "
     },
     {
       "endpoint": "engine",
