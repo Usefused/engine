@@ -59,6 +59,12 @@ type sdkConfigDocument struct {
 	Version    string `json:"version"`
 	Language   string `json:"language"`
 	Bucket     string `json:"bucket,omitempty"`
+	// Generate is tri-state on purpose: absent means the historical default of
+	// building a package. Only an explicit false suppresses codegen, leaving a
+	// published app version that is reachable over REST execution and
+	// describable via sdk openapi, with no downloadable artifact behind it.
+	// Mirrors cli/internal/configfile's app config generate field.
+	Generate *bool `json:"generate,omitempty"`
 	// WebhookAttachment names one kind: webhook config this SDK/MCP wants
 	// event delivery from -- mirrors cli/internal/configfile's
 	// app config webhook_attachment field-for-field (same yaml/json key),
@@ -124,6 +130,7 @@ type appResolvedPayload struct {
 	TargetLanguage                 string                                 `json:"target_language,omitempty"`
 	DefaultEngineURL               string                                 `json:"default_engine_url,omitempty"`
 	SkipSandbox                    bool                                   `json:"skip_sandbox,omitempty"`
+	SkipPackaging                  bool                                   `json:"skip_packaging,omitempty"`
 	ContractBindings               []sdkContractBinding                   `json:"contract_bindings,omitempty"`
 	UnifiedDefinitionSchemaVersion int                                    `json:"unified_definition_schema_version,omitempty"`
 	UnifiedDefinitions             json.RawMessage                        `json:"unified_definitions,omitempty"`
@@ -1774,6 +1781,7 @@ func sdkGenerateRequest(doc sdkConfigDocument, selections []models.SDKSelection,
 		TargetType:       store.AppKindSDK.String(),
 		TargetLanguage:   doc.Language,
 		DefaultEngineURL: strings.TrimSpace(defaultEngineURL),
+		SkipPackaging:    doc.Generate != nil && !*doc.Generate,
 		ContractBindings: bindings,
 	}
 }
@@ -1784,7 +1792,7 @@ func resolvedSDKPayload(request GenerateSDKRequest, bucketID, appID uuid.UUID, n
 		AppID: appID, Noop: noop, BucketID: bucketID, Name: request.Name, Description: request.Description, Version: request.Version,
 		Selections: request.Selections, IncludeMCP: request.IncludeMCP, TargetType: request.TargetType,
 		TargetLanguage: request.TargetLanguage, DefaultEngineURL: request.DefaultEngineURL,
-		SkipSandbox: request.SkipSandbox, ContractBindings: request.ContractBindings,
+		SkipSandbox: request.SkipSandbox, SkipPackaging: request.SkipPackaging, ContractBindings: request.ContractBindings,
 		UnifiedOperations: request.UnifiedOperations,
 	}
 }
@@ -3057,6 +3065,12 @@ func validateSDKGenerationResult(payload json.RawMessage, call sdkApplyCall, res
 	if err := json.Unmarshal(payload, &request); err != nil {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid sdk generation payload"}
 	}
+	// A skipped result is only trustworthy when this Engine actually asked for
+	// one. Registry silently dropping packaging for a request that wanted a
+	// package would otherwise publish a version with nothing to download.
+	if result.Status == models.SDKGenerationStatusSkipped && !request.SkipPackaging {
+		return workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_generation_unexpectedly_skipped"}
+	}
 	if err := validateGeneratedScopeSelections(request.Selections, result.Selections); err != nil {
 		return err
 	}
@@ -3077,7 +3091,11 @@ func validateSDKGenerationResultEnvelope(call sdkApplyCall, result models.SDKGen
 	if result.Status == models.SDKGenerationStatusFailed {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_generation_failed"}
 	}
-	if result.Status != models.SDKGenerationStatusPending && result.Status != models.SDKGenerationStatusComplete {
+	// Skipped is terminal and legitimate: the request asked for the resolved
+	// contract without a package, and Registry closed the job out rather than
+	// scheduling codegen. The scope assertions below still apply to it.
+	if result.Status != models.SDKGenerationStatusPending && result.Status != models.SDKGenerationStatusComplete &&
+		result.Status != models.SDKGenerationStatusSkipped {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_generation_status_invalid"}
 	}
 	if result.ScopeSchemaVersion != models.AppScopeSchemaVersion {
