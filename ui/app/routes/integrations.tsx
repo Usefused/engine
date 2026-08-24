@@ -4,7 +4,9 @@ import { NotificationBell } from "~/components/notifications/NotificationBell";
 import { api } from "~/lib/api";
 import { IntegrationsSidebar } from "~/components/layout/IntegrationsSidebar";
 import { CurrentActorAccessProvider } from "~/components/access/CurrentActorAccess";
+import { loginPathForLocation } from "~/lib/safe-navigation";
 
+// IntegrationsLayout protects private integration routes while retaining their complete post-login destination.
 export default function IntegrationsLayout() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -13,24 +15,27 @@ export default function IntegrationsLayout() {
   const [signOutError, setSignOutError] = useState("");
 
   useEffect(() => {
-    const isAuthenticatedStaticRoute = location.pathname.startsWith("/integrations/access/") || [
+    const isAuthenticatedStaticRoute = location.pathname.startsWith("/integrations/access/") ||
+      location.pathname.startsWith("/integrations/mcp/") ||
+      location.pathname.startsWith("/integrations/sdks/") || [
       "/integrations/buckets",
 	  "/integrations/activity",
       "/integrations/mcp",
       "/integrations/sdks",
       "/integrations/settings",
     ].includes(location.pathname);
-    const isPublicRoute =
+    const isPublicRoute = !isAuthenticatedStaticRoute && (
       // Single-segment provider detail pages are public (e.g. /integrations/stripe)
-      (!isAuthenticatedStaticRoute && /^\/integrations\/[a-zA-Z0-9_-]+$/.test(location.pathname)) ||
+      /^\/integrations\/[a-zA-Z0-9_-]+$/.test(location.pathname) ||
       // Two-segment provider/slug pages are public (e.g. /integrations/stripe/charges)
-      // but not /integrations/sdks/:id which needs auth
-      /^\/integrations\/(?!sdks\/)[a-zA-Z0-9_-]+\/[a-zA-Z0-9_-]+$/.test(location.pathname);
+      // App and MCP detail prefixes are classified above before provider URLs.
+      /^\/integrations\/[a-zA-Z0-9_-]+\/[a-zA-Z0-9_-]+$/.test(location.pathname)
+    );
     // /integrations (index) and all authenticated static routes require login.
     if (!isAuth && !isPublicRoute) {
-      navigate("/login", { replace: true });
+      navigate(loginPathForLocation(location.pathname, location.search), { replace: true });
     }
-  }, [navigate, location.pathname, isAuth]);
+  }, [navigate, location.pathname, location.search, isAuth]);
 
   async function handleSignOut() {
     setSignOutError("");

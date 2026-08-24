@@ -64,11 +64,11 @@ test("accounts for every current UI GraphQL call and document variant", () => {
   const scan = scanCurrentUI();
   assert.equal(scan.call_count, 83);
   assert.equal(scan.calls.length, 83);
-  assert.equal(scan.document_count, 100);
-  assert.equal(scan.documents.length, 100);
+  assert.equal(scan.document_count, 102);
+  assert.equal(scan.documents.length, 102);
   assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "registry").length, 18);
-  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "engine").length, 82);
-  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 100);
+  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "engine").length, 84);
+  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 102);
 });
 
 test("resolves imported fragments and expands conditional and map variants", () => {
@@ -103,7 +103,7 @@ test("models runtime scalar interpolation without accepting structural interpola
   const scan = scanCurrentUI();
   assert.ok(scan.documents.every(({ document }) => !document.includes("UI_DYNAMIC_VALUE")));
   assert.ok(scan.documents.some(({ file, document }) => (
-    file === "app/routes/integrations.mcp.tsx" && document.includes("query($limit: Int!, $offset: Int!)")
+    file === "app/routes/integrations.mcp.tsx" && document.includes("query MCPApps($search: String!, $version: String!, $limit: Int!, $offset: Int!)")
   )));
   assert.ok(scan.documents.some(({ file, document }) => (
     file === "app/routes/integrations.mcp.tsx" && document.includes("deprecateApp(app_id: $appId")

@@ -600,7 +600,7 @@ function Consumers({ consumers }: { consumers: ServiceConsumerEntry[] }) {
                     <ConsumerIcon className="h-4 w-4 shrink-0 text-slate-400" />
                     <div className="min-w-0">
                       <Link
-                        to={consumer.kind === "mcp" ? `/integrations/mcp/${consumer.id}/analytics` : `/integrations/sdks/${consumer.id}`}
+                        to={consumer.kind === "mcp" ? `/integrations/mcp/${consumer.id}` : `/integrations/sdks/${consumer.id}`}
                         className="block truncate text-sm font-medium text-blue-700 hover:underline"
                       >
                         {consumer.name}

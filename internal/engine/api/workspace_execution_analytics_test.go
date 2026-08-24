@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/graphql-go/graphql"
+
+	"github.com/Usefused/engine/internal/shared/models"
 )
 
 // TestWorkspaceExecutionRangeAcceptsBoundedRFC3339Range verifies exact browser
@@ -73,5 +75,16 @@ func TestWorkspaceExecutionAnalyticsTelemetryUsesBoundedDuration(t *testing.T) {
 	}
 	if _, exists := attributes["range.end"]; exists {
 		t.Fatalf("workspace analytics telemetry exposed range.end: %#v", attributes)
+	}
+}
+
+// TestWorkspaceExecutionAnalyticsProjectsAbsentHighlightsAsNull prevents a
+// typed nil map from becoming a truthy GraphQL object with all-null fields.
+func TestWorkspaceExecutionAnalyticsProjectsAbsentHighlightsAsNull(t *testing.T) {
+	projected := projectGraphQLWorkspaceExecutionAnalytics(models.WorkspaceExecutionAnalytics{})
+	for _, field := range []string{"most_used_sdk", "most_used_service", "most_failed_service", "most_used_bucket"} {
+		if projected[field] != nil {
+			t.Fatalf("%s = %#v, want GraphQL null", field, projected[field])
+		}
 	}
 }

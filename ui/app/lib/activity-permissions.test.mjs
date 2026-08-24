@@ -16,8 +16,8 @@ const notificationHook = readFileSync(new URL("../components/notifications/useWo
 const paginatedHook = readFileSync(new URL("../components/notifications/usePaginatedWorkspaceNotifications.ts", import.meta.url), "utf8");
 const serviceRoute = readFileSync(new URL("../routes/integrations.$id.tsx", import.meta.url), "utf8");
 const sdkRoute = readFileSync(new URL("../routes/integrations.sdks.$id.tsx", import.meta.url), "utf8");
-const mcpRoute = readFileSync(new URL("../routes/integrations.mcp_.$id.analytics.tsx", import.meta.url), "utf8");
-const mcpList = readFileSync(new URL("../routes/integrations.mcp.tsx", import.meta.url), "utf8");
+const mcpActivity = readFileSync(new URL("../routes/integrations.mcp_.$id.analytics.tsx", import.meta.url), "utf8");
+const mcpDetail = readFileSync(new URL("../routes/integrations.mcp_.$id.tsx", import.meta.url), "utf8");
 
 // workspaceAccess constructs one exact workspace-scoped authorization snapshot
 // without granting any implied capability.
@@ -70,7 +70,9 @@ test("scoped Activity tabs are hidden when their audit capability is absent", ()
   assert.match(serviceRoute, /return canReadActivity \? <ActivityTabContent \/> : <EndpointTabContent \/>/);
   assert.match(sdkRoute, /optionalNode\(canReadActivity, \(\s*<button[\s\S]+Activity/);
   assert.match(sdkRoute, /requestedActiveTab === "analytics" && !canReadActivity \? "overview"/);
-  assert.match(mcpList, /canReadActivity=\{hasWorkspacePermission\(access, "audit\.read"\) && hasResourcePermission\(access, "app\.read"/);
-  assert.match(mcpList, /<McpActivityLink serverId=\{server\.id\} visible=\{canReadActivity\}/);
-  assert.match(mcpRoute, /hasAnyPermission\(access, "app\.read"\) && hasWorkspacePermission\(access, "audit\.read"\)/);
+  assert.match(mcpDetail, /hasResourcePermission\(access, "app\.read", "APP", state\.server\?\.app_family_id/);
+  assert.match(mcpDetail, /requestedTab === "activity" && !canReadActivity \? "overview"/);
+  assert.match(mcpDetail, /canReadActivity \? <button[^>]+[\s\S]+Activity/);
+  assert.match(mcpActivity, /hasResourcePermission\(access, "app\.read", "APP", appFamilyId\) && hasWorkspacePermission\(access, "audit\.read"\)/);
+  assert.doesNotMatch(mcpActivity, /hasAnyPermission\(access, "app\.read"\)/);
 });

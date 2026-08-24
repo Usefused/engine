@@ -93,7 +93,6 @@ import { WorkspaceConnectionProfileSection } from "~/components/integration-deta
 import {
   Check,
   Copy,
-  AlertTriangle,
   Loader2,
   MessageSquare,
   Share2,
@@ -112,7 +111,6 @@ import { isPending, matchesService } from "~/components/notifications/notificati
 import { useToast } from "~/components/Toast";
 import { formatServiceName } from "~/lib/format";
 import { useEndpointSearch } from "~/hooks/useEndpointSearch";
-import { useImportSession } from "~/hooks/useImportSession";
 import { useResourceLoader } from "~/hooks/useResourceLoader";
 
 import { redirect } from "@remix-run/react";
@@ -746,7 +744,6 @@ function useIntegrationDetailModel() {
     setResourceVersions,
     expandedResources,
     integrationsByResource,
-    setIntegrationsByResource,
     loadingResources,
     hasMoreResources,
     toggleResource,
@@ -757,8 +754,6 @@ function useIntegrationDetailModel() {
   const urlWPage = positivePage(searchParams.get("wPage"));
   const urlWStartDate = queryValue(searchParams, "wStartDate");
   const urlWEndDate = queryValue(searchParams, "wEndDate");
-  const importSessionId = searchParams.get("importSession");
-
   const [isClientFetchingTab, setIsClientFetchingTab] = useState(false);
 
   const handleTabChange = (tab: "endpoints" | "webhooks" | "analytics") => {
@@ -1113,49 +1108,6 @@ function useIntegrationDetailModel() {
     loadData();
   }, [id, version]);
 
-  const { importProgress } = useImportSession(
-    importSessionId,
-    (payload) => {
-      setRes((prev) => {
-        if (!prev) return prev;
-        if (payload.path) {
-          const ep: IntegrationObject = { ...payload, status: "active" };
-          const resourceID = ep.resource_id;
-          if (resourceID) {
-            setIntegrationsByResource(
-              (prevRes: Record<string, IntegrationObject[]>) => {
-                const existing = prevRes[resourceID] || [];
-                if (existing.some((e) => e.id === ep.id)) return prevRes;
-                return { ...prevRes, [resourceID]: [...existing, ep] };
-              }
-            );
-          }
-          if (prev.integrations.some((e) => e.id === ep.id)) return prev;
-          return { ...prev, integrations: [...prev.integrations, ep] };
-        } else {
-          if (prev.service.webhooks?.some((w) => w.id === payload.id))
-            return prev;
-          return {
-            ...prev,
-            service: {
-              ...prev.service,
-              webhooks: [...(prev.service.webhooks || []), payload],
-            },
-          };
-        }
-      });
-    },
-    () => loadData(),
-    () =>
-      setSearchParams(
-        (prev) => {
-          prev.delete("importSession");
-          return prev;
-        },
-        { replace: true, preventScrollReset: true }
-      )
-  );
-
   const autoExpandedServiceId = useRef<string | null>(null);
 
   useEffect(() => {
@@ -1328,7 +1280,7 @@ function useIntegrationDetailModel() {
     handleSearch, loadMoreSearchResults, handleClearSearch,
     notificationServiceRefs, markNotificationRead, dismissNotification,
     canUpdateNotifications,
-    serviceNotifications, importProgress, loadWebhookData, handleDismiss,
+    serviceNotifications, loadWebhookData, handleDismiss,
     handleApply, handleToggleDriftWatch, handleTogglePublic,
     handleToggleVersionPublic, handleClearImportWarnings,
   };
@@ -1625,7 +1577,6 @@ function DetailNotices({ srv, importWarnings }: { srv: Service; importWarnings: 
       {srv.description && <p className="text-sm text-slate-600">{srv.description}</p>}
       <ImportWarningPanel warnings={importWarnings} onClear={detail.handleClearImportWarnings} />
       <ServiceNotificationBanner />
-      <ImportProgressPanel />
     </>
   );
 }
@@ -1647,29 +1598,6 @@ function ServiceNotificationBanner() {
   // Unauthenticated and empty contexts do not reserve space for notifications.
   if (!detail.isAuth || !detail.res || detail.serviceNotifications.length === 0) return null;
   return <NotificationBanner key={detail.res.service.id} items={detail.serviceNotifications} serviceRefs={detail.notificationServiceRefs} onMarkRead={detail.markNotificationRead} onDismiss={detail.dismissNotification} canUpdate={detail.canUpdateNotifications} />;
-}
-
-function ImportProgressPanel() {
-  const { importProgress } = useDetail();
-  if (!importProgress) return null;
-  const tone = importProgress.error
-    ? "bg-red-50 border-red-200 text-red-700"
-    : importProgress.active
-      ? "bg-blue-50 border-blue-200 text-blue-800"
-      : "bg-green-50 border-green-200 text-green-700";
-  const title = importProgress.active ? "Still Extracting" : importProgress.error ? "Extraction Failed" : "Extraction Complete";
-  return (
-    <div className={`flex items-start gap-3 rounded-lg border px-4 py-3 ${tone}`}>
-      <ImportProgressIcon active={importProgress.active} error={Boolean(importProgress.error)} />
-      <div><p className="text-sm font-medium">{title}</p><p className="text-sm opacity-90">{importProgress.error || importProgress.status}</p></div>
-    </div>
-  );
-}
-
-function ImportProgressIcon({ active, error }: { active: boolean; error: boolean }) {
-  if (error) return <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />;
-  if (active) return <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin" />;
-  return <Check className="mt-0.5 h-4 w-4 shrink-0" />;
 }
 
 const configCardClass = "group rounded-lg border border-slate-100 bg-slate-50 p-3";

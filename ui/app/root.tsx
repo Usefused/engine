@@ -20,6 +20,7 @@ export const links: LinksFunction = () => [
 import { api } from "~/lib/api";
 import { purgeLegacyBrowserCredential } from "~/lib/session";
 
+// clientLoader exposes only runtime shell values; extraction admission policy arrives with each Registry question.
 export async function clientLoader() {
 	purgeLegacyBrowserCredential();
 	const session = await api.auth.session().catch(() => ({ authenticated: false }));
@@ -33,7 +34,6 @@ export async function clientLoader() {
 			API_KEY: "",
       WEBHOOK_BASE_URL: "https://run.usefused.com",
       SUPPORT_EMAIL: "hello@usefused.com",
-      AGENT_MAX_IMPORT_SELECTIONS: "20",
       GA_MEASUREMENT_ID: "G-2LM4S365BM",
     },
   };

@@ -22,6 +22,9 @@ export function routeTitle(pathname: string, search = ""): string {
   if (/^\/integrations\/mcp\/[^/]+\/analytics$/.test(normalizedPath)) {
     return "MCP server activity - Fused";
   }
+  if (/^\/integrations\/mcp\/[^/]+$/.test(normalizedPath)) {
+    return "MCP server details - Fused";
+  }
   if (/^\/integrations\/sdks\/[^/]+$/.test(normalizedPath)) {
     return "App details - Fused";
   }

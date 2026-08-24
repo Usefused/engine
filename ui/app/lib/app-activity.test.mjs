@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import { appActivityIssue } from "./app-activity-error.ts";
 
 const appRoutePath = fileURLToPath(import.meta.resolve("../routes/integrations.sdks.$id.tsx"));
-const mcpRoutePath = fileURLToPath(import.meta.resolve("../routes/integrations.mcp_.$id.analytics.tsx"));
+const mcpActivityPath = fileURLToPath(import.meta.resolve("../routes/integrations.mcp_.$id.analytics.tsx"));
+const mcpDetailPath = fileURLToPath(import.meta.resolve("../routes/integrations.mcp_.$id.tsx"));
 const serviceActivityPath = fileURLToPath(import.meta.resolve("../components/AnalyticsTab.tsx"));
 const nestedTabsPath = fileURLToPath(import.meta.resolve("../components/activity/NestedActivityTabs.tsx"));
 const appIndexPath = fileURLToPath(import.meta.resolve("../routes/integrations.sdks._index.tsx"));
@@ -29,15 +30,15 @@ test("translates a missing local app without exposing an internal store error", 
 });
 
 test("uses one subordinate underline treatment for nested activity views", async () => {
-  const [appRoute, mcpRoute, serviceActivity, nestedTabs] = await Promise.all([
+  const [appRoute, mcpActivity, serviceActivity, nestedTabs] = await Promise.all([
     readFile(appRoutePath, "utf8"),
-    readFile(mcpRoutePath, "utf8"),
+    readFile(mcpActivityPath, "utf8"),
     readFile(serviceActivityPath, "utf8"),
     readFile(nestedTabsPath, "utf8"),
   ]);
 
   assert.match(appRoute, /<NestedActivityTabs/);
-  assert.match(mcpRoute, /<NestedActivityTabs/);
+  assert.match(mcpActivity, /<NestedActivityTabs/);
   assert.match(serviceActivity, /<NestedActivityTabs/);
   assert.match(nestedTabs, /border-b-2/);
   assert.doesNotMatch(serviceActivity, />This Engine</);
@@ -55,10 +56,11 @@ test("keeps aggregate service usage inside Outbound calls as a select option", a
 });
 
 test("reads exact app versions and family state from the Engine catalogue", async () => {
-  const [appIndex, appRoute, mcpRoute, runtimeStatus] = await Promise.all([
+  const [appIndex, appRoute, mcpDetail, mcpActivity, runtimeStatus] = await Promise.all([
     readFile(appIndexPath, "utf8"),
     readFile(appRoutePath, "utf8"),
-    readFile(mcpRoutePath, "utf8"),
+    readFile(mcpDetailPath, "utf8"),
+    readFile(mcpActivityPath, "utf8"),
     readFile(runtimeStatusPath, "utf8"),
   ]);
   assert.match(appIndex, /\.mcpGraphql<\{ apps: SdkPage/);
@@ -76,8 +78,14 @@ test("reads exact app versions and family state from the Engine catalogue", asyn
   assert.match(appRoute, /definition_schema_version/);
   assert.match(appRoute, /status\s+downloads/);
   assert.match(appRoute, /await fetchSdk\(sdk\.app_id\)/);
-  assert.match(appRoute, /requireAppSelectionsV3\(res\.app\.selections\)/);
-  assert.match(mcpRoute, /hasAnyPermission\(access, "app\.read"\)/);
+  assert.match(appRoute, /appConnectedServiceSelections\(res\.app\.selections, res\.appServices\)/);
+  assert.match(mcpDetail, /app\(app_id: \$appId\)/);
+  assert.match(mcpDetail, /appServices\(app_id: \$appId\)/);
+  assert.match(mcpDetail, /appVersions\(app_family_id: \$appFamilyId\)/);
+  assert.match(mcpDetail, /operation_names/);
+  assert.match(mcpDetail, /appConnectedServiceSelections\(result\.app\.selections, result\.appServices\)/);
+  assert.match(mcpDetail, /result\.app\.kind !== "mcp"/);
+  assert.match(mcpActivity, /hasResourcePermission\(access, "app\.read", "APP", appFamilyId\)/);
   assert.doesNotMatch(appRoute, /artifactSnapshot|sdkAnalytics|sdkSelectionResources/);
   assert.match(runtimeStatus, /status === "deprecated"/);
   assert.match(runtimeStatus, /Deprecated/);
