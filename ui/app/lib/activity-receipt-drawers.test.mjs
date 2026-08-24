@@ -19,7 +19,7 @@ test("app receipt rows open shared execution details", () => {
   assert.match(appRequests, /<ExecutionDetails event=\{selectedEvent\}/);
   assert.match(appRequests, /new Map\(\[\[appId, consumerName\]\]\)/);
   assert.match(sdkDetails, /consumerName=\{sdk\.name\}/);
-  assert.match(mcpActivity, /consumerName="MCP server"/);
+  assert.match(mcpActivity, /consumerName=\{serverName\}/);
   assert.match(sharedDrawer, /xl:max-w-\[1080px\]/);
 });
 

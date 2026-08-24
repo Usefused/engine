@@ -1,13 +1,12 @@
 import { useState, useEffect, isValidElement, type ReactNode } from "react";
 import { useParams, Link, useNavigate, useSearchParams, type MetaFunction } from "@remix-run/react";
-import { ArrowLeft, Download, ChevronDown, ChevronRight, Copy, Check, Loader2, Database } from "lucide-react";
+import { ArrowLeft, Download, Copy, Check, Database } from "lucide-react";
 import { api, type NotificationServiceRef, type WorkspaceNotification } from "~/lib/api";
 import { useToast } from "~/components/Toast";
 import { readBucketsForSDK } from "~/lib/buckets";
-import { serviceDetailPath } from "~/lib/service-navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { EndpointRow, WebhookRow } from "~/components/EndpointRow";
+import { AppConnectedServices } from "~/components/apps/AppConnectedServices";
 import { NotificationBanner } from "~/components/notifications/NotificationBanner";
 import { useWorkspaceNotifications } from "~/components/notifications/useWorkspaceNotifications";
 import { isPending, matchesConfig } from "~/components/notifications/notificationHelpers";
@@ -19,34 +18,10 @@ import { type Bucket } from "~/lib/api";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasAnyPermission, hasResourcePermission, hasWorkspacePermission } from "~/lib/current-actor-access";
 import type { CurrentActorAccess } from "~/lib/current-actor-access";
-import {
-  appSelectionDisplayRows,
-  requireAppSelectionsV3,
-  type AppSelectionPayload,
-  type AppSelectionV3,
-} from "~/lib/app-selection-v3";
+import { appConnectedServiceSelections, type AppConnectedServiceSelection, type AppServiceSummary } from "~/lib/app-connected-services";
+import type { AppSelectionPayload } from "~/lib/app-selection-v3";
 
-type SdkSelection = AppSelectionV3 & {
-  service_name?: string;
-  service_slug?: string;
-  service_provider?: string;
-  service_version_name?: string;
-};
-
-type SdkEndpointRow = {
-  id: string;
-  method?: string;
-  path?: string;
-  name?: string;
-  description?: string;
-  resource_name?: string;
-};
-
-type SdkWebhookRow = {
-  id: string;
-  method?: string;
-  name?: string;
-};
+type SdkSelection = AppConnectedServiceSelection;
 
 type SdkPrimaryTab = "overview" | "docs" | "analytics";
 type SdkActivitySection = "overview" | "requests" | "changes";
@@ -126,6 +101,7 @@ type Sdk = {
   name: string;
   description?: string;
   version: string;
+  kind: string;
   target_type: string;
   target_language?: string;
   sandbox_url?: string;
@@ -144,37 +120,6 @@ export const meta: MetaFunction = ({ matches }) => {
     { title: "App details - Fused" },
   ];
 };
-
-const capitalizeFirstLetter = (str: string) => {
-  if (!str) return "";
-  return str.charAt(0).toUpperCase() + str.slice(1);
-};
-
-/** Builds the canonical service slug used by detail links. */
-function bundledServiceSlug(selection: SdkSelection): string | undefined {
-  if (!selection.service_provider) return selection.service_slug;
-  if (!selection.service_slug) return undefined;
-  return `@${selection.service_provider}/${selection.service_slug}`;
-}
-
-/** Summarizes the immutable resources selected for one bundled service. */
-function bundledSelectionSummary(selection: SdkSelection): string {
-  if (selection.select_all) return "All operations";
-  const labels = [resourceCountLabel(selection.endpoint_ids?.length, "operation"), resourceCountLabel(selection.webhook_ids?.length, "webhook")].filter(Boolean);
-  return labels.join(" · ") || "0 resources";
-}
-
-/** Formats a nonzero resource count for the bundled-service summary. */
-function resourceCountLabel(count: number | undefined, label: string): string {
-  if (!count) return "";
-  return `${count} ${label}${count === 1 ? "" : "s"}`;
-}
-
-/** Renders the open or closed service disclosure indicator. */
-function ServiceDisclosureIcon({ open }: { open: boolean }) {
-  if (open) return <ChevronDown className="w-3.5 h-3.5 shrink-0" />;
-  return <ChevronRight className="w-3.5 h-3.5 shrink-0" />;
-}
 
 function LanguageBadge({ targetLanguage }: { targetLanguage?: string }) {
   if (targetLanguage === "python") {
@@ -195,194 +140,6 @@ function LanguageBadge({ targetLanguage }: { targetLanguage?: string }) {
         <path fill="#fff" d="M11.3 13.1h9.8v2.2h-3.7V26h-2.4V15.3h-3.7v-2.2Zm10.6 0h-2.4v8.5c0 2.5 1.3 4.4 4.7 4.4 1.2 0 2.5-.3 3.5-.8v-2.1c-.9.5-1.8.8-2.7.8-1.7 0-3.1-.8-3.1-2.6v-8.2Z"/>
       </svg>
     </span>
-  );
-}
-
-/** Read-only bundled services display — mirrors EndpointSelectionList visual style */
-function BundledServicesSection({ selections }: { selections: SdkSelection[] }) {
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [expandedResourceGroups, setExpandedResourceGroups] = useState<Record<string, boolean>>({});
-  const [resourceGroupsData, setResourceGroupsData] = useState<Record<string, string[]>>({});
-  const [endpointsData, setEndpointsData] = useState<Record<string, SdkEndpointRow[]>>({});
-  const [webhooksData, setWebhooksData] = useState<Record<string, SdkWebhookRow[]>>({});
-  const [loadingServices, setLoadingServices] = useState<Record<string, boolean>>({});
-  const [loadingEndpoints, setLoadingEndpoints] = useState<Record<string, boolean>>({});
-
-  const fetchServiceMetadata = (serviceId: string) => {
-    setLoadingServices(prev => ({ ...prev, [serviceId]: true }));
-    const selection = selections.find(item => item.service_id === serviceId);
-    // Exact names are persisted with the app version, so the detail view does
-    // not consult mutable Registry state to relabel an immutable selection.
-    setResourceGroupsData(prev => ({ ...prev, [serviceId]: selection?.endpoint_ids?.length ? ["Selected operations"] : [] }));
-    setWebhooksData(prev => ({
-      ...prev,
-      [serviceId]: appSelectionDisplayRows(selection?.webhook_ids ?? [], selection?.webhook_names),
-    }));
-    setLoadingServices(prev => ({ ...prev, [serviceId]: false }));
-  };
-
-  const fetchResourceEndpoints = (serviceId: string, _resourceName: string, groupKey: string) => {
-    setLoadingEndpoints(prev => ({ ...prev, [groupKey]: true }));
-    const selection = selections.find(item => item.service_id === serviceId);
-    setEndpointsData(prev => ({
-      ...prev,
-      [groupKey]: appSelectionDisplayRows(selection?.endpoint_ids ?? [], selection?.operation_names),
-    }));
-    setLoadingEndpoints(prev => ({ ...prev, [groupKey]: false }));
-  };
-
-  const toggle = (serviceId: string) => {
-    setExpanded(prev => {
-      const isNowOpen = !prev[serviceId];
-      if (isNowOpen && !resourceGroupsData[serviceId] && !loadingServices[serviceId]) {
-        fetchServiceMetadata(serviceId);
-      }
-      return { ...prev, [serviceId]: isNowOpen };
-    });
-  };
-
-  const toggleResourceGroup = (serviceId: string, resourceName: string) => {
-    const groupKey = `${serviceId}-${resourceName}`;
-    setExpandedResourceGroups(prev => {
-      const isNowOpen = !prev[groupKey];
-      if (isNowOpen && !endpointsData[groupKey] && !loadingEndpoints[groupKey]) {
-        fetchResourceEndpoints(serviceId, resourceName, groupKey);
-      }
-      return { ...prev, [groupKey]: isNowOpen };
-    });
-  };
-
-  if (!selections || selections.length === 0) {
-    return <p className="text-sm text-slate-400 py-2">No services connected.</p>;
-  }
-
-  return (
-    <div className="rounded-lg border border-slate-200 overflow-hidden divide-y divide-slate-100">
-      {/* Projects each immutable selection without re-querying Registry state. */}
-      {selections.map((sel, idx: number) => {
-        const key = sel.service_id ?? String(idx);
-        const canonicalSlug = bundledServiceSlug(sel);
-        const isOpen = !!expanded[key];
-        const webhooks = webhooksData[key] || [];
-        const isLoading = loadingServices[key];
-
-        const resources = resourceGroupsData[key] || [];
-        const sortedResourceNames = [...resources].sort((a, b) => a.localeCompare(b));
-
-        return (
-          <div key={key}>
-            {/* Service header */}
-            <div
-              className="w-full flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-4 py-3 bg-slate-50 hover:bg-slate-100 transition-colors text-left select-none cursor-pointer"
-            >
-              <div className="flex min-w-0 w-full sm:w-auto items-start gap-2">
-                <button
-                  type="button"
-                  onClick={() => toggle(key)}
-                  className="rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-700"
-                  aria-label={`Toggle ${sel.service_name}`}
-                >
-                  <ServiceDisclosureIcon open={isOpen} />
-                </button>
-                <div className="flex min-w-0 flex-1 flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
-                  <a
-                    href={serviceDetailPath(sel.service_id, canonicalSlug)}
-                    className="text-sm font-semibold text-slate-700 hover:text-blue-600 transition-colors"
-                  >
-                    {capitalizeFirstLetter(sel.service_name || "")}
-                  </a>
-                  {optionalNode(Boolean(sel.service_version_name), (
-                    <span className="max-w-full break-all text-xs text-slate-500 bg-white border border-slate-200 rounded px-1.5 py-0.5">
-                      {sel.service_version_name}
-                    </span>
-                  ))}
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => toggle(key)}
-                className="self-end rounded px-1 py-0.5 text-xs text-slate-400 hover:bg-slate-200 hover:text-slate-700 sm:self-auto shrink-0"
-              >
-                {bundledSelectionSummary(sel)}
-              </button>
-            </div>
-
-            {/* Expanded rows */}
-            {isOpen && (
-              <div className="bg-white">
-                {isLoading ? (
-                  <div className="px-5 py-4 text-sm text-slate-400 flex items-center justify-center">
-                    <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mr-2" />
-                    Loading resources...
-                  </div>
-                ) : (resources.length === 0 && webhooks.length === 0) ? (
-                  <div className="px-5 py-4 text-sm text-slate-400 italic text-center">No operations or events.</div>
-                ) : (
-                  <div className="pb-2">
-                    {/* Render Grouped Endpoints */}
-                    {sortedResourceNames.map(resName => {
-                      const groupKey = `${key}-${resName}`;
-                      const isGroupCollapsed = !expandedResourceGroups[groupKey];
-                      const eps = endpointsData[groupKey] || [];
-                      const isEpsLoading = loadingEndpoints[groupKey];
-                      return (
-                        <div key={groupKey}>
-                          <div
-                            className="bg-slate-50 px-5 py-2.5 border-y border-slate-100 flex justify-between items-center cursor-pointer hover:bg-slate-100 transition-colors select-none"
-                            onClick={() => toggleResourceGroup(key, resName)}
-                          >
-                            <div className="flex items-center gap-2 flex-wrap">
-                              {isGroupCollapsed ? <ChevronRight className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
-                              <h3 className="text-xs font-semibold text-slate-600 uppercase tracking-wider">{resName}</h3>
-                              {isEpsLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-400 ml-2" />}
-                            </div>
-                          </div>
-                          {!isGroupCollapsed && !isEpsLoading && (
-                            <div className="divide-y divide-slate-50">
-                              {eps.map((ep) => (
-                                <EndpointRow key={ep.id} ep={ep} />
-                              ))}
-                              {eps.length === 0 && <div className="px-5 py-4 text-xs text-slate-400">No operations found.</div>}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                    
-                    {/* Render Webhooks Group if any */}
-                    {webhooks.length > 0 && (() => {
-                      const groupKey = `${key}-webhooks`;
-                      const isGroupCollapsed = !expandedResourceGroups[groupKey];
-                      return (
-                        <div>
-                          <div
-                            className="bg-slate-50 px-5 py-2.5 border-y border-slate-100 flex justify-between items-center cursor-pointer hover:bg-slate-100 transition-colors select-none"
-                            onClick={() => setExpandedResourceGroups(prev => ({ ...prev, [groupKey]: !prev[groupKey] }))}
-                          >
-                            <div className="flex items-center gap-2 flex-wrap">
-                              {isGroupCollapsed ? <ChevronRight className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
-                              <h3 className="text-xs font-semibold text-slate-600 uppercase tracking-wider">Webhooks</h3>
-                              <span className="text-xs text-slate-400 ml-2">({webhooks.length})</span>
-                            </div>
-                          </div>
-                          {!isGroupCollapsed && (
-                            <div className="divide-y divide-slate-50">
-                              {webhooks.map((wh) => (
-                                <WebhookRow key={wh.id} wh={wh} />
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })()}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        );
-      })}
-    </div>
   );
 }
 
@@ -494,20 +251,13 @@ export default function SdkDetails() {
         appServices(app_id: $appId) { service_id service_slug service_name version select_all endpoint_count webhook_count }
       }
     `;
-    type AppService = { service_id: string; service_slug: string; service_name: string; version?: string; select_all: boolean };
-    api.mcpGraphql<{ app: Sdk & { selections: AppSelectionPayload[] }; appServices: AppService[] }>(queryStr, { appId })
+    api.mcpGraphql<{ app: Sdk & { selections: AppSelectionPayload[] }; appServices: AppServiceSummary[] }>(queryStr, { appId })
       .then(res => {
-        const serviceById = new Map(res.appServices.map(service => [service.service_id, service]));
-        const detailedSelections = requireAppSelectionsV3(res.app.selections).map(selection => {
-          const service = serviceById.get(selection.service_id);
-          return {
-            ...selection,
-            service_slug: service?.service_slug,
-            service_name: service?.service_name,
-            service_version_name: service?.version,
-          };
-        });
-        const local = { ...res.app, detailed_selections: detailedSelections, target_type: "sdk", is_downloadable: true };
+        // Shared catalogue reads still validate the adapter boundary so an MCP
+        // identifier cannot acquire SDK download or documentation controls.
+        if (res.app.kind !== "sdk") throw new Error("App not found");
+        const detailedSelections = appConnectedServiceSelections(res.app.selections, res.appServices);
+        const local = { ...res.app, detailed_selections: detailedSelections, target_type: res.app.kind, is_downloadable: true };
         setSdk(local);
         fetchVersions(local.app_family_id);
       })
@@ -787,7 +537,7 @@ function SdkLoadedContent({
               <h4 className="text-sm font-semibold text-slate-700 uppercase tracking-wider mb-3">
                 Connected services
               </h4>
-              <BundledServicesSection
+              <AppConnectedServices
                 selections={sdk.detailed_selections ?? []}
               />
             </div>

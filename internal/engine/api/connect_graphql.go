@@ -2856,10 +2856,10 @@ func projectGraphQLWorkspaceExecutionAnalytics(analytics models.WorkspaceExecuti
 		"failed_calls":     int(analytics.FailedCalls), "average_latency_ms": analytics.AverageLatencyMs,
 		"median_latency_ms": analytics.MedianLatencyMs, "p95_latency_ms": analytics.P95LatencyMs,
 		"by_service":          projectGraphQLExecutionBreakdowns(analytics.ByService),
-		"most_used_sdk":       projectGraphQLExecutionBreakdown(analytics.MostUsedSDK),
-		"most_used_service":   projectGraphQLExecutionBreakdown(analytics.MostUsedService),
-		"most_failed_service": projectGraphQLExecutionBreakdown(analytics.MostFailedService),
-		"most_used_bucket":    projectGraphQLExecutionBreakdown(analytics.MostUsedBucket),
+		"most_used_sdk":       projectGraphQLOptionalExecutionBreakdown(analytics.MostUsedSDK),
+		"most_used_service":   projectGraphQLOptionalExecutionBreakdown(analytics.MostUsedService),
+		"most_failed_service": projectGraphQLOptionalExecutionBreakdown(analytics.MostFailedService),
+		"most_used_bucket":    projectGraphQLOptionalExecutionBreakdown(analytics.MostUsedBucket),
 	}
 }
 
@@ -2871,12 +2871,19 @@ func projectGraphQLExecutionBreakdowns(items []models.EngineExecutionBreakdown) 
 	return result
 }
 
-// projectGraphQLExecutionBreakdown keeps highlight and service-row projections
-// identical while preserving GraphQL null for a range with no matching group.
-func projectGraphQLExecutionBreakdown(item *models.EngineExecutionBreakdown) map[string]interface{} {
+// projectGraphQLOptionalExecutionBreakdown returns an untyped nil so GraphQL
+// serializes an absent highlight as null. Boxing a typed nil map would instead
+// create an object whose fields are all null and break clients' empty state.
+func projectGraphQLOptionalExecutionBreakdown(item *models.EngineExecutionBreakdown) interface{} {
 	if item == nil {
 		return nil
 	}
+	return projectGraphQLExecutionBreakdown(item)
+}
+
+// projectGraphQLExecutionBreakdown keeps populated highlight and service-row
+// projections identical after optional values have been handled at the edge.
+func projectGraphQLExecutionBreakdown(item *models.EngineExecutionBreakdown) map[string]interface{} {
 	return map[string]interface{}{
 		"key": item.Key, "label": item.Label, "total_calls": int(item.TotalCalls),
 		"inbound_calls": int(item.InboundCalls), "failed_calls": int(item.FailedCalls),

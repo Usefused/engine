@@ -1,5 +1,5 @@
 import { getCSRFToken, purgeLegacyBrowserCredential } from "./session";
-import { credentialedRequestInit } from "./browser-request";
+import { credentialedRequestInit, credentialedResponseLoginPath } from "./browser-request";
 import type { ServiceAuthOption } from "./service-auth";
 import type { RateLimitConfig } from "./rate-limit";
 import type { RetryConfig } from "./retry-policy";
@@ -52,6 +52,11 @@ function sameOriginBaseURL(value: string): string {
 /** @deprecated prefer getBaseURL() which reads window.ENV lazily */
 export const BASE = getBaseURL();
 
+// discoveryStreamURL resolves runtime environment injection lazily and safely encodes the opaque session ID.
+export function discoveryStreamURL(sessionID: string): string {
+  return `${getBaseURL()}/integrations/session/${encodeURIComponent(sessionID)}/stream`;
+}
+
 /** Sends one credentialed JSON request and normalizes HTTP authentication failures. */
 async function req<T>(
   path: string,
@@ -69,28 +74,28 @@ async function req<T>(
   return data as T;
 }
 
+// handleAuthenticationFailure normalizes JSON API auth failures through the same redirect boundary as streams.
 function handleAuthenticationFailure(
   status: number,
   payload: APIErrorPayload
 ): void {
   if (!isAuthenticationFailure(status, payload)) return;
   purgeLegacyBrowserCredential();
-  if (shouldRedirectToLogin()) window.location.href = "/login";
+  redirectCredentialedResponse(status);
 }
 
+// handleCredentialedResponse gives streaming and non-JSON requests the shared 401 redirect behavior.
 export function handleCredentialedResponse(response: Response): void {
   if (response.status !== 401) return;
   purgeLegacyBrowserCredential();
-  if (shouldRedirectToLogin()) window.location.href = "/login";
+  redirectCredentialedResponse(response.status);
 }
 
-function shouldRedirectToLogin(): boolean {
-  if (typeof window === "undefined") return false;
-  return (
-    window.location.pathname !== "/login" &&
-    window.location.pathname !== "/cli-login" &&
-    window.location.pathname !== "/"
-  );
+// redirectCredentialedResponse performs the browser mutation only after the pure route guard admits it.
+function redirectCredentialedResponse(status: number): void {
+  if (typeof window === "undefined") return;
+  const loginPath = credentialedResponseLoginPath(status, window.location.pathname, window.location.search);
+  if (loginPath) window.location.href = loginPath;
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -316,32 +321,256 @@ export interface Parameter {
   path_encoding?: string;
 }
 
-export interface EndpointIdentifier {
+export interface DiscoveryOperationSelection {
   method: string;
   path: string;
-  name?: string;
 }
 
-export interface AgentSession {
-  id: string;
-  service_name?: string;
-  target_type?: string;
-  state: string;
-  error?: string;
-  source_url?: string;
-  pending_question?: string;
-  updated_at: string;
+export type DiscoveryState =
+  | "resolve_source"
+  | "fetch_spec"
+  | "crawl_docs"
+  | "discover_operations"
+  | "awaiting_selection"
+  | "extract_contract"
+  | "enrich_contract"
+  | "awaiting_review"
+  | "plan_ready"
+  | "error"
+  | "cancelled";
+
+export type DiscoveryEventType =
+  | "state_changed"
+  | "source_candidate"
+  | "source_resolved"
+  | "crawl_progress"
+  | "operations_discovered"
+  | "selection_required"
+  | "extraction_progress"
+  | "draft_ready"
+  | "enrichment_proposed"
+  | "review_required"
+  | "plan_ready"
+  | "failed"
+  | "cancelled";
+
+export interface DiscoveryDiagnostic {
+  severity?: string;
+  code: string;
+  message: string;
 }
+
+export interface DiscoveredOperation extends DiscoveryOperationSelection {
+  summary?: string;
+  occurrences: number;
+}
+
+export interface DiscoveryContractReceipt {
+  draft_id: string;
+  draft_revision: number;
+  review_hash: string;
+}
+
+export interface DiscoveryReviewListCounts {
+  total: number;
+  returned: number;
+  omitted: number;
+}
+
+export interface DiscoveryReviewServer {
+  url: string;
+  description?: string;
+  environment?: string;
+  is_default?: boolean;
+}
+
+export interface DiscoveryReviewOAuthFlow {
+  type: string;
+  authorization_url?: string;
+  device_authorization_url?: string;
+  token_url?: string;
+  refresh_url?: string;
+  scopes?: string[];
+  scope_counts: DiscoveryReviewListCounts;
+}
+
+export interface DiscoveryReviewAuthScheme {
+  name: string;
+  type: string;
+  scheme?: string;
+  location?: string;
+  key_name?: string;
+  open_id_connect_url?: string;
+  pkce_required?: boolean;
+  token_endpoint_auth_method?: string;
+  refresh_token_required?: boolean;
+  refresh_token_rotates?: boolean;
+  oauth_flows?: DiscoveryReviewOAuthFlow[];
+  oauth_flow_counts: DiscoveryReviewListCounts;
+}
+
+export interface DiscoveryReviewParameter {
+  name: string;
+  in: string;
+  required: boolean;
+  type?: string;
+}
+
+export interface DiscoveryReviewResponse {
+  status: string;
+  media_types?: string[];
+  media_type_counts: DiscoveryReviewListCounts;
+}
+
+export interface DiscoveryReviewSecurityAlternative {
+  anonymous: boolean;
+  schemes?: Array<{
+    name: string;
+    scopes?: string[];
+    scope_counts: DiscoveryReviewListCounts;
+  }>;
+  scheme_counts: DiscoveryReviewListCounts;
+}
+
+export interface DiscoveryReviewOperation {
+  method: string;
+  path: string;
+  operation_id: string;
+  summary?: string;
+  parameters?: DiscoveryReviewParameter[];
+  parameter_counts: DiscoveryReviewListCounts;
+  request_media_types?: string[];
+  request_media_type_counts: DiscoveryReviewListCounts;
+  responses?: DiscoveryReviewResponse[];
+  response_counts: DiscoveryReviewListCounts;
+  security?: DiscoveryReviewSecurityAlternative[];
+  security_alternative_counts: DiscoveryReviewListCounts;
+}
+
+export interface DiscoveryReviewSummary {
+  schema_version: 1;
+  session_id: string;
+  draft_id: string;
+  draft_revision: number;
+  review_hash: string;
+  info: { title: string; version: string };
+  servers?: DiscoveryReviewServer[];
+  server_counts: DiscoveryReviewListCounts;
+  auth_schemes?: DiscoveryReviewAuthScheme[];
+  auth_scheme_counts: DiscoveryReviewListCounts;
+  operations?: DiscoveryReviewOperation[];
+  operation_counts: DiscoveryReviewListCounts;
+  diagnostic_count: number;
+  evidence_count: number;
+}
+
+export interface DiscoveryPlanReceipt {
+  plan_id: string;
+  review_hash: string;
+}
+
+export interface DiscoveryEnrichmentProposal {
+  id: string;
+  extension: string;
+  pointer: string;
+  scope: string;
+  value: unknown;
+  dependencies: string[];
+  rationale: string;
+  evidence: Array<{
+    source_id: string;
+    content_hash: string;
+    source_url: string;
+    locator: string;
+    fact: string;
+  }>;
+  confidence: string;
+  requires_confirmation: boolean;
+}
+
+export interface DiscoveryPayload {
+  effective_workers: number;
+  max_pages: number;
+  max_depth: number;
+  max_selections: number;
+  diagnostics?: DiscoveryDiagnostic[];
+  operations?: DiscoveredOperation[];
+  proposals?: DiscoveryEnrichmentProposal[];
+  contract?: DiscoveryContractReceipt;
+  plan?: DiscoveryPlanReceipt;
+  failure_code?: string;
+}
+
+export interface DiscoverySnapshot {
+  version: 1;
+  session_id: string;
+  revision: number;
+  draft_revision?: number;
+  state: DiscoveryState;
+  payload?: DiscoveryPayload;
+}
+
+export interface DiscoveryEventEnvelope {
+  version: 1;
+  session_id: string;
+  revision: number;
+  state: DiscoveryState;
+  type: DiscoveryEventType;
+  payload?: DiscoveryPayload;
+}
+
+export interface DiscoveryStartRequest {
+  name: string;
+  slug: string;
+  version?: string;
+  source_url: string;
+  source_mode: "auto" | "spec" | "docs";
+  requested_workers: number;
+  crawl: { max_pages: number; max_depth: number };
+}
+
+export type DiscoveryActionRequest =
+  | {
+      version: 1;
+      session_id: string;
+      expected_revision: number;
+      action: "select_operations";
+      payload: { operations: DiscoveryOperationSelection[] };
+    }
+  | {
+      version: 1;
+      session_id: string;
+      expected_revision: number;
+      draft_revision: number;
+      action: "accept_enrichment" | "reject_enrichment";
+      payload: { proposal_ids: string[] };
+    }
+  | {
+      version: 1;
+      session_id: string;
+      expected_revision: number;
+      draft_revision: number;
+      action: "update_overlay";
+      payload: { overlay: Record<string, unknown> };
+    }
+  | {
+      version: 1;
+      session_id: string;
+      expected_revision: number;
+      draft_revision: number;
+      action: "request_plan";
+    }
+  | {
+      version: 1;
+      session_id: string;
+      expected_revision: number;
+      draft_revision?: number;
+      action: "cancel";
+    };
 
 export interface WebhookIdentifier {
   name: string;
   method: string;
-}
-
-export interface PreviewOpenAPIResult {
-  serviceName: string;
-  integrations?: Record<string, unknown>[];
-  webhooks?: Record<string, unknown>[];
 }
 
 export interface SpecificationImportPlan {
@@ -506,17 +735,6 @@ export interface NotificationServiceRef {
   id: string;
   name: string;
   slug?: string;
-}
-
-export interface AgentResponse {
-  Status: string;
-  Message?: string;
-  Question?: string;
-  Options?: string[];
-  IntegrationID?: string;
-  SessionID?: string;
-  session_id?: string;
-  service_id?: string;
 }
 
 export interface PaginatedResponse<T> {
@@ -1046,71 +1264,36 @@ export const api = {
         body: JSON.stringify({ plan_id: planId, review_hash: reviewHash }),
       }),
 
-    start: (
-      name: string,
-      serviceSlug: string,
-      version: string,
-      sourceUrl: string,
-      importMethod: string,
-      sourceContent?: string,
-      selectedEndpoints?: EndpointIdentifier[],
-      targetContext?: string,
-      graphqlUrl?: string
-    ) =>
-      req<AgentResponse>("/integrations/start", {
+    // startDiscovery creates the authoritative revision-one session snapshot.
+    startDiscovery: (input: DiscoveryStartRequest) =>
+      req<DiscoverySnapshot>("/integrations/start", {
         method: "POST",
-        body: JSON.stringify({
-          name,
-          service_slug: serviceSlug,
-          version,
-          source_url: sourceUrl,
-          import_method: importMethod,
-          source_content: sourceContent,
-          selected_endpoints: selectedEndpoints,
-          target_resource_name: targetContext,
-          graphql_url: graphqlUrl,
-        }),
+        body: JSON.stringify(input),
       }),
 
-    previewOpenAPI: (
-      sourceUrl: string,
-      sourceContent?: string,
-      targetType?: string
-    ) =>
-      req<PreviewOpenAPIResult>("/integrations/preview_openapi", {
+    // actOnDiscovery submits one strict, optimistic-concurrency-bound session decision.
+    actOnDiscovery: (sessionId: string, input: DiscoveryActionRequest) =>
+      req<DiscoverySnapshot>(`/integrations/session/${sessionId}/actions`, {
         method: "POST",
-        body: JSON.stringify({
-          source_url: sourceUrl,
-          source_content: sourceContent,
-          target_type: targetType,
-        }),
+        body: JSON.stringify(input),
       }),
 
-    respond: (sessionId: string, answer: string, rewindTo?: string) =>
-      req<AgentResponse>("/integrations/respond", {
-        method: "POST",
-        body: JSON.stringify({
-          session_id: sessionId,
-          answer,
-          rewind_to: rewindTo,
-        }),
-      }),
+    // getActiveDiscoverySessions lists only resumable version-one snapshots.
+    getActiveDiscoverySessions: () => req<DiscoverySnapshot[]>("/integrations/sessions/active"),
 
-    getActiveSessions: () => req<AgentSession[]>("/integrations/sessions/active"),
+    // getDiscoverySession reloads the authoritative snapshot after reconnects and conflicts.
+    getDiscoverySession: (sessionId: string) =>
+      req<DiscoverySnapshot>(`/integrations/session/${sessionId}`),
 
-    recoverSession: (sessionId: string) =>
-      req<void>(`/integrations/session/${sessionId}/recover`, {
-        method: "POST",
-      }),
-    cancelSession: (sessionId: string) =>
-      req<void>(`/integrations/session/${sessionId}/cancel`, {
-        method: "POST",
-      }),
-    deleteSession: (sessionId: string) =>
-      req<void>(`/integrations/session/${sessionId}`, { method: "DELETE" }),
-
-    getSession: (sessionId: string) =>
-      req<AgentSession>(`/integrations/session/${sessionId}`),
+    // getDiscoveryReviewSummary reads only the bounded structure bound to the exact public draft receipt.
+    getDiscoveryReviewSummary: (sessionId: string, receipt: DiscoveryContractReceipt) => {
+      const query = new URLSearchParams({
+        draft_id: receipt.draft_id,
+        draft_revision: String(receipt.draft_revision),
+        review_hash: receipt.review_hash,
+      });
+      return req<DiscoveryReviewSummary>(`/integrations/session/${encodeURIComponent(sessionId)}/review-summary?${query.toString()}`);
+    },
 
     delete: (id: string) =>
       req<void>(`/integrations/${id}`, { method: "DELETE" }),

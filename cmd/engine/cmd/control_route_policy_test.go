@@ -23,6 +23,35 @@ func TestControlRESTPolicyManifestIsValid(t *testing.T) {
 	}
 }
 
+// TestDiscoveryV1ControlRoutesReplaceLegacyMutationSurface keeps Engine's
+// fail-closed proxy policy synchronized with Registry's breaking protocol.
+func TestDiscoveryV1ControlRoutesReplaceLegacyMutationSurface(t *testing.T) {
+	current := map[string]accesscontrol.Permission{
+		http.MethodPost + " /integrations/session/{session_id}/actions":       accesscontrol.PermissionCatalogueImport,
+		http.MethodGet + " /integrations/session/{session_id}/review-summary": accesscontrol.PermissionCatalogueRead,
+	}
+	manifest := make(map[string]controlRoutePolicy, len(controlRESTPolicies))
+	for _, policy := range controlRESTPolicies {
+		manifest[policy.method+" "+policy.pattern] = policy
+	}
+	for route, permission := range current {
+		policy, found := manifest[route]
+		if !found || len(policy.requirements) != 1 || policy.requirements[0].permission != permission {
+			t.Fatalf("discovery policy %s = %#v, want workspace %s", route, policy.requirements, permission)
+		}
+	}
+	for _, retired := range []string{
+		http.MethodPost + " /integrations/respond",
+		http.MethodPost + " /integrations/session/{session_id}/recover",
+		http.MethodPost + " /integrations/session/{session_id}/cancel",
+		http.MethodDelete + " /integrations/session/{session_id}",
+	} {
+		if _, found := manifest[retired]; found {
+			t.Fatalf("retired discovery policy remains authorized: %s", retired)
+		}
+	}
+}
+
 func TestAuthenticatedIdentityRoutesDoNotRequireWorkspaceGrants(t *testing.T) {
 	workspaceID := uuid.New()
 	actor := actorWithGrants(t, workspaceID)

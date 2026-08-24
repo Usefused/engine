@@ -16,3 +16,9 @@ export function safeInternalPath(candidate: string | null, fallback = FALLBACK_P
     return fallback;
   }
 }
+
+// loginPathForLocation preserves the current internal path and query as one encoded login continuation.
+export function loginPathForLocation(pathname: string, search: string): string {
+  const next = safeInternalPath(`${pathname}${search}`);
+  return `/login?${new URLSearchParams({ next }).toString()}`;
+}

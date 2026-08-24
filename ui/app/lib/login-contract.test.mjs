@@ -64,3 +64,10 @@ test("uses top-level provider logout and handles an already-revoked local sessio
   assert.match(integrationsSource, /if \(!session\.authenticated\)/);
   assert.match(integrationsSource, /window\.location\.replace\("\/login"\)/);
 });
+
+test("preserves the complete protected integration URL through login", () => {
+  assert.match(integrationsSource, /loginPathForLocation\(location\.pathname, location\.search\)/);
+  assert.match(integrationsSource, /location\.pathname, location\.search, isAuth/);
+  assert.match(apiSource, /credentialedResponseLoginPath\(status, window\.location\.pathname, window\.location\.search\)/);
+  assert.doesNotMatch(apiSource, /window\.location\.href = "\/login"/);
+});

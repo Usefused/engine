@@ -36,7 +36,7 @@ test("MCP Activity uses responsive cards for usage and sessions", () => {
   assert.match(route, /function McpSessionCard/, "Session history must expose its mobile card layout");
   assert.match(route, /function McpTokenActivityCard/, "Token history must expose its mobile card layout");
   assert.match(route, /tokenTermination\(token\)/, "Expired and revoked tokens must render retained termination evidence");
-  assert.match(route, /min-w-0 max-w-5xl.*overflow-x-hidden/, "The MCP Activity shell must contain narrow-width content");
+  assert.match(route, /min-w-0 max-w-full.*overflow-x-hidden/, "The MCP Activity shell must contain narrow-width content");
 });
 
 test("Activity tabs scroll locally without widening their page", () => {

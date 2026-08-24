@@ -82,7 +82,7 @@ test("specification import apply submits the reviewed artifact receipt", async (
     readFile(integrationDetailPath, "utf8"),
   ]);
   const planType = sourceSection(apiSource, "export interface SpecificationImportPlan", "export interface SpecificationImportApplyResult");
-  const importsAPI = sourceSection(apiSource, "integrations: {", "start: (");
+  const importsAPI = sourceSection(apiSource, "integrations: {", "startDiscovery: (");
 
   assert.match(planType, /\breview_hash:\s*string/);
   assert.match(importsAPI, /applyImport:\s*\(planId:\s*string,\s*reviewHash:\s*string\)/);

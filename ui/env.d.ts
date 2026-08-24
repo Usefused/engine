@@ -27,7 +27,6 @@ declare global {
       API_KEY: string;
       WEBHOOK_BASE_URL: string;
       SUPPORT_EMAIL: string;
-      AGENT_MAX_IMPORT_SELECTIONS: string;
       GA_MEASUREMENT_ID: string;
     };
     // Standard gtag.js globals.

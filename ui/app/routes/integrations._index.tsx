@@ -8,13 +8,18 @@ export const meta: MetaFunction = ({ matches }) => {
     { title: "Services - Fused" },
   ];
 };
-import { api, type Service, type SpecificationImportPlan, type ActivatedService, type AgentSession } from "~/lib/api";
+import { api, type Service, type SpecificationImportPlan, type ActivatedService, type DiscoverySnapshot } from "~/lib/api";
 import ExtractionWizard from "~/components/ExtractionWizard";
 import IntegrationsListTab, { fromService, fromActivatedService } from "~/components/IntegrationsListTab";
 import IntegrationsPendingTab from "~/components/IntegrationsPendingTab";
 import { DefineServiceDrawer } from "~/components/DefineServiceDrawer";
 import { useToast } from "~/components/Toast";
 import { isImportVersionRequired } from "~/lib/authorization-error";
+import {
+  closeDiscoverySessionQuery,
+  discoveryNavigationFromQuery,
+  openDiscoverySessionQuery,
+} from "~/lib/discovery-navigation";
 
 type ImportSource = { url?: string; content?: string };
 type ImportIdentity = { name: string; slug?: string; version?: string };
@@ -101,7 +106,7 @@ function workspaceListProjection(page: { data: ActivatedService[]; total: number
 function ServicesTabs({ isAuth, view, activeSessions, setView }: {
   isAuth: boolean;
   view: ServicesView;
-  activeSessions: AgentSession[];
+  activeSessions: DiscoverySnapshot[];
   setView: (view: ServicesView) => void;
 }) {
   if (!isAuth) return null;
@@ -156,13 +161,14 @@ function DefineServicePanel({ visible, props }: {
 }
 
 // ExtractionSessionPanel renders one active wizard and leaves its lifecycle callbacks with the route owner.
-function ExtractionSessionPanel({ sessionID, onClose, onComplete }: {
+function ExtractionSessionPanel({ sessionID, reviewOnly, onClose, onComplete }: {
   sessionID: string | null;
+  reviewOnly: boolean;
   onClose: () => void;
   onComplete: () => void;
 }) {
   if (!sessionID) return null;
-  return <ExtractionWizard sessionId={sessionID} onClose={onClose} onComplete={onComplete} />;
+  return <ExtractionWizard sessionId={sessionID} reviewOnly={reviewOnly} onClose={onClose} onComplete={onComplete} />;
 }
 
 // IntegrationsIndex coordinates workspace, public catalog, and import views.
@@ -180,12 +186,14 @@ export default function IntegrationsIndex() {
   const [error, setError] = useState("");
   const [query, setQuery] = useState(searchParams.get("q") ?? "");
   const [searching, setSearching] = useState(false);
-  const [activeSessions, setActiveSessions] = useState<AgentSession[]>([]);
+  const [activeSessions, setActiveSessions] = useState<DiscoverySnapshot[]>([]);
   const [totalPages, setTotalPages] = useState(1);
   const [totalItems, setTotalItems] = useState(0);
   const navigate = useNavigate();
   const urlTab = searchParams.get("tab");
   const view = selectedServicesView(urlTab);
+  const discoveryNavigation = discoveryNavigationFromQuery(searchParams);
+  const activeDiscoverySessionID = discoveryNavigation.sessionID;
 
     // Pagination
   const pageParam = searchParams.get("page");
@@ -216,7 +224,6 @@ export default function IntegrationsIndex() {
 
   // Side panel states
   const [showNewPanel, setShowNewPanel] = useState(false);
-  const [newSessionId, setNewSessionId] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [newSlug, setNewSlug] = useState("");
   const [isSlugManuallyEdited, setIsSlugManuallyEdited] = useState(false);
@@ -225,13 +232,22 @@ export default function IntegrationsIndex() {
   const [importMethod, setImportMethod] = useState<"openapi" | "docs">("openapi");
   const [sourceType, setSourceType] = useState<"url" | "text">("url");
   const [newUrl, setNewUrl] = useState("");
-  const [targetContext, setTargetContext] = useState("");
   const [newContent, setNewContent] = useState("");
   const [fileName, setFileName] = useState("");
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState("");
 
   const [importPlan, setImportPlan] = useState<SpecificationImportPlan | null>(null);
+
+  // openUIDiscoverySession records resumable UI work in the URL and strips any prior CLI authority marker.
+  function openUIDiscoverySession(sessionID: string) {
+    setSearchParams((current) => openDiscoverySessionQuery(current, sessionID), { replace: true });
+  }
+
+  // closeDiscoverySession removes both the opaque identity and its handoff origin while preserving the active tab.
+  function closeDiscoverySession() {
+    setSearchParams((current) => closeDiscoverySessionQuery(current), { replace: true });
+  }
 
   // loadCatalogData normalizes authenticated and public catalog pages for UI state.
   const loadCatalogData = useCallback(async () => {
@@ -305,8 +321,9 @@ export default function IntegrationsIndex() {
     }
   }, [page, isAuth, view, loadVisibleData, query]);
 
+  // refreshSessions reads only authoritative version-one snapshots for the pending view.
   const refreshSessions = () => {
-    api.integrations.getActiveSessions()
+    api.integrations.getActiveDiscoverySessions()
       .then((sessions) => setActiveSessions(sessions || []))
       .catch((err) => console.error("Failed to load active sessions:", err));
   };
@@ -430,20 +447,24 @@ export default function IntegrationsIndex() {
     setStartError("");
   }
 
+  // handleDocsImport gives a documentation URL the deterministic spec-first path before bounded crawling.
   async function handleDocsImport(source: ImportSource) {
-    const res = await api.integrations.start(
-      newName.trim(), newSlug.trim(), newVersion.trim(), source.url || "", "docs", undefined,
-      undefined, targetContext.trim() || undefined, undefined,
-    );
-    if (!res.session_id) throw new Error("No session ID returned");
-    setNewSessionId(res.session_id);
+    const res = await api.integrations.startDiscovery({
+      name: newName.trim(),
+      slug: newSlug.trim(),
+      version: newVersion.trim(),
+      source_url: source.url || "",
+      source_mode: "auto",
+      requested_workers: 0,
+      crawl: { max_pages: 0, max_depth: 0 },
+    });
+    openUIDiscoverySession(res.session_id);
     setShowNewPanel(false);
     setNewName("");
     setNewSlug("");
     setNewVersion("");
     setNewUrl("");
     setNewContent("");
-    setTargetContext("");
     setImportPlan(null);
   }
 
@@ -518,7 +539,7 @@ export default function IntegrationsIndex() {
       </div>
 
       <ServicesTabs isAuth={isAuth} view={view} activeSessions={activeSessions} setView={setView} />
-      <PendingImports isAuth={isAuth} view={view} props={{ activeSessions, setNewSessionId, onRefresh: refreshSessions }} />
+      <PendingImports isAuth={isAuth} view={view} props={{ activeSessions, setNewSessionId: openUIDiscoverySession, onRefresh: refreshSessions }} />
       <ServicesContent
         isAuth={isAuth}
         view={view}
@@ -550,7 +571,6 @@ export default function IntegrationsIndex() {
             setNewUrl("");
             setNewContent("");
             setFileName("");
-            setTargetContext("");
             setStartError("");
           },
           importPlan, newName, setNewName, isSlugManuallyEdited, setIsSlugManuallyEdited, newSlug, setNewSlug,
@@ -560,16 +580,14 @@ export default function IntegrationsIndex() {
         }}
       />
       <ExtractionSessionPanel
-        sessionID={newSessionId}
+        sessionID={activeDiscoverySessionID}
+        reviewOnly={discoveryNavigation.cliHandoff}
         onClose={() => {
-          if (newSessionId) {
-            api.integrations.cancelSession(newSessionId).catch(console.error);
-            api.integrations.deleteSession(newSessionId).catch(console.error);
-          }
-          setNewSessionId(null);
+          // Closing preserves the durable session so it can be resumed from Imports.
+          closeDiscoverySession();
           loadVisibleData();
         }}
-        onComplete={() => setNewSessionId(null)}
+        onComplete={closeDiscoverySession}
       />
     </div>
   );

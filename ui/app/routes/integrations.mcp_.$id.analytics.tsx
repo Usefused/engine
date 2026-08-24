@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useParams, Link, useSearchParams, type MetaFunction } from "@remix-run/react";
+import { Navigate, useParams, useSearchParams, type MetaFunction } from "@remix-run/react";
 
 // meta retains the workspace chrome metadata while identifying the scoped MCP
 // Activity page in the browser title.
@@ -10,42 +10,53 @@ export const meta: MetaFunction = ({ matches }) => {
     { title: "MCP server activity - Fused" },
   ];
 };
-import { ArrowLeft, Clock, KeyRound } from "lucide-react";
+import { Clock, KeyRound } from "lucide-react";
 import { api } from "~/lib/api";
 import { McpAnalyticsPanel, type McpAnalyticsData } from "~/components/mcp/McpAnalyticsPanel";
 import { AppRequestsPanel } from "~/components/activity/AppRequestsPanel";
 import { NestedActivityTabs } from "~/components/activity/NestedActivityTabs";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
-import { hasAnyPermission, hasWorkspacePermission } from "~/lib/current-actor-access";
+import { hasResourcePermission, hasWorkspacePermission } from "~/lib/current-actor-access";
 
-/** Loads MCP overview data and separately gates request receipts. */
-export default function McpAnalyticsDashboard() {
-  const { access, loading: accessLoading } = useCurrentActorAccess();
-  const canReadOverview = hasAnyPermission(access, "app.read") && hasWorkspacePermission(access, "audit.read");
-  const canReadRequests = canReadOverview;
+interface McpActivitySectionProps {
+  appId: string;
+  appFamilyId: string;
+  serverName: string;
+}
+
+/** Keeps the historical analytics URL working while Activity moves into details. */
+export default function McpAnalyticsRedirect() {
   const { id } = useParams();
+  if (!id) return <Navigate to="/integrations/mcp" replace />;
+  return <Navigate to={`/integrations/mcp/${id}?tab=activity`} replace />;
+}
+
+/** Loads exact-app MCP activity only after family and audit access are both known. */
+export function McpActivitySection({ appId, appFamilyId, serverName }: McpActivitySectionProps) {
+  const { access, loading: accessLoading } = useCurrentActorAccess();
+  const canReadOverview = hasResourcePermission(access, "app.read", "APP", appFamilyId) && hasWorkspacePermission(access, "audit.read");
+  const canReadRequests = canReadOverview;
   const [data, setData] = useState<McpAnalyticsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [searchParams, setSearchParams] = useSearchParams();
-  const activeTab = mcpActivityTab(searchParams.get("tab"));
+  const activeTab = mcpActivityTab(searchParams.get("activity"));
 
   // handleTabChange keeps Overview as the canonical URL and records only
   // non-default Activity selections in the query string.
   const handleTabChange = (newTab: McpActivityTab) => {
     setSearchParams(prev => {
-      if (newTab === "overview") prev.delete("tab");
-      else prev.set("tab", newTab);
+      if (newTab === "overview") prev.delete("activity");
+      else prev.set("activity", newTab);
       return prev;
     }, { replace: true });
   };
 
-  /** Refreshes analytics only after the broad client-side access preflight. */
+  /** Refreshes analytics only after the exact family access preflight. */
   const fetchAnalytics = () => {
-    // The route carries an immutable app ID while grants use family IDs, so
-    // this preflight prevents known denials and the Engine enforces the exact
-    // family permission when resolving mcpAnalytics.
-    if (!id || !canReadOverview) return;
+    // Grants attach to the stable family while the query remains scoped to one
+    // immutable version, preventing sibling-family requests from being mounted.
+    if (!canReadOverview) return;
     setLoading(true);
     const queryStr = `
       query($id: String!) {
@@ -95,7 +106,7 @@ export default function McpAnalyticsDashboard() {
     // mcpAnalytics lives on the Engine's own MCP GraphQL schema now
     // (internal/engine/api/mcp_graphql.go), not the Registry-proxied
     // api.graphql this page used to call.
-    api.mcpGraphql<{ mcpAnalytics: McpAnalyticsData }>(queryStr, { id })
+    api.mcpGraphql<{ mcpAnalytics: McpAnalyticsData }>(queryStr, { id: appId })
       .then(res => {
         setData(res.mcpAnalytics);
       })
@@ -114,10 +125,10 @@ export default function McpAnalyticsDashboard() {
     fetchAnalytics();
     const interval = setInterval(fetchAnalytics, 60000);
     return () => clearInterval(interval);
-  }, [accessLoading, canReadOverview, id]);
+  }, [accessLoading, canReadOverview, appId]);
 
   return (
-    <McpActivityState id={id} data={data} loading={loading || accessLoading} error={error} activeTab={activeTab} onTabChange={handleTabChange} canReadOverview={canReadOverview} canReadRequests={canReadRequests} />
+    <McpActivityState id={appId} serverName={serverName} data={data} loading={loading || accessLoading} error={error} activeTab={activeTab} onTabChange={handleTabChange} canReadOverview={canReadOverview} canReadRequests={canReadRequests} />
   );
 }
 
@@ -129,8 +140,9 @@ function mcpActivityTab(value: string | null): McpActivityTab {
 }
 
 /** Selects the MCP activity loading, error, or content state. */
-function McpActivityState({ id, data, loading, error, activeTab, onTabChange, canReadOverview, canReadRequests }: {
-  id?: string;
+function McpActivityState({ id, serverName, data, loading, error, activeTab, onTabChange, canReadOverview, canReadRequests }: {
+  id: string;
+  serverName: string;
   data: McpAnalyticsData | null;
   loading: boolean;
   error: string;
@@ -143,29 +155,23 @@ function McpActivityState({ id, data, loading, error, activeTab, onTabChange, ca
   if (!canReadOverview) return <div className="rounded-lg border border-slate-200 bg-white px-6 py-12 text-center text-sm text-slate-500">MCP activity access is not available for your account.</div>;
   if (error) return <div className="text-center py-12 text-red-500">Error: {error}</div>;
   if (!data) return null;
-  return <McpActivityContent id={id} data={data} activeTab={activeTab} onTabChange={onTabChange} canReadRequests={canReadRequests} />;
+  return <McpActivityContent id={id} serverName={serverName} data={data} activeTab={activeTab} onTabChange={onTabChange} canReadRequests={canReadRequests} />;
 }
 
 /** Renders MCP activity tabs without mounting protected request data. */
-function McpActivityContent({ id, data, activeTab, onTabChange, canReadRequests }: {
-  id?: string;
+function McpActivityContent({ id, serverName, data, activeTab, onTabChange, canReadRequests }: {
+  id: string;
+  serverName: string;
   data: McpAnalyticsData;
   activeTab: McpActivityTab;
   onTabChange: (tab: McpActivityTab) => void;
   canReadRequests: boolean;
 }) {
   return (
-    <div className="mx-auto min-w-0 max-w-5xl space-y-5 overflow-x-hidden animate-in fade-in slide-in-from-bottom-4 duration-500 sm:space-y-6">
-      <div className="flex min-w-0 items-center gap-3 sm:gap-4">
-        <Link to="/integrations/mcp" aria-label="Back to MCP servers" className="shrink-0 rounded-lg border border-slate-200 bg-white p-2 text-slate-600 shadow-sm transition-colors hover:bg-slate-50 hover:text-slate-900">
-          <ArrowLeft className="w-4 h-4" />
-        </Link>
-        <div className="min-w-0">
-          <h1 className="text-lg font-bold tracking-tight text-slate-900 sm:text-xl">MCP server activity</h1>
-          <p className="text-sm text-slate-500 mt-1">Requests and sessions for this server.</p>
-        </div>
-      </div>
-
+    <div className="min-w-0 max-w-full space-y-5 overflow-x-hidden animate-in fade-in slide-in-from-bottom-4 duration-500 sm:space-y-6">
+      <p className="text-sm text-slate-500">
+        Requests and sessions are scoped to this immutable server version. Execution token history is scoped to the server family because tokens remain valid across its versions.
+      </p>
       <NestedActivityTabs
         active={activeTab}
         ariaLabel="MCP server activity"
@@ -178,16 +184,16 @@ function McpActivityContent({ id, data, activeTab, onTabChange, canReadRequests 
         ]}
       />
 
-      <McpActivityTabContent activeTab={activeTab} id={id} data={data} canReadRequests={canReadRequests} />
+      <McpActivityTabContent activeTab={activeTab} id={id} serverName={serverName} data={data} canReadRequests={canReadRequests} />
     </div>
   );
 }
 
-function McpActivityTabContent({ activeTab, id, data, canReadRequests }: { activeTab: McpActivityTab; id?: string; data: McpAnalyticsData; canReadRequests: boolean }) {
+function McpActivityTabContent({ activeTab, id, serverName, data, canReadRequests }: { activeTab: McpActivityTab; id: string; serverName: string; data: McpAnalyticsData; canReadRequests: boolean }) {
   switch (activeTab) {
     case "requests":
-      if (!canReadRequests || !id) return <div className="rounded-lg border border-slate-200 bg-white px-6 py-12 text-center text-sm text-slate-500">Request activity access is not available for your account.</div>;
-      return <AppRequestsPanel appId={id} consumerName="MCP server" transport="mcp" />;
+      if (!canReadRequests) return <div className="rounded-lg border border-slate-200 bg-white px-6 py-12 text-center text-sm text-slate-500">Request activity access is not available for your account.</div>;
+      return <AppRequestsPanel appId={id} consumerName={serverName} transport="mcp" />;
     case "sessions":
       return <McpSessionsPanel sessions={data.recent_sessions || []} />;
     case "tokens":

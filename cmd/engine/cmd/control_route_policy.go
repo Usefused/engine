@@ -182,22 +182,16 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodPost, "/integrations/start", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionCatalogueImport),
 	}},
-	{http.MethodPost, "/integrations/respond", false, []routeRequirement{
-		workspaceRequirement(accesscontrol.PermissionCatalogueImport),
-	}},
-	{http.MethodPost, "/integrations/session/{session_id}/recover", false, []routeRequirement{
-		workspaceRequirement(accesscontrol.PermissionCatalogueImport),
-	}},
-	{http.MethodPost, "/integrations/session/{session_id}/cancel", false, []routeRequirement{
-		workspaceRequirement(accesscontrol.PermissionCatalogueImport),
-	}},
-	{http.MethodDelete, "/integrations/session/{session_id}", false, []routeRequirement{
+	{http.MethodPost, "/integrations/session/{session_id}/actions", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionCatalogueImport),
 	}},
 	{http.MethodGet, "/integrations/sessions/active", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionCatalogueRead),
 	}},
 	{http.MethodGet, "/integrations/session/{session_id}", false, []routeRequirement{
+		workspaceRequirement(accesscontrol.PermissionCatalogueRead),
+	}},
+	{http.MethodGet, "/integrations/session/{session_id}/review-summary", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionCatalogueRead),
 	}},
 	{http.MethodGet, "/integrations/session/{session_id}/stream", false, []routeRequirement{

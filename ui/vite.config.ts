@@ -33,6 +33,9 @@ export default defineConfig({
     },
   },
   resolve: {
+    // Keep Remix and application hooks on one React instance even when Vite
+    // re-optimizes newly discovered route dependencies during local testing.
+    dedupe: ["react", "react-dom"],
     alias: {
       "~": path.resolve(__dirname, "app"),
     },
