@@ -351,28 +351,15 @@ func validateSignaturePolicy(ctx context.Context, span trace.Span, w http.Respon
 	return webhookAuthHandled
 }
 
-// extractEventName resolves the event name from the request using the configured JSON path or header.
+// extractEventName resolves ordered fallback groups while preserving strict `+` composite semantics inside each group.
 func extractEventName(r *http.Request, body []byte, config *webhookConfig) string {
+	// A configured expression owns routing before the legacy URL/RAW fallback.
 	if config.EventExtractionPath != "" {
-		// Composite paths are joined with "+", e.g. "body.eventType+body.action".
-		// Each segment is extracted independently and the values are joined with ".".
-		segments := strings.Split(config.EventExtractionPath, "+")
-		isComposite := len(segments) > 1
-		var parts []string
-		for _, seg := range segments {
-			val := extractSegmentValue(r, body, seg)
-
-			// For composite paths every segment must resolve — a partial match
-			// would produce an ambiguous event name and route incorrectly.
-			if val == "" && isComposite {
-				return ""
+		for _, group := range strings.Split(config.EventExtractionPath, "|") {
+			// The first fully resolved group wins, allowing a specific nested event path to fall back to its envelope type.
+			if eventName := extractEventGroup(r, body, group); eventName != "" {
+				return eventName
 			}
-			if val != "" {
-				parts = append(parts, val)
-			}
-		}
-		if len(parts) > 0 {
-			return strings.Join(parts, ".")
 		}
 	}
 
@@ -382,6 +369,21 @@ func extractEventName(r *http.Request, body []byte, config *webhookConfig) strin
 		eventName = "RAW"
 	}
 	return eventName
+}
+
+// extractEventGroup resolves every `+` segment atomically so partial composites can never route to the wrong subject.
+func extractEventGroup(r *http.Request, body []byte, group string) string {
+	segments := strings.Split(group, "+")
+	parts := make([]string, 0, len(segments))
+	for _, segment := range segments {
+		value := extractSegmentValue(r, body, segment)
+		// Every composite component is required; a missing value advances the caller to the next fallback group.
+		if value == "" {
+			return ""
+		}
+		parts = append(parts, value)
+	}
+	return strings.Join(parts, ".")
 }
 
 func extractSegmentValue(r *http.Request, body []byte, seg string) string {
