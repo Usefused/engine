@@ -18,6 +18,7 @@ const INSTRUCTIONS = [
   "Always route API calls through call(operationId, params) inside an execute script -- there is no other way to reach a vendor API from this server.",
   "Authentication, connected-user identity, and tenant/resource routing are supplied by the Engine. Never invent or pass Authorization headers, API keys, OAuth tokens, auth scheme names, fused_end_user_ref, or fused_resource_id in call params.",
   "Before referencing an operationId in a script for the first time, fetch its full schema with an operationId-mode search_docs call (not just a query-mode summary, which is deliberately schema-free and not safe to write a call against).",
+  "For search_docs detail with kind unified, call the exact operation_id with { input, targets, selectors?, pagination?, idempotencyKey? }; targets must include every declared dependency, selectors and pagination are keyed by public target, and the Engine generates an SDK-equivalent UUID when idempotencyKey is omitted.",
   "search_docs with no arguments lists every available operation. search_docs with a query fuzzy-matches. search_docs with an operationId returns full request/response detail for exactly that operation.",
   "An execute script's body should end with `return <value>` -- that value is what gets reported back as the tool result.",
 ].join(" ");
@@ -73,7 +74,8 @@ function main(): void {
       description:
         "Run a short TypeScript script that can call one or more operations via call(operationId, params) " +
         "and chain their results, returning one final value. Fetch full schema via search_docs before " +
-        "referencing an operationId for the first time.",
+        "referencing an operationId for the first time. Unified operations use the exact documented ID " +
+        "and params { input, targets, selectors?, pagination?, idempotencyKey? }.",
       inputSchema: {
         script: z
           .string()

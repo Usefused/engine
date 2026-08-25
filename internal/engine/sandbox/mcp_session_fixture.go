@@ -10,6 +10,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
+	"github.com/google/uuid"
 )
 
 // buildSessionFixture derives one MCP session's operation catalog from the
@@ -19,12 +20,57 @@ import (
 // enforcement engineExecuteCore/findEndpointInScope apply at dispatch time --
 // this makes the *catalog* match the *enforcement*, not just the enforcement
 // alone.
-func buildSessionFixture(ctx context.Context, cache ObjectCache, selections []models.SDKSelection, policy store.AppTokenPolicy) (*Fixture, error) {
+func buildSessionFixture(ctx context.Context, cache ObjectCache, appID string, selections []models.SDKSelection, policy store.AppTokenPolicy) (*Fixture, error) {
 	names := policy.AllowedOperations
+	// Unrestricted tokens preserve the existing nil predicate that asks SQL for
+	// every physical operation selected by the immutable app version.
 	if policy.IsUnrestricted() {
 		names = nil
 	}
-	return buildBatchedSessionFixture(ctx, cache, selections, names)
+	fixture, err := buildBatchedSessionFixture(ctx, cache, selections, names)
+	// Physical catalogue failure remains authoritative and must not be hidden by
+	// an independently available logical descriptor.
+	if err != nil {
+		return nil, err
+	}
+	loader, ok := cache.(mcpUnifiedDescriptorLoader)
+	// A cache without the Engine-local applied-plan resolver cannot claim to
+	// provide a complete catalogue or reconstruct one from private definitions.
+	if !ok {
+		return nil, fmt.Errorf("MCP Unified descriptor lookup unavailable")
+	}
+	descriptors, err := loader.GetMCPUnifiedOperationDescriptors(ctx, appID, policy)
+	// Missing or inconsistent applied-plan state makes the complete catalogue
+	// unavailable rather than silently degrading to physical-only discovery.
+	if err != nil {
+		return nil, err
+	}
+	if err := fixture.attachUnifiedOperations(descriptors); err != nil {
+		return nil, err
+	}
+	return fixture, nil
+}
+
+type mcpUnifiedDescriptorLoader interface {
+	GetMCPUnifiedOperationDescriptors(context.Context, string, store.AppTokenPolicy) (*models.SDKUnifiedOperationDescriptors, error)
+}
+
+// GetMCPUnifiedOperationDescriptors delegates one session-scoped read to the
+// persistence owner without retaining descriptor state in another cache.
+func (c *LocalObjectCache) GetMCPUnifiedOperationDescriptors(ctx context.Context, appID string, policy store.AppTokenPolicy) (*models.SDKUnifiedOperationDescriptors, error) {
+	parsedAppID, err := uuid.Parse(appID)
+	// Exact UUID parsing prevents a malformed transport identifier from reaching
+	// the applied-plan query under a different interpretation.
+	if err != nil {
+		return nil, fmt.Errorf("invalid MCP app id: %w", err)
+	}
+	repository, ok := c.db.(store.MCPUnifiedDescriptorStore)
+	// Registry or private-definition fallbacks would create competing sources
+	// of public catalogue truth, so absence fails closed.
+	if !ok {
+		return nil, fmt.Errorf("MCP Unified descriptor store unavailable")
+	}
+	return repository.GetMCPUnifiedOperationDescriptors(ctx, parsedAppID, policy.IsUnrestricted(), policy.AllowedOperations)
 }
 
 type endpointBatchLister interface {

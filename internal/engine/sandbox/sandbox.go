@@ -17,6 +17,7 @@ import (
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/entitlement"
+	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/config"
@@ -71,6 +72,11 @@ var globalObjectCache ObjectCache
 var globalDispatcher *engine.Dispatcher
 var globalTokenValidator auth.TokenValidator
 var globalSecretResolver SecretResolver
+var globalMCPUnifiedExecute MCPUnifiedExecuteFunc
+
+// MCPUnifiedExecuteFunc is the existing Engine ExecuteUnified method value;
+// injecting it avoids a second graph executor and keeps the package boundary acyclic.
+type MCPUnifiedExecuteFunc func(context.Context, *enginev1.ExecuteUnifiedRequest) (*enginev1.ExecuteUnifiedResponse, error)
 
 // SetSecretResolver replaces the process-wide resolver used by every physical
 // execution path and returns the prior value for bounded fixture restoration.
@@ -151,17 +157,20 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, msg)))
 }
 
-func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, cache ObjectCache, validator auth.TokenValidator, resolver SecretResolver, rateLimits store.ProviderRateLimitStore, enginePort string) {
+// InitSandbox wires the process-owned physical and logical execution edges used by SDK and MCP transports.
+func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, cache ObjectCache, validator auth.TokenValidator, resolver SecretResolver, rateLimits store.ProviderRateLimitStore, enginePort string, unifiedExecute MCPUnifiedExecuteFunc) {
 	cfg = appCfg
 	globalNATSClient = nc
 	globalObjectCache = cache
 	globalDispatcher = engine.NewDispatcher()
+	// A configured coordinator must remain on the one canonical provider path.
 	if rateLimits != nil {
 		globalDispatcher = engine.NewDispatcherWithProviderRateLimits(rateLimits)
 	}
 	globalTokenValidator = validator
 	SetSecretResolver(resolver)
 	globalEnginePort = enginePort
+	globalMCPUnifiedExecute = unifiedExecute
 
 	// Initialise rate limiters from config.
 	rl := cfg.Sandbox.RateLimit

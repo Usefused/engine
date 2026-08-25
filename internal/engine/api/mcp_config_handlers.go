@@ -12,6 +12,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/engine/unified"
 	"github.com/Usefused/engine/internal/shared/canonical"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
@@ -174,7 +175,14 @@ func validateAppConfigDocument(doc sdkConfigDocument, kind string) error {
 	if err := validateMCPAppRestrictions(doc, kind); err != nil {
 		return err
 	}
-	return validateAppServiceDocs(doc.Services)
+	// Service selection must be valid before bindings can rely on those exact
+	// configured keys and operation allowlists.
+	if err := validateAppServiceDocs(doc.Services); err != nil {
+		return err
+	}
+	// MCP shares the SDK graph contract but has no generated language symbols,
+	// so only the code-generation checks are disabled at this boundary.
+	return validateAppUnifiedOperations(doc, false)
 }
 
 // validateMCPAppRestrictions rejects malformed mcp app restrictions before it can cross the Unified operation boundary.
@@ -184,9 +192,6 @@ func validateMCPAppRestrictions(doc sdkConfigDocument, kind string) error {
 	}
 	if strings.TrimSpace(doc.Language) != "" {
 		return errors.New("mcp config must not set language")
-	}
-	if len(doc.UnifiedOperations) > 0 {
-		return errors.New("mcp config cannot declare Unified Operations")
 	}
 	for name, service := range doc.Services {
 		// MCP is operation-only; webhook attachment belongs to SDK apps.
@@ -221,7 +226,8 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	}
 	selections = finalizeAppSelections(selections, bindings)
 
-	selections, err = resolveMCPEndpointIDs(ctx, registryClient, selections)
+	selections, unifiedCompilation, err := resolveAndCompileMCPUnifiedOperations(ctx, s, call.document, selections, resolved)
+	// A partially frozen or compiled graph must never enter an immutable plan.
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
@@ -232,6 +238,11 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	}
 	payload := appResolvedPayload{
 		Selections: selections, ContractBindings: bindings, BucketID: bucket.ID,
+		UnifiedDefinitionSchemaVersion: unified.DefinitionSchemaVersion,
+		UnifiedDefinitions:             unifiedCompilation.DefinitionJSON,
+		UnifiedDefinitionHash:          unifiedCompilation.DefinitionHash,
+		UnifiedCodegenDescriptorHash:   unifiedCompilation.CodegenDescriptorHash,
+		UnifiedOperations:              unifiedCompilation.Descriptors,
 	}
 	resolvedPayload, _ := json.Marshal(payload)
 	requiredPermissions, requiredCount, err := configPlanRequiredPermissionsWithBuckets(
@@ -259,6 +270,21 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	return sdkPlanResult{plan: plan, summary: map[string]any{"create_mcp": current == nil, "services": services}, notifications: collectSDKPlanNotifications(ctx, configStore, registryClient, call, resolved)}, nil
 }
 
+// resolveAndCompileMCPUnifiedOperations freezes physical selections before invoking the unchanged SDK Unified compiler.
+func resolveAndCompileMCPUnifiedOperations(ctx context.Context, s store.Store, doc sdkConfigDocument, selections []models.SDKSelection, services []sdkResolvedService) ([]models.SDKSelection, sdkUnifiedCompilation, error) {
+	resolved, err := resolveMCPEndpointIDs(ctx, s, selections)
+	// Compilation requires endpoint IDs from the exact local contract snapshot.
+	if err != nil {
+		return nil, sdkUnifiedCompilation{}, err
+	}
+	compiled, err := compileSDKUnifiedOperations(ctx, s, doc, resolved, services)
+	// The shared compiler is the sole admission boundary for executable graph bytes.
+	if err != nil {
+		return nil, sdkUnifiedCompilation{}, err
+	}
+	return resolved, compiled, nil
+}
+
 func validateMCPDesiredState(state sdkConfigDocument, current *store.ConfigState) ([]byte, error) {
 	desiredState, err := canonicalAppState(state)
 	if err != nil {
@@ -275,21 +301,62 @@ func validateMCPDesiredState(state sdkConfigDocument, current *store.ConfigState
 	return desiredState, nil
 }
 
-func resolveMCPEndpointIDs(ctx context.Context, registryClient sandbox.RegistryClient, selections []models.SDKSelection) ([]models.SDKSelection, error) {
-	for index := range selections {
-		selection := &selections[index]
+// resolveMCPEndpointIDs freezes explicit MCP operation names to immutable endpoint IDs through one Engine snapshot query.
+func resolveMCPEndpointIDs(ctx context.Context, s store.Store, selections []models.SDKSelection) ([]models.SDKSelection, error) {
+	requests := mcpEndpointResolutionRequests(selections)
+	// An empty unresolved set is already immutable and should not issue a
+	// database query solely to prove that no work exists.
+	if len(requests) == 0 {
+		return selections, nil
+	}
+	contractStore, ok := s.(sdkUnifiedContractStore)
+	// Explicit operation names cannot be frozen safely without the set-based
+	// snapshot resolver; falling back to Registry would reintroduce N+1 reads.
+	if !ok {
+		return nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "Engine contract snapshot resolver is unavailable"}
+	}
+	matches, err := contractStore.ListServiceContractEndpointsForSelections(ctx, requests, nil)
+	// Snapshot lookup failures stop planning before any immutable payload exists.
+	if err != nil {
+		return nil, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "failed to resolve MCP operations from the Engine contract snapshot"}
+	}
+	return applyResolvedMCPEndpointIDs(selections, requests, matches)
+}
+
+// mcpEndpointResolutionRequests projects every unresolved explicit selection into one set-based snapshot request.
+func mcpEndpointResolutionRequests(selections []models.SDKSelection) []store.ServiceContractEndpointSelection {
+	requests := make([]store.ServiceContractEndpointSelection, 0, len(selections))
+	for index, selection := range selections {
+		// Select-all and already-frozen selections need no name-to-ID work, which
+		// keeps the single query bounded to unresolved explicit operation sets.
 		if len(selection.OperationNames) == 0 || len(selection.EndpointIDs) > 0 {
 			continue
 		}
-		endpoints, err := registryClient.FetchEndpointsByNames(ctx, selection.ServiceID, selection.ServiceVersionID, selection.OperationNames)
-		if err != nil {
-			return nil, workspaceConfigHTTPError{status: http.StatusBadRequest, message: fmt.Sprintf("failed to resolve operations for service %s", selection.ServiceID)}
+		requests = append(requests, store.ServiceContractEndpointSelection{
+			SelectionIndex: index, ServiceID: selection.ServiceID, ServiceVersionID: selection.ServiceVersionID,
+			OperationNames: selection.OperationNames, EndpointNames: selection.OperationNames,
+		})
+	}
+	return requests
+}
+
+// applyResolvedMCPEndpointIDs aligns database-filtered snapshot rows with their immutable app selections.
+func applyResolvedMCPEndpointIDs(selections []models.SDKSelection, requests []store.ServiceContractEndpointSelection, matches []store.ServiceContractEndpointMatch) ([]models.SDKSelection, error) {
+	resolvedCounts := make(map[int]int, len(requests))
+	for _, match := range matches {
+		// The resolver has already applied exact service/version/name predicates;
+		// this loop only projects its bounded rows back onto their source selection.
+		if match.SelectionIndex < 0 || match.SelectionIndex >= len(selections) {
+			return nil, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "MCP operation resolution returned an invalid selection"}
 		}
-		if len(endpoints) != len(selection.OperationNames) {
-			return nil, workspaceConfigHTTPError{status: http.StatusBadRequest, message: fmt.Sprintf("some requested operations were not found for service %s", selection.ServiceID)}
-		}
-		for _, endpoint := range endpoints {
-			selection.EndpointIDs = append(selection.EndpointIDs, endpoint.ID)
+		selections[match.SelectionIndex].EndpointIDs = append(selections[match.SelectionIndex].EndpointIDs, match.Endpoint.ID)
+		resolvedCounts[match.SelectionIndex]++
+	}
+	for _, request := range requests {
+		// Every authored operation must freeze to exactly one snapshot endpoint;
+		// partial matches would otherwise publish a narrower app silently.
+		if resolvedCounts[request.SelectionIndex] != len(request.OperationNames) {
+			return nil, workspaceConfigHTTPError{status: http.StatusBadRequest, message: fmt.Sprintf("some requested operations were not found for service %s", request.ServiceID)}
 		}
 	}
 	return selections, nil
@@ -316,11 +383,20 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 	if err != nil {
 		return mcpConfigApplyResult{}, err
 	}
+	// Apply rechecks canonical bytes and both hashes so a tampered plan cannot
+	// become executable even though planning already validated the graph.
+	if err := normalizeAndValidateResolvedUnifiedPayload(&payload); err != nil {
+		return mcpConfigApplyResult{}, err
+	}
 	runtimeID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(plan.ConfigKey))
 	scope, err := appRuntimeForApply(persistAppRuntimeParams{
 		accountID: call.accountID, appID: runtimeID, ownerSubjectID: planOwnerSubjectID(plan), ownerTeamID: planOwnerTeamID(plan), bucketID: payload.BucketID, bucketName: doc.Bucket,
 		selections: payload.Selections, scopeSchemaVersion: models.AppScopeSchemaVersion,
 		kind: store.AppKindMCP, name: doc.Name, version: doc.Version, configKey: plan.ConfigKey,
+		unifiedDefinitionSchemaVersion: payload.UnifiedDefinitionSchemaVersion,
+		unifiedDefinitions:             payload.UnifiedDefinitions,
+		unifiedDefinitionHash:          payload.UnifiedDefinitionHash,
+		unifiedCodegenDescriptorHash:   payload.UnifiedCodegenDescriptorHash,
 	})
 	if err != nil {
 		return mcpConfigApplyResult{}, err

@@ -1,9 +1,12 @@
 package sandbox
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Usefused/engine/internal/shared/models"
 )
 
 func writeTempFixture(t *testing.T, contents string) string {
@@ -94,6 +97,56 @@ func TestLoadFixture_DuplicateOperationIdIsRejected(t *testing.T) {
 
 	if _, err := LoadFixture(path); err == nil {
 		t.Fatal("LoadFixture() with duplicate operation_id = nil error, want error")
+	}
+}
+
+// TestLoadFixtureIndexesUnifiedOperations proves exact authored logical names
+// remain separate from the established physical resolver.
+func TestLoadFixtureIndexesUnifiedOperations(t *testing.T) {
+	raw := `{"operations":[],"unified_operations":{"schema_version":3,"operations":[{"name":"release.provision","input_schema":{"type":"object"},"targets":[]}]}}`
+	fixture, err := LoadFixture(writeTempFixture(t, raw))
+	if err != nil {
+		t.Fatalf("LoadFixture() error = %v", err)
+	}
+	if fixture.UnifiedOperations == nil || len(fixture.UnifiedOperations.Operations) != 1 || fixture.UnifiedOperations.Operations[0].Name != "release.provision" {
+		t.Fatalf("UnifiedOperations = %#v, want exact logical operation", fixture.UnifiedOperations)
+	}
+	// Physical resolution must not begin treating a logical descriptor as a
+	// provider endpoint before the dedicated dispatch adapter exists.
+	if _, ok := fixture.Resolve("release.provision"); ok {
+		t.Fatal("Resolve() returned a Unified operation through the physical index")
+	}
+}
+
+// TestLoadFixtureRejectsPhysicalUnifiedCollision keeps call(operationId)
+// classification independent from input ordering.
+func TestLoadFixtureRejectsPhysicalUnifiedCollision(t *testing.T) {
+	raw := `{"operations":[{"operation_id":"release.provision","method":"POST","path":"/release","responses":{}}],"unified_operations":{"schema_version":3,"operations":[{"name":"release.provision","input_schema":{"type":"object"},"targets":[]}]}}`
+	// Exact cross-kind overlap cannot safely inherit physical duplicate handling
+	// because the logical graph has different execution semantics.
+	if _, err := LoadFixture(writeTempFixture(t, raw)); err == nil {
+		t.Fatal("LoadFixture() collision error = nil, want fail-closed rejection")
+	}
+}
+
+// TestWriteSessionFixturePreservesUnifiedDescriptor covers the exact Go-to-Node
+// file boundary used by every live MCP session.
+func TestWriteSessionFixturePreservesUnifiedDescriptor(t *testing.T) {
+	fixture := newFixtureFromOperations(t.Context(), nil)
+	fixture.UnifiedOperations = &models.SDKUnifiedOperationDescriptors{
+		SchemaVersion: models.SDKUnifiedDescriptorSchemaVersion,
+		Operations:    []models.SDKUnifiedOperationDescriptor{{Name: "release.provision", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+	}
+	path, err := writeSessionFixture(t.TempDir(), fixture)
+	if err != nil {
+		t.Fatalf("writeSessionFixture() error = %v", err)
+	}
+	loaded, err := LoadFixture(path)
+	if err != nil {
+		t.Fatalf("LoadFixture(written) error = %v", err)
+	}
+	if loaded.UnifiedOperations == nil || loaded.UnifiedOperations.Operations[0].Name != "release.provision" {
+		t.Fatalf("written Unified descriptor = %#v", loaded.UnifiedOperations)
 	}
 }
 

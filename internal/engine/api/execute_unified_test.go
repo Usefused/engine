@@ -39,6 +39,7 @@ type unifiedRuntimeCall struct {
 	environment string
 	idempotency string
 	requestHash string
+	transport   string
 }
 
 type unifiedRuntimeTestDouble struct {
@@ -80,7 +81,7 @@ func (runtime *unifiedRuntimeTestDouble) ExecuteResolvedPhysicalJSON(_ context.C
 	runtime.executeCalls++
 	runtime.calls = append(runtime.calls, unifiedRuntimeCall{
 		params: request.Params, credentials: request.Credentials, environment: request.Environment,
-		idempotency: request.IdempotencyKey, requestHash: request.RequestBodyHash,
+		idempotency: request.IdempotencyKey, requestHash: request.RequestBodyHash, transport: request.Transport,
 	})
 	runtime.mu.Unlock()
 	if runtime.started != nil {
@@ -106,7 +107,7 @@ func (runtime *unifiedRuntimeTestDouble) ExecuteResolvedPhysicalSuccess(_ contex
 	runtime.executeCalls++
 	runtime.calls = append(runtime.calls, unifiedRuntimeCall{
 		params: request.Params, credentials: request.Credentials, environment: request.Environment,
-		idempotency: request.IdempotencyKey, requestHash: request.RequestBodyHash,
+		idempotency: request.IdempotencyKey, requestHash: request.RequestBodyHash, transport: request.Transport,
 	})
 	return nil
 }
@@ -152,6 +153,7 @@ func TestExecuteUnifiedFansOutConcurrentlyAndNormalizesRootOutput(t *testing.T) 
 	}
 	assertUnifiedChildRequests(t, runtime.calls)
 	assertUnifiedWrapperTelemetry(t, exporter, map[string]string{
+		"execution.transport":    "sdk",
 		"unified.schema_version": "3", "unified.stage": "dispatch", "unified.outcome": "success",
 		"unified.target_count": "2", "unified.success_count": "2", "unified.error_count": "0",
 		"unified.skipped_count": "0", "unified.rollback_count": "0",
@@ -176,11 +178,42 @@ func TestExecuteUnifiedReturnsOrderedMixedResults(t *testing.T) {
 		t.Fatalf("unexpected failure result: %#v", failure)
 	}
 	assertUnifiedWrapperTelemetry(t, exporter, map[string]string{
+		"execution.transport":    "sdk",
 		"unified.schema_version": "3", "unified.stage": "dispatch", "unified.outcome": "partial",
 		"unified.target_count": "2", "unified.success_count": "1", "unified.error_count": "1",
 		"unified.skipped_count": "0", "unified.rollback_count": "0",
 		"unified.rollback_success_count": "0", "unified.rollback_error_count": "0",
 	}, "issues.create", "github", "@acme/custom-crm", "private provider failure", "logical-request-1")
+}
+
+// TestExecuteUnifiedAcceptsMCPRuntimeWithMCPTransport proves the injected MCP
+// adapter enters the canonical coordinator while SDK and MCP kinds remain isolated.
+func TestExecuteUnifiedAcceptsMCPRuntimeWithMCPTransport(t *testing.T) {
+	exporter := setupTestTracer(t)
+	server, runtime, appID := newUnifiedRuntimeServer(t, store.AppTokenPolicy{AllowAll: true})
+	runtimeStore := server.store.(*grpcRuntimeStore)
+	runtimeStore.scope.Kind = store.AppKindMCP
+	validator := server.tokenValidator.(unifiedTestValidator)
+	validator.identity.Kind = store.AppKindMCP
+	server.tokenValidator = validator
+	ctx := sandbox.ContextWithMCPExecutionTransport(grpcTestContext(appID))
+	response, err := server.ExecuteUnified(ctx, unifiedRuntimeRequest())
+	if err != nil || response == nil || runtime.executeCalls != 2 {
+		t.Fatalf("MCP ExecuteUnified() = (%#v, %v), physical calls = %d", response, err, runtime.executeCalls)
+	}
+	for _, call := range runtime.calls {
+		// Durable child receipts inherit the trusted adapter label from the logical wrapper.
+		if call.transport != models.EngineExecutionTransportMCP {
+			t.Fatalf("MCP child transport = %q, want mcp", call.transport)
+		}
+	}
+	assertUnifiedWrapperTelemetry(t, exporter, map[string]string{
+		"execution.transport":    "mcp",
+		"unified.schema_version": "3", "unified.stage": "dispatch", "unified.outcome": "success",
+		"unified.target_count": "2", "unified.success_count": "2", "unified.error_count": "0",
+		"unified.skipped_count": "0", "unified.rollback_count": "0",
+		"unified.rollback_success_count": "0", "unified.rollback_error_count": "0",
+	}, "issues.create", "github", "@acme/custom-crm", "Bug", "logical-request-1")
 }
 
 // TestExecuteUnifiedRejectsUnderlyingOperationBeforeResolution proves a
@@ -196,6 +229,7 @@ func TestExecuteUnifiedRejectsUnderlyingOperationBeforeResolution(t *testing.T) 
 		t.Fatalf("predispatch rejection touched runtime: resolve=%d execute=%d", runtime.resolveCalls, runtime.executeCalls)
 	}
 	assertUnifiedWrapperTelemetry(t, exporter, map[string]string{
+		"execution.transport":    "sdk",
 		"unified.schema_version": "3", "unified.stage": "validation", "unified.outcome": "rejected",
 		"unified.target_count": "2", "unified.error_code": "operation_not_allowed",
 	}, "issues.create", "github", "@acme/custom-crm", "Bug", "sandbox", "user-1", "githubOAuth", "logical-request-1")
@@ -420,6 +454,10 @@ func assertUnifiedChildRequests(t *testing.T, calls []unifiedRuntimeCall) {
 func assertUnifiedGitHubSelectors(t *testing.T, calls []unifiedRuntimeCall) {
 	t.Helper()
 	for _, call := range calls {
+		// Legacy SDK callers must retain their existing physical audit label.
+		if call.transport != models.EngineExecutionTransportSDK {
+			t.Fatalf("SDK child transport = %q, want sdk", call.transport)
+		}
 		if _, isGitHub := call.params["title"]; isGitHub {
 			if call.environment != "sandbox" || call.credentials["fused_end_user_ref"] != "user-1" || call.credentials["fused_auth_name"] != "githubOAuth" {
 				t.Fatalf("selectors were not forwarded as Engine routing values: %#v", call)

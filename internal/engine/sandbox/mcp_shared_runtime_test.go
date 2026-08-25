@@ -9,8 +9,12 @@ import (
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine"
+	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 // fixtureForTest loads through the same parser used for serialized session
@@ -68,7 +72,7 @@ func TestMcpCallHandlerUsesOnlySessionFixture(t *testing.T) {
 
 	// The session-only operation must resolve (400: found, rejected for a
 	// missing param -- not 404, which would mean it wasn't found at all).
-	body, _ := json.Marshal(mcpCallRequest{OperationID: "session.only.op", Params: map[string]any{}})
+	body, _ := json.Marshal(mcpCallRequest{OperationID: "session.only.op", Params: json.RawMessage(`{}`)})
 	req := httptest.NewRequest(http.MethodPost, "/mcp/call", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+sessionID)
 	rec := httptest.NewRecorder()
@@ -79,7 +83,7 @@ func TestMcpCallHandlerUsesOnlySessionFixture(t *testing.T) {
 
 	// An operation outside the session catalog must not resolve through any
 	// process-wide fallback.
-	body, _ = json.Marshal(mcpCallRequest{OperationID: "globalOnly.op", Params: map[string]any{}})
+	body, _ = json.Marshal(mcpCallRequest{OperationID: "globalOnly.op", Params: json.RawMessage(`{}`)})
 	req = httptest.NewRequest(http.MethodPost, "/mcp/call", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+sessionID)
 	rec = httptest.NewRecorder()
@@ -191,7 +195,7 @@ func TestMcpCallHandler_SchemaValidationFailureRejected(t *testing.T) {
 	// mcp_fixture_test.go) -- omitting it must fail validation before
 	// engineExecuteCore is ever reached, per the design doc's "Guarding
 	// Against Hallucinated Calls" backstop.
-	body, _ := json.Marshal(mcpCallRequest{OperationID: "test.getWidget", Params: map[string]any{}})
+	body, _ := json.Marshal(mcpCallRequest{OperationID: "test.getWidget", Params: json.RawMessage(`{}`)})
 	req := httptest.NewRequest(http.MethodPost, "/mcp/call", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+sessionID)
 	rec := httptest.NewRecorder()
@@ -256,7 +260,7 @@ func TestMcpCallHandler_EndToEndDispatchesThroughEngineExecuteCore(t *testing.T)
 	}
 	mcpSessions.Unlock()
 
-	body, _ := json.Marshal(mcpCallRequest{OperationID: endpointName, Params: map[string]any{}})
+	body, _ := json.Marshal(mcpCallRequest{OperationID: endpointName, Params: json.RawMessage(`{}`)})
 	req := httptest.NewRequest(http.MethodPost, "/mcp/call", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+sessionID)
 	rec := httptest.NewRecorder()
@@ -280,6 +284,145 @@ func TestMcpCallHandler_EndToEndDispatchesThroughEngineExecuteCore(t *testing.T)
 	if resolver.passthrough["fused_end_user_ref"] != "customer-42" || resolver.passthrough["fused_resource_id"] != resourceID {
 		t.Fatalf("MCP middleware lost connected-user context: %#v", resolver.passthrough)
 	}
+}
+
+// TestMcpCallHandler_ExecutesUnifiedThroughCanonicalCoordinator proves one
+// discovered logical name reaches the injected ExecuteUnified method with
+// trusted MCP transport, metadata, and SDK-equivalent options.
+func TestMcpCallHandler_ExecutesUnifiedThroughCanonicalCoordinator(t *testing.T) {
+	fixture := unifiedFixtureForTest(t, "release.provision")
+	sessionID := registerTestMCPSession(t, "family-token", fixture)
+	var captured *enginev1.ExecuteUnifiedRequest
+	var capturedTransport string
+	var capturedMetadata metadata.MD
+	previous := globalMCPUnifiedExecute
+	// Restore the process-owned coordinator so parallel package tests cannot inherit this fixture.
+	t.Cleanup(func() { globalMCPUnifiedExecute = previous })
+	// The test coordinator records the adapter contract and returns the same
+	// protobuf response shape the production scheduler owns.
+	globalMCPUnifiedExecute = func(ctx context.Context, request *enginev1.ExecuteUnifiedRequest) (*enginev1.ExecuteUnifiedResponse, error) {
+		captured, capturedTransport = request, ExecutionTransportFromContext(ctx)
+		capturedMetadata, _ = metadata.FromIncomingContext(ctx)
+		return &enginev1.ExecuteUnifiedResponse{Results: []*enginev1.UnifiedTargetResult{{
+			Target: "github", Status: "success", DataJson: []byte(`{"id":1}`),
+		}}, RollbackResults: []*enginev1.UnifiedRollbackResult{{
+			Target: "github", Status: "error", ErrorCode: "rollback_failed", TriggeredBy: []string{"gitlab"},
+			AuthAction: &enginev1.UnifiedAuthAction{Action: "reconnect", BucketId: "bucket", ServiceId: "service", EndUserRef: "user"},
+		}}}, nil
+	}
+
+	body := []byte(`{"operation_id":"release.provision","params":{"input":{"count":9007199254740993},"targets":["github"],"selectors":{"github":{"endUserRef":"user","authType":"oauth"}},"pagination":{"github":{"maxPages":2}}}}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp/call", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+sessionID)
+	rec := httptest.NewRecorder()
+	mcpCallHandler(rec, req)
+	// A successful adapter response proves no physical fallback consumed the logical name.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if captured == nil || captured.Operation != "release.provision" || string(captured.InputJson) != `{"count":9007199254740993}` {
+		t.Fatalf("captured Unified request = %#v", captured)
+	}
+	apiKeys := capturedMetadata.Get("x-api-key")
+	// Trusted metadata must be attached independently of model-authored params.
+	if capturedTransport != models.EngineExecutionTransportMCP || len(apiKeys) != 1 || apiKeys[0] != "family-token" {
+		t.Fatalf("trusted transport/metadata = %q/%#v", capturedTransport, capturedMetadata)
+	}
+	if captured.TargetSelectors["github"].GetEndUserRef() != "user" || captured.TargetPagination["github"].GetMaxPages() != 2 {
+		t.Fatalf("SDK-equivalent options were not forwarded: %#v", captured)
+	}
+	// Omitted idempotency defaults once per logical call, matching generated SDKs.
+	if _, err := uuid.Parse(captured.IdempotencyKey); err != nil {
+		t.Fatalf("generated idempotency key = %q", captured.IdempotencyKey)
+	}
+	var response mcpCallResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode Unified response: %v", err)
+	}
+	encoded := string(response.Result)
+	if !bytes.Contains(response.Result, []byte(`"data":{"id":1}`)) || bytes.Contains(response.Result, []byte("connectionId")) || bytes.Contains(response.Result, []byte("reason")) {
+		t.Fatalf("SDK-compatible all-settled result = %s", encoded)
+	}
+}
+
+// TestDecodeMCPUnifiedInvocationRejectsNonSDKShapes locks strict camelCase
+// options and one-document decoding before trusted metadata is attached.
+func TestDecodeMCPUnifiedInvocationRejectsNonSDKShapes(t *testing.T) {
+	cases := []string{
+		`{"input":{},"targets":["github"],"unexpected":true}`,
+		`{"input":{},"targets":["github"],"selectors":{"github":{"end_user_ref":"user"}}}`,
+		`{"input":{},"targets":["github"],"pagination":{"github":{"max_pages":2}}}`,
+		`{"input":{},"targets":["github"]} {}`,
+	}
+	for _, raw := range cases {
+		// Every alternate spelling or suffix must fail instead of being ignored.
+		if _, err := decodeMCPUnifiedInvocation(json.RawMessage(raw)); err == nil {
+			t.Fatalf("decodeMCPUnifiedInvocation(%s) error = nil", raw)
+		}
+	}
+	invocation, err := decodeMCPUnifiedInvocation(json.RawMessage(`{"input":{},"targets":["github"],"idempotencyKey":" "}`))
+	if err != nil || invocation.IdempotencyKey != " " {
+		t.Fatalf("present whitespace key was rewritten: %#v, %v", invocation, err)
+	}
+}
+
+// TestMcpCallHandlerBoundsUnifiedCoordinatorErrors ensures private runtime
+// messages never cross the MCP adapter or enter model-visible script errors.
+func TestMcpCallHandlerBoundsUnifiedCoordinatorErrors(t *testing.T) {
+	sessionID := registerTestMCPSession(t, "family-token", unifiedFixtureForTest(t, "release.provision"))
+	previous := globalMCPUnifiedExecute
+	// Restore the process-owned coordinator after exercising the bounded failure path.
+	t.Cleanup(func() { globalMCPUnifiedExecute = previous })
+	// The private status message simulates definition or provider context that must be discarded.
+	globalMCPUnifiedExecute = func(context.Context, *enginev1.ExecuteUnifiedRequest) (*enginev1.ExecuteUnifiedResponse, error) {
+		return nil, status.Error(codes.PermissionDenied, "private selector and provider details")
+	}
+	body := []byte(`{"operation_id":"release.provision","params":{"input":{},"targets":["github"]}}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp/call", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+sessionID)
+	rec := httptest.NewRecorder()
+	mcpCallHandler(rec, req)
+	if rec.Code != http.StatusForbidden || rec.Body.String() != "{\"error\":\"unified_execution_denied\"}\n" {
+		t.Fatalf("bounded coordinator error = %d/%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestProjectMCPUnifiedResponseMatchesSDKSemantics locks final-output authority
+// and the generated SDK's bounded all-settled fallbacks.
+func TestProjectMCPUnifiedResponseMatchesSDKSemantics(t *testing.T) {
+	descriptor := &models.SDKUnifiedOperationDescriptor{OutputSchema: json.RawMessage(`{"type":"object"}`)}
+	result, statusCode, code := projectMCPUnifiedResponse(descriptor, &enginev1.ExecuteUnifiedResponse{OutputJson: []byte(`{"id":"root"}`)})
+	if string(result) != `{"id":"root"}` || statusCode != 0 || code != "" {
+		t.Fatalf("configured output projection = %s/%d/%q", result, statusCode, code)
+	}
+	_, statusCode, code = projectMCPUnifiedResponse(descriptor, &enginev1.ExecuteUnifiedResponse{})
+	// A configured output never degrades into an all-settled response.
+	if statusCode != http.StatusUnprocessableEntity || code != "output_unavailable" {
+		t.Fatalf("missing configured output = %d/%q", statusCode, code)
+	}
+	result, statusCode, code = projectMCPUnifiedResponse(nil, &enginev1.ExecuteUnifiedResponse{
+		Results:         []*enginev1.UnifiedTargetResult{{Target: "ok", Status: "success"}, {Target: "skip", Status: "skipped"}, {Target: "bad", Status: "unexpected"}},
+		RollbackResults: []*enginev1.UnifiedRollbackResult{{Target: "bad", Status: "unexpected"}},
+	})
+	// Empty bodies and absent codes receive the same null/default projections as generated clients.
+	want := `{"results":[{"target":"ok","status":"success","data":null,"errorCode":null,"authAction":null},{"target":"skip","status":"skipped","data":null,"errorCode":"dependency_failed","authAction":null},{"target":"bad","status":"error","data":null,"errorCode":"execution_failed","authAction":null}],"rollbacks":[{"target":"bad","status":"error","errorCode":"rollback_failed","triggeredBy":[],"authAction":null}]}`
+	if string(result) != want || statusCode != 0 || code != "" {
+		t.Fatalf("all-settled projection = %s/%d/%q", result, statusCode, code)
+	}
+}
+
+// unifiedFixtureForTest attaches one exact public descriptor through the same
+// collision and schema admission used by production session construction.
+func unifiedFixtureForTest(t *testing.T, operation string) *Fixture {
+	t.Helper()
+	fixture := newFixtureFromOperations(context.Background(), nil)
+	descriptor := &models.SDKUnifiedOperationDescriptors{SchemaVersion: models.SDKUnifiedDescriptorSchemaVersion, Operations: []models.SDKUnifiedOperationDescriptor{{
+		Name: operation, InputSchema: json.RawMessage(`{"type":"object"}`), Targets: []models.SDKUnifiedTargetDescriptor{{PublicTarget: "github", OperationID: "repos.create"}},
+	}}}
+	if err := fixture.attachUnifiedOperations(descriptor); err != nil {
+		t.Fatalf("attach Unified descriptor: %v", err)
+	}
+	return fixture
 }
 
 // assertCallErrorResponse checks the response body is valid JSON with a

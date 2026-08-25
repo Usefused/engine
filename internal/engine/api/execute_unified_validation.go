@@ -17,6 +17,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/engine/unified"
 	"github.com/Usefused/engine/internal/shared/canonicaljson"
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
@@ -33,10 +34,11 @@ type validatedUnifiedRequest struct {
 	pagination     map[string]*engine.PaginationIntent
 }
 
-// validateUnifiedRequest rejects malformed unified request before it can cross the Unified preflight admission boundary.
-func validateUnifiedRequest(scope *store.AppRuntime, request *enginev1.ExecuteUnifiedRequest) (validatedUnifiedRequest, error) {
-	if scope == nil || (scope.Kind != "" && scope.Kind != store.AppKindSDK) {
-		return validatedUnifiedRequest{}, status.Error(codes.FailedPrecondition, "Unified execution requires an SDK app")
+// validateUnifiedRequest rejects malformed or cross-adapter requests before they can cross the Unified preflight admission boundary.
+func validateUnifiedRequest(scope *store.AppRuntime, request *enginev1.ExecuteUnifiedRequest, transport string) (validatedUnifiedRequest, error) {
+	// Runtime kind must match the trusted ingress so neither adapter becomes an alternate entrypoint for the other.
+	if !validUnifiedRuntimeTransport(scope, transport) {
+		return validatedUnifiedRequest{}, status.Error(codes.FailedPrecondition, "Unified execution requires a compatible app runtime")
 	}
 	if request == nil {
 		return validatedUnifiedRequest{}, status.Error(codes.InvalidArgument, "Unified request is required")
@@ -58,6 +60,23 @@ func validateUnifiedRequest(scope *store.AppRuntime, request *enginev1.ExecuteUn
 		return validatedUnifiedRequest{}, status.Error(codes.InvalidArgument, "Unified input must be one bounded JSON document")
 	}
 	return validatedUnifiedRequest{operation: operation, targets: targets, input: input, idempotencyKey: idempotencyKey, pagination: pagination}, nil
+}
+
+// validUnifiedRuntimeTransport preserves the SDK legacy-empty kind only on SDK/REST while requiring explicit MCP identity for hosted sessions.
+func validUnifiedRuntimeTransport(scope *store.AppRuntime, transport string) bool {
+	// A missing runtime never gains authority from a transport label.
+	if scope == nil {
+		return false
+	}
+	// Transport is server-owned and selects only the matching immutable app adapter.
+	switch transport {
+	case models.EngineExecutionTransportMCP:
+		return scope.Kind == store.AppKindMCP
+	case models.EngineExecutionTransportSDK, models.EngineExecutionTransportREST:
+		return scope.Kind == "" || scope.Kind == store.AppKindSDK
+	default:
+		return false
+	}
 }
 
 // validateUnifiedRouting keeps target, selector, and pagination namespaces on one admission boundary.

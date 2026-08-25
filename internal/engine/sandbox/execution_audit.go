@@ -60,9 +60,15 @@ func ContextWithRESTExecutionTransport(ctx context.Context) context.Context {
 	return contextWithExecutionTransport(ctx, models.EngineExecutionTransportREST)
 }
 
-// executionTransportFromContext defaults older in-process callers to SDK while
+// ContextWithMCPExecutionTransport marks only Engine-owned MCP adapter calls;
+// model-authored parameters cannot construct Go context values.
+func ContextWithMCPExecutionTransport(ctx context.Context) context.Context {
+	return contextWithExecutionTransport(ctx, models.EngineExecutionTransportMCP)
+}
+
+// ExecutionTransportFromContext defaults older in-process callers to SDK while
 // preserving explicit MCP and REST ingress labels.
-func executionTransportFromContext(ctx context.Context) string {
+func ExecutionTransportFromContext(ctx context.Context) string {
 	if transport, ok := ctx.Value(executionTransportContextKey{}).(string); ok && transport != "" {
 		return transport
 	}
@@ -77,7 +83,7 @@ func recordEngineExecutionAudit(ctx context.Context, span trace.Span, state exec
 		AppID:               state.identity.AppID,
 		AppTokenID:          state.identity.TokenID,
 		AppVersion:          state.identity.AppVersion,
-		Transport:           executionTransportFromContext(ctx),
+		Transport:           ExecutionTransportFromContext(ctx),
 		Direction:           models.EngineExecutionDirectionOutbound,
 		EndpointName:        state.endpointName,
 		HTTPMethod:          executionHTTPMethod(state.match),

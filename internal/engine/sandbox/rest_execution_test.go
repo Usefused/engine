@@ -52,7 +52,7 @@ func TestPreparePhysicalExecutionContextPreservesRESTTransport(t *testing.T) {
 	ctx := preparePhysicalExecutionContext(context.Background(), PhysicalExecutionRequest{
 		Transport: models.EngineExecutionTransportREST,
 	})
-	if got := executionTransportFromContext(ctx); got != models.EngineExecutionTransportREST {
+	if got := ExecutionTransportFromContext(ctx); got != models.EngineExecutionTransportREST {
 		t.Fatalf("execution transport = %q", got)
 	}
 }

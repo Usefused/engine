@@ -113,6 +113,9 @@ type workspaceTestStore struct {
 	secretLookupErr              error
 	getMCPScopeByNameFunc        func(ctx context.Context, accountID uuid.UUID, name, version string) (*store.AppRuntime, error)
 	buckets                      []store.Bucket
+	contractEndpointBatches      [][]store.ServiceContractEndpointSelection
+	contractEndpointMatches      []store.ServiceContractEndpointMatch
+	contractEndpointErr          error
 	bucketSummaries              []store.BucketSummary
 	sdkBuckets                   map[uuid.UUID][]store.Bucket
 	appRuntimesForBucket         map[uuid.UUID][]store.AppRuntime
@@ -148,6 +151,29 @@ type workspaceTestStore struct {
 	webhookOwnersErr       error
 	exactExecutionPolicies map[store.WorkspaceExecutionPolicyRef]*store.WorkspaceExecutionPolicyOverride
 	packageBuildRequest    *models.SDKGenerationRequest
+}
+
+// ListServiceContractEndpointsForSelections models the one-query Engine snapshot resolver used by app plan tests.
+func (s *workspaceTestStore) ListServiceContractEndpointsForSelections(_ context.Context, selections []store.ServiceContractEndpointSelection, _ []string) ([]store.ServiceContractEndpointMatch, error) {
+	s.contractEndpointBatches = append(s.contractEndpointBatches, append([]store.ServiceContractEndpointSelection(nil), selections...))
+	// Explicit fixture rows let Unified compilation tests control exact endpoint
+	// schemas and identities without teaching this shared mock provider policy.
+	if s.contractEndpointMatches != nil || s.contractEndpointErr != nil {
+		return append([]store.ServiceContractEndpointMatch(nil), s.contractEndpointMatches...), s.contractEndpointErr
+	}
+	matches := make([]store.ServiceContractEndpointMatch, 0)
+	for _, selection := range selections {
+		for _, name := range selection.EndpointNames {
+			// Stable synthetic IDs preserve immutable-selection assertions while the
+			// production PostgreSQL resolver remains covered by store integration tests.
+			endpointID := uuid.NewSHA1(selection.ServiceVersionID, []byte(name))
+			matches = append(matches, store.ServiceContractEndpointMatch{
+				SelectionIndex: selection.SelectionIndex,
+				Endpoint:       fusedobject.Endpoint{ID: endpointID, Name: name},
+			})
+		}
+	}
+	return matches, nil
 }
 
 func (s *workspaceTestStore) CreateOrGetAppFamily(_ context.Context, family store.AppFamily) (*store.AppFamily, bool, error) {

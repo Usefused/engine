@@ -442,7 +442,10 @@ func (s *EngineGRPCServer) executeRESTUnified(ctx context.Context, scope *store.
 		TargetSelectors: protoRESTSelectors(request.Selectors), TargetPagination: protoRESTTargetPagination(request.TargetPagination), IdempotencyKey: idempotencyKey,
 	}
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.unified.execute")
-	span.SetAttributes(attribute.Int("unified.target_count", boundedUnifiedTargetCount(protoRequest)))
+	span.SetAttributes(
+		attribute.String("execution.transport", models.EngineExecutionTransportREST),
+		attribute.Int("unified.target_count", boundedUnifiedTargetCount(protoRequest)),
+	)
 	stage := "validation"
 	var protoResponse *enginev1.ExecuteUnifiedResponse
 	var execErr error
