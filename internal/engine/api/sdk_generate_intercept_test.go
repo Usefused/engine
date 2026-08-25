@@ -238,12 +238,9 @@ func TestFirstUnactivatedSelection_EmptySelections_NotBlocked(t *testing.T) {
 	}
 }
 
-// TestFirstUnactivatedSelection_ActivationCheckError_ReturnsError is the
-// fail-closed AC: unlike Task 3's best-effort auto-register (which swallows
-// store errors since it's not a security control), this gate must surface an
-// IsWorkspaceServiceEnabled failure as an error rather than silently treating it as
-// either activated or not -- a security check that fails open on an internal
-// error would defeat its own purpose.
+// TestFirstUnactivatedSelection_ActivationCheckError_ReturnsError proves the
+// pre-dispatch security gate fails closed instead of relying on post-publication
+// workspace recovery.
 func TestFirstUnactivatedSelection_ActivationCheckError_ReturnsError(t *testing.T) {
 	svcA := uuid.New()
 	versionA := uuid.New()

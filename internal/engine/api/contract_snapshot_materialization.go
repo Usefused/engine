@@ -23,6 +23,8 @@ type runtimeContractSnapshotWriter interface {
 	UpsertServiceContractSnapshot(ctx context.Context, snapshot store.ServiceContractSnapshot) (*store.ServiceContractSnapshot, error)
 }
 
+// materializeRuntimeContractSnapshot stores the exact Registry contract needed
+// by local activation while keeping its audit dimensions identity-only.
 func materializeRuntimeContractSnapshot(ctx context.Context, s store.Store, fetcher RuntimeContractFetcher, accountID, serviceID, serviceVersionID uuid.UUID, version, apiKey string) error {
 	snapshotStore, ok := s.(runtimeContractSnapshotWriter)
 	if !ok || fetcher == nil {
@@ -40,10 +42,10 @@ func materializeRuntimeContractSnapshot(ctx context.Context, s store.Store, fetc
 		attribute.String("account_id", accountID.String()),
 		attribute.String("service_id", serviceID.String()),
 		attribute.String("service_version_id", serviceVersionID.String()),
-		attribute.String("service_version", version),
 	)
 
 	snapshot, err := fetcher.FetchRuntimeContract(ctx, serviceID, serviceVersionID, version, apiKey)
+	// Fetch failure stops before local persistence or activation can observe an incomplete snapshot.
 	if err != nil {
 		span.SetAttributes(attribute.String("outcome", "fetch_failed"))
 		slog.WarnContext(ctx, "runtime contract snapshot fetch failed",
@@ -52,6 +54,8 @@ func materializeRuntimeContractSnapshot(ctx context.Context, s store.Store, fetc
 			slog.Any("error", err))
 		return fmt.Errorf("failed to fetch runtime contract snapshot: %w", err)
 	}
+	// Snapshot persistence is the local authorization boundary, so callers must
+	// see failure instead of continuing with Registry-only contract state.
 	if _, err := snapshotStore.UpsertServiceContractSnapshot(ctx, *snapshot); err != nil {
 		span.SetAttributes(attribute.String("outcome", "write_failed"))
 		slog.ErrorContext(ctx, "runtime contract snapshot write failed",

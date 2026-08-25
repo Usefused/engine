@@ -113,13 +113,10 @@ func TestForward_PropagatesStatusCode(t *testing.T) {
 	}
 }
 
-// TestForwardAndInspect_PassesBodyThroughUnchangedAndInvokesOnSuccess is
-// Task 3's core contract (engine_workspace_registration_plan.md): the client
-// must receive the exact same bytes Forward would have given it, and
-// onSuccess must see those same bytes -- the import/apply auto-register
-// intercept reads from onSuccess's copy, never from what's written to w.
+// TestForwardAndInspect_PassesBodyThroughUnchangedAndInvokesOnSuccess proves the
+// client and pre-write callback receive the same Registry response bytes.
 func TestForwardAndInspect_PassesBodyThroughUnchangedAndInvokesOnSuccess(t *testing.T) {
-	wantBody := `{"status":"applied","service_id":"abc-123","is_new_service":true,"version":"2026-01-01"}`
+	wantBody := `{"status":"applied","service_id":"abc-123","version":"2026-01-01"}`
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)

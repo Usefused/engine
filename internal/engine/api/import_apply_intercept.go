@@ -19,9 +19,7 @@ import (
 )
 
 // isImportApplyPath reports whether r is the config-as-code commit request
-// that gets the auto-register intercept (Task 3, engine_workspace_
-// registration_plan.md) instead of RESTProxyHandler's normal uniform
-// forward.
+// that needs post-publication workspace activation instead of uniform forwarding.
 func isImportApplyPath(method, path string) bool {
 	return method == http.MethodPost && path == "/integrations/import/apply"
 }
@@ -38,7 +36,6 @@ type importApplyResponse struct {
 	ServiceID        string `json:"service_id"`
 	Name             string `json:"name"`
 	Slug             string `json:"slug"`
-	IsNewService     bool   `json:"is_new_service"`
 	Version          string `json:"version"`
 	ServiceVersionID string `json:"service_version_id"`
 }
@@ -50,7 +47,6 @@ type autoRegistrationAudit struct {
 	version          string
 	serviceVersionID uuid.UUID
 	outcome          string
-	err              error
 }
 
 // forwardImportApplyWithAutoRegister mirrors forwardRESTMutationWithSpan's
@@ -80,16 +76,12 @@ func forwardImportApplyWithAutoRegister(proxy Forwarder, s store.Store, contract
 	)
 }
 
-// autoRegisterImportedService is Task 3's intercept
-// (engine_workspace_registration_plan.md): after a successful
-// import/apply, make the applied service usable in the caller's workspace
-// immediately, with no second request needed.
+// autoRegisterImportedService makes a successfully imported service usable in
+// the caller's workspace immediately, with no second request needed.
 //
 // Gated on actual workspace-activation state (IsWorkspaceServiceEnabled), not
-// IsNewService -- IsNewService only says whether the Registry row was just
-// created, which isn't the same thing as "already activated in this
-// workspace" (an existing Registry service may never have been activated in
-// this Engine workspace).
+// publication novelty: an existing Registry service may never have been
+// activated in this Engine workspace.
 //
 // Registry commit remains successful when activation fails, but the returned
 // audit lets the proxy replace the stale success response with exact recovery.
@@ -218,14 +210,14 @@ func decodeAutoRegistrationResponse(ctx context.Context, body []byte) (importApp
 	if err != nil {
 		slog.WarnContext(ctx, "auto-register: invalid service_id in import/apply response",
 			slog.String("service_id", resp.ServiceID), slog.Any("error", err))
-		return resp, autoRegistrationAudit{operationID: operationID, outcome: "invalid_service_id", err: err}, false
+		return resp, autoRegistrationAudit{operationID: operationID, outcome: "invalid_service_id"}, false
 	}
 	serviceVersionID, err := uuid.Parse(resp.ServiceVersionID)
 	// A nil or malformed version UUID cannot pin activation to the committed artifact.
 	if err != nil || serviceVersionID == uuid.Nil {
 		slog.WarnContext(ctx, "auto-register: invalid service_version_id in import/apply response",
 			slog.String("service_version_id", resp.ServiceVersionID), slog.Any("error", err))
-		return resp, autoRegistrationAudit{operationID: operationID, serviceID: serviceID, outcome: "invalid_service_version_id", err: err}, false
+		return resp, autoRegistrationAudit{operationID: operationID, serviceID: serviceID, outcome: "invalid_service_version_id"}, false
 	}
 	resp.Slug = strings.TrimSpace(resp.Slug)
 	if resp.Slug == "" {
@@ -253,38 +245,45 @@ func decodeCommittedImportApplyResponse(ctx context.Context, body []byte) (impor
 	// Invalid JSON cannot prove either commit identity or workspace target.
 	if err := json.Unmarshal(body, &resp); err != nil {
 		slog.WarnContext(ctx, "auto-register: could not decode import/apply response", slog.Any("error", err))
-		return resp, uuid.Nil, autoRegistrationAudit{outcome: "invalid_response", err: err}, false
+		return resp, uuid.Nil, autoRegistrationAudit{outcome: "invalid_response"}, false
 	}
 	operationID, err := uuid.Parse(resp.OperationID)
 	// Auto-registration may only follow the Registry's exact durable success
 	// proof; malformed success responses remain the CLI's unknown-outcome case.
 	if err != nil || resp.Status != "applied" || resp.Phase != "complete" || resp.CommitState != "committed" {
-		return resp, uuid.Nil, autoRegistrationAudit{outcome: "invalid_commit_proof", err: err}, false
+		return resp, uuid.Nil, autoRegistrationAudit{outcome: "invalid_commit_proof"}, false
 	}
 	return resp, operationID, autoRegistrationAudit{}, true
 }
 
+// activateImportedService materializes the exact imported contract before
+// adding or extending its local workspace membership.
 func activateImportedService(ctx context.Context, s store.Store, contractFetcher RuntimeContractFetcher, accountID uuid.UUID, apiKey string, resp importApplyResponse, audit autoRegistrationAudit) autoRegistrationAudit {
+	// Workspace identity must be authoritative before any local membership read or write.
 	if err := verifyWorkspaceActor(ctx, accountID); err != nil {
 		slog.ErrorContext(ctx, "auto-register: resolve Engine workspace failed", slog.Any("error", err))
-		audit.outcome, audit.err = "workspace_lookup_failed", err
+		audit.outcome = "workspace_lookup_failed"
 		return audit
 	}
 
 	activated, err := s.IsWorkspaceServiceEnabled(ctx, audit.serviceID)
+	// Unknown membership cannot safely select either the add or enable-version mutation.
 	if err != nil {
 		slog.ErrorContext(ctx, "auto-register: IsWorkspaceServiceEnabled failed", slog.Any("error", err))
-		audit.outcome, audit.err = "activation_check_failed", err
+		audit.outcome = "activation_check_failed"
 		return audit
 	}
+	// Existing membership needs only the newly imported immutable version enabled.
 	if activated {
+		// Runtime execution must never observe the version before its contract snapshot exists.
 		if err := materializeRuntimeContractSnapshot(ctx, s, contractFetcher, accountID, audit.serviceID, audit.serviceVersionID, resp.Version, apiKey); err != nil {
-			audit.outcome, audit.err = "contract_snapshot_failed", err
+			audit.outcome = "contract_snapshot_failed"
 			return audit
 		}
+		// Enabling the version is the only workspace mutation after snapshot success.
 		if err := s.EnableWorkspaceServiceVersion(ctx, audit.serviceID, resp.Version, audit.serviceVersionID, accountID); err != nil {
 			slog.ErrorContext(ctx, "auto-register: EnableWorkspaceServiceVersion failed", slog.Any("error", err))
-			audit.outcome, audit.err = "version_activation_failed", err
+			audit.outcome = "version_activation_failed"
 			return audit
 		}
 		// Membership and version availability are separate: a later provider
@@ -293,13 +292,15 @@ func activateImportedService(ctx context.Context, s store.Store, contractFetcher
 		return audit
 	}
 
+	// New membership follows the same snapshot-before-activation invariant.
 	if err := materializeRuntimeContractSnapshot(ctx, s, contractFetcher, accountID, audit.serviceID, audit.serviceVersionID, resp.Version, apiKey); err != nil {
-		audit.outcome, audit.err = "contract_snapshot_failed", err
+		audit.outcome = "contract_snapshot_failed"
 		return audit
 	}
+	// The additive mutation keeps unrelated workspace services untouched.
 	if err := s.AddWorkspaceServiceVersion(ctx, audit.serviceID, resp.Slug, resp.Version, audit.serviceVersionID, importedServiceName(resp), accountID); err != nil {
 		slog.ErrorContext(ctx, "auto-register: AddWorkspaceServiceVersion failed", slog.Any("error", err))
-		audit.outcome, audit.err = "activation_failed", err
+		audit.outcome = "activation_failed"
 		return audit
 	}
 	audit.outcome = "activated"
@@ -313,17 +314,19 @@ func importedServiceName(resp importApplyResponse) string {
 	return resp.Slug
 }
 
+// recordAutoRegistrationAudit emits only stable identity and outcome fields on
+// the existing mutation span; raw local errors remain in owner-controlled logs.
 func recordAutoRegistrationAudit(span trace.Span, accountID uuid.UUID, audit autoRegistrationAudit) {
 	span.SetAttributes(
 		attribute.String("user_action", "workspace.auto_register_service"),
 		attribute.String("account_id", accountID.String()),
 		attribute.String("service_id", audit.serviceID.String()),
 		attribute.String("service_version_id", audit.serviceVersionID.String()),
-		attribute.String("service_version", audit.version),
 		attribute.String("outcome", audit.outcome),
 	)
-	if audit.err != nil {
-		span.RecordError(audit.err)
+	// Every non-success outcome is a failed local follow-up, even when Registry
+	// publication already committed and the caller receives exact recovery.
+	if !autoRegistrationSucceeded(audit) {
 		span.SetStatus(codes.Error, audit.outcome)
 	}
 }

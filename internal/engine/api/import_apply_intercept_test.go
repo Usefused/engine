@@ -51,10 +51,8 @@ func TestImportWorkspaceActivationFailureOmitsMissingIdentities(t *testing.T) {
 	}
 }
 
-// autoRegisterMockStore records activation calls made for an authenticated Actor.
-// AddWorkspaceServiceVersion calls for Task 3's unit tests
-// (engine_workspace_registration_plan.md). Embeds store.Store so any method
-// not overridden here isn't needed by the code under test.
+// autoRegisterMockStore records activation calls made for an authenticated
+// actor. Embedding store.Store keeps unrelated methods outside this test seam.
 type autoRegisterMockStore struct {
 	store.Store
 	accountID uuid.UUID
@@ -140,7 +138,7 @@ func TestAutoRegisterImportedService_ActivatesWhenNotYetActivated(t *testing.T) 
 	serviceID := uuid.New()
 	s := &autoRegisterMockStore{accountID: accountID}
 
-	body := committedImportApplyBody(importApplyResponse{ServiceID: serviceID.String(), ServiceVersionID: testImportServiceVersionID, Name: "Stripe Payments", Slug: "stripe", IsNewService: true, Version: "2026-01-01"})
+	body := committedImportApplyBody(importApplyResponse{ServiceID: serviceID.String(), ServiceVersionID: testImportServiceVersionID, Name: "Stripe Payments", Slug: "stripe", Version: "2026-01-01"})
 	autoRegisterImportedService(autoRegisterTestContext(accountID), s, nil, accountID, "", body)
 
 	if s.workspaceCalls != 0 {
@@ -192,6 +190,8 @@ func TestAutoRegisterImportedService_MissingSlugFailsClosed(t *testing.T) {
 	t.Fatal("missing-slug activation did not emit outcome=missing_slug")
 }
 
+// TestAutoRegisterImportedService_EmitsMutationAuditSpan enforces the exact
+// stable-field allowlist for successful local activation.
 func TestAutoRegisterImportedService_EmitsMutationAuditSpan(t *testing.T) {
 	exporter := setupTestTracer(t)
 	accountID := uuid.New()
@@ -214,14 +214,20 @@ func TestAutoRegisterImportedService_EmitsMutationAuditSpan(t *testing.T) {
 		"account_id":         accountID.String(),
 		"service_id":         serviceID.String(),
 		"service_version_id": testImportServiceVersionID,
-		"service_version":    "2026-01-01",
 		"outcome":            "activated",
 	}
 	for _, attr := range spans[0].Attributes {
 		key := string(attr.Key)
-		if expected, ok := want[key]; ok && attr.Value.AsString() == expected {
-			delete(want, key)
+		expected, ok := want[key]
+		// Exact allowlisting prevents redundant labels or provider-controlled text
+		// from creeping back into the mutation audit.
+		if !ok {
+			t.Fatalf("unexpected auto-registration attribute %s=%q", key, attr.Value.AsString())
 		}
+		if attr.Value.AsString() != expected {
+			t.Fatalf("auto-registration attribute %s=%q, want %q", key, attr.Value.AsString(), expected)
+		}
+		delete(want, key)
 	}
 	for key, value := range want {
 		t.Errorf("expected span attribute %s=%q", key, value)
@@ -273,7 +279,10 @@ func TestAutoRegisterImportedService_MaterializesSnapshotBeforeActivation(t *tes
 	}
 }
 
+// TestAutoRegisterImportedService_SnapshotFetchFailureSkipsActivation proves a
+// failed local follow-up emits stable state without raw-error OTEL events.
 func TestAutoRegisterImportedService_SnapshotFetchFailureSkipsActivation(t *testing.T) {
+	exporter := setupTestTracer(t)
 	accountID := uuid.New()
 	serviceID := uuid.New()
 	s := &snapshotAutoRegisterStore{autoRegisterMockStore: &autoRegisterMockStore{accountID: accountID}}
@@ -287,6 +296,29 @@ func TestAutoRegisterImportedService_SnapshotFetchFailureSkipsActivation(t *test
 	}
 	if s.snapshotCalls != 0 || s.activateCalls != 0 || s.enableVersionCalls != 0 {
 		t.Fatalf("snapshot failure must block activation, got snapshot=%d activate=%d enable=%d", s.snapshotCalls, s.activateCalls, s.enableVersionCalls)
+	}
+	spans := exporter.GetSpans()
+	auditSpanFound := false
+	for _, span := range spans {
+		// Neither the parent audit nor snapshot helper may serialize a raw error as an OTEL event.
+		if len(span.Events) != 0 {
+			t.Fatalf("span %q recorded raw failure events: %#v", span.Name, span.Events)
+		}
+		for _, attr := range span.Attributes {
+			// The opaque version UUID already provides exact correlation, making the
+			// provider-controlled version label redundant and unsafe here.
+			if attr.Key == "service_version" {
+				t.Fatalf("span %q retained stale service_version=%q", span.Name, attr.Value.AsString())
+			}
+			// The parent mutation span must still explain the bounded failure phase.
+			if span.Name == "engine.workspace.auto_register_service" && attr.Key == "outcome" && attr.Value.AsString() == "contract_snapshot_failed" {
+				auditSpanFound = true
+			}
+		}
+	}
+	// Absence would make the committed partial impossible to audit safely.
+	if !auditSpanFound {
+		t.Fatalf("missing stable contract_snapshot_failed audit outcome: %#v", spans)
 	}
 }
 

@@ -113,11 +113,9 @@ func forwardSDKGenerateWithWorkspaceGate(proxy Forwarder, s store.Store, w http.
 // means nothing has ever been activated, so the first requested service ID
 // is reported as the blocker without needing an IsWorkspaceServiceEnabled call.
 //
-// An IsWorkspaceServiceEnabled failure is returned as an error, not treated as
-// either activated or not -- unlike Task 3's best-effort auto-register
-// (which swallows store errors since it isn't a security control), this
-// gate fails closed: a security check that silently allows the request
-// through on an internal error would defeat its own purpose.
+// An IsWorkspaceServiceEnabled failure is returned before forwarding. This
+// security gate cannot defer failure into post-publication recovery because a
+// request admitted here would already have bypassed its workspace boundary.
 func firstUnactivatedSelection(ctx context.Context, s store.Store, accountID uuid.UUID, body []byte) (selection sdkGenerateSelection, blocked bool, err error) {
 	var req sdkGenerateRequestBody
 	if decErr := json.Unmarshal(body, &req); decErr != nil || len(req.Selections) == 0 {
