@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -179,6 +180,11 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodPost, "/integrations/import/apply", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionCatalogueImport),
 	}},
+	// Status uses the same import grant so every actor allowed to mutate can
+	// recover its outcome without exposing plan metadata to read-only roles.
+	{http.MethodGet, "/integrations/import/operations/{operation_id}", false, []routeRequirement{
+		workspaceRequirement(accesscontrol.PermissionCatalogueImport),
+	}},
 	{http.MethodPost, "/integrations/start", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionCatalogueImport),
 	}},
@@ -294,18 +300,24 @@ func serveControlAuthorizationRequest(w http.ResponseWriter, r *http.Request, ne
 	serveAuthorizedControlRequest(w, r, next, recorder, actor, requirements, policy)
 }
 
+// denyUnauthenticatedControlRequest records the canonical denial before writing
+// either the generic or import-specific safe authorization envelope.
 func denyUnauthenticatedControlRequest(w http.ResponseWriter, r *http.Request, recorder accesscontrol.AuditRecorder, started time.Time) {
 	finishControlAuthorization(w, r, started, "", 0, "unauthenticated")
 	_ = recordControlAudit(r.Context(), recorder, newControlAuditEvent(r, accesscontrol.Actor{}, controlAuditAction(r.Method), r.URL.Path, nil, accesscontrol.AuditDenied, http.StatusUnauthorized, "unauthenticated"))
-	accesscontrol.WriteAuthorizationError(w, accesscontrol.ErrAuthenticationRequired)
+	writeControlAuthorizationError(w, r, accesscontrol.ErrAuthenticationRequired)
 }
 
+// denyUnclassifiedControlRequest keeps fail-closed policy decisions observable
+// while allowing import routes to retain their recovery fields.
 func denyUnclassifiedControlRequest(w http.ResponseWriter, r *http.Request, recorder accesscontrol.AuditRecorder, actor accesscontrol.Actor, policy string, started time.Time) {
 	finishControlAuthorization(w, r, started, policy, 0, "unclassified")
 	_ = recordControlAudit(r.Context(), recorder, newControlAuditEvent(r, actor, controlAuditAction(r.Method), policy, nil, accesscontrol.AuditDenied, http.StatusForbidden, "policy_denied"))
-	accesscontrol.WriteAuthorizationError(w, accesscontrol.ErrPolicyDenied)
+	writeControlAuthorizationError(w, r, accesscontrol.ErrPolicyDenied)
 }
 
+// authorizeControlRequirements evaluates the resolved grants once and routes a
+// denial through the surface-specific bounded response contract.
 func authorizeControlRequirements(w http.ResponseWriter, r *http.Request, recorder accesscontrol.AuditRecorder, actor accesscontrol.Actor, authorizer accesscontrol.Authorizer, resolver controlRequirementResolver, requirements []accesscontrol.Requirement, policy string, started time.Time) bool {
 	err := accesscontrol.AuthorizeAll(r.Context(), authorizer, requirements...)
 	outcome := "allowed"
@@ -320,7 +332,7 @@ func authorizeControlRequirements(w http.ResponseWriter, r *http.Request, record
 	event := newControlAuditEvent(r, actor, controlAuditAction(r.Method), policy, requirements, accesscontrol.AuditDenied, http.StatusForbidden, "permission_denied")
 	setAuditMissingRequirements(&event, accesscontrol.MissingRequirements(err))
 	_ = recordControlAudit(r.Context(), recorder, event)
-	accesscontrol.WriteAuthorizationError(w, err)
+	writeControlAuthorizationError(w, r, err)
 	return false
 }
 
@@ -359,14 +371,96 @@ func isControlMutation(method string) bool {
 	return method != http.MethodGet && method != http.MethodHead
 }
 
+// recordAuthorizedControlAttempt fails mutations closed when their durable
+// attempt audit is unavailable and preserves import recovery metadata.
 func recordAuthorizedControlAttempt(w http.ResponseWriter, r *http.Request, recorder accesscontrol.AuditRecorder, actor accesscontrol.Actor, requirements []accesscontrol.Requirement, policy string) bool {
 	preflight := newControlAuditEvent(r, actor, controlAuditAction(r.Method), policy, requirements, accesscontrol.AuditAttempted, 0, "attempted")
 	if err := requireControlAudit(r.Context(), recorder, preflight); err != nil {
 		slog.ErrorContext(r.Context(), "control mutation blocked because audit is unavailable", slog.Any("error", err))
+		// Import mutations use the same slim recovery contract even when Engine
+		// blocks them before Registry can observe the operation.
+		if isImportControlRoute(r) {
+			writeImportControlError(w, http.StatusServiceUnavailable, "IMPORT_AUDIT_UNAVAILABLE", "import apply is unavailable because control audit could not be recorded", "authorization", "", "not_committed", "fused-cli import apply --help")
+			return false
+		}
 		http.Error(w, `{"error":"audit service unavailable"}`, http.StatusServiceUnavailable)
 		return false
 	}
 	return true
+}
+
+// importControlError is Engine's bounded pre-Registry projection of the same
+// recovery fields returned by Registry apply and status handlers.
+type importControlError struct {
+	Code        string `json:"code"`
+	Message     string `json:"message"`
+	Phase       string `json:"phase"`
+	OperationID string `json:"operation_id"`
+	CommitState string `json:"commit_state"`
+	Recovery    string `json:"recovery"`
+}
+
+// writeControlAuthorizationError preserves shared denial behavior outside the
+// import surface and emits the slim safe contract for import recovery routes.
+func writeControlAuthorizationError(w http.ResponseWriter, r *http.Request, err error) {
+	// Only import routes promise operation recovery metadata.
+	if !isImportControlRoute(r) {
+		accesscontrol.WriteAuthorizationError(w, err)
+		return
+	}
+	status, authorizationCode := accesscontrol.AuthorizationErrorStatusCode(err)
+	code, message := importAuthorizationFailure(authorizationCode)
+	operationID := importControlOperationID(r.URL.Path)
+	commitState := "not_committed"
+	// A denied status read says nothing about the referenced mutation's outcome.
+	if r.Method == http.MethodGet {
+		commitState = "unknown"
+	}
+	writeImportControlError(w, status, code, message, "authorization", operationID, commitState, "fused-cli whoami")
+}
+
+// isImportControlRoute limits route-specific envelopes to the two reviewed
+// import operations without weakening generic Engine authorization responses.
+func isImportControlRoute(r *http.Request) bool {
+	// Apply is exact while status carries one UUID path segment.
+	return r != nil && (r.URL.Path == "/integrations/import/apply" || strings.HasPrefix(r.URL.Path, "/integrations/import/operations/"))
+}
+
+// importAuthorizationFailure maps shared Engine denial codes to stable import
+// selectors while keeping permission details out of the response message.
+func importAuthorizationFailure(code string) (string, string) {
+	// Authentication has a distinct remediation from an authenticated denial.
+	if code == "authentication_required" {
+		return "IMPORT_AUTHENTICATION_REQUIRED", "authentication is required for this import operation"
+	}
+	// Policy configuration failures remain server-owned rather than caller denials.
+	if code == "authorization_policy_invalid" {
+		return "IMPORT_AUTHORIZATION_POLICY_INVALID", "import authorization policy is unavailable"
+	}
+	return "IMPORT_AUTHORIZATION_DENIED", "permission is required for this import operation"
+}
+
+// importControlOperationID returns only a canonical UUID from the status path
+// so untrusted route text cannot enter error output or recovery commands.
+func importControlOperationID(path string) string {
+	value := strings.TrimPrefix(path, "/integrations/import/operations/")
+	operationID, err := uuid.Parse(value)
+	// Apply paths and malformed status paths have no safe operation identity.
+	if err != nil {
+		return ""
+	}
+	return operationID.String()
+}
+
+// writeImportControlError emits only stable import recovery metadata and never
+// includes authorization internals, request bodies, credentials, or raw errors.
+func writeImportControlError(w http.ResponseWriter, status int, code, message, phase, operationID, commitState, recovery string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": importControlError{
+		Code: code, Message: message, Phase: phase, OperationID: operationID,
+		CommitState: commitState, Recovery: recovery,
+	}})
 }
 
 func recordAuthorizedControlPanic(r *http.Request, recorder accesscontrol.AuditRecorder, actor accesscontrol.Actor, requirements []accesscontrol.Requirement, policy string) {
