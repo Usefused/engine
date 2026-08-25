@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/Usefused/engine/internal/shared/canonicaljson"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -554,6 +555,100 @@ func (s *postgresStore) GetSDKPackageBuildRequest(ctx context.Context, accountID
 	request.IdempotencyKey = planID.String()
 	request.TargetType = AppKindSDK.String()
 	return &request, nil
+}
+
+// GetMCPUnifiedOperationDescriptors returns only complete logical operations
+// whose physical graph is discoverable under the session token. The complete
+// descriptor is still read for immutable-hash verification, while PostgreSQL
+// owns policy filtering so runtime code cannot accidentally broaden it.
+func (s *postgresStore) GetMCPUnifiedOperationDescriptors(ctx context.Context, appID uuid.UUID, unrestricted bool, allowedOperations []string) (*models.SDKUnifiedOperationDescriptors, error) {
+	var expectedHash string
+	var complete, visible []byte
+	err := s.db.QueryRow(ctx, `
+		WITH descriptor AS (
+			SELECT app.unified_codegen_descriptor_hash AS expected_hash, COALESCE(plan.resolved_payload->'unified_operations', 'null'::jsonb) AS complete
+			FROM fused_apps app
+			JOIN fused_app_families family ON family.app_family_id = app.app_family_id AND family.account_id = app.account_id
+			JOIN LATERAL (
+				SELECT applied.resolved_payload
+				FROM fused_config_plans applied
+				WHERE applied.config_key = app.config_key AND applied.source_hash = app.source_hash
+				  AND applied.config_type = 'mcp' AND applied.status = 'applied'
+				  AND NOT COALESCE((applied.resolved_payload->>'noop')::boolean, false)
+				ORDER BY applied.applied_at DESC, applied.created_at DESC
+				LIMIT 1
+			) plan ON true
+			WHERE app.app_id = $1 AND family.kind = 'mcp' AND app.status IN ('active', 'deprecated')
+		), projected AS (
+			SELECT expected_hash, complete,
+			       CASE WHEN complete = 'null'::jsonb THEN complete
+			       ELSE jsonb_build_object(
+			         'schema_version', complete->'schema_version',
+			         'operations', COALESCE((
+			           SELECT jsonb_agg(candidate.operation ORDER BY candidate.operation->>'name')
+			           FROM jsonb_array_elements(complete->'operations') candidate(operation)
+			           WHERE $2::boolean OR NOT EXISTS (
+			             SELECT 1
+			             FROM jsonb_array_elements(candidate.operation->'targets') target(value)
+			             WHERE NOT (target.value->>'operation_id' = ANY($3::text[]) AND (
+			                 target.value->'rollback' IS NULL
+			                 OR target.value->'rollback' = 'null'::jsonb
+			                 OR target.value->'rollback'->>'operation_id' = ANY($3::text[])
+			               ))
+			           )
+			         ), '[]'::jsonb)
+			       ) END AS visible
+			FROM descriptor
+		)
+		SELECT expected_hash, complete, visible FROM projected
+	`, appID, unrestricted, allowedOperations).Scan(&expectedHash, &complete, &visible)
+	// A missing runnable MCP version or exact applied plan cannot provide an
+	// authoritative catalogue and must not fall back to mutable state.
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrAppNotFound
+	}
+	// Database errors remain distinct from an absent descriptor so callers can
+	// fail the session rather than silently presenting a partial catalogue.
+	if err != nil {
+		return nil, fmt.Errorf("get MCP Unified descriptor: %w", err)
+	}
+	return decodeMCPUnifiedDescriptorProjection(complete, visible, expectedHash)
+}
+
+// decodeMCPUnifiedDescriptorProjection verifies the immutable complete value
+// before admitting the independently SQL-filtered public projection.
+func decodeMCPUnifiedDescriptorProjection(complete, visible []byte, expectedHash string) (*models.SDKUnifiedOperationDescriptors, error) {
+	// The canonical empty graph is represented by no public descriptor, not by
+	// a second synthetic descriptor shape.
+	if string(complete) == "null" {
+		if expectedHash != EmptyUnifiedSetHash {
+			return nil, errors.New("MCP Unified descriptor hash is inconsistent")
+		}
+		return nil, nil
+	}
+	digest, err := canonicaljson.HexSHA256(complete)
+	// App identity pins the complete descriptor, so a mismatch invalidates the
+	// entire discovery surface even if the filtered subset decoded cleanly.
+	if err != nil || "sha256:"+digest != expectedHash {
+		return nil, errors.New("MCP Unified descriptor hash is invalid")
+	}
+	var descriptors models.SDKUnifiedOperationDescriptors
+	// The filtered bytes retain the shared public descriptor contract; they do
+	// not become a separate MCP-specific schema.
+	if err := json.Unmarshal(visible, &descriptors); err != nil {
+		return nil, fmt.Errorf("decode MCP Unified descriptor: %w", err)
+	}
+	// Runtime discovery accepts only the compiler's current public descriptor
+	// schema so future semantics cannot be guessed by an older Engine.
+	if descriptors.SchemaVersion != models.SDKUnifiedDescriptorSchemaVersion {
+		return nil, errors.New("MCP Unified descriptor schema is unsupported")
+	}
+	// No fully authorized logical operation means there is no Unified catalogue
+	// section for this token, while physical discovery remains unaffected.
+	if len(descriptors.Operations) == 0 {
+		return nil, nil
+	}
+	return &descriptors, nil
 }
 
 // scanApp maps the stable query column order into one immutable app publication value.

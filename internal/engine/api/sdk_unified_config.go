@@ -65,30 +65,52 @@ func (b *sdkUnifiedBindingDoc) UnmarshalJSON(raw []byte) error {
 	return nil
 }
 
-// validateSDKUnifiedOperations rejects malformed sdk unified operations before it can cross the SDK Unified configuration boundary.
+// validateSDKUnifiedOperations preserves SDK package-language checks on top of the shared Unified authoring contract.
 func validateSDKUnifiedOperations(doc sdkConfigDocument) error {
+	return validateAppUnifiedOperations(doc, true)
+}
+
+// validateAppUnifiedOperations keeps one graph validator for SDK and MCP while gating only package-codegen constraints.
+func validateAppUnifiedOperations(doc sdkConfigDocument, requireCodegenNames bool) error {
+	// Absence is the canonical empty graph and needs no operation-level checks.
 	if len(doc.UnifiedOperations) == 0 {
 		return nil
 	}
-	if doc.Language != "typescript" && doc.Language != "python" {
-		return errors.New("Unified Operations require TypeScript or Python SDK generation")
-	}
+	// The shared bound protects both generated packages and Engine-hosted MCP state.
 	if len(doc.UnifiedOperations) > maxUnifiedOperations {
 		return fmt.Errorf("sdk config supports at most %d Unified Operations", maxUnifiedOperations)
 	}
 	names := sortedUnifiedOperationNames(doc.UnifiedOperations)
-	if err := validateUnifiedOperationNameCollisions(names); err != nil {
-		return err
-	}
-	if err := validateUnifiedGeneratedNames(names, doc.Language); err != nil {
+	// Package-only restrictions remain layered over the common graph contract.
+	if err := validateUnifiedCodegenContract(names, doc.Language, requireCodegenNames); err != nil {
 		return err
 	}
 	for _, name := range names {
+		// Each operation must be independently valid before whole-set hashing.
 		if err := validateSDKUnifiedOperation(name, doc.UnifiedOperations[name], doc.Services); err != nil {
 			return err
 		}
 	}
 	return validateUnifiedEncodedSize(doc.UnifiedOperations)
+}
+
+// validateUnifiedCodegenContract isolates package-only language and generated-symbol admission from the shared graph rules.
+func validateUnifiedCodegenContract(names []string, language string, required bool) error {
+	// Exact MCP logical names never become language symbols, so package-only
+	// restrictions must not narrow an otherwise valid Engine graph.
+	if !required {
+		return nil
+	}
+	// Generated Unified methods exist only in the two generators that implement
+	// the public descriptor contract.
+	if language != "typescript" && language != "python" {
+		return errors.New("Unified Operations require TypeScript or Python SDK generation")
+	}
+	// Prefix collisions must fail before the finer normalized-symbol checks.
+	if err := validateUnifiedOperationNameCollisions(names); err != nil {
+		return err
+	}
+	return validateUnifiedGeneratedNames(names, language)
 }
 
 // validateUnifiedGeneratedNames rejects malformed unified generated names before it can cross the SDK Unified configuration boundary.

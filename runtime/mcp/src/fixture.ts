@@ -178,8 +178,31 @@ export interface FixtureOperation {
   responses: Record<string, FixtureResponseContract>;
 }
 
+/** Mirrors the existing credential-free Unified descriptor stored in the applied plan. */
+export interface FixtureUnifiedOperation {
+  name: string;
+  description?: string;
+  input_schema: unknown;
+  output_schema?: unknown;
+  targets: FixtureUnifiedTarget[];
+}
+
+/** Carries the public graph metadata search_docs may safely project. */
+export interface FixtureUnifiedTarget {
+  public_target: string;
+  service_target?: string;
+  operation_id: string;
+  depends_on?: string[];
+  rollback?: { operation_id: string };
+  output_schema?: unknown;
+}
+
 interface FixtureFile {
   operations: FixtureOperation[];
+  unified_operations?: {
+    schema_version: number;
+    operations: FixtureUnifiedOperation[];
+  };
 }
 
 /**
@@ -192,16 +215,34 @@ interface FixtureFile {
  */
 export class Fixture {
   private readonly byOperationId = new Map<string, FixtureOperation>();
+  private readonly byUnifiedOperationId = new Map<string, FixtureUnifiedOperation>();
 
-  constructor(public readonly operations: FixtureOperation[]) {
+  constructor(
+    public readonly operations: FixtureOperation[],
+    public readonly unifiedOperations: FixtureUnifiedOperation[] = [],
+  ) {
     for (const op of operations) {
+      // Exact physical IDs remain mandatory because call() has no fallback key.
       if (!op.operation_id) {
         throw new Error("fixture operation missing operation_id");
       }
+      // Serialized fixture files retain their existing strict duplicate check.
       if (this.byOperationId.has(op.operation_id)) {
         throw new Error(`duplicate operation_id "${op.operation_id}" in fixture`);
       }
       this.byOperationId.set(op.operation_id, op);
+    }
+    for (const operation of unifiedOperations) {
+      // Empty logical names cannot become exact call identifiers.
+      if (!operation.name) {
+        throw new Error("Unified fixture operation missing name");
+      }
+      // Cross-kind or repeated logical names are ambiguous to call(operationId)
+      // and therefore fail before the MCP server exposes either operation.
+      if (this.byOperationId.has(operation.name) || this.byUnifiedOperationId.has(operation.name)) {
+        throw new Error(`physical and Unified operation name collision "${operation.name}"`);
+      }
+      this.byUnifiedOperationId.set(operation.name, operation);
     }
   }
 
@@ -215,6 +256,11 @@ export class Fixture {
   resolve(operationId: string): FixtureOperation | undefined {
     return this.byOperationId.get(operationId);
   }
+
+  /** Resolves one exact authored Unified name without inspecting private graph state. */
+  resolveUnified(operationId: string): FixtureUnifiedOperation | undefined {
+    return this.byUnifiedOperationId.get(operationId);
+  }
 }
 
 /**
@@ -224,8 +270,16 @@ export class Fixture {
 export function loadFixture(path: string): Fixture {
   const raw = readFileSync(path, "utf-8");
   const parsed = JSON.parse(raw) as FixtureFile;
+  // A physical array remains mandatory because existing physical-only fixtures
+  // and runtime enforcement share that stable top-level contract.
   if (!Array.isArray(parsed.operations)) {
     throw new Error("fixture.json missing an \"operations\" array");
   }
-  return new Fixture(parsed.operations);
+  const unified = parsed.unified_operations;
+  // Descriptor schema admission belongs at fixture load so search_docs never
+  // guesses how to project a future compiler contract.
+  if (unified !== undefined && (unified.schema_version !== 3 || !Array.isArray(unified.operations))) {
+    throw new Error("fixture.json has an unsupported Unified descriptor");
+  }
+  return new Fixture(parsed.operations, unified?.operations ?? []);
 }

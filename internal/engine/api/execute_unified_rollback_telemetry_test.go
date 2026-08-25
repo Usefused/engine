@@ -26,7 +26,7 @@ func (runtime *unifiedRollbackTelemetryRuntime) ExecuteResolvedPhysicalJSON(ctx 
 	runtime.executeCalls++
 	runtime.calls = append(runtime.calls, unifiedRuntimeCall{
 		params: request.Params, credentials: request.Credentials, environment: request.Environment,
-		idempotency: request.IdempotencyKey, requestHash: request.RequestBodyHash,
+		idempotency: request.IdempotencyKey, requestHash: request.RequestBodyHash, transport: request.Transport,
 	})
 	runtime.mu.Unlock()
 	return sandbox.PhysicalExecutionResult{}, errors.New("private dependent provider failure")
@@ -52,6 +52,7 @@ func TestExecuteUnifiedRollbackTelemetryUsesBoundedExactCounts(t *testing.T) {
 		t.Fatalf("physical work = resolve:%d bindings:%d execute:%d", baseRuntime.resolveCalls, len(baseRuntime.bindings), baseRuntime.executeCalls)
 	}
 	assertUnifiedWrapperTelemetry(t, exporter, map[string]string{
+		"execution.transport":    "sdk",
 		"unified.schema_version": "3", "unified.stage": "dispatch", "unified.outcome": "partial",
 		"unified.target_count": "2", "unified.success_count": "1", "unified.error_count": "1",
 		"unified.skipped_count": "0", "unified.rollback_count": "1",

@@ -2,11 +2,14 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/entitlement"
+	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
@@ -54,6 +57,123 @@ func TestValidateAppConfigDocument_MCPRejectsWebhookSelection(t *testing.T) {
 			t.Fatalf("expected no error for an operations-only MCP service, got %v", err)
 		}
 	})
+}
+
+// TestValidateAppConfigDocumentMCPUsesSharedUnifiedContract proves MCP admits
+// the SDK graph shape while avoiding package-only language namespace checks.
+func TestValidateAppConfigDocumentMCPUsesSharedUnifiedContract(t *testing.T) {
+	doc := decodeUnifiedDocument(t, `{"github":"createIssue"}`, ``, "typescript")
+	doc.Kind, doc.Language = store.AppKindMCP.String(), ""
+	// Exact MCP operation identities do not become nested generated members, so
+	// a prefix pair that remains invalid for SDK code generation is admissible.
+	doc.UnifiedOperations["issues"] = doc.UnifiedOperations["issues.create"]
+	// MCP keeps exact logical names, so SDK-only generated namespace collisions
+	// must not reject this otherwise valid graph.
+	if err := validateAppConfigDocument(doc, store.AppKindMCP.String()); err != nil {
+		t.Fatalf("MCP should use shared Unified graph validation: %v", err)
+	}
+}
+
+// TestResolveMCPEndpointIDsUsesOneSnapshotBatch verifies endpoint freezing has
+// constant query count as the number of explicit service selections grows.
+func TestResolveMCPEndpointIDsUsesOneSnapshotBatch(t *testing.T) {
+	firstService, secondService := uuid.New(), uuid.New()
+	firstVersion, secondVersion := uuid.New(), uuid.New()
+	s := &workspaceTestStore{}
+	selections := []models.SDKSelection{
+		{ServiceID: firstService, ServiceVersionID: firstVersion, OperationNames: []string{"getIssue", "createIssue"}},
+		{ServiceID: secondService, ServiceVersionID: secondVersion, OperationNames: []string{"notify"}},
+	}
+	resolved, err := resolveMCPEndpointIDs(t.Context(), s, selections)
+	// A resolver failure would hide whether the batch query shape was preserved.
+	if err != nil {
+		t.Fatalf("resolveMCPEndpointIDs() error = %v", err)
+	}
+	if len(s.contractEndpointBatches) != 1 {
+		t.Fatalf("snapshot query count = %d, want 1", len(s.contractEndpointBatches))
+	}
+	// Each exact operation receives one immutable endpoint ID from rows already
+	// intersected by the database-facing resolver.
+	if len(resolved[0].EndpointIDs) != 2 || len(resolved[1].EndpointIDs) != 1 {
+		t.Fatalf("resolved endpoint IDs = %#v", resolved)
+	}
+}
+
+// TestMCPConfigApplyPersistsCompiledUnifiedState exercises plan-to-apply
+// handoff and proves MCP uses the existing immutable runtime fields unchanged.
+func TestMCPConfigApplyPersistsCompiledUnifiedState(t *testing.T) {
+	accountID, serviceID, serviceVersionID := uuid.New(), uuid.New(), uuid.New()
+	actor := controlTestOwnerActor(accountID)
+	ctx := accesscontrol.ContextWithActor(t.Context(), actor)
+	s := &workspaceTestStore{
+		accountID: accountID,
+		workspaceServices: []store.WorkspaceService{{
+			ServiceID: serviceID, ServiceName: "okta", Version: "2026-07-01",
+		}},
+		workspaceServiceVersions: map[uuid.UUID][]store.WorkspaceServiceVersion{
+			serviceID: {{ServiceID: serviceID, ServiceVersionID: serviceVersionID, Version: "2026-07-01"}},
+		},
+	}
+	revision := sandbox.ServiceVersionRevision{
+		ServiceID: serviceID, Version: "2026-07-01", ServiceVersionID: serviceVersionID, Revision: 1,
+	}
+	registryClient := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
+		serviceID.String() + "|2026-07-01": revision,
+	}}
+	configStore := &mockConfigStore{}
+	doc := sdkConfigDocument{
+		APIVersion: "fused/v1", Kind: store.AppKindMCP.String(), Name: "security", Version: "1.0.0", Bucket: "default",
+		Services: map[string]sdkConfigServiceDoc{"okta": {Version: "2026-07-01", Operations: []string{"getUser"}}},
+		UnifiedOperations: map[string]sdkUnifiedOperationDoc{
+			"security.lookup": {
+				Input:    json.RawMessage(`{"type":"object"}`),
+				Bindings: map[string]sdkUnifiedBindingDoc{"okta": {Operation: "getUser"}},
+			},
+		},
+	}
+	planResult, err := createMCPConfigPlan(ctx, configStore, s, registryClient, sdkPlanCall{
+		apiKey: "fsk_test", accountID: accountID, actor: actor,
+		request: SDKConfigPlanRequest{ConfigKey: "mcp:security:1.0.0", SourceHash: "sha256:test"}, document: doc,
+	})
+	// Plan must succeed before apply can prove byte-identical persistence.
+	if err != nil {
+		t.Fatalf("createMCPConfigPlan() error = %v", err)
+	}
+	result, err := executeMCPConfigApply(ctx, configStore, s, registryClient, sdkApplyCall{
+		apiKey: "fsk_test", accountID: accountID, actor: actor,
+		planID: planResult.plan.ID, planRevision: planResult.plan.Revision, sourceHash: planResult.plan.SourceHash,
+	})
+	// Apply is the user-triggered mutation boundary whose persisted scope is under test.
+	if err != nil {
+		t.Fatalf("executeMCPConfigApply() error = %v", err)
+	}
+	// Reaching the shared atomic repository proves MCP did not fork persistence.
+	if result.RuntimeID == uuid.Nil || configStore.artifactApply == nil {
+		t.Fatalf("MCP apply did not reach shared app persistence: %#v", result)
+	}
+	var planned appResolvedPayload
+	// The stored payload is authoritative for both the public descriptor and private hashes.
+	if err := json.Unmarshal(planResult.plan.ResolvedPayload, &planned); err != nil {
+		t.Fatalf("decode plan payload: %v", err)
+	}
+	// MCP keeps the credential-free descriptor in the plan without a new persistence column.
+	if planned.UnifiedOperations == nil || len(planned.UnifiedOperations.Operations) != 1 {
+		t.Fatalf("credential-free Unified descriptor is absent from the applied plan: %#v", planned.UnifiedOperations)
+	}
+	// Planning performs two bounded set-based reads regardless of selected row
+	// count: one physical freeze and one shared Unified compile resolution.
+	if len(s.contractEndpointBatches) != 2 {
+		t.Fatalf("snapshot batch count = %d, want endpoint freeze plus shared compile", len(s.contractEndpointBatches))
+	}
+	scope := configStore.artifactApply.Scope
+	// Apply must copy the compiler-owned bytes and hashes exactly; recomputing
+	// or translating them here would create a second Unified contract.
+	if scope.UnifiedDefinitionSchemaVersion != planned.UnifiedDefinitionSchemaVersion ||
+		string(scope.UnifiedDefinitions) != string(planned.UnifiedDefinitions) ||
+		scope.UnifiedDefinitionHash != planned.UnifiedDefinitionHash ||
+		scope.UnifiedCodegenDescriptorHash != planned.UnifiedCodegenDescriptorHash {
+		t.Fatalf("persisted Unified scope differs from plan: %#v", scope)
+	}
 }
 
 func TestAppConfigVersionLengthBound(t *testing.T) {

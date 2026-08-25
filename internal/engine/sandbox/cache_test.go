@@ -38,6 +38,21 @@ type mockCacheDB struct {
 	contractIDCalls    int
 	contractListCalls  int
 	contractBatchCalls int
+	unifiedDescriptors *models.SDKUnifiedOperationDescriptors
+	unifiedErr         error
+	unifiedCalls       int
+}
+
+// GetMCPUnifiedOperationDescriptors supplies an already policy-filtered public
+// descriptor so session-fixture tests stay independent from PostgreSQL.
+func (m *mockCacheDB) GetMCPUnifiedOperationDescriptors(_ context.Context, _ uuid.UUID, _ bool, _ []string) (*models.SDKUnifiedOperationDescriptors, error) {
+	m.unifiedCalls++
+	// Test doubles preserve explicit store failures so callers prove they fail
+	// closed instead of silently omitting logical operations.
+	if m.unifiedErr != nil {
+		return nil, m.unifiedErr
+	}
+	return m.unifiedDescriptors, nil
 }
 
 func (m *mockCacheDB) GetSDKAccountID(ctx context.Context, appID uuid.UUID) (uuid.UUID, error) {

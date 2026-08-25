@@ -9,7 +9,6 @@ import (
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/engine/unified"
-	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
@@ -75,8 +74,12 @@ type preparedUnifiedOutput struct {
 // enters the established physical boundary, which remains the single owner of
 // authorization, retry, auditing, usage, and provider dispatch behavior.
 func (s *EngineGRPCServer) ExecuteUnified(ctx context.Context, request *enginev1.ExecuteUnifiedRequest) (response *enginev1.ExecuteUnifiedResponse, err error) {
+	transport := sandbox.ExecutionTransportFromContext(ctx)
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.unified.execute")
-	span.SetAttributes(attribute.Int("unified.target_count", boundedUnifiedTargetCount(request)))
+	span.SetAttributes(
+		attribute.String("execution.transport", transport),
+		attribute.Int("unified.target_count", boundedUnifiedTargetCount(request)),
+	)
 	stage := "authentication"
 	defer func() { finishUnifiedSpan(span, stage, response, err) }()
 
@@ -85,7 +88,7 @@ func (s *EngineGRPCServer) ExecuteUnified(ctx context.Context, request *enginev1
 		return nil, err
 	}
 	stage = "validation"
-	call, err := s.prepareUnifiedCall(ctx, scope, identity, request, models.EngineExecutionTransportSDK)
+	call, err := s.prepareUnifiedCall(ctx, scope, identity, request, transport)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +111,7 @@ func boundedUnifiedTargetCount(request *enginev1.ExecuteUnifiedRequest) int {
 
 // prepareUnifiedCall authenticates, validates, resolves, and preflights the complete logical call before scheduling.
 func (s *EngineGRPCServer) prepareUnifiedCall(ctx context.Context, scope *store.AppRuntime, identity auth.RuntimeIdentity, request *enginev1.ExecuteUnifiedRequest, transport string) (preparedUnifiedCall, error) {
-	validated, err := validateUnifiedRequest(scope, request)
+	validated, err := validateUnifiedRequest(scope, request, transport)
 	if err != nil {
 		return preparedUnifiedCall{}, err
 	}

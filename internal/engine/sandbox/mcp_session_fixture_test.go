@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine/store"
@@ -31,7 +32,7 @@ func TestBuildSessionFixture_MapsEndpointsAcrossSelections(t *testing.T) {
 		{ServiceID: svcA, ServiceVersionID: svcB, SelectAll: true},
 	}
 
-	fixture, err := buildSessionFixture(context.Background(), cache, selections, store.AppTokenPolicy{AllowAll: true})
+	fixture, err := buildSessionFixture(context.Background(), cache, uuid.NewString(), selections, store.AppTokenPolicy{AllowAll: true})
 	if err != nil {
 		t.Fatalf("buildSessionFixture() error = %v", err)
 	}
@@ -77,7 +78,7 @@ func TestBuildSessionFixture_PropagatesListEndpointsError(t *testing.T) {
 	selections := []models.SDKSelection{
 		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), SelectAll: true},
 	}
-	_, err := buildSessionFixture(context.Background(), cache, selections, store.AppTokenPolicy{AllowAll: true})
+	_, err := buildSessionFixture(context.Background(), cache, uuid.NewString(), selections, store.AppTokenPolicy{AllowAll: true})
 	if err == nil {
 		t.Fatal("buildSessionFixture() error = nil, want propagated error")
 	}
@@ -99,7 +100,7 @@ func TestBuildSessionFixture_StrictTokenFetchesOnlyAllowedOperations(t *testing.
 		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), EndpointIDs: []uuid.UUID{allowedList}},
 	}
 
-	fixture, err := buildSessionFixture(context.Background(), cache, selections, store.AppTokenPolicy{
+	fixture, err := buildSessionFixture(context.Background(), cache, uuid.NewString(), selections, store.AppTokenPolicy{
 		AllowedOperations: []string{"getUser", "listUsers", "deleteUser"},
 	})
 	if err != nil {
@@ -116,6 +117,30 @@ func TestBuildSessionFixture_StrictTokenFetchesOnlyAllowedOperations(t *testing.
 	}
 	if db.contractBatchCalls != 1 {
 		t.Fatalf("strict fixture snapshot queries = %d, want one batched query", db.contractBatchCalls)
+	}
+}
+
+// TestBuildSessionFixtureAttachesAppliedPlanDescriptor verifies the session
+// uses the store-owned public descriptor without changing physical lookup.
+func TestBuildSessionFixtureAttachesAppliedPlanDescriptor(t *testing.T) {
+	database := &mockCacheDB{
+		contractMetadata: &fusedobject.ServiceMetadata{ID: uuid.New(), Name: "Users"},
+		unifiedDescriptors: &models.SDKUnifiedOperationDescriptors{
+			SchemaVersion: models.SDKUnifiedDescriptorSchemaVersion,
+			Operations:    []models.SDKUnifiedOperationDescriptor{{Name: "users.sync", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+		},
+	}
+	fixture, err := buildSessionFixture(context.Background(), NewLocalObjectCache(database), uuid.NewString(), nil, store.AppTokenPolicy{AllowAll: true})
+	if err != nil {
+		t.Fatalf("buildSessionFixture() error = %v", err)
+	}
+	if fixture.UnifiedOperations == nil || len(fixture.UnifiedOperations.Operations) != 1 || fixture.UnifiedOperations.Operations[0].Name != "users.sync" {
+		t.Fatal("Unified descriptor was not attached under its exact authored name")
+	}
+	// One descriptor read per session keeps query count constant as the logical
+	// operation count grows and avoids a new process cache.
+	if database.unifiedCalls != 1 {
+		t.Fatalf("Unified descriptor calls = %d, want 1", database.unifiedCalls)
 	}
 }
 

@@ -231,7 +231,7 @@ func prepareSessionFixture(ctx context.Context, appIDHex string, policy store.Ap
 	if err != nil {
 		return nil, fmt.Errorf("load app scope: %w", err)
 	}
-	fixture, err := buildSessionFixture(ctx, globalObjectCache, selections, policy)
+	fixture, err := buildSessionFixture(ctx, globalObjectCache, appIDHex, selections, policy)
 	if err != nil {
 		return nil, fmt.Errorf("build fixture: %w", err)
 	}
@@ -239,18 +239,19 @@ func prepareSessionFixture(ctx context.Context, appIDHex string, policy store.Ap
 }
 
 // writeSessionFixture serializes fixture to sessionTmpDir/fixture.json in the
-// same {"operations": [...]} shape fixture.ts parses, so the
+// same operations plus optional public Unified descriptor shape fixture.ts
+// parses, so the
 // spawned Node process reads the exact catalog validated by the Go middleware.
 // sessionTmpDir already exists
 // (buildMCPCommand creates it) and is cleaned up by terminateMCPSession, so
 // this file needs no cleanup of its own.
 func writeSessionFixture(sessionTmpDir string, fixture *Fixture) (string, error) {
+	// A nil fixture cannot produce a scoped catalogue and must never serialize
+	// as JSON null for the child runtime to interpret permissively.
 	if fixture == nil {
 		return "", fmt.Errorf("no fixture available for this session")
 	}
-	data, err := json.Marshal(struct {
-		Operations []FixtureOperation `json:"operations"`
-	}{Operations: fixture.Operations})
+	data, err := json.Marshal(fixture)
 	if err != nil {
 		return "", fmt.Errorf("marshal session fixture: %w", err)
 	}

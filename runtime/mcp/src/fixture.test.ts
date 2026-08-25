@@ -39,6 +39,15 @@ describe("Fixture", () => {
         ]),
     ).toThrow(/duplicate operation_id/);
   });
+
+  it("rejects exact physical and Unified name collisions", () => {
+    expect(
+      () => new Fixture(
+        [{ operation_id: "sync", service_id: "s", name: "Sync", method: "POST", path: "/sync", responses: {} }],
+        [{ name: "sync", input_schema: {}, targets: [] }],
+      ),
+    ).toThrow(/collision/);
+  });
 });
 
 describe("loadFixture", () => {
@@ -64,5 +73,15 @@ describe("loadFixture", () => {
     writeFileSync(file, JSON.stringify({}));
 
     expect(() => loadFixture(file)).toThrow(/operations/);
+  });
+
+  it("loads the shared Unified descriptor without reshaping its schemas", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "fixture-test-"));
+    const file = path.join(dir, "fixture.json");
+    writeFileSync(file, JSON.stringify({
+      operations: [],
+      unified_operations: { schema_version: 3, operations: [{ name: "sync", input_schema: { type: "object" }, targets: [] }] },
+    }));
+    expect(loadFixture(file).resolveUnified("sync")?.input_schema).toEqual({ type: "object" });
   });
 });

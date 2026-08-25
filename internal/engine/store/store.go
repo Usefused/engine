@@ -154,6 +154,12 @@ type SDKPackageBuildStore interface {
 	GetSDKPackageBuildRequest(ctx context.Context, accountID, appID uuid.UUID) (*models.SDKGenerationRequest, error)
 }
 
+// MCPUnifiedDescriptorStore recovers the credential-free public descriptor
+// from the exact applied plan while keeping discovery authorization in SQL.
+type MCPUnifiedDescriptorStore interface {
+	GetMCPUnifiedOperationDescriptors(context.Context, uuid.UUID, bool, []string) (*models.SDKUnifiedOperationDescriptors, error)
+}
+
 // EngineInstallationStore is intentionally narrower than Store because the
 // stable installation identity is needed only during process bootstrap.
 type EngineInstallationStore interface {

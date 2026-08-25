@@ -823,12 +823,18 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 
 	secretResolver := sandbox.NewSecretResolver(deps.engineStore, deps.masterKey)
 
-	sandbox.InitSandbox(r, deps.natsClient, deps.cfg, deps.localObjectCache, deps.tokenValidator, secretResolver, deps.providerRateLimits, port)
+	// One server instance owns REST and MCP Unified adapters so both call the
+	// same preflight, scheduler, physical runtime, and token validator.
+	executionServer := api.NewEngineGRPCServer(
+		deps.engineStore, deps.registryClient, deps.masterKey, deps.configStore, deps.natsClient, deps.tokenValidator,
+	)
+	sandbox.InitSandbox(
+		r, deps.natsClient, deps.cfg, deps.localObjectCache, deps.tokenValidator, secretResolver,
+		deps.providerRateLimits, port, executionServer.ExecuteUnified,
+	)
 	// Runtime REST execution reuses the same process-wide sandbox cache and
 	// dispatcher initialized above; it never loops back through network gRPC.
-	api.MountAppExecutionRoute(r, api.NewEngineGRPCServer(
-		deps.engineStore, deps.registryClient, deps.masterKey, deps.configStore, deps.natsClient, deps.tokenValidator,
-	))
+	api.MountAppExecutionRoute(r, executionServer)
 	// SDK and MCP webhook delivery uses EngineGRPCServer.SubscribeWebhooks.
 	// Engine-native MCP GraphQL surface (list/deploy/kill/reactivate/delete +
 	// analytics) -- a distinct endpoint from POST /graphql, which is a pure
