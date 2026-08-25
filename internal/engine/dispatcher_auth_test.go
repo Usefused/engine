@@ -151,6 +151,7 @@ func TestApplySelectedAuthComposesHeaderQueryAndCookie(t *testing.T) {
 	}
 }
 
+// TestBasicPasswordModes proves omitted mode remains standard username-plus-password Basic auth.
 func TestBasicPasswordModes(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -160,6 +161,8 @@ func TestBasicPasswordModes(t *testing.T) {
 	}{
 		{name: "required", mode: authrouting.BasicPasswordRequired, credentials: map[string]any{"basic_username": "u", "basic_password": "p"}, want: true},
 		{name: "required missing", mode: authrouting.BasicPasswordRequired, credentials: map[string]any{"basic_username": "u"}},
+		{name: "omitted defaults required", credentials: map[string]any{"basic_username": "u", "basic_password": "p"}, want: true},
+		{name: "omitted rejects missing password", credentials: map[string]any{"basic_username": "u"}},
 		{name: "optional absent", mode: authrouting.BasicPasswordOptional, credentials: map[string]any{"basic_username": "u"}, want: true},
 		{name: "optional empty", mode: authrouting.BasicPasswordOptional, credentials: map[string]any{"basic_username": "u", "basic_password": ""}, want: true},
 		{name: "empty absent", mode: authrouting.BasicPasswordEmpty, credentials: map[string]any{"basic_username": "u"}, want: true},

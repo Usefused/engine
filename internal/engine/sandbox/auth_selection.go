@@ -189,10 +189,17 @@ func secretKeysNeeded(auth fusedobject.AuthConfig, credentials map[string]any) (
 	}
 }
 
+// basicSecretKeysNeeded applies the shared Basic default while preserving explicit optional and empty-password contracts.
 func basicSecretKeysNeeded(auth fusedobject.AuthConfig, credentials map[string]any) ([]string, []string, bool) {
 	name := authCredentialName(auth)
 	required := missingNonemptyKeys(credentials, name+"_username")
-	switch auth.BasicPasswordMode {
+	mode, valid := authrouting.EffectiveBasicPasswordMode(auth.BasicPasswordMode)
+	// A malformed explicit mode cannot authorize secret selection.
+	if !valid {
+		return nil, nil, false
+	}
+	// Omitted mode resolves to required so credential lookup and dispatch share one invariant.
+	switch mode {
 	case authrouting.BasicPasswordRequired:
 		return appendUnique(required, missingNonemptyKeys(credentials, name+"_password")...), nil, true
 	case authrouting.BasicPasswordOptional:

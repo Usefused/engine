@@ -369,10 +369,16 @@ func TestValidateAppBucketReadinessValidatesEveryStaticScheme(t *testing.T) {
 	}
 }
 
+// TestAppRequiredSecretFieldsHonorsBasicPasswordMode covers both explicit exceptions and the conventional omitted default.
 func TestAppRequiredSecretFieldsHonorsBasicPasswordMode(t *testing.T) {
 	required := appRequiredSecretFields(models.SDKRequiredAuth{AuthType: "basic", AuthName: "basicAuth", BasicPasswordMode: authrouting.BasicPasswordEmpty})
 	if len(required) != 1 || required[0].Name != "username" || required[0].SecretKey != "basicAuth_username" {
 		t.Fatalf("empty-password Basic fields = %#v", required)
+	}
+	omitted := appRequiredSecretFields(models.SDKRequiredAuth{AuthType: "basic", AuthName: "basicAuth"})
+	// Omitted mode must produce actionable username-and-password remediation rather than an internal sentinel.
+	if len(omitted) != 2 || omitted[0].Name != "username" || omitted[1].Name != "password" {
+		t.Fatalf("omitted Basic fields = %#v", omitted)
 	}
 }
 

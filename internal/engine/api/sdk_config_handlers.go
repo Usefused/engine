@@ -998,6 +998,8 @@ type sdkExecutionAuthContractFetcher interface {
 	FetchServiceVersionExecutionAuthContracts(context.Context, []sandbox.ServiceVersionExecutionAuthSelection, string) ([]sandbox.ServiceVersionExecutionAuthContract, error)
 }
 
+var errInvalidServiceAuthContract = errors.New("invalid service auth contract")
+
 type sdkAuthResolutionTelemetry struct {
 	anonymousOnly int
 	securedOnly   int
@@ -1048,13 +1050,30 @@ func resolveAppAuthPolicies(ctx context.Context, registryClient sandbox.Registry
 			recordSDKAuthResolution(ctx, telemetry, "invalid_selection")
 			return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
 		}
+		// Auth-policy failures retain whether the caller selection or provider contract caused the rejection.
 		if err := resolveSelectionAuthPolicy(&selections[index], contract, &telemetry); err != nil {
-			recordSDKAuthResolution(ctx, telemetry, "invalid_selection")
-			return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
+			httpErr, outcome := appAuthPolicyPlanError(err)
+			recordSDKAuthResolution(ctx, telemetry, outcome)
+			return httpErr
 		}
 	}
 	recordSDKAuthResolution(ctx, telemetry, "success")
 	return nil
+}
+
+// appAuthPolicyPlanError keeps malformed provider contracts distinct from caller-auth selection errors at the public plan boundary.
+func appAuthPolicyPlanError(err error) (workspaceConfigHTTPError, string) {
+	// Contract defects require provider correction and must never be presented as missing bucket credentials.
+	if errors.Is(err, errInvalidServiceAuthContract) {
+		return workspaceConfigHTTPError{
+			status:      http.StatusBadRequest,
+			code:        "invalid_service_auth_contract",
+			message:     "The selected service has an invalid authentication contract.",
+			category:    "validation",
+			remediation: "Correct or reimport the service contract before creating the plan.",
+		}, "invalid_contract"
+	}
+	return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, "invalid_selection"
 }
 
 func unavailableAuthTelemetry(selections []models.SDKSelection) sdkAuthResolutionTelemetry {
@@ -1131,8 +1150,9 @@ func resolveSelectionAuthPolicy(selection *models.SDKSelection, contract sandbox
 		return err
 	}
 	required, err := requiredSDKAuth(contract.AuthConfigs, alternatives)
+	// Only definition/requirement defects reach this branch, so classify them as provider-contract failures.
 	if err != nil {
-		return fmt.Errorf("service %s auth contract is invalid: %w", selection.ServiceID, err)
+		return fmt.Errorf("%w for service %s: %v", errInvalidServiceAuthContract, selection.ServiceID, err)
 	}
 	selection.RequiredAuth = required
 	telemetry.required += len(required)
@@ -1237,11 +1257,22 @@ func requiredSDKAuth(auths fusedobject.AuthConfigs, alternatives []authrouting.A
 	return sortedRequiredSDKAuth(required), nil
 }
 
+// sdkAuthDefinitions resolves named provider schemes and normalizes Basic defaults before requirements are persisted.
 func sdkAuthDefinitions(auths fusedobject.AuthConfigs) (map[string]fusedobject.AuthConfig, error) {
 	definitions := make(map[string]fusedobject.AuthConfig, len(auths))
 	for _, auth := range auths {
+		// Unique names are required because operation security requirements refer to schemes by exact name.
 		if auth.Name == "" || definitions[auth.Name].Name != "" {
 			return nil, errors.New("auth definitions require unique names")
+		}
+		// Basic contracts normalize omission once so persisted requirements expose the effective credential shape.
+		if sandbox.CanonicalFusedAuthType(auth) == "basic" {
+			mode, valid := authrouting.EffectiveBasicPasswordMode(auth.BasicPasswordMode)
+			// Unknown explicit modes indicate a malformed provider contract rather than a missing user credential.
+			if !valid {
+				return nil, fmt.Errorf("auth definition %q has invalid basic password mode", auth.Name)
+			}
+			auth.BasicPasswordMode = mode
 		}
 		definitions[auth.Name] = auth
 	}
@@ -2835,19 +2866,26 @@ func appConnectReadinessKey(serviceID uuid.UUID, authType, authName string) stri
 // decrypted values.
 func appRequiredSecretFields(required models.SDKRequiredAuth) []appMissingCredentialField {
 	name := strings.TrimSpace(required.AuthName)
+	// A missing scheme identity cannot map safely to an Engine-local secret key.
 	if name == "" {
 		return []appMissingCredentialField{{Name: "credential_name", SecretKey: "<credential-name>"}}
 	}
 	switch required.AuthType {
 	case "basic":
-		switch required.BasicPasswordMode {
+		mode, valid := authrouting.EffectiveBasicPasswordMode(required.BasicPasswordMode)
+		// Invalid explicit modes remain contract errors instead of being mistaken for password omission.
+		if !valid {
+			return []appMissingCredentialField{{Name: "invalid_basic_password_mode", SecretKey: "<invalid-basic-password-mode>"}}
+		}
+		// Omitted mode uses the standard username-and-password Basic credential shape.
+		switch mode {
 		case authrouting.BasicPasswordRequired:
 			return []appMissingCredentialField{{Name: "username", SecretKey: name + "_username"}, {Name: "password", SecretKey: name + "_password"}}
 		case authrouting.BasicPasswordOptional, authrouting.BasicPasswordEmpty:
 			return []appMissingCredentialField{{Name: "username", SecretKey: name + "_username"}}
-		default:
-			return []appMissingCredentialField{{Name: "invalid_basic_password_mode", SecretKey: "<invalid-basic-password-mode>"}}
 		}
+		// The shared normalizer makes this unreachable, but retaining a fail-closed return protects future mode additions.
+		return []appMissingCredentialField{{Name: "invalid_basic_password_mode", SecretKey: "<invalid-basic-password-mode>"}}
 	case "mtls":
 		return []appMissingCredentialField{{Name: "certificate", SecretKey: name + "_cert"}, {Name: "private_key", SecretKey: name + "_key"}}
 	case "api_key":

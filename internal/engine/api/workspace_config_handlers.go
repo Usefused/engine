@@ -3464,11 +3464,18 @@ func validateWorkspaceAuthResolvedMaterial(key string, definition fusedobject.Au
 	}
 }
 
+// validateWorkspaceBasicMaterial enforces the effective provider credential shape before any Basic secrets are encrypted.
 func validateWorkspaceBasicMaterial(key string, mode authrouting.BasicPasswordMode, auth *WorkspaceAuthConfig) error {
 	if err := validateWorkspaceAuthResolvedFields(key, "basic", auth.Username); err != nil {
 		return err
 	}
-	switch mode {
+	effective, valid := authrouting.EffectiveBasicPasswordMode(mode)
+	// Invalid explicit modes identify a malformed provider contract and cannot guide secret storage.
+	if !valid {
+		return fmt.Errorf("service %q auth basic password mode is invalid", key)
+	}
+	// Omitted mode follows standard Basic auth and therefore requires password material.
+	switch effective {
 	case authrouting.BasicPasswordRequired:
 		return validateWorkspaceAuthResolvedFields(key, "basic", auth.Password)
 	case authrouting.BasicPasswordOptional:
@@ -3478,9 +3485,8 @@ func validateWorkspaceBasicMaterial(key string, mode authrouting.BasicPasswordMo
 			return fmt.Errorf("service %q auth basic password must be empty", key)
 		}
 		return nil
-	default:
-		return fmt.Errorf("service %q auth basic password mode is invalid", key)
 	}
+	return nil
 }
 
 // validateWorkspaceAuthResolvedFields prevents empty bucket secrets, which are
@@ -3524,13 +3530,20 @@ type workspaceAuthSecretInput struct {
 // keys while keeping bucket storage service-scoped.
 func workspaceAuthSecretInputs(auth fusedobject.AuthConfig, cfg *WorkspaceAuthConfig) ([]workspaceAuthSecretInput, error) {
 	name := workspaceAuthCredentialName(auth)
+	// Secret rows require the exact provider scheme name used later by dispatch.
 	if name == "" {
 		return nil, errors.New("selected auth config has no credential name")
 	}
 	switch canonicalWorkspaceStaticAuthType(cfg.AuthType) {
 	case "basic":
 		inputs := []workspaceAuthSecretInput{{Name: name + "_username", Type: "basic", Value: cfg.Username}}
-		if auth.BasicPasswordMode == authrouting.BasicPasswordRequired || auth.BasicPasswordMode == authrouting.BasicPasswordOptional && cfg.Password != "" {
+		mode, valid := authrouting.EffectiveBasicPasswordMode(auth.BasicPasswordMode)
+		// Validation should have rejected malformed provider metadata before secret encryption.
+		if !valid {
+			return nil, errors.New("selected basic auth config has invalid password mode")
+		}
+		// Required and supplied optional passwords are persisted; explicit empty mode deliberately omits the row.
+		if mode == authrouting.BasicPasswordRequired || mode == authrouting.BasicPasswordOptional && cfg.Password != "" {
 			inputs = append(inputs, workspaceAuthSecretInput{Name: name + "_password", Type: "basic", Value: cfg.Password})
 		}
 		return inputs, nil

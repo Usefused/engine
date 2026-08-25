@@ -147,13 +147,21 @@ func selectOAuth2Flow(auth models.AuthConfig, credentials map[string]any) (model
 	return auth, nil
 }
 
+// basicAuthSatisfied applies the shared default before deciding whether one Basic credential pair can satisfy dispatch.
 func basicAuthSatisfied(auth models.AuthConfig, credentials map[string]any) bool {
 	username := credentialValue(credentials, auth.Name+"_username")
 	password, passwordSet := credentials[auth.Name+"_password"].(string)
+	// A username is always required regardless of the provider's explicit password exception.
 	if username == "" {
 		return false
 	}
-	switch auth.BasicPasswordMode {
+	mode, valid := authrouting.EffectiveBasicPasswordMode(auth.BasicPasswordMode)
+	// Invalid explicit modes must never select a credential set for provider dispatch.
+	if !valid {
+		return false
+	}
+	// The effective mode keeps omitted contracts on standard username-plus-password Basic auth.
+	switch mode {
 	case authrouting.BasicPasswordRequired:
 		return passwordSet && password != ""
 	case authrouting.BasicPasswordOptional:

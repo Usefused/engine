@@ -85,20 +85,23 @@ func validateAuthDefinitions(auths fusedobject.AuthConfigs) (map[string]string, 
 	return seen, nil
 }
 
+// validateBasicMode accepts conventional omission while rejecting password modes on incompatible or malformed schemes.
 func validateBasicMode(auth fusedobject.AuthConfig) error {
 	isBasic := authrouting.CanonicalType(auth.Type, auth.Scheme) == "basic"
+	// Password modes are meaningful only for HTTP Basic and would be ambiguous on another auth family.
 	if !isBasic && auth.BasicPasswordMode != "" {
 		return errors.New("basic password mode is invalid for auth scheme")
 	}
+	// Non-Basic schemes have no password-mode requirement to normalize.
 	if !isBasic {
 		return nil
 	}
-	switch auth.BasicPasswordMode {
-	case authrouting.BasicPasswordRequired, authrouting.BasicPasswordOptional, authrouting.BasicPasswordEmpty:
+	_, valid := authrouting.EffectiveBasicPasswordMode(auth.BasicPasswordMode)
+	// Basic defaults omission to required, while explicit unknown values remain invalid contracts.
+	if valid {
 		return nil
-	default:
-		return errors.New("basic password mode is missing or invalid")
 	}
+	return errors.New("basic password mode is invalid")
 }
 
 func validateSecurityRequirements(requirements authrouting.Requirements, definitions map[string]string) error {

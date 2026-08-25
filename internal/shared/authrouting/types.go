@@ -10,6 +10,21 @@ const (
 	BasicPasswordEmpty    BasicPasswordMode = "empty"
 )
 
+// EffectiveBasicPasswordMode preserves conventional Basic auth when a provider contract omits Fused's password-mode extension.
+func EffectiveBasicPasswordMode(mode BasicPasswordMode) (BasicPasswordMode, bool) {
+	// OpenAPI Basic auth normally carries username and password, so omission must not silently weaken the credential pair.
+	if mode == "" {
+		return BasicPasswordRequired, true
+	}
+	// Explicit modes retain provider-reviewed exceptions while unknown values still fail closed.
+	switch mode {
+	case BasicPasswordRequired, BasicPasswordOptional, BasicPasswordEmpty:
+		return mode, true
+	default:
+		return "", false
+	}
+}
+
 // Requirements preserves OpenAPI's ordered OR-of-AND transport contract.
 // Outer order is provider preference; every scheme inside one alternative is required.
 type Requirements []Alternative

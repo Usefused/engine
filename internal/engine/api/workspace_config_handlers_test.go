@@ -27,7 +27,6 @@ import (
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/engine/workspaceplan"
-	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
@@ -1931,6 +1930,7 @@ func TestLoadWorkspacePlanForApplyRejectsRevisionDifferentFromAuthorizationSnaps
 	}
 }
 
+// TestWorkspaceConfigApplyHandler_UpsertsBasicAuthSecretsFromRuntimeConfig proves omitted Basic mode stores the password by default.
 func TestWorkspaceConfigApplyHandler_UpsertsBasicAuthSecretsFromRuntimeConfig(t *testing.T) {
 	svcID := uuid.New()
 	bucketID := uuid.New()
@@ -1948,10 +1948,9 @@ func TestWorkspaceConfigApplyHandler_UpsertsBasicAuthSecretsFromRuntimeConfig(t 
 		serviceMetadata: &fusedobject.ServiceMetadata{
 			ID: svcID,
 			AuthConfigs: fusedobject.AuthConfigs{{
-				Name:              "basicAuth",
-				Type:              "http",
-				Scheme:            "basic",
-				BasicPasswordMode: authrouting.BasicPasswordRequired,
+				Name:   "basicAuth",
+				Type:   "http",
+				Scheme: "basic",
 			}},
 		},
 	}

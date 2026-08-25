@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -39,6 +40,22 @@ func TestResolveSelectionAuthPolicyPinsProviderScheme(t *testing.T) {
 	}
 	if len(selection.RequiredAuth) != 1 || selection.RequiredAuth[0].AuthName != "oauthAuth" {
 		t.Fatalf("required auth was not persisted: %#v", selection.RequiredAuth)
+	}
+}
+
+// TestResolveSelectionAuthPolicyDefaultsOmittedBasicPasswordMode proves planned requirements persist the effective standard shape.
+func TestResolveSelectionAuthPolicyDefaultsOmittedBasicPasswordMode(t *testing.T) {
+	selection := models.SDKSelection{ServiceID: uuid.New()}
+	contract := executionAuthContract(selection.ServiceID,
+		fusedobject.AuthConfigs{{Name: "basicAuth", Type: "http", Scheme: "basic"}},
+		securedOperation("listItems", "basicAuth"),
+	)
+	if err := resolveSelectionAuthPolicy(&selection, contract, &sdkAuthResolutionTelemetry{}); err != nil {
+		t.Fatalf("resolveSelectionAuthPolicy() error = %v", err)
+	}
+	// The applied selection must be self-describing even though the provider contract omitted the Fused extension.
+	if len(selection.RequiredAuth) != 1 || selection.RequiredAuth[0].BasicPasswordMode != authrouting.BasicPasswordRequired {
+		t.Fatalf("required auth did not normalize omitted Basic mode: %#v", selection.RequiredAuth)
 	}
 }
 
@@ -192,6 +209,35 @@ func TestResolveAppAuthPoliciesRejectsMissingOperation(t *testing.T) {
 	}
 }
 
+// TestResolveAppAuthPoliciesClassifiesInvalidProviderContract keeps malformed auth metadata out of credential remediation.
+func TestResolveAppAuthPoliciesClassifiesInvalidProviderContract(t *testing.T) {
+	serviceID, versionID := uuid.New(), uuid.New()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	ctx, span := provider.Tracer("test").Start(context.Background(), "engine.sdk_config.plan")
+	registry := &sdkAuthContractRegistry{contracts: []sandbox.ServiceVersionExecutionAuthContract{executionAuthContract(serviceID,
+		fusedobject.AuthConfigs{{Name: "basicAuth", Type: "http", Scheme: "basic", BasicPasswordMode: "unknown"}},
+		securedOperation("listItems", "basicAuth"),
+	)}}
+	selections := []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: versionID, OperationNames: []string{"listItems"}}}
+	err := resolveAppAuthPolicies(ctx, registry, "key", []sdkResolvedService{{ServiceID: serviceID, ServiceVersionID: versionID, Version: "v1"}}, selections)
+	span.End()
+	var httpErr workspaceConfigHTTPError
+	// Planning must preserve the typed error so HTTP and CLI callers receive the stable classification.
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("invalid provider contract did not return a structured plan error: %v", err)
+	}
+	// The stable public response remains actionable without exposing internal scheme metadata.
+	if httpErr.code != "invalid_service_auth_contract" || httpErr.category != "validation" || httpErr.remediation == "" || strings.Contains(httpErr.message, "basicAuth") {
+		t.Fatalf("invalid provider contract response = %#v", httpErr)
+	}
+	attributes := endedSDKAuthAttributes(t, recorder)
+	// OTEL records only the bounded failure class, never the provider scheme or service identity.
+	if attributes["sdk.auth.decision_outcome"] != "invalid_contract" {
+		t.Fatalf("invalid provider contract telemetry = %#v", attributes)
+	}
+}
+
 func TestRecordSDKAuthResolutionUsesSafeAggregateAttributes(t *testing.T) {
 	recorder := tracetest.NewSpanRecorder()
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
@@ -199,14 +245,7 @@ func TestRecordSDKAuthResolutionUsesSafeAggregateAttributes(t *testing.T) {
 	recordSDKAuthResolution(ctx, sdkAuthResolutionTelemetry{anonymousOnly: 1, securedOnly: 2, explicit: 1, none: 1, required: 3, multiScheme: 1}, "success")
 	span.End()
 
-	spans := recorder.Ended()
-	if len(spans) != 1 {
-		t.Fatalf("expected one plan span, got %d", len(spans))
-	}
-	attributes := map[string]string{}
-	for _, item := range spans[0].Attributes() {
-		attributes[string(item.Key)] = item.Value.Emit()
-	}
+	attributes := endedSDKAuthAttributes(t, recorder)
 	if attributes["sdk.auth.anonymous_only_count"] != "1" || attributes["sdk.auth.secured_only_count"] != "2" || attributes["sdk.auth.required_scheme_count"] != "3" || attributes["sdk.auth.multi_scheme_selection_count"] != "1" || attributes["sdk.auth.decision_source"] != "explicit" || attributes["sdk.auth.decision_outcome"] != "success" {
 		t.Fatalf("unexpected SDK auth telemetry: %#v", attributes)
 	}
@@ -215,6 +254,21 @@ func TestRecordSDKAuthResolutionUsesSafeAggregateAttributes(t *testing.T) {
 			t.Fatalf("unsafe auth attribute key %q", key)
 		}
 	}
+}
+
+// endedSDKAuthAttributes projects one completed test span into a map so telemetry assertions stay focused and secret-safe.
+func endedSDKAuthAttributes(t *testing.T, recorder *tracetest.SpanRecorder) map[string]string {
+	t.Helper()
+	spans := recorder.Ended()
+	// Each focused auth decision test owns exactly one plan span.
+	if len(spans) != 1 {
+		t.Fatalf("expected one plan span, got %d", len(spans))
+	}
+	attributes := map[string]string{}
+	for _, item := range spans[0].Attributes() {
+		attributes[string(item.Key)] = item.Value.Emit()
+	}
+	return attributes
 }
 
 type sdkAuthContractRegistry struct {

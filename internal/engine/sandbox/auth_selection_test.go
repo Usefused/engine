@@ -101,6 +101,30 @@ func TestOrderedStaticSecretAlternativesKeepsEveryAPIKeyInANDSet(t *testing.T) {
 	}
 }
 
+// TestBasicSecretKeysNeededDefaultsOmittedModeToRequired keeps bucket lookup aligned with standard Basic dispatch.
+func TestBasicSecretKeysNeededDefaultsOmittedModeToRequired(t *testing.T) {
+	auth := fusedobject.AuthConfig{Name: "basicAuth", Type: "http", Scheme: "basic"}
+	required, optional, valid := basicSecretKeysNeeded(auth, map[string]any{"basicAuth_username": "alice"})
+	// Omitted mode must request the password instead of accepting a username-only credential set.
+	if !valid || len(optional) != 0 || len(required) != 1 || required[0] != "basicAuth_password" {
+		t.Fatalf("omitted Basic requirements = required %#v optional %#v valid %v", required, optional, valid)
+	}
+}
+
+// TestValidateBasicModeAcceptsOnlyOmissionOrReviewedModes keeps compatibility narrow at snapshot admission.
+func TestValidateBasicModeAcceptsOnlyOmissionOrReviewedModes(t *testing.T) {
+	omitted := fusedobject.AuthConfig{Name: "basicAuth", Type: "http", Scheme: "basic"}
+	if err := validateBasicMode(omitted); err != nil {
+		t.Fatalf("omitted Basic mode was rejected: %v", err)
+	}
+	invalid := omitted
+	invalid.BasicPasswordMode = "unknown"
+	// An explicit unknown value is different from omission and must remain invalid.
+	if err := validateBasicMode(invalid); err == nil {
+		t.Fatal("unknown Basic mode was accepted")
+	}
+}
+
 func TestConnectedAuthResolutionRequiredKeepsAnonymousCallsAnonymous(t *testing.T) {
 	anonymous := authrouting.Requirements{{Schemes: []authrouting.Requirement{}}}
 	if connectedAuthResolutionRequired("customer-42", map[string]any{}, anonymous) {
