@@ -503,84 +503,6 @@ const (
 	VersionStatusDeprecated = "deprecated"
 )
 
-// ImportPlan is the server-side record backing a non-interactive CLI
-// `import plan` -> `import apply` call. Mirrors the shape of Engine's
-// ConfigPlan (compute now, persist, read back once at apply, mark applied)
-// but scoped to a Registry service import rather than workspace/SDK config
-// -- Registry has no workspace concept to key a plan against, so this lives
-// in the Registry's own store instead of reusing Engine's ConfigRepository.
-// SourceContent carries the raw spec bytes forward so apply can replay the
-// exact same parse without re-fetching a URL that might have changed since
-// plan ran; SourceHash is apply's guard against the underlying spec content
-// changing between the two calls (the same role the existing
-// sdk-config/workspace-config plan's source_hash already plays).
-type ImportPlan struct {
-	ID     uuid.UUID `json:"id"`
-	Status string    `json:"status"`
-	// AccountID scopes an apply lookup to the account that created the
-	// plan -- a plan_id is never valid for any other account.
-	AccountID uuid.UUID `json:"account_id"`
-	// ServiceID is nil for a plan that would create a brand-new service --
-	// there's nothing to point at until apply actually creates it.
-	ServiceID     *uuid.UUID `json:"service_id,omitempty"`
-	Slug          string     `json:"slug,omitempty"`
-	Name          string     `json:"name"`
-	IsNewService  bool       `json:"is_new_service"`
-	SourceContent string     `json:"-"`
-	SourceURL     string     `json:"source_url,omitempty"`
-	SourceHash    string     `json:"source_hash"`
-	TargetType    string     `json:"target_type,omitempty"`
-	Category      string     `json:"category,omitempty"`
-	IsPublic      bool       `json:"is_public"`
-	// TargetVersion is the exact provider-declared version reviewed by the
-	// user. Keeping it on the plan prevents apply from inventing or
-	// re-resolving an identity after approval.
-	TargetVersion string          `json:"target_version"`
-	Action        ImportAction    `json:"action"`
-	ContractDiff  json.RawMessage `json:"contract_diff,omitempty"`
-	CreatedAt     time.Time       `json:"created_at"`
-}
-
-// SpecificationImport is the complete, already-parsed contract handed to
-// the repository's atomic apply boundary. Parsing and embeddings stay out of
-// persistence; every database mutation stays inside one transaction.
-type SpecificationImport struct {
-	PlanID        uuid.UUID
-	AccountID     uuid.UUID
-	ServiceID     uuid.UUID
-	Name          string
-	Slug          string
-	TargetVersion string
-	Action        ImportAction
-	SourceURL     string
-	SourceContent string
-	SourceHash    string
-	TargetType    string
-	Category      string
-	IsPublic      bool
-	ContractDiff  json.RawMessage
-	Version       ServiceVersion
-	Integrations  []IntegrationObject
-	Webhooks      []WebhookObject
-	Components    []Component
-}
-
-type ServiceVersionRevision struct {
-	ServiceID        uuid.UUID `json:"service_id"`
-	Version          string    `json:"version"`
-	ServiceVersionID uuid.UUID `json:"service_version_id"`
-	Revision         int       `json:"revision"`
-	SourceHash       string    `json:"source_hash"`
-	IsPublic         bool      `json:"is_public"`
-}
-
-type ServiceVersionAuthConfigs struct {
-	ServiceID        uuid.UUID   `json:"service_id"`
-	Version          string      `json:"version"`
-	ServiceVersionID uuid.UUID   `json:"service_version_id"`
-	AuthConfigs      AuthConfigs `json:"auth_configs"`
-}
-
 // ServiceVersionConnectionContract is the bounded Registry response used to
 // validate local workspace profiles against exact pinned service versions.
 type ServiceVersionConnectionContract struct {
@@ -601,20 +523,6 @@ type ServiceVersionResolvedRef struct {
 	Version          string    `json:"version"`
 	ServiceVersionID uuid.UUID `json:"service_version_id"`
 }
-
-type ImportAction string
-
-const (
-	ImportActionCreateService ImportAction = "create_service"
-	ImportActionUpdateVersion ImportAction = "update_version"
-	ImportActionCreateVersion ImportAction = "create_version"
-)
-
-// ImportPlan.Status values.
-const (
-	ImportPlanStatusPending = "pending"
-	ImportPlanStatusApplied = "applied"
-)
 
 // WorkspaceUsageRef is the minimal identity of a workspace pinned to a
 // service version being touched by a ModifyExisting import -- just enough

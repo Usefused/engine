@@ -369,8 +369,54 @@ func TestImportStatusRecoveryUsesImportGrantAndSlimDenialContract(t *testing.T) 
 	if err := json.Unmarshal(denied.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("decode import denial: %v", err)
 	}
-	if denied.Code != http.StatusForbidden || envelope.Error.Code != "IMPORT_AUTHORIZATION_DENIED" || envelope.Error.OperationID != operationID.String() || envelope.Error.CommitState != "unknown" || envelope.Error.Recovery != "fused-cli whoami" {
+	if denied.Code != http.StatusForbidden || envelope.Error.Code != "IMPORT_AUTHORIZATION_DENIED" || envelope.Error.OperationID != operationID.String() || envelope.Error.CommitState != "unknown" || envelope.Error.Recovery != "fused-cli team access workspace set --help" {
 		t.Fatalf("import denial = status %d, envelope %#v", denied.Code, envelope.Error)
+	}
+}
+
+// TestImportControlRouteMatchingIsExact prevents wrong methods and descendant
+// paths from inheriting the reviewed apply/status recovery contract.
+func TestImportControlRouteMatchingIsExact(t *testing.T) {
+	operationID := uuid.NewString()
+	tests := []struct {
+		name, method, path string
+		want               bool
+	}{
+		{name: "apply", method: http.MethodPost, path: importApplyControlPath, want: true},
+		{name: "status", method: http.MethodGet, path: importStatusControlPrefix + operationID, want: true},
+		{name: "wrong apply method", method: http.MethodGet, path: importApplyControlPath},
+		{name: "wrong status method", method: http.MethodPost, path: importStatusControlPrefix + operationID},
+		{name: "status descendant", method: http.MethodGet, path: importStatusControlPrefix + operationID + "/detail"},
+		{name: "empty status", method: http.MethodGet, path: importStatusControlPrefix},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, test.path, nil)
+			// Only the two declared route shapes may opt into the specialized envelope.
+			if got := isImportControlRoute(request); got != test.want {
+				t.Fatalf("isImportControlRoute(%s %s) = %v, want %v", test.method, test.path, got, test.want)
+			}
+		})
+	}
+}
+
+// TestImportApplyAuthenticationRecoveryUsesLogin pins an executable recovery
+// command for callers that have no current Engine identity.
+func TestImportApplyAuthenticationRecoveryUsesLogin(t *testing.T) {
+	handler := controlAuthorizationMiddleware(accesscontrol.SnapshotAuthorizer{})(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("unauthenticated import apply must not execute")
+	}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, importApplyControlPath, nil))
+	var envelope struct {
+		Error importControlError `json:"error"`
+	}
+	// Authentication recovery should advance the caller instead of only inspecting identity.
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode import authentication error: %v", err)
+	}
+	if response.Code != http.StatusUnauthorized || envelope.Error.Code != "IMPORT_AUTHENTICATION_REQUIRED" || envelope.Error.Recovery != "fused-cli login" {
+		t.Fatalf("import authentication response = status %d, envelope %#v", response.Code, envelope.Error)
 	}
 }
 

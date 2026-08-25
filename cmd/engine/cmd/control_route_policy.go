@@ -39,6 +39,8 @@ const (
 	dynamicAppAccess          dynamicRequirementKind = "app_access"
 	dynamicAppTokenAccess     dynamicRequirementKind = "app_token_access"
 	workspaceAppTokensPath                           = "/workspace/app-tokens"
+	importApplyControlPath                           = "/integrations/import/apply"
+	importStatusControlPrefix                        = "/integrations/import/operations/"
 )
 
 type controlRequirementResolver interface {
@@ -177,12 +179,12 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodPost, "/integrations/import/plan", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionCatalogueImport),
 	}},
-	{http.MethodPost, "/integrations/import/apply", false, []routeRequirement{
+	{http.MethodPost, importApplyControlPath, false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionCatalogueImport),
 	}},
 	// Status uses the same import grant so every actor allowed to mutate can
 	// recover its outcome without exposing plan metadata to read-only roles.
-	{http.MethodGet, "/integrations/import/operations/{operation_id}", false, []routeRequirement{
+	{http.MethodGet, importStatusControlPrefix + "{operation_id}", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionCatalogueImport),
 	}},
 	{http.MethodPost, "/integrations/start", false, []routeRequirement{
@@ -409,41 +411,52 @@ func writeControlAuthorizationError(w http.ResponseWriter, r *http.Request, err 
 		return
 	}
 	status, authorizationCode := accesscontrol.AuthorizationErrorStatusCode(err)
-	code, message := importAuthorizationFailure(authorizationCode)
+	code, message, recovery := importAuthorizationFailure(authorizationCode)
 	operationID := importControlOperationID(r.URL.Path)
 	commitState := "not_committed"
 	// A denied status read says nothing about the referenced mutation's outcome.
 	if r.Method == http.MethodGet {
 		commitState = "unknown"
 	}
-	writeImportControlError(w, status, code, message, "authorization", operationID, commitState, "fused-cli whoami")
+	writeImportControlError(w, status, code, message, "authorization", operationID, commitState, recovery)
 }
 
 // isImportControlRoute limits route-specific envelopes to the two reviewed
 // import operations without weakening generic Engine authorization responses.
 func isImportControlRoute(r *http.Request) bool {
-	// Apply is exact while status carries one UUID path segment.
-	return r != nil && (r.URL.Path == "/integrations/import/apply" || strings.HasPrefix(r.URL.Path, "/integrations/import/operations/"))
+	// Nil requests cannot match either reviewed control operation.
+	if r == nil {
+		return false
+	}
+	// Apply is an exact mutation route; wrong methods retain generic fail-closed errors.
+	if r.Method == http.MethodPost && r.URL.Path == importApplyControlPath {
+		return true
+	}
+	// Status admits exactly one path segment so unrelated subtrees never inherit its contract.
+	operationID := strings.TrimPrefix(r.URL.Path, importStatusControlPrefix)
+	return r.Method == http.MethodGet && operationID != r.URL.Path && operationID != "" && !strings.Contains(operationID, "/")
 }
 
 // importAuthorizationFailure maps shared Engine denial codes to stable import
 // selectors while keeping permission details out of the response message.
-func importAuthorizationFailure(code string) (string, string) {
+func importAuthorizationFailure(code string) (string, string, string) {
 	// Authentication has a distinct remediation from an authenticated denial.
 	if code == "authentication_required" {
-		return "IMPORT_AUTHENTICATION_REQUIRED", "authentication is required for this import operation"
+		return "IMPORT_AUTHENTICATION_REQUIRED", "authentication is required for this import operation", "fused-cli login"
 	}
 	// Policy configuration failures remain server-owned rather than caller denials.
 	if code == "authorization_policy_invalid" {
-		return "IMPORT_AUTHORIZATION_POLICY_INVALID", "import authorization policy is unavailable"
+		return "IMPORT_AUTHORIZATION_POLICY_INVALID", "import authorization policy is unavailable", "fused-cli import apply --help"
 	}
-	return "IMPORT_AUTHORIZATION_DENIED", "permission is required for this import operation"
+	// Permission cannot be self-granted; the workspace access command gives an
+	// authorized owner the exact bounded path for assigning an importer role.
+	return "IMPORT_AUTHORIZATION_DENIED", "permission is required for this import operation", "fused-cli team access workspace set --help"
 }
 
 // importControlOperationID returns only a canonical UUID from the status path
 // so untrusted route text cannot enter error output or recovery commands.
 func importControlOperationID(path string) string {
-	value := strings.TrimPrefix(path, "/integrations/import/operations/")
+	value := strings.TrimPrefix(path, importStatusControlPrefix)
 	operationID, err := uuid.Parse(value)
 	// Apply paths and malformed status paths have no safe operation identity.
 	if err != nil {
