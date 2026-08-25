@@ -49,11 +49,19 @@ func AuthorizeAll(ctx context.Context, authorizer Authorizer, requirements ...Re
 	return authorizer.CheckAll(ctx, actor, requirements...)
 }
 
+// WriteAuthorizationError emits the shared bounded authorization response.
 func WriteAuthorizationError(w http.ResponseWriter, err error) {
 	status, response := authorizationErrorResponse(err)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+// AuthorizationErrorStatusCode exposes the existing stable classification so
+// route-specific safe envelopes can reuse it without duplicating RBAC policy.
+func AuthorizationErrorStatusCode(err error) (int, string) {
+	status, response := authorizationErrorResponse(err)
+	return status, response.Error
 }
 
 func authorizationErrorResponse(err error) (int, denialResponse) {

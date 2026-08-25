@@ -304,6 +304,7 @@ func TestControlAuthorizationRejectsMalformedScopedResource(t *testing.T) {
 	assertControlDenial(t, response, http.StatusForbidden, "permission_denied", 0)
 }
 
+// TestControlEndpointRoleMatrix pins representative role boundaries for control-plane routes.
 func TestControlEndpointRoleMatrix(t *testing.T) {
 	workspaceID := uuid.New()
 	tests := []struct {
@@ -316,6 +317,9 @@ func TestControlEndpointRoleMatrix(t *testing.T) {
 		{http.MethodPut, "/account", map[string]bool{accesscontrol.RoleOwner: true}},
 		{http.MethodPost, "/workspace/buckets", map[string]bool{accesscontrol.RoleOwner: true, accesscontrol.RoleAdmin: true}},
 		{http.MethodPost, "/integrations/preview_openapi", map[string]bool{accesscontrol.RoleOwner: true, accesscontrol.RoleAdmin: true}},
+		// Recovery must require the same mutation grant so every importer can inspect
+		// its outcome without widening plan metadata to read-only catalogue roles.
+		{http.MethodGet, "/integrations/import/operations/" + uuid.NewString(), map[string]bool{accesscontrol.RoleOwner: true, accesscontrol.RoleAdmin: true}},
 		{http.MethodGet, "/credits/pricing", map[string]bool{accesscontrol.RoleOwner: true, accesscontrol.RoleAdmin: true, accesscontrol.RoleBuilder: true, accesscontrol.RoleViewer: true}},
 	}
 	roles := []string{accesscontrol.RoleOwner, accesscontrol.RoleAdmin, accesscontrol.RoleBuilder, accesscontrol.RoleViewer}
@@ -334,6 +338,39 @@ func TestControlEndpointRoleMatrix(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestImportStatusRecoveryUsesImportGrantAndSlimDenialContract proves the
+// original mutation grant can recover status while read-only actors get safe fields.
+func TestImportStatusRecoveryUsesImportGrantAndSlimDenialContract(t *testing.T) {
+	workspaceID, operationID := uuid.New(), uuid.New()
+	path := "/integrations/import/operations/" + operationID.String()
+	handler := controlAuthorizationMiddleware(accesscontrol.SnapshotAuthorizer{})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	importer := actorWithGrants(t, workspaceID, accesscontrol.Grant{
+		Permission: accesscontrol.PermissionCatalogueImport,
+		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID},
+	})
+	allowed := httptest.NewRecorder()
+	handler.ServeHTTP(allowed, requestWithActor(t, http.MethodGet, path, importer))
+	// Import-only custom grants must retain the exact recovery path.
+	if allowed.Code != http.StatusNoContent {
+		t.Fatalf("import status grant = %d: %s", allowed.Code, allowed.Body.String())
+	}
+	viewer := workspaceRoleActor(t, workspaceID, accesscontrol.RoleViewer)
+	denied := httptest.NewRecorder()
+	handler.ServeHTTP(denied, requestWithActor(t, http.MethodGet, path, viewer))
+	var envelope struct {
+		Error importControlError `json:"error"`
+	}
+	// Denials before Registry must still carry the slim import recovery contract.
+	if err := json.Unmarshal(denied.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode import denial: %v", err)
+	}
+	if denied.Code != http.StatusForbidden || envelope.Error.Code != "IMPORT_AUTHORIZATION_DENIED" || envelope.Error.OperationID != operationID.String() || envelope.Error.CommitState != "unknown" || envelope.Error.Recovery != "fused-cli whoami" {
+		t.Fatalf("import denial = status %d, envelope %#v", denied.Code, envelope.Error)
 	}
 }
 
