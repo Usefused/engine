@@ -73,9 +73,11 @@ func (m *mockDeleteForwarder) Forward(w http.ResponseWriter, _ *http.Request, _ 
 	w.WriteHeader(m.status)
 }
 
-func (m *mockDeleteForwarder) ForwardAndInspect(w http.ResponseWriter, _ *http.Request, _ string, fn func([]byte)) {
+// ForwardAndInspect supplies the same status to the cleanup callback so these
+// tests retain production's inspect-after-Registry contract.
+func (m *mockDeleteForwarder) ForwardAndInspect(w http.ResponseWriter, _ *http.Request, _ string, fn func(*http.Response, []byte)) {
 	w.WriteHeader(m.status)
-	fn(nil)
+	fn(&http.Response{StatusCode: m.status}, nil)
 }
 
 func TestDeleteIntercept_CleanupCalledOnSuccess(t *testing.T) {

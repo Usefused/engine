@@ -111,7 +111,9 @@ func (f *revisionReplacementForwarder) Forward(http.ResponseWriter, *http.Reques
 	f.calls++
 }
 
-func (f *revisionReplacementForwarder) ForwardAndInspect(w http.ResponseWriter, request *http.Request, prefix string, _ func([]byte)) {
+// ForwardAndInspect shares the same call counter because this authorization
+// test does not need to simulate Registry response inspection.
+func (f *revisionReplacementForwarder) ForwardAndInspect(w http.ResponseWriter, request *http.Request, prefix string, _ func(*http.Response, []byte)) {
 	f.Forward(w, request, prefix)
 }
 

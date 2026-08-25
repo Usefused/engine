@@ -5541,6 +5541,11 @@ type workspaceConfigErrorBody struct {
 	Retryable   bool           `json:"retryable"`
 	Details     map[string]any `json:"details,omitempty"`
 	Remediation string         `json:"remediation,omitempty"`
+	Phase       string         `json:"phase,omitempty"`
+	OperationID string         `json:"operation_id,omitempty"`
+	RequestID   string         `json:"request_id,omitempty"`
+	CommitState string         `json:"commit_state,omitempty"`
+	Recovery    string         `json:"recovery,omitempty"`
 	TraceID     string         `json:"trace_id,omitempty"`
 }
 

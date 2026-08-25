@@ -50,7 +50,9 @@ func (f *sdkPackageGenerationForwarder) Forward(w http.ResponseWriter, r *http.R
 	_, _ = w.Write([]byte(f.body))
 }
 
-func (f *sdkPackageGenerationForwarder) ForwardAndInspect(http.ResponseWriter, *http.Request, string, func([]byte)) {
+// ForwardAndInspect is intentionally inert because package-generation tests
+// exercise only the ordinary forwarding method.
+func (f *sdkPackageGenerationForwarder) ForwardAndInspect(http.ResponseWriter, *http.Request, string, func(*http.Response, []byte)) {
 }
 
 func TestSDKPackageDownloadStreamsCacheHitWithoutGeneration(t *testing.T) {

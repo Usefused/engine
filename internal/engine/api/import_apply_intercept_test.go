@@ -3,10 +3,14 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
@@ -14,6 +18,38 @@ import (
 )
 
 const testImportServiceVersionID = "11111111-1111-1111-1111-111111111111"
+const testImportOperationID = "22222222-2222-4222-8222-222222222222"
+
+// committedImportApplyBody supplies the durable Registry proof required before Engine workspace activation.
+func committedImportApplyBody(response importApplyResponse) []byte {
+	response.Status = "applied"
+	response.OperationID = testImportOperationID
+	response.Phase = "complete"
+	response.CommitState = "committed"
+	body, _ := json.Marshal(response)
+	return body
+}
+
+// TestImportWorkspaceActivationFailureOmitsMissingIdentities ensures incomplete
+// Registry proof falls back to status recovery without presenting nil UUIDs.
+func TestImportWorkspaceActivationFailureOmitsMissingIdentities(t *testing.T) {
+	operationID := uuid.MustParse(testImportOperationID)
+	body := importWorkspaceActivationFailure(autoRegistrationAudit{operationID: operationID, outcome: "missing_service_id"}, "request-1")
+	var response workspaceConfigErrorResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		t.Fatalf("decode partial error: %v", err)
+	}
+	// Status is the only exact recovery until Registry can return service identity.
+	if response.Error.Recovery != "fused-cli import status "+testImportOperationID {
+		t.Fatalf("recovery = %q", response.Error.Recovery)
+	}
+	if _, exists := response.Error.Details["service_id"]; exists {
+		t.Fatalf("partial error exposed a nil service identity: %#v", response.Error.Details)
+	}
+	if _, exists := response.Error.Details["service_version_id"]; exists {
+		t.Fatalf("partial error exposed a nil service-version identity: %#v", response.Error.Details)
+	}
+}
 
 // autoRegisterMockStore records activation calls made for an authenticated Actor.
 // AddWorkspaceServiceVersion calls for Task 3's unit tests
@@ -104,7 +140,7 @@ func TestAutoRegisterImportedService_ActivatesWhenNotYetActivated(t *testing.T) 
 	serviceID := uuid.New()
 	s := &autoRegisterMockStore{accountID: accountID}
 
-	body := []byte(`{"status":"applied","service_id":"` + serviceID.String() + `","service_version_id":"` + testImportServiceVersionID + `","name":"Stripe Payments","slug":"stripe","is_new_service":true,"version":"2026-01-01"}`)
+	body := committedImportApplyBody(importApplyResponse{ServiceID: serviceID.String(), ServiceVersionID: testImportServiceVersionID, Name: "Stripe Payments", Slug: "stripe", IsNewService: true, Version: "2026-01-01"})
 	autoRegisterImportedService(autoRegisterTestContext(accountID), s, nil, accountID, "", body)
 
 	if s.workspaceCalls != 0 {
@@ -124,7 +160,7 @@ func TestAutoRegisterImportedService_FallsBackToSlugWhenNameIsMissing(t *testing
 	serviceID := uuid.New()
 	s := &autoRegisterMockStore{accountID: accountID}
 
-	body := []byte(`{"status":"applied","service_id":"` + serviceID.String() + `","service_version_id":"` + testImportServiceVersionID + `","slug":"stripe","version":"2026-01-01"}`)
+	body := committedImportApplyBody(importApplyResponse{ServiceID: serviceID.String(), ServiceVersionID: testImportServiceVersionID, Slug: "stripe", Version: "2026-01-01"})
 	autoRegisterImportedService(autoRegisterTestContext(accountID), s, nil, accountID, "", body)
 
 	if got := s.lastActivateArgs[4]; got != "stripe" {
@@ -138,7 +174,7 @@ func TestAutoRegisterImportedService_MissingSlugFailsClosed(t *testing.T) {
 	serviceID := uuid.New()
 	s := &autoRegisterMockStore{accountID: accountID}
 
-	body := []byte(`{"status":"applied","service_id":"` + serviceID.String() + `","service_version_id":"` + testImportServiceVersionID + `","name":"Stripe Payments","slug":"  ","version":"2026-01-01"}`)
+	body := committedImportApplyBody(importApplyResponse{ServiceID: serviceID.String(), ServiceVersionID: testImportServiceVersionID, Name: "Stripe Payments", Slug: "  ", Version: "2026-01-01"})
 	autoRegisterImportedService(autoRegisterTestContext(accountID), s, nil, accountID, "", body)
 
 	if s.activateCalls != 0 {
@@ -162,7 +198,7 @@ func TestAutoRegisterImportedService_EmitsMutationAuditSpan(t *testing.T) {
 	serviceID := uuid.New()
 	s := &autoRegisterMockStore{accountID: accountID}
 
-	body := []byte(`{"status":"applied","service_id":"` + serviceID.String() + `","service_version_id":"` + testImportServiceVersionID + `","slug":"stripe","version":"2026-01-01"}`)
+	body := committedImportApplyBody(importApplyResponse{ServiceID: serviceID.String(), ServiceVersionID: testImportServiceVersionID, Slug: "stripe", Version: "2026-01-01"})
 	autoRegisterImportedService(autoRegisterTestContext(accountID), s, nil, accountID, "", body)
 
 	spans := exporter.GetSpans()
@@ -197,7 +233,7 @@ func TestAutoRegisterImportedService_EnablesImportedVersionWhenAlreadyActivated(
 	serviceID := uuid.New()
 	s := &autoRegisterMockStore{accountID: accountID, alreadyActivated: true}
 
-	body := []byte(`{"status":"applied","service_id":"` + serviceID.String() + `","service_version_id":"` + testImportServiceVersionID + `","slug":"stripe","is_new_service":false,"version":"2026-01-01"}`)
+	body := committedImportApplyBody(importApplyResponse{ServiceID: serviceID.String(), ServiceVersionID: testImportServiceVersionID, Slug: "stripe", Version: "2026-01-01"})
 	autoRegisterImportedService(autoRegisterTestContext(accountID), s, nil, accountID, "", body)
 
 	if s.activateCalls != 0 {
@@ -223,7 +259,7 @@ func TestAutoRegisterImportedService_MaterializesSnapshotBeforeActivation(t *tes
 		Version:          "2026-01-01",
 	}}
 
-	body := []byte(`{"status":"applied","service_id":"` + serviceID.String() + `","service_version_id":"` + testImportServiceVersionID + `","name":"Stripe Payments","slug":"stripe","version":"2026-01-01"}`)
+	body := committedImportApplyBody(importApplyResponse{ServiceID: serviceID.String(), ServiceVersionID: testImportServiceVersionID, Name: "Stripe Payments", Slug: "stripe", Version: "2026-01-01"})
 	autoRegisterImportedService(autoRegisterTestContext(accountID), s, fetcher, accountID, "user-api-key", body)
 
 	if fetcher.calls != 1 || s.snapshotCalls != 1 {
@@ -243,7 +279,7 @@ func TestAutoRegisterImportedService_SnapshotFetchFailureSkipsActivation(t *test
 	s := &snapshotAutoRegisterStore{autoRegisterMockStore: &autoRegisterMockStore{accountID: accountID}}
 	fetcher := &runtimeContractFetcherStub{err: context.DeadlineExceeded}
 
-	body := []byte(`{"status":"applied","service_id":"` + serviceID.String() + `","service_version_id":"` + testImportServiceVersionID + `","slug":"stripe","version":"2026-01-01"}`)
+	body := committedImportApplyBody(importApplyResponse{ServiceID: serviceID.String(), ServiceVersionID: testImportServiceVersionID, Slug: "stripe", Version: "2026-01-01"})
 	autoRegisterImportedService(autoRegisterTestContext(accountID), s, fetcher, accountID, "user-api-key", body)
 
 	if fetcher.calls != 1 {
@@ -265,7 +301,7 @@ func TestAutoRegisterImportedService_MalformedJSONNoPanic(t *testing.T) {
 
 func TestAutoRegisterImportedService_MissingServiceIDSkips(t *testing.T) {
 	s := &autoRegisterMockStore{accountID: uuid.New()}
-	autoRegisterImportedService(autoRegisterTestContext(s.accountID), s, nil, s.accountID, "", []byte(`{"status":"applied"}`))
+	autoRegisterImportedService(autoRegisterTestContext(s.accountID), s, nil, s.accountID, "", committedImportApplyBody(importApplyResponse{}))
 
 	if s.activateCalls != 0 || s.workspaceCalls != 0 {
 		t.Errorf("expected no store calls when service_id is missing, got workspace=%d activate=%d", s.workspaceCalls, s.activateCalls)
@@ -275,7 +311,7 @@ func TestAutoRegisterImportedService_MissingServiceIDSkips(t *testing.T) {
 func TestAutoRegisterImportedService_MissingVersionSkips(t *testing.T) {
 	serviceID := uuid.New()
 	s := &autoRegisterMockStore{accountID: uuid.New()}
-	body := []byte(`{"status":"applied","service_id":"` + serviceID.String() + `","slug":"stripe"}`)
+	body := committedImportApplyBody(importApplyResponse{ServiceID: serviceID.String(), Slug: "stripe"})
 	autoRegisterImportedService(autoRegisterTestContext(s.accountID), s, nil, s.accountID, "", body)
 
 	if s.workspaceCalls != 0 || s.activateCalls != 0 {
@@ -285,7 +321,7 @@ func TestAutoRegisterImportedService_MissingVersionSkips(t *testing.T) {
 
 func TestAutoRegisterImportedService_StoreErrorsDoNotPanic(t *testing.T) {
 	serviceID := uuid.New()
-	body := []byte(`{"status":"applied","service_id":"` + serviceID.String() + `","service_version_id":"` + testImportServiceVersionID + `","slug":"stripe","version":"2026-01-01"}`)
+	body := committedImportApplyBody(importApplyResponse{ServiceID: serviceID.String(), ServiceVersionID: testImportServiceVersionID, Slug: "stripe", Version: "2026-01-01"})
 
 	t.Run("missing actor fails closed", func(t *testing.T) {
 		s := &autoRegisterMockStore{accountID: uuid.New()}
@@ -359,17 +395,26 @@ func (f *recordingForwarder) Forward(w http.ResponseWriter, r *http.Request, str
 	_, _ = w.Write([]byte(body))
 }
 
-func (f *recordingForwarder) ForwardAndInspect(w http.ResponseWriter, r *http.Request, stripPrefix string, onSuccess func(body []byte)) {
+// ForwardAndInspect simulates the production callback-before-write ordering so response replacement is testable.
+func (f *recordingForwarder) ForwardAndInspect(w http.ResponseWriter, r *http.Request, stripPrefix string, onSuccess func(*http.Response, []byte)) {
 	f.forwardAndInspectCalled = true
 	status := f.status
+	// Tests default to a successful Registry response unless they explicitly
+	// exercise a non-2xx proxy path.
 	if status == 0 {
 		status = http.StatusOK
 	}
-	w.WriteHeader(status)
-	_, _ = w.Write([]byte(f.body))
+	response := &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader([]byte(f.body)))}
+	// Only a successful Registry response owns Engine-local follow-up work.
 	if status >= 200 && status < 300 && onSuccess != nil {
-		onSuccess([]byte(f.body))
+		onSuccess(response, []byte(f.body))
 	}
+	for key, values := range response.Header {
+		w.Header()[key] = append([]string(nil), values...)
+	}
+	w.WriteHeader(response.StatusCode)
+	body, _ := io.ReadAll(response.Body)
+	_, _ = w.Write(body)
 }
 
 // TestRESTProxyHandler_ImportApply_RoutesThroughAutoRegister is the
@@ -379,7 +424,7 @@ func (f *recordingForwarder) ForwardAndInspect(w http.ResponseWriter, r *http.Re
 func TestRESTProxyHandler_ImportApply_RoutesThroughAutoRegister(t *testing.T) {
 	accountID := uuid.New()
 	serviceID := uuid.New()
-	fwd := &recordingForwarder{body: `{"status":"applied","service_id":"` + serviceID.String() + `","service_version_id":"` + testImportServiceVersionID + `","slug":"stripe","version":"2026-01-01"}`}
+	fwd := &recordingForwarder{body: string(committedImportApplyBody(importApplyResponse{ServiceID: serviceID.String(), ServiceVersionID: testImportServiceVersionID, Slug: "stripe", Version: "2026-01-01"}))}
 	s := &autoRegisterMockStore{accountID: accountID}
 	handler := RESTProxyHandler(fwd, s)
 
@@ -398,6 +443,40 @@ func TestRESTProxyHandler_ImportApply_RoutesThroughAutoRegister(t *testing.T) {
 	}
 	if s.activateCalls != 1 {
 		t.Errorf("expected auto-register to activate the service, got %d AddWorkspaceServiceVersion calls", s.activateCalls)
+	}
+}
+
+// TestRESTProxyHandler_ImportApplyReportsCommittedActivationFailure proves a Registry success cannot mask local partial state.
+func TestRESTProxyHandler_ImportApplyReportsCommittedActivationFailure(t *testing.T) {
+	accountID := uuid.New()
+	serviceID := uuid.New()
+	fwd := &recordingForwarder{body: string(committedImportApplyBody(importApplyResponse{
+		ServiceID: serviceID.String(), ServiceVersionID: testImportServiceVersionID,
+		Slug: "chargebee", Version: "2026-08-19-webhooks",
+	}))}
+	store := &snapshotAutoRegisterStore{autoRegisterMockStore: &autoRegisterMockStore{accountID: accountID}}
+	fetcher := &runtimeContractFetcherStub{err: context.DeadlineExceeded}
+	handler := chimiddleware.RequestID(RESTProxyHandlerWithRuntimeContracts(fwd, store, fetcher))
+
+	request := httptest.NewRequest(http.MethodPost, "/integrations/import/apply", bytes.NewBufferString(`{}`))
+	request.Header.Set("X-API-Key", "fsk_valid")
+	request.Header.Set("X-Request-ID", "import-chargebee-1")
+	request = controlTestRequest(request, accountID)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusFailedDependency {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusFailedDependency, recorder.Body.String())
+	}
+	var response workspaceConfigErrorResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode partial error: %v", err)
+	}
+	if response.Error.Code != "import_workspace_activation_failed" || response.Error.CommitState != "committed" || response.Error.Phase != "workspace_activation" {
+		t.Fatalf("partial error = %#v", response.Error)
+	}
+	if response.Error.OperationID != testImportOperationID || response.Error.RequestID == "" || !strings.Contains(response.Error.Recovery, "--service-id") {
+		t.Fatalf("recovery contract = %#v", response.Error)
 	}
 }
 

@@ -49,12 +49,15 @@ func (m *mockForwarder) Forward(w http.ResponseWriter, r *http.Request, stripPre
 	w.WriteHeader(http.StatusOK)
 }
 
-func (m *mockForwarder) ForwardAndInspect(w http.ResponseWriter, r *http.Request, stripPrefix string, onSuccess func(body []byte)) {
+// ForwardAndInspect mirrors a successful proxy call while leaving response
+// content irrelevant to GraphQL routing tests.
+func (m *mockForwarder) ForwardAndInspect(w http.ResponseWriter, r *http.Request, stripPrefix string, onSuccess func(*http.Response, []byte)) {
 	m.called = true
 	m.calls++
 	w.WriteHeader(http.StatusOK)
+	// Callback invocation preserves the production success-only contract.
 	if onSuccess != nil {
-		onSuccess(nil)
+		onSuccess(&http.Response{StatusCode: http.StatusOK}, nil)
 	}
 }
 

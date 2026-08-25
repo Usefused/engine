@@ -4,6 +4,7 @@ package api
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -62,17 +63,15 @@ func (p *RegistryProxy) Forward(w http.ResponseWriter, r *http.Request, stripPre
 
 // ForwardAndInspect behaves exactly like Forward (path stripping, Host
 // rewriting, CORS header removal, byte-for-byte body passthrough to the
-// client), but additionally invokes onSuccess with the buffered response
-// body whenever the Registry answered with a 2xx status. This is how the
-// import/apply auto-register intercept (engine_workspace_registration_plan.md,
-// Task 3) reads what was just applied without altering what the client
-// ultimately receives -- onSuccess runs against a copy of the bytes, and the
-// response body is restored before ServeHTTP writes it out.
+// client), but additionally invokes onSuccess with the buffered response body
+// whenever the Registry answered with a 2xx status. The callback receives the
+// not-yet-written response so an Engine-local follow-up failure can replace a
+// stale success receipt with an honest structured partial outcome.
 //
 // A non-2xx response never invokes onSuccess -- there's nothing to
 // auto-register from a failed apply -- but the body still passes through to
 // the client unchanged either way.
-func (p *RegistryProxy) ForwardAndInspect(w http.ResponseWriter, r *http.Request, stripPrefix string, onSuccess func(body []byte)) {
+func (p *RegistryProxy) ForwardAndInspect(w http.ResponseWriter, r *http.Request, stripPrefix string, onSuccess func(response *http.Response, body []byte)) {
 	proxy := p.newReverseProxy(stripPrefix)
 	proxy.ModifyResponse = func(res *http.Response) error {
 		stripCORSHeaders(res)
@@ -85,8 +84,10 @@ func (p *RegistryProxy) ForwardAndInspect(w http.ResponseWriter, r *http.Request
 		}
 		_ = res.Body.Close()
 		res.Body = io.NopCloser(bytes.NewReader(body))
+		// Inspection runs before proxy output, preserving one place for response
+		// replacement without duplicating proxying, header, or credential policy.
 		if onSuccess != nil {
-			onSuccess(body)
+			onSuccess(res, body)
 		}
 		return nil
 	}
@@ -140,6 +141,18 @@ func stripCORSHeaders(res *http.Response) {
 	res.Header.Del("X-API-Key")
 }
 
+// replaceProxyJSONResponse swaps a buffered upstream success for an Engine-owned structured outcome.
+func replaceProxyJSONResponse(response *http.Response, status int, body []byte) {
+	response.StatusCode = status
+	response.Status = fmt.Sprintf("%d %s", status, http.StatusText(status))
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	response.ContentLength = int64(len(body))
+	response.Header.Set("Content-Type", "application/json")
+	// The upstream length described the Registry receipt and must not survive a
+	// replacement with a differently sized Engine error envelope.
+	response.Header.Del("Content-Length")
+}
+
 // Forwarder is the subset of RegistryProxy's behavior the proxy handlers
 // depend on. Handlers accept this interface rather than *RegistryProxy so
 // their tests can substitute a mock instead of standing up a real Registry.
@@ -147,7 +160,7 @@ type Forwarder interface {
 	Forward(w http.ResponseWriter, r *http.Request, stripPrefix string)
 	// ForwardAndInspect is Forward's response-inspecting sibling -- see its
 	// doc comment on *RegistryProxy for what onSuccess receives and when.
-	ForwardAndInspect(w http.ResponseWriter, r *http.Request, stripPrefix string, onSuccess func(body []byte))
+	ForwardAndInspect(w http.ResponseWriter, r *http.Request, stripPrefix string, onSuccess func(response *http.Response, body []byte))
 }
 
 // statusRecorder wraps an http.ResponseWriter to capture the status code a

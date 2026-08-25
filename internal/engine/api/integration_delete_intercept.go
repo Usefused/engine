@@ -45,7 +45,7 @@ func forwardIntegrationDeleteWithWorkspaceCleanup(proxy Forwarder, s store.Store
 
 	wsErr := verifyWorkspaceActor(ctx, accountID)
 
-	proxy.ForwardAndInspect(rec, r.WithContext(ctx), "", func(body []byte) {
+	proxy.ForwardAndInspect(rec, r.WithContext(ctx), "", func(_ *http.Response, body []byte) {
 		// Only clean up the workspace if the Registry confirmed the deletion.
 		// Skip if we failed to resolve the workspace -- the Registry-side delete
 		// already succeeded, so we log and move on rather than blocking.

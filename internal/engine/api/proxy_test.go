@@ -133,7 +133,7 @@ func TestForwardAndInspect_PassesBodyThroughUnchangedAndInvokesOnSuccess(t *test
 
 	var gotOnSuccessBody []byte
 	onSuccessCalls := 0
-	proxy.ForwardAndInspect(rec, req, "", func(body []byte) {
+	proxy.ForwardAndInspect(rec, req, "", func(_ *http.Response, body []byte) {
 		onSuccessCalls++
 		gotOnSuccessBody = body
 	})
@@ -156,6 +156,26 @@ func TestForwardAndInspect_PassesBodyThroughUnchangedAndInvokesOnSuccess(t *test
 	}
 }
 
+// TestForwardAndInspect_AllowsStructuredResponseReplacement verifies local follow-up errors win before proxy output.
+func TestForwardAndInspect_AllowsStructuredResponseReplacement(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"applied"}`))
+	}))
+	defer backend.Close()
+
+	proxy := NewRegistryProxy(backend.URL, testRegistryLicense)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/integrations/import/apply", nil)
+	proxy.ForwardAndInspect(recorder, request, "", func(response *http.Response, _ []byte) {
+		replaceProxyJSONResponse(response, http.StatusFailedDependency, []byte(`{"error":{"code":"partial"}}`))
+	})
+
+	if recorder.Code != http.StatusFailedDependency || recorder.Body.String() != `{"error":{"code":"partial"}}` {
+		t.Fatalf("replacement response = status %d body %q", recorder.Code, recorder.Body.String())
+	}
+}
+
 // TestForwardAndInspect_SkipsOnSuccessForNonSuccessStatus asserts a failed
 // apply never triggers auto-registration -- there's nothing to register from
 // an error response -- while the client still sees the real error body.
@@ -171,7 +191,7 @@ func TestForwardAndInspect_SkipsOnSuccessForNonSuccessStatus(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	onSuccessCalls := 0
-	proxy.ForwardAndInspect(rec, req, "", func(body []byte) {
+	proxy.ForwardAndInspect(rec, req, "", func(_ *http.Response, body []byte) {
 		onSuccessCalls++
 	})
 

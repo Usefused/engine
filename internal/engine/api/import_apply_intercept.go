@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"unicode"
 
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -29,6 +31,10 @@ func isImportApplyPath(method, path string) bool {
 // shape keeps Engine coupled to the public JSON contract rather than Registry
 // implementation types.
 type importApplyResponse struct {
+	Status           string `json:"status"`
+	OperationID      string `json:"operation_id"`
+	Phase            string `json:"phase"`
+	CommitState      string `json:"commit_state"`
 	ServiceID        string `json:"service_id"`
 	Name             string `json:"name"`
 	Slug             string `json:"slug"`
@@ -38,7 +44,9 @@ type importApplyResponse struct {
 }
 
 type autoRegistrationAudit struct {
+	operationID      uuid.UUID
 	serviceID        uuid.UUID
+	serviceSlug      string
 	version          string
 	serviceVersionID uuid.UUID
 	outcome          string
@@ -57,8 +65,14 @@ func forwardImportApplyWithAutoRegister(proxy Forwarder, s store.Store, contract
 	defer span.End()
 
 	rec := newStatusRecorder(w)
-	proxy.ForwardAndInspect(rec, r.WithContext(ctx), "", func(body []byte) {
-		autoRegisterImportedService(ctx, s, contractFetcher, accountID, r.Header.Get("X-API-Key"), body)
+	proxy.ForwardAndInspect(rec, r.WithContext(ctx), "", func(response *http.Response, body []byte) {
+		audit := autoRegisterImportedService(ctx, s, contractFetcher, accountID, r.Header.Get("X-API-Key"), body)
+		// Registry has committed, so Engine-local activation failure must replace
+		// the success receipt with an authoritative partial outcome before write.
+		if autoRegistrationSucceeded(audit) || audit.operationID == uuid.Nil {
+			return
+		}
+		replaceProxyJSONResponse(response, http.StatusFailedDependency, importWorkspaceActivationFailure(audit, chimiddleware.GetReqID(ctx)))
 	})
 	span.SetAttributes(
 		attribute.Int("http_status_code", rec.status),
@@ -77,55 +91,150 @@ func forwardImportApplyWithAutoRegister(proxy Forwarder, s store.Store, contract
 // workspace" (an existing Registry service may never have been activated in
 // this Engine workspace).
 //
-// Failures here are logged and swallowed, never surfaced to the caller: a
-// failure to auto-register must not turn an otherwise-successful
-// import/apply into a client-visible error. The explicit "Add to Workspace"
-// path remains available when automatic registration fails.
-func autoRegisterImportedService(ctx context.Context, s store.Store, contractFetcher RuntimeContractFetcher, accountID uuid.UUID, apiKey string, body []byte) {
+// Registry commit remains successful when activation fails, but the returned
+// audit lets the proxy replace the stale success response with exact recovery.
+func autoRegisterImportedService(ctx context.Context, s store.Store, contractFetcher RuntimeContractFetcher, accountID uuid.UUID, apiKey string, body []byte) autoRegistrationAudit {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.workspace.auto_register_service")
 	defer span.End()
 
 	audit := registerImportedService(ctx, s, contractFetcher, accountID, apiKey, body)
 	recordAutoRegistrationAudit(span, accountID, audit)
+	return audit
 }
 
+// autoRegistrationSucceeded recognizes only outcomes that made the imported version usable in this workspace.
+func autoRegistrationSucceeded(audit autoRegistrationAudit) bool {
+	return audit.outcome == "activated" || audit.outcome == "version_enabled"
+}
+
+// importWorkspaceActivationFailure returns a bounded structured partial outcome after Registry commit.
+func importWorkspaceActivationFailure(audit autoRegistrationAudit, requestID string) []byte {
+	recovery := importWorkspaceActivationRecovery(audit)
+	response := workspaceConfigErrorResponse{Error: workspaceConfigErrorBody{
+		Code:        "import_workspace_activation_failed",
+		Message:     "The service was published, but Engine could not add its imported version to this workspace.",
+		Category:    "partial",
+		Retryable:   false,
+		Phase:       "workspace_activation",
+		OperationID: audit.operationID.String(),
+		RequestID:   requestID,
+		CommitState: "committed",
+		Recovery:    recovery,
+		Remediation: "Run the exact recovery command; do not repeat the committed import.",
+		Details:     importWorkspaceActivationDetails(audit),
+	}}
+	body, err := json.Marshal(response)
+	// This envelope contains only strings and a fixed map, so failure indicates
+	// an internal encoder defect; retain a safe fixed response in that case.
+	if err != nil {
+		return []byte(`{"error":{"code":"import_workspace_activation_failed","message":"The service was published, but workspace activation failed.","category":"partial","phase":"workspace_activation","commit_state":"committed"}}`)
+	}
+	return body
+}
+
+// importWorkspaceActivationDetails omits unavailable opaque identities instead
+// of rendering nil UUIDs that could look like valid recovery targets.
+func importWorkspaceActivationDetails(audit autoRegistrationAudit) map[string]any {
+	details := map[string]any{"workspace_outcome": audit.outcome}
+	// Service identity is useful only after Registry returned a concrete UUID.
+	if audit.serviceID != uuid.Nil {
+		details["service_id"] = audit.serviceID.String()
+	}
+	// Version identity must independently be present before the CLI exposes it.
+	if audit.serviceVersionID != uuid.Nil {
+		details["service_version_id"] = audit.serviceVersionID.String()
+	}
+	return details
+}
+
+// importWorkspaceActivationRecovery pins activation to the exact Registry service and imported version.
+func importWorkspaceActivationRecovery(audit autoRegistrationAudit) string {
+	// Without complete Registry identity, status is the only recovery that does
+	// not guess which service or version committed.
+	if audit.serviceID == uuid.Nil || audit.serviceVersionID == uuid.Nil {
+		return "fused-cli import status " + audit.operationID.String()
+	}
+	slug := safeImportRecoveryToken(audit.serviceSlug, audit.serviceID.String())
+	version := safeImportRecoveryToken(audit.version, "")
+	parts := []string{
+		"fused-cli workspace service add", quoteImportRecoveryArg(slug),
+		"--service-id", quoteImportRecoveryArg(audit.serviceID.String()),
+	}
+	// An exact safe version avoids activating a different future provider version;
+	// malformed remote text is omitted rather than copied into a command.
+	if version != "" {
+		parts = append(parts, "--version", quoteImportRecoveryArg(version))
+	}
+	return strings.Join(append(parts, "--apply"), " ")
+}
+
+// safeImportRecoveryToken admits the bounded Registry identity grammar used in copied shell recovery.
+func safeImportRecoveryToken(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	// Recovery values must stay compact and credential-free even though Registry
+	// normally supplies canonical slugs and versions here.
+	if value == "" || len(value) > 256 || strings.Contains(strings.ToLower(value), "fsk_") || strings.Contains(value, "://") {
+		return fallback
+	}
+	for _, char := range value {
+		// Shell quoting cannot make terminal controls safe to render or audit.
+		if unicode.IsControl(char) {
+			return fallback
+		}
+	}
+	return value
+}
+
+// quoteImportRecoveryArg makes a reviewed recovery argument inert in POSIX-compatible shells.
+func quoteImportRecoveryArg(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+// registerImportedService separates response admission from workspace mutation
+// so malformed Registry success cannot reach local activation calls.
 func registerImportedService(ctx context.Context, s store.Store, contractFetcher RuntimeContractFetcher, accountID uuid.UUID, apiKey string, body []byte) autoRegistrationAudit {
 	resp, audit, ok := decodeAutoRegistrationResponse(ctx, body)
+	// Admission failure already contains the stable audit outcome needed by the proxy.
 	if !ok {
 		return audit
 	}
 	return activateImportedService(ctx, s, contractFetcher, accountID, apiKey, resp, audit)
 }
 
+// decodeAutoRegistrationResponse admits only the Registry's complete durable
+// commit proof and resolves the exact immutable service version for activation.
 func decodeAutoRegistrationResponse(ctx context.Context, body []byte) (importApplyResponse, autoRegistrationAudit, bool) {
-	var resp importApplyResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		slog.WarnContext(ctx, "auto-register: could not decode import/apply response", slog.Any("error", err))
-		return resp, autoRegistrationAudit{outcome: "invalid_response", err: err}, false
+	resp, operationID, rejected, ok := decodeCommittedImportApplyResponse(ctx, body)
+	// Commit-proof rejection already owns its precise stable audit outcome.
+	if !ok {
+		return resp, rejected, false
 	}
+	// A committed service UUID is required for local authorization and storage.
 	if resp.ServiceID == "" {
-		return resp, autoRegistrationAudit{outcome: "missing_service_id"}, false
+		return resp, autoRegistrationAudit{operationID: operationID, outcome: "missing_service_id"}, false
 	}
 	serviceID, err := uuid.Parse(resp.ServiceID)
+	// Registry identity is opaque, so Engine must reject rather than normalize malformed UUIDs.
 	if err != nil {
 		slog.WarnContext(ctx, "auto-register: invalid service_id in import/apply response",
 			slog.String("service_id", resp.ServiceID), slog.Any("error", err))
-		return resp, autoRegistrationAudit{outcome: "invalid_service_id", err: err}, false
+		return resp, autoRegistrationAudit{operationID: operationID, outcome: "invalid_service_id", err: err}, false
 	}
 	serviceVersionID, err := uuid.Parse(resp.ServiceVersionID)
+	// A nil or malformed version UUID cannot pin activation to the committed artifact.
 	if err != nil || serviceVersionID == uuid.Nil {
 		slog.WarnContext(ctx, "auto-register: invalid service_version_id in import/apply response",
 			slog.String("service_version_id", resp.ServiceVersionID), slog.Any("error", err))
-		return resp, autoRegistrationAudit{outcome: "invalid_service_version_id", err: err}, false
+		return resp, autoRegistrationAudit{operationID: operationID, serviceID: serviceID, outcome: "invalid_service_version_id", err: err}, false
 	}
 	resp.Slug = strings.TrimSpace(resp.Slug)
 	if resp.Slug == "" {
 		// The Registry slug is the stable config identity used by SDK/MCP plans.
 		// Activating without it would succeed here but fail later authorization
 		// when a desired config refers to the imported service by slug.
-		return resp, autoRegistrationAudit{serviceID: serviceID, serviceVersionID: serviceVersionID, outcome: "missing_slug"}, false
+		return resp, autoRegistrationAudit{operationID: operationID, serviceID: serviceID, serviceVersionID: serviceVersionID, outcome: "missing_slug"}, false
 	}
-	audit := autoRegistrationAudit{serviceID: serviceID, version: resp.Version, serviceVersionID: serviceVersionID}
+	audit := autoRegistrationAudit{operationID: operationID, serviceID: serviceID, serviceSlug: resp.Slug, version: resp.Version, serviceVersionID: serviceVersionID}
 	if resp.Version == "" {
 		// AddWorkspaceServiceVersion requires a concrete version to pin to -- there's
 		// nothing safe to activate without one.
@@ -135,6 +244,24 @@ func decodeAutoRegistrationResponse(ctx context.Context, body []byte) (importApp
 		return resp, audit, false
 	}
 	return resp, audit, true
+}
+
+// decodeCommittedImportApplyResponse validates the Registry's durable success
+// proof independently from resolving workspace service identity.
+func decodeCommittedImportApplyResponse(ctx context.Context, body []byte) (importApplyResponse, uuid.UUID, autoRegistrationAudit, bool) {
+	var resp importApplyResponse
+	// Invalid JSON cannot prove either commit identity or workspace target.
+	if err := json.Unmarshal(body, &resp); err != nil {
+		slog.WarnContext(ctx, "auto-register: could not decode import/apply response", slog.Any("error", err))
+		return resp, uuid.Nil, autoRegistrationAudit{outcome: "invalid_response", err: err}, false
+	}
+	operationID, err := uuid.Parse(resp.OperationID)
+	// Auto-registration may only follow the Registry's exact durable success
+	// proof; malformed success responses remain the CLI's unknown-outcome case.
+	if err != nil || resp.Status != "applied" || resp.Phase != "complete" || resp.CommitState != "committed" {
+		return resp, uuid.Nil, autoRegistrationAudit{outcome: "invalid_commit_proof", err: err}, false
+	}
+	return resp, operationID, autoRegistrationAudit{}, true
 }
 
 func activateImportedService(ctx context.Context, s store.Store, contractFetcher RuntimeContractFetcher, accountID uuid.UUID, apiKey string, resp importApplyResponse, audit autoRegistrationAudit) autoRegistrationAudit {
