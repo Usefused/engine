@@ -163,15 +163,23 @@ func insertAppTokenHistory(ctx context.Context, tx pgx.Tx, issue AppTokenIssue) 
 	return &token, nil
 }
 
+// insertActiveAppToken detects name conflicts atomically without replacing an
+// existing credential; the caller rolls back the new history row on rejection.
 func insertActiveAppToken(ctx context.Context, tx pgx.Tx, issue AppTokenIssue) error {
-	_, err := tx.Exec(ctx, `
+	result, err := tx.Exec(ctx, `
 		INSERT INTO fused_app_tokens
 			(id, app_family_id, token_hash, name, allow_all, allowed_operations, expires_at, binding_mode)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (app_family_id, name) DO NOTHING
 	`, issue.ID, issue.AppFamilyID, issue.TokenHash, issue.Name, issue.Policy.AllowAll,
 		nonNilStrings(issue.Policy.AllowedOperations), issue.Policy.ExpiresAt, issue.BindingMode)
+	// Other database failures must not be misreported as a duplicate name.
 	if err != nil {
 		return fmt.Errorf("create active app token: %w", err)
+	}
+	// The exact unique constraint owns conflict detection, including concurrent issuance.
+	if result.RowsAffected() == 0 {
+		return ErrAppTokenNameConflict
 	}
 	return nil
 }

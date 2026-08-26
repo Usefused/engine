@@ -37,12 +37,16 @@ type AppTokenRevoker interface {
 	RevokeAppToken(context.Context, uuid.UUID, string) (*store.AppTokenRevocation, error)
 }
 
+// GenerateAppTokenHandler issues one family credential only after validation,
+// preserving reviewed token failures instead of hiding them as server outages.
 func GenerateAppTokenHandler(s store.Store) http.HandlerFunc {
+	// The request owns its one-time credential and canonical mutation span.
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.app_tokens.generate")
 		defer span.End()
 
 		_, err := controlActorAccount(ctx)
+		// Anonymous requests cannot issue execution credentials.
 		if err != nil {
 			recordTokenMutationError(span, applifecycle.OutcomeUnauthorized)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -51,6 +55,7 @@ func GenerateAppTokenHandler(s store.Store) http.HandlerFunc {
 		setTokenMutationActor(span, ctx)
 
 		familyID, err := uuid.Parse(r.URL.Query().Get("app_family_id"))
+		// Token scope requires an exact identity, never a guessed app name.
 		if err != nil {
 			recordTokenMutationError(span, applifecycle.OutcomeInvalid)
 			http.Error(w, "invalid app_family_id", http.StatusBadRequest)
@@ -58,18 +63,21 @@ func GenerateAppTokenHandler(s store.Store) http.HandlerFunc {
 		}
 
 		var payload TokenGeneratePayload
+		// Reject malformed or extra input before interpreting credential policy.
 		if err := decodeOneStrictJSON(r.Body, &payload); err != nil {
 			recordTokenMutationError(span, applifecycle.OutcomeInvalid)
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
 		expiresIn, err := tokenExpiryDuration(payload.ExpiresIn)
+		// Invalid lifetimes must not silently create non-expiring credentials.
 		if err != nil {
 			recordTokenMutationError(span, applifecycle.OutcomeInvalid)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		bindings, err := tokenBindingRequests(payload.Bindings)
+		// A partial connected-user binding must never authorize issuance.
 		if err != nil {
 			recordTokenMutationError(span, applifecycle.OutcomeInvalid)
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -86,15 +94,9 @@ func GenerateAppTokenHandler(s store.Store) http.HandlerFunc {
 			BindingMode: payload.BindingMode, Bindings: bindings,
 			IssuedBySubjectID: optionalActorID(actor.SubjectID), IssuedByCredentialID: optionalActorID(actor.CredentialID),
 		})
+		// Failure never reveals a generated plaintext or changes an existing token.
 		if err != nil {
-			if errors.Is(err, applifecycle.ErrTokenPolicyInvalid) || errors.Is(err, store.ErrAppTokenBindingInvalid) {
-				recordTokenMutationError(span, applifecycle.OutcomeInvalid)
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			recordTokenMutationError(span, applifecycle.OutcomeFailed)
-			slog.ErrorContext(ctx, "failed to create app token", slog.String("error_code", "token_persistence_failed"))
-			http.Error(w, "failed to create token", http.StatusInternalServerError)
+			writeAppTokenGenerationError(w, ctx, span, err)
 			return
 		}
 		span.SetAttributes(attribute.String("outcome", string(applifecycle.OutcomeCreated)))
@@ -113,6 +115,30 @@ func GenerateAppTokenHandler(s store.Store) http.HandlerFunc {
 			"created_at":    tok.CreatedAt,
 		})
 	}
+}
+
+// writeAppTokenGenerationError projects only reviewed domain failures; unknown
+// persistence errors remain generic and never expose SQL or credential material.
+func writeAppTokenGenerationError(w http.ResponseWriter, ctx context.Context, span trace.Span, err error) {
+	// A duplicate label is a caller-resolvable conflict, not a database outage.
+	if errors.Is(err, store.ErrAppTokenNameConflict) {
+		recordTokenMutationError(span, applifecycle.OutcomeConflict)
+		writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+			status: http.StatusConflict, code: "app_token_name_conflict", category: "conflict",
+			message:     "A token with this name already exists for this app.",
+			remediation: "Choose a different token name, or explicitly revoke the existing token before reusing its name. Existing token plaintext cannot be retrieved.",
+		}, ctx)
+		return
+	}
+	// Policy and binding validation retain their existing shared SDK/MCP contract.
+	if errors.Is(err, applifecycle.ErrTokenPolicyInvalid) || errors.Is(err, store.ErrAppTokenBindingInvalid) {
+		recordTokenMutationError(span, applifecycle.OutcomeInvalid)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	recordTokenMutationError(span, applifecycle.OutcomeFailed)
+	slog.ErrorContext(ctx, "failed to create app token", slog.String("error_code", "token_persistence_failed"))
+	http.Error(w, "failed to create token", http.StatusInternalServerError)
 }
 
 func tokenBindingRequests(payload []TokenBindingPayload) ([]store.AppTokenBindingRequest, error) {

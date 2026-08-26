@@ -32,6 +32,7 @@ var (
 	ErrAppVersionExists       = errors.New("app version already exists in family")
 	ErrAppDeactivated         = errors.New("app is deactivated")
 	ErrAppTokenNotFound       = errors.New("app token not found")
+	ErrAppTokenNameConflict   = errors.New("a token with this name already exists for this app")
 	ErrAppTokenBindingInvalid = errors.New("app token binding is invalid or unavailable")
 	ErrAppTombstoneExists     = errors.New("app version was deactivated and cannot be reused")
 	ErrAppKindInvalid         = errors.New("app kind is invalid")
