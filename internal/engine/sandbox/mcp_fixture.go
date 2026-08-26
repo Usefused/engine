@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 )
 
@@ -12,21 +13,24 @@ import (
 // intentionally reuses canonical execution-contract types so search_docs and
 // call validation cannot drift into a second request or response schema.
 type FixtureOperation struct {
-	OperationID    string                 `json:"operation_id"`
-	ServiceID      string                 `json:"service_id"`
-	Name           string                 `json:"name"`
-	Description    string                 `json:"description"`
-	Method         string                 `json:"method"`
-	Path           string                 `json:"path"`
-	Parameters     []models.Parameter     `json:"parameters"`
-	RequestContent *models.RequestContent `json:"request_content,omitempty"`
-	Responses      models.Responses       `json:"responses"`
+	ServiceVersionID string                 `json:"service_version_id,omitempty"`
+	OperationID      string                 `json:"operation_id"`
+	ServiceID        string                 `json:"service_id"`
+	Name             string                 `json:"name"`
+	Description      string                 `json:"description"`
+	Method           string                 `json:"method"`
+	Path             string                 `json:"path"`
+	Parameters       []models.Parameter     `json:"parameters"`
+	RequestContent   *models.RequestContent `json:"request_content,omitempty"`
+	Responses        models.Responses       `json:"responses"`
 }
 
 // Fixture is the app-scoped operation catalogue serialized for the shared MCP runtime.
 type Fixture struct {
-	Operations        []FixtureOperation                     `json:"operations"`
-	UnifiedOperations *models.SDKUnifiedOperationDescriptors `json:"unified_operations,omitempty"`
+	// Version-keyed dictionaries are serialized once for lazy schema documentation lookup.
+	SchemaDefinitions map[string]map[string]fusedobject.SchemaContract `json:"schema_definitions,omitempty"`
+	Operations        []FixtureOperation                               `json:"operations"`
+	UnifiedOperations *models.SDKUnifiedOperationDescriptors           `json:"unified_operations,omitempty"`
 
 	// byOperationID is built once so repeated tool calls do not scan the app's
 	// complete selected operation set.

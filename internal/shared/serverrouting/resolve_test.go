@@ -17,20 +17,29 @@ func TestValidateResolvedHostAnchor(t *testing.T) {
 		name     string
 		template string
 		resolved string
+		values   map[string]string
 		supplied map[string]bool
 		wantErr  bool
 	}{
-		{name: "Sendbird anchor", template: "https://api-{app_id}.sendbird.com", resolved: "https://api-sandbox-123.sendbird.com", supplied: map[string]bool{"app_id": true}},
-		{name: "path only", template: "https://api.example.com/{tenant}", resolved: "https://api.example.com/acme", supplied: map[string]bool{"tenant": true}},
-		{name: "whole host", template: "https://{host}", resolved: "https://evil.example", supplied: map[string]bool{"host": true}, wantErr: true},
-		{name: "protocol-relative whole host", template: "//{host}", resolved: "https://evil.example", supplied: map[string]bool{"host": true}, wantErr: true},
-		{name: "public suffix", template: "https://{tenant}.com", resolved: "https://evil.com", supplied: map[string]bool{"tenant": true}, wantErr: true},
-		{name: "private suffix", template: "https://{tenant}.github.io", resolved: "https://evil.github.io", supplied: map[string]bool{"tenant": true}, wantErr: true},
+		{name: "Sendbird anchor", template: "https://api-{app_id}.sendbird.com", resolved: "https://api-sandbox-123.sendbird.com", values: map[string]string{"app_id": "sandbox-123"}, supplied: map[string]bool{"app_id": true}},
+		{name: "path only", template: "https://api.example.com/{tenant}", resolved: "https://api.example.com/acme", values: map[string]string{"tenant": "acme"}, supplied: map[string]bool{"tenant": true}},
+		{name: "whole host", template: "https://{host}", resolved: "https://evil.example", values: map[string]string{"host": "evil.example"}, supplied: map[string]bool{"host": true}, wantErr: true},
+		{name: "protocol-relative whole host", template: "//{host}", resolved: "https://evil.example", values: map[string]string{"host": "evil.example"}, supplied: map[string]bool{"host": true}, wantErr: true},
+		{name: "public suffix", template: "https://{tenant}.com", resolved: "https://evil.com", values: map[string]string{"tenant": "evil"}, supplied: map[string]bool{"tenant": true}, wantErr: true},
+		{name: "private suffix", template: "https://{tenant}.github.io", resolved: "https://evil.github.io", values: map[string]string{"tenant": "evil"}, supplied: map[string]bool{"tenant": true}, wantErr: true},
+		{name: "templated port whole host", template: "https://{host}:{port}", resolved: "https://evil.example:443", values: map[string]string{"host": "evil.example", "port": "443"}, supplied: map[string]bool{"host": true}, wantErr: true},
+		{name: "templated port fixed anchor", template: "https://{tenant}.example.com:{port}", resolved: "https://acme.example.com:443", values: map[string]string{"tenant": "acme", "port": "443"}, supplied: map[string]bool{"tenant": true}},
+		{name: "only port dynamic", template: "https://api.example.com:{port}", resolved: "https://api.example.com:443", values: map[string]string{"port": "443"}, supplied: map[string]bool{"port": true}},
+		{name: "undeclared host", template: "https://{host}:{port}", resolved: "https://evil.example:443", values: map[string]string{"port": "443"}, supplied: map[string]bool{"host": true}, wantErr: true},
 	}
 	// Table coverage keeps every origin decision on the same shared function.
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := ValidateResolvedHostAnchor(test.template, test.resolved, test.supplied)
+			variables := make([]Variable, 0, len(test.values))
+			for name := range test.values {
+				variables = append(variables, Variable{Name: name})
+			}
+			err := ValidateResolvedHostAnchor(test.template, test.resolved, variables, test.values, test.supplied)
 			// Error presence is the contract; messages intentionally omit host data.
 			if (err != nil) != test.wantErr {
 				t.Fatalf("ValidateResolvedHostAnchor error = %v, wantErr=%t", err, test.wantErr)

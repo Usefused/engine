@@ -1,5 +1,26 @@
 @import "tailwindcss";
 
+/* Receipt navigation preserves the current inspector instead of stacking animated dialogs. */
+@keyframes receipt-drawer-enter {
+  from { transform: translateX(24px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+@keyframes receipt-view-forward {
+  from { transform: translateX(16px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+@keyframes receipt-view-backward {
+  from { transform: translateX(-16px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.receipt-drawer-enter { animation: receipt-drawer-enter 180ms ease-out; }
+.receipt-view-forward { animation: receipt-view-forward 160ms ease-out; }
+.receipt-view-backward { animation: receipt-view-backward 160ms ease-out; }
+/* The same navigation remains usable when motion would be distracting or uncomfortable. */
+@media (prefers-reduced-motion: reduce) {
+  .receipt-drawer-enter, .receipt-view-forward, .receipt-view-backward { animation: none; }
+}
+
 /* Brand tokens lifted from the marketing homepage (homepage/app/components/
    MarketingChrome.jsx, AccessRequestSection.jsx) so the embedded Engine UI
    reads as the same product, not a separate internal tool. Referenced via

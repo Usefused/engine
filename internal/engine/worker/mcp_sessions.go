@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/mcpsession"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/messaging"
 	"github.com/Usefused/engine/internal/shared/models"
@@ -36,17 +37,20 @@ func StartMCPSessionWorker(ctx context.Context, engineStore store.Store, natsCli
 	slog.InfoContext(ctx, "Started MCP session consumer")
 }
 
+// persistMCPSessionMessage acknowledges poison documents and retries storage without logging private provenance.
 func persistMCPSessionMessage(ctx context.Context, engineStore store.Store, message *nats.Msg) {
 	thread, _ := observability.Start(ctx, "Worker: MCP Session", "", "worker:mcp_session")
 	defer thread.Complete(ctx, "Processed")
 	session, err := decodeMCPSession(message.Data, time.Now())
+	// Invalid documents cannot recover through redelivery and must not expose raw client metadata.
 	if err != nil {
-		slog.WarnContext(ctx, "Discarding invalid MCP session event", slog.Any("error", err))
+		slog.WarnContext(ctx, "Discarding invalid MCP session event")
 		_ = message.Ack()
 		return
 	}
+	// Storage errors may quote private values; emit a fixed diagnostic and retry the canonical event.
 	if err := engineStore.UpsertMCPSession(ctx, &session); err != nil {
-		slog.ErrorContext(ctx, "Failed to persist MCP session", slog.Any("error", err))
+		slog.ErrorContext(ctx, "Failed to persist MCP session")
 		_ = message.Nak()
 		return
 	}
@@ -54,6 +58,7 @@ func persistMCPSessionMessage(ctx context.Context, engineStore store.Store, mess
 }
 
 type mcpSessionEventData struct {
+	mcpsession.Metadata
 	AppID           string    `json:"app_id"`
 	AppTokenID      string    `json:"app_token_id"`
 	SessionID       string    `json:"session_id"`
@@ -64,31 +69,39 @@ type mcpSessionEventData struct {
 	LastActivityAt  time.Time `json:"last_activity_at"`
 }
 
+// decodeMCPSession preserves producer chronology and admits only bounded lifecycle metadata.
 func decodeMCPSession(payload []byte, occurredAt time.Time) (models.MCPSession, error) {
 	data, err := decodeMCPSessionEventData(payload)
+	// Strict decoding prevents producer drift from silently changing history.
 	if err != nil {
 		return models.MCPSession{}, err
 	}
 	appID, tokenID, err := parseMCPSessionEventIDs(data)
+	// Only well-formed relational identifiers can own a session row.
 	if err != nil {
 		return models.MCPSession{}, err
 	}
-	if !validMCPSessionEventData(data) {
+	// Worker admission shares provenance limits with the transport producer.
+	if !validMCPSessionEventData(data) || !data.Metadata.Valid() {
 		return models.MCPSession{}, errors.New("mcp session event is invalid")
 	}
 	recordedAt := occurredAt
+	// Historical producers without timestamps retain their prior arrival-time fallback.
 	if !data.Timestamp.IsZero() {
 		// Persist producer time so JetStream delivery delay does not distort
 		// session duration or token-use history after a worker restart.
 		recordedAt = data.Timestamp.UTC()
 	}
 	protocolVersion, err := normalizedMCPProtocolVersion(data.ProtocolVersion)
+	// Invalid protocol claims must be rejected before entering the durable store.
 	if err != nil {
 		return models.MCPSession{}, err
 	}
 	lastActivityAt := recordedAt
+	// Explicit activity time is evidence rather than a worker-generated approximation.
 	if !data.LastActivityAt.IsZero() {
 		lastActivityAt = data.LastActivityAt.UTC()
+		// Producer chronology cannot place activity beyond the lifecycle transition.
 		if lastActivityAt.After(recordedAt) {
 			return models.MCPSession{}, errors.New("mcp session activity is after the event")
 		}
@@ -98,7 +111,9 @@ func decodeMCPSession(payload []byte, occurredAt time.Time) (models.MCPSession, 
 		AppID: appID, AppTokenID: tokenID, SessionID: data.SessionID,
 		ProtocolVersion: protocolVersion,
 		StartedAt:       recordedAt, LastActivityAt: lastActivityAt,
+		ClientName: data.ClientName, ClientVersion: data.ClientVersion, InitialClientIP: data.InitialClientIP,
 	}
+	// Initialization updates metadata, but only termination closes the session.
 	if data.Type == "ended" {
 		session.EndedAt = &recordedAt
 		session.EndReason = data.EndReason
@@ -130,11 +145,14 @@ func parseMCPSessionEventIDs(data mcpSessionEventData) (uuid.UUID, uuid.UUID, er
 	return appID, tokenID, err
 }
 
+// validMCPSessionEventData keeps the existing lifecycle stream closed over supported transitions.
 func validMCPSessionEventData(data mcpSessionEventData) bool {
+	// Opaque session identity is required even when client metadata is absent.
 	if data.SessionID == "" {
 		return false
 	}
-	if data.Type == "started" {
+	// SSE discovers clientInfo after connection start, without creating another session row.
+	if data.Type == "started" || data.Type == "initialized" {
 		return data.EndReason == ""
 	}
 	return data.Type == "ended" && validMCPSessionEndReason(data.EndReason)

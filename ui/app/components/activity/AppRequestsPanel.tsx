@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { ChevronLeft, ChevronRight, Clock, Loader2 } from "lucide-react";
-import { ExecutionDetails } from "~/components/AnalyticsTab";
-import { ExecutionDetailsDrawer } from "~/components/activity/ExecutionDetailsDrawer";
+import { AppExecutionInspector } from "~/components/activity/AppExecutionInspector";
 import { activateReceiptRow } from "~/components/activity/receiptRow";
 import { api, type EngineExecutionEventEntry } from "~/lib/api";
 import { appActivityIssue, type AppActivityIssue } from "~/lib/app-activity-error";
+import { receiptRequestLabel } from "~/lib/unified-receipt";
 
 type RequestStatus = "all" | "success" | "failed";
 
@@ -28,7 +28,7 @@ function RequestRow({ event, onSelect }: { event: EngineExecutionEventEntry; onS
       <td className="px-4 py-3">
         <div className="font-medium text-slate-800">{requestLabel(event)}</div>
         <div className="mt-1 font-mono text-xs text-slate-500">
-          {[event.http_method, event.request_path].filter(Boolean).join(" ") || event.direction}
+          {receiptRequestLabel(event)}
         </div>
       </td>
       <td className="px-4 py-3 text-sm text-slate-600">
@@ -55,7 +55,7 @@ function RequestRow({ event, onSelect }: { event: EngineExecutionEventEntry; onS
 // forcing a wide column layout onto touch-sized screens.
 function RequestCard({ event, onSelect }: { event: EngineExecutionEventEntry; onSelect: (event: EngineExecutionEventEntry) => void }) {
   const failed = event.status === "failed";
-  const providerRequest = [event.http_method, event.request_path].filter(Boolean).join(" ") || event.direction;
+  const providerRequest = receiptRequestLabel(event);
   return (
     <button type="button" aria-haspopup="dialog" aria-label={`Inspect ${requestLabel(event)}`} onClick={() => onSelect(event)} className="block w-full p-4 text-left transition-colors hover:bg-slate-50 focus:bg-slate-50 focus:outline-none">
       <div className="flex min-w-0 items-start justify-between gap-3">
@@ -125,7 +125,7 @@ export function AppRequestsPanel({ appId, consumerName, transport }: AppRequests
       <div className="flex flex-col gap-3 border-b border-slate-100 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold text-slate-900">Execution receipts</h3>
-          <p className="mt-0.5 text-xs text-slate-500">Actual requests executed through this {transport === "mcp" ? "MCP server" : "app"}.</p>
+          <p className="mt-0.5 text-xs text-slate-500">Individual and Unified calls through this {transport === "mcp" ? "MCP server" : "app"}. Open a Unified call to inspect its executions.</p>
         </div>
 		<div className="grid w-full grid-cols-1 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:items-center">
 			<select
@@ -186,7 +186,8 @@ export function AppRequestsPanel({ appId, consumerName, transport }: AppRequests
           </div>
         </div>
       ) : null}
-      {selectedEvent ? <ExecutionDetailsDrawer event={selectedEvent} onClose={() => setSelectedEvent(null)}><ExecutionDetails event={selectedEvent} appNames={new Map([[appId, consumerName]])} /></ExecutionDetailsDrawer> : null}
+      {/* One inspector owns the parent/child stack, keeping service receipt rendering shared. */}
+      {selectedEvent ? <AppExecutionInspector key={selectedEvent.id} event={selectedEvent} appId={appId} consumerName={consumerName} onClose={() => setSelectedEvent(null)} /> : null}
     </div>
   );
 }

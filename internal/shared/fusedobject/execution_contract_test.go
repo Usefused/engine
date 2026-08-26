@@ -74,10 +74,12 @@ func TestCanonicalExecutionContractEnvelopePreservesExplicitEmptyArray(t *testin
 // exact GraphQL negotiation set advertised to Registry.
 func TestEngineExecutionContractSupportEncodesExplicitCapabilities(t *testing.T) {
 	payload, err := json.Marshal(EngineExecutionContractSupport())
+	// Negotiation must be representable before comparing the complete supported feature set.
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	want := `{"contract_version":2,"required_capabilities":["auth.http.digest.v1","auth.oauth1.signature.v1","auth.oauth2.multiflow.v1","auth.oauth2.refresh_token_required.v1","auth.oauth2.token_request_media.v1","auth.security.server_selection.v1","connection.resource_discovery.v1","http.methods.extensible.v1","http.multipart.positional.v1","http.parameter.querystring.v1","http.parameter.serialization.v1","http.parameter.serialization.v2","http.request.alternatives.v1","http.response.contracts.v1","http.sequential_media.v1","http.server.named.v1","http.server.precedence.v1","http.upload.workflow.v1","json.schema.contract.v1","pagination.composable.v3","quota.multidimensional.v3","retry.policy.v3","webhook.signature.recipes.v1"]}`
+	want := `{"contract_version":2,"required_capabilities":["auth.http.digest.v1","auth.oauth1.signature.v1","auth.oauth2.multiflow.v1","auth.oauth2.refresh_token_required.v1","auth.oauth2.token_request_media.v1","auth.security.server_selection.v1","connection.resource_discovery.v1","http.methods.extensible.v1","http.multipart.positional.v1","http.parameter.querystring.v1","http.parameter.serialization.v1","http.parameter.serialization.v2","http.request.alternatives.v1","http.response.contracts.v1","http.sequential_media.v1","http.server.named.v1","http.server.precedence.v1","http.upload.workflow.v1","json.schema.contract.v1","json.schema.shared_definitions.v1","pagination.composable.v3","quota.multidimensional.v3","retry.policy.v3","webhook.signature.recipes.v1"]}`
+	// Shared-definition execution is explicitly negotiated rather than inferred from new JSON fields.
 	if string(payload) != want {
 		t.Fatalf("support JSON = %s", payload)
 	}

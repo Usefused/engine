@@ -798,8 +798,21 @@ export interface WebhookAnalyticsSummary {
   total_failed: number;
 }
 
+// UnifiedExecutionStep describes orchestration outcomes without exposing mapped or provider data.
+export interface UnifiedExecutionStep {
+  target: string;
+  phase: "forward" | "rollback";
+  status: "success" | "error" | "skipped";
+  error_code?: string;
+}
+
 export interface EngineExecutionEventEntry {
   id: string;
+  execution_kind?: "physical" | "unified";
+  parent_execution_id?: string;
+  unified_target?: string;
+  execution_phase?: "forward" | "rollback";
+  unified_steps?: UnifiedExecutionStep[];
   trace_id?: string;
   span_id?: string;
   app_family_id?: string;
@@ -862,6 +875,11 @@ export interface EngineExecutionEventEntry {
 
 const engineExecutionEventSelection = `
   id
+  execution_kind
+  parent_execution_id
+  unified_target
+  execution_phase
+  unified_steps { target phase status error_code }
   trace_id
   span_id
   app_family_id
@@ -1552,9 +1570,10 @@ export const api = {
         )
         .then(({ engineExecutionEvents }) => engineExecutionEvents),
 
-    // listAppExecutionEvents scopes receipts to one app version or its family.
+    // listAppExecutionEvents scopes roots or a bounded child page to the same authorized app family.
     listAppExecutionEvents: (params: {
       appId: string;
+      parentExecutionId?: string;
       includeAllVersions?: boolean;
       transport?: string;
       direction?: string;
@@ -1571,8 +1590,8 @@ export const api = {
             total: number;
           };
         }>(
-          `query AppExecutionEvents($appId: String!, $includeAllVersions: Boolean, $transport: String, $direction: String, $status: String, $limit: Int, $offset: Int, $startDate: String, $endDate: String) {
-            appExecutionEvents(app_id: $appId, include_all_versions: $includeAllVersions, transport: $transport, direction: $direction, status: $status, limit: $limit, offset: $offset, start_date: $startDate, end_date: $endDate) {
+          `query AppExecutionEvents($appId: String!, $parentExecutionId: String, $includeAllVersions: Boolean, $transport: String, $direction: String, $status: String, $limit: Int, $offset: Int, $startDate: String, $endDate: String) {
+            appExecutionEvents(app_id: $appId, parent_execution_id: $parentExecutionId, include_all_versions: $includeAllVersions, transport: $transport, direction: $direction, status: $status, limit: $limit, offset: $offset, start_date: $startDate, end_date: $endDate) {
               total
               items {
                 ${engineExecutionEventSelection}
@@ -1581,6 +1600,7 @@ export const api = {
           }`,
           {
             appId: params.appId,
+            parentExecutionId: params.parentExecutionId ?? null,
             includeAllVersions: params.includeAllVersions ?? false,
             transport: params.transport || null,
             direction: params.direction || null,

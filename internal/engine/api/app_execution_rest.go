@@ -11,6 +11,7 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
@@ -432,8 +433,10 @@ func restPhysicalRequestHash(request restExecutionRequest, fallback []byte) stri
 }
 
 // executeRESTUnified reuses the canonical preflight and scheduler while
-// retaining only bounded wrapper telemetry and physical child receipts.
+// retaining the same bounded parent/child audit metadata as SDK and MCP calls.
 func (s *EngineGRPCServer) executeRESTUnified(ctx context.Context, scope *store.AppRuntime, identity auth.RuntimeIdentity, request restExecutionRequest, plan restExecutionPlan, idempotencyKey string) (response restExecutionSuccess, requestErr *restExecutionError) {
+	started := time.Now()
+	// Logical callers must place physical controls on their individual targets.
 	if request.Selector != nil || request.Pagination != nil {
 		return restExecutionSuccess{}, newRESTExecutionError(http.StatusBadRequest, "invalid_request", "selector and pagination apply only to physical operations")
 	}
@@ -451,28 +454,27 @@ func (s *EngineGRPCServer) executeRESTUnified(ctx context.Context, scope *store.
 	var execErr error
 	defer func() { finishUnifiedSpan(span, stage, protoResponse, execErr) }()
 	call, execErr := s.prepareUnifiedCall(ctx, scope, identity, protoRequest, models.EngineExecutionTransportREST)
+	// Whole-call validation must finish before any audit parent or provider dispatch.
 	if execErr != nil {
 		return restExecutionSuccess{}, restErrorFromExecution(execErr)
 	}
 	stage = "dispatch"
-	graph := s.executeUnifiedGraph(ctx, call)
-	output, outputCode := projectUnifiedOperationOutput(call.input, call.output, graph.outputs)
-	protoResponse = &enginev1.ExecuteUnifiedResponse{
-		Results: graph.results, RollbackResults: graph.rollbacks,
-		OutputJson: output, OutputErrorCode: outputCode,
-	}
+	protoResponse = s.executePreparedUnified(ctx, call, started)
+	output, outputCode := protoResponse.GetOutputJson(), protoResponse.GetOutputErrorCode()
+	// Output mapping errors remain visible on the already-published logical receipt.
 	if call.output != nil && outputCode != "" {
 		return restExecutionSuccess{}, newRESTExecutionErrorWithDetails(
 			http.StatusUnprocessableEntity, outputCode, "Unified output could not be produced",
-			projectRESTUnifiedDiagnostics(graph.results),
+			projectRESTUnifiedDiagnostics(protoResponse.GetResults()),
 		)
 	}
+	// Authored projections retain the existing direct REST response contract.
 	if call.output != nil {
 		return restExecutionSuccess{Direct: json.RawMessage(output)}, nil
 	}
 	return restExecutionSuccess{
 		AppID: identity.AppID.String(), Operation: plan.operation, Kind: plan.kind,
-		Results: projectRESTUnifiedResults(graph.results), Rollbacks: projectRESTUnifiedRollbacks(graph.rollbacks),
+		Results: projectRESTUnifiedResults(protoResponse.GetResults()), Rollbacks: projectRESTUnifiedRollbacks(protoResponse.GetRollbackResults()),
 	}, nil
 }
 

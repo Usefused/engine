@@ -126,36 +126,47 @@ func (p *Publisher) Publish(ctx context.Context, event models.EngineExecutionEve
 	return nil
 }
 
+// normalize preserves historical producer defaults without inventing provider attempts for logical calls.
 func normalize(event models.EngineExecutionEvent) models.EngineExecutionEvent {
+	// Producer-assigned IDs keep retries idempotent; older callers still receive a unique receipt.
 	if event.ID == uuid.Nil {
 		event.ID = uuid.New()
 	}
+	// Outbound is the historical default for SDK/MCP callers.
 	if event.Direction == "" {
 		event.Direction = models.EngineExecutionDirectionOutbound
 	}
-	if event.AttemptCount <= 0 {
+	event.ExecutionKind = Kind(event)
+	// Unified envelopes summarize work and must never masquerade as a provider attempt.
+	if event.AttemptCount <= 0 && event.ExecutionKind == "physical" {
 		event.AttemptCount = 1
 	}
+	// Publication time is diagnostic metadata, not the execution clock.
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now()
 	}
 	return event
 }
 
+// validate rejects malformed receipts before they enter the canonical durable stream.
 func validate(event models.EngineExecutionEvent) error {
+	// Transport is necessary to enforce the correct runtime identity boundary.
 	if event.Transport == "" {
 		return errors.New("execution event transport is required")
 	}
+	// App-authenticated receipts must identify the exact immutable caller.
 	if err := validateAppIdentity(event); err != nil {
 		return err
 	}
+	// The receipt outcome vocabulary is intentionally smaller than provider error vocabularies.
 	if event.Status != models.EngineExecutionStatusSuccess && event.Status != models.EngineExecutionStatusFailed {
 		return fmt.Errorf("invalid execution event status %q", event.Status)
 	}
+	// Missing execution clocks cannot be repaired by the persistence worker.
 	if event.StartedAt.IsZero() || event.EndedAt.IsZero() {
 		return errors.New("execution event timestamps are required")
 	}
-	return nil
+	return ValidateUnifiedMetadata(event)
 }
 
 func validateAppIdentity(event models.EngineExecutionEvent) error {
@@ -178,6 +189,7 @@ func appTransport(transport string) bool {
 		transport == models.EngineExecutionTransportREST
 }
 
+// recordPublish audits delivery using bounded metadata; logical spans never acquire raw error text.
 func recordPublish(ctx context.Context, event models.EngineExecutionEvent, publishErr error) {
 	span := trace.SpanFromContext(ctx)
 	attrs := []attribute.KeyValue{
@@ -185,6 +197,7 @@ func recordPublish(ctx context.Context, event models.EngineExecutionEvent, publi
 		attribute.String("execution.transport", event.Transport),
 		attribute.String("execution.direction", event.Direction),
 		attribute.String("execution.status", event.Status),
+		attribute.String("execution.kind", Kind(event)),
 	}
 	if event.ServiceID != uuid.Nil {
 		attrs = append(attrs, attribute.String("service.id", event.ServiceID.String()))
@@ -196,8 +209,12 @@ func recordPublish(ctx context.Context, event models.EngineExecutionEvent, publi
 			attribute.String("app.version", event.AppVersion),
 		)
 	}
+	// A publish failure is observable but cannot change an already completed provider outcome.
 	if publishErr != nil {
-		span.RecordError(publishErr)
+		// Logical telemetry excludes raw errors, including infrastructure exception messages.
+		if Kind(event) == "physical" {
+			span.RecordError(publishErr)
+		}
 		span.SetStatus(codes.Error, "execution event publication failed")
 		attrs = append(attrs, attribute.Bool("execution.persist_queued", false))
 	} else {

@@ -85,7 +85,7 @@ function main(): void {
         section: z
           .custom(isDocumentationSection, "invalid public documentation section")
           .optional()
-          .describe("One exact advertised section: parameters, request, response:<status>, input, targets, or output."),
+          .describe("One exact advertised section: parameters, request, response:<status>, input, targets, output, or definitions. Shared #/$defs references use the definitions section with schemaPath /<escaped-name>/raw."),
         schemaPath: z
           .string()
           .max(2048)

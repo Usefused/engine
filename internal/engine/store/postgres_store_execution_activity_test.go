@@ -47,6 +47,7 @@ func TestEngineExecutionWhereClauseScopesAppFamilyAndVersionInSQL(t *testing.T) 
 	}
 }
 
+// TestEngineExecutionWhereClauseScopesWholeAppFamilyInSQL locks tenant and provider-accounting predicates together.
 func TestEngineExecutionWhereClauseScopesWholeAppFamilyInSQL(t *testing.T) {
 	accountID := uuid.New()
 	appFamilyID := uuid.New()
@@ -54,9 +55,11 @@ func TestEngineExecutionWhereClauseScopesWholeAppFamilyInSQL(t *testing.T) {
 		AccountID: accountID, AppFamilyID: appFamilyID,
 	})
 
-	if whereClause != "WHERE account_id = $1 AND app_family_id = $2" {
+	// Aggregate reads must never count the logical envelope in addition to its children.
+	if whereClause != "WHERE account_id = $1 AND app_family_id = $2 AND execution_kind = 'physical'" {
 		t.Fatalf("where clause = %s, want family scope", whereClause)
 	}
+	// Kind is a server-owned constant, not an untrusted query parameter.
 	if !reflect.DeepEqual(args, []any{accountID, appFamilyID}) {
 		t.Fatalf("args = %#v", args)
 	}

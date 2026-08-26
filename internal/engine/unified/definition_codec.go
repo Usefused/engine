@@ -214,9 +214,11 @@ func prepareBindingsForDecode(values []wireBindingDefinition) ([]wireBindingDefi
 
 // admitDefinitionTarget charges shared limits and rejects unsupported immutable Unified definitions shapes before allocation grows.
 func admitDefinitionTarget(target string, previous []string, index int) error {
-	if target == "" || len(target) > maxDefinitionTargetBytes || strings.TrimSpace(target) != target {
+	// Old immutable definitions must not dispatch an identity the receipt contract cannot preserve.
+	if !ValidPublicName(target, maxDefinitionTargetBytes) {
 		return definitionError("invalid public target", nil)
 	}
+	// Canonical ordering makes duplicate identity rejection local and deterministic.
 	if index > 0 && previous[index-1] == target {
 		return definitionError("duplicate public target", nil)
 	}

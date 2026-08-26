@@ -1,4 +1,5 @@
 import { Activity, Clock, ServerCrash, Users, Wrench } from "lucide-react";
+import type { McpSession } from "~/lib/mcp-sessions";
 
 // The per-server activity route owns data loading; this component renders its
 // overview without coupling presentation to GraphQL or route state.
@@ -9,16 +10,7 @@ export interface McpAnalyticsData {
   active_agents: number;
   tool_usage?: Array<{ tool_name: string; count: number; failed: number; average_latency: number }>;
   service_usage?: Array<{ service_name: string; count: number; failed: number; average_latency: number }>;
-  recent_sessions?: Array<{
-    id: string;
-    app_token_id?: string;
-    session_id: string;
-    protocol_version: string;
-    started_at: string;
-    last_activity_at: string;
-    ended_at?: string;
-    end_reason?: string;
-  }>;
+  recent_sessions?: McpSession[];
   token_activity?: Array<{
     id: string;
     name: string;

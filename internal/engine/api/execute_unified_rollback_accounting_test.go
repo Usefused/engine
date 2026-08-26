@@ -13,8 +13,7 @@ import (
 )
 
 // TestExecuteUnifiedRollbackUsesPhysicalAccounting proves a dependency failure
-// produces one separately finalized rollback receipt/usage record and no
-// logical-wrapper accounting record.
+// produces a separately finalized rollback receipt and usage while its parent remains audit-only.
 func TestExecuteUnifiedRollbackUsesPhysicalAccounting(t *testing.T) {
 	var githubCalls atomic.Int32
 	var crmCalls atomic.Int32
@@ -31,8 +30,9 @@ func TestExecuteUnifiedRollbackUsesPhysicalAccounting(t *testing.T) {
 		t.Fatalf("ExecuteUnified() error = %v", err)
 	}
 	assertUnifiedRollbackAccountingResponse(t, response)
-	if githubCalls.Load() != 1 || crmCalls.Load() != 2 || len(events.messages) != 3 {
-		t.Fatalf("physical attempts = github:%d crm:%d events:%d, want one/two/three", githubCalls.Load(), crmCalls.Load(), len(events.messages))
+	// Forward, failed dependent and compensation are three provider calls plus one audit parent.
+	if githubCalls.Load() != 1 || crmCalls.Load() != 2 || len(events.messages) != 4 {
+		t.Fatalf("physical attempts = github:%d crm:%d events:%d, want one/two/four", githubCalls.Load(), crmCalls.Load(), len(events.messages))
 	}
 	assertUnifiedPhysicalEvents(t, events.messages, appID)
 	assertUnifiedUsageOutcomes(t, usage.increments, 3, 2, 1)
@@ -63,8 +63,9 @@ func TestExecuteUnifiedInputMappingFailureIsNotPhysicallyAccounted(t *testing.T)
 		t.Fatalf("ExecuteUnified() error = %v", err)
 	}
 	assertUnifiedInputMappingAccountingResponse(t, response)
-	if githubCalls.Load() != 0 || crmCalls.Load() != 2 || len(events.messages) != 2 {
-		t.Fatalf("physical attempts = github:%d crm:%d events:%d, want zero/two/two", githubCalls.Load(), crmCalls.Load(), len(events.messages))
+	// Mapping failure adds a parent step, not a physical attempt or usage increment.
+	if githubCalls.Load() != 0 || crmCalls.Load() != 2 || len(events.messages) != 3 {
+		t.Fatalf("physical attempts = github:%d crm:%d events:%d, want zero/two/three", githubCalls.Load(), crmCalls.Load(), len(events.messages))
 	}
 	assertUnifiedPhysicalEvents(t, events.messages, appID)
 	assertUnifiedUsageOutcomes(t, usage.increments, 2, 2, 0)

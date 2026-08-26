@@ -1,9 +1,10 @@
-import { Copy, MoreVertical } from "lucide-react";
+import { Copy } from "lucide-react";
 import { type BucketValue, type SecretMeta } from "~/lib/api";
 import { formatExpiry } from "~/lib/buckets";
 import { bucketEntryActions } from "~/lib/bucket-entry-actions";
 import { BucketPagination } from "~/components/buckets/BucketPagination";
 import { StoredSecretKeys } from "~/components/buckets/StoredSecretKeys";
+import { BucketEntryMenu } from "~/components/buckets/BucketEntryMenu";
 
 type BucketEntryListProps = {
   loading: boolean;
@@ -152,13 +153,14 @@ function valueEntry(
   };
 }
 
-/** Shows secret storage identifiers without revealing their values or expanding the row's authorized actions. */
+/** Shows masked secrets and separates authorized row options from the removal request. */
 function EntryRow({ entry, canRemove }: { entry: EntryRowModel; canRemove: boolean }) {
   const actions = bucketEntryActions(entry.kind, entry.value, canRemove);
   return (
     <div className="grid grid-cols-[minmax(0,0.9fr)_minmax(220px,1.4fr)_auto] items-center gap-3 px-4 py-3">
       <div className="flex min-w-0 items-center gap-3">
         <span className="font-mono text-xs text-slate-400">
+          {/* Keep secret and environment rows visually distinct without exposing values. */}
           {entry.kind === "secret" ? "{}" : "[]"}
         </span>
         <div className="min-w-0">
@@ -172,6 +174,7 @@ function EntryRow({ entry, canRemove }: { entry: EntryRowModel; canRemove: boole
       </div>
       <EntryValue entry={entry} />
       <div className="flex items-center gap-1">
+        {/* Only visible environment values may be copied; secret placeholders are not credentials. */}
         {actions.canCopy && (
           <button
             type="button"
@@ -183,17 +186,8 @@ function EntryRow({ entry, canRemove }: { entry: EntryRowModel; canRemove: boole
             <Copy className="h-4 w-4" />
           </button>
         )}
-        {actions.canRemove && (
-          <button
-            type="button"
-            onClick={entry.onRemove}
-            className="rounded-md p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600"
-            aria-label={`Remove ${entry.name}`}
-            title="Remove"
-          >
-            <MoreVertical className="h-4 w-4" />
-          </button>
-        )}
+        {/* Opening options must never perform the destructive route action. */}
+        {actions.canRemove && <BucketEntryMenu name={entry.name} onRemove={entry.onRemove} />}
       </div>
     </div>
   );

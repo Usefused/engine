@@ -117,7 +117,8 @@ func validateUnifiedPaginationIntents(values map[string]*enginev1.PaginationInte
 
 // validateUnifiedName rejects malformed unified name before it can cross the Unified preflight admission boundary.
 func validateUnifiedName(value string, maxBytes int) (string, error) {
-	if value == "" || value != strings.TrimSpace(value) || len(value) > maxBytes {
+	// Admission must match receipt identity bounds before any provider side effect occurs.
+	if !unified.ValidPublicName(value, maxBytes) {
 		return "", errors.New("invalid bounded name")
 	}
 	return value, nil

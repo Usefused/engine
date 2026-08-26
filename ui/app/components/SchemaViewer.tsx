@@ -1,6 +1,8 @@
 import React, { useState } from "react";
 import { ChevronDown, ChevronRight, Loader2, Link2, AlertCircle, Info } from "lucide-react";
 import { api } from "~/lib/api";
+import { planSchemaReference, resolvePlannedSchemaReference, schemaReferenceLabel } from "~/lib/schema-reference";
+import type { ResolvedSchemaReference, SchemaReferencePlan } from "~/lib/schema-reference";
 
 // Loosely-typed JSON Schema node used for the recursive tree renderer below.
 // Deliberately permissive (all fields optional) since real-world schemas from
@@ -24,17 +26,18 @@ export interface JsonSchemaNode {
   allOf?: JsonSchemaNode[];
 }
 
-// Global cache for fetched $ref components
-const componentCache: Record<string, JsonSchemaNode> = {};
-
 interface ComponentResolutionContext {
   componentScope: string;
   allowRemoteRefs: boolean;
+  document: unknown;
+  cache: Map<string, unknown>;
 }
 
 const ComponentResolutionContext = React.createContext<ComponentResolutionContext>({
   componentScope: "",
   allowRemoteRefs: true,
+  document: undefined,
+  cache: new Map<string, unknown>(),
 });
 
 // ─── Type system ──────────────────────────────────────────────────────────────
@@ -57,8 +60,6 @@ function inferType(node: unknown): SchemaType {
   if (["object", "array", "string", "number", "integer", "boolean", "null"].includes(String(obj.type))) return obj.type as SchemaType;
   return "unknown";
 }
-
-const getRefName = (ref: string) => ref.split("/").at(-1) ?? ref;
 
 // ─── Type badge (text-only, tight pill) ──────────────────────────────────────
 
@@ -120,7 +121,7 @@ function TreeGuide({ children }: { children: React.ReactNode }) {
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 interface SchemaViewerProps {
-  schema: JsonSchemaNode | null | undefined;
+  schema: JsonSchemaNode | boolean | null | undefined;
   serviceId: string;
   componentScope?: string;
   allowRemoteRefs?: boolean;
@@ -129,11 +130,14 @@ interface SchemaViewerProps {
 
 // SchemaViewer renders a schema tree and scopes any remote component expansion.
 export function SchemaViewer({ schema, serviceId, componentScope = "latest", allowRemoteRefs = true, isWebhookEvent }: SchemaViewerProps) {
-  if (!schema) {
+  // Leaving a service/version view discards its private definitions instead of retaining a global cache.
+  const cache = React.useMemo(() => new Map<string, unknown>(), [serviceId, componentScope]);
+  // False is an authoritative schema that rejects every value, not missing data.
+  if (schema == null) {
     return <p className="text-[11px] text-slate-500 italic py-1.5">No schema defined.</p>;
   }
   return (
-    <ComponentResolutionContext.Provider value={{ componentScope, allowRemoteRefs }}>
+    <ComponentResolutionContext.Provider key={`${serviceId}:${componentScope}`} value={{ componentScope, allowRemoteRefs, document: schema, cache }}>
       <div className="text-[11px] leading-normal select-text w-full">
         <SchemaNode node={schema} serviceId={serviceId} depth={0} isWebhookEvent={isWebhookEvent} />
       </div>
@@ -361,62 +365,28 @@ function CompositeNode({ node, serviceId, depth, ctype, name, required }: { node
 
 // ─── $ref ─────────────────────────────────────────────────────────────────────
 
-// RefNode expands latest-version component references while historical views fail closed.
+// RefNode expands local pointers before consulting the exact selected version's
+// saved components and preserves the fetched definition's own document scope.
 function RefNode({ refStr, serviceId, name, required }: { refStr: string; serviceId: string; depth: number; name?: string; required?: boolean }) {
-  const [open, setOpen]       = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [data, setData]       = useState<JsonSchemaNode | null>(null);
-  const [err, setErr]         = useState<string | null>(null);
-  const refName = getRefName(refStr);
-  const { componentScope, allowRemoteRefs } = React.useContext(ComponentResolutionContext);
-
-  // toggle resolves a component only when the selected contract shares the latest component scope.
-  const toggle = async () => {
-    // If already open, collapse
-    if (open) { setOpen(false); return; }
-    // Open immediately so loading state is visible
-    setOpen(true);
-    const key = `${serviceId}:${componentScope}:${refName}`;
-    // Cache hit — data already set, nothing more to do
-    if (componentCache[key]) { setData(componentCache[key]); return; }
-    // Fetch
-    setLoading(true);
-    setErr(null);
-    try {
-      const res = await api.graphql<{ getServiceComponent: { id: string; name: string; schema: JsonSchemaNode } | null }>(`
-        query GetServiceComponent($serviceId: String!, $name: String!) {
-          getServiceComponent(serviceId: $serviceId, name: $name) { id name schema }
-        }
-      `, { serviceId, name: refName });
-      const schema = res.getServiceComponent?.schema;
-      if (schema) {
-        componentCache[key] = schema;
-        // Setting data while open=true → React will render it immediately, no extra click needed
-        setData(schema);
-      } else {
-        setErr("Not found");
-      }
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Failed");
-    } finally {
-      setLoading(false);
-    }
-  };
+  const context = React.useContext(ComponentResolutionContext);
+  const plan = planSchemaReference(context.document, refStr);
+  const unavailable = unavailableSchemaReference(plan, context);
+  const { open, loading, data, err, toggle } = useSchemaReference(refStr, serviceId, context, plan);
 
   return (
     <div>
-      <Row name={name} required={required} onToggle={allowRemoteRefs ? toggle : undefined} expanded={open}>
+      <Row name={name} required={required} onToggle={unavailable ? undefined : toggle} expanded={open}>
         <div className="flex items-center gap-1.5 flex-wrap">
           <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium font-mono leading-none ${BADGE.ref}`}>
             <Link2 className="w-2.5 h-2.5 shrink-0" />
-            {refName}
+            {schemaReferenceLabel(refStr)}
           </span>
           {loading && <Loader2 className="w-2.5 h-2.5 text-indigo-400 animate-spin shrink-0" />}
         </div>
       </Row>
-      {!allowRemoteRefs && (
+      {unavailable && (
         <p className="ml-6 text-[10px] italic text-slate-500">
-          Reference expansion is unavailable for historical versions.
+          {unavailable}
         </p>
       )}
       {open && (
@@ -430,11 +400,90 @@ function RefNode({ refStr, serviceId, name, required }: { refStr: string; servic
             <p className="text-slate-400 text-[10px] italic py-1">Loading…</p>
           )}
           {/* depth=0 so the fetched schema always auto-opens regardless of nesting level */}
-          {data && <SchemaNode node={data} serviceId={serviceId} depth={0} />}
+          {data && (
+            <ComponentResolutionContext.Provider value={{ ...context, document: data.document }}>
+              <SchemaNode node={data.schema} serviceId={serviceId} depth={0} />
+            </ComponentResolutionContext.Provider>
+          )}
         </TreeGuide>
       )}
     </div>
   );
+}
+
+// unavailableSchemaReference keeps local definitions usable while respecting
+// a caller's explicit remote-expansion policy and unresolved version state.
+function unavailableSchemaReference(plan: SchemaReferencePlan, context: ComponentResolutionContext): string | null {
+  // Local JSON Pointers never need Registry permissions or a network request.
+  if (plan.kind === "local") return null;
+  // Unsupported URLs and broken local pointers remain visible, not guessed names.
+  if (plan.kind === "unavailable") return plan.reason;
+  // An unresolved selection must not float silently to the current service version.
+  if (!context.componentScope || context.componentScope === "unresolved") return "Select a service version to expand this reference.";
+  // Explicitly disabled remote reads remain disabled even when a component is cached.
+  if (!context.allowRemoteRefs) return "Reference expansion is disabled for this view.";
+  return null;
+}
+
+// useSchemaReference fences asynchronous results so switching versions or local
+// document roots cannot display a response from the previous schema scope.
+function useSchemaReference(refStr: string, serviceId: string, context: ComponentResolutionContext, plan: SchemaReferencePlan) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<ResolvedSchemaReference | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const generation = React.useRef(0);
+  React.useEffect(() => {
+    generation.current++;
+    setOpen(false);
+    setLoading(false);
+    setData(null);
+    setErr(null);
+    // Unmounted or replaced roots must not accept a late component response.
+    return () => { generation.current++; };
+  }, [refStr, serviceId, context.componentScope, context.document]);
+
+  // toggle resolves one visible reference on demand, never recursively prefetching its graph.
+  const toggle = async () => {
+    // Collapsing a row must not issue another component request.
+    if (open) { setOpen(false); return; }
+    const current = ++generation.current;
+    setOpen(true);
+    setLoading(true);
+    setErr(null);
+    try {
+      const resolved = await resolvePlannedSchemaReference(plan, (componentName) => fetchSchemaReferenceComponent(serviceId, context.componentScope, componentName, context.cache));
+      // Only the still-selected document may consume the completed lookup.
+      if (current === generation.current) setData(resolved);
+    } catch (error) {
+      // Old failures must not replace the current version's schema or error state.
+      if (current === generation.current) setErr(error instanceof Error ? error.message : "Schema reference could not be loaded.");
+    } finally {
+      // A previous request must not clear a newer request's loading indicator.
+      if (current === generation.current) setLoading(false);
+    }
+  };
+  return { open, loading, data, err, toggle };
+}
+
+// fetchSchemaReferenceComponent requests one exact decoded component identity
+// and caches only immutable version selections, not the moving latest alias.
+async function fetchSchemaReferenceComponent(serviceId: string, componentScope: string, componentName: string, cache: Map<string, unknown>): Promise<unknown> {
+  const version = componentScope === "latest" ? undefined : componentScope;
+  const key = JSON.stringify([serviceId, version, componentName]);
+  // Map membership distinguishes a saved false schema from a missing definition.
+  if (version && cache.has(key)) return cache.get(key);
+  const res = await api.graphql<{ getServiceComponent: { id: string; name: string; schema: unknown } | null }>(`
+    query GetServiceComponent($serviceId: String!, $name: String!, $version: String) {
+      getServiceComponent(serviceId: $serviceId, name: $name, version: $version) { id name schema }
+    }
+  `, { serviceId, name: componentName, version });
+  const schema = res.getServiceComponent?.schema;
+  // Null means absent; false is a valid restrictive JSON Schema definition.
+  if (schema == null) throw new Error("Schema definition was not found in the selected version.");
+  // Floating latest responses must not survive a subsequent version publication.
+  if (version) cache.set(key, schema);
+  return schema;
 }
 
 // ─── Raw primitives ───────────────────────────────────────────────────────────

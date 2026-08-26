@@ -9,6 +9,7 @@ import (
 	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
 	"github.com/Usefused/engine/internal/shared/retrypolicy"
+	"github.com/Usefused/engine/internal/shared/schemaref"
 	"github.com/Usefused/engine/internal/shared/serverrouting"
 	"github.com/Usefused/engine/internal/shared/signaturepolicy"
 	"github.com/Usefused/engine/internal/shared/workflowcontract"
@@ -108,6 +109,8 @@ type ParameterContent struct {
 }
 
 type SchemaContract struct {
+	SharedDefinitions     bool                         `json:"shared_definitions,omitempty"`
+	DefinitionIndex       *schemaref.Index             `json:"-"`
 	Dialect               string                       `json:"dialect"`
 	Raw                   json.RawMessage              `json:"raw"`
 	ContentHash           string                       `json:"content_hash"`

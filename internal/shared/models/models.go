@@ -22,6 +22,7 @@ import (
 	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
 	"github.com/Usefused/engine/internal/shared/retrypolicy"
+	"github.com/Usefused/engine/internal/shared/schemaref"
 	"github.com/Usefused/engine/internal/shared/serverrouting"
 	"github.com/Usefused/engine/internal/shared/signaturepolicy"
 	"github.com/Usefused/engine/internal/shared/workflowcontract"
@@ -655,6 +656,8 @@ type ParameterContent struct {
 }
 
 type SchemaContract struct {
+	SharedDefinitions     bool                         `json:"shared_definitions,omitempty"`
+	DefinitionIndex       *schemaref.Index             `json:"-"`
 	Dialect               string                       `json:"dialect"`
 	Raw                   json.RawMessage              `json:"raw"`
 	ContentHash           string                       `json:"content_hash"`
@@ -1265,6 +1268,9 @@ type SDKPackageLeaseRenewal struct {
 // ─── MCP Analytics ────────────────────────────────────────────────────────────
 
 type MCPSession struct {
+	ClientName      string     `json:"client_name,omitempty"`
+	ClientVersion   string     `json:"client_version,omitempty"`
+	InitialClientIP string     `json:"initial_client_ip,omitempty"`
 	ID              uuid.UUID  `json:"id"`
 	AppID           uuid.UUID  `json:"app_id"`
 	AppTokenID      uuid.UUID  `json:"app_token_id,omitempty"`
@@ -1335,19 +1341,24 @@ const (
 // compact so user-facing history and dependency checks do not depend on an
 // observability backend being configured.
 type EngineExecutionEvent struct {
-	ID               uuid.UUID `json:"id" db:"id"`
-	TraceID          string    `json:"trace_id,omitempty" db:"trace_id"`
-	SpanID           string    `json:"span_id,omitempty" db:"span_id"`
-	AccountID        uuid.UUID `json:"account_id,omitempty" db:"account_id"`
-	AppFamilyID      uuid.UUID `json:"app_family_id,omitempty" db:"app_family_id"`
-	AppID            uuid.UUID `json:"app_id,omitempty" db:"app_id"`
-	AppTokenID       uuid.UUID `json:"app_token_id,omitempty" db:"app_token_id"`
-	AppVersion       string    `json:"app_version,omitempty" db:"app_version"`
-	Transport        string    `json:"transport" db:"transport"`
-	ProviderProtocol string    `json:"provider_protocol,omitempty" db:"provider_protocol"`
-	Direction        string    `json:"direction" db:"direction"`
-	ServiceID        uuid.UUID `json:"service_id,omitempty" db:"service_id"`
-	ServiceVersionID string    `json:"service_version_id" db:"service_version_id"`
+	ExecutionKind     string                 `json:"execution_kind,omitempty"`
+	ParentExecutionID uuid.UUID              `json:"parent_execution_id,omitempty"`
+	UnifiedTarget     string                 `json:"unified_target,omitempty"`
+	ExecutionPhase    string                 `json:"execution_phase,omitempty"`
+	UnifiedSteps      []UnifiedExecutionStep `json:"unified_steps,omitempty"`
+	ID                uuid.UUID              `json:"id" db:"id"`
+	TraceID           string                 `json:"trace_id,omitempty" db:"trace_id"`
+	SpanID            string                 `json:"span_id,omitempty" db:"span_id"`
+	AccountID         uuid.UUID              `json:"account_id,omitempty" db:"account_id"`
+	AppFamilyID       uuid.UUID              `json:"app_family_id,omitempty" db:"app_family_id"`
+	AppID             uuid.UUID              `json:"app_id,omitempty" db:"app_id"`
+	AppTokenID        uuid.UUID              `json:"app_token_id,omitempty" db:"app_token_id"`
+	AppVersion        string                 `json:"app_version,omitempty" db:"app_version"`
+	Transport         string                 `json:"transport" db:"transport"`
+	ProviderProtocol  string                 `json:"provider_protocol,omitempty" db:"provider_protocol"`
+	Direction         string                 `json:"direction" db:"direction"`
+	ServiceID         uuid.UUID              `json:"service_id,omitempty" db:"service_id"`
+	ServiceVersionID  string                 `json:"service_version_id" db:"service_version_id"`
 	// Service display fields are query-time projections from the Engine-local
 	// workspace snapshot. They never expand the durable execution-event wire.
 	ServiceName            string    `json:"-" db:"-"`
@@ -1404,7 +1415,15 @@ type EngineExecutionEvent struct {
 	CreatedAt           time.Time `json:"created_at" db:"created_at"`
 }
 
-const EngineExecutionEventSchemaVersion = 5
+// UnifiedExecutionStep is bounded execution metadata, never mapped input or provider output.
+type UnifiedExecutionStep struct {
+	Target    string `json:"target"`
+	Phase     string `json:"phase"`
+	Status    string `json:"status"`
+	ErrorCode string `json:"error_code,omitempty"`
+}
+
+const EngineExecutionEventSchemaVersion = 6
 
 // EngineExecutionEventEnvelope keeps the NATS contract versioned independently
 // from the database schema so a malformed or future message can be rejected

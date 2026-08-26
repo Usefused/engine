@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"time"
 
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
@@ -35,6 +36,7 @@ type unifiedPhysicalRuntime interface {
 }
 
 type preparedUnifiedCall struct {
+	receiptID      uuid.UUID
 	identity       auth.RuntimeIdentity
 	appID          uuid.UUID
 	operation      string
@@ -70,10 +72,10 @@ type preparedUnifiedOutput struct {
 	schema  *openapi3.Schema
 }
 
-// ExecuteUnified is a logical wrapper only. Each selected provider still
-// enters the established physical boundary, which remains the single owner of
-// authorization, retry, auditing, usage, and provider dispatch behavior.
+// ExecuteUnified adds a logical receipt while each selected provider still enters
+// the established physical boundary that owns authorization, retries and usage.
 func (s *EngineGRPCServer) ExecuteUnified(ctx context.Context, request *enginev1.ExecuteUnifiedRequest) (response *enginev1.ExecuteUnifiedResponse, err error) {
+	started := time.Now()
 	transport := sandbox.ExecutionTransportFromContext(ctx)
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.unified.execute")
 	span.SetAttributes(
@@ -84,21 +86,18 @@ func (s *EngineGRPCServer) ExecuteUnified(ctx context.Context, request *enginev1
 	defer func() { finishUnifiedSpan(span, stage, response, err) }()
 
 	scope, identity, err := s.authenticatedAppRuntimeFromGRPC(ctx)
+	// Unauthenticated callers cannot manufacture app history.
 	if err != nil {
 		return nil, err
 	}
 	stage = "validation"
 	call, err := s.prepareUnifiedCall(ctx, scope, identity, request, transport)
+	// Rejected definitions/selectors stay pre-dispatch and have no logical execution.
 	if err != nil {
 		return nil, err
 	}
 	stage = "dispatch"
-	graph := s.executeUnifiedGraph(ctx, call)
-	output, outputCode := projectUnifiedOperationOutput(call.input, call.output, graph.outputs)
-	return &enginev1.ExecuteUnifiedResponse{
-		Results: graph.results, RollbackResults: graph.rollbacks,
-		OutputJson: output, OutputErrorCode: outputCode,
-	}, nil
+	return s.executePreparedUnified(ctx, call, started), nil
 }
 
 // boundedUnifiedTargetCount caps target-derived span metadata before any caller value reaches telemetry.

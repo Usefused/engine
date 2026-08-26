@@ -1,7 +1,13 @@
 {
-  "call_count": 83,
-  "document_count": 102,
+  "call_count": 84,
+  "document_count": 103,
   "calls": [
+    {
+      "endpoint": "engine",
+      "file": "app/components/mcp/useMcpSessionsPage.ts",
+      "call": 1,
+      "document_count": 1
+    },
     {
       "endpoint": "registry",
       "file": "app/components/SchemaViewer.tsx",
@@ -503,11 +509,18 @@
   ],
   "documents": [
     {
+      "endpoint": "engine",
+      "file": "app/components/mcp/useMcpSessionsPage.ts",
+      "call": 1,
+      "variant": 1,
+      "document": "\n  query McpSessions($appId: String!, $after: String, $first: Int!) {\n    mcpSessions(app_id: $appId, after: $after, first: $first) {\n      items {\n        id app_token_id session_id protocol_version\n        started_at last_activity_at ended_at end_reason\n        client_name client_version initial_client_ip\n      }\n      next_cursor\n      has_more\n    }\n  }\n"
+    },
+    {
       "endpoint": "registry",
       "file": "app/components/SchemaViewer.tsx",
       "call": 1,
       "variant": 1,
-      "document": "\n        query GetServiceComponent($serviceId: String!, $name: String!) {\n          getServiceComponent(serviceId: $serviceId, name: $name) { id name schema }\n        }\n      "
+      "document": "\n    query GetServiceComponent($serviceId: String!, $name: String!, $version: String) {\n      getServiceComponent(serviceId: $serviceId, name: $name, version: $version) { id name schema }\n    }\n  "
     },
     {
       "endpoint": "registry",
@@ -570,14 +583,14 @@
       "file": "app/lib/api.ts",
       "call": 5,
       "variant": 1,
-      "document": "query EngineExecutionEvents($serviceId: String!, $transport: String, $direction: String, $status: String, $limit: Int, $offset: Int, $startDate: String, $endDate: String) {\n            engineExecutionEvents(service_id: $serviceId, transport: $transport, direction: $direction, status: $status, limit: $limit, offset: $offset, start_date: $startDate, end_date: $endDate) {\n              total\n              items {\n                \n  id\n  trace_id\n  span_id\n  app_family_id\n  app_id\n  app_version\n  app_kind\n  transport\n  provider_protocol\n  direction\n  service_id\n  service_version_id\n  service_name\n  service_slug\n  service_version\n  operation_id\n  webhook_id\n  operation\n  event_name\n  http_method\n  request_path\n  environment\n  environment_source\n  provider_host\n  provider_http_status\n  provider_status_class\n  status\n  failure_reason\n  failure_category\n  failure_code\n  latency_ms\n  provider_latency_ms\n  attempt_count\n  auth_scheme_names\n  auth_scheme_types\n  auth_scheme_count\n  auth_selection_outcome\n  pagination_type\n  pagination_page_count\n  pagination_item_count\n  pagination_byte_count\n  pagination_stop_reason\n  rate_limit_decision\n  rate_limit_policy_count\n  rate_limit_scope_kinds\n  rate_limit_units\n  rate_limit_unit_totals\n  rate_limit_retry_outcome\n  rate_limit_header_outcome\n  request_bytes\n  response_bytes\n  verification_status\n  delivery_status\n  idempotency_replayed\n  started_at\n  ended_at\n  timings { name duration_ms }\n\n              }\n            }\n          }"
+      "document": "query EngineExecutionEvents($serviceId: String!, $transport: String, $direction: String, $status: String, $limit: Int, $offset: Int, $startDate: String, $endDate: String) {\n            engineExecutionEvents(service_id: $serviceId, transport: $transport, direction: $direction, status: $status, limit: $limit, offset: $offset, start_date: $startDate, end_date: $endDate) {\n              total\n              items {\n                \n  id\n  execution_kind\n  parent_execution_id\n  unified_target\n  execution_phase\n  unified_steps { target phase status error_code }\n  trace_id\n  span_id\n  app_family_id\n  app_id\n  app_version\n  app_kind\n  transport\n  provider_protocol\n  direction\n  service_id\n  service_version_id\n  service_name\n  service_slug\n  service_version\n  operation_id\n  webhook_id\n  operation\n  event_name\n  http_method\n  request_path\n  environment\n  environment_source\n  provider_host\n  provider_http_status\n  provider_status_class\n  status\n  failure_reason\n  failure_category\n  failure_code\n  latency_ms\n  provider_latency_ms\n  attempt_count\n  auth_scheme_names\n  auth_scheme_types\n  auth_scheme_count\n  auth_selection_outcome\n  pagination_type\n  pagination_page_count\n  pagination_item_count\n  pagination_byte_count\n  pagination_stop_reason\n  rate_limit_decision\n  rate_limit_policy_count\n  rate_limit_scope_kinds\n  rate_limit_units\n  rate_limit_unit_totals\n  rate_limit_retry_outcome\n  rate_limit_header_outcome\n  request_bytes\n  response_bytes\n  verification_status\n  delivery_status\n  idempotency_replayed\n  started_at\n  ended_at\n  timings { name duration_ms }\n\n              }\n            }\n          }"
     },
     {
       "endpoint": "engine",
       "file": "app/lib/api.ts",
       "call": 6,
       "variant": 1,
-      "document": "query AppExecutionEvents($appId: String!, $includeAllVersions: Boolean, $transport: String, $direction: String, $status: String, $limit: Int, $offset: Int, $startDate: String, $endDate: String) {\n            appExecutionEvents(app_id: $appId, include_all_versions: $includeAllVersions, transport: $transport, direction: $direction, status: $status, limit: $limit, offset: $offset, start_date: $startDate, end_date: $endDate) {\n              total\n              items {\n                \n  id\n  trace_id\n  span_id\n  app_family_id\n  app_id\n  app_version\n  app_kind\n  transport\n  provider_protocol\n  direction\n  service_id\n  service_version_id\n  service_name\n  service_slug\n  service_version\n  operation_id\n  webhook_id\n  operation\n  event_name\n  http_method\n  request_path\n  environment\n  environment_source\n  provider_host\n  provider_http_status\n  provider_status_class\n  status\n  failure_reason\n  failure_category\n  failure_code\n  latency_ms\n  provider_latency_ms\n  attempt_count\n  auth_scheme_names\n  auth_scheme_types\n  auth_scheme_count\n  auth_selection_outcome\n  pagination_type\n  pagination_page_count\n  pagination_item_count\n  pagination_byte_count\n  pagination_stop_reason\n  rate_limit_decision\n  rate_limit_policy_count\n  rate_limit_scope_kinds\n  rate_limit_units\n  rate_limit_unit_totals\n  rate_limit_retry_outcome\n  rate_limit_header_outcome\n  request_bytes\n  response_bytes\n  verification_status\n  delivery_status\n  idempotency_replayed\n  started_at\n  ended_at\n  timings { name duration_ms }\n\n              }\n            }\n          }"
+      "document": "query AppExecutionEvents($appId: String!, $parentExecutionId: String, $includeAllVersions: Boolean, $transport: String, $direction: String, $status: String, $limit: Int, $offset: Int, $startDate: String, $endDate: String) {\n            appExecutionEvents(app_id: $appId, parent_execution_id: $parentExecutionId, include_all_versions: $includeAllVersions, transport: $transport, direction: $direction, status: $status, limit: $limit, offset: $offset, start_date: $startDate, end_date: $endDate) {\n              total\n              items {\n                \n  id\n  execution_kind\n  parent_execution_id\n  unified_target\n  execution_phase\n  unified_steps { target phase status error_code }\n  trace_id\n  span_id\n  app_family_id\n  app_id\n  app_version\n  app_kind\n  transport\n  provider_protocol\n  direction\n  service_id\n  service_version_id\n  service_name\n  service_slug\n  service_version\n  operation_id\n  webhook_id\n  operation\n  event_name\n  http_method\n  request_path\n  environment\n  environment_source\n  provider_host\n  provider_http_status\n  provider_status_class\n  status\n  failure_reason\n  failure_category\n  failure_code\n  latency_ms\n  provider_latency_ms\n  attempt_count\n  auth_scheme_names\n  auth_scheme_types\n  auth_scheme_count\n  auth_selection_outcome\n  pagination_type\n  pagination_page_count\n  pagination_item_count\n  pagination_byte_count\n  pagination_stop_reason\n  rate_limit_decision\n  rate_limit_policy_count\n  rate_limit_scope_kinds\n  rate_limit_units\n  rate_limit_unit_totals\n  rate_limit_retry_outcome\n  rate_limit_header_outcome\n  request_bytes\n  response_bytes\n  verification_status\n  delivery_status\n  idempotency_replayed\n  started_at\n  ended_at\n  timings { name duration_ms }\n\n              }\n            }\n          }"
     },
     {
       "endpoint": "engine",
@@ -1144,7 +1157,7 @@
       "file": "app/routes/integrations.mcp_.$id.analytics.tsx",
       "call": 1,
       "variant": 1,
-      "document": "\n      query($id: String!) {\n        mcpAnalytics(app_id: $id) {\n          total_requests\n          failed_requests\n          average_latency\n          active_agents\n          tool_usage {\n            tool_name\n            count\n            failed\n            average_latency\n          }\n          service_usage {\n            service_name\n            count\n            failed\n            average_latency\n          }\n          recent_sessions {\n            id\n            app_token_id\n            session_id\n            protocol_version\n            started_at\n            last_activity_at\n            ended_at\n            end_reason\n          }\n          token_activity {\n            id\n            name\n            binding_mode\n            status\n            issued_by_subject_id\n            execution_count\n            session_count\n            created_at\n            last_used_at\n            terminated_at\n            termination_reason\n          }\n        }\n      }\n    "
+      "document": "\n      query($id: String!) {\n        mcpAnalytics(app_id: $id) {\n          total_requests\n          failed_requests\n          average_latency\n          active_agents\n          tool_usage {\n            tool_name\n            count\n            failed\n            average_latency\n          }\n          service_usage {\n            service_name\n            count\n            failed\n            average_latency\n          }\n          token_activity {\n            id\n            name\n            binding_mode\n            status\n            issued_by_subject_id\n            execution_count\n            session_count\n            created_at\n            last_used_at\n            terminated_at\n            termination_reason\n          }\n        }\n      }\n    "
     },
     {
       "endpoint": "engine",

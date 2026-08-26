@@ -344,14 +344,17 @@ var mcpServiceUsageType = graphql.NewObject(graphql.ObjectConfig{
 var mcpSessionSummaryType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "MCPSessionSummary",
 	Fields: graphql.Fields{
-		"id":               &graphql.Field{Type: graphql.String},
-		"app_token_id":     &graphql.Field{Type: graphql.String},
-		"session_id":       &graphql.Field{Type: graphql.String},
-		"protocol_version": &graphql.Field{Type: graphql.String},
-		"started_at":       &graphql.Field{Type: graphql.String},
-		"last_activity_at": &graphql.Field{Type: graphql.String},
-		"ended_at":         &graphql.Field{Type: graphql.String},
-		"end_reason":       &graphql.Field{Type: graphql.String},
+		"id":                &graphql.Field{Type: graphql.String},
+		"app_token_id":      &graphql.Field{Type: graphql.String},
+		"session_id":        &graphql.Field{Type: graphql.String},
+		"protocol_version":  &graphql.Field{Type: graphql.String},
+		"started_at":        &graphql.Field{Type: graphql.String},
+		"last_activity_at":  &graphql.Field{Type: graphql.String},
+		"ended_at":          &graphql.Field{Type: graphql.String},
+		"end_reason":        &graphql.Field{Type: graphql.String},
+		"client_name":       &graphql.Field{Type: graphql.String},
+		"client_version":    &graphql.Field{Type: graphql.String},
+		"initial_client_ip": &graphql.Field{Type: graphql.String},
 	},
 })
 
@@ -386,6 +389,7 @@ var mcpAnalyticsDashboardType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
+// newMCPGraphQLSchema keeps session history and execution Activity behind the shared Engine authorization surface.
 func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient, masterKey []byte) (graphql.Schema, error) {
 	publicInsightReader := newPublicInsightReader(registryClient)
 	packageDownloads, _ := registryClient.(sandbox.SDKPackageDownloadCountClient)
@@ -421,6 +425,7 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"mcpServers":                  mcpServersField(s),
 			"mcpServerByName":             mcpServerByNameField(s),
 			"mcpAnalytics":                mcpAnalyticsField(s),
+			"mcpSessions":                 mcpSessionsField(s),
 			"bucketSummaries":             bucketSummariesGraphQLField(s),
 			"bucketSummary":               bucketSummaryGraphQLField(s),
 			"bucketSummaryPage":           bucketSummaryPageGraphQLField(s),
@@ -658,6 +663,7 @@ func mcpAnalyticsField(s store.Store) *graphql.Field {
 	}
 }
 
+// mcpAnalyticsDashboardFields shares the safe session projection with the paginated history endpoint.
 func mcpAnalyticsDashboardFields(d *models.MCPAnalyticsDashboard, tokens []store.AppTokenMetadata) map[string]interface{} {
 	toolUsage := make([]map[string]interface{}, 0, len(d.ToolUsage))
 	for _, u := range d.ToolUsage {
@@ -671,20 +677,7 @@ func mcpAnalyticsDashboardFields(d *models.MCPAnalyticsDashboard, tokens []store
 			"service_name": u.ServiceName, "count": u.Count, "failed": u.Failed, "average_latency": u.AverageLatencyMs,
 		})
 	}
-	sessions := make([]map[string]interface{}, 0, len(d.RecentSessions))
-	for _, sess := range d.RecentSessions {
-		endedAt := ""
-		if sess.EndedAt != nil {
-			endedAt = sess.EndedAt.Format(mcpGraphQLTimeFormat)
-		}
-		sessions = append(sessions, map[string]interface{}{
-			"id": sess.ID.String(), "app_token_id": optionalGraphQLUUIDValue(sess.AppTokenID),
-			"session_id": sess.SessionID, "protocol_version": sess.ProtocolVersion,
-			"started_at":       sess.StartedAt.Format(mcpGraphQLTimeFormat),
-			"last_activity_at": sess.LastActivityAt.Format(mcpGraphQLTimeFormat),
-			"ended_at":         endedAt, "end_reason": sess.EndReason,
-		})
-	}
+	sessions := mcpSessionHistoryFields(d.RecentSessions)
 	return map[string]interface{}{
 		"total_requests": d.TotalRequests, "failed_requests": d.FailedRequests,
 		"average_latency": d.AverageLatencyMs, "active_agents": d.ActiveAgents,

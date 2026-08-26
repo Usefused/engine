@@ -16,6 +16,7 @@ import (
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -471,16 +472,40 @@ func assertUnifiedGitHubSelectors(t *testing.T, calls []unifiedRuntimeCall) {
 func assertUnifiedWrapperTelemetry(t *testing.T, exporter *tracetest.InMemoryExporter, expected map[string]string, forbidden ...string) {
 	t.Helper()
 	for _, span := range exporter.GetSpans() {
+		// Child and publication spans have their own telemetry contracts.
 		if span.Name != "engine.unified.execute" {
 			continue
 		}
-		if len(span.Events) != 0 {
-			t.Fatal("Unified wrapper must not record raw error events")
-		}
+		assertUnifiedReceiptTelemetry(t, span.Events, forbidden)
 		assertUnifiedSpanAttributes(t, span.Attributes, expected, forbidden)
 		return
 	}
 	t.Fatal("engine.unified.execute span was not emitted")
+}
+
+// assertUnifiedReceiptTelemetry admits the canonical delivery event but never raw
+// exceptions, operation names, target names, or request/response material.
+func assertUnifiedReceiptTelemetry(t *testing.T, events []sdktrace.Event, forbidden []string) {
+	t.Helper()
+	allowed := map[string]bool{"execution.event_id": true, "execution.transport": true, "execution.direction": true, "execution.status": true, "execution.kind": true, "app.family_id": true, "app.id": true, "app.version": true, "execution.persist_queued": true}
+	// Only the canonical publisher may add a diagnostic event to the wrapper span.
+	for _, event := range events {
+		if event.Name != "engine.execution.event" {
+			t.Fatal("Unified wrapper recorded a non-canonical event")
+		}
+		for _, attr := range event.Attributes {
+			// An allowlist prevents future publisher metadata from silently expanding logical telemetry.
+			if !allowed[string(attr.Key)] {
+				t.Fatalf("Unified receipt telemetry emitted unexpected attribute %q", attr.Key)
+			}
+			for _, value := range forbidden {
+				// Synthetic sentinels stand in for user/provider content without printing any payload.
+				if strings.Contains(attr.Value.Emit(), value) {
+					t.Fatal("Unified receipt telemetry contains forbidden material")
+				}
+			}
+		}
+	}
 }
 
 // assertUnifiedSpanAttributes compares the wrapper allowlist while rejecting

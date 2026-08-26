@@ -3,13 +3,13 @@ package sandbox
 import (
 	"errors"
 	"mime"
-	"net/url"
 	"regexp"
 	"strings"
 
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/schemacontract"
+	"github.com/Usefused/engine/internal/shared/serverrouting"
 )
 
 var runtimeMethod = regexp.MustCompile(`^[!#$%&'*+.^_` + "`" + `|~0-9A-Za-z-]+$`)
@@ -125,19 +125,23 @@ func validateOperationServers(servers fusedobject.Servers) error {
 	return nil
 }
 
+// validateOperationServer admits routing templates without treating unresolved
+// provider variables as literal URL syntax or requiring tenant credentials early.
 func validateOperationServer(server fusedobject.Server) error {
 	raw := strings.TrimSpace(server.URL)
+	// Bound authored input before variable substitution can enlarge its URL.
 	if raw == "" || len(raw) > 2048 || strings.ContainsAny(raw, "\r\n") {
 		return errors.New("runtime operation server URL is invalid")
 	}
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return errors.New("runtime operation server URL is invalid")
-	}
+	// Environment selectors remain bounded independently from routing variables.
 	if len(server.Name) > 128 || strings.ContainsAny(server.Name, "\r\n") {
 		return errors.New("runtime operation server name is invalid")
 	}
-	return validateRuntimeServers(fusedobject.Servers{server})
+	// Preserve exact declaration, duplicate, and enum checks before any expansion.
+	if err := validateRuntimeServers(fusedobject.Servers{server}); err != nil {
+		return err
+	}
+	return serverrouting.ValidateReferenceTemplate(raw, server.Variables)
 }
 
 func validateRuntimeParameters(parameters fusedobject.Parameters) error {

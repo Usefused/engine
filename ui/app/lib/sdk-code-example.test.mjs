@@ -74,3 +74,32 @@ test("endpoint details labels operationId and renders the generated example", ()
   assert.match(endpointSidebarSource, /Copy generated SDK example/);
   assert.match(endpointSidebarSource, /typescriptSDKCallExample\(serviceName, endpoint, requestSchema\)/);
 });
+
+// Inbound event schemas and parameters must never become outbound SDK arguments.
+test("webhook examples subscribe with the generated enum instead of calling a service", () => {
+  const code = typescriptSDKCallExample("Square", {
+    ...endpoint,
+    isWebhook: true,
+    name: "booking.custom_attribute.owned.deleted",
+  }, {
+    type: "object",
+    required: ["customerSecret"],
+    properties: { customerSecret: { type: "string" } },
+  });
+  assert.match(code, /FusedWebhooks\.listen\(/);
+  assert.match(code, /process\.env\.FUSED_SDK_TOKEN!/);
+  assert.match(code, /receiver\.on\(\s+SquareWebhook\.BOOKING_CUSTOM_ATTRIBUTE_OWNED_DELETED,/);
+  assert.match(code, /async \(payload, ctx\) =>/);
+  assert.match(code, /ctx\.ack\(\)/);
+  assert.match(code, /receiver\.close\(\)/);
+  assert.doesNotMatch(code, /const result|await sdk\.|profileId|customerSecret/);
+});
+
+// Empty incoming contracts still expose status, and known shapes retain the
+// viewer's webhook observation context when expanded.
+test("webhook schema sections retain pending and observation guidance", () => {
+  assert.match(endpointSidebarSource, /endpoint\.isWebhook && webhookSchemaPending\(schema\)/);
+  assert.match(endpointSidebarSource, /Event body schema pending/);
+  assert.match(endpointSidebarSource, /incoming webhook events in real time/);
+  assert.match(endpointSidebarSource, /isWebhookEvent=\{endpoint\.isWebhook\}/);
+});

@@ -25,13 +25,16 @@ const (
 // Validate independently verifies the authoritative raw/hash envelope before
 // Engine persistence or execution trusts Registry-owned schema metadata.
 func Validate(contract *fusedobject.SchemaContract) error {
+	// Omitted schemas do not imply any executable schema semantics.
 	if contract == nil {
 		return nil
 	}
+	// Dialect metadata is bounded independently from raw JSON size.
 	if !validText(contract.Dialect, MaxDialectLength, false) {
 		return errors.New("schema contract dialect is invalid")
 	}
 	decoded, err := hex.DecodeString(contract.ContentHash)
+	// Hash spelling is part of the canonical envelope identity, not a case-insensitive identifier.
 	if err != nil || len(decoded) != sha256.Size || contract.ContentHash != strings.ToLower(contract.ContentHash) {
 		return errors.New("schema contract content hash is invalid")
 	}
@@ -40,8 +43,13 @@ func Validate(contract *fusedobject.SchemaContract) error {
 	if err != nil {
 		return errors.New("schema contract raw value is invalid")
 	}
+	// Raw truth must match its independently computed hash before dictionary lookup can execute it.
 	if contract.ContentHash != expected {
 		return errors.New("schema contract content hash does not match raw schema")
+	}
+	// Compact roots are trustworthy only when every edge resolves in the admitted version dictionary.
+	if err := contract.DefinitionIndex.Validate(contract.Raw, contract.SharedDefinitions); err != nil {
+		return err
 	}
 	return validateDiagnostics(contract.ProjectionDiagnostics)
 }

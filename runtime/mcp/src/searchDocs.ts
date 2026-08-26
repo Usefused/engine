@@ -16,7 +16,7 @@ export const SEARCH_DOCS_DEFAULT_LIMIT = 3;
 export const SEARCH_DOCS_MAX_LIMIT = 5;
 export const SEARCH_DOCS_LIST_LIMIT = 20;
 
-export type DocumentationSection = "parameters" | "request" | `response:${string}` | "input" | "targets" | "output";
+export type DocumentationSection = "parameters" | "request" | `response:${string}` | "input" | "targets" | "output" | "definitions";
 
 /** Admits only bounded public section names, including exact physical response statuses. */
 export function isDocumentationSection(value: unknown): value is DocumentationSection {
@@ -25,7 +25,7 @@ export function isDocumentationSection(value: unknown): value is DocumentationSe
     return false;
   }
   // Fixed sections cover request and Unified contracts without accepting private namespaces.
-  if (["parameters", "request", "input", "targets", "output"].includes(value)) {
+  if (["parameters", "request", "input", "targets", "output", "definitions"].includes(value)) {
     return true;
   }
   // A bounded status suffix permits exact response retrieval without accepting arbitrary private namespaces.
@@ -368,7 +368,7 @@ function childPointers(value: unknown, base: string): string[] {
 /** Builds all local candidates without database, network, or private mapping access. */
 function allCandidates(fixture: Fixture): SearchCandidate[] {
   return [
-    ...fixture.operations.map(toPhysicalCandidate),
+    ...fixture.operations.map((operation) => toPhysicalCandidate(operation, fixture)),
     ...fixture.unifiedOperations.map(toUnifiedCandidate),
   ];
 }
@@ -378,7 +378,7 @@ function exactCandidate(fixture: Fixture, operationId: string): SearchCandidate 
   const physical = fixture.resolve(operationId);
   // Physical lookup remains first because fixture admission prevents cross-kind collisions.
   if (physical) {
-    return toPhysicalCandidate(physical);
+    return toPhysicalCandidate(physical, fixture);
   }
   const unified = fixture.resolveUnified(operationId);
   // A missing logical name remains absent rather than becoming a fuzzy fallback.
@@ -386,7 +386,7 @@ function exactCandidate(fixture: Fixture, operationId: string): SearchCandidate 
 }
 
 /** Projects one physical operation into independently packable request and response sections. */
-function toPhysicalCandidate(operation: FixtureOperation): SearchCandidate {
+function toPhysicalCandidate(operation: FixtureOperation, fixture: Fixture): SearchCandidate {
   const summary = physicalSummary(operation);
   return {
     summary,
@@ -412,8 +412,20 @@ function toPhysicalCandidate(operation: FixtureOperation): SearchCandidate {
         fragment: { responses: { [status]: operation.responses[status] } },
         value: operation.responses[status],
       })),
+      ...definitionSections(operation, fixture),
     ],
   };
+}
+
+/** Makes shared definitions lazily navigable through the existing bounded section API, never per-operation copies. */
+function definitionSections(operation: FixtureOperation, fixture: Fixture): DocumentationSectionValue[] {
+  const definitions = fixture.schemaDefinitions[operation.service_version_id ?? ""];
+  // Standalone legacy operations do not advertise a dictionary that cannot be retrieved.
+  if (!definitions) {
+    return [];
+  }
+  // Priority 3 is intentionally outside automatic packing: callers retrieve only needed definitions by JSON Pointer.
+  return [{ name: "definitions", priority: 3, fragment: {}, value: definitions }];
 }
 
 /** Projects one Unified descriptor without compiler mappings or Engine identities. */

@@ -26,14 +26,16 @@ test("app Activity uses cards on mobile and tables on wider screens", () => {
   assert.match(requests, /break-all font-mono text-\[11px\]/, "Provider paths must wrap inside mobile receipts");
 });
 
+// Session history keeps its responsive pairing when moved out of the route for cursor pagination.
 test("MCP Activity uses responsive cards for usage and sessions", () => {
   const analytics = source("../components/mcp/McpAnalyticsPanel.tsx");
   const route = source("../routes/integrations.mcp_.$id.analytics.tsx");
+  const sessions = source("../components/mcp/McpSessionsPanel.tsx");
 
   assertResponsivePair(analytics, "MCP usage");
-  assertResponsivePair(route, "MCP sessions");
+  assertResponsivePair(sessions, "MCP sessions");
   assert.match(analytics, /function McpUsageCards/, "Tool and service mobile layouts must share one card implementation");
-  assert.match(route, /function McpSessionCard/, "Session history must expose its mobile card layout");
+  assert.match(sessions, /function McpSessionCard/, "Session history must expose its mobile card layout");
   assert.match(route, /function McpTokenActivityCard/, "Token history must expose its mobile card layout");
   assert.match(route, /tokenTermination\(token\)/, "Expired and revoked tokens must render retained termination evidence");
   assert.match(route, /min-w-0 max-w-full.*overflow-x-hidden/, "The MCP Activity shell must contain narrow-width content");

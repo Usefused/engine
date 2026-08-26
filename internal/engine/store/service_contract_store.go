@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/shared/fusedobject"
+	"github.com/Usefused/engine/internal/shared/schemacontract"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -338,6 +339,7 @@ func writeServiceContractBatches[T any](rows []T, write func([]byte) error) erro
 	return nil
 }
 
+// GetServiceContractMetadata validates one exact local snapshot before its immutable dictionary enters the runtime cache.
 func (s *postgresStore) GetServiceContractMetadata(ctx context.Context, serviceID, serviceVersionID uuid.UUID) (*fusedobject.ServiceMetadata, error) {
 	var envelope fusedobject.ExecutionContractEnvelope
 	var payload []byte
@@ -347,20 +349,28 @@ func (s *postgresStore) GetServiceContractMetadata(ctx context.Context, serviceI
 		WHERE service_id = $1 AND service_version_id = $2`,
 		serviceID, serviceVersionID,
 	).Scan(&envelope.ContractVersion, &envelope.RequiredCapabilities, &payload)
+	// Missing snapshots are recoverable only through explicit activation, never a mutable Registry fallback.
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrServiceContractSnapshotNotFound
 	}
+	// Database errors remain distinct from an authoritative missing snapshot.
 	if err != nil {
 		return nil, err
 	}
+	// Stored capability declarations must validate before decoding executable metadata.
 	if err := validatePersistedExecutionContract(envelope); err != nil {
 		return nil, err
 	}
 	var metadata fusedobject.ServiceMetadata
+	// Corrupt metadata cannot be cached with a valid-looking execution envelope.
 	if err := json.Unmarshal(payload, &metadata); err != nil {
 		return nil, fmt.Errorf("decode service contract metadata: %w", err)
 	}
 	metadata.ExecutionContractEnvelope = envelope
+	// Rebuild one validated dictionary at the cache-load boundary, never once per operation query.
+	if err := schemacontract.PrepareDefinitions(&metadata); err != nil {
+		return nil, err
+	}
 	return &metadata, nil
 }
 
@@ -438,6 +448,10 @@ func collectServiceContractMetadata(rows serviceContractMetadataRows, result map
 			return nil, fmt.Errorf("decode service contract metadata: %w", err)
 		}
 		metadata.ExecutionContractEnvelope = envelope
+		// Each exact service version receives an isolated index before entering the shared runtime cache.
+		if err := schemacontract.PrepareDefinitions(&metadata); err != nil {
+			return nil, err
+		}
 		result[ref] = &metadata
 	}
 	return result, rows.Err()

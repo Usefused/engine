@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { AlertTriangle, ChevronDown, ChevronUp, Loader2, Copy, Check } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronUp, Loader2, Copy, Check, Info } from "lucide-react";
 import { SchemaViewer } from "~/components/SchemaViewer";
 import { type JsonSchemaNode } from "~/components/SchemaViewer";
 import {
@@ -11,6 +11,7 @@ import {
 } from "~/lib/api";
 import { stripLinks } from "~/lib/format";
 import { typescriptSDKCallExample } from "~/lib/sdk-code-example";
+import { webhookSchemaPending } from "~/lib/webhook-schema";
 
 interface ComponentReferenceScope {
   componentScope: string;
@@ -315,8 +316,8 @@ function EndpointSummary({ endpoint }: { endpoint: IntegrationObject }) {
   return <div><h2 className="text-lg font-semibold text-slate-900">{endpoint.name}</h2><OperationMetadata endpoint={endpoint} />{(endpoint.deprecated || endpoint.deprecation_date) && <p className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">{deprecation}</p>}{endpoint.description && <div className="mt-2 text-sm text-slate-600" dangerouslySetInnerHTML={{ __html: stripLinks(endpoint.description) }} />}</div>;
 }
 
-// GeneratedSDKExample connects the exact operationId to a copyable generated
-// TypeScript call without exposing credentials or provider-derived examples.
+// GeneratedSDKExample displays the matching generated call or subscription
+// without exposing credentials or provider-derived examples.
 function GeneratedSDKExample({ endpoint, serviceName, requestSchema }: { endpoint: IntegrationObject; serviceName: string; requestSchema?: JsonSchemaNode }) {
   const [copied, setCopied] = useState(false);
   const code = typescriptSDKCallExample(serviceName, endpoint, requestSchema);
@@ -337,6 +338,7 @@ function GeneratedSDKExample({ endpoint, serviceName, requestSchema }: { endpoin
       </summary>
       <div className="relative border-t border-slate-200 bg-slate-950">
         <button onClick={copyExample} className="absolute right-2 top-2 rounded p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white" title="Copy generated example" aria-label="Copy generated SDK example">
+          {/* Copy feedback stays local and does not change the example's transport. */}
           {copied ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
         </button>
         <pre className="overflow-x-auto p-4 pr-10 text-[11px] leading-5 text-slate-200"><code>{code}</code></pre>
@@ -408,11 +410,47 @@ function ParameterTable({ endpoint }: { endpoint: IntegrationObject }) {
   );
 }
 
-// RequestSchemaSection renders the canonical default request representation.
+// WebhookSchemaNotice explains the observation path without presenting an
+// empty body as validated or promising a completion notification.
+function WebhookSchemaNotice() {
+  return (
+    <section aria-label="Event schema status" className="rounded-lg border border-indigo-200 bg-indigo-50/60 p-4">
+      <div className="flex items-start gap-2.5">
+        <Info aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-indigo-600" />
+        <div className="space-y-2">
+          <h3 className="text-sm font-semibold text-indigo-950">Event body schema pending</h3>
+          <p className="text-xs leading-relaxed text-indigo-900">
+            Fused infers event-body schemas from incoming webhook events in real time. This event does not yet have a defined body schema; observations need validation before the shape can be treated as confirmed.
+          </p>
+          <p className="text-xs leading-relaxed text-indigo-800">
+            Schema inference records only field names and types, not payload values. You can still receive events while the body schema is pending.
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// RequestSchemaSection keeps unknown webhook bodies visible while preserving
+// declared scalar, reference, and object schemas as expandable contracts.
 function RequestSchemaSection({ endpoint, schema, serviceId, componentScope, allowRemoteRefs }: { endpoint: IntegrationObject; schema?: JsonSchemaNode; serviceId: string } & ComponentReferenceScope) {
   const [open, setOpen] = useState(false);
+  // A missing or empty inbound body is pending knowledge, not an absent UI section.
+  if (endpoint.isWebhook && webhookSchemaPending(schema)) return <WebhookSchemaNotice />;
+  // Outbound operations without a body should not inherit webhook inference copy.
   if (!schema) return null;
-  return <div><button data-track="toggle_request_schema" onClick={() => setOpen(!open)} className="flex w-full justify-between rounded border p-3 text-xs font-medium"><span>{endpoint.isWebhook ? "Event Schema" : "Request Schema"}</span>{open ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}</button>{open && <div className="bg-[#161c27] p-4"><SchemaViewer schema={schema} serviceId={serviceId} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} /></div>}</div>;
+  return (
+    <div>
+      <button data-track="toggle_request_schema" onClick={() => setOpen(!open)} aria-expanded={open} className="flex w-full justify-between rounded border p-3 text-xs font-medium">
+        {/* Inbound and outbound schemas describe opposite directions. */}
+        <span>{endpoint.isWebhook ? "Event Schema" : "Request Schema"}</span>
+        {/* The chevron reflects disclosure state without implying schema validity. */}
+        {open ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+      </button>
+      {/* Resolve and render schema details only when the user expands them. */}
+      {open && <div className="bg-[#161c27] p-4"><SchemaViewer schema={schema} serviceId={serviceId} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} isWebhookEvent={endpoint.isWebhook} /></div>}
+    </div>
+  );
 }
 
 // ResponseSchemasSection renders every canonical response media representation.

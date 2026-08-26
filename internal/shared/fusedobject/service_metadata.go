@@ -3,6 +3,7 @@ package fusedobject
 import (
 	"github.com/Usefused/engine/internal/shared/catalogcontract"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
+	"github.com/Usefused/engine/internal/shared/schemaref"
 	"github.com/google/uuid"
 )
 
@@ -24,6 +25,9 @@ type ServiceMetadata struct {
 	ServerVariables map[string]string `json:"-"`
 	AuthConfigs     AuthConfigs       `json:"auth_configs"`
 	RawWSDL         string            `json:"raw_wsdl,omitempty"`
+	// Definitions belong to this exact version and are serialized once, never on every operation.
+	SchemaDefinitions map[string]SchemaContract `json:"schema_definitions,omitempty"`
+	DefinitionIndex   *schemaref.Index          `json:"-"`
 
 	// EventExtractionPath and IncomingWebhookConfig describe how this
 	// service's provider signs and shapes inbound webhook events. Populated

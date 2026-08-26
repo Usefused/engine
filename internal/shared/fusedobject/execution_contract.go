@@ -18,6 +18,7 @@ const (
 	ExecutionCapabilityHTTPMultipartPositionalV1     = "http.multipart.positional.v1"
 	ExecutionCapabilityHTTPServerPrecedenceV1        = "http.server.precedence.v1"
 	ExecutionCapabilityJSONSchemaContractV1          = "json.schema.contract.v1"
+	ExecutionCapabilityJSONSchemaSharedDefinitionsV1 = "json.schema.shared_definitions.v1"
 	ExecutionCapabilityHTTPRequestAlternativesV1     = "http.request.alternatives.v1"
 	ExecutionCapabilityHTTPResponseContractsV1       = "http.response.contracts.v1"
 	ExecutionCapabilityOAuth2MultiFlowV1             = "auth.oauth2.multiflow.v1"
@@ -54,6 +55,7 @@ var supportedExecutionCapabilityOrder = []string{
 	ExecutionCapabilityHTTPServerPrecedenceV1,
 	ExecutionCapabilityHTTPUploadWorkflowV1,
 	ExecutionCapabilityJSONSchemaContractV1,
+	ExecutionCapabilityJSONSchemaSharedDefinitionsV1,
 	ExecutionCapabilityPaginationComposableV3,
 	ExecutionCapabilityQuotaMultidimensionalV3,
 	ExecutionCapabilityRetryPolicyV3,

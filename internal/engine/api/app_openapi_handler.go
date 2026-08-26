@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -91,14 +90,14 @@ func buildAppOpenAPIDocument(ctx context.Context, contracts appOpenAPIContractSt
 	if err != nil {
 		return nil, err
 	}
-	operations, err := loadAppOpenAPIOperations(ctx, contracts, app, filter)
+	export, err := loadAppOpenAPIOperations(ctx, contracts, app, filter)
 	if err != nil {
 		return nil, err
 	}
-	if len(operations) == 0 {
+	if len(export.operations) == 0 {
 		return nil, missingAppOpenAPIOperationError(filter)
 	}
-	document := composeAppOpenAPIDocument(app, family, operations)
+	document := composeAppOpenAPIDocument(app, family, export)
 	encoded, err := json.Marshal(document)
 	if err != nil {
 		return nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to encode app schema"}
@@ -109,9 +108,9 @@ func buildAppOpenAPIDocument(ctx context.Context, contracts appOpenAPIContractSt
 	return encoded, nil
 }
 
-// loadAppOpenAPIOperations resolves the requested physical endpoint set in one
-// snapshot query and combines it with integrity-checked Unified definitions.
-func loadAppOpenAPIOperations(ctx context.Context, contracts appOpenAPIContractStore, app *store.App, operationFilter string) ([]appOpenAPIOperation, error) {
+// loadAppOpenAPIOperations uses one endpoint query and, when required, one
+// dictionary batch before combining integrity-checked Unified definitions.
+func loadAppOpenAPIOperations(ctx context.Context, contracts appOpenAPIContractStore, app *store.App, operationFilter string) (*appOpenAPIExport, error) {
 	if app == nil || app.ScopeSchemaVersion != models.AppScopeSchemaVersion {
 		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app scope is incompatible"}
 	}
@@ -127,19 +126,28 @@ func loadAppOpenAPIOperations(ctx context.Context, contracts appOpenAPIContractS
 	if err := validateAppOpenAPIMatches(selections, matches, operationFilter); err != nil {
 		return nil, err
 	}
-	operations := make([]appOpenAPIOperation, 0, len(matches))
-	for _, match := range matches {
-		operation, buildErr := physicalAppOpenAPIOperation(match.Endpoint)
-		if buildErr != nil {
-			return nil, buildErr
-		}
-		operations = append(operations, operation)
-	}
-	unifiedOperations, err := unifiedAppOpenAPIOperations(app, operationFilter)
+	metadata, err := loadAppOpenAPIMetadata(ctx, contracts, selections, matches)
+	// Shared references require one complete exact-version dictionary batch.
 	if err != nil {
 		return nil, err
 	}
-	return rejectAmbiguousAppOpenAPIOperations(append(operations, unifiedOperations...))
+	export := &appOpenAPIExport{components: make(map[string]any)}
+	export.operations, err = physicalAppOpenAPIOperations(export, selections, matches, metadata)
+	// A physical schema failure prevents an apparently complete mixed export.
+	if err != nil {
+		return nil, err
+	}
+	unifiedScope := &appOpenAPISchemaScope{export: export, namespace: "Unified_" + strings.ReplaceAll(app.AppID.String(), "-", "") + "_"}
+	unifiedOperations, err := unifiedAppOpenAPIOperations(app, operationFilter, unifiedScope)
+	if err != nil {
+		return nil, err
+	}
+	export.operations, err = rejectAmbiguousAppOpenAPIOperations(append(export.operations, unifiedOperations...))
+	// Relocation errors remain fail-closed even when an otherwise valid operation exists.
+	if err != nil {
+		return nil, err
+	}
+	return export, export.err
 }
 
 // decodeAppOpenAPISelections rejects stale or malformed app selection state
@@ -301,7 +309,7 @@ func missingEndpointID(expected []uuid.UUID, found map[uuid.UUID]struct{}) bool 
 
 // unifiedAppOpenAPIOperations verifies the complete persisted definition set
 // before projecting only the requested credential-free public operation.
-func unifiedAppOpenAPIOperations(app *store.App, operationFilter string) ([]appOpenAPIOperation, error) {
+func unifiedAppOpenAPIOperations(app *store.App, operationFilter string, scope *appOpenAPISchemaScope) ([]appOpenAPIOperation, error) {
 	if len(app.UnifiedDefinitions) == 0 {
 		return nil, nil
 	}
@@ -321,7 +329,7 @@ func unifiedAppOpenAPIOperations(app *store.App, operationFilter string) ([]appO
 		if operationFilter != "" && definition.Name != operationFilter {
 			continue
 		}
-		operations = append(operations, unifiedAppOpenAPIOperation(definition))
+		operations = append(operations, unifiedAppOpenAPIOperation(definition, scope))
 	}
 	return operations, nil
 }
@@ -372,24 +380,24 @@ func missingAppOpenAPIOperationError(filter string) error {
 
 // physicalAppOpenAPIOperation builds the flat Engine input contract used by
 // generated SDK calls and the direct REST execution route.
-func physicalAppOpenAPIOperation(endpoint fusedobject.Endpoint) (appOpenAPIOperation, error) {
+func physicalAppOpenAPIOperation(endpoint fusedobject.Endpoint, scope *appOpenAPISchemaScope) (appOpenAPIOperation, error) {
 	if endpoint.Name == "" || endpoint.Name != strings.TrimSpace(endpoint.Name) || len(endpoint.Name) > maxRESTOperationBytes {
 		return appOpenAPIOperation{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "physical operation name is unavailable"}
 	}
-	input, err := physicalOpenAPIInputSchema(endpoint)
+	input, err := physicalOpenAPIInputSchema(endpoint, scope)
 	if err != nil {
 		return appOpenAPIOperation{}, err
 	}
 	return appOpenAPIOperation{
 		name:           endpoint.Name,
 		requestSchema:  executionRequestSchema(endpoint.Name, input, false, nil),
-		responseSchema: physicalOpenAPIResponseSchema(endpoint),
+		responseSchema: physicalOpenAPIResponseSchema(endpoint, scope),
 	}, nil
 }
 
 // unifiedAppOpenAPIOperation projects one private definition without exposing
 // its mappings, dependency expressions, or provider routing identities.
-func unifiedAppOpenAPIOperation(definition unified.OperationDefinition) appOpenAPIOperation {
+func unifiedAppOpenAPIOperation(definition unified.OperationDefinition, scope *appOpenAPISchemaScope) appOpenAPIOperation {
 	targets := make([]string, 0, len(definition.Bindings))
 	services := make(map[string]struct{}, len(definition.Bindings))
 	for _, binding := range definition.Bindings {
@@ -400,10 +408,10 @@ func unifiedAppOpenAPIOperation(definition unified.OperationDefinition) appOpenA
 		}
 		services[service] = struct{}{}
 	}
-	input := normalizeOpenAPISchema(decodeOpenAPISchema(definition.InputSchema))
+	input := scope.schema(&fusedobject.SchemaContract{Raw: definition.InputSchema})
 	response := unifiedOpenAPIResponseSchema(definition.Name, targets)
 	if definition.Output != nil {
-		response = normalizeOpenAPISchema(decodeOpenAPISchema(definition.Output.Schema))
+		response = scope.schema(&fusedobject.SchemaContract{Raw: definition.Output.Schema})
 	}
 	return appOpenAPIOperation{
 		name:           definition.Name,
@@ -456,19 +464,19 @@ func unifiedRoutingSchema(targets []string, services map[string]struct{}) map[st
 
 // physicalOpenAPIInputSchema flattens declared provider parameters and body
 // fields exactly as Engine execution accepts them.
-func physicalOpenAPIInputSchema(endpoint fusedobject.Endpoint) (map[string]any, error) {
+func physicalOpenAPIInputSchema(endpoint fusedobject.Endpoint, scope *appOpenAPISchemaScope) (map[string]any, error) {
 	properties := make(map[string]any, len(endpoint.Parameters)+1)
 	required := make([]string, 0, len(endpoint.Parameters))
 	for _, parameter := range endpoint.Parameters {
 		if parameter.Name == "_headers" {
 			return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "physical operation uses a reserved input name"}
 		}
-		properties[parameter.Name] = parameterOpenAPISchema(parameter)
+		properties[parameter.Name] = parameterOpenAPISchema(parameter, scope)
 		if parameter.Required {
 			required = append(required, parameter.Name)
 		}
 	}
-	additionalProperties, err := addOpenAPIBodyFields(properties, &required, endpoint.RequestContent)
+	additionalProperties, err := addOpenAPIBodyFields(properties, &required, endpoint.RequestContent, scope)
 	if err != nil {
 		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "physical operation request schema is unavailable"}
 	}
@@ -480,11 +488,11 @@ func physicalOpenAPIInputSchema(endpoint fusedobject.Endpoint) (map[string]any, 
 	}, nil
 }
 
-// parameterOpenAPISchema chooses the canonical raw parameter schema when it is
-// self-contained and otherwise uses the reviewed execution projection.
-func parameterOpenAPISchema(parameter fusedobject.Parameter) map[string]any {
+// parameterOpenAPISchema uses the selected version's canonical schema scope,
+// retaining raw references and falling back only when a raw schema is absent.
+func parameterOpenAPISchema(parameter fusedobject.Parameter, scope *appOpenAPISchemaScope) map[string]any {
 	if parameter.Schema != nil {
-		return schemaContractOpenAPI(parameter.Schema)
+		return scope.schema(parameter.Schema)
 	}
 	media := make([]string, 0, len(parameter.Content))
 	for name := range parameter.Content {
@@ -493,7 +501,7 @@ func parameterOpenAPISchema(parameter fusedobject.Parameter) map[string]any {
 	sort.Strings(media)
 	for _, name := range media {
 		if parameter.Content[name].Schema != nil {
-			return schemaContractOpenAPI(parameter.Content[name].Schema)
+			return scope.schema(parameter.Content[name].Schema)
 		}
 	}
 	if parameter.Type != "" {
@@ -504,7 +512,7 @@ func parameterOpenAPISchema(parameter fusedobject.Parameter) map[string]any {
 
 // addOpenAPIBodyFields merges the selected reviewed request representation into
 // the same flat input object used by the Engine dispatcher.
-func addOpenAPIBodyFields(properties map[string]any, required *[]string, content *fusedobject.RequestContent) (any, error) {
+func addOpenAPIBodyFields(properties map[string]any, required *[]string, content *fusedobject.RequestContent, scope *appOpenAPISchemaScope) (any, error) {
 	if content == nil {
 		return false, nil
 	}
@@ -513,19 +521,19 @@ func addOpenAPIBodyFields(properties map[string]any, required *[]string, content
 		return false, err
 	}
 	if representation.ItemSchema != nil {
-		return addOpenAPIItemBody(properties, required, content, representation.ItemSchema)
+		return addOpenAPIItemBody(properties, required, content, representation.ItemSchema, scope)
 	}
-	return addOpenAPISchemaBody(properties, required, content, representation)
+	return addOpenAPISchemaBody(properties, required, content, representation, scope)
 }
 
 // addOpenAPIItemBody exposes sequential request items under the exact runtime
 // payload parameter instead of assuming the historical default name.
-func addOpenAPIItemBody(properties map[string]any, required *[]string, content *fusedobject.RequestContent, itemSchema *fusedobject.SchemaContract) (any, error) {
+func addOpenAPIItemBody(properties map[string]any, required *[]string, content *fusedobject.RequestContent, itemSchema *fusedobject.SchemaContract, scope *appOpenAPISchemaScope) (any, error) {
 	name := openAPIPayloadParameter(content)
 	if name == "_headers" {
 		return false, errors.New("reserved payload parameter")
 	}
-	properties[name] = map[string]any{"type": "array", "items": schemaContractOpenAPI(itemSchema)}
+	properties[name] = map[string]any{"type": "array", "items": scope.schema(itemSchema)}
 	if content.Required {
 		*required = append(*required, name)
 	}
@@ -534,9 +542,9 @@ func addOpenAPIItemBody(properties map[string]any, required *[]string, content *
 
 // addOpenAPISchemaBody exposes object declarations as flat input fields and
 // uses one payload field only when the schema has no object declarations.
-func addOpenAPISchemaBody(properties map[string]any, required *[]string, content *fusedobject.RequestContent, representation fusedobject.RequestRepresentation) (any, error) {
-	schema := schemaContractOpenAPI(representation.Schema)
-	bodyProperties, bodyRequired, additionalProperties := collectOpenAPIBodySchema(schema, representation)
+func addOpenAPISchemaBody(properties map[string]any, required *[]string, content *fusedobject.RequestContent, representation fusedobject.RequestRepresentation, scope *appOpenAPISchemaScope) (any, error) {
+	schema := scope.schema(representation.Schema)
+	bodyProperties, bodyRequired, additionalProperties := collectOpenAPIBodySchema(schema, representation, scope)
 	if _, reserved := bodyProperties["_headers"]; reserved {
 		return false, errors.New("reserved body field")
 	}
@@ -568,11 +576,11 @@ func openAPIPayloadParameter(content *fusedobject.RequestContent) string {
 
 // collectOpenAPIBodySchema discovers flat body fields through the same bounded
 // composition traversal as runtime admission and includes encoding-only keys.
-func collectOpenAPIBodySchema(schema map[string]any, representation fusedobject.RequestRepresentation) (map[string]any, []string, any) {
+func collectOpenAPIBodySchema(schema map[string]any, representation fusedobject.RequestRepresentation, scope *appOpenAPISchemaScope) (map[string]any, []string, any) {
 	properties := make(map[string]any)
 	required := make([]string, 0)
 	additionalProperties := any(false)
-	collectOpenAPIBodyBranches(schema, properties, &required, &additionalProperties, 0)
+	collectOpenAPIBodyBranches(schema, properties, &required, &additionalProperties, scope, make(map[string]bool), 0)
 	for name := range representation.Encoding {
 		if _, ok := properties[name]; !ok {
 			properties[name] = map[string]any{}
@@ -584,10 +592,13 @@ func collectOpenAPIBodySchema(schema map[string]any, representation fusedobject.
 
 // collectOpenAPIBodyBranches recursively merges direct and composed object
 // declarations without treating arbitrary nested object properties as flat.
-func collectOpenAPIBodyBranches(schema map[string]any, properties map[string]any, required *[]string, additionalProperties *any, depth int) {
+func collectOpenAPIBodyBranches(schema map[string]any, properties map[string]any, required *[]string, additionalProperties *any, scope *appOpenAPISchemaScope, seen map[string]bool, depth int) {
+	// Only root references/compositions are inspected; nested property graphs stay shared.
 	if depth > maxOpenAPISchemaRefDepth {
+		scope.export.err = unavailableAppOpenAPISchemaError()
 		return
 	}
+	collectOpenAPIBodyReference(schema, properties, required, additionalProperties, scope, seen, depth)
 	if direct, ok := schema["properties"].(map[string]any); ok {
 		for name, property := range direct {
 			mergeOpenAPIProperty(properties, name, property)
@@ -597,7 +608,7 @@ func collectOpenAPIBodyBranches(schema map[string]any, properties map[string]any
 	mergeOpenAPIAdditionalProperties(additionalProperties, schema)
 	for _, keyword := range []string{"allOf", "anyOf", "oneOf"} {
 		for _, branch := range openAPISchemaArray(schema[keyword]) {
-			collectOpenAPIBodyBranches(branch, properties, required, additionalProperties, depth+1)
+			collectOpenAPIBodyBranches(branch, properties, required, additionalProperties, scope, seen, depth+1)
 		}
 	}
 }
@@ -679,131 +690,6 @@ func selectOpenAPIRequestRepresentation(content *fusedobject.RequestContent) (fu
 	return fusedobject.RequestRepresentation{}, errors.New("request representation is ambiguous")
 }
 
-// schemaContractOpenAPI retains canonical raw JSON Schema when available and
-// falls back to the same reviewed projection used by generated SDK typing.
-func schemaContractOpenAPI(contract *fusedobject.SchemaContract) map[string]any {
-	if contract == nil {
-		return map[string]any{}
-	}
-	if schema := decodeOpenAPISchema(contract.Raw); len(schema) > 0 {
-		return normalizeOpenAPISchema(schema)
-	}
-	return normalizeOpenAPISchema(projectionOpenAPISchema(contract.Projection))
-}
-
-// decodeOpenAPISchema decodes one bounded canonical JSON Schema object without
-// converting exact numbers through binary floating point.
-func decodeOpenAPISchema(payload []byte) map[string]any {
-	if len(payload) == 0 {
-		return map[string]any{}
-	}
-	decoder := json.NewDecoder(strings.NewReader(string(payload)))
-	decoder.UseNumber()
-	var schema map[string]any
-	if decoder.Decode(&schema) != nil || schema == nil || decoder.Decode(&struct{}{}) != io.EOF {
-		return map[string]any{}
-	}
-	return schema
-}
-
-// normalizeOpenAPISchema expands bundled local references through a bounded
-// traversal so extracted subschemas remain valid in their OpenAPI component.
-func normalizeOpenAPISchema(schema map[string]any) map[string]any {
-	normalized := expandOpenAPISchemaValue(schema, schema, make(map[string]bool), 0)
-	result, _ := normalized.(map[string]any)
-	if result == nil {
-		return map[string]any{}
-	}
-	return result
-}
-
-// expandOpenAPISchemaValue recursively copies schema values and resolves local
-// references; cyclic or over-depth branches become unconstrained valid JSON.
-func expandOpenAPISchemaValue(value, root any, visited map[string]bool, depth int) any {
-	if depth > maxOpenAPISchemaRefDepth {
-		return map[string]any{}
-	}
-	switch typed := value.(type) {
-	case map[string]any:
-		return expandOpenAPISchemaObject(typed, root, visited, depth)
-	case []any:
-		result := make([]any, len(typed))
-		for index, item := range typed {
-			result[index] = expandOpenAPISchemaValue(item, root, visited, depth+1)
-		}
-		return result
-	default:
-		return typed
-	}
-}
-
-// expandOpenAPISchemaObject resolves a local reference with sibling keywords
-// as an allOf, matching JSON Schema 2020-12 sibling semantics.
-func expandOpenAPISchemaObject(schema map[string]any, root any, visited map[string]bool, depth int) map[string]any {
-	ref, _ := schema["$ref"].(string)
-	if ref == "" {
-		return copyOpenAPISchemaObject(schema, root, visited, depth)
-	}
-	resolved := resolveOpenAPILocalReference(root, ref)
-	if resolved == nil || visited[ref] {
-		fallback := copyOpenAPISchemaObjectWithoutDefinitions(schema, root, visited, depth)
-		delete(fallback, "$ref")
-		return fallback
-	}
-	visited[ref] = true
-	target := expandOpenAPISchemaValue(resolved, root, visited, depth+1)
-	delete(visited, ref)
-	siblings := copyOpenAPISchemaObjectWithoutDefinitions(schema, root, visited, depth)
-	delete(siblings, "$ref")
-	if len(siblings) == 0 {
-		result, _ := target.(map[string]any)
-		if result == nil {
-			return map[string]any{}
-		}
-		return result
-	}
-	return map[string]any{"allOf": []any{target, siblings}}
-}
-
-// copyOpenAPISchemaObject recursively copies one schema object while dropping
-// definition containers after every local reference has been expanded.
-func copyOpenAPISchemaObject(schema map[string]any, root any, visited map[string]bool, depth int) map[string]any {
-	result := copyOpenAPISchemaObjectWithoutDefinitions(schema, root, visited, depth)
-	delete(result, "$ref")
-	return result
-}
-
-// copyOpenAPISchemaObjectWithoutDefinitions copies ordinary keywords without
-// retaining large now-unused local definition tables in every component.
-func copyOpenAPISchemaObjectWithoutDefinitions(schema map[string]any, root any, visited map[string]bool, depth int) map[string]any {
-	result := make(map[string]any, len(schema))
-	for key, value := range schema {
-		if key == "$defs" || key == "definitions" {
-			continue
-		}
-		result[key] = expandOpenAPISchemaValue(value, root, visited, depth+1)
-	}
-	return result
-}
-
-// resolveOpenAPILocalReference resolves a fragment-only JSON Pointer against
-// the canonical schema root; external references are intentionally not fetched.
-func resolveOpenAPILocalReference(root any, ref string) any {
-	if !strings.HasPrefix(ref, "#/") {
-		return nil
-	}
-	current := root
-	for _, token := range strings.Split(strings.TrimPrefix(ref, "#/"), "/") {
-		object, ok := current.(map[string]any)
-		if !ok {
-			return nil
-		}
-		token = strings.ReplaceAll(strings.ReplaceAll(token, "~1", "/"), "~0", "~")
-		current = object[token]
-	}
-	return current
-}
-
 // projectionOpenAPISchema maps the bounded execution projection back onto
 // standard JSON Schema field names without inventing unsupported semantics.
 func projectionOpenAPISchema(schema fusedobject.Schema) map[string]any {
@@ -838,8 +724,8 @@ func projectionOpenAPISchema(schema fusedobject.Schema) map[string]any {
 
 // physicalOpenAPIResponseSchema describes the one buffered JSON value returned
 // by successful physical REST execution.
-func physicalOpenAPIResponseSchema(endpoint fusedobject.Endpoint) map[string]any {
-	resultSchemas := physicalSuccessSchemas(endpoint)
+func physicalOpenAPIResponseSchema(endpoint fusedobject.Endpoint, scope *appOpenAPISchemaScope) map[string]any {
+	resultSchemas := physicalSuccessSchemas(endpoint, scope)
 	itemSchema := map[string]any{}
 	if len(resultSchemas) == 1 {
 		itemSchema = resultSchemas[0]
@@ -865,7 +751,7 @@ func physicalOpenAPIResponseSchema(endpoint fusedobject.Endpoint) map[string]any
 
 // physicalSuccessSchemas returns deterministic schemas for every documented
 // successful provider representation.
-func physicalSuccessSchemas(endpoint fusedobject.Endpoint) []map[string]any {
+func physicalSuccessSchemas(endpoint fusedobject.Endpoint, scope *appOpenAPISchemaScope) []map[string]any {
 	statuses := make([]string, 0, len(endpoint.Responses))
 	for status := range endpoint.Responses {
 		if strings.HasPrefix(status, "2") {
@@ -877,7 +763,7 @@ func physicalSuccessSchemas(endpoint fusedobject.Endpoint) []map[string]any {
 	for _, status := range statuses {
 		for _, representation := range endpoint.Responses[status].Representations {
 			if representation.Schema != nil {
-				schemas = append(schemas, schemaContractOpenAPI(representation.Schema))
+				schemas = append(schemas, scope.schema(representation.Schema))
 			}
 		}
 	}
@@ -939,13 +825,16 @@ func unifiedAuthActionOpenAPISchema() map[string]any {
 
 // composeAppOpenAPIDocument assembles one path with discriminator branches for
 // all exact app operations and stable shared selector/error components.
-func composeAppOpenAPIDocument(app *store.App, family *store.AppFamily, operations []appOpenAPIOperation) map[string]any {
+func composeAppOpenAPIDocument(app *store.App, family *store.AppFamily, export *appOpenAPIExport) map[string]any {
 	components := map[string]any{
 		"ExecutionSelector": executionSelectorOpenAPISchema(),
 		"PaginationIntent":  paginationIntentOpenAPISchema(),
 		"ExecutionError":    executionErrorOpenAPISchema(),
 	}
-	requestRefs, responseRefs, mapping := operationOpenAPIComponents(components, operations)
+	for key, schema := range export.components {
+		components[key] = schema
+	}
+	requestRefs, responseRefs, mapping := operationOpenAPIComponents(components, export.operations)
 	return map[string]any{
 		"openapi": "3.1.0", "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
 		"info": map[string]any{
@@ -960,7 +849,7 @@ func composeAppOpenAPIDocument(app *store.App, family *store.AppFamily, operatio
 		},
 		"x-fused-app-id": app.AppID.String(), "x-fused-app-family-id": app.AppFamilyID.String(),
 		"x-fused-app-name": family.DisplayName, "x-fused-app-version": app.Version,
-		"x-fused-operation-count": len(operations),
+		"x-fused-operation-count": len(export.operations),
 	}
 }
 

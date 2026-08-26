@@ -399,7 +399,7 @@ func (capture *unifiedUsageCapture) Record(increment models.EngineUsageIncrement
 	capture.increments = append(capture.increments, increment)
 }
 
-// TestExecuteUnifiedProducesOnlyPhysicalAccounting protects the rule that each physical attempt produces one receipt and the matching usage outcome.
+// TestExecuteUnifiedProducesOnlyPhysicalAccounting protects provider-only billing alongside a separate logical receipt.
 func TestExecuteUnifiedProducesOnlyPhysicalAccounting(t *testing.T) {
 	provider := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
@@ -422,8 +422,9 @@ func TestExecuteUnifiedProducesOnlyPhysicalAccounting(t *testing.T) {
 		t.Fatalf("ExecuteUnified() = (%#v, %v)", response, err)
 	}
 	assertUnifiedResults(t, response, []string{"github", "@acme/custom-crm"}, []string{`{"id":"gh-1"}`, `{"iid":"crm-1"}`})
-	if len(events.messages) != 2 {
-		t.Fatalf("execution events = %d, want two physical events and no wrapper event", len(events.messages))
+	// The extra parent is audit metadata, not another usage increment.
+	if len(events.messages) != 3 {
+		t.Fatalf("execution events = %d, want two physical events and one logical parent", len(events.messages))
 	}
 	assertUnifiedPhysicalEvents(t, events.messages, appID)
 	assertUnifiedUsageIncrements(t, usage.increments, 2)
@@ -447,8 +448,9 @@ func TestExecuteUnifiedSingleTargetProducesOnePhysicalAccountingFinalization(t *
 	if err != nil || len(response.GetResults()) != 1 || response.GetResults()[0].GetStatus() != "success" {
 		t.Fatalf("ExecuteUnified() = (%#v, %v)", response, err)
 	}
-	if len(events.messages) != 1 {
-		t.Fatalf("execution events = %d, want one physical event", len(events.messages))
+	// Single-target Unified calls retain the same logical/physical distinction.
+	if len(events.messages) != 2 {
+		t.Fatalf("execution events = %d, want one physical event and one logical parent", len(events.messages))
 	}
 	assertUnifiedUsageOutcomes(t, usage.increments, 1, 1, 0)
 }
@@ -481,8 +483,9 @@ func TestExecuteUnifiedRealMixedFailureAttemptsBothPhysicalTargets(t *testing.T)
 	if response.GetResults()[0].GetStatus() != "success" || response.GetResults()[1].GetErrorCode() != "provider_error" {
 		t.Fatalf("mixed response = %#v", response.GetResults())
 	}
-	if providerCalls.Load() != 2 || len(events.messages) != 2 {
-		t.Fatalf("physical attempts = provider:%d events:%d, want two/two", providerCalls.Load(), len(events.messages))
+	// Failed children still belong to one parent without adding provider dispatches.
+	if providerCalls.Load() != 2 || len(events.messages) != 3 {
+		t.Fatalf("attempts/receipts = provider:%d events:%d, want two/three", providerCalls.Load(), len(events.messages))
 	}
 	assertUnifiedUsageOutcomes(t, usage.increments, 2, 1, 1)
 }
@@ -521,18 +524,53 @@ func installUnifiedAccountingCaptures(t *testing.T) (*unifiedEventCapture, *unif
 	return events, usage
 }
 
-// assertUnifiedPhysicalEvents requires one finalized SDK execution receipt per
-// provider attempt and rejects any logical-wrapper receipt.
+// assertUnifiedPhysicalEvents verifies physical identity and one metadata-only
+// logical parent, with correlation independent of optional trace exporters.
 func assertUnifiedPhysicalEvents(t *testing.T, messages [][]byte, appID uuid.UUID) {
 	t.Helper()
+	parents := 0
+	var parentID uuid.UUID
+	children := []models.EngineExecutionEvent{}
+	// Decode the canonical durable envelope rather than an in-memory projection.
 	for _, message := range messages {
 		var envelope models.EngineExecutionEventEnvelope
+		// Invalid serialization must fail before accounting assertions can conceal it.
 		if err := json.Unmarshal(message, &envelope); err != nil {
 			t.Fatal(err)
 		}
-		if envelope.Event.AppID != appID || envelope.Event.OperationID == uuid.Nil || envelope.Event.ServiceID == uuid.Nil {
-			t.Fatalf("event is not a physical execution: %#v", envelope.Event)
+		// Parents summarize steps and deliberately omit provider identity.
+		if executionevent.Kind(envelope.Event) == "unified" {
+			parents++
+			parentID = envelope.Event.ID
+			assertUnifiedParentAccounting(t, envelope.Event, appID)
+			continue
 		}
+		children = append(children, envelope.Event)
+	}
+	// A logical call emits exactly one terminal summary regardless of child count.
+	if parents != 1 {
+		t.Fatalf("logical parent count = %d, want 1", parents)
+	}
+	for _, child := range children {
+		assertUnifiedChildAccounting(t, child, appID, parentID)
+	}
+}
+
+// assertUnifiedParentAccounting prevents envelope metadata from becoming provider usage.
+func assertUnifiedParentAccounting(t *testing.T, event models.EngineExecutionEvent, appID uuid.UUID) {
+	t.Helper()
+	// Provider identity and attempts are never meaningful on the logical envelope.
+	if event.AppID != appID || event.OperationID != uuid.Nil || event.ServiceID != uuid.Nil || event.AttemptCount != 0 || event.ProviderLatencyMs != nil {
+		t.Fatal("logical receipt contains incorrect identity or provider accounting")
+	}
+}
+
+// assertUnifiedChildAccounting requires server-owned receipt linkage on each actual provider attempt.
+func assertUnifiedChildAccounting(t *testing.T, event models.EngineExecutionEvent, appID, parentID uuid.UUID) {
+	t.Helper()
+	// Every child retains physical identity in addition to its logical navigation metadata.
+	if event.AppID != appID || event.OperationID == uuid.Nil || event.ServiceID == uuid.Nil || event.ParentExecutionID != parentID || event.UnifiedTarget == "" || event.ExecutionPhase == "" {
+		t.Fatal("physical receipt is missing identity or logical correlation")
 	}
 }
 

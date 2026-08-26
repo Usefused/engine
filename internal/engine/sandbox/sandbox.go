@@ -18,6 +18,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/entitlement"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
+	"github.com/Usefused/engine/internal/engine/mcpsession"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/config"
@@ -34,25 +35,28 @@ import (
 )
 
 type mcpSession struct {
-	appID           string
-	sessionID       string
-	tokenID         uuid.UUID
-	protocolVersion string
-	transport       string
-	cmd             *exec.Cmd
-	stdin           io.WriteCloser
-	cancel          context.CancelFunc
-	lifecycleCtx    context.Context
-	requestMu       sync.Mutex
-	pendingRequests map[string]struct{}
-	searchTelemetry map[string]*mcpSearchObservation
-	pendingMu       sync.Mutex
-	idleTimer       *time.Timer
-	responses       chan string
-	token           string
-	activityMu      sync.Mutex
-	ended           bool // Guarded by activityMu so late activity cannot rearm a retired session's timer.
-	lastActivityAt  time.Time
+	metadataMu         sync.Mutex
+	clientMetadata     mcpsession.Metadata
+	clientInfoRecorded bool
+	appID              string
+	sessionID          string
+	tokenID            uuid.UUID
+	protocolVersion    string
+	transport          string
+	cmd                *exec.Cmd
+	stdin              io.WriteCloser
+	cancel             context.CancelFunc
+	lifecycleCtx       context.Context
+	requestMu          sync.Mutex
+	pendingRequests    map[string]struct{}
+	searchTelemetry    map[string]*mcpSearchObservation
+	pendingMu          sync.Mutex
+	idleTimer          *time.Timer
+	responses          chan string
+	token              string
+	activityMu         sync.Mutex
+	ended              bool // Guarded by activityMu so late activity cannot rearm a retired session's timer.
+	lastActivityAt     time.Time
 
 	// fixture is this session's own operation catalog, built at connect time
 	// from the app version's AppRuntime.Selections (mcp_session_fixture.go), scoping
@@ -226,6 +230,7 @@ var EngineStreamExecuteFunc = func(ctx context.Context, appID, token, endpointNa
 // parameters are intentionally absent: request values can contain secrets or
 // provider payloads even when they are not named like credentials. Bounded
 // contract, outcome, timing, and identity metadata provide the audit signal.
+// Timing ownership is established here so non-gRPC adapters also produce complete receipts.
 func engineExecuteCore(
 	ctx context.Context,
 	cache ObjectCache,
@@ -236,6 +241,10 @@ func engineExecuteCore(
 	environment string,
 	stream engine.ResponseStream,
 ) (err error) {
+	// gRPC already records ingress work; preserve its collector while admitting bare MCP contexts.
+	if _, ok := engine.ExecutionTimingsFromContext(ctx); !ok {
+		ctx = engine.ContextWithExecutionTimings(ctx, engine.NewExecutionTimings())
+	}
 	executionStarted := time.Now()
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.dispatch.execute", trace.WithAttributes(
 		attribute.String("app.id", appID),
@@ -313,17 +322,20 @@ func resolveExecutionContractScopedEndpoint(ctx context.Context, cache ObjectCac
 // adding a new provider outcome cannot make the execution boundary itself too
 // complex to audit reliably.
 func finishExecutionDispatch(ctx context.Context, span trace.Span, providerHTTPStatus, executionTimeoutMs int, dispatchErr error) error {
+	// Failed attempts consumed time too; export the same collected stages before outcome-specific returns.
+	if timings, ok := engine.ExecutionTimingsFromContext(ctx); ok {
+		span.SetAttributes(timings.Attributes()...)
+	}
+	// Normalize policy expiry without losing the recorded provider work that preceded it.
 	if dispatchErr != nil {
 		dispatchErr = normalizeExecutionTimeout(ctx, dispatchErr, executionTimeoutMs)
 		span.SetStatus(codes.Error, executionFailureDescription(dispatchErr, providerHTTPStatus))
 		return dispatchErr
 	}
+	// A provider HTTP failure is an execution failure even when transport completed normally.
 	if providerHTTPStatus >= http.StatusBadRequest {
 		span.SetStatus(codes.Error, providerStatusError(providerHTTPStatus))
 		return nil
-	}
-	if timings, ok := engine.ExecutionTimingsFromContext(ctx); ok {
-		span.SetAttributes(timings.Attributes()...)
 	}
 	span.SetStatus(codes.Ok, "tool call dispatched")
 	return nil

@@ -62,13 +62,14 @@ test("keeps the Registry repo-boundary manifest synchronized when present", (t) 
 
 test("accounts for every current UI GraphQL call and document variant", () => {
   const scan = scanCurrentUI();
-  assert.equal(scan.call_count, 83);
-  assert.equal(scan.calls.length, 83);
-  assert.equal(scan.document_count, 102);
-  assert.equal(scan.documents.length, 102);
+  // Session history adds one scoped cursor query without a parallel analytics consumer.
+  assert.equal(scan.call_count, 84);
+  assert.equal(scan.calls.length, 84);
+  assert.equal(scan.document_count, 103);
+  assert.equal(scan.documents.length, 103);
   assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "registry").length, 18);
-  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "engine").length, 84);
-  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 102);
+  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "engine").length, 85);
+  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 103);
 });
 
 test("resolves imported fragments and expands conditional and map variants", () => {

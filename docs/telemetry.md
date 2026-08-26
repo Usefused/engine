@@ -44,3 +44,40 @@ metrics. Credential resolution and dispatch paths intentionally record
 identifiers and aggregate counts instead of credential values. Runtime payloads
 may contain PII, so handlers should avoid exporting raw request/response bodies
 unless a future feature explicitly adds redaction and opt-in controls.
+
+## Execution receipts and sessions
+
+SDK and MCP Activity show one parent receipt for each admitted Unified call,
+with the existing service receipts beneath it. The parent records total elapsed
+time and bounded forward/rollback outcomes; it does not retain inputs or
+responses, and it does not add another provider usage count. Selecting a child
+opens its normal receipt in the same sidebar. Back restores the Unified view.
+Rejected calls that fail whole-call preflight do not create a parent receipt.
+Provider timing capture and parent/child linkage work without an OTLP exporter.
+
+Sessions use server-side cursor pagination. New sessions retain bounded
+client-reported `initialize.clientInfo.name` and `version`, plus the initial
+observed client IP. These fields are visible only through app/audit-authorized
+Activity; they are not added to traces, logs, or metrics. Historical missing
+values display “Not recorded.” Hard-deactivated app versions retain the existing
+session-deletion behavior; this change does not extend session retention.
+
+By default, the initial IP is the direct HTTP peer. Behind a reverse proxy, set
+`FUSED_MCP_TRUSTED_PROXY_CIDRS` to a comma-separated list of the actual trusted
+proxy networks, for example `192.0.2.10/32,2001:db8:1::/64`. Only a trusted peer
+may supply `X-Forwarded-For`; Engine walks the chain from the right and stops at
+the first untrusted hop. Invalid configuration or chain evidence falls back to
+the direct peer. Do not configure every address as trusted. VPNs, NAT and hosted
+clients can expose an intermediary address, so this is provenance, not identity
+verification. The MCP client name/version are also self-reported.
+
+### Upgrade coordination
+
+This release adds schema migration 13, execution-event envelope version 6, and
+an `initialized` session transition with additive metadata. New workers accept
+old version-5 execution events and historical session events. Old workers do
+not accept the new documents and can discard them if they share the queue.
+Drain/stop old Engine producers and consumers before starting the new binaries;
+do not overlap old and new replicas on the same execution/session consumer
+queues. Engine startup applies the forward migration automatically. No
+historical client metadata or detailed timings can be recovered retroactively.

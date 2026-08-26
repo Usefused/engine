@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Usefused/engine/internal/engine/unified"
 	"github.com/Usefused/engine/internal/shared/canonicaljson"
 	"github.com/google/uuid"
 )
@@ -289,12 +290,13 @@ func validateSDKUnifiedGraph(operationName string, bindings map[string]sdkUnifie
 // selectedUnifiedBindingService resolves a graph step to its declared service
 // while applying the binding-key default defined by the configuration contract.
 func selectedUnifiedBindingService(operationName, target, configuredService string, services map[string]sdkConfigServiceDoc) (sdkConfigServiceDoc, error) {
-	if target == "" || len(target) > maxUnifiedTargetLength || strings.TrimSpace(target) != target {
+	// Public execution identity must be representable safely in canonical audit metadata.
+	if !unified.ValidPublicName(target, maxUnifiedTargetLength) {
 		return sdkConfigServiceDoc{}, fmt.Errorf("Unified Operation %q binding target must be an exact configured service key", operationName)
 	}
 	serviceTarget := unifiedBindingServiceTarget(target, configuredService)
 	// Exact service keys keep aliases from introducing normalized or ambiguous selector namespaces.
-	if serviceTarget == "" || len(serviceTarget) > maxUnifiedTargetLength || strings.TrimSpace(serviceTarget) != serviceTarget {
+	if !unified.ValidPublicName(serviceTarget, maxUnifiedTargetLength) {
 		return sdkConfigServiceDoc{}, fmt.Errorf("Unified Operation %q binding %q service must be an exact configured service key", operationName, target)
 	}
 	service, ok := services[serviceTarget]

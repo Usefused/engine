@@ -14,12 +14,13 @@ import (
 
 type executionContractFixture struct {
 	fusedobject.ExecutionContractEnvelope
-	ServiceID        uuid.UUID       `json:"service_id"`
-	ServiceVersionID uuid.UUID       `json:"service_version_id"`
-	Version          string          `json:"version"`
-	Service          json.RawMessage `json:"service"`
-	Operations       json.RawMessage `json:"operations"`
-	Webhooks         json.RawMessage `json:"webhooks"`
+	SchemaDefinitions map[string]fusedobject.SchemaContract `json:"schema_definitions"`
+	ServiceID         uuid.UUID                             `json:"service_id"`
+	ServiceVersionID  uuid.UUID                             `json:"service_version_id"`
+	Version           string                                `json:"version"`
+	Service           json.RawMessage                       `json:"service"`
+	Operations        json.RawMessage                       `json:"operations"`
+	Webhooks          json.RawMessage                       `json:"webhooks"`
 }
 
 // TestExecutionContractV2RoundTripsSemantically proves the

@@ -61,7 +61,28 @@ func forwardImportApplyWithAutoRegister(proxy Forwarder, s store.Store, contract
 	defer span.End()
 
 	rec := newStatusRecorder(w)
-	proxy.ForwardAndInspect(rec, r.WithContext(ctx), "", func(response *http.Response, body []byte) {
+	request, cancel, err := prepareImportApplyResponseWindow(w, r.WithContext(ctx))
+	defer cancel()
+	// A broken response deadline must fail before forwarding a possible mutation;
+	// otherwise a predictable delivery failure would make commit recovery harder.
+	if err != nil {
+		writeImportResponseWindowFailure(rec, ctx)
+		span.SetStatus(codes.Error, "import_response_deadline_unavailable")
+		span.SetAttributes(attribute.String("failure_code", "import_response_deadline_unavailable"))
+	} else {
+		forwardPreparedImportApply(proxy, s, contractFetcher, rec, request, accountID)
+	}
+	span.SetAttributes(
+		attribute.Int("http_status_code", rec.status),
+		attribute.String("outcome", outcomeLabel(rec.status)),
+	)
+}
+
+// forwardPreparedImportApply keeps publication and activation on one bounded
+// request context while preserving the existing partial-outcome response path.
+func forwardPreparedImportApply(proxy Forwarder, s store.Store, contractFetcher RuntimeContractFetcher, w http.ResponseWriter, r *http.Request, accountID uuid.UUID) {
+	ctx := r.Context()
+	proxy.ForwardAndInspect(w, r, "", func(response *http.Response, body []byte) {
 		audit := autoRegisterImportedService(ctx, s, contractFetcher, accountID, r.Header.Get("X-API-Key"), body)
 		// Registry has committed, so Engine-local activation failure must replace
 		// the success receipt with an authoritative partial outcome before write.
@@ -70,10 +91,6 @@ func forwardImportApplyWithAutoRegister(proxy Forwarder, s store.Store, contract
 		}
 		replaceProxyJSONResponse(response, http.StatusFailedDependency, importWorkspaceActivationFailure(audit, chimiddleware.GetReqID(ctx)))
 	})
-	span.SetAttributes(
-		attribute.Int("http_status_code", rec.status),
-		attribute.String("outcome", outcomeLabel(rec.status)),
-	)
 }
 
 // autoRegisterImportedService makes a successfully imported service usable in

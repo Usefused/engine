@@ -25,13 +25,17 @@ func IsVariableName(value string) bool {
 
 // ValidateResolvedHostAnchor confines app-supplied hostname variables to the
 // registrable provider domain that remains immutable in the template.
-func ValidateResolvedHostAnchor(template, resolved string, supplied map[string]bool) error {
-	marked, err := url.Parse(markServerVariables(template, supplied))
-	// Variables outside the authority cannot select the request destination.
-	if err != nil || !strings.Contains(marked.Hostname(), suppliedHostMarker) {
+func ValidateResolvedHostAnchor(template, resolved string, variables []Variable, values map[string]string, supplied map[string]bool) error {
+	markedHostname, err := markServerHostname(template, variables, values, supplied)
+	// A malformed template must never turn a required host check into a bypass.
+	if err != nil {
+		return errors.New("resolved server URL is invalid")
+	}
+	// Variables outside the hostname cannot select a different provider domain.
+	if markedHostname == "" {
 		return nil
 	}
-	anchor, err := publicsuffix.EffectiveTLDPlusOne(marked.Hostname())
+	anchor, err := publicsuffix.EffectiveTLDPlusOne(markedHostname)
 	// A marker in the eTLD+1 means caller data controls the registrable domain;
 	// whole-host and private/public-suffix templates therefore fail closed.
 	if err != nil || strings.Contains(anchor, suppliedHostMarker) {
@@ -49,19 +53,6 @@ func ValidateResolvedHostAnchor(template, resolved string, supplied map[string]b
 		return errors.New("server variable escaped the provider host")
 	}
 	return nil
-}
-
-// markServerVariables makes supplied-variable positions visible to URL and
-// public-suffix parsing without resolving any user-controlled value.
-func markServerVariables(template string, supplied map[string]bool) string {
-	return placeholderPattern.ReplaceAllStringFunc(template, func(match string) string {
-		name := placeholderPattern.FindStringSubmatch(match)[1]
-		// Only app-owned variables need the stronger registrable-domain boundary.
-		if supplied[name] {
-			return suppliedHostMarker
-		}
-		return "fused-provider-variable"
-	})
 }
 
 func Resolve(template string, variables []Variable, supplied map[string]string) (string, bool, error) {

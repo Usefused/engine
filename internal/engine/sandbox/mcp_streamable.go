@@ -14,6 +14,7 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/entitlement"
+	"github.com/Usefused/engine/internal/engine/mcpsession"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -102,33 +103,38 @@ func handleMCPStreamablePost(ctx context.Context, span trace.Span, w http.Respon
 
 // handleMCPStreamableInitialize preserves typed admission failures while establishing one authenticated runtime.
 func handleMCPStreamableInitialize(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, appID, token string, body []byte, request mcpJSONRPCRequest) {
+	// Only a correlated initialize request can establish the transport's immutable session identity.
 	if request.Method != "initialize" || len(request.ID) == 0 {
 		writeMCPJSONRPCError(w, request.ID, -32600, "initialize is required before creating a session", http.StatusBadRequest)
 		recordMCPStreamableOutcome(span, "invalid", true)
 		return
 	}
+	// Admission precedes runtime allocation and provenance retention.
 	if !allowMCPStreamableStart(ctx, span, w, appID) {
 		return
 	}
 	protocolVersion, err := initializeMCPProtocolVersion(request.Params)
+	// Invalid protocol negotiation cannot establish a session with misleading metadata.
 	if err != nil {
 		writeMCPJSONRPCError(w, request.ID, -32602, err.Error(), http.StatusBadRequest)
 		recordMCPStreamableOutcome(span, "invalid", true)
 		return
 	}
 	authContext, err := mcpSessionAuthContext(r.Header)
+	// Connection selectors must validate independently of the display-only client claim.
 	if err != nil {
 		writeMCPJSONRPCError(w, request.ID, -32602, err.Error(), http.StatusBadRequest)
 		recordMCPStreamableOutcome(span, "invalid", true)
 		return
 	}
 	identity, err := validateMCPToken(ctx, appID, token)
+	// No network or client attribution is retained before the runtime credential is authorized.
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "invalid token")
 		recordMCPStreamableOutcome(span, "denied", true)
 		return
 	}
-	sess, err := startMCPStreamableSession(ctx, appID, token, protocolVersion, authContext, identity)
+	sess, err := startMCPStreamableSession(ctx, appID, token, protocolVersion, authContext, identity, initialMCPSessionMetadata(r))
 	// Typed catalogue admission codes survive the session-start boundary without authored content.
 	if err != nil {
 		statusCode, errorCode := mcpSessionStartFailure(err)
@@ -138,6 +144,7 @@ func handleMCPStreamableInitialize(ctx context.Context, span trace.Span, w http.
 	}
 	w.Header().Set(mcpSessionIDHeader, sess.sessionID)
 	w.Header().Set(mcpProtocolVersionHeader, sess.protocolVersion)
+	// Failed initialization cannot leave a registered but unusable runtime session behind.
 	if !serveMCPStreamableRequest(ctx, span, w, sess, body, request) {
 		terminateMCPSession(sess.sessionID, "runtime_failed")
 	}
@@ -162,29 +169,34 @@ func allowMCPStreamableConcurrency(ctx context.Context, span trace.Span, w http.
 }
 
 // startMCPStreamableSession starts one isolated runtime that survives active use until authorization or cleanup ends it.
-func startMCPStreamableSession(ctx context.Context, appID, token, protocolVersion string, authContext map[string]any, identity auth.RuntimeIdentity) (*mcpSession, error) {
+func startMCPStreamableSession(ctx context.Context, appID, token, protocolVersion string, authContext map[string]any, identity auth.RuntimeIdentity, metadata mcpsession.Metadata) (*mcpSession, error) {
+	// Runtime state is loaded only after the shared token authorization has succeeded.
 	if err := globalObjectCache.ConnectSDK(ctx, appID); err != nil {
 		return nil, err
 	}
 	sessionID := uuid.NewString()
 	runtimeCtx, cancel := mcpSessionContext(context.WithoutCancel(ctx), identity.TokenPolicy.ExpiresAt)
 	fixture, err := prepareSessionFixture(runtimeCtx, appID, identity.TokenPolicy)
+	// Failed preparation must release the exact app's connection ownership.
 	if err != nil {
 		cleanupFailedMCPStreamableStart(appID, sessionID, cancel)
 		return nil, err
 	}
 	cmd, err := buildMCPCommand(runtimeCtx, sessionID, fixture)
+	// No partially prepared process survives an invalid runtime launch request.
 	if err != nil {
 		cleanupFailedMCPStreamableStart(appID, sessionID, cancel)
 		return nil, err
 	}
 	stdin, stdout, err := setupPipesAndStart(cmd)
+	// A failed process start leaves no usable session to register.
 	if err != nil {
 		cleanupFailedMCPStreamableStart(appID, sessionID, cancel)
 		return nil, err
 	}
 	sess := &mcpSession{
-		appID: appID, sessionID: sessionID, tokenID: identity.TokenID,
+		clientMetadata: metadata,
+		appID:          appID, sessionID: sessionID, tokenID: identity.TokenID,
 		protocolVersion: protocolVersion, transport: mcpStreamableTransport,
 		cmd: cmd, stdin: stdin, cancel: cancel, responses: make(chan string, 32),
 		token: token, fixture: fixture, authContext: authContext,

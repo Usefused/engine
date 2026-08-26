@@ -252,6 +252,7 @@ func marshalAppTokenBindings(bindings []AppTokenBindingRequest) ([]byte, error) 
 	return encoded, nil
 }
 
+// ListAppTokens counts physical usage once while session activity remains independently aggregated.
 func (s *postgresStore) ListAppTokens(ctx context.Context, appFamilyID uuid.UUID) ([]AppTokenMetadata, error) {
 	// Active history has no termination reason by design; normalize that NULL
 	// at the SQL projection boundary so every metadata scan uses one wire shape.
@@ -263,6 +264,7 @@ func (s *postgresStore) ListAppTokens(ctx context.Context, appFamilyID uuid.UUID
 			       MAX(event.started_at) AS last_used_at
 			FROM fused_engine_execution_events event
 			JOIN family_tokens token ON token.id = event.app_token_id
+			WHERE event.execution_kind = 'physical'
 			GROUP BY event.app_token_id
 		), session_usage AS (
 			SELECT session.app_token_id AS token_id, COUNT(*) AS session_count,

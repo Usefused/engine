@@ -790,19 +790,28 @@ async function saveBucketValue(
   if (err) throw err;
 }
 
+/** Requires explicit consent for the exact stored keys before deleting a credential. */
 async function removeBucketSecret(
   item: SecretMeta,
   setSaving: (saving: boolean) => void,
   loadContents: (bucketId: string) => void,
   toast: ReturnType<typeof useToast>
 ) {
+  // Paired credentials are one row; the confirmation must cover every key removed together.
+  const keyNames = item.key_names?.length ? [...item.key_names] : [item.key_name];
+  const confirmed = await toast.confirm(
+    `Remove secret stored under "${keyNames.join('", "')}"? Apps using this credential may stop working. This cannot be undone.`,
+    { confirmLabel: "Remove secret", cancelLabel: "Cancel" }
+  );
+  // Cancellation, dismissal, or an unexpected result cannot authorize a mutation.
+  if (confirmed !== true) return;
   await withSaving(
     setSaving,
     async () => {
       await api.workspace.deleteSecrets(
         item.bucket_id,
         item.service_id,
-        item.key_names?.length ? item.key_names : [item.key_name]
+        keyNames
       );
       loadContents(item.bucket_id);
       toast.success("Secret removed");
@@ -820,12 +829,19 @@ function rewindContentPage(
   if (items.length === 0 && total > 0 && page > 0) setPage(page - 1);
 }
 
+/** Confirms removal using the environment key only, never its stored value. */
 async function removeBucketValue(
   item: BucketValue,
   setSaving: (saving: boolean) => void,
   loadContents: (bucketId: string) => void,
   toast: ReturnType<typeof useToast>
 ) {
+  const confirmed = await toast.confirm(
+    `Remove environment value "${item.key_name}"? Apps using this value may stop working. This cannot be undone.`,
+    { confirmLabel: "Remove value", cancelLabel: "Cancel" }
+  );
+  // No save state, reload, or DELETE may run until the user explicitly confirms.
+  if (confirmed !== true) return;
   await withSaving(
     setSaving,
     async () => {
@@ -841,6 +857,7 @@ async function removeBucketValue(
   );
 }
 
+/** Preserves typed-reference confirmation before removing a reusable connected user. */
 async function removeBucketConnection(
   item: AuthConnection,
   setDeletingConnectionId: (connectionId: string | null) => void,
@@ -850,7 +867,9 @@ async function removeBucketConnection(
   const typedRef = await toast.prompt(connectedUserDeletePrompt(item), {
     placeholder: item.end_user_ref,
   });
-  if (typedRef !== item.end_user_ref) {
+  // Empty, cancelled, or mismatched references never authorize connection removal.
+  if (!item.end_user_ref || typedRef !== item.end_user_ref) {
+    // Cancellation is not an error; only an attempted mismatch needs feedback.
     if (typedRef !== null) toast.error("Connected user ref did not match");
     return;
   }
@@ -866,6 +885,7 @@ async function removeBucketConnection(
   }
 }
 
+/** Explains the exact connected-user reference required without exposing OAuth credentials. */
 function connectedUserDeletePrompt(item: AuthConnection): string {
   // Connected users are reusable OAuth credentials, so removal should be an
   // explicit act instead of a one-click row action.

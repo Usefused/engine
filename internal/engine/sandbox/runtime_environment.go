@@ -115,6 +115,8 @@ func runtimeServerName(name, legacyEnvironment string) string {
 	return strings.TrimSpace(legacyEnvironment)
 }
 
+// resolveRuntimeServerTemplate keeps service routing on the shared value resolver
+// and applies source-specific trust checks before replacing its execution origin.
 func resolveRuntimeServerTemplate(metadata *fusedobject.ServiceMetadata, resolution RuntimeEnvironmentResolution, credentials map[string]any, values []store.BucketValue) (RuntimeEnvironmentResolution, error) {
 	if baseURL := forcedRuntimeBaseURL(values); baseURL != "" {
 		if err := serverrouting.ValidateResolvedURL(baseURL); err != nil {
@@ -144,7 +146,8 @@ func resolveRuntimeServerTemplate(metadata *fusedobject.ServiceMetadata, resolut
 	// Provider defaults do not change the resolution source; supplied inputs may
 	// require an additional trust-boundary decision.
 	if usedSupplied {
-		if err := validateSuppliedServerRouting(metadata, resolution.BaseURL, resolved, resolution.Variables, supplied.sources); err != nil {
+		// Host anchoring needs actual enum-bound values, not unresolved placeholders.
+		if err := validateSuppliedServerRouting(metadata, resolution.BaseURL, resolved, resolution.Variables, supplied); err != nil {
 			return RuntimeEnvironmentResolution{}, err
 		}
 		// The bounded winning layer makes user/agent routing changes auditable
@@ -277,9 +280,9 @@ func resolvedServerVariableSource(variables []serverrouting.Variable, sources ma
 
 // validateSuppliedServerRouting keeps resource/workspace allowlists intact and
 // confines app bucket values to a provider-owned registrable domain.
-func validateSuppliedServerRouting(metadata *fusedobject.ServiceMetadata, template, resolved string, variables []serverrouting.Variable, sources map[string]string) error {
-	usesConnection := usesServerVariableSource(variables, sources, serverVariableSourceConnection)
-	usesWorkspace := usesServerVariableSource(variables, sources, serverVariableSourceWorkspace)
+func validateSuppliedServerRouting(metadata *fusedobject.ServiceMetadata, template, resolved string, variables []serverrouting.Variable, supplied serverVariableInputs) error {
+	usesConnection := usesServerVariableSource(variables, supplied.sources, serverVariableSourceConnection)
+	usesWorkspace := usesServerVariableSource(variables, supplied.sources, serverVariableSourceWorkspace)
 	// Resource and workspace routing retain the reviewed ConnectConfig allowlist
 	// used before app server-variable support was introduced.
 	if usesConnection || usesWorkspace {
@@ -287,7 +290,8 @@ func validateSuppliedServerRouting(metadata *fusedobject.ServiceMetadata, templa
 			return err
 		}
 	}
-	return serverrouting.ValidateResolvedHostAnchor(template, resolved, unboundedServerVariablesBySource(variables, sources, serverVariableSourceApp))
+	return serverrouting.ValidateResolvedHostAnchor(template, resolved, variables, supplied.values,
+		unboundedServerVariablesBySource(variables, supplied.sources, serverVariableSourceApp))
 }
 
 // unboundedServerVariablesBySource selects only non-enum inputs because the
@@ -304,6 +308,8 @@ func unboundedServerVariablesBySource(variables []serverrouting.Variable, source
 	return selected
 }
 
+// applyOperationRuntimeServer preserves the selected service trust boundary when
+// a reviewed operation supplies a more specific provider route.
 func applyOperationRuntimeServer(metadata *fusedobject.ServiceMetadata, service *models.Service, operation *models.IntegrationObject, resolution RuntimeEnvironmentResolution, credentials map[string]any, values []store.BucketValue) (RuntimeEnvironmentResolution, error) {
 	if len(operation.OperationServers) == 0 || service.ServerSource == "connection_resource" {
 		return resolution, nil
@@ -323,7 +329,8 @@ func applyOperationRuntimeServer(metadata *fusedobject.ServiceMetadata, service 
 	// Dynamic operation servers reuse the same source-specific trust boundary as
 	// service-level templates before replacing the request origin.
 	if dynamic {
-		if err := validateSuppliedServerRouting(metadata, server.URL, resolved, server.Variables, supplied.sources); err != nil {
+		// The same resolved values establish both dispatch and its provider anchor.
+		if err := validateSuppliedServerRouting(metadata, server.URL, resolved, server.Variables, supplied); err != nil {
 			return resolution, err
 		}
 	}

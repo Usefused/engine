@@ -1973,15 +1973,14 @@ function ServiceMetadata({ srv }: { srv: Service }) {
   );
 }
 
-// SelectedEndpointSidebar scopes component expansion to the Registry's latest component snapshot.
+// SelectedEndpointSidebar pins schema expansion to the same visible version as the selected operation.
 function SelectedEndpointSidebar({ srv }: { srv: Service }) {
   const detail = useDetail();
+  // No operation means no schema identity to resolve.
   if (!detail.selectedEndpoint) return null;
+  // An unresolved version never silently borrows the current version's dictionary.
   const componentScope = detail.currentVersionEntry?.id || "unresolved";
-  const allowRemoteRefs = Boolean(
-    detail.currentVersionEntry?.id &&
-    detail.serviceVersions[0]?.id === detail.currentVersionEntry.id
-  );
+  const allowRemoteRefs = Boolean(detail.currentVersionEntry?.id);
   return (
     <EndpointDetailsSidebar
       selectedEndpoint={detail.selectedEndpoint}

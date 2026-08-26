@@ -8,6 +8,7 @@ const appRequests = readFileSync(new URL("../components/activity/AppRequestsPane
 const sdkDetails = readFileSync(new URL("../routes/integrations.sdks.$id.tsx", import.meta.url), "utf8");
 const mcpActivity = readFileSync(new URL("../routes/integrations.mcp_.$id.analytics.tsx", import.meta.url), "utf8");
 const sharedDrawer = readFileSync(new URL("../components/activity/ExecutionDetailsDrawer.tsx", import.meta.url), "utf8");
+const appInspector = readFileSync(new URL("../components/activity/AppExecutionInspector.tsx", import.meta.url), "utf8");
 const webhookLogs = readFileSync(new URL("../components/webhooks/WebhookLogsCard.tsx", import.meta.url), "utf8");
 const webhookDrawer = readFileSync(new URL("../components/webhooks/WebhookEventDetailsDrawer.tsx", import.meta.url), "utf8");
 
@@ -15,9 +16,10 @@ const webhookDrawer = readFileSync(new URL("../components/webhooks/WebhookEventD
 test("app receipt rows open shared execution details", () => {
   assert.match(appRequests, /role="button" tabIndex=\{0\} aria-haspopup="dialog"/);
   assert.match(appRequests, /onSelect=\{setSelectedEvent\}/);
-  assert.match(appRequests, /<ExecutionDetailsDrawer event=\{selectedEvent\}/);
-  assert.match(appRequests, /<ExecutionDetails event=\{selectedEvent\}/);
-  assert.match(appRequests, /new Map\(\[\[appId, consumerName\]\]\)/);
+  assert.match(appRequests, /<AppExecutionInspector key=\{selectedEvent.id\} event=\{selectedEvent\}/);
+  assert.match(appInspector, /<ExecutionDetailsDrawer event=\{selected\}/);
+  assert.match(appInspector, /<ExecutionDetails event=\{selected\}/);
+  assert.match(appInspector, /new Map\(\[\[appId, consumerName\]\]\)/);
   assert.match(sdkDetails, /consumerName=\{sdk\.name\}/);
   assert.match(mcpActivity, /consumerName=\{serverName\}/);
   assert.match(sharedDrawer, /xl:max-w-\[1080px\]/);

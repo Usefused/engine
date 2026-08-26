@@ -14,6 +14,7 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/connectresource"
+	"github.com/Usefused/engine/internal/engine/executionevent"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
@@ -278,6 +279,11 @@ var engineExecutionTimingGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 var engineExecutionEventGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "EngineExecutionEvent",
 	Fields: graphql.Fields{
+		"execution_kind":            &graphql.Field{Type: graphql.String},
+		"parent_execution_id":       &graphql.Field{Type: graphql.String},
+		"unified_target":            &graphql.Field{Type: graphql.String},
+		"execution_phase":           &graphql.Field{Type: graphql.String},
+		"unified_steps":             &graphql.Field{Type: graphql.NewList(unifiedExecutionStepGraphQLType)},
 		"id":                        &graphql.Field{Type: graphql.String},
 		"trace_id":                  &graphql.Field{Type: graphql.String},
 		"span_id":                   &graphql.Field{Type: graphql.String},
@@ -884,10 +890,11 @@ func engineExecutionEventsGraphQLField(s store.Store) *graphql.Field {
 	}
 }
 
+// appExecutionEventsGraphQLField reuses the existing app audit permission boundary for parent and child pages.
 func appExecutionEventsGraphQLField(s store.Store) *graphql.Field {
 	return &graphql.Field{
 		Type: engineExecutionEventPageGraphQLType,
-		Args: appExecutionActivityArgs(true),
+		Args: appExecutionReceiptArgs(),
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.app_execution_events.list")
 			defer span.End()
@@ -911,7 +918,12 @@ func appExecutionEventsGraphQLField(s store.Store) *graphql.Field {
 				attribute.Int("limit", filter.limit),
 				attribute.Int("offset", filter.offset),
 			)
-			events, total, err := reader.ListEngineExecutionEventsByApp(ctx, filter.storeFilter(actor.accountID))
+			storeFilter, err := appExecutionReceiptFilter(filter.storeFilter(actor.accountID), p)
+			// Reject malformed parent selectors before reaching the account-scoped store.
+			if err != nil {
+				return nil, err
+			}
+			events, total, err := reader.ListEngineExecutionEventsByApp(ctx, storeFilter)
 			if err != nil {
 				return nil, fmt.Errorf("list app execution events: %w", err)
 			}
@@ -2748,19 +2760,25 @@ func projectGraphQLWebhookAnalytics(analytics models.WebhookAnalytics) map[strin
 	}
 }
 
+// projectGraphQLEngineExecutionEvents exposes metadata-only receipts for either physical or logical work.
 func projectGraphQLEngineExecutionEvents(events []models.EngineExecutionEvent) []map[string]interface{} {
 	items := make([]map[string]interface{}, 0, len(events))
 	for _, event := range events {
 		providerLatency := interface{}(nil)
+		// Missing provider timings stay absent rather than looking like a zero-duration request.
 		if event.ProviderLatencyMs != nil {
 			providerLatency = int(*event.ProviderLatencyMs)
 		}
 		providerHTTPStatus := interface{}(nil)
+		// Logical and pre-dispatch failures have no provider status.
 		if event.ProviderHTTPStatus != nil {
 			providerHTTPStatus = *event.ProviderHTTPStatus
 		}
 		items = append(items, map[string]interface{}{
-			"id": event.ID.String(), "trace_id": event.TraceID, "span_id": event.SpanID,
+			"execution_kind": executionevent.Kind(event), "parent_execution_id": optionalGraphQLUUID(event.ParentExecutionID),
+			"unified_target": event.UnifiedTarget, "execution_phase": event.ExecutionPhase,
+			"unified_steps": projectUnifiedReceiptSteps(event.UnifiedSteps),
+			"id":            event.ID.String(), "trace_id": event.TraceID, "span_id": event.SpanID,
 			"app_family_id": optionalGraphQLUUID(event.AppFamilyID), "app_id": optionalGraphQLUUID(event.AppID),
 			"app_version": event.AppVersion, "app_kind": executionAppKind(event.Transport),
 			"transport": event.Transport, "provider_protocol": event.ProviderProtocol,

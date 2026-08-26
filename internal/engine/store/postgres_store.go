@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
+	"github.com/Usefused/engine/internal/engine/executionevent"
 	"github.com/Usefused/engine/internal/shared/canonical"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
@@ -379,21 +380,27 @@ func (s *postgresStore) VerifyWorkspaceOwner(ctx context.Context, accountID uuid
 	return nil
 }
 
+// UpsertMCPSession merges lifecycle replay without moving the initial peer or regressing producer chronology.
 func (s *postgresStore) UpsertMCPSession(ctx context.Context, session *models.MCPSession) error {
 	query := `
 		INSERT INTO fused_mcp_sessions
-			(id, app_id, app_token_id, session_id, protocol_version, started_at, last_activity_at, ended_at, end_reason)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''))
+			(id, app_id, app_token_id, session_id, protocol_version, started_at, last_activity_at, ended_at, end_reason,
+			 client_name, client_version, initial_client_ip)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), $10, $11, NULLIF($12, '')::inet)
 		ON CONFLICT (id) DO UPDATE SET
 			app_token_id = COALESCE(fused_mcp_sessions.app_token_id, EXCLUDED.app_token_id),
 			protocol_version = EXCLUDED.protocol_version,
+			started_at = LEAST(fused_mcp_sessions.started_at, EXCLUDED.started_at),
+			client_name = COALESCE(NULLIF(fused_mcp_sessions.client_name, ''), EXCLUDED.client_name),
+			client_version = COALESCE(NULLIF(fused_mcp_sessions.client_version, ''), EXCLUDED.client_version),
+			initial_client_ip = COALESCE(fused_mcp_sessions.initial_client_ip, EXCLUDED.initial_client_ip),
 			last_activity_at = GREATEST(fused_mcp_sessions.last_activity_at, EXCLUDED.last_activity_at),
 			ended_at = COALESCE(EXCLUDED.ended_at, fused_mcp_sessions.ended_at),
 			end_reason = COALESCE(EXCLUDED.end_reason, fused_mcp_sessions.end_reason)
 	`
 	_, err := s.db.Exec(ctx, query, session.ID, session.AppID, nullableUUID(session.AppTokenID),
 		session.SessionID, session.ProtocolVersion, session.StartedAt, session.LastActivityAt,
-		session.EndedAt, session.EndReason)
+		session.EndedAt, session.EndReason, session.ClientName, session.ClientVersion, session.InitialClientIP)
 	return err
 }
 
@@ -405,7 +412,7 @@ func (s *postgresStore) GetMCPAnalyticsDashboard(ctx context.Context, appID uuid
 
 	totalsQuery := `
 		SELECT COUNT(*), COUNT(*) FILTER (WHERE status = 'failed'), COALESCE(AVG(latency_ms), 0)
-		FROM fused_engine_execution_events WHERE app_id = $1 AND transport = 'mcp'
+		FROM fused_engine_execution_events WHERE app_id = $1 AND transport = 'mcp' AND execution_kind = 'physical'
 	`
 	if err := s.db.QueryRow(ctx, totalsQuery, appID).Scan(&dashboard.TotalRequests, &dashboard.FailedRequests, &dashboard.AverageLatencyMs); err != nil {
 		return nil, fmt.Errorf("query mcp analytics totals: %w", err)
@@ -437,11 +444,12 @@ func (s *postgresStore) GetMCPAnalyticsDashboard(ctx context.Context, appID uuid
 	return dashboard, nil
 }
 
+// queryMCPToolUsage counts provider receipts, not logical wrappers that already own children.
 func queryMCPToolUsage(ctx context.Context, db *pgxpool.Pool, appID uuid.UUID) ([]models.MCPToolUsage, error) {
 	query := `
 		SELECT endpoint_name, COUNT(*), COUNT(*) FILTER (WHERE status = 'failed'), COALESCE(AVG(latency_ms), 0)
 		FROM fused_engine_execution_events
-		WHERE app_id = $1 AND transport = 'mcp' AND endpoint_name <> ''
+		WHERE app_id = $1 AND transport = 'mcp' AND endpoint_name <> '' AND execution_kind = 'physical'
 		GROUP BY endpoint_name
 		ORDER BY COUNT(*) DESC
 	`
@@ -462,13 +470,14 @@ func queryMCPToolUsage(ctx context.Context, db *pgxpool.Pool, appID uuid.UUID) (
 	return usage, rows.Err()
 }
 
+// queryMCPServiceUsage preserves provider-only analytics after adding logical history.
 func queryMCPServiceUsage(ctx context.Context, db *pgxpool.Pool, appID uuid.UUID) ([]models.MCPServiceUsage, error) {
 	query := `
 		SELECT COALESCE(workspace_service.service_name, event.service_id::text), COUNT(*),
 			COUNT(*) FILTER (WHERE event.status = 'failed'), COALESCE(AVG(event.latency_ms), 0)
 		FROM fused_engine_execution_events event
 		LEFT JOIN fused_workspace_services workspace_service ON workspace_service.service_id = event.service_id
-		WHERE event.app_id = $1 AND event.transport = 'mcp' AND event.service_id IS NOT NULL
+		WHERE event.app_id = $1 AND event.transport = 'mcp' AND event.service_id IS NOT NULL AND event.execution_kind = 'physical'
 		GROUP BY COALESCE(workspace_service.service_name, event.service_id::text)
 		ORDER BY COUNT(*) DESC
 	`
@@ -494,32 +503,26 @@ func queryMCPServiceUsage(ctx context.Context, db *pgxpool.Pool, appID uuid.UUID
 func queryRecentMCPSessions(ctx context.Context, db *pgxpool.Pool, appID uuid.UUID) ([]models.MCPSession, error) {
 	query := `
 		SELECT id, app_id, COALESCE(app_token_id, '00000000-0000-0000-0000-000000000000'::uuid),
-		       session_id, protocol_version, started_at, last_activity_at, ended_at, COALESCE(end_reason, '')
+		       session_id, protocol_version, started_at, last_activity_at, ended_at, COALESCE(end_reason, ''),
+		       client_name, client_version, COALESCE(host(initial_client_ip), '')
 		FROM fused_mcp_sessions
 		WHERE app_id = $1
-		ORDER BY started_at DESC
+		ORDER BY started_at DESC, id DESC
 		LIMIT 10
 	`
 	rows, err := db.Query(ctx, query, appID)
+	// A failed summary query must not appear as an empty session history.
 	if err != nil {
 		return nil, fmt.Errorf("query recent mcp sessions: %w", err)
 	}
 	defer rows.Close()
 
-	var sessions []models.MCPSession
-	for rows.Next() {
-		var sess models.MCPSession
-		if err := rows.Scan(&sess.ID, &sess.AppID, &sess.AppTokenID, &sess.SessionID,
-			&sess.ProtocolVersion, &sess.StartedAt, &sess.LastActivityAt, &sess.EndedAt,
-			&sess.EndReason); err != nil {
-			return nil, fmt.Errorf("scan mcp session: %w", err)
-		}
-		sessions = append(sessions, sess)
-	}
-	return sessions, rows.Err()
+	return collectMCPSessionRows(rows)
 }
 
+// BatchCreateEngineExecutionEvents persists canonical provider and logical receipts in one bounded worker batch.
 func (s *postgresStore) BatchCreateEngineExecutionEvents(ctx context.Context, events []models.EngineExecutionEvent) error {
+	// Empty flushes should not acquire a database connection.
 	if len(events) == 0 {
 		return nil
 	}
@@ -536,11 +539,13 @@ func (s *postgresStore) BatchCreateEngineExecutionEvents(ctx context.Context, ev
 			rate_limit_decision, rate_limit_policy_count, rate_limit_scope_kinds, rate_limit_units,
 			rate_limit_unit_totals, rate_limit_retry_outcome, rate_limit_header_outcome,
 			request_bytes, response_bytes, verification_status, delivery_status, idempotency_key_hash,
-			request_body_hash, idempotency_replayed, timings, started_at, ended_at, created_at
+			request_body_hash, idempotency_replayed, timings, started_at, ended_at, created_at,
+			execution_kind, parent_execution_id, unified_target, execution_phase, unified_steps
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
 			$21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40,
-			$41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59)
+			$41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59,
+			$60, $61, $62, $63, $64)
 		ON CONFLICT (id) DO UPDATE SET
 			status = EXCLUDED.status,
 			failure_reason = EXCLUDED.failure_reason,
@@ -571,6 +576,7 @@ func (s *postgresStore) BatchCreateEngineExecutionEvents(ctx context.Context, ev
 			ended_at = EXCLUDED.ended_at
 	`
 	for _, event := range events {
+		// Validate before queuing so one malformed event cannot partially persist a batch.
 		if err := validateExecutionEventIdentity(event); err != nil {
 			return err
 		}
@@ -589,6 +595,8 @@ func (s *postgresStore) BatchCreateEngineExecutionEvents(ctx context.Context, ev
 			event.RequestBytes, event.ResponseBytes, event.VerificationStatus, event.DeliveryStatus,
 			event.IdempotencyKeyHash, event.RequestBodyHash, event.IdempotencyReplayed, event.Timings, event.StartedAt,
 			event.EndedAt, event.CreatedAt,
+			executionevent.Kind(event), nullableUUID(event.ParentExecutionID), event.UnifiedTarget, event.ExecutionPhase,
+			append([]models.UnifiedExecutionStep{}, event.UnifiedSteps...),
 		)
 	}
 	results := s.db.SendBatch(ctx, b)
@@ -605,13 +613,20 @@ func nonNilInt64s(values []int64) []int64 {
 // validateExecutionEventIdentity keeps all app-authenticated transports on the
 // same exact family/app/version receipt invariant.
 func validateExecutionEventIdentity(event models.EngineExecutionEvent) error {
+	// Durable replay must apply the same bounded logical metadata rules as producers.
+	if err := executionevent.ValidateUnifiedMetadata(event); err != nil {
+		return err
+	}
+	// Webhooks retain their existing registration-scoped identity contract.
 	if event.Transport != models.EngineExecutionTransportSDK && event.Transport != models.EngineExecutionTransportMCP &&
 		event.Transport != models.EngineExecutionTransportREST {
 		return nil
 	}
+	// App identity is mandatory even when a logical parent has no service identity.
 	if event.AppFamilyID == uuid.Nil || event.AppID == uuid.Nil || strings.TrimSpace(event.AppVersion) == "" {
 		return fmt.Errorf("%s execution event requires app family, app, and version identity", event.Transport)
 	}
+	// Match the persisted immutable version bound.
 	if len([]rune(event.AppVersion)) > 128 {
 		return errors.New("execution event app version exceeds 128 characters")
 	}
@@ -644,17 +659,19 @@ func (s *postgresStore) DeleteEngineExecutionEventsBefore(ctx context.Context, b
 }
 
 type EngineExecutionFilter struct {
-	AccountID   uuid.UUID
-	ServiceID   uuid.UUID
-	AppFamilyID uuid.UUID
-	AppID       uuid.UUID
-	Transport   string
-	Direction   string
-	Status      string
-	Limit       int
-	Offset      int
-	StartDate   *time.Time
-	EndDate     *time.Time
+	ParentExecutionID uuid.UUID
+	ReceiptRoots      bool
+	AccountID         uuid.UUID
+	ServiceID         uuid.UUID
+	AppFamilyID       uuid.UUID
+	AppID             uuid.UUID
+	Transport         string
+	Direction         string
+	Status            string
+	Limit             int
+	Offset            int
+	StartDate         *time.Time
+	EndDate           *time.Time
 }
 
 // AppExecutionEventReader is optional so alternate Store implementations can
@@ -667,12 +684,15 @@ type AppExecutionAnalyticsReader interface {
 	GetEngineExecutionAnalyticsByApp(ctx context.Context, filter EngineExecutionFilter) (models.AppExecutionAnalytics, error)
 }
 
+// engineExecutionWhereClause keeps tenant/resource selection and accounting semantics in SQL.
 func engineExecutionWhereClause(filter EngineExecutionFilter) (string, []any) {
 	whereClause := "WHERE account_id = $1"
 	args := []any{filter.AccountID}
+	// App activity is family-scoped; service activity must never broaden to the workspace.
 	if filter.AppFamilyID != uuid.Nil {
 		whereClause += " AND app_family_id = $2"
 		args = append(args, filter.AppFamilyID)
+		// An exact app narrows the family when the caller did not request all versions.
 		if filter.AppID != uuid.Nil {
 			whereClause += " AND app_id = $3"
 			args = append(args, filter.AppID)
@@ -686,31 +706,36 @@ func engineExecutionWhereClause(filter EngineExecutionFilter) (string, []any) {
 	// Keeping tenant and resource scope in the same SQL predicate prevents a
 	// caller from receiving broad workspace data and filtering it in memory.
 	argIdx := len(args) + 1
+	// Optional dimensions stay database predicates to avoid loading unrelated receipts.
 	if filter.Transport != "" {
 		whereClause += fmt.Sprintf(" AND transport = $%d", argIdx)
 		args = append(args, filter.Transport)
 		argIdx++
 	}
+	// Inbound webhook and outbound execution histories remain independently selectable.
 	if filter.Direction != "" {
 		whereClause += fmt.Sprintf(" AND direction = $%d", argIdx)
 		args = append(args, filter.Direction)
 		argIdx++
 	}
+	// Status selection applies before pagination and counting.
 	if filter.Status != "" {
 		whereClause += fmt.Sprintf(" AND status = $%d", argIdx)
 		args = append(args, filter.Status)
 		argIdx++
 	}
+	// Bound the scan by the caller's requested interval.
 	if filter.StartDate != nil {
 		whereClause += fmt.Sprintf(" AND started_at >= $%d", argIdx)
 		args = append(args, *filter.StartDate)
 		argIdx++
 	}
+	// An omitted end keeps existing open-ended history behavior.
 	if filter.EndDate != nil {
 		whereClause += fmt.Sprintf(" AND started_at <= $%d", argIdx)
 		args = append(args, *filter.EndDate)
 	}
-	return whereClause, args
+	return executionReceiptWhereClause(filter, whereClause, args)
 }
 
 func (s *postgresStore) ListEngineExecutionEventsByService(ctx context.Context, filter EngineExecutionFilter) ([]models.EngineExecutionEvent, int64, error) {
@@ -719,14 +744,18 @@ func (s *postgresStore) ListEngineExecutionEventsByService(ctx context.Context, 
 	return s.listEngineExecutionEvents(ctx, filter)
 }
 
+// ListEngineExecutionEventsByApp groups logical work without hiding physical receipts from service activity.
 func (s *postgresStore) ListEngineExecutionEventsByApp(ctx context.Context, filter EngineExecutionFilter) ([]models.EngineExecutionEvent, int64, error) {
 	filter.ServiceID = uuid.Nil
+	filter.ReceiptRoots = true
 	return s.listEngineExecutionEvents(ctx, filter)
 }
 
+// listEngineExecutionEvents pages before display joins, avoiding per-row service lookups.
 func (s *postgresStore) listEngineExecutionEvents(ctx context.Context, filter EngineExecutionFilter) ([]models.EngineExecutionEvent, int64, error) {
 	whereClause, args := engineExecutionWhereClause(filter)
 	var count int64
+	// Count uses exactly the same scope as the page so parent grouping cannot skew pagination.
 	if err := s.db.QueryRow(ctx, "SELECT COUNT(*) FROM fused_engine_execution_events "+whereClause, args...).Scan(&count); err != nil {
 		return nil, 0, err
 	}
@@ -735,13 +764,13 @@ func (s *postgresStore) listEngineExecutionEvents(ctx context.Context, filter En
 	// Page the canonical receipt rows before joining display metadata so query
 	// cost remains bounded by the requested receipt limit rather than workspace size.
 	query := `WITH event_page AS (
-		SELECT * FROM fused_engine_execution_events ` + whereClause + fmt.Sprintf(" ORDER BY started_at DESC LIMIT $%d OFFSET $%d", argIdx, argIdx+1) + `
+		SELECT * FROM fused_engine_execution_events ` + whereClause + fmt.Sprintf(" ORDER BY started_at DESC, id DESC LIMIT $%d OFFSET $%d", argIdx, argIdx+1) + `
 	)
 	SELECT event.id, COALESCE(event.trace_id, ''), COALESCE(event.span_id, ''), COALESCE(event.account_id, '00000000-0000-0000-0000-000000000000'::uuid),
 		COALESCE(event.app_family_id, '00000000-0000-0000-0000-000000000000'::uuid),
 		COALESCE(event.app_id, '00000000-0000-0000-0000-000000000000'::uuid),
 		COALESCE(event.app_token_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(event.app_version, ''),
-		event.transport, COALESCE(event.provider_protocol, ''), event.direction, event.service_id, COALESCE(event.service_version_id, ''),
+		event.transport, COALESCE(event.provider_protocol, ''), event.direction, COALESCE(event.service_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(event.service_version_id, ''),
 		COALESCE(service.service_name, ''), COALESCE(service.service_slug, ''), COALESCE(version.version, ''),
 		COALESCE(event.operation_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(event.webhook_id, '00000000-0000-0000-0000-000000000000'::uuid),
 		event.endpoint_name, COALESCE(event.external_id, ''), COALESCE(event.event_name, ''), COALESCE(event.http_method, ''), COALESCE(event.request_path, ''), COALESCE(event.environment, ''),
@@ -753,14 +782,17 @@ func (s *postgresStore) listEngineExecutionEvents(ctx context.Context, filter En
 		event.rate_limit_scope_kinds, event.rate_limit_units, event.rate_limit_unit_totals,
 		COALESCE(event.rate_limit_retry_outcome, ''), COALESCE(event.rate_limit_header_outcome, ''),
 		event.request_bytes, event.response_bytes, COALESCE(event.verification_status, ''), COALESCE(event.delivery_status, ''),
-		event.idempotency_replayed, COALESCE(event.timings, '{}'::jsonb), event.started_at, event.ended_at, event.created_at
+		event.idempotency_replayed, COALESCE(event.timings, '{}'::jsonb), event.started_at, event.ended_at, event.created_at,
+		event.execution_kind, COALESCE(event.parent_execution_id, '00000000-0000-0000-0000-000000000000'::uuid),
+		event.unified_target, event.execution_phase, event.unified_steps
 	FROM event_page event
 	LEFT JOIN fused_workspace_services service ON service.service_id = event.service_id
 	LEFT JOIN fused_workspace_service_versions version
 		ON version.service_id = event.service_id AND version.service_version_id::text = event.service_version_id
-	ORDER BY event.started_at DESC`
+	ORDER BY event.started_at DESC, event.id DESC`
 	args = append(args, filter.Limit, filter.Offset)
 	rows, err := s.db.Query(ctx, query, args...)
+	// A failed page read must not look like an empty history.
 	if err != nil {
 		return nil, 0, err
 	}
@@ -769,6 +801,7 @@ func (s *postgresStore) listEngineExecutionEvents(ctx context.Context, filter En
 	events := make([]models.EngineExecutionEvent, 0, filter.Limit)
 	for rows.Next() {
 		var event models.EngineExecutionEvent
+		// Parent service identity is intentionally absent; the SELECT normalizes nullable UUIDs.
 		if err := rows.Scan(
 			&event.ID, &event.TraceID, &event.SpanID, &event.AccountID, &event.AppFamilyID, &event.AppID, &event.AppTokenID,
 			&event.AppVersion, &event.Transport, &event.ProviderProtocol, &event.Direction, &event.ServiceID,
@@ -784,11 +817,13 @@ func (s *postgresStore) listEngineExecutionEvents(ctx context.Context, filter En
 			&event.RateLimitRetryOutcome, &event.RateLimitHeaderOutcome,
 			&event.RequestBytes, &event.ResponseBytes, &event.VerificationStatus, &event.DeliveryStatus,
 			&event.IdempotencyReplayed, &event.Timings, &event.StartedAt, &event.EndedAt, &event.CreatedAt,
+			&event.ExecutionKind, &event.ParentExecutionID, &event.UnifiedTarget, &event.ExecutionPhase, &event.UnifiedSteps,
 		); err != nil {
 			return nil, 0, err
 		}
 		events = append(events, event)
 	}
+	// Never return a partial page after a cursor or transport failure.
 	if err := rows.Err(); err != nil {
 		return nil, 0, err
 	}

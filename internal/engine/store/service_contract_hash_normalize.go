@@ -8,18 +8,27 @@ import (
 	"github.com/Usefused/engine/internal/shared/schemacontract"
 )
 
+// normalizeServiceContractHashInput validates shared identities before hashing compact roots and metadata once.
 func normalizeServiceContractHashInput(input serviceContractHashInput) (serviceContractHashInput, error) {
+	input.ServiceMetadata.ExecutionContractEnvelope = fusedobject.ExecutionContractEnvelope{ContractVersion: input.ContractVersion, RequiredCapabilities: input.RequiredCapabilities}
+	// The database path repeats admission independently of the Registry transport boundary.
+	if err := schemacontract.PrepareSnapshot(&input.ServiceMetadata, input.Endpoints, input.Webhooks); err != nil {
+		return input, err
+	}
 	// Canonicalize only embedded raw values: a service snapshot can legitimately
 	// exceed the per-schema bound when it contains many independently bounded schemas.
 	metadata, err := normalizeHashServiceMetadata(input.ServiceMetadata)
+	// Invalid metadata cannot be bypassed by otherwise valid child contracts.
 	if err != nil {
 		return input, err
 	}
 	endpoints, err := normalizeHashEndpoints(input.Endpoints)
+	// Every selected operation contributes authoritative schema truth to the snapshot identity.
 	if err != nil {
 		return input, err
 	}
 	webhooks, err := normalizeHashWebhooks(input.Webhooks)
+	// Inbound contracts share the same integrity boundary as outbound operations.
 	if err != nil {
 		return input, err
 	}
@@ -27,18 +36,46 @@ func normalizeServiceContractHashInput(input serviceContractHashInput) (serviceC
 	return input, nil
 }
 
+// normalizeHashServiceMetadata keeps dictionary hashes stable across JSONB member and number rewriting.
 func normalizeHashServiceMetadata(value fusedobject.ServiceMetadata) (fusedobject.ServiceMetadata, error) {
+	definitions, err := normalizeHashDefinitions(value)
+	// Invalid definition truth cannot be hidden by an otherwise unchanged operation list.
+	if err != nil {
+		return value, err
+	}
+	value.SchemaDefinitions = definitions
+	// Documentation is optional independently of executable schema definitions.
 	if value.Documentation == nil {
 		return value, nil
 	}
 	documentation := *value.Documentation
 	extensions, err := normalizeHashExtensions(documentation.Extensions)
+	// Extension normalization cannot weaken the surrounding metadata hash on failure.
 	if err != nil {
 		return value, err
 	}
 	documentation.Extensions = extensions
 	value.Documentation = &documentation
 	return value, nil
+}
+
+// normalizeHashDefinitions hashes each version-owned raw definition once rather than per referencing operation.
+func normalizeHashDefinitions(metadata fusedobject.ServiceMetadata) (map[string]fusedobject.SchemaContract, error) {
+	// Preserve omission for legacy standalone snapshots so their identity remains stable.
+	if metadata.SchemaDefinitions == nil {
+		return nil, nil
+	}
+	result := make(map[string]fusedobject.SchemaContract, len(metadata.SchemaDefinitions))
+	for name, definition := range metadata.SchemaDefinitions {
+		definition.DefinitionIndex = metadata.DefinitionIndex
+		normalized, err := normalizeHashSchema(&definition)
+		// A single corrupted definition invalidates the complete immutable snapshot.
+		if err != nil {
+			return nil, err
+		}
+		result[name] = *normalized
+	}
+	return result, nil
 }
 
 func normalizeHashEndpoints(values []fusedobject.Endpoint) ([]fusedobject.Endpoint, error) {

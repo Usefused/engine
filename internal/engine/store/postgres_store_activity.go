@@ -38,6 +38,7 @@ func (s *postgresStore) scanWorkspaceExecutionSummary(ctx context.Context, accou
 			       event.service_id, event.status, event.latency_ms
 			FROM fused_engine_execution_events event
 			WHERE event.account_id = $1 AND event.started_at >= $2 AND event.started_at <= $3
+			  AND event.execution_kind = 'physical'
 		), summary AS (
 			SELECT COUNT(*) AS total_calls,
 			       COUNT(*) FILTER (WHERE direction = 'inbound') AS inbound_calls,
@@ -140,7 +141,7 @@ func (s *postgresStore) listWorkspaceServiceExecutionBreakdown(ctx context.Conte
 		FROM fused_engine_execution_events event
 		LEFT JOIN fused_workspace_services service ON service.service_id = event.service_id
 		WHERE event.account_id = $1 AND event.started_at >= $2 AND event.started_at <= $3
-		  AND event.service_id IS NOT NULL
+		  AND event.service_id IS NOT NULL AND event.execution_kind = 'physical'
 		GROUP BY event.service_id, service.service_name, service.service_slug
 		ORDER BY COUNT(*) DESC, 2, 1
 		LIMIT $4`, accountID, startDate, endDate, workspaceExecutionBreakdownLimit)

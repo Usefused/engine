@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+const maxRuntimeContractsResponseBytes int64 = 128 << 20
+
+var errRuntimeContractsResponseLimit = errors.New("runtime_contract_response_limit_exceeded: Registry response exceeds the 128 MiB limit; request fewer service versions")
+
 func (c *HTTPRegistryClient) FetchRuntimeContract(ctx context.Context, serviceID, serviceVersionID uuid.UUID, version, apiKey string) (*store.ServiceContractSnapshot, error) {
 	snapshots, err := c.FetchRuntimeContracts(ctx, []store.WorkspaceServiceVersion{{ServiceID: serviceID, ServiceVersionID: serviceVersionID, Version: version}}, apiKey)
 	if err != nil {
@@ -28,26 +33,45 @@ func (c *HTTPRegistryClient) FetchRuntimeContract(ctx context.Context, serviceID
 	return &snapshots[0], nil
 }
 
+// FetchRuntimeContracts admits one bounded Registry batch without retrying rejected contracts per service.
 func (c *HTTPRegistryClient) FetchRuntimeContracts(ctx context.Context, versions []store.WorkspaceServiceVersion, apiKey string) ([]store.ServiceContractSnapshot, error) {
+	// Empty selections perform no network or Registry work.
 	if len(versions) == 0 {
 		return nil, nil
 	}
 	req, err := c.buildRuntimeContractsRequest(ctx, versions, apiKey)
+	// Request construction failure cannot be repaired by dropping selected versions.
 	if err != nil {
 		return nil, err
 	}
 	resp, err := c.do(req)
+	// Transport failure preserves the one-batch ownership and recovery boundary.
 	if err != nil {
 		return nil, fmt.Errorf("FetchRuntimeContracts: request failed: %w", err)
 	}
 	defer resp.Body.Close()
+	// Registry error content remains useful diagnostics but cannot allocate an unbounded body.
 	if resp.StatusCode >= http.StatusBadRequest {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("FetchRuntimeContracts: registry returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("FetchRuntimeContracts: registry returned %d: %s", resp.StatusCode, runtimeContractErrorBody(resp.Body))
 	}
 	snapshots, err := decodeRuntimeContractsResponse(resp.Body, versions)
 	recordPassiveContractSummary(ctx, snapshots, err)
 	return snapshots, err
+}
+
+// runtimeContractErrorBody preserves bounded error context and makes truncation explicit rather than silently hiding it.
+func runtimeContractErrorBody(body io.Reader) string {
+	const limit = 64 << 10
+	payload, err := io.ReadAll(io.LimitReader(body, limit+1))
+	// An explicit marker distinguishes omitted tail content from the Registry's complete error message.
+	if len(payload) > limit {
+		return string(payload[:limit]) + " [Registry error body truncated at 64 KiB]"
+	}
+	// Partial transport reads are surfaced rather than presented as complete provider diagnostics.
+	if err != nil {
+		return string(payload) + " [Registry error body could not be read completely]"
+	}
+	return string(payload)
 }
 
 // recordPassiveContractSummary reports bounded aggregate evidence rather than
@@ -136,6 +160,7 @@ const runtimeContractsQuery = `
 			required_capabilities
 			service_id
 			service_version_id
+			schema_definitions
 			version
 			service {` + runtimeContractServiceFields + `}
 			operations {` + runtimeContractOperationFields + `}
@@ -322,26 +347,58 @@ type runtimeContractsGraphQLResponse struct {
 
 type runtimeContractBatchItem struct {
 	fusedobject.ExecutionContractEnvelope
-	ServiceID        uuid.UUID               `json:"service_id"`
-	ServiceVersionID uuid.UUID               `json:"service_version_id"`
-	Version          string                  `json:"version"`
-	Service          *runtimeContractService `json:"service"`
-	Operations       []fusedobject.Endpoint  `json:"operations"`
-	Webhooks         []fusedobject.Webhook   `json:"webhooks"`
+	SchemaDefinitions map[string]fusedobject.SchemaContract `json:"schema_definitions"`
+	ServiceID         uuid.UUID                             `json:"service_id"`
+	ServiceVersionID  uuid.UUID                             `json:"service_version_id"`
+	Version           string                                `json:"version"`
+	Service           *runtimeContractService               `json:"service"`
+	Operations        []fusedobject.Endpoint                `json:"operations"`
+	Webhooks          []fusedobject.Webhook                 `json:"webhooks"`
 }
 
 // decodeRuntimeContractsResponse separates contract rejection from transport and identity failure.
 func decodeRuntimeContractsResponse(body io.Reader, versions []store.WorkspaceServiceVersion) ([]store.ServiceContractSnapshot, error) {
-	var decoded runtimeContractsGraphQLResponse
+	decoded, err := decodeBoundedRuntimeContracts(body, maxRuntimeContractsResponseBytes)
 	// Unreadable responses provide no per-service proof and remain fatal to recovery.
-	if err := json.NewDecoder(body).Decode(&decoded); err != nil {
-		return nil, fmt.Errorf("FetchRuntimeContracts: incompatible contract: %w", unsupportedExecutionCapability())
+	if err != nil {
+		return nil, err
 	}
 	// Only an explicit, version-bound Registry classification is recoverable.
 	if len(decoded.Errors) > 0 {
 		return nil, classifyRuntimeContractGraphQLErrors(decoded.Errors, versions)
 	}
 	return runtimeContractSnapshotsFromBatch(decoded.Data.Contracts, versions)
+}
+
+// decodeBoundedRuntimeContracts bounds the entire batch and rejects trailing JSON instead of admitting a valid prefix.
+func decodeBoundedRuntimeContracts(body io.Reader, limit int64) (runtimeContractsGraphQLResponse, error) {
+	var decoded runtimeContractsGraphQLResponse
+	reader := &io.LimitedReader{R: body, N: limit + 1}
+	decoder := json.NewDecoder(reader)
+	err := decoder.Decode(&decoded)
+	// The sentinel byte distinguishes actual overrun from malformed but bounded input.
+	if reader.N == 0 {
+		return decoded, errRuntimeContractsResponseLimit
+	}
+	// Decode errors never echo untrusted payload fragments or suggest per-service retries.
+	if err != nil {
+		return decoded, incompatibleRuntimeResponse()
+	}
+	err = decoder.Decode(new(any))
+	// Trailing whitespace is part of the aggregate budget, not an unlimited post-document stream.
+	if reader.N == 0 {
+		return decoded, errRuntimeContractsResponseLimit
+	}
+	// Exactly one response object is required; a second value cannot be silently ignored.
+	if err != io.EOF {
+		return decoded, incompatibleRuntimeResponse()
+	}
+	return decoded, nil
+}
+
+// incompatibleRuntimeResponse preserves the existing safe compatibility classification for malformed JSON.
+func incompatibleRuntimeResponse() error {
+	return fmt.Errorf("FetchRuntimeContracts: incompatible contract: %w", unsupportedExecutionCapability())
 }
 
 // runtimeContractSnapshotsFromBatch keeps ordinary callers atomic while allowing
@@ -371,18 +428,24 @@ func runtimeContractSnapshotsFromBatch(items []runtimeContractBatchItem, version
 	return out, nil
 }
 
+// runtimeContractSnapshotFromBatchItem pins shared definitions beside the requested immutable version.
 func runtimeContractSnapshotFromBatchItem(item runtimeContractBatchItem, requested store.WorkspaceServiceVersion) (*store.ServiceContractSnapshot, error) {
+	// Requested identity is authoritative even when the Registry returns a valid but different contract.
 	if item.Service == nil || item.ServiceID != requested.ServiceID || item.ServiceVersionID != requested.ServiceVersionID {
 		return nil, fmt.Errorf("FetchRuntimeContracts: service %s version %s not found", requested.ServiceID, requested.ServiceVersionID)
 	}
+	// Existing pagination semantics remain independent of schema dictionary representation.
 	if err := validateRuntimePagination(item.Service, item.Operations); err != nil {
 		return nil, err
 	}
 	version := item.Version
+	// A missing display label may use the requested label, never a different version identity.
 	if version == "" {
 		version = requested.Version
 	}
 	snapshot := runtimeContractSnapshot(item.ExecutionContractEnvelope, requested.ServiceID, requested.ServiceVersionID, version, item.Service, item.Operations, item.Webhooks)
+	snapshot.ServiceMetadata.SchemaDefinitions = item.SchemaDefinitions
+	// One incompatible operation rejects the complete version before Engine storage.
 	if err := validateRuntimeSnapshot(snapshot); err != nil {
 		return nil, err
 	}

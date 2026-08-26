@@ -139,6 +139,7 @@ func engineMigrations() []engineMigration {
 		{Version: appTokenHistoryMigrationVersion, Name: appTokenHistoryMigrationName, Queries: appTokenHistoryMigrationQueries()},
 		{Version: appTokenCleanupMigrationVersion, Name: appTokenCleanupMigrationName, Queries: appTokenCleanupMigrationQueries()},
 		{Version: mcpSessionLifetimeMigrationVersion, Name: mcpSessionLifetimeMigrationName, Queries: mcpSessionLifetimeMigrationQueries()},
+		{Version: 13, Name: "20260826_unified_receipts_session_metadata", Queries: activityReceiptMigrationQueries()},
 	}
 }
 

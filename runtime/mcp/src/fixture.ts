@@ -36,6 +36,7 @@ export interface FixtureSchemaProjection {
 }
 
 export interface FixtureSchemaContract {
+  shared_definitions?: boolean;
   dialect: string;
   raw: unknown;
   content_hash: string;
@@ -167,6 +168,7 @@ export interface FixtureResponseContract {
 }
 
 export interface FixtureOperation {
+  service_version_id?: string;
   operation_id: string;
   service_id: string;
   name: string;
@@ -198,6 +200,7 @@ export interface FixtureUnifiedTarget {
 }
 
 interface FixtureFile {
+  schema_definitions?: Record<string, Record<string, FixtureSchemaContract>>;
   operations: FixtureOperation[];
   unified_operations?: {
     schema_version: number;
@@ -220,6 +223,7 @@ export class Fixture {
   constructor(
     public readonly operations: FixtureOperation[],
     public readonly unifiedOperations: FixtureUnifiedOperation[] = [],
+    public readonly schemaDefinitions: Record<string, Record<string, FixtureSchemaContract>> = {},
   ) {
     for (const op of operations) {
       // Exact physical IDs remain mandatory because call() has no fallback key.
@@ -281,5 +285,6 @@ export function loadFixture(path: string): Fixture {
   if (unified !== undefined && (unified.schema_version !== 3 || !Array.isArray(unified.operations))) {
     throw new Error("fixture.json has an unsupported Unified descriptor");
   }
-  return new Fixture(parsed.operations, unified?.operations ?? []);
+  // Standalone fixtures have no dictionary; compact roots retain the exact version-keyed shared source.
+  return new Fixture(parsed.operations, unified?.operations ?? [], parsed.schema_definitions ?? {});
 }

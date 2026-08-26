@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 
+	"github.com/Usefused/engine/internal/engine/executionevent"
+
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 )
 
@@ -290,11 +292,14 @@ func (s *EngineGRPCServer) executeUnifiedRollback(ctx context.Context, call prep
 	result := &enginev1.UnifiedRollbackResult{Target: target.name, TriggeredBy: append([]string(nil), plan.triggeredBy...)}
 	responseContext := map[string]any{target.name: responses[target.name]}
 	request, err := prepareUnifiedPhysicalRequest(call, target, target.rollback.input, responseContext, "rollback")
+	// Failed compensation mappings remain logical diagnostics, never provider attempts.
 	if err != nil {
 		result.Status, result.ErrorCode = "error", "input_mapping_failed"
 		return result
 	}
+	ctx = executionevent.WithUnifiedChild(ctx, call.receiptID, target.name, "rollback")
 	err = s.unifiedRuntime.ExecuteResolvedPhysicalSuccess(ctx, call.identity, target.rollback.operation, request)
+	// Compensation failure is reported independently from the forward failure.
 	if err != nil {
 		classified := classifyUnifiedPhysicalError(err)
 		result.Status, result.ErrorCode, result.AuthAction = "error", classified.code, classified.action

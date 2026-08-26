@@ -43,19 +43,23 @@ const (
 // No memory, globals, or file handles are shared between sessions.
 func mcpSseHandler(w http.ResponseWriter, r *http.Request) {
 	appIDHex, token, ok := extractMCPParams(w, r)
+	// Missing runtime identity must fail before any session or provenance is retained.
 	if !ok {
 		return
 	}
 	authContext, err := mcpSessionAuthContext(r.Header)
+	// Invalid connection selectors cannot become authority for a new session.
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Rate limiting applies before allocating a provider-capable runtime.
 	if !allowMCPSessionStart(w, appIDHex) {
 		return
 	}
 
 	ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.sandbox.mcp.concurrency_check")
+	// Shared concurrency policy must admit the connection before an isolated process starts.
 	if limitErr := entitlement.CheckLimit(span, "mcp_sandbox_concurrency", activeMCPSessionCount(), entitlement.LiveEntitlement.Load().MaxSandboxConcurrency); limitErr != nil {
 		slog.InfoContext(ctx, "mcp sse denied: max sandbox concurrency reached", "limit", limitErr.Limit, "current", limitErr.Current)
 		writeError(w, http.StatusPaymentRequired, limitErr.Error())
@@ -65,6 +69,7 @@ func mcpSseHandler(w http.ResponseWriter, r *http.Request) {
 	span.End()
 
 	identity, connected := connectMCPApp(w, r.Context(), appIDHex, token)
+	// An unauthenticated peer must not create a durable session attribution.
 	if !connected {
 		return
 	}
@@ -89,6 +94,7 @@ func mcpSseHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stdin, stdout, err := setupPipesAndStart(cmd)
+	// Failed process startup must release the admitted app cache ownership.
 	if err != nil {
 		cancel()
 		globalObjectCache.DisconnectSDK(appIDHex)
@@ -97,7 +103,8 @@ func mcpSseHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	registerMCPSession(ctx, &mcpSession{
-		appID: appIDHex, sessionID: sessionID, tokenID: identity.TokenID,
+		clientMetadata: initialMCPSessionMetadata(r),
+		appID:          appIDHex, sessionID: sessionID, tokenID: identity.TokenID,
 		protocolVersion: "2024-11-05", transport: "sse", cmd: cmd, stdin: stdin,
 		cancel: cancel, token: token,
 		fixture: fixture, authContext: authContext,
@@ -105,6 +112,7 @@ func mcpSseHandler(w http.ResponseWriter, r *http.Request) {
 	defer terminateMCPSession(sessionID, "client_disconnected")
 
 	flusher, ok := setupSSEResponse(w, sessionID)
+	// A writer without streaming support cannot keep the newly created session alive.
 	if !ok {
 		return
 	}
@@ -486,13 +494,19 @@ func recordMCPSessionIdleTimeout(sess *mcpSession) {
 
 // publishMCPSessionEvent sends a session lifecycle event to NATS JetStream.
 func publishMCPSessionEvent(sess *mcpSession, eventType, endReason string) {
+	// Session metadata uses only the existing durable lifecycle subject, never OTEL attributes.
 	if globalNATSClient != nil && globalNATSClient.JS != nil {
+		metadata := mcpSessionMetadata(sess)
+		lastActivityAt := mcpSessionLastActivity(sess)
+		// Snapshot activity before event time so concurrent traffic cannot produce impossible worker chronology.
 		occurredAt := time.Now().UTC()
 		eventData, _ := json.Marshal(map[string]any{
 			"app_id": sess.appID, "app_token_id": sess.tokenID,
 			"session_id": sess.sessionID, "protocol_version": sess.protocolVersion,
 			"type": eventType, "end_reason": endReason, "timestamp": occurredAt,
-			"last_activity_at": mcpSessionLastActivity(sess),
+			"last_activity_at": lastActivityAt,
+			"client_name":      metadata.ClientName, "client_version": metadata.ClientVersion,
+			"initial_client_ip": metadata.InitialClientIP,
 		})
 		globalNATSClient.PublishJS(messaging.FusedEngineSessionSubject(sess.appID), eventData)
 	}
@@ -754,6 +768,7 @@ func trackPendingRequest(ctx context.Context, body []byte, sess *mcpSession) str
 
 // trackMCPToolCall retains one opaque request key and starts search telemetry only for search_docs.
 func trackMCPToolCall(ctx context.Context, request mcpJSONRPCRequest, sess *mcpSession) string {
+	captureMCPClientInfo(ctx, request, sess)
 	// Notifications and non-tool methods do not participate in tool timeout or search telemetry.
 	if request.Method != "tools/call" || len(request.ID) == 0 {
 		return ""

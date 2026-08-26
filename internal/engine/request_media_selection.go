@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Usefused/engine/internal/shared/models"
+	"github.com/Usefused/engine/internal/shared/schemaref"
 	"github.com/Usefused/engine/internal/shared/workflowcontract"
 )
 
@@ -67,9 +68,11 @@ func SelectRequestContent(content *models.RequestContent) (*SelectedRequestRepre
 	}, outcome, nil
 }
 
+// requestBodyDeclaration reads referenced body fields from one immutable index without expanding its graph.
 func requestBodyDeclaration(contract *models.SchemaContract) (map[string]struct{}, bool, error) {
 	fields := make(map[string]struct{})
 	allowsAdditional := false
+	// A body-less contract grants no additional caller fields.
 	if contract == nil {
 		return fields, false, nil
 	}
@@ -77,19 +80,46 @@ func requestBodyDeclaration(contract *models.SchemaContract) (map[string]struct{
 		fields[name] = struct{}{}
 	}
 	allowsAdditional = contract.Projection.AdditionalProperties != nil
+	// Legacy fixtures without canonical raw truth retain their explicit projection-only semantics.
 	if len(contract.Raw) == 0 {
 		return fields, allowsAdditional, nil
 	}
+	// Canonical raw truth replaces the lossy projection; it must not grant extra fields omitted by the actual schema.
+	fields = make(map[string]struct{})
+	allowsAdditional = false
 	var root any
+	// Malformed raw schema cannot become a permissive projection fallback.
 	if err := json.Unmarshal(contract.Raw, &root); err != nil {
 		return nil, false, errors.New("request schema raw contract is invalid")
 	}
-	collectBodyDeclarations(root, root, fields, &allowsAdditional, make(map[string]bool), 0)
+	// A compact contract cannot fall back to its lossy projection when its dictionary is missing.
+	if err := contract.DefinitionIndex.Validate(contract.Raw, contract.SharedDefinitions); err != nil {
+		return nil, false, err
+	}
+	scope := bodySchemaScope{root: root}
+	// Only explicitly marked roots may consult service-wide definitions.
+	if contract.SharedDefinitions {
+		scope.index = contract.DefinitionIndex
+	}
+	collectBodyDeclarations(root, scope, fields, &allowsAdditional, make(map[string]bool), 0)
 	return fields, allowsAdditional, nil
 }
 
-func collectBodyDeclarations(node, root any, fields map[string]struct{}, allowsAdditional *bool, visited map[string]bool, depth int) {
+type bodySchemaScope struct {
+	root  any
+	index *schemaref.Index
+	name  string
+}
+
+// collectBodyDeclarations follows only root composition and references, not nested property declarations.
+func collectBodyDeclarations(node any, root bodySchemaScope, fields map[string]struct{}, allowsAdditional *bool, visited map[string]bool, depth int) {
+	// A literal true schema explicitly allows arbitrary JSON, unlike an omitted object declaration.
+	if unconstrained, boolean := node.(bool); boolean {
+		*allowsAdditional = *allowsAdditional || unconstrained
+		return
+	}
 	object, ok := node.(map[string]any)
+	// Only object schema nodes declare named fields; bounded traversal also terminates recursive compositions.
 	if !ok || depth > 32 {
 		return
 	}
@@ -124,36 +154,26 @@ func schemaAllowsAdditionalProperties(object map[string]any) bool {
 	return false
 }
 
-func collectReferencedBodyDeclaration(object map[string]any, root any, fields map[string]struct{}, allowsAdditional *bool, visited map[string]bool, depth int) {
+// collectReferencedBodyDeclaration retains owning-document identity across shared and local reference scopes.
+func collectReferencedBodyDeclaration(object map[string]any, root bodySchemaScope, fields map[string]struct{}, allowsAdditional *bool, visited map[string]bool, depth int) {
 	ref, _ := object["$ref"].(string)
-	if ref == "" || visited[ref] {
+	key := root.name + "\x00" + ref
+	// Reference cycles are normal schemas; visit each scope/edge only once for root field discovery.
+	if ref == "" || visited[key] {
 		return
 	}
-	target, ok := resolveLocalSchemaReference(root, ref)
+	target, document, name, ok := root.index.Resolve(root.root, ref)
+	// Admission has already verified edges; a absent target never grants undeclared fields.
 	if !ok {
 		return
 	}
-	visited[ref] = true
+	visited[key] = true
+	root.root = document
+	// Local pointers retain their prior scope; a dictionary hop begins a new document scope.
+	if name != "" {
+		root.name = name
+	}
 	collectBodyDeclarations(target, root, fields, allowsAdditional, visited, depth+1)
-}
-
-func resolveLocalSchemaReference(root any, ref string) (any, bool) {
-	if !strings.HasPrefix(ref, "#/") {
-		return nil, false
-	}
-	current := root
-	for _, token := range strings.Split(strings.TrimPrefix(ref, "#/"), "/") {
-		object, ok := current.(map[string]any)
-		if !ok {
-			return nil, false
-		}
-		token = strings.ReplaceAll(strings.ReplaceAll(token, "~1", "/"), "~0", "~")
-		current, ok = object[token]
-		if !ok {
-			return nil, false
-		}
-	}
-	return current, true
 }
 
 func schemaArray(value any) []any {

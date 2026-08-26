@@ -124,13 +124,39 @@ function renderRootPayloadCall(methodPath: string, requestSchema: CodeExampleSch
   return `const result = await ${methodPath}(${schemaExampleValue(requestSchema)}${optionsArgument});`;
 }
 
-// typescriptSDKCallExample shows the exact generated member path and declared
-// option keys without embedding credentials, selectors, or source examples.
+// typescriptWebhookSubscriptionExample mirrors the receiver and event enum
+// exported by generated packages, without turning inbound data into call inputs.
+function typescriptWebhookSubscriptionExample(serviceName: string, endpoint: IntegrationObject): string {
+  const eventEnum = `${generatedPascalCase(serviceName, "resource")}Webhook`;
+  const eventMember = endpoint.name.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+  return `// Import FusedWebhooks and ${eventEnum} from your generated SDK.
+const receiver = FusedWebhooks.listen(
+  "my-receiver",
+  process.env.FUSED_SDK_TOKEN!
+);
+
+receiver.on(
+  ${eventEnum}.${eventMember},
+  // Handle each incoming event before acknowledging its delivery.
+  async (payload, ctx) => {
+    // Process payload.body here; it is received, not sent.
+    ctx.ack();
+  }
+);
+
+// Call receiver.close() when your application shuts down.`;
+}
+
+// typescriptSDKCallExample keeps inbound subscriptions distinct from outbound
+// method calls and never embeds credentials, selectors, or source examples.
 export function typescriptSDKCallExample(serviceName: string, endpoint: IntegrationObject, requestSchema?: CodeExampleSchema): string {
+  // Webhook body/parameter schemas describe received events, never SDK inputs.
+  if (endpoint.isWebhook) return typescriptWebhookSubscriptionExample(serviceName, endpoint);
   const methodPath = generatedMethodPath(serviceName, endpoint);
   const { options, omitted } = generatedExampleOptions(endpoint, requestSchema);
   const optionLines = options.map(renderExampleOption);
   const omittedLine = omittedOptionsLine(omitted);
+  // Keep large contracts honest about the fields omitted from the short sample.
   if (omittedLine) optionLines.push(omittedLine);
 
   // Scalar and array roots are generated as a payload argument rather than
@@ -138,6 +164,7 @@ export function typescriptSDKCallExample(serviceName: string, endpoint: Integrat
   if (usesRootPayload(requestSchema) && requestSchema) {
     return renderRootPayloadCall(methodPath, requestSchema, optionLines);
   }
+  // Unresolved request shapes must not produce invented body fields.
   if (hasUnprojectedBody(endpoint, requestSchema)) {
     optionLines.push("  // Add request fields from the generated options type.");
   }

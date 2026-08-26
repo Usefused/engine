@@ -75,6 +75,7 @@ func ExecutionTransportFromContext(ctx context.Context) string {
 	return models.EngineExecutionTransportSDK
 }
 
+// recordEngineExecutionAudit publishes one physical receipt with optional server-owned Unified correlation.
 func recordEngineExecutionAudit(ctx context.Context, span trace.Span, state executionAuditState, execErr error) {
 	event := models.EngineExecutionEvent{
 		ID:                  uuid.New(),
@@ -125,6 +126,7 @@ func recordEngineExecutionAudit(ctx context.Context, span trace.Span, state exec
 		event.TraceID = spanContext.TraceID().String()
 		event.SpanID = spanContext.SpanID().String()
 	}
+	executionevent.AttachUnifiedChild(ctx, &event)
 	attachExecutionTimings(ctx, &event)
 	if event.PaginationType != "" {
 		span.SetAttributes(

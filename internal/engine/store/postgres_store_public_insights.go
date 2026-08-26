@@ -11,13 +11,14 @@ import (
 	"github.com/Usefused/engine/internal/shared/models"
 )
 
+// ListUnprojectedPublicInsightServiceIDs excludes logical envelopes from provider reliability reports.
 func (s *postgresStore) ListUnprojectedPublicInsightServiceIDs(ctx context.Context, before time.Time, limit int) ([]uuid.UUID, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT DISTINCT event.service_id
 		FROM fused_engine_execution_events event
 		LEFT JOIN fused_public_service_insight_projected_events projected ON projected.event_id = event.id
 		WHERE projected.event_id IS NULL AND event.started_at < $1
-		  AND event.direction = 'outbound' AND event.operation_id IS NOT NULL
+		  AND event.direction = 'outbound' AND event.operation_id IS NOT NULL AND event.execution_kind = 'physical'
 		ORDER BY event.service_id LIMIT $2`, before, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list public insight candidate services: %w", err)
@@ -53,6 +54,7 @@ const publicInsightProjectionSQL = `
 		LEFT JOIN fused_public_service_insight_projected_events projected ON projected.event_id = event.id
 		WHERE projected.event_id IS NULL AND event.service_id = ANY($1::uuid[])
 		  AND event.started_at < $2 AND event.direction = 'outbound' AND event.operation_id IS NOT NULL
+		  AND event.execution_kind = 'physical'
 		ORDER BY event.started_at, event.id LIMIT $3
 		FOR UPDATE OF event SKIP LOCKED
 	), grouped AS (

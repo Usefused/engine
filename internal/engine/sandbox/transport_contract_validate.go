@@ -8,6 +8,7 @@ import (
 	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/catalogcontract"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
+	"github.com/Usefused/engine/internal/shared/schemacontract"
 	"github.com/Usefused/engine/internal/shared/serverrouting"
 	"github.com/Usefused/engine/internal/shared/signaturepolicy"
 )
@@ -24,6 +25,10 @@ func validateTransportContract(metadata *fusedobject.ServiceMetadata, endpoints 
 	// Missing service metadata cannot establish a trustworthy snapshot boundary.
 	if metadata == nil {
 		return errors.New("runtime transport contract is missing")
+	}
+	// Shared references must be complete before other validators consume any operation schema.
+	if err := schemacontract.PrepareSnapshot(metadata, endpoints, webhooks); err != nil {
+		return err
 	}
 	// Catalogue policy must validate before any operation is admitted.
 	if err := catalogcontract.Validate(metadata.Catalog); err != nil {

@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/Usefused/engine/internal/engine"
+	"github.com/Usefused/engine/internal/engine/executionevent"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/unified"
@@ -24,10 +25,13 @@ type unifiedTargetOutcome struct {
 // boundary, and retains its raw response only for in-call dependencies.
 func (s *EngineGRPCServer) executeUnifiedTarget(ctx context.Context, call preparedUnifiedCall, target preparedUnifiedTarget, responses map[string]any) unifiedTargetOutcome {
 	request, err := prepareUnifiedPhysicalRequest(call, target, target.input, responses, "forward")
+	// Invalid mappings never enter the provider boundary or fabricate child receipts.
 	if err != nil {
 		return unifiedTargetOutcome{result: unifiedErrorResult(target.name, "input_mapping_failed", nil)}
 	}
+	ctx = executionevent.WithUnifiedChild(ctx, call.receiptID, target.name, "forward")
 	physical, err := s.unifiedRuntime.ExecuteResolvedPhysicalJSON(ctx, call.identity, target.operation, request)
+	// Preserve the runtime's bounded classification instead of retaining provider error bodies.
 	if err != nil {
 		classified := classifyUnifiedPhysicalError(err)
 		return unifiedTargetOutcome{result: unifiedErrorResult(target.name, classified.code, classified.action)}

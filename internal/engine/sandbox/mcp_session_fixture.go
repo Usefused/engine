@@ -77,32 +77,44 @@ type endpointBatchLister interface {
 	ListEndpointsForSelections(context.Context, []models.SDKSelection, []string) (map[int][]fusedobject.Endpoint, error)
 }
 
+// buildBatchedSessionFixture reuses the connected app metadata cache beside one set-based endpoint query.
 func buildBatchedSessionFixture(ctx context.Context, cache ObjectCache, selections []models.SDKSelection, allowedOperations []string) (*Fixture, error) {
 	lister, ok := cache.(endpointBatchLister)
+	// Per-service fallback queries would reintroduce N+1 catalogue loading.
 	if !ok {
 		return nil, fmt.Errorf("app-scoped endpoint lookup unavailable")
 	}
 	endpointsBySelection, err := lister.ListEndpointsForSelections(ctx, selections, allowedOperations)
+	// A failed batch cannot safely produce a partially authorized catalogue.
 	if err != nil {
 		return nil, fmt.Errorf("list app-scoped endpoints: %w", err)
 	}
 	var operations []FixtureOperation
 	for index, selection := range selections {
 		operations, err = appendFixtureOperations(operations, selection, endpointsBySelection[index])
+		// Rejection of one selected operation prevents the entire unsafe fixture from reaching Node.
 		if err != nil {
 			return nil, err
 		}
 	}
-	return newFixtureFromOperations(ctx, operations), nil
+	fixture := newFixtureFromOperations(ctx, operations)
+	// Dictionary lookup is an in-memory batch over metadata preloaded during app connection.
+	if err := attachMCPDefinitions(fixture, cache, selections); err != nil {
+		return nil, err
+	}
+	return fixture, nil
 }
 
+// appendFixtureOperations pins each documentation operation to the same version as its shared schema dictionary.
 func appendFixtureOperations(operations []FixtureOperation, selection models.SDKSelection, endpoints []fusedobject.Endpoint) ([]FixtureOperation, error) {
 	for _, endpoint := range endpoints {
 		operation, err := endpointToFixtureOperation(selection.ServiceID.String(), endpoint)
+		// Conversion failures retain exact operation context without dropping a selected callable silently.
 		if err != nil {
 			return nil, fmt.Errorf("convert endpoint %s: %w", endpoint.Name, err)
 		}
 		stripMCPAuthParameters(&operation, selection.AuthName)
+		operation.ServiceVersionID = selection.ServiceVersionID.String()
 		operations = append(operations, operation)
 	}
 	return operations, nil

@@ -84,9 +84,9 @@ func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 	}
 
 	migrations := engineMigrations()
-	// The new lifetime cause requires its own ledger entry rather than rewriting an applied version.
-	if len(migrations) != 12 {
-		t.Fatalf("Engine migration count = %d, want 12", len(migrations))
+	// Receipt hierarchy and session metadata require a forward migration, never a rewrite of applied schema.
+	if len(migrations) != 13 {
+		t.Fatalf("Engine migration count = %d, want 13", len(migrations))
 	}
 	assertMigrationIdentity(t, migrations[0], engineMigrationVersion, engineMigrationName)
 	assertMigrationIdentity(t, migrations[1], appTokenPolicyMigrationVersion, appTokenPolicyMigrationName)
@@ -100,6 +100,7 @@ func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 	assertMigrationIdentity(t, migrations[9], appTokenHistoryMigrationVersion, appTokenHistoryMigrationName)
 	assertMigrationIdentity(t, migrations[10], appTokenCleanupMigrationVersion, appTokenCleanupMigrationName)
 	assertMigrationIdentity(t, migrations[11], mcpSessionLifetimeMigrationVersion, mcpSessionLifetimeMigrationName)
+	assertMigrationIdentity(t, migrations[12], 13, "20260826_unified_receipts_session_metadata")
 	if engineMigrationLockQuery != "SELECT pg_advisory_xact_lock($1)" {
 		t.Fatalf("Engine migrations must use a transaction-scoped advisory lock, got %q", engineMigrationLockQuery)
 	}

@@ -59,6 +59,8 @@ func mapRetryConfig(r *fusedobject.RetryConfig) *models.RetryConfig {
 // declare one default instead of annotating every operation individually
 // (see plans/plan-service-config-restructure.md item 1).
 func fusedToIntegrationObject(o *fusedobject.ServiceMetadata, ep fusedobject.Endpoint) *models.IntegrationObject {
+	requestContent := mapRequestContent(ep.RequestContent)
+	attachRequestDefinitionIndex(requestContent, o)
 	return &models.IntegrationObject{
 		ID:                   ep.ID,
 		StableKey:            ep.StableKey,
@@ -73,7 +75,7 @@ func fusedToIntegrationObject(o *fusedobject.ServiceMetadata, ep fusedobject.End
 		NormalizedPath:       ep.NormalizedPath,
 		Deprecated:           ep.Deprecated,
 		Parameters:           mapParameters(ep.Parameters),
-		RequestContent:       mapRequestContent(ep.RequestContent),
+		RequestContent:       requestContent,
 		Responses:            mapResponses(ep.Responses),
 		GraphQLQuery:         ep.GraphQLQuery,
 		ProviderProtocol:     ep.ProviderProtocol,
@@ -213,13 +215,34 @@ func mapParameterContent(content map[string]fusedobject.ParameterContent) map[st
 	return mapped
 }
 
+// mapSchemaContract copies the compact root while sharing immutable dictionary identity across operations.
 func mapSchemaContract(contract *fusedobject.SchemaContract) *models.SchemaContract {
+	// Absent schemas remain absent rather than acquiring a permissive default.
 	if contract == nil {
 		return nil
 	}
 	return &models.SchemaContract{
 		Dialect: contract.Dialect, Raw: append([]byte(nil), contract.Raw...), ContentHash: contract.ContentHash,
+		SharedDefinitions: contract.SharedDefinitions, DefinitionIndex: contract.DefinitionIndex,
 		Projection: *mapSchema(&contract.Projection), ProjectionDiagnostics: mapProjectionDiagnostics(contract.ProjectionDiagnostics),
+	}
+}
+
+// attachRequestDefinitionIndex binds runtime-only body lookup to metadata already loaded for the exact version.
+func attachRequestDefinitionIndex(content *models.RequestContent, metadata *fusedobject.ServiceMetadata) {
+	// Body-less operations need no schema lookup and must not trigger metadata I/O.
+	if content == nil {
+		return
+	}
+	for position := range content.Representations {
+		representation := &content.Representations[position]
+		// Both ordinary bodies and sequential items may reference shared definitions.
+		if representation.Schema != nil {
+			representation.Schema.DefinitionIndex = metadata.DefinitionIndex
+		}
+		if representation.ItemSchema != nil {
+			representation.ItemSchema.DefinitionIndex = metadata.DefinitionIndex
+		}
 	}
 }
 

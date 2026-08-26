@@ -13,6 +13,7 @@ import (
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/paginationpolicy"
+	"github.com/Usefused/engine/internal/shared/schemaref"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/google/uuid"
 )
@@ -315,6 +316,15 @@ func openAPITestOperationResponse(t *testing.T, document map[string]any, operati
 	if !ok {
 		t.Fatalf("response component for %q is unavailable", operation)
 	}
+	// Exported schemas retain references instead of embedding the same definition.
+	if ref, referenced := response["$ref"].(string); referenced {
+		resolved, found := schemaref.ResolveLocal(document, ref)
+		// A dangling reference must fail the test rather than look like an empty response.
+		if !found {
+			t.Fatal("response component reference is unavailable")
+		}
+		response, _ = resolved.(map[string]any)
+	}
 	return response
 }
 
@@ -484,7 +494,8 @@ func TestProjectionOpenAPIRequiredStrings(t *testing.T) {
 			Type: "object", Required: []string{"name"}, Properties: map[string]fusedobject.Schema{"name": {Type: "string"}},
 		}}}},
 	}}
-	input, err := physicalOpenAPIInputSchema(endpoint)
+	scope := &appOpenAPISchemaScope{export: &appOpenAPIExport{components: make(map[string]any)}}
+	input, err := physicalOpenAPIInputSchema(endpoint, scope)
 	if err != nil || !containsAllStrings(stringSlice(input["required"]), "name") {
 		t.Fatalf("input/error = %#v/%v, required projection was lost", input, err)
 	}
@@ -498,7 +509,9 @@ func TestPhysicalOpenAPIInputRejectsReservedHeadersName(t *testing.T) {
 		Schema: rawOpenAPISchema(`{"type":"object","properties":{"_headers":{"type":"string"}}}`),
 	}}}}
 	for _, endpoint := range []fusedobject.Endpoint{parameter, body} {
-		if _, err := physicalOpenAPIInputSchema(endpoint); err == nil {
+		scope := &appOpenAPISchemaScope{export: &appOpenAPIExport{components: make(map[string]any)}}
+		// Reserved controls must remain rejected after shared-reference relocation.
+		if _, err := physicalOpenAPIInputSchema(endpoint, scope); err == nil {
 			t.Fatalf("reserved _headers declaration was accepted for %s", endpoint.Name)
 		}
 	}

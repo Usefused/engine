@@ -10,9 +10,10 @@ export const meta: MetaFunction = ({ matches }) => {
     { title: "MCP server activity - Fused" },
   ];
 };
-import { Clock, KeyRound } from "lucide-react";
+import { KeyRound } from "lucide-react";
 import { api } from "~/lib/api";
 import { McpAnalyticsPanel, type McpAnalyticsData } from "~/components/mcp/McpAnalyticsPanel";
+import { McpSessionsPanel } from "~/components/mcp/McpSessionsPanel";
 import { AppRequestsPanel } from "~/components/activity/AppRequestsPanel";
 import { NestedActivityTabs } from "~/components/activity/NestedActivityTabs";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
@@ -76,16 +77,6 @@ export function McpActivitySection({ appId, appFamilyId, serverName }: McpActivi
             count
             failed
             average_latency
-          }
-          recent_sessions {
-            id
-            app_token_id
-            session_id
-            protocol_version
-            started_at
-            last_activity_at
-            ended_at
-            end_reason
           }
           token_activity {
             id
@@ -158,7 +149,7 @@ function McpActivityState({ id, serverName, data, loading, error, activeTab, onT
   return <McpActivityContent id={id} serverName={serverName} data={data} activeTab={activeTab} onTabChange={onTabChange} canReadRequests={canReadRequests} />;
 }
 
-/** Renders MCP activity tabs without mounting protected request data. */
+/** Renders protected Activity tabs without presenting a bounded session preview as a total count. */
 function McpActivityContent({ id, serverName, data, activeTab, onTabChange, canReadRequests }: {
   id: string;
   serverName: string;
@@ -179,7 +170,7 @@ function McpActivityContent({ id, serverName, data, activeTab, onTabChange, canR
         options={[
           { value: "overview", label: "Overview", trackingId: "view_mcp_overview_tab" },
           { value: "requests", label: "Requests", trackingId: "view_mcp_requests_tab" },
-          { value: "sessions", label: "Sessions", badge: data.recent_sessions?.length, trackingId: "view_mcp_sessions_tab" },
+          { value: "sessions", label: "Sessions", trackingId: "view_mcp_sessions_tab" },
           { value: "tokens", label: "Tokens", badge: data.token_activity?.length, trackingId: "view_mcp_tokens_tab" },
         ]}
       />
@@ -189,13 +180,16 @@ function McpActivityContent({ id, serverName, data, activeTab, onTabChange, canR
   );
 }
 
+/** Mounts one protected data consumer for the selected immutable-version Activity view. */
 function McpActivityTabContent({ activeTab, id, serverName, data, canReadRequests }: { activeTab: McpActivityTab; id: string; serverName: string; data: McpAnalyticsData; canReadRequests: boolean }) {
+  // Requests and sessions share the same exact-app/audit gate; denied views never mount a query.
+  if (!canReadRequests) return <div className="rounded-lg border border-slate-200 bg-white px-6 py-12 text-center text-sm text-slate-500">MCP activity access is not available for your account.</div>;
+  // Each selection has one owner; the Sessions view no longer reuses a latest-ten summary.
   switch (activeTab) {
     case "requests":
-      if (!canReadRequests) return <div className="rounded-lg border border-slate-200 bg-white px-6 py-12 text-center text-sm text-slate-500">Request activity access is not available for your account.</div>;
       return <AppRequestsPanel appId={id} consumerName={serverName} transport="mcp" />;
     case "sessions":
-      return <McpSessionsPanel sessions={data.recent_sessions || []} />;
+      return <McpSessionsPanel key={id} appId={id} />;
     case "tokens":
       return <McpTokenActivityPanel tokens={data.token_activity || []} />;
     default:
@@ -289,96 +283,5 @@ function McpTokenActivityTableRow({ token }: { token: McpTokenActivity }) {
       <td className="whitespace-nowrap px-5 py-4 capitalize">{tokenTermination(token)}</td>
       <td className="max-w-52 truncate px-5 py-4 font-mono text-xs" title={token.issued_by_subject_id}>{token.issued_by_subject_id || "Unknown"}</td>
     </tr>
-  );
-}
-
-// McpSessionCard keeps long session identifiers and timestamps within the
-// mobile viewport while preserving the same status shown by the desktop row.
-function McpSessionCard({ session }: { session: NonNullable<McpAnalyticsData["recent_sessions"]>[number] }) {
-  const isLive = !session.ended_at;
-  return (
-    <div className="p-4">
-      <div className="flex min-w-0 items-start justify-between gap-3">
-        <span className="min-w-0 break-all font-mono text-sm text-slate-700">{session.session_id}</span>
-        <SessionStatus live={isLive} />
-      </div>
-      <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
-        <div><dt className="text-xs text-slate-500">Started</dt><dd className="mt-0.5 text-slate-700">{new Date(session.started_at).toLocaleString()}</dd></div>
-        <div><dt className="text-xs text-slate-500">Ended</dt><dd className="mt-0.5 text-slate-700">{session.ended_at ? new Date(session.ended_at).toLocaleString() : "Not ended"}</dd></div>
-        <div><dt className="text-xs text-slate-500">Protocol</dt><dd className="mt-0.5 font-mono text-slate-700">{session.protocol_version}</dd></div>
-        <div><dt className="text-xs text-slate-500">Last activity</dt><dd className="mt-0.5 text-slate-700">{tokenActivityTime(session.last_activity_at)}</dd></div>
-      </dl>
-      {session.app_token_id && <p className="truncate font-mono text-xs text-slate-500" title={session.app_token_id}>Token {session.app_token_id}</p>}
-      {session.end_reason && <p className="text-xs text-slate-500">Ended because: <span className="font-medium text-slate-700">{session.end_reason.replaceAll("_", " ")}</span></p>}
-    </div>
-  );
-}
-
-// SessionStatus centralizes the live and disconnected status treatment across
-// mobile cards and desktop rows.
-function SessionStatus({ live }: { live: boolean }) {
-  // Live sessions use the active treatment; completed sessions remain static.
-  if (live) {
-    return <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-emerald-100 bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-600"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500 motion-safe:animate-pulse" />Live</span>;
-  }
-  return <span className="inline-flex shrink-0 items-center rounded-full border border-slate-200 bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">Disconnected</span>;
-}
-
-// McpSessionsPanel presents session history as mobile cards and retains the
-// comparative table at wider breakpoints.
-function McpSessionsPanel({ sessions }: { sessions: NonNullable<McpAnalyticsData["recent_sessions"]> }) {
-  return (
-    <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-      <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
-        <Clock className="w-4 h-4 text-blue-500" />
-        <h3 className="font-semibold text-slate-900">Recent sessions</h3>
-      </div>
-      <div className="p-0">
-        {sessions.length === 0 ? (
-          <div className="text-center py-12 text-slate-500 text-sm">
-            No sessions recorded yet.
-          </div>
-        ) : (
-          <>
-          <div className="divide-y divide-slate-100 md:hidden">
-            {sessions.map((session) => <McpSessionCard key={session.id} session={session} />)}
-          </div>
-          <div className="hidden overflow-x-auto md:block">
-            <table className="w-full min-w-[1050px] text-sm text-left">
-              <thead className="bg-slate-50/50 text-slate-500 text-xs uppercase tracking-wider">
-                <tr>
-                  <th className="px-6 py-3 font-medium">Session ID</th>
-                  <th className="px-6 py-3 font-medium">Token ID</th>
-                  <th className="px-6 py-3 font-medium">Protocol</th>
-                  <th className="px-6 py-3 font-medium">Started At</th>
-                  <th className="px-6 py-3 font-medium">Last Activity</th>
-                  <th className="px-6 py-3 font-medium">Ended At</th>
-                  <th className="px-6 py-3 font-medium text-right">Status</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 text-slate-700">
-                {sessions.map((sess) => {
-                  const isLive = !sess.ended_at;
-                  return (
-                    <tr key={sess.id} className="hover:bg-slate-50 transition-colors">
-                      <td className="px-6 py-4 font-mono text-slate-600">{sess.session_id}</td>
-                      <td className="max-w-48 truncate px-6 py-4 font-mono text-xs text-slate-500" title={sess.app_token_id}>{sess.app_token_id || "Legacy"}</td>
-                      <td className="px-6 py-4 font-mono text-xs text-slate-600">{sess.protocol_version}</td>
-                      <td className="px-6 py-4">{new Date(sess.started_at).toLocaleString()}</td>
-                      <td className="px-6 py-4">{tokenActivityTime(sess.last_activity_at)}</td>
-                      <td className="px-6 py-4 text-slate-500">
-                        {sess.ended_at ? new Date(sess.ended_at).toLocaleString() : "-"}
-                      </td>
-                      <td className="px-6 py-4 text-right"><SessionStatus live={isLive} /></td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          </>
-        )}
-      </div>
-    </div>
   );
 }

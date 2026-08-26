@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/executionevent"
 	"github.com/Usefused/engine/internal/shared/messaging"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/nats-io/nats.go"
@@ -145,16 +146,24 @@ func decodeExecutionMessages(messages []*nats.Msg) ([]models.EngineExecutionEven
 	return events, validMessages
 }
 
+// decodeExecutionMessage admits the current receipt contract and in-flight pre-hierarchy events.
 func decodeExecutionMessage(payload []byte) (models.EngineExecutionEvent, error) {
 	var envelope models.EngineExecutionEventEnvelope
+	// Corrupt envelopes are poison messages, not transient database failures.
 	if err := json.Unmarshal(payload, &envelope); err != nil {
 		return models.EngineExecutionEvent{}, fmt.Errorf("decode execution event: %w", err)
 	}
-	if envelope.SchemaVersion != models.EngineExecutionEventSchemaVersion {
+	// Version five events remain valid during rolling upgrades and durable queue replay.
+	if envelope.SchemaVersion != models.EngineExecutionEventSchemaVersion && envelope.SchemaVersion != 5 {
 		return models.EngineExecutionEvent{}, fmt.Errorf("unsupported execution event schema version %d", envelope.SchemaVersion)
 	}
+	// Every durable event needs its own idempotency identity.
 	if envelope.Event.ID.String() == "00000000-0000-0000-0000-000000000000" {
 		return models.EngineExecutionEvent{}, fmt.Errorf("execution event id is required")
+	}
+	// Reject invalid hierarchy metadata before a malformed message can poison a whole store batch.
+	if err := executionevent.ValidateUnifiedMetadata(envelope.Event); err != nil {
+		return models.EngineExecutionEvent{}, err
 	}
 	return envelope.Event, nil
 }

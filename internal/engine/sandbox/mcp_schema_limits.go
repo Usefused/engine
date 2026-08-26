@@ -65,6 +65,10 @@ func validateMCPFixtureSchemas(fixture *Fixture) error {
 		return ErrMCPSchemaInvalid
 	}
 	admission := &mcpSchemaAdmission{}
+	// Charge each saved definition once, so compact roots cannot bypass aggregate complexity admission.
+	if err := admission.admitDefinitions(fixture.SchemaDefinitions); err != nil {
+		return err
+	}
 	for index := range fixture.Operations {
 		// Physical and logical schemas consume the same session-wide budget.
 		if err := admission.admitOperation(&fixture.Operations[index]); err != nil {
@@ -73,7 +77,7 @@ func validateMCPFixtureSchemas(fixture *Fixture) error {
 	}
 	// An absent logical descriptor is the canonical empty logical schema set.
 	if fixture.UnifiedOperations == nil {
-		return nil
+		return validateMCPSharedSchemaReferences(fixture)
 	}
 	for index := range fixture.UnifiedOperations.Operations {
 		// Unified descriptors are documentation schemas, not a separate trust boundary.
@@ -81,7 +85,7 @@ func validateMCPFixtureSchemas(fixture *Fixture) error {
 			return err
 		}
 	}
-	return nil
+	return validateMCPSharedSchemaReferences(fixture)
 }
 
 // admitOperation scans every schema-bearing physical contract, including
