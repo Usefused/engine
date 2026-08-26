@@ -273,13 +273,13 @@ func activateImportedService(ctx context.Context, s store.Store, contractFetcher
 		audit.outcome = "activation_check_failed"
 		return audit
 	}
+	// Both membership paths require the same validated snapshot before exposing the version.
+	if err := materializeRuntimeContractSnapshot(ctx, s, contractFetcher, accountID, audit.serviceID, audit.serviceVersionID, resp.Version, apiKey); err != nil {
+		audit.outcome = "contract_snapshot_failed"
+		return audit
+	}
 	// Existing membership needs only the newly imported immutable version enabled.
 	if activated {
-		// Runtime execution must never observe the version before its contract snapshot exists.
-		if err := materializeRuntimeContractSnapshot(ctx, s, contractFetcher, accountID, audit.serviceID, audit.serviceVersionID, resp.Version, apiKey); err != nil {
-			audit.outcome = "contract_snapshot_failed"
-			return audit
-		}
 		// Enabling the version is the only workspace mutation after snapshot success.
 		if err := s.EnableWorkspaceServiceVersion(ctx, audit.serviceID, resp.Version, audit.serviceVersionID, accountID); err != nil {
 			slog.ErrorContext(ctx, "auto-register: EnableWorkspaceServiceVersion failed", slog.Any("error", err))
@@ -292,11 +292,6 @@ func activateImportedService(ctx context.Context, s store.Store, contractFetcher
 		return audit
 	}
 
-	// New membership follows the same snapshot-before-activation invariant.
-	if err := materializeRuntimeContractSnapshot(ctx, s, contractFetcher, accountID, audit.serviceID, audit.serviceVersionID, resp.Version, apiKey); err != nil {
-		audit.outcome = "contract_snapshot_failed"
-		return audit
-	}
 	// The additive mutation keeps unrelated workspace services untouched.
 	if err := s.AddWorkspaceServiceVersion(ctx, audit.serviceID, resp.Slug, resp.Version, audit.serviceVersionID, importedServiceName(resp), accountID); err != nil {
 		slog.ErrorContext(ctx, "auto-register: AddWorkspaceServiceVersion failed", slog.Any("error", err))

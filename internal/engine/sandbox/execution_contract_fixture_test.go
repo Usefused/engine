@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -38,14 +39,32 @@ func TestExecutionContractV2RoundTripsSemantically(t *testing.T) {
 	}
 }
 
-// TestExecutionContractRejectsUnknownCapability keeps capability
-// negotiation fail-closed without retaining an external rejection fixture.
+// TestExecutionContractRejectsUnknownCapability exercises the live HTTP batch
+// admission path rather than maintaining a test-only envelope validator.
 func TestExecutionContractRejectsUnknownCapability(t *testing.T) {
 	item := localRuntimeContractItem()
 	item.RequiredCapabilities = []string{"http.future.v1"}
-	err := validateRuntimeContractBatchEnvelopes([]runtimeContractBatchItem{item})
+	versions := []store.WorkspaceServiceVersion{{ServiceID: item.ServiceID, ServiceVersionID: item.ServiceVersionID, Version: item.Version}}
+	client, requests := newOwnedRecoveryHTTPRegistry(t, versions, []runtimeContractBatchItem{item})
+	snapshots, err := client.FetchRuntimeContracts(context.Background(), versions, "license-fixture")
+	// Ordinary consumers must retain the compatibility diagnostic and receive no executable subset.
 	if err == nil || !strings.Contains(err.Error(), fusedobject.ExecutionCapabilityRequiredCode) {
 		t.Fatalf("validate rejection contract error = %v", err)
+	}
+	// One failed batch must not trigger per-service fallback requests or expose rejected data.
+	if snapshots != nil || requests.Load() != 1 {
+		t.Fatalf("snapshots=%v requests=%d", snapshots, requests.Load())
+	}
+}
+
+// TestRuntimeContractEmptyRequestDoesNotFetch keeps empty work at the public
+// boundary instead of maintaining a separate decoder admission path.
+func TestRuntimeContractEmptyRequestDoesNotFetch(t *testing.T) {
+	client, requests := newOwnedRecoveryHTTPRegistry(t, nil, nil)
+	snapshots, err := client.FetchRuntimeContracts(context.Background(), nil, "license-fixture")
+	// An empty batch neither reaches Registry nor needs an executable response.
+	if err != nil || snapshots != nil || requests.Load() != 0 {
+		t.Fatalf("snapshots=%v requests=%d err=%v", snapshots, requests.Load(), err)
 	}
 }
 

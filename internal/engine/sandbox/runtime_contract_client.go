@@ -17,14 +17,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-type RuntimeContractFetcher interface {
-	FetchRuntimeContract(ctx context.Context, serviceID, serviceVersionID uuid.UUID, version, apiKey string) (*store.ServiceContractSnapshot, error)
-}
-
-type BatchRuntimeContractFetcher interface {
-	FetchRuntimeContracts(ctx context.Context, versions []store.WorkspaceServiceVersion, apiKey string) ([]store.ServiceContractSnapshot, error)
-}
-
 func (c *HTTPRegistryClient) FetchRuntimeContract(ctx context.Context, serviceID, serviceVersionID uuid.UUID, version, apiKey string) (*store.ServiceContractSnapshot, error) {
 	snapshots, err := c.FetchRuntimeContracts(ctx, []store.WorkspaceServiceVersion{{ServiceID: serviceID, ServiceVersionID: serviceVersionID, Version: version}}, apiKey)
 	if err != nil {
@@ -349,22 +341,7 @@ func decodeRuntimeContractsResponse(body io.Reader, versions []store.WorkspaceSe
 	if len(decoded.Errors) > 0 {
 		return nil, classifyRuntimeContractGraphQLErrors(decoded.Errors, versions)
 	}
-	// Preserve envelope admission for callers checking a response without requesting snapshots.
-	if len(versions) == 0 {
-		return nil, validateRuntimeContractBatchEnvelopes(decoded.Data.Contracts)
-	}
 	return runtimeContractSnapshotsFromBatch(decoded.Data.Contracts, versions)
-}
-
-// validateRuntimeContractBatchEnvelopes validates the complete batch before any
-// snapshot is persisted so incompatible services cannot be partially activated.
-func validateRuntimeContractBatchEnvelopes(items []runtimeContractBatchItem) error {
-	for _, item := range items {
-		if err := fusedobject.ValidateExecutionContractEnvelope(item.ExecutionContractEnvelope); err != nil {
-			return fmt.Errorf("FetchRuntimeContracts: incompatible contract: %w", err)
-		}
-	}
-	return nil
 }
 
 // runtimeContractSnapshotsFromBatch keeps ordinary callers atomic while allowing

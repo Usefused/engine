@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -73,6 +75,30 @@ type snapshotAutoRegisterStore struct {
 	*autoRegisterMockStore
 	snapshotCalls int
 	snapshotErr   error
+}
+
+// orderedAutoRegisterStore records the snapshot-before-membership invariant for both activation paths.
+type orderedAutoRegisterStore struct {
+	*snapshotAutoRegisterStore
+	steps []string
+}
+
+// UpsertServiceContractSnapshot records persistence before delegating its configured failure or success.
+func (s *orderedAutoRegisterStore) UpsertServiceContractSnapshot(ctx context.Context, snapshot store.ServiceContractSnapshot) (*store.ServiceContractSnapshot, error) {
+	s.steps = append(s.steps, "snapshot")
+	return s.snapshotAutoRegisterStore.UpsertServiceContractSnapshot(ctx, snapshot)
+}
+
+// AddWorkspaceServiceVersion records new membership separately from enabling an existing service version.
+func (s *orderedAutoRegisterStore) AddWorkspaceServiceVersion(ctx context.Context, serviceID uuid.UUID, slug, version string, versionID uuid.UUID, name string, accountID uuid.UUID) error {
+	s.steps = append(s.steps, "add")
+	return s.autoRegisterMockStore.AddWorkspaceServiceVersion(ctx, serviceID, slug, version, versionID, name, accountID)
+}
+
+// EnableWorkspaceServiceVersion records the existing-membership mutation without inventing a second snapshot path.
+func (s *orderedAutoRegisterStore) EnableWorkspaceServiceVersion(ctx context.Context, serviceID uuid.UUID, version string, versionID, accountID uuid.UUID) error {
+	s.steps = append(s.steps, "enable")
+	return s.autoRegisterMockStore.EnableWorkspaceServiceVersion(ctx, serviceID, version, versionID, accountID)
 }
 
 func (m *snapshotAutoRegisterStore) UpsertServiceContractSnapshot(ctx context.Context, snapshot store.ServiceContractSnapshot) (*store.ServiceContractSnapshot, error) {
@@ -254,28 +280,52 @@ func TestAutoRegisterImportedService_EnablesImportedVersionWhenAlreadyActivated(
 	}
 }
 
+// TestAutoRegisterImportedService_MaterializesSnapshotBeforeActivation protects
+// both membership paths and their failure boundary through the shared materializer.
 func TestAutoRegisterImportedService_MaterializesSnapshotBeforeActivation(t *testing.T) {
 	accountID := uuid.New()
 	serviceID := uuid.New()
 	serviceVersionID := uuid.MustParse(testImportServiceVersionID)
-	s := &snapshotAutoRegisterStore{autoRegisterMockStore: &autoRegisterMockStore{accountID: accountID}}
-	fetcher := &runtimeContractFetcherStub{snapshot: &store.ServiceContractSnapshot{
-		ServiceID:        serviceID,
-		ServiceVersionID: serviceVersionID,
-		Version:          "2026-01-01",
-	}}
-
 	body := committedImportApplyBody(importApplyResponse{ServiceID: serviceID.String(), ServiceVersionID: testImportServiceVersionID, Name: "Stripe Payments", Slug: "stripe", Version: "2026-01-01"})
-	autoRegisterImportedService(autoRegisterTestContext(accountID), s, fetcher, accountID, "user-api-key", body)
-
-	if fetcher.calls != 1 || s.snapshotCalls != 1 {
-		t.Fatalf("expected one runtime contract fetch and snapshot write, got fetch=%d write=%d", fetcher.calls, s.snapshotCalls)
-	}
-	if fetcher.serviceID != serviceID || fetcher.serviceVersionID != serviceVersionID || fetcher.version != "2026-01-01" || fetcher.apiKey != "user-api-key" {
-		t.Fatalf("unexpected runtime contract fetch args: %#v", fetcher)
-	}
-	if s.activateCalls != 1 {
-		t.Fatalf("expected activation after snapshot materialization, got %d calls", s.activateCalls)
+	for _, membership := range []struct {
+		name, mutation, outcome string
+		active                  bool
+	}{
+		{name: "new", mutation: "add", outcome: "activated"},
+		{name: "existing", mutation: "enable", outcome: "version_enabled", active: true},
+	} {
+		for _, failWrite := range []bool{false, true} {
+			// Each case owns its store so a previous activation cannot hide an ordering regression.
+			t.Run(membership.name+"/write_failed="+strconv.FormatBool(failWrite), func(t *testing.T) {
+				s := &orderedAutoRegisterStore{snapshotAutoRegisterStore: &snapshotAutoRegisterStore{
+					autoRegisterMockStore: &autoRegisterMockStore{accountID: accountID, alreadyActivated: membership.active},
+				}}
+				fetcher := &runtimeContractFetcherStub{snapshot: &store.ServiceContractSnapshot{
+					ServiceID: serviceID, ServiceVersionID: serviceVersionID, Version: "2026-01-01",
+				}}
+				wantSteps := []string{"snapshot", membership.mutation}
+				wantOutcome := membership.outcome
+				// Failed persistence must block both mutations while preserving the same audit outcome.
+				if failWrite {
+					s.snapshotErr = context.DeadlineExceeded
+					wantSteps = []string{"snapshot"}
+					wantOutcome = "contract_snapshot_failed"
+				}
+				audit := autoRegisterImportedService(autoRegisterTestContext(accountID), s, fetcher, accountID, "user-api-key", body)
+				// Both paths must share exactly one fetch and one attempted snapshot write.
+				if fetcher.calls != 1 || s.snapshotCalls != 1 {
+					t.Fatalf("fetch=%d write=%d", fetcher.calls, s.snapshotCalls)
+				}
+				// The requested version and caller context must survive consolidation unchanged.
+				if got, want := []any{fetcher.serviceID, fetcher.serviceVersionID, fetcher.version, fetcher.apiKey}, []any{serviceID, serviceVersionID, "2026-01-01", "user-api-key"}; !reflect.DeepEqual(got, want) {
+					t.Fatalf("unexpected runtime contract fetch args: %#v", fetcher)
+				}
+				// Ordered calls distinguish real snapshot-before-activation from coincidental final counts.
+				if !reflect.DeepEqual(s.steps, wantSteps) || audit.outcome != wantOutcome {
+					t.Fatalf("steps=%v outcome=%s; want steps=%v outcome=%s", s.steps, audit.outcome, wantSteps, wantOutcome)
+				}
+			})
+		}
 	}
 }
 
