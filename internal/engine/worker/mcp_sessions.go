@@ -140,11 +140,12 @@ func validMCPSessionEventData(data mcpSessionEventData) bool {
 	return data.Type == "ended" && validMCPSessionEndReason(data.EndReason)
 }
 
+// validMCPSessionEndReason admits only normalized lifecycle causes understood by durable storage.
 func validMCPSessionEndReason(reason string) bool {
 	// Keep producer validation aligned with the database constraint so a bad
 	// event is acknowledged once instead of being NAKed into an endless retry.
 	switch reason {
-	case "client_terminated", "client_disconnected", "idle_timeout", "token_expired",
+	case "client_terminated", "client_disconnected", "idle_timeout", "max_lifetime", "token_expired",
 		"token_revoked", "app_deactivated", "engine_shutdown", "runtime_failed", "tool_call_timeout":
 		return true
 	default:

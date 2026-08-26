@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -142,6 +143,29 @@ func TestBufferToJSONResult(t *testing.T) {
 	}
 }
 
+// TestBufferToBoundedJSONResultRejectsExpandedText proves the model-visible
+// JSON remains bounded even when string escaping expands a provider body.
+func TestBufferToBoundedJSONResultRejectsExpandedText(t *testing.T) {
+	raw := bytes.Repeat([]byte{0}, maxMCPPhysicalResultBytes/2)
+	_, err := bufferToBoundedJSONResult(raw, maxMCPPhysicalResultBytes)
+	// A stable sentinel lets the handler discard wrapper text and payload content.
+	if !errors.Is(err, engine.ErrBufferStreamLimitExceeded) {
+		t.Fatalf("bufferToBoundedJSONResult() error = %v, want ErrBufferStreamLimitExceeded", err)
+	}
+}
+
+// TestMCPCallWriterBoundsFailureText prevents error paths from bypassing the
+// same wire-size budget used for successful physical results.
+func TestMCPCallWriterBoundsFailureText(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	message := string(bytes.Repeat([]byte{0}, maxMCPPhysicalResultBytes/2))
+	writeMCPCallResult(recorder, http.StatusBadGateway, mcpCallResponse{Error: message})
+	// Escaped error text must be replaced completely, without retaining provider bytes.
+	if got := recorder.Body.String(); got != "{\"error\":\"mcp_call_result_too_large\"}\n" {
+		t.Fatalf("bounded error body = %s", got)
+	}
+}
+
 func TestMcpCallHandler_MissingAuthorizationRejected(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/mcp/call", bytes.NewReader([]byte(`{}`)))
 	rec := httptest.NewRecorder()
@@ -166,6 +190,23 @@ func TestMcpCallHandler_UnknownSessionRejected(t *testing.T) {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
 	}
 	assertCallErrorResponse(t, rec)
+}
+
+// TestMcpCallHandlerRejectsOversizedChildRuntimePayload proves the private
+// call bridge cannot bypass the external MCP message admission budget.
+func TestMcpCallHandlerRejectsOversizedChildRuntimePayload(t *testing.T) {
+	sessionID := registerTestMCPSession(t, "tok", fixtureForTest(t, validFixtureJSON))
+	body := bytes.Repeat([]byte("x"), maxMCPMessageBodyBytes+1)
+	req := httptest.NewRequest(http.MethodPost, "/mcp/call", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+sessionID)
+	rec := httptest.NewRecorder()
+
+	mcpCallHandler(rec, req)
+
+	// Payload rejection stays exact and contains none of the submitted body.
+	if rec.Code != http.StatusRequestEntityTooLarge || rec.Body.String() != "{\"error\":\"mcp_call_payload_too_large\"}\n" {
+		t.Fatalf("oversized call response = %d/%s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestMcpCallHandler_UnknownOperationIdRejected(t *testing.T) {
@@ -219,39 +260,7 @@ func TestMcpCallHandler_EndToEndDispatchesThroughEngineExecuteCore(t *testing.T)
 	}))
 	defer vendor.Close()
 
-	// makePassthroughCache (credential_passthrough_test.go) wires a
-	// richMockCache whose GetEndpoint only resolves the hardcoded names
-	// "list_items"/"do_thing", and its stub Endpoint doesn't set Method or
-	// Parameters -- fine for this test, which is about proving the /mcp/call
-	// handler reaches the real engineExecuteCore path end-to-end and
-	// forwards the vendor's response, not about path/query/header param
-	// routing (that's dispatcher.go's own concern, covered by
-	// dispatcher_test.go). Reuse "do_thing" as this fixture's operationId so
-	// the same mock cache backs both the fixture-side resolution (this
-	// handler) and the scope-side resolution (engineExecuteCore, via
-	// findEndpointInScope).
-	cache, endpointName := makePassthroughCache(t, vendor.URL)
-
-	fixtureJSON := `{"operations":[{
-		"operation_id":"` + endpointName + `",
-		"method":"GET",
-		"path":"/thing",
-		"responses":{"200":{"type":"object"}}
-	}]}`
-	fixture := fixtureForTest(t, fixtureJSON)
-
-	origCache, origDispatcher, origValidator, origResolver := globalObjectCache, globalDispatcher, globalTokenValidator, globalSecretResolver
-	t.Cleanup(func() {
-		globalObjectCache, globalDispatcher, globalTokenValidator = origCache, origDispatcher, origValidator
-		globalSecretResolver = origResolver
-	})
-	globalObjectCache = cache
-	globalDispatcher = engine.NewDispatcher()
-	globalTokenValidator = &dummyTokenValidator{}
-	resolver := &mockSecretResolver{creds: map[string]any{"bearerAuth": "server-side-token"}}
-	globalSecretResolver = resolver
-
-	sessionID := registerTestMCPSession(t, "tok", fixture)
+	sessionID, endpointName, resolver := configureMCPPhysicalCallTest(t, vendor.URL)
 	resourceID := uuid.NewString()
 	mcpSessions.Lock()
 	mcpSessions.m[sessionID].authContext = map[string]any{
@@ -284,6 +293,56 @@ func TestMcpCallHandler_EndToEndDispatchesThroughEngineExecuteCore(t *testing.T)
 	if resolver.passthrough["fused_end_user_ref"] != "customer-42" || resolver.passthrough["fused_resource_id"] != resourceID {
 		t.Fatalf("MCP middleware lost connected-user context: %#v", resolver.passthrough)
 	}
+}
+
+// TestMcpCallHandlerRejectsOversizedPhysicalResult proves vendor output cannot
+// cross the child-runtime bridge or leave a partial result in its error body.
+func TestMcpCallHandlerRejectsOversizedPhysicalResult(t *testing.T) {
+	vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("x"), maxMCPPhysicalResultBytes+1))
+	}))
+	defer vendor.Close()
+
+	sessionID, endpointName, _ := configureMCPPhysicalCallTest(t, vendor.URL)
+	body, _ := json.Marshal(mcpCallRequest{OperationID: endpointName, Params: json.RawMessage(`{}`)})
+	req := httptest.NewRequest(http.MethodPost, "/mcp/call", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+sessionID)
+	rec := httptest.NewRecorder()
+
+	mcpCallHandler(rec, req)
+
+	// The static code is safe for scripts while provider bytes remain unobservable.
+	if rec.Code != http.StatusBadGateway || rec.Body.String() != "{\"error\":\"mcp_call_result_too_large\"}\n" {
+		t.Fatalf("oversized physical result response = %d/%s", rec.Code, rec.Body.String())
+	}
+}
+
+// configureMCPPhysicalCallTest wires one real physical dispatch through the
+// production cache, validator, resolver, dispatcher, and session boundaries.
+func configureMCPPhysicalCallTest(t *testing.T, vendorURL string) (string, string, *mockSecretResolver) {
+	t.Helper()
+	// The shared cache fixture keeps handler tests on the canonical execution path.
+	cache, endpointName := makePassthroughCache(t, vendorURL)
+	fixtureJSON := `{"operations":[{
+		"operation_id":"` + endpointName + `",
+		"method":"GET",
+		"path":"/thing",
+		"responses":{"200":{"type":"object"}}
+	}]}`
+	fixture := fixtureForTest(t, fixtureJSON)
+	originalCache, originalDispatcher := globalObjectCache, globalDispatcher
+	originalValidator, originalResolver := globalTokenValidator, globalSecretResolver
+	// Cleanup prevents these process-owned dependencies from leaking into sibling tests.
+	t.Cleanup(func() {
+		globalObjectCache, globalDispatcher = originalCache, originalDispatcher
+		globalTokenValidator, globalSecretResolver = originalValidator, originalResolver
+	})
+	globalObjectCache = cache
+	globalDispatcher = engine.NewDispatcher()
+	globalTokenValidator = &dummyTokenValidator{}
+	resolver := &mockSecretResolver{creds: map[string]any{"bearerAuth": "server-side-token"}}
+	globalSecretResolver = resolver
+	return registerTestMCPSession(t, "tok", fixture), endpointName, resolver
 }
 
 // TestMcpCallHandler_ExecutesUnifiedThroughCanonicalCoordinator proves one

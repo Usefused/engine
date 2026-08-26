@@ -29,7 +29,13 @@ import (
 	"go.opentelemetry.io/otel"
 )
 
-const maxMCPMessageBodyBytes = 256 * 1024
+const (
+	maxMCPMessageBodyBytes   = 256 * 1024
+	maxMCPSessionIdleTimeout = 5 * time.Minute
+	// A one-MiB result can double when nested as JSON text; this also reserves
+	// room for the bounded request ID and the fixed JSON-RPC envelope.
+	maxMCPResponseMessageBytes = 3 * 1024 * 1024
+)
 
 // mcpSseHandler handles SSE connections for MCP sessions.
 //
@@ -65,17 +71,21 @@ func mcpSseHandler(w http.ResponseWriter, r *http.Request) {
 	sessionID := uuid.NewString()
 	ctx, cancel := mcpSessionContext(r.Context(), identity.TokenPolicy.ExpiresAt)
 	fixture, err := prepareSessionFixture(ctx, appIDHex, identity.TokenPolicy)
+	// Typed schema admission failures remain actionable without leaking catalogue content.
 	if err != nil {
 		cancel()
 		globalObjectCache.DisconnectSDK(appIDHex)
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to build mcp fixture: %v", err))
+		statusCode, errorCode := mcpSessionStartFailure(err)
+		writeError(w, statusCode, errorCode)
 		return
 	}
 	cmd, err := buildMCPCommand(ctx, sessionID, fixture)
+	// Serialization admission uses the same public failure mapping as live fixture preparation.
 	if err != nil {
 		cancel()
 		globalObjectCache.DisconnectSDK(appIDHex)
-		writeError(w, http.StatusInternalServerError, "failed to prepare mcp runtime")
+		statusCode, errorCode := mcpSessionStartFailure(err)
+		writeError(w, statusCode, errorCode)
 		return
 	}
 	stdin, stdout, err := setupPipesAndStart(cmd)
@@ -145,13 +155,13 @@ func validateMCPToken(ctx context.Context, appIDHex, token string) (auth.Runtime
 	return globalTokenValidator.Validate(ctx, appID, token)
 }
 
+// mcpSessionContext preserves credential expiry without imposing an age limit on active work.
 func mcpSessionContext(parent context.Context, expiresAt *time.Time) (context.Context, context.CancelFunc) {
-	if expiresAt == nil {
-		return context.WithCancel(parent)
+	// Activity cannot extend authorization beyond the execution token's lifetime.
+	if expiresAt != nil {
+		return context.WithDeadline(parent, *expiresAt)
 	}
-	// A token deadline closes the child runtime as well as future dispatches,
-	// so expired credentials cannot leave a discoverable MCP session behind.
-	return context.WithDeadline(parent, *expiresAt)
+	return context.WithCancel(parent)
 }
 
 func extractBearerAuthToken(authHeader string) (string, bool) {
@@ -232,8 +242,16 @@ func prepareSessionFixture(ctx context.Context, appIDHex string, policy store.Ap
 		return nil, fmt.Errorf("load app scope: %w", err)
 	}
 	fixture, err := buildSessionFixture(ctx, globalObjectCache, appIDHex, selections, policy)
+	// Source-schema admission can fail before a complete fixture exists and still needs bounded audit evidence.
 	if err != nil {
+		recordMCPSchemaLimit(ctx, appIDHex, err)
 		return nil, fmt.Errorf("build fixture: %w", err)
+	}
+	// Live catalogue admission occurs before Node starts so unsafe schema work
+	// cannot consume runtime memory or become model-visible documentation.
+	if err := validateMCPFixtureSchemas(fixture); err != nil {
+		recordMCPSchemaLimit(ctx, appIDHex, err)
+		return nil, fmt.Errorf("admit fixture schemas: %w", err)
 	}
 	return fixture, nil
 }
@@ -250,6 +268,11 @@ func writeSessionFixture(sessionTmpDir string, fixture *Fixture) (string, error)
 	// as JSON null for the child runtime to interpret permissively.
 	if fixture == nil {
 		return "", fmt.Errorf("no fixture available for this session")
+	}
+	// This serialization boundary remains a defense-in-depth check for callers
+	// that construct fixtures without the live session preparation path.
+	if err := validateMCPFixtureSchemas(fixture); err != nil {
+		return "", fmt.Errorf("admit fixture schemas: %w", err)
 	}
 	data, err := json.Marshal(fixture)
 	if err != nil {
@@ -292,7 +315,9 @@ func setupPipesAndStart(cmd *exec.Cmd) (io.WriteCloser, io.ReadCloser, error) {
 // registerMCPSession is shared by SSE and Streamable HTTP so expiry, idle
 // termination, history events, and cleanup cannot drift by transport.
 func registerMCPSession(ctx context.Context, sess *mcpSession) {
+	sess.lifecycleCtx = ctx
 	sess.pendingRequests = make(map[string]struct{})
+	sess.searchTelemetry = make(map[string]*mcpSearchObservation)
 	touchMCPSession(sess)
 	sess.idleTimer = time.AfterFunc(mcpSessionIdleTimeout(), func() { handleMCPSessionIdle(sess.sessionID) })
 	mcpSessions.Lock()
@@ -302,36 +327,49 @@ func registerMCPSession(ctx context.Context, sess *mcpSession) {
 	go terminateMCPSessionWhenContextEnds(ctx, sess.sessionID)
 }
 
+// mcpSessionIdleTimeout bounds inactivity only; the existing config key does not cap session age.
 func mcpSessionIdleTimeout() time.Duration {
-	return time.Duration(cfg.Sandbox.SessionMaxAgeSeconds) * time.Second
+	configured := cfg.Sandbox.SessionMaxAgeSeconds
+	// Invalid or excessive settings cannot disable cleanup of abandoned runtimes.
+	if configured <= 0 || configured > int(maxMCPSessionIdleTimeout/time.Second) {
+		return maxMCPSessionIdleTimeout
+	}
+	return time.Duration(configured) * time.Second
 }
 
+// handleMCPSessionIdle rechecks activity at the shared termination boundary because timers may race traffic.
 func handleMCPSessionIdle(sessionID string) {
-	sess, ok := lookupMCPSession(sessionID)
-	if !ok {
-		return
-	}
-	sess.pendingMu.Lock()
-	hasPending := len(sess.pendingRequests) > 0
-	sess.pendingMu.Unlock()
-	if hasPending {
-		sess.idleTimer.Reset(mcpSessionIdleTimeout())
-		return
-	}
 	terminateMCPSession(sessionID, "idle_timeout")
 }
 
 func terminateMCPSessionWhenContextEnds(ctx context.Context, sessionID string) {
 	<-ctx.Done()
+	reason := mcpSessionEndReason(ctx, sessionID)
+	terminateMCPSession(sessionID, reason)
+}
+
+// mcpSessionEndReason keeps durable lifecycle outcomes stable without exposing context details.
+func mcpSessionEndReason(ctx context.Context, sessionID string) string {
 	reason := "engine_shutdown"
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		reason = "token_expired"
-	} else if sess, ok := lookupMCPSession(sessionID); ok && sess.transport == "sse" {
-		// An SSE session is deliberately tied to its request context, so ordinary
-		// cancellation means the client closed that transport connection.
+	// Legacy SSE is tied to its request context, so ordinary cancellation is a disconnect.
+	if sess, ok := lookupMCPSession(sessionID); ok && sess.transport == "sse" {
 		reason = "client_disconnected"
 	}
-	terminateMCPSession(sessionID, reason)
+	return canonicalMCPSessionEndReason(ctx, reason)
+}
+
+// canonicalMCPSessionEndReason makes the owned deadline authoritative even
+// when child EOF or handler cleanup wins the race to remove the session.
+func canonicalMCPSessionEndReason(ctx context.Context, fallback string) string {
+	// Directly constructed test sessions retain the explicit cleanup outcome.
+	if ctx == nil {
+		return fallback
+	}
+	// Session deadlines now belong only to authentication or the parent request.
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return "token_expired"
+	}
+	return fallback
 }
 
 // mcpSessionAuthContext accepts the same stable connected-user selectors a
@@ -361,30 +399,89 @@ func mcpSessionAuthContext(headers http.Header) (map[string]any, error) {
 // terminateMCPSession deletes only the transport session. The execution token
 // remains independently revocable/expirable, while history keeps the reason.
 func terminateMCPSession(sessionID, reason string) bool {
-	mcpSessions.Lock()
-	sess, ok := mcpSessions.m[sessionID]
-	if ok {
-		delete(mcpSessions.m, sessionID)
-	}
-	mcpSessions.Unlock()
-	if !ok {
+	sess := claimMCPSessionTermination(sessionID, reason)
+	// Concurrent or repeated termination must not duplicate lifecycle or search telemetry.
+	if sess == nil {
 		return false
 	}
-	if sess.idleTimer != nil {
-		sess.idleTimer.Stop()
-	}
+	reason = canonicalMCPSessionEndReason(sess.lifecycleCtx, reason)
+	// Ending a session closes any in-flight search spans with one stable boundary code.
+	finishMCPSearchSession(sess)
+	// A live child process is best-effort killed after its in-flight observations close.
 	if sess.cmd != nil && sess.cmd.Process != nil {
 		_ = sess.cmd.Process.Kill()
 	}
+	// Tests and failed starts may not have installed a cancellation function.
 	if sess.cancel != nil {
 		sess.cancel()
 	}
 	os.RemoveAll(mcpSessionTmpDir(sessionID))
+	// Cache ownership exists only after the process-wide cache has initialized.
 	if globalObjectCache != nil {
 		globalObjectCache.DisconnectSDK(sess.appID)
 	}
+	// Only the stable idle-limit outcome enters OTEL; session IDs, tokens, and
+	// catalogue or provider data remain exclusively outside telemetry.
+	if reason == "idle_timeout" {
+		recordMCPSessionIdleTimeout(sess)
+	}
 	publishMCPSessionEvent(sess, "ended", reason)
 	return true
+}
+
+// claimMCPSessionTermination makes idle admission and session removal atomic with tracked work and activity.
+func claimMCPSessionTermination(sessionID, reason string) *mcpSession {
+	mcpSessions.Lock()
+	defer mcpSessions.Unlock()
+	sess, ok := mcpSessions.m[sessionID]
+	// Another cleanup owner may already have removed this session.
+	if !ok {
+		return nil
+	}
+	sess.pendingMu.Lock()
+	defer sess.pendingMu.Unlock()
+	sess.activityMu.Lock()
+	defer sess.activityMu.Unlock()
+	// A stale timer cannot retire a session after a request or completion refreshed it.
+	if reason == "idle_timeout" && deferMCPSessionIdleLocked(sess) {
+		return nil
+	}
+	sess.ended = true
+	// Stop under the activity lock so late request completion cannot rearm cleanup.
+	if sess.idleTimer != nil {
+		sess.idleTimer.Stop()
+	}
+	delete(mcpSessions.m, sessionID)
+	return sess
+}
+
+// deferMCPSessionIdleLocked grants pending work and recent traffic their full inactivity window.
+// The caller holds pendingMu and activityMu through the eventual removal decision.
+func deferMCPSessionIdleLocked(sess *mcpSession) bool {
+	timeout := mcpSessionIdleTimeout()
+	remaining := time.Until(sess.lastActivityAt.Add(timeout))
+	// A long-running request is active even when no new client messages arrive.
+	if len(sess.pendingRequests) > 0 {
+		remaining = timeout
+	}
+	// Only genuine inactivity may end a session; server keepalives do not refresh activity.
+	if remaining <= 0 {
+		return false
+	}
+	// Directly constructed test sessions may not own a timer.
+	if sess.idleTimer != nil {
+		sess.idleTimer.Reset(remaining)
+	}
+	return true
+}
+
+// recordMCPSessionIdleTimeout audits abandoned-runtime cleanup without exposing session material.
+func recordMCPSessionIdleTimeout(sess *mcpSession) {
+	recordMCPLimitRejection(context.Background(), mcpLimitObservation{
+		AppID: sess.appID, Transport: sess.transport,
+		Kind: "session_idle", Unit: "milliseconds",
+		Code: "mcp_session_idle_timeout", Maximum: mcpSessionIdleTimeout().Milliseconds(),
+	})
 }
 
 // publishMCPSessionEvent sends a session lifecycle event to NATS JetStream.
@@ -401,16 +498,27 @@ func publishMCPSessionEvent(sess *mcpSession, eventType, endReason string) {
 	}
 }
 
+// touchMCPSession refreshes the idle window and audit timestamp together so cleanup cannot observe half an update.
 func touchMCPSession(sess *mcpSession) {
 	sess.activityMu.Lock()
-	sess.lastActivityAt = time.Now().UTC()
-	sess.activityMu.Unlock()
+	defer sess.activityMu.Unlock()
+	// Late response completion must not recreate timer ownership after termination.
+	if sess.ended {
+		return
+	}
+	// Retain the monotonic clock internally so wall-clock corrections cannot shorten the idle window.
+	sess.lastActivityAt = time.Now()
+	// Registration records initial activity before installing its timer.
+	if sess.idleTimer != nil {
+		sess.idleTimer.Reset(mcpSessionIdleTimeout())
+	}
 }
 
+// mcpSessionLastActivity projects UTC audit time without discarding the internal monotonic idle clock.
 func mcpSessionLastActivity(sess *mcpSession) time.Time {
 	sess.activityMu.Lock()
 	defer sess.activityMu.Unlock()
-	return sess.lastActivityAt
+	return sess.lastActivityAt.UTC()
 }
 
 // setupSSEResponse configures the HTTP response for SSE streaming.
@@ -432,13 +540,10 @@ func setupSSEResponse(w http.ResponseWriter, sessionID string) (http.Flusher, bo
 // the SSE connection alive without sharing process state between sessions.
 func processMCPStream(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, stdout io.ReadCloser, sessionID string) {
 	stdoutLines := make(chan string)
+	// The shared pump stops blocked reads and sends when this transport expires.
 	go func() {
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-		for scanner.Scan() {
-			stdoutLines <- scanner.Text()
-		}
-		close(stdoutLines)
+		defer close(stdoutLines)
+		_ = scanMCPResponseLines(ctx, stdout, stdoutLines)
 	}()
 
 	pingTicker := time.NewTicker(15 * time.Second)
@@ -451,6 +556,7 @@ func processMCPStream(ctx context.Context, w http.ResponseWriter, flusher http.F
 			fmt.Fprint(w, ": ping\n\n")
 			flusher.Flush()
 		case line, ok := <-stdoutLines:
+			// Closed child output ends the transport rather than emitting an empty event.
 			if !ok {
 				return
 			}
@@ -461,56 +567,92 @@ func processMCPStream(ctx context.Context, w http.ResponseWriter, flusher http.F
 	}
 }
 
+// scanMCPResponseLines applies one wire budget to both transports and never
+// retains a child line after its session has been canceled.
+func scanMCPResponseLines(ctx context.Context, stdout io.ReadCloser, lines chan<- string) error {
+	defer stdout.Close()
+	// Closing the owned pipe also interrupts Scan when the child has emitted no bytes.
+	stopClosing := context.AfterFunc(ctx, func() { _ = stdout.Close() })
+	defer stopClosing()
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), maxMCPResponseMessageBytes)
+	// A send must remain cancelable when the HTTP consumer has already returned.
+	for scanner.Scan() {
+		select {
+		case lines <- scanner.Text():
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	// Cancellation owns pipe-close errors and must not be reported as a child failure.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return scanner.Err()
+}
+
+// handleMCPResponse correlates a child JSON-RPC envelope without retaining its content.
 func handleMCPResponse(line, sessionID string) {
 	var msg struct {
 		ID json.RawMessage `json:"id"`
 	}
+	// Malformed child output cannot safely identify a pending request.
 	if json.Unmarshal([]byte(line), &msg) != nil {
 		return
 	}
+	// Notifications carry no request ID and therefore complete no tool call.
 	if len(msg.ID) == 0 {
 		return
 	}
 	sess, ok := lookupMCPSession(sessionID)
+	// A response after session teardown has already had its search span drained.
 	if !ok {
 		return
 	}
-	completeMCPToolCall(sess, string(compactJSON(msg.ID)))
+	completeMCPToolCall(sess, string(compactJSON(msg.ID)), line, "")
 }
 
 // mcpMessageHandler accepts JSON-RPC messages for an authenticated SSE session.
 func mcpMessageHandler(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.URL.Query().Get("sessionId")
+	// Legacy SSE messages require the opaque route correlation key.
 	if sessionID == "" {
 		writeError(w, http.StatusBadRequest, "sessionId query param required")
 		return
 	}
 	sess, ok := lookupMCPSession(sessionID)
+	// Cross-transport session reuse fails before reading caller content.
 	if !ok || sess.transport != "sse" {
 		writeError(w, http.StatusNotFound, "mcp session not found or expired")
 		return
 	}
+	// The bearer proves ownership because a session ID may appear in access logs.
 	if !messageUsesSessionToken(r, sess) {
 		writeError(w, http.StatusUnauthorized, "invalid Authorization header")
 		return
 	}
+	// Existing per-app message limits remain authoritative for search and execute.
 	if !allowMessage(w, sess.appID) {
 		return
 	}
 	body, err := readBoundedMCPMessageBody(w, r)
+	// The bounded reader owns its safe HTTP failure response.
 	if err != nil {
-		return
-	}
-	callID := trackPendingRequest(body, sess)
-	if callID != "" {
-		go enforceToolCallTimeout(sess, callID)
-	}
-	resetMCPSessionIdleTimer(sess)
-	if _, err = sess.stdin.Write(append(body, '\n')); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to send message to mcp server")
+		recordMCPMessageLimit(r.Context(), sess.appID, "sse", err)
 		return
 	}
 	touchMCPSession(sess)
+	callID := trackPendingRequest(r.Context(), body, sess)
+	// Only correlatable requests need the existing child-response deadline.
+	if callID != "" {
+		go enforceToolCallTimeout(sess, callID)
+	}
+	if _, err = sess.stdin.Write(append(body, '\n')); err != nil {
+		// A failed child write completes the observed search at this boundary.
+		completeMCPToolCall(sess, callID, "", "dispatch_failed")
+		writeError(w, http.StatusInternalServerError, "failed to send message to mcp server")
+		return
+	}
 	w.WriteHeader(http.StatusAccepted)
 }
 
@@ -524,14 +666,17 @@ func messageUsesSessionToken(r *http.Request, sess *mcpSession) bool {
 	return subtle.ConstantTimeCompare([]byte(token), []byte(sess.token)) == 1
 }
 
+// readBoundedMCPMessageBody admits one complete envelope with a stable size failure.
 func readBoundedMCPMessageBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxMCPMessageBodyBytes))
+	// The complete body must fit before any protocol or operation handling begins.
 	if err == nil {
 		return body, nil
 	}
 	var maxErr *http.MaxBytesError
+	// Only the typed size failure receives the stable payload-limit code.
 	if errors.As(err, &maxErr) {
-		writeError(w, http.StatusRequestEntityTooLarge, "mcp message body too large")
+		writeError(w, http.StatusRequestEntityTooLarge, "mcp_message_payload_too_large")
 		return nil, err
 	}
 	writeError(w, http.StatusBadRequest, "failed to read body")
@@ -576,54 +721,85 @@ func hashRequestBody(params map[string]any) string {
 func enforceToolCallTimeout(sess *mcpSession, callID string) {
 	timer := time.NewTimer(time.Duration(cfg.Sandbox.ToolCallTimeoutSeconds) * time.Second)
 	defer timer.Stop()
-	<-timer.C
+	var sessionDone <-chan struct{}
+	// Production timers must not retain a session after authentication or explicit cleanup ends it.
+	if sess.lifecycleCtx != nil {
+		sessionDone = sess.lifecycleCtx.Done()
+	}
+	select {
+	case <-timer.C:
+	case <-sessionDone:
+		return
+	}
 	sess.pendingMu.Lock()
 	_, stillPending := sess.pendingRequests[callID]
-	if stillPending {
-		delete(sess.pendingRequests, callID)
-	}
 	sess.pendingMu.Unlock()
+	// Only the timeout winner closes telemetry and terminates the stuck session.
 	if stillPending {
+		completeMCPToolCall(sess, callID, "", "tool_call_timeout")
 		terminateMCPSession(sess.sessionID, "tool_call_timeout")
 	}
 }
 
 // trackPendingRequest retains only an opaque request ID. Provider arguments
 // are unnecessary for timeouts and must not become session state.
-func trackPendingRequest(body []byte, sess *mcpSession) string {
+func trackPendingRequest(ctx context.Context, body []byte, sess *mcpSession) string {
 	var request mcpJSONRPCRequest
+	// Malformed envelopes remain the child protocol's responsibility and create no tracked call.
 	if json.Unmarshal(body, &request) != nil {
 		return ""
 	}
-	return trackMCPToolCall(request, sess)
+	return trackMCPToolCall(ctx, request, sess)
 }
 
-func trackMCPToolCall(request mcpJSONRPCRequest, sess *mcpSession) string {
+// trackMCPToolCall retains one opaque request key and starts search telemetry only for search_docs.
+func trackMCPToolCall(ctx context.Context, request mcpJSONRPCRequest, sess *mcpSession) string {
+	// Notifications and non-tool methods do not participate in tool timeout or search telemetry.
 	if request.Method != "tools/call" || len(request.ID) == 0 {
 		return ""
 	}
 	callID := string(compactJSON(request.ID))
+	// JSON null is not a correlatable request identity.
 	if callID == "null" {
 		return ""
 	}
 	sess.pendingMu.Lock()
 	sess.pendingRequests[callID] = struct{}{}
+	// The observer is nil for execute and all future tools, avoiding unrelated spans.
+	if observation := startMCPSearchObservation(ctx, request, sess); observation != nil {
+		// Directly constructed test or legacy sessions lazily gain the same bounded state.
+		if sess.searchTelemetry == nil {
+			sess.searchTelemetry = make(map[string]*mcpSearchObservation)
+		}
+		sess.searchTelemetry[callID] = observation
+	}
 	sess.pendingMu.Unlock()
 	return callID
 }
 
-func completeMCPToolCall(sess *mcpSession, callID string) {
+// completeMCPToolCall closes timeout tracking and any search span with only a bounded outcome.
+func completeMCPToolCall(sess *mcpSession, callID, response, errorCode string) {
+	// Notifications and malformed calls have no state to complete.
 	if callID == "" {
 		return
 	}
 	sess.pendingMu.Lock()
 	_, found := sess.pendingRequests[callID]
+	// Only the first completion removes timeout ownership.
 	if found {
 		delete(sess.pendingRequests, callID)
-	}
-	sess.pendingMu.Unlock()
-	if found {
-		resetMCPSessionIdleTimer(sess)
+		// Refresh before releasing pending ownership so idle cleanup cannot race the completion.
 		touchMCPSession(sess)
+	}
+	observation := sess.searchTelemetry[callID]
+	delete(sess.searchTelemetry, callID)
+	sess.pendingMu.Unlock()
+	// Search telemetry ends once even if timeout and response race each other.
+	if observation != nil {
+		finishMCPSearchObservation(observation, response, errorCode)
+	}
+	// Only the first completion may audit a rejected runtime output.
+	if found {
+		recordMCPRuntimeOutputLimit(context.Background(), sess, response)
 	}
 }

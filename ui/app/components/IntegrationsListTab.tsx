@@ -3,7 +3,7 @@ import { Link } from "@remix-run/react";
 import { Loader2, Search, X , ChevronLeft, ChevronRight } from "lucide-react";
 import { Service, ActivatedService, serviceHref } from "~/lib/api";
 import { formatServiceName, formatVersion } from "~/lib/format";
-import { openAuthenticatedTab } from "~/lib/session";
+import { openServiceLink } from "~/lib/service-navigation";
 
 // ListableService is the minimal normalised shape that IntegrationsListTab
 // reads from. Both Service (catalog) and ActivatedService (workspace) satisfy
@@ -290,7 +290,7 @@ function IntegrationCollection(props: IntegrationResultsProps) {
 type IntegrationRowProps = IntegrationResultsProps & { service: ListableService };
 
 // IntegrationRow owns only one service's presentation and delegates action
-// policy, keeping catalog/workspace mutations out of navigation behavior.
+// policy; the shared link handler honors cancellation from catalog/workspace actions.
 function IntegrationRow(props: IntegrationRowProps) {
   const { service, viewType } = props;
   const href = detailHref(service);
@@ -299,7 +299,7 @@ function IntegrationRow(props: IntegrationRowProps) {
       to={href}
       target="_blank"
       rel="noopener noreferrer"
-      onClick={(event) => openIntegrationLink(event, href)}
+      onClick={(event) => openServiceLink(event, href)}
       className="flex items-center justify-between px-5 py-4 hover:bg-slate-50 transition-colors group"
     >
       <div>
@@ -315,19 +315,6 @@ function IntegrationRow(props: IntegrationRowProps) {
       <IntegrationActions {...props} />
     </Link>
   );
-}
-
-// openIntegrationLink preserves native modified-click behavior while routing
-// ordinary clicks through the authenticated-tab helper.
-function openIntegrationLink(event: React.MouseEvent, href: string): void {
-  // Modified or non-primary clicks belong to the browser's native tab handling.
-  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
-    return;
-  }
-  // Prevent Remix navigation only after the authenticated tab was opened.
-  if (openAuthenticatedTab(href)) {
-    event.preventDefault();
-  }
 }
 
 // integrationSummary selects the provider's preferred production server and

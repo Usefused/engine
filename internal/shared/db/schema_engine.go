@@ -34,8 +34,19 @@ const (
 	appTokenHistoryMigrationName              = "20260822_app_token_history"
 	appTokenCleanupMigrationVersion     int64 = 11
 	appTokenCleanupMigrationName              = "20260822_app_token_history_cleanup"
+	mcpSessionLifetimeMigrationVersion  int64 = 12
+	mcpSessionLifetimeMigrationName           = "20260826_mcp_session_max_lifetime"
 	unifiedEmptySetHash                       = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
 )
+
+// mcpSessionLifetimeEndReasonConstraint is the frozen v12 constraint shared by
+// fresh installs; future policy changes must append a new immutable constraint/migration.
+const mcpSessionLifetimeEndReasonConstraint = `CONSTRAINT chk_fused_mcp_sessions_end_reason CHECK (
+	end_reason IS NULL OR end_reason IN (
+		'client_terminated', 'client_disconnected', 'idle_timeout', 'max_lifetime', 'token_expired',
+		'token_revoked', 'app_deactivated', 'engine_shutdown', 'runtime_failed', 'tool_call_timeout'
+	)
+)`
 
 type engineMigration struct {
 	Version int64
@@ -127,6 +138,7 @@ func engineMigrations() []engineMigration {
 		{Version: restExecutionMigrationVersion, Name: restExecutionMigrationName, Queries: restExecutionMigrationQueries()},
 		{Version: appTokenHistoryMigrationVersion, Name: appTokenHistoryMigrationName, Queries: appTokenHistoryMigrationQueries()},
 		{Version: appTokenCleanupMigrationVersion, Name: appTokenCleanupMigrationName, Queries: appTokenCleanupMigrationQueries()},
+		{Version: mcpSessionLifetimeMigrationVersion, Name: mcpSessionLifetimeMigrationName, Queries: mcpSessionLifetimeMigrationQueries()},
 	}
 }
 
@@ -632,12 +644,7 @@ func engineSchemaQueries() []string {
 			ended_at timestamp with time zone,
 			last_activity_at timestamp with time zone DEFAULT NOW(),
 			end_reason text,
-			CONSTRAINT chk_fused_mcp_sessions_end_reason CHECK (
-				end_reason IS NULL OR end_reason IN (
-					'client_terminated', 'client_disconnected', 'idle_timeout', 'token_expired',
-					'token_revoked', 'app_deactivated', 'engine_shutdown', 'runtime_failed', 'tool_call_timeout'
-				)
-			)
+			` + mcpSessionLifetimeEndReasonConstraint + `
 		);`,
 		// App-scoped indexes are created by the additive migration after legacy
 		// tables receive app_id. Keeping one definition also prevents fresh and
@@ -1833,6 +1840,15 @@ func appTokenCleanupMigrationQueries() []string {
 		`DROP INDEX IF EXISTS idx_fused_app_tokens_family;`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_app_tokens_expiry
 			ON fused_app_tokens(expires_at, id) WHERE expires_at IS NOT NULL;`,
+	}
+}
+
+// mcpSessionLifetimeMigrationQueries widens only the lifecycle cause allowlist
+// so existing termination evidence survives and hard stops become durably auditable.
+func mcpSessionLifetimeMigrationQueries() []string {
+	return []string{
+		`ALTER TABLE fused_mcp_sessions DROP CONSTRAINT IF EXISTS chk_fused_mcp_sessions_end_reason;`,
+		`ALTER TABLE fused_mcp_sessions ADD ` + mcpSessionLifetimeEndReasonConstraint + `;`,
 	}
 }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bestScore, fuzzyScore } from "./fuzzyMatch.js";
+import { bestScore, fuzzyScore, weightedIntentScore } from "./fuzzyMatch.js";
 
 describe("fuzzyScore", () => {
   it("scores an exact substring match highest", () => {
@@ -43,5 +43,22 @@ describe("bestScore", () => {
 
   it("returns 0 when no field matches", () => {
     expect(bestScore("nomatch", ["a", "b", undefined])).toBe(0);
+  });
+});
+
+describe("weightedIntentScore", () => {
+  // Public identity evidence should outrank incidental descriptive prose without a model call.
+  it("weights public identity above descriptive prose deterministically", () => {
+    const identityMatch = weightedIntentScore("create repo", [
+      { value: "github.createRepo", weight: 8 },
+      { value: "Read a repository", weight: 4 },
+    ]);
+    const proseMatch = weightedIntentScore("create repo", [
+      { value: "github.readRepo", weight: 8 },
+      { value: "Create a repository", weight: 4 },
+    ]);
+
+    expect(identityMatch).toBeGreaterThan(proseMatch);
+    expect(weightedIntentScore("create repo", [{ value: "github.createRepo", weight: 8 }])).toBe(identityMatch - weightedIntentScore("create repo", [{ value: "Read a repository", weight: 4 }]));
   });
 });

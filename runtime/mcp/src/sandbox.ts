@@ -1,5 +1,6 @@
 import vm from "node:vm";
 import { CallClientOptions, remoteCall } from "./callClient.js";
+import { EXECUTE_RESULT_OUTPUT_POLICY, SerializedJsonOutput, serializeBoundedJson } from "./outputLimits.js";
 
 export interface ExecuteLimits {
   timeoutMs: number;
@@ -11,10 +12,8 @@ export const DEFAULT_EXECUTE_LIMITS: ExecuteLimits = {
   maxCalls: 10,
 };
 
-export interface ExecuteOutcome {
-  result?: unknown;
-  error?: string;
-}
+/** Exposes only admitted text so no caller can accidentally serialize an untrusted result again. */
+export type ExecuteOutcome = SerializedJsonOutput;
 
 /**
  * SessionState is the design doc's "explicit session state" primitive
@@ -52,8 +51,8 @@ export type CallImpl = (
 ) => Promise<unknown>;
 
 /**
- * runExecute runs one untrusted script in a fresh vm realm and returns its
- * result or a clean error. This is the security-critical function in this
+ * runExecute runs one untrusted script in a fresh vm realm and returns an
+ * admitted JSON result or bounded error text. This is the security-critical function in this
  * package -- read the allowlist comment below before changing anything here.
  */
 export async function runExecute(
@@ -63,6 +62,7 @@ export async function runExecute(
   limits: ExecuteLimits = DEFAULT_EXECUTE_LIMITS,
   callImpl: CallImpl = remoteCall,
 ): Promise<ExecuteOutcome> {
+  const deadline = Date.now() + limits.timeoutMs;
   const boundCall = buildBoundCall(callOptions, limits.maxCalls, callImpl);
   const context = vm.createContext(buildSandboxGlobals(boundCall, session));
   const wrapped = `(async () => {\n${script}\n})()`;
@@ -78,10 +78,45 @@ export async function runExecute(
     // why a second, independent mechanism is required).
     const resultPromise = compiled.runInContext(context, { timeout: limits.timeoutMs }) as Promise<unknown>;
     const result = await withWallClockTimeout(resultPromise, limits.timeoutMs);
-    return { result };
+    return withinSerializationDeadline(() => serializeBoundedJson(result ?? null, EXECUTE_RESULT_OUTPUT_POLICY), deadline);
   } catch (err) {
-    return { error: describeError(err) };
+    return serializeExecuteError(err, deadline, limits.timeoutMs);
   }
+}
+
+/** Executes all user-provided serialization hooks under the invocation's remaining deadline. */
+function withinSerializationDeadline(serialize: () => ExecuteOutcome, deadline: number): ExecuteOutcome {
+  const remainingMs = deadline - Date.now();
+  // An exhausted execution cannot acquire another timeout window while formatting its result.
+  if (remainingMs <= 0) {
+    throw new Error("execute serialization deadline exceeded");
+  }
+  const context = vm.createContext({ serialize });
+  return new vm.Script("serialize()", { filename: "execute-output.js" }).runInContext(context, { timeout: remainingMs }) as ExecuteOutcome;
+}
+
+/** Extracts and bounds error text inside the deadline because thrown values can contain hostile hooks. */
+function serializeExecuteError(error: unknown, deadline: number, timeoutMs: number): ExecuteOutcome {
+  try {
+    return withinSerializationDeadline(() => boundedExecuteError(describeError(error)), deadline);
+  } catch {
+    // Failure to render an error must never recurse through its getters or toString outside the VM.
+    const timedOut = Date.now() >= deadline;
+    return {
+      text: JSON.stringify({
+        code: timedOut ? "MCP_EXECUTE_TIMEOUT" : "MCP_EXECUTE_ERROR_SERIALIZATION_FAILED",
+        message: timedOut ? `execute timed out after ${timeoutMs}ms` : "execute error could not be rendered safely",
+      }),
+      isError: true,
+    };
+  }
+}
+
+/** Preserves ordinary Engine/script messages while making failures share the result byte ceiling. */
+function boundedExecuteError(message: string): ExecuteOutcome {
+  const output = serializeBoundedJson(message, EXECUTE_RESULT_OUTPUT_POLICY);
+  // Rejected messages retain the stable limit failure; accepted messages keep their original text.
+  return output.isError ? output : { text: message, isError: true };
 }
 
 /**
@@ -94,8 +129,13 @@ export async function runExecute(
  * which realm the value came from.
  */
 function describeError(err: unknown): string {
-  if (typeof err === "object" && err !== null && "message" in err && typeof (err as { message: unknown }).message === "string") {
-    return (err as { message: string }).message;
+  // Cross-realm errors are identified structurally, and the caller bounds any property hooks in a VM.
+  if (typeof err === "object" && err !== null && "message" in err) {
+    const message = (err as { message: unknown }).message;
+    // Reading once prevents a stateful getter from changing an admitted string into an object.
+    if (typeof message === "string") {
+      return message;
+    }
   }
   return String(err);
 }

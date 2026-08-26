@@ -1,7 +1,6 @@
 package sandbox
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/subtle"
@@ -63,9 +62,12 @@ func mcpStreamableHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleMCPStreamablePost admits a bounded envelope before authenticating or starting its runtime session.
 func handleMCPStreamablePost(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, appID, token string) {
 	body, err := readBoundedMCPMessageBody(w, r)
+	// Only a typed size rejection enters limit-specific telemetry; parser failures remain separate.
 	if err != nil {
+		recordMCPMessageLimit(ctx, appID, mcpStreamableTransport, err)
 		recordMCPStreamableOutcome(span, "invalid", true)
 		return
 	}
@@ -98,6 +100,7 @@ func handleMCPStreamablePost(ctx context.Context, span trace.Span, w http.Respon
 	serveMCPStreamableRequest(ctx, span, w, sess, body, request)
 }
 
+// handleMCPStreamableInitialize preserves typed admission failures while establishing one authenticated runtime.
 func handleMCPStreamableInitialize(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, appID, token string, body []byte, request mcpJSONRPCRequest) {
 	if request.Method != "initialize" || len(request.ID) == 0 {
 		writeMCPJSONRPCError(w, request.ID, -32600, "initialize is required before creating a session", http.StatusBadRequest)
@@ -126,8 +129,10 @@ func handleMCPStreamableInitialize(ctx context.Context, span trace.Span, w http.
 		return
 	}
 	sess, err := startMCPStreamableSession(ctx, appID, token, protocolVersion, authContext, identity)
+	// Typed catalogue admission codes survive the session-start boundary without authored content.
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to establish MCP session")
+		statusCode, errorCode := mcpSessionStartFailure(err)
+		writeError(w, statusCode, errorCode)
 		recordMCPStreamableOutcome(span, "start_failed", true)
 		return
 	}
@@ -156,6 +161,7 @@ func allowMCPStreamableConcurrency(ctx context.Context, span trace.Span, w http.
 	return false
 }
 
+// startMCPStreamableSession starts one isolated runtime that survives active use until authorization or cleanup ends it.
 func startMCPStreamableSession(ctx context.Context, appID, token, protocolVersion string, authContext map[string]any, identity auth.RuntimeIdentity) (*mcpSession, error) {
 	if err := globalObjectCache.ConnectSDK(ctx, appID); err != nil {
 		return nil, err
@@ -194,48 +200,48 @@ func cleanupFailedMCPStreamableStart(appID, sessionID string, cancel context.Can
 	globalObjectCache.DisconnectSDK(appID)
 }
 
+// pumpMCPStreamableResponses shares the bounded cancelable scanner used by legacy SSE.
 func pumpMCPStreamableResponses(ctx context.Context, sess *mcpSession, stdout io.ReadCloser) {
 	defer close(sess.responses)
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		select {
-		case sess.responses <- line:
-		case <-ctx.Done():
-			return
-		}
-	}
+	_ = scanMCPResponseLines(ctx, stdout, sess.responses)
 	terminateMCPSession(sess.sessionID, "runtime_failed")
 }
 
+// serveMCPStreamableRequest serializes one child exchange and closes its bounded tool observation.
 func serveMCPStreamableRequest(ctx context.Context, span trace.Span, w http.ResponseWriter, sess *mcpSession, body []byte, request mcpJSONRPCRequest) bool {
 	sess.requestMu.Lock()
 	defer sess.requestMu.Unlock()
-	callID := trackMCPToolCall(request, sess)
-	resetMCPSessionIdleTimer(sess)
+	touchMCPSession(sess)
+	callID := trackMCPToolCall(ctx, request, sess)
+	// Dispatch failure ends both pending-call and search state before session cleanup.
 	if _, err := sess.stdin.Write(append(body, '\n')); err != nil {
-		completeMCPToolCall(sess, callID)
+		completeMCPToolCall(sess, callID, "", "dispatch_failed")
 		writeMCPJSONRPCError(w, request.ID, -32603, "failed to dispatch request", http.StatusBadGateway)
 		recordMCPStreamableOutcome(span, "dispatch_failed", true)
 		terminateMCPSession(sess.sessionID, "runtime_failed")
 		return false
 	}
-	touchMCPSession(sess)
+	// Notifications are accepted without waiting for a response envelope.
 	if len(request.ID) == 0 {
 		w.WriteHeader(http.StatusAccepted)
 		recordMCPStreamableOutcome(span, "accepted", false)
 		return true
 	}
 	response, err := waitForMCPStreamableResponse(ctx, sess, request.ID)
+	// Transport failure is collapsed before it reaches telemetry or the public response.
 	if err != nil {
-		completeMCPToolCall(sess, callID)
+		failureCode := "runtime_unavailable"
+		// Deadline ownership is safe to distinguish without attaching raw errors.
+		if errors.Is(err, context.DeadlineExceeded) {
+			failureCode = "tool_call_timeout"
+		}
+		completeMCPToolCall(sess, callID, "", failureCode)
 		writeMCPJSONRPCError(w, request.ID, -32603, "MCP runtime did not respond", http.StatusBadGateway)
 		recordMCPStreamableOutcome(span, "runtime_failed", true)
 		terminateMCPSession(sess.sessionID, "runtime_failed")
 		return false
 	}
-	completeMCPToolCall(sess, callID)
+	completeMCPToolCall(sess, callID, response, "")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, response)
@@ -281,12 +287,7 @@ func compactJSON(value json.RawMessage) []byte {
 	return buffer.Bytes()
 }
 
-func resetMCPSessionIdleTimer(sess *mcpSession) {
-	if sess.idleTimer != nil {
-		sess.idleTimer.Reset(mcpSessionIdleTimeout())
-	}
-}
-
+// handleMCPStreamableGet ties keepalives to session cancellation without imposing a fixed age on active sessions.
 func handleMCPStreamableGet(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, appID, token string) {
 	sess, status, err := authenticateMCPStreamableSession(ctx, appID, token, r.Header.Get(mcpSessionIDHeader), r.Header.Get(mcpProtocolVersionHeader))
 	if err != nil {
@@ -305,7 +306,9 @@ func handleMCPStreamableGet(ctx context.Context, span trace.Span, w http.Respons
 	touchMCPSession(sess)
 	_, _ = io.WriteString(w, ": connected\n\n")
 	flusher.Flush()
-	streamMCPKeepAlives(ctx, w, flusher, sess.sessionID)
+	streamCtx, cancel := mcpSessionRequestContext(ctx, sess)
+	defer cancel()
+	streamMCPKeepAlives(streamCtx, w, flusher, sess.sessionID)
 	recordMCPStreamableOutcome(span, "closed", false)
 }
 
@@ -339,6 +342,7 @@ func handleMCPStreamableDelete(ctx context.Context, span trace.Span, w http.Resp
 	recordMCPStreamableOutcome(span, "deleted", false)
 }
 
+// authenticateMCPStreamableSession refreshes activity only after session ownership and token policy succeed.
 func authenticateMCPStreamableSession(ctx context.Context, appID, token, sessionID, protocolVersion string) (*mcpSession, int, error) {
 	if strings.TrimSpace(sessionID) == "" {
 		return nil, http.StatusBadRequest, errors.New("Mcp-Session-Id header is required")
@@ -357,7 +361,7 @@ func authenticateMCPStreamableSession(ctx context.Context, appID, token, session
 	if protocolVersion != "" && protocolVersion != sess.protocolVersion {
 		return nil, http.StatusBadRequest, errors.New("MCP-Protocol-Version does not match the session")
 	}
-	resetMCPSessionIdleTimer(sess)
+	touchMCPSession(sess)
 	return sess, http.StatusOK, nil
 }
 

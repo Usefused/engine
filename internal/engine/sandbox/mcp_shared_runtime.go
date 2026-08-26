@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,6 +19,10 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
+
+// maxMCPPhysicalResultBytes bounds both buffered provider bytes and the exact
+// JSON value returned to the sandboxed child runtime.
+const maxMCPPhysicalResultBytes = 1 << 20
 
 // mcpCallRequest preserves params as JSON until exact catalogue kind is known,
 // avoiding numeric changes to Unified input while retaining physical map decoding.
@@ -111,11 +116,16 @@ func mcpCallHandler(w http.ResponseWriter, r *http.Request) {
 		writeMCPCallResult(w, http.StatusNotFound, mcpCallResponse{Error: "mcp session not found or expired"})
 		return
 	}
+	callCtx, cancel := mcpSessionRequestContext(r.Context(), sess)
+	defer cancel()
+	r = r.WithContext(callCtx)
 
 	var req mcpCallRequest
-	// One malformed envelope receives the same bounded failure before dispatch.
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeMCPCallResult(w, http.StatusBadRequest, mcpCallResponse{Error: "invalid request body"})
+	statusCode, errorCode := decodeBoundedMCPCallRequest(w, r, &req)
+	// Internal child-runtime calls share the public MCP payload budget before decoding.
+	if statusCode != 0 {
+		recordMCPCallLimit(r.Context(), sess, errorCode)
+		writeMCPCallResult(w, statusCode, mcpCallResponse{Error: errorCode})
 		return
 	}
 
@@ -159,11 +169,53 @@ func mcpCallHandler(w http.ResponseWriter, r *http.Request) {
 	result, err := dispatchMCPCall(r.Context(), sess, req.OperationID, params)
 	// Physical provider failures retain their established response path.
 	if err != nil {
-		writeMCPCallResult(w, http.StatusBadGateway, mcpCallResponse{Error: err.Error()})
+		statusCode, errorCode := boundedMCPPhysicalCallError(err)
+		recordMCPCallLimit(r.Context(), sess, errorCode)
+		writeMCPCallResult(w, statusCode, mcpCallResponse{Error: errorCode})
 		return
 	}
 
 	writeMCPCallResult(w, http.StatusOK, mcpCallResponse{Result: result})
+}
+
+// decodeBoundedMCPCallRequest admits one child-runtime envelope only when its
+// complete encoded body fits the same fixed budget as external MCP messages.
+func decodeBoundedMCPCallRequest(w http.ResponseWriter, r *http.Request, request *mcpCallRequest) (int, string) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxMCPMessageBodyBytes))
+	// Oversized bodies receive a stable code distinct from malformed envelopes.
+	if err != nil {
+		var maxBytesError *http.MaxBytesError
+		// Only the typed limit failure may be classified as a payload rejection.
+		if errors.As(err, &maxBytesError) {
+			return http.StatusRequestEntityTooLarge, "mcp_call_payload_too_large"
+		}
+		return http.StatusBadRequest, "invalid request body"
+	}
+	// Unmarshal requires exactly one JSON document and rejects trailing data.
+	if err := json.Unmarshal(body, request); err != nil {
+		return http.StatusBadRequest, "invalid request body"
+	}
+	return 0, ""
+}
+
+// mcpSessionRequestContext binds bridge calls and SSE streams to session cancellation,
+// preserving caller deadlines without inventing a maximum age for active sessions.
+func mcpSessionRequestContext(parent context.Context, sess *mcpSession) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	// Directly constructed test sessions may rely solely on the caller's cancellation.
+	if sess.lifecycleCtx == nil {
+		return ctx, cancel
+	}
+	stopCancellation := context.AfterFunc(sess.lifecycleCtx, cancel)
+	// AfterFunc runs asynchronously, so an already-ended session must fail closed immediately.
+	if sess.lifecycleCtx.Err() != nil {
+		cancel()
+	}
+	// Removing the callback avoids retaining completed calls until session teardown.
+	return ctx, func() {
+		stopCancellation()
+		cancel()
+	}
 }
 
 // resolveSessionFixtureUnifiedOperation keeps logical lookup inside the same
@@ -404,15 +456,41 @@ func dispatchMCPCall(ctx context.Context, sess *mcpSession, operationID string, 
 	ctx = contextWithExecutionTransport(ctx, models.EngineExecutionTransportMCP)
 	ctx = contextWithMCPIdempotencyIdentity(ctx, params)
 
-	buf := engine.NewBufferStream()
+	buf := engine.NewBoundedBufferStream(maxMCPPhysicalResultBytes)
 	err := engineExecuteCore(
 		ctx, globalObjectCache, globalDispatcher, globalTokenValidator,
 		sess.appID, sess.token, operationID, params, copyCredentialEnvelope(sess.authContext), "", buf,
 	)
+	// Canonical execution errors, including the bounded-stream sentinel, retain their identity.
 	if err != nil {
 		return nil, err
 	}
-	return bufferToJSONResult(buf.Bytes())
+	return bufferToBoundedJSONResult(buf.Bytes(), maxMCPPhysicalResultBytes)
+}
+
+// boundedMCPPhysicalCallError exposes a stable hard-limit code while retaining
+// the existing error contract for unrelated physical execution failures.
+func boundedMCPPhysicalCallError(err error) (int, string) {
+	// Provider bodies crossing the result budget never expose partial content or wrapper text.
+	if errors.Is(err, engine.ErrBufferStreamLimitExceeded) {
+		return http.StatusBadGateway, "mcp_call_result_too_large"
+	}
+	return http.StatusBadGateway, boundedMCPCallErrorMessage(err.Error())
+}
+
+// boundedMCPCallErrorMessage applies the result budget to failure text as well
+// as success values without exposing any rejected provider or validation text.
+func boundedMCPCallErrorMessage(message string) string {
+	// Reject raw oversize before quoting can allocate an even larger error representation.
+	if len(message) > maxMCPPhysicalResultBytes {
+		return "mcp_call_result_too_large"
+	}
+	encoded, _ := json.Marshal(message)
+	// Control characters and quotes can expand even a small raw failure on the JSON wire.
+	if len(encoded) > maxMCPPhysicalResultBytes {
+		return "mcp_call_result_too_large"
+	}
+	return message
 }
 
 // copyCredentialEnvelope prevents concurrent MCP calls from sharing a map
@@ -449,14 +527,31 @@ func bufferToJSONResult(raw []byte) (json.RawMessage, error) {
 	return json.RawMessage(encoded), nil
 }
 
+// bufferToBoundedJSONResult caps the model-visible JSON after conversion
+// because quoting a text response can expand beyond its provider byte count.
+func bufferToBoundedJSONResult(raw []byte, maxBytes int) (json.RawMessage, error) {
+	result, err := bufferToJSONResult(raw)
+	// Encoding failures remain authoritative and never become limit failures.
+	if err != nil {
+		return nil, err
+	}
+	// The post-encoding check bounds the exact result placed in the call response.
+	if len(result) > maxBytes {
+		return nil, engine.ErrBufferStreamLimitExceeded
+	}
+	return result, nil
+}
+
 // writeMCPCallResult is this handler's own JSON writer rather than the
 // package's existing writeError (mcp.go): writeError builds its body with
 // fmt.Sprintf and does not escape the message, which breaks as soon as an
 // error string contains a quote -- something this handler's validation
 // errors do routinely (e.g. `missing required parameter "foo"`). Encoding
 // through encoding/json avoids shipping a client-observable malformed-JSON
-// bug instead of fixing it here.
+// bug instead of fixing it here. Failure text receives the same bounded
+// result policy, so early validation paths cannot bypass the writer budget.
 func writeMCPCallResult(w http.ResponseWriter, status int, resp mcpCallResponse) {
+	resp.Error = boundedMCPCallErrorMessage(resp.Error)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(resp)

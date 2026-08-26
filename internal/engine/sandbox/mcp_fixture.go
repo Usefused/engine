@@ -47,6 +47,11 @@ func LoadFixture(path string) (*Fixture, error) {
 	if err := json.Unmarshal(data, &f); err != nil {
 		return nil, fmt.Errorf("parse fixture: %w", err)
 	}
+	// Offline fixtures cross the same catalogue boundary as live sessions and
+	// must fail before unsafe schemas are indexed or exposed to the runtime.
+	if err := validateMCPFixtureSchemas(&f); err != nil {
+		return nil, fmt.Errorf("admit fixture schemas: %w", err)
+	}
 
 	f.byOperationID = make(map[string]*FixtureOperation, len(f.Operations))
 	for i := range f.Operations {

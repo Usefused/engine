@@ -68,3 +68,19 @@ func TestDecodeMCPSessionAcceptsToolCallTimeout(t *testing.T) {
 		t.Fatalf("timeout event = %#v/%v", session, err)
 	}
 }
+
+// TestDecodeMCPSessionAcceptsMaxLifetime preserves the hard-stop cause and producer timestamps for audit.
+func TestDecodeMCPSessionAcceptsMaxLifetime(t *testing.T) {
+	producerAt := time.Date(2026, 8, 26, 10, 5, 0, 0, time.UTC)
+	lastActivityAt := producerAt.Add(-time.Second)
+	payload := []byte(`{"app_id":"` + uuid.NewString() + `","session_id":"hard-stop","type":"ended","end_reason":"max_lifetime","timestamp":"` + producerAt.Format(time.RFC3339Nano) + `","last_activity_at":"` + lastActivityAt.Format(time.RFC3339Nano) + `"}`)
+	session, err := decodeMCPSession(payload, producerAt.Add(time.Minute))
+	// Delivery delay must not turn a valid hard lifetime termination into a discarded event.
+	if err != nil {
+		t.Fatalf("decode max-lifetime event: %v", err)
+	}
+	// Durable history must retain the exact normalized cause and source event time.
+	if session.EndedAt == nil || session.EndReason != "max_lifetime" || !session.EndedAt.Equal(producerAt) || !session.LastActivityAt.Equal(lastActivityAt) {
+		t.Fatalf("max-lifetime termination = %#v, want producer time/cause/activity", session)
+	}
+}

@@ -11,6 +11,10 @@ const maxDeferredResponseBytes = 1 << 20
 
 var errDeferredResponseTooLarge = errors.New("retryable provider response exceeded deferred body limit")
 
+// ErrBufferStreamLimitExceeded is the stable failure returned when a bounded
+// response consumer reaches its admitted in-memory result budget.
+var ErrBufferStreamLimitExceeded = errors.New("buffered response limit exceeded")
+
 // ResponseStream streams execution result chunks back to the caller — either the
 // gRPC edge (relaying to the open stream) or a buffering adapter.
 type ResponseStream interface {
@@ -164,13 +168,37 @@ func (stream *deferredResponseStream) forwardMetadata(headers http.Header, reque
 // the full response as a buffered string). Having one type here keeps those
 // callers DRY instead of each defining its own buffer.
 type BufferStream struct {
-	buf bytes.Buffer
+	buf      bytes.Buffer
+	maxBytes int
+	limited  bool
+	err      error
 }
 
 // NewBufferStream returns an empty in-memory ResponseStream.
 func NewBufferStream() *BufferStream { return &BufferStream{} }
 
+// NewBoundedBufferStream returns an in-memory stream that rejects output past
+// maxBytes without retaining a partial result for a caller to consume.
+func NewBoundedBufferStream(maxBytes int) *BufferStream {
+	// A negative budget cannot quietly restore unbounded buffering at a security boundary.
+	if maxBytes < 0 {
+		maxBytes = 0
+	}
+	return &BufferStream{maxBytes: maxBytes, limited: true}
+}
+
+// Send appends a chunk while preserving a sticky bounded-buffer failure.
 func (b *BufferStream) Send(chunk []byte) error {
+	// Once a result crosses its budget, later chunks must not recreate a partial response.
+	if b.err != nil {
+		return b.err
+	}
+	// Checking the remaining capacity before Write avoids allocating the oversized chunk.
+	if b.limited && len(chunk) > b.maxBytes-b.buf.Len() {
+		b.buf = bytes.Buffer{}
+		b.err = ErrBufferStreamLimitExceeded
+		return b.err
+	}
 	_, err := b.buf.Write(chunk)
 	return err
 }

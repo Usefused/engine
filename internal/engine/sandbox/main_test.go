@@ -273,6 +273,7 @@ func TestEnforceToolCallTimeout_DoesNotKillIfCompleted(t *testing.T) {
 
 // ─── trackPendingRequest tests ─────────────────────────────────────────────────
 
+// TestTrackPendingRequest_TracksToolsCall verifies opaque timeout correlation survives telemetry wiring.
 func TestTrackPendingRequest_TracksToolsCall(t *testing.T) {
 	sess := &mcpSession{
 		pendingRequests: make(map[string]struct{}),
@@ -284,8 +285,9 @@ func TestTrackPendingRequest_TracksToolsCall(t *testing.T) {
 		"params": map[string]any{"name": "get_user"},
 	})
 
-	callID := trackPendingRequest(body, sess)
+	callID := trackPendingRequest(context.Background(), body, sess)
 
+	// JSON request identity is compacted without exposing params.
 	if callID != `"42"` {
 		t.Errorf("expected JSON request id %q, got %q", `"42"`, callID)
 	}
@@ -293,15 +295,18 @@ func TestTrackPendingRequest_TracksToolsCall(t *testing.T) {
 	_, ok := sess.pendingRequests[`"42"`]
 	sess.pendingMu.Unlock()
 
+	// A valid tool call must own timeout state until its response arrives.
 	if !ok {
 		t.Fatal("expected pending request to be recorded")
 	}
-	completeMCPToolCall(sess, `"42"`)
+	completeMCPToolCall(sess, `"42"`, `{"jsonrpc":"2.0","id":42,"result":{}}`, "")
+	// Completion removes the sole pending entry.
 	if len(sess.pendingRequests) != 0 {
 		t.Fatal("completed request remained pending")
 	}
 }
 
+// TestTrackPendingRequest_IgnoresNonToolsCall keeps non-call protocol messages out of pending state.
 func TestTrackPendingRequest_IgnoresNonToolsCall(t *testing.T) {
 	sess := &mcpSession{
 		pendingRequests: make(map[string]struct{}),
@@ -312,10 +317,12 @@ func TestTrackPendingRequest_IgnoresNonToolsCall(t *testing.T) {
 		"id":     "1",
 	})
 
-	callID := trackPendingRequest(body, sess)
+	callID := trackPendingRequest(context.Background(), body, sess)
+	// Non-tool methods never receive a timeout correlation key.
 	if callID != "" {
 		t.Errorf("expected empty callID for non-tools/call method, got '%s'", callID)
 	}
+	// Ignored protocol traffic cannot mutate pending-call state.
 	if len(sess.pendingRequests) != 0 {
 		t.Error("expected no pending requests to be recorded for tools/list")
 	}

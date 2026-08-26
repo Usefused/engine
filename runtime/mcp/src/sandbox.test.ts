@@ -1,8 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import { CallClientOptions } from "./callClient.js";
-import { runExecute, SessionState, ExecuteLimits } from "./sandbox.js";
+import { runExecute, SessionState, ExecuteLimits, ExecuteOutcome } from "./sandbox.js";
+import { EXECUTE_RESULT_OUTPUT_POLICY } from "./outputLimits.js";
 
 const testCallOptions: CallClientOptions = { sessionId: "sess-1", enginePort: "1234" };
+
+/** Decodes only admitted output so tests exercise the same trusted text consumed by the MCP handler. */
+function resultValue(outcome: ExecuteOutcome): unknown {
+  // An execution error must not accidentally satisfy a successful-result assertion.
+  expect(outcome.isError).toBe(false);
+  return JSON.parse(outcome.text);
+}
 
 describe("runExecute -- sandbox allowlist (security-critical)", () => {
   it("cannot reach fetch", async () => {
@@ -11,7 +19,7 @@ describe("runExecute -- sandbox allowlist (security-critical)", () => {
       testCallOptions,
       new SessionState(),
     );
-    expect(outcome.result).toBe("undefined");
+    expect(resultValue(outcome)).toBe("undefined");
   });
 
   it("cannot reach process", async () => {
@@ -20,7 +28,7 @@ describe("runExecute -- sandbox allowlist (security-critical)", () => {
       testCallOptions,
       new SessionState(),
     );
-    expect(outcome.result).toBe("undefined");
+    expect(resultValue(outcome)).toBe("undefined");
   });
 
   it("cannot reach require", async () => {
@@ -29,7 +37,7 @@ describe("runExecute -- sandbox allowlist (security-critical)", () => {
       testCallOptions,
       new SessionState(),
     );
-    expect(outcome.result).toBe("undefined");
+    expect(resultValue(outcome)).toBe("undefined");
   });
 
   it("cannot reach Node's Buffer, global, or globalThis host objects", async () => {
@@ -38,7 +46,7 @@ describe("runExecute -- sandbox allowlist (security-critical)", () => {
       testCallOptions,
       new SessionState(),
     );
-    expect(outcome.result).toBe("undefined,undefined");
+    expect(resultValue(outcome)).toBe("undefined,undefined");
   });
 
   it("standard JS built-ins (not injected, inherent to any realm) are still usable", async () => {
@@ -47,7 +55,7 @@ describe("runExecute -- sandbox allowlist (security-critical)", () => {
       testCallOptions,
       new SessionState(),
     );
-    expect(outcome.result).toBe('{"a":2,"b":[2,4,6]}');
+    expect(resultValue(outcome)).toBe('{"a":2,"b":[2,4,6]}');
   });
 });
 
@@ -61,8 +69,7 @@ describe("runExecute -- call() wiring", () => {
       undefined,
       callImpl,
     );
-    expect(outcome.error).toBeUndefined();
-    expect(outcome.result).toEqual({ ok: true });
+    expect(resultValue(outcome)).toEqual({ ok: true });
     expect(callImpl).toHaveBeenCalledWith(testCallOptions, "test.op", { x: 1 });
   });
 
@@ -76,7 +83,8 @@ describe("runExecute -- call() wiring", () => {
       limits,
       callImpl,
     );
-    expect(outcome.error).toMatch(/call\(\) limit exceeded/);
+    expect(outcome.isError).toBe(true);
+    expect(outcome.text).toMatch(/call\(\) limit exceeded/);
     expect(callImpl).toHaveBeenCalledTimes(2);
   });
 
@@ -86,7 +94,7 @@ describe("runExecute -- call() wiring", () => {
       testCallOptions,
       new SessionState(),
     );
-    expect(outcome.error).toBe("boom");
+    expect(outcome).toEqual({ isError: true, text: "boom" });
   });
 });
 
@@ -95,7 +103,7 @@ describe("runExecute -- session state", () => {
     const session = new SessionState();
     await runExecute('session.set("k", 42); return null;', testCallOptions, session);
     const outcome = await runExecute('return session.get("k");', testCallOptions, session);
-    expect(outcome.result).toBe(42);
+    expect(resultValue(outcome)).toBe(42);
   });
 });
 
@@ -103,7 +111,7 @@ describe("runExecute -- realm freshness", () => {
   it("does not leak global mutations from one invocation into the next", async () => {
     await runExecute("globalThis.polluted = true; return null;", testCallOptions, new SessionState());
     const outcome = await runExecute("return typeof globalThis.polluted;", testCallOptions, new SessionState());
-    expect(outcome.result).toBe("undefined");
+    expect(resultValue(outcome)).toBe("undefined");
   });
 });
 
@@ -116,6 +124,87 @@ describe("runExecute -- wall-clock timeout", () => {
       new SessionState(),
       limits,
     );
-    expect(outcome.error).toMatch(/timed out/);
+    expect(outcome.isError).toBe(true);
+    expect(outcome.text).toMatch(/timed out/);
   }, 2000);
+});
+
+describe("runExecute -- bounded output", () => {
+  it("applies the result limit to thrown error messages too", async () => {
+    const outcome = await runExecute(
+      `throw new Error("x".repeat(${EXECUTE_RESULT_OUTPUT_POLICY.maxBytes + 1}));`,
+      testCallOptions,
+      new SessionState(),
+    );
+
+    expect(outcome.isError).toBe(true);
+    expect(JSON.parse(outcome.text).code).toBe("MCP_EXECUTE_RESULT_LIMIT_EXCEEDED");
+    expect(Buffer.byteLength(outcome.text, "utf8")).toBeLessThan(1024);
+  });
+
+  it("rejects large results before returning raw objects to the MCP handler", async () => {
+    const outcome = await runExecute(
+      `return "x".repeat(${EXECUTE_RESULT_OUTPUT_POLICY.maxBytes + 1});`,
+      testCallOptions,
+      new SessionState(),
+    );
+
+    expect(JSON.parse(outcome.text).code).toBe("MCP_EXECUTE_RESULT_LIMIT_EXCEEDED");
+    expect(outcome).not.toHaveProperty("result");
+  });
+
+  it("keeps result getters and toJSON hooks inside the execute deadline", async () => {
+    const limits: ExecuteLimits = { timeoutMs: 25, maxCalls: 10 };
+    const scripts = [
+      "return { get value() { while (true) {} } };",
+      "return { toJSON() { while (true) {} } };",
+    ];
+    for (const script of scripts) {
+      const outcome = await runExecute(script, testCallOptions, new SessionState(), limits);
+      expect(outcome.isError).toBe(true);
+      expect(JSON.parse(outcome.text).code).toBe("MCP_EXECUTE_TIMEOUT");
+    }
+  }, 2000);
+
+  it("keeps thrown message getters and toString hooks inside the execute deadline", async () => {
+    const limits: ExecuteLimits = { timeoutMs: 25, maxCalls: 10 };
+    const scripts = [
+      "throw { get message() { while (true) {} } };",
+      "throw { toString() { while (true) {} } };",
+    ];
+    for (const script of scripts) {
+      const outcome = await runExecute(script, testCallOptions, new SessionState(), limits);
+      expect(outcome.isError).toBe(true);
+      expect(JSON.parse(outcome.text).code).toBe("MCP_EXECUTE_TIMEOUT");
+    }
+  }, 2000);
+
+  it("uses trusted JSON despite script-side serializer replacement", async () => {
+    const outcome = await runExecute(
+      "JSON.stringify = () => 'spoofed'; return { admitted: true };",
+      testCallOptions,
+      new SessionState(),
+    );
+
+    expect(resultValue(outcome)).toEqual({ admitted: true });
+  });
+
+  it("reads a thrown message getter only once before admitting its text", async () => {
+    const outcome = await runExecute(
+      "let reads = 0; throw { get message() { return ++reads === 1 ? 'safe text' : { unexpected: true }; } };",
+      testCallOptions,
+      new SessionState(),
+    );
+
+    expect(outcome).toEqual({ text: "safe text", isError: true });
+  });
+
+  it("returns stable serialization failures for circular and BigInt output", async () => {
+    const scripts = ["const value = {}; value.self = value; return value;", "return 1n;"];
+    for (const script of scripts) {
+      const outcome = await runExecute(script, testCallOptions, new SessionState());
+      expect(outcome.isError).toBe(true);
+      expect(JSON.parse(outcome.text).code).toBe("MCP_OUTPUT_SERIALIZATION_FAILED");
+    }
+  });
 });

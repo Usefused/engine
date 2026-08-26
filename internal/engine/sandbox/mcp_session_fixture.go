@@ -140,11 +140,18 @@ func stripMCPAuthParameters(operation *FixtureOperation, authName string) {
 // fixture and its live dispatch path always mean the same thing by the same
 // identifier.
 func endpointToFixtureOperation(serviceID string, ep fusedobject.Endpoint) (FixtureOperation, error) {
+	// Source schemas cross a JSON conversion before fixture admission, so the
+	// same bounded preflight must run before that conversion can allocate or recurse.
+	if err := validateMCPSourceEndpointSchemas(ep); err != nil {
+		return FixtureOperation{}, err
+	}
 	raw, err := json.Marshal(ep)
+	// Conversion errors are distinct from policy rejection and retain their existing classification.
 	if err != nil {
 		return FixtureOperation{}, fmt.Errorf("marshal endpoint: %w", err)
 	}
 	var op FixtureOperation
+	// The shared wire shape must decode completely before the operation becomes discoverable.
 	if err := json.Unmarshal(raw, &op); err != nil {
 		return FixtureOperation{}, fmt.Errorf("unmarshal endpoint into fixture operation: %w", err)
 	}

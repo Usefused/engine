@@ -152,6 +152,21 @@ func TestMCPStreamableFirstPostRequiresInitialize(t *testing.T) {
 	}
 }
 
+// TestMCPStreamablePostRejectsOversizedPayload proves admission stops before JSON parsing or session creation.
+func TestMCPStreamablePostRejectsOversizedPayload(t *testing.T) {
+	appID := uuid.NewString()
+	request := httptest.NewRequest(http.MethodPost, "/mcp/"+appID, strings.NewReader(strings.Repeat("x", maxMCPMessageBodyBytes+1)))
+	request.Header.Set("Authorization", "Bearer token")
+	response := httptest.NewRecorder()
+
+	streamableTestRouter().ServeHTTP(response, request)
+
+	// HTTP 413 is the transport-level signal before an untrusted envelope reaches the runtime.
+	if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), "mcp_message_payload_too_large") {
+		t.Fatalf("oversized payload response = %d/%s", response.Code, response.Body.String())
+	}
+}
+
 func TestInitializeMCPProtocolVersionRejectsMalformedValues(t *testing.T) {
 	for _, params := range []string{
 		`{}`,

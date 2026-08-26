@@ -69,6 +69,7 @@ func TestEngineSchemaDefinesStableInstallationIdentity(t *testing.T) {
 
 // TestEngineSchemaDefinesVersionedMigrationLedger locks migration identities so
 // an already-recorded version can never silently acquire different queries.
+// TestEngineSchemaDefinesVersionedMigrationLedger keeps schema upgrades append-only and serialized across Engine processes.
 func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 	joined := strings.Join(engineSchemaQueries(), "\n")
 	for _, expected := range []string{
@@ -83,8 +84,9 @@ func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 	}
 
 	migrations := engineMigrations()
-	if len(migrations) != 11 {
-		t.Fatalf("Engine migration count = %d, want 11", len(migrations))
+	// The new lifetime cause requires its own ledger entry rather than rewriting an applied version.
+	if len(migrations) != 12 {
+		t.Fatalf("Engine migration count = %d, want 12", len(migrations))
 	}
 	assertMigrationIdentity(t, migrations[0], engineMigrationVersion, engineMigrationName)
 	assertMigrationIdentity(t, migrations[1], appTokenPolicyMigrationVersion, appTokenPolicyMigrationName)
@@ -97,6 +99,7 @@ func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 	assertMigrationIdentity(t, migrations[8], restExecutionMigrationVersion, restExecutionMigrationName)
 	assertMigrationIdentity(t, migrations[9], appTokenHistoryMigrationVersion, appTokenHistoryMigrationName)
 	assertMigrationIdentity(t, migrations[10], appTokenCleanupMigrationVersion, appTokenCleanupMigrationName)
+	assertMigrationIdentity(t, migrations[11], mcpSessionLifetimeMigrationVersion, mcpSessionLifetimeMigrationName)
 	if engineMigrationLockQuery != "SELECT pg_advisory_xact_lock($1)" {
 		t.Fatalf("Engine migrations must use a transaction-scoped advisory lock, got %q", engineMigrationLockQuery)
 	}

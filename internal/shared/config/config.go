@@ -20,9 +20,10 @@ type SandboxRateLimitConfig struct {
 }
 
 type SandboxConfig struct {
-	ToolCallTimeoutSeconds int                    `yaml:"tool_call_timeout_seconds"`
-	SessionMaxAgeSeconds   int                    `yaml:"session_max_age_seconds"`
-	RateLimit              SandboxRateLimitConfig `yaml:"rate_limit"`
+	ToolCallTimeoutSeconds int `yaml:"tool_call_timeout_seconds"`
+	// This existing setting bounds inactivity, not the lifetime of an actively used MCP session.
+	SessionMaxAgeSeconds int                    `yaml:"session_max_age_seconds"`
+	RateLimit            SandboxRateLimitConfig `yaml:"rate_limit"`
 }
 
 type CreditConfig struct {

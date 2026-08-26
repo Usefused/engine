@@ -42,13 +42,16 @@ type mcpSession struct {
 	cmd             *exec.Cmd
 	stdin           io.WriteCloser
 	cancel          context.CancelFunc
+	lifecycleCtx    context.Context
 	requestMu       sync.Mutex
 	pendingRequests map[string]struct{}
+	searchTelemetry map[string]*mcpSearchObservation
 	pendingMu       sync.Mutex
 	idleTimer       *time.Timer
 	responses       chan string
 	token           string
 	activityMu      sync.Mutex
+	ended           bool // Guarded by activityMu so late activity cannot rearm a retired session's timer.
 	lastActivityAt  time.Time
 
 	// fixture is this session's own operation catalog, built at connect time
