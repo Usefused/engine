@@ -197,13 +197,18 @@ func GraphQLProxyHandler(proxy Forwarder, s store.Store) http.HandlerFunc {
 	}
 }
 
+// forwardGraphQLRead keeps freshness decisions request-scoped so bypass responses cannot refill the shared cache.
 func forwardGraphQLRead(proxy Forwarder, cache *proxyResponseCache, w http.ResponseWriter, r *http.Request, body []byte, authDur time.Duration, start time.Time) {
 	cacheStart := time.Now()
-	cacheKey, cacheable := graphQLRequestCacheKey(r.Context(), body)
-	if entry, ok := cache.get(cacheKey); cacheable && ok {
-		timing := graphQLProxyTiming{auth: authDur, cache: time.Since(cacheStart), total: time.Since(start), hit: true}
-		writeGraphQLCacheHit(w, entry, timing)
-		return
+	cacheKey, cacheable := graphQLRequestCacheKey(r, body)
+	// A freshness request must not consult or update cache recency, even when an identical row exists.
+	if cacheable {
+		// Only an authorized cacheable read may return the existing short-lived response.
+		if entry, ok := cache.get(cacheKey); ok {
+			timing := graphQLProxyTiming{auth: authDur, cache: time.Since(cacheStart), total: time.Since(start), hit: true}
+			writeGraphQLCacheHit(w, entry, timing)
+			return
+		}
 	}
 
 	registryStart := time.Now()
@@ -212,17 +217,77 @@ func forwardGraphQLRead(proxy Forwarder, cache *proxyResponseCache, w http.Respo
 	timing := graphQLProxyTiming{auth: authDur, cache: time.Since(cacheStart), registry: time.Since(registryStart), total: time.Since(start)}
 	setGraphQLServerTiming(bw.Header(), timing)
 	bw.flushTo(w)
+	// Preserve the pre-forward decision so delayed bypass responses cannot overwrite a newer cached read.
 	if cacheable && bw.status == http.StatusOK {
 		cache.set(cacheKey, bw.status, bw.body.Bytes())
 	}
 }
 
-func graphQLRequestCacheKey(ctx context.Context, body []byte) (string, bool) {
-	actor, ok := accesscontrol.ActorFromContext(ctx)
+// graphQLRequestCacheKey applies freshness only after handler authorization and otherwise preserves actor partitioning.
+func graphQLRequestCacheKey(r *http.Request, body []byte) (string, bool) {
+	// Both directives request an authoritative recovery read, with no local cache insertion afterward.
+	if graphQLCacheBypassRequested(r.Header) {
+		recordGraphQLCacheBypass(r.Context())
+		return "", false
+	}
+	actor, ok := accesscontrol.ActorFromContext(r.Context())
+	// Responses without the authenticated partition identity must never become shared cache entries.
 	if !ok {
 		return "", false
 	}
 	return proxyCacheKey(body, actor), true
+}
+
+// graphQLCacheBypassRequested recognizes exact directive names across repeated header values.
+func graphQLCacheBypassRequested(header http.Header) bool {
+	for _, value := range header.Values("Cache-Control") {
+		for value != "" {
+			directive, remainder := nextGraphQLCacheDirective(value)
+			name, _, _ := strings.Cut(directive, "=")
+			name = strings.TrimSpace(name)
+			// Directive names are case-insensitive tokens; unrelated extensions and substrings remain cacheable.
+			if strings.EqualFold(name, "no-cache") || strings.EqualFold(name, "no-store") {
+				return true
+			}
+			value = remainder
+		}
+	}
+	return false
+}
+
+// nextGraphQLCacheDirective respects quoted extension values so their commas cannot impersonate directives.
+func nextGraphQLCacheDirective(value string) (string, string) {
+	quoted, escaped := false, false
+	for index, character := range value {
+		// Quoted-pair escaping protects the following quote or comma from delimiter interpretation.
+		if escaped {
+			escaped = false
+			continue
+		}
+		// Backslashes have escape semantics only within an HTTP quoted-string.
+		if quoted && character == '\\' {
+			escaped = true
+			continue
+		}
+		// Quote state distinguishes extension text from the surrounding directive list.
+		if character == '"' {
+			quoted = !quoted
+			continue
+		}
+		// Only an unquoted comma terminates the current directive.
+		if character == ',' && !quoted {
+			return value[:index], value[index+1:]
+		}
+	}
+	return value, ""
+}
+
+// recordGraphQLCacheBypass attaches only fixed policy facts to the caller's existing trace.
+func recordGraphQLCacheBypass(ctx context.Context) {
+	trace.SpanFromContext(ctx).AddEvent("engine.proxy.graphql_cache.bypass", trace.WithAttributes(
+		attribute.String("cache.kind", "registry_graphql_response"),
+		attribute.String("outcome", "bypassed"),
+	))
 }
 
 func writeGraphQLCacheHit(w http.ResponseWriter, entry proxyCacheEntry, timing graphQLProxyTiming) {

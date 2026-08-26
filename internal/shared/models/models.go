@@ -1153,11 +1153,14 @@ const (
 )
 
 type SDKContractBinding struct {
-	ServiceID        uuid.UUID `json:"service_id"`
-	Version          string    `json:"version"`
-	ServiceVersionID uuid.UUID `json:"service_version_id"`
-	Revision         int       `json:"revision"`
-	SourceHash       string    `json:"source_hash"`
+	ServiceID              uuid.UUID `json:"service_id"`
+	Version                string    `json:"version"`
+	ServiceVersionID       uuid.UUID `json:"service_version_id"`
+	Revision               int       `json:"revision"`
+	SourceHash             string    `json:"source_hash"`
+	GenerationContractHash string    `json:"generation_contract_hash,omitempty"`
+	// RuntimeContractHash fences local-only MCP plans whose snapshots predate archival generation pins.
+	RuntimeContractHash string `json:"runtime_contract_hash,omitempty"`
 }
 
 // SDKUnifiedDescriptorSchemaVersion identifies the credential-free generator

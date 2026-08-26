@@ -34,6 +34,8 @@ var registryGraphQLQueryPolicies = registryGraphQLPolicies(
 	},
 	[]accesscontrol.Permission{accesscontrol.PermissionCatalogueRead},
 	map[string][]accesscontrol.Permission{
+		// Editor reads share the import grant so an actor allowed to plan can load its owned baseline.
+		"serviceWebhookEditor": {accesscontrol.PermissionCatalogueImport},
 		"globalServiceAnalytics": {accesscontrol.PermissionCatalogueRead},
 		"__typename":             {},
 	},

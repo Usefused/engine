@@ -14,7 +14,7 @@ import (
 type graphQLAuthorizationResources struct {
 	store        store.Store
 	configStore  store.ConfigRepository
-	slugResolver sdkServiceSlugResolver
+	slugResolver ServiceSlugResolver
 	revisionSink authorizationRevisionSink
 }
 

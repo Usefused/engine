@@ -9,8 +9,8 @@
  * This makes an HTTP request to the Engine's own /mcp/call endpoint
  * (internal/engine/sandbox/mcp_shared_runtime.go) rather than the vendor
  * directly. Credentials are never read or held here: the request carries
- * only (operationId, params) plus the non-secret session ID used as a
- * lookup key, and the Go side resolves real credentials server-side from the
+ * only (operationId, params) plus the session bearer used as a
+ * lookup key with session authority, and the Go side resolves provider credentials server-side from the
  * session's validated token -- see sprint/lighter_mcp_runtime_design.md,
  * "Credentials never enter the process running the script."
  */
@@ -45,12 +45,16 @@ export function callClientOptionsFromEnv(): CallClientOptions {
  * things that make call() safe -- the vm allowlist, the call-count cap, the
  * per-invocation timeout -- all live in sandbox.ts instead of being tangled
  * into the transport code.
+ * The invocation signal aborts both fetch and body consumption; Engine observes
+ * the disconnected request through its existing execution context.
  */
 export async function remoteCall(
   options: CallClientOptions,
   operationId: string,
   params: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<unknown> {
+  signal?.throwIfAborted();
   const response = await fetch(`http://localhost:${options.enginePort}/mcp/call`, {
     method: "POST",
     headers: {
@@ -58,9 +62,11 @@ export async function remoteCall(
       Authorization: `Bearer ${options.sessionId}`,
     },
     body: JSON.stringify({ operation_id: operationId, params }),
+    signal,
   });
 
   const body = (await response.json()) as CallResponse;
+  // Provider and bridge errors preserve the existing reviewed response contract.
   if (!response.ok || body.error) {
     throw new Error(body.error ?? `call() failed with HTTP ${response.status}`);
   }

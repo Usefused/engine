@@ -678,6 +678,7 @@ func validateWebhookServiceIdentities(keys []string, services map[string]store.W
 	return serviceIDs, nil
 }
 
+// buildResolvedWebhookServices pins each inbound binding to an already-enabled local service version.
 func buildResolvedWebhookServices(doc webhookConfigDocument, keys []string, services map[string]store.WorkspaceService, allowedVersions map[uuid.UUID][]store.WorkspaceServiceVersion) (map[string]webhookResolvedService, error) {
 	resolved := make(map[string]webhookResolvedService, len(doc.Services))
 	for _, name := range keys {
@@ -686,7 +687,8 @@ func buildResolvedWebhookServices(doc webhookConfigDocument, keys []string, serv
 		// kind: webhook has no per-service version field (unlike SDK/MCP) --
 		// an empty version resolves to allowedVersions[0], the same
 		// "register against the first/default enabled version" contract.
-		version, err := resolveSDKVersionAllowed(activation, "", name, allowedVersions[activation.ServiceID])
+		version, err := resolveSDKVersionAllowed("", name, allowedVersions[activation.ServiceID])
+		// Missing enabled versions cannot be repaired by creating a partial inbound binding.
 		if err != nil {
 			return nil, err
 		}
@@ -698,18 +700,22 @@ func buildResolvedWebhookServices(doc webhookConfigDocument, keys []string, serv
 	return resolved, nil
 }
 
+// addResolvedWebhookSlugs reuses canonical identity resolution while retaining local activation as the admission boundary.
 func addResolvedWebhookSlugs(ctx context.Context, registryClient sandbox.RegistryClient, apiKey string, doc webhookConfigDocument, workspaceServices []store.WorkspaceService, services map[string]store.WorkspaceService) error {
 	missing := unresolvedWebhookServiceKeys(doc, services)
-	resolver, ok := registryClient.(sdkServiceSlugResolver)
+	resolver, ok := registryClient.(ServiceSlugResolver)
+	// Resolved names need no remote work; narrower clients cannot expand their existing activation map.
 	if len(missing) == 0 || !ok || resolver == nil {
 		return nil
 	}
 	resolved, err := resolver.ResolveServiceIDsBySlugs(ctx, missing, apiKey)
+	// Lookup failures must not be interpreted as absent or differently owned services.
 	if err != nil {
 		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to resolve service slugs"}
 	}
 	byID := workspaceServicesByID(workspaceServices)
 	for _, slug := range missing {
+		// A Registry identity is selectable only when the same service is already activated locally.
 		if activation, exists := byID[resolved[slug]]; exists {
 			services[slug] = activation
 		}

@@ -2,6 +2,9 @@ import { useState } from "react";
 import { Info, AlertTriangle, Search } from "lucide-react";
 import type { IntegrationObject, Service } from "~/lib/api";
 import { WebhookRow } from "~/components/EndpointRow";
+import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
+import { canEditWebhook } from "~/lib/webhook-editor-draft";
+import { WebhookDefinitionEditor } from "~/components/webhooks/WebhookDefinitionEditor";
 
 interface Webhook {
   id: string;
@@ -14,14 +17,25 @@ interface Webhook {
 interface WebhooksTabProps {
   srv: Service;
   setSelectedEndpoint: (ep: IntegrationObject | null) => void;
+  version: string;
+  onSaved: () => void;
 }
 
+// The catalogue stays read-only until an explicitly authorized owner opens its separate editor.
 export default function WebhooksTab({
   srv,
   setSelectedEndpoint,
+  version,
+  onSaved,
 }: WebhooksTabProps) {
 	const [showGuide, setShowGuide] = useState(false);
 	const [search, setSearch] = useState("");
+  const [editing, setEditing] = useState(false);
+  const { access } = useCurrentActorAccess();
+  const canEdit = canEditWebhook(srv.is_owner, access);
+
+  // A confirmed commit refreshes the same selected version, never workspace registration or secrets.
+  function saved() { setEditing(false); onSaved(); }
 
   const renderedWebhooks = (srv.webhooks as Webhook[] || []).filter((wh) => {
     const q = search.toLowerCase();
@@ -61,6 +75,7 @@ export default function WebhooksTab({
             Guide
           </button>
         </div>
+        {canEdit && <button type="button" onClick={() => setEditing(true)} className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700">Edit webhook</button>}
       </div>
 
       {showGuide && (
@@ -108,6 +123,7 @@ export default function WebhooksTab({
           </div>
         )}
       </div>
+      {editing && canEdit && <WebhookDefinitionEditor key={`${srv.id}:${version}`} service={srv} version={version} onClose={() => setEditing(false)} onSaved={saved} />}
     </div>
   );
 }

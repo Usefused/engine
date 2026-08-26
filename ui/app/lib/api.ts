@@ -583,19 +583,51 @@ export interface SpecificationImportPlan {
   is_new_service: boolean;
   target_version: string;
   action: "create_service" | "update_version" | "create_version";
+  target_type?: string;
+  destination_version?: string;
+  webhook_draft?: { source_content: string };
+  expected_target?: SpecificationImportTarget;
+  usage?: { workspaces: unknown[] };
+  diagnostics?: unknown;
   diff: {
     added: number;
     changed: number;
     removed: number;
     changed_names?: string[];
     removed_names?: string[];
+    settings_changed?: boolean;
   };
+}
+
+export interface SpecificationImportTarget {
+  service_id: string;
+  service_version_id: string;
+  revision: number;
+}
+
+export interface ServiceWebhookEditorSource extends SpecificationImportTarget {
+  source_content: string;
+}
+
+export interface SpecificationImportStatus {
+  status: string;
+  operation_id: string;
+  phase: string;
+  commit_state: string;
+  service_id?: string;
+  service_version_id?: string;
+  version?: string;
+  revision?: number;
+  code?: string;
+  recovery?: string;
+  guidance?: string;
 }
 
 export interface SpecificationImportApplyResult {
   status: "applied";
   plan_id: string;
   service_id: string;
+  service_version_id: string;
   slug?: string;
   is_new_service: boolean;
   action: SpecificationImportPlan["action"];
@@ -1231,11 +1263,12 @@ export const api = {
     getPricing: () => req<CreditsPricing>("/credits/pricing"),
   },
 
-  // graphql sends Registry documents and rejects GraphQL error envelopes.
-  graphql: <T>(query: string, variables?: Record<string, unknown>) =>
+  // GraphQL freshness uses the shared credentialed transport without permitting a different method or body.
+  graphql: <T>(query: string, variables?: Record<string, unknown>, options?: Pick<RequestInit, "headers" | "cache" | "signal">) =>
     req<GraphQLResponse<T>>(
       "/graphql",
       {
+        ...options,
         method: "POST",
         body: JSON.stringify({ query, variables }),
       }
@@ -1265,23 +1298,33 @@ export const api = {
   },
 
   integrations: {
+    // Builder and uploaded-source reviews share Registry's authoritative parser and receipt.
     planImport: (input: {
       name: string;
       slug?: string;
       version?: string;
       source_url?: string;
       source_content?: string;
+      target_type?: "endpoints" | "webhooks";
+      destination_version?: string;
+      expected_target?: SpecificationImportTarget;
+      include_webhook_draft?: boolean;
     }) =>
       req<SpecificationImportPlan>("/integrations/import/plan", {
         method: "POST",
         body: JSON.stringify(input),
       }),
 
+    // Only the reviewed source may cross the existing import mutation boundary.
     applyImport: (planId: string, reviewHash: string) =>
       req<SpecificationImportApplyResult>("/integrations/import/apply", {
         method: "POST",
         body: JSON.stringify({ plan_id: planId, review_hash: reviewHash }),
       }),
+
+    // An interrupted apply is resolved from its durable ledger before offering a retry.
+    importStatus: (operationID: string) =>
+      req<SpecificationImportStatus>(`/integrations/import/operations/${encodeURIComponent(operationID)}`),
 
     // startDiscovery creates the authoritative revision-one session snapshot.
     startDiscovery: (input: DiscoveryStartRequest) =>

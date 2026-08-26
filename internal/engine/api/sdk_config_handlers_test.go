@@ -30,18 +30,18 @@ import (
 // what to do about it. The new one names the fix directly.
 func TestValidateSDKServiceSelection_NotActivatedErrorMessage(t *testing.T) {
 	_, _, err := validateSDKServiceSelection(
-		context.Background(),
-		nil,
 		"stripe",
 		sdkConfigServiceDoc{Version: "2026-01-01", Operations: []string{"createCharge"}},
 		store.WorkspaceService{},
 		false,
 		nil,
 	)
+	// Missing local activation must be rejected independently of any remote client.
 	if err == nil {
 		t.Fatal("expected an error when the service isn't activated")
 	}
 	want := "service stripe is not activated in this workspace. Run 'fused-cli workspace service add stripe' to activate it."
+	// Recovery should name the existing activation command rather than imply an auth or Registry failure.
 	if err.Error() != want {
 		t.Errorf("expected message %q, got %q", want, err.Error())
 	}
@@ -730,7 +730,8 @@ func TestSDKConfigPlanHandler_RejectsUnregisteredWebhookAttachment(t *testing.T)
 	}
 }
 
-func TestSDKConfigPlanHandler_FailsClosedWithoutBatchVersionResolver(t *testing.T) {
+// TestSDKConfigPlanHandler_FailsClosedWithoutLocalContracts proves absent local admission stops before a live Registry fallback.
+func TestSDKConfigPlanHandler_FailsClosedWithoutLocalContracts(t *testing.T) {
 	serviceID := uuid.New()
 	serviceVersionID := uuid.New()
 	s := &workspaceTestStore{
@@ -748,8 +749,9 @@ func TestSDKConfigPlanHandler_FailsClosedWithoutBatchVersionResolver(t *testing.
 	req.Header.Set("X-API-Key", "fsk_test")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("expected fail-closed 400, got %d: %s", rr.Code, rr.Body.String())
+	// Infrastructure absence has its own stable code rather than masquerading as an invalid service selection.
+	if rr.Code != http.StatusServiceUnavailable || !strings.Contains(rr.Body.String(), "local_contract_store_unavailable") {
+		t.Fatalf("expected fail-closed local contract error, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 

@@ -60,16 +60,17 @@ test("keeps the Registry repo-boundary manifest synchronized when present", (t) 
   }
 });
 
+// The owner editor adds one complete, version-scoped read through Registry's existing GraphQL proxy.
 test("accounts for every current UI GraphQL call and document variant", () => {
   const scan = scanCurrentUI();
-  // Session history adds one scoped cursor query without a parallel analytics consumer.
-  assert.equal(scan.call_count, 84);
-  assert.equal(scan.calls.length, 84);
-  assert.equal(scan.document_count, 103);
-  assert.equal(scan.documents.length, 103);
-  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "registry").length, 18);
+  // The editor read neither introduces a new save transport nor loads a filtered event page.
+  assert.equal(scan.call_count, 85);
+  assert.equal(scan.calls.length, 85);
+  assert.equal(scan.document_count, 104);
+  assert.equal(scan.documents.length, 104);
+  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "registry").length, 19);
   assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "engine").length, 85);
-  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 103);
+  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 104);
 });
 
 test("resolves imported fragments and expands conditional and map variants", () => {

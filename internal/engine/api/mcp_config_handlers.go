@@ -205,24 +205,28 @@ func validateMCPAppRestrictions(doc sdkConfigDocument, kind string) error {
 // createMCPConfigPlan resolves service versions, operations, and auth policy
 // now so apply and later agent calls never need to infer provider setup.
 func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkPlanCall) (sdkPlanResult, error) {
-	current, err := configStore.GetConfigState(ctx, call.request.ConfigKey)
+	current, registryClient, err := loadMCPPlanningState(ctx, configStore, s, registryClient, call.request.ConfigKey)
+	// State and local snapshot authority must be available before another immutable version is planned.
 	if err != nil {
-		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to fetch config state"}
+		return sdkPlanResult{}, err
 	}
 	owner, bucket, err := resolveAppPlanOwnerAndBucket(
 		ctx, s, current, call.actor, call.request.OwnerTeamSlug, call.document.Bucket,
 	)
+	// Retained provider contracts do not bypass owner or credential-set authorization.
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
 	call.request.OwnerSubjectID, call.request.OwnerTeamID = owner.subjectID, owner.teamID
 	selections, services, resolved, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current), *bucket)
+	// MCP shares SDK selection/auth decisions rather than implementing an alternate planner.
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
 	bindings, err := resolveSDKContractBindings(ctx, registryClient, call.apiKey, resolved)
+	// Local snapshot identity fences MCP refreshes without requiring a generated-package pin.
 	if err != nil {
-		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "failed to bind service contract revisions"}
+		return sdkPlanResult{}, generationPinPlanError(err, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "failed to bind service contract revisions"})
 	}
 	selections = finalizeAppSelections(selections, bindings)
 
@@ -233,6 +237,7 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	}
 
 	desiredState, err := validateMCPDesiredState(stateDoc, current)
+	// A changed declaration cannot overwrite an immutable published MCP version.
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
@@ -248,9 +253,11 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	requiredPermissions, requiredCount, err := configPlanRequiredPermissionsWithBuckets(
 		ctx, s, current, serviceNamesFromResolved(resolved), []store.Bucket{*bucket}, call.document.Name,
 	)
+	// Required permissions remain attached to the plan regardless of contract storage location.
 	if err != nil {
 		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to compute required permissions"}
 	}
+	// Plan creation must not expose a family the actor cannot manage.
 	if err := preflightConfigOwnership(ctx, s, call.actor, owner, existingConfigResourceID(current), requiredPermissions); err != nil {
 		return sdkPlanResult{}, err
 	}
@@ -263,11 +270,27 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 		RequiredPermissions: requiredPermissions,
 		CreatedBy:           call.accountID, SupersedeExisting: true,
 	})
+	// Success means the complete plan and its exact pins are durable together.
 	if err != nil {
 		return sdkPlanResult{}, configPlanSaveHTTPError(err)
 	}
 	trace.SpanFromContext(ctx).SetAttributes(attribute.Int("required_permissions_count", requiredCount))
 	return sdkPlanResult{plan: plan, summary: map[string]any{"create_mcp": current == nil, "services": services}, notifications: collectSDKPlanNotifications(ctx, configStore, registryClient, call, resolved)}, nil
+}
+
+// loadMCPPlanningState admits local-only dependencies before inspecting the existing immutable configuration.
+func loadMCPPlanningState(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, configKey string) (*store.ConfigState, sandbox.RegistryClient, error) {
+	client, err := localSnapshotPlanningClient(s, registryClient, false)
+	// Missing snapshot support cannot fall back to Registry even when no prior MCP state exists.
+	if err != nil {
+		return nil, nil, err
+	}
+	current, err := configStore.GetConfigState(ctx, configKey)
+	// Store failure is distinct from a legitimately new immutable version.
+	if err != nil {
+		return nil, nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to fetch config state"}
+	}
+	return current, client, nil
 }
 
 // resolveAndCompileMCPUnifiedOperations freezes physical selections before invoking the unchanged SDK Unified compiler.
@@ -365,21 +388,26 @@ func applyResolvedMCPEndpointIDs(selections []models.SDKSelection, requests []st
 // executeMCPConfigApply persists only an Engine scope and one-time execution
 // token; MCP intentionally has no generated package or archive package.
 func executeMCPConfigApply(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkApplyCall) (mcpConfigApplyResult, error) {
-	plan, err := loadAuthorizedConfigPlanForApply(ctx, configStore, s, call, store.ConfigTypeMCP)
+	registryClient, err := localSnapshotPlanningClient(s, registryClient, false)
+	// An unavailable snapshot store must fail before any app mutation or live lookup.
 	if err != nil {
 		return mcpConfigApplyResult{}, err
 	}
+	plan, err := loadAuthorizedConfigPlanForApply(ctx, configStore, s, call, store.ConfigTypeMCP)
+	// Only the authorized exact plan may establish execution scope.
+	if err != nil {
+		return mcpConfigApplyResult{}, err
+	}
+	// Archived contracts cannot reactivate a version removed from this workspace.
 	if err := ensureSDKSelectionsStillAllowed(ctx, s, plan.ResolvedPayload); err != nil {
 		return mcpConfigApplyResult{}, err
 	}
-	bindings, err := sdkContractBindingsFromPayload(plan.ResolvedPayload)
-	if err != nil {
+	// Refreshes between plan and apply must invalidate the old immutable binding.
+	if err := ensureAppPayloadContractsCurrent(ctx, registryClient, call.apiKey, plan.ResolvedPayload); err != nil {
 		return mcpConfigApplyResult{}, err
 	}
-	if err := ensureSDKContractBindingsCurrent(ctx, registryClient, call.apiKey, bindings); err != nil {
-		return mcpConfigApplyResult{}, workspaceConfigHTTPError{status: http.StatusConflict, message: err.Error()}
-	}
 	doc, payload, err := decodeAppApplyPlan(ctx, configStore, s, plan, store.AppKindMCP.String())
+	// MCP-specific admission cannot be borrowed from an SDK payload.
 	if err != nil {
 		return mcpConfigApplyResult{}, err
 	}
@@ -398,14 +426,17 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 		unifiedDefinitionHash:          payload.UnifiedDefinitionHash,
 		unifiedCodegenDescriptorHash:   payload.UnifiedCodegenDescriptorHash,
 	})
+	// Runtime scope must be complete before publishing any family version.
 	if err != nil {
 		return mcpConfigApplyResult{}, err
 	}
+	// Retention changes no entitlement or family-count policy.
 	if err := enforceMCPFamilyLimit(ctx, s, call.accountID, doc.Name); err != nil {
 		return mcpConfigApplyResult{}, err
 	}
 
 	token, familyID, appID, _, err := applyAppConfigRuntime(ctx, configStore, s, call, plan, scope, doc.Bucket, "", "")
+	// A token is returned only after the canonical lifecycle transaction commits.
 	if err != nil {
 		return mcpConfigApplyResult{}, err
 	}

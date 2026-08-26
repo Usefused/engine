@@ -14,9 +14,10 @@ type mcpResultDelivery struct {
 	RetainedReads     int    `json:"retained_reads"`
 	UnavailableReads  int    `json:"unavailable_reads"`
 	OutputBudgetBytes int    `json:"output_budget_bytes"`
+	ExecutionOutcome  string `json:"execution_outcome"`
 }
 
-// recordMCPRuntimeResultDelivery audits retrieval and its effective byte budget without another provider receipt.
+// recordMCPRuntimeResultDelivery audits delivery and invocation termination without another provider receipt.
 func recordMCPRuntimeResultDelivery(ctx context.Context, sess *mcpSession, response string) {
 	observation, ok := mcpRuntimeResultDelivery(response)
 	// Older runtimes and non-execute results have no trusted delivery metadata.
@@ -35,6 +36,10 @@ func recordMCPRuntimeResultDelivery(ctx context.Context, sess *mcpSession, respo
 	// Older runtime responses omit this metadata; only validated explicit budgets are observable.
 	if observation.OutputBudgetBytes != 0 {
 		span.SetAttributes(attribute.Int("mcp.result.output_budget_bytes", observation.OutputBudgetBytes))
+	}
+	// Legacy runtimes omit termination status; never infer timeout from script-controlled error text.
+	if observation.ExecutionOutcome != "" {
+		span.SetAttributes(attribute.String("mcp.execute.outcome", observation.ExecutionOutcome))
 	}
 }
 
@@ -59,10 +64,25 @@ func mcpRuntimeResultDelivery(response string) (mcpResultDelivery, bool) {
 		return mcpResultDelivery{}, false
 	}
 	// Counters and policy bytes are bounded independently of any script or result content.
-	if !validMCPResultDeliveryCounts(value) {
+	if !validMCPResultDeliveryCounts(value) || !validMCPExecutionOutcome(value) {
 		return mcpResultDelivery{}, false
 	}
 	return value, true
+}
+
+// validMCPExecutionOutcome admits only host-owned states consistent with the delivery result.
+func validMCPExecutionOutcome(value mcpResultDelivery) bool {
+	// Absent status preserves compatibility with already-running older session processes.
+	switch value.ExecutionOutcome {
+	case "":
+		return true
+	case "completed":
+		return value.Delivery != "error"
+	case "failed", "timed_out", "cancelled":
+		return value.Delivery == "error"
+	default:
+		return false
+	}
 }
 
 // validMCPResultDeliveryCounts admits only runtime-owned counters and the compiled client-budget range.

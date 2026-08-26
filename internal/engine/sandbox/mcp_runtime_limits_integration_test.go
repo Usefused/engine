@@ -62,11 +62,17 @@ func TestMCPBundledRuntimeOutputLimits(t *testing.T) {
 // startMCPLimitRuntime reuses production process setup with an explicit synthetic bridge port.
 func startMCPLimitRuntime(t *testing.T, enginePort string) *mcpRuntimeLimitClient {
 	t.Helper()
+	return startMCPLimitRuntimeWithDeadline(t, enginePort, 10*time.Second)
+}
+
+// startMCPLimitRuntimeWithDeadline allows deadline tests to outlive the production execute budget without changing it.
+func startMCPLimitRuntimeWithDeadline(t *testing.T, enginePort string, timeout time.Duration) *mcpRuntimeLimitClient {
+	t.Helper()
 	// Go-only environments cannot execute Node integration tests, while release builds always include Node.
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("Node is required for bundled MCP runtime integration")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	t.Cleanup(cancel)
 	sessionID := uuid.NewString()
 	// The production helper creates this exact per-session temporary directory; cleanup owns only that directory.

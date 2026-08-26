@@ -200,10 +200,6 @@ type sdkProxyError struct {
 
 func (e sdkProxyError) Error() string { return "sdk generation proxy failed" }
 
-type sdkServiceSlugResolver interface {
-	ResolveServiceIDsBySlugs(ctx context.Context, slugs []string, apiKey string) (map[string]uuid.UUID, error)
-}
-
 // SDKConfigPlanHandler handles POST /sdk-config/plan.
 func SDKConfigPlanHandler(configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, defaultEngineURLs ...string) http.HandlerFunc {
 	defaultEngineURL := ""
@@ -637,6 +633,7 @@ func setSDKConfigSpanAttributes(span trace.Span, configKey string, doc sdkConfig
 	)
 }
 
+// createSDKConfigPlan binds generation to admitted local snapshots while retaining the shared app plan lifecycle.
 func createSDKConfigPlan(
 	ctx context.Context,
 	configStore store.ConfigRepository,
@@ -644,18 +641,26 @@ func createSDKConfigPlan(
 	registryClient sandbox.RegistryClient,
 	call sdkPlanCall,
 ) (sdkPlanResult, error) {
+	registryClient, err := localGenerationPlanningClient(s, registryClient)
+	// Planning cannot restore a live catalogue path when local snapshot authority is unavailable.
+	if err != nil {
+		return sdkPlanResult{}, err
+	}
 	currentState, appID, err := loadSDKPlanState(ctx, configStore, s, call)
+	// Existing app identity must resolve before a new plan can reuse its pins.
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
 	owner, bucket, err := resolveAppPlanOwnerAndBucket(
 		ctx, s, currentState, call.actor, call.request.OwnerTeamSlug, call.document.Bucket,
 	)
+	// Bucket and owner authorization remain independent of contract retention.
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
 	call.request.OwnerSubjectID, call.request.OwnerTeamID = owner.subjectID, owner.teamID
 	definition, err := resolveSDKPlanDefinition(ctx, configStore, s, registryClient, call, currentState, *bucket, appID)
+	// Incomplete pin, auth, or selection resolution cannot become a stored plan.
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
@@ -663,9 +668,11 @@ func createSDKConfigPlan(
 	requiredPermissions, requiredCount, err := configPlanRequiredPermissionsWithBuckets(
 		ctx, s, appPermissionState(currentState, appID), serviceNamesFromResolved(definition.resolvedServices), []store.Bucket{*bucket}, call.document.Name,
 	)
+	// A retained contract grants no additional control-plane permissions.
 	if err != nil {
 		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to compute required permissions"}
 	}
+	// Planning must prove the same ownership that apply will enforce again.
 	if err := preflightConfigOwnership(ctx, s, call.actor, owner, optionalAppID(appID), requiredPermissions); err != nil {
 		return sdkPlanResult{}, err
 	}
@@ -685,6 +692,7 @@ func createSDKConfigPlan(
 		CreatedBy:           call.accountID,
 		SupersedeExisting:   true,
 	})
+	// Only a durably stored plan can be returned as ready for apply.
 	if err != nil {
 		slog.ErrorContext(ctx, "SDKConfigPlanHandler: CreateConfigPlan error", slog.Any("error", err))
 		return sdkPlanResult{}, configPlanSaveHTTPError(err)
@@ -700,21 +708,25 @@ func createSDKConfigPlan(
 // resolveSDKPlanDefinition resolves sdk plan definition from immutable app scope before provider dispatch.
 func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkPlanCall, current *store.ConfigState, bucket store.Bucket, appID uuid.UUID) (sdkPlanDefinition, error) {
 	selections, services, resolvedServices, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current), bucket)
+	// Selection/auth admission must precede generation identity binding.
 	if err != nil {
 		return sdkPlanDefinition{}, err
 	}
 	bindings, err := resolveSDKContractBindings(ctx, registryClient, call.apiKey, resolvedServices)
+	// An unpinned snapshot can execute old apps, but cannot authorize a new generation plan.
 	if err != nil {
-		return sdkPlanDefinition{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "failed to bind service contract revisions"}
+		return sdkPlanDefinition{}, generationPinPlanError(err, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "failed to bind service contract revisions"})
 	}
 	selections = finalizeAppSelections(selections, bindings)
 	unifiedCompilation, err := compileSDKUnifiedOperations(ctx, s, call.document, selections, resolvedServices)
+	// Unified mappings must bind to those same local physical selections.
 	if err != nil {
 		return sdkPlanDefinition{}, err
 	}
 	desiredState, _ := json.Marshal(stateDoc)
 	unchanged := current != nil && sameCanonicalAppState(current.DesiredState, desiredState)
 	noop, err := sdkPlanIsNoop(ctx, s, call.accountID, appID, unchanged, unifiedCompilation)
+	// No-op requires complete local immutable-state verification, not source-text equality alone.
 	if err != nil {
 		return sdkPlanDefinition{}, err
 	}
@@ -824,6 +836,7 @@ func resolveSDKSelections(
 ) ([]models.SDKSelection, []map[string]any, []sdkResolvedService, sdkConfigDocument, error) {
 	doc = canonicalAppDocument(doc)
 	services, err := workspaceServicesByConfigKey(ctx, s, registryClient, apiKey, doc)
+	// Exact service identity must be known before any allowed-version membership is checked.
 	if err != nil {
 		return nil, nil, nil, sdkConfigDocument{}, err
 	}
@@ -831,6 +844,7 @@ func resolveSDKSelections(
 	// instead of one ListWorkspaceServiceVersions call per service inside the
 	// loop below -- see ensureSDKVersionAllowed's doc comment.
 	allowedVersions, err := s.ListWorkspaceServiceVersionsForServices(ctx, sdkReferencedServiceIDs(doc, services))
+	// A failed batch cannot be interpreted as permission to use any Registry version.
 	if err != nil {
 		return nil, nil, nil, sdkConfigDocument{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to list allowed versions"}
 	}
@@ -841,7 +855,8 @@ func resolveSDKSelections(
 	stateDoc.Services = make(map[string]sdkConfigServiceDoc, len(doc.Services))
 	for serviceName, serviceDoc := range doc.Services {
 		activation, ok := services[serviceName]
-		resolvedServiceVersionID, resolvedVersionStr, err := validateSDKServiceSelection(ctx, registryClient, serviceName, serviceDoc, activation, ok, allowedVersions)
+		resolvedServiceVersionID, resolvedVersionStr, err := validateSDKServiceSelection(serviceName, serviceDoc, activation, ok, allowedVersions)
+		// Every service must resolve before a multi-service selection can become plan authority.
 		if err != nil {
 			return nil, nil, nil, sdkConfigDocument{}, err
 		}
@@ -868,6 +883,7 @@ func resolveSDKSelections(
 		})
 		stateDoc.Services[activation.ServiceName] = serviceDoc
 	}
+	// Auth, credentials, attachments, and exact membership share one final admission boundary.
 	if err := validateResolvedSDKSelections(ctx, configStore, s, registryClient, apiKey, bucket, doc, resolved, selections); err != nil {
 		return nil, nil, nil, sdkConfigDocument{}, err
 	}
@@ -875,28 +891,40 @@ func resolveSDKSelections(
 	return selections, summary, resolved, stateDoc, nil
 }
 
-// validateResolvedSDKSelections rejects malformed resolved sdk selections before it can cross the Unified operation boundary.
+// sdkSelectionValidator keeps app selection admission separate from Registry transport capabilities.
+type sdkSelectionValidator interface {
+	ValidateSDKSelections(context.Context, []models.SDKSelection) error
+}
+
+// validateResolvedSDKSelections admits exact local scope before it can cross the shared app publication boundary.
 func validateResolvedSDKSelections(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, apiKey string, bucket store.Bucket, doc sdkConfigDocument, resolved []sdkResolvedService, selections []models.SDKSelection) error {
 	// public target uniqueness becomes execution authority only when Unified
 	// bindings can address those targets; ordinary SDK services keep legacy names.
 	if len(doc.UnifiedOperations) > 0 {
+		// Unified binding keys must identify one exact physical selection.
 		if err := validateUniqueUnifiedTargets(resolved); err != nil {
 			return err
 		}
 	}
+	// Auth decisions share the same admitted snapshots as operation membership.
 	if err := resolveAppAuthPolicies(ctx, registryClient, apiKey, resolved, selections); err != nil {
 		return err
 	}
+	// A valid contract does not imply the selected bucket has usable credentials.
 	if err := validateAppBucketReadiness(ctx, s, bucket, selections, appReadinessServiceNames(resolved)); err != nil {
 		return err
 	}
+	// Inbound scope must retain the reviewed attachment coverage alongside outbound scope.
 	if err := validateWebhookAttachmentCoverage(ctx, configStore, doc); err != nil {
 		return err
 	}
-	if registryClient == nil {
-		return nil
+	validator, ok := registryClient.(sdkSelectionValidator)
+	// Missing local admission must fail closed rather than restoring a live Registry fallback.
+	if !ok {
+		return localPlanningUnavailableError()
 	}
-	if err := registryClient.ValidateSDKSelections(ctx, selections); err != nil {
+	// SQL membership validation cannot silently narrow a requested operation or webhook set.
+	if err := validator.ValidateSDKSelections(ctx, selections); err != nil {
 		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
 	}
 	return nil
@@ -1036,8 +1064,8 @@ func resolveAppAuthPolicies(ctx context.Context, registryClient sandbox.Registry
 	contracts, err := fetcher.FetchServiceVersionExecutionAuthContracts(ctx, requests, apiKey)
 	// Dependency errors must never forward raw Registry messages or credentials.
 	if err != nil {
-		recordSDKAuthResolution(ctx, sdkAuthResolutionTelemetry{}, "registry_error")
-		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: "failed to resolve service auth policies"}
+		recordSDKAuthResolution(ctx, sdkAuthResolutionTelemetry{}, "contract_error")
+		return generationPinPlanError(err, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "failed to resolve service auth policies"})
 	}
 	bySelection := make(map[string]sandbox.ServiceVersionExecutionAuthContract, len(contracts))
 	// Index the existing batch without introducing per-service metadata lookups.
@@ -1705,6 +1733,7 @@ func pointerUUIDString(id *uuid.UUID) string {
 	return id.String()
 }
 
+// workspaceServicesByConfigKey resolves local names and qualified references through one authoritative identity map before selecting versions.
 func workspaceServicesByConfigKey(
 	ctx context.Context,
 	s store.Store,
@@ -1713,25 +1742,34 @@ func workspaceServicesByConfigKey(
 
 	doc sdkConfigDocument,
 ) (map[string]store.WorkspaceService, error) {
+	// Production planning filters exact requested identities in SQL before loading workspace metadata.
+	if local, ok := registryClient.(*generationPlanningClient); ok {
+		return local.workspaceServicesByKeys(ctx, s, doc)
+	}
 	workspaceServices, err := s.ListWorkspaceServices(ctx, nil)
+	// Activation lookup failures cannot be interpreted as an empty workspace.
 	if err != nil {
 		return nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to list workspace services"}
 	}
 	services := workspaceServicesByDisplayName(workspaceServices)
 	missing := unresolvedSDKServiceKeys(doc, services)
+	// Complete legacy display-name resolution needs no additional dependency call.
 	if len(missing) == 0 {
 		return services, nil
 	}
-	resolver, ok := registryClient.(sdkServiceSlugResolver)
+	resolver, ok := registryClient.(ServiceSlugResolver)
+	// Focused clients without slug support retain their pre-existing display-name behavior.
 	if !ok || resolver == nil {
 		return services, nil
 	}
 	resolved, err := resolver.ResolveServiceIDsBySlugs(ctx, missing, apiKey)
+	// Missing local provider proof keeps explicit refresh guidance instead of becoming a generic resolver failure.
 	if err != nil {
-		return nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to resolve service slugs"}
+		return nil, generationPinPlanError(err, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to resolve service slugs"})
 	}
 	byID := workspaceServicesByID(workspaceServices)
 	for _, slug := range missing {
+		// Only an identity both authorized by the resolver and activated locally can enter the plan.
 		if activation, ok := byID[resolved[slug]]; ok {
 			services[slug] = activation
 		}
@@ -1768,22 +1806,24 @@ func workspaceServicesByID(workspaceServices []store.WorkspaceService) map[uuid.
 	return out
 }
 
+// validateSDKServiceSelection checks already-loaded local activation and version membership without a network dependency.
 func validateSDKServiceSelection(
-	ctx context.Context,
-	registryClient sandbox.RegistryClient,
 	serviceName string,
 	serviceDoc sdkConfigServiceDoc,
 	activation store.WorkspaceService,
 	found bool,
 	allowedVersions map[uuid.UUID][]store.WorkspaceServiceVersion,
 ) (uuid.UUID, string, error) {
+	// An empty physical scope cannot create a meaningful service selection.
 	if len(serviceDoc.Operations) == 0 && len(serviceDoc.Webhooks) == 0 && !serviceDoc.SelectAll && !serviceDoc.WebhooksSelectAll {
 		return uuid.Nil, "", workspaceConfigHTTPError{status: http.StatusBadRequest, message: fmt.Sprintf("service %s requires at least one operation or webhook", serviceName)}
 	}
+	// Registry existence alone never authorizes a service that has not been activated locally.
 	if !found {
 		return uuid.Nil, "", workspaceConfigHTTPError{status: http.StatusBadRequest, message: fmt.Sprintf("service %s is not activated in this workspace. Run 'fused-cli workspace service add %s' to activate it.", serviceName, serviceName)}
 	}
-	resolvedVersion, err := resolveSDKVersionAllowed(activation, serviceDoc.Version, serviceName, allowedVersions[activation.ServiceID])
+	resolvedVersion, err := resolveSDKVersionAllowed(serviceDoc.Version, serviceName, allowedVersions[activation.ServiceID])
+	// Only an exact enabled version can be persisted into immutable app scope.
 	if err != nil {
 		return uuid.Nil, "", err
 	}
@@ -1796,11 +1836,11 @@ func validateSDKServiceSelection(
 // slice in, instead of this function querying the store itself once per
 // service (the shape resolveSDKSelections uses).
 func resolveSDKVersionAllowed(
-	activation store.WorkspaceService,
 	version string,
 	serviceName string,
 	allowedVersions []store.WorkspaceServiceVersion,
 ) (*store.WorkspaceServiceVersion, error) {
+	// A service with no locally enabled version cannot contribute executable scope.
 	if len(allowedVersions) == 0 {
 		return nil, workspaceConfigHTTPError{
 			status:  http.StatusBadRequest,
@@ -1808,10 +1848,12 @@ func resolveSDKVersionAllowed(
 		}
 	}
 	version = strings.TrimSpace(version)
+	// Omitted versions preserve the established first-enabled-version selection rule.
 	if version == "" {
 		return &allowedVersions[0], nil
 	}
 	for _, allowed := range allowedVersions {
+		// Explicit labels match exactly within the already-authorized local version set.
 		if allowed.Version == version {
 			return &allowed, nil
 		}
@@ -1932,16 +1974,23 @@ func executeSDKConfigApply(
 	registryClient sandbox.RegistryClient,
 	call sdkApplyCall,
 ) (sdkGenerationResult, error) {
+	registryClient, err := localGenerationPlanningClient(s, registryClient)
+	// Apply must prove local snapshot capability before reserving or generating any package.
+	if err != nil {
+		return sdkGenerationResult{}, err
+	}
 	// A plan has one deterministic Registry package. Serializing that identity
 	// prevents a losing first apply from deleting the app committed by a
 	// concurrent winner after both initially observed an empty local state.
 	unlockApp := sdkGenerationApplies.lock(stableAppIDForPlan(call.planID))
 	defer unlockApp()
 	plan, err := loadAuthorizedSDKAppPlanForApply(ctx, configStore, s, call)
+	// Only an authorized, exact stored plan can use its retained generation references.
 	if err != nil {
 		return sdkGenerationResult{}, err
 	}
 	lease, err := configStore.ReserveConfigPlanApply(ctx, call.planID, call.planRevision)
+	// Cross-process apply ownership must be established before Registry generation starts.
 	if err != nil {
 		return sdkGenerationResult{}, configPlanApplyReservationHTTPError(err)
 	}
@@ -1950,6 +1999,7 @@ func executeSDKConfigApply(
 	applyCtx, stopLease := workspaceApplyLeaseContextWithTimeout(ctx, configStore, call.planID, call.planRevision, lease.ID, sdkGenerationApplyTimeout+time.Minute)
 	defer stopLease()
 	call.applyLeaseID = lease.ID
+	// A semantic no-op remains entirely local and does not require Registry package work.
 	if payload, noop := noopSDKPayload(plan.ResolvedPayload); noop {
 		result, applyErr := applyNoopSDKPlan(applyCtx, configStore, s, call, plan, payload)
 		// No external system was contacted, so a failed local transaction is
@@ -1963,6 +2013,7 @@ func executeSDKConfigApply(
 	leaseGuard.releasable = false
 
 	plan, result, err := generateSDKForApply(applyCtx, configStore, s, proxy, registryClient, call)
+	// Failed generation may release its lease only when the external outcome is known.
 	if err != nil {
 		leaseGuard.releasable = sdkGenerationFailureReleasable(applyCtx, proxy, result)
 		return sdkGenerationResult{}, err
@@ -1974,19 +2025,22 @@ func executeSDKConfigApply(
 		attribute.String("sdk_generation_status", result.Status),
 		attribute.Int("scope_schema_version", result.ScopeSchemaVersion),
 	)
+	// Registry output must preserve the app identity and exact selected scope before publication.
 	if err := validateSDKGenerationResult(plan.ResolvedPayload, call, result.SDKGenerationResult); err != nil {
 		scopeSpan.SetStatus(codes.Error, err.Error())
 		scopeSpan.SetAttributes(attribute.String("outcome", "validation_failed"))
 		leaseGuard.releasable = compensateNewRegistryPackage(applyCtx, proxy, result)
 		return sdkGenerationResult{}, err
 	}
-	if err := revalidateSDKContractsAfterGeneration(applyCtx, registryClient, call.apiKey, plan.ResolvedPayload); err != nil {
+	// A snapshot refreshed during generation invalidates the plan instead of silently mixing revisions.
+	if err := ensureAppPayloadContractsCurrent(applyCtx, registryClient, call.apiKey, plan.ResolvedPayload); err != nil {
 		scopeSpan.SetStatus(codes.Error, "contract_revalidation_failed")
 		scopeSpan.SetAttributes(attribute.String("outcome", "contract_revalidation_failed"))
 		leaseGuard.releasable = compensateNewRegistryPackage(applyCtx, proxy, result)
 		return sdkGenerationResult{}, err
 	}
 	token, familyID, appID, _, err := applyGeneratedAppRuntime(applyCtx, configStore, s, call, plan, result)
+	// Failed local publication compensates only the package owned by this attempted plan.
 	if err != nil {
 		scopeSpan.SetStatus(codes.Error, err.Error())
 		scopeSpan.SetAttributes(attribute.String("outcome", "scope_persist_failed"))
@@ -2102,31 +2156,34 @@ func prepareSDKGenerationForApply(
 	call sdkApplyCall,
 ) (sdkGenerationApplyInput, error) {
 	plan, err := loadAuthorizedSDKAppPlanForApply(ctx, configStore, s, call)
+	// Stored authorization and plan revision remain authoritative on every retry.
 	if err != nil {
 		return sdkGenerationApplyInput{}, err
 	}
+	// Retention cannot re-enable a workspace version removed after planning.
 	if err := ensureSDKSelectionsStillAllowed(ctx, s, plan.ResolvedPayload); err != nil {
 		return sdkGenerationApplyInput{}, err
 	}
-	bindings, err := sdkContractBindingsFromPayload(plan.ResolvedPayload)
-	if err != nil {
+	// The planned object hash must still match the selected local runtime revision.
+	if err := ensureAppPayloadContractsCurrent(ctx, registryClient, call.apiKey, plan.ResolvedPayload); err != nil {
 		return sdkGenerationApplyInput{}, err
-	}
-	if err := ensureSDKContractBindingsCurrent(ctx, registryClient, call.apiKey, bindings); err != nil {
-		return sdkGenerationApplyInput{}, workspaceConfigHTTPError{status: http.StatusConflict, message: err.Error()}
 	}
 	doc, resolvedPayload, err := decodeAppApplyPlan(ctx, configStore, s, plan, store.AppKindSDK.String())
+	// SDK-specific plan decoding must succeed before reserving app identity.
 	if err != nil {
 		return sdkGenerationApplyInput{}, err
 	}
+	// Private mappings are Engine-owned immutable state, separate from archived provider contracts.
 	if err := normalizeAndValidateResolvedUnifiedPayload(&resolvedPayload); err != nil {
 		return sdkGenerationApplyInput{}, err
 	}
 	familyID, appID, existing, err := reserveSDKGenerationIdentity(ctx, s, call, plan, doc, resolvedPayload)
+	// Immutable app identity must be secured before sending any generation request.
 	if err != nil {
 		return sdkGenerationApplyInput{}, err
 	}
 	generationPayload, err := sdkGenerationPayloadForPlan(plan.ResolvedPayload, call, familyID, appID, plan.SourceHash)
+	// Registry receives only a fully encoded request carrying compact retained references.
 	if err != nil {
 		return sdkGenerationApplyInput{}, err
 	}
@@ -2476,13 +2533,16 @@ func sdkServiceVersionRefs(services []sdkResolvedService) []sandbox.ServiceVersi
 	return refs
 }
 
+// sdkBindingFromRevision retains Registry's immutable generation object beside the exact local runtime revision.
 func sdkBindingFromRevision(revision sandbox.ServiceVersionRevision) sdkContractBinding {
 	return sdkContractBinding{
-		ServiceID:        revision.ServiceID,
-		Version:          revision.Version,
-		ServiceVersionID: revision.ServiceVersionID,
-		Revision:         revision.Revision,
-		SourceHash:       revision.SourceHash,
+		ServiceID:              revision.ServiceID,
+		Version:                revision.Version,
+		ServiceVersionID:       revision.ServiceVersionID,
+		Revision:               revision.Revision,
+		SourceHash:             revision.SourceHash,
+		GenerationContractHash: revision.GenerationContractHash,
+		RuntimeContractHash:    revision.RuntimeContractHash,
 	}
 }
 
@@ -2530,26 +2590,31 @@ func ensureSDKContractBindingsCurrent(ctx context.Context, registryClient sandbo
 	return ensureSDKContractBindingsCurrentBatch(ctx, registryClient, apiKey, bindings)
 }
 
-// revalidateSDKContractsAfterGeneration rechecks every generated forward and rollback endpoint against the current Registry snapshot.
-func revalidateSDKContractsAfterGeneration(ctx context.Context, registryClient sandbox.RegistryClient, apiKey string, raw json.RawMessage) error {
+// ensureAppPayloadContractsCurrent shares the exact payload fence across MCP apply and SDK's before/after-generation checks.
+func ensureAppPayloadContractsCurrent(ctx context.Context, registryClient sandbox.RegistryClient, apiKey string, raw json.RawMessage) error {
 	bindings, err := sdkContractBindingsFromPayload(raw)
+	// Failed decoding cannot bypass an optimistic-concurrency check.
 	if err != nil {
 		return err
 	}
+	// Local runtime or retained generation identity must remain unchanged at each publication checkpoint.
 	if err := ensureSDKContractBindingsCurrent(ctx, registryClient, apiKey, bindings); err != nil {
-		return workspaceConfigHTTPError{status: http.StatusConflict, message: err.Error()}
+		return generationPinPlanError(err, workspaceConfigHTTPError{status: http.StatusConflict, message: err.Error()})
 	}
 	return nil
 }
 
+// ensureSDKContractBindingsCurrentBatch rejects a snapshot refresh before or during generation using the same local pin projection.
 func ensureSDKContractBindingsCurrentBatch(ctx context.Context, resolver sandbox.RegistryClient, apiKey string, bindings []sdkContractBinding) error {
 	current, err := resolver.FetchServiceVersionRevisions(ctx, sdkBindingVersionRefs(bindings), apiKey)
+	// Missing pins need explicit refresh guidance; unrelated dependency errors keep their bounded classification.
 	if err != nil {
-		return errors.New("contract_revision_unavailable")
+		return generationPinPlanError(err, errors.New("contract_revision_unavailable"))
 	}
 	currentByService := sdkRevisionMap(current)
 	for _, binding := range bindings {
 		revision, ok := currentByService[binding.ServiceID]
+		// All identity dimensions are required; matching only the public version label could admit replacement content.
 		if !ok || !sdkRevisionMatchesBinding(revision, binding) {
 			return errors.New("contract_revision_stale")
 		}
@@ -2573,10 +2638,13 @@ func sdkRevisionMap(revisions []sandbox.ServiceVersionRevision) map[uuid.UUID]sa
 	return out
 }
 
+// sdkRevisionMatchesBinding keeps the archive reference in the existing optimistic concurrency boundary.
 func sdkRevisionMatchesBinding(current sandbox.ServiceVersionRevision, binding sdkContractBinding) bool {
 	return current.ServiceVersionID == binding.ServiceVersionID &&
 		current.Revision == binding.Revision &&
-		current.SourceHash == binding.SourceHash
+		current.SourceHash == binding.SourceHash &&
+		current.GenerationContractHash == binding.GenerationContractHash &&
+		current.RuntimeContractHash == binding.RuntimeContractHash
 }
 
 func loadSDKPlanForApply(ctx context.Context, configStore store.ConfigRepository, call sdkApplyCall) (*store.ConfigPlan, *store.ConfigState, error) {

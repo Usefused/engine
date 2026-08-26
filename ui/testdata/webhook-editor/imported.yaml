@@ -1,0 +1,11 @@
+openapi: 3.1.0
+info:
+  title: Synthetic imported webhooks
+  version: v1
+webhooks:
+  imported.event:
+    post:
+      summary: Imported event
+      responses:
+        '200':
+          description: Accepted

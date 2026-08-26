@@ -31,11 +31,9 @@ type RegistryClient interface {
 	Handshake(ctx context.Context) (accountID string, workspaceName string, err error)
 	FetchServiceMetadata(ctx context.Context, serviceID uuid.UUID, version string) (*fusedobject.ServiceMetadata, error)
 	FetchEndpointByName(ctx context.Context, serviceID uuid.UUID, version string, endpointName string) (*fusedobject.Endpoint, error)
-	// FetchEndpointsByNames is FetchEndpointByName's batched sibling:
-	// validateSDKOperations (sdk_config_handlers.go) used to call
-	// FetchEndpointByName once per operation name when validating an SDK
-	// config's selected operations -- this resolves the whole operation
-	// list for a service in one Registry round trip instead.
+	// FetchEndpointsByNames is the batched contract reader underlying live
+	// connection-discovery lookups. SDK/MCP selection validation instead
+	// uses admitted Engine snapshots and never calls this Registry path.
 	FetchEndpointsByNames(ctx context.Context, serviceID uuid.UUID, serviceVersionID uuid.UUID, endpointNames []string) ([]fusedobject.Endpoint, error)
 	// FetchServiceOperations returns the full operation contract used by
 	// connection-profile validation; MCP discovery reads local snapshots.
@@ -56,7 +54,6 @@ type RegistryClient interface {
 	// tracked one row per service, so there's no shared "since" value that
 	// would make a batched call shape simpler.
 	FetchServiceChangelogSince(ctx context.Context, serviceID uuid.UUID, since time.Time, apiKey string) ([]models.ServiceChangelogEntry, error)
-	ValidateSDKSelections(ctx context.Context, selections []models.SDKSelection) error
 }
 
 type CatalogueService struct {
@@ -66,12 +63,14 @@ type CatalogueService struct {
 }
 
 type ServiceVersionRevision struct {
-	ServiceID        uuid.UUID `json:"service_id"`
-	Version          string    `json:"version"`
-	ServiceVersionID uuid.UUID `json:"service_version_id"`
-	Revision         int       `json:"revision"`
-	SourceHash       string    `json:"source_hash"`
-	IsPublic         bool      `json:"is_public"`
+	ServiceID              uuid.UUID `json:"service_id"`
+	Version                string    `json:"version"`
+	ServiceVersionID       uuid.UUID `json:"service_version_id"`
+	Revision               int       `json:"revision"`
+	SourceHash             string    `json:"source_hash"`
+	GenerationContractHash string    `json:"generation_contract_hash,omitempty"`
+	RuntimeContractHash    string    `json:"runtime_contract_hash,omitempty"`
+	IsPublic               bool      `json:"is_public"`
 }
 
 type ServiceVersionAuthConfigs struct {
@@ -925,65 +924,6 @@ func serviceSlugResolutionQuery(slugs []string) (string, map[string]interface{})
 	return query, map[string]interface{}{"inputs": inputs}
 }
 
-func (c *HTTPRegistryClient) ValidateSDKSelections(ctx context.Context, selections []models.SDKSelection) error {
-	if len(selections) == 0 {
-		return nil
-	}
-	inputs := make([]map[string]interface{}, len(selections))
-	for i, sel := range selections {
-		inputs[i] = map[string]interface{}{
-			"serviceId":        sel.ServiceID.String(),
-			"serviceVersionId": sel.ServiceVersionID.String(),
-			"operationNames":   sel.OperationNames,
-			"webhookNames":     sel.WebhookNames,
-		}
-	}
-	query := `
-		query ValidateSDKSelections($inputs: [SDKSelectionInput!]!) {
-			validateSDKSelections(inputs: $inputs)
-		}
-	`
-	reqBody := graphqlQuery{Query: query, Variables: map[string]interface{}{"inputs": inputs}}
-	b, err := json.Marshal(reqBody)
-	if err != nil {
-		return fmt.Errorf("ValidateSDKSelections: marshal query: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(b))
-	if err != nil {
-		return fmt.Errorf("ValidateSDKSelections: create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if c.licenseKey != "" {
-		req.Header.Set("X-API-Key", c.licenseKey)
-	}
-
-	resp, err := c.do(req)
-	if err != nil {
-		return fmt.Errorf("ValidateSDKSelections: request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("ValidateSDKSelections: registry responded with status %d", resp.StatusCode)
-	}
-
-	var res struct {
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-		Data struct {
-			ValidateSDKSelections bool `json:"validateSDKSelections"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		return fmt.Errorf("ValidateSDKSelections: decode response: %w", err)
-	}
-	if len(res.Errors) > 0 {
-		return errors.New(res.Errors[0].Message)
-	}
-	return nil
-}
-
 func decodeServiceSlugResolution(resp *http.Response, slugs []string) (map[string]uuid.UUID, error) {
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
@@ -1106,17 +1046,6 @@ func NewHTTPRegistryClient(endpoint, licenseKey string) *HTTPRegistryClient {
 	}
 }
 
-func (c *HTTPRegistryClient) FetchServiceVersionRevision(ctx context.Context, serviceID uuid.UUID, version, apiKey string) (ServiceVersionRevision, error) {
-	revisions, err := c.FetchServiceVersionRevisions(ctx, []ServiceVersionRef{{ServiceID: serviceID, Version: version}}, apiKey)
-	if err != nil {
-		return ServiceVersionRevision{}, err
-	}
-	if len(revisions) == 0 {
-		return ServiceVersionRevision{}, fmt.Errorf("service version revision not found")
-	}
-	return revisions[0], nil
-}
-
 func (c *HTTPRegistryClient) FetchServiceVersionRevisions(ctx context.Context, refs []ServiceVersionRef, apiKey string) ([]ServiceVersionRevision, error) {
 	if len(refs) == 0 {
 		return nil, nil
@@ -1195,56 +1124,6 @@ func (c *HTTPRegistryClient) FetchServiceVersionAuthConfigs(ctx context.Context,
 		return nil, fmt.Errorf("FetchServiceVersionAuthConfigs: graphql error: %s", decoded.Errors[0].Message)
 	}
 	return decoded.Data.Versions, nil
-}
-
-func (c *HTTPRegistryClient) FetchServiceVersionExecutionAuthContracts(ctx context.Context, selections []ServiceVersionExecutionAuthSelection, apiKey string) ([]ServiceVersionExecutionAuthContract, error) {
-	if len(selections) == 0 {
-		return nil, nil
-	}
-	reqBody := graphqlQuery{
-		Query: `query ServiceVersionExecutionAuthContracts($selections: [ServiceVersionExecutionAuthSelectionInput!]!) {
-			serviceVersionExecutionAuthContracts(selections: $selections) {
-				service_id version service_version_id operation_names select_all
-				auth_configs { name type scheme basic_password_mode oauth2_flows }
-				operations { name security_requirements { schemes { scheme scopes } } }
-			}
-		}`,
-		Variables: map[string]interface{}{"selections": selections},
-	}
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("FetchServiceVersionExecutionAuthContracts: marshal query: %w", err)
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("FetchServiceVersionExecutionAuthContracts: create request: %w", err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-API-Key", apiKey)
-	response, err := c.do(request)
-	if err != nil {
-		return nil, fmt.Errorf("FetchServiceVersionExecutionAuthContracts: request failed: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		return nil, fmt.Errorf("FetchServiceVersionExecutionAuthContracts: registry returned %d: %s", response.StatusCode, string(body))
-	}
-	var decoded struct {
-		Data struct {
-			Contracts []ServiceVersionExecutionAuthContract `json:"serviceVersionExecutionAuthContracts"`
-		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
-		return nil, fmt.Errorf("FetchServiceVersionExecutionAuthContracts: decode response: %w", err)
-	}
-	if len(decoded.Errors) > 0 {
-		return nil, fmt.Errorf("FetchServiceVersionExecutionAuthContracts: graphql error: %s", decoded.Errors[0].Message)
-	}
-	return decoded.Data.Contracts, nil
 }
 
 type ServiceVersionResolvedRef struct {

@@ -1281,7 +1281,7 @@ function useIntegrationDetailModel() {
     handleSearch, loadMoreSearchResults, handleClearSearch,
     notificationServiceRefs, markNotificationRead, dismissNotification,
     canUpdateNotifications,
-    serviceNotifications, loadWebhookData, handleDismiss,
+    serviceNotifications, loadWebhookData, loadData, handleDismiss,
     handleApply, handleToggleDriftWatch, handleTogglePublic,
     handleToggleVersionPublic, handleClearImportWarnings,
   };
@@ -1872,10 +1872,13 @@ function TabLoadingIndicator() {
   );
 }
 
+// Webhook authoring reuses the selected-version refresh without changing ordinary tab navigation.
 function ActiveTabContent({ srv }: { srv: Service }) {
-  const { activeTab, setSelectedEndpoint, canReadActivity } = useDetail();
+  const { activeTab, setSelectedEndpoint, canReadActivity, version, loadData } = useDetail();
+  // Operation browsing remains the default read-only view.
   if (activeTab === "endpoints") return <EndpointTabContent />;
-  if (activeTab === "webhooks") return <WebhooksTab srv={srv} setSelectedEndpoint={setSelectedEndpoint} />;
+  // Only the webhook tab exposes its click-gated owner editor; it never mounts from settings expansion.
+  if (activeTab === "webhooks") return <WebhooksTab srv={srv} version={selectedVersionName(version, srv.current_service_version)} onSaved={loadData} setSelectedEndpoint={setSelectedEndpoint} />;
   // A direct analytics URL must fall back to ordinary service content when
   // the Activity capability is absent; its data effects are also gated.
   return canReadActivity ? <ActivityTabContent /> : <EndpointTabContent />;

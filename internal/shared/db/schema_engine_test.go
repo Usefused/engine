@@ -67,8 +67,6 @@ func TestEngineSchemaDefinesStableInstallationIdentity(t *testing.T) {
 	}
 }
 
-// TestEngineSchemaDefinesVersionedMigrationLedger locks migration identities so
-// an already-recorded version can never silently acquire different queries.
 // TestEngineSchemaDefinesVersionedMigrationLedger keeps schema upgrades append-only and serialized across Engine processes.
 func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 	joined := strings.Join(engineSchemaQueries(), "\n")
@@ -78,15 +76,16 @@ func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 		"name       text NOT NULL UNIQUE",
 		"applied_at timestamptz NOT NULL DEFAULT NOW()",
 	} {
+		// Ledger shape is part of the concurrent-startup safety boundary.
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("expected Engine migration ledger containing %q", expected)
 		}
 	}
 
 	migrations := engineMigrations()
-	// Receipt hierarchy and session metadata require a forward migration, never a rewrite of applied schema.
-	if len(migrations) != 13 {
-		t.Fatalf("Engine migration count = %d, want 13", len(migrations))
+	// Generation pins require a forward migration, never a rewrite of applied schema.
+	if len(migrations) != 14 {
+		t.Fatalf("Engine migration count = %d, want 14", len(migrations))
 	}
 	assertMigrationIdentity(t, migrations[0], engineMigrationVersion, engineMigrationName)
 	assertMigrationIdentity(t, migrations[1], appTokenPolicyMigrationVersion, appTokenPolicyMigrationName)
@@ -101,6 +100,8 @@ func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 	assertMigrationIdentity(t, migrations[10], appTokenCleanupMigrationVersion, appTokenCleanupMigrationName)
 	assertMigrationIdentity(t, migrations[11], mcpSessionLifetimeMigrationVersion, mcpSessionLifetimeMigrationName)
 	assertMigrationIdentity(t, migrations[12], 13, "20260826_unified_receipts_session_metadata")
+	assertMigrationIdentity(t, migrations[13], 14, "20260826_generation_contract_pins")
+	// Every appended migration must preserve the transaction-scoped serialization primitive.
 	if engineMigrationLockQuery != "SELECT pg_advisory_xact_lock($1)" {
 		t.Fatalf("Engine migrations must use a transaction-scoped advisory lock, got %q", engineMigrationLockQuery)
 	}

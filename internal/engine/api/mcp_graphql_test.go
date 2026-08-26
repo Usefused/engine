@@ -150,19 +150,23 @@ func mountMCPGraphQLTestHandlerWithRegistry(t *testing.T, s store.Store, registr
 	return mountMCPGraphQLTestHandlerWithRegistryAndSink(t, s, registry, nil)
 }
 
+// mountMCPGraphQLTestHandlerWithRegistryAndSink mirrors the production shared service resolver and revision notification path.
 func mountMCPGraphQLTestHandlerWithRegistryAndSink(t *testing.T, s store.Store, registry sandbox.RegistryClient, revisionSink authorizationRevisionSink) http.HandlerFunc {
 	t.Helper()
 	configStore := &mockConfigStore{}
+	// Workspace fixtures retain the app scope needed by subsequent GraphQL authorization assertions.
 	if fixture, ok := s.(*workspaceTestStore); ok {
 		configStore.appRuntimeSink = func(scope store.AppRuntime) error {
 			return fixture.SaveAppRuntime(context.Background(), scope)
 		}
 	}
 	schema, err := newMCPGraphQLSchema(configStore, s, &mockVerifier{}, registry, []byte("12345678901234567890123456789012"))
+	// The fixture cannot exercise request authorization without a complete schema.
 	if err != nil {
 		t.Fatalf("newMCPGraphQLSchema() error = %v", err)
 	}
-	slugResolver, _ := registry.(sdkServiceSlugResolver)
+	// Use the same optional identity capability as the production route.
+	slugResolver, _ := registry.(ServiceSlugResolver)
 	return withGraphQLTestOwner(t, s, mcpGraphQLHandler(schema, graphQLAuthorizationResources{store: s, configStore: configStore, slugResolver: slugResolver, revisionSink: revisionSink}))
 }
 

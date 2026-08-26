@@ -60,6 +60,7 @@ describe("runExecute -- sandbox allowlist (security-critical)", () => {
 });
 
 describe("runExecute -- call() wiring", () => {
+  // The transport receives invocation-owned cancellation without exposing it to script params.
   it("routes call() through the injected transport, not a real network call", async () => {
     const callImpl = vi.fn().mockResolvedValue({ ok: true });
     const outcome = await runExecute(
@@ -70,7 +71,7 @@ describe("runExecute -- call() wiring", () => {
       callImpl,
     );
     expect(resultValue(outcome)).toEqual({ ok: true });
-    expect(callImpl).toHaveBeenCalledWith(testCallOptions, "test.op", { x: 1 });
+    expect(callImpl).toHaveBeenCalledWith(testCallOptions, "test.op", { x: 1 }, expect.any(AbortSignal));
   });
 
   it("enforces the call-count cap", async () => {

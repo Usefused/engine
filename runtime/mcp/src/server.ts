@@ -11,6 +11,7 @@ import {
 } from "./searchDocs.js";
 import { callClientOptionsFromEnv } from "./callClient.js";
 import { DEFAULT_EXECUTE_LIMITS, runExecute, SessionState } from "./sandbox.js";
+import { BASE64_MAX_BYTES } from "./base64.js";
 import { EXECUTE_INLINE_BYTES, EXECUTE_MIN_OUTPUT_BYTES, EXECUTE_VISIBLE_OUTPUT_POLICY } from "./resultBudget.js";
 import {
   DOCUMENTATION_OUTPUT_POLICY,
@@ -31,6 +32,8 @@ const INSTRUCTIONS = [
   "For search_docs detail with kind unified, call the exact operation_id with { input, targets, selectors?, pagination?, idempotencyKey? }; targets must include every declared dependency, selectors and pagination are keyed by public target, and the Engine generates an SDK-equivalent UUID when idempotencyKey is omitted.",
   "search_docs with no arguments returns a bounded schema-free catalogue window. A query ranks physical and Unified callables together and includes callable detail. An exact operationId remains available when its public ID is already known.",
   "An execute script's body should end with `return <value>` -- that value is what gets reported back as the tool result.",
+  `Each execute has a ${DEFAULT_EXECUTE_LIMITS.timeoutMs / 1000}-second total budget including provider calls, delays, and serialization, and at most ${DEFAULT_EXECUTE_LIMITS.maxCalls} calls. Await every operation. Use await sleep(ms) for a delay; setTimeout/clearTimeout are also supported with invocation-local numeric handles. Timeout, cancellation, failure, or return clears pending timers, aborts outstanding HTTP requests, and prevents further calls from that invocation. A provider action already accepted may still complete: a timeout does not mean rollback, and you must not automatically retry mutations. Long-running workflows should not be implemented as detached timers.`,
+  `Use decodeBase64(text) for UTF-8 base64 or base64url, encodeBase64(text, urlSafe=false) to encode UTF-8, and atob(text) for standard-base64 binary strings (not UTF-8 decoding). Helpers accept strings only and limit raw/decoded data to ${BASE64_MAX_BYTES} bytes per conversion; encoded input/output is bounded to base64 expansion. Malformed base64 or UTF-8 is rejected. Full Node Buffer, fetch, require, and process are unavailable. Decoding does not parse MIME/RFC822; return only needed fields under the normal output budget.`,
   "Small execute results are returned directly. Larger admitted results return MCP_RESULT_STORED with a session-local result_ref and an explicitly incomplete structural preview. Use execute with session.get(result_ref) to inspect keys, select fields, or slice arrays/strings; do not repeat the provider call to retrieve data. References expire after five minutes or earlier eviction/session closure. MCP_RESULT_UNAVAILABLE requires a deliberate recovery decision, never an automatic retry of the operation.",
   "For lists, project the needed fields in the first execute when they are already known. On overflow, read collections for exact array paths, counts, and immediate row fields. fields_complete=false or collections_complete=false means discovery omitted information; use session.get to inspect additional keys, never infer their absence. Return session.page(result_ref, {path, fields, offset}) directly to pack complete rows within the output budget. path is an RFC 6901 JSON Pointer (empty for a root array); fields are literal immediate keys, omitted for whole rows. Keep path/fields unchanged and use nextOffset for continuation; complete means no rows remain after the returned range, not that earlier pages are included. MCP_RESULT_ROW_TOO_LARGE requires narrower fields or session.get slicing, never a provider retry. outputBudgetBytes is an optional execute argument, default 16384, range 1024..65536; it limits UTF-8 JSON bytes, not tokens. Do not collect all pages into one oversized return value. For aggregates, compute inside execute and return only the answer.",
 ].join(" ");
@@ -113,7 +116,9 @@ function main(): void {
         "referencing an operationId for the first time. Large results return a session-local result_ref; " +
         "read collections metadata and return session.page(result_ref, {path, fields, offset}) for automatically sized pages, " +
         "or use session.get(result_ref) for other projections, without repeating provider calls. Unified operations use the exact documented ID " +
-        "and params { input, targets, selectors?, pagination?, idempotencyKey? }.",
+        "and params { input, targets, selectors?, pagination?, idempotencyKey? }. " +
+        `The total deadline is ${DEFAULT_EXECUTE_LIMITS.timeoutMs / 1000} seconds, including calls and sleep(ms). Timeout cancels pending work but does not undo accepted provider actions; never automatically retry mutations. ` +
+        "Use decodeBase64(text) for UTF-8 base64/base64url, encodeBase64(text, urlSafe=false), or atob(text) for binary strings; Node Buffer is unavailable.",
       inputSchema: {
         outputBudgetBytes: z.number().int().min(EXECUTE_MIN_OUTPUT_BYTES).max(EXECUTE_VISIBLE_OUTPUT_POLICY.maxBytes).optional()
           .describe(`Maximum UTF-8 JSON bytes returned by this execute and its pages; defaults to ${EXECUTE_INLINE_BYTES}. Not a token count. Keep the same budget on continuation calls.`),
@@ -128,11 +133,11 @@ function main(): void {
     },
     // The sandbox returns only trusted, already-bounded text, so the handler
     // cannot accidentally serialize user-controlled objects outside its deadline.
-    async (args) => {
-      const output = await runExecute(args.script, callOptions, session, { ...DEFAULT_EXECUTE_LIMITS, outputBudgetBytes: args.outputBudgetBytes });
+    async (args, extra) => {
+      const output = await runExecute(args.script, callOptions, session, { ...DEFAULT_EXECUTE_LIMITS, outputBudgetBytes: args.outputBudgetBytes }, undefined, extra.signal);
       return {
         content: [{ type: "text", text: output.text }], isError: output.isError,
-        _meta: { "com.usefused/execute": { delivery: output.delivery, output_budget_bytes: output.outputBudgetBytes, ...output.access } },
+        _meta: { "com.usefused/execute": { delivery: output.delivery, output_budget_bytes: output.outputBudgetBytes, execution_outcome: output.executionOutcome, ...output.access } },
       };
     },
   );

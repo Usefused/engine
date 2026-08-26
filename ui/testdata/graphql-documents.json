@@ -1,6 +1,6 @@
 {
-  "call_count": 84,
-  "document_count": 103,
+  "call_count": 85,
+  "document_count": 104,
   "calls": [
     {
       "endpoint": "engine",
@@ -11,6 +11,12 @@
     {
       "endpoint": "registry",
       "file": "app/components/SchemaViewer.tsx",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/components/webhooks/useWebhookEditor.ts",
       "call": 1,
       "document_count": 1
     },
@@ -521,6 +527,13 @@
       "call": 1,
       "variant": 1,
       "document": "\n    query GetServiceComponent($serviceId: String!, $name: String!, $version: String) {\n      getServiceComponent(serviceId: $serviceId, name: $name, version: $version) { id name schema }\n    }\n  "
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/components/webhooks/useWebhookEditor.ts",
+      "call": 1,
+      "variant": 1,
+      "document": "query ServiceWebhookEditor($service_id: String!, $version: String!) {\n  serviceWebhookEditor(service_id: $service_id, version: $version) {\n    service_id service_version_id revision source_content\n  }\n}"
     },
     {
       "endpoint": "registry",

@@ -80,10 +80,12 @@ func MountMCPGraphQLRoute(mux interface {
 	Post(pattern string, handlerFn http.HandlerFunc)
 }, configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient, masterKey []byte, revisionSinks ...authorizationRevisionSink) error {
 	schema, err := newMCPGraphQLSchema(configStore, s, verifier, registryClient, masterKey)
+	// Do not mount a route whose authorization policy schema could not be constructed.
 	if err != nil {
 		return fmt.Errorf("build mcp graphql schema: %w", err)
 	}
-	slugResolver, _ := registryClient.(sdkServiceSlugResolver)
+	// GraphQL preflight shares the canonical service-reference capability with workspace and webhook flows.
+	slugResolver, _ := registryClient.(ServiceSlugResolver)
 	resources := graphQLAuthorizationResources{store: s, configStore: configStore, slugResolver: slugResolver, revisionSink: firstAuthorizationRevisionSink(revisionSinks)}
 	mux.Post("/engine/graphql", mcpGraphQLHandler(schema, resources))
 	return nil

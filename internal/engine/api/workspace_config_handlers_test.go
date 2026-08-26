@@ -2556,10 +2556,6 @@ type serviceVisibilityUpdate struct {
 	Public    bool
 }
 
-func (m *mockRegistryClient) FetchServiceVersionRevision(_ context.Context, serviceID uuid.UUID, version, _ string) (sandbox.ServiceVersionRevision, error) {
-	return m.contractRevisions[serviceID.String()+"|"+version], nil
-}
-
 func (m *mockRegistryClient) VerifyServiceExists(_ context.Context, serviceID uuid.UUID, _ string) (string, string, string, uuid.UUID, error) {
 	if m.name != "" {
 		return m.name, "test/test-service", "2026-07-01", uuid.New(), nil

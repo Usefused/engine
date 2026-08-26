@@ -50,10 +50,6 @@ func (m *mockRegistryClient) FetchServiceOperations(context.Context, uuid.UUID, 
 	return nil, nil
 }
 
-func (m *mockRegistryClient) ValidateSDKSelections(ctx context.Context, selections []models.SDKSelection) error {
-	return nil
-}
-
 func (m *mockRegistryClient) FetchServiceVersionRevisions(ctx context.Context, refs []ServiceVersionRef, apiKey string) ([]ServiceVersionRevision, error) {
 	return nil, nil
 }

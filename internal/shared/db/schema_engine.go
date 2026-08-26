@@ -140,6 +140,7 @@ func engineMigrations() []engineMigration {
 		{Version: appTokenCleanupMigrationVersion, Name: appTokenCleanupMigrationName, Queries: appTokenCleanupMigrationQueries()},
 		{Version: mcpSessionLifetimeMigrationVersion, Name: mcpSessionLifetimeMigrationName, Queries: mcpSessionLifetimeMigrationQueries()},
 		{Version: 13, Name: "20260826_unified_receipts_session_metadata", Queries: activityReceiptMigrationQueries()},
+		{Version: 14, Name: "20260826_generation_contract_pins", Queries: generationContractPinMigrationQueries()},
 	}
 }
 
@@ -868,6 +869,7 @@ func engineSchemaQueries() []string {
 			required_capabilities text[] NOT NULL,
 			revision           integer NOT NULL DEFAULT 0,
 			source_hash        text NOT NULL DEFAULT '',
+			generation_contract_hash text NOT NULL DEFAULT '' CHECK (generation_contract_hash = '' OR generation_contract_hash ~ '^sha256:[0-9a-f]{64}$'),
 			contract_hash      text NOT NULL,
 			contract_status    text NOT NULL DEFAULT 'active'
 				CHECK (contract_status IN ('active', 'stale', 'refresh_failed')),

@@ -4,6 +4,8 @@ import { SerializedJsonOutput, serializeBoundedJson } from "./outputLimits.js";
 import { DeliveredResult, EXECUTE_ERROR_OUTPUT_POLICY, isResultReference, RetainedResults } from "./retainedResults.js";
 import { executeOutputBudget, EXECUTE_INLINE_BYTES } from "./resultBudget.js";
 import { pageResult, ResultPageOptions } from "./resultPaging.js";
+import { Invocation, ExecutionOutcome } from "./invocation.js";
+import { boundedAtob, decodeBase64, encodeBase64 } from "./base64.js";
 
 export interface ExecuteLimits {
   timeoutMs: number;
@@ -20,6 +22,7 @@ export const DEFAULT_EXECUTE_LIMITS: ExecuteLimits = {
 export interface ExecuteOutcome extends DeliveredResult {
   access: ResultAccess;
   outputBudgetBytes: number;
+  executionOutcome: ExecutionOutcome;
 }
 
 /** Tracks only bounded retrieval counts; references and result values never become audit metadata. */
@@ -95,12 +98,13 @@ export type CallImpl = (
   options: CallClientOptions,
   operationId: string,
   params: Record<string, unknown>,
+  signal?: AbortSignal,
 ) => Promise<unknown>;
 
 /**
  * runExecute runs one untrusted script in a fresh vm realm and returns an
- * admitted JSON result or bounded error text. This is the security-critical function in this
- * package -- read the allowlist comment below before changing anything here.
+ * admitted JSON result or bounded error text. Invocation-owned capabilities are revoked
+ * on every exit; Promise timeout alone cannot stop a suspended script's later side effects.
  */
 export async function runExecute(
   script: string,
@@ -108,31 +112,39 @@ export async function runExecute(
   session: SessionState,
   limits: ExecuteLimits = DEFAULT_EXECUTE_LIMITS,
   callImpl: CallImpl = remoteCall,
+  signal?: AbortSignal,
 ): Promise<ExecuteOutcome> {
-  const deadline = Date.now() + limits.timeoutMs;
-  const boundCall = buildBoundCall(callOptions, limits.maxCalls, callImpl);
+  const invocation = new Invocation(limits.timeoutMs, signal);
+  const deadline = invocation.deadline;
+  const boundCall = buildBoundCall(callOptions, limits.maxCalls, callImpl, invocation);
   const access: ResultAccess = { retained_reads: 0, unavailable_reads: 0 };
   const wrapped = `(async () => {\n${script}\n})()`;
   let outputBudget = EXECUTE_INLINE_BYTES;
 
   try {
+    invocation.assertActive();
     outputBudget = executeOutputBudget(limits.outputBudgetBytes);
-    const context = vm.createContext(buildSandboxGlobals(boundCall, session, access, outputBudget));
+    const context = vm.createContext(buildSandboxGlobals(boundCall, session, access, outputBudget, invocation));
     const compiled = new vm.Script(wrapped, { filename: "execute.ts" });
     // vm's own `timeout` guards one specific failure mode: a synchronous,
     // CPU-bound infinite loop (e.g. `while (true) {}`) in the script's
     // pre-first-await code, which would otherwise block this single-
     // threaded process's event loop entirely -- including the ability to
-    // run the setTimeout callback that withWallClockTimeout below relies
-    // on. It does NOT bound anything async (see that function's comment for
-    // why a second, independent mechanism is required).
-    const resultPromise = compiled.runInContext(context, { timeout: limits.timeoutMs }) as Promise<unknown>;
-    const result = await withWallClockTimeout(resultPromise, limits.timeoutMs);
-    // Retention and previewing stay under the same deadline as user-defined serialization hooks.
+    // run the invocation watchdog callback that cancellation relies
+    // on. Async capabilities therefore share a separate cancellable invocation.
+    const resultPromise = compiled.runInContext(context, { timeout: Math.max(1, deadline - Date.now()) }) as Promise<unknown>;
+    const result = await invocation.wait(resultPromise);
+    invocation.assertActive();
+    // Serialization is synchronous and shares the deadline; finally revokes authority before yielding again.
     const output = withinSerializationDeadline(() => session.deliver(result ?? null, outputBudget), deadline);
-    return { ...output, access, outputBudgetBytes: outputBudget };
+    invocation.assertActive();
+    return { ...output, access, outputBudgetBytes: outputBudget, executionOutcome: invocation.outcome(output.isError) };
   } catch (err) {
-    return { ...serializeExecuteError(err, deadline, limits.timeoutMs, outputBudget), delivery: "error", access, outputBudgetBytes: outputBudget };
+    // Error formatting must not leave callbacks or provider requests running in the background.
+    invocation.close();
+    return { ...serializeExecuteError(err, deadline, limits.timeoutMs, outputBudget), delivery: "error", access, outputBudgetBytes: outputBudget, executionOutcome: invocation.outcome(true) };
+  } finally {
+    invocation.close();
   }
 }
 
@@ -193,19 +205,26 @@ function describeError(err: unknown): string {
 }
 
 /**
- * buildBoundCall wraps remoteCall with the hard call-count cap. The counter
- * lives in this closure, in trusted host code the sandboxed script has no
- * reference to and can't reset or read -- the cap can't be bypassed by
- * anything the script does, only by changing this function.
+ * buildBoundCall checks lifetime before dispatch and after resolution so even an
+ * abort-ignoring transport cannot release a stale response into another operation.
  */
-function buildBoundCall(callOptions: CallClientOptions, maxCalls: number, callImpl: CallImpl) {
+function buildBoundCall(callOptions: CallClientOptions, maxCalls: number, callImpl: CallImpl, invocation: Invocation) {
   let callCount = 0;
-  return async (operationId: string, params: Record<string, unknown> = {}): Promise<unknown> => {
-    callCount++;
-    if (callCount > maxCalls) {
-      throw new Error(`call() limit exceeded (max ${maxCalls} per execute invocation)`);
-    }
-    return callImpl(callOptions, operationId, params);
+  // Observe fire-and-forget rejections as well; callers still receive the original rejected promise.
+  return (operationId: string, params: Record<string, unknown> = {}): Promise<unknown> => {
+    // Keep validation inside a promise so call() consistently supports await/catch.
+    const pending = (async () => {
+      invocation.assertActive();
+      callCount++;
+      // Only admitted calls consume transport resources, regardless of script error handling.
+      if (callCount > maxCalls) throw new Error(`call() limit exceeded (max ${maxCalls} per execute invocation)`);
+      const result = await invocation.wait(callImpl(callOptions, operationId, params, invocation.signal));
+      invocation.assertActive();
+      return result;
+    })();
+    // Cleanup may abort a request the script deliberately did not await.
+    void pending.catch(() => {});
+    return pending;
   };
 }
 
@@ -214,10 +233,11 @@ function buildBoundCall(callOptions: CallClientOptions, maxCalls: number, callIm
  * copy of the outer global scope with a few dangerous things deleted. That
  * distinction matters: an allowlist can't accidentally leak a capability
  * that gets added to Node's globals later; a denylist can. Only `call`,
- * `session`, `console`, `setTimeout`, and `clearTimeout` are placed here --
+ * `session`, `console`, managed delays, and bounded decoding helpers are placed here --
  * everything else the script sees (JSON, Math, Array, Object, Promise,
  * Function, ...) is inherent to any JS realm and was never something this
- * function granted or could withhold. Nothing with an I/O path (fetch,
+ * function granted or could withhold. Timers are invocation-owned and decoding
+ * helpers return bounded strings, never Node Buffer objects. Nothing with an I/O path (fetch,
  * process, require, http, net, fs, child_process, dns) is ever added.
  *
  * Caveat, stated plainly rather than implied: this allowlist reduces the
@@ -228,8 +248,9 @@ function buildBoundCall(callOptions: CallClientOptions, maxCalls: number, callIm
  * script could in principle pivot through that chain (this is the
  * well-documented reason `vm` escapes exist and don't require
  * sophistication to find). The real boundary is the OS process (one per
- * session, never pooled) and the fact that this process never holds
- * credential material at all, so even a full pivot yields nothing to steal.
+ * session, never pooled). Provider credentials stay in Engine, but session
+ * authority and provider responses are still sensitive; process separation
+ * and this allowlist alone must not be described as complete OS isolation.
  * See sprint/lighter_mcp_runtime_design.md, Sandbox and Isolation Rules.
  */
 function buildSandboxGlobals(
@@ -237,47 +258,24 @@ function buildSandboxGlobals(
   session: SessionState,
   access: ResultAccess,
   maxBytes: number,
+  invocation: Invocation,
 ): Record<string, unknown> {
   return {
     call: boundCall,
     session: {
       // Invocation-local counts avoid cross-call attribution when several tools run concurrently.
-      get: (key: string) => session.get(key, access),
+      get: (key: string) => { invocation.assertActive(); return session.get(key, access); },
       // Writes retain the existing explicit-state API but cannot replace runtime snapshots.
-      set: (key: string, value: unknown) => session.set(key, value),
+      set: (key: string, value: unknown) => { invocation.assertActive(); session.set(key, value); },
       // Paging shares this invocation's output budget and retained-read audit without any provider transport.
-      page: (key: string, options?: ResultPageOptions) => session.page(key, options, maxBytes, access),
+      page: (key: string, options?: ResultPageOptions) => { invocation.assertActive(); return session.page(key, options, maxBytes, access); },
     },
     console,
-    setTimeout,
-    clearTimeout,
+    setTimeout: invocation.setTimeout.bind(invocation),
+    clearTimeout: invocation.clearTimeout.bind(invocation),
+    sleep: invocation.sleep.bind(invocation),
+    decodeBase64,
+    encodeBase64,
+    atob: boundedAtob,
   };
-}
-
-/**
- * withWallClockTimeout bounds the *async* portion of a script's execution --
- * an await'd call() that hangs, or a loop of many calls that individually
- * return but never finish as a whole. vm's own `timeout` option (see
- * runExecute) cannot catch this: it only measures synchronous execution
- * time, and once the script is suspended at an `await`, control has already
- * returned to the event loop. This function is what actually enforces the
- * wall-clock budget the design doc calls for.
- */
-function withWallClockTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`execute timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (err) => {
-        clearTimeout(timer);
-        reject(err);
-      },
-    );
-  });
 }

@@ -3,6 +3,7 @@ package fusedobject
 import (
 	"github.com/Usefused/engine/internal/shared/catalogcontract"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/schemaref"
 	"github.com/google/uuid"
 )
@@ -18,8 +19,10 @@ type ServiceMetadata struct {
 	ServiceVersionID          uuid.UUID `json:"service_version_id"`
 	Name                      string    `json:"name"`
 	Description               string    `json:"description"`
-	BaseURL                   string    `json:"base_url"`
-	Servers                   Servers   `json:"servers,omitempty"`
+	// Provider is pinned catalogue identity, allowing qualified local selection after Registry deletion.
+	Provider *models.ServiceProviderIdentity `json:"provider,omitempty"`
+	BaseURL  string                          `json:"base_url"`
+	Servers  Servers                         `json:"servers,omitempty"`
 	// ServerVariables are workspace-local execution inputs and must never be
 	// persisted in Registry snapshots or emitted through runtime telemetry.
 	ServerVariables map[string]string `json:"-"`

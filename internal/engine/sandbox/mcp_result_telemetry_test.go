@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -25,6 +26,55 @@ func TestMCPResultDeliveryAuditedOnce(t *testing.T) {
 	// Exact allowlisting catches private values and unintended new dimensions together.
 	if !reflect.DeepEqual(mcpSearchTestAttributes(spans[0]), want) {
 		t.Fatal("delivery telemetry differs from its privacy allowlist")
+	}
+}
+
+// TestMCPExecutionOutcomeTelemetry admits bounded host outcomes without trusting error text or decoded content.
+func TestMCPExecutionOutcomeTelemetry(t *testing.T) {
+	for _, outcome := range []string{"completed", "failed", "timed_out", "cancelled"} {
+		// Every outcome uses the same completion/audit path and its own isolated exporter.
+		t.Run(outcome, func(t *testing.T) {
+			exporter := installStreamableTestTracer(t)
+			sess := &mcpSession{transport: "streamable_http", pendingRequests: map[string]struct{}{"1": {}}}
+			delivery := "error"
+			// Only successful completion can produce an ordinary inline result.
+			if outcome == "completed" {
+				delivery = "inline"
+			}
+			response := fmt.Sprintf(`{"result":{"_meta":{"com.usefused/execute":{"delivery":%q,"execution_outcome":%q,"secret":"decoded-private-text"}},"content":[{"type":"text","text":"private script and decoded provider data"}]}}`, delivery, outcome)
+			completeMCPToolCall(sess, "1", response, "")
+			completeMCPToolCall(sess, "1", response, "")
+			spans := exporter.GetSpans()
+			// Duplicate completion must not create another execution observation.
+			if len(spans) != 1 {
+				t.Fatalf("delivery span count = %d", len(spans))
+			}
+			want := map[string]string{
+				"actor.type": "agent", "mcp.transport": "streamable_http", "mcp.result.delivery": delivery,
+				"mcp.result.retained_reads": "0", "mcp.result.unavailable_reads": "0", "mcp.execute.outcome": outcome,
+			}
+			// Exact allowlisting excludes decoded data, caller reasons, and arbitrary runtime metadata.
+			if !reflect.DeepEqual(mcpSearchTestAttributes(spans[0]), want) {
+				t.Fatal("execution outcome telemetry differs from its privacy allowlist")
+			}
+		})
+	}
+}
+
+// TestMCPExecutionOutcomeAdmission rejects invented and contradictory states, while preserving legacy metadata.
+func TestMCPExecutionOutcomeAdmission(t *testing.T) {
+	for _, metadata := range []string{
+		`"delivery":"error","execution_outcome":"private"`,
+		`"delivery":"inline","execution_outcome":"timed_out"`,
+		`"delivery":"stored","execution_outcome":"cancelled"`,
+		`"delivery":"error","execution_outcome":"completed"`,
+		`"delivery":"error","execution_outcome":42`,
+	} {
+		response := `{"result":{"_meta":{"com.usefused/execute":{` + metadata + `}}}}`
+		// Contradictions cannot acquire a trusted OTEL state from an error's text.
+		if _, ok := mcpRuntimeResultDelivery(response); ok {
+			t.Fatal("invalid execution outcome admitted")
+		}
 	}
 }
 

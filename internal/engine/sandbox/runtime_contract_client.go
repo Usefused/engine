@@ -11,6 +11,7 @@ import (
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"github.com/Usefused/engine/internal/shared/retrypolicy"
 	"github.com/google/uuid"
@@ -160,6 +161,9 @@ const runtimeContractsQuery = `
 			required_capabilities
 			service_id
 			service_version_id
+			revision
+			source_hash
+			generation_contract_hash
 			schema_definitions
 			version
 			service {` + runtimeContractServiceFields + `}
@@ -173,6 +177,7 @@ const runtimeContractsQuery = `
 
 const runtimeContractServiceFields = `
 	id
+	provider { name handle }
 	current_service_version
 	name
 	description
@@ -347,13 +352,16 @@ type runtimeContractsGraphQLResponse struct {
 
 type runtimeContractBatchItem struct {
 	fusedobject.ExecutionContractEnvelope
-	SchemaDefinitions map[string]fusedobject.SchemaContract `json:"schema_definitions"`
-	ServiceID         uuid.UUID                             `json:"service_id"`
-	ServiceVersionID  uuid.UUID                             `json:"service_version_id"`
-	Version           string                                `json:"version"`
-	Service           *runtimeContractService               `json:"service"`
-	Operations        []fusedobject.Endpoint                `json:"operations"`
-	Webhooks          []fusedobject.Webhook                 `json:"webhooks"`
+	Revision               int                                   `json:"revision,omitempty"`
+	SourceHash             string                                `json:"source_hash,omitempty"`
+	GenerationContractHash string                                `json:"generation_contract_hash,omitempty"`
+	SchemaDefinitions      map[string]fusedobject.SchemaContract `json:"schema_definitions"`
+	ServiceID              uuid.UUID                             `json:"service_id"`
+	ServiceVersionID       uuid.UUID                             `json:"service_version_id"`
+	Version                string                                `json:"version"`
+	Service                *runtimeContractService               `json:"service"`
+	Operations             []fusedobject.Endpoint                `json:"operations"`
+	Webhooks               []fusedobject.Webhook                 `json:"webhooks"`
 }
 
 // decodeRuntimeContractsResponse separates contract rejection from transport and identity failure.
@@ -444,6 +452,8 @@ func runtimeContractSnapshotFromBatchItem(item runtimeContractBatchItem, request
 		version = requested.Version
 	}
 	snapshot := runtimeContractSnapshot(item.ExecutionContractEnvelope, requested.ServiceID, requested.ServiceVersionID, version, item.Service, item.Operations, item.Webhooks)
+	// The generation pin is Registry-owned; the separately computed runtime hash cannot substitute for it.
+	snapshot.Revision, snapshot.SourceHash, snapshot.GenerationContractHash = item.Revision, item.SourceHash, item.GenerationContractHash
 	snapshot.ServiceMetadata.SchemaDefinitions = item.SchemaDefinitions
 	// One incompatible operation rejects the complete version before Engine storage.
 	if err := validateRuntimeSnapshot(snapshot); err != nil {
@@ -510,6 +520,7 @@ func validateRuntimePaginationConfig(scope string, config *fusedobject.Paginatio
 }
 
 type runtimeContractService struct {
+	Provider              *models.ServiceProviderIdentity    `json:"provider,omitempty"`
 	ID                    uuid.UUID                          `json:"id"`
 	CurrentServiceVersion string                             `json:"current_service_version"`
 	Name                  string                             `json:"name"`
@@ -528,6 +539,7 @@ type runtimeContractService struct {
 	Documentation         *fusedobject.ServiceDocumentation  `json:"documentation"`
 }
 
+// runtimeContractSnapshot projects one Registry version without discarding its credential-free provider identity.
 func runtimeContractSnapshot(envelope fusedobject.ExecutionContractEnvelope, serviceID, serviceVersionID uuid.UUID, version string, service *runtimeContractService, operations []fusedobject.Endpoint, webhooks []fusedobject.Webhook) *store.ServiceContractSnapshot {
 	metadata := fusedobject.ServiceMetadata{
 		ExecutionContractEnvelope: envelope,
@@ -535,6 +547,7 @@ func runtimeContractSnapshot(envelope fusedobject.ExecutionContractEnvelope, ser
 		ServiceVersionID:          serviceVersionID,
 		Name:                      service.Name,
 		Description:               service.Description,
+		Provider:                  service.Provider,
 		BaseURL:                   service.BaseURL,
 		Servers:                   service.Servers,
 		AuthConfigs:               service.AuthConfigs,

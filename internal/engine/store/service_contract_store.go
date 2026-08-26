@@ -26,20 +26,21 @@ const serviceContractSnapshotWriteBatchSize = 100
 
 type ServiceContractSnapshot struct {
 	fusedobject.ExecutionContractEnvelope
-	ID               uuid.UUID
-	ServiceID        uuid.UUID
-	ServiceVersionID uuid.UUID
-	Version          string
-	Revision         int
-	SourceHash       string
-	ContractHash     string
-	Status           string
-	ServiceMetadata  fusedobject.ServiceMetadata
-	Endpoints        []fusedobject.Endpoint
-	Webhooks         []fusedobject.Webhook
-	FetchedAt        time.Time
-	RefreshedAt      time.Time
-	LastRefreshError string
+	ID                     uuid.UUID
+	ServiceID              uuid.UUID
+	ServiceVersionID       uuid.UUID
+	Version                string
+	Revision               int
+	SourceHash             string
+	GenerationContractHash string
+	ContractHash           string
+	Status                 string
+	ServiceMetadata        fusedobject.ServiceMetadata
+	Endpoints              []fusedobject.Endpoint
+	Webhooks               []fusedobject.Webhook
+	FetchedAt              time.Time
+	RefreshedAt            time.Time
+	LastRefreshError       string
 }
 
 type serviceContractHashInput struct {
@@ -152,26 +153,36 @@ func (s *postgresStore) UpsertServiceContractSnapshot(ctx context.Context, snaps
 	return saved, nil
 }
 
+// prepareServiceContractSnapshot admits both runtime semantics and any supplied immutable generation identity before persistence.
 func prepareServiceContractSnapshot(snapshot ServiceContractSnapshot) (ServiceContractSnapshot, []byte, error) {
+	// Older runtime snapshots may remain executable, but a malformed new pin must never become generation authority.
+	if snapshot.GenerationContractHash != "" && !ValidGenerationContractHash(snapshot.GenerationContractHash) {
+		return snapshot, nil, ErrGenerationContractPinUnavailable
+	}
 	envelope, err := fusedobject.CanonicalExecutionContractEnvelope(snapshot.ExecutionContractEnvelope)
+	// Unsupported runtime semantics cannot be rescued by a valid storage reference.
 	if err != nil {
 		return snapshot, nil, fmt.Errorf("service contract snapshot: %w", err)
 	}
 	snapshot.ExecutionContractEnvelope = envelope
+	// Complete snapshot validation runs before hashing or any database write.
 	if err := validateServiceContractSnapshot(snapshot); err != nil {
 		return snapshot, nil, err
 	}
+	// Only omitted status receives the ordinary newly activated state.
 	if snapshot.Status == "" {
 		snapshot.Status = "active"
 	}
 	// Recompute locally on every write so a caller cannot carry forward a hash
 	// that predates newly negotiated execution semantics.
 	hash, err := serviceContractHash(snapshot)
+	// A hash failure means the complete contract cannot be admitted atomically.
 	if err != nil {
 		return snapshot, nil, err
 	}
 	snapshot.ContractHash = hash
 	metadataJSON, err := json.Marshal(snapshot.ServiceMetadata)
+	// Persistence accepts only a fully encoded, validated metadata document.
 	if err != nil {
 		return snapshot, nil, fmt.Errorf("marshal service metadata: %w", err)
 	}
@@ -193,9 +204,9 @@ func replaceServiceContractSnapshotRows(
 	err := tx.QueryRow(ctx, `
 		INSERT INTO fused_service_contract_snapshots (
 			service_id, service_version_id, version, contract_version, required_capabilities, revision, source_hash,
-			contract_hash, contract_status, service_metadata, last_refresh_error
+			contract_hash, contract_status, service_metadata, last_refresh_error, generation_contract_hash
 		)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		ON CONFLICT (service_version_id) DO UPDATE SET
 			service_id = EXCLUDED.service_id,
 			version = EXCLUDED.version,
@@ -203,6 +214,7 @@ func replaceServiceContractSnapshotRows(
 			required_capabilities = EXCLUDED.required_capabilities,
 			revision = EXCLUDED.revision,
 			source_hash = EXCLUDED.source_hash,
+			generation_contract_hash = EXCLUDED.generation_contract_hash,
 			contract_hash = EXCLUDED.contract_hash,
 			contract_status = EXCLUDED.contract_status,
 			service_metadata = EXCLUDED.service_metadata,
@@ -211,14 +223,17 @@ func replaceServiceContractSnapshotRows(
 		RETURNING id, contract_version, required_capabilities, fetched_at, refreshed_at`,
 		snapshot.ServiceID, snapshot.ServiceVersionID, snapshot.Version,
 		snapshot.ContractVersion, snapshot.RequiredCapabilities, snapshot.Revision,
-		snapshot.SourceHash, snapshot.ContractHash, snapshot.Status, metadataJSON, snapshot.LastRefreshError,
+		snapshot.SourceHash, snapshot.ContractHash, snapshot.Status, metadataJSON, snapshot.LastRefreshError, snapshot.GenerationContractHash,
 	).Scan(&snapshotID, &snapshot.ContractVersion, &snapshot.RequiredCapabilities, &fetchedAt, &refreshedAt)
+	// Metadata and the generation pin must be durably prepared before replacing child rows.
 	if err != nil {
 		return nil, fmt.Errorf("upsert service contract snapshot: %w", err)
 	}
+	// Endpoint replacement shares the transaction so revision identity cannot drift from executable operations.
 	if err := replaceServiceContractEndpoints(ctx, tx, snapshotID, endpointRows); err != nil {
 		return nil, err
 	}
+	// Webhook selection authority must commit at the same revision as the generation bundle reference.
 	if err := replaceServiceContractWebhooks(ctx, tx, snapshotID, webhookRows); err != nil {
 		return nil, err
 	}
