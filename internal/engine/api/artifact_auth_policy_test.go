@@ -171,6 +171,8 @@ func TestResolveSelectionAuthPolicyUsesSourceOrderAndExplicitORChoice(t *testing
 	}
 }
 
+// TestResolveSelectionAuthPolicyRejectsExplicitSelectorMissingFromOneOperation
+// keeps rejection intact while naming the incompatible portion of the selection.
 func TestResolveSelectionAuthPolicyRejectsExplicitSelectorMissingFromOneOperation(t *testing.T) {
 	selection := models.SDKSelection{ServiceID: uuid.New(), AuthType: "oauth", AuthName: "oauthAuth"}
 	contract := executionAuthContract(selection.ServiceID,
@@ -179,7 +181,8 @@ func TestResolveSelectionAuthPolicyRejectsExplicitSelectorMissingFromOneOperatio
 		securedOperation("two", "apiKey"),
 	)
 	err := resolveSelectionAuthPolicy(&selection, contract, &sdkAuthResolutionTelemetry{})
-	if err == nil || !strings.Contains(err.Error(), "compatible with every secured selected operation") {
+	// A partial auth match must not be accepted or reported as a missing credential.
+	if err == nil || !strings.Contains(err.Error(), "1 selected operation(s) do not support it") {
 		t.Fatalf("expected explicit selector incompatibility, got %v", err)
 	}
 }
@@ -238,6 +241,8 @@ func TestResolveAppAuthPoliciesClassifiesInvalidProviderContract(t *testing.T) {
 	}
 }
 
+// TestRecordSDKAuthResolutionUsesSafeAggregateAttributes keeps auth decisions
+// observable without copying response-only service or scheme metadata into OTEL.
 func TestRecordSDKAuthResolutionUsesSafeAggregateAttributes(t *testing.T) {
 	recorder := tracetest.NewSpanRecorder()
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
@@ -246,13 +251,22 @@ func TestRecordSDKAuthResolutionUsesSafeAggregateAttributes(t *testing.T) {
 	span.End()
 
 	attributes := endedSDKAuthAttributes(t, recorder)
-	if attributes["sdk.auth.anonymous_only_count"] != "1" || attributes["sdk.auth.secured_only_count"] != "2" || attributes["sdk.auth.required_scheme_count"] != "3" || attributes["sdk.auth.multi_scheme_selection_count"] != "1" || attributes["sdk.auth.decision_source"] != "explicit" || attributes["sdk.auth.decision_outcome"] != "success" {
-		t.Fatalf("unexpected SDK auth telemetry: %#v", attributes)
+	want := map[string]string{
+		"sdk.auth.anonymous_only_count": "1", "sdk.auth.secured_only_count": "2",
+		"sdk.auth.required_scheme_count": "3", "sdk.auth.multi_scheme_selection_count": "1",
+		"sdk.auth.decision_source": "explicit", "sdk.auth.decision_outcome": "success",
 	}
+	// A table keeps each fixed aggregate assertion independent of optional display diagnostics.
+	for key, value := range want {
+		if attributes[key] != value {
+			t.Fatalf("unexpected SDK auth telemetry: %#v", attributes)
+		} // Missing and incorrect values must fail identically.
+	}
+	// Field names themselves must not introduce identity or credential-bearing telemetry dimensions.
 	for key := range attributes {
 		if strings.Contains(key, "name") || strings.Contains(key, "url") || strings.Contains(key, "secret") {
 			t.Fatalf("unsafe auth attribute key %q", key)
-		}
+		} // Inspect all emitted attributes, not only the expected aggregate subset.
 	}
 }
 

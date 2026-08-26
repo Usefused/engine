@@ -1087,11 +1087,7 @@ func appAuthPolicyPlanError(err error, service sdkResolvedService) (workspaceCon
 	var selectionErr appServiceValidationError
 	// Only typed selection errors can be relabelled; never parse or rewrite arbitrary error text.
 	if errors.As(err, &selectionErr) {
-		return workspaceConfigHTTPError{
-			status:  http.StatusBadRequest,
-			message: appValidationServiceLabel(service, selectionErr.serviceID) + " " + selectionErr.reason,
-			details: map[string]any{"service_id": selectionErr.serviceID.String()},
-		}, "invalid_selection"
+		return selectionErr.httpError(service), "invalid_selection"
 	}
 	return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, "invalid_selection"
 }
@@ -1224,7 +1220,7 @@ func preferredAppAuth(selection models.SDKSelection, auths fusedobject.AuthConfi
 	}
 	// An explicit selector must remain compatible with every secured operation.
 	if len(scopeMatches) == 0 {
-		return nil, explicit, appServiceValidationError{serviceID: selection.ServiceID, reason: "has no authentication scheme compatible with every secured selected operation"}
+		return nil, explicit, incompatibleAppAuthError(selection, auths, operations)
 	}
 	// Multiple matches need caller disambiguation, not an arbitrary default.
 	if explicit && len(scopeMatches) > 1 {

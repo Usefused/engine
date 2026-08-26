@@ -29,8 +29,9 @@ func TestAppAuthPlanErrorsUseServiceLabels(t *testing.T) {
 		selection models.SDKSelection
 		contracts []sandbox.ServiceVersionExecutionAuthContract
 		reason    string
+		code      string
 	}{
-		{name: "incompatible", selection: models.SDKSelection{AuthType: "oauth", AuthName: "oauthAuth", SelectAll: true}, contracts: []sandbox.ServiceVersionExecutionAuthContract{executionAuthContract(serviceID, fusedobject.AuthConfigs{oauth, {Name: "apiKey", Type: "apiKey"}}, securedOperation("listIssues", "apiKey"))}, reason: "has no authentication scheme compatible with every secured selected operation"},
+		{name: "incompatible", selection: models.SDKSelection{AuthType: "oauth", AuthName: "oauthAuth", SelectAll: true}, contracts: []sandbox.ServiceVersionExecutionAuthContract{executionAuthContract(serviceID, fusedobject.AuthConfigs{oauth, {Name: "apiKey", Type: "apiKey"}}, securedOperation("listIssues", "apiKey"))}, reason: appIncompatibleOAuthReason, code: "auth_selection_incompatible"},
 		{name: "ambiguous", selection: models.SDKSelection{AuthType: "oauth", SelectAll: true}, contracts: []sandbox.ServiceVersionExecutionAuthContract{executionAuthContract(serviceID, fusedobject.AuthConfigs{oauth, otherOAuth}, securedOperationAlternatives("listIssues", []string{"oauthAuth"}, []string{"otherOAuth"}))}, reason: "auth selection is ambiguous; set auth.name"},
 		{name: "scope", selection: models.SDKSelection{AuthType: "oauth", ConnectScopes: []string{"admin"}, SelectAll: true}, contracts: []sandbox.ServiceVersionExecutionAuthContract{executionAuthContract(serviceID, fusedobject.AuthConfigs{oauth}, securedOperation("listIssues", "oauthAuth"))}, reason: `connect scope "admin" is not provider-approved`},
 		{name: "operation", selection: models.SDKSelection{OperationNames: []string{"missing"}}, contracts: []sandbox.ServiceVersionExecutionAuthContract{executionAuthContract(serviceID, nil, anonymousOperation("present"))}, reason: `selected operation "missing" was not found`},
@@ -47,15 +48,15 @@ func TestAppAuthPlanErrorsUseServiceLabels(t *testing.T) {
 			ctx, span := provider.Tracer("test").Start(context.Background(), "engine.app.plan")
 			err := resolveAppAuthPolicies(ctx, &sdkAuthContractRegistry{contracts: test.contracts}, "fixture-key", []sdkResolvedService{service}, []models.SDKSelection{test.selection})
 			span.End()
-			assertNamedAppAuthResponse(t, err, serviceID, test.reason)
+			assertNamedAppAuthResponse(t, err, serviceID, test.reason, test.code)
 			assertNamedAppAuthTelemetry(t, recorder)
 		})
 	}
 }
 
-// assertNamedAppAuthResponse checks the unchanged status/code and actionable
-// human label while retaining the opaque service ID only as machine detail.
-func assertNamedAppAuthResponse(t *testing.T, err error, serviceID uuid.UUID, reason string) {
+// assertNamedAppAuthResponse checks actionable labels and stable failure codes
+// while retaining the opaque service ID only as machine detail.
+func assertNamedAppAuthResponse(t *testing.T, err error, serviceID uuid.UUID, reason, code string) {
 	t.Helper()
 	var httpErr workspaceConfigHTTPError
 	// The typed public error must survive the shared resolver boundary.
@@ -70,8 +71,12 @@ func assertNamedAppAuthResponse(t *testing.T, err error, serviceID uuid.UUID, re
 		t.Fatal(decodeErr)
 	}
 	want := `service "Jira" (config key "jira") ` + reason
-	// The existing invalid_request contract remains stable for CLI clients.
-	if response.Code != http.StatusBadRequest || envelope.Error.Code != "invalid_request" || envelope.Error.Message != want {
+	// Existing validation cases retain their code while auth mismatches become distinguishable.
+	if code == "" {
+		code = "invalid_request"
+	}
+	// Both human and machine projections must survive the shared HTTP writer.
+	if response.Code != http.StatusBadRequest || envelope.Error.Code != code || envelope.Error.Message != want {
 		t.Fatalf("response = %d %#v", response.Code, envelope.Error)
 	}
 	// IDs remain available to tools without replacing the human-readable subject.
@@ -95,7 +100,7 @@ func assertNamedAppAuthTelemetry(t *testing.T, recorder *tracetest.SpanRecorder)
 		t.Fatal(err)
 	}
 	// Metadata stays response-only; even config keys and operation names are excluded.
-	for _, forbidden := range []string{"Jira", "jira", "listIssues", "oauthAuth", "fixture-key", "provider-approved"} {
+	for _, forbidden := range []string{"Jira", "jira", "listIssues", "oauthAuth", "apiKey", "fixture-key", "provider-approved", "Incompatible operations"} {
 		if strings.Contains(string(encoded), forbidden) {
 			t.Fatalf("telemetry disclosed %q", forbidden)
 		} // Inspect the full attribute map.
@@ -119,7 +124,7 @@ func TestAppAuthPlanErrorLabelsFailingSelection(t *testing.T) {
 		{ServiceID: jiraID, ServiceVersionID: versionID, SelectAll: true, AuthType: "oauth", AuthName: "oauthAuth"},
 	}
 	err := resolveAppAuthPolicies(context.Background(), registry, "fixture-key", services, selections)
-	assertNamedAppAuthResponse(t, err, jiraID, "has no authentication scheme compatible with every secured selected operation")
+	assertNamedAppAuthResponse(t, err, jiraID, appIncompatibleOAuthReason, "auth_selection_incompatible")
 }
 
 // TestAppValidationServiceLabelFallbacks ensures names never override identity

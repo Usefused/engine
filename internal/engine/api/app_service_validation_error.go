@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 	"unicode"
 
@@ -13,11 +14,29 @@ import (
 type appServiceValidationError struct {
 	serviceID uuid.UUID
 	reason    string
+	code      string
+	detail    string
+	remedy    string
 }
 
 // Error preserves the ID-based fallback for callers without resolved display metadata.
 func (err appServiceValidationError) Error() string {
 	return fmt.Sprintf("service %s %s", err.serviceID, err.reason)
+}
+
+// httpError keeps human diagnostics on the existing response contract, separate
+// from the fixed auth-decision attributes recorded on the planning span.
+func (err appServiceValidationError) httpError(service sdkResolvedService) workspaceConfigHTTPError {
+	details := map[string]any{"service_id": err.serviceID.String()}
+	// Optional diagnostic text uses the field already supported by CLI and JSON consumers.
+	if err.detail != "" {
+		details["server_detail"] = err.detail
+	}
+	return workspaceConfigHTTPError{
+		status: http.StatusBadRequest, code: err.code,
+		message: appValidationServiceLabel(service, err.serviceID) + " " + err.reason,
+		details: details, remediation: err.remedy,
+	}
 }
 
 // appValidationServiceLabel reuses the authorized plan's service name and exact
