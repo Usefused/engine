@@ -9,6 +9,14 @@ const routeSource = readFileSync(new URL("../routes/integrations._index.tsx", im
 const summarySource = readFileSync(new URL("../components/DiscoveryReviewSummaryPanel.tsx", import.meta.url), "utf8");
 const protocolSource = readFileSync(new URL("./extraction-wizard-protocol.ts", import.meta.url), "utf8");
 
+// Apply owns workspace activation; browser navigation must not introduce a second mutation.
+test("reviewed import delegates activation exactly once to Engine apply", () => {
+  const applySource = wizardSource.slice(wizardSource.indexOf("async function applyPlan"), wizardSource.indexOf("async function cancelDiscovery"));
+  assert.equal((applySource.match(/api\.integrations\.applyImport\(/g) || []).length, 1);
+  assert.doesNotMatch(applySource, /api\.workspace\.addService/);
+  assert.match(applySource, /error\.message/);
+});
+
 test("models only the bounded public snapshot payload", () => {
   const payloadSource = apiSource.slice(apiSource.indexOf("export interface DiscoveryPayload"), apiSource.indexOf("export interface DiscoverySnapshot"));
   for (const field of ["effective_workers", "max_pages", "max_depth", "max_selections", "operations", "proposals", "diagnostics", "contract", "plan", "failure_code"]) {

@@ -10,6 +10,39 @@ import {
   normalizeAPIErrorPayload,
 } from "./authorization-error.ts";
 
+// A committed import may fail activation; every UI entrypoint must retain its actionable recovery.
+test("preserves committed import recovery and correlation through the displayed error", () => {
+  const recovery = "fused-cli workspace service add 'billing' --service-id 'service-id' --version 'v1' --apply";
+  const error = new APIRequestError(424, normalizeAPIErrorPayload({ error: {
+    code: "import_workspace_activation_failed", message: "Published, but workspace activation failed.",
+    category: "partial", retryable: false, phase: "workspace_activation", commit_state: "committed",
+    operation_id: "operation-id", request_id: "request-id", recovery,
+    remediation: "Run the exact recovery command; do not repeat the committed import.",
+  }}));
+  assert.equal(error.phase, "workspace_activation");
+  assert.equal(error.commitState, "committed");
+  assert.equal(error.operationId, "operation-id");
+  assert.equal(error.requestId, "request-id");
+  assert.equal(error.retryable, false);
+  assert.equal(error.recovery, recovery);
+  assert.ok(error.message.includes(recovery));
+  assert.match(error.message, /do not repeat/);
+});
+
+// Untrusted malformed metadata must not become a command or fabricated committed state.
+test("discards non-string import recovery metadata", () => {
+  const error = new APIRequestError(424, normalizeAPIErrorPayload({error: {
+    code: "import_workspace_activation_failed", message: "Activation failed.",
+    recovery: { command: "untrusted" }, commit_state: true, phase: [], operation_id: 1, request_id: null,
+  }}));
+  assert.equal(error.recovery, undefined);
+  assert.equal(error.commitState, undefined);
+  assert.equal(error.phase, undefined);
+  assert.equal(error.operationId, undefined);
+  assert.equal(error.requestId, undefined);
+  assert.equal(error.message, "Activation failed.");
+});
+
 test("formats stable authentication errors", () => {
   const message = apiErrorMessage(401, { error: "authentication_required" });
   assert.match(message, /Authentication required/);

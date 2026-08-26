@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const ownedServicesPageLimit = 100
@@ -130,49 +133,64 @@ type ownedServiceRegistry interface {
 	FetchRuntimeContracts(ctx context.Context, versions []store.WorkspaceServiceVersion, apiKey string) ([]store.ServiceContractSnapshot, error)
 }
 
-type ownedServiceSnapshotWriter interface {
-	UpsertServiceContractSnapshot(ctx context.Context, snapshot store.ServiceContractSnapshot) (*store.ServiceContractSnapshot, error)
-}
-
 // OwnedServiceReconcileResult describes the idempotent startup reconciliation.
 type OwnedServiceReconcileResult struct {
 	Discovered    int
 	AlreadyActive int
 	Activated     int
+	Deferred      []OwnedServiceRejection
 }
 
 // ReconcileOwnedServices restores Registry-owned services that are absent from
 // this Engine workspace. Existing services keep their current local pins.
 func ReconcileOwnedServices(ctx context.Context, workspace store.Store, registry ownedServiceRegistry, accountID uuid.UUID, apiKey string) (OwnedServiceReconcileResult, error) {
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.owned_services.reconcile")
+	defer span.End()
+	result, err := reconcileOwnedServices(ctx, workspace, registry, accountID, apiKey)
+	outcome := "complete"
+	// Deferred contracts must remain visible even though the control plane can safely start.
+	if len(result.Deferred) > 0 {
+		outcome = "partial"
+	}
+	// Infrastructure and trust failures must not masquerade as recoverable service content.
+	if err != nil {
+		outcome = "failed"
+	}
+	span.SetAttributes(attribute.String("outcome", outcome),
+		attribute.Int("service.discovered_count", boundedPassiveCount(result.Discovered)),
+		attribute.Int("service.activated_count", boundedPassiveCount(result.Activated)),
+		attribute.Int("service.deferred_count", boundedPassiveCount(len(result.Deferred))))
+	for _, failure := range result.Deferred {
+		slog.WarnContext(ctx, "Owned service recovery deferred; repair the Registry contract, then add the exact version to the workspace",
+			"service_id", failure.ServiceID, "service_version_id", failure.ServiceVersionID,
+			"blocking_service_version_id", failure.BlockingVersionID, "failure_code", "runtime_contract_rejected")
+	}
+	return result, err
+}
+
+// reconcileOwnedServices isolates validated content failures without changing identity or persistence policy.
+func reconcileOwnedServices(ctx context.Context, workspace store.Store, registry ownedServiceRegistry, accountID uuid.UUID, apiKey string) (OwnedServiceReconcileResult, error) {
 	result := OwnedServiceReconcileResult{}
 	owned, err := registry.FetchOwnedServices(ctx)
+	// A failed licensed listing cannot be interpreted as an empty workspace.
 	if err != nil {
 		return result, err
 	}
 	result.Discovered = len(owned)
 
-	snapshotStore, ok := workspace.(ownedServiceSnapshotWriter)
+	snapshotStore, ok := workspace.(store.OwnedServiceRecoveryStore)
+	// Recovery requires both SQL membership selection and canonical snapshot persistence.
 	if !ok {
 		return result, errors.New("owned service reconciliation requires runtime contract storage")
 	}
 
-	var failures []error
-	missing := make([]OwnedRegistryService, 0, len(owned))
-	for _, service := range owned {
-		enabled, err := workspace.IsWorkspaceServiceEnabled(ctx, service.ServiceID)
-		if err != nil {
-			failures = append(failures, fmt.Errorf("check owned service %s: %w", service.ServiceID, err))
-			continue
-		}
-		if enabled {
-			result.AlreadyActive++
-			continue
-		}
-		missing = append(missing, service)
+	missing, err := missingOwnedServices(ctx, snapshotStore, owned)
+	// Membership errors leave local pins untouched and remain startup failures.
+	if err != nil {
+		return result, err
 	}
-	if len(failures) > 0 {
-		return result, errors.Join(failures...)
-	}
+	result.AlreadyActive = len(owned) - len(missing)
+	// All existing pins are authoritative; startup must not float them to Registry latest.
 	if len(missing) == 0 {
 		return result, nil
 	}
@@ -187,29 +205,99 @@ func ReconcileOwnedServices(ctx context.Context, workspace store.Store, registry
 		})
 	}
 	snapshots, err := registry.FetchRuntimeContracts(ctx, versions, apiKey)
+	// Only canonical content rejection can supply a validated recovery subset.
 	if err != nil {
-		return result, fmt.Errorf("fetch owned service runtime contracts: %w", err)
+		var rejected *runtimeContractRejections
+		// Transport, authorization, identity and unknown failures still stop startup.
+		if !errors.As(err, &rejected) {
+			return result, fmt.Errorf("fetch owned service runtime contracts: %w", err)
+		}
+		snapshots = rejected.accepted
+		result.Deferred = rejected.failures
 	}
-	snapshotsByVersion := make(map[uuid.UUID]store.ServiceContractSnapshot, len(snapshots))
-	for _, snapshot := range snapshots {
-		snapshotsByVersion[snapshot.ServiceVersionID] = snapshot
+	// Every requested identity needs exactly one accepted or deferred result before any writes begin.
+	if err := validateOwnedRecoverySet(missing, snapshots, result.Deferred); err != nil {
+		return result, err
 	}
+	result.Activated, err = restoreOwnedSnapshots(ctx, workspace, snapshotStore, missing, snapshots, accountID)
+	return result, err
+}
 
+// validateOwnedRecoverySet prevents partial or duplicate fetcher responses from appearing fully recovered.
+func validateOwnedRecoverySet(missing []OwnedRegistryService, snapshots []store.ServiceContractSnapshot, failures []OwnedServiceRejection) error {
+	pending := make(map[uuid.UUID]uuid.UUID, len(missing))
 	for _, service := range missing {
-		snapshot, ok := snapshotsByVersion[service.ServiceVersionID]
-		if !ok {
-			failures = append(failures, fmt.Errorf("owned service %s runtime contract was not returned", service.ServiceID))
-			continue
-		}
-		if _, err := snapshotStore.UpsertServiceContractSnapshot(ctx, snapshot); err != nil {
-			failures = append(failures, fmt.Errorf("store owned service %s runtime contract: %w", service.ServiceID, err))
-			continue
-		}
-		if err := workspace.AddWorkspaceServiceVersion(ctx, service.ServiceID, service.Slug, service.Version, service.ServiceVersionID, service.Name, accountID); err != nil {
-			failures = append(failures, fmt.Errorf("activate owned service %s: %w", service.ServiceID, err))
-			continue
-		}
-		result.Activated++
+		pending[service.ServiceVersionID] = service.ServiceID
 	}
-	return result, errors.Join(failures...)
+	for _, snapshot := range snapshots {
+		// Accepted data must consume one exact requested identity.
+		if err := consumeOwnedRecoveryIdentity(pending, snapshot.ServiceID, snapshot.ServiceVersionID); err != nil {
+			return err
+		}
+	}
+	for _, failure := range failures {
+		// A rejection cannot excuse a missing or duplicated unrelated service.
+		if err := consumeOwnedRecoveryIdentity(pending, failure.ServiceID, failure.ServiceVersionID); err != nil {
+			return err
+		}
+	}
+	// An incomplete response is not a successful empty recovery.
+	if len(pending) != 0 {
+		return errors.New("owned service recovery response is incomplete")
+	}
+	return nil
+}
+
+// consumeOwnedRecoveryIdentity enforces one-to-one admission before persistence starts.
+func consumeOwnedRecoveryIdentity(pending map[uuid.UUID]uuid.UUID, serviceID, versionID uuid.UUID) error {
+	expected, ok := pending[versionID]
+	// Absence includes duplicates because the first admitted result consumes the identity.
+	if !ok || expected != serviceID {
+		return errors.New("owned service recovery identity mismatch")
+	}
+	delete(pending, versionID)
+	return nil
+}
+
+// missingOwnedServices maps only SQL-selected missing IDs back to the already bounded Registry metadata.
+func missingOwnedServices(ctx context.Context, persistence store.OwnedServiceRecoveryStore, owned []OwnedRegistryService) ([]OwnedRegistryService, error) {
+	ids := make([]uuid.UUID, 0, len(owned))
+	byID := make(map[uuid.UUID]OwnedRegistryService, len(owned))
+	for _, service := range owned {
+		ids = append(ids, service.ServiceID)
+		byID[service.ServiceID] = service
+	}
+	missingIDs, err := persistence.MissingOwnedServiceIDs(ctx, ids)
+	// No fallback may turn a SQL failure into apparent absence.
+	if err != nil {
+		return nil, err
+	}
+	missing := make([]OwnedRegistryService, 0, len(missingIDs))
+	for _, id := range missingIDs {
+		missing = append(missing, byID[id])
+	}
+	return missing, nil
+}
+
+// restoreOwnedSnapshots writes each independently admitted service; rejected versions never reach storage or activation.
+func restoreOwnedSnapshots(ctx context.Context, workspace store.Store, persistence store.OwnedServiceRecoveryStore, missing []OwnedRegistryService, snapshots []store.ServiceContractSnapshot, accountID uuid.UUID) (int, error) {
+	byVersion := make(map[uuid.UUID]OwnedRegistryService, len(missing))
+	for _, service := range missing {
+		byVersion[service.ServiceVersionID] = service
+	}
+	activated := 0
+	for _, snapshot := range snapshots {
+		// validateOwnedRecoverySet admitted the complete tuple set before any writes began.
+		service := byVersion[snapshot.ServiceVersionID]
+		// Persistence failure is not a content rejection and must remain visible to startup.
+		if _, err := persistence.UpsertServiceContractSnapshot(ctx, snapshot); err != nil {
+			return activated, fmt.Errorf("store owned service %s runtime contract: %w", service.ServiceID, err)
+		}
+		// Membership is created only after canonical snapshot validation and persistence succeed.
+		if err := workspace.AddWorkspaceServiceVersion(ctx, service.ServiceID, service.Slug, service.Version, service.ServiceVersionID, service.Name, accountID); err != nil {
+			return activated, fmt.Errorf("activate owned service %s: %w", service.ServiceID, err)
+		}
+		activated++
+	}
+	return activated, nil
 }

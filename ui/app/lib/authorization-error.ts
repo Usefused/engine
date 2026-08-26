@@ -13,6 +13,11 @@ export interface APIErrorPayload {
   details?: Record<string, unknown>;
   remediation?: string;
   trace_id?: string;
+  phase?: string;
+  commit_state?: string;
+  operation_id?: string;
+  request_id?: string;
+  recovery?: string;
   message?: string;
   missing?: PermissionRequirement[];
 }
@@ -25,8 +30,14 @@ export class APIRequestError extends Error {
   readonly details: Record<string, unknown>;
   readonly remediation?: string;
   readonly traceId?: string;
+  readonly phase?: string;
+  readonly commitState?: string;
+  readonly operationId?: string;
+  readonly requestId?: string;
+  readonly recovery?: string;
   readonly missing: PermissionRequirement[];
 
+  // Preserve the server's durable outcome so callers never mistake a committed partial for rollback.
   constructor(status: number, payload: APIErrorPayload) {
     super(apiErrorMessage(status, payload));
     this.name = "APIRequestError";
@@ -37,6 +48,12 @@ export class APIRequestError extends Error {
     this.details = payload.details || {};
     this.remediation = payload.remediation;
     this.traceId = payload.trace_id;
+    this.phase = payload.phase;
+    this.commitState = payload.commit_state;
+    this.operationId = payload.operation_id;
+    this.requestId = payload.request_id;
+    this.recovery = payload.recovery;
+    // Malformed permission details cannot acquire display or authorization meaning.
     this.missing = Array.isArray(payload.missing) ? payload.missing : [];
   }
 }
@@ -49,8 +66,11 @@ function asBoolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
+// normalizeAPIErrorPayload preserves the canonical Engine error envelope across every UI import entrypoint.
 export function normalizeAPIErrorPayload(input: unknown): APIErrorPayload {
+  // Non-object responses carry no trustworthy structured recovery data.
   if (!isRecord(input)) return {};
+  // Engine's nested envelope owns recovery; legacy flat permission responses retain their existing projection.
   if (isRecord(input.error)) {
     const engineError = input.error;
     return {
@@ -58,9 +78,15 @@ export function normalizeAPIErrorPayload(input: unknown): APIErrorPayload {
       code: asString(engineError.code),
       category: asString(engineError.category),
       retryable: asBoolean(engineError.retryable),
+      // Reject scalar details rather than exposing them as trusted metadata.
       details: isRecord(engineError.details) ? engineError.details : undefined,
       remediation: asString(engineError.remediation),
       trace_id: asString(engineError.trace_id),
+      phase: asString(engineError.phase),
+      commit_state: asString(engineError.commit_state),
+      operation_id: asString(engineError.operation_id),
+      request_id: asString(engineError.request_id),
+      recovery: asString(engineError.recovery),
     };
   }
   return {
@@ -95,11 +121,11 @@ function specificApiErrorMessage(
   return appOwnerErrorMessage(payload.error) || workspaceConfigErrorMessage(payload);
 }
 
+// codedErrorMessage includes the server's exact recovery as text, never as an executable browser action.
 function codedErrorMessage(payload: APIErrorPayload): string | null {
+  // Unstructured errors must use the existing bounded fallback copy.
   if (!payload.code || !payload.error) return null;
-  return payload.remediation
-    ? `${payload.error} ${payload.remediation}`
-    : payload.error;
+  return [payload.error, payload.remediation, payload.recovery].filter(Boolean).join(" ");
 }
 
 export function isAuthenticationFailure(

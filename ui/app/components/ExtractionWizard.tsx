@@ -296,17 +296,19 @@ export default function ExtractionWizard({ sessionId, reviewOnly = false, onClos
     // A CLI handoff owns its apply step, so the browser cannot race the waiting terminal.
     if (reviewOnly) return;
     const plan = snapshot?.payload?.plan;
+    // Only the reviewed immutable plan may be submitted.
     if (!plan) return;
     setSubmitting(true);
     setSessionError("");
     try {
       const applied = await api.integrations.applyImport(plan.plan_id, plan.review_hash);
-      await api.workspace.addService(applied.service_id, "", applied.version);
+      // Engine apply already materializes and activates the exact version; a second mutation can falsely report failure.
       toast.success("Reviewed service imported.");
       // Clear URL session state before navigating so a parent search-param update cannot reopen the index.
       if (onComplete) onComplete(); else onClose();
       navigate(`/integrations/${applied.service_id}`);
     } catch (error) {
+      // APIRequestError includes committed state and recovery rather than hiding the partial result.
       setSessionError(error instanceof Error ? error.message : "Failed to apply the reviewed import plan.");
     } finally {
       setSubmitting(false);

@@ -325,9 +325,7 @@ type runtimeContractsGraphQLResponse struct {
 	Data struct {
 		Contracts []runtimeContractBatchItem `json:"serviceRuntimeContracts"`
 	} `json:"data"`
-	Errors []struct {
-		Message string `json:"message"`
-	} `json:"errors"`
+	Errors []runtimeContractGraphQLError `json:"errors"`
 }
 
 type runtimeContractBatchItem struct {
@@ -340,16 +338,20 @@ type runtimeContractBatchItem struct {
 	Webhooks         []fusedobject.Webhook   `json:"webhooks"`
 }
 
+// decodeRuntimeContractsResponse separates contract rejection from transport and identity failure.
 func decodeRuntimeContractsResponse(body io.Reader, versions []store.WorkspaceServiceVersion) ([]store.ServiceContractSnapshot, error) {
 	var decoded runtimeContractsGraphQLResponse
+	// Unreadable responses provide no per-service proof and remain fatal to recovery.
 	if err := json.NewDecoder(body).Decode(&decoded); err != nil {
 		return nil, fmt.Errorf("FetchRuntimeContracts: incompatible contract: %w", unsupportedExecutionCapability())
 	}
+	// Only an explicit, version-bound Registry classification is recoverable.
 	if len(decoded.Errors) > 0 {
-		return nil, fmt.Errorf("FetchRuntimeContracts: graphql error: %s", decoded.Errors[0].Message)
+		return nil, classifyRuntimeContractGraphQLErrors(decoded.Errors, versions)
 	}
-	if err := validateRuntimeContractBatchEnvelopes(decoded.Data.Contracts); err != nil {
-		return nil, err
+	// Preserve envelope admission for callers checking a response without requesting snapshots.
+	if len(versions) == 0 {
+		return nil, validateRuntimeContractBatchEnvelopes(decoded.Data.Contracts)
 	}
 	return runtimeContractSnapshotsFromBatch(decoded.Data.Contracts, versions)
 }
@@ -365,18 +367,29 @@ func validateRuntimeContractBatchEnvelopes(items []runtimeContractBatchItem) err
 	return nil
 }
 
+// runtimeContractSnapshotsFromBatch keeps ordinary callers atomic while allowing
+// owned-service recovery to explicitly inspect independently validated snapshots.
 func runtimeContractSnapshotsFromBatch(items []runtimeContractBatchItem, versions []store.WorkspaceServiceVersion) ([]store.ServiceContractSnapshot, error) {
-	byVersion := make(map[uuid.UUID]runtimeContractBatchItem, len(items))
-	for _, item := range items {
-		byVersion[item.ServiceVersionID] = item
+	byVersion, err := indexRuntimeContractBatch(items, versions)
+	// Missing, duplicate or cross-service identities cannot be treated as malformed contract content.
+	if err != nil {
+		return nil, err
 	}
 	out := make([]store.ServiceContractSnapshot, 0, len(versions))
+	rejected := &runtimeContractRejections{}
 	for _, version := range versions {
-		snapshot, err := runtimeContractSnapshotFromBatchItem(byVersion[version.ServiceVersionID], version)
+		snapshot, err := admittedRuntimeContractSnapshot(byVersion[version.ServiceVersionID], version)
+		// No failed snapshot is returned as executable; only startup recovery consumes the partial set.
 		if err != nil {
-			return nil, err
+			rejected.failures = append(rejected.failures, ownedServiceRejection(version, err))
+			continue
 		}
 		out = append(out, *snapshot)
+	}
+	// Normal plan/apply clients still receive no partial success when any item is rejected.
+	if len(rejected.failures) > 0 {
+		rejected.accepted = out
+		return nil, rejected
 	}
 	return out, nil
 }

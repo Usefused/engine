@@ -184,6 +184,35 @@ it owns through that connection before serving requests. Moving an existing
 Engine database and its data between providers remains an operator-run
 migration.
 
+### Import failures and startup recovery
+
+Registry publication and Engine workspace activation are separate steps. A
+committed publication is not automatically deleted if Engine cannot activate
+it. Import apply returns HTTP 424 with `import_workspace_activation_failed`,
+`commit_state: committed`, phase, operation/request IDs, and an exact `recovery`
+command. The embedded UI preserves that command; it does not issue a second
+workspace-add request after successful apply. Do not repeat the publication or
+delete a service merely to recover activation.
+
+Startup preserves existing workspace pins. It selects absent owned services
+with one SQL membership query and fetches their contracts in a batch. Explicit
+contract validation failures leave the rejected versions unactivated while
+independently validated peers can be restored. Look for `Owned service recovery
+deferred` warnings with `service_version_id` and `blocking_service_version_id`.
+
+When Registry rejects the entire batch (for example, inconsistent capability
+metadata), no contract from that batch is activated. Repair the reported
+blocking version, then retry workspace activation or restart recovery. There is
+no per-service query fallback. License, identity, authorization, unknown
+Registry failures, and database failures still stop startup; validation and
+execution security are not bypassed.
+
+Registry must include the typed `runtime_contract_rejected` GraphQL error
+extension for Registry-side rejections to be deferred. Deploy the updated
+Registry before the updated Engine; an older server's unclassified error stays
+fatal. No provisioner, Kubernetes manifest, or data migration is required for
+this change. See [import recovery](docs/import-recovery.md) for verification.
+
 Newly generated TypeScript and Python SDK versions embed
 `FUSED_ENGINE_PUBLIC_GRPC_URL` as their default Engine target. Applications can
 override it with the SDK constructor option (`grpcUrl` / `grpc_url`) or the
