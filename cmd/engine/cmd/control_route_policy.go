@@ -280,23 +280,34 @@ func controlAuthorizationMiddlewareWithAudit(authorizer accesscontrol.Authorizer
 	}
 }
 
+// serveControlAuthorizationRequest admits only fully resolved, authorized
+// requests; reviewed resolution failures stop here with their safe diagnostics.
 func serveControlAuthorizationRequest(w http.ResponseWriter, r *http.Request, next http.Handler, authorizer accesscontrol.Authorizer, resolver controlRequirementResolver, recorder accesscontrol.AuditRecorder) {
+	// Other request classes own their authorization boundaries.
 	if classifyEngineRequest(r) != requestClassControl || isGraphQLControlPath(r.URL.Path) {
 		next.ServeHTTP(w, r)
 		return
 	}
 	started := time.Now()
 	actor, ok := accesscontrol.ActorFromContext(r.Context())
+	// Anonymous requests must never reach resource resolution.
 	if !ok {
 		denyUnauthenticatedControlRequest(w, r, recorder, started)
 		return
 	}
-	requirements, policy, resolved := resolveControlRESTPolicy(r, resolver)
-	if !resolved || authorizer == nil {
+	requirements, policy, resolutionErr := resolveControlRESTPolicyWithError(r, resolver)
+	// Unknown policies and unreviewed failures retain the existing fail-closed response.
+	if !diagnosableControlResolution(resolutionErr) || authorizer == nil {
 		denyUnclassifiedControlRequest(w, r, recorder, actor, policy, started)
 		return
 	}
-	if !authorizeControlRequirements(w, r, recorder, actor, authorizer, resolver, requirements, policy, started) {
+	// Available app, service, and bucket grants take precedence over validation details.
+	if !authorizeControlRequirements(w, r, recorder, actor, authorizer, resolver, requirements, policy, started, resolutionErr) {
+		return
+	}
+	// A diagnostic is a terminal rejection, never permission to execute a partial plan.
+	if resolutionErr != nil {
+		writeControlResolutionError(w, r, recorder, actor, requirements, policy, resolutionErr)
 		return
 	}
 	serveAuthorizedControlRequest(w, r, next, recorder, actor, requirements, policy)
@@ -320,13 +331,15 @@ func denyUnclassifiedControlRequest(w http.ResponseWriter, r *http.Request, reco
 
 // authorizeControlRequirements evaluates the resolved grants once and routes a
 // denial through the surface-specific bounded response contract.
-func authorizeControlRequirements(w http.ResponseWriter, r *http.Request, recorder accesscontrol.AuditRecorder, actor accesscontrol.Actor, authorizer accesscontrol.Authorizer, resolver controlRequirementResolver, requirements []accesscontrol.Requirement, policy string, started time.Time) bool {
+func authorizeControlRequirements(w http.ResponseWriter, r *http.Request, recorder accesscontrol.AuditRecorder, actor accesscontrol.Actor, authorizer accesscontrol.Authorizer, resolver controlRequirementResolver, requirements []accesscontrol.Requirement, policy string, started time.Time, resolutionErr error) bool {
 	err := accesscontrol.AuthorizeAll(r.Context(), authorizer, requirements...)
-	outcome := "allowed"
+	outcome := controlResolutionOutcome(resolutionErr)
+	// A missing grant overrides any otherwise actionable resolution failure.
 	if err != nil {
 		outcome = "denied"
 	}
 	finishControlAuthorization(w, r, started, policy, len(requirements), outcome)
+	// Successful grant checks still leave resolution errors terminal at the caller.
 	if err == nil {
 		return true
 	}
@@ -572,37 +585,48 @@ func isGraphQLControlPath(path string) bool {
 	return path == "/graphql" || path == "/engine/graphql"
 }
 
+// resolveControlRESTPolicy preserves the boolean policy-check contract: even a
+// reviewed validation error is unresolved and must never admit a handler.
 func resolveControlRESTPolicy(r *http.Request, resolver controlRequirementResolver) ([]accesscontrol.Requirement, string, bool) {
+	requirements, policy, err := resolveControlRESTPolicyWithError(r, resolver)
+	return requirements, policy, err == nil
+}
+
+// resolveControlRESTPolicyWithError retains reviewed resolver diagnostics while
+// returning the available grant requirements for the same fail-closed boundary.
+func resolveControlRESTPolicyWithError(r *http.Request, resolver controlRequirementResolver) ([]accesscontrol.Requirement, string, error) {
 	actor, ok := accesscontrol.ActorFromContext(r.Context())
+	// Resource resolution requires an authenticated workspace identity.
 	if !ok {
-		return nil, "", false
+		return nil, "", accesscontrol.ErrPolicyDenied
 	}
+	// Only server-owned route patterns can establish an authorization policy.
 	for _, policy := range controlRESTPolicies {
 		params, matched := matchControlRoute(policy, r.Method, r.URL.Path)
+		// Nonmatching routes cannot lend their grants to this request.
 		if !matched {
 			continue
 		}
 		requirements, valid := materializeRouteRequirements(policy.requirements, params, r.URL.Query(), actor.WorkspaceID)
+		// Malformed resource identities do not define usable grant requirements.
 		if !valid {
 			continue
 		}
 		kind := dynamicControlRequirements[policy.method+" "+policy.pattern]
+		// Dynamic routes must resolve their entire body-derived authority before dispatch.
 		if kind != "" {
 			// Body- and database-derived requirements are part of the same all-or-
 			// nothing authorization decision. Missing resolution is a denial, never
 			// permission to run with only the static subset.
 			if resolver == nil {
-				return nil, policy.pattern, false
+				return nil, policy.pattern, accesscontrol.ErrPolicyDenied
 			}
 			dynamic, err := resolver.ResolveControlRequirements(r.Context(), actor, kind, params, r)
-			if err != nil {
-				return nil, policy.pattern, false
-			}
-			requirements = append(requirements, dynamic...)
+			return append(requirements, dynamic...), policy.pattern, err
 		}
-		return requirements, policy.pattern, true
+		return requirements, policy.pattern, nil
 	}
-	return nil, "", false
+	return nil, "", accesscontrol.ErrPolicyDenied
 }
 
 func matchControlRoute(policy controlRoutePolicy, method, path string) (map[string]string, bool) {

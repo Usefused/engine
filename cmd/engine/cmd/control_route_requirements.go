@@ -362,23 +362,24 @@ func (r *storeBackedControlRequirementResolver) desiredConfigApplyRequirements(c
 	return append(requirements, selections...), nil
 }
 
+// desiredConfigPlanRequestRequirements retains mutation authority even when a
+// selection cannot resolve, so diagnostics never bypass the app access check.
 func (r *storeBackedControlRequirementResolver) desiredConfigPlanRequestRequirements(ctx context.Context, actor accesscontrol.Actor, request *http.Request) ([]accesscontrol.Requirement, error) {
 	var envelope struct {
 		ConfigKey string          `json:"config_key"`
 		Config    json.RawMessage `json:"config"`
 	}
+	// Unreadable envelopes cannot establish a trustworthy authorization target.
 	if err := decodeAndRestoreAuthorizationBody(request, &envelope); err != nil {
 		return nil, err
 	}
 	mutation, err := r.desiredConfigPlanMutationRequirement(ctx, actor.WorkspaceID, envelope.ConfigKey)
+	// App ownership must resolve before selection diagnostics are considered.
 	if err != nil {
 		return nil, err
 	}
 	selections, err := r.desiredConfigDocumentRequirements(ctx, actor.WorkspaceID, envelope.Config, accesscontrol.PermissionServiceRead, accesscontrol.PermissionBucketRead)
-	if err != nil {
-		return nil, err
-	}
-	return append(mutation, selections...), nil
+	return append(mutation, selections...), err
 }
 
 func (r *storeBackedControlRequirementResolver) desiredConfigPlanMutationRequirement(ctx context.Context, workspaceID uuid.UUID, configKey string) ([]accesscontrol.Requirement, error) {
@@ -654,6 +655,8 @@ func jsonValuesEqual(first, second json.RawMessage) bool {
 	return reflect.DeepEqual(left, right)
 }
 
+// desiredConfigDocumentRequirements resolves each submitted key through the
+// canonical matcher and keeps validation separate from actual grant denials.
 func (r *storeBackedControlRequirementResolver) desiredConfigDocumentRequirements(
 	ctx context.Context,
 	workspaceID uuid.UUID,
@@ -667,22 +670,27 @@ func (r *storeBackedControlRequirementResolver) desiredConfigDocumentRequirement
 			Secret string `json:"secret"`
 		} `json:"services"`
 	}
+	// Incomplete documents cannot safely establish service authorization targets.
 	if json.Unmarshal(raw, &doc) != nil || len(doc.Services) == 0 || r.store == nil {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
 	serviceNames := mapKeys(doc.Services)
-	services, err := r.store.ListWorkspaceServices(ctx, serviceNames)
-	if err != nil || len(services) != len(doc.Services) {
-		return nil, accesscontrol.ErrPolicyDenied
+	services, err := r.store.ResolveWorkspaceServiceIDsByKeys(ctx, serviceNames)
+	// Store outages are retryable dependency failures, never evidence of a typo.
+	if err != nil {
+		return nil, serviceResolutionUnavailable()
 	}
-	requirements := make([]accesscontrol.Requirement, 0, len(services)+1)
-	for _, service := range services {
-		requirements = append(requirements, accesscontrol.Requirement{
-			Permission: servicePermission,
-			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: service.ServiceID},
-		})
+	requirements, unresolved := desiredServiceRequirements(serviceNames, services, servicePermission)
+	requirements, err = r.appendDesiredConfigBucketRequirements(ctx, workspaceID, requirements, doc.Bucket, doc.Services, bucketPermission)
+	// Invalid bucket references still fail closed before any diagnostic is emitted.
+	if err != nil {
+		return nil, err
 	}
-	return r.appendDesiredConfigBucketRequirements(ctx, workspaceID, requirements, doc.Bucket, doc.Services, bucketPermission)
+	// Only unresolved keys are echoed; no workspace candidates or hidden names are disclosed.
+	if len(unresolved) > 0 {
+		return requirements, unresolvedConfigServices(unresolved)
+	}
+	return r.appendDesiredServiceCandidateRequirements(ctx, serviceNames, requirements, servicePermission)
 }
 
 func (r *storeBackedControlRequirementResolver) appendDesiredConfigBucketRequirements(

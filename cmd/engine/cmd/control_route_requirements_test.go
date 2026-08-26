@@ -18,21 +18,22 @@ import (
 
 type controlRequirementStoreStub struct {
 	store.Store
-	bucket          *store.Bucket
-	defaultID       uuid.UUID
-	services        []store.WorkspaceService
-	buckets         []store.Bucket
-	bucketLoads     int
-	defaultLoads    int
-	serviceLoads    int
-	batchBuckets    int
-	displayNames    map[accesscontrol.ResourceRef]string
-	displayLoads    int
-	localServiceIDs map[string]uuid.UUID
-	slugLoads       int
-	apps            map[uuid.UUID]store.App
-	appLoads        int
-	families        map[uuid.UUID]store.AppFamily
+	bucket            *store.Bucket
+	defaultID         uuid.UUID
+	services          []store.WorkspaceService
+	buckets           []store.Bucket
+	bucketLoads       int
+	defaultLoads      int
+	serviceLoads      int
+	batchBuckets      int
+	displayNames      map[accesscontrol.ResourceRef]string
+	displayLoads      int
+	localServiceIDs   map[string]uuid.UUID
+	serviceResolveErr error
+	slugLoads         int
+	apps              map[uuid.UUID]store.App
+	appLoads          int
+	families          map[uuid.UUID]store.AppFamily
 }
 
 func TestAppAccessRequirementsUseFamilyBoundary(t *testing.T) {
@@ -99,18 +100,39 @@ func (s *controlRequirementStoreStub) GetApp(_ context.Context, appID uuid.UUID)
 }
 
 // ResolveWorkspaceServiceIDsByKeys stands in for the Engine's local
-// fused_workspace_services mirror: only keys present in localServiceIDs
-// resolve, exactly like a real cache miss for a service never added to this
-// workspace before.
+// fused_workspace_services mirror using explicit resolutions or named fixture
+// services; absent keys behave like missing or ambiguous workspace references.
 func (s *controlRequirementStoreStub) ResolveWorkspaceServiceIDsByKeys(_ context.Context, keys []string) (map[string]uuid.UUID, error) {
 	s.slugLoads++
+	// Dependency failures must be distinguishable from successful empty lookups.
+	if s.serviceResolveErr != nil {
+		return nil, s.serviceResolveErr
+	}
+	local := s.localServiceIDs
+	// Older fixtures describe their workspace by rows rather than a key map.
+	if local == nil {
+		local = fixtureServiceIDs(s.services)
+	}
 	resolved := make(map[string]uuid.UUID, len(keys))
+	// Return only requested keys, matching the store's batched resolution contract.
 	for _, key := range keys {
-		if id, ok := s.localServiceIDs[key]; ok {
+		// Unknown keys cannot acquire a fabricated resource identity.
+		if id, ok := local[key]; ok {
 			resolved[key] = id
 		}
 	}
 	return resolved, nil
+}
+
+// fixtureServiceIDs lets named service fixtures participate in canonical lookup tests.
+func fixtureServiceIDs(services []store.WorkspaceService) map[string]uuid.UUID {
+	resolved := make(map[string]uuid.UUID)
+	// Fixture names and slugs identify the same local service without extra store calls.
+	for _, service := range services {
+		resolved[service.ServiceName] = service.ServiceID
+		resolved[service.ServiceSlug] = service.ServiceID
+	}
+	return resolved
 }
 
 func (s *controlRequirementStoreStub) GetBucketByName(context.Context, string) (*store.Bucket, error) {
@@ -352,12 +374,13 @@ func TestDynamicDesiredConfigApplyChoosesCreateOrManage(t *testing.T) {
 	}
 }
 
+// TestDynamicDesiredConfigPlanResolvesSelectionsInBatches prevents per-service lookup regressions.
 func TestDynamicDesiredConfigPlanResolvesSelectionsInBatches(t *testing.T) {
 	workspaceID := uuid.New()
 	serviceID := uuid.New()
 	bucketID := uuid.New()
 	stores := &controlRequirementStoreStub{
-		services: []store.WorkspaceService{{ServiceID: serviceID}},
+		services: []store.WorkspaceService{{ServiceID: serviceID, ServiceName: "payments"}},
 		buckets:  []store.Bucket{{ID: bucketID, Name: "production"}},
 	}
 	resolver := newControlRequirementResolver(stores, &controlConfigRepositoryStub{})
@@ -365,15 +388,19 @@ func TestDynamicDesiredConfigPlanResolvesSelectionsInBatches(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/sdk-config/plan", strings.NewReader(body))
 
 	requirements, err := resolver.ResolveControlRequirements(context.Background(), accesscontrol.Actor{WorkspaceID: workspaceID}, dynamicDesiredConfigPlan, nil, request)
+	// All app, service, and bucket authority must survive successful resolution.
 	if err != nil || len(requirements) != 3 {
 		t.Fatalf("requirements/error = %#v/%v", requirements, err)
 	}
 	configStore := resolver.(*storeBackedControlRequirementResolver).configStore.(*controlConfigRepositoryStub)
-	if stores.serviceLoads != 1 || stores.batchBuckets != 1 || configStore.stateLoads != 1 || configStore.stateKey != "sdk:payments:1.0.0" {
-		t.Fatalf("service/bucket/state loads = %d/%d/%d key=%q", stores.serviceLoads, stores.batchBuckets, configStore.stateLoads, configStore.stateKey)
+	// Resolution and legacy candidate authorization remain fixed-size batches.
+	if stores.slugLoads != 1 || stores.serviceLoads != 1 || stores.batchBuckets != 1 || configStore.stateLoads != 1 || configStore.stateKey != "sdk:payments:1.0.0" {
+		t.Fatalf("service/bucket/state loads = %d/%d/%d key=%q", stores.slugLoads, stores.batchBuckets, configStore.stateLoads, configStore.stateKey)
 	}
 }
 
+// TestWebhookPlanSecretReferencesRequireEveryBucketReadBeforeSideEffects keeps
+// reference diagnostics from bypassing any selected bucket's read grant.
 func TestWebhookPlanSecretReferencesRequireEveryBucketReadBeforeSideEffects(t *testing.T) {
 	workspaceID, serviceID, auditServiceID := uuid.New(), uuid.New(), uuid.New()
 	alphaID, betaID := uuid.New(), uuid.New()
@@ -393,6 +420,7 @@ func TestWebhookPlanSecretReferencesRequireEveryBucketReadBeforeSideEffects(t *t
 		accesscontrol.Grant{Permission: accesscontrol.PermissionBucketRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: alphaID}},
 	)
 	planWrites, registrationWrites, registryMutations := 0, 0, 0
+	// This downstream stub detects every attempted side effect after authorization.
 	handler := controlAuthorizationMiddleware(accesscontrol.SnapshotAuthorizer{}, resolver)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		planWrites++
 		registrationWrites++
@@ -403,11 +431,13 @@ func TestWebhookPlanSecretReferencesRequireEveryBucketReadBeforeSideEffects(t *t
 	request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), actor))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusForbidden || planWrites != 0 || registrationWrites != 0 || registryMutations != 0 {
+	// Missing access to any bucket must block the entire operation.
+	if [4]int{response.Code, planWrites, registrationWrites, registryMutations} != [4]int{http.StatusForbidden, 0, 0, 0} {
 		t.Fatalf("denied status/side effects = %d/%d/%d/%d", response.Code, planWrites, registrationWrites, registryMutations)
 	}
-	if stores.serviceLoads != 1 || stores.batchBuckets != 1 {
-		t.Fatalf("service/bucket batches = %d/%d, want 1/1", stores.serviceLoads, stores.batchBuckets)
+	// Service key resolution and bucket selection must remain batched.
+	if stores.slugLoads != 1 || stores.batchBuckets != 1 {
+		t.Fatalf("service/bucket batches = %d/%d, want 1/1", stores.slugLoads, stores.batchBuckets)
 	}
 	allowed := actorWithGrants(t, workspaceID,
 		accesscontrol.Grant{Permission: accesscontrol.PermissionAppCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
@@ -420,7 +450,8 @@ func TestWebhookPlanSecretReferencesRequireEveryBucketReadBeforeSideEffects(t *t
 	request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), allowed))
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusNoContent || planWrites != 1 || registrationWrites != 1 || registryMutations != 1 {
+	// Supplying the missing grant admits exactly one downstream operation.
+	if [4]int{response.Code, planWrites, registrationWrites, registryMutations} != [4]int{http.StatusNoContent, 1, 1, 1} {
 		t.Fatalf("allowed status/side effects = %d/%d/%d/%d", response.Code, planWrites, registrationWrites, registryMutations)
 	}
 }

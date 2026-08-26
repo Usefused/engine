@@ -599,10 +599,11 @@ func workspacePlanAuthorizationFixture(uuid.UUID) dynamicAuthorizationFixture {
 	}
 }
 
+// desiredConfigPlanAuthorizationFixture supplies named rows for canonical key resolution.
 func desiredConfigPlanAuthorizationFixture(uuid.UUID) dynamicAuthorizationFixture {
 	firstServiceID, secondServiceID, bucketID := uuid.New(), uuid.New(), uuid.New()
 	stores := &controlRequirementStoreStub{
-		services: []store.WorkspaceService{{ServiceID: firstServiceID}, {ServiceID: secondServiceID}},
+		services: []store.WorkspaceService{{ServiceID: firstServiceID, ServiceName: "payments"}, {ServiceID: secondServiceID, ServiceName: "identity"}},
 		buckets:  []store.Bucket{{ID: bucketID, Name: "production"}},
 	}
 	body := `{"config_key":"sdk:payments:1.0.0","config":{"bucket":"production","services":{"payments":{"version":"1"},"identity":{"version":"1"}}}}`

@@ -1017,9 +1017,11 @@ type sdkAuthResolutionTelemetry struct {
 // keeps agents and SDK consumers from guessing provider-specific auth names.
 func resolveAppAuthPolicies(ctx context.Context, registryClient sandbox.RegistryClient, apiKey string, services []sdkResolvedService, selections []models.SDKSelection) error {
 	fetcher, ok := registryClient.(sdkExecutionAuthContractFetcher)
+	// Missing contract support cannot establish authority for secured selections.
 	if !ok {
 		err := validateNoExecutionAuthContract(selections)
 		outcome := "success"
+		// Keep the existing bounded telemetry classification independent of display labels.
 		if err != nil {
 			outcome = "unavailable"
 		}
@@ -1027,32 +1029,40 @@ func resolveAppAuthPolicies(ctx context.Context, registryClient sandbox.Registry
 		return err
 	}
 	requests, err := sdkExecutionAuthContractSelections(services, selections)
+	// Parallel selection metadata must agree before per-service labels are reused.
 	if err != nil {
 		return err
 	}
 	contracts, err := fetcher.FetchServiceVersionExecutionAuthContracts(ctx, requests, apiKey)
+	// Dependency errors must never forward raw Registry messages or credentials.
 	if err != nil {
 		recordSDKAuthResolution(ctx, sdkAuthResolutionTelemetry{}, "registry_error")
 		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: "failed to resolve service auth policies"}
 	}
 	bySelection := make(map[string]sandbox.ServiceVersionExecutionAuthContract, len(contracts))
+	// Index the existing batch without introducing per-service metadata lookups.
 	for _, contract := range contracts {
 		bySelection[executionAuthContractKey(contract.ServiceID, contract.Version, contract.OperationNames, contract.SelectAll)] = contract
 	}
 	telemetry := sdkAuthResolutionTelemetry{}
+	// Every selected service retains its own already-resolved display context.
 	for index := range selections {
 		contract, exists := bySelection[executionAuthContractKey(requests[index].ServiceID, requests[index].Version, requests[index].OperationNames, requests[index].SelectAll)]
+		// A missing contract remains a rejected selection, now with an actionable label.
 		if !exists {
 			recordSDKAuthResolution(ctx, telemetry, "invalid_selection")
-			return workspaceConfigHTTPError{status: http.StatusBadRequest, message: fmt.Sprintf("service %s version auth contract was not found", selections[index].ServiceID)}
+			httpErr, _ := appAuthPolicyPlanError(appServiceValidationError{serviceID: selections[index].ServiceID, reason: "version auth contract was not found"}, services[index])
+			return httpErr
 		}
+		// Operation validation shares the same safe service-label projection as auth failures.
 		if err := validateSelectedOperations(requests[index], contract.Operations); err != nil {
 			recordSDKAuthResolution(ctx, telemetry, "invalid_selection")
-			return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
+			httpErr, _ := appAuthPolicyPlanError(err, services[index])
+			return httpErr
 		}
 		// Auth-policy failures retain whether the caller selection or provider contract caused the rejection.
 		if err := resolveSelectionAuthPolicy(&selections[index], contract, &telemetry); err != nil {
-			httpErr, outcome := appAuthPolicyPlanError(err)
+			httpErr, outcome := appAuthPolicyPlanError(err, services[index])
 			recordSDKAuthResolution(ctx, telemetry, outcome)
 			return httpErr
 		}
@@ -1061,8 +1071,9 @@ func resolveAppAuthPolicies(ctx context.Context, registryClient sandbox.Registry
 	return nil
 }
 
-// appAuthPolicyPlanError keeps malformed provider contracts distinct from caller-auth selection errors at the public plan boundary.
-func appAuthPolicyPlanError(err error) (workspaceConfigHTTPError, string) {
+// appAuthPolicyPlanError preserves failure classification while giving typed
+// selection errors the safe service labels already resolved for this plan.
+func appAuthPolicyPlanError(err error, service sdkResolvedService) (workspaceConfigHTTPError, string) {
 	// Contract defects require provider correction and must never be presented as missing bucket credentials.
 	if errors.Is(err, errInvalidServiceAuthContract) {
 		return workspaceConfigHTTPError{
@@ -1072,6 +1083,15 @@ func appAuthPolicyPlanError(err error) (workspaceConfigHTTPError, string) {
 			category:    "validation",
 			remediation: "Correct or reimport the service contract before creating the plan.",
 		}, "invalid_contract"
+	}
+	var selectionErr appServiceValidationError
+	// Only typed selection errors can be relabelled; never parse or rewrite arbitrary error text.
+	if errors.As(err, &selectionErr) {
+		return workspaceConfigHTTPError{
+			status:  http.StatusBadRequest,
+			message: appValidationServiceLabel(service, selectionErr.serviceID) + " " + selectionErr.reason,
+			details: map[string]any{"service_id": selectionErr.serviceID.String()},
+		}, "invalid_selection"
 	}
 	return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, "invalid_selection"
 }
@@ -1114,17 +1134,23 @@ func executionAuthContractKey(serviceID uuid.UUID, version string, operationName
 	return serviceID.String() + "\x00" + version + "\x00" + strings.Join(sortedUniqueStrings(operationNames), "\x00") + fmt.Sprintf("\x00%t", selectAll)
 }
 
+// validateSelectedOperations retains typed service identity so the public plan
+// boundary can name the configured service without changing operation checks.
 func validateSelectedOperations(selection sandbox.ServiceVersionExecutionAuthSelection, operations []sandbox.OperationSecuritySummary) error {
+	// Select-all has no individual requested names to reconcile.
 	if selection.SelectAll {
 		return nil
 	}
 	returned := make(map[string]struct{}, len(operations))
+	// The fetched contract remains authoritative for selected operation membership.
 	for _, operation := range operations {
 		returned[operation.Name] = struct{}{}
 	}
+	// Fail on the first absent operation without weakening the selection contract.
 	for _, name := range selection.OperationNames {
+		// Preserve the operation label separately from the service's opaque identity.
 		if _, exists := returned[name]; !exists {
-			return fmt.Errorf("service %s selected operation %q was not found", selection.ServiceID, name)
+			return appServiceValidationError{serviceID: selection.ServiceID, reason: fmt.Sprintf("selected operation %q was not found", name)}
 		}
 	}
 	return nil
@@ -1179,39 +1205,50 @@ func resolveSelectionAuthPolicy(selection *models.SDKSelection, contract sandbox
 	return validateAppScopes(selection, declaredOAuth2Scopes(*selected))
 }
 
+// preferredAppAuth preserves provider compatibility rules while returning typed
+// selection failures that can be labelled at the shared SDK/MCP plan boundary.
 func preferredAppAuth(selection models.SDKSelection, auths fusedobject.AuthConfigs, operations []sandbox.OperationSecuritySummary) (*fusedobject.AuthConfig, bool, error) {
 	explicit := selection.AuthType != "" || selection.AuthName != ""
+	// Without an explicit preference, each operation keeps provider-declared auth ordering.
 	if !explicit && len(selection.ConnectScopes) == 0 {
 		return nil, false, nil
 	}
 	matches := compatibleAppAuths(auths, operations, selection.AuthType, selection.AuthName)
 	scopeMatches := appAuthsAcceptingScopes(matches, selection.ConnectScopes)
+	// A compatible scheme with an invalid scope deserves the more precise scope failure.
 	if len(scopeMatches) == 0 && len(matches) > 0 && len(selection.ConnectScopes) > 0 {
 		candidate := selection
 		candidate.AuthType = sandbox.CanonicalFusedAuthType(matches[0])
 		candidate.AuthName = sandbox.AuthCredentialName(matches[0])
 		return nil, explicit, validateAppScopes(&candidate, declaredOAuth2Scopes(matches[0]))
 	}
+	// An explicit selector must remain compatible with every secured operation.
 	if len(scopeMatches) == 0 {
-		return nil, explicit, fmt.Errorf("service %s has no authentication scheme compatible with every secured selected operation", selection.ServiceID)
+		return nil, explicit, appServiceValidationError{serviceID: selection.ServiceID, reason: "has no authentication scheme compatible with every secured selected operation"}
 	}
+	// Multiple matches need caller disambiguation, not an arbitrary default.
 	if explicit && len(scopeMatches) > 1 {
-		return nil, true, fmt.Errorf("service %s auth selection is ambiguous; set auth.name", selection.ServiceID)
+		return nil, true, appServiceValidationError{serviceID: selection.ServiceID, reason: "auth selection is ambiguous; set auth.name"}
 	}
 	selected := scopeMatches[0]
 	return &selected, explicit, nil
 }
 
+// selectOperationAuthAlternatives retains the service identity when an operation
+// cannot satisfy the preferred scheme, without altering provider alternatives.
 func selectOperationAuthAlternatives(serviceID uuid.UUID, operations []sandbox.OperationSecuritySummary, preferred *fusedobject.AuthConfig) ([]authrouting.Alternative, error) {
 	selected := make([]authrouting.Alternative, 0, len(operations))
 	preferredName := ""
+	// Omitted preference preserves provider ordering rather than inventing a scheme.
 	if preferred != nil {
 		preferredName = preferred.Name
 	}
+	// Every secured operation must admit the selected auth branch.
 	for _, operation := range operations {
 		alternative, ok := firstOperationAuthAlternative(operation.SecurityRequirements, preferredName)
+		// A typed failure lets the plan boundary add the correct human service label.
 		if !ok {
-			return nil, fmt.Errorf("service %s auth selection cannot satisfy operation %q", serviceID, operation.Name)
+			return nil, appServiceValidationError{serviceID: serviceID, reason: fmt.Sprintf("auth selection cannot satisfy operation %q", operation.Name)}
 		}
 		selected = append(selected, alternative)
 	}
@@ -1475,16 +1512,20 @@ func authDecisionSource(telemetry sdkAuthResolutionTelemetry) string {
 // validateAppScopes lets an app narrow OAuth/OIDC permissions while
 // preventing config from requesting scopes absent from the provider contract.
 func validateAppScopes(selection *models.SDKSelection, allowed []string) error {
+	// Empty scope selections impose no additional OAuth consent ceiling.
 	if len(selection.ConnectScopes) == 0 {
 		return nil
 	}
+	// Static auth cannot satisfy connected-user consent requirements.
 	if selection.AuthType != "oauth" && selection.AuthType != "oidc" {
-		return fmt.Errorf("service %s connect scopes require oauth or oidc auth", selection.ServiceID)
+		return appServiceValidationError{serviceID: selection.ServiceID, reason: "connect scopes require oauth or oidc auth"}
 	}
 	allowedSet := stringSet(allowed)
+	// Every requested scope must be declared by the provider contract.
 	for _, scope := range selection.ConnectScopes {
+		// Keep the rejection intact while allowing public error projection to name the service.
 		if !allowedSet[scope] {
-			return fmt.Errorf("service %s connect scope %q is not provider-approved", selection.ServiceID, scope)
+			return appServiceValidationError{serviceID: selection.ServiceID, reason: fmt.Sprintf("connect scope %q is not provider-approved", scope)}
 		}
 	}
 	return nil
