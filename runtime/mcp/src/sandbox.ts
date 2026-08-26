@@ -1,10 +1,14 @@
 import vm from "node:vm";
 import { CallClientOptions, remoteCall } from "./callClient.js";
-import { EXECUTE_RESULT_OUTPUT_POLICY, SerializedJsonOutput, serializeBoundedJson } from "./outputLimits.js";
+import { SerializedJsonOutput, serializeBoundedJson } from "./outputLimits.js";
+import { DeliveredResult, EXECUTE_ERROR_OUTPUT_POLICY, isResultReference, RetainedResults } from "./retainedResults.js";
+import { executeOutputBudget, EXECUTE_INLINE_BYTES } from "./resultBudget.js";
+import { pageResult, ResultPageOptions } from "./resultPaging.js";
 
 export interface ExecuteLimits {
   timeoutMs: number;
   maxCalls: number;
+  outputBudgetBytes?: number;
 }
 
 export const DEFAULT_EXECUTE_LIMITS: ExecuteLimits = {
@@ -13,30 +17,73 @@ export const DEFAULT_EXECUTE_LIMITS: ExecuteLimits = {
 };
 
 /** Exposes only admitted text so no caller can accidentally serialize an untrusted result again. */
-export type ExecuteOutcome = SerializedJsonOutput;
+export interface ExecuteOutcome extends DeliveredResult {
+  access: ResultAccess;
+  outputBudgetBytes: number;
+}
+
+/** Tracks only bounded retrieval counts; references and result values never become audit metadata. */
+interface ResultAccess {
+  retained_reads: number;
+  unavailable_reads: number;
+}
 
 /**
- * SessionState is the design doc's "explicit session state" primitive
- * (session.get/set) -- deliberately not the same thing as the vm execution
- * realm, which is always fresh per invocation. One SessionState instance is
- * created per MCP session process and threaded into every runExecute call
- * for that session, so a script can stash a large intermediate result and a
- * later script in the same session can read it back, without either script's
- * vm realm (globals/prototypes) ever being reused.
- *
- * A plain in-memory Map is enough for the spike -- no SSE-reconnect
- * durability, no cross-process sharing. Both are explicitly out of scope
- * (sprint/lighter_mcp_runtime_spike_plan.md, Task 4).
+ * One SessionState belongs to one MCP process, while each invocation gets a
+ * fresh VM realm. Explicit script state keeps its existing API; automatic
+ * result snapshots have independent byte/count/expiry bounds. Neither store
+ * survives session closure or crosses a process/session boundary.
  */
 export class SessionState {
   private readonly store = new Map<string, unknown>();
+  private readonly results = new RetainedResults();
 
-  get(key: string): unknown {
+  /** Resolves retained results through the existing session API without a new provider invocation. */
+  get(key: string, access?: ResultAccess): unknown {
+    // Only the reserved namespace has expiry semantics; ordinary script state keeps its existing behavior.
+    if (isResultReference(key)) {
+      return this.readResult(key, access);
+    }
     return this.store.get(key);
   }
 
+  /** Preserves explicit script state without allowing it to overwrite runtime-owned result references. */
   set(key: string, value: unknown): void {
+    // Runtime snapshots must remain immutable even when a script guesses their namespace.
+    if (isResultReference(key)) {
+      throw new Error("MCP_RESULT_REFERENCE_RESERVED: Retained result references cannot be overwritten.");
+    }
     this.store.set(key, value);
+  }
+
+  /** Uses the invocation's budget for delivery as well as paging to prevent re-retaining a correctly sized page. */
+  deliver(value: unknown, maxBytes = EXECUTE_INLINE_BYTES): DeliveredResult {
+    return this.results.deliver(value, maxBytes);
+  }
+
+  /** Retrieves only immutable retained snapshots, sharing the existing payload-free read audit. */
+  page(key: string, options: ResultPageOptions = {}, maxBytes = EXECUTE_INLINE_BYTES, access?: ResultAccess): unknown {
+    executeOutputBudget(maxBytes);
+    // Arbitrary session.set values may contain hooks and are not admitted result snapshots.
+    if (!isResultReference(key)) throw new Error("MCP_RESULT_REFERENCE_INVALID: session.page requires a retained result reference.");
+    return pageResult(this.readResult(key, access), key, options, maxBytes);
+  }
+
+  /** Counts retained reads without retaining IDs or confusing an unavailable result with JSON null. */
+  private readResult(key: string, access?: ResultAccess): unknown {
+    // Direct host tests have no invocation observation, while sandbox reads always supply one.
+    if (access) {
+      access.retained_reads = Math.min(access.retained_reads + 1, 100_000);
+    }
+    try {
+      return this.results.get(key);
+    } catch (error) {
+      // The bounded unavailable count is enough to debug expiry without exposing a reference.
+      if (access) {
+        access.unavailable_reads = Math.min(access.unavailable_reads + 1, 100_000);
+      }
+      throw error;
+    }
   }
 }
 
@@ -64,10 +111,13 @@ export async function runExecute(
 ): Promise<ExecuteOutcome> {
   const deadline = Date.now() + limits.timeoutMs;
   const boundCall = buildBoundCall(callOptions, limits.maxCalls, callImpl);
-  const context = vm.createContext(buildSandboxGlobals(boundCall, session));
+  const access: ResultAccess = { retained_reads: 0, unavailable_reads: 0 };
   const wrapped = `(async () => {\n${script}\n})()`;
+  let outputBudget = EXECUTE_INLINE_BYTES;
 
   try {
+    outputBudget = executeOutputBudget(limits.outputBudgetBytes);
+    const context = vm.createContext(buildSandboxGlobals(boundCall, session, access, outputBudget));
     const compiled = new vm.Script(wrapped, { filename: "execute.ts" });
     // vm's own `timeout` guards one specific failure mode: a synchronous,
     // CPU-bound infinite loop (e.g. `while (true) {}`) in the script's
@@ -78,27 +128,29 @@ export async function runExecute(
     // why a second, independent mechanism is required).
     const resultPromise = compiled.runInContext(context, { timeout: limits.timeoutMs }) as Promise<unknown>;
     const result = await withWallClockTimeout(resultPromise, limits.timeoutMs);
-    return withinSerializationDeadline(() => serializeBoundedJson(result ?? null, EXECUTE_RESULT_OUTPUT_POLICY), deadline);
+    // Retention and previewing stay under the same deadline as user-defined serialization hooks.
+    const output = withinSerializationDeadline(() => session.deliver(result ?? null, outputBudget), deadline);
+    return { ...output, access, outputBudgetBytes: outputBudget };
   } catch (err) {
-    return serializeExecuteError(err, deadline, limits.timeoutMs);
+    return { ...serializeExecuteError(err, deadline, limits.timeoutMs, outputBudget), delivery: "error", access, outputBudgetBytes: outputBudget };
   }
 }
 
 /** Executes all user-provided serialization hooks under the invocation's remaining deadline. */
-function withinSerializationDeadline(serialize: () => ExecuteOutcome, deadline: number): ExecuteOutcome {
+function withinSerializationDeadline<T extends SerializedJsonOutput>(serialize: () => T, deadline: number): T {
   const remainingMs = deadline - Date.now();
   // An exhausted execution cannot acquire another timeout window while formatting its result.
   if (remainingMs <= 0) {
     throw new Error("execute serialization deadline exceeded");
   }
   const context = vm.createContext({ serialize });
-  return new vm.Script("serialize()", { filename: "execute-output.js" }).runInContext(context, { timeout: remainingMs }) as ExecuteOutcome;
+  return new vm.Script("serialize()", { filename: "execute-output.js" }).runInContext(context, { timeout: remainingMs }) as T;
 }
 
-/** Extracts and bounds error text inside the deadline because thrown values can contain hostile hooks. */
-function serializeExecuteError(error: unknown, deadline: number, timeoutMs: number): ExecuteOutcome {
+/** Renders hostile error hooks inside the deadline and honors smaller client output budgets. */
+function serializeExecuteError(error: unknown, deadline: number, timeoutMs: number, maxBytes: number): SerializedJsonOutput {
   try {
-    return withinSerializationDeadline(() => boundedExecuteError(describeError(error)), deadline);
+    return withinSerializationDeadline(() => boundedExecuteError(describeError(error), maxBytes), deadline);
   } catch {
     // Failure to render an error must never recurse through its getters or toString outside the VM.
     const timedOut = Date.now() >= deadline;
@@ -112,9 +164,9 @@ function serializeExecuteError(error: unknown, deadline: number, timeoutMs: numb
   }
 }
 
-/** Preserves ordinary Engine/script messages while making failures share the result byte ceiling. */
-function boundedExecuteError(message: string): ExecuteOutcome {
-  const output = serializeBoundedJson(message, EXECUTE_RESULT_OUTPUT_POLICY);
+/** Errors cannot be paged, so the smaller of the error policy and invocation budget is authoritative. */
+function boundedExecuteError(message: string, maxBytes: number): SerializedJsonOutput {
+  const output = serializeBoundedJson(message, { ...EXECUTE_ERROR_OUTPUT_POLICY, maxBytes: Math.min(maxBytes, EXECUTE_ERROR_OUTPUT_POLICY.maxBytes) });
   // Rejected messages retain the stable limit failure; accepted messages keep their original text.
   return output.isError ? output : { text: message, isError: true };
 }
@@ -183,12 +235,18 @@ function buildBoundCall(callOptions: CallClientOptions, maxCalls: number, callIm
 function buildSandboxGlobals(
   boundCall: (operationId: string, params?: Record<string, unknown>) => Promise<unknown>,
   session: SessionState,
+  access: ResultAccess,
+  maxBytes: number,
 ): Record<string, unknown> {
   return {
     call: boundCall,
     session: {
-      get: (key: string) => session.get(key),
+      // Invocation-local counts avoid cross-call attribution when several tools run concurrently.
+      get: (key: string) => session.get(key, access),
+      // Writes retain the existing explicit-state API but cannot replace runtime snapshots.
       set: (key: string, value: unknown) => session.set(key, value),
+      // Paging shares this invocation's output budget and retained-read audit without any provider transport.
+      page: (key: string, options?: ResultPageOptions) => session.page(key, options, maxBytes, access),
     },
     console,
     setTimeout,

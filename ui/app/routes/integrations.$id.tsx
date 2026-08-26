@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useEffect, useRef } from "react";
+import { AuthNameField } from "~/components/AuthNameField";
 import {
   useParams,
   Link,
@@ -1641,13 +1642,23 @@ function ServerConfigCard({ srv }: { srv: Service }) {
   );
 }
 
+// AuthConfigCard makes service-defined scheme names the primary discovery surface before expanding method details.
 function AuthConfigCard({ srv }: { srv: Service }) {
   const authConfigs = srv.auth_configs ?? [];
   const hasAuth = authConfigs.length > 0;
+  // Empty contracts have no auth selector to reveal or copy.
   return (
     <details className={`${configCardClass} ${hasAuth ? "cursor-pointer hover:bg-slate-100" : ""}`}>
       <summary className="flex list-none items-start justify-between outline-none">
-        <div><dt className="text-xs text-slate-500">Authentication</dt><dd className="mt-1 text-slate-800">{authConfigs.map((auth) => auth.type).join(", ") || "None"}</dd></div>
+        <div className="min-w-0">
+          <dt className="text-xs text-slate-500">Authentication schemes · auth.name</dt>
+          <dd className="mt-1 space-y-1 text-slate-800">
+            {/* Names are exact and case-sensitive; missing metadata must never be inferred from type. */}
+            {hasAuth ? authConfigs.map((auth, index) => (
+              <div key={index} className="break-all"><code className="font-mono text-xs">{auth.name || "Name not provided"}</code> <span className="text-xs text-slate-500">({auth.type})</span></div>
+            )) : "None"}
+          </dd>
+        </div>
         {hasAuth && <ChevronDown className="mt-1 h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" />}
       </summary>
       {hasAuth && <AuthConfigDetails authConfigs={authConfigs} />}
@@ -1655,15 +1666,19 @@ function AuthConfigCard({ srv }: { srv: Service }) {
   );
 }
 
+// AuthConfigDetails explains which names the service defines without conflating them with stored credentials or wire keys.
 function AuthConfigDetails({ authConfigs }: { authConfigs: AuthConfig[] }) {
   return (
     <div className="mt-3 space-y-3 border-t border-slate-200 pt-3 text-xs text-slate-700">
+      <p className="leading-relaxed text-slate-500">This service defines the scheme names below. Use the exact, case-sensitive name as <code>auth.name</code> in SDK/MCP config. Credentials stay in the bucket; <code>end_user_ref</code> identifies a connected user. Operations within this service may require different auth methods.</p>
+      {/* Separate schemes visually while keeping optional provider fields truthful to the contract. */}
       {authConfigs.map((auth, index) => (
         <div key={index} className={index > 0 ? "border-t border-slate-200 pt-3" : ""}>
-          {auth.type && <ConfigRow label="Type" value={auth.type} />}
-          {auth.scheme && <ConfigRow label="Scheme" value={auth.scheme} />}
+          <AuthNameField name={auth.name} />
+          {auth.type && <ConfigRow label="Provider type" value={auth.type} />}
+          {auth.scheme && <ConfigRow label="HTTP scheme" value={auth.scheme} />}
           {auth.location && <ConfigRow label="Location" value={auth.location} />}
-          {auth.key_name && <ConfigRow label="Key" value={auth.key_name} mono />}
+          {auth.key_name && <ConfigRow label="Request key" value={auth.key_name} mono />}
           <OAuth2FlowDetails auth={auth} />
         </div>
       ))}

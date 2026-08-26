@@ -88,13 +88,14 @@ describe("runExecute -- call() wiring", () => {
     expect(callImpl).toHaveBeenCalledTimes(2);
   });
 
+  // Delivery metadata stays separate from the public error text.
   it("a script error is returned as a clean error, not thrown", async () => {
     const outcome = await runExecute(
       'throw new Error("boom");',
       testCallOptions,
       new SessionState(),
     );
-    expect(outcome).toEqual({ isError: true, text: "boom" });
+    expect(outcome).toMatchObject({ isError: true, text: "boom", delivery: "error" });
   });
 });
 
@@ -130,7 +131,8 @@ describe("runExecute -- wall-clock timeout", () => {
 });
 
 describe("runExecute -- bounded output", () => {
-  it("applies the result limit to thrown error messages too", async () => {
+  // Errors cannot be retrieved by reference and need their own small inline ceiling.
+  it("bounds thrown error messages independently of stored results", async () => {
     const outcome = await runExecute(
       `throw new Error("x".repeat(${EXECUTE_RESULT_OUTPUT_POLICY.maxBytes + 1}));`,
       testCallOptions,
@@ -138,7 +140,7 @@ describe("runExecute -- bounded output", () => {
     );
 
     expect(outcome.isError).toBe(true);
-    expect(JSON.parse(outcome.text).code).toBe("MCP_EXECUTE_RESULT_LIMIT_EXCEEDED");
+    expect(JSON.parse(outcome.text).code).toBe("MCP_EXECUTE_ERROR_OUTPUT_LIMIT_EXCEEDED");
     expect(Buffer.byteLength(outcome.text, "utf8")).toBeLessThan(1024);
   });
 
@@ -189,6 +191,7 @@ describe("runExecute -- bounded output", () => {
     expect(resultValue(outcome)).toEqual({ admitted: true });
   });
 
+  // Error formatting must not re-evaluate stateful user code when adding delivery metadata.
   it("reads a thrown message getter only once before admitting its text", async () => {
     const outcome = await runExecute(
       "let reads = 0; throw { get message() { return ++reads === 1 ? 'safe text' : { unexpected: true }; } };",
@@ -196,7 +199,7 @@ describe("runExecute -- bounded output", () => {
       new SessionState(),
     );
 
-    expect(outcome).toEqual({ text: "safe text", isError: true });
+    expect(outcome).toMatchObject({ text: "safe text", isError: true, delivery: "error" });
   });
 
   it("returns stable serialization failures for circular and BigInt output", async () => {

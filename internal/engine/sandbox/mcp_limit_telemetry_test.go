@@ -26,19 +26,19 @@ func TestMCPMessageLimitTelemetryIgnoresOtherReadErrors(t *testing.T) {
 	}
 }
 
-// TestMCPRuntimeOutputLimitTelemetryAllowlist excludes successful content and arbitrary script errors.
+// TestMCPRuntimeOutputLimitTelemetryAllowlist checks admission and delivery policies without inspecting result values.
 func TestMCPRuntimeOutputLimitTelemetryAllowlist(t *testing.T) {
 	exporter := installStreamableTestTracer(t)
 	sess := &mcpSession{appID: "app-safe", transport: "sse", token: "secret-token"}
-	for _, code := range []string{"MCP_DOCUMENTATION_OUTPUT_LIMIT_EXCEEDED", "MCP_EXECUTE_RESULT_LIMIT_EXCEEDED"} {
+	for _, code := range []string{"MCP_DOCUMENTATION_OUTPUT_LIMIT_EXCEEDED", "MCP_EXECUTE_RESULT_LIMIT_EXCEEDED", "MCP_EXECUTE_ERROR_OUTPUT_LIMIT_EXCEEDED", "MCP_EXECUTE_VISIBLE_OUTPUT_LIMIT_EXCEEDED"} {
 		recordMCPRuntimeOutputLimit(context.Background(), sess, mcpLimitTestEnvelope(t, code, true))
 	}
 	recordMCPRuntimeOutputLimit(context.Background(), sess, mcpLimitTestEnvelope(t, "secret-error", true))
 	recordMCPRuntimeOutputLimit(context.Background(), sess, mcpLimitTestEnvelope(t, "MCP_EXECUTE_RESULT_LIMIT_EXCEEDED", false))
 	spans := exporter.GetSpans()
-	// Exactly the two known failed outputs may cross the telemetry boundary.
-	if len(spans) != 2 {
-		t.Fatalf("limit span count = %d, want 2", len(spans))
+	// Only the four fixed policy failures may cross the telemetry boundary.
+	if len(spans) != 4 {
+		t.Fatalf("limit span count = %d, want 4", len(spans))
 	}
 	for _, span := range spans {
 		attributes := mcpSearchTestAttributes(span)

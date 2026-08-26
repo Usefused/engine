@@ -777,7 +777,7 @@ func trackMCPToolCall(ctx context.Context, request mcpJSONRPCRequest, sess *mcpS
 	return callID
 }
 
-// completeMCPToolCall closes timeout tracking and any search span with only a bounded outcome.
+// completeMCPToolCall closes timeout ownership and audits trusted runtime outcomes exactly once.
 func completeMCPToolCall(sess *mcpSession, callID, response, errorCode string) {
 	// Notifications and malformed calls have no state to complete.
 	if callID == "" {
@@ -798,8 +798,9 @@ func completeMCPToolCall(sess *mcpSession, callID, response, errorCode string) {
 	if observation != nil {
 		finishMCPSearchObservation(observation, response, errorCode)
 	}
-	// Only the first completion may audit a rejected runtime output.
+	// Both transports converge here so timeout/response races cannot duplicate delivery audits.
 	if found {
 		recordMCPRuntimeOutputLimit(context.Background(), sess, response)
+		recordMCPRuntimeResultDelivery(context.Background(), sess, response)
 	}
 }

@@ -1038,6 +1038,7 @@ export interface AuthConnection {
   service_id: string;
   end_user_ref: string;
   auth_type: string;
+  auth_name?: string;
   token_type: string;
   scopes: string[];
   scope_source: string;

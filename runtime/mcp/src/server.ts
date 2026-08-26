@@ -10,7 +10,8 @@ import {
   searchDocs,
 } from "./searchDocs.js";
 import { callClientOptionsFromEnv } from "./callClient.js";
-import { runExecute, SessionState } from "./sandbox.js";
+import { DEFAULT_EXECUTE_LIMITS, runExecute, SessionState } from "./sandbox.js";
+import { EXECUTE_INLINE_BYTES, EXECUTE_MIN_OUTPUT_BYTES, EXECUTE_VISIBLE_OUTPUT_POLICY } from "./resultBudget.js";
 import {
   DOCUMENTATION_OUTPUT_POLICY,
   serializeBoundedJson,
@@ -30,6 +31,8 @@ const INSTRUCTIONS = [
   "For search_docs detail with kind unified, call the exact operation_id with { input, targets, selectors?, pagination?, idempotencyKey? }; targets must include every declared dependency, selectors and pagination are keyed by public target, and the Engine generates an SDK-equivalent UUID when idempotencyKey is omitted.",
   "search_docs with no arguments returns a bounded schema-free catalogue window. A query ranks physical and Unified callables together and includes callable detail. An exact operationId remains available when its public ID is already known.",
   "An execute script's body should end with `return <value>` -- that value is what gets reported back as the tool result.",
+  "Small execute results are returned directly. Larger admitted results return MCP_RESULT_STORED with a session-local result_ref and an explicitly incomplete structural preview. Use execute with session.get(result_ref) to inspect keys, select fields, or slice arrays/strings; do not repeat the provider call to retrieve data. References expire after five minutes or earlier eviction/session closure. MCP_RESULT_UNAVAILABLE requires a deliberate recovery decision, never an automatic retry of the operation.",
+  "For lists, project the needed fields in the first execute when they are already known. On overflow, read collections for exact array paths, counts, and immediate row fields. fields_complete=false or collections_complete=false means discovery omitted information; use session.get to inspect additional keys, never infer their absence. Return session.page(result_ref, {path, fields, offset}) directly to pack complete rows within the output budget. path is an RFC 6901 JSON Pointer (empty for a root array); fields are literal immediate keys, omitted for whole rows. Keep path/fields unchanged and use nextOffset for continuation; complete means no rows remain after the returned range, not that earlier pages are included. MCP_RESULT_ROW_TOO_LARGE requires narrower fields or session.get slicing, never a provider retry. outputBudgetBytes is an optional execute argument, default 16384, range 1024..65536; it limits UTF-8 JSON bytes, not tokens. Do not collect all pages into one oversized return value. For aggregates, compute inside execute and return only the answer.",
 ].join(" ");
 
 /** Starts one process-scoped MCP session with bounded tool outputs. */
@@ -106,10 +109,14 @@ function main(): void {
       title: "Execute a script",
       description:
         "Run a short TypeScript script that can call one or more operations via call(operationId, params) " +
-        "and chain their results, returning one final value. Fetch full schema via search_docs before " +
-        "referencing an operationId for the first time. Unified operations use the exact documented ID " +
+        "and chain their results, returning one final value. Use complete search_docs detail before " +
+        "referencing an operationId for the first time. Large results return a session-local result_ref; " +
+        "read collections metadata and return session.page(result_ref, {path, fields, offset}) for automatically sized pages, " +
+        "or use session.get(result_ref) for other projections, without repeating provider calls. Unified operations use the exact documented ID " +
         "and params { input, targets, selectors?, pagination?, idempotencyKey? }.",
       inputSchema: {
+        outputBudgetBytes: z.number().int().min(EXECUTE_MIN_OUTPUT_BYTES).max(EXECUTE_VISIBLE_OUTPUT_POLICY.maxBytes).optional()
+          .describe(`Maximum UTF-8 JSON bytes returned by this execute and its pages; defaults to ${EXECUTE_INLINE_BYTES}. Not a token count. Keep the same budget on continuation calls.`),
         script: z
           .string()
           .describe(
@@ -122,8 +129,11 @@ function main(): void {
     // The sandbox returns only trusted, already-bounded text, so the handler
     // cannot accidentally serialize user-controlled objects outside its deadline.
     async (args) => {
-      const output = await runExecute(args.script, callOptions, session);
-      return { content: [{ type: "text", text: output.text }], isError: output.isError };
+      const output = await runExecute(args.script, callOptions, session, { ...DEFAULT_EXECUTE_LIMITS, outputBudgetBytes: args.outputBudgetBytes });
+      return {
+        content: [{ type: "text", text: output.text }], isError: output.isError,
+        _meta: { "com.usefused/execute": { delivery: output.delivery, output_budget_bytes: output.outputBudgetBytes, ...output.access } },
+      };
     },
   );
 

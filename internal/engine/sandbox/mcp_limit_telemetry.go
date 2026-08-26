@@ -65,7 +65,7 @@ func recordMCPMessageLimit(ctx context.Context, appID, transport string, err err
 	})
 }
 
-// recordMCPRuntimeOutputLimit projects only fixed child-runtime rejection codes into Engine OTEL.
+// recordMCPRuntimeOutputLimit distinguishes storage admission from model-facing output ceilings in OTEL.
 func recordMCPRuntimeOutputLimit(ctx context.Context, sess *mcpSession, response string) {
 	code := mcpRuntimeOutputLimitCode(response)
 	observation := mcpLimitObservation{
@@ -77,6 +77,10 @@ func recordMCPRuntimeOutputLimit(ctx context.Context, sess *mcpSession, response
 		observation.Kind, observation.Maximum = "documentation_output", 64<<10
 	case "MCP_EXECUTE_RESULT_LIMIT_EXCEEDED":
 		observation.Kind, observation.Maximum = "execute_result", maxMCPPhysicalResultBytes
+	case "MCP_EXECUTE_ERROR_OUTPUT_LIMIT_EXCEEDED":
+		observation.Kind, observation.Maximum = "execute_error", mcpEffectiveOutputLimit(response, 8<<10)
+	case "MCP_EXECUTE_VISIBLE_OUTPUT_LIMIT_EXCEEDED":
+		observation.Kind, observation.Maximum = "execute_visible", mcpEffectiveOutputLimit(response, 64<<10)
 	default:
 		return
 	}

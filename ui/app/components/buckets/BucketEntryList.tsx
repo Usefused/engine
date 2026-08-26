@@ -3,6 +3,7 @@ import { type BucketValue, type SecretMeta } from "~/lib/api";
 import { formatExpiry } from "~/lib/buckets";
 import { bucketEntryActions } from "~/lib/bucket-entry-actions";
 import { BucketPagination } from "~/components/buckets/BucketPagination";
+import { StoredSecretKeys } from "~/components/buckets/StoredSecretKeys";
 
 type BucketEntryListProps = {
   loading: boolean;
@@ -24,6 +25,7 @@ type EntryRowModel = {
   name: string;
   detail: string;
   value: string;
+  storedSecret?: Pick<SecretMeta, "key_name" | "key_names">;
   onRemove: () => void;
 };
 
@@ -99,6 +101,7 @@ function bucketEntries(
   return values.map((item) => valueEntry(item, onRemoveValue));
 }
 
+/** Preserves the stored key metadata separately from the credential's friendly type label and masked value. */
 function secretEntry(
   item: SecretMeta,
   onRemove: (item: SecretMeta) => void
@@ -115,6 +118,7 @@ function secretEntry(
         ? item.credential_type
         : `${item.credential_type} · expires ${expiry}`,
     value: "********",
+    storedSecret: { key_name: item.key_name, key_names: item.key_names },
     onRemove: () => onRemove(item),
   };
 }
@@ -148,7 +152,7 @@ function valueEntry(
   };
 }
 
-/** Renders one entry while omitting destructive controls without manage access. */
+/** Shows secret storage identifiers without revealing their values or expanding the row's authorized actions. */
 function EntryRow({ entry, canRemove }: { entry: EntryRowModel; canRemove: boolean }) {
   const actions = bucketEntryActions(entry.kind, entry.value, canRemove);
   return (
@@ -162,6 +166,8 @@ function EntryRow({ entry, canRemove }: { entry: EntryRowModel; canRemove: boole
             {entry.name}
           </p>
           <p className="truncate text-xs text-slate-500">{entry.detail}</p>
+          {/* Only secret rows need separate storage metadata; environment rows already use their key as the title. */}
+          {entry.storedSecret && <StoredSecretKeys secret={entry.storedSecret} />}
         </div>
       </div>
       <EntryValue entry={entry} />

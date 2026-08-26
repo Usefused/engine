@@ -18,6 +18,7 @@ import {
 import { BucketPagination } from "~/components/buckets/BucketPagination";
 import { BucketServiceSelect } from "~/components/buckets/BucketServiceSelect";
 import { useToast } from "~/components/Toast";
+import { AuthNameField } from "~/components/AuthNameField";
 
 type BucketConnectedUsersTableProps = {
   loading: boolean;
@@ -99,6 +100,7 @@ export function BucketConnectedUsersTable({
   );
 }
 
+// ConnectedUserToolbar explains that the bucket stores a service-scheme binding, not a new scheme definition.
 function ConnectedUserToolbar({
   services,
   serviceSearch,
@@ -127,11 +129,12 @@ function ConnectedUserToolbar({
         onSearchChange={onServiceSearchChange}
         onSelectedServiceChange={onServiceFilterChange}
       />
+      <p className="mt-2 text-xs leading-relaxed text-slate-500">Stored auth name links each connection to a service-defined authentication scheme. Use it as <code>auth.name</code> in SDK/MCP config; <code>end_user_ref</code> identifies the connected user.</p>
     </div>
   );
 }
 
-/** Renders one connection and exposes resource mutations only to managers. */
+/** Shows the connection's stored scheme name independently of resource expansion and gates mutations. */
 function ConnectedUserRow({
   connection,
   serviceName,
@@ -215,6 +218,7 @@ function ConnectedUserRow({
         <div className="flex min-w-0 items-start gap-3">
           <UserRound className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
           <div className="min-w-0">
+            <p className="mb-1 text-xs text-slate-500">Connected user · <code>end_user_ref</code></p>
             <p className="truncate font-mono text-sm font-medium text-slate-900">
               {connection.end_user_ref}
             </p>
@@ -232,6 +236,10 @@ function ConnectedUserRow({
             )}
           </div>
         </div>
+      </div>
+      {/* Keep copy outside the clickable header so it never expands the row or fetches resources. */}
+      <div className="px-4 pb-4 pl-11">
+        <AuthNameField name={connection.auth_name} context="bucket" />
       </div>
       {expanded && (
         <div className="border-t border-slate-100 bg-slate-50/50 p-4">

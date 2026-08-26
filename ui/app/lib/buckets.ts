@@ -184,7 +184,7 @@ function readBucketSecrets(
     }));
 }
 
-/** Loads one page of connected users under connection-read permission. */
+/** Loads exact auth names with the existing connection page, avoiding per-user metadata requests. */
 function readBucketConnections(
   bucketId: string,
   page: BucketContentPages["connections"]
@@ -194,7 +194,7 @@ function readBucketConnections(
       `query BucketConnections($bucketId: String!, $limit: Int!, $offset: Int!, $serviceId: String) {
         authConnectionPage(bucket_id: $bucketId, service_id: $serviceId, limit: $limit, offset: $offset) {
           total
-          items { id bucket_id service_id end_user_ref auth_type token_type scopes scope_source issuer subject expires_at refresh_token_expires_at last_used_at refresh_state last_failure_code last_failure_at last_failure_trace_id created_at updated_at }
+          items { id bucket_id service_id end_user_ref auth_type auth_name token_type scopes scope_source issuer subject expires_at refresh_token_expires_at last_used_at refresh_state last_failure_code last_failure_at last_failure_trace_id created_at updated_at }
         }
       }`,
       {
