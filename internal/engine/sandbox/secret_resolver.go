@@ -486,8 +486,8 @@ func (r *secretResolver) decryptStoredSecret(serviceID uuid.UUID, sec store.Work
 	return val, nil
 }
 
-// resolveConnectedAuth turns a stable end-user reference into the actual
-// provider credential only inside Engine's execution path.
+// resolveConnectedAuth resolves OAuth/OIDC provider credentials inside Engine,
+// leaving named static schemes on the bucket-secret path even with user context.
 func (r *secretResolver) resolveConnectedAuth(ctx context.Context, bucketID, serviceID, serviceVersionID uuid.UUID, auths fusedobject.AuthConfigs, requirements authrouting.Requirements, credentials map[string]any) error {
 	endUserRef := connectedEndUserRef(credentials)
 	if !connectedAuthResolutionRequired(endUserRef, credentials, requirements) {
@@ -497,9 +497,13 @@ func (r *secretResolver) resolveConnectedAuth(ctx context.Context, bucketID, ser
 	if err != nil {
 		return err
 	}
+	// An empty result can be a validated static scheme, which needs no user connection.
 	if authName == "" {
-		// The user reference alone identifies who connected; the auth name tells
-		// the dispatcher which provider slot receives the decrypted access token.
+		// Named static auth has already been validated and loaded from bucket secrets.
+		if requestedAuthName(credentials) != "" {
+			return nil
+		}
+		// Identity context alone cannot identify a provider credential slot.
 		return errors.New("connected auth requires fused_auth_name or fused_auth_type")
 	}
 	conn, err := r.selectedUsableAuthConnection(ctx, bucketID, serviceID, serviceVersionID, endUserRef, authName, credentials)
@@ -629,28 +633,45 @@ func injectConnectedToken(credentials map[string]any, authName, token string) {
 	}
 }
 
-// selectedConnectedAuthName keeps public selection at the auth-type level while
-// returning the internal credential key applyAuth needs for token injection.
+// selectedConnectedAuthName validates named schemes before deciding whether they
+// need a connected account; static schemes remain on the bucket-secret path.
 func selectedConnectedAuthName(credentials map[string]any, auths fusedobject.AuthConfigs, requirements authrouting.Requirements) (string, error) {
-	if authName := credentialString(credentials, "fused_auth_name"); authName != "" {
-		if requirementAuthNameConfigured(auths, requirements, authName, "") {
-			return authName, nil
-		}
-		return "", fmt.Errorf("connected auth name %q is not configured for this operation", authName)
-	}
 	selector := requestedAuthType(credentials)
+	// A name must identify a required scheme and agree with any explicit type.
+	if authName := requestedAuthName(credentials); authName != "" {
+		return namedConnectedAuthName(auths, requirements, authName, selector)
+	}
+	// Preserve the existing default only when the caller has not selected an auth family.
 	if selector == "" {
 		return defaultConnectedAuthName(auths, requirements), nil
 	}
+	// Static type selection must not trigger connection lookup from unrelated user context.
 	if !isConnectedAuthSelector(selector) {
-		// Static auth can share request builders with connected auth. Selecting a
-		// static type must not trigger a user-connection lookup just because an
-		// endUserRef is present.
 		return "", nil
 	}
 	authName := connectedAuthNameForRequirements(auths, requirements, selector)
+	// An explicit connected family cannot fall back to a different credential type.
 	if authName == "" {
 		return "", fmt.Errorf("connected auth type %q is not configured for this service", selector)
+	}
+	return authName, nil
+}
+
+// namedConnectedAuthName classifies only a declared operation scheme, preventing
+// static selectors from bypassing a named OAuth/OIDC fixed binding.
+func namedConnectedAuthName(auths fusedobject.AuthConfigs, requirements authrouting.Requirements, authName, selector string) (string, error) {
+	authType, configured := requiredNamedAuthType(auths, requirements, authName)
+	// Unknown or unreferenced names are invalid even when a static type was supplied.
+	if !configured {
+		return "", fmt.Errorf("auth name %q is not configured for this operation", authName)
+	}
+	// A contradictory selector must fail before either binding lookup or secret selection.
+	if selector != "" && selector != authType {
+		return "", fmt.Errorf("auth type does not match auth name %q for this operation", authName)
+	}
+	// API keys, Basic, bearer and mTLS use bucket secrets rather than user connections.
+	if !isConnectedAuthSelector(authType) {
+		return "", nil
 	}
 	return authName, nil
 }
@@ -798,20 +819,29 @@ func connectedAuthNameForRequirements(auths fusedobject.AuthConfigs, requirement
 	return ""
 }
 
-func requirementAuthNameConfigured(auths fusedobject.AuthConfigs, requirements authrouting.Requirements, authName, selector string) bool {
+// requiredNamedAuthType resolves the scheme's declared family only when this
+// operation references it; service-wide definitions alone cannot authorize it.
+func requiredNamedAuthType(auths fusedobject.AuthConfigs, requirements authrouting.Requirements, authName string) (string, bool) {
 	definitions, err := fusedAuthDefinitions(auths)
+	// Ambiguous or incomplete definitions cannot establish a credential route.
 	if err != nil {
-		return false
+		return "", false
 	}
+	auth, ok := definitions[authName]
+	// Do not infer a scheme from the caller's name or selected auth family.
+	if !ok {
+		return "", false
+	}
+	// Preserve operation-local membership across its ordered security alternatives.
 	for _, alternative := range requirements {
 		for _, requirement := range alternative.Schemes {
-			auth, ok := definitions[requirement.Scheme]
-			if ok && authCredentialName(auth) == authName && isConnectedAuthSelector(canonicalFusedAuthType(auth)) && (selector == "" || canonicalFusedAuthType(auth) == selector) {
-				return true
+			// Exact scheme identity is authoritative; similar names never share credentials.
+			if requirement.Scheme == authName {
+				return canonicalFusedAuthType(auth), true
 			}
 		}
 	}
-	return false
+	return "", false
 }
 
 func authCredentialName(auth fusedobject.AuthConfig) string {
