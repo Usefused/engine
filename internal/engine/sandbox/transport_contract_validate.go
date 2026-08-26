@@ -21,26 +21,32 @@ const maxRuntimeSecurityAlternatives = 256
 // validateTransportContract is the single snapshot-admission boundary so every
 // operation is rejected before persistence when any executable surface drifts.
 func validateTransportContract(metadata *fusedobject.ServiceMetadata, endpoints []fusedobject.Endpoint, webhooks []fusedobject.Webhook) error {
+	// Missing service metadata cannot establish a trustworthy snapshot boundary.
 	if metadata == nil {
 		return errors.New("runtime transport contract is missing")
 	}
+	// Catalogue policy must validate before any operation is admitted.
 	if err := catalogcontract.Validate(metadata.Catalog); err != nil {
 		return err
 	}
+	// Executable verification remains owned by explicit policy, not documentary schemes.
 	if err := validateIncomingWebhookContract(metadata); err != nil {
 		return err
 	}
 	definitions, err := validateAuthDefinitions(metadata.AuthConfigs)
+	// Outbound credentials are validated solely for endpoint dispatch.
 	if err != nil {
 		return err
 	}
+	// Server templates must remain compatible with admitted operation transports.
 	if err := validateRuntimeServers(metadata.Servers); err != nil {
 		return err
 	}
+	// Only endpoint requirements may consume the service's outbound auth namespace.
 	if err := validateEndpointContracts(endpoints, definitions); err != nil {
 		return err
 	}
-	return validatePassiveContracts(metadata, endpoints, webhooks, definitions)
+	return validatePassiveContracts(metadata, endpoints, webhooks)
 }
 
 func validateIncomingWebhookContract(metadata *fusedobject.ServiceMetadata) error {

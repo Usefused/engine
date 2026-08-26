@@ -14,32 +14,38 @@ const maxDocumentationText = 64 << 10
 
 // validatePassiveContracts bounds preserved documentation and inbound metadata
 // even though those fields do not grant outbound execution capabilities.
-func validatePassiveContracts(metadata *fusedobject.ServiceMetadata, endpoints []fusedobject.Endpoint, webhooks []fusedobject.Webhook, definitions map[string]string) error {
+func validatePassiveContracts(metadata *fusedobject.ServiceMetadata, endpoints []fusedobject.Endpoint, webhooks []fusedobject.Webhook) error {
+	// Documentation remains bounded even though it cannot authorize execution.
 	if err := validateServiceDocumentation(metadata.Documentation); err != nil {
 		return err
 	}
 	for _, endpoint := range endpoints {
+		// Endpoint documentation admission is independent of credential routing.
 		if err := validateOperationDocumentation(endpoint.Documentation); err != nil {
 			return err
 		}
 	}
-	return validateInboundContracts(webhooks, definitions)
+	return validateInboundContracts(webhooks)
 }
 
-func validateInboundContracts(webhooks []fusedobject.Webhook, definitions map[string]string) error {
+// validateInboundContracts preserves legacy uploads while requiring self-contained standard contracts.
+func validateInboundContracts(webhooks []fusedobject.Webhook) error {
 	for _, webhook := range webhooks {
+		// Independently uploaded legacy webhooks have no standard security namespace to resolve.
 		if webhook.Contract == nil {
-			// Independently uploaded legacy webhooks intentionally remain valid.
 			continue
 		}
-		if err := validateInboundContract(webhook.Method, *webhook.Contract, definitions); err != nil {
+		// A present contract cannot borrow missing definitions from outbound credentials.
+		if err := validateInboundContract(webhook.Method, *webhook.Contract); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateInboundContract(method string, contract fusedobject.InboundOperationContract, definitions map[string]string) error {
+// validateInboundContract checks documentary security without creating executable verification policy.
+func validateInboundContract(method string, contract fusedobject.InboundOperationContract) error {
+	// Identity must be valid before its associated transport and security are trusted.
 	if err := validateInboundIdentity(contract); err != nil {
 		return err
 	}
@@ -47,15 +53,19 @@ func validateInboundContract(method string, contract fusedobject.InboundOperatio
 		Method: method, Path: contract.Path, OperationServers: contract.OperationServers,
 		Parameters: contract.Parameters, RequestContent: contract.RequestContent, Responses: contract.Responses,
 	}
+	// Shared transport checks retain the same inbound shape guarantees as before.
 	if err := validateInboundOperationTransport(endpoint); err != nil {
 		return err
 	}
-	if err := validateSecurityRequirements(contract.SecurityRequirements, definitions); err != nil {
+	// Only contract-local definitions may satisfy inbound security names.
+	if err := validateInboundSecurity(contract); err != nil {
 		return err
 	}
+	// Documentary server selections must still reference an effective operation server.
 	if err := validateSecurityServerSelections(contract.SecurityRequirements, contract.OperationServers); err != nil {
 		return err
 	}
+	// External documentation never bypasses passive metadata validation.
 	if err := validateExternalDocumentation(contract.ExternalDocs); err != nil {
 		return err
 	}

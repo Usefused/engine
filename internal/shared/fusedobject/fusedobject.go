@@ -227,7 +227,9 @@ type InboundOperationContract struct {
 	RequestContent       *RequestContent          `json:"request_content,omitempty"`
 	Responses            Responses                `json:"responses"`
 	SecurityRequirements authrouting.Requirements `json:"security_requirements"`
-	Extensions           NamespacedExtensions     `json:"extensions,omitempty"`
+	// SecuritySchemes resolves only this inbound contract's documentary requirements.
+	SecuritySchemes map[string]InboundSecurityScheme `json:"security_schemes,omitempty"`
+	Extensions      NamespacedExtensions             `json:"extensions,omitempty"`
 }
 
 const (

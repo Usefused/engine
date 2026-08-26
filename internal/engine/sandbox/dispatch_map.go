@@ -330,7 +330,9 @@ func mapLinkContracts(values map[string]fusedobject.LinkContract) map[string]mod
 	return mapped
 }
 
+// mapInboundOperationContract preserves documentary inbound security without joining the outbound credential namespace.
 func mapInboundOperationContract(value *fusedobject.InboundOperationContract) *models.InboundOperationContract {
+	// Legacy uploads intentionally have no standard inbound operation contract.
 	if value == nil {
 		return nil
 	}
@@ -340,7 +342,8 @@ func mapInboundOperationContract(value *fusedobject.InboundOperationContract) *m
 		ExternalDocs: mapExternalDocumentation(value.ExternalDocs), Deprecated: value.Deprecated,
 		OperationServers: mapServers(value.OperationServers), Parameters: mapParameters(value.Parameters),
 		RequestContent: mapRequestContent(value.RequestContent), Responses: mapResponses(value.Responses),
-		SecurityRequirements: value.SecurityRequirements, Extensions: mapNamespacedExtensions(value.Extensions),
+		SecurityRequirements: value.SecurityRequirements, SecuritySchemes: mapInboundSecuritySchemes(value.SecuritySchemes),
+		Extensions: mapNamespacedExtensions(value.Extensions),
 	}
 }
 
