@@ -19,8 +19,10 @@ import (
 )
 
 const (
-	Version               = "fused-canonical-json-v1"
-	MaxInputBytes         = 1 << 20
+	Version       = "fused-canonical-json-v1"
+	MaxInputBytes = 1 << 20
+	// Schema envelopes need room for large reference closures without enlarging ordinary request limits.
+	MaxSchemaInputBytes   = 4 << 20
 	MaxDepth              = 64
 	MaxValues             = 65536
 	MaxNumberDigits       = 4096
@@ -56,23 +58,46 @@ type parser struct {
 	values  int
 }
 
-// Canonicalize returns one deterministic representation of exactly one JSON
-// value while enforcing the same resource limits at every trust boundary.
+// Canonicalize applies the ordinary JSON profile, including its request-sized byte bound.
 func Canonicalize(raw []byte) ([]byte, error) {
-	if err := validateInput(raw); err != nil {
+	return canonicalizeBounded(raw, MaxInputBytes)
+}
+
+// CanonicalizeSchema uses the same wire format with a schema-specific byte allowance.
+// Depth, value count, number precision, and ambiguity checks remain unchanged.
+func CanonicalizeSchema(raw []byte) ([]byte, error) {
+	canonical, err := canonicalizeBounded(raw, MaxSchemaInputBytes)
+	// A failed input must not yield a partial schema envelope.
+	if err != nil {
+		return nil, err
+	}
+	// Escaping can enlarge valid input; persisted canonical bytes must be admissible on replay too.
+	if len(canonical) > MaxSchemaInputBytes {
+		return nil, fmt.Errorf("canonical schema JSON exceeds maximum output size %d", MaxSchemaInputBytes)
+	}
+	return canonical, nil
+}
+
+// canonicalizeBounded shares all canonicalization rules between the two closed resource profiles.
+func canonicalizeBounded(raw []byte, maxBytes int) ([]byte, error) {
+	// Validate size and text before allocating the parsed representation.
+	if err := validateInput(raw, maxBytes); err != nil {
 		return nil, err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	p := parser{decoder: decoder}
 	root, err := p.parseValue(0)
+	// Invalid or over-budget trees cannot yield an identity.
 	if err != nil {
 		return nil, err
 	}
+	// A second JSON value would make the chosen identity ambiguous.
 	if err := requireEnd(decoder); err != nil {
 		return nil, err
 	}
 	var output bytes.Buffer
+	// Encoding failures must not return a partial canonical representation.
 	if err := writeValue(&output, root); err != nil {
 		return nil, err
 	}
@@ -88,12 +113,23 @@ func SHA256(raw []byte) ([sha256.Size]byte, error) {
 	return sha256.Sum256(canonical), nil
 }
 
-// HexSHA256 returns the lowercase digest used by schema contracts.
+// HexSHA256 returns the lowercase digest under the ordinary JSON resource profile.
 func HexSHA256(raw []byte) (string, error) {
 	digest, err := SHA256(raw)
 	if err != nil {
 		return "", err
 	}
+	return hex.EncodeToString(digest[:]), nil
+}
+
+// HexSchemaSHA256 hashes schema envelopes with the same bytes and digest algorithm as ordinary JSON.
+func HexSchemaSHA256(raw []byte) (string, error) {
+	canonical, err := CanonicalizeSchema(raw)
+	// Hash only a complete, validated representation.
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(canonical)
 	return hex.EncodeToString(digest[:]), nil
 }
 
@@ -110,10 +146,13 @@ func Equal(left, right []byte) (bool, error) {
 	return bytes.Equal(leftCanonical, rightCanonical), nil
 }
 
-func validateInput(raw []byte) error {
-	if len(raw) > MaxInputBytes {
-		return fmt.Errorf("canonical JSON exceeds maximum input size %d", MaxInputBytes)
+// validateInput fails before hashing when input cannot have one portable canonical representation.
+func validateInput(raw []byte, maxBytes int) error {
+	// The selected profile is checked before any decoding allocations.
+	if len(raw) > maxBytes {
+		return fmt.Errorf("canonical JSON exceeds maximum input size %d", maxBytes)
 	}
+	// Invalid UTF-8 cannot have a portable cross-runtime identity.
 	if !utf8.Valid(raw) {
 		return fmt.Errorf("canonical JSON must be UTF-8")
 	}

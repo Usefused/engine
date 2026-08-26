@@ -35,7 +35,8 @@ func Validate(contract *fusedobject.SchemaContract) error {
 	if err != nil || len(decoded) != sha256.Size || contract.ContentHash != strings.ToLower(contract.ContentHash) {
 		return errors.New("schema contract content hash is invalid")
 	}
-	expected, err := canonicaljson.HexSHA256(contract.Raw)
+	expected, err := canonicaljson.HexSchemaSHA256(contract.Raw)
+	// Registry and Engine admit the same schema profile without widening execution request limits.
 	if err != nil {
 		return errors.New("schema contract raw value is invalid")
 	}

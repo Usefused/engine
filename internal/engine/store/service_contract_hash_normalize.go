@@ -323,15 +323,19 @@ func normalizeHashExtensions(values fusedobject.NamespacedExtensions) (fusedobje
 	return out, nil
 }
 
+// normalizeHashSchema preserves schema identity across jsonb reserialization using Registry's schema profile.
 func normalizeHashSchema(value *fusedobject.SchemaContract) (*fusedobject.SchemaContract, error) {
+	// Absent schemas must remain absent in the service identity.
 	if value == nil {
 		return nil, nil
 	}
+	// Integrity is checked before normalized bytes enter the service hash input.
 	if err := schemacontract.Validate(value); err != nil {
 		return nil, err
 	}
 	out := *value
-	canonical, err := canonicaljson.Canonicalize(out.Raw)
+	canonical, err := canonicaljson.CanonicalizeSchema(out.Raw)
+	// Never hash a partial or over-budget canonical representation.
 	if err != nil {
 		return nil, fmt.Errorf("canonicalize service contract schema: %w", err)
 	}

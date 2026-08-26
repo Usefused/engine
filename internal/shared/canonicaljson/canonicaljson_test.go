@@ -15,6 +15,7 @@ type conformanceVector struct {
 type conformanceFixture struct {
 	Version               string `json:"version"`
 	MaxInputBytes         int    `json:"max_input_bytes"`
+	MaxSchemaInputBytes   int    `json:"max_schema_input_bytes"`
 	MaxDepth              int    `json:"max_depth"`
 	MaxValues             int    `json:"max_values"`
 	MaxNumberDigits       int    `json:"max_number_digits"`
@@ -55,9 +56,11 @@ func TestCanonicalizeConformsToFusedV1Fixture(t *testing.T) {
 	}
 }
 
+// matchesImplementation binds both resource profiles to the portable wire contract.
 func (f conformanceFixture) matchesImplementation() bool {
 	return f.Version == Version &&
 		f.MaxInputBytes == MaxInputBytes &&
+		f.MaxSchemaInputBytes == MaxSchemaInputBytes &&
 		f.MaxDepth == MaxDepth &&
 		f.MaxValues == MaxValues &&
 		f.MaxNumberDigits == MaxNumberDigits &&
@@ -116,7 +119,8 @@ func TestSHA256UsesSemanticCanonicalForm(t *testing.T) {
 func localConformanceFixture() conformanceFixture {
 	return conformanceFixture{
 		Version: Version, MaxInputBytes: MaxInputBytes, MaxDepth: MaxDepth,
-		MaxValues: MaxValues, MaxNumberDigits: MaxNumberDigits,
+		MaxSchemaInputBytes: 4 << 20,
+		MaxValues:           MaxValues, MaxNumberDigits: MaxNumberDigits,
 		MaxAbsDecimalExponent: MaxAbsDecimalExponent,
 		Vectors: []conformanceVector{
 			{Name: "object_order", Inputs: []string{`{"b":1,"a":true}`, ` { "a": true, "b": 1.0 } `}, Canonical: `{"a":true,"b":1}`, SHA256: "a3f44886ecd0b8667b0c6a4652d41e1f9e8205fb8d35d299fd20577f5268adb6"},
