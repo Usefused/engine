@@ -248,7 +248,6 @@ func TestBoundedMCPPhysicalCallErrorExplainsPaginationFailures(t *testing.T) {
 		want       string
 	}{
 		{name: "invalid intent", err: &engine.PaginationIntentValidationError{Reason: engine.PaginationIntentInvalidValue}, wantStatus: http.StatusBadRequest, want: "mcp_pagination_max_pages_invalid"},
-		{name: "opaque invalid intent", err: engine.ErrPaginationIntentInvalid, wantStatus: http.StatusBadRequest, want: "mcp_pagination_intent_invalid"},
 		{name: "page limit", err: &engine.PaginationError{Code: "max_pages"}, wantStatus: http.StatusUnprocessableEntity, want: "mcp_pagination_max_pages"},
 		{name: "duration limit", err: &engine.PaginationError{Code: "max_duration"}, wantStatus: http.StatusGatewayTimeout, want: "mcp_pagination_max_duration"},
 		{name: "unsafe continuation", err: &engine.PaginationError{Code: "untrusted_next_url"}, wantStatus: http.StatusBadGateway, want: "mcp_pagination_untrusted_next_url"},
@@ -275,6 +274,7 @@ func TestBoundedMCPPaginationIntentErrorProvidesExactCallCorrection(t *testing.T
 		{name: "not supported", err: &engine.PaginationIntentValidationError{Reason: engine.PaginationIntentNotSupported}, want: `mcp_pagination_not_supported: operation "gmail.users.messages.get" is not paginated; use call("gmail.users.messages.get", params) without a pagination option`},
 		{name: "lower bound available", err: &engine.PaginationIntentValidationError{Reason: engine.PaginationIntentBoundNotLower, EngineMaxPages: 10}, want: `mcp_pagination_bound_not_lower: operation "gmail.users.messages.get" has an Engine page limit of 10; use pagination.maxPages between 1 and 9, or omit pagination`},
 		{name: "no lower bound", err: &engine.PaginationIntentValidationError{Reason: engine.PaginationIntentBoundNotLower, EngineMaxPages: 1}, want: `mcp_pagination_bound_not_lower: operation "gmail.users.messages.get" has an Engine page limit of 1, so no lower positive pagination.maxPages exists; use call("gmail.users.messages.get", params) without a pagination option`},
+		{name: "unknown future reason", err: &engine.PaginationIntentValidationError{Reason: "future"}, want: mcpPaginationIntentUnknown},
 	}
 	// Exact strings make the error a stable executable recovery contract rather than advisory prose.
 	for _, test := range tests {

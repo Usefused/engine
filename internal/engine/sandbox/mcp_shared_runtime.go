@@ -24,8 +24,8 @@ import (
 // JSON value returned to the sandboxed child runtime.
 const maxMCPPhysicalResultBytes = 1 << 20
 
-// mcpPaginationIntentFallback recovers safely when an opaque legacy error has no reviewed policy details.
-const mcpPaginationIntentFallback = "mcp_pagination_intent_invalid: omit pagination, then use search_docs to confirm whether this operation supports a lower pagination.maxPages bound"
+// mcpPaginationIntentUnknown fails closed if a newer Engine reason reaches an older MCP adapter.
+const mcpPaginationIntentUnknown = "mcp_pagination_intent_invalid: omit pagination, then use search_docs to confirm whether this operation supports a lower pagination.maxPages bound"
 
 // mcpCallRequest preserves params as JSON until exact catalogue kind is known,
 // avoiding numeric changes to Unified input while retaining physical map decoding.
@@ -541,10 +541,6 @@ func boundedMCPPhysicalCallError(operationID string, err error) (int, string) {
 	if errors.As(err, &paginationErr) {
 		return http.StatusBadRequest, boundedMCPPaginationIntentError(operationID, paginationErr)
 	}
-	// The legacy sentinel remains a bounded fallback for opaque resolution failures without policy details.
-	if errors.Is(err, engine.ErrPaginationIntentInvalid) {
-		return http.StatusBadRequest, mcpPaginationIntentFallback
-	}
 	// Typed pagination failures retain a stable code and bounded recovery guidance instead of a generic wrapper.
 	if code := engine.PaginationFailureCode(err); code != "" {
 		return boundedMCPPaginationFailure(code)
@@ -568,7 +564,7 @@ func boundedMCPPaginationIntentError(operationID string, validationErr *engine.P
 		return boundedMCPPaginationBoundError(publicOperationID, validationErr.EngineMaxPages)
 	default:
 		// Unknown future reasons fail closed without inventing policy-specific guidance.
-		return mcpPaginationIntentFallback
+		return mcpPaginationIntentUnknown
 	}
 }
 
