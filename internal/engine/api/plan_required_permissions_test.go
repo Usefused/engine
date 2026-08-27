@@ -3,8 +3,10 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -90,6 +92,50 @@ func TestConfigPlanActionsRefreshesRequiredPermissionsInResponse(t *testing.T) {
 	}
 	if string(configStore.plan.RequiredPermissions) == "" {
 		t.Fatal("updated plan did not persist required permissions")
+	}
+}
+
+// TestConfigPlanActionsFailuresUseStructuredMutationEnvelope verifies store
+// sentinels retain status semantics plus exact pre-commit plan identity.
+func TestConfigPlanActionsFailuresUseStructuredMutationEnvelope(t *testing.T) {
+	tests := []struct {
+		name       string
+		storeError error
+		status     int
+		code       string
+	}{
+		{name: "apply in progress", storeError: store.ErrConfigPlanApplyInProgress, status: http.StatusConflict, code: "plan_apply_in_progress"},
+		{name: "not pending", storeError: store.ErrConfigPlanNotFound, status: http.StatusNotFound, code: "config_plan_not_pending"},
+		{name: "internal", storeError: errors.New("database password=fsk_never_return"), status: http.StatusInternalServerError, code: "plan_actions_update_failed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			accountID, planID := uuid.New(), uuid.New()
+			configStore := &mockConfigStore{plan: &store.ConfigPlan{ID: planID, Status: store.ConfigPlanStatusPending}, err: test.storeError}
+			router := newControlTestRouter(accountID)
+			router.Use(func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					actor, _ := accesscontrol.ActorFromContext(r.Context())
+					requirements := []accesscontrol.Requirement{{Permission: accesscontrol.PermissionWorkspaceUpdate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: actor.WorkspaceID}}}
+					next.ServeHTTP(w, r.WithContext(accesscontrol.ContextWithRequiredPermissions(r.Context(), requirements)))
+				})
+			})
+			router.Patch("/config/plans/{planId}/actions", ConfigPlanActionsHandler(configStore, &workspaceTestStore{accountID: accountID}))
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPatch, "/config/plans/"+planID.String()+"/actions", bytes.NewBufferString(`{"actions":[]}`))
+
+			router.ServeHTTP(response, request)
+
+			var envelope workspaceConfigErrorResponse
+			// Every store outcome carries one stable code and the non-commit proof.
+			if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil || response.Code != test.status || envelope.Error.Code != test.code || envelope.Error.Phase != "plan_action_update" || envelope.Error.OperationID != planID.String() || envelope.Error.CommitState != "not_committed" {
+				t.Fatalf("plan action envelope = %#v, status=%d, decode error=%v", envelope, response.Code, err)
+			}
+			// Unknown persistence prose must remain private even on the internal branch.
+			if strings.Contains(response.Body.String(), "fsk_never_return") || strings.Contains(response.Body.String(), "database password") {
+				t.Fatalf("plan action response leaked store cause: %s", response.Body.String())
+			}
+		})
 	}
 }
 

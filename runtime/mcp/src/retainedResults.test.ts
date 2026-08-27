@@ -32,6 +32,11 @@ it("returns incomplete fields and collection counts without scalar samples", () 
   expect(envelope.complete).toBe(false);
   expect(envelope.preview.fields[0]).toMatchObject({ name: "items", preview: { type: "array", count: 200, complete: false } });
   expect(JSON.stringify(envelope)).not.toContain("PRIVATE_SENTINEL");
+  expect(envelope).toMatchObject({ recovery_action: "continue_stored_result", execute_request: "use_next_request", provider_execution: "complete", automatic_replay: false });
+  expect(envelope.session).toEqual({ scope: "current_mcp_connection", same_session_required: true });
+  expect(envelope.next_request).toMatchObject({ tool: "execute", arguments: { outputBudgetBytes: EXECUTE_INLINE_BYTES } });
+  expect(envelope.next_request.arguments.script).toBe(`return session.page(${JSON.stringify(envelope.result_ref)}, {path:"/items",offset:0});`);
+  expect(envelope.next_request.arguments.script).not.toContain("call(");
   expect(results.get(envelope.result_ref)).toEqual(value);
 });
 
@@ -92,6 +97,54 @@ it("bounds deep previews and omits oversized keys without corrupting stored data
   const envelope = store(results, value);
   expect(envelope.preview).toMatchObject({ count: 1, fields: [], complete: false });
   expect(results.get(envelope.result_ref)).toEqual(value);
+});
+
+// Minimum-budget navigation must retain an executable same-session request even when no row projection can fit.
+it("preserves executable recovery for oversized rows at the minimum output budget", async () => {
+  const session = new SessionState();
+  const options = { sessionId: "synthetic", enginePort: "1" };
+  const callImpl = vi.fn();
+  const stored = await runExecute('return {rows:Array(100).fill({["k".repeat(128)]:"PRIVATE_SENTINEL".repeat(100)})}', options, session, { timeoutMs: 30_000, maxCalls: 10, outputBudgetBytes: 1024 }, callImpl);
+  const envelope = JSON.parse(stored.text);
+  expect(Buffer.byteLength(JSON.stringify(envelope))).toBeLessThanOrEqual(1024);
+  expect(envelope.code).toBe("MCP_RESULT_STORED");
+  expect(envelope).toMatchObject({ recovery_action: "continue_stored_result", execute_request: "use_next_request", provider_execution: "complete", automatic_replay: false });
+  expect(envelope.session).toMatchObject({ same_session_required: true });
+  expect(envelope.next_request.tool).toBe("execute");
+  const next = await runExecute(envelope.next_request.arguments.script, options, session, { timeoutMs: 30_000, maxCalls: 10, outputBudgetBytes: 1024 }, callImpl);
+  expect(next.isError).toBe(false);
+  expect(JSON.parse(next.text)).toMatchObject({ recovery_action: "adjust_result_projection", execute_request: "adjust_projection", provider_execution: "complete", type: "object" });
+  expect(callImpl).not.toHaveBeenCalled();
+  expect(JSON.stringify(envelope)).not.toContain("PRIVATE_SENTINEL");
+});
+
+// Compact type-specific continuations keep legal root values recoverable at the public minimum budget.
+it("delivers and executes minimum-budget continuations for root strings and objects", async () => {
+  const options = { sessionId: "synthetic", enginePort: "1" };
+  for (const script of ['return "x".repeat(20000)', 'return {body:"x".repeat(20000)}']) {
+    const session = new SessionState();
+    const stored = await runExecute(script, options, session, { timeoutMs: 30_000, maxCalls: 10, outputBudgetBytes: 1024 });
+    const envelope = JSON.parse(stored.text);
+    // Every admitted stored result must expose a usable reference rather than a visible-output error.
+    expect(stored.delivery).toBe("stored");
+    expect(envelope.result_ref).toMatch(/^fused-result:/);
+    const next = await runExecute(envelope.next_request.arguments.script, options, session, { timeoutMs: 30_000, maxCalls: 10, outputBudgetBytes: 1024 });
+    expect(next.isError).toBe(false);
+    expect(JSON.parse(next.text)).toMatchObject({ recovery_action: "adjust_result_projection", execute_request: "adjust_projection", provider_execution: "complete" });
+  }
+});
+
+// Long provider-authored paths fall back before their exact text can crowd the retained reference out of the envelope.
+it("keeps long-path retained results recoverable at the minimum budget", async () => {
+  const session = new SessionState();
+  const options = { sessionId: "synthetic", enginePort: "1" };
+  const stored = await runExecute('return {["k".repeat(256)]:Array(20).fill({id:1,body:"x".repeat(100)})}', options, session, { timeoutMs: 30_000, maxCalls: 10, outputBudgetBytes: 1024 });
+  const envelope = JSON.parse(stored.text);
+  expect(stored.delivery).toBe("stored");
+  expect(envelope.result_ref).toMatch(/^fused-result:/);
+  const next = await runExecute(envelope.next_request.arguments.script, options, session, { timeoutMs: 30_000, maxCalls: 10, outputBudgetBytes: 1024 });
+  expect(next.isError).toBe(false);
+  expect(JSON.parse(next.text)).toMatchObject({ provider_execution: "complete" });
 });
 
 // Retrieval is a pure session read, so repeated selection cannot repeat a provider side effect.

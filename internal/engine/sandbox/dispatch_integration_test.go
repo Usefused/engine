@@ -29,6 +29,7 @@ type richMockCache struct {
 	path                 string
 	method               string
 	responses            fusedobject.Responses
+	parameters           fusedobject.Parameters
 	securityRequirements authrouting.Requirements
 }
 
@@ -41,9 +42,12 @@ func (m *richMockCache) GetOrFetchServiceMetadata(ctx context.Context, appID str
 	}
 	return m.obj, nil
 }
+
+// GetEndpoint returns the exact transport contract configured by each dispatch fixture.
 func (c *richMockCache) GetEndpoint(ctx context.Context, appID string, serviceID string, endpointName string) (*fusedobject.Endpoint, error) {
+	// Only the two fixture operations are admitted so out-of-scope dispatch remains fail-closed.
 	if endpointName == "list_items" || endpointName == "do_thing" {
-		return &fusedobject.Endpoint{Name: endpointName, ID: c.epID, Path: c.path, Method: c.method, Responses: c.responses, SecurityRequirements: c.testSecurityRequirements()}, nil
+		return &fusedobject.Endpoint{Name: endpointName, ID: c.epID, Path: c.path, Method: c.method, Parameters: c.parameters, Responses: c.responses, SecurityRequirements: c.testSecurityRequirements()}, nil
 	}
 	return nil, fmt.Errorf("not found")
 }

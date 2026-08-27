@@ -3,15 +3,20 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/google/uuid"
 )
 
+// TestUpsertSecretHandler_UnknownBucketReturnsNotFound verifies secret writes
+// preserve the stable structured bucket diagnosis without exposing the value.
 func TestUpsertSecretHandler_UnknownBucketReturnsNotFound(t *testing.T) {
 	fixture := newSecretsFixture()
 	fixture.store.bucketErr = store.ErrBucketNotFound
@@ -32,8 +37,44 @@ func TestUpsertSecretHandler_UnknownBucketReturnsNotFound(t *testing.T) {
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for unknown bucket, got %d body=%s", rr.Code, rr.Body.String())
 	}
+	var envelope workspaceConfigErrorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &envelope); err != nil || envelope.Error.Code != "bucket_not_found" || envelope.Error.Remediation == "" {
+		t.Fatalf("secret error envelope = %#v, decode error=%v", envelope, err)
+	}
+	// Bucket admission failure proves the secret never reached encryption or persistence.
+	if envelope.Error.Phase != "secret_upsert" || envelope.Error.CommitState != "not_committed" || envelope.Error.OperationID != "" {
+		t.Fatalf("unexpected mutation metadata: %#v", envelope.Error)
+	}
+	if bytes.Contains(rr.Body.Bytes(), []byte("secret-token")) {
+		t.Fatalf("secret error reflected credential material: %s", rr.Body.String())
+	}
 	if fixture.store.upsertedSecret != nil {
 		t.Fatal("secret must not be persisted when bucket ownership check fails")
+	}
+}
+
+// TestUpsertSecretHandler_UnknownSaveOutcomeRequiresInspection verifies an
+// ambiguous repository result remains safe and does not recommend blind retry.
+func TestUpsertSecretHandler_UnknownSaveOutcomeRequiresInspection(t *testing.T) {
+	fixture := newSecretsFixture()
+	fixture.store.upsertErr = errors.New("ambiguous commit with private backend detail")
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
+	body := bytes.NewReader([]byte(`{"service_id":"` + fixture.serviceID.String() + `","key_name":"Authorization","credential_type":"bearer","value":"secret-token"}`))
+	req := httptest.NewRequest(http.MethodPut, "/workspace/secrets", body)
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	var envelope workspaceConfigErrorResponse
+	// Unknown commit metadata must be present without reflecting secret or store detail.
+	if err := json.Unmarshal(rr.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode error envelope: %v", err)
+	}
+	if rr.Code != http.StatusInternalServerError || envelope.Error.Code != "secret_save_failed" || envelope.Error.Phase != "secret_upsert" || envelope.Error.CommitState != "unknown" || envelope.Error.OperationID != "" {
+		t.Fatalf("unexpected error response: status=%d error=%#v", rr.Code, envelope.Error)
+	}
+	if !strings.Contains(envelope.Error.Remediation, "Inspect") || strings.Contains(rr.Body.String(), "secret-token") || strings.Contains(rr.Body.String(), "private backend detail") {
+		t.Fatalf("unsafe or unactionable response: %s", rr.Body.String())
 	}
 }
 

@@ -10,33 +10,35 @@ import (
 )
 
 const (
-	engineMigrationAdvisoryLockKey      int64 = 0x465553454E47494E
-	engineMigrationLockQuery                  = `SELECT pg_advisory_xact_lock($1)`
-	engineMigrationVersion              int64 = 1
-	engineMigrationName                       = "20260810_engine_schema_convergence"
-	appTokenPolicyMigrationVersion      int64 = 2
-	appTokenPolicyMigrationName               = "20260810_app_token_policy"
-	contractEnvelopeMigrationVersion    int64 = 3
-	contractEnvelopeMigrationName             = "20260811_execution_contract_envelope"
-	idempotencyMediaMigrationVersion    int64 = 4
-	idempotencyMediaMigrationName             = "20260811_idempotency_response_media"
-	connectBrandingMigrationVersion     int64 = 5
-	connectBrandingMigrationName              = "20260819_connect_branding"
-	connectBrandColorMigrationVersion   int64 = 6
-	connectBrandColorMigrationName            = "20260819_connect_brand_color"
-	connectBrandVioletMigrationVersion  int64 = 7
-	connectBrandVioletMigrationName           = "20260819_connect_brand_violet"
-	managedOAuthRefreshMigrationVersion int64 = 8
-	managedOAuthRefreshMigrationName          = "20260820_managed_oauth_refresh"
-	restExecutionMigrationVersion       int64 = 9
-	restExecutionMigrationName                = "20260820_rest_execution_transport"
-	appTokenHistoryMigrationVersion     int64 = 10
-	appTokenHistoryMigrationName              = "20260822_app_token_history"
-	appTokenCleanupMigrationVersion     int64 = 11
-	appTokenCleanupMigrationName              = "20260822_app_token_history_cleanup"
-	mcpSessionLifetimeMigrationVersion  int64 = 12
-	mcpSessionLifetimeMigrationName           = "20260826_mcp_session_max_lifetime"
-	unifiedEmptySetHash                       = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+	engineMigrationAdvisoryLockKey         int64 = 0x465553454E47494E
+	engineMigrationLockQuery                     = `SELECT pg_advisory_xact_lock($1)`
+	engineMigrationVersion                 int64 = 1
+	engineMigrationName                          = "20260810_engine_schema_convergence"
+	appTokenPolicyMigrationVersion         int64 = 2
+	appTokenPolicyMigrationName                  = "20260810_app_token_policy"
+	contractEnvelopeMigrationVersion       int64 = 3
+	contractEnvelopeMigrationName                = "20260811_execution_contract_envelope"
+	idempotencyMediaMigrationVersion       int64 = 4
+	idempotencyMediaMigrationName                = "20260811_idempotency_response_media"
+	connectBrandingMigrationVersion        int64 = 5
+	connectBrandingMigrationName                 = "20260819_connect_branding"
+	connectBrandColorMigrationVersion      int64 = 6
+	connectBrandColorMigrationName               = "20260819_connect_brand_color"
+	connectBrandVioletMigrationVersion     int64 = 7
+	connectBrandVioletMigrationName              = "20260819_connect_brand_violet"
+	managedOAuthRefreshMigrationVersion    int64 = 8
+	managedOAuthRefreshMigrationName             = "20260820_managed_oauth_refresh"
+	restExecutionMigrationVersion          int64 = 9
+	restExecutionMigrationName                   = "20260820_rest_execution_transport"
+	appTokenHistoryMigrationVersion        int64 = 10
+	appTokenHistoryMigrationName                 = "20260822_app_token_history"
+	appTokenCleanupMigrationVersion        int64 = 11
+	appTokenCleanupMigrationName                 = "20260822_app_token_history_cleanup"
+	mcpSessionLifetimeMigrationVersion     int64 = 12
+	mcpSessionLifetimeMigrationName              = "20260826_mcp_session_max_lifetime"
+	workspaceAuthReferenceMigrationVersion int64 = 15
+	workspaceAuthReferenceMigrationName          = "20260826_workspace_auth_references"
+	unifiedEmptySetHash                          = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
 )
 
 // mcpSessionLifetimeEndReasonConstraint is the frozen v12 constraint shared by
@@ -141,6 +143,7 @@ func engineMigrations() []engineMigration {
 		{Version: mcpSessionLifetimeMigrationVersion, Name: mcpSessionLifetimeMigrationName, Queries: mcpSessionLifetimeMigrationQueries()},
 		{Version: 13, Name: "20260826_unified_receipts_session_metadata", Queries: activityReceiptMigrationQueries()},
 		{Version: 14, Name: "20260826_generation_contract_pins", Queries: generationContractPinMigrationQueries()},
+		{Version: workspaceAuthReferenceMigrationVersion, Name: workspaceAuthReferenceMigrationName, Queries: workspaceAuthReferenceMigrationQueries()},
 	}
 }
 
@@ -835,6 +838,32 @@ func engineSchemaQueries() []string {
 		);`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_workspace_services_slug_ci
 		ON fused_workspace_services(lower(service_slug)) WHERE service_slug IS NOT NULL;`,
+
+		// Auth references point at local service identities rather than copied
+		// values. Target removal cleans its own binding; source removal is blocked
+		// while another service still depends on that credential family.
+		`CREATE TABLE IF NOT EXISTS fused_workspace_auth_references (
+			id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			bucket_id         uuid NOT NULL REFERENCES fused_buckets(id) ON DELETE CASCADE,
+			target_service_id uuid NOT NULL,
+			target_auth_type  text NOT NULL,
+			target_auth_name  text NOT NULL,
+			source_service_id uuid NOT NULL,
+			source_auth_type  text NOT NULL,
+			source_auth_name  text NOT NULL,
+			created_at        timestamptz NOT NULL DEFAULT NOW(),
+			updated_at        timestamptz NOT NULL DEFAULT NOW(),
+			CONSTRAINT uq_fused_workspace_auth_reference_target UNIQUE (bucket_id, target_service_id, target_auth_name),
+			CONSTRAINT fk_fused_workspace_auth_reference_target FOREIGN KEY (target_service_id)
+				REFERENCES fused_workspace_services(service_id) ON DELETE CASCADE,
+			CONSTRAINT fk_fused_workspace_auth_reference_source FOREIGN KEY (source_service_id)
+				REFERENCES fused_workspace_services(service_id) ON DELETE NO ACTION,
+			CONSTRAINT chk_fused_workspace_auth_reference_not_self CHECK (
+				target_service_id <> source_service_id OR target_auth_name <> source_auth_name
+			)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_workspace_auth_reference_source
+		ON fused_workspace_auth_references(bucket_id, source_service_id, source_auth_name);`,
 
 		// clock_timestamp() records enablement order inside a single transaction;
 		// NOW() would give every row in one apply the same timestamp.
@@ -1852,6 +1881,16 @@ func mcpSessionLifetimeMigrationQueries() []string {
 	return []string{
 		`ALTER TABLE fused_mcp_sessions DROP CONSTRAINT IF EXISTS chk_fused_mcp_sessions_end_reason;`,
 		`ALTER TABLE fused_mcp_sessions ADD ` + mcpSessionLifetimeEndReasonConstraint + `;`,
+	}
+}
+
+// workspaceAuthReferenceMigrationQueries converges engines that created the
+// source FK before composite target+source removal became atomic.
+func workspaceAuthReferenceMigrationQueries() []string {
+	return []string{
+		`ALTER TABLE fused_workspace_auth_references DROP CONSTRAINT IF EXISTS fk_fused_workspace_auth_reference_source;`,
+		`ALTER TABLE fused_workspace_auth_references ADD CONSTRAINT fk_fused_workspace_auth_reference_source
+			FOREIGN KEY (source_service_id) REFERENCES fused_workspace_services(service_id) ON DELETE NO ACTION;`,
 	}
 }
 

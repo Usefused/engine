@@ -35,28 +35,33 @@ import (
 )
 
 type mcpSession struct {
-	metadataMu         sync.Mutex
-	clientMetadata     mcpsession.Metadata
-	clientInfoRecorded bool
-	appID              string
-	sessionID          string
-	tokenID            uuid.UUID
-	protocolVersion    string
-	transport          string
-	cmd                *exec.Cmd
-	stdin              io.WriteCloser
-	cancel             context.CancelFunc
-	lifecycleCtx       context.Context
-	requestMu          sync.Mutex
-	pendingRequests    map[string]struct{}
-	searchTelemetry    map[string]*mcpSearchObservation
-	pendingMu          sync.Mutex
-	idleTimer          *time.Timer
-	responses          chan string
-	token              string
-	activityMu         sync.Mutex
-	ended              bool // Guarded by activityMu so late activity cannot rearm a retired session's timer.
-	lastActivityAt     time.Time
+	lifecycleMu         sync.Mutex // Serializes initialization, child-write admission, and terminal lifecycle transitions.
+	metadataMu          sync.Mutex
+	clientMetadata      mcpsession.Metadata
+	clientInfoRecorded  bool
+	initialized         bool
+	initializeRequestID string
+	appID               string
+	sessionID           string
+	tokenID             uuid.UUID
+	protocolVersion     string // Guarded by activityMu once the session is registered and negotiation can race termination.
+	transport           string
+	cmd                 *exec.Cmd
+	stdin               io.WriteCloser
+	cancel              context.CancelFunc
+	lifecycleCtx        context.Context
+	requestMu           sync.Mutex
+	pendingRequests     map[string]struct{}
+	searchTelemetry     map[string]*mcpSearchObservation
+	pendingMayExecute   map[string]bool
+	pendingMu           sync.Mutex
+	idleTimer           *time.Timer
+	responses           chan string
+	sseFailures         chan mcpSSEFailure
+	token               string
+	activityMu          sync.Mutex
+	ended               bool // Guarded by activityMu so late activity cannot rearm a retired session's timer.
+	lastActivityAt      time.Time
 
 	// fixture is this session's own operation catalog, built at connect time
 	// from the app version's AppRuntime.Selections (mcp_session_fixture.go), scoping
@@ -67,6 +72,12 @@ type mcpSession struct {
 	// never exposed as a tool argument. It mirrors the fused envelope an SDK
 	// method would send while keeping identity/routing out of model-authored JS.
 	authContext map[string]any
+}
+
+// mcpSSEFailure couples a compact client response with its stable terminal lifecycle reason.
+type mcpSSEFailure struct {
+	payload   string
+	endReason string
 }
 
 var globalNATSClient *messaging.NATSClient
@@ -154,14 +165,16 @@ func activeMCPSessionCount() int {
 	return len(mcpSessions.m)
 }
 
+// writeError preserves the shared HTTP error shape while delegating JSON escaping to the encoder.
 func writeError(w http.ResponseWriter, status int, msg string) {
+	// Missing SQL rows are an absence result, not an internal storage failure.
 	if msg == "no rows in result set" {
 		status = http.StatusNotFound
 		msg = "resource not found"
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, msg)))
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 // InitSandbox wires the process-owned physical and logical execution edges used by SDK and MCP transports.
@@ -208,7 +221,7 @@ func InitWebhookRoutes(r chi.Router) {
 // observability.Start. Kept as a var (not an interface) to avoid adding an
 // unnecessary abstraction layer for a single call site.
 //
-// Why injectable: engineExecuteCore must be fully testable without a live
+// Injection keeps engineExecuteCore fully testable without a live
 // OTEL collector, and we want to assert that credentials are never placed
 // in span refs/attrs.
 var observabilityStartFunc = func(ctx context.Context, name, parentID string, tags ...string) (observability.Thread, error) {

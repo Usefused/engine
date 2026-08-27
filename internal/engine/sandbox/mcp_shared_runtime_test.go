@@ -7,11 +7,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
+	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
+	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -51,6 +54,24 @@ func registerTestMCPSession(t *testing.T, token string, fixture *Fixture) string
 		mcpSessions.Unlock()
 	})
 	return sessionID
+}
+
+// TestMCPCallHandlerUnavailableSessionReturnsTypedRecovery keeps the private bridge from collapsing session loss to prose.
+func TestMCPCallHandlerUnavailableSessionReturnsTypedRecovery(t *testing.T) {
+	sessionID := uuid.NewString()
+	request := httptest.NewRequest(http.MethodPost, "/mcp/call", bytes.NewBufferString(`{"operation_id":"fixture.read","params":{}}`))
+	request.Header.Set("Authorization", "Bearer "+sessionID)
+	response := httptest.NewRecorder()
+	mcpCallHandler(response, request)
+
+	var body mcpCallResponse
+	// The bridge exposes only the agent decision, while transport state remains internal telemetry.
+	if json.Unmarshal(response.Body.Bytes(), &body) != nil || response.Code != http.StatusNotFound || body.Code != "MCP_BRIDGE_SESSION_UNAVAILABLE" || body.RecoveryAction != "reinitialize_connection" || body.ExecuteRequest != "reformat_if_session_state_used" || body.ProviderExecution != "not_started" || body.AutomaticReplay == nil || *body.AutomaticReplay {
+		t.Fatalf("bridge session recovery = status:%d body:%+v raw:%s", response.Code, body, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), sessionID) {
+		t.Fatalf("bridge response exposed session identity: %s", response.Body.String())
+	}
 }
 
 // TestMcpCallHandlerUsesOnlySessionFixture proves the artifact-derived catalog
@@ -163,6 +184,81 @@ func TestMCPCallWriterBoundsFailureText(t *testing.T) {
 	// Escaped error text must be replaced completely, without retaining provider bytes.
 	if got := recorder.Body.String(); got != "{\"error\":\"mcp_call_result_too_large\"}\n" {
 		t.Fatalf("bounded error body = %s", got)
+	}
+}
+
+// TestDecodeMCPPhysicalPaginationIntentUsesCanonicalBounds proves the bridge does not create a second pagination policy.
+func TestDecodeMCPPhysicalPaginationIntentUsesCanonicalBounds(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   *mcpPhysicalPaginationIntent
+		want    int
+		wantErr bool
+	}{
+		{name: "omitted"},
+		{name: "one page", value: &mcpPhysicalPaginationIntent{MaxPages: 1}, want: 1},
+		{name: "zero", value: &mcpPhysicalPaginationIntent{}, wantErr: true},
+		{name: "above ceiling", value: &mcpPhysicalPaginationIntent{MaxPages: paginationpolicy.CeilingMaxPages + 1}, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			intent, err := decodeMCPPhysicalPaginationIntent(test.value)
+			// Error presence and the decoded value together distinguish every public shape.
+			if (err != nil) != test.wantErr {
+				t.Fatalf("decode error = %v, wantErr %v", err, test.wantErr)
+			}
+			// Omission must remain nil so automatic pagination retains its full policy.
+			if test.value == nil {
+				if intent != nil {
+					t.Fatalf("omitted intent = %#v, want nil", intent)
+				}
+				return
+			}
+			// Only valid controls produce a canonical Engine value.
+			if !test.wantErr && (intent == nil || intent.MaxPages != test.want) {
+				t.Fatalf("decoded intent = %#v, want max pages %d", intent, test.want)
+			}
+		})
+	}
+}
+
+// TestContextWithMCPPhysicalExecutionIdentityBindsPagination proves replay identity includes caller result-size intent.
+func TestContextWithMCPPhysicalExecutionIdentityBindsPagination(t *testing.T) {
+	params := map[string]any{"userId": "me"}
+	without := contextWithMCPPhysicalExecutionIdentity(context.Background(), params, nil)
+	with := contextWithMCPPhysicalExecutionIdentity(context.Background(), params, &engine.PaginationIntent{MaxPages: 1})
+	intent, ok := engine.PaginationIntentFromContext(with)
+	// A present option must reach the canonical Dispatcher context unchanged.
+	if !ok || intent.MaxPages != 1 {
+		t.Fatalf("pagination intent = %#v/%v", intent, ok)
+	}
+	// Equal provider params with different pagination semantics cannot share replay identity.
+	if requestBodyHashFromContext(without) == requestBodyHashFromContext(with) {
+		t.Fatal("pagination intent did not change the request hash")
+	}
+}
+
+// TestBoundedMCPPhysicalCallErrorExplainsPaginationFailures keeps stable codes and bounded remediation at the script boundary.
+func TestBoundedMCPPhysicalCallErrorExplainsPaginationFailures(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		want       string
+	}{
+		{name: "invalid intent", err: engine.ErrPaginationIntentInvalid, wantStatus: http.StatusBadRequest, want: "mcp_pagination_intent_invalid"},
+		{name: "page limit", err: &engine.PaginationError{Code: "max_pages"}, wantStatus: http.StatusUnprocessableEntity, want: "mcp_pagination_max_pages"},
+		{name: "duration limit", err: &engine.PaginationError{Code: "max_duration"}, wantStatus: http.StatusGatewayTimeout, want: "mcp_pagination_max_duration"},
+		{name: "unsafe continuation", err: &engine.PaginationError{Code: "untrusted_next_url"}, wantStatus: http.StatusBadGateway, want: "mcp_pagination_untrusted_next_url"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			statusCode, message := boundedMCPPhysicalCallError(test.err)
+			// The fixed prefix remains machine-readable while the suffix carries recovery guidance.
+			if statusCode != test.wantStatus || !bytes.HasPrefix([]byte(message), []byte(test.want+":")) {
+				t.Fatalf("mapped failure = %d/%q, want %d/%q prefix", statusCode, message, test.wantStatus, test.want)
+			}
+		})
 	}
 }
 
@@ -293,6 +389,86 @@ func TestMcpCallHandler_EndToEndDispatchesThroughEngineExecuteCore(t *testing.T)
 	if resolver.passthrough["fused_end_user_ref"] != "customer-42" || resolver.passthrough["fused_resource_id"] != resourceID {
 		t.Fatalf("MCP middleware lost connected-user context: %#v", resolver.passthrough)
 	}
+}
+
+type mcpPaginatedCache struct {
+	*richMockCache
+	pagination *fusedobject.PaginationConfig
+}
+
+// GetEndpoint adds pagination to the shared physical fixture without changing its scope, auth, or transport behavior.
+func (cache *mcpPaginatedCache) GetEndpoint(ctx context.Context, appID, serviceID, endpointName string) (*fusedobject.Endpoint, error) {
+	endpoint, err := cache.richMockCache.GetEndpoint(ctx, appID, serviceID, endpointName)
+	// The base fixture remains authoritative for exact operation admission.
+	if err != nil {
+		return nil, err
+	}
+	cloned := *endpoint
+	cloned.Pagination = cache.pagination
+	return &cloned, nil
+}
+
+// TestMcpCallHandlerAppliesPhysicalPaginationBeforeReturning proves standard and caller-bounded traversal stay inside Engine and precede result handling.
+func TestMcpCallHandlerAppliesPhysicalPaginationBeforeReturning(t *testing.T) {
+	providerCalls := 0
+	vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		providerCalls++
+		// The continuation query proves Engine, rather than the MCP session layer, owns traversal.
+		if request.URL.Query().Get("cursor") == "page-two" {
+			_, _ = w.Write([]byte(`{"items":[{"id":"older"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"items":[{"id":"latest"}],"next":"page-two"}`))
+	}))
+	defer vendor.Close()
+
+	sessionID, endpointName, _ := configureMCPPhysicalCallTest(t, vendor.URL)
+	baseCache := globalObjectCache.(*richMockCache)
+	baseCache.parameters = fusedobject.Parameters{{Name: "cursor", In: "query", Type: "string"}}
+	globalObjectCache = &mcpPaginatedCache{richMockCache: baseCache, pagination: testCursorPagination("cursor", "$.next")}
+
+	statusCode, response := executeMCPPhysicalHandlerTest(t, sessionID, endpointName, nil)
+	// Omission must exhaust standard provider pagination and publish only the completed aggregate.
+	if statusCode != http.StatusOK || providerCalls != 2 || string(response.Result) != `{"items":[{"id":"latest"},{"id":"older"}]}` {
+		t.Fatalf("automatic pagination = %d/%s, provider calls = %d", statusCode, response.Result, providerCalls)
+	}
+
+	providerCalls = 0
+	statusCode, _ = executeMCPPhysicalHandlerTest(t, sessionID, endpointName, &mcpPhysicalPaginationIntent{MaxPages: paginationpolicy.DefaultMaxPages})
+	// Equal policy limits are rejected before provider I/O because only strict reductions can return partial results.
+	if statusCode != http.StatusBadRequest || providerCalls != 0 {
+		t.Fatalf("non-tightening intent = %d, provider calls = %d", statusCode, providerCalls)
+	}
+
+	statusCode, response = executeMCPPhysicalHandlerTest(t, sessionID, endpointName, &mcpPhysicalPaginationIntent{MaxPages: 1})
+	// One provider page must complete and aggregate before the bridge exposes its successful result.
+	if statusCode != http.StatusOK || providerCalls != 1 {
+		t.Fatalf("physical pagination = %d/%s, provider calls = %d", statusCode, response.Result, providerCalls)
+	}
+	// Consumed continuation state is Engine metadata and must not survive in the returned provider document.
+	if string(response.Result) != `{"items":[{"id":"latest"}]}` {
+		t.Fatalf("paginated result = %s", response.Result)
+	}
+}
+
+// executeMCPPhysicalHandlerTest drives one authenticated bridge request and decodes its bounded response.
+func executeMCPPhysicalHandlerTest(t *testing.T, sessionID, endpointName string, pagination *mcpPhysicalPaginationIntent) (int, mcpCallResponse) {
+	t.Helper()
+	body, err := json.Marshal(mcpCallRequest{OperationID: endpointName, Params: json.RawMessage(`{}`), Pagination: pagination})
+	// Test setup must stop before dispatch if the trusted request fixture cannot encode.
+	if err != nil {
+		t.Fatalf("encode MCP physical request: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/mcp/call", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+sessionID)
+	recorder := httptest.NewRecorder()
+	mcpCallHandler(recorder, request)
+	var response mcpCallResponse
+	// Error and success envelopes share one bounded JSON response contract.
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode MCP physical response: %v", err)
+	}
+	return recorder.Code, response
 }
 
 // TestMcpCallHandlerRejectsOversizedPhysicalResult proves vendor output cannot
@@ -485,8 +661,7 @@ func unifiedFixtureForTest(t *testing.T, operation string) *Fixture {
 }
 
 // assertCallErrorResponse checks the response body is valid JSON with a
-// non-empty error field -- i.e. the handler used writeMCPCallResult's
-// JSON-safe encoding, not the package's quote-breaking writeError helper.
+// non-empty error field, preserving the bridge's typed shape independently of shared HTTP errors.
 func assertCallErrorResponse(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
 	var resp mcpCallResponse

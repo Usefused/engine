@@ -128,6 +128,34 @@ func TestInboundSecurityRejectsInvalidDefinitions(t *testing.T) {
 	}
 }
 
+// TestValidateInboundSecuritySchemePreservesFamilyBoundaries locks the split
+// validators to the same public errors and accepted documentary shapes.
+func TestValidateInboundSecuritySchemePreservesFamilyBoundaries(t *testing.T) {
+	cases := []struct {
+		name      string
+		scheme    fusedobject.InboundSecurityScheme
+		wantError string
+	}{
+		{name: "API key", scheme: fusedobject.InboundSecurityScheme{Type: "apiKey", In: "query", Name: "token"}},
+		{name: "HTTP", scheme: fusedobject.InboundSecurityScheme{Type: "http", Scheme: "custom-auth"}},
+		{name: "OAuth", scheme: fusedobject.InboundSecurityScheme{Type: "oauth2", Flows: map[string]fusedobject.InboundOAuthFlow{
+			"clientCredentials": {TokenURL: "https://provider.test/token", Scopes: map[string]string{}},
+		}}},
+		{name: "API key transport", scheme: fusedobject.InboundSecurityScheme{Type: "apiKey", In: "body", Name: "token"}, wantError: "runtime inbound apiKey location or name is invalid"},
+		{name: "cross-family OAuth metadata", scheme: fusedobject.InboundSecurityScheme{Type: "http", Scheme: "basic", OAuth2MetadataURL: "https://provider.test/metadata"}, wantError: "runtime inbound OAuth metadata requires OAuth2"},
+	}
+	for _, testCase := range cases {
+		// Each family exercises the same top-level validator used during contract admission.
+		t.Run(testCase.name, func(t *testing.T) {
+			err := validateInboundSecurityScheme(testCase.scheme)
+			// Exact results protect both accepted shapes and stable diagnostic contracts.
+			if (err == nil && testCase.wantError != "") || (err != nil && err.Error() != testCase.wantError) {
+				t.Fatalf("validateInboundSecurityScheme() error = %v, want %q", err, testCase.wantError)
+			}
+		})
+	}
+}
+
 // TestInboundSecurityScopeValidation uses local scheme types and declarations rather than outbound credentials.
 func TestInboundSecurityScopeValidation(t *testing.T) {
 	flow := fusedobject.InboundOAuthFlow{TokenURL: "https://provider.test/token", Scopes: map[string]string{"events:read": "Read events"}}

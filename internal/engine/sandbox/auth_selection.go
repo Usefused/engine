@@ -135,27 +135,51 @@ func fusedAuthDefinitions(auths fusedobject.AuthConfigs) (map[string]fusedobject
 	return definitions, nil
 }
 
+// staticSecretAlternative keeps each storage key bound to its exact reviewed
+// scheme so the store can resolve a whole-auth reference without prefix guesses.
 func staticSecretAlternative(alternative authrouting.Alternative, definitions map[string]fusedobject.AuthConfig, credentials map[string]any) (store.SecretKeyAlternative, bool, error) {
+	// A selector mismatch makes this whole OpenAPI OR branch ineligible.
 	if !alternativeMatchesSelectors(alternative, definitions, credentials) {
 		return store.SecretKeyAlternative{}, false, nil
 	}
 	candidate := store.SecretKeyAlternative{}
 	for _, requirement := range alternative.Schemes {
 		auth, ok := definitions[requirement.Scheme]
+		// Unknown scheme identities cannot be safely mapped to stored material.
 		if !ok {
 			return store.SecretKeyAlternative{}, false, errors.New("auth routing contract references an unknown scheme")
 		}
+		// Connected schemes resolve through user grants and contribute no static keys.
 		if selectedAuthIsConnected(auth, credentials) {
 			continue
 		}
 		required, optional, eligible := secretKeysNeeded(auth, credentials)
+		// An invalid or incompatible static contract invalidates this AND-set.
 		if !eligible {
 			return store.SecretKeyAlternative{}, false, nil
 		}
 		candidate.Required = appendUnique(candidate.Required, required...)
 		candidate.Optional = appendUnique(candidate.Optional, optional...)
+		bindAlternativeAuthIdentity(&candidate, authCredentialName(auth), canonicalFusedAuthType(auth), required, optional)
 	}
 	return candidate, true, nil
+}
+
+// bindAlternativeAuthIdentity records exact key ownership and canonical family
+// once for both required and optional material so runtime SQL cannot drift.
+func bindAlternativeAuthIdentity(candidate *store.SecretKeyAlternative, authName, authType string, keySets ...[]string) {
+	for _, keys := range keySets {
+		for _, key := range keys {
+			// Allocate both maps together because a partial identity must never authorize a reference.
+			if candidate.AuthNames == nil {
+				candidate.AuthNames = make(map[string]string)
+				candidate.AuthTypes = make(map[string]string)
+			}
+			// Exact name and canonical type jointly authorize this destination key.
+			candidate.AuthNames[key] = authName
+			candidate.AuthTypes[key] = authType
+		}
+	}
 }
 
 func alternativeMatchesSelectors(alternative authrouting.Alternative, definitions map[string]fusedobject.AuthConfig, credentials map[string]any) bool {

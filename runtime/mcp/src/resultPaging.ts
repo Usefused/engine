@@ -1,5 +1,6 @@
 import { resolveJsonPointer } from "./jsonPointer.js";
 import { isResultRecord, MAX_RESULT_FIELDS, MAX_RESULT_FIELD_BYTES } from "./resultCollections.js";
+import { executeRequest, pageScript, SessionToolRequest } from "./sessionContract.js";
 
 /** Fields are literal immediate row keys; only the collection path uses RFC 6901. */
 export interface ResultPageOptions {
@@ -10,6 +11,10 @@ export interface ResultPageOptions {
 
 /** Explicit ranges prevent a terminal page from being confused with the entire original collection. */
 export interface ResultPage {
+  recovery_action?: "continue_stored_result";
+  execute_request?: "use_next_request";
+  provider_execution: "complete";
+  automatic_replay: false;
   result_ref: string;
   path: string;
   offset: number;
@@ -18,6 +23,7 @@ export interface ResultPage {
   nextOffset: number | null;
   complete: boolean;
   items: unknown[];
+  next_request?: SessionToolRequest;
 }
 
 /** Projects and sizes whole rows from an already admitted snapshot without I/O or provider execution. */
@@ -33,6 +39,28 @@ export function pageResult(root: unknown, reference: string, rawOptions: unknown
   if (options.offset > rows.length) throw new Error("MCP_RESULT_PAGE_OFFSET_INVALID: offset exceeds the collection count.");
   validateAvailableFields(rows, options.fields);
   return packPage(rows, reference, options, maxBytes);
+}
+
+/** Proves every selected row can advance through the same exact continuation before it is advertised. */
+export function pageResultCanProgress(root: unknown, reference: string, rawOptions: unknown, maxBytes: number): boolean {
+  try {
+    const options = pageOptions(rawOptions);
+    const resolved = resolveJsonPointer(root, options.path);
+    // Missing arrays cannot become a retained continuation candidate.
+    if (resolved.error || !Array.isArray(resolved.value)) return false;
+    validateAvailableFields(resolved.value, options.fields);
+    for (let index = 0; index < resolved.value.length; index++) {
+      const page = pageEnvelope(reference, options, resolved.value.length, index, 1, maxBytes);
+      page.items = [projectRow(resolved.value[index], options.fields)];
+      // One whole selected row plus its exact next request must fit at every cursor.
+      if (Buffer.byteLength(JSON.stringify(page), "utf8") > maxBytes) return false;
+    }
+    const empty = pageEnvelope(reference, options, 0, 0, 0, maxBytes);
+    return resolved.value.length > 0 || Buffer.byteLength(JSON.stringify(empty), "utf8") <= maxBytes;
+  } catch {
+    // Invalid selectors and hostile values simply fall back to bounded structural inspection.
+    return false;
+  }
 }
 
 /** Copies and validates caller options once so getters cannot change a checked projection later. */
@@ -105,15 +133,15 @@ function projectRow(row: unknown, fields?: string[]): unknown {
 function packPage(rows: unknown[], reference: string, options: ReturnType<typeof pageOptions>, maxBytes: number): ResultPage {
   const items: unknown[] = [];
   let itemBytes = 0;
-  let page = pageEnvelope(reference, options.path, options.offset, rows.length, 0);
-  const terminalBytes = Buffer.byteLength(JSON.stringify(pageEnvelope(reference, options.path, options.offset, rows.length, rows.length - options.offset)));
+  let page = pageEnvelope(reference, options, rows.length, options.offset, 0, maxBytes);
+  const terminalBytes = Buffer.byteLength(JSON.stringify(pageEnvelope(reference, options, rows.length, options.offset, rows.length - options.offset, maxBytes)));
   // Very long paths can consume a small configured budget before any row is selected.
   if (Buffer.byteLength(JSON.stringify(page)) > maxBytes) throw new Error("MCP_RESULT_PAGE_METADATA_TOO_LARGE: page metadata exceeds outputBudgetBytes; increase the budget or use session.get for a smaller projection.");
   for (let index = options.offset; index < rows.length; index++) {
     const row = projectRow(rows[index], options.fields);
     // Commas are charged only between rows; the empty array brackets are already in the envelope.
     const addedBytes = Buffer.byteLength(JSON.stringify(row)) + (items.length > 0 ? 1 : 0);
-    const candidate = pageEnvelope(reference, options.path, options.offset, rows.length, items.length + 1);
+    const candidate = pageEnvelope(reference, options, rows.length, options.offset, items.length + 1, maxBytes);
     // Exact UTF-8 plus JSON escaping and changing count digits decide whether a complete next row fits.
     if (Buffer.byteLength(JSON.stringify(candidate)) + itemBytes + addedBytes <= maxBytes) {
       page = candidate;
@@ -132,8 +160,21 @@ function packPage(rows: unknown[], reference: string, options: ReturnType<typeof
 }
 
 /** Keeps continuation positions independent of field projection and never invents a cursor beyond the snapshot. */
-function pageEnvelope(reference: string, path: string, offset: number, total: number, returned: number): ResultPage {
+function pageEnvelope(reference: string, options: ReturnType<typeof pageOptions>, total: number, offset: number, returned: number, maxBytes: number): ResultPage {
   const end = offset + returned;
   // Completion means no rows remain after this range; offset still shows whether earlier pages were omitted.
-  return { result_ref: reference, path, offset, total, returned, nextOffset: end < total ? end : null, complete: end === total, items: [] };
+  const complete = end === total;
+  const page: ResultPage = {
+    provider_execution: "complete",
+    automatic_replay: false,
+    result_ref: reference, path: options.path, offset, total, returned,
+    nextOffset: complete ? null : end, complete, items: [],
+  };
+  // Incomplete pages carry the exact same selector and budget so continuation requires no reconstruction.
+  if (!complete) {
+    page.recovery_action = "continue_stored_result";
+    page.execute_request = "use_next_request";
+    page.next_request = executeRequest(pageScript(reference, options.path, options.fields, end), maxBytes);
+  }
+  return page;
 }

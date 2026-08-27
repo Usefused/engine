@@ -101,6 +101,28 @@ func TestOrderedStaticSecretAlternativesKeepsEveryAPIKeyInANDSet(t *testing.T) {
 	}
 }
 
+// TestOrderedStaticSecretAlternativesPinsExactAuthIdentity proves runtime SQL
+// receives key ownership and family instead of inferring either from prefixes.
+func TestOrderedStaticSecretAlternativesPinsExactAuthIdentity(t *testing.T) {
+	auths := fusedobject.AuthConfigs{
+		{Name: "api", Type: "apiKey"},
+		{Name: "apiToken", Type: "apiKey"},
+		{Name: "bearerToken", Type: "http", Scheme: "bearer"},
+	}
+	requirements := authrouting.Requirements{{Schemes: []authrouting.Requirement{{Scheme: "api"}, {Scheme: "apiToken"}, {Scheme: "bearerToken"}}}}
+	alternatives, err := orderedStaticSecretAlternatives(auths, requirements, nil)
+	// The reference metadata must be derived from the same reviewed alternative.
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Similar prefixes remain distinct and every key is locked to the reviewed family.
+	if len(alternatives) != 1 || alternatives[0].AuthNames["api"] != "api" || alternatives[0].AuthNames["apiToken"] != "apiToken" ||
+		alternatives[0].AuthTypes["api"] != "api_key" || alternatives[0].AuthTypes["apiToken"] != "api_key" ||
+		alternatives[0].AuthTypes["bearerToken"] != "bearer" {
+		t.Fatalf("exact auth-identity bindings = %#v", alternatives)
+	}
+}
+
 // TestBasicSecretKeysNeededDefaultsOmittedModeToRequired keeps bucket lookup aligned with standard Basic dispatch.
 func TestBasicSecretKeysNeededDefaultsOmittedModeToRequired(t *testing.T) {
 	auth := fusedobject.AuthConfig{Name: "basicAuth", Type: "http", Scheme: "basic"}

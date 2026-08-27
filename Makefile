@@ -29,10 +29,12 @@ run: build
 run-headless: build-headless
 	./fused-engine-headless start --config engine.yaml
 
-test: embed-ui
+# Go tests consume the generated runtime bundle, so rebuilding prevents a stale local artifact from masking sandbox changes.
+test: embed-ui runtime-mcp-build
 	go test ./...
 
-test-headless:
+# Headless tests share the same generated runtime contract even without embedded UI assets.
+test-headless: runtime-mcp-build
 	go test -tags headless ./...
 
 tidy:

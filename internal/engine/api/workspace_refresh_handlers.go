@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -45,38 +44,50 @@ type refreshServiceContractPath struct {
 }
 
 type refreshHTTPError struct {
-	status  int
-	message string
+	status      int
+	message     string
+	phase       string
+	commitState string
 }
 
 func (e refreshHTTPError) Error() string {
 	return e.message
 }
 
+// RefreshServiceContractHandler refreshes one pinned local runtime snapshot and
+// reports every failure through the shared structured envelope.
 func RefreshServiceContractHandler(s store.Store, fetcher RuntimeContractFetcher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		accountID, err := controlActorAccount(r.Context())
+		ctx := r.Context()
+		accountID, err := controlActorAccount(ctx)
+		// Authentication fails before any Registry fetch or snapshot mutation.
 		if err != nil {
-			http.Error(w, `{"error":"invalid API key"}`, http.StatusUnauthorized)
+			writeWorkspaceConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{
+				status: http.StatusUnauthorized, code: "authentication_required", message: "Authentication is required to refresh a runtime contract.", remediation: "Log in or provide a valid Fused credential.",
+			}, "runtime_contract_refresh_admission", "", "not_committed"), ctx)
 			return
 		}
 		path, err := parseRefreshServiceContractPath(r)
+		// Malformed service identity cannot select a snapshot and is safe to correct locally.
 		if err != nil {
-			writeRefreshServiceContractError(w, err)
+			writeRefreshServiceContractError(w, ctx, err)
 			return
 		}
-		if err := verifyWorkspaceActor(r.Context(), accountID); err != nil {
-			writeRefreshServiceContractError(w, refreshHTTPError{status: http.StatusInternalServerError, message: "workspace not found"})
+		// Workspace verification precedes the Registry fetch and local upsert.
+		if err := verifyWorkspaceActor(ctx, accountID); err != nil {
+			writeRefreshServiceContractError(w, ctx, refreshHTTPError{status: http.StatusInternalServerError, message: "workspace not found"})
 			return
 		}
-		snapshot, err := refreshPinnedServiceContract(r.Context(), s, fetcher, refreshPinnedServiceContractCall{
+		snapshot, err := refreshPinnedServiceContract(ctx, s, fetcher, refreshPinnedServiceContractCall{
 			accountID:        accountID,
 			serviceID:        path.serviceID,
 			serviceVersionID: path.serviceVersionID,
 			apiKey:           r.Header.Get("X-API-Key"),
 		})
+		// Refresh errors are classified only after their typed status is projected to
+		// safe public copy and pre-commit mutation metadata.
 		if err != nil {
-			writeRefreshServiceContractError(w, err)
+			writeRefreshServiceContractError(w, ctx, err)
 			return
 		}
 		writeRefreshServiceContractResponse(w, snapshot)
@@ -131,7 +142,8 @@ func refreshPinnedServiceContract(ctx context.Context, s store.Store, fetcher Ru
 	saved, err := writer.UpsertServiceContractSnapshot(ctx, *snapshot)
 	if err != nil {
 		span.SetAttributes(attribute.String("outcome", "write_failed"))
-		return nil, refreshHTTPError{status: http.StatusInternalServerError, message: "failed to store runtime contract snapshot"}
+		// A store write or commit error cannot prove whether the replacement became durable.
+		return nil, refreshHTTPError{status: http.StatusInternalServerError, message: "failed to store runtime contract snapshot", phase: "runtime_contract_refresh_commit", commitState: "unknown"}
 	}
 	span.SetAttributes(attribute.String("outcome", "success"))
 	return saved, nil
@@ -277,12 +289,51 @@ func fetchRefreshSnapshot(ctx context.Context, fetcher RuntimeContractFetcher, c
 	return snapshot, nil
 }
 
-func writeRefreshServiceContractError(w http.ResponseWriter, err error) {
+// writeRefreshServiceContractError converts refresh-local failures into one
+// stable public contract without exposing persistence or Registry prose.
+func writeRefreshServiceContractError(w http.ResponseWriter, ctx context.Context, err error) {
 	var httpErr refreshHTTPError
+	// Unknown failures receive the same generic internal classification as typed
+	// store failures, while their underlying prose remains private.
 	if !errors.As(err, &httpErr) {
 		httpErr = refreshHTTPError{status: http.StatusInternalServerError, message: "refresh failed"}
 	}
-	http.Error(w, fmt.Sprintf(`{"error":%q}`, httpErr.message), httpErr.status)
+	publicErr := refreshWorkspaceConfigError(httpErr)
+	phase, commitState := httpErr.phase, httpErr.commitState
+	// Admission, lookup, and dependency failures occur before the snapshot store write.
+	if phase == "" {
+		phase = "runtime_contract_refresh"
+	}
+	if commitState == "" {
+		commitState = "not_committed"
+	}
+	writeWorkspaceConfigError(w, withWorkspaceConfigErrorMetadata(publicErr, phase, "", commitState), ctx)
+}
+
+// refreshWorkspaceConfigError maps refresh-local status and safe validation
+// text to stable automation codes while replacing every 5xx message.
+func refreshWorkspaceConfigError(err refreshHTTPError) workspaceConfigHTTPError {
+	// Client-correctable path validation retains the precise field diagnosis.
+	if err.status == http.StatusBadRequest {
+		// Only the two local route-parser diagnostics are safe to preserve verbatim.
+		switch err.message {
+		case "service id must be a valid UUID":
+			return workspaceConfigHTTPError{status: err.status, code: "invalid_service_id", message: err.message, remediation: "Use the exact service ID shown by workspace service commands."}
+		case "service_version_id must be a valid UUID":
+			return workspaceConfigHTTPError{status: err.status, code: "invalid_service_version_id", message: err.message, remediation: "Use the exact service-version ID shown by workspace service commands."}
+		default:
+			return workspaceConfigHTTPError{status: err.status, code: "invalid_runtime_contract_refresh_request", message: "The runtime contract refresh request is invalid.", remediation: "Use exact service and service-version IDs from workspace service commands."}
+		}
+	}
+	// An absent active pin is authoritative and requires workspace correction, not retry.
+	if err.status == http.StatusNotFound {
+		return workspaceConfigHTTPError{status: err.status, code: "runtime_contract_not_active", message: "The selected workspace service version is not active.", remediation: "Activate that exact service version before refreshing its runtime contract."}
+	}
+	// Registry dependency failures are retryable but never expose downstream prose.
+	if err.status == http.StatusBadGateway {
+		return workspaceConfigHTTPError{status: err.status, code: "runtime_contract_dependency_unavailable", message: "The Engine could not fetch the runtime contract.", category: "dependency", retryable: true, remediation: "Retry and check Registry availability if the problem continues."}
+	}
+	return workspaceConfigHTTPError{status: http.StatusInternalServerError, code: "runtime_contract_refresh_failed", message: "The Engine could not refresh the runtime contract.", category: "internal", retryable: true, remediation: "Retry and check Engine logs if the problem continues."}
 }
 
 func writeRefreshServiceContractResponse(w http.ResponseWriter, snapshot *store.ServiceContractSnapshot) {

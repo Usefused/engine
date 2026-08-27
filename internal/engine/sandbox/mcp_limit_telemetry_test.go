@@ -79,8 +79,39 @@ func TestMCPSessionStartFailurePreservesOnlyTypedSchemaCode(t *testing.T) {
 		t.Fatalf("schema start failure = %d/%q", status, code)
 	}
 	status, code = mcpSessionStartFailure(errors.New("secret-runtime-path"))
-	// Unknown startup failures retain the existing generic response without raw process details.
-	if status != http.StatusInternalServerError || code != "failed to establish MCP session" {
+	// Unknown startup failures retain one stable code without raw process details.
+	if status != http.StatusInternalServerError || code != mcpSessionStartFailedCode {
 		t.Fatalf("runtime start failure = %d/%q", status, code)
+	}
+}
+
+// TestMCPSessionStartFailureDataSeparatesAgentActionFromTelemetry guards the compact public contract.
+func TestMCPSessionStartFailureDataSeparatesAgentActionFromTelemetry(t *testing.T) {
+	for _, test := range []struct {
+		code, recovery string
+	}{
+		{code: mcpSessionStartFailedCode, recovery: "retry_initialize"},
+		{code: mcpSchemaDepthLimitCode, recovery: "contact_server_owner"},
+	} {
+		failure := mcpSessionStartFailureData(test.code)
+		encoded, err := json.Marshal(failure)
+		// Serialization must succeed before the field allowlist can prove what an agent receives.
+		if err != nil {
+			t.Fatal(err)
+		}
+		var public map[string]any
+		// A malformed recovery envelope would be less actionable than the generic response it replaces.
+		if json.Unmarshal(encoded, &public) != nil {
+			t.Fatalf("invalid recovery JSON: %s", encoded)
+		}
+		if failure.RecoveryAction != test.recovery || failure.ExecuteRequest != "unchanged" || failure.ProviderExecution != "not_started" {
+			t.Fatalf("failure = %+v, want recovery %q with unchanged execute", failure, test.recovery)
+		}
+		for _, hidden := range []string{"phase", "session_state", "request_delivery", "side_effect_state"} {
+			// Internal classification belongs on bounded OTEL attributes, not in model-visible recovery data.
+			if _, exposed := public[hidden]; exposed {
+				t.Fatalf("recovery exposed internal field %q: %s", hidden, encoded)
+			}
+		}
 	}
 }

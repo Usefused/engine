@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
@@ -14,6 +16,9 @@ import (
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type sdkPackageBuildStoreStub struct {
@@ -93,21 +98,106 @@ func TestSDKPackageDownloadRegeneratesPinnedCacheMissOnce(t *testing.T) {
 	}
 }
 
+// TestSDKPackageDownloadReportsPinnedGeneratorUnavailable verifies the current
+// Registry envelope retains the actionable pinned-generator classification.
 func TestSDKPackageDownloadReportsPinnedGeneratorUnavailable(t *testing.T) {
+	appID := uuid.New()
+	packages := &sdkPackageClientStub{responses: []*http.Response{sdkPackageResponse(http.StatusNotFound, "missing")}}
+	proxy := &sdkPackageGenerationForwarder{status: http.StatusConflict, body: `{"error":{"code":"sdk_generator_version_unavailable","message":"The Registry could not complete the request."}}`}
+	recorder := serveSDKPackageDownload(t, appID, sdkPackageBuildRequest(appID), proxy, packages)
+
+	// The reviewed dependency conflict must survive Engine translation unchanged.
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("response status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response workspaceConfigErrorResponse
+	// The handler must still emit the common Engine control-plane envelope.
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	// The CLI relies on this stable code to explain that regeneration is impossible.
+	if response.Error.Code != "sdk_generator_version_unavailable" {
+		t.Fatalf("error code = %q", response.Error.Code)
+	}
+}
+
+// TestSDKPackageDownloadRejectsLegacyGeneratorErrorEnvelope proves obsolete
+// code-only Registry payloads cannot regain the reviewed dependency class.
+func TestSDKPackageDownloadRejectsLegacyGeneratorErrorEnvelope(t *testing.T) {
 	appID := uuid.New()
 	packages := &sdkPackageClientStub{responses: []*http.Response{sdkPackageResponse(http.StatusNotFound, "missing")}}
 	proxy := &sdkPackageGenerationForwarder{status: http.StatusConflict, body: `{"error":"sdk_generator_version_unavailable"}`}
 	recorder := serveSDKPackageDownload(t, appID, sdkPackageBuildRequest(appID), proxy, packages)
 
+	// The HTTP conflict survives while its obsolete payload receives no special trust.
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("response status = %d: %s", recorder.Code, recorder.Body.String())
 	}
 	var response workspaceConfigErrorResponse
+	// The handler must project the rejected payload through the safe generic envelope.
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode error response: %v", err)
 	}
-	if response.Error.Code != "sdk_generator_version_unavailable" {
-		t.Fatalf("error code = %q", response.Error.Code)
+	// Generic classification proves the legacy code did not cross the allowlist boundary.
+	if response.Error.Code != "registry_request_failed" {
+		t.Fatalf("error code = %q, want registry_request_failed", response.Error.Code)
+	}
+}
+
+// TestSDKPackageDownloadFailureTelemetryExcludesRawError verifies storage and
+// credential prose never becomes an OTEL exception or status description.
+func TestSDKPackageDownloadFailureTelemetryExcludesRawError(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	previous := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	// Process-global tracing is restored so parallel package tests see their original provider.
+	t.Cleanup(func() {
+		otel.SetTracerProvider(previous)
+		_ = provider.Shutdown(t.Context())
+	})
+
+	secret := "database password=fsk_never_trace"
+	appID := uuid.New()
+	// A failing build lookup exercises the public handler before any Registry package request.
+	router := chi.NewRouter()
+	router.Get("/sdks/{app_id}/download", SDKPackageDownloadHandler(&sdkPackageBuildStoreStub{err: errors.New(secret)}, nil, nil))
+	request := httptest.NewRequest(http.MethodGet, "/sdks/"+appID.String()+"/download", nil)
+	request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), accesscontrol.Actor{AccountID: uuid.New(), SubjectID: uuid.New(), Kind: accesscontrol.SubjectUser}))
+	router.ServeHTTP(httptest.NewRecorder(), request)
+
+	spans := recorder.Ended()
+	span := spans[len(spans)-1]
+	encoded, _ := json.Marshal(span.Attributes())
+	// Stable status and attributes replace raw exception events entirely.
+	if len(span.Events()) != 0 || span.Status().Description != "sdk_package_unavailable" || strings.Contains(string(encoded), secret) || strings.Contains(span.Status().Description, "password") {
+		t.Fatalf("unsafe SDK download telemetry: status=%#v events=%#v attrs=%s", span.Status(), span.Events(), encoded)
+	}
+}
+
+// TestRegistrySDKGenerationErrorCode accepts only the current nested code
+// location so unrelated messages, legacy shapes, and malformed payloads remain opaque.
+func TestRegistrySDKGenerationErrorCode(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{name: "nested", payload: `{"error":{"code":"sdk_generator_version_unavailable","message":"ignored"}}`, want: "sdk_generator_version_unavailable"},
+		{name: "legacy rejected", payload: `{"error":"sdk_generator_version_unavailable"}`},
+		{name: "nested unknown remains available to allowlist", payload: `{"error":{"code":"private_dependency_failure","message":"token=secret"}}`, want: "private_dependency_failure"},
+		{name: "object without code", payload: `{"error":{"message":"token=secret"}}`},
+		{name: "malformed", payload: `{"error":`},
+	}
+	// Every accepted wire generation gets its own diagnostic for compatibility failures.
+	for _, test := range tests {
+		// The subtest closure keeps each payload and expected code paired safely.
+		t.Run(test.name, func(t *testing.T) {
+			// Exact extraction keeps message text outside the classification path.
+			if got := registrySDKGenerationErrorCode([]byte(test.payload)); got != test.want {
+				t.Fatalf("code = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 

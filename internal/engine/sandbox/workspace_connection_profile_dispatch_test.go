@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"testing"
 	"time"
@@ -68,6 +70,11 @@ func TestWorkspaceConnectionProfileDispatch(t *testing.T) {
 		w.Write([]byte(`{"ok":true}`))
 	}))
 	defer vendor.Close()
+	parsedVendorURL, err := url.Parse(vendor.URL)
+	// Derive the loopback host from the actual listener so the explicit routing allowlist remains portable across IP families.
+	if err != nil {
+		t.Fatalf("parse vendor URL: %v", err)
+	}
 
 	f.seedConnectedResource(t, vendor.URL)
 
@@ -76,22 +83,35 @@ func TestWorkspaceConnectionProfileDispatch(t *testing.T) {
 		Name:        "DispatchProfileSvc",
 		BaseURL:     vendor.URL,
 		AuthConfigs: fusedobject.AuthConfigs{{Name: "bearerAuth", Type: "oauth2"}},
+		ConnectConfig: &fusedobject.ServiceConnectConfig{
+			ResourceInput: &fusedobject.ResourceInputConfig{AllowedHosts: []string{parsedVendorURL.Hostname()}},
+		},
 	}
 	selections := []models.SDKSelection{{
 		ServiceID: f.serviceID, ServiceVersionID: f.versionID,
 		SchemaVersion: models.AppSelectionSchemaVersion, EndpointIDs: []uuid.UUID{f.epID},
+		AuthType: "oauth", AuthName: "bearerAuth",
 	}}
 	scopeJSON, err := json.Marshal(selections)
 	if err != nil {
 		t.Fatalf("marshal scope selections: %v", err)
 	}
-	pathlessCache := &richMockCache{scopeJSON: scopeJSON, obj: obj, epID: f.epID}
-	pathedCache := &richMockCache{scopeJSON: scopeJSON, obj: obj, epID: f.epID, path: "/items/{accountId}", method: http.MethodGet}
+	// The operation must declare the exact named scheme because service-wide auth definitions alone cannot authorize credential use.
+	securityRequirements := singleAuthRequirement("bearerAuth")
+	pathlessCache := &richMockCache{scopeJSON: scopeJSON, obj: obj, epID: f.epID, securityRequirements: securityRequirements}
+	pathedCache := &richMockCache{
+		scopeJSON: scopeJSON, obj: obj, epID: f.epID, path: "/items/{accountId}", method: http.MethodGet,
+		securityRequirements: securityRequirements,
+		parameters: fusedobject.Parameters{{
+			Name: "accountId", In: "path", Required: true,
+			Schema: &fusedobject.SchemaContract{Projection: fusedobject.Schema{Type: "string"}},
+		}},
+	}
 
 	h := &dispatchProfileHarness{
 		ctx: ctx, dispatcher: dispatcher, f: f, captured: &captured,
 		pathlessCache: pathlessCache, pathedCache: pathedCache,
-		creds: map[string]any{"fused_end_user_ref": f.endUserRef, "fused_auth_name": "bearerAuth"},
+		creds: map[string]any{"fused_end_user_ref": f.endUserRef},
 	}
 
 	f.seedBaseline(t)
@@ -335,6 +355,7 @@ type dispatchProfileFixture struct {
 	connectionID        uuid.UUID
 }
 
+// setupDispatchProfileFixture seeds the current Engine identities required to exercise real PostgreSQL dispatch resolution.
 func setupDispatchProfileFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *dispatchProfileFixture {
 	t.Helper()
 	workspaceID, accountID, ownsWorkspace := dispatchProfileWorkspace(t, ctx, pool)
@@ -370,28 +391,21 @@ func setupDispatchProfileFixture(t *testing.T, ctx context.Context, pool *pgxpoo
 	selections := []models.SDKSelection{{
 		ServiceID: f.serviceID, ServiceVersionID: f.versionID,
 		SchemaVersion: models.AppSelectionSchemaVersion, EndpointIDs: []uuid.UUID{f.epID},
+		AuthType: "oauth", AuthName: "bearerAuth",
 	}}
 	selectionsJSON, err := json.Marshal(selections)
 	if err != nil {
 		t.Fatalf("marshal sdk scope selections: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO fused_app_families
-			(app_family_id, account_id, kind, canonical_name, display_name, target_language, owner_team_id)
-		VALUES ($1, $2, 'sdk', $3, 'Dispatch profile SDK', 'typescript', $4);
-		INSERT INTO fused_apps
-			(app_id, app_family_id, account_id, version, config_key, source_hash, status, selections)
-		VALUES ($5, $1, $2, '1.0.0', $6, 'dispatch-profile', 'active', $7);
-		INSERT INTO fused_app_family_buckets (app_family_id, bucket_id) VALUES ($1, $8)
-	`, f.appFamilyID, f.accountID, "dispatch-profile-"+f.appFamilyID.String(), f.ownerTeamID,
-		f.appID, "sdk:dispatch-profile:"+f.appFamilyID.String(), selectionsJSON, f.bucketID); err != nil {
+	// Keep the related runtime rows atomic while issuing one command per prepared statement, as production PostgreSQL requires.
+	if err := f.seedAppRuntime(selectionsJSON); err != nil {
 		t.Fatalf("seed SDK app runtime: %v", err)
 	}
 
 	encryptedToken := dispatchEncrypt(t, "connected-access-token")
 	conn, err := f.store.UpsertAuthConnection(ctx, store.AuthConnection{
 		BucketID: f.bucketID, ServiceID: f.serviceID,
-		EndUserRef: f.endUserRef, CreatedByAppID: f.appID, AuthType: "oauth",
+		EndUserRef: f.endUserRef, CreatedByAppID: f.appID, AuthType: "oauth", AuthName: "bearerAuth",
 		EncryptedDEK:         encryptedToken.dek,
 		EncryptedAccessToken: encryptedToken.values[0],
 		TokenType:            "Bearer", RefreshState: "ok",
@@ -425,6 +439,35 @@ func setupDispatchProfileFixture(t *testing.T, ctx context.Context, pool *pgxpoo
 	}
 
 	return f
+}
+
+// seedAppRuntime creates one internally consistent SDK version fixture without relying on multi-command prepared statements.
+func (f *dispatchProfileFixture) seedAppRuntime(selectionsJSON []byte) error {
+	return pgx.BeginFunc(f.ctx, f.pool, func(tx pgx.Tx) error {
+		// The family must exist before its immutable version can reference it.
+		if _, err := tx.Exec(f.ctx, `
+			INSERT INTO fused_app_families
+				(app_family_id, account_id, kind, canonical_name, display_name, target_language, owner_team_id)
+			VALUES ($1, $2, 'sdk', $3, 'Dispatch profile SDK', 'typescript', $4)
+		`, f.appFamilyID, f.accountID, "dispatch-profile-"+f.appFamilyID.String(), f.ownerTeamID); err != nil {
+			return fmt.Errorf("insert app family: %w", err)
+		}
+		// Persist the exact immutable version and selection scope exercised by dispatch.
+		if _, err := tx.Exec(f.ctx, `
+			INSERT INTO fused_apps
+				(app_id, app_family_id, account_id, version, config_key, source_hash, status, scope_schema_version, selections)
+			VALUES ($1, $2, $3, '1.0.0', $4, 'dispatch-profile', 'active', $5, $6)
+		`, f.appID, f.appFamilyID, f.accountID, "sdk:dispatch-profile:"+f.appFamilyID.String(), models.AppScopeSchemaVersion, selectionsJSON); err != nil {
+			return fmt.Errorf("insert app version: %w", err)
+		}
+		// Bind the family only after both lifecycle identities exist, preserving the same FK-safe order as production writes.
+		if _, err := tx.Exec(f.ctx, `
+			INSERT INTO fused_app_family_buckets (app_family_id, bucket_id) VALUES ($1, $2)
+		`, f.appFamilyID, f.bucketID); err != nil {
+			return fmt.Errorf("bind app family bucket: %w", err)
+		}
+		return nil
+	})
 }
 
 // seedConnectedResource attaches the one connection resource used by the

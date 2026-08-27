@@ -186,6 +186,13 @@ migration.
 
 ### Import failures and startup recovery
 
+Before Registry publication, Engine requests a rollback-only preview of the
+reviewed plan and runs the ordinary runtime-snapshot validator against it. The
+subsequent apply is bound to that preview hash, which Registry recomputes from
+the merged transaction view before committing. A deterministic rejection is
+reported as `phase: engine_preflight` and `commit_state: not_committed`; it does
+not create or update the service.
+
 Registry publication and Engine workspace activation are separate steps. A
 committed publication is not automatically deleted if Engine cannot activate
 it. Import apply returns HTTP 424 with `import_workspace_activation_failed`,

@@ -43,33 +43,39 @@ func UpsertSecretHandler(s store.Store, masterKey []byte) http.HandlerFunc {
 		defer span.End()
 
 		status, message, ok := secretAdminWorkspace(ctx, s, r)
+		// Authentication and workspace failures are already reduced to safe local copy.
 		if !ok {
-			http.Error(w, message, status)
+			writeControlAPIMutationError(w, ctx, status, secretAdminErrorCode(status), message, secretAdminRemediation(status), "secret_upsert", "", "not_committed", "")
 			return
 		}
 
 		var payload SecretUpsertPayload
+		// Invalid JSON cannot safely identify credential metadata or secret value.
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
+			writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "invalid_secret_request", "The secret request body is invalid.", "Check service_id, key_name, credential_type, bucket_id, and expires_at.", "secret_upsert", "", "not_committed", "")
 			return
 		}
 
+		// Expired-at-write credentials can never become usable and are rejected early.
 		if payload.ExpiresAt != nil && payload.ExpiresAt.Before(time.Now()) {
-			http.Error(w, "expires_at must be in the future", http.StatusBadRequest)
+			writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "invalid_secret_expiry", "expires_at must be in the future.", "Choose a future RFC3339 expiry or omit expires_at.", "secret_upsert", "", "not_committed", "")
 			return
 		}
+		// Paired credentials must use the atomic bulk endpoint to avoid partial state.
 		if credentialTypeRequiresPair(payload.CredentialType) {
-			http.Error(w, "paired credentials must be saved together", http.StatusBadRequest)
+			writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "paired_credentials_required", "Paired credentials must be saved together.", "Use the paired credential fields in one secret-set command.", "secret_upsert", "", "not_committed", "")
 			return
 		}
 
 		bucketID, status, err := resolveSecretBucketID(ctx, s, payload.BucketID)
+		// Bucket resolution distinguishes invalid input from absent defaults.
 		if err != nil {
-			http.Error(w, err.Error(), status)
+			writeControlAPIMutationError(w, ctx, status, "secret_bucket_resolution_failed", err.Error(), "Provide an existing bucket ID or configure a default bucket.", "secret_upsert", "", "not_committed", "")
 			return
 		}
+		// Exact lookup prevents secret writes to unknown buckets.
 		if err := verifyBucketInWorkspace(ctx, s, bucketID); err != nil {
-			writeBucketLookupError(w, err)
+			writeBucketMutationLookupError(ctx, w, err, "secret_upsert")
 			return
 		}
 
@@ -80,16 +86,19 @@ func UpsertSecretHandler(s store.Store, masterKey []byte) http.HandlerFunc {
 		)
 
 		secret, err := buildEncryptedSecret(bucketID, payload, masterKey)
+		// Encryption must complete before persistence receives any credential row.
 		if err != nil {
-			http.Error(w, "failed to encrypt secret", http.StatusInternalServerError)
+			writeControlAPIMutationError(w, ctx, http.StatusInternalServerError, "secret_encryption_failed", "The Engine could not encrypt the secret.", "Check Engine master-key configuration and retry.", "secret_upsert", "", "not_committed", "")
 			return
 		}
 
+		// Unclassified store failures hide encrypted material and retain an unknown commit outcome.
 		if err := s.UpsertSecret(ctx, secret); err != nil {
 			slog.ErrorContext(ctx, "failed to upsert secret", slog.Any("error", err))
-			http.Error(w, "failed to save secret", http.StatusInternalServerError)
+			writeControlAPIMutationError(w, ctx, http.StatusInternalServerError, "secret_save_failed", "The Engine could not save the secret.", "Inspect current secret metadata before retrying, and use the request or trace ID to check Engine logs.", "secret_upsert", "", "unknown", "")
 			return
 		}
+		span.SetAttributes(attribute.String("outcome", "upserted"))
 
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -103,38 +112,45 @@ func UpsertSecretsHandler(s store.Store, masterKey []byte) http.HandlerFunc {
 		defer span.End()
 
 		status, message, ok := secretAdminWorkspace(ctx, s, r)
+		// Authentication and workspace failures are already reduced to safe local copy.
 		if !ok {
-			http.Error(w, message, status)
+			writeControlAPIMutationError(w, ctx, status, secretAdminErrorCode(status), message, secretAdminRemediation(status), "secret_bulk_upsert", "", "not_committed", "")
 			return
 		}
 
 		payload, err := decodeSecretBulkUpsertPayload(r)
+		// Strict decoding prevents misspelled fields from producing partial credentials.
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "invalid_secret_request", err.Error(), "Check the paired credential fields and retry.", "secret_bulk_upsert", "", "not_committed", "")
 			return
 		}
 		bucketID, status, err := resolveSecretBucketID(ctx, s, payload.BucketID)
+		// Bucket resolution distinguishes invalid input from absent defaults.
 		if err != nil {
-			http.Error(w, err.Error(), status)
+			writeControlAPIMutationError(w, ctx, status, "secret_bucket_resolution_failed", err.Error(), "Provide an existing bucket ID or configure a default bucket.", "secret_bulk_upsert", "", "not_committed", "")
 			return
 		}
+		// Exact lookup prevents secret writes to unknown buckets.
 		if err := verifyBucketInWorkspace(ctx, s, bucketID); err != nil {
-			writeBucketLookupError(w, err)
+			writeBucketMutationLookupError(ctx, w, err, "secret_bulk_upsert")
 			return
 		}
+		// Validate the complete set before encryption so pairs commit atomically.
 		if err := validateSecretBulkPayload(payload.Secrets, time.Now()); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "invalid_secret_set", err.Error(), "Provide every required paired credential field in the same request.", "secret_bulk_upsert", "", "not_committed", "")
 			return
 		}
 
 		secrets, err := buildEncryptedSecrets(bucketID, payload.Secrets, masterKey)
+		// Any encryption failure aborts the whole pair before persistence.
 		if err != nil {
-			http.Error(w, "failed to encrypt secrets", http.StatusInternalServerError)
+			writeControlAPIMutationError(w, ctx, http.StatusInternalServerError, "secret_encryption_failed", "The Engine could not encrypt the credential set.", "Check Engine master-key configuration and retry.", "secret_bulk_upsert", "", "not_committed", "")
 			return
 		}
+		// Unclassified atomic-store failures retain an unknown commit outcome at the handler boundary.
 		if err := s.UpsertSecrets(ctx, secrets); err != nil {
 			slog.ErrorContext(ctx, "failed to upsert secrets", slog.Any("error", err))
-			http.Error(w, "failed to save secrets", http.StatusInternalServerError)
+			writeControlAPIMutationError(w, ctx, http.StatusInternalServerError, "secret_save_failed", "The Engine could not save the credential set.", "Inspect current secret metadata before retrying, and use the request or trace ID to check Engine logs.", "secret_bulk_upsert", "", "unknown", "")
 			return
 		}
 
@@ -142,6 +158,7 @@ func UpsertSecretsHandler(s store.Store, masterKey []byte) http.HandlerFunc {
 			attribute.String("bucket_id", bucketID.String()),
 			attribute.Int("secret_count", len(secrets)),
 			attribute.Int("mtls_pair_count", countMTLSPairs(payload.Secrets)),
+			attribute.String("outcome", "upserted"),
 		)
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -151,13 +168,35 @@ func UpsertSecretsHandler(s store.Store, masterKey []byte) http.HandlerFunc {
 // handlers do not drift on authorization or workspace-resolution semantics.
 func secretAdminWorkspace(ctx context.Context, s store.Store, r *http.Request) (int, string, bool) {
 	accountID, err := controlActorAccount(ctx)
+	// Anonymous callers cannot mutate workspace credential material.
 	if err != nil {
-		return http.StatusUnauthorized, "unauthorized", false
+		return http.StatusUnauthorized, "Authentication is required to manage secrets.", false
 	}
+	// Workspace resolution is required before any bucket-scoped secret operation.
 	if err := verifyWorkspaceActor(ctx, accountID); err != nil {
-		return http.StatusInternalServerError, "failed to resolve workspace", false
+		return http.StatusInternalServerError, "The Engine could not resolve the workspace for secret management.", false
 	}
 	return http.StatusOK, "", true
+}
+
+// secretAdminErrorCode returns a stable code for the two authorization setup
+// failures emitted by secretAdminWorkspace.
+func secretAdminErrorCode(status int) string {
+	// Only an authentication status represents a caller credential problem.
+	if status == http.StatusUnauthorized {
+		return "authentication_required"
+	}
+	return "workspace_resolution_failed"
+}
+
+// secretAdminRemediation supplies status-appropriate next steps without
+// relying on mutable error text.
+func secretAdminRemediation(status int) string {
+	// Authentication failures are fixed by credentials, not Engine retries.
+	if status == http.StatusUnauthorized {
+		return "Log in or provide a valid Fused credential."
+	}
+	return "Retry and check Engine logs if the problem continues."
 }
 
 // decodeSecretBulkUpsertPayload rejects unknown fields so mistyped auth
@@ -394,42 +433,50 @@ func buildEncryptedSecret(bucketID uuid.UUID, payload SecretUpsertPayload, maste
 	}, nil
 }
 
+// DeleteSecretHandler deletes one exact bucket/service/key secret and emits
+// structured diagnostics without exposing any credential material.
 func DeleteSecretHandler(s store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.secrets.delete")
 		defer span.End()
 
 		accountID, err := controlActorAccount(ctx)
+		// Secret deletion requires an authenticated control-plane actor.
 		if err != nil {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeControlAPIMutationError(w, ctx, http.StatusUnauthorized, "authentication_required", "Authentication is required to delete a secret.", "Log in or provide a valid Fused credential.", "secret_delete", "", "not_committed", "")
 			return
 		}
 
+		// Workspace resolution prevents deletion through a foreign identity.
 		if err := verifyWorkspaceActor(ctx, accountID); err != nil {
-			http.Error(w, "failed to resolve workspace", http.StatusInternalServerError)
+			writeControlAPIMutationError(w, ctx, http.StatusInternalServerError, "workspace_resolution_failed", "The Engine could not resolve the workspace for secret deletion.", "Retry and check Engine logs if the problem continues.", "secret_delete", "", "not_committed", "")
 			return
 		}
 
 		serviceIDStr := r.URL.Query().Get("service_id")
 		keyName := r.URL.Query().Get("key_name")
+		// Exact service and key identity is required for a safe deletion.
 		if serviceIDStr == "" || keyName == "" {
-			http.Error(w, "missing service_id or key_name", http.StatusBadRequest)
+			writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "secret_identity_required", "The service ID and key name are required.", "Provide service_id and key_name query values.", "secret_delete", "", "not_committed", "")
 			return
 		}
 
 		serviceID, err := uuid.Parse(serviceIDStr)
+		// Reject malformed service identity before bucket or secret lookup.
 		if err != nil {
-			http.Error(w, "invalid service_id", http.StatusBadRequest)
+			writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "invalid_service_id", "The service ID is not a valid UUID.", "Use the service ID shown by the bucket or service commands.", "secret_delete", "", "not_committed", "")
 			return
 		}
 
 		bucketID, status, err := resolveSecretBucketID(ctx, s, r.URL.Query().Get("bucket_id"))
+		// Omitted bucket IDs may resolve only through the authoritative default.
 		if err != nil {
-			http.Error(w, err.Error(), status)
+			writeControlAPIMutationError(w, ctx, status, "secret_bucket_resolution_failed", err.Error(), "Provide an existing bucket ID or configure a default bucket.", "secret_delete", "", "not_committed", "")
 			return
 		}
+		// Exact lookup prevents deletion from an unknown bucket.
 		if err := verifyBucketInWorkspace(ctx, s, bucketID); err != nil {
-			writeBucketLookupError(w, err)
+			writeBucketMutationLookupError(ctx, w, err, "secret_delete")
 			return
 		}
 
@@ -438,11 +485,19 @@ func DeleteSecretHandler(s store.Store) http.HandlerFunc {
 			attribute.String("bucket_id", bucketID.String()),
 		)
 
+		// Unclassified store failures hide database detail and retain an unknown deletion outcome.
 		if err := s.DeleteSecret(ctx, bucketID, serviceID, keyName); err != nil {
+			// A live reference makes deletion deterministically impossible; expose
+			// that contract instead of disguising it as an unknown database failure.
+			if errors.Is(err, store.ErrWorkspaceAuthReferenceInUse) {
+				writeControlAPIMutationError(w, ctx, http.StatusConflict, "workspace_auth_reference_in_use", "The credential is used by another workspace service.", "Replace the dependent auth ref or remove its destination service before deleting this credential.", "secret_delete", "", "not_committed", "")
+				return
+			}
 			slog.ErrorContext(ctx, "failed to delete secret", slog.Any("error", err))
-			http.Error(w, "failed to delete secret", http.StatusInternalServerError)
+			writeControlAPIMutationError(w, ctx, http.StatusInternalServerError, "secret_delete_failed", "The Engine could not delete the secret.", "Inspect current secret metadata before retrying, and use the request or trace ID to check Engine logs.", "secret_delete", "", "unknown", "")
 			return
 		}
+		span.SetAttributes(attribute.String("outcome", "deleted"))
 
 		w.WriteHeader(http.StatusNoContent)
 	}

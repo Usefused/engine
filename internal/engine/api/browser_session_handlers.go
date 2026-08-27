@@ -59,29 +59,35 @@ func browserSessionStatusHandler(service BrowserSessionService) http.HandlerFunc
 	}
 }
 
+// browserLicenseExchangeHandler exchanges one bounded API key for an HttpOnly browser session.
 func browserLicenseExchangeHandler(service BrowserSessionService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setManagedLoginResponseHeaders(w)
+		// A missing browser service is an Engine availability failure.
 		if service == nil {
-			writeManagedLoginError(w, http.StatusServiceUnavailable, "browser_auth_unavailable")
+			writeManagedLoginError(w, http.StatusServiceUnavailable, "browser_auth_unavailable", r.Context())
 			return
 		}
+		// Credential exchange is accepted only from the Engine browser origin.
 		if !service.Cookies().ValidateSameOrigin(r) {
-			writeManagedLoginError(w, http.StatusForbidden, "origin_denied")
+			writeManagedLoginError(w, http.StatusForbidden, "origin_denied", r.Context())
 			return
 		}
 		licenseKey, err := decodeLicenseExchangeRequest(w, r)
+		// Invalid bounded JSON is caller-remediable and never reaches authentication.
 		if err != nil {
-			writeManagedLoginError(w, http.StatusBadRequest, "invalid_request")
+			writeManagedLoginError(w, http.StatusBadRequest, "invalid_request", r.Context())
 			return
 		}
 		credential, err := service.ExchangeLicenseKey(r.Context(), licenseKey)
+		// Missing or rejected keys remain authentication failures rather than server errors.
 		if errors.Is(err, browserauth.ErrAPIKeyRequired) {
-			writeManagedLoginError(w, http.StatusUnauthorized, "api_key_denied")
+			writeManagedLoginError(w, http.StatusUnauthorized, "api_key_denied", r.Context())
 			return
 		}
+		// Unknown exchange failures hide provider and persistence details.
 		if err != nil {
-			writeManagedLoginError(w, http.StatusInternalServerError, "browser_auth_failed")
+			writeManagedLoginError(w, http.StatusInternalServerError, "browser_auth_failed", r.Context())
 			return
 		}
 		service.Cookies().SetSession(w, credential.RawKey, credential.ExpiresAt)
@@ -89,26 +95,31 @@ func browserLicenseExchangeHandler(service BrowserSessionService) http.HandlerFu
 	}
 }
 
+// browserSessionLogoutHandler validates session, CSRF, and origin before revocation.
 func browserSessionLogoutHandler(service BrowserSessionService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setManagedLoginResponseHeaders(w)
 		credential, source, err := browserSessionCredential(r, service)
+		// Logout accepts only the HttpOnly managed browser credential source.
 		if err != nil || source != browserauth.CredentialSourceCookie {
-			writeManagedLoginError(w, http.StatusUnauthorized, "session_required")
+			writeManagedLoginError(w, http.StatusUnauthorized, "session_required", r.Context())
 			return
 		}
+		// CSRF proof must be bound to the exact session credential.
 		if !service.Cookies().ValidateCSRF(r, credential) {
-			writeManagedLoginError(w, http.StatusForbidden, "csrf_denied")
+			writeManagedLoginError(w, http.StatusForbidden, "csrf_denied", r.Context())
 			return
 		}
 		returnURL, err := browserLogoutReturnURL(r, service.Cookies())
+		// Invalid return origins fail closed before the provider logout call.
 		if err != nil {
-			writeManagedLoginError(w, http.StatusForbidden, "origin_denied")
+			writeManagedLoginError(w, http.StatusForbidden, "origin_denied", r.Context())
 			return
 		}
 		result, err := service.Logout(r.Context(), credential, returnURL)
+		// An already-invalid session is safe to clear; other failures remain retryable.
 		if err != nil && !errors.Is(err, accesscontrol.ErrAuthenticationRequired) {
-			writeManagedLoginError(w, http.StatusInternalServerError, "logout_failed")
+			writeManagedLoginError(w, http.StatusInternalServerError, "logout_failed", r.Context())
 			return
 		}
 		// Keep the cookie on transient persistence failures so the browser can

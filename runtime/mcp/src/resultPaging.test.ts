@@ -47,8 +47,8 @@ it("packs maximal whole-row pages without gaps, duplicates, or retained page env
   const ref = retain(session, { transactions: rows });
   const received: unknown[] = [];
   let offset = 0;
+  let script = `return session.page(${JSON.stringify(ref)}, {path:"/transactions", fields:["id","merchant","amount","currency"],offset:0});`;
   for (let attempt = 0; attempt < rows.length; attempt++) {
-    const script = `return session.page(${JSON.stringify(ref)}, {path:"/transactions", fields:["id","merchant","amount","currency"],offset:${offset}});`;
     const output = await runExecute(script, callOptions, session, { ...DEFAULT_EXECUTE_LIMITS, outputBudgetBytes: 1024 });
     expect(output.delivery).toBe("inline");
     expect(output.isError).toBe(false);
@@ -63,15 +63,22 @@ it("packs maximal whole-row pages without gaps, duplicates, or retained page env
     received.push(...page.items);
     // The final page terminates traversal; all others must advance an exact snapshot position.
     if (page.complete) {
+      expect(page.provider_execution).toBe("complete");
+      expect(page.automatic_replay).toBe(false);
       expect(page.nextOffset).toBeNull();
+      expect(page.next_request).toBeUndefined();
       break;
     }
+    expect(page).toMatchObject({ recovery_action: "continue_stored_result", execute_request: "use_next_request", provider_execution: "complete", automatic_replay: false });
     expect(page.nextOffset).toBe(offset + page.returned);
+    expect(page.next_request).toMatchObject({ tool: "execute", arguments: { outputBudgetBytes: 1024 } });
     const next = rows[page.nextOffset!];
     // One more full row must exceed the budget; otherwise the runtime caused an avoidable round trip.
     const extended = { ...page, returned: page.returned + 1, nextOffset: page.nextOffset! + 1, complete: false, items: [...page.items, { id: next.id, merchant: next.merchant, amount: next.amount, currency: next.currency }] };
     expect(Buffer.byteLength(JSON.stringify(extended))).toBeGreaterThan(1024);
     offset = page.nextOffset!;
+    // Execute the supplied continuation verbatim so selector and cursor reconstruction cannot hide a defect.
+    script = page.next_request!.arguments.script;
   }
   // Field selection preserves exact values and order, excluding only the explicitly unselected payload.
   expect(received).toEqual(rows.map(({ id, merchant, amount, currency }) => ({ id, merchant, amount, currency })));

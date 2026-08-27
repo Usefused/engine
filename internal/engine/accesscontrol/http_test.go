@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 )
 
@@ -27,6 +28,24 @@ func TestWriteAuthorizationErrorReturnsStablePolicyDenial(t *testing.T) {
 	assertDenialResponse(t, response, http.StatusForbidden, "permission_denied", 0)
 }
 
+// TestWriteAuthorizationErrorIncludesRequestCorrelation proves middleware identity is mirrored in the envelope and header.
+func TestWriteAuthorizationErrorIncludesRequestCorrelation(t *testing.T) {
+	handler := chimiddleware.RequestID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		WriteAuthorizationError(w, ErrAuthenticationRequired, r.Context())
+	}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/protected", nil))
+	var body denialResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	// The generated request ID must be identical in both correlation surfaces.
+	if body.Error.RequestID == "" || response.Header().Get("X-Request-ID") != body.Error.RequestID {
+		t.Fatalf("request correlation = body %q header %q", body.Error.RequestID, response.Header().Get("X-Request-ID"))
+	}
+}
+
+// TestRequireAllReturns403WithSafeMissingRequirements proves typed policy details stay nested and bounded.
 func TestRequireAllReturns403WithSafeMissingRequirements(t *testing.T) {
 	requirement := testWorkspaceRequirement()
 	actor := Actor{SubjectID: uuid.New(), Authorization: mustSnapshot(t)}
@@ -44,11 +63,17 @@ func TestRequireAllReturns403WithSafeMissingRequirements(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if body.Missing[0].Permission != requirement.Permission || body.Missing[0].ResourceID != requirement.Resource.ID.String() {
-		t.Fatalf("missing requirement = %#v", body.Missing[0])
+	// Permission details remain nested under the shared error envelope.
+	if body.Error.Details == nil || body.Error.Details.Missing[0].Permission != requirement.Permission || body.Error.Details.Missing[0].ResourceID != requirement.Resource.ID.String() {
+		t.Fatalf("missing requirement = %#v", body.Error.Details)
+	}
+	// Authorization stopped this unsafe request before its protected mutation began.
+	if body.Error.Phase != "authorization" || body.Error.CommitState != "not_committed" {
+		t.Fatalf("mutation denial metadata = %#v", body.Error)
 	}
 }
 
+// TestWriteAuthorizationErrorIncludesOnlyProvidedSafeDisplayName proves only reviewed labels reach the envelope.
 func TestWriteAuthorizationErrorIncludesOnlyProvidedSafeDisplayName(t *testing.T) {
 	resource := ResourceRef{Type: ResourceBucket, ID: uuid.New()}
 	response := httptest.NewRecorder()
@@ -60,7 +85,8 @@ func TestWriteAuthorizationErrorIncludesOnlyProvidedSafeDisplayName(t *testing.T
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Missing) != 1 || body.Missing[0].DisplayName != "payments-production" {
+	// The reviewed display name is the only resource label exposed to the caller.
+	if body.Error.Details == nil || len(body.Error.Details.Missing) != 1 || body.Error.Details.Missing[0].DisplayName != "payments-production" {
 		t.Fatalf("response = %#v", body)
 	}
 }
@@ -105,6 +131,7 @@ func testWorkspaceRequirement() Requirement {
 	}
 }
 
+// assertDenialResponse checks the common authorization envelope and optional typed details.
 func assertDenialResponse(t *testing.T, response *httptest.ResponseRecorder, status int, code string, missing int) {
 	t.Helper()
 	if response.Code != status {
@@ -117,7 +144,12 @@ func assertDenialResponse(t *testing.T, response *httptest.ResponseRecorder, sta
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if body.Error != code || len(body.Missing) != missing {
+	missingCount := 0
+	// An omitted details object represents a denial with no safe field diagnostics.
+	if body.Error.Details != nil {
+		missingCount = len(body.Error.Details.Missing)
+	}
+	if body.Error.Code != code || missingCount != missing {
 		t.Fatalf("response = %#v, want error=%q missing=%d", body, code, missing)
 	}
 }

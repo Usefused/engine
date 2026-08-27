@@ -14,9 +14,11 @@ import (
 	"strings"
 	"time"
 
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
@@ -30,7 +32,6 @@ import (
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
-	"github.com/Usefused/engine/internal/shared/observability"
 	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
 	"github.com/Usefused/engine/internal/shared/retrypolicy"
@@ -256,6 +257,8 @@ type WorkspaceAuthConfig struct {
 	Bucket   string `json:"bucket,omitempty"`
 	AuthType string `json:"auth_type"`
 	AuthName string `json:"auth_name,omitempty"`
+	// Ref names a complete same-bucket source family so rotation does not copy values.
+	Ref      string `json:"ref,omitempty"`
 	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`
 	Token    string `json:"token,omitempty"`
@@ -456,10 +459,21 @@ type workspaceConfigHTTPError struct {
 	retryable         bool
 	details           map[string]any
 	remediation       string
+	phase             string
+	operationID       string
+	requestID         string
+	commitState       string
+	recovery          string
+	traceID           string
 	retryAfterSeconds int
+	cause             error
 }
 
 func (e workspaceConfigHTTPError) Error() string { return e.message }
+
+// Unwrap preserves cancellation and typed-cause inspection without exposing
+// the underlying error prose through the public response envelope.
+func (e workspaceConfigHTTPError) Unwrap() error { return e.cause }
 
 type ServiceSlugResolver interface {
 	ResolveServiceIDsBySlugs(ctx context.Context, slugs []string, apiKey string) (map[string]uuid.UUID, error)
@@ -526,19 +540,19 @@ func WorkspaceConfigPlanHandler(configStore store.ConfigRepository, s store.Stor
 		accountID, err := resolveWorkspaceActor(ctx)
 		if err != nil {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			writeWorkspaceConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, ctx)
+			writeWorkspaceConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, "plan_admission", "", "not_committed"), ctx)
 			return
 		}
 		span.SetAttributes(attribute.String("account_id", accountID.String()))
 
 		req, err := decodeWorkspacePlanRequest(r)
 		if err != nil {
-			writeWorkspaceConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, ctx)
+			writeWorkspaceConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, "plan_admission", "", "not_committed"), ctx)
 			return
 		}
 		result, err := createWorkspaceConfigPlan(ctx, configStore, s, verifier, r.Header.Get("X-API-Key"), accountID, req)
 		if err != nil {
-			writeWorkspaceConfigError(w, err, ctx)
+			writeWorkspaceConfigError(w, withWorkspaceConfigErrorMetadata(err, "planning", "", "unknown"), ctx)
 			return
 		}
 
@@ -740,28 +754,30 @@ func workspaceServiceVersionsMap(desired workspaceDesiredState) map[uuid.UUID][]
 // WorkspaceConfigApplyHandler handles POST /workspace/config/apply.
 func WorkspaceConfigApplyHandler(configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, masterKey []byte) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		thread := observability.ThreadFromContext(ctx)
-		step := thread.Step("engine.workspace_config.apply")
+		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.workspace_config.apply")
+		defer span.End()
 
 		accountID, err := resolveWorkspaceActor(ctx)
+		// Actor admission must be visible even when no configuration input is decoded.
 		if err != nil {
-			step.AddContext(map[string]any{"outcome": "unauthorized"}).Error(ctx, err)
-			writeWorkspaceConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, ctx)
+			span.SetAttributes(attribute.String("outcome", "unauthorized"))
+			writeWorkspaceConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, "request_admission", "", "not_committed"), ctx)
 			return
 		}
-		step.AddContext(map[string]any{"account_id": accountID.String()})
+		span.SetAttributes(attribute.String("account_id", accountID.String()))
 
 		req, planID, err := decodeWorkspaceApplyRequest(r)
+		// Invalid plan input cannot reach reservation or mutation execution.
 		if err != nil {
-			step.AddContext(map[string]any{"outcome": "bad_request"}).Error(ctx, err)
-			writeWorkspaceConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, ctx)
+			span.SetAttributes(attribute.String("outcome", "bad_request"))
+			writeWorkspaceConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, "request_admission", "", "not_committed"), ctx)
 			return
 		}
 		planRevision, ok := AuthorizedPlanRevisionFromContext(ctx)
+		// Apply requires the exact revision admitted by authorization middleware.
 		if !ok {
-			step.AddContext(map[string]any{"outcome": "authorization_snapshot_missing"}).Error(ctx, errors.New("authorized plan revision unavailable"))
-			writeWorkspaceConfigError(w, workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"}, ctx)
+			span.SetAttributes(attribute.String("outcome", "authorization_snapshot_missing"))
+			writeWorkspaceConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"}, "apply_admission", planID.String(), "not_committed"), ctx)
 			return
 		}
 		appliedWebhooks, err := executeWorkspaceConfigApply(ctx, configStore, s, verifier, workspaceApplyCall{
@@ -775,13 +791,14 @@ func WorkspaceConfigApplyHandler(configStore store.ConfigRepository, s store.Sto
 			profileMats:      req.ProfileMaterials,
 			bucketSecretMats: req.BucketSecretMaterials,
 		})
+		// The handler reports only a stable outcome; nested helpers retain private causes.
 		if err != nil {
-			step.AddContext(map[string]any{"outcome": "apply_failed"}).Error(ctx, err)
-			writeWorkspaceConfigError(w, err, ctx)
+			span.SetAttributes(attribute.String("outcome", "apply_failed"))
+			writeWorkspaceConfigError(w, withWorkspaceConfigErrorMetadata(err, "apply_execution", planID.String(), "unknown"), ctx)
 			return
 		}
 
-		step.AddContext(map[string]any{"outcome": "success"}).Success(ctx)
+		span.SetAttributes(attribute.String("outcome", "success"))
 		writeJSON(w, workspaceApplyResponse{
 			Status:   "applied",
 			PlanID:   planID.String(),
@@ -829,6 +846,16 @@ type workspaceApplyCall struct {
 	bucketSecretMats map[string]string
 }
 
+// workspacePreparedApply holds only validated, write-ready state so the
+// mutation path cannot repeat Registry reads or credential interpretation.
+type workspacePreparedApply struct {
+	profilePlan   workspaceProfilePlan
+	authBindings  []store.WorkspaceAuthBinding
+	bucketSecrets []store.WorkspaceSecret
+}
+
+// executeWorkspaceConfigApply separates pre-mutation admission failures from
+// outcomes that can become ambiguous after external execution starts.
 func executeWorkspaceConfigApply(
 	ctx context.Context,
 	configStore store.ConfigRepository,
@@ -841,24 +868,30 @@ func executeWorkspaceConfigApply(
 
 	plan, currentState, err := loadWorkspacePlanForApply(ctx, configStore, call)
 	if err != nil {
-		return nil, err
+		return nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 	lease, err := configStore.ReserveConfigPlanApply(ctx, plan.ID, call.planRevision)
 	if err != nil {
-		return nil, configPlanApplyReservationHTTPError(err)
+		return nil, withWorkspaceConfigErrorMetadata(configPlanApplyReservationHTTPError(err), "apply_admission", call.planID.String(), "not_committed")
 	}
 	leaseGuard := workspaceApplyLeaseGuard{configStore: configStore, planID: plan.ID, revision: call.planRevision, leaseID: lease.ID, releasable: true}
 	defer leaseGuard.release()
 	desired, previousManaged, err := workspaceApplyInputs(plan, currentState)
 	if err != nil {
-		return nil, err
+		return nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 	if err := validateWorkspaceRemovalDecisions(plan, desired, previousManaged); err != nil {
-		return nil, err
+		return nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 	if limErr := checkWorkspaceServiceLimit(ctx, span, s, desired, previousManaged); limErr != nil {
 		span.SetAttributes(attribute.String("outcome", "service_limit_exceeded"))
-		return nil, workspaceConfigHTTPError{status: http.StatusForbidden, message: limErr.Error()}
+		return nil, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusForbidden, message: limErr.Error()}, "apply_admission", call.planID.String(), "not_committed")
+	}
+	prepared, err := prepareWorkspaceConfigApply(ctx, s, verifier, call, desired)
+	// Preparation and graph validation are still safely reversible because the
+	// lease remains releasable and no workspace material has been written.
+	if err != nil {
+		return nil, withWorkspaceConfigErrorMetadata(workspaceApplyError(ctx, err), "apply_admission", call.planID.String(), "not_committed")
 	}
 	// Once external execution begins we finish independently of client
 	// cancellation. Otherwise a dropped connection after an accepted Registry
@@ -869,7 +902,7 @@ func executeWorkspaceConfigApply(
 	// partial or unknown outcome. Keep the reservation until crash-recovery
 	// expiry unless the final database commit proves the apply completed.
 	leaseGuard.releasable = false
-	appliedWebhooks, err := applyWorkspaceConfigMutations(applyCtx, ctx, configStore, s, verifier, call, plan, currentState, desired, previousManaged, lease.ID)
+	appliedWebhooks, err := applyWorkspaceConfigMutations(applyCtx, ctx, configStore, s, verifier, call, plan, currentState, desired, previousManaged, prepared, lease.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -891,23 +924,24 @@ func applyWorkspaceConfigMutations(
 	currentState *store.ConfigState,
 	desired workspaceDesiredState,
 	previousManaged map[uuid.UUID]workspaceManagedService,
+	prepared workspacePreparedApply,
 	leaseID uuid.UUID,
 ) ([]appliedWorkspaceWebhook, error) {
-	appliedWebhooks, err := applyWorkspaceConfig(applyCtx, s, verifier, call.apiKey, call.accountID, desired, previousManaged, call.authMats, call.profileMats, call.bucketSecretMats, call.masterKey)
+	appliedWebhooks, err := applyWorkspaceConfig(applyCtx, s, verifier, call.apiKey, call.accountID, desired, previousManaged, prepared)
 	if err != nil {
-		return nil, workspaceApplyError(requestCtx, err)
+		return nil, withWorkspaceConfigErrorMetadata(workspaceApplyError(requestCtx, err), "workspace_mutation", call.planID.String(), "unknown")
 	}
 	if err := applyWorkspaceRegistryActions(applyCtx, verifier, call, plan, currentState); err != nil {
-		return nil, err
+		return nil, withWorkspaceConfigErrorMetadata(err, "registry_mutation", call.planID.String(), "unknown")
 	}
 	if err := applyWorkspacePolicyActions(applyCtx, s, verifier, call, plan, desired); err != nil {
-		return nil, err
+		return nil, withWorkspaceConfigErrorMetadata(err, "policy_mutation", call.planID.String(), "unknown")
 	}
 	if err := createWorkspaceRemovalNotifications(applyCtx, configStore, call, plan); err != nil {
-		return nil, err
+		return nil, withWorkspaceConfigErrorMetadata(err, "notification_commit", call.planID.String(), "unknown")
 	}
 	if err := persistWorkspaceConfigApply(applyCtx, configStore, call, plan, desired, previousManaged, leaseID); err != nil {
-		return nil, err
+		return nil, withWorkspaceConfigErrorMetadata(err, "workspace_commit", call.planID.String(), "unknown")
 	}
 	return appliedWebhooks, nil
 }
@@ -1017,10 +1051,31 @@ func releaseWorkspaceApplyLease(configStore store.ConfigRepository, planID uuid.
 	}
 }
 
+// workspaceApplyError preserves stable reference conflicts while reducing
+// unclassified persistence failures to the existing safe apply envelope.
 func workspaceApplyError(ctx context.Context, err error) error {
 	var httpErr workspaceConfigHTTPError
 	if errors.As(err, &httpErr) {
 		return httpErr
+	}
+	// Dependency conflicts are deterministic and safe to retry only after the
+	// authored reference changes; do not flatten them into an opaque 500.
+	if errors.Is(err, store.ErrWorkspaceAuthReferenceInUse) {
+		return workspaceConfigHTTPError{
+			status: http.StatusConflict, code: "workspace_auth_reference_in_use", category: "conflict",
+			message:     "A removed service still provides credentials used by another workspace service.",
+			remediation: "Replace the dependent auth ref or remove its destination service, then create a new plan.",
+			cause:       err,
+		}
+	}
+	// Invalid source/type/chaining state is a reviewable config conflict rather
+	// than an internal Engine failure.
+	if errors.Is(err, store.ErrWorkspaceAuthReferenceInvalid) {
+		return workspaceConfigHTTPError{
+			status: http.StatusConflict, code: "workspace_auth_reference_invalid", category: "conflict",
+			message: err.Error(), remediation: "Correct the auth ref and create a new plan.",
+			cause: err,
+		}
 	}
 	slog.ErrorContext(ctx, "WorkspaceConfigApplyHandler: apply failed", slog.Any("error", err))
 	return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to apply workspace config"}
@@ -1935,21 +1990,36 @@ func normalizeWorkspaceVersionPolicies(items []workspaceConfigServiceVersion, ve
 }
 
 // normalizeWorkspaceBuckets attaches bucket-owned credential intent to already
-// normalized service identities so apply never accepts material for a service
-// the workspace config did not enable.
+// normalized service identities and retains omissions as explicit clear intent.
 func normalizeWorkspaceBuckets(buckets map[string]workspaceConfigBucket, configured map[string]workspaceConfigService, services map[uuid.UUID]workspaceDesiredService) ([]workspaceDesiredBucketServiceConfig, error) {
 	out := make([]workspaceDesiredBucketServiceConfig, 0)
 	byKey := workspaceDesiredServicesByKey(services)
 	for bucketName, bucket := range buckets {
 		name := workspaceConnectBucketName(bucketName)
-		for serviceKey, serviceConfig := range bucket.ServiceConfig {
+		for serviceKey := range bucket.ServiceConfig {
 			service := byKey[serviceKey]
+			// Explicit bucket entries may never smuggle credential intent for a
+			// service that normalization did not admit into desired state.
 			if service.ServiceID == uuid.Nil {
 				return nil, fmt.Errorf("workspace bucket %q references unknown service %q", name, serviceKey)
 			}
+			// The authored service map remains the authority even when two keys
+			// could otherwise resolve to the same normalized identity.
 			if _, ok := configured[serviceKey]; !ok {
 				return nil, fmt.Errorf("workspace bucket %q references unapproved service %q", name, serviceKey)
 			}
+		}
+		for serviceKey := range configured {
+			service := byKey[serviceKey]
+			serviceConfig, explicit := bucket.ServiceConfig[serviceKey]
+			// A missing service_config entry is declarative removal, so retaining
+			// it as nil auth lets the atomic store clear only managed references.
+			if !explicit {
+				out = append(out, workspaceDesiredBucketServiceConfig{BucketName: name, ServiceKey: serviceKey, ServiceID: service.ServiceID})
+				continue
+			}
+			// Explicit auth remains subject to the same public shape admission as
+			// before omission reconciliation was added.
 			if err := validateWorkspaceAuthConfigIntent(serviceKey, serviceConfig.Auth); err != nil {
 				return nil, err
 			}
@@ -2105,8 +2175,27 @@ func validWorkspaceConnectionProfileAuthName(name string) bool {
 	return len(name) <= 128 && !strings.ContainsAny(name, "\r\n\x00")
 }
 
+// validateWorkspaceAuthConfigIntent keeps literal material and dynamic bundle
+// references on one mutually-exclusive admission path.
 func validateWorkspaceAuthConfigIntent(key string, auth *WorkspaceAuthConfig) error {
+	// A missing auth block is valid for routing-only bucket service config.
 	if auth == nil {
+		return nil
+	}
+	// A live binding owns the whole credential family; accepting literals too
+	// would create two competing sources with unclear rotation semantics.
+	if strings.TrimSpace(auth.Ref) != "" {
+		// Reference intent cannot also carry any direct credential field.
+		if workspaceAuthConfigHasMaterial(auth) {
+			return fmt.Errorf("service %q auth ref cannot include credential fields", key)
+		}
+		if err := validateWorkspaceAuthReferenceTarget(key, auth); err != nil {
+			return err
+		}
+		_, err := parseWorkspaceAuthRef(auth.Ref)
+		if err != nil {
+			return fmt.Errorf("service %q auth ref: %w", key, err)
+		}
 		return nil
 	}
 	authType := canonicalWorkspaceStaticAuthType(auth.AuthType)
@@ -2122,6 +2211,52 @@ func validateWorkspaceAuthConfigIntent(key string, auth *WorkspaceAuthConfig) er
 	default:
 		return fmt.Errorf("service %q auth has unsupported auth_type", key)
 	}
+}
+
+// validateWorkspaceAuthReferenceTarget requires the exact static scheme that
+// receives the source bundle, independent of contract ambiguity today.
+func validateWorkspaceAuthReferenceTarget(key string, auth *WorkspaceAuthConfig) error {
+	switch canonicalWorkspaceStaticAuthType(auth.AuthType) {
+	case "basic", "api_key", "mtls", "bearer", "oauth", "oidc":
+		// Persisted bindings are keyed by auth_name, so omission would create an
+		// unstable target if provider metadata later adds a sibling scheme.
+		if strings.TrimSpace(auth.AuthName) == "" {
+			return fmt.Errorf("service %q auth ref requires auth_name", key)
+		}
+		return nil
+	default:
+		return fmt.Errorf("service %q auth ref has unsupported auth_type", key)
+	}
+}
+
+// workspaceAuthConfigHasMaterial centralizes the complete set of fields that
+// cannot coexist with a dynamic credential-family reference.
+func workspaceAuthConfigHasMaterial(auth *WorkspaceAuthConfig) bool {
+	return auth.Username != "" || auth.Password != "" || auth.Token != "" || auth.APIKey != "" || auth.Cert != "" || auth.Key != ""
+}
+
+type workspaceAuthRef struct {
+	ServiceKey string
+	AuthName   string
+}
+
+// parseWorkspaceAuthRef admits the intentionally narrow same-bucket grammar;
+// service and scheme resolution remain separate Registry-backed checks.
+func parseWorkspaceAuthRef(value string) (workspaceAuthRef, error) {
+	const prefix = "${bucket.auth."
+	trimmed := strings.TrimSpace(value)
+	// Requiring the complete envelope prevents partial interpolation and keeps
+	// references auditable as one immutable config value.
+	if !strings.HasPrefix(trimmed, prefix) || !strings.HasSuffix(trimmed, "}") {
+		return workspaceAuthRef{}, errors.New("must use ${bucket.auth.<service>.<authName>}")
+	}
+	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(trimmed, prefix), "}"), ".")
+	// Dot-free segments are an explicit MVP boundary rather than a heuristic
+	// split that could bind credentials to the wrong service.
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return workspaceAuthRef{}, errors.New("must name one service and auth scheme")
+	}
+	return workspaceAuthRef{ServiceKey: strings.TrimSpace(parts[0]), AuthName: strings.TrimSpace(parts[1])}, nil
 }
 
 // validateWorkspaceAuthEnvRefs rejects inline static credentials before they
@@ -3146,6 +3281,59 @@ type appliedWorkspaceWebhook struct {
 	Slug       string
 }
 
+// prepareWorkspaceConfigApply resolves every write input and proves the auth
+// reference graph before the apply crosses its first mutation boundary.
+func prepareWorkspaceConfigApply(
+	ctx context.Context,
+	s store.Store,
+	verifier ServiceVerifier,
+	call workspaceApplyCall,
+	desired workspaceDesiredState,
+) (workspacePreparedApply, error) {
+	profilePlan, err := prepareWorkspaceProfilePlan(ctx, s, verifier, call.apiKey, desired, call.profileMats)
+	// Profile admission stays read-only so a malformed profile cannot leave
+	// unrelated service or credential state behind.
+	if err != nil {
+		return workspacePreparedApply{}, err
+	}
+	authBindings, err := prepareWorkspaceAuthBindings(ctx, s, verifier, call.apiKey, desired, call.authMats, call.masterKey)
+	// Auth metadata and encryption must complete as one all-or-nothing input set.
+	if err != nil {
+		return workspacePreparedApply{}, err
+	}
+	bucketSecrets, err := prepareWorkspaceBucketSecrets(ctx, s, desired, call.bucketSecretMats, call.masterKey)
+	// Generic material shares the same pre-mutation admission boundary even
+	// though it has no service dimension.
+	if err != nil {
+		return workspacePreparedApply{}, err
+	}
+	if err := preflightWorkspaceAuthBindings(ctx, s, authBindings, workspaceDesiredServiceIDs(desired)); err != nil {
+		return workspacePreparedApply{}, err
+	}
+	return workspacePreparedApply{profilePlan: profilePlan, authBindings: authBindings, bucketSecrets: bucketSecrets}, nil
+}
+
+// preflightWorkspaceAuthBindings proves source material and service membership
+// against the complete desired set without changing persistent state.
+func preflightWorkspaceAuthBindings(ctx context.Context, s store.Store, bindings []store.WorkspaceAuthBinding, desiredServiceIDs []uuid.UUID) error {
+	// No auth reconciliation means there is no graph for the optional store
+	// capability to validate.
+	if len(bindings) == 0 {
+		return nil
+	}
+	repository, ok := s.(store.WorkspaceAuthBindingStore)
+	// Dynamic rotation has no safe fallback through ordinary per-secret writes.
+	if !ok {
+		return errors.New("workspace auth binding store is unavailable")
+	}
+	if err := repository.PreflightWorkspaceAuthBindings(ctx, bindings, desiredServiceIDs); err != nil {
+		return fmt.Errorf("preflight workspace auth bindings: %w", err)
+	}
+	return nil
+}
+
+// applyWorkspaceConfig consumes only preflighted state and preserves the
+// existing workspace mutation sequence with one auth persistence batch.
 func applyWorkspaceConfig(
 	ctx context.Context,
 	s store.Store,
@@ -3154,46 +3342,29 @@ func applyWorkspaceConfig(
 	accountID uuid.UUID,
 	desired workspaceDesiredState,
 	previousManaged map[uuid.UUID]workspaceManagedService,
-	authMats map[string]workspaceAuthMaterial,
-	profileMats map[string]workspaceConnectMaterial,
-	bucketSecretMats map[string]string,
-	masterKey []byte,
+	prepared workspacePreparedApply,
 ) ([]appliedWorkspaceWebhook, error) {
-	// Bucket-owned OAuth app registration (fused-cli connect <slug> set) and
-	// workspace connection profiles are independent plans (see the plan's
-	// "Workspace Plan And Apply"): profile reconciliation never consults
-	// bucket material, and bucket material is no longer a workspace apply
-	// concern at all -- it's an immediate admin action against its own
-	// endpoint (connect_admin_handlers.go), not something this apply plans,
-	// validates, or reconciles.
-	profilePlan, err := prepareWorkspaceProfilePlan(ctx, s, verifier, apiKey, desired, profileMats)
-	if err != nil {
-		return nil, err
-	}
-	authSecrets, err := prepareWorkspaceAuthSecrets(ctx, s, verifier, apiKey, desired, authMats, masterKey)
-	if err != nil {
-		return nil, err
-	}
-	// Generic bucket secrets are a third independent plan, same reasoning as
-	// the comment above: no service dimension at all, so they can't gate or
-	// be gated by service-scoped auth material.
-	bucketSecrets, err := prepareWorkspaceBucketSecrets(ctx, s, desired, bucketSecretMats, masterKey)
-	if err != nil {
-		return nil, err
-	}
 	// Reconciled once for the entire apply, not once per service -- see
 	// reconcileWorkspaceProfilePlan's doc comment for why this is the one
 	// database round trip the plan requires even when many services change.
-	if err := reconcileWorkspaceProfilePlan(ctx, s, profilePlan); err != nil {
+	if err := reconcileWorkspaceProfilePlan(ctx, s, prepared.profilePlan); err != nil {
 		return nil, err
 	}
-	if err := upsertWorkspaceBucketSecrets(ctx, s, bucketSecrets); err != nil {
+	// Bucket-secret persistence remains one batch independent of service auth.
+	if err := upsertWorkspaceBucketSecrets(ctx, s, prepared.bucketSecrets); err != nil {
 		return nil, err
 	}
-	applied, err := upsertDesiredWorkspaceServices(ctx, s, verifier, apiKey, accountID, desired, authSecrets)
+	applied, err := upsertDesiredWorkspaceServices(ctx, s, verifier, apiKey, accountID, desired)
+	// Local service membership must exist before reference foreign keys can commit.
 	if err != nil {
 		return nil, err
 	}
+	// Service membership is created first because reference rows use local
+	// foreign keys; all credential bindings then replace atomically as one batch.
+	if err := applyPreparedWorkspaceAuthBindings(ctx, s, prepared.authBindings); err != nil {
+		return nil, err
+	}
+	// Removal runs last so sources referenced by the new desired state remain fenced.
 	if err := removePreviouslyManagedWorkspaceResources(ctx, s, desired, previousManaged); err != nil {
 		return nil, err
 	}
@@ -3207,7 +3378,6 @@ func upsertDesiredWorkspaceServices(
 	apiKey string,
 	accountID uuid.UUID,
 	desired workspaceDesiredState,
-	authSecrets map[string]workspaceAuthApplyPlan,
 ) ([]appliedWorkspaceWebhook, error) {
 	// applied is always empty now -- kept in this function's return type only
 	// because appliedWebhookResponses/the apply response wire shape still
@@ -3251,12 +3421,8 @@ func upsertDesiredWorkspaceServices(
 		// (still part of this function's and the caller's signature) but is
 		// never populated by this loop anymore.
 
-		// Connection profile reconciliation is intentionally not here: it is
-		// batched once across the whole apply by reconcileWorkspaceProfilePlan,
-		// not once per service inside this loop (see applyWorkspaceConfig).
-		if err := upsertPreparedWorkspaceAuthSecrets(ctx, s, svc, authSecrets); err != nil {
-			return nil, err
-		}
+		// Connection profiles and auth bindings are intentionally not here: both
+		// reconcile once across the apply to avoid one write path per service.
 	}
 	return applied, nil
 }
@@ -3278,64 +3444,89 @@ func workspaceServiceSlug(key string) string {
 	return key
 }
 
-type workspaceAuthApplyPlan struct {
-	BucketID  uuid.UUID
-	ServiceID uuid.UUID
-	AuthType  string
-	AuthName  string
-	Secrets   []store.WorkspaceSecret
-}
-
-// prepareWorkspaceAuthSecrets validates all static-auth bucket writes before
-// workspace membership mutates, avoiding half-applied service config.
-func prepareWorkspaceAuthSecrets(
+// prepareWorkspaceAuthBindings validates every direct or referenced static
+// credential before workspace membership mutates.
+func prepareWorkspaceAuthBindings(
 	ctx context.Context,
 	s store.Store,
 	verifier ServiceVerifier,
 	apiKey string,
-
 	desired workspaceDesiredState,
 	materials map[string]workspaceAuthMaterial,
 	masterKey []byte,
-) (map[string]workspaceAuthApplyPlan, error) {
-	plans := map[string]workspaceAuthApplyPlan{}
+) ([]store.WorkspaceAuthBinding, error) {
+	bindings := make([]store.WorkspaceAuthBinding, 0, len(desired.BucketServiceConfigs))
 	buckets := workspaceConnectBucketCache{}
 	authConfigs, err := fetchWorkspaceAuthConfigs(ctx, verifier, apiKey, desired)
+	// One failed metadata batch invalidates the whole credential plan.
 	if err != nil {
 		return nil, err
 	}
+	servicesByKey := workspaceDesiredServicesByKey(desired.Services)
 	for _, item := range desired.BucketServiceConfigs {
+		service := desired.Services[item.ServiceID]
+		// Omission is authoritative desired state: explicitly reconcile away any
+		// previous dynamic reference without deleting independently stored secrets.
 		if item.Auth == nil {
+			bucket, resolveErr := resolveWorkspaceConnectBucket(ctx, s, item.BucketName, buckets)
+			// A clear must pin the same immutable local bucket identity as a normal
+			// binding so reconciliation cannot escape its authored bucket.
+			if resolveErr != nil {
+				return nil, resolveErr
+			}
+			bindings = append(bindings, store.WorkspaceAuthBinding{
+				BucketID: bucket.ID, TargetServiceID: service.ServiceID,
+				ReconcileReferences: true, ClearReferences: true,
+			})
 			continue
 		}
-		service := desired.Services[item.ServiceID]
-		plan, err := prepareWorkspaceAuthSecret(ctx, s, service, item, authConfigs[workspaceAuthMetadataKey(service)], materials, buckets, masterKey)
+		binding, err := prepareWorkspaceAuthBinding(ctx, s, service, item, servicesByKey, authConfigs, materials, buckets, masterKey)
+		// No partial binding list should survive a malformed service credential.
 		if err != nil {
 			return nil, err
 		}
-		plans[workspaceBucketMaterialKey(item.BucketName, item.ServiceKey)] = plan
+		bindings = append(bindings, binding)
 	}
-	return plans, nil
+	// Persistence capability and source readiness belong to the dedicated
+	// preflight boundary so preparation remains interpretation-only.
+	return bindings, nil
 }
 
+// fetchWorkspaceAuthConfigs batches destination and referenced-source contract
+// metadata so reference validation never adds a lookup per service.
 func fetchWorkspaceAuthConfigs(ctx context.Context, verifier ServiceVerifier, apiKey string, desired workspaceDesiredState) (map[string]fusedobject.AuthConfigs, error) {
 	seen := make(map[string]struct{})
 	var refs []sandbox.ServiceVersionRef
+	servicesByKey := workspaceDesiredServicesByKey(desired.Services)
 	for _, item := range desired.BucketServiceConfigs {
+		// Entries without auth do not need provider security metadata.
 		if item.Auth == nil {
 			continue
 		}
 		service := desired.Services[item.ServiceID]
-		key := workspaceAuthMetadataKey(service)
-		if _, exists := seen[key]; !exists {
-			seen[key] = struct{}{}
-			refs = append(refs, sandbox.ServiceVersionRef{ServiceID: service.ServiceID, Version: service.Versions[0]})
+		refs = appendWorkspaceAuthConfigRefs(refs, seen, service)
+		// A reference source needs its own reviewed scheme metadata for exact
+		// type/name compatibility, but shares this one Registry batch.
+		if strings.TrimSpace(item.Auth.Ref) != "" {
+			parsed, err := parseWorkspaceAuthRef(item.Auth.Ref)
+			// Engine repeats grammar admission because API callers may bypass the CLI.
+			if err != nil {
+				return nil, err
+			}
+			source := servicesByKey[parsed.ServiceKey]
+			if source.ServiceID == uuid.Nil {
+				return nil, fmt.Errorf("service %q auth ref references unknown service %q", item.ServiceKey, parsed.ServiceKey)
+			}
+			refs = appendWorkspaceAuthConfigRefs(refs, seen, source)
 		}
 	}
+	// An auth-free workspace should not contact Registry merely to return an
+	// empty metadata map.
 	if len(refs) == 0 {
 		return map[string]fusedobject.AuthConfigs{}, nil
 	}
 	configs, err := verifier.FetchServiceVersionAuthConfigs(ctx, refs, apiKey)
+	// A partial Registry response cannot authoritatively validate scheme identity.
 	if err != nil {
 		return nil, err
 	}
@@ -3347,40 +3538,189 @@ func fetchWorkspaceAuthConfigs(ctx context.Context, verifier ServiceVerifier, ap
 	return result, nil
 }
 
-func workspaceAuthMetadataKey(service workspaceDesiredService) string {
-	return sandbox.ServiceMetadataRefKey(sandbox.ServiceMetadataRef{ServiceID: service.ServiceID, Version: service.Versions[0]})
+// appendWorkspaceAuthConfigRefs deduplicates the bounded Registry metadata
+// request while preserving the first-seen deterministic service order.
+func appendWorkspaceAuthConfigRefs(refs []sandbox.ServiceVersionRef, seen map[string]struct{}, service workspaceDesiredService) []sandbox.ServiceVersionRef {
+	for _, version := range service.Versions {
+		key := workspaceAuthMetadataKey(service, version)
+		// A destination version can also be another binding's source; fetch each
+		// immutable contract only once for the whole apply.
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		refs = append(refs, sandbox.ServiceVersionRef{ServiceID: service.ServiceID, Version: version})
+	}
+	return refs
 }
 
-// prepareWorkspaceAuthSecret derives provider-specific secret keys from
-// registry metadata so users configure "basic" instead of dispatcher key names.
-func prepareWorkspaceAuthSecret(
+// workspaceAuthMetadataKey shares the exact immutable service/version identity
+// used by the batched Registry response and local lookup map.
+func workspaceAuthMetadataKey(service workspaceDesiredService, version string) string {
+	return sandbox.ServiceMetadataRefKey(sandbox.ServiceMetadataRef{ServiceID: service.ServiceID, Version: version})
+}
+
+// workspaceStaticAuthSelection is the one service-level credential contract
+// admitted only after every enabled immutable version proves the same shape.
+type workspaceStaticAuthSelection struct {
+	Auth     fusedobject.AuthConfig
+	Required []string
+	Optional []string
+	Keys     []string
+}
+
+// prepareWorkspaceAuthBinding derives exact runtime keys from reviewed auth
+// metadata for either encrypted local material or a live source reference.
+func prepareWorkspaceAuthBinding(
 	ctx context.Context,
 	s store.Store,
 	svc workspaceDesiredService,
 	item workspaceDesiredBucketServiceConfig,
-	authConfigs fusedobject.AuthConfigs,
+	servicesByKey map[string]workspaceDesiredService,
+	authConfigs map[string]fusedobject.AuthConfigs,
 	materials map[string]workspaceAuthMaterial,
 	buckets workspaceConnectBucketCache,
 	masterKey []byte,
-) (workspaceAuthApplyPlan, error) {
+) (store.WorkspaceAuthBinding, error) {
 	bucket, err := resolveWorkspaceConnectBucket(ctx, s, item.BucketName, buckets)
+	// References cannot escape the enclosing resolved bucket.
 	if err != nil {
-		return workspaceAuthApplyPlan{}, err
+		return store.WorkspaceAuthBinding{}, err
 	}
 	authType := canonicalWorkspaceStaticAuthType(item.Auth.AuthType)
-	auth, err := workspaceStaticAuthConfig(authConfigs, svc, authType, item.Auth.AuthName)
+	selection, err := workspaceStaticAuthSelectionForService(authConfigs, svc, authType, item.Auth.AuthName)
+	// Every enabled version must agree because the stored workspace binding is
+	// service-scoped and cannot safely float between immutable auth contracts.
 	if err != nil {
-		return workspaceAuthApplyPlan{}, err
+		return store.WorkspaceAuthBinding{}, err
 	}
-	resolved, err := workspaceAuthConfigWithMaterial(svc, item, auth, materials)
+	binding := store.WorkspaceAuthBinding{
+		BucketID: bucket.ID, TargetServiceID: svc.ServiceID,
+		TargetAuthType: authType, TargetAuthName: selection.Auth.Name, TargetKeys: selection.Keys,
+		ReconcileReferences: true,
+	}
+	// A reference remains value-free; direct material continues through the
+	// existing encryption helpers below.
+	if strings.TrimSpace(item.Auth.Ref) != "" {
+		return prepareWorkspaceAuthReference(binding, svc, item, servicesByKey, authConfigs, selection)
+	}
+	resolved, err := workspaceAuthConfigWithMaterial(svc, item, selection.Auth, materials)
+	// Direct material still has to satisfy its reviewed credential shape.
 	if err != nil {
-		return workspaceAuthApplyPlan{}, err
+		return store.WorkspaceAuthBinding{}, err
 	}
-	secrets, err := encryptedWorkspaceAuthSecrets(bucket.ID, svc.ServiceID, auth, &resolved, masterKey)
+	secrets, err := encryptedWorkspaceAuthSecrets(bucket.ID, svc.ServiceID, selection.Auth, &resolved, masterKey)
+	// Encryption must finish for the complete family before it enters the batch.
 	if err != nil {
-		return workspaceAuthApplyPlan{}, err
+		return store.WorkspaceAuthBinding{}, err
 	}
-	return workspaceAuthApplyPlan{BucketID: bucket.ID, ServiceID: svc.ServiceID, AuthType: authType, AuthName: auth.Name, Secrets: secrets}, nil
+	binding.Secrets = secrets
+	return binding, nil
+}
+
+// prepareWorkspaceAuthReference resolves the source scheme and maps the
+// destination's required credential roles onto that source's exact key name.
+func prepareWorkspaceAuthReference(
+	binding store.WorkspaceAuthBinding,
+	svc workspaceDesiredService,
+	item workspaceDesiredBucketServiceConfig,
+	servicesByKey map[string]workspaceDesiredService,
+	authConfigs map[string]fusedobject.AuthConfigs,
+	target workspaceStaticAuthSelection,
+) (store.WorkspaceAuthBinding, error) {
+	parsed, err := parseWorkspaceAuthRef(item.Auth.Ref)
+	// Parsing is repeated at preparation to keep this helper safe in isolation.
+	if err != nil {
+		return store.WorkspaceAuthBinding{}, err
+	}
+	source := servicesByKey[parsed.ServiceKey]
+	// References are workspace-declared identities, never an implicit Registry
+	// search that could drift to a similarly named provider service.
+	if source.ServiceID == uuid.Nil {
+		return store.WorkspaceAuthBinding{}, fmt.Errorf("service %q auth ref references unknown service %q", svc.Key, parsed.ServiceKey)
+	}
+	sourceSelection, err := workspaceStaticAuthSelectionForService(authConfigs, source, binding.TargetAuthType, parsed.AuthName)
+	// Exact type, name, and cross-version shape prevent declaration-order or
+	// immutable-version fallback at runtime.
+	if err != nil {
+		return store.WorkspaceAuthBinding{}, fmt.Errorf("service %q auth ref source: %w", svc.Key, err)
+	}
+	binding.Reference = &store.WorkspaceAuthReference{
+		SourceServiceID: source.ServiceID, SourceAuthType: canonicalWorkspaceAuthConfigType(sourceSelection.Auth),
+		SourceAuthName: sourceSelection.Auth.Name,
+		// A source must remain valid for its own reviewed scheme while also
+		// satisfying any stricter roles required by the destination.
+		SourceRequired: mergeWorkspaceAuthKeys(sourceSelection.Required, rebaseWorkspaceAuthKeys(target.Required, target.Auth.Name, sourceSelection.Auth.Name)),
+	}
+	return binding, nil
+}
+
+// workspaceStaticAuthSelectionForService validates that one service-level
+// selector has identical storage semantics across every enabled version.
+func workspaceStaticAuthSelectionForService(
+	authConfigs map[string]fusedobject.AuthConfigs,
+	svc workspaceDesiredService,
+	authType string,
+	authName string,
+) (workspaceStaticAuthSelection, error) {
+	var selected workspaceStaticAuthSelection
+	for index, version := range svc.Versions {
+		auth, err := workspaceStaticAuthConfig(authConfigs[workspaceAuthMetadataKey(svc, version)], svc, authType, authName)
+		// A missing immutable response or selector invalidates the complete batch.
+		if err != nil {
+			// Multiple enabled versions make absence in any one version a service-
+			// level contract drift rather than an isolated selector typo.
+			if len(svc.Versions) > 1 {
+				return workspaceStaticAuthSelection{}, workspaceAuthContractDriftError(svc)
+			}
+			return workspaceStaticAuthSelection{}, err
+		}
+		required, optional, keys, err := workspaceAuthKeyRequirements(auth)
+		// Malformed provider credential metadata cannot become a service binding.
+		if err != nil {
+			// A multi-version service cannot safely persist one shape when any
+			// immutable version declares an unusable or different shape.
+			if len(svc.Versions) > 1 {
+				return workspaceStaticAuthSelection{}, workspaceAuthContractDriftError(svc)
+			}
+			return workspaceStaticAuthSelection{}, err
+		}
+		candidate := workspaceStaticAuthSelection{Auth: auth, Required: required, Optional: optional, Keys: keys}
+		// The first version establishes the service-level invariant checked by
+		// each remaining immutable version in the same Registry batch.
+		if index == 0 {
+			selected = candidate
+			continue
+		}
+		if !workspaceStaticAuthSelectionsEqual(selected, candidate) {
+			return workspaceStaticAuthSelection{}, workspaceAuthContractDriftError(svc)
+		}
+	}
+	// Normalized desired services always contain a version; retain a defensive
+	// failure so this helper cannot silently return an empty selector in isolation.
+	if selected.Auth.Name == "" {
+		return workspaceStaticAuthSelection{}, errors.New("selected service has no enabled auth contract")
+	}
+	return selected, nil
+}
+
+// workspaceStaticAuthSelectionsEqual compares only runtime storage semantics;
+// provider URLs and credential values never enter this validation path.
+func workspaceStaticAuthSelectionsEqual(left, right workspaceStaticAuthSelection) bool {
+	return canonicalWorkspaceAuthConfigType(left.Auth) == canonicalWorkspaceAuthConfigType(right.Auth) &&
+		left.Auth.Name == right.Auth.Name && reflect.DeepEqual(left.Required, right.Required) &&
+		reflect.DeepEqual(left.Optional, right.Optional) && reflect.DeepEqual(left.Keys, right.Keys)
+}
+
+// workspaceAuthContractDriftError returns one stable, secret-safe conflict for
+// an auth selector that cannot represent every enabled immutable version.
+func workspaceAuthContractDriftError(svc workspaceDesiredService) error {
+	return workspaceConfigHTTPError{
+		status: http.StatusConflict, code: "workspace_auth_contract_drift", category: "conflict",
+		message:     "The selected authentication contract differs across enabled service versions.",
+		remediation: "Select one auth name with the same credential shape across every enabled version, then create a new plan.",
+		cause:       fmt.Errorf("service %s has incompatible enabled auth contracts", svc.ServiceID),
+	}
 }
 
 // workspaceStaticAuthConfig fetches the selected service version's auth shape;
@@ -3526,6 +3866,76 @@ type workspaceAuthSecretInput struct {
 	Value string
 }
 
+// workspaceAuthKeyRequirements derives the exact runtime storage contract for
+// one reviewed scheme, including optional Basic password behavior.
+func workspaceAuthKeyRequirements(auth fusedobject.AuthConfig) (required, optional, all []string, err error) {
+	name := workspaceAuthCredentialName(auth)
+	// Runtime cannot bind an unnamed security scheme to a stable bucket key.
+	if name == "" {
+		return nil, nil, nil, errors.New("selected auth config has no credential name")
+	}
+	switch canonicalWorkspaceAuthConfigType(auth) {
+	case "basic":
+		all = []string{name + "_username", name + "_password"}
+		mode, valid := authrouting.EffectiveBasicPasswordMode(auth.BasicPasswordMode)
+		// Unknown provider metadata cannot safely describe either direct or
+		// referenced Basic material.
+		if !valid {
+			return nil, nil, nil, errors.New("selected basic auth config has invalid password mode")
+		}
+		required = []string{name + "_username"}
+		// Password role admission follows the reviewed provider mode; explicit
+		// empty deliberately maps only the username.
+		if mode == authrouting.BasicPasswordRequired {
+			required = append(required, name+"_password")
+		} else if mode == authrouting.BasicPasswordOptional {
+			optional = []string{name + "_password"}
+		}
+		return required, optional, all, nil
+	case "mtls":
+		all = []string{name + "_cert", name + "_key"}
+		return append([]string(nil), all...), nil, all, nil
+	default:
+		all = []string{name}
+		return append([]string(nil), all...), nil, all, nil
+	}
+}
+
+// rebaseWorkspaceAuthKeys preserves credential roles while replacing only the
+// reviewed security-scheme prefix used by bucket storage.
+func rebaseWorkspaceAuthKeys(keys []string, targetName, sourceName string) []string {
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		// Exact single-value families have no role suffix.
+		if key == targetName {
+			out = append(out, sourceName)
+			continue
+		}
+		// Paired Basic and mTLS keys retain their reviewed role suffix so the
+		// destination dispatcher receives the same semantic field.
+		out = append(out, sourceName+strings.TrimPrefix(key, targetName))
+	}
+	return out
+}
+
+// mergeWorkspaceAuthKeys preserves deterministic role order while removing
+// overlap between source completeness and destination compatibility checks.
+func mergeWorkspaceAuthKeys(keySets ...[]string) []string {
+	seen := make(map[string]struct{})
+	var merged []string
+	for _, keys := range keySets {
+		for _, key := range keys {
+			// Repeated roles are one source requirement, not multiple SQL checks.
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			merged = append(merged, key)
+		}
+	}
+	return merged
+}
+
 // workspaceAuthSecretInputs maps public auth families to dispatcher credential
 // keys while keeping bucket storage service-scoped.
 func workspaceAuthSecretInputs(auth fusedobject.AuthConfig, cfg *WorkspaceAuthConfig) ([]workspaceAuthSecretInput, error) {
@@ -3587,7 +3997,7 @@ func encryptedWorkspaceSecret(bucketID, serviceID uuid.UUID, keyName, credential
 
 // prepareWorkspaceBucketSecrets resolves and encrypts every declared
 // buckets.<name>.secrets.<key> intent before any workspace membership
-// mutates, mirroring prepareWorkspaceAuthSecrets' validate-before-write
+// mutates, mirroring prepareWorkspaceAuthBindings' validate-before-write
 // ordering. Unlike auth secrets, these have no per-service loop to ride
 // along with -- they're upserted once for the whole apply (see
 // upsertWorkspaceBucketSecrets), the same way connection profiles are
@@ -3626,8 +4036,8 @@ func prepareWorkspaceBucketSecrets(
 }
 
 // upsertWorkspaceBucketSecrets performs the already-validated writes and
-// records only non-secret identifiers/counts for audit, mirroring
-// upsertPreparedWorkspaceAuthSecrets' OTEL shape.
+// records only non-secret identifiers/counts for audit, matching the auth
+// binding path's secret-safe OTEL shape.
 func upsertWorkspaceBucketSecrets(ctx context.Context, s store.Store, secrets []store.WorkspaceSecret) error {
 	if len(secrets) == 0 {
 		return nil
@@ -3636,32 +4046,75 @@ func upsertWorkspaceBucketSecrets(ctx context.Context, s store.Store, secrets []
 		return fmt.Errorf("upsert bucket secrets: %w", err)
 	}
 	_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.bucket_secrets_upserted")
-	span.SetAttributes(attribute.Int("secret_count", len(secrets)))
+	span.SetAttributes(attribute.Int("secret_count", len(secrets)), attribute.String("outcome", "success"))
+	span.SetStatus(codes.Ok, "")
 	span.End()
 	return nil
 }
 
-// upsertPreparedWorkspaceAuthSecrets performs the already-validated writes and
-// records only non-secret identifiers/counts for audit.
-func upsertPreparedWorkspaceAuthSecrets(ctx context.Context, s store.Store, svc workspaceDesiredService, plans map[string]workspaceAuthApplyPlan) error {
-	for _, plan := range plans {
-		if plan.ServiceID != svc.ServiceID {
-			continue
-		}
-		if err := s.UpsertSecrets(ctx, plan.Secrets); err != nil {
-			return fmt.Errorf("upsert auth secrets for service %s: %w", svc.ServiceID, err)
-		}
-		_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.auth_secrets_upserted")
-		span.SetAttributes(
-			attribute.String("bucket_id", plan.BucketID.String()),
-			attribute.String("service_id", svc.ServiceID.String()),
-			attribute.String("auth_type", plan.AuthType),
-			attribute.String("auth_name", plan.AuthName),
-			attribute.Int("secret_count", len(plan.Secrets)),
-		)
-		span.End()
+// applyPreparedWorkspaceAuthBindings performs one transactional mutation and
+// records only aggregate, non-secret audit dimensions.
+func applyPreparedWorkspaceAuthBindings(ctx context.Context, s store.Store, bindings []store.WorkspaceAuthBinding) error {
+	// Auth-free workspace plans should not require an optional store capability.
+	if len(bindings) == 0 {
+		return nil
 	}
+	repository, ok := s.(store.WorkspaceAuthBindingStore)
+	// The same store owner that preflighted reference edges must commit them;
+	// there is no safe legacy fallback that preserves dynamic rotation.
+	if !ok {
+		return errors.New("workspace auth binding store is unavailable")
+	}
+	// The store owns transactional revalidation and all encrypted-row replacement.
+	if err := repository.ApplyWorkspaceAuthBindings(ctx, bindings); err != nil {
+		return fmt.Errorf("apply workspace auth bindings: %w", err)
+	}
+	_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.auth_bindings_applied")
+	span.SetAttributes(
+		attribute.Int("binding_count", len(bindings)),
+		attribute.Int("reference_count", workspaceAuthReferenceCount(bindings)),
+		attribute.Int("clear_count", workspaceAuthClearCount(bindings)),
+		attribute.Int("secret_count", workspaceAuthBindingSecretCount(bindings)),
+		attribute.String("outcome", "success"),
+	)
+	span.SetStatus(codes.Ok, "")
+	span.End()
 	return nil
+}
+
+// workspaceAuthReferenceCount reports only aggregate binding shape for OTEL.
+func workspaceAuthReferenceCount(bindings []store.WorkspaceAuthBinding) int {
+	total := 0
+	for _, binding := range bindings {
+		// A non-nil source distinguishes live bindings from encrypted local
+		// material without exposing either service or auth identities.
+		if binding.Reference != nil {
+			total++
+		}
+	}
+	return total
+}
+
+// workspaceAuthClearCount reports only aggregate reconciliation intent so
+// operators can distinguish removal from direct rotation without identities.
+func workspaceAuthClearCount(bindings []store.WorkspaceAuthBinding) int {
+	total := 0
+	for _, binding := range bindings {
+		// Clear intent is safe bounded telemetry and carries no auth or service name.
+		if binding.ClearReferences {
+			total++
+		}
+	}
+	return total
+}
+
+// workspaceAuthBindingSecretCount reports encrypted-row volume without values.
+func workspaceAuthBindingSecretCount(bindings []store.WorkspaceAuthBinding) int {
+	total := 0
+	for _, binding := range bindings {
+		total += len(binding.Secrets)
+	}
+	return total
 }
 
 // workspaceAuthCredentialName mirrors runtime credential resolution so config
@@ -5169,14 +5622,19 @@ func removePreviouslyManagedWorkspaceResources(
 	desired workspaceDesiredState,
 	previousManaged map[uuid.UUID]workspaceManagedService,
 ) error {
+	removals := managedWorkspaceServiceRemovalIDs(desired, previousManaged)
+	// Membership removal is batched so a referenced target and source can leave
+	// together without map iteration order creating a false dependency conflict.
+	if err := removeManagedWorkspaceServices(ctx, s, removals); err != nil {
+		return err
+	}
 	for serviceID, managed := range previousManaged {
 		desiredSvc, keepService := desired.Services[serviceID]
+		// Removed services were handled atomically above; only retained versions remain.
 		if !keepService {
-			if err := removeManagedWorkspaceService(ctx, s, desired, serviceID); err != nil {
-				return err
-			}
 			continue
 		}
+		// Version cleanup preserves the existing per-service reconciliation contract.
 		if err := removeManagedWorkspaceVersions(ctx, s, desired, desiredSvc, managed); err != nil {
 			return err
 		}
@@ -5184,25 +5642,54 @@ func removePreviouslyManagedWorkspaceResources(
 	return nil
 }
 
-func removeManagedWorkspaceService(
-	ctx context.Context,
-	s store.Store,
+// managedWorkspaceServiceRemovalIDs returns the deterministic, non-deprecated
+// membership set that this apply is authorized to remove.
+func managedWorkspaceServiceRemovalIDs(desired workspaceDesiredState, previousManaged map[uuid.UUID]workspaceManagedService) []uuid.UUID {
+	serviceIDs := make([]uuid.UUID, 0, len(previousManaged))
+	for serviceID := range previousManaged {
+		// Desired membership always wins over historical managed state.
+		if _, keep := desired.Services[serviceID]; keep {
+			continue
+		}
+		// Deprecation keeps the service executable while announcing future removal.
+		if _, deprecated := serviceDeprecationDirective(desired, serviceID); deprecated {
+			continue
+		}
+		serviceIDs = append(serviceIDs, serviceID)
+	}
+	// Stable ordering keeps mutation audit events reproducible across map iteration.
+	sort.Slice(serviceIDs, func(i, j int) bool { return serviceIDs[i].String() < serviceIDs[j].String() })
+	return serviceIDs
+}
 
-	desired workspaceDesiredState,
-	serviceID uuid.UUID,
-) error {
-	if _, deprecated := serviceDeprecationDirective(desired, serviceID); deprecated {
+// removeManagedWorkspaceServices preserves the single-service store contract
+// while requiring atomic persistence for a composite dependency graph.
+func removeManagedWorkspaceServices(ctx context.Context, s store.Store, serviceIDs []uuid.UUID) error {
+	// No removals means no database mutation or audit event.
+	if len(serviceIDs) == 0 {
 		return nil
 	}
-	if err := s.RemoveWorkspaceService(ctx, serviceID); err != nil && !errors.Is(err, store.ErrWorkspaceServiceNotFound) {
+	var err error
+	// One service retains the established exact delete and not-found behavior.
+	if len(serviceIDs) == 1 {
+		err = s.RemoveWorkspaceService(ctx, serviceIDs[0])
+	} else {
+		repository, ok := s.(store.WorkspaceServiceBatchRemovalStore)
+		// Order-dependent fallbacks can reject a valid target+source removal.
+		if !ok {
+			return errors.New("workspace service batch removal is unavailable")
+		}
+		err = repository.RemoveWorkspaceServices(ctx, serviceIDs)
+	}
+	// Concurrent absence remains idempotent; every other store result is authoritative.
+	if err != nil && !errors.Is(err, store.ErrWorkspaceServiceNotFound) {
 		return err
 	}
-	_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.service_removed")
-	span.SetAttributes(
-		attribute.String("service_id", serviceID.String()),
-	)
-	span.End()
-
+	for _, serviceID := range serviceIDs {
+		_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.service_removed")
+		span.SetAttributes(attribute.String("service_id", serviceID.String()))
+		span.End()
+	}
 	return nil
 }
 
@@ -5294,7 +5781,10 @@ func checkWorkspaceServiceLimit(
 	removableIDs := workspaceRemovableServiceIDs(desired, previousManaged)
 	currentActive, projectedActive, err := capacityStore.CountProjectedActiveServices(ctx, desiredIDs, removableIDs)
 	if err != nil {
-		span.RecordError(err)
+		// Projection errors may contain SQL detail, so the existing plan span gets
+		// only a fixed failure classifier.
+		span.SetAttributes(attribute.String("outcome", "capacity_lookup_failed"), attribute.String("error.code", "workspace_service_capacity_failed"))
+		span.SetStatus(codes.Error, "workspace_service_capacity_failed")
 		return fmt.Errorf("failed to project active services: %w", err)
 	}
 	if projectedActive <= currentActive {
@@ -5549,35 +6039,80 @@ type workspaceConfigErrorBody struct {
 	TraceID     string         `json:"trace_id,omitempty"`
 }
 
+// writeWorkspaceConfigError emits one structured error contract and attaches
+// the available trace identity even when the underlying error is unclassified.
 func writeWorkspaceConfigError(w http.ResponseWriter, err error, contexts ...context.Context) {
 	markMutationAuditCancellation(err, contexts)
+	recordControlMutationFailure(err, contexts)
+	contextTraceID := workspaceConfigErrorTraceID(contexts)
+	contextRequestID := workspaceConfigErrorRequestID(contexts)
+	setWorkspaceConfigErrorHeaders(w, contextRequestID, contextTraceID)
 	var httpErr workspaceConfigHTTPError
+	// Typed errors retain their reviewed status, category, and remediation contract.
 	if errors.As(err, &httpErr) {
-		response := workspaceConfigErrorResponse{
-			Error: workspaceConfigErrorBody{
-				Code:        workspaceConfigErrorCode(httpErr),
-				Message:     httpErr.message,
-				Category:    workspaceConfigErrorCategory(httpErr),
-				Retryable:   httpErr.retryable || httpErr.status == http.StatusTooManyRequests || httpErr.status >= http.StatusInternalServerError,
-				Details:     httpErr.details,
-				Remediation: httpErr.remediation,
-			},
-		}
-		if len(contexts) > 0 {
-			spanContext := trace.SpanContextFromContext(contexts[0])
-			if spanContext.IsValid() {
-				response.Error.TraceID = spanContext.TraceID().String()
-			}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if httpErr.retryAfterSeconds > 0 {
-			w.Header().Set("Retry-After", fmt.Sprint(httpErr.retryAfterSeconds))
-		}
-		w.WriteHeader(httpErr.status)
-		_ = json.NewEncoder(w).Encode(response)
+		writeTypedWorkspaceConfigError(w, httpErr, contextRequestID, contextTraceID)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	writeUnknownWorkspaceConfigError(w, contextRequestID, contextTraceID)
+}
+
+// writeTypedWorkspaceConfigError assembles one reviewed public envelope while
+// keeping retry and correlation policy outside the HTTP dispatch boundary.
+func writeTypedWorkspaceConfigError(w http.ResponseWriter, httpErr workspaceConfigHTTPError, contextRequestID, contextTraceID string) {
+	requestID := workspaceConfigErrorCorrelation(httpErr.requestID, contextRequestID)
+	traceID := workspaceConfigErrorCorrelation(httpErr.traceID, contextTraceID)
+	setWorkspaceConfigErrorHeaders(w, requestID, traceID)
+	response := workspaceConfigErrorResponse{Error: workspaceConfigErrorBody{
+		Code: workspaceConfigErrorCode(httpErr), Message: httpErr.message,
+		Category: workspaceConfigErrorCategory(httpErr), Retryable: workspaceConfigErrorRetryable(httpErr),
+		Details: httpErr.details, Remediation: workspaceConfigErrorRemediation(httpErr),
+		Phase: httpErr.phase, OperationID: httpErr.operationID, RequestID: requestID,
+		CommitState: httpErr.commitState, Recovery: httpErr.recovery, TraceID: traceID,
+	}}
+	// Retry-After is emitted only for contracts that provide an authoritative delay.
+	if httpErr.retryAfterSeconds > 0 {
+		w.Header().Set("Retry-After", fmt.Sprint(httpErr.retryAfterSeconds))
+	}
+	w.WriteHeader(httpErr.status)
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+// workspaceConfigErrorRetryable allows automatic retries only when mutation
+// state proves another attempt cannot duplicate committed or uncertain work.
+func workspaceConfigErrorRetryable(httpErr workspaceConfigHTTPError) bool {
+	// Unknown or already-committed mutations require state inspection even when
+	// the underlying transport or server classification is ordinarily transient.
+	if httpErr.commitState == "unknown" || httpErr.commitState == "committed" {
+		return false
+	}
+	return httpErr.retryable || httpErr.status == http.StatusTooManyRequests || httpErr.status >= http.StatusInternalServerError
+}
+
+// workspaceConfigErrorRemediation fills only the proven-commit case where a
+// blank response would otherwise make a blind repeat look reasonable.
+func workspaceConfigErrorRemediation(httpErr workspaceConfigHTTPError) string {
+	// A supplied command or explanation is more specific than the generic state-inspection path.
+	if httpErr.commitState != "committed" || httpErr.recovery != "" || strings.TrimSpace(httpErr.remediation) != "" {
+		return httpErr.remediation
+	}
+	return "Inspect current state and use the request or trace ID to check Engine logs before taking further action."
+}
+
+// workspaceConfigErrorCorrelation prefers a trusted downstream identity and
+// otherwise retains the request-local correlation generated by middleware.
+func workspaceConfigErrorCorrelation(preferred, fallback string) string {
+	// Empty downstream values must not erase the local request or trace identity.
+	if preferred == "" {
+		return fallback
+	}
+	return preferred
+}
+
+// writeUnknownWorkspaceConfigError hides internal prose while preserving the
+// request identities operators need to locate the matching Engine telemetry.
+func writeUnknownWorkspaceConfigError(w http.ResponseWriter, requestID, traceID string) {
+	// Unknown failures hide internal prose but keep correlation identity so the
+	// generic response can still be matched to Engine telemetry and logs.
 	w.WriteHeader(http.StatusInternalServerError)
 	_ = json.NewEncoder(w).Encode(workspaceConfigErrorResponse{
 		Error: workspaceConfigErrorBody{
@@ -5585,8 +6120,95 @@ func writeWorkspaceConfigError(w http.ResponseWriter, err error, contexts ...con
 			Message:   "The Engine could not complete the configuration request.",
 			Category:  "internal",
 			Retryable: true,
+			RequestID: requestID,
+			TraceID:   traceID,
 		},
 	})
+}
+
+// setWorkspaceConfigErrorHeaders applies the shared no-store response policy
+// and mirrors only non-empty request and trace identities.
+func setWorkspaceConfigErrorHeaders(w http.ResponseWriter, requestID, traceID string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// Correlation headers mirror the bounded identifiers carried in the envelope.
+	if requestID != "" {
+		w.Header().Set("X-Request-ID", requestID)
+	}
+	if traceID != "" {
+		w.Header().Set("X-Trace-ID", traceID)
+	}
+}
+
+// workspaceConfigErrorRequestID returns the first middleware-issued request
+// identity without inventing one outside the HTTP request boundary.
+func workspaceConfigErrorRequestID(contexts []context.Context) string {
+	for _, ctx := range contexts {
+		// Nil contexts cannot carry request-scoped correlation metadata.
+		if ctx == nil {
+			continue
+		}
+		// The first populated request ID belongs to the nearest handler context.
+		if requestID := chimiddleware.GetReqID(ctx); requestID != "" {
+			return requestID
+		}
+	}
+	return ""
+}
+
+// withWorkspaceConfigErrorMetadata adds proven mutation outcome metadata while
+// retaining the original typed diagnostic and keeping unknown prose private.
+func withWorkspaceConfigErrorMetadata(err error, phase, operationID, commitState string) error {
+	var httpErr workspaceConfigHTTPError
+	// Existing typed fields are more specific and must not be overwritten by a
+	// broader handler-stage classification.
+	if errors.As(err, &httpErr) {
+		if httpErr.phase == "" {
+			httpErr.phase = phase
+		}
+		if httpErr.operationID == "" {
+			httpErr.operationID = operationID
+		}
+		if httpErr.commitState == "" {
+			httpErr.commitState = commitState
+		}
+		// Ambiguous outcomes without an exact recovery command must not encourage a blind repeat.
+		if httpErr.commitState == "unknown" && httpErr.recovery == "" && (strings.TrimSpace(httpErr.remediation) == "" || strings.HasPrefix(strings.ToLower(strings.TrimSpace(httpErr.remediation)), "retry")) {
+			httpErr.remediation = "Inspect current state and use the request or trace ID to check Engine logs before retrying."
+		}
+		return httpErr
+	}
+	// Unknown internal errors need a stable envelope, but the cause remains
+	// wrapped solely for cancellation/audit classification and is never copied into the response.
+	remediation := "Retry and check Engine logs if the problem continues."
+	// Only an ambiguous mutation outcome requires state inspection before another attempt.
+	if commitState == "unknown" {
+		remediation = "Inspect current state and use the request or trace ID to check Engine logs before retrying."
+	}
+	return workspaceConfigHTTPError{
+		status: http.StatusInternalServerError, code: "workspace_config_error",
+		message: "The Engine could not complete the configuration request.", category: "internal", retryable: true,
+		remediation: remediation,
+		phase:       phase, operationID: operationID, commitState: commitState, cause: err,
+	}
+}
+
+// workspaceConfigErrorTraceID returns the first valid span identity supplied
+// by the request path without manufacturing a correlation value.
+func workspaceConfigErrorTraceID(contexts []context.Context) string {
+	for _, ctx := range contexts {
+		// Nil contexts cannot carry a span and are skipped defensively.
+		if ctx == nil {
+			continue
+		}
+		spanContext := trace.SpanContextFromContext(ctx)
+		// Only a valid SDK span context is safe to expose as correlation identity.
+		if spanContext.IsValid() {
+			return spanContext.TraceID().String()
+		}
+	}
+	return ""
 }
 
 func markMutationAuditCancellation(err error, contexts []context.Context) {

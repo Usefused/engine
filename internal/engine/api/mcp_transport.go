@@ -1,6 +1,7 @@
 package api
 
 import (
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -26,14 +27,39 @@ func mcpTransportURLsForApp(r *http.Request, appID uuid.UUID) mcpTransportURLs {
 	}
 }
 
+// mcpStreamableHTTPURLForApp returns a directly usable transport URL so
+// authentication never depends on surviving an origin-changing redirect.
 func mcpStreamableHTTPURLForApp(r *http.Request, appID uuid.UUID) string {
 	path := "/mcp/" + appID.String()
+	// Request-free projections remain relative because no public authority is available.
 	if r == nil {
 		return path
 	}
 	scheme := mcpRequestScheme(r)
 	host := mcpRequestHost(r)
+	// Plain HTTP is safe only for the same-machine development origins that do
+	// not redirect credentials across a public scheme boundary.
+	if scheme == "http" && !mcpAllowsPlainHTTP(host) {
+		scheme = "https"
+	}
 	return scheme + "://" + host + path
+}
+
+// mcpAllowsPlainHTTP limits insecure discovery to explicit loopback hosts;
+// private and public names must advertise the TLS endpoint clients can call directly.
+func mcpAllowsPlainHTTP(authority string) bool {
+	parsed, err := url.Parse("http://" + authority)
+	// Invalid authorities are handled by the existing host validator and cannot opt into HTTP here.
+	if err != nil {
+		return false
+	}
+	hostname := parsed.Hostname()
+	// The conventional loopback name supports local development without requiring certificates.
+	if strings.EqualFold(hostname, "localhost") {
+		return true
+	}
+	address := net.ParseIP(hostname)
+	return address != nil && address.IsLoopback()
 }
 
 func mcpRequestScheme(r *http.Request) string {

@@ -119,6 +119,14 @@ func TestMCPToolTimeoutStillEndsStuckSession(t *testing.T) {
 		go enforceToolCallTimeout(sess, callID)
 		time.Sleep(20 * time.Minute)
 		synctest.Wait()
+		failure := <-sess.sseFailures
+		// A timed-out execute may already have mutated provider state, so the agent receives correlation and an explicit no-replay action before teardown.
+		if !strings.Contains(failure.payload, `"id":1`) || !strings.Contains(failure.payload, mcpRuntimeOutcomeUnknownCode) || !strings.Contains(failure.payload, `"execute_request":"do_not_replay"`) {
+			t.Fatalf("timeout failure = %s", failure.payload)
+		}
+		// The fallback grace lets a connected event stream drain the error before an unconsumed session is retired.
+		time.Sleep(mcpSSEFailureDrainGrace)
+		synctest.Wait()
 		assertMCPSessionIdleTestEnded(t, sess)
 	})
 }

@@ -59,9 +59,10 @@ func forwardSDKGenerateWithWorkspaceGate(proxy Forwarder, s store.Store, w http.
 	defer span.End()
 
 	body, err := io.ReadAll(r.Body)
+	// Body read failures happen before Registry receives the generation mutation.
 	if err != nil {
 		span.SetAttributes(attribute.String("outcome", "bad_request"))
-		http.Error(w, `{"error":"failed to read request body"}`, http.StatusBadRequest)
+		writeSDKGenerateAdmissionError(w, ctx, http.StatusBadRequest, "invalid_sdk_generate_request", "The SDK generation request body could not be read.", "Send a valid bounded JSON generation request.")
 		return
 	}
 	// The Registry still needs to see the exact same bytes if this request
@@ -69,12 +70,16 @@ func forwardSDKGenerateWithWorkspaceGate(proxy Forwarder, s store.Store, w http.
 	r.Body = io.NopCloser(bytes.NewReader(body))
 
 	unactivated, blocked, checkErr := firstUnactivatedSelection(ctx, s, accountID, body)
+	// Activation verification is fail-closed because forwarding would begin the
+	// Registry mutation before workspace eligibility was proven.
 	if checkErr != nil {
 		span.SetAttributes(attribute.String("outcome", "error"))
 		slog.ErrorContext(ctx, "sdk generate gate: activation check failed", slog.Any("error", checkErr))
-		http.Error(w, `{"error":"failed to verify workspace activation"}`, http.StatusInternalServerError)
+		writeSDKGenerateAdmissionError(w, ctx, http.StatusInternalServerError, "sdk_activation_check_failed", "The Engine could not verify workspace activation for SDK generation.", "Retry and check Engine logs if the problem continues.")
 		return
 	}
+	// A known inactive selection is precise caller-correctable context and remains
+	// a forbidden precondition without forwarding any generation request.
 	if blocked {
 		attrs := []attribute.KeyValue{
 			attribute.String("outcome", "forbidden"),
@@ -88,7 +93,7 @@ func forwardSDKGenerateWithWorkspaceGate(proxy Forwarder, s store.Store, w http.
 		slog.WarnContext(ctx, "sdk generate: rejected selection for an unactivated service",
 			slog.String("service_id", unactivated.ServiceID.String()), slog.String("account_id", accountID.String()))
 		msg := workspaceActivationRequiredMessage(unactivated)
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, msg), http.StatusForbidden)
+		writeSDKGenerateAdmissionError(w, ctx, http.StatusForbidden, "workspace_service_activation_required", msg, "Activate the exact selected service version in this workspace, then generate the SDK again.")
 		return
 	}
 
@@ -98,6 +103,14 @@ func forwardSDKGenerateWithWorkspaceGate(proxy Forwarder, s store.Store, w http.
 		attribute.Int("http_status_code", rec.status),
 		attribute.String("outcome", outcomeLabel(rec.status)),
 	)
+}
+
+// writeSDKGenerateAdmissionError records that Registry never received the
+// generation mutation and emits a correlated structured control-plane error.
+func writeSDKGenerateAdmissionError(w http.ResponseWriter, ctx context.Context, status int, code, message, remediation string) {
+	writeWorkspaceConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{
+		status: status, code: code, message: message, remediation: remediation,
+	}, "sdk_generation_admission", "", "not_committed"), ctx)
 }
 
 // firstUnactivatedSelection decodes body's selections and reports the first

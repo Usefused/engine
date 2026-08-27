@@ -1032,17 +1032,6 @@ func idempotentExecutionInsertArgs(exec *models.IdempotentExecution) []any {
 	}
 }
 
-func (s *postgresStore) DeleteSecret(ctx context.Context, bucketID uuid.UUID, serviceID uuid.UUID, keyName string) error {
-	query := `
-		DELETE FROM fused_workspace_secrets 
-		WHERE bucket_id = $1 
-		AND service_id = $2 
-		AND key_name = $3 
-	`
-	_, err := s.db.Exec(ctx, query, bucketID, serviceID, keyName)
-	return err
-}
-
 func (s *postgresStore) ListSecretMeta(ctx context.Context, bucketID uuid.UUID) ([]WorkspaceSecretMeta, error) {
 	query := `
 		SELECT id,  bucket_id, service_id, key_name, credential_type, last_used_at, expires_at, created_at, updated_at
@@ -1057,6 +1046,31 @@ func (s *postgresStore) ListSecretMeta(ctx context.Context, bucketID uuid.UUID) 
 	return collectSecretMetas(rows)
 }
 
+// authReferenceStorageServiceIDSQL makes an exact reference authoritative;
+// direct target rows remain eligible only when no reference edge exists.
+const authReferenceStorageServiceIDSQL = `CASE
+	WHEN reference.id IS NULL THEN requested_key.service_id
+	ELSE reference.source_service_id
+END`
+
+// authReferenceStorageKeyNameSQL rebases only a key owned by the exact target
+// scheme; malformed prefixes resolve to NULL and therefore fail closed.
+const authReferenceStorageKeyNameSQL = `CASE
+	WHEN reference.id IS NULL THEN requested_key.target_key_name
+	WHEN LOWER(REPLACE(BTRIM(reference.target_auth_type), '-', '_')) <>
+	     LOWER(REPLACE(BTRIM(reference.source_auth_type), '-', '_'))
+		THEN NULL
+	WHEN requested_key.auth_type IS NULL
+	  OR LOWER(REPLACE(BTRIM(reference.target_auth_type), '-', '_')) <> requested_key.auth_type
+		THEN NULL
+	WHEN requested_key.auth_name = ''
+	  OR LEFT(requested_key.target_key_name, CHAR_LENGTH(requested_key.auth_name)) <> requested_key.auth_name
+		THEN NULL
+	ELSE reference.source_auth_name || SUBSTRING(
+		requested_key.target_key_name FROM CHAR_LENGTH(reference.target_auth_name) + 1
+	)
+END`
+
 const appBucketCredentialPresenceSQL = `
 	WITH requirements AS (
 		SELECT
@@ -1070,6 +1084,30 @@ const appBucketCredentialPresenceSQL = `
 			auth_name text,
 			secret_keys jsonb
 		)
+	), auth_keys AS (
+		SELECT
+			requirement.service_id,
+			requirement.auth_type,
+			requirement.auth_name,
+			requested_key.key_name AS target_key_name
+		FROM requirements requirement
+		CROSS JOIN LATERAL jsonb_array_elements_text(requirement.secret_keys) AS requested_key(key_name)
+	), requested_keys AS (
+		SELECT
+			requested_key.service_id,
+			requested_key.auth_type,
+			requested_key.auth_name,
+			requested_key.target_key_name,
+			` + authReferenceStorageServiceIDSQL + ` AS storage_service_id,
+			` + authReferenceStorageKeyNameSQL + ` AS storage_key_name
+		FROM auth_keys requested_key
+		LEFT JOIN LATERAL (
+			SELECT candidate.*
+			FROM fused_workspace_auth_references candidate
+			WHERE candidate.bucket_id = $1
+			  AND candidate.target_service_id = requested_key.service_id
+			  AND candidate.target_auth_name = requested_key.auth_name
+		) reference ON TRUE
 	)
 	SELECT
 		requirement.service_id,
@@ -1085,16 +1123,20 @@ const appBucketCredentialPresenceSQL = `
 			  AND BTRIM(config.auth_name) = requirement.auth_name
 		) AS connected,
 		COALESCE(ARRAY(
-			SELECT requested_key.key_name
-			FROM jsonb_array_elements_text(requirement.secret_keys) AS requested_key(key_name)
-			WHERE EXISTS (
+			SELECT DISTINCT requested_key.target_key_name
+			FROM requested_keys requested_key
+			WHERE requested_key.service_id = requirement.service_id
+			  AND requested_key.auth_type = requirement.auth_type
+			  AND requested_key.auth_name = requirement.auth_name
+			  AND EXISTS (
 				SELECT 1
 				FROM fused_workspace_secrets secret
 				WHERE secret.bucket_id = $1
-				  AND secret.service_id = requirement.service_id
-				  AND secret.key_name = requested_key.key_name
+				  AND secret.service_id = requested_key.storage_service_id
+				  AND secret.key_name = requested_key.storage_key_name
+				  AND (secret.expires_at IS NULL OR secret.expires_at > NOW())
 			)
-			ORDER BY requested_key.key_name
+			ORDER BY requested_key.target_key_name
 		), ARRAY[]::text[]) AS secret_keys
 	FROM requirements requirement
 	ORDER BY requirement.service_id, requirement.auth_type, requirement.auth_name`
@@ -1250,37 +1292,75 @@ const firstCompleteSecretSetSQL = `
 	WITH alternatives AS (
 		SELECT ordinality, value
 		FROM jsonb_array_elements($3::jsonb) WITH ORDINALITY
+	), requested_keys AS (
+		SELECT
+			$2::uuid AS service_id,
+			candidate.value->'auth_types'->>requested_key.key_name AS auth_type,
+			candidate.ordinality,
+			requested_key.key_name AS target_key_name,
+			BOOL_OR(requested_key.required) AS required,
+			candidate.value->'auth_names'->>requested_key.key_name AS auth_name
+		FROM alternatives candidate
+		CROSS JOIN LATERAL (
+			SELECT required_key.key_name, TRUE AS required
+			FROM jsonb_array_elements_text(COALESCE(candidate.value->'required', '[]'::jsonb)) required_key(key_name)
+			UNION ALL
+			SELECT optional_key.key_name, FALSE AS required
+			FROM jsonb_array_elements_text(COALESCE(candidate.value->'optional', '[]'::jsonb)) optional_key(key_name)
+		) requested_key
+		GROUP BY candidate.ordinality, candidate.value, requested_key.key_name
+	), resolved_keys AS (
+		SELECT
+			requested_key.ordinality,
+			requested_key.target_key_name,
+			requested_key.required,
+			` + authReferenceStorageServiceIDSQL + ` AS storage_service_id,
+			` + authReferenceStorageKeyNameSQL + ` AS storage_key_name
+		FROM requested_keys requested_key
+		LEFT JOIN LATERAL (
+			SELECT candidate.*
+			FROM fused_workspace_auth_references candidate
+			WHERE candidate.bucket_id = $1
+			  AND candidate.target_service_id = requested_key.service_id
+			  AND candidate.target_auth_name = requested_key.auth_name
+		) reference ON TRUE
 	), selected AS (
-		SELECT value
+		SELECT ordinality
 		FROM alternatives candidate
 		WHERE NOT EXISTS (
 			SELECT 1
-			FROM jsonb_array_elements_text(candidate.value->'required') required_key
-			WHERE NOT EXISTS (
+			FROM resolved_keys required_key
+			WHERE required_key.ordinality = candidate.ordinality
+			  AND required_key.required
+			  AND NOT EXISTS (
 				SELECT 1 FROM fused_workspace_secrets secret
-				WHERE secret.bucket_id = $1 AND secret.service_id = $2
-				  AND secret.key_name = required_key
+				WHERE secret.bucket_id = $1
+				  AND secret.service_id = required_key.storage_service_id
+				  AND secret.key_name = required_key.storage_key_name
 				  AND (secret.expires_at IS NULL OR secret.expires_at > NOW())
 			)
 		)
 		ORDER BY ordinality
 		LIMIT 1
-	), selected_keys AS (
-		SELECT jsonb_array_elements_text(
-			COALESCE(value->'required', '[]'::jsonb) || COALESCE(value->'optional', '[]'::jsonb)
-		) AS key_name
-		FROM selected
 	)
-	SELECT secret.id, secret.bucket_id, secret.service_id, secret.key_name,
+	SELECT secret.id, secret.bucket_id, secret.service_id,
+	       selected_key.target_key_name AS key_name,
 	       secret.credential_type, secret.encrypted_dek, secret.encrypted_value,
 	       secret.last_used_at, secret.expires_at, secret.created_at, secret.updated_at
-	FROM fused_workspace_secrets secret
-	JOIN selected_keys selected_key ON selected_key.key_name = secret.key_name
-	WHERE secret.bucket_id = $1 AND secret.service_id = $2
-	  AND (secret.expires_at IS NULL OR secret.expires_at > NOW())
+	FROM selected
+	JOIN resolved_keys selected_key ON selected_key.ordinality = selected.ordinality
+	JOIN fused_workspace_secrets secret
+	  ON secret.bucket_id = $1
+	 AND secret.service_id = selected_key.storage_service_id
+	 AND secret.key_name = selected_key.storage_key_name
+	WHERE secret.expires_at IS NULL OR secret.expires_at > NOW()
+	ORDER BY selected_key.target_key_name
 `
 
+// GetFirstCompleteSecretSet resolves one ordered static-auth branch, including
+// exact same-bucket reference aliases, in one database query.
 func (s *postgresStore) GetFirstCompleteSecretSet(ctx context.Context, bucketID, serviceID uuid.UUID, alternatives []SecretKeyAlternative) ([]WorkspaceSecret, error) {
+	// No reviewed alternatives means there is no static credential query to run.
 	if len(alternatives) == 0 {
 		return nil, nil
 	}

@@ -148,10 +148,16 @@ func finishPaginationV3Page(policy *paginationpolicy.Config, state *paginationV3
 	return advancePaginationV3(policy, state, response, page)
 }
 
+// checkPaginationV3Bounds stops before provider work that cannot fit the remaining reviewed execution budget.
 func checkPaginationV3Bounds(parent, run context.Context, state *paginationV3State, limits paginationpolicy.Limits) error {
 	if err := checkPaginationContext(parent, run); err != nil {
 		return err
 	}
+	// An exhausted aggregate budget makes every non-empty JSON continuation response fail, so another provider call cannot make progress.
+	if state.bytes >= limits.MaxBytes {
+		return paginationError("max_bytes")
+	}
+	// The next provider request would exceed the reviewed page ceiling even if it returned no items.
 	if state.pages >= int64(limits.MaxPages) {
 		return paginationError("max_pages")
 	}

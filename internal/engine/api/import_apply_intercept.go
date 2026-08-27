@@ -1,8 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -15,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 )
 
@@ -47,6 +51,12 @@ type autoRegistrationAudit struct {
 	version          string
 	serviceVersionID uuid.UUID
 	outcome          string
+}
+
+// importContractPreflighter is the read-only Registry client capability needed
+// to admit the prospective runtime contract before publication.
+type importContractPreflighter interface {
+	PreflightImport(context.Context, []byte) (*sandbox.ImportContractPreflight, error)
 }
 
 // forwardImportApplyWithAutoRegister mirrors forwardRESTMutationWithSpan's
@@ -82,7 +92,12 @@ func forwardImportApplyWithAutoRegister(proxy Forwarder, s store.Store, contract
 // request context while preserving the existing partial-outcome response path.
 func forwardPreparedImportApply(proxy Forwarder, s store.Store, contractFetcher RuntimeContractFetcher, w http.ResponseWriter, r *http.Request, accountID uuid.UUID) {
 	ctx := r.Context()
-	proxy.ForwardAndInspect(w, r, "", func(response *http.Response, body []byte) {
+	prepared, ok := prepareImportApplyPreflight(w, r, contractFetcher)
+	// A failed preflight proves Registry publication was never attempted.
+	if !ok {
+		return
+	}
+	proxy.ForwardAndInspect(w, prepared, "", func(response *http.Response, body []byte) {
 		audit := autoRegisterImportedService(ctx, s, contractFetcher, accountID, r.Header.Get("X-API-Key"), body)
 		// Registry has committed, so Engine-local activation failure must replace
 		// the success receipt with an authoritative partial outcome before write.
@@ -91,6 +106,270 @@ func forwardPreparedImportApply(proxy Forwarder, s store.Store, contractFetcher 
 		}
 		replaceProxyJSONResponse(response, http.StatusFailedDependency, importWorkspaceActivationFailure(audit, chimiddleware.GetReqID(ctx)))
 	})
+}
+
+// prepareImportApplyPreflight buffers one tiny receipt, validates Registry's
+// candidate in Engine, and adds only the resulting proof to the forwarded body.
+func prepareImportApplyPreflight(w http.ResponseWriter, r *http.Request, contractFetcher RuntimeContractFetcher) (*http.Request, bool) {
+	ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.import.preflight", trace.WithAttributes(
+		attribute.String("user_action", "import.preflight"),
+		attribute.String("phase", "engine_preflight"),
+	))
+	defer span.End()
+	body, fields, receipt, err := readImportApplyReceipt(r.Body)
+	// Malformed or oversized receipts fail before either Registry request can run.
+	if err != nil {
+		recordImportPreflightSpan(span, "request_rejected", "import_preflight_request_invalid", uuid.Nil)
+		writeEngineImportPreflightFailure(w, ctx, http.StatusBadRequest, "import_preflight_request_invalid", "The import apply receipt is invalid.", false, uuid.Nil, "")
+		return nil, false
+	}
+	preflighter, ok := contractFetcher.(importContractPreflighter)
+	// Production always supplies the Registry client; a missing capability must
+	// fail closed rather than restoring the old publish-first behavior.
+	if !ok {
+		recordImportPreflightSpan(span, "unavailable", "import_preflight_unavailable", receipt.PlanID)
+		writeEngineImportPreflightFailure(w, ctx, http.StatusServiceUnavailable, "import_preflight_unavailable", "Engine import preflight is unavailable.", true, receipt.PlanID, importApplyRecovery(receipt))
+		return nil, false
+	}
+	preflightBody := importApplyBodyWithoutProof(fields)
+	preflight, err := preflighter.PreflightImport(ctx, preflightBody)
+	if err != nil {
+		// A terminal plan cannot mutate on replay, so Registry apply remains the
+		// sole owner of its durable committed or failed receipt.
+		if importPreflightAllowsTerminalReplay(err) {
+			recordImportPreflightSpan(span, "terminal_replay", "", receipt.PlanID)
+			return requestWithImportApplyBody(r, body), true
+		}
+		writeImportPreflightError(w, ctx, span, err, receipt)
+		return nil, false
+	}
+	// A response for another plan is not authority to mutate this receipt.
+	if preflight.OperationID != receipt.PlanID {
+		recordImportPreflightSpan(span, "response_rejected", "import_preflight_identity_mismatch", receipt.PlanID)
+		writeEngineImportPreflightFailure(w, ctx, http.StatusBadGateway, "import_preflight_identity_mismatch", "Registry returned preflight proof for a different import operation.", false, receipt.PlanID, importApplyRecovery(receipt))
+		return nil, false
+	}
+	preparedBody, err := importApplyBodyWithProof(fields, preflight.ContractHash)
+	// Encoding an already admitted bounded map should be infallible; keep the
+	// mutation closed if that invariant is ever broken.
+	if err != nil {
+		recordImportPreflightSpan(span, "response_rejected", "import_preflight_proof_encoding_failed", receipt.PlanID)
+		writeEngineImportPreflightFailure(w, ctx, http.StatusInternalServerError, "import_preflight_proof_encoding_failed", "Engine could not bind the import preflight proof.", false, receipt.PlanID, importApplyRecovery(receipt))
+		return nil, false
+	}
+	span.SetAttributes(
+		attribute.Int("contract.endpoint_count", len(preflight.Snapshot.Endpoints)),
+		attribute.Int("contract.webhook_count", len(preflight.Snapshot.Webhooks)),
+	)
+	recordImportPreflightSpan(span, "accepted", "", receipt.PlanID)
+	return requestWithImportApplyBody(r, preparedBody), true
+}
+
+type importApplyReceipt struct {
+	PlanID     uuid.UUID
+	ReviewHash string
+}
+
+// readImportApplyReceipt bounds and strictly admits the immutable identifiers
+// while retaining unknown fields for forward-compatible proxying.
+func readImportApplyReceipt(body io.ReadCloser) ([]byte, map[string]json.RawMessage, importApplyReceipt, error) {
+	payload, err := readBoundedImportApplyBody(body)
+	// Transport admission remains separate from JSON and identity validation so
+	// each boundary stays small and reports one stable caller classification.
+	if err != nil {
+		return nil, nil, importApplyReceipt{}, err
+	}
+	fields, err := decodeImportApplyFields(payload)
+	// No identity is parsed from a partial or multi-document request.
+	if err != nil {
+		return nil, nil, importApplyReceipt{}, err
+	}
+	receipt, err := parseImportApplyReceipt(fields)
+	return payload, fields, receipt, err
+}
+
+// readBoundedImportApplyBody consumes one replayable receipt without allowing
+// a truncated prefix to reach either Registry preflight or publication.
+func readBoundedImportApplyBody(body io.ReadCloser) ([]byte, error) {
+	// A missing stream cannot carry an immutable plan receipt.
+	if body == nil {
+		return nil, errors.New("import apply body is required")
+	}
+	defer body.Close() // The forwarded request receives an independent replayable reader below.
+	payload, err := io.ReadAll(io.LimitReader(body, sandbox.MaxImportPreflightRequestBytes+1))
+	// Crossing the shared limit must not forward a truncated JSON prefix.
+	if err != nil || len(payload) == 0 || len(payload) > sandbox.MaxImportPreflightRequestBytes {
+		return nil, errors.New("import apply body is unreadable or too large")
+	}
+	return payload, nil
+}
+
+// decodeImportApplyFields admits exactly one JSON object while retaining
+// unknown fields for forward-compatible proxying after Engine adds its proof.
+func decodeImportApplyFields(payload []byte) (map[string]json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	// The apply contract is one object; scalars and arrays cannot carry named proof fields.
+	if err := decoder.Decode(&fields); err != nil || fields == nil {
+		return nil, errors.New("import apply body must be a JSON object")
+	}
+	// A second JSON document would not be covered by the Registry proof.
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return nil, errors.New("import apply body contains trailing data")
+	}
+	return fields, nil
+}
+
+// parseImportApplyReceipt validates the immutable identifiers Engine uses to
+// correlate Registry preview, publication, and exact retry recovery.
+func parseImportApplyReceipt(fields map[string]json.RawMessage) (importApplyReceipt, error) {
+	var planIDText, reviewHash string
+	// Both fields are required before Engine can correlate a preflight response.
+	if json.Unmarshal(fields["plan_id"], &planIDText) != nil || json.Unmarshal(fields["review_hash"], &reviewHash) != nil {
+		return importApplyReceipt{}, errors.New("import apply receipt fields are invalid")
+	}
+	planID, err := uuid.Parse(planIDText)
+	// Empty hashes and nil identities cannot bind the immutable Registry review.
+	if err != nil || planID == uuid.Nil || strings.TrimSpace(reviewHash) == "" {
+		return importApplyReceipt{}, errors.New("import apply receipt is incomplete")
+	}
+	return importApplyReceipt{PlanID: planID, ReviewHash: reviewHash}, nil
+}
+
+// importApplyBodyWithoutProof prevents a caller-supplied proof from entering
+// Registry preflight while retaining every other apply field byte-semantically.
+func importApplyBodyWithoutProof(fields map[string]json.RawMessage) []byte {
+	clean := cloneImportApplyFields(fields)
+	delete(clean, "preflight_hash")
+	payload, _ := json.Marshal(clean)
+	return payload
+}
+
+// importApplyBodyWithProof overwrites any caller value with the exact hash
+// produced and admitted inside this Engine request.
+func importApplyBodyWithProof(fields map[string]json.RawMessage, contractHash string) ([]byte, error) {
+	prepared := cloneImportApplyFields(fields)
+	hashJSON, err := json.Marshal(contractHash)
+	// A Go string should always encode; returning the error preserves fail-closed behavior.
+	if err != nil {
+		return nil, err
+	}
+	prepared["preflight_hash"] = hashJSON
+	return json.Marshal(prepared)
+}
+
+// cloneImportApplyFields keeps body reconstruction from mutating the admitted
+// request map that terminal replay may still need unchanged.
+func cloneImportApplyFields(fields map[string]json.RawMessage) map[string]json.RawMessage {
+	cloned := make(map[string]json.RawMessage, len(fields)+1)
+	for key, value := range fields {
+		cloned[key] = append(json.RawMessage(nil), value...)
+	}
+	return cloned
+}
+
+// requestWithImportApplyBody restores a replayable request for ReverseProxy
+// after Engine consumed the original stream during preflight.
+func requestWithImportApplyBody(r *http.Request, body []byte) *http.Request {
+	prepared := r.Clone(r.Context())
+	prepared.Body = io.NopCloser(bytes.NewReader(body))
+	prepared.ContentLength = int64(len(body))
+	prepared.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
+	return prepared
+}
+
+// importPreflightAllowsTerminalReplay identifies only Registry's durable
+// non-pending classification; every other preflight failure blocks apply.
+func importPreflightAllowsTerminalReplay(err error) bool {
+	upstream, response, ok := admittedImportPreflightHTTPError(err)
+	// Only Registry's exact conflict response proves this plan can no longer mutate.
+	if !ok || upstream.StatusCode != http.StatusConflict {
+		return false
+	}
+	return response.Error.Code == "IMPORT_OPERATION_NOT_PENDING"
+}
+
+// admittedImportPreflightHTTPError accepts only Registry's nested, bounded
+// public envelope so proxy or transport prose cannot cross Engine's API.
+func admittedImportPreflightHTTPError(err error) (*sandbox.ImportPreflightHTTPError, workspaceConfigErrorResponse, bool) {
+	var upstream *sandbox.ImportPreflightHTTPError
+	// Local transport and validation failures do not contain Registry-owned recovery facts.
+	if !errors.As(err, &upstream) || upstream.StatusCode < http.StatusBadRequest || upstream.StatusCode > 599 {
+		return nil, workspaceConfigErrorResponse{}, false
+	}
+	var response workspaceConfigErrorResponse
+	// A stable code is required before the original bounded envelope may be forwarded.
+	if json.Unmarshal(upstream.Body, &response) != nil || strings.TrimSpace(response.Error.Code) == "" {
+		return nil, workspaceConfigErrorResponse{}, false
+	}
+	return upstream, response, true
+}
+
+// writeImportPreflightError preserves typed Registry admission errors and maps
+// Engine-local failures to one slim, secret-safe pre-commit envelope.
+func writeImportPreflightError(w http.ResponseWriter, ctx context.Context, span trace.Span, err error, receipt importApplyReceipt) {
+	upstream, response, admitted := admittedImportPreflightHTTPError(err)
+	// Registry already owns typed provenance, review, and operation-state recovery semantics.
+	if admitted {
+		recordImportPreflightSpan(span, "registry_rejected", response.Error.Code, receipt.PlanID)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(upstream.StatusCode)
+		_, _ = w.Write(upstream.Body)
+		return
+	}
+	// Deterministic Engine admission means Registry publication is proven absent.
+	if errors.Is(err, sandbox.ErrImportRuntimeContractRejected) {
+		slog.WarnContext(ctx, "Engine rejected prospective import runtime contract", slog.Any("error", err))
+		recordImportPreflightSpan(span, "contract_rejected", "import_runtime_contract_rejected", receipt.PlanID)
+		writeEngineImportPreflightFailure(w, ctx, http.StatusUnprocessableEntity, "import_runtime_contract_rejected", "Engine rejected the prospective runtime contract.", false, receipt.PlanID, "")
+		return
+	}
+	slog.ErrorContext(ctx, "Engine import preflight failed", slog.Any("error", err))
+	recordImportPreflightSpan(span, "unavailable", "import_preflight_unavailable", receipt.PlanID)
+	writeEngineImportPreflightFailure(w, ctx, http.StatusServiceUnavailable, "import_preflight_unavailable", "Engine could not complete import preflight.", true, receipt.PlanID, importApplyRecovery(receipt))
+}
+
+// writeEngineImportPreflightFailure emits only proven pre-commit state and an
+// exact retry command when the same immutable receipt is safe to retry.
+func writeEngineImportPreflightFailure(w http.ResponseWriter, ctx context.Context, status int, code, message string, retryable bool, operationID uuid.UUID, recovery string) {
+	operation := ""
+	// Nil identity remains omitted rather than looking like a durable operation.
+	if operationID != uuid.Nil {
+		operation = operationID.String()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(workspaceConfigErrorResponse{Error: workspaceConfigErrorBody{
+		Code: code, Message: message, Category: "precondition", Retryable: retryable,
+		Phase: "engine_preflight", OperationID: operation, RequestID: chimiddleware.GetReqID(ctx),
+		CommitState: "not_committed", Recovery: recovery,
+	}})
+}
+
+// importApplyRecovery reconstructs the exact immutable receipt command without
+// depending on local CLI state that may be unavailable during automation.
+func importApplyRecovery(receipt importApplyReceipt) string {
+	return "fused-cli import apply --plan-id '" + receipt.PlanID.String() + "' --review-hash '" + strings.ReplaceAll(receipt.ReviewHash, "'", "'\"'\"'") + "'"
+}
+
+// recordImportPreflightSpan keeps contract content and hashes out of telemetry
+// while retaining the durable operation and stable outcome selectors.
+func recordImportPreflightSpan(span trace.Span, outcome, code string, operationID uuid.UUID) {
+	span.SetAttributes(attribute.String("outcome", outcome))
+	// Empty codes are successful control states, not synthetic errors.
+	if code != "" {
+		span.SetAttributes(attribute.String("error_code", code))
+	}
+	// A non-nil plan ID is the only durable preflight correlation identity.
+	if operationID != uuid.Nil {
+		span.SetAttributes(attribute.String("operation_id", operationID.String()))
+	}
+	// Only failed outcomes should set the span error status.
+	if outcome != "accepted" && outcome != "terminal_replay" {
+		span.SetStatus(codes.Error, code)
+	}
 }
 
 // autoRegisterImportedService makes a successfully imported service usable in

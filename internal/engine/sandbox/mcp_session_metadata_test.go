@@ -71,6 +71,10 @@ func TestMCPSessionMetadataLifecycleWire(t *testing.T) {
 	session := &mcpSession{appID: "synthetic-app", sessionID: "synthetic-session", protocolVersion: "2025-06-18", token: "never-publish-token", clientMetadata: mcpsession.Metadata{InitialClientIP: "192.0.2.2"}}
 	publishMCPSessionEvent(session, "started", "")
 	captureMCPClientInfo(context.Background(), mcpJSONRPCRequest{Method: "initialize", ID: []byte("1"), Params: []byte(`{"clientInfo":{"name":"Example Agent","version":"1"}}`)}, session)
+	session.lifecycleMu.Lock()
+	// A valid child result, not clientInfo presence, owns the initialized transition.
+	commitMCPInitializationLocked(session, "2025-06-18")
+	session.lifecycleMu.Unlock()
 	publishMCPSessionEvent(session, "ended", "client_terminated")
 	// A metadata transition enriches the session exactly once between start and end.
 	if len(capture.messages) != 3 {

@@ -138,6 +138,56 @@ func (s *cachedStore) UpsertSecrets(ctx context.Context, secrets []WorkspaceSecr
 	return nil
 }
 
+// PreflightWorkspaceAuthBindings forwards the read-only graph validation so
+// API admission can finish before any workspace mutation begins.
+func (s *cachedStore) PreflightWorkspaceAuthBindings(ctx context.Context, bindings []WorkspaceAuthBinding, desiredServiceIDs []uuid.UUID) error {
+	repository, ok := s.Store.(WorkspaceAuthBindingStore)
+	// Reference-aware admission cannot safely skip validation on cached stores.
+	if !ok {
+		return errors.New("store does not support workspace auth bindings")
+	}
+	return repository.PreflightWorkspaceAuthBindings(ctx, bindings, desiredServiceIDs)
+}
+
+// ApplyWorkspaceAuthBindings preserves the store's atomic replacement before
+// invalidating every target key that may have changed representation.
+func (s *cachedStore) ApplyWorkspaceAuthBindings(ctx context.Context, bindings []WorkspaceAuthBinding) error {
+	repository, ok := s.Store.(WorkspaceAuthBindingStore)
+	// Reference-aware apply cannot safely degrade to the legacy secret writer.
+	if !ok {
+		return errors.New("store does not support workspace auth bindings")
+	}
+	// Cache invalidation is valid only after the atomic representation change commits.
+	if err := repository.ApplyWorkspaceAuthBindings(ctx, bindings); err != nil {
+		return err
+	}
+	secretsByBucket := make(map[uuid.UUID][]WorkspaceSecret)
+	for _, binding := range bindings {
+		for _, keyName := range binding.TargetKeys {
+			secretsByBucket[binding.BucketID] = append(secretsByBucket[binding.BucketID], WorkspaceSecret{WorkspaceSecretMeta: WorkspaceSecretMeta{
+				BucketID: binding.BucketID, ServiceID: binding.TargetServiceID, KeyName: keyName,
+			}})
+		}
+	}
+	for bucketID, secrets := range secretsByBucket {
+		// One cache/NATS invalidation per bucket avoids a fan-out proportional to
+		// the number of service bindings in a composite workspace apply.
+		s.invalidateSecretCaches(bucketID, secrets)
+	}
+	return nil
+}
+
+// RemoveWorkspaceServices forwards atomic membership removal because the
+// cache wrapper does not retain workspace-service rows itself.
+func (s *cachedStore) RemoveWorkspaceServices(ctx context.Context, serviceIDs []uuid.UUID) error {
+	repository, ok := s.Store.(WorkspaceServiceBatchRemovalStore)
+	// Composite removal cannot safely fall back to order-dependent single deletes.
+	if !ok {
+		return errors.New("store does not support workspace service batch removal")
+	}
+	return repository.RemoveWorkspaceServices(ctx, serviceIDs)
+}
+
 // invalidateSecretCaches clears exact keys plus bucket list caches because
 // dispatch may resolve either shape depending on auth type and SDK scope.
 func (s *cachedStore) invalidateSecretCaches(bucketID uuid.UUID, secrets []WorkspaceSecret) {

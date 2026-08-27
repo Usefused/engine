@@ -270,6 +270,67 @@ func TestPrepareServiceContractSnapshotRejectsMismatchedSchemaHash(t *testing.T)
 	}
 }
 
+// TestValidateServiceContractSnapshotRejectsChildConflictsBeforePersistence proves preflight sees child-table conflicts without a transaction.
+func TestValidateServiceContractSnapshotRejectsChildConflictsBeforePersistence(t *testing.T) {
+	snapshot := serviceContractBatchFixture(1)
+	snapshot.Webhooks = append(snapshot.Webhooks, snapshot.Webhooks[0])
+	// Duplicate immutable child identity must fail at validate-only admission rather than at PostgreSQL commit.
+	if _, err := ValidateServiceContractSnapshot(snapshot); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("ValidateServiceContractSnapshot() error = %v", err)
+	}
+}
+
+// TestValidateServiceContractSnapshotDoesNotWriteBeforeUpsert exercises the validate-only and persistence phases against one database.
+func TestValidateServiceContractSnapshotDoesNotWriteBeforeUpsert(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	// Integration coverage never guesses a developer database when no isolated test DSN was supplied.
+	if dbURL == "" {
+		t.Skip("DATABASE_URL not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	pool, err := db.InitEnginePostgres(ctx, dbURL)
+	// Schema initialization must succeed before observing whether validation wrote anything.
+	if err != nil {
+		t.Fatalf("InitEnginePostgres: %v", err)
+	}
+	defer pool.Close()
+	snapshotStore := NewPostgresStore(pool).(*postgresStore)
+	snapshot := serviceContractBatchFixture(1)
+	defer deleteServiceContractFixture(t, pool, snapshot.ServiceVersionID)
+
+	validated, err := ValidateServiceContractSnapshot(snapshot)
+	// A valid fixture must reach the no-write assertion with a computed hash.
+	if err != nil {
+		t.Fatalf("ValidateServiceContractSnapshot: %v", err)
+	}
+	// Validate-only admission must leave the local snapshot table untouched.
+	if count := countServiceContractSnapshotRows(t, ctx, pool, snapshot.ServiceVersionID); count != 0 {
+		t.Fatalf("snapshot rows after validate-only admission = %d", count)
+	}
+	saved, err := snapshotStore.UpsertServiceContractSnapshot(ctx, validated)
+	// The same admitted value must remain acceptable at the transactional boundary.
+	if err != nil {
+		t.Fatalf("UpsertServiceContractSnapshot: %v", err)
+	}
+	persistedRows := countServiceContractSnapshotRows(t, ctx, pool, snapshot.ServiceVersionID)
+	// Persistence must retain the exact hash produced by the shared validate-only path.
+	if saved.ContractHash != validated.ContractHash || persistedRows != 1 {
+		t.Fatalf("persisted contract hash=%q rows=%d, want hash=%q rows=1", saved.ContractHash, persistedRows, validated.ContractHash)
+	}
+}
+
+// countServiceContractSnapshotRows reads one exact immutable version so admission tests never filter database state in Go.
+func countServiceContractSnapshotRows(t *testing.T, ctx context.Context, pool *pgxpool.Pool, serviceVersionID uuid.UUID) int {
+	t.Helper()
+	var count int
+	// SQL performs the exact-version filter so the test observes only its own fixture.
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM fused_service_contract_snapshots WHERE service_version_id = $1`, serviceVersionID).Scan(&count); err != nil {
+		t.Fatalf("count service contract snapshots: %v", err)
+	}
+	return count
+}
+
 func TestValidatePersistedExecutionContractUsesStableClassification(t *testing.T) {
 	err := validatePersistedExecutionContract(fusedobject.ExecutionContractEnvelope{
 		ContractVersion:      fusedobject.CurrentExecutionContractVersion,

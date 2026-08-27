@@ -250,8 +250,10 @@ type ManagedLogoutResult struct {
 }
 
 type ManagedIdentityRegistryError struct {
-	Status int
-	Code   string
+	Status    int
+	Code      string
+	RequestID string
+	TraceID   string
 }
 
 func (e ManagedIdentityRegistryError) Error() string {
@@ -994,7 +996,28 @@ type HTTPRegistryClient struct {
 	sfGroup singleflight.Group
 }
 
+// do sends an ordinary bounded Registry request through the shared licensed transport.
 func (c *HTTPRegistryClient) do(request *http.Request) (*http.Response, error) {
+	return c.doWithClient(request, c.httpClient)
+}
+
+// doWithCallerDeadline lets a finite workflow budget replace the generic
+// client timeout while retaining that safety net for unbounded callers.
+func (c *HTTPRegistryClient) doWithCallerDeadline(request *http.Request) (*http.Response, error) {
+	// A missing caller deadline must keep the shared client's ordinary timeout.
+	if _, bounded := request.Context().Deadline(); !bounded {
+		return c.do(request)
+	}
+	client := *c.httpClient
+	// Import replay already has an earlier finite context deadline; removing the
+	// generic ten-second client cap prevents it from winning unexpectedly.
+	client.Timeout = 0
+	return c.doWithClient(request, &client)
+}
+
+// doWithClient applies the one Engine-to-Registry credential boundary before dispatch.
+func (c *HTTPRegistryClient) doWithClient(request *http.Request, client *http.Client) (*http.Response, error) {
+	// A missing licensed identity must fail locally before any Registry traffic.
 	if c.licenseKey == "" {
 		return nil, errors.New("Registry licence identity is unavailable")
 	}
@@ -1004,13 +1027,15 @@ func (c *HTTPRegistryClient) do(request *http.Request) (*http.Response, error) {
 	// control credentials are local to Engine and must never cross this boundary.
 	outbound.Header.Set("Authorization", "Bearer "+c.licenseKey)
 	outbound.Header.Set("X-API-Key", c.licenseKey)
+	// Installation identity is optional only before the Engine handshake completes.
 	if c.installationID != uuid.Nil {
 		outbound.Header.Set("X-Fused-Installation-ID", c.installationID.String())
 	}
+	// Runtime identity follows the same handshake boundary as installation identity.
 	if c.runtimeInstanceID != uuid.Nil {
 		outbound.Header.Set("X-Fused-Runtime-Instance-ID", c.runtimeInstanceID.String())
 	}
-	return c.httpClient.Do(outbound)
+	return client.Do(outbound)
 }
 
 func (c *HTTPRegistryClient) ConfigureEngineIdentity(installationID, runtimeInstanceID uuid.UUID) error {
@@ -1783,12 +1808,83 @@ func (c *HTTPRegistryClient) postManagedIdentityJSON(ctx context.Context, path s
 	return nil
 }
 
+// decodeManagedIdentityRegistryError retains only bounded automation and
+// correlation fields from the shared Registry error envelope.
 func decodeManagedIdentityRegistryError(response *http.Response) error {
 	var payload struct {
-		Code string `json:"code"`
+		Error struct {
+			Code      string `json:"code"`
+			RequestID string `json:"request_id"`
+			TraceID   string `json:"trace_id"`
+		} `json:"error"`
 	}
 	_ = json.NewDecoder(io.LimitReader(response.Body, 4<<10)).Decode(&payload)
-	return ManagedIdentityRegistryError{Status: response.StatusCode, Code: payload.Code}
+	return ManagedIdentityRegistryError{
+		Status: response.StatusCode, Code: safeManagedIdentityRegistryCode(payload.Error.Code),
+		RequestID: safeManagedIdentityRegistryCorrelationID(payload.Error.RequestID),
+		TraceID:   safeManagedIdentityRegistryTraceID(payload.Error.TraceID),
+	}
+}
+
+// safeManagedIdentityRegistryCode admits the Registry's stable lower-case
+// classifier grammar while rejecting arbitrary error prose.
+func safeManagedIdentityRegistryCode(value string) string {
+	value = strings.TrimSpace(value)
+	// Registry codes are deliberately short enough for logs and control decisions.
+	if value == "" || len(value) > 96 {
+		return ""
+	}
+	for _, char := range value {
+		// Prose punctuation or upper-case text is not a trusted automation code.
+		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '_' {
+			return ""
+		}
+	}
+	return value
+}
+
+// safeManagedIdentityRegistryCorrelationID mirrors the Registry's bounded
+// request-correlation grammar before retaining a remote identifier.
+func safeManagedIdentityRegistryCorrelationID(value string) string {
+	value = strings.TrimSpace(value)
+	// Empty, oversized, or delimiter-bearing values must not reach Engine logs.
+	if value == "" || len(value) > 128 {
+		return ""
+	}
+	for _, char := range value {
+		// Registry request IDs permit only letters, digits, and compact path punctuation.
+		if !validManagedIdentityRegistryCorrelationRune(char) {
+			return ""
+		}
+	}
+	return value
+}
+
+// validManagedIdentityRegistryCorrelationRune centralizes the ASCII allowlist
+// so correlation values cannot acquire Unicode aliases or prose punctuation.
+func validManagedIdentityRegistryCorrelationRune(char rune) bool {
+	// ASCII letters and digits are safe across Registry and Engine log transports.
+	if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') {
+		return true
+	}
+	return strings.ContainsRune("._:/-", char)
+}
+
+// safeManagedIdentityRegistryTraceID accepts only a canonical lower-case
+// OpenTelemetry trace identifier from the Registry envelope.
+func safeManagedIdentityRegistryTraceID(value string) string {
+	value = strings.TrimSpace(value)
+	// A canonical trace identifier is exactly 16 bytes rendered as lower-case hex.
+	if len(value) != 32 {
+		return ""
+	}
+	for _, char := range value {
+		// Upper-case or non-hex content cannot identify the Registry request span.
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return ""
+		}
+	}
+	return value
 }
 
 func (c *HTTPRegistryClient) SendHeartbeat(ctx context.Context, engineVersion, engineBuildHash, appliedPlan, appliedEntitlementRevision string, reportedAt time.Time) (*EngineHeartbeatResponse, error) {

@@ -5,13 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/Usefused/engine/internal/shared/observability"
 	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
@@ -132,33 +135,52 @@ func parseAddServiceRequest(r *http.Request) (addServiceRequest, uuid.UUID, erro
 // attempt shows up in the audit trail rather than only successful writes.
 func addServiceHandler(s store.Store, verifier ServiceVerifier) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.workspace.add_service")
+		defer span.End()
+		span.SetAttributes(attribute.String("user_action", "workspace.add_service"), attribute.String("outcome", "failed"))
+
 		apiKey := r.Header.Get("X-API-Key")
-		accountID, err := controlActorAccount(r.Context())
+		accountID, err := controlActorAccount(ctx)
+		// Authentication rejection remains observable before any service input is trusted.
 		if err != nil {
-			http.Error(w, `{"error":"invalid API key"}`, http.StatusUnauthorized)
+			writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+				status: http.StatusUnauthorized, code: "authentication_required", message: "A valid Engine credential is required to add a workspace service.",
+				remediation: "Log in or provide a valid Fused credential.", phase: "request_admission", commitState: "not_committed",
+			}, ctx)
 			return
 		}
+		span.SetAttributes(attribute.String("account_id", accountID.String()))
 
 		req, svcID, err := parseAddServiceRequest(r)
+		// Invalid service identity cannot reach Registry verification or local storage.
 		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+			writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+				status: http.StatusBadRequest, code: "invalid_workspace_service_request", message: err.Error(),
+				remediation: "Provide a valid service_id and optional exact version identity.", phase: "request_admission", commitState: "not_committed",
+			}, ctx)
+			return
+		}
+		span.SetAttributes(attribute.String("service_id", svcID.String()))
+
+		// Workspace resolution keeps the mutation on the authenticated tenant.
+		if err := verifyWorkspaceActor(ctx, accountID); err != nil {
+			slog.ErrorContext(ctx, "addServiceHandler: workspace not found for account", slog.Any("error", err))
+			writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+				status: http.StatusInternalServerError, code: "workspace_resolution_failed", message: "The Engine could not resolve the workspace for service activation.",
+				remediation: "Retry and check Engine logs if the problem continues.", phase: "workspace_resolution", commitState: "not_committed",
+			}, ctx)
 			return
 		}
 
-		if err := verifyWorkspaceActor(r.Context(), accountID); err != nil {
-			slog.ErrorContext(r.Context(), "addServiceHandler: workspace not found for account", slog.Any("error", err))
-			http.Error(w, `{"error":"workspace not found"}`, http.StatusInternalServerError)
-			return
-		}
-
-		if err := verifyAndActivateService(r.Context(), s, verifier, addServiceCall{
+		// Registry verification and the local write share this one mutation span.
+		if err := verifyAndActivateService(ctx, s, verifier, addServiceCall{
 			accountID: accountID,
 			serviceID: svcID,
 			apiKey:    apiKey,
 			version:   strings.TrimSpace(req.VersionTag),
 			versionID: parseOptionalUUID(req.ServiceVersionID),
 		}); err != nil {
-			writeAddServiceError(w, err)
+			writeAddServiceError(w, ctx, err)
 			return
 		}
 
@@ -192,49 +214,56 @@ type addServiceCall struct {
 // GraphQL query (id + name only), not the full FetchServiceMetadata catalogue
 // payload, since existence + name is all this flow needs.
 func verifyAndActivateService(ctx context.Context, s store.Store, verifier ServiceVerifier, call addServiceCall) error {
-	thread := observability.ThreadFromContext(ctx)
-	step := thread.Step("engine.workspace.add_service")
-	step.AddContext(map[string]any{
-		"user_action": "workspace.add_service",
-		"account_id":  call.accountID.String(),
-		"service_id":  call.serviceID.String(),
-	})
+	span := trace.SpanFromContext(ctx)
 
 	verifiedName, verifiedSlug, currentVersionTag, _, err := verifier.VerifyServiceExists(ctx, call.serviceID, call.apiKey)
+	// Registry absence and dependency failure remain distinct bounded outcomes.
 	if err != nil {
 		slog.WarnContext(ctx, "verifyAndActivateService: registry verification failed", slog.Any("error", err), slog.String("service_id", call.serviceID.String()))
+		// Authoritative absence is caller-remediable and never reaches local persistence.
 		if errors.Is(err, sandbox.ErrServiceNotFound) {
-			step.AddContext(map[string]any{"outcome": "not_found"}).Error(ctx, err)
+			recordWorkspaceServiceMutationFailure(span, "not_found", "workspace_service_not_found")
 			return err
 		}
 		// Any other failure (Registry unreachable, malformed response, etc.) is
 		// distinct from "service doesn't exist" -- wrap it so writeAddServiceError
 		// can tell the two apart and return 502 instead of 404 for this case.
-		step.AddContext(map[string]any{"outcome": "error"}).Error(ctx, err)
+		recordWorkspaceServiceMutationFailure(span, "failed", "registry_verification_failed")
 		return fmt.Errorf("%w: %w", errRegistryVerificationFailed, err)
 	}
 
 	version, serviceVersionID, err := resolveWorkspaceServiceVersionID(ctx, verifier, call.serviceID, call.apiKey, call.version, currentVersionTag, call.versionID)
+	// An exact version pin is required before any workspace membership write.
 	if err != nil {
-		step.AddContext(map[string]any{"outcome": "version_unavailable"}).Error(ctx, err)
+		recordWorkspaceServiceMutationFailure(span, "version_unavailable", "service_version_unavailable")
 		return err
 	}
-	step.AddContext(map[string]any{"version_tag": version, "service_version_id": serviceVersionID.String()})
+	span.SetAttributes(attribute.String("version_tag", version), attribute.String("service_version_id", serviceVersionID.String()))
 
 	fetcher, _ := verifier.(RuntimeContractFetcher)
+	// Snapshot failure prevents activation rather than admitting an unfenced runtime contract.
 	if err := materializeRuntimeContractSnapshot(ctx, s, fetcher, call.accountID, call.serviceID, serviceVersionID, version, call.apiKey); err != nil {
-		step.AddContext(map[string]any{"outcome": "contract_snapshot_failed"}).Error(ctx, err)
+		recordWorkspaceServiceMutationFailure(span, "contract_snapshot_failed", "contract_snapshot_failed")
 		return err
 	}
 
+	// The final local write is the only point at which activation can commit.
 	if err := s.AddWorkspaceServiceVersion(ctx, call.serviceID, verifiedSlug, version, serviceVersionID, verifiedName, call.accountID); err != nil {
-		step.AddContext(map[string]any{"outcome": "error"}).Error(ctx, err)
+		recordWorkspaceServiceMutationFailure(span, "failed", "workspace_service_add_failed")
 		slog.ErrorContext(ctx, "verifyAndActivateService: AddWorkspaceServiceVersion failed", slog.Any("error", err))
 		return fmt.Errorf("failed to add service to workspace: %w", err)
 	}
 
-	step.AddContext(map[string]any{"outcome": "success"}).Success(ctx)
+	span.SetAttributes(attribute.String("outcome", "success"))
+	span.SetStatus(codes.Ok, "")
 	return nil
+}
+
+// recordWorkspaceServiceMutationFailure sets only stable state on the existing
+// workspace service span and never records Registry or store error prose.
+func recordWorkspaceServiceMutationFailure(span trace.Span, outcome, code string) {
+	span.SetAttributes(attribute.String("outcome", outcome), attribute.String("error.code", code))
+	span.SetStatus(codes.Error, code)
 }
 
 func resolveWorkspaceServiceVersionID(
@@ -299,16 +328,33 @@ func fetchServiceVersionRevision(
 // writeAddServiceError maps verifyAndActivateService's error back to an HTTP
 // response. Split out from addServiceHandler to keep that function's
 // branching to the request lifecycle, not error-to-status translation.
-func writeAddServiceError(w http.ResponseWriter, err error) {
+func writeAddServiceError(w http.ResponseWriter, ctx context.Context, err error) {
 	switch {
 	case errors.Is(err, sandbox.ErrServiceNotFound):
-		http.Error(w, `{"error":"service not found in registry"}`, http.StatusNotFound)
+		// Registry not-found is authoritative and proves no local activation began.
+		writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+			status: http.StatusNotFound, code: "service_not_found", message: "The selected service was not found in the Registry.",
+			remediation: "Refresh the service catalogue and choose an available service.", phase: "service_verification", commitState: "not_committed",
+		}, ctx)
 	case errors.Is(err, errVersionPinUnavailable):
-		http.Error(w, `{"error":"service has no publishable version to pin"}`, http.StatusConflict)
+		// Missing immutable version identity stops before snapshot or membership writes.
+		writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+			status: http.StatusConflict, code: "service_version_unavailable", message: "The service has no publishable version to pin.",
+			remediation: "Publish or select a concrete service version, then retry.", phase: "service_verification", commitState: "not_committed",
+		}, ctx)
 	case errors.Is(err, errRegistryVerificationFailed):
-		http.Error(w, `{"error":"unable to verify service with registry"}`, http.StatusBadGateway)
+		// Dependency failure occurs before local snapshot or membership mutation.
+		writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+			status: http.StatusBadGateway, code: "registry_verification_failed", message: "The Registry could not verify the selected service.", category: "dependency", retryable: true,
+			remediation: "Retry after Registry connectivity is restored.", phase: "service_verification", commitState: "not_committed",
+		}, ctx)
 	default:
-		http.Error(w, `{"error":"failed to add service to workspace"}`, http.StatusInternalServerError)
+		// Snapshot materialization can precede membership persistence, so an
+		// unclassified failure cannot prove whether every local mutation committed.
+		writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+			status: http.StatusInternalServerError, code: "workspace_service_add_failed", message: "The Engine could not add the service to this workspace.",
+			remediation: "Inspect the workspace service state before retrying.", phase: "workspace_mutation", commitState: "unknown",
+		}, ctx)
 	}
 }
 
@@ -391,47 +437,76 @@ func listedServiceIDs(services []store.WorkspaceService) []uuid.UUID {
 // a workspace-wide admin action with compliance-level audit requirements.
 func removeServiceHandler(s store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		accountID, err := controlActorAccount(r.Context())
+		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.workspace.remove_service")
+		defer span.End()
+		span.SetAttributes(attribute.String("user_action", "workspace.remove_service"), attribute.String("outcome", "failed"))
+
+		accountID, err := controlActorAccount(ctx)
+		// Authentication rejection remains observable before route identity is trusted.
 		if err != nil {
-			http.Error(w, `{"error":"invalid API key"}`, http.StatusUnauthorized)
+			writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+				status: http.StatusUnauthorized, code: "authentication_required", message: "A valid Engine credential is required to remove a workspace service.",
+				remediation: "Log in or provide a valid Fused credential.", phase: "request_admission", commitState: "not_committed",
+			}, ctx)
 			return
 		}
+		span.SetAttributes(attribute.String("account_id", accountID.String()))
 
 		rawID := chi.URLParam(r, "id")
 		svcID, err := uuid.Parse(rawID)
+		// Invalid route identity proves no workspace mutation was attempted.
 		if err != nil {
-			http.Error(w, `{"error":"id must be a valid UUID"}`, http.StatusBadRequest)
+			writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+				status: http.StatusBadRequest, code: "invalid_workspace_service_id", message: "The workspace service ID must be a valid UUID.",
+				remediation: "Use a service ID returned by the workspace service list.", phase: "request_admission", commitState: "not_committed",
+			}, ctx)
+			return
+		}
+		span.SetAttributes(attribute.String("service_id", svcID.String()))
+
+		// Workspace resolution keeps deletion on the authenticated tenant.
+		if err := verifyWorkspaceActor(ctx, accountID); err != nil {
+			writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+				status: http.StatusInternalServerError, code: "workspace_resolution_failed", message: "The Engine could not resolve the workspace for service removal.",
+				remediation: "Retry and check Engine logs if the problem continues.", phase: "workspace_resolution", commitState: "not_committed",
+			}, ctx)
 			return
 		}
 
-		if err := verifyWorkspaceActor(r.Context(), accountID); err != nil {
-			http.Error(w, `{"error":"workspace not found"}`, http.StatusInternalServerError)
-			return
-		}
-
-		ctx := r.Context()
-		thread := observability.ThreadFromContext(ctx)
-		step := thread.Step("engine.workspace.remove_service")
-		step.AddContext(map[string]any{
-			"user_action": "workspace.remove_service",
-			"account_id":  accountID.String(),
-			"service_id":  svcID.String(),
-		})
-
+		// Store absence and ambiguous persistence failure remain separately classified.
 		if err := s.RemoveWorkspaceService(ctx, svcID); err != nil {
 			// Surface a 404 when the service was never in the workspace so the
 			// client can distinguish "not found" from a real DB error.
 			if errors.Is(err, store.ErrWorkspaceServiceNotFound) {
-				step.AddContext(map[string]any{"outcome": "not_found"}).Error(ctx, err)
-				http.Error(w, `{"error":"service not found in workspace"}`, http.StatusNotFound)
+				recordWorkspaceServiceMutationFailure(span, "not_found", "workspace_service_not_found")
+				writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+					status: http.StatusNotFound, code: "workspace_service_not_found", message: "The selected service is not active in this workspace.",
+					remediation: "Refresh the workspace service list before retrying.", phase: "workspace_mutation", commitState: "not_committed",
+				}, ctx)
 				return
 			}
-			step.AddContext(map[string]any{"outcome": "error"}).Error(ctx, err)
-			http.Error(w, `{"error":"failed to remove service"}`, http.StatusInternalServerError)
+			// A source service remains executable by dependent consumers, so removal
+			// must stop until those explicit auth bindings are changed.
+			if errors.Is(err, store.ErrWorkspaceAuthReferenceInUse) {
+				recordWorkspaceServiceMutationFailure(span, "auth_reference_conflict", "workspace_auth_reference_in_use")
+				writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+					status: http.StatusConflict, code: "workspace_auth_reference_in_use",
+					message:     "The service provides credentials used by another workspace service.",
+					remediation: "Replace the dependent auth ref or remove its destination service before deleting this source.",
+					phase:       "workspace_mutation", commitState: "not_committed",
+				}, ctx)
+				return
+			}
+			recordWorkspaceServiceMutationFailure(span, "failed", "workspace_service_remove_failed")
+			writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+				status: http.StatusInternalServerError, code: "workspace_service_remove_failed", message: "The Engine could not remove the service from this workspace.",
+				remediation: "Inspect the workspace service state before retrying.", phase: "workspace_mutation", commitState: "unknown",
+			}, ctx)
 			return
 		}
 
-		step.AddContext(map[string]any{"outcome": "success"}).Success(ctx)
+		span.SetAttributes(attribute.String("outcome", "success"))
+		span.SetStatus(codes.Ok, "")
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

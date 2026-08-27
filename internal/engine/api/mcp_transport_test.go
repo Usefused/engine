@@ -48,6 +48,21 @@ func TestMCPTransportURLsForAppUsesDirectRequestOrigin(t *testing.T) {
 	}
 }
 
+// TestMCPTransportURLsForAppUpgradesPublicHTTPOrigin prevents discovery from
+// advertising a redirect that ordinary clients may follow without credentials.
+func TestMCPTransportURLsForAppUpgradesPublicHTTPOrigin(t *testing.T) {
+	appID := uuid.New()
+	request := httptest.NewRequest("GET", "http://engine.internal/engine/graphql", nil)
+	request.Header.Set("X-Forwarded-Proto", "http")
+	request.Header.Set("X-Forwarded-Host", "fused.run.usefused.com")
+
+	urls := mcpTransportURLsForApp(request, appID)
+	want := "https://fused.run.usefused.com/mcp/" + appID.String()
+	if urls.StreamableHTTP != want || urls.SSE != want+"/sse" {
+		t.Fatalf("public transport URLs = %#v, want TLS URLs rooted at %q", urls, want)
+	}
+}
+
 func TestMCPTransportURLsForAppNormalizesForwardedHops(t *testing.T) {
 	appID := uuid.New()
 	request := httptest.NewRequest("GET", "http://engine.internal/engine/graphql", nil)
@@ -61,6 +76,8 @@ func TestMCPTransportURLsForAppNormalizesForwardedHops(t *testing.T) {
 	}
 }
 
+// TestMCPTransportURLsForAppRejectsInvalidForwardedOriginParts verifies an
+// untrusted proxy hint cannot re-enable insecure public discovery.
 func TestMCPTransportURLsForAppRejectsInvalidForwardedOriginParts(t *testing.T) {
 	appID := uuid.New()
 	request := httptest.NewRequest("GET", "http://engine.internal:8081/engine/graphql", nil)
@@ -68,7 +85,7 @@ func TestMCPTransportURLsForAppRejectsInvalidForwardedOriginParts(t *testing.T) 
 	request.Header.Set("X-Forwarded-Host", "attacker.example/path")
 
 	urls := mcpTransportURLsForApp(request, appID)
-	want := "http://engine.internal:8081/mcp/" + appID.String()
+	want := "https://engine.internal:8081/mcp/" + appID.String()
 	if urls.StreamableHTTP != want {
 		t.Fatalf("invalid forwarded origin fallback = %q, want %q", urls.StreamableHTTP, want)
 	}

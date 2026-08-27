@@ -18,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var errSDKPackageStreamInterrupted = errors.New("SDK package stream interrupted")
@@ -47,8 +48,7 @@ func SDKPackageDownloadHandler(s store.Store, proxy Forwarder, packages SDKPacka
 			attribute.String("app.id", appID.String()),
 		)
 		if err := serveSDKPackage(ctx, w, r.Header.Get("X-API-Key"), actor, appID, s, proxy, packages); err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "SDK package download failed")
+			recordSDKPackageDownloadFailure(span, err)
 			if errors.Is(err, errSDKPackageStreamInterrupted) {
 				return
 			}
@@ -57,6 +57,24 @@ func SDKPackageDownloadHandler(s store.Store, proxy Forwarder, packages SDKPacka
 		}
 		span.SetStatus(codes.Ok, "SDK package downloaded")
 	}
+}
+
+// recordSDKPackageDownloadFailure records only a stable code so Registry,
+// storage, URL, and stream errors cannot leak into OTEL exception fields.
+func recordSDKPackageDownloadFailure(span trace.Span, err error) {
+	code := "sdk_package_download_failed"
+	// Stream interruption is operationally distinct after response headers commit.
+	if errors.Is(err, errSDKPackageStreamInterrupted) {
+		code = "sdk_package_stream_interrupted"
+	} else {
+		var httpErr workspaceConfigHTTPError
+		// Reviewed typed codes retain actionable cache-regeneration classification.
+		if errors.As(err, &httpErr) && strings.TrimSpace(httpErr.code) != "" {
+			code = httpErr.code
+		}
+	}
+	span.SetAttributes(attribute.String("outcome", "failed"), attribute.String("error.code", code))
+	span.SetStatus(codes.Error, code)
 }
 
 func serveSDKPackage(ctx context.Context, w http.ResponseWriter, apiKey string, actor accesscontrol.Actor, appID uuid.UUID, s store.Store, proxy Forwarder, packages SDKPackageClient) error {
@@ -126,22 +144,44 @@ func regenerateSDKPackage(ctx context.Context, proxy Forwarder, apiKey string, a
 	return nil
 }
 
+// safeSDKPackageGenerationError promotes only the reviewed pinned-generator
+// conflict while leaving every unrecognized Registry response opaque.
 func safeSDKPackageGenerationError(err error) error {
 	var proxyErr sdkProxyError
+	// Only the conflict returned by SDK generation can carry the reviewed code.
 	if !errors.As(err, &proxyErr) || proxyErr.status != http.StatusConflict {
 		return err
 	}
-	var body struct {
-		Error string `json:"error"`
-	}
-	if json.Unmarshal(proxyErr.body, &body) == nil && body.Error == "sdk_generator_version_unavailable" {
+	code := registrySDKGenerationErrorCode(proxyErr.body)
+	// Exact allowlisting prevents arbitrary Registry prose or codes from reaching callers.
+	if code == "sdk_generator_version_unavailable" {
 		return workspaceConfigHTTPError{
-			status: http.StatusConflict, code: body.Error,
+			status: http.StatusConflict, code: code,
 			message:  "This SDK version uses a generator that is no longer available.",
 			category: "dependency", retryable: false,
 		}
 	}
 	return err
+}
+
+// registrySDKGenerationErrorCode reads only the current nested Registry
+// envelope without accepting legacy shapes or any accompanying text.
+func registrySDKGenerationErrorCode(payload []byte) string {
+	var envelope struct {
+		Error json.RawMessage `json:"error"`
+	}
+	// Malformed or absent error payloads cannot provide a reviewed code.
+	if json.Unmarshal(payload, &envelope) != nil || len(envelope.Error) == 0 {
+		return ""
+	}
+	var nested struct {
+		Code string `json:"code"`
+	}
+	// The shared Registry control-plane envelope is the authoritative shape.
+	if json.Unmarshal(envelope.Error, &nested) == nil && nested.Code != "" {
+		return nested.Code
+	}
+	return ""
 }
 
 func streamSDKPackageResponse(w http.ResponseWriter, response *http.Response) error {

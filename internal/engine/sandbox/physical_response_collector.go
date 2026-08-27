@@ -16,6 +16,22 @@ var (
 	ErrPhysicalResponseStatus   = errors.New("physical response status is not successful")
 )
 
+// PhysicalResponseStatusError carries only the provider's bounded numeric
+// status so public adapters can offer safe retry guidance without response data.
+type PhysicalResponseStatusError struct {
+	StatusCode int
+}
+
+// Error returns a stable diagnostic containing no provider-controlled body.
+func (err *PhysicalResponseStatusError) Error() string {
+	return fmt.Sprintf("%s: HTTP %d", ErrPhysicalResponseStatus, err.StatusCode)
+}
+
+// Unwrap preserves sentinel classification for existing execution policies.
+func (err *PhysicalResponseStatusError) Unwrap() error {
+	return ErrPhysicalResponseStatus
+}
+
 // PhysicalExecutionResult carries only the bounded canonical provider body
 // consumed by the Unified interpreter.
 type PhysicalExecutionResult struct {
@@ -62,7 +78,7 @@ func (collector *successfulResponseCollector) Result() error {
 		return collector.err
 	}
 	if collector.status < 200 || collector.status >= 300 {
-		return fmt.Errorf("%w: HTTP %d", ErrPhysicalResponseStatus, collector.status)
+		return &PhysicalResponseStatusError{StatusCode: collector.status}
 	}
 	return nil
 }
@@ -119,7 +135,7 @@ func (collector *boundedJSONResponseCollector) Result() (PhysicalExecutionResult
 		return PhysicalExecutionResult{}, collector.err
 	}
 	if collector.status < 200 || collector.status >= 300 {
-		return PhysicalExecutionResult{}, fmt.Errorf("%w: HTTP %d", ErrPhysicalResponseStatus, collector.status)
+		return PhysicalExecutionResult{}, &PhysicalResponseStatusError{StatusCode: collector.status}
 	}
 	if collector.mediaFamily != "json" {
 		return PhysicalExecutionResult{}, ErrPhysicalResponseNotJSON

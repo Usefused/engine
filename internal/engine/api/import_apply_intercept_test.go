@@ -506,11 +506,13 @@ func (f *recordingForwarder) ForwardAndInspect(w http.ResponseWriter, r *http.Re
 func TestRESTProxyHandler_ImportApply_RoutesThroughAutoRegister(t *testing.T) {
 	accountID := uuid.New()
 	serviceID := uuid.New()
+	operationID := uuid.New()
 	fwd := &recordingForwarder{body: string(committedImportApplyBody(importApplyResponse{ServiceID: serviceID.String(), ServiceVersionID: testImportServiceVersionID, Slug: "stripe", Version: "2026-01-01"}))}
 	s := &autoRegisterMockStore{accountID: accountID}
-	handler := RESTProxyHandler(fwd, s)
+	fetcher := &preflightRuntimeFetcherStub{runtimeContractFetcherStub: &runtimeContractFetcherStub{}, preflight: importPreflightSuccess(operationID)}
+	handler := RESTProxyHandlerWithRuntimeContracts(fwd, s, fetcher)
 
-	req := httptest.NewRequest(http.MethodPost, "/integrations/import/apply", bytes.NewBufferString(`{}`))
+	req := httptest.NewRequest(http.MethodPost, "/integrations/import/apply", bytes.NewBufferString(`{"plan_id":"`+operationID.String()+`","review_hash":"review-1"}`))
 	req.Header.Set("X-API-Key", "fsk_valid")
 	req = controlTestRequest(req, accountID)
 	rec := httptest.NewRecorder()
@@ -532,15 +534,19 @@ func TestRESTProxyHandler_ImportApply_RoutesThroughAutoRegister(t *testing.T) {
 func TestRESTProxyHandler_ImportApplyReportsCommittedActivationFailure(t *testing.T) {
 	accountID := uuid.New()
 	serviceID := uuid.New()
+	operationID := uuid.New()
 	fwd := &recordingForwarder{body: string(committedImportApplyBody(importApplyResponse{
 		ServiceID: serviceID.String(), ServiceVersionID: testImportServiceVersionID,
 		Slug: "chargebee", Version: "2026-08-19-webhooks",
 	}))}
 	store := &snapshotAutoRegisterStore{autoRegisterMockStore: &autoRegisterMockStore{accountID: accountID}}
-	fetcher := &runtimeContractFetcherStub{err: context.DeadlineExceeded}
+	fetcher := &preflightRuntimeFetcherStub{
+		runtimeContractFetcherStub: &runtimeContractFetcherStub{err: context.DeadlineExceeded},
+		preflight:                  importPreflightSuccess(operationID),
+	}
 	handler := chimiddleware.RequestID(RESTProxyHandlerWithRuntimeContracts(fwd, store, fetcher))
 
-	request := httptest.NewRequest(http.MethodPost, "/integrations/import/apply", bytes.NewBufferString(`{}`))
+	request := httptest.NewRequest(http.MethodPost, "/integrations/import/apply", bytes.NewBufferString(`{"plan_id":"`+operationID.String()+`","review_hash":"review-1"}`))
 	request.Header.Set("X-API-Key", "fsk_valid")
 	request.Header.Set("X-Request-ID", "import-chargebee-1")
 	request = controlTestRequest(request, accountID)

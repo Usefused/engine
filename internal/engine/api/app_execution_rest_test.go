@@ -466,6 +466,26 @@ func TestRESTExecutionReturnsDeterministicNonJSONError(t *testing.T) {
 	}
 }
 
+// TestRESTExecutionReturnsProviderStatusWithoutBody proves SDK callers receive
+// the actionable status while provider-controlled response content stays hidden.
+func TestRESTExecutionReturnsProviderStatusWithoutBody(t *testing.T) {
+	runtime := &restRuntimeTestDouble{
+		physicalFound: true,
+		physicalErr:   &sandbox.PhysicalResponseStatusError{StatusCode: http.StatusTooManyRequests},
+	}
+	server, appID := newRESTPhysicalServer(runtime)
+	response := performRESTExecution(t, server, appID, "fsk_test", `{"operation":"items.list","input":{}}`, "")
+	assertRESTErrorCode(t, response, http.StatusBadGateway, "provider_error")
+	// The numeric status is safe and sufficient for callers to recognize throttling.
+	if !strings.Contains(response.Body.String(), `"provider_http_status":429`) {
+		t.Fatalf("provider status missing from REST error: %s", response.Body.String())
+	}
+	// Provider response bytes remain outside the public error contract.
+	if strings.Contains(response.Body.String(), "provider-private-body") {
+		t.Fatalf("provider body leaked through REST error: %s", response.Body.String())
+	}
+}
+
 // TestRESTExecutionProjectsActionableErrorsWithSafeDetails locks connection and
 // environment repair metadata without admitting provider bodies.
 func TestRESTExecutionProjectsActionableErrorsWithSafeDetails(t *testing.T) {

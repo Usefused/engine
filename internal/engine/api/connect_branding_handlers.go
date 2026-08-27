@@ -63,7 +63,10 @@ func GetConnectBrandingHandler(s store.Store) http.HandlerFunc {
 			// Database details remain in the storage boundary rather than logs that
 			// may be exported alongside customer-controlled presentation data.
 			slog.ErrorContext(r.Context(), "failed to load connect branding")
-			http.Error(w, "failed to load connect branding", http.StatusInternalServerError)
+			writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+				status: http.StatusInternalServerError, code: "connect_branding_load_failed", message: "The Engine could not load hosted-connect branding.",
+				remediation: "Retry and check Engine logs if the problem continues.",
+			}, r.Context())
 			return
 		}
 		writeConnectJSON(w, http.StatusOK, branding)
@@ -76,6 +79,7 @@ func UpsertConnectBrandingHandler(s store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.connect_branding.update")
 		defer span.End()
+		ctx = contextWithControlMutationTelemetryRecorded(ctx)
 		recordConnectBrandingChanges(span, connectBrandingChanges{}, "failed", "internal_error")
 		span.SetAttributes(attribute.String("actor.type", "unknown"))
 		actor, ok := accesscontrol.ActorFromContext(ctx)
@@ -83,7 +87,10 @@ func UpsertConnectBrandingHandler(s store.Store) http.HandlerFunc {
 			// Direct invocation without the control middleware fails closed and
 			// remains distinguishable from validation or persistence failures.
 			recordConnectBrandingChanges(span, connectBrandingChanges{}, "denied", "unauthorized")
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+				status: http.StatusUnauthorized, code: "authentication_required", message: "A valid Engine credential is required to update hosted-connect branding.",
+				remediation: "Log in or provide a valid Fused credential.", phase: "request_admission", commitState: "not_committed",
+			}, ctx)
 			return
 		}
 		span.SetAttributes(attribute.String("actor.type", string(actor.Kind)))
@@ -92,7 +99,10 @@ func UpsertConnectBrandingHandler(s store.Store) http.HandlerFunc {
 		if err != nil {
 			// Validation errors expose only the fixed request class in telemetry.
 			recordConnectBrandingChanges(span, connectBrandingChanges{}, "invalid", "invalid_request")
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+				status: http.StatusBadRequest, code: "invalid_connect_branding", message: err.Error(),
+				remediation: "Correct the named branding field and submit one complete branding document.", phase: "request_admission", commitState: "not_committed",
+			}, ctx)
 			return
 		}
 		existing, err := s.GetConnectBranding(ctx)
@@ -101,7 +111,10 @@ func UpsertConnectBrandingHandler(s store.Store) http.HandlerFunc {
 			// of logs and exported telemetry.
 			recordConnectBrandingChanges(span, connectBrandingChanges{}, "failed", "branding_load_failed")
 			slog.ErrorContext(ctx, "failed to load connect branding before update")
-			http.Error(w, "failed to update connect branding", http.StatusInternalServerError)
+			writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+				status: http.StatusInternalServerError, code: "connect_branding_load_failed", message: "The Engine could not load existing hosted-connect branding.",
+				remediation: "Retry and check Engine logs if the problem continues.", phase: "mutation_admission", commitState: "not_committed",
+			}, ctx)
 			return
 		}
 		changes := compareConnectBranding(existing, branding)
@@ -122,7 +135,10 @@ func UpsertConnectBrandingHandler(s store.Store) http.HandlerFunc {
 			// and submitted values remain absent.
 			recordConnectBrandingChanges(span, changes, "failed", "branding_write_failed")
 			slog.ErrorContext(ctx, "failed to update connect branding")
-			http.Error(w, "failed to update connect branding", http.StatusInternalServerError)
+			writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+				status: http.StatusInternalServerError, code: "connect_branding_update_failed", message: "The Engine could not update hosted-connect branding.",
+				remediation: "Inspect the saved branding state before retrying.", phase: "workspace_commit", commitState: "unknown",
+			}, ctx)
 			return
 		}
 		writeConnectJSON(w, http.StatusOK, saved)

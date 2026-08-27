@@ -20,10 +20,10 @@ func TestGenerationContractPinSchemaPreservesOldSnapshots(t *testing.T) {
 		}
 	}
 	migrations := engineMigrations()
-	last := migrations[len(migrations)-1]
+	pinMigration := migrations[13]
 	// New pin storage must not rewrite already-applied migration identities.
-	if last.Version != 14 || last.Name != "20260826_generation_contract_pins" {
-		t.Fatalf("migration=%+v", last)
+	if pinMigration.Version != 14 || pinMigration.Name != "20260826_generation_contract_pins" {
+		t.Fatalf("migration=%+v", pinMigration)
 	}
 }
 

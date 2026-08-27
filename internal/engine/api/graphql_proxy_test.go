@@ -96,6 +96,8 @@ func TestGraphQLProxy_ValidKey_Forwards(t *testing.T) {
 	}
 }
 
+// TestGraphQLProxy_InvalidKey_Returns401 verifies authentication fails locally
+// through the shared structured Engine envelope.
 func TestGraphQLProxy_InvalidKey_Returns401(t *testing.T) {
 	s := &mockKeyStore{err: errors.New("api key not found")}
 	fwd := &mockForwarder{}
@@ -112,6 +114,11 @@ func TestGraphQLProxy_InvalidKey_Returns401(t *testing.T) {
 	}
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401, got %d", rec.Code)
+	}
+	var envelope workspaceConfigErrorResponse
+	// The proxy must not retain its former top-level string-only response.
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil || envelope.Error.Code != "authentication_required" || envelope.Error.Remediation == "" {
+		t.Fatalf("GraphQL authentication envelope = %#v, decode error=%v", envelope, err)
 	}
 }
 
@@ -166,6 +173,8 @@ func TestGraphQLProxy_OperationNameCannotHideMutationInReadCache(t *testing.T) {
 	}
 }
 
+// TestGraphQLProxyRejectsAmbiguousBatchAndSubscriptionDocuments verifies every
+// unsupported document shape uses one precise structured validation response.
 func TestGraphQLProxyRejectsAmbiguousBatchAndSubscriptionDocuments(t *testing.T) {
 	tests := []string{
 		`{"query":"query One { services { id } } query Two { service { id } }"}`,
@@ -181,8 +190,14 @@ func TestGraphQLProxyRejectsAmbiguousBatchAndSubscriptionDocuments(t *testing.T)
 		req = controlTestRequest(req, s.accountID)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
+		// Invalid documents must be rejected before Registry forwarding.
 		if rec.Code != http.StatusBadRequest || fwd.called {
 			t.Fatalf("body %s status/forwarded = %d/%v", body, rec.Code, fwd.called)
+		}
+		var envelope workspaceConfigErrorResponse
+		// The stable code is independent of the rejected GraphQL source text.
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil || envelope.Error.Code != "invalid_graphql_operation" || envelope.Error.Remediation == "" {
+			t.Fatalf("GraphQL validation envelope = %#v, decode error=%v", envelope, err)
 		}
 	}
 }

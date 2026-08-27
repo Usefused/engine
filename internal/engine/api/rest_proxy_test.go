@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -73,6 +74,15 @@ func TestRESTProxy_InvalidKey_Returns401(t *testing.T) {
 	}
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401, got %d", rec.Code)
+	}
+	var response workspaceConfigErrorResponse
+	// Proxy-local authentication failures must use the same control envelope as local Engine routes.
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	// Stable authentication metadata replaces the former double-encoded plain body.
+	if response.Error.Code != "authentication_required" || response.Error.Category != "authentication" {
+		t.Fatalf("authentication envelope = %#v", response.Error)
 	}
 }
 

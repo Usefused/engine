@@ -35,16 +35,16 @@ func TestRuntimePaginationV3ValidatesEffectiveRequestTypeAtSnapshotBoundary(t *t
 		Termination:  paginationpolicy.Termination{StopOnMissingValues: []string{"next"}, RepeatedValue: "error"},
 		Limits:       paginationpolicy.Limits{MaxPages: 10, MaxItems: 100, MaxBytes: 1 << 20, MaxDurationMs: 5_000},
 	}
-	service := &runtimeContractService{Pagination: policy}
+	metadata := &fusedobject.ServiceMetadata{Pagination: policy}
 	endpoint := fusedobject.Endpoint{Parameters: fusedobject.Parameters{{Name: "cursor", In: "query", Type: "integer"}}}
 
-	err := validateRuntimePagination(service, []fusedobject.Endpoint{endpoint})
+	err := validateRuntimePagination(metadata, []fusedobject.Endpoint{endpoint})
 	if err == nil || !strings.Contains(err.Error(), "request_target_invalid") {
 		t.Fatalf("snapshot target validation error = %v", err)
 	}
 
 	endpoint.Parameters[0].Type = "string"
-	if err := validateRuntimePagination(service, []fusedobject.Endpoint{endpoint}); err != nil {
+	if err := validateRuntimePagination(metadata, []fusedobject.Endpoint{endpoint}); err != nil {
 		t.Fatalf("valid effective service pagination was rejected: %v", err)
 	}
 }

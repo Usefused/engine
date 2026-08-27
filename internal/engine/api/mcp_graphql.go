@@ -104,9 +104,10 @@ func mcpGraphQLHandler(schema graphql.Schema, resourceResolvers ...graphQLAuthor
 		authStart := time.Now()
 		actor, ok := accesscontrol.ActorFromContext(r.Context())
 		authDur := time.Since(authStart)
+		// Missing actors use the common envelope before parsing any GraphQL document.
 		if !ok {
 			setEngineGraphQLServerTiming(w.Header(), engineGraphQLTiming{auth: authDur, total: time.Since(start)})
-			accesscontrol.WriteAuthorizationError(w, accesscontrol.ErrAuthenticationRequired)
+			accesscontrol.WriteAuthorizationError(w, accesscontrol.ErrAuthenticationRequired, r.Context())
 			return
 		}
 
@@ -117,9 +118,10 @@ func mcpGraphQLHandler(schema graphql.Schema, resourceResolvers ...graphQLAuthor
 		accesscontrol.CaptureRequiredPermissions(r.Context(), plan.requirements)
 		accesscontrol.CaptureMissingPermissions(r.Context(), accesscontrol.MissingRequirements(err))
 		authorizationDur := time.Since(authorizationStart)
+		// Parse and policy denials must remain HTTP-level structured failures.
 		if err != nil {
 			setEngineGraphQLServerTiming(w.Header(), engineGraphQLTiming{auth: authDur, authorize: authorizationDur, total: time.Since(start)})
-			writeEngineGraphQLAuthorizationError(w, err)
+			writeEngineGraphQLAuthorizationError(w, r.Context(), err)
 			return
 		}
 		ctx := context.WithValue(r.Context(), mcpGraphQLActorContextKey, mcpGraphQLActor{accountID: actor.AccountID})
@@ -279,14 +281,15 @@ func recordGraphQLAuthorizationSpan(span trace.Span, plan graphQLAuthorizationPl
 	)
 }
 
-func writeEngineGraphQLAuthorizationError(w http.ResponseWriter, err error) {
+// writeEngineGraphQLAuthorizationError separates malformed documents from
+// authenticated policy denials while retaining the common Engine envelope.
+func writeEngineGraphQLAuthorizationError(w http.ResponseWriter, ctx context.Context, err error) {
+	// Malformed GraphQL cannot be classified as an authorization denial.
 	if errors.Is(err, errInvalidGraphQLRequest) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_graphql_request"})
+		writeControlAPIError(w, ctx, http.StatusBadRequest, "invalid_graphql_request", "The GraphQL request is invalid.", "Correct the GraphQL document and retry.")
 		return
 	}
-	accesscontrol.WriteAuthorizationError(w, err)
+	accesscontrol.WriteAuthorizationError(w, err, ctx)
 }
 
 // ─── Types ──────────────────────────────────────────────────────────────────

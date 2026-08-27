@@ -60,11 +60,31 @@ func inboundSecurityScopeType(schemeType string) string {
 // validateInboundSecurityScheme checks source shape without requiring an
 // executable auth strategy for documentary HTTP schemes or OAuth flows.
 func validateInboundSecurityScheme(scheme fusedobject.InboundSecurityScheme) error {
+	// Type-specific fields are validated separately so later OAuth checks cannot legitimize an invalid base scheme.
+	if err := validateInboundSecuritySchemeType(scheme); err != nil {
+		return err
+	}
+	// Cross-family metadata rules remain independent from the passive scheme shape.
+	if err := validateInboundOAuthSchemeMetadata(scheme); err != nil {
+		return err
+	}
+	for name, flow := range scheme.Flows {
+		// Every flow retains a checked scope catalogue before requirements may reference it.
+		if err := validateInboundOAuthFlow(name, flow); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateInboundSecuritySchemeType admits only standard OpenAPI types and
+// validates fields whose meaning is confined to one security family.
+func validateInboundSecuritySchemeType(scheme fusedobject.InboundSecurityScheme) error {
 	// Only standard OpenAPI scheme types can identify a persisted source definition.
 	switch scheme.Type {
 	case "apiKey":
 		// Preserve the provider's exact API-key transport rather than guessing a header.
-		if (scheme.In != "header" && scheme.In != "query" && scheme.In != "cookie") || !validInboundSecurityText(scheme.Name, 256) {
+		if !validInboundAPIKeyScheme(scheme) {
 			return errors.New("runtime inbound apiKey location or name is invalid")
 		}
 	case "http":
@@ -77,6 +97,22 @@ func validateInboundSecurityScheme(scheme fusedobject.InboundSecurityScheme) err
 	default:
 		return errors.New("runtime inbound security scheme type is invalid")
 	}
+	return nil
+}
+
+// validInboundAPIKeyScheme keeps transport and identifier validation together
+// because both are required to preserve an exact documentary API-key source.
+func validInboundAPIKeyScheme(scheme fusedobject.InboundSecurityScheme) bool {
+	// OpenAPI limits API keys to these three passive transport locations.
+	if scheme.In != "header" && scheme.In != "query" && scheme.In != "cookie" {
+		return false
+	}
+	return validInboundSecurityText(scheme.Name, 256)
+}
+
+// validateInboundOAuthSchemeMetadata prevents OAuth-only fields from changing
+// the meaning of another scheme family and bounds passive flow catalogues.
+func validateInboundOAuthSchemeMetadata(scheme fusedobject.InboundSecurityScheme) error {
 	// OAuth-only metadata cannot silently decorate another security family.
 	if scheme.Type != "oauth2" && (len(scheme.Flows) > 0 || scheme.OAuth2MetadataURL != "") {
 		return errors.New("runtime inbound OAuth metadata requires OAuth2")
@@ -88,12 +124,6 @@ func validateInboundSecurityScheme(scheme fusedobject.InboundSecurityScheme) err
 	// Five standard flows include documentary device authorization, not Engine execution support.
 	if len(scheme.Flows) > 5 {
 		return errors.New("runtime inbound OAuth flow set is invalid")
-	}
-	for name, flow := range scheme.Flows {
-		// Every flow retains a checked scope catalogue before requirements may reference it.
-		if err := validateInboundOAuthFlow(name, flow); err != nil {
-			return err
-		}
 	}
 	return nil
 }

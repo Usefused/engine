@@ -115,6 +115,14 @@ func mcpForwardedPeer(chain string, peer netip.Addr, trusted []netip.Prefix) (ne
 
 // captureMCPClientInfo records the first initialize claim without treating it as verified identity.
 func captureMCPClientInfo(ctx context.Context, request mcpJSONRPCRequest, session *mcpSession) {
+	// Initialization metadata and its durable event must not overtake a concurrent ended transition.
+	session.lifecycleMu.Lock()
+	defer session.lifecycleMu.Unlock()
+	captureMCPClientInfoLocked(ctx, request, session)
+}
+
+// captureMCPClientInfoLocked records the bounded client claim without declaring protocol initialization complete.
+func captureMCPClientInfoLocked(ctx context.Context, request mcpJSONRPCRequest, session *mcpSession) {
 	// Tool arguments and ordinary protocol messages must never become session metadata.
 	if request.Method != "initialize" {
 		return
@@ -122,6 +130,14 @@ func captureMCPClientInfo(ctx context.Context, request mcpJSONRPCRequest, sessio
 	_, span := otel.Tracer("engine").Start(ctx, "engine.sandbox.mcp.initialize_metadata")
 	defer span.End()
 	span.SetAttributes(attribute.String("outcome", "invalid"))
+	session.activityMu.Lock()
+	ended := session.ended
+	session.activityMu.Unlock()
+	// A late initialize claim cannot add metadata or an event after the session was retired.
+	if ended {
+		span.SetAttributes(attribute.String("outcome", "session_ended"))
+		return
+	}
 	claim, ok := mcpInitializeClientClaim(request)
 	// Malformed or oversized claims remain absent rather than changing protocol admission behavior.
 	if !ok {
@@ -138,7 +154,20 @@ func captureMCPClientInfo(ctx context.Context, request mcpJSONRPCRequest, sessio
 	session.clientMetadata.ClientName, session.clientMetadata.ClientVersion = claim.ClientName, claim.ClientVersion
 	session.metadataMu.Unlock()
 	span.SetAttributes(attribute.String("outcome", "recorded"))
-	publishMCPSessionEvent(session, "initialized", "")
+}
+
+// commitMCPInitializationLocked publishes the single initialized transition after a valid child result.
+func commitMCPInitializationLocked(session *mcpSession, protocolVersion string) bool {
+	// Repeated or delayed child responses cannot duplicate the durable lifecycle transition.
+	if session.initialized {
+		return false
+	}
+	session.activityMu.Lock()
+	session.protocolVersion = protocolVersion
+	session.activityMu.Unlock()
+	session.initialized = true
+	publishMCPSessionEventLocked(session, "initialized", "")
+	return true
 }
 
 // mcpInitializeClientClaim admits present display claims only from a correlated initialization request.

@@ -24,6 +24,8 @@ var (
 	ErrInvalidAuthConnectionRefreshClaim = errors.New("invalid auth connection refresh claim")
 	ErrConnectSessionUnavailable         = errors.New("connect session not found or already used")
 	ErrInvalidEncryptedAuthMaterial      = errors.New("invalid encrypted auth material")
+	ErrWorkspaceAuthReferenceInvalid     = errors.New("workspace auth reference is invalid or unavailable")
+	ErrWorkspaceAuthReferenceInUse       = errors.New("workspace auth credential is referenced by another service")
 
 	// App-family errors
 	ErrAppFamilyNotFound      = errors.New("app family not found")
@@ -642,6 +644,53 @@ type AppBucketReadinessStore interface {
 type SecretKeyAlternative struct {
 	Required []string `json:"required"`
 	Optional []string `json:"optional,omitempty"`
+	// AuthNames pins every requested storage key to its reviewed scheme so
+	// overlapping provider names cannot redirect a reference during SQL lookup.
+	AuthNames map[string]string `json:"auth_names,omitempty"`
+	// AuthTypes carries the canonical family reviewed with each key so an
+	// immutable-version change cannot reinterpret referenced credential material.
+	AuthTypes map[string]string `json:"auth_types,omitempty"`
+}
+
+// WorkspaceAuthReference is one same-bucket, whole-credential binding. It
+// stores identities and required key names only; secret values stay in their
+// original encrypted rows and are resolved atomically at execution time.
+type WorkspaceAuthReference struct {
+	SourceServiceID uuid.UUID
+	SourceAuthType  string
+	SourceAuthName  string
+	SourceRequired  []string
+}
+
+// WorkspaceAuthBinding is the mutually-exclusive apply unit for either local
+// encrypted material or a live reference to another credential family.
+type WorkspaceAuthBinding struct {
+	BucketID        uuid.UUID
+	TargetServiceID uuid.UUID
+	TargetAuthType  string
+	TargetAuthName  string
+	TargetKeys      []string
+	Secrets         []WorkspaceSecret
+	Reference       *WorkspaceAuthReference
+	// ReconcileReferences expands replacement from one auth name to every
+	// reference edge owned by the target service in this bucket.
+	ReconcileReferences bool
+	// ClearReferences represents auth omission without granting permission to
+	// remove any directly stored credential material.
+	ClearReferences bool
+}
+
+// WorkspaceAuthBindingStore owns set-based validation and atomic replacement
+// so API and runtime code do not grow competing persistence paths.
+type WorkspaceAuthBindingStore interface {
+	PreflightWorkspaceAuthBindings(ctx context.Context, bindings []WorkspaceAuthBinding, desiredServiceIDs []uuid.UUID) error
+	ApplyWorkspaceAuthBindings(ctx context.Context, bindings []WorkspaceAuthBinding) error
+}
+
+// WorkspaceServiceBatchRemovalStore removes one desired set in a statement so
+// dependent auth-reference targets and sources can disappear atomically.
+type WorkspaceServiceBatchRemovalStore interface {
+	RemoveWorkspaceServices(ctx context.Context, serviceIDs []uuid.UUID) error
 }
 
 type ConnectConfig struct {

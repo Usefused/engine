@@ -12,19 +12,20 @@ import (
 	"github.com/Usefused/engine/internal/shared/retrypolicy"
 )
 
+// TestRuntimePolicyContractsRejectNonV3WithCompatibilityClassification keeps preflight policy errors on the existing stable capability class.
 func TestRuntimePolicyContractsRejectNonV3WithCompatibilityClassification(t *testing.T) {
 	tests := map[string]func() error{
 		"rate limit": func() error {
 			snapshot := &store.ServiceContractSnapshot{ServiceMetadata: fusedobject.ServiceMetadata{
 				RateLimit: &ratelimitpolicy.Config{Version: 2},
 			}}
-			return validateRuntimeSnapshot(snapshot)
+			return ValidateRuntimeContractSnapshot(snapshot)
 		},
 		"retry": func() error {
 			snapshot := &store.ServiceContractSnapshot{ServiceMetadata: fusedobject.ServiceMetadata{
 				RetryConfig: &retrypolicy.Config{Version: 2},
 			}}
-			return validateRuntimeSnapshot(snapshot)
+			return ValidateRuntimeContractSnapshot(snapshot)
 		},
 		"pagination": func() error {
 			return validateRuntimePaginationConfig("service", &paginationpolicy.Config{Version: 2})

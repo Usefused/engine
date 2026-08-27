@@ -436,15 +436,45 @@ func (s *postgresStore) ListAuthorizedBucketServiceSummaries(ctx context.Context
 	return items, total, err
 }
 
+// RemoveWorkspaceService preserves source services while live auth references
+// depend on them and otherwise keeps the existing exact-delete semantics.
 func (s *postgresStore) RemoveWorkspaceService(ctx context.Context, serviceID uuid.UUID) error {
 	res, err := s.db.Exec(ctx, `DELETE FROM fused_workspace_services WHERE service_id = $1`, serviceID)
+	// Named reference ownership turns source use into a stable domain conflict.
 	if err != nil {
-		return fmt.Errorf("RemoveWorkspaceService: %w", err)
+		return workspaceServiceRemovalError("RemoveWorkspaceService", err)
 	}
+	// Zero affected rows remains authoritative absence rather than success.
 	if res.RowsAffected() == 0 {
 		return fmt.Errorf("RemoveWorkspaceService: %w", ErrWorkspaceServiceNotFound)
 	}
 	return nil
+}
+
+// RemoveWorkspaceServices deletes a composite desired set in one statement so
+// target cascades are complete before source NO ACTION constraints are checked.
+func (s *postgresStore) RemoveWorkspaceServices(ctx context.Context, serviceIDs []uuid.UUID) error {
+	// Empty reconciliation sets should not issue a broad DELETE statement.
+	if len(serviceIDs) == 0 {
+		return nil
+	}
+	_, err := s.db.Exec(ctx, `DELETE FROM fused_workspace_services WHERE service_id = ANY($1)`, serviceIDs)
+	// Any remaining dependent outside the batch must retain the same stable conflict.
+	if err != nil {
+		return workspaceServiceRemovalError("RemoveWorkspaceServices", err)
+	}
+	return nil
+}
+
+// workspaceServiceRemovalError maps only the named source dependency while
+// preserving every unrelated PostgreSQL failure for diagnostics.
+func workspaceServiceRemovalError(operation string, err error) error {
+	var pgErr *pgconn.PgError
+	// Constraint identity is stable and avoids parsing vendor message text.
+	if errors.As(err, &pgErr) && pgErr.ConstraintName == "fk_fused_workspace_auth_reference_source" {
+		return fmt.Errorf("%s: %w", operation, ErrWorkspaceAuthReferenceInUse)
+	}
+	return fmt.Errorf("%s: %w", operation, err)
 }
 
 func collectBucketServiceSummaries(rows pgx.Rows) ([]BucketServiceSummary, error) {

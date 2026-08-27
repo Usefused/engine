@@ -2,10 +2,16 @@
 
 An import has two owners:
 
-1. Registry validates and commits the service/version, operations, webhooks,
+1. Registry builds the reviewed import in a rollback-only transaction. Engine
+   validates that exact runtime candidate, and Registry binds apply to its hash.
+2. Registry validates and commits the service/version, operations, webhooks,
    source metadata, and import-plan state in its publication transaction.
-2. Engine fetches and independently validates the published runtime snapshot,
+3. Engine fetches and independently validates the published runtime snapshot,
    then activates that exact version in the workspace.
+
+A failure with `phase: engine_preflight` and `commit_state: not_committed`
+occurs before publication. Correct the reviewed contract and retry the exact
+receipt command only when the response marks it retryable.
 
 A Registry pre-commit write failure rolls back its transaction. A lost commit
 acknowledgement is ambiguous, not proof of rollback. An Engine activation

@@ -74,19 +74,22 @@ type authConnectionResponse struct {
 	UpdatedAt             time.Time  `json:"updated_at"`
 }
 
+// UpsertConnectConfigHandler merges, validates, encrypts, and saves one bucket
+// registration while keeping credentials out of diagnostics.
 func UpsertConnectConfigHandler(s store.Store, masterKey []byte) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.connect_config.upsert")
 		defer span.End()
 
-		call, ok := resolveConnectAdminCall(w, r, s)
+		call, ok := resolveConnectAdminMutationCall(w, r, s, "connect_config_upsert")
 		if !ok {
 			return
 		}
 
 		var payload connectConfigUpsertPayload
+		// Invalid JSON cannot safely drive partial credential merge semantics.
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
+			writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "invalid_connect_config_request", "The connect configuration request body is invalid.", "Check auth_type, auth_name, enabled, client credentials, and redirect_uri.", "connect_config_upsert", "", "not_committed", "")
 			return
 		}
 
@@ -97,27 +100,31 @@ func UpsertConnectConfigHandler(s store.Store, masterKey []byte) http.HandlerFun
 		// connectConfigResponse), so a caller cannot resend what it was never
 		// given back. One read, one write below; never a loop over rows.
 		existing, err := s.GetConnectConfig(ctx, call.bucketID, call.serviceID)
+		// Existing encrypted fields must be available before a safe partial update.
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to load existing connect config", slog.Any("error", err))
-			http.Error(w, "failed to load existing connect config", http.StatusInternalServerError)
+			writeControlAPIMutationError(w, ctx, http.StatusInternalServerError, "connect_config_load_failed", "The Engine could not load the existing connect configuration.", "Retry and check Engine logs if the problem continues.", "connect_config_upsert", "", "not_committed", "")
 			return
 		}
 
 		payload.normalize()
+		// Validation runs against the merged shape so partial updates cannot erase required fields.
 		if msg := validateConnectConfigPayload(&payload, existing); msg != "" {
-			http.Error(w, msg, http.StatusBadRequest)
+			writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "invalid_connect_config", msg, "Provide the required OAuth or OIDC registration fields and retry.", "connect_config_upsert", "", "not_committed", "")
 			return
 		}
 
 		resolved, err := resolveConnectConfigFields(payload, existing, masterKey)
+		// Decryption or merge failures remain opaque to protect stored credentials.
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to resolve connect config fields", slog.Any("error", err))
-			http.Error(w, "failed to resolve existing connect config", http.StatusInternalServerError)
+			writeControlAPIMutationError(w, ctx, http.StatusInternalServerError, "connect_config_resolution_failed", "The Engine could not resolve the existing connect configuration.", "Check Engine master-key configuration and retry.", "connect_config_upsert", "", "not_committed", "")
 			return
 		}
 		cfg, err := encryptConnectConfig(call.bucketID, call.serviceID, resolved, masterKey)
+		// Encryption must finish before persistence receives the registration.
 		if err != nil {
-			http.Error(w, "failed to encrypt connect config", http.StatusInternalServerError)
+			writeControlAPIMutationError(w, ctx, http.StatusInternalServerError, "connect_config_encryption_failed", "The Engine could not encrypt the connect configuration.", "Check Engine master-key configuration and retry.", "connect_config_upsert", "", "not_committed", "")
 			return
 		}
 
@@ -127,11 +134,13 @@ func UpsertConnectConfigHandler(s store.Store, masterKey []byte) http.HandlerFun
 		// credential anywhere near telemetry.
 		span.SetAttributes(connectAdminAttrs(connectConfigUpsertAction(existing), call)...)
 		saved, err := s.UpsertConnectConfig(ctx, cfg)
+		// An unclassified repository failure cannot prove whether the save committed.
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to upsert connect config", slog.Any("error", err))
-			http.Error(w, "failed to save connect config", http.StatusInternalServerError)
+			writeControlAPIMutationError(w, ctx, http.StatusInternalServerError, "connect_config_save_failed", "The Engine could not save the connect configuration.", "Inspect the current connect configuration before retrying, and use the request or trace ID to check Engine logs.", "connect_config_upsert", "", "unknown", "")
 			return
 		}
+		span.SetAttributes(attribute.String("outcome", "upserted"))
 		writeConnectJSON(w, http.StatusOK, projectConnectConfig(saved))
 	}
 }
@@ -160,42 +169,49 @@ func GetConnectConfigHandler(s store.Store) http.HandlerFunc {
 			return
 		}
 		cfg, err := s.GetConnectConfig(r.Context(), call.bucketID, call.serviceID)
+		// Store failures are distinct from an authoritative absent configuration.
 		if err != nil {
 			slog.ErrorContext(r.Context(), "failed to load connect config", slog.Any("error", err))
-			http.Error(w, "failed to load connect config", http.StatusInternalServerError)
+			writeControlAPIError(w, r.Context(), http.StatusInternalServerError, "connect_config_load_failed", "The Engine could not load the connect configuration.", "Retry and check Engine logs if the problem continues.")
 			return
 		}
+		// Nil is the authoritative not-configured state used by `connect get`.
 		if cfg == nil {
-			http.Error(w, "connect config not found", http.StatusNotFound)
+			writeControlAPIError(w, r.Context(), http.StatusNotFound, "connect_config_not_found", "No connect configuration exists for this bucket and service.", "Create it with `fused-cli connect set`.")
 			return
 		}
 		writeConnectJSON(w, http.StatusOK, projectConnectConfig(cfg))
 	}
 }
 
+// DeleteAuthConnectionHandler removes one connected-user grant from the exact
+// bucket authorized by the control route.
 func DeleteAuthConnectionHandler(s store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.auth_connections.delete")
 		defer span.End()
 
-		call, ok := resolveBucketAdminCall(w, r, s)
+		call, ok := resolveBucketAdminMutationCall(w, r, s, "auth_connection_delete")
 		if !ok {
 			return
 		}
-		connectionID, ok := parseUUIDParam(w, r, "connection_id")
+		connectionID, ok := parseUUIDMutationParam(w, r, "connection_id", "auth_connection_delete")
 		if !ok {
 			return
 		}
 		span.SetAttributes(connectBucketAdminAttrs("auth_connection.delete", call, connectionID)...)
+		// Known absence is safe to expose; unknown store failures remain opaque.
 		if err := s.DeleteAuthConnection(ctx, call.bucketID, connectionID); err != nil {
+			// A missing grant is caller-remediable and should not suggest a retryable outage.
 			if errors.Is(err, store.ErrAuthConnectionNotFound) {
-				http.Error(w, "auth connection not found", http.StatusNotFound)
+				writeControlAPIMutationError(w, ctx, http.StatusNotFound, "auth_connection_not_found", "The selected auth connection was not found.", "Refresh connected users before retrying.", "auth_connection_delete", "", "not_committed", "")
 				return
 			}
 			slog.ErrorContext(ctx, "failed to delete auth connection", slog.Any("error", err))
-			http.Error(w, "failed to delete auth connection", http.StatusInternalServerError)
+			writeControlAPIMutationError(w, ctx, http.StatusInternalServerError, "auth_connection_delete_failed", "The Engine could not delete the auth connection.", "Inspect connected users before retrying, and use the request or trace ID to check Engine logs.", "auth_connection_delete", "", "unknown", "")
 			return
 		}
+		span.SetAttributes(attribute.String("outcome", "deleted"))
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -209,12 +225,28 @@ type bucketAdminCall struct {
 	bucketID uuid.UUID
 }
 
+// resolveConnectAdminCall validates the exact bucket and service route identity
+// shared by connect configuration reads and writes.
 func resolveConnectAdminCall(w http.ResponseWriter, r *http.Request, s store.Store) (connectAdminCall, bool) {
-	bucketCall, ok := resolveBucketAdminCall(w, r, s)
+	return resolveConnectAdminCallForPhase(w, r, s, "")
+}
+
+// resolveConnectAdminMutationCall validates bucket and service route identity
+// while preserving mutation outcome metadata for every admission failure.
+func resolveConnectAdminMutationCall(w http.ResponseWriter, r *http.Request, s store.Store, phase string) (connectAdminCall, bool) {
+	return resolveConnectAdminCallForPhase(w, r, s, phase)
+}
+
+// resolveConnectAdminCallForPhase owns the shared route-resolution algorithm;
+// a non-empty phase adds mutation certainty without duplicating admission.
+func resolveConnectAdminCallForPhase(w http.ResponseWriter, r *http.Request, s store.Store, phase string) (connectAdminCall, bool) {
+	bucketCall, ok := resolveBucketAdminCallForPhase(w, r, s, phase)
+	// Bucket admission must succeed before the service identity can be trusted.
 	if !ok {
 		return connectAdminCall{}, false
 	}
-	serviceID, ok := parseUUIDParam(w, r, "service_id")
+	serviceID, ok := parseUUIDParamForPhase(w, r, "service_id", phase)
+	// A malformed service route cannot identify an exact connect configuration.
 	if !ok {
 		return connectAdminCall{}, false
 	}
@@ -224,22 +256,40 @@ func resolveConnectAdminCall(w http.ResponseWriter, r *http.Request, s store.Sto
 	}, true
 }
 
+// resolveBucketAdminCall authenticates the actor and verifies the exact route
+// bucket before any bucket-scoped connect operation proceeds.
 func resolveBucketAdminCall(w http.ResponseWriter, r *http.Request, s store.Store) (bucketAdminCall, bool) {
+	return resolveBucketAdminCallForPhase(w, r, s, "")
+}
+
+// resolveBucketAdminMutationCall authenticates and validates a bucket-scoped
+// mutation before storage writes, reporting every rejection as not committed.
+func resolveBucketAdminMutationCall(w http.ResponseWriter, r *http.Request, s store.Store, phase string) (bucketAdminCall, bool) {
+	return resolveBucketAdminCallForPhase(w, r, s, phase)
+}
+
+// resolveBucketAdminCallForPhase centralizes authentication and exact bucket
+// admission for both reads and mutations without adding repository queries.
+func resolveBucketAdminCallForPhase(w http.ResponseWriter, r *http.Request, s store.Store, phase string) (bucketAdminCall, bool) {
 	accountID, err := controlActorAccount(r.Context())
+	// Missing actor identity rejects bucket administration before repository access.
 	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeConnectAdminAdmissionError(w, r.Context(), http.StatusUnauthorized, "authentication_required", "Authentication is required to manage connect configuration.", "Log in or provide a valid Fused credential.", phase)
 		return bucketAdminCall{}, false
 	}
+	// Workspace verification must finish before a bucket route is admitted.
 	if err := verifyWorkspaceActor(r.Context(), accountID); err != nil {
-		http.Error(w, "failed to resolve workspace", http.StatusInternalServerError)
+		writeConnectAdminAdmissionError(w, r.Context(), http.StatusInternalServerError, "workspace_resolution_failed", "The Engine could not resolve the workspace for connect configuration.", "Retry and check Engine logs if the problem continues.", phase)
 		return bucketAdminCall{}, false
 	}
-	bucketID, ok := parseUUIDParam(w, r, "bucket_id")
+	bucketID, ok := parseUUIDParamForPhase(w, r, "bucket_id", phase)
+	// An invalid route identity cannot reach bucket storage.
 	if !ok {
 		return bucketAdminCall{}, false
 	}
+	// Exact bucket lookup proves workspace membership before route admission.
 	if _, err := s.GetBucket(r.Context(), bucketID); err != nil {
-		writeBucketLookupError(w, err)
+		writeBucketLookupErrorForPhase(r.Context(), w, err, phase)
 		return bucketAdminCall{}, false
 	}
 	return bucketAdminCall{bucketID: bucketID}, true
@@ -558,22 +608,63 @@ func optionalConnectionUUID(id uuid.UUID) *uuid.UUID {
 	return &id
 }
 
+// parseUUIDParam validates an exact route UUID and emits a stable field-specific
+// diagnostic without reflecting the supplied value.
 func parseUUIDParam(w http.ResponseWriter, r *http.Request, name string) (uuid.UUID, bool) {
+	return parseUUIDParamForPhase(w, r, name, "")
+}
+
+// parseUUIDMutationParam validates an exact route UUID and records malformed
+// mutation identity as an authoritative pre-write rejection.
+func parseUUIDMutationParam(w http.ResponseWriter, r *http.Request, name, phase string) (uuid.UUID, bool) {
+	return parseUUIDParamForPhase(w, r, name, phase)
+}
+
+// parseUUIDParamForPhase validates route identity once and selects read or
+// authoritative pre-write error metadata from the supplied phase.
+func parseUUIDParamForPhase(w http.ResponseWriter, r *http.Request, name, phase string) (uuid.UUID, bool) {
 	value := chi.URLParam(r, name)
 	id, err := uuid.Parse(value)
+	// Malformed route values never reach bucket or connection storage.
 	if err != nil {
-		http.Error(w, "invalid "+name, http.StatusBadRequest)
+		writeConnectAdminAdmissionError(w, r.Context(), http.StatusBadRequest, "invalid_"+name, "The "+name+" route value is not a valid UUID.", "Use an ID returned by the corresponding Fused list command.", phase)
 		return uuid.Nil, false
 	}
 	return id, true
 }
 
-func writeBucketLookupError(w http.ResponseWriter, err error) {
+// writeBucketLookupError distinguishes authoritative absence from a retryable
+// store failure without exposing database details.
+func writeBucketLookupError(ctx context.Context, w http.ResponseWriter, err error) {
+	writeBucketLookupErrorForPhase(ctx, w, err, "")
+}
+
+// writeBucketMutationLookupError distinguishes authoritative bucket absence
+// from lookup failure while proving both occurred before the requested write.
+func writeBucketMutationLookupError(ctx context.Context, w http.ResponseWriter, err error, phase string) {
+	writeBucketLookupErrorForPhase(ctx, w, err, phase)
+}
+
+// writeBucketLookupErrorForPhase maps bucket lookup results once while a
+// non-empty phase preserves authoritative pre-write mutation metadata.
+func writeBucketLookupErrorForPhase(ctx context.Context, w http.ResponseWriter, err error, phase string) {
+	// A missing bucket is caller-remediable and, for mutations, proves pre-write rejection.
 	if errors.Is(err, store.ErrBucketNotFound) {
-		http.Error(w, "bucket not found", http.StatusNotFound)
+		writeConnectAdminAdmissionError(w, ctx, http.StatusNotFound, "bucket_not_found", "The selected bucket was not found.", "Choose a bucket from `fused-cli bucket list`.", phase)
 		return
 	}
-	http.Error(w, "failed to resolve bucket", http.StatusInternalServerError)
+	writeConnectAdminAdmissionError(w, ctx, http.StatusInternalServerError, "bucket_lookup_failed", "The Engine could not resolve the selected bucket.", "Retry and check Engine logs if the problem continues.", phase)
+}
+
+// writeConnectAdminAdmissionError preserves the ordinary read envelope when
+// no phase exists and adds not-committed metadata only for mutation admission.
+func writeConnectAdminAdmissionError(w http.ResponseWriter, ctx context.Context, status int, code, message, remediation, phase string) {
+	// An empty phase identifies a read path and must not claim mutation certainty.
+	if phase == "" {
+		writeControlAPIError(w, ctx, status, code, message, remediation)
+		return
+	}
+	writeControlAPIMutationError(w, ctx, status, code, message, remediation, phase, "", "not_committed", "")
 }
 
 // verifyBucketInWorkspace confirms bucketID actually exists before a handler

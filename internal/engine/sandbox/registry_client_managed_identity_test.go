@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -71,21 +72,86 @@ func TestManagedIdentityRegistryClientUsesEngineIdentityAndDecodesContracts(t *t
 	}
 }
 
+// TestManagedIdentityRegistryClientReturnsTypedPendingWithoutProviderBody
+// verifies nested Registry metadata survives without reflecting error prose.
 func TestManagedIdentityRegistryClientReturnsTypedPendingWithoutProviderBody(t *testing.T) {
 	transactionID := uuid.New()
 	secret := "provider-body-must-not-leak"
+	traceID := "1234567890abcdef1234567890abcdef"
 	client := &HTTPRegistryClient{
 		endpoint: "https://registry.example/graphql", licenseKey: "engine-license",
+		// The fixture includes hostile prose to prove only allowlisted fields are retained.
+		httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return managedIdentityResponse(http.StatusNotFound, `{"error":{"code":"transaction_unavailable","message":"`+secret+`","category":"not_found","retryable":false,"request_id":"registry/identity-42","trace_id":"`+traceID+`","detail":"`+secret+`"}}`), nil
+		})},
+	}
+	_, err := client.ExchangeManagedLoginTransaction(context.Background(), transactionID, "registry-verifier")
+	// The stable code remains the sole state-machine signal for a pending exchange.
+	if !IsManagedLoginPending(err) {
+		t.Fatalf("pending error = %v", err)
+	}
+	var registryErr ManagedIdentityRegistryError
+	// Typed metadata allows operators to correlate the exact Registry failure.
+	if !errors.As(err, &registryErr) || registryErr.Code != "transaction_unavailable" || registryErr.RequestID != "registry/identity-42" || registryErr.TraceID != traceID {
+		t.Fatalf("typed managed identity error = %#v, %v", registryErr, err)
+	}
+	// Registry message/detail fields and request secrets never enter Engine error prose.
+	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "registry-verifier") {
+		t.Fatalf("managed identity error leaked secret: %v", err)
+	}
+}
+
+// TestManagedIdentityRegistryClientRejectsLegacyTopLevelCode proves the old
+// private response shape cannot drive the managed-login state machine.
+func TestManagedIdentityRegistryClientRejectsLegacyTopLevelCode(t *testing.T) {
+	secret := "legacy-provider-detail"
+	client := &HTTPRegistryClient{
+		endpoint: "https://registry.example/graphql", licenseKey: "engine-license",
+		// The legacy fixture carries the former signal plus prose that must remain ignored.
 		httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return managedIdentityResponse(http.StatusNotFound, `{"code":"transaction_unavailable","detail":"`+secret+`"}`), nil
 		})},
 	}
-	_, err := client.ExchangeManagedLoginTransaction(context.Background(), transactionID, "registry-verifier")
-	if !IsManagedLoginPending(err) {
-		t.Fatalf("pending error = %v", err)
+	_, err := client.ExchangeManagedLoginTransaction(context.Background(), uuid.New(), "registry-verifier")
+	// Only the shared nested envelope may classify an exchange as still pending.
+	if IsManagedLoginPending(err) {
+		t.Fatalf("legacy response was classified as pending: %v", err)
 	}
+	var registryErr ManagedIdentityRegistryError
+	// HTTP status remains diagnostic, but the legacy classifier is discarded.
+	if !errors.As(err, &registryErr) || registryErr.Status != http.StatusNotFound || registryErr.Code != "" {
+		t.Fatalf("legacy managed identity error = %#v, %v", registryErr, err)
+	}
+	// Unknown legacy fields never become Engine-visible error prose.
 	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "registry-verifier") {
-		t.Fatalf("managed identity error leaked secret: %v", err)
+		t.Fatalf("legacy managed identity error leaked secret: %v", err)
+	}
+}
+
+// TestSafeManagedIdentityRegistryCorrelationIDPreservesGrammar locks the
+// bounded ASCII allowlist used before remote identifiers reach diagnostics.
+func TestSafeManagedIdentityRegistryCorrelationIDPreservesGrammar(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "allowed punctuation", value: " registry/Identity-42:part.one ", want: "registry/Identity-42:part.one"},
+		{name: "empty", value: "   "},
+		{name: "embedded space", value: "registry identity"},
+		{name: "Unicode alias", value: "registry/identité"},
+		{name: "prose punctuation", value: "registry?id=42"},
+		{name: "oversized", value: strings.Repeat("a", 129)},
+	}
+	for _, testCase := range cases {
+		// Each case validates the complete sanitizer rather than its internal helper.
+		t.Run(testCase.name, func(t *testing.T) {
+			got := safeManagedIdentityRegistryCorrelationID(testCase.value)
+			// Invalid remote values must collapse to the empty diagnostic field.
+			if got != testCase.want {
+				t.Fatalf("safeManagedIdentityRegistryCorrelationID(%q) = %q, want %q", testCase.value, got, testCase.want)
+			}
+		})
 	}
 }
 

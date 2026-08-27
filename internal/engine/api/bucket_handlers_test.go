@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -70,17 +71,21 @@ func TestDeleteBucketHandlerCarriesMiddlewareAuthorizedIDAcrossReplacement(t *te
 	}
 }
 
+// TestDeleteBucketHandlerMapsDeletionFailures verifies typed rejections and
+// unknown repository outcomes expose truthful mutation metadata.
 func TestDeleteBucketHandlerMapsDeletionFailures(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		deleteErr  error
-		wantStatus int
+		name            string
+		deleteErr       error
+		wantStatus      int
+		wantCommitState string
 	}{
-		{name: "bound", deleteErr: store.ErrBucketBound, wantStatus: http.StatusConflict},
-		{name: "default", deleteErr: store.ErrDefaultBucketProtected, wantStatus: http.StatusConflict},
-		{name: "not found", deleteErr: store.ErrBucketNotFound, wantStatus: http.StatusNotFound},
-		{name: "repository", deleteErr: errors.New("database unavailable"), wantStatus: http.StatusInternalServerError},
+		{name: "bound", deleteErr: store.ErrBucketBound, wantStatus: http.StatusConflict, wantCommitState: "not_committed"},
+		{name: "default", deleteErr: store.ErrDefaultBucketProtected, wantStatus: http.StatusConflict, wantCommitState: "not_committed"},
+		{name: "not found", deleteErr: store.ErrBucketNotFound, wantStatus: http.StatusNotFound, wantCommitState: "not_committed"},
+		{name: "repository", deleteErr: errors.New("database unavailable"), wantStatus: http.StatusInternalServerError, wantCommitState: "unknown"},
 	} {
+		// Each repository class must retain its distinct commit certainty.
 		t.Run(test.name, func(t *testing.T) {
 			s := newBucketDeleteGuardStore()
 			s.deleteErr = test.deleteErr
@@ -90,6 +95,18 @@ func TestDeleteBucketHandlerMapsDeletionFailures(t *testing.T) {
 			}
 			if s.deleted {
 				t.Fatal("failed deletion must not be recorded as deleted")
+			}
+			var envelope workspaceConfigErrorResponse
+			// The structured envelope is the contract consumed by CLI remediation.
+			if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+				t.Fatalf("decode error envelope: %v", err)
+			}
+			if envelope.Error.Phase != "bucket_delete" || envelope.Error.CommitState != test.wantCommitState || envelope.Error.OperationID != "" {
+				t.Fatalf("unexpected mutation metadata: %#v", envelope.Error)
+			}
+			// Unknown outcomes must direct inspection before any retry.
+			if test.wantCommitState == "unknown" && !strings.Contains(envelope.Error.Remediation, "Inspect") {
+				t.Fatalf("unknown outcome remediation = %q", envelope.Error.Remediation)
 			}
 		})
 	}

@@ -132,7 +132,9 @@ describe("managed timers", () => {
     vi.useFakeTimers();
     const pending = runExecute(`setTimeout(${callback}, 5); await sleep(40);`, options, new SessionState(), limits);
     await vi.advanceTimersByTimeAsync(50);
-    expect(await pending).toMatchObject({ text: "callback failure", isError: true, executionOutcome: "failed" });
+    const outcome = await pending;
+    expect(outcome).toMatchObject({ isError: true, executionOutcome: "failed" });
+    expect(JSON.parse(outcome.text)).toMatchObject({ message: "callback failure", recovery_action: "do_not_replay", provider_execution: "unknown" });
     expect(vi.getTimerCount()).toBe(0);
   });
 

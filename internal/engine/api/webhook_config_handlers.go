@@ -81,22 +81,23 @@ type webhookConfigApplyResult struct {
 // each referenced service's webhook auth shape in one Registry metadata batch.
 func WebhookConfigPlanHandler(configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !entitlement.LiveEntitlement.Load().WebhookIngestionEnabled {
-			slog.InfoContext(r.Context(), "webhook config plan denied: webhook ingestion not enabled on current plan")
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusForbidden, message: "webhook ingestion not enabled on current plan"}, r.Context())
-			return
-		}
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.webhook_config.plan")
 		defer span.End()
+		// Entitlement denial is still a user-triggered plan attempt on this span.
+		if !entitlement.LiveEntitlement.Load().WebhookIngestionEnabled {
+			slog.InfoContext(ctx, "webhook config plan denied: webhook ingestion not enabled on current plan")
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusForbidden, message: "webhook ingestion not enabled on current plan"}, "plan_admission", "", "not_committed"), ctx)
+			return
+		}
 		actor, ok := accesscontrol.ActorFromContext(ctx)
 		if !ok {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, "plan_admission", "", "not_committed"), ctx)
 			return
 		}
 		req, doc, err := decodeWebhookConfigPlanRequest(r)
 		if err != nil {
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, "plan_admission", "", "not_committed"), ctx)
 			return
 		}
 		span.SetAttributes(attribute.String("config_key", req.ConfigKey), attribute.String("webhook.name", doc.Name))
@@ -106,7 +107,7 @@ func WebhookConfigPlanHandler(configStore store.ConfigRepository, s store.Store,
 		})
 		if err != nil {
 			span.SetStatus(codes.Error, "webhook config plan failed")
-			writeSDKConfigError(w, err, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(err, "planning", "", "unknown"), ctx)
 			return
 		}
 		span.SetAttributes(attribute.String("outcome", "success"), attribute.String("plan_id", plan.ID.String()))
@@ -127,27 +128,28 @@ func WebhookConfigPlanHandler(configStore store.ConfigRepository, s store.Store,
 // activate.
 func WebhookConfigApplyHandler(configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !entitlement.LiveEntitlement.Load().WebhookIngestionEnabled {
-			slog.InfoContext(r.Context(), "webhook config apply denied: webhook ingestion not enabled on current plan")
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusForbidden, message: "webhook ingestion not enabled on current plan"}, r.Context())
-			return
-		}
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.webhook_config.apply")
 		defer span.End()
+		// Entitlement denial is still a user-triggered apply attempt on this span.
+		if !entitlement.LiveEntitlement.Load().WebhookIngestionEnabled {
+			slog.InfoContext(ctx, "webhook config apply denied: webhook ingestion not enabled on current plan")
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusForbidden, message: "webhook ingestion not enabled on current plan"}, "request_admission", "", "not_committed"), ctx)
+			return
+		}
 		actor, ok := accesscontrol.ActorFromContext(ctx)
 		if !ok {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, "request_admission", "", "not_committed"), ctx)
 			return
 		}
 		req, planID, err := decodeSDKConfigApplyRequest(r)
 		if err != nil {
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, "request_admission", "", "not_committed"), ctx)
 			return
 		}
 		planRevision, ok := AuthorizedPlanRevisionFromContext(ctx)
 		if !ok {
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"}, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"}, "apply_admission", planID.String(), "not_committed"), ctx)
 			return
 		}
 		result, err := executeWebhookConfigApply(ctx, configStore, s, verifier, registryClient, sdkApplyCall{
@@ -156,7 +158,7 @@ func WebhookConfigApplyHandler(configStore store.ConfigRepository, s store.Store
 		})
 		if err != nil {
 			span.SetStatus(codes.Error, "webhook config apply failed")
-			writeSDKConfigError(w, err, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(err, "apply_execution", planID.String(), "unknown"), ctx)
 			return
 		}
 		span.SetAttributes(
@@ -309,12 +311,12 @@ func webhookPlanPermissionSnapshot(ctx context.Context, s store.Store, current *
 func executeWebhookConfigApply(ctx context.Context, configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient, call sdkApplyCall) (webhookConfigApplyResult, error) {
 	plan, doc, resolved, err := loadResolvedWebhookApply(ctx, configStore, s, registryClient, call)
 	if err != nil {
-		return webhookConfigApplyResult{}, err
+		return webhookConfigApplyResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 	names := sortedWebhookServiceNames(resolved)
 	registrations, serviceIDs, err := prepareWebhookRegistrations(ctx, s, verifier, plan.ConfigKey, plan.RequiredPermissions, doc, resolved, names)
 	if err != nil {
-		return webhookConfigApplyResult{}, err
+		return webhookConfigApplyResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 	return commitWebhookConfigApply(ctx, configStore, call, plan, doc.Name, names, registrations, serviceIDs)
 }
@@ -607,13 +609,16 @@ func commitWebhookConfigApply(ctx context.Context, configStore store.ConfigRepos
 		Registrations: registrations, KeepServiceIDs: keepServiceIDs,
 	})
 	if err != nil {
+		// Typed repository conflicts reject the atomic transaction before commit.
 		if errors.Is(err, store.ErrConfigOwnerInactive) || errors.Is(err, store.ErrConfigPlanRevisionMismatch) || errors.Is(err, store.ErrConfigPlanNotFound) || errors.Is(err, store.ErrWorkspaceWebhookOwnerConflict) || errors.Is(err, store.ErrAppOwnerMismatch) || errors.Is(err, store.ErrConfigStateIdentityMismatch) {
-			return webhookConfigApplyResult{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "webhook plan is stale or its owner is inactive"}
+			return webhookConfigApplyResult{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "webhook plan is stale or its owner is inactive", phase: "workspace_commit", operationID: call.planID.String(), commitState: "not_committed"}
 		}
-		return webhookConfigApplyResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to atomically apply webhook config"}
+		// An unclassified commit-boundary failure cannot prove the transaction outcome.
+		return webhookConfigApplyResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to atomically apply webhook config", phase: "workspace_commit", operationID: call.planID.String(), commitState: "unknown"}
 	}
+	// A complete database result proves commit before response projection checks.
 	if len(result.Registrations) != len(names) {
-		return webhookConfigApplyResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "webhook apply returned an incomplete result"}
+		return webhookConfigApplyResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "webhook apply returned an incomplete result", phase: "response_projection", operationID: call.planID.String(), commitState: "committed"}
 	}
 	applied := make([]appliedWorkspaceWebhook, 0, len(result.Registrations))
 	for i, saved := range result.Registrations {

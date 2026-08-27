@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,6 +69,10 @@ func TestConnectAdminHandlers_GetMissingConfigReturnsNotFound(t *testing.T) {
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for a never-set connect config, got %d body=%s", rr.Code, rr.Body.String())
 	}
+	var envelope workspaceConfigErrorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &envelope); err != nil || envelope.Error.Code != "connect_config_not_found" || envelope.Error.Remediation == "" {
+		t.Fatalf("connect error envelope = %#v, decode error=%v", envelope, err)
+	}
 }
 
 // TestConnectAdminHandlers_GetRequiresBucketOwnership mirrors the upsert
@@ -87,6 +92,33 @@ func TestConnectAdminHandlers_GetRequiresBucketOwnership(t *testing.T) {
 	}
 }
 
+// TestConnectAdminHandlers_UnknownConfigSaveRequiresInspection verifies an
+// ambiguous config write reports unknown state without exposing store detail.
+func TestConnectAdminHandlers_UnknownConfigSaveRequiresInspection(t *testing.T) {
+	fixture := newConnectAdminFixture()
+	fixture.store.upsertConnectErr = errors.New("ambiguous commit with private backend detail")
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
+	body := bytes.NewReader([]byte(`{"auth_type":"oauth","auth_name":"oauthScheme","client_id":"client-id","client_secret":"client-secret","redirect_uri":"https://engine.example.com/connect/callback"}`))
+	req := httptest.NewRequest(http.MethodPut, fixture.configPath(), body)
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	var envelope workspaceConfigErrorResponse
+	// The response directs state inspection and retains no CRUD target as an operation ID.
+	if err := json.Unmarshal(rr.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode error envelope: %v", err)
+	}
+	if rr.Code != http.StatusInternalServerError || envelope.Error.Code != "connect_config_save_failed" || envelope.Error.Phase != "connect_config_upsert" || envelope.Error.CommitState != "unknown" || envelope.Error.OperationID != "" {
+		t.Fatalf("unexpected error response: status=%d error=%#v", rr.Code, envelope.Error)
+	}
+	if !strings.Contains(envelope.Error.Remediation, "Inspect") || strings.Contains(rr.Body.String(), "private backend detail") {
+		t.Fatalf("unsafe or unactionable response: %s", rr.Body.String())
+	}
+}
+
+// TestConnectAdminHandlers_BucketOwnershipRequired verifies mutation admission
+// rejects foreign bucket identity with authoritative pre-write metadata.
 func TestConnectAdminHandlers_BucketOwnershipRequired(t *testing.T) {
 	fixture := newConnectAdminFixture()
 	fixture.store.bucketErr = store.ErrBucketNotFound
@@ -103,6 +135,14 @@ func TestConnectAdminHandlers_BucketOwnershipRequired(t *testing.T) {
 	router.ServeHTTP(rr, req)
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("expected bucket ownership failure as 404, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var envelope workspaceConfigErrorResponse
+	// Route admission failure proves no connect configuration write was attempted.
+	if err := json.Unmarshal(rr.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode error envelope: %v", err)
+	}
+	if envelope.Error.Phase != "connect_config_upsert" || envelope.Error.CommitState != "not_committed" || envelope.Error.OperationID != "" {
+		t.Fatalf("unexpected mutation metadata: %#v", envelope.Error)
 	}
 }
 
@@ -319,6 +359,8 @@ func TestConnectAdminHandlers_ListAndDeleteConnections(t *testing.T) {
 	}
 }
 
+// TestConnectAdminHandlers_DeleteMissingConnectionReturnsNotFound verifies a
+// typed absence remains an authoritative, non-committed deletion result.
 func TestConnectAdminHandlers_DeleteMissingConnectionReturnsNotFound(t *testing.T) {
 	fixture := newConnectAdminFixture()
 	fixture.store.deleteErr = store.ErrAuthConnectionNotFound
@@ -330,6 +372,38 @@ func TestConnectAdminHandlers_DeleteMissingConnectionReturnsNotFound(t *testing.
 	router.ServeHTTP(rr, req)
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("delete missing status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var envelope workspaceConfigErrorResponse
+	// Typed absence proves the delete was rejected without a committed change.
+	if err := json.Unmarshal(rr.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode error envelope: %v", err)
+	}
+	if envelope.Error.Phase != "auth_connection_delete" || envelope.Error.CommitState != "not_committed" || envelope.Error.OperationID != "" {
+		t.Fatalf("unexpected mutation metadata: %#v", envelope.Error)
+	}
+}
+
+// TestConnectAdminHandlers_UnknownConnectionDeleteRequiresInspection verifies
+// ambiguous deletion reports current-state inspection before retry guidance.
+func TestConnectAdminHandlers_UnknownConnectionDeleteRequiresInspection(t *testing.T) {
+	fixture := newConnectAdminFixture()
+	fixture.store.deleteErr = errors.New("ambiguous delete with private backend detail")
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
+	req := httptest.NewRequest(http.MethodDelete, "/workspace/buckets/"+fixture.bucketID.String()+"/auth/connections/"+uuid.NewString(), nil)
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	var envelope workspaceConfigErrorResponse
+	// No target resource ID may masquerade as a durable operation identity.
+	if err := json.Unmarshal(rr.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode error envelope: %v", err)
+	}
+	if rr.Code != http.StatusInternalServerError || envelope.Error.Phase != "auth_connection_delete" || envelope.Error.CommitState != "unknown" || envelope.Error.OperationID != "" {
+		t.Fatalf("unexpected error response: status=%d error=%#v", rr.Code, envelope.Error)
+	}
+	if !strings.Contains(envelope.Error.Remediation, "Inspect") || strings.Contains(rr.Body.String(), "private backend detail") {
+		t.Fatalf("unsafe or unactionable response: %s", rr.Body.String())
 	}
 }
 
@@ -347,6 +421,7 @@ type connectAdminMockStore struct {
 	bucketID             uuid.UUID
 	serviceID            uuid.UUID
 	bucketErr            error
+	upsertConnectErr     error
 	savedConfig          *store.ConnectConfig
 	createdSessions      []store.ConnectSession
 	inputSessions        []store.ConnectInputSession
@@ -423,7 +498,13 @@ func (s *connectAdminMockStore) GetBucket(context.Context, uuid.UUID) (*store.Bu
 	return &store.Bucket{ID: s.bucketID, Name: "production"}, nil
 }
 
+// UpsertConnectConfig captures successful config writes and injects ambiguous
+// repository failures for mutation-envelope tests.
 func (s *connectAdminMockStore) UpsertConnectConfig(_ context.Context, cfg store.ConnectConfig) (*store.ConnectConfig, error) {
+	// Injected failures occur before fixture state changes so tests can inspect the response alone.
+	if s.upsertConnectErr != nil {
+		return nil, s.upsertConnectErr
+	}
 	cfg.ID = uuid.New()
 	cfg.CreatedAt = time.Now().UTC()
 	cfg.UpdatedAt = cfg.CreatedAt

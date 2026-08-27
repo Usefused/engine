@@ -21,6 +21,7 @@ import (
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -71,6 +72,128 @@ func TestStartConnectSessionHandlerCreatesAuthorizationURL(t *testing.T) {
 	}
 	if fixture.store.createdSessions[0].ReturnURL != "https://app.example.com/oauth/done" {
 		t.Fatalf("expected return_url to be stored, got %#v", fixture.store.createdSessions[0])
+	}
+}
+
+// TestStartConnectSessionHandlerReturnsStructuredValidationErrors verifies
+// every request-edge rejection uses the shared correlated control envelope.
+func TestStartConnectSessionHandlerReturnsStructuredValidationErrors(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		code        string
+		messagePart string
+	}{
+		{name: "invalid JSON", body: `{`, code: "invalid_connect_session_request", messagePart: "invalid request body"},
+		{name: "missing end user", body: `{}`, code: "connect_end_user_ref_required", messagePart: "end_user_ref is required"},
+		{name: "invalid return URL", body: `{"end_user_ref":"user","return_url":"relative"}`, code: "invalid_connect_return_url", messagePart: "absolute http or https URL"},
+		{name: "invalid app ID", body: `{"end_user_ref":"user","created_by_app_id":"not-a-uuid"}`, code: "invalid_connect_app_id", messagePart: "valid UUID"},
+	}
+	// Each malformed request must fail before configuration resolution or session persistence.
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newConnectRuntimeFixture(t)
+			request := httptest.NewRequest(http.MethodPost, fixture.startPath(), strings.NewReader(test.body))
+			request.Header.Set("X-API-Key", "fsk_test")
+			response := httptest.NewRecorder()
+			buildConnectRuntimeRouter(fixture).ServeHTTP(response, request)
+
+			var envelope workspaceConfigErrorResponse
+			decodeErr := json.Unmarshal(response.Body.Bytes(), &envelope)
+			// Structured JSON is required so CLI and UI callers can consume stable fields.
+			if response.Code != http.StatusBadRequest || decodeErr != nil {
+				t.Fatalf("validation response = %d %q, decode error = %v", response.Code, response.Body.String(), decodeErr)
+			}
+			// The code is machine-stable while the message retains precise safe validation guidance.
+			if envelope.Error.Code != test.code || !strings.Contains(envelope.Error.Message, test.messagePart) {
+				t.Fatalf("validation error = %#v, want code %q and message containing %q", envelope.Error, test.code, test.messagePart)
+			}
+			// Request admission failures are non-retryable and prove no mutation was committed.
+			if envelope.Error.Category != "validation" || envelope.Error.Retryable || envelope.Error.Phase != "request_admission" || envelope.Error.CommitState != "not_committed" {
+				t.Fatalf("validation metadata = %#v", envelope.Error)
+			}
+			// The shared writer must advertise JSON rather than the old text/plain body.
+			if !strings.HasPrefix(response.Header().Get("Content-Type"), "application/json") {
+				t.Fatalf("content type = %q", response.Header().Get("Content-Type"))
+			}
+			// No browser session may exist after request-edge validation fails.
+			if len(fixture.store.createdSessions) != 0 || len(fixture.store.inputSessions) != 0 {
+				t.Fatalf("validation persisted sessions: provider=%d input=%d", len(fixture.store.createdSessions), len(fixture.store.inputSessions))
+			}
+		})
+	}
+}
+
+// TestStartConnectSessionHandlerReturnsStructuredResolutionError verifies a
+// missing connect registration remains distinct from malformed input.
+func TestStartConnectSessionHandlerReturnsStructuredResolutionError(t *testing.T) {
+	fixture := newConnectRuntimeFixture(t)
+	fixture.store.savedConfig = nil
+	request := httptest.NewRequest(http.MethodPost, fixture.startPath(), strings.NewReader(`{"end_user_ref":"user"}`))
+	request.Header.Set("X-API-Key", "fsk_test")
+	response := httptest.NewRecorder()
+	buildConnectRuntimeRouter(fixture).ServeHTTP(response, request)
+
+	var envelope workspaceConfigErrorResponse
+	decodeErr := json.Unmarshal(response.Body.Bytes(), &envelope)
+	// Authoritative absence uses a stable non-retryable not-found classification.
+	if response.Code != http.StatusNotFound || decodeErr != nil || envelope.Error.Code != "connect_config_not_found" || envelope.Error.Category != "not_found" || envelope.Error.Retryable {
+		t.Fatalf("resolution response = %d %#v decode=%v", response.Code, envelope.Error, decodeErr)
+	}
+	// Configuration resolution precedes mutation and carries an actionable recovery step.
+	if envelope.Error.Phase != "connect_resolution" || envelope.Error.CommitState != "not_committed" || !strings.Contains(envelope.Error.Remediation, "connect configuration") {
+		t.Fatalf("resolution metadata = %#v", envelope.Error)
+	}
+	// Absence must never allocate either form or provider callback state.
+	if len(fixture.store.createdSessions) != 0 || len(fixture.store.inputSessions) != 0 {
+		t.Fatalf("resolution failure persisted sessions: provider=%d input=%d", len(fixture.store.createdSessions), len(fixture.store.inputSessions))
+	}
+}
+
+// TestWriteConnectRuntimeErrorCorrelatesAndHidesInternalCause proves unknown
+// failures stay secret-safe while retaining request and trace identities.
+func TestWriteConnectRuntimeErrorCorrelatesAndHidesInternalCause(t *testing.T) {
+	provider := sdktrace.NewTracerProvider()
+	ctx, span := provider.Tracer("test").Start(context.Background(), "connect-runtime-error")
+	traceID := span.SpanContext().TraceID().String()
+	defer func() {
+		span.End()
+		_ = provider.Shutdown(context.Background())
+	}()
+
+	handler := chimiddleware.RequestID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeConnectRuntimeError(w, r.Context(), errors.New("database secret=fsk_never_return"), "connect_session_create", "unknown")
+	}))
+	request := httptest.NewRequest(http.MethodPost, "/workspace/connect/sessions", nil).WithContext(ctx)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	var envelope workspaceConfigErrorResponse
+	decodeErr := json.Unmarshal(response.Body.Bytes(), &envelope)
+	// Unknown commit outcomes remain stable but are not automatically retryable before inspection.
+	if response.Code != http.StatusInternalServerError || decodeErr != nil || envelope.Error.Code != "connect_runtime_failed" || envelope.Error.Category != "internal" || envelope.Error.Retryable {
+		t.Fatalf("internal response = %d %#v decode=%v", response.Code, envelope.Error, decodeErr)
+	}
+	// Correlation and conservative commit metadata let operators investigate an uncertain persistence result.
+	if envelope.Error.TraceID != traceID || envelope.Error.RequestID == "" || envelope.Error.Phase != "connect_session_create" || envelope.Error.CommitState != "unknown" || !strings.Contains(envelope.Error.Remediation, "before retrying") {
+		t.Fatalf("internal correlation metadata = %#v, trace want %q", envelope.Error, traceID)
+	}
+	// Neither public prose nor structured fields may contain the internal credential-like cause.
+	if strings.Contains(response.Body.String(), "fsk_never_return") || strings.Contains(response.Body.String(), "database secret") {
+		t.Fatalf("internal cause leaked: %s", response.Body.String())
+	}
+}
+
+// TestConnectCallbackErrorCodeNeverReflectsProviderProse proves browser redirect
+// parameters use a closed classifier instead of transformed upstream text.
+func TestConnectCallbackErrorCodeNeverReflectsProviderProse(t *testing.T) {
+	code := connectCallbackErrorCode(connectRuntimeHTTPError{
+		status:  http.StatusBadGateway,
+		message: "provider https://private.example failed with secret=unsafe-value",
+	})
+	// Unknown dependency prose collapses to one stable URL-safe code.
+	if code != "connect_dependency_unavailable" || strings.Contains(code, "private") || strings.Contains(code, "unsafe") {
+		t.Fatalf("callback error code = %q", code)
 	}
 }
 
@@ -177,8 +300,15 @@ func TestStartConnectSessionHandlerRejectsUndeclaredScope(t *testing.T) {
 
 	router.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "not declared") {
+	var envelope workspaceConfigErrorResponse
+	decodeErr := json.Unmarshal(rr.Body.Bytes(), &envelope)
+	// Scope validation retains its safe detail and exposes a stable machine code.
+	if rr.Code != http.StatusBadRequest || decodeErr != nil || envelope.Error.Code != "connect_scope_not_declared" || !strings.Contains(envelope.Error.Message, "not declared") {
 		t.Fatalf("expected undeclared scope 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	// Scope rejection occurs before persistence and is not retryable without caller changes.
+	if envelope.Error.Phase != "connect_session_admission" || envelope.Error.CommitState != "not_committed" || envelope.Error.Retryable {
+		t.Fatalf("unexpected scope error metadata: %#v", envelope.Error)
 	}
 	if len(fixture.store.createdSessions) != 0 {
 		t.Fatalf("scope validation must happen before persistence: %#v", fixture.store.createdSessions)

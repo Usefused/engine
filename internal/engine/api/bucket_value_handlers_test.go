@@ -3,14 +3,19 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/google/uuid"
 )
 
+// TestUpsertBucketValueHandler_UnknownBucketReturnsNotFound verifies the CLI
+// receives the stable structured absence diagnosis instead of plain text.
 func TestUpsertBucketValueHandler_UnknownBucketReturnsNotFound(t *testing.T) {
 	fixture := newBucketValueFixture()
 	fixture.store.bucketErr = store.ErrBucketNotFound
@@ -30,8 +35,41 @@ func TestUpsertBucketValueHandler_UnknownBucketReturnsNotFound(t *testing.T) {
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for unknown bucket, got %d body=%s", rr.Code, rr.Body.String())
 	}
+	var envelope workspaceConfigErrorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &envelope); err != nil || envelope.Error.Code != "bucket_not_found" || envelope.Error.Remediation == "" {
+		t.Fatalf("bucket error envelope = %#v, decode error=%v", envelope, err)
+	}
+	// Bucket admission failure proves no value write was attempted.
+	if envelope.Error.Phase != "bucket_value_upsert" || envelope.Error.CommitState != "not_committed" || envelope.Error.OperationID != "" {
+		t.Fatalf("unexpected mutation metadata: %#v", envelope.Error)
+	}
 	if fixture.store.upsertedValue != nil {
 		t.Fatal("value must not be persisted when bucket ownership check fails")
+	}
+}
+
+// TestUpsertBucketValueHandler_UnknownSaveOutcomeRequiresInspection verifies an
+// unclassified repository error does not invite a blind retry.
+func TestUpsertBucketValueHandler_UnknownSaveOutcomeRequiresInspection(t *testing.T) {
+	fixture := newBucketValueFixture()
+	fixture.store.upsertErr = errors.New("ambiguous commit: private database detail")
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
+	body := bytes.NewReader([]byte(`{"service_id":"` + fixture.serviceID.String() + `","key_name":"region","location":"header","value":"us-east-1"}`))
+	req := httptest.NewRequest(http.MethodPut, "/workspace/buckets/"+fixture.bucketID.String()+"/values", body)
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	var envelope workspaceConfigErrorResponse
+	// The client receives certainty and remediation without the repository cause.
+	if err := json.Unmarshal(rr.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode error envelope: %v", err)
+	}
+	if rr.Code != http.StatusInternalServerError || envelope.Error.Code != "bucket_value_save_failed" || envelope.Error.Phase != "bucket_value_upsert" || envelope.Error.CommitState != "unknown" || envelope.Error.OperationID != "" {
+		t.Fatalf("unexpected error response: status=%d error=%#v", rr.Code, envelope.Error)
+	}
+	if !strings.Contains(envelope.Error.Remediation, "Inspect") || strings.Contains(rr.Body.String(), "private database detail") {
+		t.Fatalf("unsafe or unactionable response: %s", rr.Body.String())
 	}
 }
 
@@ -88,15 +126,14 @@ func TestUpsertBucketValueHandlerRejectsProtectedHeader(t *testing.T) {
 	}
 }
 
-// TestDeleteBucketValueHandler_UnknownBucketReturnsNotFound also covers the
-// fix that made this handler resolve workspaceID at all -- previously it
-// discarded the account ID and never checked bucket ownership.
+// TestDeleteBucketValueHandler_UnknownBucketReturnsNotFound verifies the path
+// bucket is checked authoritatively before any deletion occurs.
 func TestDeleteBucketValueHandler_UnknownBucketReturnsNotFound(t *testing.T) {
 	fixture := newBucketValueFixture()
 	fixture.store.bucketErr = store.ErrBucketNotFound
 	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
-	req := httptest.NewRequest(http.MethodDelete, "/workspace/buckets/"+fixture.bucketID.String()+"/values?bucket_id="+uuid.NewString()+"&service_id="+fixture.serviceID.String()+"&key_name=region", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/workspace/buckets/"+fixture.bucketID.String()+"/values?service_id="+fixture.serviceID.String()+"&key_name=region", nil)
 	req.Header.Set("X-API-Key", "test-key")
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
@@ -104,16 +141,22 @@ func TestDeleteBucketValueHandler_UnknownBucketReturnsNotFound(t *testing.T) {
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for unknown bucket, got %d body=%s", rr.Code, rr.Body.String())
 	}
+	var envelope workspaceConfigErrorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &envelope); err != nil || envelope.Error.Code != "bucket_not_found" {
+		t.Fatalf("bucket error envelope = %#v, decode error=%v", envelope, err)
+	}
 	if fixture.store.deletedBucketID != uuid.Nil {
 		t.Fatal("value must not be deleted when bucket ownership check fails")
 	}
 }
 
+// TestDeleteBucketValueHandler_Success proves the CLI route works without the
+// obsolete redundant bucket_id query parameter.
 func TestDeleteBucketValueHandler_Success(t *testing.T) {
 	fixture := newBucketValueFixture()
 	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
 
-	req := httptest.NewRequest(http.MethodDelete, "/workspace/buckets/"+fixture.bucketID.String()+"/values?bucket_id="+fixture.bucketID.String()+"&service_id="+fixture.serviceID.String()+"&key_name=region", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/workspace/buckets/"+fixture.bucketID.String()+"/values?service_id="+fixture.serviceID.String()+"&key_name=region", nil)
 	req.Header.Set("X-API-Key", "test-key")
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
@@ -123,6 +166,22 @@ func TestDeleteBucketValueHandler_Success(t *testing.T) {
 	}
 	if fixture.store.deletedBucketID != fixture.bucketID {
 		t.Fatalf("expected delete to target bucket %s, got %s", fixture.bucketID, fixture.store.deletedBucketID)
+	}
+}
+
+// TestDeleteBucketValueHandlerUsesPathBucketID prevents a redundant query
+// value from overriding the bucket identity authorized by routing middleware.
+func TestDeleteBucketValueHandlerUsesPathBucketID(t *testing.T) {
+	fixture := newBucketValueFixture()
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
+
+	req := httptest.NewRequest(http.MethodDelete, "/workspace/buckets/"+fixture.bucketID.String()+"/values?bucket_id="+uuid.NewString()+"&service_id="+fixture.serviceID.String()+"&key_name=region", nil)
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent || fixture.store.deletedBucketID != fixture.bucketID {
+		t.Fatalf("delete status=%d bucket=%s, want path bucket %s: %s", rr.Code, fixture.store.deletedBucketID, fixture.bucketID, rr.Body.String())
 	}
 }
 

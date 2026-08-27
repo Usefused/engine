@@ -28,12 +28,72 @@ type mcpRuntimeLimitClient struct {
 type mcpRuntimeLimitResponse struct {
 	Error  json.RawMessage `json:"error"`
 	Result struct {
+		ProtocolVersion string `json:"protocolVersion"`
+		Instructions    string `json:"instructions"`
+		Tools           []struct {
+			Name        string                    `json:"name"`
+			Description string                    `json:"description"`
+			Meta        map[string]map[string]any `json:"_meta"`
+		} `json:"tools"`
 		Meta    map[string]mcpResultDelivery `json:"_meta"`
 		IsError bool                         `json:"isError"`
 		Content []struct {
 			Text string `json:"text"`
 		} `json:"content"`
 	} `json:"result"`
+}
+
+// mcpRuntimeNavigation captures the exact retained-result recovery request exposed to an agent.
+type mcpRuntimeNavigation struct {
+	RecoveryAction    string `json:"recovery_action"`
+	ExecuteRequest    string `json:"execute_request"`
+	ProviderExecution string `json:"provider_execution"`
+	AutomaticReplay   bool   `json:"automatic_replay"`
+	Session           struct {
+		Scope               string `json:"scope"`
+		SameSessionRequired bool   `json:"same_session_required"`
+	} `json:"session"`
+	NextRequest struct {
+		Tool      string         `json:"tool"`
+		Arguments map[string]any `json:"arguments"`
+	} `json:"next_request"`
+}
+
+// TestMCPBundledRuntimeAdvertisesSessionContract verifies the actual MCP SDK wire surfaces visible to hosts and agents.
+func TestMCPBundledRuntimeAdvertisesSessionContract(t *testing.T) {
+	client := startMCPLimitRuntime(t, "1")
+	initialized := client.exchange(t, "initialize", map[string]any{
+		"protocolVersion": "2025-03-26", "capabilities": map[string]any{},
+		"clientInfo": map[string]string{"name": "fused-session-contract-test", "version": "1.0.0"},
+	})
+	assertMCPRuntimeInitializeContract(t, initialized)
+	assertMCPRuntimeExecuteContract(t, client.exchange(t, "tools/list", map[string]any{}))
+}
+
+// assertMCPRuntimeInitializeContract checks the guidance available before any tool discovery.
+func assertMCPRuntimeInitializeContract(t *testing.T, initialized mcpRuntimeLimitResponse) {
+	t.Helper()
+	// Initialize instructions are useful to capable hosts, while tools/list repeats the critical agent-facing rule.
+	if initialized.Result.ProtocolVersion != "2025-03-26" || !strings.Contains(initialized.Result.Instructions, "already attached every execute call") || !strings.Contains(initialized.Result.Instructions, "Follow recovery_action and execute_request exactly") {
+		t.Fatalf("initialize omitted session contract: %+v", initialized.Result)
+	}
+}
+
+// assertMCPRuntimeExecuteContract checks the script-session metadata on only the provider-capable tool.
+func assertMCPRuntimeExecuteContract(t *testing.T, listed mcpRuntimeLimitResponse) {
+	t.Helper()
+	for _, tool := range listed.Result.Tools {
+		// Only execute owns script session state; discovery remains free of irrelevant lifecycle metadata.
+		if tool.Name != "execute" {
+			continue
+		}
+		contract := tool.Meta["com.usefused/session"]
+		if !strings.Contains(tool.Description, "Never invent") || contract["transport_session"] != "client_managed" || contract["session_id_input"] != false || contract["script_scope"] != "current_mcp_connection" || contract["automatic_execute_replay"] != false {
+			t.Fatalf("execute session contract = description:%q metadata:%+v", tool.Description, contract)
+		}
+		return
+	}
+	t.Fatal("execute tool was not advertised")
 }
 
 // TestMCPBundledRuntimeOutputLimits proves large admitted JSON survives retention while visible output stays small.
@@ -169,38 +229,115 @@ func retainedMCPResultReference(t *testing.T, response mcpRuntimeLimitResponse) 
 	return envelope.Reference
 }
 
-// TestMCPBundledRuntimeRetainedRetrieval proves field discovery and multi-page retrieval share one real HTTP dispatch.
+// TestMCPBundledRuntimeRetainedRetrieval proves physical controls, retention, and session paging share one real HTTP dispatch.
 func TestMCPBundledRuntimeRetainedRetrieval(t *testing.T) {
 	var calls atomic.Int32
-	rows := make([]map[string]any, 120)
-	for index := range rows {
-		rows[index] = map[string]any{"id": index, "amount": index, "raw": strings.Repeat("PRIVATE_SENTINEL", 40)}
-	}
-	// The synthetic bridge exercises real runtime HTTP without accessing any connected account.
-	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]any{
-			"items": []string{"fixture-one", "fixture-two"}, "body": strings.Repeat("PRIVATE_SENTINEL", 9000),
-			"transactions": rows,
-		}})
-	}))
-	t.Cleanup(bridge.Close)
+	var paginationForwarded atomic.Bool
+	bridge := startMCPRuntimeRetentionBridge(t, &calls, &paginationForwarded)
 	port := strings.TrimPrefix(bridge.URL, "http://127.0.0.1:")
 	client := startMCPLimitRuntime(t, port)
 	client.exchange(t, "initialize", map[string]any{
 		"protocolVersion": "2025-03-26", "capabilities": map[string]any{},
 		"clientInfo": map[string]string{"name": "fused-page-test", "version": "1.0.0"},
 	})
-	stored := client.execute(t, `return await call("fixture.read", {})`)
+	stored := client.execute(t, `return await call("fixture.read", {}, {pagination:{maxPages:1}})`)
 	reference := retainedMCPResultReference(t, stored)
+	assertMCPRuntimeStoredAdmission(t, stored, calls.Load(), paginationForwarded.Load())
+	navigation := decodeMCPRuntimeNavigation(t, stored)
+	continued := client.exchange(t, "tools/call", map[string]any{"name": navigation.NextRequest.Tool, "arguments": navigation.NextRequest.Arguments})
+	assertMCPRuntimeContinuation(t, continued, calls.Load())
+	retrieved := client.execute(t, `const result=session.get("`+reference+`"); return {items:result.items.slice(0,1), length:result.body.length}`)
+	assertMCPRuntimeRetainedRead(t, retrieved, calls.Load())
+	invalidGet := client.execute(t, `return session.get("`+reference+`", {path:"/transactions"})`)
+	assertMCPRuntimeInvalidGet(t, invalidGet, calls.Load())
+	assertMCPRuntimeTransactionPages(t, client, reference)
+	// All continuation requests must read the original snapshot, not dispatch the operation again.
+	if calls.Load() != 1 {
+		t.Fatal("paging repeated the bridge call")
+	}
+}
+
+// startMCPRuntimeRetentionBridge serves one large synthetic provider result through the real child bridge.
+func startMCPRuntimeRetentionBridge(t *testing.T, calls *atomic.Int32, paginationForwarded *atomic.Bool) *httptest.Server {
+	t.Helper()
+	rows := make([]map[string]any, 120)
+	// Distinct row positions prove that retained paging neither drops nor duplicates provider results.
+	for index := range rows {
+		rows[index] = map[string]any{"id": index, "amount": index, "raw": strings.Repeat("PRIVATE_SENTINEL", 40)}
+	}
+	// The synthetic bridge exercises real runtime HTTP without accessing any connected account.
+	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serveMCPRuntimeRetentionBridge(w, r, calls, paginationForwarded, rows)
+	}))
+	t.Cleanup(bridge.Close)
+	return bridge
+}
+
+// serveMCPRuntimeRetentionBridge validates physical pagination separation before returning retained test data.
+func serveMCPRuntimeRetentionBridge(w http.ResponseWriter, r *http.Request, calls *atomic.Int32, paginationForwarded *atomic.Bool, rows []map[string]any) {
+	calls.Add(1)
+	var request struct {
+		Params     map[string]any `json:"params"`
+		Pagination struct {
+			MaxPages int `json:"maxPages"`
+		} `json:"pagination"`
+	}
+	// The real child must keep Engine pagination intent outside provider parameters.
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.Pagination.MaxPages != 1 {
+		http.Error(w, "invalid synthetic pagination envelope", http.StatusBadRequest)
+		return
+	}
+	// Provider parameters cannot acquire an Engine-owned field through serialization.
+	if _, leaked := request.Params["pagination"]; leaked {
+		http.Error(w, "pagination leaked into provider params", http.StatusBadRequest)
+		return
+	}
+	paginationForwarded.Store(true)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]any{
+		"items": []string{"fixture-one", "fixture-two"}, "body": strings.Repeat("PRIVATE_SENTINEL", 9000),
+		"transactions": rows,
+	}})
+}
+
+// assertMCPRuntimeStoredAdmission checks that retention follows one paginated provider dispatch without preview leakage.
+func assertMCPRuntimeStoredAdmission(t *testing.T, stored mcpRuntimeLimitResponse, calls int32, paginationForwarded bool) {
+	t.Helper()
+	// Retention begins only after the bridge accepts the separate canonical pagination control.
+	if !paginationForwarded {
+		t.Fatal("bundled runtime did not forward the physical pagination intent")
+	}
 	// Automatic previews must not expose synthetic private scalar sentinels.
-	if strings.Contains(stored.Result.Content[0].Text, "PRIVATE_SENTINEL") {
+	if calls != 1 || strings.Contains(stored.Result.Content[0].Text, "PRIVATE_SENTINEL") {
 		t.Fatal("automatic preview exposed scalar content")
 	}
-	retrieved := client.execute(t, `const result=session.get("`+reference+`"); return {items:result.items.slice(0,1), length:result.body.length}`)
+}
+
+// decodeMCPRuntimeNavigation validates the compact action contract and returns its exact continuation request.
+func decodeMCPRuntimeNavigation(t *testing.T, stored mcpRuntimeLimitResponse) mcpRuntimeNavigation {
+	t.Helper()
+	var navigation mcpRuntimeNavigation
+	// The stored envelope itself supplies a directly executable session-only continuation.
+	if json.Unmarshal([]byte(stored.Result.Content[0].Text), &navigation) != nil || navigation.RecoveryAction != "continue_stored_result" || navigation.ExecuteRequest != "use_next_request" || navigation.ProviderExecution != "complete" || navigation.AutomaticReplay || navigation.Session.Scope != "current_mcp_connection" || !navigation.Session.SameSessionRequired || navigation.NextRequest.Tool != "execute" {
+		t.Fatalf("stored navigation omitted session recovery: %s", stored.Result.Content[0].Text)
+	}
+	return navigation
+}
+
+// assertMCPRuntimeContinuation proves an advertised stored read cannot repeat provider execution.
+func assertMCPRuntimeContinuation(t *testing.T, continued mcpRuntimeLimitResponse, calls int32) {
+	t.Helper()
+	// Executing the advertised continuation must read retained state without another bridge request.
+	if continued.Result.IsError || calls != 1 {
+		t.Fatal("advertised retained continuation failed or repeated the provider call")
+	}
+}
+
+// assertMCPRuntimeRetainedRead verifies the selected value and its bounded delivery audit metadata.
+func assertMCPRuntimeRetainedRead(t *testing.T, retrieved mcpRuntimeLimitResponse, calls int32) {
+	t.Helper()
 	// Exact selected fields are returned through the existing tool, with no second bridge invocation.
-	if retrieved.Result.IsError || retrieved.Result.Content[0].Text != `{"items":["fixture-one"],"length":144000}` || calls.Load() != 1 {
+	if retrieved.Result.IsError || retrieved.Result.Content[0].Text != `{"items":["fixture-one"],"length":144000}` || calls != 1 {
 		t.Fatal("retained retrieval failed or repeated the bridge call")
 	}
 	metadata := retrieved.Result.Meta["com.usefused/execute"]
@@ -208,10 +345,15 @@ func TestMCPBundledRuntimeRetainedRetrieval(t *testing.T) {
 	if metadata.Delivery != "inline" || metadata.RetainedReads != 1 || metadata.UnavailableReads != 0 {
 		t.Fatal("retained read audit metadata was missing or invalid")
 	}
-	assertMCPRuntimeTransactionPages(t, client, reference)
-	// All continuation requests must read the original snapshot, not dispatch the operation again.
-	if calls.Load() != 1 {
-		t.Fatal("paging repeated the bridge call")
+}
+
+// assertMCPRuntimeInvalidGet proves invalid session access fails before retention or provider work is attributed.
+func assertMCPRuntimeInvalidGet(t *testing.T, invalidGet mcpRuntimeLimitResponse, calls int32) {
+	t.Helper()
+	invalidMetadata := invalidGet.Result.Meta["com.usefused/execute"]
+	// Extra arguments fail before a retained read or another provider dispatch can be attributed.
+	if !invalidGet.Result.IsError || !strings.Contains(invalidGet.Result.Content[0].Text, "MCP_SESSION_GET_ARGUMENTS_INVALID") || invalidMetadata.RetainedReads != 0 || calls != 1 {
+		t.Fatal("session.get silently accepted an option or changed retained/provider read counts")
 	}
 }
 

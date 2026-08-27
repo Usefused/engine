@@ -61,12 +61,14 @@ func MountCLILoginRoutes(router chi.Router, service CLILoginService, browser Bro
 	router.Post("/auth/cli/logout", cliLogoutHandler(service))
 }
 
+// cliWhoAmIHandler returns the authenticated human identity without exposing credentials.
 func cliWhoAmIHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setManagedLoginResponseHeaders(w)
 		actor, ok := accesscontrol.ActorFromContext(r.Context())
+		// An absent actor is an authentication failure, not an anonymous identity response.
 		if !ok {
-			writeCLILoginError(w, http.StatusUnauthorized, "authentication_required")
+			writeCLILoginError(w, r.Context(), http.StatusUnauthorized, "authentication_required")
 			return
 		}
 		writeManagedLoginJSON(w, http.StatusOK, cliWhoAmIResponse{
@@ -79,44 +81,52 @@ func cliWhoAmIHandler() http.HandlerFunc {
 	}
 }
 
+// cliLogoutHandler revokes only the credential represented by the authenticated actor.
 func cliLogoutHandler(service CLILoginService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setManagedLoginResponseHeaders(w)
+		// A missing service is a retryable Engine availability failure.
 		if service == nil {
-			writeCLILoginError(w, http.StatusServiceUnavailable, "cli_logout_unavailable")
+			writeCLILoginError(w, r.Context(), http.StatusServiceUnavailable, "cli_logout_unavailable")
 			return
 		}
 		actor, ok := accesscontrol.ActorFromContext(r.Context())
+		// Logout cannot act on caller-provided credential identifiers.
 		if !ok {
-			writeCLILoginError(w, http.StatusUnauthorized, "authentication_required")
+			writeCLILoginError(w, r.Context(), http.StatusUnauthorized, "authentication_required")
 			return
 		}
 		err := service.Logout(r.Context(), cliauth.LogoutInput{Actor: actor, RequestID: chimiddleware.GetReqID(r.Context())})
+		// Store failures retain their stable denial or availability classification.
 		if err != nil {
-			writeCLILogoutServiceError(w, err)
+			writeCLILogoutServiceError(w, r.Context(), err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
+// cliLoginStartHandler creates one bounded device-style login transaction.
 func cliLoginStartHandler(service CLILoginService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setManagedLoginResponseHeaders(w)
+		// A missing service is reported before any credential material is parsed.
 		if service == nil {
-			writeCLILoginError(w, http.StatusServiceUnavailable, "cli_login_unavailable")
+			writeCLILoginError(w, r.Context(), http.StatusServiceUnavailable, "cli_login_unavailable")
 			return
 		}
 		request, err := decodeCLILoginStartRequest(w, r)
+		// Malformed bounded JSON is caller-remediable and safe to classify precisely.
 		if err != nil {
-			writeCLILoginError(w, http.StatusBadRequest, "invalid_request")
+			writeCLILoginError(w, r.Context(), http.StatusBadRequest, "invalid_request")
 			return
 		}
 		result, err := service.Start(r.Context(), cliauth.StartInput{
 			CredentialHash: request.CredentialHash, CredentialPrefix: request.CredentialPrefix,
 		})
+		// Service errors are mapped without copying internal error prose.
 		if err != nil {
-			writeCLILoginServiceError(w, err)
+			writeCLILoginServiceError(w, r.Context(), err)
 			return
 		}
 		writeManagedLoginJSON(w, http.StatusCreated, map[string]string{
@@ -126,16 +136,19 @@ func cliLoginStartHandler(service CLILoginService) http.HandlerFunc {
 	}
 }
 
+// cliLoginPollHandler exchanges a valid transaction capability for CLI authentication state.
 func cliLoginPollHandler(service CLILoginService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setManagedLoginResponseHeaders(w)
+		// A missing service is a retryable Engine availability failure.
 		if service == nil {
-			writeCLILoginError(w, http.StatusServiceUnavailable, "cli_login_unavailable")
+			writeCLILoginError(w, r.Context(), http.StatusServiceUnavailable, "cli_login_unavailable")
 			return
 		}
 		request, id, err := decodeCLILoginCapabilityRequest(w, r)
+		// Invalid capabilities are rejected before the login store is queried.
 		if err != nil {
-			writeCLILoginError(w, http.StatusBadRequest, "invalid_request")
+			writeCLILoginError(w, r.Context(), http.StatusBadRequest, "invalid_request")
 			return
 		}
 		credential, err := service.Poll(r.Context(), id, request.Token)
@@ -143,8 +156,9 @@ func cliLoginPollHandler(service CLILoginService) http.HandlerFunc {
 			writeManagedLoginJSON(w, http.StatusAccepted, map[string]string{"status": "pending"})
 			return
 		}
+		// Non-pending service failures use the stable login error taxonomy.
 		if err != nil {
-			writeCLILoginServiceError(w, err)
+			writeCLILoginServiceError(w, r.Context(), err)
 			return
 		}
 		writeManagedLoginJSON(w, http.StatusOK, map[string]string{
@@ -154,25 +168,30 @@ func cliLoginPollHandler(service CLILoginService) http.HandlerFunc {
 	}
 }
 
+// cliLoginApproveHandler binds a browser-authenticated actor to one CLI login capability.
 func cliLoginApproveHandler(service CLILoginService, browser BrowserSessionService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setManagedLoginResponseHeaders(w)
+		// Approval cannot proceed without the login service.
 		if service == nil {
-			writeCLILoginError(w, http.StatusServiceUnavailable, "cli_login_unavailable")
+			writeCLILoginError(w, r.Context(), http.StatusServiceUnavailable, "cli_login_unavailable")
 			return
 		}
 		actor, status, code, err := cliApprovalActor(r, browser)
+		// Browser-origin and CSRF failures retain the classifier chosen by cliApprovalActor.
 		if err != nil {
-			writeCLILoginError(w, status, code)
+			writeCLILoginError(w, r.Context(), status, code)
 			return
 		}
 		request, id, err := decodeCLILoginCapabilityRequest(w, r)
+		// Invalid transaction capabilities never reach service approval.
 		if err != nil {
-			writeCLILoginError(w, http.StatusBadRequest, "invalid_request")
+			writeCLILoginError(w, r.Context(), http.StatusBadRequest, "invalid_request")
 			return
 		}
+		// Approval failures are safe only after stable service classification.
 		if err := service.Approve(r.Context(), id, request.Token, actor); err != nil {
-			writeCLILoginServiceError(w, err)
+			writeCLILoginServiceError(w, r.Context(), err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -230,27 +249,34 @@ func decodeCLILoginJSON(w http.ResponseWriter, r *http.Request, target any) erro
 	return nil
 }
 
-func writeCLILoginServiceError(w http.ResponseWriter, err error) {
+// writeCLILoginServiceError maps login-store outcomes to stable public codes.
+func writeCLILoginServiceError(w http.ResponseWriter, ctx context.Context, err error) {
 	switch {
+	// A denied capability is final and should not be retried unchanged.
 	case errors.Is(err, store.ErrCLILoginDenied):
-		writeCLILoginError(w, http.StatusForbidden, "cli_login_denied")
+		writeCLILoginError(w, ctx, http.StatusForbidden, "cli_login_denied")
+	// Pending is normal protocol state rather than an error envelope.
 	case errors.Is(err, store.ErrCLILoginPending):
 		writeManagedLoginJSON(w, http.StatusAccepted, map[string]string{"status": "pending"})
+	// Unknown service failures are bounded as availability problems.
 	default:
-		writeCLILoginError(w, http.StatusServiceUnavailable, "cli_login_unavailable")
+		writeCLILoginError(w, ctx, http.StatusServiceUnavailable, "cli_login_unavailable")
 	}
 }
 
-func writeCLILoginError(w http.ResponseWriter, status int, code string) {
-	writeManagedLoginError(w, status, code)
+// writeCLILoginError preserves CLI-specific codes in the shared identity envelope.
+func writeCLILoginError(w http.ResponseWriter, ctx context.Context, status int, code string) {
+	writeManagedLoginError(w, status, code, ctx)
 }
 
-func writeCLILogoutServiceError(w http.ResponseWriter, err error) {
+// writeCLILogoutServiceError distinguishes an explicit denial from a retryable outage.
+func writeCLILogoutServiceError(w http.ResponseWriter, ctx context.Context, err error) {
+	// Actor and credential mismatches are caller-visible policy denials.
 	if errors.Is(err, store.ErrCLILogoutDenied) || errors.Is(err, store.ErrInvalidMutationActor) {
-		writeCLILoginError(w, http.StatusForbidden, "cli_logout_denied")
+		writeCLILoginError(w, ctx, http.StatusForbidden, "cli_logout_denied")
 		return
 	}
-	writeCLILoginError(w, http.StatusServiceUnavailable, "cli_logout_unavailable")
+	writeCLILoginError(w, ctx, http.StatusServiceUnavailable, "cli_logout_unavailable")
 }
 
 var _ CLILoginService = (*cliauth.Service)(nil)

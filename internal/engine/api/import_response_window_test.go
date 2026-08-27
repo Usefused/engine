@@ -143,6 +143,7 @@ func TestImportResponseWindowDoesNotChangeOrdinaryRoutes(t *testing.T) {
 // a slow Registry commit must remain deliverable past the ordinary deadline.
 func TestImportResponseWindowSurvivesServerWriteTimeout(t *testing.T) {
 	accountID := uuid.New()
+	operationID := uuid.New()
 	body := committedImportApplyBody(importApplyResponse{ServiceID: uuid.NewString(), ServiceVersionID: testImportServiceVersionID, Slug: "widgets", Version: "v1"})
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// This bounded fixture delay deliberately crosses the Engine's ordinary
@@ -153,7 +154,13 @@ func TestImportResponseWindowSurvivesServerWriteTimeout(t *testing.T) {
 	}))
 	defer registry.Close()
 	proxy := NewRegistryProxy(registry.URL, "fixture-license")
-	handler := RESTProxyHandler(proxy, &autoRegisterMockStore{accountID: accountID})
+	// The response-window test uses an admitted read-only candidate so its only
+	// delayed network boundary remains the mutating Registry apply response.
+	fetcher := &preflightRuntimeFetcherStub{
+		runtimeContractFetcherStub: &runtimeContractFetcherStub{},
+		preflight:                  importPreflightSuccess(operationID),
+	}
+	handler := RESTProxyHandlerWithRuntimeContracts(proxy, &autoRegisterMockStore{accountID: accountID}, fetcher)
 	engine := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Test identity enters through the same Engine-local principal used by
 		// handler tests; the Registry fixture never receives a user credential.
@@ -162,7 +169,8 @@ func TestImportResponseWindowSurvivesServerWriteTimeout(t *testing.T) {
 	engine.Config.WriteTimeout = 20 * time.Millisecond
 	engine.Start()
 	defer engine.Close()
-	response, err := engine.Client().Post(engine.URL+"/integrations/import/apply", "application/json", strings.NewReader(`{}`))
+	requestBody := `{"plan_id":"` + operationID.String() + `","review_hash":"review-1"}`
+	response, err := engine.Client().Post(engine.URL+"/integrations/import/apply", "application/json", strings.NewReader(requestBody))
 	// A stale server write deadline previously closed this socket without a receipt.
 	if err != nil {
 		t.Fatal(err)

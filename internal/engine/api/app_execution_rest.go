@@ -639,7 +639,7 @@ func restPhysicalExecutionError(err error) *restExecutionError {
 	case errors.Is(err, sandbox.ErrPhysicalResponseTooLarge):
 		return newRESTExecutionError(http.StatusBadGateway, "response_too_large", "provider response exceeds the REST JSON limit")
 	case errors.Is(err, sandbox.ErrPhysicalResponseStatus):
-		return newRESTExecutionError(http.StatusBadGateway, "provider_error", "provider returned an unsuccessful response")
+		return newRESTExecutionErrorWithDetails(http.StatusBadGateway, "provider_error", "provider returned an unsuccessful response", restProviderHTTPStatusDetails(err))
 	case errors.Is(err, context.DeadlineExceeded):
 		return newRESTExecutionError(http.StatusGatewayTimeout, "execution_timeout", "execution timed out")
 	case errors.Is(err, context.Canceled):
@@ -647,6 +647,17 @@ func restPhysicalExecutionError(err error) *restExecutionError {
 	default:
 		return nil
 	}
+}
+
+// restProviderHTTPStatusDetails exposes only a collector-owned numeric status,
+// never provider headers, body content, or raw transport error text.
+func restProviderHTTPStatusDetails(err error) map[string]any {
+	var responseErr *sandbox.PhysicalResponseStatusError
+	// Only the typed collector error proves that the number came from an HTTP status frame.
+	if !errors.As(err, &responseErr) || responseErr.StatusCode < 100 || responseErr.StatusCode > 599 {
+		return nil
+	}
+	return map[string]any{"provider_http_status": responseErr.StatusCode}
 }
 
 // restActionableAuthError projects only Engine-owned connection routing fields

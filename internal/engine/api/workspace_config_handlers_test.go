@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
@@ -1915,6 +1916,46 @@ func TestWorkspaceConfigApplyHandler(t *testing.T) {
 	}
 }
 
+// TestWorkspaceConfigApplyHandlerReportsUnknownCommitOutcome verifies that a
+// commit-boundary failure retains its plan/request identity without raw errors.
+func TestWorkspaceConfigApplyHandlerReportsUnknownCommitOutcome(t *testing.T) {
+	serviceID := uuid.New()
+	engineStore := &workspaceTestStore{accountID: uuid.New(), workspaceID: uuid.New()}
+	planID := uuid.New()
+	payload := json.RawMessage(`{
+		"kind":"workspace",
+		"services":{"svc":{"service_id":"` + serviceID.String() + `","versions":[{"version":"2026-08-01","service_version_id":"` + uuid.NewString() + `"}]}}
+	}`)
+	managed, _ := json.Marshal(workspaceManagedResources{Services: []workspaceManagedService{{ServiceID: serviceID.String(), Versions: []string{"2026-08-01"}}}})
+	configStore := &mockConfigStore{
+		state: &store.ConfigState{Generation: 3, ManagedResources: managed},
+		plan: &store.ConfigPlan{
+			ID: planID, Status: store.ConfigPlanStatusPending, ConfigKey: "workspace", ConfigType: store.ConfigTypeWorkspace,
+			SourceHash: "abc", BaseGeneration: 3, ResolvedPayload: payload,
+		},
+		upsertErr: errors.New("database password=fsk_never_return"),
+	}
+	router := newControlTestRouter(engineStore.accountID)
+	router.Post("/workspace/config/apply", WorkspaceConfigApplyHandler(configStore, engineStore, &mockRegistryClient{name: "test"}, testMasterKey))
+	request := httptest.NewRequest(http.MethodPost, "/workspace/config/apply", strings.NewReader(`{"plan_id":"`+planID.String()+`","source_hash":"abc"}`))
+	request.Header.Set("X-API-Key", "fsk_test")
+	response := httptest.NewRecorder()
+	chimiddleware.RequestID(router).ServeHTTP(response, request)
+
+	var envelope workspaceConfigErrorResponse
+	// The failed response must use the shared structured envelope.
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode apply failure: %v", err)
+	}
+	if response.Code != http.StatusConflict || envelope.Error.Phase != "workspace_commit" || envelope.Error.OperationID != planID.String() || envelope.Error.CommitState != "unknown" || envelope.Error.RequestID == "" {
+		t.Fatalf("apply failure metadata = status %d, error %#v", response.Code, envelope.Error)
+	}
+	// Store diagnostics may contain credentials and must remain behind the Engine boundary.
+	if strings.Contains(response.Body.String(), "fsk_never_return") || strings.Contains(response.Body.String(), "database password") {
+		t.Fatalf("apply failure leaked store error: %s", response.Body.String())
+	}
+}
+
 func TestLoadWorkspacePlanForApplyRejectsRevisionDifferentFromAuthorizationSnapshot(t *testing.T) {
 	plan := &store.ConfigPlan{
 		ID: uuid.New(), ConfigKey: "workspace", ConfigType: store.ConfigTypeWorkspace,
@@ -1966,6 +2007,15 @@ func TestWorkspaceConfigApplyHandler_UpsertsBasicAuthSecretsFromRuntimeConfig(t 
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 	assertWorkspaceBasicSecrets(t, s.upsertedSecrets, bucketID, svcID)
+	// Direct material must travel through the same atomic batch as live references.
+	if len(s.workspaceAuthBindings) != 1 {
+		t.Fatalf("atomic auth binding batches = %d, want 1", len(s.workspaceAuthBindings))
+	}
+	// One workspace service config owns one auth family, so changing it must
+	// explicitly reconcile stale references from the previously selected name.
+	if !s.workspaceAuthBindings[0].ReconcileReferences || s.workspaceAuthBindings[0].ClearReferences {
+		t.Fatalf("direct auth reconciliation = %#v", s.workspaceAuthBindings[0])
+	}
 	if bytes.Contains(configStore.upserted.DesiredState, []byte("alice")) || bytes.Contains(configStore.upserted.DesiredState, []byte("s3cr3t")) {
 		t.Fatal("applied desired state must not store resolved basic auth material")
 	}
@@ -2009,6 +2059,10 @@ func TestWorkspaceConfigApplyHandler_UpsertsMTLSAuthSecretsFromRuntimeConfig(t *
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 	assertWorkspaceMTLSSecrets(t, s.upsertedSecrets, bucketID, svcID, certPEM, keyPEM)
+	// Paired certificate material must commit as one current auth-binding unit.
+	if len(s.workspaceAuthBindings) != 1 {
+		t.Fatalf("atomic auth binding batches = %d, want 1", len(s.workspaceAuthBindings))
+	}
 	if bytes.Contains(configStore.upserted.DesiredState, []byte(certPEM)) || bytes.Contains(configStore.upserted.DesiredState, []byte(keyPEM)) {
 		t.Fatal("applied desired state must not store resolved mTLS auth material")
 	}

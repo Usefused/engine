@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -63,24 +64,28 @@ func StartConnectSessionHandler(s store.Store, verifier ServiceVerifier, masterK
 		if !ok {
 			return
 		}
-		req, createdByAppID, ok := decodeConnectSessionStartRequest(w, r)
+		req, createdByAppID, ok := decodeConnectSessionStartRequest(w, r, ctx)
 		if !ok {
 			return
 		}
 		resolved, err := resolveConnectRuntimeConfig(ctx, s, verifier, call, masterKey)
+		// Resolution failures occur before any one-time connect session can be persisted.
 		if err != nil {
-			writeConnectRuntimeError(w, err)
+			writeConnectRuntimeError(w, ctx, err, "connect_resolution", "not_committed")
 			return
 		}
 		response, err := createConnectSession(ctx, s, call, req.EndUserRef, createdByAppID, req.ReturnURL, req.ResourceInput, req.Scopes, resolved, masterKey)
+		// Session creation distinguishes reviewed admission errors from uncertain internal persistence failures.
 		if err != nil {
 			var requestErr connectRuntimeHTTPError
+			// Reviewed validation failures occur before session persistence and retain precise client guidance.
 			if errors.As(err, &requestErr) {
-				writeConnectRuntimeError(w, err)
+				writeConnectRuntimeError(w, ctx, err, "connect_session_admission", "not_committed")
 				return
 			}
 			slog.ErrorContext(ctx, "failed to create connect session", slog.Any("error", err))
-			http.Error(w, "failed to create connect session", http.StatusInternalServerError)
+			// An unclassified persistence failure has an unknown commit outcome and must hide its internal cause.
+			writeConnectRuntimeError(w, ctx, err, "connect_session_create", "unknown")
 			return
 		}
 		span.SetAttributes(connectAdminAttrs("connect.session.start", call)...)
@@ -187,25 +192,29 @@ type connectInputContractIdentity struct {
 
 // decodeConnectSessionStartRequest keeps request validation at the HTTP edge
 // so downstream auth/session helpers only deal with normalized values.
-func decodeConnectSessionStartRequest(w http.ResponseWriter, r *http.Request) (connectSessionStartRequest, uuid.UUID, bool) {
+func decodeConnectSessionStartRequest(w http.ResponseWriter, r *http.Request, ctx context.Context) (connectSessionStartRequest, uuid.UUID, bool) {
 	var req connectSessionStartRequest
+	// Malformed JSON is rejected before any connect configuration or session mutation is attempted.
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeConnectRuntimeError(w, ctx, connectRuntimeHTTPError{status: http.StatusBadRequest, code: "invalid_connect_session_request", message: "invalid request body"}, "request_admission", "not_committed")
 		return req, uuid.Nil, false
 	}
 	req.EndUserRef = strings.TrimSpace(req.EndUserRef)
 	req.ReturnURL = strings.TrimSpace(req.ReturnURL)
+	// Connection ownership requires a stable caller-supplied end-user reference.
 	if req.EndUserRef == "" {
-		http.Error(w, "end_user_ref is required", http.StatusBadRequest)
+		writeConnectRuntimeError(w, ctx, connectRuntimeHTTPError{status: http.StatusBadRequest, code: "connect_end_user_ref_required", message: "end_user_ref is required"}, "request_admission", "not_committed")
 		return req, uuid.Nil, false
 	}
+	// Return destinations must be absolute web URLs so callback routing cannot become ambiguous.
 	if req.ReturnURL != "" && !isHTTPRedirectURI(req.ReturnURL) {
-		http.Error(w, "return_url must be an absolute http or https URL", http.StatusBadRequest)
+		writeConnectRuntimeError(w, ctx, connectRuntimeHTTPError{status: http.StatusBadRequest, code: "invalid_connect_return_url", message: "return_url must be an absolute http or https URL"}, "request_admission", "not_committed")
 		return req, uuid.Nil, false
 	}
 	createdBy, err := optionalUUIDValue(req.CreatedByAppID)
+	// App attribution is optional, but a supplied identity must be an exact UUID.
 	if err != nil {
-		http.Error(w, "created_by_app_id must be a valid UUID", http.StatusBadRequest)
+		writeConnectRuntimeError(w, ctx, connectRuntimeHTTPError{status: http.StatusBadRequest, code: "invalid_connect_app_id", message: "created_by_app_id must be a valid UUID"}, "request_admission", "not_committed")
 		return req, uuid.Nil, false
 	}
 	return req, createdBy, true
@@ -989,6 +998,8 @@ func writeConnectCallbackSuccess(ctx context.Context, s store.Store, w http.Resp
 // writeConnectCallbackFailure avoids JSON browser responses for completed
 // sessions while keeping error details coarse and URL-safe.
 func writeConnectCallbackFailure(ctx context.Context, s store.Store, w http.ResponseWriter, r *http.Request, session *store.ConnectSession, err error) {
+	recordConnectCallbackError(ctx, err)
+	// A missing return destination keeps the failure on the Engine-owned page.
 	if session.ReturnURL == "" {
 		// The Engine renders stable guidance when no application owns the result.
 		writeConnectCallbackRuntimeError(ctx, s, w, err)
@@ -1025,8 +1036,10 @@ func connectCallbackReturnURL(raw string, params map[string]string) (string, err
 // are safe to expose in a browser query string.
 func connectCallbackErrorCode(err error) string {
 	var httpErr connectRuntimeHTTPError
-	if errors.As(err, &httpErr) && httpErr.message != "" {
-		return strings.ReplaceAll(strings.ToLower(httpErr.message), " ", "_")
+	// Callback query parameters use the same closed classifier as JSON errors;
+	// provider or internal prose must never be transformed into a URL value.
+	if errors.As(err, &httpErr) {
+		return connectRuntimeErrorCode(httpErr)
 	}
 	return "connect_runtime_failed"
 }
@@ -1058,6 +1071,7 @@ func writeConnectCallbackFallback(ctx context.Context, s store.Store, w http.Res
 // writeConnectCallbackRuntimeError preserves the bounded status class while
 // replacing internal/provider detail with stable browser-safe guidance.
 func writeConnectCallbackRuntimeError(ctx context.Context, s store.Store, w http.ResponseWriter, err error) {
+	recordConnectCallbackError(ctx, err)
 	status := http.StatusInternalServerError
 	message := "Return to the application and start the connection again."
 	var httpErr connectRuntimeHTTPError
@@ -1071,6 +1085,15 @@ func writeConnectCallbackRuntimeError(ctx context.Context, s store.Store, w http
 		}
 	}
 	writeConnectCallbackFallback(ctx, s, w, status, message, true)
+}
+
+// recordConnectCallbackError adds only the stable callback classifier to the
+// existing callback span and never records provider or token failure prose.
+func recordConnectCallbackError(ctx context.Context, err error) {
+	code := connectCallbackErrorCode(err)
+	span := trace.SpanFromContext(ctx)
+	span.SetAttributes(attribute.String("error.code", code))
+	span.SetStatus(codes.Error, code)
 }
 
 // selectRuntimeOAuthConfig matches the bucket's chosen auth family instead of
@@ -1294,6 +1317,7 @@ func connectContainsString(values []string, want string) bool {
 
 type connectRuntimeHTTPError struct {
 	status        int
+	code          string
 	message       string
 	publicMessage string
 }
@@ -1302,13 +1326,143 @@ type connectRuntimeHTTPError struct {
 // leaking lower-level token/client details to the browser.
 func (e connectRuntimeHTTPError) Error() string { return e.message }
 
-// writeConnectRuntimeError maps expected auth-flow failures to user-facing
-// status codes while hiding internal encryption/store failures.
-func writeConnectRuntimeError(w http.ResponseWriter, err error) {
+// writeConnectRuntimeError maps start-session failures into the shared
+// structured control-plane envelope while keeping internal causes private.
+func writeConnectRuntimeError(w http.ResponseWriter, ctx context.Context, err error, phase, commitState string) {
 	var httpErr connectRuntimeHTTPError
+	// Reviewed runtime errors retain safe status and message details for callers.
 	if errors.As(err, &httpErr) {
-		http.Error(w, httpErr.message, httpErr.status)
+		remediation := connectRuntimeErrorRemediation(httpErr.status)
+		// An ambiguous session creation must be investigated before another mutation is attempted.
+		if commitState == "unknown" {
+			remediation = "Use the request or trace ID to inspect Engine logs before retrying."
+		}
+		writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+			status: httpErr.status, code: connectRuntimeErrorCode(httpErr), message: httpErr.message,
+			category: connectRuntimeErrorCategory(httpErr.status), remediation: remediation,
+			phase: phase, commitState: commitState,
+		}, ctx)
 		return
 	}
-	http.Error(w, "connect runtime failed", http.StatusInternalServerError)
+	// Unknown causes are retained only for cancellation classification and never serialized.
+	writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+		status: http.StatusInternalServerError, code: "connect_runtime_failed",
+		message: "The Engine could not start the connection.", category: "internal", retryable: true,
+		remediation: "Use the request or trace ID to inspect Engine logs before retrying.",
+		phase:       phase, commitState: commitState, cause: err,
+	}, ctx)
+}
+
+var connectRuntimeExactErrorCodes = map[string]string{
+	"connect config not found":                           "connect_config_not_found",
+	"connect service version changed":                    "connect_service_version_changed",
+	"resource input is not supported":                    "connect_resource_input_unsupported",
+	"resource input is invalid":                          "connect_resource_input_invalid",
+	"app scope is unavailable":                           "connect_app_scope_unavailable",
+	"app scope is invalid":                               "connect_app_scope_invalid",
+	"scopes must contain at least one non-empty value":   "connect_scopes_required",
+	"OIDC connect scopes must include openid":            "connect_openid_scope_required",
+	"state and code are required":                        "connect_callback_parameters_required",
+	"connect session expired or already used":            "connect_session_unavailable",
+	"token exchange failed":                              "connect_token_exchange_failed",
+	"provider did not issue a required refresh token":    "connect_refresh_token_required",
+	"authorization_url is required":                      "connect_authorization_url_required",
+	"authorization_url must be absolute":                 "invalid_connect_authorization_url",
+	"connect requires the authorizationCode OAuth2 flow": "connect_authorization_code_flow_required",
+	"selected OAuth2 flow requires token_url":            "connect_token_url_required",
+	"selected OAuth2 flow requires authorization_url":    "connect_authorization_url_required",
+	"connect auth configuration changed":                 "connect_auth_configuration_changed",
+	"connect session service version is unavailable":     "connect_service_version_unavailable",
+	"failed to store auth connection":                    "connect_connection_store_failed",
+}
+
+// connectRuntimeErrorCode returns bounded stable identifiers independently of
+// any provider, customer, or internal value embedded in the safe message.
+func connectRuntimeErrorCode(err connectRuntimeHTTPError) string {
+	// An explicit handler-edge code is authoritative for that reviewed validation path.
+	if strings.TrimSpace(err.code) != "" {
+		return err.code
+	}
+	// Exact known messages keep distinct recovery semantics without exposing them as telemetry keys.
+	if code := connectRuntimeExactErrorCodes[strings.TrimSpace(err.message)]; code != "" {
+		return code
+	}
+	return connectRuntimeVariableErrorCode(err.status, err.message)
+}
+
+// connectRuntimeVariableErrorCode classifies the few safe diagnostics that
+// contain a requested scope or configured auth family without copying values.
+func connectRuntimeVariableErrorCode(status int, message string) string {
+	trimmed := strings.TrimSpace(message)
+	// App-policy scope rejection is distinct from provider-contract scope rejection.
+	if strings.Contains(trimmed, "outside the app policy") {
+		return "connect_scope_outside_app_policy"
+	}
+	// Provider-contract scope rejection tells callers to select only declared scopes.
+	if strings.Contains(trimmed, "not declared by this service") {
+		return "connect_scope_not_declared"
+	}
+	// Auth-name mismatches require configuration repair rather than request retries.
+	if strings.HasPrefix(trimmed, "service has no configured auth_name") {
+		return "connect_auth_config_not_found"
+	}
+	// Provider callback denial remains a stable class regardless of provider prose.
+	if strings.HasPrefix(trimmed, "provider returned error:") {
+		return "connect_provider_denied"
+	}
+	return connectRuntimeStatusErrorCode(status)
+}
+
+// connectRuntimeStatusErrorCode provides a stable fallback when a future safe
+// diagnostic has not yet gained a more precise reviewed code.
+func connectRuntimeStatusErrorCode(status int) string {
+	// HTTP families provide deterministic fallback codes without depending on mutable prose.
+	switch status {
+	case http.StatusBadRequest:
+		return "invalid_connect_request"
+	case http.StatusUnauthorized:
+		return "connect_authentication_required"
+	case http.StatusForbidden:
+		return "connect_permission_denied"
+	case http.StatusNotFound:
+		return "connect_resource_not_found"
+	case http.StatusConflict:
+		return "connect_configuration_conflict"
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return "connect_dependency_unavailable"
+	default:
+		return "connect_runtime_failed"
+	}
+}
+
+// connectRuntimeErrorCategory marks upstream failures as dependencies while
+// allowing the shared writer to derive ordinary status categories.
+func connectRuntimeErrorCategory(status int) string {
+	// Gateway statuses represent provider or Registry dependencies, not Engine validation.
+	if status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout {
+		return "dependency"
+	}
+	return ""
+}
+
+// connectRuntimeErrorRemediation gives each status family one safe recovery
+// action without repeating request values or internal failure detail.
+func connectRuntimeErrorRemediation(status int) string {
+	// Recovery follows the HTTP ownership boundary: caller, authorization, configuration, dependency, or Engine.
+	switch status {
+	case http.StatusBadRequest:
+		return "Correct the request fields or service connect configuration and retry."
+	case http.StatusUnauthorized:
+		return "Log in or provide a valid Fused credential before retrying."
+	case http.StatusForbidden:
+		return "Use an authorized app and bucket binding with the required connect scope."
+	case http.StatusNotFound:
+		return "Create or enable the bucket's connect configuration before retrying."
+	case http.StatusConflict:
+		return "Reapply the app or service configuration before starting a new connection."
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return "Retry after the provider or Registry dependency is available."
+	default:
+		return "Retry and use the request or trace ID to inspect Engine logs if the problem continues."
+	}
 }

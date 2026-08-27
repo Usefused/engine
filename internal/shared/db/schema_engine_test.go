@@ -84,8 +84,8 @@ func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 
 	migrations := engineMigrations()
 	// Generation pins require a forward migration, never a rewrite of applied schema.
-	if len(migrations) != 14 {
-		t.Fatalf("Engine migration count = %d, want 14", len(migrations))
+	if len(migrations) != 15 {
+		t.Fatalf("Engine migration count = %d, want 15", len(migrations))
 	}
 	assertMigrationIdentity(t, migrations[0], engineMigrationVersion, engineMigrationName)
 	assertMigrationIdentity(t, migrations[1], appTokenPolicyMigrationVersion, appTokenPolicyMigrationName)
@@ -101,6 +101,7 @@ func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 	assertMigrationIdentity(t, migrations[11], mcpSessionLifetimeMigrationVersion, mcpSessionLifetimeMigrationName)
 	assertMigrationIdentity(t, migrations[12], 13, "20260826_unified_receipts_session_metadata")
 	assertMigrationIdentity(t, migrations[13], 14, "20260826_generation_contract_pins")
+	assertMigrationIdentity(t, migrations[14], workspaceAuthReferenceMigrationVersion, workspaceAuthReferenceMigrationName)
 	// Every appended migration must preserve the transaction-scoped serialization primitive.
 	if engineMigrationLockQuery != "SELECT pg_advisory_xact_lock($1)" {
 		t.Fatalf("Engine migrations must use a transaction-scoped advisory lock, got %q", engineMigrationLockQuery)

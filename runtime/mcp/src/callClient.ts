@@ -18,6 +18,14 @@
 interface CallResponse {
   result?: unknown;
   error?: string;
+  code?: string;
+}
+
+/** PhysicalCallOptions carries caller-owned execution controls separately from provider parameters. */
+export interface PhysicalCallOptions {
+  pagination?: {
+    maxPages: number;
+  };
 }
 
 export interface CallClientOptions {
@@ -53,22 +61,45 @@ export async function remoteCall(
   operationId: string,
   params: Record<string, unknown>,
   signal?: AbortSignal,
+  callOptions?: PhysicalCallOptions,
 ): Promise<unknown> {
   signal?.throwIfAborted();
-  const response = await fetch(`http://localhost:${options.enginePort}/mcp/call`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${options.sessionId}`,
-    },
-    body: JSON.stringify({ operation_id: operationId, params }),
-    signal,
-  });
+  // Omitting pagination preserves the established envelope and automatic Engine pagination behavior.
+  const pagination = callOptions?.pagination;
+  let response: Response;
+  try {
+    response = await fetch(`http://localhost:${options.enginePort}/mcp/call`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${options.sessionId}`,
+      },
+      body: JSON.stringify({ operation_id: operationId, params, ...(pagination ? { pagination } : {}) }),
+      signal,
+    });
+  } catch (error) {
+    // Caller cancellation already has precise invocation semantics and must not be relabeled as bridge uncertainty.
+    if (signal?.aborted) throw error;
+    throw new Error("MCP_BRIDGE_UNAVAILABLE: Engine bridge did not respond; request outcome is unknown. Do not automatically retry provider mutations.");
+  }
 
-  const body = (await response.json()) as CallResponse;
+  let body: CallResponse;
+  try {
+    body = (await response.json()) as CallResponse;
+  } catch (error) {
+    // Abort during body consumption belongs to the invocation owner just like abort during fetch.
+    if (signal?.aborted) throw error;
+    // A proxy or truncated bridge response cannot prove whether provider dispatch occurred.
+    throw new Error("MCP_BRIDGE_RESPONSE_INVALID: Engine bridge returned invalid JSON; request outcome is unknown. Do not automatically retry provider mutations.");
+  }
+  // JSON primitives and arrays cannot satisfy the bridge's reviewed result-or-error envelope.
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new Error("MCP_BRIDGE_RESPONSE_INVALID: Engine bridge returned an invalid envelope; request outcome is unknown. Do not automatically retry provider mutations.");
+  }
   // Provider and bridge errors preserve the existing reviewed response contract.
   if (!response.ok || body.error) {
-    throw new Error(body.error ?? `call() failed with HTTP ${response.status}`);
+    const code = typeof body.code === "string" && body.code ? `${body.code}: ` : "";
+    throw new Error(code + (body.error ?? `call() failed with HTTP ${response.status}`));
   }
   return body.result;
 }

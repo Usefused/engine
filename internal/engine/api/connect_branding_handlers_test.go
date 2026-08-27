@@ -14,10 +14,12 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/store"
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type connectBrandingTestStore struct {
@@ -104,6 +106,14 @@ func TestConnectBrandingPUTRejectsUnsafeValues(t *testing.T) {
 			UpsertConnectBrandingHandler(testStore).ServeHTTP(response, request)
 			if response.Code != http.StatusBadRequest || testStore.updateCalls != 0 {
 				t.Fatalf("unsafe URL %q = %d calls=%d body=%s", unsafeURL, response.Code, testStore.updateCalls, response.Body.String())
+			}
+			var envelope workspaceConfigErrorResponse
+			// Field-specific server-owned validation remains safe and actionable.
+			if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+				t.Fatalf("decode unsafe URL response: %v", err)
+			}
+			if envelope.Error.Code != "invalid_connect_branding" || envelope.Error.Message != "logo_url must be an absolute HTTPS URL" || envelope.Error.Category != "validation" || envelope.Error.CommitState != "not_committed" {
+				t.Fatalf("unsafe URL envelope = %#v", envelope.Error)
 			}
 		})
 	}
@@ -255,6 +265,50 @@ func TestConnectBrandingFailureTelemetryClassifiesStableErrors(t *testing.T) {
 		}
 	}
 	assertConnectBrandingSpanAllowlist(t, spans)
+}
+
+// TestConnectBrandingFailureResponsesUseStructuredCorrelation verifies read
+// and mutation failures share the safe Engine envelope without store details.
+func TestConnectBrandingFailureResponsesUseStructuredCorrelation(t *testing.T) {
+	traceID, _ := trace.TraceIDFromHex("1234567890abcdef1234567890abcdef")
+	spanID, _ := trace.SpanIDFromHex("1234567890abcdef")
+	spanContext := trace.NewSpanContext(trace.SpanContextConfig{TraceID: traceID, SpanID: spanID})
+
+	writeStore := &connectBrandingTestStore{branding: store.DefaultConnectBranding(), updateErr: errors.New("database secret=fsk_never_return")}
+	writeRequest := httptest.NewRequest(http.MethodPut, "/workspace/connect-branding", strings.NewReader(`{"display_name":"Acme","logo_url":"","primary_color":"#112233","support_url":"","privacy_url":""}`))
+	writeCtx := trace.ContextWithSpanContext(connectBrandingActorContext(), spanContext)
+	writeRequest = writeRequest.WithContext(writeCtx)
+	writeResponse := httptest.NewRecorder()
+	chimiddleware.RequestID(UpsertConnectBrandingHandler(writeStore)).ServeHTTP(writeResponse, writeRequest)
+
+	var writeEnvelope workspaceConfigErrorResponse
+	// A commit-boundary failure must remain explicitly ambiguous and correlated.
+	if err := json.Unmarshal(writeResponse.Body.Bytes(), &writeEnvelope); err != nil {
+		t.Fatalf("decode branding write error: %v", err)
+	}
+	if writeResponse.Code != http.StatusInternalServerError || writeEnvelope.Error.Code != "connect_branding_update_failed" || writeEnvelope.Error.Phase != "workspace_commit" || writeEnvelope.Error.CommitState != "unknown" || writeEnvelope.Error.RequestID == "" || writeEnvelope.Error.TraceID != traceID.String() {
+		t.Fatalf("branding write error = status %d, envelope %#v", writeResponse.Code, writeEnvelope.Error)
+	}
+	// Persistence details and submitted values must not enter the public error.
+	if strings.Contains(writeResponse.Body.String(), "fsk_never_return") || strings.Contains(writeResponse.Body.String(), "database secret") || strings.Contains(writeResponse.Body.String(), "#112233") {
+		t.Fatalf("branding write error leaked private data: %s", writeResponse.Body.String())
+	}
+
+	readStore := &connectBrandingTestStore{loadErr: errors.New("database URL=private")}
+	readRequest := httptest.NewRequest(http.MethodGet, "/workspace/connect-branding", nil).WithContext(trace.ContextWithSpanContext(context.Background(), spanContext))
+	readResponse := httptest.NewRecorder()
+	chimiddleware.RequestID(GetConnectBrandingHandler(readStore)).ServeHTTP(readResponse, readRequest)
+	var readEnvelope workspaceConfigErrorResponse
+	// Read failures carry correlation but no fabricated mutation proof.
+	if err := json.Unmarshal(readResponse.Body.Bytes(), &readEnvelope); err != nil {
+		t.Fatalf("decode branding read error: %v", err)
+	}
+	if readEnvelope.Error.Code != "connect_branding_load_failed" || readEnvelope.Error.RequestID == "" || readEnvelope.Error.TraceID != traceID.String() || readEnvelope.Error.CommitState != "" {
+		t.Fatalf("branding read error = %#v", readEnvelope.Error)
+	}
+	if strings.Contains(readResponse.Body.String(), "database URL") {
+		t.Fatalf("branding read error leaked store cause: %s", readResponse.Body.String())
+	}
 }
 
 // TestHostedConnectBrandingEscapesHTMLAndPinsLogoCSP verifies customer-owned

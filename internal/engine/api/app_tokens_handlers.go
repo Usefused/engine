@@ -44,12 +44,13 @@ func GenerateAppTokenHandler(s store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.app_tokens.generate")
 		defer span.End()
+		ctx = contextWithControlMutationTelemetryRecorded(ctx)
 
 		_, err := controlActorAccount(ctx)
 		// Anonymous requests cannot issue execution credentials.
 		if err != nil {
 			recordTokenMutationError(span, applifecycle.OutcomeUnauthorized)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeControlAPIMutationError(w, ctx, http.StatusUnauthorized, "authentication_required", "Authentication is required to generate an app token.", "Log in or provide a valid Fused credential.", "app_token_generation", "", "not_committed", "")
 			return
 		}
 		setTokenMutationActor(span, ctx)
@@ -58,7 +59,7 @@ func GenerateAppTokenHandler(s store.Store) http.HandlerFunc {
 		// Token scope requires an exact identity, never a guessed app name.
 		if err != nil {
 			recordTokenMutationError(span, applifecycle.OutcomeInvalid)
-			http.Error(w, "invalid app_family_id", http.StatusBadRequest)
+			writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "invalid_app_family_id", "The SDK or MCP ID is not a valid UUID.", "Use the SDK ID or MCP ID shown by the corresponding list command.", "app_token_generation", "", "not_committed", "")
 			return
 		}
 
@@ -66,21 +67,21 @@ func GenerateAppTokenHandler(s store.Store) http.HandlerFunc {
 		// Reject malformed or extra input before interpreting credential policy.
 		if err := decodeOneStrictJSON(r.Body, &payload); err != nil {
 			recordTokenMutationError(span, applifecycle.OutcomeInvalid)
-			http.Error(w, "invalid request body", http.StatusBadRequest)
+			writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "invalid_app_token_request", "The app token request body is invalid.", "Check the token name, expiry, allow policy, and fixed bindings.", "app_token_generation", "", "not_committed", "")
 			return
 		}
 		expiresIn, err := tokenExpiryDuration(payload.ExpiresIn)
 		// Invalid lifetimes must not silently create non-expiring credentials.
 		if err != nil {
 			recordTokenMutationError(span, applifecycle.OutcomeInvalid)
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "invalid_app_token_expiry", err.Error(), "Provide a positive in-range expiry in seconds or omit it.", "app_token_generation", "", "not_committed", "")
 			return
 		}
 		bindings, err := tokenBindingRequests(payload.Bindings)
 		// A partial connected-user binding must never authorize issuance.
 		if err != nil {
 			recordTokenMutationError(span, applifecycle.OutcomeInvalid)
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "invalid_app_token_binding", err.Error(), "Provide service_slug, auth_name, and end_user_ref for every fixed binding.", "app_token_generation", "", "not_committed", "")
 			return
 		}
 		actor, _ := accesscontrol.ActorFromContext(ctx)
@@ -123,22 +124,18 @@ func writeAppTokenGenerationError(w http.ResponseWriter, ctx context.Context, sp
 	// A duplicate label is a caller-resolvable conflict, not a database outage.
 	if errors.Is(err, store.ErrAppTokenNameConflict) {
 		recordTokenMutationError(span, applifecycle.OutcomeConflict)
-		writeWorkspaceConfigError(w, workspaceConfigHTTPError{
-			status: http.StatusConflict, code: "app_token_name_conflict", category: "conflict",
-			message:     "A token with this name already exists for this app.",
-			remediation: "Choose a different token name, or explicitly revoke the existing token before reusing its name. Existing token plaintext cannot be retrieved.",
-		}, ctx)
+		writeControlAPIMutationError(w, ctx, http.StatusConflict, "app_token_name_conflict", "A token with this name already exists for this app.", "Choose a different token name, or explicitly revoke the existing token before reusing its name. Existing token plaintext cannot be retrieved.", "app_token_generation", "", "not_committed", "")
 		return
 	}
 	// Policy and binding validation retain their existing shared SDK/MCP contract.
 	if errors.Is(err, applifecycle.ErrTokenPolicyInvalid) || errors.Is(err, store.ErrAppTokenBindingInvalid) {
 		recordTokenMutationError(span, applifecycle.OutcomeInvalid)
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "invalid_app_token_policy", "The app token policy or fixed binding is invalid.", "Correct the allow policy or fixed bindings and retry.", "app_token_generation", "", "not_committed", "")
 		return
 	}
 	recordTokenMutationError(span, applifecycle.OutcomeFailed)
 	slog.ErrorContext(ctx, "failed to create app token", slog.String("error_code", "token_persistence_failed"))
-	http.Error(w, "failed to create token", http.StatusInternalServerError)
+	writeControlAPIMutationError(w, ctx, http.StatusInternalServerError, "app_token_create_failed", "The Engine could not create the app token.", "Inspect the current app token list before retrying, and use the request or trace ID to check Engine logs.", "app_token_generation", "", "unknown", "")
 }
 
 func tokenBindingRequests(payload []TokenBindingPayload) ([]store.AppTokenBindingRequest, error) {
@@ -164,30 +161,36 @@ func optionalActorID(id uuid.UUID) *uuid.UUID {
 	return &id
 }
 
+// RevokeAppTokenHandler revokes one family token by name and returns stable
+// diagnostics without exposing token plaintext, hashes, or store details.
 func RevokeAppTokenHandler(revoker AppTokenRevoker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.app_tokens.revoke")
 		defer span.End()
+		ctx = contextWithControlMutationTelemetryRecorded(ctx)
 
 		_, err := controlActorAccount(ctx)
+		// App-token revocation requires an authenticated control-plane actor.
 		if err != nil {
 			recordTokenMutationError(span, applifecycle.OutcomeUnauthorized)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeControlAPIMutationError(w, ctx, http.StatusUnauthorized, "authentication_required", "Authentication is required to revoke an app token.", "Log in or provide a valid Fused credential.", "app_token_revocation", "", "not_committed", "")
 			return
 		}
 		setTokenMutationActor(span, ctx)
 
 		familyID, err := uuid.Parse(r.URL.Query().Get("app_family_id"))
+		// Token scope requires an exact family identity, never a guessed app name.
 		if err != nil {
 			recordTokenMutationError(span, applifecycle.OutcomeInvalid)
-			http.Error(w, "invalid app_family_id", http.StatusBadRequest)
+			writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "invalid_app_family_id", "The SDK or MCP ID is not a valid UUID.", "Use the SDK ID or MCP ID shown by the corresponding list command.", "app_token_revocation", "", "not_committed", "")
 			return
 		}
 
 		tokenName := r.URL.Query().Get("name")
+		// Token name is part of the exact family-scoped revocation identity.
 		if tokenName == "" {
 			recordTokenMutationError(span, applifecycle.OutcomeInvalid)
-			http.Error(w, "missing name", http.StatusBadRequest)
+			writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "app_token_name_required", "The token name is required.", "Choose a token name from the SDK or MCP token list.", "app_token_revocation", "", "not_committed", "")
 			return
 		}
 
@@ -195,10 +198,17 @@ func RevokeAppTokenHandler(revoker AppTokenRevoker) http.HandlerFunc {
 			attribute.String("app.family_id", familyID.String()),
 		)
 
+		// Revocation failures remain opaque so credential history and store detail cannot leak.
 		if _, err := revoker.RevokeAppToken(ctx, familyID, tokenName); err != nil {
+			// Authoritative absence proves the revocation did not commit.
+			if errors.Is(err, store.ErrAppTokenNotFound) {
+				recordTokenMutationError(span, applifecycle.OutcomeInvalid)
+				writeControlAPIMutationError(w, ctx, http.StatusNotFound, "app_token_not_found", "The selected app token was not found.", "Refresh the SDK or MCP token list before retrying.", "app_token_revocation", "", "not_committed", "")
+				return
+			}
 			recordTokenMutationError(span, applifecycle.OutcomeFailed)
 			slog.ErrorContext(ctx, "failed to revoke token", slog.String("error_code", "token_revoke_failed"))
-			http.Error(w, "failed to revoke token", http.StatusInternalServerError)
+			writeControlAPIMutationError(w, ctx, http.StatusInternalServerError, "app_token_revoke_failed", "The Engine could not revoke the app token.", "Inspect the current app token list before retrying, and use the request or trace ID to check Engine logs.", "app_token_revocation", "", "unknown", "")
 			return
 		}
 

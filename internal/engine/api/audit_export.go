@@ -20,13 +20,16 @@ import (
 
 const defaultAuditExportLimit = 1000
 
+// AuditExportHandler returns a bounded credential-free audit projection and
+// emits structured control-plane failures for every rejected export request.
 func AuditExportHandler(s store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.audit.export_http")
 		defer span.End()
 		actor, ok := accesscontrol.ActorFromContext(ctx)
+		// Missing actor context uses the shared authorization envelope with request correlation.
 		if !ok {
-			accesscontrol.WriteAuthorizationError(w, accesscontrol.ErrAuthenticationRequired)
+			accesscontrol.WriteAuthorizationError(w, accesscontrol.ErrAuthenticationRequired, ctx)
 			return
 		}
 		format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
@@ -34,24 +37,56 @@ func AuditExportHandler(s store.Store) http.HandlerFunc {
 			format = "csv"
 		}
 		query, err := auditExportQueryFromRequest(r, actor.SubjectID)
+		// Format and filter validation complete before repository access so a caller
+		// receives one precise, non-mutating request diagnostic.
 		if err != nil || (format != "csv" && format != "jsonl") {
-			http.Error(w, `{"error":"invalid_audit_export"}`, http.StatusBadRequest)
+			message, remediation := auditExportRequestDiagnostic(format, err)
+			writeControlAPIError(w, ctx, http.StatusBadRequest, "invalid_audit_export", message, remediation)
 			return
 		}
 		repository, ok := s.(store.AuditRepository)
+		// An Engine without the audit repository capability cannot safely synthesize
+		// an export from another data path.
 		if !ok {
-			http.Error(w, `{"error":"audit_export_unavailable"}`, http.StatusInternalServerError)
+			writeControlAPIError(w, ctx, http.StatusInternalServerError, "audit_export_unavailable", "The Engine could not export audit events.", "Retry and check Engine logs if the problem continues.")
 			return
 		}
 		rows, err := repository.ExportAuditEvents(ctx, query)
+		// Repository failures remain in logs and traces; the public 5xx response uses
+		// fixed prose plus request correlation.
 		if err != nil {
 			span.RecordError(err)
-			http.Error(w, `{"error":"audit_export_unavailable"}`, http.StatusInternalServerError)
+			writeControlAPIError(w, ctx, http.StatusInternalServerError, "audit_export_unavailable", "The Engine could not export audit events.", "Retry and check Engine logs if the problem continues.")
 			return
 		}
 		span.SetAttributes(attribute.Int("audit.export_rows", len(rows)), attribute.String("audit.export_format", format))
 		writeAuditExport(w, format, rows)
 	}
+}
+
+// auditExportRequestDiagnostic maps only local parser errors to precise safe
+// 4xx copy without echoing any query value.
+func auditExportRequestDiagnostic(format string, err error) (string, string) {
+	// Unsupported formats have a closed, explicit correction independent of filter parsing.
+	if format != "csv" && format != "jsonl" {
+		return "Audit export format must be csv or jsonl.", "Set format=csv or format=jsonl."
+	}
+	// Parser errors are Engine-owned sentinels containing field names but no supplied values.
+	if err != nil {
+		switch err.Error() {
+		case "invalid limit":
+			return "Audit export limit must be an integer from 1 to 10000.", "Provide a limit from 1 to 10000."
+		case "invalid outcome":
+			return "Audit export outcome contains an unsupported value.", "Use an audit outcome accepted by the audit activity filters."
+		case "invalid actor_subject_id":
+			return "Audit export actor_subject_id must be a valid UUID.", "Use an actor subject ID from audit activity."
+		case "invalid from":
+			return "Audit export from must be an RFC3339 timestamp.", "Provide from as an RFC3339 timestamp."
+		case "invalid to":
+			return "Audit export to must be an RFC3339 timestamp.", "Provide to as an RFC3339 timestamp."
+		}
+	}
+	return "The audit export parameters are invalid.", "Provide valid audit export filters and retry."
 }
 
 func auditExportQueryFromRequest(r *http.Request, requester uuid.UUID) (store.AuditExportQuery, error) {

@@ -282,6 +282,8 @@ func TestEngineGraphQLPreflightIsAllOrNothing(t *testing.T) {
 	}
 }
 
+// TestEngineGraphQLProtectedChildAddsPermission verifies a protected child
+// contributes its exact requirement to the nested shared denial envelope.
 func TestEngineGraphQLProtectedChildAddsPermission(t *testing.T) {
 	workspaceID := uuid.New()
 	s := &workspaceTestStore{accountID: uuid.New()}
@@ -300,15 +302,21 @@ func TestEngineGraphQLProtectedChildAddsPermission(t *testing.T) {
 		t.Fatalf("status = %d, want 403: %s", response.Code, response.Body.String())
 	}
 	var denial struct {
-		Missing []struct {
-			Permission accesscontrol.Permission `json:"permission"`
-		} `json:"missing"`
+		Error struct {
+			Code    string `json:"code"`
+			Details struct {
+				Missing []struct {
+					Permission accesscontrol.Permission `json:"permission"`
+				} `json:"missing"`
+			} `json:"details"`
+		} `json:"error"`
 	}
+	// Shared authorization responses nest typed remediation details under error.
 	if err := json.Unmarshal(response.Body.Bytes(), &denial); err != nil {
 		t.Fatalf("decode denial: %v", err)
 	}
-	if len(denial.Missing) != 1 || denial.Missing[0].Permission != accesscontrol.PermissionAppTokensManage {
-		t.Fatalf("missing = %#v, want app.tokens.manage", denial.Missing)
+	if denial.Error.Code != "permission_denied" || len(denial.Error.Details.Missing) != 1 || denial.Error.Details.Missing[0].Permission != accesscontrol.PermissionAppTokensManage {
+		t.Fatalf("denial = %#v, want app.tokens.manage", denial.Error)
 	}
 	captured, ok := capture.RequiredPermissions()
 	if !ok || !hasRequirementPermission(captured, accesscontrol.PermissionAppTokensManage) {
@@ -316,6 +324,8 @@ func TestEngineGraphQLProtectedChildAddsPermission(t *testing.T) {
 	}
 }
 
+// TestEngineGraphQLAppTokensRequiresManagePermissionForRequestedFamily verifies
+// nested denial details retain the exact requested app-family resource.
 func TestEngineGraphQLAppTokensRequiresManagePermissionForRequestedFamily(t *testing.T) {
 	workspaceID := uuid.New()
 	familyID := uuid.New()
@@ -333,16 +343,22 @@ func TestEngineGraphQLAppTokensRequiresManagePermissionForRequestedFamily(t *tes
 		t.Fatalf("status = %d, want 403: %s", response.Code, response.Body.String())
 	}
 	var denial struct {
-		Missing []struct {
-			Permission accesscontrol.Permission `json:"permission"`
-			ResourceID uuid.UUID                `json:"resource_id"`
-		} `json:"missing"`
+		Error struct {
+			Code    string `json:"code"`
+			Details struct {
+				Missing []struct {
+					Permission accesscontrol.Permission `json:"permission"`
+					ResourceID uuid.UUID                `json:"resource_id"`
+				} `json:"missing"`
+			} `json:"details"`
+		} `json:"error"`
 	}
+	// Resource-scoped denial details use the same nested common envelope.
 	if err := json.Unmarshal(response.Body.Bytes(), &denial); err != nil {
 		t.Fatalf("decode denial: %v", err)
 	}
-	if len(denial.Missing) != 1 || denial.Missing[0].Permission != accesscontrol.PermissionAppTokensManage || denial.Missing[0].ResourceID != familyID {
-		t.Fatalf("missing = %#v, want app.tokens.manage for %s", denial.Missing, familyID)
+	if denial.Error.Code != "permission_denied" || len(denial.Error.Details.Missing) != 1 || denial.Error.Details.Missing[0].Permission != accesscontrol.PermissionAppTokensManage || denial.Error.Details.Missing[0].ResourceID != familyID {
+		t.Fatalf("denial = %#v, want app.tokens.manage for %s", denial.Error, familyID)
 	}
 }
 

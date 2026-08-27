@@ -155,19 +155,39 @@ func (s *postgresStore) UpsertServiceContractSnapshot(ctx context.Context, snaps
 
 // prepareServiceContractSnapshot admits both runtime semantics and any supplied immutable generation identity before persistence.
 func prepareServiceContractSnapshot(snapshot ServiceContractSnapshot) (ServiceContractSnapshot, []byte, error) {
+	prepared, err := ValidateServiceContractSnapshot(snapshot)
+	// Validation owns canonicalization and hashing so preflight and persistence cannot drift.
+	if err != nil {
+		return snapshot, nil, err
+	}
+	snapshot = prepared
+	metadataJSON, err := json.Marshal(snapshot.ServiceMetadata)
+	// Persistence accepts only a fully encoded, validated metadata document.
+	if err != nil {
+		return snapshot, nil, fmt.Errorf("marshal service metadata: %w", err)
+	}
+	return snapshot, metadataJSON, nil
+}
+
+// ValidateServiceContractSnapshot admits and hashes a complete snapshot without opening a transaction or writing local state.
+func ValidateServiceContractSnapshot(snapshot ServiceContractSnapshot) (ServiceContractSnapshot, error) {
 	// Older runtime snapshots may remain executable, but a malformed new pin must never become generation authority.
 	if snapshot.GenerationContractHash != "" && !ValidGenerationContractHash(snapshot.GenerationContractHash) {
-		return snapshot, nil, ErrGenerationContractPinUnavailable
+		return snapshot, ErrGenerationContractPinUnavailable
 	}
 	envelope, err := fusedobject.CanonicalExecutionContractEnvelope(snapshot.ExecutionContractEnvelope)
 	// Unsupported runtime semantics cannot be rescued by a valid storage reference.
 	if err != nil {
-		return snapshot, nil, fmt.Errorf("service contract snapshot: %w", err)
+		return snapshot, fmt.Errorf("service contract snapshot: %w", err)
 	}
 	snapshot.ExecutionContractEnvelope = envelope
-	// Complete snapshot validation runs before hashing or any database write.
-	if err := validateServiceContractSnapshot(snapshot); err != nil {
-		return snapshot, nil, err
+	// Storage identity remains part of admission because the validated hash must bind the exact immutable pin.
+	if err := validateServiceContractSnapshotIdentity(snapshot); err != nil {
+		return snapshot, err
+	}
+	// Child keys are checked before hashing so preflight catches the same conflicts as PostgreSQL persistence.
+	if err := validateServiceContractChildIdentity(snapshot.Endpoints, snapshot.Webhooks); err != nil {
+		return snapshot, err
 	}
 	// Only omitted status receives the ordinary newly activated state.
 	if snapshot.Status == "" {
@@ -178,15 +198,10 @@ func prepareServiceContractSnapshot(snapshot ServiceContractSnapshot) (ServiceCo
 	hash, err := serviceContractHash(snapshot)
 	// A hash failure means the complete contract cannot be admitted atomically.
 	if err != nil {
-		return snapshot, nil, err
+		return snapshot, err
 	}
 	snapshot.ContractHash = hash
-	metadataJSON, err := json.Marshal(snapshot.ServiceMetadata)
-	// Persistence accepts only a fully encoded, validated metadata document.
-	if err != nil {
-		return snapshot, nil, fmt.Errorf("marshal service metadata: %w", err)
-	}
-	return snapshot, metadataJSON, nil
+	return snapshot, nil
 }
 
 // replaceServiceContractSnapshotRows replaces metadata and child surfaces in one
@@ -244,20 +259,85 @@ func replaceServiceContractSnapshotRows(
 	return &snapshot, nil
 }
 
-func validateServiceContractSnapshot(snapshot ServiceContractSnapshot) error {
+// validateServiceContractSnapshotIdentity rejects incomplete local pin identity separately from semantic contract checks.
+func validateServiceContractSnapshotIdentity(snapshot ServiceContractSnapshot) error {
+	// The canonical envelope must be rechecked at the store boundary even when a transport mapper already admitted it.
 	if err := fusedobject.ValidateExecutionContractEnvelope(snapshot.ExecutionContractEnvelope); err != nil {
 		return fmt.Errorf("service contract snapshot: %w", err)
 	}
+	// A snapshot without a service cannot be selected or safely replaced.
 	if snapshot.ServiceID == uuid.Nil {
 		return errors.New("service contract snapshot requires service_id")
 	}
+	// Version identity is the immutable local lookup key and cannot be inferred from a label.
 	if snapshot.ServiceVersionID == uuid.Nil {
 		return errors.New("service contract snapshot requires service_version_id")
 	}
+	// The version label is retained for diagnostics but must accompany the exact UUID pin.
 	if snapshot.Version == "" {
 		return errors.New("service contract snapshot requires version")
 	}
+	// PostgreSQL accepts only executable and refresh lifecycle states for a local snapshot.
+	if snapshot.Status != "" && snapshot.Status != "active" && snapshot.Status != "stale" && snapshot.Status != "refresh_failed" {
+		return errors.New("service contract snapshot status is invalid")
+	}
 	return nil
+}
+
+// validateServiceContractChildIdentity mirrors child-row uniqueness before a transaction can replace an existing snapshot.
+func validateServiceContractChildIdentity(endpoints []fusedobject.Endpoint, webhooks []fusedobject.Webhook) error {
+	endpointIDs := make(map[uuid.UUID]struct{}, len(endpoints))
+	endpointNames := make(map[string]struct{}, len(endpoints))
+	// One bounded pass mirrors both endpoint primary and selector uniqueness constraints.
+	for _, endpoint := range endpoints {
+		// Missing or repeated endpoint IDs cannot identify one executable row.
+		if endpoint.ID == uuid.Nil || duplicateServiceContractUUID(endpointIDs, endpoint.ID) {
+			return fmt.Errorf("service contract endpoint %q has an invalid or duplicate id", endpoint.Name)
+		}
+		// Operation names are immutable runtime selectors and must remain unique within a version.
+		if duplicateServiceContractName(endpointNames, endpoint.Name) {
+			return fmt.Errorf("service contract endpoint name %q is duplicated", endpoint.Name)
+		}
+	}
+	return validateServiceContractWebhookIdentity(webhooks)
+}
+
+// validateServiceContractWebhookIdentity enforces the webhook child-table keys without mixing them with endpoint selectors.
+func validateServiceContractWebhookIdentity(webhooks []fusedobject.Webhook) error {
+	webhookIDs := make(map[uuid.UUID]struct{}, len(webhooks))
+	webhookNames := make(map[string]struct{}, len(webhooks))
+	// One bounded pass mirrors both webhook primary and selector uniqueness constraints.
+	for _, webhook := range webhooks {
+		// Missing or repeated webhook IDs cannot identify one inbound contract row.
+		if webhook.ID == uuid.Nil || duplicateServiceContractUUID(webhookIDs, webhook.ID) {
+			return fmt.Errorf("service contract webhook %q has an invalid or duplicate id", webhook.Name)
+		}
+		// Webhook names remain exact SDK and MCP selection keys within one version.
+		if duplicateServiceContractName(webhookNames, webhook.Name) {
+			return fmt.Errorf("service contract webhook name %q is duplicated", webhook.Name)
+		}
+	}
+	return nil
+}
+
+// duplicateServiceContractUUID records one UUID and reports whether the same local row key was already admitted.
+func duplicateServiceContractUUID(seen map[uuid.UUID]struct{}, value uuid.UUID) bool {
+	_, exists := seen[value]
+	// Only first occurrence becomes the authoritative child identity.
+	if !exists {
+		seen[value] = struct{}{}
+	}
+	return exists
+}
+
+// duplicateServiceContractName records one exact selector and reports whether it would violate child-row uniqueness.
+func duplicateServiceContractName(seen map[string]struct{}, value string) bool {
+	_, exists := seen[value]
+	// Exact selector spelling is persisted, so only exact duplicates conflict here.
+	if !exists {
+		seen[value] = struct{}{}
+	}
+	return exists
 }
 
 // prepareServiceContractEndpointRows serializes once before batching so query

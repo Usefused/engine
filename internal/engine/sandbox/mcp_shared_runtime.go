@@ -27,8 +27,14 @@ const maxMCPPhysicalResultBytes = 1 << 20
 // mcpCallRequest preserves params as JSON until exact catalogue kind is known,
 // avoiding numeric changes to Unified input while retaining physical map decoding.
 type mcpCallRequest struct {
-	OperationID string          `json:"operation_id"`
-	Params      json.RawMessage `json:"params"`
+	OperationID string                       `json:"operation_id"`
+	Params      json.RawMessage              `json:"params"`
+	Pagination  *mcpPhysicalPaginationIntent `json:"pagination,omitempty"`
+}
+
+// mcpPhysicalPaginationIntent mirrors the generated SDK's provider-neutral page ceiling without entering provider params.
+type mcpPhysicalPaginationIntent struct {
+	MaxPages int `json:"maxPages"`
 }
 
 // mcpUnifiedInvocation is the SDK-equivalent public call shape; transport
@@ -88,20 +94,22 @@ type mcpUnifiedAuthAction struct {
 // string so a JSON vendor response reaches the script as a parsed value,
 // not a double-encoded string.
 type mcpCallResponse struct {
-	Result json.RawMessage `json:"result,omitempty"`
-	Error  string          `json:"error,omitempty"`
+	Result            json.RawMessage `json:"result,omitempty"`
+	Error             string          `json:"error,omitempty"`
+	Code              string          `json:"code,omitempty"`
+	RecoveryAction    string          `json:"recovery_action,omitempty"`
+	ExecuteRequest    string          `json:"execute_request,omitempty"`
+	ProviderExecution string          `json:"provider_execution,omitempty"`
+	AutomaticReplay   *bool           `json:"automatic_replay,omitempty"`
 }
 
 // mcpCallHandler is call()'s only server-side entrypoint (design doc,
 // "No I/O outside call()" -- the shared runtime's sandboxed process has no
-// other path to a vendor API). It is intentionally thin: resolve the
-// session (only a live, already-authenticated MCP session may call this at
-// all), resolve+validate the operation against the fixture (Guarding
-// Against Hallucinated Calls), then hand off to the exact same
-// engineExecuteCore path the gRPC edge uses (sandbox.go:
-// EngineStreamExecuteFunc). No new dispatch or param-routing logic is
-// introduced here -- that already exists in dispatcher.go and works the
-// same way regardless of which caller flattened params into the map.
+// other path to a vendor API). This boundary resolves the authenticated
+// session and catalogue kind, keeps physical execution controls separate
+// from provider params, validates the public shape, then hands the request to
+// the same engineExecuteCore path used by gRPC. Provider routing and pagination
+// policy remain owned by the canonical Dispatcher.
 func mcpCallHandler(w http.ResponseWriter, r *http.Request) {
 	sessionID, ok := extractBearerToken(r)
 	// Only a live session identifier may reach either catalogue namespace.
@@ -113,7 +121,12 @@ func mcpCallHandler(w http.ResponseWriter, r *http.Request) {
 	sess, ok := lookupMCPSession(sessionID)
 	// Session lookup preserves the established tenant boundary for both kinds.
 	if !ok {
-		writeMCPCallResult(w, http.StatusNotFound, mcpCallResponse{Error: "mcp session not found or expired"})
+		automaticReplay := false
+		writeMCPCallResult(w, http.StatusNotFound, mcpCallResponse{
+			Error: "MCP bridge session is unavailable; reinitialize the MCP connection instead of inventing a session ID",
+			Code:  "MCP_BRIDGE_SESSION_UNAVAILABLE", RecoveryAction: "reinitialize_connection",
+			ExecuteRequest: "reformat_if_session_state_used", ProviderExecution: "not_started", AutomaticReplay: &automaticReplay,
+		})
 		return
 	}
 	callCtx, cancel := mcpSessionRequestContext(r.Context(), sess)
@@ -132,7 +145,7 @@ func mcpCallHandler(w http.ResponseWriter, r *http.Request) {
 	// Exact catalogue kind selects the adapter; invocation shape never grants
 	// access to a private definition or changes physical dispatch behavior.
 	if descriptor, unified := resolveSessionFixtureUnifiedOperation(sess, req.OperationID); unified {
-		handleMCPUnifiedCall(w, r, sess, descriptor, req)
+		handleMCPResolvedUnifiedCall(w, r, sess, descriptor, req)
 		return
 	}
 
@@ -148,25 +161,16 @@ func mcpCallHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var params map[string]any
-	// Physical calls retain their existing flat-map contract after the envelope
-	// became raw JSON solely to preserve exact Unified input bytes.
-	if len(req.Params) != 0 {
-		// Present physical params must still be a valid JSON map before schema validation.
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			writeMCPCallResult(w, http.StatusBadRequest, mcpCallResponse{Error: "invalid request body"})
-			return
-		}
-	}
-	// Existing physical schema validation and its client-visible errors remain unchanged.
-	if err := validateCallParams(op, params); err != nil {
-		slog.WarnContext(r.Context(), "mcp call() rejected: schema validation failed",
+	params, intent, statusCode, errorCode := decodeMCPPhysicalCallInput(op, req)
+	// Provider input and execution controls must both be admitted before dispatch.
+	if statusCode != 0 {
+		slog.WarnContext(r.Context(), "mcp call() rejected: physical input validation failed",
 			slog.String("operation_id", req.OperationID))
-		writeMCPCallResult(w, http.StatusBadRequest, mcpCallResponse{Error: err.Error()})
+		writeMCPCallResult(w, statusCode, mcpCallResponse{Error: errorCode})
 		return
 	}
 
-	result, err := dispatchMCPCall(r.Context(), sess, req.OperationID, params)
+	result, err := dispatchMCPCall(r.Context(), sess, req.OperationID, params, intent)
 	// Physical provider failures retain their established response path.
 	if err != nil {
 		statusCode, errorCode := boundedMCPPhysicalCallError(err)
@@ -176,6 +180,53 @@ func mcpCallHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeMCPCallResult(w, http.StatusOK, mcpCallResponse{Result: result})
+}
+
+// handleMCPResolvedUnifiedCall prevents physical-only options from being ignored by the logical adapter.
+func handleMCPResolvedUnifiedCall(w http.ResponseWriter, r *http.Request, sess *mcpSession, descriptor *models.SDKUnifiedOperationDescriptor, request mcpCallRequest) {
+	// Unified pagination remains target-keyed inside params to preserve SDK-equivalent graph semantics.
+	if request.Pagination != nil {
+		writeMCPCallResult(w, http.StatusBadRequest, mcpCallResponse{Error: "mcp_physical_pagination_not_allowed_for_unified: use target-keyed params.pagination for Unified operations"})
+		return
+	}
+	handleMCPUnifiedCall(w, r, sess, descriptor, request)
+}
+
+// decodeMCPPhysicalCallInput admits provider params and the Engine-owned pagination option as separate concerns.
+func decodeMCPPhysicalCallInput(operation *FixtureOperation, request mcpCallRequest) (map[string]any, *engine.PaginationIntent, int, string) {
+	var params map[string]any
+	// Physical params preserve their flat-map contract while Unified input remains exact raw JSON.
+	if len(request.Params) != 0 {
+		// A present physical payload must be a JSON object before schema validation.
+		if err := json.Unmarshal(request.Params, &params); err != nil {
+			return nil, nil, http.StatusBadRequest, "invalid request body"
+		}
+	}
+	// Canonical provider schema validation remains independent from execution policy controls.
+	if err := validateCallParams(operation, params); err != nil {
+		return nil, nil, http.StatusBadRequest, err.Error()
+	}
+	intent, err := decodeMCPPhysicalPaginationIntent(request.Pagination)
+	// Invalid public controls stop before exact Engine resolution can trigger provider work.
+	if err != nil {
+		statusCode, errorCode := boundedMCPPhysicalCallError(err)
+		return nil, nil, statusCode, errorCode
+	}
+	return params, intent, 0, ""
+}
+
+// decodeMCPPhysicalPaginationIntent converts the public camelCase option into the canonical bounded Engine control.
+func decodeMCPPhysicalPaginationIntent(value *mcpPhysicalPaginationIntent) (*engine.PaginationIntent, error) {
+	// Omission preserves the operation's complete reviewed pagination policy.
+	if value == nil {
+		return nil, nil
+	}
+	intent := &engine.PaginationIntent{MaxPages: value.MaxPages}
+	// Shared validation keeps MCP aligned with REST, gRPC, and Unified callers.
+	if err := engine.ValidatePaginationIntent(intent); err != nil {
+		return nil, err
+	}
+	return intent, nil
 }
 
 // decodeBoundedMCPCallRequest admits one child-runtime envelope only when its
@@ -452,9 +503,9 @@ func extractBearerToken(r *http.Request) (string, bool) {
 // app scope and validated identity. The sandboxed Node process therefore
 // never holds a provider credential. sess.token (not just sess.appID) remains
 // required because engineExecuteCore resolves the account identity from it.
-func dispatchMCPCall(ctx context.Context, sess *mcpSession, operationID string, params map[string]any) (json.RawMessage, error) {
+func dispatchMCPCall(ctx context.Context, sess *mcpSession, operationID string, params map[string]any, pagination *engine.PaginationIntent) (json.RawMessage, error) {
 	ctx = contextWithExecutionTransport(ctx, models.EngineExecutionTransportMCP)
-	ctx = contextWithMCPIdempotencyIdentity(ctx, params)
+	ctx = contextWithMCPPhysicalExecutionIdentity(ctx, params, pagination)
 
 	buf := engine.NewBoundedBufferStream(maxMCPPhysicalResultBytes)
 	err := engineExecuteCore(
@@ -468,14 +519,48 @@ func dispatchMCPCall(ctx context.Context, sess *mcpSession, operationID string, 
 	return bufferToBoundedJSONResult(buf.Bytes(), maxMCPPhysicalResultBytes)
 }
 
-// boundedMCPPhysicalCallError exposes a stable hard-limit code while retaining
-// the existing error contract for unrelated physical execution failures.
+// contextWithMCPPhysicalExecutionIdentity binds pagination to replay identity and the canonical Dispatcher context.
+func contextWithMCPPhysicalExecutionIdentity(ctx context.Context, params map[string]any, pagination *engine.PaginationIntent) context.Context {
+	ctx = contextWithMCPIdempotencyIdentity(ctx, params)
+	requestHash := engine.BindPaginationIntentRequestHash(requestBodyHashFromContext(ctx), pagination)
+	ctx = contextWithExecutionIdentity(ctx, idempotencyKeyFromContext(ctx), requestHash)
+	return engine.ContextWithPaginationIntent(ctx, pagination)
+}
+
+// boundedMCPPhysicalCallError projects result limits and pagination decisions into stable, actionable MCP failures.
 func boundedMCPPhysicalCallError(err error) (int, string) {
 	// Provider bodies crossing the result budget never expose partial content or wrapper text.
 	if errors.Is(err, engine.ErrBufferStreamLimitExceeded) {
 		return http.StatusBadGateway, "mcp_call_result_too_large"
 	}
+	// Caller controls are request errors even when policy comparison occurs after exact operation resolution.
+	if errors.Is(err, engine.ErrPaginationIntentInvalid) {
+		return http.StatusBadRequest, "mcp_pagination_intent_invalid: pagination.maxPages must be positive and lower than the operation's Engine page limit"
+	}
+	// Typed pagination failures retain a stable code and bounded recovery guidance instead of a generic wrapper.
+	if code := engine.PaginationFailureCode(err); code != "" {
+		return boundedMCPPaginationFailure(code)
+	}
 	return http.StatusBadGateway, boundedMCPCallErrorMessage(err.Error())
+}
+
+// boundedMCPPaginationFailure maps Engine-owned pagination codes to safe status and recovery guidance.
+func boundedMCPPaginationFailure(code string) (int, string) {
+	// Reviewed hard limits are actionable input/result-shape failures rather than bridge outages.
+	switch code {
+	case "max_pages":
+		return http.StatusUnprocessableEntity, "mcp_pagination_max_pages: Engine reached the operation's page limit before provider pagination ended; narrow the query, increase the provider page size, or set a lower pagination.maxPages when partial results are sufficient"
+	case "max_items":
+		return http.StatusUnprocessableEntity, "mcp_pagination_max_items: Engine reached the operation's item limit before provider pagination ended; narrow the provider query"
+	case "max_bytes":
+		return http.StatusUnprocessableEntity, "mcp_pagination_max_bytes: Engine reached the operation's pagination byte limit; narrow the provider query or response fields"
+	case "max_duration":
+		return http.StatusGatewayTimeout, "mcp_pagination_max_duration: provider pagination exceeded the operation's execution duration; narrow the provider query"
+	case "cycle":
+		return http.StatusBadGateway, "mcp_pagination_cycle: the provider repeated a continuation value; retry only after the provider pagination state changes"
+	default:
+		return http.StatusBadGateway, "mcp_pagination_" + code + ": Engine could not safely continue provider pagination; review the operation pagination contract"
+	}
 }
 
 // boundedMCPCallErrorMessage applies the result budget to failure text as well
@@ -542,14 +627,9 @@ func bufferToBoundedJSONResult(raw []byte, maxBytes int) (json.RawMessage, error
 	return result, nil
 }
 
-// writeMCPCallResult is this handler's own JSON writer rather than the
-// package's existing writeError (mcp.go): writeError builds its body with
-// fmt.Sprintf and does not escape the message, which breaks as soon as an
-// error string contains a quote -- something this handler's validation
-// errors do routinely (e.g. `missing required parameter "foo"`). Encoding
-// through encoding/json avoids shipping a client-observable malformed-JSON
-// bug instead of fixing it here. Failure text receives the same bounded
-// result policy, so early validation paths cannot bypass the writer budget.
+// writeMCPCallResult keeps the bridge's typed result-or-error envelope separate
+// from the package's generic HTTP error shape. Failure text receives the same
+// bounded result policy, so early validation paths cannot bypass the writer budget.
 func writeMCPCallResult(w http.ResponseWriter, status int, resp mcpCallResponse) {
 	resp.Error = boundedMCPCallErrorMessage(resp.Error)
 	w.Header().Set("Content-Type", "application/json")

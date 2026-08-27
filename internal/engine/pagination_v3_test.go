@@ -544,6 +544,31 @@ func TestPaginationV3RepeatedValuesAndBoundsFailSafely(t *testing.T) {
 	}
 }
 
+// TestPaginationV3ExhaustedByteBudgetStopsBeforeAnotherProviderCall prevents a guaranteed-failure continuation request.
+func TestPaginationV3ExhaustedByteBudgetStopsBeforeAnotherProviderCall(t *testing.T) {
+	body := `{"items":[1],"next":"second"}`
+	policy := baseV3Policy("$.items")
+	policy.Request = []paginationpolicy.RequestStep{{State: "cursor", Target: v3Target("query", "cursor"), ValueType: "string", Apply: "subsequent"}}
+	policy.Response.Values = []paginationpolicy.ResponseValue{{Name: "next", Source: v3BodySource("$.next", "string")}}
+	policy.Continuation = []paginationpolicy.ContinuationStep{{Kind: "token", State: "cursor", ResponseValue: "next"}}
+	policy.Termination.StopOnMissingValues = []string{"next"}
+	policy.Limits = paginationpolicy.Limits{MaxPages: 2, MaxItems: 10, MaxBytes: int64(len(body)), MaxDurationMs: 1000}
+	calls := 0
+	dispatcher := &Dispatcher{client: &http.Client{Transport: paginationRoundTripper(func(request *http.Request) (*http.Response, error) {
+		calls++
+		return paginationResponse(request, body, nil), nil
+	})}}
+	object := v3Object(http.MethodGet, "/items", models.Parameter{Name: "cursor", In: "query", Type: "string"})
+	object.Pagination = modelPolicy(policy)
+
+	_, err := dispatcher.ExecuteStream(context.Background(), &models.Service{BaseURL: "https://provider.test"}, explicitAnonymousEndpoint(object), nil, nil, nil, &mockStream{})
+
+	// One admitted page exactly consumes the byte policy; a second provider call cannot produce a valid JSON page within zero remaining bytes.
+	if PaginationFailureCode(err) != "max_bytes" || calls != 1 {
+		t.Fatalf("code=%q calls=%d err=%v", PaginationFailureCode(err), calls, err)
+	}
+}
+
 // TestPaginationV3PreservesProviderFailure proves an error response on a later
 // page replaces the private partial aggregate and retains SDK auth semantics.
 func TestPaginationV3PreservesProviderFailure(t *testing.T) {

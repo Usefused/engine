@@ -164,28 +164,33 @@ func GraphQLProxyHandler(proxy Forwarder, s store.Store) http.HandlerFunc {
 		start := time.Now()
 		accountID, err := controlActorAccount(r.Context())
 		authDur := time.Since(start)
+		// Cancellation means the caller is already gone; every other authentication
+		// failure receives the shared correlated control-plane contract.
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
 			slog.WarnContext(r.Context(), "GraphQLProxyHandler: rejected request with invalid API key", slog.Any("error", err))
-			http.Error(w, `{"error":"invalid API key"}`, http.StatusUnauthorized)
+			writeControlAPIError(w, r.Context(), http.StatusUnauthorized, "authentication_required", "Authentication is required to use Registry GraphQL.", "Log in or provide a valid Fused credential.")
 			return
 		}
 
 		body, err := readAndRestoreBody(r)
+		// A body read failure is rejected before GraphQL parsing or Registry forwarding.
 		if err != nil {
-			http.Error(w, `{"error":"failed to read request body"}`, http.StatusBadRequest)
+			writeControlAPIError(w, r.Context(), http.StatusBadRequest, "invalid_graphql_request_body", "The GraphQL request body could not be read.", "Send one valid JSON GraphQL request.")
 			return
 		}
 
 		operation, err := authorizeRegistryGraphQLOperation(r.Context(), body)
+		// Authorization errors retain their dedicated contract; only invalid GraphQL
+		// document shapes use this control-plane validation envelope.
 		if err != nil {
 			if !errors.Is(err, errInvalidRegistryGraphQLRequest) {
-				accesscontrol.WriteAuthorizationError(w, err)
+				accesscontrol.WriteAuthorizationError(w, err, r.Context())
 				return
 			}
-			http.Error(w, `{"error":"invalid GraphQL operation"}`, http.StatusBadRequest)
+			writeControlAPIError(w, r.Context(), http.StatusBadRequest, "invalid_graphql_operation", "The GraphQL operation is invalid or ambiguous.", "Send exactly one supported query or mutation operation.")
 			return
 		}
 		if operation != "mutation" {

@@ -124,7 +124,7 @@ func mcpSessionStartFailure(err error) (int, string) {
 	if errors.As(err, &admissionError) {
 		return http.StatusUnprocessableEntity, admissionError.Code
 	}
-	return http.StatusInternalServerError, "failed to establish MCP session"
+	return http.StatusInternalServerError, mcpSessionStartFailedCode
 }
 
 // recordMCPSchemaLimit maps typed schema failures to fixed policy dimensions without schema text.

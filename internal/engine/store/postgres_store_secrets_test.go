@@ -36,15 +36,167 @@ func TestFirstCompleteSecretSetSQLIsOrderedAndExpiryAware(t *testing.T) {
 	}
 }
 
+// TestAppBucketCredentialPresenceSQLUsesExactSecretFreeRequirements keeps
+// referenced readiness set-based, expiry-aware, and free of credential values.
 func TestAppBucketCredentialPresenceSQLUsesExactSecretFreeRequirements(t *testing.T) {
-	for _, required := range []string{"jsonb_to_recordset", "config.bucket_id = $1", "config.service_id = requirement.service_id", "secret.key_name = requested_key.key_name"} {
+	for _, required := range []string{
+		"jsonb_to_recordset", "config.bucket_id = $1", "config.service_id = requirement.service_id",
+		"candidate.target_auth_name = requested_key.auth_name", "secret.key_name = requested_key.storage_key_name",
+		"requested_key.target_key_name", "secret.expires_at IS NULL OR secret.expires_at > NOW()",
+	} {
+		// Each fragment preserves exact, expiry-aware matching inside one bounded query.
 		if !strings.Contains(appBucketCredentialPresenceSQL, required) {
 			t.Fatalf("credential readiness query is missing %q: %s", required, appBucketCredentialPresenceSQL)
 		}
 	}
 	for _, forbidden := range []string{"encrypted_value", "encrypted_dek", "encrypted_client_id", "encrypted_client_secret"} {
+		// Planning must reveal presence only, never stored credential material.
 		if strings.Contains(strings.ToLower(appBucketCredentialPresenceSQL), forbidden) {
 			t.Fatalf("credential readiness query must not select secret material %q", forbidden)
+		}
+	}
+}
+
+// TestAuthReferenceSQLUsesExactIdentityAndAliasesKeys guards the shared runtime
+// invariant without permitting version drift or source names into injection.
+func TestAuthReferenceSQLUsesExactIdentityAndAliasesKeys(t *testing.T) {
+	for _, required := range []string{
+		"candidate.target_auth_name = requested_key.auth_name",
+		"candidate.value->'auth_types'->>requested_key.key_name AS auth_type",
+		"requested_key.auth_type IS NULL",
+		"reference.target_auth_type), '-', '_')) <> requested_key.auth_type",
+		"reference.source_auth_name || SUBSTRING",
+		"selected_key.target_key_name AS key_name",
+		"secret.service_id = selected_key.storage_service_id",
+	} {
+		// Exact-name lookup and destination aliases are both required for safe reuse.
+		if !strings.Contains(firstCompleteSecretSetSQL, required) {
+			t.Fatalf("referenced secret selector is missing %q: %s", required, firstCompleteSecretSetSQL)
+		}
+	}
+}
+
+// TestPostgresStoreResolvesWholeAuthReference proves direct and referenced
+// Basic bundles share one ordered, atomic store lookup and one readiness query.
+func TestPostgresStoreResolvesWholeAuthReference(t *testing.T) {
+	fixture := setupConnectAuthStore(t)
+	postgres := fixture.store.(*postgresStore)
+	sourceServiceID := uuid.New()
+	_, err := postgres.db.Exec(fixture.ctx, `
+		INSERT INTO fused_workspace_services (service_id, service_name)
+		VALUES ($1, 'Auth reference target'), ($2, 'Auth reference source')
+	`, fixture.serviceID, sourceServiceID)
+	// References may only target workspace-admitted source identities.
+	if err != nil {
+		t.Fatalf("seed auth reference source service: %v", err)
+	}
+
+	bindings := referencedBasicBindings(fixture.bucketA, fixture.serviceID, sourceServiceID)
+	// The binding store persists direct source values and both references atomically.
+	if err := fixture.store.(WorkspaceAuthBindingStore).ApplyWorkspaceAuthBindings(fixture.ctx, bindings); err != nil {
+		t.Fatalf("apply auth reference fixtures: %v", err)
+	}
+	// A later direct row must not shadow the reference selected for this exact auth name.
+	if err := fixture.store.UpsertSecrets(fixture.ctx, basicSecretRows(fixture.bucketA, fixture.serviceID, "targetBasic", "stale")); err != nil {
+		t.Fatalf("seed stale target credentials: %v", err)
+	}
+
+	mismatchedAlternative := SecretKeyAlternative{
+		Required:  []string{"targetBasic_username", "targetBasic_password"},
+		AuthNames: map[string]string{"targetBasic_username": "targetBasic", "targetBasic_password": "targetBasic"},
+		AuthTypes: map[string]string{"targetBasic_username": "bearer", "targetBasic_password": "bearer"},
+	}
+	selected, err := fixture.store.GetFirstCompleteSecretSet(fixture.ctx, fixture.bucketA, fixture.serviceID, []SecretKeyAlternative{mismatchedAlternative})
+	// An immutable-version family change must fail closed even when source material exists.
+	if err != nil || len(selected) != 0 {
+		t.Fatalf("mismatched referenced Basic bundle = %#v err=%v", selected, err)
+	}
+
+	alternative := mismatchedAlternative
+	alternative.AuthTypes = map[string]string{"targetBasic_username": "basic", "targetBasic_password": "basic"}
+	selected, err = fixture.store.GetFirstCompleteSecretSet(fixture.ctx, fixture.bucketA, fixture.serviceID, []SecretKeyAlternative{alternative})
+	// Runtime should resolve the complete source bundle in one store call.
+	if err != nil {
+		t.Fatalf("resolve referenced Basic bundle: %v", err)
+	}
+	assertReferencedBasicSelection(t, selected, sourceServiceID, "source")
+
+	// References remain live: rotating only the source must affect the next uncached lookup.
+	if err := fixture.store.UpsertSecrets(fixture.ctx, basicSecretRows(fixture.bucketA, sourceServiceID, "sourceBasic", "rotated")); err != nil {
+		t.Fatalf("rotate source Basic bundle: %v", err)
+	}
+	selected, err = fixture.store.GetFirstCompleteSecretSet(fixture.ctx, fixture.bucketA, fixture.serviceID, []SecretKeyAlternative{alternative})
+	// Rotation still has to return one complete bundle under destination keys.
+	if err != nil {
+		t.Fatalf("resolve rotated Basic bundle: %v", err)
+	}
+	assertReferencedBasicSelection(t, selected, sourceServiceID, "rotated")
+
+	presence, err := fixture.store.(AppBucketReadinessStore).GetAppBucketCredentialPresence(fixture.ctx, fixture.bucketA, []AppCredentialRequirement{{
+		ServiceID: fixture.serviceID, AuthType: "basic", AuthName: "targetBasic",
+		SecretKeys: []string{"targetBasic_username", "targetBasic_password"},
+	}})
+	// Planning must report destination key identities even though material lives on the source.
+	if err != nil || len(presence) != 1 || len(presence[0].SecretKeys) != 2 {
+		t.Fatalf("referenced credential readiness = %#v err=%v", presence, err)
+	}
+}
+
+// referencedBasicBindings creates overlapping target names so tests prove
+// exact scheme identity wins over tempting prefix matches.
+func referencedBasicBindings(bucketID, targetServiceID, sourceServiceID uuid.UUID) []WorkspaceAuthBinding {
+	source := workspaceAuthDirectTestBinding(bucketID, sourceServiceID)
+	return []WorkspaceAuthBinding{
+		source,
+		{
+			BucketID: bucketID, TargetServiceID: sourceServiceID, TargetAuthType: "basic", TargetAuthName: "wrongBasic",
+			TargetKeys: []string{"wrongBasic_username", "wrongBasic_password"},
+			Secrets:    basicSecretRows(bucketID, sourceServiceID, "wrongBasic", "wrong"),
+		},
+		{
+			BucketID: bucketID, TargetServiceID: targetServiceID, TargetAuthType: "basic", TargetAuthName: "target",
+			TargetKeys: []string{"target_username", "target_password"},
+			Reference: &WorkspaceAuthReference{
+				SourceServiceID: sourceServiceID, SourceAuthType: "basic", SourceAuthName: "wrongBasic",
+				SourceRequired: []string{"wrongBasic_username", "wrongBasic_password"},
+			},
+		},
+		workspaceAuthReferenceTestBinding(bucketID, targetServiceID, sourceServiceID),
+	}
+}
+
+// basicSecretRows builds one complete encrypted-metadata fixture without
+// duplicating paired username/password setup across reference scenarios.
+func basicSecretRows(bucketID, serviceID uuid.UUID, authName, marker string) []WorkspaceSecret {
+	rows := make([]WorkspaceSecret, 0, 2)
+	for _, suffix := range []string{"_username", "_password"} {
+		rows = append(rows, WorkspaceSecret{
+			WorkspaceSecretMeta: WorkspaceSecretMeta{
+				BucketID: bucketID, ServiceID: serviceID, KeyName: authName + suffix, CredentialType: "basic",
+			},
+			EncryptedDEK: "dek-" + marker + suffix, EncryptedValue: "value-" + marker + suffix,
+		})
+	}
+	return rows
+}
+
+// assertReferencedBasicSelection checks that source material is returned under
+// destination names and that neither the overlapping nor stale rows won.
+func assertReferencedBasicSelection(t *testing.T, selected []WorkspaceSecret, sourceServiceID uuid.UUID, marker string) {
+	t.Helper()
+	// A Basic reference is indivisible and must return both destination roles.
+	if len(selected) != 2 {
+		t.Fatalf("referenced Basic selection = %#v", selected)
+	}
+	byKey := make(map[string]WorkspaceSecret, len(selected))
+	for _, secret := range selected {
+		byKey[secret.KeyName] = secret
+	}
+	for _, key := range []string{"targetBasic_username", "targetBasic_password"} {
+		secret, ok := byKey[key]
+		// Aliased rows retain their source identity and correct encrypted marker.
+		if !ok || secret.ServiceID != sourceServiceID || !strings.Contains(secret.EncryptedValue, marker) {
+			t.Fatalf("referenced Basic key %q = %#v", key, secret)
 		}
 	}
 }

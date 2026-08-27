@@ -71,7 +71,74 @@ describe("runExecute -- call() wiring", () => {
       callImpl,
     );
     expect(resultValue(outcome)).toEqual({ ok: true });
-    expect(callImpl).toHaveBeenCalledWith(testCallOptions, "test.op", { x: 1 }, expect.any(AbortSignal));
+    expect(callImpl).toHaveBeenCalledWith(testCallOptions, "test.op", { x: 1 }, expect.any(AbortSignal), undefined);
+  });
+
+  /** Physical pagination options reach the Engine separately while malformed controls stop before transport. */
+  it("forwards only strict physical pagination options", async () => {
+    const callImpl = vi.fn().mockResolvedValue({ messages: [{ id: "latest" }] });
+    const session = new SessionState();
+    const accepted = await runExecute(
+      'return await call("gmail.users.messages.list", {userId:"me",maxResults:1}, {pagination:{maxPages:1}});',
+      testCallOptions,
+      session,
+      undefined,
+      callImpl,
+    );
+    expect(accepted.isError).toBe(false);
+    expect(callImpl).toHaveBeenCalledWith(
+      testCallOptions,
+      "gmail.users.messages.list",
+      { userId: "me", maxResults: 1 },
+      expect.any(AbortSignal),
+      { pagination: { maxPages: 1 } },
+    );
+
+    const engineBound = await runExecute(
+      'return await call("test.op", {}, {pagination:{maxPages:1001}});',
+      testCallOptions,
+      session,
+      undefined,
+      callImpl,
+    );
+    // The runtime owns shape admission; the Engine remains the single source for operation and global upper bounds.
+    expect(engineBound.isError).toBe(false);
+    expect(callImpl).toHaveBeenLastCalledWith(
+      testCallOptions,
+      "test.op",
+      {},
+      expect.any(AbortSignal),
+      { pagination: { maxPages: 1001 } },
+    );
+
+    const invalid = [
+      "null",
+      "{}",
+      '{pagination:{maxPages:0}}',
+      '{pagination:{maxPages:1.5}}',
+      '{pagination:{max_pages:1}}',
+      '{pagination:{maxPages:1},unknown:true}',
+    ];
+    for (const options of invalid) {
+      // Every rejected shape must fail before another Engine bridge call begins.
+      const outcome = await runExecute(`return await call("test.op", {}, ${options});`, testCallOptions, session, undefined, callImpl);
+      expect(outcome.text).toMatch(/MCP_CALL_(OPTIONS|PAGINATION)_INVALID/);
+    }
+    expect(callImpl).toHaveBeenCalledTimes(2);
+  });
+
+  /** session.get fails explicitly on ignored options before reading or re-retaining a root result. */
+  it("rejects extra session.get arguments with navigation guidance", async () => {
+    const session = new SessionState();
+    const retained = session.deliver({ messages: Array.from({ length: 100 }, (_, id) => ({ id, body: "x".repeat(200) })) }, 1024);
+    const reference = JSON.parse(retained.text).result_ref;
+
+    const outcome = await runExecute(`return session.get(${JSON.stringify(reference)}, {path:"/messages"});`, testCallOptions, session);
+
+    expect(outcome.isError).toBe(true);
+    expect(outcome.text).toContain("MCP_SESSION_GET_ARGUMENTS_INVALID");
+    expect(outcome.text).toContain("session.page");
+    expect(outcome.access).toEqual({ retained_reads: 0, unavailable_reads: 0 });
   });
 
   it("enforces the call-count cap", async () => {
@@ -89,14 +156,15 @@ describe("runExecute -- call() wiring", () => {
     expect(callImpl).toHaveBeenCalledTimes(2);
   });
 
-  // Delivery metadata stays separate from the public error text.
+  // Model-visible recovery stays compact while trusted delivery metadata remains separate.
   it("a script error is returned as a clean error, not thrown", async () => {
     const outcome = await runExecute(
       'throw new Error("boom");',
       testCallOptions,
       new SessionState(),
     );
-    expect(outcome).toMatchObject({ isError: true, text: "boom", delivery: "error" });
+    expect(outcome).toMatchObject({ isError: true, delivery: "error" });
+    expect(JSON.parse(outcome.text)).toMatchObject({ message: "boom", recovery_action: "do_not_replay", execute_request: "do_not_replay", provider_execution: "unknown" });
   });
 });
 
@@ -200,7 +268,8 @@ describe("runExecute -- bounded output", () => {
       new SessionState(),
     );
 
-    expect(outcome).toMatchObject({ text: "safe text", isError: true, delivery: "error" });
+    expect(outcome).toMatchObject({ isError: true, delivery: "error" });
+    expect(JSON.parse(outcome.text)).toMatchObject({ message: "safe text", recovery_action: "do_not_replay", provider_execution: "unknown" });
   });
 
   it("returns stable serialization failures for circular and BigInt output", async () => {

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -94,24 +95,58 @@ func TestAuditExportHandlerProducesSafeJSONL(t *testing.T) {
 	}
 }
 
+// TestAuditExportHandlerRejectsInvalidInputsBeforeRepositoryCall verifies every
+// invalid filter returns the stable structured validation contract.
 func TestAuditExportHandlerRejectsInvalidInputsBeforeRepositoryCall(t *testing.T) {
 	workspaceID := uuid.New()
-	for _, path := range []string{
-		"/audit/export?format=xml",
-		"/audit/export?limit=10001",
-		"/audit/export?outcome=unknown",
-		"/audit/export?actor_subject_id=not-a-uuid",
-	} {
-		t.Run(path, func(t *testing.T) {
+	tests := []struct {
+		path    string
+		message string
+	}{
+		{path: "/audit/export?format=xml", message: "Audit export format must be csv or jsonl."},
+		{path: "/audit/export?limit=10001", message: "Audit export limit must be an integer from 1 to 10000."},
+		{path: "/audit/export?outcome=unknown", message: "Audit export outcome contains an unsupported value."},
+		{path: "/audit/export?actor_subject_id=not-a-uuid", message: "Audit export actor_subject_id must be a valid UUID."},
+	}
+	for _, test := range tests {
+		t.Run(test.path, func(t *testing.T) {
 			repository := &auditExportStore{}
-			request := httptest.NewRequest(http.MethodGet, path, nil)
+			request := httptest.NewRequest(http.MethodGet, test.path, nil)
 			request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), controlTestOwnerActor(workspaceID)))
 			response := httptest.NewRecorder()
 			AuditExportHandler(repository).ServeHTTP(response, request)
+			// Invalid input must remain a non-mutating 400 before repository access.
 			if response.Code != http.StatusBadRequest || repository.calls != 0 {
 				t.Fatalf("status/calls = %d/%d; body=%s", response.Code, repository.calls, response.Body.String())
 			}
+			var envelope workspaceConfigErrorResponse
+			// Every validation path must use the nested shared Engine envelope.
+			if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil || envelope.Error.Code != "invalid_audit_export" || envelope.Error.Message != test.message || envelope.Error.Remediation == "" {
+				t.Fatalf("audit validation envelope = %#v, decode error=%v", envelope, err)
+			}
 		})
+	}
+}
+
+// TestAuditExportHandlerHidesRepositoryFailure verifies internal export prose
+// stays in telemetry while the public envelope remains fixed and retryable.
+func TestAuditExportHandlerHidesRepositoryFailure(t *testing.T) {
+	workspaceID := uuid.New()
+	repository := &auditExportStore{err: errors.New("database password=fsk_never_return")}
+	request := httptest.NewRequest(http.MethodGet, "/audit/export?format=jsonl", nil)
+	request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), controlTestOwnerActor(workspaceID)))
+	response := httptest.NewRecorder()
+
+	AuditExportHandler(repository).ServeHTTP(response, request)
+
+	var envelope workspaceConfigErrorResponse
+	// Repository failures retain only the stable code, retry policy, and remediation.
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil || response.Code != http.StatusInternalServerError || envelope.Error.Code != "audit_export_unavailable" || !envelope.Error.Retryable {
+		t.Fatalf("audit internal envelope = %#v, status=%d, decode error=%v", envelope, response.Code, err)
+	}
+	// Store causes may contain secrets and must never cross the HTTP boundary.
+	if strings.Contains(response.Body.String(), "fsk_never_return") || strings.Contains(response.Body.String(), "database password") {
+		t.Fatalf("audit export leaked repository failure: %s", response.Body.String())
 	}
 }
 

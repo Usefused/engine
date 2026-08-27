@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
@@ -2238,6 +2239,8 @@ func TestArtifactApplyRejectsPlanRevisionChangedAfterAuthorization(t *testing.T)
 	}
 }
 
+// TestArtifactApplyHandlersRejectMissingAuthorizedPlanRevision verifies every
+// app adapter proves that admission rejection occurred before mutation.
 func TestArtifactApplyHandlersRejectMissingAuthorizedPlanRevision(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -2249,18 +2252,28 @@ func TestArtifactApplyHandlersRejectMissingAuthorizedPlanRevision(t *testing.T) 
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			// Webhook admission is enabled so every adapter reaches the shared revision gate.
 			if test.name == "webhook" {
 				entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{WebhookIngestionEnabled: true})
 				defer entitlement.LiveEntitlement.Reset()
 			}
-			request := httptest.NewRequest(http.MethodPost, "/"+test.name+"-config/apply", strings.NewReader(`{"plan_id":"`+uuid.NewString()+`"}`))
+			planID := uuid.NewString()
+			request := httptest.NewRequest(http.MethodPost, "/"+test.name+"-config/apply", strings.NewReader(`{"plan_id":"`+planID+`"}`))
 			request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), accesscontrol.Actor{AccountID: uuid.New()}))
 			response := httptest.NewRecorder()
 
-			test.handler.ServeHTTP(response, request)
+			chimiddleware.RequestID(test.handler).ServeHTTP(response, request)
 
 			if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "authorized plan revision unavailable") {
 				t.Fatalf("missing revision response = %d %s", response.Code, response.Body.String())
+			}
+			var envelope workspaceConfigErrorResponse
+			// Shared apply admission must prove no mutation started and retain both correlations.
+			if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+				t.Fatalf("decode missing revision response: %v", err)
+			}
+			if envelope.Error.Phase != "apply_admission" || envelope.Error.OperationID != planID || envelope.Error.CommitState != "not_committed" || envelope.Error.RequestID == "" {
+				t.Fatalf("missing revision metadata = %#v", envelope.Error)
 			}
 		})
 	}

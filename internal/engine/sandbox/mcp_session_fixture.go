@@ -182,9 +182,11 @@ func endpointToFixtureOperation(serviceID string, ep fusedobject.Endpoint) (Fixt
 // hard-fail-on-duplicate behavior for fixture files, where a duplicate is an
 // authoring mistake rather than a live scope's cross-service name collision.
 func newFixtureFromOperations(ctx context.Context, ops []FixtureOperation) *Fixture {
-	f := &Fixture{}
+	// A fully narrowed token may expose no physical operations; Node still requires the catalogue field to be an array.
+	f := &Fixture{Operations: make([]FixtureOperation, 0, len(ops))}
 	seen := make(map[string]struct{}, len(ops))
 	for _, op := range ops {
+		// Live cross-service collisions preserve the first callable to match dispatch's existing resolution order.
 		if _, exists := seen[op.OperationID]; exists {
 			slog.WarnContext(ctx, "duplicate operation_id building session fixture; keeping first",
 				slog.String("operation_id", op.OperationID))

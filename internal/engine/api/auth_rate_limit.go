@@ -8,9 +8,11 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
+// limitAuthenticationRequests rejects abusive identity traffic with a stable retry contract.
 func limitAuthenticationRequests(limiter *browserauth.RequestLimiter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Admitted requests proceed without changing their identity response contract.
 			if limiter.Allow(r) {
 				next.ServeHTTP(w, r)
 				return
@@ -24,7 +26,7 @@ func limitAuthenticationRequests(limiter *browserauth.RequestLimiter) func(http.
 			span.End()
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Retry-After", "60")
-			writeManagedLoginError(w, http.StatusTooManyRequests, "rate_limited")
+			writeManagedLoginError(w, http.StatusTooManyRequests, "rate_limited", r.Context())
 		})
 	}
 }

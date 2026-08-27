@@ -65,6 +65,14 @@ func TestBoundedJSONResponseCollectorRejectsMalformedOrUnsuccessfulResponses(t *
 			if !errors.Is(err, test.want) {
 				t.Fatalf("Result() error = %v, want %v", err, test.want)
 			}
+			// Provider failures must retain only their numeric status for safe public diagnostics.
+			if test.want == ErrPhysicalResponseStatus {
+				var statusErr *PhysicalResponseStatusError
+				// The typed status must match the frame while retaining sentinel compatibility.
+				if !errors.As(err, &statusErr) || statusErr.StatusCode != test.status {
+					t.Fatalf("Result() status error = %#v, want HTTP %d", statusErr, test.status)
+				}
+			}
 		})
 	}
 }

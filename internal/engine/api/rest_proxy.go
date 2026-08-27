@@ -48,7 +48,7 @@ func RESTProxyHandlerWithRuntimeContracts(proxy Forwarder, s store.Store, contra
 				return
 			}
 			slog.WarnContext(r.Context(), "RESTProxyHandler: rejected request with invalid API key", slog.Any("error", err), slog.String("path", r.URL.Path))
-			http.Error(w, `{"error":"invalid API key"}`, http.StatusUnauthorized)
+			writeControlAPIError(w, r.Context(), http.StatusUnauthorized, "authentication_required", "Authentication is required for this Registry request.", "Log in or provide a valid Fused credential.")
 			return
 		}
 

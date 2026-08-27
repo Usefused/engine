@@ -136,16 +136,28 @@ func TestRateLimiter_RefillsOverTime(t *testing.T) {
 	}
 }
 
+// isolateRateLimiters restores package-global limiter policy after a test replaces it.
+func isolateRateLimiters(t *testing.T) {
+	t.Helper()
+	previousSessionLimiter, previousMessageLimiter := sessionStartRateLimiter, messageRateLimiter
+	// Isolation keeps a narrow exhaustion policy from altering later integration tests in the same package process.
+	t.Cleanup(func() {
+		sessionStartRateLimiter, messageRateLimiter = previousSessionLimiter, previousMessageLimiter
+	})
+}
+
+// TestAllowMCPSessionStartReturns429WhenExhausted isolates handshake policy while proving burst exhaustion returns guidance.
 func TestAllowMCPSessionStartReturns429WhenExhausted(t *testing.T) {
+	isolateRateLimiters(t)
 	initRateLimiters(1, 1, 60, 10)
 
-	// First connection: allowed
+	// The first connection consumes the only handshake burst token.
 	w := httptest.NewRecorder()
 	if !allowMCPSessionStart(w, "sdk-test") {
 		t.Fatal("first MCP session should be allowed")
 	}
 
-	// Second connection immediately: denied → 429
+	// An immediate second connection cannot refill, so the caller receives an actionable retry response.
 	w2 := httptest.NewRecorder()
 	if allowMCPSessionStart(w2, "sdk-test") {
 		t.Fatal("second MCP session should be rate-limited")
@@ -158,14 +170,18 @@ func TestAllowMCPSessionStartReturns429WhenExhausted(t *testing.T) {
 	}
 }
 
+// TestAllowMessage_Returns429WhenExhausted isolates message policy while proving burst exhaustion returns HTTP 429.
 func TestAllowMessage_Returns429WhenExhausted(t *testing.T) {
-	initRateLimiters(60, 10, 1, 1) // burst=1 for messages
+	isolateRateLimiters(t)
+	// One message token makes the exhaustion boundary deterministic without affecting later tests.
+	initRateLimiters(60, 10, 1, 1)
 
 	w := httptest.NewRecorder()
 	if !allowMessage(w, "sdk-msg") {
 		t.Fatal("first message should be allowed")
 	}
 
+	// The second immediate message proves the shared handler reports exhaustion at admission.
 	w2 := httptest.NewRecorder()
 	if allowMessage(w2, "sdk-msg") {
 		t.Fatal("second message should be rate-limited")

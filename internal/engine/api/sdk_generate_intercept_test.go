@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -282,6 +283,12 @@ func TestRESTProxyHandler_SDKGenerate_BlocksUnactivatedService(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "fused-cli workspace service add stripe-billing") {
 		t.Errorf("expected friendly add command hint, got %s", rec.Body.String())
+	}
+	var envelope workspaceConfigErrorResponse
+	// The activation gate proves Registry never received the mutation and carries
+	// that pre-commit state in the shared structured response.
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil || envelope.Error.Code != "workspace_service_activation_required" || envelope.Error.Phase != "sdk_generation_admission" || envelope.Error.CommitState != "not_committed" {
+		t.Fatalf("SDK generation gate envelope = %#v, decode error=%v", envelope, err)
 	}
 }
 

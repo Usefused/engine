@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
@@ -123,6 +124,10 @@ type workspaceTestStore struct {
 	bucketValues                 map[uuid.UUID][]store.BucketValue
 	secretMetas                  map[uuid.UUID][]store.WorkspaceSecretMeta
 	upsertedSecrets              []store.WorkspaceSecret
+	workspaceAuthBindings        []store.WorkspaceAuthBinding
+	workspaceAuthPreflight       []store.WorkspaceAuthBinding
+	workspaceAuthDesiredIDs      []uuid.UUID
+	workspaceAuthPreflightErr    error
 	bucketLookupNames            []string
 	bucketBatchLookupNames       [][]string
 	bucketBatchLookupErr         error
@@ -836,6 +841,13 @@ func (s *workspaceTestStore) RemoveWorkspaceService(ctx context.Context, service
 	return s.deactivateErr
 }
 
+// RemoveWorkspaceServices records composite reconciliation without imposing a
+// test-only deletion order on auth-reference targets and sources.
+func (s *workspaceTestStore) RemoveWorkspaceServices(_ context.Context, serviceIDs []uuid.UUID) error {
+	s.removedWorkspaceServices = append(s.removedWorkspaceServices, serviceIDs...)
+	return s.deactivateErr
+}
+
 func (s *workspaceTestStore) GetWorkspaceWebhookBySlug(ctx context.Context, slug string) (*store.WorkspaceWebhook, error) {
 	return nil, store.ErrWorkspaceWebhookNotFound
 }
@@ -944,6 +956,8 @@ func (s *workspaceTestStore) GetWorkspaceExecutionAnalytics(ctx context.Context,
 	return s.workspaceExecutionAnalytics, nil
 }
 
+// TestAddService_MissingServiceID_400 verifies malformed activation input uses
+// the correlated structured admission contract before any workspace write.
 func TestAddService_MissingServiceID_400(t *testing.T) {
 	s := &workspaceTestStore{
 		accountID:   uuid.New(),
@@ -958,10 +972,18 @@ func TestAddService_MissingServiceID_400(t *testing.T) {
 	req.Header.Set("X-API-Key", "fsk_test")
 
 	rr := httptest.NewRecorder()
-	router.ServeHTTP(rr, req)
+	chimiddleware.RequestID(router).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var envelope workspaceConfigErrorResponse
+	// Structured validation metadata must remain stable for CLI automation.
+	if err := json.Unmarshal(rr.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode activation error: %v", err)
+	}
+	if envelope.Error.Code != "invalid_workspace_service_request" || envelope.Error.Message != "service_id is required" || envelope.Error.Phase != "request_admission" || envelope.Error.CommitState != "not_committed" || envelope.Error.RequestID == "" {
+		t.Fatalf("activation error = %#v", envelope.Error)
 	}
 }
 
@@ -1373,8 +1395,21 @@ func TestAddService_RegistryUnreachable_502(t *testing.T) {
 	if rr.Code != http.StatusBadGateway {
 		t.Errorf("expected 502, got %d: %s", rr.Code, rr.Body.String())
 	}
+	var envelope workspaceConfigErrorResponse
+	// Dependency classification must remain actionable without exposing transport prose.
+	if err := json.Unmarshal(rr.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode Registry error: %v", err)
+	}
+	if envelope.Error.Code != "registry_verification_failed" || envelope.Error.Category != "dependency" || !envelope.Error.Retryable || envelope.Error.CommitState != "not_committed" {
+		t.Fatalf("Registry error = %#v", envelope.Error)
+	}
+	if strings.Contains(rr.Body.String(), "connection refused") {
+		t.Fatalf("Registry error leaked transport cause: %s", rr.Body.String())
+	}
 }
 
+// TestRemoveService_NotFound_404 verifies an authoritative missing membership
+// is distinct from an ambiguous persistence failure.
 func TestRemoveService_NotFound_404(t *testing.T) {
 	s := &workspaceTestStore{
 		accountID:     uuid.New(),
@@ -1391,6 +1426,61 @@ func TestRemoveService_NotFound_404(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var envelope workspaceConfigErrorResponse
+	// Repository not-found proves the delete did not commit.
+	if err := json.Unmarshal(rr.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode removal error: %v", err)
+	}
+	if envelope.Error.Code != "workspace_service_not_found" || envelope.Error.Phase != "workspace_mutation" || envelope.Error.CommitState != "not_committed" {
+		t.Fatalf("removal error = %#v", envelope.Error)
+	}
+}
+
+// TestRemoveServiceReferencedCredentialConflict proves source dependency
+// fencing is a reviewable conflict rather than an ambiguous persistence error.
+func TestRemoveServiceReferencedCredentialConflict(t *testing.T) {
+	testStore := &workspaceTestStore{
+		accountID: uuid.New(), workspaceID: uuid.New(),
+		deactivateErr: store.ErrWorkspaceAuthReferenceInUse,
+	}
+	router := buildWorkspaceRouter(testStore, &mockVerifier{})
+	request := httptest.NewRequest(http.MethodDelete, "/workspace/services/"+uuid.NewString(), nil)
+	request.Header.Set("X-API-Key", "fsk_test")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	var envelope workspaceConfigErrorResponse
+	// The response must explain the dependency and prove no deletion committed.
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode dependency conflict: %v", err)
+	}
+	if response.Code != http.StatusConflict || envelope.Error.Code != "workspace_auth_reference_in_use" || envelope.Error.CommitState != "not_committed" {
+		t.Fatalf("dependency conflict = status %d, error %#v", response.Code, envelope.Error)
+	}
+}
+
+// TestRemoveServiceStoreFailureHidesCauseAndReportsUnknownCommit verifies an
+// unclassified delete failure does not claim rollback or expose store details.
+func TestRemoveServiceStoreFailureHidesCauseAndReportsUnknownCommit(t *testing.T) {
+	testStore := &workspaceTestStore{accountID: uuid.New(), workspaceID: uuid.New(), deactivateErr: errors.New("database secret=fsk_never_return")}
+	router := buildWorkspaceRouter(testStore, &mockVerifier{})
+	request := httptest.NewRequest(http.MethodDelete, "/workspace/services/"+uuid.NewString(), nil)
+	request.Header.Set("X-API-Key", "fsk_test")
+	response := httptest.NewRecorder()
+	chimiddleware.RequestID(router).ServeHTTP(response, request)
+
+	var envelope workspaceConfigErrorResponse
+	// The shared mutation envelope must carry request and outcome correlation.
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode store failure: %v", err)
+	}
+	if response.Code != http.StatusInternalServerError || envelope.Error.Code != "workspace_service_remove_failed" || envelope.Error.CommitState != "unknown" || envelope.Error.RequestID == "" {
+		t.Fatalf("store failure = status %d, error %#v", response.Code, envelope.Error)
+	}
+	// Raw persistence errors can contain secrets and stay behind the handler boundary.
+	if strings.Contains(response.Body.String(), "fsk_never_return") || strings.Contains(response.Body.String(), "database secret") {
+		t.Fatalf("store failure leaked cause: %s", response.Body.String())
 	}
 }
 
@@ -1675,6 +1765,29 @@ func (s *workspaceTestStore) UpsertSecret(ctx context.Context, secret store.Work
 
 func (s *workspaceTestStore) UpsertSecrets(ctx context.Context, secrets []store.WorkspaceSecret) error {
 	s.upsertedSecrets = append(s.upsertedSecrets, secrets...)
+	return nil
+}
+
+// PreflightWorkspaceAuthBindings records read-only admission inputs so API
+// tests can prove validation precedes every workspace mutation.
+func (s *workspaceTestStore) PreflightWorkspaceAuthBindings(_ context.Context, bindings []store.WorkspaceAuthBinding, desiredServiceIDs []uuid.UUID) error {
+	s.workspaceAuthPreflight = append(s.workspaceAuthPreflight, bindings...)
+	s.workspaceAuthDesiredIDs = append(s.workspaceAuthDesiredIDs, desiredServiceIDs...)
+	// Injected typed failures model the production PostgreSQL graph admission
+	// boundary without allowing later mutation assertions to become coupled to SQL.
+	if s.workspaceAuthPreflightErr != nil {
+		return s.workspaceAuthPreflightErr
+	}
+	return nil
+}
+
+// ApplyWorkspaceAuthBindings records the atomic batch and its direct material
+// so existing workspace-apply assertions observe the current persistence path.
+func (s *workspaceTestStore) ApplyWorkspaceAuthBindings(_ context.Context, bindings []store.WorkspaceAuthBinding) error {
+	s.workspaceAuthBindings = append(s.workspaceAuthBindings, bindings...)
+	for _, binding := range bindings {
+		s.upsertedSecrets = append(s.upsertedSecrets, binding.Secrets...)
+	}
 	return nil
 }
 

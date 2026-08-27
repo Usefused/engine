@@ -45,7 +45,7 @@ func (c *HTTPRegistryClient) FetchRuntimeContracts(ctx context.Context, versions
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.do(req)
+	resp, err := c.doWithCallerDeadline(req)
 	// Transport failure preserves the one-batch ownership and recovery boundary.
 	if err != nil {
 		return nil, fmt.Errorf("FetchRuntimeContracts: request failed: %w", err)
@@ -442,10 +442,6 @@ func runtimeContractSnapshotFromBatchItem(item runtimeContractBatchItem, request
 	if item.Service == nil || item.ServiceID != requested.ServiceID || item.ServiceVersionID != requested.ServiceVersionID {
 		return nil, fmt.Errorf("FetchRuntimeContracts: service %s version %s not found", requested.ServiceID, requested.ServiceVersionID)
 	}
-	// Existing pagination semantics remain independent of schema dictionary representation.
-	if err := validateRuntimePagination(item.Service, item.Operations); err != nil {
-		return nil, err
-	}
 	version := item.Version
 	// A missing display label may use the requested label, never a different version identity.
 	if version == "" {
@@ -456,19 +452,40 @@ func runtimeContractSnapshotFromBatchItem(item runtimeContractBatchItem, request
 	snapshot.Revision, snapshot.SourceHash, snapshot.GenerationContractHash = item.Revision, item.SourceHash, item.GenerationContractHash
 	snapshot.ServiceMetadata.SchemaDefinitions = item.SchemaDefinitions
 	// One incompatible operation rejects the complete version before Engine storage.
-	if err := validateRuntimeSnapshot(snapshot); err != nil {
+	if err := ValidateRuntimeContractSnapshot(snapshot); err != nil {
 		return nil, err
 	}
 	return snapshot, nil
 }
 
-func validateRuntimeSnapshot(snapshot *store.ServiceContractSnapshot) error {
+// ValidateRuntimeContractSnapshot runs the complete Engine admission path and computes its hash without persisting the candidate.
+func ValidateRuntimeContractSnapshot(snapshot *store.ServiceContractSnapshot) error {
+	// A nil candidate cannot establish either runtime semantics or immutable identity.
+	if snapshot == nil {
+		return errors.New("runtime contract snapshot is missing")
+	}
+	// Runtime metadata must describe the same immutable pin used by local lookup and hashing.
+	if snapshot.ServiceMetadata.ID != snapshot.ServiceID || snapshot.ServiceMetadata.ServiceVersionID != snapshot.ServiceVersionID {
+		return errors.New("runtime contract snapshot identity does not match service metadata")
+	}
+	// Pagination target validation needs the effective service policy and every operation together.
+	if err := validateRuntimePagination(&snapshot.ServiceMetadata, snapshot.Endpoints); err != nil {
+		return err
+	}
+	// Execution policies are admitted before transport mapping can consume them.
 	if err := validateRuntimeExecutionPolicies(&snapshot.ServiceMetadata); err != nil {
 		return err
 	}
+	// Transport validation covers outbound operations and passive inbound contracts as one version.
 	if err := validateTransportContract(&snapshot.ServiceMetadata, snapshot.Endpoints, snapshot.Webhooks); err != nil {
 		return fmt.Errorf("FetchRuntimeContract: invalid transport contract: %w", err)
 	}
+	validated, err := store.ValidateServiceContractSnapshot(*snapshot)
+	// Store admission independently verifies capability, schema, generation-pin, and immutable child identity.
+	if err != nil {
+		return err
+	}
+	*snapshot = validated
 	return nil
 }
 
@@ -490,16 +507,24 @@ func incompatibleRuntimePolicy(policy string) error {
 	return fmt.Errorf("FetchRuntimeContract: incompatible %s policy: %w", policy, unsupportedExecutionCapability())
 }
 
-func validateRuntimePagination(service *runtimeContractService, operations []fusedobject.Endpoint) error {
-	if err := validateRuntimePaginationConfig("service", service.Pagination); err != nil {
+// validateRuntimePagination verifies service and operation policies against the exact executable request targets.
+func validateRuntimePagination(metadata *fusedobject.ServiceMetadata, operations []fusedobject.Endpoint) error {
+	// A missing service projection cannot provide effective pagination defaults.
+	if metadata == nil {
+		return errors.New("FetchRuntimeContract: service metadata is missing")
+	}
+	// Service pagination must be canonical before it can become an operation fallback.
+	if err := validateRuntimePaginationConfig("service", metadata.Pagination); err != nil {
 		return err
 	}
-	metadata := &fusedobject.ServiceMetadata{Pagination: service.Pagination}
+	// Each operation must be checked because service fallback changes its effective target contract.
 	for i := range operations {
+		// An exact operation override is independently validated before target resolution.
 		if err := validateRuntimePaginationConfig("operation", operations[i].Pagination); err != nil {
 			return err
 		}
 		object := fusedToIntegrationObject(metadata, operations[i])
+		// Target checks apply only to canonical v3; absent pagination keeps ordinary single-call execution.
 		if object.Pagination != nil && object.Pagination.Version == paginationpolicy.Version {
 			if err := engine.ValidatePaginationV3Targets(object, (*paginationpolicy.Config)(object.Pagination)); err != nil {
 				return fmt.Errorf("FetchRuntimeContract: invalid operation pagination target: %w", err)

@@ -213,12 +213,12 @@ func SDKConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 		actor, ok := accesscontrol.ActorFromContext(ctx)
 		if !ok {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, "plan_admission", "", "not_committed"), ctx)
 			return
 		}
 		req, doc, err := decodeSDKConfigPlanRequest(r)
 		if err != nil {
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, "plan_admission", "", "not_committed"), ctx)
 			return
 		}
 		setSDKConfigSpanAttributes(span, req.ConfigKey, doc)
@@ -231,7 +231,7 @@ func SDKConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 			defaultEngineURL: defaultEngineURL,
 		})
 		if err != nil {
-			writeSDKConfigError(w, err, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(err, "planning", "", "unknown"), ctx)
 			return
 		}
 
@@ -262,17 +262,17 @@ func SDKConfigApplyHandler(configStore store.ConfigRepository, s store.Store, pr
 		actor, ok := accesscontrol.ActorFromContext(ctx)
 		if !ok {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, "request_admission", "", "not_committed"), ctx)
 			return
 		}
 		req, planID, err := decodeSDKConfigApplyRequest(r)
 		if err != nil {
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, "request_admission", "", "not_committed"), ctx)
 			return
 		}
 		planRevision, ok := AuthorizedPlanRevisionFromContext(ctx)
 		if !ok {
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"}, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"}, "apply_admission", planID.String(), "not_committed"), ctx)
 			return
 		}
 		span.SetAttributes(
@@ -288,7 +288,7 @@ func SDKConfigApplyHandler(configStore store.ConfigRepository, s store.Store, pr
 			sourceHash:   req.SourceHash,
 		})
 		if err != nil {
-			writeSDKConfigError(w, err, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(err, "apply_execution", planID.String(), "unknown"), ctx)
 			return
 		}
 
@@ -1977,7 +1977,7 @@ func executeSDKConfigApply(
 	registryClient, err := localGenerationPlanningClient(s, registryClient)
 	// Apply must prove local snapshot capability before reserving or generating any package.
 	if err != nil {
-		return sdkGenerationResult{}, err
+		return sdkGenerationResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 	// A plan has one deterministic Registry package. Serializing that identity
 	// prevents a losing first apply from deleting the app committed by a
@@ -1987,12 +1987,12 @@ func executeSDKConfigApply(
 	plan, err := loadAuthorizedSDKAppPlanForApply(ctx, configStore, s, call)
 	// Only an authorized, exact stored plan can use its retained generation references.
 	if err != nil {
-		return sdkGenerationResult{}, err
+		return sdkGenerationResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 	lease, err := configStore.ReserveConfigPlanApply(ctx, call.planID, call.planRevision)
 	// Cross-process apply ownership must be established before Registry generation starts.
 	if err != nil {
-		return sdkGenerationResult{}, configPlanApplyReservationHTTPError(err)
+		return sdkGenerationResult{}, withWorkspaceConfigErrorMetadata(configPlanApplyReservationHTTPError(err), "apply_admission", call.planID.String(), "not_committed")
 	}
 	leaseGuard := workspaceApplyLeaseGuard{configStore: configStore, planID: call.planID, revision: call.planRevision, leaseID: lease.ID, releasable: true}
 	defer leaseGuard.release()
@@ -2005,7 +2005,12 @@ func executeSDKConfigApply(
 		// No external system was contacted, so a failed local transaction is
 		// always safe to release and retry immediately.
 		leaseGuard.releasable = true
-		return result, applyErr
+		// A post-commit read can fail after the no-op transaction succeeds, so the
+		// public outcome remains unknown unless the inner error proves otherwise.
+		if applyErr != nil {
+			return result, withWorkspaceConfigErrorMetadata(applyErr, "workspace_commit", call.planID.String(), "unknown")
+		}
+		return result, nil
 	}
 	// From the first Registry call onward, release requires either a committed
 	// local transaction or positively confirmed compensation. Unknown external
@@ -2016,7 +2021,7 @@ func executeSDKConfigApply(
 	// Failed generation may release its lease only when the external outcome is known.
 	if err != nil {
 		leaseGuard.releasable = sdkGenerationFailureReleasable(applyCtx, proxy, result)
-		return sdkGenerationResult{}, err
+		return sdkGenerationResult{}, withWorkspaceConfigErrorMetadata(err, "registry_generation", call.planID.String(), "unknown")
 	}
 	applyCtx, scopeSpan := otel.Tracer("engine").Start(applyCtx, "engine.sdk_scope.persist")
 	defer scopeSpan.End()
@@ -2027,25 +2032,25 @@ func executeSDKConfigApply(
 	)
 	// Registry output must preserve the app identity and exact selected scope before publication.
 	if err := validateSDKGenerationResult(plan.ResolvedPayload, call, result.SDKGenerationResult); err != nil {
-		scopeSpan.SetStatus(codes.Error, err.Error())
-		scopeSpan.SetAttributes(attribute.String("outcome", "validation_failed"))
+		scopeSpan.SetStatus(codes.Error, "sdk_generation_validation_failed")
+		scopeSpan.SetAttributes(attribute.String("outcome", "validation_failed"), attribute.String("error.code", "sdk_generation_validation_failed"))
 		leaseGuard.releasable = compensateNewRegistryPackage(applyCtx, proxy, result)
-		return sdkGenerationResult{}, err
+		return sdkGenerationResult{}, withWorkspaceConfigErrorMetadata(err, "generation_validation", call.planID.String(), "unknown")
 	}
 	// A snapshot refreshed during generation invalidates the plan instead of silently mixing revisions.
 	if err := ensureAppPayloadContractsCurrent(applyCtx, registryClient, call.apiKey, plan.ResolvedPayload); err != nil {
 		scopeSpan.SetStatus(codes.Error, "contract_revalidation_failed")
 		scopeSpan.SetAttributes(attribute.String("outcome", "contract_revalidation_failed"))
 		leaseGuard.releasable = compensateNewRegistryPackage(applyCtx, proxy, result)
-		return sdkGenerationResult{}, err
+		return sdkGenerationResult{}, withWorkspaceConfigErrorMetadata(err, "contract_revalidation", call.planID.String(), "unknown")
 	}
 	token, familyID, appID, _, err := applyGeneratedAppRuntime(applyCtx, configStore, s, call, plan, result)
 	// Failed local publication compensates only the package owned by this attempted plan.
 	if err != nil {
-		scopeSpan.SetStatus(codes.Error, err.Error())
-		scopeSpan.SetAttributes(attribute.String("outcome", "scope_persist_failed"))
+		scopeSpan.SetStatus(codes.Error, "sdk_scope_persist_failed")
+		scopeSpan.SetAttributes(attribute.String("outcome", "scope_persist_failed"), attribute.String("error.code", "sdk_scope_persist_failed"))
 		leaseGuard.releasable = compensateRejectedSDKPackage(applyCtx, configStore, plan.ConfigKey, proxy, result)
-		return sdkGenerationResult{}, err
+		return sdkGenerationResult{}, withWorkspaceConfigErrorMetadata(err, "workspace_commit", call.planID.String(), "unknown")
 	}
 	leaseGuard.releasable = true
 	result.AppFamilyID = familyID
@@ -2234,7 +2239,9 @@ func checkSDKFamilyCapacity(ctx context.Context, s store.Store, span trace.Span,
 	// identity path needs the aggregate count query.
 	currentFamilies, err := s.CountAppFamilies(ctx, accountID, store.AppKindSDK.String())
 	if err != nil {
-		span.RecordError(err)
+		// Store failures may contain SQL detail, so only the stable capacity code is traced.
+		span.SetAttributes(attribute.String("outcome", "failed"), attribute.String("error.code", "failed_to_count_sdk_families"))
+		span.SetStatus(codes.Error, "failed_to_count_sdk_families")
 		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_count_sdk_families"}
 	}
 	if limitErr := entitlement.CheckLimit(span, "sdk_families", currentFamilies, entitlement.LiveEntitlement.Load().MaxSDKFamilies); limitErr != nil {
@@ -3481,21 +3488,44 @@ func sameSDKServiceVersion(a, b models.SDKSelection) bool {
 	return a.ServiceVersionID == b.ServiceVersionID
 }
 
+// writeSDKConfigError preserves safe Registry classification while converging
+// SDK failures on the shared control-plane response envelope.
 func writeSDKConfigError(w http.ResponseWriter, err error, contexts ...context.Context) {
+	// Authorization errors retain their reviewed permission details and correlation.
 	if isConfigAuthorizationError(err) {
-		accesscontrol.WriteAuthorizationError(w, err)
+		recordControlMutationFailure(err, contexts)
+		var metadata workspaceConfigHTTPError
+		// Mutation wrappers retain their proven phase and commit state without
+		// discarding the authorization boundary's actionable missing permissions.
+		if errors.As(err, &metadata) && metadata.phase != "" {
+			accesscontrol.WriteAuthorizationMutationError(w, err, metadata.phase, metadata.operationID, metadata.commitState, contexts...)
+			return
+		}
+		accesscontrol.WriteAuthorizationError(w, err, contexts...)
 		return
 	}
 	var proxyErr sdkProxyError
 	if errors.As(err, &proxyErr) {
-		writeWorkspaceConfigError(w, workspaceConfigHTTPError{
+		converted := workspaceConfigHTTPError{
 			status:    proxyErr.status,
 			code:      "registry_request_failed",
 			message:   "The Registry could not complete SDK generation.",
 			category:  "dependency",
 			retryable: proxyErr.status >= http.StatusInternalServerError,
 			details:   map[string]any{"stage": "registry_generation", "http_status": proxyErr.status},
-		}, contexts...)
+		}
+		var metadata workspaceConfigHTTPError
+		// A metadata wrapper may surround the proxy cause; retain its mutation
+		// proof while replacing only the safe Registry diagnostic fields.
+		if errors.As(err, &metadata) {
+			converted.phase = metadata.phase
+			converted.operationID = metadata.operationID
+			converted.requestID = metadata.requestID
+			converted.commitState = metadata.commitState
+			converted.recovery = metadata.recovery
+			converted.traceID = metadata.traceID
+		}
+		writeWorkspaceConfigError(w, converted, contexts...)
 		return
 	}
 	writeWorkspaceConfigError(w, err, contexts...)

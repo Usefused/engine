@@ -1,11 +1,12 @@
 import vm from "node:vm";
-import { CallClientOptions, remoteCall } from "./callClient.js";
+import { CallClientOptions, PhysicalCallOptions, remoteCall } from "./callClient.js";
 import { SerializedJsonOutput, serializeBoundedJson } from "./outputLimits.js";
 import { DeliveredResult, EXECUTE_ERROR_OUTPUT_POLICY, isResultReference, RetainedResults } from "./retainedResults.js";
 import { executeOutputBudget, EXECUTE_INLINE_BYTES } from "./resultBudget.js";
 import { pageResult, ResultPageOptions } from "./resultPaging.js";
 import { Invocation, ExecutionOutcome } from "./invocation.js";
 import { boundedAtob, decodeBase64, encodeBase64 } from "./base64.js";
+import { recoveryForError } from "./sessionContract.js";
 
 export interface ExecuteLimits {
   timeoutMs: number;
@@ -99,6 +100,7 @@ export type CallImpl = (
   operationId: string,
   params: Record<string, unknown>,
   signal?: AbortSignal,
+  callOptions?: PhysicalCallOptions,
 ) => Promise<unknown>;
 
 /**
@@ -170,6 +172,7 @@ function serializeExecuteError(error: unknown, deadline: number, timeoutMs: numb
       text: JSON.stringify({
         code: timedOut ? "MCP_EXECUTE_TIMEOUT" : "MCP_EXECUTE_ERROR_SERIALIZATION_FAILED",
         message: timedOut ? `execute timed out after ${timeoutMs}ms` : "execute error could not be rendered safely",
+        ...recoveryForError(timedOut ? "MCP_EXECUTE_TIMEOUT:" : "MCP_EXECUTE_ERROR_SERIALIZATION_FAILED:"),
       }),
       isError: true,
     };
@@ -178,9 +181,23 @@ function serializeExecuteError(error: unknown, deadline: number, timeoutMs: numb
 
 /** Errors cannot be paged, so the smaller of the error policy and invocation budget is authoritative. */
 function boundedExecuteError(message: string, maxBytes: number): SerializedJsonOutput {
-  const output = serializeBoundedJson(message, { ...EXECUTE_ERROR_OUTPUT_POLICY, maxBytes: Math.min(maxBytes, EXECUTE_ERROR_OUTPUT_POLICY.maxBytes) });
-  // Rejected messages retain the stable limit failure; accepted messages keep their original text.
-  return output.isError ? output : { text: message, isError: true };
+  const policy = { ...EXECUTE_ERROR_OUTPUT_POLICY, maxBytes: Math.min(maxBytes, EXECUTE_ERROR_OUTPUT_POLICY.maxBytes) };
+  const output = serializeBoundedJson({
+    code: executeErrorCode(message),
+    message,
+    ...recoveryForError(message),
+  }, policy);
+  // Oversized hostile messages collapse to the fixed limit failure plus one closed recovery action.
+  if (output.isError) {
+    const failure = JSON.parse(output.text) as Record<string, unknown>;
+    return { text: JSON.stringify({ ...failure, ...recoveryForError("MCP_EXECUTE_ERROR_OUTPUT_LIMIT_EXCEEDED:") }), isError: true };
+  }
+  return { ...output, isError: true };
+}
+
+/** Extracts only a stable leading code while keeping uncoded script failures explicit. */
+function executeErrorCode(message: string): string {
+  return /^([A-Z][A-Z0-9_]+):/.exec(message)?.[1] ?? "MCP_EXECUTE_FAILED";
 }
 
 /**
@@ -211,14 +228,15 @@ function describeError(err: unknown): string {
 function buildBoundCall(callOptions: CallClientOptions, maxCalls: number, callImpl: CallImpl, invocation: Invocation) {
   let callCount = 0;
   // Observe fire-and-forget rejections as well; callers still receive the original rejected promise.
-  return (operationId: string, params: Record<string, unknown> = {}): Promise<unknown> => {
+  return (operationId: string, params: Record<string, unknown> = {}, rawOptions?: unknown): Promise<unknown> => {
     // Keep validation inside a promise so call() consistently supports await/catch.
     const pending = (async () => {
       invocation.assertActive();
+      const physicalOptions = physicalCallOptions(rawOptions);
       callCount++;
       // Only admitted calls consume transport resources, regardless of script error handling.
       if (callCount > maxCalls) throw new Error(`call() limit exceeded (max ${maxCalls} per execute invocation)`);
-      const result = await invocation.wait(callImpl(callOptions, operationId, params, invocation.signal));
+      const result = await invocation.wait(callImpl(callOptions, operationId, params, invocation.signal, physicalOptions));
       invocation.assertActive();
       return result;
     })();
@@ -226,6 +244,33 @@ function buildBoundCall(callOptions: CallClientOptions, maxCalls: number, callIm
     void pending.catch(() => {});
     return pending;
   };
+}
+
+/** physicalCallOptions rejects ambiguous controls before any provider transport is acquired. */
+function physicalCallOptions(value: unknown): PhysicalCallOptions | undefined {
+  // Absence retains the operation's reviewed automatic pagination policy.
+  if (value === undefined) return undefined;
+  // A single named control prevents provider inputs or future options from being silently ignored.
+  if (!isPlainRecord(value) || Object.keys(value).length !== 1 || !("pagination" in value)) {
+    throw new Error("MCP_CALL_OPTIONS_INVALID: use only {pagination:{maxPages}} as the optional third call argument.");
+  }
+  const pagination = value.pagination;
+  // The nested shape stays distinct from provider page-size parameters such as Gmail maxResults.
+  if (!isPlainRecord(pagination) || Object.keys(pagination).length !== 1 || !("maxPages" in pagination)) {
+    throw new Error("MCP_CALL_PAGINATION_INVALID: pagination must contain only maxPages.");
+  }
+  const maxPages = pagination.maxPages;
+  // Exact integer admission avoids coercing model-authored values into a different execution intent.
+  if (typeof maxPages !== "number" || !Number.isSafeInteger(maxPages) || maxPages < 1) {
+    throw new Error("MCP_CALL_PAGINATION_INVALID: maxPages must be a positive safe integer; Engine applies the operation's canonical upper bound.");
+  }
+  return { pagination: { maxPages } };
+}
+
+/** isPlainRecord excludes null and arrays while accepting objects created inside the VM realm. */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  // Cross-realm objects have a distinct Object prototype, so structural admission is required here.
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -254,7 +299,7 @@ function buildBoundCall(callOptions: CallClientOptions, maxCalls: number, callIm
  * See sprint/lighter_mcp_runtime_design.md, Sandbox and Isolation Rules.
  */
 function buildSandboxGlobals(
-  boundCall: (operationId: string, params?: Record<string, unknown>) => Promise<unknown>,
+  boundCall: (operationId: string, params?: Record<string, unknown>, options?: PhysicalCallOptions) => Promise<unknown>,
   session: SessionState,
   access: ResultAccess,
   maxBytes: number,
@@ -264,7 +309,14 @@ function buildSandboxGlobals(
     call: boundCall,
     session: {
       // Invocation-local counts avoid cross-call attribution when several tools run concurrently.
-      get: (key: string) => { invocation.assertActive(); return session.get(key, access); },
+      get: (...args: unknown[]) => {
+        invocation.assertActive();
+        // Rejecting before the read prevents a misleading root result and keeps audit counts exact.
+        if (args.length !== 1 || typeof args[0] !== "string") {
+          throw new Error("MCP_SESSION_GET_ARGUMENTS_INVALID: session.get accepts exactly one string key; use session.page(ref, {path, fields, offset}) for array paths or project session.get(ref) in JavaScript.");
+        }
+        return session.get(args[0], access);
+      },
       // Writes retain the existing explicit-state API but cannot replace runtime snapshots.
       set: (key: string, value: unknown) => { invocation.assertActive(); session.set(key, value); },
       // Paging shares this invocation's output budget and retained-read audit without any provider transport.

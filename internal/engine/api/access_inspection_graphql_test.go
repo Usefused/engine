@@ -209,6 +209,8 @@ func TestCurrentActorAccessPolicyRequiresAuthenticationButNoBusinessPermission(t
 	}
 }
 
+// TestInspectionGraphQLPreflightDeniesForgedFragmentBeforeAnyRepositoryCall
+// verifies the shared nested denial retains the exact preflight requirement.
 func TestInspectionGraphQLPreflightDeniesForgedFragmentBeforeAnyRepositoryCall(t *testing.T) {
 	workspaceID := uuid.New()
 	repository := &accessInspectionGraphQLStore{}
@@ -229,15 +231,22 @@ func TestInspectionGraphQLPreflightDeniesForgedFragmentBeforeAnyRepositoryCall(t
 		t.Fatalf("status/audit/explanation calls = %d/%d/%d; body=%s", response.Code, repository.auditCalls, repository.explanationCalls, response.Body.String())
 	}
 	var denial struct {
-		Missing []struct {
-			Permission accesscontrol.Permission `json:"permission"`
-		} `json:"missing"`
+		Error struct {
+			Code    string `json:"code"`
+			Details struct {
+				Missing []struct {
+					Permission accesscontrol.Permission `json:"permission"`
+				} `json:"missing"`
+			} `json:"details"`
+		} `json:"error"`
 	}
+	// The authorization writer now uses the common Engine envelope rather than
+	// the removed top-level missing array.
 	if err := json.Unmarshal(response.Body.Bytes(), &denial); err != nil {
 		t.Fatalf("decode denial: %v", err)
 	}
-	if len(denial.Missing) != 1 || denial.Missing[0].Permission != accesscontrol.PermissionAuditRead {
-		t.Fatalf("missing = %#v, want audit.read", denial.Missing)
+	if denial.Error.Code != "permission_denied" || len(denial.Error.Details.Missing) != 1 || denial.Error.Details.Missing[0].Permission != accesscontrol.PermissionAuditRead {
+		t.Fatalf("denial = %#v, want audit.read", denial.Error)
 	}
 }
 

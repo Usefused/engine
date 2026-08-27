@@ -43,12 +43,12 @@ func MCPConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 		actor, ok := accesscontrol.ActorFromContext(ctx)
 		if !ok {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, "plan_admission", "", "not_committed"), ctx)
 			return
 		}
 		req, doc, err := decodeAppConfigPlanRequest(r, store.AppKindMCP.String())
 		if err != nil {
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, "plan_admission", "", "not_committed"), ctx)
 			return
 		}
 		setSDKConfigSpanAttributes(span, req.ConfigKey, doc)
@@ -58,7 +58,7 @@ func MCPConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 		})
 		if err != nil {
 			span.SetStatus(codes.Error, "mcp config plan failed")
-			writeSDKConfigError(w, err, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(err, "planning", "", "unknown"), ctx)
 			return
 		}
 		span.SetAttributes(attribute.String("outcome", "success"), attribute.String("plan_id", result.plan.ID.String()))
@@ -81,17 +81,17 @@ func MCPConfigApplyHandler(configStore store.ConfigRepository, s store.Store, re
 		actor, ok := accesscontrol.ActorFromContext(ctx)
 		if !ok {
 			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, "request_admission", "", "not_committed"), ctx)
 			return
 		}
 		req, planID, err := decodeSDKConfigApplyRequest(r)
 		if err != nil {
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, "request_admission", "", "not_committed"), ctx)
 			return
 		}
 		planRevision, ok := AuthorizedPlanRevisionFromContext(ctx)
 		if !ok {
-			writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"}, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"}, "apply_admission", planID.String(), "not_committed"), ctx)
 			return
 		}
 		span.SetAttributes(attribute.String("actor.type", string(actor.Kind)))
@@ -101,7 +101,7 @@ func MCPConfigApplyHandler(configStore store.ConfigRepository, s store.Store, re
 		})
 		if err != nil {
 			span.SetStatus(codes.Error, "mcp config apply failed")
-			writeSDKConfigError(w, err, ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(err, "apply_execution", planID.String(), "unknown"), ctx)
 			return
 		}
 		span.SetAttributes(
@@ -391,30 +391,30 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 	registryClient, err := localSnapshotPlanningClient(s, registryClient, false)
 	// An unavailable snapshot store must fail before any app mutation or live lookup.
 	if err != nil {
-		return mcpConfigApplyResult{}, err
+		return mcpConfigApplyResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 	plan, err := loadAuthorizedConfigPlanForApply(ctx, configStore, s, call, store.ConfigTypeMCP)
 	// Only the authorized exact plan may establish execution scope.
 	if err != nil {
-		return mcpConfigApplyResult{}, err
+		return mcpConfigApplyResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 	// Archived contracts cannot reactivate a version removed from this workspace.
 	if err := ensureSDKSelectionsStillAllowed(ctx, s, plan.ResolvedPayload); err != nil {
-		return mcpConfigApplyResult{}, err
+		return mcpConfigApplyResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 	// Refreshes between plan and apply must invalidate the old immutable binding.
 	if err := ensureAppPayloadContractsCurrent(ctx, registryClient, call.apiKey, plan.ResolvedPayload); err != nil {
-		return mcpConfigApplyResult{}, err
+		return mcpConfigApplyResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 	doc, payload, err := decodeAppApplyPlan(ctx, configStore, s, plan, store.AppKindMCP.String())
 	// MCP-specific admission cannot be borrowed from an SDK payload.
 	if err != nil {
-		return mcpConfigApplyResult{}, err
+		return mcpConfigApplyResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 	// Apply rechecks canonical bytes and both hashes so a tampered plan cannot
 	// become executable even though planning already validated the graph.
 	if err := normalizeAndValidateResolvedUnifiedPayload(&payload); err != nil {
-		return mcpConfigApplyResult{}, err
+		return mcpConfigApplyResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 	runtimeID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(plan.ConfigKey))
 	scope, err := appRuntimeForApply(persistAppRuntimeParams{
@@ -428,17 +428,17 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 	})
 	// Runtime scope must be complete before publishing any family version.
 	if err != nil {
-		return mcpConfigApplyResult{}, err
+		return mcpConfigApplyResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 	// Retention changes no entitlement or family-count policy.
 	if err := enforceMCPFamilyLimit(ctx, s, call.accountID, doc.Name); err != nil {
-		return mcpConfigApplyResult{}, err
+		return mcpConfigApplyResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 
 	token, familyID, appID, _, err := applyAppConfigRuntime(ctx, configStore, s, call, plan, scope, doc.Bucket, "", "")
 	// A token is returned only after the canonical lifecycle transaction commits.
 	if err != nil {
-		return mcpConfigApplyResult{}, err
+		return mcpConfigApplyResult{}, withWorkspaceConfigErrorMetadata(err, "workspace_commit", call.planID.String(), "unknown")
 	}
 	return mcpConfigApplyResult{
 		AppFamilyID: familyID, RuntimeID: appID, ExecutionToken: token, ConfigKey: plan.ConfigKey,
