@@ -18,12 +18,59 @@ export type ExecuteRequestAction =
 
 export type ProviderExecutionState = "not_started" | "complete" | "unknown";
 
+const CORRECTABLE_PHYSICAL_PAGINATION_CODES = new Set<string>([
+  "MCP_CALL_OPTIONS_INVALID",
+  "MCP_CALL_PAGINATION_INVALID",
+]);
+
+const STABLE_LOWERCASE_ENGINE_CODES = new Set<string>([
+  "mcp_pagination_max_pages_invalid",
+  "mcp_pagination_not_supported",
+  "mcp_pagination_bound_not_lower",
+  "mcp_pagination_max_pages",
+  "mcp_pagination_max_items",
+  "mcp_pagination_max_bytes",
+  "mcp_pagination_max_duration",
+  "mcp_pagination_cycle",
+  "mcp_pagination_invalid_config",
+  "mcp_pagination_response_invalid",
+  "mcp_pagination_continuation_invalid",
+  "mcp_pagination_request_target_invalid",
+  "mcp_pagination_untrusted_next_url",
+  "mcp_physical_pagination_not_allowed_for_unified",
+]);
+
+const RECOVERY_ACTIONS = new Set<RecoveryAction>(["continue_stored_result", "correct_execute_arguments", "adjust_result_projection", "reinitialize_connection", "do_not_replay"]);
+const EXECUTE_REQUEST_ACTIONS = new Set<ExecuteRequestAction>(["use_next_request", "correct_arguments", "adjust_projection", "reformat_if_session_state_used", "do_not_replay"]);
+const PROVIDER_EXECUTION_STATES = new Set<ProviderExecutionState>(["not_started", "complete", "unknown"]);
+
 /** One compact public recovery shape replaces transport and audit details. */
 export interface ModelRecovery {
   recovery_action: RecoveryAction;
   execute_request: ExecuteRequestAction;
   provider_execution: ProviderExecutionState;
   automatic_replay: false;
+}
+
+/** Projects bridge metadata only when every field belongs to the closed public recovery vocabulary. */
+export function modelRecoveryFromUnknown(value: unknown): ModelRecovery | undefined {
+  // Only an object envelope can carry named bridge recovery fields.
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const candidate = value as Record<string, unknown>;
+  // Each independent vocabulary check prevents a partially trusted bridge envelope from becoming model instruction.
+  if (!RECOVERY_ACTIONS.has(candidate.recovery_action as RecoveryAction)) return undefined;
+  // Execute requests remain closed separately because not every recovery action shares the same syntax change.
+  if (!EXECUTE_REQUEST_ACTIONS.has(candidate.execute_request as ExecuteRequestAction)) return undefined;
+  // Provider state must never accept arbitrary bridge or provider prose.
+  if (!PROVIDER_EXECUTION_STATES.has(candidate.provider_execution as ProviderExecutionState)) return undefined;
+  // Automatic replay is intentionally false for every public recovery contract.
+  if (candidate.automatic_replay !== false) return undefined;
+  return {
+    recovery_action: candidate.recovery_action as RecoveryAction,
+    execute_request: candidate.execute_request as ExecuteRequestAction,
+    provider_execution: candidate.provider_execution as ProviderExecutionState,
+    automatic_replay: false,
+  };
 }
 
 /** Gives capable MCP hosts a bounded, non-secret description of the script session contract. */
@@ -108,7 +155,11 @@ export function inspectionScript(reference: string, root: unknown, outputBudgetB
 
 /** Maps trusted runtime codes to the smallest safe model recovery contract. */
 export function recoveryForError(message: string): ModelRecovery {
-  const code = /^([A-Z][A-Z0-9_]+):/.exec(message)?.[1] ?? "";
+  const code = modelVisibleExecuteErrorCode(message);
+  // Local physical option validation finishes before its bridge call and is safe to reformat when invocation history agrees.
+  if (CORRECTABLE_PHYSICAL_PAGINATION_CODES.has(code)) {
+    return recovery("correct_execute_arguments", "correct_arguments", "not_started");
+  }
   // A lost bridge session requires client transport work, never a model-authored identifier.
   if (code === "MCP_BRIDGE_SESSION_UNAVAILABLE") {
     return recovery("reinitialize_connection", "reformat_if_session_state_used", "not_started");
@@ -126,6 +177,18 @@ export function recoveryForError(message: string): ModelRecovery {
     return recovery("correct_execute_arguments", "correct_arguments", "not_started");
   }
   return recovery("do_not_replay", "do_not_replay", "unknown");
+}
+
+/** Preserves established uppercase error behavior and exact reviewed lowercase Engine codes. */
+export function modelVisibleExecuteErrorCode(message: string): string {
+  const runtimeCode = /^([A-Z][A-Z0-9_]+):/.exec(message)?.[1];
+  // Uppercase prefixes retain the runtime and script behavior established before lowercase Engine codes were admitted.
+  if (runtimeCode) {
+    return runtimeCode;
+  }
+  const engineCode = /^(mcp_[a-z0-9_]+):/.exec(message)?.[1];
+  // An exact allowlist prevents arbitrary lowercase provider text or future unreviewed reasons from becoming recovery metadata.
+  return engineCode && STABLE_LOWERCASE_ENGINE_CODES.has(engineCode) ? engineCode : "MCP_EXECUTE_FAILED";
 }
 
 /** Constructs closed recovery values without transport/session diagnostics. */

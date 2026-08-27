@@ -12,11 +12,16 @@ import (
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine"
+	"github.com/Usefused/engine/internal/engine/executionevent"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -270,7 +275,7 @@ func TestBoundedMCPPaginationIntentErrorProvidesExactCallCorrection(t *testing.T
 		err  *engine.PaginationIntentValidationError
 		want string
 	}{
-		{name: "invalid value", err: &engine.PaginationIntentValidationError{Reason: engine.PaginationIntentInvalidValue}, want: `mcp_pagination_max_pages_invalid: operation "gmail.users.messages.get" received an invalid pagination.maxPages; use a positive integer lower than pagination.engine_max_pages only when search_docs reports pagination.caller_bound_supported=true, otherwise use call("gmail.users.messages.get", params) without a pagination option`},
+		{name: "invalid value", err: &engine.PaginationIntentValidationError{Reason: engine.PaginationIntentInvalidValue}, want: `mcp_pagination_max_pages_invalid: operation "gmail.users.messages.get" received an invalid pagination.maxPages; use a positive integer lower than pagination.engine_max_pages only when search_docs exact operationId detail reports pagination.caller_bound_supported=true for this operation, otherwise use call("gmail.users.messages.get", params) without a pagination option; never reuse another operation's bound`},
 		{name: "not supported", err: &engine.PaginationIntentValidationError{Reason: engine.PaginationIntentNotSupported}, want: `mcp_pagination_not_supported: operation "gmail.users.messages.get" is not paginated; use call("gmail.users.messages.get", params) without a pagination option`},
 		{name: "lower bound available", err: &engine.PaginationIntentValidationError{Reason: engine.PaginationIntentBoundNotLower, EngineMaxPages: 10}, want: `mcp_pagination_bound_not_lower: operation "gmail.users.messages.get" has an Engine page limit of 10; use pagination.maxPages between 1 and 9, or omit pagination`},
 		{name: "no lower bound", err: &engine.PaginationIntentValidationError{Reason: engine.PaginationIntentBoundNotLower, EngineMaxPages: 1}, want: `mcp_pagination_bound_not_lower: operation "gmail.users.messages.get" has an Engine page limit of 1, so no lower positive pagination.maxPages exists; use call("gmail.users.messages.get", params) without a pagination option`},
@@ -498,8 +503,105 @@ func TestMcpCallHandlerExplainsPhysicalPaginationIntentErrors(t *testing.T) {
 	assertMCPPaginationIntentRejection(t, statusCode, response, providerCalls, wantUnsupported)
 
 	statusCode, response = executeMCPPhysicalHandlerTest(t, sessionID, endpointName, &mcpPhysicalPaginationIntent{})
-	wantInvalid := fmt.Sprintf(`mcp_pagination_max_pages_invalid: operation %q received an invalid pagination.maxPages; use a positive integer lower than pagination.engine_max_pages only when search_docs reports pagination.caller_bound_supported=true, otherwise use call(%q, params) without a pagination option`, endpointName, endpointName)
+	wantInvalid := fmt.Sprintf(`mcp_pagination_max_pages_invalid: operation %q received an invalid pagination.maxPages; use a positive integer lower than pagination.engine_max_pages only when search_docs exact operationId detail reports pagination.caller_bound_supported=true for this operation, otherwise use call(%q, params) without a pagination option; never reuse another operation's bound`, endpointName, endpointName)
 	assertMCPPaginationIntentRejection(t, statusCode, response, providerCalls, wantInvalid)
+}
+
+// TestMCPPhysicalPaginationIntentRejectionsAuditStableCodes proves pre-provider policy decisions reuse one secret-safe execution receipt and span.
+func TestMCPPhysicalPaginationIntentRejectionsAuditStableCodes(t *testing.T) {
+	tests := []struct {
+		name, wantCode string
+		paginated      bool
+		maxPages       int
+	}{
+		{name: "bound not lower", wantCode: "intent_bound_not_lower", paginated: true, maxPages: paginationpolicy.DefaultMaxPages},
+		{name: "not supported", wantCode: "intent_not_supported", maxPages: 1},
+	}
+	// Both reviewed policy outcomes must remain distinguishable without invoking the provider.
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			providerCalls := 0
+			// The loopback counter is the authoritative proof that policy rejection precedes provider dispatch.
+			vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				providerCalls++
+				_, _ = w.Write([]byte(`{"items":[]}`))
+			}))
+			defer vendor.Close()
+
+			sessionID, endpointName, _ := configureMCPPhysicalCallTest(t, vendor.URL)
+			// Only the bound test receives a reviewed policy; the other operation must reject pagination as unsupported.
+			if test.paginated {
+				baseCache := globalObjectCache.(*richMockCache)
+				globalObjectCache = &mcpPaginatedCache{richMockCache: baseCache, pagination: testCursorPagination("cursor", "$.next")}
+			}
+			capture := &captureJetStreamPublisher{}
+			executionevent.SetPublisher(executionevent.NewPublisher(capture))
+			// Global publication state must not leak this subtest's captured receipt into sibling cases.
+			t.Cleanup(func() { executionevent.SetPublisher(nil) })
+			recorder := tracetest.NewSpanRecorder()
+			provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+			previous := otel.GetTracerProvider()
+			otel.SetTracerProvider(provider)
+			// Restoring the process tracer keeps focused evidence isolated despite package-global OTEL registration.
+			t.Cleanup(func() {
+				_ = provider.Shutdown(context.Background())
+				otel.SetTracerProvider(previous)
+			})
+
+			statusCode, response := executeMCPPhysicalHandlerTest(t, sessionID, endpointName, &mcpPhysicalPaginationIntent{MaxPages: test.maxPages})
+			// The public bridge result and provider count prove rejection happened before any external side effect.
+			if statusCode != http.StatusBadRequest || providerCalls != 0 {
+				t.Fatalf("pagination rejection = %d, provider calls = %d, response = %+v", statusCode, providerCalls, response)
+			}
+			assertMCPPaginationIntentExecutionEvidence(t, capture, recorder, response.Error, test.wantCode)
+		})
+	}
+}
+
+// assertMCPPaginationIntentExecutionEvidence checks the canonical receipt and execution span without admitting public prose as telemetry.
+func assertMCPPaginationIntentExecutionEvidence(t *testing.T, capture *captureJetStreamPublisher, recorder *tracetest.SpanRecorder, publicMessage, wantCode string) {
+	t.Helper()
+	event := decodeExecutionAuditEvent(t, capture.message)
+	assertMCPPaginationIntentAudit(t, event, wantCode)
+	span := executionSpanByName(t, recorder.Ended(), "engine.dispatch.execute")
+	assertMCPPaginationIntentSpan(t, span, wantCode)
+	assertMCPPaginationIntentEvidenceSafe(t, span, capture.message.Data, publicMessage)
+}
+
+// assertMCPPaginationIntentAudit verifies Activity receives only the bounded policy outcome and no fabricated provider response.
+func assertMCPPaginationIntentAudit(t *testing.T, event models.EngineExecutionEvent, wantCode string) {
+	t.Helper()
+	// Durable Activity must expose the same closed classification as OTEL while provider status remains absent.
+	if event.Status != models.EngineExecutionStatusFailed || event.Transport != models.EngineExecutionTransportMCP || event.FailureCategory != "pagination" || event.FailureCode != wantCode || event.FailureReason != wantCode || event.ProviderHTTPStatus != nil {
+		t.Fatalf("pagination audit = %#v, want pagination/%s without provider status", event, wantCode)
+	}
+}
+
+// assertMCPPaginationIntentSpan verifies the existing execution span owns the same closed policy outcome as the receipt.
+func assertMCPPaginationIntentSpan(t *testing.T, span sdktrace.ReadOnlySpan, wantCode string) {
+	t.Helper()
+	attributes := span.Attributes()
+	// The existing logical span owns the outcome; no pagination-specific competing span is introduced.
+	if stringSpanAttribute(attributes, "execution.outcome") != models.EngineExecutionStatusFailed || stringSpanAttribute(attributes, "execution.failure_category") != "pagination" || stringSpanAttribute(attributes, "execution.failure_code") != wantCode || span.Status().Description != wantCode {
+		t.Fatalf("pagination OTEL = status %#v attributes %#v", span.Status(), attributes)
+	}
+}
+
+// assertMCPPaginationIntentEvidenceSafe keeps agent guidance and raw error fields outside both canonical evidence paths.
+func assertMCPPaginationIntentEvidenceSafe(t *testing.T, span sdktrace.ReadOnlySpan, audit []byte, publicMessage string) {
+	t.Helper()
+	attributes := span.Attributes()
+	serialized := fmt.Sprint(attributes, span.Events(), span.Status(), string(audit))
+	// Agent-facing remediation may contain operation context, but that full message must never enter OTEL or durable audit fields.
+	if publicMessage != "" && strings.Contains(serialized, publicMessage) {
+		t.Fatalf("public pagination message leaked into execution evidence: %s", serialized)
+	}
+	// Attribute values are restricted to the established execution allowlist plus timing fields owned by the same span.
+	for _, item := range attributes {
+		if item.Key == attribute.Key("error.message") {
+			t.Fatalf("raw error attribute entered pagination OTEL: %#v", attributes)
+		}
+	}
 }
 
 // assertMCPPaginationIntentRejection verifies exact public guidance and the pre-provider admission boundary.
@@ -508,6 +610,16 @@ func assertMCPPaginationIntentRejection(t *testing.T, statusCode int, response m
 	// Pagination intent mistakes are caller errors and must never trigger a provider request.
 	if statusCode != http.StatusBadRequest || response.Error != want || providerCalls != 0 {
 		t.Fatalf("pagination rejection = %d/%q, provider calls = %d; want %q", statusCode, response.Error, providerCalls, want)
+	}
+	assertMCPPaginationIntentRecovery(t, response, strings.SplitN(want, ":", 2)[0])
+}
+
+// assertMCPPaginationIntentRecovery verifies the typed bridge fields consumed by the outer execute runtime.
+func assertMCPPaginationIntentRecovery(t *testing.T, response mcpCallResponse, wantCode string) {
+	t.Helper()
+	// Typed validation proves the provider was not started and permits only deliberate argument correction.
+	if response.Code != wantCode || response.RecoveryAction != "correct_execute_arguments" || response.ExecuteRequest != "correct_arguments" || response.ProviderExecution != "not_started" || response.AutomaticReplay == nil || *response.AutomaticReplay {
+		t.Fatalf("pagination recovery = %+v, want code %q pre-provider correction", response, wantCode)
 	}
 }
 
@@ -659,6 +771,35 @@ func TestDecodeMCPUnifiedInvocationRejectsNonSDKShapes(t *testing.T) {
 	if err != nil || invocation.IdempotencyKey != " " {
 		t.Fatalf("present whitespace key was rewritten: %#v, %v", invocation, err)
 	}
+}
+
+// TestMcpCallHandlerRejectsPhysicalPaginationForUnified returns one typed correction before the coordinator can run.
+func TestMcpCallHandlerRejectsPhysicalPaginationForUnified(t *testing.T) {
+	sessionID := registerTestMCPSession(t, "family-token", unifiedFixtureForTest(t, "release.provision"))
+	previous := globalMCPUnifiedExecute
+	coordinatorCalls := 0
+	// Restore the process-owned coordinator after proving this request never reaches it.
+	t.Cleanup(func() { globalMCPUnifiedExecute = previous })
+	// A call counter proves the physical option guard owns this failure before logical execution.
+	globalMCPUnifiedExecute = func(context.Context, *enginev1.ExecuteUnifiedRequest) (*enginev1.ExecuteUnifiedResponse, error) {
+		coordinatorCalls++
+		return &enginev1.ExecuteUnifiedResponse{}, nil
+	}
+	body := []byte(`{"operation_id":"release.provision","params":{"input":{},"targets":["github"]},"pagination":{"maxPages":1}}`)
+	request := httptest.NewRequest(http.MethodPost, "/mcp/call", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+sessionID)
+	recorder := httptest.NewRecorder()
+	mcpCallHandler(recorder, request)
+	var response mcpCallResponse
+	// The bridge envelope must preserve the closed correction fields consumed by the runtime.
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode Unified pagination rejection: %v", err)
+	}
+	wantMessage := `mcp_physical_pagination_not_allowed_for_unified: operation "release.provision" is Unified; use call("release.provision", params) without physical pagination options and keep any target-keyed pagination inside params.pagination`
+	if recorder.Code != http.StatusBadRequest || response.Error != wantMessage || coordinatorCalls != 0 {
+		t.Fatalf("Unified physical pagination rejection = %d/%+v, coordinator calls = %d", recorder.Code, response, coordinatorCalls)
+	}
+	assertMCPPaginationIntentRecovery(t, response, mcpUnifiedPhysicalPaginationCode)
 }
 
 // TestMcpCallHandlerBoundsUnifiedCoordinatorErrors ensures private runtime

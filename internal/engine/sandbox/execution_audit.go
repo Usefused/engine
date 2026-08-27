@@ -163,9 +163,14 @@ func providerStatusClass(status int, execErr error) string {
 	return "none"
 }
 
+// classifyExecutionFailure maps execution evidence to bounded durable and OTEL dimensions without retaining raw errors.
 func classifyExecutionFailure(execErr error, status int) (string, string) {
 	if _, incompatible := fusedobject.ExecutionContractCompatibilityDetails(execErr); incompatible {
 		return "contract", fusedobject.ExecutionCapabilityRequiredCode
+	}
+	// Caller pagination-policy decisions are already typed, so preserve their bounded reason instead of falling through to a network failure.
+	if code, ok := paginationIntentFailureCode(execErr); ok {
+		return "pagination", code
 	}
 	if code := engine.PaginationFailureCode(execErr); code != "" {
 		return "pagination", code
@@ -186,6 +191,34 @@ func classifyExecutionFailure(execErr error, status int) (string, string) {
 		return "", ""
 	}
 	return classifyExecutionFailureByStatus(execErr.Error(), status)
+}
+
+// paginationIntentFailureCode maps only the closed Engine reason vocabulary into durable and OTEL-safe codes.
+func paginationIntentFailureCode(execErr error) (string, bool) {
+	var validationErr *engine.PaginationIntentValidationError
+	// Untyped failures continue through the existing status and transport classifiers.
+	if !errors.As(execErr, &validationErr) {
+		return "", false
+	}
+	// A typed nil or future reason must remain bounded rather than emitting caller-controlled text.
+	if validationErr == nil {
+		return "intent_invalid", true
+	}
+	// Explicit mapping prevents a newly added reason from silently becoming an unbounded telemetry dimension.
+	switch validationErr.Reason {
+	case engine.PaginationIntentInvalidValue:
+		// Global bound failures remain distinct from operation-policy decisions.
+		return "intent_invalid_value", true
+	case engine.PaginationIntentNotSupported:
+		// Unsupported controls identify a non-paginated resolved operation without exposing its contract.
+		return "intent_not_supported", true
+	case engine.PaginationIntentBoundNotLower:
+		// Non-tightening controls retain their policy decision without recording the requested or effective bound.
+		return "intent_bound_not_lower", true
+	default:
+		// Future typed reasons collapse to one safe code until this allowlist is deliberately extended.
+		return "intent_invalid", true
+	}
 }
 
 func isTransportExecutionFailure(execErr error) bool {

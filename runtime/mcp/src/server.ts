@@ -28,9 +28,9 @@ import { SESSION_AGENT_RULE, SESSION_CONTRACT_METADATA } from "./sessionContract
 const INSTRUCTIONS = [
   "This server exposes exactly two tools: search_docs and execute.",
   SESSION_AGENT_RULE,
-  "Always route API calls through call(operationId, params, options?) inside an execute script -- there is no other way to reach a vendor API from this server. For physical calls, follow the selected search_docs result's pagination guidance: Engine automatically completes reviewed provider pagination, a supported operation may use the third call() argument to lower that traversal, and an unsupported operation must omit the pagination option even when its provider request uses GET.",
+  "Always route API calls through call(operationId, params, options?) inside an execute script -- there is no other way to reach a vendor API from this server. For physical calls, follow operation-specific search_docs pagination guidance: Engine automatically completes reviewed provider pagination, and only exact operationId detail with caller_bound_supported=true permits that same operation's third call() argument. Never reuse the bound for another operation. An unsupported operation must omit pagination even when its provider request uses GET.",
   "Authentication, connected-user identity, and tenant/resource routing are supplied by the Engine. Never invent or pass Authorization headers, API keys, OAuth tokens, auth scheme names, fused_end_user_ref, or fused_resource_id in call params.",
-  "Search once with one concise natural-language intent. When a ranked callable has schema_status.complete=true, execute it directly; otherwise retrieve only its missing advertised section with operationId, section, and an optional RFC 6901 schemaPath.",
+  "Search once with one concise natural-language intent. When a ranked callable has schema_status.complete=true, it may be executed directly with two arguments. If pagination.exact_lookup_required=true, retrieve exact operationId detail before choosing any third-argument bound. Otherwise retrieve only its missing advertised section with operationId, section, and an optional RFC 6901 schemaPath.",
   "For search_docs detail with kind unified, call the exact operation_id with { input, targets, selectors?, pagination?, idempotencyKey? }; targets must include every declared dependency, selectors and pagination are keyed by public target, and the Engine generates an SDK-equivalent UUID when idempotencyKey is omitted.",
   "search_docs with no arguments returns a bounded schema-free catalogue window. A query ranks physical and Unified callables together and includes callable detail. An exact operationId remains available when its public ID is already known.",
   "An execute script's body should end with `return <value>` -- that value is what gets reported back as the tool result.",
@@ -117,7 +117,7 @@ function main(): void {
         SESSION_AGENT_RULE + " Run a short TypeScript script that can call one or more operations via call(operationId, params, options?) " +
         "and chain their results, returning one final value. Use complete search_docs detail before " +
         "referencing an operationId for the first time. Follow its physical pagination guidance exactly; " +
-        "use the optional third argument {pagination:{maxPages:N}} only when caller_bound_supported is true. " +
+        "use the optional third argument {pagination:{maxPages:N}} only after exact operationId detail reports caller_bound_supported=true for that same operation, and never reuse a bound across calls. " +
         "Large results return provider_execution=complete and an exact retained-data next_request for this same execute tool; " +
         "run it without reconstructing session arguments or repeating provider calls. Each incomplete page supplies its exact next_request. Unified operations use the exact documented ID " +
         "and params { input, targets, selectors?, pagination?, idempotencyKey? }. " +
@@ -130,7 +130,7 @@ function main(): void {
         script: z
           .string()
           .describe(
-            "TypeScript to run. Use `await call(operationId, params, options?)` to invoke operations; physical options may contain only `{pagination:{maxPages:N}}`. " +
+            "TypeScript to run. Use `await call(operationId, params, options?)` to invoke operations. Include physical `{pagination:{maxPages:N}}` only when search_docs exact operationId detail says `pagination.caller_bound_supported=true` for that same operation; never reuse another operation's bound. Otherwise use `await call(operationId, params)` with no third argument. " +
               "`session.get(key)`/`session.set(key, value)` for state across execute calls in this " +
               "client-managed session; never pass a session ID. A new MCP connection has new state. End with `return <value>` for the final result.",
           ),

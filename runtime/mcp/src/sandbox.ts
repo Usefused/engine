@@ -1,12 +1,12 @@
 import vm from "node:vm";
-import { CallClientOptions, PhysicalCallOptions, remoteCall } from "./callClient.js";
+import { bridgeRecoveryForError, CallClientOptions, PhysicalCallOptions, remoteCall } from "./callClient.js";
 import { SerializedJsonOutput, serializeBoundedJson } from "./outputLimits.js";
 import { DeliveredResult, EXECUTE_ERROR_OUTPUT_POLICY, isResultReference, RetainedResults } from "./retainedResults.js";
 import { executeOutputBudget, EXECUTE_INLINE_BYTES } from "./resultBudget.js";
 import { pageResult, ResultPageOptions } from "./resultPaging.js";
 import { Invocation, ExecutionOutcome } from "./invocation.js";
 import { boundedAtob, decodeBase64, encodeBase64 } from "./base64.js";
-import { recoveryForError } from "./sessionContract.js";
+import { ModelRecovery, modelVisibleExecuteErrorCode, recoveryForError } from "./sessionContract.js";
 
 export interface ExecuteLimits {
   timeoutMs: number;
@@ -19,6 +19,8 @@ export const DEFAULT_EXECUTE_LIMITS: ExecuteLimits = {
   maxCalls: 10,
 };
 
+const PHYSICAL_PAGINATION_CORRECTION = "Use {pagination:{maxPages:N}} only when search_docs exact operationId detail reports pagination.caller_bound_supported=true for this operation; otherwise omit the third argument and use call(operationId, params). Never reuse another operation's bound.";
+
 /** Exposes only admitted text so no caller can accidentally serialize an untrusted result again. */
 export interface ExecuteOutcome extends DeliveredResult {
   access: ResultAccess;
@@ -30,6 +32,11 @@ export interface ExecuteOutcome extends DeliveredResult {
 interface ResultAccess {
   retained_reads: number;
   unavailable_reads: number;
+}
+
+/** Counts only admitted bridge attempts so outer recovery can conservatively account for sibling calls. */
+interface CallExecutionHistory {
+  bridge_calls_started: number;
 }
 
 /**
@@ -118,7 +125,8 @@ export async function runExecute(
 ): Promise<ExecuteOutcome> {
   const invocation = new Invocation(limits.timeoutMs, signal);
   const deadline = invocation.deadline;
-  const boundCall = buildBoundCall(callOptions, limits.maxCalls, callImpl, invocation);
+  const callHistory: CallExecutionHistory = { bridge_calls_started: 0 };
+  const boundCall = buildBoundCall(callOptions, limits.maxCalls, callImpl, invocation, callHistory);
   const access: ResultAccess = { retained_reads: 0, unavailable_reads: 0 };
   const wrapped = `(async () => {\n${script}\n})()`;
   let outputBudget = EXECUTE_INLINE_BYTES;
@@ -144,7 +152,7 @@ export async function runExecute(
   } catch (err) {
     // Error formatting must not leave callbacks or provider requests running in the background.
     invocation.close();
-    return { ...serializeExecuteError(err, deadline, limits.timeoutMs, outputBudget), delivery: "error", access, outputBudgetBytes: outputBudget, executionOutcome: invocation.outcome(true) };
+    return { ...serializeExecuteError(err, deadline, limits.timeoutMs, outputBudget, callHistory), delivery: "error", access, outputBudgetBytes: outputBudget, executionOutcome: invocation.outcome(true) };
   } finally {
     invocation.close();
   }
@@ -162,9 +170,9 @@ function withinSerializationDeadline<T extends SerializedJsonOutput>(serialize: 
 }
 
 /** Renders hostile error hooks inside the deadline and honors smaller client output budgets. */
-function serializeExecuteError(error: unknown, deadline: number, timeoutMs: number, maxBytes: number): SerializedJsonOutput {
+function serializeExecuteError(error: unknown, deadline: number, timeoutMs: number, maxBytes: number, callHistory: CallExecutionHistory): SerializedJsonOutput {
   try {
-    return withinSerializationDeadline(() => boundedExecuteError(describeError(error), maxBytes), deadline);
+    return withinSerializationDeadline(() => boundedExecuteError(error, describeError(error), maxBytes, callHistory), deadline);
   } catch {
     // Failure to render an error must never recurse through its getters or toString outside the VM.
     const timedOut = Date.now() >= deadline;
@@ -180,12 +188,12 @@ function serializeExecuteError(error: unknown, deadline: number, timeoutMs: numb
 }
 
 /** Errors cannot be paged, so the smaller of the error policy and invocation budget is authoritative. */
-function boundedExecuteError(message: string, maxBytes: number): SerializedJsonOutput {
+function boundedExecuteError(error: unknown, message: string, maxBytes: number, callHistory: CallExecutionHistory): SerializedJsonOutput {
   const policy = { ...EXECUTE_ERROR_OUTPUT_POLICY, maxBytes: Math.min(maxBytes, EXECUTE_ERROR_OUTPUT_POLICY.maxBytes) };
   const output = serializeBoundedJson({
-    code: executeErrorCode(message),
+    code: modelVisibleExecuteErrorCode(message),
     message,
-    ...recoveryForError(message),
+    ...executionAwareRecovery(error, message, callHistory),
   }, policy);
   // Oversized hostile messages collapse to the fixed limit failure plus one closed recovery action.
   if (output.isError) {
@@ -195,9 +203,16 @@ function boundedExecuteError(message: string, maxBytes: number): SerializedJsonO
   return { ...output, isError: true };
 }
 
-/** Extracts only a stable leading code while keeping uncoded script failures explicit. */
-function executeErrorCode(message: string): string {
-  return /^([A-Z][A-Z0-9_]+):/.exec(message)?.[1] ?? "MCP_EXECUTE_FAILED";
+/** Uses trusted bridge recovery only when invocation history proves no sibling call may have dispatched. */
+function executionAwareRecovery(error: unknown, message: string, callHistory: CallExecutionHistory): ModelRecovery {
+  const bridgeRecovery = bridgeRecoveryForError(error);
+  const candidate = bridgeRecovery ?? recoveryForError(message);
+  // Outcomes other than not-started do not make a claim that sibling provider work was absent.
+  if (candidate.provider_execution !== "not_started") return candidate;
+  const safeBridgeCalls = bridgeRecovery ? 1 : 0;
+  // A bridge-proven rejection owns one attempt; local validation must precede every bridge attempt.
+  if (callHistory.bridge_calls_started <= safeBridgeCalls) return candidate;
+  return recoveryForError("MCP_EXECUTE_FAILED:");
 }
 
 /**
@@ -225,7 +240,7 @@ function describeError(err: unknown): string {
  * buildBoundCall checks lifetime before dispatch and after resolution so even an
  * abort-ignoring transport cannot release a stale response into another operation.
  */
-function buildBoundCall(callOptions: CallClientOptions, maxCalls: number, callImpl: CallImpl, invocation: Invocation) {
+function buildBoundCall(callOptions: CallClientOptions, maxCalls: number, callImpl: CallImpl, invocation: Invocation, callHistory: CallExecutionHistory) {
   let callCount = 0;
   // Observe fire-and-forget rejections as well; callers still receive the original rejected promise.
   return (operationId: string, params: Record<string, unknown> = {}, rawOptions?: unknown): Promise<unknown> => {
@@ -236,6 +251,8 @@ function buildBoundCall(callOptions: CallClientOptions, maxCalls: number, callIm
       callCount++;
       // Only admitted calls consume transport resources, regardless of script error handling.
       if (callCount > maxCalls) throw new Error(`call() limit exceeded (max ${maxCalls} per execute invocation)`);
+      // Starting the trusted transport is enough to make any sibling error's aggregate provider outcome uncertain.
+      callHistory.bridge_calls_started = Math.min(callHistory.bridge_calls_started + 1, maxCalls);
       const result = await invocation.wait(callImpl(callOptions, operationId, params, invocation.signal, physicalOptions));
       invocation.assertActive();
       return result;
@@ -252,17 +269,17 @@ function physicalCallOptions(value: unknown): PhysicalCallOptions | undefined {
   if (value === undefined) return undefined;
   // A single named control prevents provider inputs or future options from being silently ignored.
   if (!isPlainRecord(value) || Object.keys(value).length !== 1 || !("pagination" in value)) {
-    throw new Error("MCP_CALL_OPTIONS_INVALID: use only {pagination:{maxPages}} as the optional third call argument.");
+    throw new Error(`MCP_CALL_OPTIONS_INVALID: ${PHYSICAL_PAGINATION_CORRECTION}`);
   }
   const pagination = value.pagination;
   // The nested shape stays distinct from provider page-size parameters such as Gmail maxResults.
   if (!isPlainRecord(pagination) || Object.keys(pagination).length !== 1 || !("maxPages" in pagination)) {
-    throw new Error("MCP_CALL_PAGINATION_INVALID: pagination must contain only maxPages.");
+    throw new Error(`MCP_CALL_PAGINATION_INVALID: pagination must contain only maxPages. ${PHYSICAL_PAGINATION_CORRECTION}`);
   }
   const maxPages = pagination.maxPages;
   // Exact integer admission avoids coercing model-authored values into a different execution intent.
   if (typeof maxPages !== "number" || !Number.isSafeInteger(maxPages) || maxPages < 1) {
-    throw new Error("MCP_CALL_PAGINATION_INVALID: maxPages must be a positive safe integer; Engine applies the operation's canonical upper bound.");
+    throw new Error(`MCP_CALL_PAGINATION_INVALID: maxPages must be a positive safe integer. ${PHYSICAL_PAGINATION_CORRECTION}`);
   }
   return { pagination: { maxPages } };
 }

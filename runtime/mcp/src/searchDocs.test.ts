@@ -148,7 +148,7 @@ describe("searchDocs", () => {
     expect(result.operation.pagination).toEqual({
       supported: false,
       caller_bound_supported: false,
-      usage: "This GET operation has no Engine pagination contract, so each call() makes one provider request and does not traverse provider pages. Omit the third call() argument's pagination option. Only when this operation's documentation explicitly identifies a page input, continuation output, and stop condition, pass the page input in params, await the two-argument call(), read the continuation from its result, and repeat until the documented stop condition. Never infer page, cursor, or offset semantics from names. Each page counts toward execute's call and time limits.",
+      usage: "This GET operation has no Engine pagination contract, so each call(\"github.getRepo\", params) makes one provider request and does not traverse provider pages. Only when this operation's documentation explicitly identifies a page input, continuation output, and stop condition, pass the page input in params, await the two-argument call(), read the continuation from its result, and repeat until the documented stop condition. Never infer page, cursor, or offset semantics from names. Each page counts toward execute's call and time limits. Use call(\"github.getRepo\", params) without a pagination option. A pagination bound documented for another operation must not be reused here.",
     });
     expect(result.operation.responses?.["200"]).toBeDefined();
     expect(result.operation.schema_status).toEqual({
@@ -187,7 +187,7 @@ describe("searchDocs", () => {
       throw new Error("expected physical operation detail");
     }
 
-    expect(result.operation.pagination.usage).toBe("This operation has no Engine pagination contract. Omit the third call() argument's pagination option.");
+    expect(result.operation.pagination.usage).toBe('This operation has no Engine pagination contract. Use call("github.createRepo", params) without a pagination option. A pagination bound documented for another operation must not be reused here.');
   });
 
   // Paginated list guidance must show the separate execution control rather than provider page-size fields.
@@ -202,7 +202,7 @@ describe("searchDocs", () => {
       supported: true,
       caller_bound_supported: true,
       engine_max_pages: 100,
-      usage: "Engine follows provider pagination automatically. To accept a partial result, pass { pagination: { maxPages: N } } as call()'s third argument, where N is a positive integer lower than engine_max_pages. Provider page-size parameters do not bound total Engine traversal.",
+      usage: "Engine follows provider pagination automatically for operation \"github.listRepos\". To accept a partial result from this exact operation, pass { pagination: { maxPages: N } } as call()'s third argument, where N is a positive integer lower than engine_max_pages. This bound applies only to operation \"github.listRepos\" and must not be reused for another call. Provider page-size parameters do not bound total Engine traversal.",
     });
     // Discovery must not leak provider continuation internals through the public policy summary.
     for (const privatePolicyField of ["request", "response", "continuation", "termination"]) {
@@ -211,15 +211,23 @@ describe("searchDocs", () => {
     }
   });
 
-  // Query mode must carry the same operation-specific guidance used for immediate execution.
-  it("returns distinct pagination guidance for mixed GET query results", () => {
+  // Ranked results may identify pagination support but cannot expose a reusable caller bound from a neighboring operation.
+  it("requires exact lookup for boundable operations in mixed GET query results", () => {
     const result = searchDocs(testFixture(), { query: "repositories", limit: 2 });
     // Guidance assertions require ranked physical detail rather than schema-free list mode.
     if (result.mode !== "query") throw new Error("expected query mode");
 
     const guidance = Object.fromEntries(result.operations.map((operation) => [operation.operation_id, "pagination" in operation ? operation.pagination : undefined]));
-    expect(guidance["github.listRepos"]).toMatchObject({ supported: true, caller_bound_supported: true, engine_max_pages: 100 });
-    expect(guidance["github.getRepo"]).toMatchObject({ supported: false, caller_bound_supported: false });
+    expect(guidance["github.listRepos"]).toMatchObject({ supported: true, exact_lookup_required: true });
+    expect(guidance["github.listRepos"]).not.toHaveProperty("caller_bound_supported");
+    expect(guidance["github.listRepos"]).not.toHaveProperty("engine_max_pages");
+    expect(guidance["github.getRepo"]).toMatchObject({ supported: false });
+    expect(guidance["github.getRepo"]).not.toHaveProperty("caller_bound_supported");
+    expect(guidance["github.listRepos"]?.usage).toContain('search_docs with operationId "github.listRepos"');
+    expect(guidance["github.listRepos"]?.usage).toContain('call("github.listRepos", params)');
+    expect(guidance["github.listRepos"]?.usage).toContain("must not be reused");
+    expect(guidance["github.listRepos"]?.usage).not.toMatch(/third|maxPages|engine_max_pages|\{\s*pagination/i);
+    expect(guidance["github.getRepo"]?.usage).toContain('call("github.getRepo", params)');
   });
 
   // A one-page policy is automatic but cannot accept the strict lower bound used by caller controls.
@@ -239,8 +247,26 @@ describe("searchDocs", () => {
       supported: true,
       caller_bound_supported: false,
       engine_max_pages: 1,
-      usage: "Engine follows this operation's reviewed pagination contract up to engine_max_pages, but no positive maxPages value is lower than that limit. Omit the third call() argument's pagination option.",
+      usage: "Engine follows operation \"github.onePageRepos\"'s reviewed pagination contract up to engine_max_pages, but no positive maxPages value is lower than that limit. Use call(\"github.onePageRepos\", params) without a pagination option. A pagination bound documented for another operation must not be reused here.",
     });
+  });
+
+  // Ranked supported operations share one exact-lookup boundary even when exact detail ultimately exposes no caller bound.
+  it("withholds one-page caller policy from query mode", () => {
+    const operation: FixtureOperation = {
+      ...listRepos,
+      operation_id: "github.onePageRepos",
+      pagination: { supported: true, caller_bound_supported: false, engine_max_pages: 1 },
+    };
+    const result = searchDocs(new Fixture([operation]), { query: "one page repositories" });
+    // Query mode must be inspected separately from the exact one-page assertion above.
+    if (result.mode !== "query" || !("pagination" in result.operations[0])) {
+      throw new Error("expected ranked physical operation detail");
+    }
+
+    expect(result.operations[0].pagination).toMatchObject({ supported: true, exact_lookup_required: true });
+    expect(result.operations[0].pagination).not.toHaveProperty("caller_bound_supported");
+    expect(result.operations[0].pagination).not.toHaveProperty("engine_max_pages");
   });
 
   // Oversized schemas must remain absent as a whole instead of masquerading as complete detail.

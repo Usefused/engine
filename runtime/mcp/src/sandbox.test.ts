@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CallClientOptions } from "./callClient.js";
 import { runExecute, SessionState, ExecuteLimits, ExecuteOutcome } from "./sandbox.js";
 import { EXECUTE_RESULT_OUTPUT_POLICY } from "./outputLimits.js";
@@ -11,6 +11,18 @@ function resultValue(outcome: ExecuteOutcome): unknown {
   expect(outcome.isError).toBe(false);
   return JSON.parse(outcome.text);
 }
+
+/** Decodes one admitted execute error while pinning its outer delivery classification. */
+function errorValue(outcome: ExecuteOutcome): Record<string, unknown> {
+  // Recovery assertions are meaningful only for the public error envelope.
+  expect(outcome.isError).toBe(true);
+  return JSON.parse(outcome.text) as Record<string, unknown>;
+}
+
+afterEach(() => {
+  // Host transport stubs must never leak into another sandbox invocation test.
+  vi.unstubAllGlobals();
+});
 
 describe("runExecute -- sandbox allowlist (security-critical)", () => {
   it("cannot reach fetch", async () => {
@@ -122,9 +134,88 @@ describe("runExecute -- call() wiring", () => {
     for (const options of invalid) {
       // Every rejected shape must fail before another Engine bridge call begins.
       const outcome = await runExecute(`return await call("test.op", {}, ${options});`, testCallOptions, session, undefined, callImpl);
-      expect(outcome.text).toMatch(/MCP_CALL_(OPTIONS|PAGINATION)_INVALID/);
+      const failure = JSON.parse(outcome.text);
+      expect(failure.code).toMatch(/MCP_CALL_(OPTIONS|PAGINATION)_INVALID/);
+      expect(failure.message).toContain("search_docs exact operationId detail");
+      expect(failure).toMatchObject({ recovery_action: "correct_execute_arguments", execute_request: "correct_arguments", provider_execution: "not_started", automatic_replay: false });
     }
     expect(callImpl).toHaveBeenCalledTimes(2);
+  });
+
+  /** Engine-owned structured rejections survive outer formatting when the first bridge call proves it did not dispatch. */
+  it("preserves single first-call physical pagination corrections", async () => {
+    const cases = [
+      { code: "mcp_pagination_not_supported", operationId: "gmail.users.messages.get", message: 'operation "gmail.users.messages.get" is not paginated; use call("gmail.users.messages.get", params)' },
+      { code: "mcp_physical_pagination_not_allowed_for_unified", operationId: "release.provision", message: 'operation "release.provision" is Unified; use call("release.provision", params)' },
+    ];
+    for (const test of cases) {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({
+          code: test.code,
+          error: `${test.code}: ${test.message}`,
+          recovery_action: "correct_execute_arguments",
+          execute_request: "correct_arguments",
+          provider_execution: "not_started",
+          automatic_replay: false,
+        }),
+      }));
+      const outcome = await runExecute(
+        `return await call(${JSON.stringify(test.operationId)}, {}, {pagination:{maxPages:1}});`,
+        testCallOptions,
+        new SessionState(),
+      );
+      const failure = errorValue(outcome);
+      expect(failure).toMatchObject({ code: test.code, recovery_action: "correct_execute_arguments", execute_request: "correct_arguments", provider_execution: "not_started", automatic_replay: false });
+      expect(failure.message).toContain(`call(${JSON.stringify(test.operationId)}, params)`);
+    }
+  });
+
+  /** Any earlier or concurrent admitted call makes a later local option correction unsafe as an aggregate outcome. */
+  it("downgrades local pagination corrections after another call starts", async () => {
+    const scripts = [
+      'await call("valid", {}); return await call("invalid", {}, null);',
+      'return await Promise.all([call("valid", {}), call("invalid", {}, null)]);',
+    ];
+    for (const script of scripts) {
+      const callImpl = vi.fn().mockResolvedValue({ ok: true });
+      const failure = errorValue(await runExecute(script, testCallOptions, new SessionState(), undefined, callImpl));
+      expect(failure).toMatchObject({ code: "MCP_CALL_OPTIONS_INVALID", recovery_action: "do_not_replay", execute_request: "do_not_replay", provider_execution: "unknown", automatic_replay: false });
+      expect(callImpl).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  /** Structured not-started metadata is call-scoped and cannot erase an earlier or concurrent bridge attempt. */
+  it("downgrades Engine pagination corrections when another bridge call starts", async () => {
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      const operationId = JSON.parse(String(init.body)).operation_id;
+      // Only the invalid operation returns the Engine-proven pre-provider rejection under test.
+      if (operationId === "invalid") {
+        return {
+          ok: false,
+          status: 400,
+          json: async () => ({
+            code: "mcp_pagination_not_supported",
+            error: "mcp_pagination_not_supported: invalid operation is not paginated",
+            recovery_action: "correct_execute_arguments",
+            execute_request: "correct_arguments",
+            provider_execution: "not_started",
+            automatic_replay: false,
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ result: { ok: true } }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const scripts = [
+      'await call("valid", {}); return await call("invalid", {}, {pagination:{maxPages:1}});',
+      'return await Promise.all([call("valid", {}), call("invalid", {}, {pagination:{maxPages:1}})]);',
+    ];
+    for (const script of scripts) {
+      const failure = errorValue(await runExecute(script, testCallOptions, new SessionState()));
+      expect(failure).toMatchObject({ code: "mcp_pagination_not_supported", recovery_action: "do_not_replay", execute_request: "do_not_replay", provider_execution: "unknown", automatic_replay: false });
+    }
   });
 
   /** session.get fails explicitly on ignored options before reading or re-retaining a root result. */

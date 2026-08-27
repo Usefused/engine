@@ -58,13 +58,19 @@ export interface OperationDetail extends OperationSummary {
   schema_status: SchemaStatus;
 }
 
-/** Explains whether and where the caller may bound Engine-owned provider traversal. */
-export interface PaginationGuidance {
-  supported: boolean;
-  caller_bound_supported: boolean;
-  engine_max_pages?: number;
-  usage: string;
-}
+/** Exact pagination guidance exposes caller policy only after identity is resolved. */
+type ExactPaginationGuidance =
+  | { supported: false; caller_bound_supported: false; usage: string }
+  | { supported: true; caller_bound_supported: false; engine_max_pages?: number; usage: string }
+  | { supported: true; caller_bound_supported: true; engine_max_pages: number; usage: string };
+
+/** Ranked pagination guidance withholds every caller-bound field until exact lookup. */
+type QueryPaginationGuidance =
+  | { supported: false; usage: string }
+  | { supported: true; exact_lookup_required: true; usage: string };
+
+/** Explains whether exact discovery is required before changing a physical call shape. */
+export type PaginationGuidance = ExactPaginationGuidance | QueryPaginationGuidance;
 
 /** Unified detail exposes only the public compiler descriptor. */
 export interface UnifiedOperationDetail extends OperationSummary {
@@ -111,7 +117,7 @@ interface DocumentationSectionValue {
 
 interface SearchCandidate {
   summary: OperationSummary;
-  detail_metadata?: { path: string; pagination: PaginationGuidance };
+  detail_metadata?: { path: string; pagination: ExactPaginationGuidance; query_pagination: QueryPaginationGuidance };
   search_aliases: string[];
   score: number;
   sections: DocumentationSectionValue[];
@@ -119,10 +125,7 @@ interface SearchCandidate {
 
 const MAX_DESCRIPTION_BYTES = 512;
 const MAX_CHILD_PATHS = 32;
-const NON_PAGINATED_USAGE = "This operation has no Engine pagination contract. Omit the third call() argument's pagination option.";
-const NON_PAGINATED_GET_USAGE = "This GET operation has no Engine pagination contract, so each call() makes one provider request and does not traverse provider pages. Omit the third call() argument's pagination option. Only when this operation's documentation explicitly identifies a page input, continuation output, and stop condition, pass the page input in params, await the two-argument call(), read the continuation from its result, and repeat until the documented stop condition. Never infer page, cursor, or offset semantics from names. Each page counts toward execute's call and time limits.";
-const SINGLE_PAGE_USAGE = "Engine follows this operation's reviewed pagination contract up to engine_max_pages, but no positive maxPages value is lower than that limit. Omit the third call() argument's pagination option.";
-const PAGINATED_USAGE = "Engine follows provider pagination automatically. To accept a partial result, pass { pagination: { maxPages: N } } as call()'s third argument, where N is a positive integer lower than engine_max_pages. Provider page-size parameters do not bound total Engine traversal.";
+const MANUAL_GET_PAGINATION_USAGE = "Only when this operation's documentation explicitly identifies a page input, continuation output, and stop condition, pass the page input in params, await the two-argument call(), read the continuation from its result, and repeat until the documented stop condition. Never infer page, cursor, or offset semantics from names. Each page counts toward execute's call and time limits.";
 
 /** Routes exact, lazy, intent, and list requests without changing call authorization. */
 export function searchDocs(fixture: Fixture, args: SearchDocsArgs): SearchDocsResult {
@@ -186,7 +189,7 @@ function queryOperations(fixture: Fixture, query: string, limit: number): Search
     .filter(({ score }) => score > 0)
     .sort(compareCandidates);
   const selected = matched.slice(0, limit);
-  let operations = selected.map(toDetailShell);
+  let operations = selected.map((candidate) => toDetailShell(candidate, "query"));
   // Metadata and all ranked summaries are reserved before any schema consumes the shared budget.
   while (!fitsBudget({ mode: "query", operations, total: matched.length, truncated: true })) {
     operations = operations.slice(0, -1);
@@ -207,7 +210,7 @@ function resolveOperationDetail(fixture: Fixture, operationId: string): SearchDo
   if (!candidate) {
     return { mode: "operationId", error: "no such operationId" };
   }
-  let operation = toDetailShell(candidate);
+  let operation = toDetailShell(candidate, "operationId");
   // The fixture admission bounds public identity metadata, but fail closed if that invariant changes.
   if (!fitsBudget({ mode: "operationId", operation })) {
     return { mode: "operationId", error: "operation metadata exceeds the search_docs result budget" };
@@ -401,9 +404,10 @@ function exactCandidate(fixture: Fixture, operationId: string): SearchCandidate 
 /** Projects one physical operation into independently packable request and response sections. */
 function toPhysicalCandidate(operation: FixtureOperation, fixture: Fixture): SearchCandidate {
   const summary = physicalSummary(operation);
+  const pagination = paginationGuidance(operation);
   return {
     summary,
-    detail_metadata: { path: operation.path, pagination: paginationGuidance(operation) },
+    detail_metadata: { path: operation.path, pagination, query_pagination: queryPaginationGuidance(operation, pagination) },
     search_aliases: [operation.name],
     score: 0,
     sections: [
@@ -431,12 +435,17 @@ function toPhysicalCandidate(operation: FixtureOperation, fixture: Fixture): Sea
 }
 
 /** Converts the effective fixture policy into one stable, provider-neutral call instruction. */
-function paginationGuidance(operation: FixtureOperation): PaginationGuidance {
+function paginationGuidance(operation: FixtureOperation): ExactPaginationGuidance {
   const pagination = operation.pagination;
+  const operationId = JSON.stringify(operation.operation_id);
+  const unboundedCall = `call(${operationId}, params)`;
   // Unsupported operations need manual-provider guidance without exposing a decorative Engine bound.
   if (!pagination.supported) {
-    // GET is the only generic manual-paging case; other methods receive the shorter omission rule.
-    const usage = operation.method.toUpperCase() === "GET" ? NON_PAGINATED_GET_USAGE : NON_PAGINATED_USAGE;
+    // GET is the only generic manual-paging case; every method still receives the exact safe call correction.
+    const methodUsage = operation.method.toUpperCase() === "GET"
+      ? `This GET operation has no Engine pagination contract, so each ${unboundedCall} makes one provider request and does not traverse provider pages. ${MANUAL_GET_PAGINATION_USAGE}`
+      : "This operation has no Engine pagination contract.";
+    const usage = `${methodUsage} Use ${unboundedCall} without a pagination option. A pagination bound documented for another operation must not be reused here.`;
     return { supported: false, caller_bound_supported: false, usage };
   }
   // A one-page Engine policy has no legal positive strict reduction for the caller.
@@ -445,14 +454,30 @@ function paginationGuidance(operation: FixtureOperation): PaginationGuidance {
       supported: true,
       caller_bound_supported: false,
       engine_max_pages: pagination.engine_max_pages,
-      usage: SINGLE_PAGE_USAGE,
+      usage: `Engine follows operation ${operationId}'s reviewed pagination contract up to engine_max_pages, but no positive maxPages value is lower than that limit. Use ${unboundedCall} without a pagination option. A pagination bound documented for another operation must not be reused here.`,
     };
   }
   return {
     supported: true,
     caller_bound_supported: true,
-    engine_max_pages: pagination.engine_max_pages,
-    usage: PAGINATED_USAGE,
+    // Fixture admission proves every boundable policy carries its positive Engine limit.
+    engine_max_pages: pagination.engine_max_pages!,
+    usage: `Engine follows provider pagination automatically for operation ${operationId}. To accept a partial result from this exact operation, pass { pagination: { maxPages: N } } as call()'s third argument, where N is a positive integer lower than engine_max_pages. This bound applies only to operation ${operationId} and must not be reused for another call. Provider page-size parameters do not bound total Engine traversal.`,
+  };
+}
+
+/** Removes reusable numeric bounds from ranked results while retaining an exact next discovery action. */
+function queryPaginationGuidance(operation: FixtureOperation, exact: ExactPaginationGuidance): QueryPaginationGuidance {
+  // Unsupported operations have no bound to infer and retain only their exact safe two-argument denial.
+  if (!exact.supported) {
+    return { supported: false, usage: exact.usage };
+  }
+  const operationId = JSON.stringify(operation.operation_id);
+  // Every supported ranked result uses one uniform exact-lookup boundary, including policies that ultimately allow no caller bound.
+  return {
+    supported: true,
+    exact_lookup_required: true,
+    usage: `Operation ${operationId} supports Engine pagination, but ranked query results do not expose its caller policy. Until exact detail is retrieved, use only call(${operationId}, params). Call search_docs with operationId ${operationId} to retrieve the exact pagination guidance. A policy from another operation must not be reused.`,
   };
 }
 
@@ -486,8 +511,8 @@ function toUnifiedCandidate(operation: FixtureUnifiedOperation): SearchCandidate
   };
 }
 
-/** Converts a candidate to a schema-free callable shell with explicit availability. */
-function toDetailShell(candidate: SearchCandidate): OperationDetail | UnifiedOperationDetail {
+/** Converts a candidate to a schema-free callable shell with mode-appropriate execution metadata. */
+function toDetailShell(candidate: SearchCandidate, mode: "query" | "operationId"): OperationDetail | UnifiedOperationDetail {
   const schemaStatus: SchemaStatus = {
     complete: candidate.sections.length === 0,
     included_sections: [],
@@ -501,7 +526,9 @@ function toDetailShell(candidate: SearchCandidate): OperationDetail | UnifiedOpe
   if (!candidate.detail_metadata) {
     throw new Error("physical search candidate missing execution metadata");
   }
-  return { ...candidate.summary, ...candidate.detail_metadata, schema_status: schemaStatus };
+  const { path, pagination, query_pagination: queryPagination } = candidate.detail_metadata;
+  // Ranked results withhold reusable caller bounds; exact lookup remains the authoritative numeric policy.
+  return { ...candidate.summary, path, pagination: mode === "query" ? queryPagination : pagination, schema_status: schemaStatus };
 }
 
 /** Scores public physical and Unified metadata with identity weighted most strongly. */

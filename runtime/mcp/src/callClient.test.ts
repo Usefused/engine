@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { callClientOptionsFromEnv, remoteCall } from "./callClient.js";
+import { bridgeRecoveryForError, callClientOptionsFromEnv, remoteCall } from "./callClient.js";
 
 describe("callClientOptionsFromEnv", () => {
   const originalEnv = { ...process.env };
@@ -124,6 +124,60 @@ describe("remoteCall", () => {
     );
 
     await expect(remoteCall(options, "test.op", {})).rejects.toThrow("MCP_BRIDGE_SESSION_UNAVAILABLE: MCP bridge session is unavailable");
+  });
+
+  /** Typed pagination failures retain one Engine-owned prefix for outer execute recovery. */
+  it("preserves a specific pagination code without duplicating its message prefix", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({
+          code: "mcp_pagination_not_supported",
+          error: 'mcp_pagination_not_supported: operation "gmail.users.messages.get" is not paginated',
+          recovery_action: "correct_execute_arguments",
+          execute_request: "correct_arguments",
+          provider_execution: "not_started",
+          automatic_replay: false,
+        }),
+      }),
+    );
+
+    let failure: unknown;
+    try {
+      await remoteCall(options, "gmail.users.messages.get", {});
+    } catch (error) {
+      // Capturing the exact host error verifies identity-bound metadata as well as public prose.
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe('mcp_pagination_not_supported: operation "gmail.users.messages.get" is not paginated');
+    expect((failure as Error).message).not.toContain("mcp_pagination_not_supported: mcp_pagination_not_supported:");
+    expect(bridgeRecoveryForError(failure)).toEqual({ recovery_action: "correct_execute_arguments", execute_request: "correct_arguments", provider_execution: "not_started", automatic_replay: false });
+  });
+
+  /** Invalid bridge recovery remains unusable even when its error code and prose are otherwise stable. */
+  it("rejects incomplete structured recovery metadata", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({
+        code: "mcp_pagination_not_supported",
+        error: "mcp_pagination_not_supported: omit pagination",
+        recovery_action: "correct_execute_arguments",
+        execute_request: "correct_arguments",
+        provider_execution: "not_started",
+      }),
+    }));
+    let failure: unknown;
+    try {
+      await remoteCall(options, "gmail.users.messages.get", {});
+    } catch (error) {
+      // The thrown error is retained only to inspect its trusted identity metadata.
+      failure = error;
+    }
+    expect(bridgeRecoveryForError(failure)).toBeUndefined();
   });
 
   /** Invalid bridge bodies keep the mutation outcome explicit and never trigger another fetch. */

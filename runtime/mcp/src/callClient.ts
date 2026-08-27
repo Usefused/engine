@@ -15,10 +15,25 @@
  * "Credentials never enter the process running the script."
  */
 
+import { ModelRecovery, modelRecoveryFromUnknown } from "./sessionContract.js";
+
 interface CallResponse {
   result?: unknown;
   error?: string;
   code?: string;
+  recovery_action?: unknown;
+  execute_request?: unknown;
+  provider_execution?: unknown;
+  automatic_replay?: unknown;
+}
+
+const bridgeRecoveries = new WeakMap<object, ModelRecovery>();
+
+/** Returns only recovery metadata validated from an Engine bridge response for this exact host-owned error. */
+export function bridgeRecoveryForError(error: unknown): ModelRecovery | undefined {
+  // WeakMap identity prevents a script-thrown lookalike from claiming trusted bridge recovery.
+  if (typeof error !== "object" || error === null) return undefined;
+  return bridgeRecoveries.get(error);
 }
 
 /** PhysicalCallOptions carries caller-owned execution controls separately from provider parameters. */
@@ -98,8 +113,28 @@ export async function remoteCall(
   }
   // Provider and bridge errors preserve the existing reviewed response contract.
   if (!response.ok || body.error) {
-    const code = typeof body.code === "string" && body.code ? `${body.code}: ` : "";
-    throw new Error(code + (body.error ?? `call() failed with HTTP ${response.status}`));
+    throw callResponseError(body, response.status);
   }
   return body.result;
+}
+
+/** Creates one host-owned error and attaches only closed bridge recovery fields by object identity. */
+function callResponseError(body: CallResponse, status: number): Error {
+  const failure = new Error(callErrorMessage(body, status));
+  const recovery = modelRecoveryFromUnknown(body);
+  // Invalid or absent metadata leaves outer execute recovery conservative instead of re-deriving Engine policy.
+  if (recovery) bridgeRecoveries.set(failure, recovery);
+  return failure;
+}
+
+/** Preserves an Engine-owned bridge code once without inferring codes from provider error text. */
+function callErrorMessage(body: CallResponse, status: number): string {
+  const message = body.error ?? `call() failed with HTTP ${status}`;
+  // Uncoded errors retain their established text and cannot manufacture machine-readable recovery.
+  if (typeof body.code !== "string" || !body.code) {
+    return message;
+  }
+  const prefix = `${body.code}:`;
+  // Physical errors already carry their stable prefix in prose, so adding it again would obscure correction guidance.
+  return message.startsWith(prefix) ? message : `${prefix} ${message}`;
 }

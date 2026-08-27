@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
-	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -36,6 +35,11 @@ type mcpRuntimeLimitResponse struct {
 			Name        string                    `json:"name"`
 			Description string                    `json:"description"`
 			Meta        map[string]map[string]any `json:"_meta"`
+			InputSchema struct {
+				Properties map[string]struct {
+					Description string `json:"description"`
+				} `json:"properties"`
+			} `json:"inputSchema"`
 		} `json:"tools"`
 		Meta    map[string]mcpResultDelivery `json:"_meta"`
 		IsError bool                         `json:"isError"`
@@ -64,8 +68,9 @@ type mcpRuntimeNavigation struct {
 // mcpRuntimePaginationGuidance mirrors the bounded fields exposed to agents by search_docs.
 type mcpRuntimePaginationGuidance struct {
 	Supported            bool   `json:"supported"`
-	CallerBoundSupported bool   `json:"caller_bound_supported"`
-	EngineMaxPages       int    `json:"engine_max_pages"`
+	CallerBoundSupported *bool  `json:"caller_bound_supported"`
+	EngineMaxPages       *int   `json:"engine_max_pages"`
+	ExactLookupRequired  bool   `json:"exact_lookup_required"`
 	Usage                string `json:"usage"`
 }
 
@@ -76,6 +81,16 @@ type mcpRuntimePaginationDocs struct {
 		OperationID string                       `json:"operation_id"`
 		Pagination  mcpRuntimePaginationGuidance `json:"pagination"`
 	} `json:"operations"`
+}
+
+// mcpRuntimeExecuteFailure mirrors the closed recovery fields visible in one execute tool error.
+type mcpRuntimeExecuteFailure struct {
+	Code              string `json:"code"`
+	Message           string `json:"message"`
+	RecoveryAction    string `json:"recovery_action"`
+	ExecuteRequest    string `json:"execute_request"`
+	ProviderExecution string `json:"provider_execution"`
+	AutomaticReplay   bool   `json:"automatic_replay"`
 }
 
 // TestMCPBundledRuntimeAdvertisesSessionContract verifies the actual MCP SDK wire surfaces visible to hosts and agents.
@@ -104,6 +119,69 @@ func TestMCPBundledRuntimeSearchDocsPaginationGuidance(t *testing.T) {
 		"name": "search_docs", "arguments": map[string]any{"query": "users", "limit": 2},
 	})
 	assertMCPRuntimePaginationDocs(t, response)
+	exact := client.exchange(t, "tools/call", map[string]any{
+		"name": "search_docs", "arguments": map[string]any{"operationId": "users.list"},
+	})
+	assertMCPRuntimeExactPaginationDocs(t, exact)
+}
+
+// TestMCPBundledRuntimePaginationErrorsPreserveCorrection verifies pre-provider shape and Engine intent errors across the shipped Node bundle.
+func TestMCPBundledRuntimePaginationErrorsPreserveCorrection(t *testing.T) {
+	var bridgeCalls atomic.Int32
+	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		bridgeCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code":            "mcp_pagination_not_supported",
+			"error":           `mcp_pagination_not_supported: operation "gmail.users.messages.get" is not paginated; use call("gmail.users.messages.get", params) without a pagination option`,
+			"recovery_action": "correct_execute_arguments", "execute_request": "correct_arguments", "provider_execution": "not_started", "automatic_replay": false,
+		})
+	}))
+	defer bridge.Close()
+
+	fixture := &Fixture{Operations: []FixtureOperation{{
+		OperationID: "gmail.users.messages.get", ServiceID: "gmail", Name: "Get message", Method: "GET", Path: "/messages/{id}", Responses: models.Responses{}, Pagination: FixturePagination{Supported: false},
+	}}}
+	client := startMCPLimitRuntimeWithFixture(t, strings.TrimPrefix(bridge.URL, "http://127.0.0.1:"), fixture)
+	client.exchange(t, "initialize", map[string]any{
+		"protocolVersion": "2025-03-26", "capabilities": map[string]any{},
+		"clientInfo": map[string]string{"name": "fused-pagination-error-test", "version": "1.0.0"},
+	})
+
+	shapeFailure := decodeMCPRuntimeExecuteFailure(t, client.execute(t, `return await call("gmail.users.messages.get", {userId:"me",id:"message"}, {pagination:{maxPages:0}})`))
+	assertMCPRuntimeArgumentCorrection(t, shapeFailure, "MCP_CALL_PAGINATION_INVALID")
+	// Sandbox shape admission must stop before the Engine bridge receives a request.
+	if bridgeCalls.Load() != 0 {
+		t.Fatal("invalid physical pagination reached the Engine bridge")
+	}
+
+	intentFailure := decodeMCPRuntimeExecuteFailure(t, client.execute(t, `return await call("gmail.users.messages.get", {userId:"me",id:"message"}, {pagination:{maxPages:1}})`))
+	assertMCPRuntimeArgumentCorrection(t, intentFailure, "mcp_pagination_not_supported")
+	// The Engine-owned stable code must survive exactly one bridge request and outer execute formatting.
+	if bridgeCalls.Load() != 1 || strings.Count(intentFailure.Message, "mcp_pagination_not_supported:") != 1 {
+		t.Fatalf("typed pagination failure was duplicated or replayed: calls=%d message=%q", bridgeCalls.Load(), intentFailure.Message)
+	}
+}
+
+// decodeMCPRuntimeExecuteFailure admits one real MCP tool error before checking its recovery semantics.
+func decodeMCPRuntimeExecuteFailure(t *testing.T, response mcpRuntimeLimitResponse) mcpRuntimeExecuteFailure {
+	t.Helper()
+	var failure mcpRuntimeExecuteFailure
+	// Execute failures must remain one bounded text item rather than a JSON-RPC transport error.
+	if !response.Result.IsError || len(response.Result.Content) != 1 || json.Unmarshal([]byte(response.Result.Content[0].Text), &failure) != nil {
+		t.Fatal("execute pagination failure did not return one structured tool error")
+	}
+	return failure
+}
+
+// assertMCPRuntimeArgumentCorrection checks the closed pre-provider action shared by syntax and Engine intent failures.
+func assertMCPRuntimeArgumentCorrection(t *testing.T, failure mcpRuntimeExecuteFailure, wantCode string) {
+	t.Helper()
+	// Correctable pagination mistakes must never be labeled as unknown provider outcomes.
+	if failure.Code != wantCode || failure.RecoveryAction != "correct_execute_arguments" || failure.ExecuteRequest != "correct_arguments" || failure.ProviderExecution != "not_started" || failure.AutomaticReplay {
+		t.Fatalf("pagination correction = %+v, want code %q", failure, wantCode)
+	}
 }
 
 // assertMCPRuntimePaginationDocs checks mixed GET guidance without depending on ranked order.
@@ -137,23 +215,53 @@ func decodeMCPRuntimePaginationDocs(t *testing.T, response mcpRuntimeLimitRespon
 // assertMCPRuntimePaginatedGuidance verifies the reviewed automatic and caller-owned bounds independently.
 func assertMCPRuntimePaginatedGuidance(t *testing.T, got mcpRuntimePaginationGuidance) {
 	t.Helper()
-	want := mcpRuntimePaginationGuidance{Supported: true, CallerBoundSupported: true, EngineMaxPages: 100, Usage: got.Usage}
-	// Structured fields should match without coupling this integration test to full prose.
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("paginated list guidance = %+v", got)
+	// Ranked guidance must withhold both the reusable boolean and numeric bound until exact lookup.
+	if !got.Supported || !got.ExactLookupRequired || got.CallerBoundSupported != nil || got.EngineMaxPages != nil {
+		t.Fatalf("ranked paginated list guidance = %+v", got)
 	}
-	// The public instruction must identify the separate physical call option.
-	if !strings.Contains(got.Usage, "third argument") {
-		t.Fatalf("paginated list usage = %q", got.Usage)
+	assertMCPRuntimePaginatedUsage(t, got.Usage)
+}
+
+// assertMCPRuntimePaginatedUsage keeps exact-call recovery separate from ranked metadata admission.
+func assertMCPRuntimePaginatedUsage(t *testing.T, usage string) {
+	t.Helper()
+	// The public instruction must permit only the exact two-argument call until exact lookup, without hinting at hidden bound syntax.
+	if !strings.Contains(usage, `operationId "users.list"`) || !strings.Contains(usage, `call("users.list", params)`) || !strings.Contains(usage, "must not be reused") || strings.Contains(usage, "third") || strings.Contains(usage, "maxPages") || strings.Contains(usage, "engine_max_pages") {
+		t.Fatalf("ranked paginated list usage = %q", usage)
+	}
+}
+
+// assertMCPRuntimeExactPaginationDocs verifies numeric caller policy appears only after exact operation lookup.
+func assertMCPRuntimeExactPaginationDocs(t *testing.T, response mcpRuntimeLimitResponse) {
+	t.Helper()
+	var result struct {
+		Mode      string `json:"mode"`
+		Operation struct {
+			OperationID string                       `json:"operation_id"`
+			Pagination  mcpRuntimePaginationGuidance `json:"pagination"`
+		} `json:"operation"`
+	}
+	// Exact detail is the sole public surface allowed to expose a reusable Engine page bound.
+	if response.Result.IsError || len(response.Result.Content) != 1 || json.Unmarshal([]byte(response.Result.Content[0].Text), &result) != nil || result.Mode != "operationId" {
+		t.Fatal("exact pagination lookup did not return one operation detail")
+	}
+	assertMCPRuntimeExactPaginationValues(t, result.Operation.OperationID, result.Operation.Pagination)
+}
+
+// assertMCPRuntimeExactPaginationValues checks the full policy separately to keep envelope validation simple.
+func assertMCPRuntimeExactPaginationValues(t *testing.T, operationID string, got mcpRuntimePaginationGuidance) {
+	t.Helper()
+	// Exact identity must accompany the full boolean and numeric bound.
+	if operationID != "users.list" || !got.Supported || got.CallerBoundSupported == nil || !*got.CallerBoundSupported || got.EngineMaxPages == nil || *got.EngineMaxPages != 100 || got.ExactLookupRequired {
+		t.Fatalf("exact pagination guidance = operation:%q pagination:%+v", operationID, got)
 	}
 }
 
 // assertMCPRuntimeUnpaginatedGuidance verifies GET detail cannot advertise Engine traversal.
 func assertMCPRuntimeUnpaginatedGuidance(t *testing.T, got mcpRuntimePaginationGuidance) {
 	t.Helper()
-	want := mcpRuntimePaginationGuidance{Usage: got.Usage}
-	// Unsupported guidance must omit every caller-owned bound field.
-	if !reflect.DeepEqual(got, want) {
+	// Ranked unsupported guidance denies pagination in prose while withholding every exact-policy field uniformly.
+	if got.Supported || got.CallerBoundSupported != nil || got.EngineMaxPages != nil || got.ExactLookupRequired {
 		t.Fatalf("non-paginated get guidance = %+v", got)
 	}
 	// The public instruction must explain the one-request behavior to a fresh agent.
@@ -170,7 +278,7 @@ func assertMCPRuntimeInitializeContract(t *testing.T, initialized mcpRuntimeLimi
 		t.Fatalf("initialize omitted session contract: %+v", initialized.Result)
 	}
 	// Fresh agents must defer to per-operation discovery instead of assuming every GET accepts a bound.
-	if !strings.Contains(initialized.Result.Instructions, "selected search_docs result's pagination guidance") {
+	if !strings.Contains(initialized.Result.Instructions, "exact operationId detail") || !strings.Contains(initialized.Result.Instructions, "Never reuse") {
 		t.Fatal("initialize omitted operation-specific pagination guidance")
 	}
 }
@@ -184,7 +292,8 @@ func assertMCPRuntimeExecuteContract(t *testing.T, listed mcpRuntimeLimitRespons
 			continue
 		}
 		contract := tool.Meta["com.usefused/session"]
-		if !strings.Contains(tool.Description, "Never invent") || contract["transport_session"] != "client_managed" || contract["session_id_input"] != false || contract["script_scope"] != "current_mcp_connection" || contract["automatic_execute_replay"] != false {
+		scriptDescription := tool.InputSchema.Properties["script"].Description
+		if !strings.Contains(tool.Description, "Never invent") || !strings.Contains(scriptDescription, "search_docs exact operationId detail") || !strings.Contains(scriptDescription, "caller_bound_supported=true") || contract["transport_session"] != "client_managed" || contract["session_id_input"] != false || contract["script_scope"] != "current_mcp_connection" || contract["automatic_execute_replay"] != false {
 			t.Fatalf("execute session contract = description:%q metadata:%+v", tool.Description, contract)
 		}
 		return
