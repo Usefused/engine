@@ -1046,49 +1046,53 @@ func (s *postgresStore) ListSecretMeta(ctx context.Context, bucketID uuid.UUID) 
 	return collectSecretMetas(rows)
 }
 
-// authReferenceStorageServiceIDSQL makes an exact reference authoritative;
-// direct target rows remain eligible only when no reference edge exists.
+// authReferenceStorageServiceIDSQL uses the immutable app selection source when present and otherwise remains direct.
 const authReferenceStorageServiceIDSQL = `CASE
-	WHEN reference.id IS NULL THEN requested_key.service_id
-	ELSE reference.source_service_id
+	WHEN requested_key.source_service_id IS NULL THEN requested_key.service_id
+	ELSE requested_key.source_service_id
 END`
 
-// authReferenceStorageKeyNameSQL rebases only a key owned by the exact target
-// scheme; malformed prefixes resolve to NULL and therefore fail closed.
+// authReferenceStorageKeyNameSQL rebases only exact same-family app references; malformed identities fail closed.
 const authReferenceStorageKeyNameSQL = `CASE
-	WHEN reference.id IS NULL THEN requested_key.target_key_name
-	WHEN LOWER(REPLACE(BTRIM(reference.target_auth_type), '-', '_')) <>
-	     LOWER(REPLACE(BTRIM(reference.source_auth_type), '-', '_'))
-		THEN NULL
-	WHEN requested_key.auth_type IS NULL
-	  OR LOWER(REPLACE(BTRIM(reference.target_auth_type), '-', '_')) <> requested_key.auth_type
+	WHEN requested_key.source_service_id IS NULL THEN requested_key.target_key_name
+	WHEN requested_key.auth_type <> LOWER(REPLACE(BTRIM(requested_key.source_auth_type), '-', '_'))
 		THEN NULL
 	WHEN requested_key.auth_name = ''
 	  OR LEFT(requested_key.target_key_name, CHAR_LENGTH(requested_key.auth_name)) <> requested_key.auth_name
 		THEN NULL
-	ELSE reference.source_auth_name || SUBSTRING(
-		requested_key.target_key_name FROM CHAR_LENGTH(reference.target_auth_name) + 1
+	ELSE requested_key.source_auth_name || SUBSTRING(
+		requested_key.target_key_name FROM CHAR_LENGTH(requested_key.auth_name) + 1
 	)
 END`
 
+// appBucketCredentialPresenceSQL treats Go's JSON-encoded zero UUID as an omitted direct source before applying reference routing.
 const appBucketCredentialPresenceSQL = `
 	WITH requirements AS (
 		SELECT
 			requirement.service_id,
 			LOWER(REPLACE(BTRIM(requirement.auth_type), '-', '_')) AS auth_type,
 			BTRIM(requirement.auth_name) AS auth_name,
-			COALESCE(requirement.secret_keys, '[]'::jsonb) AS secret_keys
+			COALESCE(requirement.secret_keys, '[]'::jsonb) AS secret_keys,
+			NULLIF(requirement.source_service_id, '00000000-0000-0000-0000-000000000000'::uuid) AS source_service_id,
+			LOWER(REPLACE(BTRIM(requirement.source_auth_type), '-', '_')) AS source_auth_type,
+			BTRIM(requirement.source_auth_name) AS source_auth_name
 		FROM jsonb_to_recordset($2::jsonb) AS requirement(
 			service_id uuid,
 			auth_type text,
 			auth_name text,
-			secret_keys jsonb
+			secret_keys jsonb,
+			source_service_id uuid,
+			source_auth_type text,
+			source_auth_name text
 		)
 	), auth_keys AS (
 		SELECT
 			requirement.service_id,
 			requirement.auth_type,
 			requirement.auth_name,
+			requirement.source_service_id,
+			requirement.source_auth_type,
+			requirement.source_auth_name,
 			requested_key.key_name AS target_key_name
 		FROM requirements requirement
 		CROSS JOIN LATERAL jsonb_array_elements_text(requirement.secret_keys) AS requested_key(key_name)
@@ -1101,27 +1105,27 @@ const appBucketCredentialPresenceSQL = `
 			` + authReferenceStorageServiceIDSQL + ` AS storage_service_id,
 			` + authReferenceStorageKeyNameSQL + ` AS storage_key_name
 		FROM auth_keys requested_key
-		LEFT JOIN LATERAL (
-			SELECT candidate.*
-			FROM fused_workspace_auth_references candidate
-			WHERE candidate.bucket_id = $1
-			  AND candidate.target_service_id = requested_key.service_id
-			  AND candidate.target_auth_name = requested_key.auth_name
-		) reference ON TRUE
 	)
 	SELECT
 		requirement.service_id,
 		requirement.auth_type,
 		requirement.auth_name,
-		EXISTS (
-			SELECT 1
-			FROM fused_connect_configs config
-			WHERE config.bucket_id = $1
-			  AND config.service_id = requirement.service_id
-			  AND config.enabled = TRUE
-			  AND LOWER(REPLACE(BTRIM(config.auth_type), '-', '_')) = requirement.auth_type
-			  AND BTRIM(config.auth_name) = requirement.auth_name
-		) AS connected,
+		(requirement.auth_type IN ('oauth', 'oidc')
+		 AND jsonb_array_length(requirement.secret_keys) = 2
+		 AND NOT EXISTS (
+			SELECT 1 FROM requested_keys requested_key
+			WHERE requested_key.service_id = requirement.service_id
+			  AND requested_key.auth_type = requirement.auth_type
+			  AND requested_key.auth_name = requirement.auth_name
+			  AND NOT EXISTS (
+				SELECT 1 FROM fused_workspace_secrets secret
+				WHERE secret.bucket_id = $1
+				  AND secret.service_id = requested_key.storage_service_id
+				  AND secret.key_name = requested_key.storage_key_name
+				  AND LOWER(REPLACE(BTRIM(secret.credential_type), '-', '_')) = requirement.auth_type
+				  AND (secret.expires_at IS NULL OR secret.expires_at > NOW())
+			  )
+		 )) AS connected,
 		COALESCE(ARRAY(
 			SELECT DISTINCT requested_key.target_key_name
 			FROM requested_keys requested_key
@@ -1173,6 +1177,7 @@ func (s *postgresStore) ListSecretMetaPage(ctx context.Context, bucketID uuid.UU
 		SELECT *, CASE
 			WHEN LOWER(REPLACE(credential_type, '-', '_')) = 'basic' THEN REGEXP_REPLACE(key_name, '_(username|password)$', '')
 			WHEN LOWER(REPLACE(credential_type, '-', '_')) IN ('mtls', 'mutualtls', 'mutual_tls') THEN REGEXP_REPLACE(key_name, '_(cert|key)$', '')
+			WHEN LOWER(REPLACE(credential_type, '-', '_')) IN ('oauth', 'oidc') THEN REGEXP_REPLACE(key_name, '_(client_id|client_secret)$', '')
 			ELSE key_name
 		END AS family_key
 		FROM fused_workspace_secrets WHERE bucket_id = $1`
@@ -1296,6 +1301,10 @@ const firstCompleteSecretSetSQL = `
 		SELECT
 			$2::uuid AS service_id,
 			candidate.value->'auth_types'->>requested_key.key_name AS auth_type,
+			-- Go's UUID array type serializes its zero value despite omitempty, so normalize it to direct routing.
+			NULLIF(NULLIF(candidate.value->>'source_service_id', '')::uuid, '00000000-0000-0000-0000-000000000000'::uuid) AS source_service_id,
+			candidate.value->>'source_auth_type' AS source_auth_type,
+			candidate.value->>'source_auth_name' AS source_auth_name,
 			candidate.ordinality,
 			requested_key.key_name AS target_key_name,
 			BOOL_OR(requested_key.required) AS required,
@@ -1317,13 +1326,6 @@ const firstCompleteSecretSetSQL = `
 			` + authReferenceStorageServiceIDSQL + ` AS storage_service_id,
 			` + authReferenceStorageKeyNameSQL + ` AS storage_key_name
 		FROM requested_keys requested_key
-		LEFT JOIN LATERAL (
-			SELECT candidate.*
-			FROM fused_workspace_auth_references candidate
-			WHERE candidate.bucket_id = $1
-			  AND candidate.target_service_id = requested_key.service_id
-			  AND candidate.target_auth_name = requested_key.auth_name
-		) reference ON TRUE
 	), selected AS (
 		SELECT ordinality
 		FROM alternatives candidate

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/connectauth"
 	"github.com/Usefused/engine/internal/engine/connectresource"
 	"github.com/Usefused/engine/internal/engine/store"
@@ -34,6 +35,9 @@ const connectSessionTTL = 10 * time.Minute
 type connectSessionStartRequest struct {
 	EndUserRef     string            `json:"end_user_ref"`
 	CreatedByAppID string            `json:"created_by_app_id,omitempty"`
+	AuthType       string            `json:"auth_type,omitempty"`
+	AuthName       string            `json:"auth_name,omitempty"`
+	AuthRef        string            `json:"auth_ref,omitempty"`
 	ReturnURL      string            `json:"return_url,omitempty"`
 	ResourceInput  map[string]string `json:"resource_input,omitempty"`
 	Scopes         []string          `json:"scopes,omitempty"`
@@ -52,7 +56,7 @@ type connectClientCredentials = connectauth.ClientCredentials
 
 // StartConnectSessionHandler is the team/CLI-facing entry point; it creates a
 // short-lived browser session without exposing OAuth client material.
-func StartConnectSessionHandler(s store.Store, verifier ServiceVerifier, masterKey []byte) http.HandlerFunc {
+func StartConnectSessionHandler(s store.Store, verifier ServiceVerifier, masterKey []byte, redirectURIs ...string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.connect.session.start")
 		defer span.End()
@@ -68,7 +72,14 @@ func StartConnectSessionHandler(s store.Store, verifier ServiceVerifier, masterK
 		if !ok {
 			return
 		}
-		resolved, err := resolveConnectRuntimeConfig(ctx, s, verifier, call, masterKey)
+		// Optional SDK attribution is authorized independently and never participates in bucket credential selection.
+		if err := validateConnectAuditSDK(ctx, s, createdByAppID); err != nil {
+			writeConnectRuntimeError(w, ctx, err, "request_admission", "not_committed")
+			return
+		}
+		// Control-plane app identity is audit attribution only; explicit auth_ref owns reusable credential routing.
+		call.authType, call.authName, call.authRef = req.AuthType, req.AuthName, req.AuthRef
+		resolved, err := resolveConnectRuntimeConfig(ctx, s, verifier, call, masterKey, firstRedirectURI(redirectURIs))
 		// Resolution failures occur before any one-time connect session can be persisted.
 		if err != nil {
 			writeConnectRuntimeError(w, ctx, err, "connect_resolution", "not_committed")
@@ -92,6 +103,50 @@ func StartConnectSessionHandler(s store.Store, verifier ServiceVerifier, masterK
 		span.SetAttributes(connectSessionStartTelemetry(response)...)
 		writeConnectJSON(w, http.StatusOK, response)
 	}
+}
+
+// validateConnectAuditSDK verifies one optional SDK Version ID against the control actor without loading credential routing.
+func validateConnectAuditSDK(ctx context.Context, s store.Store, appID uuid.UUID) error {
+	// Omitted attribution is valid for standalone consent and performs no app read.
+	if appID == uuid.Nil {
+		return nil
+	}
+	actor, ok := accesscontrol.ActorFromContext(ctx)
+	// Attribution cannot be authorized without the control-plane actor already admitted by the route.
+	if !ok {
+		return connectRuntimeHTTPError{status: http.StatusUnauthorized, code: "connect_authentication_required", message: "authentication is required"}
+	}
+	familyID, err := resolveConnectAuditSDKFamily(ctx, s, actor.AccountID, appID)
+	// Every unavailable identity shares one denial so the audit field cannot enumerate app versions.
+	if err != nil {
+		return connectAuditSDKUnavailableError()
+	}
+	requirement := accesscontrol.Requirement{Permission: accesscontrol.PermissionAppRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID}}
+	// Family-scoped app.read is the same visibility boundary used by SDK catalogue resolution.
+	if err := (accesscontrol.SnapshotAuthorizer{}).CheckAll(ctx, actor, requirement); err != nil {
+		return connectAuditSDKUnavailableError()
+	}
+	return nil
+}
+
+// resolveConnectAuditSDKFamily resolves only SDK kind and ownership metadata needed for audit authorization.
+func resolveConnectAuditSDKFamily(ctx context.Context, s store.Store, accountID, appID uuid.UUID) (uuid.UUID, error) {
+	app, err := s.GetApp(ctx, appID)
+	// Missing or cross-account versions cannot contribute a trusted family identity.
+	if err != nil || app == nil || app.AccountID != accountID {
+		return uuid.Nil, store.ErrAppNotFound
+	}
+	family, err := s.GetAppFamily(ctx, app.AppFamilyID)
+	// MCP families and cross-account metadata are never valid for the CLI's SDK-only audit selector.
+	if err != nil || family == nil || family.AccountID != accountID || family.Kind != store.AppKindSDK {
+		return uuid.Nil, store.ErrAppFamilyNotFound
+	}
+	return family.AppFamilyID, nil
+}
+
+// connectAuditSDKUnavailableError keeps absent, wrong-kind, cross-account, and unauthorized attribution indistinguishable.
+func connectAuditSDKUnavailableError() error {
+	return connectRuntimeHTTPError{status: http.StatusForbidden, code: "connect_audit_sdk_unavailable", message: "SDK audit attribution is unavailable"}
 }
 
 // ConnectCallbackHandler owns the browser-return leg so provider tokens are
@@ -121,20 +176,27 @@ func ConnectCallbackHandler(s store.Store, verifier ServiceVerifier, masterKey [
 			writeConnectCallbackRuntimeError(ctx, s, w, err)
 			return
 		}
-		call := connectAdminCall{bucketID: session.BucketID, serviceID: session.ServiceID}
+		call := connectAdminCall{
+			bucketID: session.BucketID, serviceID: session.ServiceID,
+			authType: session.AuthType, authName: session.AuthName,
+			credentialSource: persistedApplicationCredentialSource(
+				session.CredentialSourceServiceID,
+				session.CredentialSourceAuthType,
+				session.CredentialSourceAuthName,
+			),
+		}
 		span.SetAttributes(connectAdminAttrs("connect.callback", call)...)
-		// Legacy sessions without an unambiguous migration backfill fail closed;
-		// the callback must never float to a newer provider contract.
-		if session.ServiceVersionID == uuid.Nil {
-			writeConnectCallbackFailure(ctx, s, w, r, session, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "connect session service version is unavailable"})
+		if err := validateConnectCallbackSession(session); err != nil {
+			writeConnectCallbackFailure(ctx, s, w, r, session, err)
 			return
 		}
-		resolved, err := resolveConnectRuntimeConfigForVersion(ctx, s, verifier, call, session.ServiceVersionID, masterKey)
+		resolved, err := resolveConnectRuntimeConfigForVersion(ctx, s, verifier, call, session.ServiceVersionID, masterKey, session.RedirectURI)
 		if err != nil {
 			writeConnectCallbackFailure(ctx, s, w, r, session, err)
 			return
 		}
-		if session.AuthType != resolved.config.AuthType || session.AuthName != resolved.config.AuthName {
+		// The callback remains pinned to the exact scheme selected before the browser handoff.
+		if session.AuthType != resolved.authType || session.AuthName != resolved.authName {
 			writeConnectCallbackFailure(ctx, s, w, r, session, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "connect auth configuration changed"})
 			return
 		}
@@ -173,12 +235,27 @@ func ConnectCallbackHandler(s store.Store, verifier ServiceVerifier, masterKey [
 	}
 }
 
+// validateConnectCallbackSession rejects historical rows that cannot preserve the original provider handoff.
+func validateConnectCallbackSession(session *store.ConnectSession) error {
+	// Ambiguous version identity must never float to a newer provider contract.
+	if session == nil || session.ServiceVersionID == uuid.Nil {
+		return connectRuntimeHTTPError{status: http.StatusBadRequest, message: "connect session service version is unavailable"}
+	}
+	// Sessions created before callback pinning cannot reconstruct the redirect sent to the provider.
+	if strings.TrimSpace(session.RedirectURI) == "" {
+		return connectRuntimeHTTPError{status: http.StatusBadRequest, message: "connect session callback is unavailable; start a new connection"}
+	}
+	return nil
+}
+
 type connectRuntimeConfig struct {
-	config      *store.ConnectConfig
-	auth        fusedobject.AuthConfig
-	flow        fusedobject.OAuth2FlowContract
-	credentials connectClientCredentials
-	metadata    *fusedobject.ServiceMetadata
+	authType         string
+	authName         string
+	auth             fusedobject.AuthConfig
+	flow             fusedobject.OAuth2FlowContract
+	credentials      connectClientCredentials
+	credentialSource connectauth.ApplicationCredentialSource
+	metadata         *fusedobject.ServiceMetadata
 }
 
 type connectInputContractIdentity struct {
@@ -201,13 +278,28 @@ func decodeConnectSessionStartRequest(w http.ResponseWriter, r *http.Request, ct
 	}
 	req.EndUserRef = strings.TrimSpace(req.EndUserRef)
 	req.ReturnURL = strings.TrimSpace(req.ReturnURL)
+	req.AuthType = canonicalConnectAuthType(req.AuthType)
+	req.AuthName = strings.TrimSpace(req.AuthName)
+	req.AuthRef = strings.TrimSpace(req.AuthRef)
+	// An exact selector is all-or-none so a partial request cannot float across schemes.
+	if (req.AuthType == "") != (req.AuthName == "") {
+		writeConnectRuntimeError(w, ctx, connectRuntimeHTTPError{status: http.StatusBadRequest, code: "invalid_connect_auth_selector", message: "auth_type and auth_name must be provided together"}, "request_admission", "not_committed")
+		return req, uuid.Nil, false
+	}
+	// A malformed reference is rejected at admission before any bucket or provider metadata can be inferred from it.
+	if req.AuthRef != "" {
+		if _, err := parseAppAuthReference(req.AuthRef); err != nil {
+			writeConnectRuntimeError(w, ctx, connectRuntimeHTTPError{status: http.StatusBadRequest, code: "invalid_connect_auth_ref", message: "auth_ref must use ${bucket.auth.<service>.<authName>}"}, "request_admission", "not_committed")
+			return req, uuid.Nil, false
+		}
+	}
 	// Connection ownership requires a stable caller-supplied end-user reference.
 	if req.EndUserRef == "" {
 		writeConnectRuntimeError(w, ctx, connectRuntimeHTTPError{status: http.StatusBadRequest, code: "connect_end_user_ref_required", message: "end_user_ref is required"}, "request_admission", "not_committed")
 		return req, uuid.Nil, false
 	}
 	// Return destinations must be absolute web URLs so callback routing cannot become ambiguous.
-	if req.ReturnURL != "" && !isHTTPRedirectURI(req.ReturnURL) {
+	if req.ReturnURL != "" && !isAbsoluteHTTPURL(req.ReturnURL) {
 		writeConnectRuntimeError(w, ctx, connectRuntimeHTTPError{status: http.StatusBadRequest, code: "invalid_connect_return_url", message: "return_url must be an absolute http or https URL"}, "request_admission", "not_committed")
 		return req, uuid.Nil, false
 	}
@@ -220,36 +312,268 @@ func decodeConnectSessionStartRequest(w http.ResponseWriter, r *http.Request, ct
 	return req, createdBy, true
 }
 
+// isAbsoluteHTTPURL admits explicit browser return destinations without interpreting request host headers.
+func isAbsoluteHTTPURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	// Relative and non-web destinations cannot be trusted as post-consent navigation targets.
+	if err != nil {
+		return false
+	}
+	return parsed.Host != "" && (parsed.Scheme == "http" || parsed.Scheme == "https")
+}
+
 // resolveConnectRuntimeConfig ties a connect attempt to the bucket-enabled
 // service version, which prevents onboarding against auth metadata the
 // workspace will not use at runtime.
-func resolveConnectRuntimeConfig(ctx context.Context, s store.Store, verifier ServiceVerifier, call connectAdminCall, masterKey []byte) (connectRuntimeConfig, error) {
-	return resolveConnectRuntimeConfigForVersion(ctx, s, verifier, call, uuid.Nil, masterKey)
+func resolveConnectRuntimeConfig(ctx context.Context, s store.Store, verifier ServiceVerifier, call connectAdminCall, masterKey []byte, redirectURI ...string) (connectRuntimeConfig, error) {
+	return resolveConnectRuntimeConfigForVersion(ctx, s, verifier, call, uuid.Nil, masterKey, firstRedirectURI(redirectURI))
 }
 
 // resolveConnectRuntimeConfigForVersion resolves either the latest start-time
 // version or the exact immutable version pinned on a callback session.
-func resolveConnectRuntimeConfigForVersion(ctx context.Context, s store.Store, verifier ServiceVerifier, call connectAdminCall, serviceVersionID uuid.UUID, masterKey []byte) (connectRuntimeConfig, error) {
-	cfg, err := s.GetConnectConfig(ctx, call.bucketID, call.serviceID)
-	if err != nil {
-		return connectRuntimeConfig{}, fmt.Errorf("load connect config: %w", err)
+func resolveConnectRuntimeConfigForVersion(ctx context.Context, s store.Store, verifier ServiceVerifier, call connectAdminCall, serviceVersionID uuid.UUID, masterKey []byte, redirectURI ...string) (connectRuntimeConfig, error) {
+	callbackURI := firstRedirectURI(redirectURI)
+	// Consent cannot safely begin without the operator-controlled callback origin, but unrelated Engine work remains available.
+	if callbackURI == "" {
+		return connectRuntimeConfig{}, connectRuntimeHTTPError{
+			status: http.StatusServiceUnavailable, code: "engine_public_url_required",
+			message:     "OAuth connections require an Engine public URL.",
+			remediation: "Configure engine.public_url or FUSED_ENGINE_PUBLIC_URL with the externally reachable Engine origin, then restart the Engine.",
+		}
 	}
-	if cfg == nil || !cfg.Enabled {
-		return connectRuntimeConfig{}, connectRuntimeHTTPError{status: http.StatusNotFound, message: "connect config not found"}
-	}
-	metadata, err := loadConnectRuntimeMetadata(ctx, s, verifier, call, cfg.AuthType, serviceVersionID)
-	if err != nil {
-		return connectRuntimeConfig{}, err
-	}
-	auth, flow, err := selectRuntimeOAuthConfig(metadata.AuthConfigs, cfg.AuthType, cfg.AuthName, connectOAuth2FlowName(metadata))
+	metadata, err := loadConnectRuntimeMetadata(ctx, s, verifier, call, call.authType, serviceVersionID)
 	if err != nil {
 		return connectRuntimeConfig{}, err
 	}
-	creds, err := decryptConnectClientCredentials(cfg, masterKey)
+	authType, authName, err := resolveConnectAuthSelector(metadata.AuthConfigs, call.authType, call.authName)
 	if err != nil {
-		return connectRuntimeConfig{}, fmt.Errorf("decrypt connect client credentials: %w", err)
+		return connectRuntimeConfig{}, err
 	}
-	return connectRuntimeConfig{config: cfg, auth: auth, flow: flow, credentials: creds, metadata: metadata}, nil
+	// Profile resolution is keyed by the selected family, so auto-selection is followed by one exact overlay read.
+	if call.authType == "" {
+		metadata, err = attachedConnectMetadata(ctx, s, call, authType, metadata)
+		if err != nil {
+			return connectRuntimeConfig{}, err
+		}
+	}
+	auth, flow, err := selectRuntimeOAuthConfig(metadata.AuthConfigs, authType, authName, connectOAuth2FlowName(metadata))
+	if err != nil {
+		return connectRuntimeConfig{}, err
+	}
+	call.authType, call.authName = authType, authName
+	// Standalone control-plane consent resolves source identity from the explicit bucket reference, never app identity.
+	if call.authRef != "" {
+		source, err := resolveExplicitConnectCredentialSource(ctx, s, call)
+		if err != nil {
+			return connectRuntimeConfig{}, err
+		}
+		call.credentialSource = source
+	}
+	resolver := connectauth.NewApplicationCredentialResolver(s, masterKey, callbackURI)
+	creds, err := resolver.Resolve(ctx, call.bucketID, call.serviceID, authType, authName, call.credentialSource)
+	if err != nil {
+		return connectRuntimeConfig{}, connectRuntimeHTTPError{status: http.StatusNotFound, message: "OAuth application credentials not found"}
+	}
+	return connectRuntimeConfig{authType: authType, authName: authName, auth: auth, flow: flow, credentials: creds, credentialSource: call.credentialSource, metadata: metadata}, nil
+}
+
+// resolveExplicitConnectCredentialSource admits one enabled source scheme through the planner's set-based local snapshot path.
+func resolveExplicitConnectCredentialSource(ctx context.Context, s store.Store, call connectAdminCall) (connectauth.ApplicationCredentialSource, error) {
+	parsed, err := parseAppAuthReference(call.authRef)
+	// Invalid syntax must stop before any workspace identity can be resolved from its segments.
+	if err != nil {
+		return connectauth.ApplicationCredentialSource{}, connectRuntimeHTTPError{status: http.StatusBadRequest, code: "invalid_connect_auth_ref", message: "auth_ref must use ${bucket.auth.<service>.<authName>}"}
+	}
+	contracts, err := connectGenerationContractStore(s)
+	// Standalone reuse cannot bypass a missing local planning snapshot capability.
+	if err != nil {
+		return connectauth.ApplicationCredentialSource{}, err
+	}
+	sourceID, err := resolveConnectCredentialSourceID(ctx, contracts, parsed.ServiceKey)
+	// Preserve the bounded identity-resolution error returned by the shared local lookup.
+	if err != nil {
+		return connectauth.ApplicationCredentialSource{}, err
+	}
+	version, err := resolveConnectCredentialSourceVersion(ctx, s, sourceID)
+	// A source without one pinned workspace version cannot authorize credential reuse.
+	if err != nil {
+		return connectauth.ApplicationCredentialSource{}, err
+	}
+	// Contract compatibility must be proven before the source identity is persisted on consent state.
+	if err := validateConnectCredentialSourceContract(ctx, contracts, sourceID, version, call.authType, parsed.AuthName); err != nil {
+		return connectauth.ApplicationCredentialSource{}, err
+	}
+	// A self-reference obscures the direct family without providing reusable routing.
+	if sourceID == call.serviceID && parsed.AuthName == call.authName {
+		return connectauth.ApplicationCredentialSource{}, connectRuntimeHTTPError{status: http.StatusBadRequest, code: "connect_auth_ref_self", message: "a credential cannot reference itself"}
+	}
+	return connectauth.ApplicationCredentialSource{ServiceID: sourceID, AuthType: call.authType, AuthName: parsed.AuthName}, nil
+}
+
+// connectGenerationContractStore exposes the exact local planning snapshot required for credential-source admission.
+func connectGenerationContractStore(s store.Store) (store.GenerationContractStore, error) {
+	contracts, ok := s.(store.GenerationContractStore)
+	// Source routing must fail closed when the Engine cannot reuse the SDK/MCP planning boundary.
+	if !ok {
+		return nil, connectRuntimeHTTPError{status: http.StatusServiceUnavailable, code: "local_contract_store_unavailable", message: "local service contract storage is unavailable"}
+	}
+	return contracts, nil
+}
+
+// resolveConnectCredentialSourceID resolves one explicit service key without falling through to Registry discovery.
+func resolveConnectCredentialSourceID(ctx context.Context, contracts store.GenerationContractStore, serviceKey string) (uuid.UUID, error) {
+	resolved, err := contracts.ResolveGenerationServiceIDsByKeys(ctx, []string{serviceKey})
+	// Transport or local-store failure is distinct from a syntactically valid but unavailable source.
+	if err != nil {
+		return uuid.Nil, connectRuntimeHTTPError{status: http.StatusConflict, code: "connect_auth_ref_unavailable", message: "referenced credential source is unavailable"}
+	}
+	sourceID, found := resolved[serviceKey]
+	// Missing or ambiguous local identity cannot float to a similarly named Registry service.
+	if !found || sourceID == uuid.Nil {
+		return uuid.Nil, connectRuntimeHTTPError{status: http.StatusBadRequest, code: "connect_auth_ref_unavailable", message: "referenced credential source is not enabled in the workspace"}
+	}
+	return sourceID, nil
+}
+
+// resolveConnectCredentialSourceVersion pins standalone reuse to the source's one enabled workspace version.
+func resolveConnectCredentialSourceVersion(ctx context.Context, s store.Store, sourceID uuid.UUID) (string, error) {
+	services, err := s.ListAuthorizedWorkspaceServices(ctx, accesscontrol.AuthorizedScope{IDs: []uuid.UUID{sourceID}}, nil)
+	// Preserve an internal resolution failure rather than misreporting it as absent workspace membership.
+	if err != nil {
+		return "", connectRuntimeHTTPError{status: http.StatusInternalServerError, code: "connect_auth_ref_resolution_failed", message: "referenced credential source could not be resolved"}
+	}
+	// One exact source ID must retain one enabled workspace projection and pinned version.
+	if len(services) != 1 || services[0].ServiceID != sourceID || strings.TrimSpace(services[0].Version) == "" {
+		return "", connectRuntimeHTTPError{status: http.StatusConflict, code: "connect_auth_ref_unavailable", message: "referenced credential source has no enabled version"}
+	}
+	return services[0].Version, nil
+}
+
+// validateConnectCredentialSourceContract admits the exact referenced scheme from the pinned source snapshot.
+func validateConnectCredentialSourceContract(ctx context.Context, contracts store.GenerationContractStore, sourceID uuid.UUID, version, targetAuthType, sourceAuthName string) error {
+	authContracts, err := contracts.ListGenerationAuthContracts(ctx, []store.GenerationAuthSelection{{ServiceID: sourceID, Version: version}}, false)
+	// An unavailable immutable contract cannot be replaced by current Registry metadata.
+	if err != nil {
+		return connectRuntimeHTTPError{status: http.StatusConflict, code: "connect_auth_ref_unavailable", message: "referenced credential source contract is unavailable"}
+	}
+	// Exact family and scheme admission prevents a later sibling auth definition from changing the credential route.
+	if len(authContracts) != 1 || !appAuthContractContainsSource(authContracts[0].AuthConfigs, targetAuthType, sourceAuthName) {
+		return connectRuntimeHTTPError{status: http.StatusBadRequest, code: "connect_auth_ref_incompatible", message: "referenced credential source does not declare a compatible auth scheme"}
+	}
+	return nil
+}
+
+// connectCallFromAppSelection applies one validated selection without another store read.
+func connectCallFromAppSelection(call connectAdminCall, selection models.SDKSelection) (connectAdminCall, error) {
+	authType := canonicalConnectAuthType(selection.AuthType)
+	authName := strings.TrimSpace(selection.AuthName)
+	// Connect requires one exact OAuth/OIDC scheme even when ordinary operation dispatch accepts alternatives.
+	if (authType != "oauth" && authType != "oidc") || authName == "" {
+		return connectAdminCall{}, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "app selection does not declare an OAuth/OIDC auth scheme"}
+	}
+	// Caller selectors may narrow direct consent, but cannot override the immutable app selection.
+	if (call.authType != "" || call.authName != "") && (canonicalConnectAuthType(call.authType) != authType || strings.TrimSpace(call.authName) != authName) {
+		return connectAdminCall{}, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "connect auth selector does not match the app selection"}
+	}
+	source, err := applicationCredentialSourceForSelection(selection)
+	// Partial or cross-family persisted source identity indicates an invalid immutable scope.
+	if err != nil {
+		return connectAdminCall{}, connectRuntimeHTTPError{status: http.StatusConflict, message: "app credential source is invalid"}
+	}
+	call.authType, call.authName = authType, authName
+	call.credentialSource = source
+	call.appConnectScopes = append([]string(nil), selection.ConnectScopes...)
+	return call, nil
+}
+
+// applicationCredentialSourceForSelection returns direct target semantics unless a complete app reference was planned.
+func applicationCredentialSourceForSelection(selection models.SDKSelection) (connectauth.ApplicationCredentialSource, error) {
+	target := connectauth.ApplicationCredentialSource{
+		ServiceID: selection.ServiceID,
+		AuthType:  canonicalConnectAuthType(selection.AuthType),
+		AuthName:  strings.TrimSpace(selection.AuthName),
+	}
+	hasService := selection.CredentialSourceServiceID != uuid.Nil
+	hasType := strings.TrimSpace(selection.CredentialSourceAuthType) != ""
+	hasName := strings.TrimSpace(selection.CredentialSourceAuthName) != ""
+	// An absent reference deliberately resolves to the target service's own registration.
+	if !hasService && !hasType && !hasName {
+		return target, nil
+	}
+	// Persisted source identity is atomic so callback and refresh never guess missing pieces.
+	if !hasService || !hasType || !hasName {
+		return connectauth.ApplicationCredentialSource{}, errors.New("credential source identity is incomplete")
+	}
+	source := connectauth.ApplicationCredentialSource{
+		ServiceID: selection.CredentialSourceServiceID,
+		AuthType:  canonicalConnectAuthType(selection.CredentialSourceAuthType),
+		AuthName:  strings.TrimSpace(selection.CredentialSourceAuthName),
+	}
+	// References may change service and scheme name, but never the OAuth/OIDC family selected for the target.
+	if source.AuthType != target.AuthType || source.AuthType == "" {
+		return connectauth.ApplicationCredentialSource{}, errors.New("credential source auth family does not match target")
+	}
+	return source, nil
+}
+
+// persistedApplicationCredentialSource reconstructs the immutable routing identity carried by browser sessions and grants.
+func persistedApplicationCredentialSource(serviceID uuid.UUID, authType, authName string) connectauth.ApplicationCredentialSource {
+	return connectauth.ApplicationCredentialSource{
+		ServiceID: serviceID,
+		AuthType:  canonicalConnectAuthType(authType),
+		AuthName:  strings.TrimSpace(authName),
+	}
+}
+
+// effectiveApplicationCredentialSource fills direct callers with target semantics before persistence.
+func effectiveApplicationCredentialSource(call connectAdminCall, resolved connectRuntimeConfig) connectauth.ApplicationCredentialSource {
+	// App-scoped calls already carry a complete source selected at plan time.
+	if call.credentialSource.ServiceID != uuid.Nil {
+		return call.credentialSource
+	}
+	// Standalone auth_ref resolution is returned with runtime config because call is passed by value during admission.
+	if resolved.credentialSource.ServiceID != uuid.Nil {
+		return resolved.credentialSource
+	}
+	return connectauth.ApplicationCredentialSource{ServiceID: call.serviceID, AuthType: resolved.authType, AuthName: resolved.authName}
+}
+
+// resolveConnectAuthSelector requires an exact OAuth/OIDC scheme or an unambiguous sole candidate.
+func resolveConnectAuthSelector(auths fusedobject.AuthConfigs, requestedType, requestedName string) (string, string, error) {
+	requestedType = canonicalConnectAuthType(requestedType)
+	requestedName = strings.TrimSpace(requestedName)
+	// Explicit selectors preserve the immutable app/CLI decision without relying on metadata order.
+	if requestedType != "" || requestedName != "" {
+		if requestedType == "" || requestedName == "" {
+			return "", "", connectRuntimeHTTPError{status: http.StatusBadRequest, message: "auth_type and auth_name must be provided together"}
+		}
+		return requestedType, requestedName, nil
+	}
+	var selected *fusedobject.AuthConfig
+	for index := range auths {
+		// Only browser-connect OAuth/OIDC definitions participate in implicit selection.
+		if runtimeConnectAuthType(auths[index]) == "" {
+			continue
+		}
+		if selected != nil {
+			return "", "", connectRuntimeHTTPError{status: http.StatusBadRequest, message: "service has multiple OAuth/OIDC schemes; provide auth_type and auth_name"}
+		}
+		selected = &auths[index]
+	}
+	// A service without a browser-connect scheme cannot initiate consent.
+	if selected == nil || strings.TrimSpace(selected.Name) == "" {
+		return "", "", connectRuntimeHTTPError{status: http.StatusBadRequest, message: "service has no OAuth/OIDC authorization scheme"}
+	}
+	return runtimeConnectAuthType(*selected), strings.TrimSpace(selected.Name), nil
+}
+
+// firstRedirectURI returns the injected canonical callback without consulting request headers.
+func firstRedirectURI(values []string) string {
+	// Production injects one validated URI; empty remains a closed test/setup failure at provider start.
+	if len(values) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(values[0])
 }
 
 // loadConnectRuntimeMetadata loads and verifies one pinned service contract,
@@ -350,7 +674,7 @@ func createConnectSession(ctx context.Context, s store.Store, call connectAdminC
 	if err != nil {
 		return connectSessionStartResponse{}, err
 	}
-	requestedScopes, err = applyAppConnectScopePolicy(ctx, s, call.bucketID, call.serviceID, createdByAppID, requestedScopes)
+	requestedScopes, err = applyAppConnectScopePolicy(call.appConnectScopes, requestedScopes)
 	if err != nil {
 		return connectSessionStartResponse{}, err
 	}
@@ -416,6 +740,7 @@ func createConnectInputSession(ctx context.Context, s store.Store, call connectA
 	if err != nil {
 		return connectSessionStartResponse{}, err
 	}
+	source := effectiveApplicationCredentialSource(call, resolved)
 	expiresAt := time.Now().UTC().Add(connectSessionTTL)
 	inputURL, err := buildConnectInputURL(resolved.credentials.RedirectURI, token)
 	if err != nil {
@@ -425,8 +750,11 @@ func createConnectInputSession(ctx context.Context, s store.Store, call connectA
 	// unreachable pending browser session behind.
 	if _, err := s.CreateConnectInputSession(ctx, store.ConnectInputSession{
 		BucketID: call.bucketID, ServiceID: call.serviceID,
-		AuthType: resolved.config.AuthType, AuthName: resolved.config.AuthName, ContractHash: contractHash,
-		EndUserRef: endUserRef, TokenHash: connectHash(token), CreatedByAppID: createdByAppID,
+		AuthType: resolved.authType, AuthName: resolved.authName, ContractHash: contractHash,
+		CredentialSourceServiceID: source.ServiceID,
+		CredentialSourceAuthType:  source.AuthType,
+		CredentialSourceAuthName:  source.AuthName,
+		EndUserRef:                endUserRef, TokenHash: connectHash(token), CreatedByAppID: createdByAppID,
 		ReturnURL: returnURL, ResourceInputJSON: canonical, RequestedScopes: scopes, ExpiresAt: expiresAt,
 	}); err != nil {
 		return connectSessionStartResponse{}, err
@@ -443,7 +771,7 @@ func createConnectInputSession(ctx context.Context, s store.Store, call connectA
 func connectInputContractHash(resolved connectRuntimeConfig) (string, error) {
 	identity := connectInputContractIdentity{
 		ServiceVersionID: resolved.metadata.ServiceVersionID.String(),
-		AuthType:         resolved.config.AuthType, AuthName: resolved.config.AuthName,
+		AuthType:         resolved.authType, AuthName: resolved.authName,
 		Auth: resolved.auth, Flow: resolved.flow, Connect: resolved.metadata.ConnectConfig,
 	}
 	encoded, err := json.Marshal(identity)
@@ -485,22 +813,27 @@ func buildProviderConnectSession(call connectAdminCall, endUserRef string, creat
 	if err != nil {
 		return store.ConnectSession{}, connectSessionStartResponse{}, err
 	}
+	source := effectiveApplicationCredentialSource(call, resolved)
 	session := store.ConnectSession{
-		BucketID:              call.bucketID,
-		ServiceID:             call.serviceID,
-		ServiceVersionID:      resolved.metadata.ServiceVersionID,
-		AuthType:              resolved.config.AuthType,
-		AuthName:              resolved.config.AuthName,
-		EndUserRef:            endUserRef,
-		StateHash:             connectHash(state),
-		NonceHash:             connectHash(nonce),
-		EncryptedDEK:          encrypted.wrappedDEK,
-		EncryptedPKCEVerifier: encrypted.value,
-		CreatedByAppID:        createdByAppID,
-		ReturnURL:             returnURL,
-		ResourceInputJSON:     resourceInputJSON,
-		RequestedScopes:       scopes,
-		ExpiresAt:             expiresAt,
+		BucketID:                  call.bucketID,
+		ServiceID:                 call.serviceID,
+		ServiceVersionID:          resolved.metadata.ServiceVersionID,
+		AuthType:                  resolved.authType,
+		AuthName:                  resolved.authName,
+		CredentialSourceServiceID: source.ServiceID,
+		CredentialSourceAuthType:  source.AuthType,
+		CredentialSourceAuthName:  source.AuthName,
+		RedirectURI:               resolved.credentials.RedirectURI,
+		EndUserRef:                endUserRef,
+		StateHash:                 connectHash(state),
+		NonceHash:                 connectHash(nonce),
+		EncryptedDEK:              encrypted.wrappedDEK,
+		EncryptedPKCEVerifier:     encrypted.value,
+		CreatedByAppID:            createdByAppID,
+		ReturnURL:                 returnURL,
+		ResourceInputJSON:         resourceInputJSON,
+		RequestedScopes:           scopes,
+		ExpiresAt:                 expiresAt,
 	}
 	return session, connectSessionStartResponse{AuthorizeURL: authURL, ExpiresAt: expiresAt, Scopes: scopes, Route: "direct"}, nil
 }
@@ -517,25 +850,9 @@ func connectSessionStartTelemetry(response connectSessionStartResponse) []attrib
 	}
 }
 
-// applyAppConnectScopePolicy makes an app version's validated scope subset
-// the consent ceiling whenever a connect session names that SDK/MCP runtime.
-// Callers may narrow it further, but cannot silently expand it at runtime.
-func applyAppConnectScopePolicy(ctx context.Context, s store.Store, bucketID, serviceID, appID uuid.UUID, requested []string) ([]string, error) {
-	if appID == uuid.Nil {
-		return requested, nil
-	}
-	scope, err := s.GetAppRuntime(ctx, appID)
-	if errors.Is(err, store.ErrAppRuntimeNotFound) {
-		return nil, connectRuntimeHTTPError{status: http.StatusForbidden, message: "app scope is unavailable"}
-	}
-	if err != nil || scope.BucketID != bucketID {
-		return nil, connectRuntimeHTTPError{status: http.StatusForbidden, message: "app scope is unavailable"}
-	}
-	selections, err := models.DecodeAppSelections(scope.ScopeSchemaVersion, scope.Selections)
-	if err != nil {
-		return nil, connectRuntimeHTTPError{status: http.StatusConflict, message: "app scope is invalid"}
-	}
-	policy := appScopesForService(selections, serviceID)
+// applyAppConnectScopePolicy enforces the already-loaded immutable app ceiling without another runtime query.
+func applyAppConnectScopePolicy(policy, requested []string) ([]string, error) {
+	// A direct CLI request or an app without a scope ceiling keeps the provider-declared scope behavior.
 	if len(policy) == 0 {
 		return requested, nil
 	}
@@ -549,18 +866,6 @@ func applyAppConnectScopePolicy(ctx context.Context, s store.Store, bucketID, se
 		}
 	}
 	return requested, nil
-}
-
-// appScopesForService reads the one immutable scope document already
-// loaded for this request; matching by service prevents one selected
-// provider's consent policy from affecting another provider in the app.
-func appScopesForService(selections []models.SDKSelection, serviceID uuid.UUID) []string {
-	for _, selection := range selections {
-		if selection.ServiceID == serviceID {
-			return selection.ConnectScopes
-		}
-	}
-	return nil
 }
 
 // resolveConnectScopes lets callers reduce consent without allowing a runtime
@@ -952,26 +1257,29 @@ func encryptAuthConnectionFromToken(session *store.ConnectSession, resolved conn
 	claims := connectauth.OIDCClaims(token.IDToken)
 	scopeSet := connectauth.TokenScopeMetadata(token, session.RequestedScopes, "request")
 	return store.AuthConnection{
-		BucketID:              session.BucketID,
-		ServiceID:             session.ServiceID,
-		ServiceVersionID:      session.ServiceVersionID,
-		EndUserRef:            session.EndUserRef,
-		CreatedByAppID:        session.CreatedByAppID,
-		AuthType:              resolved.config.AuthType,
-		AuthName:              resolved.config.AuthName,
-		EncryptedDEK:          wrappedDEK,
-		EncryptedAccessToken:  access,
-		EncryptedRefreshToken: refresh,
-		EncryptedIDToken:      idToken,
-		TokenType:             connectauth.DefaultTokenType(token.TokenType),
-		Scopes:                scopeSet.Scopes,
-		ScopeSource:           scopeSet.Source,
-		Issuer:                connectauth.ClaimString(claims, "iss"),
-		Subject:               connectauth.ClaimString(claims, "sub"),
-		IdentityClaims:        connectauth.ClaimBytes(claims),
-		ExpiresAt:             connectauth.TokenExpiresAt(token.ExpiresIn),
-		RefreshTokenExpiresAt: connectauth.RefreshTokenExpiresAt(token.RefreshTokenExpiresIn),
-		RefreshState:          "ok",
+		BucketID:                  session.BucketID,
+		ServiceID:                 session.ServiceID,
+		ServiceVersionID:          session.ServiceVersionID,
+		EndUserRef:                session.EndUserRef,
+		CreatedByAppID:            session.CreatedByAppID,
+		AuthType:                  resolved.authType,
+		AuthName:                  resolved.authName,
+		CredentialSourceServiceID: session.CredentialSourceServiceID,
+		CredentialSourceAuthType:  session.CredentialSourceAuthType,
+		CredentialSourceAuthName:  session.CredentialSourceAuthName,
+		EncryptedDEK:              wrappedDEK,
+		EncryptedAccessToken:      access,
+		EncryptedRefreshToken:     refresh,
+		EncryptedIDToken:          idToken,
+		TokenType:                 connectauth.DefaultTokenType(token.TokenType),
+		Scopes:                    scopeSet.Scopes,
+		ScopeSource:               scopeSet.Source,
+		Issuer:                    connectauth.ClaimString(claims, "iss"),
+		Subject:                   connectauth.ClaimString(claims, "sub"),
+		IdentityClaims:            connectauth.ClaimBytes(claims),
+		ExpiresAt:                 connectauth.TokenExpiresAt(token.ExpiresIn),
+		RefreshTokenExpiresAt:     connectauth.RefreshTokenExpiresAt(token.RefreshTokenExpiresIn),
+		RefreshState:              "ok",
 	}, nil
 }
 
@@ -1135,12 +1443,6 @@ func validateRuntimeOAuthConfig(auth fusedobject.AuthConfig, flowName string) (f
 		return fusedobject.OAuth2FlowContract{}, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "selected OAuth2 flow requires authorization_url"}
 	}
 	return flow, nil
-}
-
-// decryptConnectClientCredentials unwraps apply-time OAuth app material only
-// inside Engine, keeping service config files and SDKs on env refs/user refs.
-func decryptConnectClientCredentials(cfg *store.ConnectConfig, masterKey []byte) (connectClientCredentials, error) {
-	return connectauth.DecryptClientCredentials(cfg, masterKey)
 }
 
 type encryptedConnectValue struct {
@@ -1320,6 +1622,7 @@ type connectRuntimeHTTPError struct {
 	code          string
 	message       string
 	publicMessage string
+	remediation   string
 }
 
 // Error lets connect helpers preserve HTTP-safe failure messages without
@@ -1333,6 +1636,10 @@ func writeConnectRuntimeError(w http.ResponseWriter, ctx context.Context, err er
 	// Reviewed runtime errors retain safe status and message details for callers.
 	if errors.As(err, &httpErr) {
 		remediation := connectRuntimeErrorRemediation(httpErr.status)
+		// Reviewed configuration failures can direct operators to the exact missing startup setting.
+		if strings.TrimSpace(httpErr.remediation) != "" {
+			remediation = httpErr.remediation
+		}
 		// An ambiguous session creation must be investigated before another mutation is attempted.
 		if commitState == "unknown" {
 			remediation = "Use the request or trace ID to inspect Engine logs before retrying."
@@ -1354,7 +1661,7 @@ func writeConnectRuntimeError(w http.ResponseWriter, ctx context.Context, err er
 }
 
 var connectRuntimeExactErrorCodes = map[string]string{
-	"connect config not found":                           "connect_config_not_found",
+	"OAuth application credentials not found":            "oauth_application_credentials_not_found",
 	"connect service version changed":                    "connect_service_version_changed",
 	"resource input is not supported":                    "connect_resource_input_unsupported",
 	"resource input is invalid":                          "connect_resource_input_invalid",
@@ -1451,13 +1758,13 @@ func connectRuntimeErrorRemediation(status int) string {
 	// Recovery follows the HTTP ownership boundary: caller, authorization, configuration, dependency, or Engine.
 	switch status {
 	case http.StatusBadRequest:
-		return "Correct the request fields or service connect configuration and retry."
+		return "Correct the request fields or service connection policy and retry."
 	case http.StatusUnauthorized:
 		return "Log in or provide a valid Fused credential before retrying."
 	case http.StatusForbidden:
 		return "Use an authorized app and bucket binding with the required connect scope."
 	case http.StatusNotFound:
-		return "Create or enable the bucket's connect configuration before retrying."
+		return "Store the complete OAuth/OIDC application credential pair in the selected bucket with secret set."
 	case http.StatusConflict:
 		return "Reapply the app or service configuration before starting a new connection."
 	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:

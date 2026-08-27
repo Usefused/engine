@@ -35,6 +35,7 @@ type graphQLFieldPolicy struct {
 	argument            string
 	relatedPermission   accesscontrol.Permission
 	relatedResource     accesscontrol.ResourceType
+	relatedArgument     string
 	protectedArgument   string
 	protectedValue      string
 	protectedPermission accesscontrol.Permission
@@ -87,7 +88,7 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		"appReference":                collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
 		"appFamilyReference":          collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
 		"workspaceConnectionProfile":  argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead),
-		"workspaceConnectConfigs":     permissions(accesscontrol.PermissionConnectionRead),
+		"workspaceConnectionProfiles": permissions(accesscontrol.PermissionServiceRead),
 		"mcpServers":                  collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
 		"mcpServerByName":             permissions(accesscontrol.PermissionAppRead),
 		"mcpAnalytics":                appArgumentPermissions("app_id", accesscontrol.PermissionAppRead, accesscontrol.PermissionAuditRead),
@@ -153,7 +154,7 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		"deactivateApp":                     appArgumentPermissions("app_id", accesscontrol.PermissionAppManage),
 		"upsertSecrets":                     argumentPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionCredentialsManage),
 		"deleteSecrets":                     argumentPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionCredentialsManage),
-		"startConnectSession":               argumentPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionConnectionManage, accesscontrol.PermissionBucketUse),
+		"startConnectSession":               connectSessionPermissions(),
 		"deleteAuthConnection":              argumentPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionConnectionManage),
 		"setDefaultConnectionResource":      connectionPermissions("connection_id", accesscontrol.PermissionConnectionManage),
 		"rediscoverConnectionResources":     connectionPermissions("connection_id", accesscontrol.PermissionConnectionManage),
@@ -205,6 +206,15 @@ func deploymentPermissions(values ...accesscontrol.Permission) graphQLFieldPolic
 func connectionPermissions(argument string, values ...accesscontrol.Permission) graphQLFieldPolicy {
 	return graphQLFieldPolicy{
 		permissions: values, scope: graphQLScopeConnection, resource: accesscontrol.ResourceBucket, argument: argument,
+	}
+}
+
+// connectSessionPermissions requires both bucket ownership and target-service consumption before consent begins.
+func connectSessionPermissions() graphQLFieldPolicy {
+	return graphQLFieldPolicy{
+		permissions: []accesscontrol.Permission{accesscontrol.PermissionConnectionManage, accesscontrol.PermissionBucketUse},
+		scope:       graphQLScopeArgument, resource: accesscontrol.ResourceBucket, argument: "bucket_id",
+		relatedPermission: accesscontrol.PermissionServiceConsume, relatedResource: accesscontrol.ResourceService, relatedArgument: "service_id",
 	}
 }
 
@@ -277,7 +287,31 @@ func validateFieldPolicy(path string, policy graphQLFieldPolicy) error {
 	if err := validateProtectedValuePolicy(path, policy); err != nil {
 		return err
 	}
+	if err := validateRelatedArgumentPolicy(path, policy); err != nil {
+		return err
+	}
 	return validatePolicyScope(path, policy)
+}
+
+// validateRelatedArgumentPolicy verifies an optional second exact resource declared beside an ordinary argument scope.
+func validateRelatedArgumentPolicy(path string, policy graphQLFieldPolicy) error {
+	// Most fields have one resource and require no secondary validation.
+	if policy.relatedArgument == "" {
+		return nil
+	}
+	// A secondary exact resource is meaningful only beside an exact primary argument.
+	if policy.scope != graphQLScopeArgument {
+		return fmt.Errorf("%w: %s has a related argument outside argument scope", errGraphQLPolicyMissing, path)
+	}
+	// Secondary resources must remain exact non-workspace identities.
+	if accesscontrol.ValidateResourceType(policy.relatedResource) != nil || policy.relatedResource == accesscontrol.ResourceWorkspace {
+		return fmt.Errorf("%w: %s has an invalid related argument resource", errGraphQLPolicyMissing, path)
+	}
+	// An invalid secondary capability must fail schema construction before the route mounts.
+	if err := accesscontrol.ValidatePermission(policy.relatedPermission); err != nil {
+		return fmt.Errorf("%w: %s has an invalid related argument permission: %v", errGraphQLPolicyMissing, path, err)
+	}
+	return nil
 }
 
 func validateProtectedValuePolicy(path string, policy graphQLFieldPolicy) error {
@@ -493,12 +527,32 @@ func (b *graphQLPlanBuilder) collectRootSelections(selectionSet *ast.SelectionSe
 			return accesscontrol.ResourceRef{}, err
 		}
 		b.addRequirements(policy.permissions, resource)
-		if err := b.addProtectedValueRequirement(field, policy, resource); err != nil {
+		if err := b.addSupplementalRequirements(field, policy, resource); err != nil {
 			return accesscontrol.ResourceRef{}, err
 		}
 		b.rootFields++
 		return resource, nil
 	})
+}
+
+// addSupplementalRequirements collects protected-value and optional second-argument checks outside the root walker.
+func (b *graphQLPlanBuilder) addSupplementalRequirements(field *ast.Field, policy graphQLFieldPolicy, resource accesscontrol.ResourceRef) error {
+	// Protected values retain their established authorization check before any second argument is added.
+	if err := b.addProtectedValueRequirement(field, policy, resource); err != nil {
+		return err
+	}
+	// Fields without a second resource preserve their existing single-argument authorization plan.
+	if policy.relatedArgument == "" {
+		return nil
+	}
+	relatedID, err := b.uuidArgument(field, policy.relatedArgument)
+	// Missing or malformed secondary IDs cannot degrade to workspace authorization.
+	if err != nil {
+		return err
+	}
+	// Bucket permissions and service consumption are independent capabilities and must both survive plan deduplication.
+	b.addRequirements([]accesscontrol.Permission{policy.relatedPermission}, accesscontrol.ResourceRef{Type: policy.relatedResource, ID: relatedID})
+	return nil
 }
 
 func (b *graphQLPlanBuilder) collectApp(field *ast.Field, policy graphQLFieldPolicy) (accesscontrol.ResourceRef, error) {
@@ -726,7 +780,9 @@ func (b *graphQLPlanBuilder) addRequirements(permissions []accesscontrol.Permiss
 	}
 }
 
+// policyResource resolves the primary exact argument or the authenticated workspace boundary declared by a field policy.
 func (b *graphQLPlanBuilder) policyResource(field *ast.Field, policy graphQLFieldPolicy) (accesscontrol.ResourceRef, error) {
+	// Only explicit argument policies may turn caller input into an exact resource requirement.
 	if policy.scope != graphQLScopeArgument && policy.scope != graphQLScopeRelated {
 		return b.workspaceResource()
 	}

@@ -138,45 +138,6 @@ func (s *cachedStore) UpsertSecrets(ctx context.Context, secrets []WorkspaceSecr
 	return nil
 }
 
-// PreflightWorkspaceAuthBindings forwards the read-only graph validation so
-// API admission can finish before any workspace mutation begins.
-func (s *cachedStore) PreflightWorkspaceAuthBindings(ctx context.Context, bindings []WorkspaceAuthBinding, desiredServiceIDs []uuid.UUID) error {
-	repository, ok := s.Store.(WorkspaceAuthBindingStore)
-	// Reference-aware admission cannot safely skip validation on cached stores.
-	if !ok {
-		return errors.New("store does not support workspace auth bindings")
-	}
-	return repository.PreflightWorkspaceAuthBindings(ctx, bindings, desiredServiceIDs)
-}
-
-// ApplyWorkspaceAuthBindings preserves the store's atomic replacement before
-// invalidating every target key that may have changed representation.
-func (s *cachedStore) ApplyWorkspaceAuthBindings(ctx context.Context, bindings []WorkspaceAuthBinding) error {
-	repository, ok := s.Store.(WorkspaceAuthBindingStore)
-	// Reference-aware apply cannot safely degrade to the legacy secret writer.
-	if !ok {
-		return errors.New("store does not support workspace auth bindings")
-	}
-	// Cache invalidation is valid only after the atomic representation change commits.
-	if err := repository.ApplyWorkspaceAuthBindings(ctx, bindings); err != nil {
-		return err
-	}
-	secretsByBucket := make(map[uuid.UUID][]WorkspaceSecret)
-	for _, binding := range bindings {
-		for _, keyName := range binding.TargetKeys {
-			secretsByBucket[binding.BucketID] = append(secretsByBucket[binding.BucketID], WorkspaceSecret{WorkspaceSecretMeta: WorkspaceSecretMeta{
-				BucketID: binding.BucketID, ServiceID: binding.TargetServiceID, KeyName: keyName,
-			}})
-		}
-	}
-	for bucketID, secrets := range secretsByBucket {
-		// One cache/NATS invalidation per bucket avoids a fan-out proportional to
-		// the number of service bindings in a composite workspace apply.
-		s.invalidateSecretCaches(bucketID, secrets)
-	}
-	return nil
-}
-
 // RemoveWorkspaceServices forwards atomic membership removal because the
 // cache wrapper does not retain workspace-service rows itself.
 func (s *cachedStore) RemoveWorkspaceServices(ctx context.Context, serviceIDs []uuid.UUID) error {
@@ -696,12 +657,12 @@ func (s *cachedStore) ListServiceContractOperations(ctx context.Context, service
 	return delegate.ListServiceContractOperations(ctx, serviceID, serviceVersionID)
 }
 
-// workspaceConnectSyncStore unwraps the paired export capability explicitly;
-// embedding Store alone cannot promote optional methods from its delegate.
+// workspaceConnectSyncStore unwraps effective profile export from the delegate.
 func (s *cachedStore) workspaceConnectSyncStore() (WorkspaceConnectSyncStore, error) {
 	delegate, ok := s.Store.(WorkspaceConnectSyncStore)
+	// A cache wrapper cannot synthesize an optional profile capability.
 	if !ok {
-		return nil, errors.New("workspace connect config sync is unavailable")
+		return nil, errors.New("workspace connect profile sync is unavailable")
 	}
 	return delegate, nil
 }
@@ -783,18 +744,7 @@ func (s *cachedStore) serviceContractSnapshotStore() (ServiceContractSnapshotSto
 	return delegate, nil
 }
 
-// ListWorkspaceConnectConfigs preserves the delegate's single workspace query
-// because exported OAuth configuration is administrative and not a hot path.
-func (s *cachedStore) ListWorkspaceConnectConfigs(ctx context.Context) ([]WorkspaceConnectConfig, error) {
-	delegate, err := s.workspaceConnectSyncStore()
-	if err != nil {
-		return nil, err
-	}
-	return delegate.ListWorkspaceConnectConfigs(ctx)
-}
-
-// ListWorkspaceConnectProfiles forwards the matching fixed-query profile read
-// instead of deriving profile state from cached binding rows.
+// ListWorkspaceConnectProfiles forwards the fixed-query profile read instead of deriving it from cached bindings.
 func (s *cachedStore) ListWorkspaceConnectProfiles(ctx context.Context) ([]WorkspaceConnectionProfile, error) {
 	delegate, err := s.workspaceConnectSyncStore()
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/mtlsauth"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/credentialkeys"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -31,8 +32,18 @@ type SecretUpsertPayload struct {
 }
 
 type SecretBulkUpsertPayload struct {
-	BucketID string                `json:"bucket_id"`
-	Secrets  []SecretUpsertPayload `json:"secrets"`
+	BucketID         string                         `json:"bucket_id"`
+	Secrets          []SecretUpsertPayload          `json:"secrets,omitempty"`
+	CredentialFamily *CredentialFamilyUpsertPayload `json:"credential_family,omitempty"`
+}
+
+// CredentialFamilyUpsertPayload carries semantic paired fields so Engine alone owns storage key names.
+type CredentialFamilyUpsertPayload struct {
+	ServiceID      uuid.UUID         `json:"service_id"`
+	CredentialType string            `json:"credential_type"`
+	AuthName       string            `json:"auth_name"`
+	Values         map[string]string `json:"values"`
+	ExpiresAt      *time.Time        `json:"expires_at,omitempty"`
 }
 
 // UpsertSecretHandler stays limited to single-value credentials. mTLS uses
@@ -135,13 +146,19 @@ func UpsertSecretsHandler(s store.Store, masterKey []byte) http.HandlerFunc {
 			writeBucketMutationLookupError(ctx, w, err, "secret_bulk_upsert")
 			return
 		}
+		secretPayloads, err := expandSecretBulkPayload(payload)
+		// Semantic families are expanded once at the Engine boundary before validation or encryption.
+		if err != nil {
+			writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "invalid_secret_set", err.Error(), "Provide every required paired credential field in the same request.", "secret_bulk_upsert", "", "not_committed", "")
+			return
+		}
 		// Validate the complete set before encryption so pairs commit atomically.
-		if err := validateSecretBulkPayload(payload.Secrets, time.Now()); err != nil {
+		if err := validateSecretBulkPayload(secretPayloads, time.Now()); err != nil {
 			writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "invalid_secret_set", err.Error(), "Provide every required paired credential field in the same request.", "secret_bulk_upsert", "", "not_committed", "")
 			return
 		}
 
-		secrets, err := buildEncryptedSecrets(bucketID, payload.Secrets, masterKey)
+		secrets, err := buildEncryptedSecrets(bucketID, secretPayloads, masterKey)
 		// Any encryption failure aborts the whole pair before persistence.
 		if err != nil {
 			writeControlAPIMutationError(w, ctx, http.StatusInternalServerError, "secret_encryption_failed", "The Engine could not encrypt the credential set.", "Check Engine master-key configuration and retry.", "secret_bulk_upsert", "", "not_committed", "")
@@ -157,11 +174,56 @@ func UpsertSecretsHandler(s store.Store, masterKey []byte) http.HandlerFunc {
 		span.SetAttributes(
 			attribute.String("bucket_id", bucketID.String()),
 			attribute.Int("secret_count", len(secrets)),
-			attribute.Int("mtls_pair_count", countMTLSPairs(payload.Secrets)),
+			attribute.Int("mtls_pair_count", countMTLSPairs(secretPayloads)),
+			attribute.Int("oauth_application_pair_count", countOAuthApplicationPairs(secretPayloads)),
 			attribute.String("outcome", "upserted"),
 		)
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// expandSecretBulkPayload converts one semantic OAuth/OIDC family into exact deterministic rows.
+func expandSecretBulkPayload(payload SecretBulkUpsertPayload) ([]SecretUpsertPayload, error) {
+	// A request must use one representation so callers cannot create competing values in one mutation.
+	if payload.CredentialFamily != nil && len(payload.Secrets) != 0 {
+		return nil, errors.New("provide either secrets or credential_family, not both")
+	}
+	// Existing Basic and mTLS callers retain the reviewed row-oriented bulk contract.
+	if payload.CredentialFamily == nil {
+		for _, secret := range payload.Secrets {
+			credentialType := canonicalSecretCredentialType(secret.CredentialType)
+			// OAuth/OIDC naming stays Engine-owned so callers cannot invent a competing application family.
+			if credentialType == "oauth" || credentialType == "oidc" {
+				return nil, errors.New("oauth and oidc credentials require credential_family")
+			}
+		}
+		return payload.Secrets, nil
+	}
+	return expandOAuthApplicationFamily(*payload.CredentialFamily)
+}
+
+// expandOAuthApplicationFamily validates semantic app credentials and fixes their storage identity.
+func expandOAuthApplicationFamily(family CredentialFamilyUpsertPayload) ([]SecretUpsertPayload, error) {
+	credentialType := canonicalSecretCredentialType(family.CredentialType)
+	// Only OAuth/OIDC registrations use this semantic paired payload.
+	if credentialType != "oauth" && credentialType != "oidc" {
+		return nil, errors.New("credential_family supports only oauth or oidc")
+	}
+	clientIDKey, clientSecretKey, ok := credentialkeys.OAuthApplication(family.AuthName)
+	// Scheme names are required because references bind the complete named family.
+	if !ok || family.ServiceID == uuid.Nil {
+		return nil, errors.New("service_id and auth_name are required")
+	}
+	clientID := family.Values[credentialkeys.OAuthClientIDField]
+	clientSecret := family.Values[credentialkeys.OAuthClientSecretField]
+	// Both values rotate together; unknown or missing fields are rejected to keep the wire contract closed.
+	if len(family.Values) != 2 || strings.TrimSpace(clientID) == "" || strings.TrimSpace(clientSecret) == "" {
+		return nil, errors.New("oauth and oidc credentials require exactly client_id and client_secret")
+	}
+	return []SecretUpsertPayload{
+		{ServiceID: family.ServiceID, KeyName: clientIDKey, CredentialType: credentialType, Value: clientID, ExpiresAt: family.ExpiresAt},
+		{ServiceID: family.ServiceID, KeyName: clientSecretKey, CredentialType: credentialType, Value: clientSecret, ExpiresAt: family.ExpiresAt},
+	}, nil
 }
 
 // secretAdminWorkspace is shared by single and batch writes so credential
@@ -208,8 +270,9 @@ func decodeSecretBulkUpsertPayload(r *http.Request) (SecretBulkUpsertPayload, er
 	if err := decoder.Decode(&payload); err != nil {
 		return payload, errors.New("invalid request body")
 	}
-	if len(payload.Secrets) == 0 {
-		return payload, errors.New("secrets is required")
+	// One of the row or semantic family representations must be present for a mutation.
+	if len(payload.Secrets) == 0 && payload.CredentialFamily == nil {
+		return payload, errors.New("secrets or credential_family is required")
 	}
 	return payload, nil
 }
@@ -228,7 +291,60 @@ func validateSecretBulkPayload(payloads []SecretUpsertPayload, now time.Time) er
 	if err := validateBulkBasicPairs(payloads); err != nil {
 		return err
 	}
-	return validateBulkMTLSPairs(payloads, now)
+	if err := validateBulkMTLSPairs(payloads, now); err != nil {
+		return err
+	}
+	return validateBulkOAuthApplicationPairs(payloads)
+}
+
+// validateBulkOAuthApplicationPairs rejects incomplete or non-deterministic OAuth/OIDC row families.
+func validateBulkOAuthApplicationPairs(payloads []SecretUpsertPayload) error {
+	type pair struct{ clientID, clientSecret bool }
+	pairs := map[string]*pair{}
+	for _, payload := range payloads {
+		credentialType := canonicalSecretCredentialType(payload.CredentialType)
+		// Non-OAuth values are validated by their own family rules.
+		if credentialType != "oauth" && credentialType != "oidc" {
+			continue
+		}
+		group, field, ok := oauthApplicationBulkKey(payload)
+		// Arbitrary OAuth key names would collide with user-token vocabulary.
+		if !ok {
+			return errors.New("oauth and oidc credentials must use matching _client_id and _client_secret names")
+		}
+		current := pairs[group]
+		// Each service, type, and auth name owns one independent pair.
+		if current == nil {
+			current = &pair{}
+			pairs[group] = current
+		}
+		if field == credentialkeys.OAuthClientIDField {
+			current.clientID = true
+		} else {
+			current.clientSecret = true
+		}
+	}
+	for _, current := range pairs {
+		// Atomic application registration requires both family members.
+		if !current.clientID || !current.clientSecret {
+			return errors.New("oauth and oidc credentials require both client_id and client_secret")
+		}
+	}
+	return nil
+}
+
+// oauthApplicationBulkKey derives one validated family group from its deterministic row suffix.
+func oauthApplicationBulkKey(payload SecretUpsertPayload) (string, string, bool) {
+	keyName := strings.TrimSpace(payload.KeyName)
+	for _, field := range []string{credentialkeys.OAuthClientIDField, credentialkeys.OAuthClientSecretField} {
+		suffix := "_" + field
+		// Only a non-empty auth-name prefix is a valid deterministic family.
+		if strings.HasSuffix(keyName, suffix) && len(keyName) > len(suffix) {
+			group := payload.ServiceID.String() + ":" + canonicalSecretCredentialType(payload.CredentialType) + ":" + strings.TrimSuffix(keyName, suffix)
+			return group, field, true
+		}
+	}
+	return "", "", false
 }
 
 // Empty Basic passwords are data, not missing input: several providers use
@@ -350,6 +466,22 @@ func countMTLSPairs(payloads []SecretUpsertPayload) int {
 	return len(groups)
 }
 
+// countOAuthApplicationPairs reports only bounded family shape without identifiers or values.
+func countOAuthApplicationPairs(payloads []SecretUpsertPayload) int {
+	groups := map[string]struct{}{}
+	for _, payload := range payloads {
+		credentialType := canonicalSecretCredentialType(payload.CredentialType)
+		// Telemetry counts only OAuth/OIDC families and never includes their names.
+		if credentialType != "oauth" && credentialType != "oidc" {
+			continue
+		}
+		if group, _, ok := oauthApplicationBulkKey(payload); ok {
+			groups[group] = struct{}{}
+		}
+	}
+	return len(groups)
+}
+
 // buildEncryptedSecrets keeps plaintext inside the HTTP boundary; Store only
 // receives encrypted values and wrapped DEKs.
 func buildEncryptedSecrets(bucketID uuid.UUID, payloads []SecretUpsertPayload, masterKey []byte) ([]store.WorkspaceSecret, error) {
@@ -378,7 +510,7 @@ func canonicalSecretCredentialType(value string) string {
 // paired auth families do not accidentally bypass the bulk validation path.
 func credentialTypeRequiresPair(value string) bool {
 	credentialType := canonicalSecretCredentialType(value)
-	return credentialType == "basic" || credentialType == "mtls"
+	return credentialType == "basic" || credentialType == "mtls" || credentialType == "oauth" || credentialType == "oidc"
 }
 
 func resolveSecretBucketID(ctx context.Context, s store.Store, rawBucketID string) (uuid.UUID, int, error) {
@@ -487,12 +619,6 @@ func DeleteSecretHandler(s store.Store) http.HandlerFunc {
 
 		// Unclassified store failures hide database detail and retain an unknown deletion outcome.
 		if err := s.DeleteSecret(ctx, bucketID, serviceID, keyName); err != nil {
-			// A live reference makes deletion deterministically impossible; expose
-			// that contract instead of disguising it as an unknown database failure.
-			if errors.Is(err, store.ErrWorkspaceAuthReferenceInUse) {
-				writeControlAPIMutationError(w, ctx, http.StatusConflict, "workspace_auth_reference_in_use", "The credential is used by another workspace service.", "Replace the dependent auth ref or remove its destination service before deleting this credential.", "secret_delete", "", "not_committed", "")
-				return
-			}
 			slog.ErrorContext(ctx, "failed to delete secret", slog.Any("error", err))
 			writeControlAPIMutationError(w, ctx, http.StatusInternalServerError, "secret_delete_failed", "The Engine could not delete the secret.", "Inspect current secret metadata before retrying, and use the request or trace ID to check Engine logs.", "secret_delete", "", "unknown", "")
 			return

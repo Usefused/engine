@@ -61,6 +61,43 @@ var workspaceConnectionProfileGraphQLType = graphql.NewObject(graphql.ObjectConf
 	},
 })
 
+// workspaceConnectionProfilesGraphQLField exports effective routing profiles without coupling sync to credential storage.
+func workspaceConnectionProfilesGraphQLField(s store.Store) *graphql.Field {
+	return &graphql.Field{
+		Type: graphql.NewList(workspaceConnectionProfileGraphQLType),
+		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.workspace_connection_profiles.list")
+			defer span.End()
+			actor, err := actorFromContext(ctx)
+			// Actor identity is required before the workspace-scoped export can run.
+			if err != nil {
+				return nil, err
+			}
+			// Workspace verification keeps the bulk export behind the same ownership boundary as exact profile reads.
+			if err := verifyWorkspaceActor(ctx, actor.accountID); err != nil {
+				return nil, err
+			}
+			reader, ok := s.(store.WorkspaceConnectSyncStore)
+			// A store without the set-based reader must fail instead of falling back to per-profile queries.
+			if !ok {
+				return nil, errors.New("workspace connection profile sync is unavailable")
+			}
+			profiles, err := reader.ListWorkspaceConnectProfiles(ctx)
+			// Store failures remain server errors and never trigger per-profile fallback reads.
+			if err != nil {
+				return nil, fmt.Errorf("list workspace connection profiles: %w", err)
+			}
+			span.SetAttributes(attribute.Int("profile_count", len(profiles)))
+			items := make([]map[string]interface{}, 0, len(profiles))
+			// Projection preserves only the already-selected safe profile fields.
+			for index := range profiles {
+				items = append(items, workspaceProfileFields(&profiles[index], nil))
+			}
+			return items, nil
+		},
+	}
+}
+
 // workspaceConnectionProfileGraphQLField returns the effective profile
 // (override if present, else baseline) only after account and workspace
 // ownership checks at the Engine boundary. There is no bucket dimension:

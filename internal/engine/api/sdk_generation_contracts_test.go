@@ -150,6 +150,98 @@ func TestSDKPlanUsesRetainedLocalGenerationPin(t *testing.T) {
 	}
 }
 
+// TestSDKGenerationPayloadHidesCredentialSourceBindings proves auth-source fences stay Engine-private while generation receives targets only.
+func TestSDKGenerationPayloadHidesCredentialSourceBindings(t *testing.T) {
+	targetID, sourceID := uuid.New(), uuid.New()
+	targetBinding := models.SDKContractBinding{ServiceID: targetID, ServiceVersionID: uuid.New(), Version: "1.0", Revision: 2, SourceHash: "target-hash"}
+	sourceBinding := models.SDKContractBinding{ServiceID: sourceID, ServiceVersionID: uuid.New(), Version: "2.0", Revision: 4, SourceHash: "source-hash"}
+	payload := resolvedSDKPayload(GenerateSDKRequest{
+		Selections:       []models.SDKSelection{{ServiceID: targetID, ServiceVersionID: targetBinding.ServiceVersionID}},
+		ContractBindings: []models.SDKContractBinding{targetBinding},
+	}, uuid.New(), uuid.New(), false)
+	payload.CredentialSourceBindings = []models.SDKContractBinding{sourceBinding}
+	raw, err := json.Marshal(payload)
+	// The immutable Engine plan must retain both independent revision fences.
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertAppPayloadContractFences(t, raw, targetBinding, sourceBinding)
+	assertSDKGenerationRequestExcludesSource(t, raw, targetBinding)
+}
+
+// assertAppPayloadContractFences verifies target and credential-source revisions share the Engine concurrency boundary.
+func assertAppPayloadContractFences(t *testing.T, raw json.RawMessage, targetBinding, sourceBinding models.SDKContractBinding) {
+	t.Helper()
+	bindings, err := sdkContractBindingsFromPayload(raw)
+	// Concurrency validation must include the metadata-only auth source.
+	if err != nil || len(bindings) != 2 || bindings[0] != targetBinding || bindings[1] != sourceBinding {
+		t.Fatalf("bindings=%+v err=%v", bindings, err)
+	}
+}
+
+// assertSDKGenerationRequestExcludesSource verifies Registry receives a one-to-one target generation contract.
+func assertSDKGenerationRequestExcludesSource(t *testing.T, raw json.RawMessage, targetBinding models.SDKContractBinding) {
+	t.Helper()
+	generationPayload, err := sdkGenerationPayloadForPlan(raw, sdkApplyCall{planID: uuid.New()}, uuid.New(), uuid.New(), "config-hash")
+	// Generation serialization must discard Engine-private credential-source bindings.
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request models.SDKGenerationRequest
+	// Decode the actual Registry request shape to assert its one-to-one target contract.
+	if err := json.Unmarshal(generationPayload, &request); err != nil {
+		t.Fatal(err)
+	}
+	// Registry rejects extra bindings because source-only services expose no generated operations.
+	if len(request.Selections) != 1 || len(request.ContractBindings) != 1 || request.ContractBindings[0] != targetBinding {
+		t.Fatalf("generation request=%+v", request)
+	}
+	// The private payload field must not leak as an unknown extension to Registry.
+	if bytes.Contains(generationPayload, []byte("credential_source_bindings")) {
+		t.Fatalf("generation payload leaked credential source bindings: %s", generationPayload)
+	}
+}
+
+// TestSplitAppContractBindingsDeduplicatesSelectedSources keeps a dual-role service in the generated target set only.
+func TestSplitAppContractBindingsDeduplicatesSelectedSources(t *testing.T) {
+	serviceID := uuid.New()
+	target := models.SDKContractBinding{ServiceID: serviceID, ServiceVersionID: uuid.New(), Version: "1.0"}
+	source := models.SDKContractBinding{ServiceID: serviceID, ServiceVersionID: uuid.New(), Version: "2.0"}
+	targets, sources := splitAppContractBindings(
+		[]models.SDKContractBinding{target, source, target},
+		[]sdkResolvedService{{ServiceID: serviceID, ServiceVersionID: target.ServiceVersionID, Version: "1.0"}},
+	)
+	// A duplicated dual-role target must not inflate Registry's binding count.
+	if len(targets) != 1 || targets[0] != target {
+		t.Fatalf("target bindings=%+v", targets)
+	}
+	// A source-only service remains available solely as an Engine-side fence.
+	if len(sources) != 1 || sources[0] != source {
+		t.Fatalf("source bindings=%+v", sources)
+	}
+}
+
+// TestResolveSDKContractBindingsKeepsSiblingVersions proves one service's target and source versions cannot overwrite each other.
+func TestResolveSDKContractBindingsKeepsSiblingVersions(t *testing.T) {
+	serviceID, targetVersionID, sourceVersionID := uuid.New(), uuid.New(), uuid.New()
+	registry := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
+		serviceID.String() + "|1.0": {ServiceID: serviceID, ServiceVersionID: targetVersionID, Version: "1.0"},
+		serviceID.String() + "|2.0": {ServiceID: serviceID, ServiceVersionID: sourceVersionID, Version: "2.0"},
+	}}
+	bindings, err := resolveSDKContractBindings(context.Background(), registry, "", []sdkResolvedService{
+		{ServiceID: serviceID, ServiceVersionID: targetVersionID, Version: "1.0"},
+		{ServiceID: serviceID, ServiceVersionID: sourceVersionID, Version: "2.0"},
+	})
+	// Both exact versions must survive the one batched revision response.
+	if err != nil || len(bindings) != 2 {
+		t.Fatalf("bindings=%+v err=%v", bindings, err)
+	}
+	// Ordered results must preserve the target/source identities supplied by the planner.
+	if bindings[0].ServiceVersionID != targetVersionID || bindings[1].ServiceVersionID != sourceVersionID {
+		t.Fatalf("bindings=%+v", bindings)
+	}
+}
+
 // TestMCPPlanUsesUnpinnedLocalSnapshot proves local-only apps remain independent of Registry archival availability.
 func TestMCPPlanUsesUnpinnedLocalSnapshot(t *testing.T) {
 	s := newGenerationPlanningTestStore()
@@ -196,6 +288,26 @@ func TestSDKPlanMissingGenerationPinIsActionable(t *testing.T) {
 	// Stable code and recovery text must survive the older auth error wrapper.
 	if !strings.Contains(response.Body.String(), "generation_contract_pin_unavailable") || !strings.Contains(response.Body.String(), "Refresh") {
 		t.Fatalf("error=%s", response.Body)
+	}
+}
+
+// TestSDKPlanningAllowsRuntimeOnlyCredentialSource proves a source service does not need an unused generator archive.
+func TestSDKPlanningAllowsRuntimeOnlyCredentialSource(t *testing.T) {
+	s := newGenerationPlanningTestStore()
+	s.binding.GenerationContractHash = ""
+	s.binding.RuntimeContractHash = "sha256:" + strings.Repeat("b", 64)
+	client := generationPlanningTestClient(t, s, true).(*generationPlanningClient)
+	client.setGenerationTargets([]sdkResolvedService{{ServiceID: uuid.New(), Version: "1.0"}})
+	selection := sandbox.ServiceVersionExecutionAuthSelection{ServiceID: s.binding.ServiceID, Version: s.binding.Version}
+	_, err := client.FetchServiceVersionExecutionAuthContracts(context.Background(), []sandbox.ServiceVersionExecutionAuthSelection{selection}, "")
+	// Source auth metadata must remain usable from its admitted runtime snapshot.
+	if err != nil {
+		t.Fatalf("source auth contract: %v", err)
+	}
+	revisions, err := client.FetchServiceVersionRevisions(context.Background(), []sandbox.ServiceVersionRef{{ServiceID: s.binding.ServiceID, Version: s.binding.Version}}, "")
+	// The source fence must retain its runtime hash instead of pretending to be generator input.
+	if err != nil || len(revisions) != 1 || revisions[0].RuntimeContractHash != s.binding.RuntimeContractHash {
+		t.Fatalf("source revisions=%+v err=%v", revisions, err)
 	}
 }
 

@@ -132,14 +132,6 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodDelete, "/workspace/buckets/{bucket_id}/values", false, []routeRequirement{
 		pathRequirement(accesscontrol.PermissionBucketManage, accesscontrol.ResourceBucket, "bucket_id"),
 	}},
-	{http.MethodPut, "/workspace/buckets/{bucket_id}/services/{service_id}/connect-config", false, []routeRequirement{
-		pathRequirement(accesscontrol.PermissionCredentialsManage, accesscontrol.ResourceBucket, "bucket_id"),
-		pathRequirement(accesscontrol.PermissionServiceConsume, accesscontrol.ResourceService, "service_id"),
-	}},
-	{http.MethodGet, "/workspace/buckets/{bucket_id}/services/{service_id}/connect-config", false, []routeRequirement{
-		pathRequirement(accesscontrol.PermissionCredentialsMetadataRead, accesscontrol.ResourceBucket, "bucket_id"),
-		pathRequirement(accesscontrol.PermissionServiceRead, accesscontrol.ResourceService, "service_id"),
-	}},
 	{http.MethodPost, "/workspace/buckets/{bucket_id}/services/{service_id}/connect/sessions", false, []routeRequirement{
 		pathRequirement(accesscontrol.PermissionConnectionManage, accesscontrol.ResourceBucket, "bucket_id"),
 		pathRequirement(accesscontrol.PermissionServiceConsume, accesscontrol.ResourceService, "service_id"),

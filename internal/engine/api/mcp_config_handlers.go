@@ -218,17 +218,18 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 		return sdkPlanResult{}, err
 	}
 	call.request.OwnerSubjectID, call.request.OwnerTeamID = owner.subjectID, owner.teamID
-	selections, services, resolved, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current), *bucket)
+	selections, services, resolved, credentialSources, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current), *bucket)
 	// MCP shares SDK selection/auth decisions rather than implementing an alternate planner.
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
-	bindings, err := resolveSDKContractBindings(ctx, registryClient, call.apiKey, resolved)
+	bindings, err := resolveSDKContractBindings(ctx, registryClient, call.apiKey, append(resolved, credentialSources...))
 	// Local snapshot identity fences MCP refreshes without requiring a generated-package pin.
 	if err != nil {
 		return sdkPlanResult{}, generationPinPlanError(err, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "failed to bind service contract revisions"})
 	}
-	selections = finalizeAppSelections(selections, bindings)
+	targetBindings, credentialSourceBindings := splitAppContractBindings(bindings, resolved)
+	selections = finalizeAppSelections(selections, targetBindings)
 
 	selections, unifiedCompilation, err := resolveAndCompileMCPUnifiedOperations(ctx, s, call.document, selections, resolved)
 	// A partially frozen or compiled graph must never enter an immutable plan.
@@ -242,7 +243,7 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 		return sdkPlanResult{}, err
 	}
 	payload := appResolvedPayload{
-		Selections: selections, ContractBindings: bindings, BucketID: bucket.ID,
+		Selections: selections, ContractBindings: targetBindings, CredentialSourceBindings: credentialSourceBindings, BucketID: bucket.ID,
 		UnifiedDefinitionSchemaVersion: unified.DefinitionSchemaVersion,
 		UnifiedDefinitions:             unifiedCompilation.DefinitionJSON,
 		UnifiedDefinitionHash:          unifiedCompilation.DefinitionHash,

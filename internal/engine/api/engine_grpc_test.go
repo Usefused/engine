@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/auth"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/credentialkeys"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
@@ -55,6 +57,71 @@ func TestEngineGRPCStartConnectSessionCreatesAuthorizationURL(t *testing.T) {
 	}
 }
 
+// TestEngineGRPCStartConnectSessionUsesSelectedCredentialSource proves generated SDK calls use the immutable auth.ref source pair and persist its identity for callbacks.
+func TestEngineGRPCStartConnectSessionUsesSelectedCredentialSource(t *testing.T) {
+	fixture := newConnectRuntimeFixture(t)
+	srv, appID := newConnectGRPCTestServer(fixture)
+	sourceServiceID := configureReferencedConnectApp(t, fixture, appID)
+	resp, err := srv.StartConnectSession(grpcTestContext(appID), &enginev1.StartConnectSessionRequest{
+		BucketId: fixture.bucketID.String(), ServiceId: fixture.serviceID.String(), EndUserRef: "user_ref", CreatedByAppId: appID.String(),
+	})
+	if err != nil {
+		t.Fatalf("StartConnectSession() error = %v", err)
+	}
+	assertReferencedConnectStart(t, resp, fixture, sourceServiceID)
+}
+
+// configureReferencedConnectApp pins one source application pair into the immutable generated-app fixture.
+func configureReferencedConnectApp(t *testing.T, fixture connectRuntimeFixture, appID uuid.UUID) uuid.UUID {
+	t.Helper()
+	sourceServiceID := uuid.New()
+	selection := models.SDKSelection{
+		ServiceID: fixture.serviceID, ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion,
+		AuthType: "oidc", AuthName: "bearerAuth", CredentialSourceServiceID: sourceServiceID,
+		CredentialSourceAuthType: "oidc", CredentialSourceAuthName: "sharedOAuth",
+	}
+	selections, err := json.Marshal([]models.SDKSelection{selection})
+	// Test setup must stop before runtime execution if immutable scope encoding fails.
+	if err != nil {
+		t.Fatalf("marshal referenced app selection: %v", err)
+	}
+	fixture.store.appRuntimes[appID].Selections = selections
+	fixture.store.sourceServiceID = sourceServiceID
+	fixture.store.applicationAuthType = "oidc"
+	clientIDKey, clientSecretKey, ok := credentialkeys.OAuthApplication("sharedOAuth")
+	// The fixed source scheme must yield the deterministic bucket key pair used by production.
+	if !ok {
+		t.Fatal("derive referenced application credential keys")
+	}
+	wrappedID, encryptedID := encryptConnectTestValue(t, fixture.masterKey, "source-client-id")
+	wrappedSecret, encryptedSecret := encryptConnectTestValue(t, fixture.masterKey, "source-client-secret")
+	fixture.store.applicationSecrets = []store.WorkspaceSecret{
+		{WorkspaceSecretMeta: store.WorkspaceSecretMeta{BucketID: fixture.bucketID, ServiceID: sourceServiceID, KeyName: clientIDKey, CredentialType: "oidc"}, EncryptedDEK: wrappedID, EncryptedValue: encryptedID},
+		{WorkspaceSecretMeta: store.WorkspaceSecretMeta{BucketID: fixture.bucketID, ServiceID: sourceServiceID, KeyName: clientSecretKey, CredentialType: "oidc"}, EncryptedDEK: wrappedSecret, EncryptedValue: encryptedSecret},
+	}
+	return sourceServiceID
+}
+
+// assertReferencedConnectStart checks provider input and durable target/source separation after generated consent starts.
+func assertReferencedConnectStart(t *testing.T, resp *enginev1.StartConnectSessionResponse, fixture connectRuntimeFixture, sourceServiceID uuid.UUID) {
+	t.Helper()
+	authorizeURL, err := url.Parse(resp.GetAuthorizeUrl())
+	// A malformed URL would hide which application registration reached the provider boundary.
+	if err != nil {
+		t.Fatalf("parse authorize URL: %v", err)
+	}
+	if got := authorizeURL.Query().Get("client_id"); got != "source-client-id" {
+		t.Fatalf("authorize client_id = %q, want source-client-id", got)
+	}
+	if len(fixture.store.createdSessions) != 1 {
+		t.Fatalf("created sessions = %d, want 1", len(fixture.store.createdSessions))
+	}
+	session := fixture.store.createdSessions[0]
+	if session.ServiceID != fixture.serviceID || session.CredentialSourceServiceID != sourceServiceID || session.CredentialSourceAuthType != "oidc" || session.CredentialSourceAuthName != "sharedOAuth" {
+		t.Fatalf("stored target/source identity = %#v", session)
+	}
+}
+
 // TestEngineGRPCStartConnectSessionDefersAuthorizationForMissingInput proves
 // generated SDK traffic receives the same hosted pre-authorisation page as the
 // REST entrypoint and creates no OAuth state before the form is complete.
@@ -83,7 +150,7 @@ func newConnectGRPCTestServer(fixture connectRuntimeFixture) (*EngineGRPCServer,
 	}
 	// Connect metadata RPCs do not touch the webhook-only configuration or NATS
 	// dependencies, so nil keeps this fixture scoped to its actual boundary.
-	server := NewEngineGRPCServer(runtimeStore, fixture.verifier, fixture.masterKey, nil, nil, auth.NewTokenValidator(runtimeStore))
+	server := NewEngineGRPCServer(runtimeStore, fixture.verifier, fixture.masterKey, nil, nil, auth.NewTokenValidator(runtimeStore), "https://engine.example.com/workspace/connect/callback")
 	return server, appID
 }
 

@@ -80,6 +80,11 @@ func addSelectAll(keys map[string]struct{}, prefix string, selection models.SDKS
 }
 
 func addAuth(keys map[string]struct{}, prefix string, selection models.SDKSelection) {
+	// Credential routing changes provider identity even though it grants no additional operation capability.
+	if selection.CredentialSourceServiceID != uuid.Nil || selection.CredentialSourceAuthType != "" || selection.CredentialSourceAuthName != "" {
+		keys[prefix+":credential-source:"+selection.CredentialSourceServiceID.String()+":"+selection.CredentialSourceAuthType+":"+selection.CredentialSourceAuthName] = struct{}{}
+	}
+	// The selected target scheme remains part of dispatch authority independently of its application credential source.
 	if selection.AuthType != "" {
 		keys[prefix+":auth:"+selection.AuthType+":"+selection.AuthName] = struct{}{}
 	}

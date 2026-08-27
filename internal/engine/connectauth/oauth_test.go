@@ -465,8 +465,7 @@ func recordedTokenSpanAttributes(t *testing.T, recorder *tracetest.SpanRecorder)
 	return attributes
 }
 
-// testClientCredentials supplies non-secret fixtures with the same shape as
-// decrypted connect config material.
+// testClientCredentials supplies non-secret fixtures with the same shape as resolved application credentials.
 func testClientCredentials() ClientCredentials {
 	return ClientCredentials{ClientID: "client-id", ClientSecret: "client-secret", RedirectURI: "https://engine.example/callback"}
 }

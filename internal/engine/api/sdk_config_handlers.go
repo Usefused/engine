@@ -31,6 +31,7 @@ import (
 
 	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/canonical"
+	"github.com/Usefused/engine/internal/shared/credentialkeys"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/serverrouting"
@@ -104,6 +105,7 @@ type sdkConfigServiceDoc struct {
 type sdkAppAuthDoc struct {
 	Type string `json:"type"`
 	Name string `json:"name,omitempty"`
+	Ref  string `json:"ref,omitempty"`
 }
 
 type sdkAppConnectDoc struct {
@@ -132,6 +134,7 @@ type appResolvedPayload struct {
 	SkipSandbox                    bool                                   `json:"skip_sandbox,omitempty"`
 	SkipPackaging                  bool                                   `json:"skip_packaging,omitempty"`
 	ContractBindings               []sdkContractBinding                   `json:"contract_bindings,omitempty"`
+	CredentialSourceBindings       []sdkContractBinding                   `json:"credential_source_bindings,omitempty"`
 	UnifiedDefinitionSchemaVersion int                                    `json:"unified_definition_schema_version,omitempty"`
 	UnifiedDefinitions             json.RawMessage                        `json:"unified_definitions,omitempty"`
 	UnifiedDefinitionHash          string                                 `json:"unified_definition_hash,omitempty"`
@@ -561,7 +564,55 @@ func validateAppServiceDoc(name string, service sdkConfigServiceDoc) error {
 	if !validAppAuthType(service.Auth.Type) {
 		return fmt.Errorf("service %s auth type must be one of basic, bearer, api_key, oauth, oidc, or mtls", name)
 	}
+	return validateAppAuthReferenceIntent(name, service.Auth)
+}
+
+// validateAppAuthReferenceIntent keeps app-owned references limited to exact OAuth/OIDC application families.
+func validateAppAuthReferenceIntent(serviceName string, auth *sdkAppAuthDoc) error {
+	// Direct selections retain their established behavior when no source is declared.
+	if strings.TrimSpace(auth.Ref) == "" {
+		return nil
+	}
+	authType := strings.ToLower(strings.TrimSpace(auth.Type))
+	// Static credentials remain direct bucket material and cannot borrow the OAuth application-routing contract.
+	if authType != "oauth" && authType != "oidc" {
+		return fmt.Errorf("service %s auth ref supports only oauth or oidc", serviceName)
+	}
+	// Exact target scheme identity prevents a reference from floating when a provider adds another OAuth scheme.
+	if strings.TrimSpace(auth.Name) == "" {
+		return fmt.Errorf("service %s auth ref requires name", serviceName)
+	}
+	_, err := parseAppAuthReference(auth.Ref)
+	// Grammar failures retain the destination label needed to repair multi-service app config.
+	if err != nil {
+		return fmt.Errorf("service %s auth ref: %w", serviceName, err)
+	}
 	return nil
+}
+
+type appAuthReference struct {
+	ServiceKey string
+	AuthName   string
+}
+
+// parseAppAuthReference admits one whole same-bucket credential-family reference with dot-free identities.
+func parseAppAuthReference(value string) (appAuthReference, error) {
+	const prefix = "${bucket.auth."
+	trimmed := strings.TrimSpace(value)
+	// Requiring the complete interpolation prevents surrounding text from changing credential identity.
+	if value != trimmed || !strings.HasPrefix(value, prefix) || !strings.HasSuffix(value, "}") {
+		return appAuthReference{}, errors.New("must use ${bucket.auth.<service>.<authName>}")
+	}
+	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(value, prefix), "}"), ".")
+	// Exact arity keeps service and auth-scheme lookup deterministic.
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return appAuthReference{}, errors.New("must name one service and auth scheme")
+	}
+	// Closed segments prevent interpolation tokens and whitespace from becoming persisted source identities.
+	if strings.ContainsAny(parts[0]+parts[1], " \t\r\n{}$") {
+		return appAuthReference{}, errors.New("must name one service and auth scheme")
+	}
+	return appAuthReference{ServiceKey: parts[0], AuthName: parts[1]}, nil
 }
 
 // validateAppInjectionDocs reserves host-template binding for non-secret
@@ -707,17 +758,18 @@ func createSDKConfigPlan(
 
 // resolveSDKPlanDefinition resolves sdk plan definition from immutable app scope before provider dispatch.
 func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkPlanCall, current *store.ConfigState, bucket store.Bucket, appID uuid.UUID) (sdkPlanDefinition, error) {
-	selections, services, resolvedServices, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current), bucket)
+	selections, services, resolvedServices, credentialSources, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current), bucket)
 	// Selection/auth admission must precede generation identity binding.
 	if err != nil {
 		return sdkPlanDefinition{}, err
 	}
-	bindings, err := resolveSDKContractBindings(ctx, registryClient, call.apiKey, resolvedServices)
+	bindings, err := resolveSDKContractBindings(ctx, registryClient, call.apiKey, append(resolvedServices, credentialSources...))
 	// An unpinned snapshot can execute old apps, but cannot authorize a new generation plan.
 	if err != nil {
 		return sdkPlanDefinition{}, generationPinPlanError(err, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "failed to bind service contract revisions"})
 	}
-	selections = finalizeAppSelections(selections, bindings)
+	targetBindings, credentialSourceBindings := splitAppContractBindings(bindings, resolvedServices)
+	selections = finalizeAppSelections(selections, targetBindings)
 	unifiedCompilation, err := compileSDKUnifiedOperations(ctx, s, call.document, selections, resolvedServices)
 	// Unified mappings must bind to those same local physical selections.
 	if err != nil {
@@ -730,9 +782,10 @@ func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepos
 	if err != nil {
 		return sdkPlanDefinition{}, err
 	}
-	generationRequest := sdkGenerateRequest(call.document, selections, bindings, call.defaultEngineURL)
+	generationRequest := sdkGenerateRequest(call.document, selections, targetBindings, call.defaultEngineURL)
 	generationRequest.UnifiedOperations = unifiedCompilation.Descriptors
 	payload := resolvedSDKPayload(generationRequest, bucket.ID, appID, noop)
+	payload.CredentialSourceBindings = credentialSourceBindings
 	payload.UnifiedDefinitionSchemaVersion = unified.DefinitionSchemaVersion
 	payload.UnifiedDefinitions = unifiedCompilation.DefinitionJSON
 	payload.UnifiedDefinitionHash = unifiedCompilation.DefinitionHash
@@ -833,12 +886,12 @@ func resolveSDKSelections(
 	doc sdkConfigDocument,
 	previous sdkConfigDocument,
 	bucket store.Bucket,
-) ([]models.SDKSelection, []map[string]any, []sdkResolvedService, sdkConfigDocument, error) {
+) ([]models.SDKSelection, []map[string]any, []sdkResolvedService, []sdkResolvedService, sdkConfigDocument, error) {
 	doc = canonicalAppDocument(doc)
 	services, err := workspaceServicesByConfigKey(ctx, s, registryClient, apiKey, doc)
 	// Exact service identity must be known before any allowed-version membership is checked.
 	if err != nil {
-		return nil, nil, nil, sdkConfigDocument{}, err
+		return nil, nil, nil, nil, sdkConfigDocument{}, err
 	}
 	// One batched lookup for every service this SDK config references,
 	// instead of one ListWorkspaceServiceVersions call per service inside the
@@ -846,7 +899,7 @@ func resolveSDKSelections(
 	allowedVersions, err := s.ListWorkspaceServiceVersionsForServices(ctx, sdkReferencedServiceIDs(doc, services))
 	// A failed batch cannot be interpreted as permission to use any Registry version.
 	if err != nil {
-		return nil, nil, nil, sdkConfigDocument{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to list allowed versions"}
+		return nil, nil, nil, nil, sdkConfigDocument{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to list allowed versions"}
 	}
 	var selections []models.SDKSelection
 	var summary []map[string]any
@@ -858,7 +911,7 @@ func resolveSDKSelections(
 		resolvedServiceVersionID, resolvedVersionStr, err := validateSDKServiceSelection(serviceName, serviceDoc, activation, ok, allowedVersions)
 		// Every service must resolve before a multi-service selection can become plan authority.
 		if err != nil {
-			return nil, nil, nil, sdkConfigDocument{}, err
+			return nil, nil, nil, nil, sdkConfigDocument{}, err
 		}
 		serviceDoc.Version = resolvedVersionStr
 		selections = append(selections, models.SDKSelection{
@@ -883,12 +936,17 @@ func resolveSDKSelections(
 		})
 		stateDoc.Services[activation.ServiceName] = serviceDoc
 	}
+	// The local planner must distinguish generated targets from source-only auth metadata before the shared auth batch.
+	if local, ok := registryClient.(*generationPlanningClient); ok {
+		local.setGenerationTargets(resolved)
+	}
 	// Auth, credentials, attachments, and exact membership share one final admission boundary.
-	if err := validateResolvedSDKSelections(ctx, configStore, s, registryClient, apiKey, bucket, doc, resolved, selections); err != nil {
-		return nil, nil, nil, sdkConfigDocument{}, err
+	credentialSources, err := validateResolvedSDKSelections(ctx, configStore, s, registryClient, apiKey, bucket, doc, services, resolved, selections)
+	if err != nil {
+		return nil, nil, nil, nil, sdkConfigDocument{}, err
 	}
 
-	return selections, summary, resolved, stateDoc, nil
+	return selections, summary, resolved, credentialSources, stateDoc, nil
 }
 
 // sdkSelectionValidator keeps app selection admission separate from Registry transport capabilities.
@@ -897,27 +955,57 @@ type sdkSelectionValidator interface {
 }
 
 // validateResolvedSDKSelections admits exact local scope before it can cross the shared app publication boundary.
-func validateResolvedSDKSelections(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, apiKey string, bucket store.Bucket, doc sdkConfigDocument, resolved []sdkResolvedService, selections []models.SDKSelection) error {
-	// public target uniqueness becomes execution authority only when Unified
-	// bindings can address those targets; ordinary SDK services keep legacy names.
-	if len(doc.UnifiedOperations) > 0 {
-		// Unified binding keys must identify one exact physical selection.
-		if err := validateUniqueUnifiedTargets(resolved); err != nil {
-			return err
-		}
+func validateResolvedSDKSelections(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, apiKey string, bucket store.Bucket, doc sdkConfigDocument, workspaceServices map[string]store.WorkspaceService, resolved []sdkResolvedService, selections []models.SDKSelection) ([]sdkResolvedService, error) {
+	// Unified target aliases must be unambiguous before auth policy resolution attaches authority to them.
+	if err := validateResolvedUnifiedTargets(doc, resolved); err != nil {
+		return nil, err
 	}
-	// Auth decisions share the same admitted snapshots as operation membership.
-	if err := resolveAppAuthPolicies(ctx, registryClient, apiKey, resolved, selections); err != nil {
-		return err
+	// Source-only services join the target auth batch without becoming app operation selections.
+	sourceRequests, err := appAuthSourceContractSelections(doc, workspaceServices)
+	if err != nil {
+		return nil, err
+	}
+	// Auth decisions share one admitted snapshot batch across target and reusable source families.
+	contracts, err := resolveAppAuthPoliciesWithSourceContracts(ctx, registryClient, apiKey, resolved, selections, sourceRequests)
+	// Target auth resolution must succeed before a reference can pin its source family.
+	if err != nil {
+		return nil, err
+	}
+	// Reference resolution pins source identity only after the target and source contracts share one batch.
+	if err := resolveAppAuthReferences(doc, workspaceServices, resolved, selections, contracts); err != nil {
+		return nil, err
+	}
+	credentialSources, err := resolvedCredentialSourceServices(sourceRequests, contracts)
+	// Missing immutable source identity must fail before readiness or apply-time fencing can continue.
+	if err != nil {
+		return nil, err
 	}
 	// A valid contract does not imply the selected bucket has usable credentials.
-	if err := validateAppBucketReadiness(ctx, s, bucket, selections, appReadinessServiceNames(resolved)); err != nil {
-		return err
+	if err := validateAppBucketReadiness(ctx, s, bucket, selections, appReadinessServiceNames(resolved, workspaceServices)); err != nil {
+		return nil, err
 	}
 	// Inbound scope must retain the reviewed attachment coverage alongside outbound scope.
 	if err := validateWebhookAttachmentCoverage(ctx, configStore, doc); err != nil {
-		return err
+		return nil, err
 	}
+	// Exact local membership is the final guard before returning the admitted credential-source fence.
+	if err := validateLocalSDKSelections(ctx, registryClient, selections); err != nil {
+		return nil, err
+	}
+	return credentialSources, nil
+}
+
+// validateResolvedUnifiedTargets applies public-target uniqueness only when Unified bindings can address those targets.
+func validateResolvedUnifiedTargets(doc sdkConfigDocument, resolved []sdkResolvedService) error {
+	// Ordinary SDK services retain legacy names because no Unified binding can make them execution authority.
+	if len(doc.UnifiedOperations) == 0 {
+		return nil
+	}
+	return validateUniqueUnifiedTargets(resolved)
+}
+
+// validateLocalSDKSelections keeps exact SQL membership admission behind the required local validator capability.
+func validateLocalSDKSelections(ctx context.Context, registryClient sandbox.RegistryClient, selections []models.SDKSelection) error {
 	validator, ok := registryClient.(sdkSelectionValidator)
 	// Missing local admission must fail closed rather than restoring a live Registry fallback.
 	if !ok {
@@ -928,6 +1016,20 @@ func validateResolvedSDKSelections(ctx context.Context, configStore store.Config
 		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
 	}
 	return nil
+}
+
+// resolvedCredentialSourceServices projects metadata-only source contracts for apply-time membership and revision fencing.
+func resolvedCredentialSourceServices(requests []sandbox.ServiceVersionExecutionAuthSelection, contracts map[string]sandbox.ServiceVersionExecutionAuthContract) ([]sdkResolvedService, error) {
+	resolved := make([]sdkResolvedService, 0, len(requests))
+	for _, request := range requests {
+		contract, ok := contracts[executionAuthContractKey(request.ServiceID, request.Version, nil, false)]
+		// A source admitted for auth must also carry one immutable version into the apply fence.
+		if !ok || contract.ServiceVersionID == uuid.Nil {
+			return nil, errors.New("credential source contract is missing immutable version identity")
+		}
+		resolved = append(resolved, sdkResolvedService{ServiceID: request.ServiceID, ServiceVersionID: contract.ServiceVersionID, Version: request.Version})
+	}
+	return resolved, nil
 }
 
 // canonicalAppDocument removes presentation-only ordering differences
@@ -1044,6 +1146,17 @@ type sdkAuthResolutionTelemetry struct {
 // exact Registry scheme used at dispatch. Doing this once during planning
 // keeps agents and SDK consumers from guessing provider-specific auth names.
 func resolveAppAuthPolicies(ctx context.Context, registryClient sandbox.RegistryClient, apiKey string, services []sdkResolvedService, selections []models.SDKSelection) error {
+	_, err := resolveAppAuthPoliciesWithContracts(ctx, registryClient, apiKey, services, selections)
+	return err
+}
+
+// resolveAppAuthPoliciesWithContracts returns the admitted batch so app auth references never trigger a second Registry read.
+func resolveAppAuthPoliciesWithContracts(ctx context.Context, registryClient sandbox.RegistryClient, apiKey string, services []sdkResolvedService, selections []models.SDKSelection) (map[string]sandbox.ServiceVersionExecutionAuthContract, error) {
+	return resolveAppAuthPoliciesWithSourceContracts(ctx, registryClient, apiKey, services, selections, nil)
+}
+
+// resolveAppAuthPoliciesWithSourceContracts admits selected targets and credential-only sources in one local snapshot batch.
+func resolveAppAuthPoliciesWithSourceContracts(ctx context.Context, registryClient sandbox.RegistryClient, apiKey string, services []sdkResolvedService, selections []models.SDKSelection, sourceRequests []sandbox.ServiceVersionExecutionAuthSelection) (map[string]sandbox.ServiceVersionExecutionAuthContract, error) {
 	fetcher, ok := registryClient.(sdkExecutionAuthContractFetcher)
 	// Missing contract support cannot establish authority for secured selections.
 	if !ok {
@@ -1054,18 +1167,19 @@ func resolveAppAuthPolicies(ctx context.Context, registryClient sandbox.Registry
 			outcome = "unavailable"
 		}
 		recordSDKAuthResolution(ctx, unavailableAuthTelemetry(selections), outcome)
-		return err
+		return nil, err
 	}
 	requests, err := sdkExecutionAuthContractSelections(services, selections)
 	// Parallel selection metadata must agree before per-service labels are reused.
 	if err != nil {
-		return err
+		return nil, err
 	}
-	contracts, err := fetcher.FetchServiceVersionExecutionAuthContracts(ctx, requests, apiKey)
+	allRequests := append(append([]sandbox.ServiceVersionExecutionAuthSelection(nil), requests...), sourceRequests...)
+	contracts, err := fetcher.FetchServiceVersionExecutionAuthContracts(ctx, allRequests, apiKey)
 	// Dependency errors must never forward raw Registry messages or credentials.
 	if err != nil {
 		recordSDKAuthResolution(ctx, sdkAuthResolutionTelemetry{}, "contract_error")
-		return generationPinPlanError(err, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "failed to resolve service auth policies"})
+		return nil, generationPinPlanError(err, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "failed to resolve service auth policies"})
 	}
 	bySelection := make(map[string]sandbox.ServiceVersionExecutionAuthContract, len(contracts))
 	// Index the existing batch without introducing per-service metadata lookups.
@@ -1080,23 +1194,139 @@ func resolveAppAuthPolicies(ctx context.Context, registryClient sandbox.Registry
 		if !exists {
 			recordSDKAuthResolution(ctx, telemetry, "invalid_selection")
 			httpErr, _ := appAuthPolicyPlanError(appServiceValidationError{serviceID: selections[index].ServiceID, reason: "version auth contract was not found"}, services[index])
-			return httpErr
+			return nil, httpErr
 		}
 		// Operation validation shares the same safe service-label projection as auth failures.
 		if err := validateSelectedOperations(requests[index], contract.Operations); err != nil {
 			recordSDKAuthResolution(ctx, telemetry, "invalid_selection")
 			httpErr, _ := appAuthPolicyPlanError(err, services[index])
-			return httpErr
+			return nil, httpErr
 		}
 		// Auth-policy failures retain whether the caller selection or provider contract caused the rejection.
 		if err := resolveSelectionAuthPolicy(&selections[index], contract, &telemetry); err != nil {
 			httpErr, outcome := appAuthPolicyPlanError(err, services[index])
 			recordSDKAuthResolution(ctx, telemetry, outcome)
-			return httpErr
+			return nil, httpErr
 		}
 	}
 	recordSDKAuthResolution(ctx, telemetry, "success")
+	return bySelection, nil
+}
+
+// appAuthSourceContractSelections builds deduplicated source-only reads from the already-batched workspace resolver.
+func appAuthSourceContractSelections(doc sdkConfigDocument, workspaceServices map[string]store.WorkspaceService) ([]sandbox.ServiceVersionExecutionAuthSelection, error) {
+	requests := make([]sandbox.ServiceVersionExecutionAuthSelection, 0)
+	seen := make(map[string]struct{})
+	for _, service := range doc.Services {
+		// Direct target credentials require no source contract beyond the ordinary target auth batch.
+		if service.Auth == nil || strings.TrimSpace(service.Auth.Ref) == "" {
+			continue
+		}
+		ref, err := parseAppAuthReference(service.Auth.Ref)
+		if err != nil {
+			return nil, err
+		}
+		source, ok := workspaceServices[ref.ServiceKey]
+		// References cannot float to Registry services that are not enabled locally.
+		if !ok || source.ServiceID == uuid.Nil || strings.TrimSpace(source.Version) == "" {
+			return nil, fmt.Errorf("source service %q has no enabled version in the workspace", ref.ServiceKey)
+		}
+		key := source.ServiceID.String() + "\x00" + source.Version
+		// Several targets may reuse one registration without multiplying snapshot reads.
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		requests = append(requests, sandbox.ServiceVersionExecutionAuthSelection{ServiceID: source.ServiceID, Version: source.Version})
+	}
+	return requests, nil
+}
+
+// resolveAppAuthReferences pins enabled, contract-verified source identity without adding source operations to app capability.
+func resolveAppAuthReferences(doc sdkConfigDocument, workspaceServices map[string]store.WorkspaceService, services []sdkResolvedService, selections []models.SDKSelection, contracts map[string]sandbox.ServiceVersionExecutionAuthContract) error {
+	serviceIndexes := appResolvedServiceIndexes(services)
+	for targetKey, serviceDoc := range doc.Services {
+		// Services without a reference retain direct lookup under their own selected scheme.
+		if serviceDoc.Auth == nil || strings.TrimSpace(serviceDoc.Auth.Ref) == "" {
+			continue
+		}
+		index, ok := serviceIndexes[targetKey]
+		// Resolution and selection arrays must retain the same service identity established earlier in planning.
+		if !ok || index >= len(selections) {
+			return errors.New("app auth reference target is unavailable")
+		}
+		if err := resolveAppAuthReferenceSelection(&selections[index], serviceDoc.Auth, workspaceServices, contracts); err != nil {
+			return fmt.Errorf("service %s auth ref: %w", targetKey, err)
+		}
+	}
 	return nil
+}
+
+// appResolvedServiceIndexes maps both authored and resolved labels without another Registry lookup.
+func appResolvedServiceIndexes(services []sdkResolvedService) map[string]int {
+	indexes := make(map[string]int, len(services)*2)
+	for index, service := range services {
+		indexes[service.PublicTarget] = index
+		// Applied state uses Registry display names, so either stable label must resolve to the same immutable service.
+		indexes[service.ServiceName] = index
+	}
+	return indexes
+}
+
+// resolveAppAuthReferenceSelection validates one target/source pair and writes only credential-routing metadata.
+func resolveAppAuthReferenceSelection(selection *models.SDKSelection, auth *sdkAppAuthDoc, workspaceServices map[string]store.WorkspaceService, contracts map[string]sandbox.ServiceVersionExecutionAuthContract) error {
+	parsed, err := parseAppAuthReference(auth.Ref)
+	if err != nil {
+		return err
+	}
+	// Policy resolution must have selected the exact OAuth/OIDC target authored by the app.
+	if selection.AuthType != strings.ToLower(strings.TrimSpace(auth.Type)) || selection.AuthName != strings.TrimSpace(auth.Name) || !selectionRequiresAuth(*selection, selection.AuthType, selection.AuthName) {
+		return errors.New("target auth scheme is not required by the selected operations")
+	}
+	source, ok := workspaceServices[parsed.ServiceKey]
+	// The source must be enabled locally, but selecting its operations would grant unrelated app capability.
+	if !ok {
+		return fmt.Errorf("source service %q is not enabled in the workspace", parsed.ServiceKey)
+	}
+	sourceContract, ok := contracts[executionAuthContractKey(source.ServiceID, source.Version, nil, false)]
+	// A missing exact snapshot must not be interpreted as an auth family with no credentials.
+	if !ok {
+		return fmt.Errorf("source service %q auth contract was not found", parsed.ServiceKey)
+	}
+	if !appAuthContractContainsSource(sourceContract.AuthConfigs, selection.AuthType, parsed.AuthName) {
+		return fmt.Errorf("source service %q does not declare compatible auth scheme %q", parsed.ServiceKey, parsed.AuthName)
+	}
+	// A self-reference adds no routing identity and would obscure the direct credential contract.
+	if source.ServiceID == selection.ServiceID && parsed.AuthName == selection.AuthName {
+		return errors.New("a credential cannot reference itself")
+	}
+	selection.CredentialSourceServiceID = source.ServiceID
+	selection.CredentialSourceAuthType = selection.AuthType
+	selection.CredentialSourceAuthName = parsed.AuthName
+	selection.AuthRef = "${bucket.auth." + parsed.ServiceKey + "." + parsed.AuthName + "}"
+	return nil
+}
+
+// appAuthContractContainsSource requires the exact named OAuth/OIDC family from the pinned source snapshot.
+func appAuthContractContainsSource(auths fusedobject.AuthConfigs, targetType, sourceName string) bool {
+	for _, auth := range auths {
+		// Exact names prevent provider metadata order or a later sibling scheme from changing registration identity.
+		if strings.TrimSpace(auth.Name) == strings.TrimSpace(sourceName) && canonicalConnectAuthType(auth.Type) == canonicalConnectAuthType(targetType) {
+			return true
+		}
+	}
+	return false
+}
+
+// selectionRequiresAuth proves the reference targets one persisted AND-member rather than an unused preference.
+func selectionRequiresAuth(selection models.SDKSelection, authType, authName string) bool {
+	for _, required := range selection.RequiredAuth {
+		// Exact family and scheme identity must both match the policy result.
+		if canonicalWorkspaceStaticAuthType(required.AuthType) == canonicalWorkspaceStaticAuthType(authType) && strings.TrimSpace(required.AuthName) == strings.TrimSpace(authName) {
+			return true
+		}
+	}
+	return false
 }
 
 // appAuthPolicyPlanError preserves failure classification while giving typed
@@ -1789,13 +2019,38 @@ func workspaceServicesByDisplayName(workspaceServices []store.WorkspaceService) 
 
 func unresolvedSDKServiceKeys(doc sdkConfigDocument, services map[string]store.WorkspaceService) []string {
 	var missing []string
-	for serviceName := range doc.Services {
+	for _, serviceName := range sdkServiceIdentityKeys(doc) {
+		// One identity batch includes credential-only sources without making them app selections.
 		if _, ok := services[serviceName]; !ok {
 			missing = append(missing, serviceName)
 		}
 	}
 	sort.Strings(missing)
 	return missing
+}
+
+// sdkServiceIdentityKeys returns selected targets plus credential-only reference sources for one set-based lookup.
+func sdkServiceIdentityKeys(doc sdkConfigDocument) []string {
+	keys := make(map[string]struct{}, len(doc.Services))
+	for serviceName, service := range doc.Services {
+		keys[serviceName] = struct{}{}
+		// Invalid refs are rejected by document validation before identity resolution; skip them defensively here.
+		if service.Auth == nil || strings.TrimSpace(service.Auth.Ref) == "" {
+			continue
+		}
+		ref, err := parseAppAuthReference(service.Auth.Ref)
+		// Keeping malformed refs out of identity lookup prevents dependency errors from hiding the authored validation error.
+		if err != nil {
+			continue
+		}
+		keys[ref.ServiceKey] = struct{}{}
+	}
+	result := make([]string, 0, len(keys))
+	for key := range keys {
+		result = append(result, key)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func workspaceServicesByID(workspaceServices []store.WorkspaceService) map[uuid.UUID]store.WorkspaceService {
@@ -2520,10 +2775,10 @@ func resolveSDKContractBindingsBatch(ctx context.Context, resolver sandbox.Regis
 	if err != nil {
 		return nil, err
 	}
-	byService := sdkRevisionMap(revisions)
+	byVersion := sdkRevisionMap(revisions)
 	bindings := make([]sdkContractBinding, 0, len(services))
 	for _, service := range services {
-		revision, ok := byService[service.ServiceID]
+		revision, ok := byVersion[sdkServiceVersionKey{serviceID: service.ServiceID, version: service.Version}]
 		if !ok || revision.ServiceVersionID == uuid.Nil {
 			return nil, fmt.Errorf("service version %s for service %s was not resolved", service.Version, service.ServiceID)
 		}
@@ -2567,12 +2822,48 @@ func finalizeAppSelections(selections []models.SDKSelection, bindings []sdkContr
 	return selections
 }
 
+// splitAppContractBindings keeps generated selections separate from metadata-only credential-source revision fences.
+func splitAppContractBindings(bindings []sdkContractBinding, targets []sdkResolvedService) ([]sdkContractBinding, []sdkContractBinding) {
+	targetIDs := make(map[sdkServiceVersionKey]bool, len(targets))
+	for _, target := range targets {
+		targetIDs[sdkServiceVersionKey{serviceID: target.ServiceID, version: target.Version}] = true
+	}
+	targetBindings := make([]sdkContractBinding, 0, len(targets))
+	sourceBindings := make([]sdkContractBinding, 0, len(bindings))
+	seen := make(map[sdkServiceVersionKey]bool, len(bindings))
+	for _, binding := range bindings {
+		identity := sdkServiceVersionKey{serviceID: binding.ServiceID, version: binding.Version}
+		// A service selected as both an operation target and auth source needs only its target binding.
+		if seen[identity] {
+			continue
+		}
+		seen[identity] = true
+		// Registry generation accepts exactly one binding per generated target selection.
+		if targetIDs[identity] {
+			targetBindings = append(targetBindings, binding)
+			continue
+		}
+		sourceBindings = append(sourceBindings, binding)
+	}
+	return targetBindings, sourceBindings
+}
+
+// allAppContractBindings combines generated targets and hidden auth sources for concurrency and activation checks.
+func allAppContractBindings(payload appResolvedPayload) []sdkContractBinding {
+	bindings := make([]sdkContractBinding, 0, len(payload.ContractBindings)+len(payload.CredentialSourceBindings))
+	bindings = append(bindings, payload.ContractBindings...)
+	bindings = append(bindings, payload.CredentialSourceBindings...)
+	return bindings
+}
+
+// sdkContractBindingsFromPayload returns every revision fence without exposing auth-source services to generation.
 func sdkContractBindingsFromPayload(payload json.RawMessage) ([]sdkContractBinding, error) {
 	resolved, err := appPayloadFromJSON(payload)
+	// Invalid plan payloads cannot participate in optimistic-concurrency checks.
 	if err != nil {
 		return nil, err
 	}
-	return resolved.ContractBindings, nil
+	return allAppContractBindings(resolved), nil
 }
 
 // appPayloadFromJSON strictly decodes the Registry plan payload before post-generation contract checks.
@@ -2599,11 +2890,16 @@ func ensureSDKContractBindingsCurrent(ctx context.Context, registryClient sandbo
 
 // ensureAppPayloadContractsCurrent shares the exact payload fence across MCP apply and SDK's before/after-generation checks.
 func ensureAppPayloadContractsCurrent(ctx context.Context, registryClient sandbox.RegistryClient, apiKey string, raw json.RawMessage) error {
-	bindings, err := sdkContractBindingsFromPayload(raw)
+	resolved, err := appPayloadFromJSON(raw)
 	// Failed decoding cannot bypass an optimistic-concurrency check.
 	if err != nil {
 		return err
 	}
+	// Apply reconstructs generated-target pin requirements from the immutable plan rather than treating auth sources as generator input.
+	if local, ok := registryClient.(*generationPlanningClient); ok {
+		local.setGenerationTargetBindings(resolved.ContractBindings)
+	}
+	bindings := allAppContractBindings(resolved)
 	// Local runtime or retained generation identity must remain unchanged at each publication checkpoint.
 	if err := ensureSDKContractBindingsCurrent(ctx, registryClient, apiKey, bindings); err != nil {
 		return generationPinPlanError(err, workspaceConfigHTTPError{status: http.StatusConflict, message: err.Error()})
@@ -2618,9 +2914,9 @@ func ensureSDKContractBindingsCurrentBatch(ctx context.Context, resolver sandbox
 	if err != nil {
 		return generationPinPlanError(err, errors.New("contract_revision_unavailable"))
 	}
-	currentByService := sdkRevisionMap(current)
+	currentByVersion := sdkRevisionMap(current)
 	for _, binding := range bindings {
-		revision, ok := currentByService[binding.ServiceID]
+		revision, ok := currentByVersion[sdkServiceVersionKey{serviceID: binding.ServiceID, version: binding.Version}]
 		// All identity dimensions are required; matching only the public version label could admit replacement content.
 		if !ok || !sdkRevisionMatchesBinding(revision, binding) {
 			return errors.New("contract_revision_stale")
@@ -2637,10 +2933,16 @@ func sdkBindingVersionRefs(bindings []sdkContractBinding) []sandbox.ServiceVersi
 	return refs
 }
 
-func sdkRevisionMap(revisions []sandbox.ServiceVersionRevision) map[uuid.UUID]sandbox.ServiceVersionRevision {
-	out := make(map[uuid.UUID]sandbox.ServiceVersionRevision, len(revisions))
+type sdkServiceVersionKey struct {
+	serviceID uuid.UUID
+	version   string
+}
+
+// sdkRevisionMap indexes revisions by exact service-version identity instead of collapsing sibling versions.
+func sdkRevisionMap(revisions []sandbox.ServiceVersionRevision) map[sdkServiceVersionKey]sandbox.ServiceVersionRevision {
+	out := make(map[sdkServiceVersionKey]sandbox.ServiceVersionRevision, len(revisions))
 	for _, revision := range revisions {
-		out[revision.ServiceID] = revision
+		out[sdkServiceVersionKey{serviceID: revision.ServiceID, version: revision.Version}] = revision
 	}
 	return out
 }
@@ -2693,6 +2995,7 @@ func validateSDKPlanForApply(plan *store.ConfigPlan, sourceHash string) error {
 
 func ensureSDKSelectionsStillAllowed(ctx context.Context, s store.Store, payload json.RawMessage) error {
 	resolved, err := appPayloadFromJSON(payload)
+	// Malformed immutable payloads must fail closed before membership checks.
 	if err != nil {
 		return err
 	}
@@ -2702,7 +3005,9 @@ func ensureSDKSelectionsStillAllowed(ctx context.Context, s store.Store, payload
 			return err
 		}
 	}
-	allowedVersions, err := s.ListWorkspaceServiceVersionsForServices(ctx, sdkSelectionServiceIDs(resolved.Selections))
+	allBindings := allAppContractBindings(resolved)
+	allowedVersions, err := s.ListWorkspaceServiceVersionsForServices(ctx, sdkBindingServiceIDs(allBindings))
+	// Target and credential-source services must remain admitted to the workspace.
 	if err != nil {
 		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to list allowed versions"}
 	}
@@ -2711,7 +3016,27 @@ func ensureSDKSelectionsStillAllowed(ctx context.Context, s store.Store, payload
 			return err
 		}
 	}
+	for _, binding := range allBindings {
+		// Metadata-only credential sources must remain enabled even though they intentionally have no app selection.
+		if !activationVersionExistsByUUID(allowedVersions[binding.ServiceID], binding.ServiceVersionID) {
+			return workspaceConfigHTTPError{status: http.StatusConflict, message: fmt.Sprintf("version %s for service %s is no longer allowed in this workspace", binding.Version, binding.ServiceID)}
+		}
+	}
 	return nil
+}
+
+// sdkBindingServiceIDs deduplicates target and metadata-only source identities for one apply membership batch.
+func sdkBindingServiceIDs(bindings []sdkContractBinding) []uuid.UUID {
+	ids := make([]uuid.UUID, 0, len(bindings))
+	seen := make(map[uuid.UUID]bool, len(bindings))
+	for _, binding := range bindings {
+		// Reused source contracts should not multiply workspace version reads.
+		if !seen[binding.ServiceID] {
+			ids = append(ids, binding.ServiceID)
+			seen[binding.ServiceID] = true
+		}
+	}
+	return ids
 }
 
 func ensurePinnedSDKSelection(selection models.SDKSelection, binding sdkContractBinding) error {
@@ -2844,7 +3169,7 @@ func validateAppBucketReadiness(ctx context.Context, s store.Store, bucket store
 	}
 	missing := make([]appMissingCredential, 0)
 	for _, selection := range selections {
-		missing = append(missing, missingAppBucketMaterial(selection, serviceNames[selection.ServiceID], ready, secretKeys)...)
+		missing = append(missing, missingAppBucketMaterial(selection, serviceNames, ready, secretKeys)...)
 	}
 	if len(missing) == 0 {
 		return nil
@@ -2870,10 +3195,16 @@ func appMissingCredentialKey(missing appMissingCredential) string {
 // appReadinessServiceNames reuses the bounded plan resolution result for
 // friendlier prompts. Apply intentionally passes no names because the persisted
 // execution scope is ID-authoritative and readiness must never add a lookup.
-func appReadinessServiceNames(resolved []sdkResolvedService) map[uuid.UUID]string {
-	names := make(map[uuid.UUID]string, len(resolved))
+func appReadinessServiceNames(resolved []sdkResolvedService, workspaceServices map[string]store.WorkspaceService) map[uuid.UUID]string {
+	names := make(map[uuid.UUID]string, len(resolved)+len(workspaceServices))
 	for _, service := range resolved {
 		names[service.ServiceID] = service.ServiceName
+	}
+	for _, service := range workspaceServices {
+		// Source-only services are already present in the same identity batch; no extra metadata read is needed for remediation.
+		if _, exists := names[service.ServiceID]; !exists {
+			names[service.ServiceID] = service.ServiceName
+		}
 	}
 	return names
 }
@@ -2920,34 +3251,66 @@ func appBucketCredentialRequirements(selections []models.SDKSelection) []store.A
 		for _, required := range selection.RequiredAuth {
 			keys := make([]string, 0)
 			for _, field := range appRequiredSecretFields(required) {
+				// Readiness asks SQL for storage keys only; prompt metadata stays keyed to the app's target scheme.
 				if field.SecretKey != "" {
 					keys = append(keys, field.SecretKey)
 				}
 			}
-			requirements = append(requirements, store.AppCredentialRequirement{
+			requirement := store.AppCredentialRequirement{
 				ServiceID: selection.ServiceID, AuthType: canonicalWorkspaceStaticAuthType(required.AuthType),
 				AuthName: strings.TrimSpace(required.AuthName), SecretKeys: keys,
-			})
+			}
+			// Only the selected target OAuth/OIDC family is rebased; other AND-members remain direct.
+			if selectionAuthMatchesRequired(selection, required) {
+				requirement.SourceServiceID = selection.CredentialSourceServiceID
+				requirement.SourceAuthType = selection.CredentialSourceAuthType
+				requirement.SourceAuthName = selection.CredentialSourceAuthName
+			}
+			requirements = append(requirements, requirement)
 		}
 	}
 	return requirements
 }
 
-func missingAppBucketMaterial(selection models.SDKSelection, serviceName string, ready, secretKeys map[string]bool) []appMissingCredential {
+// selectionAuthMatchesRequired identifies the one selected family that an app auth reference may rebase.
+func selectionAuthMatchesRequired(selection models.SDKSelection, required models.SDKRequiredAuth) bool {
+	// Direct selections carry no source fields and need no rebasing.
+	if selection.CredentialSourceServiceID == uuid.Nil {
+		return false
+	}
+	return canonicalWorkspaceStaticAuthType(selection.AuthType) == canonicalWorkspaceStaticAuthType(required.AuthType) &&
+		strings.TrimSpace(selection.AuthName) == strings.TrimSpace(required.AuthName)
+}
+
+func missingAppBucketMaterial(selection models.SDKSelection, serviceNames map[uuid.UUID]string, ready, secretKeys map[string]bool) []appMissingCredential {
 	missing := make([]appMissingCredential, 0)
 	for _, required := range selection.RequiredAuth {
 		if required.AuthType == "oauth" || required.AuthType == "oidc" {
+			// A failed exact-family readiness check reports the complete atomic pair expected by secret set.
 			if !ready[appConnectReadinessKey(selection.ServiceID, required.AuthType, required.AuthName)] {
-				missing = append(missing, newAppMissingCredential(selection.ServiceID, serviceName, required, []appMissingCredentialField{{Name: "connection"}}))
+				serviceID, reported := appReadinessCredentialIdentity(selection, required)
+				missing = append(missing, newAppMissingCredential(serviceID, serviceNames[serviceID], reported, appRequiredOAuthSecretFields(reported.AuthName)))
 			}
 			continue
 		}
 		fields := missingAppSecretFields(selection.ServiceID, required, secretKeys)
 		if len(fields) > 0 {
-			missing = append(missing, newAppMissingCredential(selection.ServiceID, serviceName, required, fields))
+			missing = append(missing, newAppMissingCredential(selection.ServiceID, serviceNames[selection.ServiceID], required, fields))
 		}
 	}
 	return missing
+}
+
+// appReadinessCredentialIdentity points remediation at the source family selected by an app reference.
+func appReadinessCredentialIdentity(selection models.SDKSelection, required models.SDKRequiredAuth) (uuid.UUID, models.SDKRequiredAuth) {
+	// Direct and non-selected required families remain owned by the target service.
+	if !selectionAuthMatchesRequired(selection, required) {
+		return selection.ServiceID, required
+	}
+	reported := required
+	reported.AuthType = selection.CredentialSourceAuthType
+	reported.AuthName = selection.CredentialSourceAuthName
+	return selection.CredentialSourceServiceID, reported
 }
 
 func newAppMissingCredential(serviceID uuid.UUID, serviceName string, required models.SDKRequiredAuth, fields []appMissingCredentialField) appMissingCredential {
@@ -2984,20 +3347,7 @@ func appRequiredSecretFields(required models.SDKRequiredAuth) []appMissingCreden
 	}
 	switch required.AuthType {
 	case "basic":
-		mode, valid := authrouting.EffectiveBasicPasswordMode(required.BasicPasswordMode)
-		// Invalid explicit modes remain contract errors instead of being mistaken for password omission.
-		if !valid {
-			return []appMissingCredentialField{{Name: "invalid_basic_password_mode", SecretKey: "<invalid-basic-password-mode>"}}
-		}
-		// Omitted mode uses the standard username-and-password Basic credential shape.
-		switch mode {
-		case authrouting.BasicPasswordRequired:
-			return []appMissingCredentialField{{Name: "username", SecretKey: name + "_username"}, {Name: "password", SecretKey: name + "_password"}}
-		case authrouting.BasicPasswordOptional, authrouting.BasicPasswordEmpty:
-			return []appMissingCredentialField{{Name: "username", SecretKey: name + "_username"}}
-		}
-		// The shared normalizer makes this unreachable, but retaining a fail-closed return protects future mode additions.
-		return []appMissingCredentialField{{Name: "invalid_basic_password_mode", SecretKey: "<invalid-basic-password-mode>"}}
+		return appRequiredBasicSecretFields(required, name)
 	case "mtls":
 		return []appMissingCredentialField{{Name: "certificate", SecretKey: name + "_cert"}, {Name: "private_key", SecretKey: name + "_key"}}
 	case "api_key":
@@ -3005,10 +3355,39 @@ func appRequiredSecretFields(required models.SDKRequiredAuth) []appMissingCreden
 	case "bearer":
 		return []appMissingCredentialField{{Name: "token", SecretKey: name}}
 	case "oauth", "oidc":
-		return nil
+		return appRequiredOAuthSecretFields(name)
 	default:
 		return []appMissingCredentialField{{Name: "invalid_auth_type", SecretKey: "<invalid-auth-type>"}}
 	}
+}
+
+// appRequiredBasicSecretFields maps one normalized Basic mode to its exact readiness keys.
+func appRequiredBasicSecretFields(required models.SDKRequiredAuth, name string) []appMissingCredentialField {
+	mode, valid := authrouting.EffectiveBasicPasswordMode(required.BasicPasswordMode)
+	// Invalid explicit modes remain contract errors instead of being mistaken for password omission.
+	if !valid {
+		return []appMissingCredentialField{{Name: "invalid_basic_password_mode", SecretKey: "<invalid-basic-password-mode>"}}
+	}
+	// Omitted mode uses the standard username-and-password Basic credential shape.
+	switch mode {
+	case authrouting.BasicPasswordRequired:
+		return []appMissingCredentialField{{Name: "username", SecretKey: name + "_username"}, {Name: "password", SecretKey: name + "_password"}}
+	case authrouting.BasicPasswordOptional, authrouting.BasicPasswordEmpty:
+		return []appMissingCredentialField{{Name: "username", SecretKey: name + "_username"}}
+	default:
+		// The shared normalizer makes this unreachable, but a fail-closed return protects future mode additions.
+		return []appMissingCredentialField{{Name: "invalid_basic_password_mode", SecretKey: "<invalid-basic-password-mode>"}}
+	}
+}
+
+// appRequiredOAuthSecretFields uses the shared naming helper for SDK and MCP readiness.
+func appRequiredOAuthSecretFields(name string) []appMissingCredentialField {
+	clientIDKey, clientSecretKey, ok := credentialkeys.OAuthApplication(name)
+	// Application readiness checks the same exact family resolved by consent and refresh.
+	if !ok {
+		return []appMissingCredentialField{{Name: "credential_name", SecretKey: "<credential-name>"}}
+	}
+	return []appMissingCredentialField{{Name: "client_id", SecretKey: clientIDKey}, {Name: "client_secret", SecretKey: clientSecretKey}}
 }
 
 // persistAppRuntimeParams carries the exact app version plus its family-level
@@ -3361,16 +3740,28 @@ func explicitWebhookSelectionChanged(planned, returned models.SDKSelection) bool
 	return len(planned.WebhookIDs) > 0 && !sameUUIDSet(planned.WebhookIDs, returned.WebhookIDs)
 }
 
+// sameReturnedSelectionPolicy ensures Registry resolution cannot widen or reroute the authored app selection.
 func sameReturnedSelectionPolicy(planned, returned models.SDKSelection) bool {
+	// Authored operation names remain authoritative when they were explicitly selected.
 	if len(planned.OperationNames) > 0 && !sameStrings(planned.OperationNames, returned.OperationNames) {
 		return false
 	}
+	// Authored webhook names remain authoritative when they were explicitly selected.
 	if len(planned.WebhookNames) > 0 && !sameStrings(planned.WebhookNames, returned.WebhookNames) {
 		return false
 	}
-	return planned.AuthType == returned.AuthType && planned.AuthName == returned.AuthName &&
+	return sameReturnedAuthPolicy(planned, returned) &&
 		sameRequiredAuth(planned.RequiredAuth, returned.RequiredAuth) &&
 		sameStrings(planned.ConnectScopes, returned.ConnectScopes) && sameInjections(planned.Injections, returned.Injections)
+}
+
+// sameReturnedAuthPolicy compares the immutable target and credential-source routing fields as one policy unit.
+func sameReturnedAuthPolicy(planned, returned models.SDKSelection) bool {
+	return planned.AuthType == returned.AuthType && planned.AuthName == returned.AuthName &&
+		planned.AuthRef == returned.AuthRef &&
+		planned.CredentialSourceServiceID == returned.CredentialSourceServiceID &&
+		planned.CredentialSourceAuthType == returned.CredentialSourceAuthType &&
+		planned.CredentialSourceAuthName == returned.CredentialSourceAuthName
 }
 
 func sameRequiredAuth(expected, actual []models.SDKRequiredAuth) bool {

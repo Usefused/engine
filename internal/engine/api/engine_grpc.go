@@ -28,6 +28,7 @@ type EngineGRPCServer struct {
 	store          store.Store
 	verifier       ServiceVerifier
 	masterKey      []byte
+	redirectURI    string
 	// configStore and natsClient are only needed by SubscribeWebhooks
 	// (webhook_grpc_handler.go) -- resolving a connecting SDK/MCP's
 	// webhook_attachment label and bridging to the NATS JetStream durable
@@ -39,7 +40,7 @@ type EngineGRPCServer struct {
 
 // NewEngineGRPCServer requires the process-shared validator so SDK execution,
 // MCP execution, and revocation can never accidentally use separate caches.
-func NewEngineGRPCServer(s store.Store, verifier ServiceVerifier, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient, tokenValidator auth.TokenValidator) *EngineGRPCServer {
+func NewEngineGRPCServer(s store.Store, verifier ServiceVerifier, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient, tokenValidator auth.TokenValidator, redirectURIs ...string) *EngineGRPCServer {
 	runtime := sandbox.NewEngineGRPCServer()
 	return &EngineGRPCServer{
 		runtime:        runtime,
@@ -48,6 +49,7 @@ func NewEngineGRPCServer(s store.Store, verifier ServiceVerifier, masterKey []by
 		store:          s,
 		verifier:       verifier,
 		masterKey:      masterKey,
+		redirectURI:    firstRedirectURI(redirectURIs),
 		configStore:    configStore,
 		natsClient:     natsClient,
 		tokenValidator: tokenValidator,
@@ -104,10 +106,10 @@ func (s *EngineGRPCServer) StartConnectSession(ctx context.Context, req *enginev
 		return nil, status.Error(codes.InvalidArgument, "end_user_ref is required")
 	}
 	returnURL := strings.TrimSpace(req.GetReturnUrl())
-	if returnURL != "" && !isHTTPRedirectURI(returnURL) {
+	if returnURL != "" && !isAbsoluteHTTPURL(returnURL) {
 		return nil, status.Error(codes.InvalidArgument, "return_url must be an absolute http or https URL")
 	}
-	resolved, err := resolveConnectRuntimeConfig(ctx, s.store, s.verifier, call, s.masterKey)
+	resolved, err := resolveConnectRuntimeConfig(ctx, s.store, s.verifier, call, s.masterKey, s.redirectURI)
 	if err != nil {
 		return nil, grpcConnectError(err)
 	}
@@ -186,10 +188,33 @@ func (s *EngineGRPCServer) authenticatedConnectCallFromGRPC(ctx context.Context,
 	if err != nil {
 		return connectAdminCall{}, uuid.Nil, status.Error(codes.InvalidArgument, "service_id must be a valid UUID")
 	}
-	if scope.BucketID != bucketID || !appRuntimeSelectsService(scope.Selections, serviceID) {
+	selection, ok := appRuntimeServiceSelection(scope.ScopeSchemaVersion, scope.Selections, serviceID)
+	// Consent is restricted to the authenticated immutable app selection.
+	if scope.BucketID != bucketID || !ok {
 		return connectAdminCall{}, uuid.Nil, status.Error(codes.PermissionDenied, "app scope does not allow this bucket and service")
 	}
-	return connectAdminCall{bucketID: bucketID, serviceID: serviceID}, scope.AppID, nil
+	call, err := connectCallFromAppSelection(connectAdminCall{bucketID: bucketID, serviceID: serviceID}, selection)
+	// Invalid immutable auth routing cannot be repaired by changing one SDK request.
+	if err != nil {
+		return connectAdminCall{}, uuid.Nil, grpcConnectError(err)
+	}
+	return call, scope.AppID, nil
+}
+
+// appRuntimeServiceSelection returns one exact immutable selection without loading another app row.
+func appRuntimeServiceSelection(schemaVersion int, raw []byte, serviceID uuid.UUID) (models.SDKSelection, bool) {
+	selections, err := models.DecodeAppSelections(schemaVersion, raw)
+	// Invalid scope JSON cannot authorize consent or choose a credential family.
+	if err != nil {
+		return models.SDKSelection{}, false
+	}
+	for _, selection := range selections {
+		// Service identity is unique within the validated app selection document.
+		if selection.ServiceID == serviceID {
+			return selection, true
+		}
+	}
+	return models.SDKSelection{}, false
 }
 
 // authenticateAppFromGRPC deliberately avoids control credentials: SDK

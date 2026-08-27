@@ -409,7 +409,7 @@ func (s *postgresStore) GetEffectiveWorkspaceProfiles(ctx context.Context, refs 
 // ListWorkspaceConnectProfiles returns the effective profile for every active
 // service version in one SQL query. Profiles are service/version/auth policy,
 // not bucket material, so this read intentionally does not depend on a
-// connect-config row existing for any bucket.
+// application credential row existing for any bucket.
 func (s *postgresStore) ListWorkspaceConnectProfiles(ctx context.Context) ([]WorkspaceConnectionProfile, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT DISTINCT ON (profiles.service_id, profiles.service_version_id, profiles.auth_type)

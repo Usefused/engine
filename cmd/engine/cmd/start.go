@@ -27,6 +27,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/browserauth"
 	"github.com/Usefused/engine/internal/engine/cliauth"
+	"github.com/Usefused/engine/internal/engine/connectauth"
 	entitlementpkg "github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/executionevent"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
@@ -122,6 +123,18 @@ func runEngine() {
 
 	// ─── Engine Bootstrap ───
 	postgresStore := store.NewPostgresStore(database)
+	masterKey := loadMasterKey(ctx)
+	connectRedirectURI, err := configuredConnectRedirectURI(cfg.Engine.PublicURL)
+	// A configured public identity must be safe because request hosts never participate in OAuth redirects.
+	if err != nil {
+		slog.ErrorContext(ctx, "FATAL: Engine public URL is invalid", slog.String("error_code", "engine_public_url_invalid"))
+		os.Exit(1)
+	}
+	if err := runLegacyConnectConfigCutover(ctx, postgresStore, masterKey); err != nil {
+		// Connect and refresh cannot start while application credentials have competing storage paths.
+		slog.ErrorContext(ctx, "FATAL: OAuth application credential cutover failed", slog.String("error_code", "oauth_application_credential_cutover_failed"))
+		os.Exit(1)
+	}
 	engineStore := store.NewCachedStore(postgresStore, natsClient)
 	tokenValidator := auth.NewTokenValidator(engineStore)
 	runtimeTokenInvalidator := apptokeninvalidation.NewFanoutInvalidator(
@@ -202,7 +215,6 @@ func runEngine() {
 	subscribeCacheInvalidation(natsClient, localObjectCache)
 
 	registryProxy := api.NewRegistryProxy(cfg.Engine.RegistryEndpoint, envLicense)
-	masterKey := loadMasterKey(ctx)
 	authRefreshStore, err := backgroundStore.connectedAuthRefreshCapability()
 	if err != nil {
 		// Why: managed refresh cannot operate safely without durable claims;
@@ -235,6 +247,7 @@ func runEngine() {
 		localObjectCache:   localObjectCache,
 		configStore:        configStore,
 		masterKey:          masterKey,
+		connectRedirectURI: connectRedirectURI,
 		controlAuth:        controlAuthenticator,
 		managedLogin:       managedLoginService,
 		cliLogin:           cliLoginService,
@@ -247,9 +260,43 @@ func runEngine() {
 
 	webhookSrv := startWebhookServer(ctx, r)
 	srv := startEngineHTTPServer(ctx, r)
-	grpcServer := startEngineGRPCServer(ctx, engineStore, registryClient, masterKey, configStore, natsClient, tokenValidator)
+	grpcServer := startEngineGRPCServer(ctx, engineStore, registryClient, masterKey, configStore, natsClient, tokenValidator, connectRedirectURI)
 
 	waitForEngineShutdown(ctx, cancel, srv, webhookSrv, grpcServer)
+}
+
+// configuredConnectRedirectURI preserves non-OAuth deployments while validating any explicitly configured public identity.
+func configuredConnectRedirectURI(publicURL string) (string, error) {
+	// An omitted public URL disables consent admission without blocking unrelated Engine capabilities.
+	if strings.TrimSpace(publicURL) == "" {
+		return "", nil
+	}
+	return connectauth.CanonicalCallbackURI(publicURL)
+}
+
+// runLegacyConnectConfigCutover gates runtime startup on the permanent master-key-aware migration.
+func runLegacyConnectConfigCutover(ctx context.Context, repository store.Store, masterKey []byte) error {
+	migrator, ok := repository.(store.LegacyConnectConfigCutoverStore)
+	// Missing migration capability would allow an old credential table to compete with runtime secrets.
+	if !ok {
+		return errors.New("legacy connect-config cutover is unavailable")
+	}
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.migration.oauth_application_credentials")
+	defer span.End()
+	result, err := migrator.MigrateLegacyConnectConfigs(ctx, masterKey, 100)
+	// Migration telemetry is aggregate-only and never includes identifiers, key names, URLs, or raw errors.
+	if err != nil {
+		span.SetAttributes(attribute.String("outcome", "failed"))
+		return errors.New("OAuth application credential cutover failed")
+	}
+	span.SetAttributes(
+		attribute.String("outcome", "succeeded"),
+		attribute.Int("rows_migrated", result.MigratedRows),
+		attribute.Int("rows_skipped", result.SkippedRows),
+		attribute.Int("batch_count", result.BatchCount),
+		attribute.Bool("already_done", result.AlreadyDone),
+	)
+	return nil
 }
 
 func newProviderRateLimitCoordinator(kv nats.KeyValue, repository store.Store) (*ratelimitcoordinator.Coordinator, error) {
@@ -758,6 +805,7 @@ type engineRouterDeps struct {
 	localObjectCache   sandbox.ObjectCache
 	configStore        store.ConfigRepository
 	masterKey          []byte
+	connectRedirectURI string
 	controlAuth        *accesscontrol.Authenticator
 	managedLogin       api.ManagedLoginService
 	cliLogin           api.CLILoginService
@@ -826,7 +874,7 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	// One server instance owns REST and MCP Unified adapters so both call the
 	// same preflight, scheduler, physical runtime, and token validator.
 	executionServer := api.NewEngineGRPCServer(
-		deps.engineStore, deps.registryClient, deps.masterKey, deps.configStore, deps.natsClient, deps.tokenValidator,
+		deps.engineStore, deps.registryClient, deps.masterKey, deps.configStore, deps.natsClient, deps.tokenValidator, deps.connectRedirectURI,
 	)
 	sandbox.InitSandbox(
 		r, deps.natsClient, deps.cfg, deps.localObjectCache, deps.tokenValidator, secretResolver,
@@ -839,7 +887,7 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	// Engine-native MCP GraphQL surface (list/deploy/kill/reactivate/delete +
 	// analytics) -- a distinct endpoint from POST /graphql, which is a pure
 	// Registry forward-proxy with no resolvers of its own (graphql_proxy.go).
-	if err := api.MountMCPGraphQLRoute(r, deps.configStore, deps.engineStore, deps.registryClient, deps.registryClient, deps.masterKey, deps.controlAuth); err != nil {
+	if err := api.MountMCPGraphQLRoute(r, deps.configStore, deps.engineStore, deps.registryClient, deps.registryClient, deps.masterKey, deps.connectRedirectURI, deps.controlAuth); err != nil {
 		slog.Error("failed to mount mcp graphql route", slog.Any("error", err))
 		os.Exit(1)
 	}
@@ -974,7 +1022,8 @@ func serveHTTPServer(ctx context.Context, srv *http.Server, startMessage string,
 	}
 }
 
-func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient, tokenValidator auth.TokenValidator) *grpc.Server {
+// startEngineGRPCServer injects the same canonical callback identity used by HTTP and GraphQL consent flows.
+func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient, tokenValidator auth.TokenValidator, redirectURI string) *grpc.Server {
 	listenAddress := engineGRPCListenAddress(grpcHost, grpcPort)
 	lis, err := net.Listen("tcp", listenAddress)
 	if err != nil {
@@ -989,7 +1038,7 @@ func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registr
 	)
 	// SubscribeWebhooks needs both dependencies to resolve the configured
 	// attachment and bridge its durable JetStream consumer to the gRPC stream.
-	enginev1.RegisterEngineServiceServer(grpcServer, api.NewEngineGRPCServer(engineStore, registryClient, masterKey, configStore, natsClient, tokenValidator))
+	enginev1.RegisterEngineServiceServer(grpcServer, api.NewEngineGRPCServer(engineStore, registryClient, masterKey, configStore, natsClient, tokenValidator, redirectURI))
 
 	go serveGRPCServer(ctx, grpcServer, lis, listenAddress)
 	return grpcServer

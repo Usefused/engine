@@ -124,23 +124,14 @@ type workspaceTestStore struct {
 	bucketValues                 map[uuid.UUID][]store.BucketValue
 	secretMetas                  map[uuid.UUID][]store.WorkspaceSecretMeta
 	upsertedSecrets              []store.WorkspaceSecret
-	workspaceAuthBindings        []store.WorkspaceAuthBinding
-	workspaceAuthPreflight       []store.WorkspaceAuthBinding
-	workspaceAuthDesiredIDs      []uuid.UUID
-	workspaceAuthPreflightErr    error
 	bucketLookupNames            []string
 	bucketBatchLookupNames       [][]string
 	bucketBatchLookupErr         error
 	bucketLookupErr              error
-	upsertedConnectConfigs       []store.ConnectConfig
-	upsertConnectConfigErr       error
-	connectConfigs               map[string]*store.ConnectConfig
-	connectConfigsForBucketErr   error
-	connectConfigsForBucketCalls int
+	connectedCredentialKeys      map[string]bool
+	appBucketReadinessErr        error
 	secretMetaCalls              int
 	appBucketReadinessCalls      int
-	serviceConnectConfigs        []store.ConnectConfig
-	workspaceConnectConfigs      []store.WorkspaceConnectConfig
 	workspaceConnectProfiles     []store.WorkspaceConnectionProfile
 	bucketConnectSummaries       map[uuid.UUID]*store.BucketConnectSummary
 	authConnections              []store.AuthConnection
@@ -1437,29 +1428,6 @@ func TestRemoveService_NotFound_404(t *testing.T) {
 	}
 }
 
-// TestRemoveServiceReferencedCredentialConflict proves source dependency
-// fencing is a reviewable conflict rather than an ambiguous persistence error.
-func TestRemoveServiceReferencedCredentialConflict(t *testing.T) {
-	testStore := &workspaceTestStore{
-		accountID: uuid.New(), workspaceID: uuid.New(),
-		deactivateErr: store.ErrWorkspaceAuthReferenceInUse,
-	}
-	router := buildWorkspaceRouter(testStore, &mockVerifier{})
-	request := httptest.NewRequest(http.MethodDelete, "/workspace/services/"+uuid.NewString(), nil)
-	request.Header.Set("X-API-Key", "fsk_test")
-	response := httptest.NewRecorder()
-	router.ServeHTTP(response, request)
-
-	var envelope workspaceConfigErrorResponse
-	// The response must explain the dependency and prove no deletion committed.
-	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
-		t.Fatalf("decode dependency conflict: %v", err)
-	}
-	if response.Code != http.StatusConflict || envelope.Error.Code != "workspace_auth_reference_in_use" || envelope.Error.CommitState != "not_committed" {
-		t.Fatalf("dependency conflict = status %d, error %#v", response.Code, envelope.Error)
-	}
-}
-
 // TestRemoveServiceStoreFailureHidesCauseAndReportsUnknownCommit verifies an
 // unclassified delete failure does not claim rollback or expose store details.
 func TestRemoveServiceStoreFailureHidesCauseAndReportsUnknownCommit(t *testing.T) {
@@ -1730,17 +1698,16 @@ func (s *workspaceTestStore) ListSecretMeta(ctx context.Context, bucketID uuid.U
 
 func (s *workspaceTestStore) GetAppBucketCredentialPresence(_ context.Context, bucketID uuid.UUID, requirements []store.AppCredentialRequirement) ([]store.AppCredentialPresence, error) {
 	s.appBucketReadinessCalls++
-	if s.connectConfigsForBucketErr != nil {
-		return nil, s.connectConfigsForBucketErr
+	// Injected exact-query failure must propagate without a broad fallback read.
+	if s.appBucketReadinessErr != nil {
+		return nil, s.appBucketReadinessErr
 	}
 	presence := make([]store.AppCredentialPresence, 0, len(requirements))
 	for _, requirement := range requirements {
 		item := store.AppCredentialPresence{
 			ServiceID: requirement.ServiceID, AuthType: requirement.AuthType, AuthName: requirement.AuthName,
 		}
-		if config := s.connectConfigs[bucketID.String()+":"+requirement.ServiceID.String()]; config != nil {
-			item.Connected = config.Enabled && canonicalWorkspaceStaticAuthType(config.AuthType) == requirement.AuthType && strings.TrimSpace(config.AuthName) == requirement.AuthName
-		}
+		item.Connected = s.connectedCredentialKeys[appConnectReadinessKey(requirement.ServiceID, requirement.AuthType, requirement.AuthName)]
 		for _, requiredKey := range requirement.SecretKeys {
 			for _, secret := range s.secretMetas[bucketID] {
 				if secret.ServiceID == requirement.ServiceID && secret.KeyName == requiredKey {
@@ -1765,29 +1732,6 @@ func (s *workspaceTestStore) UpsertSecret(ctx context.Context, secret store.Work
 
 func (s *workspaceTestStore) UpsertSecrets(ctx context.Context, secrets []store.WorkspaceSecret) error {
 	s.upsertedSecrets = append(s.upsertedSecrets, secrets...)
-	return nil
-}
-
-// PreflightWorkspaceAuthBindings records read-only admission inputs so API
-// tests can prove validation precedes every workspace mutation.
-func (s *workspaceTestStore) PreflightWorkspaceAuthBindings(_ context.Context, bindings []store.WorkspaceAuthBinding, desiredServiceIDs []uuid.UUID) error {
-	s.workspaceAuthPreflight = append(s.workspaceAuthPreflight, bindings...)
-	s.workspaceAuthDesiredIDs = append(s.workspaceAuthDesiredIDs, desiredServiceIDs...)
-	// Injected typed failures model the production PostgreSQL graph admission
-	// boundary without allowing later mutation assertions to become coupled to SQL.
-	if s.workspaceAuthPreflightErr != nil {
-		return s.workspaceAuthPreflightErr
-	}
-	return nil
-}
-
-// ApplyWorkspaceAuthBindings records the atomic batch and its direct material
-// so existing workspace-apply assertions observe the current persistence path.
-func (s *workspaceTestStore) ApplyWorkspaceAuthBindings(_ context.Context, bindings []store.WorkspaceAuthBinding) error {
-	s.workspaceAuthBindings = append(s.workspaceAuthBindings, bindings...)
-	for _, binding := range bindings {
-		s.upsertedSecrets = append(s.upsertedSecrets, binding.Secrets...)
-	}
 	return nil
 }
 
@@ -2003,60 +1947,7 @@ func (s *workspaceTestStore) ListBucketValuePage(ctx context.Context, bucketID u
 	return items, total, nil
 }
 
-func (s *workspaceTestStore) UpsertConnectConfig(ctx context.Context, cfg store.ConnectConfig) (*store.ConnectConfig, error) {
-	if s.upsertConnectConfigErr != nil {
-		return nil, s.upsertConnectConfigErr
-	}
-	cfg.ID = uuid.New()
-	cfg.CreatedAt = time.Now().UTC()
-	cfg.UpdatedAt = cfg.CreatedAt
-	s.upsertedConnectConfigs = append(s.upsertedConnectConfigs, cfg)
-	return &cfg, nil
-}
-
-// GetConnectConfig first checks explicit fixtures, then recent upserts, so read
-// and write GraphQL tests can share the same lightweight store.
-func (s *workspaceTestStore) GetConnectConfig(ctx context.Context, bucketID, serviceID uuid.UUID) (*store.ConnectConfig, error) {
-	if s.connectConfigs != nil {
-		return s.connectConfigs[bucketID.String()+":"+serviceID.String()], nil
-	}
-	for i := len(s.upsertedConnectConfigs) - 1; i >= 0; i-- {
-		cfg := s.upsertedConnectConfigs[i]
-		if cfg.BucketID == bucketID && cfg.ServiceID == serviceID {
-			return &cfg, nil
-		}
-	}
-	return nil, nil
-}
-
-// ListConnectConfigsForBucket keeps artifact readiness tests on the same
-// bounded bucket read as production without requiring a database fixture.
-func (s *workspaceTestStore) ListConnectConfigsForBucket(ctx context.Context, bucketID uuid.UUID) ([]store.ConnectConfig, error) {
-	s.connectConfigsForBucketCalls++
-	if s.connectConfigsForBucketErr != nil {
-		return nil, s.connectConfigsForBucketErr
-	}
-	var configs []store.ConnectConfig
-	for _, cfg := range s.connectConfigs {
-		if cfg != nil && cfg.BucketID == bucketID {
-			configs = append(configs, *cfg)
-		}
-	}
-	return configs, nil
-}
-
-func (s *workspaceTestStore) ListConnectConfigsForService(ctx context.Context, serviceID uuid.UUID) ([]store.ConnectConfig, error) {
-	return s.serviceConnectConfigs, nil
-}
-
-// ListWorkspaceConnectConfigs supplies the fixed-query GraphQL sync fixture
-// without coupling unrelated tests to a real database.
-func (s *workspaceTestStore) ListWorkspaceConnectConfigs(ctx context.Context) ([]store.WorkspaceConnectConfig, error) {
-	return s.workspaceConnectConfigs, nil
-}
-
-// ListWorkspaceConnectProfiles supplies active profile snapshots paired with
-// the workspace connect fixtures used by GraphQL sync tests.
+// ListWorkspaceConnectProfiles supplies active effective profiles to changelog tests.
 func (s *workspaceTestStore) ListWorkspaceConnectProfiles(ctx context.Context) ([]store.WorkspaceConnectionProfile, error) {
 	return s.workspaceConnectProfiles, nil
 }

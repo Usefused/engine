@@ -63,9 +63,11 @@ func TestGetSDKPackageBuildRequestUsesExactAppliedPlan(t *testing.T) {
 		t.Fatalf("publish SDK app: %v", err)
 	}
 	binding := models.SDKContractBinding{ServiceID: selection.ServiceID, ServiceVersionID: selection.ServiceVersionID, Version: "2026-01", Revision: 7, SourceHash: "contract", GenerationContractHash: "sha256:" + strings.Repeat("a", 64)}
+	credentialSourceBinding := models.SDKContractBinding{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "2026-02", Revision: 3, SourceHash: "source-contract", RuntimeContractHash: "sha256:" + strings.Repeat("c", 64)}
 	resolved, _ := json.Marshal(map[string]any{
 		"description": "Pinned Jira SDK", "default_engine_url": "https://tenant-exec.example.com:443",
-		"contract_bindings": []models.SDKContractBinding{binding},
+		"contract_bindings":          []models.SDKContractBinding{binding},
+		"credential_source_bindings": []models.SDKContractBinding{credentialSourceBinding},
 	})
 	_, err = pool.Exec(ctx, `
 		INSERT INTO fused_config_plans

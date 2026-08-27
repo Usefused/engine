@@ -23,12 +23,10 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/entitlement"
-	"github.com/Usefused/engine/internal/engine/mtlsauth"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/engine/webhookid"
 	"github.com/Usefused/engine/internal/engine/workspaceplan"
-	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
@@ -50,24 +48,15 @@ type ConfigPlanRequest struct {
 type ConfigApplyRequest struct {
 	PlanID           string                              `json:"plan_id"`
 	SourceHash       string                              `json:"source_hash"`
-	AuthMaterials    map[string]workspaceAuthMaterial    `json:"auth_materials,omitempty"`
+	AuthMaterials    map[string]json.RawMessage          `json:"auth_materials,omitempty"`
 	ProfileMaterials map[string]workspaceConnectMaterial `json:"profile_materials,omitempty"`
 	// BucketSecretMaterials carries the resolved values for
 	// buckets.<name>.secrets.<key> $ENV refs, keyed by
 	// workspaceBucketSecretMaterialKey(bucketName, key) -- same out-of-band
-	// pattern as AuthMaterials: the plan/config only ever stores the $ENV
+	// pattern as other local material: the plan/config only ever stores the $ENV
 	// reference, never the resolved value, so this travels separately at
 	// apply time, resolved locally by the CLI from its own environment.
 	BucketSecretMaterials map[string]string `json:"bucket_secret_materials,omitempty"`
-}
-
-type workspaceAuthMaterial struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Token    string `json:"token"`
-	APIKey   string `json:"api_key"`
-	Cert     string `json:"cert"`
-	Key      string `json:"key"`
 }
 
 type workspaceConnectMaterial struct {
@@ -85,17 +74,12 @@ type workspaceConfigDocument struct {
 }
 
 type workspaceConfigBucket struct {
-	ServiceConfig map[string]workspaceConfigBucketService `json:"service_config,omitempty"`
-	// Secrets are generic, bucket-scoped named secrets ($ENV refs only, same
-	// discipline as ServiceConfig.Auth/.Connect) -- not tied to any one
+	ServiceConfig map[string]json.RawMessage `json:"service_config,omitempty"`
+	// Secrets are generic, bucket-scoped named secrets ($ENV refs only) -- not tied to any one
 	// service, resolved via an explicit bucket.<name>.secret.<key> reference
 	// rather than ambient SDK/app context (see
 	// plans/plan-service-config-restructure.md item 4).
 	Secrets map[string]string `json:"secrets,omitempty"`
-}
-
-type workspaceConfigBucketService struct {
-	Auth *WorkspaceAuthConfig `json:"auth,omitempty"`
 }
 
 type workspaceConfigService struct {
@@ -253,20 +237,6 @@ type workspaceConfigConnectionProfileIntent struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-type WorkspaceAuthConfig struct {
-	Bucket   string `json:"bucket,omitempty"`
-	AuthType string `json:"auth_type"`
-	AuthName string `json:"auth_name,omitempty"`
-	// Ref names a complete same-bucket source family so rotation does not copy values.
-	Ref      string `json:"ref,omitempty"`
-	Username string `json:"username,omitempty"`
-	Password string `json:"password,omitempty"`
-	Token    string `json:"token,omitempty"`
-	APIKey   string `json:"api_key,omitempty"`
-	Cert     string `json:"cert,omitempty"`
-	Key      string `json:"key,omitempty"`
-}
-
 type InjectionConfig struct {
 	Value    string `json:"value"`
 	Location string `json:"location"`
@@ -290,12 +260,10 @@ type workspaceConfigDeprecation struct {
 }
 
 type workspaceDesiredState struct {
-	Services             map[uuid.UUID]workspaceDesiredService
-	BucketServiceConfigs []workspaceDesiredBucketServiceConfig
+	Services map[uuid.UUID]workspaceDesiredService
 	// BucketSecrets is the normalized form of workspaceConfigBucket.Secrets --
 	// generic, bucket-scoped (not service-scoped) named secret intents. Kept
-	// as its own list rather than folded into BucketServiceConfigs because it
-	// has no service dimension at all (see workspaceDesiredBucketSecret).
+	// as its own list because it has no service dimension at all.
 	BucketSecrets []workspaceDesiredBucketSecret
 	Deprecations  map[uuid.UUID][]workspaceDeprecation
 }
@@ -304,7 +272,7 @@ type workspaceDesiredState struct {
 // normalized from workspaceConfigBucket.Secrets. EnvRef is validated but not
 // resolved here -- resolution happens at apply time via
 // ConfigApplyRequest.BucketSecretMaterials, out-of-band from the plan itself
-// (same pattern as workspaceAuthMaterial).
+// (the same out-of-band pattern as other local material).
 type workspaceDesiredBucketSecret struct {
 	BucketName string
 	Key        string
@@ -359,13 +327,6 @@ type workspaceDesiredConnectionProfile struct {
 	// Reason is a safe, non-secret explanation surfaced in plan warnings when
 	// Ambiguous is true (e.g. "multiple public connection profiles match").
 	Reason string
-}
-
-type workspaceDesiredBucketServiceConfig struct {
-	BucketName string
-	ServiceKey string
-	ServiceID  uuid.UUID
-	Auth       *WorkspaceAuthConfig
 }
 
 // explicit reports whether the workspace author named a specific profile
@@ -787,7 +748,6 @@ func WorkspaceConfigApplyHandler(configStore store.ConfigRepository, s store.Sto
 			planRevision:     planRevision,
 			sourceHash:       req.SourceHash,
 			masterKey:        masterKey,
-			authMats:         req.AuthMaterials,
 			profileMats:      req.ProfileMaterials,
 			bucketSecretMats: req.BucketSecretMaterials,
 		})
@@ -841,7 +801,6 @@ type workspaceApplyCall struct {
 	planRevision     int
 	sourceHash       string
 	masterKey        []byte
-	authMats         map[string]workspaceAuthMaterial
 	profileMats      map[string]workspaceConnectMaterial
 	bucketSecretMats map[string]string
 }
@@ -850,7 +809,6 @@ type workspaceApplyCall struct {
 // mutation path cannot repeat Registry reads or credential interpretation.
 type workspacePreparedApply struct {
 	profilePlan   workspaceProfilePlan
-	authBindings  []store.WorkspaceAuthBinding
 	bucketSecrets []store.WorkspaceSecret
 }
 
@@ -1051,31 +1009,11 @@ func releaseWorkspaceApplyLease(configStore store.ConfigRepository, planID uuid.
 	}
 }
 
-// workspaceApplyError preserves stable reference conflicts while reducing
-// unclassified persistence failures to the existing safe apply envelope.
+// workspaceApplyError preserves typed admission failures while reducing unclassified persistence errors to the safe apply envelope.
 func workspaceApplyError(ctx context.Context, err error) error {
 	var httpErr workspaceConfigHTTPError
 	if errors.As(err, &httpErr) {
 		return httpErr
-	}
-	// Dependency conflicts are deterministic and safe to retry only after the
-	// authored reference changes; do not flatten them into an opaque 500.
-	if errors.Is(err, store.ErrWorkspaceAuthReferenceInUse) {
-		return workspaceConfigHTTPError{
-			status: http.StatusConflict, code: "workspace_auth_reference_in_use", category: "conflict",
-			message:     "A removed service still provides credentials used by another workspace service.",
-			remediation: "Replace the dependent auth ref or remove its destination service, then create a new plan.",
-			cause:       err,
-		}
-	}
-	// Invalid source/type/chaining state is a reviewable config conflict rather
-	// than an internal Engine failure.
-	if errors.Is(err, store.ErrWorkspaceAuthReferenceInvalid) {
-		return workspaceConfigHTTPError{
-			status: http.StatusConflict, code: "workspace_auth_reference_invalid", category: "conflict",
-			message: err.Error(), remediation: "Correct the auth ref and create a new plan.",
-			cause: err,
-		}
 	}
 	slog.ErrorContext(ctx, "WorkspaceConfigApplyHandler: apply failed", slog.Any("error", err))
 	return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to apply workspace config"}
@@ -1708,6 +1646,10 @@ func decodeWorkspaceApplyRequest(r *http.Request) (ConfigApplyRequest, uuid.UUID
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		return req, uuid.Nil, errors.New("invalid request body")
 	}
+	// Service credential material moved to bucket secret commands and is no longer accepted by workspace apply.
+	if len(req.AuthMaterials) != 0 {
+		return req, uuid.Nil, errors.New("auth_materials is no longer supported; configure bucket credentials with secret set")
+	}
 	planID, err := uuid.Parse(req.PlanID)
 	if err != nil {
 		return req, uuid.Nil, errors.New("invalid plan_id")
@@ -1740,12 +1682,6 @@ func parseWorkspaceConfig(raw json.RawMessage) (workspaceDesiredState, error) {
 		}
 		out.Services[desired.ServiceID] = desired
 	}
-	bucketConfigs, err := normalizeWorkspaceBuckets(doc.Buckets, doc.Services, out.Services)
-	if err != nil {
-		return workspaceDesiredState{}, err
-	}
-	out.BucketServiceConfigs = bucketConfigs
-
 	bucketSecrets, err := normalizeWorkspaceBucketSecrets(doc.Buckets)
 	if err != nil {
 		return workspaceDesiredState{}, err
@@ -1765,6 +1701,12 @@ func validateWorkspaceConfigDocument(doc workspaceConfigDocument) error {
 	}
 	if doc.Services == nil {
 		return errors.New("config.services is required")
+	}
+	// Workspace owns enablement and policy only; app auth refs and secret commands own credential routing/material.
+	for bucketName, bucket := range doc.Buckets {
+		if len(bucket.ServiceConfig) != 0 {
+			return fmt.Errorf("bucket %q service_config is no longer supported; configure credentials with secret set and app services.<name>.auth.ref", bucketName)
+		}
 	}
 	return validateWorkspaceExecutionPolicyTimeouts(doc.Services)
 }
@@ -1989,46 +1931,6 @@ func normalizeWorkspaceVersionPolicies(items []workspaceConfigServiceVersion, ve
 	return out
 }
 
-// normalizeWorkspaceBuckets attaches bucket-owned credential intent to already
-// normalized service identities and retains omissions as explicit clear intent.
-func normalizeWorkspaceBuckets(buckets map[string]workspaceConfigBucket, configured map[string]workspaceConfigService, services map[uuid.UUID]workspaceDesiredService) ([]workspaceDesiredBucketServiceConfig, error) {
-	out := make([]workspaceDesiredBucketServiceConfig, 0)
-	byKey := workspaceDesiredServicesByKey(services)
-	for bucketName, bucket := range buckets {
-		name := workspaceConnectBucketName(bucketName)
-		for serviceKey := range bucket.ServiceConfig {
-			service := byKey[serviceKey]
-			// Explicit bucket entries may never smuggle credential intent for a
-			// service that normalization did not admit into desired state.
-			if service.ServiceID == uuid.Nil {
-				return nil, fmt.Errorf("workspace bucket %q references unknown service %q", name, serviceKey)
-			}
-			// The authored service map remains the authority even when two keys
-			// could otherwise resolve to the same normalized identity.
-			if _, ok := configured[serviceKey]; !ok {
-				return nil, fmt.Errorf("workspace bucket %q references unapproved service %q", name, serviceKey)
-			}
-		}
-		for serviceKey := range configured {
-			service := byKey[serviceKey]
-			serviceConfig, explicit := bucket.ServiceConfig[serviceKey]
-			// A missing service_config entry is declarative removal, so retaining
-			// it as nil auth lets the atomic store clear only managed references.
-			if !explicit {
-				out = append(out, workspaceDesiredBucketServiceConfig{BucketName: name, ServiceKey: serviceKey, ServiceID: service.ServiceID})
-				continue
-			}
-			// Explicit auth remains subject to the same public shape admission as
-			// before omission reconciliation was added.
-			if err := validateWorkspaceAuthConfigIntent(serviceKey, serviceConfig.Auth); err != nil {
-				return nil, err
-			}
-			out = append(out, workspaceDesiredBucketServiceConfig{BucketName: name, ServiceKey: serviceKey, ServiceID: service.ServiceID, Auth: serviceConfig.Auth})
-		}
-	}
-	return out, nil
-}
-
 // normalizeWorkspaceBucketSecrets validates and flattens every bucket's
 // generic Secrets map into the desired-state list, enforcing the same
 // $ENV-only discipline as bucket Auth material (Secrets never carries a
@@ -2049,16 +1951,6 @@ func normalizeWorkspaceBucketSecrets(buckets map[string]workspaceConfigBucket) (
 		}
 	}
 	return out, nil
-}
-
-// workspaceDesiredServicesByKey prevents bucket material lookups from scanning
-// all services for every bucket entry.
-func workspaceDesiredServicesByKey(services map[uuid.UUID]workspaceDesiredService) map[string]workspaceDesiredService {
-	byKey := make(map[string]workspaceDesiredService, len(services))
-	for _, service := range services {
-		byKey[service.Key] = service
-	}
-	return byKey
 }
 
 // normalizeWorkspaceConnectionProfileIntents validates and normalizes one
@@ -2108,7 +2000,7 @@ func normalizeWorkspaceServiceConnectionProfiles(key string, items []workspaceCo
 // no equivalent of the old containsString check to run here anymore.
 func normalizeWorkspaceConnectionProfileIntent(key, version string, item workspaceConfigConnectionProfileIntent, versionIDs map[string]uuid.UUID) (workspaceDesiredConnectionProfile, error) {
 	authType := connectionprofile.CanonicalAuthType(item.AuthType)
-	if !isSupportedConnectAuthType(authType) {
+	if !isConnectionProfileAuthType(authType) {
 		return workspaceDesiredConnectionProfile{}, fmt.Errorf("service %q connection_profiles has unsupported auth_type", key)
 	}
 	authName, err := normalizedWorkspaceConnectionProfileAuthName(key, item)
@@ -2143,6 +2035,17 @@ func normalizeWorkspaceConnectionProfileIntent(key, version string, item workspa
 	}, nil
 }
 
+// isConnectionProfileAuthType limits provider connection profiles to interactive OAuth/OIDC families.
+func isConnectionProfileAuthType(authType string) bool {
+	switch canonicalWorkspaceStaticAuthType(authType) {
+	case "oauth", "oidc":
+		return true
+	default:
+		// Static authentication has no connected-user profile lifecycle.
+		return false
+	}
+}
+
 // normalizedWorkspaceConnectionProfileAuthName retains the Registry stream selector while accepting inline profiles authored before the outer field existed.
 func normalizedWorkspaceConnectionProfileAuthName(key string, item workspaceConfigConnectionProfileIntent) (string, error) {
 	outer := strings.TrimSpace(item.AuthName)
@@ -2173,103 +2076,6 @@ func normalizedWorkspaceConnectionProfileAuthName(key string, item workspaceConf
 // validWorkspaceConnectionProfileAuthName mirrors Registry ref validation so malformed selectors fail before a remote lookup.
 func validWorkspaceConnectionProfileAuthName(name string) bool {
 	return len(name) <= 128 && !strings.ContainsAny(name, "\r\n\x00")
-}
-
-// validateWorkspaceAuthConfigIntent keeps literal material and dynamic bundle
-// references on one mutually-exclusive admission path.
-func validateWorkspaceAuthConfigIntent(key string, auth *WorkspaceAuthConfig) error {
-	// A missing auth block is valid for routing-only bucket service config.
-	if auth == nil {
-		return nil
-	}
-	// A live binding owns the whole credential family; accepting literals too
-	// would create two competing sources with unclear rotation semantics.
-	if strings.TrimSpace(auth.Ref) != "" {
-		// Reference intent cannot also carry any direct credential field.
-		if workspaceAuthConfigHasMaterial(auth) {
-			return fmt.Errorf("service %q auth ref cannot include credential fields", key)
-		}
-		if err := validateWorkspaceAuthReferenceTarget(key, auth); err != nil {
-			return err
-		}
-		_, err := parseWorkspaceAuthRef(auth.Ref)
-		if err != nil {
-			return fmt.Errorf("service %q auth ref: %w", key, err)
-		}
-		return nil
-	}
-	authType := canonicalWorkspaceStaticAuthType(auth.AuthType)
-	switch authType {
-	case "basic":
-		return validateWorkspaceAuthEnvRefs(key, authType, auth.Username, auth.Password)
-	case "api_key":
-		return validateWorkspaceAuthEnvRefs(key, authType, auth.APIKey)
-	case "mtls":
-		return validateWorkspaceAuthEnvRefs(key, authType, auth.Cert, auth.Key)
-	case "bearer", "oauth", "oidc":
-		return validateWorkspaceAuthEnvRefs(key, authType, auth.Token)
-	default:
-		return fmt.Errorf("service %q auth has unsupported auth_type", key)
-	}
-}
-
-// validateWorkspaceAuthReferenceTarget requires the exact static scheme that
-// receives the source bundle, independent of contract ambiguity today.
-func validateWorkspaceAuthReferenceTarget(key string, auth *WorkspaceAuthConfig) error {
-	switch canonicalWorkspaceStaticAuthType(auth.AuthType) {
-	case "basic", "api_key", "mtls", "bearer", "oauth", "oidc":
-		// Persisted bindings are keyed by auth_name, so omission would create an
-		// unstable target if provider metadata later adds a sibling scheme.
-		if strings.TrimSpace(auth.AuthName) == "" {
-			return fmt.Errorf("service %q auth ref requires auth_name", key)
-		}
-		return nil
-	default:
-		return fmt.Errorf("service %q auth ref has unsupported auth_type", key)
-	}
-}
-
-// workspaceAuthConfigHasMaterial centralizes the complete set of fields that
-// cannot coexist with a dynamic credential-family reference.
-func workspaceAuthConfigHasMaterial(auth *WorkspaceAuthConfig) bool {
-	return auth.Username != "" || auth.Password != "" || auth.Token != "" || auth.APIKey != "" || auth.Cert != "" || auth.Key != ""
-}
-
-type workspaceAuthRef struct {
-	ServiceKey string
-	AuthName   string
-}
-
-// parseWorkspaceAuthRef admits the intentionally narrow same-bucket grammar;
-// service and scheme resolution remain separate Registry-backed checks.
-func parseWorkspaceAuthRef(value string) (workspaceAuthRef, error) {
-	const prefix = "${bucket.auth."
-	trimmed := strings.TrimSpace(value)
-	// Requiring the complete envelope prevents partial interpolation and keeps
-	// references auditable as one immutable config value.
-	if !strings.HasPrefix(trimmed, prefix) || !strings.HasSuffix(trimmed, "}") {
-		return workspaceAuthRef{}, errors.New("must use ${bucket.auth.<service>.<authName>}")
-	}
-	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(trimmed, prefix), "}"), ".")
-	// Dot-free segments are an explicit MVP boundary rather than a heuristic
-	// split that could bind credentials to the wrong service.
-	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
-		return workspaceAuthRef{}, errors.New("must name one service and auth scheme")
-	}
-	return workspaceAuthRef{ServiceKey: strings.TrimSpace(parts[0]), AuthName: strings.TrimSpace(parts[1])}, nil
-}
-
-// validateWorkspaceAuthEnvRefs rejects inline static credentials before they
-// can be stored in config plans; apply receives resolved values out-of-band.
-func validateWorkspaceAuthEnvRefs(key, authType string, values ...string) error {
-	for _, value := range values {
-		if strings.TrimSpace(value) == "" || !isWorkspaceEnvRef(value) {
-			// Static auth is encrypted into bucket secrets during apply; config
-			// state stores only env refs so secret rotation stays local/operator owned.
-			return fmt.Errorf("service %q auth %s requires $ENV credential fields", key, authType)
-		}
-	}
-	return nil
 }
 
 func resolveWorkspaceServiceVisibility(
@@ -3296,40 +3102,13 @@ func prepareWorkspaceConfigApply(
 	if err != nil {
 		return workspacePreparedApply{}, err
 	}
-	authBindings, err := prepareWorkspaceAuthBindings(ctx, s, verifier, call.apiKey, desired, call.authMats, call.masterKey)
-	// Auth metadata and encryption must complete as one all-or-nothing input set.
-	if err != nil {
-		return workspacePreparedApply{}, err
-	}
 	bucketSecrets, err := prepareWorkspaceBucketSecrets(ctx, s, desired, call.bucketSecretMats, call.masterKey)
 	// Generic material shares the same pre-mutation admission boundary even
 	// though it has no service dimension.
 	if err != nil {
 		return workspacePreparedApply{}, err
 	}
-	if err := preflightWorkspaceAuthBindings(ctx, s, authBindings, workspaceDesiredServiceIDs(desired)); err != nil {
-		return workspacePreparedApply{}, err
-	}
-	return workspacePreparedApply{profilePlan: profilePlan, authBindings: authBindings, bucketSecrets: bucketSecrets}, nil
-}
-
-// preflightWorkspaceAuthBindings proves source material and service membership
-// against the complete desired set without changing persistent state.
-func preflightWorkspaceAuthBindings(ctx context.Context, s store.Store, bindings []store.WorkspaceAuthBinding, desiredServiceIDs []uuid.UUID) error {
-	// No auth reconciliation means there is no graph for the optional store
-	// capability to validate.
-	if len(bindings) == 0 {
-		return nil
-	}
-	repository, ok := s.(store.WorkspaceAuthBindingStore)
-	// Dynamic rotation has no safe fallback through ordinary per-secret writes.
-	if !ok {
-		return errors.New("workspace auth binding store is unavailable")
-	}
-	if err := repository.PreflightWorkspaceAuthBindings(ctx, bindings, desiredServiceIDs); err != nil {
-		return fmt.Errorf("preflight workspace auth bindings: %w", err)
-	}
-	return nil
+	return workspacePreparedApply{profilePlan: profilePlan, bucketSecrets: bucketSecrets}, nil
 }
 
 // applyWorkspaceConfig consumes only preflighted state and preserves the
@@ -3355,16 +3134,11 @@ func applyWorkspaceConfig(
 		return nil, err
 	}
 	applied, err := upsertDesiredWorkspaceServices(ctx, s, verifier, apiKey, accountID, desired)
-	// Local service membership must exist before reference foreign keys can commit.
+	// Service membership must exist before policies and removals can reconcile against it.
 	if err != nil {
 		return nil, err
 	}
-	// Service membership is created first because reference rows use local
-	// foreign keys; all credential bindings then replace atomically as one batch.
-	if err := applyPreparedWorkspaceAuthBindings(ctx, s, prepared.authBindings); err != nil {
-		return nil, err
-	}
-	// Removal runs last so sources referenced by the new desired state remain fenced.
+	// Removal runs last so every desired service has already been reconciled.
 	if err := removePreviouslyManagedWorkspaceResources(ctx, s, desired, previousManaged); err != nil {
 		return nil, err
 	}
@@ -3444,533 +3218,6 @@ func workspaceServiceSlug(key string) string {
 	return key
 }
 
-// prepareWorkspaceAuthBindings validates every direct or referenced static
-// credential before workspace membership mutates.
-func prepareWorkspaceAuthBindings(
-	ctx context.Context,
-	s store.Store,
-	verifier ServiceVerifier,
-	apiKey string,
-	desired workspaceDesiredState,
-	materials map[string]workspaceAuthMaterial,
-	masterKey []byte,
-) ([]store.WorkspaceAuthBinding, error) {
-	bindings := make([]store.WorkspaceAuthBinding, 0, len(desired.BucketServiceConfigs))
-	buckets := workspaceConnectBucketCache{}
-	authConfigs, err := fetchWorkspaceAuthConfigs(ctx, verifier, apiKey, desired)
-	// One failed metadata batch invalidates the whole credential plan.
-	if err != nil {
-		return nil, err
-	}
-	servicesByKey := workspaceDesiredServicesByKey(desired.Services)
-	for _, item := range desired.BucketServiceConfigs {
-		service := desired.Services[item.ServiceID]
-		// Omission is authoritative desired state: explicitly reconcile away any
-		// previous dynamic reference without deleting independently stored secrets.
-		if item.Auth == nil {
-			bucket, resolveErr := resolveWorkspaceConnectBucket(ctx, s, item.BucketName, buckets)
-			// A clear must pin the same immutable local bucket identity as a normal
-			// binding so reconciliation cannot escape its authored bucket.
-			if resolveErr != nil {
-				return nil, resolveErr
-			}
-			bindings = append(bindings, store.WorkspaceAuthBinding{
-				BucketID: bucket.ID, TargetServiceID: service.ServiceID,
-				ReconcileReferences: true, ClearReferences: true,
-			})
-			continue
-		}
-		binding, err := prepareWorkspaceAuthBinding(ctx, s, service, item, servicesByKey, authConfigs, materials, buckets, masterKey)
-		// No partial binding list should survive a malformed service credential.
-		if err != nil {
-			return nil, err
-		}
-		bindings = append(bindings, binding)
-	}
-	// Persistence capability and source readiness belong to the dedicated
-	// preflight boundary so preparation remains interpretation-only.
-	return bindings, nil
-}
-
-// fetchWorkspaceAuthConfigs batches destination and referenced-source contract
-// metadata so reference validation never adds a lookup per service.
-func fetchWorkspaceAuthConfigs(ctx context.Context, verifier ServiceVerifier, apiKey string, desired workspaceDesiredState) (map[string]fusedobject.AuthConfigs, error) {
-	seen := make(map[string]struct{})
-	var refs []sandbox.ServiceVersionRef
-	servicesByKey := workspaceDesiredServicesByKey(desired.Services)
-	for _, item := range desired.BucketServiceConfigs {
-		// Entries without auth do not need provider security metadata.
-		if item.Auth == nil {
-			continue
-		}
-		service := desired.Services[item.ServiceID]
-		refs = appendWorkspaceAuthConfigRefs(refs, seen, service)
-		// A reference source needs its own reviewed scheme metadata for exact
-		// type/name compatibility, but shares this one Registry batch.
-		if strings.TrimSpace(item.Auth.Ref) != "" {
-			parsed, err := parseWorkspaceAuthRef(item.Auth.Ref)
-			// Engine repeats grammar admission because API callers may bypass the CLI.
-			if err != nil {
-				return nil, err
-			}
-			source := servicesByKey[parsed.ServiceKey]
-			if source.ServiceID == uuid.Nil {
-				return nil, fmt.Errorf("service %q auth ref references unknown service %q", item.ServiceKey, parsed.ServiceKey)
-			}
-			refs = appendWorkspaceAuthConfigRefs(refs, seen, source)
-		}
-	}
-	// An auth-free workspace should not contact Registry merely to return an
-	// empty metadata map.
-	if len(refs) == 0 {
-		return map[string]fusedobject.AuthConfigs{}, nil
-	}
-	configs, err := verifier.FetchServiceVersionAuthConfigs(ctx, refs, apiKey)
-	// A partial Registry response cannot authoritatively validate scheme identity.
-	if err != nil {
-		return nil, err
-	}
-	result := make(map[string]fusedobject.AuthConfigs, len(configs))
-	for _, config := range configs {
-		key := sandbox.ServiceMetadataRefKey(sandbox.ServiceMetadataRef{ServiceID: config.ServiceID, Version: config.Version})
-		result[key] = config.AuthConfigs
-	}
-	return result, nil
-}
-
-// appendWorkspaceAuthConfigRefs deduplicates the bounded Registry metadata
-// request while preserving the first-seen deterministic service order.
-func appendWorkspaceAuthConfigRefs(refs []sandbox.ServiceVersionRef, seen map[string]struct{}, service workspaceDesiredService) []sandbox.ServiceVersionRef {
-	for _, version := range service.Versions {
-		key := workspaceAuthMetadataKey(service, version)
-		// A destination version can also be another binding's source; fetch each
-		// immutable contract only once for the whole apply.
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		refs = append(refs, sandbox.ServiceVersionRef{ServiceID: service.ServiceID, Version: version})
-	}
-	return refs
-}
-
-// workspaceAuthMetadataKey shares the exact immutable service/version identity
-// used by the batched Registry response and local lookup map.
-func workspaceAuthMetadataKey(service workspaceDesiredService, version string) string {
-	return sandbox.ServiceMetadataRefKey(sandbox.ServiceMetadataRef{ServiceID: service.ServiceID, Version: version})
-}
-
-// workspaceStaticAuthSelection is the one service-level credential contract
-// admitted only after every enabled immutable version proves the same shape.
-type workspaceStaticAuthSelection struct {
-	Auth     fusedobject.AuthConfig
-	Required []string
-	Optional []string
-	Keys     []string
-}
-
-// prepareWorkspaceAuthBinding derives exact runtime keys from reviewed auth
-// metadata for either encrypted local material or a live source reference.
-func prepareWorkspaceAuthBinding(
-	ctx context.Context,
-	s store.Store,
-	svc workspaceDesiredService,
-	item workspaceDesiredBucketServiceConfig,
-	servicesByKey map[string]workspaceDesiredService,
-	authConfigs map[string]fusedobject.AuthConfigs,
-	materials map[string]workspaceAuthMaterial,
-	buckets workspaceConnectBucketCache,
-	masterKey []byte,
-) (store.WorkspaceAuthBinding, error) {
-	bucket, err := resolveWorkspaceConnectBucket(ctx, s, item.BucketName, buckets)
-	// References cannot escape the enclosing resolved bucket.
-	if err != nil {
-		return store.WorkspaceAuthBinding{}, err
-	}
-	authType := canonicalWorkspaceStaticAuthType(item.Auth.AuthType)
-	selection, err := workspaceStaticAuthSelectionForService(authConfigs, svc, authType, item.Auth.AuthName)
-	// Every enabled version must agree because the stored workspace binding is
-	// service-scoped and cannot safely float between immutable auth contracts.
-	if err != nil {
-		return store.WorkspaceAuthBinding{}, err
-	}
-	binding := store.WorkspaceAuthBinding{
-		BucketID: bucket.ID, TargetServiceID: svc.ServiceID,
-		TargetAuthType: authType, TargetAuthName: selection.Auth.Name, TargetKeys: selection.Keys,
-		ReconcileReferences: true,
-	}
-	// A reference remains value-free; direct material continues through the
-	// existing encryption helpers below.
-	if strings.TrimSpace(item.Auth.Ref) != "" {
-		return prepareWorkspaceAuthReference(binding, svc, item, servicesByKey, authConfigs, selection)
-	}
-	resolved, err := workspaceAuthConfigWithMaterial(svc, item, selection.Auth, materials)
-	// Direct material still has to satisfy its reviewed credential shape.
-	if err != nil {
-		return store.WorkspaceAuthBinding{}, err
-	}
-	secrets, err := encryptedWorkspaceAuthSecrets(bucket.ID, svc.ServiceID, selection.Auth, &resolved, masterKey)
-	// Encryption must finish for the complete family before it enters the batch.
-	if err != nil {
-		return store.WorkspaceAuthBinding{}, err
-	}
-	binding.Secrets = secrets
-	return binding, nil
-}
-
-// prepareWorkspaceAuthReference resolves the source scheme and maps the
-// destination's required credential roles onto that source's exact key name.
-func prepareWorkspaceAuthReference(
-	binding store.WorkspaceAuthBinding,
-	svc workspaceDesiredService,
-	item workspaceDesiredBucketServiceConfig,
-	servicesByKey map[string]workspaceDesiredService,
-	authConfigs map[string]fusedobject.AuthConfigs,
-	target workspaceStaticAuthSelection,
-) (store.WorkspaceAuthBinding, error) {
-	parsed, err := parseWorkspaceAuthRef(item.Auth.Ref)
-	// Parsing is repeated at preparation to keep this helper safe in isolation.
-	if err != nil {
-		return store.WorkspaceAuthBinding{}, err
-	}
-	source := servicesByKey[parsed.ServiceKey]
-	// References are workspace-declared identities, never an implicit Registry
-	// search that could drift to a similarly named provider service.
-	if source.ServiceID == uuid.Nil {
-		return store.WorkspaceAuthBinding{}, fmt.Errorf("service %q auth ref references unknown service %q", svc.Key, parsed.ServiceKey)
-	}
-	sourceSelection, err := workspaceStaticAuthSelectionForService(authConfigs, source, binding.TargetAuthType, parsed.AuthName)
-	// Exact type, name, and cross-version shape prevent declaration-order or
-	// immutable-version fallback at runtime.
-	if err != nil {
-		return store.WorkspaceAuthBinding{}, fmt.Errorf("service %q auth ref source: %w", svc.Key, err)
-	}
-	binding.Reference = &store.WorkspaceAuthReference{
-		SourceServiceID: source.ServiceID, SourceAuthType: canonicalWorkspaceAuthConfigType(sourceSelection.Auth),
-		SourceAuthName: sourceSelection.Auth.Name,
-		// A source must remain valid for its own reviewed scheme while also
-		// satisfying any stricter roles required by the destination.
-		SourceRequired: mergeWorkspaceAuthKeys(sourceSelection.Required, rebaseWorkspaceAuthKeys(target.Required, target.Auth.Name, sourceSelection.Auth.Name)),
-	}
-	return binding, nil
-}
-
-// workspaceStaticAuthSelectionForService validates that one service-level
-// selector has identical storage semantics across every enabled version.
-func workspaceStaticAuthSelectionForService(
-	authConfigs map[string]fusedobject.AuthConfigs,
-	svc workspaceDesiredService,
-	authType string,
-	authName string,
-) (workspaceStaticAuthSelection, error) {
-	var selected workspaceStaticAuthSelection
-	for index, version := range svc.Versions {
-		auth, err := workspaceStaticAuthConfig(authConfigs[workspaceAuthMetadataKey(svc, version)], svc, authType, authName)
-		// A missing immutable response or selector invalidates the complete batch.
-		if err != nil {
-			// Multiple enabled versions make absence in any one version a service-
-			// level contract drift rather than an isolated selector typo.
-			if len(svc.Versions) > 1 {
-				return workspaceStaticAuthSelection{}, workspaceAuthContractDriftError(svc)
-			}
-			return workspaceStaticAuthSelection{}, err
-		}
-		required, optional, keys, err := workspaceAuthKeyRequirements(auth)
-		// Malformed provider credential metadata cannot become a service binding.
-		if err != nil {
-			// A multi-version service cannot safely persist one shape when any
-			// immutable version declares an unusable or different shape.
-			if len(svc.Versions) > 1 {
-				return workspaceStaticAuthSelection{}, workspaceAuthContractDriftError(svc)
-			}
-			return workspaceStaticAuthSelection{}, err
-		}
-		candidate := workspaceStaticAuthSelection{Auth: auth, Required: required, Optional: optional, Keys: keys}
-		// The first version establishes the service-level invariant checked by
-		// each remaining immutable version in the same Registry batch.
-		if index == 0 {
-			selected = candidate
-			continue
-		}
-		if !workspaceStaticAuthSelectionsEqual(selected, candidate) {
-			return workspaceStaticAuthSelection{}, workspaceAuthContractDriftError(svc)
-		}
-	}
-	// Normalized desired services always contain a version; retain a defensive
-	// failure so this helper cannot silently return an empty selector in isolation.
-	if selected.Auth.Name == "" {
-		return workspaceStaticAuthSelection{}, errors.New("selected service has no enabled auth contract")
-	}
-	return selected, nil
-}
-
-// workspaceStaticAuthSelectionsEqual compares only runtime storage semantics;
-// provider URLs and credential values never enter this validation path.
-func workspaceStaticAuthSelectionsEqual(left, right workspaceStaticAuthSelection) bool {
-	return canonicalWorkspaceAuthConfigType(left.Auth) == canonicalWorkspaceAuthConfigType(right.Auth) &&
-		left.Auth.Name == right.Auth.Name && reflect.DeepEqual(left.Required, right.Required) &&
-		reflect.DeepEqual(left.Optional, right.Optional) && reflect.DeepEqual(left.Keys, right.Keys)
-}
-
-// workspaceAuthContractDriftError returns one stable, secret-safe conflict for
-// an auth selector that cannot represent every enabled immutable version.
-func workspaceAuthContractDriftError(svc workspaceDesiredService) error {
-	return workspaceConfigHTTPError{
-		status: http.StatusConflict, code: "workspace_auth_contract_drift", category: "conflict",
-		message:     "The selected authentication contract differs across enabled service versions.",
-		remediation: "Select one auth name with the same credential shape across every enabled version, then create a new plan.",
-		cause:       fmt.Errorf("service %s has incompatible enabled auth contracts", svc.ServiceID),
-	}
-}
-
-// workspaceStaticAuthConfig fetches the selected service version's auth shape;
-// config files intentionally name auth families, not provider scheme IDs.
-func workspaceStaticAuthConfig(authConfigs fusedobject.AuthConfigs, svc workspaceDesiredService, authType, authName string) (fusedobject.AuthConfig, error) {
-	if authConfigs == nil {
-		return fusedobject.AuthConfig{}, fmt.Errorf("fetch auth shape for service %s: auth configs missing", svc.ServiceID)
-	}
-	return selectWorkspaceStaticAuthConfig(authConfigs, authType, authName)
-}
-
-// selectWorkspaceStaticAuthConfig requires the provider scheme name only when
-// a service exposes multiple static schemes in the same public auth family.
-func selectWorkspaceStaticAuthConfig(auths fusedobject.AuthConfigs, authType, authName string) (fusedobject.AuthConfig, error) {
-	var matches fusedobject.AuthConfigs
-	for _, auth := range auths {
-		if canonicalWorkspaceAuthConfigType(auth) == authType && (authName == "" || auth.Name == authName) {
-			matches = append(matches, auth)
-		}
-	}
-	if len(matches) == 1 {
-		return matches[0], nil
-	}
-	if len(matches) > 1 {
-		return fusedobject.AuthConfig{}, fmt.Errorf("auth type %q has multiple schemes; auth_name is required", authType)
-	}
-	if authName != "" {
-		return fusedobject.AuthConfig{}, fmt.Errorf("auth name %q with type %q is not configured for this service", authName, authType)
-	}
-	return fusedobject.AuthConfig{}, fmt.Errorf("auth type %q is not configured for this service", authType)
-}
-
-// workspaceAuthConfigWithMaterial replaces shareable $ENV refs with the
-// apply-time material sent by the CLI before encryption.
-func workspaceAuthConfigWithMaterial(svc workspaceDesiredService, item workspaceDesiredBucketServiceConfig, auth fusedobject.AuthConfig, materials map[string]workspaceAuthMaterial) (WorkspaceAuthConfig, error) {
-	resolved := *item.Auth
-	material := materials[workspaceBucketMaterialKey(item.BucketName, item.ServiceKey)]
-	replaceWorkspaceAuthEnvRefs(&resolved, material)
-	if err := validateWorkspaceAuthResolvedMaterial(svc.Key, auth, &resolved); err != nil {
-		return WorkspaceAuthConfig{}, err
-	}
-	return resolved, nil
-}
-
-// replaceWorkspaceAuthEnvRefs only resolves whole-field env refs; partial
-// interpolation stays unsupported so config intent is auditable.
-func replaceWorkspaceAuthEnvRefs(auth *WorkspaceAuthConfig, material workspaceAuthMaterial) {
-	if isWorkspaceEnvRef(auth.Username) {
-		auth.Username = material.Username
-	}
-	if isWorkspaceEnvRef(auth.Password) {
-		auth.Password = material.Password
-	}
-	if isWorkspaceEnvRef(auth.Token) {
-		auth.Token = material.Token
-	}
-	if isWorkspaceEnvRef(auth.APIKey) {
-		auth.APIKey = material.APIKey
-	}
-	if isWorkspaceEnvRef(auth.Cert) {
-		auth.Cert = material.Cert
-	}
-	if isWorkspaceEnvRef(auth.Key) {
-		auth.Key = material.Key
-	}
-}
-
-// validateWorkspaceAuthResolvedMaterial fails closed when apply callers omit
-// material for a config that declared static auth secrets.
-func validateWorkspaceAuthResolvedMaterial(key string, definition fusedobject.AuthConfig, auth *WorkspaceAuthConfig) error {
-	authType := canonicalWorkspaceStaticAuthType(auth.AuthType)
-	switch authType {
-	case "basic":
-		return validateWorkspaceBasicMaterial(key, definition.BasicPasswordMode, auth)
-	case "api_key":
-		return validateWorkspaceAuthResolvedFields(key, authType, auth.APIKey)
-	case "mtls":
-		return validateWorkspaceAuthResolvedFields(key, authType, auth.Cert, auth.Key)
-	default:
-		return validateWorkspaceAuthResolvedFields(key, authType, auth.Token)
-	}
-}
-
-// validateWorkspaceBasicMaterial enforces the effective provider credential shape before any Basic secrets are encrypted.
-func validateWorkspaceBasicMaterial(key string, mode authrouting.BasicPasswordMode, auth *WorkspaceAuthConfig) error {
-	if err := validateWorkspaceAuthResolvedFields(key, "basic", auth.Username); err != nil {
-		return err
-	}
-	effective, valid := authrouting.EffectiveBasicPasswordMode(mode)
-	// Invalid explicit modes identify a malformed provider contract and cannot guide secret storage.
-	if !valid {
-		return fmt.Errorf("service %q auth basic password mode is invalid", key)
-	}
-	// Omitted mode follows standard Basic auth and therefore requires password material.
-	switch effective {
-	case authrouting.BasicPasswordRequired:
-		return validateWorkspaceAuthResolvedFields(key, "basic", auth.Password)
-	case authrouting.BasicPasswordOptional:
-		return nil
-	case authrouting.BasicPasswordEmpty:
-		if auth.Password != "" {
-			return fmt.Errorf("service %q auth basic password must be empty", key)
-		}
-		return nil
-	}
-	return nil
-}
-
-// validateWorkspaceAuthResolvedFields prevents empty bucket secrets, which are
-// harder to debug later as provider 401s.
-func validateWorkspaceAuthResolvedFields(key, authType string, values ...string) error {
-	for _, value := range values {
-		if strings.TrimSpace(value) == "" {
-			// Apply receives resolved local material out-of-band; missing fields
-			// indicate a stale/non-CLI caller and must not produce empty secrets.
-			return fmt.Errorf("service %q auth %s material is missing", key, authType)
-		}
-	}
-	return nil
-}
-
-// encryptedWorkspaceAuthSecrets turns one selected auth family into the exact
-// secret rows the dispatcher already knows how to read.
-func encryptedWorkspaceAuthSecrets(bucketID, serviceID uuid.UUID, auth fusedobject.AuthConfig, cfg *WorkspaceAuthConfig, masterKey []byte) ([]store.WorkspaceSecret, error) {
-	keys, err := workspaceAuthSecretInputs(auth, cfg)
-	if err != nil {
-		return nil, err
-	}
-	secrets := make([]store.WorkspaceSecret, 0, len(keys))
-	for _, key := range keys {
-		secret, err := encryptedWorkspaceSecret(bucketID, serviceID, key.Name, key.Type, key.Value, masterKey)
-		if err != nil {
-			return nil, err
-		}
-		secrets = append(secrets, secret)
-	}
-	return secrets, nil
-}
-
-type workspaceAuthSecretInput struct {
-	Name  string
-	Type  string
-	Value string
-}
-
-// workspaceAuthKeyRequirements derives the exact runtime storage contract for
-// one reviewed scheme, including optional Basic password behavior.
-func workspaceAuthKeyRequirements(auth fusedobject.AuthConfig) (required, optional, all []string, err error) {
-	name := workspaceAuthCredentialName(auth)
-	// Runtime cannot bind an unnamed security scheme to a stable bucket key.
-	if name == "" {
-		return nil, nil, nil, errors.New("selected auth config has no credential name")
-	}
-	switch canonicalWorkspaceAuthConfigType(auth) {
-	case "basic":
-		all = []string{name + "_username", name + "_password"}
-		mode, valid := authrouting.EffectiveBasicPasswordMode(auth.BasicPasswordMode)
-		// Unknown provider metadata cannot safely describe either direct or
-		// referenced Basic material.
-		if !valid {
-			return nil, nil, nil, errors.New("selected basic auth config has invalid password mode")
-		}
-		required = []string{name + "_username"}
-		// Password role admission follows the reviewed provider mode; explicit
-		// empty deliberately maps only the username.
-		if mode == authrouting.BasicPasswordRequired {
-			required = append(required, name+"_password")
-		} else if mode == authrouting.BasicPasswordOptional {
-			optional = []string{name + "_password"}
-		}
-		return required, optional, all, nil
-	case "mtls":
-		all = []string{name + "_cert", name + "_key"}
-		return append([]string(nil), all...), nil, all, nil
-	default:
-		all = []string{name}
-		return append([]string(nil), all...), nil, all, nil
-	}
-}
-
-// rebaseWorkspaceAuthKeys preserves credential roles while replacing only the
-// reviewed security-scheme prefix used by bucket storage.
-func rebaseWorkspaceAuthKeys(keys []string, targetName, sourceName string) []string {
-	out := make([]string, 0, len(keys))
-	for _, key := range keys {
-		// Exact single-value families have no role suffix.
-		if key == targetName {
-			out = append(out, sourceName)
-			continue
-		}
-		// Paired Basic and mTLS keys retain their reviewed role suffix so the
-		// destination dispatcher receives the same semantic field.
-		out = append(out, sourceName+strings.TrimPrefix(key, targetName))
-	}
-	return out
-}
-
-// mergeWorkspaceAuthKeys preserves deterministic role order while removing
-// overlap between source completeness and destination compatibility checks.
-func mergeWorkspaceAuthKeys(keySets ...[]string) []string {
-	seen := make(map[string]struct{})
-	var merged []string
-	for _, keys := range keySets {
-		for _, key := range keys {
-			// Repeated roles are one source requirement, not multiple SQL checks.
-			if _, exists := seen[key]; exists {
-				continue
-			}
-			seen[key] = struct{}{}
-			merged = append(merged, key)
-		}
-	}
-	return merged
-}
-
-// workspaceAuthSecretInputs maps public auth families to dispatcher credential
-// keys while keeping bucket storage service-scoped.
-func workspaceAuthSecretInputs(auth fusedobject.AuthConfig, cfg *WorkspaceAuthConfig) ([]workspaceAuthSecretInput, error) {
-	name := workspaceAuthCredentialName(auth)
-	// Secret rows require the exact provider scheme name used later by dispatch.
-	if name == "" {
-		return nil, errors.New("selected auth config has no credential name")
-	}
-	switch canonicalWorkspaceStaticAuthType(cfg.AuthType) {
-	case "basic":
-		inputs := []workspaceAuthSecretInput{{Name: name + "_username", Type: "basic", Value: cfg.Username}}
-		mode, valid := authrouting.EffectiveBasicPasswordMode(auth.BasicPasswordMode)
-		// Validation should have rejected malformed provider metadata before secret encryption.
-		if !valid {
-			return nil, errors.New("selected basic auth config has invalid password mode")
-		}
-		// Required and supplied optional passwords are persisted; explicit empty mode deliberately omits the row.
-		if mode == authrouting.BasicPasswordRequired || mode == authrouting.BasicPasswordOptional && cfg.Password != "" {
-			inputs = append(inputs, workspaceAuthSecretInput{Name: name + "_password", Type: "basic", Value: cfg.Password})
-		}
-		return inputs, nil
-	case "api_key":
-		return []workspaceAuthSecretInput{{Name: name, Type: "apiKey", Value: cfg.APIKey}}, nil
-	case "mtls":
-		// Validate before encryption so config apply cannot save an unusable or
-		// expired transport credential pair into the bucket.
-		if _, err := mtlsauth.CertificatePair(cfg.Cert, cfg.Key, time.Now().UTC()); err != nil {
-			return nil, err
-		}
-		return []workspaceAuthSecretInput{{Name: name + "_cert", Type: "mtls", Value: cfg.Cert}, {Name: name + "_key", Type: "mtls", Value: cfg.Key}}, nil
-	default:
-		return []workspaceAuthSecretInput{{Name: name, Type: canonicalWorkspaceStaticAuthType(cfg.AuthType), Value: cfg.Token}}, nil
-	}
-}
-
 // encryptedWorkspaceSecret wraps each value with the Engine master key so
 // plaintext auth material never lands in the workspace secret table.
 func encryptedWorkspaceSecret(bucketID, serviceID uuid.UUID, keyName, credentialType, value string, masterKey []byte) (store.WorkspaceSecret, error) {
@@ -3997,11 +3244,7 @@ func encryptedWorkspaceSecret(bucketID, serviceID uuid.UUID, keyName, credential
 
 // prepareWorkspaceBucketSecrets resolves and encrypts every declared
 // buckets.<name>.secrets.<key> intent before any workspace membership
-// mutates, mirroring prepareWorkspaceAuthBindings' validate-before-write
-// ordering. Unlike auth secrets, these have no per-service loop to ride
-// along with -- they're upserted once for the whole apply (see
-// upsertWorkspaceBucketSecrets), the same way connection profiles are
-// reconciled once rather than per service.
+// mutates. These are upserted once for the whole apply because they have no service dimension.
 func prepareWorkspaceBucketSecrets(
 	ctx context.Context,
 	s store.Store,
@@ -4021,8 +3264,7 @@ func prepareWorkspaceBucketSecrets(
 		}
 		value, ok := materials[workspaceBucketSecretMaterialKey(intent.BucketName, intent.Key)]
 		if !ok || strings.TrimSpace(value) == "" {
-			// Mirrors validateWorkspaceAuthResolvedMaterial's guard: an
-			// unresolved $ENV ref at apply time means the CLI sent a plan
+			// An unresolved $ENV ref at apply time means the CLI sent a plan
 			// without its matching material, not a legitimately empty secret.
 			return nil, fmt.Errorf("bucket %q secret %q material is missing", workspaceConnectBucketName(intent.BucketName), intent.Key)
 		}
@@ -4050,86 +3292,6 @@ func upsertWorkspaceBucketSecrets(ctx context.Context, s store.Store, secrets []
 	span.SetStatus(codes.Ok, "")
 	span.End()
 	return nil
-}
-
-// applyPreparedWorkspaceAuthBindings performs one transactional mutation and
-// records only aggregate, non-secret audit dimensions.
-func applyPreparedWorkspaceAuthBindings(ctx context.Context, s store.Store, bindings []store.WorkspaceAuthBinding) error {
-	// Auth-free workspace plans should not require an optional store capability.
-	if len(bindings) == 0 {
-		return nil
-	}
-	repository, ok := s.(store.WorkspaceAuthBindingStore)
-	// The same store owner that preflighted reference edges must commit them;
-	// there is no safe legacy fallback that preserves dynamic rotation.
-	if !ok {
-		return errors.New("workspace auth binding store is unavailable")
-	}
-	// The store owns transactional revalidation and all encrypted-row replacement.
-	if err := repository.ApplyWorkspaceAuthBindings(ctx, bindings); err != nil {
-		return fmt.Errorf("apply workspace auth bindings: %w", err)
-	}
-	_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.auth_bindings_applied")
-	span.SetAttributes(
-		attribute.Int("binding_count", len(bindings)),
-		attribute.Int("reference_count", workspaceAuthReferenceCount(bindings)),
-		attribute.Int("clear_count", workspaceAuthClearCount(bindings)),
-		attribute.Int("secret_count", workspaceAuthBindingSecretCount(bindings)),
-		attribute.String("outcome", "success"),
-	)
-	span.SetStatus(codes.Ok, "")
-	span.End()
-	return nil
-}
-
-// workspaceAuthReferenceCount reports only aggregate binding shape for OTEL.
-func workspaceAuthReferenceCount(bindings []store.WorkspaceAuthBinding) int {
-	total := 0
-	for _, binding := range bindings {
-		// A non-nil source distinguishes live bindings from encrypted local
-		// material without exposing either service or auth identities.
-		if binding.Reference != nil {
-			total++
-		}
-	}
-	return total
-}
-
-// workspaceAuthClearCount reports only aggregate reconciliation intent so
-// operators can distinguish removal from direct rotation without identities.
-func workspaceAuthClearCount(bindings []store.WorkspaceAuthBinding) int {
-	total := 0
-	for _, binding := range bindings {
-		// Clear intent is safe bounded telemetry and carries no auth or service name.
-		if binding.ClearReferences {
-			total++
-		}
-	}
-	return total
-}
-
-// workspaceAuthBindingSecretCount reports encrypted-row volume without values.
-func workspaceAuthBindingSecretCount(bindings []store.WorkspaceAuthBinding) int {
-	total := 0
-	for _, binding := range bindings {
-		total += len(binding.Secrets)
-	}
-	return total
-}
-
-// workspaceAuthCredentialName mirrors runtime credential resolution so config
-// apply writes the same key names applyAuth reads at execution time.
-func workspaceAuthCredentialName(auth fusedobject.AuthConfig) string {
-	return strings.TrimSpace(auth.Name)
-}
-
-// canonicalWorkspaceAuthConfigType converts OpenAPI http schemes into the auth
-// families users select in workspace config.
-func canonicalWorkspaceAuthConfigType(auth fusedobject.AuthConfig) string {
-	if strings.EqualFold(auth.Type, "http") {
-		return canonicalWorkspaceStaticAuthType(auth.Scheme)
-	}
-	return canonicalWorkspaceImportedAuthType(auth.Type)
 }
 
 // canonicalWorkspaceStaticAuthType accepts only the public workspace config

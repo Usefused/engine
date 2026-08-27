@@ -16,9 +16,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/connectresource"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
+	"github.com/Usefused/engine/internal/shared/credentialkeys"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
@@ -51,39 +53,84 @@ func TestStartConnectSessionHandlerCreatesAuthorizationURL(t *testing.T) {
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	assertConnectStartSuccess(t, rr, fixture)
+}
+
+// assertConnectStartSuccess verifies the public authorization URL and persisted server-only session state.
+func assertConnectStartSuccess(t *testing.T, response *httptest.ResponseRecorder, fixture connectRuntimeFixture) {
+	t.Helper()
+	// A successful start must persist exactly one provider session.
+	if response.Code != http.StatusOK || len(fixture.store.createdSessions) != 1 {
+		t.Fatalf("connect start response=%d sessions=%#v body=%s", response.Code, fixture.store.createdSessions, response.Body.String())
 	}
-	if len(fixture.store.createdSessions) != 1 {
-		t.Fatalf("expected one connect session, got %#v", fixture.store.createdSessions)
-	}
-	values := authorizeURLValues(t, rr.Body.Bytes())
+	values := authorizeURLValues(t, response.Body.Bytes())
+	assertConnectAuthorizationPolicy(t, values)
+	assertConnectPersistedRequest(t, fixture.store.createdSessions[0])
+}
+
+// assertConnectAuthorizationPolicy verifies provider parameters, scopes, and anti-forgery material.
+func assertConnectAuthorizationPolicy(t *testing.T, values url.Values) {
+	t.Helper()
+	// The URL must identify the configured OAuth application and code flow.
 	if values.Get("client_id") != "client-id" || values.Get("response_type") != "code" {
 		t.Fatalf("unexpected authorize URL query: %#v", values)
 	}
+	// Authored scope and prompt policy must override unsafe provider metadata state.
 	if values.Get("scope") != "openid,profile" || values.Get("prompt") != "consent" || values.Get("state") == "metadata-state" {
 		t.Fatalf("OAuth edge policy was not applied safely: %#v", values)
 	}
+	// State, nonce, and PKCE bind the callback to this exact browser handoff.
 	if values.Get("code_challenge") == "" || values.Get("state") == "" || values.Get("nonce") == "" {
 		t.Fatalf("expected state, nonce, and PKCE challenge in authorize URL: %#v", values)
 	}
-	if fixture.store.createdSessions[0].EndUserRef != "user_123" {
-		t.Fatalf("expected end_user_ref to be stored, got %#v", fixture.store.createdSessions[0])
+}
+
+// assertConnectPersistedRequest verifies caller-owned attribution survives the authorization redirect.
+func assertConnectPersistedRequest(t *testing.T, session store.ConnectSession) {
+	t.Helper()
+	// End-user identity is required for later connection ownership checks.
+	if session.EndUserRef != "user_123" {
+		t.Fatalf("expected end_user_ref to be stored, got %#v", session)
 	}
-	if fixture.store.createdSessions[0].ReturnURL != "https://app.example.com/oauth/done" {
-		t.Fatalf("expected return_url to be stored, got %#v", fixture.store.createdSessions[0])
+	// The validated return URL is persisted instead of reconstructed from callback input.
+	if session.ReturnURL != "https://app.example.com/oauth/done" {
+		t.Fatalf("expected return_url to be stored, got %#v", session)
 	}
 }
 
-// TestStartConnectSessionHandlerReturnsStructuredValidationErrors verifies
-// every request-edge rejection uses the shared correlated control envelope.
+// TestStartConnectSessionRequiresConfiguredPublicURL keeps the missing deployment setting at consent admission.
+func TestStartConnectSessionRequiresConfiguredPublicURL(t *testing.T) {
+	fixture := newConnectRuntimeFixture(t)
+	request := httptest.NewRequest(http.MethodPost, fixture.startPath(), strings.NewReader(`{"end_user_ref":"user_123"}`))
+	request.Header.Set("X-API-Key", "fsk_test")
+	response := httptest.NewRecorder()
+	// The real control router supplies the actor while omitting a callback to model a non-OAuth deployment.
+	router := newControlTestRouter(fixture.store.accountID)
+	router.Mount("/workspace", WorkspaceHandler(fixture.store, fixture.verifier, fixture.masterKey, fixture.store))
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("missing public URL status = %d, want 503: %s", response.Code, response.Body.String())
+	}
+	var envelope workspaceConfigErrorResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode missing public URL response: %v", err)
+	}
+	// The response identifies the operator-owned setting without suggesting caller retries or request-host inference.
+	if envelope.Error.Code != "engine_public_url_required" || !strings.Contains(envelope.Error.Remediation, "FUSED_ENGINE_PUBLIC_URL") {
+		t.Fatalf("missing public URL envelope = %#v", envelope.Error)
+	}
+}
+
+type connectStartValidationCase struct {
+	name        string
+	body        string
+	code        string
+	messagePart string
+}
+
+// TestStartConnectSessionHandlerReturnsStructuredValidationErrors verifies every request-edge rejection.
 func TestStartConnectSessionHandlerReturnsStructuredValidationErrors(t *testing.T) {
-	tests := []struct {
-		name        string
-		body        string
-		code        string
-		messagePart string
-	}{
+	tests := []connectStartValidationCase{
 		{name: "invalid JSON", body: `{`, code: "invalid_connect_session_request", messagePart: "invalid request body"},
 		{name: "missing end user", body: `{}`, code: "connect_end_user_ref_required", messagePart: "end_user_ref is required"},
 		{name: "invalid return URL", body: `{"end_user_ref":"user","return_url":"relative"}`, code: "invalid_connect_return_url", messagePart: "absolute http or https URL"},
@@ -92,43 +139,59 @@ func TestStartConnectSessionHandlerReturnsStructuredValidationErrors(t *testing.
 	// Each malformed request must fail before configuration resolution or session persistence.
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			fixture := newConnectRuntimeFixture(t)
-			request := httptest.NewRequest(http.MethodPost, fixture.startPath(), strings.NewReader(test.body))
-			request.Header.Set("X-API-Key", "fsk_test")
-			response := httptest.NewRecorder()
-			buildConnectRuntimeRouter(fixture).ServeHTTP(response, request)
-
-			var envelope workspaceConfigErrorResponse
-			decodeErr := json.Unmarshal(response.Body.Bytes(), &envelope)
-			// Structured JSON is required so CLI and UI callers can consume stable fields.
-			if response.Code != http.StatusBadRequest || decodeErr != nil {
-				t.Fatalf("validation response = %d %q, decode error = %v", response.Code, response.Body.String(), decodeErr)
-			}
-			// The code is machine-stable while the message retains precise safe validation guidance.
-			if envelope.Error.Code != test.code || !strings.Contains(envelope.Error.Message, test.messagePart) {
-				t.Fatalf("validation error = %#v, want code %q and message containing %q", envelope.Error, test.code, test.messagePart)
-			}
-			// Request admission failures are non-retryable and prove no mutation was committed.
-			if envelope.Error.Category != "validation" || envelope.Error.Retryable || envelope.Error.Phase != "request_admission" || envelope.Error.CommitState != "not_committed" {
-				t.Fatalf("validation metadata = %#v", envelope.Error)
-			}
-			// The shared writer must advertise JSON rather than the old text/plain body.
-			if !strings.HasPrefix(response.Header().Get("Content-Type"), "application/json") {
-				t.Fatalf("content type = %q", response.Header().Get("Content-Type"))
-			}
-			// No browser session may exist after request-edge validation fails.
-			if len(fixture.store.createdSessions) != 0 || len(fixture.store.inputSessions) != 0 {
-				t.Fatalf("validation persisted sessions: provider=%d input=%d", len(fixture.store.createdSessions), len(fixture.store.inputSessions))
-			}
+			assertConnectStartValidationCase(t, test)
 		})
 	}
 }
 
-// TestStartConnectSessionHandlerReturnsStructuredResolutionError verifies a
-// missing connect registration remains distinct from malformed input.
+// assertConnectStartValidationCase checks one malformed request without inflating the table driver's complexity.
+func assertConnectStartValidationCase(t *testing.T, test connectStartValidationCase) {
+	t.Helper()
+	fixture := newConnectRuntimeFixture(t)
+	request := httptest.NewRequest(http.MethodPost, fixture.startPath(), strings.NewReader(test.body))
+	request.Header.Set("X-API-Key", "fsk_test")
+	response := httptest.NewRecorder()
+	buildConnectRuntimeRouter(fixture).ServeHTTP(response, request)
+	var envelope workspaceConfigErrorResponse
+	decodeErr := json.Unmarshal(response.Body.Bytes(), &envelope)
+	assertConnectStartValidationEnvelope(t, response, envelope, decodeErr, test)
+	assertNoConnectSessions(t, fixture, "validation")
+}
+
+// assertConnectStartValidationEnvelope verifies the stable error contract independently of persistence state.
+func assertConnectStartValidationEnvelope(t *testing.T, response *httptest.ResponseRecorder, envelope workspaceConfigErrorResponse, decodeErr error, test connectStartValidationCase) {
+	t.Helper()
+	// Structured JSON is required so CLI and UI callers can consume stable fields.
+	if response.Code != http.StatusBadRequest || decodeErr != nil {
+		t.Fatalf("validation response = %d %q, decode error = %v", response.Code, response.Body.String(), decodeErr)
+	}
+	// The code and message retain precise safe validation guidance.
+	if envelope.Error.Code != test.code || !strings.Contains(envelope.Error.Message, test.messagePart) {
+		t.Fatalf("validation error = %#v, want code %q and message containing %q", envelope.Error, test.code, test.messagePart)
+	}
+	// Request admission failures are non-retryable and prove no mutation was committed.
+	if envelope.Error.Category != "validation" || envelope.Error.Retryable || envelope.Error.Phase != "request_admission" || envelope.Error.CommitState != "not_committed" {
+		t.Fatalf("validation metadata = %#v", envelope.Error)
+	}
+	// The shared writer must advertise JSON rather than an ambiguous text body.
+	if !strings.HasPrefix(response.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("content type = %q", response.Header().Get("Content-Type"))
+	}
+}
+
+// assertNoConnectSessions proves a failed phase persisted neither hosted-form nor provider state.
+func assertNoConnectSessions(t *testing.T, fixture connectRuntimeFixture, phase string) {
+	t.Helper()
+	// Both session stores must remain empty after pre-persistence failures.
+	if len(fixture.store.createdSessions) != 0 || len(fixture.store.inputSessions) != 0 {
+		t.Fatalf("%s persisted sessions: provider=%d input=%d", phase, len(fixture.store.createdSessions), len(fixture.store.inputSessions))
+	}
+}
+
+// TestStartConnectSessionHandlerReturnsStructuredResolutionError distinguishes missing app credentials from malformed input.
 func TestStartConnectSessionHandlerReturnsStructuredResolutionError(t *testing.T) {
 	fixture := newConnectRuntimeFixture(t)
-	fixture.store.savedConfig = nil
+	fixture.store.applicationSecrets = nil
 	request := httptest.NewRequest(http.MethodPost, fixture.startPath(), strings.NewReader(`{"end_user_ref":"user"}`))
 	request.Header.Set("X-API-Key", "fsk_test")
 	response := httptest.NewRecorder()
@@ -136,17 +199,20 @@ func TestStartConnectSessionHandlerReturnsStructuredResolutionError(t *testing.T
 
 	var envelope workspaceConfigErrorResponse
 	decodeErr := json.Unmarshal(response.Body.Bytes(), &envelope)
+	assertConnectResolutionError(t, response, envelope, decodeErr)
+	assertNoConnectSessions(t, fixture, "resolution failure")
+}
+
+// assertConnectResolutionError keeps classification and remediation assertions below the complexity ceiling.
+func assertConnectResolutionError(t *testing.T, response *httptest.ResponseRecorder, envelope workspaceConfigErrorResponse, decodeErr error) {
+	t.Helper()
 	// Authoritative absence uses a stable non-retryable not-found classification.
-	if response.Code != http.StatusNotFound || decodeErr != nil || envelope.Error.Code != "connect_config_not_found" || envelope.Error.Category != "not_found" || envelope.Error.Retryable {
+	if response.Code != http.StatusNotFound || decodeErr != nil || envelope.Error.Code != "oauth_application_credentials_not_found" || envelope.Error.Category != "not_found" || envelope.Error.Retryable {
 		t.Fatalf("resolution response = %d %#v decode=%v", response.Code, envelope.Error, decodeErr)
 	}
-	// Configuration resolution precedes mutation and carries an actionable recovery step.
-	if envelope.Error.Phase != "connect_resolution" || envelope.Error.CommitState != "not_committed" || !strings.Contains(envelope.Error.Remediation, "connect configuration") {
+	// Credential resolution precedes mutation and points callers to the canonical secret path.
+	if envelope.Error.Phase != "connect_resolution" || envelope.Error.CommitState != "not_committed" || !strings.Contains(envelope.Error.Remediation, "secret set") {
 		t.Fatalf("resolution metadata = %#v", envelope.Error)
-	}
-	// Absence must never allocate either form or provider callback state.
-	if len(fixture.store.createdSessions) != 0 || len(fixture.store.inputSessions) != 0 {
-		t.Fatalf("resolution failure persisted sessions: provider=%d input=%d", len(fixture.store.createdSessions), len(fixture.store.inputSessions))
 	}
 }
 
@@ -170,14 +236,38 @@ func TestWriteConnectRuntimeErrorCorrelatesAndHidesInternalCause(t *testing.T) {
 
 	var envelope workspaceConfigErrorResponse
 	decodeErr := json.Unmarshal(response.Body.Bytes(), &envelope)
+	assertInternalConnectRuntimeEnvelope(t, response, envelope, decodeErr, traceID)
+}
+
+// assertInternalConnectRuntimeEnvelope verifies safe classification, correlation, and redaction.
+func assertInternalConnectRuntimeEnvelope(t *testing.T, response *httptest.ResponseRecorder, envelope workspaceConfigErrorResponse, decodeErr error, traceID string) {
+	t.Helper()
+	assertInternalConnectClassification(t, response, envelope, decodeErr)
+	assertInternalConnectCorrelation(t, envelope, traceID)
+	assertInternalConnectRedaction(t, response)
+}
+
+// assertInternalConnectClassification verifies stable status and retry semantics for unknown failures.
+func assertInternalConnectClassification(t *testing.T, response *httptest.ResponseRecorder, envelope workspaceConfigErrorResponse, decodeErr error) {
+	t.Helper()
 	// Unknown commit outcomes remain stable but are not automatically retryable before inspection.
 	if response.Code != http.StatusInternalServerError || decodeErr != nil || envelope.Error.Code != "connect_runtime_failed" || envelope.Error.Category != "internal" || envelope.Error.Retryable {
 		t.Fatalf("internal response = %d %#v decode=%v", response.Code, envelope.Error, decodeErr)
 	}
+}
+
+// assertInternalConnectCorrelation verifies operator-visible trace, request, phase, and commit metadata.
+func assertInternalConnectCorrelation(t *testing.T, envelope workspaceConfigErrorResponse, traceID string) {
+	t.Helper()
 	// Correlation and conservative commit metadata let operators investigate an uncertain persistence result.
 	if envelope.Error.TraceID != traceID || envelope.Error.RequestID == "" || envelope.Error.Phase != "connect_session_create" || envelope.Error.CommitState != "unknown" || !strings.Contains(envelope.Error.Remediation, "before retrying") {
 		t.Fatalf("internal correlation metadata = %#v, trace want %q", envelope.Error, traceID)
 	}
+}
+
+// assertInternalConnectRedaction verifies internal credential-like causes never enter the public response.
+func assertInternalConnectRedaction(t *testing.T, response *httptest.ResponseRecorder) {
+	t.Helper()
 	// Neither public prose nor structured fields may contain the internal credential-like cause.
 	if strings.Contains(response.Body.String(), "fsk_never_return") || strings.Contains(response.Body.String(), "database secret") {
 		t.Fatalf("internal cause leaked: %s", response.Body.String())
@@ -203,11 +293,48 @@ func attachConnectTestArtifact(fixture *connectRuntimeFixture) uuid.UUID {
 	appID := uuid.New()
 	selections, _ := json.Marshal([]models.SDKSelection{{
 		ServiceID: fixture.serviceID, ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion,
+		AuthType: "oidc", AuthName: "bearerAuth",
 	}})
 	fixture.store.appRuntimes = map[uuid.UUID]*store.AppRuntime{
-		appID: {AccountID: fixture.store.accountID, AppID: appID, BucketID: fixture.bucketID, ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: selections},
+		appID: {AccountID: fixture.store.accountID, AppID: appID, BucketID: fixture.bucketID, ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: selections, Kind: store.AppKindSDK},
 	}
 	return appID
+}
+
+// TestValidateConnectAuditSDKRejectsUntrustedAttribution keeps SDK audit identity separate from credential routing.
+func TestValidateConnectAuditSDKRejectsUntrustedAttribution(t *testing.T) {
+	fixture := newConnectRuntimeFixture(t)
+	appID := attachConnectTestArtifact(&fixture)
+	ownerContext := accesscontrol.ContextWithActor(t.Context(), controlTestOwnerActor(fixture.store.accountID))
+	// A visible SDK is accepted before exercising opaque denial cases.
+	if err := validateConnectAuditSDK(ownerContext, fixture.store, appID); err != nil {
+		t.Fatalf("validate authorized SDK attribution: %v", err)
+	}
+	fixture.store.appRuntimes[appID].Kind = store.AppKindMCP
+	// An MCP Version ID cannot be recorded through the CLI's SDK-only audit selector.
+	assertConnectAuditSDKDenied(t, validateConnectAuditSDK(ownerContext, fixture.store, appID))
+	fixture.store.appRuntimes[appID].Kind = store.AppKindSDK
+	unauthorized, err := accesscontrol.NewAuthorizationSnapshot(1)
+	// An empty valid snapshot models a caller with no app-family visibility.
+	if err != nil {
+		t.Fatalf("create empty authorization snapshot: %v", err)
+	}
+	actor := controlTestOwnerActor(fixture.store.accountID)
+	actor.Authorization = unauthorized
+	// Existing SDK identity remains opaque when the actor lacks family-scoped app.read.
+	assertConnectAuditSDKDenied(t, validateConnectAuditSDK(accesscontrol.ContextWithActor(t.Context(), actor), fixture.store, appID))
+	// Unknown Version IDs use the same denial and cannot be enumerated through attribution.
+	assertConnectAuditSDKDenied(t, validateConnectAuditSDK(ownerContext, fixture.store, uuid.New()))
+}
+
+// assertConnectAuditSDKDenied verifies the stable opaque denial returned for every untrusted attribution case.
+func assertConnectAuditSDKDenied(t *testing.T, err error) {
+	t.Helper()
+	var runtimeErr connectRuntimeHTTPError
+	// Every rejected identity must retain the same status and stable public code.
+	if !errors.As(err, &runtimeErr) || runtimeErr.status != http.StatusForbidden || runtimeErr.code != "connect_audit_sdk_unavailable" {
+		t.Fatalf("audit attribution error = %#v, want opaque 403", err)
+	}
 }
 
 // TestResolveConnectScopesNarrowsAndNormalizes proves callers can request a
@@ -249,21 +376,42 @@ func TestResolveConnectScopesRequiresOpenID(t *testing.T) {
 	}
 }
 
+// TestResolveExplicitConnectCredentialSourceUsesPinnedBatch proves standalone consent does not need an SDK/MCP identity.
+func TestResolveExplicitConnectCredentialSourceUsesPinnedBatch(t *testing.T) {
+	fixture := newConnectAdminFixture()
+	fixture.store.sourceServiceID = uuid.New()
+	fixture.store.sourceVersion = "v1"
+	fixture.store.sourceAuthName = "oauth2"
+	call := connectAdminCall{
+		bucketID: fixture.bucketID, serviceID: fixture.serviceID,
+		authType: "oauth", authName: "targetOAuth", authRef: "${bucket.auth.gmail.oauth2}",
+	}
+	source, err := resolveExplicitConnectCredentialSource(context.Background(), fixture.store, call)
+	if err != nil {
+		t.Fatalf("resolve explicit credential source: %v", err)
+	}
+	// Source identity changes application credentials only; the target service remains the grant owner.
+	if source.ServiceID != fixture.store.sourceServiceID || source.AuthType != "oauth" || source.AuthName != "oauth2" {
+		t.Fatalf("credential source = %#v", source)
+	}
+}
+
 func TestArtifactConnectScopePolicyIsAppliedBeforeProviderScopes(t *testing.T) {
 	fixture := newConnectAdminFixture()
-	appID := uuid.New()
-	selections, _ := json.Marshal([]models.SDKSelection{{
-		ServiceID: fixture.serviceID, ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion, ConnectScopes: []string{"read"},
-	}})
-	fixture.store.appRuntimes = map[uuid.UUID]*store.AppRuntime{
-		appID: {AccountID: fixture.store.accountID, AppID: appID, BucketID: fixture.bucketID, ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: selections},
+	selection := models.SDKSelection{
+		ServiceID: fixture.serviceID, ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion,
+		AuthType: "oauth", AuthName: "oauth2", ConnectScopes: []string{"read"},
 	}
 
-	scopes, err := applyAppConnectScopePolicy(context.Background(), fixture.store, fixture.bucketID, fixture.serviceID, appID, nil)
+	call, err := connectCallFromAppSelection(connectAdminCall{bucketID: fixture.bucketID, serviceID: fixture.serviceID}, selection)
+	if err != nil {
+		t.Fatalf("load app connect policy: %v", err)
+	}
+	scopes, err := applyAppConnectScopePolicy(call.appConnectScopes, nil)
 	if err != nil || strings.Join(scopes, " ") != "read" {
 		t.Fatalf("artifact policy = %#v, err = %v", scopes, err)
 	}
-	if _, err := applyAppConnectScopePolicy(context.Background(), fixture.store, fixture.bucketID, fixture.serviceID, appID, []string{"write"}); err == nil {
+	if _, err := applyAppConnectScopePolicy(call.appConnectScopes, []string{"write"}); err == nil {
 		t.Fatal("expected a scope outside the artifact policy to be rejected")
 	}
 }
@@ -272,19 +420,11 @@ func TestArtifactConnectScopePolicyIsAppliedBeforeProviderScopes(t *testing.T) {
 // cannot grant provider scopes from an obsolete persisted app contract.
 func TestArtifactConnectScopePolicyRejectsRemovedSelectionField(t *testing.T) {
 	fixture := newConnectAdminFixture()
-	appID := uuid.New()
-	fixture.store.appRuntimes = map[uuid.UUID]*store.AppRuntime{
-		appID: {
-			AccountID: fixture.store.accountID, AppID: appID, BucketID: fixture.bucketID,
-			ScopeSchemaVersion: models.AppScopeSchemaVersion,
-			Selections:         []byte(`[{"service_id":"` + fixture.serviceID.String() + `","service_version_id":"` + uuid.NewString() + `","definition_schema_version":3}]`),
-		},
-	}
-
-	_, err := applyAppConnectScopePolicy(context.Background(), fixture.store, fixture.bucketID, fixture.serviceID, appID, nil)
-	var runtimeErr connectRuntimeHTTPError
-	if !errors.As(err, &runtimeErr) || runtimeErr.status != http.StatusConflict {
-		t.Fatalf("legacy selection policy error = %#v, want conflict", err)
+	legacy := []byte(`[{"service_id":"` + fixture.serviceID.String() + `","service_version_id":"` + uuid.NewString() + `","definition_schema_version":3}]`)
+	_, found := appRuntimeServiceSelection(models.AppScopeSchemaVersion, legacy, fixture.serviceID)
+	// Obsolete selection fields must fail closed before SDK consent policy is constructed.
+	if found {
+		t.Fatal("legacy selection unexpectedly admitted")
 	}
 }
 
@@ -341,6 +481,26 @@ func TestConnectCallbackHandlerStoresEncryptedAuthConnection(t *testing.T) {
 	}
 	assertRuntimeAuthConnectionEncrypted(t, fixture.store.savedConnection, fixture)
 	assertCallbackRedirectLocation(t, rr.Header().Get("Location"), fixture.store.savedConnection.ID)
+}
+
+// TestConnectCallbackHandlerRejectsUnpinnedRedirect protects upgraded sessions from provider replay guesses.
+func TestConnectCallbackHandlerRejectsUnpinnedRedirect(t *testing.T) {
+	fixture := newConnectRuntimeFixture(t)
+	state := "legacy-callback-state"
+	fixture.store.session = connectRuntimeSession(t, fixture, state, "pkce-verifier")
+	fixture.store.session.RedirectURI = ""
+	providerCalled := false
+	restoreClient := replaceDefaultHTTPClient(roundTripFunc(func(*http.Request) (*http.Response, error) {
+		providerCalled = true
+		return nil, errors.New("provider must not be called")
+	}))
+	defer restoreClient()
+
+	response := serveConnectCallback(fixture, state)
+	// Missing callback identity is locally actionable and must stop before token exchange.
+	if response.Code != http.StatusBadRequest || providerCalled || !strings.Contains(response.Body.String(), "start the connection again") {
+		t.Fatalf("unpinned callback response=%d called=%v body=%s", response.Code, providerCalled, response.Body.String())
+	}
 }
 
 // TestConnectCallbackHandlerRejectsMissingRequiredRefreshToken proves an
@@ -419,7 +579,7 @@ func TestConnectCallbackHandlerDiscoversResources(t *testing.T) {
 	fixture.store.session.RequestedScopes = []string{"account:read"}
 	fixture.verifier.serviceMetadata.BaseURL = provider.URL
 	fixture.verifier.serviceMetadata.AuthConfigs[0].Type = "oauth2"
-	fixture.store.savedConfig.AuthType = "oauth"
+	setRuntimeApplicationCredentialIdentity(&fixture, "oauth", fixture.store.applicationAuthName)
 	fixture.store.session.AuthType = "oauth"
 	// This fixture exercises OAuth resource discovery; retaining the shared
 	// fixture's openid scope would correctly require an OIDC ID token and nonce.
@@ -604,7 +764,7 @@ func combinedConnectRuntimeFixture(t *testing.T, providerURL, subdomain string) 
 	fixture.verifier.serviceMetadata.AuthConfigs[0].OAuth2Flows = fusedobject.OAuth2Flows{"authorizationCode": {
 		AuthorizationURL: providerURL + "/authorize", TokenURL: providerURL + "/token", Scopes: map[string]string{},
 	}}
-	fixture.store.savedConfig.AuthType = "oauth"
+	setRuntimeApplicationCredentialIdentity(&fixture, "oauth", fixture.store.applicationAuthName)
 	fixture.store.session.AuthType = "oauth"
 	fixture.verifier.serviceMetadata.ConnectConfig = combinedConnectProfile()
 	fixture.verifier.discoveryEndpoint = &fusedobject.Endpoint{Name: "getAccessibleResources", Method: http.MethodGet, Path: "/resources"}
@@ -684,22 +844,10 @@ func TestSelectRuntimeOAuthConfigMatchesConfiguredFamily(t *testing.T) {
 // TestRediscoverConnectionResourcesReusesConnectedToken covers the manual
 // lifecycle path without exposing the provider token through GraphQL.
 func TestRediscoverConnectionResourcesReusesConnectedToken(t *testing.T) {
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/resources" || r.Header.Get("Authorization") != "Bearer access-token" {
-			t.Fatalf("unexpected discovery request: %s %q", r.URL.Path, r.Header.Get("Authorization"))
-		}
-		_, _ = w.Write([]byte(`[{"id":"portal-1","name":"Acme"}]`))
-	}))
+	provider := newRediscoveryProvider(t)
 	defer provider.Close()
 	fixture := newConnectRuntimeFixture(t)
-	wrapped, dek, err := store.WrapDEK(fixture.masterKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	encrypted, err := store.EncryptWithDEK(dek, "access-token")
-	if err != nil {
-		t.Fatal(err)
-	}
+	wrapped, encrypted := encryptConnectTestValue(t, fixture.masterKey, "access-token")
 	expires := time.Now().Add(time.Hour)
 	consentedVersionID := uuid.New()
 	connection := &store.AuthConnection{
@@ -711,8 +859,7 @@ func TestRediscoverConnectionResourcesReusesConnectedToken(t *testing.T) {
 	fixture.store.savedConnection = connection
 	fixture.store.latestVersion = "2.0.0"
 	fixture.store.exactVersions = map[uuid.UUID]string{consentedVersionID: "1.0.0"}
-	fixture.store.savedConfig.AuthType = "oauth"
-	fixture.store.savedConfig.AuthName = "oauthScheme"
+	setRuntimeApplicationCredentialIdentity(&fixture, "oauth", "oauthScheme")
 	fixture.verifier.serviceMetadata.ServiceVersionID = consentedVersionID
 	fixture.verifier.serviceMetadata.BaseURL = provider.URL
 	fixture.verifier.serviceMetadata.AuthConfigs = fusedobject.AuthConfigs{{
@@ -728,12 +875,49 @@ func TestRediscoverConnectionResourcesReusesConnectedToken(t *testing.T) {
 	}
 	fixture.verifier.discoveryEndpoint = &fusedobject.Endpoint{Name: "listPortals", Method: http.MethodGet, Path: "/resources"}
 	resources, err := rediscoverConnectionResources(context.Background(), fixture.store, fixture.verifier, fixture.masterKey, connection)
+	assertRediscoveredConnectionResources(t, resources, err, fixture)
+}
+
+// newRediscoveryProvider verifies the connected token while returning one bounded resource fixture.
+func newRediscoveryProvider(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Resource discovery must use the decrypted connected-user token on the pinned provider path.
+		if r.URL.Path != "/resources" || r.Header.Get("Authorization") != "Bearer access-token" {
+			t.Fatalf("unexpected discovery request: %s %q", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		_, _ = w.Write([]byte(`[{"id":"portal-1","name":"Acme"}]`))
+	}))
+}
+
+// encryptConnectTestValue creates production-shaped encrypted material for focused handler tests.
+func encryptConnectTestValue(t *testing.T, masterKey []byte, value string) (string, string) {
+	t.Helper()
+	wrapped, dek, err := store.WrapDEK(masterKey)
+	// Test setup must fail before a handler sees malformed wrapped-key material.
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := store.EncryptWithDEK(dek, value)
+	// Test setup must fail before a handler sees malformed ciphertext.
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wrapped, encrypted
+}
+
+// assertRediscoveredConnectionResources checks resource output and immutable contract selection.
+func assertRediscoveredConnectionResources(t *testing.T, resources []store.ConnectionResource, err error, fixture connectRuntimeFixture) {
+	t.Helper()
+	// Provider or validation failures must not be mistaken for an empty discovery result.
 	if err != nil {
 		t.Fatalf("rediscover resources: %v", err)
 	}
+	// The one fixture resource remains provider-relative because no approved base URL was returned.
 	if len(resources) != 1 || resources[0].ProviderResourceID != "portal-1" || resources[0].BaseURL != "" {
 		t.Fatalf("resources = %#v", resources)
 	}
+	// Rediscovery must reload the version pinned at consent rather than the latest activated version.
 	if len(fixture.verifier.fetchMetadataVersions) == 0 || fixture.verifier.fetchMetadataVersions[len(fixture.verifier.fetchMetadataVersions)-1] != "1.0.0" {
 		t.Fatalf("rediscovery metadata versions = %v, want pinned 1.0.0", fixture.verifier.fetchMetadataVersions)
 	}
@@ -752,8 +936,9 @@ type connectRuntimeFixture struct {
 func newConnectRuntimeFixture(t *testing.T) connectRuntimeFixture {
 	t.Helper()
 	admin := newConnectAdminFixture()
-	cfg := encryptedRuntimeConnectConfig(t, admin)
-	admin.store.savedConfig = &cfg
+	admin.store.applicationSecrets = encryptedRuntimeApplicationSecrets(t, admin)
+	admin.store.applicationAuthType = "oidc"
+	admin.store.applicationAuthName = "bearerAuth"
 	metadata := &fusedobject.ServiceMetadata{
 		ID: admin.serviceID, ServiceVersionID: uuid.New(),
 		AuthConfigs: fusedobject.AuthConfigs{{
@@ -776,11 +961,28 @@ func newConnectRuntimeFixture(t *testing.T) connectRuntimeFixture {
 	}
 }
 
+// setRuntimeApplicationCredentialIdentity rekeys the fixture pair to the exact selector under test.
+func setRuntimeApplicationCredentialIdentity(fixture *connectRuntimeFixture, authType, authName string) {
+	fixture.store.applicationAuthType = authType
+	fixture.store.applicationAuthName = authName
+	clientIDKey, clientSecretKey, ok := credentialkeys.OAuthApplication(authName)
+	// Tests only supply valid named schemes; an invalid name makes the pair intentionally unavailable.
+	if !ok {
+		fixture.store.applicationSecrets = nil
+		return
+	}
+	keys := []string{clientIDKey, clientSecretKey}
+	for index := range fixture.store.applicationSecrets {
+		fixture.store.applicationSecrets[index].KeyName = keys[index]
+		fixture.store.applicationSecrets[index].CredentialType = authType
+	}
+}
+
 // buildConnectRuntimeRouter mounts the real workspace routes so tests cover
 // chi params and auth middleware behavior, not just handler internals.
 func buildConnectRuntimeRouter(f connectRuntimeFixture) http.Handler {
 	r := newControlTestRouter(f.store.accountID)
-	r.Mount("/workspace", WorkspaceHandler(f.store, f.verifier, f.masterKey, f.store))
+	r.Mount("/workspace", WorkspaceHandler(f.store, f.verifier, f.masterKey, f.store, "https://engine.example.com/workspace/connect/callback"))
 	return r
 }
 
@@ -790,22 +992,30 @@ func (f connectRuntimeFixture) startPath() string {
 	return "/workspace/buckets/" + f.bucketID.String() + "/services/" + f.serviceID.String() + "/connect/sessions"
 }
 
-// encryptedRuntimeConnectConfig uses production encryption helpers so tests
-// catch DEK/ciphertext shape changes in connect config storage.
-func encryptedRuntimeConnectConfig(t *testing.T, fixture connectAdminFixture) store.ConnectConfig {
+// encryptedRuntimeApplicationSecrets uses production encryption and naming for the resolver fixture.
+func encryptedRuntimeApplicationSecrets(t *testing.T, fixture connectAdminFixture) []store.WorkspaceSecret {
 	t.Helper()
-	cfg, err := encryptConnectConfig(fixture.bucketID, fixture.serviceID, resolvedConnectConfigFields{
-		AuthType:     "oidc",
-		AuthName:     "bearerAuth",
-		Enabled:      true,
-		ClientID:     "client-id",
-		ClientSecret: "client-secret",
-		RedirectURI:  "https://engine.example.com/workspace/connect/callback",
-	}, fixture.masterKey)
-	if err != nil {
-		t.Fatalf("encrypt connect config: %v", err)
+	clientIDKey, clientSecretKey, ok := credentialkeys.OAuthApplication("bearerAuth")
+	// A fixed valid scheme name must always produce the deterministic pair used in production.
+	if !ok {
+		t.Fatal("derive application credential keys")
 	}
-	return cfg
+	inputs := []struct{ key, value string }{{clientIDKey, "client-id"}, {clientSecretKey, "client-secret"}}
+	secrets := make([]store.WorkspaceSecret, 0, len(inputs))
+	for _, input := range inputs {
+		wrappedDEK, dek, err := store.WrapDEK(fixture.masterKey)
+		if err != nil {
+			t.Fatalf("wrap application credential DEK: %v", err)
+		}
+		encrypted, err := store.EncryptWithDEK(dek, input.value)
+		if err != nil {
+			t.Fatalf("encrypt application credential: %v", err)
+		}
+		secrets = append(secrets, store.WorkspaceSecret{WorkspaceSecretMeta: store.WorkspaceSecretMeta{
+			BucketID: fixture.bucketID, ServiceID: fixture.serviceID, KeyName: input.key, CredentialType: "oidc",
+		}, EncryptedDEK: wrappedDEK, EncryptedValue: encrypted})
+	}
+	return secrets
 }
 
 // authorizeURLValues extracts the provider query because the security contract
@@ -836,13 +1046,14 @@ func connectRuntimeSession(t *testing.T, fixture connectRuntimeFixture, state, v
 		BucketID:              fixture.bucketID,
 		ServiceID:             fixture.serviceID,
 		ServiceVersionID:      fixture.verifier.serviceMetadata.ServiceVersionID,
-		AuthType:              fixture.store.savedConfig.AuthType,
-		AuthName:              fixture.store.savedConfig.AuthName,
+		AuthType:              fixture.store.applicationAuthType,
+		AuthName:              fixture.store.applicationAuthName,
 		EndUserRef:            "user_123",
 		StateHash:             connectHash(state),
 		NonceHash:             connectHash("nonce-value"),
 		EncryptedDEK:          encrypted.wrappedDEK,
 		EncryptedPKCEVerifier: encrypted.value,
+		RedirectURI:           "https://engine.example.com/workspace/connect/callback",
 		ExpiresAt:             time.Now().UTC().Add(time.Minute),
 	}
 }

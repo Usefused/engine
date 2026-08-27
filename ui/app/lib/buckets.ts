@@ -220,7 +220,7 @@ function readBucketConnectionServices(
       `query BucketConnectionServices($bucketId: String!, $search: String, $limit: Int!, $offset: Int!) {
         connectionServicePage: bucketServicePage(bucket_id: $bucketId, search: $search, limit: $limit, offset: $offset) {
           total
-          items { service_id service_name secret_count value_count connect_config_count connected_user_count }
+          items { service_id service_name secret_count value_count application_credential_count connected_user_count }
         }
       }`,
       {
@@ -241,7 +241,7 @@ function readBucketConnectSummary(bucketId: string): Promise<BucketContentState>
     .mcpGraphql<{ connectSummary: BucketConnectSummary | null }>(
       `query BucketConnectSummary($bucketId: String!) {
         connectSummary: bucketConnectSummary(bucket_id: $bucketId) {
-          bucket_id connect_config_count connected_user_count
+          bucket_id application_credential_count connected_user_count
         }
       }`,
       { bucketId }
@@ -277,7 +277,7 @@ function readBucketServices(
       `query($bucketId: String!, $limit: Int!, $offset: Int!, $search: String) {
         bucketServicePage(bucket_id: $bucketId, search: $search, limit: $limit, offset: $offset) {
           total
-          items { service_id service_name secret_count value_count connect_config_count connected_user_count }
+          items { service_id service_name secret_count value_count application_credential_count connected_user_count }
         }
       }`,
       {

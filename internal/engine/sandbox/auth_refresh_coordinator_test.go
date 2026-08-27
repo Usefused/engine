@@ -231,7 +231,7 @@ func TestAuthRefreshCoordinatorUsesVersionPinnedJSONOIDCContract(t *testing.T) {
 	auth.Type = "openIdConnect"
 	fixture.connection.AuthType = "oidc"
 	fixture.db.authConnection.AuthType = "oidc"
-	fixture.db.connectConfig.AuthType = "openIdConnect"
+	setResolverApplicationCredentialType(fixture.db, "openIdConnect")
 	auth.TokenRequestMediaType = fusedobject.TokenRequestMediaTypeJSON
 	fixture.db.serviceMetadata = &fusedobject.ServiceMetadata{AuthConfigs: fusedobject.AuthConfigs{auth}}
 	client := &http.Client{Timeout: time.Second, Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
@@ -312,7 +312,7 @@ func TestAuthRefreshCoordinatorContractSelectionFailsClosed(t *testing.T) {
 // same-name OAuth/OIDC registration mismatch never reaches the provider.
 func TestAuthRefreshCoordinatorRegistrationTypeMismatchFailsClosed(t *testing.T) {
 	fixture := newAuthRefreshCoordinatorFixture(t, time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC), time.Minute)
-	fixture.db.connectConfig.AuthType = "oidc"
+	setResolverApplicationCredentialType(fixture.db, "oidc")
 	var exchanges atomic.Int32
 	client := &http.Client{Timeout: time.Second, Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 		exchanges.Add(1)
@@ -331,6 +331,13 @@ func TestAuthRefreshCoordinatorRegistrationTypeMismatchFailsClosed(t *testing.T)
 	}
 	if exchanges.Load() != 0 {
 		t.Fatalf("mismatched registration type made %d provider calls", exchanges.Load())
+	}
+}
+
+// setResolverApplicationCredentialType changes only the application family metadata used by mismatch tests.
+func setResolverApplicationCredentialType(db *resolverMockStore, credentialType string) {
+	for index := range db.secrets {
+		db.secrets[index].CredentialType = credentialType
 	}
 }
 
@@ -638,8 +645,8 @@ func newAuthRefreshCoordinatorFixture(t *testing.T, now time.Time, expiresIn tim
 	masterKey := []byte("12345678901234567890123456789012")
 	connection := encryptedAuthConnection(t, masterKey, bucketID, serviceID, "user-1", "old-access", "old-refresh", now.Add(expiresIn))
 	connection.ServiceVersionID = versionID
-	config := encryptedResolverConnectConfig(t, masterKey, bucketID, serviceID)
-	db := &resolverMockStore{authConnection: &connection, connectConfig: &config, serviceMetadata: refreshServiceMetadata("bearerAuth")}
+	applicationSecrets := encryptedResolverApplicationSecrets(t, masterKey, bucketID, serviceID)
+	db := &resolverMockStore{authConnection: &connection, secrets: applicationSecrets, serviceMetadata: refreshServiceMetadata("bearerAuth")}
 	return authRefreshCoordinatorFixture{db: db, masterKey: masterKey, connection: connection, versionID: versionID, now: now}
 }
 

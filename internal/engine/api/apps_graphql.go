@@ -54,6 +54,7 @@ var appSelectionGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"webhook_select_all": &graphql.Field{Type: graphql.NewNonNull(graphql.Boolean)},
 		"auth_type":          &graphql.Field{Type: graphql.String},
 		"auth_name":          &graphql.Field{Type: graphql.String},
+		"auth_ref":           &graphql.Field{Type: graphql.String},
 		"required_auth":      &graphql.Field{Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(appRequiredAuthGraphQLType)))},
 		"connect_scopes":     &graphql.Field{Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(graphql.String)))},
 		"injections":         &graphql.Field{Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(appInjectionGraphQLType)))},
@@ -341,6 +342,7 @@ func appFragmentRequestsDownloads(spread *ast.FragmentSpread, fragments map[stri
 	return appSelectionRequestsDownloads(fragment.SelectionSet, fragments, visiting)
 }
 
+// appSelectionFields projects immutable public app policy while keeping internal credential-source IDs private.
 func appSelectionFields(item store.AppCatalogItem) []map[string]interface{} {
 	selections := make([]map[string]interface{}, 0, len(item.Selections))
 	for _, selection := range item.Selections {
@@ -353,6 +355,7 @@ func appSelectionFields(item store.AppCatalogItem) []map[string]interface{} {
 			webhookIDs = append(webhookIDs, id.String())
 		}
 		serviceVersionID := ""
+		// A missing version is retained as empty diagnostic data rather than fabricated from current Registry state.
 		if selection.ServiceVersionID != uuid.Nil {
 			serviceVersionID = selection.ServiceVersionID.String()
 		}
@@ -362,7 +365,7 @@ func appSelectionFields(item store.AppCatalogItem) []map[string]interface{} {
 			"endpoint_ids":   endpointIDs, "operation_names": nonNilStrings(selection.OperationNames),
 			"webhook_ids": webhookIDs, "webhook_names": nonNilStrings(selection.WebhookNames),
 			"select_all": selection.SelectAll, "webhook_select_all": selection.WebhookSelectAll,
-			"auth_type": selection.AuthType, "auth_name": selection.AuthName,
+			"auth_type": selection.AuthType, "auth_name": selection.AuthName, "auth_ref": selection.AuthRef,
 			"required_auth":  appRequiredAuthFields(selection.RequiredAuth),
 			"connect_scopes": nonNilStrings(selection.ConnectScopes), "injections": appInjectionFields(selection.Injections),
 		})

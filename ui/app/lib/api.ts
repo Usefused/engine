@@ -1056,7 +1056,7 @@ export interface BucketSummary extends Bucket {
 
 export interface BucketConnectSummary {
   bucket_id: string;
-  connect_config_count: number;
+  application_credential_count: number;
   connected_user_count: number;
 }
 
@@ -1078,7 +1078,7 @@ export interface BucketServiceSummary {
   service_name: string;
   secret_count: number;
   value_count: number;
-  connect_config_count: number;
+  application_credential_count: number;
   connected_user_count: number;
 }
 

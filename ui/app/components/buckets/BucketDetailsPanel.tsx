@@ -363,8 +363,8 @@ function BucketConnectUsage({
         </span>
         <span className="inline-flex items-center gap-1.5 text-amber-800">
           <ShieldCheck className="h-4 w-4" />
-          {summary.connect_config_count} config
-          {summary.connect_config_count === 1 ? "" : "s"}
+          {summary.application_credential_count} OAuth app
+          {summary.application_credential_count === 1 ? "" : "s"}
         </span>
         <span className="inline-flex items-center gap-1.5 text-amber-800">
           <Users className="h-4 w-4" />
@@ -383,7 +383,8 @@ function BucketConnectUsage({
 }
 
 function hasConnectUsage(summary: BucketConnectSummary): boolean {
-  return summary.connect_config_count > 0 || summary.connected_user_count > 0;
+  // Application credentials and user grants are independent reasons to show connection state.
+  return summary.application_credential_count > 0 || summary.connected_user_count > 0;
 }
 
 function bucketDeleteDisabledReason(

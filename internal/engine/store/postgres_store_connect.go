@@ -11,109 +11,23 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const connectConfigColumns = `
-	id,  bucket_id, service_id, auth_type, auth_name, enabled,
-	encrypted_dek, encrypted_client_id, encrypted_client_secret, redirect_uri,
-	created_at, updated_at`
-
 const authConnectionColumns = `
 	id,  bucket_id, service_id, service_version_id, end_user_ref, created_by_app_id,
-	auth_type, auth_name, encrypted_dek, access_token, refresh_token, id_token, token_type,
+	auth_type, auth_name, credential_source_service_id, credential_source_auth_type, credential_source_auth_name,
+	encrypted_dek, access_token, refresh_token, id_token, token_type,
 	scopes, scope_source, issuer, subject, identity_claims, expires_at, refresh_token_expires_at, last_used_at,
 	last_refresh_attempt_at, last_refreshed_at, refresh_retry_not_before, refresh_state,
 	last_failure_code, last_failure_at, last_failure_trace_id, created_at, updated_at`
 
 const connectSessionColumns = `
-	id,  bucket_id, service_id, service_version_id, auth_type, auth_name, end_user_ref, state_hash,
-	nonce_hash, encrypted_dek, pkce_verifier, created_by_app_id, return_url, resource_input, requested_scopes, expires_at, used_at, created_at`
+	id,  bucket_id, service_id, service_version_id, auth_type, auth_name,
+	credential_source_service_id, credential_source_auth_type, credential_source_auth_name, end_user_ref, state_hash,
+	nonce_hash, encrypted_dek, pkce_verifier, redirect_uri, created_by_app_id, return_url, resource_input, requested_scopes, expires_at, used_at, created_at`
 
 const connectInputSessionColumns = `
-	id, bucket_id, service_id, auth_type, auth_name, contract_hash, end_user_ref, token_hash,
+	id, bucket_id, service_id, auth_type, auth_name,
+	credential_source_service_id, credential_source_auth_type, credential_source_auth_name, contract_hash, end_user_ref, token_hash,
 	created_by_app_id, return_url, resource_input, requested_scopes, expires_at, used_at, created_at`
-
-func (s *postgresStore) UpsertConnectConfig(ctx context.Context, cfg ConnectConfig) (*ConnectConfig, error) {
-	if err := validateConnectConfigMaterial(cfg); err != nil {
-		return nil, err
-	}
-	query := `
-		INSERT INTO fused_connect_configs (
-			bucket_id, service_id, auth_type, auth_name, enabled,
-			encrypted_dek, encrypted_client_id, encrypted_client_secret, redirect_uri
-		)
-		SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9
-		FROM fused_buckets b
-		WHERE b.id = $1
-		ON CONFLICT ON CONSTRAINT uq_fused_connect_configs
-		DO UPDATE SET
-			auth_type = EXCLUDED.auth_type,
-			auth_name = EXCLUDED.auth_name,
-			enabled = EXCLUDED.enabled,
-			encrypted_dek = EXCLUDED.encrypted_dek,
-			encrypted_client_id = EXCLUDED.encrypted_client_id,
-			encrypted_client_secret = EXCLUDED.encrypted_client_secret,
-			redirect_uri = EXCLUDED.redirect_uri,
-			updated_at = NOW()
-		RETURNING ` + connectConfigColumns
-	return scanConnectConfig(s.db.QueryRow(ctx, query,
-		cfg.BucketID, cfg.ServiceID, cfg.AuthType, cfg.AuthName, cfg.Enabled,
-		cfg.EncryptedDEK, cfg.EncryptedClientID, cfg.EncryptedClientSecret, cfg.RedirectURI,
-	))
-}
-
-func (s *postgresStore) GetConnectConfig(ctx context.Context, bucketID, serviceID uuid.UUID) (*ConnectConfig, error) {
-	query := `SELECT ` + connectConfigColumns + ` FROM fused_connect_configs WHERE bucket_id = $1 AND service_id = $2`
-	cfg, err := scanConnectConfig(s.db.QueryRow(ctx, query, bucketID, serviceID))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
-	return cfg, err
-}
-
-func (s *postgresStore) ListConnectConfigsForBucket(ctx context.Context, bucketID uuid.UUID) ([]ConnectConfig, error) {
-	query := `SELECT ` + connectConfigColumns + ` FROM fused_connect_configs WHERE bucket_id = $1 ORDER BY created_at DESC`
-	rows, err := s.db.Query(ctx, query, bucketID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return collectConnectConfigs(rows)
-}
-
-func (s *postgresStore) ListConnectConfigsForService(ctx context.Context, serviceID uuid.UUID) ([]ConnectConfig, error) {
-	query := `SELECT ` + connectConfigColumns + ` FROM fused_connect_configs
-		WHERE service_id = $1
-		ORDER BY updated_at DESC, id DESC`
-	rows, err := s.db.Query(ctx, query, serviceID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return collectConnectConfigs(rows)
-}
-
-// ListWorkspaceConnectConfigs returns every bucket-owned connect config in one
-// SQL read. Service activation is intentionally not a filter here: buckets can
-// hold credentials before an app chooses the service, and sync must not
-// hide that material.
-func (s *postgresStore) ListWorkspaceConnectConfigs(ctx context.Context) ([]WorkspaceConnectConfig, error) {
-	query := `SELECT ` + prefixedConnectConfigColumns("configs") + `, buckets.name
-		FROM fused_connect_configs configs
-		JOIN fused_buckets buckets ON buckets.id = configs.bucket_id 
-		
-		ORDER BY configs.service_id, configs.updated_at DESC, configs.id DESC`
-	rows, err := s.db.Query(ctx, query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return collectWorkspaceConnectConfigs(rows)
-}
-
-// prefixedConnectConfigColumns keeps joined connect-config reads aligned with
-// the canonical scanner while avoiding ambiguous column names in SQL joins.
-func prefixedConnectConfigColumns(alias string) string {
-	return prefixedColumns(connectConfigColumns, alias)
-}
 
 // prefixedAuthConnectionColumns qualifies the canonical credential projection
 // used inside UPDATE CTEs where unqualified RETURNING names are ambiguous.
@@ -137,10 +51,16 @@ func (s *postgresStore) GetBucketConnectSummary(ctx context.Context, bucketID uu
 	query := `
 		SELECT
 			$1::uuid AS bucket_id,
-			(SELECT COUNT(*) FROM fused_connect_configs WHERE bucket_id = $1) AS connect_config_count,
+			(SELECT COUNT(*) FROM (
+				SELECT service_id, credential_type, REGEXP_REPLACE(key_name, '_(client_id|client_secret)$', '')
+				FROM fused_workspace_secrets
+				WHERE bucket_id = $1 AND credential_type IN ('oauth', 'oidc')
+				GROUP BY service_id, credential_type, REGEXP_REPLACE(key_name, '_(client_id|client_secret)$', '')
+				HAVING COUNT(DISTINCT key_name) = 2
+			) application_credentials) AS application_credential_count,
 			(SELECT COUNT(DISTINCT end_user_ref) FROM fused_auth_connections WHERE bucket_id = $1) AS connected_user_count`
 	var summary BucketConnectSummary
-	err := s.db.QueryRow(ctx, query, bucketID).Scan(&summary.BucketID, &summary.ConnectConfigCount, &summary.ConnectedUserCount)
+	err := s.db.QueryRow(ctx, query, bucketID).Scan(&summary.BucketID, &summary.ApplicationCredentialCount, &summary.ConnectedUserCount)
 	if err != nil {
 		return nil, err
 	}
@@ -150,6 +70,10 @@ func (s *postgresStore) GetBucketConnectSummary(ctx context.Context, bucketID uu
 // UpsertAuthConnection writes standalone credential refreshes through the same
 // validated row helper used by callback transactions.
 func (s *postgresStore) UpsertAuthConnection(ctx context.Context, conn AuthConnection) (*AuthConnection, error) {
+	// Direct callers are normalized to target-owned credentials before the non-null persistence boundary.
+	if !normalizeAuthConnectionCredentialSource(&conn) {
+		return nil, ErrInvalidEncryptedAuthMaterial
+	}
 	if err := validateAuthConnectionMaterial(conn); err != nil {
 		return nil, err
 	}
@@ -167,12 +91,13 @@ func upsertAuthConnectionRow(ctx context.Context, querier authConnectionRowQueri
 	query := `
 		INSERT INTO fused_auth_connections (
 			bucket_id, service_id, service_version_id, end_user_ref, created_by_app_id,
-			auth_type, auth_name, encrypted_dek, access_token, refresh_token, id_token,
+			auth_type, auth_name, credential_source_service_id, credential_source_auth_type, credential_source_auth_name,
+			encrypted_dek, access_token, refresh_token, id_token,
 			token_type, scopes, scope_source, issuer, subject, identity_claims, expires_at, refresh_token_expires_at,
 			refresh_state, last_failure_code, last_failure_at, last_failure_trace_id
 		)
-		SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18, $19,
-		       $20, $21, $22, $23
+		SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::jsonb, $21, $22,
+		       $23, $24, $25, $26
 		FROM fused_buckets b
 		WHERE b.id = $1
 		ON CONFLICT ON CONSTRAINT uq_fused_auth_connections
@@ -181,6 +106,9 @@ func upsertAuthConnectionRow(ctx context.Context, querier authConnectionRowQueri
 			created_by_app_id = EXCLUDED.created_by_app_id,
 			auth_type = EXCLUDED.auth_type,
 			auth_name = EXCLUDED.auth_name,
+			credential_source_service_id = EXCLUDED.credential_source_service_id,
+			credential_source_auth_type = EXCLUDED.credential_source_auth_type,
+			credential_source_auth_name = EXCLUDED.credential_source_auth_name,
 			encrypted_dek = EXCLUDED.encrypted_dek,
 			access_token = EXCLUDED.access_token,
 			refresh_token = EXCLUDED.refresh_token,
@@ -204,7 +132,8 @@ func upsertAuthConnectionRow(ctx context.Context, querier authConnectionRowQueri
 		RETURNING ` + authConnectionColumns
 	return scanAuthConnection(querier.QueryRow(ctx, query,
 		conn.BucketID, conn.ServiceID, uuidOrNil(conn.ServiceVersionID), conn.EndUserRef, uuidOrNil(conn.CreatedByAppID),
-		conn.AuthType, conn.AuthName, conn.EncryptedDEK, conn.EncryptedAccessToken, emptyStringOrNil(conn.EncryptedRefreshToken), emptyStringOrNil(conn.EncryptedIDToken),
+		conn.AuthType, conn.AuthName, conn.CredentialSourceServiceID, conn.CredentialSourceAuthType, conn.CredentialSourceAuthName,
+		conn.EncryptedDEK, conn.EncryptedAccessToken, emptyStringOrNil(conn.EncryptedRefreshToken), emptyStringOrNil(conn.EncryptedIDToken),
 		defaultString(conn.TokenType, "Bearer"), nonNilStrings(conn.Scopes), defaultString(conn.ScopeSource, "none"), conn.Issuer, conn.Subject,
 		jsonObjectBytes(conn.IdentityClaims), conn.ExpiresAt, conn.RefreshTokenExpiresAt, defaultString(conn.RefreshState, "ok"),
 		conn.LastFailureCode, conn.LastFailureAt, conn.LastFailureTraceID,
@@ -497,7 +426,12 @@ type connectQueryRower interface {
 // insertConnectSession accepts either the pool or an existing transaction so
 // form-token consumption can be atomic without duplicating insert SQL.
 func insertConnectSession(ctx context.Context, db connectQueryRower, session ConnectSession) (*ConnectSession, error) {
-	if session.ServiceVersionID == uuid.Nil || strings.TrimSpace(session.AuthType) == "" || strings.TrimSpace(session.AuthName) == "" {
+	// Every callback row carries complete source identity so later process state is never consulted.
+	if !normalizeConnectSessionCredentialSource(&session) {
+		return nil, ErrInvalidEncryptedAuthMaterial
+	}
+	// A callback URI is part of the immutable browser handoff and cannot be reconstructed from later process state.
+	if session.ServiceVersionID == uuid.Nil || strings.TrimSpace(session.AuthType) == "" || strings.TrimSpace(session.AuthName) == "" || strings.TrimSpace(session.RedirectURI) == "" {
 		return nil, ErrInvalidEncryptedAuthMaterial
 	}
 	if session.EncryptedPKCEVerifier != "" && (!looksWrappedDEK(session.EncryptedDEK) || !looksEncryptedValue(session.EncryptedPKCEVerifier)) {
@@ -505,16 +439,18 @@ func insertConnectSession(ctx context.Context, db connectQueryRower, session Con
 	}
 	query := `
 		INSERT INTO fused_connect_sessions (
-			bucket_id, service_id, service_version_id, auth_type, auth_name, end_user_ref, state_hash,
-			nonce_hash, encrypted_dek, pkce_verifier, created_by_app_id, return_url, resource_input, requested_scopes, expires_at
+			bucket_id, service_id, service_version_id, auth_type, auth_name,
+			credential_source_service_id, credential_source_auth_type, credential_source_auth_name, end_user_ref, state_hash,
+			nonce_hash, encrypted_dek, pkce_verifier, redirect_uri, created_by_app_id, return_url, resource_input, requested_scopes, expires_at
 			)
-			SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+			SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
 			FROM fused_buckets b
 			WHERE b.id = $1
 			RETURNING ` + connectSessionColumns
 	return scanConnectSession(db.QueryRow(ctx, query,
-		session.BucketID, session.ServiceID, session.ServiceVersionID, session.AuthType, session.AuthName, session.EndUserRef,
-		session.StateHash, session.NonceHash, session.EncryptedDEK, session.EncryptedPKCEVerifier,
+		session.BucketID, session.ServiceID, session.ServiceVersionID, session.AuthType, session.AuthName,
+		session.CredentialSourceServiceID, session.CredentialSourceAuthType, session.CredentialSourceAuthName, session.EndUserRef,
+		session.StateHash, session.NonceHash, session.EncryptedDEK, session.EncryptedPKCEVerifier, session.RedirectURI,
 		uuidOrNil(session.CreatedByAppID), session.ReturnURL, jsonObjectBytes(session.ResourceInputJSON), session.RequestedScopes, session.ExpiresAt,
 	))
 }
@@ -542,17 +478,23 @@ func (s *postgresStore) MarkConnectSessionUsed(ctx context.Context, stateHash st
 // CreateConnectInputSession stores the pre-authorisation browser handoff under
 // a hash, keeping its raw bearer token exclusively in the returned URL.
 func (s *postgresStore) CreateConnectInputSession(ctx context.Context, session ConnectInputSession) (*ConnectInputSession, error) {
+	// Pending hosted forms preserve the source selected before any browser handoff.
+	if !normalizeConnectInputCredentialSource(&session) {
+		return nil, ErrInvalidEncryptedAuthMaterial
+	}
 	query := `
 		INSERT INTO fused_connect_input_sessions (
-			bucket_id, service_id, auth_type, auth_name, contract_hash, end_user_ref, token_hash,
+			bucket_id, service_id, auth_type, auth_name,
+			credential_source_service_id, credential_source_auth_type, credential_source_auth_name, contract_hash, end_user_ref, token_hash,
 			created_by_app_id, return_url, resource_input, requested_scopes, expires_at
 		)
-		SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+		SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
 		FROM fused_buckets b
 		WHERE b.id = $1
 		RETURNING ` + connectInputSessionColumns
 	return scanConnectInputSession(s.db.QueryRow(ctx, query,
-		session.BucketID, session.ServiceID, session.AuthType, session.AuthName, session.ContractHash,
+		session.BucketID, session.ServiceID, session.AuthType, session.AuthName,
+		session.CredentialSourceServiceID, session.CredentialSourceAuthType, session.CredentialSourceAuthName, session.ContractHash,
 		session.EndUserRef, session.TokenHash, uuidOrNil(session.CreatedByAppID),
 		session.ReturnURL, jsonObjectBytes(session.ResourceInputJSON), session.RequestedScopes, session.ExpiresAt,
 	))
@@ -574,6 +516,10 @@ func (s *postgresStore) GetActiveConnectInputSessionByTokenHash(ctx context.Cont
 // cannot mint a second authorization request, while insertion failure leaves
 // the input session retryable.
 func (s *postgresStore) CompleteConnectInputSession(ctx context.Context, tokenHash, contractHash string, usedAt time.Time, session ConnectSession) (*ConnectSession, error) {
+	// Direct completions normalize before the SQL identity comparison so the form cannot swap credential ownership.
+	if !normalizeConnectSessionCredentialSource(&session) {
+		return nil, ErrInvalidEncryptedAuthMaterial
+	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -593,13 +539,17 @@ func (s *postgresStore) CompleteConnectInputSession(ctx context.Context, tokenHa
 		  AND service_id = $4
 		  AND auth_type = $5
 		  AND auth_name = $6
-		  AND end_user_ref = $7
-		  AND created_by_app_id IS NOT DISTINCT FROM $8
-		  AND return_url = $9
-		  AND requested_scopes = $10
-		  AND contract_hash = $11`,
+		  AND credential_source_service_id = $7
+		  AND credential_source_auth_type = $8
+		  AND credential_source_auth_name = $9
+		  AND end_user_ref = $10
+		  AND created_by_app_id IS NOT DISTINCT FROM $11
+		  AND return_url = $12
+		  AND requested_scopes = $13
+		  AND contract_hash = $14`,
 		tokenHash, usedAt, session.BucketID, session.ServiceID, session.AuthType,
-		session.AuthName, session.EndUserRef, uuidOrNil(session.CreatedByAppID),
+		session.AuthName, session.CredentialSourceServiceID, session.CredentialSourceAuthType, session.CredentialSourceAuthName,
+		session.EndUserRef, uuidOrNil(session.CreatedByAppID),
 		session.ReturnURL, session.RequestedScopes, contractHash,
 	)
 	if err != nil {
@@ -646,50 +596,6 @@ type rowsScanner interface {
 	Err() error
 }
 
-func scanConnectConfig(row rowScanner) (*ConnectConfig, error) {
-	var cfg ConnectConfig
-	err := row.Scan(
-		&cfg.ID, &cfg.BucketID, &cfg.ServiceID, &cfg.AuthType, &cfg.AuthName, &cfg.Enabled,
-		&cfg.EncryptedDEK, &cfg.EncryptedClientID, &cfg.EncryptedClientSecret, &cfg.RedirectURI,
-		&cfg.CreatedAt, &cfg.UpdatedAt,
-	)
-	return &cfg, err
-}
-
-func collectConnectConfigs(rows rowsScanner) ([]ConnectConfig, error) {
-	var configs []ConnectConfig
-	for rows.Next() {
-		cfg, err := scanConnectConfig(rows)
-		if err != nil {
-			return nil, err
-		}
-		configs = append(configs, *cfg)
-	}
-	return configs, rows.Err()
-}
-
-// collectWorkspaceConnectConfigs scans the export projection without exposing
-// encrypted fields outside the store layer.
-func collectWorkspaceConnectConfigs(rows rowsScanner) ([]WorkspaceConnectConfig, error) {
-	var configs []WorkspaceConnectConfig
-	// Rows are already workspace- and activation-scoped by SQL, so this loop
-	// only maps result rows and performs no application-side filtering.
-	for rows.Next() {
-		var config WorkspaceConnectConfig
-		err := rows.Scan(
-			&config.ID, &config.BucketID, &config.ServiceID,
-			&config.AuthType, &config.AuthName, &config.Enabled, &config.EncryptedDEK,
-			&config.EncryptedClientID, &config.EncryptedClientSecret,
-			&config.RedirectURI, &config.CreatedAt, &config.UpdatedAt, &config.BucketName,
-		)
-		if err != nil {
-			return nil, err
-		}
-		configs = append(configs, config)
-	}
-	return configs, rows.Err()
-}
-
 // scanAuthConnection reads the canonical credential projection without private
 // lease suffix fields used by worker claims.
 func scanAuthConnection(row rowScanner) (*AuthConnection, error) {
@@ -704,7 +610,8 @@ func scanAuthConnectionWithSuffix(row rowScanner, suffix ...any) (*AuthConnectio
 	var refreshToken, idToken *string
 	targets := []any{
 		&conn.ID, &conn.BucketID, &conn.ServiceID, &serviceVersionID, &conn.EndUserRef, &createdBy,
-		&conn.AuthType, &conn.AuthName, &conn.EncryptedDEK, &conn.EncryptedAccessToken, &refreshToken, &idToken, &conn.TokenType,
+		&conn.AuthType, &conn.AuthName, &conn.CredentialSourceServiceID, &conn.CredentialSourceAuthType, &conn.CredentialSourceAuthName,
+		&conn.EncryptedDEK, &conn.EncryptedAccessToken, &refreshToken, &idToken, &conn.TokenType,
 		&conn.Scopes, &conn.ScopeSource, &conn.Issuer, &conn.Subject, &conn.IdentityClaims, &conn.ExpiresAt, &conn.RefreshTokenExpiresAt, &conn.LastUsedAt,
 		&conn.LastRefreshAttemptAt, &conn.LastRefreshedAt, &conn.RefreshRetryNotBefore,
 		&conn.RefreshState, &conn.LastFailureCode, &conn.LastFailureAt, &conn.LastFailureTraceID, &conn.CreatedAt, &conn.UpdatedAt,
@@ -769,8 +676,9 @@ func scanConnectSession(row rowScanner) (*ConnectSession, error) {
 	var session ConnectSession
 	var createdBy, serviceVersionID *uuid.UUID
 	err := row.Scan(
-		&session.ID, &session.BucketID, &session.ServiceID, &serviceVersionID, &session.AuthType, &session.AuthName, &session.EndUserRef,
-		&session.StateHash, &session.NonceHash, &session.EncryptedDEK, &session.EncryptedPKCEVerifier, &createdBy,
+		&session.ID, &session.BucketID, &session.ServiceID, &serviceVersionID, &session.AuthType, &session.AuthName,
+		&session.CredentialSourceServiceID, &session.CredentialSourceAuthType, &session.CredentialSourceAuthName, &session.EndUserRef,
+		&session.StateHash, &session.NonceHash, &session.EncryptedDEK, &session.EncryptedPKCEVerifier, &session.RedirectURI, &createdBy,
 		&session.ReturnURL, &session.ResourceInputJSON, &session.RequestedScopes, &session.ExpiresAt, &session.UsedAt, &session.CreatedAt,
 	)
 	if createdBy != nil {
@@ -788,7 +696,8 @@ func scanConnectInputSession(row rowScanner) (*ConnectInputSession, error) {
 	var session ConnectInputSession
 	var createdBy *uuid.UUID
 	err := row.Scan(
-		&session.ID, &session.BucketID, &session.ServiceID, &session.AuthType, &session.AuthName, &session.ContractHash,
+		&session.ID, &session.BucketID, &session.ServiceID, &session.AuthType, &session.AuthName,
+		&session.CredentialSourceServiceID, &session.CredentialSourceAuthType, &session.CredentialSourceAuthName, &session.ContractHash,
 		&session.EndUserRef, &session.TokenHash, &createdBy, &session.ReturnURL,
 		&session.ResourceInputJSON, &session.RequestedScopes, &session.ExpiresAt, &session.UsedAt, &session.CreatedAt,
 	)
@@ -798,15 +707,91 @@ func scanConnectInputSession(row rowScanner) (*ConnectInputSession, error) {
 	return &session, err
 }
 
-func validateConnectConfigMaterial(cfg ConnectConfig) error {
-	if strings.TrimSpace(cfg.AuthName) == "" || !looksWrappedDEK(cfg.EncryptedDEK) ||
-		!looksEncryptedValue(cfg.EncryptedClientID) ||
-		!looksEncryptedValue(cfg.EncryptedClientSecret) {
-		return ErrInvalidEncryptedAuthMaterial
+// normalizeAuthConnectionCredentialSource makes direct grants explicit and rejects partial or cross-family references.
+func normalizeAuthConnectionCredentialSource(conn *AuthConnection) bool {
+	serviceID, authType, authName, ok := normalizedApplicationCredentialSource(
+		conn.ServiceID, conn.AuthType, conn.AuthName,
+		conn.CredentialSourceServiceID, conn.CredentialSourceAuthType, conn.CredentialSourceAuthName,
+	)
+	// Invalid source identity must fail before encrypted material reaches SQL.
+	if !ok {
+		return false
 	}
-	return nil
+	conn.CredentialSourceServiceID = serviceID
+	conn.CredentialSourceAuthType = authType
+	conn.CredentialSourceAuthName = authName
+	return true
 }
 
+// normalizeConnectSessionCredentialSource makes callback credential routing self-contained.
+func normalizeConnectSessionCredentialSource(session *ConnectSession) bool {
+	serviceID, authType, authName, ok := normalizedApplicationCredentialSource(
+		session.ServiceID, session.AuthType, session.AuthName,
+		session.CredentialSourceServiceID, session.CredentialSourceAuthType, session.CredentialSourceAuthName,
+	)
+	// Invalid source identity cannot be repaired after the provider browser redirect.
+	if !ok {
+		return false
+	}
+	session.CredentialSourceServiceID = serviceID
+	session.CredentialSourceAuthType = authType
+	session.CredentialSourceAuthName = authName
+	return true
+}
+
+// normalizeConnectInputCredentialSource pins hosted-form routing before any OAuth state exists.
+func normalizeConnectInputCredentialSource(session *ConnectInputSession) bool {
+	serviceID, authType, authName, ok := normalizedApplicationCredentialSource(
+		session.ServiceID, session.AuthType, session.AuthName,
+		session.CredentialSourceServiceID, session.CredentialSourceAuthType, session.CredentialSourceAuthName,
+	)
+	// A malformed source must not create a one-time browser capability.
+	if !ok {
+		return false
+	}
+	session.CredentialSourceServiceID = serviceID
+	session.CredentialSourceAuthType = authType
+	session.CredentialSourceAuthName = authName
+	return true
+}
+
+// normalizedApplicationCredentialSource returns one complete same-family source, defaulting direct rows to the target.
+func normalizedApplicationCredentialSource(targetServiceID uuid.UUID, targetAuthType, targetAuthName string, sourceServiceID uuid.UUID, sourceAuthType, sourceAuthName string) (uuid.UUID, string, string, bool) {
+	targetType := canonicalApplicationAuthType(targetAuthType)
+	targetName := strings.TrimSpace(targetAuthName)
+	// Connect storage admits only complete OAuth/OIDC target identity.
+	if !validApplicationCredentialTarget(targetServiceID, targetType, targetName) {
+		return uuid.Nil, "", "", false
+	}
+	sourceType := strings.TrimSpace(sourceAuthType)
+	sourceName := strings.TrimSpace(sourceAuthName)
+	// Omitted source fields are the direct target-owned credential case.
+	if applicationCredentialSourceOmitted(sourceServiceID, sourceType, sourceName) {
+		return targetServiceID, targetType, targetName, true
+	}
+	// Reference identity is atomic and may not cross the target OAuth/OIDC family.
+	if !validReferencedApplicationCredentialSource(sourceServiceID, sourceType, sourceName, targetType) {
+		return uuid.Nil, "", "", false
+	}
+	return sourceServiceID, targetType, sourceName, true
+}
+
+// validApplicationCredentialTarget requires one exact target identity before direct or referenced routing is considered.
+func validApplicationCredentialTarget(serviceID uuid.UUID, authType, authName string) bool {
+	return serviceID != uuid.Nil && authType != "" && authName != ""
+}
+
+// applicationCredentialSourceOmitted identifies the deliberate direct-registration representation.
+func applicationCredentialSourceOmitted(serviceID uuid.UUID, authType, authName string) bool {
+	return serviceID == uuid.Nil && authType == "" && authName == ""
+}
+
+// validReferencedApplicationCredentialSource enforces atomic source identity within the target OAuth/OIDC family.
+func validReferencedApplicationCredentialSource(serviceID uuid.UUID, authType, authName, targetAuthType string) bool {
+	return serviceID != uuid.Nil && authType != "" && authName != "" && canonicalApplicationAuthType(authType) == targetAuthType
+}
+
+// validateAuthConnectionMaterial rejects incomplete encrypted grants before persistence.
 func validateAuthConnectionMaterial(conn AuthConnection) error {
 	if strings.TrimSpace(conn.AuthName) == "" || !looksWrappedDEK(conn.EncryptedDEK) || !looksEncryptedValue(conn.EncryptedAccessToken) {
 		return ErrInvalidEncryptedAuthMaterial

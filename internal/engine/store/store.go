@@ -24,8 +24,6 @@ var (
 	ErrInvalidAuthConnectionRefreshClaim = errors.New("invalid auth connection refresh claim")
 	ErrConnectSessionUnavailable         = errors.New("connect session not found or already used")
 	ErrInvalidEncryptedAuthMaterial      = errors.New("invalid encrypted auth material")
-	ErrWorkspaceAuthReferenceInvalid     = errors.New("workspace auth reference is invalid or unavailable")
-	ErrWorkspaceAuthReferenceInUse       = errors.New("workspace auth credential is referenced by another service")
 
 	// App-family errors
 	ErrAppFamilyNotFound      = errors.New("app family not found")
@@ -337,9 +335,9 @@ type BucketSummary struct {
 }
 
 type BucketConnectSummary struct {
-	BucketID           uuid.UUID
-	ConnectConfigCount int
-	ConnectedUserCount int
+	BucketID                   uuid.UUID
+	ApplicationCredentialCount int
+	ConnectedUserCount         int
 }
 
 const (
@@ -366,12 +364,12 @@ func DefaultConnectBranding() ConnectBranding {
 }
 
 type BucketServiceSummary struct {
-	ServiceID          uuid.UUID
-	ServiceName        string
-	SecretCount        int
-	ValueCount         int
-	ConnectConfigCount int
-	ConnectedUserCount int
+	ServiceID                  uuid.UUID
+	ServiceName                string
+	SecretCount                int
+	ValueCount                 int
+	ApplicationCredentialCount int
+	ConnectedUserCount         int
 }
 
 type BucketValue struct {
@@ -614,10 +612,13 @@ type WorkspaceSecret struct {
 // plan needs to validate. SecretKeys contains storage identifiers only; values
 // never cross this read-only readiness boundary.
 type AppCredentialRequirement struct {
-	ServiceID  uuid.UUID `json:"service_id"`
-	AuthType   string    `json:"auth_type"`
-	AuthName   string    `json:"auth_name"`
-	SecretKeys []string  `json:"secret_keys"`
+	ServiceID       uuid.UUID `json:"service_id"`
+	AuthType        string    `json:"auth_type"`
+	AuthName        string    `json:"auth_name"`
+	SecretKeys      []string  `json:"secret_keys"`
+	SourceServiceID uuid.UUID `json:"source_service_id,omitempty"`
+	SourceAuthType  string    `json:"source_auth_type,omitempty"`
+	SourceAuthName  string    `json:"source_auth_name,omitempty"`
 }
 
 // AppCredentialPresence reports only material that exists for one requested
@@ -650,80 +651,23 @@ type SecretKeyAlternative struct {
 	// AuthTypes carries the canonical family reviewed with each key so an
 	// immutable-version change cannot reinterpret referenced credential material.
 	AuthTypes map[string]string `json:"auth_types,omitempty"`
+	// Source fields rebase one app-owned credential family without a workspace-global reference edge.
+	SourceServiceID uuid.UUID `json:"source_service_id,omitempty"`
+	SourceAuthType  string    `json:"source_auth_type,omitempty"`
+	SourceAuthName  string    `json:"source_auth_name,omitempty"`
 }
 
-// WorkspaceAuthReference is one same-bucket, whole-credential binding. It
-// stores identities and required key names only; secret values stay in their
-// original encrypted rows and are resolved atomically at execution time.
-type WorkspaceAuthReference struct {
-	SourceServiceID uuid.UUID
-	SourceAuthType  string
-	SourceAuthName  string
-	SourceRequired  []string
-}
-
-// WorkspaceAuthBinding is the mutually-exclusive apply unit for either local
-// encrypted material or a live reference to another credential family.
-type WorkspaceAuthBinding struct {
-	BucketID        uuid.UUID
-	TargetServiceID uuid.UUID
-	TargetAuthType  string
-	TargetAuthName  string
-	TargetKeys      []string
-	Secrets         []WorkspaceSecret
-	Reference       *WorkspaceAuthReference
-	// ReconcileReferences expands replacement from one auth name to every
-	// reference edge owned by the target service in this bucket.
-	ReconcileReferences bool
-	// ClearReferences represents auth omission without granting permission to
-	// remove any directly stored credential material.
-	ClearReferences bool
-}
-
-// WorkspaceAuthBindingStore owns set-based validation and atomic replacement
-// so API and runtime code do not grow competing persistence paths.
-type WorkspaceAuthBindingStore interface {
-	PreflightWorkspaceAuthBindings(ctx context.Context, bindings []WorkspaceAuthBinding, desiredServiceIDs []uuid.UUID) error
-	ApplyWorkspaceAuthBindings(ctx context.Context, bindings []WorkspaceAuthBinding) error
-}
-
-// WorkspaceServiceBatchRemovalStore removes one desired set in a statement so
-// dependent auth-reference targets and sources can disappear atomically.
+// WorkspaceServiceBatchRemovalStore removes one desired membership set in a statement.
 type WorkspaceServiceBatchRemovalStore interface {
 	RemoveWorkspaceServices(ctx context.Context, serviceIDs []uuid.UUID) error
 }
 
-type ConnectConfig struct {
-	ID                    uuid.UUID
-	BucketID              uuid.UUID
-	ServiceID             uuid.UUID
-	AuthType              string
-	AuthName              string
-	Enabled               bool
-	EncryptedDEK          string
-	EncryptedClientID     string
-	EncryptedClientSecret string
-	RedirectURI           string
-	CreatedAt             time.Time
-	UpdatedAt             time.Time
-}
-
-// WorkspaceConnectConfig adds the bucket name needed by declarative config
-// export without teaching API projection code how to join storage identities.
-type WorkspaceConnectConfig struct {
-	ConnectConfig
-	BucketName string
-}
-
-// WorkspaceConnectSyncStore groups the two workspace-scoped exports used by
-// declarative sync. Keeping them as one capability lets wrappers preserve the
-// fixed-query contract without widening every focused Store test double.
+// WorkspaceConnectSyncStore exposes effective profile snapshots to changelog matching.
 type WorkspaceConnectSyncStore interface {
-	ListWorkspaceConnectConfigs(ctx context.Context) ([]WorkspaceConnectConfig, error)
 	// ListWorkspaceConnectProfiles returns the effective (override-if-present-
 	// else-baseline) profile for every active service version in the
 	// workspace, in one query. CLI sync (Batch 6) reads this independently of
-	// bucket connect configs, since profiles are no longer bucket-owned.
+	// bucket credential material, since profiles are no longer bucket-owned.
 	ListWorkspaceConnectProfiles(ctx context.Context) ([]WorkspaceConnectionProfile, error)
 }
 
@@ -735,31 +679,34 @@ type WorkspaceServiceCapacityStore interface {
 }
 
 type AuthConnection struct {
-	ID                    uuid.UUID
-	BucketID              uuid.UUID
-	ServiceID             uuid.UUID
-	ServiceVersionID      uuid.UUID
-	EndUserRef            string
-	CreatedByAppID        uuid.UUID
-	AuthType              string
-	AuthName              string
-	EncryptedDEK          string
-	EncryptedAccessToken  string
-	EncryptedRefreshToken string
-	EncryptedIDToken      string
-	TokenType             string
-	Scopes                []string
-	ScopeSource           string
-	Issuer                string
-	Subject               string
-	IdentityClaims        []byte
-	ExpiresAt             *time.Time
-	RefreshTokenExpiresAt *time.Time
-	LastUsedAt            *time.Time
-	LastRefreshAttemptAt  *time.Time
-	LastRefreshedAt       *time.Time
-	RefreshRetryNotBefore *time.Time
-	RefreshState          string
+	ID                        uuid.UUID
+	BucketID                  uuid.UUID
+	ServiceID                 uuid.UUID
+	ServiceVersionID          uuid.UUID
+	EndUserRef                string
+	CreatedByAppID            uuid.UUID
+	AuthType                  string
+	AuthName                  string
+	CredentialSourceServiceID uuid.UUID
+	CredentialSourceAuthType  string
+	CredentialSourceAuthName  string
+	EncryptedDEK              string
+	EncryptedAccessToken      string
+	EncryptedRefreshToken     string
+	EncryptedIDToken          string
+	TokenType                 string
+	Scopes                    []string
+	ScopeSource               string
+	Issuer                    string
+	Subject                   string
+	IdentityClaims            []byte
+	ExpiresAt                 *time.Time
+	RefreshTokenExpiresAt     *time.Time
+	LastUsedAt                *time.Time
+	LastRefreshAttemptAt      *time.Time
+	LastRefreshedAt           *time.Time
+	RefreshRetryNotBefore     *time.Time
+	RefreshState              string
 	// Failure metadata is deliberately limited to stable codes and OTEL
 	// correlation; raw provider responses and user identifiers do not belong here.
 	LastFailureCode    string
@@ -790,24 +737,28 @@ type AuthConnectionRefreshStore interface {
 }
 
 type ConnectSession struct {
-	ID                    uuid.UUID
-	BucketID              uuid.UUID
-	ServiceID             uuid.UUID
-	ServiceVersionID      uuid.UUID
-	AuthType              string
-	AuthName              string
-	EndUserRef            string
-	StateHash             string
-	NonceHash             string
-	EncryptedDEK          string
-	EncryptedPKCEVerifier string
-	CreatedByAppID        uuid.UUID
-	ReturnURL             string
-	ResourceInputJSON     []byte
-	RequestedScopes       []string
-	ExpiresAt             time.Time
-	UsedAt                *time.Time
-	CreatedAt             time.Time
+	ID                        uuid.UUID
+	BucketID                  uuid.UUID
+	ServiceID                 uuid.UUID
+	ServiceVersionID          uuid.UUID
+	AuthType                  string
+	AuthName                  string
+	CredentialSourceServiceID uuid.UUID
+	CredentialSourceAuthType  string
+	CredentialSourceAuthName  string
+	RedirectURI               string
+	EndUserRef                string
+	StateHash                 string
+	NonceHash                 string
+	EncryptedDEK              string
+	EncryptedPKCEVerifier     string
+	CreatedByAppID            uuid.UUID
+	ReturnURL                 string
+	ResourceInputJSON         []byte
+	RequestedScopes           []string
+	ExpiresAt                 time.Time
+	UsedAt                    *time.Time
+	CreatedAt                 time.Time
 }
 
 // ConnectInputSession is a one-time browser handoff used only when a caller
@@ -815,21 +766,24 @@ type ConnectSession struct {
 // is never persisted; completing this row and creating the OAuth session is
 // one atomic store operation.
 type ConnectInputSession struct {
-	ID                uuid.UUID
-	BucketID          uuid.UUID
-	ServiceID         uuid.UUID
-	AuthType          string
-	AuthName          string
-	ContractHash      string
-	EndUserRef        string
-	TokenHash         string
-	CreatedByAppID    uuid.UUID
-	ReturnURL         string
-	ResourceInputJSON []byte
-	RequestedScopes   []string
-	ExpiresAt         time.Time
-	UsedAt            *time.Time
-	CreatedAt         time.Time
+	ID                        uuid.UUID
+	BucketID                  uuid.UUID
+	ServiceID                 uuid.UUID
+	AuthType                  string
+	AuthName                  string
+	CredentialSourceServiceID uuid.UUID
+	CredentialSourceAuthType  string
+	CredentialSourceAuthName  string
+	ContractHash              string
+	EndUserRef                string
+	TokenHash                 string
+	CreatedByAppID            uuid.UUID
+	ReturnURL                 string
+	ResourceInputJSON         []byte
+	RequestedScopes           []string
+	ExpiresAt                 time.Time
+	UsedAt                    *time.Time
+	CreatedAt                 time.Time
 }
 
 // ConnectionResource is non-secret provider context discovered for one
@@ -995,10 +949,6 @@ type Store interface {
 	// Connect auth methods. User auth is bucket-attached rather than SDK-
 	// attached so newly generated SDKs can reuse connected users by linking to
 	// the same credential bucket.
-	UpsertConnectConfig(ctx context.Context, cfg ConnectConfig) (*ConnectConfig, error)
-	GetConnectConfig(ctx context.Context, bucketID, serviceID uuid.UUID) (*ConnectConfig, error)
-	ListConnectConfigsForBucket(ctx context.Context, bucketID uuid.UUID) ([]ConnectConfig, error)
-	ListConnectConfigsForService(ctx context.Context, serviceID uuid.UUID) ([]ConnectConfig, error)
 	GetBucketConnectSummary(ctx context.Context, bucketID uuid.UUID) (*BucketConnectSummary, error)
 	UpsertAuthConnection(ctx context.Context, conn AuthConnection) (*AuthConnection, error)
 	GetAuthConnection(ctx context.Context, bucketID, serviceID uuid.UUID, endUserRef, authName string) (*AuthConnection, error)

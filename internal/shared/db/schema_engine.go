@@ -10,35 +10,39 @@ import (
 )
 
 const (
-	engineMigrationAdvisoryLockKey         int64 = 0x465553454E47494E
-	engineMigrationLockQuery                     = `SELECT pg_advisory_xact_lock($1)`
-	engineMigrationVersion                 int64 = 1
-	engineMigrationName                          = "20260810_engine_schema_convergence"
-	appTokenPolicyMigrationVersion         int64 = 2
-	appTokenPolicyMigrationName                  = "20260810_app_token_policy"
-	contractEnvelopeMigrationVersion       int64 = 3
-	contractEnvelopeMigrationName                = "20260811_execution_contract_envelope"
-	idempotencyMediaMigrationVersion       int64 = 4
-	idempotencyMediaMigrationName                = "20260811_idempotency_response_media"
-	connectBrandingMigrationVersion        int64 = 5
-	connectBrandingMigrationName                 = "20260819_connect_branding"
-	connectBrandColorMigrationVersion      int64 = 6
-	connectBrandColorMigrationName               = "20260819_connect_brand_color"
-	connectBrandVioletMigrationVersion     int64 = 7
-	connectBrandVioletMigrationName              = "20260819_connect_brand_violet"
-	managedOAuthRefreshMigrationVersion    int64 = 8
-	managedOAuthRefreshMigrationName             = "20260820_managed_oauth_refresh"
-	restExecutionMigrationVersion          int64 = 9
-	restExecutionMigrationName                   = "20260820_rest_execution_transport"
-	appTokenHistoryMigrationVersion        int64 = 10
-	appTokenHistoryMigrationName                 = "20260822_app_token_history"
-	appTokenCleanupMigrationVersion        int64 = 11
-	appTokenCleanupMigrationName                 = "20260822_app_token_history_cleanup"
-	mcpSessionLifetimeMigrationVersion     int64 = 12
-	mcpSessionLifetimeMigrationName              = "20260826_mcp_session_max_lifetime"
-	workspaceAuthReferenceMigrationVersion int64 = 15
-	workspaceAuthReferenceMigrationName          = "20260826_workspace_auth_references"
-	unifiedEmptySetHash                          = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+	engineMigrationAdvisoryLockKey           int64 = 0x465553454E47494E
+	engineMigrationLockQuery                       = `SELECT pg_advisory_xact_lock($1)`
+	engineMigrationVersion                   int64 = 1
+	engineMigrationName                            = "20260810_engine_schema_convergence"
+	appTokenPolicyMigrationVersion           int64 = 2
+	appTokenPolicyMigrationName                    = "20260810_app_token_policy"
+	contractEnvelopeMigrationVersion         int64 = 3
+	contractEnvelopeMigrationName                  = "20260811_execution_contract_envelope"
+	idempotencyMediaMigrationVersion         int64 = 4
+	idempotencyMediaMigrationName                  = "20260811_idempotency_response_media"
+	connectBrandingMigrationVersion          int64 = 5
+	connectBrandingMigrationName                   = "20260819_connect_branding"
+	connectBrandColorMigrationVersion        int64 = 6
+	connectBrandColorMigrationName                 = "20260819_connect_brand_color"
+	connectBrandVioletMigrationVersion       int64 = 7
+	connectBrandVioletMigrationName                = "20260819_connect_brand_violet"
+	managedOAuthRefreshMigrationVersion      int64 = 8
+	managedOAuthRefreshMigrationName               = "20260820_managed_oauth_refresh"
+	restExecutionMigrationVersion            int64 = 9
+	restExecutionMigrationName                     = "20260820_rest_execution_transport"
+	appTokenHistoryMigrationVersion          int64 = 10
+	appTokenHistoryMigrationName                   = "20260822_app_token_history"
+	appTokenCleanupMigrationVersion          int64 = 11
+	appTokenCleanupMigrationName                   = "20260822_app_token_history_cleanup"
+	mcpSessionLifetimeMigrationVersion       int64 = 12
+	mcpSessionLifetimeMigrationName                = "20260826_mcp_session_max_lifetime"
+	workspaceAuthReferenceMigrationVersion   int64 = 15
+	workspaceAuthReferenceMigrationName            = "20260826_workspace_auth_references"
+	connectCanonicalRedirectMigrationVersion int64 = 16
+	connectCanonicalRedirectMigrationName          = "20260827_connect_canonical_redirect"
+	appCredentialSourceMigrationVersion      int64 = 17
+	appCredentialSourceMigrationName               = "20260827_app_credential_sources"
+	unifiedEmptySetHash                            = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
 )
 
 // mcpSessionLifetimeEndReasonConstraint is the frozen v12 constraint shared by
@@ -144,6 +148,8 @@ func engineMigrations() []engineMigration {
 		{Version: 13, Name: "20260826_unified_receipts_session_metadata", Queries: activityReceiptMigrationQueries()},
 		{Version: 14, Name: "20260826_generation_contract_pins", Queries: generationContractPinMigrationQueries()},
 		{Version: workspaceAuthReferenceMigrationVersion, Name: workspaceAuthReferenceMigrationName, Queries: workspaceAuthReferenceMigrationQueries()},
+		{Version: connectCanonicalRedirectMigrationVersion, Name: connectCanonicalRedirectMigrationName, Queries: connectCanonicalRedirectMigrationQueries()},
+		{Version: appCredentialSourceMigrationVersion, Name: appCredentialSourceMigrationName, Queries: appCredentialSourceMigrationQueries()},
 	}
 }
 
@@ -195,6 +201,13 @@ func engineSchemaQueries() []string {
 			version    bigint PRIMARY KEY,
 			name       text NOT NULL UNIQUE CHECK (name <> ''),
 			applied_at timestamptz NOT NULL DEFAULT NOW()
+		);`,
+		// Sensitive migrations run after master-key loading and keep a permanent immutable ledger.
+		`CREATE TABLE IF NOT EXISTS fused_sensitive_data_migrations (
+			version bigint PRIMARY KEY,
+			name text NOT NULL UNIQUE,
+			rows_migrated bigint NOT NULL DEFAULT 0,
+			completed_at timestamptz NOT NULL DEFAULT NOW()
 		);`,
 
 		// Control-plane subjects are deliberately independent of Registry
@@ -506,6 +519,9 @@ func engineSchemaQueries() []string {
 			created_by_app_id       uuid,
 			auth_type          text NOT NULL,
 			auth_name          text NOT NULL,
+			credential_source_service_id uuid NOT NULL,
+			credential_source_auth_type text NOT NULL,
+			credential_source_auth_name text NOT NULL,
 			encrypted_dek      text NOT NULL,
 			access_token       text NOT NULL,
 			refresh_token      text,
@@ -593,11 +609,15 @@ func engineSchemaQueries() []string {
 				service_version_id uuid NOT NULL,
 				auth_type          text NOT NULL,
 				auth_name          text NOT NULL,
+				credential_source_service_id uuid NOT NULL,
+				credential_source_auth_type text NOT NULL,
+				credential_source_auth_name text NOT NULL,
 				end_user_ref       text NOT NULL,
 				state_hash         text NOT NULL UNIQUE,
 				nonce_hash         text NOT NULL DEFAULT '',
 				encrypted_dek      text NOT NULL DEFAULT '',
 				pkce_verifier      text NOT NULL DEFAULT '',
+				redirect_uri       text NOT NULL DEFAULT '',
 				created_by_app_id       uuid,
 				return_url         text NOT NULL DEFAULT '',
 				resource_input     jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -622,6 +642,9 @@ func engineSchemaQueries() []string {
 			service_id         uuid NOT NULL,
 			auth_type          text NOT NULL,
 			auth_name          text NOT NULL,
+			credential_source_service_id uuid NOT NULL,
+			credential_source_auth_type text NOT NULL,
+			credential_source_auth_name text NOT NULL,
 			contract_hash      text NOT NULL CHECK (contract_hash ~ '^sha256:[0-9a-f]{64}$'),
 			end_user_ref       text NOT NULL,
 			token_hash         text NOT NULL UNIQUE,
@@ -839,31 +862,39 @@ func engineSchemaQueries() []string {
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_workspace_services_slug_ci
 		ON fused_workspace_services(lower(service_slug)) WHERE service_slug IS NOT NULL;`,
 
-		// Auth references point at local service identities rather than copied
-		// values. Target removal cleans its own binding; source removal is blocked
-		// while another service still depends on that credential family.
-		`CREATE TABLE IF NOT EXISTS fused_workspace_auth_references (
-			id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-			bucket_id         uuid NOT NULL REFERENCES fused_buckets(id) ON DELETE CASCADE,
-			target_service_id uuid NOT NULL,
-			target_auth_type  text NOT NULL,
-			target_auth_name  text NOT NULL,
-			source_service_id uuid NOT NULL,
-			source_auth_type  text NOT NULL,
-			source_auth_name  text NOT NULL,
-			created_at        timestamptz NOT NULL DEFAULT NOW(),
-			updated_at        timestamptz NOT NULL DEFAULT NOW(),
-			CONSTRAINT uq_fused_workspace_auth_reference_target UNIQUE (bucket_id, target_service_id, target_auth_name),
-			CONSTRAINT fk_fused_workspace_auth_reference_target FOREIGN KEY (target_service_id)
-				REFERENCES fused_workspace_services(service_id) ON DELETE CASCADE,
-			CONSTRAINT fk_fused_workspace_auth_reference_source FOREIGN KEY (source_service_id)
-				REFERENCES fused_workspace_services(service_id) ON DELETE NO ACTION,
-			CONSTRAINT chk_fused_workspace_auth_reference_not_self CHECK (
-				target_service_id <> source_service_id OR target_auth_name <> source_auth_name
-			)
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_workspace_auth_reference_source
-		ON fused_workspace_auth_references(bucket_id, source_service_id, source_auth_name);`,
+		// A clean database must still execute immutable migration v15 before v17
+		// retires its table. Already-migrated databases skip this bootstrap so a
+		// later restart cannot recreate the removed workspace-global state.
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM fused_engine_schema_migrations
+				WHERE version = 15 AND name = '20260826_workspace_auth_references'
+			) THEN
+				CREATE TABLE IF NOT EXISTS fused_workspace_auth_references (
+					id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+					bucket_id         uuid NOT NULL REFERENCES fused_buckets(id) ON DELETE CASCADE,
+					target_service_id uuid NOT NULL,
+					target_auth_type  text NOT NULL,
+					target_auth_name  text NOT NULL,
+					source_service_id uuid NOT NULL,
+					source_auth_type  text NOT NULL,
+					source_auth_name  text NOT NULL,
+					created_at        timestamptz NOT NULL DEFAULT NOW(),
+					updated_at        timestamptz NOT NULL DEFAULT NOW(),
+					CONSTRAINT uq_fused_workspace_auth_reference_target UNIQUE (bucket_id, target_service_id, target_auth_name),
+					CONSTRAINT fk_fused_workspace_auth_reference_target FOREIGN KEY (target_service_id)
+						REFERENCES fused_workspace_services(service_id) ON DELETE CASCADE,
+					CONSTRAINT fk_fused_workspace_auth_reference_source FOREIGN KEY (source_service_id)
+						REFERENCES fused_workspace_services(service_id) ON DELETE NO ACTION,
+					CONSTRAINT chk_fused_workspace_auth_reference_not_self CHECK (
+						target_service_id <> source_service_id OR target_auth_name <> source_auth_name
+					)
+				);
+				CREATE INDEX IF NOT EXISTS idx_fused_workspace_auth_reference_source
+					ON fused_workspace_auth_references(bucket_id, source_service_id, source_auth_name);
+			END IF;
+		END $$;`,
 
 		// clock_timestamp() records enablement order inside a single transaction;
 		// NOW() would give every row in one apply the same timestamp.
@@ -1532,6 +1563,226 @@ func engineSchemaQueries() []string {
 			ON fused_app_token_bindings(auth_connection_id);`,
 	}
 	return append(queries, unifiedSchemaConvergenceQueries()...)
+}
+
+// connectCanonicalRedirectMigrationQueries preserves callback identity across the browser handoff.
+func connectCanonicalRedirectMigrationQueries() []string {
+	return []string{
+		`ALTER TABLE fused_connect_sessions ADD COLUMN IF NOT EXISTS redirect_uri text NOT NULL DEFAULT '';`,
+	}
+}
+
+// appCredentialSourceMigrationQueries moves credential routing into immutable app/session state and retires workspace-global edges.
+func appCredentialSourceMigrationQueries() []string {
+	return []string{
+		`WITH migrated AS (
+			SELECT app.app_id,
+				jsonb_agg(
+					CASE WHEN reference.id IS NULL THEN selection.item ELSE
+						selection.item || jsonb_build_object(
+							-- Required-auth recovery must make the uniquely selected target family explicit for runtime matching.
+							'auth_type', COALESCE(NULLIF(selection.item ->> 'auth_type', ''), CASE
+								WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+								WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc' END),
+							'auth_name', COALESCE(NULLIF(selection.item ->> 'auth_name', ''), reference.target_auth_name),
+							'auth_ref', COALESCE(
+								NULLIF(state.desired_state #>> ARRAY['services', target.service_name, 'auth', 'ref'], ''),
+								NULLIF(state.desired_state #>> ARRAY['services', target.service_slug, 'auth', 'ref'], ''),
+								CASE WHEN COALESCE(source.service_slug, '') <> ''
+									THEN '${bucket.auth.' || source.service_slug || '.' || reference.source_auth_name || '}' END,
+								selection.item ->> 'auth_ref', ''),
+							'credential_source_service_id', reference.source_service_id,
+							'credential_source_auth_type', reference.source_auth_type,
+							'credential_source_auth_name', reference.source_auth_name)
+					END ORDER BY selection.ordinality) AS selections
+			FROM fused_apps app
+			JOIN fused_app_family_buckets family_bucket ON family_bucket.app_family_id = app.app_family_id
+			LEFT JOIN fused_config_states state ON state.config_key = app.config_key
+			CROSS JOIN LATERAL jsonb_array_elements(app.selections) WITH ORDINALITY AS selection(item, ordinality)
+			LEFT JOIN fused_workspace_services target ON target.service_id::text = selection.item ->> 'service_id'
+			LEFT JOIN LATERAL (
+				SELECT matched.*
+				FROM (
+					SELECT candidate.*, count(*) OVER () AS candidate_count
+					FROM fused_workspace_auth_references candidate
+					WHERE candidate.bucket_id = family_bucket.bucket_id
+					  AND candidate.target_service_id::text = selection.item ->> 'service_id'
+					  -- Only OAuth/OIDC references belong in immutable application-registration routing.
+					  AND CASE
+						WHEN lower(replace(btrim(candidate.target_auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+						WHEN lower(replace(btrim(candidate.target_auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
+						ELSE '' END <> ''
+					  AND (
+						-- A named selection retains the historical exact target-family match.
+						(btrim(COALESCE(selection.item ->> 'auth_name', '')) <> ''
+						 AND candidate.target_auth_name = selection.item ->> 'auth_name'
+						 AND CASE
+							WHEN lower(replace(btrim(candidate.target_auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+							WHEN lower(replace(btrim(candidate.target_auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
+							ELSE '' END = CASE
+							WHEN lower(replace(btrim(selection.item ->> 'auth_type'), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+							WHEN lower(replace(btrim(selection.item ->> 'auth_type'), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
+							ELSE '' END)
+						OR
+						-- A blank legacy selector may recover only a family explicitly present in required_auth.
+						(btrim(COALESCE(selection.item ->> 'auth_name', '')) = ''
+						 AND EXISTS (
+							SELECT 1
+							FROM jsonb_array_elements(COALESCE(selection.item -> 'required_auth', '[]'::jsonb)) required
+							WHERE candidate.target_auth_name = required ->> 'auth_name'
+							  AND CASE
+								WHEN lower(replace(btrim(candidate.target_auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+								WHEN lower(replace(btrim(candidate.target_auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
+								ELSE '' END = CASE
+								WHEN lower(replace(btrim(required ->> 'auth_type'), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+								WHEN lower(replace(btrim(required ->> 'auth_type'), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
+								ELSE '' END
+						 ))
+					  )
+				) matched
+				-- More than one compatible legacy edge is ambiguous and remains safely unbound.
+				WHERE matched.candidate_count = 1
+			) reference ON true
+			LEFT JOIN fused_workspace_services source ON source.service_id = reference.source_service_id
+			GROUP BY app.app_id
+		)
+		UPDATE fused_apps app SET selections = migrated.selections
+		FROM migrated
+		WHERE app.app_id = migrated.app_id AND app.selections IS DISTINCT FROM migrated.selections;`,
+		`ALTER TABLE fused_connect_input_sessions ADD COLUMN IF NOT EXISTS credential_source_service_id uuid;`,
+		`ALTER TABLE fused_connect_input_sessions ADD COLUMN IF NOT EXISTS credential_source_auth_type text NOT NULL DEFAULT '';`,
+		`ALTER TABLE fused_connect_input_sessions ADD COLUMN IF NOT EXISTS credential_source_auth_name text NOT NULL DEFAULT '';`,
+		`UPDATE fused_connect_input_sessions session SET
+			credential_source_service_id = reference.source_service_id,
+			credential_source_auth_type = reference.source_auth_type,
+			credential_source_auth_name = reference.source_auth_name
+			FROM fused_workspace_auth_references reference
+			WHERE session.credential_source_service_id IS NULL
+			  AND reference.bucket_id = session.bucket_id
+			  AND reference.target_service_id = session.service_id
+			  AND reference.target_auth_name = session.auth_name
+			  AND CASE
+				WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+				WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
+				ELSE '' END = CASE
+				WHEN lower(replace(btrim(session.auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+				WHEN lower(replace(btrim(session.auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
+				ELSE '' END;`,
+		`UPDATE fused_connect_input_sessions SET credential_source_service_id = service_id,
+			credential_source_auth_type = auth_type, credential_source_auth_name = auth_name
+			WHERE credential_source_service_id IS NULL;`,
+		`ALTER TABLE fused_connect_input_sessions ALTER COLUMN credential_source_service_id SET NOT NULL;`,
+		`ALTER TABLE fused_connect_sessions ADD COLUMN IF NOT EXISTS credential_source_service_id uuid;`,
+		`ALTER TABLE fused_connect_sessions ADD COLUMN IF NOT EXISTS credential_source_auth_type text NOT NULL DEFAULT '';`,
+		`ALTER TABLE fused_connect_sessions ADD COLUMN IF NOT EXISTS credential_source_auth_name text NOT NULL DEFAULT '';`,
+		`WITH candidates AS (
+			SELECT session.id, btrim(auth ->> 'name') AS auth_name
+			FROM fused_connect_sessions session
+			JOIN fused_service_contract_snapshots snapshot
+			  ON snapshot.service_id = session.service_id
+			 AND snapshot.service_version_id = session.service_version_id
+			CROSS JOIN LATERAL jsonb_array_elements(COALESCE(snapshot.service_metadata -> 'auth_configs', '[]'::jsonb)) auth
+			-- A blank historical selector may inherit only one exact compatible name from its pinned contract.
+			WHERE btrim(session.auth_name) = ''
+			  AND btrim(COALESCE(auth ->> 'name', '')) <> ''
+			  -- Unsupported historical families cannot become compatible merely because both normalize to empty.
+			  AND CASE
+				WHEN lower(replace(btrim(session.auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+				WHEN lower(replace(btrim(session.auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
+				ELSE '' END <> ''
+			  AND CASE
+				WHEN lower(replace(btrim(auth ->> 'type'), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+				WHEN lower(replace(btrim(auth ->> 'type'), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
+				ELSE '' END = CASE
+				WHEN lower(replace(btrim(session.auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+				WHEN lower(replace(btrim(session.auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
+				ELSE '' END
+		), resolved AS (
+			SELECT id, min(auth_name) AS auth_name
+			FROM candidates
+			GROUP BY id
+			-- Ambiguous pinned contracts stay blank and therefore inactive after the direct-source fallback.
+			HAVING count(DISTINCT auth_name) = 1
+		)
+		UPDATE fused_connect_sessions session SET auth_name = resolved.auth_name
+		FROM resolved WHERE session.id = resolved.id;`,
+		`UPDATE fused_connect_sessions session SET
+			credential_source_service_id = reference.source_service_id,
+			credential_source_auth_type = reference.source_auth_type,
+			credential_source_auth_name = reference.source_auth_name
+			FROM fused_workspace_auth_references reference
+			WHERE session.credential_source_service_id IS NULL
+			  AND reference.bucket_id = session.bucket_id
+			  AND reference.target_service_id = session.service_id
+			  AND reference.target_auth_name = session.auth_name
+			  AND CASE
+				WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+				WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
+				ELSE '' END = CASE
+				WHEN lower(replace(btrim(session.auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+				WHEN lower(replace(btrim(session.auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
+				ELSE '' END;`,
+		`UPDATE fused_connect_sessions SET credential_source_service_id = service_id,
+			credential_source_auth_type = auth_type, credential_source_auth_name = auth_name
+			WHERE credential_source_service_id IS NULL;`,
+		`ALTER TABLE fused_connect_sessions ALTER COLUMN credential_source_service_id SET NOT NULL;`,
+		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS credential_source_service_id uuid;`,
+		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS credential_source_auth_type text NOT NULL DEFAULT '';`,
+		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS credential_source_auth_name text NOT NULL DEFAULT '';`,
+		`WITH candidates AS (
+			SELECT connection.id, btrim(auth ->> 'name') AS auth_name
+			FROM fused_auth_connections connection
+			JOIN fused_service_contract_snapshots snapshot
+			  ON snapshot.service_id = connection.service_id
+			 AND snapshot.service_version_id = connection.service_version_id
+			CROSS JOIN LATERAL jsonb_array_elements(COALESCE(snapshot.service_metadata -> 'auth_configs', '[]'::jsonb)) auth
+			-- Refresh grants recover a blank scheme only from their immutable service-version contract.
+			WHERE btrim(connection.auth_name) = ''
+			  AND btrim(COALESCE(auth ->> 'name', '')) <> ''
+			  -- Only OAuth/OIDC grants may recover application-credential routing from pinned metadata.
+			  AND CASE
+				WHEN lower(replace(btrim(connection.auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+				WHEN lower(replace(btrim(connection.auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
+				ELSE '' END <> ''
+			  AND CASE
+				WHEN lower(replace(btrim(auth ->> 'type'), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+				WHEN lower(replace(btrim(auth ->> 'type'), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
+				ELSE '' END = CASE
+				WHEN lower(replace(btrim(connection.auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+				WHEN lower(replace(btrim(connection.auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
+				ELSE '' END
+		), resolved AS (
+			SELECT id, min(auth_name) AS auth_name
+			FROM candidates
+			GROUP BY id
+			-- Multiple compatible names cannot be inferred from an old blank grant without changing ownership.
+			HAVING count(DISTINCT auth_name) = 1
+		)
+		UPDATE fused_auth_connections connection SET auth_name = resolved.auth_name
+		FROM resolved WHERE connection.id = resolved.id;`,
+		`UPDATE fused_auth_connections connection SET
+			credential_source_service_id = reference.source_service_id,
+			credential_source_auth_type = reference.source_auth_type,
+			credential_source_auth_name = reference.source_auth_name
+			FROM fused_workspace_auth_references reference
+			WHERE connection.credential_source_service_id IS NULL
+			  AND reference.bucket_id = connection.bucket_id
+			  AND reference.target_service_id = connection.service_id
+			  AND reference.target_auth_name = connection.auth_name
+			  AND CASE
+				WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+				WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
+				ELSE '' END = CASE
+				WHEN lower(replace(btrim(connection.auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+				WHEN lower(replace(btrim(connection.auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
+				ELSE '' END;`,
+		`UPDATE fused_auth_connections SET credential_source_service_id = service_id,
+			credential_source_auth_type = auth_type, credential_source_auth_name = auth_name
+			WHERE credential_source_service_id IS NULL;`,
+		`ALTER TABLE fused_auth_connections ALTER COLUMN credential_source_service_id SET NOT NULL;`,
+		// v15 remains immutable in the ledger, while v17 removes its incorrect workspace-global state.
+		`DROP TABLE IF EXISTS fused_workspace_auth_references;`,
+	}
 }
 
 // unifiedSchemaConvergenceQueries makes v3 the only writable Unified shape.

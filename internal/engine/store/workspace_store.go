@@ -436,13 +436,12 @@ func (s *postgresStore) ListAuthorizedBucketServiceSummaries(ctx context.Context
 	return items, total, err
 }
 
-// RemoveWorkspaceService preserves source services while live auth references
-// depend on them and otherwise keeps the existing exact-delete semantics.
+// RemoveWorkspaceService deletes one exact enabled service identity.
 func (s *postgresStore) RemoveWorkspaceService(ctx context.Context, serviceID uuid.UUID) error {
 	res, err := s.db.Exec(ctx, `DELETE FROM fused_workspace_services WHERE service_id = $1`, serviceID)
-	// Named reference ownership turns source use into a stable domain conflict.
+	// Store failures remain diagnostic because app credential refs do not own workspace membership.
 	if err != nil {
-		return workspaceServiceRemovalError("RemoveWorkspaceService", err)
+		return fmt.Errorf("RemoveWorkspaceService: %w", err)
 	}
 	// Zero affected rows remains authoritative absence rather than success.
 	if res.RowsAffected() == 0 {
@@ -451,30 +450,18 @@ func (s *postgresStore) RemoveWorkspaceService(ctx context.Context, serviceID uu
 	return nil
 }
 
-// RemoveWorkspaceServices deletes a composite desired set in one statement so
-// target cascades are complete before source NO ACTION constraints are checked.
+// RemoveWorkspaceServices deletes one composite desired set in a single statement.
 func (s *postgresStore) RemoveWorkspaceServices(ctx context.Context, serviceIDs []uuid.UUID) error {
 	// Empty reconciliation sets should not issue a broad DELETE statement.
 	if len(serviceIDs) == 0 {
 		return nil
 	}
 	_, err := s.db.Exec(ctx, `DELETE FROM fused_workspace_services WHERE service_id = ANY($1)`, serviceIDs)
-	// Any remaining dependent outside the batch must retain the same stable conflict.
+	// App selections retain immutable source identity but do not block workspace membership changes.
 	if err != nil {
-		return workspaceServiceRemovalError("RemoveWorkspaceServices", err)
+		return fmt.Errorf("RemoveWorkspaceServices: %w", err)
 	}
 	return nil
-}
-
-// workspaceServiceRemovalError maps only the named source dependency while
-// preserving every unrelated PostgreSQL failure for diagnostics.
-func workspaceServiceRemovalError(operation string, err error) error {
-	var pgErr *pgconn.PgError
-	// Constraint identity is stable and avoids parsing vendor message text.
-	if errors.As(err, &pgErr) && pgErr.ConstraintName == "fk_fused_workspace_auth_reference_source" {
-		return fmt.Errorf("%s: %w", operation, ErrWorkspaceAuthReferenceInUse)
-	}
-	return fmt.Errorf("%s: %w", operation, err)
 }
 
 func collectBucketServiceSummaries(rows pgx.Rows) ([]BucketServiceSummary, error) {
@@ -483,7 +470,7 @@ func collectBucketServiceSummaries(rows pgx.Rows) ([]BucketServiceSummary, error
 		var item BucketServiceSummary
 		if err := rows.Scan(
 			&item.ServiceID, &item.ServiceName, &item.SecretCount, &item.ValueCount,
-			&item.ConnectConfigCount, &item.ConnectedUserCount,
+			&item.ApplicationCredentialCount, &item.ConnectedUserCount,
 		); err != nil {
 			return nil, fmt.Errorf("ListBucketServiceSummaries: scan: %w", err)
 		}
@@ -754,8 +741,6 @@ const bucketServiceIDsSQL = `
 	WITH bucket_service_ids AS (
 		SELECT service_id FROM fused_workspace_secrets WHERE bucket_id = $1 AND ($2 OR service_id = ANY($3::uuid[]))
 		UNION
-		SELECT service_id FROM fused_connect_configs WHERE bucket_id = $1 AND ($2 OR service_id = ANY($3::uuid[]))
-		UNION
 		SELECT service_id FROM fused_auth_connections WHERE bucket_id = $1 AND ($2 OR service_id = ANY($3::uuid[]))
 		UNION
 		SELECT service_id FROM fused_bucket_values WHERE bucket_id = $1 AND ($2 OR service_id = ANY($3::uuid[]))
@@ -783,10 +768,15 @@ const bucketServiceSummaryPageSQL = bucketServiceIDsSQL + `,
 		WHERE bucket_id = $1
 		GROUP BY service_id
 	),
-	connect_config_counts AS (
-		SELECT service_id, COUNT(*) AS connect_config_count
-		FROM fused_connect_configs
-		WHERE bucket_id = $1
+	application_credential_counts AS (
+		SELECT service_id, COUNT(*) AS application_credential_count FROM (
+			SELECT service_id, credential_type,
+			       REGEXP_REPLACE(key_name, '_(client_id|client_secret)$', '') AS auth_name
+			FROM fused_workspace_secrets
+			WHERE bucket_id = $1 AND credential_type IN ('oauth', 'oidc')
+			GROUP BY service_id, credential_type, REGEXP_REPLACE(key_name, '_(client_id|client_secret)$', '')
+			HAVING COUNT(DISTINCT key_name) = 2
+		) application_credentials
 		GROUP BY service_id
 	),
 	connected_user_counts AS (
@@ -799,14 +789,14 @@ const bucketServiceSummaryPageSQL = bucketServiceIDsSQL + `,
 	       COALESCE(ws.service_name, ''),
 	       COALESCE(secret_counts.secret_count, 0),
 	       COALESCE(value_counts.value_count, 0),
-	       COALESCE(connect_config_counts.connect_config_count, 0),
+	       COALESCE(application_credential_counts.application_credential_count, 0),
 	       COALESCE(connected_user_counts.connected_user_count, 0)
 	FROM bucket_service_ids ids
 	LEFT JOIN fused_workspace_services ws
 	  ON ws.service_id = ids.service_id
 	LEFT JOIN secret_counts ON secret_counts.service_id = ids.service_id
 	LEFT JOIN value_counts ON value_counts.service_id = ids.service_id
-	LEFT JOIN connect_config_counts ON connect_config_counts.service_id = ids.service_id
+	LEFT JOIN application_credential_counts ON application_credential_counts.service_id = ids.service_id
 	LEFT JOIN connected_user_counts ON connected_user_counts.service_id = ids.service_id
 	WHERE $4 = ''
 	   OR COALESCE(ws.service_name, '') ILIKE '%' || $4 || '%'

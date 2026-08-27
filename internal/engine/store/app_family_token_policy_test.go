@@ -162,10 +162,12 @@ func (fixture appTokenPolicyFixture) insertFixedBindingTarget(target fixedBindin
 		VALUES ($1, $2, 'Gmail fixed binding'), ($3, $4, $2)`,
 		target.serviceA, target.serviceSlugA, target.serviceB, target.serviceSlugB)
 	batch.Queue(`INSERT INTO fused_auth_connections
-		(id, bucket_id, service_id, end_user_ref, auth_type, auth_name, encrypted_dek, access_token)
-		VALUES ($1, $2, $3, 'mail-user', 'oauth2', 'gmail', 'encrypted', 'encrypted'),
-		       ($4, $2, $3, 'mail-user-b', 'oauth2', 'gmail', 'encrypted', 'encrypted'),
-		       ($5, $2, $6, 'drive-user', 'oauth2', 'drive', 'encrypted', 'encrypted')`,
+		(id, bucket_id, service_id, end_user_ref, auth_type, auth_name,
+		 credential_source_service_id, credential_source_auth_type, credential_source_auth_name,
+		 encrypted_dek, access_token)
+		VALUES ($1, $2, $3, 'mail-user', 'oauth2', 'gmail', $3, 'oauth', 'gmail', 'encrypted', 'encrypted'),
+		       ($4, $2, $3, 'mail-user-b', 'oauth2', 'gmail', $3, 'oauth', 'gmail', 'encrypted', 'encrypted'),
+		       ($5, $2, $6, 'drive-user', 'oauth2', 'drive', $6, 'oauth', 'drive', 'encrypted', 'encrypted')`,
 		target.connectionA, target.bucketID, target.serviceA, target.connectionA2, target.connectionB, target.serviceB)
 	batch.Queue(`INSERT INTO fused_connection_resources
 		(id, connection_id, bucket_id, service_id, provider_resource_id, resource_type, display_name, base_url)

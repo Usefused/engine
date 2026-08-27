@@ -756,10 +756,7 @@ func (s *workspaceProfileApplyStore) ReconcileWorkspaceProfiles(_ context.Contex
 	return nil
 }
 
-func (s *workspaceProfileApplyStore) UpsertConnectConfig(_ context.Context, config store.ConnectConfig) (*store.ConnectConfig, error) {
-	return &config, nil
-}
-
+// GetEffectiveWorkspaceProfiles returns the current exact profile snapshots for apply reconciliation.
 func (s *workspaceProfileApplyStore) GetEffectiveWorkspaceProfiles(context.Context, []store.WorkspaceProfileRef) ([]store.WorkspaceConnectionProfile, error) {
 	return append([]store.WorkspaceConnectionProfile(nil), s.current...), nil
 }
@@ -1971,222 +1968,29 @@ func TestLoadWorkspacePlanForApplyRejectsRevisionDifferentFromAuthorizationSnaps
 	}
 }
 
-// TestWorkspaceConfigApplyHandler_UpsertsBasicAuthSecretsFromRuntimeConfig proves omitted Basic mode stores the password by default.
-func TestWorkspaceConfigApplyHandler_UpsertsBasicAuthSecretsFromRuntimeConfig(t *testing.T) {
-	svcID := uuid.New()
-	bucketID := uuid.New()
-	s := &workspaceTestStore{
-		accountID:   uuid.New(),
-		workspaceID: uuid.New(),
-		bucketsByName: map[string]*store.Bucket{
-			"prod": {ID: bucketID, Name: "prod"},
-		},
-	}
-	planID := uuid.New()
-	configStore := workspaceApplyConfigStore(planID, workspaceBasicAuthApplyPayload(svcID, "prod"))
-	verifier := &mockRegistryClient{
-		name: "GitHub",
-		serviceMetadata: &fusedobject.ServiceMetadata{
-			ID: svcID,
-			AuthConfigs: fusedobject.AuthConfigs{{
-				Name:   "basicAuth",
-				Type:   "http",
-				Scheme: "basic",
-			}},
-		},
-	}
-
-	r := newControlTestRouter(s.accountID)
-	r.Post("/workspace/config/apply", WorkspaceConfigApplyHandler(configStore, s, verifier, testMasterKey))
-	req := httptest.NewRequest(http.MethodPost, "/workspace/config/apply", bytes.NewReader(workspaceBasicAuthApplyRequest(planID)))
-	req.Header.Set("X-API-Key", "fsk_test")
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
-	}
-	assertWorkspaceBasicSecrets(t, s.upsertedSecrets, bucketID, svcID)
-	// Direct material must travel through the same atomic batch as live references.
-	if len(s.workspaceAuthBindings) != 1 {
-		t.Fatalf("atomic auth binding batches = %d, want 1", len(s.workspaceAuthBindings))
-	}
-	// One workspace service config owns one auth family, so changing it must
-	// explicitly reconcile stale references from the previously selected name.
-	if !s.workspaceAuthBindings[0].ReconcileReferences || s.workspaceAuthBindings[0].ClearReferences {
-		t.Fatalf("direct auth reconciliation = %#v", s.workspaceAuthBindings[0])
-	}
-	if bytes.Contains(configStore.upserted.DesiredState, []byte("alice")) || bytes.Contains(configStore.upserted.DesiredState, []byte("s3cr3t")) {
-		t.Fatal("applied desired state must not store resolved basic auth material")
+// TestWorkspaceConfigRejectsServiceConfig keeps provider credentials out of workspace desired state.
+func TestWorkspaceConfigRejectsServiceConfig(t *testing.T) {
+	err := validateWorkspaceConfigDocument(workspaceConfigDocument{
+		Services: map[string]workspaceConfigService{},
+		Buckets:  map[string]workspaceConfigBucket{"default": {ServiceConfig: map[string]json.RawMessage{"gmail": json.RawMessage(`{}`)}}},
+	})
+	// App config owns auth refs, so the retired bucket service shape must fail closed.
+	if err == nil || !strings.Contains(err.Error(), "service_config is no longer supported") {
+		t.Fatalf("service_config error = %v", err)
 	}
 }
 
-// TestWorkspaceConfigApplyHandler_UpsertsMTLSAuthSecretsFromRuntimeConfig
-// verifies apply-time mTLS material is validated, encrypted, and kept out of
-// persisted desired state.
-func TestWorkspaceConfigApplyHandler_UpsertsMTLSAuthSecretsFromRuntimeConfig(t *testing.T) {
-	svcID := uuid.New()
-	bucketID := uuid.New()
-	certPEM, keyPEM := workspaceTestMTLSPair(t)
-	s := &workspaceTestStore{
-		accountID:   uuid.New(),
-		workspaceID: uuid.New(),
-		bucketsByName: map[string]*store.Bucket{
-			"prod": {ID: bucketID, Name: "prod"},
-		},
-	}
-	planID := uuid.New()
-	configStore := workspaceApplyConfigStore(planID, workspaceMTLSAuthApplyPayload(svcID, "prod"))
-	verifier := &mockRegistryClient{
-		name: "GitHub",
-		serviceMetadata: &fusedobject.ServiceMetadata{
-			ID: svcID,
-			AuthConfigs: fusedobject.AuthConfigs{{
-				Name: "clientCert",
-				Type: "mutualTLS",
-			}},
-		},
-	}
-
-	r := newControlTestRouter(s.accountID)
-	r.Post("/workspace/config/apply", WorkspaceConfigApplyHandler(configStore, s, verifier, testMasterKey))
-	req := httptest.NewRequest(http.MethodPost, "/workspace/config/apply", bytes.NewReader(workspaceMTLSAuthApplyRequest(planID, certPEM, keyPEM)))
-	req.Header.Set("X-API-Key", "fsk_test")
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
-	}
-	assertWorkspaceMTLSSecrets(t, s.upsertedSecrets, bucketID, svcID, certPEM, keyPEM)
-	// Paired certificate material must commit as one current auth-binding unit.
-	if len(s.workspaceAuthBindings) != 1 {
-		t.Fatalf("atomic auth binding batches = %d, want 1", len(s.workspaceAuthBindings))
-	}
-	if bytes.Contains(configStore.upserted.DesiredState, []byte(certPEM)) || bytes.Contains(configStore.upserted.DesiredState, []byte(keyPEM)) {
-		t.Fatal("applied desired state must not store resolved mTLS auth material")
-	}
-}
-
-func workspaceBasicAuthApplyPayload(svcID uuid.UUID, bucket string) json.RawMessage {
-	payload := map[string]any{
-		"kind":     "workspace",
-		"services": workspaceTestServicePayload(svcID),
-		"buckets": map[string]any{bucket: map[string]any{"service_config": map[string]any{"github": map[string]any{"auth": map[string]any{
-			"auth_type": "basic", "username": "$GITHUB_BASIC_USER", "password": "$GITHUB_BASIC_PASS",
-		}}}}},
-	}
-	body, _ := json.Marshal(payload)
-	return body
-}
-
-// workspaceMTLSAuthApplyPayload keeps plan state on env refs so raw cert/key
-// material can only arrive through apply materials.
-func workspaceMTLSAuthApplyPayload(svcID uuid.UUID, bucket string) json.RawMessage {
-	payload := map[string]any{
-		"kind":     "workspace",
-		"services": workspaceTestServicePayload(svcID),
-		"buckets": map[string]any{bucket: map[string]any{"service_config": map[string]any{"github": map[string]any{"auth": map[string]any{
-			"auth_type": "mtls", "cert": "$GITHUB_CLIENT_CERT", "key": "$GITHUB_CLIENT_KEY",
-		}}}}},
-	}
-	body, _ := json.Marshal(payload)
-	return body
-}
-
-// workspaceTestServicePayload keeps bucket-shape tests focused on credential
-// placement instead of repeating service version boilerplate.
-func workspaceTestServicePayload(svcID uuid.UUID) map[string]any {
-	return map[string]any{"github": workspaceTestServiceEntry(svcID)}
-}
-
-func workspaceTestServiceEntry(svcID uuid.UUID) map[string]any {
-	return map[string]any{
-		"service_id": svcID.String(),
-		"versions": []map[string]string{{
-			"version": "2026-08-01", "service_version_id": uuid.NewString(),
-		}},
-	}
-}
-
-func workspaceBasicAuthApplyRequest(planID uuid.UUID) []byte {
-	return []byte(`{
-		"plan_id":"` + planID.String() + `",
+// TestWorkspaceApplyRejectsAuthMaterials keeps credential values on secret-set mutations.
+func TestWorkspaceApplyRejectsAuthMaterials(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/workspace/config/apply", strings.NewReader(`{
+		"plan_id":"`+uuid.NewString()+`",
 		"source_hash":"abc",
-		"auth_materials": {
-			"prod\u0000github": {
-				"username": "alice",
-				"password": "s3cr3t"
-			}
-		}
-	}`)
-}
-
-// workspaceMTLSAuthApplyRequest posts resolved material out-of-band, matching
-// the CLI apply contract instead of embedding secrets in config.
-func workspaceMTLSAuthApplyRequest(planID uuid.UUID, certPEM, keyPEM string) []byte {
-	payload := map[string]any{
-		"plan_id":     planID.String(),
-		"source_hash": "abc",
-		"auth_materials": map[string]any{
-			"prod\x00github": map[string]string{
-				"cert": certPEM,
-				"key":  keyPEM,
-			},
-		},
-	}
-	body, _ := json.Marshal(payload)
-	return body
-}
-
-func workspaceApplyConfigStore(planID uuid.UUID, payload json.RawMessage) *mockConfigStore {
-	return &mockConfigStore{
-		state: &store.ConfigState{Generation: 0},
-		plan: &store.ConfigPlan{
-			ID:              planID,
-			Status:          store.ConfigPlanStatusPending,
-			ConfigKey:       "workspace",
-			ConfigType:      store.ConfigTypeWorkspace,
-			SourceHash:      "abc",
-			BaseGeneration:  0,
-			ResolvedPayload: payload,
-		},
-	}
-}
-
-func assertWorkspaceBasicSecrets(t *testing.T, secrets []store.WorkspaceSecret, bucketID, serviceID uuid.UUID) {
-	t.Helper()
-	if len(secrets) != 2 {
-		t.Fatalf("expected two basic auth secrets, got %#v", secrets)
-	}
-	values := map[string]string{}
-	for _, secret := range secrets {
-		if secret.BucketID != bucketID || secret.ServiceID != serviceID || secret.CredentialType != "basic" {
-			t.Fatalf("unexpected basic secret identity: %#v", secret)
-		}
-		values[secret.KeyName] = decryptWorkspaceSecretForTest(t, secret)
-	}
-	if values["basicAuth_username"] != "alice" || values["basicAuth_password"] != "s3cr3t" {
-		t.Fatalf("unexpected basic secret values: %#v", values)
-	}
-}
-
-// assertWorkspaceMTLSSecrets checks the pair is stored under service-scoped
-// cert/key names and encrypted before persistence.
-func assertWorkspaceMTLSSecrets(t *testing.T, secrets []store.WorkspaceSecret, bucketID, serviceID uuid.UUID, certPEM, keyPEM string) {
-	t.Helper()
-	if len(secrets) != 2 {
-		t.Fatalf("expected two mTLS auth secrets, got %#v", secrets)
-	}
-	values := map[string]string{}
-	for _, secret := range secrets {
-		if secret.BucketID != bucketID || secret.ServiceID != serviceID || secret.CredentialType != "mtls" {
-			t.Fatalf("unexpected mTLS secret identity: %#v", secret)
-		}
-		values[secret.KeyName] = decryptWorkspaceSecretForTest(t, secret)
-	}
-	if values["clientCert_cert"] != certPEM || values["clientCert_key"] != keyPEM {
-		t.Fatalf("unexpected mTLS secret values: %#v", values)
+		"auth_materials":{"default":{"client_id":"forbidden"}}
+	}`))
+	_, _, err := decodeWorkspaceApplyRequest(request)
+	// Legacy out-of-band provider material cannot become a second credential write path.
+	if err == nil || !strings.Contains(err.Error(), "auth_materials is no longer supported") {
+		t.Fatalf("auth_materials error = %v", err)
 	}
 }
 

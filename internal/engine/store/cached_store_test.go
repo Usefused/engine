@@ -120,8 +120,7 @@ func TestCachedStoreForwardsProfileCapabilities(t *testing.T) {
 	}
 }
 
-// TestCachedStoreForwardsWorkspaceConnectSync prevents the cache wrapper from
-// hiding the fixed-query export methods required by workspace sync.
+// TestCachedStoreForwardsWorkspaceConnectSync prevents the cache wrapper from hiding the effective-profile query.
 func TestCachedStoreForwardsWorkspaceConnectSync(t *testing.T) {
 	delegate := &cachedWorkspaceConnectSyncDelegate{}
 	cached := NewCachedStore(delegate, nil)
@@ -129,14 +128,11 @@ func TestCachedStoreForwardsWorkspaceConnectSync(t *testing.T) {
 	if !ok {
 		t.Fatal("cached store does not expose workspace connect sync capability")
 	}
-	if _, err := syncStore.ListWorkspaceConnectConfigs(context.Background()); err != nil {
-		t.Fatalf("forward workspace connect configs: %v", err)
-	}
 	if _, err := syncStore.ListWorkspaceConnectProfiles(context.Background()); err != nil {
 		t.Fatalf("forward workspace connect profiles: %v", err)
 	}
-	if delegate.configCalls != 1 || delegate.profileCalls != 1 {
-		t.Fatalf("delegate calls configs=%d profiles=%d", delegate.configCalls, delegate.profileCalls)
+	if delegate.profileCalls != 1 {
+		t.Fatalf("delegate profile calls=%d", delegate.profileCalls)
 	}
 }
 
@@ -154,19 +150,10 @@ type cachedProfileDelegate struct {
 
 type cachedWorkspaceConnectSyncDelegate struct {
 	Store
-	configCalls  int
 	profileCalls int
 }
 
-// ListWorkspaceConnectConfigs records forwarding of the config half of the
-// workspace export without introducing data that could mask call counts.
-func (d *cachedWorkspaceConnectSyncDelegate) ListWorkspaceConnectConfigs(context.Context) ([]WorkspaceConnectConfig, error) {
-	d.configCalls++
-	return nil, nil
-}
-
-// ListWorkspaceConnectProfiles records forwarding of the profile half so the
-// regression test covers both queries used by one GraphQL resolver.
+// ListWorkspaceConnectProfiles records forwarding of the effective profile query.
 func (d *cachedWorkspaceConnectSyncDelegate) ListWorkspaceConnectProfiles(context.Context) ([]WorkspaceConnectionProfile, error) {
 	d.profileCalls++
 	return nil, nil

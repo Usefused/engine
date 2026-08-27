@@ -778,14 +778,14 @@
       "file": "app/lib/buckets.ts",
       "call": 6,
       "variant": 1,
-      "document": "query BucketConnectionServices($bucketId: String!, $search: String, $limit: Int!, $offset: Int!) {\n        connectionServicePage: bucketServicePage(bucket_id: $bucketId, search: $search, limit: $limit, offset: $offset) {\n          total\n          items { service_id service_name secret_count value_count connect_config_count connected_user_count }\n        }\n      }"
+      "document": "query BucketConnectionServices($bucketId: String!, $search: String, $limit: Int!, $offset: Int!) {\n        connectionServicePage: bucketServicePage(bucket_id: $bucketId, search: $search, limit: $limit, offset: $offset) {\n          total\n          items { service_id service_name secret_count value_count application_credential_count connected_user_count }\n        }\n      }"
     },
     {
       "endpoint": "engine",
       "file": "app/lib/buckets.ts",
       "call": 7,
       "variant": 1,
-      "document": "query BucketConnectSummary($bucketId: String!) {\n        connectSummary: bucketConnectSummary(bucket_id: $bucketId) {\n          bucket_id connect_config_count connected_user_count\n        }\n      }"
+      "document": "query BucketConnectSummary($bucketId: String!) {\n        connectSummary: bucketConnectSummary(bucket_id: $bucketId) {\n          bucket_id application_credential_count connected_user_count\n        }\n      }"
     },
     {
       "endpoint": "engine",
@@ -799,7 +799,7 @@
       "file": "app/lib/buckets.ts",
       "call": 9,
       "variant": 1,
-      "document": "query($bucketId: String!, $limit: Int!, $offset: Int!, $search: String) {\n        bucketServicePage(bucket_id: $bucketId, search: $search, limit: $limit, offset: $offset) {\n          total\n          items { service_id service_name secret_count value_count connect_config_count connected_user_count }\n        }\n      }"
+      "document": "query($bucketId: String!, $limit: Int!, $offset: Int!, $search: String) {\n        bucketServicePage(bucket_id: $bucketId, search: $search, limit: $limit, offset: $offset) {\n          total\n          items { service_id service_name secret_count value_count application_credential_count connected_user_count }\n        }\n      }"
     },
     {
       "endpoint": "engine",

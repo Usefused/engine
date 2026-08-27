@@ -50,8 +50,9 @@ type ServiceVerifier interface {
 //
 // Workspace membership lives in the Engine's own DB. Proxying it to the Registry would
 // serve stale or wrong data; the Engine is the authoritative source here.
-func WorkspaceHandler(s store.Store, verifier ServiceVerifier, masterKey []byte, tokenRevoker AppTokenRevoker) http.Handler {
+func WorkspaceHandler(s store.Store, verifier ServiceVerifier, masterKey []byte, tokenRevoker AppTokenRevoker, redirectURIs ...string) http.Handler {
 	r := chi.NewRouter()
+	redirectURI := firstRedirectURI(redirectURIs)
 	r.Post("/services", addServiceHandler(s, verifier))
 	r.Post("/services/{id}/versions/{version_id}/refresh", RefreshServiceContractHandler(s, runtimeContractFetcher(verifier)))
 	r.Delete("/services/{id}", removeServiceHandler(s))
@@ -64,14 +65,13 @@ func WorkspaceHandler(s store.Store, verifier ServiceVerifier, masterKey []byte,
 	r.Put("/buckets/{id}/values", UpsertBucketValueHandler(s))
 	r.Delete("/buckets/{id}/values", DeleteBucketValueHandler(s))
 
-	r.Put("/buckets/{bucket_id}/services/{service_id}/connect-config", UpsertConnectConfigHandler(s, masterKey))
-	r.Get("/buckets/{bucket_id}/services/{service_id}/connect-config", GetConnectConfigHandler(s))
-	r.Post("/buckets/{bucket_id}/services/{service_id}/connect/sessions", StartConnectSessionHandler(s, verifier, masterKey))
+	r.Post("/buckets/{bucket_id}/services/{service_id}/connect/sessions", StartConnectSessionHandler(s, verifier, masterKey, redirectURI))
 	// These token-authenticated browser routes stay beside the provider callback
 	// because they are runtime handoffs, not control-plane form mutations.
-	r.Get("/connect/input", ConnectInputPageHandler(s, verifier, masterKey))
-	r.Post("/connect/input", ConnectInputSubmitHandler(s, verifier, masterKey))
+	r.Get("/connect/input", ConnectInputPageHandler(s, verifier, masterKey, redirectURI))
+	r.Post("/connect/input", ConnectInputSubmitHandler(s, verifier, masterKey, redirectURI))
 	r.Delete("/buckets/{bucket_id}/auth/connections/{connection_id}", DeleteAuthConnectionHandler(s))
+	// Callback exchange uses the URI pinned in the session, never mutable process configuration.
 	r.Get("/connect/callback", ConnectCallbackHandler(s, verifier, masterKey))
 
 	r.Put("/secrets", UpsertSecretHandler(s, masterKey))
@@ -482,18 +482,6 @@ func removeServiceHandler(s store.Store) http.HandlerFunc {
 				writeWorkspaceConfigError(w, workspaceConfigHTTPError{
 					status: http.StatusNotFound, code: "workspace_service_not_found", message: "The selected service is not active in this workspace.",
 					remediation: "Refresh the workspace service list before retrying.", phase: "workspace_mutation", commitState: "not_committed",
-				}, ctx)
-				return
-			}
-			// A source service remains executable by dependent consumers, so removal
-			// must stop until those explicit auth bindings are changed.
-			if errors.Is(err, store.ErrWorkspaceAuthReferenceInUse) {
-				recordWorkspaceServiceMutationFailure(span, "auth_reference_conflict", "workspace_auth_reference_in_use")
-				writeWorkspaceConfigError(w, workspaceConfigHTTPError{
-					status: http.StatusConflict, code: "workspace_auth_reference_in_use",
-					message:     "The service provides credentials used by another workspace service.",
-					remediation: "Replace the dependent auth ref or remove its destination service before deleting this source.",
-					phase:       "workspace_mutation", commitState: "not_committed",
 				}, ctx)
 				return
 			}

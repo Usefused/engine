@@ -698,32 +698,6 @@ func TestWebhookServerUsesBoundedTimeouts(t *testing.T) {
 	}
 }
 
-func TestControlAuditCapturesSensitiveReadStatus(t *testing.T) {
-	workspaceID, bucketID, serviceID := uuid.New(), uuid.New(), uuid.New()
-	actor := actorWithGrants(t, workspaceID,
-		accesscontrol.Grant{Permission: accesscontrol.PermissionCredentialsMetadataRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: bucketID}},
-		accesscontrol.Grant{Permission: accesscontrol.PermissionServiceRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: serviceID}},
-	)
-	path := "/workspace/buckets/" + bucketID.String() + "/services/" + serviceID.String() + "/connect-config"
-	for _, statusCode := range []int{http.StatusOK, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound} {
-		t.Run(http.StatusText(statusCode), func(t *testing.T) {
-			recorder := &controlAuditRecorderStub{}
-			handler := controlAuthorizationMiddlewareWithAudit(accesscontrol.SnapshotAuthorizer{}, nil, recorder)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(statusCode)
-			}))
-			response := httptest.NewRecorder()
-			handler.ServeHTTP(response, requestWithActor(t, http.MethodGet, path, actor))
-			if len(recorder.events) != 2 || recorder.events[1].StatusCode != statusCode {
-				t.Fatalf("events = %#v", recorder.events)
-			}
-			want := controlAuditOutcome(statusCode)
-			if recorder.events[1].Outcome != want {
-				t.Fatalf("outcome = %q, want %q", recorder.events[1].Outcome, want)
-			}
-		})
-	}
-}
-
 func controlAuditTestActor(t *testing.T) accesscontrol.Actor {
 	t.Helper()
 	principal := controlTestPrincipal()

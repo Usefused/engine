@@ -69,6 +69,7 @@ type AuthRefreshCoordinator struct {
 	db                     store.Store
 	refreshStore           store.AuthConnectionRefreshStore
 	masterKey              []byte
+	applicationCredentials *connectauth.ApplicationCredentialResolver
 	httpClient             *http.Client
 	now                    func() time.Time
 	foregroundLease        time.Duration
@@ -105,6 +106,7 @@ func NewAuthRefreshCoordinator(db store.Store, masterKey []byte, opts ...AuthRef
 		db:                     db,
 		refreshStore:           refreshStore,
 		masterKey:              append([]byte(nil), masterKey...),
+		applicationCredentials: connectauth.NewApplicationCredentialResolver(db, masterKey, ""),
 		httpClient:             &http.Client{Timeout: defaultAuthRefreshHTTPTimeout},
 		now:                    func() time.Time { return time.Now().UTC() },
 		foregroundLease:        defaultForegroundRefreshLease,
@@ -401,22 +403,16 @@ func (c *AuthRefreshCoordinator) loadAuthRefreshContract(ctx context.Context, co
 	if err != nil || !refreshAuthMatchesConnection(auth, conn) {
 		return authRefreshContract{}, ErrAuthRefreshContractUnavailable
 	}
-	config, err := c.db.GetConnectConfig(ctx, conn.BucketID, conn.ServiceID)
-	if err != nil || !connectConfigMatchesRefresh(config, conn) {
+	source := connectauth.ApplicationCredentialSource{
+		ServiceID: conn.CredentialSourceServiceID,
+		AuthType:  conn.CredentialSourceAuthType,
+		AuthName:  conn.CredentialSourceAuthName,
+	}
+	creds, err := c.applicationCredentials.Resolve(ctx, conn.BucketID, conn.ServiceID, conn.AuthType, conn.AuthName, source)
+	if err != nil {
 		return authRefreshContract{}, ErrAuthRefreshContractUnavailable
 	}
-	creds, err := connectauth.DecryptClientCredentials(config, c.masterKey)
-	if err != nil {
-		return authRefreshContract{}, err
-	}
 	return authRefreshContract{auth: auth, flow: flow, creds: creds}, nil
-}
-
-// connectConfigMatchesRefresh prevents a renamed or disabled client registration
-// from being used against a connection created for another auth definition.
-func connectConfigMatchesRefresh(config *store.ConnectConfig, conn *store.AuthConnection) bool {
-	return config != nil && config.Enabled && strings.TrimSpace(config.AuthName) == strings.TrimSpace(conn.AuthName) &&
-		canonicalAuthConfigType(config.AuthType, "") == canonicalAuthConfigType(conn.AuthType, "")
 }
 
 // refreshAuthMatchesConnection prevents a same-name auth definition from a

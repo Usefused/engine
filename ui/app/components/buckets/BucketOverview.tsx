@@ -191,7 +191,7 @@ function ServiceRow({
       <div className="grid grid-cols-2 gap-2 text-center text-xs sm:grid-cols-4">
         <ServiceMetric label="Secrets" value={service.secret_count} strong />
         <ServiceMetric label="Env" value={service.value_count} />
-        <ServiceMetric label="OAuth" value={service.connect_config_count} />
+        <ServiceMetric label="OAuth apps" value={service.application_credential_count} />
         <ServiceMetric label="Users" value={service.connected_user_count} />
       </div>
     </Link>

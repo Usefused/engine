@@ -359,61 +359,6 @@ func (m *runtimeContractRegistryClient) FetchRuntimeContracts(ctx context.Contex
 	return out, nil
 }
 
-// TestEngineGraphQLConnectAuth_WorkspaceConnectConfigs covers the read path
-// workspace sync needs: masked connect-config metadata plus its profile
-// snapshots, in GraphQL. (This test used to also cover the standalone
-// buckets/connectConfig/serviceConnectConfigs fields, removed as dead code --
-// nothing in the UI, CLI, or e2e scripts called them; bucket listing goes
-// through bucketSummaries/bucketSummaryPage instead, and per-service connect
-// config reads have no live caller left now that workspace sync owns this
-// read model.)
-func TestEngineGraphQLConnectAuth_WorkspaceConnectConfigs(t *testing.T) {
-	accountID := uuid.New()
-	workspaceID := uuid.New()
-	bucketID := uuid.New()
-	serviceID := uuid.New()
-	now := time.Now().UTC()
-	s := &workspaceTestStore{
-		accountID:   accountID,
-		workspaceID: workspaceID,
-		workspaceConnectConfigs: []store.WorkspaceConnectConfig{{
-			ConnectConfig: store.ConnectConfig{
-				ID: uuid.New(), BucketID: bucketID, ServiceID: serviceID,
-				AuthType: "oauth", AuthName: "primaryOAuth", Enabled: true, EncryptedClientID: "enc:id", EncryptedClientSecret: "enc:secret",
-				RedirectURI: "http://localhost:8081/connect/callback", CreatedAt: now, UpdatedAt: now,
-			},
-			BucketName: "github",
-		}},
-		workspaceConnectProfiles: []store.WorkspaceConnectionProfile{{
-			ID: uuid.New(), ServiceID: serviceID,
-			ServiceVersionID: uuid.New(), AuthType: "oauth", Layer: "override", ProfileRevision: 1,
-			ProfileHash: "profile-hash", Provenance: "workspace", ProfileSnapshot: []byte(`{"auth_type":"oauth","bindings":[]}`),
-		}},
-	}
-	h := mountMCPGraphQLTestHandler(t, s)
-
-	query := `query {
-		workspaceConnectConfigs {
-			bucket_id bucket_name service_id auth_type auth_name enabled redirect_uri has_client_id has_client_secret
-			profiles { service_version_id auth_type provenance profile }
-		}
-	}`
-	data := doMCPGraphQLRequest(t, h, query)
-
-	workspaceConfigs := data["workspaceConnectConfigs"].([]any)
-	if len(workspaceConfigs) != 1 {
-		t.Fatalf("expected one workspace sync config, got %#v", workspaceConfigs)
-	}
-	exported := workspaceConfigs[0].(map[string]any)
-	if exported["bucket_name"] != "github" || exported["auth_name"] != "primaryOAuth" || exported["has_client_secret"] != true {
-		t.Fatalf("unexpected workspace sync config: %#v", exported)
-	}
-	profiles := exported["profiles"].([]any)
-	if len(profiles) != 1 || profiles[0].(map[string]any)["provenance"] != "workspace" {
-		t.Fatalf("expected safe profile snapshot in workspace sync config, got %#v", profiles)
-	}
-}
-
 // TestEngineGraphQLConnectionResourcesListAndSetDefault exercises the UI/CLI
 // read and audited mutation through an owned opaque connection ID.
 func TestEngineGraphQLConnectionResourcesListAndSetDefault(t *testing.T) {
@@ -556,15 +501,15 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 			}},
 		},
 		bucketConnectSummaries: map[uuid.UUID]*store.BucketConnectSummary{
-			attachedBucketID: {BucketID: attachedBucketID, ConnectConfigCount: 1, ConnectedUserCount: 2},
+			attachedBucketID: {BucketID: attachedBucketID, ApplicationCredentialCount: 1, ConnectedUserCount: 2},
 		},
 		bucketServiceSummaries: map[uuid.UUID][]store.BucketServiceSummary{
 			attachedBucketID: {{
 				ServiceID: serviceID, ServiceName: "Linear", SecretCount: 1,
-				ValueCount: 1, ConnectConfigCount: 1, ConnectedUserCount: 1,
+				ValueCount: 1, ApplicationCredentialCount: 1, ConnectedUserCount: 1,
 			}, {
 				ServiceID: uuid.New(), ServiceName: "Stripe", SecretCount: 1,
-				ValueCount: 0, ConnectConfigCount: 0, ConnectedUserCount: 0,
+				ValueCount: 0, ApplicationCredentialCount: 0, ConnectedUserCount: 0,
 			}},
 		},
 		authConnections: []store.AuthConnection{{
@@ -610,13 +555,13 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 		appTokens(app_family_id: "` + appID.String() + `") { id app_family_id name allow binding_mode status expires_at created_at last_used_at execution_count session_count issued_by_subject_id terminated_at termination_reason }
 		sdkBuckets(app_family_id: "` + appID.String() + `") { id name is_default }
 		bucketSDKPage(bucket_id: "` + attachedBucketID.String() + `", limit: 10, offset: 0) { total items { id name kind active } }
-		bucketServicePage(bucket_id: "` + attachedBucketID.String() + `", search: "Lin", limit: 10, offset: 0) { total items { service_id service_name secret_count value_count connect_config_count connected_user_count } }
+		bucketServicePage(bucket_id: "` + attachedBucketID.String() + `", search: "Lin", limit: 10, offset: 0) { total items { service_id service_name secret_count value_count application_credential_count connected_user_count } }
 		bucketValues(bucket_id: "` + attachedBucketID.String() + `") { id service_id key_name location value }
 		bucketValuePage(bucket_id: "` + attachedBucketID.String() + `", limit: 10, offset: 0) { total items { id service_id key_name location value } }
 		secretMetas(bucket_id: "` + attachedBucketID.String() + `") { id service_id key_name credential_type }
 		secretMetaPage(bucket_id: "` + attachedBucketID.String() + `", limit: 10, offset: 0) { total items { id service_id key_name key_names credential_type } }
 		authConnectionPage(bucket_id: "` + attachedBucketID.String() + `", service_id: "` + serviceID.String() + `", limit: 10, offset: 0) { total items { id service_id end_user_ref auth_type token_type refresh_state } }
-		bucketConnectSummary(bucket_id: "` + attachedBucketID.String() + `") { bucket_id connect_config_count connected_user_count }
+		bucketConnectSummary(bucket_id: "` + attachedBucketID.String() + `") { bucket_id application_credential_count connected_user_count }
 	}`
 	data := doMCPGraphQLRequest(t, h, query)
 
@@ -783,7 +728,7 @@ func assertSecretAndConnectGraphQLData(t *testing.T, data map[string]any) {
 	connection := graphQLMap(t, graphQLList(t, connectionPage["items"], "authConnectionPage.items")[0], "authConnectionPage.items[0]")
 	assertGraphQLField(t, connection, "end_user_ref", "user-123", "authConnectionPage.items[0]")
 	connectSummary := graphQLMap(t, data["bucketConnectSummary"], "bucketConnectSummary")
-	assertGraphQLField(t, connectSummary, "connect_config_count", float64(1), "bucketConnectSummary")
+	assertGraphQLField(t, connectSummary, "application_credential_count", float64(1), "bucketConnectSummary")
 	assertGraphQLField(t, connectSummary, "connected_user_count", float64(2), "bucketConnectSummary")
 }
 

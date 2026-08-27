@@ -105,12 +105,12 @@ var bucketSDKSummaryPageGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 var bucketServiceSummaryGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "BucketServiceSummary",
 	Fields: graphql.Fields{
-		"service_id":           &graphql.Field{Type: graphql.String},
-		"service_name":         &graphql.Field{Type: graphql.String},
-		"secret_count":         &graphql.Field{Type: graphql.Int},
-		"value_count":          &graphql.Field{Type: graphql.Int},
-		"connect_config_count": &graphql.Field{Type: graphql.Int},
-		"connected_user_count": &graphql.Field{Type: graphql.Int},
+		"service_id":                   &graphql.Field{Type: graphql.String},
+		"service_name":                 &graphql.Field{Type: graphql.String},
+		"secret_count":                 &graphql.Field{Type: graphql.Int},
+		"value_count":                  &graphql.Field{Type: graphql.Int},
+		"application_credential_count": &graphql.Field{Type: graphql.Int},
+		"connected_user_count":         &graphql.Field{Type: graphql.Int},
 	},
 })
 
@@ -133,9 +133,9 @@ var bucketSummaryPageGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 var bucketConnectSummaryGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "BucketConnectSummary",
 	Fields: graphql.Fields{
-		"bucket_id":            &graphql.Field{Type: graphql.String},
-		"connect_config_count": &graphql.Field{Type: graphql.Int},
-		"connected_user_count": &graphql.Field{Type: graphql.Int},
+		"bucket_id":                    &graphql.Field{Type: graphql.String},
+		"application_credential_count": &graphql.Field{Type: graphql.Int},
+		"connected_user_count":         &graphql.Field{Type: graphql.Int},
 	},
 })
 
@@ -500,24 +500,6 @@ var secretUpsertGraphQLInput = graphql.NewInputObject(graphql.InputObjectConfig{
 		"credential_type": &graphql.InputObjectFieldConfig{Type: graphql.NewNonNull(graphql.String)},
 		"value":           &graphql.InputObjectFieldConfig{Type: graphql.NewNonNull(graphql.String)},
 		"expires_at":      &graphql.InputObjectFieldConfig{Type: graphql.String},
-	},
-})
-
-// workspaceConnectConfigGraphQLType is the masked, bucket-named projection
-// intended for declarative workspace sync rather than runtime secret use.
-var workspaceConnectConfigGraphQLType = graphql.NewObject(graphql.ObjectConfig{
-	Name: "WorkspaceConnectConfig",
-	Fields: graphql.Fields{
-		"bucket_id":         &graphql.Field{Type: graphql.String},
-		"bucket_name":       &graphql.Field{Type: graphql.String},
-		"service_id":        &graphql.Field{Type: graphql.String},
-		"auth_type":         &graphql.Field{Type: graphql.String},
-		"auth_name":         &graphql.Field{Type: graphql.String},
-		"enabled":           &graphql.Field{Type: graphql.Boolean},
-		"redirect_uri":      &graphql.Field{Type: graphql.String},
-		"has_client_id":     &graphql.Field{Type: graphql.Boolean},
-		"has_client_secret": &graphql.Field{Type: graphql.Boolean},
-		"profiles":          &graphql.Field{Type: graphql.NewList(workspaceConnectionProfileGraphQLType)},
 	},
 })
 
@@ -1464,79 +1446,6 @@ func bucketConnectSummaryGraphQLField(s store.Store) *graphql.Field {
 	}
 }
 
-// workspaceConnectConfigsGraphQLField exposes the complete safe read model
-// needed by workspace sync. One resolver avoids per-service GraphQL calls,
-// while its store contract guarantees a fixed number of SQL reads.
-func workspaceConnectConfigsGraphQLField(s store.Store) *graphql.Field {
-	return &graphql.Field{
-		Type: graphql.NewList(workspaceConnectConfigGraphQLType),
-		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.workspace_connect_configs.list")
-			defer span.End()
-			actor, err := actorFromContext(ctx)
-			if err != nil {
-				return nil, err
-			}
-			reader, ok := s.(store.WorkspaceConnectSyncStore)
-			if !ok {
-				return nil, errors.New("workspace connect config sync is unavailable")
-			}
-			configs, err := reader.ListWorkspaceConnectConfigs(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("list workspace connect configs: %w", err)
-			}
-			profiles, err := reader.ListWorkspaceConnectProfiles(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("list workspace connect profiles: %w", err)
-			}
-			span.SetAttributes(attribute.String("account_id", actor.accountID.String()), attribute.Int("config_count", len(configs)), attribute.Int("profile_count", len(profiles)))
-			return projectGraphQLWorkspaceConnectConfigs(configs, profiles), nil
-		},
-	}
-}
-
-// projectGraphQLWorkspaceConnectConfigs groups already-scoped profile rows by
-// service+auth identity so the GraphQL payload remains deterministic. Unlike
-// the old bucket-owned model, one workspace profile now serves every bucket's
-// Connect config for the same service and auth type -- profiles carry no
-// bucket dimension.
-func projectGraphQLWorkspaceConnectConfigs(configs []store.WorkspaceConnectConfig, profiles []store.WorkspaceConnectionProfile) []map[string]interface{} {
-	profilesByConfig := make(map[string][]store.WorkspaceConnectionProfile)
-	for _, profile := range profiles {
-		key := workspaceConnectIdentityKey(profile.ServiceID, profile.AuthType)
-		profilesByConfig[key] = append(profilesByConfig[key], profile)
-	}
-	items := make([]map[string]interface{}, 0, len(configs))
-	for _, config := range configs {
-		key := workspaceConnectIdentityKey(config.ServiceID, config.AuthType)
-		items = append(items, projectGraphQLWorkspaceConnectConfig(config, profilesByConfig[key]))
-	}
-	return items
-}
-
-// projectGraphQLWorkspaceConnectConfig deliberately converts encrypted client
-// material to presence flags; sync must never receive decryptable secrets.
-func projectGraphQLWorkspaceConnectConfig(config store.WorkspaceConnectConfig, profiles []store.WorkspaceConnectionProfile) map[string]interface{} {
-	profileItems := make([]map[string]interface{}, 0, len(profiles))
-	for index := range profiles {
-		profileItems = append(profileItems, workspaceProfileFields(&profiles[index], nil))
-	}
-	return map[string]interface{}{
-		"bucket_id": config.BucketID.String(), "bucket_name": config.BucketName,
-		"service_id": config.ServiceID.String(), "auth_type": config.AuthType, "auth_name": config.AuthName,
-		"enabled": config.Enabled, "redirect_uri": config.RedirectURI,
-		"has_client_id": config.EncryptedClientID != "", "has_client_secret": config.EncryptedClientSecret != "",
-		"profiles": profileItems,
-	}
-}
-
-// workspaceConnectIdentityKey mirrors the profile table's uniqueness
-// dimensions (minus bucket, which profiles no longer carry) so in-memory
-// grouping cannot collapse another authentication family.
-func workspaceConnectIdentityKey(serviceID uuid.UUID, authType string) string {
-	return serviceID.String() + "\x00" + authType
-}
-
 // authConnectionsGraphQLField passes service/user filters to Store so the
 // database, not Go, owns filtering for production requests.
 func authConnectionsGraphQLField(s store.Store) *graphql.Field {
@@ -1841,7 +1750,7 @@ func upsertSecretsGraphQLField(s store.Store, masterKey []byte) *graphql.Field {
 
 // startConnectSessionGraphQLField reuses the runtime connect flow so provider
 // metadata, PKCE, and encrypted session state stay centralized in Engine.
-func startConnectSessionGraphQLField(s store.Store, verifier ServiceVerifier, masterKey []byte) *graphql.Field {
+func startConnectSessionGraphQLField(s store.Store, verifier ServiceVerifier, masterKey []byte, redirectURIs ...string) *graphql.Field {
 	return &graphql.Field{
 		Type: connectSessionGraphQLType,
 		Args: connectSessionMutationArgs(),
@@ -1864,13 +1773,17 @@ func startConnectSessionGraphQLField(s store.Store, verifier ServiceVerifier, ma
 			if err != nil {
 				return nil, err
 			}
-			resolved, err := resolveConnectRuntimeConfig(ctx, s, verifier, call, masterKey)
+			// GraphQL SDK attribution shares the REST trust boundary and remains independent of credential routing.
+			if err := validateConnectAuditSDK(ctx, s, optionalUUIDValueOrNil(createdByAppID)); err != nil {
+				return nil, err
+			}
+			resolved, err := resolveConnectRuntimeConfig(ctx, s, verifier, call, masterKey, firstRedirectURI(redirectURIs))
 			if err != nil {
 				return nil, err
 			}
 			returnURL, _ := p.Args["return_url"].(string)
 			returnURL = strings.TrimSpace(returnURL)
-			if returnURL != "" && !isHTTPRedirectURI(returnURL) {
+			if returnURL != "" && !isAbsoluteHTTPURL(returnURL) {
 				return nil, errors.New("return_url must be an absolute http or https URL")
 			}
 			response, err := createConnectSession(ctx, s, call, endUserRef, optionalUUIDValueOrNil(createdByAppID), returnURL, graphQLStringMapArg(p, "resource_input"), graphQLStringSliceArg(p, "scopes"), resolved, masterKey)
@@ -2182,6 +2095,9 @@ func connectSessionMutationArgs() graphql.FieldConfigArgument {
 	args := connectScopedArgs()
 	args["end_user_ref"] = &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)}
 	args["created_by_app_id"] = &graphql.ArgumentConfig{Type: graphql.String}
+	args["auth_type"] = &graphql.ArgumentConfig{Type: graphql.String}
+	args["auth_name"] = &graphql.ArgumentConfig{Type: graphql.String}
+	args["auth_ref"] = &graphql.ArgumentConfig{Type: graphql.String}
 	args["return_url"] = &graphql.ArgumentConfig{Type: graphql.String}
 	args["resource_input"] = &graphql.ArgumentConfig{Type: engineJSONType}
 	args["scopes"] = &graphql.ArgumentConfig{Type: graphql.NewList(graphql.NewNonNull(graphql.String))}
@@ -2231,7 +2147,23 @@ func connectAdminCallFromArgs(p graphql.ResolveParams, s store.Store) (connectAd
 	if err != nil {
 		return connectAdminCall{}, err
 	}
-	return connectAdminCall{bucketID: bucketID, serviceID: serviceID}, nil
+	authType, _ := p.Args["auth_type"].(string)
+	authName, _ := p.Args["auth_name"].(string)
+	authRef, _ := p.Args["auth_ref"].(string)
+	authType = canonicalConnectAuthType(authType)
+	authName = strings.TrimSpace(authName)
+	authRef = strings.TrimSpace(authRef)
+	// Exact selector input is all-or-none so GraphQL cannot float across auth schemes.
+	if (authType == "") != (authName == "") {
+		return connectAdminCall{}, errors.New("auth_type and auth_name must be provided together")
+	}
+	// Closed reference grammar prevents GraphQL clients from supplying field interpolation or partial source identity.
+	if authRef != "" {
+		if _, err := parseAppAuthReference(authRef); err != nil {
+			return connectAdminCall{}, errors.New("auth_ref must use ${bucket.auth.<service>.<authName>}")
+		}
+	}
+	return connectAdminCall{bucketID: bucketID, serviceID: serviceID, authType: authType, authName: authName, authRef: authRef}, nil
 }
 
 // secretBulkGraphQLArgs verifies bucket ownership before decoding secret rows,
@@ -2445,9 +2377,9 @@ func projectGraphQLBucketConnectSummary(summary *store.BucketConnectSummary) map
 		return nil
 	}
 	return map[string]interface{}{
-		"bucket_id":            summary.BucketID.String(),
-		"connect_config_count": summary.ConnectConfigCount,
-		"connected_user_count": summary.ConnectedUserCount,
+		"bucket_id":                    summary.BucketID.String(),
+		"application_credential_count": summary.ApplicationCredentialCount,
+		"connected_user_count":         summary.ConnectedUserCount,
 	}
 }
 
@@ -2970,7 +2902,7 @@ func projectGraphQLBucketServiceSummaries(services []store.BucketServiceSummary)
 		items = append(items, map[string]interface{}{
 			"service_id": service.ServiceID.String(), "service_name": service.ServiceName,
 			"secret_count": service.SecretCount, "value_count": service.ValueCount,
-			"connect_config_count": service.ConnectConfigCount, "connected_user_count": service.ConnectedUserCount,
+			"application_credential_count": service.ApplicationCredentialCount, "connected_user_count": service.ConnectedUserCount,
 		})
 	}
 	return items

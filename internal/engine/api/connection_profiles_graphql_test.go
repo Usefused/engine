@@ -84,6 +84,27 @@ func TestSetWorkspaceConnectionProfileRejectsInactiveVersion(t *testing.T) {
 	}
 }
 
+// TestWorkspaceConnectionProfilesGraphQLFieldReturnsFlatProfiles protects CLI sync from credential-store coupling.
+func TestWorkspaceConnectionProfilesGraphQLFieldReturnsFlatProfiles(t *testing.T) {
+	accountID := uuid.New()
+	serviceID := uuid.New()
+	versionID := uuid.New()
+	profileStore := &profileGraphQLStore{profile: &store.WorkspaceConnectionProfile{
+		ID: uuid.New(), ServiceID: serviceID, ServiceVersionID: versionID, AuthType: "oauth",
+		ProfileSnapshot: json.RawMessage(`{"auth_type":"oauth"}`),
+	}}
+	result, err := workspaceConnectionProfilesGraphQLField(profileStore).Resolve(graphql.ResolveParams{Context: profileGraphQLTestContext(accountID)})
+	// Resolver failure would make the CLI sync regression reappear before projection assertions run.
+	if err != nil {
+		t.Fatalf("resolve workspace connection profiles: %v", err)
+	}
+	items, ok := result.([]map[string]interface{})
+	// A flat row must carry both service identities so CLI can place it without bucket metadata.
+	if !ok || len(items) != 1 || items[0]["service_id"] != serviceID.String() || items[0]["service_version_id"] != versionID.String() {
+		t.Fatalf("unexpected workspace connection profile projection: %#v", result)
+	}
+}
+
 func profileGraphQLTestContext(accountID uuid.UUID) context.Context {
 	ctx := context.WithValue(context.Background(), mcpGraphQLActorContextKey, mcpGraphQLActor{accountID: accountID})
 	return accesscontrol.ContextWithActor(ctx, accesscontrol.Actor{AccountID: accountID, WorkspaceID: uuid.New()})
@@ -130,6 +151,15 @@ func (s *profileGraphQLStore) GetEffectiveWorkspaceProfile(context.Context, uuid
 
 // GetEffectiveWorkspaceProfiles models the batch read used by workspace application.
 func (s *profileGraphQLStore) GetEffectiveWorkspaceProfiles(context.Context, []store.WorkspaceProfileRef) ([]store.WorkspaceConnectionProfile, error) {
+	if s.profile == nil {
+		return nil, nil
+	}
+	return []store.WorkspaceConnectionProfile{*s.profile}, nil
+}
+
+// ListWorkspaceConnectProfiles supplies the bounded effective profile export used by declarative sync.
+func (s *profileGraphQLStore) ListWorkspaceConnectProfiles(context.Context) ([]store.WorkspaceConnectionProfile, error) {
+	// An absent fixture models a workspace with no exportable routing profiles.
 	if s.profile == nil {
 		return nil, nil
 	}

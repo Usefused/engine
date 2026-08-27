@@ -21,6 +21,7 @@ type generationPlanningClient struct {
 	contracts            store.GenerationContractStore
 	observed             map[uuid.UUID]string
 	requireGenerationPin bool
+	generationTargets    map[string]bool
 }
 
 // workspaceServicesByKeys composes canonical identity resolution with the existing SQL-filtered metadata reader.
@@ -69,7 +70,47 @@ func localSnapshotPlanningClient(s store.Store, registry sandbox.RegistryClient,
 		}
 		return registry, nil
 	}
-	return &generationPlanningClient{RegistryClient: registry, contracts: contracts, observed: make(map[uuid.UUID]string), requireGenerationPin: requireGenerationPin}, nil
+	return &generationPlanningClient{
+		RegistryClient: registry, contracts: contracts, observed: make(map[uuid.UUID]string),
+		requireGenerationPin: requireGenerationPin, generationTargets: make(map[string]bool),
+	}, nil
+}
+
+// setGenerationTargets records exact generated service versions so metadata-only auth sources need no archive pin.
+func (c *generationPlanningClient) setGenerationTargets(services []sdkResolvedService) {
+	for _, service := range services {
+		c.generationTargets[generationPlanningRefKey(service.ServiceID, service.Version)] = true
+	}
+}
+
+// setGenerationTargetBindings restores exact generated targets when a persisted plan is revalidated during apply.
+func (c *generationPlanningClient) setGenerationTargetBindings(bindings []sdkContractBinding) {
+	for _, binding := range bindings {
+		c.generationTargets[generationPlanningRefKey(binding.ServiceID, binding.Version)] = true
+	}
+}
+
+// requiresGenerationPin returns true only for exact service versions exposed through generated SDK selections.
+func (c *generationPlanningClient) requiresGenerationPin(serviceID uuid.UUID, version string) bool {
+	// SDK callers that have not yet supplied a target partition retain the historical fail-closed archive requirement.
+	if c.requireGenerationPin && len(c.generationTargets) == 0 {
+		return true
+	}
+	return c.requireGenerationPin && c.generationTargets[generationPlanningRefKey(serviceID, version)]
+}
+
+// generationPlanningRefKey prevents two versions of one service from sharing generation authority.
+func generationPlanningRefKey(serviceID uuid.UUID, version string) string {
+	return serviceID.String() + "\x00" + version
+}
+
+// requireLocalGenerationPin enforces archive identity only where a generated target actually consumes it.
+func requireLocalGenerationPin(hash string, required bool) error {
+	// Runtime-only credential sources remain valid without a Registry generation archive.
+	if required && !store.ValidGenerationContractHash(hash) {
+		return store.ErrGenerationContractPinUnavailable
+	}
+	return nil
 }
 
 // localPlanningUnavailableError distinguishes absent storage support from an individual refreshable SDK pin.
@@ -80,19 +121,24 @@ func localPlanningUnavailableError() error {
 
 // FetchServiceVersionRevisions keeps the existing before/after-generation checks tied to the local pin instead of current Registry visibility.
 func (c *generationPlanningClient) FetchServiceVersionRevisions(ctx context.Context, refs []sandbox.ServiceVersionRef, _ string) ([]sandbox.ServiceVersionRevision, error) {
-	bindings, err := c.contracts.ListGenerationContractBindings(ctx, refs, c.requireGenerationPin)
+	bindings, err := c.contracts.ListGenerationContractBindings(ctx, refs, false)
 	// A missing pin is actionable; network fallback would silently select a different contract.
 	if err != nil {
 		return nil, err
 	}
 	revisions := make([]sandbox.ServiceVersionRevision, len(bindings))
 	for i, binding := range bindings {
+		generated := c.requiresGenerationPin(binding.ServiceID, binding.Version)
+		// Only generated targets require an archived provider contract; auth-source metadata executes locally.
+		if err := requireLocalGenerationPin(binding.GenerationContractHash, generated); err != nil {
+			return nil, err
+		}
 		// A concurrent refresh between auth planning and binding cannot mix two revisions in one plan.
-		if hash := c.observed[binding.ServiceVersionID]; hash != "" && hash != planningContractIdentity(binding.GenerationContractHash, binding.RuntimeContractHash, c.requireGenerationPin) {
+		if hash := c.observed[binding.ServiceVersionID]; hash != "" && hash != planningContractIdentity(binding.GenerationContractHash, binding.RuntimeContractHash, generated) {
 			return nil, errors.New("contract_revision_stale")
 		}
 		// Registry requests carry only the generation reference; MCP instead retains its local runtime staleness fence.
-		if c.requireGenerationPin {
+		if generated {
 			binding.RuntimeContractHash = ""
 		}
 		revisions[i] = sandbox.ServiceVersionRevision{
@@ -111,14 +157,19 @@ func (c *generationPlanningClient) FetchServiceVersionExecutionAuthContracts(ctx
 	for i, selection := range selections {
 		inputs[i] = store.GenerationAuthSelection{ServiceID: selection.ServiceID, Version: selection.Version, OperationNames: selection.OperationNames, SelectAll: selection.SelectAll}
 	}
-	contracts, err := c.contracts.ListGenerationAuthContracts(ctx, inputs, c.requireGenerationPin)
+	contracts, err := c.contracts.ListGenerationAuthContracts(ctx, inputs, false)
 	// Missing local security cannot be converted into anonymous generation authority.
 	if err != nil {
 		return nil, err
 	}
 	result := make([]sandbox.ServiceVersionExecutionAuthContract, len(contracts))
 	for i, contract := range contracts {
-		c.observed[contract.ServiceVersionID] = planningContractIdentity(contract.GenerationContractHash, contract.RuntimeContractHash, c.requireGenerationPin)
+		generated := c.requiresGenerationPin(contract.ServiceID, contract.Version)
+		// Source-only security metadata does not become SDK generator input.
+		if err := requireLocalGenerationPin(contract.GenerationContractHash, generated); err != nil {
+			return nil, err
+		}
+		c.observed[contract.ServiceVersionID] = planningContractIdentity(contract.GenerationContractHash, contract.RuntimeContractHash, generated)
 		result[i] = generationAuthProjection(contract)
 	}
 	return result, nil

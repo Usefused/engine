@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,16 +11,6 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
-
-type workspaceAuthTelemetryStore struct {
-	*workspaceTestStore
-}
-
-// ApplyWorkspaceAuthBindings succeeds without retaining credential material so
-// this fixture isolates the post-commit telemetry contract.
-func (s *workspaceAuthTelemetryStore) ApplyWorkspaceAuthBindings(context.Context, []store.WorkspaceAuthBinding) error {
-	return nil
-}
 
 // TestWorkspaceServiceAdmissionEmitsMutationSpans proves add/remove attempts
 // use live OTEL spans even when authentication rejects them before storage.
@@ -72,30 +61,26 @@ func TestWorkspaceServiceAdmissionEmitsMutationSpans(t *testing.T) {
 	}
 }
 
-// TestWorkspaceCredentialMutationSuccessSpansIncludeOutcome verifies both
-// credential persistence paths emit a stable terminal result without identity values.
-func TestWorkspaceCredentialMutationSuccessSpansIncludeOutcome(t *testing.T) {
+// TestWorkspaceBucketSecretMutationSuccessSpanIncludesOutcome verifies generic workspace secrets retain their stable audit result.
+func TestWorkspaceBucketSecretMutationSuccessSpanIncludesOutcome(t *testing.T) {
 	recorder := tracetest.NewSpanRecorder()
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
 	previous := otel.GetTracerProvider()
 	otel.SetTracerProvider(provider)
-	// Cleanup restores the process tracer after both sibling mutation spans end.
+	// Cleanup restores the process tracer after the mutation span ends.
 	t.Cleanup(func() {
 		otel.SetTracerProvider(previous)
 		_ = provider.Shutdown(t.Context())
 	})
 
-	repository := &workspaceAuthTelemetryStore{workspaceTestStore: &workspaceTestStore{}}
+	repository := &workspaceTestStore{}
 	if err := upsertWorkspaceBucketSecrets(t.Context(), repository, []store.WorkspaceSecret{{}}); err != nil {
 		t.Fatalf("upsert bucket secrets: %v", err)
 	}
-	if err := applyPreparedWorkspaceAuthBindings(t.Context(), repository, []store.WorkspaceAuthBinding{{}}); err != nil {
-		t.Fatalf("apply auth bindings: %v", err)
-	}
 
 	spans := recorder.Ended()
-	if len(spans) != 2 {
-		t.Fatalf("credential mutation spans = %d, want 2", len(spans))
+	if len(spans) != 1 {
+		t.Fatalf("credential mutation spans = %d, want 1", len(spans))
 	}
 	for _, span := range spans {
 		attributes := map[string]string{}

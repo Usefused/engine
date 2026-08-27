@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Usefused/engine/internal/shared/credentialkeys"
 	"github.com/Usefused/engine/internal/shared/db"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -23,10 +24,6 @@ func TestPostgresStore_BucketAttachedConnectAuth(t *testing.T) {
 
 	t.Run("bucket names resolve in one exact batch", func(t *testing.T) {
 		testGetBucketsByNames(t, fixture)
-	})
-
-	t.Run("config is upserted only for a bucket in the workspace", func(t *testing.T) {
-		testConnectConfigOwnership(t, fixture)
 	})
 
 	t.Run("app readiness selects only exact requested credential metadata", func(t *testing.T) {
@@ -888,16 +885,7 @@ func upsertOAuthConnectionForUser(t *testing.T, f connectAuthFixture, endUserRef
 
 func TestPostgresStoreConnectRejectsPlaintextAuthMaterial(t *testing.T) {
 	s := &postgresStore{}
-	_, err := s.UpsertConnectConfig(context.Background(), ConnectConfig{
-		EncryptedDEK:          "dek",
-		EncryptedClientID:     "client-id",
-		EncryptedClientSecret: "client-secret",
-	})
-	if !errors.Is(err, ErrInvalidEncryptedAuthMaterial) {
-		t.Fatalf("expected config plaintext rejection, got %v", err)
-	}
-
-	_, err = s.UpsertAuthConnection(context.Background(), AuthConnection{
+	_, err := s.UpsertAuthConnection(context.Background(), AuthConnection{
 		EncryptedDEK:         "dek",
 		EncryptedAccessToken: "access-token",
 	})
@@ -1074,52 +1062,21 @@ func seedConnectAuthFixture(t *testing.T, db execer, f connectAuthFixture) {
 	`, f.appFamilyID, f.bucketA); err != nil {
 		t.Fatalf("seed connect auth app bucket: %v", err)
 	}
-}
-
-func testConnectConfigOwnership(t *testing.T, f connectAuthFixture) {
-	t.Helper()
-	cfg, err := f.store.UpsertConnectConfig(f.ctx, connectConfigForFixture(t, f))
-	if err != nil {
-		t.Fatalf("UpsertConnectConfig: %v", err)
+	// Every connection fixture is pinned to one enabled version so callbacks and refresh never float to Registry latest.
+	if _, err := db.Exec(f.ctx, `INSERT INTO fused_workspace_services (service_id, service_slug, service_name)
+		VALUES ($1, $2, 'Connect auth service')`, f.serviceID, "connect-auth-"+f.serviceID.String()); err != nil {
+		t.Fatalf("seed connect auth service: %v", err)
 	}
-	if cfg.BucketID != f.bucketA || cfg.ServiceID != f.serviceID {
-		t.Fatalf("unexpected connect config identity: %#v", cfg)
-	}
-	versionID := uuid.New()
-	if err := f.store.AddWorkspaceServiceVersion(f.ctx, f.serviceID, "", "v-connect", versionID, "Connect Service", f.accountID); err != nil {
-		t.Fatalf("activate connect service: %v", err)
-	}
-	configs, err := f.store.ListConnectConfigsForService(f.ctx, f.serviceID)
-	if err != nil || len(configs) != 1 || configs[0].BucketID != f.bucketA {
-		t.Fatalf("ListConnectConfigsForService: configs=%#v err=%v", configs, err)
-	}
-	syncReader := f.store.(interface {
-		ListWorkspaceConnectConfigs(context.Context) ([]WorkspaceConnectConfig, error)
-	})
-	exported, err := syncReader.ListWorkspaceConnectConfigs(f.ctx)
-	if err != nil || len(exported) != 1 || exported[0].BucketName == "" {
-		t.Fatalf("ListWorkspaceConnectConfigs: configs=%#v err=%v", exported, err)
-	}
-
-}
-
-func connectConfigForFixture(t *testing.T, f connectAuthFixture) ConnectConfig {
-	encrypted := encryptConnectAuthValues(t, "client-id-v1", "client-secret-v1")
-	return ConnectConfig{
-		BucketID:              f.bucketA,
-		ServiceID:             f.serviceID,
-		AuthType:              "oauth",
-		AuthName:              "oauth",
-		Enabled:               true,
-		EncryptedDEK:          encrypted.dek,
-		EncryptedClientID:     encrypted.values[0],
-		EncryptedClientSecret: encrypted.values[1],
-		RedirectURI:           "https://engine.example.com/connect/callback",
+	if _, err := db.Exec(f.ctx, `INSERT INTO fused_workspace_service_versions
+		(service_id, service_version_id, version, status) VALUES ($1, $2, 'v1', 'public')`, f.serviceID, uuid.New()); err != nil {
+		t.Fatalf("seed connect auth service version: %v", err)
 	}
 }
 
 func testAppBucketCredentialPresence(t *testing.T, f connectAuthFixture) {
 	t.Helper()
+	upsertOAuthApplicationSecrets(t, f)
+	clientIDKey, clientSecretKey, _ := credentialkeys.OAuthApplication("oauth")
 	if err := f.store.UpsertSecret(f.ctx, WorkspaceSecret{
 		WorkspaceSecretMeta: WorkspaceSecretMeta{
 			BucketID: f.bucketA, ServiceID: f.serviceID, KeyName: "bearerAuth", CredentialType: "bearer",
@@ -1130,7 +1087,7 @@ func testAppBucketCredentialPresence(t *testing.T, f connectAuthFixture) {
 	}
 	repository := f.store.(AppBucketReadinessStore)
 	presence, err := repository.GetAppBucketCredentialPresence(f.ctx, f.bucketA, []AppCredentialRequirement{
-		{ServiceID: f.serviceID, AuthType: "oauth", AuthName: "oauth"},
+		{ServiceID: f.serviceID, AuthType: "oauth", AuthName: "oauth", SecretKeys: []string{clientIDKey, clientSecretKey}},
 		{ServiceID: f.serviceID, AuthType: "bearer", AuthName: "bearerAuth", SecretKeys: []string{"bearerAuth", "missingKey"}},
 	})
 	if err != nil {
@@ -1140,7 +1097,8 @@ func testAppBucketCredentialPresence(t *testing.T, f connectAuthFixture) {
 	for _, item := range presence {
 		byType[item.AuthType] = item
 	}
-	if !byType["oauth"].Connected || len(byType["oauth"].SecretKeys) != 0 {
+	// OAuth readiness now proves the complete deterministic application pair in the selected bucket.
+	if !byType["oauth"].Connected || len(byType["oauth"].SecretKeys) != 2 {
 		t.Fatalf("OAuth readiness presence = %#v", byType["oauth"])
 	}
 	if got := byType["bearer"].SecretKeys; len(got) != 1 || got[0] != "bearerAuth" || byType["bearer"].Connected {
@@ -1150,11 +1108,11 @@ func testAppBucketCredentialPresence(t *testing.T, f connectAuthFixture) {
 
 func testAuthConnectionsReusableByBucket(t *testing.T, f connectAuthFixture) {
 	t.Helper()
-	upsertConnectConfigForSummary(t, f)
+	upsertOAuthApplicationSecrets(t, f)
 	connA := upsertOAuthConnection(t, f)
 	assertAuthConnectionFailureDiagnostic(t, f, connA)
 	connA = assertReconnectUpsertReplacesConnection(t, f, connA)
-	connB := upsertAPIKeyConnection(t, f)
+	connB := upsertSecondBucketOAuthConnection(t, f)
 	assertDifferentBucketConnections(t, connA, connB)
 	assertBucketConnectionLookup(t, f, connA)
 	assertConnectionListAndRefreshQuery(t, f, connA.ID, connB.ID)
@@ -1205,10 +1163,31 @@ func assertReconnectUpsertReplacesConnection(t *testing.T, f connectAuthFixture,
 	return reconnected
 }
 
-func upsertConnectConfigForSummary(t *testing.T, f connectAuthFixture) {
+// upsertOAuthApplicationSecrets persists the exact pair used by readiness and summary queries.
+func upsertOAuthApplicationSecrets(t *testing.T, f connectAuthFixture) {
 	t.Helper()
-	if _, err := f.store.UpsertConnectConfig(f.ctx, connectConfigForFixture(t, f)); err != nil {
-		t.Fatalf("UpsertConnectConfig for summary: %v", err)
+	clientIDKey, clientSecretKey, ok := credentialkeys.OAuthApplication("oauth")
+	// A fixed valid test name must always produce the deterministic application family.
+	if !ok {
+		t.Fatal("derive OAuth application keys")
+	}
+	inputs := []struct{ key, value string }{{clientIDKey, "client-id-v1"}, {clientSecretKey, "client-secret-v1"}}
+	secrets := make([]WorkspaceSecret, 0, len(inputs))
+	for _, input := range inputs {
+		wrappedDEK, dek, err := WrapDEK(connectAuthTestMasterKey)
+		if err != nil {
+			t.Fatalf("wrap OAuth application DEK: %v", err)
+		}
+		encrypted, err := EncryptWithDEK(dek, input.value)
+		if err != nil {
+			t.Fatalf("encrypt OAuth application value: %v", err)
+		}
+		secrets = append(secrets, WorkspaceSecret{WorkspaceSecretMeta: WorkspaceSecretMeta{
+			BucketID: f.bucketA, ServiceID: f.serviceID, KeyName: input.key, CredentialType: "oauth",
+		}, EncryptedDEK: wrappedDEK, EncryptedValue: encrypted})
+	}
+	if err := f.store.UpsertSecrets(f.ctx, secrets); err != nil {
+		t.Fatalf("UpsertSecrets OAuth application: %v", err)
 	}
 }
 
@@ -1243,15 +1222,17 @@ func upsertOAuthConnection(t *testing.T, f connectAuthFixture) *AuthConnection {
 	return conn
 }
 
-func upsertAPIKeyConnection(t *testing.T, f connectAuthFixture) *AuthConnection {
+// upsertSecondBucketOAuthConnection stores the same user/service grant under another credential bucket.
+func upsertSecondBucketOAuthConnection(t *testing.T, f connectAuthFixture) *AuthConnection {
 	t.Helper()
 	encrypted := encryptConnectAuthValues(t, "access-b")
 	conn, err := f.store.UpsertAuthConnection(f.ctx, AuthConnection{
 		BucketID:             f.bucketB,
 		ServiceID:            f.serviceID,
+		ServiceVersionID:     fixtureServiceVersionID(t, f),
 		EndUserRef:           "user_123",
-		AuthType:             "api_key",
-		AuthName:             "api_key",
+		AuthType:             "oauth",
+		AuthName:             "oauth",
 		EncryptedDEK:         encrypted.dek,
 		EncryptedAccessToken: encrypted.values[0],
 		TokenType:            "Bearer",
@@ -1358,7 +1339,7 @@ func assertBucketConnectSummary(t *testing.T, f connectAuthFixture) {
 	if err != nil {
 		t.Fatalf("GetBucketConnectSummary: %v", err)
 	}
-	if summary.BucketID != f.bucketA || summary.ConnectConfigCount != 1 || summary.ConnectedUserCount != 1 {
+	if summary.BucketID != f.bucketA || summary.ApplicationCredentialCount != 1 || summary.ConnectedUserCount != 1 {
 		t.Fatalf("unexpected bucket connect summary: %#v", summary)
 	}
 }
@@ -1387,6 +1368,7 @@ func createConnectSession(t *testing.T, f connectAuthFixture) *ConnectSession {
 		NonceHash:             "nonce-hash",
 		EncryptedDEK:          encrypted.dek,
 		EncryptedPKCEVerifier: encrypted.values[0],
+		RedirectURI:           "https://engine.example.com/workspace/connect/callback",
 		CreatedByAppID:        f.appID,
 		ReturnURL:             "https://app.example.com/oauth/done",
 		RequestedScopes:       []string{"test"},
@@ -1409,6 +1391,10 @@ func assertConnectSessionLookup(t *testing.T, f connectAuthFixture, session *Con
 	}
 	if found.ReturnURL != "https://app.example.com/oauth/done" {
 		t.Fatalf("expected return_url to round-trip, got %q", found.ReturnURL)
+	}
+	// Callback identity must remain pinned even if Engine public configuration changes during consent.
+	if found.RedirectURI != "https://engine.example.com/workspace/connect/callback" {
+		t.Fatalf("expected redirect_uri to round-trip, got %q", found.RedirectURI)
 	}
 	if decryptConnectAuthValue(t, found.EncryptedDEK, found.EncryptedPKCEVerifier) != "pkce-verifier" {
 		t.Fatal("expected encrypted PKCE verifier to decrypt to fixture value")
@@ -1533,7 +1519,7 @@ func postgresInputCompletionSession(t *testing.T, f connectAuthFixture, now time
 	return ConnectSession{
 		BucketID: f.bucketA, ServiceID: f.serviceID, ServiceVersionID: fixtureServiceVersionID(t, f), AuthType: "oauth", AuthName: "oauth",
 		EndUserRef: "user_input", StateHash: "provider-" + uuid.NewString(), NonceHash: "nonce-hash",
-		EncryptedDEK: encrypted.dek, EncryptedPKCEVerifier: encrypted.values[0], CreatedByAppID: f.appID,
+		EncryptedDEK: encrypted.dek, EncryptedPKCEVerifier: encrypted.values[0], RedirectURI: "https://engine.example.com/workspace/connect/callback", CreatedByAppID: f.appID,
 		ReturnURL: "https://app.example.com/oauth/done", ResourceInputJSON: []byte(`{"subdomain":"acme"}`),
 		RequestedScopes: []string{"read"}, ExpiresAt: now.Add(10 * time.Minute),
 	}

@@ -14,6 +14,6 @@ func registerNativeRESTControlRoutes(r chi.Router, deps engineRouterDeps) {
 		enginePublicGRPCURL = deps.cfg.Engine.PublicGRPCURL
 	}
 	r.Get("/audit/export", api.AuditExportHandler(deps.engineStore))
-	r.Mount("/workspace", api.WorkspaceHandler(deps.engineStore, deps.registryClient, deps.masterKey, deps.appTokenRevoker))
+	r.Mount("/workspace", api.WorkspaceHandler(deps.engineStore, deps.registryClient, deps.masterKey, deps.appTokenRevoker, deps.connectRedirectURI))
 	api.MountConfigRoutes(r, deps.configStore, deps.engineStore, deps.registryClient, deps.registryProxy, deps.registryClient, deps.masterKey, enginePublicGRPCURL, deps.controlAuth)
 }

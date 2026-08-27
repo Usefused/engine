@@ -305,14 +305,14 @@ func TestValidateAppBucketReadinessReportsEveryMissingOAuthService(t *testing.T)
 	byService := map[string]appMissingCredential{missing[0].ServiceID: missing[0], missing[1].ServiceID: missing[1]}
 	assertAppMissingCredential(t, byService[first.String()], appMissingCredential{
 		ServiceID: first.String(), Service: "Google Drive", AuthType: "oauth", AuthName: "primaryOAuth",
-		RequiredFields: []appMissingCredentialField{{Name: "connection"}},
+		RequiredFields: []appMissingCredentialField{{Name: "client_id", SecretKey: "primaryOAuth_client_id"}, {Name: "client_secret", SecretKey: "primaryOAuth_client_secret"}},
 	})
 	assertAppMissingCredential(t, byService[second.String()], appMissingCredential{
 		ServiceID: second.String(), Service: "Identity Provider", AuthType: "oidc", AuthName: "primaryOIDC",
-		RequiredFields: []appMissingCredentialField{{Name: "connection"}},
+		RequiredFields: []appMissingCredentialField{{Name: "client_id", SecretKey: "primaryOIDC_client_id"}, {Name: "client_secret", SecretKey: "primaryOIDC_client_secret"}},
 	})
-	if got := [3]int{s.appBucketReadinessCalls, s.connectConfigsForBucketCalls, s.secretMetaCalls}; got != [3]int{1, 0, 0} {
-		t.Fatalf("readiness queries = exact:%d broad-connect:%d broad-secret:%d", s.appBucketReadinessCalls, s.connectConfigsForBucketCalls, s.secretMetaCalls)
+	if got := [2]int{s.appBucketReadinessCalls, s.secretMetaCalls}; got != [2]int{1, 0} {
+		t.Fatalf("readiness queries = exact:%d broad-secret:%d", s.appBucketReadinessCalls, s.secretMetaCalls)
 	}
 }
 
@@ -326,11 +326,7 @@ func assertAppMissingCredential(t *testing.T, got, want appMissingCredential) {
 func TestValidateAppBucketReadinessValidatesOAuthAndMTLSAlternative(t *testing.T) {
 	bucketID, serviceID := uuid.New(), uuid.New()
 	s := &workspaceTestStore{
-		connectConfigs: map[string]*store.ConnectConfig{
-			bucketID.String() + ":" + serviceID.String(): {
-				BucketID: bucketID, ServiceID: serviceID, AuthType: "oauth", AuthName: "oauthAuth", Enabled: true,
-			},
-		},
+		connectedCredentialKeys: map[string]bool{appConnectReadinessKey(serviceID, "oauth", "oauthAuth"): true},
 		secretMetas: map[uuid.UUID][]store.WorkspaceSecretMeta{bucketID: {
 			{ServiceID: serviceID, KeyName: "clientCertificate_cert"},
 			{ServiceID: serviceID, KeyName: "clientCertificate_key"},
@@ -453,21 +449,21 @@ func TestDecodeAppApplyPlanReturnsAuthoritativeBucketAndIDOnlyCredentialMetadata
 		RequiredFields: []appMissingCredentialField{{Name: "token", SecretKey: "bearerAuth"}},
 	})
 	wantQueries := struct {
-		bucketNames          []string
-		exact, broad, secret int
-	}{[]string{"customer-integrations"}, 1, 0, 0}
+		bucketNames   []string
+		exact, secret int
+	}{[]string{"customer-integrations"}, 1, 0}
 	gotQueries := struct {
-		bucketNames          []string
-		exact, broad, secret int
-	}{s.bucketLookupNames, s.appBucketReadinessCalls, s.connectConfigsForBucketCalls, s.secretMetaCalls}
+		bucketNames   []string
+		exact, secret int
+	}{s.bucketLookupNames, s.appBucketReadinessCalls, s.secretMetaCalls}
 	if !reflect.DeepEqual(gotQueries, wantQueries) {
-		t.Fatalf("apply readiness queries = bucket:%v exact:%d broad-connect:%d broad-secret:%d", s.bucketLookupNames, s.appBucketReadinessCalls, s.connectConfigsForBucketCalls, s.secretMetaCalls)
+		t.Fatalf("apply readiness queries = bucket:%v exact:%d broad-secret:%d", s.bucketLookupNames, s.appBucketReadinessCalls, s.secretMetaCalls)
 	}
 }
 
 func TestValidateAppBucketReadinessSkipsCredentialReadsForAnonymousAndWebhookSelections(t *testing.T) {
 	bucketID := uuid.New()
-	s := &workspaceTestStore{connectConfigsForBucketErr: errors.New("credential reads must be skipped")}
+	s := &workspaceTestStore{appBucketReadinessErr: errors.New("credential reads must be skipped")}
 	err := validateAppBucketReadiness(context.Background(), s, store.Bucket{ID: bucketID, Name: "production"}, []models.SDKSelection{
 		{ServiceID: uuid.New(), OperationNames: []string{"health"}},
 		{ServiceID: uuid.New(), WebhookNames: []string{"created"}},

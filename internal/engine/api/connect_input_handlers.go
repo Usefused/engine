@@ -201,12 +201,12 @@ var connectInputProviderTemplate = parseHostedConnectTemplate("connect-input-pro
 // ConnectInputPageHandler renders the short-lived Engine-owned collection
 // page only for a valid pending form session. The raw token is a bearer secret,
 // so the response is non-cacheable and telemetry records counts/outcomes only.
-func ConnectInputPageHandler(s store.Store, verifier ServiceVerifier, masterKey []byte) http.HandlerFunc {
+func ConnectInputPageHandler(s store.Store, verifier ServiceVerifier, masterKey []byte, redirectURIs ...string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.connect.input.view")
 		defer span.End()
 		branding := loadHostedConnectBranding(ctx, s)
-		loaded, err := loadConnectInputSession(ctx, s, verifier, masterKey, r.URL.Query().Get("token"))
+		loaded, err := loadConnectInputSession(ctx, s, verifier, masterKey, firstRedirectURI(redirectURIs), r.URL.Query().Get("token"))
 		if err != nil {
 			recordConnectInputOutcome(ctx, span, "view", connectInputOutcome(err), 0)
 			writeConnectInputUnavailable(w, branding)
@@ -221,7 +221,7 @@ func ConnectInputPageHandler(s store.Store, verifier ServiceVerifier, masterKey 
 // ConnectInputSubmitHandler validates the browser fields before creating any
 // OAuth state. A successful submission atomically consumes the form session
 // and inserts the provider callback session, then renders the provider handoff.
-func ConnectInputSubmitHandler(s store.Store, verifier ServiceVerifier, masterKey []byte) http.HandlerFunc {
+func ConnectInputSubmitHandler(s store.Store, verifier ServiceVerifier, masterKey []byte, redirectURIs ...string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.connect.input.submit")
 		defer span.End()
@@ -236,7 +236,7 @@ func ConnectInputSubmitHandler(s store.Store, verifier ServiceVerifier, masterKe
 		// preventing collisions with a provider profile that declares "token" as
 		// legitimate customer routing input.
 		token := strings.TrimSpace(r.URL.Query().Get("token"))
-		loaded, err := loadConnectInputSession(ctx, s, verifier, masterKey, token)
+		loaded, err := loadConnectInputSession(ctx, s, verifier, masterKey, firstRedirectURI(redirectURIs), token)
 		if err != nil {
 			recordConnectInputOutcome(ctx, span, "submit", connectInputOutcome(err), 0)
 			writeConnectInputUnavailable(w, branding)
@@ -267,7 +267,7 @@ func ConnectInputSubmitHandler(s store.Store, verifier ServiceVerifier, masterKe
 // loadConnectInputSession resolves one exact hashed token row and its pinned
 // runtime profile. The lookup remains constant-count and rejects replay,
 // expiry, or configuration drift before any customer values are displayed.
-func loadConnectInputSession(ctx context.Context, s store.Store, verifier ServiceVerifier, masterKey []byte, rawToken string) (resolvedConnectInputSession, error) {
+func loadConnectInputSession(ctx context.Context, s store.Store, verifier ServiceVerifier, masterKey []byte, redirectURI, rawToken string) (resolvedConnectInputSession, error) {
 	tokenHash, err := connectInputTokenHash(rawToken)
 	if err != nil {
 		return resolvedConnectInputSession{}, err
@@ -279,12 +279,20 @@ func loadConnectInputSession(ctx context.Context, s store.Store, verifier Servic
 	if session == nil {
 		return resolvedConnectInputSession{}, store.ErrConnectSessionUnavailable
 	}
-	call := connectAdminCall{bucketID: session.BucketID, serviceID: session.ServiceID}
-	resolved, err := resolveConnectRuntimeConfig(ctx, s, verifier, call, masterKey)
+	call := connectAdminCall{
+		bucketID: session.BucketID, serviceID: session.ServiceID,
+		authType: session.AuthType, authName: session.AuthName,
+		credentialSource: persistedApplicationCredentialSource(
+			session.CredentialSourceServiceID,
+			session.CredentialSourceAuthType,
+			session.CredentialSourceAuthName,
+		),
+	}
+	resolved, err := resolveConnectRuntimeConfig(ctx, s, verifier, call, masterKey, redirectURI)
 	if err != nil {
 		return resolvedConnectInputSession{}, err
 	}
-	if err := validateConnectInputSessionContract(ctx, s, session, resolved); err != nil {
+	if err := validateConnectInputSessionContract(session, resolved); err != nil {
 		return resolvedConnectInputSession{}, err
 	}
 	values, err := decodeConnectInputValues(session.ResourceInputJSON)
@@ -307,19 +315,17 @@ func connectInputTokenHash(raw string) (string, error) {
 // validateConnectInputSessionContract rejects same-name profile drift and
 // repeats app/service scope admission at submit time. A pending form cannot
 // silently inherit new auth URLs, fields, hosts, or permissions.
-func validateConnectInputSessionContract(ctx context.Context, s store.Store, session *store.ConnectInputSession, resolved connectRuntimeConfig) error {
-	if session.AuthType != resolved.config.AuthType || session.AuthName != resolved.config.AuthName || resolved.metadata.ConnectConfig == nil || resolved.metadata.ConnectConfig.ResourceInput == nil {
+func validateConnectInputSessionContract(session *store.ConnectInputSession, resolved connectRuntimeConfig) error {
+	// Pending input sessions remain pinned to the exact credential family and profile contract.
+	if session.AuthType != resolved.authType || session.AuthName != resolved.authName || resolved.metadata.ConnectConfig == nil || resolved.metadata.ConnectConfig.ResourceInput == nil {
 		return store.ErrConnectSessionUnavailable
 	}
 	contractHash, err := connectInputContractHash(resolved)
 	if err != nil || contractHash != session.ContractHash {
 		return store.ErrConnectSessionUnavailable
 	}
-	appScopes, err := applyAppConnectScopePolicy(ctx, s, session.BucketID, session.ServiceID, session.CreatedByAppID, session.RequestedScopes)
-	if err != nil {
-		return store.ErrConnectSessionUnavailable
-	}
-	effectiveScopes, err := resolveConnectScopes(resolved.auth, resolved.flow, appScopes)
+	effectiveScopes, err := resolveConnectScopes(resolved.auth, resolved.flow, session.RequestedScopes)
+	// Stored effective scopes are already bounded by the immutable app at session creation and must remain provider-valid.
 	if err != nil || !slices.Equal(effectiveScopes, session.RequestedScopes) {
 		return store.ErrConnectSessionUnavailable
 	}
@@ -341,7 +347,15 @@ func decodeConnectInputValues(raw []byte) (map[string]string, error) {
 // to one transaction owned by the store.
 func completeConnectInputSession(ctx context.Context, s store.Store, loaded resolvedConnectInputSession, resourceInputJSON []byte, masterKey []byte) (connectSessionStartResponse, error) {
 	session := loaded.session
-	call := connectAdminCall{bucketID: session.BucketID, serviceID: session.ServiceID}
+	call := connectAdminCall{
+		bucketID: session.BucketID, serviceID: session.ServiceID,
+		authType: session.AuthType, authName: session.AuthName,
+		credentialSource: persistedApplicationCredentialSource(
+			session.CredentialSourceServiceID,
+			session.CredentialSourceAuthType,
+			session.CredentialSourceAuthName,
+		),
+	}
 	providerSession, response, err := buildProviderConnectSession(call, session.EndUserRef, session.CreatedByAppID, session.ReturnURL, resourceInputJSON, session.RequestedScopes, loaded.resolved, masterKey)
 	if err != nil {
 		return connectSessionStartResponse{}, err

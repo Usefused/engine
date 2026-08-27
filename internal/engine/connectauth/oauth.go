@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -67,24 +66,6 @@ func IsReconnectRequiredRefreshError(err error) bool {
 	// Only OAuth invalid_grant means the stored user grant can no longer be
 	// refreshed; invalid_client instead points to workspace app configuration.
 	return errors.As(err, &endpointErr) && strings.EqualFold(endpointErr.Code, "invalid_grant")
-}
-
-// DecryptClientCredentials centralizes connect-config decryption so callback
-// and refresh flows use the same encrypted bucket config contract.
-func DecryptClientCredentials(cfg *store.ConnectConfig, masterKey []byte) (ClientCredentials, error) {
-	dek, err := store.UnwrapDEK(masterKey, cfg.EncryptedDEK)
-	if err != nil {
-		return ClientCredentials{}, err
-	}
-	clientID, err := store.DecryptWithDEK(dek, cfg.EncryptedClientID)
-	if err != nil {
-		return ClientCredentials{}, err
-	}
-	clientSecret, err := store.DecryptWithDEK(dek, cfg.EncryptedClientSecret)
-	if err != nil {
-		return ClientCredentials{}, err
-	}
-	return ClientCredentials{ClientID: clientID, ClientSecret: clientSecret, RedirectURI: cfg.RedirectURI}, nil
 }
 
 // ExchangeAuthorizationCode builds the auth-code grant in one place so browser

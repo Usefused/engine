@@ -96,6 +96,40 @@ func TestEngineGraphQLPolicyClassifiesEveryRootResolver(t *testing.T) {
 	assertRootPolicyCoverage(t, schema.MutationType(), engineGraphQLPolicy.mutationRoots)
 }
 
+// TestStartConnectSessionAuthorizationRequiresBucketAndTargetService locks GraphQL to REST authorization parity.
+func TestStartConnectSessionAuthorizationRequiresBucketAndTargetService(t *testing.T) {
+	bucketID, serviceID, workspaceID := uuid.New(), uuid.New(), uuid.New()
+	schema := authorizationTestSchema(t, &workspaceTestStore{})
+	body, err := json.Marshal(map[string]any{
+		"query": `mutation { startConnectSession(bucket_id: "` + bucketID.String() + `", service_id: "` + serviceID.String() + `", end_user_ref: "user") { authorize_url } }`,
+	})
+	// Fixture encoding must succeed before authorization planning is evaluated.
+	if err != nil {
+		t.Fatalf("marshal connect authorization request: %v", err)
+	}
+	plan, err := buildGraphQLAuthorizationPlan(&schema, body, workspaceID)
+	// Schema planning must accept the public mutation before requirement comparison.
+	if err != nil {
+		t.Fatalf("build connect authorization plan: %v", err)
+	}
+	want := map[accesscontrol.Requirement]bool{
+		{Permission: accesscontrol.PermissionConnectionManage, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: bucketID}}: true,
+		{Permission: accesscontrol.PermissionBucketUse, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: bucketID}}:        true,
+		{Permission: accesscontrol.PermissionServiceConsume, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: serviceID}}: true,
+	}
+	// No implicit workspace requirement may replace an exact bucket or service capability.
+	if len(plan.requirements) != len(want) {
+		t.Fatalf("connect requirements = %#v, want %#v", plan.requirements, want)
+	}
+	// Order is intentionally irrelevant because authorization plans deduplicate requirements as a set.
+	for _, requirement := range plan.requirements {
+		// Every exact bucket/service requirement must be present before the resolver can run.
+		if !want[requirement] {
+			t.Fatalf("unexpected connect requirement: %#v", requirement)
+		}
+	}
+}
+
 func TestWorkspaceExecutionAnalyticsRequiresAuditRead(t *testing.T) {
 	workspaceID := uuid.New()
 	s := &workspaceTestStore{accountID: uuid.New()}

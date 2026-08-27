@@ -683,11 +683,11 @@ func TestSecretResolverResolveExecutionCredentialsRefreshesExpiringConnectedAuth
 	conn.ScopeSource = "request"
 	failedAt := time.Now().UTC().Add(-time.Minute)
 	conn.LastFailureCode, conn.LastFailureAt, conn.LastFailureTraceID = "provider_unauthorized", &failedAt, "old-trace"
-	cfg := encryptedResolverConnectConfig(t, masterKey, bucketID, serviceID)
+	applicationSecrets := encryptedResolverApplicationSecrets(t, masterKey, bucketID, serviceID)
 	mockStore := &resolverMockStore{
 		appRuntime:      &store.AppRuntime{AppID: appID, BucketID: bucketID},
 		authConnection:  &conn,
-		connectConfig:   &cfg,
+		secrets:         applicationSecrets,
 		serviceMetadata: refreshServiceMetadata("bearerAuth"),
 	}
 
@@ -732,10 +732,10 @@ func TestSecretResolver_InvalidGrantRequiresReconnect(t *testing.T) {
 	masterKey := []byte("12345678901234567890123456789012")
 	conn := encryptedAuthConnection(t, masterKey, bucketID, serviceID, "user_123", "old-access", "old-refresh", time.Now().UTC().Add(time.Minute))
 	conn.ServiceVersionID = serviceVersionID
-	cfg := encryptedResolverConnectConfig(t, masterKey, bucketID, serviceID)
+	applicationSecrets := encryptedResolverApplicationSecrets(t, masterKey, bucketID, serviceID)
 	mockStore := &resolverMockStore{
 		appRuntime: &store.AppRuntime{AppID: appID, BucketID: bucketID}, authConnection: &conn,
-		connectConfig: &cfg, serviceMetadata: refreshServiceMetadata("bearerAuth"),
+		secrets: applicationSecrets, serviceMetadata: refreshServiceMetadata("bearerAuth"),
 	}
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
@@ -811,7 +811,6 @@ type resolverMockStore struct {
 	authConnection            *store.AuthConnection
 	authConnectionID          uuid.UUID
 	touchedConnectionID       uuid.UUID
-	connectConfig             *store.ConnectConfig
 	serviceMetadata           *fusedobject.ServiceMetadata
 	refreshLeaseToken         uuid.UUID
 	refreshLeaseExpiresAt     time.Time
@@ -1030,20 +1029,6 @@ func (m *resolverMockStore) TouchAuthConnectionLastUsed(ctx context.Context, id 
 	return nil
 }
 
-// GetConnectConfig lets refresh tests prove OAuth app credentials stay bucket
-// scoped instead of being supplied by SDK runtime input.
-func (m *resolverMockStore) GetConnectConfig(ctx context.Context, bucketID, serviceID uuid.UUID) (*store.ConnectConfig, error) {
-	m.refreshMu.Lock()
-	defer m.refreshMu.Unlock()
-	if m.connectConfig == nil {
-		return nil, nil
-	}
-	if m.connectConfig.BucketID == bucketID && m.connectConfig.ServiceID == serviceID {
-		return m.connectConfig, nil
-	}
-	return nil, nil
-}
-
 // GetServiceContractMetadata returns the immutable version-pinned auth surface
 // used by refresh coordinator tests.
 func (m *resolverMockStore) GetServiceContractMetadata(_ context.Context, serviceID, serviceVersionID uuid.UUID) (*fusedobject.ServiceMetadata, error) {
@@ -1206,33 +1191,25 @@ func encryptedAuthConnection(t *testing.T, masterKey []byte, bucketID, serviceID
 	}
 }
 
-// encryptedResolverConnectConfig mirrors apply-time connect config encryption
-// so refresh tests decrypt real client credentials.
-func encryptedResolverConnectConfig(t *testing.T, masterKey []byte, bucketID, serviceID uuid.UUID) store.ConnectConfig {
+// encryptedResolverApplicationSecrets mirrors atomic secret-set encryption for refresh tests.
+func encryptedResolverApplicationSecrets(t *testing.T, masterKey []byte, bucketID, serviceID uuid.UUID) []store.WorkspaceSecret {
 	t.Helper()
-	wrappedDEK, dek, err := store.WrapDEK(masterKey)
-	if err != nil {
-		t.Fatalf("wrap connect config DEK: %v", err)
+	inputs := []struct{ key, value string }{{"bearerAuth_client_id", "client-id"}, {"bearerAuth_client_secret", "client-secret"}}
+	secrets := make([]store.WorkspaceSecret, 0, len(inputs))
+	for _, input := range inputs {
+		wrappedDEK, dek, err := store.WrapDEK(masterKey)
+		if err != nil {
+			t.Fatalf("wrap application credential DEK: %v", err)
+		}
+		encrypted, err := store.EncryptWithDEK(dek, input.value)
+		if err != nil {
+			t.Fatalf("encrypt application credential: %v", err)
+		}
+		secrets = append(secrets, store.WorkspaceSecret{WorkspaceSecretMeta: store.WorkspaceSecretMeta{
+			BucketID: bucketID, ServiceID: serviceID, KeyName: input.key, CredentialType: "oauth",
+		}, EncryptedDEK: wrappedDEK, EncryptedValue: encrypted})
 	}
-	clientID, err := store.EncryptWithDEK(dek, "client-id")
-	if err != nil {
-		t.Fatalf("encrypt client id: %v", err)
-	}
-	clientSecret, err := store.EncryptWithDEK(dek, "client-secret")
-	if err != nil {
-		t.Fatalf("encrypt client secret: %v", err)
-	}
-	return store.ConnectConfig{
-		BucketID:              bucketID,
-		ServiceID:             serviceID,
-		AuthType:              "oauth",
-		AuthName:              "bearerAuth",
-		Enabled:               true,
-		EncryptedDEK:          wrappedDEK,
-		EncryptedClientID:     clientID,
-		EncryptedClientSecret: clientSecret,
-		RedirectURI:           "https://engine.example.com/workspace/connect/callback",
-	}
+	return secrets
 }
 
 // refreshServiceMetadata builds the exact persisted OAuth contract used by coordinator tests.
@@ -1267,7 +1244,7 @@ func refreshRoundTripper(t *testing.T) http.RoundTripper {
 			t.Fatalf("unexpected refresh request form: %#v", values)
 		}
 		if values.Get("client_id") != "client-id" || values.Get("client_secret") != "client-secret" {
-			t.Fatalf("expected connect config client credentials, got %#v", values)
+			t.Fatalf("expected OAuth application credentials, got %#v", values)
 		}
 		return &http.Response{
 			StatusCode: http.StatusOK,

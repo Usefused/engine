@@ -81,11 +81,21 @@ func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 			t.Fatalf("expected Engine migration ledger containing %q", expected)
 		}
 	}
+	for _, expected := range []string{
+		"CREATE TABLE IF NOT EXISTS fused_sensitive_data_migrations",
+		"rows_migrated bigint NOT NULL DEFAULT 0",
+		"completed_at timestamptz NOT NULL DEFAULT NOW()",
+	} {
+		// Sensitive cutovers require their own permanent ledger after master-key loading.
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("expected sensitive migration ledger containing %q", expected)
+		}
+	}
 
 	migrations := engineMigrations()
-	// Generation pins require a forward migration, never a rewrite of applied schema.
-	if len(migrations) != 15 {
-		t.Fatalf("Engine migration count = %d, want 15", len(migrations))
+	// Credential-source cleanup requires a forward migration after canonical callback pinning.
+	if len(migrations) != 17 {
+		t.Fatalf("Engine migration count = %d, want 17", len(migrations))
 	}
 	assertMigrationIdentity(t, migrations[0], engineMigrationVersion, engineMigrationName)
 	assertMigrationIdentity(t, migrations[1], appTokenPolicyMigrationVersion, appTokenPolicyMigrationName)
@@ -102,6 +112,8 @@ func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 	assertMigrationIdentity(t, migrations[12], 13, "20260826_unified_receipts_session_metadata")
 	assertMigrationIdentity(t, migrations[13], 14, "20260826_generation_contract_pins")
 	assertMigrationIdentity(t, migrations[14], workspaceAuthReferenceMigrationVersion, workspaceAuthReferenceMigrationName)
+	assertMigrationIdentity(t, migrations[15], connectCanonicalRedirectMigrationVersion, connectCanonicalRedirectMigrationName)
+	assertMigrationIdentity(t, migrations[16], appCredentialSourceMigrationVersion, appCredentialSourceMigrationName)
 	// Every appended migration must preserve the transaction-scoped serialization primitive.
 	if engineMigrationLockQuery != "SELECT pg_advisory_xact_lock($1)" {
 		t.Fatalf("Engine migrations must use a transaction-scoped advisory lock, got %q", engineMigrationLockQuery)
@@ -618,6 +630,7 @@ func TestEngineSchemaDefinesBucketAttachedConnectAuth(t *testing.T) {
 		"chk_fused_auth_connections_refresh_lease",
 		"CREATE INDEX IF NOT EXISTS idx_fused_auth_connections_refresh",
 		"CREATE INDEX IF NOT EXISTS idx_fused_connect_sessions_expires",
+		"redirect_uri       text NOT NULL DEFAULT ''",
 	}
 	for _, expected := range required {
 		if !strings.Contains(joined, expected) {

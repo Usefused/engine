@@ -178,6 +178,56 @@ func TestUpsertSecretsHandler_StoresMTLSPairAtomically(t *testing.T) {
 	}
 }
 
+// TestUpsertSecretsHandlerStoresOAuthApplicationFamily verifies semantic input becomes one atomic deterministic pair.
+func TestUpsertSecretsHandlerStoresOAuthApplicationFamily(t *testing.T) {
+	fixture := newSecretsFixture()
+	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)
+	body := bytes.NewReader([]byte(`{
+		"credential_family":{
+			"service_id":"` + fixture.serviceID.String() + `",
+			"credential_type":"oauth",
+			"auth_name":"oauth2",
+			"values":{"client_id":"client-id","client_secret":"client-secret"}
+		}
+	}`))
+	req := httptest.NewRequest(http.MethodPut, "/workspace/secrets/bulk", body)
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("OAuth family status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	// Engine, not the caller, owns both exact storage keys and commits them together.
+	if len(fixture.store.upsertedSecrets) != 2 || fixture.store.upsertedSecrets[0].KeyName != "oauth2_client_id" || fixture.store.upsertedSecrets[1].KeyName != "oauth2_client_secret" {
+		t.Fatalf("stored OAuth family = %#v", fixture.store.upsertedSecrets)
+	}
+}
+
+// TestExpandOAuthApplicationFamilyRejectsRedirect proves request-controlled redirects cannot enter credential storage.
+func TestExpandOAuthApplicationFamilyRejectsRedirect(t *testing.T) {
+	_, err := expandOAuthApplicationFamily(CredentialFamilyUpsertPayload{
+		ServiceID: uuid.New(), CredentialType: "oidc", AuthName: "oidc",
+		Values: map[string]string{"client_id": "id", "client_secret": "secret", "redirect_uri": "https://attacker.example/callback"},
+	})
+	// The semantic family is deliberately closed to exactly the two application values.
+	if err == nil {
+		t.Fatal("OAuth family accepted redirect_uri")
+	}
+}
+
+// TestExpandSecretBulkPayloadRejectsCallerNamedOAuthRows keeps deterministic naming inside Engine.
+func TestExpandSecretBulkPayloadRejectsCallerNamedOAuthRows(t *testing.T) {
+	serviceID := uuid.New()
+	_, err := expandSecretBulkPayload(SecretBulkUpsertPayload{Secrets: []SecretUpsertPayload{
+		{ServiceID: serviceID, CredentialType: "oauth", KeyName: "invented_client_id", Value: "id"},
+		{ServiceID: serviceID, CredentialType: "oauth", KeyName: "invented_client_secret", Value: "secret"},
+	}})
+	// Row-shaped OAuth input would let an SDK bypass the semantic family contract even when values are paired.
+	if err == nil {
+		t.Fatal("row-shaped OAuth credentials were accepted")
+	}
+}
+
 func TestUpsertSecretsHandler_StoresUsernameOnlyBasicCredential(t *testing.T) {
 	fixture := newSecretsFixture()
 	router := buildConnectAdminRouter(fixture.store, fixture.store.accountID, fixture.masterKey)

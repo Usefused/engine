@@ -135,15 +135,19 @@ func seedManagedOAuthRefreshLegacyRows(t *testing.T, ctx context.Context, pool *
 		t.Fatalf("seed migration service versions: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO fused_auth_connections
-		(id, bucket_id, service_id, end_user_ref, auth_type, auth_name, encrypted_dek, access_token, refresh_token)
-		VALUES ($1, $3, $4, 'unique-user', 'oauth', 'oauth', 'legacy-dek', 'unique-access', 'unique-refresh'),
-		       ($2, $3, $5, 'ambiguous-user', 'oauth', 'oauth', 'legacy-dek', 'ambiguous-access', 'ambiguous-refresh')`,
+		(id, bucket_id, service_id, end_user_ref, auth_type, auth_name,
+		 credential_source_service_id, credential_source_auth_type, credential_source_auth_name,
+		 encrypted_dek, access_token, refresh_token)
+		VALUES ($1, $3, $4, 'unique-user', 'oauth', 'oauth', $4, 'oauth', 'oauth', 'legacy-dek', 'unique-access', 'unique-refresh'),
+		       ($2, $3, $5, 'ambiguous-user', 'oauth', 'oauth', $5, 'oauth', 'oauth', 'legacy-dek', 'ambiguous-access', 'ambiguous-refresh')`,
 		fixture.uniqueConnectionID, fixture.ambiguousConnectionID, bucketID, uniqueServiceID, ambiguousServiceID); err != nil {
 		t.Fatalf("seed legacy auth connections: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO fused_connect_sessions
-		(id, bucket_id, service_id, auth_type, auth_name, end_user_ref, state_hash, expires_at)
-		VALUES ($1, $2, $3, 'oauth', 'oauth', 'legacy-session-user', $4, NOW() + INTERVAL '10 minutes')`,
+		(id, bucket_id, service_id, auth_type, auth_name,
+		 credential_source_service_id, credential_source_auth_type, credential_source_auth_name,
+		 end_user_ref, state_hash, expires_at)
+		VALUES ($1, $2, $3, 'oauth', 'oauth', $3, 'oauth', 'oauth', 'legacy-session-user', $4, NOW() + INTERVAL '10 minutes')`,
 		fixture.legacySessionID, bucketID, uniqueServiceID, "state-"+uuid.NewString()); err != nil {
 		t.Fatalf("seed legacy connect session: %v", err)
 	}
