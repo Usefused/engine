@@ -162,14 +162,36 @@ func validateV3Response(plan ResponsePlan, states map[string]ValueType) (map[str
 	return values, nil
 }
 
+// validateItemsSource admits omission only for nested paths because a decoded
+// root always exists and cannot represent an optional provider collection.
 func validateItemsSource(source ItemsSource, states map[string]ValueType) error {
 	if (source.Path == "") == (len(source.Paths) == 0) {
 		return invalid("pagination items requires one path form")
+	}
+	// A root JSON document cannot be absent after successful decoding, so the omission opt-in would be meaningless.
+	if source.MissingIsEmpty && itemsSourceUsesRoot(source) {
+		return invalid("pagination missing_is_empty requires a nested collection path")
 	}
 	if source.Path != "" {
 		return ValidateItemsPath(source.Path)
 	}
 	return validateConditionalPaths(source.Paths, states, true)
+}
+
+// itemsSourceUsesRoot keeps the omission invariant aligned across direct and
+// conditionally selected collection paths.
+func itemsSourceUsesRoot(source ItemsSource) bool {
+	// The direct path is mutually exclusive with conditional paths after shape validation.
+	if source.Path != "" {
+		return source.Path == "$"
+	}
+	for _, candidate := range source.Paths {
+		// Any root alternative makes a single source-wide omission rule internally inconsistent.
+		if candidate.Path == "$" {
+			return true
+		}
+	}
+	return false
 }
 
 func validateV3Source(source ValueSource, states map[string]ValueType) error {

@@ -51,10 +51,19 @@ export interface SchemaStatus {
 
 /** Physical callable detail preserves the reviewed request and response contracts. */
 export interface OperationDetail extends OperationSummary {
+  pagination: PaginationGuidance;
   parameters?: FixtureParameter[];
   request_content?: FixtureRequestContent | null;
   responses?: Record<string, FixtureResponseContract>;
   schema_status: SchemaStatus;
+}
+
+/** Explains whether and where the caller may bound Engine-owned provider traversal. */
+export interface PaginationGuidance {
+  supported: boolean;
+  caller_bound_supported: boolean;
+  engine_max_pages?: number;
+  usage: string;
 }
 
 /** Unified detail exposes only the public compiler descriptor. */
@@ -102,7 +111,7 @@ interface DocumentationSectionValue {
 
 interface SearchCandidate {
   summary: OperationSummary;
-  detail_metadata?: { path: string };
+  detail_metadata?: { path: string; pagination: PaginationGuidance };
   search_aliases: string[];
   score: number;
   sections: DocumentationSectionValue[];
@@ -110,6 +119,10 @@ interface SearchCandidate {
 
 const MAX_DESCRIPTION_BYTES = 512;
 const MAX_CHILD_PATHS = 32;
+const NON_PAGINATED_USAGE = "This operation has no Engine pagination contract. Omit the third call() argument's pagination option.";
+const NON_PAGINATED_GET_USAGE = "This GET operation has no Engine pagination contract, so each call() makes one provider request and does not traverse provider pages. Omit the third call() argument's pagination option. Only when this operation's documentation explicitly identifies a page input, continuation output, and stop condition, pass the page input in params, await the two-argument call(), read the continuation from its result, and repeat until the documented stop condition. Never infer page, cursor, or offset semantics from names. Each page counts toward execute's call and time limits.";
+const SINGLE_PAGE_USAGE = "Engine follows this operation's reviewed pagination contract up to engine_max_pages, but no positive maxPages value is lower than that limit. Omit the third call() argument's pagination option.";
+const PAGINATED_USAGE = "Engine follows provider pagination automatically. To accept a partial result, pass { pagination: { maxPages: N } } as call()'s third argument, where N is a positive integer lower than engine_max_pages. Provider page-size parameters do not bound total Engine traversal.";
 
 /** Routes exact, lazy, intent, and list requests without changing call authorization. */
 export function searchDocs(fixture: Fixture, args: SearchDocsArgs): SearchDocsResult {
@@ -390,7 +403,7 @@ function toPhysicalCandidate(operation: FixtureOperation, fixture: Fixture): Sea
   const summary = physicalSummary(operation);
   return {
     summary,
-    detail_metadata: { path: operation.path },
+    detail_metadata: { path: operation.path, pagination: paginationGuidance(operation) },
     search_aliases: [operation.name],
     score: 0,
     sections: [
@@ -414,6 +427,32 @@ function toPhysicalCandidate(operation: FixtureOperation, fixture: Fixture): Sea
       })),
       ...definitionSections(operation, fixture),
     ],
+  };
+}
+
+/** Converts the effective fixture policy into one stable, provider-neutral call instruction. */
+function paginationGuidance(operation: FixtureOperation): PaginationGuidance {
+  const pagination = operation.pagination;
+  // Unsupported operations need manual-provider guidance without exposing a decorative Engine bound.
+  if (!pagination.supported) {
+    // GET is the only generic manual-paging case; other methods receive the shorter omission rule.
+    const usage = operation.method.toUpperCase() === "GET" ? NON_PAGINATED_GET_USAGE : NON_PAGINATED_USAGE;
+    return { supported: false, caller_bound_supported: false, usage };
+  }
+  // A one-page Engine policy has no legal positive strict reduction for the caller.
+  if (!pagination.caller_bound_supported) {
+    return {
+      supported: true,
+      caller_bound_supported: false,
+      engine_max_pages: pagination.engine_max_pages,
+      usage: SINGLE_PAGE_USAGE,
+    };
+  }
+  return {
+    supported: true,
+    caller_bound_supported: true,
+    engine_max_pages: pagination.engine_max_pages,
+    usage: PAGINATED_USAGE,
   };
 }
 
@@ -449,15 +488,20 @@ function toUnifiedCandidate(operation: FixtureUnifiedOperation): SearchCandidate
 
 /** Converts a candidate to a schema-free callable shell with explicit availability. */
 function toDetailShell(candidate: SearchCandidate): OperationDetail | UnifiedOperationDetail {
-  return {
-    ...candidate.summary,
-    ...candidate.detail_metadata,
-    schema_status: {
-      complete: candidate.sections.length === 0,
-      included_sections: [],
-      available_sections: candidate.sections.map(({ name }) => name),
-    },
+  const schemaStatus: SchemaStatus = {
+    complete: candidate.sections.length === 0,
+    included_sections: [],
+    available_sections: candidate.sections.map(({ name }) => name),
   };
+  // Unified candidates have no physical path or pagination contract to project.
+  if (candidate.summary.kind === "unified") {
+    return { ...candidate.summary, kind: "unified", schema_status: schemaStatus };
+  }
+  // Candidate construction guarantees physical metadata before detail can be returned.
+  if (!candidate.detail_metadata) {
+    throw new Error("physical search candidate missing execution metadata");
+  }
+  return { ...candidate.summary, ...candidate.detail_metadata, schema_status: schemaStatus };
 }
 
 /** Scores public physical and Unified metadata with identity weighted most strongly. */

@@ -11,6 +11,7 @@ function sharedFixture(): Fixture {
   const operation: FixtureOperation = {
     operation_id: "createItem", service_id: "service", service_version_id: "version-a", name: "createItem",
     description: "Create item", method: "POST", path: "/items", parameters: [], responses: {},
+    pagination: { supported: false, caller_bound_supported: false },
     request_content: { representations: [{media_type: "application/json", serialization: "json", schema: {
       dialect: definition.dialect, content_hash: "root", shared_definitions: true,
       raw: { $ref: "#/$defs/Payload" }, projection: {},

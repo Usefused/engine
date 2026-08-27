@@ -12,28 +12,41 @@ import (
 func TestValidatePaginationIntentPolicyRequiresStrictReduction(t *testing.T) {
 	policy := paginationIntentPolicy(10)
 	tests := []struct {
-		name   string
-		intent *PaginationIntent
-		policy *models.PaginationConfig
-		valid  bool
+		name       string
+		intent     *PaginationIntent
+		policy     *models.PaginationConfig
+		valid      bool
+		wantReason PaginationIntentErrorReason
+		wantLimit  int
 	}{
 		{name: "omitted", intent: nil, policy: nil, valid: true},
 		{name: "strict reduction", intent: &PaginationIntent{MaxPages: 1}, policy: policy, valid: true},
-		{name: "zero", intent: &PaginationIntent{MaxPages: 0}, policy: policy},
-		{name: "ceiling exceeded", intent: &PaginationIntent{MaxPages: paginationpolicy.CeilingMaxPages + 1}, policy: policy},
-		{name: "non paginated", intent: &PaginationIntent{MaxPages: 1}, policy: nil},
-		{name: "equal policy", intent: &PaginationIntent{MaxPages: 10}, policy: policy},
-		{name: "above policy", intent: &PaginationIntent{MaxPages: 11}, policy: policy},
+		{name: "zero", intent: &PaginationIntent{MaxPages: 0}, policy: policy, wantReason: PaginationIntentInvalidValue},
+		{name: "ceiling exceeded", intent: &PaginationIntent{MaxPages: paginationpolicy.CeilingMaxPages + 1}, policy: policy, wantReason: PaginationIntentInvalidValue},
+		{name: "non paginated", intent: &PaginationIntent{MaxPages: 1}, policy: nil, wantReason: PaginationIntentNotSupported},
+		{name: "equal policy", intent: &PaginationIntent{MaxPages: 10}, policy: policy, wantReason: PaginationIntentBoundNotLower, wantLimit: 10},
+		{name: "above policy", intent: &PaginationIntent{MaxPages: 11}, policy: policy, wantReason: PaginationIntentBoundNotLower, wantLimit: 10},
 	}
-	// Every invalid shape must resolve to the same secret-safe public sentinel.
+	// Every invalid shape retains sentinel compatibility while preserving its safe correction reason.
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			err := ValidatePaginationIntentPolicy(test.intent, test.policy)
+			// Valid controls must remain free of a typed validation failure.
 			if test.valid && err != nil {
 				t.Fatalf("ValidatePaginationIntentPolicy() error = %v", err)
 			}
+			// Existing callers continue to classify every rejected control through the stable sentinel.
 			if !test.valid && !errors.Is(err, ErrPaginationIntentInvalid) {
 				t.Fatalf("ValidatePaginationIntentPolicy() error = %v", err)
+			}
+			// Valid cases have no error details to inspect.
+			if test.valid {
+				return
+			}
+			var validationErr *PaginationIntentValidationError
+			// Public adapters need the precise reason and effective limit without re-resolving policy.
+			if !errors.As(err, &validationErr) || validationErr.Reason != test.wantReason || validationErr.EngineMaxPages != test.wantLimit {
+				t.Fatalf("validation error = %#v, want reason=%q limit=%d", validationErr, test.wantReason, test.wantLimit)
 			}
 		})
 	}

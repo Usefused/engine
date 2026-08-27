@@ -34,12 +34,13 @@ type paginationV3State struct {
 }
 
 type paginationV3Response struct {
-	document    any
-	itemsPath   string
-	itemCount   int64
-	values      map[string]any
-	present     map[string]bool
-	sourcePaths map[string]string
+	document     any
+	itemsPath    string
+	itemCount    int64
+	itemsMissing bool
+	values       map[string]any
+	present      map[string]bool
+	sourcePaths  map[string]string
 }
 
 // paginationV3SourceResult retains the response path selected for one body or GraphQL value.
@@ -238,6 +239,8 @@ func applyPaginationGraphQLVariables(params map[string]any, plan *paginationpoli
 	}
 }
 
+// decodePaginationV3Page validates provider structure before a successful page
+// can enter the aggregate or influence continuation state.
 func decodePaginationV3Page(page *paginationPage, policy *paginationpolicy.Config, state *paginationV3State) (paginationV3Response, error) {
 	document, err := decodePaginationDocument(page.body.Bytes())
 	if err != nil {
@@ -250,16 +253,94 @@ func decodePaginationV3Page(page *paginationPage, policy *paginationpolicy.Confi
 	// Registry paths name provider fields; aliases describe the actual response
 	// keys, so items and scalar extraction must use the same rewrite.
 	itemsPath = applyGraphQLResultAliases(itemsPath, policy.GraphQL)
-	items, found := valueAtPath(document, itemsPath)
-	list, valid := items.([]any)
-	if !found || !valid {
-		return paginationV3Response{}, paginationError("response_invalid")
+	list, itemsMissing, err := readPaginationV3Items(document, itemsPath, policy.Response.Items.MissingIsEmpty)
+	// Structural collection failures stop before continuation fields can influence execution state.
+	if err != nil {
+		return paginationV3Response{}, err
 	}
 	values, present, sourcePaths, err := readPaginationV3Values(policy, state, document, list, page)
 	if err != nil {
 		return paginationV3Response{}, err
 	}
-	return paginationV3Response{document: document, itemsPath: itemsPath, itemCount: int64(len(list)), values: values, present: present, sourcePaths: sourcePaths}, nil
+	// A missing collection is terminal only when the provider did not also advertise another page.
+	if itemsMissing && paginationV3ContinuationPresent(policy, present) {
+		return paginationV3Response{}, paginationError("response_invalid")
+	}
+	// Materializing the reviewed empty collection keeps the aggregate response structurally useful to SDK and MCP callers.
+	if itemsMissing && !materializePaginationV3Items(document, itemsPath) {
+		return paginationV3Response{}, paginationError("response_invalid")
+	}
+	return paginationV3Response{document: document, itemsPath: itemsPath, itemCount: int64(len(list)), itemsMissing: itemsMissing, values: values, present: present, sourcePaths: sourcePaths}, nil
+}
+
+// readPaginationV3Items distinguishes a reviewed omitted collection from a
+// present value with the wrong provider shape.
+func readPaginationV3Items(document any, path string, missingIsEmpty bool) ([]any, bool, error) {
+	items, found := valueAtPath(document, path)
+	// Missing fields retain the fail-closed default unless the immutable policy explicitly admits omission.
+	if !found {
+		// The reviewed opt-in is the only path that converts omission into a terminal empty collection.
+		if missingIsEmpty {
+			return []any{}, true, nil
+		}
+		return nil, false, paginationError("response_invalid")
+	}
+	list, valid := items.([]any)
+	// Nulls and non-arrays are malformed values rather than omitted optional collections.
+	if !valid {
+		return nil, false, paginationError("response_invalid")
+	}
+	return list, false, nil
+}
+
+// paginationV3ContinuationPresent prevents optional collection handling from
+// discarding provider evidence that another page exists.
+func paginationV3ContinuationPresent(policy *paginationpolicy.Config, present map[string]bool) bool {
+	for _, step := range policy.Continuation {
+		// Increment-only strategies have no provider continuation token to conceal.
+		if step.ResponseValue != "" && present[step.ResponseValue] {
+			return true
+		}
+	}
+	return false
+}
+
+// materializePaginationV3Items creates only the reviewed collection path so a
+// terminal omission is returned as an empty list instead of an ambiguous object.
+func materializePaginationV3Items(document any, path string) bool {
+	// The root document always exists after JSON decoding and therefore cannot be an omitted collection.
+	if isRootBodyPath(path) {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(path), "$"), "."), ".")
+	current, ok := document.(map[string]any)
+	// A collection path can only be materialized inside an object response.
+	if !ok || len(parts) == 0 || parts[0] == "" {
+		return false
+	}
+	for _, part := range parts[:len(parts)-1] {
+		next, exists := current[part]
+		// Optional enclosing objects may be absent alongside the optional collection.
+		if !exists {
+			child := make(map[string]any)
+			current[part] = child
+			current = child
+			continue
+		}
+		var valid bool
+		current, valid = next.(map[string]any)
+		// A present non-object parent contradicts the reviewed JSON path.
+		if !valid {
+			return false
+		}
+	}
+	leaf := parts[len(parts)-1]
+	// The caller invokes this helper only after proving the leaf is absent.
+	if _, exists := current[leaf]; exists {
+		return false
+	}
+	current[leaf] = []any{}
+	return true
 }
 
 func decodePaginationDocument(payload []byte) (any, error) {
@@ -394,6 +475,11 @@ func requestConditionMatches(condition paginationpolicy.RequestCondition, state 
 // terminatePaginationV3 requires a reviewed signal or a hard limit; provider
 // response shape alone must not create an unbounded continuation loop.
 func terminatePaginationV3(policy *paginationpolicy.Config, state *paginationV3State, response paginationV3Response) (bool, error) {
+	// A reviewed omitted collection is an explicit terminal provider response, independent of other termination signals.
+	if response.itemsMissing {
+		state.stopReason = "missing_items"
+		return true, nil
+	}
 	if policy.Termination.StopOnEmptyItems && response.itemCount == 0 {
 		state.stopReason = "empty_page"
 		return true, nil

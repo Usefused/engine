@@ -110,12 +110,20 @@ func (d *Dispatcher) runPagination(
 	return d.runPaginationV3(ctx, span, srv, obj, params, credentials, bucketValues, stream, policy)
 }
 
+// Add retains an explicit empty slice so a valid terminal empty page is never
+// serialized as JSON null after aggregation.
 func (a *paginationAggregate) Add(document any, itemsPath string) error {
 	items, found := valueAtPath(document, itemsPath)
 	list, ok := items.([]any)
+	// Missing or non-array values still violate the reviewed collection contract.
 	if !found || !ok {
 		return paginationError("response_invalid")
 	}
+	// append on a nil slice preserves nil, so initialize once to keep empty collections as arrays on the wire.
+	if a.items == nil {
+		a.items = make([]any, 0, len(list))
+	}
+	// The first provider document supplies all non-collection response fields.
 	if a.document == nil {
 		a.document = document
 	}

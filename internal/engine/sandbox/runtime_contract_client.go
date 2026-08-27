@@ -311,6 +311,7 @@ const runtimePaginationFields = `
 	response {
 		items {
 			path
+			missing_is_empty
 			paths { path when { state operator value { type string integer boolean } } }
 		}
 		values {

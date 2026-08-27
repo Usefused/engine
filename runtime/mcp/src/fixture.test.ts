@@ -5,17 +5,19 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { Fixture, loadFixture } from "./fixture.js";
 
+const noPagination = { supported: false, caller_bound_supported: false } as const;
+
 describe("Fixture", () => {
   it("resolves a registered operationId", () => {
     const f = new Fixture([
-      { operation_id: "a", service_id: "s", name: "A", method: "GET", path: "/a", responses: {} },
+      { operation_id: "a", service_id: "s", name: "A", method: "GET", path: "/a", responses: {}, pagination: noPagination },
     ]);
     expect(f.resolve("a")?.path).toBe("/a");
   });
 
   it("does not resolve an unregistered operationId -- tier 1 enforcement point", () => {
     const f = new Fixture([
-      { operation_id: "a", service_id: "s", name: "A", method: "GET", path: "/a", responses: {} },
+      { operation_id: "a", service_id: "s", name: "A", method: "GET", path: "/a", responses: {}, pagination: noPagination },
     ]);
     expect(f.resolve("b")).toBeUndefined();
   });
@@ -25,7 +27,7 @@ describe("Fixture", () => {
       () =>
         new Fixture([
           // @ts-expect-error -- deliberately malformed for the test
-          { service_id: "s", name: "A", method: "GET", path: "/a", responses: {} },
+          { service_id: "s", name: "A", method: "GET", path: "/a", responses: {}, pagination: noPagination },
         ]),
     ).toThrow(/operation_id/);
   });
@@ -34,8 +36,8 @@ describe("Fixture", () => {
     expect(
       () =>
         new Fixture([
-          { operation_id: "dup", service_id: "s", name: "A", method: "GET", path: "/a", responses: {} },
-          { operation_id: "dup", service_id: "s", name: "B", method: "GET", path: "/b", responses: {} },
+          { operation_id: "dup", service_id: "s", name: "A", method: "GET", path: "/a", responses: {}, pagination: noPagination },
+          { operation_id: "dup", service_id: "s", name: "B", method: "GET", path: "/b", responses: {}, pagination: noPagination },
         ]),
     ).toThrow(/duplicate operation_id/);
   });
@@ -43,10 +45,19 @@ describe("Fixture", () => {
   it("rejects exact physical and Unified name collisions", () => {
     expect(
       () => new Fixture(
-        [{ operation_id: "sync", service_id: "s", name: "Sync", method: "POST", path: "/sync", responses: {} }],
+        [{ operation_id: "sync", service_id: "s", name: "Sync", method: "POST", path: "/sync", responses: {}, pagination: noPagination }],
         [{ name: "sync", input_schema: {}, targets: [] }],
       ),
     ).toThrow(/collision/);
+  });
+
+  it("rejects physical operations without explicit pagination metadata", () => {
+    expect(
+      () => new Fixture([
+        // @ts-expect-error -- omission must fail runtime admission as well as static typing.
+        { operation_id: "missing", service_id: "s", name: "Missing", method: "GET", path: "/missing", responses: {} },
+      ]),
+    ).toThrow(/pagination metadata/);
   });
 });
 
@@ -58,13 +69,14 @@ describe("loadFixture", () => {
       file,
       JSON.stringify({
         operations: [
-          { operation_id: "x", service_id: "s", name: "X", method: "GET", path: "/x", responses: {} },
+          { operation_id: "x", service_id: "s", name: "X", method: "GET", path: "/x", responses: {}, pagination: { supported: true, caller_bound_supported: true, engine_max_pages: 12 } },
         ],
       }),
     );
 
     const f = loadFixture(file);
     expect(f.resolve("x")?.method).toBe("GET");
+    expect(f.resolve("x")?.pagination).toEqual({ supported: true, caller_bound_supported: true, engine_max_pages: 12 });
   });
 
   it("throws a clear error when the operations array is missing", () => {

@@ -136,8 +136,9 @@ type ResponsePlan struct {
 }
 
 type ItemsSource struct {
-	Path  string            `json:"path,omitempty"`
-	Paths []ConditionalPath `json:"paths,omitempty"`
+	Path           string            `json:"path,omitempty"`
+	Paths          []ConditionalPath `json:"paths,omitempty"`
+	MissingIsEmpty bool              `json:"missing_is_empty,omitempty"`
 }
 
 type ResponseValue struct {

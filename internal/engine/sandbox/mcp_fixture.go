@@ -23,6 +23,14 @@ type FixtureOperation struct {
 	Parameters       []models.Parameter     `json:"parameters"`
 	RequestContent   *models.RequestContent `json:"request_content,omitempty"`
 	Responses        models.Responses       `json:"responses"`
+	Pagination       FixturePagination      `json:"pagination"`
+}
+
+// FixturePagination exposes only the caller controls needed to invoke an operation safely.
+type FixturePagination struct {
+	Supported            bool `json:"supported"`
+	CallerBoundSupported bool `json:"caller_bound_supported"`
+	EngineMaxPages       int  `json:"engine_max_pages,omitempty"`
 }
 
 // Fixture is the app-scoped operation catalogue serialized for the shared MCP runtime.

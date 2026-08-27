@@ -28,7 +28,7 @@ import { SESSION_AGENT_RULE, SESSION_CONTRACT_METADATA } from "./sessionContract
 const INSTRUCTIONS = [
   "This server exposes exactly two tools: search_docs and execute.",
   SESSION_AGENT_RULE,
-  "Always route API calls through call(operationId, params, options?) inside an execute script -- there is no other way to reach a vendor API from this server. Physical calls automatically complete the endpoint's reviewed provider pagination before returning one aggregate. When the goal intentionally needs only the first N provider pages, pass {pagination:{maxPages:N}} as the optional third argument; provider page-size parameters such as maxResults do not bound total traversal.",
+  "Always route API calls through call(operationId, params, options?) inside an execute script -- there is no other way to reach a vendor API from this server. For physical calls, follow the selected search_docs result's pagination guidance: Engine automatically completes reviewed provider pagination, a supported operation may use the third call() argument to lower that traversal, and an unsupported operation must omit the pagination option even when its provider request uses GET.",
   "Authentication, connected-user identity, and tenant/resource routing are supplied by the Engine. Never invent or pass Authorization headers, API keys, OAuth tokens, auth scheme names, fused_end_user_ref, or fused_resource_id in call params.",
   "Search once with one concise natural-language intent. When a ranked callable has schema_status.complete=true, execute it directly; otherwise retrieve only its missing advertised section with operationId, section, and an optional RFC 6901 schemaPath.",
   "For search_docs detail with kind unified, call the exact operation_id with { input, targets, selectors?, pagination?, idempotencyKey? }; targets must include every declared dependency, selectors and pagination are keyed by public target, and the Engine generates an SDK-equivalent UUID when idempotencyKey is omitted.",
@@ -67,7 +67,8 @@ function main(): void {
       description:
         "List, rank, or fetch bounded documentation for operations available on this MCP server. " +
         "Call with no arguments for a schema-free window, `query` for intent ranking, or `operationId` " +
-        "for exact detail. If schema_status is incomplete, retrieve one advertised `section` and " +
+        "for exact detail. Query and exact physical detail include operation-specific pagination guidance; " +
+        "follow it before execute instead of inferring behavior from HTTP method or parameter names. If schema_status is incomplete, retrieve one advertised `section` and " +
         "optionally narrow it with an RFC 6901 `schemaPath`.",
       inputSchema: {
         query: z
@@ -115,8 +116,8 @@ function main(): void {
       description:
         SESSION_AGENT_RULE + " Run a short TypeScript script that can call one or more operations via call(operationId, params, options?) " +
         "and chain their results, returning one final value. Use complete search_docs detail before " +
-        "referencing an operationId for the first time. Physical operations complete reviewed provider pagination before returning one aggregate; " +
-        "use the optional third argument {pagination:{maxPages:N}} only to request a narrower result bound. " +
+        "referencing an operationId for the first time. Follow its physical pagination guidance exactly; " +
+        "use the optional third argument {pagination:{maxPages:N}} only when caller_bound_supported is true. " +
         "Large results return provider_execution=complete and an exact retained-data next_request for this same execute tool; " +
         "run it without reconstructing session arguments or repeating provider calls. Each incomplete page supplies its exact next_request. Unified operations use the exact documented ID " +
         "and params { input, targets, selectors?, pagination?, idempotencyKey? }. " +

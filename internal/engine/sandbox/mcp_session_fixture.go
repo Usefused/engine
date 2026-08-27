@@ -89,9 +89,14 @@ func buildBatchedSessionFixture(ctx context.Context, cache ObjectCache, selectio
 	if err != nil {
 		return nil, fmt.Errorf("list app-scoped endpoints: %w", err)
 	}
+	servicePagination, err := mcpPaginationForSelections(ctx, cache, selections)
+	// Effective policy documentation must come from the same immutable metadata already loaded for execution.
+	if err != nil {
+		return nil, err
+	}
 	var operations []FixtureOperation
 	for index, selection := range selections {
-		operations, err = appendFixtureOperations(operations, selection, endpointsBySelection[index])
+		operations, err = appendFixtureOperations(operations, selection, endpointsBySelection[index], servicePagination[index])
 		// Rejection of one selected operation prevents the entire unsafe fixture from reaching Node.
 		if err != nil {
 			return nil, err
@@ -106,9 +111,9 @@ func buildBatchedSessionFixture(ctx context.Context, cache ObjectCache, selectio
 }
 
 // appendFixtureOperations pins each documentation operation to the same version as its shared schema dictionary.
-func appendFixtureOperations(operations []FixtureOperation, selection models.SDKSelection, endpoints []fusedobject.Endpoint) ([]FixtureOperation, error) {
+func appendFixtureOperations(operations []FixtureOperation, selection models.SDKSelection, endpoints []fusedobject.Endpoint, servicePagination *fusedobject.PaginationConfig) ([]FixtureOperation, error) {
 	for _, endpoint := range endpoints {
-		operation, err := endpointToFixtureOperation(selection.ServiceID.String(), endpoint)
+		operation, err := endpointToFixtureOperation(selection.ServiceID.String(), endpoint, servicePagination)
 		// Conversion failures retain exact operation context without dropping a selected callable silently.
 		if err != nil {
 			return nil, fmt.Errorf("convert endpoint %s: %w", endpoint.Name, err)
@@ -151,7 +156,7 @@ func stripMCPAuthParameters(operation *FixtureOperation, authName string) {
 // straight through as engineExecuteCore's endpointName), so a session's
 // fixture and its live dispatch path always mean the same thing by the same
 // identifier.
-func endpointToFixtureOperation(serviceID string, ep fusedobject.Endpoint) (FixtureOperation, error) {
+func endpointToFixtureOperation(serviceID string, ep fusedobject.Endpoint, servicePagination *fusedobject.PaginationConfig) (FixtureOperation, error) {
 	// Source schemas cross a JSON conversion before fixture admission, so the
 	// same bounded preflight must run before that conversion can allocate or recurse.
 	if err := validateMCPSourceEndpointSchemas(ep); err != nil {
@@ -169,6 +174,7 @@ func endpointToFixtureOperation(serviceID string, ep fusedobject.Endpoint) (Fixt
 	}
 	op.OperationID = ep.Name
 	op.ServiceID = serviceID
+	op.Pagination = fixturePagination(ep.Pagination, servicePagination)
 	return op, nil
 }
 

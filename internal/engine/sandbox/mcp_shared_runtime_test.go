@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -246,17 +247,41 @@ func TestBoundedMCPPhysicalCallErrorExplainsPaginationFailures(t *testing.T) {
 		wantStatus int
 		want       string
 	}{
-		{name: "invalid intent", err: engine.ErrPaginationIntentInvalid, wantStatus: http.StatusBadRequest, want: "mcp_pagination_intent_invalid"},
+		{name: "invalid intent", err: &engine.PaginationIntentValidationError{Reason: engine.PaginationIntentInvalidValue}, wantStatus: http.StatusBadRequest, want: "mcp_pagination_max_pages_invalid"},
+		{name: "opaque invalid intent", err: engine.ErrPaginationIntentInvalid, wantStatus: http.StatusBadRequest, want: "mcp_pagination_intent_invalid"},
 		{name: "page limit", err: &engine.PaginationError{Code: "max_pages"}, wantStatus: http.StatusUnprocessableEntity, want: "mcp_pagination_max_pages"},
 		{name: "duration limit", err: &engine.PaginationError{Code: "max_duration"}, wantStatus: http.StatusGatewayTimeout, want: "mcp_pagination_max_duration"},
 		{name: "unsafe continuation", err: &engine.PaginationError{Code: "untrusted_next_url"}, wantStatus: http.StatusBadGateway, want: "mcp_pagination_untrusted_next_url"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			statusCode, message := boundedMCPPhysicalCallError(test.err)
+			statusCode, message := boundedMCPPhysicalCallError("gmail.users.messages.get", test.err)
 			// The fixed prefix remains machine-readable while the suffix carries recovery guidance.
 			if statusCode != test.wantStatus || !bytes.HasPrefix([]byte(message), []byte(test.want+":")) {
 				t.Fatalf("mapped failure = %d/%q, want %d/%q prefix", statusCode, message, test.wantStatus, test.want)
+			}
+		})
+	}
+}
+
+// TestBoundedMCPPaginationIntentErrorProvidesExactCallCorrection pins agent-readable guidance for every policy decision.
+func TestBoundedMCPPaginationIntentErrorProvidesExactCallCorrection(t *testing.T) {
+	tests := []struct {
+		name string
+		err  *engine.PaginationIntentValidationError
+		want string
+	}{
+		{name: "invalid value", err: &engine.PaginationIntentValidationError{Reason: engine.PaginationIntentInvalidValue}, want: `mcp_pagination_max_pages_invalid: operation "gmail.users.messages.get" received an invalid pagination.maxPages; use a positive integer lower than pagination.engine_max_pages only when search_docs reports pagination.caller_bound_supported=true, otherwise use call("gmail.users.messages.get", params) without a pagination option`},
+		{name: "not supported", err: &engine.PaginationIntentValidationError{Reason: engine.PaginationIntentNotSupported}, want: `mcp_pagination_not_supported: operation "gmail.users.messages.get" is not paginated; use call("gmail.users.messages.get", params) without a pagination option`},
+		{name: "lower bound available", err: &engine.PaginationIntentValidationError{Reason: engine.PaginationIntentBoundNotLower, EngineMaxPages: 10}, want: `mcp_pagination_bound_not_lower: operation "gmail.users.messages.get" has an Engine page limit of 10; use pagination.maxPages between 1 and 9, or omit pagination`},
+		{name: "no lower bound", err: &engine.PaginationIntentValidationError{Reason: engine.PaginationIntentBoundNotLower, EngineMaxPages: 1}, want: `mcp_pagination_bound_not_lower: operation "gmail.users.messages.get" has an Engine page limit of 1, so no lower positive pagination.maxPages exists; use call("gmail.users.messages.get", params) without a pagination option`},
+	}
+	// Exact strings make the error a stable executable recovery contract rather than advisory prose.
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// Any wording drift can reintroduce agent guesswork even when the stable prefix remains unchanged.
+			if got := boundedMCPPaginationIntentError("gmail.users.messages.get", test.err); got != test.want {
+				t.Fatalf("pagination guidance = %q, want %q", got, test.want)
 			}
 		})
 	}
@@ -448,6 +473,41 @@ func TestMcpCallHandlerAppliesPhysicalPaginationBeforeReturning(t *testing.T) {
 	// Consumed continuation state is Engine metadata and must not survive in the returned provider document.
 	if string(response.Result) != `{"items":[{"id":"latest"}]}` {
 		t.Fatalf("paginated result = %s", response.Result)
+	}
+}
+
+// TestMcpCallHandlerExplainsPhysicalPaginationIntentErrors proves actionable guidance crosses the real bridge without provider work.
+func TestMcpCallHandlerExplainsPhysicalPaginationIntentErrors(t *testing.T) {
+	providerCalls := 0
+	vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls++
+		_, _ = w.Write([]byte(`{"items":[]}`))
+	}))
+	defer vendor.Close()
+
+	sessionID, endpointName, _ := configureMCPPhysicalCallTest(t, vendor.URL)
+	baseCache := globalObjectCache.(*richMockCache)
+	globalObjectCache = &mcpPaginatedCache{richMockCache: baseCache, pagination: testCursorPagination("cursor", "$.next")}
+	statusCode, response := executeMCPPhysicalHandlerTest(t, sessionID, endpointName, &mcpPhysicalPaginationIntent{MaxPages: paginationpolicy.DefaultMaxPages})
+	wantBound := fmt.Sprintf(`mcp_pagination_bound_not_lower: operation %q has an Engine page limit of %d; use pagination.maxPages between 1 and %d, or omit pagination`, endpointName, paginationpolicy.DefaultMaxPages, paginationpolicy.DefaultMaxPages-1)
+	assertMCPPaginationIntentRejection(t, statusCode, response, providerCalls, wantBound)
+
+	globalObjectCache = baseCache
+	statusCode, response = executeMCPPhysicalHandlerTest(t, sessionID, endpointName, &mcpPhysicalPaginationIntent{MaxPages: 1})
+	wantUnsupported := fmt.Sprintf(`mcp_pagination_not_supported: operation %q is not paginated; use call(%q, params) without a pagination option`, endpointName, endpointName)
+	assertMCPPaginationIntentRejection(t, statusCode, response, providerCalls, wantUnsupported)
+
+	statusCode, response = executeMCPPhysicalHandlerTest(t, sessionID, endpointName, &mcpPhysicalPaginationIntent{})
+	wantInvalid := fmt.Sprintf(`mcp_pagination_max_pages_invalid: operation %q received an invalid pagination.maxPages; use a positive integer lower than pagination.engine_max_pages only when search_docs reports pagination.caller_bound_supported=true, otherwise use call(%q, params) without a pagination option`, endpointName, endpointName)
+	assertMCPPaginationIntentRejection(t, statusCode, response, providerCalls, wantInvalid)
+}
+
+// assertMCPPaginationIntentRejection verifies exact public guidance and the pre-provider admission boundary.
+func assertMCPPaginationIntentRejection(t *testing.T, statusCode int, response mcpCallResponse, providerCalls int, want string) {
+	t.Helper()
+	// Pagination intent mistakes are caller errors and must never trigger a provider request.
+	if statusCode != http.StatusBadRequest || response.Error != want || providerCalls != 0 {
+		t.Fatalf("pagination rejection = %d/%q, provider calls = %d; want %q", statusCode, response.Error, providerCalls, want)
 	}
 }
 

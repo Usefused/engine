@@ -178,6 +178,14 @@ export interface FixtureOperation {
   parameters?: FixtureParameter[];
   request_content?: FixtureRequestContent | null;
   responses: Record<string, FixtureResponseContract>;
+  pagination: FixturePagination;
+}
+
+/** Carries the bounded effective Engine policy needed for safe agent invocation. */
+export interface FixturePagination {
+  supported: boolean;
+  caller_bound_supported: boolean;
+  engine_max_pages?: number;
 }
 
 /** Mirrors the existing credential-free Unified descriptor stored in the applied plan. */
@@ -230,6 +238,7 @@ export class Fixture {
       if (!op.operation_id) {
         throw new Error("fixture operation missing operation_id");
       }
+      validateFixturePagination(op.operation_id, op.pagination);
       // Serialized fixture files retain their existing strict duplicate check.
       if (this.byOperationId.has(op.operation_id)) {
         throw new Error(`duplicate operation_id "${op.operation_id}" in fixture`);
@@ -264,6 +273,30 @@ export class Fixture {
   /** Resolves one exact authored Unified name without inspecting private graph state. */
   resolveUnified(operationId: string): FixtureUnifiedOperation | undefined {
     return this.byUnifiedOperationId.get(operationId);
+  }
+}
+
+/** Rejects incomplete or contradictory pagination metadata before it becomes model-visible. */
+function validateFixturePagination(operationId: string, pagination: FixturePagination): void {
+  // Every physical operation must state whether Engine owns provider traversal.
+  if (!pagination || typeof pagination.supported !== "boolean" || typeof pagination.caller_bound_supported !== "boolean") {
+    throw new Error(`fixture operation "${operationId}" missing pagination metadata`);
+  }
+  // Unsupported operations cannot advertise a bound that execution would reject.
+  if (!pagination.supported) {
+    // Absence must be represented without decorative limits or caller controls.
+    if (pagination.caller_bound_supported || pagination.engine_max_pages !== undefined) {
+      throw new Error(`fixture operation "${operationId}" has invalid unsupported pagination metadata`);
+    }
+    return;
+  }
+  // Engine limits must be positive integers so strict lower-bound guidance is well-defined.
+  if (!Number.isInteger(pagination.engine_max_pages) || (pagination.engine_max_pages ?? 0) < 1) {
+    throw new Error(`fixture operation "${operationId}" has invalid pagination limit`);
+  }
+  // A caller-owned positive reduction exists exactly when the Engine limit exceeds one page.
+  if (pagination.caller_bound_supported !== ((pagination.engine_max_pages ?? 0) > 1)) {
+    throw new Error(`fixture operation "${operationId}" has contradictory pagination bound metadata`);
   }
 }
 

@@ -24,6 +24,9 @@ import (
 // JSON value returned to the sandboxed child runtime.
 const maxMCPPhysicalResultBytes = 1 << 20
 
+// mcpPaginationIntentFallback recovers safely when an opaque legacy error has no reviewed policy details.
+const mcpPaginationIntentFallback = "mcp_pagination_intent_invalid: omit pagination, then use search_docs to confirm whether this operation supports a lower pagination.maxPages bound"
+
 // mcpCallRequest preserves params as JSON until exact catalogue kind is known,
 // avoiding numeric changes to Unified input while retaining physical map decoding.
 type mcpCallRequest struct {
@@ -173,7 +176,7 @@ func mcpCallHandler(w http.ResponseWriter, r *http.Request) {
 	result, err := dispatchMCPCall(r.Context(), sess, req.OperationID, params, intent)
 	// Physical provider failures retain their established response path.
 	if err != nil {
-		statusCode, errorCode := boundedMCPPhysicalCallError(err)
+		statusCode, errorCode := boundedMCPPhysicalCallError(req.OperationID, err)
 		recordMCPCallLimit(r.Context(), sess, errorCode)
 		writeMCPCallResult(w, statusCode, mcpCallResponse{Error: errorCode})
 		return
@@ -209,7 +212,7 @@ func decodeMCPPhysicalCallInput(operation *FixtureOperation, request mcpCallRequ
 	intent, err := decodeMCPPhysicalPaginationIntent(request.Pagination)
 	// Invalid public controls stop before exact Engine resolution can trigger provider work.
 	if err != nil {
-		statusCode, errorCode := boundedMCPPhysicalCallError(err)
+		statusCode, errorCode := boundedMCPPhysicalCallError(request.OperationID, err)
 		return nil, nil, statusCode, errorCode
 	}
 	return params, intent, 0, ""
@@ -528,20 +531,54 @@ func contextWithMCPPhysicalExecutionIdentity(ctx context.Context, params map[str
 }
 
 // boundedMCPPhysicalCallError projects result limits and pagination decisions into stable, actionable MCP failures.
-func boundedMCPPhysicalCallError(err error) (int, string) {
+func boundedMCPPhysicalCallError(operationID string, err error) (int, string) {
 	// Provider bodies crossing the result budget never expose partial content or wrapper text.
 	if errors.Is(err, engine.ErrBufferStreamLimitExceeded) {
 		return http.StatusBadGateway, "mcp_call_result_too_large"
 	}
-	// Caller controls are request errors even when policy comparison occurs after exact operation resolution.
+	var paginationErr *engine.PaginationIntentValidationError
+	// Typed caller failures include only public request and effective-limit facts safe for exact correction guidance.
+	if errors.As(err, &paginationErr) {
+		return http.StatusBadRequest, boundedMCPPaginationIntentError(operationID, paginationErr)
+	}
+	// The legacy sentinel remains a bounded fallback for opaque resolution failures without policy details.
 	if errors.Is(err, engine.ErrPaginationIntentInvalid) {
-		return http.StatusBadRequest, "mcp_pagination_intent_invalid: pagination.maxPages must be positive and lower than the operation's Engine page limit"
+		return http.StatusBadRequest, mcpPaginationIntentFallback
 	}
 	// Typed pagination failures retain a stable code and bounded recovery guidance instead of a generic wrapper.
 	if code := engine.PaginationFailureCode(err); code != "" {
 		return boundedMCPPaginationFailure(code)
 	}
 	return http.StatusBadGateway, boundedMCPCallErrorMessage(err.Error())
+}
+
+// boundedMCPPaginationIntentError gives an agent an exact call() correction using only the resolved public operation ID.
+func boundedMCPPaginationIntentError(operationID string, validationErr *engine.PaginationIntentValidationError) string {
+	publicOperationID := fmt.Sprintf("%q", operationID)
+	// Each reason receives a stable code so clients can recover without parsing prose.
+	switch validationErr.Reason {
+	case engine.PaginationIntentInvalidValue:
+		// Pre-policy validation must not recommend a bound that a non-paginated operation would reject next.
+		return fmt.Sprintf("mcp_pagination_max_pages_invalid: operation %s received an invalid pagination.maxPages; use a positive integer lower than pagination.engine_max_pages only when search_docs reports pagination.caller_bound_supported=true, otherwise use call(%s, params) without a pagination option", publicOperationID, publicOperationID)
+	case engine.PaginationIntentNotSupported:
+		// The two-argument form removes the unsupported Engine control while preserving provider parameters.
+		return fmt.Sprintf("mcp_pagination_not_supported: operation %s is not paginated; use call(%s, params) without a pagination option", publicOperationID, publicOperationID)
+	case engine.PaginationIntentBoundNotLower:
+		// The effective limit determines whether any valid positive strict reduction exists.
+		return boundedMCPPaginationBoundError(publicOperationID, validationErr.EngineMaxPages)
+	default:
+		// Unknown future reasons fail closed without inventing policy-specific guidance.
+		return mcpPaginationIntentFallback
+	}
+}
+
+// boundedMCPPaginationBoundError explains whether a smaller positive caller bound exists under the Engine limit.
+func boundedMCPPaginationBoundError(publicOperationID string, engineMaxPages int) string {
+	// A one-page Engine policy has no positive strict reduction, so omission is the only valid reformat.
+	if engineMaxPages <= 1 {
+		return fmt.Sprintf("mcp_pagination_bound_not_lower: operation %s has an Engine page limit of %d, so no lower positive pagination.maxPages exists; use call(%s, params) without a pagination option", publicOperationID, engineMaxPages, publicOperationID)
+	}
+	return fmt.Sprintf("mcp_pagination_bound_not_lower: operation %s has an Engine page limit of %d; use pagination.maxPages between 1 and %d, or omit pagination", publicOperationID, engineMaxPages, engineMaxPages-1)
 }
 
 // boundedMCPPaginationFailure maps Engine-owned pagination codes to safe status and recovery guidance.

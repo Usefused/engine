@@ -59,6 +59,11 @@ func (*streamableSessionCache) ListEndpointsForSelections(context.Context, []mod
 	return map[int][]fusedobject.Endpoint{}, nil
 }
 
+// MCPPaginationForSelections returns no policies because this transport-only catalogue has no operations.
+func (*streamableSessionCache) MCPPaginationForSelections(context.Context, []models.SDKSelection) (map[int]*fusedobject.PaginationConfig, error) {
+	return map[int]*fusedobject.PaginationConfig{}, nil
+}
+
 // GetMCPUnifiedOperationDescriptors returns the canonical absent logical catalogue for this transport-only test.
 func (*streamableSessionCache) GetMCPUnifiedOperationDescriptors(context.Context, string, store.AppTokenPolicy) (*models.SDKUnifiedOperationDescriptors, error) {
 	return nil, nil

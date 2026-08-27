@@ -619,6 +619,75 @@ func TestPaginationV3StillRejectsMalformedSuccess(t *testing.T) {
 	}
 }
 
+// TestPaginationV3OptionalMissingItemsRequiresTerminalProviderState proves the
+// reviewed opt-in accepts only omissions that cannot conceal another page.
+func TestPaginationV3OptionalMissingItemsRequiresTerminalProviderState(t *testing.T) {
+	tests := []optionalMissingItemsCase{
+		{name: "reviewed terminal omission", missingIsEmpty: true, body: `{}`, wantStopReason: "missing_items"},
+		{name: "strict omission", body: `{}`, wantCode: "response_invalid"},
+		{name: "continuation contradiction", missingIsEmpty: true, body: `{"next":"second"}`, wantCode: "response_invalid"},
+		{name: "present null collection", missingIsEmpty: true, body: `{"items":null}`, wantCode: "response_invalid"},
+	}
+	// Every provider shape must follow the same one-page admission boundary.
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assertOptionalMissingItemsCase(t, test)
+		})
+	}
+}
+
+type optionalMissingItemsCase struct {
+	name           string
+	missingIsEmpty bool
+	body           string
+	wantCode       string
+	wantStopReason string
+}
+
+// assertOptionalMissingItemsCase executes one omission scenario without
+// increasing the table-driven test's decision complexity.
+func assertOptionalMissingItemsCase(t *testing.T, test optionalMissingItemsCase) {
+	t.Helper()
+	policy := baseV3Policy("$.items")
+	policy.Response.Items.MissingIsEmpty = test.missingIsEmpty
+	policy.Request = []paginationpolicy.RequestStep{{State: "cursor", Target: v3Target("query", "pageToken"), ValueType: "string", Apply: "subsequent"}}
+	policy.Response.Values = []paginationpolicy.ResponseValue{{Name: "next", Source: v3BodySource("$.next", "string")}}
+	policy.Continuation = []paginationpolicy.ContinuationStep{{Kind: "token", State: "cursor", ResponseValue: "next"}}
+	policy.Termination.StopOnMissingValues = []string{"next"}
+	object := v3Object(http.MethodGet, "/items", models.Parameter{Name: "pageToken", In: "query", Type: "string"})
+	object.Pagination = modelPolicy(policy)
+	calls := 0
+	dispatcher := &Dispatcher{client: &http.Client{Transport: paginationRoundTripper(func(request *http.Request) (*http.Response, error) {
+		calls++
+		return paginationResponse(request, test.body, nil), nil
+	})}}
+	timings := NewExecutionTimings()
+	ctx := ContextWithExecutionTimings(context.Background(), timings)
+	stream := &mockStream{}
+	status, err := dispatcher.ExecuteStream(ctx, &models.Service{BaseURL: "https://provider.test"}, explicitAnonymousEndpoint(object), nil, nil, nil, stream)
+	// Every case must decide from the first provider page without speculative retries.
+	if calls != 1 || status != http.StatusOK || PaginationFailureCode(err) != test.wantCode {
+		t.Fatalf("status=%d code=%q calls=%d err=%v", status, PaginationFailureCode(err), calls, err)
+	}
+	// Failure cases must not publish a partial response body.
+	if test.wantCode != "" {
+		// Buffered pagination errors must leave the public stream empty.
+		if len(stream.chunks) != 0 {
+			t.Fatalf("failure published chunks=%q", stream.chunks)
+		}
+		return
+	}
+	// The only successful case must publish exactly one logical aggregate.
+	if len(stream.chunks) != 1 {
+		t.Fatalf("terminal omission chunks=%d", len(stream.chunks))
+	}
+	assertV3Items(t, stream.chunks[0], "$.items", nil)
+	// Audit state must distinguish an omitted terminal list from a provider-returned empty array.
+	if summary := timings.PaginationSummary(); summary.StopReason != test.wantStopReason || summary.PageCount != 1 || summary.ItemCount != 0 {
+		t.Fatalf("pagination summary = %+v", summary)
+	}
+}
+
 func TestPaginationV3RejectsTargetTypeBeforeProviderDispatch(t *testing.T) {
 	caseData := v3TokenCase()
 	caseData.object.Parameters[0].Type = "integer"

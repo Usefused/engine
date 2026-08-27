@@ -10,11 +10,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 )
 
@@ -59,6 +61,23 @@ type mcpRuntimeNavigation struct {
 	} `json:"next_request"`
 }
 
+// mcpRuntimePaginationGuidance mirrors the bounded fields exposed to agents by search_docs.
+type mcpRuntimePaginationGuidance struct {
+	Supported            bool   `json:"supported"`
+	CallerBoundSupported bool   `json:"caller_bound_supported"`
+	EngineMaxPages       int    `json:"engine_max_pages"`
+	Usage                string `json:"usage"`
+}
+
+// mcpRuntimePaginationDocs mirrors the query result fields needed by the wire-level assertion.
+type mcpRuntimePaginationDocs struct {
+	Mode       string `json:"mode"`
+	Operations []struct {
+		OperationID string                       `json:"operation_id"`
+		Pagination  mcpRuntimePaginationGuidance `json:"pagination"`
+	} `json:"operations"`
+}
+
 // TestMCPBundledRuntimeAdvertisesSessionContract verifies the actual MCP SDK wire surfaces visible to hosts and agents.
 func TestMCPBundledRuntimeAdvertisesSessionContract(t *testing.T) {
 	client := startMCPLimitRuntime(t, "1")
@@ -70,12 +89,89 @@ func TestMCPBundledRuntimeAdvertisesSessionContract(t *testing.T) {
 	assertMCPRuntimeExecuteContract(t, client.exchange(t, "tools/list", map[string]any{}))
 }
 
+// TestMCPBundledRuntimeSearchDocsPaginationGuidance verifies Go fixture policy reaches the public JSON-RPC result.
+func TestMCPBundledRuntimeSearchDocsPaginationGuidance(t *testing.T) {
+	fixture := &Fixture{Operations: []FixtureOperation{
+		{OperationID: "users.list", ServiceID: "users", Name: "List users", Description: "List users", Method: "GET", Path: "/users", Responses: models.Responses{}, Pagination: FixturePagination{Supported: true, CallerBoundSupported: true, EngineMaxPages: 100}},
+		{OperationID: "users.get", ServiceID: "users", Name: "Get user", Description: "Get one user", Method: "GET", Path: "/users/{id}", Responses: models.Responses{}, Pagination: FixturePagination{Supported: false}},
+	}}
+	client := startMCPLimitRuntimeWithFixture(t, "1", fixture)
+	client.exchange(t, "initialize", map[string]any{
+		"protocolVersion": "2025-03-26", "capabilities": map[string]any{},
+		"clientInfo": map[string]string{"name": "fused-pagination-docs-test", "version": "1.0.0"},
+	})
+	response := client.exchange(t, "tools/call", map[string]any{
+		"name": "search_docs", "arguments": map[string]any{"query": "users", "limit": 2},
+	})
+	assertMCPRuntimePaginationDocs(t, response)
+}
+
+// assertMCPRuntimePaginationDocs checks mixed GET guidance without depending on ranked order.
+func assertMCPRuntimePaginationDocs(t *testing.T, response mcpRuntimeLimitResponse) {
+	t.Helper()
+	docs := decodeMCPRuntimePaginationDocs(t, response)
+	byID := make(map[string]mcpRuntimePaginationGuidance, len(docs.Operations))
+	// Identity indexing makes the assertion independent of search ranking ties.
+	for _, operation := range docs.Operations {
+		byID[operation.OperationID] = operation.Pagination
+	}
+	assertMCPRuntimePaginatedGuidance(t, byID["users.list"])
+	assertMCPRuntimeUnpaginatedGuidance(t, byID["users.get"])
+}
+
+// decodeMCPRuntimePaginationDocs admits the real MCP envelope before semantic assertions.
+func decodeMCPRuntimePaginationDocs(t *testing.T, response mcpRuntimeLimitResponse) mcpRuntimePaginationDocs {
+	t.Helper()
+	// Discovery must return one successful bounded text document through the real MCP SDK envelope.
+	if response.Result.IsError || len(response.Result.Content) != 1 {
+		t.Fatal("search_docs did not return one successful result")
+	}
+	var docs mcpRuntimePaginationDocs
+	// Public pagination metadata must remain structured after fixture serialization and Node projection.
+	if err := json.Unmarshal([]byte(response.Result.Content[0].Text), &docs); err != nil || docs.Mode != "query" || len(docs.Operations) != 2 {
+		t.Fatalf("invalid pagination documentation result: %v", err)
+	}
+	return docs
+}
+
+// assertMCPRuntimePaginatedGuidance verifies the reviewed automatic and caller-owned bounds independently.
+func assertMCPRuntimePaginatedGuidance(t *testing.T, got mcpRuntimePaginationGuidance) {
+	t.Helper()
+	want := mcpRuntimePaginationGuidance{Supported: true, CallerBoundSupported: true, EngineMaxPages: 100, Usage: got.Usage}
+	// Structured fields should match without coupling this integration test to full prose.
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("paginated list guidance = %+v", got)
+	}
+	// The public instruction must identify the separate physical call option.
+	if !strings.Contains(got.Usage, "third argument") {
+		t.Fatalf("paginated list usage = %q", got.Usage)
+	}
+}
+
+// assertMCPRuntimeUnpaginatedGuidance verifies GET detail cannot advertise Engine traversal.
+func assertMCPRuntimeUnpaginatedGuidance(t *testing.T, got mcpRuntimePaginationGuidance) {
+	t.Helper()
+	want := mcpRuntimePaginationGuidance{Usage: got.Usage}
+	// Unsupported guidance must omit every caller-owned bound field.
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("non-paginated get guidance = %+v", got)
+	}
+	// The public instruction must explain the one-request behavior to a fresh agent.
+	if !strings.Contains(got.Usage, "does not traverse provider pages") {
+		t.Fatalf("non-paginated get usage = %q", got.Usage)
+	}
+}
+
 // assertMCPRuntimeInitializeContract checks the guidance available before any tool discovery.
 func assertMCPRuntimeInitializeContract(t *testing.T, initialized mcpRuntimeLimitResponse) {
 	t.Helper()
 	// Initialize instructions are useful to capable hosts, while tools/list repeats the critical agent-facing rule.
 	if initialized.Result.ProtocolVersion != "2025-03-26" || !strings.Contains(initialized.Result.Instructions, "already attached every execute call") || !strings.Contains(initialized.Result.Instructions, "Follow recovery_action and execute_request exactly") {
 		t.Fatalf("initialize omitted session contract: %+v", initialized.Result)
+	}
+	// Fresh agents must defer to per-operation discovery instead of assuming every GET accepts a bound.
+	if !strings.Contains(initialized.Result.Instructions, "selected search_docs result's pagination guidance") {
+		t.Fatal("initialize omitted operation-specific pagination guidance")
 	}
 }
 
@@ -127,6 +223,17 @@ func startMCPLimitRuntime(t *testing.T, enginePort string) *mcpRuntimeLimitClien
 
 // startMCPLimitRuntimeWithDeadline allows deadline tests to outlive the production execute budget without changing it.
 func startMCPLimitRuntimeWithDeadline(t *testing.T, enginePort string, timeout time.Duration) *mcpRuntimeLimitClient {
+	return startMCPLimitRuntimeWithFixtureAndDeadline(t, enginePort, &Fixture{Operations: []FixtureOperation{}}, timeout)
+}
+
+// startMCPLimitRuntimeWithFixture starts the bundled runtime with an explicit public catalogue.
+func startMCPLimitRuntimeWithFixture(t *testing.T, enginePort string, fixture *Fixture) *mcpRuntimeLimitClient {
+	t.Helper()
+	return startMCPLimitRuntimeWithFixtureAndDeadline(t, enginePort, fixture, 10*time.Second)
+}
+
+// startMCPLimitRuntimeWithFixtureAndDeadline owns process setup for both empty and documentation fixtures.
+func startMCPLimitRuntimeWithFixtureAndDeadline(t *testing.T, enginePort string, fixture *Fixture, timeout time.Duration) *mcpRuntimeLimitClient {
 	t.Helper()
 	// Go-only environments cannot execute Node integration tests, while release builds always include Node.
 	if _, err := exec.LookPath("node"); err != nil {
@@ -137,7 +244,7 @@ func startMCPLimitRuntimeWithDeadline(t *testing.T, enginePort string, timeout t
 	sessionID := uuid.NewString()
 	// The production helper creates this exact per-session temporary directory; cleanup owns only that directory.
 	t.Cleanup(func() { _ = os.RemoveAll(mcpSessionTmpDir(sessionID)) })
-	cmd, err := buildMCPCommand(ctx, sessionID, &Fixture{Operations: []FixtureOperation{}})
+	cmd, err := buildMCPCommand(ctx, sessionID, fixture)
 	// Fixture admission and bundle staging must succeed before transport behavior can be asserted.
 	if err != nil {
 		t.Fatal(err)

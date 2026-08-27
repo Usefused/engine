@@ -28,6 +28,7 @@ const (
 	ExecutionCapabilityHTTPDigestV1                  = "auth.http.digest.v1"
 	ExecutionCapabilitySecurityServerSelectionV1     = "auth.security.server_selection.v1"
 	ExecutionCapabilityPaginationComposableV3        = "pagination.composable.v3"
+	ExecutionCapabilityPaginationOptionalItemsV1     = "pagination.optional_items.v1"
 	ExecutionCapabilityQuotaMultidimensionalV3       = "quota.multidimensional.v3"
 	ExecutionCapabilityRetryPolicyV3                 = "retry.policy.v3"
 	ExecutionCapabilityWebhookSignatureRecipesV1     = "webhook.signature.recipes.v1"
@@ -57,6 +58,7 @@ var supportedExecutionCapabilityOrder = []string{
 	ExecutionCapabilityJSONSchemaContractV1,
 	ExecutionCapabilityJSONSchemaSharedDefinitionsV1,
 	ExecutionCapabilityPaginationComposableV3,
+	ExecutionCapabilityPaginationOptionalItemsV1,
 	ExecutionCapabilityQuotaMultidimensionalV3,
 	ExecutionCapabilityRetryPolicyV3,
 	ExecutionCapabilityWebhookSignatureRecipesV1,

@@ -66,6 +66,26 @@ func TestStrictDecodeRejectsUnknownNestedFieldAndTrailingData(t *testing.T) {
 	}
 }
 
+// TestMissingItemsEmptyOptInSurvivesStrictDecode proves the reviewed response
+// invariant crosses Engine's strict Registry boundary without weakening unknown-field rejection.
+func TestMissingItemsEmptyOptInSurvivesStrictDecode(t *testing.T) {
+	raw := `{"version":3,"request":[{"state":"cursor","target":{"location":"query","name":"cursor"},"value_type":"string","apply":"subsequent"}],"response":{"items":{"path":"$.items","missing_is_empty":true},"values":[{"name":"next","source":{"location":"body","path":"$.next","value_type":"string"}}]},"continuation":[{"kind":"token","state":"cursor","response_value":"next"}],"termination":{"stop_on_missing_values":["next"],"repeated_value":"stop"},"limits":{"max_pages":10,"max_items":100,"max_bytes":1024,"max_duration_ms":1000}}`
+	var config Config
+	// The strict decoder must recognize the reviewed field rather than classify it as unknown input.
+	if err := json.Unmarshal([]byte(raw), &config); err != nil {
+		t.Fatalf("decode reviewed omission policy: %v", err)
+	}
+	// Successful decoding must retain the executable behavior bit.
+	if !config.Response.Items.MissingIsEmpty {
+		t.Fatal("reviewed omission flag was lost")
+	}
+	config.Response.Items.Path = "$"
+	// Root documents are always present, so applying omission semantics there is invalid configuration.
+	if err := Validate(&config); err == nil {
+		t.Fatal("root collection accepted missing_is_empty")
+	}
+}
+
 func TestEffectiveLimitsAppliesFrozenDefaults(t *testing.T) {
 	got := EffectiveLimits(Limits{})
 	if got.MaxPages != 100 || got.MaxItems != 10_000 || got.MaxBytes != 16_777_216 || got.MaxDurationMs != 120_000 {

@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 )
 
+// TestBuildSessionFixture_MapsEndpointsAcrossSelections verifies one batched catalogue carries current effective policy.
 func TestBuildSessionFixture_MapsEndpointsAcrossSelections(t *testing.T) {
 	svcA := uuid.New()
 	svcB := uuid.New()
@@ -25,12 +26,21 @@ func TestBuildSessionFixture_MapsEndpointsAcrossSelections(t *testing.T) {
 		},
 		{ID: epB, Name: "getUser", Method: "GET", Path: "/users/{id}"},
 	}
-	db := &mockCacheDB{contractMetadata: &fusedobject.ServiceMetadata{ID: svcA}, contractEndpoints: endpoints}
+	servicePolicy := paginationGuidancePolicy(10)
+	overridePolicy := paginationGuidancePolicy(5)
+	db := &mockCacheDB{
+		contractMetadata:  &fusedobject.ServiceMetadata{ID: svcA, Pagination: servicePolicy},
+		contractEndpoints: endpoints,
+		policyOverrides: map[store.WorkspaceExecutionPolicyRef]*store.WorkspaceExecutionPolicyOverride{
+			{ServiceID: svcA, ServiceVersionID: svcB}: {Pagination: overridePolicy},
+		},
+	}
 	cache := NewLocalObjectCache(db)
 
 	selections := []models.SDKSelection{
 		{ServiceID: svcA, ServiceVersionID: svcB, SelectAll: true},
 	}
+	seedMCPPaginationMetadata(cache, selections, db.contractMetadata)
 
 	fixture, err := buildSessionFixture(context.Background(), cache, uuid.NewString(), selections, store.AppTokenPolicy{AllowAll: true})
 	if err != nil {
@@ -44,6 +54,10 @@ func TestBuildSessionFixture_MapsEndpointsAcrossSelections(t *testing.T) {
 	if db.contractBatchCalls != 1 {
 		t.Fatalf("unrestricted fixture snapshot queries = %d, want one batched query", db.contractBatchCalls)
 	}
+	// Effective workspace overrides must remain one set-based lookup for the entire selection.
+	if db.policyBatchCalls != 1 {
+		t.Fatalf("pagination policy queries = %d, want one batched query", db.policyBatchCalls)
+	}
 }
 
 // assertListUsersOperation checks the "listUsers" operation's fields, split
@@ -55,6 +69,13 @@ func assertListUsersOperation(t *testing.T, fixture *Fixture, wantServiceID uuid
 	if !ok {
 		t.Fatal(`fixture.Resolve("listUsers") = not found, want found`)
 	}
+	assertListUsersIdentity(t, op, wantServiceID)
+	assertListUsersContract(t, op)
+}
+
+// assertListUsersIdentity checks the exact public dispatch identity independently from contract detail.
+func assertListUsersIdentity(t *testing.T, op *FixtureOperation, wantServiceID uuid.UUID) {
+	t.Helper()
 	if op.OperationID != "listUsers" {
 		t.Errorf("OperationID = %q, want %q", op.OperationID, "listUsers")
 	}
@@ -64,11 +85,20 @@ func assertListUsersOperation(t *testing.T, fixture *Fixture, wantServiceID uuid
 	if op.Method != "GET" || op.Path != "/users" {
 		t.Errorf("Method/Path = %q/%q, want GET//users", op.Method, op.Path)
 	}
+}
+
+// assertListUsersContract checks request, response, and effective pagination projections together.
+func assertListUsersContract(t *testing.T, op *FixtureOperation) {
+	t.Helper()
 	if len(op.Parameters) != 1 || op.Parameters[0].Name != "limit" {
 		t.Errorf("Parameters = %+v, want one param named limit", op.Parameters)
 	}
 	if _, ok := op.Responses["200"]; !ok {
 		t.Errorf("Responses = %+v, want a 200 entry", op.Responses)
+	}
+	// Discovery must expose the current workspace reduction rather than cached service defaults.
+	if !op.Pagination.Supported || !op.Pagination.CallerBoundSupported || op.Pagination.EngineMaxPages != 5 {
+		t.Errorf("Pagination = %+v, want current workspace limit 5", op.Pagination)
 	}
 }
 
@@ -84,6 +114,7 @@ func TestBuildSessionFixture_PropagatesListEndpointsError(t *testing.T) {
 	}
 }
 
+// TestBuildSessionFixture_StrictTokenFetchesOnlyAllowedOperations keeps token filtering and policy loading set-based.
 func TestBuildSessionFixture_StrictTokenFetchesOnlyAllowedOperations(t *testing.T) {
 	allowedGet := uuid.New()
 	allowedList := uuid.New()
@@ -99,6 +130,7 @@ func TestBuildSessionFixture_StrictTokenFetchesOnlyAllowedOperations(t *testing.
 		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), EndpointIDs: []uuid.UUID{allowedGet}},
 		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), EndpointIDs: []uuid.UUID{allowedList}},
 	}
+	seedMCPPaginationMetadata(cache, selections, db.contractMetadata)
 
 	fixture, err := buildSessionFixture(context.Background(), cache, uuid.NewString(), selections, store.AppTokenPolicy{
 		AllowedOperations: []string{"getUser", "listUsers", "deleteUser"},
@@ -117,6 +149,17 @@ func TestBuildSessionFixture_StrictTokenFetchesOnlyAllowedOperations(t *testing.
 	}
 	if db.contractBatchCalls != 1 {
 		t.Fatalf("strict fixture snapshot queries = %d, want one batched query", db.contractBatchCalls)
+	}
+}
+
+// seedMCPPaginationMetadata mirrors the metadata prewarm completed before a live MCP fixture is built.
+func seedMCPPaginationMetadata(cache *LocalObjectCache, selections []models.SDKSelection, metadata *fusedobject.ServiceMetadata) {
+	// Each immutable selection receives its own copy so test mutations cannot alias policy state.
+	for _, selection := range selections {
+		copyValue := *metadata
+		copyValue.ID = selection.ServiceID
+		copyValue.ServiceVersionID = selection.ServiceVersionID
+		cache.serviceMetadataCache[selection.ServiceID.String()+":"+selection.ServiceVersionID.String()] = &copyValue
 	}
 }
 
@@ -165,14 +208,16 @@ func TestNewFixtureFromOperations_DedupesDuplicateOperationID(t *testing.T) {
 	}
 }
 
+// TestEndpointToFixtureOperation_SetsOperationIDAndServiceID verifies public identity and policy survive conversion together.
 func TestEndpointToFixtureOperation_SetsOperationIDAndServiceID(t *testing.T) {
 	ep := fusedobject.Endpoint{
-		ID:     uuid.New(),
-		Name:   "listUsers",
-		Method: "GET",
-		Path:   "/users",
+		ID:         uuid.New(),
+		Name:       "listUsers",
+		Method:     "GET",
+		Path:       "/users",
+		Pagination: paginationGuidancePolicy(8),
 	}
-	op, err := endpointToFixtureOperation("svc-123", ep)
+	op, err := endpointToFixtureOperation("svc-123", ep, nil)
 	if err != nil {
 		t.Fatalf("endpointToFixtureOperation() error = %v", err)
 	}
@@ -184,6 +229,10 @@ func TestEndpointToFixtureOperation_SetsOperationIDAndServiceID(t *testing.T) {
 	}
 	if op.Name != "listUsers" || op.Method != "GET" || op.Path != "/users" {
 		t.Errorf("op = %+v, want Name/Method/Path carried through from the endpoint", op)
+	}
+	// Endpoint policy has execution precedence and must survive fixture projection unchanged.
+	if !op.Pagination.Supported || !op.Pagination.CallerBoundSupported || op.Pagination.EngineMaxPages != 8 {
+		t.Errorf("Pagination = %+v, want supported Engine limit 8", op.Pagination)
 	}
 }
 

@@ -14,6 +14,39 @@ import (
 // ErrPaginationIntentInvalid identifies caller pagination controls that do not strictly tighten a reviewed policy.
 var ErrPaginationIntentInvalid = errors.New("pagination intent is invalid")
 
+// PaginationIntentErrorReason identifies the safe caller correction without exposing the resolved policy object.
+type PaginationIntentErrorReason string
+
+const (
+	// PaginationIntentInvalidValue means maxPages is outside the global positive caller range.
+	PaginationIntentInvalidValue PaginationIntentErrorReason = "invalid_value"
+	// PaginationIntentNotSupported means the resolved operation has no provider-pagination contract.
+	PaginationIntentNotSupported PaginationIntentErrorReason = "not_supported"
+	// PaginationIntentBoundNotLower means maxPages would not strictly tighten the effective Engine policy.
+	PaginationIntentBoundNotLower PaginationIntentErrorReason = "bound_not_lower"
+)
+
+// PaginationIntentValidationError carries only bounded policy facts that public adapters may safely explain.
+type PaginationIntentValidationError struct {
+	Reason         PaginationIntentErrorReason
+	RequestedPages int
+	EngineMaxPages int
+}
+
+// Error keeps the internal error useful in logs while public adapters own transport-specific guidance.
+func (e *PaginationIntentValidationError) Error() string {
+	// A nil receiver remains safe when a typed nil crosses a generic error boundary.
+	if e == nil {
+		return ErrPaginationIntentInvalid.Error()
+	}
+	return "pagination intent is invalid: " + string(e.Reason)
+}
+
+// Unwrap preserves the original sentinel contract for existing REST, gRPC, and Unified callers.
+func (e *PaginationIntentValidationError) Unwrap() error {
+	return ErrPaginationIntentInvalid
+}
+
 // PaginationIntent is the provider-neutral request control retained inside one physical execution.
 type PaginationIntent struct {
 	MaxPages int
@@ -29,7 +62,7 @@ func ValidatePaginationIntent(intent *PaginationIntent) error {
 	}
 	// A present intent must name a useful positive bound that cannot exceed the global safety ceiling.
 	if intent.MaxPages < 1 || intent.MaxPages > paginationpolicy.CeilingMaxPages {
-		return ErrPaginationIntentInvalid
+		return &PaginationIntentValidationError{Reason: PaginationIntentInvalidValue, RequestedPages: intent.MaxPages}
 	}
 	return nil
 }
@@ -45,12 +78,14 @@ func ValidatePaginationIntentPolicy(intent *PaginationIntent, policy *models.Pag
 	}
 	// Non-paginated operations cannot silently accept a decorative pagination control.
 	if policy == nil {
-		return ErrPaginationIntentInvalid
+		return &PaginationIntentValidationError{Reason: PaginationIntentNotSupported, RequestedPages: intent.MaxPages}
 	}
 	limits := paginationpolicy.EffectiveLimits((*paginationpolicy.Config)(policy).Limits)
 	// Equality would soften the policy's hard max-pages failure into partial success, so only a strict reduction is allowed.
 	if intent.MaxPages >= limits.MaxPages {
-		return ErrPaginationIntentInvalid
+		return &PaginationIntentValidationError{
+			Reason: PaginationIntentBoundNotLower, RequestedPages: intent.MaxPages, EngineMaxPages: limits.MaxPages,
+		}
 	}
 	return nil
 }
