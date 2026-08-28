@@ -488,7 +488,7 @@ func TestSecretResolverResolveExecutionCredentialsInjectsConnectionResource(t *t
 
 		appRuntime: &store.AppRuntime{AppID: uuid.New(), BucketID: bucketID},
 		authConnection: &store.AuthConnection{
-			ID: connectionID, BucketID: bucketID, ServiceID: serviceID, EndUserRef: "user_123",
+			ID: connectionID, BucketID: bucketID, ServiceID: serviceID, ServiceVersionID: uuid.New(), EndUserRef: "user_123",
 			AuthName: "oauth", EncryptedDEK: wrapper, EncryptedAccessToken: access,
 		},
 		connectionResource: &store.ConnectionResource{
@@ -524,7 +524,7 @@ func TestSecretResolverResolveExecutionCredentialsRequiresResourceChoice(t *test
 	mockStore := &resolverMockStore{
 
 		appRuntime:              &store.AppRuntime{AppID: uuid.New(), BucketID: bucketID},
-		authConnection:          &store.AuthConnection{ID: uuid.New(), BucketID: bucketID, ServiceID: serviceID, EndUserRef: "user_123", AuthName: "oauth", EncryptedDEK: wrapper, EncryptedAccessToken: access},
+		authConnection:          &store.AuthConnection{ID: uuid.New(), BucketID: bucketID, ServiceID: serviceID, ServiceVersionID: uuid.New(), EndUserRef: "user_123", AuthName: "oauth", EncryptedDEK: wrapper, EncryptedAccessToken: access},
 		connectionResourceCount: 2,
 	}
 	resolver := NewSecretResolver(mockStore, masterKey)
@@ -1044,7 +1044,7 @@ func (m *resolverMockStore) GetServiceContractMetadata(_ context.Context, servic
 }
 
 // TryClaimAuthConnectionRefresh gives one foreground caller a mock CAS lease.
-func (m *resolverMockStore) TryClaimAuthConnectionRefresh(_ context.Context, id, serviceVersionID uuid.UUID, now, leaseExpiresAt time.Time) (*store.AuthConnectionRefreshClaim, error) {
+func (m *resolverMockStore) TryClaimAuthConnectionRefresh(_ context.Context, id uuid.UUID, now, leaseExpiresAt time.Time) (*store.AuthConnectionRefreshClaim, error) {
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
 	m.refreshClaimAttempts++
@@ -1058,12 +1058,6 @@ func (m *resolverMockStore) TryClaimAuthConnectionRefresh(_ context.Context, id,
 		return nil, nil
 	}
 	if authConnectionRefreshRetryScheduled(m.authConnection, now) {
-		return nil, nil
-	}
-	if m.authConnection.ServiceVersionID == uuid.Nil {
-		m.authConnection.ServiceVersionID = serviceVersionID
-	}
-	if m.authConnection.ServiceVersionID != serviceVersionID {
 		return nil, nil
 	}
 	m.refreshLeaseToken = uuid.New()
@@ -1179,6 +1173,7 @@ func encryptedAuthConnection(t *testing.T, masterKey []byte, bucketID, serviceID
 		ID:                    uuid.New(),
 		BucketID:              bucketID,
 		ServiceID:             serviceID,
+		ServiceVersionID:      uuid.New(),
 		EndUserRef:            endUserRef,
 		AuthType:              "oauth",
 		AuthName:              "bearerAuth",

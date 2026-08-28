@@ -87,6 +87,10 @@ func TestEngineSchemaRequiresExactConnectedAuthVersions(t *testing.T) {
 		"oauth2_authorization_code",
 		"open_id_connect",
 	})
+	// A NOT NULL column must not retain a partial-index branch for unsupported legacy grants.
+	if strings.Contains(schema, "AND service_version_id IS NOT NULL") {
+		t.Fatal("connected-auth refresh index retained nullable-version compatibility")
+	}
 }
 
 // TestEngineSchemaDefinesIsolatedConnectInputSessions locks pre-OAuth state to a one-time token without callback secrets.

@@ -20,7 +20,7 @@ type authConnectionResponse struct {
 	ID                    uuid.UUID  `json:"id"`
 	BucketID              uuid.UUID  `json:"bucket_id"`
 	ServiceID             uuid.UUID  `json:"service_id"`
-	ServiceVersionID      *uuid.UUID `json:"service_version_id,omitempty"`
+	ServiceVersionID      uuid.UUID  `json:"service_version_id"`
 	EndUserRef            string     `json:"end_user_ref"`
 	CreatedByAppID        uuid.UUID  `json:"created_by_app_id,omitempty"`
 	AuthType              string     `json:"auth_type"`
@@ -159,7 +159,7 @@ func projectAuthConnection(conn store.AuthConnection) authConnectionResponse {
 		ID:                    conn.ID,
 		BucketID:              conn.BucketID,
 		ServiceID:             conn.ServiceID,
-		ServiceVersionID:      optionalConnectionUUID(conn.ServiceVersionID),
+		ServiceVersionID:      conn.ServiceVersionID,
 		EndUserRef:            conn.EndUserRef,
 		CreatedByAppID:        conn.CreatedByAppID,
 		AuthType:              conn.AuthType,
@@ -182,15 +182,6 @@ func projectAuthConnection(conn store.AuthConnection) authConnectionResponse {
 		CreatedAt:             conn.CreatedAt,
 		UpdatedAt:             conn.UpdatedAt,
 	}
-}
-
-// optionalConnectionUUID keeps ambiguous legacy service-version identity null
-// instead of projecting the all-zero UUID as if it were a real contract pin.
-func optionalConnectionUUID(id uuid.UUID) *uuid.UUID {
-	if id == uuid.Nil {
-		return nil
-	}
-	return &id
 }
 
 // parseUUIDParam validates an exact route UUID and emits a stable field-specific

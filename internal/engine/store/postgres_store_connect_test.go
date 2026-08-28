@@ -56,7 +56,7 @@ func TestPostgresStore_BucketAttachedConnectAuth(t *testing.T) {
 }
 
 // TestPostgresStoreAuthConnectionRefreshLeases exercises cross-replica claims,
-// CAS completion, retry throttling, recovery, and exact legacy version binding.
+// CAS completion, retry throttling, and recovery for version-pinned grants.
 func TestPostgresStoreAuthConnectionRefreshLeases(t *testing.T) {
 	fixture := setupConnectAuthStore(t)
 	versionID := uuid.New()
@@ -68,16 +68,14 @@ func TestPostgresStoreAuthConnectionRefreshLeases(t *testing.T) {
 	early := upsertRefreshLeaseConnection(t, fixture, "refresh-early", versionID, now.Add(-2*time.Minute))
 	later := upsertRefreshLeaseConnection(t, fixture, "refresh-later", versionID, now.Add(-time.Minute))
 	_ = upsertRefreshLeaseConnection(t, fixture, "refresh-future", versionID, now.Add(2*time.Hour))
-	legacy := upsertRefreshLeaseConnection(t, fixture, "refresh-legacy", uuid.Nil, now.Add(-time.Minute))
 
 	first, second, leaseUntil := claimRefreshLeasePages(t, refreshStore, now, early.ID, later.ID)
-	assertRefreshLeaseContention(t, refreshStore, first, versionID, now, leaseUntil)
+	assertRefreshLeaseContention(t, refreshStore, first, now, leaseUntil)
 	recovered := recoverExpiredRefreshLease(t, refreshStore, first, leaseUntil)
 	completeRecoveredRefresh(t, refreshStore, first, recovered, leaseUntil)
 	releaseWorkerRefreshTransiently(t, refreshStore, second, now)
 	assertRefreshPassDoesNotReclaimCompleted(t, refreshStore, early.ID, now, leaseUntil)
 	assertForegroundRetryAndReconnect(t, fixture, refreshStore, versionID, now)
-	assertLegacyRefreshVersionBinding(t, refreshStore, legacy.ID, versionID, now)
 	// The second page remains a valid independently leased claim, proving the
 	// page-one worker did not serialize every due connection behind one lock.
 	if second.LeaseToken == uuid.Nil || second.Connection.ID != later.ID {
@@ -239,7 +237,7 @@ func releaseWorkerRefreshTransiently(t *testing.T, refreshStore AuthConnectionRe
 }
 
 // claimRefreshLeasePages proves ordered limit-one pages skip an already leased
-// row and exclude future and unpinned legacy credentials from worker discovery.
+// row while excluding credentials whose provider expiry is still in the future.
 func claimRefreshLeasePages(t *testing.T, refreshStore AuthConnectionRefreshStore, now time.Time, earlyID, laterID uuid.UUID) (AuthConnectionRefreshClaim, AuthConnectionRefreshClaim, time.Time) {
 	t.Helper()
 	leaseUntil := now.Add(time.Minute)
@@ -266,17 +264,14 @@ func claimRefreshPage(t *testing.T, refreshStore AuthConnectionRefreshStore, cut
 	return claims
 }
 
-// assertRefreshLeaseContention proves an SDK fallback cannot take a worker's
-// live lease and that an exact version mismatch never rewrites stored identity.
-func assertRefreshLeaseContention(t *testing.T, refreshStore AuthConnectionRefreshStore, claim AuthConnectionRefreshClaim, versionID uuid.UUID, now, leaseUntil time.Time) {
+// assertRefreshLeaseContention proves a request fallback cannot take a worker's
+// live lease or alter the connection's persisted consent identity.
+func assertRefreshLeaseContention(t *testing.T, refreshStore AuthConnectionRefreshStore, claim AuthConnectionRefreshClaim, now, leaseUntil time.Time) {
 	t.Helper()
-	contended, err := refreshStore.TryClaimAuthConnectionRefresh(context.Background(), claim.Connection.ID, versionID, now, leaseUntil)
+	contended, err := refreshStore.TryClaimAuthConnectionRefresh(context.Background(), claim.Connection.ID, now, leaseUntil)
+	// An existing worker lease must win without returning an error to the request path.
 	if err != nil || contended != nil {
 		t.Fatalf("live lease contention claim=%#v err=%v", contended, err)
-	}
-	concurrentFallback, err := refreshStore.TryClaimAuthConnectionRefresh(context.Background(), claim.Connection.ID, uuid.New(), now, leaseUntil)
-	if err != nil || concurrentFallback != nil {
-		t.Fatalf("concurrent fallback version claim=%#v err=%v", concurrentFallback, err)
 	}
 }
 
@@ -305,7 +300,7 @@ func completeRecoveredRefresh(t *testing.T, refreshStore AuthConnectionRefreshSt
 	if connection.RefreshRetryNotBefore == nil || !connection.RefreshRetryNotBefore.Equal(nextEligibleAt) {
 		t.Fatalf("successful refresh eligibility = %#v, want %v", connection.RefreshRetryNotBefore, nextEligibleAt)
 	}
-	duplicate, err := refreshStore.TryClaimAuthConnectionRefresh(context.Background(), recovered.Connection.ID, recovered.Connection.ServiceVersionID, refreshedAt, refreshedAt.Add(time.Minute))
+	duplicate, err := refreshStore.TryClaimAuthConnectionRefresh(context.Background(), recovered.Connection.ID, refreshedAt, refreshedAt.Add(time.Minute))
 	if err != nil || duplicate != nil {
 		t.Fatalf("freshly completed foreground claim=%#v err=%v", duplicate, err)
 	}
@@ -368,7 +363,7 @@ func assertForegroundRetryAndReconnect(t *testing.T, fixture connectAuthFixture,
 // retry deadline while the still-valid access token remains usable.
 func claimAndReleaseForegroundRefresh(t *testing.T, fixture connectAuthFixture, refreshStore AuthConnectionRefreshStore, connectionID, versionID uuid.UUID, now time.Time) {
 	t.Helper()
-	claim, err := refreshStore.TryClaimAuthConnectionRefresh(fixture.ctx, connectionID, versionID, now, now.Add(time.Minute))
+	claim, err := refreshStore.TryClaimAuthConnectionRefresh(fixture.ctx, connectionID, now, now.Add(time.Minute))
 	if err != nil || claim == nil {
 		t.Fatalf("foreground refresh claim=%#v err=%v", claim, err)
 	}
@@ -383,15 +378,15 @@ func claimAndReleaseForegroundRefresh(t *testing.T, fixture connectAuthFixture, 
 // prevents tight loops even after expiry, then permits the next bounded retry.
 func assertForegroundRetryThrottleThenEligibility(t *testing.T, fixture connectAuthFixture, refreshStore AuthConnectionRefreshStore, connectionID, versionID uuid.UUID, now time.Time) AuthConnectionRefreshClaim {
 	t.Helper()
-	throttled, err := refreshStore.TryClaimAuthConnectionRefresh(fixture.ctx, connectionID, versionID, now.Add(2*time.Minute), now.Add(3*time.Minute))
+	throttled, err := refreshStore.TryClaimAuthConnectionRefresh(fixture.ctx, connectionID, now.Add(2*time.Minute), now.Add(3*time.Minute))
 	if err != nil || throttled != nil {
 		t.Fatalf("near-expiry retry throttle claim=%#v err=%v", throttled, err)
 	}
-	expiredThrottled, err := refreshStore.TryClaimAuthConnectionRefresh(fixture.ctx, connectionID, versionID, now.Add(6*time.Minute), now.Add(7*time.Minute))
+	expiredThrottled, err := refreshStore.TryClaimAuthConnectionRefresh(fixture.ctx, connectionID, now.Add(6*time.Minute), now.Add(7*time.Minute))
 	if err != nil || expiredThrottled != nil {
 		t.Fatalf("expired retry throttle claim=%#v err=%v", expiredThrottled, err)
 	}
-	eligible, err := refreshStore.TryClaimAuthConnectionRefresh(fixture.ctx, connectionID, versionID, now.Add(11*time.Minute), now.Add(12*time.Minute))
+	eligible, err := refreshStore.TryClaimAuthConnectionRefresh(fixture.ctx, connectionID, now.Add(11*time.Minute), now.Add(12*time.Minute))
 	if err != nil || eligible == nil {
 		t.Fatalf("post-retry claim=%#v err=%v", eligible, err)
 	}
@@ -427,7 +422,7 @@ func assertMissingRefreshTokenCanReconnect(t *testing.T, fixture connectAuthFixt
 	if err != nil {
 		t.Fatalf("upsert access-only refresh connection: %v", err)
 	}
-	claim, err := refreshStore.TryClaimAuthConnectionRefresh(fixture.ctx, connection.ID, versionID, now, now.Add(time.Minute))
+	claim, err := refreshStore.TryClaimAuthConnectionRefresh(fixture.ctx, connection.ID, now, now.Add(time.Minute))
 	if err != nil || claim == nil {
 		t.Fatalf("claim access-only expired connection=%#v err=%v", claim, err)
 	}
@@ -437,27 +432,8 @@ func assertMissingRefreshTokenCanReconnect(t *testing.T, fixture connectAuthFixt
 	}
 }
 
-// assertLegacyRefreshVersionBinding verifies an unpinned row is atomically
-// bound from foreground exact metadata and never by background discovery.
-func assertLegacyRefreshVersionBinding(t *testing.T, refreshStore AuthConnectionRefreshStore, connectionID, versionID uuid.UUID, now time.Time) {
-	t.Helper()
-	claim, err := refreshStore.TryClaimAuthConnectionRefresh(context.Background(), connectionID, versionID, now, now.Add(time.Minute))
-	if err != nil || claim == nil || claim.Connection.ServiceVersionID != versionID {
-		t.Fatalf("legacy exact binding claim=%#v err=%v", claim, err)
-	}
-	retryAt := now.Add(time.Second)
-	released, err := refreshStore.ReleaseAuthConnectionRefresh(context.Background(), connectionID, claim.LeaseToken, retryAt, "provider_unavailable", "trace-legacy", now.Add(500*time.Millisecond))
-	if err != nil || !released {
-		t.Fatalf("release legacy binding claim released=%t err=%v", released, err)
-	}
-	reused, err := refreshStore.TryClaimAuthConnectionRefresh(context.Background(), connectionID, uuid.New(), now.Add(2*time.Second), now.Add(time.Minute))
-	if err != nil || reused == nil || reused.Connection.ServiceVersionID != versionID {
-		t.Fatalf("legacy binding reuse claim=%#v err=%v", reused, err)
-	}
-}
-
 // upsertRefreshLeaseConnection creates encrypted refreshable fixture material
-// with a caller-selected expiry and optional exact service-version identity.
+// with a caller-selected expiry and mandatory consent-version identity.
 func upsertRefreshLeaseConnection(t *testing.T, fixture connectAuthFixture, endUserRef string, versionID uuid.UUID, expiresAt time.Time) *AuthConnection {
 	return upsertRefreshLeaseConnectionState(t, fixture, endUserRef, versionID, expiresAt, "ok")
 }
@@ -911,12 +887,16 @@ func upsertOAuthConnectionForUser(t *testing.T, f connectAuthFixture, endUserRef
 	return connection
 }
 
+// TestPostgresStoreConnectRejectsPlaintextAuthMaterial isolates encrypted-material validation from identity validation.
 func TestPostgresStoreConnectRejectsPlaintextAuthMaterial(t *testing.T) {
 	s := &postgresStore{}
 	_, err := s.UpsertAuthConnection(context.Background(), AuthConnection{
+		BucketID: uuid.New(), ServiceID: uuid.New(), ServiceVersionID: uuid.New(), EndUserRef: "plaintext-user",
+		AuthType: "oauth", AuthName: "oauth",
 		EncryptedDEK:         "dek",
 		EncryptedAccessToken: "access-token",
 	})
+	// Complete identity isolates encrypted-material validation from the clean-schema guard.
 	if !errors.Is(err, ErrInvalidEncryptedAuthMaterial) {
 		t.Fatalf("expected connection plaintext rejection, got %v", err)
 	}
@@ -926,6 +906,28 @@ func TestPostgresStoreConnectRejectsPlaintextAuthMaterial(t *testing.T) {
 	})
 	if !errors.Is(err, ErrInvalidEncryptedAuthMaterial) {
 		t.Fatalf("expected session plaintext rejection, got %v", err)
+	}
+}
+
+// TestPostgresStoreConnectRejectsMissingConsentVersion proves both credential
+// persistence paths fail before SQL when immutable refresh identity is absent.
+func TestPostgresStoreConnectRejectsMissingConsentVersion(t *testing.T) {
+	encrypted := encryptConnectAuthValues(t, "version-required-access")
+	connection := AuthConnection{
+		BucketID: uuid.New(), ServiceID: uuid.New(), EndUserRef: "version-required-user",
+		AuthType: "oauth", AuthName: "oauth", EncryptedDEK: encrypted.dek,
+		EncryptedAccessToken: encrypted.values[0], RefreshState: "ok",
+	}
+	store := &postgresStore{}
+	_, err := store.UpsertAuthConnection(context.Background(), connection)
+	// Standalone writes must reject before dereferencing the intentionally absent database pool.
+	if !errors.Is(err, ErrInvalidAuthConnectionIdentity) {
+		t.Fatalf("standalone missing-version error = %v", err)
+	}
+	_, _, err = store.UpsertAuthConnectionAndReconcileResources(context.Background(), connection, nil)
+	// Transactional resource writes share the same pre-SQL identity boundary.
+	if !errors.Is(err, ErrInvalidAuthConnectionIdentity) {
+		t.Fatalf("transactional missing-version error = %v", err)
 	}
 }
 

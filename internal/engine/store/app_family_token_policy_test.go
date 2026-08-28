@@ -100,6 +100,8 @@ type fixedBindingTarget struct {
 	bucketID     uuid.UUID
 	serviceA     uuid.UUID
 	serviceB     uuid.UUID
+	versionA     uuid.UUID
+	versionB     uuid.UUID
 	serviceSlugA string
 	serviceSlugB string
 	connectionA  uuid.UUID
@@ -134,10 +136,11 @@ func (fixture appTokenPolicyFixture) createFixedToken(t *testing.T, name string,
 	return token
 }
 
+// seedFixedBindingTarget creates exact service-version grants for fixed-token resolution tests.
 func (fixture appTokenPolicyFixture) seedFixedBindingTarget(t *testing.T) fixedBindingTarget {
 	t.Helper()
 	target := fixedBindingTarget{
-		bucketID: uuid.New(), serviceA: uuid.New(), serviceB: uuid.New(),
+		bucketID: uuid.New(), serviceA: uuid.New(), serviceB: uuid.New(), versionA: uuid.New(), versionB: uuid.New(),
 		serviceSlugA: "gmail-fixed-" + uuid.NewString(), serviceSlugB: "google-drive-fixed-" + uuid.NewString(),
 		connectionA: uuid.New(), connectionA2: uuid.New(), connectionB: uuid.New(), resourceB: uuid.New(),
 	}
@@ -147,6 +150,7 @@ func (fixture appTokenPolicyFixture) seedFixedBindingTarget(t *testing.T) fixedB
 	return target
 }
 
+// insertFixedBindingTarget persists one atomic fixed-binding graph with immutable consent versions.
 func (fixture appTokenPolicyFixture) insertFixedBindingTarget(target fixedBindingTarget) error {
 	tx, err := fixture.pool.Begin(fixture.ctx)
 	if err != nil {
@@ -162,13 +166,14 @@ func (fixture appTokenPolicyFixture) insertFixedBindingTarget(target fixedBindin
 		VALUES ($1, $2, 'Gmail fixed binding'), ($3, $4, $2)`,
 		target.serviceA, target.serviceSlugA, target.serviceB, target.serviceSlugB)
 	batch.Queue(`INSERT INTO fused_auth_connections
-		(id, bucket_id, service_id, end_user_ref, auth_type, auth_name,
+		(id, bucket_id, service_id, service_version_id, end_user_ref, auth_type, auth_name,
 		 credential_source_service_id, credential_source_auth_type, credential_source_auth_name,
 		 encrypted_dek, access_token)
-		VALUES ($1, $2, $3, 'mail-user', 'oauth2', 'gmail', $3, 'oauth', 'gmail', 'encrypted', 'encrypted'),
-		       ($4, $2, $3, 'mail-user-b', 'oauth2', 'gmail', $3, 'oauth', 'gmail', 'encrypted', 'encrypted'),
-		       ($5, $2, $6, 'drive-user', 'oauth2', 'drive', $6, 'oauth', 'drive', 'encrypted', 'encrypted')`,
-		target.connectionA, target.bucketID, target.serviceA, target.connectionA2, target.connectionB, target.serviceB)
+		VALUES ($1, $2, $3, $4, 'mail-user', 'oauth2', 'gmail', $3, 'oauth', 'gmail', 'encrypted', 'encrypted'),
+		       ($5, $2, $3, $4, 'mail-user-b', 'oauth2', 'gmail', $3, 'oauth', 'gmail', 'encrypted', 'encrypted'),
+		       ($6, $2, $7, $8, 'drive-user', 'oauth2', 'drive', $7, 'oauth', 'drive', 'encrypted', 'encrypted')`,
+		target.connectionA, target.bucketID, target.serviceA, target.versionA,
+		target.connectionA2, target.connectionB, target.serviceB, target.versionB)
 	batch.Queue(`INSERT INTO fused_connection_resources
 		(id, connection_id, bucket_id, service_id, provider_resource_id, resource_type, display_name, base_url)
 		VALUES ($1, $2, $3, $4, 'drive-root', 'drive', 'Drive root', 'https://www.googleapis.com')`,

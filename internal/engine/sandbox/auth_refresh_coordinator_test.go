@@ -29,7 +29,7 @@ func TestAuthRefreshCoordinatorPreservesOmittedRefreshToken(t *testing.T) {
 	coordinator := NewAuthRefreshCoordinator(fixture.db, fixture.masterKey,
 		WithAuthRefreshClock(func() time.Time { return fixture.now }), WithAuthRefreshHTTPClient(client))
 
-	refreshed, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection, fixture.versionID)
+	refreshed, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection)
 	if err != nil {
 		t.Fatalf("ensureForegroundConnectionFresh() error = %v", err)
 	}
@@ -53,7 +53,7 @@ func TestAuthRefreshCoordinatorClearsOldExpiryForRotatedTokenWithoutTTL(t *testi
 	coordinator := NewAuthRefreshCoordinator(fixture.db, fixture.masterKey,
 		WithAuthRefreshClock(func() time.Time { return fixture.now }), WithAuthRefreshHTTPClient(client))
 
-	refreshed, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection, fixture.versionID)
+	refreshed, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection)
 	if err != nil {
 		t.Fatalf("ensureForegroundConnectionFresh() error = %v", err)
 	}
@@ -74,7 +74,7 @@ func TestAuthRefreshCoordinatorPreservesExpiryForEchoedRefreshToken(t *testing.T
 	coordinator := NewAuthRefreshCoordinator(fixture.db, fixture.masterKey,
 		WithAuthRefreshClock(func() time.Time { return fixture.now }), WithAuthRefreshHTTPClient(client))
 
-	refreshed, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection, fixture.versionID)
+	refreshed, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection)
 	if err != nil {
 		t.Fatalf("ensureForegroundConnectionFresh() error = %v", err)
 	}
@@ -95,7 +95,7 @@ func TestAuthRefreshCoordinatorRejectsExpiringClaimBeforeProviderIO(t *testing.T
 	})}
 	coordinator := NewAuthRefreshCoordinator(fixture.db, fixture.masterKey,
 		WithAuthRefreshClock(func() time.Time { return now }), WithAuthRefreshHTTPClient(client))
-	claim, err := fixture.db.TryClaimAuthConnectionRefresh(context.Background(), fixture.connection.ID, fixture.versionID, now, now.Add(4*time.Second))
+	claim, err := fixture.db.TryClaimAuthConnectionRefresh(context.Background(), fixture.connection.ID, now, now.Add(4*time.Second))
 	if err != nil || claim == nil {
 		t.Fatalf("TryClaimAuthConnectionRefresh() claim=%v error=%v", claim != nil, err)
 	}
@@ -120,7 +120,7 @@ func TestAuthRefreshCoordinatorPreservesLeaseReserveForCompletion(t *testing.T) 
 	})}
 	coordinator := NewAuthRefreshCoordinator(fixture.db, fixture.masterKey,
 		WithAuthRefreshClock(func() time.Time { return now }), WithAuthRefreshHTTPClient(client))
-	claim, err := fixture.db.TryClaimAuthConnectionRefresh(context.Background(), fixture.connection.ID, fixture.versionID, now, now.Add(6500*time.Millisecond))
+	claim, err := fixture.db.TryClaimAuthConnectionRefresh(context.Background(), fixture.connection.ID, now, now.Add(6500*time.Millisecond))
 	if err != nil || claim == nil {
 		t.Fatalf("TryClaimAuthConnectionRefresh() claim=%v error=%v", claim != nil, err)
 	}
@@ -143,7 +143,7 @@ func TestAuthRefreshCoordinatorUsesCompletionClockForLeaseCAS(t *testing.T) {
 	})}
 	coordinator := NewAuthRefreshCoordinator(fixture.db, fixture.masterKey,
 		WithAuthRefreshClock(func() time.Time { return clock }), WithAuthRefreshHTTPClient(client))
-	claim, err := fixture.db.TryClaimAuthConnectionRefresh(context.Background(), fixture.connection.ID, fixture.versionID, startedAt, startedAt.Add(time.Minute))
+	claim, err := fixture.db.TryClaimAuthConnectionRefresh(context.Background(), fixture.connection.ID, startedAt, startedAt.Add(time.Minute))
 	if err != nil || claim == nil {
 		t.Fatalf("TryClaimAuthConnectionRefresh() claim=%v error=%v", claim != nil, err)
 	}
@@ -188,7 +188,7 @@ func TestAuthRefreshCoordinatorLetsAccessOnlyGrantReachExpiry(t *testing.T) {
 	fixture.db.authConnection.EncryptedRefreshToken = ""
 	coordinator := NewAuthRefreshCoordinator(fixture.db, fixture.masterKey, WithAuthRefreshClock(func() time.Time { return now }))
 
-	connection, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection, fixture.versionID)
+	connection, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection)
 	if err != nil || connection == nil {
 		t.Fatalf("valid access-only result connection=%v error=%v", connection != nil, err)
 	}
@@ -198,7 +198,7 @@ func TestAuthRefreshCoordinatorLetsAccessOnlyGrantReachExpiry(t *testing.T) {
 
 	expiredNow := now.Add(2 * time.Minute)
 	coordinator = NewAuthRefreshCoordinator(fixture.db, fixture.masterKey, WithAuthRefreshClock(func() time.Time { return expiredNow }))
-	connection, err = coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection, fixture.versionID)
+	connection, err = coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection)
 	if err == nil || connection != nil || fixture.db.authConnection.RefreshState != reconnectRequiredCode {
 		t.Fatalf("expired access-only result connection=%v error=%v state=%q", connection != nil, err, fixture.db.authConnection.RefreshState)
 	}
@@ -217,7 +217,7 @@ func TestAuthRefreshCoordinatorRechecksExpiryAfterFailedExchange(t *testing.T) {
 	coordinator := NewAuthRefreshCoordinator(fixture.db, fixture.masterKey,
 		WithAuthRefreshClock(func() time.Time { return clock }), WithAuthRefreshHTTPClient(client))
 
-	connection, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection, fixture.versionID)
+	connection, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection)
 	if err == nil || connection != nil {
 		t.Fatalf("post-attempt expired result connection=%v error=%v", connection != nil, err)
 	}
@@ -250,7 +250,7 @@ func TestAuthRefreshCoordinatorUsesVersionPinnedJSONOIDCContract(t *testing.T) {
 	coordinator := NewAuthRefreshCoordinator(fixture.db, fixture.masterKey,
 		WithAuthRefreshClock(func() time.Time { return fixture.now }), WithAuthRefreshHTTPClient(client))
 
-	refreshed, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection, fixture.versionID)
+	refreshed, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection)
 	if err != nil {
 		t.Fatalf("ensureForegroundConnectionFresh() error = %v", err)
 	}
@@ -259,26 +259,41 @@ func TestAuthRefreshCoordinatorUsesVersionPinnedJSONOIDCContract(t *testing.T) {
 	}
 }
 
-// TestAuthRefreshCoordinatorKeepsConsentedVersionAcrossSDKUpgrade proves a v2
-// request refreshes a connection through its persisted v1 auth contract.
-func TestAuthRefreshCoordinatorKeepsConsentedVersionAcrossSDKUpgrade(t *testing.T) {
+// TestAuthRefreshCoordinatorUsesConsentedVersion proves refresh loads the
+// immutable contract pinned on the connection without request-time identity.
+func TestAuthRefreshCoordinatorUsesConsentedVersion(t *testing.T) {
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	fixture := newAuthRefreshCoordinatorFixture(t, now, time.Minute)
 	consentedVersionID := fixture.versionID
-	requestVersionID := uuid.New()
 	client := authRefreshResponseClient(http.StatusOK, `{"access_token":"v1-contract-access","refresh_token":"v1-contract-refresh","expires_in":3600}`)
 	coordinator := NewAuthRefreshCoordinator(fixture.db, fixture.masterKey,
 		WithAuthRefreshClock(func() time.Time { return now }), WithAuthRefreshHTTPClient(client))
 
-	connection, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection, requestVersionID)
+	connection, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection)
+	// Refresh must retain the version that owns the consented token contract.
 	if err != nil {
 		t.Fatalf("ensureForegroundConnectionFresh() error = %v", err)
 	}
+	// The returned domain object must preserve the same immutable contract identity.
 	if connection.ServiceVersionID != consentedVersionID {
 		t.Fatalf("refreshed version = %s, want consented v1 %s", connection.ServiceVersionID, consentedVersionID)
 	}
+	// Provider success proves the pinned contract was loaded and executed.
 	if got := testDecryptAuthConnectionToken(t, fixture.masterKey, connection.EncryptedDEK, connection.EncryptedAccessToken); got != "v1-contract-access" {
 		t.Fatalf("access token = %q, want v1-contract-access", got)
+	}
+}
+
+// TestAuthRefreshCoordinatorRejectsMissingConsentVersion proves an in-memory
+// caller cannot bypass persistence and dispatch an unversioned grant.
+func TestAuthRefreshCoordinatorRejectsMissingConsentVersion(t *testing.T) {
+	fixture := newAuthRefreshCoordinatorFixture(t, time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC), time.Minute)
+	fixture.connection.ServiceVersionID = uuid.Nil
+	coordinator := NewAuthRefreshCoordinator(fixture.db, fixture.masterKey)
+	connection, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection)
+	// Missing identity must fail before refresh eligibility or provider I/O is considered.
+	if connection != nil || !errors.Is(err, ErrAuthRefreshContractUnavailable) {
+		t.Fatalf("missing consent version connection=%v error=%v", connection != nil, err)
 	}
 }
 
@@ -294,7 +309,7 @@ func TestAuthRefreshCoordinatorContractSelectionFailsClosed(t *testing.T) {
 	})}
 	coordinator := NewAuthRefreshCoordinator(fixture.db, fixture.masterKey,
 		WithAuthRefreshClock(func() time.Time { return fixture.now }), WithAuthRefreshHTTPClient(client))
-	claim, err := fixture.db.TryClaimAuthConnectionRefresh(context.Background(), fixture.connection.ID, fixture.versionID, fixture.now, fixture.now.Add(time.Minute))
+	claim, err := fixture.db.TryClaimAuthConnectionRefresh(context.Background(), fixture.connection.ID, fixture.now, fixture.now.Add(time.Minute))
 	if err != nil || claim == nil {
 		t.Fatalf("TryClaimAuthConnectionRefresh() claim=%v error=%v", claim != nil, err)
 	}
@@ -320,7 +335,7 @@ func TestAuthRefreshCoordinatorRegistrationTypeMismatchFailsClosed(t *testing.T)
 	})}
 	coordinator := NewAuthRefreshCoordinator(fixture.db, fixture.masterKey,
 		WithAuthRefreshClock(func() time.Time { return fixture.now }), WithAuthRefreshHTTPClient(client))
-	claim, err := fixture.db.TryClaimAuthConnectionRefresh(context.Background(), fixture.connection.ID, fixture.versionID, fixture.now, fixture.now.Add(time.Minute))
+	claim, err := fixture.db.TryClaimAuthConnectionRefresh(context.Background(), fixture.connection.ID, fixture.now, fixture.now.Add(time.Minute))
 	if err != nil || claim == nil {
 		t.Fatalf("TryClaimAuthConnectionRefresh() claim=%v error=%v", claim != nil, err)
 	}
@@ -353,7 +368,7 @@ func TestAuthRefreshCoordinatorEmitsBoundedDecisionSpan(t *testing.T) {
 	fixture := newAuthRefreshCoordinatorFixture(t, time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC), time.Minute)
 	fixture.db.serviceMetadata = refreshServiceMetadata("differentAuth")
 	coordinator := NewAuthRefreshCoordinator(fixture.db, fixture.masterKey, WithAuthRefreshClock(func() time.Time { return fixture.now }))
-	claim, err := fixture.db.TryClaimAuthConnectionRefresh(context.Background(), fixture.connection.ID, fixture.versionID, fixture.now, fixture.now.Add(time.Minute))
+	claim, err := fixture.db.TryClaimAuthConnectionRefresh(context.Background(), fixture.connection.ID, fixture.now, fixture.now.Add(time.Minute))
 	if err != nil || claim == nil {
 		t.Fatalf("TryClaimAuthConnectionRefresh() claim=%v error=%v", claim != nil, err)
 	}
@@ -417,7 +432,7 @@ func TestAuthRefreshCoordinatorEmitsRequestSkipDecisionSpans(t *testing.T) {
 			coordinator := NewAuthRefreshCoordinator(fixture.db, fixture.masterKey,
 				WithAuthRefreshClock(func() time.Time { return now }),
 				withAuthRefreshForegroundTiming(time.Second, time.Millisecond, time.Millisecond))
-			if _, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection, fixture.versionID); err != nil {
+			if _, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection); err != nil {
 				t.Fatalf("ensureForegroundConnectionFresh() error = %v", err)
 			}
 
@@ -444,7 +459,7 @@ func TestAuthRefreshCoordinatorClassifiesLostClaimWithoutDoubleSpan(t *testing.T
 
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	fixture := newAuthRefreshCoordinatorFixture(t, now, time.Minute)
-	claim, err := fixture.db.TryClaimAuthConnectionRefresh(context.Background(), fixture.connection.ID, fixture.versionID, now, now.Add(time.Minute))
+	claim, err := fixture.db.TryClaimAuthConnectionRefresh(context.Background(), fixture.connection.ID, now, now.Add(time.Minute))
 	if err != nil || claim == nil {
 		t.Fatalf("TryClaimAuthConnectionRefresh() claim=%v error=%v", claim != nil, err)
 	}
@@ -493,7 +508,7 @@ func TestAuthRefreshCoordinatorTransientFailureHonorsAccessExpiry(t *testing.T) 
 			coordinator := NewAuthRefreshCoordinator(fixture.db, fixture.masterKey,
 				WithAuthRefreshClock(func() time.Time { return fixture.now }), WithAuthRefreshHTTPClient(client))
 
-			usable, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection, fixture.versionID)
+			usable, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection)
 			if test.wantUsable && (err != nil || usable == nil) {
 				t.Fatalf("live token blocked: usable=%v err=%v", usable != nil, err)
 			}
@@ -535,7 +550,7 @@ func TestAuthRefreshCoordinatorDeferredRetrySkipsProviderForLiveAndExpiredAccess
 				WithAuthRefreshClock(func() time.Time { return now }), WithAuthRefreshHTTPClient(client),
 				withAuthRefreshForegroundTiming(time.Second, time.Millisecond, time.Millisecond))
 
-			connection, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection, fixture.versionID)
+			connection, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection)
 			if test.wantErr {
 				if connection != nil || !errors.Is(err, ErrAuthRefreshFailed) {
 					t.Fatalf("expired deferred result: connection=%v error=%v", connection != nil, err)
@@ -578,7 +593,7 @@ func TestAuthRefreshCoordinatorForegroundContentionExchangesExactlyOnce(t *testi
 	results := make(chan refreshCall, 2)
 	// call models one SDK request resolving the same due connected account.
 	call := func() {
-		connection, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection, fixture.versionID)
+		connection, err := coordinator.ensureForegroundConnectionFresh(context.Background(), &fixture.connection)
 		results <- refreshCall{connection: connection, err: err}
 	}
 	go call()

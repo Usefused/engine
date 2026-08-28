@@ -34,7 +34,7 @@ func (d *refreshForwardingDelegate) ClaimAuthConnectionsForRefresh(context.Conte
 }
 
 // TryClaimAuthConnectionRefresh records the foreground exact-claim call.
-func (d *refreshForwardingDelegate) TryClaimAuthConnectionRefresh(context.Context, uuid.UUID, uuid.UUID, time.Time, time.Time) (*AuthConnectionRefreshClaim, error) {
+func (d *refreshForwardingDelegate) TryClaimAuthConnectionRefresh(context.Context, uuid.UUID, time.Time, time.Time) (*AuthConnectionRefreshClaim, error) {
 	d.calls = append(d.calls, "exact")
 	claim := d.claim
 	return &claim, nil
@@ -82,7 +82,7 @@ func TestCachedStoreForwardsAuthConnectionRefreshCapability(t *testing.T) {
 		t.Fatal("cached store does not expose auth connection refresh capability")
 	}
 	now := time.Now().UTC()
-	assertCachedRefreshClaimForwarding(t, cached, connectionID, versionID, leaseToken, now)
+	assertCachedRefreshClaimForwarding(t, cached, connectionID, leaseToken, now)
 	assertCachedRefreshTransitionForwarding(t, cached, delegate, connectionID, leaseToken, now)
 	if got := strings.Join(delegate.calls, ","); got != "batch,exact,complete,release,reconnect,get" {
 		t.Fatalf("refresh forwarding calls = %q", got)
@@ -91,13 +91,13 @@ func TestCachedStoreForwardsAuthConnectionRefreshCapability(t *testing.T) {
 
 // assertCachedRefreshClaimForwarding verifies both worker-page and foreground
 // exact claims cross NewCachedStore without changing lease identity.
-func assertCachedRefreshClaimForwarding(t *testing.T, cached AuthConnectionRefreshStore, connectionID, versionID, leaseToken uuid.UUID, now time.Time) {
+func assertCachedRefreshClaimForwarding(t *testing.T, cached AuthConnectionRefreshStore, connectionID, leaseToken uuid.UUID, now time.Time) {
 	t.Helper()
 	claims, err := cached.ClaimAuthConnectionsForRefresh(context.Background(), now, now, now, now.Add(time.Minute), 1)
 	if err != nil || len(claims) != 1 {
 		t.Fatalf("forward batch claims=%#v err=%v", claims, err)
 	}
-	claim, err := cached.TryClaimAuthConnectionRefresh(context.Background(), connectionID, versionID, now, now.Add(time.Minute))
+	claim, err := cached.TryClaimAuthConnectionRefresh(context.Background(), connectionID, now, now.Add(time.Minute))
 	if err != nil || claim == nil || claim.LeaseToken != leaseToken {
 		t.Fatalf("forward exact claim=%#v err=%v", claim, err)
 	}

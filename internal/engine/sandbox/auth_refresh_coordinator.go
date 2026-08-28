@@ -155,25 +155,33 @@ func (c *AuthRefreshCoordinator) RefreshClaimedConnection(ctx context.Context, c
 
 // ensureForegroundConnectionFresh applies the five-minute request fallback
 // while coordinating rotation with all workers and Engine replicas through CAS.
-func (c *AuthRefreshCoordinator) ensureForegroundConnectionFresh(ctx context.Context, conn *store.AuthConnection, serviceVersionID uuid.UUID) (*store.AuthConnection, error) {
+func (c *AuthRefreshCoordinator) ensureForegroundConnectionFresh(ctx context.Context, conn *store.AuthConnection) (*store.AuthConnection, error) {
+	// Refresh must fail closed before token use if an in-memory caller bypasses the clean persistence boundary.
+	if conn == nil || conn.ServiceVersionID == uuid.Nil {
+		return nil, ErrAuthRefreshContractUnavailable
+	}
 	now := c.now().UTC()
+	// A token outside the proactive window can be used without acquiring a refresh lease.
 	if !authConnectionNeedsRefresh(conn, now) {
 		recordUnclaimedAuthRefreshDecision(ctx, conn, "request", AuthRefreshResult{Outcome: AuthRefreshOutcomeNotDue})
 		return conn, nil
 	}
+	// Refresh is unavailable when the composed store cannot provide durable CAS operations.
 	if c.refreshStore == nil {
 		return foregroundTransientResult(conn, now, ErrAuthRefreshFailed)
 	}
 	latest, decided, err := c.foregroundConnectionBeforeClaim(ctx, conn, now)
+	// A durable reconnect, throttle, or concurrent completion can resolve the request before a new claim.
 	if decided {
 		return latest, err
 	}
 	conn = latest
-	refreshVersionID := authConnectionRefreshVersionID(conn, serviceVersionID)
-	claim, err := c.refreshStore.TryClaimAuthConnectionRefresh(ctx, conn.ID, refreshVersionID, now, now.Add(c.foregroundLease))
+	claim, err := c.refreshStore.TryClaimAuthConnectionRefresh(ctx, conn.ID, now, now.Add(c.foregroundLease))
+	// Store failures remain transient so callers never receive raw persistence diagnostics.
 	if err != nil {
 		return foregroundTransientResult(conn, now, ErrAuthRefreshFailed)
 	}
+	// A missing claim normally means another Engine owns the lease; the reload path distinguishes the exact state.
 	if claim == nil {
 		return c.handleForegroundClaimMiss(ctx, conn, now)
 	}
@@ -212,15 +220,6 @@ func (c *AuthRefreshCoordinator) foregroundConnectionBeforeClaim(ctx context.Con
 		return connection, true, resultErr
 	}
 	return latest, false, nil
-}
-
-// authConnectionRefreshVersionID preserves the consented immutable contract
-// and uses the executing SDK version only to bind a legacy unpinned row once.
-func authConnectionRefreshVersionID(conn *store.AuthConnection, requestVersionID uuid.UUID) uuid.UUID {
-	if conn.ServiceVersionID != uuid.Nil {
-		return conn.ServiceVersionID
-	}
-	return requestVersionID
 }
 
 // handleForegroundClaimMiss distinguishes a retry throttle or invariant miss

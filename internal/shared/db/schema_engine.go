@@ -432,7 +432,6 @@ func engineSchemaQueries() []string {
 			COALESCE(LEAST(expires_at, refresh_token_expires_at), expires_at, refresh_token_expires_at), id
 		)
 		WHERE refresh_state IN ('ok', 'failed', 'expired')
-		  AND service_version_id IS NOT NULL
 		  AND lower(replace(btrim(auth_type), '-', '_')) IN
 		      ('oauth', 'oauth2', 'oauth2_authorization_code', 'oidc', 'openidconnect', 'open_id_connect');`,
 		// The clean-schema boundary rejects retained unversioned grants instead of preserving an ambiguous refresh path.

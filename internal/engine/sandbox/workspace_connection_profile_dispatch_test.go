@@ -404,7 +404,7 @@ func setupDispatchProfileFixture(t *testing.T, ctx context.Context, pool *pgxpoo
 
 	encryptedToken := dispatchEncrypt(t, "connected-access-token")
 	conn, err := f.store.UpsertAuthConnection(ctx, store.AuthConnection{
-		BucketID: f.bucketID, ServiceID: f.serviceID,
+		BucketID: f.bucketID, ServiceID: f.serviceID, ServiceVersionID: f.versionID,
 		EndUserRef: f.endUserRef, CreatedByAppID: f.appID, AuthType: "oauth", AuthName: "bearerAuth",
 		EncryptedDEK:         encryptedToken.dek,
 		EncryptedAccessToken: encryptedToken.values[0],

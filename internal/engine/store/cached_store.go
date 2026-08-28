@@ -211,14 +211,14 @@ func (s *cachedStore) ClaimAuthConnectionsForRefresh(ctx context.Context, cutoff
 	return delegate.ClaimAuthConnectionsForRefresh(ctx, cutoff, passStartedAt, now, leaseExpiresAt, limit)
 }
 
-// TryClaimAuthConnectionRefresh forwards the request-time exact-version lease
-// without populating any credential cache entry.
-func (s *cachedStore) TryClaimAuthConnectionRefresh(ctx context.Context, id, serviceVersionID uuid.UUID, now, leaseExpiresAt time.Time) (*AuthConnectionRefreshClaim, error) {
+// TryClaimAuthConnectionRefresh forwards the request-time lease without
+// populating any credential cache entry or accepting mutable version context.
+func (s *cachedStore) TryClaimAuthConnectionRefresh(ctx context.Context, id uuid.UUID, now, leaseExpiresAt time.Time) (*AuthConnectionRefreshClaim, error) {
 	delegate, err := s.authConnectionRefreshDelegate()
 	if err != nil {
 		return nil, err
 	}
-	return delegate.TryClaimAuthConnectionRefresh(ctx, id, serviceVersionID, now, leaseExpiresAt)
+	return delegate.TryClaimAuthConnectionRefresh(ctx, id, now, leaseExpiresAt)
 }
 
 // CompleteAuthConnectionRefresh forwards the lease-token CAS so rotated token

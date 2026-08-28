@@ -23,7 +23,8 @@ func TestProjectAuthConnectionRefreshMetadata(t *testing.T) {
 	}
 
 	response := projectAuthConnection(connection)
-	if response.ServiceVersionID == nil || *response.ServiceVersionID != versionID {
+	// Public metadata must carry the same mandatory contract identity as persistence.
+	if response.ServiceVersionID != versionID {
 		t.Fatal("expected exact service version identity")
 	}
 	if response.LastRefreshAttemptAt != &attemptedAt || response.LastRefreshedAt != &refreshedAt || response.RefreshRetryNotBefore != &retryAt {
@@ -52,17 +53,5 @@ func assertRefreshMetadataProjection(t *testing.T, projection map[string]interfa
 		if _, exists := projection[forbidden]; exists {
 			t.Fatalf("private refresh field %s was projected", forbidden)
 		}
-	}
-}
-
-// TestProjectAuthConnectionKeepsLegacyVersionAmbiguous proves migration-safe
-// rows do not masquerade as the all-zero service version in public metadata.
-func TestProjectAuthConnectionKeepsLegacyVersionAmbiguous(t *testing.T) {
-	response := projectAuthConnection(store.AuthConnection{})
-	if response.ServiceVersionID != nil {
-		t.Fatal("expected ambiguous legacy version to remain null")
-	}
-	if projectGraphQLAuthConnection(store.AuthConnection{})["service_version_id"] != nil {
-		t.Fatal("expected GraphQL legacy version to remain null")
 	}
 }

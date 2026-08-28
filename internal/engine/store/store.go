@@ -21,6 +21,7 @@ var (
 	ErrBucketBound                       = errors.New("bucket is bound to an app")
 	ErrDefaultBucketProtected            = errors.New("default bucket cannot be deleted")
 	ErrAuthConnectionNotFound            = errors.New("auth connection not found")
+	ErrInvalidAuthConnectionIdentity     = errors.New("invalid auth connection identity")
 	ErrInvalidAuthConnectionRefreshClaim = errors.New("invalid auth connection refresh claim")
 	ErrConnectSessionUnavailable         = errors.New("connect session not found or already used")
 	ErrInvalidEncryptedAuthMaterial      = errors.New("invalid encrypted auth material")
@@ -729,7 +730,7 @@ type AuthConnectionRefreshClaim struct {
 // background worker and request-time fallback refresh coordinator.
 type AuthConnectionRefreshStore interface {
 	ClaimAuthConnectionsForRefresh(ctx context.Context, cutoff, passStartedAt, now, leaseExpiresAt time.Time, limit int) ([]AuthConnectionRefreshClaim, error)
-	TryClaimAuthConnectionRefresh(ctx context.Context, id, serviceVersionID uuid.UUID, now, leaseExpiresAt time.Time) (*AuthConnectionRefreshClaim, error)
+	TryClaimAuthConnectionRefresh(ctx context.Context, id uuid.UUID, now, leaseExpiresAt time.Time) (*AuthConnectionRefreshClaim, error)
 	CompleteAuthConnectionRefresh(ctx context.Context, id, leaseToken uuid.UUID, refreshed AuthConnection, refreshedAt time.Time) (*AuthConnection, bool, error)
 	ReleaseAuthConnectionRefresh(ctx context.Context, id, leaseToken uuid.UUID, retryNotBefore time.Time, failureCode, traceID string, failedAt time.Time) (bool, error)
 	MarkAuthConnectionReconnectRequired(ctx context.Context, id, leaseToken uuid.UUID, failureCode, traceID string, failedAt time.Time) (bool, error)

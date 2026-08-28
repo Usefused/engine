@@ -70,11 +70,8 @@ func (s *postgresStore) GetBucketConnectSummary(ctx context.Context, bucketID uu
 // UpsertAuthConnection writes standalone credential refreshes through the same
 // validated row helper used by callback transactions.
 func (s *postgresStore) UpsertAuthConnection(ctx context.Context, conn AuthConnection) (*AuthConnection, error) {
-	// Direct callers are normalized to target-owned credentials before the non-null persistence boundary.
-	if !normalizeAuthConnectionCredentialSource(&conn) {
-		return nil, ErrInvalidEncryptedAuthMaterial
-	}
-	if err := validateAuthConnectionMaterial(conn); err != nil {
+	// Reject incomplete identity and credential material before PostgreSQL can surface a generic constraint error.
+	if err := prepareAuthConnectionForPersistence(&conn); err != nil {
 		return nil, err
 	}
 	return upsertAuthConnectionRow(ctx, s.db, conn)
@@ -102,7 +99,7 @@ func upsertAuthConnectionRow(ctx context.Context, querier authConnectionRowQueri
 		WHERE b.id = $1
 		ON CONFLICT ON CONSTRAINT uq_fused_auth_connections
 		DO UPDATE SET
-			service_version_id = COALESCE(EXCLUDED.service_version_id, fused_auth_connections.service_version_id),
+			service_version_id = EXCLUDED.service_version_id,
 			created_by_app_id = EXCLUDED.created_by_app_id,
 			auth_type = EXCLUDED.auth_type,
 			auth_name = EXCLUDED.auth_name,
@@ -131,7 +128,7 @@ func upsertAuthConnectionRow(ctx context.Context, querier authConnectionRowQueri
 			updated_at = NOW()
 		RETURNING ` + authConnectionColumns
 	return scanAuthConnection(querier.QueryRow(ctx, query,
-		conn.BucketID, conn.ServiceID, uuidOrNil(conn.ServiceVersionID), conn.EndUserRef, uuidOrNil(conn.CreatedByAppID),
+		conn.BucketID, conn.ServiceID, conn.ServiceVersionID, conn.EndUserRef, uuidOrNil(conn.CreatedByAppID),
 		conn.AuthType, conn.AuthName, conn.CredentialSourceServiceID, conn.CredentialSourceAuthType, conn.CredentialSourceAuthName,
 		conn.EncryptedDEK, conn.EncryptedAccessToken, emptyStringOrNil(conn.EncryptedRefreshToken), emptyStringOrNil(conn.EncryptedIDToken),
 		defaultString(conn.TokenType, "Bearer"), nonNilStrings(conn.Scopes), defaultString(conn.ScopeSource, "none"), conn.Issuer, conn.Subject,
@@ -264,8 +261,7 @@ func (s *postgresStore) ClaimAuthConnectionsForRefresh(ctx context.Context, cuto
 	query := `WITH candidates AS (
 		SELECT id
 		FROM fused_auth_connections
-		WHERE service_version_id IS NOT NULL
-		  AND lower(replace(btrim(auth_type), '-', '_')) IN
+		WHERE lower(replace(btrim(auth_type), '-', '_')) IN
 		      ('oauth', 'oauth2', 'oauth2_authorization_code', 'oidc', 'openidconnect', 'open_id_connect')
 		  AND refresh_state IN ('ok', 'failed', 'expired')
 		  AND COALESCE(LEAST(expires_at, refresh_token_expires_at), expires_at, refresh_token_expires_at) <= $1
@@ -297,26 +293,26 @@ func (s *postgresStore) ClaimAuthConnectionsForRefresh(ctx context.Context, cuto
 	return collectAuthConnectionRefreshClaims(rows)
 }
 
-// TryClaimAuthConnectionRefresh leases one foreground connection and binds a
-// legacy nil version only to the exact version already resolved for execution.
-func (s *postgresStore) TryClaimAuthConnectionRefresh(ctx context.Context, id, serviceVersionID uuid.UUID, now, leaseExpiresAt time.Time) (*AuthConnectionRefreshClaim, error) {
-	if id == uuid.Nil || serviceVersionID == uuid.Nil || !leaseExpiresAt.After(now) {
+// TryClaimAuthConnectionRefresh leases one already-versioned foreground
+// connection without allowing request context to rewrite its consent contract.
+func (s *postgresStore) TryClaimAuthConnectionRefresh(ctx context.Context, id uuid.UUID, now, leaseExpiresAt time.Time) (*AuthConnectionRefreshClaim, error) {
+	// A valid lease window and exact connection identity are required before the CAS write.
+	if id == uuid.Nil || !leaseExpiresAt.After(now) {
 		return nil, ErrInvalidAuthConnectionRefreshClaim
 	}
 	query := `UPDATE fused_auth_connections
-		SET service_version_id = COALESCE(service_version_id, $2),
-			refresh_lease_token = gen_random_uuid(),
-			refresh_lease_expires_at = $4,
-			last_refresh_attempt_at = $3,
-			updated_at = $3
+		SET refresh_lease_token = gen_random_uuid(),
+			refresh_lease_expires_at = $3,
+			last_refresh_attempt_at = $2,
+			updated_at = $2
 		WHERE id = $1
 		  AND refresh_state IN ('ok', 'failed', 'expired')
-		  AND COALESCE(LEAST(expires_at, refresh_token_expires_at), expires_at, refresh_token_expires_at) <= $3::timestamptz + INTERVAL '5 minutes'
-		  AND (refresh_token IS NOT NULL OR expires_at <= $3)
-		  AND (refresh_lease_expires_at IS NULL OR refresh_lease_expires_at <= $3)
-		  AND (refresh_retry_not_before IS NULL OR refresh_retry_not_before <= $3)
+		  AND COALESCE(LEAST(expires_at, refresh_token_expires_at), expires_at, refresh_token_expires_at) <= $2::timestamptz + INTERVAL '5 minutes'
+		  AND (refresh_token IS NOT NULL OR expires_at <= $2)
+		  AND (refresh_lease_expires_at IS NULL OR refresh_lease_expires_at <= $2)
+		  AND (refresh_retry_not_before IS NULL OR refresh_retry_not_before <= $2)
 		RETURNING ` + authConnectionColumns + `, refresh_lease_token, refresh_lease_expires_at`
-	claim, err := scanAuthConnectionRefreshClaim(s.db.QueryRow(ctx, query, id, serviceVersionID, now, leaseExpiresAt))
+	claim, err := scanAuthConnectionRefreshClaim(s.db.QueryRow(ctx, query, id, now, leaseExpiresAt))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -608,10 +604,10 @@ func scanAuthConnection(row rowScanner) (*AuthConnection, error) {
 // optional private columns used only by refresh-claim persistence.
 func scanAuthConnectionWithSuffix(row rowScanner, suffix ...any) (*AuthConnection, error) {
 	var conn AuthConnection
-	var createdBy, serviceVersionID *uuid.UUID
+	var createdBy *uuid.UUID
 	var refreshToken, idToken *string
 	targets := []any{
-		&conn.ID, &conn.BucketID, &conn.ServiceID, &serviceVersionID, &conn.EndUserRef, &createdBy,
+		&conn.ID, &conn.BucketID, &conn.ServiceID, &conn.ServiceVersionID, &conn.EndUserRef, &createdBy,
 		&conn.AuthType, &conn.AuthName, &conn.CredentialSourceServiceID, &conn.CredentialSourceAuthType, &conn.CredentialSourceAuthName,
 		&conn.EncryptedDEK, &conn.EncryptedAccessToken, &refreshToken, &idToken, &conn.TokenType,
 		&conn.Scopes, &conn.ScopeSource, &conn.Issuer, &conn.Subject, &conn.IdentityClaims, &conn.ExpiresAt, &conn.RefreshTokenExpiresAt, &conn.LastUsedAt,
@@ -619,15 +615,15 @@ func scanAuthConnectionWithSuffix(row rowScanner, suffix ...any) (*AuthConnectio
 		&conn.RefreshState, &conn.LastFailureCode, &conn.LastFailureAt, &conn.LastFailureTraceID, &conn.CreatedAt, &conn.UpdatedAt,
 	}
 	err := row.Scan(append(targets, suffix...)...)
+	// Creator identity remains optional because direct control-plane connections are not app-originated.
 	if createdBy != nil {
 		conn.CreatedByAppID = *createdBy
 	}
-	if serviceVersionID != nil {
-		conn.ServiceVersionID = *serviceVersionID
-	}
+	// Optional provider tokens preserve absence without exposing pointer fields in the domain model.
 	if refreshToken != nil {
 		conn.EncryptedRefreshToken = *refreshToken
 	}
+	// OIDC identity material is present only when the consented provider returned it.
 	if idToken != nil {
 		conn.EncryptedIDToken = *idToken
 	}
@@ -672,22 +668,20 @@ func collectAuthConnections(rows rowsScanner) ([]AuthConnection, error) {
 	return connections, rows.Err()
 }
 
-// scanConnectSession tolerates legacy nil version IDs so callback code can fail
-// those ambiguous sessions closed with a typed browser response.
+// scanConnectSession reads the exact version-pinned callback state required by
+// the clean schema boundary.
 func scanConnectSession(row rowScanner) (*ConnectSession, error) {
 	var session ConnectSession
-	var createdBy, serviceVersionID *uuid.UUID
+	var createdBy *uuid.UUID
 	err := row.Scan(
-		&session.ID, &session.BucketID, &session.ServiceID, &serviceVersionID, &session.AuthType, &session.AuthName,
+		&session.ID, &session.BucketID, &session.ServiceID, &session.ServiceVersionID, &session.AuthType, &session.AuthName,
 		&session.CredentialSourceServiceID, &session.CredentialSourceAuthType, &session.CredentialSourceAuthName, &session.EndUserRef,
 		&session.StateHash, &session.NonceHash, &session.EncryptedDEK, &session.EncryptedPKCEVerifier, &session.RedirectURI, &createdBy,
 		&session.ReturnURL, &session.ResourceInputJSON, &session.RequestedScopes, &session.ExpiresAt, &session.UsedAt, &session.CreatedAt,
 	)
+	// Direct browser sessions may be initiated without an app version.
 	if createdBy != nil {
 		session.CreatedByAppID = *createdBy
-	}
-	if serviceVersionID != nil {
-		session.ServiceVersionID = *serviceVersionID
 	}
 	return &session, err
 }
@@ -791,6 +785,20 @@ func applicationCredentialSourceOmitted(serviceID uuid.UUID, authType, authName 
 // validReferencedApplicationCredentialSource enforces atomic source identity within the target OAuth/OIDC family.
 func validReferencedApplicationCredentialSource(serviceID uuid.UUID, authType, authName, targetAuthType string) bool {
 	return serviceID != uuid.Nil && authType != "" && authName != "" && canonicalApplicationAuthType(authType) == targetAuthType
+}
+
+// prepareAuthConnectionForPersistence enforces complete consent identity and
+// encrypted material before either callback persistence path reaches SQL.
+func prepareAuthConnectionForPersistence(conn *AuthConnection) error {
+	// Bucket, service, and immutable version jointly identify where the grant lives and which contract refreshes it.
+	if conn == nil || conn.BucketID == uuid.Nil || conn.ServiceID == uuid.Nil || conn.ServiceVersionID == uuid.Nil || strings.TrimSpace(conn.EndUserRef) == "" {
+		return ErrInvalidAuthConnectionIdentity
+	}
+	// Direct grants normalize to target-owned application credentials; partial source identity remains invalid.
+	if !normalizeAuthConnectionCredentialSource(conn) {
+		return ErrInvalidAuthConnectionIdentity
+	}
+	return validateAuthConnectionMaterial(*conn)
 }
 
 // validateAuthConnectionMaterial rejects incomplete encrypted grants before persistence.

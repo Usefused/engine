@@ -509,7 +509,7 @@ var authConnectionGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"id":                       &graphql.Field{Type: graphql.String},
 		"bucket_id":                &graphql.Field{Type: graphql.String},
 		"service_id":               &graphql.Field{Type: graphql.String},
-		"service_version_id":       &graphql.Field{Type: graphql.String},
+		"service_version_id":       &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
 		"end_user_ref":             &graphql.Field{Type: graphql.String},
 		"created_by_app_id":        &graphql.Field{Type: graphql.String},
 		"auth_type":                &graphql.Field{Type: graphql.String},
@@ -1614,7 +1614,7 @@ func rediscoverConnectionResources(ctx context.Context, s store.Store, verifier 
 	if err != nil {
 		return nil, err
 	}
-	token, err := sandbox.ResolveConnectionAccessToken(ctx, s, masterKey, connection, metadata.ServiceVersionID, sandbox.AuthCredentialName(auth))
+	token, err := sandbox.ResolveConnectionAccessToken(ctx, s, masterKey, connection, sandbox.AuthCredentialName(auth))
 	if err != nil {
 		return nil, errors.New("connected token is unavailable")
 	}
@@ -1663,8 +1663,9 @@ func connectionDiscoveryMetadata(ctx context.Context, s store.Store, verifier Se
 	if err != nil {
 		return nil, fmt.Errorf("load service metadata: %w", err)
 	}
+	// Discovery must use the exact consent contract; latest-version fallback could change provider routing or OAuth policy.
 	if metadata == nil || metadata.ServiceVersionID == uuid.Nil ||
-		(connection.ServiceVersionID != uuid.Nil && metadata.ServiceVersionID != connection.ServiceVersionID) {
+		metadata.ServiceVersionID != connection.ServiceVersionID {
 		return nil, errors.New("resource discovery service version does not match the connection")
 	}
 	call := connectAdminCall{bucketID: connection.BucketID, serviceID: connection.ServiceID}
@@ -1678,11 +1679,12 @@ func connectionDiscoveryMetadata(ctx context.Context, s store.Store, verifier Se
 	return metadata, nil
 }
 
-// connectionDiscoveryVersion preserves a connection's consent-time contract;
-// only a legacy unpinned row may resolve the current activated version once.
+// connectionDiscoveryVersion resolves only the immutable consent-time contract
+// pinned on the connection; current workspace versions cannot replace it.
 func connectionDiscoveryVersion(ctx context.Context, s store.Store, connection *store.AuthConnection) (string, error) {
+	// Clean-schema connections must never reach discovery without their exact contract identity.
 	if connection.ServiceVersionID == uuid.Nil {
-		return s.GetLatestWorkspaceServiceVersionByWorkspace(ctx, connection.ServiceID)
+		return "", errors.New("connection service version is unavailable")
 	}
 	lookup, ok := s.(store.WorkspaceServiceVersionLookupStore)
 	if !ok {
@@ -2955,7 +2957,7 @@ func projectGraphQLAuthConnection(conn store.AuthConnection) map[string]interfac
 	resp := projectAuthConnection(conn)
 	return map[string]interface{}{
 		"id": resp.ID.String(), "bucket_id": resp.BucketID.String(), "service_id": resp.ServiceID.String(),
-		"service_version_id": formatOptionalGraphQLUUID(resp.ServiceVersionID),
+		"service_version_id": resp.ServiceVersionID.String(),
 		"end_user_ref":       resp.EndUserRef, "created_by_app_id": resp.CreatedByAppID.String(),
 		"auth_type": resp.AuthType, "auth_name": resp.AuthName, "token_type": resp.TokenType, "scopes": resp.Scopes,
 		"scope_source": resp.ScopeSource, "issuer": resp.Issuer, "subject": resp.Subject,
@@ -2973,8 +2975,8 @@ func projectGraphQLAuthConnection(conn store.AuthConnection) map[string]interfac
 	}
 }
 
-// formatOptionalGraphQLUUID preserves null for unpinned legacy connections
-// while returning ordinary version identities as stable strings.
+// formatOptionalGraphQLUUID preserves null for genuinely optional subject and
+// credential identities while returning present UUIDs as stable strings.
 func formatOptionalGraphQLUUID(value *uuid.UUID) interface{} {
 	if value == nil {
 		return nil

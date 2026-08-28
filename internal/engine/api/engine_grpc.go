@@ -340,7 +340,7 @@ func projectProtoAuthConnection(conn store.AuthConnection) *enginev1.AuthConnect
 		RefreshState:          resp.RefreshState,
 		CreatedAt:             formatProtoTime(resp.CreatedAt),
 		UpdatedAt:             formatProtoTime(resp.UpdatedAt),
-		ServiceVersionId:      formatOptionalProtoUUID(resp.ServiceVersionID),
+		ServiceVersionId:      resp.ServiceVersionID.String(),
 		AuthName:              resp.AuthName,
 		LastRefreshAttemptAt:  formatOptionalProtoTime(resp.LastRefreshAttemptAt),
 		LastRefreshedAt:       formatOptionalProtoTime(resp.LastRefreshedAt),
@@ -349,15 +349,6 @@ func projectProtoAuthConnection(conn store.AuthConnection) *enginev1.AuthConnect
 		LastFailureAt:         formatOptionalProtoTime(resp.LastFailureAt),
 		LastFailureTraceId:    resp.LastFailureTraceID,
 	}
-}
-
-// formatOptionalProtoUUID renders absent legacy identities as the protobuf
-// string zero value without inventing a service-version association.
-func formatOptionalProtoUUID(value *uuid.UUID) string {
-	if value == nil {
-		return ""
-	}
-	return value.String()
 }
 
 // projectProtoConnectionResources intentionally omits base URLs and provider

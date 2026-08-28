@@ -112,7 +112,7 @@ func (r *secretResolver) ResolveExecutionCredentials(ctx context.Context, reques
 	if err := r.mergeStoredSecrets(ctx, scope.BucketID, request.ServiceID, finalCreds, request.Auths, request.Requirements); err != nil {
 		return nil, nil, err
 	}
-	if err := r.resolveConnectedAuth(ctx, scope.BucketID, request.ServiceID, request.ServiceVersionID, request.Auths, request.Requirements, finalCreds); err != nil {
+	if err := r.resolveConnectedAuth(ctx, scope.BucketID, request.ServiceID, request.Auths, request.Requirements, finalCreds); err != nil {
 		return nil, nil, err
 	}
 	values, err := resolveRequestBindings(bindings, finalCreds, scope.BucketID)
@@ -488,7 +488,7 @@ func (r *secretResolver) decryptStoredSecret(serviceID uuid.UUID, sec store.Work
 
 // resolveConnectedAuth resolves OAuth/OIDC provider credentials inside Engine,
 // leaving named static schemes on the bucket-secret path even with user context.
-func (r *secretResolver) resolveConnectedAuth(ctx context.Context, bucketID, serviceID, serviceVersionID uuid.UUID, auths fusedobject.AuthConfigs, requirements authrouting.Requirements, credentials map[string]any) error {
+func (r *secretResolver) resolveConnectedAuth(ctx context.Context, bucketID, serviceID uuid.UUID, auths fusedobject.AuthConfigs, requirements authrouting.Requirements, credentials map[string]any) error {
 	endUserRef := connectedEndUserRef(credentials)
 	if !connectedAuthResolutionRequired(endUserRef, credentials, requirements) {
 		return nil
@@ -506,7 +506,7 @@ func (r *secretResolver) resolveConnectedAuth(ctx context.Context, bucketID, ser
 		// Identity context alone cannot identify a provider credential slot.
 		return errors.New("connected auth requires fused_auth_name or fused_auth_type")
 	}
-	conn, err := r.selectedUsableAuthConnection(ctx, bucketID, serviceID, serviceVersionID, endUserRef, authName, credentials)
+	conn, err := r.selectedUsableAuthConnection(ctx, bucketID, serviceID, endUserRef, authName, credentials)
 	if err != nil {
 		return err
 	}
@@ -676,39 +676,49 @@ func namedConnectedAuthName(auths fusedobject.AuthConfigs, requirements authrout
 	return authName, nil
 }
 
-// usableAuthConnection refreshes near-expiry tokens before dispatch while
-// still allowing a currently-valid token through if the provider is flaky.
-func (r *secretResolver) usableAuthConnection(ctx context.Context, bucketID, serviceID, serviceVersionID uuid.UUID, endUserRef, authName string) (*store.AuthConnection, error) {
+// usableAuthConnection loads the bucket-owned grant and refreshes it through
+// its persisted consent contract, allowing a live token through transient provider failures.
+func (r *secretResolver) usableAuthConnection(ctx context.Context, bucketID, serviceID uuid.UUID, endUserRef, authName string) (*store.AuthConnection, error) {
 	conn, err := r.db.GetAuthConnection(ctx, bucketID, serviceID, endUserRef, authName)
+	// Storage failures remain distinct from an absent user grant.
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch auth connection: %w", err)
 	}
+	// Absence is a reconnect action, not an authorization fallback to another credential.
 	if conn == nil {
 		return nil, newConnectionRequiredError(bucketID.String(), serviceID.String(), endUserRef)
 	}
-	return r.ensureUsableAuthConnection(ctx, conn, serviceVersionID)
+	return r.ensureUsableAuthConnection(ctx, conn)
 }
 
-func (r *secretResolver) selectedUsableAuthConnection(ctx context.Context, bucketID, serviceID, serviceVersionID uuid.UUID, endUserRef, authName string, credentials map[string]any) (*store.AuthConnection, error) {
+// selectedUsableAuthConnection resolves either the natural connection key or
+// a fixed token binding while preserving the stored consent-version identity.
+func (r *secretResolver) selectedUsableAuthConnection(ctx context.Context, bucketID, serviceID uuid.UUID, endUserRef, authName string, credentials map[string]any) (*store.AuthConnection, error) {
 	connectionID := credentialString(credentials, "fused_connection_id")
+	// Dynamic callers use the bucket/service/user natural key; fixed tokens supply an opaque connection ID.
 	if connectionID == "" {
-		return r.usableAuthConnection(ctx, bucketID, serviceID, serviceVersionID, endUserRef, authName)
+		return r.usableAuthConnection(ctx, bucketID, serviceID, endUserRef, authName)
 	}
 	id, err := uuid.Parse(connectionID)
+	// Fixed bindings accept only Engine-issued UUID identities.
 	if err != nil {
 		return nil, errors.New("fixed app token connection identity is invalid")
 	}
 	conn, err := r.db.GetAuthConnectionByIDForBuckets(ctx, id, []uuid.UUID{bucketID})
+	// Bound lookup failures cannot fall back to dynamic user selection.
 	if err != nil {
 		return nil, fmt.Errorf("load fixed app token connection: %w", err)
 	}
+	// Every persisted binding must still match the executing bucket, service, and named auth slot.
 	if conn == nil || conn.BucketID != bucketID || conn.ServiceID != serviceID || conn.AuthName != authName {
 		return nil, store.ErrAppTokenBindingInvalid
 	}
-	return r.ensureUsableAuthConnection(ctx, conn, serviceVersionID)
+	return r.ensureUsableAuthConnection(ctx, conn)
 }
 
-func (r *secretResolver) ensureUsableAuthConnection(ctx context.Context, conn *store.AuthConnection, serviceVersionID uuid.UUID) (*store.AuthConnection, error) {
+// ensureUsableAuthConnection applies durable reconnect state and coordinated
+// refresh without accepting a caller-selected replacement contract.
+func (r *secretResolver) ensureUsableAuthConnection(ctx context.Context, conn *store.AuthConnection) (*store.AuthConnection, error) {
 	// Once Engine has classified the grant as permanently unusable, later SDK
 	// calls must receive the same action instead of dispatching a stale token.
 	if conn.RefreshState == reconnectRequiredCode {
@@ -720,7 +730,7 @@ func (r *secretResolver) ensureUsableAuthConnection(ctx context.Context, conn *s
 		// building the same coordinator lazily keeps production and tests on one path.
 		coordinator = NewAuthRefreshCoordinator(r.db, r.masterKey)
 	}
-	return coordinator.ensureForegroundConnectionFresh(ctx, conn, serviceVersionID)
+	return coordinator.ensureForegroundConnectionFresh(ctx, conn)
 }
 
 // recordConnectedAuthFailure stores provider authorization diagnostics without
@@ -860,13 +870,15 @@ func decryptAuthConnectionAccessToken(masterKey []byte, conn *store.AuthConnecti
 
 // ResolveConnectionAccessToken applies the same proactive refresh policy used
 // by SDK dispatch before returning a token for an Engine-owned control action.
-func ResolveConnectionAccessToken(ctx context.Context, db store.Store, masterKey []byte, conn *store.AuthConnection, serviceVersionID uuid.UUID, authName string) (string, error) {
+func ResolveConnectionAccessToken(ctx context.Context, db store.Store, masterKey []byte, conn *store.AuthConnection, authName string) (string, error) {
 	resolver := &secretResolver{db: db, masterKey: masterKey, refreshCoordinator: NewAuthRefreshCoordinator(db, masterKey)}
-	usable, err := resolver.usableAuthConnection(ctx, conn.BucketID, conn.ServiceID, serviceVersionID, conn.EndUserRef, authName)
+	usable, err := resolver.usableAuthConnection(ctx, conn.BucketID, conn.ServiceID, conn.EndUserRef, authName)
+	// Control actions share the same refresh failure semantics as runtime dispatch.
 	if err != nil {
 		return "", err
 	}
 	token, err := decryptAuthConnectionAccessToken(masterKey, usable)
+	// Decryption details remain private even for Engine-owned control actions.
 	if err != nil {
 		return "", errors.New("failed to decrypt auth connection")
 	}

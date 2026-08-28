@@ -19,7 +19,8 @@ const connectionResourceColumns = `
 // the previous credential and routing rows intact. Its six set-based statements
 // are constant regardless of authoritative resource row count.
 func (s *postgresStore) UpsertAuthConnectionAndReconcileResources(ctx context.Context, conn AuthConnection, resources []ConnectionResource) (*AuthConnection, []ConnectionResource, error) {
-	if err := validateAuthConnectionMaterial(conn); err != nil {
+	// The atomic resource path must enforce the same consent identity as the standalone credential path.
+	if err := prepareAuthConnectionForPersistence(&conn); err != nil {
 		return nil, nil, err
 	}
 	tx, err := s.db.Begin(ctx)

@@ -331,8 +331,9 @@ func newUnifiedConnectedAuthStore(t *testing.T, appID uuid.UUID, test unifiedCon
 	t.Helper()
 	bucketID := uuid.New()
 	serviceID := uuid.MustParse("11111111-1111-4111-8111-111111111111")
+	serviceVersionID := uuid.New()
 	selections, _ := json.Marshal([]models.SDKSelection{{
-		ServiceID: serviceID, ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion,
+		ServiceID: serviceID, ServiceVersionID: serviceVersionID, SchemaVersion: models.AppSelectionSchemaVersion,
 	}})
 	fixture := &unifiedConnectedAuthStore{
 		appRuntime: &store.AppRuntime{
@@ -352,7 +353,7 @@ func newUnifiedConnectedAuthStore(t *testing.T, appID uuid.UUID, test unifiedCon
 		t.Fatal(err)
 	}
 	fixture.connection = &store.AuthConnection{
-		ID: uuid.New(), BucketID: bucketID, ServiceID: serviceID,
+		ID: uuid.New(), BucketID: bucketID, ServiceID: serviceID, ServiceVersionID: serviceVersionID,
 		EndUserRef: "connected-user", AuthType: test.authType, AuthName: "connectedAuth",
 		EncryptedDEK: wrapper, EncryptedAccessToken: accessToken, RefreshState: test.connectionState,
 	}
