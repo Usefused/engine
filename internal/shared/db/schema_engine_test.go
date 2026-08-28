@@ -66,6 +66,34 @@ func TestEngineSchemaUsesCleanBaseline(t *testing.T) {
 	})
 }
 
+// TestEngineSchemaDefinesStableMCPFamilyRouting locks the direct columns,
+// one-time backfill marker, and referential cleanup into the clean baseline.
+func TestEngineSchemaDefinesStableMCPFamilyRouting(t *testing.T) {
+	families := engineSchemaTable(t, "fused_app_families")
+	assertSchemaContainsAll(t, families, "stable MCP family schema missing %q", []string{
+		"mcp_stable_app_id       uuid",
+		"mcp_stable_route_initialized boolean NOT NULL DEFAULT false",
+		"chk_fused_app_families_stable_mcp",
+		"kind = 'sdk' AND mcp_stable_app_id IS NULL AND NOT mcp_stable_route_initialized",
+		"kind = 'mcp' AND (mcp_stable_app_id IS NULL OR mcp_stable_route_initialized)",
+	})
+	schema := strings.Join(engineSchemaQueries(), "\n")
+	assertSchemaContainsAll(t, schema, "stable MCP convergence missing %q", []string{
+		"ALTER TABLE fused_app_families ADD COLUMN IF NOT EXISTS mcp_stable_app_id uuid",
+		"ALTER TABLE fused_app_families ADD COLUMN IF NOT EXISTS mcp_stable_route_initialized boolean NOT NULL DEFAULT false",
+		"ORDER BY app.activated_at DESC NULLS LAST, app.created_at DESC, app.app_id DESC",
+		"AND NOT family.mcp_stable_route_initialized",
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_fused_apps_app_family_identity",
+		"FOREIGN KEY (mcp_stable_app_id, app_family_id)",
+		"ON DELETE SET NULL (mcp_stable_app_id)",
+	})
+	// Stable-route convergence validates existing data directly; it must not
+	// reintroduce the deferred constraint state removed from older migrations.
+	if strings.Contains(schema, "fk_fused_app_families_stable_mcp NOT VALID") {
+		t.Fatal("stable MCP foreign key retained a deferred validation state")
+	}
+}
+
 // TestEngineSchemaRequiresExactConnectedAuthVersions removes the v8 nullable-version compatibility state.
 func TestEngineSchemaRequiresExactConnectedAuthVersions(t *testing.T) {
 	for name, table := range map[string]string{

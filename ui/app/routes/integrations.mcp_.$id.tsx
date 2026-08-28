@@ -4,7 +4,7 @@ import { ArrowLeft, TerminalSquare } from "lucide-react";
 import { AppRuntimeStatus } from "~/components/apps/AppRuntimeStatus";
 import { AppConnectedServices, type AppConnectedServiceSelection } from "~/components/apps/AppConnectedServices";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
-import { McpTransportEndpoints, type McpTransportEndpointData } from "~/components/mcp/McpTransportEndpoints";
+import { McpTransportEndpoints, type McpTransportEndpointData, type McpTransportName } from "~/components/mcp/McpTransportEndpoints";
 import { useToast } from "~/components/Toast";
 import { api } from "~/lib/api";
 import { appConnectedServiceSelections, type AppServiceSummary } from "~/lib/app-connected-services";
@@ -62,7 +62,9 @@ function readMcpDetails(appId: string): Promise<McpServerDetail> {
         status
         created_at
         default_transport
-        transport_urls { streamable_http sse }
+        stable
+        stable_version_id
+        transport_urls { streamable_http sse versioned_streamable_http versioned_sse }
         selections { service_id service_version_id schema_version endpoint_ids operation_names webhook_ids webhook_names select_all webhook_select_all }
       }
       appServices(app_id: $appId) { service_id service_slug service_name version select_all endpoint_count webhook_count }
@@ -96,7 +98,9 @@ function McpVersionSwitcher({ versions, currentId, onSelect }: { versions: McpVe
   );
 }
 
-function McpOverview({ server, onCopied }: { server: McpServerDetail; onCopied: (transport: "streamable_http" | "sse") => void }) {
+/** Shows all Engine-owned route identities only while this immutable version remains runnable. */
+function McpOverview({ server, onCopied }: { server: McpServerDetail; onCopied: (transport: McpTransportName) => void }) {
+  // Deprecated versions remain runnable until their scheduled hard deactivation.
   const enabled = server.status === "active" || server.status === "deprecated";
   return (
     <div className="space-y-7">
@@ -110,6 +114,17 @@ function McpOverview({ server, onCopied }: { server: McpServerDetail; onCopied: 
       </section>
     </div>
   );
+}
+
+/** Gives each copied stable, pinned, or legacy route an unambiguous toast label. */
+function mcpTransportLabel(transport: McpTransportName): string {
+  const labels: Record<McpTransportName, string> = {
+    streamable_http: "Stable Streamable HTTP",
+    versioned_streamable_http: "Version-pinned Streamable HTTP",
+    sse: "Stable SSE",
+    versioned_sse: "Version-pinned SSE",
+  };
+  return labels[transport];
 }
 
 /** Owns exact-version loading so the route component stays presentation-only. */
@@ -162,9 +177,10 @@ export default function McpServerDetails() {
   const activeTab = requestedTab === "activity" && !canReadActivity ? "overview" : requestedTab;
   const setActiveTab = (tab: McpDetailTab) => setSearchParams((current) => updateMcpDetailTab(current, tab), { replace: true });
 
-  return <McpDetailState id={id} state={state} activeTab={activeTab} canReadActivity={canReadActivity} onNavigate={navigate} onTabChange={setActiveTab} onCopied={(transport) => toast.success(`${transport === "streamable_http" ? "Streamable HTTP" : "SSE"} URL copied to clipboard!`)} />;
+  return <McpDetailState id={id} state={state} activeTab={activeTab} canReadActivity={canReadActivity} onNavigate={navigate} onTabChange={setActiveTab} onCopied={(transport) => toast.success(`${mcpTransportLabel(transport)} URL copied to clipboard!`)} />;
 }
 
+/** Selects the bounded loading, failure, or immutable-version detail surface. */
 function McpDetailState({ id, state, activeTab, canReadActivity, onNavigate, onTabChange, onCopied }: {
   id?: string;
   state: ReturnType<typeof useMcpServerDetail>;
@@ -172,13 +188,14 @@ function McpDetailState({ id, state, activeTab, canReadActivity, onNavigate, onT
   canReadActivity: boolean;
   onNavigate: (path: string) => void;
   onTabChange: (tab: McpDetailTab) => void;
-  onCopied: (transport: "streamable_http" | "sse") => void;
+  onCopied: (transport: McpTransportName) => void;
 }) {
   if (state.loading) return <div className="flex flex-col items-center justify-center py-20 text-slate-500"><div className="mb-4 h-8 w-8 animate-spin rounded-full border-4 border-blue-500 border-t-transparent" />Loading MCP server details...</div>;
   if (state.error || !state.server || !id) return <div className="space-y-6"><Link to="/integrations/mcp" className="inline-flex items-center text-sm text-slate-500 hover:text-slate-800"><ArrowLeft className="mr-2 h-4 w-4" />Back to MCP servers</Link><div className="rounded-lg border border-red-200 bg-red-50 p-4 text-red-700">{state.error || "MCP server not found"}</div></div>;
   return <McpLoadedContent id={id} server={state.server} versions={state.versions} activeTab={activeTab} canReadActivity={canReadActivity} onNavigate={onNavigate} onTabChange={onTabChange} onCopied={onCopied} />;
 }
 
+/** Renders one loaded MCP version while routing transport copy events through fixed labels. */
 function McpLoadedContent({ id, server, versions, activeTab, canReadActivity, onNavigate, onTabChange, onCopied }: {
   id: string;
   server: McpServerDetail;
@@ -187,7 +204,7 @@ function McpLoadedContent({ id, server, versions, activeTab, canReadActivity, on
   canReadActivity: boolean;
   onNavigate: (path: string) => void;
   onTabChange: (tab: McpDetailTab) => void;
-  onCopied: (transport: "streamable_http" | "sse") => void;
+  onCopied: (transport: McpTransportName) => void;
 }) {
 
   return (

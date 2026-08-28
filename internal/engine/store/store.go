@@ -58,8 +58,10 @@ const (
 )
 
 type AppRuntime struct {
-	AccountID uuid.UUID
-	AppID     uuid.UUID
+	AccountID   uuid.UUID
+	AppFamilyID uuid.UUID
+	AppID       uuid.UUID
+	StableAppID uuid.UUID
 	// Exactly one owner is set. Subject ownership is the safe default derived
 	// from the authenticated actor; team ownership is an explicit sharing
 	// decision resolved from a stable team slug by the Engine.
@@ -113,6 +115,14 @@ type AppFamily struct {
 	OwnerTeamID    uuid.UUID
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+}
+
+// MCPRouteTarget resolves a public MCP route identifier to the immutable
+// version that must own one newly initialized session.
+type MCPRouteTarget struct {
+	AppFamilyID uuid.UUID
+	AppID       uuid.UUID
+	Stable      bool
 }
 
 // App is one immutable version within an AppFamily. Migration preserves the
@@ -873,6 +883,9 @@ type Store interface {
 	GetApp(ctx context.Context, appID uuid.UUID) (*App, error)
 	GetAppByFamilyAndVersion(ctx context.Context, appFamilyID uuid.UUID, version string) (*App, error)
 	ListApps(ctx context.Context, appFamilyID uuid.UUID) ([]App, error)
+	// ResolveMCPRoute accepts either an immutable Version ID or stable MCP ID and
+	// returns the exact runnable version selected at request admission.
+	ResolveMCPRoute(ctx context.Context, routeID uuid.UUID) (*MCPRouteTarget, error)
 
 	// App lifecycle
 	DeprecateApp(ctx context.Context, appID uuid.UUID, message string, plannedDeactivationAt *time.Time) error

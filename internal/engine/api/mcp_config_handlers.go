@@ -113,7 +113,7 @@ func MCPConfigApplyHandler(configStore store.ConfigRepository, s store.Store, re
 		if result.ExecutionToken != "" {
 			setOneTimeSecretResponseHeaders(w)
 		}
-		writeJSON(w, mcpConfigApplyResponse(planID, result, mcpTransportURLsForApp(r, result.RuntimeID)))
+		writeJSON(w, mcpConfigApplyResponse(planID, result, mcpTransportURLsForApp(r, result.AppFamilyID, result.RuntimeID, result.RuntimeID)))
 	}
 }
 
@@ -124,6 +124,7 @@ func mcpConfigApplyResponse(planID uuid.UUID, result mcpConfigApplyResult, trans
 		"status": "applied", "plan_id": planID.String(), "config_key": result.ConfigKey,
 		"name": result.Name, "version": result.Version,
 		"app_family_id": result.AppFamilyID.String(), "app_id": result.RuntimeID.String(),
+		"stable": true, "stable_version_id": result.RuntimeID.String(),
 		"default_transport": mcpDefaultTransport, "transport_urls": transportURLs,
 	}
 	if result.ExecutionToken != "" {
@@ -464,6 +465,10 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 	if err != nil {
 		return mcpConfigApplyResult{}, withWorkspaceConfigErrorMetadata(err, "workspace_commit", call.planID.String(), "unknown")
 	}
+	// GraphQL apply projects transport URLs from the same stable family identity
+	// committed by the REST path, avoiding a second family lookup after apply.
+	scope.AppFamilyID = familyID
+	scope.StableAppID = appID
 	return mcpConfigApplyResult{
 		AppFamilyID: familyID, RuntimeID: appID, ExecutionToken: token, ConfigKey: plan.ConfigKey,
 		Name: doc.Name, Version: doc.Version, SourceHash: plan.SourceHash, Scope: scope,

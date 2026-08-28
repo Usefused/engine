@@ -149,6 +149,7 @@ func newMCPSessionIdleTestState(t *testing.T, transport string, expiry *time.Tim
 		transport: transport, protocolVersion: "2025-06-18", token: "test-token",
 		stdin: &streamableWriteBuffer{}, responses: make(chan string, 1), cancel: cancel,
 	}
+	sess.routeID = sess.appID
 	globalTokenValidator = &streamableTokenValidator{token: sess.token, tokenID: sess.tokenID}
 	registerMCPSession(ctx, sess)
 	// Every spawned lifecycle goroutine must finish before the virtual-time bubble exits.

@@ -42,6 +42,7 @@ type mcpSession struct {
 	initialized         bool
 	initializeRequestID string
 	appID               string
+	routeID             string
 	sessionID           string
 	tokenID             uuid.UUID
 	protocolVersion     string // Guarded by activityMu once the session is registered and negotiation can race termination.
@@ -89,8 +90,15 @@ var globalObjectCache ObjectCache
 // and the MCP tool-call path.
 var globalDispatcher *engine.Dispatcher
 var globalTokenValidator auth.TokenValidator
+var globalMCPRouteResolver MCPRouteResolver
 var globalSecretResolver SecretResolver
 var globalMCPUnifiedExecute MCPUnifiedExecuteFunc
+
+// MCPRouteResolver maps a stable MCP family URL to one immutable runtime at
+// session initialization while preserving exact Version ID routes.
+type MCPRouteResolver interface {
+	ResolveMCPRoute(context.Context, uuid.UUID) (*store.MCPRouteTarget, error)
+}
 
 // MCPUnifiedExecuteFunc is the existing Engine ExecuteUnified method value;
 // injecting it avoids a second graph executor and keeps the package boundary acyclic.
@@ -178,7 +186,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 // InitSandbox wires the process-owned physical and logical execution edges used by SDK and MCP transports.
-func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, cache ObjectCache, validator auth.TokenValidator, resolver SecretResolver, rateLimits store.ProviderRateLimitStore, enginePort string, unifiedExecute MCPUnifiedExecuteFunc) {
+func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, cache ObjectCache, validator auth.TokenValidator, routeResolver MCPRouteResolver, resolver SecretResolver, rateLimits store.ProviderRateLimitStore, enginePort string, unifiedExecute MCPUnifiedExecuteFunc) {
 	cfg = appCfg
 	globalNATSClient = nc
 	globalObjectCache = cache
@@ -188,6 +196,7 @@ func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, 
 		globalDispatcher = engine.NewDispatcherWithProviderRateLimits(rateLimits)
 	}
 	globalTokenValidator = validator
+	globalMCPRouteResolver = routeResolver
 	SetSecretResolver(resolver)
 	globalEnginePort = enginePort
 	globalMCPUnifiedExecute = unifiedExecute

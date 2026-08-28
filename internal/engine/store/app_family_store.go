@@ -200,8 +200,13 @@ func publishAppVersionTx(ctx context.Context, tx pgx.Tx, app App) (*App, bool, e
 		return nil, false, err
 	}
 	if existing != nil {
+		// Immutable equality permits reapplying an older MCP declaration; that
+		// explicit apply must still move the stable family route back to it.
 		if !sameImmutableAppVersion(*existing, app) {
 			return nil, false, ErrAppVersionImmutable
+		}
+		if err := promoteStableMCPVersionTx(ctx, tx, app); err != nil {
+			return nil, false, err
 		}
 		return existing, false, nil
 	}
@@ -214,7 +219,46 @@ func publishAppVersionTx(ctx context.Context, tx pgx.Tx, app App) (*App, bool, e
 	if err := insertAppCapabilities(ctx, tx, app.AppID, app.CapabilityKeys); err != nil {
 		return nil, false, err
 	}
+	if err := promoteStableMCPVersionTx(ctx, tx, app); err != nil {
+		return nil, false, err
+	}
 	return &app, true, nil
+}
+
+// promoteStableMCPVersionTx advances the MCP family alias in the same transaction
+// that proves the immutable version exists and is runnable.
+func promoteStableMCPVersionTx(ctx context.Context, tx pgx.Tx, app App) error {
+	// SDK execution remains version-pinned, so only MCP publication owns a
+	// mutable transport target.
+	if app.ExpectedFamilyKind != AppKindMCP || !app.Status.Runnable() {
+		return nil
+	}
+	result, err := tx.Exec(ctx, `
+		UPDATE fused_app_families family
+		SET mcp_stable_app_id = app.app_id,
+		    mcp_stable_route_initialized = true,
+		    updated_at = CASE
+		      WHEN family.mcp_stable_app_id IS DISTINCT FROM app.app_id THEN NOW()
+		      ELSE family.updated_at
+		    END
+		FROM fused_apps app
+		WHERE family.app_family_id = $1
+		  AND family.kind = 'mcp'
+		  AND app.app_id = $2
+		  AND app.app_family_id = family.app_family_id
+		  AND app.status IN ('active', 'deprecated')
+	`, app.AppFamilyID, app.AppID)
+	// A failed promotion must abort the same transaction that published or
+	// reapplied the immutable version.
+	if err != nil {
+		return fmt.Errorf("promote stable MCP version: %w", err)
+	}
+	// Publication must fail atomically if the version cannot satisfy the stable
+	// route invariant; silently leaving an older target would misreport apply.
+	if result.RowsAffected() != 1 {
+		return errors.New("promote stable MCP version: runnable family version not found")
+	}
+	return nil
 }
 
 // withUnifiedDefaults maps legacy callers to the canonical empty Unified definition set before publication.
@@ -462,6 +506,58 @@ func (s *postgresStore) ListApps(ctx context.Context, appFamilyID uuid.UUID) ([]
 		apps = append(apps, *a)
 	}
 	return apps, rows.Err()
+}
+
+// ResolveMCPRoute resolves one UUID as either an exact MCP version or its
+// promoted family target without loading candidates into memory.
+func (s *postgresStore) ResolveMCPRoute(ctx context.Context, routeID uuid.UUID) (*MCPRouteTarget, error) {
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.store.mcp_route.resolve")
+	defer span.End()
+	var target MCPRouteTarget
+	err := s.db.QueryRow(ctx, `
+		WITH candidates AS (
+			SELECT app.app_family_id, app.app_id, false AS stable, 0 AS preference
+			FROM fused_apps app
+			JOIN fused_app_families family
+			  ON family.app_family_id = app.app_family_id
+			 AND family.account_id = app.account_id
+			WHERE app.app_id = $1
+			  AND family.kind = 'mcp'
+			  AND app.status IN ('active', 'deprecated')
+			UNION ALL
+			SELECT family.app_family_id, app.app_id, true AS stable, 1 AS preference
+			FROM fused_app_families family
+			JOIN fused_apps app
+			  ON app.app_id = family.mcp_stable_app_id
+			 AND app.app_family_id = family.app_family_id
+			 AND app.account_id = family.account_id
+			WHERE family.app_family_id = $1
+			  AND family.kind = 'mcp'
+			  AND app.status IN ('active', 'deprecated')
+		)
+		SELECT app_family_id, app_id, stable
+		FROM candidates
+		ORDER BY preference
+		LIMIT 1
+	`, routeID).Scan(&target.AppFamilyID, &target.AppID, &target.Stable)
+	// Unknown, deactivated, and unpromoted identities share one closed result so
+	// route discovery cannot reveal lifecycle state to an unauthenticated peer.
+	if errors.Is(err, pgx.ErrNoRows) {
+		span.SetAttributes(attribute.String("outcome", "not_found"))
+		return nil, ErrAppNotFound
+	}
+	// Unexpected persistence failures remain internal and cannot be collapsed
+	// into the public not-found lifecycle result.
+	if err != nil {
+		return nil, fmt.Errorf("resolve MCP route: %w", err)
+	}
+	span.SetAttributes(
+		attribute.String("outcome", "resolved"),
+		attribute.Bool("mcp.route.stable", target.Stable),
+		attribute.String("app.family_id", target.AppFamilyID.String()),
+		attribute.String("app.id", target.AppID.String()),
+	)
+	return &target, nil
 }
 
 func (s *postgresStore) ListSDKPackageLeaseRenewals(ctx context.Context, after uuid.UUID, limit int) ([]models.SDKPackageLeaseRenewal, error) {

@@ -11,26 +11,38 @@ import (
 
 const mcpDefaultTransport = "streamable_http"
 
-// mcpTransportURLs keeps transport discovery separate from runtime identity.
-// Both URLs point at the same immutable app version; SSE is exposed only so
-// older clients can connect without making it look equivalent to the default.
+// mcpTransportURLs keeps stable upgrade discovery and immutable pinning in one
+// typed projection. SSE remains available only for older clients.
 type mcpTransportURLs struct {
-	StreamableHTTP string `json:"streamable_http"`
-	SSE            string `json:"sse"`
+	StreamableHTTP          string `json:"streamable_http"`
+	SSE                     string `json:"sse"`
+	VersionedStreamableHTTP string `json:"versioned_streamable_http"`
+	VersionedSSE            string `json:"versioned_sse"`
 }
 
-func mcpTransportURLsForApp(r *http.Request, appID uuid.UUID) mcpTransportURLs {
-	streamableHTTP := mcpStreamableHTTPURLForApp(r, appID)
+// mcpTransportURLsForApp advertises the family URL as the upgrade-safe default
+// while retaining exact version URLs for controlled pinning and rollback.
+func mcpTransportURLsForApp(r *http.Request, familyID, appID, stableAppID uuid.UUID) mcpTransportURLs {
+	streamableHTTP, sse := "", ""
+	// A family with no promoted version must not advertise a broken endpoint as
+	// recommended merely because a pinned sibling remains runnable.
+	if stableAppID != uuid.Nil {
+		streamableHTTP = mcpStreamableHTTPURLForID(r, familyID)
+		sse = streamableHTTP + "/sse"
+	}
+	versionedStreamableHTTP := mcpStreamableHTTPURLForID(r, appID)
 	return mcpTransportURLs{
-		StreamableHTTP: streamableHTTP,
-		SSE:            streamableHTTP + "/sse",
+		StreamableHTTP:          streamableHTTP,
+		SSE:                     sse,
+		VersionedStreamableHTTP: versionedStreamableHTTP,
+		VersionedSSE:            versionedStreamableHTTP + "/sse",
 	}
 }
 
-// mcpStreamableHTTPURLForApp returns a directly usable transport URL so
+// mcpStreamableHTTPURLForID returns a directly usable transport URL so
 // authentication never depends on surviving an origin-changing redirect.
-func mcpStreamableHTTPURLForApp(r *http.Request, appID uuid.UUID) string {
-	path := "/mcp/" + appID.String()
+func mcpStreamableHTTPURLForID(r *http.Request, routeID uuid.UUID) string {
+	path := "/mcp/" + routeID.String()
 	// Request-free projections remain relative because no public authority is available.
 	if r == nil {
 		return path
@@ -96,9 +108,12 @@ func validMCPURLAuthority(authority string) bool {
 	return err == nil && parsed.Host == authority && parsed.Hostname() != ""
 }
 
+// mcpTransportURLsGraphQLValue keeps REST and GraphQL transport field names identical.
 func mcpTransportURLsGraphQLValue(urls mcpTransportURLs) map[string]interface{} {
 	return map[string]interface{}{
-		"streamable_http": urls.StreamableHTTP,
-		"sse":             urls.SSE,
+		"streamable_http":           urls.StreamableHTTP,
+		"sse":                       urls.SSE,
+		"versioned_streamable_http": urls.VersionedStreamableHTTP,
+		"versioned_sse":             urls.VersionedSSE,
 	}
 }

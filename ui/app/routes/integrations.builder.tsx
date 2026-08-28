@@ -1823,11 +1823,15 @@ export default function SdkBuilder() {
 
       if (generationMode === "mcp") {
         setGenerateStatus("Deploying MCP server...");
-        const result = await planAndApplyApp<{ app_id: string; default_transport: string; transport_urls: McpTransportEndpointData["transport_urls"]; execution_token?: string }>("mcp", ownerTeamSlug, config);
+        const result = await planAndApplyApp<{ app_id: string; default_transport: string; stable: boolean; stable_version_id: string; transport_urls: McpTransportEndpointData["transport_urls"]; execution_token?: string }>("mcp", ownerTeamSlug, config);
         await syncWorkspacePinsAfterGenerate(selectionPayload);
+        // Engine owns promotion state and public URL projection, so the
+        // deployment result must preserve both instead of inferring either.
         setMcpDeployment({
           id: result.app_id,
           default_transport: result.default_transport,
+          stable: result.stable,
+          stable_version_id: result.stable_version_id,
           transport_urls: result.transport_urls,
           token: result.execution_token || "",
         });

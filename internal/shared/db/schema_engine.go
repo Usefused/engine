@@ -1194,6 +1194,8 @@ func engineSchemaQueries() []string {
 			canonical_name      text NOT NULL,
 			display_name        text NOT NULL,
 			target_language     text,
+			mcp_stable_app_id       uuid,
+			mcp_stable_route_initialized boolean NOT NULL DEFAULT false,
 			owner_subject_id    uuid REFERENCES fused_subjects(id) ON DELETE RESTRICT,
 			owner_team_id       uuid REFERENCES fused_teams(id) ON DELETE RESTRICT,
 			created_at          timestamptz NOT NULL DEFAULT NOW(),
@@ -1205,6 +1207,10 @@ func engineSchemaQueries() []string {
 			CONSTRAINT chk_fused_app_families_language CHECK (
 				(kind = 'sdk' AND target_language IS NOT NULL)
 				OR (kind = 'mcp' AND target_language IS NULL)
+			),
+			CONSTRAINT chk_fused_app_families_stable_mcp CHECK (
+				(kind = 'sdk' AND mcp_stable_app_id IS NULL AND NOT mcp_stable_route_initialized)
+				OR (kind = 'mcp' AND (mcp_stable_app_id IS NULL OR mcp_stable_route_initialized))
 			),
 			UNIQUE (account_id, kind, canonical_name),
 			UNIQUE (app_family_id, account_id)
@@ -1257,6 +1263,54 @@ func engineSchemaQueries() []string {
 			ON fused_apps(app_family_id, status, created_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_apps_account_status
 			ON fused_apps(account_id, status, created_at DESC);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_fused_apps_app_family_identity
+			ON fused_apps(app_id, app_family_id);`,
+		// Existing Engines gain one stable MCP pointer in place. The initialization
+		// marker lets startup choose one initial target without later undoing an
+		// intentional deactivation that cleared the pointer. One table lock closes
+		// the race between backfill and constraint creation.
+		`DO $$
+		BEGIN
+			LOCK TABLE fused_app_families IN SHARE ROW EXCLUSIVE MODE;
+			LOCK TABLE fused_apps IN SHARE ROW EXCLUSIVE MODE;
+			ALTER TABLE fused_app_families ADD COLUMN IF NOT EXISTS mcp_stable_app_id uuid;
+			ALTER TABLE fused_app_families ADD COLUMN IF NOT EXISTS mcp_stable_route_initialized boolean NOT NULL DEFAULT false;
+			UPDATE fused_app_families family
+			SET mcp_stable_app_id = (
+				SELECT app.app_id
+				FROM fused_apps app
+				WHERE app.app_family_id = family.app_family_id
+				  AND app.status IN ('active', 'deprecated')
+				ORDER BY app.activated_at DESC NULLS LAST, app.created_at DESC, app.app_id DESC
+				LIMIT 1
+			),
+			    mcp_stable_route_initialized = true
+			WHERE family.kind = 'mcp'
+			  AND NOT family.mcp_stable_route_initialized;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname = 'chk_fused_app_families_stable_mcp'
+				  AND conrelid = 'fused_app_families'::regclass
+			) THEN
+				ALTER TABLE fused_app_families
+				ADD CONSTRAINT chk_fused_app_families_stable_mcp
+				CHECK (
+					(kind = 'sdk' AND mcp_stable_app_id IS NULL AND NOT mcp_stable_route_initialized)
+					OR (kind = 'mcp' AND (mcp_stable_app_id IS NULL OR mcp_stable_route_initialized))
+				);
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname = 'fk_fused_app_families_stable_mcp'
+				  AND conrelid = 'fused_app_families'::regclass
+			) THEN
+				ALTER TABLE fused_app_families
+				ADD CONSTRAINT fk_fused_app_families_stable_mcp
+				FOREIGN KEY (mcp_stable_app_id, app_family_id)
+				REFERENCES fused_apps(app_id, app_family_id)
+				ON DELETE SET NULL (mcp_stable_app_id);
+			END IF;
+		END $$;`,
 		// Package retention walks only runnable SDK versions by app_id. This
 		// partial index keeps each keyset page bounded as version history grows.
 		`CREATE INDEX IF NOT EXISTS idx_fused_apps_package_lease

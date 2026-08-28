@@ -76,12 +76,20 @@ func (s *artifactReferenceGraphQLTestStore) ListAuthorizedAppServiceSummaries(_ 
 	return s.services, nil
 }
 
+// appCatalogItemFromTestScope preserves explicit family identity while keeping
+// older fixtures concise when version and family IDs are intentionally equal.
 func appCatalogItemFromTestScope(scope *store.AppRuntime) store.AppCatalogItem {
 	status := scope.Status
+	// Runtime fixtures without lifecycle state represent active catalogue rows.
 	if status == "" {
 		status = "active"
 	}
-	return store.AppCatalogItem{AppFamilyID: scope.AppID, AppID: scope.AppID, Name: scope.Name,
+	familyID := scope.AppFamilyID
+	// Legacy test fixtures predate stable family routes and use one UUID for both identities.
+	if familyID == uuid.Nil {
+		familyID = scope.AppID
+	}
+	return store.AppCatalogItem{AppFamilyID: familyID, AppID: scope.AppID, StableAppID: scope.StableAppID, Name: scope.Name,
 		Version: scope.Version, Kind: scope.Kind, Status: status, CreatedAt: scope.CreatedAt}
 }
 
@@ -910,7 +918,9 @@ func TestDeployMcpServer_CreatesActiveScopeWithNameAndKind(t *testing.T) {
 			version
 			active
 			default_transport
-			transport_urls { streamable_http sse }
+			stable
+			stable_version_id
+			transport_urls { streamable_http sse versioned_streamable_http versioned_sse }
 		}
 	}`
 	data := doMCPGraphQLRequestWithVariables(t, h, query, map[string]any{"owner": "platform", "config": map[string]any{
@@ -923,23 +933,39 @@ func TestDeployMcpServer_CreatesActiveScopeWithNameAndKind(t *testing.T) {
 	assertMCPAuthorizationRevision(t, revisionSink, s.authorizationRevision)
 }
 
+// assertDeployedMCPServer verifies GraphQL apply exposes one coherent immutable
+// version and its promoted stable transport identity.
 func assertDeployedMCPServer(t *testing.T, data map[string]any) {
 	t.Helper()
 	deployed, ok := data["deployMcpServer"].(map[string]any)
+	// The mutation must return a concrete deployed server before URL assertions are meaningful.
 	if !ok {
 		t.Fatalf("expected deployMcpServer object, got %#v", data)
 	}
+	// Authored identity and runnable state are part of the same apply response.
 	if deployed["name"] != "stripe-mcp" || deployed["active"] != true {
 		t.Errorf("deployed MCP identity/status = %#v", deployed)
 	}
+	// Streamable HTTP remains the protocol recommendation for both route identities.
 	if deployed["default_transport"] != mcpDefaultTransport {
 		t.Errorf("default_transport = %#v, want %q", deployed["default_transport"], mcpDefaultTransport)
+	}
+	// Apply promotes the returned immutable version in the same transaction.
+	if deployed["stable"] != true || deployed["stable_version_id"] != deployed["id"] {
+		t.Errorf("stable target = %#v/%#v, want deployed version %#v", deployed["stable"], deployed["stable_version_id"], deployed["id"])
 	}
 	transportURLs, _ := deployed["transport_urls"].(map[string]any)
 	streamableHTTP, _ := transportURLs["streamable_http"].(string)
 	sse, _ := transportURLs["sse"].(string)
+	versionedStreamableHTTP, _ := transportURLs["versioned_streamable_http"].(string)
+	versionedSSE, _ := transportURLs["versioned_sse"].(string)
+	// Stable and pinned URLs must both use Streamable HTTP as their primary transport.
 	if !strings.Contains(streamableHTTP, "/mcp/") || strings.HasSuffix(streamableHTTP, "/sse") || sse != streamableHTTP+"/sse" {
 		t.Errorf("transport_urls = %#v, want Streamable HTTP primary and matching legacy SSE", transportURLs)
+	}
+	// Version pinning remains available but must not collapse to the family URL.
+	if versionedStreamableHTTP == "" || versionedStreamableHTTP == streamableHTTP || versionedSSE != versionedStreamableHTTP+"/sse" {
+		t.Errorf("transport_urls = %#v, want distinct immutable-version URLs", transportURLs)
 	}
 }
 
@@ -1026,6 +1052,8 @@ func TestDeployMcpServer_SelectAllSkipsEndpointIds(t *testing.T) {
 	}
 }
 
+// TestMcpServers_ListsOnlyMCPKindScopesForAccount keeps SDK versions out of MCP
+// discovery while preserving the promoted target projection.
 func TestMcpServers_ListsOnlyMCPKindScopesForAccount(t *testing.T) {
 	accountID := uuid.New()
 	otherAccountID := uuid.New()
@@ -1059,49 +1087,69 @@ func TestMcpServers_ListsOnlyMCPKindScopesForAccount(t *testing.T) {
 	}
 }
 
+// TestAppsListSDKAndMCPVersionsForAccount verifies mixed app discovery keeps
+// MCP family and immutable version transport identities distinct.
 func TestAppsListSDKAndMCPVersionsForAccount(t *testing.T) {
 	accountID, otherAccountID := uuid.New(), uuid.New()
-	sdkID, mcpID, hiddenID := uuid.New(), uuid.New(), uuid.New()
+	sdkID, mcpID, mcpFamilyID, hiddenID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	fixture := &workspaceTestStore{accountID: accountID, mockScopes: map[uuid.UUID]*store.AppRuntime{
 		sdkID:    {AccountID: accountID, AppID: sdkID, Kind: "sdk", Name: "support", Version: "1.0.0", CreatedAt: time.Now()},
-		mcpID:    {AccountID: accountID, AppID: mcpID, Kind: "mcp", Name: "support-agent", Version: "2.0.0", CreatedAt: time.Now().Add(-time.Minute)},
+		mcpID:    {AccountID: accountID, AppFamilyID: mcpFamilyID, AppID: mcpID, StableAppID: mcpID, Kind: "mcp", Name: "support-agent", Version: "2.0.0", CreatedAt: time.Now().Add(-time.Minute)},
 		hiddenID: {AccountID: otherAccountID, AppID: hiddenID, Kind: "sdk", Name: "other-workspace", Version: "1.0.0", CreatedAt: time.Now().Add(-time.Hour)},
 	}}
 	s := &artifactReferenceGraphQLTestStore{workspaceTestStore: fixture}
 	h := mountMCPGraphQLTestHandler(t, s)
-	data := doMCPGraphQLRequest(t, h, `query { apps(limit: 20, offset: 0) { total items { app_id app_family_id name version kind status default_transport transport_urls { streamable_http sse } } } }`)
+	data := doMCPGraphQLRequest(t, h, `query { apps(limit: 20, offset: 0) { total items { app_id app_family_id name version kind status default_transport stable stable_version_id transport_urls { streamable_http sse versioned_streamable_http versioned_sse } } } }`)
 	page := data["apps"].(map[string]any)
+	// Cross-account rows must not contribute to the authorized total.
 	if page["total"] != float64(2) {
 		t.Fatalf("app total = %#v, want 2", page["total"])
 	}
 	items := page["items"].([]any)
 	kinds := map[string]bool{}
 	var mcpItem map[string]any
+	// Inspect the bounded page once so identity and kind coverage remain O(n).
 	for _, raw := range items {
 		item := raw.(map[string]any)
 		kinds[fmt.Sprint(item["kind"])] = true
+		// Only the MCP item carries transport discovery assertions below.
 		if item["kind"] == "mcp" {
 			mcpItem = item
 		}
+		// Every catalogue row must preserve both logical-family and version identity.
 		if item["app_id"] == "" || item["app_family_id"] == "" {
 			t.Fatalf("app identity is incomplete: %#v", item)
 		}
 	}
+	// The authorized result must include exactly the seeded SDK and MCP rows.
 	if len(items) != 2 || !kinds["sdk"] || !kinds["mcp"] {
 		t.Fatalf("unexpected app items: %#v", items)
 	}
 	assertMCPTransportProjection(t, mcpItem)
 }
 
+// assertMCPTransportProjection verifies catalogue discovery keeps stable and
+// immutable-pinned endpoints distinguishable.
 func assertMCPTransportProjection(t *testing.T, item map[string]any) {
 	t.Helper()
+	// Catalogue and apply projections must agree on the recommended protocol.
 	if item["default_transport"] != mcpDefaultTransport {
 		t.Fatalf("MCP default transport = %#v", item["default_transport"])
 	}
 	transportURLs, _ := item["transport_urls"].(map[string]any)
 	streamableHTTP, _ := transportURLs["streamable_http"].(string)
+	versionedStreamableHTTP, _ := transportURLs["versioned_streamable_http"].(string)
+	// The row matching the current family target must be marked for auditable rollback decisions.
+	if item["stable"] != true || item["stable_version_id"] != item["app_id"] {
+		t.Fatalf("MCP stable target = %#v", item)
+	}
+	// Stable discovery must include a matching legacy endpoint for clients that still require SSE.
 	if streamableHTTP == "" || transportURLs["sse"] != streamableHTTP+"/sse" {
 		t.Fatalf("MCP transport URLs = %#v", transportURLs)
+	}
+	// Exact-version discovery remains distinct and internally consistent.
+	if versionedStreamableHTTP == "" || versionedStreamableHTTP == streamableHTTP || transportURLs["versioned_sse"] != versionedStreamableHTTP+"/sse" {
+		t.Fatalf("MCP pinned transport URLs = %#v", transportURLs)
 	}
 }
 

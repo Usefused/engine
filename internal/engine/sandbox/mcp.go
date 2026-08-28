@@ -50,11 +50,19 @@ func mcpSseHandler(w http.ResponseWriter, r *http.Request) {
 	if !admitMCPRequestOrigin(w, r) {
 		return
 	}
-	appIDHex, token, ok := extractMCPParams(w, r)
+	routeID, token, ok := extractMCPParams(w, r)
 	// Missing runtime identity must fail before any session or provenance is retained.
 	if !ok {
 		return
 	}
+	target, err := resolveMCPRoute(r.Context(), routeID)
+	// Resolution failures remain indistinguishable from invalid runtime
+	// credentials so an anonymous caller cannot enumerate MCP families.
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid token")
+		return
+	}
+	appIDHex := target.AppID.String()
 	authContext, err := mcpSessionAuthContext(r.Header)
 	// Invalid connection selectors cannot become authority for a new session.
 	if err != nil {
@@ -81,7 +89,7 @@ func mcpSseHandler(w http.ResponseWriter, r *http.Request) {
 	if !connected {
 		return
 	}
-	sessionID, sessionCtx, stdout, started := startMCPSSESession(r, w, appIDHex, token, authContext, identity)
+	sessionID, sessionCtx, stdout, started := startMCPSSESession(r, w, routeID, appIDHex, token, authContext, identity)
 	// Failed runtime preparation already returned one bounded handshake error.
 	if !started {
 		return
@@ -97,7 +105,7 @@ func mcpSseHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // startMCPSSESession prepares and registers one legacy runtime after shared admission succeeds.
-func startMCPSSESession(r *http.Request, w http.ResponseWriter, appID, token string, authContext map[string]any, identity auth.RuntimeIdentity) (string, context.Context, io.ReadCloser, bool) {
+func startMCPSSESession(r *http.Request, w http.ResponseWriter, routeID, appID, token string, authContext map[string]any, identity auth.RuntimeIdentity) (string, context.Context, io.ReadCloser, bool) {
 	sessionID := uuid.NewString()
 	sessionCtx, cancel := mcpSessionContext(r.Context(), identity.TokenPolicy.ExpiresAt)
 	fixture, err := prepareSessionFixture(sessionCtx, appID, identity.TokenPolicy)
@@ -121,7 +129,7 @@ func startMCPSSESession(r *http.Request, w http.ResponseWriter, appID, token str
 	}
 	registerMCPSession(sessionCtx, &mcpSession{
 		clientMetadata: initialMCPSessionMetadata(r),
-		appID:          appID, sessionID: sessionID, tokenID: identity.TokenID,
+		appID:          appID, routeID: routeID, sessionID: sessionID, tokenID: identity.TokenID,
 		protocolVersion: "2024-11-05", transport: "sse", cmd: cmd, stdin: stdin,
 		cancel: cancel, token: token, fixture: fixture, authContext: authContext,
 	})
@@ -164,6 +172,22 @@ func extractMCPParams(w http.ResponseWriter, r *http.Request) (string, string, b
 		return "", "", false
 	}
 	return appIDHex, token, true
+}
+
+// resolveMCPRoute converts either public MCP route identity into one exact,
+// runnable version before token validation or session creation.
+func resolveMCPRoute(ctx context.Context, routeIDHex string) (*store.MCPRouteTarget, error) {
+	routeID, err := uuid.Parse(routeIDHex)
+	// Malformed route identities cannot reach persistence or token validation.
+	if err != nil {
+		return nil, err
+	}
+	// Missing route persistence is a startup wiring error; failing closed keeps
+	// an SDK Version ID from being accepted accidentally as an MCP runtime.
+	if globalMCPRouteResolver == nil {
+		return nil, auth.ErrUnauthorized
+	}
+	return globalMCPRouteResolver.ResolveMCPRoute(ctx, routeID)
 }
 
 func validateMCPToken(ctx context.Context, appIDHex, token string) (auth.RuntimeIdentity, error) {

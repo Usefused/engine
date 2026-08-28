@@ -1177,7 +1177,7 @@
       "file": "app/routes/integrations.mcp_.$id.tsx",
       "call": 1,
       "variant": 1,
-      "document": "\n    query MCPServerDetails($appId: String!) {\n      app(app_id: $appId) {\n        app_id\n        app_family_id\n        name\n        description\n        version\n        kind\n        status\n        created_at\n        default_transport\n        transport_urls { streamable_http sse }\n        selections { service_id service_version_id schema_version endpoint_ids operation_names webhook_ids webhook_names select_all webhook_select_all }\n      }\n      appServices(app_id: $appId) { service_id service_slug service_name version select_all endpoint_count webhook_count }\n    }\n  "
+      "document": "\n    query MCPServerDetails($appId: String!) {\n      app(app_id: $appId) {\n        app_id\n        app_family_id\n        name\n        description\n        version\n        kind\n        status\n        created_at\n        default_transport\n        stable\n        stable_version_id\n        transport_urls { streamable_http sse versioned_streamable_http versioned_sse }\n        selections { service_id service_version_id schema_version endpoint_ids operation_names webhook_ids webhook_names select_all webhook_select_all }\n      }\n      appServices(app_id: $appId) { service_id service_slug service_name version select_all endpoint_count webhook_count }\n    }\n  "
     },
     {
       "endpoint": "engine",

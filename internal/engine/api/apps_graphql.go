@@ -35,6 +35,8 @@ var appSummaryGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"readme":                  &graphql.Field{Type: graphql.String},
 		"default_transport":       &graphql.Field{Type: graphql.String},
 		"transport_urls":          &graphql.Field{Type: mcpTransportURLsGraphQLType},
+		"stable":                  &graphql.Field{Type: graphql.Boolean},
+		"stable_version_id":       &graphql.Field{Type: graphql.String},
 		"selections":              &graphql.Field{Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(appSelectionGraphQLType)))},
 		"planned_deactivation_at": &graphql.Field{Type: graphql.String},
 	},
@@ -252,11 +254,23 @@ func appSummaryField(r *http.Request, item store.AppCatalogItem, counts map[uuid
 	if item.Kind == store.AppKindMCP {
 		// Transport discovery belongs to Engine projection so reverse-proxy
 		// origins and legacy compatibility never drift across CLI and UI clients.
-		transportURLs := mcpTransportURLsForApp(r, item.AppID)
+		transportURLs := mcpTransportURLsForApp(r, item.AppFamilyID, item.AppID, item.StableAppID)
 		fields["default_transport"] = mcpDefaultTransport
 		fields["transport_urls"] = mcpTransportURLsGraphQLValue(transportURLs)
+		fields["stable"] = item.StableAppID == item.AppID
+		fields["stable_version_id"] = optionalUUIDString(item.StableAppID)
 	}
 	return fields
+}
+
+// optionalUUIDString keeps absent lifecycle pointers explicit without exposing
+// the all-zero storage sentinel through GraphQL.
+func optionalUUIDString(id uuid.UUID) string {
+	// Zero represents a family with no promoted route after hard deactivation.
+	if id == uuid.Nil {
+		return ""
+	}
+	return id.String()
 }
 
 // appDownloadCounts performs one exact Registry batch only when the caller

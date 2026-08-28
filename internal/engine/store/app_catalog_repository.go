@@ -18,6 +18,7 @@ import (
 type AppCatalogItem struct {
 	AppFamilyID           uuid.UUID
 	AppID                 uuid.UUID
+	StableAppID           uuid.UUID
 	Name                  string
 	Description           string
 	Version               string
@@ -49,7 +50,9 @@ type AppCatalogRepository interface {
 }
 
 const appCatalogSelect = `
-	SELECT app.app_family_id, app.app_id, family.display_name,
+	SELECT app.app_family_id, app.app_id,
+	       COALESCE(family.mcp_stable_app_id, '00000000-0000-0000-0000-000000000000'::uuid),
+	       family.display_name,
 	       COALESCE(plan.resolved_payload->>'description', ''), app.version,
 	       family.kind, app.status, app.created_at, COALESCE(family.target_language, ''),
 	       COALESCE(app.generator_version, ''), COALESCE(plan.resolved_payload->>'readme', ''), app.selections,
@@ -155,10 +158,12 @@ func (s *postgresStore) ListAuthorizedAppServiceSummaries(ctx context.Context, a
 
 type appCatalogScanner interface{ Scan(...any) error }
 
+// scanAppCatalogItem preserves the fixed SQL projection order for one immutable
+// catalogue version and its family promotion state.
 func scanAppCatalogItem(row appCatalogScanner) (*AppCatalogItem, error) {
 	var item AppCatalogItem
 	var selections json.RawMessage
-	err := row.Scan(&item.AppFamilyID, &item.AppID, &item.Name, &item.Description,
+	err := row.Scan(&item.AppFamilyID, &item.AppID, &item.StableAppID, &item.Name, &item.Description,
 		&item.Version, &item.Kind, &item.Status, &item.CreatedAt, &item.TargetLanguage,
 		&item.GeneratorVersion, &item.Readme, &selections, &item.PlannedDeactivationAt)
 	if err == nil {

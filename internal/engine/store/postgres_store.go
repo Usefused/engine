@@ -153,7 +153,9 @@ func (s *postgresStore) GetLatestWorkspaceServiceVersionID(ctx context.Context, 
 // ListMCPAppsByAccount so their SELECT lists and Scan order can't drift
 // apart from each other. Description stays in the applied immutable plan so
 // legacy rows need no schema backfill and every runtime reads its exact source hash.
-const appRuntimeSelectColumns = `a.account_id, a.app_id, f.owner_subject_id, f.owner_team_id,
+const appRuntimeSelectColumns = `a.account_id, a.app_family_id, a.app_id,
+COALESCE(f.mcp_stable_app_id, '00000000-0000-0000-0000-000000000000'::uuid),
+f.owner_subject_id, f.owner_team_id,
 fb.bucket_id, a.scope_schema_version, a.selections,
 a.unified_definition_schema_version, a.unified_definitions,
 a.unified_definition_hash, a.unified_codegen_descriptor_hash,
@@ -185,7 +187,7 @@ func scanAppRuntimeRow(row pgx.Row, includeTotal bool) (*AppRuntime, int, error)
 	var ownerSubjectID, ownerTeamID *uuid.UUID
 	total := 0
 	targets := []any{
-		&scope.AccountID, &scope.AppID, &ownerSubjectID, &ownerTeamID,
+		&scope.AccountID, &scope.AppFamilyID, &scope.AppID, &scope.StableAppID, &ownerSubjectID, &ownerTeamID,
 		&bucketID, &scope.ScopeSchemaVersion, &scope.Selections,
 		&scope.UnifiedDefinitionSchemaVersion, &scope.UnifiedDefinitions,
 		&scope.UnifiedDefinitionHash, &scope.UnifiedCodegenDescriptorHash, &scope.Status,

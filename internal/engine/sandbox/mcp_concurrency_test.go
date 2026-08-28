@@ -60,6 +60,7 @@ func preseedMCPSessions(t *testing.T, n int) {
 // when activeMCPSessionCount() is at MaxSandboxConcurrency the SSE
 // handler must return HTTP 402 before any token validation or cache wiring.
 func TestMCPSSE_Concurrency_BlocksWhenAtLimit(t *testing.T) {
+	installDirectMCPRouteResolver(t)
 	withEntitlement(t, models.RuntimeEntitlement{MaxSandboxConcurrency: models.IntPtr(2)})
 	preseedMCPSessions(t, 2)
 
@@ -78,6 +79,7 @@ func TestMCPSSE_Concurrency_BlocksWhenAtLimit(t *testing.T) {
 // TestMCPSSE_Concurrency_ZeroBlocksAll verifies the P4-05 gate:
 // a MaxSandboxConcurrency of 0 means no sessions are allowed.
 func TestMCPSSE_Concurrency_ZeroBlocksAll(t *testing.T) {
+	installDirectMCPRouteResolver(t)
 	withEntitlement(t, models.RuntimeEntitlement{MaxSandboxConcurrency: models.IntPtr(0)})
 
 	req := mcpSSEConcurrencyRequest(uuid.NewString(), "any-token")

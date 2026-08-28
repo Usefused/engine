@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"reflect"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/db"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/go-chi/chi/v5"
@@ -25,11 +27,22 @@ import (
 )
 
 type streamableTokenValidator struct {
-	token   string
-	tokenID uuid.UUID
+	token         string
+	tokenID       uuid.UUID
+	expectedAppID uuid.UUID
+	lastAppID     uuid.UUID
 }
 
+// Validate records the exact immutable app identity presented by transport
+// admission while preserving the shared token behavior used by session tests.
 func (validator *streamableTokenValidator) Validate(_ context.Context, appID uuid.UUID, token string) (auth.RuntimeIdentity, error) {
+	validator.lastAppID = appID
+	// A configured expectation turns the test validator into a guard against
+	// accidentally authorizing the public family route as an immutable version.
+	if validator.expectedAppID != uuid.Nil && appID != validator.expectedAppID {
+		return auth.RuntimeIdentity{}, auth.ErrUnauthorized
+	}
+	// Token mismatches remain independent from route resolution failures.
 	if token != validator.token {
 		return auth.RuntimeIdentity{}, auth.ErrUnauthorized
 	}
@@ -346,12 +359,14 @@ func TestMCPStreamableSessionContractEndToEnd(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("Node is required for Streamable MCP end-to-end coverage")
 	}
-	previousValidator, previousCache, previousEnginePort, previousConfig := globalTokenValidator, globalObjectCache, globalEnginePort, cfg
+	previousValidator, previousResolver := globalTokenValidator, globalMCPRouteResolver
+	previousCache, previousEnginePort, previousConfig := globalObjectCache, globalEnginePort, cfg
 	localConfig := *cfg
 	// Race instrumentation can push real Node startup beyond the package-wide one-second unit-test deadline.
 	localConfig.Sandbox.ToolCallTimeoutSeconds = 10
 	cfg = &localConfig
-	appID, token, tokenID := uuid.NewString(), "end-to-end-token", uuid.New()
+	familyID, appID, tokenID := uuid.New(), uuid.New(), uuid.New()
+	token := "end-to-end-token"
 	selection := []models.SDKSelection{{
 		ServiceID: uuid.New(), ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion,
 	}}
@@ -360,36 +375,153 @@ func TestMCPStreamableSessionContractEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	globalTokenValidator = &streamableTokenValidator{token: token, tokenID: tokenID}
+	validator := &streamableTokenValidator{token: token, tokenID: tokenID, expectedAppID: appID}
+	resolver := &mcpRouteResolverStub{target: &store.MCPRouteTarget{AppFamilyID: familyID, AppID: appID, Stable: true}}
+	globalTokenValidator, globalMCPRouteResolver = validator, resolver
 	globalObjectCache = &streamableSessionCache{richMockCache: &richMockCache{scopeJSON: scopeJSON}}
 	globalEnginePort = "1"
 	t.Cleanup(func() {
-		globalTokenValidator, globalObjectCache, globalEnginePort, cfg = previousValidator, previousCache, previousEnginePort, previousConfig
+		globalTokenValidator, globalMCPRouteResolver = previousValidator, previousResolver
+		globalObjectCache, globalEnginePort, cfg = previousCache, previousEnginePort, previousConfig
 	})
 
-	initialize := serveMCPStreamableEndToEndRequest(t, appID, token, "", "", `{"jsonrpc":"2.0","id":31,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"session-e2e","version":"1"}}}`)
+	initialize := serveMCPStreamableEndToEndRequest(t, familyID.String(), token, "", "", `{"jsonrpc":"2.0","id":31,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"session-e2e","version":"1"}}}`)
 	sessionID, protocolVersion := assertMCPStreamableEndToEndInitialize(t, initialize)
 	t.Cleanup(func() { terminateMCPSession(sessionID, "test_cleanup") })
+	sess, ok := lookupMCPSession(sessionID)
+	// Successful handler admission must snapshot the promoted Version ID while
+	// preserving the MCP ID as the client's transport identity.
+	if !ok || sess.routeID != familyID.String() || sess.appID != appID.String() || resolver.calls != 1 || validator.lastAppID != appID {
+		t.Fatalf("stable initialize session = %#v, resolver calls %d, validated app %s", sess, resolver.calls, validator.lastAppID)
+	}
 
-	initialized := serveMCPStreamableEndToEndRequest(t, appID, token, sessionID, protocolVersion, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	initialized := serveMCPStreamableEndToEndRequest(t, familyID.String(), token, sessionID, protocolVersion, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
 	assertMCPStreamableEndToEndResponse(t, initialized, http.StatusAccepted, "initialized notification")
 	// Notifications have no JSON-RPC response, so acceptance must not synthesize a result envelope.
 	if initialized.Body.Len() != 0 {
 		t.Fatalf("initialized notification returned a body: %s", initialized.Body.String())
 	}
 
-	listed := serveMCPStreamableEndToEndRequest(t, appID, token, sessionID, protocolVersion, `{"jsonrpc":"2.0","id":32,"method":"tools/list","params":{}}`)
+	listed := serveMCPStreamableEndToEndRequest(t, familyID.String(), token, sessionID, protocolVersion, `{"jsonrpc":"2.0","id":32,"method":"tools/list","params":{}}`)
 	assertMCPStreamableEndToEndResponse(t, listed, http.StatusOK, "tools/list session contract", `"com.usefused/session"`, `"session_id_input":false`)
-	executed := serveMCPStreamableEndToEndRequest(t, appID, token, sessionID, protocolVersion, `{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"execute","arguments":{"script":"session.set(\"proof\",\"active\"); return {proof:session.get(\"proof\")};"}}}`)
+	executed := serveMCPStreamableEndToEndRequest(t, familyID.String(), token, sessionID, protocolVersion, `{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"execute","arguments":{"script":"session.set(\"proof\",\"active\"); return {proof:session.get(\"proof\")};"}}}`)
 	assertMCPStreamableEndToEndResponse(t, executed, http.StatusOK, "execute retained state", `\"proof\":\"active\"`)
 
-	deleted := serveMCPStreamableEndToEndRequest(t, appID, token, sessionID, protocolVersion, "")
+	deleted := serveMCPStreamableEndToEndRequest(t, familyID.String(), token, sessionID, protocolVersion, "")
 	assertMCPStreamableEndToEndResponse(t, deleted, http.StatusNoContent, "DELETE")
-	stale := serveMCPStreamableEndToEndRequest(t, appID, token, sessionID, protocolVersion, `{"jsonrpc":"2.0","id":34,"method":"tools/list","params":{}}`)
+	stale := serveMCPStreamableEndToEndRequest(t, familyID.String(), token, sessionID, protocolVersion, `{"jsonrpc":"2.0","id":34,"method":"tools/list","params":{}}`)
 	assertMCPFailureResponse(t, stale, http.StatusNotFound, "34", mcpSessionFailureData{
 		Code: mcpSessionUnavailableCode, RecoveryAction: "reinitialize_connection",
 		ExecuteRequest: "reformat_if_session_state_used", ProviderExecution: "not_started", AutomaticReplay: false,
 	})
+}
+
+// TestMCPStableFamilyURLRoutesNewSessionsToPromotedVersion proves one public
+// family URL survives a persisted version promotion while existing sessions
+// remain bound to the immutable version selected during initialization.
+func TestMCPStableFamilyURLRoutesNewSessionsToPromotedVersion(t *testing.T) {
+	// PostgreSQL owns the promoted target, so this integration case cannot be
+	// represented faithfully when the database fixture is unavailable.
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("DATABASE_URL is required for stable MCP URL integration coverage")
+	}
+	// The real MCP child proves the HTTP session still works after promotion.
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("Node is required for stable MCP URL integration coverage")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	pool, err := db.InitEnginePostgres(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("initialize Engine PostgreSQL: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	runtimeStore := store.NewPostgresStore(pool)
+	accountID, ownerID, familyID := uuid.New(), uuid.New(), uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO fused_subjects (id, kind, display_name) VALUES ($1, 'user', 'Stable MCP URL Test')`, ownerID); err != nil {
+		t.Fatalf("seed MCP owner: %v", err)
+	}
+	// Exact cleanup preserves unrelated integration fixtures sharing the database.
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM fused_apps WHERE app_family_id = $1`, familyID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM fused_app_families WHERE app_family_id = $1`, familyID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM fused_subjects WHERE id = $1`, ownerID)
+	})
+	if _, _, err := runtimeStore.CreateOrGetAppFamily(ctx, store.AppFamily{
+		AppFamilyID: familyID, AccountID: accountID, Kind: store.AppKindMCP,
+		CanonicalName: "stable-url-" + familyID.String(), DisplayName: "Stable URL", OwnerSubjectID: ownerID,
+	}); err != nil {
+		t.Fatalf("create MCP family: %v", err)
+	}
+
+	firstAppID := publishStableURLTestVersion(t, ctx, runtimeStore, accountID, familyID, ownerID, "1.0.0")
+	previousValidator, previousResolver := globalTokenValidator, globalMCPRouteResolver
+	previousCache, previousEnginePort, previousConfig := globalObjectCache, globalEnginePort, cfg
+	localConfig := *cfg
+	localConfig.Sandbox.ToolCallTimeoutSeconds = 10
+	token, tokenID := "stable-family-url-token", uuid.New()
+	validator := &streamableTokenValidator{token: token, tokenID: tokenID}
+	globalTokenValidator, globalMCPRouteResolver = validator, runtimeStore
+	globalObjectCache = &streamableSessionCache{richMockCache: &richMockCache{scopeJSON: []byte("[]")}}
+	globalEnginePort, cfg = "1", &localConfig
+	t.Cleanup(func() {
+		globalTokenValidator, globalMCPRouteResolver = previousValidator, previousResolver
+		globalObjectCache, globalEnginePort, cfg = previousCache, previousEnginePort, previousConfig
+	})
+
+	stableURLID := familyID.String()
+	firstInitialize := serveMCPStreamableEndToEndRequest(t, stableURLID, token, "", "", `{"jsonrpc":"2.0","id":71,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"stable-v1","version":"1"}}}`)
+	firstSessionID, protocolVersion := assertMCPStreamableEndToEndInitialize(t, firstInitialize)
+	t.Cleanup(func() { terminateMCPSession(firstSessionID, "test_cleanup") })
+	firstInitialized := serveMCPStreamableEndToEndRequest(t, stableURLID, token, firstSessionID, protocolVersion, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	assertMCPStreamableEndToEndResponse(t, firstInitialized, http.StatusAccepted, "initialize stable v1")
+
+	secondAppID := publishStableURLTestVersion(t, ctx, runtimeStore, accountID, familyID, ownerID, "2.0.0")
+	secondInitialize := serveMCPStreamableEndToEndRequest(t, stableURLID, token, "", "", `{"jsonrpc":"2.0","id":72,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"stable-v2","version":"1"}}}`)
+	secondSessionID, secondProtocolVersion := assertMCPStreamableEndToEndInitialize(t, secondInitialize)
+	t.Cleanup(func() { terminateMCPSession(secondSessionID, "test_cleanup") })
+	secondInitialized := serveMCPStreamableEndToEndRequest(t, stableURLID, token, secondSessionID, secondProtocolVersion, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	assertMCPStreamableEndToEndResponse(t, secondInitialized, http.StatusAccepted, "initialize stable v2")
+
+	firstSession, firstFound := lookupMCPSession(firstSessionID)
+	secondSession, secondFound := lookupMCPSession(secondSessionID)
+	// Both connections used the same URL, but promotion may affect only the new session.
+	if !firstFound || !secondFound || firstSession.routeID != stableURLID || secondSession.routeID != stableURLID || firstSession.appID != firstAppID.String() || secondSession.appID != secondAppID.String() {
+		t.Fatalf("stable sessions after promotion = first:%#v second:%#v", firstSession, secondSession)
+	}
+
+	firstList := serveMCPStreamableEndToEndRequest(t, stableURLID, token, firstSessionID, protocolVersion, `{"jsonrpc":"2.0","id":73,"method":"tools/list","params":{}}`)
+	assertMCPStreamableEndToEndResponse(t, firstList, http.StatusOK, "stable v1 session after promotion", `"execute"`)
+	// Reauthorization against the captured v1 identity proves the old session did not float to v2.
+	if validator.lastAppID != firstAppID {
+		t.Fatalf("existing stable session authorized app %s, want %s", validator.lastAppID, firstAppID)
+	}
+	secondList := serveMCPStreamableEndToEndRequest(t, stableURLID, token, secondSessionID, secondProtocolVersion, `{"jsonrpc":"2.0","id":74,"method":"tools/list","params":{}}`)
+	assertMCPStreamableEndToEndResponse(t, secondList, http.StatusOK, "stable v2 session after promotion", `"execute"`)
+	// The same family URL must now authorize the exact newly promoted version.
+	if validator.lastAppID != secondAppID {
+		t.Fatalf("new stable session authorized app %s, want %s", validator.lastAppID, secondAppID)
+	}
+}
+
+// publishStableURLTestVersion creates and promotes one immutable MCP version
+// through the same store boundary used by config apply.
+func publishStableURLTestVersion(t *testing.T, ctx context.Context, runtimeStore store.Store, accountID, familyID, ownerID uuid.UUID, version string) uuid.UUID {
+	t.Helper()
+	appID := uuid.New()
+	_, created, err := runtimeStore.PublishAppVersion(ctx, store.App{
+		AppID: appID, AppFamilyID: familyID, AccountID: accountID,
+		Version: version, ConfigKey: "mcp:stable-url:" + appID.String(), SourceHash: "source-" + version,
+		ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: []byte("[]"), Status: store.AppStatusActive,
+		CreatedBy: ownerID, ExpectedFamilyKind: store.AppKindMCP,
+	})
+	// A test promotion is meaningful only when a new immutable row committed.
+	if err != nil || !created {
+		t.Fatalf("publish MCP %s = created %t, error %v", version, created, err)
+	}
+	return appID
 }
 
 // assertMCPStreamableEndToEndInitialize verifies child negotiation and returns the transport-owned headers for later requests.
@@ -434,6 +566,8 @@ func TestMCPStreamablePostRejectsOversizedPayload(t *testing.T) {
 	}
 }
 
+// TestInitializeMCPProtocolVersionRejectsMalformedValues keeps invalid protocol
+// negotiation from reaching runtime startup.
 func TestInitializeMCPProtocolVersionRejectsMalformedValues(t *testing.T) {
 	for _, params := range []string{
 		`{}`,
@@ -446,6 +580,8 @@ func TestInitializeMCPProtocolVersionRejectsMalformedValues(t *testing.T) {
 	}
 }
 
+// TestRegisterMCPRoutesKeepsSSEAndStreamableHTTP verifies both transports share
+// the same public route-identity shape.
 func TestRegisterMCPRoutesKeepsSSEAndStreamableHTTP(t *testing.T) {
 	router := chi.NewRouter()
 	registerMCPRoutes(router)
@@ -479,6 +615,8 @@ func TestWriteErrorEscapesJSON(t *testing.T) {
 	}
 }
 
+// installStreamableSessionTestState installs one isolated in-memory session for
+// transport requests that do not need a real child runtime.
 func installStreamableSessionTestState(t *testing.T) (*mcpSession, *streamableWriteBuffer, string) {
 	t.Helper()
 	previousValidator, previousCache := globalTokenValidator, globalObjectCache
@@ -491,6 +629,7 @@ func installStreamableSessionTestState(t *testing.T) (*mcpSession, *streamableWr
 		token: token, stdin: input, responses: make(chan string, 2),
 		pendingRequests: make(map[string]struct{}), idleTimer: time.AfterFunc(time.Hour, func() {}),
 	}
+	sess.routeID = sess.appID
 	mcpSessions.Lock()
 	mcpSessions.m[sess.sessionID] = sess
 	mcpSessions.Unlock()
@@ -501,6 +640,8 @@ func installStreamableSessionTestState(t *testing.T) (*mcpSession, *streamableWr
 	return sess, input, token
 }
 
+// serveStreamableTestRequest sends one authenticated request against an already
+// initialized in-memory transport session.
 func serveStreamableTestRequest(t *testing.T, sess *mcpSession, token, method, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(method, "/mcp/"+sess.appID, bytes.NewBufferString(body))
@@ -513,14 +654,14 @@ func serveStreamableTestRequest(t *testing.T, sess *mcpSession, token, method, b
 }
 
 // serveMCPStreamableEndToEndRequest sends one real Engine transport request and applies session headers only when supplied.
-func serveMCPStreamableEndToEndRequest(t *testing.T, appID, token, sessionID, protocolVersion, body string) *httptest.ResponseRecorder {
+func serveMCPStreamableEndToEndRequest(t *testing.T, routeID, token, sessionID, protocolVersion, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	method := http.MethodPost
 	// An empty body represents the protocol's explicit session termination request.
 	if body == "" {
 		method = http.MethodDelete
 	}
-	request := httptest.NewRequest(method, "/mcp/"+appID, bytes.NewBufferString(body))
+	request := httptest.NewRequest(method, "/mcp/"+routeID, bytes.NewBufferString(body))
 	request.Header.Set("Authorization", "Bearer "+token)
 	// Initialization intentionally omits both transport-owned headers.
 	if sessionID != "" {
@@ -538,6 +679,8 @@ func streamableTestRouter() http.Handler {
 	return router
 }
 
+// installStreamableTestTracer captures synchronous spans without changing
+// process-global tracing after the test completes.
 func installStreamableTestTracer(t *testing.T) *tracetest.InMemoryExporter {
 	t.Helper()
 	exporter := tracetest.NewInMemoryExporter()

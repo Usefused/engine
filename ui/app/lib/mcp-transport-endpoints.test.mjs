@@ -8,7 +8,7 @@ const detailsPath = fileURLToPath(import.meta.resolve("../routes/integrations.mc
 const builderPath = fileURLToPath(import.meta.resolve("../routes/integrations.builder.tsx"));
 const generationPanelPath = fileURLToPath(import.meta.resolve("../components/consumer/ConsumerGenerationPanel.tsx"));
 
-test("presents Streamable HTTP first and keeps legacy SSE collapsed", async () => {
+test("presents stable and pinned Streamable HTTP before collapsed legacy SSE", async () => {
   const source = await readFile(componentPath, "utf8");
   const primaryIndex = source.indexOf("Streamable HTTP");
   const legacyIndex = source.indexOf("<details");
@@ -17,6 +17,8 @@ test("presents Streamable HTTP first and keeps legacy SSE collapsed", async () =
   assert.notEqual(legacyIndex, -1);
   assert.ok(primaryIndex < legacyIndex, "Streamable HTTP must render before compatibility transports");
   assert.match(source, /<TransportBadge>Recommended<\/TransportBadge>/);
+  assert.match(source, /Streamable HTTP · Version-pinned/);
+  assert.match(source, /transport="versioned_streamable_http"/);
   assert.match(source, /<span>Legacy compatibility<\/span>/);
   assert.match(source, /<TransportBadge legacy>Legacy<\/TransportBadge>/);
   assert.doesNotMatch(source, /<details[^>]*\sopen(?:=|\s|>)/, "legacy compatibility must be collapsed by default");
@@ -30,9 +32,12 @@ test("uses Engine transport discovery in MCP details and deployment results", as
   ]);
 
   assert.match(details, /default_transport/);
-  assert.match(details, /transport_urls\s*\{\s*streamable_http\s+sse\s*\}/);
+  assert.match(details, /stable_version_id/);
+  assert.match(details, /transport_urls\s*\{\s*streamable_http\s+sse\s+versioned_streamable_http\s+versioned_sse\s*\}/);
   assert.match(details, /<McpTransportEndpoints endpoints=\{server\}/);
   assert.match(builder, /default_transport:\s*result\.default_transport/);
+  assert.match(builder, /stable:\s*result\.stable/);
+  assert.match(builder, /stable_version_id:\s*result\.stable_version_id/);
   assert.match(builder, /transport_urls:\s*result\.transport_urls/);
   assert.match(generationPanel, /<McpTransportEndpoints endpoints=\{mcpDeployment\}/);
 

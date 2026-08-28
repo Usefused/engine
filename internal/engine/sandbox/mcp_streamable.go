@@ -15,6 +15,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/mcpsession"
+	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -49,19 +50,18 @@ func mcpStreamableHandler(w http.ResponseWriter, r *http.Request) {
 		recordMCPTransportOutcome(span, "origin_denied", true)
 		return
 	}
-	appID, token, ok := extractMCPParams(w, r)
+	routeID, token, ok := extractMCPParams(w, r)
 	if !ok {
 		recordMCPTransportOutcome(span, "unauthorized", true)
 		return
 	}
-	span.SetAttributes(attribute.String("app.id", appID))
 	switch r.Method {
 	case http.MethodPost:
-		handleMCPStreamablePost(ctx, span, w, r, appID, token)
+		handleMCPStreamablePost(ctx, span, w, r, routeID, token)
 	case http.MethodGet:
-		handleMCPStreamableGet(ctx, span, w, r, appID, token)
+		handleMCPStreamableGet(ctx, span, w, r, routeID, token)
 	case http.MethodDelete:
-		handleMCPStreamableDelete(ctx, span, w, r, appID, token)
+		handleMCPStreamableDelete(ctx, span, w, r, routeID, token)
 	default:
 		w.Header().Set("Allow", "POST, GET, DELETE")
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -70,11 +70,11 @@ func mcpStreamableHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleMCPStreamablePost admits a bounded envelope before authenticating or starting its runtime session.
-func handleMCPStreamablePost(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, appID, token string) {
+func handleMCPStreamablePost(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, routeID, token string) {
 	body, err := readBoundedMCPMessageBody(w, r)
 	// Only a typed size rejection enters limit-specific telemetry; parser failures remain separate.
 	if err != nil {
-		recordMCPMessageLimit(ctx, appID, mcpStreamableTransport, err)
+		recordMCPMessageLimit(ctx, routeID, mcpStreamableTransport, err)
 		recordMCPTransportOutcome(span, "invalid", true)
 		return
 	}
@@ -87,10 +87,10 @@ func handleMCPStreamablePost(ctx context.Context, span trace.Span, w http.Respon
 	sessionID := strings.TrimSpace(r.Header.Get(mcpSessionIDHeader))
 	// Only initialize may create a transport session; every other first request receives an exact recovery contract.
 	if sessionID == "" {
-		handleMCPStreamableInitialize(ctx, span, w, r, appID, token, body, request)
+		handleMCPStreamableInitialize(ctx, span, w, r, routeID, token, body, request)
 		return
 	}
-	sess, status, err := authenticateMCPStreamableSession(ctx, appID, token, sessionID, r.Header.Get(mcpProtocolVersionHeader))
+	sess, status, err := authenticateMCPStreamableSession(ctx, routeID, token, sessionID, r.Header.Get(mcpProtocolVersionHeader))
 	if err != nil {
 		// Reviewed session states carry exact client recovery; credential failures retain their opaque denial.
 		if failure, typed := mcpSessionAuthenticationFailure(err); typed {
@@ -115,14 +115,22 @@ func handleMCPStreamablePost(ctx context.Context, span trace.Span, w http.Respon
 }
 
 // handleMCPStreamableInitialize preserves typed admission failures while establishing one authenticated runtime.
-func handleMCPStreamableInitialize(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, appID, token string, body []byte, request mcpJSONRPCRequest) {
-	// Only a correlated initialize request can establish the transport's immutable session identity.
-	if request.Method != "initialize" || len(request.ID) == 0 || string(compactJSON(request.ID)) == "null" {
-		failure := mcpInitializeRequiredFailure()
-		writeMCPJSONRPCErrorData(w, request.ID, -32600, "initialize is required before creating a session", http.StatusBadRequest, failure)
-		recordMCPTransportFailure(span, "invalid", failure)
+func handleMCPStreamableInitialize(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, routeID, token string, body []byte, request mcpJSONRPCRequest) {
+	// Request-shape admission owns its typed failure before any route lookup.
+	if !admitMCPInitializeRequest(span, w, request) {
 		return
 	}
+	target, admitted := admitMCPStreamableRoute(ctx, span, w, routeID, request.ID)
+	// Route admission owns its bounded client error and telemetry outcome.
+	if !admitted {
+		return
+	}
+	appID := target.AppID.String()
+	span.SetAttributes(
+		attribute.String("app.id", appID),
+		attribute.String("app.family_id", target.AppFamilyID.String()),
+		attribute.Bool("mcp.route.stable", target.Stable),
+	)
 	// Admission precedes runtime allocation and provenance retention.
 	if !allowMCPStreamableStart(ctx, span, w, appID) {
 		return
@@ -148,7 +156,7 @@ func handleMCPStreamableInitialize(ctx context.Context, span trace.Span, w http.
 		recordMCPTransportOutcome(span, "denied", true)
 		return
 	}
-	sess, err := startMCPStreamableSession(ctx, appID, token, protocolVersion, authContext, identity, initialMCPSessionMetadata(r))
+	sess, err := startMCPStreamableSession(ctx, routeID, appID, token, protocolVersion, authContext, identity, initialMCPSessionMetadata(r))
 	// Typed catalogue admission codes survive the session-start boundary without authored content.
 	if err != nil {
 		statusCode, errorCode := mcpSessionStartFailure(err)
@@ -161,6 +169,33 @@ func handleMCPStreamableInitialize(ctx context.Context, span trace.Span, w http.
 	if !serveMCPStreamableRequest(ctx, span, w, sess, body, request) {
 		terminateMCPSession(sess.sessionID, "runtime_failed")
 	}
+}
+
+// admitMCPInitializeRequest requires one correlated initialize request before
+// stable-route resolution or runtime allocation can occur.
+func admitMCPInitializeRequest(span trace.Span, w http.ResponseWriter, request mcpJSONRPCRequest) bool {
+	// Notifications and null IDs cannot establish client-owned transport state.
+	if request.Method != "initialize" || len(request.ID) == 0 || string(compactJSON(request.ID)) == "null" {
+		failure := mcpInitializeRequiredFailure()
+		writeMCPJSONRPCErrorData(w, request.ID, -32600, "initialize is required before creating a session", http.StatusBadRequest, failure)
+		recordMCPTransportFailure(span, "invalid", failure)
+		return false
+	}
+	return true
+}
+
+// admitMCPStreamableRoute snapshots the stable target for a new session and
+// keeps route lifecycle state opaque on every admission failure.
+func admitMCPStreamableRoute(ctx context.Context, span trace.Span, w http.ResponseWriter, routeID string, requestID json.RawMessage) (*store.MCPRouteTarget, bool) {
+	target, err := resolveMCPRoute(ctx, routeID)
+	// Stable and pinned route failures share the token denial contract so
+	// lifecycle state cannot be enumerated before authentication.
+	if err != nil {
+		writeMCPJSONRPCError(w, requestID, -32600, "invalid token", http.StatusUnauthorized)
+		recordMCPTransportOutcome(span, "denied", true)
+		return nil, false
+	}
+	return target, true
 }
 
 // allowMCPStreamableStart applies rate and concurrency admission before allocating a child runtime.
@@ -184,7 +219,7 @@ func allowMCPStreamableConcurrency(ctx context.Context, span trace.Span, w http.
 }
 
 // startMCPStreamableSession starts one isolated runtime that survives active use until authorization or cleanup ends it.
-func startMCPStreamableSession(ctx context.Context, appID, token, protocolVersion string, authContext map[string]any, identity auth.RuntimeIdentity, metadata mcpsession.Metadata) (*mcpSession, error) {
+func startMCPStreamableSession(ctx context.Context, routeID, appID, token, protocolVersion string, authContext map[string]any, identity auth.RuntimeIdentity, metadata mcpsession.Metadata) (*mcpSession, error) {
 	// Runtime state is loaded only after the shared token authorization has succeeded.
 	if err := globalObjectCache.ConnectSDK(ctx, appID); err != nil {
 		return nil, err
@@ -211,7 +246,7 @@ func startMCPStreamableSession(ctx context.Context, appID, token, protocolVersio
 	}
 	sess := &mcpSession{
 		clientMetadata: metadata,
-		appID:          appID, sessionID: sessionID, tokenID: identity.TokenID,
+		appID:          appID, routeID: routeID, sessionID: sessionID, tokenID: identity.TokenID,
 		protocolVersion: protocolVersion, transport: mcpStreamableTransport,
 		cmd: cmd, stdin: stdin, cancel: cancel, responses: make(chan string, 32),
 		token: token, fixture: fixture, authContext: authContext,
@@ -362,6 +397,8 @@ func mcpJSONRPCResponseMatches(response string, requestID json.RawMessage) bool 
 	return bytes.Equal(compactJSON(envelope.ID), compactJSON(requestID))
 }
 
+// compactJSON normalizes one admitted envelope before forwarding it to the
+// newline-delimited child protocol.
 func compactJSON(value json.RawMessage) []byte {
 	var buffer bytes.Buffer
 	if json.Compact(&buffer, value) != nil {
@@ -371,8 +408,8 @@ func compactJSON(value json.RawMessage) []byte {
 }
 
 // handleMCPStreamableGet ties keepalives to session cancellation without imposing a fixed age on active sessions.
-func handleMCPStreamableGet(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, appID, token string) {
-	sess, status, err := authenticateMCPStreamableSession(ctx, appID, token, r.Header.Get(mcpSessionIDHeader), r.Header.Get(mcpProtocolVersionHeader))
+func handleMCPStreamableGet(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, routeID, token string) {
+	sess, status, err := authenticateMCPStreamableSession(ctx, routeID, token, r.Header.Get(mcpSessionIDHeader), r.Header.Get(mcpProtocolVersionHeader))
 	if err != nil {
 		// GET has no JSON-RPC ID, so reviewed session failures use typed HTTP recovery data.
 		if failure, typed := mcpSessionAuthenticationFailure(err); typed {
@@ -401,6 +438,8 @@ func handleMCPStreamableGet(ctx context.Context, span trace.Span, w http.Respons
 	recordMCPTransportOutcome(span, "closed", false)
 }
 
+// streamMCPKeepAlives keeps an attached response open without treating
+// server-originated traffic as client session activity.
 func streamMCPKeepAlives(ctx context.Context, w io.Writer, flusher http.Flusher, sessionID string) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
@@ -419,8 +458,8 @@ func streamMCPKeepAlives(ctx context.Context, w io.Writer, flusher http.Flusher,
 }
 
 // handleMCPStreamableDelete ends only the authenticated transport session and preserves the reusable token.
-func handleMCPStreamableDelete(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, appID, token string) {
-	sess, status, err := authenticateMCPStreamableSession(ctx, appID, token, r.Header.Get(mcpSessionIDHeader), r.Header.Get(mcpProtocolVersionHeader))
+func handleMCPStreamableDelete(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, routeID, token string) {
+	sess, status, err := authenticateMCPStreamableSession(ctx, routeID, token, r.Header.Get(mcpSessionIDHeader), r.Header.Get(mcpProtocolVersionHeader))
 	if err != nil {
 		// DELETE has no JSON-RPC ID, so reviewed session failures use typed HTTP recovery data.
 		if failure, typed := mcpSessionAuthenticationFailure(err); typed {
@@ -439,18 +478,20 @@ func handleMCPStreamableDelete(ctx context.Context, span trace.Span, w http.Resp
 }
 
 // authenticateMCPStreamableSession refreshes activity only after session ownership and token policy succeed.
-func authenticateMCPStreamableSession(ctx context.Context, appID, token, sessionID, protocolVersion string) (*mcpSession, int, error) {
+func authenticateMCPStreamableSession(ctx context.Context, routeID, token, sessionID, protocolVersion string) (*mcpSession, int, error) {
 	if strings.TrimSpace(sessionID) == "" {
 		return nil, http.StatusBadRequest, errMCPSessionHeaderRequired
 	}
 	sess, ok := lookupMCPSession(sessionID)
-	if !ok || sess.transport != mcpStreamableTransport || sess.appID != appID {
+	// Route ownership is retained at initialization so promoting a family URL
+	// does not move an in-flight session to a different immutable runtime.
+	if !ok || sess.transport != mcpStreamableTransport || sess.routeID != routeID {
 		return nil, http.StatusNotFound, errMCPSessionUnavailable
 	}
 	if subtle.ConstantTimeCompare([]byte(token), []byte(sess.token)) != 1 {
 		return nil, http.StatusUnauthorized, errors.New("invalid Authorization header")
 	}
-	identity, err := validateMCPToken(ctx, appID, token)
+	identity, err := validateMCPToken(ctx, sess.appID, token)
 	if err != nil || identity.TokenID != sess.tokenID {
 		return nil, http.StatusUnauthorized, errors.New("invalid token")
 	}

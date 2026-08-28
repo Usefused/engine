@@ -297,8 +297,10 @@ func writeEngineGraphQLAuthorizationError(w http.ResponseWriter, ctx context.Con
 var mcpTransportURLsGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "MCPTransportURLs",
 	Fields: graphql.Fields{
-		"streamable_http": &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
-		"sse":             &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"streamable_http":           &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"sse":                       &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"versioned_streamable_http": &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"versioned_sse":             &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
 	},
 })
 
@@ -311,6 +313,8 @@ var mcpServerType = graphql.NewObject(graphql.ObjectConfig{
 		"config_key":        &graphql.Field{Type: graphql.String},
 		"default_transport": &graphql.Field{Type: graphql.String},
 		"transport_urls":    &graphql.Field{Type: mcpTransportURLsGraphQLType},
+		"stable":            &graphql.Field{Type: graphql.Boolean},
+		"stable_version_id": &graphql.Field{Type: graphql.String},
 		"execution_token":   &graphql.Field{Type: graphql.String},
 		"active":            &graphql.Field{Type: graphql.Boolean},
 		"deactivated_at":    &graphql.Field{Type: graphql.String},
@@ -603,8 +607,10 @@ func mcpServerByNameField(s store.Store) *graphql.Field {
 // returns the server it just acted on -- one mapping, not five copies that
 // could drift on which fields it exposes.
 func mcpServerFields(r *http.Request, scope store.AppRuntime) map[string]interface{} {
+	// Empty status belongs to compatibility projections that predate explicit
+	// lifecycle state; persisted versions must still be runnable.
 	active := scope.Status == "" || scope.Status.Runnable()
-	transportURLs := mcpTransportURLsForApp(r, scope.AppID)
+	transportURLs := mcpTransportURLsForApp(r, scope.AppFamilyID, scope.AppID, scope.StableAppID)
 	return map[string]interface{}{
 		"id":                scope.AppID.String(),
 		"name":              scope.Name,
@@ -612,6 +618,8 @@ func mcpServerFields(r *http.Request, scope store.AppRuntime) map[string]interfa
 		"config_key":        scope.ConfigKey,
 		"default_transport": mcpDefaultTransport,
 		"transport_urls":    mcpTransportURLsGraphQLValue(transportURLs),
+		"stable":            scope.StableAppID == scope.AppID,
+		"stable_version_id": optionalUUIDString(scope.StableAppID),
 		"active":            active,
 		"deactivated_at":    "",
 		"created_at":        scope.CreatedAt.Format(mcpGraphQLTimeFormat),
