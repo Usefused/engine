@@ -1,6 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { Fixture, FixtureOperation, FixtureUnifiedOperation } from "./fixture.js";
+import { Fixture as RuntimeFixture, FixtureOperation, FixtureSchemaContract, FixtureUnifiedOperation } from "./fixture.js";
 import { SEARCH_DOCS_MAX_BYTES, SEARCH_DOCS_MAX_LIMIT, searchDocs } from "./searchDocs.js";
+
+const testServer = {
+  name: "search-docs-test", title: "Search docs test", version: "1.0.0",
+  description: "Exercise operation documentation search.",
+} as const;
+
+class Fixture extends RuntimeFixture {
+  /** Supplies complete server identity while individual tests focus on catalogue behavior. */
+  constructor(
+    operations: FixtureOperation[],
+    unifiedOperations: FixtureUnifiedOperation[] = [],
+    schemaDefinitions: Record<string, Record<string, FixtureSchemaContract>> = {},
+  ) {
+    super(operations, unifiedOperations, schemaDefinitions, testServer);
+  }
+}
 
 const listRepos: FixtureOperation = {
   operation_id: "github.listRepos",

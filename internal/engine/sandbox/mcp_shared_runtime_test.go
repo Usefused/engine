@@ -31,7 +31,21 @@ import (
 // catalogs, keeping handler tests realistic without global fixture state.
 func fixtureForTest(t *testing.T, raw string) *Fixture {
 	t.Helper()
-	fixture, err := LoadFixture(writeTempFixture(t, raw))
+	var document map[string]any
+	// Handler fixtures focus on call behavior but still cross the real mandatory server-identity boundary.
+	if err := json.Unmarshal([]byte(raw), &document); err != nil {
+		t.Fatalf("decode test fixture: %v", err)
+	}
+	document["server"] = FixtureServerMetadata{
+		Name: "shared-runtime-test", Title: "Shared runtime test", Version: "1.0.0",
+		Description: "Exercise the shared MCP runtime call path.",
+	}
+	encoded, err := json.Marshal(document)
+	// Re-encoding must succeed before the production fixture loader is exercised.
+	if err != nil {
+		t.Fatalf("encode test fixture: %v", err)
+	}
+	fixture, err := LoadFixture(writeTempFixture(t, string(encoded)))
 	if err != nil {
 		t.Fatalf("LoadFixture() error = %v", err)
 	}

@@ -31,7 +31,13 @@ type mcpRuntimeLimitResponse struct {
 	Result struct {
 		ProtocolVersion string `json:"protocolVersion"`
 		Instructions    string `json:"instructions"`
-		Tools           []struct {
+		ServerInfo      struct {
+			Name        string `json:"name"`
+			Title       string `json:"title"`
+			Version     string `json:"version"`
+			Description string `json:"description"`
+		} `json:"serverInfo"`
+		Tools []struct {
 			Name        string                    `json:"name"`
 			Description string                    `json:"description"`
 			Meta        map[string]map[string]any `json:"_meta"`
@@ -93,6 +99,11 @@ type mcpRuntimeExecuteFailure struct {
 	AutomaticReplay   bool   `json:"automatic_replay"`
 }
 
+var mcpRuntimeDocumentationServer = FixtureServerMetadata{
+	Name: "documentation-test", Title: "Documentation test", Version: "1.0.0",
+	Description: "Exercise selected operation documentation and execution behavior.",
+}
+
 // TestMCPBundledRuntimeAdvertisesSessionContract verifies the actual MCP SDK wire surfaces visible to hosts and agents.
 func TestMCPBundledRuntimeAdvertisesSessionContract(t *testing.T) {
 	client := startMCPLimitRuntime(t, "1")
@@ -106,7 +117,7 @@ func TestMCPBundledRuntimeAdvertisesSessionContract(t *testing.T) {
 
 // TestMCPBundledRuntimeSearchDocsPaginationGuidance verifies Go fixture policy reaches the public JSON-RPC result.
 func TestMCPBundledRuntimeSearchDocsPaginationGuidance(t *testing.T) {
-	fixture := &Fixture{Operations: []FixtureOperation{
+	fixture := &Fixture{Server: mcpRuntimeDocumentationServer, Operations: []FixtureOperation{
 		{OperationID: "users.list", ServiceID: "users", Name: "List users", Description: "List users", Method: "GET", Path: "/users", Responses: models.Responses{}, Pagination: FixturePagination{Supported: true, CallerBoundSupported: true, EngineMaxPages: 100}},
 		{OperationID: "users.get", ServiceID: "users", Name: "Get user", Description: "Get one user", Method: "GET", Path: "/users/{id}", Responses: models.Responses{}, Pagination: FixturePagination{Supported: false}},
 	}}
@@ -140,7 +151,7 @@ func TestMCPBundledRuntimePaginationErrorsPreserveCorrection(t *testing.T) {
 	}))
 	defer bridge.Close()
 
-	fixture := &Fixture{Operations: []FixtureOperation{{
+	fixture := &Fixture{Server: mcpRuntimeDocumentationServer, Operations: []FixtureOperation{{
 		OperationID: "gmail.users.messages.get", ServiceID: "gmail", Name: "Get message", Method: "GET", Path: "/messages/{id}", Responses: models.Responses{}, Pagination: FixturePagination{Supported: false},
 	}}}
 	client := startMCPLimitRuntimeWithFixture(t, strings.TrimPrefix(bridge.URL, "http://127.0.0.1:"), fixture)
@@ -281,6 +292,10 @@ func assertMCPRuntimeInitializeContract(t *testing.T, initialized mcpRuntimeLimi
 	if !strings.Contains(initialized.Result.Instructions, "exact operationId detail") || !strings.Contains(initialized.Result.Instructions, "Never reuse") {
 		t.Fatal("initialize omitted operation-specific pagination guidance")
 	}
+	// Server identity must explain the app's business capability without leaking operation-level discovery into initialization.
+	if initialized.Result.ServerInfo.Name != "mail-assistant" || initialized.Result.ServerInfo.Version != "1.2.3" || !strings.Contains(initialized.Result.ServerInfo.Description, "send email") || strings.Contains(initialized.Result.ServerInfo.Description, "operationId") {
+		t.Fatalf("initialize serverInfo = %+v, want authored app-version description", initialized.Result.ServerInfo)
+	}
 }
 
 // assertMCPRuntimeExecuteContract checks the script-session metadata on only the provider-capable tool.
@@ -332,7 +347,13 @@ func startMCPLimitRuntime(t *testing.T, enginePort string) *mcpRuntimeLimitClien
 
 // startMCPLimitRuntimeWithDeadline allows deadline tests to outlive the production execute budget without changing it.
 func startMCPLimitRuntimeWithDeadline(t *testing.T, enginePort string, timeout time.Duration) *mcpRuntimeLimitClient {
-	return startMCPLimitRuntimeWithFixtureAndDeadline(t, enginePort, &Fixture{Operations: []FixtureOperation{}}, timeout)
+	return startMCPLimitRuntimeWithFixtureAndDeadline(t, enginePort, &Fixture{
+		Server: FixtureServerMetadata{
+			Name: "mail-assistant", Title: "Mail assistant", Version: "1.2.3",
+			Description: "Read, search, summarize, draft, and send email through the connected mailbox.",
+		},
+		Operations: []FixtureOperation{},
+	}, timeout)
 }
 
 // startMCPLimitRuntimeWithFixture starts the bundled runtime with an explicit public catalogue.

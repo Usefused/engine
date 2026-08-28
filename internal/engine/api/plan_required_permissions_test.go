@@ -16,6 +16,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/store"
 )
 
+// TestMCPConfigPlanResponseIncludesExactApplyPermissions keeps plan authorization explicit after server metadata admission.
 func TestMCPConfigPlanResponseIncludesExactApplyPermissions(t *testing.T) {
 	serviceID := uuid.New()
 	serviceVersionID := uuid.New()
@@ -39,7 +40,7 @@ func TestMCPConfigPlanResponseIncludesExactApplyPermissions(t *testing.T) {
 	body := []byte(`{
 		"source_hash":"abc",
 		"owner_team":"platform","config_key":"mcp:security:1.0.0",
-		"config":{"apiVersion":"fused/v1","kind":"mcp","name":"security","version":"1.0.0","bucket":"default","services":{"okta":{"version":"2026-07-01","select_all":true}}}
+		"config":{"apiVersion":"fused/v1","kind":"mcp","name":"security","version":"1.0.0","description":"Review security activity in Okta.","bucket":"default","services":{"okta":{"version":"2026-07-01","select_all":true}}}
 	}`)
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/mcp-config/plan", bytes.NewReader(body))

@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import { Fixture, type FixtureOperation, type FixtureSchemaContract } from "./fixture.js";
 import { searchDocs } from "./searchDocs.js";
 
+const testServer = {
+  name: "shared-schema-test", title: "Shared schema test", version: "1.0.0",
+  description: "Exercise shared schema documentation.",
+} as const;
+
 /** Keeps the shared reference independent from the one fixture-level definition dictionary. */
 function sharedFixture(): Fixture {
   const definition: FixtureSchemaContract = {
@@ -17,7 +22,7 @@ function sharedFixture(): Fixture {
       raw: { $ref: "#/$defs/Payload" }, projection: {},
     }}]},
   };
-  return new Fixture([operation], [], { "version-a": { Payload: definition } });
+  return new Fixture([operation], [], { "version-a": { Payload: definition } }, testServer);
 }
 
 describe("shared schema documentation", () => {

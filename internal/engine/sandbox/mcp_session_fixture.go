@@ -48,11 +48,64 @@ func buildSessionFixture(ctx context.Context, cache ObjectCache, appID string, s
 	if err := fixture.attachUnifiedOperations(descriptors); err != nil {
 		return nil, err
 	}
+	metadataLoader, ok := cache.(mcpServerMetadataLoader)
+	// Server identity must describe the same immutable app version as the catalogue, never a process-wide runtime.
+	if !ok {
+		return nil, fmt.Errorf("MCP server metadata lookup unavailable")
+	}
+	metadata, err := metadataLoader.GetMCPServerMetadata(ctx, appID)
+	// Persistence failures must not silently relabel one app as a generic shared server.
+	if err != nil {
+		return nil, err
+	}
+	fixture.Server, err = validateMCPServerMetadata(metadata)
+	// Missing authored identity is an invalid app version, not a reason to invent generic server capabilities.
+	if err != nil {
+		return nil, err
+	}
 	return fixture, nil
 }
 
 type mcpUnifiedDescriptorLoader interface {
 	GetMCPUnifiedOperationDescriptors(context.Context, string, store.AppTokenPolicy) (*models.SDKUnifiedOperationDescriptors, error)
+}
+
+type mcpServerMetadataLoader interface {
+	GetMCPServerMetadata(context.Context, string) (FixtureServerMetadata, error)
+}
+
+// GetMCPServerMetadata reads the exact immutable runtime identity without retaining another metadata cache.
+func (c *LocalObjectCache) GetMCPServerMetadata(ctx context.Context, appID string) (FixtureServerMetadata, error) {
+	parsedAppID, err := uuid.Parse(appID)
+	// A malformed transport identifier cannot be allowed to select a different app record.
+	if err != nil {
+		return FixtureServerMetadata{}, fmt.Errorf("invalid MCP app id: %w", err)
+	}
+	runtime, err := c.db.GetAppRuntime(ctx, parsedAppID)
+	// The session must advertise only metadata belonging to its successfully loaded app version.
+	if err != nil {
+		return FixtureServerMetadata{}, fmt.Errorf("load MCP server metadata: %w", err)
+	}
+	return FixtureServerMetadata{
+		Name: runtime.Name, Title: runtime.Name, Version: runtime.Version, Description: runtime.Description,
+	}, nil
+}
+
+// validateMCPServerMetadata requires complete authored identity for every runnable MCP app version.
+func validateMCPServerMetadata(metadata FixtureServerMetadata) (FixtureServerMetadata, error) {
+	metadata.Name = strings.TrimSpace(metadata.Name)
+	metadata.Title = strings.TrimSpace(metadata.Title)
+	metadata.Version = strings.TrimSpace(metadata.Version)
+	metadata.Description = strings.TrimSpace(metadata.Description)
+	// Every field is part of the advertised immutable version; partial metadata must stop session creation.
+	if metadata.Name == "" || metadata.Title == "" || metadata.Version == "" || metadata.Description == "" {
+		return FixtureServerMetadata{}, fmt.Errorf("MCP app version is missing required server metadata")
+	}
+	// Defensive runtime admission mirrors config planning even when a fixture comes from another adapter.
+	if len(metadata.Description) > models.MCPServerDescriptionMaxBytes {
+		return FixtureServerMetadata{}, fmt.Errorf("MCP server description exceeds %d bytes", models.MCPServerDescriptionMaxBytes)
+	}
+	return metadata, nil
 }
 
 // GetMCPUnifiedOperationDescriptors delegates one session-scoped read to the

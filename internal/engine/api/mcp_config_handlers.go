@@ -172,6 +172,10 @@ func validateAppConfigDocument(doc sdkConfigDocument, kind string) error {
 	if strings.TrimSpace(doc.Bucket) == "" {
 		return fmt.Errorf("%s config requires exactly one bucket", kind)
 	}
+	// Hosted identity must be admitted before any service or graph work can make the version runnable.
+	if err := validateMCPServerDescription(doc, kind); err != nil {
+		return err
+	}
 	if err := validateMCPAppRestrictions(doc, kind); err != nil {
 		return err
 	}
@@ -183,6 +187,23 @@ func validateAppConfigDocument(doc sdkConfigDocument, kind string) error {
 	// MCP shares the SDK graph contract but has no generated language symbols,
 	// so only the code-generation checks are disabled at this boundary.
 	return validateAppUnifiedOperations(doc, false)
+}
+
+// validateMCPServerDescription keeps hosted-server identity policy separate from shared app selection validation.
+func validateMCPServerDescription(doc sdkConfigDocument, kind string) error {
+	// SDK documents share this decoder but must not be subjected to MCP-only metadata requirements.
+	if kind != store.AppKindMCP.String() {
+		return nil
+	}
+	// MCP clients choose a server before inspecting its operations, so every new version must explain its purpose up front.
+	if strings.TrimSpace(doc.Description) == "" {
+		return errors.New("mcp config requires a server description")
+	}
+	// Server identity metadata is repeated in model context and must remain independently bounded.
+	if len(doc.Description) > models.MCPServerDescriptionMaxBytes {
+		return fmt.Errorf("mcp config description must be at most %d bytes", models.MCPServerDescriptionMaxBytes)
+	}
+	return nil
 }
 
 // validateMCPAppRestrictions rejects malformed mcp app restrictions before it can cross the Unified operation boundary.
@@ -243,7 +264,8 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 		return sdkPlanResult{}, err
 	}
 	payload := appResolvedPayload{
-		Selections: selections, ContractBindings: targetBindings, CredentialSourceBindings: credentialSourceBindings, BucketID: bucket.ID,
+		Description: strings.TrimSpace(call.document.Description),
+		Selections:  selections, ContractBindings: targetBindings, CredentialSourceBindings: credentialSourceBindings, BucketID: bucket.ID,
 		UnifiedDefinitionSchemaVersion: unified.DefinitionSchemaVersion,
 		UnifiedDefinitions:             unifiedCompilation.DefinitionJSON,
 		UnifiedDefinitionHash:          unifiedCompilation.DefinitionHash,
@@ -422,6 +444,7 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 		accountID: call.accountID, appID: runtimeID, ownerSubjectID: planOwnerSubjectID(plan), ownerTeamID: planOwnerTeamID(plan), bucketID: payload.BucketID, bucketName: doc.Bucket,
 		selections: payload.Selections, scopeSchemaVersion: models.AppScopeSchemaVersion,
 		kind: store.AppKindMCP, name: doc.Name, version: doc.Version, configKey: plan.ConfigKey,
+		description:                    payload.Description,
 		unifiedDefinitionSchemaVersion: payload.UnifiedDefinitionSchemaVersion,
 		unifiedDefinitions:             payload.UnifiedDefinitions,
 		unifiedDefinitionHash:          payload.UnifiedDefinitionHash,

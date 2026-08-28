@@ -160,6 +160,7 @@ type concurrentArtifactApplyFixture struct {
 	params     ApplyAppConfigPlanParams
 }
 
+// newConcurrentArtifactApplyFixture creates one immutable plan/runtime pair for atomic apply integration coverage.
 func newConcurrentArtifactApplyFixture(t *testing.T, configType ConfigType) concurrentArtifactApplyFixture {
 	t.Helper()
 	dbURL := os.Getenv("DATABASE_URL")
@@ -204,7 +205,7 @@ func newConcurrentArtifactApplyFixture(t *testing.T, configType ConfigType) conc
 	plan, err := repository.CreateConfigPlan(ctx, CreateConfigPlanParams{
 		ConfigKey: configKey, ConfigType: configType, OwnerTeamID: &ownerTeamID,
 		SourceHash: "source", BaseGeneration: 0, Actions: []byte("[]"), DesiredState: []byte("{}"),
-		ResolvedPayload: []byte("{}"), Blockers: []byte("[]"), Warnings: []byte("[]"),
+		ResolvedPayload: []byte(`{"description":"Coordinate work through the connected service."}`), Blockers: []byte("[]"), Warnings: []byte("[]"),
 		RequiredPermissions: required, CreatedBy: accountID,
 	})
 	if err != nil {
@@ -231,7 +232,7 @@ func newConcurrentArtifactApplyFixture(t *testing.T, configType ConfigType) conc
 			},
 			Scope: AppRuntime{AccountID: accountID, AppID: appID, OwnerTeamID: ownerTeamID,
 				BucketID: bucketID, Selections: []byte("[]"), ScopeSchemaVersion: models.AppScopeSchemaVersion,
-				Kind: AppKind(configType), Name: "concurrent", Version: version, ConfigKey: configKey},
+				Kind: AppKind(configType), Name: "concurrent", Description: "Coordinate work through the connected service.", Version: version, ConfigKey: configKey},
 			AuthorizedBucketName:      bucketName,
 			TokenName:                 "default",
 			TokenPolicy:               AppTokenPolicy{AllowAll: true, AllowedOperations: []string{}},
@@ -243,6 +244,7 @@ func newConcurrentArtifactApplyFixture(t *testing.T, configType ConfigType) conc
 	}
 }
 
+// assertAtomicArtifactApplyState verifies every runtime, token, state, plan, and identity write committed together.
 func assertAtomicArtifactApplyState(t *testing.T, fixture concurrentArtifactApplyFixture) {
 	t.Helper()
 	var scopes, tokens, states, applied int
@@ -264,8 +266,23 @@ func assertAtomicArtifactApplyState(t *testing.T, fixture concurrentArtifactAppl
 	if scopes != 1 || tokens != 1 || states != 1 || applied != 1 {
 		t.Fatalf("atomic artifact state scopes=%d tokens=%d states=%d applied=%d", scopes, tokens, states, applied)
 	}
+	assertAppRuntimeDescription(t, fixture)
 	assertArtifactTokenAuditActor(t, fixture)
 	assertCanonicalCapabilityHash(t, fixture)
+}
+
+// assertAppRuntimeDescription proves runtime reads project immutable server prose from the exact applied plan.
+func assertAppRuntimeDescription(t *testing.T, fixture concurrentArtifactApplyFixture) {
+	t.Helper()
+	runtime, err := NewPostgresStore(fixture.pool).GetAppRuntime(fixture.ctx, fixture.params.Scope.AppID)
+	// A missing runtime row cannot supply protocol identity for the applied app version.
+	if err != nil {
+		t.Fatalf("read runtime description: %v", err)
+	}
+	// Mismatched prose would make the session advertise identity from a different source than its catalogue.
+	if runtime.Description != fixture.params.Scope.Description {
+		t.Fatalf("runtime description = %q, want %q", runtime.Description, fixture.params.Scope.Description)
+	}
 }
 
 // assertArtifactTokenAuditActor proves account-level config attribution cannot

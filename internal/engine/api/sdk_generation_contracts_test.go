@@ -250,7 +250,7 @@ func TestMCPPlanUsesUnpinnedLocalSnapshot(t *testing.T) {
 	configs := &mockConfigStore{}
 	router := newControlTestRouter(s.accountID)
 	router.Post("/mcp-config/plan", MCPConfigPlanHandler(configs, s, &generationPlanningRegistryTrap{RegistryClient: &mockRegistryClient{}, t: t}))
-	body := []byte(`{"source_hash":"config-hash","owner_team":"platform","config_key":"mcp:retained:1.0.0","config":{"apiVersion":"fused/v1","kind":"mcp","name":"retained","version":"1.0.0","bucket":"default","services":{"Saved service":{"version":"1.0","operations":["listLogEvents"]}}}}`)
+	body := []byte(`{"source_hash":"config-hash","owner_team":"platform","config_key":"mcp:retained:1.0.0","config":{"apiVersion":"fused/v1","kind":"mcp","name":"retained","version":"1.0.0","description":"Review retained service activity.","bucket":"default","services":{"Saved service":{"version":"1.0","operations":["listLogEvents"]}}}}`)
 	request := httptest.NewRequest(http.MethodPost, "/mcp-config/plan", bytes.NewReader(body))
 	request.Header.Set("X-API-Key", "fsk_test")
 	response := httptest.NewRecorder()

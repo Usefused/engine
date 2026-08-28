@@ -207,7 +207,16 @@ export interface FixtureUnifiedTarget {
   output_schema?: unknown;
 }
 
+/** Carries app-version identity that MCP hosts can inspect before listing tools. */
+export interface FixtureServerMetadata {
+  name: string;
+  title: string;
+  version: string;
+  description: string;
+}
+
 interface FixtureFile {
+  server?: Partial<FixtureServerMetadata>;
   schema_definitions?: Record<string, Record<string, FixtureSchemaContract>>;
   operations: FixtureOperation[];
   unified_operations?: {
@@ -228,11 +237,14 @@ export class Fixture {
   private readonly byOperationId = new Map<string, FixtureOperation>();
   private readonly byUnifiedOperationId = new Map<string, FixtureUnifiedOperation>();
 
+  /** Admits immutable server identity before indexing any callable catalogue entries. */
   constructor(
     public readonly operations: FixtureOperation[],
     public readonly unifiedOperations: FixtureUnifiedOperation[] = [],
     public readonly schemaDefinitions: Record<string, Record<string, FixtureSchemaContract>> = {},
+    server?: Partial<FixtureServerMetadata>,
   ) {
+    this.server = validateServerMetadata(server);
     for (const op of operations) {
       // Exact physical IDs remain mandatory because call() has no fallback key.
       if (!op.operation_id) {
@@ -259,6 +271,8 @@ export class Fixture {
     }
   }
 
+  public readonly server: FixtureServerMetadata;
+
   /**
    * Resolve looks up an operation by operationId. Returns undefined if the ID
    * isn't in this MCP server's registered set -- the mechanical enforcement
@@ -274,6 +288,23 @@ export class Fixture {
   resolveUnified(operationId: string): FixtureUnifiedOperation | undefined {
     return this.byUnifiedOperationId.get(operationId);
   }
+}
+
+/** Validates complete app-version identity before the runtime advertises an MCP server. */
+function validateServerMetadata(server?: Partial<FixtureServerMetadata>): FixtureServerMetadata {
+  const name = server?.name?.trim();
+  const title = server?.title?.trim();
+  const version = server?.version?.trim();
+  const description = server?.description?.trim();
+  // Missing authored metadata means the immutable MCP version is not runnable.
+  if (!name || !title || !version || !description) {
+    throw new Error("fixture.json missing required server metadata");
+  }
+  // Authored descriptions are admitted by Engine, while standalone fixtures still need a defensive context bound.
+  if (Buffer.byteLength(description, "utf8") > 1024) {
+    throw new Error("fixture server description exceeds 1024 bytes");
+  }
+  return { name, title, version, description };
 }
 
 /** Rejects incomplete or contradictory pagination metadata before it becomes model-visible. */
@@ -319,5 +350,5 @@ export function loadFixture(path: string): Fixture {
     throw new Error("fixture.json has an unsupported Unified descriptor");
   }
   // Standalone fixtures have no dictionary; compact roots retain the exact version-keyed shared source.
-  return new Fixture(parsed.operations, unified?.operations ?? [], parsed.schema_definitions ?? {});
+  return new Fixture(parsed.operations, unified?.operations ?? [], parsed.schema_definitions ?? {}, parsed.server);
 }

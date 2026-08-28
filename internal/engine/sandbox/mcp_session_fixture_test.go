@@ -31,6 +31,8 @@ func TestBuildSessionFixture_MapsEndpointsAcrossSelections(t *testing.T) {
 	db := &mockCacheDB{
 		contractMetadata:  &fusedobject.ServiceMetadata{ID: svcA, Pagination: servicePolicy},
 		contractEndpoints: endpoints,
+		appName:           "directory-assistant", appVersion: "2.1.0",
+		appDescription: "Find and review people in the connected directory.",
 		policyOverrides: map[store.WorkspaceExecutionPolicyRef]*store.WorkspaceExecutionPolicyOverride{
 			{ServiceID: svcA, ServiceVersionID: svcB}: {Pagination: overridePolicy},
 		},
@@ -51,12 +53,25 @@ func TestBuildSessionFixture_MapsEndpointsAcrossSelections(t *testing.T) {
 		t.Fatal(`fixture.Resolve("getUser") = not found, want found`)
 	}
 	assertListUsersOperation(t, fixture, svcA)
+	// Session identity must come from the same immutable app version as the selected catalogue.
+	if fixture.Server.Name != db.appName || fixture.Server.Version != db.appVersion || fixture.Server.Description != db.appDescription {
+		t.Fatalf("fixture server metadata = %#v", fixture.Server)
+	}
 	if db.contractBatchCalls != 1 {
 		t.Fatalf("unrestricted fixture snapshot queries = %d, want one batched query", db.contractBatchCalls)
 	}
 	// Effective workspace overrides must remain one set-based lookup for the entire selection.
 	if db.policyBatchCalls != 1 {
 		t.Fatalf("pagination policy queries = %d, want one batched query", db.policyBatchCalls)
+	}
+}
+
+// TestValidateMCPServerMetadataRejectsMissingIdentity prevents generic compatibility servers from starting.
+func TestValidateMCPServerMetadataRejectsMissingIdentity(t *testing.T) {
+	_, err := validateMCPServerMetadata(FixtureServerMetadata{})
+	// Missing authored prose must make the immutable version unrunnable.
+	if err == nil {
+		t.Fatal("missing MCP server metadata was accepted")
 	}
 }
 
@@ -120,6 +135,7 @@ func TestBuildSessionFixture_StrictTokenFetchesOnlyAllowedOperations(t *testing.
 	allowedList := uuid.New()
 	db := &mockCacheDB{
 		contractMetadata: &fusedobject.ServiceMetadata{ID: uuid.New(), Name: "Users"},
+		appName:          "users-test", appVersion: "1.0.0", appDescription: "Find and manage test users.",
 		contractEndpoints: []fusedobject.Endpoint{
 			{ID: allowedGet, Name: "getUser", Method: "GET", Path: "/users/{id}"},
 			{ID: allowedList, Name: "listUsers", Method: "GET", Path: "/users"},
@@ -168,6 +184,7 @@ func seedMCPPaginationMetadata(cache *LocalObjectCache, selections []models.SDKS
 func TestBuildSessionFixtureAttachesAppliedPlanDescriptor(t *testing.T) {
 	database := &mockCacheDB{
 		contractMetadata: &fusedobject.ServiceMetadata{ID: uuid.New(), Name: "Users"},
+		appName:          "users-sync-test", appVersion: "1.0.0", appDescription: "Synchronize test users.",
 		unifiedDescriptors: &models.SDKUnifiedOperationDescriptors{
 			SchemaVersion: models.SDKUnifiedDescriptorSchemaVersion,
 			Operations:    []models.SDKUnifiedOperationDescriptor{{Name: "users.sync", InputSchema: json.RawMessage(`{"type":"object"}`)}},

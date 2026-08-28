@@ -58,8 +58,10 @@ type sdkConfigDocument struct {
 	Kind       string `json:"kind"`
 	Name       string `json:"name"`
 	Version    string `json:"version"`
-	Language   string `json:"language"`
-	Bucket     string `json:"bucket,omitempty"`
+	// Description is the authored MCP server summary returned in protocol identity metadata.
+	Description string `json:"description,omitempty"`
+	Language    string `json:"language"`
+	Bucket      string `json:"bucket,omitempty"`
 	// Generate is tri-state on purpose: absent means the historical default of
 	// building a package. Only an explicit false suppresses codegen, leaving a
 	// published app version that is reachable over REST execution and
@@ -399,22 +401,51 @@ func validateSDKConfigDocument(doc sdkConfigDocument) error {
 	return validateSDKUnifiedOperations(doc)
 }
 
+// validateSDKIdentity admits package identity fields while rejecting MCP-only server metadata.
 func validateSDKIdentity(doc sdkConfigDocument) error {
+	// Base identity errors must stop before output-only fields are interpreted.
+	if err := validateSDKBaseIdentity(doc); err != nil {
+		return err
+	}
+	return validateSDKOutputFields(doc)
+}
+
+// validateSDKBaseIdentity enforces the immutable coordinates shared by every generated package.
+func validateSDKBaseIdentity(doc sdkConfigDocument) error {
+	// A different API generation cannot be safely interpreted with this contract.
 	if doc.APIVersion != "fused/v1" {
 		return errors.New("config apiVersion must be fused/v1")
 	}
+	// Kind is part of immutable app identity, so an MCP document cannot enter SDK planning.
 	if doc.Kind != store.AppKindSDK.String() {
 		return errors.New("config kind must be sdk")
 	}
-	if strings.TrimSpace(doc.Name) == "" || strings.TrimSpace(doc.Version) == "" {
+	// Both coordinates are required before version immutability can be enforced.
+	if strings.TrimSpace(doc.Name) == "" {
 		return errors.New("sdk config requires name and version")
 	}
+	// Splitting the checks preserves the same diagnostic while keeping decision complexity explicit.
+	if strings.TrimSpace(doc.Version) == "" {
+		return errors.New("sdk config requires name and version")
+	}
+	// Registry app versions use SemVer so identity remains interoperable across CLI and Engine.
 	if !validAppVersion(doc.Version) {
 		return errors.New("sdk config requires a SemVer-compatible version")
 	}
+	return nil
+}
+
+// validateSDKOutputFields rejects hosted-runtime metadata and incomplete package routing.
+func validateSDKOutputFields(doc sdkConfigDocument) error {
+	// Registry generation supports only the maintained language emitters.
 	if doc.Language != "typescript" && doc.Language != "python" && doc.Language != "go" {
 		return fmt.Errorf("invalid sdk language %q", doc.Language)
 	}
+	// Authored server prose has no SDK output consumer and must not become inert immutable state.
+	if strings.TrimSpace(doc.Description) != "" {
+		return errors.New("sdk config must not set description")
+	}
+	// A single bucket is the credential-routing boundary for every generated app version.
 	if strings.TrimSpace(doc.Bucket) == "" {
 		return errors.New("sdk config requires exactly one bucket")
 	}
@@ -1040,6 +1071,7 @@ func canonicalAppDocument(doc sdkConfigDocument) sdkConfigDocument {
 	canonical.Kind = strings.TrimSpace(doc.Kind)
 	canonical.Name = strings.TrimSpace(doc.Name)
 	canonical.Version = strings.TrimSpace(doc.Version)
+	canonical.Description = strings.TrimSpace(doc.Description)
 	canonical.Language = strings.TrimSpace(doc.Language)
 	canonical.Bucket = strings.TrimSpace(doc.Bucket)
 	canonical.WebhookAttachment = strings.TrimSpace(doc.WebhookAttachment)
@@ -3442,6 +3474,7 @@ func appRuntimeForApply(p persistAppRuntimeParams) (store.AppRuntime, error) {
 		UnifiedCodegenDescriptorHash:   p.unifiedCodegenDescriptorHash,
 		Kind:                           p.kind,
 		Name:                           p.name,
+		Description:                    p.description,
 		Version:                        p.version,
 		ConfigKey:                      p.configKey,
 	}, nil

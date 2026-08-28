@@ -69,6 +69,11 @@ func (*streamableSessionCache) GetMCPUnifiedOperationDescriptors(context.Context
 	return nil, nil
 }
 
+// GetMCPServerMetadata supplies stable identity for transport tests that do not load an applied app plan.
+func (*streamableSessionCache) GetMCPServerMetadata(context.Context, string) (FixtureServerMetadata, error) {
+	return FixtureServerMetadata{Name: "transport-test", Title: "Transport test", Version: "1.0.0", Description: "Exercise the MCP transport contract."}, nil
+}
+
 // Write simulates a dead or partially consumed child pipe without retaining request content.
 func (writer *streamableFailingWriter) Write(payload []byte) (int, error) {
 	// The configured prefix is capped to the supplied payload so tests cannot violate io.Writer's byte-count contract.

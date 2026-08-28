@@ -86,6 +86,9 @@ type AppRuntime struct {
 	// set by a reactivate-only activate call (persistAppRuntime isn't invoked
 	// on that path), so it can be empty even for a scope in active use.
 	Name string
+	// Description is immutable authored MCP identity metadata projected from
+	// the applied config plan; an empty value makes an MCP version unrunnable.
+	Description string
 	// Version and ConfigKey identify the immutable declaration that created a
 	// runtime scope; they are metadata only and never contain credentials.
 	Version   string

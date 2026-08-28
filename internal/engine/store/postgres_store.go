@@ -151,12 +151,21 @@ func (s *postgresStore) GetLatestWorkspaceServiceVersionID(ctx context.Context, 
 
 // appRuntimeSelectColumns is shared by GetAppRuntime/ListAppRuntimes/
 // ListMCPAppsByAccount so their SELECT lists and Scan order can't drift
-// apart from each other.
+// apart from each other. Description stays in the applied immutable plan so
+// legacy rows need no schema backfill and every runtime reads its exact source hash.
 const appRuntimeSelectColumns = `a.account_id, a.app_id, f.owner_subject_id, f.owner_team_id,
 fb.bucket_id, a.scope_schema_version, a.selections,
 a.unified_definition_schema_version, a.unified_definitions,
 a.unified_definition_hash, a.unified_codegen_descriptor_hash,
-a.status, f.kind, f.display_name, a.version, a.config_key, a.created_at`
+a.status, f.kind, f.display_name,
+COALESCE((
+	SELECT applied.resolved_payload->>'description'
+	FROM fused_config_plans applied
+	WHERE applied.config_key = a.config_key AND applied.source_hash = a.source_hash
+	  AND applied.status = 'applied'
+	ORDER BY applied.applied_at DESC NULLS LAST, applied.created_at DESC
+	LIMIT 1
+), ''), a.version, a.config_key, a.created_at`
 
 func scanAppRuntime(row pgx.Row) (*AppRuntime, error) {
 	scope, _, err := scanAppRuntimeRow(row, false)
@@ -180,7 +189,7 @@ func scanAppRuntimeRow(row pgx.Row, includeTotal bool) (*AppRuntime, int, error)
 		&bucketID, &scope.ScopeSchemaVersion, &scope.Selections,
 		&scope.UnifiedDefinitionSchemaVersion, &scope.UnifiedDefinitions,
 		&scope.UnifiedDefinitionHash, &scope.UnifiedCodegenDescriptorHash, &scope.Status,
-		&scope.Kind, &name, &version, &configKey, &scope.CreatedAt,
+		&scope.Kind, &name, &scope.Description, &version, &configKey, &scope.CreatedAt,
 	}
 	if includeTotal {
 		targets = append(targets, &total)

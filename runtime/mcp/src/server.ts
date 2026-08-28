@@ -56,7 +56,12 @@ function main(): void {
   const session = new SessionState();
 
   const server = new McpServer(
-    { name: "fused-mcp-shared-runtime", version: "0.1.0" },
+    {
+      name: fixture.server.name,
+      title: fixture.server.title,
+      version: fixture.server.version,
+      description: fixture.server.description,
+    },
     { instructions: INSTRUCTIONS },
   );
 

@@ -1122,15 +1122,15 @@ type SDKSelection struct {
 	// AuthType and AuthName pin dispatch when the selected operations require
 	// authentication. Anonymous-only and webhook-only selections leave both
 	// empty so runtime calls preserve the operation security contract.
-	AuthType                       string               `json:"auth_type,omitempty"`
-	AuthName                       string               `json:"auth_name,omitempty"`
-	AuthRef                        string               `json:"auth_ref,omitempty"`
-	CredentialSourceServiceID      uuid.UUID            `json:"credential_source_service_id,omitempty"`
-	CredentialSourceAuthType       string               `json:"credential_source_auth_type,omitempty"`
-	CredentialSourceAuthName       string               `json:"credential_source_auth_name,omitempty"`
-	RequiredAuth                   []SDKRequiredAuth    `json:"required_auth,omitempty"`
-	ConnectScopes                  []string             `json:"connect_scopes,omitempty"`
-	Injections                     []SDKInjectionConfig `json:"injections,omitempty"`
+	AuthType                  string               `json:"auth_type,omitempty"`
+	AuthName                  string               `json:"auth_name,omitempty"`
+	AuthRef                   string               `json:"auth_ref,omitempty"`
+	CredentialSourceServiceID uuid.UUID            `json:"credential_source_service_id,omitempty"`
+	CredentialSourceAuthType  string               `json:"credential_source_auth_type,omitempty"`
+	CredentialSourceAuthName  string               `json:"credential_source_auth_name,omitempty"`
+	RequiredAuth              []SDKRequiredAuth    `json:"required_auth,omitempty"`
+	ConnectScopes             []string             `json:"connect_scopes,omitempty"`
+	Injections                []SDKInjectionConfig `json:"injections,omitempty"`
 }
 
 type SDKInjectionConfig struct {
@@ -1141,6 +1141,9 @@ type SDKInjectionConfig struct {
 }
 
 const AppScopeSchemaVersion = 3
+
+// MCPServerDescriptionMaxBytes bounds protocol identity prose consistently across Engine admission and runtime loading.
+const MCPServerDescriptionMaxBytes = 1024
 
 const SDKGeneratorVersion = "registry-generator-v4"
 

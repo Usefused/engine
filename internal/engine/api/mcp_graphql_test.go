@@ -887,6 +887,7 @@ func TestEngineGraphQLConnectAuth_ListAndDeleteConnections(t *testing.T) {
 	}
 }
 
+// TestDeployMcpServer_CreatesActiveScopeWithNameAndKind verifies GraphQL apply preserves authored identity on the active MCP version.
 func TestDeployMcpServer_CreatesActiveScopeWithNameAndKind(t *testing.T) {
 	accountID := uuid.New()
 	serviceID := uuid.New()
@@ -914,7 +915,8 @@ func TestDeployMcpServer_CreatesActiveScopeWithNameAndKind(t *testing.T) {
 	}`
 	data := doMCPGraphQLRequestWithVariables(t, h, query, map[string]any{"owner": "platform", "config": map[string]any{
 		"apiVersion": "fused/v1", "kind": "mcp", "name": "stripe-mcp", "version": "1.0.0", "bucket": "default",
-		"services": map[string]any{"Stripe": map[string]any{"version": "2026-07-01", "operations": []string{"listCharges"}}},
+		"description": "Review and manage charges in Stripe.",
+		"services":    map[string]any{"Stripe": map[string]any{"version": "2026-07-01", "operations": []string{"listCharges"}}},
 	}})
 	assertDeployedMCPServer(t, data)
 	assertSavedMCPServerScope(t, s, accountID)
@@ -1005,7 +1007,8 @@ func TestDeployMcpServer_SelectAllSkipsEndpointIds(t *testing.T) {
 	}`
 	doMCPGraphQLRequestWithVariables(t, h, query, map[string]any{"owner": "platform", "config": map[string]any{
 		"apiVersion": "fused/v1", "kind": "mcp", "name": "stripe-mcp", "version": "1.0.0", "bucket": "default",
-		"services": map[string]any{"Stripe": map[string]any{"version": "2026-07-01", "operations": []string{}, "select_all": true}},
+		"description": "Review and manage charges in Stripe.",
+		"services":    map[string]any{"Stripe": map[string]any{"version": "2026-07-01", "operations": []string{}, "select_all": true}},
 	}})
 
 	if len(s.savedScopes) != 1 {

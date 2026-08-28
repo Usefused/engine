@@ -33,8 +33,17 @@ type FixturePagination struct {
 	EngineMaxPages       int  `json:"engine_max_pages,omitempty"`
 }
 
+// FixtureServerMetadata is the immutable MCP identity advertised before a host inspects any tools.
+type FixtureServerMetadata struct {
+	Name        string `json:"name"`
+	Title       string `json:"title"`
+	Version     string `json:"version"`
+	Description string `json:"description"`
+}
+
 // Fixture is the app-scoped operation catalogue serialized for the shared MCP runtime.
 type Fixture struct {
+	Server FixtureServerMetadata `json:"server"`
 	// Version-keyed dictionaries are serialized once for lazy schema documentation lookup.
 	SchemaDefinitions map[string]map[string]fusedobject.SchemaContract `json:"schema_definitions,omitempty"`
 	Operations        []FixtureOperation                               `json:"operations"`
@@ -81,6 +90,12 @@ func LoadFixture(path string) (*Fixture, error) {
 	if err := f.attachUnifiedOperations(f.UnifiedOperations); err != nil {
 		return nil, err
 	}
+	server, err := validateMCPServerMetadata(f.Server)
+	// Serialized fixtures are runnable session inputs, so incomplete server identity fails at the Go boundary too.
+	if err != nil {
+		return nil, fmt.Errorf("admit fixture server metadata: %w", err)
+	}
+	f.Server = server
 
 	return &f, nil
 }

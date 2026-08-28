@@ -132,8 +132,11 @@ func (registry *appAuthMismatchRegistry) FetchServiceVersionExecutionAuthContrac
 // TestAppAuthMismatchReachesSDKAndMCPHTTP exercises both real planning handlers
 // and proves a rejected selection never creates a plan or extra metadata reads.
 func TestAppAuthMismatchReachesSDKAndMCPHTTP(t *testing.T) {
-	// Separate instances avoid sharing plan state or query counters across app kinds.
-	for _, test := range []struct{ kind, language string }{{"sdk", "typescript"}, {"mcp", ""}} {
+	// Kind-specific identity fragments keep each request valid until it reaches the shared auth decision under test.
+	for _, test := range []struct{ kind, language, descriptionField string }{
+		{"sdk", "typescript", ""},
+		{"mcp", "", `,"description":"Find and manage Jira work."`},
+	} {
 		t.Run(test.kind, func(t *testing.T) { // Both entry points must preserve the same shared diagnostic.
 			serviceID, versionID := uuid.New(), uuid.New()
 			s := &workspaceTestStore{accountID: uuid.New(),
@@ -149,7 +152,7 @@ func TestAppAuthMismatchReachesSDKAndMCPHTTP(t *testing.T) {
 			router := newControlTestRouter(s.accountID)
 			router.Post("/sdk-config/plan", SDKConfigPlanHandler(configStore, s, registry))
 			router.Post("/mcp-config/plan", MCPConfigPlanHandler(configStore, s, registry))
-			body := fmt.Sprintf(`{"source_hash":"fixture","config_key":"%s:fixture:1.0.0","config":{"apiVersion":"fused/v1","kind":%q,"name":"fixture","version":"1.0.0","language":%q,"bucket":"default","services":{"jira":{"version":"v1","select_all":true,"auth":{"type":"oauth","name":"oauthAuth"}}}}}`, test.kind, test.kind, test.language)
+			body := fmt.Sprintf(`{"source_hash":"fixture","config_key":"%s:fixture:1.0.0","config":{"apiVersion":"fused/v1","kind":%q,"name":"fixture","version":"1.0.0"%s,"language":%q,"bucket":"default","services":{"jira":{"version":"v1","select_all":true,"auth":{"type":"oauth","name":"oauthAuth"}}}}}`, test.kind, test.kind, test.descriptionField, test.language)
 			request := httptest.NewRequest(http.MethodPost, "/"+test.kind+"-config/plan", strings.NewReader(body))
 			response := httptest.NewRecorder()
 			router.ServeHTTP(response, request)

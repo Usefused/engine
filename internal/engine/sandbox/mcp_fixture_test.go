@@ -20,6 +20,7 @@ func writeTempFixture(t *testing.T, contents string) string {
 }
 
 const validFixtureJSON = `{
+	"server": {"name":"widget-test","title":"Widget test","version":"1.0.0","description":"Read and create test widgets."},
 	"operations": [
 		{
 			"operation_id": "test.getWidget",
@@ -103,7 +104,7 @@ func TestLoadFixture_DuplicateOperationIdIsRejected(t *testing.T) {
 // TestLoadFixtureIndexesUnifiedOperations proves exact authored logical names
 // remain separate from the established physical resolver.
 func TestLoadFixtureIndexesUnifiedOperations(t *testing.T) {
-	raw := `{"operations":[],"unified_operations":{"schema_version":3,"operations":[{"name":"release.provision","input_schema":{"type":"object"},"targets":[]}]}}`
+	raw := `{"server":{"name":"release-test","title":"Release test","version":"1.0.0","description":"Provision test releases."},"operations":[],"unified_operations":{"schema_version":3,"operations":[{"name":"release.provision","input_schema":{"type":"object"},"targets":[]}]}}`
 	fixture, err := LoadFixture(writeTempFixture(t, raw))
 	if err != nil {
 		t.Fatalf("LoadFixture() error = %v", err)
@@ -133,6 +134,7 @@ func TestLoadFixtureRejectsPhysicalUnifiedCollision(t *testing.T) {
 // file boundary used by every live MCP session.
 func TestWriteSessionFixturePreservesUnifiedDescriptor(t *testing.T) {
 	fixture := newFixtureFromOperations(t.Context(), nil)
+	fixture.Server = FixtureServerMetadata{Name: "release-test", Title: "Release test", Version: "1.0.0", Description: "Provision test releases."}
 	fixture.UnifiedOperations = &models.SDKUnifiedOperationDescriptors{
 		SchemaVersion: models.SDKUnifiedDescriptorSchemaVersion,
 		Operations:    []models.SDKUnifiedOperationDescriptor{{Name: "release.provision", InputSchema: json.RawMessage(`{"type":"object"}`)}},
@@ -147,6 +149,15 @@ func TestWriteSessionFixturePreservesUnifiedDescriptor(t *testing.T) {
 	}
 	if loaded.UnifiedOperations == nil || loaded.UnifiedOperations.Operations[0].Name != "release.provision" {
 		t.Fatalf("written Unified descriptor = %#v", loaded.UnifiedOperations)
+	}
+}
+
+// TestLoadFixtureRejectsMissingServerMetadata enforces authored identity at the serialized fixture boundary.
+func TestLoadFixtureRejectsMissingServerMetadata(t *testing.T) {
+	_, err := LoadFixture(writeTempFixture(t, `{"operations":[]}`))
+	// A fixture without authored server identity must never reach the Node runtime.
+	if err == nil {
+		t.Fatal("LoadFixture() accepted missing server metadata")
 	}
 }
 

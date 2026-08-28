@@ -20,6 +20,9 @@ type mockCacheDB struct {
 	scopeData          []byte
 	scopeVersion       int
 	scopeCount         int
+	appName            string
+	appVersion         string
+	appDescription     string
 	activatedVersion   string
 	activatedErr       error
 	activatedCalls     int
@@ -63,13 +66,17 @@ func (m *mockCacheDB) GetAccountByAPIKey(ctx context.Context, apiKey string) (uu
 	return uuid.Nil, nil
 }
 
+// GetAppRuntime supplies selection and immutable identity metadata for cache and MCP fixture tests.
 func (m *mockCacheDB) GetAppRuntime(ctx context.Context, id uuid.UUID) (*store.AppRuntime, error) {
 	m.scopeCount++
 	version := m.scopeVersion
 	if version == 0 {
 		version = models.AppScopeSchemaVersion
 	}
-	return &store.AppRuntime{AppID: id, Selections: m.scopeData, ScopeSchemaVersion: version, Status: "active"}, nil
+	return &store.AppRuntime{
+		AppID: id, Selections: m.scopeData, ScopeSchemaVersion: version, Status: "active",
+		Name: m.appName, Version: m.appVersion, Description: m.appDescription,
+	}, nil
 }
 
 func (m *mockCacheDB) SaveAppRuntime(ctx context.Context, scope store.AppRuntime) error {

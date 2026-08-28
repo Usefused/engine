@@ -26,12 +26,13 @@ import (
 func TestValidateAppConfigDocument_MCPRejectsWebhookSelection(t *testing.T) {
 	baseDoc := func(svc sdkConfigServiceDoc) sdkConfigDocument {
 		return sdkConfigDocument{
-			APIVersion: "fused/v1",
-			Kind:       "mcp",
-			Name:       "jira-mcp",
-			Version:    "1.0.0",
-			Bucket:     "default",
-			Services:   map[string]sdkConfigServiceDoc{"jira": svc},
+			APIVersion:  "fused/v1",
+			Kind:        "mcp",
+			Name:        "jira-mcp",
+			Version:     "1.0.0",
+			Description: "Find and manage support issues in Jira.",
+			Bucket:      "default",
+			Services:    map[string]sdkConfigServiceDoc{"jira": svc},
 		}
 	}
 
@@ -63,7 +64,7 @@ func TestValidateAppConfigDocument_MCPRejectsWebhookSelection(t *testing.T) {
 // the SDK graph shape while avoiding package-only language namespace checks.
 func TestValidateAppConfigDocumentMCPUsesSharedUnifiedContract(t *testing.T) {
 	doc := decodeUnifiedDocument(t, `{"github":"createIssue"}`, ``, "typescript")
-	doc.Kind, doc.Language = store.AppKindMCP.String(), ""
+	doc.Kind, doc.Language, doc.Description = store.AppKindMCP.String(), "", "Create and coordinate GitHub issues."
 	// Exact MCP operation identities do not become nested generated members, so
 	// a prefix pair that remains invalid for SDK code generation is admissible.
 	doc.UnifiedOperations["issues"] = doc.UnifiedOperations["issues.create"]
@@ -123,7 +124,8 @@ func TestMCPConfigApplyPersistsCompiledUnifiedState(t *testing.T) {
 	configStore := &mockConfigStore{}
 	doc := sdkConfigDocument{
 		APIVersion: "fused/v1", Kind: store.AppKindMCP.String(), Name: "security", Version: "1.0.0", Bucket: "default",
-		Services: map[string]sdkConfigServiceDoc{"okta": {Version: "2026-07-01", Operations: []string{"getUser"}}},
+		Description: "Look up identities and coordinate security workflows in Okta.",
+		Services:    map[string]sdkConfigServiceDoc{"okta": {Version: "2026-07-01", Operations: []string{"getUser"}}},
 		UnifiedOperations: map[string]sdkUnifiedOperationDoc{
 			"security.lookup": {
 				Input:    json.RawMessage(`{"type":"object"}`),
@@ -160,6 +162,10 @@ func TestMCPConfigApplyPersistsCompiledUnifiedState(t *testing.T) {
 	if planned.UnifiedOperations == nil || len(planned.UnifiedOperations.Operations) != 1 {
 		t.Fatalf("credential-free Unified descriptor is absent from the applied plan: %#v", planned.UnifiedOperations)
 	}
+	// The authored server summary must survive plan and apply without being reconstructed from operation identifiers.
+	if planned.Description != doc.Description || configStore.artifactApply.Scope.Description != doc.Description {
+		t.Fatalf("MCP description did not survive plan/apply: plan=%q scope=%q", planned.Description, configStore.artifactApply.Scope.Description)
+	}
 	// Planning performs two bounded set-based reads regardless of selected row
 	// count: one physical freeze and one shared Unified compile resolution.
 	if len(s.contractEndpointBatches) != 2 {
@@ -173,6 +179,42 @@ func TestMCPConfigApplyPersistsCompiledUnifiedState(t *testing.T) {
 		scope.UnifiedDefinitionHash != planned.UnifiedDefinitionHash ||
 		scope.UnifiedCodegenDescriptorHash != planned.UnifiedCodegenDescriptorHash {
 		t.Fatalf("persisted Unified scope differs from plan: %#v", scope)
+	}
+}
+
+// TestValidateAppConfigDocumentMCPRequiresBoundedDescription keeps server identity useful and bounded before planning.
+func TestValidateAppConfigDocumentMCPRequiresBoundedDescription(t *testing.T) {
+	doc := sdkConfigDocument{
+		APIVersion: "fused/v1", Kind: "mcp", Name: "mail", Version: "1.0.0", Bucket: "default",
+		Services: map[string]sdkConfigServiceDoc{"gmail": {Operations: []string{"listMessages"}}},
+	}
+	// Missing prose would leave clients unable to choose the server before tool discovery.
+	if err := validateAppConfigDocument(doc, "mcp"); err == nil || !strings.Contains(err.Error(), "description") {
+		t.Fatalf("missing description error = %v", err)
+	}
+	doc.Description = strings.Repeat("a", models.MCPServerDescriptionMaxBytes+1)
+	// Oversized identity text would consume unbounded initialize context.
+	if err := validateAppConfigDocument(doc, "mcp"); err == nil || !strings.Contains(err.Error(), "at most") {
+		t.Fatalf("oversized description error = %v", err)
+	}
+}
+
+// TestValidateMCPDesiredStateTreatsDescriptionAsImmutable requires a version bump when server identity prose changes.
+func TestValidateMCPDesiredStateTreatsDescriptionAsImmutable(t *testing.T) {
+	doc := sdkConfigDocument{
+		APIVersion: "fused/v1", Kind: "mcp", Name: "mail", Version: "1.0.0",
+		Description: "Read and summarize email.", Services: map[string]sdkConfigServiceDoc{},
+	}
+	desired, err := canonicalAppState(doc)
+	// The baseline state must be canonical before immutability can be evaluated.
+	if err != nil {
+		t.Fatalf("canonicalAppState() error = %v", err)
+	}
+	doc.Description = "Read, summarize, and send email."
+	_, err = validateMCPDesiredState(doc, &store.ConfigState{DesiredState: desired})
+	// A changed public server promise is a new immutable MCP version, even with identical operation scope.
+	if err == nil || !strings.Contains(err.Error(), "app_version_immutable") {
+		t.Fatalf("description mutation error = %v", err)
 	}
 }
 
@@ -193,6 +235,18 @@ func TestAppConfigVersionLengthBound(t *testing.T) {
 	}
 	if err := validateAppConfigDocument(mcpDoc, "mcp"); err == nil {
 		t.Fatal("expected an overlong MCP version to be rejected")
+	}
+}
+
+// TestValidateSDKIdentityRejectsMCPDescription mirrors the CLI cross-kind metadata boundary.
+func TestValidateSDKIdentityRejectsMCPDescription(t *testing.T) {
+	doc := sdkConfigDocument{
+		APIVersion: "fused/v1", Kind: "sdk", Name: "support", Version: "1.0.0",
+		Language: "typescript", Bucket: "default", Description: "Manage support work.",
+	}
+	// Engine must reject inert authored prose even when a client bypasses CLI validation.
+	if err := validateSDKIdentity(doc); err == nil || !strings.Contains(err.Error(), "description") {
+		t.Fatalf("SDK description error = %v", err)
 	}
 }
 
