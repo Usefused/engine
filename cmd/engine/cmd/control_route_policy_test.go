@@ -628,19 +628,32 @@ func requestWithActor(t *testing.T, method, path string, actor accesscontrol.Act
 	return request.WithContext(accesscontrol.ContextWithActor(request.Context(), actor))
 }
 
+// assertControlDenial verifies the shared structured authorization envelope used by control routes.
 func assertControlDenial(t *testing.T, response *httptest.ResponseRecorder, status int, code string, missing int) {
 	t.Helper()
+	// Status is checked before decoding so transport failures retain their raw response body.
 	if response.Code != status {
 		t.Fatalf("status = %d, want %d; body=%s", response.Code, status, response.Body.String())
 	}
 	var body struct {
-		Error   string            `json:"error"`
-		Missing []json.RawMessage `json:"missing"`
+		Error struct {
+			Code    string `json:"code"`
+			Details *struct {
+				Missing []json.RawMessage `json:"missing"`
+			} `json:"details"`
+		} `json:"error"`
 	}
+	// A decode failure means the route no longer follows the shared client contract.
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if body.Error != code || len(body.Missing) != missing {
-		t.Fatalf("response error/missing = %q/%d, want %q/%d", body.Error, len(body.Missing), code, missing)
+	missingCount := 0
+	// Omitted details represent a denial with no safely reportable missing requirements.
+	if body.Error.Details != nil {
+		missingCount = len(body.Error.Details.Missing)
+	}
+	// Both the stable selector and bounded remediation detail are part of the response contract.
+	if body.Error.Code != code || missingCount != missing {
+		t.Fatalf("response error/missing = %q/%d, want %q/%d", body.Error.Code, missingCount, code, missing)
 	}
 }

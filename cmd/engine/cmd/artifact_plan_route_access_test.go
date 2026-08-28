@@ -12,7 +12,9 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/api"
+	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/models"
 )
 
 type artifactPlanRouteActor struct {
@@ -46,6 +48,8 @@ func TestArtifactPlanRouteIgnoresForgedClientArtifactIdentity(t *testing.T) {
 	assertArtifactPlanHTTPDecision(t, status, calls, false)
 }
 
+// TestArtifactApplyMiddlewareRevisionReplacementStopsBeforeRegistry proves a
+// plan replaced after authorization cannot cross the Registry boundary.
 func TestArtifactApplyMiddlewareRevisionReplacementStopsBeforeRegistry(t *testing.T) {
 	workspaceID, serviceID, bucketID, planID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	plan := &store.ConfigPlan{
@@ -57,8 +61,9 @@ func TestArtifactApplyMiddlewareRevisionReplacementStopsBeforeRegistry(t *testin
 	configStore := &revisionReplacingConfigStore{plan: plan}
 	stores := &controlRequirementStoreStub{buckets: []store.Bucket{{ID: bucketID, Name: "default"}}}
 	resolver := newControlRequirementResolver(stores, configStore)
-	registry := &revisionReplacementForwarder{}
-	handler := controlAuthorizationMiddleware(accesscontrol.SnapshotAuthorizer{}, resolver)(api.SDKConfigApplyHandler(configStore, nil, registry))
+	proxy := &revisionReplacementForwarder{}
+	registry := &revisionReplacementRegistry{}
+	handler := controlAuthorizationMiddleware(accesscontrol.SnapshotAuthorizer{}, resolver)(api.SDKConfigApplyHandler(configStore, nil, proxy, registry))
 	actor := actorWithGrants(t, workspaceID,
 		accesscontrol.Grant{Permission: accesscontrol.PermissionAppCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionServiceConsume, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: serviceID}},
@@ -68,12 +73,24 @@ func TestArtifactApplyMiddlewareRevisionReplacementStopsBeforeRegistry(t *testin
 	request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), actor))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
+	// A changed authorized revision must remain a pre-Registry conflict rather than falling through to generation.
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "plan_revision_changed") {
 		t.Fatalf("revision replacement response = %d %s", response.Code, response.Body.String())
 	}
-	if configStore.callCount() != 2 || registry.callCount() != 0 {
-		t.Fatalf("plan/Registry calls = %d/%d, want 2/0", configStore.callCount(), registry.callCount())
+	// The second plan read detects replacement while the Registry proxy remains untouched.
+	if configStore.callCount() != 2 || proxy.callCount() != 0 {
+		t.Fatalf("plan/Registry calls = %d/%d, want 2/0", configStore.callCount(), proxy.callCount())
 	}
+}
+
+type revisionReplacementRegistry struct {
+	sandbox.RegistryClient
+}
+
+// ValidateSDKSelections gives the focused apply test the local-selection
+// capability production receives from its Engine snapshot store.
+func (*revisionReplacementRegistry) ValidateSDKSelections(context.Context, []models.SDKSelection) error {
+	return nil
 }
 
 type revisionReplacingConfigStore struct {
