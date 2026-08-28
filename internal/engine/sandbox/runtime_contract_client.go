@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/store"
@@ -19,7 +20,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const maxRuntimeContractsResponseBytes int64 = 128 << 20
+const (
+	maxRuntimeContractsResponseBytes int64 = 128 << 20
+	runtimeContractsRequestTimeout         = time.Minute
+)
 
 var errRuntimeContractsResponseLimit = errors.New("runtime_contract_response_limit_exceeded: Registry response exceeds the 128 MiB limit; request fewer service versions")
 
@@ -40,7 +44,13 @@ func (c *HTTPRegistryClient) FetchRuntimeContracts(ctx context.Context, versions
 	if len(versions) == 0 {
 		return nil, nil
 	}
-	req, err := c.buildRuntimeContractsRequest(ctx, versions, apiKey)
+	// Runtime contracts can be substantially larger than ordinary Registry
+	// responses, so this workflow owns a bounded budget instead of inheriting
+	// the shared client's ten-second fallback. An earlier caller cancellation
+	// or deadline still wins through the derived context.
+	requestCtx, cancel := context.WithTimeout(ctx, runtimeContractsRequestTimeout)
+	defer cancel()
+	req, err := c.buildRuntimeContractsRequest(requestCtx, versions, apiKey)
 	// Request construction failure cannot be repaired by dropping selected versions.
 	if err != nil {
 		return nil, err

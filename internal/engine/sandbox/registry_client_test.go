@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
@@ -500,6 +501,65 @@ func TestFetchRuntimeContractsUsesSingleSetBasedGraphQLRequest(t *testing.T) {
 	variablesJSON, _ := json.Marshal(requestBody.Variables)
 	if !bytes.Contains(variablesJSON, []byte(firstServiceID.String())) || !bytes.Contains(variablesJSON, []byte(secondVersionID.String())) {
 		t.Fatalf("unexpected variables: %#v", requestBody.Variables)
+	}
+}
+
+// TestFetchRuntimeContractsOwnsOneMinuteDeadline proves large snapshot reads
+// bypass the shared ten-second fallback while remaining bounded.
+func TestFetchRuntimeContractsOwnsOneMinuteDeadline(t *testing.T) {
+	serviceID, versionID := uuid.New(), uuid.New()
+	var remaining time.Duration
+	client := &HTTPRegistryClient{
+		endpoint: "https://registry.example/graphql", licenseKey: "engine-license-key",
+		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			deadline, ok := request.Context().Deadline()
+			// A missing deadline would put this large response back under the generic client timeout.
+			if !ok {
+				t.Fatal("runtime contract request has no deadline")
+			}
+			remaining = time.Until(deadline)
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"data":{"serviceRuntimeContracts":[]}}`)), Header: make(http.Header)}, nil
+		})},
+	}
+	_, err := client.FetchRuntimeContracts(context.Background(), []store.WorkspaceServiceVersion{{ServiceID: serviceID, ServiceVersionID: versionID, Version: "v1"}}, "user-api-key")
+	// The intentionally empty Registry response is invalid, but it is enough to exercise the real transport boundary.
+	if err == nil {
+		t.Fatal("empty runtime contract response should fail")
+	}
+	// Scheduling overhead may consume part of the minute, while any materially shorter budget is a regression.
+	if remaining < 59*time.Second || remaining > runtimeContractsRequestTimeout {
+		t.Fatalf("runtime contract deadline remaining = %s, want approximately %s", remaining, runtimeContractsRequestTimeout)
+	}
+}
+
+// TestFetchRuntimeContractsPreservesEarlierCallerDeadline proves the larger
+// snapshot budget cannot extend a caller-owned cancellation boundary.
+func TestFetchRuntimeContractsPreservesEarlierCallerDeadline(t *testing.T) {
+	serviceID, versionID := uuid.New(), uuid.New()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	wantDeadline, _ := ctx.Deadline()
+	var gotDeadline time.Time
+	client := &HTTPRegistryClient{
+		endpoint: "https://registry.example/graphql", licenseKey: "engine-license-key",
+		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			var ok bool
+			gotDeadline, ok = request.Context().Deadline()
+			// The transport must retain the earlier caller boundary instead of replacing it with one minute.
+			if !ok {
+				t.Fatal("runtime contract request has no caller deadline")
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"data":{"serviceRuntimeContracts":[]}}`)), Header: make(http.Header)}, nil
+		})},
+	}
+	_, err := client.FetchRuntimeContracts(ctx, []store.WorkspaceServiceVersion{{ServiceID: serviceID, ServiceVersionID: versionID, Version: "v1"}}, "user-api-key")
+	// The fixture intentionally tests transport context rather than admitting an empty contract set.
+	if err == nil {
+		t.Fatal("empty runtime contract response should fail")
+	}
+	// Exact equality proves context.WithTimeout inherited the parent's earlier deadline.
+	if !gotDeadline.Equal(wantDeadline) {
+		t.Fatalf("runtime contract deadline = %s, want caller deadline %s", gotDeadline, wantDeadline)
 	}
 }
 
