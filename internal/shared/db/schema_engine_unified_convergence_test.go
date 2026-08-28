@@ -23,7 +23,7 @@ type unifiedConvergenceRow struct {
 }
 
 // TestUnifiedSchemaConvergencePreservesExistingApps proves live pre-Unified
-// tables reach the current v3 default without losing rows or recording a migration.
+// tables reach the current v3 default without losing rows.
 func TestUnifiedSchemaConvergencePreservesExistingApps(t *testing.T) {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
@@ -54,11 +54,10 @@ func TestUnifiedSchemaConvergencePreservesExistingApps(t *testing.T) {
 	assertUnifiedConstraintIdentity(t, firstConstraints, secondConstraints)
 	assertUnifiedConvergedRows(t, ctx, tx)
 	assertUnifiedConstraintsEnforced(t, ctx, tx)
-	assertNoUnifiedMigrationRecord(t, ctx, tx)
 }
 
 // createPreUnifiedAppFixture builds the live schema state that predates all
-// Unified columns while retaining an existing app row and migration ledger.
+// Unified columns while retaining an existing app row.
 func createPreUnifiedAppFixture(t *testing.T, ctx context.Context, tx pgx.Tx) {
 	t.Helper()
 	if _, err := tx.Exec(ctx, `CREATE TEMP TABLE fused_apps (
@@ -66,20 +65,6 @@ func createPreUnifiedAppFixture(t *testing.T, ctx context.Context, tx pgx.Tx) {
 		marker text NOT NULL
 	) ON COMMIT DROP`); err != nil {
 		t.Fatalf("create pre-Unified fused_apps: %v", err)
-	}
-	if _, err := tx.Exec(ctx, `CREATE TEMP TABLE fused_engine_schema_migrations (
-		version bigint PRIMARY KEY,
-		name text NOT NULL UNIQUE,
-		applied_at timestamptz NOT NULL DEFAULT NOW()
-	) ON COMMIT DROP`); err != nil {
-		t.Fatalf("create migration ledger fixture: %v", err)
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO fused_engine_schema_migrations (version, name) VALUES
-		(1, '20260810_engine_schema_convergence'),
-		(2, '20260810_app_token_policy'),
-		(3, '20260811_execution_contract_envelope'),
-		(4, '20260811_idempotency_response_media')`); err != nil {
-		t.Fatalf("seed migration ledger fixture: %v", err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO fused_apps (app_id, marker)
 		VALUES ('00000000-0000-0000-0000-000000000101', 'keep-me')`); err != nil {
@@ -214,21 +199,5 @@ func assertUnifiedWriteRejected(t *testing.T, ctx context.Context, tx pgx.Tx, qu
 	}
 	if writeErr == nil {
 		t.Fatalf("Unified constraint accepted invalid write %q", query)
-	}
-}
-
-// assertNoUnifiedMigrationRecord verifies canonical convergence does not claim
-// a migration version or name in the immutable Engine ledger.
-func assertNoUnifiedMigrationRecord(t *testing.T, ctx context.Context, tx pgx.Tx) {
-	t.Helper()
-	var rows int
-	const query = `SELECT COUNT(*)
-	FROM fused_engine_schema_migrations
-	WHERE version IN (5, 6) OR name ILIKE '%unified%'`
-	if err := tx.QueryRow(ctx, query).Scan(&rows); err != nil {
-		t.Fatalf("read Unified migration records: %v", err)
-	}
-	if rows != 0 {
-		t.Fatalf("Unified migration ledger rows = %d, want 0", rows)
 	}
 }

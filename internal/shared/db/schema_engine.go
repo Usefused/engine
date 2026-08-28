@@ -5,210 +5,32 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
-	engineMigrationAdvisoryLockKey           int64 = 0x465553454E47494E
-	engineMigrationLockQuery                       = `SELECT pg_advisory_xact_lock($1)`
-	engineMigrationVersion                   int64 = 1
-	engineMigrationName                            = "20260810_engine_schema_convergence"
-	appTokenPolicyMigrationVersion           int64 = 2
-	appTokenPolicyMigrationName                    = "20260810_app_token_policy"
-	contractEnvelopeMigrationVersion         int64 = 3
-	contractEnvelopeMigrationName                  = "20260811_execution_contract_envelope"
-	idempotencyMediaMigrationVersion         int64 = 4
-	idempotencyMediaMigrationName                  = "20260811_idempotency_response_media"
-	connectBrandingMigrationVersion          int64 = 5
-	connectBrandingMigrationName                   = "20260819_connect_branding"
-	connectBrandColorMigrationVersion        int64 = 6
-	connectBrandColorMigrationName                 = "20260819_connect_brand_color"
-	connectBrandVioletMigrationVersion       int64 = 7
-	connectBrandVioletMigrationName                = "20260819_connect_brand_violet"
-	managedOAuthRefreshMigrationVersion      int64 = 8
-	managedOAuthRefreshMigrationName               = "20260820_managed_oauth_refresh"
-	restExecutionMigrationVersion            int64 = 9
-	restExecutionMigrationName                     = "20260820_rest_execution_transport"
-	appTokenHistoryMigrationVersion          int64 = 10
-	appTokenHistoryMigrationName                   = "20260822_app_token_history"
-	appTokenCleanupMigrationVersion          int64 = 11
-	appTokenCleanupMigrationName                   = "20260822_app_token_history_cleanup"
-	mcpSessionLifetimeMigrationVersion       int64 = 12
-	mcpSessionLifetimeMigrationName                = "20260826_mcp_session_max_lifetime"
-	workspaceAuthReferenceMigrationVersion   int64 = 15
-	workspaceAuthReferenceMigrationName            = "20260826_workspace_auth_references"
-	connectCanonicalRedirectMigrationVersion int64 = 16
-	connectCanonicalRedirectMigrationName          = "20260827_connect_canonical_redirect"
-	appCredentialSourceMigrationVersion      int64 = 17
-	appCredentialSourceMigrationName               = "20260827_app_credential_sources"
-	oauthRefreshAuthTypeMigrationVersion     int64 = 18
-	oauthRefreshAuthTypeMigrationName              = "20260828_oauth_refresh_auth_types"
-	unifiedEmptySetHash                            = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+	unifiedEmptySetHash = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
 )
 
-// mcpSessionLifetimeEndReasonConstraint is the frozen v12 constraint shared by
-// fresh installs; future policy changes must append a new immutable constraint/migration.
-const mcpSessionLifetimeEndReasonConstraint = `CONSTRAINT chk_fused_mcp_sessions_end_reason CHECK (
+// mcpSessionEndReasonConstraint keeps every durable session termination cause on the clean schema.
+const mcpSessionEndReasonConstraint = `CONSTRAINT chk_fused_mcp_sessions_end_reason CHECK (
 	end_reason IS NULL OR end_reason IN (
 		'client_terminated', 'client_disconnected', 'idle_timeout', 'max_lifetime', 'token_expired',
 		'token_revoked', 'app_deactivated', 'engine_shutdown', 'runtime_failed', 'tool_call_timeout'
 	)
 )`
 
-type engineMigration struct {
-	Version          int64
-	Name             string
-	PreflightQueries []string
-	Queries          []string
-}
-
+// initEngineSchema reconciles the supported clean schema directly and does not
+// attempt to upgrade databases from retired pre-baseline layouts.
 func initEngineSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	for _, q := range engineSchemaQueries() {
 		if _, err := pool.Exec(ctx, q); err != nil {
 			return fmt.Errorf("failed to execute query %q: %w", q, err)
 		}
 	}
-	if err := applyEngineMigrations(ctx, pool); err != nil {
-		return err
-	}
 
 	log.Println("Engine database schema initialization complete.")
 	return nil
-}
-
-func applyEngineMigrations(ctx context.Context, pool *pgxpool.Pool) error {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin Engine schema migrations: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	// The transaction-scoped lock makes the ledger decision and its DDL atomic,
-	// so replicas cannot both observe a pending migration and replay it.
-	if _, err := tx.Exec(ctx, engineMigrationLockQuery, engineMigrationAdvisoryLockKey); err != nil {
-		return fmt.Errorf("lock Engine schema migrations: %w", err)
-	}
-	for _, migration := range engineMigrations() {
-		if err := applyEngineMigration(ctx, tx, migration); err != nil {
-			return err
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit Engine schema migrations: %w", err)
-	}
-	return nil
-}
-
-// applyEngineMigration runs compatibility preflights and immutable migration SQL in one ledger-guarded transaction.
-func applyEngineMigration(ctx context.Context, tx pgx.Tx, migration engineMigration) error {
-	applied, err := engineMigrationApplied(ctx, tx, migration)
-	// Ledger lookup errors must stop before any compatibility or schema writes.
-	if err != nil {
-		return err
-	}
-	// Recorded migrations skip both their historical SQL and pending-only compatibility preflights.
-	if applied {
-		return nil
-	}
-	// Preflights repair only the database state required for a previously shipped pending migration to execute atomically.
-	for _, query := range migration.PreflightQueries {
-		// Any preflight failure must roll back before the immutable migration body starts.
-		if _, err := tx.Exec(ctx, query); err != nil {
-			return fmt.Errorf("preflight Engine schema migration %d (%s): %w", migration.Version, migration.Name, err)
-		}
-	}
-	// Immutable migration SQL remains byte-stable after release; forward migrations perform later convergence.
-	for _, query := range migration.Queries {
-		// One failed statement invalidates the migration and its eventual ledger record.
-		if _, err := tx.Exec(ctx, query); err != nil {
-			return fmt.Errorf("apply Engine schema migration %d (%s): %w", migration.Version, migration.Name, err)
-		}
-	}
-	// The ledger write shares the transaction so a failed commit never records partial DDL.
-	if _, err := tx.Exec(ctx, `INSERT INTO fused_engine_schema_migrations (version, name) VALUES ($1, $2)`, migration.Version, migration.Name); err != nil {
-		return fmt.Errorf("record Engine schema migration %d (%s): %w", migration.Version, migration.Name, err)
-	}
-	return nil
-}
-
-func engineMigrationApplied(ctx context.Context, tx pgx.Tx, migration engineMigration) (bool, error) {
-	const query = `SELECT
-		EXISTS (SELECT 1 FROM fused_engine_schema_migrations WHERE version = $1),
-		EXISTS (SELECT 1 FROM fused_engine_schema_migrations WHERE version = $1 AND name = $2)`
-	var versionExists, identityMatches bool
-	if err := tx.QueryRow(ctx, query, migration.Version, migration.Name).Scan(&versionExists, &identityMatches); err != nil {
-		return false, fmt.Errorf("read Engine schema migration %d: %w", migration.Version, err)
-	}
-	if versionExists && !identityMatches {
-		return false, fmt.Errorf("Engine schema migration version %d has a different recorded name", migration.Version)
-	}
-	return versionExists, nil
-}
-
-// engineMigrations returns the immutable ordered migration ledger.
-func engineMigrations() []engineMigration {
-	return []engineMigration{
-		{Version: engineMigrationVersion, Name: engineMigrationName, Queries: engineMigrationV1Queries()},
-		{Version: appTokenPolicyMigrationVersion, Name: appTokenPolicyMigrationName, Queries: appTokenPolicyMigrationQueries()},
-		{Version: contractEnvelopeMigrationVersion, Name: contractEnvelopeMigrationName, Queries: contractEnvelopeMigrationQueries()},
-		{Version: idempotencyMediaMigrationVersion, Name: idempotencyMediaMigrationName, Queries: idempotencyMediaMigrationQueries()},
-		{Version: connectBrandingMigrationVersion, Name: connectBrandingMigrationName, Queries: connectBrandingMigrationQueries()},
-		{Version: connectBrandColorMigrationVersion, Name: connectBrandColorMigrationName, Queries: connectBrandColorMigrationQueries()},
-		{Version: connectBrandVioletMigrationVersion, Name: connectBrandVioletMigrationName, Queries: connectBrandVioletMigrationQueries()},
-		{Version: managedOAuthRefreshMigrationVersion, Name: managedOAuthRefreshMigrationName, Queries: managedOAuthRefreshMigrationQueries()},
-		{Version: restExecutionMigrationVersion, Name: restExecutionMigrationName, Queries: restExecutionMigrationQueries()},
-		{Version: appTokenHistoryMigrationVersion, Name: appTokenHistoryMigrationName, Queries: appTokenHistoryMigrationQueries()},
-		{Version: appTokenCleanupMigrationVersion, Name: appTokenCleanupMigrationName, Queries: appTokenCleanupMigrationQueries()},
-		{Version: mcpSessionLifetimeMigrationVersion, Name: mcpSessionLifetimeMigrationName, Queries: mcpSessionLifetimeMigrationQueries()},
-		{Version: 13, Name: "20260826_unified_receipts_session_metadata", Queries: activityReceiptMigrationQueries()},
-		{Version: 14, Name: "20260826_generation_contract_pins", Queries: generationContractPinMigrationQueries()},
-		{Version: workspaceAuthReferenceMigrationVersion, Name: workspaceAuthReferenceMigrationName, Queries: workspaceAuthReferenceMigrationQueries()},
-		{Version: connectCanonicalRedirectMigrationVersion, Name: connectCanonicalRedirectMigrationName, Queries: connectCanonicalRedirectMigrationQueries()},
-		{Version: appCredentialSourceMigrationVersion, Name: appCredentialSourceMigrationName, PreflightQueries: appCredentialSourcePreflightQueries(), Queries: appCredentialSourceMigrationQueries()},
-		{Version: oauthRefreshAuthTypeMigrationVersion, Name: oauthRefreshAuthTypeMigrationName, Queries: oauthRefreshAuthTypeMigrationQueries()},
-	}
-}
-
-// appCredentialSourcePreflightQueries repairs the shipped v17 admission state without rewriting its immutable SQL.
-func appCredentialSourcePreflightQueries() []string {
-	return []string{
-		// Only OAuth/OIDC application registrations have a lossless replacement, so unsupported legacy edges stop before v17 retires them.
-		`DO $$
-		BEGIN
-			-- Credential-family mismatch must fail closed rather than disappear with the legacy routing table.
-			IF EXISTS (
-				SELECT 1 FROM fused_workspace_auth_references reference
-				-- Normalize authored spellings before comparing the only credential families the replacement supports.
-				WHERE CASE
-					WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-					WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
-					ELSE '' END = ''
-				   OR CASE
-					WHEN lower(replace(btrim(reference.source_auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-					WHEN lower(replace(btrim(reference.source_auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
-					ELSE '' END <> CASE
-					WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-					WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
-					ELSE '' END
-			) THEN
-				RAISE EXCEPTION USING ERRCODE = '23514',
-					MESSAGE = 'legacy workspace auth references contain an unsupported or incompatible credential family; remove the obsolete reference and reapply the app configuration';
-			END IF;
-		END
-		$$;`,
-		// PostgreSQL enforces a NOT VALID check on every changed row, so v8's retained NULL-version sessions need a transactional exception during v17.
-		`ALTER TABLE fused_connect_sessions DROP CONSTRAINT IF EXISTS chk_fused_connect_sessions_service_version;`,
-	}
-}
-
-// engineMigrationQueries flattens the immutable ledger for schema contract tests.
-func engineMigrationQueries() []string {
-	var queries []string
-	for _, migration := range engineMigrations() {
-		queries = append(queries, migration.Queries...)
-	}
-	return queries
 }
 
 // engineSchemaQueries returns the canonical schema plus unversioned live-table convergence.
@@ -244,13 +66,6 @@ func engineSchemaQueries() []string {
 		`INSERT INTO fused_engine_installation (singleton_key)
 		VALUES (1)
 		ON CONFLICT (singleton_key) DO NOTHING;`,
-		// Schema migration history is separate from app lifecycle state. It is the
-		// durable coordination point shared by every replica using this database.
-		`CREATE TABLE IF NOT EXISTS fused_engine_schema_migrations (
-			version    bigint PRIMARY KEY,
-			name       text NOT NULL UNIQUE CHECK (name <> ''),
-			applied_at timestamptz NOT NULL DEFAULT NOW()
-		);`,
 		// Sensitive migrations run after master-key loading and keep a permanent immutable ledger.
 		`CREATE TABLE IF NOT EXISTS fused_sensitive_data_migrations (
 			version bigint PRIMARY KEY,
@@ -563,7 +378,7 @@ func engineSchemaQueries() []string {
 			id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 			bucket_id          uuid NOT NULL REFERENCES fused_buckets(id) ON DELETE CASCADE,
 			service_id         uuid NOT NULL,
-			service_version_id uuid,
+			service_version_id uuid NOT NULL,
 			end_user_ref       text NOT NULL,
 			created_by_app_id       uuid,
 			auth_type          text NOT NULL,
@@ -611,12 +426,17 @@ func engineSchemaQueries() []string {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_auth_connections_bucket_service
 		ON fused_auth_connections(bucket_id, service_id);`,
-		// Fresh-schema refresh admission mirrors worker normalization; v18 later converges databases carrying v8's older index.
+		// Refresh admission mirrors the worker's exact due-time ordering and normalized OAuth/OIDC family predicate.
 		`CREATE INDEX IF NOT EXISTS idx_fused_auth_connections_refresh
-		ON fused_auth_connections(expires_at, id)
+		ON fused_auth_connections(
+			COALESCE(LEAST(expires_at, refresh_token_expires_at), expires_at, refresh_token_expires_at), id
+		)
 		WHERE refresh_state IN ('ok', 'failed', 'expired')
+		  AND service_version_id IS NOT NULL
 		  AND lower(replace(btrim(auth_type), '-', '_')) IN
 		      ('oauth', 'oauth2', 'oauth2_authorization_code', 'oidc', 'openidconnect', 'open_id_connect');`,
+		// The clean-schema boundary rejects retained unversioned grants instead of preserving an ambiguous refresh path.
+		`ALTER TABLE fused_auth_connections ALTER COLUMN service_version_id SET NOT NULL;`,
 
 		// Provider resources carry routing context only. Keeping them separate
 		// from token rows lets one connection own several tenant endpoints without
@@ -677,6 +497,8 @@ func engineSchemaQueries() []string {
 				used_at            timestamptz,
 				created_at         timestamptz DEFAULT NOW()
 			);`,
+		// Exact contract identity is mandatory; pre-baseline NULL sessions are unsupported.
+		`ALTER TABLE fused_connect_sessions ALTER COLUMN service_version_id SET NOT NULL;`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_connect_sessions_state_hash
 			ON fused_connect_sessions(state_hash);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_connect_sessions_expires
@@ -711,23 +533,6 @@ func engineSchemaQueries() []string {
 		// index, so only expiry needs a separate cleanup index.
 		`CREATE INDEX IF NOT EXISTS idx_fused_connect_input_sessions_expires
 			ON fused_connect_input_sessions(expires_at);`,
-
-		// MCP Sessions
-		`CREATE TABLE IF NOT EXISTS fused_mcp_sessions (
-			id uuid PRIMARY KEY,
-			app_id uuid,
-			app_token_id uuid,
-			session_id text,
-			protocol_version text NOT NULL DEFAULT '2024-11-05',
-			started_at timestamp with time zone DEFAULT NOW(),
-			ended_at timestamp with time zone,
-			last_activity_at timestamp with time zone DEFAULT NOW(),
-			end_reason text,
-			` + mcpSessionLifetimeEndReasonConstraint + `
-		);`,
-		// App-scoped indexes are created by the additive migration after legacy
-		// tables receive app_id. Keeping one definition also prevents fresh and
-		// upgraded installations from drifting.
 
 		// Engine execution receipts are compact product/audit records. OTEL owns
 		// rich step-level detail; this table keeps user history queryable even
@@ -788,6 +593,11 @@ func engineSchemaQueries() []string {
 			idempotency_key_hash text,
 			request_body_hash text,
 			timings jsonb,
+			execution_kind text NOT NULL DEFAULT 'physical' CHECK (execution_kind IN ('physical','unified')),
+			parent_execution_id uuid,
+			unified_target text NOT NULL DEFAULT '',
+			execution_phase text NOT NULL DEFAULT '',
+			unified_steps jsonb NOT NULL DEFAULT '[]',
 			started_at timestamp with time zone NOT NULL,
 			ended_at timestamp with time zone NOT NULL,
 			created_at timestamp with time zone DEFAULT NOW(),
@@ -812,6 +622,24 @@ func engineSchemaQueries() []string {
 		// order lets PostgreSQL bound the tenant slice before grouping dimensions.
 		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_account_started
 		ON fused_engine_execution_events(account_id, started_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_direction_started
+		ON fused_engine_execution_events(direction, transport, started_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_operation_started
+		ON fused_engine_execution_events(operation_id, started_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_webhook_started
+		ON fused_engine_execution_events(webhook_id, started_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_family_started
+		ON fused_engine_execution_events(account_id, app_family_id, started_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_app_started
+		ON fused_engine_execution_events(account_id, app_id, started_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_endpoint
+		ON fused_engine_execution_events(app_id, endpoint_name, started_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_token_started
+		ON fused_engine_execution_events(app_token_id, started_at DESC)
+		WHERE app_token_id IS NOT NULL;`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_execution_parent
+		ON fused_engine_execution_events(account_id, app_family_id, parent_execution_id, started_at, id)
+		WHERE parent_execution_id IS NOT NULL;`,
 		// Public-service insight reporting starts from committed canonical events.
 		// The projection marker and outbox are updated in one transaction so a
 		// Registry outage never blocks execution or causes double counting.
@@ -912,40 +740,6 @@ func engineSchemaQueries() []string {
 		);`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_workspace_services_slug_ci
 		ON fused_workspace_services(lower(service_slug)) WHERE service_slug IS NOT NULL;`,
-
-		// A clean database must still execute immutable migration v15 before v17
-		// retires its table. Already-migrated databases skip this bootstrap so a
-		// later restart cannot recreate the removed workspace-global state.
-		`DO $$
-		BEGIN
-			IF NOT EXISTS (
-				SELECT 1 FROM fused_engine_schema_migrations
-				WHERE version = 15 AND name = '20260826_workspace_auth_references'
-			) THEN
-				CREATE TABLE IF NOT EXISTS fused_workspace_auth_references (
-					id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-					bucket_id         uuid NOT NULL REFERENCES fused_buckets(id) ON DELETE CASCADE,
-					target_service_id uuid NOT NULL,
-					target_auth_type  text NOT NULL,
-					target_auth_name  text NOT NULL,
-					source_service_id uuid NOT NULL,
-					source_auth_type  text NOT NULL,
-					source_auth_name  text NOT NULL,
-					created_at        timestamptz NOT NULL DEFAULT NOW(),
-					updated_at        timestamptz NOT NULL DEFAULT NOW(),
-					CONSTRAINT uq_fused_workspace_auth_reference_target UNIQUE (bucket_id, target_service_id, target_auth_name),
-					CONSTRAINT fk_fused_workspace_auth_reference_target FOREIGN KEY (target_service_id)
-						REFERENCES fused_workspace_services(service_id) ON DELETE CASCADE,
-					CONSTRAINT fk_fused_workspace_auth_reference_source FOREIGN KEY (source_service_id)
-						REFERENCES fused_workspace_services(service_id) ON DELETE NO ACTION,
-					CONSTRAINT chk_fused_workspace_auth_reference_not_self CHECK (
-						target_service_id <> source_service_id OR target_auth_name <> source_auth_name
-					)
-				);
-				CREATE INDEX IF NOT EXISTS idx_fused_workspace_auth_reference_source
-					ON fused_workspace_auth_references(bucket_id, source_service_id, source_auth_name);
-			END IF;
-		END $$;`,
 
 		// clock_timestamp() records enablement order inside a single transaction;
 		// NOW() would give every row in one apply the same timestamp.
@@ -1198,33 +992,10 @@ func engineSchemaQueries() []string {
 		`CREATE INDEX IF NOT EXISTS idx_fused_workspace_notifications_workspace_status
 		ON fused_workspace_notifications(status, created_at DESC);`,
 
-		// Idempotency cache: stores the final response of an Execute call keyed
-		// by (app_id, idempotency_key_hash) so a retried/duplicate request with
-		// the same key replays the original result instead of re-hitting the
-		// provider. A 24h TTL covers delayed reconnects while bounding storage. The key
-		// itself is hashed before storage, consistent with how execution audit
-		// events already only ever store idempotency_key_hash, never the raw key.
-		`CREATE TABLE IF NOT EXISTS fused_engine_idempotency_keys (
-			id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-			app_id uuid NOT NULL,
-			idempotency_key_hash text NOT NULL,
-			request_body_hash text,
-			environment text,
-			response_body bytea,
-			response_status integer NOT NULL DEFAULT 200,
-			response_media_family text NOT NULL DEFAULT 'unknown',
-			created_at timestamptz NOT NULL DEFAULT NOW(),
-			expires_at timestamptz NOT NULL,
-			CONSTRAINT chk_fused_engine_idempotency_response_media_family CHECK (response_media_family IN ('sse', 'json', 'binary', 'xml', 'text', 'other', 'unknown')),
-			UNIQUE(app_id, idempotency_key_hash)
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_engine_idempotency_keys_expires
-		ON fused_engine_idempotency_keys(expires_at);`,
-
 		// Workspace Secrets
 		`CREATE TABLE IF NOT EXISTS fused_workspace_secrets (
 			id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-			bucket_id        uuid REFERENCES fused_buckets(id) ON DELETE CASCADE,
+			bucket_id        uuid NOT NULL REFERENCES fused_buckets(id) ON DELETE CASCADE,
 			service_id       uuid NOT NULL,
 			key_name         text NOT NULL,
 			credential_type  text NOT NULL,
@@ -1233,8 +1004,11 @@ func engineSchemaQueries() []string {
 			last_used_at     timestamptz,
 			expires_at       timestamptz,
 			created_at       timestamptz DEFAULT NOW(),
-			updated_at       timestamptz DEFAULT NOW()
+			updated_at       timestamptz DEFAULT NOW(),
+			CONSTRAINT uq_workspace_secrets UNIQUE (bucket_id, service_id, key_name)
 		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_workspace_secrets_lookup
+		ON fused_workspace_secrets(bucket_id, service_id);`,
 
 		// Bucket Values
 		`CREATE TABLE IF NOT EXISTS fused_bucket_values (
@@ -1440,7 +1214,6 @@ func engineSchemaQueries() []string {
 			ON fused_app_families(account_id, kind, created_at DESC);`,
 
 		// Each app is one immutable version and its exact execution scope.
-		// The existing artifact_id is preserved as app_id during migration.
 		// Kind and target_language are read through the family to avoid
 		// duplicating them on every version row.
 		`CREATE TABLE IF NOT EXISTS fused_apps (
@@ -1612,259 +1385,47 @@ func engineSchemaQueries() []string {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_app_token_bindings_connection
 			ON fused_app_token_bindings(auth_connection_id);`,
+		// Idempotency rows bind directly to one immutable app version and never preserve removed artifact identity.
+		`CREATE TABLE IF NOT EXISTS fused_engine_idempotency_keys (
+			id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			app_id uuid NOT NULL REFERENCES fused_apps(app_id) ON DELETE CASCADE,
+			idempotency_key_hash text NOT NULL,
+			request_body_hash text,
+			environment text,
+			response_body bytea,
+			response_status integer NOT NULL DEFAULT 200,
+			response_media_family text NOT NULL DEFAULT 'unknown',
+			created_at timestamptz NOT NULL DEFAULT NOW(),
+			expires_at timestamptz NOT NULL,
+			CONSTRAINT chk_fused_engine_idempotency_response_media_family CHECK (response_media_family IN ('sse', 'json', 'binary', 'xml', 'text', 'other', 'unknown')),
+			UNIQUE(app_id, idempotency_key_hash)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_engine_idempotency_keys_expires
+			ON fused_engine_idempotency_keys(expires_at);`,
+		// MCP sessions are declared after app/token identity so both foreign keys are direct clean-schema constraints.
+		`CREATE TABLE IF NOT EXISTS fused_mcp_sessions (
+			id uuid PRIMARY KEY,
+			app_id uuid NOT NULL REFERENCES fused_apps(app_id) ON DELETE CASCADE,
+			app_token_id uuid REFERENCES fused_app_token_history(id) ON DELETE SET NULL,
+			session_id text,
+			protocol_version text NOT NULL DEFAULT '2024-11-05',
+			started_at timestamp with time zone DEFAULT NOW(),
+			ended_at timestamp with time zone,
+			last_activity_at timestamp with time zone DEFAULT NOW(),
+			end_reason text,
+			client_name text NOT NULL DEFAULT '' CHECK (octet_length(client_name) <= 128),
+			client_version text NOT NULL DEFAULT '' CHECK (octet_length(client_version) <= 128),
+			initial_client_ip inet,
+			` + mcpSessionEndReasonConstraint + `
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_mcp_sessions_app_started
+			ON fused_mcp_sessions(app_id, started_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_mcp_sessions_token_started
+			ON fused_mcp_sessions(app_token_id, started_at DESC) WHERE app_token_id IS NOT NULL;`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_mcp_sessions_cursor
+			ON fused_mcp_sessions(app_id, started_at DESC, id DESC);`,
 	}
 	return append(queries, unifiedSchemaConvergenceQueries()...)
-}
-
-// connectCanonicalRedirectMigrationQueries preserves callback identity across the browser handoff.
-func connectCanonicalRedirectMigrationQueries() []string {
-	return []string{
-		`ALTER TABLE fused_connect_sessions ADD COLUMN IF NOT EXISTS redirect_uri text NOT NULL DEFAULT '';`,
-	}
-}
-
-// appCredentialSourceMigrationQueries moves credential routing into immutable app/session state and retires workspace-global edges.
-func appCredentialSourceMigrationQueries() []string {
-	return []string{
-		`WITH migrated AS (
-			SELECT app.app_id,
-				jsonb_agg(
-					CASE WHEN reference.id IS NULL THEN selection.item ELSE
-						selection.item || jsonb_build_object(
-							-- Required-auth recovery must make the uniquely selected target family explicit for runtime matching.
-							'auth_type', COALESCE(NULLIF(selection.item ->> 'auth_type', ''), CASE
-								WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-								WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc' END),
-							'auth_name', COALESCE(NULLIF(selection.item ->> 'auth_name', ''), reference.target_auth_name),
-							'auth_ref', COALESCE(
-								NULLIF(state.desired_state #>> ARRAY['services', target.service_name, 'auth', 'ref'], ''),
-								NULLIF(state.desired_state #>> ARRAY['services', target.service_slug, 'auth', 'ref'], ''),
-								CASE WHEN COALESCE(source.service_slug, '') <> ''
-									THEN '${bucket.auth.' || source.service_slug || '.' || reference.source_auth_name || '}' END,
-								selection.item ->> 'auth_ref', ''),
-							'credential_source_service_id', reference.source_service_id,
-							'credential_source_auth_type', reference.source_auth_type,
-							'credential_source_auth_name', reference.source_auth_name)
-					END ORDER BY selection.ordinality) AS selections
-			FROM fused_apps app
-			JOIN fused_app_family_buckets family_bucket ON family_bucket.app_family_id = app.app_family_id
-			LEFT JOIN fused_config_states state ON state.config_key = app.config_key
-			CROSS JOIN LATERAL jsonb_array_elements(app.selections) WITH ORDINALITY AS selection(item, ordinality)
-			LEFT JOIN fused_workspace_services target ON target.service_id::text = selection.item ->> 'service_id'
-			LEFT JOIN LATERAL (
-				SELECT matched.*
-				FROM (
-					SELECT candidate.*, count(*) OVER () AS candidate_count
-					FROM fused_workspace_auth_references candidate
-					WHERE candidate.bucket_id = family_bucket.bucket_id
-					  AND candidate.target_service_id::text = selection.item ->> 'service_id'
-					  -- Only OAuth/OIDC references belong in immutable application-registration routing.
-					  AND CASE
-						WHEN lower(replace(btrim(candidate.target_auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-						WHEN lower(replace(btrim(candidate.target_auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
-						ELSE '' END <> ''
-					  AND (
-						-- A named selection retains the historical exact target-family match.
-						(btrim(COALESCE(selection.item ->> 'auth_name', '')) <> ''
-						 AND candidate.target_auth_name = selection.item ->> 'auth_name'
-						 AND CASE
-							WHEN lower(replace(btrim(candidate.target_auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-							WHEN lower(replace(btrim(candidate.target_auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
-							ELSE '' END = CASE
-							WHEN lower(replace(btrim(selection.item ->> 'auth_type'), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-							WHEN lower(replace(btrim(selection.item ->> 'auth_type'), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
-							ELSE '' END)
-						OR
-						-- A blank legacy selector may recover only a family explicitly present in required_auth.
-						(btrim(COALESCE(selection.item ->> 'auth_name', '')) = ''
-						 AND EXISTS (
-							SELECT 1
-							FROM jsonb_array_elements(COALESCE(selection.item -> 'required_auth', '[]'::jsonb)) required
-							WHERE candidate.target_auth_name = required ->> 'auth_name'
-							  AND CASE
-								WHEN lower(replace(btrim(candidate.target_auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-								WHEN lower(replace(btrim(candidate.target_auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
-								ELSE '' END = CASE
-								WHEN lower(replace(btrim(required ->> 'auth_type'), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-								WHEN lower(replace(btrim(required ->> 'auth_type'), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
-								ELSE '' END
-						 ))
-					  )
-				) matched
-				-- More than one compatible legacy edge is ambiguous and remains safely unbound.
-				WHERE matched.candidate_count = 1
-			) reference ON true
-			LEFT JOIN fused_workspace_services source ON source.service_id = reference.source_service_id
-			GROUP BY app.app_id
-		)
-		UPDATE fused_apps app SET selections = migrated.selections
-		FROM migrated
-		WHERE app.app_id = migrated.app_id AND app.selections IS DISTINCT FROM migrated.selections;`,
-		`ALTER TABLE fused_connect_input_sessions ADD COLUMN IF NOT EXISTS credential_source_service_id uuid;`,
-		`ALTER TABLE fused_connect_input_sessions ADD COLUMN IF NOT EXISTS credential_source_auth_type text NOT NULL DEFAULT '';`,
-		`ALTER TABLE fused_connect_input_sessions ADD COLUMN IF NOT EXISTS credential_source_auth_name text NOT NULL DEFAULT '';`,
-		`UPDATE fused_connect_input_sessions session SET
-			credential_source_service_id = reference.source_service_id,
-			credential_source_auth_type = reference.source_auth_type,
-			credential_source_auth_name = reference.source_auth_name
-			FROM fused_workspace_auth_references reference
-			WHERE session.credential_source_service_id IS NULL
-			  AND reference.bucket_id = session.bucket_id
-			  AND reference.target_service_id = session.service_id
-			  AND reference.target_auth_name = session.auth_name
-			  AND CASE
-				WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-				WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
-				ELSE '' END = CASE
-				WHEN lower(replace(btrim(session.auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-				WHEN lower(replace(btrim(session.auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
-				ELSE '' END;`,
-		`UPDATE fused_connect_input_sessions SET credential_source_service_id = service_id,
-			credential_source_auth_type = auth_type, credential_source_auth_name = auth_name
-			WHERE credential_source_service_id IS NULL;`,
-		`ALTER TABLE fused_connect_input_sessions ALTER COLUMN credential_source_service_id SET NOT NULL;`,
-		`ALTER TABLE fused_connect_sessions ADD COLUMN IF NOT EXISTS credential_source_service_id uuid;`,
-		`ALTER TABLE fused_connect_sessions ADD COLUMN IF NOT EXISTS credential_source_auth_type text NOT NULL DEFAULT '';`,
-		`ALTER TABLE fused_connect_sessions ADD COLUMN IF NOT EXISTS credential_source_auth_name text NOT NULL DEFAULT '';`,
-		`WITH candidates AS (
-			SELECT session.id, btrim(auth ->> 'name') AS auth_name
-			FROM fused_connect_sessions session
-			JOIN fused_service_contract_snapshots snapshot
-			  ON snapshot.service_id = session.service_id
-			 AND snapshot.service_version_id = session.service_version_id
-			CROSS JOIN LATERAL jsonb_array_elements(COALESCE(snapshot.service_metadata -> 'auth_configs', '[]'::jsonb)) auth
-			-- A blank historical selector may inherit only one exact compatible name from its pinned contract.
-			WHERE btrim(session.auth_name) = ''
-			  AND btrim(COALESCE(auth ->> 'name', '')) <> ''
-			  -- Unsupported historical families cannot become compatible merely because both normalize to empty.
-			  AND CASE
-				WHEN lower(replace(btrim(session.auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-				WHEN lower(replace(btrim(session.auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
-				ELSE '' END <> ''
-			  AND CASE
-				WHEN lower(replace(btrim(auth ->> 'type'), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-				WHEN lower(replace(btrim(auth ->> 'type'), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
-				ELSE '' END = CASE
-				WHEN lower(replace(btrim(session.auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-				WHEN lower(replace(btrim(session.auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
-				ELSE '' END
-		), resolved AS (
-			SELECT id, min(auth_name) AS auth_name
-			FROM candidates
-			GROUP BY id
-			-- Ambiguous pinned contracts stay blank and therefore inactive after the direct-source fallback.
-			HAVING count(DISTINCT auth_name) = 1
-		)
-		UPDATE fused_connect_sessions session SET auth_name = resolved.auth_name
-		FROM resolved WHERE session.id = resolved.id;`,
-		`UPDATE fused_connect_sessions session SET
-			credential_source_service_id = reference.source_service_id,
-			credential_source_auth_type = reference.source_auth_type,
-			credential_source_auth_name = reference.source_auth_name
-			FROM fused_workspace_auth_references reference
-			WHERE session.credential_source_service_id IS NULL
-			  AND reference.bucket_id = session.bucket_id
-			  AND reference.target_service_id = session.service_id
-			  AND reference.target_auth_name = session.auth_name
-			  AND CASE
-				WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-				WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
-				ELSE '' END = CASE
-				WHEN lower(replace(btrim(session.auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-				WHEN lower(replace(btrim(session.auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
-				ELSE '' END;`,
-		`UPDATE fused_connect_sessions SET credential_source_service_id = service_id,
-			credential_source_auth_type = auth_type, credential_source_auth_name = auth_name
-			WHERE credential_source_service_id IS NULL;`,
-		`ALTER TABLE fused_connect_sessions ALTER COLUMN credential_source_service_id SET NOT NULL;`,
-		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS credential_source_service_id uuid;`,
-		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS credential_source_auth_type text NOT NULL DEFAULT '';`,
-		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS credential_source_auth_name text NOT NULL DEFAULT '';`,
-		`WITH candidates AS (
-			SELECT connection.id, btrim(auth ->> 'name') AS auth_name
-			FROM fused_auth_connections connection
-			JOIN fused_service_contract_snapshots snapshot
-			  ON snapshot.service_id = connection.service_id
-			 AND snapshot.service_version_id = connection.service_version_id
-			CROSS JOIN LATERAL jsonb_array_elements(COALESCE(snapshot.service_metadata -> 'auth_configs', '[]'::jsonb)) auth
-			-- Refresh grants recover a blank scheme only from their immutable service-version contract.
-			WHERE btrim(connection.auth_name) = ''
-			  AND btrim(COALESCE(auth ->> 'name', '')) <> ''
-			  -- Only OAuth/OIDC grants may recover application-credential routing from pinned metadata.
-			  AND CASE
-				WHEN lower(replace(btrim(connection.auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-				WHEN lower(replace(btrim(connection.auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
-				ELSE '' END <> ''
-			  AND CASE
-				WHEN lower(replace(btrim(auth ->> 'type'), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-				WHEN lower(replace(btrim(auth ->> 'type'), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
-				ELSE '' END = CASE
-				WHEN lower(replace(btrim(connection.auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-				WHEN lower(replace(btrim(connection.auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
-				ELSE '' END
-		), resolved AS (
-			SELECT id, min(auth_name) AS auth_name
-			FROM candidates
-			GROUP BY id
-			-- Multiple compatible names cannot be inferred from an old blank grant without changing ownership.
-			HAVING count(DISTINCT auth_name) = 1
-		)
-		UPDATE fused_auth_connections connection SET auth_name = resolved.auth_name
-		FROM resolved WHERE connection.id = resolved.id;`,
-		`UPDATE fused_auth_connections connection SET
-			credential_source_service_id = reference.source_service_id,
-			credential_source_auth_type = reference.source_auth_type,
-			credential_source_auth_name = reference.source_auth_name
-			FROM fused_workspace_auth_references reference
-			WHERE connection.credential_source_service_id IS NULL
-			  AND reference.bucket_id = connection.bucket_id
-			  AND reference.target_service_id = connection.service_id
-			  AND reference.target_auth_name = connection.auth_name
-			  AND CASE
-				WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-				WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
-				ELSE '' END = CASE
-				WHEN lower(replace(btrim(connection.auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
-				WHEN lower(replace(btrim(connection.auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
-				ELSE '' END;`,
-		`UPDATE fused_auth_connections SET credential_source_service_id = service_id,
-			credential_source_auth_type = auth_type, credential_source_auth_name = auth_name
-			WHERE credential_source_service_id IS NULL;`,
-		`ALTER TABLE fused_auth_connections ALTER COLUMN credential_source_service_id SET NOT NULL;`,
-		// v15 remains immutable in the ledger, while v17 removes its incorrect workspace-global state.
-		`DROP TABLE IF EXISTS fused_workspace_auth_references;`,
-	}
-}
-
-// oauthRefreshAuthTypeMigrationQueries aligns background refresh indexing with every accepted OAuth/OIDC spelling.
-func oauthRefreshAuthTypeMigrationQueries() []string {
-	return []string{
-		// Pending v17 preflights remove this check transactionally; v18 restores it without disturbing already-upgraded Engines.
-		`DO $$
-		BEGIN
-			-- Existing v17 databases retain their original check, while repaired upgrades add the same NOT VALID write invariant.
-			IF NOT EXISTS (
-				SELECT 1 FROM pg_constraint
-				WHERE conname = 'chk_fused_connect_sessions_service_version'
-				  AND conrelid = 'fused_connect_sessions'::regclass
-			) THEN
-				ALTER TABLE fused_connect_sessions ADD CONSTRAINT chk_fused_connect_sessions_service_version
-					CHECK (service_version_id IS NOT NULL) NOT VALID;
-			END IF;
-		END
-		$$;`,
-		// Rebuild the partial index so every normalized worker-eligible family has matching index admission.
-		`DROP INDEX IF EXISTS idx_fused_auth_connections_refresh;`,
-		`CREATE INDEX idx_fused_auth_connections_refresh
-			ON fused_auth_connections(
-				COALESCE(LEAST(expires_at, refresh_token_expires_at), expires_at, refresh_token_expires_at), id
-			)
-			-- The partial-index predicate must exactly cover every row admitted by the background refresh worker.
-			WHERE refresh_state IN ('ok', 'failed', 'expired')
-			  AND service_version_id IS NOT NULL
-			  AND lower(replace(btrim(auth_type), '-', '_')) IN
-			      ('oauth', 'oauth2', 'oauth2_authorization_code', 'oidc', 'openidconnect', 'open_id_connect');`,
-	}
 }
 
 // unifiedSchemaConvergenceQueries makes v3 the only writable Unified shape.
@@ -1933,572 +1494,5 @@ func unifiedSchemaConvergenceQueries() []string {
 			END IF;
 		END
 		$$;`,
-	}
-}
-
-// Existing snapshots predate capability negotiation and therefore cannot be
-// proven executable. Dropping only this rebuildable Registry cache prevents an
-// upgrade from blessing unknown semantics with today's version number.
-func contractEnvelopeMigrationQueries() []string {
-	return []string{
-		`ALTER TABLE fused_service_contract_snapshots ADD COLUMN IF NOT EXISTS contract_version integer;`,
-		`ALTER TABLE fused_service_contract_snapshots ADD COLUMN IF NOT EXISTS required_capabilities text[];`,
-		`DELETE FROM fused_service_contract_snapshots
-		 WHERE contract_version IS NULL OR required_capabilities IS NULL;`,
-		`ALTER TABLE fused_service_contract_snapshots ALTER COLUMN contract_version SET NOT NULL;`,
-		`ALTER TABLE fused_service_contract_snapshots ALTER COLUMN required_capabilities SET NOT NULL;`,
-	}
-}
-
-// Token policy is an additive upgrade over the app-family schema. The ledger
-// keeps it one-shot, while IF NOT EXISTS lets fresh databases run the same
-// migration after creating the canonical table shape.
-func appTokenPolicyMigrationQueries() []string {
-	return []string{
-		`ALTER TABLE fused_app_tokens ADD COLUMN IF NOT EXISTS allow_all boolean NOT NULL DEFAULT true;`,
-		`ALTER TABLE fused_app_tokens ADD COLUMN IF NOT EXISTS allowed_operations text[] NOT NULL DEFAULT '{}';`,
-		`ALTER TABLE fused_app_tokens ADD COLUMN IF NOT EXISTS expires_at timestamptz;`,
-		`ALTER TABLE fused_app_tokens DROP CONSTRAINT IF EXISTS chk_fused_app_tokens_allow;`,
-		`ALTER TABLE fused_app_tokens ADD CONSTRAINT chk_fused_app_tokens_allow CHECK (
-			(allow_all AND cardinality(allowed_operations) = 0)
-			OR (NOT allow_all AND cardinality(allowed_operations) > 0 AND NOT ('*' = ANY(allowed_operations)))
-		);`,
-	}
-}
-
-func idempotencyMediaMigrationQueries() []string {
-	return []string{
-		`ALTER TABLE fused_engine_idempotency_keys ADD COLUMN IF NOT EXISTS response_media_family text;`,
-		// Rows written before media-family persistence cannot safely satisfy an
-		// adaptive client, so invalidate them instead of replaying guessed metadata.
-		`DELETE FROM fused_engine_idempotency_keys WHERE response_media_family IS NULL OR response_media_family = 'unknown';`,
-		`ALTER TABLE fused_engine_idempotency_keys ALTER COLUMN response_media_family SET DEFAULT 'unknown';`,
-		`ALTER TABLE fused_engine_idempotency_keys ALTER COLUMN response_media_family SET NOT NULL;`,
-		`ALTER TABLE fused_engine_idempotency_keys DROP CONSTRAINT IF EXISTS chk_fused_engine_idempotency_response_media_family;`,
-		`ALTER TABLE fused_engine_idempotency_keys ADD CONSTRAINT chk_fused_engine_idempotency_response_media_family CHECK (response_media_family IN ('sse', 'json', 'binary', 'xml', 'text', 'other', 'unknown'));`,
-	}
-}
-
-// connectBrandingMigrationQueries adds presentation-only workspace fields to
-// existing Engine databases while preserving the compiled fallback defaults.
-func connectBrandingMigrationQueries() []string {
-	return []string{
-		`ALTER TABLE fused_workspaces ADD COLUMN IF NOT EXISTS connect_display_name text NOT NULL DEFAULT 'Fused';`,
-		`ALTER TABLE fused_workspaces ADD COLUMN IF NOT EXISTS connect_logo_url text NOT NULL DEFAULT '';`,
-		`ALTER TABLE fused_workspaces ADD COLUMN IF NOT EXISTS connect_primary_color text NOT NULL DEFAULT '#18181b';`,
-		`ALTER TABLE fused_workspaces ADD COLUMN IF NOT EXISTS connect_support_url text NOT NULL DEFAULT '';`,
-		`ALTER TABLE fused_workspaces ADD COLUMN IF NOT EXISTS connect_privacy_url text NOT NULL DEFAULT '';`,
-	}
-}
-
-// connectBrandColorMigrationQueries upgrades only untouched legacy defaults
-// while retaining every row with evidence of a prior branding replacement.
-func connectBrandColorMigrationQueries() []string {
-	return []string{
-		// The marker gives future migrations durable evidence without exposing a colour value.
-		`ALTER TABLE fused_workspaces ADD COLUMN IF NOT EXISTS connect_primary_color_customized boolean NOT NULL DEFAULT false;`,
-		// A visibly different colour or the bounded mutation audit protects an explicit choice.
-		`UPDATE fused_workspaces AS workspace
-		 SET connect_primary_color_customized = true
-		 WHERE connect_primary_color IS DISTINCT FROM '#18181b'
-		    OR EXISTS (
-		       SELECT 1
-		       FROM fused_audit_events AS audit
-		       WHERE audit.resource_type = 'workspace'
-		         AND audit.resource_id = workspace.id
-		         AND audit.action = 'control.http.put'
-		         AND audit.path = '/workspace/connect-branding'
-		         AND audit.permission = 'workspace.update'
-		         AND audit.outcome = 'succeeded'
-		         AND audit.metadata @> '{"primary_color_changed": true}'::jsonb
-		    );`,
-		// Only the unprotected legacy default is safe to converge to Engine blue.
-		`UPDATE fused_workspaces
-		 SET connect_primary_color = '#2563eb'
-		 WHERE connect_primary_color_customized = false
-		   AND connect_primary_color = '#18181b';`,
-		// New workspaces inherit the same primary colour as the compiled fallback.
-		`ALTER TABLE fused_workspaces ALTER COLUMN connect_primary_color SET DEFAULT '#2563eb';`,
-	}
-}
-
-// connectBrandVioletMigrationQueries aligns untouched Engine defaults with the
-// canonical violet token while preserving every explicitly selected colour.
-func connectBrandVioletMigrationQueries() []string {
-	return []string{
-		// Only rows still carrying the prior generated default are safe to converge.
-		`UPDATE fused_workspaces
-		 SET connect_primary_color = '#6941ff'
-		 WHERE connect_primary_color_customized = false
-		   AND connect_primary_color = '#2563eb';`,
-		// New workspaces must use the same token as the compiled and embedded UI fallbacks.
-		`ALTER TABLE fused_workspaces ALTER COLUMN connect_primary_color SET DEFAULT '#6941ff';`,
-	}
-}
-
-// managedOAuthRefreshMigrationQueries adds exact contract identity and durable
-// lease state without rewriting any previously recorded Engine migration.
-func managedOAuthRefreshMigrationQueries() []string {
-	return []string{
-		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS service_version_id uuid;`,
-		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS last_refresh_attempt_at timestamptz;`,
-		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS last_refreshed_at timestamptz;`,
-		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS refresh_retry_not_before timestamptz;`,
-		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS refresh_lease_token uuid;`,
-		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS refresh_lease_expires_at timestamptz;`,
-		`ALTER TABLE fused_connect_sessions ADD COLUMN IF NOT EXISTS service_version_id uuid;`,
-		// A legacy credential can be pinned only when exactly one active local
-		// version exists. Ambiguous rows remain nil for foreground exact binding.
-		`WITH unambiguous_versions AS (
-			SELECT service_id, MIN(service_version_id::text)::uuid AS service_version_id
-			FROM fused_workspace_service_versions
-			WHERE status <> 'deprecated'
-			GROUP BY service_id
-			HAVING COUNT(*) = 1
-		)
-		UPDATE fused_auth_connections AS connection
-		SET service_version_id = version.service_version_id
-		FROM unambiguous_versions AS version
-		WHERE connection.service_id = version.service_id
-		  AND connection.service_version_id IS NULL;`,
-		// Pending browser sessions are equally safe to recover when their service
-		// has one active version; ambiguous legacy sessions fail closed in API code.
-		`WITH unambiguous_versions AS (
-			SELECT service_id, MIN(service_version_id::text)::uuid AS service_version_id
-			FROM fused_workspace_service_versions
-			WHERE status <> 'deprecated'
-			GROUP BY service_id
-			HAVING COUNT(*) = 1
-		)
-		UPDATE fused_connect_sessions AS session
-		SET service_version_id = version.service_version_id
-		FROM unambiguous_versions AS version
-		WHERE session.service_id = version.service_id
-		  AND session.service_version_id IS NULL;`,
-		`ALTER TABLE fused_auth_connections DROP CONSTRAINT IF EXISTS chk_fused_auth_connections_refresh_lease;`,
-		`ALTER TABLE fused_auth_connections ADD CONSTRAINT chk_fused_auth_connections_refresh_lease
-			CHECK ((refresh_lease_token IS NULL) = (refresh_lease_expires_at IS NULL));`,
-		// NOT VALID preserves ambiguous in-flight legacy sessions while enforcing
-		// exact service-version identity on every session created after migration.
-		`ALTER TABLE fused_connect_sessions DROP CONSTRAINT IF EXISTS chk_fused_connect_sessions_service_version;`,
-		`ALTER TABLE fused_connect_sessions ADD CONSTRAINT chk_fused_connect_sessions_service_version
-			CHECK (service_version_id IS NOT NULL) NOT VALID;`,
-		`DROP INDEX IF EXISTS idx_fused_auth_connections_refresh;`,
-		`CREATE INDEX idx_fused_auth_connections_refresh
-			ON fused_auth_connections(
-				COALESCE(LEAST(expires_at, refresh_token_expires_at), expires_at, refresh_token_expires_at), id
-			)
-			WHERE refresh_state IN ('ok', 'failed', 'expired')
-			  AND service_version_id IS NOT NULL
-			  AND lower(auth_type) IN ('oauth', 'oauth2', 'oidc', 'openidconnect', 'open_id_connect');`,
-	}
-}
-
-// restExecutionMigrationQueries widens the live execution-receipt identity
-// constraint without mutating any already-recorded Engine migration.
-func restExecutionMigrationQueries() []string {
-	return []string{
-		`ALTER TABLE fused_engine_execution_events DROP CONSTRAINT IF EXISTS chk_fused_execution_app_identity;`,
-		`ALTER TABLE fused_engine_execution_events ADD CONSTRAINT chk_fused_execution_app_identity
-			CHECK (transport NOT IN ('sdk', 'mcp', 'rest') OR (
-				app_family_id IS NOT NULL AND app_id IS NOT NULL
-				AND NULLIF(BTRIM(app_version), '') IS NOT NULL
-			)) NOT VALID;`,
-	}
-}
-
-// appTokenHistoryMigrationQueries separates executable hashes from durable
-// lifecycle identity before receipts and sessions begin referring to token IDs.
-// The set-based backfill keeps query count constant for installations with many
-// tokens and leaves actor provenance empty where older rows never recorded it.
-func appTokenHistoryMigrationQueries() []string {
-	return []string{
-		`CREATE TABLE IF NOT EXISTS fused_app_token_history (
-			id uuid PRIMARY KEY,
-			app_family_id uuid NOT NULL REFERENCES fused_app_families(app_family_id) ON DELETE CASCADE,
-			name text NOT NULL,
-			allow_all boolean NOT NULL DEFAULT true,
-			allowed_operations text[] NOT NULL DEFAULT '{}',
-			binding_mode text NOT NULL DEFAULT 'dynamic' CHECK (binding_mode IN ('dynamic', 'fixed')),
-			expires_at timestamptz,
-			issued_by_subject_id uuid,
-			issued_by_credential_id uuid,
-			status text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'expired', 'revoked')),
-			terminated_at timestamptz,
-			terminated_by_subject_id uuid,
-			terminated_by_credential_id uuid,
-			created_at timestamptz NOT NULL DEFAULT NOW(),
-			CONSTRAINT chk_fused_app_token_history_allow CHECK (
-				(allow_all AND cardinality(allowed_operations) = 0)
-				OR (NOT allow_all AND cardinality(allowed_operations) > 0 AND NOT ('*' = ANY(allowed_operations)))
-			),
-			CONSTRAINT chk_fused_app_token_history_terminal CHECK (
-				(status = 'active' AND terminated_at IS NULL)
-				OR (status <> 'active' AND terminated_at IS NOT NULL)
-			)
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_app_token_history_family
-			ON fused_app_token_history(app_family_id, created_at DESC);`,
-		`ALTER TABLE fused_app_tokens ADD COLUMN IF NOT EXISTS binding_mode text NOT NULL DEFAULT 'dynamic';`,
-		`ALTER TABLE fused_app_tokens DROP CONSTRAINT IF EXISTS chk_fused_app_tokens_binding_mode;`,
-		`ALTER TABLE fused_app_tokens ADD CONSTRAINT chk_fused_app_tokens_binding_mode CHECK (binding_mode IN ('dynamic', 'fixed'));`,
-		`INSERT INTO fused_app_token_history
-			(id, app_family_id, name, allow_all, allowed_operations, binding_mode, expires_at, status, terminated_at, created_at)
-		 SELECT id, app_family_id, name, allow_all, allowed_operations, binding_mode, expires_at,
-		        CASE WHEN expires_at IS NOT NULL AND expires_at <= NOW() THEN 'expired' ELSE 'active' END,
-		        CASE WHEN expires_at IS NOT NULL AND expires_at <= NOW() THEN expires_at ELSE NULL END,
-		        created_at
-		 FROM fused_app_tokens
-		 ON CONFLICT (id) DO NOTHING;`,
-		`ALTER TABLE fused_app_tokens DROP CONSTRAINT IF EXISTS fk_fused_app_tokens_history;`,
-		`ALTER TABLE fused_app_tokens ADD CONSTRAINT fk_fused_app_tokens_history
-			FOREIGN KEY (id) REFERENCES fused_app_token_history(id) ON DELETE RESTRICT NOT VALID;`,
-		`ALTER TABLE fused_app_tokens VALIDATE CONSTRAINT fk_fused_app_tokens_history;`,
-		`CREATE TABLE IF NOT EXISTS fused_app_token_bindings (
-			token_id uuid NOT NULL REFERENCES fused_app_tokens(id) ON DELETE CASCADE,
-			service_id uuid NOT NULL,
-			auth_name text NOT NULL DEFAULT '',
-			auth_connection_id uuid NOT NULL REFERENCES fused_auth_connections(id) ON DELETE CASCADE,
-			resource_id uuid REFERENCES fused_connection_resources(id) ON DELETE CASCADE,
-			created_at timestamptz NOT NULL DEFAULT NOW(),
-			PRIMARY KEY (token_id, service_id, auth_name)
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_app_token_bindings_connection
-			ON fused_app_token_bindings(auth_connection_id);`,
-		`ALTER TABLE fused_mcp_sessions ADD COLUMN IF NOT EXISTS app_token_id uuid;`,
-		`ALTER TABLE fused_mcp_sessions ADD COLUMN IF NOT EXISTS protocol_version text NOT NULL DEFAULT '2024-11-05';`,
-		`ALTER TABLE fused_mcp_sessions ADD COLUMN IF NOT EXISTS last_activity_at timestamptz NOT NULL DEFAULT NOW();`,
-		`ALTER TABLE fused_mcp_sessions ADD COLUMN IF NOT EXISTS end_reason text;`,
-		`ALTER TABLE fused_mcp_sessions DROP CONSTRAINT IF EXISTS chk_fused_mcp_sessions_end_reason;`,
-		`ALTER TABLE fused_mcp_sessions ADD CONSTRAINT chk_fused_mcp_sessions_end_reason
-			CHECK (end_reason IS NULL OR end_reason IN ('client_terminated', 'client_disconnected', 'idle_timeout', 'token_expired', 'token_revoked', 'app_deactivated', 'engine_shutdown', 'runtime_failed'));`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_mcp_sessions_token_started
-			ON fused_mcp_sessions(app_token_id, started_at DESC) WHERE app_token_id IS NOT NULL;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS app_token_id uuid;`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_token_started
-			ON fused_engine_execution_events(app_token_id, started_at DESC) WHERE app_token_id IS NOT NULL;`,
-	}
-}
-
-// appTokenCleanupMigrationQueries repairs lifecycle evidence without mutating
-// migration 10, which may already be recorded in an Engine database. It also
-// replaces the old token-list index with the bounded expiry worker's access path.
-func appTokenCleanupMigrationQueries() []string {
-	return []string{
-		`ALTER TABLE fused_app_token_history ADD COLUMN IF NOT EXISTS termination_reason text;`,
-		`UPDATE fused_app_token_history
-		 SET termination_reason = status
-		 WHERE status IN ('expired', 'revoked') AND termination_reason IS NULL;`,
-		`ALTER TABLE fused_app_token_history DROP CONSTRAINT IF EXISTS chk_fused_app_token_history_reason;`,
-		`ALTER TABLE fused_app_token_history ADD CONSTRAINT chk_fused_app_token_history_reason CHECK (
-			(status = 'active' AND termination_reason IS NULL)
-			OR (status = 'expired' AND termination_reason = 'expired')
-			OR (status = 'revoked' AND termination_reason = 'revoked')
-		);`,
-		`ALTER TABLE fused_mcp_sessions DROP CONSTRAINT IF EXISTS chk_fused_mcp_sessions_end_reason;`,
-		`ALTER TABLE fused_mcp_sessions ADD CONSTRAINT chk_fused_mcp_sessions_end_reason CHECK (
-			end_reason IS NULL OR end_reason IN (
-				'client_terminated', 'client_disconnected', 'idle_timeout', 'token_expired',
-				'token_revoked', 'app_deactivated', 'engine_shutdown', 'runtime_failed', 'tool_call_timeout'
-			)
-		);`,
-		`DROP INDEX IF EXISTS idx_fused_app_tokens_family;`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_app_tokens_expiry
-			ON fused_app_tokens(expires_at, id) WHERE expires_at IS NOT NULL;`,
-	}
-}
-
-// mcpSessionLifetimeMigrationQueries widens only the lifecycle cause allowlist
-// so existing termination evidence survives and hard stops become durably auditable.
-func mcpSessionLifetimeMigrationQueries() []string {
-	return []string{
-		`ALTER TABLE fused_mcp_sessions DROP CONSTRAINT IF EXISTS chk_fused_mcp_sessions_end_reason;`,
-		`ALTER TABLE fused_mcp_sessions ADD ` + mcpSessionLifetimeEndReasonConstraint + `;`,
-	}
-}
-
-// workspaceAuthReferenceMigrationQueries converges engines that created the
-// source FK before composite target+source removal became atomic.
-func workspaceAuthReferenceMigrationQueries() []string {
-	return []string{
-		`ALTER TABLE fused_workspace_auth_references DROP CONSTRAINT IF EXISTS fk_fused_workspace_auth_reference_source;`,
-		`ALTER TABLE fused_workspace_auth_references ADD CONSTRAINT fk_fused_workspace_auth_reference_source
-			FOREIGN KEY (source_service_id) REFERENCES fused_workspace_services(service_id) ON DELETE NO ACTION;`,
-	}
-}
-
-// Version 1 is immutable once recorded. Later schema changes need a new
-// engineMigration entry so existing databases cannot silently skip them.
-func engineMigrationV1Queries() []string {
-	return []string{
-		`ALTER TABLE fused_subjects DROP CONSTRAINT IF EXISTS chk_fused_subjects_kind;`,
-		`UPDATE fused_subjects SET kind = 'app' WHERE kind = 'artifact';`,
-		`ALTER TABLE fused_subjects ADD CONSTRAINT chk_fused_subjects_kind
-		 CHECK (kind IN ('bootstrap', 'user', 'service_account', 'app'));`,
-		// App-family IDs are the only app authorization boundary. Existing
-		// version-scoped grants are collapsed onto their family before the old
-		// vocabulary is removed, so sibling versions cannot drift in access.
-		`ALTER TABLE fused_roles DROP CONSTRAINT IF EXISTS chk_fused_roles_scope_type;`,
-		`ALTER TABLE fused_role_bindings DROP CONSTRAINT IF EXISTS chk_fused_role_bindings_resource_type;`,
-		`ALTER TABLE fused_audit_events DROP CONSTRAINT IF EXISTS chk_fused_audit_events_resource_type;`,
-		`INSERT INTO fused_role_permissions (role_id, permission)
-		 SELECT role_id, 'app.' || substr(permission, length('artifact.') + 1)
-		 FROM fused_role_permissions WHERE permission LIKE 'artifact.%'
-		 ON CONFLICT (role_id, permission) DO NOTHING;`,
-		`DELETE FROM fused_role_permissions WHERE permission LIKE 'artifact.%';`,
-		`UPDATE fused_roles SET
-			slug = CASE slug
-				WHEN 'artifact-reader' THEN 'app-reader'
-				WHEN 'artifact-user' THEN 'app-user'
-				WHEN 'artifact-manager' THEN 'app-manager'
-				ELSE slug END,
-			display_name = CASE display_name
-				WHEN 'Artifact reader' THEN 'App reader'
-				WHEN 'Artifact user' THEN 'App user'
-				WHEN 'Artifact manager' THEN 'App manager'
-				ELSE display_name END,
-			scope_type = 'app'
-		 WHERE scope_type = 'artifact';`,
-		`INSERT INTO fused_role_bindings
-			(id, subject_type, subject_id, role_id, resource_type, resource_id, created_by_subject_id, created_at)
-		 SELECT gen_random_uuid(), binding.subject_type, binding.subject_id, binding.role_id,
-			'app', app.app_family_id, binding.created_by_subject_id, MIN(binding.created_at)
-		 FROM fused_role_bindings binding
-		 JOIN fused_apps app ON app.app_id = binding.resource_id
-		 WHERE binding.resource_type = 'artifact'
-		 GROUP BY binding.subject_type, binding.subject_id, binding.role_id, app.app_family_id, binding.created_by_subject_id
-		 ON CONFLICT (subject_type, subject_id, role_id, resource_type, resource_id) DO NOTHING;`,
-		`DELETE FROM fused_role_bindings WHERE resource_type = 'artifact';`,
-		`UPDATE fused_audit_events audit
-		 SET resource_type = 'app', resource_id = app.app_family_id
-		 FROM fused_apps app
-		 WHERE audit.resource_type = 'artifact' AND audit.resource_id = app.app_id;`,
-		`UPDATE fused_audit_events SET resource_type = NULL, resource_id = NULL
-		 WHERE resource_type = 'artifact';`,
-		`ALTER TABLE fused_roles ADD CONSTRAINT chk_fused_roles_scope_type
-		 CHECK (scope_type IN ('workspace', 'service', 'bucket', 'app'));`,
-		`ALTER TABLE fused_role_bindings ADD CONSTRAINT chk_fused_role_bindings_resource_type
-		 CHECK (resource_type IN ('workspace', 'service', 'bucket', 'app'));`,
-		`ALTER TABLE fused_audit_events ADD CONSTRAINT chk_fused_audit_events_resource_type
-		 CHECK (resource_type IS NULL OR resource_type IN ('workspace', 'service', 'bucket', 'app'));`,
-		// The engine operates in a mono-workspace environment. Remove the workspace-level scoping columns.
-		`ALTER TABLE fused_buckets DROP CONSTRAINT IF EXISTS uq_workspace_buckets;`,
-		`ALTER TABLE fused_buckets DROP COLUMN IF EXISTS workspace_id;`,
-		`ALTER TABLE fused_buckets ADD CONSTRAINT uq_workspace_buckets UNIQUE (name);`,
-		`ALTER TABLE fused_connect_configs DROP COLUMN IF EXISTS workspace_id;`,
-		`ALTER TABLE fused_connect_configs ADD COLUMN IF NOT EXISTS auth_name text NOT NULL DEFAULT '';`,
-		`ALTER TABLE fused_auth_connections DROP COLUMN IF EXISTS workspace_id;`,
-		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS auth_name text NOT NULL DEFAULT '';`,
-		`ALTER TABLE fused_auth_connections DROP CONSTRAINT IF EXISTS uq_fused_auth_connections;`,
-		`ALTER TABLE fused_auth_connections ADD CONSTRAINT uq_fused_auth_connections UNIQUE (bucket_id, service_id, end_user_ref, auth_name);`,
-		`ALTER TABLE fused_connect_sessions DROP COLUMN IF EXISTS workspace_id;`,
-		`ALTER TABLE fused_connect_sessions ADD COLUMN IF NOT EXISTS auth_type text NOT NULL DEFAULT '';`,
-		`ALTER TABLE fused_connect_sessions ADD COLUMN IF NOT EXISTS auth_name text NOT NULL DEFAULT '';`,
-		`ALTER TABLE fused_mcp_sessions ADD COLUMN IF NOT EXISTS app_id uuid;`,
-		`DO $$ BEGIN
-			IF EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = current_schema() AND table_name = 'fused_mcp_sessions' AND column_name = 'artifact_id'
-			) THEN
-				EXECUTE 'UPDATE fused_mcp_sessions SET app_id = artifact_id WHERE app_id IS NULL';
-			END IF;
-		END $$;`,
-		`DROP INDEX IF EXISTS idx_fused_mcp_sessions_sdk_started;`,
-		`ALTER TABLE fused_mcp_sessions DROP COLUMN IF EXISTS artifact_id;`,
-		`ALTER TABLE fused_mcp_sessions ALTER COLUMN app_id SET NOT NULL;`,
-		`ALTER TABLE fused_mcp_sessions DROP CONSTRAINT IF EXISTS fk_fused_mcp_sessions_app;`,
-		`ALTER TABLE fused_mcp_sessions ADD CONSTRAINT fk_fused_mcp_sessions_app
-			FOREIGN KEY (app_id) REFERENCES fused_apps(app_id) ON DELETE CASCADE;`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_mcp_sessions_app_started ON fused_mcp_sessions(app_id, started_at DESC);`,
-		`ALTER TABLE fused_engine_idempotency_keys ADD COLUMN IF NOT EXISTS app_id uuid;`,
-		`DO $$ BEGIN
-			IF EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = current_schema() AND table_name = 'fused_engine_idempotency_keys' AND column_name = 'artifact_id'
-			) THEN
-				EXECUTE 'UPDATE fused_engine_idempotency_keys SET app_id = artifact_id WHERE app_id IS NULL';
-			END IF;
-		END $$;`,
-		`ALTER TABLE fused_engine_idempotency_keys DROP CONSTRAINT IF EXISTS fused_engine_idempotency_keys_artifact_id_idempotency_key_hash_key;`,
-		`ALTER TABLE fused_engine_idempotency_keys DROP COLUMN IF EXISTS artifact_id;`,
-		`ALTER TABLE fused_engine_idempotency_keys ALTER COLUMN app_id SET NOT NULL;`,
-		`ALTER TABLE fused_engine_idempotency_keys DROP CONSTRAINT IF EXISTS fk_fused_engine_idempotency_app;`,
-		`ALTER TABLE fused_engine_idempotency_keys ADD CONSTRAINT fk_fused_engine_idempotency_app
-			FOREIGN KEY (app_id) REFERENCES fused_apps(app_id) ON DELETE CASCADE;`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_engine_idempotency_app_key ON fused_engine_idempotency_keys(app_id, idempotency_key_hash);`,
-
-		`ALTER TABLE fused_workspace_services ADD COLUMN IF NOT EXISTS service_slug text;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS http_method text;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS request_path text;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS environment_source text;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS provider_host text;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS provider_http_status integer;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS account_id uuid;`,
-		// Existing installations need the target identity columns before the
-		// historical backfill and app-scoped indexes run below.
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS app_family_id uuid;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS app_id uuid;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS app_version text;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS provider_protocol text;`,
-		`DROP INDEX IF EXISTS idx_fused_engine_execution_events_sdk_started;`,
-		`DROP INDEX IF EXISTS idx_fused_engine_execution_events_endpoint;`,
-		`DO $$ BEGIN
-			IF EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = current_schema()
-				  AND table_name = 'fused_engine_execution_events'
-				  AND column_name = 'artifact_id'
-			) THEN
-				EXECUTE $backfill$
-					UPDATE fused_engine_execution_events event
-					SET app_family_id = identity.app_family_id,
-						app_id = identity.app_id,
-						app_version = identity.version
-					FROM (
-						SELECT app_id, app_family_id, version FROM fused_apps
-						UNION ALL
-						SELECT app_id, app_family_id, version FROM fused_app_tombstones
-					) identity
-					WHERE event.artifact_id = identity.app_id
-					  AND event.app_id IS NULL
-				$backfill$;
-			END IF;
-		END $$;`,
-		`ALTER TABLE fused_engine_execution_events DROP COLUMN IF EXISTS artifact_id;`,
-		`DO $$ BEGIN
-			IF NOT EXISTS (
-				SELECT 1 FROM pg_constraint
-				WHERE conname = 'chk_fused_execution_app_identity'
-				  AND conrelid = 'fused_engine_execution_events'::regclass
-			) THEN
-				ALTER TABLE fused_engine_execution_events ADD CONSTRAINT chk_fused_execution_app_identity
-				CHECK (transport NOT IN ('sdk', 'mcp') OR (
-					app_family_id IS NOT NULL AND app_id IS NOT NULL
-					AND NULLIF(BTRIM(app_version), '') IS NOT NULL
-				)) NOT VALID;
-			END IF;
-		END $$;`,
-		`DO $$ BEGIN
-			IF NOT EXISTS (
-				SELECT 1 FROM pg_constraint
-				WHERE conname = 'chk_fused_execution_app_version_length'
-				  AND conrelid = 'fused_engine_execution_events'::regclass
-			) THEN
-				ALTER TABLE fused_engine_execution_events ADD CONSTRAINT chk_fused_execution_app_version_length
-				CHECK (app_version IS NULL OR CHAR_LENGTH(app_version) <= 128) NOT VALID;
-			END IF;
-		END $$;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS direction text NOT NULL DEFAULT 'outbound';`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS operation_id uuid;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS webhook_id uuid;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS external_id text;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS event_name text;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS provider_status_class text;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS failure_category text;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS failure_code text;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS attempt_count integer NOT NULL DEFAULT 1;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS auth_scheme_names text[] NOT NULL DEFAULT '{}';`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS auth_scheme_types text[] NOT NULL DEFAULT '{}';`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS auth_scheme_count bigint NOT NULL DEFAULT 0;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS auth_selection_outcome text;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS pagination_type text;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS pagination_page_count bigint NOT NULL DEFAULT 0;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS pagination_item_count bigint NOT NULL DEFAULT 0;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS pagination_byte_count bigint NOT NULL DEFAULT 0;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS pagination_stop_reason text;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS rate_limit_decision text;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS rate_limit_policy_count bigint NOT NULL DEFAULT 0;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS rate_limit_scope_kinds text[] NOT NULL DEFAULT '{}';`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS rate_limit_units text[] NOT NULL DEFAULT '{}';`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS rate_limit_unit_totals bigint[] NOT NULL DEFAULT '{}';`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS rate_limit_retry_outcome text;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS rate_limit_header_outcome text;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS request_bytes bigint NOT NULL DEFAULT 0;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS response_bytes bigint NOT NULL DEFAULT 0;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS verification_status text;`,
-		`ALTER TABLE fused_engine_execution_events ADD COLUMN IF NOT EXISTS delivery_status text;`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_direction_started ON fused_engine_execution_events(direction, transport, started_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_operation_started ON fused_engine_execution_events(operation_id, started_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_webhook_started ON fused_engine_execution_events(webhook_id, started_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_family_started
-		ON fused_engine_execution_events(account_id, app_family_id, started_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_app_started
-		ON fused_engine_execution_events(account_id, app_id, started_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_engine_execution_events_endpoint
-		ON fused_engine_execution_events(app_id, endpoint_name, started_at DESC);`,
-		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS public_service_insights_enabled boolean NOT NULL DEFAULT false;`,
-		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS entitlement_revision text NOT NULL DEFAULT '';`,
-		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS max_buckets integer NOT NULL DEFAULT -1;`,
-		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS max_sdk_families integer NOT NULL DEFAULT -1;`,
-		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS max_mcp_families integer NOT NULL DEFAULT -1;`,
-		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS max_services integer NOT NULL DEFAULT -1;`,
-		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS max_sandbox_concurrency integer NOT NULL DEFAULT -1;`,
-		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS drift_monitoring_enabled boolean NOT NULL DEFAULT false;`,
-		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS webhook_ingestion_enabled boolean NOT NULL DEFAULT false;`,
-		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS sso_enabled boolean NOT NULL DEFAULT false;`,
-		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS execution_retention_days integer NOT NULL DEFAULT 30;`,
-		`ALTER TABLE fused_control_credentials ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'api_key';`,
-		`ALTER TABLE fused_control_credentials ADD COLUMN IF NOT EXISTS auth_method text NOT NULL DEFAULT 'api_key';`,
-		// Existing self-hosted Engines need the transient handoff columns before
-		// managed login can persist the optional Registry logout capability.
-		`ALTER TABLE fused_managed_login_transactions ADD COLUMN IF NOT EXISTS logout_encrypted_dek text;`,
-		`ALTER TABLE fused_managed_login_transactions ADD COLUMN IF NOT EXISTS encrypted_logout_token text;`,
-		`ALTER TABLE fused_managed_login_transactions ADD COLUMN IF NOT EXISTS logout_expires_at timestamptz;`,
-		`ALTER TABLE fused_engine_idempotency_keys ADD COLUMN IF NOT EXISTS response_status integer NOT NULL DEFAULT 200;`,
-		`DROP TABLE IF EXISTS fused_webhook_events;`,
-		`DROP TABLE IF EXISTS fused_mcp_analytics;`,
-
-		// Update connection profile and auth connection constraints to their latest
-		// definitions. Unconditionally dropping and re-adding ensures idempotency.
-		`ALTER TABLE fused_workspace_connection_profiles
-			DROP CONSTRAINT IF EXISTS chk_fused_workspace_connection_profile_baseline_registry_id;`,
-		`ALTER TABLE fused_workspace_connection_profiles
-			ADD CONSTRAINT chk_fused_workspace_connection_profile_baseline_registry_id
-			CHECK (layer <> 'baseline' OR registry_profile_id IS NOT NULL);`,
-
-		`ALTER TABLE fused_auth_connections
-			DROP CONSTRAINT IF EXISTS chk_fused_auth_connections_refresh_state;`,
-		`ALTER TABLE fused_auth_connections
-			ADD CONSTRAINT chk_fused_auth_connections_refresh_state
-			CHECK (refresh_state IN ('ok', 'failed', 'expired', 'reconnect_required'));`,
-
-		// Migrate fused_workspace_secrets
-		`ALTER TABLE fused_workspace_secrets DROP CONSTRAINT IF EXISTS uq_workspace_secrets;`,
-		`DROP INDEX IF EXISTS idx_fused_workspace_secrets_lookup;`,
-		`ALTER TABLE fused_workspace_secrets DROP COLUMN IF EXISTS artifact_id CASCADE;`,
-
-		`ALTER TABLE fused_workspace_secrets ALTER COLUMN bucket_id SET NOT NULL;`,
-		`ALTER TABLE fused_workspace_secrets ADD CONSTRAINT uq_workspace_secrets UNIQUE (bucket_id, service_id, key_name);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_workspace_secrets_lookup ON fused_workspace_secrets(bucket_id, service_id);`,
-
-		// Connection profiles are workspace-scoped. Remove the bucket-scoped binding tables.
-		`DROP TABLE IF EXISTS fused_bucket_bindings;`,
-		`DROP TABLE IF EXISTS fused_bucket_profile_attachments;`,
-
-		// Widen the severity constraint to support non-breaking notifications.
-		`ALTER TABLE fused_workspace_notifications DROP CONSTRAINT IF EXISTS fused_workspace_notifications_severity_check;`,
-		`ALTER TABLE fused_workspace_notifications ADD CONSTRAINT fused_workspace_notifications_severity_check CHECK (severity IN ('breaking', 'non-breaking'));`,
-
-		// resolved_by records which actor (account) transitioned a notification
-		// out of 'pending' (see UpdateWorkspaceNotificationStatus, Phase 4 of
-		// plans/plan-service-changelog.md) -- NULL for every row until that first
-		// transition happens, same optional/audit-only shape as created_by.
-		`ALTER TABLE fused_workspace_notifications ADD COLUMN IF NOT EXISTS resolved_by uuid;`,
-
-		// Ensure the base_url override column exists for execution policies.
-		`ALTER TABLE fused_workspace_execution_policies ADD COLUMN IF NOT EXISTS base_url text;`,
-		`ALTER TABLE fused_workspace_execution_policies ADD COLUMN IF NOT EXISTS server_variables jsonb;`,
-		// The Engine executes only canonical v3 quota policy. Clearing any other
-		// version fails closed without discarding unrelated workspace overrides.
-		`UPDATE fused_workspace_execution_policies
-		SET rate_limit = NULL
-		WHERE rate_limit IS NOT NULL
-		  AND rate_limit->>'version' IS DISTINCT FROM '3';`,
-		`ALTER TABLE fused_provider_rate_limit_states ADD COLUMN IF NOT EXISTS state_sequence bigint NOT NULL DEFAULT 0;`,
-		`ALTER TABLE fused_provider_rate_limit_states ADD COLUMN IF NOT EXISTS rolling_usage jsonb NOT NULL DEFAULT '[]'::jsonb;`,
-		`ALTER TABLE fused_provider_rate_limit_states ADD COLUMN IF NOT EXISTS concurrency_used bigint NOT NULL DEFAULT 0;`,
-		`ALTER TABLE fused_provider_rate_limit_states ADD COLUMN IF NOT EXISTS concurrency_holders jsonb NOT NULL DEFAULT '{}'::jsonb;`,
-		`ALTER TABLE fused_provider_rate_limit_states DROP CONSTRAINT IF EXISTS fused_provider_rate_limit_states_scope_kind_check;`,
-		`ALTER TABLE fused_provider_rate_limit_states DROP CONSTRAINT IF EXISTS fused_provider_rate_limit_states_algorithm_check;`,
 	}
 }

@@ -63,15 +63,16 @@ func TestEngineSchemaDefinesAccessControlFoundation(t *testing.T) {
 	}
 }
 
-func TestEngineMigrationsAddManagedLogoutHandoffColumns(t *testing.T) {
-	joined := strings.Join(engineMigrationQueries(), "\n")
+// TestEngineSchemaDefinesManagedLogoutHandoffColumns keeps the current login handoff shape in the clean schema.
+func TestEngineSchemaDefinesManagedLogoutHandoffColumns(t *testing.T) {
+	joined := strings.Join(engineSchemaQueries(), "\n")
 	for _, expected := range []string{
-		"ALTER TABLE fused_managed_login_transactions ADD COLUMN IF NOT EXISTS logout_encrypted_dek text",
-		"ALTER TABLE fused_managed_login_transactions ADD COLUMN IF NOT EXISTS encrypted_logout_token text",
-		"ALTER TABLE fused_managed_login_transactions ADD COLUMN IF NOT EXISTS logout_expires_at timestamptz",
+		"logout_encrypted_dek         text",
+		"encrypted_logout_token       text",
+		"logout_expires_at            timestamptz",
 	} {
 		if !strings.Contains(joined, expected) {
-			t.Fatalf("expected Engine migration containing %q", expected)
+			t.Fatalf("expected Engine schema containing %q", expected)
 		}
 	}
 }
@@ -91,6 +92,7 @@ func TestEngineSchemaCreatesAccessControlDependenciesInOrder(t *testing.T) {
 	assertSchemaOrder(t, queries, "CREATE TABLE IF NOT EXISTS fused_roles", "CREATE TABLE IF NOT EXISTS fused_role_bindings")
 }
 
+// TestEngineAccessControlSchemaInitializationIsIdempotent proves direct schema reconciliation is restart-safe.
 func TestEngineAccessControlSchemaInitializationIsIdempotent(t *testing.T) {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -105,52 +107,13 @@ func TestEngineAccessControlSchemaInitializationIsIdempotent(t *testing.T) {
 	}
 	defer pool.Close()
 
-	firstMigration := readEngineMigrationRecord(t, ctx, pool)
-
-	// Base schema reconciliation remains idempotent, while the ledger ensures the
-	// transactional migration batch is not replayed on every restart.
+	// Direct clean-schema reconciliation must remain safe on every restart.
 	if err := initEngineSchema(ctx, pool); err != nil {
 		t.Fatalf("second initEngineSchema: %v", err)
 	}
 
-	assertEngineMigrationNotReplayed(t, ctx, pool, firstMigration)
 	assertAccessControlTablesExist(t, ctx, pool)
 	assertAuthorizationStateSingleton(t, ctx, pool)
-}
-
-type engineMigrationRecord struct {
-	Name      string
-	AppliedAt time.Time
-}
-
-func readEngineMigrationRecord(t *testing.T, ctx context.Context, pool *pgxpool.Pool) engineMigrationRecord {
-	t.Helper()
-	var record engineMigrationRecord
-	if err := pool.QueryRow(ctx, `SELECT name, applied_at FROM fused_engine_schema_migrations WHERE version = $1`, engineMigrationVersion).Scan(&record.Name, &record.AppliedAt); err != nil {
-		t.Fatalf("read Engine migration ledger entry: %v", err)
-	}
-	return record
-}
-
-func assertEngineMigrationNotReplayed(t *testing.T, ctx context.Context, pool *pgxpool.Pool, first engineMigrationRecord) {
-	t.Helper()
-	var migrationRows int
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM fused_engine_schema_migrations`).Scan(&migrationRows); err != nil {
-		t.Fatalf("read Engine migration ledger after restart: %v", err)
-	}
-	if migrationRows != len(engineMigrations()) {
-		t.Fatalf("Engine migration ledger rows = %d, want %d", migrationRows, len(engineMigrations()))
-	}
-	var second engineMigrationRecord
-	if err := pool.QueryRow(ctx, `SELECT name, applied_at FROM fused_engine_schema_migrations WHERE version = $1`, engineMigrationVersion).Scan(&second.Name, &second.AppliedAt); err != nil {
-		t.Fatalf("read current Engine migration after restart: %v", err)
-	}
-	if first.Name != engineMigrationName || second.Name != first.Name {
-		t.Fatalf("Engine migration name changed across restart: first=%q second=%q", first.Name, second.Name)
-	}
-	if !second.AppliedAt.Equal(first.AppliedAt) {
-		t.Fatalf("Engine migration replayed: first=%s second=%s", first.AppliedAt, second.AppliedAt)
-	}
 }
 
 func assertAccessControlTablesExist(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
