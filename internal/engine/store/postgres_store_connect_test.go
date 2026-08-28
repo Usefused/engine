@@ -148,6 +148,34 @@ func TestPostgresStoreAuthConnectionRefreshClaimsLegacyRetryableStates(t *testin
 	}
 }
 
+// TestPostgresStoreAuthConnectionRefreshClaimsAuthorizationCodeAlias proves background workers admit the hyphenated historical OAuth2 spelling.
+func TestPostgresStoreAuthConnectionRefreshClaimsAuthorizationCodeAlias(t *testing.T) {
+	fixture := setupConnectAuthStore(t)
+	versionID := uuid.New()
+	// Worker discovery requires the historical grant to retain an exact enabled service-version identity.
+	if err := fixture.store.AddWorkspaceServiceVersion(fixture.ctx, fixture.serviceID, "", "v-auth-code-alias", versionID, "Authorization Code Alias Service", fixture.accountID); err != nil {
+		t.Fatalf("activate authorization-code alias fixture version: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	expiresAt := now.Add(-time.Minute)
+	encrypted := encryptConnectAuthValues(t, "alias-access", "alias-refresh")
+	connection, err := fixture.store.UpsertAuthConnection(fixture.ctx, AuthConnection{
+		BucketID: fixture.bucketA, ServiceID: fixture.serviceID, ServiceVersionID: versionID,
+		EndUserRef: "oauth2-authorization-code-alias", AuthType: "oauth2-authorization-code", AuthName: "primaryOAuth",
+		EncryptedDEK: encrypted.dek, EncryptedAccessToken: encrypted.values[0], EncryptedRefreshToken: encrypted.values[1],
+		TokenType: "Bearer", ExpiresAt: &expiresAt, RefreshState: "ok",
+	})
+	// Persistence intentionally retains the authored alias so this exercises SQL normalization rather than Go normalization.
+	if err != nil || connection == nil || connection.AuthType != "oauth2-authorization-code" {
+		t.Fatalf("persist authorization-code alias connection=%#v err=%v", connection, err)
+	}
+	claims := claimRefreshPage(t, fixture.store.(AuthConnectionRefreshStore), now.Add(70*time.Minute), now, now, now.Add(time.Minute), 10)
+	// The due alias row must enter the same bounded worker page as canonical OAuth grants.
+	if len(claims) != 1 || claims[0].Connection.ID != connection.ID {
+		t.Fatalf("authorization-code alias claims = %#v", claims)
+	}
+}
+
 // TestPostgresStoreAuthConnectionRefreshClaimsEarlierRefreshExpiry proves the
 // worker schedules against the earlier provider-declared token deadline.
 func TestPostgresStoreAuthConnectionRefreshClaimsEarlierRefreshExpiry(t *testing.T) {

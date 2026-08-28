@@ -42,6 +42,8 @@ const (
 	connectCanonicalRedirectMigrationName          = "20260827_connect_canonical_redirect"
 	appCredentialSourceMigrationVersion      int64 = 17
 	appCredentialSourceMigrationName               = "20260827_app_credential_sources"
+	oauthRefreshAuthTypeMigrationVersion     int64 = 18
+	oauthRefreshAuthTypeMigrationName              = "20260828_oauth_refresh_auth_types"
 	unifiedEmptySetHash                            = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
 )
 
@@ -55,9 +57,10 @@ const mcpSessionLifetimeEndReasonConstraint = `CONSTRAINT chk_fused_mcp_sessions
 )`
 
 type engineMigration struct {
-	Version int64
-	Name    string
-	Queries []string
+	Version          int64
+	Name             string
+	PreflightQueries []string
+	Queries          []string
 }
 
 func initEngineSchema(ctx context.Context, pool *pgxpool.Pool) error {
@@ -97,19 +100,32 @@ func applyEngineMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
+// applyEngineMigration runs compatibility preflights and immutable migration SQL in one ledger-guarded transaction.
 func applyEngineMigration(ctx context.Context, tx pgx.Tx, migration engineMigration) error {
 	applied, err := engineMigrationApplied(ctx, tx, migration)
+	// Ledger lookup errors must stop before any compatibility or schema writes.
 	if err != nil {
 		return err
 	}
+	// Recorded migrations skip both their historical SQL and pending-only compatibility preflights.
 	if applied {
 		return nil
 	}
+	// Preflights repair only the database state required for a previously shipped pending migration to execute atomically.
+	for _, query := range migration.PreflightQueries {
+		// Any preflight failure must roll back before the immutable migration body starts.
+		if _, err := tx.Exec(ctx, query); err != nil {
+			return fmt.Errorf("preflight Engine schema migration %d (%s): %w", migration.Version, migration.Name, err)
+		}
+	}
+	// Immutable migration SQL remains byte-stable after release; forward migrations perform later convergence.
 	for _, query := range migration.Queries {
+		// One failed statement invalidates the migration and its eventual ledger record.
 		if _, err := tx.Exec(ctx, query); err != nil {
 			return fmt.Errorf("apply Engine schema migration %d (%s): %w", migration.Version, migration.Name, err)
 		}
 	}
+	// The ledger write shares the transaction so a failed commit never records partial DDL.
 	if _, err := tx.Exec(ctx, `INSERT INTO fused_engine_schema_migrations (version, name) VALUES ($1, $2)`, migration.Version, migration.Name); err != nil {
 		return fmt.Errorf("record Engine schema migration %d (%s): %w", migration.Version, migration.Name, err)
 	}
@@ -149,7 +165,40 @@ func engineMigrations() []engineMigration {
 		{Version: 14, Name: "20260826_generation_contract_pins", Queries: generationContractPinMigrationQueries()},
 		{Version: workspaceAuthReferenceMigrationVersion, Name: workspaceAuthReferenceMigrationName, Queries: workspaceAuthReferenceMigrationQueries()},
 		{Version: connectCanonicalRedirectMigrationVersion, Name: connectCanonicalRedirectMigrationName, Queries: connectCanonicalRedirectMigrationQueries()},
-		{Version: appCredentialSourceMigrationVersion, Name: appCredentialSourceMigrationName, Queries: appCredentialSourceMigrationQueries()},
+		{Version: appCredentialSourceMigrationVersion, Name: appCredentialSourceMigrationName, PreflightQueries: appCredentialSourcePreflightQueries(), Queries: appCredentialSourceMigrationQueries()},
+		{Version: oauthRefreshAuthTypeMigrationVersion, Name: oauthRefreshAuthTypeMigrationName, Queries: oauthRefreshAuthTypeMigrationQueries()},
+	}
+}
+
+// appCredentialSourcePreflightQueries repairs the shipped v17 admission state without rewriting its immutable SQL.
+func appCredentialSourcePreflightQueries() []string {
+	return []string{
+		// Only OAuth/OIDC application registrations have a lossless replacement, so unsupported legacy edges stop before v17 retires them.
+		`DO $$
+		BEGIN
+			-- Credential-family mismatch must fail closed rather than disappear with the legacy routing table.
+			IF EXISTS (
+				SELECT 1 FROM fused_workspace_auth_references reference
+				-- Normalize authored spellings before comparing the only credential families the replacement supports.
+				WHERE CASE
+					WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+					WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
+					ELSE '' END = ''
+				   OR CASE
+					WHEN lower(replace(btrim(reference.source_auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+					WHEN lower(replace(btrim(reference.source_auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
+					ELSE '' END <> CASE
+					WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
+					WHEN lower(replace(btrim(reference.target_auth_type), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
+					ELSE '' END
+			) THEN
+				RAISE EXCEPTION USING ERRCODE = '23514',
+					MESSAGE = 'legacy workspace auth references contain an unsupported or incompatible credential family; remove the obsolete reference and reapply the app configuration';
+			END IF;
+		END
+		$$;`,
+		// PostgreSQL enforces a NOT VALID check on every changed row, so v8's retained NULL-version sessions need a transactional exception during v17.
+		`ALTER TABLE fused_connect_sessions DROP CONSTRAINT IF EXISTS chk_fused_connect_sessions_service_version;`,
 	}
 }
 
@@ -562,10 +611,12 @@ func engineSchemaQueries() []string {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_auth_connections_bucket_service
 		ON fused_auth_connections(bucket_id, service_id);`,
+		// Fresh-schema refresh admission mirrors worker normalization; v18 later converges databases carrying v8's older index.
 		`CREATE INDEX IF NOT EXISTS idx_fused_auth_connections_refresh
 		ON fused_auth_connections(expires_at, id)
 		WHERE refresh_state IN ('ok', 'failed', 'expired')
-		  AND lower(auth_type) IN ('oauth', 'oauth2', 'oidc', 'openidconnect', 'open_id_connect');`,
+		  AND lower(replace(btrim(auth_type), '-', '_')) IN
+		      ('oauth', 'oauth2', 'oauth2_authorization_code', 'oidc', 'openidconnect', 'open_id_connect');`,
 
 		// Provider resources carry routing context only. Keeping them separate
 		// from token rows lets one connection own several tenant endpoints without
@@ -1782,6 +1833,37 @@ func appCredentialSourceMigrationQueries() []string {
 		`ALTER TABLE fused_auth_connections ALTER COLUMN credential_source_service_id SET NOT NULL;`,
 		// v15 remains immutable in the ledger, while v17 removes its incorrect workspace-global state.
 		`DROP TABLE IF EXISTS fused_workspace_auth_references;`,
+	}
+}
+
+// oauthRefreshAuthTypeMigrationQueries aligns background refresh indexing with every accepted OAuth/OIDC spelling.
+func oauthRefreshAuthTypeMigrationQueries() []string {
+	return []string{
+		// Pending v17 preflights remove this check transactionally; v18 restores it without disturbing already-upgraded Engines.
+		`DO $$
+		BEGIN
+			-- Existing v17 databases retain their original check, while repaired upgrades add the same NOT VALID write invariant.
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname = 'chk_fused_connect_sessions_service_version'
+				  AND conrelid = 'fused_connect_sessions'::regclass
+			) THEN
+				ALTER TABLE fused_connect_sessions ADD CONSTRAINT chk_fused_connect_sessions_service_version
+					CHECK (service_version_id IS NOT NULL) NOT VALID;
+			END IF;
+		END
+		$$;`,
+		// Rebuild the partial index so every normalized worker-eligible family has matching index admission.
+		`DROP INDEX IF EXISTS idx_fused_auth_connections_refresh;`,
+		`CREATE INDEX idx_fused_auth_connections_refresh
+			ON fused_auth_connections(
+				COALESCE(LEAST(expires_at, refresh_token_expires_at), expires_at, refresh_token_expires_at), id
+			)
+			-- The partial-index predicate must exactly cover every row admitted by the background refresh worker.
+			WHERE refresh_state IN ('ok', 'failed', 'expired')
+			  AND service_version_id IS NOT NULL
+			  AND lower(replace(btrim(auth_type), '-', '_')) IN
+			      ('oauth', 'oauth2', 'oauth2_authorization_code', 'oidc', 'openidconnect', 'open_id_connect');`,
 	}
 }
 

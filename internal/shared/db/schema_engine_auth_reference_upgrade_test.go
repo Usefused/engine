@@ -2,12 +2,14 @@ package db
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -38,6 +40,7 @@ type appCredentialSourceUpgradeFixture struct {
 	blankConnectionID     uuid.UUID
 	ambiguousConnectID    uuid.UUID
 	ambiguousConnectionID uuid.UUID
+	unversionedConnectID  uuid.UUID
 	targetID              uuid.UUID
 	requiredTargetID      uuid.UUID
 	ambiguousTargetID     uuid.UUID
@@ -63,7 +66,7 @@ func applyAppCredentialSourceV15FixtureSchema(t *testing.T, ctx context.Context,
 	}
 	queries := []string{
 		`ALTER TABLE fused_connect_input_sessions DROP COLUMN credential_source_service_id, DROP COLUMN credential_source_auth_type, DROP COLUMN credential_source_auth_name`,
-		`ALTER TABLE fused_connect_sessions DROP COLUMN credential_source_service_id, DROP COLUMN credential_source_auth_type, DROP COLUMN credential_source_auth_name, DROP COLUMN redirect_uri`,
+		`ALTER TABLE fused_connect_sessions DROP COLUMN credential_source_service_id, DROP COLUMN credential_source_auth_type, DROP COLUMN credential_source_auth_name, DROP COLUMN redirect_uri, ALTER COLUMN service_version_id DROP NOT NULL`,
 		`ALTER TABLE fused_auth_connections DROP COLUMN credential_source_service_id, DROP COLUMN credential_source_auth_type, DROP COLUMN credential_source_auth_name`,
 	}
 	for _, query := range queries {
@@ -80,7 +83,8 @@ func seedAppCredentialSourceV15Rows(t *testing.T, ctx context.Context, pool *pgx
 		appID: uuid.New(), inputSessionID: uuid.New(), connectID: uuid.New(), connectionID: uuid.New(),
 		blankConnectID: uuid.New(), blankConnectionID: uuid.New(),
 		ambiguousConnectID: uuid.New(), ambiguousConnectionID: uuid.New(),
-		targetID: uuid.New(), requiredTargetID: uuid.New(), ambiguousTargetID: uuid.New(), sourceID: uuid.New(),
+		unversionedConnectID: uuid.New(),
+		targetID:             uuid.New(), requiredTargetID: uuid.New(), ambiguousTargetID: uuid.New(), sourceID: uuid.New(),
 		targetVersionID: uuid.New(), requiredVersionID: uuid.New(), ambiguousVersionID: uuid.New(),
 	}
 	bucketID, accountID, ownerID, familyID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
@@ -93,11 +97,12 @@ func seedAppCredentialSourceV15Rows(t *testing.T, ctx context.Context, pool *pgx
 		($1, 'google-sheets', 'Google Sheets'), ($2, 'google-drive', 'Google Drive'),
 		($3, 'google-calendar', 'Google Calendar'), ($4, 'gmail', 'Gmail')`,
 		fixture.targetID, fixture.requiredTargetID, fixture.ambiguousTargetID, fixture.sourceID)
-	// Every target keeps an exact immutable version so unrelated session migration assertions remain realistic.
+	// Every referenced row keeps an exact version, while the ambiguous target has a second active version that v8 cannot guess.
 	execAppCredentialSourceFixture(t, ctx, pool, "seed migration service versions", `INSERT INTO fused_workspace_service_versions (service_id, service_version_id, version, status) VALUES
-		($1, $2, 'v4', 'public'), ($3, $4, 'v3', 'public'), ($5, $6, 'v3', 'public'), ($7, $8, 'v1', 'public')`,
+		($1, $2, 'v4', 'public'), ($3, $4, 'v3', 'public'), ($5, $6, 'v3', 'public'),
+		($5, $9, 'v4', 'public'), ($7, $8, 'v1', 'public')`,
 		fixture.targetID, fixture.targetVersionID, fixture.requiredTargetID, fixture.requiredVersionID,
-		fixture.ambiguousTargetID, fixture.ambiguousVersionID, fixture.sourceID, uuid.New())
+		fixture.ambiguousTargetID, fixture.ambiguousVersionID, fixture.sourceID, uuid.New(), uuid.New())
 	// Pinned metadata distinguishes one recoverable blank session from an ambiguous two-scheme session.
 	execAppCredentialSourceFixture(t, ctx, pool, "seed pinned migration auth contracts", `INSERT INTO fused_service_contract_snapshots
 		(service_id, service_version_id, version, contract_version, required_capabilities, contract_hash, service_metadata)
@@ -136,9 +141,14 @@ func seedAppCredentialSourceV15Rows(t *testing.T, ctx context.Context, pool *pgx
 		(id, bucket_id, service_id, service_version_id, auth_type, auth_name, end_user_ref, state_hash, expires_at)
 		VALUES ($1, $2, $3, $4, 'oauth', 'oauth2', 'connect-user', $5, NOW() + INTERVAL '10 minutes'),
 		       ($6, $2, $3, $4, 'oauth', '', 'blank-connect-user', $7, NOW() + INTERVAL '10 minutes'),
-		       ($8, $2, $9, $10, 'oauth', '', 'ambiguous-connect-user', $11, NOW() + INTERVAL '10 minutes')`,
+		       ($8, $2, $9, $10, 'oauth', '', 'ambiguous-connect-user', $11, NOW() + INTERVAL '10 minutes'),
+		       ($12, $2, $9, NULL, 'oauth', 'oauth2', 'unversioned-connect-user', $13, NOW() + INTERVAL '10 minutes')`,
 		fixture.connectID, bucketID, fixture.targetID, fixture.targetVersionID, "state-"+uuid.NewString(),
-		fixture.blankConnectID, "state-"+uuid.NewString(), fixture.ambiguousConnectID, fixture.ambiguousTargetID, fixture.ambiguousVersionID, "state-"+uuid.NewString())
+		fixture.blankConnectID, "state-"+uuid.NewString(), fixture.ambiguousConnectID, fixture.ambiguousTargetID, fixture.ambiguousVersionID, "state-"+uuid.NewString(),
+		fixture.unversionedConnectID, "state-"+uuid.NewString())
+	// Migration v8 installed this check after retaining NULL-version rows, so v17 must handle that exact write-time constraint state.
+	execAppCredentialSourceFixture(t, ctx, pool, "restore legacy connect-session version check", `ALTER TABLE fused_connect_sessions
+		ADD CONSTRAINT chk_fused_connect_sessions_service_version CHECK (service_version_id IS NOT NULL) NOT VALID`)
 	execAppCredentialSourceFixture(t, ctx, pool, "seed referenced auth connection", `INSERT INTO fused_auth_connections
 		(id, bucket_id, service_id, service_version_id, end_user_ref, auth_type, auth_name, encrypted_dek, access_token)
 		VALUES ($1, $2, $3, $4, 'grant-user', 'oauth', 'oauth2', 'dek-sentinel', 'access-sentinel'),
@@ -165,6 +175,8 @@ func assertAppCredentialSourceUpgrade(t *testing.T, ctx context.Context, pool *p
 	assertRequiredAuthAppCredentialSourceUpgrade(t, ctx, pool, fixture)
 	assertDurableAppCredentialSources(t, ctx, pool, fixture)
 	assertBlankAppCredentialSourceUpgrade(t, ctx, pool, fixture)
+	assertUnversionedConnectSessionUpgrade(t, ctx, pool, fixture)
+	assertConnectSessionVersionConstraintRestored(t, ctx, pool, fixture)
 	assertWorkspaceAuthReferenceRetired(t, ctx, pool)
 }
 
@@ -312,5 +324,57 @@ func assertBlankCredentialSourceRows(t *testing.T, ctx context.Context, pool *pg
 		if got != want {
 			t.Fatalf("blank %s = %#v, want %#v", table, got, want)
 		}
+	}
+}
+
+// assertUnversionedConnectSessionUpgrade proves v17 can migrate a retained v8 session without inventing version identity.
+func assertUnversionedConnectSessionUpgrade(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture appCredentialSourceUpgradeFixture) {
+	t.Helper()
+	var serviceVersionID *uuid.UUID
+	var got appCredentialSourceProjection
+	// Reading the exact retained row proves the migration did not replace ambiguity with a guessed version.
+	if err := pool.QueryRow(ctx, `SELECT service_version_id, credential_source_service_id,
+		credential_source_auth_type, credential_source_auth_name FROM fused_connect_sessions WHERE id = $1`, fixture.unversionedConnectID).
+		Scan(&serviceVersionID, &got.sourceID, &got.sourceType, &got.sourceName); err != nil {
+		t.Fatalf("read unversioned migrated connect session: %v", err)
+	}
+	want := appCredentialSourceProjection{sourceID: fixture.sourceID, sourceType: "oauth", sourceName: "oauth2"}
+	// Ambiguous historical version identity remains unset while exact application-credential routing is preserved independently.
+	if serviceVersionID != nil || got != want {
+		t.Fatalf("unversioned migrated session version=%v source=%#v, want nil/%#v", serviceVersionID, got, want)
+	}
+}
+
+// assertConnectSessionVersionConstraintRestored verifies v17 reinstalls the v8 write invariant after migrating retained rows.
+func assertConnectSessionVersionConstraintRestored(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture appCredentialSourceUpgradeFixture) {
+	t.Helper()
+	var validated bool
+	// Constraint metadata distinguishes the intentional legacy exception from a missing enforcement boundary.
+	if err := pool.QueryRow(ctx, `SELECT convalidated FROM pg_constraint
+		WHERE conname = 'chk_fused_connect_sessions_service_version'
+		  AND conrelid = 'fused_connect_sessions'::regclass`).Scan(&validated); err != nil {
+		t.Fatalf("read restored connect-session version constraint: %v", err)
+	}
+	// NOT VALID preserves the historical row but must still reject every newly written NULL-version session.
+	if validated {
+		t.Fatal("restored connect-session version constraint unexpectedly validated legacy rows")
+	}
+	// A post-migration insert must be checked even though PostgreSQL did not scan the retained legacy row.
+	_, err := pool.Exec(ctx, `INSERT INTO fused_connect_sessions
+		(id, bucket_id, service_id, service_version_id, auth_type, auth_name,
+		 credential_source_service_id, credential_source_auth_type, credential_source_auth_name,
+		 end_user_ref, state_hash, expires_at)
+		SELECT gen_random_uuid(), bucket_id, service_id, NULL, auth_type, auth_name,
+		       credential_source_service_id, credential_source_auth_type, credential_source_auth_name,
+		       'new-invalid-user', $2, expires_at
+		FROM fused_connect_sessions WHERE id = $1`, fixture.unversionedConnectID, "state-"+uuid.NewString())
+	// A successful insert would prove the temporary enforcement gap escaped the migration transaction.
+	if err == nil {
+		t.Fatal("restored connect-session version constraint accepted a new NULL-version row")
+	}
+	var postgresError *pgconn.PgError
+	// Exact SQLSTATE and constraint identity prevent an unrelated fixture failure from masquerading as enforcement.
+	if !errors.As(err, &postgresError) || postgresError.Code != "23514" || postgresError.ConstraintName != "chk_fused_connect_sessions_service_version" {
+		t.Fatalf("new NULL-version row error = %v, want chk_fused_connect_sessions_service_version violation", err)
 	}
 }

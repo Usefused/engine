@@ -44,6 +44,44 @@ func TestLegacyConnectConfigCutoverKeepsAmbiguousAndDisabledRowsInactive(t *test
 	assertLegacyCutoverSecretPresence(t, fixture, disabledServiceID, "disabledOAuth", false)
 }
 
+// TestLegacyConnectConfigCutoverSeparatesSameServiceAuthFamilies proves one migration page cannot conflate OAuth and OIDC registrations across buckets.
+func TestLegacyConnectConfigCutoverSeparatesSameServiceAuthFamilies(t *testing.T) {
+	fixture := setupConnectAuthStore(t)
+	serviceID := uuid.New()
+	seedLegacyCutoverRawAuthContract(t, fixture, serviceID, `[
+		{"type":"oauth2_authorization_code","name":"primaryOAuth"},
+		{"type":"openidConnect","name":"primaryOIDC"}
+	]`)
+	seedLegacyConnectConfigIdentityForCutover(t, fixture, fixture.bucketA, serviceID, "oauth2-authorization-code", "", true)
+	seedLegacyConnectConfigIdentityForCutover(t, fixture, fixture.bucketB, serviceID, "openidConnect", "", true)
+
+	result := runLegacyConnectConfigCutoverBatchForTest(t, fixture, fixture.store.(LegacyConnectConfigCutoverStore), 2)
+	// Both rows sharing one service must resolve within their own canonical family in the same SQL batch.
+	if result.MigratedRows != 2 || result.SkippedRows != 0 || result.BatchCount != 1 {
+		t.Fatalf("same-service cutover result = %#v", result)
+	}
+	assertLegacyCutoverSecretPresenceInBucket(t, fixture, fixture.bucketA, serviceID, "primaryOAuth", true)
+	assertLegacyCutoverSecretPresenceInBucket(t, fixture, fixture.bucketA, serviceID, "primaryOIDC", false)
+	assertLegacyCutoverSecretPresenceInBucket(t, fixture, fixture.bucketB, serviceID, "primaryOIDC", true)
+	assertLegacyCutoverSecretPresenceInBucket(t, fixture, fixture.bucketB, serviceID, "primaryOAuth", false)
+}
+
+// TestLegacyConnectConfigCutoverTreatsNonArrayAuthConfigsAsUnresolved proves malformed metadata fails closed without aborting the permanent cutover.
+func TestLegacyConnectConfigCutoverTreatsNonArrayAuthConfigsAsUnresolved(t *testing.T) {
+	fixture := setupConnectAuthStore(t)
+	nullServiceID, objectServiceID := uuid.New(), uuid.New()
+	seedLegacyCutoverRawAuthContract(t, fixture, nullServiceID, `null`)
+	seedLegacyCutoverRawAuthContract(t, fixture, objectServiceID, `{"type":"oauth2","name":"not-an-array"}`)
+	seedLegacyConnectConfigRowForCutover(t, fixture, nullServiceID, "", true)
+	seedLegacyConnectConfigRowForCutover(t, fixture, objectServiceID, "", true)
+
+	result := runLegacyConnectConfigCutoverBatchForTest(t, fixture, fixture.store.(LegacyConnectConfigCutoverStore), 2)
+	// Invalid metadata never selects a scheme, but it also cannot trigger jsonb_array_elements type errors.
+	if result.MigratedRows != 0 || result.SkippedRows != 2 || result.BatchCount != 1 {
+		t.Fatalf("non-array auth-config cutover result = %#v", result)
+	}
+}
+
 // seedLegacyCutoverAuthContract stores one enabled pinned version with the supplied compatible OAuth names.
 func seedLegacyCutoverAuthContract(t *testing.T, fixture connectAuthFixture, serviceID uuid.UUID, authNames []string) {
 	t.Helper()
@@ -69,11 +107,36 @@ func seedLegacyCutoverAuthContract(t *testing.T, fixture connectAuthFixture, ser
 	}
 }
 
+// seedLegacyCutoverRawAuthContract stores an exact auth_configs JSON value so PostgreSQL tests can cover valid and malformed historical metadata.
+func seedLegacyCutoverRawAuthContract(t *testing.T, fixture connectAuthFixture, serviceID uuid.UUID, authJSON string) {
+	t.Helper()
+	versionID := uuid.New()
+	// The snapshot must be pinned through ordinary workspace activation before raw metadata is inserted.
+	if err := fixture.store.AddWorkspaceServiceVersion(fixture.ctx, serviceID, "cutover-"+serviceID.String(), "v1", versionID, "Cutover service", fixture.accountID); err != nil {
+		t.Fatalf("activate raw cutover service: %v", err)
+	}
+	_, err := fixture.store.(*postgresStore).db.Exec(fixture.ctx, `INSERT INTO fused_service_contract_snapshots
+		(service_id, service_version_id, version, contract_version, required_capabilities, contract_hash, service_metadata)
+		VALUES ($1, $2, 'v1', 1, '{}', $3, jsonb_build_object('auth_configs', $4::jsonb))`,
+		serviceID, versionID, "sha256:"+strings.Repeat("b", 64), authJSON)
+	// Invalid fixture metadata is deliberate JSON, while invalid JSON must still fail setup.
+	if err != nil {
+		t.Fatalf("seed raw cutover auth contract: %v", err)
+	}
+}
+
 // assertLegacyCutoverSecretPresence checks whether one historical family became executable secret material.
 func assertLegacyCutoverSecretPresence(t *testing.T, fixture connectAuthFixture, serviceID uuid.UUID, authName string, want bool) {
 	t.Helper()
+	assertLegacyCutoverSecretPresenceInBucket(t, fixture, fixture.bucketA, serviceID, authName, want)
+}
+
+// assertLegacyCutoverSecretPresenceInBucket checks one exact bucket-owned application family after cutover.
+func assertLegacyCutoverSecretPresenceInBucket(t *testing.T, fixture connectAuthFixture, bucketID, serviceID uuid.UUID, authName string, want bool) {
+	t.Helper()
 	clientIDKey, clientSecretKey, _ := credentialkeys.OAuthApplication(authName)
-	secrets, err := fixture.store.GetSecrets(fixture.ctx, fixture.bucketA, serviceID, []string{clientIDKey, clientSecretKey})
+	secrets, err := fixture.store.GetSecrets(fixture.ctx, bucketID, serviceID, []string{clientIDKey, clientSecretKey})
+	// A failed exact read cannot be interpreted as credential absence.
 	if err != nil {
 		t.Fatalf("read cutover secrets: %v", err)
 	}
@@ -86,7 +149,13 @@ func assertLegacyCutoverSecretPresence(t *testing.T, fixture connectAuthFixture,
 // runLegacyConnectConfigCutoverForTest executes the permanent migration with the smallest valid batch.
 func runLegacyConnectConfigCutoverForTest(t *testing.T, fixture connectAuthFixture, migrator LegacyConnectConfigCutoverStore) LegacyConnectConfigCutoverResult {
 	t.Helper()
-	result, err := migrator.MigrateLegacyConnectConfigs(fixture.ctx, connectAuthTestMasterKey, 1)
+	return runLegacyConnectConfigCutoverBatchForTest(t, fixture, migrator, 1)
+}
+
+// runLegacyConnectConfigCutoverBatchForTest executes the permanent migration with an explicit batch size for collision coverage.
+func runLegacyConnectConfigCutoverBatchForTest(t *testing.T, fixture connectAuthFixture, migrator LegacyConnectConfigCutoverStore, batchSize int) LegacyConnectConfigCutoverResult {
+	t.Helper()
+	result, err := migrator.MigrateLegacyConnectConfigs(fixture.ctx, connectAuthTestMasterKey, batchSize)
 	// Migration errors must retain the fixture context rather than being folded into result assertions.
 	if err != nil {
 		t.Fatalf("MigrateLegacyConnectConfigs: %v", err)
@@ -160,22 +229,32 @@ func seedLegacyConnectConfigForCutover(t *testing.T, fixture connectAuthFixture,
 // seedLegacyConnectConfigRowForCutover writes one configurable historical encrypted row.
 func seedLegacyConnectConfigRowForCutover(t *testing.T, fixture connectAuthFixture, serviceID uuid.UUID, authName string, enabled bool) {
 	t.Helper()
+	seedLegacyConnectConfigIdentityForCutover(t, fixture, fixture.bucketA, serviceID, "oauth", authName, enabled)
+}
+
+// seedLegacyConnectConfigIdentityForCutover writes one historical row under an exact bucket and authored auth spelling.
+func seedLegacyConnectConfigIdentityForCutover(t *testing.T, fixture connectAuthFixture, bucketID, serviceID uuid.UUID, authType, authName string, enabled bool) {
+	t.Helper()
 	wrappedDEK, dek, err := WrapDEK(connectAuthTestMasterKey)
+	// Fixture encryption must retain the same master-key envelope expected by the cutover.
 	if err != nil {
 		t.Fatalf("wrap legacy DEK: %v", err)
 	}
 	clientID, err := EncryptWithDEK(dek, "client-id-v1")
+	// Either application value failing encryption invalidates the complete historical row.
 	if err != nil {
 		t.Fatalf("encrypt legacy client ID: %v", err)
 	}
 	clientSecret, err := EncryptWithDEK(dek, "client-secret-v1")
+	// The paired secret must share the historical row DEK so migration exercises real decoding.
 	if err != nil {
 		t.Fatalf("encrypt legacy client secret: %v", err)
 	}
 	_, err = fixture.store.(*postgresStore).db.Exec(fixture.ctx, `INSERT INTO fused_connect_configs
 		(bucket_id, service_id, auth_type, auth_name, enabled, encrypted_dek, encrypted_client_id, encrypted_client_secret, redirect_uri)
-		VALUES ($1, $2, 'oauth', $3, $4, $5, $6, $7, 'https://discarded.invalid/callback')`,
-		fixture.bucketA, serviceID, authName, enabled, wrappedDEK, clientID, clientSecret)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'https://discarded.invalid/callback')`,
+		bucketID, serviceID, authType, authName, enabled, wrappedDEK, clientID, clientSecret)
+	// A failed seed cannot provide evidence about the cutover outcome.
 	if err != nil {
 		t.Fatalf("seed legacy connect config: %v", err)
 	}

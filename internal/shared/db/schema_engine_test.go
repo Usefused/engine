@@ -93,9 +93,9 @@ func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 	}
 
 	migrations := engineMigrations()
-	// Credential-source cleanup requires a forward migration after canonical callback pinning.
-	if len(migrations) != 17 {
-		t.Fatalf("Engine migration count = %d, want 17", len(migrations))
+	// Refresh-index convergence must remain an append after credential-source cleanup so shipped SQL stays immutable.
+	if len(migrations) != 18 {
+		t.Fatalf("Engine migration count = %d, want 18", len(migrations))
 	}
 	assertMigrationIdentity(t, migrations[0], engineMigrationVersion, engineMigrationName)
 	assertMigrationIdentity(t, migrations[1], appTokenPolicyMigrationVersion, appTokenPolicyMigrationName)
@@ -114,9 +114,48 @@ func TestEngineSchemaDefinesVersionedMigrationLedger(t *testing.T) {
 	assertMigrationIdentity(t, migrations[14], workspaceAuthReferenceMigrationVersion, workspaceAuthReferenceMigrationName)
 	assertMigrationIdentity(t, migrations[15], connectCanonicalRedirectMigrationVersion, connectCanonicalRedirectMigrationName)
 	assertMigrationIdentity(t, migrations[16], appCredentialSourceMigrationVersion, appCredentialSourceMigrationName)
+	assertMigrationIdentity(t, migrations[17], oauthRefreshAuthTypeMigrationVersion, oauthRefreshAuthTypeMigrationName)
 	// Every appended migration must preserve the transaction-scoped serialization primitive.
 	if engineMigrationLockQuery != "SELECT pg_advisory_xact_lock($1)" {
 		t.Fatalf("Engine migrations must use a transaction-scoped advisory lock, got %q", engineMigrationLockQuery)
+	}
+}
+
+// TestOAuthRefreshAuthTypeMigrationConvergesThePartialIndex locks the forward-only refresh eligibility repair.
+func TestOAuthRefreshAuthTypeMigrationConvergesThePartialIndex(t *testing.T) {
+	joined := strings.Join(oauthRefreshAuthTypeMigrationQueries(), "\n")
+	for _, expected := range []string{
+		"ADD CONSTRAINT chk_fused_connect_sessions_service_version",
+		"DROP INDEX IF EXISTS idx_fused_auth_connections_refresh",
+		"service_version_id IS NOT NULL",
+		"lower(replace(btrim(auth_type), '-', '_'))",
+		"oauth2_authorization_code",
+		"refresh_token_expires_at",
+	} {
+		// Every clause keeps the index predicate aligned with the worker query without rewriting migration v8.
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("OAuth refresh auth-type migration missing %q", expected)
+		}
+	}
+}
+
+// TestAppCredentialSourceMigrationUsesTransactionalCompatibilityPreflight keeps shipped v17 SQL immutable while repairing its pending constraint state.
+func TestAppCredentialSourceMigrationUsesTransactionalCompatibilityPreflight(t *testing.T) {
+	migration := engineMigrations()[16]
+	preflight := strings.Join(migration.PreflightQueries, "\n")
+	for _, expected := range []string{
+		"legacy workspace auth references contain an unsupported or incompatible credential family",
+		"DROP CONSTRAINT IF EXISTS chk_fused_connect_sessions_service_version",
+	} {
+		// Both protections must execute only when the ledger still considers v17 pending.
+		if !strings.Contains(preflight, expected) {
+			t.Fatalf("app credential-source preflight missing %q", expected)
+		}
+	}
+	immutableSQL := strings.Join(appCredentialSourceMigrationQueries(), "\n")
+	// The released migration body cannot absorb the compatibility repair after v0.24.0 was tagged.
+	if strings.Contains(immutableSQL, "DROP CONSTRAINT IF EXISTS chk_fused_connect_sessions_service_version") {
+		t.Fatal("released app credential-source migration SQL was modified in place")
 	}
 }
 

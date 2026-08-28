@@ -209,6 +209,11 @@ type legacyConnectAuthNameRequest struct {
 	AuthType  string    `json:"auth_type"`
 }
 
+type legacyConnectAuthNameKey struct {
+	ServiceID uuid.UUID
+	AuthType  string
+}
+
 // legacyConnectAuthNameRequests selects only enabled historical rows whose scheme name can be safely backfilled.
 func legacyConnectAuthNameRequests(configs []legacyConnectConfigRow) []legacyConnectAuthNameRequest {
 	requests := make([]legacyConnectAuthNameRequest, 0, len(configs))
@@ -236,14 +241,15 @@ func resolveLegacyConnectConfigAuthNames(ctx context.Context, tx pgx.Tx, configs
 	for index := range configs {
 		// Only a unique compatible pinned family may fill an historically blank selector.
 		if configs[index].Enabled && strings.TrimSpace(configs[index].AuthName) == "" {
-			configs[index].AuthName = resolved[configs[index].ServiceID]
+			key := legacyConnectAuthNameKey{ServiceID: configs[index].ServiceID, AuthType: canonicalApplicationAuthType(configs[index].AuthType)}
+			configs[index].AuthName = resolved[key]
 		}
 	}
 	return nil
 }
 
 // queryLegacyConnectConfigAuthNames resolves unique compatible names for one migration page in a set-based query.
-func queryLegacyConnectConfigAuthNames(ctx context.Context, tx pgx.Tx, requests []legacyConnectAuthNameRequest) (map[uuid.UUID]string, error) {
+func queryLegacyConnectConfigAuthNames(ctx context.Context, tx pgx.Tx, requests []legacyConnectAuthNameRequest) (map[legacyConnectAuthNameKey]string, error) {
 	payload, err := json.Marshal(requests)
 	// A malformed internal request batch cannot safely reach the SQL resolver.
 	if err != nil {
@@ -252,34 +258,41 @@ func queryLegacyConnectConfigAuthNames(ctx context.Context, tx pgx.Tx, requests 
 	rows, err := tx.Query(ctx, `WITH requested AS (
 		SELECT service_id, auth_type FROM jsonb_to_recordset($1::jsonb) AS item(service_id uuid, auth_type text)
 	), candidates AS (
-		SELECT DISTINCT requested.service_id, auth ->> 'name' AS auth_name
+		SELECT DISTINCT requested.service_id, requested.auth_type, auth ->> 'name' AS auth_name
 		FROM requested
 		JOIN fused_workspace_service_versions enabled ON enabled.service_id = requested.service_id
 		JOIN fused_service_contract_snapshots snapshot
 		  ON snapshot.service_id = enabled.service_id AND snapshot.service_version_id = enabled.service_version_id
-		CROSS JOIN LATERAL jsonb_array_elements(snapshot.service_metadata -> 'auth_configs') auth
+		-- Historical JSON null and non-array values are unresolved metadata, not inputs to the set-returning function.
+		CROSS JOIN LATERAL jsonb_array_elements(CASE
+			WHEN jsonb_typeof(snapshot.service_metadata -> 'auth_configs') = 'array'
+				THEN snapshot.service_metadata -> 'auth_configs'
+			ELSE '[]'::jsonb
+		END) auth
 		WHERE COALESCE(auth ->> 'name', '') <> ''
+		  -- Canonical family comparison prevents one service's OAuth and OIDC registrations from sharing a name result.
 		  AND CASE
-			WHEN lower(replace(btrim(auth ->> 'type'), '-', '_')) IN ('oauth', 'oauth2') THEN 'oauth'
+			WHEN lower(replace(btrim(auth ->> 'type'), '-', '_')) IN ('oauth', 'oauth2', 'oauth2_authorization_code') THEN 'oauth'
 			WHEN lower(replace(btrim(auth ->> 'type'), '-', '_')) IN ('oidc', 'openidconnect', 'open_id_connect') THEN 'oidc'
 			ELSE '' END = requested.auth_type
 	)
-	SELECT service_id, min(auth_name) FROM candidates GROUP BY service_id HAVING count(*) = 1`, payload)
+	SELECT service_id, auth_type, min(auth_name) FROM candidates
+	GROUP BY service_id, auth_type HAVING count(*) = 1`, payload)
 	// Query failure leaves every historical row unchanged for a later retry.
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	resolved := make(map[uuid.UUID]string)
-	// The bounded result contains at most one unique name per requested service.
+	resolved := make(map[legacyConnectAuthNameKey]string)
+	// The bounded result contains at most one unique name per requested service and canonical auth family.
 	for rows.Next() {
 		var serviceID uuid.UUID
-		var authName string
+		var authType, authName string
 		// Scan failure invalidates the whole batch so no partial mapping is applied.
-		if err := rows.Scan(&serviceID, &authName); err != nil {
+		if err := rows.Scan(&serviceID, &authType, &authName); err != nil {
 			return nil, err
 		}
-		resolved[serviceID] = authName
+		resolved[legacyConnectAuthNameKey{ServiceID: serviceID, AuthType: authType}] = authName
 	}
 	// Deferred driver errors are equivalent to an incomplete result batch.
 	if err := rows.Err(); err != nil {

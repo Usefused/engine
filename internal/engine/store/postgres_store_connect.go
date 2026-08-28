@@ -260,11 +260,13 @@ func (s *postgresStore) ClaimAuthConnectionsForRefresh(ctx context.Context, cuto
 	if limit <= 0 || !leaseExpiresAt.After(now) {
 		return nil, ErrInvalidAuthConnectionRefreshClaim
 	}
+	// Worker admission normalizes every accepted historical spelling so background refresh matches foreground resolution.
 	query := `WITH candidates AS (
 		SELECT id
 		FROM fused_auth_connections
 		WHERE service_version_id IS NOT NULL
-		  AND lower(auth_type) IN ('oauth', 'oauth2', 'oidc', 'openidconnect', 'open_id_connect')
+		  AND lower(replace(btrim(auth_type), '-', '_')) IN
+		      ('oauth', 'oauth2', 'oauth2_authorization_code', 'oidc', 'openidconnect', 'open_id_connect')
 		  AND refresh_state IN ('ok', 'failed', 'expired')
 		  AND COALESCE(LEAST(expires_at, refresh_token_expires_at), expires_at, refresh_token_expires_at) <= $1
 		  AND (refresh_token IS NOT NULL OR expires_at <= $3)

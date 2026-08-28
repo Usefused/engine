@@ -258,7 +258,9 @@ func assertManagedOAuthRefreshMigrationIndex(t *testing.T, ctx context.Context, 
 	if err := pool.QueryRow(ctx, `SELECT pg_get_indexdef(indexrelid) FROM pg_index WHERE indexrelid = 'idx_fused_auth_connections_refresh'::regclass`).Scan(&indexDefinition); err != nil {
 		t.Fatalf("read managed refresh index: %v", err)
 	}
-	if !strings.Contains(indexDefinition, "lower(auth_type)") || !strings.Contains(indexDefinition, "failed") ||
+	// The final v18 index must recognize authorization-code aliases through the same normalization used by worker claims.
+	if !strings.Contains(indexDefinition, "lower(replace(btrim(auth_type), '-'::text, '_'::text))") ||
+		!strings.Contains(indexDefinition, "oauth2_authorization_code") || !strings.Contains(indexDefinition, "failed") ||
 		!strings.Contains(indexDefinition, "refresh_token_expires_at") || strings.Contains(indexDefinition, "refresh_token IS NOT NULL") {
 		t.Fatalf("managed refresh index definition = %q", indexDefinition)
 	}
