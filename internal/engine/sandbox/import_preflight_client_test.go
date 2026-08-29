@@ -13,6 +13,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Usefused/engine/internal/shared/fusedobject"
+	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 )
 
 // importPreflightFixtureResponse builds one proof from the same candidate bytes
@@ -20,13 +23,20 @@ import (
 func importPreflightFixtureResponse(t *testing.T, mutate func(*importPreflightResponse)) []byte {
 	t.Helper()
 	item, version := recoveryContractFixture()
+	return importPreflightFixtureResponseForContract(t, item, version.ServiceVersionID.String(), mutate)
+}
+
+// importPreflightFixtureResponseForContract builds proof bytes for a specific
+// runtime contract so feature-shaped fixtures still exercise the production decoder.
+func importPreflightFixtureResponseForContract(t *testing.T, item runtimeContractBatchItem, operationID string, mutate func(*importPreflightResponse)) []byte {
+	t.Helper()
 	contract, err := json.Marshal(item)
 	if err != nil {
 		t.Fatalf("marshal candidate: %v", err)
 	}
 	digest := sha256.Sum256(contract)
 	response := importPreflightResponse{
-		OperationID: version.ServiceVersionID.String(), Phase: "engine_preflight", CommitState: "not_committed",
+		OperationID: operationID, Phase: "engine_preflight", CommitState: "not_committed",
 		ContractHash: "sha256:" + hex.EncodeToString(digest[:]), Contract: contract,
 	}
 	// Targeted mutations let each test break one proof invariant without rebuilding the fixture.
@@ -38,6 +48,44 @@ func importPreflightFixtureResponse(t *testing.T, mutate func(*importPreflightRe
 		t.Fatalf("marshal preflight response: %v", err)
 	}
 	return payload
+}
+
+// TestDecodeImportPreflightResponseAcceptsOptionalPaginationCollections proves
+// Gmail-style omitted empty arrays survive strict decoding and runtime admission.
+func TestDecodeImportPreflightResponseAcceptsOptionalPaginationCollections(t *testing.T) {
+	item, version := recoveryContractFixture()
+	item.RequiredCapabilities = []string{
+		fusedobject.ExecutionCapabilityPaginationComposableV3,
+		fusedobject.ExecutionCapabilityPaginationOptionalItemsV1,
+	}
+	item.Service.Pagination = &fusedobject.PaginationConfig{
+		Version: paginationpolicy.Version,
+		Request: []paginationpolicy.RequestStep{{
+			State: "cursor", Target: paginationpolicy.RequestTarget{Location: paginationpolicy.RequestQuery, Name: "pageToken"},
+			ValueType: paginationpolicy.ValueString, Apply: paginationpolicy.ApplySubsequent,
+		}},
+		Response: paginationpolicy.ResponsePlan{
+			Items: paginationpolicy.ItemsSource{Path: "$.messages", MissingIsEmpty: true},
+			Values: []paginationpolicy.ResponseValue{{
+				Name: "next_cursor", Source: paginationpolicy.ValueSource{Location: paginationpolicy.SourceBody, Path: "$.nextPageToken", ValueType: paginationpolicy.ValueString},
+			}},
+		},
+		Continuation: []paginationpolicy.ContinuationStep{{Kind: paginationpolicy.ContinuationToken, State: "cursor", ResponseValue: "next_cursor"}},
+		Termination: paginationpolicy.Termination{
+			StopOnEmptyItems: true, StopOnMissingValues: []string{"next_cursor"}, RepeatedValue: paginationpolicy.RepeatedError,
+		},
+		Limits: paginationpolicy.Limits{MaxPages: 100, MaxItems: 10_000, MaxBytes: 16_777_216, MaxDurationMs: 120_000},
+	}
+
+	result, err := decodeImportPreflightResponse(bytes.NewReader(importPreflightFixtureResponseForContract(t, item, version.ServiceVersionID.String(), nil)))
+	// The optional collection capability must be admitted before Registry is allowed to publish the reviewed Gmail contract.
+	if err != nil {
+		t.Fatalf("decode optional pagination preflight: %v", err)
+	}
+	// Preserving the normalization flag prevents valid provider responses with omitted empty arrays from failing at execution time.
+	if !result.Snapshot.ServiceMetadata.Pagination.Response.Items.MissingIsEmpty {
+		t.Fatal("optional pagination collection was discarded")
+	}
 }
 
 // addUnknownImportPreflightContractField rehashes a candidate containing an
