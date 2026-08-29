@@ -172,6 +172,32 @@ describe("runExecute -- call() wiring", () => {
     }
   });
 
+  /** A first-call missing user selector remains actionable in the final model-visible execute error. */
+  it("preserves the MCP end-user connection correction", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({
+        code: "MCP_END_USER_REF_REQUIRED",
+        error: "MCP_END_USER_REF_REQUIRED: This operation requires connected OAuth/OIDC credentials. Configure X-Fused-End-User-Ref on the MCP client connection for the intended user, then retry.",
+        recovery_action: "correct_execute_arguments",
+        execute_request: "correct_arguments",
+        provider_execution: "not_started",
+        automatic_replay: false,
+      }),
+    }));
+
+    const failure = errorValue(await runExecute('return await call("jira.searchProjects", {});', testCallOptions, new SessionState()));
+    expect(failure).toMatchObject({
+      code: "MCP_END_USER_REF_REQUIRED",
+      recovery_action: "correct_execute_arguments",
+      execute_request: "correct_arguments",
+      provider_execution: "not_started",
+      automatic_replay: false,
+    });
+    expect(failure.message).toContain("Configure X-Fused-End-User-Ref on the MCP client connection");
+  });
+
   /** Any earlier or concurrent admitted call makes a later local option correction unsafe as an aggregate outcome. */
   it("downgrades local pagination corrections after another call starts", async () => {
     const scripts = [

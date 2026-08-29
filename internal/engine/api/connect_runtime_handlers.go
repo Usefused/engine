@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
+	"github.com/Usefused/engine/internal/engine/authevent"
 	"github.com/Usefused/engine/internal/engine/connectauth"
 	"github.com/Usefused/engine/internal/engine/connectresource"
 	"github.com/Usefused/engine/internal/engine/store"
@@ -231,6 +232,8 @@ func ConnectCallbackHandler(s store.Store, verifier ServiceVerifier, masterKey [
 			return
 		}
 		span.SetAttributes(attribute.String("outcome", "success"), attribute.String("resource_persistence_status", "committed"), attribute.Int("resource_count", boundedCallbackResourceCount(resourceCount)))
+		// Notification delivery is best-effort after commit so a NATS outage cannot invalidate a saved provider grant.
+		_ = authevent.Publish(ctx, authevent.NewConnectionCompleted(*session, *saved, resourceCount, time.Now().UTC()))
 		writeConnectCallbackSuccess(ctx, s, w, r, session, saved.ID)
 	}
 }

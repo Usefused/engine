@@ -18,6 +18,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/engine/webhookstream"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 )
@@ -178,6 +179,23 @@ func mountMCPGraphQLTestHandlerWithRegistryAndSink(t *testing.T, s store.Store, 
 	return withGraphQLTestOwner(t, s, mcpGraphQLHandler(schema, graphQLAuthorizationResources{store: s, configStore: configStore, slugResolver: slugResolver, revisionSink: revisionSink}))
 }
 
+// accountScopedGraphQLTestStore preserves an explicit workspace identity when a production wrapper hides the concrete fixture type.
+type accountScopedGraphQLTestStore struct {
+	store.Store
+	accountID uuid.UUID
+}
+
+// ResolveAppFamilyAccess preserves the optional authorization capability exposed by the wrapped production store.
+func (fixture *accountScopedGraphQLTestStore) ResolveAppFamilyAccess(ctx context.Context, accountID uuid.UUID, appIDs []uuid.UUID) (map[uuid.UUID]uuid.UUID, error) {
+	resolver, ok := fixture.Store.(store.AppFamilyAccessResolver)
+	// A missing capability must fail like production instead of manufacturing test-only family grants.
+	if !ok {
+		return nil, errors.New("wrapped store does not resolve app-family access")
+	}
+	return resolver.ResolveAppFamilyAccess(ctx, accountID, appIDs)
+}
+
+// withGraphQLTestOwner grants the test actor against the store fixture's actual workspace account.
 func withGraphQLTestOwner(t *testing.T, s store.Store, next http.HandlerFunc) http.HandlerFunc {
 	t.Helper()
 	accountID := uuid.New()
@@ -189,6 +207,9 @@ func withGraphQLTestOwner(t *testing.T, s store.Store, next http.HandlerFunc) ht
 	case *appSelectionGraphQLTestStore:
 		// The projection fixture wraps the ordinary catalogue fixture, so the actor must inherit its account identity.
 		accountID = fixture.workspaceTestStore.accountID
+	case *accountScopedGraphQLTestStore:
+		// Production wrappers retain behavior while this test adapter carries only the account needed for authorization.
+		accountID = fixture.accountID
 	}
 	workspaceID := uuid.New()
 	grants := make([]accesscontrol.Grant, 0, len(accesscontrol.AllPermissions()))
@@ -1326,6 +1347,7 @@ func TestUndeprecateAppMutationRestoresActiveStatus(t *testing.T) {
 	}
 }
 
+// TestDeactivateAppMutationPermanentlyRemovesVersion proves GraphQL shares exact live-receiver teardown.
 func TestDeactivateAppMutationPermanentlyRemovesVersion(t *testing.T) {
 	accountID := uuid.New()
 	appID := uuid.New()
@@ -1335,7 +1357,15 @@ func TestDeactivateAppMutationPermanentlyRemovesVersion(t *testing.T) {
 			appID: {AccountID: accountID, AppID: appID, Kind: "mcp", Name: "stripe-mcp"},
 		},
 	}
-	h := mountMCPGraphQLTestHandler(t, s)
+	registry := webhookstream.NewRegistry()
+	registration, ok := registry.Register(uuid.New(), appID)
+	// The fixture represents a stream whose initial source revalidation completed before deactivation.
+	if !ok || !registration.Confirm() {
+		t.Fatal("confirm webhook stream registration")
+	}
+	cachedStore := store.NewCachedStoreWithAppRuntimeInvalidator(s, nil, registry)
+	// The cached production wrapper intentionally hides test-only fixture fields, so carry the workspace account separately.
+	h := mountMCPGraphQLTestHandler(t, &accountScopedGraphQLTestStore{Store: cachedStore, accountID: accountID})
 
 	data := doMCPGraphQLRequest(t, h, `mutation { deactivateApp(app_id: "`+appID.String()+`") }`)
 	if data["deactivateApp"] != true {
@@ -1343,6 +1373,12 @@ func TestDeactivateAppMutationPermanentlyRemovesVersion(t *testing.T) {
 	}
 	if len(s.deletedScopes) != 1 || s.deletedScopes[0] != appID {
 		t.Errorf("expected exact app deletion for %s, got %#v", appID, s.deletedScopes)
+	}
+	select {
+	case <-registration.Done():
+		// Successful GraphQL persistence reaches the same CachedStore invalidation boundary as HTTP.
+	default:
+		t.Error("GraphQL deactivation left exact-app webhook stream active")
 	}
 }
 

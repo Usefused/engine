@@ -259,6 +259,8 @@ func dispatchResolvedProvider(
 	executionTimeoutMs int,
 ) error {
 	resolution, status, err := dispatchAndCache(ctx, dispatcher, match, object, params, credentials, bucketValues, environment, stream, span, identity.AppID)
+	// The MCP adapter can turn a pre-provider connected-auth miss into exact client-header guidance without changing SDK behavior.
+	err = classifyMCPEndUserRefRequirement(ctx, identity, match.service.AuthConfigs, object.SecurityRequirements, credentials, err)
 	auditState.providerHTTPStatus = status
 	auditState.selectedEnvironment = resolution.Environment
 	auditState.environmentSource = resolution.Source

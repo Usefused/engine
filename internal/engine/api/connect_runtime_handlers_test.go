@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
+	"github.com/Usefused/engine/internal/engine/authevent"
 	"github.com/Usefused/engine/internal/engine/connectresource"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
@@ -25,10 +26,22 @@ import (
 	"github.com/Usefused/engine/internal/shared/models"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
+	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
+
+// connectAuthEventCapture records callback lifecycle publication without a live JetStream server.
+type connectAuthEventCapture struct {
+	message *nats.Msg
+}
+
+// PublishMsgJS implements the auth event publisher boundary for callback tests.
+func (capture *connectAuthEventCapture) PublishMsgJS(message *nats.Msg) (*nats.PubAck, error) {
+	capture.message = message
+	return &nats.PubAck{}, nil
+}
 
 func connectTestOAuthFlow(scopes ...string) fusedobject.OAuth2FlowContract {
 	declared := make(map[string]string, len(scopes))
@@ -459,6 +472,9 @@ func TestStartConnectSessionHandlerRejectsUndeclaredScope(t *testing.T) {
 // exchange consumes the session and stores provider tokens encrypted.
 func TestConnectCallbackHandlerStoresEncryptedAuthConnection(t *testing.T) {
 	fixture := newConnectRuntimeFixture(t)
+	events := &connectAuthEventCapture{}
+	authevent.SetPublisher(authevent.NewPublisher(events))
+	t.Cleanup(func() { authevent.SetPublisher(nil) })
 	fixture.verifier.serviceMetadata.AuthConfigs[0].RefreshTokenRequired = true
 	state := "state-value"
 	verifier := "pkce-verifier"
@@ -481,6 +497,17 @@ func TestConnectCallbackHandlerStoresEncryptedAuthConnection(t *testing.T) {
 	}
 	assertRuntimeAuthConnectionEncrypted(t, fixture.store.savedConnection, fixture)
 	assertCallbackRedirectLocation(t, rr.Header().Get("Location"), fixture.store.savedConnection.ID)
+	// Completion is announced only after the encrypted connection has committed.
+	if events.message == nil {
+		t.Fatal("callback did not publish connection completion")
+	}
+	var envelope authevent.Envelope
+	if err := json.Unmarshal(events.message.Data, &envelope); err != nil {
+		t.Fatalf("decode auth event: %v", err)
+	}
+	if envelope.Event.Type != authevent.TypeConnectionCompleted || envelope.Event.ConnectionID != fixture.store.savedConnection.ID {
+		t.Fatalf("unexpected callback auth event: %#v", envelope.Event)
+	}
 }
 
 // TestConnectCallbackHandlerRejectsUnpinnedRedirect protects upgraded sessions from provider replay guesses.
@@ -659,6 +686,9 @@ func TestConnectCallbackHandlerPersistFailurePreservesPriorGrant(t *testing.T) {
 	provider := newCombinedConnectProvider(t, `[{"id":"cloud-a","name":"Acme","url":"https://acme.atlassian.net"}]`)
 	defer provider.Close()
 	fixture, state := combinedConnectRuntimeFixture(t, provider.URL, "acme")
+	events := &connectAuthEventCapture{}
+	authevent.SetPublisher(authevent.NewPublisher(events))
+	t.Cleanup(func() { authevent.SetPublisher(nil) })
 	seedPriorCallbackGrant(&fixture)
 	fixture.store.callbackPersistErr = errors.New("injected transaction failure")
 
@@ -668,6 +698,10 @@ func TestConnectCallbackHandlerPersistFailurePreservesPriorGrant(t *testing.T) {
 		t.Fatalf("expected 500, got %d: %s", rr.Code, rr.Body.String())
 	}
 	assertPriorCallbackGrant(t, fixture, 1)
+	// A rolled-back callback cannot claim that a new connection became usable.
+	if events.message != nil {
+		t.Fatal("failed callback persistence published a completion event")
+	}
 }
 
 // TestCallbackResourceValidationAttrsAreBounded asserts the callback span has

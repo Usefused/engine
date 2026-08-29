@@ -157,6 +157,35 @@ describe("remoteCall", () => {
     expect(bridgeRecoveryForError(failure)).toEqual({ recovery_action: "correct_execute_arguments", execute_request: "correct_arguments", provider_execution: "not_started", automatic_replay: false });
   });
 
+  /** Missing dynamic user context keeps Engine's exact connection correction attached to the host-owned error. */
+  it("preserves the end-user connection selector recovery", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({
+          code: "MCP_END_USER_REF_REQUIRED",
+          error: "MCP_END_USER_REF_REQUIRED: This operation requires connected OAuth/OIDC credentials. Configure X-Fused-End-User-Ref on the MCP client connection for the intended user, then retry.",
+          recovery_action: "correct_execute_arguments",
+          execute_request: "correct_arguments",
+          provider_execution: "not_started",
+          automatic_replay: false,
+        }),
+      }),
+    );
+
+    let failure: unknown;
+    try {
+      await remoteCall(options, "jira.searchProjects", {});
+    } catch (error) {
+      // Retaining the exact error object verifies that untrusted lookalikes cannot claim bridge recovery.
+      failure = error;
+    }
+    expect((failure as Error).message).toContain("Configure X-Fused-End-User-Ref on the MCP client connection");
+    expect(bridgeRecoveryForError(failure)).toEqual({ recovery_action: "correct_execute_arguments", execute_request: "correct_arguments", provider_execution: "not_started", automatic_replay: false });
+  });
+
   /** Invalid bridge recovery remains unusable even when its error code and prose are otherwise stable. */
   it("rejects incomplete structured recovery metadata", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({

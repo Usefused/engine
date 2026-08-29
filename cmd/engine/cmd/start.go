@@ -25,6 +25,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/api"
 	"github.com/Usefused/engine/internal/engine/apptokeninvalidation"
 	"github.com/Usefused/engine/internal/engine/auth"
+	"github.com/Usefused/engine/internal/engine/authevent"
 	"github.com/Usefused/engine/internal/engine/browserauth"
 	"github.com/Usefused/engine/internal/engine/cliauth"
 	"github.com/Usefused/engine/internal/engine/connectauth"
@@ -36,6 +37,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/ratelimitcoordinator"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/engine/webhookstream"
 	"github.com/Usefused/engine/internal/engine/worker"
 	"github.com/Usefused/engine/internal/shared/config"
 	"github.com/Usefused/engine/internal/shared/db"
@@ -100,6 +102,7 @@ func init() {
 	startCmd.Flags().StringVar(&environment, "environment", "", "Deployment environment label (e.g. production, staging) -- attached to OTel traces/logs/metrics and echoed on /health (overrides FUSED_ENGINE_ENVIRONMENT env var when set; defaults to \"production\")")
 }
 
+// runEngine assembles one process-wide dependency graph before accepting HTTP, gRPC, or background work.
 func runEngine() {
 	licenseSources := loadEngineEnv()
 	licenseSources.Flag = licenseKey
@@ -135,10 +138,11 @@ func runEngine() {
 		slog.ErrorContext(ctx, "FATAL: OAuth application credential cutover failed", slog.String("error_code", "oauth_application_credential_cutover_failed"))
 		os.Exit(1)
 	}
-	engineStore := store.NewCachedStore(postgresStore, natsClient)
+	webhookStreams := webhookstream.NewRegistry()
+	engineStore := store.NewCachedStoreWithAppRuntimeInvalidator(postgresStore, natsClient, webhookStreams)
 	tokenValidator := auth.NewTokenValidator(engineStore)
 	runtimeTokenInvalidator := apptokeninvalidation.NewFanoutInvalidator(
-		tokenValidator, sandbox.MCPSessionTokenInvalidator{},
+		tokenValidator, sandbox.MCPSessionTokenInvalidator{}, webhookStreams,
 	)
 	tokenRevoker, err := apptokeninvalidation.NewService(
 		engineStore, runtimeTokenInvalidator, apptokeninvalidation.NewPublisher(natsClient),
@@ -212,12 +216,12 @@ func runEngine() {
 	sandbox.StartServiceChangelogPoller(ctx, engineStore, configStore, registryClient, envLicense)
 
 	localObjectCache := sandbox.NewLocalObjectCache(engineStore)
-	subscribeCacheInvalidation(natsClient, localObjectCache)
+	subscribeCacheInvalidation(natsClient, localObjectCache, webhookStreams)
 
 	registryProxy := api.NewRegistryProxy(cfg.Engine.RegistryEndpoint, envLicense)
 	authRefreshStore, err := backgroundStore.connectedAuthRefreshCapability()
 	if err != nil {
-		// Why: managed refresh cannot operate safely without durable claims;
+		// Managed refresh cannot operate safely without durable claims;
 		// failing startup is clearer than allowing user grants to expire silently.
 		slog.ErrorContext(ctx, "FATAL: Connected auth refresh store is unavailable",
 			slog.String("error_code", "connected_auth_refresh_store_unavailable"))
@@ -228,7 +232,7 @@ func runEngine() {
 		ctx, authRefreshStore, authRefreshCoordinator, cfg.Engine.ConnectedAuthRefreshWorkers,
 	)
 	if err != nil {
-		// Why: managed refresh is part of connected-auth correctness, so an
+		// Managed refresh is part of connected-auth correctness, so an
 		// invalid or incomplete worker must fail startup rather than run degraded.
 		slog.ErrorContext(ctx, "FATAL: Failed to start connected auth refresh worker",
 			slog.String("error_code", "connected_auth_refresh_worker_start_failed"))
@@ -260,7 +264,7 @@ func runEngine() {
 
 	webhookSrv := startWebhookServer(ctx, r)
 	srv := startEngineHTTPServer(ctx, r)
-	grpcServer := startEngineGRPCServer(ctx, engineStore, registryClient, masterKey, configStore, natsClient, tokenValidator, connectRedirectURI)
+	grpcServer := startEngineGRPCServer(ctx, engineStore, registryClient, masterKey, configStore, natsClient, tokenValidator, webhookStreams, connectRedirectURI)
 
 	waitForEngineShutdown(ctx, cancel, srv, webhookSrv, grpcServer)
 }
@@ -402,37 +406,61 @@ type engineWorkers struct {
 	packageLeases         *worker.SDKPackageLeaseWorker
 	providerRateLimits    *worker.ProviderRateLimitProjectionWorker
 	connectedAuthRefresh  *worker.ConnectedAuthRefreshWorker
+	authEventWebhooks     *worker.AuthEventWebhookWorker
 }
 
 // Stop cancels every Engine-owned background worker and lets each one honor the
 // caller's shared bounded shutdown context.
 func (w engineWorkers) Stop(ctx context.Context) {
+	w.stopRuntimeWorkers(ctx)
+	w.stopReportingWorkers(ctx)
+}
+
+// stopRuntimeWorkers drains workers that enforce or project live Engine runtime state.
+func (w engineWorkers) stopRuntimeWorkers(ctx context.Context) {
+	// Token invalidation owns no blocking drain and can stop before the bounded workers.
 	if w.appTokenInvalidations != nil {
 		w.appTokenInvalidations.Stop()
 	}
+	// Token expiry finishes its current bounded deletion batch before shutdown returns.
 	if w.appTokenExpiry != nil {
 		w.appTokenExpiry.Stop(ctx)
 	}
+	// Provider quota state projection drains before execution reporting consumers stop.
 	if w.providerRateLimits != nil {
 		w.providerRateLimits.Stop(ctx)
 	}
+	// Connected-auth refresh stops producing transitions before their webhook projector is drained.
+	if w.connectedAuthRefresh != nil {
+		w.connectedAuthRefresh.Stop(ctx)
+	}
+	// Auth-event projection stops after producers so its bounded poll can finish without accepting new transitions.
+	if w.authEventWebhooks != nil {
+		w.authEventWebhooks.Stop(ctx)
+	}
+}
+
+// stopReportingWorkers drains durable execution, usage, retention, insight, and package-lease work.
+func (w engineWorkers) stopReportingWorkers(ctx context.Context) {
+	// Usage aggregation finishes before its source execution worker is stopped.
 	if w.usageCounter != nil {
 		w.usageCounter.Stop(ctx)
 	}
+	// Execution persistence drains its bounded JetStream batch before retention stops.
 	if w.executionEvents != nil {
 		w.executionEvents.Stop(ctx)
 	}
+	// Retention cleanup stops after new execution persistence has ended.
 	if w.retention != nil {
 		w.retention.Stop(ctx)
 	}
+	// Public insight reporting completes its current bounded send attempt.
 	if w.publicInsights != nil {
 		w.publicInsights.Stop(ctx)
 	}
+	// Package lease renewal stops last among reporting workers because it is independent from event persistence.
 	if w.packageLeases != nil {
 		w.packageLeases.Stop(ctx)
-	}
-	if w.connectedAuthRefresh != nil {
-		w.connectedAuthRefresh.Stop(ctx)
 	}
 }
 
@@ -457,14 +485,31 @@ type runtimeEntitlementStore interface {
 	GetRuntimeEntitlement(ctx context.Context) (models.RuntimeEntitlement, error)
 }
 
+// startEngineWorkers wires stream publishers before starting consumers that can produce lifecycle transitions.
 func startEngineWorkers(ctx context.Context, engineStore store.Store, natsClient *messaging.NATSClient, cfg config.EngineConfig, tokenInvalidator apptokeninvalidation.Invalidator) engineWorkers {
 	appTokenInvalidations, err := apptokeninvalidation.StartWorker(natsClient.JS, tokenInvalidator)
+	// Cross-replica token revocation must be available before accepting Engine work.
 	if err != nil {
 		slog.ErrorContext(ctx, "FATAL: Failed to start app-token invalidation subscriber", slog.Any("error", err))
 		os.Exit(1)
 	}
+	// Auth transitions publish directly to the shared Engine stream after their database commits.
+	authevent.SetPublisher(authevent.NewPublisher(natsClient))
+	authEventResolver, ok := engineStore.(store.AuthEventAppFamilyResolver)
+	// SDK delivery requires set-based current/tombstone family resolution; startup fails closed if the store cannot provide it.
+	if !ok {
+		slog.ErrorContext(ctx, "FATAL: Auth-event app-family resolver is unavailable")
+		os.Exit(1)
+	}
+	authEventWebhooks, err := worker.StartAuthEventWebhookWorker(ctx, authEventResolver, natsClient)
+	// The projector is required once canonical auth transitions are enabled so published internal events reach SDK receivers.
+	if err != nil {
+		slog.ErrorContext(ctx, "FATAL: Failed to start auth-event webhook projection", slog.Any("error", err))
+		os.Exit(1)
+	}
 	executionevent.SetPublisher(executionevent.NewPublisher(natsClient))
 	executionEventWorker, err := worker.StartExecutionEventWorker(ctx, engineStore, natsClient)
+	// Execution history is a required durable consumer rather than a best-effort UI projection.
 	if err != nil {
 		slog.ErrorContext(ctx, "FATAL: Failed to start execution event persistence", slog.Any("error", err))
 		os.Exit(1)
@@ -483,7 +528,7 @@ func startEngineWorkers(ctx context.Context, engineStore store.Store, natsClient
 	tokenExpiryWorker := worker.StartAppTokenExpiryWorker(ctx, engineStore, 250)
 	return engineWorkers{
 		appTokenInvalidations: appTokenInvalidations, appTokenExpiry: tokenExpiryWorker,
-		executionEvents: executionEventWorker, retention: retentionWorker,
+		executionEvents: executionEventWorker, retention: retentionWorker, authEventWebhooks: authEventWebhooks,
 	}
 }
 
@@ -776,14 +821,36 @@ func engineIntFromEnv(name string, fallback int) int {
 	return parsed
 }
 
-func subscribeCacheInvalidation(natsClient *messaging.NATSClient, localObjectCache *sandbox.LocalObjectCache) {
-	if natsClient != nil && natsClient.Conn != nil {
-		natsClient.Conn.Subscribe("engine.cache.invalidate.sdk_scope.>", func(m *nats.Msg) {
-			parts := strings.Split(m.Subject, ".")
-			if len(parts) == 5 {
-				localObjectCache.InvalidateAppRuntime(parts[4])
-			}
-		})
+// subscribeCacheInvalidation evicts execution objects and live webhook authorization from one peer signal.
+func subscribeCacheInvalidation(natsClient *messaging.NATSClient, localObjectCache *sandbox.LocalObjectCache, streamInvalidator store.AppRuntimeInvalidator) {
+	// Missing core NATS leaves cache TTL plus webhook periodic revalidation as the bounded recovery path.
+	if natsClient == nil || natsClient.Conn == nil {
+		return
+	}
+	_, _ = natsClient.Conn.Subscribe("engine.cache.invalidate.sdk_scope.>", func(message *nats.Msg) {
+		handleSDKScopeInvalidation(message, localObjectCache, streamInvalidator)
+	})
+}
+
+// handleSDKScopeInvalidation validates one exact app subject before touching either volatile runtime surface.
+func handleSDKScopeInvalidation(message *nats.Msg, localObjectCache *sandbox.LocalObjectCache, streamInvalidator store.AppRuntimeInvalidator) {
+	parts := strings.Split(message.Subject, ".")
+	// The exact five-segment subject and UUID prevent malformed peer input from broad invalidation.
+	if len(parts) != 5 {
+		return
+	}
+	appID, err := uuid.Parse(parts[4])
+	// Invalid app identities cannot be forwarded into exact-app caches or receiver indexes.
+	if err != nil {
+		return
+	}
+	// Object-cache invalidation retains the existing string contract after UUID admission.
+	if localObjectCache != nil {
+		localObjectCache.InvalidateAppRuntime(appID.String())
+	}
+	// Live receivers close on every immutable runtime change and must reauthorize before reconnecting.
+	if streamInvalidator != nil {
+		streamInvalidator.InvalidateAppRuntime(appID)
 	}
 }
 
@@ -1023,7 +1090,7 @@ func serveHTTPServer(ctx context.Context, srv *http.Server, startMessage string,
 }
 
 // startEngineGRPCServer injects the same canonical callback identity used by HTTP and GraphQL consent flows.
-func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient, tokenValidator auth.TokenValidator, redirectURI string) *grpc.Server {
+func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient, tokenValidator auth.TokenValidator, webhookStreams *webhookstream.Registry, redirectURI string) *grpc.Server {
 	listenAddress := engineGRPCListenAddress(grpcHost, grpcPort)
 	lis, err := net.Listen("tcp", listenAddress)
 	if err != nil {
@@ -1038,7 +1105,7 @@ func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registr
 	)
 	// SubscribeWebhooks needs both dependencies to resolve the configured
 	// attachment and bridge its durable JetStream consumer to the gRPC stream.
-	enginev1.RegisterEngineServiceServer(grpcServer, api.NewEngineGRPCServer(engineStore, registryClient, masterKey, configStore, natsClient, tokenValidator, redirectURI))
+	enginev1.RegisterEngineServiceServer(grpcServer, api.NewEngineGRPCServerWithWebhookStreams(engineStore, registryClient, masterKey, configStore, natsClient, tokenValidator, webhookStreams, redirectURI))
 
 	go serveGRPCServer(ctx, grpcServer, lis, listenAddress)
 	return grpcServer

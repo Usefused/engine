@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/authevent"
 	"github.com/Usefused/engine/internal/engine/connectauth"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
@@ -433,9 +434,11 @@ func (c *AuthRefreshCoordinator) handleProviderRefreshError(ctx context.Context,
 // the lease owner and never rewrites encrypted token fields.
 func (c *AuthRefreshCoordinator) markClaimReconnectRequired(ctx context.Context, claim store.AuthConnectionRefreshClaim, failureCode string, now time.Time) authRefreshAttempt {
 	applied, err := c.refreshStore.MarkAuthConnectionReconnectRequired(ctx, claim.Connection.ID, claim.LeaseToken, failureCode, executionTraceID(ctx), now)
+	// Failed persistence leaves no authoritative reconnect transition to publish.
 	if err != nil {
 		return authRefreshAttempt{result: transientRefreshResult("reconnect_state_write_failed"), err: err}
 	}
+	// A stale lease observes the winner and never duplicates its lifecycle event.
 	if !applied {
 		return c.resultAfterStaleClaim(ctx, claim.Connection.ID)
 	}
@@ -443,6 +446,8 @@ func (c *AuthRefreshCoordinator) markClaimReconnectRequired(ctx context.Context,
 	connection.RefreshState = reconnectRequiredCode
 	connection.LastFailureCode = failureCode
 	connection.LastFailureAt = &now
+	// The persisted reconnect decision remains authoritative when event delivery is temporarily unavailable.
+	_ = authevent.Publish(ctx, authevent.NewReconnectRequired(connection, failureCode, now))
 	return authRefreshAttempt{connection: &connection, result: AuthRefreshResult{Outcome: AuthRefreshOutcomeReconnectRequired, FailureCode: failureCode}}
 }
 
@@ -451,12 +456,16 @@ func (c *AuthRefreshCoordinator) markClaimReconnectRequired(ctx context.Context,
 func (c *AuthRefreshCoordinator) releaseClaim(ctx context.Context, claim store.AuthConnectionRefreshClaim, outcome AuthRefreshOutcome, failureCode string, retryDelay time.Duration, cause error) authRefreshAttempt {
 	now := c.now().UTC()
 	applied, err := c.refreshStore.ReleaseAuthConnectionRefresh(ctx, claim.Connection.ID, claim.LeaseToken, now.Add(retryDelay), failureCode, executionTraceID(ctx), now)
+	// Retry events require the retry boundary and stable failure code to be durable first.
 	if err != nil {
 		return authRefreshAttempt{result: transientRefreshResult("refresh_release_failed"), err: err}
 	}
+	// A stale lease observes the winner and never publishes a failed attempt it did not commit.
 	if !applied {
 		return c.resultAfterStaleClaim(ctx, claim.Connection.ID)
 	}
+	// Only the lease owner that committed retry state announces this failed attempt.
+	_ = authevent.Publish(ctx, authevent.NewTokenRefreshFailed(claim.Connection, failureCode, now))
 	return authRefreshAttempt{connection: &claim.Connection, result: AuthRefreshResult{Outcome: outcome, FailureCode: failureCode}, err: cause}
 }
 
@@ -464,12 +473,16 @@ func (c *AuthRefreshCoordinator) releaseClaim(ctx context.Context, claim store.A
 // the lease, preventing a late provider response from overwriting newer tokens.
 func (c *AuthRefreshCoordinator) completeClaim(ctx context.Context, claim store.AuthConnectionRefreshClaim, updated store.AuthConnection, refreshedAt time.Time) authRefreshAttempt {
 	saved, applied, err := c.refreshStore.CompleteAuthConnectionRefresh(ctx, claim.Connection.ID, claim.LeaseToken, updated, refreshedAt)
+	// Token material that failed to persist cannot be announced as usable.
 	if err != nil {
 		return authRefreshAttempt{result: transientRefreshResult("refresh_completion_failed"), err: err}
 	}
+	// The winning lease alone publishes the saved connection projection.
 	if !applied || saved == nil {
 		return c.resultAfterStaleClaim(ctx, claim.Connection.ID)
 	}
+	// Successful publication follows the token compare-and-set so lost leases cannot emit false rotations.
+	_ = authevent.Publish(ctx, authevent.NewTokenRefreshed(*saved, refreshedAt))
 	return authRefreshAttempt{connection: saved, result: AuthRefreshResult{Outcome: AuthRefreshOutcomeRefreshed}}
 }
 

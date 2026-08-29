@@ -117,8 +117,13 @@ func (s *cachedStore) UndeprecateApp(ctx context.Context, appID uuid.UUID) error
 // connected SDK scope after the tombstone transaction removes executability.
 func (s *cachedStore) DeactivateAppVersion(ctx context.Context, appID, deactivatedBy uuid.UUID) error {
 	err := s.Store.DeactivateAppVersion(ctx, appID, deactivatedBy)
+	// Cache and peer invalidation happen only after the tombstone transaction commits successfully.
 	if err == nil {
 		s.NotifyAppRuntimeChanged(ctx, appID)
+	}
+	// Local cache eviction precedes stream cancellation so a racing registration's source recheck sees the tombstone.
+	if err == nil && s.appRuntimeInvalidator != nil {
+		s.appRuntimeInvalidator.InvalidateAppRuntime(appID)
 	}
 	return err
 }

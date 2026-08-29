@@ -20,20 +20,30 @@ import (
 // offline resilience across the Engine API surface.
 type cachedStore struct {
 	Store
-	cache   *cache.InMemoryCache
-	runtime *runtimeCacheState
-	nc      *messaging.NATSClient
+	cache                 *cache.InMemoryCache
+	runtime               *runtimeCacheState
+	nc                    *messaging.NATSClient
+	appRuntimeInvalidator AppRuntimeInvalidator
 }
 
 var _ AuthConnectionRefreshStore = (*cachedStore)(nil)
 var _ MCPUnifiedDescriptorStore = (*cachedStore)(nil)
 
+// AppRuntimeInvalidator terminates volatile consumers holding one exact immutable app authorization.
+type AppRuntimeInvalidator interface {
+	InvalidateAppRuntime(uuid.UUID) int
+}
+
+// NewCachedStore builds the runtime cache without optional volatile-consumer teardown.
 func NewCachedStore(delegate Store, nc *messaging.NATSClient) Store {
+	return NewCachedStoreWithAppRuntimeInvalidator(delegate, nc, nil)
+}
+
+// NewCachedStoreWithAppRuntimeInvalidator couples durable app transitions to exact live-consumer invalidation.
+func NewCachedStoreWithAppRuntimeInvalidator(delegate Store, nc *messaging.NATSClient, invalidator AppRuntimeInvalidator) Store {
 	cs := &cachedStore{
-		Store:   delegate,
-		cache:   cache.NewInMemoryCache(),
-		runtime: newRuntimeCacheState(),
-		nc:      nc,
+		Store: delegate, cache: cache.NewInMemoryCache(), runtime: newRuntimeCacheState(),
+		nc: nc, appRuntimeInvalidator: invalidator,
 	}
 	cs.subscribeCacheInvalidations()
 

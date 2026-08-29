@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/engine/webhookstream"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -109,14 +110,22 @@ func TestUndeprecateAppHandlerDoesNotReactivateDeletedApp(t *testing.T) {
 	}
 }
 
+// TestDeactivateAppHandlerHardDeletesExactVersion proves HTTP deactivation also closes exact live receivers.
 func TestDeactivateAppHandlerHardDeletesExactVersion(t *testing.T) {
 	accountID, familyID, appID := uuid.New(), uuid.New(), uuid.New()
 	appStore := &appLifecycleTestStore{apps: map[uuid.UUID]store.App{appID: {
 		AppID: appID, AppFamilyID: familyID, AccountID: accountID,
 	}}}
+	registry := webhookstream.NewRegistry()
+	registration, ok := registry.Register(uuid.New(), appID)
+	// The fixture represents a stream whose initial source revalidation completed before deactivation.
+	if !ok || !registration.Confirm() {
+		t.Fatal("confirm webhook stream registration")
+	}
+	cachedStore := store.NewCachedStoreWithAppRuntimeInvalidator(appStore, nil, registry)
 	request := httptest.NewRequest(http.MethodDelete, "/apps/"+appID.String()+"/", nil)
 	response := httptest.NewRecorder()
-	mountAppLifecycleRoutes(accountID, appStore).ServeHTTP(response, request)
+	mountAppLifecycleRoutes(accountID, cachedStore).ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -125,6 +134,12 @@ func TestDeactivateAppHandlerHardDeletesExactVersion(t *testing.T) {
 	}
 	if _, err := appStore.GetApp(context.Background(), appID); !errors.Is(err, store.ErrAppNotFound) {
 		t.Fatalf("deactivated app remains executable: %v", err)
+	}
+	select {
+	case <-registration.Done():
+		// Successful HTTP persistence reaches the shared CachedStore invalidation boundary.
+	default:
+		t.Fatal("HTTP deactivation left exact-app webhook stream active")
 	}
 }
 

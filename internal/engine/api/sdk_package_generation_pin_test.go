@@ -17,7 +17,7 @@ func TestSDKPackageRegenerationForwardsOriginalGenerationPin(t *testing.T) {
 	pin := models.SDKContractBinding{ServiceID: selection.ServiceID, ServiceVersionID: selection.ServiceVersionID, Version: "1.0", Revision: 7, SourceHash: "source-7", GenerationContractHash: "sha256:" + strings.Repeat("a", 64)}
 	build.ContractBindings = []models.SDKContractBinding{pin}
 	packages := &sdkPackageClientStub{responses: []*http.Response{sdkPackageResponse(http.StatusNotFound, "missing"), sdkPackageResponse(http.StatusOK, "zip")}}
-	proxy := &sdkPackageGenerationForwarder{status: http.StatusAccepted, body: `{"app_id":"` + appID.String() + `","job_id":"retained-job","status":"complete","scope_schema_version":3,"generator_version":"registry-generator-v4"}`}
+	proxy := &sdkPackageGenerationForwarder{status: http.StatusAccepted, body: `{"app_id":"` + appID.String() + `","job_id":"retained-job","status":"complete","scope_schema_version":3,"generator_version":"registry-generator-v5"}`}
 	response := serveSDKPackageDownload(t, appID, build, proxy, packages)
 	// Recovery should produce a normal download after one generation request.
 	if response.Code != http.StatusOK || len(packages.appIDs) != 2 {

@@ -522,6 +522,8 @@ func extractBearerToken(r *http.Request) (string, bool) {
 // required because engineExecuteCore resolves the account identity from it.
 func dispatchMCPCall(ctx context.Context, sess *mcpSession, operationID string, params map[string]any, pagination *engine.PaginationIntent) (json.RawMessage, error) {
 	ctx = contextWithExecutionTransport(ctx, models.EngineExecutionTransportMCP)
+	// Direct physical MCP calls take connected-user routing only from the authenticated connection handshake.
+	ctx = contextWithMCPConnectionSelectors(ctx)
 	ctx = contextWithMCPPhysicalExecutionIdentity(ctx, params, pagination)
 
 	buf := engine.NewBoundedBufferStream(maxMCPPhysicalResultBytes)
@@ -564,6 +566,10 @@ func boundedMCPPhysicalCallError(operationID string, err error) (int, string) {
 
 // boundedMCPPhysicalCallResponse adds closed recovery fields only when typed validation proves provider dispatch never began.
 func boundedMCPPhysicalCallResponse(operationID string, err error) (int, mcpCallResponse) {
+	// Missing dynamic user context is proven before provider dispatch and has one exact MCP connection correction.
+	if errors.Is(err, errMCPEndUserRefRequired) {
+		return http.StatusBadRequest, mcpCorrectArgumentsResponse(mcpEndUserRefRequiredCode, mcpEndUserRefRequiredMessage)
+	}
 	statusCode, message := boundedMCPPhysicalCallError(operationID, err)
 	response := mcpCallResponse{Error: message}
 	var paginationErr *engine.PaginationIntentValidationError

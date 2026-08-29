@@ -10,6 +10,7 @@ import (
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/engine/webhookstream"
 	"github.com/Usefused/engine/internal/shared/messaging"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
@@ -36,12 +37,22 @@ type EngineGRPCServer struct {
 	configStore    store.ConfigRepository
 	natsClient     *messaging.NATSClient
 	tokenValidator auth.TokenValidator
+	webhookStreams *webhookstream.Registry
 }
 
 // NewEngineGRPCServer requires the process-shared validator so SDK execution,
 // MCP execution, and revocation can never accidentally use separate caches.
 func NewEngineGRPCServer(s store.Store, verifier ServiceVerifier, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient, tokenValidator auth.TokenValidator, redirectURIs ...string) *EngineGRPCServer {
+	return NewEngineGRPCServerWithWebhookStreams(s, verifier, masterKey, configStore, natsClient, tokenValidator, webhookstream.NewRegistry(), redirectURIs...)
+}
+
+// NewEngineGRPCServerWithWebhookStreams injects the process-shared live receiver registry used by revocation and app invalidation.
+func NewEngineGRPCServerWithWebhookStreams(s store.Store, verifier ServiceVerifier, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient, tokenValidator auth.TokenValidator, webhookStreams *webhookstream.Registry, redirectURIs ...string) *EngineGRPCServer {
 	runtime := sandbox.NewEngineGRPCServer()
+	// A nil optional registry still fails closed through a private registry rather than leaving streams untracked.
+	if webhookStreams == nil {
+		webhookStreams = webhookstream.NewRegistry()
+	}
 	return &EngineGRPCServer{
 		runtime:        runtime,
 		unifiedRuntime: runtime,
@@ -53,6 +64,7 @@ func NewEngineGRPCServer(s store.Store, verifier ServiceVerifier, masterKey []by
 		configStore:    configStore,
 		natsClient:     natsClient,
 		tokenValidator: tokenValidator,
+		webhookStreams: webhookStreams,
 	}
 }
 

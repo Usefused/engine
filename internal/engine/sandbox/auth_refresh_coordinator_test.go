@@ -11,15 +11,85 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/authevent"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/google/uuid"
+	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
+
+// refreshAuthEventCapture stores all transition messages emitted by one coordinator attempt.
+type refreshAuthEventCapture struct {
+	messages []*nats.Msg
+}
+
+// PublishMsgJS implements the auth event publication boundary for refresh tests.
+func (capture *refreshAuthEventCapture) PublishMsgJS(message *nats.Msg) (*nats.PubAck, error) {
+	capture.messages = append(capture.messages, message)
+	return &nats.PubAck{}, nil
+}
+
+// publishedRefreshEvent decodes the sole durable transition expected from one owned lease.
+func publishedRefreshEvent(t *testing.T, capture *refreshAuthEventCapture) authevent.Event {
+	t.Helper()
+	// One lease completion maps to one lifecycle decision, preventing duplicate user notifications.
+	if len(capture.messages) != 1 {
+		t.Fatalf("auth event messages = %d, want 1", len(capture.messages))
+	}
+	var envelope authevent.Envelope
+	if err := json.Unmarshal(capture.messages[0].Data, &envelope); err != nil {
+		t.Fatalf("decode auth event: %v", err)
+	}
+	return envelope.Event
+}
+
+// TestAuthRefreshCoordinatorPublishesDurableLifecycleTransitions verifies success, retry, and reconnect decisions.
+func TestAuthRefreshCoordinatorPublishesDurableLifecycleTransitions(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      int
+		body        string
+		wantOutcome AuthRefreshOutcome
+		wantType    authevent.Type
+		wantCode    string
+	}{
+		{name: "refreshed", status: http.StatusOK, body: `{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`, wantOutcome: AuthRefreshOutcomeRefreshed, wantType: authevent.TypeTokenRefreshed},
+		{name: "retryable failure", status: http.StatusServiceUnavailable, body: `{"error":"temporarily_unavailable"}`, wantOutcome: AuthRefreshOutcomeTransientFailure, wantType: authevent.TypeTokenRefreshFailed, wantCode: "provider_refresh_failed"},
+		{name: "reconnect required", status: http.StatusBadRequest, body: `{"error":"invalid_grant"}`, wantOutcome: AuthRefreshOutcomeReconnectRequired, wantType: authevent.TypeReconnectRequired, wantCode: "refresh_token_rejected"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Date(2026, time.August, 29, 10, 0, 0, 0, time.UTC)
+			fixture := newAuthRefreshCoordinatorFixture(t, now, time.Minute)
+			claim, err := fixture.db.TryClaimAuthConnectionRefresh(context.Background(), fixture.connection.ID, now, now.Add(time.Minute))
+			// The test must own a real mock CAS lease before provider behavior can exercise publication.
+			if err != nil || claim == nil {
+				t.Fatalf("claim connection: claim=%v error=%v", claim != nil, err)
+			}
+			capture := &refreshAuthEventCapture{}
+			authevent.SetPublisher(authevent.NewPublisher(capture))
+			t.Cleanup(func() { authevent.SetPublisher(nil) })
+			coordinator := NewAuthRefreshCoordinator(fixture.db, fixture.masterKey,
+				WithAuthRefreshClock(func() time.Time { return now }),
+				WithAuthRefreshHTTPClient(authRefreshResponseClient(test.status, test.body)))
+
+			result, _ := coordinator.RefreshClaimedConnection(context.Background(), *claim)
+			if result.Outcome != test.wantOutcome {
+				t.Fatalf("refresh outcome = %q, want %q", result.Outcome, test.wantOutcome)
+			}
+			event := publishedRefreshEvent(t, capture)
+			if event.Type != test.wantType || event.ConnectionID != fixture.connection.ID || event.FailureCode != test.wantCode {
+				t.Fatalf("unexpected auth event: %#v", event)
+			}
+		})
+	}
+}
 
 // TestAuthRefreshCoordinatorPreservesOmittedRefreshToken verifies providers
 // that rotate access only cannot erase the still-valid encrypted refresh grant.
@@ -456,6 +526,9 @@ func TestAuthRefreshCoordinatorClassifiesLostClaimWithoutDoubleSpan(t *testing.T
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
 	otel.SetTracerProvider(provider)
 	defer otel.SetTracerProvider(previousProvider)
+	events := &refreshAuthEventCapture{}
+	authevent.SetPublisher(authevent.NewPublisher(events))
+	t.Cleanup(func() { authevent.SetPublisher(nil) })
 
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	fixture := newAuthRefreshCoordinatorFixture(t, now, time.Minute)
@@ -487,6 +560,10 @@ func TestAuthRefreshCoordinatorClassifiesLostClaimWithoutDoubleSpan(t *testing.T
 	attributes := testSpanStringAttributes(findAuthRefreshTestSpan(t, spans).Attributes())
 	if attributes["auth.refresh.trigger"] != "worker" || attributes["auth.refresh.outcome"] != "lease_contended" {
 		t.Fatalf("unexpected lost-claim attributes: %#v", attributes)
+	}
+	// The winning lease owns lifecycle publication; this stale provider response must stay silent.
+	if len(events.messages) != 0 {
+		t.Fatalf("lost claim published %d auth events", len(events.messages))
 	}
 }
 

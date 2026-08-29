@@ -16,6 +16,27 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
+// appRuntimeInvalidatorCapture records exact-app teardown without depending on the gRPC stream registry package.
+type appRuntimeInvalidatorCapture struct {
+	mu     sync.Mutex
+	appIDs []uuid.UUID
+}
+
+// InvalidateAppRuntime implements the narrow volatile-consumer invalidation boundary.
+func (capture *appRuntimeInvalidatorCapture) InvalidateAppRuntime(appID uuid.UUID) int {
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	capture.appIDs = append(capture.appIDs, appID)
+	return 1
+}
+
+// calls returns a defensive snapshot for commit-order assertions.
+func (capture *appRuntimeInvalidatorCapture) calls() []uuid.UUID {
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	return append([]uuid.UUID(nil), capture.appIDs...)
+}
+
 func TestCachedStoreAppRuntimeHitReturnsDefensiveCopy(t *testing.T) {
 	appID := uuid.New()
 	delegate := newRuntimeCacheDelegate(AppRuntime{
@@ -303,13 +324,15 @@ func TestCachedStoreExecutionPolicyInvalidatesWritesAndCopiesNestedValues(t *tes
 	}
 }
 
+// TestCachedStoreHardDeactivationInvalidatesOnlyAfterCommit proves both cache and live streams follow persistence.
 func TestCachedStoreHardDeactivationInvalidatesOnlyAfterCommit(t *testing.T) {
 	appID := uuid.New()
 	actorID := uuid.New()
 
 	t.Run("failed transaction keeps cache", func(t *testing.T) {
 		delegate := newRuntimeCacheDelegate(AppRuntime{AppID: appID, Version: "v1"})
-		cached := NewCachedStore(delegate, nil).(*cachedStore)
+		invalidator := &appRuntimeInvalidatorCapture{}
+		cached := NewCachedStoreWithAppRuntimeInvalidator(delegate, nil, invalidator).(*cachedStore)
 		mustGetRuntime(t, cached, appID)
 		delegate.setRuntime(AppRuntime{AppID: appID, Version: "v2"})
 		delegate.setDeactivateError(errors.New("transaction rolled back"))
@@ -320,11 +343,16 @@ func TestCachedStoreHardDeactivationInvalidatesOnlyAfterCommit(t *testing.T) {
 		if runtime := mustGetRuntime(t, cached, appID); runtime.Version != "v1" {
 			t.Fatalf("failed deactivation invalidated cache to %q, want v1", runtime.Version)
 		}
+		// A rolled-back tombstone cannot revoke a stream that still has valid exact-app authorization.
+		if calls := invalidator.calls(); len(calls) != 0 {
+			t.Fatalf("failed deactivation invalidations = %v, want none", calls)
+		}
 	})
 
 	t.Run("committed tombstone evicts runtime", func(t *testing.T) {
 		delegate := newRuntimeCacheDelegate(AppRuntime{AppID: appID, Version: "v1"})
-		cached := NewCachedStore(delegate, nil).(*cachedStore)
+		invalidator := &appRuntimeInvalidatorCapture{}
+		cached := NewCachedStoreWithAppRuntimeInvalidator(delegate, nil, invalidator).(*cachedStore)
 		mustGetRuntime(t, cached, appID)
 
 		if err := cached.DeactivateAppVersion(context.Background(), appID, actorID); err != nil {
@@ -335,6 +363,10 @@ func TestCachedStoreHardDeactivationInvalidatesOnlyAfterCommit(t *testing.T) {
 		}
 		if calls := delegate.loadCount(); calls != 2 {
 			t.Fatalf("runtime delegate loads = %d, want cache fill plus post-deactivation lookup", calls)
+		}
+		// The exact app closes synchronously after commit, before relying on best-effort peer messaging.
+		if calls := invalidator.calls(); len(calls) != 1 || calls[0] != appID {
+			t.Fatalf("committed deactivation invalidations = %v, want [%s]", calls, appID)
 		}
 	})
 }

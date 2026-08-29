@@ -168,6 +168,10 @@ func classifyExecutionFailure(execErr error, status int) (string, string) {
 	if _, incompatible := fusedobject.ExecutionContractCompatibilityDetails(execErr); incompatible {
 		return "contract", fusedobject.ExecutionCapabilityRequiredCode
 	}
+	// Missing MCP connection identity is a caller-correctable auth input, not a provider rejection or network failure.
+	if errors.Is(execErr, errMCPEndUserRefRequired) {
+		return "auth", "end_user_ref_required"
+	}
 	// Caller pagination-policy decisions are already typed, so preserve their bounded reason instead of falling through to a network failure.
 	if code, ok := paginationIntentFailureCode(execErr); ok {
 		return "pagination", code
