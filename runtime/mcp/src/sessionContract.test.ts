@@ -14,7 +14,7 @@ it("advertises client-owned session state without exposing session identity", ()
     automatic_execute_replay: false,
   });
   expect(SESSION_CONTRACT_METADATA.recovery_actions).toEqual([
-    "continue_stored_result", "correct_execute_arguments", "adjust_result_projection", "reinitialize_connection", "do_not_replay",
+    "complete_authentication", "continue_stored_result", "correct_execute_arguments", "adjust_result_projection", "reinitialize_connection", "do_not_replay",
   ]);
   expect(JSON.stringify(SESSION_CONTRACT_METADATA)).not.toContain("session_id\":");
 });

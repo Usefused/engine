@@ -360,6 +360,10 @@ func completeConnectInputSession(ctx context.Context, s store.Store, loaded reso
 	if err != nil {
 		return connectSessionStartResponse{}, err
 	}
+	// The pre-authorisation and provider callback rows use separate tables, so
+	// reusing the opaque UUID preserves one browser-to-lifecycle correlation.
+	providerSession.ID = session.ID
+	response.ConnectSessionID = session.ID
 	if _, err := s.CompleteConnectInputSession(ctx, session.TokenHash, session.ContractHash, time.Now().UTC(), providerSession); err != nil {
 		return connectSessionStartResponse{}, err
 	}

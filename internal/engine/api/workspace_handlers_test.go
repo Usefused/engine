@@ -2096,7 +2096,10 @@ func (s *workspaceTestStore) SetDefaultConnectionResource(ctx context.Context, c
 // CreateConnectSession captures session writes for GraphQL start-session tests
 // without exposing the encrypted PKCE material to assertions.
 func (s *workspaceTestStore) CreateConnectSession(ctx context.Context, session store.ConnectSession) (*store.ConnectSession, error) {
-	session.ID = uuid.New()
+	// Production starts preallocate browser correlation; older direct fixtures receive an ID only when absent.
+	if session.ID == uuid.Nil {
+		session.ID = uuid.New()
+	}
 	session.CreatedAt = time.Now().UTC()
 	s.createdConnectSessions = append(s.createdConnectSessions, session)
 	return &session, nil

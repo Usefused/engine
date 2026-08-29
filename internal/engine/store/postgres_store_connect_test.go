@@ -902,6 +902,7 @@ func TestPostgresStoreConnectRejectsPlaintextAuthMaterial(t *testing.T) {
 	}
 
 	_, err = s.CreateConnectSession(context.Background(), ConnectSession{
+		ID:                    uuid.New(),
 		EncryptedPKCEVerifier: "pkce-verifier",
 	})
 	if !errors.Is(err, ErrInvalidEncryptedAuthMaterial) {
@@ -1388,6 +1389,7 @@ func createConnectSession(t *testing.T, f connectAuthFixture) *ConnectSession {
 	t.Helper()
 	encrypted := encryptConnectAuthValues(t, "pkce-verifier")
 	session, err := f.store.CreateConnectSession(f.ctx, ConnectSession{
+		ID:                    uuid.New(),
 		BucketID:              f.bucketA,
 		ServiceID:             f.serviceID,
 		ServiceVersionID:      fixtureServiceVersionID(t, f),
@@ -1467,6 +1469,7 @@ func testConnectInputSessionLifecycle(t *testing.T, f connectAuthFixture) {
 	now := time.Now().UTC()
 	tokenHash := "input-" + uuid.NewString()
 	pending, err := f.store.CreateConnectInputSession(f.ctx, ConnectInputSession{
+		ID:       uuid.New(),
 		BucketID: f.bucketA, ServiceID: f.serviceID, AuthType: "oauth", AuthName: "oauth",
 		ContractHash: "sha256:" + strings.Repeat("a", 64), EndUserRef: "user_input", TokenHash: tokenHash, CreatedByAppID: f.appID,
 		ReturnURL: "https://app.example.com/oauth/done", ResourceInputJSON: []byte(`{"subdomain":"acme"}`),
@@ -1481,6 +1484,7 @@ func testConnectInputSessionLifecycle(t *testing.T, f connectAuthFixture) {
 	}
 
 	providerSession := postgresInputCompletionSession(t, f, now)
+	providerSession.ID = pending.ID
 	mismatched := providerSession
 	mismatched.EndUserRef = "different_user"
 	if _, err := f.store.CompleteConnectInputSession(f.ctx, tokenHash, pending.ContractHash, now, mismatched); !errors.Is(err, ErrConnectSessionUnavailable) {
@@ -1497,6 +1501,10 @@ func testConnectInputSessionLifecycle(t *testing.T, f connectAuthFixture) {
 	if err != nil || stored == nil || stored.EndUserRef != "user_input" {
 		t.Fatalf("completed provider session = %#v err=%v", stored, err)
 	}
+	// One UUID must survive both tables so the later lifecycle event can address the browser action returned before form completion.
+	if created.ID != pending.ID || stored.ID != pending.ID {
+		t.Fatalf("hosted correlation changed pending=%s created=%s stored=%s", pending.ID, created.ID, stored.ID)
+	}
 	assertConcurrentConnectInputReplay(t, f, now.Add(time.Second))
 }
 
@@ -1506,7 +1514,8 @@ func assertConcurrentConnectInputReplay(t *testing.T, f connectAuthFixture, now 
 	t.Helper()
 	tokenHash := "concurrent-" + uuid.NewString()
 	contractHash := "sha256:" + strings.Repeat("b", 64)
-	_, err := f.store.CreateConnectInputSession(f.ctx, ConnectInputSession{
+	pending, err := f.store.CreateConnectInputSession(f.ctx, ConnectInputSession{
+		ID:       uuid.New(),
 		BucketID: f.bucketA, ServiceID: f.serviceID, AuthType: "oauth", AuthName: "oauth",
 		ContractHash: contractHash, EndUserRef: "user_input", TokenHash: tokenHash, CreatedByAppID: f.appID,
 		ReturnURL: "https://app.example.com/oauth/done", ResourceInputJSON: []byte(`{"subdomain":"acme"}`),
@@ -1516,6 +1525,7 @@ func assertConcurrentConnectInputReplay(t *testing.T, f connectAuthFixture, now 
 		t.Fatalf("CreateConnectInputSession for race: %v", err)
 	}
 	providerSession := postgresInputCompletionSession(t, f, now)
+	providerSession.ID = pending.ID
 	results := make(chan error, 2)
 	start := make(chan struct{})
 	for range 2 {

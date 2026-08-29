@@ -18,6 +18,7 @@ import {
   serializeBoundedJson,
 } from "./outputLimits.js";
 import { SESSION_AGENT_RULE, SESSION_CONTRACT_METADATA } from "./sessionContract.js";
+import { mcpAuthElicitationError } from "./authElicitation.js";
 
 /**
  * Session initialization instructions (design doc, "Session Initialization
@@ -145,6 +146,10 @@ function main(): void {
     // cannot accidentally serialize user-controlled objects outside its deadline.
     async (args, extra) => {
       const output = await runExecute(args.script, callOptions, session, { ...DEFAULT_EXECUTE_LIMITS, outputBudgetBytes: args.outputBudgetBytes }, undefined, extra.signal);
+      // URL mode keeps browser consent in the MCP host instead of exposing a navigation instruction to the model.
+      if (output.authAction) {
+        throw mcpAuthElicitationError(output.authAction);
+      }
       return {
         content: [{ type: "text", text: output.text }], isError: output.isError,
         _meta: { "com.usefused/execute": { delivery: output.delivery, output_budget_bytes: output.outputBudgetBytes, execution_outcome: output.executionOutcome, ...output.access } },

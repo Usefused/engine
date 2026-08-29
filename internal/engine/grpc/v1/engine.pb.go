@@ -984,11 +984,14 @@ func (x *StartConnectSessionRequest) GetScopes() []string {
 }
 
 type StartConnectSessionResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	AuthorizeUrl  string                 `protobuf:"bytes,1,opt,name=authorize_url,json=authorizeUrl,proto3" json:"authorize_url,omitempty"`
-	ExpiresAt     string                 `protobuf:"bytes,2,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	AuthorizeUrl string                 `protobuf:"bytes,1,opt,name=authorize_url,json=authorizeUrl,proto3" json:"authorize_url,omitempty"`
+	ExpiresAt    string                 `protobuf:"bytes,2,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// connect_session_id is the opaque correlation carried by the eventual
+	// connected-auth lifecycle event; it contains no provider credential data.
+	ConnectSessionId string `protobuf:"bytes,3,opt,name=connect_session_id,json=connectSessionId,proto3" json:"connect_session_id,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *StartConnectSessionResponse) Reset() {
@@ -1031,6 +1034,13 @@ func (x *StartConnectSessionResponse) GetAuthorizeUrl() string {
 func (x *StartConnectSessionResponse) GetExpiresAt() string {
 	if x != nil {
 		return x.ExpiresAt
+	}
+	return ""
+}
+
+func (x *StartConnectSessionResponse) GetConnectSessionId() string {
+	if x != nil {
+		return x.ConnectSessionId
 	}
 	return ""
 }
@@ -2104,11 +2114,12 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\x06scopes\x18\a \x03(\tR\x06scopes\x1a@\n" +
 	"\x12ResourceInputEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"a\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8f\x01\n" +
 	"\x1bStartConnectSessionResponse\x12#\n" +
 	"\rauthorize_url\x18\x01 \x01(\tR\fauthorizeUrl\x12\x1d\n" +
 	"\n" +
-	"expires_at\x18\x02 \x01(\tR\texpiresAt\";\n" +
+	"expires_at\x18\x02 \x01(\tR\texpiresAt\x12,\n" +
+	"\x12connect_session_id\x18\x03 \x01(\tR\x10connectSessionId\";\n" +
 	"\x14GetConnectionRequest\x12#\n" +
 	"\rconnection_id\x18\x01 \x01(\tR\fconnectionId\"h\n" +
 	"\x15GetConnectionResponse\x129\n" +

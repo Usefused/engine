@@ -1,5 +1,5 @@
 import vm from "node:vm";
-import { bridgeRecoveryForError, CallClientOptions, PhysicalCallOptions, remoteCall } from "./callClient.js";
+import { BridgeAuthAction, bridgeAuthActionForError, bridgeRecoveryForError, CallClientOptions, PhysicalCallOptions, remoteCall } from "./callClient.js";
 import { SerializedJsonOutput, serializeBoundedJson } from "./outputLimits.js";
 import { DeliveredResult, EXECUTE_ERROR_OUTPUT_POLICY, isResultReference, RetainedResults } from "./retainedResults.js";
 import { executeOutputBudget, EXECUTE_INLINE_BYTES } from "./resultBudget.js";
@@ -26,6 +26,12 @@ export interface ExecuteOutcome extends DeliveredResult {
   access: ResultAccess;
   outputBudgetBytes: number;
   executionOutcome: ExecutionOutcome;
+  authAction?: ExecuteAuthAction;
+}
+
+/** ExecuteAuthAction combines one trusted URL with aggregate script replay safety. */
+export interface ExecuteAuthAction extends BridgeAuthAction {
+  recovery: ModelRecovery;
 }
 
 /** Tracks only bounded retrieval counts; references and result values never become audit metadata. */
@@ -152,10 +158,21 @@ export async function runExecute(
   } catch (err) {
     // Error formatting must not leave callbacks or provider requests running in the background.
     invocation.close();
-    return { ...serializeExecuteError(err, deadline, limits.timeoutMs, outputBudget, callHistory), delivery: "error", access, outputBudgetBytes: outputBudget, executionOutcome: invocation.outcome(true) };
+    const authAction = executeAuthAction(err, callHistory);
+    return { ...serializeExecuteError(err, deadline, limits.timeoutMs, outputBudget, callHistory), delivery: "error", access, outputBudgetBytes: outputBudget, executionOutcome: invocation.outcome(true), ...(authAction ? { authAction } : {}) };
   } finally {
     invocation.close();
   }
+}
+
+/** Retains a trusted browser URL while downgrading replay safety for earlier sibling calls. */
+function executeAuthAction(error: unknown, callHistory: CallExecutionHistory): ExecuteAuthAction | undefined {
+  const action = bridgeAuthActionForError(error);
+  // Script-thrown errors and malformed bridge responses cannot create URL elicitation.
+  if (!action) return undefined;
+  const recovery = executionAwareRecovery(error, "", callHistory);
+  // Browser completion remains the next user action even when prior provider work forbids replaying the execute script.
+  return { ...action, recovery: { ...recovery, recovery_action: "complete_authentication" } };
 }
 
 /** Executes all user-provided serialization hooks under the invocation's remaining deadline. */

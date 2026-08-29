@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -24,9 +25,10 @@ import (
 )
 
 const (
-	mcpSessionIDHeader       = "Mcp-Session-Id"
-	mcpProtocolVersionHeader = "MCP-Protocol-Version"
-	mcpStreamableTransport   = "streamable_http"
+	mcpSessionIDHeader        = "Mcp-Session-Id"
+	mcpProtocolVersionHeader  = "MCP-Protocol-Version"
+	mcpStreamableTransport    = "streamable_http"
+	maxMCPServerNotifications = 8
 )
 
 type mcpJSONRPCRequest struct {
@@ -38,6 +40,11 @@ type mcpJSONRPCRequest struct {
 
 type mcpInitializeParams struct {
 	ProtocolVersion string `json:"protocolVersion"`
+	Capabilities    struct {
+		Elicitation struct {
+			URL json.RawMessage `json:"url"`
+		} `json:"elicitation"`
+	} `json:"capabilities"`
 }
 
 // mcpStreamableHandler owns one audited HTTP transport request without exposing its session identity.
@@ -135,7 +142,7 @@ func handleMCPStreamableInitialize(ctx context.Context, span trace.Span, w http.
 	if !allowMCPStreamableStart(ctx, span, w, appID) {
 		return
 	}
-	protocolVersion, err := initializeMCPProtocolVersion(request.Params)
+	protocolVersion, urlElicitation, err := admitMCPInitializeParams(request.Params)
 	// Invalid protocol negotiation cannot establish a session with misleading metadata.
 	if err != nil {
 		writeMCPJSONRPCError(w, request.ID, -32602, err.Error(), http.StatusBadRequest)
@@ -156,7 +163,7 @@ func handleMCPStreamableInitialize(ctx context.Context, span trace.Span, w http.
 		recordMCPTransportOutcome(span, "denied", true)
 		return
 	}
-	sess, err := startMCPStreamableSession(ctx, routeID, appID, token, protocolVersion, authContext, identity, initialMCPSessionMetadata(r))
+	sess, err := startMCPStreamableSession(ctx, routeID, appID, token, protocolVersion, urlElicitation, authContext, identity, initialMCPSessionMetadata(r))
 	// Typed catalogue admission codes survive the session-start boundary without authored content.
 	if err != nil {
 		statusCode, errorCode := mcpSessionStartFailure(err)
@@ -219,7 +226,7 @@ func allowMCPStreamableConcurrency(ctx context.Context, span trace.Span, w http.
 }
 
 // startMCPStreamableSession starts one isolated runtime that survives active use until authorization or cleanup ends it.
-func startMCPStreamableSession(ctx context.Context, routeID, appID, token, protocolVersion string, authContext map[string]any, identity auth.RuntimeIdentity, metadata mcpsession.Metadata) (*mcpSession, error) {
+func startMCPStreamableSession(ctx context.Context, routeID, appID, token, protocolVersion string, urlElicitation bool, authContext map[string]any, identity auth.RuntimeIdentity, metadata mcpsession.Metadata) (*mcpSession, error) {
 	// Runtime state is loaded only after the shared token authorization has succeeded.
 	if err := globalObjectCache.ConnectSDK(ctx, appID); err != nil {
 		return nil, err
@@ -247,9 +254,11 @@ func startMCPStreamableSession(ctx context.Context, routeID, appID, token, proto
 	sess := &mcpSession{
 		clientMetadata: metadata,
 		appID:          appID, routeID: routeID, sessionID: sessionID, tokenID: identity.TokenID,
-		protocolVersion: protocolVersion, transport: mcpStreamableTransport,
+		protocolVersion: protocolVersion, transport: mcpStreamableTransport, urlElicitation: urlElicitation,
 		cmd: cmd, stdin: stdin, cancel: cancel, responses: make(chan string, 32),
-		token: token, fixture: fixture, authContext: authContext,
+		serverNotifications: make(chan string, maxMCPServerNotifications),
+		authActions:         make(chan struct{}, maxPendingMCPAuthCorrelations),
+		token:               token, fixture: fixture, authContext: authContext,
 	}
 	registerMCPSession(runtimeCtx, sess)
 	go pumpMCPStreamableResponses(runtimeCtx, sess, stdout)
@@ -434,26 +443,82 @@ func handleMCPStreamableGet(ctx context.Context, span trace.Span, w http.Respons
 	flusher.Flush()
 	streamCtx, cancel := mcpSessionRequestContext(ctx, sess)
 	defer cancel()
-	streamMCPKeepAlives(streamCtx, w, flusher, sess.sessionID)
+	streamMCPServerEvents(streamCtx, w, flusher, sess)
 	recordMCPTransportOutcome(span, "closed", false)
 }
 
-// streamMCPKeepAlives keeps an attached response open without treating
-// server-originated traffic as client session activity.
-func streamMCPKeepAlives(ctx context.Context, w io.Writer, flusher http.Flusher, sessionID string) {
+// streamMCPServerEvents delivers bounded server notifications and keepalives without treating either as client activity.
+func streamMCPServerEvents(ctx context.Context, w io.Writer, flusher http.Flusher, sess *mcpSession) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			if _, ok := lookupMCPSession(sessionID); !ok {
+		case notification := <-sess.serverNotifications:
+			// Every queued value was constructed by the typed enqueue boundary, so GET only owns standard SSE framing.
+			written := writeMCPStreamableServerEvent(w, flusher, notification)
+			// In-flight writes retain their slot; completion or transport failure closes this action before another durable OAuth row is admitted.
+			releaseMCPAuthAction(sess)
+			if !written {
 				return
 			}
-			_, _ = io.WriteString(w, ": ping\n\n")
+		case <-ticker.C:
+			// A detached or terminated session cannot keep a stale listener alive.
+			if _, ok := lookupMCPSession(sess.sessionID); !ok {
+				return
+			}
+			// Keepalives deliberately carry no JSON-RPC message or client activity signal.
+			if _, err := io.WriteString(w, ": ping\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
 		}
+	}
+}
+
+// writeMCPStreamableServerEvent applies the MCP Streamable HTTP SSE framing expected by standard clients.
+func writeMCPStreamableServerEvent(w io.Writer, flusher http.Flusher, payload string) bool {
+	// A write failure closes only this listener; the buffered session queue remains bounded independently.
+	if _, err := fmt.Fprintf(w, "event: message\ndata: %s\n\n", payload); err != nil {
+		return false
+	}
+	flusher.Flush()
+	return true
+}
+
+// mcpSessionSupportsURLElicitation proves both the negotiated client capability and the supported transport.
+func mcpSessionSupportsURLElicitation(sess *mcpSession) bool {
+	// Legacy SSE never inherits browser completion behavior from the shared child runtime.
+	return sess != nil && sess.transport == mcpStreamableTransport && sess.urlElicitation
+}
+
+// enqueueMCPAuthCompletion queues one standard out-of-band elicitation completion for an active capable session.
+func enqueueMCPAuthCompletion(sess *mcpSession, elicitationID string) bool {
+	// Engine creates UUID elicitation identities, so accepting another shape would broaden callback correlation authority.
+	if !mcpSessionSupportsURLElicitation(sess) || uuid.Validate(elicitationID) != nil {
+		return false
+	}
+	payload, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "method": "notifications/elicitation/complete",
+		"params": map[string]string{"elicitationId": elicitationID},
+	})
+	// Serialization is fixed-shape, but failure must still stop before lifecycle or queue state changes.
+	if err != nil {
+		return false
+	}
+	sess.lifecycleMu.Lock()
+	defer sess.lifecycleMu.Unlock()
+	// Callback completion belongs only to the exact still-registered session that created the browser handoff.
+	if !mcpSessionRegisteredAndActiveLocked(sess) {
+		return false
+	}
+	// A bounded non-blocking queue prevents callbacks from waiting on a disconnected MCP client.
+	select {
+	case sess.serverNotifications <- string(payload):
+		return true
+	default:
+		return false
 	}
 }
 
@@ -519,18 +584,25 @@ func parseMCPJSONRPCRequest(body []byte) (mcpJSONRPCRequest, error) {
 	return request, nil
 }
 
-// initializeMCPProtocolVersion validates the client token before the child SDK performs supported-version negotiation.
-func initializeMCPProtocolVersion(params json.RawMessage) (string, error) {
+// admitMCPInitializeParams validates transport metadata and retains only explicitly advertised URL elicitation support.
+func admitMCPInitializeParams(params json.RawMessage) (string, bool, error) {
 	var initialize mcpInitializeParams
 	if json.Unmarshal(params, &initialize) != nil {
-		return "", errors.New("initialize params are invalid")
+		return "", false, errors.New("initialize params are invalid")
 	}
 	version := strings.TrimSpace(initialize.ProtocolVersion)
 	// A bounded token can be forwarded to the child for normal MCP negotiation without header ambiguity.
 	if !validMCPProtocolVersionToken(version) {
-		return "", errors.New("initialize protocolVersion must be a non-empty token of at most 32 characters")
+		return "", false, errors.New("initialize protocolVersion must be a non-empty token of at most 32 characters")
 	}
-	return version, nil
+	return version, validMCPURLCapability(initialize.Capabilities.Elicitation.URL), nil
+}
+
+// validMCPURLCapability requires the open object shape defined by MCP rather than truthiness or extension prose.
+func validMCPURLCapability(raw json.RawMessage) bool {
+	var capability map[string]json.RawMessage
+	// Missing, null, scalar, and array values do not advertise URL elicitation support.
+	return len(raw) != 0 && json.Unmarshal(raw, &capability) == nil && capability != nil
 }
 
 // validMCPProtocolVersionToken admits only the portable header grammar shared by requests and child results.

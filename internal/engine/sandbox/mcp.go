@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -434,22 +435,41 @@ func canonicalMCPSessionEndReason(ctx context.Context, fallback string) string {
 func mcpSessionAuthContext(headers http.Header) (map[string]any, error) {
 	endUserRef := strings.TrimSpace(headers.Get("X-Fused-End-User-Ref"))
 	resourceID := strings.TrimSpace(headers.Get("X-Fused-Resource-ID"))
+	// Connected-user references are bounded before they can influence credential lookup or telemetry.
 	if len(endUserRef) > 255 {
 		return nil, errors.New("X-Fused-End-User-Ref is too long")
 	}
+	// Resource routing stays optional, but a supplied selector must be one exact Engine UUID.
 	if resourceID != "" {
+		// UUID parsing prevents provider or model text from becoming a resource lookup key.
 		if _, err := uuid.Parse(resourceID); err != nil {
 			return nil, errors.New("X-Fused-Resource-ID must be a valid UUID")
 		}
 	}
 	context := map[string]any{}
+	// Only present selectors enter the credential envelope so empty headers cannot change resolver behavior.
 	if endUserRef != "" {
 		context["fused_end_user_ref"] = endUserRef
 	}
+	// Resource identity is attached only after exact UUID admission above.
 	if resourceID != "" {
 		context["fused_resource_id"] = resourceID
 	}
 	return context, nil
+}
+
+// isMCPAbsoluteWebURL centralizes browser-navigation admission for Engine-created OAuth handoffs.
+func isMCPAbsoluteWebURL(value string, maxBytes int) bool {
+	// Empty or oversized destinations never become navigation authority.
+	if value == "" || len(value) > maxBytes {
+		return false
+	}
+	parsed, err := url.Parse(value)
+	// Explicit HTTP(S) authority prevents relative and executable URL interpretation by the MCP host.
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	return parsed.Scheme == "http" || parsed.Scheme == "https"
 }
 
 // terminateMCPSession deletes only the transport session. The execution token
@@ -460,6 +480,14 @@ func terminateMCPSession(sessionID, reason string) bool {
 	if !ok {
 		return false
 	}
+	// Correlations are removed only after successful termination and after the
+	// lifecycle lock is released, avoiding inverted lock order with completion delivery.
+	defer func() {
+		// A nil session means another lifecycle path retained ownership and its correlations remain valid.
+		if sess != nil {
+			unregisterMCPAuthCorrelations(sess)
+		}
+	}()
 	// Removal and lifecycle publication share this lock with initialization so their durable order matches state order.
 	sess.lifecycleMu.Lock()
 	defer sess.lifecycleMu.Unlock()

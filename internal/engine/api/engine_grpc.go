@@ -131,8 +131,9 @@ func (s *EngineGRPCServer) StartConnectSession(ctx context.Context, req *enginev
 	}
 	span.SetAttributes(append(connectAdminAttrs("connect.session.start", call), connectSessionStartTelemetry(response)...)...)
 	return &enginev1.StartConnectSessionResponse{
-		AuthorizeUrl: response.AuthorizeURL,
-		ExpiresAt:    formatProtoTime(response.ExpiresAt),
+		AuthorizeUrl:     response.AuthorizeURL,
+		ExpiresAt:        formatProtoTime(response.ExpiresAt),
+		ConnectSessionId: response.ConnectSessionID.String(),
 	}, nil
 }
 

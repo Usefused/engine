@@ -59,10 +59,15 @@ type mcpSession struct {
 	idleTimer           *time.Timer
 	responses           chan string
 	sseFailures         chan mcpSSEFailure
+	serverNotifications chan string
+	authActions         chan struct{} // Bounds persisted browser actions until their completion notification leaves the server queue.
 	token               string
 	activityMu          sync.Mutex
 	ended               bool // Guarded by activityMu so late activity cannot rearm a retired session's timer.
 	lastActivityAt      time.Time
+	// urlElicitation is immutable after initialization and authorizes only the
+	// Streamable HTTP server-to-client completion notification path.
+	urlElicitation bool
 
 	// fixture is this session's own operation catalog, built at connect time
 	// from the app version's AppRuntime.Selections (mcp_session_fixture.go), scoping
@@ -93,6 +98,7 @@ var globalTokenValidator auth.TokenValidator
 var globalMCPRouteResolver MCPRouteResolver
 var globalSecretResolver SecretResolver
 var globalMCPUnifiedExecute MCPUnifiedExecuteFunc
+var globalMCPConnectSessionStart MCPConnectSessionStartFunc
 
 // MCPRouteResolver maps a stable MCP family URL to one immutable runtime at
 // session initialization while preserving exact Version ID routes.
@@ -103,6 +109,10 @@ type MCPRouteResolver interface {
 // MCPUnifiedExecuteFunc is the existing Engine ExecuteUnified method value;
 // injecting it avoids a second graph executor and keeps the package boundary acyclic.
 type MCPUnifiedExecuteFunc func(context.Context, *enginev1.ExecuteUnifiedRequest) (*enginev1.ExecuteUnifiedResponse, error)
+
+// MCPConnectSessionStartFunc reuses the authenticated Engine connect-session
+// mutation without introducing a second MCP-specific OAuth implementation.
+type MCPConnectSessionStartFunc func(context.Context, *enginev1.StartConnectSessionRequest) (*enginev1.StartConnectSessionResponse, error)
 
 // SetSecretResolver replaces the process-wide resolver used by every physical
 // execution path and returns the prior value for bounded fixture restoration.
@@ -186,7 +196,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 // InitSandbox wires the process-owned physical and logical execution edges used by SDK and MCP transports.
-func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, cache ObjectCache, validator auth.TokenValidator, routeResolver MCPRouteResolver, resolver SecretResolver, rateLimits store.ProviderRateLimitStore, enginePort string, unifiedExecute MCPUnifiedExecuteFunc) {
+func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, cache ObjectCache, validator auth.TokenValidator, routeResolver MCPRouteResolver, resolver SecretResolver, rateLimits store.ProviderRateLimitStore, enginePort string, unifiedExecute MCPUnifiedExecuteFunc, connectSessionStart MCPConnectSessionStartFunc) {
 	cfg = appCfg
 	globalNATSClient = nc
 	globalObjectCache = cache
@@ -200,6 +210,7 @@ func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, 
 	SetSecretResolver(resolver)
 	globalEnginePort = enginePort
 	globalMCPUnifiedExecute = unifiedExecute
+	globalMCPConnectSessionStart = connectSessionStart
 
 	// Initialise rate limiters from config.
 	rl := cfg.Sandbox.RateLimit

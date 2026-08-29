@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -566,19 +568,256 @@ func TestMCPStreamablePostRejectsOversizedPayload(t *testing.T) {
 	}
 }
 
-// TestInitializeMCPProtocolVersionRejectsMalformedValues keeps invalid protocol
-// negotiation from reaching runtime startup.
-func TestInitializeMCPProtocolVersionRejectsMalformedValues(t *testing.T) {
+// TestAdmitMCPInitializeParamsRejectsMalformedValues keeps invalid protocol negotiation from reaching runtime startup.
+func TestAdmitMCPInitializeParamsRejectsMalformedValues(t *testing.T) {
 	for _, params := range []string{
 		`{}`,
 		`{"protocolVersion":"invalid version"}`,
 		`{"protocolVersion":"` + strings.Repeat("x", 33) + `"}`,
 	} {
-		if _, err := initializeMCPProtocolVersion([]byte(params)); err == nil {
+		// Every malformed transport token must stop before a session records client capabilities.
+		if _, _, err := admitMCPInitializeParams([]byte(params)); err == nil {
 			t.Fatalf("accepted malformed initialize params: %s", params)
 		}
 	}
 }
+
+// TestAdmitMCPInitializeParamsRequiresExplicitURLCapability prevents absent or malformed claims from enabling browser completion.
+func TestAdmitMCPInitializeParamsRequiresExplicitURLCapability(t *testing.T) {
+	for _, test := range []struct {
+		name, capabilities string
+		wantURL            bool
+	}{
+		{name: "explicit URL", capabilities: `{"elicitation":{"url":{}}}`, wantURL: true},
+		{name: "URL extensions", capabilities: `{"elicitation":{"url":{"future":true}}}`, wantURL: true},
+		{name: "missing", capabilities: `{}`},
+		{name: "form only", capabilities: `{"elicitation":{"form":{}}}`},
+		{name: "null URL", capabilities: `{"elicitation":{"url":null}}`},
+		{name: "scalar URL", capabilities: `{"elicitation":{"url":true}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			version, urlElicitation, err := admitMCPInitializeParams([]byte(`{"protocolVersion":"2025-11-25","capabilities":` + test.capabilities + `}`))
+			// Capability parsing must preserve valid protocol negotiation while narrowing only URL completion support.
+			if err != nil || version != "2025-11-25" || urlElicitation != test.wantURL {
+				t.Fatalf("initialize admission = version:%q url:%v err:%v, want url:%v", version, urlElicitation, err, test.wantURL)
+			}
+		})
+	}
+}
+
+// TestEnqueueMCPAuthCompletionRequiresCapableStreamableSession closes browser completion to negotiated live sessions.
+func TestEnqueueMCPAuthCompletionRequiresCapableStreamableSession(t *testing.T) {
+	sess, _, _ := installStreamableSessionTestState(t)
+	elicitationID := uuid.NewString()
+	// A session that omitted URL elicitation must not receive a server notification.
+	if enqueueMCPAuthCompletion(sess, elicitationID) {
+		t.Fatal("completion was queued without URL elicitation capability")
+	}
+	sess.urlElicitation = true
+	// Engine-owned UUID correlation is required before a completion enters the bounded queue.
+	if enqueueMCPAuthCompletion(sess, "caller-text") {
+		t.Fatal("completion accepted a non-Engine elicitation identity")
+	}
+	// The exact capable session should receive one standard notification.
+	if !enqueueMCPAuthCompletion(sess, elicitationID) {
+		t.Fatal("completion was not queued for a capable Streamable HTTP session")
+	}
+	var envelope struct {
+		JSONRPC string `json:"jsonrpc"`
+		Method  string `json:"method"`
+		Params  struct {
+			ElicitationID string `json:"elicitationId"`
+		} `json:"params"`
+	}
+	payload := <-sess.serverNotifications
+	// Notification correlation must contain only the opaque elicitation identity and standard method.
+	if json.Unmarshal([]byte(payload), &envelope) != nil || envelope.JSONRPC != "2.0" || envelope.Method != "notifications/elicitation/complete" || envelope.Params.ElicitationID != elicitationID {
+		t.Fatalf("unexpected completion notification: %s", payload)
+	}
+	sess.transport = "sse"
+	// Legacy SSE remains outside this new browser-auth contract even if a field is set directly in a test.
+	if enqueueMCPAuthCompletion(sess, uuid.NewString()) {
+		t.Fatal("legacy SSE accepted URL elicitation completion")
+	}
+}
+
+// TestStreamMCPServerEventsFramesCompletionForStandardClients verifies the GET stream's JSON-RPC SSE boundary.
+func TestStreamMCPServerEventsFramesCompletionForStandardClients(t *testing.T) {
+	sess, _, _ := installStreamableSessionTestState(t)
+	sess.urlElicitation = true
+	elicitationID := uuid.NewString()
+	// Queueing before GET attaches proves the bounded channel also covers a short listener reconnect gap.
+	if !enqueueMCPAuthCompletion(sess, elicitationID) {
+		t.Fatal("completion was not queued")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	writer := &streamableEventWriter{writes: make(chan string, 1)}
+	done := make(chan struct{})
+	go func() {
+		streamMCPServerEvents(ctx, writer, writer, sess)
+		close(done)
+	}()
+	select {
+	case payload := <-writer.writes:
+		// MCP clients parse server notifications only from event: message records with complete JSON data.
+		if !strings.HasPrefix(payload, "event: message\ndata: ") || !strings.Contains(payload, `"method":"notifications/elicitation/complete"`) || !strings.Contains(payload, elicitationID) || !strings.HasSuffix(payload, "\n\n") {
+			t.Fatalf("unexpected Streamable HTTP event: %q", payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("completion notification was not delivered")
+	}
+	cancel()
+	select {
+	case <-done:
+		// Cancellation must release the GET listener without terminating its MCP session.
+	case <-time.After(time.Second):
+		t.Fatal("server event stream did not stop after cancellation")
+	}
+}
+
+// TestStreamMCPServerEventsRetainsCapacityDuringConcurrentWrites proves slow GET listeners cannot admit extra persisted auth actions.
+func TestStreamMCPServerEventsRetainsCapacityDuringConcurrentWrites(t *testing.T) {
+	sess, _, _ := installStreamableSessionTestState(t)
+	sess.urlElicitation = true
+	for index := 0; index < maxPendingMCPAuthCorrelations; index++ {
+		// Each queued completion already owns the reservation acquired before its connect-session mutation.
+		sess.authActions <- struct{}{}
+		if !enqueueMCPAuthCompletion(sess, uuid.NewString()) {
+			t.Fatalf("queue completion %d", index)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	writer := &blockingStreamableEventWriter{
+		entered: make(chan struct{}, maxPendingMCPAuthCorrelations),
+		release: make(chan struct{}),
+	}
+	var wait sync.WaitGroup
+	wait.Add(maxPendingMCPAuthCorrelations)
+	for index := 0; index < maxPendingMCPAuthCorrelations; index++ {
+		go func() {
+			defer wait.Done()
+			streamMCPServerEvents(ctx, writer, writer, sess)
+		}()
+	}
+	for index := 0; index < maxPendingMCPAuthCorrelations; index++ {
+		select {
+		case <-writer.entered:
+			// Every listener must hold its reservation until the deliberately blocked write finishes.
+		case <-time.After(time.Second):
+			t.Fatalf("listener %d did not enter its write", index)
+		}
+	}
+	// Empty queue storage does not imply delivery while each handler still owns an in-flight notification.
+	if len(sess.serverNotifications) != 0 || len(sess.authActions) != maxPendingMCPAuthCorrelations {
+		t.Fatalf("in-flight capacity = queued:%d reserved:%d", len(sess.serverNotifications), len(sess.authActions))
+	}
+	close(writer.release)
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		wait.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		// Every completed write releases its reservation before the listener exits.
+	case <-time.After(time.Second):
+		t.Fatal("blocked listeners did not stop")
+	}
+	if len(sess.authActions) != 0 {
+		t.Fatalf("completed writes retained %d reservations", len(sess.authActions))
+	}
+}
+
+// TestMCPStreamableGetDeliversQueuedAuthCompletion covers authentication, response headers, and SSE notification framing together.
+func TestMCPStreamableGetDeliversQueuedAuthCompletion(t *testing.T) {
+	sess, _, token := installStreamableSessionTestState(t)
+	sess.urlElicitation = true
+	elicitationID := uuid.NewString()
+	// A callback may complete before the client's long-lived GET is attached, so the event must already be retained.
+	if !enqueueMCPAuthCompletion(sess, elicitationID) {
+		t.Fatal("completion was not queued")
+	}
+	server := httptest.NewServer(streamableTestRouter())
+	t.Cleanup(server.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	t.Cleanup(cancel)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/mcp/"+sess.appID, nil)
+	if err != nil {
+		t.Fatalf("create GET request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set(mcpSessionIDHeader, sess.sessionID)
+	request.Header.Set(mcpProtocolVersionHeader, sess.protocolVersion)
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatalf("open GET stream: %v", err)
+	}
+	t.Cleanup(func() { _ = response.Body.Close() })
+	// The authenticated GET must establish the standard event-stream response before delivering server messages.
+	if response.StatusCode != http.StatusOK || !strings.HasPrefix(response.Header.Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("GET stream = status:%d content-type:%q", response.StatusCode, response.Header.Get("Content-Type"))
+	}
+	reader := bufio.NewReader(response.Body)
+	connected, err := readStreamableSSERecord(reader)
+	// The transport establishes the stream with a comment before any queued JSON-RPC notification.
+	if err != nil || connected != ": connected\n\n" {
+		t.Fatalf("GET connected event = err:%v payload:%q", err, connected)
+	}
+	payload, err := readStreamableSSERecord(reader)
+	// Reading exactly one complete record avoids waiting for the intentionally long-lived GET response to reach EOF.
+	if err != nil || !strings.Contains(payload, "event: message\ndata: ") || !strings.Contains(payload, `"method":"notifications/elicitation/complete"`) || !strings.Contains(payload, elicitationID) {
+		t.Fatalf("GET completion event = err:%v payload:%q", err, payload)
+	}
+}
+
+// readStreamableSSERecord reads through the blank line that terminates one complete SSE record.
+func readStreamableSSERecord(reader *bufio.Reader) (string, error) {
+	var record strings.Builder
+	for {
+		line, err := reader.ReadString('\n')
+		// Returning partial content keeps transport failures diagnosable without inventing a valid record boundary.
+		if err != nil {
+			return record.String(), err
+		}
+		record.WriteString(line)
+		// Streamable HTTP delivers each JSON-RPC message as one blank-line-delimited SSE record.
+		if line == "\n" {
+			return record.String(), nil
+		}
+	}
+}
+
+type streamableEventWriter struct {
+	writes chan string
+}
+
+// blockingStreamableEventWriter holds concurrent notification writes so capacity can be inspected while delivery is in flight.
+type blockingStreamableEventWriter struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+// Write captures one complete SSE record without sharing mutable buffers across goroutines.
+func (writer *streamableEventWriter) Write(payload []byte) (int, error) {
+	copy := string(append([]byte(nil), payload...))
+	// The test provisions one slot for the single completion event under assertion.
+	writer.writes <- copy
+	return len(payload), nil
+}
+
+// Flush satisfies the streaming response contract; Write already publishes the captured test record synchronously.
+func (*streamableEventWriter) Flush() {}
+
+// Write records one in-flight delivery and waits until the test releases every listener.
+func (writer *blockingStreamableEventWriter) Write(payload []byte) (int, error) {
+	writer.entered <- struct{}{}
+	<-writer.release
+	return len(payload), nil
+}
+
+// Flush is inert because blocking behavior belongs solely to Write.
+func (*blockingStreamableEventWriter) Flush() {}
 
 // TestRegisterMCPRoutesKeepsSSEAndStreamableHTTP verifies both transports share
 // the same public route-identity shape.
@@ -626,7 +865,8 @@ func installStreamableSessionTestState(t *testing.T) (*mcpSession, *streamableWr
 	sess := &mcpSession{
 		appID: uuid.NewString(), sessionID: uuid.NewString(), tokenID: tokenID,
 		protocolVersion: "2025-06-18", transport: mcpStreamableTransport,
-		token: token, stdin: input, responses: make(chan string, 2),
+		token: token, stdin: input, responses: make(chan string, 2), serverNotifications: make(chan string, maxMCPServerNotifications),
+		authActions:     make(chan struct{}, maxPendingMCPAuthCorrelations),
 		pendingRequests: make(map[string]struct{}), idleTimer: time.AfterFunc(time.Hour, func() {}),
 	}
 	sess.routeID = sess.appID

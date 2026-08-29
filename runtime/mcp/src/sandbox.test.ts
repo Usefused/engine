@@ -198,6 +198,41 @@ describe("runExecute -- call() wiring", () => {
     expect(failure.message).toContain("Configure X-Fused-End-User-Ref on the MCP client connection");
   });
 
+  /** A first-call auth challenge carries a browser URL and safe exact-tool replay decision outside model text. */
+  it("preserves browser authentication for an isolated call", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false, status: 409,
+      json: async () => ({
+        code: "connection_required", error: "Provider authentication is required to continue.",
+        recovery_action: "complete_authentication", execute_request: "retry_after_auth",
+        provider_execution: "not_started", automatic_replay: false,
+        auth_action: { action: "connect", url: "https://provider.example.com/oauth", elicitation_id: "opaque-1", expires_at: "2026-08-29T17:00:00Z" },
+      }),
+    }));
+    const outcome = await runExecute('return await call("gmail.list", {});', testCallOptions, new SessionState());
+    expect(outcome.authAction).toMatchObject({ action: "connect", url: "https://provider.example.com/oauth", recovery: { provider_execution: "not_started", execute_request: "retry_after_auth" } });
+  });
+
+  /** Earlier provider work keeps the browser link while forbidding complete-script replay. */
+  it("downgrades browser authentication replay after a sibling call", async () => {
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      const operationId = JSON.parse(String(init.body)).operation_id;
+      // Only the second bridge call requires authentication in this aggregate script.
+      if (operationId === "auth") {
+        return { ok: false, status: 409, json: async () => ({
+          code: "reconnect_required", error: "Provider authentication is required to continue.",
+          recovery_action: "complete_authentication", execute_request: "retry_after_auth",
+          provider_execution: "not_started", automatic_replay: false,
+          auth_action: { action: "reconnect", url: "https://provider.example.com/oauth", elicitation_id: "opaque-2", expires_at: "2026-08-29T17:00:00Z" },
+        }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ result: { ok: true } }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const outcome = await runExecute('await call("first", {}); return await call("auth", {});', testCallOptions, new SessionState());
+    expect(outcome.authAction).toMatchObject({ action: "reconnect", recovery: { recovery_action: "complete_authentication", provider_execution: "unknown", execute_request: "do_not_replay" } });
+  });
+
   /** Any earlier or concurrent admitted call makes a later local option correction unsafe as an aggregate outcome. */
   it("downgrades local pagination corrections after another call starts", async () => {
     const scripts = [

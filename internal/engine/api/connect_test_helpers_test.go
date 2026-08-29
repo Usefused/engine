@@ -247,7 +247,10 @@ func (s *connectAdminMockStore) GetWorkspaceServiceVersion(_ context.Context, se
 
 // CreateConnectSession records one provider callback session for subsequent exact lookup.
 func (s *connectAdminMockStore) CreateConnectSession(_ context.Context, session store.ConnectSession) (*store.ConnectSession, error) {
-	session.ID = uuid.New()
+	// Direct callback fixtures may omit identity, while production-created sessions preserve their preallocated browser correlation.
+	if session.ID == uuid.Nil {
+		session.ID = uuid.New()
+	}
 	session.CreatedAt = time.Now().UTC()
 	s.createdSessions = append(s.createdSessions, session)
 	return &session, nil

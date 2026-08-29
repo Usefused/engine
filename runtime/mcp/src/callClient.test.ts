@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { bridgeRecoveryForError, callClientOptionsFromEnv, remoteCall } from "./callClient.js";
+import { bridgeAuthActionForError, bridgeRecoveryForError, callClientOptionsFromEnv, remoteCall } from "./callClient.js";
 
 describe("callClientOptionsFromEnv", () => {
   const originalEnv = { ...process.env };
@@ -184,6 +184,117 @@ describe("remoteCall", () => {
     }
     expect((failure as Error).message).toContain("Configure X-Fused-End-User-Ref on the MCP client connection");
     expect(bridgeRecoveryForError(failure)).toEqual({ recovery_action: "correct_execute_arguments", execute_request: "correct_arguments", provider_execution: "not_started", automatic_replay: false });
+  });
+
+  /** Engine-created authentication URLs remain identity-bound and require the complete recovery contract. */
+  it("preserves a validated browser authentication handoff", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        code: "connection_required",
+        error: "Provider authentication is required to continue.",
+        recovery_action: "complete_authentication",
+        execute_request: "retry_after_auth",
+        provider_execution: "not_started",
+        automatic_replay: false,
+        auth_action: {
+          action: "connect",
+          url: "https://provider.example.com/oauth",
+          elicitation_id: "opaque-1",
+          expires_at: "2026-08-29T17:00:00Z",
+        },
+      }),
+    }));
+    let failure: unknown;
+    try {
+      await remoteCall(options, "gmail.list", {});
+    } catch (error) {
+      // The exact thrown object is the sole carrier of trusted navigation authority.
+      failure = error;
+    }
+    expect(bridgeAuthActionForError(failure)).toEqual({ action: "connect", url: "https://provider.example.com/oauth", elicitationId: "opaque-1", expiresAt: "2026-08-29T17:00:00Z" });
+    expect(bridgeAuthActionForError(new Error("lookalike"))).toBeUndefined();
+  });
+
+  /** Unknown provider execution keeps consent actionable without authorizing replay. */
+  it("preserves a non-replayable browser authentication handoff", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        code: "reconnect_required",
+        error: "Provider authentication is required to continue.",
+        recovery_action: "complete_authentication",
+        execute_request: "do_not_replay",
+        provider_execution: "unknown",
+        automatic_replay: false,
+        auth_action: {
+          action: "reconnect",
+          url: "https://provider.example.com/oauth",
+          elicitation_id: "opaque-unsafe-1",
+          expires_at: "2026-08-29T17:00:00Z",
+        },
+      }),
+    }));
+    let failure: unknown;
+    try {
+      await remoteCall(options, "jira.update", {});
+    } catch (error) {
+      // The exact host-owned error retains both the navigation action and conservative replay decision.
+      failure = error;
+    }
+    expect(bridgeAuthActionForError(failure)).toMatchObject({ action: "reconnect", elicitationId: "opaque-unsafe-1" });
+    expect(bridgeRecoveryForError(failure)).toMatchObject({ provider_execution: "unknown", execute_request: "do_not_replay" });
+  });
+
+  /** Unsafe or contradictory browser actions remain ordinary errors. */
+  it("rejects an unsafe browser authentication handoff", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        code: "connection_required",
+        error: "Provider authentication is required to continue.",
+        recovery_action: "complete_authentication",
+        execute_request: "retry_after_auth",
+        provider_execution: "not_started",
+        automatic_replay: false,
+        auth_action: { action: "connect", url: "javascript:alert(1)", elicitation_id: "opaque-1", expires_at: "soon" },
+      }),
+    }));
+    let failure: unknown;
+    try {
+      await remoteCall(options, "gmail.list", {});
+    } catch (error) {
+      failure = error;
+    }
+    expect(bridgeAuthActionForError(failure)).toBeUndefined();
+  });
+
+  /** Locale-dependent expiry text cannot become a browser action even when the URL is otherwise safe. */
+  it("rejects a browser authentication handoff without RFC 3339 expiry", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        code: "connection_required",
+        error: "Provider authentication is required to continue.",
+        recovery_action: "complete_authentication",
+        execute_request: "retry_after_auth",
+        provider_execution: "not_started",
+        automatic_replay: false,
+        auth_action: { action: "connect", url: "https://provider.example.com/oauth", elicitation_id: "opaque-1", expires_at: "tomorrow" },
+      }),
+    }));
+    let failure: unknown;
+    try {
+      await remoteCall(options, "gmail.list", {});
+    } catch (error) {
+      // The rejected bridge object remains an ordinary execution failure without navigation authority.
+      failure = error;
+    }
+    expect(bridgeAuthActionForError(failure)).toBeUndefined();
   });
 
   /** Invalid bridge recovery remains unusable even when its error code and prose are otherwise stable. */

@@ -39,13 +39,17 @@ func TestEngineGRPCStartConnectSessionCreatesAuthorizationURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartConnectSession() error = %v", err)
 	}
-	if resp.GetAuthorizeUrl() == "" || resp.GetExpiresAt() == "" {
-		t.Fatalf("expected authorize URL and expiry, got %#v", resp)
+	if resp.GetAuthorizeUrl() == "" || resp.GetExpiresAt() == "" || uuid.Validate(resp.GetConnectSessionId()) != nil {
+		t.Fatalf("expected authorize URL, expiry, and opaque correlation, got %#v", resp)
 	}
 	if len(fixture.store.createdSessions) != 1 {
 		t.Fatalf("expected one stored session, got %#v", fixture.store.createdSessions)
 	}
 	session := fixture.store.createdSessions[0]
+	// The gRPC response must expose the same persisted correlation later carried by connection.completed.
+	if resp.GetConnectSessionId() != session.ID.String() {
+		t.Fatalf("connect correlation response=%s stored=%s", resp.GetConnectSessionId(), session.ID)
+	}
 	if session.EndUserRef != "user_123" || session.ReturnURL != "https://app.example.com/oauth/done" {
 		t.Fatalf("unexpected stored session: %#v", session)
 	}
@@ -137,6 +141,10 @@ func TestEngineGRPCStartConnectSessionDefersAuthorizationForMissingInput(t *test
 	}
 	if !strings.Contains(response.GetAuthorizeUrl(), "/workspace/connect/input?token=") || len(fixture.store.inputSessions) != 1 || len(fixture.store.createdSessions) != 0 {
 		t.Fatalf("deferred response=%#v pending=%d provider=%d", response, len(fixture.store.inputSessions), len(fixture.store.createdSessions))
+	}
+	// Hosted input and its later provider callback must begin from the same Engine-owned UUID.
+	if response.GetConnectSessionId() != fixture.store.inputSessions[0].ID.String() {
+		t.Fatalf("hosted correlation response=%s stored=%s", response.GetConnectSessionId(), fixture.store.inputSessions[0].ID)
 	}
 }
 

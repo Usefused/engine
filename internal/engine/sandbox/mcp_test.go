@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
+// TestMCPSessionAuthContextBindsConnectedUserOutsideToolArguments verifies selectors remain outside model-authored tools.
 func TestMCPSessionAuthContextBindsConnectedUserOutsideToolArguments(t *testing.T) {
 	resourceID := uuid.NewString()
 	headers := http.Header{}
@@ -125,6 +126,7 @@ func TestRecordMCPSessionIdleTimeoutEmitsOnlyBoundedFacts(t *testing.T) {
 	}
 }
 
+// TestMCPSessionAuthContextRejectsInvalidResourceID keeps malformed routing out of session authority.
 func TestMCPSessionAuthContextRejectsInvalidResourceID(t *testing.T) {
 	headers := http.Header{"X-Fused-Resource-Id": []string{"not-a-uuid"}}
 	if _, err := mcpSessionAuthContext(headers); err == nil {

@@ -495,6 +495,12 @@ func startEngineWorkers(ctx context.Context, engineStore store.Store, natsClient
 	}
 	// Auth transitions publish directly to the shared Engine stream after their database commits.
 	authevent.SetPublisher(authevent.NewPublisher(natsClient))
+	// Every replica listens because only the process retaining the exact MCP
+	// session can turn a completed browser grant into a protocol notification.
+	if err := sandbox.StartMCPAuthCompletionSubscriber(ctx, natsClient); err != nil {
+		slog.ErrorContext(ctx, "FATAL: Failed to start MCP auth completion subscriber", slog.String("error_code", "mcp_auth_completion_subscriber_failed"))
+		os.Exit(1)
+	}
 	authEventResolver, ok := engineStore.(store.AuthEventAppFamilyResolver)
 	// SDK delivery requires set-based current/tombstone family resolution; startup fails closed if the store cannot provide it.
 	if !ok {
@@ -945,7 +951,7 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	)
 	sandbox.InitSandbox(
 		r, deps.natsClient, deps.cfg, deps.localObjectCache, deps.tokenValidator, deps.engineStore, secretResolver,
-		deps.providerRateLimits, port, executionServer.ExecuteUnified,
+		deps.providerRateLimits, port, executionServer.ExecuteUnified, executionServer.StartConnectSession,
 	)
 	// Runtime REST execution reuses the same process-wide sandbox cache and
 	// dispatcher initialized above; it never loops back through network gRPC.

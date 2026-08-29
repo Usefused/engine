@@ -25,15 +25,32 @@ interface CallResponse {
   execute_request?: unknown;
   provider_execution?: unknown;
   automatic_replay?: unknown;
+  auth_action?: unknown;
 }
 
 const bridgeRecoveries = new WeakMap<object, ModelRecovery>();
+const bridgeAuthActions = new WeakMap<object, BridgeAuthAction>();
+
+/** BridgeAuthAction is the validated browser handoff created by Engine for one failed provider call. */
+export interface BridgeAuthAction {
+  action: "connect" | "reconnect";
+  url: string;
+  elicitationId: string;
+  expiresAt: string;
+}
 
 /** Returns only recovery metadata validated from an Engine bridge response for this exact host-owned error. */
 export function bridgeRecoveryForError(error: unknown): ModelRecovery | undefined {
   // WeakMap identity prevents a script-thrown lookalike from claiming trusted bridge recovery.
   if (typeof error !== "object" || error === null) return undefined;
   return bridgeRecoveries.get(error);
+}
+
+/** Returns a browser handoff only when it was attached to this exact host-owned bridge error. */
+export function bridgeAuthActionForError(error: unknown): BridgeAuthAction | undefined {
+  // Object identity prevents sandbox-authored lookalikes from opening arbitrary URLs in the MCP client.
+  if (typeof error !== "object" || error === null) return undefined;
+  return bridgeAuthActions.get(error);
 }
 
 /** PhysicalCallOptions carries caller-owned execution controls separately from provider parameters. */
@@ -124,7 +141,64 @@ function callResponseError(body: CallResponse, status: number): Error {
   const recovery = modelRecoveryFromUnknown(body);
   // Invalid or absent metadata leaves outer execute recovery conservative instead of re-deriving Engine policy.
   if (recovery) bridgeRecoveries.set(failure, recovery);
+  const authAction = bridgeAuthActionFromResponse(body, recovery);
+  // Authentication URLs become actionable only when the complete Engine-owned recovery envelope agrees.
+  if (authAction) bridgeAuthActions.set(failure, authAction);
   return failure;
+}
+
+/** Validates the complete Engine browser-auth contract before trusting its URL. */
+function bridgeAuthActionFromResponse(body: CallResponse, recovery: ModelRecovery | undefined): BridgeAuthAction | undefined {
+  // Ordinary provider failures and partial recovery envelopes cannot request browser navigation.
+  if (!recovery || !validAuthRecovery(recovery)) return undefined;
+  // Only a named object can carry the closed authentication action fields.
+  if (typeof body.auth_action !== "object" || body.auth_action === null || Array.isArray(body.auth_action)) return undefined;
+  const action = body.auth_action as Record<string, unknown>;
+  const expectedAction = expectedAuthAction(body.code);
+  // Stable error and action names must agree so one unreviewed code cannot inherit navigation authority.
+  if (expectedAction === undefined || action.action !== expectedAction) return undefined;
+  // Navigation values remain bounded even though the Engine bridge owns their source.
+  if (typeof action.url !== "string" || action.url.length === 0 || action.url.length > 16_384 || !isAbsoluteWebURL(action.url)) return undefined;
+  // Opaque IDs need only be non-empty and bounded; the client must not infer their structure.
+  if (typeof action.elicitation_id !== "string" || action.elicitation_id.length === 0 || action.elicitation_id.length > 128) return undefined;
+  // Absolute expiry is required so hosts can retire stale browser actions without inventing a lifetime.
+  if (typeof action.expires_at !== "string" || action.expires_at.length > 64 || !isRFC3339Timestamp(action.expires_at)) return undefined;
+  return { action: expectedAction, url: action.url, elicitationId: action.elicitation_id, expiresAt: action.expires_at };
+}
+
+/** Admits only the two reviewed browser-auth recovery pairs. */
+function validAuthRecovery(recovery: ModelRecovery): boolean {
+  // A proven pre-provider block allows the host to retry the tool after consent.
+  if (recovery.provider_execution === "not_started") return recovery.recovery_action === "complete_authentication" && recovery.execute_request === "retry_after_auth";
+  // An unknown provider outcome keeps the link usable but forbids automatic or complete-script replay.
+  return recovery.provider_execution === "unknown" && recovery.recovery_action === "complete_authentication" && recovery.execute_request === "do_not_replay";
+}
+
+/** Maps only the two stable Engine connection codes to browser action names. */
+function expectedAuthAction(code: unknown): BridgeAuthAction["action"] | undefined {
+  // A missing connection begins first-time consent.
+  if (code === "connection_required") return "connect";
+  // An unusable persisted grant begins replacement consent.
+  if (code === "reconnect_required") return "reconnect";
+  return undefined;
+}
+
+/** Restricts client-opened handoffs to explicit HTTP(S) destinations. */
+function isAbsoluteWebURL(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    // Malformed values remain ordinary bridge errors without navigation authority.
+    return false;
+  }
+}
+
+/** Accepts the RFC 3339 shape emitted by Engine while rejecting locale-dependent date strings. */
+function isRFC3339Timestamp(value: string): boolean {
+  // A timezone is mandatory because browser-local interpretation would change expiry semantics.
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return false;
+  return Number.isFinite(Date.parse(value));
 }
 
 /** Preserves an Engine-owned bridge code once without inferring codes from provider error text. */

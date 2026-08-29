@@ -9,11 +9,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/executionevent"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
+	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/paginationpolicy"
@@ -26,6 +30,21 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
+
+// mcpConnectedAuthFailureResolver returns one trusted pre-provider connection action for handler integration coverage.
+type mcpConnectedAuthFailureResolver struct {
+	err error
+}
+
+// ResolveExecutionCredentials stops canonical dispatch before HTTP construction with the configured typed action.
+func (resolver *mcpConnectedAuthFailureResolver) ResolveExecutionCredentials(context.Context, CredentialRequest) (map[string]any, []store.BucketValue, error) {
+	return nil, nil, resolver.err
+}
+
+// GetWebhookSecret is inert because MCP provider-auth coverage never enters webhook verification.
+func (resolver *mcpConnectedAuthFailureResolver) GetWebhookSecret(context.Context, uuid.UUID, uuid.UUID, string) (string, error) {
+	return "", nil
+}
 
 // fixtureForTest loads through the same parser used for serialized session
 // catalogs, keeping handler tests realistic without global fixture state.
@@ -834,6 +853,295 @@ func TestMcpCallHandlerBoundsUnifiedCoordinatorErrors(t *testing.T) {
 	mcpCallHandler(rec, req)
 	if rec.Code != http.StatusForbidden || rec.Body.String() != "{\"error\":\"unified_execution_denied\"}\n" {
 		t.Fatalf("bounded coordinator error = %d/%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMCPConnectedAuthResponseCreatesCanonicalHandoff verifies a resolver failure starts consent through the existing app-authenticated RPC.
+func TestMCPConnectedAuthResponseCreatesCanonicalHandoff(t *testing.T) {
+	previous := globalMCPConnectSessionStart
+	t.Cleanup(func() { globalMCPConnectSessionStart = previous })
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	previousProvider := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	// Restoring process telemetry keeps this agent-triggered mutation evidence isolated from sibling tests.
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		otel.SetTracerProvider(previousProvider)
+	})
+	appID := uuid.NewString()
+	bucketID := uuid.NewString()
+	serviceID := uuid.NewString()
+	connectSessionID := uuid.NewString()
+	expiresAt := time.Now().UTC().Add(time.Minute).Format(time.RFC3339)
+	globalMCPConnectSessionStart = func(ctx context.Context, request *enginev1.StartConnectSessionRequest) (*enginev1.StartConnectSessionResponse, error) {
+		md, _ := metadata.FromIncomingContext(ctx)
+		// The internal adapter must reauthenticate the immutable app instead of trusting routing fields alone.
+		if md.Get("x-app-id")[0] != appID || md.Get("x-api-key")[0] != "family-token" {
+			t.Fatalf("unexpected runtime metadata: %#v", md)
+		}
+		if request.GetBucketId() != bucketID || request.GetServiceId() != serviceID || request.GetEndUserRef() != "user-1" || request.GetCreatedByAppId() != appID {
+			t.Fatalf("unexpected connect request: %#v", request)
+		}
+		if request.GetReturnUrl() != "" {
+			t.Fatalf("MCP connect request retained a custom callback: %q", request.GetReturnUrl())
+		}
+		return &enginev1.StartConnectSessionResponse{AuthorizeUrl: "https://provider.example.com/oauth", ExpiresAt: expiresAt, ConnectSessionId: connectSessionID}, nil
+	}
+	sess := &mcpSession{
+		appID: appID, sessionID: uuid.NewString(), token: "family-token",
+		transport: mcpStreamableTransport, urlElicitation: true,
+		serverNotifications: make(chan string, maxMCPServerNotifications),
+		authActions:         make(chan struct{}, maxPendingMCPAuthCorrelations),
+	}
+	// Direct registry installation isolates the auth adapter without allocating a child runtime.
+	mcpSessions.Lock()
+	mcpSessions.m[sess.sessionID] = sess
+	mcpSessions.Unlock()
+	t.Cleanup(func() {
+		mcpSessions.Lock()
+		delete(mcpSessions.m, sess.sessionID)
+		mcpSessions.Unlock()
+		unregisterMCPAuthCorrelations(sess)
+	})
+	statusCode, response, handled := mcpConnectedAuthResponse(context.Background(), sess, newConnectionRequiredError(bucketID, serviceID, "user-1"), "not_started")
+	if !handled || statusCode != http.StatusConflict || response.Code != "connection_required" || response.AuthAction == nil {
+		t.Fatalf("connected auth response = %t/%d/%+v", handled, statusCode, response)
+	}
+	if response.AuthAction.Action != "connect" || response.AuthAction.URL != "https://provider.example.com/oauth" || response.AuthAction.ElicitationID != connectSessionID {
+		t.Fatalf("auth action = %+v", response.AuthAction)
+	}
+	span := executionSpanByName(t, recorder.Ended(), "engine.sandbox.mcp.auth_session.start")
+	attributes := span.Attributes()
+	// Agent provenance, bounded action, provider state, and outcome are sufficient without routing or URL values.
+	if stringSpanAttribute(attributes, "execution.trigger") != "agent" || stringSpanAttribute(attributes, "auth.action") != "connect" || stringSpanAttribute(attributes, "provider.execution") != "not_started" || stringSpanAttribute(attributes, "outcome") != "success" {
+		t.Fatalf("auth session telemetry = %#v", attributes)
+	}
+	serialized := fmt.Sprint(attributes, span.Events(), span.Status())
+	// Provider URLs and exact connected-user routing must remain outside observability.
+	if strings.Contains(serialized, "provider.example.com") || strings.Contains(serialized, "user-1") || strings.Contains(serialized, bucketID) || strings.Contains(serialized, serviceID) {
+		t.Fatalf("auth session telemetry exposed routing data: %s", serialized)
+	}
+}
+
+// TestMCPConnectedAuthResponseRejectsUnsupportedClientBeforeMutation proves URL state is never persisted for a host that cannot receive completion.
+func TestMCPConnectedAuthResponseRejectsUnsupportedClientBeforeMutation(t *testing.T) {
+	previous := globalMCPConnectSessionStart
+	t.Cleanup(func() { globalMCPConnectSessionStart = previous })
+	var starts atomic.Int32
+	globalMCPConnectSessionStart = func(context.Context, *enginev1.StartConnectSessionRequest) (*enginev1.StartConnectSessionResponse, error) {
+		starts.Add(1)
+		return nil, errors.New("must not run")
+	}
+	session := &mcpSession{appID: uuid.NewString(), transport: mcpStreamableTransport}
+	statusCode, response := startMCPConnectedAuthResponse(context.Background(), session, mcpConnectedAuthRequirement{
+		Code: "connection_required", Action: "connect", BucketID: uuid.NewString(), ServiceID: uuid.NewString(), EndUserRef: "user-1",
+	}, "not_started")
+	// The bounded response exposes neither URL nor provider routing and retains the no-replay contract.
+	if statusCode != http.StatusConflict || starts.Load() != 0 || response.AuthAction != nil || response.Code != "connection_required" || response.AutomaticReplay == nil || *response.AutomaticReplay {
+		t.Fatalf("unsupported auth response = status:%d starts:%d response:%+v", statusCode, starts.Load(), response)
+	}
+}
+
+// TestMCPConnectedAuthCapacityPrecedesPersistence proves concurrent and completed-undrained actions share one pre-mutation bound.
+func TestMCPConnectedAuthCapacityPrecedesPersistence(t *testing.T) {
+	resetMCPAuthCorrelationTestState(t)
+	previous := globalMCPConnectSessionStart
+	t.Cleanup(func() { globalMCPConnectSessionStart = previous })
+	appID := uuid.New()
+	session := &mcpSession{
+		appID: appID.String(), sessionID: uuid.NewString(), token: "family-token",
+		transport: mcpStreamableTransport, urlElicitation: true,
+		serverNotifications: make(chan string, maxMCPServerNotifications),
+		authActions:         make(chan struct{}, maxPendingMCPAuthCorrelations),
+	}
+	mcpSessions.Lock()
+	mcpSessions.m[session.sessionID] = session
+	mcpSessions.Unlock()
+	t.Cleanup(func() {
+		mcpSessions.Lock()
+		delete(mcpSessions.m, session.sessionID)
+		mcpSessions.Unlock()
+		unregisterMCPAuthCorrelations(session)
+	})
+	var starts atomic.Int32
+	connectSessionIDs := make(chan uuid.UUID, maxPendingMCPAuthCorrelations*4)
+	globalMCPConnectSessionStart = func(context.Context, *enginev1.StartConnectSessionRequest) (*enginev1.StartConnectSessionResponse, error) {
+		starts.Add(1)
+		connectSessionID := uuid.New()
+		connectSessionIDs <- connectSessionID
+		return &enginev1.StartConnectSessionResponse{
+			AuthorizeUrl: "https://provider.example.com/oauth", ConnectSessionId: connectSessionID.String(),
+			ExpiresAt: time.Now().UTC().Add(time.Minute).Format(time.RFC3339),
+		}, nil
+	}
+	requirement := mcpConnectedAuthRequirement{
+		Code: "connection_required", Action: "connect", BucketID: uuid.NewString(), ServiceID: uuid.NewString(), EndUserRef: "user-1",
+	}
+	const attempts = maxPendingMCPAuthCorrelations * 4
+	var wait sync.WaitGroup
+	var successes atomic.Int32
+	wait.Add(attempts)
+	for index := 0; index < attempts; index++ {
+		go func() {
+			defer wait.Done()
+			statusCode, response := startMCPConnectedAuthResponse(context.Background(), session, requirement, "not_started")
+			// Only calls holding a pre-persistence reservation may expose a browser action.
+			if statusCode == http.StatusConflict && response.AuthAction != nil {
+				successes.Add(1)
+			}
+		}()
+	}
+	wait.Wait()
+	// Concurrent callers cannot persist beyond the queue-sized action ceiling.
+	if starts.Load() != maxPendingMCPAuthCorrelations || successes.Load() != maxPendingMCPAuthCorrelations {
+		t.Fatalf("bounded starts = persisted:%d successful:%d", starts.Load(), successes.Load())
+	}
+	for index := 0; index < maxPendingMCPAuthCorrelations; index++ {
+		connectSessionID := <-connectSessionIDs
+		// Durable completion transfers each reservation from the pending registry into the still-undrained server queue.
+		if outcome := pendingMCPAuthCorrelations.complete(mcpAuthCompletionTestEvent(connectSessionID, appID), time.Now().UTC()); outcome != "delivered" {
+			t.Fatalf("completion %d outcome = %q", index, outcome)
+		}
+	}
+	// A full completion queue still blocks before another durable OAuth session can be created.
+	if statusCode, _ := startMCPConnectedAuthResponse(context.Background(), session, requirement, "not_started"); statusCode != http.StatusServiceUnavailable || starts.Load() != maxPendingMCPAuthCorrelations {
+		t.Fatalf("queued capacity = status:%d starts:%d", statusCode, starts.Load())
+	}
+	<-session.serverNotifications
+	releaseMCPAuthAction(session)
+	// Dequeueing one notification releases exactly one new persistence slot.
+	if statusCode, response := startMCPConnectedAuthResponse(context.Background(), session, requirement, "not_started"); statusCode != http.StatusConflict || response.AuthAction == nil || starts.Load() != maxPendingMCPAuthCorrelations+1 {
+		t.Fatalf("released capacity = status:%d starts:%d response:%+v", statusCode, starts.Load(), response)
+	}
+}
+
+// TestMCPCallHandlerStartsProviderAuthBeforeDispatch covers the live bridge branch from typed resolution failure to browser action.
+func TestMCPCallHandlerStartsProviderAuthBeforeDispatch(t *testing.T) {
+	var providerCalls atomic.Int32
+	vendor := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		providerCalls.Add(1)
+		_, _ = response.Write([]byte(`{"unexpected":true}`))
+	}))
+	defer vendor.Close()
+
+	sessionID, operationID, _ := configureMCPPhysicalCallTest(t, vendor.URL)
+	sess, ok := lookupMCPSession(sessionID)
+	// This handler case models a current Streamable client that negotiated the standard URL capability.
+	if !ok {
+		t.Fatal("configured MCP session is unavailable")
+	}
+	sess.transport = mcpStreamableTransport
+	sess.urlElicitation = true
+	sess.serverNotifications = make(chan string, maxMCPServerNotifications)
+	sess.authActions = make(chan struct{}, maxPendingMCPAuthCorrelations)
+	bucketID := uuid.NewString()
+	serviceID := uuid.NewString()
+	globalSecretResolver = &mcpConnectedAuthFailureResolver{err: newConnectionRequiredError(bucketID, serviceID, "user-1")}
+	previousStarter := globalMCPConnectSessionStart
+	// Cleanup prevents the test-owned authenticated mutation from leaking into other handler cases.
+	t.Cleanup(func() { globalMCPConnectSessionStart = previousStarter })
+	globalMCPConnectSessionStart = func(context.Context, *enginev1.StartConnectSessionRequest) (*enginev1.StartConnectSessionResponse, error) {
+		return &enginev1.StartConnectSessionResponse{
+			AuthorizeUrl: "https://provider.example.com/oauth",
+			ExpiresAt:    time.Now().UTC().Add(time.Minute).Format(time.RFC3339), ConnectSessionId: uuid.NewString(),
+		}, nil
+	}
+
+	body, err := json.Marshal(mcpCallRequest{OperationID: operationID, Params: json.RawMessage(`{}`)})
+	// Encoding must succeed before the test can make claims about the live handler path.
+	if err != nil {
+		t.Fatalf("encode MCP call: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/mcp/call", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+sessionID)
+	response := httptest.NewRecorder()
+	mcpCallHandler(response, request)
+
+	var failure mcpCallResponse
+	// A decoded bridge response proves the action crossed the same wire contract used by the Node runtime.
+	if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil {
+		t.Fatalf("decode MCP call response: %v", err)
+	}
+	// Consent must start before provider dispatch and retain the closed no-automatic-replay contract.
+	if response.Code != http.StatusConflict || providerCalls.Load() != 0 || failure.Code != "connection_required" || failure.AuthAction == nil || failure.AuthAction.Action != "connect" || failure.AutomaticReplay == nil || *failure.AutomaticReplay {
+		t.Fatalf("provider-auth bridge = status:%d provider_calls:%d response:%+v", response.Code, providerCalls.Load(), failure)
+	}
+}
+
+// TestFirstMCPUnifiedAuthRequirementKeepsReplayConservative covers auth remediation after sibling provider work.
+func TestFirstMCPUnifiedAuthRequirementKeepsReplayConservative(t *testing.T) {
+	bucketID := uuid.NewString()
+	serviceID := uuid.NewString()
+	tests := []struct {
+		name            string
+		results         []*enginev1.UnifiedTargetResult
+		rollbacks       []*enginev1.UnifiedRollbackResult
+		wantExecution   string
+		wantRequirement bool
+	}{
+		{name: "isolated auth block", results: []*enginev1.UnifiedTargetResult{{Target: "write", Status: "error", ErrorCode: "reconnect_required", AuthAction: &enginev1.UnifiedAuthAction{Action: "reconnect", BucketId: bucketID, ServiceId: serviceID, EndUserRef: "user"}}}, wantExecution: "not_started", wantRequirement: true},
+		{name: "successful sibling", results: []*enginev1.UnifiedTargetResult{{Target: "read", Status: "success"}, {Target: "write", Status: "error", ErrorCode: "reconnect_required", AuthAction: &enginev1.UnifiedAuthAction{Action: "reconnect", BucketId: bucketID, ServiceId: serviceID, EndUserRef: "user"}}}, wantExecution: "unknown", wantRequirement: true},
+		{name: "failed sibling", results: []*enginev1.UnifiedTargetResult{{Target: "read", Status: "error", ErrorCode: "provider_failed"}, {Target: "write", Status: "error", ErrorCode: "reconnect_required", AuthAction: &enginev1.UnifiedAuthAction{Action: "reconnect", BucketId: bucketID, ServiceId: serviceID, EndUserRef: "user"}}}, wantExecution: "unknown", wantRequirement: true},
+		{name: "contradictory success action", results: []*enginev1.UnifiedTargetResult{{Target: "write", Status: "success", ErrorCode: "reconnect_required", AuthAction: &enginev1.UnifiedAuthAction{Action: "reconnect", BucketId: bucketID, ServiceId: serviceID, EndUserRef: "user"}}}, wantExecution: "unknown", wantRequirement: false},
+		{name: "rollback auth block", results: []*enginev1.UnifiedTargetResult{{Target: "write", Status: "error", ErrorCode: "provider_failed"}}, rollbacks: []*enginev1.UnifiedRollbackResult{{Target: "cleanup", Status: "error", ErrorCode: "connection_required", AuthAction: &enginev1.UnifiedAuthAction{Action: "connect", BucketId: bucketID, ServiceId: serviceID, EndUserRef: "user"}}}, wantExecution: "unknown", wantRequirement: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			requirement, providerExecution := firstMCPUnifiedAuthRequirement(&enginev1.ExecuteUnifiedResponse{Results: test.results, RollbackResults: test.rollbacks})
+			// Only a fully consistent auth error remains actionable, while any provider-capable sibling forbids graph replay.
+			if (requirement != nil) != test.wantRequirement || providerExecution != test.wantExecution {
+				t.Fatalf("Unified auth requirement = %+v/%q", requirement, providerExecution)
+			}
+		})
+	}
+}
+
+// TestMCPAuthExecuteRequestKeepsUnknownOutcomesNonReplayable separates browser consent from execution safety.
+func TestMCPAuthExecuteRequestKeepsUnknownOutcomesNonReplayable(t *testing.T) {
+	for _, test := range []struct {
+		providerExecution string
+		want              string
+	}{
+		{providerExecution: "not_started", want: "retry_after_auth"},
+		{providerExecution: "unknown", want: "do_not_replay"},
+	} {
+		// Only Engine proof that dispatch never began may authorize a post-consent retry.
+		if got := mcpAuthExecuteRequest(test.providerExecution); got != test.want {
+			t.Fatalf("mcpAuthExecuteRequest(%q) = %q, want %q", test.providerExecution, got, test.want)
+		}
+	}
+}
+
+// TestMCPConnectedAuthRequirementRejectsForgedRouting ensures typed wrappers alone cannot authorize consent.
+func TestMCPConnectedAuthRequirementRejectsForgedRouting(t *testing.T) {
+	_, ok := mcpConnectedAuthRequirementFromError(&ConnectionRequiredError{
+		Code: "connection_required", BucketID: "not-a-uuid", ServiceID: uuid.NewString(), EndUserRef: "user",
+	})
+	// Malformed Engine identity must stop before the canonical connect-session mutation is invoked.
+	if ok {
+		t.Fatal("expected malformed routing to be rejected")
+	}
+}
+
+// TestMCPAuthActionFromConnectResponseRejectsMalformedOutput keeps invalid canonical output away from MCP clients.
+func TestMCPAuthActionFromConnectResponseRejectsMalformedOutput(t *testing.T) {
+	tests := []struct {
+		name     string
+		response *enginev1.StartConnectSessionResponse
+	}{
+		{name: "missing response"},
+		{name: "unsafe URL", response: &enginev1.StartConnectSessionResponse{AuthorizeUrl: "javascript:alert(1)", ExpiresAt: "2026-08-29T17:00:00Z"}},
+		{name: "invalid expiry", response: &enginev1.StartConnectSessionResponse{AuthorizeUrl: "https://provider.example.com/oauth", ExpiresAt: "soon"}},
+		{name: "missing persisted correlation", response: &enginev1.StartConnectSessionResponse{AuthorizeUrl: "https://provider.example.com/oauth", ExpiresAt: time.Now().UTC().Add(time.Minute).Format(time.RFC3339)}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// Both navigation and expiry must be trustworthy before the host receives an elicitation.
+			if action, ok := mcpAuthActionFromConnectResponse("connect", test.response); ok || action != nil {
+				t.Fatalf("auth action = %+v/%t", action, ok)
+			}
+		})
 	}
 }
 

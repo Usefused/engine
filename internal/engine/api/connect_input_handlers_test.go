@@ -23,7 +23,10 @@ import (
 // CreateConnectInputSession captures the hashed pre-authorisation record so
 // handler tests can assert that no provider state exists before form submit.
 func (s *connectAdminMockStore) CreateConnectInputSession(_ context.Context, session store.ConnectInputSession) (*store.ConnectInputSession, error) {
-	session.ID = uuid.New()
+	// Handler-created sessions already carry the returned correlation, while direct fixture setup may still need one allocated here.
+	if session.ID == uuid.Nil {
+		session.ID = uuid.New()
+	}
 	session.CreatedAt = time.Now().UTC()
 	s.inputSessions = append(s.inputSessions, session)
 	return &session, nil
@@ -46,11 +49,11 @@ func (s *connectAdminMockStore) GetActiveConnectInputSessionByTokenHash(_ contex
 func (s *connectAdminMockStore) CompleteConnectInputSession(_ context.Context, tokenHash, contractHash string, usedAt time.Time, session store.ConnectSession) (*store.ConnectSession, error) {
 	for index := range s.inputSessions {
 		pending := &s.inputSessions[index]
-		if pending.TokenHash != tokenHash || pending.ContractHash != contractHash || pending.UsedAt != nil || !usedAt.Before(pending.ExpiresAt) {
+		// The provider row must inherit the exact hosted-form UUID before the one-time token can be consumed.
+		if pending.TokenHash != tokenHash || pending.ContractHash != contractHash || pending.ID != session.ID || pending.UsedAt != nil || !usedAt.Before(pending.ExpiresAt) {
 			continue
 		}
 		pending.UsedAt = &usedAt
-		session.ID = uuid.New()
 		session.CreatedAt = usedAt
 		s.createdSessions = append(s.createdSessions, session)
 		return &session, nil
@@ -152,6 +155,10 @@ func TestHostedConnectInputSubmissionCreatesProviderStateAfterValidation(t *test
 	}
 	if len(fixture.store.createdSessions) != 1 || fixture.store.inputSessions[0].UsedAt == nil {
 		t.Fatalf("completion pending=%#v provider=%#v", fixture.store.inputSessions, fixture.store.createdSessions)
+	}
+	// The form transition changes tables but not the opaque correlation retained for the app-authenticated caller.
+	if fixture.store.createdSessions[0].ID != fixture.store.inputSessions[0].ID {
+		t.Fatalf("hosted correlation changed input=%s provider=%s", fixture.store.inputSessions[0].ID, fixture.store.createdSessions[0].ID)
 	}
 	var stored map[string]string
 	if err := json.Unmarshal(fixture.store.createdSessions[0].ResourceInputJSON, &stored); err != nil || stored["subdomain"] != "acme" || stored["ignored"] != "" {

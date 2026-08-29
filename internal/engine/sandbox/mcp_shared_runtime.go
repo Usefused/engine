@@ -10,11 +10,15 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Usefused/engine/internal/engine"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -107,6 +111,21 @@ type mcpCallResponse struct {
 	ExecuteRequest    string          `json:"execute_request,omitempty"`
 	ProviderExecution string          `json:"provider_execution,omitempty"`
 	AutomaticReplay   *bool           `json:"automatic_replay,omitempty"`
+	AuthAction        *mcpAuthAction  `json:"auth_action,omitempty"`
+}
+
+// mcpAuthAction carries one Engine-created browser handoff without exposing
+// bucket, service, user, token, or provider credential identifiers.
+type mcpAuthAction struct {
+	Action        string `json:"action"`
+	URL           string `json:"url"`
+	ElicitationID string `json:"elicitation_id"`
+	ExpiresAt     string `json:"expires_at"`
+}
+
+// mcpConnectedAuthRequirement normalizes physical and Unified remediation onto one session creator.
+type mcpConnectedAuthRequirement struct {
+	Code, Action, BucketID, ServiceID, EndUserRef string
 }
 
 // mcpCallHandler is call()'s only server-side entrypoint (design doc,
@@ -177,8 +196,13 @@ func mcpCallHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := dispatchMCPCall(r.Context(), sess, req.OperationID, params, intent)
-	// Physical provider failures retain their established response path.
+	// Connected-auth failures create one browser handoff before the bounded bridge response is emitted.
 	if err != nil {
+		if statusCode, failure, handled := mcpConnectedAuthResponse(r.Context(), sess, err, "not_started"); handled {
+			writeMCPCallResult(w, statusCode, failure)
+			return
+		}
+		// Every other physical provider failure retains its established response path.
 		statusCode, failure := boundedMCPPhysicalCallResponse(req.OperationID, err)
 		recordMCPCallLimit(r.Context(), sess, failure.Error)
 		writeMCPCallResult(w, statusCode, failure)
@@ -332,6 +356,12 @@ func handleMCPUnifiedCall(w http.ResponseWriter, r *http.Request, sess *mcpSessi
 		writeMCPCallResult(w, httpStatus, mcpCallResponse{Error: code})
 		return
 	}
+	// Unified all-settled results surface the first blocked connection while retaining conservative replay state.
+	if requirement, providerExecution := firstMCPUnifiedAuthRequirement(response); requirement != nil {
+		statusCode, failure := startMCPConnectedAuthResponse(r.Context(), sess, *requirement, providerExecution)
+		writeMCPCallResult(w, statusCode, failure)
+		return
+	}
 	result, httpStatus, code := projectMCPUnifiedResponse(descriptor, response)
 	// Configured output failures remain bounded while successful output keeps its authored JSON shape.
 	if code != "" {
@@ -339,6 +369,254 @@ func handleMCPUnifiedCall(w http.ResponseWriter, r *http.Request, sess *mcpSessi
 		return
 	}
 	writeMCPCallResult(w, http.StatusOK, mcpCallResponse{Result: result})
+}
+
+// mcpConnectedAuthResponse recognizes only Engine-owned typed failures and leaves every other error unchanged.
+func mcpConnectedAuthResponse(ctx context.Context, sess *mcpSession, err error, providerExecution string) (int, mcpCallResponse, bool) {
+	requirement, ok := mcpConnectedAuthRequirementFromError(err)
+	// Provider and transport errors must never manufacture a browser-auth action from prose.
+	if !ok {
+		return 0, mcpCallResponse{}, false
+	}
+	statusCode, response := startMCPConnectedAuthResponse(ctx, sess, requirement, providerExecution)
+	return statusCode, response, true
+}
+
+// mcpConnectedAuthRequirementFromError projects only trusted connection routing from typed resolver errors.
+func mcpConnectedAuthRequirementFromError(err error) (mcpConnectedAuthRequirement, bool) {
+	var required *ConnectionRequiredError
+	// A missing connection always begins a fresh consent session.
+	if errors.As(err, &required) {
+		candidate := mcpConnectedAuthRequirement{Code: required.Code, Action: "connect", BucketID: required.BucketID, ServiceID: required.ServiceID, EndUserRef: required.EndUserRef}
+		return candidate, validMCPConnectedAuthRequirement(candidate)
+	}
+	var reconnect *ReconnectRequiredError
+	// An unusable stored connection uses the same consent creator with clearer client copy.
+	if errors.As(err, &reconnect) {
+		candidate := mcpConnectedAuthRequirement{Code: reconnect.Code, Action: "reconnect", BucketID: reconnect.BucketID, ServiceID: reconnect.ServiceID, EndUserRef: reconnect.EndUserRef}
+		return candidate, validMCPConnectedAuthRequirement(candidate)
+	}
+	return mcpConnectedAuthRequirement{}, false
+}
+
+// validMCPConnectedAuthRequirement admits only canonical connection routing derived from Engine-owned state.
+func validMCPConnectedAuthRequirement(requirement mcpConnectedAuthRequirement) bool {
+	expectedCode := ""
+	// The action vocabulary determines the sole matching stable execution code.
+	switch requirement.Action {
+	case "connect":
+		expectedCode = "connection_required"
+	case "reconnect":
+		expectedCode = "reconnect_required"
+	default:
+		return false
+	}
+	// Contradictory codes cannot inherit browser-navigation authority from a typed wrapper alone.
+	if requirement.Code != expectedCode {
+		return false
+	}
+	// Exact bucket identity is reauthenticated by StartConnectSession after syntactic admission.
+	if _, err := uuid.Parse(requirement.BucketID); err != nil {
+		return false
+	}
+	// Exact service identity is reauthenticated independently of the bucket value.
+	if _, err := uuid.Parse(requirement.ServiceID); err != nil {
+		return false
+	}
+	endUserRef := strings.TrimSpace(requirement.EndUserRef)
+	// Empty or oversized user references cannot identify the canonical connection slot.
+	return endUserRef != "" && len(endUserRef) <= 255
+}
+
+// startMCPConnectedAuthResponse creates one short-lived URL through the canonical app-authenticated mutation.
+func startMCPConnectedAuthResponse(ctx context.Context, sess *mcpSession, requirement mcpConnectedAuthRequirement, providerExecution string) (int, mcpCallResponse) {
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.sandbox.mcp.auth_session.start")
+	defer span.End()
+	span.SetAttributes(attribute.String("execution.trigger", "agent"), attribute.String("auth.action", requirement.Action), attribute.String("provider.execution", providerExecution), attribute.String("outcome", "failed"))
+	// URL creation is a durable auth mutation, so unsupported or legacy clients fail before Engine persists browser state they cannot complete through MCP.
+	if !mcpSessionSupportsURLElicitation(sess) {
+		span.SetAttributes(attribute.String("outcome", "unsupported_client"))
+		return mcpAuthCapabilityRequiredResponse(requirement.Code, providerExecution)
+	}
+	// Startup wiring is mandatory because a fabricated fallback URL would bypass Engine OAuth state and PKCE ownership.
+	if globalMCPConnectSessionStart == nil {
+		span.SetStatus(otelcodes.Error, "connect session starter unavailable")
+		return mcpAuthSessionUnavailableResponse(requirement.Code, providerExecution)
+	}
+	// Capacity is reserved before persistence so every created OAuth row has a bounded route to a completion notification.
+	if !reserveMCPAuthAction(ctx, sess) {
+		span.SetStatus(otelcodes.Error, "connect session capacity unavailable")
+		return mcpAuthSessionUnavailableResponse(requirement.Code, providerExecution)
+	}
+	reservationOwned := true
+	defer func() {
+		// Successful correlation transfers the reservation through NATS completion and eventual Streamable GET dequeue.
+		if reservationOwned {
+			releaseMCPAuthAction(sess)
+		}
+	}()
+	authCtx := metadata.NewIncomingContext(ctx, metadata.Pairs("x-app-id", sess.appID, "x-api-key", sess.token))
+	response, err := globalMCPConnectSessionStart(authCtx, &enginev1.StartConnectSessionRequest{
+		BucketId: requirement.BucketID, ServiceId: requirement.ServiceID,
+		EndUserRef: requirement.EndUserRef, CreatedByAppId: sess.appID,
+	})
+	authAction, valid := mcpAuthActionFromConnectResponse(requirement.Action, response)
+	// A failed or malformed handoff stays non-replayable and never exposes internal OAuth resolution details.
+	if err != nil || !valid {
+		span.SetStatus(otelcodes.Error, "connect session creation failed")
+		return mcpAuthSessionUnavailableResponse(requirement.Code, providerExecution)
+	}
+	// Correlation is installed before the URL crosses the runtime boundary, so
+	// even a fast browser completion can address this exact live MCP session.
+	if !registerMCPAuthCorrelation(ctx, sess, authAction.ElicitationID, authAction.ExpiresAt) {
+		span.SetStatus(otelcodes.Error, "connect session correlation unavailable")
+		return mcpAuthSessionUnavailableResponse(requirement.Code, providerExecution)
+	}
+	reservationOwned = false
+	span.SetAttributes(attribute.String("outcome", "success"))
+	automaticReplay := false
+	return http.StatusConflict, mcpCallResponse{
+		Error: "Provider authentication is required to continue.", Code: requirement.Code,
+		RecoveryAction: "complete_authentication", ExecuteRequest: mcpAuthExecuteRequest(providerExecution),
+		ProviderExecution: providerExecution, AutomaticReplay: &automaticReplay,
+		AuthAction: authAction,
+	}
+}
+
+// mcpAuthExecuteRequest permits retry only when Engine proved no provider-capable work started.
+func mcpAuthExecuteRequest(providerExecution string) string {
+	// Unknown aggregate outcomes still require consent, but replay could duplicate earlier provider work.
+	if providerExecution != "not_started" {
+		return "do_not_replay"
+	}
+	return "retry_after_auth"
+}
+
+// mcpAuthCapabilityRequiredResponse keeps provider routing private while directing the caller to a standard-capable MCP host.
+func mcpAuthCapabilityRequiredResponse(code, providerExecution string) (int, mcpCallResponse) {
+	automaticReplay := false
+	return http.StatusConflict, mcpCallResponse{
+		Error: "Provider authentication requires an MCP client with URL elicitation support.",
+		Code:  code, RecoveryAction: "do_not_replay", ExecuteRequest: "do_not_replay",
+		ProviderExecution: providerExecution, AutomaticReplay: &automaticReplay,
+	}
+}
+
+// mcpAuthActionFromConnectResponse validates canonical connect output before it becomes browser-navigation authority.
+func mcpAuthActionFromConnectResponse(action string, response *enginev1.StartConnectSessionResponse) (*mcpAuthAction, bool) {
+	// An absent response cannot prove that the connect-session mutation produced a usable handoff.
+	if response == nil {
+		return nil, false
+	}
+	authorizeURL := strings.TrimSpace(response.GetAuthorizeUrl())
+	// The MCP client may open this value directly, so only bounded absolute web URLs are admitted.
+	if !isMCPAbsoluteWebURL(authorizeURL, 16_384) {
+		return nil, false
+	}
+	expiresAt := strings.TrimSpace(response.GetExpiresAt())
+	// A parseable absolute expiry lets the client retire stale browser actions without guessing a lifetime.
+	if _, err := time.Parse(time.RFC3339, expiresAt); err != nil {
+		return nil, false
+	}
+	connectSessionID, err := uuid.Parse(strings.TrimSpace(response.GetConnectSessionId()))
+	// The persisted callback correlation becomes the standard MCP elicitation ID; an unrelated random value could never receive completion.
+	if err != nil || connectSessionID == uuid.Nil {
+		return nil, false
+	}
+	return &mcpAuthAction{Action: action, URL: authorizeURL, ElicitationID: connectSessionID.String(), ExpiresAt: expiresAt}, true
+}
+
+// mcpAuthSessionUnavailableResponse keeps setup failures actionable without exposing provider configuration.
+func mcpAuthSessionUnavailableResponse(code, providerExecution string) (int, mcpCallResponse) {
+	automaticReplay := false
+	return http.StatusServiceUnavailable, mcpCallResponse{
+		Error: "Provider authentication could not be started. Check the MCP service OAuth setup and retry.",
+		Code:  code, RecoveryAction: "do_not_replay", ExecuteRequest: "do_not_replay",
+		ProviderExecution: providerExecution, AutomaticReplay: &automaticReplay,
+	}
+}
+
+// firstMCPUnifiedAuthRequirement chooses one deterministic remediation and reports whether sibling work may have run.
+func firstMCPUnifiedAuthRequirement(response *enginev1.ExecuteUnifiedResponse) (*mcpConnectedAuthRequirement, string) {
+	// A missing response cannot carry trusted target remediation.
+	if response == nil {
+		return nil, "not_started"
+	}
+	selected, providerMayHaveRun := firstMCPUnifiedForwardAuthRequirement(response.GetResults())
+	rollbackRequirement := firstMCPUnifiedRollbackAuthRequirement(response.GetRollbackResults())
+	// Forward response order remains authoritative before compensation order when both need different grants.
+	if selected == nil {
+		selected = rollbackRequirement
+	}
+	// Output production or failure proves the coordinator advanced beyond a solely auth-blocked graph.
+	if len(response.GetOutputJson()) != 0 || response.GetOutputErrorCode() != "" {
+		providerMayHaveRun = true
+	}
+	// Rollback activity proves the coordinator entered provider-capable work even if no forward result succeeded.
+	if len(response.GetRollbackResults()) != 0 {
+		providerMayHaveRun = true
+	}
+	// Only a graph composed entirely of auth-blocked and skipped forward work is safe to retry automatically.
+	if providerMayHaveRun {
+		return selected, "unknown"
+	}
+	return selected, "not_started"
+}
+
+// firstMCPUnifiedForwardAuthRequirement selects one forward action and proves whether a sibling may have dispatched.
+func firstMCPUnifiedForwardAuthRequirement(results []*enginev1.UnifiedTargetResult) (*mcpConnectedAuthRequirement, bool) {
+	var selected *mcpConnectedAuthRequirement
+	providerMayHaveRun := false
+	for _, result := range results {
+		var requirement *mcpConnectedAuthRequirement
+		// Only an error result can consistently carry a pre-provider connected-auth action.
+		if result.GetStatus() == "error" {
+			requirement = mcpConnectedAuthRequirementFromUnified(result.GetErrorCode(), result.GetAuthAction())
+		}
+		// Connected-auth errors are proven pre-provider and do not alone make graph replay uncertain.
+		if requirement != nil {
+			// Response order makes the first complete remediation deterministic for the client.
+			if selected == nil {
+				selected = requirement
+			}
+			continue
+		}
+		// Success and unclassified errors may both follow provider dispatch; skipped work is the sole safe sibling state.
+		if result.GetStatus() != "skipped" {
+			providerMayHaveRun = true
+		}
+	}
+	return selected, providerMayHaveRun
+}
+
+// firstMCPUnifiedRollbackAuthRequirement surfaces one compensation-time connection action in scheduler order.
+func firstMCPUnifiedRollbackAuthRequirement(results []*enginev1.UnifiedRollbackResult) *mcpConnectedAuthRequirement {
+	for _, result := range results {
+		// Only a failed rollback can consistently carry actionable connected-auth metadata.
+		if result.GetStatus() != "error" {
+			continue
+		}
+		requirement := mcpConnectedAuthRequirementFromUnified(result.GetErrorCode(), result.GetAuthAction())
+		// The first complete action is deterministic and sufficient for one browser handoff.
+		if requirement != nil {
+			return requirement
+		}
+	}
+	return nil
+}
+
+// mcpConnectedAuthRequirementFromUnified validates the closed action vocabulary before starting consent.
+func mcpConnectedAuthRequirementFromUnified(code string, action *enginev1.UnifiedAuthAction) *mcpConnectedAuthRequirement {
+	// Only the two connected-auth states may initiate browser consent.
+	if action == nil || (code != "connection_required" && code != "reconnect_required") {
+		return nil
+	}
+	requirement := &mcpConnectedAuthRequirement{Code: code, Action: action.GetAction(), BucketID: action.GetBucketId(), ServiceID: action.GetServiceId(), EndUserRef: action.GetEndUserRef()}
+	// Unified diagnostics must agree across code, action, and exact routing identities before starting consent.
+	if !validMCPConnectedAuthRequirement(*requirement) {
+		return nil
+	}
+	return requirement
 }
 
 // decodeMCPUnifiedInvocation preserves exact input JSON and supplies the same

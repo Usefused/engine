@@ -47,6 +47,7 @@ type connectSessionStartRequest struct {
 type connectSessionStartResponse struct {
 	AuthorizeURL      string    `json:"authorize_url"`
 	ExpiresAt         time.Time `json:"expires_at"`
+	ConnectSessionID  uuid.UUID `json:"-"`
 	Scopes            []string  `json:"-"`
 	Route             string    `json:"-"`
 	MissingFieldCount int       `json:"-"`
@@ -751,7 +752,9 @@ func createConnectInputSession(ctx context.Context, s store.Store, call connectA
 	}
 	// Persistence is last so an invalid public callback origin cannot leave an
 	// unreachable pending browser session behind.
+	correlationID := uuid.New()
 	if _, err := s.CreateConnectInputSession(ctx, store.ConnectInputSession{
+		ID:       correlationID,
 		BucketID: call.bucketID, ServiceID: call.serviceID,
 		AuthType: resolved.authType, AuthName: resolved.authName, ContractHash: contractHash,
 		CredentialSourceServiceID: source.ServiceID,
@@ -763,7 +766,7 @@ func createConnectInputSession(ctx context.Context, s store.Store, call connectA
 		return connectSessionStartResponse{}, err
 	}
 	return connectSessionStartResponse{
-		AuthorizeURL: inputURL, ExpiresAt: expiresAt, Scopes: scopes,
+		AuthorizeURL: inputURL, ExpiresAt: expiresAt, ConnectSessionID: correlationID, Scopes: scopes,
 		Route: "hosted_form", MissingFieldCount: missingFieldCount,
 	}, nil
 }
@@ -817,7 +820,9 @@ func buildProviderConnectSession(call connectAdminCall, endUserRef string, creat
 		return store.ConnectSession{}, connectSessionStartResponse{}, err
 	}
 	source := effectiveApplicationCredentialSource(call, resolved)
+	correlationID := uuid.New()
 	session := store.ConnectSession{
+		ID:                        correlationID,
 		BucketID:                  call.bucketID,
 		ServiceID:                 call.serviceID,
 		ServiceVersionID:          resolved.metadata.ServiceVersionID,
@@ -838,7 +843,7 @@ func buildProviderConnectSession(call connectAdminCall, endUserRef string, creat
 		RequestedScopes:           scopes,
 		ExpiresAt:                 expiresAt,
 	}
-	return session, connectSessionStartResponse{AuthorizeURL: authURL, ExpiresAt: expiresAt, Scopes: scopes, Route: "direct"}, nil
+	return session, connectSessionStartResponse{AuthorizeURL: authURL, ExpiresAt: expiresAt, ConnectSessionID: correlationID, Scopes: scopes, Route: "direct"}, nil
 }
 
 // connectSessionStartTelemetry keeps REST, GraphQL, and gRPC start spans on one

@@ -181,6 +181,9 @@ message StartConnectSessionRequest {
 message StartConnectSessionResponse {
   string authorize_url = 1;
   string expires_at = 2;
+  // connect_session_id is the opaque correlation carried by the eventual
+  // connected-auth lifecycle event; it contains no provider credential data.
+  string connect_session_id = 3;
 }
 
 message GetConnectionRequest {

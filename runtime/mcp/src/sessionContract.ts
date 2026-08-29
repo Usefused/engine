@@ -3,6 +3,7 @@ export const SESSION_RESULT_TTL_MS = 5 * 60 * 1000;
 
 /** Keeps model recovery choices aligned with Engine transport failures. */
 export type RecoveryAction =
+  | "complete_authentication"
   | "continue_stored_result"
   | "correct_execute_arguments"
   | "adjust_result_projection"
@@ -10,6 +11,7 @@ export type RecoveryAction =
   | "do_not_replay";
 
 export type ExecuteRequestAction =
+  | "retry_after_auth"
   | "use_next_request"
   | "correct_arguments"
   | "adjust_projection"
@@ -40,8 +42,8 @@ const STABLE_LOWERCASE_ENGINE_CODES = new Set<string>([
   "mcp_physical_pagination_not_allowed_for_unified",
 ]);
 
-const RECOVERY_ACTIONS = new Set<RecoveryAction>(["continue_stored_result", "correct_execute_arguments", "adjust_result_projection", "reinitialize_connection", "do_not_replay"]);
-const EXECUTE_REQUEST_ACTIONS = new Set<ExecuteRequestAction>(["use_next_request", "correct_arguments", "adjust_projection", "reformat_if_session_state_used", "do_not_replay"]);
+const RECOVERY_ACTIONS = new Set<RecoveryAction>(["complete_authentication", "continue_stored_result", "correct_execute_arguments", "adjust_result_projection", "reinitialize_connection", "do_not_replay"]);
+const EXECUTE_REQUEST_ACTIONS = new Set<ExecuteRequestAction>(["retry_after_auth", "use_next_request", "correct_arguments", "adjust_projection", "reformat_if_session_state_used", "do_not_replay"]);
 const PROVIDER_EXECUTION_STATES = new Set<ProviderExecutionState>(["not_started", "complete", "unknown"]);
 
 /** One compact public recovery shape replaces transport and audit details. */
@@ -83,6 +85,7 @@ export const SESSION_CONTRACT_METADATA = Object.freeze({
   result_ttl_ms: SESSION_RESULT_TTL_MS,
   automatic_execute_replay: false,
   recovery_actions: Object.freeze<RecoveryAction[]>([
+    "complete_authentication",
     "continue_stored_result",
     "correct_execute_arguments",
     "adjust_result_projection",
@@ -93,7 +96,7 @@ export const SESSION_CONTRACT_METADATA = Object.freeze({
 
 /** Repeats the safety-critical contract in model-visible text because clients may hide initialize metadata. */
 export const SESSION_AGENT_RULE =
-  "The MCP client has already attached every execute call to one active client-owned session. Never invent, request, or pass a session ID. Use execute for session.get, session.set, and session.page; their state exists only on this MCP connection. Follow recovery_action and execute_request exactly: correct arguments, adjust a result projection, run the supplied stored-result request, let the client reconnect, or do not replay an unknown outcome. A new connection cannot read prior state or result_ref values.";
+  "The MCP client has already attached every execute call to one active client-owned session. Never invent, request, or pass a session ID. Use execute for session.get, session.set, and session.page; their state exists only on this MCP connection. Follow recovery_action and execute_request exactly: complete client-presented provider authentication, correct arguments, adjust a result projection, run the supplied stored-result request, let the client reconnect, or do not replay an unknown outcome. A new connection cannot read prior state or result_ref values.";
 
 export interface SessionToolRequest {
   tool: "execute";

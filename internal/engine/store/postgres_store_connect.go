@@ -424,6 +424,11 @@ type connectQueryRower interface {
 // insertConnectSession accepts either the pool or an existing transaction so
 // form-token consumption can be atomic without duplicating insert SQL.
 func insertConnectSession(ctx context.Context, db connectQueryRower, session ConnectSession) (*ConnectSession, error) {
+	// Callers allocate the opaque correlation before returning a browser URL so
+	// the eventual lifecycle event can address the waiting runtime exactly.
+	if session.ID == uuid.Nil {
+		return nil, ErrInvalidEncryptedAuthMaterial
+	}
 	// Every callback row carries complete source identity so later process state is never consulted.
 	if !normalizeConnectSessionCredentialSource(&session) {
 		return nil, ErrInvalidEncryptedAuthMaterial
@@ -437,16 +442,16 @@ func insertConnectSession(ctx context.Context, db connectQueryRower, session Con
 	}
 	query := `
 		INSERT INTO fused_connect_sessions (
-			bucket_id, service_id, service_version_id, auth_type, auth_name,
+			id, bucket_id, service_id, service_version_id, auth_type, auth_name,
 			credential_source_service_id, credential_source_auth_type, credential_source_auth_name, end_user_ref, state_hash,
 			nonce_hash, encrypted_dek, pkce_verifier, redirect_uri, created_by_app_id, return_url, resource_input, requested_scopes, expires_at
 			)
-			SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+			SELECT $1, b.id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
 			FROM fused_buckets b
-			WHERE b.id = $1
+			WHERE b.id = $2
 			RETURNING ` + connectSessionColumns
 	return scanConnectSession(db.QueryRow(ctx, query,
-		session.BucketID, session.ServiceID, session.ServiceVersionID, session.AuthType, session.AuthName,
+		session.ID, session.BucketID, session.ServiceID, session.ServiceVersionID, session.AuthType, session.AuthName,
 		session.CredentialSourceServiceID, session.CredentialSourceAuthType, session.CredentialSourceAuthName, session.EndUserRef,
 		session.StateHash, session.NonceHash, session.EncryptedDEK, session.EncryptedPKCEVerifier, session.RedirectURI,
 		uuidOrNil(session.CreatedByAppID), session.ReturnURL, jsonObjectBytes(session.ResourceInputJSON), session.RequestedScopes, session.ExpiresAt,
@@ -476,22 +481,27 @@ func (s *postgresStore) MarkConnectSessionUsed(ctx context.Context, stateHash st
 // CreateConnectInputSession stores the pre-authorisation browser handoff under
 // a hash, keeping its raw bearer token exclusively in the returned URL.
 func (s *postgresStore) CreateConnectInputSession(ctx context.Context, session ConnectInputSession) (*ConnectInputSession, error) {
+	// The hosted form owns the same opaque correlation later transferred to the
+	// provider callback row, so persistence cannot allocate it after response.
+	if session.ID == uuid.Nil {
+		return nil, ErrInvalidEncryptedAuthMaterial
+	}
 	// Pending hosted forms preserve the source selected before any browser handoff.
 	if !normalizeConnectInputCredentialSource(&session) {
 		return nil, ErrInvalidEncryptedAuthMaterial
 	}
 	query := `
 		INSERT INTO fused_connect_input_sessions (
-			bucket_id, service_id, auth_type, auth_name,
+			id, bucket_id, service_id, auth_type, auth_name,
 			credential_source_service_id, credential_source_auth_type, credential_source_auth_name, contract_hash, end_user_ref, token_hash,
 			created_by_app_id, return_url, resource_input, requested_scopes, expires_at
-		)
-		SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+			)
+		SELECT $1, b.id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
 		FROM fused_buckets b
-		WHERE b.id = $1
+		WHERE b.id = $2
 		RETURNING ` + connectInputSessionColumns
 	return scanConnectInputSession(s.db.QueryRow(ctx, query,
-		session.BucketID, session.ServiceID, session.AuthType, session.AuthName,
+		session.ID, session.BucketID, session.ServiceID, session.AuthType, session.AuthName,
 		session.CredentialSourceServiceID, session.CredentialSourceAuthType, session.CredentialSourceAuthName, session.ContractHash,
 		session.EndUserRef, session.TokenHash, uuidOrNil(session.CreatedByAppID),
 		session.ReturnURL, jsonObjectBytes(session.ResourceInputJSON), session.RequestedScopes, session.ExpiresAt,
@@ -544,11 +554,12 @@ func (s *postgresStore) CompleteConnectInputSession(ctx context.Context, tokenHa
 		  AND created_by_app_id IS NOT DISTINCT FROM $11
 		  AND return_url = $12
 		  AND requested_scopes = $13
-		  AND contract_hash = $14`,
+		  AND contract_hash = $14
+		  AND id = $15`,
 		tokenHash, usedAt, session.BucketID, session.ServiceID, session.AuthType,
 		session.AuthName, session.CredentialSourceServiceID, session.CredentialSourceAuthType, session.CredentialSourceAuthName,
 		session.EndUserRef, uuidOrNil(session.CreatedByAppID),
-		session.ReturnURL, session.RequestedScopes, contractHash,
+		session.ReturnURL, session.RequestedScopes, contractHash, session.ID,
 	)
 	if err != nil {
 		return nil, err
