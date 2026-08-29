@@ -475,26 +475,22 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 	}, nil
 }
 
+// enforceMCPFamilyLimit canonicalizes authored identity before applying the
+// shared invokable-family entitlement used by both app adapters.
 func enforceMCPFamilyLimit(ctx context.Context, s store.Store, accountID uuid.UUID, name string) error {
 	canonicalName, _, err := canonical.AppName(name)
+	// Invalid authored identity must fail before any family or entitlement lookup.
 	if err != nil {
 		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
 	}
-	_, err = s.GetAppFamilyByIdentity(ctx, accountID, store.AppKindMCP.String(), canonicalName)
-	if err == nil {
-		return nil
-	}
-	if !errors.Is(err, store.ErrAppFamilyNotFound) {
-		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_resolve_mcp_family"}
-	}
-	currentFamilies, err := s.CountAppFamilies(ctx, accountID, store.AppKindMCP.String())
-	if err != nil {
-		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_count_mcp_families"}
-	}
-	if limitErr := entitlement.CheckLimit(trace.SpanFromContext(ctx), "mcp_families", currentFamilies, entitlement.LiveEntitlement.Load().MaxMCPFamilies); limitErr != nil {
-		return workspaceConfigHTTPError{status: http.StatusForbidden, message: limitErr.Error()}
-	}
-	return nil
+	return enforceAppFamilyCapacity(ctx, s, trace.SpanFromContext(ctx), accountID, canonicalName, appFamilyCapacityPolicy{
+		kind:        store.AppKindMCP,
+		resource:    "mcp_families",
+		errorCode:   "mcp_family_limit_exceeded",
+		displayName: "MCP server",
+		remediation: "Deactivate all active or deprecated versions of an unused MCP server, or upgrade the workspace plan, then retry.",
+		limit:       entitlement.LiveEntitlement.Load().MaxMCPFamilies,
+	})
 }
 
 // sameCanonicalAppState compares persisted desired state after applying

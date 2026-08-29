@@ -200,19 +200,34 @@ func (s *workspaceTestStore) GetAppFamilyByIdentity(_ context.Context, accountID
 	return nil, store.ErrAppFamilyNotFound
 }
 
-// CountAppFamilies returns the number of families for the given account and
-// kind.  It is used by the license-tier limit check in reserveSDKGenerationIdentity.
-func (s *workspaceTestStore) CountAppFamilies(_ context.Context, accountID uuid.UUID, kind string) (int, error) {
+// GetAppFamilyQuotaUsage mirrors the PostgreSQL entitlement projection without
+// treating retained family identity as currently invokable capacity.
+func (s *workspaceTestStore) GetAppFamilyQuotaUsage(_ context.Context, accountID uuid.UUID, kind, canonicalName string) (store.AppFamilyQuotaUsage, error) {
 	s.appMutex.Lock()
 	defer s.appMutex.Unlock()
-	count := 0
-	prefix := accountID.String() + "\x00" + kind + "\x00"
-	for key := range s.appFamilies {
-		if strings.HasPrefix(key, prefix) {
-			count++
+	runnableFamilies := make(map[uuid.UUID]struct{})
+	// Only statuses accepted by runtime authorization spend a family quota unit.
+	for _, app := range s.apps {
+		if app.Status.Runnable() {
+			runnableFamilies[app.AppFamilyID] = struct{}{}
 		}
 	}
-	return count, nil
+	usage := store.AppFamilyQuotaUsage{}
+	for _, family := range s.appFamilies {
+		// Account and adapter filters keep one workspace's quota isolated from every other family.
+		if family.AccountID != accountID || family.Kind.String() != kind {
+			continue
+		}
+		// Retained identity and tombstones alone are history, not invokable usage.
+		if _, ok := runnableFamilies[family.AppFamilyID]; ok {
+			usage.CurrentInvokable++
+			// The target flag prevents ordinary version upgrades from spending capacity twice.
+			if family.CanonicalName == canonicalName {
+				usage.TargetInvokable = true
+			}
+		}
+	}
+	return usage, nil
 }
 
 // CountActiveServices returns the number of workspace services registered in

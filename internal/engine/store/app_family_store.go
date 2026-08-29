@@ -143,16 +143,29 @@ func scanAppFamily(row pgx.Row) (*AppFamily, error) {
 	return &f, nil
 }
 
-// CountAppFamilies returns the number of AppFamily rows for the given
-// account and kind filter. Used by license-enforcement gates so callers
-// can reject creation that would exceed the entitled limit.
-func (s *postgresStore) CountAppFamilies(ctx context.Context, accountID uuid.UUID, kind string) (int, error) {
-	var n int
+// GetAppFamilyQuotaUsage counts runnable families and reports whether the
+// target already occupies capacity in the same bounded SQL statement.
+func (s *postgresStore) GetAppFamilyQuotaUsage(ctx context.Context, accountID uuid.UUID, kind, canonicalName string) (AppFamilyQuotaUsage, error) {
+	var usage AppFamilyQuotaUsage
 	err := s.db.QueryRow(ctx, `
-		SELECT COUNT(*) FROM fused_app_families
-		WHERE account_id = $1 AND ($2 = '' OR kind = $2)
-	`, accountID, kind).Scan(&n)
-	return n, err
+		WITH scoped_families AS (
+			SELECT family.canonical_name,
+			       EXISTS (
+				 SELECT 1
+				 FROM fused_apps app
+				 WHERE app.app_family_id = family.app_family_id
+				   AND app.account_id = family.account_id
+				   AND app.status IN ('active', 'deprecated')
+			       ) AS invokable
+			FROM fused_app_families family
+			WHERE family.account_id = $1
+			  AND ($2 = '' OR family.kind = $2)
+		)
+		SELECT COUNT(*) FILTER (WHERE invokable),
+		       COALESCE(BOOL_OR(canonical_name = $3 AND invokable), FALSE)
+		FROM scoped_families
+	`, accountID, kind, canonicalName).Scan(&usage.CurrentInvokable, &usage.TargetInvokable)
+	return usage, err
 }
 
 // --- App (version) CRUD ---

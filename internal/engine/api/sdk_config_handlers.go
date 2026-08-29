@@ -2516,26 +2516,17 @@ func reserveSDKGenerationIdentity(ctx context.Context, s store.Store, call sdkAp
 	return family.AppFamilyID, appID, existingID, nil
 }
 
+// checkSDKFamilyCapacity applies the SDK-specific quota presentation to the
+// shared invokable-family admission rule.
 func checkSDKFamilyCapacity(ctx context.Context, s store.Store, span trace.Span, accountID uuid.UUID, canonicalName string) error {
-	_, familyErr := s.GetAppFamilyByIdentity(ctx, accountID, store.AppKindSDK.String(), canonicalName)
-	if !errors.Is(familyErr, store.ErrAppFamilyNotFound) {
-		return nil
-	}
-
-	// Existing families consume no additional entitlement, so only the absent
-	// identity path needs the aggregate count query.
-	currentFamilies, err := s.CountAppFamilies(ctx, accountID, store.AppKindSDK.String())
-	if err != nil {
-		// Store failures may contain SQL detail, so only the stable capacity code is traced.
-		span.SetAttributes(attribute.String("outcome", "failed"), attribute.String("error.code", "failed_to_count_sdk_families"))
-		span.SetStatus(codes.Error, "failed_to_count_sdk_families")
-		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_count_sdk_families"}
-	}
-	if limitErr := entitlement.CheckLimit(span, "sdk_families", currentFamilies, entitlement.LiveEntitlement.Load().MaxSDKFamilies); limitErr != nil {
-		span.SetAttributes(attribute.String("outcome", "sdk_family_limit_exceeded"))
-		return workspaceConfigHTTPError{status: http.StatusForbidden, message: limitErr.Error()}
-	}
-	return nil
+	return enforceAppFamilyCapacity(ctx, s, span, accountID, canonicalName, appFamilyCapacityPolicy{
+		kind:        store.AppKindSDK,
+		resource:    "sdk_families",
+		errorCode:   "sdk_family_limit_exceeded",
+		displayName: "SDK",
+		remediation: "Deactivate all active or deprecated versions of an unused SDK, or upgrade the workspace plan, then retry.",
+		limit:       entitlement.LiveEntitlement.Load().MaxSDKFamilies,
+	})
 }
 
 // reserveSDKVersionIdentity persists Unified operation identity atomically while preserving immutability checks.

@@ -46,6 +46,13 @@ func (status AppStatus) String() string {
 	return string(status)
 }
 
+// AppFamilyQuotaUsage is the single-row entitlement projection for one
+// account, adapter, and target family identity.
+type AppFamilyQuotaUsage struct {
+	CurrentInvokable int
+	TargetInvokable  bool
+}
+
 // HasSameBinding compares the immutable language and owner choices attached to
 // a logical family. Display-name changes are intentionally excluded because
 // they do not change execution authority or generated-package identity.

@@ -255,124 +255,161 @@ func TestValidateSDKIdentityRejectsMCPDescription(t *testing.T) {
 // sdk_config_handlers.go but uses a separate limit field so SDK and MCP
 // counts are gated independently.
 func TestEnforceMCPFamilyLimit(t *testing.T) {
+	t.Cleanup(entitlement.LiveEntitlement.Reset)
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{"existing family allowed regardless of limit", testMCPExistingFamilyCapacity},
+		{"dormant existing family must reacquire capacity", testMCPDormantFamilyCapacity},
+		{"new family allowed when under limit", testMCPFamilyUnderLimit},
+		{"new family blocked at limit", testMCPFamilyAtLimit},
+		{"fully deactivated family does not consume capacity", testMCPDeactivatedFamilyCapacity},
+		{"zero limit blocks all new families", testMCPZeroFamilyLimit},
+		{"unlimited allows new families", testMCPUnlimitedFamilyLimit},
+		{"nil limit is treated as unlimited", testMCPNilFamilyLimit},
+		{"invalid name returns 400", testMCPInvalidFamilyName},
+	}
+	// Named cases keep each lifecycle invariant independently readable and below the complexity ceiling.
+	for _, test := range tests {
+		t.Run(test.name, test.run)
+	}
+}
+
+// testMCPExistingFamilyCapacity proves an already-counted family can add a version after a plan downgrade.
+func testMCPExistingFamilyCapacity(t *testing.T) {
+	accountID, existingFamilyID := uuid.New(), uuid.New()
+	s := &workspaceTestStore{accountID: accountID,
+		appFamilies: map[string]store.AppFamily{accountID.String() + "\x00mcp\x00jira": {AppFamilyID: existingFamilyID, AccountID: accountID, Kind: store.AppKindMCP, CanonicalName: "jira"}},
+		apps:        map[uuid.UUID]store.App{uuid.New(): {AppFamilyID: existingFamilyID, Status: store.AppStatusActive}},
+	}
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{MaxMCPFamilies: models.IntPtr(0)})
+	// Existing invokable usage must not be charged twice.
+	if err := enforceMCPFamilyLimit(context.Background(), s, accountID, "jira"); err != nil {
+		t.Fatalf("existing family should be allowed even at zero limit: %v", err)
+	}
+}
+
+// testMCPDormantFamilyCapacity proves retained identity cannot bypass a full quota.
+func testMCPDormantFamilyCapacity(t *testing.T) {
+	accountID, dormantFamilyID, activeFamilyID := uuid.New(), uuid.New(), uuid.New()
+	s := &workspaceTestStore{accountID: accountID,
+		appFamilies: map[string]store.AppFamily{
+			accountID.String() + "\x00mcp\x00dormant": {AppFamilyID: dormantFamilyID, AccountID: accountID, Kind: store.AppKindMCP, CanonicalName: "dormant"},
+			accountID.String() + "\x00mcp\x00active":  {AppFamilyID: activeFamilyID, AccountID: accountID, Kind: store.AppKindMCP, CanonicalName: "active"},
+		},
+		apps: map[uuid.UUID]store.App{uuid.New(): {AppFamilyID: activeFamilyID, Status: store.AppStatusActive}},
+	}
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{MaxMCPFamilies: models.IntPtr(1)})
+	// Publishing a dormant family makes it invokable again and therefore needs capacity.
+	if err := enforceMCPFamilyLimit(context.Background(), s, accountID, "dormant"); err == nil {
+		t.Fatal("expected dormant family reactivation to require capacity")
+	}
+}
+
+// testMCPFamilyUnderLimit proves a new family is admitted when one slot remains.
+func testMCPFamilyUnderLimit(t *testing.T) {
 	accountID := uuid.New()
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{MaxMCPFamilies: models.IntPtr(2)})
+	// Empty usage leaves room for the requested server.
+	if err := enforceMCPFamilyLimit(context.Background(), &workspaceTestStore{accountID: accountID}, accountID, "slack"); err != nil {
+		t.Fatalf("new family under limit should be allowed: %v", err)
+	}
+}
 
-	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{
-		MaxMCPFamilies: models.IntPtr(-1), // unlimited
-	})
-	defer entitlement.LiveEntitlement.Reset()
+// testMCPFamilyAtLimit verifies the plain-language error returned when all slots are occupied.
+func testMCPFamilyAtLimit(t *testing.T) {
+	accountID, githubFamilyID, gitlabFamilyID := uuid.New(), uuid.New(), uuid.New()
+	s := &workspaceTestStore{accountID: accountID,
+		appFamilies: map[string]store.AppFamily{
+			accountID.String() + "\x00mcp\x00github": {AppFamilyID: githubFamilyID, AccountID: accountID, Kind: store.AppKindMCP, CanonicalName: "github"},
+			accountID.String() + "\x00mcp\x00gitlab": {AppFamilyID: gitlabFamilyID, AccountID: accountID, Kind: store.AppKindMCP, CanonicalName: "gitlab"},
+		},
+		apps: map[uuid.UUID]store.App{
+			uuid.New(): {AppFamilyID: githubFamilyID, Status: store.AppStatusActive},
+			uuid.New(): {AppFamilyID: gitlabFamilyID, Status: store.AppStatusDeprecated},
+		},
+	}
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{MaxMCPFamilies: models.IntPtr(2)})
+	err := enforceMCPFamilyLimit(context.Background(), s, accountID, "bitbucket")
+	// Full usage must return a typed quota error rather than pass admission.
+	if err == nil {
+		t.Fatal("expected block when at limit")
+	}
+	assertMCPFamilyLimitError(t, err)
+}
 
-	t.Run("existing family allowed regardless of limit", func(t *testing.T) {
-		s := &workspaceTestStore{
-			accountID: accountID,
-			appFamilies: map[string]store.AppFamily{
-				accountID.String() + "\x00" + "mcp" + "\x00" + "jira": {
-					AccountID:     accountID,
-					Kind:          "mcp",
-					CanonicalName: "jira",
-				},
-			},
-		}
-		// set a very low limit
-		entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{
-			MaxMCPFamilies: models.IntPtr(0),
-		})
-		err := enforceMCPFamilyLimit(context.Background(), s, accountID, "jira")
-		if err != nil {
-			t.Fatalf("existing family should be allowed even at zero limit: %v", err)
-		}
-	})
+// assertMCPFamilyLimitError verifies quota identity and first-use guidance without duplicating admission setup.
+func assertMCPFamilyLimitError(t *testing.T, err error) {
+	t.Helper()
+	werr, ok := err.(workspaceConfigHTTPError)
+	// Every public field must remain explicit enough for agents that do not know internal family terminology.
+	if !ok || werr.status != http.StatusForbidden || werr.code != "mcp_family_limit_exceeded" || werr.category != "entitlement" || werr.message != "This workspace has reached its MCP server limit (2 of 2)." || werr.remediation != "Deactivate all active or deprecated versions of an unused MCP server, or upgrade the workspace plan, then retry." {
+		t.Fatalf("unexpected MCP family limit error: %#v", err)
+	}
+}
 
-	t.Run("new family allowed when under limit", func(t *testing.T) {
-		s := &workspaceTestStore{accountID: accountID}
-		entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{
-			MaxMCPFamilies: models.IntPtr(2),
-		})
-		err := enforceMCPFamilyLimit(context.Background(), s, accountID, "slack")
-		if err != nil {
-			t.Fatalf("new family under limit should be allowed: %v", err)
-		}
-	})
+// testMCPDeactivatedFamilyCapacity proves retained history does not occupy an MCP slot.
+func testMCPDeactivatedFamilyCapacity(t *testing.T) {
+	accountID, familyID := uuid.New(), uuid.New()
+	s := &workspaceTestStore{accountID: accountID,
+		appFamilies: map[string]store.AppFamily{accountID.String() + "\x00mcp\x00retained": {AppFamilyID: familyID, AccountID: accountID, Kind: store.AppKindMCP, CanonicalName: "retained"}},
+		apps:        map[uuid.UUID]store.App{},
+	}
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{MaxMCPFamilies: models.IntPtr(1)})
+	// One new server remains admissible after the old server's final version is gone.
+	if err := enforceMCPFamilyLimit(context.Background(), s, accountID, "replacement"); err != nil {
+		t.Fatalf("fully deactivated family should not consume capacity: %v", err)
+	}
+}
 
-	t.Run("new family blocked at limit", func(t *testing.T) {
-		s := &workspaceTestStore{
-			accountID: accountID,
-			appFamilies: map[string]store.AppFamily{
-				accountID.String() + "\x00" + "mcp" + "\x00" + "github": {
-					AccountID:     accountID,
-					Kind:          "mcp",
-					CanonicalName: "github",
-				},
-				accountID.String() + "\x00" + "mcp" + "\x00" + "gitlab": {
-					AccountID:     accountID,
-					Kind:          "mcp",
-					CanonicalName: "gitlab",
-				},
-			},
-		}
-		entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{
-			MaxMCPFamilies: models.IntPtr(2),
-		})
-		err := enforceMCPFamilyLimit(context.Background(), s, accountID, "bitbucket")
-		if err == nil {
-			t.Fatal("expected block when at limit")
-		}
-		werr, ok := err.(workspaceConfigHTTPError)
-		if !ok || werr.status != http.StatusForbidden {
-			t.Fatalf("expected 403, got %#v", err)
-		}
-	})
+// testMCPZeroFamilyLimit proves an explicit zero remains quota policy rather than authorization denial.
+func testMCPZeroFamilyLimit(t *testing.T) {
+	accountID := uuid.New()
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{MaxMCPFamilies: models.IntPtr(0)})
+	err := enforceMCPFamilyLimit(context.Background(), &workspaceTestStore{accountID: accountID}, accountID, "pagerduty")
+	// Zero entitlement blocks every new server.
+	if err == nil {
+		t.Fatal("expected block with zero limit")
+	}
+	werr, ok := err.(workspaceConfigHTTPError)
+	// The stable code must remain distinct from permission denial.
+	if !ok || werr.status != http.StatusForbidden || werr.code != "mcp_family_limit_exceeded" {
+		t.Fatalf("expected MCP quota error, got %#v", err)
+	}
+}
 
-	t.Run("zero limit blocks all new families", func(t *testing.T) {
-		s := &workspaceTestStore{accountID: accountID}
-		entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{
-			MaxMCPFamilies: models.IntPtr(0),
-		})
-		err := enforceMCPFamilyLimit(context.Background(), s, accountID, "pagerduty")
-		if err == nil {
-			t.Fatal("expected block with zero limit")
-		}
-		werr, ok := err.(workspaceConfigHTTPError)
-		if !ok || werr.status != http.StatusForbidden {
-			t.Fatalf("expected 403, got %#v", err)
-		}
-	})
+// testMCPUnlimitedFamilyLimit proves the explicit unlimited sentinel admits new servers.
+func testMCPUnlimitedFamilyLimit(t *testing.T) {
+	accountID := uuid.New()
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{MaxMCPFamilies: models.IntPtr(-1)})
+	// Unlimited workspaces have no family admission ceiling.
+	if err := enforceMCPFamilyLimit(context.Background(), &workspaceTestStore{accountID: accountID}, accountID, "asana"); err != nil {
+		t.Fatalf("unlimited should allow: %v", err)
+	}
+}
 
-	t.Run("unlimited allows new families", func(t *testing.T) {
-		s := &workspaceTestStore{accountID: accountID}
-		entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{
-			MaxMCPFamilies: models.IntPtr(-1),
-		})
-		err := enforceMCPFamilyLimit(context.Background(), s, accountID, "asana")
-		if err != nil {
-			t.Fatalf("unlimited should allow: %v", err)
-		}
-	})
+// testMCPNilFamilyLimit proves an absent forward-compatible field retains unlimited behavior.
+func testMCPNilFamilyLimit(t *testing.T) {
+	accountID := uuid.New()
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{MaxMCPFamilies: nil})
+	// Missing limits remain unlimited so older entitlement rows do not block new functionality.
+	if err := enforceMCPFamilyLimit(context.Background(), &workspaceTestStore{accountID: accountID}, accountID, "notion"); err != nil {
+		t.Fatalf("nil limit should allow: %v", err)
+	}
+}
 
-	t.Run("nil limit is treated as unlimited", func(t *testing.T) {
-		s := &workspaceTestStore{accountID: accountID}
-		entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{
-			MaxMCPFamilies: nil,
-		})
-		err := enforceMCPFamilyLimit(context.Background(), s, accountID, "notion")
-		if err != nil {
-			t.Fatalf("nil limit (normalized to unlimited) should allow: %v", err)
-		}
-	})
-
-	t.Run("invalid name returns 400", func(t *testing.T) {
-		s := &workspaceTestStore{accountID: accountID}
-		err := enforceMCPFamilyLimit(context.Background(), s, accountID, "")
-		if err == nil {
-			t.Fatal("expected error for empty name")
-		}
-		werr, ok := err.(workspaceConfigHTTPError)
-		if !ok || werr.status != http.StatusBadRequest {
-			t.Fatalf("expected 400, got %#v", err)
-		}
-	})
-
-	// DB count-error paths are covered by integration tests against real
-	// Store implementations; workspaceTestStore does not expose injected
-	// count errors.
+// testMCPInvalidFamilyName proves malformed identity fails before quota lookup.
+func testMCPInvalidFamilyName(t *testing.T) {
+	accountID := uuid.New()
+	err := enforceMCPFamilyLimit(context.Background(), &workspaceTestStore{accountID: accountID}, accountID, "")
+	// Empty names cannot identify a target family.
+	if err == nil {
+		t.Fatal("expected error for empty name")
+	}
+	werr, ok := err.(workspaceConfigHTTPError)
+	// Identity validation remains a caller error rather than quota denial.
+	if !ok || werr.status != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %#v", err)
+	}
 }

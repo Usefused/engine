@@ -913,7 +913,7 @@ type Store interface {
 	// License-tier count queries (single-row, no pagination).
 	// Implementations must keep the query scoped to the calling workspace.
 	CountBuckets(ctx context.Context) (int, error)
-	CountAppFamilies(ctx context.Context, accountID uuid.UUID, kind string) (int, error)
+	GetAppFamilyQuotaUsage(ctx context.Context, accountID uuid.UUID, kind, canonicalName string) (AppFamilyQuotaUsage, error)
 	CountActiveServices(ctx context.Context) (int, error)
 
 	// Bucket methods
