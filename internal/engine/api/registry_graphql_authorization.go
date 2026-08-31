@@ -29,13 +29,14 @@ var registryGraphQLQueryPolicies = registryGraphQLPolicies(
 		"latestServiceVersions", "serviceVersionAuthConfigs", "serviceVersionExecutionAuthContracts", "serviceRuntimeContracts", "serviceWebhookMetadata",
 		"serviceVersionImportIdentities", "service", "resourceIntegrations", "getServiceComponent",
 		"integration", "endpointByName", "endpointsByNames", "serviceOperations", "validateSDKSelections",
-		"searchEndpoints", "searchServices", "parseSDKIntent", "driftSnapshots", "driftSnapshotsForServices",
+		// Batched service candidates are catalogue discovery before a service has workspace execution authority.
+		"searchEndpoints", "searchServices", "serviceCandidatesByRefs", "parseSDKIntent", "driftSnapshots", "driftSnapshotsForServices",
 		"serviceChangelogSince",
 	},
 	[]accesscontrol.Permission{accesscontrol.PermissionCatalogueRead},
 	map[string][]accesscontrol.Permission{
 		// Editor reads share the import grant so an actor allowed to plan can load its owned baseline.
-		"serviceWebhookEditor": {accesscontrol.PermissionCatalogueImport},
+		"serviceWebhookEditor":   {accesscontrol.PermissionCatalogueImport},
 		"globalServiceAnalytics": {accesscontrol.PermissionCatalogueRead},
 		"__typename":             {},
 	},

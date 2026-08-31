@@ -79,8 +79,10 @@ func TestRegistryGraphQLAuthorizationFailsClosedForUnknownRoot(t *testing.T) {
 	}
 }
 
+// TestRegistryGraphQLAuthorizationClassifiesDiscoveryAndRuntimeContractRoots keeps pre-enable catalogue discovery on the reviewed read permission.
 func TestRegistryGraphQLAuthorizationClassifiesDiscoveryAndRuntimeContractRoots(t *testing.T) {
-	roots := []string{"endpointByName", "serviceRuntimeContracts", "serviceVersionExecutionAuthContracts", "serviceWebhookMetadata", "serviceVersionImportIdentities"}
+	// Batched SDK/workspace initialization must discover candidates before any workspace service grant exists.
+	roots := []string{"endpointByName", "serviceCandidatesByRefs", "serviceRuntimeContracts", "serviceVersionExecutionAuthContracts", "serviceWebhookMetadata", "serviceVersionImportIdentities"}
 
 	for _, root := range roots {
 		t.Run(root, func(t *testing.T) {
