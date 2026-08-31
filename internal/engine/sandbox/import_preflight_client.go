@@ -156,9 +156,9 @@ func decodeImportRuntimeContract(contract json.RawMessage) (runtimeContractBatch
 	var item runtimeContractBatchItem
 	decoder := json.NewDecoder(bytes.NewReader(contract))
 	decoder.DisallowUnknownFields()
-	// Unknown or malformed fields would otherwise be hash-bound but unvalidated.
+	// Preserve the decoder cause for owner-visible Engine logs without exposing the contract body.
 	if err := decoder.Decode(&item); err != nil {
-		return runtimeContractBatchItem{}, errors.New("Registry import preflight returned an invalid runtime contract")
+		return runtimeContractBatchItem{}, fmt.Errorf("Registry import preflight returned an invalid runtime contract: %w", err)
 	}
 	// The raw contract must contain exactly one proof-bound object.
 	if err := decoder.Decode(new(any)); err != io.EOF {

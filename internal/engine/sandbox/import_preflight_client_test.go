@@ -88,6 +88,22 @@ func TestDecodeImportPreflightResponseAcceptsOptionalPaginationCollections(t *te
 	}
 }
 
+// TestDecodeImportPreflightResponseAcceptsRegistryWebhookProjection proves a merged endpoint import can retain webhook metadata at strict admission.
+func TestDecodeImportPreflightResponseAcceptsRegistryWebhookProjection(t *testing.T) {
+	item, version := recoveryContractFixture()
+	item.Webhooks = []fusedobject.Webhook{{ID: version.ServiceID, Name: "RAW", Method: "POST"}}
+
+	result, err := decodeImportPreflightResponse(bytes.NewReader(importPreflightFixtureResponseForContract(t, item, version.ServiceVersionID.String(), nil)))
+	// A webhook nested beneath an identity-bound root must not require a redundant service_id field.
+	if err != nil {
+		t.Fatalf("decode merged webhook preflight: %v", err)
+	}
+	// Strict decoding must preserve the retained webhook instead of dropping the passive contract.
+	if len(result.Snapshot.Webhooks) != 1 || result.Snapshot.Webhooks[0].Name != "RAW" {
+		t.Fatalf("merged webhook projection = %+v", result.Snapshot.Webhooks)
+	}
+}
+
 // addUnknownImportPreflightContractField rehashes a candidate containing an
 // unsupported field so the test reaches strict runtime decoding, not hash rejection.
 func addUnknownImportPreflightContractField(t *testing.T, response *importPreflightResponse) {
@@ -100,6 +116,25 @@ func addUnknownImportPreflightContractField(t *testing.T, response *importPrefli
 	contract["catalog"] = json.RawMessage(`{"unsupported":true}`)
 	payload, err := json.Marshal(contract)
 	// A test-only raw field must still produce one canonical candidate document.
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	response.Contract = payload
+	response.ContractHash = "sha256:" + hex.EncodeToString(digest[:])
+}
+
+// addUnknownImportPreflightWebhookField recreates the former Registry projection so diagnostics cover nested DTO drift.
+func addUnknownImportPreflightWebhookField(t *testing.T, response *importPreflightResponse) {
+	t.Helper()
+	var contract map[string]json.RawMessage
+	// The shared fixture must remain an object before its webhook projection can be replaced.
+	if err := json.Unmarshal(response.Contract, &contract); err != nil {
+		t.Fatal(err)
+	}
+	contract["webhooks"] = json.RawMessage(`[{"service_id":"11111111-1111-4111-8111-111111111111"}]`)
+	payload, err := json.Marshal(contract)
+	// Rehashing keeps the test focused on nested strict decoding rather than proof verification.
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,12 +180,17 @@ func TestDecodeImportPreflightResponseRejectsProofAndTransportDefects(t *testing
 			return importPreflightFixtureResponse(t, func(response *importPreflightResponse) {
 				addUnknownImportPreflightContractField(t, response)
 			})
-		}, needle: "invalid runtime contract"},
+		}, needle: `invalid runtime contract: json: unknown field "catalog"`},
+		{name: "unknown nested webhook field", body: func(t *testing.T) []byte {
+			return importPreflightFixtureResponse(t, func(response *importPreflightResponse) {
+				addUnknownImportPreflightWebhookField(t, response)
+			})
+		}, needle: `invalid runtime contract: json: unknown field "service_id"`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := decodeImportPreflightResponse(bytes.NewReader(test.body(t)))
-			// Stable bounded wording is sufficient; provider contract JSON must never enter the error.
+			// Stable bounded wording may identify the rejected field, while provider contract values must never enter the error.
 			if err == nil || !strings.Contains(err.Error(), test.needle) {
 				t.Fatalf("error = %v, want %q", err, test.needle)
 			}
