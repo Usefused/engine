@@ -14,6 +14,8 @@ import (
 
 var errBackgroundStoreCapability = errors.New("background database capability is unavailable")
 
+var _ worker.SDKGenerationBuildStore = (*serializedBackgroundStore)(nil)
+
 // backgroundDatabaseGate prevents independently scheduled maintenance jobs
 // from opening multiple connections at the same instant. Foreground request
 // paths deliberately keep the original store so traffic can expand the pool.
@@ -56,6 +58,7 @@ type serializedBackgroundStore struct {
 	revisionLoader accesscontrol.AuthorizationRevisionLoader
 	usageReports   worker.RuntimeUsageReportStore
 	packageLeases  worker.SDKPackageLeaseStore
+	sdkGenerations worker.SDKGenerationBuildStore
 	authRefresh    worker.ConnectedAuthRefreshStore
 }
 
@@ -65,10 +68,11 @@ func newSerializedBackgroundStore(source store.Store) *serializedBackgroundStore
 	revisionLoader, _ := source.(accesscontrol.AuthorizationRevisionLoader)
 	usageReports, _ := source.(worker.RuntimeUsageReportStore)
 	packageLeases, _ := source.(worker.SDKPackageLeaseStore)
+	sdkGenerations, _ := source.(worker.SDKGenerationBuildStore)
 	authRefresh, _ := source.(worker.ConnectedAuthRefreshStore)
 	return &serializedBackgroundStore{
 		Store: source, gate: newBackgroundDatabaseGate(), revisionLoader: revisionLoader,
-		usageReports: usageReports, packageLeases: packageLeases, authRefresh: authRefresh,
+		usageReports: usageReports, packageLeases: packageLeases, sdkGenerations: sdkGenerations, authRefresh: authRefresh,
 	}
 }
 
@@ -78,6 +82,16 @@ func (s *serializedBackgroundStore) connectedAuthRefreshCapability() (worker.Con
 	if s == nil || s.authRefresh == nil {
 		// Why: returning the wrapper itself would defer a missing capability to
 		// hourly runtime failures and silently let OAuth grants expire.
+		return nil, errBackgroundStoreCapability
+	}
+	return s, nil
+}
+
+// sdkGenerationCapability returns the gated discovery view only when the
+// wrapped store can durably finalize building SDK versions.
+func (s *serializedBackgroundStore) sdkGenerationCapability() (worker.SDKGenerationBuildStore, error) {
+	// Starting without this capability would strand every accepted asynchronous SDK build.
+	if s == nil || s.sdkGenerations == nil {
 		return nil, errBackgroundStoreCapability
 	}
 	return s, nil
@@ -115,6 +129,37 @@ func (s *serializedBackgroundStore) ListSDKPackageLeaseRenewals(ctx context.Cont
 	return backgroundDatabaseValue(ctx, s.gate, func() ([]models.SDKPackageLeaseRenewal, error) {
 		return s.packageLeases.ListSDKPackageLeaseRenewals(ctx, after, limit)
 	})
+}
+
+// ListPendingSDKGenerationBuilds serializes only pending-row discovery; the
+// worker's Registry calls and compare-and-swap mutations bypass the gate.
+func (s *serializedBackgroundStore) ListPendingSDKGenerationBuilds(ctx context.Context, after uuid.UUID, limit int) ([]store.SDKGenerationBuild, error) {
+	// A missing production capability must fail the pass rather than appear as an empty queue.
+	if s.sdkGenerations == nil {
+		return nil, errBackgroundStoreCapability
+	}
+	return backgroundDatabaseValue(ctx, s.gate, func() ([]store.SDKGenerationBuild, error) {
+		return s.sdkGenerations.ListPendingSDKGenerationBuilds(ctx, after, limit)
+	})
+}
+
+// CompleteSDKGeneration forwards the activation CAS outside the shared probe
+// gate so Registry latency cannot hold unrelated background database reads.
+func (s *serializedBackgroundStore) CompleteSDKGeneration(ctx context.Context, appID uuid.UUID, jobID, idempotencyKey string) (bool, error) {
+	// Capability absence leaves the durable build pending for a later healthy process.
+	if s.sdkGenerations == nil {
+		return false, errBackgroundStoreCapability
+	}
+	return s.sdkGenerations.CompleteSDKGeneration(ctx, appID, jobID, idempotencyKey)
+}
+
+// FailSDKGeneration forwards a confirmed terminal Registry outcome outside the probe gate.
+func (s *serializedBackgroundStore) FailSDKGeneration(ctx context.Context, appID uuid.UUID, jobID, idempotencyKey string) (bool, error) {
+	// Capability absence leaves the durable build pending rather than inventing failure state.
+	if s.sdkGenerations == nil {
+		return false, errBackgroundStoreCapability
+	}
+	return s.sdkGenerations.FailSDKGeneration(ctx, appID, jobID, idempotencyKey)
 }
 
 // ClaimAuthConnectionsForRefresh serializes only the due-row discovery and

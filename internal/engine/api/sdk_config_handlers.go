@@ -306,11 +306,12 @@ func SDKConfigApplyHandler(configStore store.ConfigRepository, s store.Store, pr
 			status = models.SDKGenerationStatusPending
 		}
 		resp := map[string]string{
-			"status":        status,
-			"plan_id":       planID.String(),
-			"app_family_id": result.AppFamilyID.String(),
-			"app_id":        result.AppID.String(),
-			"job_id":        result.JobID,
+			"status":            status,
+			"generation_status": result.Status,
+			"plan_id":           planID.String(),
+			"app_family_id":     result.AppFamilyID.String(),
+			"app_id":            result.AppID.String(),
+			"job_id":            result.JobID,
 		}
 		if result.ExecutionToken != "" {
 			resp["execution_token"] = result.ExecutionToken
@@ -578,24 +579,42 @@ func validateAppServiceDocs(services map[string]sdkConfigServiceDoc) error {
 	return nil
 }
 
+// validateAppServiceDoc enforces one unambiguous capability-selection mode before resolving auth or injections.
 func validateAppServiceDoc(name string, service sdkConfigServiceDoc) error {
-	if len(service.Operations) == 0 && !service.SelectAll && len(service.Webhooks) == 0 && !service.WebhooksSelectAll {
-		return fmt.Errorf("service %s requires at least one operation or webhook", name)
+	// Capability shape is independent of injection and authentication policy, so reject ambiguity first.
+	if err := validateAppServiceCapabilitySelection(name, service); err != nil {
+		return err
 	}
 	// Injection grammar must fail before any Registry or bucket lookup begins.
 	if err := validateAppInjectionDocs(name, service.Injections); err != nil {
 		return err
 	}
+	// Omitting an auth selector delegates to the operation contracts resolved later in planning.
 	if service.Auth == nil {
 		return nil
 	}
+	// A present selector must name its canonical authentication family explicitly.
 	if strings.TrimSpace(service.Auth.Type) == "" {
 		return fmt.Errorf("service %s auth requires type", name)
 	}
+	// Only authentication types supported by Engine credential routing may enter immutable app state.
 	if !validAppAuthType(service.Auth.Type) {
 		return fmt.Errorf("service %s auth type must be one of basic, bearer, api_key, oauth, oidc, or mtls", name)
 	}
 	return validateAppAuthReferenceIntent(name, service.Auth)
+}
+
+// validateAppServiceCapabilitySelection requires a useful surface and keeps explicit and wildcard operation authority mutually exclusive.
+func validateAppServiceCapabilitySelection(name string, service sdkConfigServiceDoc) error {
+	// An empty capability surface cannot produce a usable immutable app selection.
+	if len(service.Operations) == 0 && !service.SelectAll && len(service.Webhooks) == 0 && !service.WebhooksSelectAll {
+		return fmt.Errorf("service %s requires at least one operation or webhook", name)
+	}
+	// Explicit names and select-all are competing authorities, so accepting both would make immutable scope intent ambiguous.
+	if len(service.Operations) > 0 && service.SelectAll {
+		return fmt.Errorf("service %s cannot set both operations and select_all", name)
+	}
+	return nil
 }
 
 // validateAppAuthReferenceIntent keeps app-owned references limited to exact OAuth/OIDC application families.
@@ -739,6 +758,10 @@ func createSDKConfigPlan(
 	// Bucket and owner authorization remain independent of contract retention.
 	if err != nil {
 		return sdkPlanResult{}, err
+	}
+	// Capacity is reviewable plan admission, so a full workspace must fail before contract resolution or plan persistence.
+	if err := enforceSDKFamilyLimit(ctx, s, call.accountID, call.document.Name); err != nil {
+		return sdkPlanResult{}, withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed")
 	}
 	call.request.OwnerSubjectID, call.request.OwnerTeamID = owner.subjectID, owner.teamID
 	definition, err := resolveSDKPlanDefinition(ctx, configStore, s, registryClient, call, currentState, *bucket, appID)
@@ -2274,20 +2297,10 @@ func executeSDKConfigApply(
 	// A plan has one deterministic app identity. Serializing it prevents concurrent applies from publishing competing versions.
 	unlockApp := sdkGenerationApplies.lock(stableAppIDForPlan(call.planID))
 	defer unlockApp()
-	plan, err := loadAuthorizedSDKAppPlanForApply(ctx, configStore, s, call)
-	// Only an authorized, exact stored plan can use its retained generation references.
+	plan, registryClient, err := prepareSDKApplyAdmission(ctx, configStore, s, registryClient, call)
+	// Authorization, payload authority, snapshot support, and quota must pass before the apply lease is reserved.
 	if err != nil {
-		return sdkGenerationResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
-	}
-	resolved, err := appPayloadFromJSON(plan.ResolvedPayload)
-	// The immutable plan decides whether apply needs Registry package authority; request flags cannot change that decision.
-	if err != nil {
-		return sdkGenerationResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
-	}
-	registryClient, err = localSnapshotPlanningClient(s, registryClient, !resolved.SkipPackaging)
-	// Apply must prove local snapshot capability before reserving app identity or contacting Registry.
-	if err != nil {
-		return sdkGenerationResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
+		return sdkGenerationResult{}, err
 	}
 	lease, err := configStore.ReserveConfigPlanApply(ctx, call.planID, call.planRevision)
 	// Cross-process apply ownership must be established before Registry generation starts.
@@ -2356,6 +2369,40 @@ func executeSDKConfigApply(
 	result.ExecutionToken = token
 	scopeSpan.SetAttributes(attribute.String("outcome", "success"))
 	return result, nil
+}
+
+// prepareSDKApplyAdmission proves every pre-mutation SDK dependency before lease, identity, or Registry work begins.
+func prepareSDKApplyAdmission(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkApplyCall) (*store.ConfigPlan, sandbox.RegistryClient, error) {
+	plan, err := loadAuthorizedSDKAppPlanForApply(ctx, configStore, s, call)
+	// Only an authorized, exact stored plan can use its retained generation references.
+	if err != nil {
+		return nil, nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
+	}
+	resolved, err := appPayloadFromJSON(plan.ResolvedPayload)
+	// The immutable plan decides whether apply needs Registry package authority; request flags cannot change that decision.
+	if err != nil {
+		return nil, nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
+	}
+	registryClient, err = localSnapshotPlanningClient(s, registryClient, !resolved.SkipPackaging)
+	// Apply must prove local snapshot capability before reserving app identity or contacting Registry.
+	if err != nil {
+		return nil, nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
+	}
+	// A second quota check at apply protects the plan/apply race before a lease, app identity, or Registry job is created.
+	if err := enforceSDKPlanFamilyLimit(ctx, s, call.accountID, plan); err != nil {
+		return nil, nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
+	}
+	return plan, registryClient, nil
+}
+
+// enforceSDKPlanFamilyLimit decodes only the authored family name needed for pre-mutation quota admission.
+func enforceSDKPlanFamilyLimit(ctx context.Context, s store.Store, accountID uuid.UUID, plan *store.ConfigPlan) error {
+	var doc sdkConfigDocument
+	// Stored desired state must remain decodable before it can name an entitlement target.
+	if plan == nil || json.Unmarshal(plan.DesiredState, &doc) != nil {
+		return workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid resolved sdk plan"}
+	}
+	return enforceSDKFamilyLimit(ctx, s, accountID, doc.Name)
 }
 
 func compensateRejectedSDKPackage(ctx context.Context, configStore store.ConfigRepository, configKey string, proxy Forwarder, result sdkGenerationResult) bool {
@@ -2437,11 +2484,9 @@ func generateSDKForApply(
 	}
 	// Compensation owns only a Registry package actually attempted for this new version; direct API created no remote package to delete.
 	result.createdForPlan = input.existingConfigResourceID == uuid.Nil && result.registryGenerationAttempted
-	completed, err := awaitSDKGenerationCompletion(ctx, proxy, call.apiKey, result)
-	if err != nil {
-		return input.plan, result, err
-	}
-	return input.plan, completed, nil
+	// Pending Registry work is now a durable Engine building state; holding this
+	// mutation open until code generation completes recreates the proxy timeout.
+	return input.plan, result, nil
 }
 
 // executeSDKGenerationForApply selects Engine-local publication or Registry package generation from the immutable plan payload.
@@ -2537,8 +2582,9 @@ func reserveSDKGenerationIdentity(ctx context.Context, s store.Store, call sdkAp
 	if err != nil {
 		return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid_app_name"}
 	}
+	// Rechecking immediately before family creation remains authoritative when capacity changed after plan or early apply admission.
 	if err := checkSDKFamilyCapacity(ctx, s, span, call.accountID, canonicalName); err != nil {
-		return uuid.Nil, uuid.Nil, uuid.Nil, err
+		return uuid.Nil, uuid.Nil, uuid.Nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 
 	family, _, err := applifecycle.New(s).CreateOrGetFamily(ctx, applifecycle.CreateFamilyParams{
@@ -2573,6 +2619,16 @@ func checkSDKFamilyCapacity(ctx context.Context, s store.Store, span trace.Span,
 		remediation: "Deactivate all active or deprecated versions of an unused SDK, or upgrade the workspace plan, then retry.",
 		limit:       entitlement.LiveEntitlement.Load().MaxSDKFamilies,
 	})
+}
+
+// enforceSDKFamilyLimit canonicalizes authored SDK identity before applying the shared invokable-family entitlement.
+func enforceSDKFamilyLimit(ctx context.Context, s store.Store, accountID uuid.UUID, name string) error {
+	canonicalName, _, err := canonical.AppName(name)
+	// Invalid authored identity must fail before any family or entitlement lookup.
+	if err != nil {
+		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
+	}
+	return checkSDKFamilyCapacity(ctx, s, trace.SpanFromContext(ctx), accountID, canonicalName)
 }
 
 // reserveSDKVersionIdentity persists Unified operation identity atomically while preserving immutability checks.
@@ -3508,14 +3564,18 @@ type persistAppRuntimeParams struct {
 	selections         []models.SDKSelection
 	scopeSchemaVersion int
 	// Kind and name label the exact version for the app catalogue.
-	kind                           store.AppKind
-	name                           string
-	version                        string
-	configKey                      string
-	description                    string
-	targetLanguage                 string
-	sourceHash                     string
-	generatorVersion               string
+	kind             store.AppKind
+	name             string
+	version          string
+	configKey        string
+	description      string
+	targetLanguage   string
+	sourceHash       string
+	generatorVersion string
+	// Generation identity is mutable lifecycle state for SDK building recovery,
+	// not part of the immutable runtime selection contract.
+	generationJobID                string
+	generationStatus               string
 	unifiedDefinitionSchemaVersion int
 	unifiedDefinitions             json.RawMessage
 	unifiedDefinitionHash          string
@@ -3600,7 +3660,7 @@ func applyGeneratedAppRuntime(
 		kind:                           store.AppKindSDK,
 		name:                           doc.Name,
 		version:                        doc.Version,
-		configKey:                      fmt.Sprintf("sdk:%s:%s", doc.Name, doc.Version),
+		configKey:                      plan.ConfigKey,
 		description:                    payload.Description,
 		targetLanguage:                 payload.TargetLanguage,
 		sourceHash:                     plan.SourceHash,
@@ -3609,19 +3669,42 @@ func applyGeneratedAppRuntime(
 		unifiedDefinitions:             payload.UnifiedDefinitions,
 		unifiedDefinitionHash:          payload.UnifiedDefinitionHash,
 		unifiedCodegenDescriptorHash:   payload.UnifiedCodegenDescriptorHash,
+		generationJobID:                result.JobID,
+		generationStatus:               result.Status,
 	})
 }
 
 func applyAppConfigPlan(ctx context.Context, configStore store.ConfigRepository, s store.Store, call sdkApplyCall, plan *store.ConfigPlan, params persistAppRuntimeParams) (string, uuid.UUID, uuid.UUID, bool, error) {
 	scope, err := appRuntimeForApply(params)
+	// Runtime shape validation must finish before mutable generation state enters persistence.
 	if err != nil {
 		return "", uuid.Nil, uuid.Nil, false, err
 	}
-	return applyAppConfigRuntime(ctx, configStore, s, call, plan, scope, params.bucketName, params.targetLanguage, params.generatorVersion)
+	return applyAppConfigRuntime(ctx, configStore, s, call, plan, scope, params.bucketName, params.targetLanguage, params.generatorVersion, sdkApplyGenerationState{
+		jobID: params.generationJobID, status: params.generationStatus,
+	})
 }
 
-func applyAppConfigRuntime(ctx context.Context, configStore store.ConfigRepository, s store.Store, call sdkApplyCall, plan *store.ConfigPlan, scope store.AppRuntime, authorizedBucketName, targetLanguage, generatorVersion string) (string, uuid.UUID, uuid.UUID, bool, error) {
+type sdkApplyGenerationState struct {
+	jobID  string
+	status string
+}
+
+// applyAppConfigRuntime atomically publishes app scope, plan state, and the
+// first family token, optionally leaving a generated SDK non-runnable while it builds.
+func applyAppConfigRuntime(ctx context.Context, configStore store.ConfigRepository, s store.Store, call sdkApplyCall, plan *store.ConfigPlan, scope store.AppRuntime, authorizedBucketName, targetLanguage, generatorVersion string, generationStates ...sdkApplyGenerationState) (string, uuid.UUID, uuid.UUID, bool, error) {
+	generation := sdkApplyGenerationState{}
+	// MCP and legacy terminal callers omit generation state and remain immediately active.
+	if len(generationStates) > 0 {
+		generation = generationStates[0]
+	}
+	appStatus := store.AppStatusActive
+	// A pending package is durable but cannot execute or consume family quota until confirmed complete.
+	if generation.status == models.SDKGenerationStatusPending {
+		appStatus = store.AppStatusBuilding
+	}
 	rawToken, tokenHash, err := applifecycle.NewExecutionToken()
+	// Token creation precedes the transaction so plaintext can be returned once without persistence.
 	if err != nil {
 		return "", uuid.Nil, uuid.Nil, false, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to issue sdk execution credential"}
 	}
@@ -3637,8 +3720,11 @@ func applyAppConfigRuntime(ctx context.Context, configStore store.ConfigReposito
 		Scope: scope, AuthorizedBucketName: authorizedBucketName,
 		TokenHash: tokenHash, TokenName: "default", TokenPolicy: applifecycle.FullAccessTokenPolicy(),
 		TokenIssuedBySubjectID: optionalActorID(call.actor.SubjectID), TokenIssuedByCredentialID: optionalActorID(call.actor.CredentialID),
-		TargetLanguage:   targetLanguage,
-		GeneratorVersion: generatorVersion,
+		TargetLanguage:      targetLanguage,
+		GeneratorVersion:    generatorVersion,
+		AppStatus:           appStatus,
+		SDKGenerationJobID:  generation.jobID,
+		SDKGenerationStatus: generation.status,
 	})
 	if err != nil {
 		return "", uuid.Nil, uuid.Nil, false, appApplyPersistenceError(ctx, err, scope.AppID)
@@ -3660,11 +3746,22 @@ func notifyAppRuntimeChanged(ctx context.Context, s store.Store, appID uuid.UUID
 	}
 }
 
+// appApplyPersistenceError maps bounded storage invariants into actionable apply errors without exposing database detail.
 func appApplyPersistenceError(ctx context.Context, err error, appID uuid.UUID) error {
 	slog.ErrorContext(ctx, "app config apply persistence failed", slog.Any("error", err), slog.String("app.id", appID.String()))
+	// A concurrent activation may consume the final SDK quota unit after request-path preflight but before commit.
+	if errors.Is(err, store.ErrSDKFamilyLimitExceeded) {
+		return workspaceConfigHTTPError{
+			status: http.StatusForbidden, code: "sdk_family_limit_exceeded", category: "entitlement",
+			message:     "This workspace has reached its SDK limit.",
+			remediation: "Deactivate all active or deprecated versions of an unused SDK, or upgrade the workspace plan, then retry.",
+		}
+	}
+	// Bucket reassignment is an immutable family conflict rather than an internal persistence failure.
 	if errors.Is(err, store.ErrSDKBucketImmutable) {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "app bucket assignment is immutable"}
 	}
+	// Missing or superseded plans require creating a new reviewed plan before another apply.
 	if errors.Is(err, store.ErrConfigPlanNotFound) {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "plan_stale_or_mismatched"}
 	}

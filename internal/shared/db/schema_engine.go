@@ -703,6 +703,19 @@ func engineSchemaQueries() []string {
 			execution_retention_days integer NOT NULL DEFAULT 30,
 			CHECK (singleton_key = 1)
 		);`,
+		// A default unlimited row makes activation transactions total before the
+		// first handshake; Registry bootstrap atomically overwrites it with the licensed contract.
+		`INSERT INTO fused_runtime_entitlements (
+			singleton_key, entitlement_revision, plan, heartbeat_required, usage_reporting,
+			public_service_insights_enabled, heartbeat_interval_seconds,
+			heartbeat_stale_after_seconds, refreshed_at, max_buckets,
+			max_sdk_families, max_mcp_families, max_services, max_sandbox_concurrency,
+			drift_monitoring_enabled, webhook_ingestion_enabled, sso_enabled,
+			execution_retention_days
+		) VALUES (
+			1, '', 'commercial', true, 'aggregate', false, 60, 300, NOW(),
+			-1, -1, -1, -1, -1, true, false, false, 30
+		) ON CONFLICT (singleton_key) DO NOTHING;`,
 
 		// Pending usage reports are local aggregate counters, not raw execution
 		// logs. A partial unique index lets many executions in the same minute
@@ -1236,8 +1249,23 @@ func engineSchemaQueries() []string {
 			unified_definition_hash text NOT NULL DEFAULT '` + unifiedEmptySetHash + `',
 			unified_codegen_descriptor_hash text NOT NULL DEFAULT '` + unifiedEmptySetHash + `',
 			generator_version      text,
+			sdk_generation_job_id  text,
+			sdk_generation_status  text CONSTRAINT chk_fused_apps_sdk_generation_status CHECK (sdk_generation_status IS NULL OR sdk_generation_status IN ('pending', 'complete', 'failed', 'skipped')),
 			status                 text NOT NULL
 			                       CHECK (status IN ('building', 'active', 'deprecated')),
+			CONSTRAINT chk_fused_apps_sdk_generation_state CHECK (
+				(sdk_generation_job_id IS NULL AND sdk_generation_status IS NULL)
+				OR (
+					sdk_generation_job_id IS NOT NULL
+					AND btrim(sdk_generation_job_id) <> ''
+					AND octet_length(sdk_generation_job_id) <= 255
+					AND sdk_generation_status IS NOT NULL
+					AND (
+						(status = 'building' AND sdk_generation_status IN ('pending', 'failed'))
+						OR (status IN ('active', 'deprecated') AND sdk_generation_status IN ('complete', 'skipped'))
+					)
+				)
+			),
 			deprecation_message    text,
 			deprecated_at          timestamptz,
 			planned_deactivation_at timestamptz,
@@ -1259,6 +1287,46 @@ func engineSchemaQueries() []string {
 				AND unified_codegen_descriptor_hash ~ '^sha256:[0-9a-f]{64}$'
 			)
 		);`,
+		// Existing app-family Engines gain durable SDK build recovery columns in
+		// place; no app identity or runtime selection is rewritten.
+		`ALTER TABLE fused_apps ADD COLUMN IF NOT EXISTS sdk_generation_job_id text;`,
+		`ALTER TABLE fused_apps ADD COLUMN IF NOT EXISTS sdk_generation_status text;`,
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname = 'chk_fused_apps_sdk_generation_status'
+				  AND conrelid = 'fused_apps'::regclass
+			) THEN
+				ALTER TABLE fused_apps
+				ADD CONSTRAINT chk_fused_apps_sdk_generation_status
+				CHECK (sdk_generation_status IS NULL OR sdk_generation_status IN ('pending', 'complete', 'failed', 'skipped'));
+			END IF;
+		END $$;`,
+		// Generation coherence prevents direct SQL or old callers from making pending SDK work runnable or terminal work building.
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname = 'chk_fused_apps_sdk_generation_state'
+				  AND conrelid = 'fused_apps'::regclass
+			) THEN
+				ALTER TABLE fused_apps
+				ADD CONSTRAINT chk_fused_apps_sdk_generation_state CHECK (
+					(sdk_generation_job_id IS NULL AND sdk_generation_status IS NULL)
+					OR (
+						sdk_generation_job_id IS NOT NULL
+						AND btrim(sdk_generation_job_id) <> ''
+						AND octet_length(sdk_generation_job_id) <= 255
+						AND sdk_generation_status IS NOT NULL
+						AND (
+							(status = 'building' AND sdk_generation_status IN ('pending', 'failed'))
+							OR (status IN ('active', 'deprecated') AND sdk_generation_status IN ('complete', 'skipped'))
+						)
+					)
+				);
+			END IF;
+		END $$;`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_apps_family_status
 			ON fused_apps(app_family_id, status, created_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_apps_account_status

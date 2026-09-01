@@ -60,14 +60,14 @@ func TestGetAppFamilyQuotaUsage(t *testing.T) {
 	}
 	_, err = pool.Exec(ctx, `
 		INSERT INTO fused_apps
-			(app_id, app_family_id, account_id, version, config_key, status)
+			(app_id, app_family_id, account_id, version, config_key, status, sdk_generation_job_id, sdk_generation_status)
 		VALUES
-			($1, $7, $12, '1.0.0', $14, 'active'),
-			($2, $7, $12, '2.0.0', $15, 'deprecated'),
-			($3, $8, $12, '1.0.0', $16, 'deprecated'),
-			($4, $9, $12, '1.0.0', $17, 'building'),
-			($5, $10, $12, '1.0.0', $18, 'active'),
-			($6, $11, $13, '1.0.0', $19, 'active')
+			($1, $7, $12, '1.0.0', $14, 'active', NULL, NULL),
+			($2, $7, $12, '2.0.0', $15, 'deprecated', NULL, NULL),
+			($3, $8, $12, '1.0.0', $16, 'deprecated', NULL, NULL),
+			($4, $9, $12, '1.0.0', $17, 'building', 'job-building', 'pending'),
+			($5, $10, $12, '1.0.0', $18, 'active', NULL, NULL),
+			($6, $11, $13, '1.0.0', $19, 'active', NULL, NULL)
 	`, activeAppID, activeSiblingAppID, deprecatedAppID, buildingAppID, mcpAppID, otherAppID,
 		activeFamilyID, deprecatedFamilyID, buildingFamilyID, mcpFamilyID, otherFamilyID,
 		accountID, otherAccountID,

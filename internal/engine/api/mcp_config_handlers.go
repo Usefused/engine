@@ -228,15 +228,8 @@ func validateMCPAppRestrictions(doc sdkConfigDocument, kind string) error {
 // createMCPConfigPlan resolves service versions, operations, and auth policy
 // now so apply and later agent calls never need to infer provider setup.
 func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkPlanCall) (sdkPlanResult, error) {
-	current, registryClient, err := loadMCPPlanningState(ctx, configStore, s, registryClient, call.request.ConfigKey)
-	// State and local snapshot authority must be available before another immutable version is planned.
-	if err != nil {
-		return sdkPlanResult{}, err
-	}
-	owner, bucket, err := resolveAppPlanOwnerAndBucket(
-		ctx, s, current, call.actor, call.request.OwnerTeamSlug, call.document.Bucket,
-	)
-	// Retained provider contracts do not bypass owner or credential-set authorization.
+	current, registryClient, owner, bucket, err := prepareMCPPlanAdmission(ctx, configStore, s, registryClient, call)
+	// State, authorization, bucket identity, and quota must all pass before contract resolution begins.
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
@@ -311,6 +304,25 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 		notifications: withAppCredentialReadinessWarning(collectSDKPlanNotifications(ctx, configStore, registryClient, call, resolved), readiness),
 		readiness:     readiness,
 	}, nil
+}
+
+// prepareMCPPlanAdmission resolves local planning authority and all non-contract admission checks in one bounded stage.
+func prepareMCPPlanAdmission(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkPlanCall) (*store.ConfigState, sandbox.RegistryClient, configOwner, *store.Bucket, error) {
+	current, registryClient, err := loadMCPPlanningState(ctx, configStore, s, registryClient, call.request.ConfigKey)
+	// State and local snapshot authority must be available before another immutable version is planned.
+	if err != nil {
+		return nil, nil, configOwner{}, nil, err
+	}
+	owner, bucket, err := resolveAppPlanOwnerAndBucket(ctx, s, current, call.actor, call.request.OwnerTeamSlug, call.document.Bucket)
+	// Retained provider contracts do not bypass owner or credential-set authorization.
+	if err != nil {
+		return nil, nil, configOwner{}, nil, err
+	}
+	// Capacity is reviewable plan admission, so a full workspace must fail before contract resolution or plan persistence.
+	if err := enforceMCPFamilyLimit(ctx, s, call.accountID, call.document.Name); err != nil {
+		return nil, nil, configOwner{}, nil, withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed")
+	}
+	return current, registryClient, owner, bucket, nil
 }
 
 // loadMCPPlanningState admits local-only dependencies before inspecting the existing immutable configuration.

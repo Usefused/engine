@@ -26,6 +26,7 @@ const CORRECTABLE_PHYSICAL_PAGINATION_CODES = new Set<string>([
 ]);
 
 const STABLE_LOWERCASE_ENGINE_CODES = new Set<string>([
+  "bucket_credentials_missing",
   "mcp_pagination_max_pages_invalid",
   "mcp_pagination_not_supported",
   "mcp_pagination_bound_not_lower",
@@ -189,8 +190,8 @@ export function modelVisibleExecuteErrorCode(message: string): string {
   if (runtimeCode) {
     return runtimeCode;
   }
-  const engineCode = /^(mcp_[a-z0-9_]+):/.exec(message)?.[1];
-  // An exact allowlist prevents arbitrary lowercase provider text or future unreviewed reasons from becoming recovery metadata.
+  const engineCode = /^([a-z][a-z0-9_]+):/.exec(message)?.[1];
+  // An exact allowlist admits reviewed Engine setup and pagination codes without trusting arbitrary lowercase provider text.
   return engineCode && STABLE_LOWERCASE_ENGINE_CODES.has(engineCode) ? engineCode : "MCP_EXECUTE_FAILED";
 }
 

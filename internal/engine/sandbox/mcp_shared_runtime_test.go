@@ -657,15 +657,53 @@ func assertMCPPaginationIntentRecovery(t *testing.T, response mcpCallResponse, w
 }
 
 // TestMCPPhysicalMissingCredentialReturnsSetupCommand proves a physical MCP
-// tool call keeps the pre-provider credential remedy intact for the agent.
+// tool call keeps the pre-provider credential remedy and replay proof intact for the agent.
 func TestMCPPhysicalMissingCredentialReturnsSetupCommand(t *testing.T) {
 	bucketID, serviceID := uuid.New(), uuid.New()
-	statusCode, response := boundedMCPPhysicalCallResponse("jira.searchProjects", &CredentialMaterialMissingError{
+	statusCode, response := boundedMCPPhysicalCallResponse("jira.searchProjects", fmt.Errorf("resolve static auth: %w", &CredentialMaterialMissingError{
 		BucketID: bucketID, ServiceID: serviceID, AuthType: "basic", AuthName: "basicAuth",
-	})
-	// Static absence remains a provider-gateway failure, but its bounded text must be directly actionable.
-	if statusCode != http.StatusBadGateway || !strings.Contains(response.Error, "bucket_credentials_missing") || !strings.Contains(response.Error, "fused-cli secret set "+serviceID.String()) || !strings.Contains(response.Error, "--bucket "+bucketID.String()) {
+	}))
+	assertMCPMissingCredentialRecovery(t, statusCode, response)
+	assertMCPMissingCredentialCommand(t, response, bucketID, serviceID)
+}
+
+// TestMCPCallHandlerClassifiesMissingCredentialsBeforeProviderDispatch covers the complete authenticated bridge path used by Streamable MCP execute.
+func TestMCPCallHandlerClassifiesMissingCredentialsBeforeProviderDispatch(t *testing.T) {
+	// An unreachable endpoint ensures this test cannot accidentally depend on a live provider listener.
+	sessionID, endpointName, _ := configureMCPPhysicalCallTest(t, "http://127.0.0.1:1")
+	bucketID, serviceID := uuid.New(), uuid.New()
+	globalSecretResolver = &mcpConnectedAuthFailureResolver{err: fmt.Errorf("resolve static auth: %w", &CredentialMaterialMissingError{
+		BucketID: bucketID, ServiceID: serviceID, AuthType: "api_key", AuthName: "providerKey",
+	})}
+	statusCode, response := executeMCPPhysicalHandlerTest(t, sessionID, endpointName, nil)
+	assertMCPMissingCredentialRecovery(t, statusCode, response)
+	assertMCPMissingCredentialCommand(t, response, bucketID, serviceID)
+}
+
+// assertMCPMissingCredentialRecovery verifies the closed bridge decision trusted by the child runtime.
+func assertMCPMissingCredentialRecovery(t *testing.T, statusCode int, response mcpCallResponse) {
+	t.Helper()
+	// Typed static absence is a setup conflict whose exact remedy permits only a deliberate retry after configuration.
+	if statusCode != http.StatusConflict || response.Code != "bucket_credentials_missing" || response.RecoveryAction != "complete_authentication" || response.ExecuteRequest != "retry_after_auth" || response.ProviderExecution != "not_started" || response.AutomaticReplay == nil || *response.AutomaticReplay {
 		t.Fatalf("MCP credential response = status:%d response:%+v", statusCode, response)
+	}
+}
+
+// assertMCPMissingCredentialCommand verifies the value-free response retains the exact interactive setup command.
+func assertMCPMissingCredentialCommand(t *testing.T, response mcpCallResponse, bucketID, serviceID uuid.UUID) {
+	t.Helper()
+	// Both immutable identifiers are required for an operator to configure the selected app bucket without guessing.
+	if !strings.Contains(response.Error, "fused-cli secret set "+serviceID.String()) || !strings.Contains(response.Error, "--bucket "+bucketID.String()) {
+		t.Fatalf("missing credential command = %q", response.Error)
+	}
+}
+
+// TestMCPPhysicalAmbiguousFailureKeepsUnknownOutcome proves untyped failures cannot borrow the credential retry decision.
+func TestMCPPhysicalAmbiguousFailureKeepsUnknownOutcome(t *testing.T) {
+	statusCode, response := boundedMCPPhysicalCallResponse("jira.searchProjects", errors.New("provider connection ended"))
+	// Absence of typed pre-provider proof must retain the conservative unclassified bridge response.
+	if statusCode != http.StatusBadGateway || response.Code != "" || response.RecoveryAction != "" || response.ExecuteRequest != "" || response.ProviderExecution != "" || response.AutomaticReplay != nil {
+		t.Fatalf("ambiguous physical failure = status:%d response:%+v", statusCode, response)
 	}
 }
 

@@ -455,15 +455,18 @@ func insertApp(ctx context.Context, tx pgx.Tx, app App) error {
 			 source_hash, capability_hash, scope_schema_version, selections,
 			 unified_definition_schema_version, unified_definitions,
 			 unified_definition_hash, unified_codegen_descriptor_hash,
-			 generator_version, status, created_by, activated_at)
+			 generator_version, sdk_generation_job_id, sdk_generation_status,
+			 status, created_by, activated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-		        NULLIF($14, ''), $15, NULLIF($16, '00000000-0000-0000-0000-000000000000'::uuid),
-		        CASE WHEN $15 = 'active' THEN NOW() ELSE NULL END)
+		        NULLIF($14, ''), NULLIF($15, ''), NULLIF($16, ''), $17,
+		        NULLIF($18, '00000000-0000-0000-0000-000000000000'::uuid),
+		        CASE WHEN $17 = 'active' THEN NOW() ELSE NULL END)
 	`, app.AppID, app.AppFamilyID, app.AccountID, app.Version, app.ConfigKey,
 		app.SourceHash, app.CapabilityHash, app.ScopeSchemaVersion, app.Selections,
 		app.UnifiedDefinitionSchemaVersion, app.UnifiedDefinitions,
 		app.UnifiedDefinitionHash, app.UnifiedCodegenDescriptorHash,
-		app.GeneratorVersion, app.Status, app.CreatedBy)
+		app.GeneratorVersion, app.SDKGenerationJobID, app.SDKGenerationStatus,
+		app.Status, app.CreatedBy)
 	if err != nil {
 		return fmt.Errorf("publish app: insert: %w", err)
 	}
@@ -474,8 +477,10 @@ const appSelect = `
 SELECT a.app_id, a.app_family_id, a.account_id, a.version, a.config_key,
        a.source_hash, a.capability_hash, a.scope_schema_version, a.selections,
        a.unified_definition_schema_version, a.unified_definitions,
-       a.unified_definition_hash, a.unified_codegen_descriptor_hash,
-       COALESCE(a.generator_version, ''), a.status,
+	       a.unified_definition_hash, a.unified_codegen_descriptor_hash,
+	       COALESCE(a.generator_version, ''),
+	       COALESCE(a.sdk_generation_job_id, ''), COALESCE(a.sdk_generation_status, ''),
+	       a.status,
        COALESCE(a.deprecation_message, ''), a.planned_deactivation_at,
        COALESCE(a.created_by, '00000000-0000-0000-0000-000000000000'::uuid),
 	   a.created_at, a.activated_at
@@ -768,7 +773,8 @@ func scanApp(row pgx.Row) (*App, error) {
 		&a.SourceHash, &a.CapabilityHash, &a.ScopeSchemaVersion, &a.Selections,
 		&a.UnifiedDefinitionSchemaVersion, &a.UnifiedDefinitions,
 		&a.UnifiedDefinitionHash, &a.UnifiedCodegenDescriptorHash,
-		&a.GeneratorVersion, &a.Status, &depMsg, &a.PlannedDeactivationAt,
+		&a.GeneratorVersion, &a.SDKGenerationJobID, &a.SDKGenerationStatus,
+		&a.Status, &depMsg, &a.PlannedDeactivationAt,
 		&a.CreatedBy, &a.CreatedAt, &a.ActivatedAt)
 	if err != nil {
 		return nil, err

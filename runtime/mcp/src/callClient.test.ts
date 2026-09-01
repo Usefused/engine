@@ -186,6 +186,35 @@ describe("remoteCall", () => {
     expect(bridgeRecoveryForError(failure)).toEqual({ recovery_action: "correct_execute_arguments", execute_request: "correct_arguments", provider_execution: "not_started", automatic_replay: false });
   });
 
+  /** Missing static credentials retain Engine's exact operator action and proven pre-provider state. */
+  it("preserves the credential configuration recovery", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: async () => ({
+          code: "bucket_credentials_missing",
+          error: "bucket_credentials_missing: provider credentials are not configured; run: fused-cli secret set service-id --bucket bucket-id --interactive",
+          recovery_action: "complete_authentication",
+          execute_request: "retry_after_auth",
+          provider_execution: "not_started",
+          automatic_replay: false,
+        }),
+      }),
+    );
+
+    let failure: unknown;
+    try {
+      await remoteCall(options, "resend.sendEmail", {});
+    } catch (error) {
+      // The trusted bridge error owns both the value-free command and the safe deliberate retry decision.
+      failure = error;
+    }
+    expect((failure as Error).message).toContain("fused-cli secret set service-id --bucket bucket-id --interactive");
+    expect(bridgeRecoveryForError(failure)).toEqual({ recovery_action: "complete_authentication", execute_request: "retry_after_auth", provider_execution: "not_started", automatic_replay: false });
+  });
+
   /** Engine-created authentication URLs remain identity-bound and require the complete recovery contract. */
   it("preserves a validated browser authentication handoff", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({

@@ -198,6 +198,33 @@ describe("runExecute -- call() wiring", () => {
     expect(failure.message).toContain("Configure X-Fused-End-User-Ref on the MCP client connection");
   });
 
+  /** A first-call static credential miss remains actionable without claiming any provider execution. */
+  it("preserves the credential setup action in the final execute error", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        code: "bucket_credentials_missing",
+        error: "bucket_credentials_missing: provider credentials are not configured; run: fused-cli secret set service-id --bucket bucket-id --interactive",
+        recovery_action: "complete_authentication",
+        execute_request: "retry_after_auth",
+        provider_execution: "not_started",
+        automatic_replay: false,
+      }),
+    }));
+
+    const failure = errorValue(await runExecute('return await call("resend.sendEmail", {});', testCallOptions, new SessionState()));
+    // A single bridge-proven rejection survives the outer runtime without being downgraded to an unknown provider outcome.
+    expect(failure).toMatchObject({
+      code: "bucket_credentials_missing",
+      recovery_action: "complete_authentication",
+      execute_request: "retry_after_auth",
+      provider_execution: "not_started",
+      automatic_replay: false,
+    });
+    expect(failure.message).toContain("fused-cli secret set service-id --bucket bucket-id --interactive");
+  });
+
   /** A first-call auth challenge carries a browser URL and safe exact-tool replay decision outside model text. */
   it("preserves browser authentication for an isolated call", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({

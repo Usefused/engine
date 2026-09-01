@@ -61,8 +61,9 @@ it("validates bridge recovery fields before use", () => {
   expect(modelRecoveryFromUnknown({ ...recovery, automatic_replay: true })).toBeUndefined();
 });
 
-// Only Engine-owned lowercase pagination prefixes may bypass the generic outer execute code.
-it("preserves stable pagination codes without admitting arbitrary lowercase prefixes", () => {
+// Only reviewed Engine-owned lowercase setup and pagination prefixes may bypass the generic outer execute code.
+it("preserves stable Engine codes without admitting arbitrary lowercase prefixes", () => {
+  expect(modelVisibleExecuteErrorCode("bucket_credentials_missing: run fused-cli secret set")).toBe("bucket_credentials_missing");
   expect(modelVisibleExecuteErrorCode("mcp_pagination_not_supported: omit it")).toBe("mcp_pagination_not_supported");
   expect(modelVisibleExecuteErrorCode("mcp_physical_pagination_not_allowed_for_unified: omit it")).toBe("mcp_physical_pagination_not_allowed_for_unified");
   expect(modelVisibleExecuteErrorCode("MCP_CALL_OPTIONS_INVALID: bad options")).toBe("MCP_CALL_OPTIONS_INVALID");

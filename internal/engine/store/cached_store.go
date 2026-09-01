@@ -28,6 +28,7 @@ type cachedStore struct {
 
 var _ AuthConnectionRefreshStore = (*cachedStore)(nil)
 var _ MCPUnifiedDescriptorStore = (*cachedStore)(nil)
+var _ SDKGenerationBuildStore = (*cachedStore)(nil)
 
 // AppRuntimeInvalidator terminates volatile consumers holding one exact immutable app authorization.
 type AppRuntimeInvalidator interface {
@@ -90,6 +91,58 @@ func (s *cachedStore) GetSDKPackageBuildRequest(ctx context.Context, accountID, 
 		return nil, errors.New("store does not support SDK package build recovery")
 	}
 	return repository.GetSDKPackageBuildRequest(ctx, accountID, appID)
+}
+
+// sdkGenerationBuildDelegate exposes durable generation recovery without
+// caching building state that changes independently in a background worker.
+func (s *cachedStore) sdkGenerationBuildDelegate() (SDKGenerationBuildStore, error) {
+	repository, ok := s.Store.(SDKGenerationBuildStore)
+	// Recovery must fail closed when a storage implementation cannot own the activation CAS.
+	if !ok {
+		return nil, errors.New("store does not support SDK generation recovery")
+	}
+	return repository, nil
+}
+
+// GetSDKGenerationBuild forwards exact retained request recovery to durable storage.
+func (s *cachedStore) GetSDKGenerationBuild(ctx context.Context, accountID, appID uuid.UUID) (*SDKGenerationBuild, error) {
+	repository, err := s.sdkGenerationBuildDelegate()
+	// Capability errors remain distinct from an absent app build.
+	if err != nil {
+		return nil, err
+	}
+	return repository.GetSDKGenerationBuild(ctx, accountID, appID)
+}
+
+// ListPendingSDKGenerationBuilds forwards bounded keyset discovery without
+// retaining independently changing job status in memory.
+func (s *cachedStore) ListPendingSDKGenerationBuilds(ctx context.Context, after uuid.UUID, limit int) ([]SDKGenerationBuild, error) {
+	repository, err := s.sdkGenerationBuildDelegate()
+	// Capability errors stop the pass before any incomplete page is interpreted.
+	if err != nil {
+		return nil, err
+	}
+	return repository.ListPendingSDKGenerationBuilds(ctx, after, limit)
+}
+
+// CompleteSDKGeneration forwards the job-bound activation CAS to durable storage.
+func (s *cachedStore) CompleteSDKGeneration(ctx context.Context, appID uuid.UUID, jobID, idempotencyKey string) (bool, error) {
+	repository, err := s.sdkGenerationBuildDelegate()
+	// A missing durable transition owner cannot be replaced by a cache mutation.
+	if err != nil {
+		return false, err
+	}
+	return repository.CompleteSDKGeneration(ctx, appID, jobID, idempotencyKey)
+}
+
+// FailSDKGeneration forwards confirmed terminal failure without caching it as runtime state.
+func (s *cachedStore) FailSDKGeneration(ctx context.Context, appID uuid.UUID, jobID, idempotencyKey string) (bool, error) {
+	repository, err := s.sdkGenerationBuildDelegate()
+	// A missing durable transition owner leaves the job pending for later recovery.
+	if err != nil {
+		return false, err
+	}
+	return repository.FailSDKGeneration(ctx, appID, jobID, idempotencyKey)
 }
 
 // GetMCPUnifiedOperationDescriptors forwards exact applied-plan recovery

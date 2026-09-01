@@ -848,6 +848,11 @@ func boundedMCPPhysicalCallResponse(operationID string, err error) (int, mcpCall
 	if errors.Is(err, errMCPEndUserRefRequired) {
 		return http.StatusBadRequest, mcpCorrectArgumentsResponse(mcpEndUserRefRequiredCode, mcpEndUserRefRequiredMessage)
 	}
+	var missingCredentials *CredentialMaterialMissingError
+	// Static credential resolution happens before provider dispatch, so the exact setup command may authorize one deliberate post-configuration retry.
+	if errors.As(err, &missingCredentials) {
+		return http.StatusConflict, mcpMissingCredentialsResponse(missingCredentials)
+	}
 	statusCode, message := boundedMCPPhysicalCallError(operationID, err)
 	response := mcpCallResponse{Error: message}
 	var paginationErr *engine.PaginationIntentValidationError
@@ -861,6 +866,16 @@ func boundedMCPPhysicalCallResponse(operationID string, err error) (int, mcpCall
 		return statusCode, response
 	}
 	return statusCode, mcpCorrectArgumentsResponse(code, message)
+}
+
+// mcpMissingCredentialsResponse preserves the value-free setup command while proving that provider execution never began.
+func mcpMissingCredentialsResponse(err *CredentialMaterialMissingError) mcpCallResponse {
+	automaticReplay := false
+	return mcpCallResponse{
+		Error: boundedMCPCallErrorMessage(err.Error()), Code: "bucket_credentials_missing",
+		RecoveryAction: "complete_authentication", ExecuteRequest: "retry_after_auth",
+		ProviderExecution: "not_started", AutomaticReplay: &automaticReplay,
+	}
 }
 
 // mcpPaginationIntentCode maps reviewed pre-provider reasons onto stable public codes shared by prose and recovery fields.

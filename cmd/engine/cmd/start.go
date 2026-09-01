@@ -185,6 +185,13 @@ func runEngine() {
 	engineWorkers := startEngineWorkers(ctx, engineStore, natsClient, cfg.Engine, runtimeTokenInvalidator)
 	engineWorkers.providerRateLimits = startProviderRateLimitProjection(ctx, postgresStore, natsClient)
 	engineWorkers.packageLeases = startSDKPackageLeaseRenewal(ctx, backgroundStore, registryClient)
+	sdkGenerationStore, err := backgroundStore.sdkGenerationCapability()
+	// Accepted asynchronous builds require a durable startup recovery owner.
+	if err != nil {
+		slog.ErrorContext(ctx, "FATAL: SDK generation finalizer store is unavailable", slog.String("error_code", "sdk_generation_finalizer_store_unavailable"))
+		os.Exit(1)
+	}
+	engineWorkers.sdkGenerations = startSDKGenerationFinalizer(ctx, sdkGenerationStore, registryClient, engineStore)
 	engineWorkers.publicInsights = startPublicServiceInsightReporting(ctx, backgroundStore, registryClient)
 	controlAuthenticator := newControlAuthenticator(ctx, engineStore, authorizationRevision)
 	startAuthorizationRevisionPolling(ctx, backgroundStore, controlAuthenticator)
@@ -404,6 +411,7 @@ type engineWorkers struct {
 	publicInsights        *worker.PublicInsightWorker
 	usageCounter          *worker.UsageCounterWorker
 	packageLeases         *worker.SDKPackageLeaseWorker
+	sdkGenerations        *worker.SDKGenerationFinalizer
 	providerRateLimits    *worker.ProviderRateLimitProjectionWorker
 	connectedAuthRefresh  *worker.ConnectedAuthRefreshWorker
 	authEventWebhooks     *worker.AuthEventWebhookWorker
@@ -458,7 +466,11 @@ func (w engineWorkers) stopReportingWorkers(ctx context.Context) {
 	if w.publicInsights != nil {
 		w.publicInsights.Stop(ctx)
 	}
-	// Package lease renewal stops last among reporting workers because it is independent from event persistence.
+	// Generation finalization stops after ordinary reporting so an in-flight bounded activation can settle during shutdown.
+	if w.sdkGenerations != nil {
+		w.sdkGenerations.Stop(ctx)
+	}
+	// Package lease renewal stops last because it is independent from event persistence and generation activation.
 	if w.packageLeases != nil {
 		w.packageLeases.Stop(ctx)
 	}
@@ -556,6 +568,24 @@ func startSDKPackageLeaseRenewal(ctx context.Context, engineStore store.Store, r
 	// arming the periodic timer. Registry availability never gates Engine runtime.
 	leaseWorker.Start(ctx)
 	return leaseWorker
+}
+
+// startSDKGenerationFinalizer launches startup recovery and binds the exact
+// activation winner to the shared runtime-cache invalidation path.
+func startSDKGenerationFinalizer(ctx context.Context, buildStore worker.SDKGenerationBuildStore, registryClient sandbox.SDKGenerationClient, runtimeStore store.Store) *worker.SDKGenerationFinalizer {
+	finalizer := worker.NewSDKGenerationFinalizer(buildStore, registryClient, worker.SDKGenerationFinalizerOptions{
+		OnActivated: func(invalidationCtx context.Context, appID uuid.UUID) {
+			notifier, ok := runtimeStore.(interface {
+				NotifyAppRuntimeChanged(context.Context, uuid.UUID)
+			})
+			// The durable activation remains valid even when an alternate test store has no volatile cache.
+			if ok {
+				notifier.NotifyAppRuntimeChanged(invalidationCtx, appID)
+			}
+		},
+	})
+	finalizer.Start(ctx)
+	return finalizer
 }
 
 // startConnectedAuthRefreshWorker constructs and starts the managed OAuth

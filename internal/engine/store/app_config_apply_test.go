@@ -106,6 +106,31 @@ func TestApplyAppConfigPlanRejectsSDKWithoutPlanLease(t *testing.T) {
 	}
 }
 
+// TestSDKGenerationCompletionPromotesDurableBuildingApp exercises the real plan-bound CAS and activation quota transaction.
+func TestSDKGenerationCompletionPromotesDurableBuildingApp(t *testing.T) {
+	fixture := newConcurrentArtifactApplyFixture(t, ConfigTypeSDK)
+	fixture.params.AppStatus = AppStatusBuilding
+	fixture.params.SDKGenerationJobID = "job-queued"
+	fixture.params.SDKGenerationStatus = models.SDKGenerationStatusPending
+	fixture.params.TokenHash = "queued-token-" + uuid.NewString()
+	result, err := fixture.repository.ApplyAppConfigPlan(fixture.ctx, fixture.params)
+	// Apply must first commit the exact version as non-runnable with its plan and token.
+	if err != nil {
+		t.Fatalf("apply building SDK: %v", err)
+	}
+	appStore := NewPostgresStore(fixture.pool).(*postgresStore)
+	changed, err := appStore.CompleteSDKGeneration(fixture.ctx, result.AppID, "job-queued", fixture.params.Plan.PlanID.String())
+	// The matching latest applied plan is the sole attempt authorized to make the version runnable.
+	if err != nil || !changed {
+		t.Fatalf("complete SDK generation: changed=%t error=%v", changed, err)
+	}
+	app, err := appStore.GetApp(fixture.ctx, result.AppID)
+	// Persisted app state is the local status endpoint and runtime's single lifecycle authority.
+	if err != nil || app.Status != AppStatusActive || app.SDKGenerationStatus != models.SDKGenerationStatusComplete {
+		t.Fatalf("completed app = %#v / %v", app, err)
+	}
+}
+
 func TestApplyAppConfigPlanRejectsSameNameBucketReplacementAtomically(t *testing.T) {
 	fixture := newConcurrentArtifactApplyFixture(t, ConfigTypeSDK)
 	replacementID := uuid.New()
@@ -240,7 +265,57 @@ func newConcurrentArtifactApplyFixture(t *testing.T, configType ConfigType) conc
 			TokenIssuedByCredentialID: &owner.CredentialID,
 			TargetLanguage:            targetLanguage,
 			GeneratorVersion:          generatorVersion,
+			AppStatus:                 AppStatusActive,
+			SDKGenerationJobID:        conditionalSDKGenerationJob(configType, plan.ID),
+			SDKGenerationStatus:       conditionalSDKGenerationStatus(configType),
 		},
+	}
+}
+
+// conditionalSDKGenerationJob gives SDK fixtures one terminal durable job while MCP remains package-free.
+func conditionalSDKGenerationJob(configType ConfigType, planID uuid.UUID) string {
+	// Only SDK configuration owns Registry generation identity.
+	if configType == ConfigTypeSDK {
+		return planID.String()
+	}
+	return ""
+}
+
+// conditionalSDKGenerationStatus keeps direct atomic-apply fixtures aligned with the adapter lifecycle.
+func conditionalSDKGenerationStatus(configType ConfigType) string {
+	// SDK fixtures model an already-complete generation response.
+	if configType == ConfigTypeSDK {
+		return models.SDKGenerationStatusComplete
+	}
+	return ""
+}
+
+// TestValidSDKGenerationTransitionRejectsRunnableDowngrade pins the only mutable retry edge for an immutable SDK version.
+func TestValidSDKGenerationTransitionRejectsRunnableDowngrade(t *testing.T) {
+	tests := []struct {
+		name              string
+		currentStatus     AppStatus
+		currentGeneration string
+		nextStatus        AppStatus
+		nextGeneration    string
+		nextJobID         string
+		want              bool
+	}{
+		{name: "failed retry pending", currentStatus: AppStatusBuilding, currentGeneration: models.SDKGenerationStatusFailed, nextStatus: AppStatusBuilding, nextGeneration: models.SDKGenerationStatusPending, nextJobID: "job-1", want: true},
+		{name: "failed retry complete", currentStatus: AppStatusBuilding, currentGeneration: models.SDKGenerationStatusFailed, nextStatus: AppStatusActive, nextGeneration: models.SDKGenerationStatusComplete, nextJobID: "job-1", want: true},
+		{name: "active cannot downgrade", currentStatus: AppStatusActive, currentGeneration: models.SDKGenerationStatusComplete, nextStatus: AppStatusBuilding, nextGeneration: models.SDKGenerationStatusPending, nextJobID: "job-1"},
+		{name: "pending cannot replace attempt", currentStatus: AppStatusBuilding, currentGeneration: models.SDKGenerationStatusPending, nextStatus: AppStatusBuilding, nextGeneration: models.SDKGenerationStatusPending, nextJobID: "job-2"},
+		{name: "failed cannot replace job", currentStatus: AppStatusBuilding, currentGeneration: models.SDKGenerationStatusFailed, nextStatus: AppStatusBuilding, nextGeneration: models.SDKGenerationStatusPending, nextJobID: "job-2"},
+	}
+	// Every case uses the same retained job unless it deliberately probes substitution.
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := validSDKGenerationTransition(test.currentStatus, "job-1", test.currentGeneration, test.nextStatus, test.nextJobID, test.nextGeneration)
+			// A false positive could make an immutable version execute the wrong package or regress a runnable app.
+			if got != test.want {
+				t.Fatalf("validSDKGenerationTransition() = %t, want %t", got, test.want)
+			}
+		})
 	}
 }
 

@@ -559,6 +559,25 @@ func TestValidateSDKConfigDocumentRequiresBucket(t *testing.T) {
 	}
 }
 
+// TestAppConfigValidationRejectsCompetingOperationSelection proves SDK and MCP share the same exactly-one selection rule.
+func TestAppConfigValidationRejectsCompetingOperationSelection(t *testing.T) {
+	sdkDoc := sdkConfigDocument{
+		APIVersion: "fused/v1", Kind: "sdk", Name: "reader", Version: "1.0.0", Language: "typescript", Bucket: "default",
+		Services: map[string]sdkConfigServiceDoc{"github": {Version: "1.0", Operations: []string{"listRepos"}, SelectAll: true}},
+	}
+	// SDK planning must reject competing explicit and wildcard execution authority at its local admission boundary.
+	if err := validateSDKConfigDocument(sdkDoc); err == nil || !strings.Contains(err.Error(), "cannot set both operations and select_all") {
+		t.Fatalf("SDK competing selection error = %v", err)
+	}
+
+	mcpDoc := sdkDoc
+	mcpDoc.Kind, mcpDoc.Language, mcpDoc.Description = "mcp", "", "Read repository metadata."
+	// MCP uses the same service validator, so bypassing the CLI cannot broaden the immutable operation surface.
+	if err := validateAppConfigDocument(mcpDoc, store.AppKindMCP.String()); err == nil || !strings.Contains(err.Error(), "cannot set both operations and select_all") {
+		t.Fatalf("MCP competing selection error = %v", err)
+	}
+}
+
 func TestSDKConfigPlanHandler_UsesOperations(t *testing.T) {
 	serviceID := uuid.New()
 	serviceVersionID := uuid.New()
@@ -1312,7 +1331,8 @@ func TestExecuteSDKConfigApplyConcurrentFirstApplyPreservesWinnerArtifact(t *tes
 	}
 }
 
-func TestExecuteSDKConfigApplyCompensatesPendingGenerationFailure(t *testing.T) {
+// TestExecuteSDKConfigApplyReturnsBeforePendingGenerationCompletes proves apply latency no longer includes Registry code generation.
+func TestExecuteSDKConfigApplyReturnsBeforePendingGenerationCompletes(t *testing.T) {
 	serviceID, serviceVersionID := uuid.New(), uuid.New()
 	planID, accountID := uuid.New(), uuid.New()
 	appID := stableAppIDForPlan(planID)
@@ -1333,15 +1353,19 @@ func TestExecuteSDKConfigApplyCompensatesPendingGenerationFailure(t *testing.T) 
 	pending := `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"pending","scope_schema_version":3,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + uuid.NewString() + `"]}]}`
 	proxy := &recordingForwarder{bodies: []string{pending, "data: {\"type\":\"error\",\"message\":\"generation failed\"}\n\n", ""}}
 
-	_, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
+	result, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
 		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
 	})
-	if err == nil {
-		t.Fatal("expected pending generation failure")
+	// The queued job is a successful durable building publication, regardless of a later unused stream fixture.
+	if err != nil || result.Status != models.SDKGenerationStatusPending {
+		t.Fatalf("pending apply result = %#v / %v", result, err)
 	}
-	wantMethods := []string{http.MethodPost, http.MethodGet, http.MethodDelete}
+	wantMethods := []string{http.MethodPost}
 	if strings.Join(proxy.forwardMethods, ",") != strings.Join(wantMethods, ",") {
-		t.Fatalf("stream failure compensation methods=%v paths=%v", proxy.forwardMethods, proxy.forwardPaths)
+		t.Fatalf("pending apply methods=%v paths=%v", proxy.forwardMethods, proxy.forwardPaths)
+	}
+	if configStore.artifactApply == nil || configStore.artifactApply.AppStatus != store.AppStatusBuilding || configStore.artifactApply.SDKGenerationStatus != models.SDKGenerationStatusPending {
+		t.Fatalf("pending apply did not persist building state: %#v", configStore.artifactApply)
 	}
 }
 
@@ -1545,7 +1569,8 @@ func TestSDKGenerationPayloadForPlanPreservesCanonicalSourceHash(t *testing.T) {
 	}
 }
 
-func TestExecuteSDKConfigApplyPendingGenerationFinalizesScopeAfterCompletion(t *testing.T) {
+// TestExecuteSDKConfigApplyPersistsPendingScopeWithoutWaiting proves Registry streaming is outside the mutation response.
+func TestExecuteSDKConfigApplyPersistsPendingScopeWithoutWaiting(t *testing.T) {
 	serviceID := uuid.New()
 	serviceVersionID := uuid.New()
 	workspaceID := uuid.New()
@@ -1577,16 +1602,22 @@ func TestExecuteSDKConfigApplyPendingGenerationFinalizesScopeAfterCompletion(t *
 		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
 	})
 	if err != nil {
-		t.Fatalf("pending generation should finalize after completion, got %v", err)
+		t.Fatalf("pending generation should publish building state, got %v", err)
 	}
-	if result.Status != models.SDKGenerationStatusComplete {
-		t.Fatalf("expected complete result, got %#v", result)
+	if result.Status != models.SDKGenerationStatusPending {
+		t.Fatalf("expected pending result, got %#v", result)
 	}
 	if configStore.artifactApply == nil || !configStore.markApplied {
-		t.Fatalf("completed generation must atomically save scope and mark applied, apply=%#v applied=%v", configStore.artifactApply, configStore.markApplied)
+		t.Fatalf("pending generation must atomically save building scope and mark applied, apply=%#v applied=%v", configStore.artifactApply, configStore.markApplied)
+	}
+	if configStore.artifactApply.AppStatus != store.AppStatusBuilding || configStore.artifactApply.SDKGenerationJobID != "job-1" {
+		t.Fatalf("pending generation state = %#v", configStore.artifactApply)
 	}
 	if configStore.upserted == nil || configStore.upserted.LatestResourceID == nil || *configStore.upserted.LatestResourceID != appID {
 		t.Fatalf("expected latest resource id %s, got %#v", appID, configStore.upserted)
+	}
+	if len(proxy.forwardMethods) != 1 || proxy.forwardMethods[0] != http.MethodPost {
+		t.Fatalf("apply waited on Registry stream: methods=%v", proxy.forwardMethods)
 	}
 }
 

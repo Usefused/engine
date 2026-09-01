@@ -56,6 +56,12 @@ type RegistryClient interface {
 	FetchServiceChangelogSince(ctx context.Context, serviceID uuid.UUID, since time.Time, apiKey string) ([]models.ServiceChangelogEntry, error)
 }
 
+// SDKGenerationClient replays one immutable Engine-owned generation request
+// through the licensed Registry boundary and returns its current job state.
+type SDKGenerationClient interface {
+	GenerateSDK(context.Context, models.SDKGenerationRequest) (models.SDKGenerationResult, error)
+}
+
 type CatalogueService struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -995,6 +1001,8 @@ type HTTPRegistryClient struct {
 	// the thundering-herd of duplicate round trips to the Registry at connect.
 	sfGroup singleflight.Group
 }
+
+var _ SDKGenerationClient = (*HTTPRegistryClient)(nil)
 
 // do sends an ordinary bounded Registry request through the shared licensed transport.
 func (c *HTTPRegistryClient) do(request *http.Request) (*http.Response, error) {
@@ -1958,6 +1966,61 @@ func (c *HTTPRegistryClient) RenewSDKPackageLeases(ctx context.Context, apps []m
 		return 0, err
 	}
 	return response.Renewed, nil
+}
+
+const maxSDKGenerationResponseBytes = 16 << 20
+
+// GenerateSDK replays one deterministic SDK generation request without
+// forwarding a local control credential or waiting for package completion.
+func (c *HTTPRegistryClient) GenerateSDK(ctx context.Context, generation models.SDKGenerationRequest) (models.SDKGenerationResult, error) {
+	var result models.SDKGenerationResult
+	body, err := json.Marshal(generation)
+	// The immutable request must be encoded before any Registry mutation is attempted.
+	if err != nil {
+		return result, fmt.Errorf("SDK generation request is invalid: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.registryBaseURL()+"/sdks/generate", bytes.NewReader(body))
+	// A malformed configured Registry URL must fail locally without changing generation state.
+	if err != nil {
+		return result, fmt.Errorf("SDK generation request could not be created: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.doWithCallerDeadline(request)
+	// Transport ambiguity leaves the Engine's durable job pending for an identical later replay.
+	if err != nil {
+		return result, fmt.Errorf("SDK generation request failed: %w", err)
+	}
+	defer response.Body.Close()
+	// Registry rejection is reported without reading provider-authored or generated content into the error.
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 16<<10))
+		return result, fmt.Errorf("Registry SDK generation returned status %d", response.StatusCode)
+	}
+	decoded, err := readBoundedSDKGenerationResponse(response.Body)
+	// An oversized or malformed response cannot become Engine runtime authority.
+	if err != nil {
+		return result, err
+	}
+	// Decode only after the complete bounded body has been admitted.
+	if err := json.Unmarshal(decoded, &result); err != nil {
+		return models.SDKGenerationResult{}, errors.New("Registry SDK generation response was invalid")
+	}
+	return result, nil
+}
+
+// readBoundedSDKGenerationResponse admits one complete JSON response while
+// distinguishing the exact size ceiling from a truncated transport body.
+func readBoundedSDKGenerationResponse(body io.Reader) ([]byte, error) {
+	limited, err := io.ReadAll(io.LimitReader(body, maxSDKGenerationResponseBytes+1))
+	// Read failures are transport ambiguity and must not be interpreted as a terminal Registry state.
+	if err != nil {
+		return nil, errors.New("Registry SDK generation response could not be read")
+	}
+	// One extra byte proves the response exceeded the public Engine admission bound.
+	if len(limited) > maxSDKGenerationResponseBytes {
+		return nil, errors.New("Registry SDK generation response exceeded the Engine limit")
+	}
+	return limited, nil
 }
 
 func (c *HTTPRegistryClient) DownloadSDKPackage(ctx context.Context, appID uuid.UUID) (*http.Response, error) {

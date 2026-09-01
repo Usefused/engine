@@ -27,18 +27,20 @@ var (
 	ErrInvalidEncryptedAuthMaterial      = errors.New("invalid encrypted auth material")
 
 	// App-family errors
-	ErrAppFamilyNotFound      = errors.New("app family not found")
-	ErrAppNotFound            = errors.New("app not found")
-	ErrAppVersionImmutable    = errors.New("app version is immutable: same version with changed source or scope")
-	ErrAppVersionExists       = errors.New("app version already exists in family")
-	ErrAppDeactivated         = errors.New("app is deactivated")
-	ErrAppTokenNotFound       = errors.New("app token not found")
-	ErrAppTokenNameConflict   = errors.New("a token with this name already exists for this app")
-	ErrAppTokenBindingInvalid = errors.New("app token binding is invalid or unavailable")
-	ErrAppTombstoneExists     = errors.New("app version was deactivated and cannot be reused")
-	ErrAppKindInvalid         = errors.New("app kind is invalid")
-	ErrAppFamilyKindMismatch  = errors.New("app kind does not match app family")
-	ErrAppStatusInvalid       = errors.New("app status is invalid")
+	ErrAppFamilyNotFound              = errors.New("app family not found")
+	ErrAppNotFound                    = errors.New("app not found")
+	ErrAppVersionImmutable            = errors.New("app version is immutable: same version with changed source or scope")
+	ErrAppVersionExists               = errors.New("app version already exists in family")
+	ErrAppDeactivated                 = errors.New("app is deactivated")
+	ErrAppTokenNotFound               = errors.New("app token not found")
+	ErrAppTokenNameConflict           = errors.New("a token with this name already exists for this app")
+	ErrAppTokenBindingInvalid         = errors.New("app token binding is invalid or unavailable")
+	ErrAppTombstoneExists             = errors.New("app version was deactivated and cannot be reused")
+	ErrAppKindInvalid                 = errors.New("app kind is invalid")
+	ErrAppFamilyKindMismatch          = errors.New("app kind does not match app family")
+	ErrSDKFamilyLimitExceeded         = errors.New("SDK family limit exceeded")
+	ErrSDKGenerationTransitionInvalid = errors.New("SDK generation transition is invalid")
+	ErrAppStatusInvalid               = errors.New("app status is invalid")
 
 	// ErrIdempotentExecutionNotFound means there's no unexpired cached
 	// response for the given (app_id, idempotency key) -- the caller should
@@ -143,12 +145,16 @@ type App struct {
 	UnifiedDefinitionHash          string
 	UnifiedCodegenDescriptorHash   string
 	GeneratorVersion               string // SDK only, empty for MCP
-	Status                         AppStatus
-	DeprecationMessage             string
-	PlannedDeactivationAt          *time.Time
-	CreatedBy                      uuid.UUID
-	CreatedAt                      time.Time
-	ActivatedAt                    *time.Time
+	// SDKGenerationJobID and SDKGenerationStatus retain only the durable,
+	// credential-free Registry job identity needed to recover a building SDK.
+	SDKGenerationJobID    string
+	SDKGenerationStatus   string
+	Status                AppStatus
+	DeprecationMessage    string
+	PlannedDeactivationAt *time.Time
+	CreatedBy             uuid.UUID
+	CreatedAt             time.Time
+	ActivatedAt           *time.Time
 	// ExpectedFamilyKind is a publication precondition, not another persisted
 	// copy of family.kind. It prevents an adapter from publishing into a family
 	// owned by the other runtime kind.
@@ -167,6 +173,24 @@ type SDKPackageLeaseStore interface {
 // the exact applied plan, so cache recovery never guesses from a name/version.
 type SDKPackageBuildStore interface {
 	GetSDKPackageBuildRequest(ctx context.Context, accountID, appID uuid.UUID) (*models.SDKGenerationRequest, error)
+}
+
+// SDKGenerationBuild is the durable pending package input recovered by the
+// Engine finalizer without treating Registry as app configuration storage.
+type SDKGenerationBuild struct {
+	Request   models.SDKGenerationRequest
+	AccountID uuid.UUID
+	JobID     string
+	Status    string
+}
+
+// SDKGenerationBuildStore owns the building-to-active SDK transition and
+// exposes bounded recovery pages to the Engine worker.
+type SDKGenerationBuildStore interface {
+	GetSDKGenerationBuild(context.Context, uuid.UUID, uuid.UUID) (*SDKGenerationBuild, error)
+	ListPendingSDKGenerationBuilds(context.Context, uuid.UUID, int) ([]SDKGenerationBuild, error)
+	CompleteSDKGeneration(context.Context, uuid.UUID, string, string) (bool, error)
+	FailSDKGeneration(context.Context, uuid.UUID, string, string) (bool, error)
 }
 
 // MCPUnifiedDescriptorStore recovers the credential-free public descriptor

@@ -28,11 +28,8 @@ type ServiceConsumerRepository interface {
 	ListServiceConsumers(context.Context, uuid.UUID, accesscontrol.AuthorizedScope, uuid.UUID) ([]ServiceConsumer, error)
 }
 
-func (s *postgresStore) ListServiceConsumers(ctx context.Context, accountID uuid.UUID, scope accesscontrol.AuthorizedScope, serviceID uuid.UUID) ([]ServiceConsumer, error) {
-	if !scope.All && len(scope.IDs) == 0 {
-		return nil, nil
-	}
-	rows, err := s.db.Query(ctx, `
+// listServiceConsumersSQL treats building apps as dependency owners even though they are not executable yet.
+const listServiceConsumersSQL = `
 		SELECT app.app_id, family.display_name,
 		       app.version, family.kind, app.status,
 		       NULLIF(selection->>'service_version_id', '')::uuid,
@@ -46,10 +43,19 @@ func (s *postgresStore) ListServiceConsumers(ctx context.Context, accountID uuid
 		JOIN fused_app_families family ON family.app_family_id = app.app_family_id AND family.account_id = app.account_id
 		CROSS JOIN LATERAL jsonb_array_elements(app.selections) selection
 		WHERE app.account_id = $1
-		  AND app.status IN ('active', 'deprecated')
+		  AND app.status IN ('building', 'active', 'deprecated')
 		  AND ($2 OR app.app_family_id = ANY($3::uuid[]))
 		  AND NULLIF(selection->>'service_id', '')::uuid = $4
-		ORDER BY app.created_at DESC, app.app_id`, accountID, scope.All, scope.IDs, serviceID)
+		ORDER BY app.created_at DESC, app.app_id`
+
+// ListServiceConsumers includes non-runnable building apps so workspace service removal cannot invalidate a queued SDK build.
+func (s *postgresStore) ListServiceConsumers(ctx context.Context, accountID uuid.UUID, scope accesscontrol.AuthorizedScope, serviceID uuid.UUID) ([]ServiceConsumer, error) {
+	// An empty authorization scope cannot observe any app dependency.
+	if !scope.All && len(scope.IDs) == 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(ctx, listServiceConsumersSQL, accountID, scope.All, scope.IDs, serviceID)
+	// Query failures remain a repository error rather than an empty dependency set that could authorize removal.
 	if err != nil {
 		return nil, fmt.Errorf("list service consumers: %w", err)
 	}
@@ -57,6 +63,7 @@ func (s *postgresStore) ListServiceConsumers(ctx context.Context, accountID uuid
 	consumers := make([]ServiceConsumer, 0)
 	for rows.Next() {
 		var consumer ServiceConsumer
+		// A malformed consumer row invalidates the whole dependency result so callers fail closed.
 		if err := rows.Scan(
 			&consumer.AppID, &consumer.Name, &consumer.Version, &consumer.Kind, &consumer.Status,
 			&consumer.ServiceVersionID, &consumer.SelectAll, &consumer.OperationCount, &consumer.WebhookCount, &consumer.CreatedAt,
@@ -66,6 +73,7 @@ func (s *postgresStore) ListServiceConsumers(ctx context.Context, accountID uuid
 		consumer.Name = strings.TrimSpace(consumer.Name)
 		consumers = append(consumers, consumer)
 	}
+	// Deferred iterator errors are as authoritative as initial query failures.
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list service consumers: %w", err)
 	}

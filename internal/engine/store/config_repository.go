@@ -13,6 +13,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/shared/canonical"
 	"github.com/Usefused/engine/internal/shared/capability"
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/secretref"
 	"github.com/Usefused/engine/internal/shared/signaturepolicy"
 	"github.com/google/uuid"
@@ -259,6 +260,11 @@ type ApplyAppConfigPlanParams struct {
 	TokenIssuedByCredentialID *uuid.UUID
 	TargetLanguage            string
 	GeneratorVersion          string
+	// AppStatus and SDK generation identity let SDK apply commit a non-runnable
+	// building version while preserving the same atomic plan/token boundary.
+	AppStatus           AppStatus
+	SDKGenerationJobID  string
+	SDKGenerationStatus string
 }
 
 type ApplyAppConfigPlanResult struct {
@@ -733,23 +739,40 @@ func verifyAuthorizedAppBucketTx(ctx context.Context, tx pgx.Tx, bucketID uuid.U
 	return nil
 }
 
+// persistAppRuntimeTx binds family ownership, bucket, activation quota, immutable version, and first token inside one transaction.
 func persistAppRuntimeTx(ctx context.Context, tx pgx.Tx, params *ApplyAppConfigPlanParams) (uuid.UUID, uuid.UUID, bool, bool, error) {
 	familyID, err := upsertAppFamilyTx(ctx, tx, *params)
+	// Family identity must be durable before ownership, bucket, or quota state can bind to it.
 	if err != nil {
 		return uuid.Nil, uuid.Nil, false, false, err
 	}
+	// Every version inherits the same explicit family owner.
 	if err := ensureAppFamilyOwnerBindingTx(ctx, tx, familyID, params.Scope); err != nil {
 		return uuid.Nil, uuid.Nil, false, false, err
 	}
+	// Bucket selection is immutable at family scope and must precede publication.
 	if err := bindAppFamilyBucketTx(ctx, tx, familyID, params.Scope.BucketID); err != nil {
 		return uuid.Nil, uuid.Nil, false, false, err
 	}
+	appStatus := params.AppStatus
+	// Omitted status is the established immediately-runnable MCP and terminal SDK path.
+	if appStatus == "" {
+		appStatus = AppStatusActive
+	}
+	// Every transaction that makes an SDK runnable shares the entitlement lock with background completion.
+	if params.Scope.Kind == AppKindSDK && appStatus == AppStatusActive {
+		if err := admitSDKFamilyActivation(ctx, tx, params.Scope.AccountID, familyID); err != nil {
+			return uuid.Nil, uuid.Nil, false, false, err
+		}
+	}
 	appID, versionCreated, err := publishConfigAppTx(ctx, tx, familyID, *params)
+	// Publication failure rolls back quota admission and every preceding family binding.
 	if err != nil {
 		return uuid.Nil, uuid.Nil, false, false, err
 	}
 	params.Plan.State.LatestResourceID = &appID
 	tokenCreated, err := ensureAppFamilyTokenTx(ctx, tx, familyID, *params)
+	// Token issue remains in the same transaction so no runnable app can exist without family authentication.
 	if err != nil {
 		return uuid.Nil, uuid.Nil, false, false, err
 	}
@@ -831,6 +854,12 @@ func publishConfigAppTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, para
 	if err != nil {
 		return uuid.Nil, false, err
 	}
+	status := params.AppStatus
+	// Existing MCP and terminal SDK callers retain active publication unless
+	// they explicitly select the SDK building state.
+	if status == "" {
+		status = AppStatusActive
+	}
 	app := App{
 		AppID: params.Scope.AppID, AppFamilyID: familyID,
 		AccountID: params.Scope.AccountID, Version: params.Scope.Version,
@@ -841,14 +870,103 @@ func publishConfigAppTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, para
 		UnifiedDefinitions:             params.Scope.UnifiedDefinitions,
 		UnifiedDefinitionHash:          params.Scope.UnifiedDefinitionHash,
 		UnifiedCodegenDescriptorHash:   params.Scope.UnifiedCodegenDescriptorHash,
-		GeneratorVersion:               params.GeneratorVersion, Status: AppStatusActive,
-		ExpectedFamilyKind: params.Scope.Kind,
+		GeneratorVersion:               params.GeneratorVersion,
+		SDKGenerationJobID:             params.SDKGenerationJobID,
+		SDKGenerationStatus:            params.SDKGenerationStatus,
+		Status:                         status,
+		ExpectedFamilyKind:             params.Scope.Kind,
 	}
 	persisted, created, err := publishAppVersionTx(ctx, tx, app)
 	if err != nil {
 		return uuid.Nil, false, err
 	}
+	// Reapplying the same immutable SDK after a failed or pending build may
+	// replace only its mutable generation state, never its runtime scope.
+	if !created && app.ExpectedFamilyKind == AppKindSDK {
+		if err := updateSDKGenerationStateTx(ctx, tx, app); err != nil {
+			return uuid.Nil, false, err
+		}
+	}
 	return persisted.AppID, created, nil
+}
+
+// updateSDKGenerationStateTx advances or retries package generation for one
+// immutable SDK version inside the same plan-apply transaction.
+func updateSDKGenerationStateTx(ctx context.Context, tx pgx.Tx, app App) error {
+	var currentStatus AppStatus
+	var currentJobID, currentGenerationStatus string
+	err := tx.QueryRow(ctx, `
+		SELECT status, COALESCE(sdk_generation_job_id, ''), COALESCE(sdk_generation_status, '')
+		FROM fused_apps
+		WHERE app_id = $1 AND app_family_id = $2
+		FOR UPDATE
+	`, app.AppID, app.AppFamilyID).Scan(&currentStatus, &currentJobID, &currentGenerationStatus)
+	// Existing immutable identity must be locked before evaluating its sole mutable lifecycle transition.
+	if err != nil {
+		return fmt.Errorf("update SDK generation state: inspect current state: %w", err)
+	}
+	// Only exact idempotency or an explicit failed-build retry may change package lifecycle metadata.
+	if !validSDKGenerationTransition(currentStatus, currentJobID, currentGenerationStatus, app.Status, app.SDKGenerationJobID, app.SDKGenerationStatus) {
+		return ErrSDKGenerationTransitionInvalid
+	}
+	// Exact state is already authoritative and needs no timestamp rewrite.
+	if currentStatus == app.Status && currentJobID == app.SDKGenerationJobID && currentGenerationStatus == app.SDKGenerationStatus {
+		return nil
+	}
+	result, err := tx.Exec(ctx, `
+		UPDATE fused_apps
+		SET status = $2,
+		    sdk_generation_job_id = NULLIF($3, ''),
+		    sdk_generation_status = NULLIF($4, ''),
+		    activated_at = CASE WHEN $2 = 'active' THEN COALESCE(activated_at, NOW()) ELSE NULL END
+		WHERE app_id = $1
+		  AND app_family_id = $5
+	`, app.AppID, app.Status, app.SDKGenerationJobID, app.SDKGenerationStatus, app.AppFamilyID)
+	if err != nil {
+		return fmt.Errorf("update SDK generation state: %w", err)
+	}
+	// The immutable row was locked by publication, so a missing update proves
+	// an internal identity mismatch rather than a concurrent deletion.
+	if result.RowsAffected() != 1 {
+		return errors.New("update SDK generation state: app not found")
+	}
+	return nil
+}
+
+// validSDKGenerationTransition permits idempotency and failed-build retry without allowing a runnable or deprecated version to regress to building.
+func validSDKGenerationTransition(currentStatus AppStatus, currentJobID, currentGenerationStatus string, nextStatus AppStatus, nextJobID, nextGenerationStatus string) bool {
+	// Replaying an already persisted lifecycle state is harmless and preserves immutable job identity.
+	if sameSDKGenerationState(currentStatus, currentJobID, currentGenerationStatus, nextStatus, nextJobID, nextGenerationStatus) {
+		return true
+	}
+	// Only a confirmed failed building version is eligible to start a newly reviewed generation attempt.
+	if currentStatus != AppStatusBuilding || currentGenerationStatus != models.SDKGenerationStatusFailed {
+		return false
+	}
+	// A reclaimed Registry job may keep its durable job ID, but it must retain a non-empty exact identity.
+	if strings.TrimSpace(nextJobID) == "" || nextJobID != currentJobID {
+		return false
+	}
+	return validSDKGenerationRetryTarget(nextStatus, nextGenerationStatus)
+}
+
+// sameSDKGenerationState recognizes exact idempotency without granting any lifecycle transition authority.
+func sameSDKGenerationState(currentStatus AppStatus, currentJobID, currentGenerationStatus string, nextStatus AppStatus, nextJobID, nextGenerationStatus string) bool {
+	return currentStatus == nextStatus && currentJobID == nextJobID && currentGenerationStatus == nextGenerationStatus
+}
+
+// validSDKGenerationRetryTarget admits only queued or terminal-success outcomes for a failed immutable package retry.
+func validSDKGenerationRetryTarget(status AppStatus, generationStatus string) bool {
+	// Queued retry remains non-runnable until the finalizer confirms completion.
+	if status == AppStatusBuilding {
+		return generationStatus == models.SDKGenerationStatusPending
+	}
+	// Any non-active state other than building would widen lifecycle semantics.
+	if status != AppStatusActive {
+		return false
+	}
+	// Registry cache hit and package-free generation are the only immediate terminal successes.
+	return generationStatus == models.SDKGenerationStatusComplete || generationStatus == models.SDKGenerationStatusSkipped
 }
 
 func ensureAppFamilyTokenTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, params ApplyAppConfigPlanParams) (bool, error) {
@@ -880,19 +998,74 @@ func ensureAppFamilyTokenTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, 
 }
 
 func validateAppApplyParams(params ApplyAppConfigPlanParams) error {
+	// Config identity is the immutable source boundary shared by SDK and MCP applies.
 	if err := validateConfigIdentity(params.Plan.State.ConfigKey, params.Plan.State.ConfigType, params.Plan.State.SourceHash); err != nil {
 		return err
 	}
+	// Runtime identity and bucket binding must be complete before lifecycle publication.
 	if err := validateAppApplyScopeIdentity(params.Scope, params.AuthorizedBucketName); err != nil {
 		return err
 	}
+	// Adapter kind cannot be inferred from generation metadata or config key text.
 	if !appKindMatchesConfigType(params.Scope.Kind, params.Plan.State.ConfigType) {
 		return ErrAppKindInvalid
 	}
+	// Language and token metadata remain independent of SDK package state.
 	if err := validateAppApplyMetadata(params); err != nil {
 		return err
 	}
-	return validateAppGeneratorVersion(params.Plan.State.ConfigType, params.GeneratorVersion)
+	// Generator compatibility and building-state coherence both fail before transaction start.
+	if err := validateAppGeneratorVersion(params.Plan.State.ConfigType, params.GeneratorVersion); err != nil {
+		return err
+	}
+	return validateAppGenerationState(params)
+}
+
+// validateAppGenerationState prevents callers from publishing runnable SDKs
+// for pending jobs or attaching package lifecycle state to MCP versions.
+func validateAppGenerationState(params ApplyAppConfigPlanParams) error {
+	status := params.AppStatus
+	// Omitted status is the established immediately-active path.
+	if status == "" {
+		status = AppStatusActive
+	}
+	if !status.Valid() {
+		return ErrAppStatusInvalid
+	}
+	// MCP has no Registry package or building state.
+	if params.Plan.State.ConfigType == ConfigTypeMCP {
+		return validateMCPGenerationState(status, params.SDKGenerationJobID, params.SDKGenerationStatus)
+	}
+	return validateSDKGenerationState(status, params.SDKGenerationJobID, params.SDKGenerationStatus)
+}
+
+// validateMCPGenerationState keeps Registry package metadata exclusive to SDK adapters.
+func validateMCPGenerationState(status AppStatus, jobID, generationStatus string) error {
+	// Any package identity or non-active state would create a competing MCP lifecycle.
+	if jobID != "" || generationStatus != "" || status != AppStatusActive {
+		return errors.New("mcp must not set SDK generation state")
+	}
+	return nil
+}
+
+// validateSDKGenerationState binds runnable state to terminal generation and building state to pending work.
+func validateSDKGenerationState(status AppStatus, jobID, generationStatus string) error {
+	// Every generated SDK result must retain its exact Registry job for recovery.
+	if strings.TrimSpace(jobID) == "" {
+		return errors.New("sdk generation job identity is required")
+	}
+	// Pending is the sole non-runnable package state admitted by apply.
+	if generationStatus == models.SDKGenerationStatusPending {
+		if status != AppStatusBuilding {
+			return errors.New("pending SDK generation must remain building")
+		}
+		return nil
+	}
+	// Only terminal complete/skipped results may publish an active SDK version.
+	if status == AppStatusActive && (generationStatus == models.SDKGenerationStatusComplete || generationStatus == models.SDKGenerationStatusSkipped) {
+		return nil
+	}
+	return errors.New("sdk generation state is invalid")
 }
 
 func appKindMatchesConfigType(kind AppKind, configType ConfigType) bool {

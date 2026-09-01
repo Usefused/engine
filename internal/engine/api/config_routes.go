@@ -27,6 +27,8 @@ func MountConfigRoutes(r chi.Router, configStore store.ConfigRepository, s store
 	r.Route("/sdk-config", func(r chi.Router) {
 		r.Post("/plan", SDKConfigPlanHandler(configStore, s, registryClient, enginePublicGRPCURL))
 		r.Post("/apply", authorizationRevisionSyncHandler(revisionLoader, revisionSink, SDKConfigApplyHandler(configStore, s, proxy, registryClient)))
+		// Polling is a local projection; the background finalizer exclusively owns Registry replay and lifecycle transitions.
+		r.Get("/generation/{app_id}", SDKConfigGenerationHandler(s))
 	})
 	r.Get("/sdks/{app_id}/download", SDKPackageDownloadHandler(s, proxy, packageClient))
 	contractStore, _ := s.(appOpenAPIContractStore)
