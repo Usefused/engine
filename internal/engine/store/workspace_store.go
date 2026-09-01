@@ -522,11 +522,14 @@ func (s *postgresStore) GetWorkspaceServiceVersion(ctx context.Context, serviceI
 	return &version, nil
 }
 
+// ListWorkspaceServiceVersionsMissingContractSnapshots selects bounded legacy versions whose local snapshot cannot yet support every app type.
 func (s *postgresStore) ListWorkspaceServiceVersionsMissingContractSnapshots(ctx context.Context, limit int) ([]WorkspaceServiceVersion, error) {
+	// A non-positive migration bound intentionally performs no database work.
 	if limit <= 0 {
 		return nil, nil
 	}
 	rows, err := s.db.Query(ctx, workspaceServiceVersionsMissingContractSnapshotsSQL, limit)
+	// Query failures cannot be interpreted as an empty backfill set.
 	if err != nil {
 		return nil, fmt.Errorf("ListWorkspaceServiceVersionsMissingContractSnapshots: %w", err)
 	}
@@ -846,7 +849,8 @@ const workspaceServiceVersionsMissingContractSnapshotsSQL = `
 	LEFT JOIN fused_service_contract_snapshots snapshots
 	  ON snapshots.service_version_id = versions.service_version_id
 	WHERE versions.status <> 'deprecated'
-	  AND snapshots.id IS NULL
+	  AND (snapshots.id IS NULL
+	       OR snapshots.generation_contract_hash !~ '^sha256:[0-9a-f]{64}$')
 	ORDER BY versions.enabled_at ASC, versions.id ASC
 	LIMIT $1`
 

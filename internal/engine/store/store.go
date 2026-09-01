@@ -523,9 +523,9 @@ type WorkspaceServiceVersionLookupStore interface {
 	GetWorkspaceServiceVersion(ctx context.Context, serviceID, serviceVersionID uuid.UUID) (*WorkspaceServiceVersion, error)
 }
 
-// WorkspaceServiceVersionContractBackfillStore lists active version rows that
-// still lack Engine-local runtime contracts. The query owns the anti-join so a
-// rollout backfill never lists all activations and filters snapshots in Go.
+// WorkspaceServiceVersionContractBackfillStore lists active version rows whose
+// Engine-local runtime snapshot is missing or lacks retained SDK generation authority.
+// The bounded SQL query avoids listing every activation and filtering snapshots in Go.
 type WorkspaceServiceVersionContractBackfillStore interface {
 	ListWorkspaceServiceVersionsMissingContractSnapshots(ctx context.Context, limit int) ([]WorkspaceServiceVersion, error)
 }

@@ -427,10 +427,11 @@ type mockVerifier struct {
 
 type runtimeContractVerifier struct {
 	*mockVerifier
-	runtimeContract     *store.ServiceContractSnapshot
-	runtimeContractErr  error
-	runtimeContractArgs []runtimeContractFetchArgs
-	batchRuntimeArgs    [][]store.WorkspaceServiceVersion
+	runtimeContract             *store.ServiceContractSnapshot
+	runtimeContractErr          error
+	runtimeContractArgs         []runtimeContractFetchArgs
+	batchRuntimeArgs            [][]store.WorkspaceServiceVersion
+	batchGenerationContractHash string
 }
 
 type runtimeContractFetchArgs struct {
@@ -600,18 +601,22 @@ func (m *runtimeContractVerifier) FetchRuntimeContract(ctx context.Context, serv
 	return &store.ServiceContractSnapshot{ServiceID: serviceID, ServiceVersionID: serviceVersionID, Version: version}, nil
 }
 
+// FetchRuntimeContracts returns identity-preserving snapshots with an optional retained generation pin for backfill tests.
 func (m *runtimeContractVerifier) FetchRuntimeContracts(ctx context.Context, versions []store.WorkspaceServiceVersion, apiKey string) ([]store.ServiceContractSnapshot, error) {
 	m.batchRuntimeArgs = append(m.batchRuntimeArgs, append([]store.WorkspaceServiceVersion(nil), versions...))
+	// Injected dependency failure prevents any partial fixture snapshot from being returned.
 	if m.runtimeContractErr != nil {
 		return nil, m.runtimeContractErr
 	}
 	out := make([]store.ServiceContractSnapshot, 0, len(versions))
+	// Each requested immutable version receives its matching refreshed snapshot and the same Registry-issued test pin.
 	for _, version := range versions {
 		out = append(out, store.ServiceContractSnapshot{
-			ServiceID:        version.ServiceID,
-			ServiceVersionID: version.ServiceVersionID,
-			Version:          version.Version,
-			ContractHash:     "hash-" + version.ServiceVersionID.String(),
+			ServiceID:              version.ServiceID,
+			ServiceVersionID:       version.ServiceVersionID,
+			Version:                version.Version,
+			ContractHash:           "hash-" + version.ServiceVersionID.String(),
+			GenerationContractHash: m.batchGenerationContractHash,
 		})
 	}
 	return out, nil
@@ -1171,6 +1176,32 @@ func TestRefreshMissingServiceContracts_BackfillsMissingSnapshotsInBatch(t *test
 	spans := exporter.GetSpans()
 	if len(spans) != 1 || spans[0].Name != "engine.workspace.refresh_missing_runtime_contracts" {
 		t.Fatalf("expected one missing-refresh span, got %#v", spans)
+	}
+}
+
+// TestRefreshMissingServiceContractsPersistsGenerationPin proves legacy backfill carries Registry retention authority into the local snapshot.
+func TestRefreshMissingServiceContractsPersistsGenerationPin(t *testing.T) {
+	serviceID, versionID := uuid.New(), uuid.New()
+	pin := "sha256:" + strings.Repeat("a", 64)
+	s := &workspaceTestStore{
+		accountID: uuid.New(),
+		missingContractVersions: []store.WorkspaceServiceVersion{{
+			ServiceID: serviceID, ServiceVersionID: versionID, Version: "v1", Status: "public",
+		}},
+	}
+	verifier := &runtimeContractVerifier{mockVerifier: &mockVerifier{}, batchGenerationContractHash: pin}
+	result, err := refreshMissingServiceContracts(context.Background(), s, verifier, refreshMissingContractsCall{
+		accountID: s.accountID,
+		apiKey:    "fsk_test",
+		limit:     1,
+	})
+	// Successful Registry retention is required before the local write can repair SDK planning authority.
+	if err != nil {
+		t.Fatalf("refreshMissingServiceContracts() error = %v", err)
+	}
+	// The persisted snapshot must retain the opaque generation hash exactly; its runtime hash is not a valid substitute.
+	if result.Refreshed != 1 || len(s.snapshotWrites) != 1 || s.snapshotWrites[0].GenerationContractHash != pin {
+		t.Fatalf("result=%#v snapshotWrites=%#v", result, s.snapshotWrites)
 	}
 }
 

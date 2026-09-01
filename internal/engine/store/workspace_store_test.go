@@ -81,17 +81,21 @@ func TestAuthorizedWorkspaceServiceFilterSupportsCLIReferences(t *testing.T) {
 	}
 }
 
-func TestMissingContractSnapshotsQueryUsesSQLAntiJoin(t *testing.T) {
+// TestIncompleteContractSnapshotsQuerySelectsMissingAndPinless verifies migration repairs legacy SDK authority without refreshing valid pins.
+func TestIncompleteContractSnapshotsQuerySelectsMissingAndPinless(t *testing.T) {
 	required := []string{
 		"LEFT JOIN fused_service_contract_snapshots snapshots",
 		"ON snapshots.service_version_id = versions.service_version_id",
 		"snapshots.id IS NULL",
+		"snapshots.generation_contract_hash !~ '^sha256:[0-9a-f]{64}$'",
 		"versions.status <> 'deprecated'",
 		"LIMIT $1",
 	}
+	// Every predicate is required to include missing or pinless active snapshots while excluding canonical retained pins.
 	for _, fragment := range required {
+		// A missing fragment would silently narrow migration coverage or refresh already-pinned versions.
 		if !strings.Contains(workspaceServiceVersionsMissingContractSnapshotsSQL, fragment) {
-			t.Fatalf("missing snapshot lookup must contain %q: %s", fragment, workspaceServiceVersionsMissingContractSnapshotsSQL)
+			t.Fatalf("incomplete snapshot lookup must contain %q: %s", fragment, workspaceServiceVersionsMissingContractSnapshotsSQL)
 		}
 	}
 }
