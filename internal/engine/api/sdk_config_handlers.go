@@ -715,7 +715,7 @@ func setSDKConfigSpanAttributes(span trace.Span, configKey string, doc sdkConfig
 	)
 }
 
-// createSDKConfigPlan binds generation to admitted local snapshots while retaining the shared app plan lifecycle.
+// createSDKConfigPlan binds SDK-backed apps to admitted local snapshots while retaining the shared app plan lifecycle.
 func createSDKConfigPlan(
 	ctx context.Context,
 	configStore store.ConfigRepository,
@@ -723,7 +723,7 @@ func createSDKConfigPlan(
 	registryClient sandbox.RegistryClient,
 	call sdkPlanCall,
 ) (sdkPlanResult, error) {
-	registryClient, err := localGenerationPlanningClient(s, registryClient)
+	registryClient, err := localSnapshotPlanningClient(s, registryClient, sdkConfigGeneratesPackage(call.document))
 	// Planning cannot restore a live catalogue path when local snapshot authority is unavailable.
 	if err != nil {
 		return sdkPlanResult{}, err
@@ -785,6 +785,12 @@ func createSDKConfigPlan(
 		summary:       sdkPlanSummary(appID == uuid.Nil, !definition.noop && appID != uuid.Nil, definition.services),
 		notifications: notifications,
 	}, nil
+}
+
+// sdkConfigGeneratesPackage preserves the historical absent-means-generate policy at the snapshot-authority boundary.
+func sdkConfigGeneratesPackage(doc sdkConfigDocument) bool {
+	// Only an explicit false selects the direct API path that executes from the admitted local runtime snapshot.
+	return doc.Generate == nil || *doc.Generate
 }
 
 // resolveSDKPlanDefinition resolves sdk plan definition from immutable app scope before provider dispatch.
@@ -2261,18 +2267,21 @@ func executeSDKConfigApply(
 	registryClient sandbox.RegistryClient,
 	call sdkApplyCall,
 ) (sdkGenerationResult, error) {
-	registryClient, err := localGenerationPlanningClient(s, registryClient)
-	// Apply must prove local snapshot capability before reserving or generating any package.
-	if err != nil {
-		return sdkGenerationResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
-	}
-	// A plan has one deterministic Registry package. Serializing that identity
-	// prevents a losing first apply from deleting the app committed by a
-	// concurrent winner after both initially observed an empty local state.
+	// A plan has one deterministic app identity. Serializing it prevents concurrent applies from publishing competing versions.
 	unlockApp := sdkGenerationApplies.lock(stableAppIDForPlan(call.planID))
 	defer unlockApp()
 	plan, err := loadAuthorizedSDKAppPlanForApply(ctx, configStore, s, call)
 	// Only an authorized, exact stored plan can use its retained generation references.
+	if err != nil {
+		return sdkGenerationResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
+	}
+	resolved, err := appPayloadFromJSON(plan.ResolvedPayload)
+	// The immutable plan decides whether apply needs Registry package authority; request flags cannot change that decision.
+	if err != nil {
+		return sdkGenerationResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
+	}
+	registryClient, err = localSnapshotPlanningClient(s, registryClient, !resolved.SkipPackaging)
+	// Apply must prove local snapshot capability before reserving app identity or contacting Registry.
 	if err != nil {
 		return sdkGenerationResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
@@ -2299,9 +2308,7 @@ func executeSDKConfigApply(
 		}
 		return result, nil
 	}
-	// From the first Registry call onward, release requires either a committed
-	// local transaction or positively confirmed compensation. Unknown external
-	// outcomes remain fenced until the database lease expires.
+	// Publication starts conservatively fenced; a local-only result or confirmed Registry outcome can release the lease safely.
 	leaseGuard.releasable = false
 
 	plan, result, err := generateSDKForApply(applyCtx, configStore, s, proxy, registryClient, call)
@@ -2414,7 +2421,7 @@ func generateSDKForApply(
 	if err != nil {
 		return nil, sdkGenerationResult{}, err
 	}
-	result, err := runTrackedSDKGeneration(ctx, proxy, call.apiKey, input.payload)
+	result, err := executeSDKGenerationForApply(ctx, proxy, call, input.payload)
 	if err != nil {
 		return input.plan, result, err
 	}
@@ -2423,14 +2430,39 @@ func generateSDKForApply(
 		// lease instead of treating this external outcome as safely untouched.
 		return input.plan, result, err
 	}
-	// Ownership is established as soon as Registry creates the deterministic
-	// identity, so stream failures can compensate it as well as DB failures.
-	result.createdForPlan = input.existingConfigResourceID == uuid.Nil
+	// Compensation owns only a Registry package actually attempted for this new version; direct API created no remote package to delete.
+	result.createdForPlan = input.existingConfigResourceID == uuid.Nil && result.registryGenerationAttempted
 	completed, err := awaitSDKGenerationCompletion(ctx, proxy, call.apiKey, result)
 	if err != nil {
 		return input.plan, result, err
 	}
 	return input.plan, completed, nil
+}
+
+// executeSDKGenerationForApply selects Engine-local publication or Registry package generation from the immutable plan payload.
+func executeSDKGenerationForApply(ctx context.Context, proxy Forwarder, call sdkApplyCall, payload json.RawMessage) (sdkGenerationResult, error) {
+	var request GenerateSDKRequest
+	// The retained payload must prove its immutable packaging choice before apply selects a local or Registry path.
+	if err := json.Unmarshal(payload, &request); err != nil {
+		return sdkGenerationResult{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid sdk generation payload"}
+	}
+	// Direct API publishes the Engine-owned runtime scope without asking Registry to resolve or cache a package it will never build.
+	if request.SkipPackaging {
+		return localSkippedSDKGenerationResult(call, request), nil
+	}
+	return runTrackedSDKGeneration(ctx, proxy, call.apiKey, payload)
+}
+
+// localSkippedSDKGenerationResult projects the already-admitted plan into the terminal envelope shared by runtime persistence.
+func localSkippedSDKGenerationResult(call sdkApplyCall, request GenerateSDKRequest) sdkGenerationResult {
+	return sdkGenerationResult{
+		SDKGenerationResult: models.SDKGenerationResult{
+			AppFamilyID: request.AppFamilyID, AppID: request.AppID, AccountID: call.accountID,
+			JobID: call.planID.String(), Status: models.SDKGenerationStatusSkipped,
+			ScopeSchemaVersion: models.AppScopeSchemaVersion, GeneratorVersion: request.GeneratorVersion,
+			Selections: request.Selections,
+		},
+	}
 }
 
 type sdkGenerationApplyInput struct {

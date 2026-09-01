@@ -110,13 +110,22 @@ func newGenerationPlanningTestStore() *generationPlanningTestStore {
 	}
 }
 
-// planWithGenerationTestStore exercises the public handler while trapping every obsolete Registry planning read.
-func planWithGenerationTestStore(t *testing.T, s *generationPlanningTestStore) (*httptest.ResponseRecorder, *mockConfigStore) {
+// planWithGenerationTestStore exercises generated or direct API planning while trapping every obsolete Registry read.
+func planWithGenerationTestStore(t *testing.T, s *generationPlanningTestStore, generate *bool) (*httptest.ResponseRecorder, *mockConfigStore) {
 	t.Helper()
 	configs := &mockConfigStore{}
 	router := newControlTestRouter(s.accountID)
 	router.Post("/sdk-config/plan", SDKConfigPlanHandler(configs, s, &generationPlanningRegistryTrap{RegistryClient: &mockRegistryClient{}, t: t}))
-	body := []byte(`{"source_hash":"config-hash","owner_team":"platform","config_key":"sdk:retained:1.0.0","config":{"apiVersion":"fused/v1","kind":"sdk","name":"retained","version":"1.0.0","language":"typescript","bucket":"default","services":{"Saved service":{"version":"1.0","operations":["listLogEvents"]}}}}`)
+	config := map[string]any{"apiVersion": "fused/v1", "kind": "sdk", "name": "retained", "version": "1.0.0", "language": "typescript", "bucket": "default",
+		"services": map[string]any{"Saved service": map[string]any{"version": "1.0", "operations": []string{"listLogEvents"}}}}
+	// Omission preserves package generation, while an explicit value exercises the public generate policy exactly.
+	if generate != nil {
+		config["generate"] = *generate
+	}
+	body, err := json.Marshal(map[string]any{"source_hash": "config-hash", "owner_team": "platform", "config_key": "sdk:retained:1.0.0", "config": config})
+	if err != nil {
+		t.Fatal(err)
+	}
 	request := httptest.NewRequest(http.MethodPost, "/sdk-config/plan", bytes.NewReader(body))
 	request.Header.Set("X-API-Key", "fsk_test")
 	response := httptest.NewRecorder()
@@ -128,7 +137,7 @@ func planWithGenerationTestStore(t *testing.T, s *generationPlanningTestStore) (
 func TestSDKPlanUsesRetainedLocalGenerationPin(t *testing.T) {
 	s := newGenerationPlanningTestStore()
 	s.binding.RuntimeContractHash = "sha256:" + strings.Repeat("f", 64)
-	response, configs := planWithGenerationTestStore(t, s)
+	response, configs := planWithGenerationTestStore(t, s, nil)
 	// A successful plan must use local validation even though Registry has no service data.
 	if response.Code != http.StatusOK || s.validationCalls != 1 {
 		t.Fatalf("status=%d calls=%d body=%s", response.Code, s.validationCalls, response.Body)
@@ -147,6 +156,27 @@ func TestSDKPlanUsesRetainedLocalGenerationPin(t *testing.T) {
 	// The compact object reference is sufficient; runtime schemas remain Engine-local.
 	if bytes.Contains(configs.createdPlan.ResolvedPayload, []byte("schema_definitions")) || bytes.Contains(configs.createdPlan.ResolvedPayload, []byte("runtime_contract_hash")) {
 		t.Fatal("generation payload contains schema definitions")
+	}
+}
+
+// TestDirectAPIPlanUsesUnpinnedLocalSnapshot proves generate:false never requires Registry package authority.
+func TestDirectAPIPlanUsesUnpinnedLocalSnapshot(t *testing.T) {
+	s := newGenerationPlanningTestStore()
+	s.binding.GenerationContractHash = ""
+	s.binding.RuntimeContractHash = "sha256:" + strings.Repeat("d", 64)
+	generate := false
+	response, configs := planWithGenerationTestStore(t, s, &generate)
+	// Direct API execution is fully admitted by the local runtime snapshot even when no package archive exists.
+	if response.Code != http.StatusOK || configs.createdPlan == nil {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body)
+	}
+	var request models.SDKGenerationRequest
+	if err := json.Unmarshal(configs.createdPlan.ResolvedPayload, &request); err != nil {
+		t.Fatal(err)
+	}
+	// The plan retains a runtime staleness fence and its explicit no-package policy without inventing a generation hash.
+	if !request.SkipPackaging || len(request.ContractBindings) != 1 || request.ContractBindings[0].RuntimeContractHash != s.binding.RuntimeContractHash || request.ContractBindings[0].GenerationContractHash != "" {
+		t.Fatalf("request=%+v", request)
 	}
 }
 
@@ -280,7 +310,7 @@ func TestMCPPlanUsesUnpinnedLocalSnapshot(t *testing.T) {
 func TestSDKPlanMissingGenerationPinIsActionable(t *testing.T) {
 	s := newGenerationPlanningTestStore()
 	s.pinErr = store.ErrGenerationContractPinUnavailable
-	response, configs := planWithGenerationTestStore(t, s)
+	response, configs := planWithGenerationTestStore(t, s, nil)
 	// No incomplete plan may become a recovery or generation authority.
 	if response.Code != http.StatusConflict || configs.createdPlan != nil {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body)

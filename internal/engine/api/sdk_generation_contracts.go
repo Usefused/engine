@@ -54,11 +54,6 @@ func (c *generationPlanningClient) workspaceServicesByKeys(ctx context.Context, 
 	return result, nil
 }
 
-// localGenerationPlanningClient reuses the shared SDK/MCP planner while production stores resolve from their exact snapshots.
-func localGenerationPlanningClient(s store.Store, registry sandbox.RegistryClient) (sandbox.RegistryClient, error) {
-	return localSnapshotPlanningClient(s, registry, true)
-}
-
 // localSnapshotPlanningClient keeps one planner while requiring Registry archival authority only for generated SDK packages.
 func localSnapshotPlanningClient(s store.Store, registry sandbox.RegistryClient, requireGenerationPin bool) (sandbox.RegistryClient, error) {
 	contracts, ok := s.(store.GenerationContractStore)

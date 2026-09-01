@@ -2374,6 +2374,34 @@ func TestSDKGenerateRequestCarriesSkipPackagingFromDocument(t *testing.T) {
 	}
 }
 
+// TestLocalSkippedSDKGenerationResultPublishesAdmittedScope proves direct API apply needs no Registry job envelope.
+func TestLocalSkippedSDKGenerationResultPublishesAdmittedScope(t *testing.T) {
+	accountID, familyID, appID, planID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	selection := models.SDKSelection{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion, EndpointIDs: []uuid.UUID{uuid.New()}}
+	request := GenerateSDKRequest{
+		AppFamilyID: familyID, AppID: appID, GeneratorVersion: models.SDKGeneratorVersion,
+		Selections: []models.SDKSelection{selection}, SkipPackaging: true,
+	}
+	payload, err := json.Marshal(request)
+	// The production decoder must receive the exact persisted request shape rather than a hand-constructed result.
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := executeSDKGenerationForApply(context.Background(), nil, sdkApplyCall{accountID: accountID, planID: planID}, payload)
+	// A nil Registry proxy is safe only when the immutable request explicitly disables packaging.
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The terminal local result carries the same immutable identity and scope validation fields as Registry's historical skipped response.
+	if result.AppFamilyID != familyID || result.AppID != appID || result.AccountID != accountID || result.JobID != planID.String() || result.Status != models.SDKGenerationStatusSkipped || result.ScopeSchemaVersion != models.AppScopeSchemaVersion || result.GeneratorVersion != models.SDKGeneratorVersion || len(result.Selections) != 1 {
+		t.Fatalf("result=%+v", result)
+	}
+	// No external generation outcome or compensation may be inferred for a package that was intentionally never requested.
+	if result.registryGenerationAttempted || result.registryGenerationOutcomeConfirmed {
+		t.Fatalf("registry attempt=%t confirmed=%t", result.registryGenerationAttempted, result.registryGenerationOutcomeConfirmed)
+	}
+}
+
 // TestValidateSDKGenerationResultSkippedOnlyWhenRequested accepts a terminal
 // skipped result for a request that asked for one, and refuses it otherwise --
 // Registry dropping packaging unasked would publish a version with nothing
