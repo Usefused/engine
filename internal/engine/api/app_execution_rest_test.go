@@ -489,10 +489,12 @@ func TestRESTExecutionReturnsProviderStatusWithoutBody(t *testing.T) {
 // TestRESTExecutionProjectsActionableErrorsWithSafeDetails locks connection and
 // environment repair metadata without admitting provider bodies.
 func TestRESTExecutionProjectsActionableErrorsWithSafeDetails(t *testing.T) {
+	missingBucket, missingService := uuid.New(), uuid.New()
 	tests := []struct {
 		err  error
 		code string
 	}{
+		{err: &sandbox.CredentialMaterialMissingError{BucketID: missingBucket, ServiceID: missingService, AuthType: "api_key", AuthName: "providerKey"}, code: "bucket_credentials_missing"},
 		{err: &sandbox.ConnectionRequiredError{Code: "connection_required", BucketID: uuid.NewString(), ServiceID: uuid.NewString(), EndUserRef: "user-1"}, code: "connection_required"},
 		{err: &sandbox.ReconnectRequiredError{Code: "reconnect_required", BucketID: uuid.NewString(), ServiceID: uuid.NewString(), ConnectionID: uuid.NewString(), Reason: "refresh_rejected"}, code: "reconnect_required"},
 		{err: &sandbox.ResourceSelectionRequiredError{Code: "resource_selection_required", BucketID: uuid.NewString(), ServiceID: uuid.NewString(), ConnectionID: uuid.NewString(), Reason: "multiple_resources"}, code: "resource_selection_required"},
@@ -507,6 +509,10 @@ func TestRESTExecutionProjectsActionableErrorsWithSafeDetails(t *testing.T) {
 		}
 		if strings.Contains(recorder.Body.String(), "provider-private-body") {
 			t.Fatalf("actionable error leaked provider data: %s", recorder.Body.String())
+		}
+		// Credential absence must include a copyable value-free CLI command.
+		if test.code == "bucket_credentials_missing" && (!strings.Contains(recorder.Body.String(), `"command":"fused-cli secret set `+missingService.String()) || !strings.Contains(recorder.Body.String(), `--bucket `+missingBucket.String())) {
+			t.Fatalf("credential remediation = %s", recorder.Body.String())
 		}
 	}
 }

@@ -325,6 +325,19 @@ func assertUnifiedConnectedAuthResolution(t *testing.T, result *enginev1.Unified
 
 var unifiedConnectedAuthMasterKey = []byte("12345678901234567890123456789012")
 
+// TestClassifyUnifiedMissingCredentialReturnsSetupAction proves Unified SDK
+// and MCP results preserve the same value-free runtime remediation.
+func TestClassifyUnifiedMissingCredentialReturnsSetupAction(t *testing.T) {
+	bucketID, serviceID := uuid.New(), uuid.New()
+	classified := classifyUnifiedPhysicalError(&sandbox.CredentialMaterialMissingError{
+		BucketID: bucketID, ServiceID: serviceID, AuthType: "bearer", AuthName: "providerToken",
+	})
+	// The action must be pre-provider, stable, and directly usable by clients.
+	if classified.code != "bucket_credentials_missing" || classified.action.GetAction() != "configure_credentials" || classified.action.GetBucketId() != bucketID.String() || !strings.Contains(classified.action.GetReason(), "fused-cli secret set "+serviceID.String()) {
+		t.Fatalf("classified missing credential = %#v", classified)
+	}
+}
+
 // newUnifiedConnectedAuthStore encrypts one fixture token with the same DEK
 // envelope the production resolver decrypts immediately before dispatch.
 func newUnifiedConnectedAuthStore(t *testing.T, appID uuid.UUID, test unifiedConnectedAuthCase) *unifiedConnectedAuthStore {

@@ -102,9 +102,9 @@ func TestPostgresGenerationContractsUseFixedQueries(t *testing.T) {
 			snapshot := seedGenerationContractFixture(t, ctx, s, count)
 			tracer.count.Store(0)
 			assertGenerationContractReads(t, ctx, s, snapshot)
-			// Binding, auth, and membership validation each own one SQL query regardless of cardinality.
-			if got := tracer.count.Load(); got != 3 {
-				t.Fatalf("queries=%d want=3", got)
+			// Binding, auth, membership validation, and concrete projection each own one SQL query regardless of cardinality.
+			if got := tracer.count.Load(); got != 4 {
+				t.Fatalf("queries=%d want=4", got)
 			}
 		})
 	}
@@ -128,6 +128,15 @@ func assertGenerationContractReads(t *testing.T, ctx context.Context, s *postgre
 	// Existing names must validate through their exact snapshot rather than another service's rows.
 	if err := s.ValidateGenerationSelections(ctx, []models.SDKSelection{selection}, true); err != nil {
 		t.Fatal(err)
+	}
+	resolved, err := s.ResolveGenerationSelections(ctx, []models.SDKSelection{selection})
+	// Direct API publication must replace names with the exact local endpoint and webhook IDs in the same declared selection.
+	if err != nil || len(resolved) != 1 || len(resolved[0].EndpointIDs) != 1 || resolved[0].EndpointIDs[0] != snapshot.Endpoints[0].ID || len(resolved[0].WebhookIDs) != 1 || resolved[0].WebhookIDs[0] != snapshot.Webhooks[0].ID {
+		t.Fatalf("resolved=%+v error=%v", resolved, err)
+	}
+	// A concrete runtime may retain explicit names for validation, but it must consume flags that could expand later.
+	if resolved[0].SelectAll || resolved[0].WebhookSelectAll || len(resolved[0].OperationNames) != 1 || len(resolved[0].WebhookNames) != 1 {
+		t.Fatalf("selection policy changed unexpectedly: %+v", resolved[0])
 	}
 }
 

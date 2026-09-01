@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine/store"
@@ -228,6 +229,28 @@ func TestEncodeRuntimeErrorPreservesReconnectContract(t *testing.T) {
 	}
 	if got != *want {
 		t.Fatalf("encoded reconnect contract = %#v, want %#v", got, *want)
+	}
+}
+
+// TestEncodeRuntimeErrorPreservesCredentialSetup proves generated SDK streams
+// receive the same structured, value-free command as other runtime surfaces.
+func TestEncodeRuntimeErrorPreservesCredentialSetup(t *testing.T) {
+	bucketID, serviceID := uuid.New(), uuid.New()
+	encoded := encodeRuntimeError(fmt.Errorf("resolve static auth: %w", &CredentialMaterialMissingError{
+		BucketID: bucketID, ServiceID: serviceID, AuthType: "api_key", AuthName: "providerKey",
+	}))
+	var got struct {
+		Code      string `json:"code"`
+		BucketID  string `json:"bucket_id"`
+		ServiceID string `json:"service_id"`
+		Command   string `json:"command"`
+	}
+	// Structured decoding must retain exact routing identity and copyable guidance.
+	if err := json.Unmarshal([]byte(encoded), &got); err != nil {
+		t.Fatalf("decode credential error %q: %v", encoded, err)
+	}
+	if got.Code != "bucket_credentials_missing" || got.BucketID != bucketID.String() || got.ServiceID != serviceID.String() || !strings.Contains(got.Command, "fused-cli secret set "+serviceID.String()) {
+		t.Fatalf("encoded credential contract = %#v", got)
 	}
 }
 

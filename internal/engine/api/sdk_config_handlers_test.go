@@ -272,35 +272,27 @@ func resolvedDefaultBucketPayload(t *testing.T, request GenerateSDKRequest) json
 	return payload
 }
 
-func TestValidateAppBucketReadinessReportsEveryMissingOAuthService(t *testing.T) {
+// TestInspectAppBucketReadinessReportsEveryMissingOAuthService proves absence is descriptive metadata rather than a publication error.
+func TestInspectAppBucketReadinessReportsEveryMissingOAuthService(t *testing.T) {
 	bucketID := uuid.New()
 	first, second := uuid.New(), uuid.New()
 	bucket := store.Bucket{ID: bucketID, Name: "production"}
 	s := &workspaceTestStore{}
-	err := validateAppBucketReadiness(context.Background(), s, bucket, []models.SDKSelection{
+	readiness, err := inspectAppBucketReadiness(context.Background(), s, bucket, []models.SDKSelection{
 		{ServiceID: first, RequiredAuth: []models.SDKRequiredAuth{{AuthType: "oauth", AuthName: "primaryOAuth"}}},
 		{ServiceID: second, RequiredAuth: []models.SDKRequiredAuth{{AuthType: "oidc", AuthName: "primaryOIDC"}}},
 	}, map[uuid.UUID]string{first: "Google Drive", second: "Identity Provider"})
-	var httpErr workspaceConfigHTTPError
-	if !errors.As(err, &httpErr) {
-		t.Fatalf("expected a structured readiness error, got %v", err)
+	// Store access failures remain errors, while missing material is returned as metadata.
+	if err != nil || readiness == nil {
+		t.Fatalf("expected structured readiness metadata, got %#v / %v", readiness, err)
 	}
-	gotBucket, ok := httpErr.details["bucket"].(appReadinessBucket)
-	if !ok {
-		t.Fatalf("bucket details = %#v", httpErr.details["bucket"])
-	}
+	gotBucket := readiness.Bucket
 	if gotBucket != (appReadinessBucket{ID: bucketID.String(), Name: "production"}) {
 		t.Fatalf("bucket details = %#v", gotBucket)
 	}
-	missing, ok := httpErr.details["missing_credentials"].([]appMissingCredential)
-	if !ok {
-		t.Fatalf("missing credentials = %#v", httpErr.details["missing_credentials"])
-	}
+	missing := readiness.MissingCredentials
 	if len(missing) != 2 {
 		t.Fatalf("missing credentials = %#v", missing)
-	}
-	if _, legacy := httpErr.details["missing"]; legacy {
-		t.Fatalf("legacy untyped missing details must not remain: %#v", httpErr.details)
 	}
 	byService := map[string]appMissingCredential{missing[0].ServiceID: missing[0], missing[1].ServiceID: missing[1]}
 	assertAppMissingCredential(t, byService[first.String()], appMissingCredential{
@@ -323,7 +315,8 @@ func assertAppMissingCredential(t *testing.T, got, want appMissingCredential) {
 	}
 }
 
-func TestValidateAppBucketReadinessValidatesOAuthAndMTLSAlternative(t *testing.T) {
+// TestInspectAppBucketReadinessAcceptsOAuthAndMTLSAlternative verifies complete AND-members yield no warning.
+func TestInspectAppBucketReadinessAcceptsOAuthAndMTLSAlternative(t *testing.T) {
 	bucketID, serviceID := uuid.New(), uuid.New()
 	s := &workspaceTestStore{
 		connectedCredentialKeys: map[string]bool{appConnectReadinessKey(serviceID, "oauth", "oauthAuth"): true},
@@ -336,12 +329,13 @@ func TestValidateAppBucketReadinessValidatesOAuthAndMTLSAlternative(t *testing.T
 		{AuthType: "oauth", AuthName: "oauthAuth"},
 		{AuthType: "mtls", AuthName: "clientCertificate"},
 	}}
-	if err := validateAppBucketReadiness(context.Background(), s, store.Bucket{ID: bucketID, Name: "production"}, []models.SDKSelection{selection}, nil); err != nil {
-		t.Fatalf("OAuth+mTLS readiness = %v", err)
+	if readiness, err := inspectAppBucketReadiness(context.Background(), s, store.Bucket{ID: bucketID, Name: "production"}, []models.SDKSelection{selection}, nil); err != nil || readiness != nil {
+		t.Fatalf("OAuth+mTLS readiness = %#v / %v", readiness, err)
 	}
 }
 
-func TestValidateAppBucketReadinessValidatesEveryStaticScheme(t *testing.T) {
+// TestInspectAppBucketReadinessChecksEveryStaticScheme keeps complete AND-set validation in warning generation.
+func TestInspectAppBucketReadinessChecksEveryStaticScheme(t *testing.T) {
 	bucketID, serviceID := uuid.New(), uuid.New()
 	selection := models.SDKSelection{ServiceID: serviceID, RequiredAuth: []models.SDKRequiredAuth{
 		{AuthType: "api_key", AuthName: "apiKey"},
@@ -351,16 +345,16 @@ func TestValidateAppBucketReadinessValidatesEveryStaticScheme(t *testing.T) {
 		{ServiceID: serviceID, KeyName: "apiKey"}, {ServiceID: serviceID, KeyName: "apiToken"},
 	}}}
 	bucket := store.Bucket{ID: bucketID, Name: "production"}
-	if err := validateAppBucketReadiness(context.Background(), s, bucket, []models.SDKSelection{selection}, nil); err != nil {
-		t.Fatalf("API key AND token readiness = %v", err)
+	if readiness, err := inspectAppBucketReadiness(context.Background(), s, bucket, []models.SDKSelection{selection}, nil); err != nil || readiness != nil {
+		t.Fatalf("API key AND token readiness = %#v / %v", readiness, err)
 	}
 	s.secretMetas[bucketID] = s.secretMetas[bucketID][:1]
-	err := validateAppBucketReadiness(context.Background(), s, bucket, []models.SDKSelection{selection}, nil)
-	var httpErr workspaceConfigHTTPError
-	if !errors.As(err, &httpErr) {
-		t.Fatalf("missing secondary credential error = %v", err)
+	readiness, err := inspectAppBucketReadiness(context.Background(), s, bucket, []models.SDKSelection{selection}, nil)
+	// Missing material stays available to prompt/render without rejecting the plan.
+	if err != nil || readiness == nil {
+		t.Fatalf("missing secondary credential metadata = %#v / %v", readiness, err)
 	}
-	missing, _ := httpErr.details["missing_credentials"].([]appMissingCredential)
+	missing := readiness.MissingCredentials
 	if len(missing) != 1 || missing[0].ServiceID != serviceID.String() || missing[0].AuthType != "api_key" || missing[0].AuthName != "apiToken" || !slices.Equal(missing[0].RequiredFields, []appMissingCredentialField{{Name: "api_key", SecretKey: "apiToken"}}) {
 		t.Fatalf("missing material = %#v", missing)
 	}
@@ -379,19 +373,20 @@ func TestAppRequiredSecretFieldsHonorsBasicPasswordMode(t *testing.T) {
 	}
 }
 
-func TestValidateAppBucketReadinessIncludesReviewedBasicPasswordMode(t *testing.T) {
+// TestInspectAppBucketReadinessIncludesReviewedBasicPasswordMode retains safe prompt semantics.
+func TestInspectAppBucketReadinessIncludesReviewedBasicPasswordMode(t *testing.T) {
 	bucketID, serviceID := uuid.New(), uuid.New()
-	err := validateAppBucketReadiness(context.Background(), &workspaceTestStore{}, store.Bucket{ID: bucketID, Name: "production"}, []models.SDKSelection{{
+	readiness, err := inspectAppBucketReadiness(context.Background(), &workspaceTestStore{}, store.Bucket{ID: bucketID, Name: "production"}, []models.SDKSelection{{
 		ServiceID: serviceID,
 		RequiredAuth: []models.SDKRequiredAuth{{
 			AuthType: "basic", AuthName: "basicAuth", BasicPasswordMode: authrouting.BasicPasswordRequired,
 		}},
 	}}, nil)
-	var httpErr workspaceConfigHTTPError
-	if !errors.As(err, &httpErr) {
-		t.Fatalf("Basic readiness error = %v", err)
+	// Missing Basic material is a warning payload, not a plan failure.
+	if err != nil || readiness == nil {
+		t.Fatalf("Basic readiness metadata = %#v / %v", readiness, err)
 	}
-	missing := httpErr.details["missing_credentials"].([]appMissingCredential)
+	missing := readiness.MissingCredentials
 	wantFields := []appMissingCredentialField{
 		{Name: "username", SecretKey: "basicAuth_username"},
 		{Name: "password", SecretKey: "basicAuth_password"},
@@ -405,7 +400,8 @@ func TestValidateAppBucketReadinessIncludesReviewedBasicPasswordMode(t *testing.
 	}
 }
 
-func TestDecodeAppApplyPlanReturnsAuthoritativeBucketAndIDOnlyCredentialMetadata(t *testing.T) {
+// TestDecodeAppApplyPlanDoesNotRequireCredentialValues proves apply binds the bucket without snapshotting mutable readiness.
+func TestDecodeAppApplyPlanDoesNotRequireCredentialValues(t *testing.T) {
 	bucketID, serviceID := uuid.New(), uuid.New()
 	payload, err := json.Marshal(appResolvedPayload{
 		BucketID: bucketID,
@@ -425,33 +421,15 @@ func TestDecodeAppApplyPlanReturnsAuthoritativeBucketAndIDOnlyCredentialMetadata
 		"customer-integrations": {ID: bucketID, Name: "customer-integrations"},
 	}}
 
-	_, _, err = decodeAppApplyPlan(context.Background(), &mockConfigStore{}, s, plan, "SDK")
-	var httpErr workspaceConfigHTTPError
-	if !errors.As(err, &httpErr) || httpErr.code != "bucket_credentials_missing" {
-		t.Fatalf("apply readiness error = %v", err)
+	_, decoded, err := decodeAppApplyPlan(context.Background(), &mockConfigStore{}, s, plan, "SDK")
+	// The immutable payload and bucket identity remain valid even when no secret row exists yet.
+	if err != nil || decoded.BucketID != bucketID {
+		t.Fatalf("apply decode = %#v / %v", decoded, err)
 	}
-	bucket, ok := httpErr.details["bucket"].(appReadinessBucket)
-	if !ok {
-		t.Fatalf("apply bucket metadata = %#v", httpErr.details["bucket"])
-	}
-	if bucket != (appReadinessBucket{ID: bucketID.String(), Name: "customer-integrations"}) {
-		t.Fatalf("apply bucket metadata = %#v", bucket)
-	}
-	missing, ok := httpErr.details["missing_credentials"].([]appMissingCredential)
-	if !ok {
-		t.Fatalf("apply missing credentials = %#v", httpErr.details["missing_credentials"])
-	}
-	if len(missing) != 1 {
-		t.Fatalf("apply missing credentials = %#v", missing)
-	}
-	assertAppMissingCredential(t, missing[0], appMissingCredential{
-		ServiceID: serviceID.String(), AuthType: "bearer", AuthName: "bearerAuth",
-		RequiredFields: []appMissingCredentialField{{Name: "token", SecretKey: "bearerAuth"}},
-	})
 	wantQueries := struct {
 		bucketNames   []string
 		exact, secret int
-	}{[]string{"customer-integrations"}, 1, 0}
+	}{[]string{"customer-integrations"}, 0, 0}
 	gotQueries := struct {
 		bucketNames   []string
 		exact, secret int
@@ -461,15 +439,16 @@ func TestDecodeAppApplyPlanReturnsAuthoritativeBucketAndIDOnlyCredentialMetadata
 	}
 }
 
-func TestValidateAppBucketReadinessSkipsCredentialReadsForAnonymousAndWebhookSelections(t *testing.T) {
+// TestInspectAppBucketReadinessSkipsCredentialReadsForAnonymousAndWebhookSelections avoids irrelevant bucket queries.
+func TestInspectAppBucketReadinessSkipsCredentialReadsForAnonymousAndWebhookSelections(t *testing.T) {
 	bucketID := uuid.New()
 	s := &workspaceTestStore{appBucketReadinessErr: errors.New("credential reads must be skipped")}
-	err := validateAppBucketReadiness(context.Background(), s, store.Bucket{ID: bucketID, Name: "production"}, []models.SDKSelection{
+	readiness, err := inspectAppBucketReadiness(context.Background(), s, store.Bucket{ID: bucketID, Name: "production"}, []models.SDKSelection{
 		{ServiceID: uuid.New(), OperationNames: []string{"health"}},
 		{ServiceID: uuid.New(), WebhookNames: []string{"created"}},
 	}, nil)
-	if err != nil {
-		t.Fatalf("auth-free selections unexpectedly required credential material: %v", err)
+	if err != nil || readiness != nil {
+		t.Fatalf("auth-free selections unexpectedly required credential material: %#v / %v", readiness, err)
 	}
 }
 
@@ -2374,6 +2353,13 @@ func TestSDKGenerateRequestCarriesSkipPackagingFromDocument(t *testing.T) {
 	}
 }
 
+type directAPITestSelectionResolver struct{}
+
+// ResolveGenerationSelections models the local snapshot projection after planning has admitted concrete IDs.
+func (directAPITestSelectionResolver) ResolveGenerationSelections(_ context.Context, selections []models.SDKSelection) ([]models.SDKSelection, error) {
+	return selections, nil
+}
+
 // TestLocalSkippedSDKGenerationResultPublishesAdmittedScope proves direct API apply needs no Registry job envelope.
 func TestLocalSkippedSDKGenerationResultPublishesAdmittedScope(t *testing.T) {
 	accountID, familyID, appID, planID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
@@ -2387,7 +2373,7 @@ func TestLocalSkippedSDKGenerationResultPublishesAdmittedScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := executeSDKGenerationForApply(context.Background(), nil, sdkApplyCall{accountID: accountID, planID: planID}, payload)
+	result, err := executeSDKGenerationForApply(context.Background(), directAPITestSelectionResolver{}, nil, sdkApplyCall{accountID: accountID, planID: planID}, payload)
 	// A nil Registry proxy is safe only when the immutable request explicitly disables packaging.
 	if err != nil {
 		t.Fatal(err)

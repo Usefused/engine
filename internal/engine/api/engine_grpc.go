@@ -309,7 +309,13 @@ func grpcConnectError(err error) error {
 	}
 	var httpErr connectRuntimeHTTPError
 	if errors.As(err, &httpErr) {
-		return status.Error(grpcCodeFromHTTPStatus(httpErr.status), httpErr.message)
+		message := httpErr.message
+		// Server-owned remediation is safe for SDK callers and preserves the exact
+		// secret command when OAuth application registration is the blocker.
+		if strings.TrimSpace(httpErr.remediation) != "" {
+			message += ". " + httpErr.remediation
+		}
+		return status.Error(grpcCodeFromHTTPStatus(httpErr.status), message)
 	}
 	return status.Error(codes.Internal, "connect auth failed")
 }

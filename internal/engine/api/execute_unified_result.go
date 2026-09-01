@@ -152,9 +152,17 @@ func classifyUnifiedPhysicalError(err error) classifiedUnifiedError {
 	}
 }
 
-// unifiedAuthAction extracts only non-secret Engine routing identifiers from a
-// typed connected-auth failure.
+// unifiedAuthAction extracts only non-secret Engine routing identifiers and
+// value-free remediation from a typed authentication failure.
 func unifiedAuthAction(err error) *enginev1.UnifiedAuthAction {
+	var missing *sandbox.CredentialMaterialMissingError
+	// Static credential setup is a pre-provider auth action just like connect,
+	// reconnect, and resource selection, with the safe command in reason.
+	if errors.As(err, &missing) {
+		return &enginev1.UnifiedAuthAction{
+			Action: "configure_credentials", BucketId: missing.BucketID.String(), ServiceId: missing.ServiceID.String(), Reason: missing.Command(),
+		}
+	}
 	var connection *sandbox.ConnectionRequiredError
 	if errors.As(err, &connection) {
 		return &enginev1.UnifiedAuthAction{
@@ -182,6 +190,11 @@ func unifiedAuthAction(err error) *enginev1.UnifiedAuthAction {
 // unifiedAuthErrorCode returns the matching stable code for an actionable auth
 // error after its typed action has been detected.
 func unifiedAuthErrorCode(err error) string {
+	var missing *sandbox.CredentialMaterialMissingError
+	// Credential setup has its own stable code so clients do not misclassify it as resource selection.
+	if errors.As(err, &missing) {
+		return "bucket_credentials_missing"
+	}
 	var connection *sandbox.ConnectionRequiredError
 	if errors.As(err, &connection) {
 		return "connection_required"

@@ -452,6 +452,13 @@ func (r *secretResolver) mergeStoredSecrets(ctx context.Context, bucketID, servi
 	if err != nil {
 		return fmt.Errorf("failed to fetch secrets from store: %w", err)
 	}
+	// An empty exact-set result proves no eligible static alternative is ready;
+	// stop before provider construction with a safe configuration command.
+	if len(secrets) == 0 {
+		if missing := missingStaticCredentialError(bucketID, serviceID, alternatives[0]); missing != nil {
+			return missing
+		}
+	}
 	for _, sec := range secrets {
 		val, err := r.decryptStoredSecret(serviceID, sec)
 		if err != nil {

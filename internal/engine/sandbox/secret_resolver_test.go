@@ -129,6 +129,39 @@ func TestSecretResolverResolveExecutionCredentials(t *testing.T) {
 	}
 }
 
+// TestSecretResolverReturnsActionableMissingStaticCredential proves an
+// unconfigured published app stops before dispatch with one safe setup command.
+func TestSecretResolverReturnsActionableMissingStaticCredential(t *testing.T) {
+	bucketID, appID, serviceID := uuid.New(), uuid.New(), uuid.New()
+	resolver := NewSecretResolver(&resolverMockStore{appRuntime: &store.AppRuntime{BucketID: bucketID}}, []byte("12345678901234567890123456789012"))
+	_, _, err := resolver.ResolveExecutionCredentials(context.Background(), CredentialRequest{
+		AppID: appID, ServiceID: serviceID, AuthType: "api_key",
+		Auths:        fusedobject.AuthConfigs{{Name: "providerKey", Type: "apiKey"}},
+		Requirements: singleAuthRequirement("providerKey"),
+	})
+	var missing *CredentialMaterialMissingError
+	// The typed failure must retain only routing metadata and never invent a provider value.
+	if !errors.As(err, &missing) || missing.BucketID != bucketID || missing.ServiceID != serviceID {
+		t.Fatalf("missing credential error = %#v / %v", missing, err)
+	}
+	command := missing.Command()
+	if !strings.Contains(command, "fused-cli secret set "+serviceID.String()) || !strings.Contains(command, "--bucket "+bucketID.String()) || !strings.Contains(command, "--interactive") {
+		t.Fatalf("remediation command = %q", command)
+	}
+}
+
+// TestMissingStaticCredentialErrorLeavesOAuthToConnectionRouting prevents a
+// missing end-user selector from being misreported as a static OAuth token.
+func TestMissingStaticCredentialErrorLeavesOAuthToConnectionRouting(t *testing.T) {
+	err := missingStaticCredentialError(uuid.New(), uuid.New(), store.SecretKeyAlternative{
+		Required: []string{"oauthAuth"}, AuthTypes: map[string]string{"oauthAuth": "oauth"}, AuthNames: map[string]string{"oauthAuth": "oauthAuth"},
+	})
+	// OAuth/OIDC user grants have their own connect/reconnect recovery contract.
+	if err != nil {
+		t.Fatalf("OAuth was misclassified as static credential setup: %v", err)
+	}
+}
+
 // TestSecretResolverRecordsSanitizedProviderFailure verifies diagnostic writes
 // use the Engine-issued connection ID and OTEL trace without changing auth state.
 func TestSecretResolverRecordsSanitizedProviderFailure(t *testing.T) {

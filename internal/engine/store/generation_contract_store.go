@@ -54,6 +54,11 @@ type GenerationContractStore interface {
 	ValidateGenerationSelections(context.Context, []models.SDKSelection, bool) error
 }
 
+// GenerationSelectionResolver converts name or select-all requests into the exact IDs persisted by an immutable app version.
+type GenerationSelectionResolver interface {
+	ResolveGenerationSelections(context.Context, []models.SDKSelection) ([]models.SDKSelection, error)
+}
+
 // ResolveGenerationServiceIDsByKeys reuses canonical local matching but requires persisted proof for an explicitly named provider.
 func (s *postgresStore) ResolveGenerationServiceIDsByKeys(ctx context.Context, keys []string) (map[string]uuid.UUID, error) {
 	result := make(map[string]uuid.UUID, len(keys))
@@ -253,6 +258,84 @@ func (s *postgresStore) ValidateGenerationSelections(ctx context.Context, select
 	}
 	return nil
 }
+
+// ResolveGenerationSelections projects locally admitted names and select-all flags into concrete endpoint and webhook IDs.
+func (s *postgresStore) ResolveGenerationSelections(ctx context.Context, selections []models.SDKSelection) ([]models.SDKSelection, error) {
+	// An app without service selections has no catalogue scope to concretize.
+	if len(selections) == 0 {
+		return nil, nil
+	}
+	payload, err := encodeGenerationInputs(selections, len(selections))
+	// The bounded input must be valid before the database receives selection authority.
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(ctx, resolveGenerationSelectionsSQL, payload)
+	// A failed local projection cannot fall back to the mutable Registry catalogue.
+	if err != nil {
+		return nil, fmt.Errorf("resolve generation selections: %w", err)
+	}
+	defer rows.Close()
+	resolved := append([]models.SDKSelection(nil), selections...)
+	seen := make([]bool, len(resolved))
+	for rows.Next() {
+		var index int
+		var endpointIDs, webhookIDs []uuid.UUID
+		// Ordinality must map each SQL result back to exactly one declared service selection.
+		if err := rows.Scan(&index, &endpointIDs, &webhookIDs); err != nil {
+			return nil, err
+		}
+		// Duplicate or out-of-range rows indicate ambiguous local snapshot identity and must fail closed.
+		if index < 0 || index >= len(resolved) || seen[index] {
+			return nil, errors.New("one or more generation selections could not be resolved uniquely")
+		}
+		seen[index] = true
+		resolved[index].EndpointIDs = endpointIDs
+		resolved[index].WebhookIDs = webhookIDs
+		// Select-all instructions are consumed into IDs, while explicit names remain as immutable descriptive policy checked by Engine validation.
+		resolved[index].SelectAll = false
+		resolved[index].WebhookSelectAll = false
+	}
+	// Query iteration failures cannot yield a partially concrete runtime scope.
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for index := range resolved {
+		// Every planned selection must resolve to at least one exact executable or webhook identity.
+		if !seen[index] || len(resolved[index].EndpointIDs)+len(resolved[index].WebhookIDs) == 0 {
+			return nil, errors.New("one or more generation selections resolved to an empty scope")
+		}
+	}
+	return resolved, nil
+}
+
+const resolveGenerationSelectionsSQL = `WITH requested AS (
+	SELECT input.*, ordinality - 1 AS selection_index
+	FROM ROWS FROM (jsonb_to_recordset($1::jsonb) AS (
+		service_id uuid, service_version_id uuid, operation_names text[], webhook_names text[],
+		endpoint_ids uuid[], webhook_ids uuid[], select_all boolean, webhook_select_all boolean))
+	WITH ORDINALITY AS input(service_id, service_version_id, operation_names, webhook_names,
+		endpoint_ids, webhook_ids, select_all, webhook_select_all, ordinality)
+)
+SELECT input.selection_index,
+	COALESCE(ARRAY(SELECT endpoint.endpoint_id FROM fused_service_contract_endpoints endpoint
+		WHERE endpoint.snapshot_id = snapshot.id AND (
+			COALESCE(input.select_all, false) OR
+			endpoint.name = ANY(COALESCE(input.operation_names, '{}'::text[])) OR
+			endpoint.endpoint_id = ANY(COALESCE(input.endpoint_ids, '{}'::uuid[])))
+		ORDER BY endpoint.endpoint_id), '{}'::uuid[]),
+	COALESCE(ARRAY(SELECT webhook.webhook_id FROM fused_service_contract_webhooks webhook
+		WHERE webhook.snapshot_id = snapshot.id AND (
+			COALESCE(input.select_all, false) OR COALESCE(input.webhook_select_all, false) OR
+			webhook.name = ANY(COALESCE(input.webhook_names, '{}'::text[])) OR
+			webhook.webhook_id = ANY(COALESCE(input.webhook_ids, '{}'::uuid[])))
+		ORDER BY webhook.webhook_id), '{}'::uuid[])
+FROM requested input
+JOIN fused_service_contract_snapshots snapshot ON snapshot.service_id = input.service_id
+	AND snapshot.service_version_id = input.service_version_id
+JOIN fused_workspace_service_versions active ON active.service_id = snapshot.service_id
+	AND active.service_version_id = snapshot.service_version_id
+ORDER BY input.selection_index`
 
 const generationSelectionsSQL = `WITH requested AS (
 	SELECT * FROM jsonb_to_recordset($1::jsonb) AS input(service_id uuid, service_version_id uuid,

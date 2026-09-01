@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -168,6 +169,57 @@ func TestAppAuthMismatchReachesSDKAndMCPHTTP(t *testing.T) {
 			// Diagnostics are derived from the one existing auth batch, before persistence.
 			if registry.calls != 1 || registry.fetchMetadataCalls != 0 || configStore.createdPlan != nil {
 				t.Fatalf("unexpected side effects: auth calls=%d metadata calls=%d plan=%#v", registry.calls, registry.fetchMetadataCalls, configStore.createdPlan)
+			}
+		})
+	}
+}
+
+// TestAppPlansPublishWithoutCredentialValues proves SDK, MCP, and direct-API
+// lifecycle planning share non-blocking readiness metadata for secured scope.
+func TestAppPlansPublishWithoutCredentialValues(t *testing.T) {
+	// Both adapters must preserve the same publication rule; direct API is the SDK case with generate=false.
+	for _, test := range []struct {
+		name, kind, language, description, generate string
+	}{
+		{name: "generated sdk", kind: "sdk", language: "typescript"},
+		{name: "direct api", kind: "sdk", language: "typescript", generate: `,"generate":false`},
+		{name: "mcp", kind: "mcp", description: `,"description":"Find Jira work."`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			serviceID, versionID := uuid.New(), uuid.New()
+			s := &workspaceTestStore{accountID: uuid.New(),
+				workspaceServices:        []store.WorkspaceService{{ServiceID: serviceID, ServiceName: "Jira", Version: "v1"}},
+				workspaceServiceVersions: map[uuid.UUID][]store.WorkspaceServiceVersion{serviceID: {{ServiceID: serviceID, ServiceVersionID: versionID, Version: "v1"}}},
+			}
+			registry := &appAuthMismatchRegistry{mockRegistryClient: &mockRegistryClient{
+				slugIDs: map[string]uuid.UUID{"jira": serviceID},
+				contractRevisions: map[string]sandbox.ServiceVersionRevision{
+					serviceID.String() + "|v1": {ServiceID: serviceID, ServiceVersionID: versionID, Version: "v1", Revision: 1},
+				},
+			}, contracts: []sandbox.ServiceVersionExecutionAuthContract{executionAuthContract(serviceID,
+				fusedobject.AuthConfigs{artifactOAuth("read")}, securedOperation("readIssue", "oauthAuth"))}}
+			configStore := &mockConfigStore{}
+			router := newControlTestRouter(s.accountID)
+			router.Post("/sdk-config/plan", SDKConfigPlanHandler(configStore, s, registry))
+			router.Post("/mcp-config/plan", MCPConfigPlanHandler(configStore, s, registry))
+			body := fmt.Sprintf(`{"source_hash":"fixture","config_key":"%s:fixture:1.0.0","config":{"apiVersion":"fused/v1","kind":%q,"name":"fixture","version":"1.0.0"%s,"language":%q%s,"bucket":"default","services":{"jira":{"version":"v1","operations":["readIssue"]}}}}`, test.kind, test.kind, test.description, test.language, test.generate)
+			request := httptest.NewRequest(http.MethodPost, "/"+test.kind+"-config/plan", strings.NewReader(body))
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			var payload struct {
+				CredentialReadiness *appCredentialReadiness `json:"credential_readiness"`
+				Notifications       notificationInbox       `json:"notifications"`
+			}
+			// Missing OAuth application material must create a plan and a safe warning, never a 400.
+			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil || response.Code != http.StatusOK || configStore.createdPlan == nil {
+				t.Fatalf("plan response = %d %s / %v plan=%#v", response.Code, response.Body.String(), err, configStore.createdPlan)
+			}
+			if payload.CredentialReadiness == nil || len(payload.CredentialReadiness.MissingCredentials) != 1 || len(payload.Notifications.Warnings) != 1 {
+				t.Fatalf("readiness = %#v notifications=%#v", payload.CredentialReadiness, payload.Notifications)
+			}
+			// The durable plan retains the non-secret readiness reason for later review.
+			if !bytes.Contains(configStore.createdPlan.Warnings, []byte(`"code":"bucket_credentials_missing"`)) {
+				t.Fatalf("plan warnings = %s", configStore.createdPlan.Warnings)
 			}
 		})
 	}

@@ -56,3 +56,13 @@ func (s *cachedStore) ValidateGenerationSelections(ctx context.Context, selectio
 	}
 	return delegate.ValidateGenerationSelections(ctx, selections, requireGenerationPin)
 }
+
+// ResolveGenerationSelections preserves concrete local IDs across the cache wrapper without caching catalogue scope.
+func (s *cachedStore) ResolveGenerationSelections(ctx context.Context, selections []models.SDKSelection) ([]models.SDKSelection, error) {
+	resolver, ok := s.Store.(GenerationSelectionResolver)
+	// A wrapper without the exact local projection cannot safely publish a direct API runtime.
+	if !ok {
+		return nil, ErrGenerationContractPinUnavailable
+	}
+	return resolver.ResolveGenerationSelections(ctx, selections)
+}

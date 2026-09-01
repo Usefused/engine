@@ -660,9 +660,18 @@ func restProviderHTTPStatusDetails(err error) map[string]any {
 	return map[string]any{"provider_http_status": responseErr.StatusCode}
 }
 
-// restActionableAuthError projects only Engine-owned connection routing fields
-// needed for the caller to complete or repair authorization.
+// restActionableAuthError projects only Engine-owned credential and connection
+// routing fields needed for the caller to complete or repair authorization.
 func restActionableAuthError(err error) *restExecutionError {
+	var missing *sandbox.CredentialMaterialMissingError
+	// Static credential absence is proven before provider construction and can
+	// safely expose only routing identity plus a value-free setup command.
+	if errors.As(err, &missing) {
+		return newRESTExecutionErrorWithDetails(http.StatusConflict, "bucket_credentials_missing", "provider credentials are not configured", map[string]any{
+			"bucket_id": missing.BucketID, "service_id": missing.ServiceID,
+			"auth_type": missing.AuthType, "auth_name": missing.AuthName, "command": missing.Command(),
+		})
+	}
 	var connection *sandbox.ConnectionRequiredError
 	if errors.As(err, &connection) {
 		return newRESTExecutionErrorWithDetails(http.StatusConflict, "connection_required", "a provider connection is required", map[string]any{

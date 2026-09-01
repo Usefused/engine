@@ -68,6 +68,7 @@ func MCPConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 			"source_hash": result.plan.SourceHash, "base_generation": result.plan.BaseGeneration,
 			"required_permissions": result.plan.RequiredPermissions,
 			"summary":              result.summary, "notifications": result.notifications,
+			"credential_readiness": result.readiness,
 		})
 	}
 }
@@ -240,7 +241,7 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 		return sdkPlanResult{}, err
 	}
 	call.request.OwnerSubjectID, call.request.OwnerTeamID = owner.subjectID, owner.teamID
-	selections, services, resolved, credentialSources, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current), *bucket)
+	selections, services, resolved, credentialSources, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current))
 	// MCP shares SDK selection/auth decisions rather than implementing an alternate planner.
 	if err != nil {
 		return sdkPlanResult{}, err
@@ -255,6 +256,12 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 
 	selections, unifiedCompilation, err := resolveAndCompileMCPUnifiedOperations(ctx, s, call.document, selections, resolved)
 	// A partially frozen or compiled graph must never enter an immutable plan.
+	if err != nil {
+		return sdkPlanResult{}, err
+	}
+	readiness, err := inspectAppBucketReadiness(ctx, s, *bucket, selections, appReadinessServiceNames(append(append([]sdkResolvedService{}, resolved...), credentialSources...), nil))
+	// Mutable credential absence becomes review metadata only after the exact
+	// immutable physical and Unified scope has passed admission.
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
@@ -290,7 +297,7 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 		OwnerSubjectID: call.request.OwnerSubjectID,
 		OwnerTeamID:    call.request.OwnerTeamID,
 		SourceHash:     call.request.SourceHash, BaseGeneration: currentGeneration(current), Actions: []byte("[]"),
-		DesiredState: desiredState, ResolvedPayload: resolvedPayload, Blockers: []byte("[]"), Warnings: []byte("[]"),
+		DesiredState: desiredState, ResolvedPayload: resolvedPayload, Blockers: []byte("[]"), Warnings: appCredentialPlanWarnings(readiness),
 		RequiredPermissions: requiredPermissions,
 		CreatedBy:           call.accountID, SupersedeExisting: true,
 	})
@@ -299,7 +306,11 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 		return sdkPlanResult{}, configPlanSaveHTTPError(err)
 	}
 	trace.SpanFromContext(ctx).SetAttributes(attribute.Int("required_permissions_count", requiredCount))
-	return sdkPlanResult{plan: plan, summary: map[string]any{"create_mcp": current == nil, "services": services}, notifications: collectSDKPlanNotifications(ctx, configStore, registryClient, call, resolved)}, nil
+	return sdkPlanResult{
+		plan: plan, summary: map[string]any{"create_mcp": current == nil, "services": services},
+		notifications: withAppCredentialReadinessWarning(collectSDKPlanNotifications(ctx, configStore, registryClient, call, resolved), readiness),
+		readiness:     readiness,
+	}, nil
 }
 
 // loadMCPPlanningState admits local-only dependencies before inspecting the existing immutable configuration.

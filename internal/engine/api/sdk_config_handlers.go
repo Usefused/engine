@@ -157,6 +157,7 @@ type sdkPlanResult struct {
 	plan          *store.ConfigPlan
 	summary       map[string]any
 	notifications notificationInbox
+	readiness     *appCredentialReadiness
 }
 
 type sdkPlanDefinition struct {
@@ -165,6 +166,7 @@ type sdkPlanDefinition struct {
 	desiredState     json.RawMessage
 	resolvedPayload  json.RawMessage
 	noop             bool
+	readiness        *appCredentialReadiness
 }
 
 type notificationInbox struct {
@@ -250,6 +252,7 @@ func SDKConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 			"required_permissions": result.plan.RequiredPermissions,
 			"summary":              result.summary,
 			"notifications":        result.notifications,
+			"credential_readiness": result.readiness,
 		})
 	}
 }
@@ -513,10 +516,8 @@ func validateWebhookAttachmentCoverage(ctx context.Context, configStore store.Co
 }
 
 // decodeAppApplyPlan decodes a stored SDK/MCP plan's desired state and
-// resolved payload, then re-verifies both cross-references apply depends on
-// (bucket readiness, webhook attachment coverage) still hold -- grouped into
-// one call so generateSDKForApply/executeMCPConfigApply each need only one
-// branch here instead of four, keeping them under the complexity budget.
+// resolved payload, then re-verifies immutable bucket identity and webhook
+// attachment coverage without treating mutable credential values as apply authority.
 // kind customizes the "invalid resolved ... plan" message only; decoding and
 // validation are identical for both, so this is the one place that logic
 // lives rather than duplicated per app kind.
@@ -526,13 +527,12 @@ func decodeAppApplyPlan(ctx context.Context, configStore store.ConfigRepository,
 	if json.Unmarshal(plan.DesiredState, &doc) != nil || json.Unmarshal(plan.ResolvedPayload, &payload) != nil {
 		return sdkConfigDocument{}, appResolvedPayload{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid resolved " + kind + " plan"}
 	}
-	bucket, err := validateAppBucketIdentity(ctx, s, doc.Bucket, payload.BucketID)
+	_, err := validateAppBucketIdentity(ctx, s, doc.Bucket, payload.BucketID)
 	if err != nil {
 		return sdkConfigDocument{}, appResolvedPayload{}, err
 	}
-	if err := validateAppBucketReadiness(ctx, s, *bucket, payload.Selections, nil); err != nil {
-		return sdkConfigDocument{}, appResolvedPayload{}, err
-	}
+	// Credential values are mutable runtime dependencies, so apply preserves the
+	// immutable bucket identity without requiring the bucket to be ready now.
 	if err := validateWebhookAttachmentCoverage(ctx, configStore, doc); err != nil {
 		return sdkConfigDocument{}, appResolvedPayload{}, err
 	}
@@ -769,7 +769,7 @@ func createSDKConfigPlan(
 		DesiredState:        definition.desiredState,
 		ResolvedPayload:     definition.resolvedPayload,
 		Blockers:            []byte("[]"),
-		Warnings:            []byte("[]"),
+		Warnings:            appCredentialPlanWarnings(definition.readiness),
 		RequiredPermissions: requiredPermissions,
 		CreatedBy:           call.accountID,
 		SupersedeExisting:   true,
@@ -783,7 +783,8 @@ func createSDKConfigPlan(
 	return sdkPlanResult{
 		plan:          plan,
 		summary:       sdkPlanSummary(appID == uuid.Nil, !definition.noop && appID != uuid.Nil, definition.services),
-		notifications: notifications,
+		notifications: withAppCredentialReadinessWarning(notifications, definition.readiness),
+		readiness:     definition.readiness,
 	}, nil
 }
 
@@ -795,7 +796,7 @@ func sdkConfigGeneratesPackage(doc sdkConfigDocument) bool {
 
 // resolveSDKPlanDefinition resolves sdk plan definition from immutable app scope before provider dispatch.
 func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkPlanCall, current *store.ConfigState, bucket store.Bucket, appID uuid.UUID) (sdkPlanDefinition, error) {
-	selections, services, resolvedServices, credentialSources, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current), bucket)
+	selections, services, resolvedServices, credentialSources, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current))
 	// Selection/auth admission must precede generation identity binding.
 	if err != nil {
 		return sdkPlanDefinition{}, err
@@ -809,6 +810,12 @@ func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepos
 	selections = finalizeAppSelections(selections, targetBindings)
 	unifiedCompilation, err := compileSDKUnifiedOperations(ctx, s, call.document, selections, resolvedServices)
 	// Unified mappings must bind to those same local physical selections.
+	if err != nil {
+		return sdkPlanDefinition{}, err
+	}
+	readiness, err := inspectAppBucketReadiness(ctx, s, bucket, selections, appReadinessServiceNames(append(append([]sdkResolvedService{}, resolvedServices...), credentialSources...), nil))
+	// Read failures remain planning failures, while authoritative absence becomes
+	// metadata only after immutable physical and Unified scope admission.
 	if err != nil {
 		return sdkPlanDefinition{}, err
 	}
@@ -828,7 +835,7 @@ func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepos
 	payload.UnifiedDefinitionHash = unifiedCompilation.DefinitionHash
 	payload.UnifiedCodegenDescriptorHash = unifiedCompilation.CodegenDescriptorHash
 	resolvedPayload, _ := json.Marshal(payload)
-	return sdkPlanDefinition{services: services, resolvedServices: resolvedServices, desiredState: desiredState, resolvedPayload: resolvedPayload, noop: noop}, nil
+	return sdkPlanDefinition{services: services, resolvedServices: resolvedServices, desiredState: desiredState, resolvedPayload: resolvedPayload, noop: noop, readiness: readiness}, nil
 }
 
 // sdkPlanIsNoop requires canonical desired state and compiled Unified hashes to match the existing app runtime.
@@ -922,7 +929,6 @@ func resolveSDKSelections(
 
 	doc sdkConfigDocument,
 	previous sdkConfigDocument,
-	bucket store.Bucket,
 ) ([]models.SDKSelection, []map[string]any, []sdkResolvedService, []sdkResolvedService, sdkConfigDocument, error) {
 	doc = canonicalAppDocument(doc)
 	services, err := workspaceServicesByConfigKey(ctx, s, registryClient, apiKey, doc)
@@ -978,7 +984,7 @@ func resolveSDKSelections(
 		local.setGenerationTargets(resolved)
 	}
 	// Auth, credentials, attachments, and exact membership share one final admission boundary.
-	credentialSources, err := validateResolvedSDKSelections(ctx, configStore, s, registryClient, apiKey, bucket, doc, services, resolved, selections)
+	credentialSources, err := validateResolvedSDKSelections(ctx, configStore, registryClient, apiKey, doc, services, resolved, selections)
 	if err != nil {
 		return nil, nil, nil, nil, sdkConfigDocument{}, err
 	}
@@ -992,7 +998,7 @@ type sdkSelectionValidator interface {
 }
 
 // validateResolvedSDKSelections admits exact local scope before it can cross the shared app publication boundary.
-func validateResolvedSDKSelections(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, apiKey string, bucket store.Bucket, doc sdkConfigDocument, workspaceServices map[string]store.WorkspaceService, resolved []sdkResolvedService, selections []models.SDKSelection) ([]sdkResolvedService, error) {
+func validateResolvedSDKSelections(ctx context.Context, configStore store.ConfigRepository, registryClient sandbox.RegistryClient, apiKey string, doc sdkConfigDocument, workspaceServices map[string]store.WorkspaceService, resolved []sdkResolvedService, selections []models.SDKSelection) ([]sdkResolvedService, error) {
 	// Unified target aliases must be unambiguous before auth policy resolution attaches authority to them.
 	if err := validateResolvedUnifiedTargets(doc, resolved); err != nil {
 		return nil, err
@@ -1017,10 +1023,8 @@ func validateResolvedSDKSelections(ctx context.Context, configStore store.Config
 	if err != nil {
 		return nil, err
 	}
-	// A valid contract does not imply the selected bucket has usable credentials.
-	if err := validateAppBucketReadiness(ctx, s, bucket, selections, appReadinessServiceNames(resolved, workspaceServices)); err != nil {
-		return nil, err
-	}
+	// Credential material is intentionally absent from immutable selection
+	// admission; readiness is inspected separately after the scope is complete.
 	// Inbound scope must retain the reviewed attachment coverage alongside outbound scope.
 	if err := validateWebhookAttachmentCoverage(ctx, configStore, doc); err != nil {
 		return nil, err
@@ -2421,7 +2425,8 @@ func generateSDKForApply(
 	if err != nil {
 		return nil, sdkGenerationResult{}, err
 	}
-	result, err := executeSDKGenerationForApply(ctx, proxy, call, input.payload)
+	resolver, _ := s.(store.GenerationSelectionResolver)
+	result, err := executeSDKGenerationForApply(ctx, resolver, proxy, call, input.payload)
 	if err != nil {
 		return input.plan, result, err
 	}
@@ -2440,7 +2445,7 @@ func generateSDKForApply(
 }
 
 // executeSDKGenerationForApply selects Engine-local publication or Registry package generation from the immutable plan payload.
-func executeSDKGenerationForApply(ctx context.Context, proxy Forwarder, call sdkApplyCall, payload json.RawMessage) (sdkGenerationResult, error) {
+func executeSDKGenerationForApply(ctx context.Context, resolver store.GenerationSelectionResolver, proxy Forwarder, call sdkApplyCall, payload json.RawMessage) (sdkGenerationResult, error) {
 	var request GenerateSDKRequest
 	// The retained payload must prove its immutable packaging choice before apply selects a local or Registry path.
 	if err := json.Unmarshal(payload, &request); err != nil {
@@ -2448,21 +2453,30 @@ func executeSDKGenerationForApply(ctx context.Context, proxy Forwarder, call sdk
 	}
 	// Direct API publishes the Engine-owned runtime scope without asking Registry to resolve or cache a package it will never build.
 	if request.SkipPackaging {
-		return localSkippedSDKGenerationResult(call, request), nil
+		return localSkippedSDKGenerationResult(ctx, resolver, call, request)
 	}
 	return runTrackedSDKGeneration(ctx, proxy, call.apiKey, payload)
 }
 
 // localSkippedSDKGenerationResult projects the already-admitted plan into the terminal envelope shared by runtime persistence.
-func localSkippedSDKGenerationResult(call sdkApplyCall, request GenerateSDKRequest) sdkGenerationResult {
+func localSkippedSDKGenerationResult(ctx context.Context, resolver store.GenerationSelectionResolver, call sdkApplyCall, request GenerateSDKRequest) (sdkGenerationResult, error) {
+	// Direct API publication needs the same concrete immutable scope that Registry returns for generated packages.
+	if resolver == nil {
+		return sdkGenerationResult{}, workspaceConfigHTTPError{status: http.StatusServiceUnavailable, message: "local generation selection resolver unavailable"}
+	}
+	selections, err := resolver.ResolveGenerationSelections(ctx, request.Selections)
+	// A partial or stale local snapshot must never broaden or silently narrow the published runtime.
+	if err != nil {
+		return sdkGenerationResult{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_scope_selection_mismatch"}
+	}
 	return sdkGenerationResult{
 		SDKGenerationResult: models.SDKGenerationResult{
 			AppFamilyID: request.AppFamilyID, AppID: request.AppID, AccountID: call.accountID,
 			JobID: call.planID.String(), Status: models.SDKGenerationStatusSkipped,
 			ScopeSchemaVersion: models.AppScopeSchemaVersion, GeneratorVersion: request.GeneratorVersion,
-			Selections: request.Selections,
+			Selections: selections,
 		},
-	}
+	}, nil
 }
 
 type sdkGenerationApplyInput struct {
@@ -3205,42 +3219,79 @@ type appMissingCredentialField struct {
 	SecretKey string `json:"secret_key,omitempty"`
 }
 
-// validateAppBucketReadiness checks the one bucket selected by an app before a
-// plan is persisted and again during apply. The planner's immutable chosen
-// alternatives let this pass validate every AND member from metadata without
-// decrypting values. One bucket-scoped pass reports all missing material, and
-// its typed response contains prompt labels and secret-key names only so a CLI
-// can remediate without parsing prose or exposing credential values.
-func validateAppBucketReadiness(ctx context.Context, s store.Store, bucket store.Bucket, selections []models.SDKSelection, serviceNames map[uuid.UUID]string) error {
+type appCredentialReadiness struct {
+	Bucket             appReadinessBucket     `json:"bucket"`
+	MissingCredentials []appMissingCredential `json:"missing_credentials"`
+}
+
+// inspectAppBucketReadiness reports mutable credential availability without
+// making it authority for publishing an otherwise valid immutable app.
+func inspectAppBucketReadiness(ctx context.Context, s store.Store, bucket store.Bucket, selections []models.SDKSelection, serviceNames map[uuid.UUID]string) (*appCredentialReadiness, error) {
+	// A missing bucket identity is a malformed plan dependency rather than a
+	// deferrable credential-value concern.
 	if bucket.ID == uuid.Nil {
-		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: "app config requires exactly one bucket"}
+		return nil, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "app config requires exactly one bucket"}
 	}
+	// Anonymous and webhook-only selections have no provider credential dependency to report.
 	if !appSelectionsRequireAuth(selections) {
-		return nil
+		return nil, nil
 	}
 	ready, secretKeys, err := loadAppBucketMaterial(ctx, s, bucket.ID, selections)
+	// Store failures cannot be represented as an authoritative "not configured" warning.
 	if err != nil {
-		return err
+		return nil, err
 	}
 	missing := make([]appMissingCredential, 0)
 	for _, selection := range selections {
 		missing = append(missing, missingAppBucketMaterial(selection, serviceNames, ready, secretKeys)...)
 	}
+	// A fully ready bucket needs no response field or warning.
 	if len(missing) == 0 {
-		return nil
+		return nil, nil
 	}
+	// Stable ordering keeps warnings, prompts, and JSON plans reproducible across map-backed metadata sources.
 	sort.Slice(missing, func(i, j int) bool { return appMissingCredentialKey(missing[i]) < appMissingCredentialKey(missing[j]) })
-	return workspaceConfigHTTPError{
-		status:   http.StatusBadRequest,
-		code:     "bucket_credentials_missing",
-		message:  "The selected credential set is missing required authentication material.",
-		category: "validation",
-		details: map[string]any{
-			"bucket":              appReadinessBucket{ID: bucket.ID.String(), Name: bucket.Name},
-			"missing_credentials": missing,
-		},
-		remediation: "Add the required credentials to the credential set and create the plan again.",
+	return &appCredentialReadiness{
+		Bucket:             appReadinessBucket{ID: bucket.ID.String(), Name: bucket.Name},
+		MissingCredentials: missing,
+	}, nil
+}
+
+// appCredentialPlanWarnings persists safe readiness metadata with the plan so
+// audit/review surfaces retain why an app may not execute yet.
+func appCredentialPlanWarnings(readiness *appCredentialReadiness) json.RawMessage {
+	// Ready apps keep the established empty warning representation.
+	if readiness == nil || len(readiness.MissingCredentials) == 0 {
+		return json.RawMessage("[]")
 	}
+	warnings, err := json.Marshal([]map[string]any{{
+		"code": "bucket_credentials_missing", "credential_readiness": readiness,
+	}})
+	// The readiness shape contains only bounded primitive DTOs, so marshal
+	// failure is defensive and must not turn mutable absence back into a blocker.
+	if err != nil {
+		return json.RawMessage("[]")
+	}
+	return warnings
+}
+
+// withAppCredentialReadinessWarning adds one human-readable warning while the
+// structured sibling field remains authoritative for automation and prompts.
+func withAppCredentialReadinessWarning(inbox notificationInbox, readiness *appCredentialReadiness) notificationInbox {
+	// No warning is needed when every selected credential family is ready.
+	if readiness == nil || len(readiness.MissingCredentials) == 0 {
+		return inbox
+	}
+	label := strings.TrimSpace(readiness.Bucket.Name)
+	// A valid UUID remains useful when an older bucket row has no display name.
+	if label == "" {
+		label = readiness.Bucket.ID
+	}
+	inbox.Warnings = append(inbox.Warnings, fmt.Sprintf(
+		"bucket_credentials_missing: %d credential requirement(s) are not configured in bucket %q; the app can be published, but affected calls will fail until configured",
+		len(readiness.MissingCredentials), label,
+	))
+	return inbox
 }
 
 func appMissingCredentialKey(missing appMissingCredential) string {

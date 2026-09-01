@@ -375,10 +375,38 @@ func resolveConnectRuntimeConfigForVersion(ctx context.Context, s store.Store, v
 	}
 	resolver := connectauth.NewApplicationCredentialResolver(s, masterKey, callbackURI)
 	creds, err := resolver.Resolve(ctx, call.bucketID, call.serviceID, authType, authName, call.credentialSource)
+	// Missing application registration is operator-remediable before any
+	// provider session exists, so return the exact value-free secret command.
 	if err != nil {
-		return connectRuntimeConfig{}, connectRuntimeHTTPError{status: http.StatusNotFound, message: "OAuth application credentials not found"}
+		return connectRuntimeConfig{}, connectRuntimeHTTPError{
+			status: http.StatusNotFound, message: "OAuth application credentials not found",
+			remediation: connectApplicationCredentialRemediation(call, authType, authName),
+		}
 	}
 	return connectRuntimeConfig{authType: authType, authName: authName, auth: auth, flow: flow, credentials: creds, credentialSource: call.credentialSource, metadata: metadata}, nil
+}
+
+// connectApplicationCredentialRemediation targets the direct or referenced
+// application family selected for this consent attempt without exposing values.
+func connectApplicationCredentialRemediation(call connectAdminCall, authType, authName string) string {
+	serviceID := call.serviceID
+	// An explicit app auth reference stores the pair under its source service and family.
+	if call.credentialSource.ServiceID != uuid.Nil {
+		serviceID = call.credentialSource.ServiceID
+		authType = call.credentialSource.AuthType
+		authName = call.credentialSource.AuthName
+	}
+	command := fmt.Sprintf(
+		"fused-cli secret set %s --bucket %s --type %s --auth-name %s --interactive",
+		serviceID.String(), call.bucketID.String(), shellQuoteCLIArgument(authType), shellQuoteCLIArgument(authName),
+	)
+	return "Run " + command + ", then retry the connection."
+}
+
+// shellQuoteCLIArgument renders reviewed provider metadata as one POSIX shell
+// word so remediation text cannot create an additional command or argument.
+func shellQuoteCLIArgument(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 // resolveExplicitConnectCredentialSource admits one enabled source scheme through the planner's set-based local snapshot path.

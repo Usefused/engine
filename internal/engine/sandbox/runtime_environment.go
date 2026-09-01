@@ -490,6 +490,11 @@ func comparableEnvironmentName(name string) string {
 // encodeRuntimeError preserves only documented structured decisions while
 // keeping ordinary execution failures backward-compatible as plain strings.
 func encodeRuntimeError(err error) string {
+	var missingErr *CredentialMaterialMissingError
+	// Generated SDKs receive the same structured, value-free setup action as REST and Unified callers.
+	if errors.As(err, &missingErr) {
+		return mustJSONError(missingErr)
+	}
 	var timeoutErr *executionTimeoutError
 	if errors.As(err, &timeoutErr) {
 		return mustJSONError(timeoutErr)

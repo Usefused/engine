@@ -656,6 +656,19 @@ func assertMCPPaginationIntentRecovery(t *testing.T, response mcpCallResponse, w
 	}
 }
 
+// TestMCPPhysicalMissingCredentialReturnsSetupCommand proves a physical MCP
+// tool call keeps the pre-provider credential remedy intact for the agent.
+func TestMCPPhysicalMissingCredentialReturnsSetupCommand(t *testing.T) {
+	bucketID, serviceID := uuid.New(), uuid.New()
+	statusCode, response := boundedMCPPhysicalCallResponse("jira.searchProjects", &CredentialMaterialMissingError{
+		BucketID: bucketID, ServiceID: serviceID, AuthType: "basic", AuthName: "basicAuth",
+	})
+	// Static absence remains a provider-gateway failure, but its bounded text must be directly actionable.
+	if statusCode != http.StatusBadGateway || !strings.Contains(response.Error, "bucket_credentials_missing") || !strings.Contains(response.Error, "fused-cli secret set "+serviceID.String()) || !strings.Contains(response.Error, "--bucket "+bucketID.String()) {
+		t.Fatalf("MCP credential response = status:%d response:%+v", statusCode, response)
+	}
+}
+
 // executeMCPPhysicalHandlerTest drives one authenticated bridge request and decodes its bounded response.
 func executeMCPPhysicalHandlerTest(t *testing.T, sessionID, endpointName string, pagination *mcpPhysicalPaginationIntent) (int, mcpCallResponse) {
 	t.Helper()
