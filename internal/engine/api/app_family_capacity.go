@@ -16,7 +16,7 @@ import (
 // appFamilyCapacityPolicy keeps adapter-specific quota language beside the
 // shared admission rule so SDK and MCP cannot drift into different semantics.
 type appFamilyCapacityPolicy struct {
-	kind        store.AppKind
+	quotaClass  string
 	resource    string
 	errorCode   string
 	displayName string
@@ -27,7 +27,7 @@ type appFamilyCapacityPolicy struct {
 // enforceAppFamilyCapacity admits a target already occupying one quota unit
 // and otherwise applies the adapter's entitlement before it becomes invokable.
 func enforceAppFamilyCapacity(ctx context.Context, s store.Store, span trace.Span, accountID uuid.UUID, canonicalName string, policy appFamilyCapacityPolicy) error {
-	usage, err := s.GetAppFamilyQuotaUsage(ctx, accountID, policy.kind.String(), canonicalName)
+	usage, err := s.GetAppFamilyQuotaUsage(ctx, accountID, policy.quotaClass, canonicalName)
 	// Quota admission fails closed when the current invokable usage is unavailable.
 	if err != nil {
 		span.SetAttributes(attribute.String("outcome", "failed"), attribute.String("error.code", "app_family_count_failed"))

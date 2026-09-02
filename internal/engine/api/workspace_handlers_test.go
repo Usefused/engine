@@ -206,16 +206,16 @@ func (s *workspaceTestStore) GetAppFamilyQuotaUsage(_ context.Context, accountID
 	s.appMutex.Lock()
 	defer s.appMutex.Unlock()
 	runnableFamilies := make(map[uuid.UUID]struct{})
-	// Only statuses accepted by runtime authorization spend a family quota unit.
+	// Only runnable versions in the requested delivery class spend its family quota unit.
 	for _, app := range s.apps {
-		if app.Status.Runnable() {
+		if app.Status.Runnable() && appMatchesQuotaClass(app, kind) {
 			runnableFamilies[app.AppFamilyID] = struct{}{}
 		}
 	}
 	usage := store.AppFamilyQuotaUsage{}
 	for _, family := range s.appFamilies {
 		// Account and adapter filters keep one workspace's quota isolated from every other family.
-		if family.AccountID != accountID || family.Kind.String() != kind {
+		if family.AccountID != accountID || !familyMatchesQuotaClass(family, kind) {
 			continue
 		}
 		// Retained identity and tombstones alone are history, not invokable usage.
@@ -228,6 +228,28 @@ func (s *workspaceTestStore) GetAppFamilyQuotaUsage(_ context.Context, accountID
 		}
 	}
 	return usage, nil
+}
+
+// appMatchesQuotaClass mirrors the persisted generation-status split between REST-only APIs and generated SDKs.
+func appMatchesQuotaClass(app store.App, quotaClass string) bool {
+	// A terminal skip means no Registry package exists, which is the direct API class.
+	if quotaClass == "api" {
+		return app.SDKGenerationStatus == models.SDKGenerationStatusSkipped
+	}
+	// Generated and legacy SDK versions are every SDK-family row that is not an explicit package skip.
+	if quotaClass == store.AppKindSDK.String() {
+		return app.SDKGenerationStatus != models.SDKGenerationStatusSkipped
+	}
+	return true
+}
+
+// familyMatchesQuotaClass maps the API quota class onto SDK-kind families without creating a new lifecycle kind.
+func familyMatchesQuotaClass(family store.AppFamily, quotaClass string) bool {
+	// Direct APIs intentionally retain SDK family identity under the shared app lifecycle.
+	if quotaClass == "api" {
+		return family.Kind == store.AppKindSDK
+	}
+	return family.Kind.String() == quotaClass
 }
 
 // CountActiveServices returns the number of workspace services registered in

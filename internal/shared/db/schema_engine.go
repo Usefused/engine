@@ -693,6 +693,7 @@ func engineSchemaQueries() []string {
 			updated_at timestamptz NOT NULL DEFAULT NOW(),
 			-- Capability limits: negative = unlimited, 0 = not allowed
 			max_buckets integer NOT NULL DEFAULT -1,
+			max_api_families integer NOT NULL DEFAULT -1,
 			max_sdk_families integer NOT NULL DEFAULT -1,
 			max_mcp_families integer NOT NULL DEFAULT -1,
 			max_services integer NOT NULL DEFAULT -1,
@@ -703,18 +704,20 @@ func engineSchemaQueries() []string {
 			execution_retention_days integer NOT NULL DEFAULT 30,
 			CHECK (singleton_key = 1)
 		);`,
+		// Existing Engines gain an independent direct-API ceiling without changing their effective capacity before the next Registry heartbeat.
+		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS max_api_families integer NOT NULL DEFAULT -1;`,
 		// A default unlimited row makes activation transactions total before the
 		// first handshake; Registry bootstrap atomically overwrites it with the licensed contract.
 		`INSERT INTO fused_runtime_entitlements (
 			singleton_key, entitlement_revision, plan, heartbeat_required, usage_reporting,
 			public_service_insights_enabled, heartbeat_interval_seconds,
 			heartbeat_stale_after_seconds, refreshed_at, max_buckets,
-			max_sdk_families, max_mcp_families, max_services, max_sandbox_concurrency,
+			max_api_families, max_sdk_families, max_mcp_families, max_services, max_sandbox_concurrency,
 			drift_monitoring_enabled, webhook_ingestion_enabled, sso_enabled,
 			execution_retention_days
 		) VALUES (
 			1, '', 'commercial', true, 'aggregate', false, 60, 300, NOW(),
-			-1, -1, -1, -1, -1, true, false, false, 30
+			-1, -1, -1, -1, -1, -1, true, false, false, 30
 		) ON CONFLICT (singleton_key) DO NOTHING;`,
 
 		// Pending usage reports are local aggregate counters, not raw execution
@@ -1256,13 +1259,24 @@ func engineSchemaQueries() []string {
 			CONSTRAINT chk_fused_apps_sdk_generation_state CHECK (
 				(sdk_generation_job_id IS NULL AND sdk_generation_status IS NULL)
 				OR (
+					sdk_generation_status = 'skipped'
+					AND status IN ('active', 'deprecated')
+					AND (
+						sdk_generation_job_id IS NULL
+						OR (
+							btrim(sdk_generation_job_id) <> ''
+							AND octet_length(sdk_generation_job_id) <= 255
+						)
+					)
+				)
+				OR (
 					sdk_generation_job_id IS NOT NULL
 					AND btrim(sdk_generation_job_id) <> ''
 					AND octet_length(sdk_generation_job_id) <= 255
 					AND sdk_generation_status IS NOT NULL
 					AND (
 						(status = 'building' AND sdk_generation_status IN ('pending', 'failed'))
-						OR (status IN ('active', 'deprecated') AND sdk_generation_status IN ('complete', 'skipped'))
+						OR (status IN ('active', 'deprecated') AND sdk_generation_status = 'complete')
 					)
 				)
 			),
@@ -1306,6 +1320,16 @@ func engineSchemaQueries() []string {
 		// Generation coherence prevents direct SQL or old callers from making pending SDK work runnable or terminal work building.
 		`DO $$
 		BEGIN
+			-- The lock serializes constraint convergence across concurrent Engine startups.
+			LOCK TABLE fused_apps IN SHARE ROW EXCLUSIVE MODE;
+			IF EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname = 'chk_fused_apps_sdk_generation_state'
+				  AND conrelid = 'fused_apps'::regclass
+				  AND pg_get_constraintdef(oid) NOT LIKE '%sdk_generation_status = ''skipped''%'
+			) THEN
+				ALTER TABLE fused_apps DROP CONSTRAINT chk_fused_apps_sdk_generation_state;
+			END IF;
 			IF NOT EXISTS (
 				SELECT 1 FROM pg_constraint
 				WHERE conname = 'chk_fused_apps_sdk_generation_state'
@@ -1313,18 +1337,29 @@ func engineSchemaQueries() []string {
 			) THEN
 				ALTER TABLE fused_apps
 				ADD CONSTRAINT chk_fused_apps_sdk_generation_state CHECK (
-					(sdk_generation_job_id IS NULL AND sdk_generation_status IS NULL)
-					OR (
-						sdk_generation_job_id IS NOT NULL
-						AND btrim(sdk_generation_job_id) <> ''
-						AND octet_length(sdk_generation_job_id) <= 255
-						AND sdk_generation_status IS NOT NULL
-						AND (
-							(status = 'building' AND sdk_generation_status IN ('pending', 'failed'))
-							OR (status IN ('active', 'deprecated') AND sdk_generation_status IN ('complete', 'skipped'))
+				(sdk_generation_job_id IS NULL AND sdk_generation_status IS NULL)
+				OR (
+					sdk_generation_status = 'skipped'
+					AND status IN ('active', 'deprecated')
+					AND (
+						sdk_generation_job_id IS NULL
+						OR (
+							btrim(sdk_generation_job_id) <> ''
+							AND octet_length(sdk_generation_job_id) <= 255
 						)
 					)
-				);
+				)
+				OR (
+					sdk_generation_job_id IS NOT NULL
+					AND btrim(sdk_generation_job_id) <> ''
+					AND octet_length(sdk_generation_job_id) <= 255
+					AND sdk_generation_status IS NOT NULL
+					AND (
+						(status = 'building' AND sdk_generation_status IN ('pending', 'failed'))
+						OR (status IN ('active', 'deprecated') AND sdk_generation_status = 'complete')
+					)
+				)
+			);
 			END IF;
 		END $$;`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_apps_family_status

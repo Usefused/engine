@@ -41,6 +41,7 @@ func TestResolveSDKGenerationStatusProjectsOnlyLocalState(t *testing.T) {
 		{name: "pending build", appStatus: store.AppStatusBuilding, generation: models.SDKGenerationStatusPending, want: models.SDKGenerationStatusPending},
 		{name: "failed build", appStatus: store.AppStatusBuilding, generation: models.SDKGenerationStatusFailed, want: models.SDKGenerationStatusFailed},
 		{name: "complete", appStatus: store.AppStatusActive, generation: models.SDKGenerationStatusComplete, want: models.SDKGenerationStatusComplete},
+		{name: "direct API", appStatus: store.AppStatusActive, generation: models.SDKGenerationStatusSkipped, want: models.SDKGenerationStatusSkipped},
 		{name: "legacy active", appStatus: store.AppStatusActive, want: models.SDKGenerationStatusComplete},
 	}
 	// Each case changes only stored lifecycle fields, proving the endpoint does not need Registry state.
@@ -52,6 +53,10 @@ func TestResolveSDKGenerationStatusProjectsOnlyLocalState(t *testing.T) {
 			// Exact persisted status and immutable identities are the complete read contract.
 			if err != nil || response.Status != test.want || response.AppID != fixture.app.AppID || response.AppFamilyID != fixture.app.AppFamilyID {
 				t.Fatalf("status = %#v / %v, want %q", response, err, test.want)
+			}
+			// A package-free API must not expose the old plan-ID sentinel as a Registry generation job.
+			if test.generation == models.SDKGenerationStatusSkipped && response.JobID != "" {
+				t.Fatalf("direct API generation job = %q, want empty", response.JobID)
 			}
 		})
 	}

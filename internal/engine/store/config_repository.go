@@ -759,9 +759,11 @@ func persistAppRuntimeTx(ctx context.Context, tx pgx.Tx, params *ApplyAppConfigP
 	if appStatus == "" {
 		appStatus = AppStatusActive
 	}
-	// Every transaction that makes an SDK runnable shares the entitlement lock with background completion.
+	// Every transaction that makes an SDK or direct API runnable shares the entitlement lock with background completion.
 	if params.Scope.Kind == AppKindSDK && appStatus == AppStatusActive {
-		if err := admitSDKFamilyActivation(ctx, tx, params.Scope.AccountID, familyID); err != nil {
+		isDirectAPI := params.SDKGenerationStatus == models.SDKGenerationStatusSkipped
+		// The terminal skip marker is the immutable proof that this app is REST-only rather than a generated package.
+		if err := admitSDKFamilyActivation(ctx, tx, params.Scope.AccountID, familyID, isDirectAPI); err != nil {
 			return uuid.Nil, uuid.Nil, false, false, err
 		}
 	}

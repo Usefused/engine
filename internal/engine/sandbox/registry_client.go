@@ -278,6 +278,7 @@ type rawRuntimeEntitlement struct {
 	HeartbeatIntervalSeconds     int    `json:"heartbeat_interval_seconds"`
 	HeartbeatStaleAfterSeconds   int    `json:"heartbeat_stale_after_seconds"`
 	MaxBuckets                   *int   `json:"max_buckets,omitempty"`
+	MaxAPIFamilies               *int   `json:"max_api_families,omitempty"`
 	MaxSDKFamilies               *int   `json:"max_sdk_families,omitempty"`
 	MaxMCPFamilies               *int   `json:"max_mcp_families,omitempty"`
 	MaxServices                  *int   `json:"max_services,omitempty"`
@@ -2130,6 +2131,7 @@ func (c *HTTPRegistryClient) signRegistryPayload(body []byte) string {
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
 
+// RuntimeEntitlementFromHandshake maps the Registry wire bundle into the Engine's normalized local authority.
 func RuntimeEntitlementFromHandshake(raw *rawRuntimeEntitlement) models.RuntimeEntitlement {
 	entitlement := models.DefaultRuntimeEntitlement()
 	if raw == nil {
@@ -2149,6 +2151,7 @@ func RuntimeEntitlementFromHandshake(raw *rawRuntimeEntitlement) models.RuntimeE
 	entitlement.HeartbeatIntervalSeconds = raw.HeartbeatIntervalSeconds
 	entitlement.HeartbeatStaleAfterSeconds = raw.HeartbeatStaleAfterSeconds
 	entitlement.MaxBuckets = raw.MaxBuckets
+	entitlement.MaxAPIFamilies = raw.MaxAPIFamilies
 	entitlement.MaxSDKFamilies = raw.MaxSDKFamilies
 	entitlement.MaxMCPFamilies = raw.MaxMCPFamilies
 	entitlement.MaxServices = raw.MaxServices

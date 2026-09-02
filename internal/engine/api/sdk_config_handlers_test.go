@@ -166,14 +166,24 @@ func TestAppPermissionStateTreatsResolvedIdentityAsExisting(t *testing.T) {
 	}
 }
 
+// TestSDKNoOpSummaryHasNoUpdateOrOperationAdditions keeps generated-SDK plan vocabulary stable for unchanged configs.
 func TestSDKNoOpSummaryHasNoUpdateOrOperationAdditions(t *testing.T) {
 	service := sdkServiceSummary("Jira", sdkConfigServiceDoc{Version: "1.0.0", Operations: []string{"createIssue", "getCurrentUser"}}, []string{"getCurrentUser", "createIssue"})
-	summary := sdkPlanSummary(false, false, []map[string]any{service})
+	summary := sdkPlanSummary(false, false, []map[string]any{service}, true)
 	if summary["create_sdk"] != false || summary["update_sdk"] != false {
 		t.Fatalf("unexpected no-op summary: %+v", summary)
 	}
 	if added := service["operations_added"].([]string); len(added) != 0 {
 		t.Fatalf("unchanged operations were reported as additions: %+v", service)
+	}
+}
+
+// TestAPIPlanSummaryUsesAPILanguage proves review output does not leak the shared SDK persistence kind.
+func TestAPIPlanSummaryUsesAPILanguage(t *testing.T) {
+	summary := sdkPlanSummary(true, false, nil, false)
+	// API mode must expose only its own create/update keys to human and structured plan consumers.
+	if summary["create_api"] != true || summary["update_api"] != false || summary["create_sdk"] != nil {
+		t.Fatalf("unexpected API summary: %+v", summary)
 	}
 }
 
@@ -2409,8 +2419,8 @@ func TestLocalSkippedSDKGenerationResultPublishesAdmittedScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The terminal local result carries the same immutable identity and scope validation fields as Registry's historical skipped response.
-	if result.AppFamilyID != familyID || result.AppID != appID || result.AccountID != accountID || result.JobID != planID.String() || result.Status != models.SDKGenerationStatusSkipped || result.ScopeSchemaVersion != models.AppScopeSchemaVersion || result.GeneratorVersion != models.SDKGeneratorVersion || len(result.Selections) != 1 {
+	// The terminal local result carries immutable scope but no fake Registry job for work that never existed.
+	if result.AppFamilyID != familyID || result.AppID != appID || result.AccountID != accountID || result.JobID != "" || result.Status != models.SDKGenerationStatusSkipped || result.ScopeSchemaVersion != models.AppScopeSchemaVersion || result.GeneratorVersion != models.SDKGeneratorVersion || len(result.Selections) != 1 {
 		t.Fatalf("result=%+v", result)
 	}
 	// No external generation outcome or compensation may be inferred for a package that was intentionally never requested.
@@ -2430,7 +2440,6 @@ func TestValidateSDKGenerationResultSkippedOnlyWhenRequested(t *testing.T) {
 	result := models.SDKGenerationResult{
 		AppID:              uuid.New(),
 		AccountID:          call.accountID,
-		JobID:              "job-1",
 		Status:             models.SDKGenerationStatusSkipped,
 		ScopeSchemaVersion: models.AppScopeSchemaVersion,
 		Selections:         models.SDKSelections{{ServiceID: serviceID, ServiceVersionID: serviceVersionID, EndpointIDs: []uuid.UUID{uuid.New()}}},

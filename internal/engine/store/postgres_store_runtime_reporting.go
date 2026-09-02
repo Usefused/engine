@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// SaveRuntimeEntitlement atomically persists the complete normalized Registry contract used by local admission.
 func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement models.RuntimeEntitlement) error {
 	entitlement = entitlement.Normalized()
 	query := `
@@ -17,10 +18,10 @@ func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement 
 			singleton_key, entitlement_revision, plan, heartbeat_required, usage_reporting,
 			public_service_insights_enabled,
 			heartbeat_interval_seconds, heartbeat_stale_after_seconds, refreshed_at, updated_at,
-			max_buckets, max_sdk_families, max_mcp_families, max_services, max_sandbox_concurrency,
+			max_buckets, max_api_families, max_sdk_families, max_mcp_families, max_services, max_sandbox_concurrency,
 			drift_monitoring_enabled, webhook_ingestion_enabled, sso_enabled, execution_retention_days
 		)
-		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9, $10, $11, $12, $13, $14, $15, $16, $17)
+		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 		ON CONFLICT (singleton_key) DO UPDATE SET
 			entitlement_revision = EXCLUDED.entitlement_revision,
 			plan = EXCLUDED.plan,
@@ -32,6 +33,7 @@ func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement 
 			refreshed_at = EXCLUDED.refreshed_at,
 			updated_at = NOW(),
 			max_buckets = EXCLUDED.max_buckets,
+			max_api_families = EXCLUDED.max_api_families,
 			max_sdk_families = EXCLUDED.max_sdk_families,
 			max_mcp_families = EXCLUDED.max_mcp_families,
 			max_services = EXCLUDED.max_services,
@@ -51,6 +53,7 @@ func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement 
 		entitlement.HeartbeatStaleAfterSeconds,
 		entitlement.RefreshedAt,
 		entitlement.MaxBuckets,
+		entitlement.MaxAPIFamilies,
 		entitlement.MaxSDKFamilies,
 		entitlement.MaxMCPFamilies,
 		entitlement.MaxServices,
@@ -63,12 +66,13 @@ func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement 
 	return err
 }
 
+// GetRuntimeEntitlement loads the complete local contract and applies compatibility defaults for absent state.
 func (s *postgresStore) GetRuntimeEntitlement(ctx context.Context) (models.RuntimeEntitlement, error) {
 	query := `
 		SELECT entitlement_revision, plan, heartbeat_required, usage_reporting,
 			public_service_insights_enabled,
 			heartbeat_interval_seconds, heartbeat_stale_after_seconds, refreshed_at,
-			max_buckets, max_sdk_families, max_mcp_families, max_services, max_sandbox_concurrency,
+			max_buckets, max_api_families, max_sdk_families, max_mcp_families, max_services, max_sandbox_concurrency,
 			drift_monitoring_enabled, webhook_ingestion_enabled, sso_enabled, execution_retention_days
 		FROM fused_runtime_entitlements
 		WHERE singleton_key = 1
@@ -84,6 +88,7 @@ func (s *postgresStore) GetRuntimeEntitlement(ctx context.Context) (models.Runti
 		&entitlement.HeartbeatStaleAfterSeconds,
 		&entitlement.RefreshedAt,
 		&entitlement.MaxBuckets,
+		&entitlement.MaxAPIFamilies,
 		&entitlement.MaxSDKFamilies,
 		&entitlement.MaxMCPFamilies,
 		&entitlement.MaxServices,

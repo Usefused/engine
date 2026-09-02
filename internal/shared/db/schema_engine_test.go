@@ -210,6 +210,7 @@ func TestEngineSchemaDefinesCurrentProductTablesDirectly(t *testing.T) {
 	schema := strings.Join(engineSchemaQueries(), "\n")
 	assertSchemaContainsAll(t, schema, "current Engine schema missing %q", []string{
 		"UNIQUE (account_id, kind, canonical_name)", "UNIQUE (app_family_id, version)",
+		"sdk_generation_status = 'skipped'", "sdk_generation_job_id IS NULL",
 		"(owner_subject_id IS NOT NULL)::int + (owner_team_id IS NOT NULL)::int = 1",
 		"required_permissions jsonb NOT NULL", "owning_config_key     text NOT NULL CHECK (owning_config_key <> '')",
 		"secret_bucket_id      uuid REFERENCES fused_buckets(id) ON DELETE RESTRICT",
@@ -244,6 +245,7 @@ func TestEngineSchemaDefinesAccessAndRuntimeFoundations(t *testing.T) {
 		"subject_type IN ('subject', 'team', 'workspace')",
 		"'attempted', 'allowed', 'denied', 'succeeded', 'failed', 'rolled_back', 'cancelled'",
 		"CREATE TABLE IF NOT EXISTS fused_runtime_entitlements",
+		"max_api_families integer NOT NULL DEFAULT -1",
 		"CREATE TABLE IF NOT EXISTS fused_engine_usage_counter_reports",
 		"CREATE TABLE IF NOT EXISTS fused_provider_rate_limit_states",
 		"rate_limit_unit_totals bigint[] NOT NULL DEFAULT '{}'",

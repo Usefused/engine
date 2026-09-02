@@ -22,8 +22,28 @@ func TestCheckSDKFamilyCapacityReportsEntitlementError(t *testing.T) {
 	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{MaxSDKFamilies: models.IntPtr(0)})
 	t.Cleanup(entitlement.LiveEntitlement.Reset)
 
-	err := checkSDKFamilyCapacity(context.Background(), &workspaceTestStore{accountID: accountID}, trace.SpanFromContext(context.Background()), accountID, "replacement")
+	err := checkSDKFamilyCapacity(context.Background(), &workspaceTestStore{accountID: accountID}, trace.SpanFromContext(context.Background()), accountID, "replacement", true)
 	assertSDKFamilyLimitError(t, err)
+}
+
+// TestCheckAPIFamilyCapacityReportsIndependentEntitlement proves package-free apps do not consume or report the SDK ceiling.
+func TestCheckAPIFamilyCapacityReportsIndependentEntitlement(t *testing.T) {
+	accountID := uuid.New()
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{MaxAPIFamilies: models.IntPtr(0), MaxSDKFamilies: models.IntPtr(10)})
+	t.Cleanup(entitlement.LiveEntitlement.Reset)
+
+	err := checkSDKFamilyCapacity(context.Background(), &workspaceTestStore{accountID: accountID}, trace.SpanFromContext(context.Background()), accountID, "replacement", false)
+	assertAPIFamilyLimitError(t, err)
+}
+
+// TestAPIApplyPersistenceErrorPreservesQuotaIdentity covers the transaction-time race after plan admission.
+func TestAPIApplyPersistenceErrorPreservesQuotaIdentity(t *testing.T) {
+	err := appApplyPersistenceError(context.Background(), store.ErrAPIFamilyLimitExceeded, uuid.New())
+	httpErr, ok := err.(workspaceConfigHTTPError)
+	// The commit-time guard must return the same stable API code as the earlier read-only capacity check.
+	if !ok || httpErr.code != "api_family_limit_exceeded" || httpErr.category != "entitlement" {
+		t.Fatalf("unexpected API persistence error: %#v", err)
+	}
 }
 
 // TestSDKPlanRejectsFamilyQuotaBeforeResolution proves capacity is a plan blocker rather than a late generation failure.
@@ -40,6 +60,26 @@ func TestSDKPlanRejectsFamilyQuotaBeforeResolution(t *testing.T) {
 	request.Header.Set("X-API-Key", "fsk_test")
 	router.ServeHTTP(response, request)
 	assertAppPlanFamilyQuotaResponse(t, response, "sdk_family_limit_exceeded")
+}
+
+// TestAPIPlanRejectsOnlyAPIQuota proves generate false selects the independent direct-API ceiling during plan admission.
+func TestAPIPlanRejectsOnlyAPIQuota(t *testing.T) {
+	accountID, familyID := uuid.New(), uuid.New()
+	s := appFamilyQuotaPlanStore(accountID, familyID, store.AppKindSDK, "existing-api")
+	for appID, app := range s.apps {
+		app.SDKGenerationStatus = models.SDKGenerationStatusSkipped
+		s.apps[appID] = app
+	}
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{MaxAPIFamilies: models.IntPtr(1), MaxSDKFamilies: models.IntPtr(10)})
+	t.Cleanup(entitlement.LiveEntitlement.Reset)
+	router := newControlTestRouter(accountID)
+	router.Post("/sdk-config/plan", SDKConfigPlanHandler(&mockConfigStore{}, s, &mockRegistryClient{}))
+	body := []byte(`{"source_hash":"sha256:test","owner_team":"platform","config_key":"sdk:new-api:1.0.0","config":{"apiVersion":"fused/v1","kind":"sdk","name":"new-api","version":"1.0.0","language":"typescript","bucket":"default","generate":false,"services":{"unresolved":{"version":"v1","select_all":true}}}}`)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/sdk-config/plan", bytes.NewReader(body))
+	request.Header.Set("X-API-Key", "fsk_test")
+	router.ServeHTTP(response, request)
+	assertAppPlanFamilyQuotaResponse(t, response, "api_family_limit_exceeded")
 }
 
 // TestMCPPlanRejectsFamilyQuotaBeforeResolution proves MCP reports the same plan-time capacity contract.
@@ -150,5 +190,15 @@ func assertSDKFamilyLimitResponse(t *testing.T, err error) {
 	// CLI consumers depend on this explicit code and remediation to avoid misleading RBAC guidance.
 	if response.Error.Code != "sdk_family_limit_exceeded" || response.Error.Category != "entitlement" || response.Error.Message != "This workspace has reached its SDK limit (0 of 0)." || response.Error.Remediation != "Deactivate all active or deprecated versions of an unused SDK, or upgrade the workspace plan, then retry." {
 		t.Fatalf("unexpected SDK family limit response: %#v", response.Error)
+	}
+}
+
+// assertAPIFamilyLimitError verifies direct API capacity keeps its own stable public identity.
+func assertAPIFamilyLimitError(t *testing.T, err error) {
+	t.Helper()
+	httpErr, ok := err.(workspaceConfigHTTPError)
+	// API quota must remain distinct from both generated SDK capacity and authorization denial.
+	if !ok || httpErr.status != http.StatusForbidden || httpErr.code != "api_family_limit_exceeded" || httpErr.category != "entitlement" || httpErr.message != "This workspace has reached its API limit (0 of 0)." {
+		t.Fatalf("unexpected API family limit error: %#v", err)
 	}
 }

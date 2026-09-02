@@ -201,6 +201,7 @@ func TestBootstrapWorkspace_RegistryOwnsAccountAndEngineIsSingleton(t *testing.T
 	}
 }
 
+// TestRuntimeEntitlementRoundTrip verifies PostgreSQL preserves the complete Registry contract including API capacity.
 func TestRuntimeEntitlementRoundTrip(t *testing.T) {
 	ctx, cancel, pool, s := runtimeReportingTestStore(t)
 	defer cancel()
@@ -215,6 +216,7 @@ func TestRuntimeEntitlementRoundTrip(t *testing.T) {
 	entitlement.Plan = "enterprise"
 	entitlement.HeartbeatIntervalSeconds = 15
 	entitlement.MaxBuckets = models.IntPtr(5)
+	entitlement.MaxAPIFamilies = models.IntPtr(4)
 	entitlement.MaxSDKFamilies = models.IntPtr(3)
 	entitlement.MaxMCPFamilies = models.IntPtr(3)
 	entitlement.MaxServices = models.IntPtr(10)
@@ -234,7 +236,7 @@ func TestRuntimeEntitlementRoundTrip(t *testing.T) {
 	if got.Plan != "enterprise" || got.EntitlementRevision != "enterprise-revision" || got.HeartbeatIntervalSeconds != 15 {
 		t.Fatalf("unexpected entitlement: %#v", got)
 	}
-	if *got.MaxBuckets != 5 || *got.MaxSDKFamilies != 3 || *got.MaxMCPFamilies != 3 || *got.MaxServices != 10 || *got.MaxSandboxConcurrency != 20 {
+	if *got.MaxBuckets != 5 || *got.MaxAPIFamilies != 4 || *got.MaxSDKFamilies != 3 || *got.MaxMCPFamilies != 3 || *got.MaxServices != 10 || *got.MaxSandboxConcurrency != 20 {
 		t.Fatalf("unexpected capability limits: %#v", got)
 	}
 	assertRuntimeEntitlementFeatureGates(t, got)

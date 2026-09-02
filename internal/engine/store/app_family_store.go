@@ -156,10 +156,19 @@ func (s *postgresStore) GetAppFamilyQuotaUsage(ctx context.Context, accountID uu
 				 WHERE app.app_family_id = family.app_family_id
 				   AND app.account_id = family.account_id
 				   AND app.status IN ('active', 'deprecated')
+				   AND (
+				     $2 NOT IN ('api', 'sdk')
+				     OR ($2 = 'api' AND app.sdk_generation_status = 'skipped')
+				     OR ($2 = 'sdk' AND app.sdk_generation_status IS DISTINCT FROM 'skipped')
+				   )
 			       ) AS invokable
 			FROM fused_app_families family
 			WHERE family.account_id = $1
-			  AND ($2 = '' OR family.kind = $2)
+			  AND (
+			    $2 = ''
+			    OR ($2 = 'api' AND family.kind = 'sdk')
+			    OR ($2 <> 'api' AND family.kind = $2)
+			  )
 		)
 		SELECT COUNT(*) FILTER (WHERE invokable),
 		       COALESCE(BOOL_OR(canonical_name = $3 AND invokable), FALSE)

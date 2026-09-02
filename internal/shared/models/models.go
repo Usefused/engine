@@ -76,6 +76,7 @@ type RuntimeEntitlement struct {
 
 	// ─── Capability limits (nil = missing/unlimited, 0 = not allowed, positive = hard ceiling) ───
 	MaxBuckets            *int `json:"max_buckets,omitempty"`
+	MaxAPIFamilies        *int `json:"max_api_families,omitempty"`
 	MaxSDKFamilies        *int `json:"max_sdk_families,omitempty"`
 	MaxMCPFamilies        *int `json:"max_mcp_families,omitempty"`
 	MaxServices           *int `json:"max_services,omitempty"`
@@ -107,6 +108,7 @@ func DefaultRuntimeEntitlement() RuntimeEntitlement {
 		HeartbeatIntervalSeconds:     60,
 		HeartbeatStaleAfterSeconds:   300,
 		MaxBuckets:                   IntPtr(-1),
+		MaxAPIFamilies:               IntPtr(-1),
 		MaxSDKFamilies:               IntPtr(-1),
 		MaxMCPFamilies:               IntPtr(-1),
 		MaxServices:                  IntPtr(-1),
@@ -146,10 +148,12 @@ func (e RuntimeEntitlement) withRuntimeDefaults(defaults RuntimeEntitlement) Run
 	return e
 }
 
+// withMissingLimitDefaults fills only absent pointer limits while preserving explicit zero-deny policies.
 func (e RuntimeEntitlement) withMissingLimitDefaults(defaults RuntimeEntitlement) RuntimeEntitlement {
 	// nil means the field was missing (older Registry or JSON zero value).
 	// Default to unlimited (-1) so missing fields never accidentally block.
 	e.MaxBuckets = entitlementLimitOrDefault(e.MaxBuckets, defaults.MaxBuckets)
+	e.MaxAPIFamilies = entitlementLimitOrDefault(e.MaxAPIFamilies, defaults.MaxAPIFamilies)
 	e.MaxSDKFamilies = entitlementLimitOrDefault(e.MaxSDKFamilies, defaults.MaxSDKFamilies)
 	e.MaxMCPFamilies = entitlementLimitOrDefault(e.MaxMCPFamilies, defaults.MaxMCPFamilies)
 	e.MaxServices = entitlementLimitOrDefault(e.MaxServices, defaults.MaxServices)

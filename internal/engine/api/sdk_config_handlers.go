@@ -760,7 +760,7 @@ func createSDKConfigPlan(
 		return sdkPlanResult{}, err
 	}
 	// Capacity is reviewable plan admission, so a full workspace must fail before contract resolution or plan persistence.
-	if err := enforceSDKFamilyLimit(ctx, s, call.accountID, call.document.Name); err != nil {
+	if err := enforceSDKFamilyLimit(ctx, s, call.accountID, call.document.Name, sdkConfigGeneratesPackage(call.document)); err != nil {
 		return sdkPlanResult{}, withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed")
 	}
 	call.request.OwnerSubjectID, call.request.OwnerTeamID = owner.subjectID, owner.teamID
@@ -805,7 +805,7 @@ func createSDKConfigPlan(
 	trace.SpanFromContext(ctx).SetAttributes(attribute.Int("required_permissions_count", requiredCount))
 	return sdkPlanResult{
 		plan:          plan,
-		summary:       sdkPlanSummary(appID == uuid.Nil, !definition.noop && appID != uuid.Nil, definition.services),
+		summary:       sdkPlanSummary(appID == uuid.Nil, !definition.noop && appID != uuid.Nil, definition.services, sdkConfigGeneratesPackage(call.document)),
 		notifications: withAppCredentialReadinessWarning(notifications, definition.readiness),
 		readiness:     definition.readiness,
 	}, nil
@@ -2227,11 +2227,17 @@ func resolvedSDKPayload(request GenerateSDKRequest, bucketID, appID uuid.UUID, n
 	}
 }
 
-func sdkPlanSummary(create, update bool, services []map[string]any) map[string]any {
+// sdkPlanSummary presents delivery-specific review language while retaining the shared SDK config lifecycle.
+func sdkPlanSummary(create, update bool, services []map[string]any, generatesPackage bool) map[string]any {
+	resource := "sdk"
+	// A package-free plan is presented as an API even though its persisted kind remains SDK.
+	if !generatesPackage {
+		resource = "api"
+	}
 	return map[string]any{
-		"create_sdk": create,
-		"update_sdk": update,
-		"services":   services,
+		"create_" + resource: create,
+		"update_" + resource: update,
+		"services":           services,
 	}
 }
 
@@ -2402,7 +2408,7 @@ func enforceSDKPlanFamilyLimit(ctx context.Context, s store.Store, accountID uui
 	if plan == nil || json.Unmarshal(plan.DesiredState, &doc) != nil {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid resolved sdk plan"}
 	}
-	return enforceSDKFamilyLimit(ctx, s, accountID, doc.Name)
+	return enforceSDKFamilyLimit(ctx, s, accountID, doc.Name, sdkConfigGeneratesPackage(doc))
 }
 
 func compensateRejectedSDKPackage(ctx context.Context, configStore store.ConfigRepository, configKey string, proxy Forwarder, result sdkGenerationResult) bool {
@@ -2517,7 +2523,7 @@ func localSkippedSDKGenerationResult(ctx context.Context, resolver store.Generat
 	return sdkGenerationResult{
 		SDKGenerationResult: models.SDKGenerationResult{
 			AppFamilyID: request.AppFamilyID, AppID: request.AppID, AccountID: call.accountID,
-			JobID: call.planID.String(), Status: models.SDKGenerationStatusSkipped,
+			Status:             models.SDKGenerationStatusSkipped,
 			ScopeSchemaVersion: models.AppScopeSchemaVersion, GeneratorVersion: request.GeneratorVersion,
 			Selections: selections,
 		},
@@ -2583,7 +2589,7 @@ func reserveSDKGenerationIdentity(ctx context.Context, s store.Store, call sdkAp
 		return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid_app_name"}
 	}
 	// Rechecking immediately before family creation remains authoritative when capacity changed after plan or early apply admission.
-	if err := checkSDKFamilyCapacity(ctx, s, span, call.accountID, canonicalName); err != nil {
+	if err := checkSDKFamilyCapacity(ctx, s, span, call.accountID, canonicalName, sdkConfigGeneratesPackage(doc)); err != nil {
 		return uuid.Nil, uuid.Nil, uuid.Nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 
@@ -2608,11 +2614,18 @@ func reserveSDKGenerationIdentity(ctx context.Context, s store.Store, call sdkAp
 	return family.AppFamilyID, appID, existingID, nil
 }
 
-// checkSDKFamilyCapacity applies the SDK-specific quota presentation to the
-// shared invokable-family admission rule.
-func checkSDKFamilyCapacity(ctx context.Context, s store.Store, span trace.Span, accountID uuid.UUID, canonicalName string) error {
+// checkSDKFamilyCapacity selects the API or generated-SDK quota presentation for the shared family admission rule.
+func checkSDKFamilyCapacity(ctx context.Context, s store.Store, span trace.Span, accountID uuid.UUID, canonicalName string, generatesPackage bool) error {
+	// Package-free versions are direct APIs and consume the independent API-family entitlement.
+	if !generatesPackage {
+		return enforceAppFamilyCapacity(ctx, s, span, accountID, canonicalName, appFamilyCapacityPolicy{
+			quotaClass: "api", resource: "api_families", errorCode: "api_family_limit_exceeded", displayName: "API",
+			remediation: "Deactivate all active or deprecated versions of an unused API, or upgrade the workspace plan, then retry.",
+			limit:       entitlement.LiveEntitlement.Load().MaxAPIFamilies,
+		})
+	}
 	return enforceAppFamilyCapacity(ctx, s, span, accountID, canonicalName, appFamilyCapacityPolicy{
-		kind:        store.AppKindSDK,
+		quotaClass:  store.AppKindSDK.String(),
 		resource:    "sdk_families",
 		errorCode:   "sdk_family_limit_exceeded",
 		displayName: "SDK",
@@ -2621,14 +2634,14 @@ func checkSDKFamilyCapacity(ctx context.Context, s store.Store, span trace.Span,
 	})
 }
 
-// enforceSDKFamilyLimit canonicalizes authored SDK identity before applying the shared invokable-family entitlement.
-func enforceSDKFamilyLimit(ctx context.Context, s store.Store, accountID uuid.UUID, name string) error {
+// enforceSDKFamilyLimit canonicalizes authored SDK/API identity before applying its delivery-specific family entitlement.
+func enforceSDKFamilyLimit(ctx context.Context, s store.Store, accountID uuid.UUID, name string, generatesPackage bool) error {
 	canonicalName, _, err := canonical.AppName(name)
 	// Invalid authored identity must fail before any family or entitlement lookup.
 	if err != nil {
 		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
 	}
-	return checkSDKFamilyCapacity(ctx, s, trace.SpanFromContext(ctx), accountID, canonicalName)
+	return checkSDKFamilyCapacity(ctx, s, trace.SpanFromContext(ctx), accountID, canonicalName, generatesPackage)
 }
 
 // reserveSDKVersionIdentity persists Unified operation identity atomically while preserving immutability checks.
@@ -3757,6 +3770,14 @@ func appApplyPersistenceError(ctx context.Context, err error, appID uuid.UUID) e
 			remediation: "Deactivate all active or deprecated versions of an unused SDK, or upgrade the workspace plan, then retry.",
 		}
 	}
+	// Direct API admission has its own quota and must never be mislabeled as generated-SDK capacity.
+	if errors.Is(err, store.ErrAPIFamilyLimitExceeded) {
+		return workspaceConfigHTTPError{
+			status: http.StatusForbidden, code: "api_family_limit_exceeded", category: "entitlement",
+			message:     "This workspace has reached its API limit.",
+			remediation: "Deactivate all active or deprecated versions of an unused API, or upgrade the workspace plan, then retry.",
+		}
+	}
 	// Bucket reassignment is an immutable family conflict rather than an internal persistence failure.
 	if errors.Is(err, store.ErrSDKBucketImmutable) {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "app bucket assignment is immutable"}
@@ -3815,8 +3836,8 @@ func validateSDKGenerationResultEnvelope(call sdkApplyCall, result models.SDKGen
 	if result.AppID == uuid.Nil {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "app_id_required"}
 	}
-	if strings.TrimSpace(result.JobID) == "" {
-		return workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_job_id_required"}
+	if err := validateSDKGenerationJobIdentity(result); err != nil {
+		return err
 	}
 	if result.AccountID == uuid.Nil || result.AccountID != call.accountID {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_scope_account_mismatch"}
@@ -3824,15 +3845,26 @@ func validateSDKGenerationResultEnvelope(call sdkApplyCall, result models.SDKGen
 	if result.Status == models.SDKGenerationStatusFailed {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_generation_failed"}
 	}
-	// Skipped is terminal and legitimate: the request asked for the resolved
-	// contract without a package, and Registry closed the job out rather than
-	// scheduling codegen. The scope assertions below still apply to it.
+	// Skipped is terminal and legitimate only for Engine-local direct API publication; the scope assertions below still apply to it.
 	if result.Status != models.SDKGenerationStatusPending && result.Status != models.SDKGenerationStatusComplete &&
 		result.Status != models.SDKGenerationStatusSkipped {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_generation_status_invalid"}
 	}
 	if result.ScopeSchemaVersion != models.AppScopeSchemaVersion {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_scope_schema_version_mismatch"}
+	}
+	return nil
+}
+
+// validateSDKGenerationJobIdentity requires durable job authority only for actual Registry package work.
+func validateSDKGenerationJobIdentity(result models.SDKGenerationResult) error {
+	// Direct API publication has no Registry generation job, so a terminal skip is intentionally jobless.
+	if result.Status == models.SDKGenerationStatusSkipped {
+		return nil
+	}
+	// Every generated package state must remain correlated to its Registry job for recovery and compensation.
+	if strings.TrimSpace(result.JobID) == "" {
+		return workspaceConfigHTTPError{status: http.StatusConflict, message: "sdk_job_id_required"}
 	}
 	return nil
 }

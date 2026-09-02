@@ -71,6 +71,10 @@ func resolveSDKGenerationStatus(ctx context.Context, s store.Store, accountID, a
 // projectSDKGenerationStatus converts one authorized local app row into the bounded polling contract.
 func projectSDKGenerationStatus(app *store.App) (sdkGenerationStatusResponse, error) {
 	response := sdkGenerationStatusResponse{Status: app.SDKGenerationStatus, AppFamilyID: app.AppFamilyID, AppID: app.AppID, JobID: app.SDKGenerationJobID}
+	// A package-free API has no Registry job, including during rolling upgrades over rows written by an older Engine.
+	if response.Status == models.SDKGenerationStatusSkipped {
+		response.JobID = ""
+	}
 	// Existing active SDKs created before durable generation tracking are complete by lifecycle proof.
 	if app.Status.Runnable() {
 		// Legacy runnable rows predate explicit generation status but already prove package admission.

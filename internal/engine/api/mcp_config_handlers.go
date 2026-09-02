@@ -507,7 +507,7 @@ func enforceMCPFamilyLimit(ctx context.Context, s store.Store, accountID uuid.UU
 		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
 	}
 	return enforceAppFamilyCapacity(ctx, s, trace.SpanFromContext(ctx), accountID, canonicalName, appFamilyCapacityPolicy{
-		kind:        store.AppKindMCP,
+		quotaClass:  store.AppKindMCP.String(),
 		resource:    "mcp_families",
 		errorCode:   "mcp_family_limit_exceeded",
 		displayName: "MCP server",

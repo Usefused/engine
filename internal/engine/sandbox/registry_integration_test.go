@@ -149,6 +149,7 @@ func TestHTTPRegistryClient_HandshakeDefaultsEntitlementsForOlderRegistry(t *tes
 	got := result.Entitlements.Normalized()
 	want := models.DefaultRuntimeEntitlement().Normalized()
 	if *got.MaxBuckets != *want.MaxBuckets ||
+		*got.MaxAPIFamilies != *want.MaxAPIFamilies ||
 		*got.MaxSDKFamilies != *want.MaxSDKFamilies ||
 		*got.MaxMCPFamilies != *want.MaxMCPFamilies ||
 		*got.MaxServices != *want.MaxServices ||

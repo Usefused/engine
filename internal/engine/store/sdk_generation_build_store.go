@@ -209,18 +209,18 @@ func admitSDKGenerationActivation(ctx context.Context, tx pgx.Tx, appID uuid.UUI
 	if err != nil {
 		return fmt.Errorf("activate SDK generation: load app identity: %w", err)
 	}
-	return admitSDKFamilyActivation(ctx, tx, accountID, familyID)
+	return admitSDKFamilyActivation(ctx, tx, accountID, familyID, false)
 }
 
-// admitSDKFamilyActivation serializes every path that can make an SDK family invokable, including cache-hit apply and background completion.
-func admitSDKFamilyActivation(ctx context.Context, tx pgx.Tx, accountID, familyID uuid.UUID) error {
+// admitSDKFamilyActivation serializes every path that can make an SDK or direct-API family invokable.
+func admitSDKFamilyActivation(ctx context.Context, tx pgx.Tx, accountID, familyID uuid.UUID, directAPI bool) error {
 	var limit int
 	err := tx.QueryRow(ctx, `
-		SELECT max_sdk_families
+		SELECT CASE WHEN $1 THEN max_api_families ELSE max_sdk_families END
 		FROM fused_runtime_entitlements
 		WHERE singleton_key = 1
 		FOR UPDATE
-	`).Scan(&limit)
+	`, directAPI).Scan(&limit)
 	// Missing entitlement state cannot safely turn a non-runnable version active.
 	if err != nil {
 		return fmt.Errorf("activate SDK generation: load entitlement: %w", err)
@@ -240,6 +240,10 @@ func admitSDKFamilyActivation(ctx context.Context, tx pgx.Tx, accountID, familyI
 				 WHERE app.app_family_id = family.app_family_id
 				   AND app.account_id = family.account_id
 				   AND app.status IN ('active', 'deprecated')
+				   AND (
+				     ($3 AND app.sdk_generation_status = 'skipped')
+				     OR (NOT $3 AND app.sdk_generation_status IS DISTINCT FROM 'skipped')
+				   )
 			       ) AS invokable
 			FROM fused_app_families family
 			WHERE family.account_id = $1
@@ -249,7 +253,7 @@ func admitSDKFamilyActivation(ctx context.Context, tx pgx.Tx, accountID, familyI
 		       COALESCE(BOOL_OR(app_family_id = $2 AND invokable), FALSE),
 		       COALESCE(BOOL_OR(app_family_id = $2), FALSE)
 		FROM families
-	`, accountID, familyID).Scan(&current, &targetInvokable, &targetExists)
+	`, accountID, familyID, directAPI).Scan(&current, &targetInvokable, &targetExists)
 	if err != nil {
 		return fmt.Errorf("activate SDK generation: count families: %w", err)
 	}
@@ -261,7 +265,12 @@ func admitSDKFamilyActivation(ctx context.Context, tx pgx.Tx, accountID, familyI
 	if targetInvokable {
 		return nil
 	}
+	// Only a genuinely new runnable family is rejected at the selected delivery-class ceiling.
 	if current >= limit {
+		// Adapter-specific errors preserve stable remediation and telemetry at the API boundary.
+		if directAPI {
+			return ErrAPIFamilyLimitExceeded
+		}
 		return ErrSDKFamilyLimitExceeded
 	}
 	return nil

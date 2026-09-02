@@ -38,6 +38,7 @@ var (
 	ErrAppTombstoneExists             = errors.New("app version was deactivated and cannot be reused")
 	ErrAppKindInvalid                 = errors.New("app kind is invalid")
 	ErrAppFamilyKindMismatch          = errors.New("app kind does not match app family")
+	ErrAPIFamilyLimitExceeded         = errors.New("API family limit exceeded")
 	ErrSDKFamilyLimitExceeded         = errors.New("SDK family limit exceeded")
 	ErrSDKGenerationTransitionInvalid = errors.New("SDK generation transition is invalid")
 	ErrAppStatusInvalid               = errors.New("app status is invalid")

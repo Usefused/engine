@@ -31,10 +31,10 @@ func TestGetAppFamilyQuotaUsage(t *testing.T) {
 	teamID := seedAppOwnerTeam(t, ctx, pool)
 	activeFamilyID, deprecatedFamilyID := uuid.New(), uuid.New()
 	buildingFamilyID, retainedFamilyID := uuid.New(), uuid.New()
-	mcpFamilyID, otherFamilyID := uuid.New(), uuid.New()
+	mcpFamilyID, otherFamilyID, directAPIFamilyID := uuid.New(), uuid.New(), uuid.New()
 	activeAppID, activeSiblingAppID, deprecatedAppID := uuid.New(), uuid.New(), uuid.New()
-	buildingAppID, mcpAppID, otherAppID := uuid.New(), uuid.New(), uuid.New()
-	familyIDs := []uuid.UUID{activeFamilyID, deprecatedFamilyID, buildingFamilyID, retainedFamilyID, mcpFamilyID, otherFamilyID}
+	buildingAppID, mcpAppID, otherAppID, directAPIAppID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	familyIDs := []uuid.UUID{activeFamilyID, deprecatedFamilyID, buildingFamilyID, retainedFamilyID, mcpFamilyID, otherFamilyID, directAPIFamilyID}
 	t.Cleanup(func() {
 		// Tombstones outlive app rows, so cleanup removes history before family identity.
 		_, _ = pool.Exec(context.Background(), `DELETE FROM fused_app_tombstones WHERE app_family_id = ANY($1)`, familyIDs)
@@ -47,13 +47,14 @@ func TestGetAppFamilyQuotaUsage(t *testing.T) {
 		INSERT INTO fused_app_families
 			(app_family_id, account_id, kind, canonical_name, display_name, target_language, owner_team_id)
 		VALUES
-			($1, $7, 'sdk', 'active-sdk', 'Active SDK', 'typescript', $9),
-			($2, $7, 'sdk', 'deprecated-sdk', 'Deprecated SDK', 'typescript', $9),
-			($3, $7, 'sdk', 'building-sdk', 'Building SDK', 'typescript', $9),
-			($4, $7, 'sdk', 'retained-sdk', 'Retained SDK', 'typescript', $9),
-			($5, $7, 'mcp', 'active-mcp', 'Active MCP', NULL, $9),
-			($6, $8, 'sdk', 'other-sdk', 'Other SDK', 'typescript', $9)
-	`, activeFamilyID, deprecatedFamilyID, buildingFamilyID, retainedFamilyID, mcpFamilyID, otherFamilyID, accountID, otherAccountID, teamID)
+			($1, $8, 'sdk', 'active-sdk', 'Active SDK', 'typescript', $10),
+			($2, $8, 'sdk', 'deprecated-sdk', 'Deprecated SDK', 'typescript', $10),
+			($3, $8, 'sdk', 'building-sdk', 'Building SDK', 'typescript', $10),
+			($4, $8, 'sdk', 'retained-sdk', 'Retained SDK', 'typescript', $10),
+			($5, $8, 'mcp', 'active-mcp', 'Active MCP', NULL, $10),
+			($6, $9, 'sdk', 'other-sdk', 'Other SDK', 'typescript', $10),
+			($7, $8, 'sdk', 'direct-api', 'Direct API', 'typescript', $10)
+	`, activeFamilyID, deprecatedFamilyID, buildingFamilyID, retainedFamilyID, mcpFamilyID, otherFamilyID, directAPIFamilyID, accountID, otherAccountID, teamID)
 	// Family fixtures must exist before their exact version rows can satisfy the composite foreign key.
 	if err != nil {
 		t.Fatalf("seed app families: %v", err)
@@ -62,25 +63,27 @@ func TestGetAppFamilyQuotaUsage(t *testing.T) {
 		INSERT INTO fused_apps
 			(app_id, app_family_id, account_id, version, config_key, status, sdk_generation_job_id, sdk_generation_status)
 		VALUES
-			($1, $7, $12, '1.0.0', $14, 'active', NULL, NULL),
-			($2, $7, $12, '2.0.0', $15, 'deprecated', NULL, NULL),
-			($3, $8, $12, '1.0.0', $16, 'deprecated', NULL, NULL),
-			($4, $9, $12, '1.0.0', $17, 'building', 'job-building', 'pending'),
-			($5, $10, $12, '1.0.0', $18, 'active', NULL, NULL),
-			($6, $11, $13, '1.0.0', $19, 'active', NULL, NULL)
-	`, activeAppID, activeSiblingAppID, deprecatedAppID, buildingAppID, mcpAppID, otherAppID,
-		activeFamilyID, deprecatedFamilyID, buildingFamilyID, mcpFamilyID, otherFamilyID,
+			($1, $8, $14, '1.0.0', $16, 'active', NULL, NULL),
+			($2, $8, $14, '2.0.0', $17, 'deprecated', NULL, NULL),
+			($3, $9, $14, '1.0.0', $18, 'deprecated', NULL, NULL),
+			($4, $10, $14, '1.0.0', $19, 'building', 'job-building', 'pending'),
+			($5, $11, $14, '1.0.0', $20, 'active', NULL, NULL),
+			($6, $12, $15, '1.0.0', $21, 'active', NULL, NULL),
+			($7, $13, $14, '1.0.0', $22, 'active', NULL, 'skipped')
+	`, activeAppID, activeSiblingAppID, deprecatedAppID, buildingAppID, mcpAppID, otherAppID, directAPIAppID,
+		activeFamilyID, deprecatedFamilyID, buildingFamilyID, mcpFamilyID, otherFamilyID, directAPIFamilyID,
 		accountID, otherAccountID,
-		"sdk:active:"+activeAppID.String(), "sdk:active-sibling:"+activeSiblingAppID.String(), "sdk:deprecated:"+deprecatedAppID.String(), "sdk:building:"+buildingAppID.String(), "mcp:active:"+mcpAppID.String(), "sdk:other:"+otherAppID.String())
+		"sdk:active:"+activeAppID.String(), "sdk:active-sibling:"+activeSiblingAppID.String(), "sdk:deprecated:"+deprecatedAppID.String(), "sdk:building:"+buildingAppID.String(), "mcp:active:"+mcpAppID.String(), "sdk:other:"+otherAppID.String(), "sdk:api:"+directAPIAppID.String())
 	// Runnable, deprecated, and building states are deliberately mixed in one bounded fixture.
 	if err != nil {
 		t.Fatalf("seed app versions: %v", err)
 	}
 
 	assertAppFamilyQuotaUsage(t, ctx, repository, accountID, AppKindSDK.String(), "active-sdk", 2, true)
+	assertAppFamilyQuotaUsage(t, ctx, repository, accountID, "api", "direct-api", 1, true)
 	assertAppFamilyQuotaUsage(t, ctx, repository, accountID, AppKindSDK.String(), "retained-sdk", 2, false)
 	assertAppFamilyQuotaUsage(t, ctx, repository, accountID, AppKindMCP.String(), "active-mcp", 1, true)
-	assertAppFamilyQuotaUsage(t, ctx, repository, accountID, "", "active-mcp", 3, true)
+	assertAppFamilyQuotaUsage(t, ctx, repository, accountID, "", "active-mcp", 4, true)
 	assertAppFamilyQuotaUsage(t, ctx, repository, otherAccountID, AppKindSDK.String(), "other-sdk", 1, true)
 
 	// Removing one exact version cannot free a family while a runnable sibling remains.
