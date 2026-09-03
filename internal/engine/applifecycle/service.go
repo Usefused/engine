@@ -128,6 +128,7 @@ func (svc *Service) CreateOrGetFamily(ctx context.Context, params CreateFamilyPa
 		CanonicalName:  params.CanonicalName,
 		DisplayName:    params.DisplayName,
 		TargetLanguage: params.TargetLanguage,
+		DeliveryMode:   params.DeliveryMode,
 		OwnerSubjectID: params.OwnerSubjectID,
 		OwnerTeamID:    params.OwnerTeamID,
 	}
@@ -448,6 +449,7 @@ type CreateFamilyParams struct {
 	CanonicalName  string
 	DisplayName    string
 	TargetLanguage string
+	DeliveryMode   store.AppDeliveryMode
 	OwnerSubjectID uuid.UUID
 	OwnerTeamID    uuid.UUID
 }

@@ -822,9 +822,21 @@ func upsertAppFamilyTx(ctx context.Context, tx pgx.Tx, params ApplyAppConfigPlan
 		TargetLanguage: params.TargetLanguage,
 		OwnerSubjectID: params.Scope.OwnerSubjectID, OwnerTeamID: params.Scope.OwnerTeamID,
 	}
+	// SDK-kind families bind once to either generated-package or direct-REST delivery; MCP has no delivery submode.
+	if params.Scope.Kind == AppKindSDK {
+		requested.DeliveryMode = AppDeliveryModeSDK
+		// The skipped marker is the authoritative package-free API outcome established by apply validation.
+		if params.SDKGenerationStatus == models.SDKGenerationStatusSkipped {
+			requested.DeliveryMode = AppDeliveryModeAPI
+		}
+	}
 	family, _, err := createOrGetAppFamily(ctx, tx, requested)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("ApplyAppConfigPlan: upsert app family: %w", err)
+	}
+	// Delivery mode has its own actionable conflict and must not be disguised as an ownership mismatch.
+	if family.DeliveryMode != requested.DeliveryMode {
+		return uuid.Nil, ErrAppDeliveryModeMismatch
 	}
 	if !family.HasSameBinding(requested) {
 		return uuid.Nil, ErrAppOwnerMismatch
@@ -967,8 +979,8 @@ func validSDKGenerationRetryTarget(status AppStatus, generationStatus string) bo
 	if status != AppStatusActive {
 		return false
 	}
-	// Registry cache hit and package-free generation are the only immediate terminal successes.
-	return generationStatus == models.SDKGenerationStatusComplete || generationStatus == models.SDKGenerationStatusSkipped
+	// A failed generated-package version may complete the same job, but it cannot switch its family into package-free API delivery.
+	return generationStatus == models.SDKGenerationStatusComplete
 }
 
 func ensureAppFamilyTokenTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, params ApplyAppConfigPlanParams) (bool, error) {
@@ -1052,7 +1064,19 @@ func validateMCPGenerationState(status AppStatus, jobID, generationStatus string
 
 // validateSDKGenerationState binds runnable state to terminal generation and building state to pending work.
 func validateSDKGenerationState(status AppStatus, jobID, generationStatus string) error {
-	// Every generated SDK result must retain its exact Registry job for recovery.
+	// A direct API deliberately has no Registry job, while its skipped marker keeps it distinct from an incomplete SDK package.
+	if generationStatus == models.SDKGenerationStatusSkipped {
+		// Any job identity would attach package-generation authority to a direct API and must fail closed.
+		if strings.TrimSpace(jobID) != "" {
+			return errors.New("skipped SDK generation cannot retain a generation job")
+		}
+		// Skipped generation is terminal and can only describe a runnable lifecycle state.
+		if status == AppStatusActive || status == AppStatusDeprecated {
+			return nil
+		}
+		return errors.New("skipped SDK generation must remain runnable")
+	}
+	// Every generated package result must retain its exact Registry job for recovery.
 	if strings.TrimSpace(jobID) == "" {
 		return errors.New("sdk generation job identity is required")
 	}
@@ -1063,8 +1087,8 @@ func validateSDKGenerationState(status AppStatus, jobID, generationStatus string
 		}
 		return nil
 	}
-	// Only terminal complete/skipped results may publish an active SDK version.
-	if status == AppStatusActive && (generationStatus == models.SDKGenerationStatusComplete || generationStatus == models.SDKGenerationStatusSkipped) {
+	// A generated package becomes runnable only after Registry reports terminal completion.
+	if status == AppStatusActive && generationStatus == models.SDKGenerationStatusComplete {
 		return nil
 	}
 	return errors.New("sdk generation state is invalid")

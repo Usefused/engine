@@ -101,6 +101,12 @@ func TestGetAppFamilyQuotaUsage(t *testing.T) {
 		t.Fatalf("deactivate deprecated SDK: %v", err)
 	}
 	assertAppFamilyQuotaUsage(t, ctx, repository, accountID, AppKindSDK.String(), "active-sdk", 0, false)
+	// Hard-deactivating the last direct API version frees API capacity without changing the independent SDK count.
+	if err := repository.DeactivateAppVersion(ctx, directAPIAppID, uuid.Nil); err != nil {
+		t.Fatalf("deactivate direct API: %v", err)
+	}
+	assertAppFamilyQuotaUsage(t, ctx, repository, accountID, "api", "direct-api", 0, false)
+	assertAppFamilyQuotaUsage(t, ctx, repository, accountID, AppKindSDK.String(), "direct-api", 0, false)
 }
 
 // assertAppFamilyQuotaUsage keeps count and target assertions uniform across account and adapter projections.

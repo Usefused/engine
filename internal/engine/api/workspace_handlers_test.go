@@ -48,10 +48,11 @@ type workspaceTestStore struct {
 	// workspaceServices returned by List
 	workspaceServices []store.WorkspaceService
 	// errors to inject
-	activateErr   error
-	deactivateErr error
-	listErr       error
-	workspaceErr  error
+	activateErr       error
+	deactivateErr     error
+	disableVersionErr error
+	listErr           error
+	workspaceErr      error
 	// capture of the last AddWorkspaceServiceVersion call, so tests can assert what
 	// was actually written (e.g. the Registry-verified name, not the client's).
 	gotServiceName           string
@@ -180,6 +181,11 @@ func (s *workspaceTestStore) CreateOrGetAppFamily(_ context.Context, family stor
 	}
 	key := family.AccountID.String() + "\x00" + family.Kind.String() + "\x00" + family.CanonicalName
 	if existing, ok := s.appFamilies[key]; ok {
+		// Match PostgreSQL's one-way binding of a versionless reservation shell to its first concrete delivery mode.
+		if existing.DeliveryMode == "" && family.DeliveryMode != "" {
+			existing.DeliveryMode = family.DeliveryMode
+			s.appFamilies[key] = existing
+		}
 		return &existing, false, nil
 	}
 	s.appFamilies[key] = family
@@ -198,6 +204,26 @@ func (s *workspaceTestStore) GetAppFamilyByIdentity(_ context.Context, accountID
 		return &copy, nil
 	}
 	return nil, store.ErrAppFamilyNotFound
+}
+
+// AppFamilyHasHistory reports durable fixture versions or tombstones for an existing family.
+func (s *workspaceTestStore) AppFamilyHasHistory(_ context.Context, familyID uuid.UUID) (bool, error) {
+	s.appMutex.Lock()
+	defer s.appMutex.Unlock()
+	for _, app := range s.apps {
+		// Any live version proves the family is no longer an unbound reservation shell.
+		if app.AppFamilyID == familyID {
+			return true, nil
+		}
+	}
+	prefix := familyID.String() + "\x00"
+	for key, exists := range s.tombstones {
+		// Tombstones retain immutable family history even after all live versions are removed.
+		if exists && strings.HasPrefix(key, prefix) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // GetAppFamilyQuotaUsage mirrors the PostgreSQL entitlement projection without
@@ -713,9 +739,10 @@ func (s *workspaceTestStore) EnableWorkspaceServiceVersion(
 	return s.activateErr
 }
 
+// DisableWorkspaceServiceVersion records exact version removal and returns the configured persistence result.
 func (s *workspaceTestStore) DisableWorkspaceServiceVersion(ctx context.Context, serviceID uuid.UUID, version string) error {
 	s.removedVersions = append(s.removedVersions, serviceID.String()+":"+version)
-	return nil
+	return s.disableVersionErr
 }
 
 func (s *workspaceTestStore) ListWorkspaceServiceVersions(ctx context.Context, serviceID uuid.UUID) ([]store.WorkspaceServiceVersion, error) {

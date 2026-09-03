@@ -3098,6 +3098,116 @@ func TestPlanWorkspaceChanges_WillArchiveOnlyForOwned(t *testing.T) {
 	}
 }
 
+// TestExplicitWorkspaceVersionRemovalPlansWithoutForce verifies action presence is independent of SDK impact decisions.
+func TestExplicitWorkspaceVersionRemovalPlansWithoutForce(t *testing.T) {
+	serviceID := uuid.New()
+	versionID := uuid.New()
+	summary := workspacePlanSummary{}
+	current := map[uuid.UUID]currentWorkspaceService{serviceID: {
+		ServiceID: serviceID, Versions: map[string]bool{"v1": true}, VersionIDs: map[string]uuid.UUID{"v1": versionID},
+	}}
+	appendExplicitWorkspaceRemovalActions(
+		[]workspaceRemovalTarget{{ServiceID: serviceID.String(), Version: "v1"}}, current, nil, nil, &summary,
+	)
+	if len(summary.Actions) != 1 {
+		t.Fatalf("expected one explicit action, got %#v", summary.Actions)
+	}
+	action := summary.Actions[0]
+	// No SDK reference means the action is directly applicable but still explicitly planned.
+	if !action.ExplicitRemoval || action.RequiresDecision || action.ServiceVersionID != versionID.String() || action.Type != workspaceplan.ActionDisableServiceVersion {
+		t.Fatalf("unexpected explicit action %#v", action)
+	}
+}
+
+// TestValidateWorkspaceRemovalTargetsRejectsDesiredAndAbsentTargets protects plan admission from contradictory or stale scope.
+func TestValidateWorkspaceRemovalTargetsRejectsDesiredAndAbsentTargets(t *testing.T) {
+	serviceID := uuid.New()
+	desired := workspaceDesiredState{Services: map[uuid.UUID]workspaceDesiredService{serviceID: {ServiceID: serviceID, Versions: []string{"v1"}}}}
+	current := map[uuid.UUID]currentWorkspaceService{serviceID: {ServiceID: serviceID, Versions: map[string]bool{"v1": true}}}
+	if err := validateWorkspaceRemovalTargets([]workspaceRemovalTarget{{ServiceID: serviceID.String(), Version: "v1"}}, desired, current); err == nil {
+		t.Fatal("expected desired-version conflict")
+	}
+	if err := validateWorkspaceRemovalTargets([]workspaceRemovalTarget{{ServiceID: uuid.NewString()}}, workspaceDesiredState{}, current); err == nil {
+		t.Fatal("expected inactive-service rejection")
+	}
+}
+
+// TestValidateWorkspaceRemovalTargetsRejectsSiblingRace prevents an exact request from expanding after its pre-plan read.
+func TestValidateWorkspaceRemovalTargetsRejectsSiblingRace(t *testing.T) {
+	serviceID := uuid.New()
+	current := map[uuid.UUID]currentWorkspaceService{serviceID: {
+		ServiceID: serviceID,
+		Versions:  map[string]bool{"v1": true, "v2": true},
+	}}
+	// Desired omission plus a newly-live sibling would make the declarative consequence broader than the exact v1 target.
+	err := validateWorkspaceRemovalTargets(
+		[]workspaceRemovalTarget{{ServiceID: serviceID.String(), Version: "v1"}},
+		workspaceDesiredState{},
+		current,
+	)
+	if err == nil || !strings.Contains(err.Error(), "live sibling version v2") {
+		t.Fatalf("expected sibling-race rejection, got %v", err)
+	}
+	// Retaining the sibling in desired state keeps the exact removal bounded to v1.
+	desired := workspaceDesiredState{Services: map[uuid.UUID]workspaceDesiredService{serviceID: {
+		ServiceID: serviceID,
+		Versions:  []string{"v2"},
+	}}}
+	if err := validateWorkspaceRemovalTargets(
+		[]workspaceRemovalTarget{{ServiceID: serviceID.String(), Version: "v1"}},
+		desired,
+		current,
+	); err != nil {
+		t.Fatalf("expected bounded exact removal to remain valid, got %v", err)
+	}
+}
+
+// TestRemoveExplicitWorkspaceVersionPinsImmutableIdentity verifies apply removes only the reviewed exact version.
+func TestRemoveExplicitWorkspaceVersionPinsImmutableIdentity(t *testing.T) {
+	serviceID := uuid.New()
+	versionID := uuid.New()
+	s := &workspaceTestStore{
+		workspaceServices: []store.WorkspaceService{{ServiceID: serviceID, Version: "v2"}},
+		workspaceServiceVersions: map[uuid.UUID][]store.WorkspaceServiceVersion{serviceID: {
+			{ServiceID: serviceID, ServiceVersionID: versionID, Version: "v1"},
+			{ServiceID: serviceID, ServiceVersionID: uuid.New(), Version: "v2"},
+		}},
+	}
+	actions, _ := json.Marshal([]workspacePlanAction{{
+		ID: workspaceActionID(workspaceplan.ActionDisableServiceVersion, serviceID, "v1"), Type: workspaceplan.ActionDisableServiceVersion,
+		ServiceID: serviceID.String(), Version: "v1", ServiceVersionID: versionID.String(), ExplicitRemoval: true,
+	}})
+	if err := removeExplicitWorkspaceResources(context.Background(), s, workspaceDesiredState{}, actions); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(s.removedVersions, ","); got != serviceID.String()+":v1" {
+		t.Fatalf("unexpected exact removals %s", got)
+	}
+}
+
+// TestRemoveExplicitWorkspaceServiceRejectsExpandedScope verifies a new sibling version requires fresh review.
+func TestRemoveExplicitWorkspaceServiceRejectsExpandedScope(t *testing.T) {
+	serviceID := uuid.New()
+	firstVersionID := uuid.New()
+	s := &workspaceTestStore{
+		workspaceServices: []store.WorkspaceService{{ServiceID: serviceID, Version: "v2"}},
+		workspaceServiceVersions: map[uuid.UUID][]store.WorkspaceServiceVersion{serviceID: {
+			{ServiceID: serviceID, ServiceVersionID: firstVersionID, Version: "v1"},
+			{ServiceID: serviceID, ServiceVersionID: uuid.New(), Version: "v2"},
+		}},
+	}
+	actions, _ := json.Marshal([]workspacePlanAction{{
+		ID: workspaceActionID(workspaceplan.ActionRemoveService, serviceID), Type: workspaceplan.ActionRemoveService,
+		ServiceID: serviceID.String(), ExplicitRemoval: true, RemovalVersionIDs: []string{firstVersionID.String()},
+	}})
+	if err := removeExplicitWorkspaceResources(context.Background(), s, workspaceDesiredState{}, actions); err == nil {
+		t.Fatal("expected expanded whole-service scope to be rejected")
+	}
+	if len(s.removedWorkspaceServices) != 0 {
+		t.Fatalf("stale whole-service plan removed %#v", s.removedWorkspaceServices)
+	}
+}
+
 func TestDesiredVersionVisibilityActionsUsesRegistryCurrentState(t *testing.T) {
 	serviceID := uuid.New()
 	private := false

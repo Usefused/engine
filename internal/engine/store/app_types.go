@@ -5,9 +5,14 @@ package store
 // behavior such as package generation.
 type AppKind string
 
+// AppDeliveryMode distinguishes generated SDK packages from package-free REST APIs within the shared SDK adapter kind.
+type AppDeliveryMode string
+
 const (
-	AppKindSDK AppKind = "sdk"
-	AppKindMCP AppKind = "mcp"
+	AppKindSDK         AppKind         = "sdk"
+	AppKindMCP         AppKind         = "mcp"
+	AppDeliveryModeSDK AppDeliveryMode = "sdk"
+	AppDeliveryModeAPI AppDeliveryMode = "api"
 )
 
 func (kind AppKind) Valid() bool {
@@ -57,7 +62,9 @@ type AppFamilyQuotaUsage struct {
 // a logical family. Display-name changes are intentionally excluded because
 // they do not change execution authority or generated-package identity.
 func (family AppFamily) HasSameBinding(other AppFamily) bool {
-	return family.TargetLanguage == other.TargetLanguage &&
+	// An empty requested mode is a pre-publication reservation, while every concrete apply must match the durable family mode.
+	deliveryMatches := other.DeliveryMode == "" || family.DeliveryMode == other.DeliveryMode
+	return deliveryMatches && family.TargetLanguage == other.TargetLanguage &&
 		family.OwnerSubjectID == other.OwnerSubjectID &&
 		family.OwnerTeamID == other.OwnerTeamID
 }

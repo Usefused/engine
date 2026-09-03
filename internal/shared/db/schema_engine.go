@@ -1210,6 +1210,7 @@ func engineSchemaQueries() []string {
 			canonical_name      text NOT NULL,
 			display_name        text NOT NULL,
 			target_language     text,
+			delivery_mode       text,
 			mcp_stable_app_id       uuid,
 			mcp_stable_route_initialized boolean NOT NULL DEFAULT false,
 			owner_subject_id    uuid REFERENCES fused_subjects(id) ON DELETE RESTRICT,
@@ -1223,6 +1224,10 @@ func engineSchemaQueries() []string {
 			CONSTRAINT chk_fused_app_families_language CHECK (
 				(kind = 'sdk' AND target_language IS NOT NULL)
 				OR (kind = 'mcp' AND target_language IS NULL)
+			),
+			CONSTRAINT chk_fused_app_families_delivery_mode CHECK (
+				(kind = 'sdk' AND (delivery_mode IS NULL OR delivery_mode IN ('sdk', 'api')))
+				OR (kind = 'mcp' AND delivery_mode IS NULL)
 			),
 			CONSTRAINT chk_fused_app_families_stable_mcp CHECK (
 				(kind = 'sdk' AND mcp_stable_app_id IS NULL AND NOT mcp_stable_route_initialized)
@@ -1280,6 +1285,9 @@ func engineSchemaQueries() []string {
 					)
 				)
 			),
+			CONSTRAINT chk_fused_apps_sdk_skipped_jobless CHECK (
+				sdk_generation_status IS DISTINCT FROM 'skipped' OR sdk_generation_job_id IS NULL
+			),
 			deprecation_message    text,
 			deprecated_at          timestamptz,
 			planned_deactivation_at timestamptz,
@@ -1305,6 +1313,38 @@ func engineSchemaQueries() []string {
 		// place; no app identity or runtime selection is rewritten.
 		`ALTER TABLE fused_apps ADD COLUMN IF NOT EXISTS sdk_generation_job_id text;`,
 		`ALTER TABLE fused_apps ADD COLUMN IF NOT EXISTS sdk_generation_status text;`,
+		// Existing SDK families bind to the delivery class already evidenced by their durable versions; mixed history fails closed.
+		`DO $$
+		BEGIN
+			ALTER TABLE fused_app_families ADD COLUMN IF NOT EXISTS delivery_mode text;
+			IF EXISTS (
+				SELECT 1
+				FROM fused_app_families family
+				WHERE family.kind = 'sdk'
+				  AND EXISTS (SELECT 1 FROM fused_apps app WHERE app.app_family_id = family.app_family_id AND app.sdk_generation_status = 'skipped')
+				  AND EXISTS (SELECT 1 FROM fused_apps app WHERE app.app_family_id = family.app_family_id AND app.sdk_generation_status IS DISTINCT FROM 'skipped')
+			) THEN
+				RAISE EXCEPTION 'existing SDK family mixes API and generated-package delivery modes';
+			END IF;
+			UPDATE fused_app_families family
+			SET delivery_mode = CASE
+				WHEN EXISTS (SELECT 1 FROM fused_apps app WHERE app.app_family_id = family.app_family_id AND app.sdk_generation_status = 'skipped') THEN 'api'
+				WHEN EXISTS (SELECT 1 FROM fused_apps app WHERE app.app_family_id = family.app_family_id) THEN 'sdk'
+				ELSE NULL
+			END
+			WHERE family.kind = 'sdk' AND family.delivery_mode IS NULL;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname = 'chk_fused_app_families_delivery_mode'
+				  AND conrelid = 'fused_app_families'::regclass
+			) THEN
+				ALTER TABLE fused_app_families
+				ADD CONSTRAINT chk_fused_app_families_delivery_mode CHECK (
+					(kind = 'sdk' AND (delivery_mode IS NULL OR delivery_mode IN ('sdk', 'api')))
+					OR (kind = 'mcp' AND delivery_mode IS NULL)
+				);
+			END IF;
+		END $$;`,
 		`DO $$
 		BEGIN
 			IF NOT EXISTS (
@@ -1315,6 +1355,19 @@ func engineSchemaQueries() []string {
 				ALTER TABLE fused_apps
 				ADD CONSTRAINT chk_fused_apps_sdk_generation_status
 				CHECK (sdk_generation_status IS NULL OR sdk_generation_status IN ('pending', 'complete', 'failed', 'skipped'));
+			END IF;
+		END $$;`,
+		// Direct API rows never acquire Registry generation authority, including on Engines upgraded from the earlier skipped-state constraint.
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname = 'chk_fused_apps_sdk_skipped_jobless'
+				  AND conrelid = 'fused_apps'::regclass
+			) THEN
+				ALTER TABLE fused_apps
+				ADD CONSTRAINT chk_fused_apps_sdk_skipped_jobless
+				CHECK (sdk_generation_status IS DISTINCT FROM 'skipped' OR sdk_generation_job_id IS NULL);
 			END IF;
 		END $$;`,
 		// Generation coherence prevents direct SQL or old callers from making pending SDK work runnable or terminal work building.

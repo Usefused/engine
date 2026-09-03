@@ -150,6 +150,85 @@ func TestSecretResolverReturnsActionableMissingStaticCredential(t *testing.T) {
 	}
 }
 
+// TestSecretResolverReturnsActionableMissingOAuthApplicationCredentials proves
+// a credential-deferred OAuth app fails before provider dispatch with the exact secure setup target.
+func TestSecretResolverReturnsActionableMissingOAuthApplicationCredentials(t *testing.T) {
+	bucketID, appID, serviceID := uuid.New(), uuid.New(), uuid.New()
+	selections, err := json.Marshal([]models.SDKSelection{{
+		ServiceID: serviceID, ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion,
+		AuthType: "oauth", AuthName: "oauth2",
+	}})
+	// A malformed fixture would invalidate the runtime-scope premise of this test.
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := NewSecretResolver(&resolverMockStore{appRuntime: &store.AppRuntime{
+		BucketID: bucketID, ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: selections,
+	}}, []byte("12345678901234567890123456789012"))
+	_, _, err = resolver.ResolveExecutionCredentials(context.Background(), CredentialRequest{
+		AppID: appID, ServiceID: serviceID, AuthType: "oauth",
+		Auths:        fusedobject.AuthConfigs{{Name: "oauth2", Type: "oauth2"}},
+		Requirements: singleAuthRequirement("oauth2"),
+		Passthrough:  map[string]any{"fused_auth_type": "oauth", "fused_auth_name": "oauth2"},
+	})
+	var missing *CredentialMaterialMissingError
+	// The failure must identify the application-registration family, not imply that an access token belongs in secret storage.
+	if !errors.As(err, &missing) || missing.BucketID != bucketID || missing.ServiceID != serviceID || missing.AuthType != "oauth" || missing.AuthName != "oauth2" {
+		t.Fatalf("missing OAuth application credentials = %#v / %v", missing, err)
+	}
+}
+
+// TestSecretResolverRequiresConnectionAfterOAuthApplicationCredentials proves
+// a complete client pair advances to connected-user guidance without dispatching credential-less.
+func TestSecretResolverRequiresConnectionAfterOAuthApplicationCredentials(t *testing.T) {
+	bucketID, appID, serviceID := uuid.New(), uuid.New(), uuid.New()
+	masterKey := []byte("12345678901234567890123456789012")
+	resolver := NewSecretResolver(&resolverMockStore{
+		appRuntime: &store.AppRuntime{BucketID: bucketID},
+		secrets:    encryptedResolverApplicationSecrets(t, masterKey, bucketID, serviceID),
+	}, masterKey)
+	_, _, err := resolver.ResolveExecutionCredentials(context.Background(), CredentialRequest{
+		AppID: appID, ServiceID: serviceID, AuthType: "oauth",
+		Auths:        fusedobject.AuthConfigs{{Name: "bearerAuth", Type: "oauth2"}},
+		Requirements: singleAuthRequirement("bearerAuth"),
+		Passthrough:  map[string]any{"fused_auth_type": "oauth", "fused_auth_name": "bearerAuth"},
+	})
+	var connection *ConnectionRequiredError
+	// Application credentials authorize consent but never substitute for a user's provider grant.
+	if !errors.As(err, &connection) || connection.BucketID != bucketID.String() || connection.ServiceID != serviceID.String() || connection.EndUserRef != "" {
+		t.Fatalf("connection requirement = %#v / %v", connection, err)
+	}
+}
+
+// TestSecretResolverMissingReferencedOAuthCredentialsTargetsSource proves the
+// setup command follows the reviewed same-bucket credential reference rather than the consuming service.
+func TestSecretResolverMissingReferencedOAuthCredentialsTargetsSource(t *testing.T) {
+	bucketID, appID, targetServiceID, sourceServiceID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	selections, err := json.Marshal([]models.SDKSelection{{
+		ServiceID: targetServiceID, ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion,
+		AuthType: "oauth", AuthName: "targetOAuth", CredentialSourceServiceID: sourceServiceID,
+		CredentialSourceAuthType: "oauth", CredentialSourceAuthName: "sourceOAuth",
+	}})
+	// A malformed fixture would invalidate the credential-reference premise of this test.
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := NewSecretResolver(&resolverMockStore{appRuntime: &store.AppRuntime{
+		BucketID: bucketID, ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: selections,
+	}}, []byte("12345678901234567890123456789012"))
+	_, _, err = resolver.ResolveExecutionCredentials(context.Background(), CredentialRequest{
+		AppID: appID, ServiceID: targetServiceID, AuthType: "oauth",
+		Auths:        fusedobject.AuthConfigs{{Name: "targetOAuth", Type: "oauth2"}},
+		Requirements: singleAuthRequirement("targetOAuth"),
+		Passthrough:  map[string]any{"fused_auth_type": "oauth", "fused_auth_name": "targetOAuth"},
+	})
+	var missing *CredentialMaterialMissingError
+	// Remediation must mutate only the source family selected by the immutable app scope.
+	if !errors.As(err, &missing) || missing.ServiceID != sourceServiceID || missing.AuthType != "oauth" || missing.AuthName != "sourceOAuth" {
+		t.Fatalf("referenced OAuth credential error = %#v / %v", missing, err)
+	}
+}
+
 // TestMissingStaticCredentialErrorLeavesOAuthToConnectionRouting prevents a
 // missing end-user selector from being misreported as a static OAuth token.
 func TestMissingStaticCredentialErrorLeavesOAuthToConnectionRouting(t *testing.T) {

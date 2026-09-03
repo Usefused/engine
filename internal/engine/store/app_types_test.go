@@ -56,6 +56,23 @@ func TestAppFamilyBindingExcludesPresentationFields(t *testing.T) {
 	}
 }
 
+// TestAppFamilyBindingPinsConcreteDeliveryMode keeps API and generated SDK versions out of the same logical family.
+func TestAppFamilyBindingPinsConcreteDeliveryMode(t *testing.T) {
+	ownerID := uuid.New()
+	existing := AppFamily{TargetLanguage: "typescript", DeliveryMode: AppDeliveryModeAPI, OwnerSubjectID: ownerID}
+	reserved := AppFamily{TargetLanguage: "typescript", OwnerSubjectID: ownerID}
+	// A pre-publication reservation has no mode yet and must remain compatible with the first concrete apply.
+	if !existing.HasSameBinding(reserved) {
+		t.Fatal("empty requested delivery mode must preserve reservation compatibility")
+	}
+	generated := reserved
+	generated.DeliveryMode = AppDeliveryModeSDK
+	// Once bound, switching between REST API and generated-package delivery changes family execution semantics.
+	if existing.HasSameBinding(generated) {
+		t.Fatal("opposite concrete delivery modes must conflict")
+	}
+}
+
 // TestImmutableAppVersionComparesEntireRuntimeScope proves private definitions,
 // descriptor hashes, selections, and capabilities all participate in version immutability.
 func TestImmutableAppVersionComparesEntireRuntimeScope(t *testing.T) {

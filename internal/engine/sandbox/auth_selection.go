@@ -261,10 +261,11 @@ func appendUnique(existing []string, values ...string) []string {
 	return existing
 }
 
-// selectedAuthIsConnected avoids fetching a static token for OAuth/OIDC calls
-// that will resolve a bucket-owned user connection instead.
-func selectedAuthIsConnected(auth fusedobject.AuthConfig, credentials map[string]any) bool {
-	return connectedEndUserRef(credentials) != "" && isConnectedAuthSelector(canonicalFusedAuthType(auth))
+// selectedAuthIsConnected keeps OAuth/OIDC application registration and user
+// grants on the connection path even before a caller supplies user identity.
+func selectedAuthIsConnected(auth fusedobject.AuthConfig, _ map[string]any) bool {
+	// OAuth/OIDC bucket values are application client pairs, never provider access tokens for direct dispatch.
+	return isConnectedAuthSelector(canonicalFusedAuthType(auth))
 }
 
 // staticSecretKeysForAuth maps one selected auth family to the minimal set of

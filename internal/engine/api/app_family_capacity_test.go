@@ -46,6 +46,16 @@ func TestAPIApplyPersistenceErrorPreservesQuotaIdentity(t *testing.T) {
 	}
 }
 
+// TestAppApplyPersistenceErrorReportsImmutableDeliveryMode exposes a stable recovery path instead of a generic 500.
+func TestAppApplyPersistenceErrorReportsImmutableDeliveryMode(t *testing.T) {
+	err := appApplyPersistenceError(context.Background(), store.ErrAppDeliveryModeMismatch, uuid.New())
+	httpErr, ok := err.(workspaceConfigHTTPError)
+	// The conflict must tell callers to choose another app family before retrying the opposite delivery outcome.
+	if !ok || httpErr.status != http.StatusConflict || httpErr.code != "app_delivery_mode_immutable" || httpErr.remediation == "" {
+		t.Fatalf("unexpected delivery-mode persistence error: %#v", err)
+	}
+}
+
 // TestSDKPlanRejectsFamilyQuotaBeforeResolution proves capacity is a plan blocker rather than a late generation failure.
 func TestSDKPlanRejectsFamilyQuotaBeforeResolution(t *testing.T) {
 	accountID, familyID := uuid.New(), uuid.New()
@@ -60,6 +70,48 @@ func TestSDKPlanRejectsFamilyQuotaBeforeResolution(t *testing.T) {
 	request.Header.Set("X-API-Key", "fsk_test")
 	router.ServeHTTP(response, request)
 	assertAppPlanFamilyQuotaResponse(t, response, "sdk_family_limit_exceeded")
+}
+
+// TestSDKPlanReportsDeliveryConflictBeforeFullQuota protects immutable identity from capacity masking.
+func TestSDKPlanReportsDeliveryConflictBeforeFullQuota(t *testing.T) {
+	accountID := uuid.New()
+	apiFamilyID, sdkFamilyID := uuid.New(), uuid.New()
+	s := &workspaceTestStore{
+		accountID: accountID,
+		appFamilies: map[string]store.AppFamily{
+			accountID.String() + "\x00sdk\x00final-gmail-api": {
+				AppFamilyID: apiFamilyID, AccountID: accountID, Kind: store.AppKindSDK, CanonicalName: "final-gmail-api", DeliveryMode: store.AppDeliveryModeAPI,
+			},
+			accountID.String() + "\x00sdk\x00existing-sdk": {
+				AppFamilyID: sdkFamilyID, AccountID: accountID, Kind: store.AppKindSDK, CanonicalName: "existing-sdk", DeliveryMode: store.AppDeliveryModeSDK,
+			},
+		},
+		apps: map[uuid.UUID]store.App{
+			uuid.New(): {AppFamilyID: apiFamilyID, Status: store.AppStatusActive, SDKGenerationStatus: models.SDKGenerationStatusSkipped},
+			uuid.New(): {AppFamilyID: sdkFamilyID, Status: store.AppStatusActive, SDKGenerationStatus: models.SDKGenerationStatusComplete},
+		},
+	}
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{MaxSDKFamilies: models.IntPtr(1)})
+	t.Cleanup(entitlement.LiveEntitlement.Reset)
+	router := newControlTestRouter(accountID)
+	router.Post("/sdk-config/plan", SDKConfigPlanHandler(&mockConfigStore{}, s, &mockRegistryClient{}))
+	body := []byte(`{"source_hash":"sha256:test","owner_team":"platform","config_key":"sdk:final-gmail-api:2.0.0","config":{"apiVersion":"fused/v1","kind":"sdk","name":"final-gmail-api","version":"2.0.0","language":"typescript","bucket":"default","services":{"unresolved":{"version":"v1","select_all":true}}}}`)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/sdk-config/plan", bytes.NewReader(body))
+	request.Header.Set("X-API-Key", "fsk_test")
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", response.Code, response.Body.String())
+	}
+	var payload workspaceConfigErrorResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode delivery conflict: %v", err)
+	}
+	// The local immutable conflict is authoritative and proves no plan-side mutation occurred.
+	if payload.Error.Code != "app_delivery_mode_immutable" || payload.Error.Phase != "plan_admission" || payload.Error.CommitState != "not_committed" {
+		t.Fatalf("unexpected precedence response: %#v", payload.Error)
+	}
 }
 
 // TestAPIPlanRejectsOnlyAPIQuota proves generate false selects the independent direct-API ceiling during plan admission.

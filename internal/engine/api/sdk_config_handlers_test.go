@@ -48,6 +48,90 @@ func TestValidateSDKServiceSelection_NotActivatedErrorMessage(t *testing.T) {
 	}
 }
 
+// TestPreflightSDKFamilyLifecycleRejectsDeliveryModeSwitch verifies planning catches API/SDK family conflicts locally.
+func TestPreflightSDKFamilyLifecycleRejectsDeliveryModeSwitch(t *testing.T) {
+	accountID := uuid.New()
+	s := &workspaceTestStore{}
+	_, _, err := s.CreateOrGetAppFamily(context.Background(), store.AppFamily{
+		AppFamilyID: uuid.New(), AccountID: accountID, Kind: store.AppKindSDK, CanonicalName: "support",
+		DeliveryMode: store.AppDeliveryModeAPI,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = preflightSDKFamilyLifecycle(context.Background(), s, accountID, sdkConfigDocument{Name: "support", Version: "1.0.0"})
+	err = withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed")
+	var httpErr workspaceConfigHTTPError
+	if !errors.As(err, &httpErr) || httpErr.code != "app_delivery_mode_immutable" || httpErr.phase != "plan_admission" || httpErr.commitState != "not_committed" {
+		t.Fatalf("delivery-mode preflight error = %#v", err)
+	}
+}
+
+// TestPreflightSDKFamilyLifecycleRejectsTombstone verifies retired versions fail before plan persistence.
+func TestPreflightSDKFamilyLifecycleRejectsTombstone(t *testing.T) {
+	accountID := uuid.New()
+	familyID := uuid.New()
+	s := &workspaceTestStore{tombstones: map[string]bool{familyID.String() + "\x00" + "1.0.0": true}}
+	_, _, err := s.CreateOrGetAppFamily(context.Background(), store.AppFamily{
+		AppFamilyID: familyID, AccountID: accountID, Kind: store.AppKindSDK, CanonicalName: "support",
+		DeliveryMode: store.AppDeliveryModeSDK,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = preflightSDKFamilyLifecycle(context.Background(), s, accountID, sdkConfigDocument{Name: "support", Version: "1.0.0"})
+	err = withWorkspaceConfigErrorMetadata(err, "apply_admission", uuid.NewString(), "not_committed")
+	var httpErr workspaceConfigHTTPError
+	if !errors.As(err, &httpErr) || httpErr.code != "app_version_deactivated" || httpErr.phase != "apply_admission" || httpErr.commitState != "not_committed" {
+		t.Fatalf("tombstone preflight error = %#v", err)
+	}
+}
+
+// TestPreflightSDKFamilyLifecycleAllowsEmptyReservation verifies a failed first apply can retry and bind its mode.
+func TestPreflightSDKFamilyLifecycleAllowsEmptyReservation(t *testing.T) {
+	accountID := uuid.New()
+	s := &workspaceTestStore{}
+	_, _, err := s.CreateOrGetAppFamily(context.Background(), store.AppFamily{
+		AppFamilyID: uuid.New(), AccountID: accountID, Kind: store.AppKindSDK, CanonicalName: "support",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := preflightSDKFamilyLifecycle(context.Background(), s, accountID, sdkConfigDocument{Name: "support", Version: "1.0.0"}); err != nil {
+		t.Fatalf("empty reservation blocked retry: %v", err)
+	}
+}
+
+// TestAPIPlanMissingBucketIsAuthoritativelyNotCommitted mirrors init --api with an unknown credential bucket.
+func TestAPIPlanMissingBucketIsAuthoritativelyNotCommitted(t *testing.T) {
+	accountID := uuid.New()
+	s := &workspaceTestStore{
+		accountID: accountID,
+		bucketsByName: map[string]*store.Bucket{
+			"default": {ID: uuid.New(), Name: "default"},
+		},
+	}
+	router := newControlTestRouter(accountID)
+	router.Post("/sdk-config/plan", SDKConfigPlanHandler(&mockConfigStore{}, s, &mockRegistryClient{}))
+	body := []byte(`{"source_hash":"sha256:test","config_key":"sdk:missing-bucket-api:1.0.0","config":{"apiVersion":"fused/v1","kind":"sdk","name":"missing-bucket-api","version":"1.0.0","language":"typescript","bucket":"definitely-missing","generate":false,"services":{"gmail":{"version":"v1","select_all":true}}}}`)
+	request := httptest.NewRequest(http.MethodPost, "/sdk-config/plan", bytes.NewReader(body))
+	request.Header.Set("X-API-Key", "fsk_test")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", response.Code, response.Body.String())
+	}
+	var payload workspaceConfigErrorResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode missing-bucket response: %v", err)
+	}
+	// A bucket lookup failure happens before plan persistence or any app/workspace mutation.
+	if payload.Error.Code != "credential_set_not_found" || payload.Error.Phase != "plan_admission" || payload.Error.CommitState != "not_committed" {
+		t.Fatalf("unexpected missing-bucket response: %#v", payload.Error)
+	}
+}
+
 func TestCanonicalAppStateIgnoresSetOrdering(t *testing.T) {
 	first, err := canonicalAppState(sdkConfigDocument{
 		APIVersion: "fused/v1", Kind: "mcp", Name: "reader", Version: "1.0.0",

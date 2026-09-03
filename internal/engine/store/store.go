@@ -32,6 +32,7 @@ var (
 	ErrAppVersionImmutable            = errors.New("app version is immutable: same version with changed source or scope")
 	ErrAppVersionExists               = errors.New("app version already exists in family")
 	ErrAppDeactivated                 = errors.New("app is deactivated")
+	ErrAppDeliveryModeMismatch        = errors.New("app delivery mode is immutable")
 	ErrAppTokenNotFound               = errors.New("app token not found")
 	ErrAppTokenNameConflict           = errors.New("a token with this name already exists for this app")
 	ErrAppTokenBindingInvalid         = errors.New("app token binding is invalid or unavailable")
@@ -114,6 +115,7 @@ type AppFamily struct {
 	CanonicalName  string
 	DisplayName    string
 	TargetLanguage string // required for SDK, empty for MCP
+	DeliveryMode   AppDeliveryMode
 	OwnerSubjectID uuid.UUID
 	OwnerTeamID    uuid.UUID
 	CreatedAt      time.Time
@@ -900,6 +902,7 @@ type Store interface {
 	CreateOrGetAppFamily(ctx context.Context, family AppFamily) (*AppFamily, bool, error)
 	GetAppFamily(ctx context.Context, appFamilyID uuid.UUID) (*AppFamily, error)
 	GetAppFamilyByIdentity(ctx context.Context, accountID uuid.UUID, kind, canonicalName string) (*AppFamily, error)
+	AppFamilyHasHistory(ctx context.Context, appFamilyID uuid.UUID) (bool, error)
 	ListAppFamilies(ctx context.Context, accountID uuid.UUID, kind string, limit, offset int) ([]AppFamily, int, error)
 
 	// App (version) CRUD

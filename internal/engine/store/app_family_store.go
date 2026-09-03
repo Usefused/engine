@@ -48,23 +48,26 @@ func createOrGetAppFamily(ctx context.Context, queryer appFamilyQueryer, family 
 	row := queryer.QueryRow(ctx, `
 		INSERT INTO fused_app_families AS family
 			(app_family_id, account_id, kind, canonical_name, display_name,
-			 target_language, owner_subject_id, owner_team_id)
+			 target_language, delivery_mode, owner_subject_id, owner_team_id)
 		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''),
-		        NULLIF($7, '00000000-0000-0000-0000-000000000000'::uuid),
-		        NULLIF($8, '00000000-0000-0000-0000-000000000000'::uuid))
+		        NULLIF($7, ''),
+		        NULLIF($8, '00000000-0000-0000-0000-000000000000'::uuid),
+		        NULLIF($9, '00000000-0000-0000-0000-000000000000'::uuid))
 		ON CONFLICT (account_id, kind, canonical_name) DO UPDATE
-		SET updated_at = family.updated_at
+		SET delivery_mode = COALESCE(family.delivery_mode, EXCLUDED.delivery_mode),
+		    updated_at = family.updated_at
 		RETURNING app_family_id, account_id, kind, canonical_name, display_name,
-		          COALESCE(target_language, ''),
+		          COALESCE(target_language, ''), COALESCE(delivery_mode, ''),
 		          COALESCE(owner_subject_id, '00000000-0000-0000-0000-000000000000'::uuid),
 		          COALESCE(owner_team_id, '00000000-0000-0000-0000-000000000000'::uuid),
 		          created_at, updated_at, (xmax = 0)
 	`, family.AppFamilyID, family.AccountID, family.Kind, family.CanonicalName,
-		family.DisplayName, family.TargetLanguage, family.OwnerSubjectID, family.OwnerTeamID)
+		family.DisplayName, family.TargetLanguage, family.DeliveryMode, family.OwnerSubjectID, family.OwnerTeamID)
 	var result AppFamily
 	var created bool
 	err := row.Scan(&result.AppFamilyID, &result.AccountID, &result.Kind,
 		&result.CanonicalName, &result.DisplayName, &result.TargetLanguage,
+		&result.DeliveryMode,
 		&result.OwnerSubjectID, &result.OwnerTeamID, &result.CreatedAt,
 		&result.UpdatedAt, &created)
 	if err != nil {
@@ -75,7 +78,7 @@ func createOrGetAppFamily(ctx context.Context, queryer appFamilyQueryer, family 
 
 const appFamilySelect = `
 SELECT app_family_id, account_id, kind, canonical_name, display_name,
-       COALESCE(target_language, ''),
+       COALESCE(target_language, ''), COALESCE(delivery_mode, ''),
        COALESCE(owner_subject_id, '00000000-0000-0000-0000-000000000000'::uuid),
        COALESCE(owner_team_id, '00000000-0000-0000-0000-000000000000'::uuid),
        created_at, updated_at
@@ -101,10 +104,27 @@ func (s *postgresStore) GetAppFamilyByIdentity(ctx context.Context, accountID uu
 	return f, err
 }
 
+// AppFamilyHasHistory reports whether an otherwise-unbound family has any live or retired immutable version identity.
+func (s *postgresStore) AppFamilyHasHistory(ctx context.Context, appFamilyID uuid.UUID) (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM fused_apps WHERE app_family_id = $1
+			UNION ALL
+			SELECT 1 FROM fused_app_tombstones WHERE app_family_id = $1
+		)
+	`, appFamilyID).Scan(&exists)
+	// Storage failures cannot prove a reservation shell is safe to bind.
+	if err != nil {
+		return false, fmt.Errorf("check app family history: %w", err)
+	}
+	return exists, nil
+}
+
 func (s *postgresStore) ListAppFamilies(ctx context.Context, accountID uuid.UUID, kind string, limit, offset int) ([]AppFamily, int, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT app_family_id, account_id, kind, canonical_name, display_name,
-		       COALESCE(target_language, ''),
+		       COALESCE(target_language, ''), COALESCE(delivery_mode, ''),
 		       COALESCE(owner_subject_id, '00000000-0000-0000-0000-000000000000'::uuid),
 		       COALESCE(owner_team_id, '00000000-0000-0000-0000-000000000000'::uuid),
 		       created_at, updated_at, COUNT(*) OVER()
@@ -123,7 +143,7 @@ func (s *postgresStore) ListAppFamilies(ctx context.Context, accountID uuid.UUID
 	for rows.Next() {
 		var f AppFamily
 		if err := rows.Scan(&f.AppFamilyID, &f.AccountID, &f.Kind, &f.CanonicalName,
-			&f.DisplayName, &f.TargetLanguage, &f.OwnerSubjectID, &f.OwnerTeamID,
+			&f.DisplayName, &f.TargetLanguage, &f.DeliveryMode, &f.OwnerSubjectID, &f.OwnerTeamID,
 			&f.CreatedAt, &f.UpdatedAt, &total); err != nil {
 			return nil, 0, fmt.Errorf("scan app family: %w", err)
 		}
@@ -135,7 +155,7 @@ func (s *postgresStore) ListAppFamilies(ctx context.Context, accountID uuid.UUID
 func scanAppFamily(row pgx.Row) (*AppFamily, error) {
 	var f AppFamily
 	err := row.Scan(&f.AppFamilyID, &f.AccountID, &f.Kind, &f.CanonicalName,
-		&f.DisplayName, &f.TargetLanguage, &f.OwnerSubjectID, &f.OwnerTeamID,
+		&f.DisplayName, &f.TargetLanguage, &f.DeliveryMode, &f.OwnerSubjectID, &f.OwnerTeamID,
 		&f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		return nil, err

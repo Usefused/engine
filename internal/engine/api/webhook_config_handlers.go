@@ -107,7 +107,8 @@ func WebhookConfigPlanHandler(configStore store.ConfigRepository, s store.Store,
 		})
 		if err != nil {
 			span.SetStatus(codes.Error, "webhook config plan failed")
-			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(err, "planning", "", "unknown"), ctx)
+			// Webhook planning performs validation and persistence of a receipt only; it cannot commit runtime configuration.
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed"), ctx)
 			return
 		}
 		span.SetAttributes(attribute.String("outcome", "success"), attribute.String("plan_id", plan.ID.String()))

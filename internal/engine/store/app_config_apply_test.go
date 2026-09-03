@@ -106,6 +106,79 @@ func TestApplyAppConfigPlanRejectsSDKWithoutPlanLease(t *testing.T) {
 	}
 }
 
+// TestValidateSDKGenerationStateAdmitsDirectAPIWithoutJob protects the package-free state rejected by the live apply path.
+func TestValidateSDKGenerationStateAdmitsDirectAPIWithoutJob(t *testing.T) {
+	tests := []struct {
+		name             string
+		status           AppStatus
+		jobID            string
+		generationStatus string
+		wantError        bool
+	}{
+		{name: "active direct API", status: AppStatusActive, generationStatus: models.SDKGenerationStatusSkipped},
+		{name: "deprecated direct API", status: AppStatusDeprecated, generationStatus: models.SDKGenerationStatusSkipped},
+		{name: "active direct API with generation job", status: AppStatusActive, jobID: "job-1", generationStatus: models.SDKGenerationStatusSkipped, wantError: true},
+		{name: "deprecated direct API with generation job", status: AppStatusDeprecated, jobID: "job-1", generationStatus: models.SDKGenerationStatusSkipped, wantError: true},
+		{name: "building direct API", status: AppStatusBuilding, generationStatus: models.SDKGenerationStatusSkipped, wantError: true},
+		{name: "complete package without job", status: AppStatusActive, generationStatus: models.SDKGenerationStatusComplete, wantError: true},
+		{name: "complete package with job", status: AppStatusActive, jobID: "job-1", generationStatus: models.SDKGenerationStatusComplete},
+		{name: "pending package with job", status: AppStatusBuilding, jobID: "job-1", generationStatus: models.SDKGenerationStatusPending},
+		{name: "pending runnable package", status: AppStatusActive, jobID: "job-1", generationStatus: models.SDKGenerationStatusPending, wantError: true},
+	}
+	// Each table row pins one allowed or rejected lifecycle combination at the shared persistence boundary.
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateSDKGenerationState(test.status, test.jobID, test.generationStatus)
+			// Error presence is the observable admission decision; message text remains an implementation detail.
+			if (err != nil) != test.wantError {
+				t.Fatalf("validateSDKGenerationState(%q, %q, %q) error = %v, wantError=%t", test.status, test.jobID, test.generationStatus, err, test.wantError)
+			}
+		})
+	}
+}
+
+// TestApplyAppConfigPlanPersistsDirectAPIWithoutGenerationJob crosses the real transaction boundary that production API init uses.
+func TestApplyAppConfigPlanPersistsDirectAPIWithoutGenerationJob(t *testing.T) {
+	fixture := newConcurrentArtifactApplyFixture(t, ConfigTypeSDK)
+	fixture.params.SDKGenerationJobID = ""
+	fixture.params.SDKGenerationStatus = models.SDKGenerationStatusSkipped
+	fixture.params.TokenHash = "direct-api-token-" + uuid.NewString()
+
+	result, err := fixture.repository.ApplyAppConfigPlan(fixture.ctx, fixture.params)
+	// Package-free publication must commit even though no Registry generation identity exists.
+	if err != nil {
+		t.Fatalf("apply direct API: %v", err)
+	}
+	appStore := NewPostgresStore(fixture.pool).(*postgresStore)
+	app, err := appStore.GetApp(fixture.ctx, result.AppID)
+	// The persisted marker is the authority used by quotas, runtime reads, and public projections.
+	if err != nil {
+		t.Fatalf("read direct API: %v", err)
+	}
+	// A fake job would recreate the competing package lifecycle that direct API mode removes.
+	if app.Status != AppStatusActive || app.SDKGenerationStatus != models.SDKGenerationStatusSkipped || app.SDKGenerationJobID != "" {
+		t.Fatalf("direct API state = status=%q generation=%q job=%q", app.Status, app.SDKGenerationStatus, app.SDKGenerationJobID)
+	}
+	family, err := appStore.GetAppFamily(fixture.ctx, result.AppFamilyID)
+	// The first package-free apply permanently classifies the logical family even after all versions are deactivated.
+	if err != nil || family.DeliveryMode != AppDeliveryModeAPI {
+		t.Fatalf("direct API family = %#v, err=%v", family, err)
+	}
+	opposite := fixture.params
+	opposite.SDKGenerationJobID = "job-generated"
+	opposite.SDKGenerationStatus = models.SDKGenerationStatusComplete
+	tx, err := fixture.pool.Begin(fixture.ctx)
+	if err != nil {
+		t.Fatalf("begin opposite-mode probe: %v", err)
+	}
+	defer tx.Rollback(fixture.ctx)
+	_, err = upsertAppFamilyTx(fixture.ctx, tx, opposite)
+	// A sibling generated version cannot reuse the direct API family or rewrite its durable delivery class.
+	if !errors.Is(err, ErrAppDeliveryModeMismatch) {
+		t.Fatalf("opposite delivery mode error = %v, want ErrAppDeliveryModeMismatch", err)
+	}
+}
+
 // TestSDKGenerationCompletionPromotesDurableBuildingApp exercises the real plan-bound CAS and activation quota transaction.
 func TestSDKGenerationCompletionPromotesDurableBuildingApp(t *testing.T) {
 	fixture := newConcurrentArtifactApplyFixture(t, ConfigTypeSDK)
@@ -303,6 +376,7 @@ func TestValidSDKGenerationTransitionRejectsRunnableDowngrade(t *testing.T) {
 	}{
 		{name: "failed retry pending", currentStatus: AppStatusBuilding, currentGeneration: models.SDKGenerationStatusFailed, nextStatus: AppStatusBuilding, nextGeneration: models.SDKGenerationStatusPending, nextJobID: "job-1", want: true},
 		{name: "failed retry complete", currentStatus: AppStatusBuilding, currentGeneration: models.SDKGenerationStatusFailed, nextStatus: AppStatusActive, nextGeneration: models.SDKGenerationStatusComplete, nextJobID: "job-1", want: true},
+		{name: "failed generation cannot become direct API", currentStatus: AppStatusBuilding, currentGeneration: models.SDKGenerationStatusFailed, nextStatus: AppStatusActive, nextGeneration: models.SDKGenerationStatusSkipped, nextJobID: "job-1"},
 		{name: "active cannot downgrade", currentStatus: AppStatusActive, currentGeneration: models.SDKGenerationStatusComplete, nextStatus: AppStatusBuilding, nextGeneration: models.SDKGenerationStatusPending, nextJobID: "job-1"},
 		{name: "pending cannot replace attempt", currentStatus: AppStatusBuilding, currentGeneration: models.SDKGenerationStatusPending, nextStatus: AppStatusBuilding, nextGeneration: models.SDKGenerationStatusPending, nextJobID: "job-2"},
 		{name: "failed cannot replace job", currentStatus: AppStatusBuilding, currentGeneration: models.SDKGenerationStatusFailed, nextStatus: AppStatusBuilding, nextGeneration: models.SDKGenerationStatusPending, nextJobID: "job-2"},

@@ -238,7 +238,8 @@ func SDKConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 			defaultEngineURL: defaultEngineURL,
 		})
 		if err != nil {
-			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(err, "planning", "", "unknown"), ctx)
+			// Planning never mutates app, workspace, credential, or Registry state; preserve any narrower typed metadata.
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed"), ctx)
 			return
 		}
 
@@ -759,7 +760,11 @@ func createSDKConfigPlan(
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
-	// Capacity is reviewable plan admission, so a full workspace must fail before contract resolution or plan persistence.
+	// Immutable identity outranks quota because capacity cannot make a conflicting or retired family reusable.
+	if err := preflightSDKFamilyLifecycle(ctx, s, call.accountID, call.document); err != nil {
+		return sdkPlanResult{}, withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed")
+	}
+	// Capacity remains reviewable admission after the cheaper authoritative identity fence.
 	if err := enforceSDKFamilyLimit(ctx, s, call.accountID, call.document.Name, sdkConfigGeneratesPackage(call.document)); err != nil {
 		return sdkPlanResult{}, withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed")
 	}
@@ -2394,7 +2399,11 @@ func prepareSDKApplyAdmission(ctx context.Context, configStore store.ConfigRepos
 	if err != nil {
 		return nil, nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
-	// A second quota check at apply protects the plan/apply race before a lease, app identity, or Registry job is created.
+	// Recheck immutable identity first so a quota race cannot mask a conflicting or retired family.
+	if err := preflightSDKPlanFamilyLifecycle(ctx, s, call.accountID, plan); err != nil {
+		return nil, nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
+	}
+	// A second quota check then protects the plan/apply capacity race before lease reservation or Registry work.
 	if err := enforceSDKPlanFamilyLimit(ctx, s, call.accountID, plan); err != nil {
 		return nil, nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
@@ -2409,6 +2418,16 @@ func enforceSDKPlanFamilyLimit(ctx context.Context, s store.Store, accountID uui
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid resolved sdk plan"}
 	}
 	return enforceSDKFamilyLimit(ctx, s, accountID, doc.Name, sdkConfigGeneratesPackage(doc))
+}
+
+// preflightSDKPlanFamilyLifecycle decodes the reviewed document and reapplies immutable local lifecycle fences.
+func preflightSDKPlanFamilyLifecycle(ctx context.Context, s store.Store, accountID uuid.UUID, plan *store.ConfigPlan) error {
+	var doc sdkConfigDocument
+	// Invalid stored desired state cannot safely identify the family/version being rechecked.
+	if plan == nil || json.Unmarshal(plan.DesiredState, &doc) != nil {
+		return workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid resolved sdk plan"}
+	}
+	return preflightSDKFamilyLifecycle(ctx, s, accountID, doc)
 }
 
 func compensateRejectedSDKPackage(ctx context.Context, configStore store.ConfigRepository, configKey string, proxy Forwarder, result sdkGenerationResult) bool {
@@ -2595,7 +2614,7 @@ func reserveSDKGenerationIdentity(ctx context.Context, s store.Store, call sdkAp
 
 	family, _, err := applifecycle.New(s).CreateOrGetFamily(ctx, applifecycle.CreateFamilyParams{
 		AccountID: call.accountID, Kind: store.AppKindSDK, CanonicalName: canonicalName,
-		DisplayName: displayName, TargetLanguage: doc.Language,
+		DisplayName: displayName, TargetLanguage: doc.Language, DeliveryMode: sdkConfigDeliveryMode(doc),
 		OwnerSubjectID: planOwnerSubjectID(plan), OwnerTeamID: planOwnerTeamID(plan),
 	})
 	if err != nil {
@@ -2642,6 +2661,71 @@ func enforceSDKFamilyLimit(ctx context.Context, s store.Store, accountID uuid.UU
 		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
 	}
 	return checkSDKFamilyCapacity(ctx, s, trace.SpanFromContext(ctx), accountID, canonicalName, generatesPackage)
+}
+
+// preflightSDKFamilyLifecycle rejects immutable local family conflicts before a plan is created.
+func preflightSDKFamilyLifecycle(ctx context.Context, s store.Store, accountID uuid.UUID, doc sdkConfigDocument) error {
+	canonicalName, _, err := canonical.AppName(doc.Name)
+	// Invalid identity must fail before it becomes a family lookup key.
+	if err != nil {
+		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
+	}
+	family, err := s.GetAppFamilyByIdentity(ctx, accountID, store.AppKindSDK.String(), canonicalName)
+	// A new family has no locked mode or retained tombstone to validate yet.
+	if errors.Is(err, store.ErrAppFamilyNotFound) {
+		return nil
+	}
+	// Unknown lookup failures cannot establish immutable family safety.
+	if err != nil {
+		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_check_app_family"}
+	}
+	tombstoned, err := s.AppTombstoneExists(ctx, family.AppFamilyID, doc.Version)
+	// An unavailable tombstone lookup cannot prove the authored identity is reusable.
+	if err != nil {
+		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_check_app_version"}
+	}
+	// Exact tombstone identity is the most actionable conflict even when historical families lack a delivery-mode binding.
+	if tombstoned {
+		return workspaceConfigHTTPError{
+			status: http.StatusConflict, code: "app_version_deactivated", category: "conflict",
+			message:     "This app version was deactivated and cannot be reused.",
+			remediation: "Choose a new app version, then retry.",
+		}
+	}
+	expectedMode := sdkConfigDeliveryMode(doc)
+	if family.DeliveryMode == "" {
+		hasHistory, historyErr := s.AppFamilyHasHistory(ctx, family.AppFamilyID)
+		// History lookup must fail closed because an unseen tombstone is permanent authority.
+		if historyErr != nil {
+			return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_check_app_family_history"}
+		}
+		// Only a versionless reservation shell may acquire the concrete delivery mode on retry.
+		if hasHistory {
+			return workspaceConfigHTTPError{
+				status: http.StatusConflict, code: "app_delivery_mode_immutable", category: "conflict",
+				message:     "App delivery mode is immutable within an app family.",
+				remediation: "Choose a different app name for the API or generated SDK, then retry.",
+			}
+		}
+	}
+	// One family cannot alternate between package generation and direct REST delivery across versions.
+	if family.DeliveryMode != "" && family.DeliveryMode != expectedMode {
+		return workspaceConfigHTTPError{
+			status: http.StatusConflict, code: "app_delivery_mode_immutable", category: "conflict",
+			message:     "App delivery mode is immutable within an app family.",
+			remediation: "Choose a different app name for the API or generated SDK, then retry.",
+		}
+	}
+	return nil
+}
+
+// sdkConfigDeliveryMode maps the authored generate flag to the family mode persisted at reservation.
+func sdkConfigDeliveryMode(doc sdkConfigDocument) store.AppDeliveryMode {
+	// Explicit generate:false selects direct REST; absent or true retains generated-package delivery.
+	if !sdkConfigGeneratesPackage(doc) {
+		return store.AppDeliveryModeAPI
+	}
+	return store.AppDeliveryModeSDK
 }
 
 // reserveSDKVersionIdentity persists Unified operation identity atomically while preserving immutability checks.
@@ -3781,6 +3865,14 @@ func appApplyPersistenceError(ctx context.Context, err error, appID uuid.UUID) e
 	// Bucket reassignment is an immutable family conflict rather than an internal persistence failure.
 	if errors.Is(err, store.ErrSDKBucketImmutable) {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "app bucket assignment is immutable"}
+	}
+	// One logical family cannot alternate between generated SDK packages and package-free REST API versions.
+	if errors.Is(err, store.ErrAppDeliveryModeMismatch) {
+		return workspaceConfigHTTPError{
+			status: http.StatusConflict, code: "app_delivery_mode_immutable", category: "conflict",
+			message:     "App delivery mode is immutable within an app family.",
+			remediation: "Choose a different app name for the API or generated SDK, then retry.",
+		}
 	}
 	// Missing or superseded plans require creating a new reviewed plan before another apply.
 	if errors.Is(err, store.ErrConfigPlanNotFound) {

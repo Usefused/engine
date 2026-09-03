@@ -38,11 +38,19 @@ import (
 )
 
 const defaultWorkspaceConfigKey = "workspace"
+const maxWorkspaceRemovalTargets = 64
 
 type ConfigPlanRequest struct {
-	ConfigKey  string          `json:"config_key"`
-	SourceHash string          `json:"source_hash"`
-	Config     json.RawMessage `json:"config"`
+	ConfigKey     string                   `json:"config_key"`
+	SourceHash    string                   `json:"source_hash"`
+	Config        json.RawMessage          `json:"config"`
+	RemoveTargets []workspaceRemovalTarget `json:"remove_targets,omitempty"`
+}
+
+// workspaceRemovalTarget carries an explicit destructive intent into the same reviewed plan as declarative changes.
+type workspaceRemovalTarget struct {
+	ServiceID string `json:"service_id"`
+	Version   string `json:"version,omitempty"`
 }
 
 type ConfigApplyRequest struct {
@@ -388,6 +396,9 @@ type workspacePlanAction struct {
 	// it locally). Surfaces this distinction in plan output so the user can see
 	// "[archive from registry]" vs "[remove from workspace]" before confirming.
 	WillArchive bool `json:"will_archive,omitempty"`
+	// ExplicitRemoval pins an unmanaged target into the immutable plan so apply never infers destructive scope.
+	ExplicitRemoval   bool     `json:"explicit_removal,omitempty"`
+	RemovalVersionIDs []string `json:"removal_version_ids,omitempty"`
 }
 
 type workspacePlanSummary struct {
@@ -513,7 +524,8 @@ func WorkspaceConfigPlanHandler(configStore store.ConfigRepository, s store.Stor
 		}
 		result, err := createWorkspaceConfigPlan(ctx, configStore, s, verifier, r.Header.Get("X-API-Key"), accountID, req)
 		if err != nil {
-			writeWorkspaceConfigError(w, withWorkspaceConfigErrorMetadata(err, "planning", "", "unknown"), ctx)
+			// Workspace planning cannot mutate membership; errors therefore prove configuration was not committed.
+			writeWorkspaceConfigError(w, withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed"), ctx)
 			return
 		}
 
@@ -559,7 +571,11 @@ func createWorkspaceConfigPlan(ctx context.Context, configStore store.ConfigRepo
 	if err != nil {
 		return workspaceConfigPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "invalid managed workspace state"}
 	}
-	summary, err := buildWorkspacePlanSummary(ctx, configStore, s, verifier, apiKey, desired, currentWorkspace, previousManaged)
+	// Explicit target admission is read-only, so rejection is authoritatively not committed.
+	if err := validateWorkspaceRemovalTargets(req.RemoveTargets, desired, currentWorkspace); err != nil {
+		return workspaceConfigPlanResult{}, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, "plan_admission", "", "not_committed")
+	}
+	summary, err := buildWorkspacePlanSummary(ctx, configStore, s, verifier, apiKey, desired, currentWorkspace, previousManaged, req.RemoveTargets)
 	if err != nil {
 		return workspaceConfigPlanResult{}, err
 	}
@@ -838,7 +854,11 @@ func executeWorkspaceConfigApply(
 	if err != nil {
 		return nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
-	if err := validateWorkspaceRemovalDecisions(plan, desired, previousManaged); err != nil {
+	if err := validateWorkspaceRemovalDecisions(plan); err != nil {
+		return nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
+	}
+	// Exact explicit scope is revalidated before any desired service or credential mutation begins.
+	if _, err := prepareExplicitWorkspaceRemovals(ctx, s, desired, plan.Actions); err != nil {
 		return nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 	if limErr := checkWorkspaceServiceLimit(ctx, span, s, desired, previousManaged); limErr != nil {
@@ -885,7 +905,7 @@ func applyWorkspaceConfigMutations(
 	prepared workspacePreparedApply,
 	leaseID uuid.UUID,
 ) ([]appliedWorkspaceWebhook, error) {
-	appliedWebhooks, err := applyWorkspaceConfig(applyCtx, s, verifier, call.apiKey, call.accountID, desired, previousManaged, prepared)
+	appliedWebhooks, err := applyWorkspaceConfig(applyCtx, s, verifier, call.apiKey, call.accountID, desired, previousManaged, prepared, plan.Actions)
 	if err != nil {
 		return nil, withWorkspaceConfigErrorMetadata(workspaceApplyError(requestCtx, err), "workspace_mutation", call.planID.String(), "unknown")
 	}
@@ -1156,13 +1176,99 @@ func persistWorkspaceConfigApply(
 
 func decodeWorkspacePlanRequest(r *http.Request) (ConfigPlanRequest, error) {
 	var req ConfigPlanRequest
+	// Invalid JSON cannot carry a reviewable source hash or destructive target.
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		return req, errors.New("invalid request body")
 	}
+	// Every plan remains bound to the exact local source that requested it.
 	if strings.TrimSpace(req.SourceHash) == "" {
 		return req, errors.New("source_hash is required")
 	}
+	// Bound explicit destructive scope before planning performs database or Registry work.
+	if len(req.RemoveTargets) > maxWorkspaceRemovalTargets {
+		return req, fmt.Errorf("remove_targets cannot contain more than %d entries", maxWorkspaceRemovalTargets)
+	}
+	seen := map[string]bool{}
+	wholeServices := map[string]bool{}
+	for index := range req.RemoveTargets {
+		target := &req.RemoveTargets[index]
+		target.ServiceID = strings.TrimSpace(target.ServiceID)
+		target.Version = strings.TrimSpace(target.Version)
+		serviceID, err := uuid.Parse(target.ServiceID)
+		// Invalid identities must fail before they can become plan action IDs.
+		if err != nil {
+			return req, fmt.Errorf("remove_targets[%d].service_id must be a valid UUID", index)
+		}
+		target.ServiceID = serviceID.String()
+		// Version labels are immutable identifiers but remain bounded control-plane input.
+		if len(target.Version) > 256 || strings.ContainsAny(target.Version, "\r\n\x00") {
+			return req, fmt.Errorf("remove_targets[%d].version is invalid", index)
+		}
+		key := target.ServiceID + "\x00" + target.Version
+		// Duplicate targets make review output ambiguous without changing the intended mutation.
+		if seen[key] {
+			return req, fmt.Errorf("remove_targets contains duplicate target for service %s version %q", target.ServiceID, target.Version)
+		}
+		seen[key] = true
+		// Whole-service and exact-version targets for one service cannot coexist because the former subsumes the latter.
+		if wholeServices[target.ServiceID] || (target.Version == "" && hasWorkspaceRemovalVersionTarget(req.RemoveTargets[:index], target.ServiceID)) {
+			return req, fmt.Errorf("remove_targets cannot mix whole-service and version removals for service %s", target.ServiceID)
+		}
+		if target.Version == "" {
+			// Remember whole-service scope so later exact siblings are rejected deterministically.
+			wholeServices[target.ServiceID] = true
+		}
+	}
 	return req, nil
+}
+
+// hasWorkspaceRemovalVersionTarget detects an earlier exact target while normalizing a plan request.
+func hasWorkspaceRemovalVersionTarget(targets []workspaceRemovalTarget, serviceID string) bool {
+	for _, target := range targets {
+		// Only an exact version conflicts with a later whole-service target.
+		if target.ServiceID == serviceID && target.Version != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// validateWorkspaceRemovalTargets proves each requested mutation is live and absent from the desired document.
+func validateWorkspaceRemovalTargets(targets []workspaceRemovalTarget, desired workspaceDesiredState, current map[uuid.UUID]currentWorkspaceService) error {
+	for _, target := range targets {
+		serviceID := uuid.MustParse(target.ServiceID)
+		currentService, active := current[serviceID]
+		// A plan cannot approve a target that was not active at its base generation.
+		if !active {
+			return fmt.Errorf("remove target service %s is not active in this workspace", serviceID)
+		}
+		desiredService, desiredNow := desired.Services[serviceID]
+		if target.Version == "" {
+			// Explicit removal may not contradict the desired document stored on the same immutable plan.
+			if desiredNow {
+				return fmt.Errorf("remove target service %s is still present in desired workspace config", serviceID)
+			}
+			continue
+		}
+		// Exact removals are pinned to an enabled label from the current workspace snapshot.
+		if !currentService.Versions[target.Version] {
+			return fmt.Errorf("remove target service %s version %s is not active in this workspace", serviceID, target.Version)
+		}
+		// A requested version cannot be both retained and removed by one plan.
+		if desiredNow && containsString(desiredService.Versions, target.Version) {
+			return fmt.Errorf("remove target service %s version %s is still present in desired workspace config", serviceID, target.Version)
+		}
+		// Omitting the service would turn an exact target into a whole-service deletion, so the current snapshot must have no sibling.
+		if !desiredNow {
+			for currentVersion, enabled := range currentService.Versions {
+				// A live sibling makes the plan broader than the user-selected version even if it appeared after a CLI precheck.
+				if enabled && currentVersion != target.Version {
+					return fmt.Errorf("remove target service %s version %s would also remove live sibling version %s", serviceID, target.Version, currentVersion)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func resolveWorkspacePlanConfig(
@@ -2084,6 +2190,7 @@ func resolveWorkspaceServiceVisibility(
 	apiKey string,
 	desired workspaceDesiredState,
 	previousManaged map[uuid.UUID]workspaceManagedService,
+	removeTargets []workspaceRemovalTarget,
 ) (map[uuid.UUID]sandbox.ServiceVisibility, error) {
 	// Collect IDs that need visibility data:
 	// (a) services with any public-flag intent -- service-level, execution
@@ -2099,6 +2206,14 @@ func resolveWorkspaceServiceVisibility(
 	}
 	for serviceID := range previousManaged {
 		if _, stillDesired := desired.Services[serviceID]; !stillDesired && !seen[serviceID] {
+			serviceIDs = append(serviceIDs, serviceID)
+			seen[serviceID] = true
+		}
+	}
+	for _, target := range removeTargets {
+		serviceID := uuid.MustParse(target.ServiceID)
+		// Explicit whole-service removal needs ownership metadata to disclose Registry archival before apply.
+		if target.Version == "" && !seen[serviceID] {
 			serviceIDs = append(serviceIDs, serviceID)
 			seen[serviceID] = true
 		}
@@ -2223,16 +2338,18 @@ func buildWorkspacePlanSummary(
 	desired workspaceDesiredState,
 	currentWorkspace map[uuid.UUID]currentWorkspaceService,
 	previousManaged map[uuid.UUID]workspaceManagedService,
+	removeTargets []workspaceRemovalTarget,
 ) (workspacePlanSummary, error) {
 	sdkImpacts, err := store.WorkspaceSDKServiceImpacts(ctx, configStore, s)
 	if err != nil {
 		return workspacePlanSummary{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to inspect SDK usage"}
 	}
-	visibility, err := resolveWorkspaceServiceVisibility(ctx, verifier, apiKey, desired, previousManaged)
+	visibility, err := resolveWorkspaceServiceVisibility(ctx, verifier, apiKey, desired, previousManaged, removeTargets)
 	if err != nil {
 		return workspacePlanSummary{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
 	}
 	summary := planWorkspaceChanges(desired, currentWorkspace, previousManaged, sdkImpacts, visibility)
+	appendExplicitWorkspaceRemovalActions(removeTargets, currentWorkspace, sdkImpacts, visibility, &summary)
 	if err := reconcileWorkspaceProfilePlanActions(ctx, s, desired, &summary); err != nil {
 		return workspacePlanSummary{}, err
 	}
@@ -2940,6 +3057,68 @@ func managedWorkspaceRemovalActions(
 	return actions
 }
 
+// appendExplicitWorkspaceRemovalActions adds only targets not already represented by declarative managed removal actions.
+func appendExplicitWorkspaceRemovalActions(
+	targets []workspaceRemovalTarget,
+	current map[uuid.UUID]currentWorkspaceService,
+	sdkImpacts map[uuid.UUID]map[uuid.UUID][]string,
+	visibility map[uuid.UUID]sandbox.ServiceVisibility,
+	summary *workspacePlanSummary,
+) {
+	existing := make(map[string]bool, len(summary.Actions))
+	for _, action := range summary.Actions {
+		existing[action.ID] = true
+	}
+	for _, target := range targets {
+		serviceID := uuid.MustParse(target.ServiceID)
+		actionType := workspaceplan.ActionRemoveService
+		if target.Version != "" {
+			actionType = workspaceplan.ActionDisableServiceVersion
+		}
+		actionID := workspaceActionID(actionType, serviceID)
+		// Version identity is part of an exact removal action ID but never a whole-service action ID.
+		if target.Version != "" {
+			actionID = workspaceActionID(actionType, serviceID, target.Version)
+		}
+		// Declarative removal already owns this exact mutation and must remain the sole authorization record.
+		if existing[actionID] {
+			continue
+		}
+		action := workspacePlanAction{
+			ID: actionID, Type: actionType, ServiceID: serviceID.String(), Version: target.Version,
+			ExplicitRemoval: true, WillArchive: target.Version == "" && visibility[serviceID].IsOwner,
+		}
+		if target.Version == "" {
+			action.RemovalVersionIDs = sortedWorkspaceRemovalVersionIDs(current[serviceID])
+			var impacted []string
+			for _, configs := range sdkImpacts[serviceID] {
+				impacted = append(impacted, configs...)
+			}
+			action = attachServiceRemovalImpact(action, impacted, summary)
+		} else {
+			versionID := current[serviceID].VersionIDs[target.Version]
+			action.ServiceVersionID = versionID.String()
+			action = attachVersionRemovalImpact(action, sdkImpacts[serviceID][versionID], summary)
+		}
+		summary.Actions = append(summary.Actions, action)
+		existing[actionID] = true
+	}
+}
+
+// sortedWorkspaceRemovalVersionIDs pins a whole-service target to the exact enabled version set reviewed at plan time.
+func sortedWorkspaceRemovalVersionIDs(service currentWorkspaceService) []string {
+	ids := make([]string, 0, len(service.Versions))
+	for version, enabled := range service.Versions {
+		// Disabled or incomplete rows cannot expand the destructive target set.
+		if !enabled || service.VersionIDs[version] == uuid.Nil {
+			continue
+		}
+		ids = append(ids, service.VersionIDs[version].String())
+	}
+	sort.Strings(ids)
+	return ids
+}
+
 func serviceDeprecationDirective(desired workspaceDesiredState, serviceID uuid.UUID) (workspaceDeprecation, bool) {
 	for _, deprecation := range desired.Deprecations[serviceID] {
 		if deprecation.Version == "" {
@@ -3122,6 +3301,7 @@ func applyWorkspaceConfig(
 	desired workspaceDesiredState,
 	previousManaged map[uuid.UUID]workspaceManagedService,
 	prepared workspacePreparedApply,
+	approvedActions json.RawMessage,
 ) ([]appliedWorkspaceWebhook, error) {
 	// Reconciled once for the entire apply, not once per service -- see
 	// reconcileWorkspaceProfilePlan's doc comment for why this is the one
@@ -3140,6 +3320,10 @@ func applyWorkspaceConfig(
 	}
 	// Removal runs last so every desired service has already been reconciled.
 	if err := removePreviouslyManagedWorkspaceResources(ctx, s, desired, previousManaged); err != nil {
+		return nil, err
+	}
+	// Explicit targets execute only from the immutable approved action set, never from mutable CLI inference.
+	if err := removeExplicitWorkspaceResources(ctx, s, desired, approvedActions); err != nil {
 		return nil, err
 	}
 	return applied, nil
@@ -4804,6 +4988,98 @@ func removePreviouslyManagedWorkspaceResources(
 	return nil
 }
 
+type explicitWorkspaceRemovals struct {
+	wholeServices []uuid.UUID
+	exactVersions []workspacePlanAction
+}
+
+// prepareExplicitWorkspaceRemovals validates immutable reviewed scope without mutating workspace membership.
+func prepareExplicitWorkspaceRemovals(ctx context.Context, s store.Store, desired workspaceDesiredState, rawActions json.RawMessage) (explicitWorkspaceRemovals, error) {
+	actions, err := parseWorkspacePlanActions(rawActions)
+	// Malformed immutable actions cannot authorize any destructive work.
+	if err != nil {
+		return explicitWorkspaceRemovals{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid plan actions"}
+	}
+	hasExplicit := false
+	for _, action := range actions {
+		// Ordinary plans should not pay an extra workspace snapshot query.
+		if action.ExplicitRemoval {
+			hasExplicit = true
+			break
+		}
+	}
+	// No explicit scope means declarative reconciliation retains its established path.
+	if !hasExplicit {
+		return explicitWorkspaceRemovals{}, nil
+	}
+	current, err := loadCurrentWorkspaceState(ctx, s)
+	// Scope cannot be revalidated when the authoritative workspace snapshot is unavailable.
+	if err != nil {
+		return explicitWorkspaceRemovals{}, err
+	}
+	var prepared explicitWorkspaceRemovals
+	for _, action := range actions {
+		// Only the explicit marker authorizes mutations outside prior managed state.
+		if !action.ExplicitRemoval {
+			continue
+		}
+		serviceID, err := uuid.Parse(action.ServiceID)
+		if err != nil {
+			return explicitWorkspaceRemovals{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "explicit removal action has invalid service identity"}
+		}
+		switch action.Type {
+		case workspaceplan.ActionRemoveService:
+			// A stored desired service wins over any contradictory destructive action.
+			if _, retained := desired.Services[serviceID]; retained || action.Version != "" {
+				return explicitWorkspaceRemovals{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "explicit service removal conflicts with desired workspace config"}
+			}
+			currentService, serviceActive := current[serviceID]
+			// A newly enabled sibling expands whole-service scope and therefore requires a fresh reviewed plan.
+			if serviceActive && !reflect.DeepEqual(sortedWorkspaceRemovalVersionIDs(currentService), action.RemovalVersionIDs) {
+				return explicitWorkspaceRemovals{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "explicit service removal target changed after planning"}
+			}
+			prepared.wholeServices = append(prepared.wholeServices, serviceID)
+		case workspaceplan.ActionDisableServiceVersion:
+			// Exact actions require both label and immutable ID so a stale label cannot change scope.
+			versionID, parseErr := uuid.Parse(action.ServiceVersionID)
+			if action.Version == "" || parseErr != nil {
+				return explicitWorkspaceRemovals{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "explicit version removal is missing exact identity"}
+			}
+			if retained, ok := desired.Services[serviceID]; ok && containsString(retained.Versions, action.Version) {
+				return explicitWorkspaceRemovals{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "explicit version removal conflicts with desired workspace config"}
+			}
+			currentService, serviceActive := current[serviceID]
+			// Concurrent absence is idempotent, but a different immutable version under the same label is stale.
+			if serviceActive && currentService.Versions[action.Version] && currentService.VersionIDs[action.Version] != versionID {
+				return explicitWorkspaceRemovals{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "explicit version removal target changed after planning"}
+			}
+			prepared.exactVersions = append(prepared.exactVersions, action)
+		default:
+			return explicitWorkspaceRemovals{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "explicit removal action has invalid type"}
+		}
+	}
+	return prepared, nil
+}
+
+// removeExplicitWorkspaceResources executes unmanaged targets carried by immutable reviewed actions.
+func removeExplicitWorkspaceResources(ctx context.Context, s store.Store, desired workspaceDesiredState, rawActions json.RawMessage) error {
+	prepared, err := prepareExplicitWorkspaceRemovals(ctx, s, desired, rawActions)
+	if err != nil {
+		return err
+	}
+	if err := removeManagedWorkspaceServices(ctx, s, prepared.wholeServices); err != nil {
+		return err
+	}
+	for _, action := range prepared.exactVersions {
+		serviceID := uuid.MustParse(action.ServiceID)
+		// Whole-service targets are structurally excluded at plan admission, so exact siblings remain independent.
+		if err := s.DisableWorkspaceServiceVersion(ctx, serviceID, action.Version); err != nil && !errors.Is(err, store.ErrWorkspaceServiceVersionNotFound) {
+			return err
+		}
+	}
+	return nil
+}
+
 // managedWorkspaceServiceRemovalIDs returns the deterministic, non-deprecated
 // membership set that this apply is authorized to remove.
 func managedWorkspaceServiceRemovalIDs(desired workspaceDesiredState, previousManaged map[uuid.UUID]workspaceManagedService) []uuid.UUID {
@@ -4889,37 +5165,18 @@ func shouldKeepManagedVersion(desired workspaceDesiredState, desiredSvc workspac
 	return deprecated
 }
 
-func validateWorkspaceRemovalDecisions(
-	plan *store.ConfigPlan,
-	desired workspaceDesiredState,
-	previousManaged map[uuid.UUID]workspaceManagedService,
-) error {
+// validateWorkspaceRemovalDecisions requires a force decision for every blocked removal action, including explicit targets.
+func validateWorkspaceRemovalDecisions(plan *store.ConfigPlan) error {
 	actions, err := parseWorkspacePlanActions(plan.Actions)
 	if err != nil {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid plan actions"}
 	}
 	blockedRemovals := blockedServiceRemovalActions(plan.Blockers)
-	for serviceID, managed := range previousManaged {
-		if desiredSvc, keep := desired.Services[serviceID]; !keep {
-			actionID := workspaceActionID(workspaceplan.ActionRemoveService, serviceID)
-			if blockedRemovals[actionID] {
-				action := actions[actionID]
-				if action.Decision != "force_remove" {
-					return workspaceConfigHTTPError{status: http.StatusConflict, message: "force_remove_required"}
-				}
-			}
-		} else {
-			for _, version := range managed.Versions {
-				if !containsString(desiredSvc.Versions, version) {
-					actionID := workspaceActionID(workspaceplan.ActionDisableServiceVersion, serviceID, version)
-					if blockedRemovals[actionID] {
-						action := actions[actionID]
-						if action.Decision != "force_remove" {
-							return workspaceConfigHTTPError{status: http.StatusConflict, message: "force_remove_required"}
-						}
-					}
-				}
-			}
+	for actionID := range blockedRemovals {
+		action, exists := actions[actionID]
+		// Missing or undecided blockers must fail closed because the plan no longer proves destructive consent.
+		if !exists || action.Decision != "force_remove" {
+			return workspaceConfigHTTPError{status: http.StatusConflict, message: "force_remove_required"}
 		}
 	}
 	return nil

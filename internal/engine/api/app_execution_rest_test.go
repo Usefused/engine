@@ -517,6 +517,27 @@ func TestRESTExecutionProjectsActionableErrorsWithSafeDetails(t *testing.T) {
 	}
 }
 
+// TestRESTExecutionProjectsMissingOAuthApplicationCredentials proves direct
+// API callers receive the same value-free setup contract as CLI invocations.
+func TestRESTExecutionProjectsMissingOAuthApplicationCredentials(t *testing.T) {
+	bucketID, serviceID := uuid.New(), uuid.New()
+	executionErr := restErrorFromExecution(&sandbox.CredentialMaterialMissingError{
+		BucketID: bucketID, ServiceID: serviceID, AuthType: "oauth", AuthName: "oauth2",
+	})
+	recorder := httptest.NewRecorder()
+	writeRESTExecutionError(recorder, executionErr)
+	// Conflict distinguishes mutable credential readiness from malformed app or provider state.
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), `"code":"bucket_credentials_missing"`) {
+		t.Fatalf("OAuth application credential status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	// Routing metadata is sufficient for a client to rebuild the secure prompt without trusting server shell text.
+	for _, expected := range []string{`"bucket_id":"` + bucketID.String() + `"`, `"service_id":"` + serviceID.String() + `"`, `"auth_type":"oauth"`, `"auth_name":"oauth2"`} {
+		if !strings.Contains(recorder.Body.String(), expected) {
+			t.Fatalf("OAuth application credential response missing %s: %s", expected, recorder.Body.String())
+		}
+	}
+}
+
 // newRESTPhysicalServer builds one exact SDK app plus an injectable in-process runtime.
 func newRESTPhysicalServer(runtime *restRuntimeTestDouble) (*EngineGRPCServer, uuid.UUID) {
 	accountID, appID := uuid.New(), uuid.New()

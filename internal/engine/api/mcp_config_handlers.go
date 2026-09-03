@@ -58,7 +58,8 @@ func MCPConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 		})
 		if err != nil {
 			span.SetStatus(codes.Error, "mcp config plan failed")
-			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(err, "planning", "", "unknown"), ctx)
+			// MCP planning is read-only, so every rejection is authoritatively pre-commit unless deeper metadata is more specific.
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed"), ctx)
 			return
 		}
 		span.SetAttributes(attribute.String("outcome", "success"), attribute.String("plan_id", result.plan.ID.String()))

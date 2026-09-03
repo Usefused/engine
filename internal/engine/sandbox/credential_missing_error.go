@@ -10,7 +10,7 @@ import (
 )
 
 // CredentialMaterialMissingError is the secret-free pre-provider failure for
-// one static authentication family that the selected bucket cannot satisfy.
+// one static or OAuth application family that the selected bucket cannot satisfy.
 type CredentialMaterialMissingError struct {
 	BucketID  uuid.UUID
 	ServiceID uuid.UUID
@@ -19,7 +19,7 @@ type CredentialMaterialMissingError struct {
 }
 
 // MarshalJSON exposes only the stable action contract consumed by generated
-// SDK runtimes; UUIDs and the reconstructed command contain no secret values.
+// SDK runtimes; routing identity and the reconstructed command contain no secret values.
 func (e *CredentialMaterialMissingError) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Code      string `json:"code"`

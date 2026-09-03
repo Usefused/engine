@@ -12,6 +12,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
+	"github.com/Usefused/engine/internal/shared/credentialkeys"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/secretref"
@@ -109,6 +110,10 @@ func (r *secretResolver) ResolveExecutionCredentials(ctx context.Context, reques
 	if requestbinding.HasDynamicSource(bindings) {
 		finalCreds["fused_resource_required"] = "true"
 	}
+	// Connected families must prove their application registration before an absent user grant can be diagnosed safely.
+	if err := r.ensureConnectedApplicationCredentials(ctx, scope.BucketID, request.ServiceID, request.Auths, request.Requirements, finalCreds, selections); err != nil {
+		return nil, nil, err
+	}
 	if err := r.mergeStoredSecrets(ctx, scope.BucketID, request.ServiceID, finalCreds, request.Auths, request.Requirements); err != nil {
 		return nil, nil, err
 	}
@@ -125,6 +130,89 @@ func (r *secretResolver) ResolveExecutionCredentials(ctx context.Context, reques
 	}
 
 	return finalCreds, values, nil
+}
+
+// ensureConnectedApplicationCredentials verifies the exact OAuth/OIDC client
+// pair before runtime asks for a user grant or reaches provider dispatch.
+func (r *secretResolver) ensureConnectedApplicationCredentials(ctx context.Context, bucketID, serviceID uuid.UUID, auths fusedobject.AuthConfigs, requirements authrouting.Requirements, credentials map[string]any, selections []models.SDKSelection) error {
+	// A selected connection can execute with its encrypted access token; refresh owns later application-credential checks.
+	if connectedEndUserRef(credentials) != "" || credentialString(credentials, "fused_connection_id") != "" {
+		return nil
+	}
+	// Anonymous routing remains credential-free unless the caller explicitly selected a connected family.
+	if requirementsPermitAnonymous(requirements) && requestedAuthType(credentials) == "" && requestedAuthName(credentials) == "" {
+		return nil
+	}
+	authName, err := selectedConnectedAuthName(credentials, auths, requirements)
+	// Selector validation errors remain authoritative and must stop before any bucket lookup.
+	if err != nil {
+		return err
+	}
+	// Static families continue through the existing exact secret-set resolver.
+	if authName == "" {
+		return nil
+	}
+	authType, configured := requiredNamedAuthType(auths, requirements, authName)
+	// Only a reviewed connected scheme can authorize an OAuth application lookup.
+	if !configured || !isConnectedAuthSelector(authType) {
+		return nil
+	}
+	alternative, ok := connectedApplicationCredentialAlternative(serviceID, authType, authName, selections)
+	// Invalid immutable identity fails through the normal auth-contract path without inventing a mutation target.
+	if !ok {
+		return errors.New("connected auth application credential identity is invalid")
+	}
+	secrets, err := r.db.GetFirstCompleteSecretSet(ctx, bucketID, serviceID, []store.SecretKeyAlternative{alternative})
+	// Storage failures are operational errors, not evidence that the operator omitted credentials.
+	if err != nil {
+		return fmt.Errorf("failed to fetch OAuth application credentials from store: %w", err)
+	}
+	// Two metadata rows prove the atomic client pair exists; values remain encrypted and never enter provider credentials.
+	if len(secrets) != 2 {
+		missing := &CredentialMaterialMissingError{BucketID: bucketID, ServiceID: serviceID, AuthType: authType, AuthName: authName}
+		// Referenced credentials are configured on their immutable source family, not copied onto the target service.
+		if alternative.SourceServiceID != uuid.Nil {
+			missing.ServiceID = alternative.SourceServiceID
+			missing.AuthType = alternative.SourceAuthType
+			missing.AuthName = alternative.SourceAuthName
+		}
+		return missing
+	}
+	return nil
+}
+
+// connectedApplicationCredentialAlternative builds the deterministic client
+// pair lookup and preserves an app-selected same-bucket credential reference.
+func connectedApplicationCredentialAlternative(serviceID uuid.UUID, authType, authName string, selections []models.SDKSelection) (store.SecretKeyAlternative, bool) {
+	clientIDKey, clientSecretKey, ok := credentialkeys.OAuthApplication(authName)
+	// A blank or malformed scheme name cannot identify an atomic application pair.
+	if !ok {
+		return store.SecretKeyAlternative{}, false
+	}
+	alternative := store.SecretKeyAlternative{
+		Required:  []string{clientIDKey, clientSecretKey},
+		AuthNames: map[string]string{clientIDKey: authName, clientSecretKey: authName},
+		AuthTypes: map[string]string{clientIDKey: authType, clientSecretKey: authType},
+	}
+	for _, selection := range selections {
+		// Only the exact selected target family may redirect this lookup to its reviewed source.
+		if selection.ServiceID != serviceID || canonicalAuthSelector(selection.AuthType) != authType || strings.TrimSpace(selection.AuthName) != authName {
+			continue
+		}
+		// Direct selections keep target ownership and need no source metadata.
+		if selection.CredentialSourceServiceID == uuid.Nil {
+			return alternative, true
+		}
+		alternative.SourceServiceID = selection.CredentialSourceServiceID
+		alternative.SourceAuthType = canonicalAuthSelector(selection.CredentialSourceAuthType)
+		alternative.SourceAuthName = strings.TrimSpace(selection.CredentialSourceAuthName)
+		// A partial or cross-family source cannot authorize runtime lookup or remediation.
+		if alternative.SourceAuthType != authType || alternative.SourceAuthName == "" {
+			return store.SecretKeyAlternative{}, false
+		}
+		return alternative, true
+	}
+	return alternative, true
 }
 
 // loadExecutionScope keeps the persisted contract check ahead of bucket and
@@ -497,6 +585,10 @@ func (r *secretResolver) decryptStoredSecret(serviceID uuid.UUID, sec store.Work
 // leaving named static schemes on the bucket-secret path even with user context.
 func (r *secretResolver) resolveConnectedAuth(ctx context.Context, bucketID, serviceID uuid.UUID, auths fusedobject.AuthConfigs, requirements authrouting.Requirements, credentials map[string]any) error {
 	endUserRef := connectedEndUserRef(credentials)
+	// A selected connected family without user identity is an actionable connection miss, never permission to dispatch anonymously.
+	if endUserRef == "" && credentialString(credentials, "fused_connection_id") == "" && !requirementsPermitAnonymous(requirements) && isConnectedAuthSelector(requestedAuthType(credentials)) {
+		return newConnectionRequiredError(bucketID.String(), serviceID.String(), "")
+	}
 	if !connectedAuthResolutionRequired(endUserRef, credentials, requirements) {
 		return nil
 	}
