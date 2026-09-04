@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -138,8 +139,9 @@ func TestAppOpenAPISharedSchemasFailClosed(t *testing.T) {
 	s.metadata = nil
 	_, err := buildAppOpenAPIDocument(context.Background(), s, s.app, s.family, "")
 	// Missing metadata is never an optional projection fallback for a compact root.
-	if err == nil {
-		t.Fatal("missing shared definition dictionary accepted")
+	var contractErr workspaceConfigHTTPError
+	if !errors.As(err, &contractErr) || contractErr.code != "app_openapi_schema_unavailable" {
+		t.Fatalf("missing shared definition dictionary error = %#v", err)
 	}
 }
 

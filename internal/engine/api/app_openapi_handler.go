@@ -120,8 +120,13 @@ func loadAppOpenAPIOperations(ctx context.Context, contracts appOpenAPIContractS
 	}
 	endpointNames := optionalOperationNames(operationFilter)
 	matches, err := contracts.ListServiceContractEndpointsForSelections(ctx, openAPIEndpointSelections(selections), endpointNames)
+	// Store failures mean the exact immutable schema projection is unavailable and can be repaired only outside this read path.
 	if err != nil {
-		return nil, workspaceConfigHTTPError{status: http.StatusServiceUnavailable, message: "failed to load immutable operation schemas"}
+		return nil, workspaceConfigHTTPError{
+			status: http.StatusServiceUnavailable, code: "app_openapi_schema_unavailable", category: "dependency",
+			message:     "failed to load immutable operation schemas",
+			remediation: "Restore Engine immutable service-contract storage, then retry the OpenAPI export.",
+		}
 	}
 	if err := validateAppOpenAPIMatches(selections, matches, operationFilter); err != nil {
 		return nil, err
@@ -224,12 +229,14 @@ func validateAppOpenAPIMatches(selections []models.SDKSelection, matches []store
 		foundNames[index], foundIDs[index] = make(map[string]struct{}), make(map[uuid.UUID]struct{})
 	}
 	for _, match := range matches {
+		// Any row outside the exact selection invalidates the whole immutable projection.
 		if !validAppOpenAPIMatch(selections, match, filter, foundNames, foundIDs) {
-			return workspaceConfigHTTPError{status: http.StatusConflict, message: "immutable operation schemas are inconsistent"}
+			return unavailableAppOpenAPISchemaError()
 		}
 	}
+	// Missing selected rows cannot be exported as a silently narrowed REST API.
 	if missingExplicitAppOpenAPISelection(selections, foundNames, foundIDs, filter) {
-		return workspaceConfigHTTPError{status: http.StatusConflict, message: "immutable operation schemas are incomplete"}
+		return unavailableAppOpenAPISchemaError()
 	}
 	return nil
 }
@@ -313,16 +320,19 @@ func unifiedAppOpenAPIOperations(app *store.App, operationFilter string, scope *
 	if len(app.UnifiedDefinitions) == 0 {
 		return nil, nil
 	}
+	// A stored definition dialect must match the only projection semantics this Engine can verify.
 	if app.UnifiedDefinitionSchemaVersion != unified.DefinitionSchemaVersion {
-		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "Unified definitions are incompatible"}
+		return nil, invalidAppOpenAPIProjectionError("Unified definitions are incompatible")
 	}
 	hash, err := unifiedCanonicalHash(app.UnifiedDefinitions)
+	// Corrupt or replaced bytes cannot be exposed under the app's immutable operation identity.
 	if err != nil || hash != app.UnifiedDefinitionHash {
-		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "Unified definitions failed integrity validation"}
+		return nil, invalidAppOpenAPIProjectionError("Unified definitions failed integrity validation")
 	}
 	definitions, err := unified.DecodeDefinitions(app.UnifiedDefinitions, unified.DefaultLimits())
+	// Invalid private definitions cannot be simplified into a public schema without changing their meaning.
 	if err != nil {
-		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "Unified definitions are invalid"}
+		return nil, invalidAppOpenAPIProjectionError("Unified definitions are invalid")
 	}
 	operations := make([]appOpenAPIOperation, 0, len(definitions))
 	for _, definition := range definitions {
@@ -339,8 +349,9 @@ func unifiedAppOpenAPIOperations(app *store.App, operationFilter string, scope *
 func rejectAmbiguousAppOpenAPIOperations(operations []appOpenAPIOperation) ([]appOpenAPIOperation, error) {
 	seen := make(map[string]struct{}, len(operations))
 	for _, operation := range operations {
+		// Duplicate public names cannot be represented by a truthful discriminator branch.
 		if _, exists := seen[operation.name]; exists {
-			return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app contains an ambiguous operation name"}
+			return nil, invalidAppOpenAPIProjectionError("app contains an ambiguous operation name")
 		}
 		seen[operation.name] = struct{}{}
 	}
@@ -381,8 +392,9 @@ func missingAppOpenAPIOperationError(filter string) error {
 // physicalAppOpenAPIOperation builds the flat Engine input contract used by
 // generated SDK calls and the direct REST execution route.
 func physicalAppOpenAPIOperation(endpoint fusedobject.Endpoint, scope *appOpenAPISchemaScope) (appOpenAPIOperation, error) {
+	// An invalid operation selector cannot be normalized without changing the immutable source contract.
 	if endpoint.Name == "" || endpoint.Name != strings.TrimSpace(endpoint.Name) || len(endpoint.Name) > maxRESTOperationBytes {
-		return appOpenAPIOperation{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "physical operation name is unavailable"}
+		return appOpenAPIOperation{}, invalidAppOpenAPIProjectionError("physical operation name is unavailable")
 	}
 	input, err := physicalOpenAPIInputSchema(endpoint, scope)
 	if err != nil {
@@ -468,8 +480,9 @@ func physicalOpenAPIInputSchema(endpoint fusedobject.Endpoint, scope *appOpenAPI
 	properties := make(map[string]any, len(endpoint.Parameters)+1)
 	required := make([]string, 0, len(endpoint.Parameters))
 	for _, parameter := range endpoint.Parameters {
+		// The execution envelope reserves this control field and cannot safely rename an immutable provider parameter.
 		if parameter.Name == "_headers" {
-			return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "physical operation uses a reserved input name"}
+			return nil, invalidAppOpenAPIProjectionError("physical operation uses a reserved input name")
 		}
 		properties[parameter.Name] = parameterOpenAPISchema(parameter, scope)
 		if parameter.Required {
@@ -477,8 +490,9 @@ func physicalOpenAPIInputSchema(endpoint fusedobject.Endpoint, scope *appOpenAPI
 		}
 	}
 	additionalProperties, err := addOpenAPIBodyFields(properties, &required, endpoint.RequestContent, scope)
+	// Ambiguous or reserved request shapes cannot be flattened without inventing a provider schema.
 	if err != nil {
-		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "physical operation request schema is unavailable"}
+		return nil, invalidAppOpenAPIProjectionError("physical operation request schema is unavailable")
 	}
 	properties["_headers"] = map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}}
 	sort.Strings(required)
@@ -824,7 +838,7 @@ func unifiedAuthActionOpenAPISchema() map[string]any {
 }
 
 // composeAppOpenAPIDocument assembles one path with discriminator branches for
-// all exact app operations and stable shared selector/error components.
+// all exact app operations, setup guidance, and stable shared selector/error components.
 func composeAppOpenAPIDocument(app *store.App, family *store.AppFamily, export *appOpenAPIExport) map[string]any {
 	components := map[string]any{
 		"ExecutionSelector": executionSelectorOpenAPISchema(),
@@ -839,7 +853,7 @@ func composeAppOpenAPIDocument(app *store.App, family *store.AppFamily, export *
 		"openapi": "3.1.0", "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
 		"info": map[string]any{
 			"title": family.DisplayName + " execution API", "version": app.Version,
-			"description": "Generated from one immutable Fused SDK app version. Execution tokens and provider credentials are never embedded.",
+			"description": appRuntimeSetupOverview(app.AppID),
 		},
 		"servers": []any{map[string]any{"url": "/"}},
 		"paths":   map[string]any{"/v1/apps/{app_id}/executions": executionOpenAPIPath(app.AppID, requestRefs, responseRefs, mapping)},

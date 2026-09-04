@@ -160,7 +160,12 @@ func (s *workspaceTestStore) ListServiceContractEndpointsForSelections(_ context
 	}
 	matches := make([]store.ServiceContractEndpointMatch, 0)
 	for _, selection := range selections {
-		for _, name := range selection.EndpointNames {
+		names := selection.EndpointNames
+		// App export fixtures use selected operation names, while Unified compilation supplies its narrower endpoint-name field.
+		if len(names) == 0 {
+			names = selection.OperationNames
+		}
+		for _, name := range names {
 			// Stable synthetic IDs preserve immutable-selection assertions while the
 			// production PostgreSQL resolver remains covered by store integration tests.
 			endpointID := uuid.NewSHA1(selection.ServiceVersionID, []byte(name))

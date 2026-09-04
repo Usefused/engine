@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -481,7 +482,8 @@ func TestAppOpenAPIHandlerRejectsCorruptEmptyUnifiedSet(t *testing.T) {
 	s.app.UnifiedDefinitionHash = "sha256:wrong"
 	recorder := httptest.NewRecorder()
 	mountAppOpenAPITestHandler(s).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/apps/"+s.app.AppID.String()+"/openapi", nil))
-	if recorder.Code != http.StatusConflict {
+	// Corrupt persisted definitions need a stable non-refresh remediation instead of a generic configuration conflict.
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "app_openapi_projection_invalid") || !strings.Contains(recorder.Body.String(), "Fused will not rewrite the source schema") {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 }
@@ -511,8 +513,10 @@ func TestPhysicalOpenAPIInputRejectsReservedHeadersName(t *testing.T) {
 	for _, endpoint := range []fusedobject.Endpoint{parameter, body} {
 		scope := &appOpenAPISchemaScope{export: &appOpenAPIExport{components: make(map[string]any)}}
 		// Reserved controls must remain rejected after shared-reference relocation.
-		if _, err := physicalOpenAPIInputSchema(endpoint, scope); err == nil {
-			t.Fatalf("reserved _headers declaration was accepted for %s", endpoint.Name)
+		_, err := physicalOpenAPIInputSchema(endpoint, scope)
+		var projectionErr workspaceConfigHTTPError
+		if !errors.As(err, &projectionErr) || projectionErr.code != "app_openapi_projection_invalid" {
+			t.Fatalf("reserved _headers declaration for %s returned %#v", endpoint.Name, err)
 		}
 	}
 }

@@ -65,7 +65,7 @@ type sdkConfigDocument struct {
 	// Generate is tri-state on purpose: absent means the historical default of
 	// building a package. Only an explicit false suppresses codegen, leaving a
 	// published app version that is reachable over REST execution and
-	// describable via sdk openapi, with no downloadable artifact behind it.
+	// describable via api openapi, with no downloadable artifact behind it.
 	// Mirrors cli/internal/configfile's app config generate field.
 	Generate *bool `json:"generate,omitempty"`
 	// WebhookAttachment names one kind: webhook config this SDK/MCP wants
@@ -839,6 +839,10 @@ func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepos
 	unifiedCompilation, err := compileSDKUnifiedOperations(ctx, s, call.document, selections, resolvedServices)
 	// Unified mappings must bind to those same local physical selections.
 	if err != nil {
+		return sdkPlanDefinition{}, err
+	}
+	// A direct REST API must prove its exact immutable OpenAPI projection before a plan can become apply authority.
+	if err := validateDirectAPIOpenAPIPlan(ctx, s, call.document, appID, selections, unifiedCompilation); err != nil {
 		return sdkPlanDefinition{}, err
 	}
 	readiness, err := inspectAppBucketReadiness(ctx, s, bucket, selections, appReadinessServiceNames(append(append([]sdkResolvedService{}, resolvedServices...), credentialSources...), nil))

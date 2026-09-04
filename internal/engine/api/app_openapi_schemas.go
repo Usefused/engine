@@ -131,7 +131,20 @@ func validateAppOpenAPIMetadata(ref store.ServiceContractMetadataRef, metadata *
 // unavailableAppOpenAPISchemaError keeps schema contents and internal store
 // details out of the public control-plane error response.
 func unavailableAppOpenAPISchemaError() error {
-	return workspaceConfigHTTPError{status: http.StatusConflict, message: "immutable operation schemas are unavailable or inconsistent"}
+	return workspaceConfigHTTPError{
+		status: http.StatusConflict, code: "app_openapi_schema_unavailable", category: "dependency",
+		message:     "immutable operation schemas are unavailable or inconsistent",
+		remediation: "Refresh the selected immutable service contracts, then retry the OpenAPI export.",
+	}
+}
+
+// invalidAppOpenAPIProjectionError rejects immutable source shapes that Fused cannot truthfully map onto the shared REST execution envelope.
+func invalidAppOpenAPIProjectionError(message string) error {
+	return workspaceConfigHTTPError{
+		status: http.StatusConflict, code: "app_openapi_projection_invalid", category: "validation",
+		message:     message,
+		remediation: "Select or import an immutable service version with a compatible operation schema, then create a new API version. Fused will not rewrite the source schema.",
+	}
 }
 
 // schema registers a canonical root once and returns only its stable component

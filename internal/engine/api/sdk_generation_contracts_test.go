@@ -13,6 +13,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/authrouting"
+	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 )
@@ -177,6 +178,59 @@ func TestDirectAPIPlanUsesUnpinnedLocalSnapshot(t *testing.T) {
 	// The plan retains a runtime staleness fence and its explicit no-package policy without inventing a generation hash.
 	if !request.SkipPackaging || len(request.ContractBindings) != 1 || request.ContractBindings[0].RuntimeContractHash != s.binding.RuntimeContractHash || request.ContractBindings[0].GenerationContractHash != "" {
 		t.Fatalf("request=%+v", request)
+	}
+}
+
+// TestDirectAPIPlanRejectsUnexportableSchemas proves apply authority is withheld until the production OpenAPI projection succeeds.
+func TestDirectAPIPlanRejectsUnexportableSchemas(t *testing.T) {
+	s := newGenerationPlanningTestStore()
+	schema := rawOpenAPISchema(`{"$ref":"#/$defs/Request"}`)
+	schema.SharedDefinitions = true
+	s.contractEndpointMatches = []store.ServiceContractEndpointMatch{{
+		SelectionIndex: 0,
+		Endpoint: fusedobject.Endpoint{
+			ID: uuid.New(), Name: "listLogEvents",
+			RequestContent: &fusedobject.RequestContent{Representations: []fusedobject.RequestRepresentation{{MediaType: "application/json", Schema: schema}}},
+		},
+	}}
+	generate := false
+	response, configs := planWithGenerationTestStore(t, s, &generate)
+	// A missing exact-version dictionary is repairable, but it cannot leave a plan that would later export a 409.
+	if response.Code != http.StatusConflict || configs.createdPlan != nil || !strings.Contains(response.Body.String(), "app_openapi_schema_unavailable") {
+		t.Fatalf("status=%d body=%s plan=%#v", response.Code, response.Body, configs.createdPlan)
+	}
+}
+
+// TestDirectAPIPlanRejectsInvalidOpenAPIProjection proves incompatible source shapes fail without a refresh loop or stored plan.
+func TestDirectAPIPlanRejectsInvalidOpenAPIProjection(t *testing.T) {
+	s := newGenerationPlanningTestStore()
+	s.contractEndpointMatches = []store.ServiceContractEndpointMatch{{
+		SelectionIndex: 0,
+		Endpoint: fusedobject.Endpoint{
+			ID: uuid.New(), Name: "listLogEvents", Parameters: fusedobject.Parameters{{Name: "_headers"}},
+		},
+	}}
+	generate := false
+	response, configs := planWithGenerationTestStore(t, s, &generate)
+	// Reserved provider input cannot be renamed or dropped, and the response must explain that no source rewrite occurs.
+	if response.Code != http.StatusConflict || configs.createdPlan != nil || !strings.Contains(response.Body.String(), "app_openapi_projection_invalid") || !strings.Contains(response.Body.String(), "Fused will not rewrite the source schema") {
+		t.Fatalf("status=%d body=%s plan=%#v", response.Code, response.Body, configs.createdPlan)
+	}
+}
+
+// TestDirectAPIOpenAPIPlanIDPreservesExistingIdentity verifies only not-yet-allocated API versions use the deterministic validation placeholder.
+func TestDirectAPIOpenAPIPlanIDPreservesExistingIdentity(t *testing.T) {
+	existing := uuid.New()
+	doc := sdkConfigDocument{Name: "threadify", Version: "1.0.0"}
+	// Existing immutable versions must render their literal route and component namespace during plan validation.
+	if got := directAPIOpenAPIPlanID(existing, doc); got != existing {
+		t.Fatalf("existing app ID changed to %s", got)
+	}
+	first := directAPIOpenAPIPlanID(uuid.Nil, doc)
+	second := directAPIOpenAPIPlanID(uuid.Nil, doc)
+	// New versions need one stable nonzero placeholder because their final app ID is allocated only during apply.
+	if first == uuid.Nil || first != second || first == existing {
+		t.Fatalf("placeholder IDs = %s / %s", first, second)
 	}
 }
 
