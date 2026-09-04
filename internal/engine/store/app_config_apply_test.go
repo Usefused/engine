@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -258,7 +259,7 @@ type concurrentArtifactApplyFixture struct {
 	params     ApplyAppConfigPlanParams
 }
 
-// newConcurrentArtifactApplyFixture creates one immutable plan/runtime pair for atomic apply integration coverage.
+// newConcurrentArtifactApplyFixture creates an immutable plan with a runnable, versioned scope for transaction-race tests.
 func newConcurrentArtifactApplyFixture(t *testing.T, configType ConfigType) concurrentArtifactApplyFixture {
 	t.Helper()
 	dbURL := os.Getenv("DATABASE_URL")
@@ -329,7 +330,7 @@ func newConcurrentArtifactApplyFixture(t *testing.T, configType ConfigType) conc
 				PlanID: plan.ID, BaseGeneration: plan.BaseGeneration, ExpectedRevision: plan.Revision, ApplyLeaseID: lease.ID,
 			},
 			Scope: AppRuntime{AccountID: accountID, AppID: appID, OwnerTeamID: ownerTeamID,
-				BucketID: bucketID, Selections: []byte("[]"), ScopeSchemaVersion: models.AppScopeSchemaVersion,
+				BucketID: bucketID, Selections: validConcurrentAppSelections(), ScopeSchemaVersion: models.AppScopeSchemaVersion,
 				Kind: AppKind(configType), Name: "concurrent", Description: "Coordinate work through the connected service.", Version: version, ConfigKey: configKey},
 			AuthorizedBucketName:      bucketName,
 			TokenName:                 "default",
@@ -343,6 +344,12 @@ func newConcurrentArtifactApplyFixture(t *testing.T, configType ConfigType) conc
 			SDKGenerationStatus:       conditionalSDKGenerationStatus(configType),
 		},
 	}
+}
+
+// validConcurrentAppSelections keeps concurrency fixtures on the same strict schema as runtime reads.
+func validConcurrentAppSelections() []byte {
+	payload, _ := json.Marshal([]models.SDKSelection{{SchemaVersion: models.AppSelectionSchemaVersion, ServiceID: uuid.New(), ServiceVersionID: uuid.New(), EndpointIDs: []uuid.UUID{uuid.New()}}})
+	return payload
 }
 
 // conditionalSDKGenerationJob gives SDK fixtures one terminal durable job while MCP remains package-free.

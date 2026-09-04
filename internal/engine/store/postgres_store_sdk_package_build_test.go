@@ -41,7 +41,7 @@ func TestGetSDKPackageBuildRequestUsesExactAppliedPlan(t *testing.T) {
 	})
 
 	family, _, err := repository.CreateOrGetAppFamily(ctx, AppFamily{
-		AppFamilyID: familyID, AccountID: accountID, Kind: "sdk",
+		AppFamilyID: familyID, AccountID: accountID, Kind: "sdk", DeliveryMode: AppDeliveryModeSDK,
 		CanonicalName: "jira-sdk", DisplayName: "Jira-SDK", TargetLanguage: "typescript", OwnerTeamID: teamID,
 	})
 	// Family ownership must exist before immutable version publication.
@@ -106,6 +106,14 @@ func TestGetSDKPackageBuildRequestUsesExactAppliedPlan(t *testing.T) {
 	// Retaining generation data does not broaden account authorization.
 	if _, err := repository.GetSDKPackageBuildRequest(ctx, uuid.New(), appID); !errors.Is(err, ErrAppNotFound) {
 		t.Fatalf("cross-account lookup error = %v, want ErrAppNotFound", err)
+	}
+	// An otherwise identical direct API must be rejected before package reconstruction.
+	if _, err := pool.Exec(ctx, `UPDATE fused_app_families SET delivery_mode='api' WHERE app_family_id=$1`, familyID); err != nil {
+		t.Fatal(err)
+	}
+	// The same pinned inputs cannot override Engine-owned delivery mode.
+	if _, err := repository.GetSDKPackageBuildRequest(ctx, accountID, appID); !errors.Is(err, ErrSDKPackageNotGenerated) {
+		t.Fatalf("direct API build lookup = %v", err)
 	}
 }
 

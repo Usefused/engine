@@ -77,33 +77,65 @@ func recordSDKPackageDownloadFailure(span trace.Span, err error) {
 	span.SetStatus(codes.Error, code)
 }
 
+// serveSDKPackage checks Engine-owned delivery authority before any Registry cache or recovery request.
 func serveSDKPackage(ctx context.Context, w http.ResponseWriter, apiKey string, actor accesscontrol.Actor, appID uuid.UUID, s store.Store, proxy Forwarder, packages SDKPackageClient) error {
+	request, err := admittedSDKPackageRequest(ctx, s, actor.AccountID, appID)
+	// Delivery eligibility is authoritative before any dependency lookup.
+	if err != nil {
+		return err
+	}
+	return serveAdmittedSDKPackage(ctx, w, apiKey, actor, appID, request, proxy, packages)
+}
+
+// admittedSDKPackageRequest keeps store identity and delivery-mode failures separate from Registry recovery.
+func admittedSDKPackageRequest(ctx context.Context, s store.Store, accountID, appID uuid.UUID) (*models.SDKGenerationRequest, error) {
 	buildStore, ok := s.(store.SDKPackageBuildStore)
-	if !ok || packages == nil {
+	// A missing store capability cannot prove package eligibility.
+	if !ok {
+		return nil, sdkPackageDependencyError("SDK package recovery is unavailable")
+	}
+	request, err := buildStore.GetSDKPackageBuildRequest(ctx, accountID, appID)
+	// Direct API delivery is a permanent user-facing boundary, not a dependency outage.
+	if errors.Is(err, store.ErrSDKPackageNotGenerated) {
+		return nil, workspaceConfigHTTPError{status: http.StatusConflict, code: "sdk_package_not_generated", category: "conflict", message: "This direct API app has no generated SDK package.", remediation: "Invoke the API directly, or initialize a new app with --sdk to generate a package."}
+	}
+	// Keep missing and unauthorized identities opaque.
+	if errors.Is(err, store.ErrAppNotFound) {
+		return nil, workspaceConfigHTTPError{status: http.StatusNotFound, message: "SDK app version not found"}
+	}
+	// Storage failure must not trigger cache recovery.
+	if err != nil {
+		return nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to load SDK package definition"}
+	}
+	return request, nil
+}
+
+// serveAdmittedSDKPackage performs one bounded cache recovery only after Engine proves generated delivery.
+func serveAdmittedSDKPackage(ctx context.Context, w http.ResponseWriter, apiKey string, actor accesscontrol.Actor, appID uuid.UUID, request *models.SDKGenerationRequest, proxy Forwarder, packages SDKPackageClient) error {
+	// Registry availability matters only after generated-package eligibility is established.
+	if packages == nil {
 		return sdkPackageDependencyError("SDK package recovery is unavailable")
 	}
-	request, err := buildStore.GetSDKPackageBuildRequest(ctx, actor.AccountID, appID)
-	if errors.Is(err, store.ErrAppNotFound) {
-		return workspaceConfigHTTPError{status: http.StatusNotFound, message: "SDK app version not found"}
-	}
-	if err != nil {
-		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to load SDK package definition"}
-	}
 	response, err := packages.DownloadSDKPackage(ctx, appID)
+	// A transport failure is not an authoritative cache miss.
 	if err != nil {
 		return sdkPackageDependencyError("The Registry could not load this SDK package")
 	}
+	// Only a definite miss may enter exact-version recovery.
 	if response.StatusCode != http.StatusNotFound {
 		return streamSDKPackageResponse(w, response)
 	}
 	response.Body.Close()
+	// Recovery retains the pinned generator and must fail closed on rejection.
 	if err := regenerateSDKPackage(ctx, proxy, apiKey, actor, request); err != nil {
 		return err
 	}
 	retry, err := packages.DownloadSDKPackage(ctx, appID)
+	// Do not reinterpret a failed second read as another regeneration opportunity.
 	if err != nil {
 		return sdkPackageDependencyError("The regenerated SDK package could not be loaded")
 	}
+	// One recovery attempt is the bound; missing output cannot loop indefinitely.
 	if retry.StatusCode == http.StatusNotFound {
 		retry.Body.Close()
 		return sdkPackageDependencyError("SDK generation completed without a downloadable package")

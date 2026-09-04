@@ -1024,6 +1024,10 @@ func validateAppApplyParams(params ApplyAppConfigPlanParams) error {
 	if !appKindMatchesConfigType(params.Scope.Kind, params.Plan.State.ConfigType) {
 		return ErrAppKindInvalid
 	}
+	// Persistence and runtime reads share one strict selection decoder; malformed scope must never commit.
+	if _, err := models.DecodeAppSelections(params.Scope.ScopeSchemaVersion, params.Scope.Selections); err != nil {
+		return err
+	}
 	// Language and token metadata remain independent of SDK package state.
 	if err := validateAppApplyMetadata(params); err != nil {
 		return err

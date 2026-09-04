@@ -169,6 +169,7 @@ func (stream *deferredResponseStream) forwardMetadata(headers http.Header, reque
 // callers DRY instead of each defining its own buffer.
 type BufferStream struct {
 	buf      bytes.Buffer
+	status   int
 	maxBytes int
 	limited  bool
 	err      error
@@ -208,3 +209,18 @@ func (b *BufferStream) Bytes() []byte { return b.buf.Bytes() }
 
 // String returns the accumulated payload as a string.
 func (b *BufferStream) String() string { return b.buf.String() }
+
+// SendResponseContract retains status separately so buffered adapters cannot mistake provider errors for success.
+func (b *BufferStream) SendResponseContract(status int, _ string) error {
+	b.status = status
+	return nil
+}
+
+// SendStatus preserves status from transports that publish only the HTTP status contract.
+func (b *BufferStream) SendStatus(status int) error {
+	b.status = status
+	return nil
+}
+
+// Status returns the final provider status without inferring success from response JSON.
+func (b *BufferStream) Status() int { return b.status }

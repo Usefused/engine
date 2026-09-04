@@ -170,7 +170,7 @@ func TestSDKPackageDownloadFailureTelemetryExcludesRawError(t *testing.T) {
 	span := spans[len(spans)-1]
 	encoded, _ := json.Marshal(span.Attributes())
 	// Stable status and attributes replace raw exception events entirely.
-	if len(span.Events()) != 0 || span.Status().Description != "sdk_package_unavailable" || strings.Contains(string(encoded), secret) || strings.Contains(span.Status().Description, "password") {
+	if len(span.Events()) != 0 || span.Status().Description != "sdk_package_download_failed" || strings.Contains(string(encoded), secret) || strings.Contains(span.Status().Description, "password") {
 		t.Fatalf("unsafe SDK download telemetry: status=%#v events=%#v attrs=%s", span.Status(), span.Events(), encoded)
 	}
 }

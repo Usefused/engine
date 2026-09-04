@@ -848,6 +848,10 @@ func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepos
 		return sdkPlanDefinition{}, err
 	}
 	desiredState, _ := json.Marshal(stateDoc)
+	// A published version cannot accept changed content even if generation is skipped.
+	if current != nil && !sameCanonicalAppState(current.DesiredState, desiredState) {
+		return sdkPlanDefinition{}, immutableAppVersionError("plan_admission")
+	}
 	unchanged := current != nil && sameCanonicalAppState(current.DesiredState, desiredState)
 	noop, err := sdkPlanIsNoop(ctx, s, call.accountID, appID, unchanged, unifiedCompilation)
 	// No-op requires complete local immutable-state verification, not source-text equality alone.
@@ -2741,23 +2745,33 @@ func reserveSDKVersionIdentity(ctx context.Context, s store.Store, planID, famil
 // reserveSDKVersionIdentityWithUnified persists Unified operation identity atomically while preserving immutability checks.
 func reserveSDKVersionIdentityWithUnified(ctx context.Context, s store.Store, planID, familyID uuid.UUID, version, sourceHash string, resolved appResolvedPayload) (uuid.UUID, uuid.UUID, error) {
 	tombstoned, err := s.AppTombstoneExists(ctx, familyID, version)
+	// Failed identity reads never prove that a version may be reused.
 	if err != nil {
 		return uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_check_app_version"}
 	}
+	// Tombstones are permanent admission failures, before version publication.
 	if tombstoned {
 		return uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app_version_deactivated"}
 	}
 	existing, err := s.GetAppByFamilyAndVersion(ctx, familyID, version)
+	// Only authoritative absence permits a new stable version ID.
 	if errors.Is(err, store.ErrAppNotFound) {
 		return stableAppIDForPlan(planID), uuid.Nil, nil
 	}
+	// Unknown storage failures stay distinct from absence.
 	if err != nil {
 		return uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_check_app_version"}
 	}
+	// Repeat immutability at apply to close races between planning and publication.
 	if existing.SourceHash != sourceHash || !existingAppMatchesResolvedUnified(existing, resolved) {
-		return uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app_version_immutable"}
+		return uuid.Nil, uuid.Nil, immutableAppVersionError("apply_admission")
 	}
 	return existing.AppID, existing.AppID, nil
+}
+
+// immutableAppVersionError preserves known non-commit through the generic apply error wrapper.
+func immutableAppVersionError(phase string) workspaceConfigHTTPError {
+	return workspaceConfigHTTPError{status: http.StatusConflict, code: "app_version_immutable", message: "app_version_immutable", category: "conflict", phase: phase, commitState: "not_committed", remediation: "Choose a new app version, then run plan and apply again."}
 }
 
 // existingAppMatchesResolvedUnified treats legacy empty fields as the canonical empty set before immutability comparison.

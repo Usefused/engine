@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 )
 
 // TestWriteRefreshServiceContractErrorUsesSharedEnvelope verifies every refresh
@@ -29,6 +30,7 @@ func TestWriteRefreshServiceContractErrorUsesSharedEnvelope(t *testing.T) {
 		{name: "unknown validation", err: refreshHTTPError{status: http.StatusBadRequest, message: "invalid value secret=fsk_never_return"}, status: http.StatusBadRequest, code: "invalid_runtime_contract_refresh_request", message: "The runtime contract refresh request is invalid."},
 		{name: "inactive version", err: refreshHTTPError{status: http.StatusNotFound, message: "workspace service version is not active"}, status: http.StatusNotFound, code: "runtime_contract_not_active", message: "The selected workspace service version is not active."},
 		{name: "registry unavailable", err: refreshHTTPError{status: http.StatusBadGateway, message: "registry https://private.registry.test secret=fsk_never_return"}, status: http.StatusBadGateway, code: "runtime_contract_dependency_unavailable", message: "The Engine could not fetch the runtime contract.", retryable: true},
+		{name: "rejected contract", err: refreshHTTPError{status: http.StatusUnprocessableEntity, rejectedVersion: uuid.New()}, status: http.StatusUnprocessableEntity, code: "runtime_contract_rejected", message: "Registry rejected the runtime contract for this service version."},
 		{name: "unknown internal", err: errors.New("database password=fsk_never_return"), status: http.StatusInternalServerError, code: "runtime_contract_refresh_failed", message: "The Engine could not refresh the runtime contract.", retryable: true},
 		{name: "ambiguous store write", err: refreshHTTPError{status: http.StatusInternalServerError, message: "failed to store runtime contract snapshot", phase: "runtime_contract_refresh_commit", commitState: "unknown"}, status: http.StatusInternalServerError, code: "runtime_contract_refresh_failed", message: "The Engine could not refresh the runtime contract.", phase: "runtime_contract_refresh_commit", commitState: "unknown"},
 	}

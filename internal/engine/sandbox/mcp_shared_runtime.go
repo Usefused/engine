@@ -813,6 +813,15 @@ func dispatchMCPCall(ctx context.Context, sess *mcpSession, operationID string, 
 	if err != nil {
 		return nil, err
 	}
+	return mcpPhysicalBufferedResult(buf)
+}
+
+// mcpPhysicalBufferedResult keeps provider HTTP failures out of successful execute results without leaking their bodies.
+func mcpPhysicalBufferedResult(buf *engine.BufferStream) (json.RawMessage, error) {
+	// HTTP failure is authoritative even when the provider serializes an ordinary JSON object.
+	if buf.Status() >= http.StatusBadRequest {
+		return nil, fmt.Errorf("mcp_provider_http_error: provider returned HTTP %d; review the operation inputs and provider status before retrying", buf.Status())
+	}
 	return bufferToBoundedJSONResult(buf.Bytes(), maxMCPPhysicalResultBytes)
 }
 

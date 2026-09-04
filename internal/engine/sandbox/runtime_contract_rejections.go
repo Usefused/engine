@@ -31,6 +31,16 @@ type runtimeContractRejections struct {
 	accepted []store.ServiceContractSnapshot
 }
 
+// RuntimeContractRejectionVersion exposes only typed source-repair identity, never Registry payload or error prose.
+func RuntimeContractRejectionVersion(err error) (uuid.UUID, bool) {
+	var rejection *runtimeContractRejections
+	// Unknown transport errors and prose lookalikes cannot claim a permanent contract rejection.
+	if !errors.As(err, &rejection) || len(rejection.failures) == 0 {
+		return uuid.Nil, false
+	}
+	return rejection.failures[0].BlockingVersionID, true
+}
+
 // Error retains diagnostics for strict callers without converting the operation into success.
 func (e *runtimeContractRejections) Error() string {
 	return fmt.Sprintf("runtime contract validation rejected %d service version(s): %v", len(e.failures), errors.Join(e.Unwrap()...))

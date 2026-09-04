@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -44,10 +45,11 @@ type refreshServiceContractPath struct {
 }
 
 type refreshHTTPError struct {
-	status      int
-	message     string
-	phase       string
-	commitState string
+	status          int
+	message         string
+	phase           string
+	commitState     string
+	rejectedVersion uuid.UUID
 }
 
 func (e refreshHTTPError) Error() string {
@@ -201,7 +203,9 @@ func listMissingContractVersions(ctx context.Context, s store.Store, limit int) 
 	return versions, nil
 }
 
+// fetchMissingSnapshots preserves typed batch rejection without introducing per-version retry fallbacks.
 func fetchMissingSnapshots(ctx context.Context, batchFetcher BatchRuntimeContractFetcher, versions []store.WorkspaceServiceVersion, apiKey string) ([]store.ServiceContractSnapshot, error) {
+	// Missing capability is not an empty batch.
 	if batchFetcher == nil {
 		return nil, refreshHTTPError{status: http.StatusInternalServerError, message: "runtime contract batch fetcher unavailable"}
 	}
@@ -209,8 +213,9 @@ func fetchMissingSnapshots(ctx context.Context, batchFetcher BatchRuntimeContrac
 	// so falling back to one Registry request per row would turn rollout into an
 	// N+1 network path.
 	snapshots, err := batchFetcher.FetchRuntimeContracts(ctx, versions, apiKey)
+	// Rejected contracts require source repair, while transport failures retain retry advice.
 	if err != nil {
-		return nil, refreshHTTPError{status: http.StatusBadGateway, message: "failed to fetch runtime contracts from registry"}
+		return nil, refreshFetchFailure(err)
 	}
 	return snapshots, nil
 }
@@ -272,21 +277,33 @@ func refreshSnapshotWriter(s store.Store) (runtimeContractSnapshotWriter, error)
 	return writer, nil
 }
 
+// fetchRefreshSnapshot retains the canonical rejection category before any snapshot replacement.
 func fetchRefreshSnapshot(ctx context.Context, fetcher RuntimeContractFetcher, call refreshPinnedServiceContractCall, version string) (*store.ServiceContractSnapshot, error) {
+	// A missing fetcher cannot prove that the pinned contract is valid.
 	if fetcher == nil {
 		return nil, refreshHTTPError{status: http.StatusInternalServerError, message: "runtime contract fetcher unavailable"}
 	}
 	// Why fetch before writing: refresh must preserve the last good local
 	// snapshot when Registry is unavailable or returns an invalid projection.
 	snapshot, err := fetcher.FetchRuntimeContract(ctx, call.serviceID, call.serviceVersionID, version, call.apiKey)
+	// Do not replace a last-good snapshot when fetch or admission fails.
 	if err != nil {
 		slog.WarnContext(ctx, "refresh runtime contract fetch failed",
 			slog.String("service_id", call.serviceID.String()),
 			slog.String("service_version_id", call.serviceVersionID.String()),
 			slog.Any("error", err))
-		return nil, refreshHTTPError{status: http.StatusBadGateway, message: "failed to fetch runtime contract from registry"}
+		return nil, refreshFetchFailure(err)
 	}
 	return snapshot, nil
+}
+
+// refreshFetchFailure distinguishes authoritative content rejection from a retryable Registry outage.
+func refreshFetchFailure(err error) refreshHTTPError {
+	// Only the canonical typed decoder may supply source-repair classification.
+	if version, rejected := sandbox.RuntimeContractRejectionVersion(err); rejected {
+		return refreshHTTPError{status: http.StatusUnprocessableEntity, message: "runtime_contract_rejected", rejectedVersion: version}
+	}
+	return refreshHTTPError{status: http.StatusBadGateway, message: "failed to fetch runtime contract from registry"}
 }
 
 // writeRefreshServiceContractError converts refresh-local failures into one
@@ -313,6 +330,10 @@ func writeRefreshServiceContractError(w http.ResponseWriter, ctx context.Context
 // refreshWorkspaceConfigError maps refresh-local status and safe validation
 // text to stable automation codes while replacing every 5xx message.
 func refreshWorkspaceConfigError(err refreshHTTPError) workspaceConfigHTTPError {
+	// A known rejected version needs repair/re-import, never outage retries.
+	if err.rejectedVersion != uuid.Nil {
+		return workspaceConfigHTTPError{status: http.StatusUnprocessableEntity, code: "runtime_contract_rejected", category: "validation", message: "Registry rejected the runtime contract for this service version.", remediation: "Repair and re-import the rejected service version, then refresh its runtime contract.", details: map[string]any{"service_version_id": err.rejectedVersion.String()}}
+	}
 	// Client-correctable path validation retains the precise field diagnosis.
 	if err.status == http.StatusBadRequest {
 		// Only the two local route-parser diagnostics are safe to preserve verbatim.

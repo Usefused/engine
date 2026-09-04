@@ -639,9 +639,13 @@ func (s *postgresStore) ListSDKPackageLeaseRenewals(ctx context.Context, after u
 	return renewals, rows.Err()
 }
 
-// GetSDKPackageBuildRequest returns exact sdk package build request through one app-scoped query or cache lookup.
+// ErrSDKPackageNotGenerated distinguishes an authorized direct API from a missing generated package.
+var ErrSDKPackageNotGenerated = errors.New("app has no generated SDK package")
+
+// GetSDKPackageBuildRequest admits only generated delivery before reconstructing exact pinned package inputs.
 func (s *postgresStore) GetSDKPackageBuildRequest(ctx context.Context, accountID, appID uuid.UUID) (*models.SDKGenerationRequest, error) {
 	var request models.SDKGenerationRequest
+	var deliveryMode AppDeliveryMode
 	var selections, bindings, unifiedOperations []byte
 	var planID uuid.UUID
 	err := s.db.QueryRow(ctx, `
@@ -654,7 +658,7 @@ func (s *postgresStore) GetSDKPackageBuildRequest(ctx context.Context, accountID
 		       COALESCE(plan.resolved_payload->>'default_engine_url', ''),
 		       COALESCE(plan.resolved_payload->'contract_bindings', '[]'::jsonb),
 		       COALESCE(plan.resolved_payload->'unified_operations', 'null'::jsonb),
-		       plan.id
+		       plan.id, COALESCE(family.delivery_mode, '')
 		FROM fused_apps app
 		JOIN fused_app_families family
 		  ON family.app_family_id = app.app_family_id
@@ -676,21 +680,31 @@ func (s *postgresStore) GetSDKPackageBuildRequest(ctx context.Context, accountID
 		&request.Name, &request.Version, &request.AppFamilyID, &request.AppID,
 		&request.SourceHash, &request.GeneratorVersion, &request.TargetLanguage,
 		&selections, &request.Description, &request.IncludeMCP, &request.SkipSandbox,
-		&request.DefaultEngineURL, &bindings, &unifiedOperations, &planID,
+		&request.DefaultEngineURL, &bindings, &unifiedOperations, &planID, &deliveryMode,
 	)
+	// Absence and cross-account identity remain indistinguishable to callers.
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrAppNotFound
 	}
+	// A failed lookup cannot authorize package reconstruction.
 	if err != nil {
 		return nil, fmt.Errorf("get SDK package build request: %w", err)
 	}
+	// Direct APIs must not reach the Registry cache or its cache-miss generation path.
+	if deliveryMode != AppDeliveryModeSDK {
+		return nil, ErrSDKPackageNotGenerated
+	}
+	// Pinned inputs must decode successfully; never substitute current catalogue state.
 	if err := json.Unmarshal(selections, &request.Selections); err != nil {
 		return nil, fmt.Errorf("decode SDK package selections: %w", err)
 	}
+	// Bindings retain the applied version's generation authority.
 	if err := json.Unmarshal(bindings, &request.ContractBindings); err != nil {
 		return nil, fmt.Errorf("decode SDK package contract bindings: %w", err)
 	}
+	// An absent descriptor is distinct from an invalid descriptor.
 	if string(unifiedOperations) != "null" {
+		// Reject corrupted definitions instead of regenerating a reduced SDK.
 		if err := json.Unmarshal(unifiedOperations, &request.UnifiedOperations); err != nil {
 			return nil, fmt.Errorf("decode SDK package unified operations: %w", err)
 		}
