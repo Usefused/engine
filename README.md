@@ -75,6 +75,9 @@ a generated package. The examples below use Linear:
 Each command guides you through selecting operations and approving setup.
 Omit the mode flag to choose interactively.
 
+For the callable schema of an exact SDK version, see the
+[per-version OpenAPI export](docs/app-execution-rest.md#export-an-openapi-document).
+
 ## Can't find the service you're looking for?
 
 Import its OpenAPI spec, review the plan, then apply it.
