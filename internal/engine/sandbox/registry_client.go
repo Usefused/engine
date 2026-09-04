@@ -1080,31 +1080,80 @@ func NewHTTPRegistryClient(endpoint, licenseKey string) *HTTPRegistryClient {
 	}
 }
 
+// Registry's revision endpoint admits at most 50 service/version references per request.
+const serviceVersionRevisionBatchSize = 50
+
+// FetchServiceVersionRevisions resolves arbitrarily sized selections through bounded
+// requests, preserving Registry rows and returning no partial result on failure.
 func (c *HTTPRegistryClient) FetchServiceVersionRevisions(ctx context.Context, refs []ServiceVersionRef, apiKey string) ([]ServiceVersionRevision, error) {
-	if len(refs) == 0 {
-		return nil, nil
+	var revisions []ServiceVersionRevision
+	for start := 0; start < len(refs); start += serviceVersionRevisionBatchSize {
+		// Stop before starting another batch when the original planning request expires.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		end := min(start+serviceVersionRevisionBatchSize, len(refs))
+		batch, err := c.fetchServiceVersionRevisionBatch(ctx, refs[start:end], apiKey)
+		// Earlier successful reads are unusable when any later dependency fails.
+		if err != nil {
+			return nil, err
+		}
+		// Validate returned identities before combining rows; absence remains visible
+		// to callers, which already reject unresolved versions with domain-specific errors.
+		if err := validateServiceVersionRevisionBatch(refs[start:end], batch); err != nil {
+			return nil, err
+		}
+		revisions = append(revisions, batch...)
 	}
+	return revisions, nil
+}
+
+// validateServiceVersionRevisionBatch permits Registry visibility omissions but rejects
+// foreign, excess, or unpinned rows that could otherwise corrupt a planning lookup map.
+func validateServiceVersionRevisionBatch(refs []ServiceVersionRef, revisions []ServiceVersionRevision) error {
+	remaining := make(map[ServiceVersionRef]int, len(refs))
+	for _, ref := range refs {
+		remaining[ref]++
+	}
+	for _, revision := range revisions {
+		ref := ServiceVersionRef{ServiceID: revision.ServiceID, Version: revision.Version}
+		// Repeated inputs are legitimate; extra response rows are not.
+		if remaining[ref] == 0 || revision.ServiceVersionID == uuid.Nil {
+			return errors.New("Registry returned an unexpected service version revision identity")
+		}
+		remaining[ref]--
+	}
+	return nil
+}
+
+// fetchServiceVersionRevisionBatch closes each bounded response before the next request begins.
+func (c *HTTPRegistryClient) fetchServiceVersionRevisionBatch(ctx context.Context, refs []ServiceVersionRef, apiKey string) ([]ServiceVersionRevision, error) {
 	body, err := json.Marshal(map[string][]ServiceVersionRef{"versions": refs})
+	// Serialization must succeed before any Registry request can be sent.
 	if err != nil {
 		return nil, err
 	}
 	requestURL := c.registryBaseURL() + "/integrations/versions/revisions"
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(body))
+	// Invalid endpoint configuration cannot be treated as an empty batch.
 	if err != nil {
 		return nil, err
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-API-Key", apiKey)
 	response, err := c.do(request)
+	// Transport failures invalidate the entire resolution, including earlier batches.
 	if err != nil {
 		return nil, err
 	}
 	defer response.Body.Close()
+	// Keep Registry validation and visibility errors intact for the planning caller.
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(response.Body)
 		return nil, fmt.Errorf("Registry returned %d: %s", response.StatusCode, string(body))
 	}
 	var decoded serviceVersionRevisionBatchResponse
+	// A truncated response must never become a usable partial snapshot.
 	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
 		return nil, err
 	}
