@@ -85,7 +85,8 @@ func seedGenerationContractFixture(t *testing.T, ctx context.Context, s *postgre
 		if err := s.RemoveWorkspaceService(context.Background(), snapshot.ServiceID); err != nil {
 			t.Error(err)
 		}
-		deleteServiceContractFixture(t, s.db, snapshot.ServiceVersionID)
+		// This fixture owns a pool-backed store, so cleanup retains its pool-specific helper.
+		deleteServiceContractFixture(t, s.db.(*pgxpool.Pool), snapshot.ServiceVersionID)
 	})
 	// Runtime and generation metadata cross the same atomic persistence boundary.
 	if _, err := s.UpsertServiceContractSnapshot(ctx, snapshot); err != nil {

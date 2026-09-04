@@ -268,7 +268,9 @@ type workspaceConfigDeprecation struct {
 }
 
 type workspaceDesiredState struct {
-	Services map[uuid.UUID]workspaceDesiredService
+	// applyServiceIDs restricts transactional reconciliation to one approved local group.
+	applyServiceIDs map[uuid.UUID]bool
+	Services        map[uuid.UUID]workspaceDesiredService
 	// BucketSecrets is the normalized form of workspaceConfigBucket.Secrets --
 	// generic, bucket-scoped (not service-scoped) named secret intents. Kept
 	// as its own list because it has no service dimension at all.
@@ -728,7 +730,7 @@ func workspaceServiceVersionsMap(desired workspaceDesiredState) map[uuid.UUID][]
 	return out
 }
 
-// WorkspaceConfigApplyHandler handles POST /workspace/config/apply.
+// WorkspaceConfigApplyHandler handles POST /workspace/config/apply and returns durable partial results without claiming full success.
 func WorkspaceConfigApplyHandler(configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, masterKey []byte) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.workspace_config.apply")
@@ -767,7 +769,14 @@ func WorkspaceConfigApplyHandler(configStore store.ConfigRepository, s store.Sto
 			profileMats:      req.ProfileMaterials,
 			bucketSecretMats: req.BucketSecretMaterials,
 		})
-		// The handler reports only a stable outcome; nested helpers retain private causes.
+		var partial *workspacePartialApplyError
+		// Partial outcomes contain confirmed local commits and must be inspectable by every client.
+		if errors.As(err, &partial) {
+			span.SetAttributes(attribute.String("outcome", "partially_applied"))
+			writeWorkspacePartialApply(w, planID, partial)
+			return
+		}
+		// Other failures retain the existing structured recovery metadata and private error causes.
 		if err != nil {
 			span.SetAttributes(attribute.String("outcome", "apply_failed"))
 			writeWorkspaceConfigError(w, withWorkspaceConfigErrorMetadata(err, "apply_execution", planID.String(), "unknown"), ctx)
@@ -840,6 +849,10 @@ func executeWorkspaceConfigApply(
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.execute_apply")
 	defer span.End()
 
+	// Production stores own atomic service receipts; narrow legacy test doubles keep their existing executor.
+	if progress, ok := s.(store.WorkspaceApplyProgressStore); ok {
+		return executeWorkspacePartialApply(ctx, configStore, s, verifier, call, progress)
+	}
 	plan, currentState, err := loadWorkspacePlanForApply(ctx, configStore, call)
 	if err != nil {
 		return nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
@@ -1039,6 +1052,7 @@ func workspaceApplyError(ctx context.Context, err error) error {
 	return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to apply workspace config"}
 }
 
+// loadWorkspacePlanForApply distinguishes this plan's own partial commits from changes made by another writer.
 func loadWorkspacePlanForApply(ctx context.Context, configStore store.ConfigRepository, call workspaceApplyCall) (*store.ConfigPlan, *store.ConfigState, error) {
 	plan, err := configStore.GetConfigPlan(ctx, call.planID)
 	if err != nil {
@@ -1054,7 +1068,12 @@ func loadWorkspacePlanForApply(ctx context.Context, configStore store.ConfigRepo
 	if err != nil {
 		return nil, nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to fetch config state"}
 	}
-	if currentGeneration(currentState) != plan.BaseGeneration {
+	expectedGeneration := plan.BaseGeneration
+	// A resumed workspace plan recognizes its own committed groups, but not unrelated changes.
+	if plan.ApplyGeneration != nil {
+		expectedGeneration = *plan.ApplyGeneration
+	}
+	if currentGeneration(currentState) != expectedGeneration {
 		return nil, nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "plan_stale"}
 	}
 	return plan, currentState, nil

@@ -975,6 +975,26 @@ func engineSchemaQueries() []string {
 				 (owner_subject_id IS NOT NULL)::int + (owner_team_id IS NOT NULL)::int = 1)
 			)
 		);`,
+		// A database-owned revision detects direct configuration writes between partial apply attempts.
+		`CREATE TABLE IF NOT EXISTS fused_workspace_apply_revision (
+			singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), revision bigint NOT NULL DEFAULT 0
+		);`,
+		`INSERT INTO fused_workspace_apply_revision(singleton) VALUES(true) ON CONFLICT DO NOTHING;`,
+		`ALTER TABLE fused_config_plans ADD COLUMN IF NOT EXISTS base_workspace_revision bigint NOT NULL DEFAULT 0;`,
+		`ALTER TABLE fused_config_plans ADD COLUMN IF NOT EXISTS apply_workspace_revision bigint;`,
+		// Per-service receipts commit beside workspace writes and survive CLI/Engine restarts.
+		`ALTER TABLE fused_config_plans ADD COLUMN IF NOT EXISTS apply_generation integer;`,
+		// Historical pending plans have no durable per-service execution contract and require replanning.
+		`ALTER TABLE fused_config_plans ADD COLUMN IF NOT EXISTS workspace_apply_version integer NOT NULL DEFAULT 0;`,
+		`CREATE TABLE IF NOT EXISTS fused_workspace_apply_steps (
+			plan_id uuid NOT NULL REFERENCES fused_config_plans(id) ON DELETE CASCADE,
+			plan_revision integer NOT NULL CHECK(plan_revision > 0),
+			step_key text NOT NULL,
+			status text NOT NULL CHECK(status IN ('running','succeeded','failed')),
+			error_code text NOT NULL DEFAULT '',
+			updated_at timestamptz NOT NULL DEFAULT NOW(),
+			PRIMARY KEY(plan_id,plan_revision,step_key)
+		);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_config_plans_workspace_key_created
 		ON fused_config_plans(config_key, created_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_config_plans_owner_status
@@ -1159,6 +1179,27 @@ func engineSchemaQueries() []string {
 			updated_at timestamptz NOT NULL DEFAULT NOW(),
 			CHECK (timeout_ms IS NULL OR timeout_ms BETWEEN 1 AND 86400000)
 		);`,
+		// Every configuration write route advances the same revision; progress commits record their own resulting value.
+		`CREATE OR REPLACE FUNCTION fused_bump_workspace_apply_revision() RETURNS trigger AS $$
+		BEGIN
+			-- Publication bookkeeping does not change the local executable profile.
+			IF TG_OP='UPDATE' AND TG_TABLE_NAME='fused_workspace_connection_profiles'
+			   AND (to_jsonb(NEW)-'updated_at'-'is_public')=(to_jsonb(OLD)-'updated_at'-'is_public') THEN
+				RETURN NULL;
+			END IF;
+			UPDATE fused_workspace_apply_revision SET revision=revision+1 WHERE singleton=true;
+			RETURN NULL;
+		END;
+		$$ LANGUAGE plpgsql;`,
+		`DO $$ DECLARE table_name text; BEGIN
+			FOREACH table_name IN ARRAY ARRAY['fused_workspace_services','fused_workspace_service_versions',
+			'fused_workspace_secrets','fused_workspace_connection_profiles','fused_workspace_connection_bindings',
+			'fused_workspace_execution_policies','fused_buckets'] LOOP
+				EXECUTE format('DROP TRIGGER IF EXISTS fused_workspace_apply_revision ON %I',table_name);
+				EXECUTE format('CREATE TRIGGER fused_workspace_apply_revision AFTER INSERT OR UPDATE OR DELETE ON %I FOR EACH ROW EXECUTE FUNCTION fused_bump_workspace_apply_revision()',table_name);
+			END LOOP;
+		END $$;`,
+
 		// Exactly one service-default override row per service.
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_fused_workspace_execution_policies_service_default
 		ON fused_workspace_execution_policies(service_id) WHERE service_version_id IS NULL;`,

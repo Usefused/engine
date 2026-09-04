@@ -146,25 +146,28 @@ type ConfigState struct {
 }
 
 type ConfigPlan struct {
-	ID                  uuid.UUID        `json:"id"`
-	ConfigKey           string           `json:"config_key"`
-	ConfigType          ConfigType       `json:"config_type"`
-	OwnerSubjectID      *uuid.UUID       `json:"owner_subject_id,omitempty"`
-	OwnerTeamID         *uuid.UUID       `json:"owner_team_id,omitempty"`
-	SourceHash          string           `json:"source_hash"`
-	BaseGeneration      int              `json:"base_generation"`
-	Status              ConfigPlanStatus `json:"status"`
-	Actions             json.RawMessage  `json:"actions"`
-	DesiredState        json.RawMessage  `json:"desired_state"`
-	ResolvedPayload     json.RawMessage  `json:"resolved_payload"`
-	Blockers            json.RawMessage  `json:"blockers"`
-	Warnings            json.RawMessage  `json:"warnings"`
-	RequiredPermissions json.RawMessage  `json:"required_permissions"`
-	Revision            int              `json:"revision"`
-	CreatedBy           uuid.UUID        `json:"created_by"`
-	CreatedAt           time.Time        `json:"created_at"`
-	AppliedAt           *time.Time       `json:"applied_at,omitempty"`
-	SupersededAt        *time.Time       `json:"superseded_at,omitempty"`
+	ID                    uuid.UUID                `json:"id"`
+	ConfigKey             string                   `json:"config_key"`
+	ConfigType            ConfigType               `json:"config_type"`
+	OwnerSubjectID        *uuid.UUID               `json:"owner_subject_id,omitempty"`
+	OwnerTeamID           *uuid.UUID               `json:"owner_team_id,omitempty"`
+	SourceHash            string                   `json:"source_hash"`
+	BaseGeneration        int                      `json:"base_generation"`
+	ApplyGeneration       *int                     `json:"apply_generation,omitempty"`
+	WorkspaceApplyVersion int                      `json:"workspace_apply_version,omitempty"`
+	ApplyResults          []WorkspaceApplyProgress `json:"apply_results,omitempty"`
+	Status                ConfigPlanStatus         `json:"status"`
+	Actions               json.RawMessage          `json:"actions"`
+	DesiredState          json.RawMessage          `json:"desired_state"`
+	ResolvedPayload       json.RawMessage          `json:"resolved_payload"`
+	Blockers              json.RawMessage          `json:"blockers"`
+	Warnings              json.RawMessage          `json:"warnings"`
+	RequiredPermissions   json.RawMessage          `json:"required_permissions"`
+	Revision              int                      `json:"revision"`
+	CreatedBy             uuid.UUID                `json:"created_by"`
+	CreatedAt             time.Time                `json:"created_at"`
+	AppliedAt             *time.Time               `json:"applied_at,omitempty"`
+	SupersededAt          *time.Time               `json:"superseded_at,omitempty"`
 }
 
 type WorkspaceNotification struct {
@@ -323,7 +326,7 @@ type ConfigRepository interface {
 }
 
 type postgresConfigRepository struct {
-	db *pgxpool.Pool
+	db storeDatabase
 }
 
 func NewPostgresConfigRepository(db *pgxpool.Pool) ConfigRepository {
@@ -1206,6 +1209,19 @@ func upsertConfigState(ctx context.Context, q configQueryRower, params UpsertCon
 // lockConfigGeneration serializes applies for one config key and fails if a
 // newer desired state won while external work was running.
 func lockConfigGeneration(ctx context.Context, tx pgx.Tx, params ApplyConfigPlanParams) error {
+	expected := params.BaseGeneration
+	// Workspace groups advance their own generation while retaining the original reviewed plan.
+	if params.State.ConfigType == ConfigTypeWorkspace {
+		// Finalization checks direct workspace mutations as well as this plan's own state generation.
+		if _, err := lockWorkspaceApplyStep(ctx, tx, WorkspaceApplyStep{PlanID: params.PlanID, Revision: params.ExpectedRevision, LeaseID: params.ApplyLeaseID}); err != nil {
+			return err
+		}
+		// Lock the plan before state, matching service commits and preventing an expired worker from finalizing.
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(apply_generation,base_generation) FROM fused_config_plans
+		WHERE id=$1 AND revision=$2 AND apply_lease_id=$3 AND apply_lease_expires_at>NOW() FOR UPDATE`, params.PlanID, params.ExpectedRevision, params.ApplyLeaseID).Scan(&expected); err != nil {
+			return ErrConfigPlanRevisionMismatch
+		}
+	}
 	var generation int
 	err := tx.QueryRow(ctx, `
 		SELECT generation
@@ -1218,7 +1234,8 @@ func lockConfigGeneration(ctx context.Context, tx pgx.Tx, params ApplyConfigPlan
 	} else if err != nil {
 		return fmt.Errorf("ApplyConfigPlan: lock state: %w", err)
 	}
-	if generation != params.BaseGeneration {
+	// A different writer must not be overwritten by the plan's final snapshot.
+	if generation != expected {
 		return fmt.Errorf("ApplyConfigPlan: config generation changed")
 	}
 	return nil
@@ -1318,11 +1335,24 @@ func optionalUUID(value uuid.UUID) *uuid.UUID {
 	return &copy
 }
 
+// GetConfigPlan attaches mutable apply progress without changing the immutable reviewed base generation.
 func (r *postgresConfigRepository) GetConfigPlan(ctx context.Context, planID uuid.UUID) (*ConfigPlan, error) {
 	row := r.db.QueryRow(ctx, selectConfigPlanSQL()+` WHERE id = $1`, planID)
-	return scanConfigPlan(row)
+	plan, err := scanConfigPlan(row)
+	// Only workspace plans have per-service commits between admission and completion.
+	if err != nil || plan.ConfigType != ConfigTypeWorkspace {
+		return plan, err
+	}
+	err = r.db.QueryRow(ctx, `SELECT apply_generation,workspace_apply_version FROM fused_config_plans WHERE id=$1`, planID).Scan(&plan.ApplyGeneration, &plan.WorkspaceApplyVersion)
+	// Historical or unreadable plans must not fabricate recovery metadata.
+	if err != nil {
+		return nil, err
+	}
+	plan.ApplyResults, err = (&postgresStore{db: r.db}).WorkspaceApplyProgress(ctx, planID, plan.Revision)
+	return plan, err
 }
 
+// ReplaceConfigPlanActions forbids changing approvals once durable execution receipts exist.
 func (r *postgresConfigRepository) ReplaceConfigPlanActions(ctx context.Context, planID uuid.UUID, actions, requiredPermissions json.RawMessage, actorID uuid.UUID) (*ConfigPlan, error) {
 	normalized, err := normalizeJSONArray(actions)
 	if err != nil {
@@ -1345,6 +1375,7 @@ func (r *postgresConfigRepository) ReplaceConfigPlanActions(ctx context.Context,
 		SET actions = $2, required_permissions = $3, revision = revision + 1
 		WHERE id = $1 AND status = 'pending'
 		  AND (apply_lease_id IS NULL OR apply_lease_expires_at <= NOW())
+		  AND NOT EXISTS (SELECT 1 FROM fused_workspace_apply_steps steps WHERE steps.plan_id=fused_config_plans.id)
 		RETURNING id, config_key, config_type, owner_subject_id, owner_team_id, source_hash, base_generation,
 		          status, actions, desired_state, resolved_payload, blockers, warnings, required_permissions, revision,
 		          created_by, created_at, applied_at, superseded_at
@@ -1835,6 +1866,7 @@ func normalizeJSONArray(raw json.RawMessage) (json.RawMessage, error) {
 	return raw, nil
 }
 
+// supersedePendingPlans preserves outstanding external outcomes even after a worker lease expires.
 func supersedePendingPlans(ctx context.Context, tx pgx.Tx, configKey string) error {
 	var planID uuid.UUID
 	var activelyLeased bool
@@ -1850,7 +1882,12 @@ func supersedePendingPlans(ctx context.Context, tx pgx.Tx, configKey string) err
 	if err != nil {
 		return fmt.Errorf("CreateConfigPlan: lock pending plan: %w", err)
 	}
-	if activelyLeased {
+	// An expired lease cannot prove an external mutation did not commit.
+	var externalUnknown bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM fused_workspace_apply_steps WHERE plan_id=$1 AND status='running')`, planID).Scan(&externalUnknown); err != nil {
+		return err
+	}
+	if activelyLeased || externalUnknown {
 		return ErrConfigPlanApplyInProgress
 	}
 	_, err = tx.Exec(ctx, `
@@ -1864,13 +1901,14 @@ func supersedePendingPlans(ctx context.Context, tx pgx.Tx, configKey string) err
 	return nil
 }
 
+// insertConfigPlan captures the workspace revision alongside immutable reviewed plan identity.
 func insertConfigPlan(ctx context.Context, tx pgx.Tx, params CreateConfigPlanParams) (*ConfigPlan, error) {
 	row := tx.QueryRow(ctx, `
 		INSERT INTO fused_config_plans (
 			config_key, config_type, owner_subject_id, owner_team_id, source_hash, base_generation,
-			actions, desired_state, resolved_payload, blockers, warnings, required_permissions, created_by
+			actions, desired_state, resolved_payload, blockers, warnings, required_permissions, created_by, base_workspace_revision, workspace_apply_version
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, (SELECT revision FROM fused_workspace_apply_revision WHERE singleton=true), CASE WHEN $2='workspace' THEN 1 ELSE 0 END)
 		RETURNING id, config_key, config_type, owner_subject_id, owner_team_id, source_hash, base_generation,
 		          status, actions, desired_state, resolved_payload, blockers, warnings, required_permissions, revision,
 		          created_by, created_at, applied_at, superseded_at

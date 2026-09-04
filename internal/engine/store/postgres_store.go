@@ -18,7 +18,7 @@ import (
 )
 
 type postgresStore struct {
-	db *pgxpool.Pool
+	db storeDatabase
 }
 
 var ErrWorkspaceOwnerMismatch = errors.New("engine workspace belongs to a different Registry account")
@@ -455,8 +455,8 @@ func (s *postgresStore) GetMCPAnalyticsDashboard(ctx context.Context, appID uuid
 	return dashboard, nil
 }
 
-// queryMCPToolUsage counts provider receipts, not logical wrappers that already own children.
-func queryMCPToolUsage(ctx context.Context, db *pgxpool.Pool, appID uuid.UUID) ([]models.MCPToolUsage, error) {
+// queryMCPToolUsage counts provider receipts through the enclosing store's database executor, excluding logical wrappers that own children.
+func queryMCPToolUsage(ctx context.Context, db storeDatabase, appID uuid.UUID) ([]models.MCPToolUsage, error) {
 	query := `
 		SELECT endpoint_name, COUNT(*), COUNT(*) FILTER (WHERE status = 'failed'), COALESCE(AVG(latency_ms), 0)
 		FROM fused_engine_execution_events
@@ -481,8 +481,8 @@ func queryMCPToolUsage(ctx context.Context, db *pgxpool.Pool, appID uuid.UUID) (
 	return usage, rows.Err()
 }
 
-// queryMCPServiceUsage preserves provider-only analytics after adding logical history.
-func queryMCPServiceUsage(ctx context.Context, db *pgxpool.Pool, appID uuid.UUID) ([]models.MCPServiceUsage, error) {
+// queryMCPServiceUsage preserves provider-only analytics through the enclosing store's database executor.
+func queryMCPServiceUsage(ctx context.Context, db storeDatabase, appID uuid.UUID) ([]models.MCPServiceUsage, error) {
 	query := `
 		SELECT COALESCE(workspace_service.service_name, event.service_id::text), COUNT(*),
 			COUNT(*) FILTER (WHERE event.status = 'failed'), COALESCE(AVG(event.latency_ms), 0)
@@ -509,9 +509,8 @@ func queryMCPServiceUsage(ctx context.Context, db *pgxpool.Pool, appID uuid.UUID
 	return usage, rows.Err()
 }
 
-// queryRecentMCPSessions caps at 10 rows -- this backs a UI summary panel,
-// not a full session history browser.
-func queryRecentMCPSessions(ctx context.Context, db *pgxpool.Pool, appID uuid.UUID) ([]models.MCPSession, error) {
+// queryRecentMCPSessions uses the enclosing database executor and caps the UI summary at 10 rows.
+func queryRecentMCPSessions(ctx context.Context, db storeDatabase, appID uuid.UUID) ([]models.MCPSession, error) {
 	query := `
 		SELECT id, app_id, COALESCE(app_token_id, '00000000-0000-0000-0000-000000000000'::uuid),
 		       session_id, protocol_version, started_at, last_activity_at, ended_at, COALESCE(end_reason, ''),
