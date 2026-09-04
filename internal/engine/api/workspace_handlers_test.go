@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/sandbox"
@@ -1256,6 +1258,260 @@ func TestRefreshMissingServiceContractsPersistsGenerationPin(t *testing.T) {
 	// The persisted snapshot must retain the opaque generation hash exactly; its runtime hash is not a valid substitute.
 	if result.Refreshed != 1 || len(s.snapshotWrites) != 1 || s.snapshotWrites[0].GenerationContractHash != pin {
 		t.Fatalf("result=%#v snapshotWrites=%#v", result, s.snapshotWrites)
+	}
+}
+
+// TestRefreshMissingServiceContractsIsolatesExactRegistryRejection proves one bad version cannot block valid peers or cause one request per valid version.
+func TestRefreshMissingServiceContractsIsolatesExactRegistryRejection(t *testing.T) {
+	goodA := store.WorkspaceServiceVersion{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"}
+	bad := store.WorkspaceServiceVersion{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"}
+	goodB := store.WorkspaceServiceVersion{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"}
+	client, requests := newRuntimeContractIsolationRegistry(t, bad.ServiceVersionID, false)
+	s := &workspaceTestStore{accountID: uuid.New(), missingContractVersions: []store.WorkspaceServiceVersion{goodA, bad, goodB}}
+
+	result, err := refreshMissingServiceContracts(context.Background(), s, client, refreshMissingContractsCall{
+		accountID: s.accountID, apiKey: "fsk_test", limit: 3,
+	})
+	// The rejected identity is reported while both valid peers are persisted from one retry batch.
+	if err != nil || result.Status != "partial" || result.Missing != 3 || result.Refreshed != 2 || result.Failed != 1 {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	// One aggregate retry for both good peers prevents the repair path from becoming a per-version request loop.
+	if *requests != 2 || len(s.snapshotWrites) != 2 {
+		t.Fatalf("requests=%d writes=%#v", *requests, s.snapshotWrites)
+	}
+	failed := result.Results[len(result.Results)-1]
+	// Failure output must retain the exact requested tuple and only the stable rejection classification.
+	if failed.ServiceID != bad.ServiceID.String() || failed.ServiceVersionID != bad.ServiceVersionID.String() || failed.Version != bad.Version || failed.Error != "runtime_contract_rejected" {
+		t.Fatalf("failed result=%#v", failed)
+	}
+}
+
+// TestRefreshMissingServiceContractsRejectsUnboundRegistryFailure proves an unrequested rejection cannot excuse or write any local version.
+func TestRefreshMissingServiceContractsRejectsUnboundRegistryFailure(t *testing.T) {
+	version := store.WorkspaceServiceVersion{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"}
+	client, requests := newRuntimeContractIsolationRegistry(t, uuid.New(), true)
+	s := &workspaceTestStore{accountID: uuid.New(), missingContractVersions: []store.WorkspaceServiceVersion{version}}
+
+	_, err := refreshMissingServiceContracts(context.Background(), s, client, refreshMissingContractsCall{
+		accountID: s.accountID, apiKey: "fsk_test", limit: 1,
+	})
+	var httpErr refreshHTTPError
+	// Ambiguous Registry identity remains a dependency failure and stops before persistence or retry.
+	if !errors.As(err, &httpErr) || httpErr.status != http.StatusBadGateway || *requests != 1 || len(s.snapshotWrites) != 0 {
+		t.Fatalf("error=%v requests=%d writes=%#v", err, *requests, s.snapshotWrites)
+	}
+}
+
+// TestRefreshMissingServiceContractsRejectsIncompleteSuccess prevents a faulty fetcher from silently writing a partial success response.
+func TestRefreshMissingServiceContractsRejectsIncompleteSuccess(t *testing.T) {
+	version := store.WorkspaceServiceVersion{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"}
+	s := &workspaceTestStore{accountID: uuid.New(), missingContractVersions: []store.WorkspaceServiceVersion{version}}
+
+	_, err := refreshMissingServiceContracts(context.Background(), s, incompleteRuntimeContractBatchFetcher{}, refreshMissingContractsCall{
+		accountID: s.accountID, apiKey: "fsk_test", limit: 1,
+	})
+	var httpErr refreshHTTPError
+	// Missing successful identities remain a dependency failure and stop before persistence.
+	if !errors.As(err, &httpErr) || httpErr.status != http.StatusBadGateway || len(s.snapshotWrites) != 0 {
+		t.Fatalf("error=%v writes=%#v", err, s.snapshotWrites)
+	}
+}
+
+// TestRefreshMissingServiceContractsPartitionsOversizedDependencyFailure verifies live-style size failures recover in bounded pair batches.
+func TestRefreshMissingServiceContractsPartitionsOversizedDependencyFailure(t *testing.T) {
+	versions := []store.WorkspaceServiceVersion{
+		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"},
+		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"},
+		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"},
+		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"},
+		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"},
+	}
+	fetcher := &sizeLimitedRuntimeContractBatchFetcher{maxBatch: 2, err: errors.New("registry query deadline exceeded")}
+	s := &workspaceTestStore{accountID: uuid.New(), missingContractVersions: versions}
+
+	result, err := refreshMissingServiceContracts(context.Background(), s, fetcher, refreshMissingContractsCall{
+		accountID: s.accountID, apiKey: "fsk_test", limit: len(versions),
+	})
+	// One failed aggregate call may recover through pairs only when every successful response retains exact identity.
+	if err != nil || result.Status != "ok" || result.Refreshed != len(versions) || result.Failed != 0 {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	// The fallback is partitioned rather than per-version, with only the odd tail using a singleton request.
+	if want := []int{5, 2, 2, 1}; !reflect.DeepEqual(fetcher.batchSizes, want) {
+		t.Fatalf("batch sizes=%v, want %v", fetcher.batchSizes, want)
+	}
+	if len(s.snapshotWrites) != len(versions) {
+		t.Fatalf("snapshot writes=%d, want %d", len(s.snapshotWrites), len(versions))
+	}
+}
+
+// TestRefreshMissingServiceContractsReportsIsolatedPartitionFailure verifies validated peers persist beside exact retryable failures.
+func TestRefreshMissingServiceContractsReportsIsolatedPartitionFailure(t *testing.T) {
+	versions := []store.WorkspaceServiceVersion{
+		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"},
+		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"},
+		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"},
+		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"},
+		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"},
+	}
+	fetcher := &sizeLimitedRuntimeContractBatchFetcher{
+		maxBatch: 2, failOnVersion: versions[2].ServiceVersionID, err: errors.New("registry partition timeout"),
+	}
+	s := &workspaceTestStore{accountID: uuid.New(), missingContractVersions: versions}
+
+	result, err := refreshMissingServiceContracts(context.Background(), s, fetcher, refreshMissingContractsCall{
+		accountID: s.accountID, apiKey: "fsk_test", limit: len(versions),
+	})
+	// One isolated pair failure remains explicit while successful partitions are written and the caller receives a partial result.
+	if err != nil || result.Status != "partial" || result.Refreshed != 3 || result.Failed != 2 || len(s.snapshotWrites) != 3 {
+		t.Fatalf("result=%#v error=%v writes=%#v", result, err, s.snapshotWrites)
+	}
+	failed := result.Results[len(result.Results)-2:]
+	// The failed pair is reported from its exact attempted identities without assigning a speculative provider cause.
+	if failed[0].ServiceVersionID != versions[2].ServiceVersionID.String() || failed[1].ServiceVersionID != versions[3].ServiceVersionID.String() || failed[0].Error != "runtime_contract_fetch_failed" || failed[1].Error != "runtime_contract_fetch_failed" {
+		t.Fatalf("failed results=%#v", failed)
+	}
+}
+
+// TestRefreshMissingServiceContractsStopsPartitionFallbackDuringOutage proves generic failures cannot fan out across the full workspace.
+func TestRefreshMissingServiceContractsStopsPartitionFallbackDuringOutage(t *testing.T) {
+	recorder := setupTestTracer(t)
+	versions := []store.WorkspaceServiceVersion{
+		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"},
+		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"},
+		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"},
+		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"},
+		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"},
+	}
+	underlying := errors.New("registry upstream timeout marker")
+	fetcher := &sizeLimitedRuntimeContractBatchFetcher{maxBatch: 0, err: underlying}
+	s := &workspaceTestStore{accountID: uuid.New(), missingContractVersions: versions}
+
+	_, err := refreshMissingServiceContracts(context.Background(), s, fetcher, refreshMissingContractsCall{
+		accountID: s.accountID, apiKey: "fsk_test", limit: len(versions),
+	})
+	var httpErr refreshHTTPError
+	// Two failed pair probes establish an outage and abort before any accumulated snapshot can be persisted.
+	if !errors.As(err, &httpErr) || httpErr.status != http.StatusBadGateway || len(s.snapshotWrites) != 0 {
+		t.Fatalf("error=%v writes=%#v", err, s.snapshotWrites)
+	}
+	if want := []int{5, 2, 2}; !reflect.DeepEqual(fetcher.batchSizes, want) {
+		t.Fatalf("batch sizes=%v, want %v", fetcher.batchSizes, want)
+	}
+	if !recordedSpanException(recorder.GetSpans(), "registry upstream timeout marker") {
+		t.Fatal("underlying Registry timeout was not retained in OpenTelemetry")
+	}
+}
+
+type sizeLimitedRuntimeContractBatchFetcher struct {
+	maxBatch      int
+	failOnVersion uuid.UUID
+	err           error
+	batchSizes    []int
+}
+
+// FetchRuntimeContracts simulates the observed Registry size threshold while returning identity-complete successful batches.
+func (f *sizeLimitedRuntimeContractBatchFetcher) FetchRuntimeContracts(_ context.Context, versions []store.WorkspaceServiceVersion, _ string) ([]store.ServiceContractSnapshot, error) {
+	f.batchSizes = append(f.batchSizes, len(versions))
+	// A zero limit models an outage; larger failing requests model the production batch latency ceiling.
+	if f.maxBatch == 0 || len(versions) > f.maxBatch {
+		return nil, f.err
+	}
+	for _, version := range versions {
+		// A selected immutable identity models one partition failing after neighboring partitions prove Registry availability.
+		if version.ServiceVersionID == f.failOnVersion {
+			return nil, f.err
+		}
+	}
+	snapshots := make([]store.ServiceContractSnapshot, 0, len(versions))
+	for _, version := range versions {
+		snapshots = append(snapshots, store.ServiceContractSnapshot{
+			ServiceID: version.ServiceID, ServiceVersionID: version.ServiceVersionID, Version: version.Version,
+		})
+	}
+	return snapshots, nil
+}
+
+// recordedSpanException finds an underlying exception without coupling the test to event order or span count.
+func recordedSpanException(spans tracetest.SpanStubs, message string) bool {
+	for _, span := range spans {
+		for _, event := range span.Events {
+			// RecordError uses the semantic-convention exception event and stores the original error message as an attribute.
+			if event.Name != "exception" {
+				continue
+			}
+			for _, attr := range event.Attributes {
+				// Exact comparison ensures the stable HTTP error did not replace the private dependency detail.
+				if string(attr.Key) == "exception.message" && attr.Value.AsString() == message {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+type incompleteRuntimeContractBatchFetcher struct{}
+
+// FetchRuntimeContracts returns an invalid empty success so the handler's independent identity gate is exercised.
+func (incompleteRuntimeContractBatchFetcher) FetchRuntimeContracts(context.Context, []store.WorkspaceServiceVersion, string) ([]store.ServiceContractSnapshot, error) {
+	return nil, nil
+}
+
+// newRuntimeContractIsolationRegistry serves the real Registry GraphQL wire shape and records aggregate request count.
+func newRuntimeContractIsolationRegistry(t *testing.T, rejectedVersionID uuid.UUID, alwaysReject bool) (*sandbox.HTTPRegistryClient, *int) {
+	t.Helper()
+	t.Setenv("FUSED_ENV", "development")
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests++
+		var payload struct {
+			Variables struct {
+				Refs []struct {
+					ServiceID uuid.UUID `json:"service_id"`
+					Version   uuid.UUID `json:"version"`
+				} `json:"refs"`
+			} `json:"variables"`
+		}
+		// Invalid fixture requests must not accidentally exercise a success response.
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Errorf("decode Registry request: %v", err)
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		containsRejected := alwaysReject
+		for _, ref := range payload.Variables.Refs {
+			// The first mixed batch fails only while it contains the exact rejected version.
+			if ref.Version == rejectedVersionID {
+				containsRejected = true
+			}
+		}
+		response.Header().Set("Content-Type", "application/json")
+		// A typed rejection carries only the exact immutable blocker needed for safe isolation.
+		if containsRejected {
+			_ = json.NewEncoder(response).Encode(map[string]any{"errors": []map[string]any{{
+				"message": "contract rejected", "extensions": map[string]any{"code": "runtime_contract_rejected", "service_version_id": rejectedVersionID},
+			}}})
+			return
+		}
+		contracts := make([]map[string]any, 0, len(payload.Variables.Refs))
+		for _, ref := range payload.Variables.Refs {
+			contracts = append(contracts, runtimeContractIsolationFixture(ref.ServiceID, ref.Version))
+		}
+		_ = json.NewEncoder(response).Encode(map[string]any{"data": map[string]any{"serviceRuntimeContracts": contracts}})
+	}))
+	t.Cleanup(server.Close)
+	return sandbox.NewHTTPRegistryClient(server.URL, "fsk_test"), &requests
+}
+
+// runtimeContractIsolationFixture returns the smallest canonically valid anonymous runtime contract for one exact identity.
+func runtimeContractIsolationFixture(serviceID, serviceVersionID uuid.UUID) map[string]any {
+	return map[string]any{
+		"contract_version": 2, "required_capabilities": []string{},
+		"service_id": serviceID, "service_version_id": serviceVersionID, "version": "v1",
+		"service":    map[string]any{"id": serviceID, "name": "Isolation", "base_url": "https://api.example.test"},
+		"operations": []any{}, "webhooks": []any{}, "schema_definitions": map[string]any{},
 	}
 }
 

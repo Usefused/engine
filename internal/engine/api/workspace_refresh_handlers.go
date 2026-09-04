@@ -13,6 +13,14 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+)
+
+const (
+	// Pair fallback uses the largest batch size proven by the live failure profile while avoiding singleton N+1 recovery.
+	missingSnapshotFallbackBatchSize    = 2
+	missingSnapshotConsecutiveFailLimit = 2
 )
 
 type refreshServiceContractResponse struct {
@@ -37,6 +45,19 @@ type refreshServiceContractResult struct {
 	Version          string `json:"version"`
 	ContractHash     string `json:"contract_hash,omitempty"`
 	Error            string `json:"error,omitempty"`
+}
+
+type missingSnapshotFetchFailure struct {
+	version store.WorkspaceServiceVersion
+	error   string
+}
+
+type missingSnapshotBatchResult struct {
+	snapshots     []store.ServiceContractSnapshot
+	failures      []missingSnapshotFetchFailure
+	unresolved    []store.WorkspaceServiceVersion
+	err           error
+	partitionable bool
 }
 
 type refreshServiceContractPath struct {
@@ -151,6 +172,7 @@ func refreshPinnedServiceContract(ctx context.Context, s store.Store, fetcher Ru
 	return saved, nil
 }
 
+// refreshMissingServiceContracts refreshes every independently admitted snapshot while retaining exact failures in the batch response.
 func refreshMissingServiceContracts(ctx context.Context, s store.Store, batchFetcher BatchRuntimeContractFetcher, call refreshMissingContractsCall) (*refreshMissingContractsResponse, error) {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.workspace.refresh_missing_runtime_contracts")
 	defer span.End()
@@ -170,13 +192,23 @@ func refreshMissingServiceContracts(ctx context.Context, s store.Store, batchFet
 		span.SetAttributes(attribute.String("outcome", "nothing_missing"))
 		return response, nil
 	}
-	snapshots, err := fetchMissingSnapshots(ctx, batchFetcher, versions, call.apiKey)
+	snapshots, failures, err := fetchMissingSnapshots(ctx, batchFetcher, versions, call.apiKey)
+	// Infrastructure and ambiguous identity failures still abort before any snapshot write.
 	if err != nil {
 		span.SetAttributes(attribute.String("outcome", "fetch_failed"))
+		// The stable HTTP response stays generic while the trace retains the dependency cause for operators.
+		span.SetStatus(codes.Error, "runtime contract fetch failed")
 		return nil, err
 	}
 	writeMissingSnapshots(ctx, s, snapshots, response)
-	span.SetAttributes(attribute.String("outcome", "success"), attribute.Int("refreshed", response.Refreshed), attribute.Int("failed", response.Failed))
+	appendMissingSnapshotFetchFailures(failures, response)
+	outcome := "success"
+	// A completed batch with exact rejected versions is partial rather than a dependency failure.
+	if response.Failed > 0 {
+		response.Status = "partial"
+		outcome = "partial"
+	}
+	span.SetAttributes(attribute.String("outcome", outcome), attribute.Int("refreshed", response.Refreshed), attribute.Int("failed", response.Failed))
 	return response, nil
 }
 
@@ -203,21 +235,178 @@ func listMissingContractVersions(ctx context.Context, s store.Store, limit int) 
 	return versions, nil
 }
 
-// fetchMissingSnapshots preserves typed batch rejection without introducing per-version retry fallbacks.
-func fetchMissingSnapshots(ctx context.Context, batchFetcher BatchRuntimeContractFetcher, versions []store.WorkspaceServiceVersion, apiKey string) ([]store.ServiceContractSnapshot, error) {
+// fetchMissingSnapshots preserves typed rejection isolation and partitions a failed oversized dependency request once.
+func fetchMissingSnapshots(ctx context.Context, batchFetcher BatchRuntimeContractFetcher, versions []store.WorkspaceServiceVersion, apiKey string) ([]store.ServiceContractSnapshot, []missingSnapshotFetchFailure, error) {
 	// Missing capability is not an empty batch.
 	if batchFetcher == nil {
-		return nil, refreshHTTPError{status: http.StatusInternalServerError, message: "runtime contract batch fetcher unavailable"}
+		return nil, nil, refreshHTTPError{status: http.StatusInternalServerError, message: "runtime contract batch fetcher unavailable"}
 	}
-	// Why batch is required here: this endpoint can cover many old activations,
-	// so falling back to one Registry request per row would turn rollout into an
-	// N+1 network path.
-	snapshots, err := batchFetcher.FetchRuntimeContracts(ctx, versions, apiKey)
-	// Rejected contracts require source repair, while transport failures retain retry advice.
-	if err != nil {
-		return nil, refreshFetchFailure(err)
+	result := fetchMissingSnapshotBatch(ctx, batchFetcher, versions, apiKey)
+	// One complete response or an all-typed-rejection batch needs no generic recovery.
+	if result.err == nil {
+		return result.snapshots, result.failures, nil
 	}
-	return snapshots, nil
+	recordMissingSnapshotFetchError(ctx, result.err, len(result.unresolved), "initial")
+	// Identity errors, caller cancellation, and already-small failures have no safe or useful partition fallback.
+	if !result.partitionable || len(result.unresolved) <= missingSnapshotFallbackBatchSize || ctx.Err() != nil || errors.Is(result.err, context.Canceled) || errors.Is(result.err, context.DeadlineExceeded) {
+		return nil, nil, refreshFetchFailure(result.err)
+	}
+	partitioned := fetchMissingSnapshotPartitions(ctx, batchFetcher, result.unresolved, apiKey)
+	// A partition circuit-breaker failure aborts before any accumulated snapshot is written.
+	if partitioned.err != nil {
+		return nil, nil, refreshFetchFailure(partitioned.err)
+	}
+	return partitioned.snapshots, append(result.failures, partitioned.failures...), nil
+}
+
+// fetchMissingSnapshotBatch removes only exact typed rejections and exposes generic dependency failures for bounded recovery.
+func fetchMissingSnapshotBatch(ctx context.Context, batchFetcher BatchRuntimeContractFetcher, versions []store.WorkspaceServiceVersion, apiKey string) missingSnapshotBatchResult {
+	remaining := append([]store.WorkspaceServiceVersion(nil), versions...)
+	result := missingSnapshotBatchResult{failures: make([]missingSnapshotFetchFailure, 0)}
+	for len(remaining) > 0 {
+		// Valid peers remain together until Registry names an exact rejected immutable version.
+		snapshots, err := batchFetcher.FetchRuntimeContracts(ctx, remaining, apiKey)
+		if err == nil {
+			// A successful response must account for every exact requested identity before any write is admitted.
+			if identityErr := validateMissingSnapshotIdentities(remaining, snapshots); identityErr != nil {
+				result.err = identityErr
+				return result
+			}
+			result.snapshots = snapshots
+			return result
+		}
+		rejectedVersionID, rejected := sandbox.RuntimeContractRejectionVersion(err)
+		// Only an untyped dependency failure is eligible for the separate size-based fallback.
+		if !rejected {
+			result.unresolved = remaining
+			result.err = err
+			result.partitionable = true
+			return result
+		}
+		var rejectedVersion store.WorkspaceServiceVersion
+		remaining, rejectedVersion, err = removeRejectedMissingVersion(remaining, rejectedVersionID)
+		// Missing or duplicated rejection identity remains fatal rather than excusing unrelated versions.
+		if err != nil {
+			result.err = err
+			return result
+		}
+		result.failures = append(result.failures, missingSnapshotFetchFailure{version: rejectedVersion, error: "runtime_contract_rejected"})
+	}
+	return result
+}
+
+// fetchMissingSnapshotPartitions retries an oversized failed request in fixed pairs and stops quickly during an outage.
+func fetchMissingSnapshotPartitions(ctx context.Context, batchFetcher BatchRuntimeContractFetcher, versions []store.WorkspaceServiceVersion, apiKey string) missingSnapshotBatchResult {
+	result := missingSnapshotBatchResult{
+		snapshots: make([]store.ServiceContractSnapshot, 0, len(versions)),
+		failures:  make([]missingSnapshotFetchFailure, 0),
+	}
+	consecutiveFailures := 0
+	for start := 0; start < len(versions); start += missingSnapshotFallbackBatchSize {
+		end := start + missingSnapshotFallbackBatchSize
+		// The final partition may contain one version while every earlier request retains pair batching.
+		if end > len(versions) {
+			end = len(versions)
+		}
+		partition := fetchMissingSnapshotBatch(ctx, batchFetcher, versions[start:end], apiKey)
+		result.failures = append(result.failures, partition.failures...)
+		// Exact identity success resets the outage circuit and admits only this partition's validated snapshots.
+		if partition.err == nil {
+			consecutiveFailures = 0
+			result.snapshots = append(result.snapshots, partition.snapshots...)
+			continue
+		}
+		recordMissingSnapshotFetchError(ctx, partition.err, len(partition.unresolved), "partition")
+		// Identity ambiguity and caller cancellation must stop rather than becoming per-version failure output.
+		if !partition.partitionable || ctx.Err() != nil || errors.Is(partition.err, context.Canceled) || errors.Is(partition.err, context.DeadlineExceeded) {
+			result.err = partition.err
+			return result
+		}
+		consecutiveFailures++
+		// Two adjacent dependency failures are treated as an outage, bounding fallback amplification to two probes.
+		if consecutiveFailures >= missingSnapshotConsecutiveFailLimit {
+			result.err = partition.err
+			return result
+		}
+		for _, unresolved := range partition.unresolved {
+			// A failed partition reports no content; its exact requested identities remain safe to retry later.
+			result.failures = append(result.failures, missingSnapshotFetchFailure{version: unresolved, error: "runtime_contract_fetch_failed"})
+		}
+	}
+	return result
+}
+
+// recordMissingSnapshotFetchError retains the private dependency cause with bounded request context in OpenTelemetry.
+func recordMissingSnapshotFetchError(ctx context.Context, err error, batchSize int, phase string) {
+	// Missing errors have no diagnostic value and should not create synthetic exception events.
+	if err == nil {
+		return
+	}
+	trace.SpanFromContext(ctx).RecordError(err, trace.WithAttributes(
+		attribute.String("runtime_contract.fetch_phase", phase),
+		attribute.Int("runtime_contract.batch_size", batchSize),
+	))
+}
+
+// removeRejectedMissingVersion consumes exactly one Registry-identified version without changing peer order.
+func removeRejectedMissingVersion(versions []store.WorkspaceServiceVersion, rejectedVersionID uuid.UUID) ([]store.WorkspaceServiceVersion, store.WorkspaceServiceVersion, error) {
+	remaining := make([]store.WorkspaceServiceVersion, 0, len(versions)-1)
+	var rejected store.WorkspaceServiceVersion
+	matches := 0
+	for _, version := range versions {
+		// Only the exact immutable version named by the typed rejection leaves the next batch.
+		if version.ServiceVersionID == rejectedVersionID {
+			rejected = version
+			matches++
+			continue
+		}
+		remaining = append(remaining, version)
+	}
+	// One-to-one identity prevents missing and duplicate local pins from becoming silent failures.
+	if matches != 1 {
+		return nil, store.WorkspaceServiceVersion{}, errors.New("runtime contract rejection identity does not match exactly one requested version")
+	}
+	return remaining, rejected, nil
+}
+
+// validateMissingSnapshotIdentities requires a complete disjoint response for the final successful batch.
+func validateMissingSnapshotIdentities(versions []store.WorkspaceServiceVersion, snapshots []store.ServiceContractSnapshot) error {
+	expected := make(map[uuid.UUID]uuid.UUID, len(versions))
+	for _, version := range versions {
+		// Empty or duplicate local identities cannot authorize a Registry snapshot write.
+		if version.ServiceID == uuid.Nil || version.ServiceVersionID == uuid.Nil {
+			return errors.New("missing runtime contract request identity")
+		}
+		// A repeated version ID would let one returned snapshot satisfy multiple local rows.
+		if _, duplicate := expected[version.ServiceVersionID]; duplicate {
+			return errors.New("duplicate runtime contract request identity")
+		}
+		expected[version.ServiceVersionID] = version.ServiceID
+	}
+	for _, snapshot := range snapshots {
+		serviceID, found := expected[snapshot.ServiceVersionID]
+		// Missing, substituted, and duplicate response identities all fail before persistence.
+		if !found || serviceID != snapshot.ServiceID {
+			return errors.New("runtime contract response identity mismatch")
+		}
+		delete(expected, snapshot.ServiceVersionID)
+	}
+	// Every requested version needs one exact accepted snapshot.
+	if len(expected) != 0 {
+		return errors.New("runtime contract response is incomplete")
+	}
+	return nil
+}
+
+// appendMissingSnapshotFetchFailures projects only stable rejection codes beside exact requested identities.
+func appendMissingSnapshotFetchFailures(failures []missingSnapshotFetchFailure, response *refreshMissingContractsResponse) {
+	for _, failure := range failures {
+		response.Failed++
+		response.Results = append(response.Results, refreshServiceContractResult{
+			ServiceID: failure.version.ServiceID.String(), ServiceVersionID: failure.version.ServiceVersionID.String(),
+			Version: failure.version.Version, Error: failure.error,
+		})
+	}
 }
 
 func writeMissingSnapshots(ctx context.Context, s store.Store, snapshots []store.ServiceContractSnapshot, response *refreshMissingContractsResponse) {
