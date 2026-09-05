@@ -16,21 +16,22 @@ import (
 // class is correlated, stable, and hides internal or downstream failure prose.
 func TestWriteRefreshServiceContractErrorUsesSharedEnvelope(t *testing.T) {
 	tests := []struct {
-		name        string
-		err         error
-		status      int
-		code        string
-		message     string
-		retryable   bool
-		phase       string
-		commitState string
+		name         string
+		err          error
+		status       int
+		code         string
+		message      string
+		retryable    bool
+		phase        string
+		commitState  string
+		serverDetail string
 	}{
 		{name: "invalid service", err: refreshHTTPError{status: http.StatusBadRequest, message: "service id must be a valid UUID"}, status: http.StatusBadRequest, code: "invalid_service_id", message: "service id must be a valid UUID", phase: "runtime_contract_refresh", commitState: "not_committed"},
 		{name: "invalid service version", err: refreshHTTPError{status: http.StatusBadRequest, message: "service_version_id must be a valid UUID"}, status: http.StatusBadRequest, code: "invalid_service_version_id", message: "service_version_id must be a valid UUID"},
 		{name: "unknown validation", err: refreshHTTPError{status: http.StatusBadRequest, message: "invalid value secret=fsk_never_return"}, status: http.StatusBadRequest, code: "invalid_runtime_contract_refresh_request", message: "The runtime contract refresh request is invalid."},
 		{name: "inactive version", err: refreshHTTPError{status: http.StatusNotFound, message: "workspace service version is not active"}, status: http.StatusNotFound, code: "runtime_contract_not_active", message: "The selected workspace service version is not active."},
 		{name: "registry unavailable", err: refreshHTTPError{status: http.StatusBadGateway, message: "registry https://private.registry.test secret=fsk_never_return"}, status: http.StatusBadGateway, code: "runtime_contract_dependency_unavailable", message: "The Engine could not fetch the runtime contract.", retryable: true},
-		{name: "rejected contract", err: refreshHTTPError{status: http.StatusUnprocessableEntity, rejectedVersion: uuid.New()}, status: http.StatusUnprocessableEntity, code: "runtime_contract_rejected", message: "Registry rejected the runtime contract for this service version."},
+		{name: "rejected contract", err: refreshHTTPError{status: http.StatusUnprocessableEntity, rejectedVersion: uuid.New(), rejectedMessage: "Generation contract failed deterministic validation."}, status: http.StatusUnprocessableEntity, code: "runtime_contract_rejected", message: "Registry rejected the runtime contract for this service version.", serverDetail: "Generation contract failed deterministic validation."},
 		{name: "unknown internal", err: errors.New("database password=fsk_never_return"), status: http.StatusInternalServerError, code: "runtime_contract_refresh_failed", message: "The Engine could not refresh the runtime contract.", retryable: true},
 		{name: "ambiguous store write", err: refreshHTTPError{status: http.StatusInternalServerError, message: "failed to store runtime contract snapshot", phase: "runtime_contract_refresh_commit", commitState: "unknown"}, status: http.StatusInternalServerError, code: "runtime_contract_refresh_failed", message: "The Engine could not refresh the runtime contract.", phase: "runtime_contract_refresh_commit", commitState: "unknown"},
 	}
@@ -59,6 +60,10 @@ func TestWriteRefreshServiceContractErrorUsesSharedEnvelope(t *testing.T) {
 			}
 			if envelope.Error.Phase != phase || envelope.Error.CommitState != commitState || envelope.Error.RequestID != "request-refresh" {
 				t.Fatalf("refresh mutation metadata = %#v", envelope.Error)
+			}
+			// Only deterministic rejection detail is eligible for the public server_detail field.
+			if detail, _ := envelope.Error.Details["server_detail"].(string); detail != test.serverDetail {
+				t.Fatalf("server_detail=%q, want %q", detail, test.serverDetail)
 			}
 			// Internal URLs, credentials, and store prose remain outside the public response.
 			if strings.Contains(response.Body.String(), "private.registry.test") || strings.Contains(response.Body.String(), "fsk_never_return") || strings.Contains(response.Body.String(), "database password") {

@@ -3,10 +3,18 @@ package sandbox
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/google/uuid"
+)
+
+const (
+	// The fallback explains the repair boundary without trusting downstream prose.
+	defaultRuntimeContractRejectionReason = "Registry rejected the runtime contract for this service version."
+	// Bounded public reasons prevent an upstream diagnostic from inflating Engine responses.
+	maxRuntimeContractRejectionReasonRunes = 512
 )
 
 type runtimeContractGraphQLError struct {
@@ -14,6 +22,7 @@ type runtimeContractGraphQLError struct {
 	Extensions struct {
 		Code             string    `json:"code"`
 		ServiceVersionID uuid.UUID `json:"service_version_id"`
+		Reason           string    `json:"reason"`
 	} `json:"extensions"`
 }
 
@@ -23,6 +32,7 @@ type OwnedServiceRejection struct {
 	ServiceVersionID  uuid.UUID
 	BlockingVersionID uuid.UUID
 	cause             error
+	publicReason      string
 }
 
 // runtimeContractRejections is private so only explicit recovery can consume its validated subset.
@@ -31,14 +41,36 @@ type runtimeContractRejections struct {
 	accepted []store.ServiceContractSnapshot
 }
 
-// RuntimeContractRejectionVersion exposes only typed source-repair identity, never Registry payload or error prose.
+// RuntimeContractRejectionVersion preserves the existing identity-only accessor for callers that do not display rejection detail.
 func RuntimeContractRejectionVersion(err error) (uuid.UUID, bool) {
+	versionID, _, ok := RuntimeContractRejectionDetails(err)
+	return versionID, ok
+}
+
+// RuntimeContractRejectionDetails exposes one validated blocker and its bounded explicit public reason.
+func RuntimeContractRejectionDetails(err error) (uuid.UUID, string, bool) {
 	var rejection *runtimeContractRejections
 	// Unknown transport errors and prose lookalikes cannot claim a permanent contract rejection.
 	if !errors.As(err, &rejection) || len(rejection.failures) == 0 {
-		return uuid.Nil, false
+		return uuid.Nil, "", false
 	}
-	return rejection.failures[0].BlockingVersionID, true
+	failure := rejection.failures[0]
+	return failure.BlockingVersionID, normalizeRuntimeContractRejectionReason(failure.publicReason), true
+}
+
+// normalizeRuntimeContractRejectionReason collapses control whitespace and bounds only the Registry's explicit public field.
+func normalizeRuntimeContractRejectionReason(reason string) string {
+	normalized := strings.Join(strings.Fields(reason), " ")
+	// Missing explicit detail falls back instead of reusing the GraphQL error message, which may contain dependency internals.
+	if normalized == "" {
+		return defaultRuntimeContractRejectionReason
+	}
+	runes := []rune(normalized)
+	// Truncation preserves useful deterministic detail while bounding untrusted upstream response size.
+	if len(runes) > maxRuntimeContractRejectionReasonRunes {
+		normalized = string(runes[:maxRuntimeContractRejectionReasonRunes])
+	}
+	return normalized
 }
 
 // Error retains diagnostics for strict callers without converting the operation into success.
@@ -117,6 +149,10 @@ func classifyRuntimeContractGraphQLErrors(failures []runtimeContractGraphQLError
 	if err != nil {
 		return err
 	}
+	// An empty error set cannot identify the immutable version that blocked the batch.
+	if len(failures) == 0 {
+		return errors.New("FetchRuntimeContracts: empty graphql error response")
+	}
 	for _, failure := range failures {
 		// Auth, identity, SQL, unknown and mixed failures retain their fatal boundary.
 		if failure.Extensions.Code != "runtime_contract_rejected" || !requested[failure.Extensions.ServiceVersionID] {
@@ -127,6 +163,7 @@ func classifyRuntimeContractGraphQLErrors(failures []runtimeContractGraphQLError
 	for _, version := range versions {
 		failure := ownedServiceRejection(version, errors.New("Registry rejected the runtime contract batch; repair the reported version before retrying"))
 		failure.BlockingVersionID = failures[0].Extensions.ServiceVersionID
+		failure.publicReason = normalizeRuntimeContractRejectionReason(failures[0].Extensions.Reason)
 		rejected.failures = append(rejected.failures, failure)
 	}
 	return rejected

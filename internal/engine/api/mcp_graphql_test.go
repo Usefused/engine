@@ -333,7 +333,7 @@ func TestEngineGraphQLRefreshMissingServiceContracts_BackfillsActivatedVersions(
 			missing
 			refreshed
 			failed
-			results { service_id service_version_id version contract_hash error }
+			results { service_id service_version_id version contract_hash error error_message }
 		}
 	}`, map[string]any{"limit": 2})
 
@@ -353,6 +353,20 @@ func TestEngineGraphQLRefreshMissingServiceContracts_BackfillsActivatedVersions(
 	spans := exporter.GetSpans()
 	if !hasSpanNamed(spans, "engine.workspace.refresh_missing_runtime_contracts") {
 		t.Fatalf("expected missing-refresh span, got %#v", spans)
+	}
+}
+
+// TestRefreshMissingContractsGraphQLPayloadIncludesErrorMessage preserves reviewed detail for CLI GraphQL decoding.
+func TestRefreshMissingContractsGraphQLPayloadIncludesErrorMessage(t *testing.T) {
+	response := &refreshMissingContractsResponse{Results: []refreshServiceContractResult{{
+		ServiceID: uuid.NewString(), ServiceVersionID: uuid.NewString(), Version: "v1",
+		Error: "runtime_contract_rejected", ErrorMessage: "Generation contract failed deterministic validation.",
+	}}}
+	payload := refreshMissingContractsGraphQLPayload(response)
+	results, ok := payload["results"].([]map[string]interface{})
+	// The GraphQL projection must keep the distinct stable code and public detail fields.
+	if !ok || len(results) != 1 || results[0]["error"] != "runtime_contract_rejected" || results[0]["error_message"] != "Generation contract failed deterministic validation." {
+		t.Fatalf("payload=%#v", payload)
 	}
 }
 

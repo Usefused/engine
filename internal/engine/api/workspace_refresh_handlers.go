@@ -49,11 +49,13 @@ type refreshServiceContractResult struct {
 	Version          string `json:"version"`
 	ContractHash     string `json:"contract_hash,omitempty"`
 	Error            string `json:"error,omitempty"`
+	ErrorMessage     string `json:"error_message,omitempty"`
 }
 
 type missingSnapshotFetchFailure struct {
-	version store.WorkspaceServiceVersion
-	error   string
+	version      store.WorkspaceServiceVersion
+	code         string
+	errorMessage string
 }
 
 type missingSnapshotBatchResult struct {
@@ -76,6 +78,7 @@ type refreshHTTPError struct {
 	phase           string
 	commitState     string
 	rejectedVersion uuid.UUID
+	rejectedMessage string
 }
 
 func (e refreshHTTPError) Error() string {
@@ -280,7 +283,7 @@ func fetchMissingSnapshotBatch(ctx context.Context, batchFetcher BatchRuntimeCon
 			result.snapshots = snapshots
 			return result
 		}
-		rejectedVersionID, rejected := sandbox.RuntimeContractRejectionVersion(err)
+		rejectedVersionID, rejectedMessage, rejected := sandbox.RuntimeContractRejectionDetails(err)
 		// Only an untyped dependency failure is eligible for the separate size-based fallback.
 		if !rejected {
 			result.unresolved = remaining
@@ -296,7 +299,7 @@ func fetchMissingSnapshotBatch(ctx context.Context, batchFetcher BatchRuntimeCon
 			result.err = err
 			return result
 		}
-		result.failures = append(result.failures, missingSnapshotFetchFailure{version: rejectedVersion, error: "runtime_contract_rejected"})
+		result.failures = append(result.failures, missingSnapshotFetchFailure{version: rejectedVersion, code: "runtime_contract_rejected", errorMessage: rejectedMessage})
 	}
 	return result
 }
@@ -383,7 +386,7 @@ func mergeMissingSnapshotSingletonProbe(ctx context.Context, resolved *missingSn
 	resolved.unresolved = append(resolved.unresolved, probe.unresolved...)
 	// A singleton generic result can name only its one requested immutable version.
 	for _, unresolved := range probe.unresolved {
-		resolved.failures = append(resolved.failures, missingSnapshotFetchFailure{version: unresolved, error: "runtime_contract_fetch_failed"})
+		resolved.failures = append(resolved.failures, missingSnapshotFetchFailure{version: unresolved, code: "runtime_contract_fetch_failed", errorMessage: "The Engine could not fetch this runtime contract from Registry."})
 	}
 	return false
 }
@@ -413,7 +416,7 @@ func mergeMissingSnapshotPartition(ctx context.Context, result *missingSnapshotB
 	}
 	for _, unresolved := range partition.unresolved {
 		// A failed partition reports no content; its exact requested identities remain safe to retry later.
-		result.failures = append(result.failures, missingSnapshotFetchFailure{version: unresolved, error: "runtime_contract_fetch_failed"})
+		result.failures = append(result.failures, missingSnapshotFetchFailure{version: unresolved, code: "runtime_contract_fetch_failed", errorMessage: "The Engine could not fetch this runtime contract from Registry."})
 	}
 	return consecutiveFailures, nil
 }
@@ -512,38 +515,42 @@ func validateMissingSnapshotIdentities(versions []store.WorkspaceServiceVersion,
 	return nil
 }
 
-// appendMissingSnapshotFetchFailures projects only stable rejection codes beside exact requested identities.
+// appendMissingSnapshotFetchFailures projects stable codes and reviewed public messages beside exact requested identities.
 func appendMissingSnapshotFetchFailures(failures []missingSnapshotFetchFailure, response *refreshMissingContractsResponse) {
 	for _, failure := range failures {
 		response.Failed++
 		response.Results = append(response.Results, refreshServiceContractResult{
 			ServiceID: failure.version.ServiceID.String(), ServiceVersionID: failure.version.ServiceVersionID.String(),
-			Version: failure.version.Version, Error: failure.error,
+			Version: failure.version.Version, Error: failure.code, ErrorMessage: failure.errorMessage,
 		})
 	}
 }
 
+// writeMissingSnapshots persists independently admitted contracts and reports stable write failures per immutable version.
 func writeMissingSnapshots(ctx context.Context, s store.Store, snapshots []store.ServiceContractSnapshot, response *refreshMissingContractsResponse) {
 	writer, err := refreshSnapshotWriter(s)
+	// Missing storage capability fails each admitted snapshot without exposing implementation details.
 	if err != nil {
-		appendMissingSnapshotError(snapshots, response, err)
+		appendMissingSnapshotError(snapshots, response)
 		return
 	}
 	for _, snapshot := range snapshots {
 		saved, err := writer.UpsertServiceContractSnapshot(ctx, snapshot)
+		// A per-version write failure leaves peers eligible for independent persistence.
 		if err != nil {
-			appendMissingSnapshotError([]store.ServiceContractSnapshot{snapshot}, response, err)
+			appendMissingSnapshotError([]store.ServiceContractSnapshot{snapshot}, response)
 			continue
 		}
 		response.Refreshed++
-		response.Results = append(response.Results, refreshResultFromSnapshot(saved, ""))
+		response.Results = append(response.Results, refreshResultFromSnapshot(saved, "", ""))
 	}
 }
 
-func appendMissingSnapshotError(snapshots []store.ServiceContractSnapshot, response *refreshMissingContractsResponse, err error) {
+// appendMissingSnapshotError reports a stable storage category without returning raw persistence errors.
+func appendMissingSnapshotError(snapshots []store.ServiceContractSnapshot, response *refreshMissingContractsResponse) {
 	for _, snapshot := range snapshots {
 		response.Failed++
-		response.Results = append(response.Results, refreshResultFromSnapshot(&snapshot, err.Error()))
+		response.Results = append(response.Results, refreshResultFromSnapshot(&snapshot, "runtime_contract_store_failed", "The Engine could not store this runtime contract snapshot."))
 	}
 }
 
@@ -562,13 +569,15 @@ func getRefreshWorkspaceServiceVersion(ctx context.Context, s store.Store, call 
 	return version, nil
 }
 
-func refreshResultFromSnapshot(snapshot *store.ServiceContractSnapshot, err string) refreshServiceContractResult {
+// refreshResultFromSnapshot projects one persisted or failed snapshot through stable public error fields.
+func refreshResultFromSnapshot(snapshot *store.ServiceContractSnapshot, errorCode, errorMessage string) refreshServiceContractResult {
 	return refreshServiceContractResult{
 		ServiceID:        snapshot.ServiceID.String(),
 		ServiceVersionID: snapshot.ServiceVersionID.String(),
 		Version:          snapshot.Version,
 		ContractHash:     snapshot.ContractHash,
-		Error:            err,
+		Error:            errorCode,
+		ErrorMessage:     errorMessage,
 	}
 }
 
@@ -603,8 +612,8 @@ func fetchRefreshSnapshot(ctx context.Context, fetcher RuntimeContractFetcher, c
 // refreshFetchFailure distinguishes authoritative content rejection from a retryable Registry outage.
 func refreshFetchFailure(err error) refreshHTTPError {
 	// Only the canonical typed decoder may supply source-repair classification.
-	if version, rejected := sandbox.RuntimeContractRejectionVersion(err); rejected {
-		return refreshHTTPError{status: http.StatusUnprocessableEntity, message: "runtime_contract_rejected", rejectedVersion: version}
+	if version, reason, rejected := sandbox.RuntimeContractRejectionDetails(err); rejected {
+		return refreshHTTPError{status: http.StatusUnprocessableEntity, message: "runtime_contract_rejected", rejectedVersion: version, rejectedMessage: reason}
 	}
 	return refreshHTTPError{status: http.StatusBadGateway, message: "failed to fetch runtime contract from registry"}
 }
@@ -635,7 +644,7 @@ func writeRefreshServiceContractError(w http.ResponseWriter, ctx context.Context
 func refreshWorkspaceConfigError(err refreshHTTPError) workspaceConfigHTTPError {
 	// A known rejected version needs repair/re-import, never outage retries.
 	if err.rejectedVersion != uuid.Nil {
-		return workspaceConfigHTTPError{status: http.StatusUnprocessableEntity, code: "runtime_contract_rejected", category: "validation", message: "Registry rejected the runtime contract for this service version.", remediation: "Repair and re-import the rejected service version, then refresh its runtime contract.", details: map[string]any{"service_version_id": err.rejectedVersion.String()}}
+		return workspaceConfigHTTPError{status: http.StatusUnprocessableEntity, code: "runtime_contract_rejected", category: "validation", message: "Registry rejected the runtime contract for this service version.", remediation: "Repair and re-import the rejected service version, then refresh its runtime contract.", details: map[string]any{"service_version_id": err.rejectedVersion.String(), "server_detail": err.rejectedMessage}}
 	}
 	// Client-correctable path validation retains the precise field diagnosis.
 	if err.status == http.StatusBadRequest {

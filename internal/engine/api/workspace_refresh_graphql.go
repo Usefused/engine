@@ -14,6 +14,7 @@ var refreshServiceContractResultType = graphql.NewObject(graphql.ObjectConfig{
 		"version":            &graphql.Field{Type: graphql.String},
 		"contract_hash":      &graphql.Field{Type: graphql.String},
 		"error":              &graphql.Field{Type: graphql.String},
+		"error_message":      &graphql.Field{Type: graphql.String},
 	},
 })
 
@@ -70,6 +71,7 @@ func refreshGraphQLLimit(raw interface{}) int {
 	return limit
 }
 
+// refreshMissingContractsGraphQLPayload preserves stable per-version failure detail across the GraphQL boundary.
 func refreshMissingContractsGraphQLPayload(response *refreshMissingContractsResponse) map[string]interface{} {
 	results := make([]map[string]interface{}, 0, len(response.Results))
 	for _, result := range response.Results {
@@ -79,6 +81,7 @@ func refreshMissingContractsGraphQLPayload(response *refreshMissingContractsResp
 			"version":            result.Version,
 			"contract_hash":      result.ContractHash,
 			"error":              result.Error,
+			"error_message":      result.ErrorMessage,
 		})
 	}
 	return map[string]interface{}{

@@ -134,14 +134,20 @@ func TestRuntimeContractBatchIdentityFailuresAreFatal(t *testing.T) {
 // TestRuntimeContractGraphQLRecoveryRequiresExplicitClassification rejects text matching and mixed auth errors.
 func TestRuntimeContractGraphQLRecoveryRequiresExplicitClassification(t *testing.T) {
 	_, version := recoveryContractFixture()
-	classified := runtimeContractGraphQLError{Message: "do not use this text for policy"}
+	classified := runtimeContractGraphQLError{Message: "dependency secret=fsk_never_return"}
 	classified.Extensions.Code = "runtime_contract_rejected"
 	classified.Extensions.ServiceVersionID = version.ServiceVersionID
+	classified.Extensions.Reason = "  Generation contract identity\nfailed deterministic validation.  "
 	err := classifyRuntimeContractGraphQLErrors([]runtimeContractGraphQLError{classified}, []store.WorkspaceServiceVersion{version})
 	var rejected *runtimeContractRejections
 	// An explicit authorized version-bound rejection may defer the whole batch without extra queries.
 	if !errors.As(err, &rejected) || len(rejected.accepted) != 0 || len(rejected.failures) != 1 {
 		t.Fatalf("classification=%v", err)
+	}
+	versionID, reason, ok := RuntimeContractRejectionDetails(err)
+	// Only the explicit reason is normalized for callers; the top-level GraphQL message remains private.
+	if !ok || versionID != version.ServiceVersionID || reason != "Generation contract identity failed deterministic validation." || strings.Contains(reason, "fsk_never_return") {
+		t.Fatalf("details=(%s, %q, %t)", versionID, reason, ok)
 	}
 	wrongVersion := classified
 	wrongVersion.Extensions.ServiceVersionID = uuid.New()
@@ -155,6 +161,21 @@ func TestRuntimeContractGraphQLRecoveryRequiresExplicitClassification(t *testing
 		if errors.As(err, &rejected) {
 			t.Fatalf("unclassified failure downgraded: %v", err)
 		}
+	}
+}
+
+// TestRuntimeContractRejectionDetailsBoundsExplicitReason prevents typed upstream detail from producing unbounded public output.
+func TestRuntimeContractRejectionDetailsBoundsExplicitReason(t *testing.T) {
+	_, version := recoveryContractFixture()
+	classified := runtimeContractGraphQLError{Message: "unused downstream diagnostic"}
+	classified.Extensions.Code = "runtime_contract_rejected"
+	classified.Extensions.ServiceVersionID = version.ServiceVersionID
+	classified.Extensions.Reason = strings.Repeat("r", maxRuntimeContractRejectionReasonRunes+20)
+	err := classifyRuntimeContractGraphQLErrors([]runtimeContractGraphQLError{classified}, []store.WorkspaceServiceVersion{version})
+	_, reason, ok := RuntimeContractRejectionDetails(err)
+	// The reason remains useful but cannot exceed the Engine's response budget.
+	if !ok || len([]rune(reason)) != maxRuntimeContractRejectionReasonRunes {
+		t.Fatalf("reason length=%d ok=%t", len([]rune(reason)), ok)
 	}
 }
 

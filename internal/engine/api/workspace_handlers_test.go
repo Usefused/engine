@@ -1236,6 +1236,34 @@ func TestRefreshMissingServiceContracts_BackfillsMissingSnapshotsInBatch(t *test
 	}
 }
 
+// TestRefreshMissingServiceContractsHidesSnapshotWriteFailure proves persistence diagnostics stay outside bulk public results.
+func TestRefreshMissingServiceContractsHidesSnapshotWriteFailure(t *testing.T) {
+	version := store.WorkspaceServiceVersion{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"}
+	s := &workspaceTestStore{
+		accountID:               uuid.New(),
+		missingContractVersions: []store.WorkspaceServiceVersion{version},
+		snapshotWriteErr:        errors.New("postgres password=fsk_never_return"),
+	}
+	verifier := &runtimeContractVerifier{mockVerifier: &mockVerifier{}}
+	result, err := refreshMissingServiceContracts(context.Background(), s, verifier, refreshMissingContractsCall{
+		accountID: s.accountID, apiKey: "fsk_test", limit: 1,
+	})
+	// A write failure remains an exact partial result rather than losing the attempted immutable identity.
+	if err != nil || result.Status != "partial" || result.Refreshed != 0 || result.Failed != 1 || len(result.Results) != 1 {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	failed := result.Results[0]
+	// The response exposes stable remediation fields without the raw store cause.
+	if failed.Error != "runtime_contract_store_failed" || failed.ErrorMessage != "The Engine could not store this runtime contract snapshot." || strings.Contains(failed.Error, "fsk_never_return") || strings.Contains(failed.ErrorMessage, "fsk_never_return") {
+		t.Fatalf("failed result=%#v", failed)
+	}
+	encoded, marshalErr := json.Marshal(result)
+	// The complete REST-shaped response must remain opaque even if fields are added later.
+	if marshalErr != nil || strings.Contains(string(encoded), "postgres password") || strings.Contains(string(encoded), "fsk_never_return") {
+		t.Fatalf("encoded result=%s marshal error=%v", encoded, marshalErr)
+	}
+}
+
 // TestRefreshMissingServiceContractsPersistsGenerationPin proves legacy backfill carries Registry retention authority into the local snapshot.
 func TestRefreshMissingServiceContractsPersistsGenerationPin(t *testing.T) {
 	serviceID, versionID := uuid.New(), uuid.New()
@@ -1282,8 +1310,8 @@ func TestRefreshMissingServiceContractsIsolatesExactRegistryRejection(t *testing
 		t.Fatalf("requests=%d writes=%#v", *requests, s.snapshotWrites)
 	}
 	failed := result.Results[len(result.Results)-1]
-	// Failure output must retain the exact requested tuple and only the stable rejection classification.
-	if failed.ServiceID != bad.ServiceID.String() || failed.ServiceVersionID != bad.ServiceVersionID.String() || failed.Version != bad.Version || failed.Error != "runtime_contract_rejected" {
+	// Failure output must retain the exact requested tuple, stable classification, and explicit reviewed Registry reason.
+	if failed.ServiceID != bad.ServiceID.String() || failed.ServiceVersionID != bad.ServiceVersionID.String() || failed.Version != bad.Version || failed.Error != "runtime_contract_rejected" || failed.ErrorMessage != "Generation contract failed deterministic validation." {
 		t.Fatalf("failed result=%#v", failed)
 	}
 }
@@ -1316,8 +1344,8 @@ func TestRefreshMissingServiceContractsConsumesMultiplePartitionRejections(t *te
 		t.Fatalf("requests=%d earlyWrite=%t writes=%#v", requests.Load(), observedEarlyWrite.Load(), s.snapshotWrites)
 	}
 	failed := result.Results[len(result.Results)-2:]
-	// Rejection output retains both exact immutable identities in their original partition order.
-	if failed[0].ServiceVersionID != badA.ServiceVersionID.String() || failed[1].ServiceVersionID != badB.ServiceVersionID.String() || failed[0].Error != "runtime_contract_rejected" || failed[1].Error != "runtime_contract_rejected" {
+	// Rejection output retains both exact immutable identities and reviewed messages in their original partition order.
+	if failed[0].ServiceVersionID != badA.ServiceVersionID.String() || failed[1].ServiceVersionID != badB.ServiceVersionID.String() || failed[0].Error != "runtime_contract_rejected" || failed[1].Error != "runtime_contract_rejected" || failed[0].ErrorMessage != "Generation contract failed deterministic validation." || failed[1].ErrorMessage != "Generation contract failed deterministic validation." {
 		t.Fatalf("failed results=%#v", failed)
 	}
 }
@@ -1511,8 +1539,8 @@ func TestRefreshMissingServiceContractsReportsOneFailedSingleton(t *testing.T) {
 		t.Fatalf("result=%#v error=%v writes=%#v", result, err, s.snapshotWrites)
 	}
 	failed := result.Results[len(result.Results)-1]
-	// The singleton boundary reports the exact immutable failure without blaming the successfully recovered pair peer.
-	if failed.ServiceID != versions[0].ServiceID.String() || failed.ServiceVersionID != versions[0].ServiceVersionID.String() || failed.Error != "runtime_contract_fetch_failed" {
+	// The singleton boundary reports the exact immutable failure with reviewed generic dependency copy.
+	if failed.ServiceID != versions[0].ServiceID.String() || failed.ServiceVersionID != versions[0].ServiceVersionID.String() || failed.Error != "runtime_contract_fetch_failed" || failed.ErrorMessage != "The Engine could not fetch this runtime contract from Registry." || strings.Contains(failed.ErrorMessage, "singleton dependency failure") {
 		t.Fatalf("failed result=%#v", failed)
 	}
 }
@@ -1539,8 +1567,8 @@ func TestRefreshMissingServiceContractsReportsIsolatedPartitionFailure(t *testin
 		t.Fatalf("result=%#v error=%v writes=%#v", result, err, s.snapshotWrites)
 	}
 	failed := result.Results[len(result.Results)-1]
-	// The final singleton is reported from its exact attempted identity without assigning a speculative provider cause.
-	if failed.ServiceVersionID != versions[4].ServiceVersionID.String() || failed.Error != "runtime_contract_fetch_failed" {
+	// The final singleton is reported from its exact attempted identity with reviewed generic dependency copy.
+	if failed.ServiceVersionID != versions[4].ServiceVersionID.String() || failed.Error != "runtime_contract_fetch_failed" || failed.ErrorMessage != "The Engine could not fetch this runtime contract from Registry." || strings.Contains(failed.ErrorMessage, "registry partition timeout") {
 		t.Fatalf("failed result=%#v", failed)
 	}
 }
@@ -1688,10 +1716,10 @@ func newRuntimeContractIsolationRegistry(t *testing.T, rejectedVersionID uuid.UU
 			}
 		}
 		response.Header().Set("Content-Type", "application/json")
-		// A typed rejection carries only the exact immutable blocker needed for safe isolation.
+		// A typed rejection carries the exact immutable blocker and an explicitly public deterministic reason.
 		if containsRejected {
 			_ = json.NewEncoder(response).Encode(map[string]any{"errors": []map[string]any{{
-				"message": "contract rejected", "extensions": map[string]any{"code": "runtime_contract_rejected", "service_version_id": rejectedVersionID},
+				"message": "storage secret=fsk_never_return", "extensions": map[string]any{"code": "runtime_contract_rejected", "service_version_id": rejectedVersionID, "reason": "Generation contract failed deterministic validation."},
 			}}})
 			return
 		}
@@ -1749,7 +1777,7 @@ func newPartitionedRuntimeContractRejectionRegistry(t *testing.T, rejectedVersio
 			// Every rejected reference carries its exact requested immutable version identity.
 			if rejected[ref.Version] {
 				failures = append(failures, map[string]any{
-					"message": "contract rejected", "extensions": map[string]any{"code": "runtime_contract_rejected", "service_version_id": ref.Version},
+					"message": "storage secret=fsk_never_return", "extensions": map[string]any{"code": "runtime_contract_rejected", "service_version_id": ref.Version, "reason": "Generation contract failed deterministic validation."},
 				})
 			}
 		}
