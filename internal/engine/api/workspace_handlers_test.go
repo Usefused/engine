@@ -1254,7 +1254,7 @@ func TestRefreshMissingServiceContractsHidesSnapshotWriteFailure(t *testing.T) {
 	}
 	failed := result.Results[0]
 	// The response exposes stable remediation fields without the raw store cause.
-	if failed.Error != "runtime_contract_store_failed" || failed.ErrorMessage != "The Engine could not store this runtime contract snapshot." || strings.Contains(failed.Error, "fsk_never_return") || strings.Contains(failed.ErrorMessage, "fsk_never_return") {
+	if failed.Error != "runtime_contract_store_failed" || failed.ErrorMessage != missingSnapshotStoreErrorMessage || !strings.Contains(failed.ErrorMessage, ": Fused could not save") || !strings.Contains(failed.ErrorMessage, "then try again") || strings.Contains(failed.Error, "fsk_never_return") || strings.Contains(failed.ErrorMessage, "fsk_never_return") {
 		t.Fatalf("failed result=%#v", failed)
 	}
 	encoded, marshalErr := json.Marshal(result)
@@ -1311,7 +1311,7 @@ func TestRefreshMissingServiceContractsIsolatesExactRegistryRejection(t *testing
 	}
 	failed := result.Results[len(result.Results)-1]
 	// Failure output must retain the exact requested tuple, stable classification, and explicit reviewed Registry reason.
-	if failed.ServiceID != bad.ServiceID.String() || failed.ServiceVersionID != bad.ServiceVersionID.String() || failed.Version != bad.Version || failed.Error != "runtime_contract_rejected" || failed.ErrorMessage != "Generation contract failed deterministic validation." {
+	if failed.ServiceID != bad.ServiceID.String() || failed.ServiceVersionID != bad.ServiceVersionID.String() || failed.Version != bad.Version || failed.Error != "runtime_contract_rejected" || failed.ErrorMessage != "generation_contract_duplicate_record_id: The saved contract contains the same immutable Fused record ID more than once. Re-import the service from its original OpenAPI file or URL, then try again." {
 		t.Fatalf("failed result=%#v", failed)
 	}
 }
@@ -1345,7 +1345,7 @@ func TestRefreshMissingServiceContractsConsumesMultiplePartitionRejections(t *te
 	}
 	failed := result.Results[len(result.Results)-2:]
 	// Rejection output retains both exact immutable identities and reviewed messages in their original partition order.
-	if failed[0].ServiceVersionID != badA.ServiceVersionID.String() || failed[1].ServiceVersionID != badB.ServiceVersionID.String() || failed[0].Error != "runtime_contract_rejected" || failed[1].Error != "runtime_contract_rejected" || failed[0].ErrorMessage != "Generation contract failed deterministic validation." || failed[1].ErrorMessage != "Generation contract failed deterministic validation." {
+	if failed[0].ServiceVersionID != badA.ServiceVersionID.String() || failed[1].ServiceVersionID != badB.ServiceVersionID.String() || failed[0].Error != "runtime_contract_rejected" || failed[1].Error != "runtime_contract_rejected" || failed[0].ErrorMessage != "generation_contract_duplicate_record_id: The saved contract contains the same immutable Fused record ID more than once. Re-import the service from its original OpenAPI file or URL, then try again." || failed[1].ErrorMessage != "generation_contract_duplicate_record_id: The saved contract contains the same immutable Fused record ID more than once. Re-import the service from its original OpenAPI file or URL, then try again." {
 		t.Fatalf("failed results=%#v", failed)
 	}
 }
@@ -1540,7 +1540,7 @@ func TestRefreshMissingServiceContractsReportsOneFailedSingleton(t *testing.T) {
 	}
 	failed := result.Results[len(result.Results)-1]
 	// The singleton boundary reports the exact immutable failure with reviewed generic dependency copy.
-	if failed.ServiceID != versions[0].ServiceID.String() || failed.ServiceVersionID != versions[0].ServiceVersionID.String() || failed.Error != "runtime_contract_fetch_failed" || failed.ErrorMessage != "The Engine could not fetch this runtime contract from Registry." || strings.Contains(failed.ErrorMessage, "singleton dependency failure") {
+	if failed.ServiceID != versions[0].ServiceID.String() || failed.ServiceVersionID != versions[0].ServiceVersionID.String() || failed.Error != "runtime_contract_fetch_failed" || failed.ErrorMessage != missingSnapshotFetchErrorMessage || !strings.Contains(failed.ErrorMessage, ": Fused could not download") || !strings.Contains(failed.ErrorMessage, "then try again") || strings.Contains(failed.ErrorMessage, "singleton dependency failure") {
 		t.Fatalf("failed result=%#v", failed)
 	}
 }
@@ -1568,7 +1568,7 @@ func TestRefreshMissingServiceContractsReportsIsolatedPartitionFailure(t *testin
 	}
 	failed := result.Results[len(result.Results)-1]
 	// The final singleton is reported from its exact attempted identity with reviewed generic dependency copy.
-	if failed.ServiceVersionID != versions[4].ServiceVersionID.String() || failed.Error != "runtime_contract_fetch_failed" || failed.ErrorMessage != "The Engine could not fetch this runtime contract from Registry." || strings.Contains(failed.ErrorMessage, "registry partition timeout") {
+	if failed.ServiceVersionID != versions[4].ServiceVersionID.String() || failed.Error != "runtime_contract_fetch_failed" || failed.ErrorMessage != missingSnapshotFetchErrorMessage || !strings.Contains(failed.ErrorMessage, ": Fused could not download") || !strings.Contains(failed.ErrorMessage, "then try again") || strings.Contains(failed.ErrorMessage, "registry partition timeout") {
 		t.Fatalf("failed result=%#v", failed)
 	}
 }
@@ -1719,7 +1719,7 @@ func newRuntimeContractIsolationRegistry(t *testing.T, rejectedVersionID uuid.UU
 		// A typed rejection carries the exact immutable blocker and an explicitly public deterministic reason.
 		if containsRejected {
 			_ = json.NewEncoder(response).Encode(map[string]any{"errors": []map[string]any{{
-				"message": "storage secret=fsk_never_return", "extensions": map[string]any{"code": "runtime_contract_rejected", "service_version_id": rejectedVersionID, "reason": "Generation contract failed deterministic validation."},
+				"message": "storage secret=fsk_never_return", "extensions": map[string]any{"code": "runtime_contract_rejected", "service_version_id": rejectedVersionID, "reason": "generation_contract_duplicate_record_id: The saved contract contains the same immutable Fused record ID more than once. Re-import the service from its original OpenAPI file or URL, then try again."},
 			}}})
 			return
 		}
@@ -1777,7 +1777,7 @@ func newPartitionedRuntimeContractRejectionRegistry(t *testing.T, rejectedVersio
 			// Every rejected reference carries its exact requested immutable version identity.
 			if rejected[ref.Version] {
 				failures = append(failures, map[string]any{
-					"message": "storage secret=fsk_never_return", "extensions": map[string]any{"code": "runtime_contract_rejected", "service_version_id": ref.Version, "reason": "Generation contract failed deterministic validation."},
+					"message": "storage secret=fsk_never_return", "extensions": map[string]any{"code": "runtime_contract_rejected", "service_version_id": ref.Version, "reason": "generation_contract_duplicate_record_id: The saved contract contains the same immutable Fused record ID more than once. Re-import the service from its original OpenAPI file or URL, then try again."},
 				})
 			}
 		}

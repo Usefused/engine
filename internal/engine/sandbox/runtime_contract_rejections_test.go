@@ -137,7 +137,7 @@ func TestRuntimeContractGraphQLRecoveryRequiresExplicitClassification(t *testing
 	classified := runtimeContractGraphQLError{Message: "dependency secret=fsk_never_return"}
 	classified.Extensions.Code = "runtime_contract_rejected"
 	classified.Extensions.ServiceVersionID = version.ServiceVersionID
-	classified.Extensions.Reason = "  Generation contract identity\nfailed deterministic validation.  "
+	classified.Extensions.Reason = "  generation_contract_duplicate_record_id: The saved contract contains the same immutable Fused record ID\nmore than once. Re-import the service, then try again.  "
 	err := classifyRuntimeContractGraphQLErrors([]runtimeContractGraphQLError{classified}, []store.WorkspaceServiceVersion{version})
 	var rejected *runtimeContractRejections
 	// An explicit authorized version-bound rejection may defer the whole batch without extra queries.
@@ -146,7 +146,7 @@ func TestRuntimeContractGraphQLRecoveryRequiresExplicitClassification(t *testing
 	}
 	versionID, reason, ok := RuntimeContractRejectionDetails(err)
 	// Only the explicit reason is normalized for callers; the top-level GraphQL message remains private.
-	if !ok || versionID != version.ServiceVersionID || reason != "Generation contract identity failed deterministic validation." || strings.Contains(reason, "fsk_never_return") {
+	if !ok || versionID != version.ServiceVersionID || reason != "generation_contract_duplicate_record_id: The saved contract contains the same immutable Fused record ID more than once. Re-import the service, then try again." || strings.Contains(reason, "fsk_never_return") {
 		t.Fatalf("details=(%s, %q, %t)", versionID, reason, ok)
 	}
 	wrongVersion := classified

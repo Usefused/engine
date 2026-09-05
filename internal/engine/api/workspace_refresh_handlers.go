@@ -25,6 +25,9 @@ const (
 	missingSnapshotConsecutiveFailLimit = 2
 	// Two concurrent partitions fit the outage probe bound and shorten healthy fallback without flooding Registry.
 	missingSnapshotPartitionConcurrency = 2
+	// Fixed guidance keeps raw Registry and storage errors outside the public response.
+	missingSnapshotFetchErrorMessage = "runtime_contract_fetch_failed: Fused could not download this API contract from Registry. Ask your Fused administrator to check that Registry is reachable, then try again."
+	missingSnapshotStoreErrorMessage = "runtime_contract_store_failed: Fused could not save this API contract. Ask your Fused administrator to check Engine storage, then try again."
 )
 
 type refreshServiceContractResponse struct {
@@ -386,7 +389,7 @@ func mergeMissingSnapshotSingletonProbe(ctx context.Context, resolved *missingSn
 	resolved.unresolved = append(resolved.unresolved, probe.unresolved...)
 	// A singleton generic result can name only its one requested immutable version.
 	for _, unresolved := range probe.unresolved {
-		resolved.failures = append(resolved.failures, missingSnapshotFetchFailure{version: unresolved, code: "runtime_contract_fetch_failed", errorMessage: "The Engine could not fetch this runtime contract from Registry."})
+		resolved.failures = append(resolved.failures, missingSnapshotFetchFailure{version: unresolved, code: "runtime_contract_fetch_failed", errorMessage: missingSnapshotFetchErrorMessage})
 	}
 	return false
 }
@@ -416,7 +419,7 @@ func mergeMissingSnapshotPartition(ctx context.Context, result *missingSnapshotB
 	}
 	for _, unresolved := range partition.unresolved {
 		// A failed partition reports no content; its exact requested identities remain safe to retry later.
-		result.failures = append(result.failures, missingSnapshotFetchFailure{version: unresolved, code: "runtime_contract_fetch_failed", errorMessage: "The Engine could not fetch this runtime contract from Registry."})
+		result.failures = append(result.failures, missingSnapshotFetchFailure{version: unresolved, code: "runtime_contract_fetch_failed", errorMessage: missingSnapshotFetchErrorMessage})
 	}
 	return consecutiveFailures, nil
 }
@@ -550,7 +553,7 @@ func writeMissingSnapshots(ctx context.Context, s store.Store, snapshots []store
 func appendMissingSnapshotError(snapshots []store.ServiceContractSnapshot, response *refreshMissingContractsResponse) {
 	for _, snapshot := range snapshots {
 		response.Failed++
-		response.Results = append(response.Results, refreshResultFromSnapshot(&snapshot, "runtime_contract_store_failed", "The Engine could not store this runtime contract snapshot."))
+		response.Results = append(response.Results, refreshResultFromSnapshot(&snapshot, "runtime_contract_store_failed", missingSnapshotStoreErrorMessage))
 	}
 }
 
@@ -644,7 +647,7 @@ func writeRefreshServiceContractError(w http.ResponseWriter, ctx context.Context
 func refreshWorkspaceConfigError(err refreshHTTPError) workspaceConfigHTTPError {
 	// A known rejected version needs repair/re-import, never outage retries.
 	if err.rejectedVersion != uuid.Nil {
-		return workspaceConfigHTTPError{status: http.StatusUnprocessableEntity, code: "runtime_contract_rejected", category: "validation", message: "Registry rejected the runtime contract for this service version.", remediation: "Repair and re-import the rejected service version, then refresh its runtime contract.", details: map[string]any{"service_version_id": err.rejectedVersion.String(), "server_detail": err.rejectedMessage}}
+		return workspaceConfigHTTPError{status: http.StatusUnprocessableEntity, code: "runtime_contract_rejected", category: "validation", message: "Fused cannot use the saved API contract for this service version.", remediation: "Complete the step in the error detail, then retry the command.", details: map[string]any{"service_version_id": err.rejectedVersion.String(), "server_detail": err.rejectedMessage}}
 	}
 	// Client-correctable path validation retains the precise field diagnosis.
 	if err.status == http.StatusBadRequest {

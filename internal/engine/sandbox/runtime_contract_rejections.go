@@ -12,7 +12,7 @@ import (
 
 const (
 	// The fallback explains the repair boundary without trusting downstream prose.
-	defaultRuntimeContractRejectionReason = "Registry rejected the runtime contract for this service version."
+	defaultRuntimeContractRejectionReason = "runtime_contract_validation_failed: The saved API contract failed validation. Re-import the service from its original OpenAPI file or URL, then try again."
 	// Bounded public reasons prevent an upstream diagnostic from inflating Engine responses.
 	maxRuntimeContractRejectionReasonRunes = 512
 )

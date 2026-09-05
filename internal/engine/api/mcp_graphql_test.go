@@ -360,12 +360,12 @@ func TestEngineGraphQLRefreshMissingServiceContracts_BackfillsActivatedVersions(
 func TestRefreshMissingContractsGraphQLPayloadIncludesErrorMessage(t *testing.T) {
 	response := &refreshMissingContractsResponse{Results: []refreshServiceContractResult{{
 		ServiceID: uuid.NewString(), ServiceVersionID: uuid.NewString(), Version: "v1",
-		Error: "runtime_contract_rejected", ErrorMessage: "Generation contract failed deterministic validation.",
+		Error: "runtime_contract_rejected", ErrorMessage: "generation_contract_duplicate_record_id: The saved contract contains the same immutable Fused record ID more than once. Re-import the service from its original OpenAPI file or URL, then try again.",
 	}}}
 	payload := refreshMissingContractsGraphQLPayload(response)
 	results, ok := payload["results"].([]map[string]interface{})
 	// The GraphQL projection must keep the distinct stable code and public detail fields.
-	if !ok || len(results) != 1 || results[0]["error"] != "runtime_contract_rejected" || results[0]["error_message"] != "Generation contract failed deterministic validation." {
+	if !ok || len(results) != 1 || results[0]["error"] != "runtime_contract_rejected" || results[0]["error_message"] != "generation_contract_duplicate_record_id: The saved contract contains the same immutable Fused record ID more than once. Re-import the service from its original OpenAPI file or URL, then try again." {
 		t.Fatalf("payload=%#v", payload)
 	}
 }
