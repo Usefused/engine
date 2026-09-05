@@ -18,4 +18,5 @@ engine:
   connected_auth_refresh_workers: 4
 
 observability:
-  otel_target: "localhost:4317"
+  # Engine exports OTLP over HTTP; environment signal endpoints take precedence.
+  otel_target: "http://localhost:4318"

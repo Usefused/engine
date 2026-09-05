@@ -11,6 +11,8 @@ Common variables:
 - `OTEL_SERVICE_NAME`: service name, usually `engine`.
 - `OTEL_EXPORTER_OTLP_ENDPOINT`: shared OTLP HTTP endpoint for traces, metrics,
   and logs.
+- `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`: optional traces-specific HTTP endpoint.
+- `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`: optional logs-specific HTTP endpoint.
 - `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`: optional metrics-specific endpoint. It
   takes precedence over the shared endpoint for metrics.
 - `FUSED_ENGINE_ENVIRONMENT`: deployment label attached to telemetry, default
@@ -24,7 +26,16 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 # Works perfectly with Threadi
 FUSED_ENGINE_ENVIRONMENT=staging
 ```
 
+Signal-specific environment endpoints take precedence over the shared endpoint,
+which takes precedence over `observability.otel_target` in `engine.yaml`. The
+YAML fallback must be an OTLP/HTTP target, normally `http://localhost:4318`.
+
 Leave the OTLP endpoint variables unset to disable export.
+
+The repository's local Compose stack sends all three signals to an OpenTelemetry
+Collector. The collector forwards traces to Jaeger and accepts bounded logs and
+metrics through its debug exporter; Jaeger itself is trace-only and must not be
+used as the log endpoint.
 
 ## What Is Recorded
 

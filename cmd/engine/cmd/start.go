@@ -110,13 +110,16 @@ func runEngine() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// OTEL observability
-	observability.Init(ctx)
+	// Configuration must precede telemetry because YAML remains the fallback OTLP destination.
+	cfg := loadEngineConfiguration(ctx, licenseSources)
+	observability.InitLogs(ctx, cfg.Observability.OTELTarget)
+	defer closeEngineLogs()
+	observability.Init(ctx, cfg.Observability.OTELTarget)
 	defer observability.Close()
-	observability.InitMetrics(ctx)
+	observability.InitMetrics(ctx, cfg.Observability.OTELTarget)
 	defer observability.CloseMetrics(ctx)
 
-	cfg, database, natsClient, rateLimitKV := initDependencies(ctx, config.WithEngineLicenseSources(licenseSources))
+	cfg, database, natsClient, rateLimitKV := initDependencies(ctx, cfg)
 	defer database.Close()
 	defer natsClient.Close()
 
@@ -151,11 +154,7 @@ func runEngine() {
 		slog.ErrorContext(ctx, "FATAL: Failed to initialize app-token invalidation", slog.String("error_code", "app_token_invalidation_init_failed"))
 		os.Exit(1)
 	}
-	rateLimits, err := newProviderRateLimitCoordinator(rateLimitKV, postgresStore)
-	if err != nil {
-		slog.ErrorContext(ctx, "FATAL: Failed to initialize provider rate-limit coordination", slog.Any("error", err))
-		os.Exit(1)
-	}
+	rateLimits := requireProviderRateLimitCoordinator(ctx, rateLimitKV, postgresStore)
 	defer func() { _ = rateLimits.Close() }()
 	registryClient := sandbox.NewHTTPRegistryClient(cfg.Engine.RegistryEndpoint, envLicense)
 	if err := configureRegistryEngineIdentity(ctx, engineStore, registryClient); err != nil {
@@ -276,6 +275,24 @@ func runEngine() {
 	waitForEngineShutdown(ctx, cancel, srv, webhookSrv, grpcServer)
 }
 
+// loadEngineConfiguration admits the one configuration used by telemetry and runtime dependencies.
+func loadEngineConfiguration(ctx context.Context, licenseSources config.EngineLicenseSources) *config.Config {
+	cfg, err := config.Load(ConfigPath, config.WithEngineLicenseSources(licenseSources))
+	// Invalid YAML or environment overrides cannot produce a safe dependency graph.
+	if err != nil {
+		slog.ErrorContext(ctx, "FATAL: Failed to load Engine configuration", slog.String("error_code", "engine_configuration_invalid"))
+		os.Exit(1)
+	}
+	return cfg
+}
+
+// closeEngineLogs gives the final OTLP batch a live bounded context after request cancellation.
+func closeEngineLogs() {
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	observability.CloseLogs(shutdownCtx)
+}
+
 // configuredConnectRedirectURI preserves non-OAuth deployments while validating any explicitly configured public identity.
 func configuredConnectRedirectURI(publicURL string) (string, error) {
 	// An omitted public URL disables consent admission without blocking unrelated Engine capabilities.
@@ -316,6 +333,17 @@ func newProviderRateLimitCoordinator(kv nats.KeyValue, repository store.Store) (
 		return nil, errors.New("provider rate-limit recovery store is unavailable")
 	}
 	return ratelimitcoordinator.New(kv, recovery)
+}
+
+// requireProviderRateLimitCoordinator keeps the startup graph fail-closed when coordination cannot initialize.
+func requireProviderRateLimitCoordinator(ctx context.Context, kv nats.KeyValue, repository store.Store) *ratelimitcoordinator.Coordinator {
+	coordinator, err := newProviderRateLimitCoordinator(kv, repository)
+	// Uncoordinated provider limits would violate cross-replica execution policy.
+	if err != nil {
+		slog.ErrorContext(ctx, "FATAL: Failed to initialize provider rate-limit coordination", slog.Any("error", err))
+		os.Exit(1)
+	}
+	return coordinator
 }
 
 func configureRegistryEngineIdentity(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient) error {
@@ -1192,12 +1220,8 @@ func shutdownWebhookServer(ctx context.Context, webhookSrv *http.Server) {
 	}
 }
 
-func initDependencies(ctx context.Context, options ...config.LoadOption) (*config.Config, *pgxpool.Pool, *messaging.NATSClient, nats.KeyValue) {
-	cfg, err := config.Load(ConfigPath, options...)
-	if err != nil {
-		slog.WarnContext(ctx, "Failed to parse config file, using defaults", slog.Any("error", err))
-	}
-
+// initDependencies connects Engine-owned stores from the configuration already used by telemetry startup.
+func initDependencies(ctx context.Context, cfg *config.Config) (*config.Config, *pgxpool.Pool, *messaging.NATSClient, nats.KeyValue) {
 	database, err := db.InitEnginePostgres(ctx, engineDatabaseURL(cfg))
 	if err != nil {
 		slog.ErrorContext(ctx, "Failed to connect to PostgreSQL", slog.Any("error", err))

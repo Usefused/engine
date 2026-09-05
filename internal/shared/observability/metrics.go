@@ -26,15 +26,10 @@ var (
 	WebhookVerify    metric.Int64Counter
 )
 
-func InitMetrics(ctx context.Context) {
-	// OTEL_EXPORTER_OTLP_METRICS_ENDPOINT takes precedence over the shared
-	// base endpoint, matching the standard OTEL SDK split-signal convention.
-	// Set it to an empty string (or leave it unset alongside a non-empty base
-	// endpoint) to disable metrics export while still emitting traces.
-	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
-	if endpoint == "" {
-		endpoint = os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
-	}
+// InitMetrics installs the process meter provider using standard endpoint precedence and the Engine fallback.
+func InitMetrics(ctx context.Context, configuredEndpoint ...string) {
+	endpoint, endpointFromEnvironment := signalEndpoint("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", configuredEndpoint)
+	// No endpoint means metrics remain registered against a no-op provider.
 	if endpoint == "" {
 		initNoopMetrics()
 		return
@@ -46,9 +41,14 @@ func InitMetrics(ctx context.Context) {
 	}
 
 	exporterOptions := []otlpmetrichttp.Option{}
-	if isOTLPEndpointURL(endpoint) {
+	// Preserve standard per-signal environment behavior rather than overriding it programmatically.
+	if endpointFromEnvironment {
+		exporterOptions = nil
+	} else if isOTLPEndpointURL(endpoint) {
+		// A configured URL carries its HTTP security and optional path.
 		exporterOptions = append(exporterOptions, otlpmetrichttp.WithEndpointURL(endpoint))
 	} else {
+		// Legacy host:port targets use plaintext OTLP/HTTP.
 		exporterOptions = append(exporterOptions,
 			otlpmetrichttp.WithEndpoint(endpoint),
 			otlpmetrichttp.WithInsecure(),

@@ -10,8 +10,8 @@
 //   - Step   ≈ a child span within that trace
 //   - Credentials and secrets MUST NEVER appear in span attributes or refs.
 //     Callers are responsible for this; the package provides no scrubbing.
-//   - When OTEL_EXPORTER_OTLP_ENDPOINT is not set the package falls back to
-//     a no-op implementation so the binary always compiles and runs.
+//   - When neither an OTEL environment endpoint nor a configured endpoint is
+//     available, the package falls back to a no-op implementation.
 package observability
 
 import (
@@ -233,15 +233,16 @@ var globalConn Connection = &noopConnection{}
 
 // Init initialises the OTel TracerProvider. Call once at startup.
 //
-// Required env var: OTEL_EXPORTER_OTLP_ENDPOINT (e.g. "http://localhost:4318")
+// Endpoint precedence: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, then
+// OTEL_EXPORTER_OTLP_ENDPOINT, then the optional configured endpoint.
 // Optional env var: OTEL_SERVICE_NAME (defaults to "fused")
 //
-// If OTEL_EXPORTER_OTLP_ENDPOINT is not set, the package operates as a no-op
-// and no traces are emitted. This keeps local development zero-config.
-func Init(ctx context.Context) {
-	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+// If no OTLP endpoint or Threadify key is available, no traces are emitted.
+func Init(ctx context.Context, configuredEndpoint ...string) {
+	endpoint, endpointFromEnvironment := signalEndpoint("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", configuredEndpoint)
 	threadifyKey := os.Getenv("THREADIFY_API_KEY")
 
+	// Without either transport the package intentionally remains a no-op.
 	if endpoint == "" && threadifyKey == "" {
 		slog.Warn("OTEL exporters not configured — observability disabled (no-op)")
 		return
@@ -253,9 +254,10 @@ func Init(ctx context.Context) {
 	}
 
 	batchers := buildTraceExporters(ctx, traceExporterConfig{
-		endpoint:     endpoint,
-		threadifyKey: threadifyKey,
-		serviceName:  serviceName,
+		endpoint:       endpoint,
+		useEnvironment: endpointFromEnvironment,
+		threadifyKey:   threadifyKey,
+		serviceName:    serviceName,
 	})
 
 	if len(batchers) == 0 {
@@ -277,6 +279,10 @@ func Init(ctx context.Context) {
 		provider: provider,
 		tracer:   tracer,
 	}
+	// A forced startup span distinguishes a configured exporter from a reachable receiver.
+	if err := verifyTraceExporter(ctx, provider, tracer); err != nil {
+		slog.Error("OTEL trace exporter startup delivery failed", slog.String("error_code", "otel_trace_startup_delivery_failed"))
+	}
 	slog.Info("OTEL tracing initialised",
 		slog.String("endpoint", endpoint),
 		slog.Bool("threadify_enabled", threadifyKey != ""),
@@ -284,16 +290,28 @@ func Init(ctx context.Context) {
 	)
 }
 
-type traceExporterConfig struct {
-	endpoint     string
-	threadifyKey string
-	serviceName  string
+// verifyTraceExporter sends one metadata-free startup span and waits for its bounded delivery result.
+func verifyTraceExporter(ctx context.Context, provider *sdktrace.TracerProvider, tracer trace.Tracer) error {
+	_, span := tracer.Start(ctx, "fused.telemetry.startup")
+	span.End()
+	probeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return provider.ForceFlush(probeCtx)
 }
 
+type traceExporterConfig struct {
+	endpoint       string
+	useEnvironment bool
+	threadifyKey   string
+	serviceName    string
+}
+
+// buildTraceExporters admits every configured transport without allowing one failed transport to hide another.
 func buildTraceExporters(ctx context.Context, cfg traceExporterConfig) []sdktrace.TracerProviderOption {
 	var batchers []sdktrace.TracerProviderOption
 	if cfg.endpoint != "" {
-		if batcher := newOTLPTraceBatcher(ctx, cfg.endpoint); batcher != nil {
+		// Environment-owned endpoints retain the OTEL SDK's standard path, header, and TLS precedence.
+		if batcher := newOTLPTraceBatcher(ctx, cfg.endpoint, cfg.useEnvironment); batcher != nil {
 			batchers = append(batchers, batcher)
 		}
 	}
@@ -305,11 +323,17 @@ func buildTraceExporters(ctx context.Context, cfg traceExporterConfig) []sdktrac
 	return batchers
 }
 
-func newOTLPTraceBatcher(ctx context.Context, endpoint string) sdktrace.TracerProviderOption {
+// newOTLPTraceBatcher preserves standard OTEL environment behavior and adapts only YAML fallback values.
+func newOTLPTraceBatcher(ctx context.Context, endpoint string, useEnvironment bool) sdktrace.TracerProviderOption {
 	exporterOptions := []otlptracehttp.Option{}
-	if isOTLPEndpointURL(endpoint) {
+	// Let the SDK interpret standard OTEL environment variables, including signal-specific paths and headers.
+	if useEnvironment {
+		exporterOptions = nil
+	} else if isOTLPEndpointURL(endpoint) {
+		// A configured URL supplies transport security and an optional explicit path.
 		exporterOptions = append(exporterOptions, otlptracehttp.WithEndpointURL(endpoint))
 	} else {
+		// A host:port configuration is the legacy plaintext OTLP/HTTP form.
 		exporterOptions = append(exporterOptions,
 			otlptracehttp.WithEndpoint(endpoint),
 			otlptracehttp.WithInsecure(), // TLS termination happens at the collector
