@@ -62,6 +62,7 @@ type missingSnapshotBatchResult struct {
 	unresolved    []store.WorkspaceServiceVersion
 	err           error
 	partitionable bool
+	genericFails  int
 }
 
 type refreshServiceContractPath struct {
@@ -252,7 +253,7 @@ func fetchMissingSnapshots(ctx context.Context, batchFetcher BatchRuntimeContrac
 	}
 	recordMissingSnapshotFetchError(ctx, result.err, len(result.unresolved), "initial")
 	// Identity errors, caller cancellation, and already-small failures have no safe or useful partition fallback.
-	if !result.partitionable || len(result.unresolved) <= missingSnapshotFallbackBatchSize || ctx.Err() != nil || errors.Is(result.err, context.Canceled) || errors.Is(result.err, context.DeadlineExceeded) {
+	if !result.partitionable || len(result.unresolved) <= missingSnapshotFallbackBatchSize || ctx.Err() != nil {
 		return nil, nil, refreshFetchFailure(result.err)
 	}
 	partitioned := fetchMissingSnapshotPartitions(ctx, batchFetcher, result.unresolved, apiKey)
@@ -285,6 +286,7 @@ func fetchMissingSnapshotBatch(ctx context.Context, batchFetcher BatchRuntimeCon
 			result.unresolved = remaining
 			result.err = err
 			result.partitionable = true
+			result.genericFails = 1
 			return result
 		}
 		var rejectedVersion store.WorkspaceServiceVersion
@@ -317,6 +319,7 @@ func fetchMissingSnapshotPartitions(ctx context.Context, batchFetcher BatchRunti
 		wave := fetchMissingSnapshotPartitionWave(ctx, batchFetcher, partitions[waveStart:waveEnd], apiKey)
 		// Source-order processing keeps adjacent-failure and response ordering deterministic despite concurrent completion.
 		for _, partition := range wave {
+			partition = splitFailedMissingSnapshotPair(ctx, batchFetcher, partition, apiKey)
 			var partitionErr error
 			consecutiveFailures, partitionErr = mergeMissingSnapshotPartition(ctx, &result, partition, consecutiveFailures)
 			// A fatal or circuit-breaking partition stops before the caller persists any accumulated snapshots.
@@ -329,6 +332,62 @@ func fetchMissingSnapshotPartitions(ctx context.Context, batchFetcher BatchRunti
 	return result
 }
 
+// splitFailedMissingSnapshotPair resolves a generic pair failure with at most two concurrent exact singleton probes.
+func splitFailedMissingSnapshotPair(ctx context.Context, batchFetcher BatchRuntimeContractFetcher, partition missingSnapshotBatchResult, apiKey string) missingSnapshotBatchResult {
+	// Successful, terminal, caller-canceled, and already-singleton results have no safe or useful narrower boundary.
+	if partition.err == nil || !partition.partitionable || len(partition.unresolved) != missingSnapshotFallbackBatchSize || ctx.Err() != nil {
+		return partition
+	}
+	recordMissingSnapshotFetchError(ctx, partition.err, len(partition.unresolved), "partition_pair")
+	requests := [][]store.WorkspaceServiceVersion{{partition.unresolved[0]}, {partition.unresolved[1]}}
+	probes := fetchMissingSnapshotPartitionWave(ctx, batchFetcher, requests, apiKey)
+	resolved := missingSnapshotBatchResult{
+		snapshots: make([]store.ServiceContractSnapshot, 0, len(partition.unresolved)),
+		failures:  append([]missingSnapshotFetchFailure(nil), partition.failures...),
+	}
+	var lastGenericErr error
+	// Source-order merging keeps recovered snapshots and exact failures deterministic despite concurrent probes.
+	for _, probe := range probes {
+		// A terminal singleton retains its original classification instead of being projected as an exact retryable failure.
+		if mergeMissingSnapshotSingletonProbe(ctx, &resolved, probe) {
+			return probe
+		}
+		// Only a generic probe error contributes an outage cause; resolved probes leave the prior cause unchanged.
+		if probe.err != nil {
+			lastGenericErr = probe.err
+		}
+	}
+	// Two failed singleton probes establish the same adjacent-failure outage boundary as two failed pair partitions.
+	if resolved.genericFails >= missingSnapshotConsecutiveFailLimit {
+		resolved.err = lastGenericErr
+		resolved.partitionable = true
+		return resolved
+	}
+	return resolved
+}
+
+// mergeMissingSnapshotSingletonProbe adds one exact probe result and reports whether its failure is terminal.
+func mergeMissingSnapshotSingletonProbe(ctx context.Context, resolved *missingSnapshotBatchResult, probe missingSnapshotBatchResult) bool {
+	resolved.failures = append(resolved.failures, probe.failures...)
+	// A validated snapshot or exact typed rejection proves this singleton was resolved without generic failure.
+	if probe.err == nil {
+		resolved.snapshots = append(resolved.snapshots, probe.snapshots...)
+		return false
+	}
+	recordMissingSnapshotFetchError(ctx, probe.err, len(probe.unresolved), "partition_singleton")
+	// Identity ambiguity and caller cancellation remain fatal instead of becoming an exact singleton failure.
+	if !probe.partitionable || ctx.Err() != nil {
+		return true
+	}
+	resolved.genericFails++
+	resolved.unresolved = append(resolved.unresolved, probe.unresolved...)
+	// A singleton generic result can name only its one requested immutable version.
+	for _, unresolved := range probe.unresolved {
+		resolved.failures = append(resolved.failures, missingSnapshotFetchFailure{version: unresolved, error: "runtime_contract_fetch_failed"})
+	}
+	return false
+}
+
 // mergeMissingSnapshotPartition preserves source-order results and advances the bounded outage circuit for one completed partition.
 func mergeMissingSnapshotPartition(ctx context.Context, result *missingSnapshotBatchResult, partition missingSnapshotBatchResult, consecutiveFailures int) (int, error) {
 	result.failures = append(result.failures, partition.failures...)
@@ -339,10 +398,15 @@ func mergeMissingSnapshotPartition(ctx context.Context, result *missingSnapshotB
 	}
 	recordMissingSnapshotFetchError(ctx, partition.err, len(partition.unresolved), "partition")
 	// Identity ambiguity and caller cancellation must stop rather than becoming per-version failure output.
-	if !partition.partitionable || ctx.Err() != nil || errors.Is(partition.err, context.Canceled) || errors.Is(partition.err, context.DeadlineExceeded) {
+	if !partition.partitionable || ctx.Err() != nil {
 		return consecutiveFailures, partition.err
 	}
-	consecutiveFailures++
+	failureCount := partition.genericFails
+	// Legacy or independently constructed generic results still consume one outage-circuit failure.
+	if failureCount < 1 {
+		failureCount = 1
+	}
+	consecutiveFailures += failureCount
 	// Two adjacent dependency failures are treated as an outage, bounding fallback amplification to one concurrent wave.
 	if consecutiveFailures >= missingSnapshotConsecutiveFailLimit {
 		return consecutiveFailures, partition.err
