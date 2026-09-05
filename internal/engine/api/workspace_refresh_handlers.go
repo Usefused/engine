@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync"
 
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
@@ -19,8 +20,11 @@ import (
 
 const (
 	// Pair fallback uses the largest batch size proven by the live failure profile while avoiding singleton N+1 recovery.
-	missingSnapshotFallbackBatchSize    = 2
+	missingSnapshotFallbackBatchSize = 2
+	// Two adjacent generic failures distinguish an outage from one isolated failed partition.
 	missingSnapshotConsecutiveFailLimit = 2
+	// Two concurrent partitions fit the outage probe bound and shorten healthy fallback without flooding Registry.
+	missingSnapshotPartitionConcurrency = 2
 )
 
 type refreshServiceContractResponse struct {
@@ -295,45 +299,91 @@ func fetchMissingSnapshotBatch(ctx context.Context, batchFetcher BatchRuntimeCon
 	return result
 }
 
-// fetchMissingSnapshotPartitions retries an oversized failed request in fixed pairs and stops quickly during an outage.
+// fetchMissingSnapshotPartitions retries fixed pairs in bounded concurrent waves and stops quickly during an outage.
 func fetchMissingSnapshotPartitions(ctx context.Context, batchFetcher BatchRuntimeContractFetcher, versions []store.WorkspaceServiceVersion, apiKey string) missingSnapshotBatchResult {
 	result := missingSnapshotBatchResult{
 		snapshots: make([]store.ServiceContractSnapshot, 0, len(versions)),
 		failures:  make([]missingSnapshotFetchFailure, 0),
 	}
+	partitions := missingSnapshotVersionPartitions(versions)
 	consecutiveFailures := 0
+	// Each wave completes before another begins so a broad outage cannot fan out past the two-probe ceiling.
+	for waveStart := 0; waveStart < len(partitions); waveStart += missingSnapshotPartitionConcurrency {
+		waveEnd := waveStart + missingSnapshotPartitionConcurrency
+		// The final wave may have one partition while every earlier wave retains the two-probe ceiling.
+		if waveEnd > len(partitions) {
+			waveEnd = len(partitions)
+		}
+		wave := fetchMissingSnapshotPartitionWave(ctx, batchFetcher, partitions[waveStart:waveEnd], apiKey)
+		// Source-order processing keeps adjacent-failure and response ordering deterministic despite concurrent completion.
+		for _, partition := range wave {
+			var partitionErr error
+			consecutiveFailures, partitionErr = mergeMissingSnapshotPartition(ctx, &result, partition, consecutiveFailures)
+			// A fatal or circuit-breaking partition stops before the caller persists any accumulated snapshots.
+			if partitionErr != nil {
+				result.err = partitionErr
+				return result
+			}
+		}
+	}
+	return result
+}
+
+// mergeMissingSnapshotPartition preserves source-order results and advances the bounded outage circuit for one completed partition.
+func mergeMissingSnapshotPartition(ctx context.Context, result *missingSnapshotBatchResult, partition missingSnapshotBatchResult, consecutiveFailures int) (int, error) {
+	result.failures = append(result.failures, partition.failures...)
+	// Exact identity success resets the outage circuit and admits only this partition's validated snapshots.
+	if partition.err == nil {
+		result.snapshots = append(result.snapshots, partition.snapshots...)
+		return 0, nil
+	}
+	recordMissingSnapshotFetchError(ctx, partition.err, len(partition.unresolved), "partition")
+	// Identity ambiguity and caller cancellation must stop rather than becoming per-version failure output.
+	if !partition.partitionable || ctx.Err() != nil || errors.Is(partition.err, context.Canceled) || errors.Is(partition.err, context.DeadlineExceeded) {
+		return consecutiveFailures, partition.err
+	}
+	consecutiveFailures++
+	// Two adjacent dependency failures are treated as an outage, bounding fallback amplification to one concurrent wave.
+	if consecutiveFailures >= missingSnapshotConsecutiveFailLimit {
+		return consecutiveFailures, partition.err
+	}
+	for _, unresolved := range partition.unresolved {
+		// A failed partition reports no content; its exact requested identities remain safe to retry later.
+		result.failures = append(result.failures, missingSnapshotFetchFailure{version: unresolved, error: "runtime_contract_fetch_failed"})
+	}
+	return consecutiveFailures, nil
+}
+
+// missingSnapshotVersionPartitions retains source order while grouping fallback requests into proven two-version batches.
+func missingSnapshotVersionPartitions(versions []store.WorkspaceServiceVersion) [][]store.WorkspaceServiceVersion {
+	partitions := make([][]store.WorkspaceServiceVersion, 0, (len(versions)+missingSnapshotFallbackBatchSize-1)/missingSnapshotFallbackBatchSize)
 	for start := 0; start < len(versions); start += missingSnapshotFallbackBatchSize {
 		end := start + missingSnapshotFallbackBatchSize
 		// The final partition may contain one version while every earlier request retains pair batching.
 		if end > len(versions) {
 			end = len(versions)
 		}
-		partition := fetchMissingSnapshotBatch(ctx, batchFetcher, versions[start:end], apiKey)
-		result.failures = append(result.failures, partition.failures...)
-		// Exact identity success resets the outage circuit and admits only this partition's validated snapshots.
-		if partition.err == nil {
-			consecutiveFailures = 0
-			result.snapshots = append(result.snapshots, partition.snapshots...)
-			continue
-		}
-		recordMissingSnapshotFetchError(ctx, partition.err, len(partition.unresolved), "partition")
-		// Identity ambiguity and caller cancellation must stop rather than becoming per-version failure output.
-		if !partition.partitionable || ctx.Err() != nil || errors.Is(partition.err, context.Canceled) || errors.Is(partition.err, context.DeadlineExceeded) {
-			result.err = partition.err
-			return result
-		}
-		consecutiveFailures++
-		// Two adjacent dependency failures are treated as an outage, bounding fallback amplification to two probes.
-		if consecutiveFailures >= missingSnapshotConsecutiveFailLimit {
-			result.err = partition.err
-			return result
-		}
-		for _, unresolved := range partition.unresolved {
-			// A failed partition reports no content; its exact requested identities remain safe to retry later.
-			result.failures = append(result.failures, missingSnapshotFetchFailure{version: unresolved, error: "runtime_contract_fetch_failed"})
-		}
+		partitions = append(partitions, versions[start:end])
 	}
-	return result
+	return partitions
+}
+
+// fetchMissingSnapshotPartitionWave runs at most two independent Registry partitions and returns results in source order.
+func fetchMissingSnapshotPartitionWave(ctx context.Context, batchFetcher BatchRuntimeContractFetcher, partitions [][]store.WorkspaceServiceVersion, apiKey string) []missingSnapshotBatchResult {
+	results := make([]missingSnapshotBatchResult, len(partitions))
+	var wait sync.WaitGroup
+	// The caller supplies at most one bounded wave, so this loop cannot exceed the shared concurrency ceiling.
+	for index, partition := range partitions {
+		wait.Add(1)
+		// Each goroutine owns one result slot, so completion order cannot reorder response or circuit-breaker semantics.
+		go func(resultIndex int, requested []store.WorkspaceServiceVersion) {
+			defer wait.Done()
+			results[resultIndex] = fetchMissingSnapshotBatch(ctx, batchFetcher, requested, apiKey)
+		}(index, partition)
+	}
+	// Joining the bounded wave prevents writes and failure classification before every in-flight request has a stable result.
+	wait.Wait()
+	return results
 }
 
 // recordMissingSnapshotFetchError retains the private dependency cause with bounded request context in OpenTelemetry.

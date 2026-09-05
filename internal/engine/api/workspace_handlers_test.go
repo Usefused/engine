@@ -1327,15 +1327,44 @@ func TestRefreshMissingServiceContractsPartitionsOversizedDependencyFailure(t *t
 		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"},
 		{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1", Status: "public"},
 	}
-	fetcher := &sizeLimitedRuntimeContractBatchFetcher{maxBatch: 2, err: errors.New("registry query deadline exceeded")}
+	pairStarted := make(chan struct{}, 2)
+	pairRelease := make(chan struct{})
+	fetcher := &sizeLimitedRuntimeContractBatchFetcher{
+		maxBatch: 2, err: errors.New("registry query deadline exceeded"), pairStarted: pairStarted, pairRelease: pairRelease,
+	}
 	s := &workspaceTestStore{accountID: uuid.New(), missingContractVersions: versions}
 
-	result, err := refreshMissingServiceContracts(context.Background(), s, fetcher, refreshMissingContractsCall{
-		accountID: s.accountID, apiKey: "fsk_test", limit: len(versions),
-	})
+	type refreshOutcome struct {
+		result *refreshMissingContractsResponse
+		err    error
+	}
+	completed := make(chan refreshOutcome, 1)
+	// Running refresh asynchronously lets the test hold the first wave until both pair requests have started.
+	go func() {
+		result, err := refreshMissingServiceContracts(context.Background(), s, fetcher, refreshMissingContractsCall{
+			accountID: s.accountID, apiKey: "fsk_test", limit: len(versions),
+		})
+		completed <- refreshOutcome{result: result, err: err}
+	}()
+	bothPairsStarted := true
+	// Two starts before release distinguish real concurrent execution from fast sequential completion.
+	for count := 0; count < missingSnapshotPartitionConcurrency; count++ {
+		select {
+		case <-pairStarted:
+		case <-time.After(time.Second):
+			// Releasing any first request prevents a failed concurrency assertion from leaking the refresh goroutine.
+			bothPairsStarted = false
+		}
+	}
+	close(pairRelease)
+	outcome := <-completed
+	// Both pair requests must enter the first wave before either is released, proving fallback latency is concurrent.
+	if !bothPairsStarted {
+		t.Fatal("pair partitions did not execute concurrently")
+	}
 	// One failed aggregate call may recover through pairs only when every successful response retains exact identity.
-	if err != nil || result.Status != "ok" || result.Refreshed != len(versions) || result.Failed != 0 {
-		t.Fatalf("result=%#v error=%v", result, err)
+	if outcome.err != nil || outcome.result.Status != "ok" || outcome.result.Refreshed != len(versions) || outcome.result.Failed != 0 {
+		t.Fatalf("result=%#v error=%v", outcome.result, outcome.err)
 	}
 	// The fallback is partitioned rather than per-version, with only the odd tail using a singleton request.
 	if want := []int{5, 2, 2, 1}; !reflect.DeepEqual(fetcher.batchSizes, want) {
@@ -1408,15 +1437,29 @@ type sizeLimitedRuntimeContractBatchFetcher struct {
 	maxBatch      int
 	failOnVersion uuid.UUID
 	err           error
+	pairStarted   chan<- struct{}
+	pairRelease   <-chan struct{}
+	mutex         sync.Mutex
 	batchSizes    []int
 }
 
 // FetchRuntimeContracts simulates the observed Registry size threshold while returning identity-complete successful batches.
-func (f *sizeLimitedRuntimeContractBatchFetcher) FetchRuntimeContracts(_ context.Context, versions []store.WorkspaceServiceVersion, _ string) ([]store.ServiceContractSnapshot, error) {
+func (f *sizeLimitedRuntimeContractBatchFetcher) FetchRuntimeContracts(ctx context.Context, versions []store.WorkspaceServiceVersion, _ string) ([]store.ServiceContractSnapshot, error) {
+	f.mutex.Lock()
 	f.batchSizes = append(f.batchSizes, len(versions))
+	f.mutex.Unlock()
 	// A zero limit models an outage; larger failing requests model the production batch latency ceiling.
 	if f.maxBatch == 0 || len(versions) > f.maxBatch {
 		return nil, f.err
+	}
+	// The optional barrier lets the happy-path test prove both pair requests enter the same concurrent wave.
+	if len(versions) == missingSnapshotFallbackBatchSize && f.pairStarted != nil && f.pairRelease != nil {
+		f.pairStarted <- struct{}{}
+		select {
+		case <-f.pairRelease:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	for _, version := range versions {
 		// A selected immutable identity models one partition failing after neighboring partitions prove Registry availability.
