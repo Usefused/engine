@@ -306,7 +306,7 @@ func attachConnectTestArtifact(fixture *connectRuntimeFixture) uuid.UUID {
 	appID := uuid.New()
 	selections, _ := json.Marshal([]models.SDKSelection{{
 		ServiceID: fixture.serviceID, ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion,
-		AuthType: "oidc", AuthName: "bearerAuth",
+		AuthType: "oauth", AuthName: "bearerAuth",
 	}})
 	fixture.store.appRuntimes = map[uuid.UUID]*store.AppRuntime{
 		appID: {AccountID: fixture.store.accountID, AppID: appID, BucketID: fixture.bucketID, ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: selections, Kind: store.AppKindSDK},
@@ -875,6 +875,43 @@ func TestSelectRuntimeOAuthConfigMatchesConfiguredFamily(t *testing.T) {
 	}
 }
 
+// TestRuntimeConnectAuthTypePreservesOAuthFamilyWithOpenIDScope protects Google-style OAuth2 schemes from being rekeyed as OIDC.
+func TestRuntimeConnectAuthTypePreservesOAuthFamilyWithOpenIDScope(t *testing.T) {
+	auths := fusedobject.AuthConfigs{{
+		Name: "oauth2", Type: "oauth2",
+		OAuth2Flows: fusedobject.OAuth2Flows{"authorizationCode": connectTestOAuthFlow("openid", "https://www.googleapis.com/auth/userinfo.email")},
+	}}
+
+	// The contract's OAuth2 type remains the credential family even when it requests OpenID identity data.
+	if got := runtimeConnectAuthType(auths[0]); got != "oauth" {
+		t.Fatalf("runtime auth type = %q, want oauth", got)
+	}
+	// OpenID scope detection must remain available for nonce and ID-token validation.
+	if !isOIDCAuth(auths[0]) {
+		t.Fatal("OAuth2 scheme with openid scope must retain OpenID protocol validation")
+	}
+
+	authType, authName, err := resolveConnectAuthSelector(auths, "", "")
+	// Implicit selection must surface unexpected validation failures directly.
+	if err != nil {
+		t.Fatalf("resolve implicit auth selector: %v", err)
+	}
+	// Automatic selection must use the same OAuth identity stored by bucket application credentials.
+	if authType != "oauth" || authName != "oauth2" {
+		t.Fatalf("implicit selector = %q/%q, want oauth/oauth2", authType, authName)
+	}
+
+	auth, _, err := selectRuntimeOAuthConfig(auths, "oauth", "oauth2", "authorizationCode")
+	// Explicit SDK selection must resolve the exact Google-style OAuth declaration.
+	if err != nil {
+		t.Fatalf("select explicit OAuth config: %v", err)
+	}
+	// Exact selection must return the named contract rather than an empty fallback.
+	if auth.Name != "oauth2" {
+		t.Fatalf("selected auth name = %q, want oauth2", auth.Name)
+	}
+}
+
 // TestRediscoverConnectionResourcesReusesConnectedToken covers the manual
 // lifecycle path without exposing the provider token through GraphQL.
 func TestRediscoverConnectionResourcesReusesConnectedToken(t *testing.T) {
@@ -971,7 +1008,7 @@ func newConnectRuntimeFixture(t *testing.T) connectRuntimeFixture {
 	t.Helper()
 	admin := newConnectAdminFixture()
 	admin.store.applicationSecrets = encryptedRuntimeApplicationSecrets(t, admin)
-	admin.store.applicationAuthType = "oidc"
+	admin.store.applicationAuthType = "oauth"
 	admin.store.applicationAuthName = "bearerAuth"
 	metadata := &fusedobject.ServiceMetadata{
 		ID: admin.serviceID, ServiceVersionID: uuid.New(),
@@ -1046,7 +1083,7 @@ func encryptedRuntimeApplicationSecrets(t *testing.T, fixture connectAdminFixtur
 			t.Fatalf("encrypt application credential: %v", err)
 		}
 		secrets = append(secrets, store.WorkspaceSecret{WorkspaceSecretMeta: store.WorkspaceSecretMeta{
-			BucketID: fixture.bucketID, ServiceID: fixture.serviceID, KeyName: input.key, CredentialType: "oidc",
+			BucketID: fixture.bucketID, ServiceID: fixture.serviceID, KeyName: input.key, CredentialType: "oauth",
 		}, EncryptedDEK: wrappedDEK, EncryptedValue: encrypted})
 	}
 	return secrets

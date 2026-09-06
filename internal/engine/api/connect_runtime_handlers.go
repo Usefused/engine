@@ -1456,9 +1456,11 @@ func selectRuntimeOAuthConfig(auths fusedobject.AuthConfigs, configuredType, con
 // runtimeConnectAuthType maps provider metadata into the small set of connect
 // families exposed to bucket configuration.
 func runtimeConnectAuthType(auth fusedobject.AuthConfig) string {
-	if isOIDCAuth(auth) {
+	// Credential lookup follows the declared scheme family; an openid scope alone only adds OIDC protocol checks.
+	if isDeclaredOIDCAuth(auth) {
 		return "oidc"
 	}
+	// All remaining supported OAuth-style declarations use the OAuth credential namespace.
 	if isRuntimeOAuthAuth(auth) {
 		return "oauth"
 	}
@@ -1556,13 +1558,21 @@ func isRuntimeOAuthAuth(auth fusedobject.AuthConfig) bool {
 	return auth.Type == "oauth2" || auth.Type == "openIdConnect" || auth.Type == "oidc"
 }
 
+// isDeclaredOIDCAuth identifies schemes whose contract type owns the OIDC credential namespace.
+func isDeclaredOIDCAuth(auth fusedobject.AuthConfig) bool {
+	return auth.Type == "openIdConnect" || strings.EqualFold(auth.Type, "oidc")
+}
+
 // OAuth2 specs that declare openid in any canonical flow still require nonce
 // validation even when their scheme type was not normalized to OpenID Connect.
 func isOIDCAuth(auth fusedobject.AuthConfig) bool {
-	if auth.Type == "openIdConnect" || strings.EqualFold(auth.Type, "oidc") {
+	// A declared OIDC scheme always requires identity-token nonce validation.
+	if isDeclaredOIDCAuth(auth) {
 		return true
 	}
+	// OAuth2 providers such as Google may opt into OpenID semantics per declared scope.
 	for _, flow := range auth.OAuth2Flows {
+		// The canonical openid scope activates nonce validation without changing credential ownership.
 		if _, ok := flow.Scopes["openid"]; ok {
 			return true
 		}

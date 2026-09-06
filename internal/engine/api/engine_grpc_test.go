@@ -81,8 +81,8 @@ func configureReferencedConnectApp(t *testing.T, fixture connectRuntimeFixture, 
 	sourceServiceID := uuid.New()
 	selection := models.SDKSelection{
 		ServiceID: fixture.serviceID, ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion,
-		AuthType: "oidc", AuthName: "bearerAuth", CredentialSourceServiceID: sourceServiceID,
-		CredentialSourceAuthType: "oidc", CredentialSourceAuthName: "sharedOAuth",
+		AuthType: "oauth", AuthName: "bearerAuth", CredentialSourceServiceID: sourceServiceID,
+		CredentialSourceAuthType: "oauth", CredentialSourceAuthName: "sharedOAuth",
 	}
 	selections, err := json.Marshal([]models.SDKSelection{selection})
 	// Test setup must stop before runtime execution if immutable scope encoding fails.
@@ -91,7 +91,7 @@ func configureReferencedConnectApp(t *testing.T, fixture connectRuntimeFixture, 
 	}
 	fixture.store.appRuntimes[appID].Selections = selections
 	fixture.store.sourceServiceID = sourceServiceID
-	fixture.store.applicationAuthType = "oidc"
+	fixture.store.applicationAuthType = "oauth"
 	clientIDKey, clientSecretKey, ok := credentialkeys.OAuthApplication("sharedOAuth")
 	// The fixed source scheme must yield the deterministic bucket key pair used by production.
 	if !ok {
@@ -100,8 +100,8 @@ func configureReferencedConnectApp(t *testing.T, fixture connectRuntimeFixture, 
 	wrappedID, encryptedID := encryptConnectTestValue(t, fixture.masterKey, "source-client-id")
 	wrappedSecret, encryptedSecret := encryptConnectTestValue(t, fixture.masterKey, "source-client-secret")
 	fixture.store.applicationSecrets = []store.WorkspaceSecret{
-		{WorkspaceSecretMeta: store.WorkspaceSecretMeta{BucketID: fixture.bucketID, ServiceID: sourceServiceID, KeyName: clientIDKey, CredentialType: "oidc"}, EncryptedDEK: wrappedID, EncryptedValue: encryptedID},
-		{WorkspaceSecretMeta: store.WorkspaceSecretMeta{BucketID: fixture.bucketID, ServiceID: sourceServiceID, KeyName: clientSecretKey, CredentialType: "oidc"}, EncryptedDEK: wrappedSecret, EncryptedValue: encryptedSecret},
+		{WorkspaceSecretMeta: store.WorkspaceSecretMeta{BucketID: fixture.bucketID, ServiceID: sourceServiceID, KeyName: clientIDKey, CredentialType: "oauth"}, EncryptedDEK: wrappedID, EncryptedValue: encryptedID},
+		{WorkspaceSecretMeta: store.WorkspaceSecretMeta{BucketID: fixture.bucketID, ServiceID: sourceServiceID, KeyName: clientSecretKey, CredentialType: "oauth"}, EncryptedDEK: wrappedSecret, EncryptedValue: encryptedSecret},
 	}
 	return sourceServiceID
 }
@@ -121,7 +121,8 @@ func assertReferencedConnectStart(t *testing.T, resp *enginev1.StartConnectSessi
 		t.Fatalf("created sessions = %d, want 1", len(fixture.store.createdSessions))
 	}
 	session := fixture.store.createdSessions[0]
-	if session.ServiceID != fixture.serviceID || session.CredentialSourceServiceID != sourceServiceID || session.CredentialSourceAuthType != "oidc" || session.CredentialSourceAuthName != "sharedOAuth" {
+	// The persisted source keeps the declared OAuth family so callback lookup reaches the same credential pair.
+	if session.ServiceID != fixture.serviceID || session.CredentialSourceServiceID != sourceServiceID || session.CredentialSourceAuthType != "oauth" || session.CredentialSourceAuthName != "sharedOAuth" {
 		t.Fatalf("stored target/source identity = %#v", session)
 	}
 }
