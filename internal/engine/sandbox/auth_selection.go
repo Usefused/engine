@@ -182,20 +182,23 @@ func bindAlternativeAuthIdentity(candidate *store.SecretKeyAlternative, authName
 	}
 }
 
+// alternativeMatchesSelectors requires every supplied selector field to identify one scheme in the candidate branch.
 func alternativeMatchesSelectors(alternative authrouting.Alternative, definitions map[string]fusedobject.AuthConfig, credentials map[string]any) bool {
 	wantName := requestedAuthName(credentials)
 	wantType := requestedAuthType(credentials)
-	nameMatched := wantName == ""
-	typeMatched := wantType == ""
+	selectorMatched := wantName == "" && wantType == ""
 	for _, requirement := range alternative.Schemes {
 		auth, ok := definitions[requirement.Scheme]
+		// Invalid contract references cannot establish a valid caller selector.
 		if !ok {
 			continue
 		}
-		nameMatched = nameMatched || auth.Name == wantName
-		typeMatched = typeMatched || canonicalFusedAuthType(auth) == wantType
+		nameMatched := wantName == "" || auth.Name == wantName
+		typeMatched := wantType == "" || canonicalFusedAuthType(auth) == wantType
+		// Both authored fields must resolve to one exact scheme within the alternative.
+		selectorMatched = selectorMatched || nameMatched && typeMatched
 	}
-	return nameMatched && typeMatched
+	return selectorMatched
 }
 
 func secretKeysNeeded(auth fusedobject.AuthConfig, credentials map[string]any) ([]string, []string, bool) {

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Usefused/engine/internal/shared/authrouting"
+	"github.com/Usefused/engine/internal/shared/authselector"
 	"github.com/Usefused/engine/internal/shared/models"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -21,6 +22,7 @@ func (e *AuthRoutingError) Unwrap() error { return ErrAuthRouting }
 
 func authRoutingError(code string) error { return &AuthRoutingError{Code: code} }
 
+// selectRequestAuth chooses one complete security alternative after validating any explicit selector.
 func selectRequestAuth(auths models.AuthConfigs, requirements authrouting.Requirements, credentials map[string]any) (models.AuthConfigs, error) {
 	if requirements == nil {
 		return nil, authRoutingError("invalid_contract")
@@ -34,6 +36,10 @@ func selectRequestAuth(auths models.AuthConfigs, requirements authrouting.Requir
 	}
 	selectorType := selectedCredentialAuthType(credentials)
 	selectorName := selectedCredentialAuthName(credentials)
+	// Selector typos are contract errors even when unrelated credential material is also missing.
+	if err := validateRequestAuthSelector(requirements, definitions, selectorType, selectorName); err != nil {
+		return nil, err
+	}
 	for _, alternative := range requirements {
 		selected, satisfiable, err := satisfiableAlternative(alternative, definitions, credentials, selectorType, selectorName)
 		if err != nil {
@@ -44,6 +50,45 @@ func selectRequestAuth(auths models.AuthConfigs, requirements authrouting.Requir
 		}
 	}
 	return nil, authRoutingError("unsatisfied")
+}
+
+// validateRequestAuthSelector distinguishes an unknown pair from a valid route whose credentials are merely unavailable.
+func validateRequestAuthSelector(requirements authrouting.Requirements, definitions map[string]models.AuthConfig, selectorType, selectorName string) error {
+	// Omitted selectors preserve provider preference and need no correction guidance.
+	if selectorType == "" && selectorName == "" {
+		return nil
+	}
+	for _, alternative := range requirements {
+		_, matches, err := matchingAlternativeDefinitions(alternative, definitions, selectorType, selectorName)
+		// Invalid immutable contracts remain internal routing failures rather than user corrections.
+		if err != nil {
+			return err
+		}
+		// A matching route may still fail later for missing material, which has a separate actionable error.
+		if matches {
+			return nil
+		}
+	}
+	return authselector.NewNotFoundError(
+		authselector.Selection{AuthType: selectorType, AuthName: selectorName},
+		requestAuthSelectorChoices(requirements, definitions),
+	)
+}
+
+// requestAuthSelectorChoices derives operation-valid pairs from the already-loaded immutable security contract.
+func requestAuthSelectorChoices(requirements authrouting.Requirements, definitions map[string]models.AuthConfig) []authselector.Selection {
+	choices := make([]authselector.Selection, 0, len(definitions))
+	for _, alternative := range requirements {
+		for _, requirement := range alternative.Schemes {
+			auth, exists := definitions[requirement.Scheme]
+			// Invalid references are omitted here because the canonical matcher reports the contract error first.
+			if !exists {
+				continue
+			}
+			choices = append(choices, authselector.Selection{AuthType: authrouting.CanonicalType(auth.Type, auth.Scheme), AuthName: auth.Name})
+		}
+	}
+	return choices
 }
 
 func authDefinitions(auths models.AuthConfigs) (map[string]models.AuthConfig, error) {
@@ -91,8 +136,7 @@ func satisfiableAlternative(alternative authrouting.Alternative, definitions map
 // caller did not choose.
 func matchingAlternativeDefinitions(alternative authrouting.Alternative, definitions map[string]models.AuthConfig, selectorType, selectorName string) (models.AuthConfigs, bool, error) {
 	declared := make(models.AuthConfigs, 0, len(alternative.Schemes))
-	typeMatched := selectorType == ""
-	nameMatched := selectorName == ""
+	selectorMatched := selectorType == "" && selectorName == ""
 	seen := make(map[string]struct{}, len(alternative.Schemes))
 	for _, requirement := range alternative.Schemes {
 		auth, ok := definitions[requirement.Scheme]
@@ -103,11 +147,13 @@ func matchingAlternativeDefinitions(alternative authrouting.Alternative, definit
 			return nil, false, authRoutingError("invalid_contract")
 		}
 		seen[auth.Name] = struct{}{}
-		typeMatched = typeMatched || authrouting.CanonicalType(auth.Type, auth.Scheme) == selectorType
-		nameMatched = nameMatched || auth.Name == selectorName
+		typeMatched := selectorType == "" || authrouting.CanonicalType(auth.Type, auth.Scheme) == selectorType
+		nameMatched := selectorName == "" || auth.Name == selectorName
+		// Type and name must identify the same scheme; matching two members of an AND-set is not an exact pair.
+		selectorMatched = selectorMatched || typeMatched && nameMatched
 		declared = append(declared, auth)
 	}
-	return declared, typeMatched && nameMatched, nil
+	return declared, selectorMatched, nil
 }
 
 func authSatisfied(auth models.AuthConfig, credentials map[string]any) bool {

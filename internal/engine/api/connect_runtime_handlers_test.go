@@ -229,6 +229,41 @@ func assertConnectResolutionError(t *testing.T, response *httptest.ResponseRecor
 	}
 }
 
+// TestStartConnectSessionHandlerExplainsValidAuthSelectors verifies a bad type/name pair receives actionable contract choices.
+func TestStartConnectSessionHandlerExplainsValidAuthSelectors(t *testing.T) {
+	fixture := newConnectRuntimeFixture(t)
+	fixture.verifier.serviceMetadata.AuthConfigs = append(fixture.verifier.serviceMetadata.AuthConfigs,
+		fusedobject.AuthConfig{Name: "googleOIDC", Type: "openIdConnect", OAuth2Flows: fusedobject.OAuth2Flows{"authorizationCode": connectTestOAuthFlow("openid")}},
+		fusedobject.AuthConfig{Name: "api_key", Type: "apiKey"},
+	)
+	request := httptest.NewRequest(http.MethodPost, fixture.startPath(), strings.NewReader(`{"end_user_ref":"user","auth_type":"basic","auth_name":"oauth2"}`))
+	request.Header.Set("X-API-Key", "fsk_test")
+	response := httptest.NewRecorder()
+	buildConnectRuntimeRouter(fixture).ServeHTTP(response, request)
+
+	var envelope workspaceConfigErrorResponse
+	decodeErr := json.Unmarshal(response.Body.Bytes(), &envelope)
+	// Invalid selectors remain a typed pre-mutation validation failure.
+	if response.Code != http.StatusBadRequest || decodeErr != nil || envelope.Error.Code != "connect_auth_config_not_found" {
+		t.Fatalf("selector response = %d %#v decode=%v", response.Code, envelope.Error, decodeErr)
+	}
+	// The caller sees its rejected pair and every bounded executable alternative from this contract.
+	if !strings.Contains(envelope.Error.Message, `auth_name "oauth2" for auth_type "basic"`) ||
+		!strings.Contains(envelope.Error.Message, `auth_type="oauth", auth_name="bearerAuth"`) ||
+		!strings.Contains(envelope.Error.Message, `auth_type="oidc", auth_name="googleOIDC"`) {
+		t.Fatalf("selector guidance = %q", envelope.Error.Message)
+	}
+	// Static schemes are not valid browser-connect corrections and must not appear in the suggestion list.
+	if strings.Contains(envelope.Error.Message, "api_key") {
+		t.Fatalf("selector guidance included static auth: %q", envelope.Error.Message)
+	}
+	// Remediation tells both CLI and JSON consumers how to use the returned pairs.
+	if !strings.Contains(envelope.Error.Remediation, "listed auth_type/auth_name pairs") {
+		t.Fatalf("selector remediation = %q", envelope.Error.Remediation)
+	}
+	assertNoConnectSessions(t, fixture, "auth selector failure")
+}
+
 // TestWriteConnectRuntimeErrorCorrelatesAndHidesInternalCause proves unknown
 // failures stay secret-safe while retaining request and trace identities.
 func TestWriteConnectRuntimeErrorCorrelatesAndHidesInternalCause(t *testing.T) {

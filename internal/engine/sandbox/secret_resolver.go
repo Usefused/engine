@@ -11,6 +11,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/requestbinding"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/authrouting"
+	"github.com/Usefused/engine/internal/shared/authselector"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
 	"github.com/Usefused/engine/internal/shared/credentialkeys"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
@@ -751,7 +752,7 @@ func selectedConnectedAuthName(credentials map[string]any, auths fusedobject.Aut
 	authName := connectedAuthNameForRequirements(auths, requirements, selector)
 	// An explicit connected family cannot fall back to a different credential type.
 	if authName == "" {
-		return "", fmt.Errorf("connected auth type %q is not configured for this service", selector)
+		return "", runtimeAuthSelectionError(auths, requirements, selector, "")
 	}
 	return authName, nil
 }
@@ -762,17 +763,38 @@ func namedConnectedAuthName(auths fusedobject.AuthConfigs, requirements authrout
 	authType, configured := requiredNamedAuthType(auths, requirements, authName)
 	// Unknown or unreferenced names are invalid even when a static type was supplied.
 	if !configured {
-		return "", fmt.Errorf("auth name %q is not configured for this operation", authName)
+		return "", runtimeAuthSelectionError(auths, requirements, selector, authName)
 	}
 	// A contradictory selector must fail before either binding lookup or secret selection.
 	if selector != "" && selector != authType {
-		return "", fmt.Errorf("auth type does not match auth name %q for this operation", authName)
+		return "", runtimeAuthSelectionError(auths, requirements, selector, authName)
 	}
 	// API keys, Basic, bearer and mTLS use bucket secrets rather than user connections.
 	if !isConnectedAuthSelector(authType) {
 		return "", nil
 	}
 	return authName, nil
+}
+
+// runtimeAuthSelectionError builds the shared operation-local correction without loading credentials or provider data.
+func runtimeAuthSelectionError(auths fusedobject.AuthConfigs, requirements authrouting.Requirements, authType, authName string) error {
+	definitions, err := fusedAuthDefinitions(auths)
+	// Malformed immutable metadata remains an internal contract failure, never a guessed user correction.
+	if err != nil {
+		return err
+	}
+	choices := make([]authselector.Selection, 0, len(definitions))
+	for _, alternative := range requirements {
+		for _, requirement := range alternative.Schemes {
+			auth, exists := definitions[requirement.Scheme]
+			// Unknown schemes are omitted here because transport-contract validation owns their internal failure.
+			if !exists {
+				continue
+			}
+			choices = append(choices, authselector.Selection{AuthType: canonicalFusedAuthType(auth), AuthName: auth.Name})
+		}
+	}
+	return authselector.NewNotFoundError(authselector.Selection{AuthType: authType, AuthName: authName}, choices)
 }
 
 // usableAuthConnection loads the bucket-owned grant and refreshes it through

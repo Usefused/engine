@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/authselector"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"github.com/go-chi/chi/v5"
@@ -31,6 +33,19 @@ type restRuntimeTestDouble struct {
 	physicalCalls     []sandbox.PhysicalExecutionRequest
 	resolveBindings   []sandbox.ExactOperationBinding
 	resolvedOperation string
+}
+
+// TestRESTActionableAuthErrorPreservesSelectorChoices verifies REST does not mask a pre-provider selector correction.
+func TestRESTActionableAuthErrorPreservesSelectorChoices(t *testing.T) {
+	selectorErr := authselector.NewNotFoundError(
+		authselector.Selection{AuthType: "basic", AuthName: "oauth2"},
+		[]authselector.Selection{{AuthType: "oauth", AuthName: "googleOAuth"}},
+	)
+	projected := restActionableAuthError(fmt.Errorf("preflight: %w", selectorErr))
+	// REST callers need the same stable code and human-readable exact pair as SDK and MCP callers.
+	if projected == nil || projected.status != http.StatusBadRequest || projected.code != "auth_selection_not_found" || !strings.Contains(projected.message, `auth_type="oauth", auth_name="googleOAuth"`) {
+		t.Fatalf("REST selector projection = %#v", projected)
+	}
 }
 
 // ConnectAppRuntime records the request-scoped cache acquisition used by the handler.

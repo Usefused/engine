@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/Usefused/engine/internal/shared/authrouting"
+	"github.com/Usefused/engine/internal/shared/authselector"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
@@ -47,6 +48,17 @@ func TestResolvedPhysicalOperationValidateSelectorsRejectsContractMismatches(t *
 				t.Fatalf("ValidateSelectors() error = %v, want ErrPhysicalSelectorContract", err)
 			}
 		})
+	}
+}
+
+// TestResolvedPhysicalOperationExplainsAuthSelectorMismatch verifies preflight keeps operation-local correction choices.
+func TestResolvedPhysicalOperationExplainsAuthSelectorMismatch(t *testing.T) {
+	operation := physicalEndpointRestrictedSelectorTestOperation()
+	err := operation.ValidateSelectors(PhysicalExecutionSelectors{AuthType: "basic", AuthName: "oauthAuth"})
+	var selectorErr *authselector.NotFoundError
+	// Only the endpoint-admitted OAuth pair is valid; the service-level API key must not be suggested.
+	if !errors.As(err, &selectorErr) || !errors.Is(err, ErrPhysicalSelectorContract) || len(selectorErr.Available) != 1 || selectorErr.Available[0] != (authselector.Selection{AuthType: "oauth", AuthName: "oauthAuth"}) {
+		t.Fatalf("selector error = %#v from %v", selectorErr, err)
 	}
 }
 

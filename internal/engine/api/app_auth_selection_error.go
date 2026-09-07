@@ -6,11 +6,12 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/shared/authrouting"
+	"github.com/Usefused/engine/internal/shared/authselector"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 )
 
-const appAuthExampleLimit = 5
+const appAuthExampleLimit = authselector.SuggestionLimit
 
 // incompatibleAppAuthError explains the existing planner decision using its
 // already-fetched contract, without querying credentials or changing auth policy.
@@ -110,15 +111,11 @@ func appAuthRequirementLabel(requirements authrouting.Requirements, types map[st
 // appAuthCandidateLabels exposes only bounded names/types, not the rest of the
 // auth config, which can contain provider URLs or credential-bearing metadata.
 func appAuthCandidateLabels(auths fusedobject.AuthConfigs) string {
-	labels := []string{}
-	for _, auth := range auths[:min(len(auths), appAuthExampleLimit)] {
-		labels = append(labels, appAuthSchemeLabel(auth.Name, sandbox.CanonicalFusedAuthType(auth)))
+	selections := make([]authselector.Selection, 0, len(auths))
+	for _, auth := range auths {
+		selections = append(selections, authselector.Selection{AuthType: sandbox.CanonicalFusedAuthType(auth), AuthName: auth.Name})
 	}
-	// The catalogue remains authoritative when the response cannot list every scheme.
-	if len(auths) > appAuthExampleLimit {
-		labels = append(labels, "[additional schemes omitted]")
-	}
-	return boundedAppAuthDetail(strings.Join(labels, ", "))
+	return authselector.FormatSelections(selections, "auth.type", "auth.name")
 }
 
 // appAuthSchemeLabel uses the canonical config type alongside the exact scheme
@@ -135,21 +132,11 @@ func appAuthSchemeLabel(name, authType string) string {
 // appAuthDiagnosticLabel reuses service-label admission to prevent provider
 // metadata from becoming a credential echo or terminal-control channel.
 func appAuthDiagnosticLabel(value string) string {
-	label := safeAppValidationLabel(value)
-	// Omit unsafe or unavailable labels rather than fabricate an exact config value.
-	if label == "" {
-		return "[label omitted]"
-	}
-	return fmt.Sprintf("%q", label)
+	return authselector.QuoteLabel(value)
 }
 
 // boundedAppAuthDetail fits the existing CLI diagnostic budget and marks partial
 // text explicitly; operation counts in the primary message remain exact.
 func boundedAppAuthDetail(value string) string {
-	runes := []rune(value)
-	// Leave headroom below the shared 1,024-rune CLI server-detail ceiling.
-	if len(runes) > 900 {
-		return string(runes[:900]) + "… [additional detail omitted]"
-	}
-	return value
+	return authselector.BoundDetail(value)
 }

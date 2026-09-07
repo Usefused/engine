@@ -16,6 +16,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/engine/unified"
+	"github.com/Usefused/engine/internal/shared/authselector"
 	"github.com/Usefused/engine/internal/shared/canonicaljson"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/getkin/kin-openapi/openapi3"
@@ -23,6 +24,26 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// unifiedAuthSelectionError preserves structured local inspection while projecting InvalidArgument over gRPC.
+type unifiedAuthSelectionError struct {
+	cause *authselector.NotFoundError
+}
+
+// Error delegates to the shared bounded selector explanation.
+func (err *unifiedAuthSelectionError) Error() string {
+	return err.cause.Error()
+}
+
+// Unwrap exposes the shared selector contract to the in-process REST adapter.
+func (err *unifiedAuthSelectionError) Unwrap() error {
+	return err.cause
+}
+
+// GRPCStatus keeps remote Unified callers on the established InvalidArgument status.
+func (err *unifiedAuthSelectionError) GRPCStatus() *status.Status {
+	return status.New(codes.InvalidArgument, err.cause.Error())
+}
 
 var errUnifiedSchemaInvalid = errors.New("Unified schema is invalid")
 
@@ -196,7 +217,7 @@ func validateUnifiedSelector(selector *enginev1.ExecutionSelectors) error {
 		}
 	}
 	if !validUnifiedAuthType(selector.GetAuthType()) {
-		return status.Error(codes.InvalidArgument, "Unified auth selector is invalid")
+		return status.Error(codes.InvalidArgument, "Unified auth_type must be one of api_key, oauth, oidc, basic, bearer, or mtls")
 	}
 	resourceID := selector.GetResourceId()
 	if len(resourceID) > maxUnifiedSelector || resourceID != strings.TrimSpace(resourceID) {
@@ -210,7 +231,7 @@ func validateUnifiedSelector(selector *enginev1.ExecutionSelectors) error {
 	return nil
 }
 
-// validUnifiedAuthType recognizes only the selector vocabulary supported by the connected-auth resolver.
+// validUnifiedAuthType recognizes the complete public selector vocabulary admitted by physical execution.
 func validUnifiedAuthType(value string) bool {
 	switch value {
 	case "", "api_key", "oauth", "oidc", "basic", "bearer", "mtls":
@@ -390,6 +411,11 @@ func validateResolvedUnifiedSelectors(runtime unifiedPhysicalRuntime, bindings [
 // into the bounded Unified RPC contract.
 func validateOneResolvedUnifiedSelector(runtime unifiedPhysicalRuntime, operation sandbox.ResolvedPhysicalOperation, selector sandbox.PhysicalExecutionSelectors) error {
 	if err := runtime.ValidateResolvedPhysicalSelectors(operation, selector); err != nil {
+		var selectionErr *authselector.NotFoundError
+		// Exact auth corrections remain typed for REST and become actionable InvalidArgument text for remote SDK callers.
+		if errors.As(err, &selectionErr) {
+			return &unifiedAuthSelectionError{cause: selectionErr}
+		}
 		if errors.Is(err, sandbox.ErrPhysicalSelectorContract) {
 			return status.Error(codes.InvalidArgument, "Unified selector is incompatible with a selected operation")
 		}

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/shared/authrouting"
+	"github.com/Usefused/engine/internal/shared/authselector"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/serverrouting"
 )
@@ -97,6 +99,44 @@ func TestSelectRequestAuthOrderedORAndExactName(t *testing.T) {
 	selected, err = selectRequestAuth(auths, requirements, credentials)
 	if err != nil || len(selected) != 1 || selected[0].Name != "adminOAuth" {
 		t.Fatalf("named selected=%#v err=%v", selected, err)
+	}
+}
+
+// TestSelectRequestAuthExplainsInvalidSelectorsAcrossFamilies verifies runtime corrections are not limited to connected auth.
+func TestSelectRequestAuthExplainsInvalidSelectorsAcrossFamilies(t *testing.T) {
+	tests := []models.AuthConfig{
+		{Name: "providerKey", Type: "apiKey"},
+		{Name: "providerOAuth", Type: "oauth2"},
+		{Name: "providerOIDC", Type: "openIdConnect"},
+		{Name: "providerBasic", Type: "http", Scheme: "basic"},
+		{Name: "providerBearer", Type: "http", Scheme: "bearer"},
+		{Name: "providerMTLS", Type: "mutualTLS"},
+		{Name: "providerOAuth1", Type: "oauth1"},
+		{Name: "providerDigest", Type: "http", Scheme: "digest"},
+	}
+	for _, auth := range tests {
+		authType := authrouting.CanonicalType(auth.Type, auth.Scheme)
+		t.Run(authType, func(t *testing.T) {
+			requirements := authrouting.Requirements{{Schemes: []authrouting.Requirement{{Scheme: auth.Name}}}}
+			_, err := selectRequestAuth(models.AuthConfigs{auth}, requirements, map[string]any{"fused_auth_type": "wrong", "fused_auth_name": "wrong"})
+			var selectorErr *authselector.NotFoundError
+			// Every supported family must return the same typed pre-provider correction contract.
+			if !errors.As(err, &selectorErr) || len(selectorErr.Available) != 1 || selectorErr.Available[0].AuthType != authType || selectorErr.Available[0].AuthName != auth.Name {
+				t.Fatalf("selector error = %#v from %v", selectorErr, err)
+			}
+		})
+	}
+}
+
+// TestSelectRequestAuthRejectsCrossSchemePairs ensures an AND-set cannot combine a type from one scheme with another scheme's name.
+func TestSelectRequestAuthRejectsCrossSchemePairs(t *testing.T) {
+	auths := models.AuthConfigs{{Name: "providerOAuth", Type: "oauth2"}, {Name: "clientCertificate", Type: "mutualTLS"}}
+	requirements := authrouting.Requirements{{Schemes: []authrouting.Requirement{{Scheme: "providerOAuth"}, {Scheme: "clientCertificate"}}}}
+	_, err := selectRequestAuth(auths, requirements, map[string]any{"fused_auth_type": "oauth", "fused_auth_name": "clientCertificate"})
+	var selectorErr *authselector.NotFoundError
+	// The runtime must suggest the two real pairs instead of accepting the contradictory composite.
+	if !errors.As(err, &selectorErr) || len(selectorErr.Available) != 2 {
+		t.Fatalf("selector error = %#v from %v", selectorErr, err)
 	}
 }
 

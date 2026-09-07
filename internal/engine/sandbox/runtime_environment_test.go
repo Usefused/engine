@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/authselector"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/serverrouting"
@@ -251,6 +252,20 @@ func TestEncodeRuntimeErrorPreservesCredentialSetup(t *testing.T) {
 	}
 	if got.Code != "bucket_credentials_missing" || got.BucketID != bucketID.String() || got.ServiceID != serviceID.String() || !strings.Contains(got.Command, "fused-cli secret set "+serviceID.String()) {
 		t.Fatalf("encoded credential contract = %#v", got)
+	}
+}
+
+// TestEncodeRuntimeErrorPreservesAuthSelectionCorrection verifies generated SDK streams receive structured valid pairs.
+func TestEncodeRuntimeErrorPreservesAuthSelectionCorrection(t *testing.T) {
+	want := authselector.NewNotFoundError(
+		authselector.Selection{AuthType: "basic", AuthName: "oauth2"},
+		[]authselector.Selection{{AuthType: "oauth", AuthName: "googleOAuth"}},
+	)
+	encoded := encodeRuntimeError(fmt.Errorf("resolve auth: %w", want))
+	var got authselector.NotFoundError
+	// The SDK frame must preserve both the stable code and exact operation-local alternative.
+	if err := json.Unmarshal([]byte(encoded), &got); err != nil || got.Code != want.Code || len(got.Available) != 1 || got.Available[0].AuthName != "googleOAuth" {
+		t.Fatalf("encoded selector contract = %q decoded=%#v err=%v", encoded, got, err)
 	}
 }
 

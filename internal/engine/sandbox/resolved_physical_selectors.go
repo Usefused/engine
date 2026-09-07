@@ -16,6 +16,26 @@ import (
 // selector or contract values across the sandbox boundary.
 var ErrPhysicalSelectorContract = errors.New("physical execution selector is incompatible with resolved operation")
 
+// physicalAuthSelectionError preserves the shared correction while remaining compatible with the physical preflight sentinel.
+type physicalAuthSelectionError struct {
+	cause error
+}
+
+// Error delegates to the bounded selector diagnostic.
+func (err *physicalAuthSelectionError) Error() string {
+	return err.cause.Error()
+}
+
+// Unwrap exposes the typed shared selector failure to REST and Unified projections.
+func (err *physicalAuthSelectionError) Unwrap() error {
+	return err.cause
+}
+
+// Is retains the established physical-selector classification for accounting and older callers.
+func (err *physicalAuthSelectionError) Is(target error) bool {
+	return target == ErrPhysicalSelectorContract
+}
+
 // PhysicalExecutionSelectors is the non-secret routing surface that may be
 // checked before a physical execution starts. Provider URLs, credentials, and
 // resolved connection data never enter this DTO.
@@ -52,7 +72,10 @@ func (operation ResolvedPhysicalOperation) ValidateSelectors(selectors PhysicalE
 		return err
 	}
 	if !resolvedAuthSelectorsAllowed(match.endpoint.SecurityRequirements, definitions, credentials) {
-		return physicalSelectorContractError("auth")
+		return &physicalAuthSelectionError{cause: runtimeAuthSelectionError(
+			match.service.AuthConfigs, match.endpoint.SecurityRequirements,
+			requestedAuthType(credentials), requestedAuthName(credentials),
+		)}
 	}
 	return validateResolvedConnectSelectors(match, selectors, credentials, definitions)
 }

@@ -18,6 +18,7 @@ import (
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/authselector"
 	"github.com/Usefused/engine/internal/shared/canonicaljson"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/go-chi/chi/v5"
@@ -311,7 +312,7 @@ func validateRESTSelector(selector *restExecutionSelector) *restExecutionError {
 		}
 	}
 	if !validUnifiedAuthType(selector.AuthType) {
-		return newRESTExecutionError(http.StatusBadRequest, "selector_invalid", "auth_type is not supported")
+		return newRESTExecutionError(http.StatusBadRequest, "selector_invalid", "auth_type must be one of api_key, oauth, oidc, basic, bearer, or mtls")
 	}
 	if selector.ResourceID != "" {
 		if _, err := uuid.Parse(selector.ResourceID); err != nil {
@@ -663,6 +664,13 @@ func restProviderHTTPStatusDetails(err error) map[string]any {
 // restActionableAuthError projects only Engine-owned credential and connection
 // routing fields needed for the caller to complete or repair authorization.
 func restActionableAuthError(err error) *restExecutionError {
+	var selector *authselector.NotFoundError
+	// Invalid selector pairs stop before provider dispatch and can safely return only sanitized operation-local choices.
+	if errors.As(err, &selector) {
+		return newRESTExecutionErrorWithDetails(http.StatusBadRequest, selector.Code, selector.Message, map[string]any{
+			"requested": selector.Requested, "available": selector.Available, "remediation": selector.Remediation,
+		})
+	}
 	var missing *sandbox.CredentialMaterialMissingError
 	// Static credential absence is proven before provider construction and can
 	// safely expose only routing identity plus a value-free setup command.

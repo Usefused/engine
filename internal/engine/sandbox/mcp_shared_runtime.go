@@ -14,6 +14,7 @@ import (
 
 	"github.com/Usefused/engine/internal/engine"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
+	"github.com/Usefused/engine/internal/shared/authselector"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
@@ -853,6 +854,11 @@ func boundedMCPPhysicalCallError(operationID string, err error) (int, string) {
 
 // boundedMCPPhysicalCallResponse adds closed recovery fields only when typed validation proves provider dispatch never began.
 func boundedMCPPhysicalCallResponse(operationID string, err error) (int, mcpCallResponse) {
+	var selectorErr *authselector.NotFoundError
+	// Selector mismatches are proven pre-provider and have one safe correction: choose an operation-local pair.
+	if errors.As(err, &selectorErr) {
+		return http.StatusBadRequest, mcpCorrectArgumentsResponse(selectorErr.Code, selectorErr.Error())
+	}
 	// Missing dynamic user context is proven before provider dispatch and has one exact MCP connection correction.
 	if errors.Is(err, errMCPEndUserRefRequired) {
 		return http.StatusBadRequest, mcpCorrectArgumentsResponse(mcpEndUserRefRequiredCode, mcpEndUserRefRequiredMessage)

@@ -10,6 +10,7 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/connectresource"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/authselector"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/serverrouting"
@@ -490,6 +491,11 @@ func comparableEnvironmentName(name string) string {
 // encodeRuntimeError preserves only documented structured decisions while
 // keeping ordinary execution failures backward-compatible as plain strings.
 func encodeRuntimeError(err error) string {
+	var selectorErr *authselector.NotFoundError
+	// Generated SDKs receive the same exact, credential-free selector choices as other Engine transports.
+	if errors.As(err, &selectorErr) {
+		return mustJSONError(selectorErr)
+	}
 	var missingErr *CredentialMaterialMissingError
 	// Generated SDKs receive the same structured, value-free setup action as REST and Unified callers.
 	if errors.As(err, &missingErr) {

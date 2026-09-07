@@ -18,6 +18,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/executionevent"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/authselector"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/paginationpolicy"
@@ -30,6 +31,19 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
+
+// TestBoundedMCPPhysicalCallResponsePreservesSelectorChoices verifies MCP returns a correct-arguments action for an invalid pair.
+func TestBoundedMCPPhysicalCallResponsePreservesSelectorChoices(t *testing.T) {
+	selectorErr := authselector.NewNotFoundError(
+		authselector.Selection{AuthType: "basic", AuthName: "oauth2"},
+		[]authselector.Selection{{AuthType: "oauth", AuthName: "googleOAuth"}},
+	)
+	statusCode, response := boundedMCPPhysicalCallResponse("users.get", fmt.Errorf("dispatch: %w", selectorErr))
+	// Invalid auth selectors stop before provider work and retain machine-readable correction semantics.
+	if statusCode != http.StatusBadRequest || response.Code != "auth_selection_not_found" || response.RecoveryAction != "correct_execute_arguments" || !strings.Contains(response.Error, `auth_name="googleOAuth"`) {
+		t.Fatalf("MCP selector response = %d %#v", statusCode, response)
+	}
+}
 
 // mcpConnectedAuthFailureResolver returns one trusted pre-provider connection action for handler integration coverage.
 type mcpConnectedAuthFailureResolver struct {

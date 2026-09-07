@@ -22,6 +22,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/connectauth"
 	"github.com/Usefused/engine/internal/engine/connectresource"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/authselector"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
@@ -1445,12 +1446,49 @@ func recordConnectCallbackError(ctx context.Context, err error) {
 func selectRuntimeOAuthConfig(auths fusedobject.AuthConfigs, configuredType, configuredName, flowName string) (fusedobject.AuthConfig, fusedobject.OAuth2FlowContract, error) {
 	want := canonicalConnectAuthType(configuredType)
 	for _, auth := range auths {
+		// Only the exact declared family/name pair can own application credentials and connected-user grants.
 		if runtimeConnectAuthType(auth) == want && auth.Name == configuredName {
 			flow, err := validateRuntimeOAuthConfig(auth, flowName)
 			return auth, flow, err
 		}
 	}
-	return fusedobject.AuthConfig{}, fusedobject.OAuth2FlowContract{}, connectRuntimeHTTPError{status: http.StatusBadRequest, message: "service has no configured auth_name for " + want}
+	return fusedobject.AuthConfig{}, fusedobject.OAuth2FlowContract{}, runtimeConnectAuthSelectionError(auths, want, configuredName, flowName)
+}
+
+// runtimeConnectAuthSelectionError explains a rejected selector using only bounded, credential-free contract labels.
+func runtimeConnectAuthSelectionError(auths fusedobject.AuthConfigs, configuredType, configuredName, flowName string) connectRuntimeHTTPError {
+	selections := runtimeConnectAuthSelections(auths, flowName)
+	safeSelections := authselector.Normalize(selections)
+	message := "service has no configured auth_name " + authselector.QuoteLabel(configuredName) + " for auth_type " + authselector.QuoteLabel(configuredType)
+	// Exact executable choices let callers repair the connect request without exposing OAuth endpoints or credentials.
+	if len(safeSelections) > 0 {
+		message += "; valid auth selections: " + authselector.FormatSelections(selections, "auth_type", "auth_name")
+	} else {
+		message += "; no valid OAuth/OIDC auth selections are declared"
+	}
+	return connectRuntimeHTTPError{
+		status: http.StatusBadRequest, code: "connect_auth_config_not_found",
+		message:     authselector.BoundDetail(message),
+		remediation: "Use one of the listed auth_type/auth_name pairs and retry the connection.",
+	}
+}
+
+// runtimeConnectAuthSelections returns executable browser-connect selectors while leaving safety, ordering, and bounds to the shared formatter.
+func runtimeConnectAuthSelections(auths fusedobject.AuthConfigs, flowName string) []authselector.Selection {
+	selections := make([]authselector.Selection, 0, len(auths))
+	for _, auth := range auths {
+		authType := runtimeConnectAuthType(auth)
+		// Static schemes cannot be used as browser-connect suggestions.
+		if authType == "" {
+			continue
+		}
+		// A declared family is useful guidance only when its selected OAuth flow is executable.
+		if _, err := validateRuntimeOAuthConfig(auth, flowName); err != nil {
+			continue
+		}
+		selections = append(selections, authselector.Selection{AuthType: authType, AuthName: auth.Name})
+	}
+	return selections
 }
 
 // runtimeConnectAuthType maps provider metadata into the small set of connect
