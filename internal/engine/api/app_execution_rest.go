@@ -385,8 +385,9 @@ func (s *EngineGRPCServer) executeRESTPhysical(ctx context.Context, identity aut
 		return restExecutionSuccess{}, newRESTExecutionError(http.StatusBadRequest, "invalid_request", "targets, selectors, and target_pagination apply only to Unified operations")
 	}
 	selectors := physicalRESTSelectors(request.Selector)
+	// Typed auth corrections must reach the shared public projector instead of being collapsed into the legacy selector mask.
 	if err := s.restRuntime.ValidateResolvedPhysicalSelectors(plan.physical, selectors); err != nil {
-		return restExecutionSuccess{}, newRESTExecutionError(http.StatusBadRequest, "selector_invalid", "selector is incompatible with this operation")
+		return restExecutionSuccess{}, restErrorFromExecution(err)
 	}
 	pagination := runtimeRESTPaginationIntent(request.Pagination)
 	if err := sandbox.ValidateResolvedPhysicalPaginationIntent(plan.physical, pagination); err != nil {

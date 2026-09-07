@@ -29,6 +29,7 @@ type restRuntimeTestDouble struct {
 	physicalFound     bool
 	physicalAmbiguous bool
 	physicalErr       error
+	selectorErr       error
 	physicalResult    sandbox.PhysicalExecutionResult
 	physicalCalls     []sandbox.PhysicalExecutionRequest
 	resolveBindings   []sandbox.ExactOperationBinding
@@ -45,6 +46,25 @@ func TestRESTActionableAuthErrorPreservesSelectorChoices(t *testing.T) {
 	// REST callers need the same stable code and human-readable exact pair as SDK and MCP callers.
 	if projected == nil || projected.status != http.StatusBadRequest || projected.code != "auth_selection_not_found" || !strings.Contains(projected.message, `auth_type="oauth", auth_name="googleOAuth"`) {
 		t.Fatalf("REST selector projection = %#v", projected)
+	}
+}
+
+// TestRESTPhysicalPreflightPreservesSelectorChoices verifies the public handler does not replace a typed auth correction.
+func TestRESTPhysicalPreflightPreservesSelectorChoices(t *testing.T) {
+	runtime := &restRuntimeTestDouble{
+		physicalFound: true,
+		selectorErr: authselector.NewNotFoundError(
+			authselector.Selection{AuthType: "basic", AuthName: "oauth2"},
+			[]authselector.Selection{{AuthType: "oauth", AuthName: "oauth2"}},
+		),
+	}
+	server, appID := newRESTPhysicalServer(runtime)
+	response := performRESTExecution(t, server, appID, "fsk_test", `{"operation":"issues.get","input":{},"selector":{"auth_type":"basic","auth_name":"oauth2"}}`, "")
+	var envelope restExecutionErrorEnvelope
+	decodeErr := json.Unmarshal(response.Body.Bytes(), &envelope)
+	// The actual HTTP boundary must retain the stable code and valid pair, not merely the projector unit test.
+	if response.Code != http.StatusBadRequest || decodeErr != nil || envelope.Error.Code != "auth_selection_not_found" || !strings.Contains(envelope.Error.Message, `auth_type="oauth", auth_name="oauth2"`) {
+		t.Fatalf("REST selector response = %d %s decode=%v", response.Code, response.Body.String(), decodeErr)
 	}
 }
 
@@ -137,8 +157,8 @@ func (runtime *restRuntimeTestDouble) ResolveExactPhysicalOperations(_ context.C
 }
 
 // ValidateResolvedPhysicalSelectors keeps selector validation on the canonical interface.
-func (*restRuntimeTestDouble) ValidateResolvedPhysicalSelectors(sandbox.ResolvedPhysicalOperation, sandbox.PhysicalExecutionSelectors) error {
-	return nil
+func (runtime *restRuntimeTestDouble) ValidateResolvedPhysicalSelectors(sandbox.ResolvedPhysicalOperation, sandbox.PhysicalExecutionSelectors) error {
+	return runtime.selectorErr
 }
 
 // ExecuteResolvedPhysicalJSON records transport and returns deterministic physical or Unified child JSON.
