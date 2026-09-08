@@ -1515,9 +1515,11 @@ func authConnectionsGraphQLField(s store.Store) *graphql.Field {
 	}
 }
 
+// authConnectionPageGraphQLField exposes one globally paginated union of whole-service and exact-version connection filters.
 func authConnectionPageGraphQLField(s store.Store) *graphql.Field {
 	args := bucketIDPageArgs()
-	args["service_id"] = &graphql.ArgumentConfig{Type: graphql.String}
+	args["service_ids"] = &graphql.ArgumentConfig{Type: graphql.NewList(graphql.String)}
+	args["service_version_ids"] = &graphql.ArgumentConfig{Type: graphql.NewList(graphql.String)}
 	args["end_user_ref"] = &graphql.ArgumentConfig{Type: graphql.String}
 	return &graphql.Field{
 		Type: authConnectionPageGraphQLType,
@@ -1529,7 +1531,13 @@ func authConnectionPageGraphQLField(s store.Store) *graphql.Field {
 			if err != nil {
 				return nil, err
 			}
-			serviceID, err := optionalGraphQLUUIDArg(p, "service_id")
+			serviceIDs, err := optionalGraphQLUUIDListArg(p, "service_ids")
+			// Every service identity must be valid before the filter can reach Store.
+			if err != nil {
+				return nil, err
+			}
+			serviceVersionIDs, err := optionalGraphQLUUIDListArg(p, "service_version_ids")
+			// Exact-version filtering follows the same all-or-nothing identity validation.
 			if err != nil {
 				return nil, err
 			}
@@ -1540,10 +1548,11 @@ func authConnectionPageGraphQLField(s store.Store) *graphql.Field {
 				attribute.Int("limit", limit),
 				attribute.Int("offset", offset),
 			)
-			if serviceID != nil {
-				span.SetAttributes(attribute.String("service_id", serviceID.String()))
-			}
-			connections, total, err := s.ListAuthConnectionsPage(ctx, bucketID, serviceID, endUserRef, limit, offset)
+			span.SetAttributes(
+				attribute.Int("service_filter_count", len(serviceIDs)),
+				attribute.Int("service_version_filter_count", len(serviceVersionIDs)),
+			)
+			connections, total, err := s.ListAuthConnectionsPage(ctx, bucketID, serviceIDs, serviceVersionIDs, endUserRef, limit, offset)
 			if err != nil {
 				return nil, fmt.Errorf("list auth connection page: %w", err)
 			}
@@ -2322,6 +2331,27 @@ func optionalGraphQLUUIDArg(p graphql.ResolveParams, name string) (*uuid.UUID, e
 		return nil, fmt.Errorf("invalid %s", name)
 	}
 	return &id, nil
+}
+
+// optionalGraphQLUUIDListArg validates every list member and removes duplicates before a filter reaches SQL.
+func optionalGraphQLUUIDListArg(p graphql.ResolveParams, name string) ([]uuid.UUID, error) {
+	values := graphQLStringListArg(p, name)
+	ids := make([]uuid.UUID, 0, len(values))
+	seen := make(map[uuid.UUID]bool, len(values))
+	for _, value := range values {
+		id, err := uuid.Parse(value)
+		// One malformed identity invalidates the complete union filter instead of silently broadening it.
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s", name)
+		}
+		// Duplicate selectors cannot change the result and should not enlarge query parameters.
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 func graphQLStringArg(p graphql.ResolveParams, name string) string {

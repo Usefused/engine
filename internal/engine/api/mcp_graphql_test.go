@@ -604,7 +604,7 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 		bucketValuePage(bucket_id: "` + attachedBucketID.String() + `", limit: 10, offset: 0) { total items { id service_id key_name location value } }
 		secretMetas(bucket_id: "` + attachedBucketID.String() + `") { id service_id key_name credential_type }
 		secretMetaPage(bucket_id: "` + attachedBucketID.String() + `", limit: 10, offset: 0) { total items { id service_id key_name key_names credential_type } }
-		authConnectionPage(bucket_id: "` + attachedBucketID.String() + `", service_id: "` + serviceID.String() + `", limit: 10, offset: 0) { total items { id service_id end_user_ref auth_type token_type refresh_state } }
+		authConnectionPage(bucket_id: "` + attachedBucketID.String() + `", service_ids: ["` + serviceID.String() + `"], limit: 10, offset: 0) { total items { id service_id end_user_ref auth_type token_type refresh_state } }
 		bucketConnectSummary(bucket_id: "` + attachedBucketID.String() + `") { bucket_id application_credential_count connected_user_count }
 	}`
 	data := doMCPGraphQLRequest(t, h, query)
@@ -936,6 +936,47 @@ func TestEngineGraphQLConnectAuth_ListAndDeleteConnections(t *testing.T) {
 	if len(s.deletedAuthConnections) != 1 || s.deletedAuthConnections[0] != connID {
 		t.Fatalf("delete did not scope through bucket: %#v", s.deletedAuthConnections)
 	}
+}
+
+// TestAuthConnectionPageUnionsWholeServicesAndExactVersions verifies one server-side page spans both selector classes.
+func TestAuthConnectionPageUnionsWholeServicesAndExactVersions(t *testing.T) {
+	bucketID := uuid.New()
+	wholeServiceID := uuid.New()
+	exactServiceID := uuid.New()
+	exactVersionID := uuid.New()
+	otherVersionID := uuid.New()
+	wholeConnectionID := uuid.New()
+	exactConnectionID := uuid.New()
+	now := time.Now().UTC()
+	s := &workspaceTestStore{
+		accountID: uuid.New(),
+		buckets:   []store.Bucket{{ID: bucketID, Name: "connections", IsDefault: true, CreatedAt: now, UpdatedAt: now}},
+		authConnections: []store.AuthConnection{
+			{ID: wholeConnectionID, BucketID: bucketID, ServiceID: wholeServiceID, ServiceVersionID: uuid.New(), EndUserRef: "whole", CreatedAt: now, UpdatedAt: now},
+			{ID: exactConnectionID, BucketID: bucketID, ServiceID: exactServiceID, ServiceVersionID: exactVersionID, EndUserRef: "exact", CreatedAt: now, UpdatedAt: now},
+			{ID: uuid.New(), BucketID: bucketID, ServiceID: exactServiceID, ServiceVersionID: otherVersionID, EndUserRef: "other-version", CreatedAt: now, UpdatedAt: now},
+			{ID: uuid.New(), BucketID: bucketID, ServiceID: uuid.New(), ServiceVersionID: uuid.New(), EndUserRef: "unselected", CreatedAt: now, UpdatedAt: now},
+		},
+	}
+	h := mountMCPGraphQLTestHandler(t, s)
+	query := `query {
+		authConnectionPage(
+			bucket_id: "` + bucketID.String() + `",
+			service_ids: ["` + wholeServiceID.String() + `"],
+			service_version_ids: ["` + exactVersionID.String() + `"],
+			limit: 1,
+			offset: 1
+		) { total items { id end_user_ref } }
+	}`
+	data := doMCPGraphQLRequest(t, h, query)
+	page := graphQLMap(t, data["authConnectionPage"], "authConnectionPage")
+	assertGraphQLField(t, page, "total", float64(2), "authConnectionPage")
+	items := graphQLList(t, page["items"], "authConnectionPage.items")
+	// Offset applies after union filtering, so the second admitted selector match is the only returned row.
+	if len(items) != 1 {
+		t.Fatalf("authConnectionPage.items = %#v, want one row", items)
+	}
+	assertGraphQLField(t, graphQLMap(t, items[0], "authConnectionPage.items[0]"), "id", exactConnectionID.String(), "authConnectionPage.items[0]")
 }
 
 // TestDeployMcpServer_CreatesActiveScopeWithNameAndKind verifies GraphQL apply preserves authored identity on the active MCP version.

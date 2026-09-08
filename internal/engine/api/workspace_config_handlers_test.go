@@ -44,12 +44,14 @@ type workspaceCapacityStoreStub struct {
 	removableIDs []uuid.UUID
 }
 
+// CountProjectedActiveServices captures exact admission inputs while returning the scenario's controlled projection.
 func (s *workspaceCapacityStoreStub) CountProjectedActiveServices(_ context.Context, desiredIDs, removableIDs []uuid.UUID) (int, int, error) {
 	s.desiredIDs = append([]uuid.UUID(nil), desiredIDs...)
 	s.removableIDs = append([]uuid.UUID(nil), removableIDs...)
 	return s.current, s.projected, nil
 }
 
+// TestCheckWorkspaceServiceLimitUsesLiveProjectedCount proves omitted managed services never create phantom capacity.
 func TestCheckWorkspaceServiceLimitUsesLiveProjectedCount(t *testing.T) {
 	original := entitlement.LiveEntitlement.Load()
 	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{MaxServices: models.IntPtr(5)})
@@ -59,25 +61,37 @@ func TestCheckWorkspaceServiceLimitUsesLiveProjectedCount(t *testing.T) {
 	desired := workspaceDesiredState{Services: map[uuid.UUID]workspaceDesiredService{
 		existingID: {ServiceID: existingID}, replacementID: {ServiceID: replacementID},
 	}}
-	removedID := uuid.New()
-	previous := map[uuid.UUID]workspaceManagedService{
-		existingID: {ServiceID: existingID.String()},
-		removedID:  {ServiceID: removedID.String()},
-	}
 	capacity := &workspaceCapacityStoreStub{current: 5, projected: 5}
 	_, span := otel.Tracer("test").Start(context.Background(), "service-capacity")
 	defer span.End()
 
-	if err := checkWorkspaceServiceLimit(context.Background(), span, capacity, desired, previous); err != nil {
-		t.Fatalf("replacement at the ceiling should be allowed: %v", err)
+	if err := checkWorkspaceServiceLimit(context.Background(), span, capacity, desired, nil); err != nil {
+		t.Fatalf("unchanged projected capacity should be allowed: %v", err)
 	}
-	if len(capacity.desiredIDs) != 2 || len(capacity.removableIDs) != 1 {
+	if len(capacity.desiredIDs) != 2 || len(capacity.removableIDs) != 0 {
 		t.Fatalf("capacity inputs desired=%v removable=%v", capacity.desiredIDs, capacity.removableIDs)
 	}
 
 	capacity.projected = 6
-	if err := checkWorkspaceServiceLimit(context.Background(), span, capacity, desired, previous); err == nil || err.Error() != "services limit reached (5/5)" {
+	if err := checkWorkspaceServiceLimit(context.Background(), span, capacity, desired, nil); err == nil || err.Error() != "services limit reached (5/5)" {
 		t.Fatalf("net addition at the ceiling should fail with a stable limit error, got %v", err)
+	}
+}
+
+// TestCheckWorkspaceServiceLimitCreditsExplicitRemoval proves reviewed replacement scope reaches the live capacity projection.
+func TestCheckWorkspaceServiceLimitCreditsExplicitRemoval(t *testing.T) {
+	addedID, removedID := uuid.New(), uuid.New()
+	desired := workspaceDesiredState{Services: map[uuid.UUID]workspaceDesiredService{addedID: {ServiceID: addedID}}}
+	capacity := &workspaceCapacityStoreStub{current: 5, projected: 5}
+	_, span := otel.Tracer("test").Start(context.Background(), "service-capacity-replacement")
+	defer span.End()
+
+	if err := checkWorkspaceServiceLimit(context.Background(), span, capacity, desired, []uuid.UUID{removedID}); err != nil {
+		t.Fatalf("explicit replacement at the ceiling should be allowed: %v", err)
+	}
+	// Only the reviewed whole-service removal may be credited against the addition.
+	if len(capacity.removableIDs) != 1 || capacity.removableIDs[0] != removedID {
+		t.Fatalf("capacity projection did not receive explicit removal: %v", capacity.removableIDs)
 	}
 }
 
@@ -1230,7 +1244,7 @@ func TestWorkspaceConfigPlanHandler(t *testing.T) {
 
 	summary := decodeWorkspacePlanSummaryResponse(t, rr.Body)
 	assertWorkspacePlanPreservesUnmanagedService(t, summary, unmanagedSvcID)
-	assertWorkspacePlanDisablesManagedVersion(t, summary, "2026-06-01")
+	assertWorkspacePlanPreservesOmittedManagedVersion(t, summary, "2026-06-01")
 	assertWorkspacePlanUsesBatchedVersionLookup(t, s)
 }
 
@@ -1256,10 +1270,12 @@ func assertWorkspacePlanPreservesUnmanagedService(t *testing.T, summary workspac
 	}
 }
 
-func assertWorkspacePlanDisablesManagedVersion(t *testing.T, summary workspacePlanSummary, version string) {
+// assertWorkspacePlanPreservesOmittedManagedVersion proves sparse version lists do not authorize deactivation.
+func assertWorkspacePlanPreservesOmittedManagedVersion(t *testing.T, summary workspacePlanSummary, version string) {
 	t.Helper()
-	if !hasWorkspaceVersionAction(summary.Actions, "disable_service_version", version) {
-		t.Fatalf("expected managed removed version action, got %#v", summary.Actions)
+	// Only an explicit removal target may create a disable action for this version.
+	if hasWorkspaceVersionAction(summary.Actions, "disable_service_version", version) {
+		t.Fatalf("omitted managed version must not be disabled, got %#v", summary.Actions)
 	}
 }
 
@@ -1630,7 +1646,8 @@ func hasWorkspaceAction(actions []workspacePlanAction, actionType workspaceplan.
 	return false
 }
 
-func TestWorkspaceConfigPlanHandler_BlocksRemovingServiceUsedBySDK(t *testing.T) {
+// TestWorkspaceConfigPlanHandler_OmissionDoesNotBlockOnSDKUsage proves absence is non-destructive even when an app depends on the service.
+func TestWorkspaceConfigPlanHandler_OmissionDoesNotBlockOnSDKUsage(t *testing.T) {
 	svcID := uuid.New()
 	appID := uuid.New()
 	svcVersionID := uuid.New()
@@ -1676,14 +1693,14 @@ func TestWorkspaceConfigPlanHandler_BlocksRemovingServiceUsedBySDK(t *testing.T)
 		t.Fatalf("decode response: %v", err)
 	}
 	summary := resp.Summary
-	if len(summary.Blockers) != 1 {
-		t.Fatalf("expected blocker, got %#v", summary)
+	if len(summary.Blockers) != 0 {
+		t.Fatalf("omission must not create blockers, got %#v", summary)
 	}
-	if len(summary.Actions) != 1 || !summary.Actions[0].RequiresDecision {
-		t.Fatalf("expected decision-required remove action, got %#v", summary.Actions)
+	if len(summary.Actions) != 0 {
+		t.Fatalf("omission must not create removal actions, got %#v", summary.Actions)
 	}
-	if got := summary.Actions[0].ImpactedSDKConfigs; len(got) != 1 || got[0] != "sdk:security" {
-		t.Fatalf("expected impacted SDK config, got %#v", got)
+	if len(summary.UnmanagedServices) != 1 || summary.UnmanagedServices[0] != svcID.String() {
+		t.Fatalf("omitted active service should be reported as unmanaged, got %#v", summary.UnmanagedServices)
 	}
 }
 
@@ -1905,8 +1922,8 @@ func TestWorkspaceConfigApplyHandler(t *testing.T) {
 	if s.gotVersion != "2026-08-01" {
 		t.Fatalf("expected latest public version to be activated, got %q", s.gotVersion)
 	}
-	if len(s.removedVersions) != 1 || s.removedVersions[0] != svcID.String()+":2026-07-01" {
-		t.Fatalf("expected old managed version removal, got %#v", s.removedVersions)
+	if len(s.removedVersions) != 0 {
+		t.Fatalf("omitted managed version must remain active, got %#v", s.removedVersions)
 	}
 	if configStore.upserted == nil || string(configStore.upserted.ManagedResources) == "" {
 		t.Fatalf("expected applied managed resources to be stored, got %#v", configStore.upserted)
@@ -2336,8 +2353,6 @@ type mockRegistryClient struct {
 	driftServiceIDBatches    [][]uuid.UUID
 	endpointNameBatches      [][]string
 	slugIDs                  map[string]uuid.UUID
-	archivedServiceIDs       []uuid.UUID
-	archiveErr               error
 	deprecatedVersions       []deprecatedVersionCall
 	deprecateVersionErr      error
 	slugBatches              [][]string
@@ -2468,14 +2483,6 @@ func (m *mockRegistryClient) PublishServiceVersionExecutionPolicy(_ context.Cont
 type deprecatedVersionCall struct {
 	ServiceID uuid.UUID
 	Version   string
-}
-
-func (m *mockRegistryClient) ArchiveService(_ context.Context, serviceID uuid.UUID, _ string) error {
-	if m.archiveErr != nil {
-		return m.archiveErr
-	}
-	m.archivedServiceIDs = append(m.archivedServiceIDs, serviceID)
-	return nil
 }
 
 func (m *mockRegistryClient) DeprecateServiceVersion(_ context.Context, serviceID uuid.UUID, version, _ string) error {
@@ -2943,128 +2950,8 @@ func TestWorkspaceNotificationsGraphQL_DriftEnabled_CallsRegistry(t *testing.T) 
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Task 3: archiveRemovedOwnedServices + planRemovedServiceIDs
-// ---------------------------------------------------------------------------
-
-func makeRemoveServicePlan(serviceIDs ...uuid.UUID) *store.ConfigPlan {
-	actions := make([]workspacePlanAction, 0, len(serviceIDs))
-	for _, id := range serviceIDs {
-		actions = append(actions, workspacePlanAction{
-			ID:        workspaceActionID(workspaceplan.ActionRemoveService, id),
-			Type:      workspaceplan.ActionRemoveService,
-			ServiceID: id.String(),
-		})
-	}
-	b, _ := json.Marshal(actions)
-	return &store.ConfigPlan{Actions: b}
-}
-
-func TestPlanRemovedServiceIDs_ReturnsOnlyRemoveActions(t *testing.T) {
-	svc1 := uuid.New()
-	svc2 := uuid.New()
-	addSvc := uuid.New()
-
-	actions := []workspacePlanAction{
-		{ID: "a1", Type: workspaceplan.ActionRemoveService, ServiceID: svc1.String()},
-		{ID: "a2", Type: workspaceplan.ActionAddService, ServiceID: addSvc.String()},
-		{ID: "a3", Type: workspaceplan.ActionRemoveService, ServiceID: svc2.String()},
-	}
-	b, _ := json.Marshal(actions)
-	plan := &store.ConfigPlan{Actions: b}
-
-	ids := planRemovedServiceIDs(plan)
-	if len(ids) != 2 {
-		t.Fatalf("expected 2 removed IDs, got %d", len(ids))
-	}
-	got := map[uuid.UUID]bool{ids[0]: true, ids[1]: true}
-	if !got[svc1] || !got[svc2] {
-		t.Errorf("expected %s and %s in result, got %v", svc1, svc2, ids)
-	}
-}
-
-func TestPlanRemovedServiceIDs_EmptyPlan(t *testing.T) {
-	ids := planRemovedServiceIDs(&store.ConfigPlan{})
-	if len(ids) != 0 {
-		t.Errorf("expected no IDs for empty plan, got %v", ids)
-	}
-}
-
-func TestArchiveRemovedOwnedServices_ArchivesOnlyOwned(t *testing.T) {
-	ctx := context.Background()
-	ownedID := uuid.New()
-	nonOwnedID := uuid.New()
-
-	rc := &mockRegistryClient{
-		visibility: map[uuid.UUID]sandbox.ServiceVisibility{
-			ownedID:    {ServiceID: ownedID, IsOwner: true},
-			nonOwnedID: {ServiceID: nonOwnedID, IsOwner: false},
-		},
-	}
-	plan := makeRemoveServicePlan(ownedID, nonOwnedID)
-	call := workspaceApplyCall{apiKey: "fsk_test"}
-
-	if err := archiveRemovedOwnedServices(ctx, rc, call, plan); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(rc.archivedServiceIDs) != 1 || rc.archivedServiceIDs[0] != ownedID {
-		t.Errorf("expected only owned service %s archived, got %v", ownedID, rc.archivedServiceIDs)
-	}
-}
-
-func TestArchiveRemovedOwnedServices_NoActionsIsNoop(t *testing.T) {
-	ctx := context.Background()
-	rc := &mockRegistryClient{}
-	plan := &store.ConfigPlan{} // no actions
-
-	if err := archiveRemovedOwnedServices(ctx, rc, workspaceApplyCall{}, plan); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(rc.archivedServiceIDs) != 0 {
-		t.Errorf("expected no archives for empty plan, got %v", rc.archivedServiceIDs)
-	}
-}
-
-// A verifier that doesn't implement ServiceArchiver should be a silent no-op
-// so that Engines without the capability don't break on removal actions.
-func TestArchiveRemovedOwnedServices_MissingCapabilityReturnsError(t *testing.T) {
-	ctx := context.Background()
-	svcID := uuid.New()
-
-	// A bare struct that implements neither ServiceVisibilityResolver nor
-	// ServiceArchiver must return an error — not silently skip. A missing
-	// capability is a misconfiguration, not a supported downgrade path.
-	type bareClient struct{ sandbox.RegistryClient }
-	plan := makeRemoveServicePlan(svcID)
-	if err := archiveRemovedOwnedServices(ctx, &bareClient{}, workspaceApplyCall{}, plan); err == nil {
-		t.Fatal("expected error when archiver capability is absent, got nil")
-	}
-}
-
-func TestArchiveRemovedOwnedServices_PropagatesArchiveError(t *testing.T) {
-	ctx := context.Background()
-	svcID := uuid.New()
-
-	rc := &mockRegistryClient{
-		visibility: map[uuid.UUID]sandbox.ServiceVisibility{
-			svcID: {ServiceID: svcID, IsOwner: true},
-		},
-		archiveErr: errors.New("registry 500"),
-	}
-	plan := makeRemoveServicePlan(svcID)
-	call := workspaceApplyCall{apiKey: "fsk_test"}
-
-	err := archiveRemovedOwnedServices(ctx, rc, call, plan)
-	if err == nil {
-		t.Fatal("expected error from failing ArchiveService, got nil")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Task 4: WillArchive label on remove_service plan actions
-// ---------------------------------------------------------------------------
-
-func TestPlanWorkspaceChanges_WillArchiveOnlyForOwned(t *testing.T) {
+// TestPlanWorkspaceChanges_OmissionNeverRemovesOrArchives proves sparse documents leave both workspace and Registry state untouched.
+func TestPlanWorkspaceChanges_OmissionNeverRemovesOrArchives(t *testing.T) {
 	ownedID := uuid.New()
 	nonOwnedID := uuid.New()
 
@@ -3072,7 +2959,7 @@ func TestPlanWorkspaceChanges_WillArchiveOnlyForOwned(t *testing.T) {
 		ownedID:    {ServiceID: ownedID.String(), Versions: []string{"2026-07-01"}},
 		nonOwnedID: {ServiceID: nonOwnedID.String(), Versions: []string{"2026-07-01"}},
 	}
-	// Neither service is in desired — both trigger remove_service actions.
+	// Neither service is desired because sparse omission must preserve both existing memberships.
 	desired := workspaceDesiredState{Services: map[uuid.UUID]workspaceDesiredService{}}
 	visibility := map[uuid.UUID]sandbox.ServiceVisibility{
 		ownedID:    {ServiceID: ownedID, IsOwner: true},
@@ -3081,20 +2968,11 @@ func TestPlanWorkspaceChanges_WillArchiveOnlyForOwned(t *testing.T) {
 
 	summary := planWorkspaceChanges(desired, nil, previousManaged, nil, visibility)
 
-	archiveActions := map[uuid.UUID]bool{}
 	for _, action := range summary.Actions {
-		if action.Type != workspaceplan.ActionRemoveService {
-			continue
+		// No action type may turn omission into membership removal or Registry archival.
+		if action.Type == workspaceplan.ActionRemoveService || action.Type == workspaceplan.ActionDisableServiceVersion {
+			t.Fatalf("omission produced a destructive action: %#v", action)
 		}
-		id, _ := uuid.Parse(action.ServiceID)
-		archiveActions[id] = action.WillArchive
-	}
-
-	if !archiveActions[ownedID] {
-		t.Errorf("owned service %s should have WillArchive=true", ownedID)
-	}
-	if archiveActions[nonOwnedID] {
-		t.Errorf("non-owned service %s should have WillArchive=false, got true", nonOwnedID)
 	}
 }
 
@@ -3107,7 +2985,7 @@ func TestExplicitWorkspaceVersionRemovalPlansWithoutForce(t *testing.T) {
 		ServiceID: serviceID, Versions: map[string]bool{"v1": true}, VersionIDs: map[string]uuid.UUID{"v1": versionID},
 	}}
 	appendExplicitWorkspaceRemovalActions(
-		[]workspaceRemovalTarget{{ServiceID: serviceID.String(), Version: "v1"}}, current, nil, nil, &summary,
+		[]workspaceRemovalTarget{{ServiceID: serviceID.String(), Version: "v1"}}, current, nil, &summary,
 	)
 	if len(summary.Actions) != 1 {
 		t.Fatalf("expected one explicit action, got %#v", summary.Actions)

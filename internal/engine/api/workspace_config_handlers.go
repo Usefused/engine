@@ -393,11 +393,6 @@ type workspacePlanAction struct {
 	TargetLocation     string                   `json:"target_location,omitempty"`
 	TargetName         string                   `json:"target_name,omitempty"`
 	BindingSource      string                   `json:"binding_source,omitempty"`
-	// WillArchive is true when the service is owned by this workspace, meaning
-	// removal will also soft-delete it from the Registry (not just deactivate
-	// it locally). Surfaces this distinction in plan output so the user can see
-	// "[archive from registry]" vs "[remove from workspace]" before confirming.
-	WillArchive bool `json:"will_archive,omitempty"`
 	// ExplicitRemoval pins an unmanaged target into the immutable plan so apply never infers destructive scope.
 	ExplicitRemoval   bool     `json:"explicit_removal,omitempty"`
 	RemovalVersionIDs []string `json:"removal_version_ids,omitempty"`
@@ -488,14 +483,6 @@ type ConnectionProfilePublisher interface {
 
 type ConnectionProfileContractResolver interface {
 	FetchConnectionProfileContracts(context.Context, []uuid.UUID, string) ([]sandbox.ConnectionProfileContract, error)
-}
-
-// ServiceArchiver is the capability required to soft-delete a service from the
-// Registry on behalf of its owner. Only the owner's Engine can issue the
-// delete; other Engines that merely have the service activated can only remove
-// it from their workspace (local deactivation).
-type ServiceArchiver interface {
-	ArchiveService(ctx context.Context, serviceID uuid.UUID, apiKey string) error
 }
 
 // ServiceVersionDeprecator marks a named version of a service as deprecated in
@@ -871,10 +858,12 @@ func executeWorkspaceConfigApply(
 		return nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 	// Exact explicit scope is revalidated before any desired service or credential mutation begins.
-	if _, err := prepareExplicitWorkspaceRemovals(ctx, s, desired, plan.Actions); err != nil {
+	preparedRemovals, err := prepareExplicitWorkspaceRemovals(ctx, s, desired, plan.Actions)
+	// Exact removal scope must be retained for capacity projection after validation succeeds.
+	if err != nil {
 		return nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
-	if limErr := checkWorkspaceServiceLimit(ctx, span, s, desired, previousManaged); limErr != nil {
+	if limErr := checkWorkspaceServiceLimit(ctx, span, s, desired, preparedRemovals.wholeServices); limErr != nil {
 		span.SetAttributes(attribute.String("outcome", "service_limit_exceeded"))
 		return nil, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusForbidden, message: limErr.Error()}, "apply_admission", call.planID.String(), "not_committed")
 	}
@@ -951,11 +940,9 @@ func (guard *workspaceApplyLeaseGuard) release() {
 	}
 }
 
+// applyWorkspaceRegistryActions applies only explicit Registry policy and lifecycle directives, never membership-derived archival.
 func applyWorkspaceRegistryActions(ctx context.Context, verifier ServiceVerifier, call workspaceApplyCall, plan *store.ConfigPlan, currentState *store.ConfigState) error {
-	if err := archiveRemovedOwnedServices(ctx, verifier, call, plan); err != nil {
-		slog.ErrorContext(ctx, "WorkspaceConfigApplyHandler: registry archive failed", slog.Any("error", err))
-		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to archive owned services in registry"}
-	}
+	// Workspace membership changes never imply Registry archival; archival belongs to a separate explicit lifecycle operation.
 	if err := applyDeprecationActions(ctx, verifier, call, plan, currentState); err != nil {
 		slog.ErrorContext(ctx, "WorkspaceConfigApplyHandler: deprecation apply failed", slog.Any("error", err))
 		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to apply deprecation actions"}
@@ -2203,40 +2190,25 @@ func validWorkspaceConnectionProfileAuthName(name string) bool {
 	return len(name) <= 128 && !strings.ContainsAny(name, "\r\n\x00")
 }
 
+// resolveWorkspaceServiceVisibility fetches ownership only for declared public-policy intent.
 func resolveWorkspaceServiceVisibility(
 	ctx context.Context,
 	resolver any,
 	apiKey string,
 	desired workspaceDesiredState,
-	previousManaged map[uuid.UUID]workspaceManagedService,
-	removeTargets []workspaceRemovalTarget,
 ) (map[uuid.UUID]sandbox.ServiceVisibility, error) {
 	// Collect IDs that need visibility data:
 	// (a) services with any public-flag intent -- service-level, execution
 	//     policy, connection profile, or version_policies (ownership validation
 	//     required for all of these; see workspaceServicesWithPublicIntent)
-	// (b) previously-managed services no longer in desired (need ownership to
-	//     label plan output as "[archive from registry]" vs "[remove from workspace]")
+	// Omitted and explicitly removed services need no ownership lookup because workspace removal never archives Registry state.
 	seen := map[uuid.UUID]bool{}
 	var serviceIDs []uuid.UUID
 	for _, serviceID := range workspaceServicesWithPublicIntent(desired) {
 		serviceIDs = append(serviceIDs, serviceID)
 		seen[serviceID] = true
 	}
-	for serviceID := range previousManaged {
-		if _, stillDesired := desired.Services[serviceID]; !stillDesired && !seen[serviceID] {
-			serviceIDs = append(serviceIDs, serviceID)
-			seen[serviceID] = true
-		}
-	}
-	for _, target := range removeTargets {
-		serviceID := uuid.MustParse(target.ServiceID)
-		// Explicit whole-service removal needs ownership metadata to disclose Registry archival before apply.
-		if target.Version == "" && !seen[serviceID] {
-			serviceIDs = append(serviceIDs, serviceID)
-			seen[serviceID] = true
-		}
-	}
+	// No other service enters this batch: absence is unmanaged intent, and explicit removal is workspace-local.
 	if len(serviceIDs) == 0 {
 		return nil, nil
 	}
@@ -2347,6 +2319,7 @@ func validateWorkspaceVersionPublicIntent(serviceID uuid.UUID, policies []worksp
 	return nil
 }
 
+// buildWorkspacePlanSummary combines sparse declarations and separately requested removals into one review surface.
 func buildWorkspacePlanSummary(
 	ctx context.Context,
 	configStore store.ConfigRepository,
@@ -2363,12 +2336,12 @@ func buildWorkspacePlanSummary(
 	if err != nil {
 		return workspacePlanSummary{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to inspect SDK usage"}
 	}
-	visibility, err := resolveWorkspaceServiceVisibility(ctx, verifier, apiKey, desired, previousManaged, removeTargets)
+	visibility, err := resolveWorkspaceServiceVisibility(ctx, verifier, apiKey, desired)
 	if err != nil {
 		return workspacePlanSummary{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
 	}
 	summary := planWorkspaceChanges(desired, currentWorkspace, previousManaged, sdkImpacts, visibility)
-	appendExplicitWorkspaceRemovalActions(removeTargets, currentWorkspace, sdkImpacts, visibility, &summary)
+	appendExplicitWorkspaceRemovalActions(removeTargets, currentWorkspace, sdkImpacts, &summary)
 	if err := reconcileWorkspaceProfilePlanActions(ctx, s, desired, &summary); err != nil {
 		return workspacePlanSummary{}, err
 	}
@@ -2681,7 +2654,7 @@ func parseManagedWorkspaceResources(state *store.ConfigState) (map[uuid.UUID]wor
 }
 
 // planWorkspaceChanges combines desired additions, visibility, deprecations,
-// profile actions, and managed removals into one ordered review surface.
+// and profile actions while reporting omitted active services as unmanaged.
 func planWorkspaceChanges(
 	desired workspaceDesiredState,
 	current map[uuid.UUID]currentWorkspaceService,
@@ -2699,7 +2672,7 @@ func planWorkspaceChanges(
 	summary.Actions = append(summary.Actions, desiredVersionExecutionPolicyLocalActions(desired)...)
 	summary.Actions = append(summary.Actions, desiredConnectionProfilePublishActions(desired)...)
 	summary.Actions = append(summary.Actions, desiredDeprecationActions(desired, sdkImpacts, &summary)...)
-	summary.Actions = append(summary.Actions, managedWorkspaceRemovalActions(desired, previousManaged, current, sdkImpacts, visibility, &summary)...)
+	// Omission releases local configuration ownership and must never authorize workspace or Registry removal.
 	summary.UnmanagedServices = unmanagedWorkspaceServices(desired, current, previousManaged)
 	sortWorkspacePlanSummary(&summary)
 	return summary
@@ -2997,11 +2970,8 @@ func desiredDeprecationActions(
 ) []workspacePlanAction {
 	var actions []workspacePlanAction
 	for serviceID, deprecations := range desired.Deprecations {
-		desiredSvc, serviceConfigured := desired.Services[serviceID]
-		if !serviceConfigured {
-			continue
-		}
 		for _, deprecation := range deprecations {
+			// Deprecation is explicit lifecycle intent and remains valid without a sibling service declaration in a sparse workspace file.
 			if deprecation.Version == "" {
 				var allImpacted []string
 				for _, impacts := range sdkImpacts[serviceID] {
@@ -3010,78 +2980,18 @@ func desiredDeprecationActions(
 				actions = append(actions, deprecateServiceAction(serviceID, deprecation, allImpacted, summary))
 				continue
 			}
-			if containsString(desiredSvc.Versions, deprecation.Version) {
-				actions = append(actions, deprecateVersionAction(serviceID, deprecation.Version, deprecation))
-			}
+			// A version directive names its scope directly and does not require activation intent in the same fragment.
+			actions = append(actions, deprecateVersionAction(serviceID, deprecation.Version, deprecation))
 		}
 	}
 	return actions
 }
 
-func managedWorkspaceRemovalActions(
-	desired workspaceDesiredState,
-	previousManaged map[uuid.UUID]workspaceManagedService,
-	current map[uuid.UUID]currentWorkspaceService,
-	sdkImpacts map[uuid.UUID]map[uuid.UUID][]string,
-	visibility map[uuid.UUID]sandbox.ServiceVisibility,
-	summary *workspacePlanSummary,
-) []workspacePlanAction {
-	var actions []workspacePlanAction
-	for serviceID, managed := range previousManaged {
-		desiredSvc, stillManaged := desired.Services[serviceID]
-		if !stillManaged {
-			if deprecation, ok := serviceDeprecationDirective(desired, serviceID); ok {
-				var allImpacted []string
-				for _, impacts := range sdkImpacts[serviceID] {
-					allImpacted = append(allImpacted, impacts...)
-				}
-				actions = append(actions, deprecateServiceAction(serviceID, deprecation, allImpacted, summary))
-				continue
-			}
-			action := workspacePlanAction{
-				ID:        workspaceActionID(workspaceplan.ActionRemoveService, serviceID),
-				Type:      workspaceplan.ActionRemoveService,
-				ServiceID: serviceID.String(),
-				// WillArchive tells the user that this Engine owns the service, so
-				// confirming the apply will also soft-delete it from the Registry
-				// (not just deactivate it locally). The label shown in plan output
-				// will read "[archive from registry]" instead of "[remove from workspace]".
-				WillArchive: visibility[serviceID].IsOwner,
-			}
-			var allImpacted []string
-			for _, impacts := range sdkImpacts[serviceID] {
-				allImpacted = append(allImpacted, impacts...)
-			}
-			actions = append(actions, attachServiceRemovalImpact(action, allImpacted, summary))
-			continue
-		}
-		for _, version := range managed.Versions {
-			if !containsString(desiredSvc.Versions, version) {
-				if deprecation, ok := versionDeprecationDirective(desired, serviceID, version); ok {
-					actions = append(actions, deprecateVersionAction(serviceID, version, deprecation))
-					continue
-				}
-				action := workspacePlanAction{
-					ID:        workspaceActionID(workspaceplan.ActionDisableServiceVersion, serviceID, version),
-					Type:      workspaceplan.ActionDisableServiceVersion,
-					ServiceID: serviceID.String(),
-					Version:   version,
-				}
-				// We need the service_version_id to check exact impact.
-				versionID := current[serviceID].VersionIDs[version]
-				actions = append(actions, attachVersionRemovalImpact(action, sdkImpacts[serviceID][versionID], summary))
-			}
-		}
-	}
-	return actions
-}
-
-// appendExplicitWorkspaceRemovalActions adds only targets not already represented by declarative managed removal actions.
+// appendExplicitWorkspaceRemovalActions turns only caller-supplied targets into workspace-local destructive actions.
 func appendExplicitWorkspaceRemovalActions(
 	targets []workspaceRemovalTarget,
 	current map[uuid.UUID]currentWorkspaceService,
 	sdkImpacts map[uuid.UUID]map[uuid.UUID][]string,
-	visibility map[uuid.UUID]sandbox.ServiceVisibility,
 	summary *workspacePlanSummary,
 ) {
 	existing := make(map[string]bool, len(summary.Actions))
@@ -3105,7 +3015,7 @@ func appendExplicitWorkspaceRemovalActions(
 		}
 		action := workspacePlanAction{
 			ID: actionID, Type: actionType, ServiceID: serviceID.String(), Version: target.Version,
-			ExplicitRemoval: true, WillArchive: target.Version == "" && visibility[serviceID].IsOwner,
+			ExplicitRemoval: true,
 		}
 		if target.Version == "" {
 			action.RemovalVersionIDs = sortedWorkspaceRemovalVersionIDs(current[serviceID])
@@ -3256,17 +3166,17 @@ func suggestedVersionDeprecationCommandString(serviceID, version, effectiveAt st
 	return fmt.Sprintf("fused-cli workspace service version deprecate %s %s --at %s", serviceID, version, effectiveAt)
 }
 
+// unmanagedWorkspaceServices reports active services outside the current sparse declaration, including formerly managed omissions.
 func unmanagedWorkspaceServices(
 	desired workspaceDesiredState,
 	current map[uuid.UUID]currentWorkspaceService,
-	previousManaged map[uuid.UUID]workspaceManagedService,
+	_previousManaged map[uuid.UUID]workspaceManagedService,
 ) []string {
 	var unmanaged []string
 	for serviceID := range current {
-		if _, managed := previousManaged[serviceID]; !managed {
-			if _, desiredNow := desired.Services[serviceID]; !desiredNow {
-				unmanaged = append(unmanaged, serviceID.String())
-			}
+		// Sparse workspace documents own only declared services; every other active service remains untouched and visible as unmanaged.
+		if _, desiredNow := desired.Services[serviceID]; !desiredNow {
+			unmanaged = append(unmanaged, serviceID.String())
 		}
 	}
 	return unmanaged
@@ -3318,7 +3228,7 @@ func applyWorkspaceConfig(
 	apiKey string,
 	accountID uuid.UUID,
 	desired workspaceDesiredState,
-	previousManaged map[uuid.UUID]workspaceManagedService,
+	_previousManaged map[uuid.UUID]workspaceManagedService,
 	prepared workspacePreparedApply,
 	approvedActions json.RawMessage,
 ) ([]appliedWorkspaceWebhook, error) {
@@ -3337,10 +3247,7 @@ func applyWorkspaceConfig(
 	if err != nil {
 		return nil, err
 	}
-	// Removal runs last so every desired service has already been reconciled.
-	if err := removePreviouslyManagedWorkspaceResources(ctx, s, desired, previousManaged); err != nil {
-		return nil, err
-	}
+	// Omitted services and versions are released from this declaration without changing live workspace membership.
 	// Explicit targets execute only from the immutable approved action set, never from mutable CLI inference.
 	if err := removeExplicitWorkspaceResources(ctx, s, desired, approvedActions); err != nil {
 		return nil, err
@@ -4180,11 +4087,10 @@ func signaturePolicyVersion(policy *signaturepolicy.Config) int {
 // Registry. Two action types are handled:
 //
 //   - "deprecate_version": marks a specific version deprecated.
-//   - "deprecate_service": the service itself is being deprecated — the workspace
-//     yaml removed the service entry and added a deprecation block. We surface
-//     this at the version level in the Registry by deprecating every version
-//     listed in previousManaged. (The service row is not soft-deleted here;
-//     that path is archiveRemovedOwnedServices for owned services.)
+//   - "deprecate_service": an explicit sparse directive deprecates the service.
+//     We surface this at the version level in the Registry by deprecating every
+//     version listed in previousManaged. Service lifecycle is never inferred
+//     from omission or workspace membership removal.
 //
 // currentState carries the previously-applied desired_state. We diff the
 // incoming deprecations block against it so that re-running apply after a
@@ -4274,84 +4180,6 @@ func previouslyAppliedDeprecations(state *store.ConfigState) map[string]bool {
 		out[serviceID.String()+"|"+dep.Version] = true
 	}
 	return out
-}
-
-// archiveRemovedOwnedServices soft-deletes services from the Registry when the
-// workspace owner removes them from their config. Only owned services can be
-// archived — non-owner workspaces can deactivate a service locally but cannot
-// delete it from the Registry.
-//
-// We batch-fetch visibility for all removed service IDs in a single Registry
-// call so ownership is determined without N+1 queries, then archive each owned
-// service individually (deletions are rare and serialising them is intentional
-// so a partial failure is easy to retry without double-deleting).
-func archiveRemovedOwnedServices(
-	ctx context.Context,
-	archiver any,
-	call workspaceApplyCall,
-	plan *store.ConfigPlan,
-) error {
-	removedIDs := planRemovedServiceIDs(plan)
-	if len(removedIDs) == 0 {
-		return nil
-	}
-
-	visResolver, ok := archiver.(ServiceVisibilityResolver)
-	if !ok {
-		return errors.New("service visibility resolution is unavailable")
-	}
-	svcArchiver, ok := archiver.(ServiceArchiver)
-	if !ok {
-		return errors.New("service archiving is unavailable")
-	}
-
-	visibility, err := visResolver.FetchServiceVisibility(ctx, removedIDs, call.apiKey)
-	if err != nil {
-		return fmt.Errorf("archiveRemovedOwnedServices: fetch visibility: %w", err)
-	}
-
-	for _, serviceID := range removedIDs {
-		vis, ok := visibility[serviceID]
-		if !ok || !vis.IsOwner {
-			// Not owned by this workspace — local removal only, no Registry delete.
-			continue
-		}
-		if err := svcArchiver.ArchiveService(ctx, serviceID, call.apiKey); err != nil {
-			return fmt.Errorf("archiveRemovedOwnedServices: archive service %s: %w", serviceID, err)
-		}
-		_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.service_archived")
-		span.SetAttributes(
-			attribute.String("service_id", serviceID.String()),
-			attribute.String("outcome", "archived"),
-		)
-		span.End()
-	}
-	return nil
-}
-
-// planRemovedServiceIDs extracts the service IDs from all remove_service
-// actions in a plan. These are the services the user explicitly dropped from
-// their workspace config yaml.
-func planRemovedServiceIDs(plan *store.ConfigPlan) []uuid.UUID {
-	var actions []workspacePlanAction
-	if len(plan.Actions) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(plan.Actions, &actions); err != nil {
-		return nil
-	}
-	var ids []uuid.UUID
-	for _, action := range actions {
-		if action.Type != workspaceplan.ActionRemoveService {
-			continue
-		}
-		id, err := uuid.Parse(action.ServiceID)
-		if err != nil {
-			continue
-		}
-		ids = append(ids, id)
-	}
-	return ids
 }
 
 func applyWorkspaceVisibilityActions(
@@ -4980,33 +4808,6 @@ func workspaceVersionVisibilityMap(revisions []sandbox.ServiceVersionRevision) m
 	return visibility
 }
 
-func removePreviouslyManagedWorkspaceResources(
-	ctx context.Context,
-	s store.Store,
-
-	desired workspaceDesiredState,
-	previousManaged map[uuid.UUID]workspaceManagedService,
-) error {
-	removals := managedWorkspaceServiceRemovalIDs(desired, previousManaged)
-	// Membership removal is batched so a referenced target and source can leave
-	// together without map iteration order creating a false dependency conflict.
-	if err := removeManagedWorkspaceServices(ctx, s, removals); err != nil {
-		return err
-	}
-	for serviceID, managed := range previousManaged {
-		desiredSvc, keepService := desired.Services[serviceID]
-		// Removed services were handled atomically above; only retained versions remain.
-		if !keepService {
-			continue
-		}
-		// Version cleanup preserves the existing per-service reconciliation contract.
-		if err := removeManagedWorkspaceVersions(ctx, s, desired, desiredSvc, managed); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 type explicitWorkspaceRemovals struct {
 	wholeServices []uuid.UUID
 	exactVersions []workspacePlanAction
@@ -5201,22 +5002,20 @@ func validateWorkspaceRemovalDecisions(plan *store.ConfigPlan) error {
 	return nil
 }
 
-// checkWorkspaceServiceLimit evaluates the net live service count after apply.
-// Import activation may legitimately precede declarative state persistence, so
-// previousManaged alone cannot distinguish a new service from an active one.
+// checkWorkspaceServiceLimit evaluates additions against live membership while crediting only reviewed whole-service removals.
 func checkWorkspaceServiceLimit(
 	ctx context.Context,
 	span trace.Span,
 	s store.Store,
 	desired workspaceDesiredState,
-	previousManaged map[uuid.UUID]workspaceManagedService,
+	removableIDs []uuid.UUID,
 ) error {
 	capacityStore, ok := s.(store.WorkspaceServiceCapacityStore)
 	if !ok {
 		return errors.New("workspace service capacity is unavailable")
 	}
 	desiredIDs := workspaceDesiredServiceIDs(desired)
-	removableIDs := workspaceRemovableServiceIDs(desired, previousManaged)
+	// Callers supply only immutable explicit removal actions; sparse omission never enters this projection.
 	currentActive, projectedActive, err := capacityStore.CountProjectedActiveServices(ctx, desiredIDs, removableIDs)
 	if err != nil {
 		// Projection errors may contain SQL detail, so the existing plan span gets
@@ -5240,16 +5039,6 @@ func workspaceDesiredServiceIDs(desired workspaceDesiredState) []uuid.UUID {
 	ids := make([]uuid.UUID, 0, len(desired.Services))
 	for serviceID := range desired.Services {
 		ids = append(ids, serviceID)
-	}
-	return ids
-}
-
-func workspaceRemovableServiceIDs(desired workspaceDesiredState, previousManaged map[uuid.UUID]workspaceManagedService) []uuid.UUID {
-	ids := make([]uuid.UUID, 0, len(previousManaged))
-	for serviceID := range previousManaged {
-		if _, retained := desired.Services[serviceID]; !retained {
-			ids = append(ids, serviceID)
-		}
 	}
 	return ids
 }

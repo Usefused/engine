@@ -191,8 +191,8 @@ function readBucketConnections(
 ): Promise<BucketContentState> {
   return api
     .mcpGraphql<{ authConnectionPage: GraphQLPage<AuthConnection> }>(
-      `query BucketConnections($bucketId: String!, $limit: Int!, $offset: Int!, $serviceId: String) {
-        authConnectionPage(bucket_id: $bucketId, service_id: $serviceId, limit: $limit, offset: $offset) {
+      `query BucketConnections($bucketId: String!, $limit: Int!, $offset: Int!, $serviceIds: [String]) {
+        authConnectionPage(bucket_id: $bucketId, service_ids: $serviceIds, limit: $limit, offset: $offset) {
           total
           items { id bucket_id service_id end_user_ref auth_type auth_name token_type scopes scope_source issuer subject expires_at refresh_token_expires_at last_used_at refresh_state last_failure_code last_failure_at last_failure_trace_id created_at updated_at }
         }
@@ -201,7 +201,8 @@ function readBucketConnections(
         bucketId,
         limit: page.limit,
         offset: page.offset,
-        serviceId: page.serviceId || "",
+        // The UI currently exposes one dropdown, but the canonical API accepts a selector list.
+        serviceIds: page.serviceId ? [page.serviceId] : [],
       }
     )
     .then(({ authConnectionPage }) => ({

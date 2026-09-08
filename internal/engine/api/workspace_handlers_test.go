@@ -474,9 +474,8 @@ type mockVerifier struct {
 	// visibilityOverrides lets a test control the full ServiceVisibility
 	// (IsOwner/IsPublic/Provider/Slug) for a specific ID -- needed to
 	// exercise displaySlug's owner/public-gated provider qualification. IDs
-	// not present here fall back to the default-non-owner-empty-slug
-	// behavior below, which other (non-slug) tests rely on for WillArchive
-	// computations.
+	// not present here fall back to the default-non-owner-empty-slug behavior
+	// below so unrelated listing tests retain stable fixtures.
 	visibilityOverrides map[uuid.UUID]sandbox.ServiceVisibility
 	discoveryEndpoint   *fusedobject.Endpoint
 }
@@ -678,12 +677,8 @@ func (m *runtimeContractVerifier) FetchRuntimeContracts(ctx context.Context, ver
 	return out, nil
 }
 
-// FetchServiceVisibility satisfies ServiceVisibilityResolver. Plan tests that
-// involve removed services need visibility data (to compute WillArchive); the
-// default returns non-owner, non-public, no slug for every ID so removal
-// actions are labelled as workspace-only removals (WillArchive: false) and
-// fetchServiceSlugsForListing degrades to an empty slug, unless overridden
-// via visibilityOverrides.
+// FetchServiceVisibility satisfies ServiceVisibilityResolver and gives plan
+// tests stable ownership and display-slug fixtures unless a test overrides an ID.
 func (m *mockVerifier) FetchServiceVisibility(_ context.Context, serviceIDs []uuid.UUID, _ string) (map[uuid.UUID]sandbox.ServiceVisibility, error) {
 	m.visibilityCalls = append(m.visibilityCalls, append([]uuid.UUID(nil), serviceIDs...))
 	if m.visibilityErr != nil {
@@ -2656,10 +2651,29 @@ func (s *workspaceTestStore) ListAuthConnections(ctx context.Context, bucketID u
 	return out, nil
 }
 
-func (s *workspaceTestStore) ListAuthConnectionsPage(ctx context.Context, bucketID uuid.UUID, serviceID *uuid.UUID, endUserRef string, limit, offset int) ([]store.AuthConnection, int, error) {
-	connections, err := s.ListAuthConnections(ctx, bucketID, serviceID, endUserRef)
-	if err != nil {
-		return nil, 0, err
+// ListAuthConnectionsPage mirrors the production union filter so GraphQL tests cover whole-service and exact-version selectors.
+func (s *workspaceTestStore) ListAuthConnectionsPage(_ context.Context, bucketID uuid.UUID, serviceIDs, serviceVersionIDs []uuid.UUID, endUserRef string, limit, offset int) ([]store.AuthConnection, int, error) {
+	serviceSet := testUUIDSet(serviceIDs)
+	versionSet := testUUIDSet(serviceVersionIDs)
+	connections := make([]store.AuthConnection, 0)
+	for _, connection := range s.authConnections {
+		// Bucket ownership is always mandatory regardless of optional service filters.
+		if connection.BucketID != bucketID {
+			continue
+		}
+		// A non-empty selector union admits a connection through either its service or exact version identity.
+		if len(serviceSet) > 0 || len(versionSet) > 0 {
+			if _, wholeService := serviceSet[connection.ServiceID]; !wholeService {
+				if _, exactVersion := versionSet[connection.ServiceVersionID]; !exactVersion {
+					continue
+				}
+			}
+		}
+		// User filtering remains conjunctive with the service selector union.
+		if endUserRef != "" && connection.EndUserRef != endUserRef {
+			continue
+		}
+		connections = append(connections, connection)
 	}
 	items, total := pageAuthConnections(connections, limit, offset)
 	return items, total, nil

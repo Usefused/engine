@@ -60,7 +60,12 @@ func executeWorkspacePartialApply(ctx context.Context, configStore store.ConfigR
 		return nil, err
 	}
 	// Revalidate exact removal scope before any independent service can change.
-	if _, err := prepareExplicitWorkspaceRemovals(applyCtx, s, desired, plan.Actions); err != nil {
+	preparedRemovals, err := prepareExplicitWorkspaceRemovals(applyCtx, s, desired, plan.Actions)
+	// The validated whole-service scope is retained for net capacity admission and the removal transaction.
+	if err != nil {
+		return nil, err
+	}
+	if err := checkWorkspaceServiceLimit(applyCtx, trace.SpanFromContext(applyCtx), s, desired, preparedRemovals.wholeServices); err != nil {
 		return nil, err
 	}
 	receipts, err := progress.WorkspaceApplyProgress(applyCtx, plan.ID, call.planRevision)
@@ -108,6 +113,41 @@ func executeWorkspacePartialApply(ctx context.Context, configStore store.ConfigR
 		}
 		states[step.Key] = store.WorkspaceApplyProgress{Key: step.Key, Status: "succeeded"}
 	}
+	actions, err := parseWorkspacePlanActions(plan.Actions)
+	// A failed decode or lookup cannot supply safe input to any local removal or later Registry step.
+	if err != nil {
+		return nil, err
+	}
+	// Explicit removals commit before additions so a reviewed replacement can remain within the service limit.
+	removalIDs := map[uuid.UUID]bool{}
+	for _, id := range preparedRemovals.wholeServices {
+		removalIDs[id] = true
+	}
+	for _, action := range preparedRemovals.exactVersions {
+		id, parseErr := uuid.Parse(action.ServiceID)
+		// Prepared actions already passed UUID validation; a mismatch here indicates corrupted immutable scope.
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		removalIDs[id] = true
+	}
+	// Composite removal is attempted once and then skipped by its durable success receipt.
+	if len(removalIDs) > 0 && states["removals"].Status != "succeeded" {
+		step := base
+		step.Key = "removals"
+		subset := workspaceServiceSubset(desired, removalIDs)
+		err = applyWorkspaceServiceStep(applyCtx, progress, s, verifier, call, plan, subset, preparedRemovals.wholeServices, step)
+		// Composite removals cannot be resumed after an uncertain commit without receipt inspection.
+		if err != nil {
+			states[step.Key] = store.WorkspaceApplyProgress{Key: step.Key, Status: "failed", ErrorCode: "removal_apply_failed"}
+			// A lost commit response cannot be reported as a proven rollback.
+			if errors.Is(err, store.ErrWorkspaceApplyOutcomeUnknown) {
+				states[step.Key] = store.WorkspaceApplyProgress{Key: step.Key, Status: "running", ErrorCode: "needs_reconciliation"}
+			}
+			return nil, workspacePartialResults(states)
+		}
+		states[step.Key] = store.WorkspaceApplyProgress{Key: step.Key, Status: "succeeded"}
+	}
 	for _, svc := range sortedDesiredServices(desired) {
 		key := "service:" + svc.ServiceID.String()
 		// Confirmed services are never prepared or written again by this plan.
@@ -121,7 +161,7 @@ func executeWorkspacePartialApply(ctx context.Context, configStore store.ConfigR
 		subset := workspaceServiceSubset(desired, map[uuid.UUID]bool{svc.ServiceID: true})
 		step := base
 		step.Key = key
-		err = applyWorkspaceServiceStep(applyCtx, progress, s, verifier, call, plan, subset, step)
+		err = applyWorkspaceServiceStep(applyCtx, progress, s, verifier, call, plan, subset, nil, step)
 		// Uncertain commits and stale ownership require reconciliation before any further work.
 		if errors.Is(err, store.ErrWorkspaceApplyOutcomeUnknown) || errors.Is(err, store.ErrConfigPlanRevisionMismatch) || errors.Is(err, store.ErrWorkspaceApplyStale) {
 			states[key] = store.WorkspaceApplyProgress{Key: key, Status: "running", ErrorCode: "needs_reconciliation"}
@@ -138,46 +178,6 @@ func executeWorkspacePartialApply(ctx context.Context, configStore store.ConfigR
 			continue
 		}
 		states[key] = store.WorkspaceApplyProgress{Key: key, Status: "succeeded"}
-	}
-	// Dependent whole-service removals retain their existing composite transaction semantics.
-	removalIDs := map[uuid.UUID]bool{}
-	for id := range previous {
-		// Only services absent from the desired set belong to the composite removal group.
-		if _, keep := desired.Services[id]; !keep {
-			removalIDs[id] = true
-		}
-	}
-	actions, err := parseWorkspacePlanActions(plan.Actions)
-	// A failed decode or lookup cannot supply safe input to the next apply stage.
-	if err != nil {
-		return nil, err
-	}
-	for _, action := range actions {
-		id, _ := uuid.Parse(action.ServiceID)
-		// Explicit unmanaged removals are approved targets, even without prior managed state.
-		if action.ExplicitRemoval {
-			// Only services absent from the desired set belong to the composite removal group.
-			if _, keep := desired.Services[id]; !keep {
-				removalIDs[id] = true
-			}
-		}
-	}
-	// Composite removal is attempted once and then skipped by its durable success receipt.
-	if len(removalIDs) > 0 && states["removals"].Status != "succeeded" {
-		step := base
-		step.Key = "removals"
-		subset := workspaceServiceSubset(desired, removalIDs)
-		err = applyWorkspaceServiceStep(applyCtx, progress, s, verifier, call, plan, subset, step)
-		// Composite removals cannot be resumed after an uncertain commit without receipt inspection.
-		if err != nil {
-			states[step.Key] = store.WorkspaceApplyProgress{Key: step.Key, Status: "failed", ErrorCode: "removal_apply_failed"}
-			// A lost commit response cannot be reported as a proven rollback.
-			if errors.Is(err, store.ErrWorkspaceApplyOutcomeUnknown) {
-				states[step.Key] = store.WorkspaceApplyProgress{Key: step.Key, Status: "running", ErrorCode: "needs_reconciliation"}
-			}
-			return nil, workspacePartialResults(states)
-		}
-		states[step.Key] = store.WorkspaceApplyProgress{Key: step.Key, Status: "succeeded"}
 	}
 	// Failed local groups must not publish desired Registry changes that never became active locally.
 	for _, state := range states {
@@ -239,7 +239,7 @@ func workspaceServiceSubset(desired workspaceDesiredState, ids map[uuid.UUID]boo
 }
 
 // applyWorkspaceServiceStep prepares network-dependent facts first, then commits all related local writes with their receipt.
-func applyWorkspaceServiceStep(ctx context.Context, progress store.WorkspaceApplyProgressStore, s store.Store, verifier ServiceVerifier, call workspaceApplyCall, plan *store.ConfigPlan, desired workspaceDesiredState, step store.WorkspaceApplyStep) error {
+func applyWorkspaceServiceStep(ctx context.Context, progress store.WorkspaceApplyProgressStore, s store.Store, verifier ServiceVerifier, call workspaceApplyCall, plan *store.ConfigPlan, desired workspaceDesiredState, removableIDs []uuid.UUID, step store.WorkspaceApplyStep) error {
 	for id, svc := range desired.Services {
 		name, err := verifiedWorkspaceServiceName(ctx, verifier, svc, call.apiKey)
 		// A Registry read failure cannot leave half an activated service.
@@ -268,13 +268,13 @@ func applyWorkspaceServiceStep(ctx context.Context, progress store.WorkspaceAppl
 			return nil, err
 		}
 		for id := range previous {
-			// Exclude unrelated managed state before invoking existing removal reconciliation.
+			// Exclude unrelated managed state before recording this independently committed service step.
 			if !desired.applyServiceIDs[id] {
 				delete(previous, id)
 			}
 		}
 		// Capacity is rechecked inside the service transaction, after prior independent commits.
-		if err := checkWorkspaceServiceLimit(txCtx, trace.SpanFromContext(txCtx), txStore, desired, previous); err != nil {
+		if err := checkWorkspaceServiceLimit(txCtx, trace.SpanFromContext(txCtx), txStore, desired, removableIDs); err != nil {
 			return nil, err
 		}
 		// A failed profile write must roll back activation and every other local change in this group.
@@ -285,10 +285,7 @@ func applyWorkspaceServiceStep(ctx context.Context, progress store.WorkspaceAppl
 		if _, err := upsertDesiredWorkspaceServices(txCtx, txStore, nil, call.apiKey, call.accountID, desired); err != nil {
 			return nil, err
 		}
-		// Version replacement cannot commit its additions while leaving a failed local removal behind.
-		if err := removePreviouslyManagedWorkspaceResources(txCtx, txStore, desired, previous); err != nil {
-			return nil, err
-		}
+		// Scoped additive apply never disables versions omitted from the submitted services document.
 		// Explicit removals remain part of the same service commit boundary.
 		if err := removeExplicitWorkspaceResources(txCtx, txStore, desired, scopedPlan.Actions); err != nil {
 			return nil, err
@@ -410,9 +407,6 @@ func workspaceHasRegistryActions(actions map[string]workspacePlanAction) bool {
 		// These existing action types are the only external mutation stages in workspace apply.
 		switch action.Type {
 		case workspaceplan.ActionDeprecateService, workspaceplan.ActionDeprecateVersion, workspaceplan.ActionPublishServiceExecutionPolicy, workspaceplan.ActionPublishServiceVersionExecutionPolicy, workspaceplan.ActionPublishConnectionProfile, workspaceplan.ActionSetServicePublic, workspaceplan.ActionSetServicePrivate, workspaceplan.ActionSetServiceVersionPublic, workspaceplan.ActionSetServiceVersionPrivate:
-			return true
-		case workspaceplan.ActionRemoveService:
-			// Removal performs a Registry ownership check and may archive the owned service.
 			return true
 		}
 	}

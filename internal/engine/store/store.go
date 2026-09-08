@@ -1000,7 +1000,8 @@ type Store interface {
 	GetAuthConnectionByIDForBuckets(ctx context.Context, id uuid.UUID, bucketIDs []uuid.UUID) (*AuthConnection, error)
 	GetAuthConnectionsByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]AuthConnection, error)
 	ListAuthConnections(ctx context.Context, bucketID uuid.UUID, serviceID *uuid.UUID, endUserRef string) ([]AuthConnection, error)
-	ListAuthConnectionsPage(ctx context.Context, bucketID uuid.UUID, serviceID *uuid.UUID, endUserRef string, limit, offset int) ([]AuthConnection, int, error)
+	// ListAuthConnectionsPage treats whole-service and exact-version filters as one server-paginated union.
+	ListAuthConnectionsPage(ctx context.Context, bucketID uuid.UUID, serviceIDs, serviceVersionIDs []uuid.UUID, endUserRef string, limit, offset int) ([]AuthConnection, int, error)
 	DeleteAuthConnection(ctx context.Context, bucketID, id uuid.UUID) error
 	TouchAuthConnectionLastUsed(ctx context.Context, id uuid.UUID, usedAt time.Time) error
 	// RecordAuthConnectionFailure updates only sanitized operational metadata so

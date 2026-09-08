@@ -194,10 +194,14 @@ func (s *postgresStore) ListAuthConnections(ctx context.Context, bucketID uuid.U
 	return collectAuthConnections(rows)
 }
 
-func (s *postgresStore) ListAuthConnectionsPage(ctx context.Context, bucketID uuid.UUID, serviceID *uuid.UUID, endUserRef string, limit, offset int) ([]AuthConnection, int, error) {
-	args := []any{bucketID, nullableUUIDPtr(serviceID), endUserRef}
-	where := `WHERE bucket_id = $1 AND ($2::uuid IS NULL OR service_id = $2) AND ($3 = '' OR end_user_ref = $3)`
+// ListAuthConnectionsPage applies unioned service and exact-version filters in SQL so multi-service CLI reads retain global pagination.
+func (s *postgresStore) ListAuthConnectionsPage(ctx context.Context, bucketID uuid.UUID, serviceIDs, serviceVersionIDs []uuid.UUID, endUserRef string, limit, offset int) ([]AuthConnection, int, error) {
+	// No selector means all connections in the bucket; otherwise either a whole-service or exact-version match admits the row.
+	allServices := len(serviceIDs) == 0 && len(serviceVersionIDs) == 0
+	args := []any{bucketID, allServices, serviceIDs, serviceVersionIDs, endUserRef}
+	where := `WHERE bucket_id = $1 AND ($2 OR service_id = ANY($3::uuid[]) OR service_version_id = ANY($4::uuid[])) AND ($5 = '' OR end_user_ref = $5)`
 	var total int
+	// Count and page share the identical union predicate so CLI pagination metadata cannot drift from returned rows.
 	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM fused_auth_connections `+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
@@ -206,9 +210,10 @@ func (s *postgresStore) ListAuthConnectionsPage(ctx context.Context, bucketID uu
 		FROM fused_auth_connections
 		` + where + `
 		ORDER BY updated_at DESC
-		LIMIT $4 OFFSET $5`
+		LIMIT $6 OFFSET $7`
 	args = append(args, limit, offset)
 	rows, err := s.db.Query(ctx, query, args...)
+	// Query failures stop the page rather than returning the already computed total with incomplete rows.
 	if err != nil {
 		return nil, 0, err
 	}

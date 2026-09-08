@@ -1346,7 +1346,29 @@ func assertConnectionListAndRefreshQuery(t *testing.T, f connectAuthFixture, con
 	if len(listed) != 1 || listed[0].ID != connAID {
 		t.Fatalf("expected one bucket-filtered connection, got %#v", listed)
 	}
+	assertConnectionPageUnion(t, f, listed[0])
 	assertWorkerClaimsOAuthNotAPIKey(t, f, connAID, connBID)
+}
+
+// assertConnectionPageUnion verifies SQL combines whole-service and exact-version filters before calculating page totals.
+func assertConnectionPageUnion(t *testing.T, f connectAuthFixture, expected AuthConnection) {
+	t.Helper()
+	items, total, err := f.store.ListAuthConnectionsPage(f.ctx, f.bucketA, []uuid.UUID{uuid.New()}, []uuid.UUID{expected.ServiceVersionID}, "user_123", 10, 0)
+	// An exact version must admit the expected row even when the whole-service side of the union does not match.
+	if err != nil {
+		t.Fatalf("ListAuthConnectionsPage union: %v", err)
+	}
+	if total != 1 || len(items) != 1 || items[0].ID != expected.ID {
+		t.Fatalf("connection page union = %#v total=%d, want connection %s", items, total, expected.ID)
+	}
+	items, total, err = f.store.ListAuthConnectionsPage(f.ctx, f.bucketA, []uuid.UUID{expected.ServiceID}, []uuid.UUID{uuid.New()}, "user_123", 10, 1)
+	// Offset is applied after union filtering, so skipping the sole whole-service match leaves an empty page with a stable total.
+	if err != nil {
+		t.Fatalf("ListAuthConnectionsPage offset: %v", err)
+	}
+	if total != 1 || len(items) != 0 {
+		t.Fatalf("connection page offset = %#v total=%d, want empty page with total 1", items, total)
+	}
 }
 
 // assertWorkerClaimsOAuthNotAPIKey verifies due discovery admits connected
