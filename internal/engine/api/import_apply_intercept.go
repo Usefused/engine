@@ -323,12 +323,31 @@ func writeImportPreflightError(w http.ResponseWriter, ctx context.Context, span 
 	if errors.Is(err, sandbox.ErrImportRuntimeContractRejected) {
 		slog.WarnContext(ctx, "Engine rejected prospective import runtime contract", slog.Any("error", err))
 		recordImportPreflightSpan(span, "contract_rejected", "import_runtime_contract_rejected", receipt.PlanID)
-		writeEngineImportPreflightFailure(w, ctx, http.StatusUnprocessableEntity, "import_runtime_contract_rejected", "Engine rejected the prospective runtime contract.", false, receipt.PlanID, "")
+		writeEngineImportRuntimeContractFailure(w, ctx, err, receipt.PlanID)
 		return
 	}
 	slog.ErrorContext(ctx, "Engine import preflight failed", slog.Any("error", err))
 	recordImportPreflightSpan(span, "unavailable", "import_preflight_unavailable", receipt.PlanID)
 	writeEngineImportPreflightFailure(w, ctx, http.StatusServiceUnavailable, "import_preflight_unavailable", "Engine could not complete import preflight.", true, receipt.PlanID, importApplyRecovery(receipt))
+}
+
+// writeEngineImportRuntimeContractFailure exposes the bounded local validator
+// reason and an explicit source-repair step without suggesting an unsafe replay.
+func writeEngineImportRuntimeContractFailure(w http.ResponseWriter, ctx context.Context, err error, operationID uuid.UUID) {
+	details := map[string]any{}
+	// Only the typed sandbox error may contribute owner-visible validator detail.
+	if detail, ok := sandbox.ImportRuntimeContractRejectionDetail(err); ok {
+		details["server_detail"] = detail
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnprocessableEntity)
+	_ = json.NewEncoder(w).Encode(workspaceConfigErrorResponse{Error: workspaceConfigErrorBody{
+		Code: "import_runtime_contract_rejected", Message: "Engine rejected the prospective runtime contract.",
+		Category: "validation", Retryable: false, Details: details,
+		Remediation: "Correct the reported contract issue, create a new import plan, and apply its receipt.",
+		Phase:       "engine_preflight", OperationID: operationID.String(), RequestID: chimiddleware.GetReqID(ctx),
+		CommitState: "not_committed",
+	}})
 }
 
 // writeEngineImportPreflightFailure emits only proven pre-commit state and an

@@ -234,6 +234,35 @@ func TestReadBoundedImportPreflightBodyRejectsOverrun(t *testing.T) {
 	}
 }
 
+// TestImportRuntimeContractRejectionDetail proves only the typed, bounded
+// Engine validator reason is eligible for the public import error envelope.
+func TestImportRuntimeContractRejectionDetail(t *testing.T) {
+	err := NewImportRuntimeContractRejection(errors.New("  service contract\nendpoint name \"find\" is duplicated  "))
+	// Callers must retain stable sentinel matching while extracting normalized detail separately.
+	if !errors.Is(err, ErrImportRuntimeContractRejected) {
+		t.Fatalf("typed rejection = %v", err)
+	}
+	detail, ok := ImportRuntimeContractRejectionDetail(err)
+	// Whitespace normalization keeps an actionable one-line diagnostic without changing its meaning.
+	if !ok || detail != `service contract endpoint name "find" is duplicated` {
+		t.Fatalf("detail = %q, available = %v", detail, ok)
+	}
+
+	oversized := NewImportRuntimeContractRejection(errors.New(strings.Repeat("x", maxImportRuntimeContractRejectionDetailRunes+1)))
+	detail, ok = ImportRuntimeContractRejectionDetail(oversized)
+	// Provider-controlled identifiers may not make the public response unbounded.
+	if !ok || len([]rune(detail)) != maxImportRuntimeContractRejectionDetailRunes {
+		t.Fatalf("bounded detail runes = %d, available = %v", len([]rune(detail)), ok)
+	}
+
+	untyped := errors.Join(ErrImportRuntimeContractRejected, errors.New("unreviewed transport detail"))
+	_, ok = ImportRuntimeContractRejectionDetail(untyped)
+	// Merely wrapping the sentinel must not authorize arbitrary dependency text for disclosure.
+	if ok {
+		t.Fatal("untyped rejection unexpectedly exposed detail")
+	}
+}
+
 // TestDoWithCallerDeadlineLetsImportOwnTimeout proves a finite composite
 // workflow is not cut off by the ordinary short Registry client timeout.
 func TestDoWithCallerDeadlineLetsImportOwnTimeout(t *testing.T) {

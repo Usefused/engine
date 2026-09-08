@@ -31,6 +31,60 @@ var (
 	ErrImportRuntimeContractRejected = errors.New("import_runtime_contract_rejected")
 )
 
+const (
+	// Deterministic Engine validator detail is useful to the importing owner but
+	// must remain bounded before it crosses the public error envelope.
+	maxImportRuntimeContractRejectionDetailRunes = 512
+	defaultImportRuntimeContractRejectionDetail  = "The prospective runtime contract failed Engine validation."
+)
+
+// importRuntimeContractRejection preserves only an Engine-authored validation
+// cause while retaining the stable sentinel used by admission callers.
+type importRuntimeContractRejection struct {
+	detail string
+}
+
+// Error keeps local logs actionable without copying the imported contract body.
+func (e *importRuntimeContractRejection) Error() string {
+	return ErrImportRuntimeContractRejected.Error() + ": " + e.detail
+}
+
+// Unwrap preserves the existing deterministic rejection classification.
+func (e *importRuntimeContractRejection) Unwrap() error {
+	return ErrImportRuntimeContractRejected
+}
+
+// NewImportRuntimeContractRejection converts a local Engine validator failure
+// into the typed, bounded detail contract consumed by the HTTP boundary.
+func NewImportRuntimeContractRejection(cause error) error {
+	detail := defaultImportRuntimeContractRejectionDetail
+	// Only a concrete local validator cause may replace the stable fallback.
+	if cause != nil {
+		detail = strings.Join(strings.Fields(cause.Error()), " ")
+	}
+	// Whitespace-only validator output is not actionable detail.
+	if detail == "" {
+		detail = defaultImportRuntimeContractRejectionDetail
+	}
+	runes := []rune(detail)
+	// Bounding the detail prevents provider-controlled names from inflating the response.
+	if len(runes) > maxImportRuntimeContractRejectionDetailRunes {
+		detail = string(runes[:maxImportRuntimeContractRejectionDetailRunes])
+	}
+	return &importRuntimeContractRejection{detail: detail}
+}
+
+// ImportRuntimeContractRejectionDetail returns detail only from the typed
+// Engine admission error, never from arbitrary errors that wrap the sentinel.
+func ImportRuntimeContractRejectionDetail(err error) (string, bool) {
+	var rejection *importRuntimeContractRejection
+	// A prose lookalike or sentinel-only error has no reviewed public detail.
+	if !errors.As(err, &rejection) || rejection.detail == "" {
+		return "", false
+	}
+	return rejection.detail, true
+}
+
 // ImportContractPreflight is the validated, non-persisted Engine admission
 // result that authorizes forwarding the matching Registry apply.
 type ImportContractPreflight struct {
@@ -140,12 +194,12 @@ func admitImportPreflightResponse(response importPreflightResponse) (*ImportCont
 	// Reusing batch identity admission keeps nested service IDs from bypassing
 	// the exact ownership checks applied to ordinary Registry snapshot fetches.
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrImportRuntimeContractRejected, err)
+		return nil, NewImportRuntimeContractRejection(err)
 	}
 	snapshot, err := admittedRuntimeContractSnapshot(indexed[item.ServiceVersionID], requested)
 	// Existing runtime admission owns every capability, policy, schema, and transport decision.
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrImportRuntimeContractRejected, err)
+		return nil, NewImportRuntimeContractRejection(err)
 	}
 	return &ImportContractPreflight{OperationID: operationID, ContractHash: response.ContractHash, Snapshot: *snapshot}, nil
 }

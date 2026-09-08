@@ -116,11 +116,15 @@ func TestImportApplyPreflightRejectionNeverForwards(t *testing.T) {
 	if response.Error.Code != "import_runtime_contract_rejected" || response.Error.Phase != "engine_preflight" || response.Error.CommitState != "not_committed" {
 		t.Fatalf("preflight rejection = %#v", response.Error)
 	}
+	// The importing user needs the exact bounded validator reason and a safe next step.
+	if response.Error.Details["server_detail"] != `service contract endpoint name "find" is duplicated` || response.Error.Remediation == "" || response.Error.Recovery != "" {
+		t.Fatalf("preflight rejection detail = %#v", response.Error)
+	}
 }
 
 // fmtImportRuntimeContractRejection wraps the sentinel as the real sandbox client does.
 func fmtImportRuntimeContractRejection() error {
-	return errors.Join(sandbox.ErrImportRuntimeContractRejected, errors.New("fixture transport defect"))
+	return sandbox.NewImportRuntimeContractRejection(errors.New(`service contract endpoint name "find" is duplicated`))
 }
 
 // TestImportApplyPreflightPreservesRegistryError verifies plan/review failures
