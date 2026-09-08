@@ -98,6 +98,7 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		"bucketSummaryPage":           collectionPermissions(accesscontrol.ResourceBucket, accesscontrol.PermissionBucketRead),
 		"bucketConnectSummary":        argumentPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionBucketRead, accesscontrol.PermissionConnectionRead),
 		"workspaceServices":           collectionPermissions(accesscontrol.ResourceService, accesscontrol.PermissionServiceRead),
+		"workspaceServiceIds":         collectionPermissions(accesscontrol.ResourceService, accesscontrol.PermissionServiceRead),
 		"workspaceServicePage":        collectionPermissions(accesscontrol.ResourceService, accesscontrol.PermissionServiceRead),
 		"workspaceWebhooks":           argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead),
 		"webhookEvents":               argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead, accesscontrol.PermissionAuditRead),

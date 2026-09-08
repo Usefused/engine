@@ -38,7 +38,7 @@ func (c *HTTPRegistryClient) FetchRuntimeContract(ctx context.Context, serviceID
 	return &snapshots[0], nil
 }
 
-// FetchRuntimeContracts admits one bounded Registry batch without retrying rejected contracts per service.
+// FetchRuntimeContracts admits arbitrarily large selections through bounded Registry batches without per-service retries.
 func (c *HTTPRegistryClient) FetchRuntimeContracts(ctx context.Context, versions []store.WorkspaceServiceVersion, apiKey string) ([]store.ServiceContractSnapshot, error) {
 	// Empty selections perform no network or Registry work.
 	if len(versions) == 0 {
@@ -50,7 +50,34 @@ func (c *HTTPRegistryClient) FetchRuntimeContracts(ctx context.Context, versions
 	// or deadline still wins through the derived context.
 	requestCtx, cancel := context.WithTimeout(ctx, runtimeContractsRequestTimeout)
 	defer cancel()
-	req, err := c.buildRuntimeContractsRequest(requestCtx, versions, apiKey)
+	snapshots := make([]store.ServiceContractSnapshot, 0, len(versions))
+	// Registry publishes generation pins per accepted partition, while Engine retains an all-or-nothing aggregate for ordinary callers.
+	for start := 0; start < len(versions); start += registryServiceVersionBatchSize {
+		// The shared deadline stops the next partition and discards all earlier caller-visible results.
+		if err := requestCtx.Err(); err != nil {
+			return nil, err
+		}
+		end := min(start+registryServiceVersionBatchSize, len(versions))
+		batch, err := c.fetchRuntimeContractBatch(requestCtx, versions[start:end], apiKey)
+		// A typed rejection retains earlier admitted snapshots only for the explicit owned-service recovery path.
+		if err != nil {
+			var rejected *runtimeContractRejections
+			// Ordinary callers still receive nil data; recovery can account for successful preceding partitions.
+			if errors.As(err, &rejected) {
+				rejected.accepted = append(snapshots, rejected.accepted...)
+			}
+			recordPassiveContractSummary(ctx, snapshots, err)
+			return nil, err
+		}
+		snapshots = append(snapshots, batch...)
+	}
+	recordPassiveContractSummary(ctx, snapshots, nil)
+	return snapshots, nil
+}
+
+// fetchRuntimeContractBatch performs one complete Registry admission within its service-version bound.
+func (c *HTTPRegistryClient) fetchRuntimeContractBatch(ctx context.Context, versions []store.WorkspaceServiceVersion, apiKey string) ([]store.ServiceContractSnapshot, error) {
+	req, err := c.buildRuntimeContractsRequest(ctx, versions, apiKey)
 	// Request construction failure cannot be repaired by dropping selected versions.
 	if err != nil {
 		return nil, err
@@ -65,9 +92,7 @@ func (c *HTTPRegistryClient) FetchRuntimeContracts(ctx context.Context, versions
 	if resp.StatusCode >= http.StatusBadRequest {
 		return nil, fmt.Errorf("FetchRuntimeContracts: registry returned %d: %s", resp.StatusCode, runtimeContractErrorBody(resp.Body))
 	}
-	snapshots, err := decodeRuntimeContractsResponse(resp.Body, versions)
-	recordPassiveContractSummary(ctx, snapshots, err)
-	return snapshots, err
+	return decodeRuntimeContractsResponse(resp.Body, versions)
 }
 
 // runtimeContractErrorBody preserves bounded error context and makes truncation explicit rather than silently hiding it.

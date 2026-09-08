@@ -26,6 +26,29 @@ test("workspace membership uses exact enabled versions without a false workspace
   assert.doesNotMatch(section, /\bworkspace_id\b/);
 });
 
+// The Services route must not bypass its page contract just to render catalogue activation state.
+test("services route paginates workspace rows and uses membership-only catalogue markers", async () => {
+  const [apiSource, routeSource, detailSource] = await Promise.all([
+    readFile(apiPath, "utf8"),
+    readFile(integrationsIndexPath, "utf8"),
+    readFile(integrationDetailPath, "utf8"),
+  ]);
+  const membershipSection = sourceSection(apiSource, "getServiceIds: () =>", "upsertBucketValue:");
+  const catalogueLoader = sourceSection(routeSource, "const loadCatalogData", "const loadWorkspaceData");
+  const workspaceLoader = sourceSection(routeSource, "const loadWorkspaceData", "const loadVisibleData");
+  const detailMembership = sourceSection(detailSource, "const [workspaceServiceActive", "const [drift");
+
+  assert.match(membershipSection, /workspaceServiceIds/);
+  assert.doesNotMatch(membershipSection, /auth_options|enabled_versions/);
+  assert.match(catalogueLoader, /getServiceIds\(\)/);
+  assert.doesNotMatch(catalogueLoader, /getServices\(\)/);
+  assert.match(workspaceLoader, /getServicesPage\(10,/);
+  assert.doesNotMatch(workspaceLoader, /getServices\(\)/);
+  assert.match(detailMembership, /getServiceIds\(\)/);
+  assert.doesNotMatch(detailMembership, /getServices\(\)/);
+  assert.match(detailMembership, /catch[\s\S]*setWorkspaceServiceActive\(null\)/);
+});
+
 test("execution history requests every v3 receipt diagnostic", async () => {
   const source = await readFile(apiPath, "utf8");
   const section = sourceSection(source, "const engineExecutionEventSelection", "export interface EngineExecutionAnalyticsSummary");

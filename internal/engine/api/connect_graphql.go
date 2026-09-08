@@ -698,6 +698,40 @@ func workspaceServicesGraphQLField(s store.Store, verifier ServiceVerifier) *gra
 	}
 }
 
+// workspaceServiceIDsGraphQLField returns only local membership identities for catalogue activation markers.
+func workspaceServiceIDsGraphQLField(s store.Store) *graphql.Field {
+	return &graphql.Field{
+		Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(graphql.String))),
+		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.workspace_service_ids.list")
+			defer span.End()
+			actor, err := actorFromContext(p.Context)
+			// Membership identities remain protected by the same actor boundary as full service projections.
+			if err != nil {
+				return nil, err
+			}
+			span.SetAttributes(attribute.String("account_id", actor.accountID.String()))
+			authorized, err := graphQLAuthorizedScope(ctx, accesscontrol.PermissionServiceRead, accesscontrol.ResourceService)
+			// Resource-scoped readers may see only the memberships authorized by preflight.
+			if err != nil {
+				return nil, err
+			}
+			services, err := s.ListAuthorizedWorkspaceServices(ctx, authorized, nil)
+			// A failed local membership read must not look like an empty workspace.
+			if err != nil {
+				return nil, fmt.Errorf("list workspace service ids: %w", err)
+			}
+			ids := make([]string, 0, len(services))
+			// Preserve store order while avoiding Registry version, slug, and auth lookups entirely.
+			for _, service := range services {
+				ids = append(ids, service.ServiceID.String())
+			}
+			span.SetAttributes(attribute.Int("service_count", len(ids)))
+			return ids, nil
+		},
+	}
+}
+
 func workspaceServicePageGraphQLField(s store.Store, verifier ServiceVerifier) *graphql.Field {
 	return &graphql.Field{
 		Type: workspaceServicePageGraphQLType,

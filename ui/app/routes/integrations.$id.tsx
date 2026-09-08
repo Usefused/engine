@@ -671,24 +671,31 @@ function useIntegrationDetailModel() {
   >(null);
 
   useEffect(() => {
-    if (!isAuth || !serviceId) {
+    // Anonymous viewers never have a local workspace action to resolve.
+    if (!isAuth) {
       setWorkspaceServiceActive(false);
+      return;
+    }
+    // An unresolved Registry identity cannot be compared safely with local membership.
+    if (!serviceId) {
+      setWorkspaceServiceActive(null);
       return;
     }
     let cancelled = false;
     setWorkspaceServiceActive(null);
     api.workspace
-      .getServices()
-      .then((services) => {
+      .getServiceIds()
+      .then((serviceIDs) => {
+        // A stale response cannot replace membership for a newly selected service.
         if (!cancelled) {
-          setWorkspaceServiceActive(
-            services.some((service) => service.service_id === serviceId)
-          );
+          setWorkspaceServiceActive(serviceIDs.includes(serviceId));
         }
       })
       .catch(() => {
-        if (!cancelled) setWorkspaceServiceActive(false);
+        // Dependency failure is unknown membership, never proof that an Add action is valid.
+        if (!cancelled) setWorkspaceServiceActive(null);
       });
+    // Effect cleanup fences the asynchronous membership result after route identity changes.
     return () => {
       cancelled = true;
     };

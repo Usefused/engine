@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -133,6 +134,58 @@ func TestFetchServiceVersionAuthConfigsUsesGraphQLBatch(t *testing.T) {
 	ref, ok := refs[0].(map[string]interface{})
 	if !ok || ref["service_id"] != serviceID.String() || ref["version"] != versionID.String() {
 		t.Fatalf("unexpected batched service ref: %#v", refs[0])
+	}
+}
+
+// TestFetchServiceVersionAuthConfigsPartitionsRegistryLimit proves large workspaces stay within the GraphQL resolver bound.
+func TestFetchServiceVersionAuthConfigsPartitionsRegistryLimit(t *testing.T) {
+	refs := make([]ServiceVersionRef, 0, 201)
+	for index := 0; index < 201; index++ {
+		refs = append(refs, ServiceVersionRef{ServiceID: uuid.New(), Version: "1.0.0"})
+	}
+	batchSizes := make([]int, 0, 3)
+	client := &HTTPRegistryClient{
+		endpoint:   "https://registry.example/graphql",
+		licenseKey: "engine-license-key",
+		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			var requestBody graphqlQuery
+			// Each transport call must remain independently decodable before its rows can join the aggregate result.
+			if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			rawRefs, ok := requestBody.Variables["refs"].([]interface{})
+			// The GraphQL variable must contain one bounded, nonempty partition.
+			if !ok || len(rawRefs) == 0 || len(rawRefs) > registryServiceVersionBatchSize {
+				t.Fatalf("auth config batch = %#v", requestBody.Variables["refs"])
+			}
+			batchSizes = append(batchSizes, len(rawRefs))
+			versions := make([]ServiceVersionAuthConfigs, 0, len(rawRefs))
+			for _, rawRef := range rawRefs {
+				ref, ok := rawRef.(map[string]interface{})
+				// Malformed transport variables would make the echo response invalid evidence for batching.
+				if !ok {
+					t.Fatalf("auth config ref = %#v", rawRef)
+				}
+				serviceID, err := uuid.Parse(fmt.Sprint(ref["service_id"]))
+				// Every response row must retain the exact service identity from its partition.
+				if err != nil {
+					t.Fatalf("service id: %v", err)
+				}
+				versions = append(versions, ServiceVersionAuthConfigs{ServiceID: serviceID, Version: fmt.Sprint(ref["version"]), ServiceVersionID: uuid.New()})
+			}
+			body, err := json.Marshal(map[string]interface{}{"data": map[string]interface{}{"serviceVersionAuthConfigs": versions}})
+			// The fixture response must be complete or the client would be testing decode failure instead of partitioning.
+			if err != nil {
+				t.Fatalf("encode response: %v", err)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
+		})},
+	}
+
+	configs, err := client.FetchServiceVersionAuthConfigs(context.Background(), refs, "fsk_test")
+	// Three exact partitions and all 201 rows prove the caller no longer exceeds Registry's limit or drops results.
+	if err != nil || !reflect.DeepEqual(batchSizes, []int{100, 100, 1}) || len(configs) != len(refs) {
+		t.Fatalf("FetchServiceVersionAuthConfigs() configs=%d batches=%v err=%v", len(configs), batchSizes, err)
 	}
 }
 
@@ -312,6 +365,56 @@ func TestFetchServiceMetadataBatchUsesOneSetBasedGraphQLRequest(t *testing.T) {
 	}
 	if metadata[ServiceMetadataRefKey(refs[0])].EventExtractionPath != "event.type" || metadata[ServiceMetadataRefKey(refs[1])].IncomingWebhookConfig.AuthType != "hmac_signature" {
 		t.Fatalf("unexpected batched metadata: %#v", metadata)
+	}
+}
+
+// TestFetchServiceMetadataBatchPartitionsRegistryLimit proves webhook planning never exceeds the shared resolver bound.
+func TestFetchServiceMetadataBatchPartitionsRegistryLimit(t *testing.T) {
+	refs := make([]ServiceMetadataRef, 0, 201)
+	// Unique identities make any dropped or duplicated partition visible in the final map size.
+	for index := 0; index < 201; index++ {
+		refs = append(refs, ServiceMetadataRef{ServiceID: uuid.New(), Version: "v1"})
+	}
+	batchSizes := make([]int, 0, 3)
+	client := &HTTPRegistryClient{
+		endpoint: "https://registry.example/graphql", licenseKey: "engine-license-key",
+		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			var requestBody graphqlQuery
+			// Each set-based request must be independently decodable before its metadata joins the aggregate.
+			if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			rawRefs, ok := requestBody.Variables["refs"].([]interface{})
+			// Every request must carry one nonempty partition within Registry's exact maximum.
+			if !ok || len(rawRefs) == 0 || len(rawRefs) > registryServiceVersionBatchSize {
+				t.Fatalf("metadata batch = %#v", requestBody.Variables["refs"])
+			}
+			batchSizes = append(batchSizes, len(rawRefs))
+			items := make([]map[string]interface{}, 0, len(rawRefs))
+			// Echo each requested identity so aggregate cardinality proves no partition was lost.
+			for _, rawRef := range rawRefs {
+				ref, ok := rawRef.(map[string]interface{})
+				// Malformed variables would invalidate the batching evidence rather than exercise metadata decoding.
+				if !ok {
+					t.Fatalf("metadata ref = %#v", rawRef)
+				}
+				items = append(items, map[string]interface{}{
+					"service_id": ref["service_id"], "service_version_id": uuid.NewString(), "version": ref["version"], "name": "Service",
+				})
+			}
+			body, err := json.Marshal(map[string]interface{}{"data": map[string]interface{}{"serviceWebhookMetadata": items}})
+			// A complete fixture response keeps the assertion focused on request partitioning.
+			if err != nil {
+				t.Fatalf("encode response: %v", err)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
+		})},
+	}
+
+	metadata, err := client.FetchServiceMetadataBatch(context.Background(), refs)
+	// Three bounded calls and every identity prove the aggregate preserves the old complete-result contract.
+	if err != nil || !reflect.DeepEqual(batchSizes, []int{100, 100, 1}) || len(metadata) != len(refs) {
+		t.Fatalf("FetchServiceMetadataBatch() metadata=%d batches=%v err=%v", len(metadata), batchSizes, err)
 	}
 }
 
@@ -501,6 +604,68 @@ func TestFetchRuntimeContractsUsesSingleSetBasedGraphQLRequest(t *testing.T) {
 	variablesJSON, _ := json.Marshal(requestBody.Variables)
 	if !bytes.Contains(variablesJSON, []byte(firstServiceID.String())) || !bytes.Contains(variablesJSON, []byte(secondVersionID.String())) {
 		t.Fatalf("unexpected variables: %#v", requestBody.Variables)
+	}
+}
+
+// TestFetchRuntimeContractsPartitionsRegistryLimit proves snapshot materialization respects every capped Registry batch.
+func TestFetchRuntimeContractsPartitionsRegistryLimit(t *testing.T) {
+	versions := make([]store.WorkspaceServiceVersion, 0, 201)
+	// Unique immutable identities let response validation detect any cross-partition mix-up.
+	for index := 0; index < 201; index++ {
+		versions = append(versions, store.WorkspaceServiceVersion{ServiceID: uuid.New(), ServiceVersionID: uuid.New(), Version: "v1"})
+	}
+	batchSizes := make([]int, 0, 3)
+	client := &HTTPRegistryClient{
+		endpoint: "https://registry.example/graphql", licenseKey: "engine-license-key",
+		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			var requestBody graphqlQuery
+			// Each runtime partition must remain independently valid before it can join the aggregate.
+			if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			rawRefs, ok := requestBody.Variables["refs"].([]interface{})
+			// Runtime contracts share the same exact 100-version Registry resolver ceiling.
+			if !ok || len(rawRefs) == 0 || len(rawRefs) > registryServiceVersionBatchSize {
+				t.Fatalf("runtime contract batch = %#v", requestBody.Variables["refs"])
+			}
+			batchSizes = append(batchSizes, len(rawRefs))
+			items := make([]map[string]interface{}, 0, len(rawRefs))
+			// Echo complete minimal contracts for every requested immutable identity.
+			for _, rawRef := range rawRefs {
+				ref, ok := rawRef.(map[string]interface{})
+				// Invalid variables cannot serve as evidence that partition identity is preserved.
+				if !ok {
+					t.Fatalf("runtime contract ref = %#v", rawRef)
+				}
+				serviceID, serviceErr := uuid.Parse(fmt.Sprint(ref["service_id"]))
+				versionID, versionErr := uuid.Parse(fmt.Sprint(ref["version"]))
+				// The fixture must bind both UUIDs exactly as the Registry resolver does.
+				if serviceErr != nil || versionErr != nil {
+					t.Fatalf("runtime contract identity errors = %v / %v", serviceErr, versionErr)
+				}
+				var service interface{}
+				// Reusing the canonical test projection avoids weakening runtime snapshot validation for this scale case.
+				if err := json.Unmarshal([]byte(runtimeContractServiceJSON(serviceID, versionID, "Service")), &service); err != nil {
+					t.Fatalf("decode service fixture: %v", err)
+				}
+				items = append(items, map[string]interface{}{
+					"contract_version": 2, "required_capabilities": []string{}, "service_id": serviceID,
+					"service_version_id": versionID, "version": "v1", "service": service, "operations": []interface{}{}, "webhooks": []interface{}{},
+				})
+			}
+			body, err := json.Marshal(map[string]interface{}{"data": map[string]interface{}{"serviceRuntimeContracts": items}})
+			// Complete JSON keeps this test focused on partitioning rather than bounded-response rejection.
+			if err != nil {
+				t.Fatalf("encode response: %v", err)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
+		})},
+	}
+
+	snapshots, err := client.FetchRuntimeContracts(context.Background(), versions, "user-api-key")
+	// The complete ordered aggregate proves no caller-visible partial result or Registry-limit failure remains.
+	if err != nil || !reflect.DeepEqual(batchSizes, []int{100, 100, 1}) || len(snapshots) != len(versions) {
+		t.Fatalf("FetchRuntimeContracts() snapshots=%d batches=%v err=%v", len(snapshots), batchSizes, err)
 	}
 }
 

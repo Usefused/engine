@@ -1160,10 +1160,35 @@ func (c *HTTPRegistryClient) fetchServiceVersionRevisionBatch(ctx context.Contex
 	return decoded.Versions, nil
 }
 
+// Registry bounds service-version GraphQL reads so one large workspace cannot monopolize a resolver.
+const registryServiceVersionBatchSize = 100
+
+// FetchServiceVersionAuthConfigs resolves arbitrarily large workspaces through bounded Registry requests.
 func (c *HTTPRegistryClient) FetchServiceVersionAuthConfigs(ctx context.Context, refs []ServiceVersionRef, apiKey string) ([]ServiceVersionAuthConfigs, error) {
+	// An empty workspace needs no Registry round trip and has no auth options to project.
 	if len(refs) == 0 {
 		return nil, nil
 	}
+	configs := make([]ServiceVersionAuthConfigs, 0, len(refs))
+	// Preserve source order while every dependency request stays within Registry's shared service-version bound.
+	for start := 0; start < len(refs); start += registryServiceVersionBatchSize {
+		// Cancellation stops the next dependency call and discards any earlier partial result.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		end := min(start+registryServiceVersionBatchSize, len(refs))
+		batch, err := c.fetchServiceVersionAuthConfigBatch(ctx, refs[start:end], apiKey)
+		// Auth options must be all-or-nothing so the frontend never shows an incomplete credential contract.
+		if err != nil {
+			return nil, err
+		}
+		configs = append(configs, batch...)
+	}
+	return configs, nil
+}
+
+// fetchServiceVersionAuthConfigBatch performs one request within Registry's documented resolver bound.
+func (c *HTTPRegistryClient) fetchServiceVersionAuthConfigBatch(ctx context.Context, refs []ServiceVersionRef, apiKey string) ([]ServiceVersionAuthConfigs, error) {
 	reqBody := graphqlQuery{
 		Query: `query ServiceVersionAuthConfigs($refs: [ServiceVersionRefInput!]!) {
 			serviceVersionAuthConfigs(refs: $refs) {
@@ -1389,21 +1414,47 @@ func ServiceMetadataRefKey(ref ServiceMetadataRef) string {
 	return ref.ServiceID.String() + ":" + ref.Version
 }
 
-// FetchServiceMetadataBatch reads webhook metadata through Registry's
-// set-based field so adding services does not add resolver/database queries.
+// FetchServiceMetadataBatch resolves arbitrarily large webhook selections through bounded Registry requests.
 func (c *HTTPRegistryClient) FetchServiceMetadataBatch(ctx context.Context, refs []ServiceMetadataRef) (map[string]*fusedobject.ServiceMetadata, error) {
+	// Empty selections retain the historical non-nil map contract without a dependency call.
 	if len(refs) == 0 {
 		return map[string]*fusedobject.ServiceMetadata{}, nil
 	}
+	metadata := make(map[string]*fusedobject.ServiceMetadata, len(refs))
+	// Preserve source partitions while keeping each set-based query within Registry's shared bound.
+	for start := 0; start < len(refs); start += registryServiceVersionBatchSize {
+		// Cancellation stops the next request and prevents an incomplete metadata map from escaping.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		end := min(start+registryServiceVersionBatchSize, len(refs))
+		batch, err := c.fetchServiceMetadataBatch(ctx, refs[start:end])
+		// Webhook planning must never proceed with only the earlier successful partitions.
+		if err != nil {
+			return nil, err
+		}
+		// Exact identity keys make partition merging deterministic and preserve duplicate-input behavior.
+		for key, item := range batch {
+			metadata[key] = item
+		}
+	}
+	return metadata, nil
+}
+
+// fetchServiceMetadataBatch performs one set-based request within Registry's service-version bound.
+func (c *HTTPRegistryClient) fetchServiceMetadataBatch(ctx context.Context, refs []ServiceMetadataRef) (map[string]*fusedobject.ServiceMetadata, error) {
 	req, err := c.buildServiceMetadataBatchRequest(ctx, refs)
+	// Request construction failure invalidates this partition before transport begins.
 	if err != nil {
 		return nil, err
 	}
 	resp, err := c.do(req)
+	// Transport failure invalidates the complete caller-owned aggregate.
 	if err != nil {
 		return nil, fmt.Errorf("FetchServiceMetadataBatch: execute: %w", err)
 	}
 	defer resp.Body.Close()
+	// Registry validation and authorization details remain available to the planning caller.
 	if resp.StatusCode >= http.StatusBadRequest {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("FetchServiceMetadataBatch: registry returned %d: %s", resp.StatusCode, body)

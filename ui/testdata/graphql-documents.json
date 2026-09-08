@@ -1,6 +1,6 @@
 {
-  "call_count": 85,
-  "document_count": 104,
+  "call_count": 86,
+  "document_count": 105,
   "calls": [
     {
       "endpoint": "engine",
@@ -180,6 +180,12 @@
       "endpoint": "registry",
       "file": "app/lib/api.ts",
       "call": 23,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 24,
       "document_count": 1
     },
     {
@@ -723,6 +729,13 @@
       "call": 23,
       "variant": 1,
       "document": "query($serviceIds: [String!]!) {\n                servicesByIds(serviceIds: $serviceIds) {\n                  id name slug\n                }\n              }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/api.ts",
+      "call": 24,
+      "variant": 1,
+      "document": "query WorkspaceServiceIds {\n            workspaceServiceIds\n          }"
     },
     {
       "endpoint": "engine",

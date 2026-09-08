@@ -584,6 +584,7 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 			enabled_versions { version status }
 			auth_options { label auth_type credential_type key_name key_prefix required_fields supports_connected_users }
 		}
+		workspaceServiceIds
 		workspaceServicePage(limit: 10, offset: 0) { total page limit data { service_id service_name service_slug version } }
 		workspaceWebhooks(service_id: "` + serviceID.String() + `") { label slug created_at }
 		webhookEvents(service_id: "` + serviceID.String() + `", event_name: "repo.created", limit: 10, offset: 0) { total items { msg_id event_name delivery_status latency_ms credits_consumed created_at } }
@@ -609,7 +610,7 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 	data := doMCPGraphQLRequest(t, h, query)
 
 	assertLinkedBucketGraphQLData(t, data, attachedBucketID)
-	assertWorkspaceServiceGraphQLData(t, data, verifier)
+	assertWorkspaceServiceGraphQLData(t, data, verifier, serviceID)
 	assertWebhookAndTokenGraphQLData(t, data, accountID)
 	assertBucketUsageGraphQLData(t, data)
 	assertSecretAndConnectGraphQLData(t, data)
@@ -633,7 +634,14 @@ func assertLinkedBucketGraphQLData(t *testing.T, data map[string]any, attachedBu
 	assertGraphQLField(t, summary, "value_count", float64(1), "bucketSummaryPage.items[0]")
 }
 
-func assertWorkspaceServiceGraphQLData(t *testing.T, data map[string]any, verifier *mockVerifier) {
+// assertWorkspaceServiceGraphQLData verifies full, paged, and membership-only workspace projections together.
+func assertWorkspaceServiceGraphQLData(t *testing.T, data map[string]any, verifier *mockVerifier, serviceID uuid.UUID) {
+	serviceIDs := graphQLList(t, data["workspaceServiceIds"], "workspaceServiceIds")
+	assertGraphQLLen(t, serviceIDs, 1, "workspaceServiceIds")
+	// The lightweight projection must preserve the exact authorized service identity.
+	if serviceIDs[0] != serviceID.String() {
+		t.Fatalf("workspaceServiceIds[0] = %#v, want %q", serviceIDs[0], serviceID)
+	}
 	services := graphQLList(t, data["workspaceServices"], "workspaceServices")
 	assertGraphQLLen(t, services, 1, "workspaceServices")
 	service := graphQLMap(t, services[0], "workspaceServices[0]")

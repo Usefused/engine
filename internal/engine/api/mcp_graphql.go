@@ -440,6 +440,7 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"bucketSummaryPage":           bucketSummaryPageGraphQLField(s),
 			"bucketConnectSummary":        bucketConnectSummaryGraphQLField(s),
 			"workspaceServices":           workspaceServicesGraphQLField(s, verifier),
+			"workspaceServiceIds":         workspaceServiceIDsGraphQLField(s),
 			"workspaceServicePage":        workspaceServicePageGraphQLField(s, verifier),
 			"workspaceWebhooks":           workspaceWebhooksGraphQLField(s),
 			"webhookEvents":               webhookEventsGraphQLField(s),

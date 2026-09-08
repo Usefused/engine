@@ -2091,6 +2091,16 @@ export const api = {
             )
             .then(({ servicesByIds }) => servicesByIds),
 
+    // getServiceIds reads local membership only, avoiding Registry metadata work for catalogue activation markers.
+    getServiceIds: () =>
+      api
+        .mcpGraphql<{ workspaceServiceIds: string[] }>(
+          `query WorkspaceServiceIds {
+            workspaceServiceIds
+          }`
+        )
+        .then(({ workspaceServiceIds }) => workspaceServiceIds),
+
     upsertBucketValue: (payload: {
       bucketId: string;
       serviceId: string;

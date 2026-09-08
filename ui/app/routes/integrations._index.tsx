@@ -180,7 +180,7 @@ export default function IntegrationsIndex() {
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [integrations, setIntegrations] = useState<Service[]>([]);
-  const [workspaceServices, setWorkspaceServices] = useState<ActivatedService[]>([]);
+  const [activeWorkspaceServiceIds, setActiveWorkspaceServiceIds] = useState<string[]>([]);
   const [workspaceServicePageData, setWorkspaceServicePageData] = useState<{ data: ActivatedService[]; total: number } | null>(null);
   const [loading, setLoading] = useState(isAuth && !searchParams.get("q"));
   const [error, setError] = useState("");
@@ -253,14 +253,14 @@ export default function IntegrationsIndex() {
   const loadCatalogData = useCallback(async () => {
     setLoading(true);
     try {
-      const [catalogPage, wsRes, wsPageRes] = await Promise.all([
+      const [catalogPage, workspaceServiceIds] = await Promise.all([
         fetchCatalogPage(),
-        isAuth ? api.workspace.getServices() : Promise.resolve([]),
-        Promise.resolve(null)
+        isAuth ? api.workspace.getServiceIds() : Promise.resolve([]),
       ]);
       setIntegrations(catalogPage.data);
-      setWorkspaceServices(wsRes);
-      setWorkspaceServicePageData(wsPageRes);
+      setActiveWorkspaceServiceIds(workspaceServiceIds);
+      // Catalogue mode has no workspace page payload; keeping stale rows would misstate page totals after a tab switch.
+      setWorkspaceServicePageData(null);
       lastLoadedPageRef.current = { page: catalogPage.page, isAuth, view: "catalog" };
       if (catalogPage.page !== page) {
         setPage(catalogPage.page);
@@ -275,14 +275,12 @@ export default function IntegrationsIndex() {
     }
   }, [page, isAuth, query]);
 
+  // loadWorkspaceData keeps the visible workspace list on its database-backed page contract.
   const loadWorkspaceData = useCallback(async (p: number = page) => {
     setLoading(true);
     try {
-      const [wsRes, wsPageRes] = await Promise.all([
-        isAuth ? api.workspace.getServices() : Promise.resolve([]),
-        isAuth ? api.workspace.getServicesPage(10, (p - 1) * 10, query ? [query] : undefined) : Promise.resolve(null)
-      ]);
-      setWorkspaceServices(wsRes);
+      const wsPageRes = isAuth ? await api.workspace.getServicesPage(10, (p - 1) * 10, query ? [query] : undefined) : null;
+      // The workspace tab renders only the requested page, so it must not issue a second unpaginated membership projection.
       setWorkspaceServicePageData(wsPageRes);
       lastLoadedPageRef.current = { page: p, isAuth, view: "workspace" };
     } catch (e) {
@@ -482,13 +480,14 @@ export default function IntegrationsIndex() {
     }
   }
 
+  // handleRemoveWorkspace updates local membership markers after Engine confirms removal.
   async function handleRemoveWorkspace(e: React.MouseEvent, id: string) {
     e.preventDefault();
     const confirmed = await toast.confirm("Are you sure you want to remove this service? It will be uninstalled from your workspace.");
     if (confirmed) {
       try {
         await api.workspace.removeService(id);
-        setWorkspaceServices(prev => prev.filter(s => s.service_id !== id && s.id !== id));
+        setActiveWorkspaceServiceIds(prev => prev.filter(serviceID => serviceID !== id));
         toast.success("Service removed from workspace.");
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Failed to remove service");
@@ -496,6 +495,7 @@ export default function IntegrationsIndex() {
     }
   }
 
+  // handleDelete removes an owned catalogue service and its matching local activation marker.
   async function handleDelete(e: React.MouseEvent, id: string) {
     e.preventDefault(); // Prevent navigating to the Service detail page
     const confirmed = await toast.confirm("Are you sure you want to permanently delete this service? This will destroy this service for everyone using it.");
@@ -504,7 +504,7 @@ export default function IntegrationsIndex() {
         await api.integrations.delete(id);
         // Optimistically remove from local state immediately (avoids stale cache showing deleted item)
         setIntegrations(prev => prev.filter(s => s.id !== id));
-        setWorkspaceServices(prev => prev.filter(s => s.service_id !== id && s.id !== id));
+        setActiveWorkspaceServiceIds(prev => prev.filter(serviceID => serviceID !== id));
         if (query.trim()) {
           // Re-run search to get fresh results from server
           runSearch(query);
@@ -547,7 +547,7 @@ export default function IntegrationsIndex() {
           integrations: integrations.map(fromService), loading, error, query, setQuery, handleSearch, handleClear,
           searching, handleDelete, setShowNewPanel, page, onPageChange: setPage, totalPages, totalItems, isAuth,
           viewType: "catalog", handleAddWorkspace, handleRemoveWorkspace,
-          activeServiceIds: workspaceServices.map(service => service.service_id),
+          activeServiceIds: activeWorkspaceServiceIds,
         }}
         workspace={{
           integrations: workspaceList.integrations, loading, error, query,
