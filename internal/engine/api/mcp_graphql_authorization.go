@@ -66,12 +66,14 @@ type graphQLAuthorizationPolicy struct {
 // policy is therefore a fail-closed server configuration error.
 var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 	queryRoots: map[string]graphQLFieldPolicy{
-		"appScaffoldRequirements":     collectionPermissions(accesscontrol.ResourceService, accesscontrol.PermissionServiceRead),
-		"currentActorAccess":          authenticatedOnly(),
-		"app":                         collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
-		"apps":                        collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
-		"appVersions":                 collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
-		"appServices":                 collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
+		"appScaffoldRequirements": collectionPermissions(accesscontrol.ResourceService, accesscontrol.PermissionServiceRead),
+		"currentActorAccess":      authenticatedOnly(),
+		"app":                     collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
+		"apps":                    collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
+		"appVersions":             collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
+		"appServices":             collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
+		// Operation discovery is exact-version state, so preflight resolves the app ID to its family authorization boundary.
+		"mcpAppOperations":            appArgumentPermissions("app_id", accesscontrol.PermissionAppRead),
 		"accessExplanation":           permissions(accesscontrol.PermissionAccessRead),
 		"auditEvents":                 permissions(accesscontrol.PermissionAuditRead),
 		"appBuildSelectors":           permissions(accesscontrol.PermissionAppCreate),

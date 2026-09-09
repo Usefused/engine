@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -103,6 +105,50 @@ var appServiceSummaryGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
+const (
+	appOperationKindPhysical = "physical"
+	appOperationKindUnified  = "unified"
+)
+
+// mcpAppOperation is one exact callable name in an immutable MCP version.
+type mcpAppOperation struct {
+	OperationID      string
+	Kind             string
+	ServiceID        uuid.UUID
+	ServiceVersionID uuid.UUID
+}
+
+// mcpAppOperationCatalogue binds operation discovery to one exact MCP version.
+type mcpAppOperationCatalogue struct {
+	AppFamilyID uuid.UUID
+	AppID       uuid.UUID
+	Name        string
+	Version     string
+	Operations  []mcpAppOperation
+}
+
+var mcpAppOperationGraphQLType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "MCPAppOperation",
+	Fields: graphql.Fields{
+		"operation_id":       &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"kind":               &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"service_id":         &graphql.Field{Type: graphql.String},
+		"service_version_id": &graphql.Field{Type: graphql.String},
+	},
+})
+
+var mcpAppOperationCatalogueGraphQLType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "MCPAppOperationCatalogue",
+	Fields: graphql.Fields{
+		"mcp_id":     &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"version_id": &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"name":       &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"version":    &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"operations": &graphql.Field{Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(mcpAppOperationGraphQLType)))},
+		"total":      &graphql.Field{Type: graphql.NewNonNull(graphql.Int)},
+	},
+})
+
 // appsGraphQLField lists authorized app versions and enriches selected SDK
 // download counts through one optional Registry batch.
 func appsGraphQLField(s store.Store, downloadClient sandbox.SDKPackageDownloadCountClient) *graphql.Field {
@@ -198,6 +244,160 @@ func appServicesGraphQLField(s store.Store) *graphql.Field {
 		}
 		return projected, nil
 	}}
+}
+
+// mcpAppOperationsGraphQLField lists the complete callable catalogue for one authorized immutable MCP version.
+func mcpAppOperationsGraphQLField(s store.Store) *graphql.Field {
+	return &graphql.Field{Type: mcpAppOperationCatalogueGraphQLType, Args: graphql.FieldConfigArgument{
+		"app_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
+	}, Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+		repository, actor, authorized, err := authorizedAppCatalog(p, s)
+		// Authorization failures must stop before any app-scoped contract data is read.
+		if err != nil {
+			return nil, err
+		}
+		appID, err := uuid.Parse(strings.TrimSpace(fmt.Sprint(p.Args["app_id"])))
+		// Malformed and inaccessible identities remain indistinguishable at the public boundary.
+		if err != nil {
+			return nil, errors.New("MCP server was not found")
+		}
+		item, err := repository.GetAuthorizedApp(p.Context, actor.accountID, appID, authorized)
+		// Exact app authorization is authoritative even when another version in the family is visible.
+		if err != nil || item == nil || item.Kind != store.AppKindMCP {
+			return nil, errors.New("MCP server was not found")
+		}
+		catalogue, err := loadMCPAppOperationCatalogue(p.Context, s, *item)
+		// A partial physical or Unified catalogue must never be presented as the complete allowlist.
+		if err != nil {
+			return nil, err
+		}
+		return mcpAppOperationCatalogueFields(catalogue), nil
+	}}
+}
+
+// loadMCPAppOperationCatalogue composes physical selections and Unified descriptors through bounded set-based reads.
+func loadMCPAppOperationCatalogue(ctx context.Context, source any, item store.AppCatalogItem) (mcpAppOperationCatalogue, error) {
+	endpointStore, ok := source.(store.ServiceContractEndpointSelectionBatchStore)
+	// Registry fallback or per-selection reads would make exact-version discovery mutable and N+1.
+	if !ok {
+		return mcpAppOperationCatalogue{}, errors.New("MCP operation catalogue is unavailable")
+	}
+	descriptorStore, ok := source.(store.MCPUnifiedDescriptorStore)
+	// Unified names must come from the integrity-checked applied plan, never reconstructed private definitions.
+	if !ok {
+		return mcpAppOperationCatalogue{}, errors.New("MCP Unified operation catalogue is unavailable")
+	}
+	selections, err := mcpEndpointSelections(item.Selections)
+	// Incomplete persisted identities cannot safely select an immutable service contract snapshot.
+	if err != nil {
+		return mcpAppOperationCatalogue{}, err
+	}
+	matches, err := endpointStore.ListServiceContractEndpointsForSelections(ctx, selections, nil)
+	// One failed batch invalidates the complete physical catalogue.
+	if err != nil {
+		return mcpAppOperationCatalogue{}, fmt.Errorf("list MCP physical operations: %w", err)
+	}
+	descriptors, err := descriptorStore.GetMCPUnifiedOperationDescriptors(ctx, item.AppID, true, nil)
+	// Descriptor hash or applied-plan failures must not silently erase Unified operations.
+	if err != nil {
+		return mcpAppOperationCatalogue{}, fmt.Errorf("list MCP Unified operations: %w", err)
+	}
+	operations, err := mergeMCPAppOperations(item.Selections, matches, descriptors)
+	// Duplicate operation IDs make execute routing ambiguous and therefore cannot be advertised as allowed.
+	if err != nil {
+		return mcpAppOperationCatalogue{}, err
+	}
+	return mcpAppOperationCatalogue{AppFamilyID: item.AppFamilyID, AppID: item.AppID, Name: item.Name, Version: item.Version, Operations: operations}, nil
+}
+
+// mcpEndpointSelections converts immutable public selections into the narrow store batch contract.
+func mcpEndpointSelections(selections []models.SDKSelection) ([]store.ServiceContractEndpointSelection, error) {
+	requests := make([]store.ServiceContractEndpointSelection, len(selections))
+	// Every persisted service selection contributes exactly one row to the set-based snapshot request.
+	for index, selection := range selections {
+		// New app versions must carry exact v3 service and version identities before any catalogue read.
+		if selection.SchemaVersion != models.AppSelectionSchemaVersion || selection.ServiceID == uuid.Nil || selection.ServiceVersionID == uuid.Nil {
+			return nil, errors.New("MCP app selection is incomplete")
+		}
+		requests[index] = store.ServiceContractEndpointSelection{
+			SelectionIndex: index, ServiceID: selection.ServiceID, ServiceVersionID: selection.ServiceVersionID,
+			SelectAll: selection.SelectAll, EndpointIDs: selection.EndpointIDs, OperationNames: selection.OperationNames,
+		}
+	}
+	return requests, nil
+}
+
+// mergeMCPAppOperations creates one deterministic collision-free physical and Unified catalogue.
+func mergeMCPAppOperations(selections []models.SDKSelection, matches []store.ServiceContractEndpointMatch, descriptors *models.SDKUnifiedOperationDescriptors) ([]mcpAppOperation, error) {
+	operations := make([]mcpAppOperation, 0, len(matches))
+	seen := make(map[string]struct{}, len(matches))
+	// Physical rows inherit exact service provenance from their originating immutable selection.
+	for _, match := range matches {
+		// A store row outside the submitted selection batch indicates corrupt catalogue identity.
+		if match.SelectionIndex < 0 || match.SelectionIndex >= len(selections) {
+			return nil, errors.New("MCP physical operation selection is invalid")
+		}
+		selection := selections[match.SelectionIndex]
+		operation := mcpAppOperation{OperationID: match.Endpoint.Name, Kind: appOperationKindPhysical, ServiceID: selection.ServiceID, ServiceVersionID: selection.ServiceVersionID}
+		if err := appendUniqueMCPAppOperation(&operations, seen, operation); err != nil {
+			return nil, err
+		}
+	}
+	// A nil descriptor represents an exact applied MCP version with no Unified Operations.
+	if descriptors != nil {
+		// Unified descriptors contribute only their public invocation identity, never private mappings.
+		for _, descriptor := range descriptors.Operations {
+			if err := appendUniqueMCPAppOperation(&operations, seen, mcpAppOperation{OperationID: descriptor.Name, Kind: appOperationKindUnified}); err != nil {
+				return nil, err
+			}
+		}
+	}
+	sort.Slice(operations, func(left, right int) bool {
+		// Operation ID is the public invocation key; kind is only a deterministic tie-breaker for corrupt duplicate input.
+		if operations[left].OperationID == operations[right].OperationID {
+			return operations[left].Kind < operations[right].Kind
+		}
+		return operations[left].OperationID < operations[right].OperationID
+	})
+	return operations, nil
+}
+
+// appendUniqueMCPAppOperation rejects blank or ambiguous public invocation identities.
+func appendUniqueMCPAppOperation(operations *[]mcpAppOperation, seen map[string]struct{}, operation mcpAppOperation) error {
+	operation.OperationID = strings.TrimSpace(operation.OperationID)
+	// Blank names cannot be invoked and must not enter an advertised allowlist.
+	if operation.OperationID == "" {
+		return errors.New("MCP operation ID is empty")
+	}
+	_, duplicate := seen[operation.OperationID]
+	// Physical/Unified name collisions are runtime-ambiguous and must fail the complete read closed.
+	if duplicate {
+		return fmt.Errorf("MCP operation ID %q is duplicated", operation.OperationID)
+	}
+	seen[operation.OperationID] = struct{}{}
+	*operations = append(*operations, operation)
+	return nil
+}
+
+// mcpAppOperationCatalogueFields projects public operation identities without private Unified mappings.
+func mcpAppOperationCatalogueFields(catalogue mcpAppOperationCatalogue) map[string]interface{} {
+	operations := make([]map[string]interface{}, 0, len(catalogue.Operations))
+	// Projection deliberately treats Unified and physical provenance differently at the public boundary.
+	for _, operation := range catalogue.Operations {
+		serviceID, serviceVersionID := "", ""
+		// Physical rows retain exact service provenance while Unified rows intentionally expose no private targets.
+		if operation.Kind == appOperationKindPhysical {
+			serviceID, serviceVersionID = operation.ServiceID.String(), operation.ServiceVersionID.String()
+		}
+		operations = append(operations, map[string]interface{}{
+			"operation_id": operation.OperationID, "kind": operation.Kind,
+			"service_id": serviceID, "service_version_id": serviceVersionID,
+		})
+	}
+	return map[string]interface{}{
+		"mcp_id": catalogue.AppFamilyID.String(), "version_id": catalogue.AppID.String(),
+		"name": catalogue.Name, "version": catalogue.Version, "operations": operations, "total": len(operations),
+	}
 }
 
 func authorizedAppCatalog(p graphql.ResolveParams, s store.Store) (store.AppCatalogRepository, mcpGraphQLActor, accesscontrol.AuthorizedScope, error) {

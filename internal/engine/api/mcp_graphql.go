@@ -414,6 +414,7 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"apps":                        appsGraphQLField(s, packageDownloads),
 			"appVersions":                 appVersionsGraphQLField(s, packageDownloads),
 			"appServices":                 appServicesGraphQLField(s),
+			"mcpAppOperations":            mcpAppOperationsGraphQLField(s),
 			"accessExplanation":           accessExplanationGraphQLField(s),
 			"auditEvents":                 auditEventsGraphQLField(s),
 			"appBuildSelectors":           appBuildSelectorsGraphQLField(s),
