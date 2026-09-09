@@ -74,6 +74,28 @@ async function req<T>(
   return data as T;
 }
 
+// reqWithTimeout bounds interactive mutations so a stalled Engine dependency cannot leave browser state pending forever.
+async function reqWithTimeout<T>(
+  path: string,
+  init: RequestInit,
+  timeoutMs: number,
+  timeoutMessage: string
+): Promise<T> {
+  const controller = new AbortController();
+  const timeoutID = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await req<T>(path, { ...init, signal: controller.signal });
+  } catch (error) {
+    // Only this helper's deadline receives the actionable timeout message; ordinary API errors retain their server detail.
+    if (controller.signal.aborted) {
+      throw new Error(timeoutMessage);
+    }
+    throw error;
+  } finally {
+    globalThis.clearTimeout(timeoutID);
+  }
+}
+
 // handleAuthenticationFailure normalizes JSON API auth failures through the same redirect boundary as streams.
 function handleAuthenticationFailure(
   status: number,
@@ -1435,23 +1457,27 @@ export const api = {
   // The Engine owns which services are in a workspace; the Registry owns the
   // service definitions themselves.
   workspace: {
-    // addService can include serviceVersionId when the caller already has an
-    // exact Registry version. That avoids asking Engine to infer a version.
+    // addService bounds the complete activation while retaining an exact Registry version when the caller has one.
     addService: (
       serviceId: string,
       serviceName: string,
       versionTag: string,
       serviceVersionId?: string
     ) =>
-      req<{ status: string }>("/workspace/services", {
-        method: "POST",
-        body: JSON.stringify({
-          service_id: serviceId,
-          service_name: serviceName,
-          version_tag: versionTag,
-          service_version_id: serviceVersionId,
-        }),
-      }),
+      reqWithTimeout<{ status: string }>(
+        "/workspace/services",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            service_id: serviceId,
+            service_name: serviceName,
+            version_tag: versionTag,
+            service_version_id: serviceVersionId,
+          }),
+        },
+        50_000,
+        "Adding the service timed out. Check whether it is already in the workspace before retrying."
+      ),
 
     removeService: (serviceId: string) =>
       req<void>(`/workspace/services/${serviceId}`, { method: "DELETE" }),

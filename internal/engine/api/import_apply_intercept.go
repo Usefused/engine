@@ -472,7 +472,8 @@ func importWorkspaceActivationRecovery(audit autoRegistrationAudit) string {
 	if version != "" {
 		parts = append(parts, "--version", quoteImportRecoveryArg(version))
 	}
-	return strings.Join(append(parts, "--apply"), " ")
+	// File-free workspace additions are immediate, so recovery must not reintroduce the retired config-first flag.
+	return strings.Join(parts, " ")
 }
 
 // safeImportRecoveryToken admits the bounded Registry identity grammar used in copied shell recovery.

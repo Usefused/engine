@@ -17,6 +17,7 @@ import (
 
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
@@ -62,7 +63,9 @@ type workspaceTestStore struct {
 	gotVersion               string
 	gotServiceVersionID      uuid.UUID
 	enabledVersion           string
+	activationCalls          atomic.Int32
 	workspaceServiceVersions map[uuid.UUID][]store.WorkspaceServiceVersion
+	versionActiveErr         error
 	versionLookupErr         error
 	versionLookups           []uuid.UUID
 	missingContractVersions  []store.WorkspaceServiceVersion
@@ -480,6 +483,28 @@ type mockVerifier struct {
 	discoveryEndpoint   *fusedobject.Endpoint
 }
 
+// blockingAddServiceVerifier holds Registry verification open so concurrent handler calls must share one activation.
+type blockingAddServiceVerifier struct {
+	*mockVerifier
+	verifyCalls atomic.Int32
+	started     chan struct{}
+	release     <-chan struct{}
+	startedOnce sync.Once
+}
+
+// VerifyServiceExists exposes the first in-flight call and remains cancellation-aware while the test coordinates waiters.
+func (v *blockingAddServiceVerifier) VerifyServiceExists(ctx context.Context, serviceID uuid.UUID, _ string) (string, string, string, uuid.UUID, error) {
+	v.verifyCalls.Add(1)
+	v.startedOnce.Do(func() { close(v.started) })
+	select {
+	case <-v.release:
+		return "Stripe", "stripe", "v1", v.serviceVersionID, nil
+	case <-ctx.Done():
+		// Handler cancellation must release the blocked Registry dependency promptly.
+		return "", "", "", uuid.Nil, ctx.Err()
+	}
+}
+
 type runtimeContractVerifier struct {
 	*mockVerifier
 	runtimeContract             *store.ServiceContractSnapshot
@@ -715,6 +740,7 @@ func (s *workspaceTestStore) VerifyWorkspaceOwner(ctx context.Context, accountID
 	return s.workspaceErr
 }
 
+// AddWorkspaceServiceVersion captures the exact activation tuple and counts committed fixture writes safely.
 func (s *workspaceTestStore) AddWorkspaceServiceVersion(
 	ctx context.Context,
 	serviceID uuid.UUID,
@@ -724,6 +750,8 @@ func (s *workspaceTestStore) AddWorkspaceServiceVersion(
 	serviceName string,
 	addedBy uuid.UUID,
 ) error {
+	// Atomic accounting lets duplicate-activation tests detect concurrent writes without introducing a fixture race.
+	s.activationCalls.Add(1)
 	s.gotVersion = version
 	s.gotServiceVersionID = serviceVersionID
 	s.gotServiceName = serviceName
@@ -821,6 +849,21 @@ func (s *workspaceTestStore) IsWorkspaceServiceEnabled(ctx context.Context, serv
 		}
 	}
 	return len(s.workspaceServiceVersions[serviceID]) > 0, nil
+}
+
+// IsWorkspaceServiceVersionActive mirrors the production exact-version idempotency check for activation tests.
+func (s *workspaceTestStore) IsWorkspaceServiceVersionActive(_ context.Context, serviceID, serviceVersionID uuid.UUID) (bool, error) {
+	// Injected read failures verify that pre-mutation database outages retain their safe retry boundary.
+	if s.versionActiveErr != nil {
+		return false, s.versionActiveErr
+	}
+	// Only the same non-deprecated immutable version can suppress another snapshot write.
+	for _, version := range s.workspaceServiceVersions[serviceID] {
+		if version.ServiceVersionID == serviceVersionID && version.Status != "deprecated" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *workspaceTestStore) ListAuthorizedWorkspaceServices(ctx context.Context, scope accesscontrol.AuthorizedScope, names []string) ([]store.WorkspaceService, error) {
@@ -1891,6 +1934,179 @@ func TestAddService_PinsToRegistryCurrentVersionWhenRequestOmitsVersion(t *testi
 	}
 	if s.gotVersion != "2026-07-09" {
 		t.Errorf("expected activation to pin Registry current version, got %q", s.gotVersion)
+	}
+}
+
+// TestAddService_CollapsesConcurrentIdenticalActivations proves repeated UI clicks cannot stack snapshot transactions.
+func TestAddService_CollapsesConcurrentIdenticalActivations(t *testing.T) {
+	serviceID, serviceVersionID := uuid.New(), uuid.New()
+	s := &workspaceTestStore{accountID: uuid.New(), workspaceID: uuid.New()}
+	release := make(chan struct{})
+	verifier := &blockingAddServiceVerifier{
+		mockVerifier: &mockVerifier{serviceVersionID: serviceVersionID},
+		started:      make(chan struct{}), release: release,
+	}
+	router := buildWorkspaceRouter(s, verifier)
+	const requestCount = 8
+	responses := make([]*httptest.ResponseRecorder, requestCount)
+	var ready, done sync.WaitGroup
+	ready.Add(requestCount)
+	done.Add(requestCount)
+	start := make(chan struct{})
+	for index := 0; index < requestCount; index++ {
+		go func(position int) {
+			defer done.Done()
+			ready.Done()
+			<-start
+			body := jsonBody(map[string]string{
+				"service_id": serviceID.String(), "service_name": "Stripe", "version_tag": "v1", "service_version_id": serviceVersionID.String(),
+			})
+			request := httptest.NewRequest(http.MethodPost, "/workspace/services", body)
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-API-Key", "fsk_test")
+			responses[position] = httptest.NewRecorder()
+			router.ServeHTTP(responses[position], request)
+		}(index)
+	}
+	ready.Wait()
+	close(start)
+	<-verifier.started
+	// A short coordination window lets every request enter the shared singleflight before verification completes.
+	time.Sleep(25 * time.Millisecond)
+	close(release)
+	done.Wait()
+
+	// Every waiter receives success while only one Registry verification and one database activation execute.
+	for index, response := range responses {
+		if response.Code != http.StatusOK {
+			t.Fatalf("response[%d] = %d %s", index, response.Code, response.Body.String())
+		}
+	}
+	if verifier.verifyCalls.Load() != 1 || s.activationCalls.Load() != 1 {
+		t.Fatalf("concurrent activation calls: verify=%d write=%d", verifier.verifyCalls.Load(), s.activationCalls.Load())
+	}
+}
+
+// TestAddService_AlreadyActiveVersionSkipsSnapshotRewrite proves stale clients cannot repeat expensive local materialization.
+func TestAddService_AlreadyActiveVersionSkipsSnapshotRewrite(t *testing.T) {
+	serviceID, serviceVersionID := uuid.New(), uuid.New()
+	s := &workspaceTestStore{
+		accountID: uuid.New(), workspaceID: uuid.New(),
+		workspaceServiceVersions: map[uuid.UUID][]store.WorkspaceServiceVersion{
+			serviceID: {{ServiceID: serviceID, ServiceVersionID: serviceVersionID, Version: "v1", Status: "active"}},
+		},
+	}
+	verifier := &mockVerifier{serviceVersionID: serviceVersionID, currentVersionTag: "v1"}
+	router := buildWorkspaceRouter(s, verifier)
+	body := jsonBody(map[string]string{
+		"service_id": serviceID.String(), "service_name": "Stripe", "version_tag": "v1", "service_version_id": serviceVersionID.String(),
+	})
+	request := httptest.NewRequest(http.MethodPost, "/workspace/services", body)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-API-Key", "fsk_test")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	// Idempotent success must not rewrite either the contract snapshot or workspace membership row.
+	if response.Code != http.StatusOK || s.activationCalls.Load() != 0 || len(s.snapshotWrites) != 0 {
+		t.Fatalf("already-active response=%d writes=%d snapshots=%d body=%s", response.Code, s.activationCalls.Load(), len(s.snapshotWrites), response.Body.String())
+	}
+}
+
+// TestAddService_ActivationDeadlineReturnsGatewayTimeout proves a blocked dependency always settles the browser request.
+func TestAddService_ActivationDeadlineReturnsGatewayTimeout(t *testing.T) {
+	s := &workspaceTestStore{accountID: uuid.New(), workspaceID: uuid.New()}
+	verifier := &blockingAddServiceVerifier{
+		mockVerifier: &mockVerifier{serviceVersionID: uuid.New()},
+		started:      make(chan struct{}), release: make(chan struct{}),
+	}
+	router := newControlTestRouter(s.accountID)
+	router.Post("/workspace/services", addServiceHandlerWithTimeout(s, verifier, 10*time.Millisecond))
+	body := jsonBody(map[string]string{"service_id": uuid.NewString(), "service_name": "Stripe"})
+	request := httptest.NewRequest(http.MethodPost, "/workspace/services", body)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-API-Key", "fsk_test")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	var envelope workspaceConfigErrorResponse
+	// Registry-phase timeout is retryable because no local snapshot or membership write has begun.
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode timeout response: %v", err)
+	}
+	if response.Code != http.StatusGatewayTimeout || envelope.Error.Code != "workspace_service_add_timeout" || !envelope.Error.Retryable || envelope.Error.Phase != "service_verification" || envelope.Error.CommitState != "not_committed" {
+		t.Fatalf("timeout response=%d %#v", response.Code, envelope.Error)
+	}
+}
+
+// TestWriteAddServiceErrorClassifiesPostgresNonWritableStates preserves SQLSTATE evidence and phase-aware retry safety.
+func TestWriteAddServiceErrorClassifiesPostgresNonWritableStates(t *testing.T) {
+	tests := []struct {
+		name        string
+		sqlState    string
+		phase       string
+		commitState string
+		retryable   bool
+	}{
+		{name: "shutdown before membership", sqlState: "57P01", phase: "contract_snapshot_persistence", commitState: "not_committed", retryable: true},
+		{name: "shutdown during membership commit", sqlState: "57P01", phase: "workspace_membership_commit", commitState: "unknown", retryable: false},
+		{name: "read only before membership", sqlState: "25006", phase: "contract_snapshot_persistence", commitState: "not_committed", retryable: true},
+		{name: "read only during membership commit", sqlState: "25006", phase: "workspace_membership_commit", commitState: "unknown", retryable: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler := chimiddleware.RequestID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeAddServiceError(w, r.Context(), &workspaceServicePersistenceError{
+					cause: &pgconn.PgError{Code: test.sqlState, Message: "sensitive PostgreSQL detail"},
+					phase: test.phase, commitState: test.commitState,
+				})
+			}))
+			request := httptest.NewRequest(http.MethodPost, "/workspace/services", nil)
+			request.Header.Set(chimiddleware.RequestIDHeader, "request-db-shutdown")
+			handler.ServeHTTP(response, request)
+
+			var envelope workspaceConfigErrorResponse
+			// Stable SQLSTATE detail explains the dependency outage without echoing raw PostgreSQL text.
+			if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+				t.Fatalf("decode database response: %v", err)
+			}
+			if response.Code != http.StatusServiceUnavailable || envelope.Error.Code != "workspace_database_unavailable" || envelope.Error.Phase != test.phase || envelope.Error.CommitState != test.commitState || envelope.Error.Retryable != test.retryable || envelope.Error.Details["sqlstate"] != test.sqlState {
+				t.Fatalf("database response=%d %#v", response.Code, envelope.Error)
+			}
+			// Raw server prose stays in Engine logs while the reviewed explanation remains public.
+			if strings.Contains(response.Body.String(), "sensitive PostgreSQL detail") {
+				t.Fatalf("database response leaked raw PostgreSQL detail: %s", response.Body.String())
+			}
+		})
+	}
+}
+
+// TestAddService_StateCheckDatabaseShutdownIsProvenUncommitted covers the first PostgreSQL read in activation.
+func TestAddService_StateCheckDatabaseShutdownIsProvenUncommitted(t *testing.T) {
+	serviceID, serviceVersionID := uuid.New(), uuid.New()
+	s := &workspaceTestStore{
+		accountID: uuid.New(), workspaceID: uuid.New(),
+		versionActiveErr: &pgconn.PgError{Code: "57P01", Message: "terminating connection due to administrator command"},
+	}
+	verifier := &mockVerifier{serviceVersionID: serviceVersionID, currentVersionTag: "v1"}
+	router := buildWorkspaceRouter(s, verifier)
+	body := jsonBody(map[string]string{
+		"service_id": serviceID.String(), "service_name": "Stripe", "version_tag": "v1", "service_version_id": serviceVersionID.String(),
+	})
+	request := httptest.NewRequest(http.MethodPost, "/workspace/services", body)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-API-Key", "fsk_test")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	var envelope workspaceConfigErrorResponse
+	// This read precedes both snapshot and membership writes, so its shutdown response is safely retryable.
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode state-check database response: %v", err)
+	}
+	if response.Code != http.StatusServiceUnavailable || envelope.Error.Code != "workspace_database_unavailable" || envelope.Error.Phase != "activation_state_check" || envelope.Error.CommitState != "not_committed" || !envelope.Error.Retryable {
+		t.Fatalf("state-check database response=%d %#v", response.Code, envelope.Error)
 	}
 }
 

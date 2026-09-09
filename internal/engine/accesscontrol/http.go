@@ -9,6 +9,7 @@ import (
 	"time"
 
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -27,6 +28,7 @@ type denialError struct {
 	Category    string         `json:"category"`
 	Retryable   bool           `json:"retryable"`
 	Details     *denialDetails `json:"details,omitempty"`
+	Remediation string         `json:"remediation,omitempty"`
 	Phase       string         `json:"phase,omitempty"`
 	OperationID string         `json:"operation_id,omitempty"`
 	RequestID   string         `json:"request_id,omitempty"`
@@ -35,7 +37,9 @@ type denialError struct {
 }
 
 type denialDetails struct {
-	Missing []missingRequirement `json:"missing,omitempty"`
+	Missing      []missingRequirement `json:"missing,omitempty"`
+	SQLState     string               `json:"sqlstate,omitempty"`
+	ServerDetail string               `json:"server_detail,omitempty"`
 }
 
 type missingRequirement struct {
@@ -163,9 +167,35 @@ func authorizationErrorResponse(err error) (int, denialResponse) {
 		}
 		return http.StatusForbidden, newDenialResponse("permission_denied", "The authenticated identity is missing required permissions.", "authorization", false, missing)
 	}
+	postgresError, databaseUnavailable := authorizationDatabaseUnavailable(err)
+	// PostgreSQL non-writable states are dependency outages, not invalid authorization policy declarations.
+	if databaseUnavailable {
+		response := newDenialResponse("authorization_database_unavailable", "The Engine database was not writable while validating authorization.", "dependency", true, nil)
+		response.Error.Details = &denialDetails{
+			SQLState:     postgresError.Code,
+			ServerDetail: "PostgreSQL is read-only, shutting down, restarting, or not ready to validate this request.",
+		}
+		response.Error.Remediation = "Wait for the Engine database to become healthy, then retry the request."
+		return http.StatusServiceUnavailable, response
+	}
 	// Invalid server-owned permission declarations fail closed and are not
 	// misreported as a caller authorization failure.
 	return http.StatusInternalServerError, newDenialResponse("authorization_policy_invalid", "The Engine could not validate the authorization policy.", "internal", true, nil)
+}
+
+// authorizationDatabaseUnavailable recognizes only reviewed PostgreSQL states that prevent authorization persistence or reads.
+func authorizationDatabaseUnavailable(err error) (*pgconn.PgError, bool) {
+	var postgresError *pgconn.PgError
+	// Other database and application failures remain internal policy errors until they have their own reviewed contract.
+	if !errors.As(err, &postgresError) {
+		return nil, false
+	}
+	switch postgresError.Code {
+	case "25006", "57P01", "57P02", "57P03":
+		return postgresError, true
+	default:
+		return nil, false
+	}
 }
 
 // newDenialResponse builds the common envelope while omitting an empty details object.

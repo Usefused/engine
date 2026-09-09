@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/store"
@@ -168,6 +169,32 @@ func TestControlAuthorizationReturns401WithoutCachedActor(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/integrations", nil))
 	assertControlDenial(t, response, http.StatusUnauthorized, "authentication_required", 0)
+}
+
+// TestControlAuthorizationDatabaseFailureProvesMutationUncommitted preserves recovery metadata before an unsafe handler runs.
+func TestControlAuthorizationDatabaseFailureProvesMutationUncommitted(t *testing.T) {
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/workspace/services", nil)
+	writeControlAuthorizationError(response, request, &pgconn.PgError{Code: "25006", Message: "sensitive database detail"})
+
+	var body struct {
+		Error struct {
+			Code        string `json:"code"`
+			Phase       string `json:"phase"`
+			CommitState string `json:"commit_state"`
+			Retryable   bool   `json:"retryable"`
+		} `json:"error"`
+	}
+	// Authorization rejects the request before dispatch, so a database outage remains safe to retry after recovery.
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Code != http.StatusServiceUnavailable || body.Error.Code != "authorization_database_unavailable" || body.Error.Phase != "authorization" || body.Error.CommitState != "not_committed" || !body.Error.Retryable {
+		t.Fatalf("response = %d %#v", response.Code, body.Error)
+	}
+	if strings.Contains(response.Body.String(), "sensitive database detail") {
+		t.Fatalf("response leaked raw PostgreSQL detail: %s", response.Body.String())
+	}
 }
 
 func TestControlAuthorizationPreservesRuntimePublicAndGraphQLBoundaries(t *testing.T) {

@@ -414,6 +414,11 @@ type importControlError struct {
 func writeControlAuthorizationError(w http.ResponseWriter, r *http.Request, err error) {
 	// Only import routes promise operation recovery metadata.
 	if !isImportControlRoute(r) {
+		// Authorization ends unsafe requests before their handlers, so their mutation state is proven uncommitted.
+		if isControlMutation(r.Method) {
+			accesscontrol.WriteAuthorizationMutationError(w, err, "authorization", "", "not_committed", r.Context())
+			return
+		}
 		accesscontrol.WriteAuthorizationError(w, err)
 		return
 	}

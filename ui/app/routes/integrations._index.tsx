@@ -23,18 +23,19 @@ import {
 
 type ImportSource = { url?: string; content?: string };
 type ImportIdentity = { name: string; slug?: string; version?: string };
-type ServicesView = "workspace" | "catalog" | "pending";
+type ServicesView = "workspace" | "pending";
 type CatalogPage = {
   data: Service[];
   total: number;
   page: number;
   limit: number;
 };
+type CatalogLoadOptions = { knownWorkspaceServiceIds?: string[]; query?: string };
 
 const CATALOG_SEARCH_QUERY = `
   query($q: String!) {
     searchServices(q: $q, publicOnly: true) {
-      id name base_url servers { url description }
+      id name description base_url servers { url description }
       is_public is_owner slug provider { name handle } canonical_ref
     }
   }
@@ -47,11 +48,11 @@ async function searchCatalogServices(q: string): Promise<Service[]> {
   return response.searchServices || [];
 }
 
-// fetchCatalogPage describes the Registry's bounded browse result as one honest UI page.
-async function fetchCatalogPage(): Promise<CatalogPage> {
-  const data = await searchCatalogServices("");
-  // The blank public search is deliberately capped in SQL, so advertising a
-  // second page would promise a pagination contract this query does not have.
+// fetchCatalogPage describes one bounded browse or search result as an honest UI page.
+async function fetchCatalogPage(query: string = ""): Promise<CatalogPage> {
+  const data = await searchCatalogServices(query);
+  // Registry search is deliberately capped in SQL, so advertising a second
+  // page would promise a pagination contract this query does not have.
   return { data, total: data.length, page: 1, limit: Math.max(data.length, 1) };
 }
 
@@ -91,7 +92,8 @@ async function createSpecificationPlan(
 
 // selectedServicesView converts an untrusted URL tab into one supported view.
 function selectedServicesView(tab: string | null): ServicesView {
-  if (tab === "pending" || tab === "catalog") return tab;
+  // Imports retain a separate progress view; legacy catalogue links now resolve to the combined workspace surface.
+  if (tab === "pending") return tab;
   return "workspace";
 }
 
@@ -114,11 +116,7 @@ function ServicesTabs({ isAuth, view, activeSessions, setView }: {
     <div className="flex bg-slate-100 p-1 rounded-lg w-full sm:w-fit mb-6">
       <button data-track="view_workspace_tab" type="button" onClick={() => setView("workspace")}
         className={`flex-1 sm:flex-none px-3 sm:px-4 py-1.5 text-sm font-medium rounded-md transition-all ${view === "workspace" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"} cursor-pointer`}>
-        Workspace services
-      </button>
-      <button data-track="view_catalog_tab" type="button" onClick={() => setView("catalog")}
-        className={`flex-1 sm:flex-none px-3 sm:px-4 py-1.5 text-sm font-medium rounded-md transition-all ${view === "catalog" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"} cursor-pointer`}>
-        Catalog
+        Workspace
       </button>
       <button data-track="view_imports_tab" type="button" onClick={() => setView("pending")}
         className={`relative flex-1 sm:flex-none px-3 sm:px-4 py-1.5 text-sm font-medium rounded-md transition-all ${view === "pending" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"} cursor-pointer`}>
@@ -127,6 +125,44 @@ function ServicesTabs({ isAuth, view, activeSessions, setView }: {
       </button>
     </div>
   );
+}
+
+// EmptyWorkspaceCatalogIntro explains why catalogue discovery is expanded for a new workspace.
+function EmptyWorkspaceCatalogIntro({ visible }: { visible: boolean }) {
+  // Established workspaces do not need onboarding copy above their optional catalogue collection.
+  if (!visible) return null;
+  return (
+    <div className="mb-6 rounded-xl border border-blue-100 bg-blue-50/70 px-5 py-4">
+      <p className="text-sm font-semibold text-slate-900">Start with the service catalog</p>
+      <p className="mt-1 text-sm text-slate-600">Add a service to make its operations and versions available to this workspace.</p>
+    </div>
+  );
+}
+
+// catalogVisible defaults discovery on only for a proven-empty workspace while preserving an explicit user choice.
+function catalogVisible(isAuth: boolean, preference: boolean | null, serviceIDs: string[] | null): boolean {
+  // Public visitors have only the catalogue surface available.
+  if (!isAuth) return true;
+  // Once the user operates the toggle, membership changes must not override that choice.
+  if (preference !== null) return preference;
+  return serviceIDs !== null && serviceIDs.length === 0;
+}
+
+// workspaceIsEmpty distinguishes an authoritative empty membership response from the initial unknown state.
+function workspaceIsEmpty(isAuth: boolean, serviceIDs: string[] | null): boolean {
+  return Boolean(isAuth && serviceIDs !== null && serviceIDs.length === 0);
+}
+
+// catalogErrorForAuth prevents the combined authenticated page from rendering the same request error twice.
+function catalogErrorForAuth(isAuth: boolean, error: string): string {
+  // Public visitors have only the catalogue collection, so it owns request feedback there.
+  return isAuth ? "" : error;
+}
+
+// needsVisibleLoad ensures bookmarked searches resolve membership before the combined workspace chooses its default catalogue state.
+function needsVisibleLoad(isAuth: boolean, query: string, serviceIDs: string[] | null): boolean {
+  // Anonymous browsing, unfiltered views, and unknown authenticated membership all require an initial request.
+  return !isAuth || !query || serviceIDs === null;
 }
 
 // PendingImports renders active extraction work only in its authenticated view.
@@ -139,16 +175,53 @@ function PendingImports({ isAuth, view, props }: {
   return <div className="mb-6"><IntegrationsPendingTab {...props} /></div>;
 }
 
-// ServicesContent chooses one list projection while keeping pagination decisions outside the route component.
-function ServicesContent({ isAuth, view, catalog, workspace }: {
+// CatalogToggle keeps discovery subordinate to Workspace instead of presenting it as another navigation destination.
+function CatalogToggle({ checked, onChange }: { checked: boolean; onChange: () => void }) {
+  return (
+    <div className="mb-6 flex items-center justify-between gap-5 rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3">
+      <div>
+        <p className="text-sm font-semibold text-slate-900">Show catalog</p>
+        <p className="mt-1 text-xs text-slate-500">Browse public services beneath your workspace services.</p>
+      </div>
+      {/* The switch's color and thumb position share the accessible checked state. */}
+      <button type="button" role="switch" aria-checked={checked} onClick={onChange} data-track="toggle_service_catalogue"
+        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${checked ? "bg-blue-600" : "bg-slate-300"}`}>
+        <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${checked ? "translate-x-5" : "translate-x-0"}`} />
+      </button>
+    </div>
+  );
+}
+
+// ServicesContent keeps workspace-owned data first and appends catalogue discovery only when requested.
+function ServicesContent({ isAuth, view, showCatalog, emptyWorkspace, onToggleCatalog, catalog, workspace }: {
   isAuth: boolean;
   view: ServicesView;
+  showCatalog: boolean;
+  emptyWorkspace: boolean;
+  onToggleCatalog: () => void;
   catalog: ComponentProps<typeof IntegrationsListTab>;
   workspace: ComponentProps<typeof IntegrationsListTab>;
 }) {
-  if (view === "catalog" || !isAuth) return <IntegrationsListTab {...catalog} />;
-  if (view === "workspace") return <IntegrationsListTab {...workspace} />;
-  return null;
+  // Anonymous visitors have no local workspace projection to place above the catalogue.
+  if (!isAuth) return <IntegrationsListTab {...catalog} />;
+  // Import progress owns the content area until the user returns to Workspace.
+  if (view !== "workspace") return null;
+  // Shared search copy names the catalogue only while that collection participates in results.
+  const searchPlaceholder = showCatalog ? "Search workspace and catalog" : "Search your workspace services";
+  return (
+    <>
+      <CatalogToggle checked={showCatalog} onChange={onToggleCatalog} />
+      {/* Imported and activated services remain the first collection on the page. */}
+      {!emptyWorkspace && <h2 className="mb-4 text-sm font-semibold text-slate-900">Workspace services</h2>}
+      <IntegrationsListTab {...workspace} hideEmptyState searchPlaceholder={searchPlaceholder} />
+      {/* Catalogue cards are appended without changing the active Workspace navigation state. */}
+      {showCatalog && <section className="mt-6">
+        <EmptyWorkspaceCatalogIntro visible={emptyWorkspace} />
+        {!emptyWorkspace && <div className="mb-4"><h2 className="text-sm font-semibold text-slate-900">Service catalog</h2><p className="mt-1 text-xs text-slate-500">Add public services without displacing what is already in your workspace.</p></div>}
+        <IntegrationsListTab {...catalog} showSearch={false} />
+      </section>}
+    </>
+  );
 }
 
 // DefineServicePanel keeps drawer visibility out of the route's orchestration complexity.
@@ -171,7 +244,7 @@ function ExtractionSessionPanel({ sessionID, reviewOnly, onClose, onComplete }: 
   return <ExtractionWizard sessionId={sessionID} reviewOnly={reviewOnly} onClose={onClose} onComplete={onComplete} />;
 }
 
-// IntegrationsIndex coordinates workspace, public catalog, and import views.
+// IntegrationsIndex coordinates the combined Workspace surface and its separate import-progress view.
 export default function IntegrationsIndex() {
   const toast = useToast();
   const rootData = useRouteLoaderData<{ isAuth: boolean }>("root");
@@ -180,9 +253,13 @@ export default function IntegrationsIndex() {
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [integrations, setIntegrations] = useState<Service[]>([]);
-  const [activeWorkspaceServiceIds, setActiveWorkspaceServiceIds] = useState<string[]>([]);
+  const [activeWorkspaceServiceIds, setActiveWorkspaceServiceIds] = useState<string[] | null>(null);
+  const pendingWorkspaceServiceIdsRef = useRef<Set<string>>(new Set());
+  const [pendingWorkspaceServiceIds, setPendingWorkspaceServiceIds] = useState<string[]>([]);
   const [workspaceServicePageData, setWorkspaceServicePageData] = useState<{ data: ActivatedService[]; total: number } | null>(null);
-  const [loading, setLoading] = useState(isAuth && !searchParams.get("q"));
+  const [workspaceLoading, setWorkspaceLoading] = useState(isAuth && !searchParams.get("q"));
+  const [catalogLoading, setCatalogLoading] = useState(!isAuth && !searchParams.get("q"));
+  const [catalogPreference, setCatalogPreference] = useState<boolean | null>(null);
   const [error, setError] = useState("");
   const [query, setQuery] = useState(searchParams.get("q") ?? "");
   const [searching, setSearching] = useState(false);
@@ -215,7 +292,7 @@ export default function IntegrationsIndex() {
     }, { replace: true });
   };
 
-  const setView = (newTab: "workspace" | "catalog" | "pending") => {
+  const setView = (newTab: ServicesView) => {
     setSearchParams(prev => {
       prev.set("tab", newTab);
       return prev;
@@ -249,49 +326,55 @@ export default function IntegrationsIndex() {
     setSearchParams((current) => closeDiscoverySessionQuery(current), { replace: true });
   }
 
-  // loadCatalogData normalizes authenticated and public catalog pages for UI state.
-  const loadCatalogData = useCallback(async () => {
-    setLoading(true);
+  // loadCatalogData normalizes authenticated and public catalogue pages for UI state.
+  const loadCatalogData = useCallback(async (options: CatalogLoadOptions = {}) => {
+    setCatalogLoading(true);
     try {
       const [catalogPage, workspaceServiceIds] = await Promise.all([
-        fetchCatalogPage(),
-        isAuth ? api.workspace.getServiceIds() : Promise.resolve([]),
+        fetchCatalogPage(options.query ?? query.trim()),
+        // Workspace loading already knows membership, so reuse it instead of repeating the Engine query.
+        options.knownWorkspaceServiceIds !== undefined
+          ? Promise.resolve(options.knownWorkspaceServiceIds)
+          : isAuth ? api.workspace.getServiceIds() : Promise.resolve([]),
       ]);
       setIntegrations(catalogPage.data);
       setActiveWorkspaceServiceIds(workspaceServiceIds);
-      // Catalogue mode has no workspace page payload; keeping stale rows would misstate page totals after a tab switch.
-      setWorkspaceServicePageData(null);
-      lastLoadedPageRef.current = { page: catalogPage.page, isAuth, view: "catalog" };
-      if (catalogPage.page !== page) {
-        setPage(catalogPage.page);
-      }
       setTotalPages(Math.ceil(catalogPage.total / catalogPage.limit) || 1);
       setTotalItems(catalogPage.total);
 
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load services");
     } finally {
-      setLoading(false);
+      setCatalogLoading(false);
     }
-  }, [page, isAuth, query]);
+  }, [isAuth, query]);
 
-  // loadWorkspaceData keeps the visible workspace list on its database-backed page contract.
-  const loadWorkspaceData = useCallback(async (p: number = page) => {
-    setLoading(true);
+  // loadWorkspaceData keeps local services first and optionally loads catalogue cards beneath them.
+  const loadWorkspaceData = useCallback(async (p: number = page, searchQuery: string = query) => {
+    setWorkspaceLoading(true);
     try {
-      const wsPageRes = isAuth ? await api.workspace.getServicesPage(10, (p - 1) * 10, query ? [query] : undefined) : null;
+      const [wsPageRes, workspaceServiceIds] = await Promise.all([
+        isAuth ? api.workspace.getServicesPage(10, (p - 1) * 10, searchQuery ? [searchQuery] : undefined) : null,
+        isAuth ? api.workspace.getServiceIds() : Promise.resolve([]),
+      ]);
+      setActiveWorkspaceServiceIds(workspaceServiceIds);
       // The workspace tab renders only the requested page, so it must not issue a second unpaginated membership projection.
       setWorkspaceServicePageData(wsPageRes);
       lastLoadedPageRef.current = { page: p, isAuth, view: "workspace" };
+      // An explicit toggle choice wins; otherwise only a proven-empty workspace loads catalogue discovery by default.
+      if (catalogVisible(isAuth, catalogPreference, workspaceServiceIds)) {
+        await loadCatalogData({ knownWorkspaceServiceIds: workspaceServiceIds, query: searchQuery });
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load services");
     } finally {
-      setLoading(false);
+      setWorkspaceLoading(false);
     }
-  }, [page, isAuth, query]);
+  }, [page, isAuth, query, catalogPreference, loadCatalogData]);
 
   const loadVisibleData = useCallback(async (p: number = page) => {
-    if (view === "catalog" || !isAuth) {
+    // Public browsing has no workspace collection to request first.
+    if (!isAuth) {
       await loadCatalogData();
       return;
     }
@@ -308,7 +391,8 @@ export default function IntegrationsIndex() {
   }, [view, isAuth, page, loadCatalogData, loadWorkspaceData]);
 
   useEffect(() => {
-    if (!isAuth || !query) {
+    // Membership must load even when the initial URL already contains a search query.
+    if (needsVisibleLoad(isAuth, query, activeWorkspaceServiceIds)) {
       if (
         lastLoadedPageRef.current.page !== page ||
         lastLoadedPageRef.current.isAuth !== isAuth ||
@@ -317,7 +401,7 @@ export default function IntegrationsIndex() {
         loadVisibleData(page);
       }
     }
-  }, [page, isAuth, view, loadVisibleData, query]);
+  }, [page, isAuth, view, loadVisibleData, query, activeWorkspaceServiceIds]);
 
   // refreshSessions reads only authoritative version-one snapshots for the pending view.
   const refreshSessions = () => {
@@ -334,24 +418,24 @@ export default function IntegrationsIndex() {
 
 
 
-  // runSearch applies the same Registry visibility semantics used by catalog browse.
+  // runSearch refreshes every collection currently represented by the shared Workspace search field.
   async function runSearch(q: string) {
-    if (!q.trim()) return;
+    const normalized = q.trim();
     setSearchParams(prev => {
       const next = new URLSearchParams(prev);
-      next.set("q", q);
+      // Clearing search removes the query entirely so refreshes return to ordinary browse semantics.
+      if (normalized) next.set("q", normalized);
+      else next.delete("q");
       return next;
     }, { replace: true });
     setSearching(true);
     setError("");
     try {
-      const services = await searchCatalogServices(q);
-      setIntegrations(services);
-      setTotalItems(services.length);
-      setTotalPages(1);
+      // Authenticated Workspace searches preserve local-first ordering and refresh the optional catalogue beneath it.
+      if (isAuth && view === "workspace") await loadWorkspaceData(1, normalized);
+      else await loadCatalogData({ query: normalized });
+      // Search results are one bounded page, so retaining another page number would mislabel their range.
       if (page !== 1) setPage(1);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Search failed");
     } finally {
       setSearching(false);
     }
@@ -363,7 +447,6 @@ export default function IntegrationsIndex() {
       setSearching(false);
       return;
     }
-    setLoading(false); // ensure the services spinner doesn't block search results
     setSearching(true);
     const id = setTimeout(() => runSearch(query), 400);
     return () => clearTimeout(id);
@@ -372,27 +455,12 @@ export default function IntegrationsIndex() {
   async function handleSearch(e?: FormEvent) {
     if (e) e.preventDefault();
     if (!query.trim()) return;
-    if (view === "workspace") {
-      setSearching(true);
-      setPage(1);
-      loadVisibleData(1).finally(() => setSearching(false));
-    } else {
-      runSearch(query);
-    }
+    await runSearch(query);
   }
 
   async function handleClear() {
     setQuery("");
-    setSearchParams(prev => {
-      const next = new URLSearchParams(prev);
-      next.delete("q");
-      return next;
-    }, { replace: true });
-    if (page === 1) {
-      loadVisibleData(1);
-    } else {
-      setPage(1);
-    }
+    await runSearch("");
   }
 
   async function handleStart(e: FormEvent) {
@@ -466,17 +534,25 @@ export default function IntegrationsIndex() {
     setImportPlan(null);
   }
 
-  // Why: Separating the Workspace add/remove logic from Registry delete logic enforces the 
-  // clear boundary between the local Engine state and the global cloud catalog.
+  // handleAddWorkspace owns immediate per-card feedback and prevents duplicate activation writes for one service.
   async function handleAddWorkspace(e: React.MouseEvent, id: string, name: string) {
     e.preventDefault();
+    // The synchronous ref closes the gap before React renders the disabled button.
+    if (pendingWorkspaceServiceIdsRef.current.has(id)) return;
+    pendingWorkspaceServiceIdsRef.current.add(id);
+    setPendingWorkspaceServiceIds(Array.from(pendingWorkspaceServiceIdsRef.current));
     try {
       await api.workspace.addService(id, name, "", "");
+      // Keep discovery visible after the first activation so the successful card remains in context until the next page refresh.
+      if (catalogPreference === null && activeWorkspaceServiceIds?.length === 0) setCatalogPreference(true);
+      // Successful activation updates membership locally without another database-backed page reload.
+      setActiveWorkspaceServiceIds((current) => Array.from(new Set([...(current ?? []), id])));
       toast.success(`${name} added to your workspace.`);
-      // Reload to reflect the newly added service
-      loadVisibleData();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to add service to workspace");
+    } finally {
+      pendingWorkspaceServiceIdsRef.current.delete(id);
+      setPendingWorkspaceServiceIds(Array.from(pendingWorkspaceServiceIdsRef.current));
     }
   }
 
@@ -487,8 +563,10 @@ export default function IntegrationsIndex() {
     if (confirmed) {
       try {
         await api.workspace.removeService(id);
-        setActiveWorkspaceServiceIds(prev => prev.filter(serviceID => serviceID !== id));
+        setActiveWorkspaceServiceIds(prev => prev?.filter(serviceID => serviceID !== id) ?? []);
         toast.success("Service removed from workspace.");
+        // Removing the final service should return to catalogue onboarding rather than retain a stale workspace card.
+        await loadWorkspaceData(1);
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Failed to remove service");
       }
@@ -504,7 +582,7 @@ export default function IntegrationsIndex() {
         await api.integrations.delete(id);
         // Optimistically remove from local state immediately (avoids stale cache showing deleted item)
         setIntegrations(prev => prev.filter(s => s.id !== id));
-        setActiveWorkspaceServiceIds(prev => prev.filter(serviceID => serviceID !== id));
+        setActiveWorkspaceServiceIds(prev => prev?.filter(serviceID => serviceID !== id) ?? []);
         if (query.trim()) {
           // Re-run search to get fresh results from server
           runSearch(query);
@@ -519,6 +597,24 @@ export default function IntegrationsIndex() {
   }
 
   const workspaceList = workspaceListProjection(workspaceServicePageData);
+  const showCatalog = catalogVisible(isAuth, catalogPreference, activeWorkspaceServiceIds);
+  // Onboarding copy is reserved for authenticated workspaces whose membership has been authoritatively loaded as empty.
+  const emptyWorkspace = workspaceIsEmpty(isAuth, activeWorkspaceServiceIds);
+  // Authenticated requests share one error above Workspace; public visitors need it on their only collection.
+  const catalogError = catalogErrorForAuth(isAuth, error);
+
+  // handleCatalogToggle records an explicit choice and fetches catalogue data only when it becomes visible.
+  async function handleCatalogToggle() {
+    const nextPreference = !showCatalog;
+    setCatalogPreference(nextPreference);
+    // Enabling discovery should populate the collection immediately with the current shared search scope.
+    if (nextPreference) {
+      await loadCatalogData({
+        knownWorkspaceServiceIds: activeWorkspaceServiceIds ?? undefined,
+        query: query.trim(),
+      });
+    }
+  }
 
   return (
     <div>
@@ -538,19 +634,28 @@ export default function IntegrationsIndex() {
         </div>
       </div>
 
-      <ServicesTabs isAuth={isAuth} view={view} activeSessions={activeSessions} setView={setView} />
+      <ServicesTabs
+        isAuth={isAuth}
+        view={view}
+        activeSessions={activeSessions}
+        setView={setView}
+      />
       <PendingImports isAuth={isAuth} view={view} props={{ activeSessions, setNewSessionId: openUIDiscoverySession, onRefresh: refreshSessions }} />
       <ServicesContent
         isAuth={isAuth}
         view={view}
+        showCatalog={showCatalog}
+        emptyWorkspace={emptyWorkspace}
+        onToggleCatalog={handleCatalogToggle}
         catalog={{
-          integrations: integrations.map(fromService), loading, error, query, setQuery, handleSearch, handleClear,
-          searching, handleDelete, setShowNewPanel, page, onPageChange: setPage, totalPages, totalItems, isAuth,
+          integrations: integrations.map(fromService), loading: catalogLoading, error: catalogError, query, setQuery, handleSearch, handleClear,
+          searching, handleDelete, setShowNewPanel, page: 1, onPageChange: setPage, totalPages, totalItems, isAuth,
           viewType: "catalog", handleAddWorkspace, handleRemoveWorkspace,
-          activeServiceIds: activeWorkspaceServiceIds,
+          activeServiceIds: activeWorkspaceServiceIds ?? [],
+          pendingServiceIds: pendingWorkspaceServiceIds,
         }}
         workspace={{
-          integrations: workspaceList.integrations, loading, error, query,
+          integrations: workspaceList.integrations, loading: workspaceLoading, error, query,
           setQuery, handleSearch, handleClear, searching, handleDelete, setShowNewPanel, page, onPageChange: setPage,
           totalPages: workspaceList.pages, totalItems: workspaceList.total, isAuth, viewType: "workspace",
           handleAddWorkspace, handleRemoveWorkspace,

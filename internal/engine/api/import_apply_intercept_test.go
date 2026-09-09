@@ -53,6 +53,24 @@ func TestImportWorkspaceActivationFailureOmitsMissingIdentities(t *testing.T) {
 	}
 }
 
+// TestImportWorkspaceActivationRecoveryUsesDirectAdd keeps committed imports recoverable without a temporary config file.
+func TestImportWorkspaceActivationRecoveryUsesDirectAdd(t *testing.T) {
+	serviceID := uuid.MustParse("33333333-3333-4333-8333-333333333333")
+	versionID := uuid.MustParse(testImportServiceVersionID)
+	recovery := importWorkspaceActivationRecovery(autoRegistrationAudit{
+		operationID: uuid.MustParse(testImportOperationID), serviceID: serviceID,
+		serviceVersionID: versionID, serviceSlug: "chargebee", version: "2026-09-01",
+	})
+	want := "fused-cli workspace service add 'chargebee' --service-id '" + serviceID.String() + "' --version '2026-09-01'"
+	if recovery != want {
+		t.Fatalf("direct activation recovery = %q, want %q", recovery, want)
+	}
+	// Recovery must remain file-free so a missing local workspace document cannot block the scoped mutation again.
+	if strings.Contains(recovery, "--apply") || strings.Contains(recovery, "--file") || strings.Contains(recovery, " -f ") {
+		t.Fatalf("direct activation recovery retained config-first flags: %q", recovery)
+	}
+}
+
 // autoRegisterMockStore records activation calls made for an authenticated
 // actor. Embedding store.Store keeps unrelated methods outside this test seam.
 type autoRegisterMockStore struct {

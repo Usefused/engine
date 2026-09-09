@@ -551,8 +551,7 @@ function Badge({ label, color }: { label: string; color: string }) {
 
 // AddToWorkspaceButton — S2.
 // Handles the "Add to Workspace" CTA for authenticated non-owners.
-// Optimistic UI: transitions to "Added ✓" immediately on success so the user
-// gets instant feedback without a loading spinner for what is a fast DB write.
+// The button exposes the bounded activation state and transitions to "Added ✓" only after Engine confirmation.
 // State is component-local because: (a) the workspace service list is not
 // rendered on this page, so no global state needs updating; (b) a page refresh
 // naturally re-derives the true state from the Engine if needed.
@@ -572,7 +571,9 @@ function AddToWorkspaceButton({
   const [error, setError] = useState<string | null>(null);
   const canPinVersion = Boolean(versionTag);
 
+  // handleAdd admits only one version-pinned activation from this detail page at a time.
   const handleAdd = async () => {
+    // Duplicate clicks and services without a concrete version cannot start an ambiguous activation.
     if (added || adding || !versionTag) return;
     setAdding(true);
     setError(null);
@@ -587,6 +588,7 @@ function AddToWorkspaceButton({
     }
   };
 
+  // Confirmed membership replaces the mutation control permanently for this page instance.
   if (added) {
     return (
       <span
@@ -600,17 +602,23 @@ function AddToWorkspaceButton({
   }
 
   return (
-    <button
-      id="add-to-workspace-btn"
-      onClick={handleAdd}
-      disabled={adding || !canPinVersion}
-      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border border-slate-300 text-slate-700 hover:bg-slate-50 hover:border-slate-400 rounded-md transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-      data-track="add_to_workspace"
-      title={`Add ${serviceName} to your workspace`}
-    >
-      {adding ? "Adding…" : "Add to workspace"}
-      {error && <span className="ml-2 text-red-500 text-xs">{error}</span>}
-    </button>
+    <div className="flex flex-col items-end gap-1.5">
+      <button
+        id="add-to-workspace-btn"
+        onClick={handleAdd}
+        disabled={adding || !canPinVersion}
+        aria-busy={adding}
+        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border border-slate-300 text-slate-700 hover:bg-slate-50 hover:border-slate-400 rounded-md transition-colors shadow-sm disabled:opacity-50 disabled:cursor-wait"
+        data-track="add_to_workspace"
+        title={`Add ${serviceName} to your workspace`}
+      >
+        {/* Detail activation uses the same explicit progress language as the catalogue card. */}
+        {adding && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+        {adding ? "Adding…" : "Add to workspace"}
+      </button>
+      {/* Errors remain readable outside the disabled control instead of expanding its click target. */}
+      {error && <span className="max-w-sm text-right text-xs text-red-500">{error}</span>}
+    </div>
   );
 }
 

@@ -7,6 +7,7 @@ import { mutableWorkspaceNotificationID } from "./workspace-notification.ts";
 
 const apiPath = fileURLToPath(import.meta.resolve("./api.ts"));
 const integrationsIndexPath = fileURLToPath(import.meta.resolve("../routes/integrations._index.tsx"));
+const integrationsListPath = fileURLToPath(import.meta.resolve("../components/IntegrationsListTab.tsx"));
 const integrationDetailPath = fileURLToPath(import.meta.resolve("../routes/integrations.$id.tsx"));
 
 // sourceSection isolates one API contract so unrelated fields cannot satisfy assertions.
@@ -26,8 +27,8 @@ test("workspace membership uses exact enabled versions without a false workspace
   assert.doesNotMatch(section, /\bworkspace_id\b/);
 });
 
-// The Services route must not bypass its page contract just to render catalogue activation state.
-test("services route paginates workspace rows and uses membership-only catalogue markers", async () => {
+// The Services route must keep Workspace authoritative while loading optional catalogue markers from lightweight membership.
+test("services route combines paged workspace rows with optional catalogue discovery", async () => {
   const [apiSource, routeSource, detailSource] = await Promise.all([
     readFile(apiPath, "utf8"),
     readFile(integrationsIndexPath, "utf8"),
@@ -44,9 +45,53 @@ test("services route paginates workspace rows and uses membership-only catalogue
   assert.doesNotMatch(catalogueLoader, /getServices\(\)/);
   assert.match(workspaceLoader, /getServicesPage\(10,/);
   assert.doesNotMatch(workspaceLoader, /getServices\(\)/);
+  assert.match(workspaceLoader, /getServiceIds\(\)/);
+  assert.match(workspaceLoader, /catalogVisible\(isAuth, catalogPreference, workspaceServiceIds\)/);
+  assert.match(workspaceLoader, /loadCatalogData\(\{ knownWorkspaceServiceIds: workspaceServiceIds/);
+  assert.doesNotMatch(routeSource, /data-track="view_catalog_tab"/);
+  assert.match(routeSource, /role="switch"/);
+  assert.match(routeSource, /Show catalog/);
   assert.match(detailMembership, /getServiceIds\(\)/);
   assert.doesNotMatch(detailMembership, /getServices\(\)/);
   assert.match(detailMembership, /catch[\s\S]*setWorkspaceServiceActive\(null\)/);
+});
+
+// Workspace activation must settle visibly and cannot turn repeated clicks into concurrent snapshot writes.
+test("service add actions expose bounded single-flight feedback", async () => {
+  const [apiSource, routeSource, listSource, detailSource] = await Promise.all([
+    readFile(apiPath, "utf8"),
+    readFile(integrationsIndexPath, "utf8"),
+    readFile(integrationsListPath, "utf8"),
+    readFile(integrationDetailPath, "utf8"),
+  ]);
+  const apiAdd = sourceSection(apiSource, "addService: (", "removeService:");
+  const routeAdd = sourceSection(routeSource, "async function handleAddWorkspace", "async function handleRemoveWorkspace");
+  const cardAction = sourceSection(listSource, "function IntegrationActions", "function canAddCatalogIntegration");
+  const detailAction = sourceSection(detailSource, "function AddToWorkspaceButton", "// useIntegrationDetailModel");
+
+  assert.match(apiAdd, /reqWithTimeout/);
+  assert.match(apiAdd, /50_000/);
+  assert.match(routeAdd, /pendingWorkspaceServiceIdsRef\.current\.has\(id\)/);
+  assert.match(routeAdd, /setActiveWorkspaceServiceIds/);
+  assert.doesNotMatch(routeAdd, /loadVisibleData/);
+  assert.match(cardAction, /aria-busy=\{pending\}/);
+  assert.match(cardAction, /Loader2[\s\S]*animate-spin/);
+  assert.match(detailAction, /aria-busy=\{adding\}/);
+  assert.match(detailAction, /Loader2[\s\S]*animate-spin/);
+});
+
+// Catalogue rendering must expose useful service context without introducing per-card network reads.
+test("services render as descriptive catalogue cards", async () => {
+  const [routeSource, listSource] = await Promise.all([
+    readFile(integrationsIndexPath, "utf8"),
+    readFile(integrationsListPath, "utf8"),
+  ]);
+
+  assert.match(routeSource, /id name description base_url/);
+  assert.match(listSource, /function IntegrationCard/);
+  assert.match(listSource, /grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3/);
+  assert.match(listSource, /integrationDescription\(service, viewType\)/);
+  assert.match(listSource, /In workspace/);
 });
 
 test("execution history requests every v3 receipt diagnostic", async () => {

@@ -1092,7 +1092,7 @@
       "file": "app/routes/integrations._index.tsx",
       "call": 1,
       "variant": 1,
-      "document": "\n  query($q: String!) {\n    searchServices(q: $q, publicOnly: true) {\n      id name base_url servers { url description }\n      is_public is_owner slug provider { name handle } canonical_ref\n    }\n  }\n"
+      "document": "\n  query($q: String!) {\n    searchServices(q: $q, publicOnly: true) {\n      id name description base_url servers { url description }\n      is_public is_owner slug provider { name handle } canonical_ref\n    }\n  }\n"
     },
     {
       "endpoint": "registry",

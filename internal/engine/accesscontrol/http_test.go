@@ -10,6 +10,7 @@ import (
 
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestRequireAllReturns401WithoutActor(t *testing.T) {
@@ -26,6 +27,28 @@ func TestWriteAuthorizationErrorReturnsStablePolicyDenial(t *testing.T) {
 	response := httptest.NewRecorder()
 	WriteAuthorizationError(response, ErrPolicyDenied)
 	assertDenialResponse(t, response, http.StatusForbidden, "permission_denied", 0)
+}
+
+// TestWriteAuthorizationMutationErrorExplainsDatabaseOutage keeps reviewed PostgreSQL failures out of the generic policy error.
+func TestWriteAuthorizationMutationErrorExplainsDatabaseOutage(t *testing.T) {
+	for _, sqlState := range []string{"25006", "57P01", "57P02", "57P03"} {
+		t.Run(sqlState, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			WriteAuthorizationMutationError(response, &pgconn.PgError{Code: sqlState, Message: "sensitive database detail"}, "authorization", "", "not_committed")
+
+			var body denialResponse
+			// The reviewed dependency contract must preserve retry and commit safety without leaking raw server prose.
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if response.Code != http.StatusServiceUnavailable || body.Error.Code != "authorization_database_unavailable" || body.Error.Category != "dependency" || !body.Error.Retryable || body.Error.Phase != "authorization" || body.Error.CommitState != "not_committed" || body.Error.Details == nil || body.Error.Details.SQLState != sqlState || body.Error.Remediation == "" {
+				t.Fatalf("response = %d %#v", response.Code, body.Error)
+			}
+			if strings.Contains(response.Body.String(), "sensitive database detail") {
+				t.Fatalf("response leaked raw PostgreSQL detail: %s", response.Body.String())
+			}
+		})
+	}
 }
 
 // TestWriteAuthorizationErrorIncludesRequestCorrelation proves middleware identity is mirrored in the envelope and header.

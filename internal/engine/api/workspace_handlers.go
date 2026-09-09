@@ -8,20 +8,26 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 )
 
-const appTokensRoute = "/app-tokens"
+const (
+	appTokensRoute                    = "/app-tokens"
+	workspaceServiceActivationTimeout = 45 * time.Second
+)
 
 // ServiceVerifier is the Registry-lookup capability workspace membership
 // writes need: confirm a service ID is real and resolve version tags to exact
@@ -134,8 +140,17 @@ func parseAddServiceRequest(r *http.Request) (addServiceRequest, uuid.UUID, erro
 // not just the write, so a blocked "add nonexistent/unauthorized service"
 // attempt shows up in the audit trail rather than only successful writes.
 func addServiceHandler(s store.Store, verifier ServiceVerifier) http.HandlerFunc {
+	return addServiceHandlerWithTimeout(s, verifier, workspaceServiceActivationTimeout)
+}
+
+// addServiceHandlerWithTimeout owns duplicate suppression and an injectable end-to-end activation budget.
+func addServiceHandlerWithTimeout(s store.Store, verifier ServiceVerifier, timeout time.Duration) http.HandlerFunc {
+	var activations singleflight.Group
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.workspace.add_service")
+		// The activation budget ends blocked Registry or PostgreSQL work before the HTTP server's write deadline.
+		ctx, cancel := context.WithTimeout(r.Context(), timeout)
+		defer cancel()
+		ctx, span := otel.Tracer("engine").Start(ctx, "engine.workspace.add_service")
 		defer span.End()
 		span.SetAttributes(attribute.String("user_action", "workspace.add_service"), attribute.String("outcome", "failed"))
 
@@ -172,15 +187,18 @@ func addServiceHandler(s store.Store, verifier ServiceVerifier) http.HandlerFunc
 			return
 		}
 
-		// Registry verification and the local write share this one mutation span.
-		if err := verifyAndActivateService(ctx, s, verifier, addServiceCall{
-			accountID: accountID,
-			serviceID: svcID,
-			apiKey:    apiKey,
-			version:   strings.TrimSpace(req.VersionTag),
-			versionID: parseOptionalUUID(req.ServiceVersionID),
-		}); err != nil {
-			writeAddServiceError(w, ctx, err)
+		call := addServiceCall{
+			accountID: accountID, serviceID: svcID, apiKey: apiKey,
+			version: strings.TrimSpace(req.VersionTag), versionID: parseOptionalUUID(req.ServiceVersionID),
+		}
+		// Identical button retries share one contract snapshot transaction instead of contending on the same PostgreSQL rows.
+		_, activationErr, shared := activations.Do(workspaceServiceActivationKey(call), func() (interface{}, error) {
+			return nil, verifyAndActivateService(ctx, s, verifier, call)
+		})
+		span.SetAttributes(attribute.Bool("activation.shared", shared))
+		// Every waiter receives the same authoritative activation result.
+		if activationErr != nil {
+			writeAddServiceError(w, ctx, activationErr)
 			return
 		}
 
@@ -188,6 +206,11 @@ func addServiceHandler(s store.Store, verifier ServiceVerifier) http.HandlerFunc
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	}
+}
+
+// workspaceServiceActivationKey scopes duplicate suppression to one tenant and requested immutable version.
+func workspaceServiceActivationKey(call addServiceCall) string {
+	return strings.Join([]string{call.accountID.String(), call.serviceID.String(), call.version, call.versionID.String()}, ":")
 }
 
 // addServiceCall bundles verifyAndActivateService's inputs -- a plain struct
@@ -200,6 +223,28 @@ type addServiceCall struct {
 	apiKey    string
 	version   string
 	versionID uuid.UUID
+}
+
+// workspaceServicePersistenceError retains the failed local phase without exposing raw database prose.
+type workspaceServicePersistenceError struct {
+	cause       error
+	phase       string
+	commitState string
+}
+
+// workspaceServiceVersionStateReader exposes the exact local idempotency check implemented by production storage.
+type workspaceServiceVersionStateReader interface {
+	IsWorkspaceServiceVersionActive(context.Context, uuid.UUID, uuid.UUID) (bool, error)
+}
+
+// Error preserves the underlying cause for Engine logs while public responses remain separately sanitized.
+func (e *workspaceServicePersistenceError) Error() string {
+	return "workspace service persistence failed during " + e.phase + ": " + e.cause.Error()
+}
+
+// Unwrap exposes only the typed cause to internal classifiers and logs.
+func (e *workspaceServicePersistenceError) Unwrap() error {
+	return e.cause
 }
 
 // verifyAndActivateService confirms the service is real via the Registry.
@@ -239,19 +284,37 @@ func verifyAndActivateService(ctx context.Context, s store.Store, verifier Servi
 		return err
 	}
 	span.SetAttributes(attribute.String("version_tag", version), attribute.String("service_version_id", serviceVersionID.String()))
+	stateReader, supportsStateRead := s.(workspaceServiceVersionStateReader)
+	// Production storage avoids an expensive rewrite, while focused transitional stores may omit this optional read capability.
+	if supportsStateRead {
+		active, err := stateReader.IsWorkspaceServiceVersionActive(ctx, call.serviceID, serviceVersionID)
+		// A failed idempotency read cannot authorize skipping snapshot materialization.
+		if err != nil {
+			return &workspaceServicePersistenceError{
+				cause: fmt.Errorf("check workspace service version activation: %w", err),
+				phase: "activation_state_check", commitState: "not_committed",
+			}
+		}
+		// An already-active immutable version has a previously admitted local snapshot and needs no rewrite.
+		if active {
+			span.SetAttributes(attribute.String("outcome", "already_active"))
+			span.SetStatus(codes.Ok, "")
+			return nil
+		}
+	}
 
 	fetcher, _ := verifier.(RuntimeContractFetcher)
 	// Snapshot failure prevents activation rather than admitting an unfenced runtime contract.
 	if err := materializeRuntimeContractSnapshot(ctx, s, fetcher, call.accountID, call.serviceID, serviceVersionID, version, call.apiKey); err != nil {
 		recordWorkspaceServiceMutationFailure(span, "contract_snapshot_failed", "contract_snapshot_failed")
-		return err
+		return &workspaceServicePersistenceError{cause: err, phase: "contract_snapshot_persistence", commitState: "not_committed"}
 	}
 
 	// The final local write is the only point at which activation can commit.
 	if err := s.AddWorkspaceServiceVersion(ctx, call.serviceID, verifiedSlug, version, serviceVersionID, verifiedName, call.accountID); err != nil {
 		recordWorkspaceServiceMutationFailure(span, "failed", "workspace_service_add_failed")
 		slog.ErrorContext(ctx, "verifyAndActivateService: AddWorkspaceServiceVersion failed", slog.Any("error", err))
-		return fmt.Errorf("failed to add service to workspace: %w", err)
+		return &workspaceServicePersistenceError{cause: err, phase: "workspace_membership_commit", commitState: "unknown"}
 	}
 
 	span.SetAttributes(attribute.String("outcome", "success"))
@@ -329,7 +392,15 @@ func fetchServiceVersionRevision(
 // response. Split out from addServiceHandler to keep that function's
 // branching to the request lifecycle, not error-to-status translation.
 func writeAddServiceError(w http.ResponseWriter, ctx context.Context, err error) {
+	databaseError, databaseUnavailable := workspaceServiceDatabaseUnavailableError(err)
+	timeoutError, timedOut := workspaceServiceTimeoutError(err)
 	switch {
+	case timedOut:
+		// Phase evidence determines whether an automatic retry is safe after the bounded cancellation.
+		writeWorkspaceConfigError(w, timeoutError, ctx)
+	case databaseUnavailable:
+		// PostgreSQL non-writability is retryable only when activation is proven uncommitted.
+		writeWorkspaceConfigError(w, databaseError, ctx)
 	case errors.Is(err, sandbox.ErrServiceNotFound):
 		// Registry not-found is authoritative and proves no local activation began.
 		writeWorkspaceConfigError(w, workspaceConfigHTTPError{
@@ -356,6 +427,50 @@ func writeAddServiceError(w http.ResponseWriter, ctx context.Context, err error)
 			remediation: "Inspect the workspace service state before retrying.", phase: "workspace_mutation", commitState: "unknown",
 		}, ctx)
 	}
+}
+
+// workspaceServiceTimeoutError preserves the furthest known mutation phase when the activation budget expires.
+func workspaceServiceTimeoutError(err error) (workspaceConfigHTTPError, bool) {
+	// Unrelated failures must continue through their more specific public classification.
+	if !errors.Is(err, context.DeadlineExceeded) {
+		return workspaceConfigHTTPError{}, false
+	}
+	phase, commitState := "workspace_mutation", "unknown"
+	var persistenceError *workspaceServicePersistenceError
+	// Persistence wrappers know whether membership commit had begun when cancellation won.
+	if errors.As(err, &persistenceError) {
+		phase, commitState = persistenceError.phase, persistenceError.commitState
+	} else if errors.Is(err, errRegistryVerificationFailed) {
+		// Registry verification precedes every local snapshot and membership write.
+		phase, commitState = "service_verification", "not_committed"
+	}
+	return workspaceConfigHTTPError{
+		status: http.StatusGatewayTimeout, code: "workspace_service_add_timeout",
+		message: "Adding the service exceeded the Engine activation deadline.", category: "dependency", retryable: true,
+		remediation: "Check whether the service is now active before retrying.", phase: phase, commitState: commitState,
+	}, true
+}
+
+// workspaceServiceDatabaseUnavailableError maps PostgreSQL non-writable SQLSTATEs to a safe actionable dependency receipt.
+func workspaceServiceDatabaseUnavailableError(err error) (workspaceConfigHTTPError, bool) {
+	var postgresError *pgconn.PgError
+	// Explicit read-only and shutdown/restart states prove that workspace persistence is temporarily unavailable.
+	if !errors.As(err, &postgresError) || (postgresError.Code != "25006" && postgresError.Code != "57P01" && postgresError.Code != "57P02" && postgresError.Code != "57P03") {
+		return workspaceConfigHTTPError{}, false
+	}
+	phase, commitState := "workspace_mutation", "unknown"
+	var persistenceError *workspaceServicePersistenceError
+	// Persistence phase evidence distinguishes a safe pre-membership retry from an ambiguous commit response.
+	if errors.As(err, &persistenceError) {
+		phase, commitState = persistenceError.phase, persistenceError.commitState
+	}
+	return workspaceConfigHTTPError{
+		status: http.StatusServiceUnavailable, code: "workspace_database_unavailable",
+		message: "The Engine database was not writable for workspace activation.", category: "dependency", retryable: true,
+		details:     map[string]any{"sqlstate": postgresError.Code, "server_detail": "PostgreSQL is read-only, shutting down, restarting, or not ready to accept this activation."},
+		remediation: "Wait for the Engine database to become healthy, then check whether the service is active before retrying.",
+		phase:       phase, commitState: commitState,
+	}, true
 }
 
 // errRegistryVerificationFailed is never returned directly -- it exists so
