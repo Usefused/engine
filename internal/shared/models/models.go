@@ -869,18 +869,19 @@ type AuthConfig struct {
 	Deprecated        *bool                         `json:"deprecated,omitempty"`
 	// Fused Auth: OAuth edge-case fields stored per AuthConfig (not per service, since a
 	// service can have multiple auth configs and these settings are per-config).
-	PKCERequired            bool                    `json:"pkce_required,omitempty"`
-	ScopesDelimiter         string                  `json:"scopes_delimiter,omitempty"` // default "space"; set to "comma" when the provider requires it
-	TokenEndpointAuthMethod TokenEndpointAuthMethod `json:"token_endpoint_auth_method,omitempty"`
-	TokenRequestMediaType   TokenRequestMediaType   `json:"token_request_media_type,omitempty"`
-	ExtraAuthParams         map[string]string       `json:"extra_auth_params,omitempty"`
-	ExtraTokenParams        map[string]string       `json:"extra_token_params,omitempty"`
-	RefreshTokenRotates     bool                    `json:"refresh_token_rotates,omitempty"`
-	RefreshTokenRequired    bool                    `json:"refresh_token_required,omitempty"`
-	OAuth2Flows             OAuth2Flows             `json:"oauth2_flows,omitempty"`
-	SelectedOAuth2Flow      *OAuth2FlowContract     `json:"-"`
-	Strategy                *AuthRuntimeStrategy    `json:"strategy,omitempty"`
-	PolicyProvenance        map[string]string       `json:"policy_provenance,omitempty"`
+	PKCERequired            bool                             `json:"pkce_required,omitempty"`
+	ScopesDelimiter         string                           `json:"scopes_delimiter,omitempty"` // default "space"; set to "comma" when the provider requires it
+	TokenEndpointAuthMethod TokenEndpointAuthMethod          `json:"token_endpoint_auth_method,omitempty"`
+	OAuthTokenPlacement     *authrouting.OAuthTokenPlacement `json:"oauth_token_placement,omitempty"`
+	TokenRequestMediaType   TokenRequestMediaType            `json:"token_request_media_type,omitempty"`
+	ExtraAuthParams         map[string]string                `json:"extra_auth_params,omitempty"`
+	ExtraTokenParams        map[string]string                `json:"extra_token_params,omitempty"`
+	RefreshTokenRotates     bool                             `json:"refresh_token_rotates,omitempty"`
+	RefreshTokenRequired    bool                             `json:"refresh_token_required,omitempty"`
+	OAuth2Flows             OAuth2Flows                      `json:"oauth2_flows,omitempty"`
+	SelectedOAuth2Flow      *OAuth2FlowContract              `json:"-"`
+	Strategy                *AuthRuntimeStrategy             `json:"strategy,omitempty"`
+	PolicyProvenance        map[string]string                `json:"policy_provenance,omitempty"`
 }
 
 type OAuth2Flows map[string]OAuth2FlowContract

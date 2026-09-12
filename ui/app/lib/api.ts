@@ -704,6 +704,7 @@ export interface AuthConfig {
   pkce_required?: boolean;
   scopes_delimiter?: string;
   token_endpoint_auth_method?: 'client_secret_basic' | 'client_secret_post';
+  oauth_token_placement?: { location: 'header'; name: string; format: 'raw' | 'bearer' };
   token_request_media_type?: string;
   extra_auth_params?: Record<string, string>;
   extra_token_params?: Record<string, string>;

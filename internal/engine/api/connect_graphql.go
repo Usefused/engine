@@ -1661,7 +1661,7 @@ func rediscoverConnectionResources(ctx context.Context, s store.Store, verifier 
 	if err != nil {
 		return nil, errors.New("connected token is unavailable")
 	}
-	discovered, err := connectresource.Discover(ctx, metadata, endpoint, token, connection.TokenType)
+	discovered, err := connectresource.Discover(ctx, metadata, endpoint, token, connection.TokenType, auth.Name)
 	if err != nil {
 		return nil, err
 	}

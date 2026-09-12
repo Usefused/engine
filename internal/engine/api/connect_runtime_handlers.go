@@ -1054,7 +1054,7 @@ func prepareDiscoveredCallbackResources(ctx context.Context, verifier ServiceVer
 	if err != nil {
 		return plan, errors.New("resource discovery operation is unavailable")
 	}
-	resources, err := connectresource.Discover(ctx, metadata, endpoint, token.AccessToken, token.TokenType)
+	resources, err := connectresource.Discover(ctx, metadata, endpoint, token.AccessToken, token.TokenType, session.AuthName)
 	if err != nil {
 		return plan, err
 	}

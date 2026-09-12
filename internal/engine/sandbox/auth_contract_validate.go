@@ -16,6 +16,10 @@ var supportedOAuth2Flows = map[string]struct{}{
 // validateAuthRuntimeContract accepts only strategies the Engine can execute;
 // preserving unknown auth metadata must not imply executable support.
 func validateAuthRuntimeContract(auth fusedobject.AuthConfig) error {
+	// Refuse malformed placement even when a stored contract claims a supported capability.
+	if err := auth.OAuthTokenPlacement.Validate(auth.Type); err != nil {
+		return err
+	}
 	if auth.OAuth2MetadataURL != "" && !validOAuthMetadataEndpoint(auth.OAuth2MetadataURL) {
 		return errors.New("runtime OAuth2 metadata URL is invalid")
 	}

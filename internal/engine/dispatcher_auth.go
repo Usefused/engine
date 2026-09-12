@@ -223,13 +223,22 @@ func applySelectedAuth(req *http.Request, auths models.AuthConfigs, credentials 
 	_ = applySelectedAuthChecked(req, auths, credentials)
 }
 
+// applySelectedAuthChecked dispatches only validated schemes and propagates credential placement failures.
 func applySelectedAuthChecked(req *http.Request, auths models.AuthConfigs, credentials map[string]any) error {
+	// Validate the complete AND-set before one scheme can overwrite another scheme's credential.
+	if err := validateOAuthPlacementHeaders(auths); err != nil {
+		return err
+	}
 	for _, auth := range auths {
+		// Canonical scheme families select their existing credential injection strategy.
 		switch authrouting.CanonicalType(auth.Type, auth.Scheme) {
 		case "basic", "bearer":
 			applyHTTPAuth(req, auth, credentials)
 		case "oauth", "oidc":
-			applyOAuth(req, auth, credentials)
+			// A bad OAuth header cannot fall back to default auth or proceed unauthenticated.
+			if err := applyOAuth(req, auth, credentials); err != nil {
+				return err
+			}
 		case "api_key":
 			applyAPIKey(req, auth, credentials)
 		case "oauth1":

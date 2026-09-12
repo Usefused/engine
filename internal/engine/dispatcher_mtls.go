@@ -14,13 +14,19 @@ import (
 var errMTLSRedirectBlocked = errors.New("mTLS cross-host redirect blocked")
 
 // providerClientForAuth returns the shared provider client unless the selected
-// auth config needs mTLS; client certificates must never mutate shared transport.
+// auth config needs mTLS or custom OAuth delivery; credentials never mutate shared transport.
 func (d *Dispatcher) providerClientForAuth(auths models.AuthConfigs, credentials map[string]any) (*http.Client, error) {
 	mtlsAuths := mutualTLSAuths(auths)
+	// Reuse ordinary transport while scoping redirect policy for nonstandard credential headers.
 	if len(mtlsAuths) == 0 {
-		return d.client, nil
+		return oauthPlacementClient(d.client, auths), nil
 	}
-	return newProviderMTLSClient(mtlsAuths, credentials)
+	client, err := newProviderMTLSClient(mtlsAuths, credentials)
+	// Certificate errors must stop before constructing a credential-bearing request.
+	if err != nil {
+		return nil, err
+	}
+	return oauthPlacementClient(client, auths), nil
 }
 
 func mutualTLSAuths(auths models.AuthConfigs) models.AuthConfigs {

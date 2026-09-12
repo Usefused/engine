@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 )
@@ -44,7 +45,7 @@ type Resource struct {
 
 // Discover executes the configured provider operation with the fresh access
 // token and turns its bounded response into validated routing records.
-func Discover(ctx context.Context, metadata *fusedobject.ServiceMetadata, endpoint *fusedobject.Endpoint, token, tokenType string) ([]Resource, error) {
+func Discover(ctx context.Context, metadata *fusedobject.ServiceMetadata, endpoint *fusedobject.Endpoint, token, tokenType string, authNames ...string) ([]Resource, error) {
 	config := metadata.ConnectConfig.ResourceDiscovery
 	// Importers already reject mutating discovery operations; this runtime
 	// check protects Engines consuming older or manually-authored metadata.
@@ -63,7 +64,15 @@ func Discover(ctx context.Context, metadata *fusedobject.ServiceMetadata, endpoi
 	for key, value := range metadata.DefaultHeaders {
 		req.Header.Set(key, value)
 	}
-	req.Header.Set("Authorization", defaultTokenType(tokenType)+" "+token)
+	// Use the consented scheme rather than choosing the first OAuth configuration.
+	placement, err := discoveryTokenPlacement(metadata, authNames)
+	if err != nil {
+		return nil, err
+	}
+	// Fresh and refreshed grants use the same imported token delivery as provider operations.
+	if err := placement.Apply(req, token, defaultTokenType(tokenType)); err != nil {
+		return nil, err
+	}
 	resp, err := discoveryHTTPClient(req.URL).Do(req)
 	if err != nil {
 		return nil, errors.New("resource discovery request failed")
@@ -620,4 +629,26 @@ func hostAllowed(host string, allowed []string) bool {
 // tenant input cannot route to arbitrary private network names.
 func isLocalHost(host string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+// discoveryTokenPlacement selects the exact consented scheme, preserving legacy unnamed discovery without guessing a custom header.
+func discoveryTokenPlacement(metadata *fusedobject.ServiceMetadata, names []string) (*authrouting.OAuthTokenPlacement, error) {
+	name := ""
+	// Production consent and rediscovery carry one exact scheme name.
+	if len(names) > 0 {
+		name = names[0]
+	}
+	for _, auth := range metadata.AuthConfigs {
+		// Only the consented auth scheme may direct this connection's token.
+		if name != "" && auth.Name == name {
+			return auth.OAuthTokenPlacement, auth.OAuthTokenPlacement.Validate(auth.Type)
+		}
+	}
+	for _, auth := range metadata.AuthConfigs {
+		// A custom rule with unresolved identity cannot fall back to Bearer authentication.
+		if auth.OAuthTokenPlacement != nil {
+			return nil, errors.New("resource discovery token placement requires an exact auth scheme")
+		}
+	}
+	return nil, nil
 }

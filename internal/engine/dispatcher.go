@@ -1463,11 +1463,14 @@ func applyHTTPAuth(req *http.Request, auth models.AuthConfig, credentials map[st
 	}
 }
 
-func applyOAuth(req *http.Request, auth models.AuthConfig, credentials map[string]any) {
-	credValue, _ := credentials[auth.Name].(string)
-	if credValue != "" {
-		req.Header.Set("Authorization", "Bearer "+credValue)
+// applyOAuth resolves only the live connection token; its destination comes from the immutable provider contract.
+func applyOAuth(req *http.Request, auth models.AuthConfig, credentials map[string]any) error {
+	// Invalid contracts must fail before a token can be sent to a guessed destination.
+	if err := auth.OAuthTokenPlacement.Validate(auth.Type); err != nil {
+		return err
 	}
+	credValue, _ := credentials[auth.Name].(string)
+	return auth.OAuthTokenPlacement.Apply(req, credValue, "Bearer")
 }
 
 func applyAPIKey(req *http.Request, auth models.AuthConfig, credentials map[string]any) {

@@ -308,26 +308,27 @@ type ResponseContract struct {
 type Responses map[string]ResponseContract
 
 type AuthConfig struct {
-	Name                    string                        `json:"name,omitempty"`
-	Type                    string                        `json:"type"`
-	Scheme                  string                        `json:"scheme,omitempty"`
-	BasicPasswordMode       authrouting.BasicPasswordMode `json:"basic_password_mode,omitempty"`
-	Location                string                        `json:"location,omitempty"`
-	KeyName                 string                        `json:"key_name,omitempty"`
-	OpenIdConnectUrl        string                        `json:"open_id_connect_url,omitempty"`
-	OAuth2MetadataURL       string                        `json:"oauth2_metadata_url,omitempty"`
-	Deprecated              *bool                         `json:"deprecated,omitempty"`
-	PKCERequired            bool                          `json:"pkce_required,omitempty"`
-	ScopesDelimiter         string                        `json:"scopes_delimiter,omitempty"`
-	TokenEndpointAuthMethod TokenEndpointAuthMethod       `json:"token_endpoint_auth_method,omitempty"`
-	TokenRequestMediaType   TokenRequestMediaType         `json:"token_request_media_type,omitempty"`
-	ExtraAuthParams         map[string]string             `json:"extra_auth_params,omitempty"`
-	ExtraTokenParams        map[string]string             `json:"extra_token_params,omitempty"`
-	RefreshTokenRotates     bool                          `json:"refresh_token_rotates,omitempty"`
-	RefreshTokenRequired    bool                          `json:"refresh_token_required,omitempty"`
-	OAuth2Flows             OAuth2Flows                   `json:"oauth2_flows,omitempty"`
-	Strategy                *AuthRuntimeStrategy          `json:"strategy,omitempty"`
-	PolicyProvenance        map[string]string             `json:"policy_provenance,omitempty"`
+	Name                    string                           `json:"name,omitempty"`
+	Type                    string                           `json:"type"`
+	Scheme                  string                           `json:"scheme,omitempty"`
+	BasicPasswordMode       authrouting.BasicPasswordMode    `json:"basic_password_mode,omitempty"`
+	Location                string                           `json:"location,omitempty"`
+	KeyName                 string                           `json:"key_name,omitempty"`
+	OpenIdConnectUrl        string                           `json:"open_id_connect_url,omitempty"`
+	OAuth2MetadataURL       string                           `json:"oauth2_metadata_url,omitempty"`
+	Deprecated              *bool                            `json:"deprecated,omitempty"`
+	PKCERequired            bool                             `json:"pkce_required,omitempty"`
+	ScopesDelimiter         string                           `json:"scopes_delimiter,omitempty"`
+	TokenEndpointAuthMethod TokenEndpointAuthMethod          `json:"token_endpoint_auth_method,omitempty"`
+	OAuthTokenPlacement     *authrouting.OAuthTokenPlacement `json:"oauth_token_placement,omitempty"`
+	TokenRequestMediaType   TokenRequestMediaType            `json:"token_request_media_type,omitempty"`
+	ExtraAuthParams         map[string]string                `json:"extra_auth_params,omitempty"`
+	ExtraTokenParams        map[string]string                `json:"extra_token_params,omitempty"`
+	RefreshTokenRotates     bool                             `json:"refresh_token_rotates,omitempty"`
+	RefreshTokenRequired    bool                             `json:"refresh_token_required,omitempty"`
+	OAuth2Flows             OAuth2Flows                      `json:"oauth2_flows,omitempty"`
+	Strategy                *AuthRuntimeStrategy             `json:"strategy,omitempty"`
+	PolicyProvenance        map[string]string                `json:"policy_provenance,omitempty"`
 }
 
 type OAuth2Flows map[string]OAuth2FlowContract

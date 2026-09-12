@@ -485,6 +485,7 @@ func mapAuthConfigs(in fusedobject.AuthConfigs) models.AuthConfigs {
 			Location:                a.Location,
 			KeyName:                 a.KeyName,
 			TokenEndpointAuthMethod: models.TokenEndpointAuthMethod(a.TokenEndpointAuthMethod),
+			OAuthTokenPlacement:     a.OAuthTokenPlacement,
 			TokenRequestMediaType:   models.TokenRequestMediaType(a.TokenRequestMediaType),
 			OpenIdConnectUrl:        a.OpenIdConnectUrl,
 			OAuth2MetadataURL:       a.OAuth2MetadataURL, Deprecated: a.Deprecated,

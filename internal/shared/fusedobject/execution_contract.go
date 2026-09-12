@@ -23,6 +23,7 @@ const (
 	ExecutionCapabilityHTTPResponseContractsV1       = "http.response.contracts.v1"
 	ExecutionCapabilityOAuth2MultiFlowV1             = "auth.oauth2.multiflow.v1"
 	ExecutionCapabilityOAuth2RefreshTokenRequiredV1  = "auth.oauth2.refresh_token_required.v1"
+	ExecutionCapabilityOAuth2TokenPlacementV1        = "auth.oauth2.token_placement.v1"
 	ExecutionCapabilityOAuth2TokenRequestMediaV1     = "auth.oauth2.token_request_media.v1"
 	ExecutionCapabilityOAuth1SignatureV1             = "auth.oauth1.signature.v1"
 	ExecutionCapabilityHTTPDigestV1                  = "auth.http.digest.v1"
@@ -41,6 +42,7 @@ var supportedExecutionCapabilityOrder = []string{
 	ExecutionCapabilityOAuth1SignatureV1,
 	ExecutionCapabilityOAuth2MultiFlowV1,
 	ExecutionCapabilityOAuth2RefreshTokenRequiredV1,
+	ExecutionCapabilityOAuth2TokenPlacementV1,
 	ExecutionCapabilityOAuth2TokenRequestMediaV1,
 	ExecutionCapabilitySecurityServerSelectionV1,
 	ExecutionCapabilityConnectionResourceDiscoveryV1,
