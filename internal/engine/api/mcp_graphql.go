@@ -412,8 +412,8 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"currentActorAccess":      currentActorAccessGraphQLField(),
 			"app":                     appGraphQLField(s, packageDownloads),
 			"apps":                    appsGraphQLField(s, packageDownloads),
-			// Application grouping is separate from the immutable-version catalogue used by UI details.
-			"appFamilies":                 appFamiliesGraphQLField(s),
+			// Application grouping includes latest presentation metadata while detail reads stay exact-version scoped.
+			"appFamilies":                 appFamiliesGraphQLField(s, packageDownloads),
 			"appVersions":                 appVersionsGraphQLField(s, packageDownloads),
 			"appServices":                 appServicesGraphQLField(s),
 			"mcpAppOperations":            mcpAppOperationsGraphQLField(s),

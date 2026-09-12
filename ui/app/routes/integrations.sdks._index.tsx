@@ -15,11 +15,12 @@ import { AppRuntimeStatus } from "~/components/apps/AppRuntimeStatus";
 import { formatAppDownloadCount } from "~/lib/app-downloads";
 
 interface SdkListItem {
-  app_id: string;
+  app_id: string | null;
   app_family_id: string;
   name: string;
   description?: string;
-  version: string;
+  version: string | null;
+  version_count: number;
   target_type: string;
   target_language?: string;
   sandbox_url?: string;
@@ -29,43 +30,40 @@ interface SdkListItem {
   created_at?: string;
   killed_at?: string;
   downloads?: string | null;
-  status: string;
+  status: string | null;
 }
 
 type SdkPage = { items: SdkListItem[]; total: number };
 
 const SDK_PAGE_SIZE = 20;
 
-/** Splits an optional version suffix without changing scoped package names. */
-function sdkSearchParts(query: string): { search: string; version: string } {
-  const trimmed = query.trim();
-  const atIndex = trimmed.lastIndexOf("@");
-  if (atIndex <= 0) return { search: trimmed, version: "" };
-  return {
-    search: trimmed.substring(0, atIndex),
-    version: trimmed.substring(atIndex + 1),
-  };
-}
-
-/** Reads one exact server-backed page instead of truncating the catalogue. */
+/** Reads one Engine-grouped application page, matching the CLI catalogue contract. */
 function readSdkPage(query: string, page: number): Promise<SdkPage> {
-  const { search, version } = sdkSearchParts(query);
   const document = `
-    query SDKApps($search: String!, $version: String!, $limit: Int!, $offset: Int!) {
-      apps(kind: "sdk", search: $search, version: $version, limit: $limit, offset: $offset) {
-        items { app_id app_family_id name description version target_language created_at status downloads }
+    query SDKApplications($search: String!, $limit: Int!, $offset: Int!) {
+      appFamilies(kind: "sdk", search: $search, limit: $limit, offset: $offset) {
+        items {
+          app_family_id
+          app_id: latest_version_id
+          name
+          version: latest_version
+          version_count
+          target_language
+          created_at: latest_created_at
+          status: latest_status
+          downloads
+        }
         total
       }
     }
   `;
   return api
-    .mcpGraphql<{ apps: SdkPage }>(document, {
-      search,
-      version,
+    .mcpGraphql<{ appFamilies: SdkPage }>(document, {
+      search: query.trim(),
       limit: SDK_PAGE_SIZE,
       offset: page * SDK_PAGE_SIZE,
     })
-    .then(({ apps }) => apps);
+    .then(({ appFamilies }) => appFamilies);
 }
 
 /** Renders the compact language mark used in catalogue rows. */
@@ -97,7 +95,7 @@ interface SdkRowProps {
   setSelectedIds: React.Dispatch<React.SetStateAction<string[]>>;
   onNavigate: (id: string) => void;
   onDownload: (id: string, name: string, version: string) => void;
-  onDeactivate: (id: string, name: string) => void;
+  onDeactivate: (id: string, name: string, version: string) => void;
 }
 
 /** Renders app identity and runtime state without duplicating row actions. */
@@ -115,18 +113,21 @@ function SdkNameCell({ sdk }: { sdk: SdkListItem }) {
           <LanguageBadge targetLanguage={sdk.target_language} />
         )}
       </div>
-      <AppRuntimeStatus className="mt-0.5" status={sdk.status} />
+      {/* Retained families without a live version remain visible but have no runtime status. */}
+      {sdk.status ? <AppRuntimeStatus className="mt-0.5" status={sdk.status} /> : <span className="mt-0.5 block text-xs text-slate-400">No active versions</span>}
     </div>
   );
 }
 
-/** Renders version and lifecycle badges for one immutable app. */
+/** Renders the latest version and family version count for one application. */
 function SdkVersionBadges({ sdk }: { sdk: SdkListItem }) {
   return (
     <div className="flex flex-wrap items-center gap-2">
+      {/* Latest is catalogue metadata only; detail navigation remains pinned to its exact version ID. */}
       <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-700 border border-slate-200">
-        {sdk.version}
+        {sdk.version ?? "—"}
       </span>
+      <span className="text-xs text-slate-400">{sdk.version_count} {sdk.version_count === 1 ? "version" : "versions"}</span>
       {sdk.killed_at && (
         <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-500 border border-slate-200">
           Killed
@@ -149,18 +150,20 @@ function SdkVersionBadges({ sdk }: { sdk: SdkListItem }) {
 interface SdkActionButtonsProps {
   sdk: SdkListItem;
   onDownload: (id: string, name: string, version: string) => void;
-  onDeactivate: (id: string, name: string) => void;
+  onDeactivate: (id: string, name: string, version: string) => void;
 }
 
-/** Renders download and irreversible deactivation actions for one row. */
+/** Renders exact-version actions for the latest version represented by a family row. */
 function SdkActionButtons({ sdk, onDownload, onDeactivate }: SdkActionButtonsProps) {
+  // A retained family without an immutable version cannot expose version-scoped actions.
+  if (!sdk.app_id || !sdk.version) return null;
   return (
     <div className="flex justify-end gap-1 sm:gap-2">
       {sdk.is_downloadable ? (
         <button
           onClick={(e) => { e.stopPropagation(); onDownload(sdk.app_id, sdk.name, sdk.version); }}
           className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors cursor-pointer"
-          title="Download SDK"
+          title="Download latest SDK version"
         >
           <Download className="w-4 h-4" />
         </button>
@@ -174,9 +177,9 @@ function SdkActionButtons({ sdk, onDownload, onDeactivate }: SdkActionButtonsPro
         </button>
       )}
       <button
-        onClick={(e) => { e.stopPropagation(); onDeactivate(sdk.app_id, sdk.name); }}
+        onClick={(e) => { e.stopPropagation(); onDeactivate(sdk.app_id, sdk.name, sdk.version); }}
         className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors cursor-pointer"
-        title="Deactivate SDK version"
+        title="Deactivate latest SDK version"
       >
         <Trash2 className="w-4 h-4" />
       </button>
@@ -184,25 +187,32 @@ function SdkActionButtons({ sdk, onDownload, onDeactivate }: SdkActionButtonsPro
   );
 }
 
-/** Renders one selectable catalogue row keyed by immutable app ID. */
+/** Renders one family catalogue row that opens its latest exact version. */
 function SdkRow({ sdk, selectedIds, setSelectedIds, onNavigate, onDownload, onDeactivate }: SdkRowProps) {
-  const isSelected = selectedIds.includes(sdk.app_id);
+  const appId = sdk.app_id;
+  // Only a family with a latest immutable version can participate in version-scoped navigation or selection.
+  const isSelected = appId ? selectedIds.includes(appId) : false;
   const showCheckbox = selectedIds.length > 0 || isSelected;
   return (
     <tr
-      className="hover:bg-slate-50/50 transition-colors cursor-pointer group"
-      onClick={() => onNavigate(sdk.app_id)}
+      className={`hover:bg-slate-50/50 transition-colors group ${appId ? "cursor-pointer" : "cursor-default"}`}
+      onClick={() => {
+        // Family rows open the deterministic latest immutable version when one exists.
+        if (appId) onNavigate(appId);
+      }}
     >
       <td className="px-3 sm:px-6 py-4 min-w-0">
         <div className="flex min-w-0 items-center gap-2 sm:gap-3">
           <div className="relative w-8 h-8 rounded shrink-0">
-            <div className={`absolute inset-0 z-10 bg-white/90 rounded flex items-center justify-center transition-opacity duration-200 ${showCheckbox ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}`} onClick={(e) => e.stopPropagation()}>
+            <div className={`absolute inset-0 z-10 bg-white/90 rounded flex items-center justify-center transition-opacity duration-200 ${!appId ? 'pointer-events-none opacity-0' : showCheckbox ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}`} onClick={(e) => e.stopPropagation()}>
               <input
                 type="checkbox"
                 className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
                 checked={isSelected}
                 onChange={() => {
-                  setSelectedIds(prev => prev.includes(sdk.app_id) ? prev.filter(i => i !== sdk.app_id) : [...prev, sdk.app_id]);
+                  // Selection remains exact-version scoped even though each row represents a family.
+                  if (!appId) return;
+                  setSelectedIds(prev => prev.includes(appId) ? prev.filter(i => i !== appId) : [...prev, appId]);
                 }}
               />
             </div>
@@ -238,7 +248,7 @@ interface SdkListContentProps {
   setSelectedIds: React.Dispatch<React.SetStateAction<string[]>>;
   navigate: (path: string) => void;
   onDownload: (id: string, name: string, version: string) => void;
-  onDeactivate: (id: string, name: string) => void;
+  onDeactivate: (id: string, name: string, version: string) => void;
 }
 
 /** Selects the loading, empty, or populated app-list presentation. */
@@ -275,6 +285,8 @@ function SdkListContent({ loading, searching, sdks, query, selectedIds, setSelec
       </div>
     );
   }
+  // Only families with a live immutable version participate in version-scoped bulk actions.
+  const selectableIds = sdks.flatMap((sdk) => sdk.app_id ? [sdk.app_id] : []);
   return (
     <div className="bg-white rounded-xl border border-slate-200 overflow-x-auto">
       <table className="w-full table-fixed md:table-auto text-left text-sm whitespace-nowrap">
@@ -287,12 +299,13 @@ function SdkListContent({ loading, searching, sdks, query, selectedIds, setSelec
                     <input
                       type="checkbox"
                       className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
-                      checked={selectedIds.length === sdks.length && sdks.length > 0}
+                      checked={selectedIds.length === selectableIds.length && selectableIds.length > 0}
                       onChange={() => {
-                        if (selectedIds.length === sdks.length) {
+                        // Select-all never manufactures an identity for retained versionless families.
+                        if (selectedIds.length === selectableIds.length) {
                           setSelectedIds([]);
                         } else {
-                          setSelectedIds(sdks.map(s => s.app_id));
+                          setSelectedIds(selectableIds);
                         }
                       }}
                     />
@@ -301,7 +314,7 @@ function SdkListContent({ loading, searching, sdks, query, selectedIds, setSelec
                 <span>App</span>
               </div>
             </th>
-            <th className="w-[25%] md:w-auto px-2 sm:px-6 py-4 font-medium">Version</th>
+            <th className="w-[25%] md:w-auto px-2 sm:px-6 py-4 font-medium">Latest version</th>
             <th className="hidden md:table-cell px-6 py-4 font-medium">Downloads</th>
             <th className="hidden lg:table-cell px-6 py-4 font-medium">Date</th>
             <th className="w-[20%] md:w-auto px-2 sm:px-6 py-4 font-medium text-right">Action</th>
@@ -310,7 +323,7 @@ function SdkListContent({ loading, searching, sdks, query, selectedIds, setSelec
         <tbody className="divide-y divide-slate-100">
           {sdks.map((sdk) => (
             <SdkRow
-              key={sdk.app_id}
+              key={sdk.app_family_id}
               sdk={sdk}
               selectedIds={selectedIds}
               setSelectedIds={setSelectedIds}
@@ -455,8 +468,8 @@ export default function SdkHistory() {
   };
 
   /** Confirms and deactivates one immutable SDK version. */
-  const handleDeactivate = async (id: string, name: string) => {
-    const confirmed = await toast.confirm(`Deactivate SDK version "${name}"? This permanently removes its runtime and package.`);
+  const handleDeactivate = async (id: string, name: string, version: string) => {
+    const confirmed = await toast.confirm(`Deactivate SDK "${name}" version "${version}"? This permanently removes its runtime and package.`);
     if (!confirmed) return;
     try {
       await api.sdks.deactivate(id);

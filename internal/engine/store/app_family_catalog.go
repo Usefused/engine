@@ -4,20 +4,25 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/google/uuid"
 )
 
-// AppFamilyCatalogItem describes one logical application without selecting an implicit version.
+// AppFamilyCatalogItem describes one logical application and its latest presentation metadata without selecting execution.
 type AppFamilyCatalogItem struct {
-	AppFamilyID    uuid.UUID
-	Name           string
-	Kind           AppKind
-	TargetLanguage string
-	VersionCount   int
-	StableAppID    uuid.UUID
-	StableVersion  string
+	AppFamilyID     uuid.UUID
+	Name            string
+	Kind            AppKind
+	TargetLanguage  string
+	VersionCount    int
+	LatestAppID     uuid.UUID
+	LatestVersion   string
+	LatestStatus    AppStatus
+	LatestCreatedAt *time.Time
+	StableAppID     uuid.UUID
+	StableVersion   string
 }
 
 // AppFamilyCatalogRepository keeps application grouping and authorized pagination in Engine persistence.
@@ -42,15 +47,26 @@ func (s *postgresStore) ListAuthorizedAppFamilies(ctx context.Context, accountID
 		return []AppFamilyCatalogItem{}, 0, nil
 	}
 	args := []any{accountID, kind, strings.TrimSpace(search), scope.All, scope.IDs}
+	// One account-scoped window scan computes counts and the newest immutable row without a per-family lookup.
 	rows, err := s.db.Query(ctx, `
+ WITH version_catalog AS (
+   SELECT app.app_family_id, app.account_id, app.app_id, app.version, app.status, app.created_at,
+          COUNT(*) OVER (PARTITION BY app.app_family_id) AS version_count,
+          ROW_NUMBER() OVER (PARTITION BY app.app_family_id ORDER BY app.created_at DESC, app.app_id DESC) AS version_rank
+   FROM fused_apps app
+   WHERE app.account_id = $1
+ )
  SELECT family.app_family_id, family.display_name, family.kind, COALESCE(family.target_language, ''),
- COUNT(app.app_id), COALESCE(stable.app_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(stable.version, '')
+ COALESCE(latest.version_count, 0),
+ COALESCE(latest.app_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(latest.version, ''),
+ COALESCE(latest.status, ''), latest.created_at,
+ COALESCE(stable.app_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(stable.version, '')
  FROM fused_app_families family
- LEFT JOIN fused_apps app ON app.app_family_id = family.app_family_id AND app.account_id = family.account_id
+ LEFT JOIN version_catalog latest ON latest.app_family_id = family.app_family_id
+   AND latest.account_id = family.account_id AND latest.version_rank = 1
  LEFT JOIN fused_apps stable ON stable.app_id = family.mcp_stable_app_id
    AND stable.app_family_id = family.app_family_id AND stable.account_id = family.account_id
  `+appFamilyCatalogWhere+`
- GROUP BY family.app_family_id, stable.app_id, stable.version
  ORDER BY family.canonical_name, family.app_family_id
  LIMIT $6 OFFSET $7`, append(args, limit, offset)...)
 	// Query failures must never be presented as an empty successful catalogue.
@@ -62,7 +78,9 @@ func (s *postgresStore) ListAuthorizedAppFamilies(ctx context.Context, accountID
 	for rows.Next() {
 		var item AppFamilyCatalogItem
 		// The fixed projection contains only family metadata and the explicit MCP promotion pointer.
-		if err := rows.Scan(&item.AppFamilyID, &item.Name, &item.Kind, &item.TargetLanguage, &item.VersionCount, &item.StableAppID, &item.StableVersion); err != nil {
+		if err := rows.Scan(&item.AppFamilyID, &item.Name, &item.Kind, &item.TargetLanguage, &item.VersionCount,
+			&item.LatestAppID, &item.LatestVersion, &item.LatestStatus, &item.LatestCreatedAt,
+			&item.StableAppID, &item.StableVersion); err != nil {
 			return nil, 0, fmt.Errorf("scan app family: %w", err)
 		}
 		items = append(items, item)

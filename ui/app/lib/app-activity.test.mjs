@@ -55,7 +55,7 @@ test("keeps aggregate service usage inside Outbound calls as a select option", a
   assert.doesNotMatch(serviceActivity, /No cross-engine usage has been reported/);
 });
 
-test("reads exact app versions and family state from the Engine catalogue", async () => {
+test("reads grouped app families and exact detail versions from the Engine catalogue", async () => {
   const [appIndex, appRoute, mcpDetail, mcpActivity, runtimeStatus] = await Promise.all([
     readFile(appIndexPath, "utf8"),
     readFile(appRoutePath, "utf8"),
@@ -63,12 +63,15 @@ test("reads exact app versions and family state from the Engine catalogue", asyn
     readFile(mcpActivityPath, "utf8"),
     readFile(runtimeStatusPath, "utf8"),
   ]);
-  assert.match(appIndex, /\.mcpGraphql<\{ apps: SdkPage/);
-  assert.match(appIndex, /app_id/);
+  assert.match(appIndex, /\.mcpGraphql<\{ appFamilies: SdkPage/);
+  assert.match(appIndex, /appFamilies\(kind: "sdk"/);
+  assert.match(appIndex, /app_id: latest_version_id/);
   assert.match(appIndex, /app_family_id/);
-  assert.match(appIndex, /status downloads/);
+  assert.match(appIndex, /status: latest_status/);
+  assert.match(appIndex, /downloads/);
   assert.match(appIndex, /await fetchSdks\(query, page\)/);
-  assert.match(appIndex, /query SDKApps\(\$search: String!, \$version: String!, \$limit: Int!, \$offset: Int!\)/);
+  assert.match(appIndex, /query SDKApplications\(\$search: String!, \$limit: Int!, \$offset: Int!\)/);
+  assert.doesNotMatch(appIndex, /apps\(kind: "sdk"/);
   assert.match(appIndex, /<SdkPagination page=\{page\} total=\{total\}/);
   assert.doesNotMatch(appIndex, /artifactSnapshots/);
   assert.match(appIndex, /<AppRuntimeStatus className="mt-0\.5" status=\{sdk\.status\}/);

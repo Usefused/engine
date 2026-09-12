@@ -1239,7 +1239,7 @@
       "file": "app/routes/integrations.sdks._index.tsx",
       "call": 1,
       "variant": 1,
-      "document": "\n    query SDKApps($search: String!, $version: String!, $limit: Int!, $offset: Int!) {\n      apps(kind: \"sdk\", search: $search, version: $version, limit: $limit, offset: $offset) {\n        items { app_id app_family_id name description version target_language created_at status downloads }\n        total\n      }\n    }\n  "
+      "document": "\n    query SDKApplications($search: String!, $limit: Int!, $offset: Int!) {\n      appFamilies(kind: \"sdk\", search: $search, limit: $limit, offset: $offset) {\n        items {\n          app_family_id\n          app_id: latest_version_id\n          name\n          version: latest_version\n          version_count\n          target_language\n          created_at: latest_created_at\n          status: latest_status\n          downloads\n        }\n        total\n      }\n    }\n  "
     },
     {
       "endpoint": "engine",

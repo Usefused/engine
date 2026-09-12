@@ -30,9 +30,15 @@ func testAppFamilyCataloguePostgres(t *testing.T, kind string) {
 		t.Fatal(err)
 	}
 	// Multiple pages of immutable versions must still occupy exactly one application row.
+	var latestAppID uuid.UUID
 	for i := 2; i <= 102; i++ {
+		appID := uuid.New()
+		// Retain the final inserted identity so the deterministic latest projection can be asserted directly.
+		if i == 102 {
+			latestAppID = appID
+		}
 		// Every version has a unique canonical key while sharing its logical family.
-		if _, err := fixture.pool.Exec(fixture.ctx, `INSERT INTO fused_apps(app_id,app_family_id,account_id,version,config_key,source_hash,status) VALUES ($1,$2,$3,$4,$5,'catalogue-test','active')`, uuid.New(), fixture.familyID, accountID, strconv.Itoa(i), "catalogue:"+uuid.NewString()); err != nil {
+		if _, err := fixture.pool.Exec(fixture.ctx, `INSERT INTO fused_apps(app_id,app_family_id,account_id,version,config_key,source_hash,status,created_at) VALUES ($1,$2,$3,$4,$5,'catalogue-test','active',NOW() + ($6 * INTERVAL '1 second'))`, appID, fixture.familyID, accountID, strconv.Itoa(i), "catalogue:"+uuid.NewString(), i); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -64,6 +70,10 @@ func testAppFamilyCataloguePostgres(t *testing.T, kind string) {
 	if err != nil || total != 2 || len(items) != 1 || items[0].Name != "Alpha:Tools" || items[0].VersionCount != 102 {
 		t.Fatalf("first page: %#v, total %d, error %v", items, total, err)
 	}
+	// Latest metadata is the newest immutable publication and supplies only catalogue navigation identity.
+	if items[0].LatestAppID != latestAppID || items[0].LatestVersion != "102" || items[0].LatestStatus != AppStatusActive || items[0].LatestCreatedAt == nil {
+		t.Fatalf("latest version: %#v", items[0])
+	}
 	// Promotion metadata is an explicit MCP pointer, never an arbitrary SDK version.
 	if kind == "mcp" && (items[0].StableAppID != fixture.appID || items[0].StableVersion != "1.0.0") {
 		t.Fatalf("promotion: %#v", items[0])
@@ -90,12 +100,12 @@ func testAppFamilyCataloguePostgres(t *testing.T, kind string) {
 		t.Fatalf("search: %#v, total %d, error %v", items, total, err)
 	}
 	versions, total, err := fixture.repository.ListAuthorizedAppsByAccount(fixture.ctx, accountID, all, kind, "", "", 100, 0)
-	// Existing UI lists still receive exact immutable versions from their unchanged query.
+	// Dedicated version discovery still receives exact immutable rows for detail-page switching.
 	if err != nil || total != 102 || len(versions) != 100 {
 		t.Fatalf("version list: count %d, total %d, error %v", len(versions), total, err)
 	}
 	siblings, err := fixture.repository.ListAuthorizedAppsByFamily(fixture.ctx, accountID, fixture.familyID, all)
-	// UI version selectors continue to retrieve every sibling through the existing detail contract.
+	// Detail-page version selectors continue to retrieve every sibling through the exact-version contract.
 	if err != nil || len(siblings) != 102 {
 		t.Fatalf("version selector: count %d, error %v", len(siblings), err)
 	}
