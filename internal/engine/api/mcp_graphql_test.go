@@ -221,6 +221,9 @@ func withGraphQLTestOwner(t *testing.T, s store.Store, next http.HandlerFunc) ht
 	case *appSelectionGraphQLTestStore:
 		// The projection fixture wraps the ordinary catalogue fixture, so the actor must inherit its account identity.
 		accountID = fixture.workspaceTestStore.accountID
+	case *appFamilyGraphQLTestStore:
+		// Family catalogue fixtures share the same account as their immutable-version fixtures.
+		accountID = fixture.accountID
 	case *accountScopedGraphQLTestStore:
 		// Production wrappers retain behavior while this test adapter carries only the account needed for authorization.
 		accountID = fixture.accountID

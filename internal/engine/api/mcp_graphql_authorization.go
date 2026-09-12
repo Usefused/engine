@@ -70,8 +70,10 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		"currentActorAccess":      authenticatedOnly(),
 		"app":                     collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
 		"apps":                    collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
-		"appVersions":             collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
-		"appServices":             collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
+		// Family rows and totals obey the same app.read scope as exact versions.
+		"appFamilies": collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
+		"appVersions": collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
+		"appServices": collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
 		// Operation discovery is exact-version state, so preflight resolves the app ID to its family authorization boundary.
 		"mcpAppOperations":            appArgumentPermissions("app_id", accesscontrol.PermissionAppRead),
 		"accessExplanation":           permissions(accesscontrol.PermissionAccessRead),

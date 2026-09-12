@@ -408,10 +408,12 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 		// in GraphQL validation errors, so keep it aligned with that surface.
 		Name: "EngineQuery",
 		Fields: graphql.Fields{
-			"appScaffoldRequirements":     appScaffoldRequirementsGraphQLField(s),
-			"currentActorAccess":          currentActorAccessGraphQLField(),
-			"app":                         appGraphQLField(s, packageDownloads),
-			"apps":                        appsGraphQLField(s, packageDownloads),
+			"appScaffoldRequirements": appScaffoldRequirementsGraphQLField(s),
+			"currentActorAccess":      currentActorAccessGraphQLField(),
+			"app":                     appGraphQLField(s, packageDownloads),
+			"apps":                    appsGraphQLField(s, packageDownloads),
+			// Application grouping is separate from the immutable-version catalogue used by UI details.
+			"appFamilies":                 appFamiliesGraphQLField(s),
 			"appVersions":                 appVersionsGraphQLField(s, packageDownloads),
 			"appServices":                 appServicesGraphQLField(s),
 			"mcpAppOperations":            mcpAppOperationsGraphQLField(s),
