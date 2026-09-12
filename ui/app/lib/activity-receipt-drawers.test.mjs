@@ -19,7 +19,8 @@ test("app receipt rows open shared execution details", () => {
   assert.match(appRequests, /<AppExecutionInspector key=\{selectedEvent.id\} event=\{selectedEvent\}/);
   assert.match(appInspector, /<ExecutionDetailsDrawer event=\{selected\}/);
   assert.match(appInspector, /<ExecutionDetails event=\{selected\}/);
-  assert.match(appInspector, /new Map\(\[\[appId, consumerName\]\]\)/);
+  // Historical receipts use their own immutable version ID, with the current app only as a missing-ID fallback.
+  assert.match(appInspector, /new Map\(\[\[selected\.app_id \|\| appId, consumerName\]\]\)/);
   assert.match(sdkDetails, /consumerName=\{sdk\.name\}/);
   assert.match(mcpActivity, /consumerName=\{serverName\}/);
   assert.match(sharedDrawer, /xl:max-w-\[1080px\]/);
