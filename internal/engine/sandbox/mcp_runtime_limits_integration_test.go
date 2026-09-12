@@ -308,7 +308,8 @@ func assertMCPRuntimeExecuteContract(t *testing.T, listed mcpRuntimeLimitRespons
 		}
 		contract := tool.Meta["com.usefused/session"]
 		scriptDescription := tool.InputSchema.Properties["script"].Description
-		if !strings.Contains(tool.Description, "Never invent") || !strings.Contains(scriptDescription, "search_docs exact operationId detail") || !strings.Contains(scriptDescription, "caller_bound_supported=true") || contract["transport_session"] != "client_managed" || contract["session_id_input"] != false || contract["script_scope"] != "current_mcp_connection" || contract["automatic_execute_replay"] != false {
+		// Tool-level guidance owns discovery and pagination policy, while the argument keeps only its session boundary.
+		if !strings.Contains(tool.Description, "Never invent") || !strings.Contains(tool.Description, "execution_ready=true") || !strings.Contains(tool.Description, "exact pagination guidance") || !strings.Contains(scriptDescription, "Never pass a session ID") || contract["transport_session"] != "client_managed" || contract["session_id_input"] != false || contract["script_scope"] != "current_mcp_connection" || contract["automatic_execute_replay"] != false {
 			t.Fatalf("execute session contract = description:%q metadata:%+v", tool.Description, contract)
 		}
 		return

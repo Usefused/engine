@@ -66,6 +66,51 @@ const getRepo: FixtureOperation = {
   },
 };
 
+const insertCalendarEvent: FixtureOperation = {
+  operation_id: "calendar.events.insert",
+  service_id: "svc-calendar",
+  name: "Insert calendar event",
+  description: "Create an event on a calendar.",
+  method: "POST",
+  path: "/calendars/{calendarId}/events",
+  pagination: { supported: false, caller_bound_supported: false },
+  parameters: [{
+    name: "calendarId", in: "path", required: true, type: "string", description: "Calendar identifier.",
+    serialization: { style: "simple", explode: false, allow_reserved: false, allow_empty_value: false },
+  }],
+  request_content: {
+    required: true,
+    representations: [{
+      media_type: "application/json",
+      serialization: "json",
+      schema: {
+        dialect: "https://json-schema.org/draft/2020-12/schema",
+        raw: {
+          type: "object",
+          properties: {
+            summary: { type: "string" },
+            start: { type: "object" },
+            end: { type: "object" },
+          },
+          required: ["start", "end"],
+          additionalProperties: false,
+        },
+        content_hash: "sha256:calendar-event",
+        projection: {
+          type: "object",
+          properties: {
+            summary: { type: "string" },
+            start: { type: "object" },
+            end: { type: "object" },
+          },
+          required: ["start", "end"],
+        },
+      },
+    }],
+  },
+  responses: { "200": { description: "Created event", representations: [] } },
+};
+
 const syncRepos = {
   name: "repos.sync",
   description: "Synchronize reviewed repositories.",
@@ -122,6 +167,15 @@ function largeProperties(count: number): Record<string, { description: string }>
   return properties;
 }
 
+/** largeSchemaProperties creates a flat request projection that cannot fit in one documentation result. */
+function largeSchemaProperties(count: number): Record<string, { type: string }> {
+  const properties: Record<string, { type: string }> = {};
+  for (let index = 0; index < count; index++) {
+    properties[`request_field_${String(index).padStart(5, "0")}`] = { type: "string" };
+  }
+  return properties;
+}
+
 describe("searchDocs", () => {
   // Orientation must not spend its budget on unusable partial schemas.
   it("returns a bounded schema-free list window", () => {
@@ -167,11 +221,46 @@ describe("searchDocs", () => {
       usage: "This GET operation has no Engine pagination contract, so each call(\"github.getRepo\", params) makes one provider request and does not traverse provider pages. Only when this operation's documentation explicitly identifies a page input, continuation output, and stop condition, pass the page input in params, await the two-argument call(), read the continuation from its result, and repeat until the documented stop condition. Never infer page, cursor, or offset semantics from names. Each page counts toward execute's call and time limits. Use call(\"github.getRepo\", params) without a pagination option. A pagination bound documented for another operation must not be reused here.",
     });
     expect(result.operation.responses?.["200"]).toBeDefined();
+    expect(result.operation.execution_ready).toBe(true);
+    expect(result.operation).not.toHaveProperty("next_action");
     expect(result.operation.schema_status).toEqual({
       complete: true,
-      included_sections: ["parameters", "request", "response:200"],
-      available_sections: ["parameters", "request", "response:200"],
+      included_sections: ["params_schema", "parameters", "request", "response:200"],
+      available_sections: ["params_schema", "parameters", "request", "response:200"],
     });
+  });
+
+  // Agents should not need to infer the flat call convention from separate path and body documents.
+  it("returns one canonical flattened params schema for a physical operation", () => {
+    const result = searchDocs(new Fixture([insertCalendarEvent]), { query: "create calendar event" });
+    // The ranked operation must be narrowed before asserting its physical call contract.
+    if (result.mode !== "query" || !("params_schema" in result.operations[0])) {
+      throw new Error("expected ranked physical params schema");
+    }
+
+    expect(result.operations[0].execution_ready).toBe(true);
+    expect(result.operations[0]).not.toHaveProperty("next_action");
+    expect(result.operations[0].params_schema).toEqual({
+      type: "object",
+      description: "Pass endpoint parameters and request-body fields together in this single flat params object.",
+      properties: {
+        calendarId: { type: "string", description: "Calendar identifier." },
+        summary: { type: "string" },
+        start: { type: "object" },
+        end: { type: "object" },
+      },
+      required: ["calendarId", "end", "start"],
+      additionalProperties: false,
+    });
+    expect(result.operations[0].params_schema?.properties).not.toHaveProperty("body");
+    expect(result.operations[0].schema_status).toEqual({
+      complete: false,
+      included_sections: ["params_schema"],
+      available_sections: ["params_schema", "parameters", "request", "response:200"],
+    });
+    expect(result.operations[0]).not.toHaveProperty("parameters");
+    expect(result.operations[0]).not.toHaveProperty("request_content");
+    expect(result.operations[0]).not.toHaveProperty("responses");
   });
 
   // Pagination-looking provider parameters cannot manufacture an absent Engine contract.
@@ -298,6 +387,43 @@ describe("searchDocs", () => {
     expect(result.operation.schema_status.available_sections).toContain("response:200");
     expect(result.operation.schema_status.included_sections).not.toContain("response:200");
     expect(result.operation).not.toHaveProperty("responses");
+    expect(result.operation.execution_ready).toBe(true);
+    expect(result.operation).not.toHaveProperty("next_action");
+    expect(encodedBytes(result)).toBeLessThanOrEqual(SEARCH_DOCS_MAX_BYTES);
+  });
+
+  // An omitted call schema needs one machine-readable discovery action before execute.
+  it("marks an oversized physical call schema not ready and supplies its exact next action", () => {
+    const properties = largeSchemaProperties(3_000);
+    const operation: FixtureOperation = {
+      ...insertCalendarEvent,
+      operation_id: "calendar.events.largeInsert",
+      request_content: {
+        required: true,
+        representations: [{
+          media_type: "application/json",
+          serialization: "json",
+          schema: {
+            dialect: "https://json-schema.org/draft/2020-12/schema",
+            raw: { type: "object", properties },
+            content_hash: "sha256:large-calendar-event",
+            projection: { type: "object", properties },
+          },
+        }],
+      },
+    };
+    const result = searchDocs(new Fixture([operation]), { operationId: operation.operation_id });
+    // Exact metadata must remain usable even when its canonical parameter section needs lazy retrieval.
+    if (result.mode !== "operationId" || "error" in result) {
+      throw new Error("expected bounded physical operation detail");
+    }
+
+    expect(result.operation.execution_ready).toBe(false);
+    expect(result.operation).not.toHaveProperty("params_schema");
+    expect(result.operation.next_action).toEqual({
+      tool: "search_docs",
+      arguments: { operationId: "calendar.events.largeInsert", section: "params_schema" },
+    });
     expect(encodedBytes(result)).toBeLessThanOrEqual(SEARCH_DOCS_MAX_BYTES);
   });
 
@@ -348,11 +474,32 @@ describe("searchDocs", () => {
     if (result.mode !== "operationId" || "error" in result) throw new Error("expected Unified detail");
 
     const encoded = JSON.stringify(result.operation);
+    expect(result.operation.execution_ready).toBe(true);
+    expect(result.operation).not.toHaveProperty("next_action");
     expect(encoded).toContain("github.restoreRepos");
     for (const forbidden of ["service_id", "service_version_id", "endpoint_id", "private_mapping", "selectors"]) {
       // Public documentation must not reveal compiler or Engine routing identities.
       expect(encoded).not.toContain(forbidden);
     }
+  });
+
+  // Ranked Unified results include only the two sections needed to construct a call.
+  it("avoids packing Unified output documentation into ranked results", () => {
+    const result = searchDocs(new Fixture([], [syncRepos]), { query: "synchronize repositories" });
+    // The ranked branch must be narrowed before checking its call-construction sections.
+    if (result.mode !== "query") throw new Error("expected query mode");
+
+    expect(result.operations[0]).toMatchObject({
+      execution_ready: true,
+      schema_status: {
+        complete: false,
+        included_sections: ["input", "targets"],
+        available_sections: ["input", "targets", "output"],
+      },
+    });
+    expect(result.operations[0]).toHaveProperty("input_schema");
+    expect(result.operations[0]).toHaveProperty("targets");
+    expect(result.operations[0]).not.toHaveProperty("output_schema");
   });
 
   // Prose has an explicit loss marker; schemas never use the same shortening path.
@@ -436,6 +583,11 @@ describe("searchDocs", () => {
     expect(result.operations[0].schema_status).toMatchObject({
       complete: false,
       available_sections: ["input", "targets", "output"],
+    });
+    expect(result.operations[0].execution_ready).toBe(false);
+    expect(result.operations[0].next_action).toEqual({
+      tool: "search_docs",
+      arguments: { operationId: "repos.largeSync", section: "input" },
     });
     expect(encodedBytes(result)).toBeLessThanOrEqual(SEARCH_DOCS_MAX_BYTES);
     for (const forbidden of ["service_id", "service_version_id", "endpoint_id", "private_mapping"]) {

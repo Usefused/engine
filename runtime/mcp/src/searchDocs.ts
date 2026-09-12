@@ -4,6 +4,8 @@ import {
   FixtureParameter,
   FixtureRequestContent,
   FixtureResponseContract,
+  FixtureSchemaContract,
+  FixtureSchemaProjection,
   FixtureUnifiedOperation,
   FixtureUnifiedTarget,
 } from "./fixture.js";
@@ -16,7 +18,7 @@ export const SEARCH_DOCS_DEFAULT_LIMIT = 3;
 export const SEARCH_DOCS_MAX_LIMIT = 5;
 export const SEARCH_DOCS_LIST_LIMIT = 20;
 
-export type DocumentationSection = "parameters" | "request" | `response:${string}` | "input" | "targets" | "output" | "definitions";
+export type DocumentationSection = "params_schema" | "parameters" | "request" | `response:${string}` | "input" | "targets" | "output" | "definitions";
 
 /** Admits only bounded public section names, including exact physical response statuses. */
 export function isDocumentationSection(value: unknown): value is DocumentationSection {
@@ -25,7 +27,7 @@ export function isDocumentationSection(value: unknown): value is DocumentationSe
     return false;
   }
   // Fixed sections cover request and Unified contracts without accepting private namespaces.
-  if (["parameters", "request", "input", "targets", "output", "definitions"].includes(value)) {
+  if (["params_schema", "parameters", "request", "input", "targets", "output", "definitions"].includes(value)) {
     return true;
   }
   // A bounded status suffix permits exact response retrieval without accepting arbitrary private namespaces.
@@ -49,9 +51,34 @@ export interface SchemaStatus {
   available_sections: DocumentationSection[];
 }
 
+/** Gives the agent one deterministic documentation request before execution. */
+export interface DocumentationNextAction {
+  tool: "search_docs";
+  arguments: {
+    operationId: string;
+    section: DocumentationSection;
+  };
+}
+
+/** Describes the exact flat object accepted as call()'s physical params argument. */
+export interface CanonicalParamsSchema {
+  type: "object";
+  description: string;
+  properties: Record<string, unknown>;
+  required: string[];
+  additionalProperties: boolean | Record<string, unknown>;
+}
+
+/** Readiness is separate from full documentation completeness because response schemas are optional before execution. */
+interface ExecutionReadiness {
+  execution_ready: boolean;
+  next_action?: DocumentationNextAction;
+}
+
 /** Physical callable detail preserves the reviewed request and response contracts. */
-export interface OperationDetail extends OperationSummary {
+export interface OperationDetail extends OperationSummary, ExecutionReadiness {
   pagination: PaginationGuidance;
+  params_schema?: CanonicalParamsSchema;
   parameters?: FixtureParameter[];
   request_content?: FixtureRequestContent | null;
   responses?: Record<string, FixtureResponseContract>;
@@ -73,7 +100,7 @@ type QueryPaginationGuidance =
 export type PaginationGuidance = ExactPaginationGuidance | QueryPaginationGuidance;
 
 /** Unified detail exposes only the public compiler descriptor. */
-export interface UnifiedOperationDetail extends OperationSummary {
+export interface UnifiedOperationDetail extends OperationSummary, ExecutionReadiness {
   kind: "unified";
   input_schema?: unknown;
   output_schema?: unknown;
@@ -227,7 +254,7 @@ function packSections(
   total: number,
 ): Array<OperationDetail | UnifiedOperationDetail> {
   let packed = operations;
-  const attempts = sectionPackingOrder(candidates);
+  const attempts = sectionPackingOrder(candidates, mode);
   for (const { index, section } of attempts) {
     const trial = replaceAt(packed, index, includeSection(packed[index], section));
     // Budget checks include the actual mode wrapper because its metadata also consumes UTF-8 bytes.
@@ -242,12 +269,17 @@ function packSections(
   return packed.map(finalizeStatus);
 }
 
-/** Orders every section globally so all request-side detail precedes any response detail. */
-function sectionPackingOrder(candidates: SearchCandidate[]): Array<{ index: number; section: DocumentationSectionValue }> {
+/** Packs only call construction for ranked search while exact detail retains every public section. */
+function sectionPackingOrder(candidates: SearchCandidate[], mode: "query" | "operationId"): Array<{ index: number; section: DocumentationSectionValue }> {
   const attempts: Array<{ index: number; section: DocumentationSectionValue }> = [];
+  const rankedCallSections = new Set<DocumentationSection>(["params_schema", "input", "targets"]);
   for (const priority of [0, 1, 2]) {
     for (let index = 0; index < candidates.length; index++) {
       for (const section of candidates[index].sections) {
+        // Ranked results avoid duplicating raw request and response documentation already represented by the call shape.
+        if (mode === "query" && !rankedCallSections.has(section.name)) {
+          continue;
+        }
         // Only the active phase is appended, preserving authored order within equal priorities.
         if (section.priority === priority) {
           attempts.push({ index, section });
@@ -274,14 +306,16 @@ function includeSection(
   section: DocumentationSectionValue,
 ): OperationDetail | UnifiedOperationDetail {
   const mergedFragment = mergeSectionFragment(operation, section.fragment);
-  return {
+  const included = {
     ...operation,
     ...mergedFragment,
     schema_status: {
       ...operation.schema_status,
       included_sections: [...operation.schema_status.included_sections, section.name],
     },
-  };
+  } as OperationDetail | UnifiedOperationDetail;
+  // Budget trials must measure the readiness state the agent will actually receive after this section is included.
+  return withExecutionReadiness(included);
 }
 
 /** Merges independently retrievable response statuses without overwriting earlier statuses. */
@@ -299,13 +333,36 @@ function mergeSectionFragment(
 
 /** Marks a detail complete only when every advertised section is present whole. */
 function finalizeStatus(operation: OperationDetail | UnifiedOperationDetail): OperationDetail | UnifiedOperationDetail {
-  return {
+  const finalized = {
     ...operation,
     schema_status: {
       ...operation.schema_status,
       complete: operation.schema_status.included_sections.length === operation.schema_status.available_sections.length,
     },
   };
+  return withExecutionReadiness(finalized);
+}
+
+/** Derives call readiness from request-side sections while leaving response detail optional. */
+function withExecutionReadiness(operation: OperationDetail | UnifiedOperationDetail): OperationDetail | UnifiedOperationDetail {
+  // Unified calls need both their public input and target graph, while physical calls need only the flattened call schema.
+  const requiredSections: DocumentationSection[] = operation.kind === "unified"
+    ? ["input", "targets"]
+    : ["params_schema"];
+  const missingSection = requiredSections.find((section) => !operation.schema_status.included_sections.includes(section));
+  const { next_action: _priorAction, ...withoutPriorAction } = operation;
+  // A missing call-construction section must produce one exact discovery action instead of inviting inference.
+  if (missingSection) {
+    return {
+      ...withoutPriorAction,
+      execution_ready: false,
+      next_action: {
+        tool: "search_docs",
+        arguments: { operationId: operation.operation_id, section: missingSection },
+      },
+    } as OperationDetail | UnifiedOperationDetail;
+  }
+  return { ...withoutPriorAction, execution_ready: true } as OperationDetail | UnifiedOperationDetail;
 }
 
 /** Retrieves one safe public section or JSON Pointer subtree without returning partial values. */
@@ -405,6 +462,7 @@ function exactCandidate(fixture: Fixture, operationId: string): SearchCandidate 
 function toPhysicalCandidate(operation: FixtureOperation, fixture: Fixture): SearchCandidate {
   const summary = physicalSummary(operation);
   const pagination = paginationGuidance(operation);
+  const paramsSchema = canonicalParamsSchema(operation, fixture);
   return {
     summary,
     detail_metadata: { path: operation.path, pagination, query_pagination: queryPaginationGuidance(operation, pagination) },
@@ -412,14 +470,20 @@ function toPhysicalCandidate(operation: FixtureOperation, fixture: Fixture): Sea
     score: 0,
     sections: [
       {
-        name: "parameters",
+        name: "params_schema",
         priority: 0,
+        fragment: { params_schema: paramsSchema },
+        value: paramsSchema,
+      },
+      {
+        name: "parameters",
+        priority: 1,
         fragment: { parameters: operation.parameters ?? [] },
         value: operation.parameters ?? [],
       },
       {
         name: "request",
-        priority: 0,
+        priority: 1,
         fragment: { request_content: operation.request_content ?? null },
         value: operation.request_content ?? null,
       },
@@ -432,6 +496,222 @@ function toPhysicalCandidate(operation: FixtureOperation, fixture: Fixture): Sea
       ...definitionSections(operation, fixture),
     ],
   };
+}
+
+/** Builds one compact flat call schema from endpoint parameters and the selected request representation. */
+function canonicalParamsSchema(operation: FixtureOperation, fixture: Fixture): CanonicalParamsSchema {
+  const properties: Record<string, unknown> = {};
+  const required = new Set<string>();
+  for (const parameter of operation.parameters ?? []) {
+    properties[parameter.name] = parameterValueSchema(parameter, operation.service_version_id, fixture);
+    // Required endpoint parameters must remain required after body fields are flattened beside them.
+    if (parameter.required) {
+      required.add(parameter.name);
+    }
+  }
+  const representation = selectedRequestRepresentation(operation.request_content);
+  let additionalProperties: boolean | Record<string, unknown> = false;
+  // A missing request representation means this operation's flat call shape consists only of endpoint parameters.
+  if (representation) {
+    const body = flattenedBodyProperties(operation.request_content!, representation, operation.service_version_id, fixture);
+    for (const [name, schema] of Object.entries(body.properties)) {
+      // Endpoint parameters win collisions because the dispatcher removes them before constructing the request body.
+      if (!(name in properties)) {
+        properties[name] = schema;
+      }
+    }
+    for (const name of body.required) {
+      // An unreachable colliding body field cannot become a second requirement on the same flat key.
+      if (!(operation.parameters ?? []).some((parameter) => parameter.name === name)) {
+        required.add(name);
+      }
+    }
+    additionalProperties = body.additionalProperties;
+  }
+  return {
+    type: "object",
+    description: "Pass endpoint parameters and request-body fields together in this single flat params object.",
+    properties,
+    required: [...required].sort(),
+    additionalProperties,
+  };
+}
+
+/** Selects the same sole or reviewed-default representation admitted by the Engine fixture. */
+function selectedRequestRepresentation(content: FixtureRequestContent | null | undefined): FixtureRequestContent["representations"][number] | undefined {
+  // Body-less operations have no request representation to flatten.
+  if (!content || content.representations.length === 0) {
+    return undefined;
+  }
+  // A reviewed default is authoritative when several media representations exist.
+  if (content.default_media_type) {
+    return content.representations.find((representation) => representation.media_type.toLowerCase() === content.default_media_type!.toLowerCase());
+  }
+  // Fixture admission permits implicit selection only for a sole representation.
+  if (content.representations.length === 1) {
+    return content.representations[0];
+  }
+  return undefined;
+}
+
+/** Projects one endpoint parameter without copying the full request-document wrapper. */
+function parameterValueSchema(parameter: FixtureParameter, serviceVersionID: string | undefined, fixture: Fixture): unknown {
+  const direct = resolvedJsonSchema(parameter.schema, serviceVersionID, fixture);
+  // A direct parameter schema is the canonical parameter contract when present.
+  if (direct !== undefined) {
+    return describedSchema(direct, parameter.description);
+  }
+  const contentSchema = Object.keys(parameter.content ?? {}).sort()
+    .map((mediaType) => resolvedJsonSchema(parameter.content![mediaType].schema, serviceVersionID, fixture))
+    .find((schema) => schema !== undefined);
+  // OpenAPI content parameters carry their value schema under their sole reviewed media type.
+  if (contentSchema !== undefined) {
+    return describedSchema(contentSchema, parameter.description);
+  }
+  // A missing schema retains the imported scalar type instead of becoming an unconstrained body field.
+  return describedSchema(parameter.type ? { type: parameter.type } : {}, parameter.description);
+}
+
+/** Adds prose only when the schema itself does not already provide a description. */
+function describedSchema(schema: unknown, description: string): unknown {
+  // Imported parameter prose fills the compact projection without replacing schema-owned wording.
+  if (description && isSchemaObject(schema) && !("description" in schema)) {
+    return { ...schema, description };
+  }
+  return schema;
+}
+
+/** Flattens the selected body convention into the same top-level namespace call() validates. */
+function flattenedBodyProperties(
+  content: FixtureRequestContent,
+  representation: FixtureRequestContent["representations"][number],
+  serviceVersionID: string | undefined,
+  fixture: Fixture,
+): Pick<CanonicalParamsSchema, "properties" | "required" | "additionalProperties"> {
+  const schema = resolvedJsonSchema(representation.schema, serviceVersionID, fixture);
+  const schemaObject = isSchemaObject(schema) ? schema : undefined;
+  const payloadParameter = content.payload_parameter?.trim();
+  // Positional and raw bodies remain one named flat property instead of pretending their payload has object fields.
+  if (payloadParameter) {
+    // A schema-less positional payload stays explicit but unconstrained rather than disappearing from the call shape.
+    const payloadSchema = schema ?? {};
+    // Raw serialization always consumes its named payload, while structured positional bodies follow request requiredness.
+    const required = content.required || representation.serialization === "raw" ? [payloadParameter] : [];
+    return { properties: { [payloadParameter]: payloadSchema }, required, additionalProperties: false };
+  }
+  // Only an object-valued properties keyword can contribute named fields to the flat call shape.
+  const properties = isSchemaObject(schemaObject?.properties)
+    ? { ...schemaObject.properties }
+    : {};
+  for (const name of Object.keys(representation.encoding ?? {}).sort()) {
+    // Encoding-only multipart or form fields remain callable even when the source omitted a property schema.
+    if (!(name in properties)) {
+      properties[name] = {};
+    }
+  }
+  // Malformed non-array required values cannot become invented call requirements.
+  const required = Array.isArray(schemaObject?.required)
+    ? schemaObject.required.filter((name): name is string => typeof name === "string")
+    : [];
+  const additional = schemaObject?.additionalProperties;
+  return {
+    properties,
+    required,
+    // Additional body fields are callable only when the reviewed schema explicitly admits them.
+    additionalProperties: typeof additional === "boolean" || isSchemaObject(additional) ? additional : false,
+  };
+}
+
+/** Resolves public raw schema truth, including one shared root reference, with projection fallback for legacy fixtures. */
+function resolvedJsonSchema(
+  contract: FixtureSchemaContract | undefined,
+  serviceVersionID: string | undefined,
+  fixture: Fixture,
+): unknown {
+  // Missing schema metadata leaves the corresponding parameter deliberately unconstrained.
+  if (!contract) {
+    return undefined;
+  }
+  const schema = preferredSchemaValue(contract);
+  // Raw truth may carry the shared reference even when a deliberately lossy projection omits it.
+  const rawReference = isSchemaObject(schema) && typeof schema.$ref === "string" ? schema.$ref : undefined;
+  // Projection metadata remains the fallback for legacy raw-less contracts.
+  const reference = rawReference ?? contract.projection.$ref;
+  // Inline schemas and local references remain in their owning request section without cross-document lookup.
+  if (!reference || !contract.shared_definitions || !serviceVersionID) {
+    return schema;
+  }
+  const prefix = "#/$defs/";
+  // Only the admitted shared-dictionary namespace can be resolved across fixture sections.
+  if (!reference.startsWith(prefix)) {
+    return schema;
+  }
+  const encodedName = reference.slice(prefix.length);
+  // A shared root must identify one dictionary entry rather than a deeper unadvertised path.
+  if (!encodedName || encodedName.includes("/")) {
+    return schema;
+  }
+  const name = encodedName.replaceAll("~1", "/").replaceAll("~0", "~");
+  const definition = fixture.schemaDefinitions[serviceVersionID]?.[name];
+  // An absent dictionary entry cannot be guessed from the reference name.
+  if (!definition) {
+    return schema;
+  }
+  return preferredSchemaValue(definition);
+}
+
+/** Chooses authoritative raw JSON Schema when present and converts only legacy projection-only contracts. */
+function preferredSchemaValue(contract: FixtureSchemaContract): unknown {
+  // Boolean schemas and non-empty raw objects retain their complete public validation semantics.
+  if (typeof contract.raw === "boolean" || (isSchemaObject(contract.raw) && Object.keys(contract.raw).length > 0)) {
+    return contract.raw;
+  }
+  return projectionToJsonSchema(contract.projection);
+}
+
+/** Recognizes JSON object schemas without treating arrays as keyword maps. */
+function isSchemaObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Converts a legacy bounded Engine projection to familiar JSON Schema keyword spelling. */
+function projectionToJsonSchema(projection: FixtureSchemaProjection): Record<string, unknown> {
+  const schema: Record<string, unknown> = {};
+  // References remain lazy and resolve through the already advertised definitions section.
+  if (projection.$ref) {
+    schema.$ref = projection.$ref;
+  }
+  // Scalar identity fields can be copied directly without exposing raw source extensions.
+  if (projection.type) {
+    schema.type = projection.type;
+  }
+  // Format refines a scalar type without changing the top-level call namespace.
+  if (projection.format) {
+    schema.format = projection.format;
+  }
+  // Nested projections retain their reviewed property names recursively.
+  if (projection.properties) {
+    schema.properties = Object.fromEntries(
+      Object.entries(projection.properties).map(([name, child]) => [name, projectionToJsonSchema(child)]),
+    );
+  }
+  // Array item contracts remain attached to the flattened field that owns them.
+  if (projection.items) {
+    schema.items = projectionToJsonSchema(projection.items);
+  }
+  // A schema-valued additional-properties contract is preserved rather than broadened to true.
+  if (projection.additional_properties) {
+    schema.additionalProperties = projectionToJsonSchema(projection.additional_properties);
+  }
+  // Required names retain source order inside nested schemas; only the top-level merged set is sorted.
+  if (projection.required) {
+    schema.required = [...projection.required];
+  }
+  // Examples are public documentation and help agents construct otherwise underspecified scalars.
+  if (projection.example !== undefined) {
+    schema.example = projection.example;
+  }
+  return schema;
 }
 
 /** Converts the effective fixture policy into one stable, provider-neutral call instruction. */
@@ -520,7 +800,7 @@ function toDetailShell(candidate: SearchCandidate, mode: "query" | "operationId"
   };
   // Unified candidates have no physical path or pagination contract to project.
   if (candidate.summary.kind === "unified") {
-    return { ...candidate.summary, kind: "unified", schema_status: schemaStatus };
+    return withExecutionReadiness({ ...candidate.summary, kind: "unified", schema_status: schemaStatus, execution_ready: false });
   }
   // Candidate construction guarantees physical metadata before detail can be returned.
   if (!candidate.detail_metadata) {
@@ -528,7 +808,7 @@ function toDetailShell(candidate: SearchCandidate, mode: "query" | "operationId"
   }
   const { path, pagination, query_pagination: queryPagination } = candidate.detail_metadata;
   // Ranked results withhold reusable caller bounds; exact lookup remains the authoritative numeric policy.
-  return { ...candidate.summary, path, pagination: mode === "query" ? queryPagination : pagination, schema_status: schemaStatus };
+  return withExecutionReadiness({ ...candidate.summary, path, pagination: mode === "query" ? queryPagination : pagination, schema_status: schemaStatus, execution_ready: false });
 }
 
 /** Scores public physical and Unified metadata with identity weighted most strongly. */

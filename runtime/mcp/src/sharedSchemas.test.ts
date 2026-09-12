@@ -30,10 +30,12 @@ describe("shared schema documentation", () => {
   it("advertises a lazy dictionary section while keeping the compact root", () => {
     const result = searchDocs(sharedFixture(), { operationId: "createItem" });
     expect(result).toMatchObject({ mode: "operationId", operation: {
-      schema_status: { complete: false, available_sections: ["parameters", "request", "definitions"] },
+      schema_status: { complete: false, available_sections: ["params_schema", "parameters", "request", "definitions"] },
+      execution_ready: true,
+      params_schema: { properties: { label: { type: "string" } } },
       request_content: { representations: [{ schema: { raw: { $ref: "#/$defs/Payload" } } }] },
     }});
-    expect(JSON.stringify(result)).not.toContain('"label"');
+    expect(JSON.stringify(result)).not.toContain('"Payload":');
   });
 
   // Existing exact section/JSON Pointer retrieval is enough; no extra tool or schema copy is needed.
