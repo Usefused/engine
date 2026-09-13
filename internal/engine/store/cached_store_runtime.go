@@ -321,13 +321,18 @@ func (s *cachedStore) invalidateRuntimeConfiguration(ctx context.Context) {
 	recordRuntimeCacheInvalidation(ctx, "runtime_configuration", propagation)
 }
 
-// invalidateRuntimeCacheLocal advances the generation before clearing entries
-// so post-commit readers never join a pre-commit singleflight.
+// invalidateRuntimeCacheLocal refreshes configuration and credentials on both
+// the committing node and peers receiving its runtime invalidation signal.
 func (s *cachedStore) invalidateRuntimeCacheLocal() {
 	// The generation changes before the clear so a post-commit reader cannot
 	// join an in-flight load that began against the previous configuration.
 	s.runtime.generation.Add(1)
 	s.runtime.cache.Clear()
+	// Workspace transactions can write bucket secrets through an uncached
+	// transaction store, so the shared commit signal must evict hits and misses
+	// from both credential lookup shapes as well as the runtime projection.
+	s.cache.DeletePrefix("secret:")
+	s.cache.DeletePrefix("list_secrets:")
 }
 
 // publishCacheInvalidation deliberately returns a stable outcome rather than
