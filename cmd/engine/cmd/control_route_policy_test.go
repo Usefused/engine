@@ -249,6 +249,29 @@ func TestConnectBrandingRoutesRequireWorkspacePermissions(t *testing.T) {
 	}
 }
 
+// TestBucketSecretRouteRequiresCredentialManagement locks generic secret
+// mutation to the explicitly selected bucket resource.
+func TestBucketSecretRouteRequiresCredentialManagement(t *testing.T) {
+	const route = "PUT /workspace/buckets/{bucket_id}/secrets"
+	for _, policy := range controlRESTPolicies {
+		// Only the exact bucket-secret route is relevant to this least-privilege assertion.
+		if policy.method+" "+policy.pattern != route {
+			continue
+		}
+		// The route needs exactly one bucket-scoped grant and no workspace-wide substitute.
+		if len(policy.requirements) != 1 {
+			t.Fatalf("bucket secret requirements = %#v", policy.requirements)
+		}
+		requirement := policy.requirements[0]
+		// Credential mutation authority must be resolved from the route's exact bucket ID.
+		if requirement.permission != accesscontrol.PermissionCredentialsManage || requirement.resourceType != accesscontrol.ResourceBucket || requirement.source != resourceFromPath || requirement.pathParam != "bucket_id" {
+			t.Fatalf("bucket secret requirement = %#v", requirement)
+		}
+		return
+	}
+	t.Fatalf("authorization policy %s is missing", route)
+}
+
 func TestControlAuthorizationRejectsMalformedScopedResource(t *testing.T) {
 	workspaceID := uuid.New()
 	response := httptest.NewRecorder()

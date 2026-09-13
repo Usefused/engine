@@ -70,6 +70,8 @@ func WorkspaceHandler(s store.Store, verifier ServiceVerifier, masterKey []byte,
 
 	r.Put("/buckets/{id}/values", UpsertBucketValueHandler(s))
 	r.Delete("/buckets/{id}/values", DeleteBucketValueHandler(s))
+	// Generic secrets are bucket-scoped by the route and never infer a provider service.
+	r.Put("/buckets/{id}/secrets", UpsertBucketSecretHandler(s, masterKey))
 
 	r.Post("/buckets/{bucket_id}/services/{service_id}/connect/sessions", StartConnectSessionHandler(s, verifier, masterKey, redirectURI))
 	// These token-authenticated browser routes stay beside the provider callback

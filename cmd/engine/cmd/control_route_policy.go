@@ -133,6 +133,10 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodDelete, "/workspace/buckets/{bucket_id}/values", false, []routeRequirement{
 		pathRequirement(accesscontrol.PermissionBucketManage, accesscontrol.ResourceBucket, "bucket_id"),
 	}},
+	// Generic secret mutation is independently authorized against the explicit bucket resource.
+	{http.MethodPut, "/workspace/buckets/{bucket_id}/secrets", false, []routeRequirement{
+		pathRequirement(accesscontrol.PermissionCredentialsManage, accesscontrol.ResourceBucket, "bucket_id"),
+	}},
 	{http.MethodPost, "/workspace/buckets/{bucket_id}/services/{service_id}/connect/sessions", false, []routeRequirement{
 		pathRequirement(accesscontrol.PermissionConnectionManage, accesscontrol.ResourceBucket, "bucket_id"),
 		pathRequirement(accesscontrol.PermissionServiceConsume, accesscontrol.ResourceService, "service_id"),
