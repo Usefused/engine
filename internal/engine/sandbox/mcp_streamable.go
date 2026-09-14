@@ -18,6 +18,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/mcpsession"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/google/uuid"
+	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -116,6 +117,10 @@ func handleMCPStreamablePost(ctx context.Context, span trace.Span, w http.Respon
 	}
 	if !allowMessage(w, sess.appID) {
 		recordMCPTransportOutcome(span, "rate_limited", true)
+		return
+	}
+	// Engine-owned event resources are served at the authenticated transport boundary instead of exposing broker subjects to the child.
+	if handled, _ := handleMCPEventResourceRequest(span, w, sess, request); handled {
 		return
 	}
 	serveMCPStreamableRequest(ctx, span, w, sess, body, request)
@@ -233,6 +238,12 @@ func startMCPStreamableSession(ctx context.Context, routeID, appID, token, proto
 	}
 	sessionID := uuid.NewString()
 	runtimeCtx, cancel := mcpSessionContext(context.WithoutCancel(ctx), identity.TokenPolicy.ExpiresAt)
+	eventResources, err := loadMCPEventResources(runtimeCtx, appID, identity)
+	// Invalid immutable event authority must release the cache ownership acquired above.
+	if err != nil {
+		cleanupFailedMCPSessionStart(appID, sessionID, cancel)
+		return nil, err
+	}
 	fixture, err := prepareSessionFixture(runtimeCtx, appID, identity.TokenPolicy)
 	// Failed preparation must release the exact app's connection ownership.
 	if err != nil {
@@ -257,6 +268,10 @@ func startMCPStreamableSession(ctx context.Context, routeID, appID, token, proto
 		protocolVersion: protocolVersion, transport: mcpStreamableTransport, urlElicitation: urlElicitation,
 		cmd: cmd, stdin: stdin, cancel: cancel, responses: make(chan string, 32),
 		serverNotifications: make(chan string, maxMCPServerNotifications),
+		eventNotifications:  make(chan string, maxMCPEventNotifications),
+		eventResources:      eventResources,
+		eventSubscriptions:  map[string]*nats.Subscription{},
+		eventLatest:         map[string]mcpEventSnapshot{},
 		authActions:         make(chan struct{}, maxPendingMCPAuthCorrelations),
 		token:               token, fixture: fixture, authContext: authContext,
 	}
@@ -302,6 +317,10 @@ func serveMCPStreamableRequest(ctx context.Context, span trace.Span, w http.Resp
 	}
 	// Notifications are accepted without waiting for a response envelope.
 	if len(request.ID) == 0 {
+		// The accepted lifecycle notification opens Engine-owned resource methods only after the required client transition.
+		if request.Method == "notifications/initialized" {
+			markMCPClientInitialized(sess)
+		}
 		w.WriteHeader(http.StatusAccepted)
 		recordMCPTransportOutcome(span, "accepted", false)
 		return true
@@ -325,10 +344,38 @@ func serveMCPStreamableRequest(ctx context.Context, span trace.Span, w http.Resp
 	return writeMCPStreamableRuntimeResponse(span, w, sess, request, response)
 }
 
+// markMCPClientInitialized records the client-side lifecycle transition only for the exact active session.
+func markMCPClientInitialized(sess *mcpSession) bool {
+	sess.lifecycleMu.Lock()
+	defer sess.lifecycleMu.Unlock()
+	// A notification queued behind termination cannot reopen protocol methods on a retired session.
+	if !mcpSessionRegisteredAndActiveLocked(sess) {
+		return false
+	}
+	sess.clientInitialized = true
+	return true
+}
+
+// mcpClientInitializationComplete reads the client lifecycle transition under its owning lock.
+func mcpClientInitializationComplete(sess *mcpSession) bool {
+	sess.lifecycleMu.Lock()
+	defer sess.lifecycleMu.Unlock()
+	return sess.clientInitialized
+}
+
 // writeMCPStreamableRuntimeResponse commits initialization and verifies final HTTP delivery.
 func writeMCPStreamableRuntimeResponse(span trace.Span, w http.ResponseWriter, sess *mcpSession, request mcpJSONRPCRequest, response string) bool {
 	// Initialization must adopt the child SDK's negotiated version before any session header becomes authoritative.
 	if request.Method == "initialize" {
+		var err error
+		response, err = addMCPEventResourceCapability(response, len(sess.eventResources) > 0)
+		// Capability augmentation must succeed before the response can establish this session.
+		if err != nil {
+			failure := mcpRuntimeFailureForRequest(request, mcpRuntimeResponseFailedCode, "session_initialization", "dispatched")
+			writeMCPJSONRPCSessionError(w, request.ID, "MCP runtime returned an invalid initialize result", http.StatusBadGateway, failure)
+			recordMCPTransportFailure(span, "runtime_failed", failure)
+			return false
+		}
 		protocolVersion, valid := mcpInitializeResultProtocolVersion(response)
 		// Invalid negotiation is read-only runtime failure, never evidence that a provider mutation ran.
 		if !valid {
@@ -461,6 +508,11 @@ func streamMCPServerEvents(ctx context.Context, w io.Writer, flusher http.Flushe
 			// In-flight writes retain their slot; completion or transport failure closes this action before another durable OAuth row is admitted.
 			releaseMCPAuthAction(sess)
 			if !written {
+				return
+			}
+		case notification := <-sess.eventNotifications:
+			// Event notifications have no OAuth action slot to release; they are independent live resource signals.
+			if !writeMCPStreamableServerEvent(w, flusher, notification) {
 				return
 			}
 		case <-ticker.C:

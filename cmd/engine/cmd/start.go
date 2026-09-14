@@ -1008,7 +1008,7 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 		deps.engineStore, deps.registryClient, deps.masterKey, deps.configStore, deps.natsClient, deps.tokenValidator, deps.connectRedirectURI,
 	)
 	sandbox.InitSandbox(
-		r, deps.natsClient, deps.cfg, deps.localObjectCache, deps.tokenValidator, deps.engineStore, secretResolver,
+		r, deps.natsClient, deps.cfg, deps.localObjectCache, deps.tokenValidator, deps.engineStore, deps.engineStore, deps.configStore, secretResolver,
 		deps.providerRateLimits, port, executionServer.ExecuteUnified, executionServer.StartConnectSession,
 	)
 	// Runtime REST execution reuses the same process-wide sandbox cache and

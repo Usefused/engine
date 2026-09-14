@@ -28,6 +28,7 @@ import (
 	"github.com/Usefused/engine/internal/shared/observability"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -40,6 +41,7 @@ type mcpSession struct {
 	clientMetadata      mcpsession.Metadata
 	clientInfoRecorded  bool
 	initialized         bool
+	clientInitialized   bool
 	initializeRequestID string
 	appID               string
 	routeID             string
@@ -59,7 +61,13 @@ type mcpSession struct {
 	idleTimer           *time.Timer
 	responses           chan string
 	sseFailures         chan mcpSSEFailure
+	sseResponses        chan string
 	serverNotifications chan string
+	eventNotifications  chan string
+	eventMu             sync.Mutex
+	eventResources      map[string]mcpEventResource
+	eventSubscriptions  map[string]*nats.Subscription
+	eventLatest         map[string]mcpEventSnapshot
 	authActions         chan struct{} // Bounds persisted browser actions until their completion notification leaves the server queue.
 	token               string
 	activityMu          sync.Mutex
@@ -96,6 +104,8 @@ var globalObjectCache ObjectCache
 var globalDispatcher *engine.Dispatcher
 var globalTokenValidator auth.TokenValidator
 var globalMCPRouteResolver MCPRouteResolver
+var globalMCPEventRuntimeStore MCPEventRuntimeStore
+var globalMCPEventConfigStore MCPEventConfigStore
 var globalSecretResolver SecretResolver
 var globalMCPUnifiedExecute MCPUnifiedExecuteFunc
 var globalMCPConnectSessionStart MCPConnectSessionStartFunc
@@ -104,6 +114,16 @@ var globalMCPConnectSessionStart MCPConnectSessionStartFunc
 // session initialization while preserving exact Version ID routes.
 type MCPRouteResolver interface {
 	ResolveMCPRoute(context.Context, uuid.UUID) (*store.MCPRouteTarget, error)
+}
+
+// MCPEventRuntimeStore loads the immutable event selection attached to one authorized MCP version.
+type MCPEventRuntimeStore interface {
+	GetAppRuntime(context.Context, uuid.UUID) (*store.AppRuntime, error)
+}
+
+// MCPEventConfigStore reads only the applied attachment state needed to construct exact event subjects.
+type MCPEventConfigStore interface {
+	GetConfigState(context.Context, string) (*store.ConfigState, error)
 }
 
 // MCPUnifiedExecuteFunc is the existing Engine ExecuteUnified method value;
@@ -196,7 +216,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 // InitSandbox wires the process-owned physical and logical execution edges used by SDK and MCP transports.
-func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, cache ObjectCache, validator auth.TokenValidator, routeResolver MCPRouteResolver, resolver SecretResolver, rateLimits store.ProviderRateLimitStore, enginePort string, unifiedExecute MCPUnifiedExecuteFunc, connectSessionStart MCPConnectSessionStartFunc) {
+func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, cache ObjectCache, validator auth.TokenValidator, routeResolver MCPRouteResolver, eventRuntimeStore MCPEventRuntimeStore, eventConfigStore MCPEventConfigStore, resolver SecretResolver, rateLimits store.ProviderRateLimitStore, enginePort string, unifiedExecute MCPUnifiedExecuteFunc, connectSessionStart MCPConnectSessionStartFunc) {
 	cfg = appCfg
 	globalNATSClient = nc
 	globalObjectCache = cache
@@ -207,6 +227,8 @@ func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, 
 	}
 	globalTokenValidator = validator
 	globalMCPRouteResolver = routeResolver
+	globalMCPEventRuntimeStore = eventRuntimeStore
+	globalMCPEventConfigStore = eventConfigStore
 	SetSecretResolver(resolver)
 	globalEnginePort = enginePort
 	globalMCPUnifiedExecute = unifiedExecute

@@ -182,6 +182,10 @@ func validateAppConfigDocument(doc sdkConfigDocument, kind string) error {
 	if err := validateMCPAppRestrictions(doc, kind); err != nil {
 		return err
 	}
+	// Selected event resources require one explicit inbound registration identity for exact subject routing.
+	if err := validateWebhookAttachmentRequired(doc); err != nil {
+		return err
+	}
 	// Service selection must be valid before bindings can rely on those exact
 	// configured keys and operation allowlists.
 	if err := validateAppServiceDocs(doc.Services); err != nil {
@@ -209,18 +213,20 @@ func validateMCPServerDescription(doc sdkConfigDocument, kind string) error {
 	return nil
 }
 
-// validateMCPAppRestrictions rejects malformed mcp app restrictions before it can cross the Unified operation boundary.
+// validateMCPAppRestrictions rejects package-only or unbounded MCP fields before they cross the Unified operation boundary.
 func validateMCPAppRestrictions(doc sdkConfigDocument, kind string) error {
+	// SDK documents share this decoder but do not inherit MCP transport restrictions.
 	if kind != store.AppKindMCP.String() {
 		return nil
 	}
+	// Hosted MCP apps execute in Engine and never select a package emitter.
 	if strings.TrimSpace(doc.Language) != "" {
 		return errors.New("mcp config must not set language")
 	}
 	for name, service := range doc.Services {
-		// MCP is operation-only; webhook attachment belongs to SDK apps.
-		if len(service.Webhooks) > 0 || service.WebhooksSelectAll {
-			return fmt.Errorf("mcp service %s cannot select webhooks", name)
+		// Exact event resources are enumerable; select-all would create an unbounded resource namespace in the initial transport.
+		if service.WebhooksSelectAll {
+			return fmt.Errorf("mcp service %s must select explicit webhook events instead of webhooks_select_all", name)
 		}
 	}
 	return nil

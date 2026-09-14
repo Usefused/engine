@@ -27,6 +27,7 @@ import (
 	"github.com/Usefused/engine/runtime"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -36,6 +37,7 @@ const (
 	maxMCPMessageBodyBytes   = 256 * 1024
 	maxMCPSessionIdleTimeout = 5 * time.Minute
 	maxMCPSSEFailureQueue    = 4
+	maxMCPSSEServerResponses = 32
 	mcpSSEFailureDrainGrace  = 250 * time.Millisecond
 	// A one-MiB result can double when nested as JSON text; this also reserves
 	// room for the bounded request ID and the fixed JSON-RPC envelope.
@@ -109,6 +111,12 @@ func mcpSseHandler(w http.ResponseWriter, r *http.Request) {
 func startMCPSSESession(r *http.Request, w http.ResponseWriter, routeID, appID, token string, authContext map[string]any, identity auth.RuntimeIdentity) (string, context.Context, io.ReadCloser, bool) {
 	sessionID := uuid.NewString()
 	sessionCtx, cancel := mcpSessionContext(r.Context(), identity.TokenPolicy.ExpiresAt)
+	eventResources, err := loadMCPEventResources(sessionCtx, appID, identity)
+	// Invalid immutable event authority must release cache ownership before a legacy stream is exposed.
+	if err != nil {
+		failMCPSSESessionStart(w, appID, sessionID, cancel, err)
+		return "", nil, nil, false
+	}
 	fixture, err := prepareSessionFixture(sessionCtx, appID, identity.TokenPolicy)
 	// Typed schema admission failures remain actionable without leaking catalogue content.
 	if err != nil {
@@ -132,7 +140,12 @@ func startMCPSSESession(r *http.Request, w http.ResponseWriter, routeID, appID, 
 		clientMetadata: initialMCPSessionMetadata(r),
 		appID:          appID, routeID: routeID, sessionID: sessionID, tokenID: identity.TokenID,
 		protocolVersion: "2024-11-05", transport: "sse", cmd: cmd, stdin: stdin,
-		cancel: cancel, token: token, fixture: fixture, authContext: authContext,
+		sseResponses:       make(chan string, maxMCPSSEServerResponses),
+		eventNotifications: make(chan string, maxMCPEventNotifications),
+		eventResources:     eventResources,
+		eventSubscriptions: map[string]*nats.Subscription{},
+		eventLatest:        map[string]mcpEventSnapshot{},
+		cancel:             cancel, token: token, fixture: fixture, authContext: authContext,
 	})
 	return sessionID, sessionCtx, stdout, true
 }
@@ -486,6 +499,7 @@ func terminateMCPSession(sessionID, reason string) bool {
 		// A nil session means another lifecycle path retained ownership and its correlations remain valid.
 		if sess != nil {
 			unregisterMCPAuthCorrelations(sess)
+			unregisterMCPEventSubscriptions(sess)
 		}
 	}()
 	// Removal and lifecycle publication share this lock with initialization so their durable order matches state order.
@@ -668,9 +682,13 @@ func setupSSEResponse(w http.ResponseWriter, sessionID string) (http.Flusher, bo
 func processMCPStream(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, stdout io.ReadCloser, sessionID string) {
 	stdoutLines := make(chan string)
 	var serverFailures <-chan mcpSSEFailure
+	var serverResponses <-chan string
+	var eventNotifications <-chan string
 	// A missing session disables only server-owned events while normal child shutdown still completes safely.
 	if sess, ok := lookupMCPSession(sessionID); ok {
 		serverFailures = sess.sseFailures
+		serverResponses = sess.sseResponses
+		eventNotifications = sess.eventNotifications
 	}
 	// The shared pump stops blocked reads and sends when this transport expires.
 	go func() {
@@ -692,14 +710,50 @@ func processMCPStream(ctx context.Context, w http.ResponseWriter, flusher http.F
 			if !ok {
 				return
 			}
+			line = augmentMCPSSEInitializeResponse(sessionID, line)
 			writeMCPSSEMessage(w, flusher, line)
 			handleMCPResponse(line, sessionID)
+		case response := <-serverResponses:
+			// Engine-owned resource results share the standard legacy message event used by child responses.
+			writeMCPSSEMessage(w, flusher, response)
+		case notification := <-eventNotifications:
+			// Live resource notifications use the same JSON-RPC SSE frame without exposing provider payloads.
+			writeMCPSSEMessage(w, flusher, notification)
 		case failure := <-serverFailures:
 			writeMCPSSEMessage(w, flusher, failure.payload)
 			terminateMCPSession(sessionID, failure.endReason)
 			return
 		}
 	}
+}
+
+// augmentMCPSSEInitializeResponse advertises Engine-owned resources only on the exact pending legacy handshake.
+func augmentMCPSSEInitializeResponse(sessionID, response string) string {
+	sess, ok := lookupMCPSession(sessionID)
+	// Unknown or operation-only sessions retain the child response byte-for-byte.
+	if !ok || len(sess.eventResources) == 0 {
+		return response
+	}
+	var envelope struct {
+		ID json.RawMessage `json:"id"`
+	}
+	// Malformed and notification output cannot match a pending initialization request.
+	if json.Unmarshal([]byte(response), &envelope) != nil || len(envelope.ID) == 0 {
+		return response
+	}
+	sess.lifecycleMu.Lock()
+	pendingID := sess.initializeRequestID
+	sess.lifecycleMu.Unlock()
+	// Only the response correlated to the retained initialize request may gain server capabilities.
+	if pendingID == "" || pendingID != string(compactJSON(envelope.ID)) {
+		return response
+	}
+	augmented, err := addMCPEventResourceCapability(response, true)
+	// Invalid child initialization remains invalid and is rejected by the existing commit path.
+	if err != nil {
+		return response
+	}
+	return augmented
 }
 
 // writeMCPSSEMessage keeps child and server-owned JSON-RPC responses on one event framing path.
@@ -828,6 +882,10 @@ func mcpMessageHandler(w http.ResponseWriter, r *http.Request) {
 func dispatchMCPSSEMessage(ctx context.Context, span trace.Span, w http.ResponseWriter, sess *mcpSession, body []byte) {
 	var request mcpJSONRPCRequest
 	parsed := json.Unmarshal(body, &request) == nil
+	// Engine-owned event resources must answer over the already-open legacy SSE stream, not the POST response.
+	if parsed && dispatchMCPSSEEventResource(span, w, sess, request) {
+		return
+	}
 	// Legacy POSTs share one child stdin, so only the bounded write is serialized while responses remain asynchronous.
 	sess.requestMu.Lock()
 	callID, written, writeErr, active := writeMCPChildRequestLocked(ctx, sess, body, request)
@@ -865,12 +923,77 @@ func dispatchMCPSSEMessage(ctx context.Context, span trace.Span, w http.Response
 		}
 		return
 	}
+	// The successfully forwarded lifecycle notification opens Engine-owned resource methods for this session.
+	if parsed && request.Method == "notifications/initialized" && len(request.ID) == 0 {
+		markMCPClientInitialized(sess)
+	}
 	// Only successfully dispatched correlatable requests own the child-response deadline.
 	if callID != "" {
 		go enforceToolCallTimeout(sess, callID)
 	}
 	w.WriteHeader(http.StatusAccepted)
 	recordMCPTransportOutcome(span, "accepted", false)
+}
+
+// mcpSSECaptureWriter records one Engine-owned JSON-RPC response before it is framed on the legacy SSE stream.
+type mcpSSECaptureWriter struct {
+	header http.Header
+	status int
+	body   strings.Builder
+}
+
+// Header returns the isolated response metadata used only while constructing the SSE payload.
+func (w *mcpSSECaptureWriter) Header() http.Header {
+	// Lazy allocation keeps zero-value captures valid in focused tests.
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+// WriteHeader retains the first status code so later encoder writes cannot replace the decision.
+func (w *mcpSSECaptureWriter) WriteHeader(status int) {
+	// HTTP semantics make the first status authoritative for one response.
+	if w.status == 0 {
+		w.status = status
+	}
+}
+
+// Write appends the bounded JSON-RPC envelope constructed by the shared resource handler.
+func (w *mcpSSECaptureWriter) Write(payload []byte) (int, error) {
+	// An implicit successful status matches net/http when a handler writes before WriteHeader.
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.body.Write(payload)
+}
+
+// dispatchMCPSSEEventResource queues one correlated Engine-owned result for delivery on the legacy stream.
+func dispatchMCPSSEEventResource(span trace.Span, w http.ResponseWriter, sess *mcpSession, request mcpJSONRPCRequest) bool {
+	// Sessions without event resources and unrelated methods continue through the child runtime.
+	if len(sess.eventResources) == 0 || !isMCPEventResourceMethod(request.Method) {
+		return false
+	}
+	capture := &mcpSSECaptureWriter{}
+	handled, _ := handleMCPEventResourceRequest(span, capture, sess, request)
+	// The method pre-check makes this defensive branch unreachable without a future routing change.
+	if !handled {
+		return false
+	}
+	payload := strings.TrimSpace(capture.body.String())
+	// Every correlated resource request must yield a JSON-RPC result or error before POST acceptance.
+	if payload == "" {
+		writeError(w, http.StatusBadGateway, "MCP event resource response unavailable")
+		return true
+	}
+	select {
+	case sess.sseResponses <- payload:
+		w.WriteHeader(http.StatusAccepted)
+	default:
+		// A disconnected or stalled SSE client cannot create an unbounded response backlog.
+		writeError(w, http.StatusServiceUnavailable, "MCP event resource response queue is full")
+	}
+	return true
 }
 
 // queueMCPSSEFailure delivers one compact correlated failure without waiting for an event-stream consumer.
