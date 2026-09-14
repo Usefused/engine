@@ -552,7 +552,7 @@ func TestInspectAppBucketReadinessSkipsCredentialReadsForAnonymousAndWebhookSele
 // no service selects webhooks in this case.
 func TestValidateWebhookAttachmentCoverage_NoAttachmentSkipsLookup(t *testing.T) {
 	configStore := &mockConfigStore{err: errors.New("must not be called")}
-	err := validateWebhookAttachmentCoverage(context.Background(), configStore, sdkConfigDocument{
+	err := validateWebhookAttachmentCoverage(context.Background(), configStore, &workspaceTestStore{}, sdkConfigDocument{
 		Services: map[string]sdkConfigServiceDoc{"github": {Webhooks: []string{"push"}}},
 	})
 	if err != nil {
@@ -566,7 +566,7 @@ func TestValidateWebhookAttachmentCoverage_NoAttachmentSkipsLookup(t *testing.T)
 // by name, that entity must already exist), same clear rejection.
 func TestValidateWebhookAttachmentCoverage_RejectsMissingAttachment(t *testing.T) {
 	configStore := &mockConfigStore{} // no state -- artifact was never applied
-	err := validateWebhookAttachmentCoverage(context.Background(), configStore, sdkConfigDocument{
+	err := validateWebhookAttachmentCoverage(context.Background(), configStore, &workspaceTestStore{}, sdkConfigDocument{
 		WebhookAttachment: "team-x-webhooks",
 		Services:          map[string]sdkConfigServiceDoc{"github": {Webhooks: []string{"push"}}},
 	})
@@ -584,7 +584,7 @@ func TestValidateWebhookAttachmentCoverage_RejectsUnregisteredService(t *testing
 	configStore := &mockConfigStore{state: &store.ConfigState{
 		DesiredState: []byte(`{"name":"team-x-webhooks","services":{"jira":{"secret":"${bucket.secret.jira_signing}"}}}`),
 	}}
-	err := validateWebhookAttachmentCoverage(context.Background(), configStore, sdkConfigDocument{
+	err := validateWebhookAttachmentCoverage(context.Background(), configStore, &workspaceTestStore{}, sdkConfigDocument{
 		WebhookAttachment: "team-x-webhooks",
 		Services:          map[string]sdkConfigServiceDoc{"github": {Webhooks: []string{"push"}}},
 	})
@@ -600,7 +600,7 @@ func TestValidateWebhookAttachmentCoverage_AcceptsRegisteredService(t *testing.T
 	configStore := &mockConfigStore{state: &store.ConfigState{
 		DesiredState: []byte(`{"name":"team-x-webhooks","services":{"github":{"secret":""},"jira":{}}}`),
 	}}
-	err := validateWebhookAttachmentCoverage(context.Background(), configStore, sdkConfigDocument{
+	err := validateWebhookAttachmentCoverage(context.Background(), configStore, &workspaceTestStore{}, sdkConfigDocument{
 		WebhookAttachment: "team-x-webhooks",
 		Services: map[string]sdkConfigServiceDoc{
 			"github": {Webhooks: []string{"push"}},
@@ -612,6 +612,24 @@ func TestValidateWebhookAttachmentCoverage_AcceptsRegisteredService(t *testing.T
 	}
 }
 
+// TestValidateWebhookAttachmentCoverage_AcceptsSlugAndDisplayNameAliases proves coverage follows resolved service identity rather than raw config keys.
+func TestValidateWebhookAttachmentCoverage_AcceptsSlugAndDisplayNameAliases(t *testing.T) {
+	serviceID := uuid.New()
+	configStore := &mockConfigStore{state: &store.ConfigState{
+		DesiredState: []byte(`{"name":"team-x-webhooks","services":{"github":{}}}`),
+	}}
+	workspaceStore := &workspaceTestStore{workspaceServices: []store.WorkspaceService{{
+		ServiceID: serviceID, ServiceSlug: "github", ServiceName: "GitHub API",
+	}}}
+	err := validateWebhookAttachmentCoverage(context.Background(), configStore, workspaceStore, sdkConfigDocument{
+		WebhookAttachment: "team-x-webhooks",
+		Services:          map[string]sdkConfigServiceDoc{"GitHub API": {Webhooks: []string{"push"}}},
+	})
+	if err != nil {
+		t.Fatalf("expected service slug and display name to resolve to the same attachment identity, got %v", err)
+	}
+}
+
 // TestValidateWebhookAttachmentCoverage_IgnoresServicesWithoutWebhooks
 // proves a service that selects only operations (no webhooks) is never
 // checked against the attached artifact's coverage -- it has no delivery
@@ -620,7 +638,7 @@ func TestValidateWebhookAttachmentCoverage_IgnoresServicesWithoutWebhooks(t *tes
 	configStore := &mockConfigStore{state: &store.ConfigState{
 		DesiredState: []byte(`{"name":"team-x-webhooks","services":{}}`),
 	}}
-	err := validateWebhookAttachmentCoverage(context.Background(), configStore, sdkConfigDocument{
+	err := validateWebhookAttachmentCoverage(context.Background(), configStore, &workspaceTestStore{}, sdkConfigDocument{
 		WebhookAttachment: "team-x-webhooks",
 		Services:          map[string]sdkConfigServiceDoc{"github": {Operations: []string{"listRepos"}}},
 	})
@@ -634,7 +652,7 @@ func TestValidateWebhookAttachmentCoverage_IgnoresServicesWithoutWebhooks(t *tes
 // "covered".
 func TestValidateWebhookAttachmentCoverage_PropagatesLookupError(t *testing.T) {
 	configStore := &mockConfigStore{err: errors.New("boom")}
-	err := validateWebhookAttachmentCoverage(context.Background(), configStore, sdkConfigDocument{
+	err := validateWebhookAttachmentCoverage(context.Background(), configStore, &workspaceTestStore{}, sdkConfigDocument{
 		WebhookAttachment: "team-x-webhooks",
 		Services:          map[string]sdkConfigServiceDoc{"github": {Webhooks: []string{"push"}}},
 	})

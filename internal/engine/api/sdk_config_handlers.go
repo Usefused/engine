@@ -489,8 +489,9 @@ func validateWebhookAttachmentRequired(doc sdkConfigDocument) error {
 // apply (generateSDKForApply/executeMCPConfigApply), same defense-in-depth
 // as bucket readiness, since the referenced webhook config can be edited
 // or removed between plan and apply.
-func validateWebhookAttachmentCoverage(ctx context.Context, configStore store.ConfigRepository, doc sdkConfigDocument) error {
+func validateWebhookAttachmentCoverage(ctx context.Context, configStore store.ConfigRepository, s store.Store, doc sdkConfigDocument) error {
 	name := strings.TrimSpace(doc.WebhookAttachment)
+	// Attachment-free SDKs have no registration state to inspect.
 	if name == "" {
 		return nil // validateWebhookAttachmentRequired already guarantees no service needs one
 	}
@@ -505,11 +506,42 @@ func validateWebhookAttachmentCoverage(ctx context.Context, configStore store.Co
 	if err != nil {
 		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "invalid webhook attachment state"}
 	}
+	var unresolved []string
 	for svcName, service := range doc.Services {
+		// Operation-only services do not depend on the inbound registration bundle.
 		if len(service.Webhooks) == 0 && !service.WebhooksSelectAll {
 			continue
 		}
-		if !registered[svcName] {
+		// Exact keys avoid a store lookup for the common case while retaining existing behavior.
+		if registered[svcName] {
+			continue
+		}
+		unresolved = append(unresolved, svcName)
+	}
+	// A key can be either the Registry display name or its stable slug, so raw map equality is not identity authority.
+	if len(unresolved) == 0 {
+		return nil
+	}
+	aliases := append([]string(nil), unresolved...)
+	for registeredName := range registered {
+		aliases = append(aliases, registeredName)
+	}
+	activations, err := s.ListWorkspaceServices(ctx, aliases)
+	if err != nil {
+		return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to resolve webhook attachment services"}
+	}
+	byAlias := workspaceWebhookServicesByKey(activations, aliases)
+	registeredIDs := make(map[uuid.UUID]bool, len(registered))
+	for registeredName := range registered {
+		// Only locally activated identities can prove that two different aliases name the same service.
+		if activation, ok := byAlias[registeredName]; ok {
+			registeredIDs[activation.ServiceID] = true
+		}
+	}
+	for _, svcName := range unresolved {
+		activation, resolved := byAlias[svcName]
+		// Missing identity or a different service must fail closed instead of silently losing inbound delivery.
+		if !resolved || !registeredIDs[activation.ServiceID] {
 			return workspaceConfigHTTPError{status: http.StatusBadRequest, message: fmt.Sprintf(
 				"service %s selects webhooks but webhook attachment %q does not register it", svcName, name)}
 		}
@@ -535,7 +567,7 @@ func decodeAppApplyPlan(ctx context.Context, configStore store.ConfigRepository,
 	}
 	// Credential values are mutable runtime dependencies, so apply preserves the
 	// immutable bucket identity without requiring the bucket to be ready now.
-	if err := validateWebhookAttachmentCoverage(ctx, configStore, doc); err != nil {
+	if err := validateWebhookAttachmentCoverage(ctx, configStore, s, doc); err != nil {
 		return sdkConfigDocument{}, appResolvedPayload{}, err
 	}
 	return doc, payload, nil
@@ -568,11 +600,7 @@ func validateAppServiceDocs(services map[string]sdkConfigServiceDoc) error {
 		return errors.New("app config requires at least one service")
 	}
 	for name, service := range services {
-		// A service may select only webhooks (no operations at all) -- MCP
-		// already rejects non-empty Webhooks/WebhooksSelectAll earlier in
-		// validateAppConfigDocument, so by the time this runs for an mcp
-		// document those are always empty/false and this check degrades to
-		// the original operations-only gate for that kind.
+		// A service may select only webhooks because SDK streams and MCP resources are complete receive capabilities.
 		if err := validateAppServiceDoc(name, service); err != nil {
 			return err
 		}
@@ -1020,7 +1048,7 @@ func resolveSDKSelections(
 		local.setGenerationTargets(resolved)
 	}
 	// Auth, credentials, attachments, and exact membership share one final admission boundary.
-	credentialSources, err := validateResolvedSDKSelections(ctx, configStore, registryClient, apiKey, doc, services, resolved, selections)
+	credentialSources, err := validateResolvedSDKSelections(ctx, configStore, s, registryClient, apiKey, doc, services, resolved, selections)
 	if err != nil {
 		return nil, nil, nil, nil, sdkConfigDocument{}, err
 	}
@@ -1034,7 +1062,7 @@ type sdkSelectionValidator interface {
 }
 
 // validateResolvedSDKSelections admits exact local scope before it can cross the shared app publication boundary.
-func validateResolvedSDKSelections(ctx context.Context, configStore store.ConfigRepository, registryClient sandbox.RegistryClient, apiKey string, doc sdkConfigDocument, workspaceServices map[string]store.WorkspaceService, resolved []sdkResolvedService, selections []models.SDKSelection) ([]sdkResolvedService, error) {
+func validateResolvedSDKSelections(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, apiKey string, doc sdkConfigDocument, workspaceServices map[string]store.WorkspaceService, resolved []sdkResolvedService, selections []models.SDKSelection) ([]sdkResolvedService, error) {
 	// Unified target aliases must be unambiguous before auth policy resolution attaches authority to them.
 	if err := validateResolvedUnifiedTargets(doc, resolved); err != nil {
 		return nil, err
@@ -1062,7 +1090,7 @@ func validateResolvedSDKSelections(ctx context.Context, configStore store.Config
 	// Credential material is intentionally absent from immutable selection
 	// admission; readiness is inspected separately after the scope is complete.
 	// Inbound scope must retain the reviewed attachment coverage alongside outbound scope.
-	if err := validateWebhookAttachmentCoverage(ctx, configStore, doc); err != nil {
+	if err := validateWebhookAttachmentCoverage(ctx, configStore, s, doc); err != nil {
 		return nil, err
 	}
 	// Exact local membership is the final guard before returning the admitted credential-source fence.
