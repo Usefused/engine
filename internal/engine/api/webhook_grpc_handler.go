@@ -312,7 +312,7 @@ func setupGRPCWebhookConsumer(ctx context.Context, thread observability.Thread, 
 			return
 		}
 		handleGRPCNatsMessage(ctx, thread, m, accountID, natsClient, stream, msgMap)
-	}, nats.Bind("WEBHOOKS", durableName))
+	}, webhookConsumerSubscribeOptions(durableName)...)
 
 	// Delivery subscription failure cannot be reported as an active receiver.
 	if err != nil {
@@ -321,6 +321,15 @@ func setupGRPCWebhookConsumer(ctx context.Context, thread observability.Thread, 
 		return nil, err
 	}
 	return sub, nil
+}
+
+// webhookConsumerSubscribeOptions binds the exact durable while preserving SDK-owned acknowledgement semantics.
+func webhookConsumerSubscribeOptions(durableName string) []nats.SubOpt {
+	return []nats.SubOpt{
+		nats.Bind("WEBHOOKS", durableName),
+		// Broker acknowledgement must come only from the SDK's explicit ACK frame; callback return cannot settle delivery.
+		nats.ManualAck(),
+	}
 }
 
 // webhookDurableName isolates receiver state by exact immutable version while subjects remain family-scoped for lifecycle continuity.

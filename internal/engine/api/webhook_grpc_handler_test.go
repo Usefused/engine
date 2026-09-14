@@ -9,6 +9,8 @@ import (
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/webhookstream"
 	"github.com/google/uuid"
+	server "github.com/nats-io/nats-server/v2/server"
+	"github.com/nats-io/nats.go"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -163,6 +165,149 @@ func TestWebhookDurableNameIsolatesSiblingVersions(t *testing.T) {
 	}
 	if first != webhookDurableName(accountID, familyID, firstAppID, "auth-worker") {
 		t.Fatal("same exact app and receiver did not retain a stable durable name")
+	}
+}
+
+// TestWebhookConsumerRequiresExplicitSDKAck proves callback return cannot settle a durable SDK delivery.
+func TestWebhookConsumerRequiresExplicitSDKAck(t *testing.T) {
+	natsServer, err := server.NewServer(&server.Options{
+		Host:      "127.0.0.1",
+		Port:      -1,
+		JetStream: true,
+		StoreDir:  t.TempDir(),
+	})
+	// A local JetStream fixture is required to exercise the client's actual auto-ack behavior.
+	if err != nil {
+		t.Fatalf("new NATS server: %v", err)
+	}
+	go natsServer.Start()
+	// Readiness bounds fixture startup and prevents connection races from obscuring acknowledgement behavior.
+	if !natsServer.ReadyForConnections(10 * time.Second) {
+		t.Fatal("NATS server did not become ready")
+	}
+	t.Cleanup(natsServer.Shutdown)
+
+	natsConnection, err := nats.Connect(natsServer.ClientURL())
+	// The regression is meaningful only when the test owns a live client connection.
+	if err != nil {
+		t.Fatalf("connect NATS client: %v", err)
+	}
+	t.Cleanup(natsConnection.Close)
+	jetStream, err := natsConnection.JetStream()
+	// JetStream setup failures must stop before asserting consumer state.
+	if err != nil {
+		t.Fatalf("create JetStream context: %v", err)
+	}
+	_, err = jetStream.AddStream(&nats.StreamConfig{Name: "WEBHOOKS", Subjects: []string{"webhooks.>"}})
+	// The production stream subject shape is retained so binding behavior matches runtime delivery.
+	if err != nil {
+		t.Fatalf("add WEBHOOKS stream: %v", err)
+	}
+
+	const durableName = "sdk-explicit-ack"
+	const deliverSubject = "deliver.sdk-explicit-ack"
+	_, err = jetStream.AddConsumer("WEBHOOKS", &nats.ConsumerConfig{
+		Durable:        durableName,
+		DeliverGroup:   durableName,
+		DeliverSubject: deliverSubject,
+		FilterSubjects: []string{"webhooks.account.service.attachment.event"},
+		AckPolicy:      nats.AckExplicitPolicy,
+		AckWait:        250 * time.Millisecond,
+	})
+	// The durable must exist before the bound queue subscription is created.
+	if err != nil {
+		t.Fatalf("add webhook consumer: %v", err)
+	}
+
+	received := make(chan struct{}, 1)
+	subscription, err := jetStream.QueueSubscribe(deliverSubject, durableName, func(*nats.Msg) {
+		// Returning without ACK models an SDK connection closing after receipt but before acknowledgement.
+		received <- struct{}{}
+	}, webhookConsumerSubscribeOptions(durableName)...)
+	// Subscription setup must use the production option set under test.
+	if err != nil {
+		t.Fatalf("subscribe webhook consumer: %v", err)
+	}
+	t.Cleanup(func() {
+		// Draining releases the bound consumer without deleting its durable state.
+		_ = subscription.Drain()
+	})
+
+	_, err = jetStream.Publish("webhooks.account.service.attachment.event", []byte(`{"ok":true}`))
+	// Publish acknowledgement establishes that the message reached the durable stream.
+	if err != nil {
+		t.Fatalf("publish webhook event: %v", err)
+	}
+	select {
+	case <-received:
+		// Callback completion intentionally carries no broker acknowledgement.
+	case <-time.After(time.Second):
+		t.Fatal("webhook callback did not receive the event")
+	}
+
+	// A brief settle interval allows any accidental client auto-ack to reach the server.
+	time.Sleep(100 * time.Millisecond)
+	consumerInfo, err := jetStream.ConsumerInfo("WEBHOOKS", durableName)
+	// Consumer inspection is the authoritative broker view of pending acknowledgement state.
+	if err != nil {
+		t.Fatalf("inspect webhook consumer: %v", err)
+	}
+	// An unacknowledged callback must remain pending and cannot advance the durable acknowledgement floor.
+	if consumerInfo.NumAckPending != 1 || consumerInfo.AckFloor.Consumer != 0 {
+		t.Fatalf("callback return settled delivery: pending=%d ack_floor=%d", consumerInfo.NumAckPending, consumerInfo.AckFloor.Consumer)
+	}
+
+	// Closing the first transport before ACK models an SDK process disappearing while the durable remains active.
+	if err := subscription.Drain(); err != nil {
+		t.Fatalf("drain first webhook subscription: %v", err)
+	}
+	redelivered := make(chan *nats.Msg, 1)
+	reconnected, err := jetStream.QueueSubscribe(deliverSubject, durableName, func(message *nats.Msg) {
+		// The replacement transport exposes the broker message so the test can apply the SDK's later explicit ACK.
+		redelivered <- message
+	}, webhookConsumerSubscribeOptions(durableName)...)
+	// Reconnecting to the same durable identity is required for retained delivery continuity.
+	if err != nil {
+		t.Fatalf("reconnect webhook consumer: %v", err)
+	}
+	t.Cleanup(func() {
+		// Draining the replacement transport leaves no test subscription behind.
+		_ = reconnected.Drain()
+	})
+
+	var redeliveredMessage *nats.Msg
+	select {
+	case redeliveredMessage = <-redelivered:
+		// The broker must retry the original pending message after its acknowledgement wait elapses.
+	case <-time.After(2 * time.Second):
+		t.Fatal("unacknowledged webhook was not redelivered after reconnect")
+	}
+	metadata, err := redeliveredMessage.Metadata()
+	// Redelivery metadata proves this was a retry rather than a second publication.
+	if err != nil || metadata.NumDelivered < 2 {
+		t.Fatalf("redelivery metadata = %+v, error = %v", metadata, err)
+	}
+	// Production applies this broker ACK only after receiving the generated SDK's event-specific ACK frame.
+	if err := redeliveredMessage.Ack(); err != nil {
+		t.Fatalf("explicitly acknowledge redelivered webhook: %v", err)
+	}
+	// Flushing creates a deterministic server boundary before inspecting the durable acknowledgement floor.
+	if err := natsConnection.FlushTimeout(time.Second); err != nil {
+		t.Fatalf("flush explicit webhook acknowledgement: %v", err)
+	}
+
+	ackDeadline := time.Now().Add(2 * time.Second)
+	for {
+		settledInfo, infoErr := jetStream.ConsumerInfo("WEBHOOKS", durableName)
+		// A settled pending count and advanced floor prove that only the explicit ACK completed delivery.
+		if infoErr == nil && settledInfo.NumAckPending == 0 && settledInfo.AckFloor.Stream == 1 {
+			break
+		}
+		// Broker state must converge promptly once the explicit ACK has crossed the flushed connection.
+		if time.Now().After(ackDeadline) {
+			t.Fatalf("explicit ACK did not settle durable: info=%+v error=%v", settledInfo, infoErr)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
