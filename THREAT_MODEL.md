@@ -20,6 +20,17 @@ Engine runs in the customer's infrastructure. Registry is a remote Fused control
 plane. Third-party APIs are external vendor systems. The embedded UI is served
 by Engine and calls Engine APIs.
 
+Registry owns account entitlements, catalogue services and versions, import and
+generation workflows, and provider baseline connection profiles. Engine owns
+workspace identities and authorization, buckets and provider credentials,
+configured apps and execution tokens, exact service-version snapshots, and
+runtime activity.
+
+Engine materializes Registry contracts during explicit control-plane workflows.
+Configured SDK, MCP, and webhook execution then uses those exact local snapshots
+plus applied workspace overrides. Missing or invalid local state fails closed;
+runtime execution never falls back to current Registry metadata.
+
 Engine does not scrape arbitrary network traffic. It injects credentials only
 when handling Fused-managed SDK, MCP, webhook, proxy, or workspace routes that
 have already resolved a configured service/bucket/auth binding.
@@ -28,7 +39,10 @@ have already resolved a configured service/bucket/auth binding.
 
 Engine makes outbound calls to:
 
-- Registry, documented in `docs/registry-contract.md`.
+- Registry for licensing, explicit catalogue and contract acquisition,
+  workspace configuration, import and generation, changelog and drift polling,
+  Registry-owned proxy workflows, and privacy-bounded aggregate reporting. See
+  `docs/license-key.md` and `docs/telemetry.md`.
 - Third-party APIs during configured SDK/MCP/runtime execution.
 - OAuth/OIDC providers during connect-session authorization and token refresh.
 - OTLP collectors when telemetry endpoints are configured.
@@ -68,9 +82,12 @@ not be placed in telemetry. See `docs/telemetry.md`.
 
 - Missing `FUSED_LICENSE_KEY`: Engine exits during startup.
 - Failed Registry handshake: Engine exits during startup.
-- Registry unavailable after startup: cached runtime metadata may continue to
-  serve configured flows, but cache misses, background polling, and
-  Registry-owned proxy routes fail.
+- Registry unavailable after startup: configured execution may continue from
+  exact local snapshots during the heartbeat grace period. Missing local state
+  and Registry-backed control workflows fail closed. When heartbeat verification
+  is required, expiry of the local lease blocks runtime traffic while leaving
+  recovery and control routes available; the next successful heartbeat reopens
+  it. See `docs/license-key.md`.
 - Missing `FUSED_ENCRYPTION_KEY`: startup secret loading fails where encrypted
   credential features require it, or development defaults warn loudly.
 

@@ -48,6 +48,23 @@ runtime call was allowed, retried, rejected, or failed. The execution path also
 adds an aggregate-only span event when commercial usage counters are enqueued;
 the event records bucket/status metadata only, not payload content.
 
+## Registry Aggregate Reporting
+
+Registry reporting is independent of OTLP export. Under the entitlement
+contract, Engine stores commercial usage counters locally and sends idempotent
+aggregates containing only a report ID, a metric from a closed vocabulary, a
+time bucket, a count, and Engine build identity.
+
+Public-service insights use a separate projection and payload. Engine reports
+eligible public-service endpoint aggregates such as counts, bounded dimensions,
+latency totals and histogram buckets, and retry totals. The entitlement gates
+owner reads of those insights, not eligible contribution.
+
+Neither reporting path includes request or response bodies, headers, provider
+URLs, credentials, end-user references, local app identities, environment
+names, traces, or raw failure messages. Local Activity remains available without
+Registry reporting.
+
 ## Secret Handling
 
 Credentials and secrets must not be added to span attributes, refs, logs, or
