@@ -499,6 +499,8 @@ func terminateMCPSession(sessionID, reason string) bool {
 	reason = canonicalMCPSessionEndReason(sess.lifecycleCtx, reason)
 	// Ending a session closes any in-flight search spans with one stable boundary code.
 	finishMCPSearchSession(sess)
+	// Explicit modern handles must stop resolving before their child runtime is released.
+	unregisterMCPModernToolHandle(sess)
 	// A live child process is best-effort killed after its in-flight observations close.
 	if sess.cmd != nil && sess.cmd.Process != nil {
 		_ = sess.cmd.Process.Kill()
@@ -585,6 +587,10 @@ func publishMCPSessionEvent(sess *mcpSession, eventType, endReason string) {
 
 // publishMCPSessionEventLocked sends an ordered session lifecycle event while its caller owns lifecycleMu.
 func publishMCPSessionEventLocked(sess *mcpSession, eventType, endReason string) {
+	// A stateless catalogue or documentation request owns a child process but no client-visible MCP session.
+	if sess.suppressLifecycle {
+		return
+	}
 	// Session metadata uses only the existing durable lifecycle subject, never OTEL attributes.
 	if globalNATSClient != nil && globalNATSClient.JS != nil {
 		metadata := mcpSessionMetadata(sess)

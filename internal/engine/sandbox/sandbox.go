@@ -44,9 +44,11 @@ type mcpSession struct {
 	appID               string
 	routeID             string
 	sessionID           string
+	modernStateHandle   string // Explicit 2026 tool state is separate from the child bridge identity.
 	tokenID             uuid.UUID
 	protocolVersion     string // Guarded by activityMu once the session is registered and negotiation can race termination.
 	transport           string
+	suppressLifecycle   bool // Disposable modern metadata calls must not inflate user-visible session history.
 	cmd                 *exec.Cmd
 	stdin               io.WriteCloser
 	cancel              context.CancelFunc

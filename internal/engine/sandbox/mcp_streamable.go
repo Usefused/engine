@@ -239,6 +239,11 @@ func allowMCPStreamableConcurrency(ctx context.Context, span trace.Span, w http.
 
 // startMCPStreamableSession starts one isolated runtime that survives active use until authorization or cleanup ends it.
 func startMCPStreamableSession(ctx context.Context, routeID, appID, token, protocolVersion string, urlElicitation bool, authContext map[string]any, identity auth.RuntimeIdentity, metadata mcpsession.Metadata) (*mcpSession, error) {
+	return startMCPRuntimeSession(ctx, routeID, appID, token, protocolVersion, mcpStreamableTransport, false, urlElicitation, authContext, identity, metadata)
+}
+
+// startMCPRuntimeSession starts one isolated child behind either a legacy connection or an explicit modern state handle.
+func startMCPRuntimeSession(ctx context.Context, routeID, appID, token, protocolVersion, transport string, suppressLifecycle, urlElicitation bool, authContext map[string]any, identity auth.RuntimeIdentity, metadata mcpsession.Metadata) (*mcpSession, error) {
 	// Runtime state is loaded only after the shared token authorization has succeeded.
 	if err := globalObjectCache.ConnectSDK(ctx, appID); err != nil {
 		return nil, err
@@ -266,7 +271,7 @@ func startMCPStreamableSession(ctx context.Context, routeID, appID, token, proto
 	sess := &mcpSession{
 		clientMetadata: metadata,
 		appID:          appID, routeID: routeID, sessionID: sessionID, tokenID: identity.TokenID,
-		protocolVersion: protocolVersion, transport: mcpStreamableTransport, urlElicitation: urlElicitation,
+		protocolVersion: protocolVersion, transport: transport, suppressLifecycle: suppressLifecycle, urlElicitation: urlElicitation,
 		cmd: cmd, stdin: stdin, cancel: cancel, responses: make(chan string, 32),
 		serverNotifications: make(chan string, maxMCPServerNotifications),
 		authActions:         make(chan struct{}, maxPendingMCPAuthCorrelations),

@@ -112,12 +112,16 @@ func handleMCPModernPost(ctx context.Context, span trace.Span, w http.ResponseWr
 		recordMCPTransportOutcome(span, "rate_limited", true)
 		return
 	}
-	// The modern surface advertises only the resource methods implemented by this migration slice.
+	// The modern surface unifies the established tool runtime with event resources on one stateless endpoint.
 	switch request.Method {
 	case "server/discover":
 		handleMCPModernDiscover(w, request, admission)
 	case "ping":
 		writeMCPModernResult(w, request.ID, map[string]any{}, admission.server)
+	case "tools/list":
+		handleMCPModernToolsList(ctx, span, w, r, routeID, token, request, admission)
+	case "tools/call":
+		handleMCPModernToolsCall(ctx, span, w, r, routeID, token, request, admission)
 	case "resources/list":
 		handleMCPModernResourcesList(w, request, admission)
 	case "resources/templates/list":
@@ -237,15 +241,27 @@ func allowMCPModernSubscriptionStart(w http.ResponseWriter, requestID json.RawMe
 
 // mcpModernRequestName returns the exact parameter mirrored by Mcp-Name for standard routed methods.
 func mcpModernRequestName(request mcpJSONRPCRequest) (string, bool, error) {
-	// Only the currently implemented resource read method has a name-bearing parameter.
-	if request.Method != "resources/read" {
+	// List and discovery methods have no routed name to mirror at the HTTP edge.
+	if request.Method != "resources/read" && request.Method != "tools/call" {
 		return "", false, nil
 	}
 	var params struct {
-		URI string `json:"uri"`
+		URI  string `json:"uri"`
+		Name string `json:"name"`
+	}
+	// Malformed parameters cannot become a trusted HTTP routing identity.
+	if json.Unmarshal(request.Params, &params) != nil {
+		return "", true, errors.New(request.Method + " requires valid params")
+	}
+	// Tool calls mirror their exact bounded public tool name for gateway routing.
+	if request.Method == "tools/call" {
+		if strings.TrimSpace(params.Name) == "" || len(params.Name) > 256 {
+			return "", true, errors.New("tools/call requires a valid name")
+		}
+		return params.Name, true, nil
 	}
 	// An empty or oversized URI cannot become either an authorization lookup or a routing header value.
-	if json.Unmarshal(request.Params, &params) != nil || strings.TrimSpace(params.URI) == "" || len(params.URI) > maxMCPModernResourceURIBytes {
+	if strings.TrimSpace(params.URI) == "" || len(params.URI) > maxMCPModernResourceURIBytes {
 		return "", true, errors.New("resources/read requires a valid uri")
 	}
 	parsed, err := url.ParseRequestURI(params.URI)
@@ -291,9 +307,9 @@ func admitMCPModernApp(ctx context.Context, routeID, token string) (*mcpModernAd
 	return &mcpModernAdmission{target: target, identity: identity, server: server, resources: resources}, http.StatusOK, nil
 }
 
-// handleMCPModernDiscover advertises the stateless revision and only the resource capabilities implemented by this slice.
+// handleMCPModernDiscover advertises the unified stateless tool and selected event-resource capabilities.
 func handleMCPModernDiscover(w http.ResponseWriter, request mcpJSONRPCRequest, admission *mcpModernAdmission) {
-	capabilities := map[string]any{}
+	capabilities := map[string]any{"tools": map[string]any{}}
 	// Resource capability is absent for operation-only versions instead of advertising an unusable empty namespace.
 	if len(admission.resources) > 0 {
 		capabilities["resources"] = map[string]any{"subscribe": true}
@@ -560,7 +576,13 @@ func writeMCPModernSSEMessage(w io.Writer, flusher http.Flusher, message map[str
 // writeMCPModernResult adds the mandatory result type and immutable server identity to one successful response.
 func writeMCPModernResult(w http.ResponseWriter, id json.RawMessage, result map[string]any, server FixtureServerMetadata) {
 	result["resultType"] = "complete"
-	result["_meta"] = map[string]any{mcpServerInfoMetaKey: mcpModernServerInfo(server)}
+	metadata, _ := result["_meta"].(map[string]any)
+	// Existing tool-result metadata remains visible while every modern response gains immutable server identity.
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata[mcpServerInfoMetaKey] = mcpModernServerInfo(server)
+	result["_meta"] = metadata
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set(mcpProtocolVersionHeader, mcpModernProtocolVersion)
 	w.WriteHeader(http.StatusOK)

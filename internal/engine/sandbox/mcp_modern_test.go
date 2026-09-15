@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -141,7 +143,7 @@ func installMCPModernFixture(t *testing.T) *mcpModernFixture {
 	globalMCPEventConfigStore = &mcpModernConfigStore{key: configKey, state: &store.ConfigState{DesiredState: []byte(`{"webhook_attachment":"payments-events"}`)}}
 	globalMCPRouteResolver = &mcpRouteResolverStub{target: &store.MCPRouteTarget{AppFamilyID: familyID, AppID: appID, Stable: true}}
 	globalTokenValidator = &mcpModernTokenValidator{token: token, identity: identity}
-	globalObjectCache = &streamableSessionCache{richMockCache: &richMockCache{}}
+	globalObjectCache = &streamableSessionCache{richMockCache: &richMockCache{scopeJSON: selections}}
 	router := chi.NewRouter()
 	router.HandleFunc("/mcp/{id}", mcpStreamableHandler)
 	uri := "fused://events/" + serviceID.String() + "/payment.succeeded"
@@ -182,9 +184,11 @@ func newMCPModernRequest(t *testing.T, fixture *mcpModernFixture, id any, method
 	request.Header.Set("Accept", "application/json, text/event-stream")
 	request.Header.Set(mcpProtocolVersionHeader, mcpModernProtocolVersion)
 	request.Header.Set(mcpMethodHeader, method)
-	// Name-bearing methods mirror their exact routed parameter in a required header.
+	// Name-bearing resource reads and tool calls mirror their exact routed parameter in a required header.
 	if method == "resources/read" {
 		request.Header.Set(mcpNameHeader, fields["uri"].(string))
+	} else if method == "tools/call" {
+		request.Header.Set(mcpNameHeader, fields["name"].(string))
 	}
 	return request
 }
@@ -210,8 +214,9 @@ func TestMCPModernDiscoveryAndResources(t *testing.T) {
 	discovered := decodeMCPModernResult(t, discovery)
 	capabilities, _ := discovered["capabilities"].(map[string]any)
 	resources, _ := capabilities["resources"].(map[string]any)
-	// Discovery must advertise only the implemented modern resource subscription capability and mandatory result metadata.
-	if discovered["resultType"] != "complete" || resources["subscribe"] != true || capabilities["tools"] != nil || discovery.Header().Get(mcpSessionIDHeader) != "" {
+	tools, _ := capabilities["tools"].(map[string]any)
+	// Discovery must advertise both the modern tool catalogue and the selected resource subscription capability without a session header.
+	if discovered["resultType"] != "complete" || resources["subscribe"] != true || tools == nil || discovery.Header().Get(mcpSessionIDHeader) != "" {
 		t.Fatalf("discovery result = %#v headers:%v", discovered, discovery.Header())
 	}
 	listedResponse := httptest.NewRecorder()
@@ -237,6 +242,171 @@ func TestMCPModernDiscoveryAndResources(t *testing.T) {
 	// The resource returns the latest retained payload with publisher identity, without acknowledging any durable SDK consumer.
 	if len(contents) != 1 || !strings.Contains(contents[0].(map[string]any)["text"].(string), `"id":"message-1"`) || !strings.Contains(contents[0].(map[string]any)["text"].(string), `"amount":4200`) {
 		t.Fatalf("resource contents = %#v", contents)
+	}
+}
+
+// TestMCPModernToolsAndExplicitStateEndToEnd proves 2026 discovery, tool calls, and explicit cross-call state through a real child runtime.
+func TestMCPModernToolsAndExplicitStateEndToEnd(t *testing.T) {
+	// The shipped tool sandbox is a Node bundle, so this boundary cannot be exercised without Node.
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("Node is required for modern MCP tool coverage")
+	}
+	fixture := installMCPModernFixture(t)
+	previousConfig, previousEnginePort := cfg, globalEnginePort
+	localConfig := *cfg
+	// Process startup under race instrumentation needs a wider bound than ordinary in-memory protocol tests.
+	localConfig.Sandbox.ToolCallTimeoutSeconds = 10
+	cfg, globalEnginePort = &localConfig, "1"
+	t.Cleanup(func() {
+		cfg, globalEnginePort = previousConfig, previousEnginePort
+	})
+
+	listedResponse := httptest.NewRecorder()
+	fixture.router.ServeHTTP(listedResponse, newMCPModernRequest(t, fixture, 21, "tools/list", nil))
+	listed := decodeMCPModernResult(t, listedResponse)
+	tools, _ := listed["tools"].([]any)
+	// The modern catalogue must expose both established tools and describe execute's explicit state input.
+	if len(tools) != 2 || !strings.Contains(listedResponse.Body.String(), `"stateHandle"`) || strings.Contains(listedResponse.Body.String(), `"com.usefused/session"`) || listedResponse.Header().Get(mcpSessionIDHeader) != "" {
+		t.Fatalf("modern tools/list = headers:%v body:%s", listedResponse.Header(), listedResponse.Body.String())
+	}
+	activeBeforeSearch := activeMCPSessionCount()
+	searchResponse := httptest.NewRecorder()
+	fixture.router.ServeHTTP(searchResponse, newMCPModernRequest(t, fixture, 20, "tools/call", map[string]any{
+		"name": "search_docs", "arguments": map[string]any{"query": "payment"},
+	}))
+	// Stateless documentation search must complete without returning state or leaving a child process registered.
+	if searchResponse.Code != http.StatusOK || strings.Contains(searchResponse.Body.String(), `"stateHandle"`) || activeMCPSessionCount() != activeBeforeSearch {
+		t.Fatalf("modern search_docs = status:%d active:%d body:%s", searchResponse.Code, activeMCPSessionCount(), searchResponse.Body.String())
+	}
+	activeBeforeRejectedCall := activeMCPSessionCount()
+	rejectedResponse := httptest.NewRecorder()
+	fixture.router.ServeHTTP(rejectedResponse, newMCPModernRequest(t, fixture, 24, "tools/call", map[string]any{
+		"name": "execute", "arguments": map[string]any{"script": 42},
+	}))
+	// A schema-rejected first execution returns its standard tool error without leaking a state handle or internal child.
+	if rejectedResponse.Code != http.StatusOK || !strings.Contains(rejectedResponse.Body.String(), `"isError":true`) || strings.Contains(rejectedResponse.Body.String(), `"stateHandle"`) || activeMCPSessionCount() != activeBeforeRejectedCall {
+		t.Fatalf("rejected modern execute = status:%d active:%d body:%s", rejectedResponse.Code, activeMCPSessionCount(), rejectedResponse.Body.String())
+	}
+
+	firstResponse := httptest.NewRecorder()
+	fixture.router.ServeHTTP(firstResponse, newMCPModernRequest(t, fixture, 22, "tools/call", map[string]any{
+		"name": "execute", "arguments": map[string]any{"script": `session.set("proof","modern"); return {proof:session.get("proof")};`},
+	}))
+	first := decodeMCPModernResult(t, firstResponse)
+	structured, _ := first["structuredContent"].(map[string]any)
+	handle, _ := structured[mcpModernStateHandleArgument].(string)
+	// The first execution returns its ordinary value plus an explicit, non-header continuation handle.
+	if !strings.HasPrefix(handle, mcpModernStateHandlePrefix) || !strings.Contains(firstResponse.Body.String(), `\"proof\":\"modern\"`) || firstResponse.Header().Get(mcpSessionIDHeader) != "" {
+		t.Fatalf("first modern execute = headers:%v body:%s", firstResponse.Header(), firstResponse.Body.String())
+	}
+	sess := resolveMCPModernToolHandle(handle, fixture.familyID.String(), &mcpModernAdmission{target: &store.MCPRouteTarget{AppFamilyID: fixture.familyID, AppID: fixture.appID, Stable: true}, identity: globalTokenValidator.(*mcpModernTokenValidator).identity}, map[string]any{})
+	// Test cleanup must release the exact child even if a later continuation assertion fails.
+	if sess == nil {
+		t.Fatalf("returned state handle did not resolve: %s", handle)
+	}
+	t.Cleanup(func() { terminateMCPSession(sess.sessionID, "test_cleanup") })
+
+	rejectedContinuation := httptest.NewRecorder()
+	fixture.router.ServeHTTP(rejectedContinuation, newMCPModernRequest(t, fixture, 25, "tools/call", map[string]any{
+		"name": "execute", "arguments": map[string]any{"stateHandle": handle, "script": 42},
+	}))
+	// A rejected continuation returns the already-owned handle because validation failure cannot invalidate earlier state.
+	if rejectedContinuation.Code != http.StatusOK || !strings.Contains(rejectedContinuation.Body.String(), `"isError":true`) || !strings.Contains(rejectedContinuation.Body.String(), handle) {
+		t.Fatalf("rejected modern continuation = status:%d body:%s", rejectedContinuation.Code, rejectedContinuation.Body.String())
+	}
+
+	secondResponse := httptest.NewRecorder()
+	fixture.router.ServeHTTP(secondResponse, newMCPModernRequest(t, fixture, 23, "tools/call", map[string]any{
+		"name": "execute", "arguments": map[string]any{
+			"stateHandle": handle, "script": `return {proof:session.get("proof")};`,
+		},
+	}))
+	second := decodeMCPModernResult(t, secondResponse)
+	secondStructured, _ := second["structuredContent"].(map[string]any)
+	// Reusing the returned handle must reach the same sandbox state without allocating an HTTP protocol session.
+	if secondStructured[mcpModernStateHandleArgument] != handle || !strings.Contains(secondResponse.Body.String(), `\"proof\":\"modern\"`) || !strings.Contains(secondResponse.Body.String(), mcpModernStateMetadataKey) || secondResponse.Header().Get(mcpSessionIDHeader) != "" {
+		t.Fatalf("continued modern execute = headers:%v body:%s", secondResponse.Header(), secondResponse.Body.String())
+	}
+	mismatchedAdmission := &mcpModernAdmission{
+		target:   &store.MCPRouteTarget{AppFamilyID: fixture.familyID, AppID: fixture.appID, Stable: true},
+		identity: globalTokenValidator.(*mcpModernTokenValidator).identity,
+	}
+	mismatchedAdmission.identity.TokenID = uuid.New()
+	// A newly issued token cannot inherit sandbox state minted for another execution-token identity.
+	if resolved := resolveMCPModernToolHandle(handle, fixture.familyID.String(), mismatchedAdmission, map[string]any{}); resolved != nil {
+		t.Fatalf("state handle crossed token identity: %#v", resolved)
+	}
+	// Shared session termination must atomically remove the public handle before process cleanup finishes.
+	if !terminateMCPSession(sess.sessionID, "test_expired") {
+		t.Fatal("terminate explicit state session returned false")
+	}
+	if resolved := resolveMCPModernToolHandle(handle, fixture.familyID.String(), &mcpModernAdmission{target: &store.MCPRouteTarget{AppFamilyID: fixture.familyID, AppID: fixture.appID, Stable: true}, identity: globalTokenValidator.(*mcpModernTokenValidator).identity}, map[string]any{}); resolved != nil {
+		t.Fatalf("terminated state handle still resolved: %#v", resolved)
+	}
+}
+
+// TestMCPModernExplicitStateResultRewritesContinuation verifies metadata preservation and ready-to-send retained-result recovery.
+func TestMCPModernExplicitStateResultRewritesContinuation(t *testing.T) {
+	handle := mcpModernStateHandlePrefix + uuid.NewString()
+	result := map[string]any{
+		"_meta": map[string]any{"runtime": "preserved"},
+		"content": []any{map[string]any{
+			"type": "text",
+			"text": `{"next_request":{"tool":"execute","arguments":{"script":"return session.page(\"ref\", 1);"}}}`,
+		}},
+	}
+	attachMCPModernStateHandle(result, handle)
+	metadata, _ := result["_meta"].(map[string]any)
+	stateMetadata, _ := metadata[mcpModernStateMetadataKey].(map[string]any)
+	structured, _ := result["structuredContent"].(map[string]any)
+	// Existing runtime metadata and the explicit structured handle must coexist in the public tool result.
+	if metadata["runtime"] != "preserved" || stateMetadata["handle"] != handle || structured[mcpModernStateHandleArgument] != handle {
+		t.Fatalf("explicit state result = %#v", result)
+	}
+	content := result["content"].([]any)
+	block := content[0].(map[string]any)
+	var payload map[string]any
+	// The rewritten text must remain valid JSON before its continuation can be inspected.
+	if err := json.Unmarshal([]byte(block["text"].(string)), &payload); err != nil {
+		t.Fatalf("decode rewritten continuation: %v", err)
+	}
+	next := payload["next_request"].(map[string]any)
+	arguments := next["arguments"].(map[string]any)
+	// A client can send next_request directly because the owning state handle is now an ordinary argument.
+	if arguments[mcpModernStateHandleArgument] != handle || payload["session"].(map[string]any)["scope"] != "explicit_state_handle" {
+		t.Fatalf("rewritten continuation = %#v", payload)
+	}
+}
+
+// TestMCPModernDisposableRuntimeSuppressesLifecycle proves implementation-only children do not appear as client sessions.
+func TestMCPModernDisposableRuntimeSuppressesLifecycle(t *testing.T) {
+	fixture := installMCPModernFixture(t)
+	subscription, err := fixture.natsClient.Conn.SubscribeSync(messaging.FusedEngineSessionSubject(fixture.appID.String()))
+	// The observer must be active before the suppression boundary is exercised.
+	if err != nil {
+		t.Fatalf("subscribe to lifecycle subject: %v", err)
+	}
+	defer subscription.Unsubscribe()
+	// Flush establishes subscription ordering so a timeout proves suppression rather than setup delay.
+	if err := fixture.natsClient.Conn.Flush(); err != nil {
+		t.Fatalf("flush lifecycle subscription: %v", err)
+	}
+	sess := &mcpSession{
+		appID: fixture.appID.String(), sessionID: uuid.NewString(), tokenID: uuid.New(),
+		protocolVersion: mcpModernProtocolVersion, suppressLifecycle: true,
+	}
+	publishMCPSessionEvent(sess, "started", "")
+	_, err = subscription.NextMsg(100 * time.Millisecond)
+	// A disposable tools/list or search_docs child is not a protocol session and must publish nothing.
+	if !errors.Is(err, nats.ErrTimeout) {
+		t.Fatalf("suppressed lifecycle publication error = %v", err)
+	}
+	sess.suppressLifecycle = false
+	publishMCPSessionEvent(sess, "started", "")
+	message, err := subscription.NextMsg(time.Second)
+	// Stateful execute handles still need normal lifecycle attribution for audit and cleanup visibility.
+	if err != nil || !bytes.Contains(message.Data, []byte(`"protocol_version":"2026-07-28"`)) {
+		t.Fatalf("stateful lifecycle message = %#v, error %v", message, err)
 	}
 }
 
@@ -390,5 +560,23 @@ func TestMCPModernRejectsInvalidRoutingAndMethods(t *testing.T) {
 	// An opt-in stream without a notifications object cannot be acknowledged as an implicit wildcard or empty listener.
 	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":-32602`) {
 		t.Fatalf("missing filter rejection = status:%d body:%s", response.Code, response.Body.String())
+	}
+	request = newMCPModernRequest(t, fixture, 12, "tools/call", map[string]any{"name": "execute", "arguments": map[string]any{"script": "return {};"}})
+	request.Header.Set(mcpNameHeader, "search_docs")
+	response = httptest.NewRecorder()
+	fixture.router.ServeHTTP(response, request)
+	// Tool routing disagreement must fail before a model-selected name can allocate an execution child.
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":-32020`) {
+		t.Fatalf("tool name mismatch = status:%d body:%s", response.Code, response.Body.String())
+	}
+	activeBefore := activeMCPSessionCount()
+	request = newMCPModernRequest(t, fixture, 13, "tools/call", map[string]any{
+		"name": "execute", "arguments": map[string]any{"stateHandle": mcpModernStateHandlePrefix + uuid.NewString(), "script": "return {};"},
+	})
+	response = httptest.NewRecorder()
+	fixture.router.ServeHTTP(response, request)
+	// Unknown explicit state fails closed with actionable recovery and cannot allocate replacement state implicitly.
+	if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `"code":"MCP_STATE_HANDLE_UNAVAILABLE"`) || activeMCPSessionCount() != activeBefore {
+		t.Fatalf("unknown state handle = status:%d active:%d body:%s", response.Code, activeMCPSessionCount(), response.Body.String())
 	}
 }
