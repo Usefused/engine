@@ -15,40 +15,45 @@ import (
 	"github.com/google/uuid"
 )
 
-// TestValidateAppConfigDocument_MCPRejectsWebhookSelection locks in the
-// MCP webhook-rejection rule at both entry points that can select webhooks on
-// a service: the explicit Webhooks allowlist and the newer WebhooksSelectAll
-// flag. WebhooksSelectAll was added alongside webhook_attachment without
-// updating this check, so `webhooks_select_all: true` on an MCP service
-// silently bypassed the "MCP cannot select webhooks" rule that CLI validation
-// already enforces -- this test guards against that
-// regressing again.
-func TestValidateAppConfigDocument_MCPRejectsWebhookSelection(t *testing.T) {
+// TestValidateAppConfigDocument_MCPAdmitsOnlyFiniteWebhookSelection keeps the modern resource namespace explicit.
+func TestValidateAppConfigDocument_MCPAdmitsOnlyFiniteWebhookSelection(t *testing.T) {
+	// Every case varies only the service selection while retaining a valid attached MCP document.
 	baseDoc := func(svc sdkConfigServiceDoc) sdkConfigDocument {
 		return sdkConfigDocument{
-			APIVersion:  "fused/v1",
-			Kind:        "mcp",
-			Name:        "jira-mcp",
-			Version:     "1.0.0",
-			Description: "Find and manage support issues in Jira.",
-			Bucket:      "default",
-			Services:    map[string]sdkConfigServiceDoc{"jira": svc},
+			APIVersion:        "fused/v1",
+			Kind:              "mcp",
+			Name:              "jira-mcp",
+			Version:           "1.0.0",
+			Description:       "Find and manage support issues in Jira.",
+			Bucket:            "default",
+			WebhookAttachment: "jira-events",
+			Services:          map[string]sdkConfigServiceDoc{"jira": svc},
 		}
 	}
 
-	t.Run("explicit webhooks list rejected", func(t *testing.T) {
+	t.Run("explicit webhooks list admitted", func(t *testing.T) {
 		doc := baseDoc(sdkConfigServiceDoc{Operations: []string{"getIssue"}, Webhooks: []string{"issue.created"}})
-		err := validateAppConfigDocument(doc, "mcp")
-		if err == nil || !strings.Contains(err.Error(), "cannot select webhooks") {
-			t.Fatalf("expected 'cannot select webhooks' error, got %v", err)
+		// Exact names can be projected into stable resource URIs and exact NATS subjects.
+		if err := validateAppConfigDocument(doc, "mcp"); err != nil {
+			t.Fatalf("expected explicit MCP webhook selection to pass, got %v", err)
 		}
 	})
 
 	t.Run("webhooks_select_all rejected", func(t *testing.T) {
 		doc := baseDoc(sdkConfigServiceDoc{Operations: []string{"getIssue"}, WebhooksSelectAll: true})
 		err := validateAppConfigDocument(doc, "mcp")
-		if err == nil || !strings.Contains(err.Error(), "cannot select webhooks") {
-			t.Fatalf("expected 'cannot select webhooks' error for webhooks_select_all, got %v", err)
+		// An unbounded selector cannot produce a reviewable subscription acknowledgement.
+		if err == nil || !strings.Contains(err.Error(), "explicit webhook events") {
+			t.Fatalf("expected finite-selection error for webhooks_select_all, got %v", err)
+		}
+	})
+
+	t.Run("explicit webhooks require attachment", func(t *testing.T) {
+		doc := baseDoc(sdkConfigServiceDoc{Webhooks: []string{"issue.created"}})
+		doc.WebhookAttachment = ""
+		// Subject routing must never infer an attachment from service or event names.
+		if err := validateAppConfigDocument(doc, "mcp"); err == nil || !strings.Contains(err.Error(), "no webhook_attachment") {
+			t.Fatalf("expected missing attachment error, got %v", err)
 		}
 	})
 

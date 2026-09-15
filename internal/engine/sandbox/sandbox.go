@@ -96,6 +96,8 @@ var globalObjectCache ObjectCache
 var globalDispatcher *engine.Dispatcher
 var globalTokenValidator auth.TokenValidator
 var globalMCPRouteResolver MCPRouteResolver
+var globalMCPEventRuntimeStore MCPEventRuntimeStore
+var globalMCPEventConfigStore MCPEventConfigStore
 var globalSecretResolver SecretResolver
 var globalMCPUnifiedExecute MCPUnifiedExecuteFunc
 var globalMCPConnectSessionStart MCPConnectSessionStartFunc
@@ -104,6 +106,16 @@ var globalMCPConnectSessionStart MCPConnectSessionStartFunc
 // session initialization while preserving exact Version ID routes.
 type MCPRouteResolver interface {
 	ResolveMCPRoute(context.Context, uuid.UUID) (*store.MCPRouteTarget, error)
+}
+
+// MCPEventRuntimeStore loads the immutable event selection attached to one authorized MCP version.
+type MCPEventRuntimeStore interface {
+	GetAppRuntime(context.Context, uuid.UUID) (*store.AppRuntime, error)
+}
+
+// MCPEventConfigStore reads the applied attachment state used to construct exact event subjects.
+type MCPEventConfigStore interface {
+	GetConfigState(context.Context, string) (*store.ConfigState, error)
 }
 
 // MCPUnifiedExecuteFunc is the existing Engine ExecuteUnified method value;
@@ -195,8 +207,8 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-// InitSandbox wires the process-owned physical and logical execution edges used by SDK and MCP transports.
-func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, cache ObjectCache, validator auth.TokenValidator, routeResolver MCPRouteResolver, resolver SecretResolver, rateLimits store.ProviderRateLimitStore, enginePort string, unifiedExecute MCPUnifiedExecuteFunc, connectSessionStart MCPConnectSessionStartFunc) {
+// InitSandbox wires the process-owned physical, event, and logical execution edges used by SDK and MCP transports.
+func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, cache ObjectCache, validator auth.TokenValidator, routeResolver MCPRouteResolver, eventRuntimeStore MCPEventRuntimeStore, eventConfigStore MCPEventConfigStore, resolver SecretResolver, rateLimits store.ProviderRateLimitStore, enginePort string, unifiedExecute MCPUnifiedExecuteFunc, connectSessionStart MCPConnectSessionStartFunc) {
 	cfg = appCfg
 	globalNATSClient = nc
 	globalObjectCache = cache
@@ -207,6 +219,8 @@ func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, 
 	}
 	globalTokenValidator = validator
 	globalMCPRouteResolver = routeResolver
+	globalMCPEventRuntimeStore = eventRuntimeStore
+	globalMCPEventConfigStore = eventConfigStore
 	SetSecretResolver(resolver)
 	globalEnginePort = enginePort
 	globalMCPUnifiedExecute = unifiedExecute

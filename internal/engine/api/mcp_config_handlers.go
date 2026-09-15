@@ -182,6 +182,10 @@ func validateAppConfigDocument(doc sdkConfigDocument, kind string) error {
 	if err := validateMCPAppRestrictions(doc, kind); err != nil {
 		return err
 	}
+	// Event-capable MCP versions require one explicit inbound registration identity for exact broker routing.
+	if err := validateWebhookAttachmentRequired(doc); err != nil {
+		return err
+	}
 	// Service selection must be valid before bindings can rely on those exact
 	// configured keys and operation allowlists.
 	if err := validateAppServiceDocs(doc.Services); err != nil {
@@ -209,18 +213,20 @@ func validateMCPServerDescription(doc sdkConfigDocument, kind string) error {
 	return nil
 }
 
-// validateMCPAppRestrictions rejects malformed mcp app restrictions before it can cross the Unified operation boundary.
+// validateMCPAppRestrictions rejects package-only or unbounded MCP fields before they cross the Unified operation boundary.
 func validateMCPAppRestrictions(doc sdkConfigDocument, kind string) error {
+	// SDK documents share this decoder but do not inherit MCP transport restrictions.
 	if kind != store.AppKindMCP.String() {
 		return nil
 	}
+	// Hosted MCP apps execute in Engine and never select a package emitter.
 	if strings.TrimSpace(doc.Language) != "" {
 		return errors.New("mcp config must not set language")
 	}
 	for name, service := range doc.Services {
-		// MCP is operation-only; webhook attachment belongs to SDK apps.
-		if len(service.Webhooks) > 0 || service.WebhooksSelectAll {
-			return fmt.Errorf("mcp service %s cannot select webhooks", name)
+		// Modern resource subscriptions need a finite URI set, so an all-events selector cannot be represented safely.
+		if service.WebhooksSelectAll {
+			return fmt.Errorf("mcp service %s must select explicit webhook events instead of webhooks_select_all", name)
 		}
 	}
 	return nil
@@ -322,6 +328,10 @@ func prepareMCPPlanAdmission(ctx context.Context, configStore store.ConfigReposi
 	// Capacity is reviewable plan admission, so a full workspace must fail before contract resolution or plan persistence.
 	if err := enforceMCPFamilyLimit(ctx, s, call.accountID, call.document.Name); err != nil {
 		return nil, nil, configOwner{}, nil, withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed")
+	}
+	// The named ingress registration must cover every selected service before the immutable MCP plan is created.
+	if err := validateWebhookAttachmentCoverage(ctx, configStore, s, call.document); err != nil {
+		return nil, nil, configOwner{}, nil, err
 	}
 	return current, registryClient, owner, bucket, nil
 }

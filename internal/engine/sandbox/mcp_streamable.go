@@ -62,6 +62,13 @@ func mcpStreamableHandler(w http.ResponseWriter, r *http.Request) {
 		recordMCPTransportOutcome(span, "unauthorized", true)
 		return
 	}
+	// The 2026 transport removed GET and DELETE; a modern header must never enter session-oriented routing.
+	if strings.TrimSpace(r.Header.Get(mcpProtocolVersionHeader)) == mcpModernProtocolVersion && r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeMCPModernError(w, nil, -32600, "protocol version "+mcpModernProtocolVersion+" uses POST only", http.StatusMethodNotAllowed, nil)
+		recordMCPTransportOutcome(span, "method_not_allowed", true)
+		return
+	}
 	switch r.Method {
 	case http.MethodPost:
 		handleMCPStreamablePost(ctx, span, w, r, routeID, token)
@@ -89,6 +96,11 @@ func handleMCPStreamablePost(ctx context.Context, span trace.Span, w http.Respon
 	if err != nil {
 		writeMCPJSONRPCError(w, nil, -32700, "invalid JSON-RPC request", http.StatusBadRequest)
 		recordMCPTransportOutcome(span, "invalid", true)
+		return
+	}
+	// Modern requests are stateless and must be admitted before the initialize/session branch.
+	if isMCPModernRequest(r, request) {
+		handleMCPModernPost(ctx, span, w, r, routeID, token, request)
 		return
 	}
 	sessionID := strings.TrimSpace(r.Header.Get(mcpSessionIDHeader))
