@@ -623,16 +623,6 @@ func (s *cachedStore) GetRuntimeEntitlement(ctx context.Context) (models.Runtime
 	return delegate.GetRuntimeEntitlement(ctx)
 }
 
-func (s *cachedStore) IncrementRuntimeUsageCounters(ctx context.Context, increments []models.EngineUsageIncrement) error {
-	delegate, ok := s.Store.(interface {
-		IncrementRuntimeUsageCounters(context.Context, []models.EngineUsageIncrement) error
-	})
-	if !ok {
-		return errors.New("runtime usage counter store is unavailable")
-	}
-	return delegate.IncrementRuntimeUsageCounters(ctx, increments)
-}
-
 func (s *cachedStore) ListPendingRuntimeUsageReports(ctx context.Context, limit int) ([]models.EngineUsageReport, error) {
 	delegate, ok := s.Store.(interface {
 		ListPendingRuntimeUsageReports(context.Context, int) ([]models.EngineUsageReport, error)

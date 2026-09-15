@@ -44,16 +44,17 @@ names, status/outcome labels, retry counts, pagination counts, webhook
 verification events, cache timings, and execution audit correlation IDs.
 
 User/agent-triggered executions create trace spans so operators can debug why a
-runtime call was allowed, retried, rejected, or failed. The execution path also
-adds an aggregate-only span event when commercial usage counters are enqueued;
-the event records bucket/status metadata only, not payload content.
+runtime call was allowed, retried, rejected, or failed. The canonical execution
+event records whether its durable JetStream publication succeeded; its consumer
+commits the physical receipt and commercial usage counters together.
 
 ## Registry Aggregate Reporting
 
 Registry reporting is independent of OTLP export. Under the entitlement
-contract, Engine stores commercial usage counters locally and sends idempotent
-aggregates containing only a report ID, a metric from a closed vocabulary, a
-time bucket, a count, and Engine build identity.
+contract, Engine derives commercial usage from first-seen durable physical
+execution events, stores the counters locally in the same transaction as their
+receipts, and sends idempotent aggregates containing only a report ID, a metric
+from a closed vocabulary, a time bucket, a count, and Engine build identity.
 
 Public-service insights use a separate projection and payload. Engine reports
 eligible public-service endpoint aggregates such as counts, bounded dimensions,

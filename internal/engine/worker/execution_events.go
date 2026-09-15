@@ -18,23 +18,30 @@ import (
 )
 
 const (
-	executionEventConsumer  = "engine_execution_postgres"
-	executionEventBatchSize = 100
+	executionEventConsumer         = "engine_execution_postgres"
+	executionEventBatchSize        = 100
+	executionEventPersistenceRetry = 2 * time.Second
 )
 
 type executionEventStore interface {
-	BatchCreateEngineExecutionEvents(ctx context.Context, events []models.EngineExecutionEvent) error
+	BatchCreateEngineExecutionEventsAndUsage(ctx context.Context, events []models.EngineExecutionEvent, aggregateUsage bool) error
 }
 
 type ExecutionEventWorker struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-	once   sync.Once
+	cancel                context.CancelFunc
+	done                  chan struct{}
+	once                  sync.Once
+	aggregateUsageEnabled func() bool
 }
 
-func StartExecutionEventWorker(ctx context.Context, eventStore executionEventStore, natsClient *messaging.NATSClient) (*ExecutionEventWorker, error) {
+// StartExecutionEventWorker starts the durable receipt and commercial-usage consumer with a live entitlement gate.
+func StartExecutionEventWorker(ctx context.Context, eventStore executionEventStore, natsClient *messaging.NATSClient, aggregateUsageEnabled func() bool) (*ExecutionEventWorker, error) {
 	if eventStore == nil || natsClient == nil || natsClient.JS == nil {
 		return nil, errorsForExecutionWorker(eventStore, natsClient)
+	}
+	// A missing gate disables commercial accounting rather than silently enabling it for test or alternate callers.
+	if aggregateUsageEnabled == nil {
+		aggregateUsageEnabled = func() bool { return false }
 	}
 	if err := ensureExecutionConsumer(natsClient); err != nil {
 		return nil, err
@@ -48,7 +55,7 @@ func StartExecutionEventWorker(ctx context.Context, eventStore executionEventSto
 		return nil, fmt.Errorf("subscribe to execution events: %w", err)
 	}
 	workerCtx, cancel := context.WithCancel(ctx)
-	worker := &ExecutionEventWorker{cancel: cancel, done: make(chan struct{})}
+	worker := &ExecutionEventWorker{cancel: cancel, done: make(chan struct{}), aggregateUsageEnabled: aggregateUsageEnabled}
 	go worker.run(workerCtx, subscription, eventStore)
 	return worker, nil
 }
@@ -87,6 +94,7 @@ func (w *ExecutionEventWorker) Stop(ctx context.Context) {
 	}
 }
 
+// run retries durable stream reads while delegating receipt and usage atomicity to the store.
 func (w *ExecutionEventWorker) run(ctx context.Context, subscription *nats.Subscription, eventStore executionEventStore) {
 	defer close(w.done)
 	for ctx.Err() == nil {
@@ -99,7 +107,7 @@ func (w *ExecutionEventWorker) run(ctx context.Context, subscription *nats.Subsc
 			waitForExecutionRetry(ctx)
 			continue
 		}
-		persistExecutionMessages(ctx, eventStore, messages)
+		persistExecutionMessages(ctx, eventStore, messages, w.aggregateUsageEnabled())
 	}
 }
 
@@ -112,7 +120,8 @@ func waitForExecutionRetry(ctx context.Context) {
 	}
 }
 
-func persistExecutionMessages(ctx context.Context, eventStore executionEventStore, messages []*nats.Msg) {
+// persistExecutionMessages ACKs only after receipts and any enabled usage counters commit together.
+func persistExecutionMessages(ctx context.Context, eventStore executionEventStore, messages []*nats.Msg, aggregateUsage bool) {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.execution_events.persist")
 	defer span.End()
 	events, validMessages := decodeExecutionMessages(messages)
@@ -120,7 +129,7 @@ func persistExecutionMessages(ctx context.Context, eventStore executionEventStor
 	if len(events) == 0 {
 		return
 	}
-	if err := eventStore.BatchCreateEngineExecutionEvents(ctx, events); err != nil {
+	if err := eventStore.BatchCreateEngineExecutionEventsAndUsage(ctx, events, aggregateUsage); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "execution event persistence failed")
 		nakExecutionMessages(validMessages)
@@ -174,8 +183,9 @@ func ackExecutionMessages(messages []*nats.Msg) {
 	}
 }
 
+// nakExecutionMessages schedules bounded redelivery so a database outage cannot create a hot retry loop.
 func nakExecutionMessages(messages []*nats.Msg) {
 	for _, message := range messages {
-		_ = message.Nak()
+		_ = message.NakWithDelay(executionEventPersistenceRetry)
 	}
 }

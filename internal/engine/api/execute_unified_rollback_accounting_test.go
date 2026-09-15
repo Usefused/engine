@@ -13,7 +13,7 @@ import (
 )
 
 // TestExecuteUnifiedRollbackUsesPhysicalAccounting proves a dependency failure
-// produces a separately finalized rollback receipt and usage while its parent remains audit-only.
+// produces a separately finalized rollback receipt while its parent remains audit-only.
 func TestExecuteUnifiedRollbackUsesPhysicalAccounting(t *testing.T) {
 	var githubCalls atomic.Int32
 	var crmCalls atomic.Int32
@@ -22,7 +22,7 @@ func TestExecuteUnifiedRollbackUsesPhysicalAccounting(t *testing.T) {
 
 	server, _, appID := newUnifiedRuntimeServerFromFixture(t, newUnifiedRollbackCompileFixture(), store.AppTokenPolicy{AllowAll: true})
 	server.unifiedRuntime = &unifiedAccountingRuntime{appID: appID, providerURL: provider.URL, dispatcher: engine.NewDispatcher()}
-	events, usage := installUnifiedAccountingCaptures(t)
+	events := installUnifiedAccountingCapture(t)
 	request := unifiedRuntimeRequest()
 	request.TargetSelectors = nil
 	response, err := server.ExecuteUnified(grpcTestContext(appID), request)
@@ -35,7 +35,7 @@ func TestExecuteUnifiedRollbackUsesPhysicalAccounting(t *testing.T) {
 		t.Fatalf("physical attempts = github:%d crm:%d events:%d, want one/two/four", githubCalls.Load(), crmCalls.Load(), len(events.messages))
 	}
 	assertUnifiedPhysicalEvents(t, events.messages, appID)
-	assertUnifiedUsageOutcomes(t, usage.increments, 3, 2, 1)
+	assertUnifiedPhysicalOutcomes(t, events.messages, 3, 2, 1)
 }
 
 // TestExecuteUnifiedInputMappingFailureIsNotPhysicallyAccounted proves an
@@ -55,7 +55,7 @@ func TestExecuteUnifiedInputMappingFailureIsNotPhysicallyAccounted(t *testing.T)
 	fixture.document.UnifiedOperations["issues.create"] = operation
 	server, _, appID := newUnifiedRuntimeServerFromFixture(t, fixture, store.AppTokenPolicy{AllowAll: true})
 	server.unifiedRuntime = &unifiedAccountingRuntime{appID: appID, providerURL: provider.URL, dispatcher: engine.NewDispatcher()}
-	events, usage := installUnifiedAccountingCaptures(t)
+	events := installUnifiedAccountingCapture(t)
 	request := unifiedRuntimeRequest()
 	request.TargetSelectors = nil
 	response, err := server.ExecuteUnified(grpcTestContext(appID), request)
@@ -63,12 +63,12 @@ func TestExecuteUnifiedInputMappingFailureIsNotPhysicallyAccounted(t *testing.T)
 		t.Fatalf("ExecuteUnified() error = %v", err)
 	}
 	assertUnifiedInputMappingAccountingResponse(t, response)
-	// Mapping failure adds a parent step, not a physical attempt or usage increment.
+	// Mapping failure adds a parent step, not a physical attempt or billable receipt.
 	if githubCalls.Load() != 0 || crmCalls.Load() != 2 || len(events.messages) != 3 {
 		t.Fatalf("physical attempts = github:%d crm:%d events:%d, want zero/two/three", githubCalls.Load(), crmCalls.Load(), len(events.messages))
 	}
 	assertUnifiedPhysicalEvents(t, events.messages, appID)
-	assertUnifiedUsageOutcomes(t, usage.increments, 2, 2, 0)
+	assertUnifiedPhysicalOutcomes(t, events.messages, 2, 2, 0)
 }
 
 // unifiedRollbackAccountingHandler models a CRM create, a failing GitHub

@@ -107,27 +107,7 @@ func (s *postgresStore) GetRuntimeEntitlement(ctx context.Context) (models.Runti
 	return entitlement.Normalized(), nil
 }
 
-func (s *postgresStore) IncrementRuntimeUsageCounters(ctx context.Context, increments []models.EngineUsageIncrement) error {
-	if len(increments) == 0 {
-		return nil
-	}
-	query := `
-		INSERT INTO fused_engine_usage_counter_reports (
-			metric, bucket_start, bucket_seconds, count, created_at, updated_at
-		)
-		VALUES ($1, $2, $3, $4, NOW(), NOW())
-		ON CONFLICT (metric, bucket_start, bucket_seconds) WHERE flushed_at IS NULL
-		DO UPDATE SET
-			count = fused_engine_usage_counter_reports.count + EXCLUDED.count,
-			updated_at = NOW()
-	`
-	batch := &pgx.Batch{}
-	for _, increment := range increments {
-		batch.Queue(query, increment.Metric, increment.BucketStart, increment.BucketSeconds, increment.Count)
-	}
-	return s.db.SendBatch(ctx, batch).Close()
-}
-
+// ListPendingRuntimeUsageReports returns only durable counters that Registry has not acknowledged.
 func (s *postgresStore) ListPendingRuntimeUsageReports(ctx context.Context, limit int) ([]models.EngineUsageReport, error) {
 	if limit <= 0 {
 		limit = 500

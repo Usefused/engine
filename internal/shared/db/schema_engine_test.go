@@ -247,6 +247,8 @@ func TestEngineSchemaDefinesAccessAndRuntimeFoundations(t *testing.T) {
 		"'attempted', 'allowed', 'denied', 'succeeded', 'failed', 'rolled_back', 'cancelled'",
 		"CREATE TABLE IF NOT EXISTS fused_runtime_entitlements",
 		"max_api_families integer NOT NULL DEFAULT -1",
+		"CREATE TABLE IF NOT EXISTS fused_engine_usage_accounted_events",
+		"NOT EXISTS (SELECT 1 FROM fused_engine_usage_accounted_events LIMIT 1)",
 		"CREATE TABLE IF NOT EXISTS fused_engine_usage_counter_reports",
 		"CREATE TABLE IF NOT EXISTS fused_provider_rate_limit_states",
 		"rate_limit_unit_totals bigint[] NOT NULL DEFAULT '{}'",

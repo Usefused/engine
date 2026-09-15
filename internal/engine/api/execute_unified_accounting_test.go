@@ -279,7 +279,7 @@ func assertUnifiedConnectedAuthCase(t *testing.T, test unifiedConnectedAuthCase)
 	connectedStore := newUnifiedConnectedAuthStore(t, appID, test)
 	previousResolver := sandbox.SetSecretResolver(sandbox.NewSecretResolver(connectedStore, unifiedConnectedAuthMasterKey))
 	t.Cleanup(func() { sandbox.SetSecretResolver(previousResolver) })
-	installUnifiedAccountingCaptures(t)
+	installUnifiedAccountingCapture(t)
 
 	request := unifiedRuntimeRequest()
 	request.Targets = []string{"github"}
@@ -401,18 +401,6 @@ func (capture *unifiedEventCapture) PublishMsgJS(message *nats.Msg) (*nats.PubAc
 	return &nats.PubAck{}, nil
 }
 
-type unifiedUsageCapture struct {
-	mu         sync.Mutex
-	increments []models.EngineUsageIncrement
-}
-
-// Record captures usage increments so tests can detect logical-wrapper double counting.
-func (capture *unifiedUsageCapture) Record(increment models.EngineUsageIncrement) {
-	capture.mu.Lock()
-	defer capture.mu.Unlock()
-	capture.increments = append(capture.increments, increment)
-}
-
 // TestExecuteUnifiedProducesOnlyPhysicalAccounting protects provider-only billing alongside a separate logical receipt.
 func TestExecuteUnifiedProducesOnlyPhysicalAccounting(t *testing.T) {
 	provider := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -427,7 +415,7 @@ func TestExecuteUnifiedProducesOnlyPhysicalAccounting(t *testing.T) {
 
 	server, _, appID := newUnifiedRuntimeServer(t, store.AppTokenPolicy{AllowAll: true})
 	server.unifiedRuntime = &unifiedAccountingRuntime{appID: appID, providerURL: provider.URL, dispatcher: engine.NewDispatcher()}
-	events, usage := installUnifiedAccountingCaptures(t)
+	events := installUnifiedAccountingCapture(t)
 
 	request := unifiedRuntimeRequest()
 	request.TargetSelectors = nil
@@ -441,7 +429,7 @@ func TestExecuteUnifiedProducesOnlyPhysicalAccounting(t *testing.T) {
 		t.Fatalf("execution events = %d, want two physical events and one logical parent", len(events.messages))
 	}
 	assertUnifiedPhysicalEvents(t, events.messages, appID)
-	assertUnifiedUsageIncrements(t, usage.increments, 2)
+	assertUnifiedPhysicalOutcomes(t, events.messages, 2, 2, 0)
 }
 
 // TestExecuteUnifiedSingleTargetProducesOnePhysicalAccountingFinalization locks
@@ -455,7 +443,7 @@ func TestExecuteUnifiedSingleTargetProducesOnePhysicalAccountingFinalization(t *
 
 	server, _, appID := newUnifiedRuntimeServer(t, store.AppTokenPolicy{AllowAll: true})
 	server.unifiedRuntime = &unifiedAccountingRuntime{appID: appID, providerURL: provider.URL, dispatcher: engine.NewDispatcher()}
-	events, usage := installUnifiedAccountingCaptures(t)
+	events := installUnifiedAccountingCapture(t)
 	request := unifiedRuntimeRequest()
 	request.Targets, request.TargetSelectors = []string{"github"}, nil
 	response, err := server.ExecuteUnified(grpcTestContext(appID), request)
@@ -466,7 +454,7 @@ func TestExecuteUnifiedSingleTargetProducesOnePhysicalAccountingFinalization(t *
 	if len(events.messages) != 2 {
 		t.Fatalf("execution events = %d, want one physical event and one logical parent", len(events.messages))
 	}
-	assertUnifiedUsageOutcomes(t, usage.increments, 1, 1, 0)
+	assertUnifiedPhysicalOutcomes(t, events.messages, 1, 1, 0)
 }
 
 // TestExecuteUnifiedRealMixedFailureAttemptsBothPhysicalTargets proves a real
@@ -487,7 +475,7 @@ func TestExecuteUnifiedRealMixedFailureAttemptsBothPhysicalTargets(t *testing.T)
 
 	server, _, appID := newUnifiedRuntimeServer(t, store.AppTokenPolicy{AllowAll: true})
 	server.unifiedRuntime = &unifiedAccountingRuntime{appID: appID, providerURL: provider.URL, dispatcher: engine.NewDispatcher()}
-	events, usage := installUnifiedAccountingCaptures(t)
+	events := installUnifiedAccountingCapture(t)
 	request := unifiedRuntimeRequest()
 	request.TargetSelectors = nil
 	response, err := server.ExecuteUnified(grpcTestContext(appID), request)
@@ -501,41 +489,37 @@ func TestExecuteUnifiedRealMixedFailureAttemptsBothPhysicalTargets(t *testing.T)
 	if providerCalls.Load() != 2 || len(events.messages) != 3 {
 		t.Fatalf("attempts/receipts = provider:%d events:%d, want two/three", providerCalls.Load(), len(events.messages))
 	}
-	assertUnifiedUsageOutcomes(t, usage.increments, 2, 1, 1)
+	assertUnifiedPhysicalOutcomes(t, events.messages, 2, 1, 1)
 }
 
 // TestExecuteUnifiedPredispatchRejectionProducesNoAccounting protects the rule that each physical attempt produces one receipt and the matching usage outcome.
 func TestExecuteUnifiedPredispatchRejectionProducesNoAccounting(t *testing.T) {
 	server, _, appID := newUnifiedRuntimeServer(t, store.AppTokenPolicy{AllowedOperations: []string{"createIssue"}})
 	server.unifiedRuntime = &unifiedAccountingRuntime{appID: appID, dispatcher: engine.NewDispatcher()}
-	events, usage := installUnifiedAccountingCaptures(t)
+	events := installUnifiedAccountingCapture(t)
 
 	request := unifiedRuntimeRequest()
 	request.TargetSelectors = nil
 	if _, err := server.ExecuteUnified(grpcTestContext(appID), request); err == nil {
 		t.Fatal("ExecuteUnified() accepted an unauthorized target")
 	}
-	if len(events.messages) != 0 || len(usage.increments) != 0 {
-		t.Fatalf("predispatch accounting = events:%d usage:%d", len(events.messages), len(usage.increments))
+	if len(events.messages) != 0 {
+		t.Fatalf("predispatch receipts = %d, want zero", len(events.messages))
 	}
 }
 
-// installUnifiedAccountingCaptures swaps in receipt and usage recorders and
-// restores both globals after the current test.
-func installUnifiedAccountingCaptures(t *testing.T) (*unifiedEventCapture, *unifiedUsageCapture) {
+// installUnifiedAccountingCapture records the canonical durable source from which commercial usage is derived.
+func installUnifiedAccountingCapture(t *testing.T) *unifiedEventCapture {
 	t.Helper()
 	events := &unifiedEventCapture{}
-	usage := &unifiedUsageCapture{}
 	executionevent.SetPublisher(executionevent.NewPublisher(events))
-	sandbox.SetExecutionUsageRecorder(usage)
 	previousEntitlement := entitlement.LiveEntitlement.Load()
 	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{MaxSandboxConcurrency: models.IntPtr(8)})
 	t.Cleanup(func() {
 		executionevent.SetPublisher(nil)
-		sandbox.SetExecutionUsageRecorder(nil)
 		entitlement.LiveEntitlement.Store(previousEntitlement)
 	})
-	return events, usage
+	return events
 }
 
 // assertUnifiedPhysicalEvents verifies physical identity and one metadata-only
@@ -588,23 +572,29 @@ func assertUnifiedChildAccounting(t *testing.T, event models.EngineExecutionEven
 	}
 }
 
-// assertUnifiedUsageIncrements checks that every successful physical child
-// contributes exactly one total and one success usage increment.
-func assertUnifiedUsageIncrements(t *testing.T, increments []models.EngineUsageIncrement, physicalCount int) {
+// assertUnifiedPhysicalOutcomes verifies the durable receipts contain exactly the provider attempts accounting will consume.
+func assertUnifiedPhysicalOutcomes(t *testing.T, messages [][]byte, total, succeeded, failed int) {
 	t.Helper()
-	assertUnifiedUsageOutcomes(t, increments, physicalCount, physicalCount, 0)
-}
-
-// assertUnifiedUsageOutcomes verifies one total and one terminal metric per
-// physical execution without introducing a logical-wrapper usage record.
-func assertUnifiedUsageOutcomes(t *testing.T, increments []models.EngineUsageIncrement, total, succeeded, failed int) {
-	t.Helper()
-	got := make(map[string]int)
-	for _, increment := range increments {
-		got[increment.Metric] += int(increment.Count)
+	gotTotal, gotSucceeded, gotFailed := 0, 0, 0
+	// Logical parents remain visible for Activity but must not enter commercial usage.
+	for _, message := range messages {
+		var envelope models.EngineExecutionEventEnvelope
+		if err := json.Unmarshal(message, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if executionevent.Kind(envelope.Event) != "physical" {
+			continue
+		}
+		gotTotal++
+		// Only the closed terminal status vocabulary determines the outcome counter.
+		if envelope.Event.Status == models.EngineExecutionStatusSuccess {
+			gotSucceeded++
+		} else if envelope.Event.Status == models.EngineExecutionStatusFailed {
+			gotFailed++
+		}
 	}
-	if len(increments) != total*2 || got[models.EngineUsageMetricExecutionTotal] != total || got[models.EngineUsageMetricExecutionSuccess] != succeeded || got[models.EngineUsageMetricExecutionFailed] != failed {
-		t.Fatalf("usage increments = %#v, want total:%d success:%d failed:%d", increments, total, succeeded, failed)
+	if gotTotal != total || gotSucceeded != succeeded || gotFailed != failed {
+		t.Fatalf("physical receipts = total:%d success:%d failed:%d, want %d/%d/%d", gotTotal, gotSucceeded, gotFailed, total, succeeded, failed)
 	}
 }
 

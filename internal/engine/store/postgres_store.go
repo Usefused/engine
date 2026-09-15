@@ -532,10 +532,21 @@ func queryRecentMCPSessions(ctx context.Context, db storeDatabase, appID uuid.UU
 
 // BatchCreateEngineExecutionEvents persists canonical provider and logical receipts in one bounded worker batch.
 func (s *postgresStore) BatchCreateEngineExecutionEvents(ctx context.Context, events []models.EngineExecutionEvent) error {
+	return s.BatchCreateEngineExecutionEventsAndUsage(ctx, events, false)
+}
+
+// BatchCreateEngineExecutionEventsAndUsage commits canonical receipts and deduplicated commercial counters atomically.
+func (s *postgresStore) BatchCreateEngineExecutionEventsAndUsage(ctx context.Context, events []models.EngineExecutionEvent, aggregateUsage bool) error {
 	// Empty flushes should not acquire a database connection.
 	if len(events) == 0 {
 		return nil
 	}
+	tx, err := s.db.Begin(ctx)
+	// A transaction is required so JetStream retry cannot observe a receipt without its matching counters.
+	if err != nil {
+		return fmt.Errorf("begin execution event persistence: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	b := &pgx.Batch{}
 	query := `
 		INSERT INTO fused_engine_execution_events (
@@ -608,9 +619,66 @@ func (s *postgresStore) BatchCreateEngineExecutionEvents(ctx context.Context, ev
 			executionevent.Kind(event), nullableUUID(event.ParentExecutionID), event.UnifiedTarget, event.ExecutionPhase,
 			append([]models.UnifiedExecutionStep{}, event.UnifiedSteps...),
 		)
+		// Every eligible first-seen receipt records its entitlement decision so a later mode change cannot bill a replay.
+		if executionEventHasCommercialUsage(event) {
+			queueExecutionEventUsage(b, event, aggregateUsage)
+		}
 	}
-	results := s.db.SendBatch(ctx, b)
-	return results.Close()
+	results := tx.SendBatch(ctx, b)
+	// Any statement failure must roll back both the receipt and its usage ledger entry before the message is retried.
+	if err := results.Close(); err != nil {
+		return fmt.Errorf("persist execution events and usage: %w", err)
+	}
+	// A commit failure leaves the delivery unacknowledged because its durable outcome is unknown.
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit execution events and usage: %w", err)
+	}
+	return nil
+}
+
+const engineUsageBucketSeconds = 60
+
+// executionEventHasCommercialUsage restricts billing to completed outbound provider attempts, never logical or inbound receipts.
+func executionEventHasCommercialUsage(event models.EngineExecutionEvent) bool {
+	// Unified parents summarize work, while inbound webhooks follow their own product contract.
+	if executionevent.Kind(event) != "physical" || event.Direction != models.EngineExecutionDirectionOutbound {
+		return false
+	}
+	return event.Status == models.EngineExecutionStatusSuccess || event.Status == models.EngineExecutionStatusFailed
+}
+
+// executionUsageStatusMetric maps the closed execution outcome vocabulary to its commercial aggregate metric.
+func executionUsageStatusMetric(status string) string {
+	// Store validation admits only terminal outcomes to accounting, so success is the sole non-failure branch.
+	if status == models.EngineExecutionStatusSuccess {
+		return models.EngineUsageMetricExecutionSuccess
+	}
+	return models.EngineUsageMetricExecutionFailed
+}
+
+// queueExecutionEventUsage records the first-seen decision and conditionally adds its two counters in the receipt transaction.
+func queueExecutionEventUsage(batch *pgx.Batch, event models.EngineExecutionEvent, aggregateUsage bool) {
+	batch.Queue(`
+		WITH accounted AS (
+			INSERT INTO fused_engine_usage_accounted_events (event_id)
+			VALUES ($1)
+			ON CONFLICT (event_id) DO NOTHING
+			RETURNING event_id
+		), metrics(metric) AS (
+			VALUES ($2::text), ($3::text)
+		)
+		INSERT INTO fused_engine_usage_counter_reports (
+			metric, bucket_start, bucket_seconds, count, created_at, updated_at
+		)
+		SELECT metrics.metric, $4, $5, 1, NOW(), NOW()
+		FROM accounted CROSS JOIN metrics
+		WHERE $6
+		ON CONFLICT (metric, bucket_start, bucket_seconds) WHERE flushed_at IS NULL
+		DO UPDATE SET
+			count = fused_engine_usage_counter_reports.count + EXCLUDED.count,
+			updated_at = NOW()
+	`, event.ID, models.EngineUsageMetricExecutionTotal, executionUsageStatusMetric(event.Status),
+		event.StartedAt.UTC().Truncate(time.Minute), engineUsageBucketSeconds, aggregateUsage)
 }
 
 func nonNilInt64s(values []int64) []int64 {

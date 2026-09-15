@@ -171,13 +171,6 @@ func entitlementLimitOrDefault(value, fallback *int) *int {
 	return fallback
 }
 
-type EngineUsageIncrement struct {
-	Metric        string
-	BucketStart   time.Time
-	BucketSeconds int
-	Count         int64
-}
-
 type EngineUsageReport struct {
 	ReportID      uuid.UUID `json:"report_id"`
 	Metric        string    `json:"metric"`

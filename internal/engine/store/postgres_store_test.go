@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -252,40 +253,119 @@ func assertRuntimeEntitlementFeatureGates(t *testing.T, entitlement models.Runti
 	}
 }
 
+// TestExecutionEventHasCommercialUsage excludes logical summaries and inbound deliveries from provider accounting.
+func TestExecutionEventHasCommercialUsage(t *testing.T) {
+	base := models.EngineExecutionEvent{Direction: models.EngineExecutionDirectionOutbound, Status: models.EngineExecutionStatusSuccess}
+	for _, test := range []struct {
+		name  string
+		event models.EngineExecutionEvent
+		want  bool
+	}{
+		{name: "outbound physical", event: base, want: true},
+		{name: "failed outbound physical", event: models.EngineExecutionEvent{Direction: models.EngineExecutionDirectionOutbound, Status: models.EngineExecutionStatusFailed}, want: true},
+		{name: "logical parent", event: models.EngineExecutionEvent{Direction: models.EngineExecutionDirectionOutbound, Status: models.EngineExecutionStatusSuccess, ExecutionKind: "unified"}},
+		{name: "inbound webhook", event: models.EngineExecutionEvent{Direction: models.EngineExecutionDirectionInbound, Status: models.EngineExecutionStatusSuccess}},
+		{name: "unknown outcome", event: models.EngineExecutionEvent{Direction: models.EngineExecutionDirectionOutbound, Status: "pending"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Each event shape must remain on its intended commercial boundary.
+			if got := executionEventHasCommercialUsage(test.event); got != test.want {
+				t.Fatalf("executionEventHasCommercialUsage() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+// TestRuntimeUsageReportsAggregateAndLateIncrements proves receipt redelivery is idempotent while later executions form fresh reports.
 func TestRuntimeUsageReportsAggregateAndLateIncrements(t *testing.T) {
 	ctx, cancel, pool, s := runtimeReportingTestStore(t)
 	defer cancel()
 	defer pool.Close()
 
 	usageStore := s.(interface {
-		IncrementRuntimeUsageCounters(context.Context, []models.EngineUsageIncrement) error
+		BatchCreateEngineExecutionEventsAndUsage(context.Context, []models.EngineExecutionEvent, bool) error
 		ListPendingRuntimeUsageReports(context.Context, int) ([]models.EngineUsageReport, error)
 		MarkRuntimeUsageReportsFlushed(context.Context, []uuid.UUID, time.Time) error
 	})
 	bucketStart := time.Now().UTC().Truncate(time.Minute)
-	increments := []models.EngineUsageIncrement{
-		{Metric: models.EngineUsageMetricExecutionTotal, BucketStart: bucketStart, BucketSeconds: 60, Count: 1},
-		{Metric: models.EngineUsageMetricExecutionTotal, BucketStart: bucketStart, BucketSeconds: 60, Count: 2},
+	events := []models.EngineExecutionEvent{
+		runtimeUsageExecutionEvent(uuid.New(), models.EngineExecutionStatusSuccess, bucketStart),
+		runtimeUsageExecutionEvent(uuid.New(), models.EngineExecutionStatusSuccess, bucketStart),
+		runtimeUsageExecutionEvent(uuid.New(), models.EngineExecutionStatusFailed, bucketStart),
 	}
-	if err := usageStore.IncrementRuntimeUsageCounters(ctx, increments); err != nil {
-		t.Fatalf("IncrementRuntimeUsageCounters: %v", err)
+	if err := usageStore.BatchCreateEngineExecutionEventsAndUsage(ctx, events, true); err != nil {
+		t.Fatalf("BatchCreateEngineExecutionEventsAndUsage: %v", err)
 	}
 	pending := pendingRuntimeUsageReports(t, ctx, usageStore)
-	if len(pending) != 1 || pending[0].Count != 3 {
-		t.Fatalf("unexpected pending reports after aggregate: %#v", pending)
+	assertRuntimeUsageCounts(t, pending, map[string]int64{
+		models.EngineUsageMetricExecutionTotal: 3, models.EngineUsageMetricExecutionSuccess: 2, models.EngineUsageMetricExecutionFailed: 1,
+	})
+	// A JetStream redelivery must update the receipt without charging the event IDs again.
+	if err := usageStore.BatchCreateEngineExecutionEventsAndUsage(ctx, events, true); err != nil {
+		t.Fatalf("replay execution events: %v", err)
 	}
-	if err := usageStore.MarkRuntimeUsageReportsFlushed(ctx, []uuid.UUID{pending[0].ReportID}, time.Now().UTC()); err != nil {
+	assertRuntimeUsageCounts(t, pendingRuntimeUsageReports(t, ctx, usageStore), map[string]int64{
+		models.EngineUsageMetricExecutionTotal: 3, models.EngineUsageMetricExecutionSuccess: 2, models.EngineUsageMetricExecutionFailed: 1,
+	})
+	// A disabled entitlement still preserves Activity without creating commercial counters.
+	disabled := runtimeUsageExecutionEvent(uuid.New(), models.EngineExecutionStatusSuccess, bucketStart)
+	if err := usageStore.BatchCreateEngineExecutionEventsAndUsage(ctx, []models.EngineExecutionEvent{disabled}, false); err != nil {
+		t.Fatalf("disabled usage execution event: %v", err)
+	}
+	assertRuntimeUsageCounts(t, pendingRuntimeUsageReports(t, ctx, usageStore), map[string]int64{
+		models.EngineUsageMetricExecutionTotal: 3, models.EngineUsageMetricExecutionSuccess: 2, models.EngineUsageMetricExecutionFailed: 1,
+	})
+	// Replaying that same ID after aggregate reporting is enabled must preserve the first-seen non-billable decision.
+	if err := usageStore.BatchCreateEngineExecutionEventsAndUsage(ctx, []models.EngineExecutionEvent{disabled}, true); err != nil {
+		t.Fatalf("replay disabled usage execution event: %v", err)
+	}
+	assertRuntimeUsageCounts(t, pendingRuntimeUsageReports(t, ctx, usageStore), map[string]int64{
+		models.EngineUsageMetricExecutionTotal: 3, models.EngineUsageMetricExecutionSuccess: 2, models.EngineUsageMetricExecutionFailed: 1,
+	})
+	if err := usageStore.MarkRuntimeUsageReportsFlushed(ctx, runtimeUsageReportIDs(pending), time.Now().UTC()); err != nil {
 		t.Fatalf("MarkRuntimeUsageReportsFlushed: %v", err)
 	}
-	if err := usageStore.IncrementRuntimeUsageCounters(ctx, []models.EngineUsageIncrement{{Metric: models.EngineUsageMetricExecutionTotal, BucketStart: bucketStart, BucketSeconds: 60, Count: 1}}); err != nil {
-		t.Fatalf("late IncrementRuntimeUsageCounters: %v", err)
+	late := runtimeUsageExecutionEvent(uuid.New(), models.EngineExecutionStatusSuccess, bucketStart)
+	if err := usageStore.BatchCreateEngineExecutionEventsAndUsage(ctx, []models.EngineExecutionEvent{late}, true); err != nil {
+		t.Fatalf("late execution event: %v", err)
 	}
 	pending = pendingRuntimeUsageReports(t, ctx, usageStore)
-	if len(pending) != 1 || pending[0].Count != 1 {
-		t.Fatalf("late increment should create a fresh pending report, got %#v", pending)
+	assertRuntimeUsageCounts(t, pending, map[string]int64{
+		models.EngineUsageMetricExecutionTotal: 1, models.EngineUsageMetricExecutionSuccess: 1,
+	})
+}
+
+// runtimeUsageExecutionEvent builds one final outbound physical receipt for transactional accounting tests.
+func runtimeUsageExecutionEvent(id uuid.UUID, status string, startedAt time.Time) models.EngineExecutionEvent {
+	return models.EngineExecutionEvent{
+		ID: id, AccountID: uuid.New(), AppFamilyID: uuid.New(), AppID: uuid.New(), AppVersion: "1.0.0",
+		Transport: models.EngineExecutionTransportSDK, Direction: models.EngineExecutionDirectionOutbound,
+		EndpointName: "execute", Status: status, StartedAt: startedAt, EndedAt: startedAt.Add(time.Millisecond), CreatedAt: startedAt,
 	}
 }
 
+// assertRuntimeUsageCounts compares the pending closed-vocabulary aggregate without depending on row order.
+func assertRuntimeUsageCounts(t *testing.T, reports []models.EngineUsageReport, want map[string]int64) {
+	t.Helper()
+	got := make(map[string]int64, len(reports))
+	for _, report := range reports {
+		got[report.Metric] += report.Count
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("usage counts = %#v, want %#v", got, want)
+	}
+}
+
+// runtimeUsageReportIDs returns the exact pending report identities acknowledged by Registry.
+func runtimeUsageReportIDs(reports []models.EngineUsageReport) []uuid.UUID {
+	ids := make([]uuid.UUID, 0, len(reports))
+	for _, report := range reports {
+		ids = append(ids, report.ReportID)
+	}
+	return ids
+}
+
+// runtimeReportingTestStore opens a bounded disposable store and removes only reporting fixtures.
 func runtimeReportingTestStore(t *testing.T) (context.Context, context.CancelFunc, *pgxpool.Pool, Store) {
 	t.Helper()
 	dbURL := os.Getenv("DATABASE_URL")
@@ -302,12 +382,13 @@ func runtimeReportingTestStore(t *testing.T) (context.Context, context.CancelFun
 	}
 
 	s := NewPostgresStore(pool)
-	if _, err := pool.Exec(ctx, "DELETE FROM fused_runtime_entitlements; DELETE FROM fused_engine_usage_counter_reports"); err != nil {
+	if _, err := pool.Exec(ctx, "DELETE FROM fused_runtime_entitlements; DELETE FROM fused_engine_usage_accounted_events; DELETE FROM fused_engine_usage_counter_reports"); err != nil {
 		t.Fatalf("reset runtime reporting tables: %v", err)
 	}
 	return ctx, cancel, pool, s
 }
 
+// pendingRuntimeUsageReports loads the current durable outbox through its public store boundary.
 func pendingRuntimeUsageReports(t *testing.T, ctx context.Context, usageStore interface {
 	ListPendingRuntimeUsageReports(context.Context, int) ([]models.EngineUsageReport, error)
 }) []models.EngineUsageReport {

@@ -1065,6 +1065,8 @@ type Store interface {
 
 	UpsertMCPSession(ctx context.Context, session *models.MCPSession) error
 	BatchCreateEngineExecutionEvents(ctx context.Context, events []models.EngineExecutionEvent) error
+	// BatchCreateEngineExecutionEventsAndUsage atomically persists receipts and event-ID-deduplicated commercial counters.
+	BatchCreateEngineExecutionEventsAndUsage(ctx context.Context, events []models.EngineExecutionEvent, aggregateUsage bool) error
 	DeleteEngineExecutionEventsBefore(ctx context.Context, before time.Time, limit int) (int64, error)
 	ListEngineExecutionEventsByService(ctx context.Context, filter EngineExecutionFilter) ([]models.EngineExecutionEvent, int64, error)
 	GetEngineExecutionAnalyticsByService(ctx context.Context, filter EngineExecutionFilter) (models.EngineExecutionAnalytics, error)

@@ -14,16 +14,9 @@ import (
 )
 
 const (
-	defaultUsageCounterQueueSize     = 1000
-	defaultUsageCounterBatchSize     = 100
-	defaultUsageCounterFlushInterval = time.Second
-	defaultUsageReportFlushInterval  = time.Minute
-	defaultUsageReportBatchLimit     = 500
+	defaultUsageReportFlushInterval = time.Minute
+	defaultUsageReportBatchLimit    = 500
 )
-
-type RuntimeUsageCounterStore interface {
-	IncrementRuntimeUsageCounters(ctx context.Context, increments []models.EngineUsageIncrement) error
-}
 
 type RuntimeUsageReportStore interface {
 	ListPendingRuntimeUsageReports(ctx context.Context, limit int) ([]models.EngineUsageReport, error)
@@ -32,144 +25,6 @@ type RuntimeUsageReportStore interface {
 
 type RuntimeUsageReportClient interface {
 	SendUsageReports(ctx context.Context, engineVersion, engineBuildHash string, reports []models.EngineUsageReport, reportedAt time.Time) error
-}
-
-type UsageCounterOptions struct {
-	QueueSize     int
-	BatchSize     int
-	FlushInterval time.Duration
-}
-
-type UsageCounterWorker struct {
-	store         RuntimeUsageCounterStore
-	increments    chan models.EngineUsageIncrement
-	batchSize     int
-	flushInterval time.Duration
-	done          chan struct{}
-	mu            sync.RWMutex
-	stopped       bool
-	started       bool
-	startOnce     sync.Once
-	stopOnce      sync.Once
-}
-
-func NewUsageCounterWorker(store RuntimeUsageCounterStore, opts UsageCounterOptions) *UsageCounterWorker {
-	queueSize, batchSize, flushInterval := usageCounterOptions(opts)
-	return &UsageCounterWorker{
-		store:         store,
-		increments:    make(chan models.EngineUsageIncrement, queueSize),
-		batchSize:     batchSize,
-		flushInterval: flushInterval,
-		done:          make(chan struct{}),
-	}
-}
-
-func (w *UsageCounterWorker) Start(ctx context.Context) {
-	if w == nil || w.store == nil {
-		return
-	}
-	w.startOnce.Do(func() {
-		w.mu.Lock()
-		w.started = true
-		w.mu.Unlock()
-		go w.run(ctx)
-	})
-}
-
-func (w *UsageCounterWorker) Stop(ctx context.Context) {
-	if w == nil {
-		return
-	}
-	w.stopOnce.Do(func() {
-		w.mu.Lock()
-		w.stopped = true
-		close(w.increments)
-		started := w.started
-		w.mu.Unlock()
-		if !started {
-			return
-		}
-		select {
-		case <-w.done:
-		case <-ctx.Done():
-		}
-	})
-}
-
-func (w *UsageCounterWorker) Record(increment models.EngineUsageIncrement) {
-	if w == nil {
-		return
-	}
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	if w.stopped {
-		return
-	}
-	select {
-	case w.increments <- increment:
-	default:
-		// Usage accounting should never add user-visible execution latency.
-		// Dropping is noisy so operators can tune queue/batch settings.
-		slog.Warn("Dropped engine usage increment: queue full", slog.String("metric", increment.Metric))
-	}
-}
-
-func (w *UsageCounterWorker) run(ctx context.Context) {
-	defer close(w.done)
-	ticker := time.NewTicker(w.flushInterval)
-	defer ticker.Stop()
-
-	batch := make([]models.EngineUsageIncrement, 0, w.batchSize)
-	flush := func(flushCtx context.Context) {
-		if len(batch) == 0 {
-			return
-		}
-		boundedCtx, cancel := boundedWorkerFlushContext(flushCtx)
-		defer cancel()
-		if err := w.store.IncrementRuntimeUsageCounters(boundedCtx, batch); err != nil {
-			slog.ErrorContext(ctx, "Failed to increment engine usage counters", slog.Any("error", err))
-		}
-		batch = batch[:0]
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			flushCtx, cancel := finalWorkerFlushContext()
-			flush(flushCtx)
-			cancel()
-			return
-		case increment, ok := <-w.increments:
-			if !ok {
-				flushCtx, cancel := finalWorkerFlushContext()
-				flush(flushCtx)
-				cancel()
-				return
-			}
-			batch = append(batch, increment)
-			if len(batch) >= w.batchSize {
-				flush(ctx)
-			}
-		case <-ticker.C:
-			flush(ctx)
-		}
-	}
-}
-
-func usageCounterOptions(opts UsageCounterOptions) (int, int, time.Duration) {
-	queueSize := opts.QueueSize
-	if queueSize <= 0 {
-		queueSize = defaultUsageCounterQueueSize
-	}
-	batchSize := opts.BatchSize
-	if batchSize <= 0 {
-		batchSize = defaultUsageCounterBatchSize
-	}
-	flushInterval := opts.FlushInterval
-	if flushInterval <= 0 {
-		flushInterval = defaultUsageCounterFlushInterval
-	}
-	return queueSize, batchSize, flushInterval
 }
 
 type UsageReportFlushOptions struct {

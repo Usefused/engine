@@ -720,6 +720,17 @@ func engineSchemaQueries() []string {
 			-1, -1, -1, -1, -1, -1, true, false, false, 30
 		) ON CONFLICT (singleton_key) DO NOTHING;`,
 
+		// The durable receipt ID is the exactly-once accounting boundary across JetStream redelivery.
+		`CREATE TABLE IF NOT EXISTS fused_engine_usage_accounted_events (
+			event_id uuid PRIMARY KEY REFERENCES fused_engine_execution_events(id) ON DELETE CASCADE,
+			accounted_at timestamptz NOT NULL DEFAULT NOW()
+		);`,
+		// Existing receipts were handled by the retired in-memory counter path; the empty-ledger gate makes this a one-time conservative backfill.
+		`INSERT INTO fused_engine_usage_accounted_events (event_id)
+		 SELECT id FROM fused_engine_execution_events
+		 WHERE execution_kind = 'physical' AND direction = 'outbound'
+		   AND NOT EXISTS (SELECT 1 FROM fused_engine_usage_accounted_events LIMIT 1)
+		 ON CONFLICT (event_id) DO NOTHING;`,
 		// Pending usage reports are local aggregate counters, not raw execution
 		// logs. A partial unique index lets many executions in the same minute
 		// fold into one pending report; once flushed, late arrivals for that

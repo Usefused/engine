@@ -18,8 +18,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// TestExecuteResolvedPhysicalJSONAccountsCollectorFailureOnce protects the rule
-// that response-validation failures finalize exactly one physical audit and usage outcome.
+// TestExecuteResolvedPhysicalJSONAccountsCollectorFailureOnce protects the one durable receipt used for downstream accounting.
 func TestExecuteResolvedPhysicalJSONAccountsCollectorFailureOnce(t *testing.T) {
 	vendor := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
@@ -35,10 +34,6 @@ func TestExecuteResolvedPhysicalJSONAccountsCollectorFailureOnce(t *testing.T) {
 	auditCapture := &captureJetStreamPublisher{}
 	executionevent.SetPublisher(executionevent.NewPublisher(auditCapture))
 	t.Cleanup(func() { executionevent.SetPublisher(nil) })
-	previousUsage := globalExecutionUsageRecorder
-	usageCapture := &captureExecutionUsageRecorder{}
-	SetExecutionUsageRecorder(usageCapture)
-	t.Cleanup(func() { SetExecutionUsageRecorder(previousUsage) })
 
 	_, err := ExecuteResolvedPhysicalJSON(context.Background(), engine.NewDispatcher(), identity, operation, PhysicalExecutionRequest{
 		IdempotencyKey: "child-key", RequestBodyHash: "strict-body-hash",
@@ -47,9 +42,6 @@ func TestExecuteResolvedPhysicalJSONAccountsCollectorFailureOnce(t *testing.T) {
 		t.Fatalf("ExecuteResolvedPhysicalJSON() error = %v, want ErrPhysicalResponseNotJSON", err)
 	}
 	assertPhysicalFailureAudit(t, auditCapture, identity, operation)
-	if len(usageCapture.increments) != 2 || usageCapture.increments[0].Metric != models.EngineUsageMetricExecutionTotal || usageCapture.increments[1].Metric != models.EngineUsageMetricExecutionFailed {
-		t.Fatalf("physical usage increments = %#v", usageCapture.increments)
-	}
 }
 
 // TestValidateResolvedPhysicalPaginationIntentUsesExactOperation proves admission reads the resolved endpoint policy without provider work.

@@ -57,7 +57,7 @@ func TestUnifiedReceiptPublishedForSDKAndMCP(t *testing.T) {
 	for _, transport := range []string{"sdk", "mcp"} {
 		t.Run(transport, func(t *testing.T) {
 			server, _, appID := newUnifiedRuntimeServer(t, store.AppTokenPolicy{AllowAll: true})
-			capture, _ := installUnifiedAccountingCaptures(t)
+			capture := installUnifiedAccountingCapture(t)
 			ctx := grpcTestContext(appID)
 			// MCP uses the same Unified runtime with a server-owned transport label.
 			if transport == "mcp" {
@@ -87,7 +87,7 @@ func TestUnifiedReceiptPublishedForSDKAndMCP(t *testing.T) {
 // TestUnifiedReceiptRESTUsesSharedProducer keeps the HTTP adapter on the same logical audit path.
 func TestUnifiedReceiptRESTUsesSharedProducer(t *testing.T) {
 	server, _, _ := newUnifiedRuntimeServer(t, store.AppTokenPolicy{AllowAll: true})
-	capture, _ := installUnifiedAccountingCaptures(t)
+	capture := installUnifiedAccountingCapture(t)
 	scope := server.store.(*grpcRuntimeStore).scope
 	identity := server.tokenValidator.(unifiedTestValidator).identity
 	input := unifiedRuntimeRequest()

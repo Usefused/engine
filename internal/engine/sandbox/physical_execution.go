@@ -176,11 +176,10 @@ func authorizePhysicalOperation(identity auth.RuntimeIdentity, endpointName stri
 	return err
 }
 
-// finalizePhysicalExecution records one receipt and usage outcome even if the caller disconnects.
+// finalizePhysicalExecution publishes one durable receipt even if the caller disconnects.
 func finalizePhysicalExecution(ctx context.Context, span trace.Span, state *executionAuditState, execErr *error) {
 	auditCtx := context.WithoutCancel(ctx)
 	recordEngineExecutionAudit(auditCtx, span, *state, *execErr)
-	recordEngineExecutionUsage(auditCtx, span, *state, *execErr)
 }
 
 // executeResolvedProviderOperation reuses the direct execution path after exact

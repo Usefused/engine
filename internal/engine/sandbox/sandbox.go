@@ -318,12 +318,11 @@ func engineExecuteCore(
 		startedAt:    executionStarted,
 	}
 	defer func() {
-		// A client or policy deadline must not suppress the durable audit event.
+		// A client or policy deadline must not suppress the durable receipt that owns downstream usage accounting.
 		// WithoutCancel preserves identity/timing/span values while removing only
 		// the cancellation signal that has already done its execution work.
 		auditCtx := context.WithoutCancel(ctx)
 		recordEngineExecutionAudit(auditCtx, span, auditState, err)
-		recordEngineExecutionUsage(auditCtx, span, auditState, err)
 	}()
 	if !identity.AllowsOperation(endpointName) {
 		// Fixture filtering improves MCP discovery, but this shared boundary is

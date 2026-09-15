@@ -194,7 +194,6 @@ func runEngine() {
 	engineWorkers.publicInsights = startPublicServiceInsightReporting(ctx, backgroundStore, registryClient)
 	controlAuthenticator := newControlAuthenticator(ctx, engineStore, authorizationRevision)
 	startAuthorizationRevisionPolling(ctx, backgroundStore, controlAuthenticator)
-	engineWorkers.usageCounter = startEngineUsageCounter(ctx, engineStore, entitlement)
 
 	startEngineHeartbeat(ctx, registryClient, entitlement, entitlementStore)
 	usageFlushWorker := startEngineUsageReporting(ctx, backgroundStore, registryClient, entitlement)
@@ -204,9 +203,8 @@ func runEngine() {
 		usageFlushWorker.Stop(stopCtx)
 	}()
 	defer func() {
-		// Drain user/agent-triggered local records before the usage reporter does
-		// its own deferred Registry flush; otherwise the newest counters would wait
-		// until the next Engine startup.
+		// Drain durable execution receipts and their transactional usage counters
+		// before the reporter's deferred Registry flush.
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer stopCancel()
 		engineWorkers.Stop(stopCtx)
@@ -437,7 +435,6 @@ type engineWorkers struct {
 	executionEvents       *worker.ExecutionEventWorker
 	retention             *worker.ExecutionRetentionWorker
 	publicInsights        *worker.PublicInsightWorker
-	usageCounter          *worker.UsageCounterWorker
 	packageLeases         *worker.SDKPackageLeaseWorker
 	sdkGenerations        *worker.SDKGenerationFinalizer
 	providerRateLimits    *worker.ProviderRateLimitProjectionWorker
@@ -478,11 +475,7 @@ func (w engineWorkers) stopRuntimeWorkers(ctx context.Context) {
 
 // stopReportingWorkers drains durable execution, usage, retention, insight, and package-lease work.
 func (w engineWorkers) stopReportingWorkers(ctx context.Context) {
-	// Usage aggregation finishes before its source execution worker is stopped.
-	if w.usageCounter != nil {
-		w.usageCounter.Stop(ctx)
-	}
-	// Execution persistence drains its bounded JetStream batch before retention stops.
+	// Execution persistence commits receipts and usage together before retention stops.
 	if w.executionEvents != nil {
 		w.executionEvents.Stop(ctx)
 	}
@@ -554,7 +547,10 @@ func startEngineWorkers(ctx context.Context, engineStore store.Store, natsClient
 		os.Exit(1)
 	}
 	executionevent.SetPublisher(executionevent.NewPublisher(natsClient))
-	executionEventWorker, err := worker.StartExecutionEventWorker(ctx, engineStore, natsClient)
+	executionEventWorker, err := worker.StartExecutionEventWorker(ctx, engineStore, natsClient, func() bool {
+		// The consumer evaluates the latest Registry entitlement at commit time so reporting changes need no restart.
+		return entitlementpkg.LiveEntitlement.Load().UsageReporting == models.RuntimeUsageReportingAggregate
+	})
 	// Execution history is a required durable consumer rather than a best-effort UI projection.
 	if err != nil {
 		slog.ErrorContext(ctx, "FATAL: Failed to start execution event persistence", slog.Any("error", err))
@@ -625,26 +621,6 @@ func startConnectedAuthRefreshWorker(ctx context.Context, refreshStore worker.Co
 	}
 	refreshWorker.Start(ctx)
 	return refreshWorker, nil
-}
-
-func startEngineUsageCounter(ctx context.Context, engineStore store.Store, entitlement models.RuntimeEntitlement) *worker.UsageCounterWorker {
-	if entitlement.UsageReporting != models.RuntimeUsageReportingAggregate {
-		// Recording is gated together with flushing so a non-aggregate Registry
-		// entitlement does not quietly accumulate local accounting rows forever.
-		sandbox.SetExecutionUsageRecorder(nil)
-		slog.InfoContext(ctx, "Engine aggregate usage recording disabled by Registry entitlement", slog.String("mode", entitlement.UsageReporting))
-		return nil
-	}
-	usageStore, ok := engineStore.(worker.RuntimeUsageCounterStore)
-	if !ok {
-		sandbox.SetExecutionUsageRecorder(nil)
-		slog.WarnContext(ctx, "Engine usage counter store unavailable; aggregate usage reports disabled")
-		return nil
-	}
-	usageCounterWorker := worker.NewUsageCounterWorker(usageStore, worker.UsageCounterOptions{})
-	usageCounterWorker.Start(ctx)
-	sandbox.SetExecutionUsageRecorder(usageCounterWorker)
-	return usageCounterWorker
 }
 
 func bootstrapRegistryIdentity(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, envLicense string) (models.RuntimeEntitlement, int64) {
