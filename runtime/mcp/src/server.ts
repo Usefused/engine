@@ -1,29 +1,21 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
+import { SEARCH_DOCS_DEFINITION, EXECUTE_DEFINITION } from "./toolDefinitions.js";
 import { loadFixture } from "./fixture.js";
 import {
   DocumentationSection,
-  SEARCH_DOCS_MAX_LIMIT,
-  isDocumentationSection,
   searchDocs,
 } from "./searchDocs.js";
 import { callClientOptionsFromEnv } from "./callClient.js";
 import { DEFAULT_EXECUTE_LIMITS, runExecute, SessionState } from "./sandbox.js";
-import { EXECUTE_MIN_OUTPUT_BYTES, EXECUTE_VISIBLE_OUTPUT_POLICY } from "./resultBudget.js";
 import {
   DOCUMENTATION_OUTPUT_POLICY,
   serializeBoundedJson,
 } from "./outputLimits.js";
-import { SESSION_CONTRACT_METADATA } from "./sessionContract.js";
 import { mcpAuthElicitationError } from "./authElicitation.js";
 import {
-  EXECUTE_ARGUMENT_DESCRIPTIONS,
-  EXECUTE_TOOL_DESCRIPTION,
   MCP_SERVER_INSTRUCTIONS,
-  SEARCH_DOCS_ARGUMENT_DESCRIPTIONS,
-  SEARCH_DOCS_TOOL_DESCRIPTION,
 } from "./toolDescriptions.js";
 
 /** Starts one process-scoped MCP session with bounded tool outputs. */
@@ -53,38 +45,7 @@ function main(): void {
 
   server.registerTool(
     "search_docs",
-    {
-      title: "Search available operations",
-      description: SEARCH_DOCS_TOOL_DESCRIPTION,
-      inputSchema: {
-        query: z
-          .string()
-          .max(512)
-          .optional()
-          .describe(SEARCH_DOCS_ARGUMENT_DESCRIPTIONS.query),
-        operationId: z
-          .string()
-          .max(256)
-          .optional()
-          .describe(SEARCH_DOCS_ARGUMENT_DESCRIPTIONS.operationId),
-        limit: z
-          .number()
-          .int()
-          .min(1)
-          .max(SEARCH_DOCS_MAX_LIMIT)
-          .optional()
-          .describe(SEARCH_DOCS_ARGUMENT_DESCRIPTIONS.limit),
-        section: z
-          .custom(isDocumentationSection, "invalid public documentation section")
-          .optional()
-          .describe(SEARCH_DOCS_ARGUMENT_DESCRIPTIONS.section),
-        schemaPath: z
-          .string()
-          .max(2048)
-          .optional()
-          .describe(SEARCH_DOCS_ARGUMENT_DESCRIPTIONS.schemaPath),
-      },
-    },
+    SEARCH_DOCS_DEFINITION,
     // Documentation is serialized at the handler boundary so every discovery
     // mode shares one wire-size policy without changing catalogue semantics.
     async (args) => {
@@ -97,18 +58,7 @@ function main(): void {
 
   server.registerTool(
     "execute",
-    {
-      title: "Execute a script",
-      description: EXECUTE_TOOL_DESCRIPTION,
-      _meta: { "com.usefused/session": SESSION_CONTRACT_METADATA },
-      inputSchema: {
-        outputBudgetBytes: z.number().int().min(EXECUTE_MIN_OUTPUT_BYTES).max(EXECUTE_VISIBLE_OUTPUT_POLICY.maxBytes).optional()
-          .describe(EXECUTE_ARGUMENT_DESCRIPTIONS.outputBudgetBytes),
-        script: z
-          .string()
-          .describe(EXECUTE_ARGUMENT_DESCRIPTIONS.script),
-      },
-    },
+    EXECUTE_DEFINITION,
     // The sandbox returns only trusted, already-bounded text, so the handler
     // cannot accidentally serialize user-controlled objects outside its deadline.
     async (args, extra) => {

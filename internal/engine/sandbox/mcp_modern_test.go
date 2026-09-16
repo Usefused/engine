@@ -252,6 +252,10 @@ func TestMCPModernToolsAndExplicitStateEndToEnd(t *testing.T) {
 		t.Skip("Node is required for modern MCP tool coverage")
 	}
 	fixture := installMCPModernFixture(t)
+	// Two non-refilling start tokens cover the deliberately rejected execute and the first valid execute only.
+	previousStarts := sessionStartRateLimiter
+	sessionStartRateLimiter = newRateLimitStore(0, 2)
+	t.Cleanup(func() { sessionStartRateLimiter = previousStarts })
 	previousConfig, previousEnginePort := cfg, globalEnginePort
 	localConfig := *cfg
 	// Process startup under race instrumentation needs a wider bound than ordinary in-memory protocol tests.
@@ -277,6 +281,10 @@ func TestMCPModernToolsAndExplicitStateEndToEnd(t *testing.T) {
 	// Stateless documentation search must complete without returning state or leaving a child process registered.
 	if searchResponse.Code != http.StatusOK || strings.Contains(searchResponse.Body.String(), `"stateHandle"`) || activeMCPSessionCount() != activeBeforeSearch {
 		t.Fatalf("modern search_docs = status:%d active:%d body:%s", searchResponse.Code, activeMCPSessionCount(), searchResponse.Body.String())
+	}
+	// Discovery and documentation must leave the sandbox limiter entirely untouched, not merely cleaned up afterward.
+	if len(sessionStartRateLimiter.entries) != 0 {
+		t.Fatal("metadata consumed the sandbox-start budget")
 	}
 	activeBeforeRejectedCall := activeMCPSessionCount()
 	rejectedResponse := httptest.NewRecorder()

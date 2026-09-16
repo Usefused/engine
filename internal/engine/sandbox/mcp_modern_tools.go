@@ -52,28 +52,25 @@ type mcpModernChildEnvelope struct {
 	} `json:"error"`
 }
 
-// handleMCPModernToolsList returns the existing immutable tool catalogue through the stateless 2026 envelope.
+// handleMCPModernToolsList serves the shared tool definitions without allocating a child or consuming a sandbox-start token.
 func handleMCPModernToolsList(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, routeID, token string, request mcpJSONRPCRequest, admission *mcpModernAdmission) {
-	sess, failure := startMCPModernToolRuntime(ctx, span, w, r, routeID, token, request, admission, false)
-	// Catalogue requests own no continuation state, so startup failure completes the request directly.
-	if failure != nil {
-		writeMCPModernRuntimeFailure(w, request.ID, failure)
-		return
-	}
-	defer terminateMCPSession(sess.sessionID, "client_terminated")
-	childRequest, err := mcpModernChildRequest(request, nil)
-	// Modern metadata must be removed before the 2025 child validates its list parameters.
-	if err != nil {
+	// Connected-user selector validation remains identical to execution even though declarations are public within this app.
+	if _, err := mcpSessionAuthContext(r.Header); err != nil {
 		writeMCPModernError(w, request.ID, -32602, err.Error(), http.StatusBadRequest, nil)
 		return
 	}
-	response, failure := exchangeMCPModernChild(ctx, sess, childRequest)
-	// A child transport failure has already classified whether provider work was possible.
-	if failure != nil {
-		writeMCPModernRuntimeFailure(w, request.ID, failure)
+	result, err := runMCPMetadata(ctx, nil, nil)
+	// A bad embedded catalogue is a server failure and must never trigger legacy child startup.
+	if err != nil {
+		writeMCPModernError(w, request.ID, -32603, "MCP tool catalogue is unavailable", http.StatusInternalServerError, nil)
 		return
 	}
-	writeMCPModernChildResponse(w, request.ID, response, admission.server, adaptMCPModernToolList)
+	// Modern execute retains its explicit continuation contract over the shared compatibility descriptor.
+	if err := adaptMCPModernToolList(result); err != nil {
+		writeMCPModernError(w, request.ID, -32603, "MCP tool catalogue is invalid", http.StatusInternalServerError, nil)
+		return
+	}
+	writeMCPModernResult(w, request.ID, result, admission.server)
 }
 
 // handleMCPModernToolsCall executes one tool and retains sandbox state only behind an explicit token-bound handle.
@@ -90,6 +87,16 @@ func handleMCPModernToolsCall(ctx context.Context, span trace.Span, w http.Respo
 		writeMCPModernError(w, request.ID, -32602, err.Error(), http.StatusBadRequest, nil)
 		return
 	}
+	// Metadata reads need the authorized catalogue but neither an execution child nor continuation state.
+	if params["name"] == mcpSearchToolName {
+		handleMCPModernSearchDocs(ctx, w, request, admission, arguments)
+		return
+	}
+	// Unknown names cannot consume process capacity merely to discover that no such tool exists.
+	if params["name"] != "execute" {
+		writeMCPModernError(w, request.ID, -32602, "unknown MCP tool", http.StatusBadRequest, nil)
+		return
+	}
 	var sess *mcpSession
 	keepState := params["name"] == "execute"
 	mintedState := keepState && handle == ""
@@ -103,7 +110,7 @@ func handleMCPModernToolsCall(ctx context.Context, span trace.Span, w http.Respo
 	} else {
 		var failure *mcpModernRuntimeFailure
 		sess, failure = startMCPModernToolRuntime(ctx, span, w, r, routeID, token, request, admission, keepState)
-		// Runtime creation is required for both documentation and execution tools.
+		// Independent executions receive isolated children; only explicit state handles reuse them.
 		if failure != nil {
 			writeMCPModernRuntimeFailure(w, request.ID, failure)
 			return
@@ -144,7 +151,7 @@ func handleMCPModernToolsCall(ctx context.Context, span trace.Span, w http.Respo
 	}
 	stateReturned := !mintedState
 	transform := func(result map[string]any) error {
-		// Only execute owns cross-request sandbox state; search_docs remains a disposable metadata lookup.
+		// Only execute reaches this path and owns cross-request sandbox state.
 		if keepState {
 			isError, _ := result["isError"].(bool)
 			// A failed first execution created no useful caller state, while an existing handle remains valid across tool errors.
@@ -175,7 +182,7 @@ func startMCPModernToolRuntime(ctx context.Context, span trace.Span, w http.Resp
 		return nil, &mcpModernRuntimeFailure{status: http.StatusBadRequest, code: -32602, message: err.Error()}
 	}
 	metadata := mcpModernClientMetadata(r, request)
-	// Catalogue and documentation calls are disposable implementations, while execute handles remain visible in lifecycle history.
+	// Execute handles remain visible in lifecycle history; metadata requests never enter this startup path.
 	sess, err := startMCPRuntimeSession(ctx, routeID, admission.target.AppID.String(), token, mcpModernProtocolVersion, mcpModernToolTransport, !retainState, false, authContext, admission.identity, metadata)
 	// Catalogue preparation and process startup fail before any tool or provider request can run.
 	if err != nil {

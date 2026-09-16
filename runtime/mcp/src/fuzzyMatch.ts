@@ -1,3 +1,15 @@
+// The embedded metadata interpreter supplies this Unicode primitive because its RegExp lacks property escapes.
+declare const fusedMetadataUnicodeWords: ((value: string) => string[]) | undefined;
+
+/** Uses equivalent Unicode letter/number segmentation in Node and the metadata-only embedded interpreter. */
+function unicodeWords(value: string): string[] {
+  // This trusted host primitive exists only in Engine's metadata evaluator; Node retains native Unicode regex semantics.
+  if (typeof fusedMetadataUnicodeWords === "function") {
+    return fusedMetadataUnicodeWords(value);
+  }
+  return value.match(/[\p{L}\p{N}]+/gu) ?? [];
+}
+
 /** One public catalogue field and its relative intent-ranking importance. */
 export interface WeightedSearchField {
   value?: string;
@@ -8,10 +20,9 @@ export interface WeightedSearchField {
 function tokenize(value: string): string[] {
   const words = value
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .toLocaleLowerCase("en-US")
-    .match(/[\p{L}\p{N}]+/gu);
+    .toLocaleLowerCase("en-US");
   // An empty lexical form cannot provide evidence for a catalogue match.
-  return words ?? [];
+  return unicodeWords(words);
 }
 
 /** Treats exact and prefix-related terms as intent matches without guessing synonyms. */

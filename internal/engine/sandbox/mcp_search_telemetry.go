@@ -93,7 +93,7 @@ func mcpFixtureKindCounts(fixture *Fixture) (int, int) {
 func boundedMCPSearchTransport(transport string) string {
 	// Only Engine-owned transport constants are safe low-cardinality dimensions.
 	switch transport {
-	case "sse", mcpStreamableTransport:
+	case "sse", mcpStreamableTransport, mcpModernToolTransport:
 		return transport
 	default:
 		return "unknown"
@@ -102,6 +102,10 @@ func boundedMCPSearchTransport(transport string) string {
 
 // finishMCPSearchObservation records response metadata without parsing documentation content.
 func finishMCPSearchObservation(observation *mcpSearchObservation, response, boundaryError string) {
+	// Malformed argument types can fail mode classification before a metadata tool returns its validation error.
+	if observation == nil {
+		return
+	}
 	outcome, errorCode := mcpSearchOutcome(response, boundaryError)
 	// Search duration is bounded by its call budget, independently of the session's age.
 	duration := min(time.Since(observation.started).Milliseconds(), int64(cfg.Sandbox.ToolCallTimeoutSeconds)*1000)
