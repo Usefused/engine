@@ -3,7 +3,7 @@ const TITLES: Record<string, string> = {
   "/login": "Sign in - Fused",
   "/integrations": "Services - Fused",
   "/integrations/sdks": "Apps - Fused",
-  "/integrations/mcp": "MCP servers - Fused",
+  "/integrations/mcp": "Apps - Fused",
   "/integrations/access/people": "People - Fused",
   "/integrations/access/teams": "Teams - Fused",
   "/integrations/buckets": "Credentials - Fused",
@@ -11,12 +11,23 @@ const TITLES: Record<string, string> = {
   "/integrations/settings": "Settings - Fused",
 };
 
+/** Returns the adapter-specific builder title from its explicit query selection. */
+function builderTitle(search: string): string {
+  const mode = new URLSearchParams(search).get("tab");
+  // Builder titles expose MCP without changing the route hierarchy.
+  if (mode === "mcp") return "Create MCP server - Fused";
+  // Direct REST is an explicit package-free choice with its own builder context.
+  if (mode === "api") return "Create REST API - Fused";
+  // SDK is explicit too; an absent or invalid choice remains the neutral chooser.
+  if (mode === "sdk") return "Create SDK - Fused";
+  return "Create app - Fused";
+}
+
+/** Resolves a concise browser title for every primary Engine UI route. */
 export function routeTitle(pathname: string, search = ""): string {
   const normalizedPath = pathname.length > 1 ? pathname.replace(/\/$/, "") : pathname;
   if (normalizedPath === "/integrations/builder") {
-    return new URLSearchParams(search).get("tab") === "mcp"
-      ? "Create MCP server - Fused"
-      : "Create app - Fused";
+    return builderTitle(search);
   }
   if (TITLES[normalizedPath]) return TITLES[normalizedPath];
   if (/^\/integrations\/mcp\/[^/]+\/analytics$/.test(normalizedPath)) {

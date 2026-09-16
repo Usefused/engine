@@ -1,8 +1,8 @@
 import type { FormEvent } from "react";
-import { AlertTriangle, Check, Copy, Download, Server } from "lucide-react";
+import { AlertTriangle, Check, Copy, Download, Globe2, Server } from "lucide-react";
 import { AppOwnerControls } from "~/components/access/AppOwnerControls";
 import { McpTransportEndpoints, type McpTransportEndpointData } from "~/components/mcp/McpTransportEndpoints";
-import type { AppBuildSelector, AppOwningTeam } from "~/lib/app-builder-contract";
+import type { AppBuildSelector, AppCreationMode, AppOwningTeam } from "~/lib/app-builder-contract";
 import type { ServiceVersion } from "~/lib/api";
 import { formatVersion } from "~/lib/format";
 
@@ -11,7 +11,7 @@ import { formatVersion } from "~/lib/format";
 // verbatim -- same handleGenerate/planAndApplyApp contract, only moved
 // so that route isn't carrying this JSX inline alongside the service list.
 export interface ConsumerGenerationPanelProps {
-  generationMode: "sdk" | "mcp";
+  generationMode: AppCreationMode;
   ownerTeams: AppOwningTeam[];
   ownerTeamId: string;
   setOwnerTeamId: (id: string) => void;
@@ -56,30 +56,39 @@ export interface ConsumerGenerationPanelProps {
   }>;
 }
 
-function GenerationModeHeader({ generationMode }: { generationMode: "sdk" | "mcp" }) {
+/** Names the adapter-specific setup while retaining one shared selection form. */
+function GenerationModeHeader({ generationMode }: { generationMode: AppCreationMode }) {
+  const title = generationMode === "mcp" ? "MCP server setup" : generationMode === "api" ? "REST API setup" : "SDK setup";
+  const description = generationMode === "mcp"
+    ? "Configure the MCP server your agent connects to."
+    : generationMode === "api"
+      ? "Configure the Engine REST API your app calls."
+      : "Configure the generated package your app imports.";
   return (
     <div className="border-b border-slate-200 bg-slate-50 p-6">
-      <h2 className="text-xl font-bold text-slate-900 mb-2">{generationMode === "mcp" ? "MCP server setup" : "App setup"}</h2>
-      <p className="text-sm text-slate-500">
-        {generationMode === "mcp" ? "Configure the MCP server your agent connects to." : "Configure how your app consumes the selected operations."}
-      </p>
+      <h2 className="text-xl font-bold text-slate-900 mb-2">{title}</h2>
+      <p className="text-sm text-slate-500">{description}</p>
     </div>
   );
 }
 
+/** Captures the immutable app-family name for every delivery adapter. */
 function NameField({ generationMode, sdkName, setSdkName, setIsDuplicate, checkDuplicateSDK }: {
-  generationMode: "sdk" | "mcp"; sdkName: string; setSdkName: (v: string) => void; setIsDuplicate: (v: boolean) => void; checkDuplicateSDK: () => void;
+  generationMode: AppCreationMode; sdkName: string; setSdkName: (v: string) => void; setIsDuplicate: (v: boolean) => void; checkDuplicateSDK: () => void;
 }) {
+  // One-company Engines use simple family names; package-manager scopes add no identity value here.
+  const placeholder = generationMode === "mcp" ? "customer-support" : generationMode === "api" ? "customer-api" : "customer-sdk";
+  const label = generationMode === "mcp" ? "Server name" : generationMode === "api" ? "API name" : "SDK name";
   return (
     <div>
-      <label className="block text-sm font-medium text-slate-700 mb-1.5">{generationMode === "mcp" ? "Server name" : "App name"}</label>
+      <label className="block text-sm font-medium text-slate-700 mb-1.5">{label}</label>
       <input
         type="text"
         required
-        placeholder={generationMode === "mcp" ? "customer-support" : "@myorg/custom-sdk"}
+        placeholder={placeholder}
         value={sdkName}
         onChange={e => { setSdkName(e.target.value); setIsDuplicate(false); }}
-        onBlur={generationMode === "sdk" ? checkDuplicateSDK : undefined}
+        onBlur={generationMode !== "mcp" ? checkDuplicateSDK : undefined}
         className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm focus:outline-none focus:border-[var(--brand-violet)] focus:ring-2 focus:ring-[var(--brand-violet)]/20 transition-all bg-slate-50 focus:bg-white"
       />
     </div>
@@ -106,16 +115,17 @@ function WebhookBundleField({ totalSelectedWebhooks, webhookAttachment, setWebho
   );
 }
 
+/** Captures immutable version identity and previews collisions for SDK-kind deliveries. */
 function VersionField({ generationMode, appVersion, setAppVersion, setIsDuplicate, checkDuplicateSDK, checkingDuplicate, isDuplicate }: {
-  generationMode: "sdk" | "mcp"; appVersion: string; setAppVersion: (v: string) => void; setIsDuplicate: (v: boolean) => void;
+  generationMode: AppCreationMode; appVersion: string; setAppVersion: (v: string) => void; setIsDuplicate: (v: boolean) => void;
   checkDuplicateSDK: () => void; checkingDuplicate: boolean; isDuplicate: boolean;
 }) {
-  const isSdk = generationMode === "sdk";
+  const isSdkKind = generationMode !== "mcp";
   return (
     <div>
       <label className="block text-sm font-medium text-slate-700 mb-1.5 flex justify-between">
         <span>Version</span>
-        {isSdk && checkingDuplicate && <span className="text-xs text-slate-400">Checking...</span>}
+        {isSdkKind && checkingDuplicate && <span className="text-xs text-slate-400">Checking...</span>}
       </label>
       <input
         type="text"
@@ -123,16 +133,16 @@ function VersionField({ generationMode, appVersion, setAppVersion, setIsDuplicat
         placeholder="1.0.0"
         value={appVersion}
         onChange={e => { setAppVersion(e.target.value); setIsDuplicate(false); }}
-        onBlur={isSdk ? checkDuplicateSDK : undefined}
+        onBlur={isSdkKind ? checkDuplicateSDK : undefined}
         className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm focus:outline-none focus:border-[var(--brand-violet)] focus:ring-2 focus:ring-[var(--brand-violet)]/20 transition-all bg-slate-50 focus:bg-white"
       />
-      {isSdk && isDuplicate && (
+      {isSdkKind && isDuplicate && (
         <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded-lg flex items-start gap-2 animate-in fade-in slide-in-from-top-1">
           <div className="text-yellow-600 mt-0.5">
             <AlertTriangle className="w-4 h-4" />
           </div>
           <p className="text-xs text-yellow-800 leading-tight">
-            An SDK with this name and version already exists. Generating it again will overwrite the existing package file.
+            An app with this name and version already exists. Engine will preserve its immutable delivery mode and scope.
           </p>
         </div>
       )}
@@ -140,8 +150,9 @@ function VersionField({ generationMode, appVersion, setAppVersion, setIsDuplicat
   );
 }
 
+/** Offers package language only when app creation will generate an SDK artifact. */
 function LanguageSelector({ generationMode, language, setLanguage }: {
-  generationMode: "sdk" | "mcp"; language: "typescript" | "python"; setLanguage: (v: "typescript" | "python") => void;
+  generationMode: AppCreationMode; language: "typescript" | "python"; setLanguage: (v: "typescript" | "python") => void;
 }) {
   if (generationMode !== "sdk") return null;
   return (
@@ -261,12 +272,13 @@ function UnactivatedServicesWarning({ unactivatedSelectedServiceIds, data, versi
   );
 }
 
-function GenerateSubmitButtonContent({ generating, generationMode }: { generating: boolean; generationMode: "sdk" | "mcp" }) {
+/** Renders progress and call-to-action copy for the selected delivery adapter. */
+function GenerateSubmitButtonContent({ generating, generationMode }: { generating: boolean; generationMode: AppCreationMode }) {
   if (generating) {
     return (
       <>
         <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-        {generationMode === "mcp" ? "Deploying..." : "Generating..."}
+        {generationMode === "mcp" ? "Deploying..." : generationMode === "api" ? "Publishing..." : "Generating..."}
       </>
     );
   }
@@ -274,7 +286,16 @@ function GenerateSubmitButtonContent({ generating, generationMode }: { generatin
     return (
       <>
         <Download className="w-5 h-5" />
-        Create app
+        Create SDK
+      </>
+    );
+  }
+  // REST publication creates an executable app without implying a package download.
+  if (generationMode === "api") {
+    return (
+      <>
+        <Globe2 className="w-5 h-5" />
+        Create REST API
       </>
     );
   }
@@ -286,7 +307,8 @@ function GenerateSubmitButtonContent({ generating, generationMode }: { generatin
   );
 }
 
-function GenerateSubmitButton({ generating, disabled, generationMode }: { generating: boolean; disabled: boolean; generationMode: "sdk" | "mcp" }) {
+/** Submits one plan/apply workflow regardless of the chosen delivery adapter. */
+function GenerateSubmitButton({ generating, disabled, generationMode }: { generating: boolean; disabled: boolean; generationMode: AppCreationMode }) {
   return (
     <button
       data-track="generate_sdk_or_mcp"
@@ -313,16 +335,18 @@ function GenerationProgress({ generating, generateStatus }: { generating: boolea
   );
 }
 
-function SdkDeploymentResult({ sdkDeployment, sdkTokenCopied, setSdkTokenCopied }: {
-  sdkDeployment: ConsumerGenerationPanelProps["sdkDeployment"]; sdkTokenCopied: boolean; setSdkTokenCopied: (v: boolean) => void;
+/** Reports either generated-package or direct-REST success from SDK-kind plan/apply. */
+function SdkDeploymentResult({ generationMode, sdkDeployment, sdkTokenCopied, setSdkTokenCopied }: {
+  generationMode: AppCreationMode; sdkDeployment: ConsumerGenerationPanelProps["sdkDeployment"]; sdkTokenCopied: boolean; setSdkTokenCopied: (v: boolean) => void;
 }) {
   if (!sdkDeployment) return null;
+  const isAPI = generationMode === "api";
   return (
     <div className="mt-4 border-t border-slate-200 pt-4 text-sm text-slate-700">
       <div className="flex items-center gap-2 font-semibold text-slate-900">
-        <Check className="h-4 w-4 text-emerald-600" /> App ready
+        <Check className="h-4 w-4 text-emerald-600" /> {isAPI ? "REST API ready" : "SDK ready"}
       </div>
-      <p className="mt-2 text-xs text-slate-500">The package has been downloaded.</p>
+      <p className="mt-2 text-xs text-slate-500">{isAPI ? "The API is published on this Engine." : "The package has been downloaded."}</p>
       {sdkDeployment.token && (
         <ExecutionTokenField token={sdkDeployment.token} copied={sdkTokenCopied} onCopy={() => setSdkTokenCopied(true)} />
       )}
@@ -361,6 +385,7 @@ function McpDeploymentResult({ mcpDeployment, mcpTokenCopied, setMcpTokenCopied 
   );
 }
 
+/** Renders the shared creation controls while adapting delivery-specific fields and outcomes. */
 export function ConsumerGenerationPanel(props: ConsumerGenerationPanelProps) {
   const {
     generationMode,
@@ -413,7 +438,7 @@ export function ConsumerGenerationPanel(props: ConsumerGenerationPanelProps) {
           onSubmit={handleGenerate}
           className="p-6 space-y-5"
           toolname="generate_sdk"
-          tooldescription="Generate a native SDK or MCP server based on the selected endpoints. Requires name and version."
+          tooldescription="Create a generated SDK, direct REST API, or MCP server from selected operations. Requires name and version."
         >
           <AppOwnerControls ownerTeams={ownerTeams} ownerTeamId={ownerTeamId} buckets={availableBuckets} bucketId={bucketId} onOwnerTeamChange={setOwnerTeamId} onBucketChange={setBucketId} onCreateCredential={onCreateCredential} />
           <NameField generationMode={generationMode} sdkName={sdkName} setSdkName={setSdkName} setIsDuplicate={setIsDuplicate} checkDuplicateSDK={checkDuplicateSDK} />
@@ -444,7 +469,7 @@ export function ConsumerGenerationPanel(props: ConsumerGenerationPanelProps) {
 
             <GenerationProgress generating={generating} generateStatus={generateStatus} />
 
-            <SdkDeploymentResult sdkDeployment={sdkDeployment} sdkTokenCopied={sdkTokenCopied} setSdkTokenCopied={setSdkTokenCopied} />
+            <SdkDeploymentResult generationMode={generationMode} sdkDeployment={sdkDeployment} sdkTokenCopied={sdkTokenCopied} setSdkTokenCopied={setSdkTokenCopied} />
 
             <McpDeploymentResult mcpDeployment={mcpDeployment} mcpTokenCopied={mcpTokenCopied} setMcpTokenCopied={setMcpTokenCopied} />
           </div>

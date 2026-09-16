@@ -21,13 +21,14 @@ func (fixture appCatalogScanFixture) Scan(dest ...any) error {
 	*(dest[4].(*string)) = fixture.values[4].(string)
 	*(dest[5].(*string)) = fixture.values[5].(string)
 	*(dest[6].(*AppKind)) = AppKind(fixture.values[6].(string))
-	*(dest[7].(*AppStatus)) = AppStatus(fixture.values[7].(string))
-	*(dest[8].(*time.Time)) = fixture.values[8].(time.Time)
-	*(dest[9].(*string)) = fixture.values[9].(string)
+	*(dest[7].(*AppDeliveryMode)) = AppDeliveryMode(fixture.values[7].(string))
+	*(dest[8].(*AppStatus)) = AppStatus(fixture.values[8].(string))
+	*(dest[9].(*time.Time)) = fixture.values[9].(time.Time)
 	*(dest[10].(*string)) = fixture.values[10].(string)
 	*(dest[11].(*string)) = fixture.values[11].(string)
-	*(dest[12].(*json.RawMessage)) = fixture.values[12].([]byte)
-	*(dest[13].(**time.Time)) = fixture.values[13].(*time.Time)
+	*(dest[12].(*string)) = fixture.values[12].(string)
+	*(dest[13].(*json.RawMessage)) = fixture.values[13].([]byte)
+	*(dest[14].(**time.Time)) = fixture.values[14].(*time.Time)
 	return nil
 }
 
@@ -36,7 +37,7 @@ func TestScanAppCatalogItemPreservesExactVersionIdentityAndSelections(t *testing
 	familyID, appID, serviceID := uuid.New(), uuid.New(), uuid.New()
 	createdAt, deactivationAt := time.Now(), time.Now().Add(24*time.Hour)
 	item, err := scanAppCatalogItem(appCatalogScanFixture{values: []any{
-		familyID, appID, uuid.Nil, "Support", "Internal support SDK", "2.0.0", "sdk", "deprecated",
+		familyID, appID, uuid.Nil, "Support", "Internal support SDK", "2.0.0", "sdk", "sdk", "deprecated",
 		createdAt, "typescript", "generator-v2", "# Support", []byte(`[{"service_id":"` + serviceID.String() + `","endpoint_ids":[],"webhook_ids":[]}]`), &deactivationAt,
 	}})
 	if err != nil {

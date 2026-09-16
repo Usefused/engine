@@ -28,6 +28,7 @@ var (
 
 	// App-family errors
 	ErrAppFamilyNotFound              = errors.New("app family not found")
+	ErrAppFamilyNotEmpty              = errors.New("app family still has active versions")
 	ErrAppNotFound                    = errors.New("app not found")
 	ErrAppVersionImmutable            = errors.New("app version is immutable: same version with changed source or scope")
 	ErrAppVersionExists               = errors.New("app version already exists in family")
@@ -118,6 +119,8 @@ type AppFamily struct {
 	DeliveryMode   AppDeliveryMode
 	OwnerSubjectID uuid.UUID
 	OwnerTeamID    uuid.UUID
+	ArchivedAt     *time.Time
+	ArchivedBy     uuid.UUID
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }
@@ -904,6 +907,7 @@ type Store interface {
 	GetAppFamilyByIdentity(ctx context.Context, accountID uuid.UUID, kind, canonicalName string) (*AppFamily, error)
 	AppFamilyHasHistory(ctx context.Context, appFamilyID uuid.UUID) (bool, error)
 	ListAppFamilies(ctx context.Context, accountID uuid.UUID, kind string, limit, offset int) ([]AppFamily, int, error)
+	ArchiveAppFamily(ctx context.Context, accountID, appFamilyID uuid.UUID) error
 
 	// App (version) CRUD
 	PublishAppVersion(ctx context.Context, app App) (*App, bool, error)

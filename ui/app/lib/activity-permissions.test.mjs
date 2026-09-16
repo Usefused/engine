@@ -65,14 +65,18 @@ test("notification discovery waits for read authorization and hides the bell", (
   assert.match(sidebar, /workspaceActivityTabs\(access\)\.length > 0/);
 });
 
-test("scoped Activity tabs are hidden when their audit capability is absent", () => {
+// Execution activity stays audit-gated while readable lifecycle Changes remains a separate primary tab.
+test("scoped Activity data is hidden when audit access is absent", () => {
   assert.match(serviceRoute, /workspaceServiceActive === true && canReadActivity/);
   assert.match(serviceRoute, /return canReadActivity \? <ActivityTabContent \/> : <EndpointTabContent \/>/);
-  assert.match(sdkRoute, /optionalNode\(canReadActivity, \(\s*<button[\s\S]+Activity/);
-  assert.match(sdkRoute, /requestedActiveTab === "analytics" && !canReadActivity \? "overview"/);
+  assert.match(sdkRoute, /if \(canReadActivity\) tabs\.push\(\{ value: "activity", label: "Activity" \}\)/);
+  assert.match(sdkRoute, /requestedTab === "activity" && !canReadActivity \? "overview"/);
+  assert.match(sdkRoute, /tabs\.push\(\{ value: "changes", label: "Changes" \}\)/);
+  assert.match(sdkRoute, /sdkActivityOptions\(canReadActivity\)/);
+  assert.match(sdkRoute, /canReadActivity && activitySection === "overview"/);
   assert.match(mcpDetail, /hasResourcePermission\(access, "app\.read", "APP", state\.server\?\.app_family_id/);
   assert.match(mcpDetail, /requestedTab === "activity" && !canReadActivity \? "overview"/);
-  assert.match(mcpDetail, /canReadActivity \? <button[^>]+[\s\S]+Activity/);
+  assert.match(mcpDetail, /if \(canReadActivity\) tabs\.push\(\{ value: "activity", label: "Activity" \}\)/);
   assert.match(mcpActivity, /hasResourcePermission\(access, "app\.read", "APP", appFamilyId\) && hasWorkspacePermission\(access, "audit\.read"\)/);
   assert.doesNotMatch(mcpActivity, /hasAnyPermission\(access, "app\.read"\)/);
 });

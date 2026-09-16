@@ -1,6 +1,6 @@
 {
-  "call_count": 86,
-  "document_count": 105,
+  "call_count": 84,
+  "document_count": 102,
   "calls": [
     {
       "endpoint": "engine",
@@ -484,27 +484,15 @@
     },
     {
       "endpoint": "engine",
-      "file": "app/routes/integrations.mcp.tsx",
+      "file": "app/routes/integrations.sdks._index.tsx",
       "call": 1,
-      "document_count": 1
-    },
-    {
-      "endpoint": "engine",
-      "file": "app/routes/integrations.mcp.tsx",
-      "call": 2,
-      "document_count": 3
-    },
-    {
-      "endpoint": "engine",
-      "file": "app/routes/integrations.mcp.tsx",
-      "call": 3,
       "document_count": 1
     },
     {
       "endpoint": "engine",
       "file": "app/routes/integrations.sdks._index.tsx",
-      "call": 1,
-      "document_count": 1
+      "call": 2,
+      "document_count": 2
     },
     {
       "endpoint": "engine",
@@ -1190,63 +1178,42 @@
       "file": "app/routes/integrations.mcp_.$id.tsx",
       "call": 1,
       "variant": 1,
-      "document": "\n    query MCPServerDetails($appId: String!) {\n      app(app_id: $appId) {\n        app_id\n        app_family_id\n        name\n        description\n        version\n        kind\n        status\n        created_at\n        default_transport\n        stable\n        stable_version_id\n        transport_urls { streamable_http sse versioned_streamable_http versioned_sse }\n        selections { service_id service_version_id schema_version endpoint_ids operation_names webhook_ids webhook_names select_all webhook_select_all }\n      }\n      appServices(app_id: $appId) { service_id service_slug service_name version select_all endpoint_count webhook_count }\n    }\n  "
+      "document": "\n    query MCPServerDetails($appId: String!) {\n      app(app_id: $appId) {\n        app_id\n        app_family_id\n        name\n        version\n        kind\n        status\n        created_at\n        default_transport\n        stable\n        stable_version_id\n        transport_urls { streamable_http sse versioned_streamable_http versioned_sse }\n        selections { service_id service_version_id schema_version endpoint_ids operation_names webhook_ids webhook_names select_all webhook_select_all }\n      }\n      appServices(app_id: $appId) { service_id service_slug service_name version select_all endpoint_count webhook_count }\n    }\n  "
     },
     {
       "endpoint": "engine",
       "file": "app/routes/integrations.mcp_.$id.tsx",
       "call": 2,
       "variant": 1,
-      "document": "\n    query MCPServerVersions($appFamilyId: String!) {\n      appVersions(app_family_id: $appFamilyId) { app_id version created_at }\n    }\n  "
-    },
-    {
-      "endpoint": "engine",
-      "file": "app/routes/integrations.mcp.tsx",
-      "call": 1,
-      "variant": 1,
-      "document": "\n    query MCPApps($search: String!, $version: String!, $limit: Int!, $offset: Int!) {\n      apps(kind: \"mcp\", search: $search, version: $version, limit: $limit, offset: $offset) {\n        items { app_id app_family_id name description version status created_at }\n        total\n      }\n    }\n  "
-    },
-    {
-      "endpoint": "engine",
-      "file": "app/routes/integrations.mcp.tsx",
-      "call": 2,
-      "variant": 1,
-      "document": "mutation($appId: String!, $message: String!) { deprecateApp(app_id: $appId, message: $message) }"
-    },
-    {
-      "endpoint": "engine",
-      "file": "app/routes/integrations.mcp.tsx",
-      "call": 2,
-      "variant": 2,
-      "document": "mutation($appId: String!) { undeprecateApp(app_id: $appId) }"
-    },
-    {
-      "endpoint": "engine",
-      "file": "app/routes/integrations.mcp.tsx",
-      "call": 2,
-      "variant": 3,
-      "document": "mutation($appId: String!) { deactivateApp(app_id: $appId) }"
-    },
-    {
-      "endpoint": "engine",
-      "file": "app/routes/integrations.mcp.tsx",
-      "call": 3,
-      "variant": 1,
-      "document": "mutation($appId: String!) { deactivateApp(app_id: $appId) }"
+      "document": "\n    query MCPServerVersions($appFamilyId: String!) {\n      appVersions(app_family_id: $appFamilyId) {\n        id: app_id\n        version\n        status\n        created_at\n        transport_urls { versioned_streamable_http versioned_sse }\n      }\n    }\n  "
     },
     {
       "endpoint": "engine",
       "file": "app/routes/integrations.sdks._index.tsx",
       "call": 1,
       "variant": 1,
-      "document": "\n    query SDKApplications($search: String!, $limit: Int!, $offset: Int!) {\n      appFamilies(kind: \"sdk\", search: $search, limit: $limit, offset: $offset) {\n        items {\n          app_family_id\n          app_id: latest_version_id\n          name\n          version: latest_version\n          version_count\n          target_language\n          created_at: latest_created_at\n          status: latest_status\n          downloads\n        }\n        total\n      }\n    }\n  "
+      "document": "\n    query Applications($search: String!, $archived: Boolean!, $limit: Int!, $offset: Int!) {\n      appFamilies(search: $search, archived: $archived, limit: $limit, offset: $offset) {\n        items {\n          app_family_id\n          app_id: latest_version_id\n          name\n          version: latest_version\n          version_count\n          kind\n          delivery_mode\n          target_language\n          created_at: latest_created_at\n          status: latest_status\n          archived_at\n          downloads\n        }\n        total\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.sdks._index.tsx",
+      "call": 2,
+      "variant": 1,
+      "document": "mutation($appId: String!, $message: String!) { deprecateApp(app_id: $appId, message: $message) }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.sdks._index.tsx",
+      "call": 2,
+      "variant": 2,
+      "document": "mutation($appId: String!) { undeprecateApp(app_id: $appId) }"
     },
     {
       "endpoint": "engine",
       "file": "app/routes/integrations.sdks.$id.tsx",
       "call": 1,
       "variant": 1,
-      "document": "\n      query($appId: String!) {\n        app(app_id: $appId) {\n          app_id\n          app_family_id\n          name\n          description\n          version\n          kind\n          target_language\n          created_at\n          readme\n          status\n          downloads\n          selections { service_id service_version_id schema_version endpoint_ids operation_names webhook_ids webhook_names select_all webhook_select_all }\n        }\n        appServices(app_id: $appId) { service_id service_slug service_name version select_all endpoint_count webhook_count }\n      }\n    "
+      "document": "\n      query($appId: String!) {\n        app(app_id: $appId) {\n          app_id\n          app_family_id\n          name\n          description\n          version\n          kind\n          delivery_mode\n          target_language\n          created_at\n          readme\n          status\n          downloads\n          selections { service_id service_version_id schema_version endpoint_ids operation_names webhook_ids webhook_names select_all webhook_select_all }\n        }\n        appServices(app_id: $appId) { service_id service_slug service_name version select_all endpoint_count webhook_count }\n      }\n    "
     },
     {
       "endpoint": "engine",

@@ -1,4 +1,5 @@
 export type AppKind = "sdk" | "mcp";
+export type AppCreationMode = "sdk" | "api" | "mcp";
 export type AppSelectorResourceType = "SERVICE" | "BUCKET";
 
 export interface AppOwningTeam {
@@ -71,6 +72,22 @@ export const APP_BUILDER_OPERATIONS = {
     }
   `,
 } as const;
+
+/** Maps a UI delivery choice onto the two persisted app configuration kinds. */
+export function appKindForCreationMode(mode: AppCreationMode): AppKind {
+  // Direct REST is the package-free delivery mode of an SDK-kind app, not a third persistence kind.
+  if (mode === "api") return "sdk";
+  return mode;
+}
+
+/** Reads an explicit supported delivery choice without silently defaulting an untyped builder entry. */
+export function appCreationModeFromSearch(search: string | URLSearchParams): AppCreationMode | null {
+  const params = typeof search === "string" ? new URLSearchParams(search) : search;
+  const mode = params.get("tab");
+  // Only the three product choices may lock immutable delivery behavior.
+  if (mode === "sdk" || mode === "api" || mode === "mcp") return mode;
+  return null;
+}
 
 export function appConfigKey(kind: AppKind, config: Record<string, unknown>): string {
   const name = requiredAppText(config.name, "name");

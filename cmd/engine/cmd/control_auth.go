@@ -16,6 +16,7 @@ var controlPlanePrefixes = []string{
 	"/integrations",
 	"/sdks",
 	"/apps",
+	"/app-families",
 	"/audit",
 	"/account",
 	"/credits",

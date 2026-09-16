@@ -1449,6 +1449,8 @@ export const api = {
       window.URL.revokeObjectURL(url);
     },
     deactivate: (appId: string) => req<void>(`/apps/${appId}/`, { method: "DELETE" }),
+	// archiveFamily releases a versionless app name while retaining its historical identity.
+	archiveFamily: (appFamilyId: string) => req<void>(`/app-families/${appFamilyId}`, { method: "DELETE" }),
   },
 
   // The hosted Connect runtime API was removed with its obsolete browser

@@ -8,20 +8,25 @@ const detailsPath = fileURLToPath(import.meta.resolve("../routes/integrations.mc
 const builderPath = fileURLToPath(import.meta.resolve("../routes/integrations.builder.tsx"));
 const generationPanelPath = fileURLToPath(import.meta.resolve("../components/consumer/ConsumerGenerationPanel.tsx"));
 
-test("presents stable and pinned Streamable HTTP before collapsed legacy SSE", async () => {
+test("keeps stable endpoints on Overview and pinned endpoints in version History", async () => {
   const source = await readFile(componentPath, "utf8");
-  const primaryIndex = source.indexOf("Streamable HTTP");
-  const legacyIndex = source.indexOf("<details");
+  const overviewStart = source.indexOf("export function McpTransportEndpoints");
+  const historyStart = source.indexOf("export function McpVersionTransportEndpoints");
+  const overview = source.slice(overviewStart, historyStart);
+  const history = source.slice(historyStart);
 
-  assert.notEqual(primaryIndex, -1);
-  assert.notEqual(legacyIndex, -1);
-  assert.ok(primaryIndex < legacyIndex, "Streamable HTTP must render before compatibility transports");
-  assert.match(source, /<TransportBadge>Recommended<\/TransportBadge>/);
-  assert.match(source, /Streamable HTTP · Version-pinned/);
-  assert.match(source, /transport="versioned_streamable_http"/);
-  assert.match(source, /<span>Legacy compatibility<\/span>/);
-  assert.match(source, /<TransportBadge legacy>Legacy<\/TransportBadge>/);
-  assert.doesNotMatch(source, /<details[^>]*\sopen(?:=|\s|>)/, "legacy compatibility must be collapsed by default");
+  assert.notEqual(overviewStart, -1);
+  assert.notEqual(historyStart, -1);
+  assert.match(overview, /<RecommendedEndpoint/);
+  assert.match(overview, /<LegacyStableEndpoint/);
+  assert.doesNotMatch(overview, /<VersionEndpoint/);
+  assert.match(source, /SSE · Stable/);
+  assert.match(source, /<TransportBadge>Stable<\/TransportBadge>/);
+  assert.match(history, /Streamable HTTP · Version-pinned/);
+  assert.match(history, /SSE · Version-pinned/);
+  assert.match(history, /transport="versioned_streamable_http"/);
+  assert.match(history, /<VersionEndpoint[\s\S]+legacy/);
+  assert.doesNotMatch(history, /<TransportBadge>Pinned<\/TransportBadge>/);
 });
 
 test("uses Engine transport discovery in MCP details and deployment results", async () => {
@@ -35,6 +40,7 @@ test("uses Engine transport discovery in MCP details and deployment results", as
   assert.match(details, /stable_version_id/);
   assert.match(details, /transport_urls\s*\{\s*streamable_http\s+sse\s+versioned_streamable_http\s+versioned_sse\s*\}/);
   assert.match(details, /<McpTransportEndpoints endpoints=\{server\}/);
+  assert.match(details, /<McpVersionTransportEndpoints/);
   assert.match(builder, /default_transport:\s*result\.default_transport/);
   assert.match(builder, /stable:\s*result\.stable/);
   assert.match(builder, /stable_version_id:\s*result\.stable_version_id/);

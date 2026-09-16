@@ -22,6 +22,8 @@ type appLifecycleTestStore struct {
 	undeprecated  uuid.UUID
 	deactivated   uuid.UUID
 	deactivatedBy uuid.UUID
+	archived      uuid.UUID
+	archiveErr    error
 	message       string
 	plannedAt     *time.Time
 }
@@ -59,12 +61,50 @@ func (s *appLifecycleTestStore) DeactivateAppVersion(_ context.Context, appID, a
 	return nil
 }
 
+// ArchiveAppFamily records the exact logical family targeted by the handler fixture.
+func (s *appLifecycleTestStore) ArchiveAppFamily(_ context.Context, _ uuid.UUID, appFamilyID uuid.UUID) error {
+	// Injected failures exercise stable HTTP lifecycle diagnostics without a database fixture.
+	if s.archiveErr != nil {
+		return s.archiveErr
+	}
+	s.archived = appFamilyID
+	return nil
+}
+
+// mountAppLifecycleRoutes exposes every shared app lifecycle action used by handler tests.
 func mountAppLifecycleRoutes(accountID uuid.UUID, s store.Store) chi.Router {
 	router := newControlTestRouter(accountID)
 	router.Post("/apps/{app_id}/deprecate", DeprecateAppHandler(s))
 	router.Post("/apps/{app_id}/undeprecate", UndeprecateAppHandler(s))
 	router.Delete("/apps/{app_id}/", DeactivateAppHandler(s, nil))
+	router.Delete("/app-families/{app_family_id}", ArchiveAppFamilyHandler(s))
 	return router
+}
+
+// TestArchiveAppFamilyHandlerReleasesEmptyFamily verifies the explicit family-level mutation target.
+func TestArchiveAppFamilyHandlerReleasesEmptyFamily(t *testing.T) {
+	accountID, familyID := uuid.New(), uuid.New()
+	appStore := &appLifecycleTestStore{}
+	request := httptest.NewRequest(http.MethodDelete, "/app-families/"+familyID.String(), nil)
+	response := httptest.NewRecorder()
+	mountAppLifecycleRoutes(accountID, appStore).ServeHTTP(response, request)
+	// A successful response must preserve the exact family identity through the handler boundary.
+	if response.Code != http.StatusOK || appStore.archived != familyID {
+		t.Fatalf("status=%d archived=%s body=%s", response.Code, appStore.archived, response.Body.String())
+	}
+}
+
+// TestArchiveAppFamilyHandlerRequiresVersionCleanup keeps deletion separate from exact-version deactivation.
+func TestArchiveAppFamilyHandlerRequiresVersionCleanup(t *testing.T) {
+	accountID, familyID := uuid.New(), uuid.New()
+	appStore := &appLifecycleTestStore{archiveErr: store.ErrAppFamilyNotEmpty}
+	request := httptest.NewRequest(http.MethodDelete, "/app-families/"+familyID.String(), nil)
+	response := httptest.NewRecorder()
+	mountAppLifecycleRoutes(accountID, appStore).ServeHTTP(response, request)
+	// Conflict responses must not report a family mutation as committed.
+	if response.Code != http.StatusConflict || appStore.archived != uuid.Nil {
+		t.Fatalf("status=%d archived=%s body=%s", response.Code, appStore.archived, response.Body.String())
+	}
 }
 
 func TestDeprecateAppHandlerRecordsWarningAndDate(t *testing.T) {

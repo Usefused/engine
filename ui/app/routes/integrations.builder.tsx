@@ -17,8 +17,11 @@ import {
   planAndApplyApp,
 } from "~/lib/app-builder";
 import {
+  appCreationModeFromSearch,
+  appKindForCreationMode,
   effectiveAppBuilderServiceURL,
   type AppBuildSelector,
+  type AppCreationMode,
   type AppOwningTeam,
 } from "~/lib/app-builder-contract";
 import { openAuthenticatedTab } from "~/lib/session";
@@ -35,6 +38,7 @@ import {
 import type { McpTransportEndpointData } from "~/components/mcp/McpTransportEndpoints";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasAnyPermission } from "~/lib/current-actor-access";
+import { CREATE_APP_OPTIONS } from "~/components/apps/CreateAppMenu";
 
 // clientLoader requires an authenticated Engine session before building an app.
 export const clientLoader = async ({ request }: { request: Request }) => {
@@ -71,7 +75,7 @@ type AppSelection = {
   service_version_id?: string;
 };
 
-type GenerationMode = "sdk" | "mcp";
+type GenerationMode = AppCreationMode;
 
 type SelectionMaps = {
   selections: Record<string, Set<string>>;
@@ -109,6 +113,19 @@ type SDKStreamContext = {
   executionToken: string;
   setStatus: (status: string) => void;
   setDeployment: (deployment: { id: string; name: string; version: string; token: string }) => void;
+};
+
+type BuilderCreationContext = {
+  mode: GenerationMode;
+  ownerTeamSlug: string;
+  config: Record<string, unknown>;
+  selections: AppSelection[];
+  name: string;
+  version: string;
+  syncWorkspacePins: (selections: AppSelection[]) => Promise<void>;
+  setStatus: (status: string) => void;
+  setSdkDeployment: SDKStreamContext["setDeployment"];
+  setMcpDeployment: (deployment: ({ id: string; token: string } & McpTransportEndpointData)) => void;
 };
 
 // hasServiceSelection keeps every selection gate aligned with the generated payload.
@@ -178,16 +195,27 @@ function baseURLConfigurationError(selections: AppSelection[], data: ServiceData
 
 // generationArtifactName returns the user-facing artifact name for validation copy.
 function generationArtifactName(mode: GenerationMode): string {
-  return mode === "mcp" ? "MCP server" : "App";
+  // Validation copy names the concrete delivery adapter the user chose.
+  if (mode === "mcp") return "MCP server";
+  if (mode === "api") return "REST API";
+  return "SDK";
+}
+
+// generationActionName keeps builder prerequisites phrased for the selected delivery adapter.
+function generationActionName(mode: GenerationMode): string {
+  // MCP is deployed, REST is published, and only generated SDKs produce a package.
+  if (mode === "mcp") return "deploy an MCP server";
+  if (mode === "api") return "publish a REST API";
+  return "generate an SDK";
 }
 
 // validateGenerationInput resolves all local prerequisites before starting plan/apply.
 function validateGenerationInput(input: GenerationInput): GenerationValidation {
   if (input.selections.length === 0) {
-    return { ok: false, severity: "warning", message: "Please select at least one endpoint or webhook to generate an SDK." };
+    return { ok: false, severity: "warning", message: `Please select at least one endpoint or webhook to ${generationActionName(input.generationMode)}.` };
   }
   if (input.selections.some((selection) => !selection.service_version_id)) {
-    return { ok: false, severity: "error", message: "Each selected service needs a service version before generating an SDK." };
+    return { ok: false, severity: "error", message: `Each selected service needs a service version before you ${generationActionName(input.generationMode)}.` };
   }
   const serviceError = webhookConfigurationError(input.selections, input.data) ||
     baseURLConfigurationError(input.selections, input.data);
@@ -234,7 +262,12 @@ async function confirmDuplicateGeneration(input: {
 
 // generationFailureMessage keeps mode-specific failure copy consistent.
 function generationFailureMessage(mode: GenerationMode, cause: unknown): string {
-  const prefix = mode === "mcp" ? "Failed to deploy MCP server" : "Failed to generate SDK";
+  // Failure copy distinguishes package generation from Engine-local publication and hosted deployment.
+  const prefix = mode === "mcp"
+    ? "Failed to deploy MCP server"
+    : mode === "api"
+      ? "Failed to publish REST API"
+      : "Failed to generate SDK";
   const detail = cause instanceof Error ? cause.message : "Unknown error";
   return `${prefix}: ${detail}`;
 }
@@ -253,13 +286,16 @@ function buildGenerationConfig(input: {
 }): Record<string, unknown> {
   const config: Record<string, unknown> = {
     apiVersion: "fused/v1",
-    kind: input.mode,
+    kind: appKindForCreationMode(input.mode),
     name: input.name.trim(),
     version: input.version.trim(),
     bucket: input.bucket,
     services: appServicesConfig(input.selections, input.data),
   };
-  if (input.mode === "sdk") config.language = input.language;
+  // SDK-kind validation still requires a maintained target language even when REST delivery skips packaging.
+  if (input.mode !== "mcp") config.language = input.language;
+  // An explicit false is the immutable direct-REST delivery selector understood by Engine plan/apply.
+  if (input.mode === "api") config.generate = false;
   if (input.hasWebhookSelections) config.webhook_attachment = input.webhookAttachment.trim();
   return config;
 }
@@ -329,6 +365,70 @@ async function waitForSDKGeneration(context: SDKStreamContext): Promise<void> {
   });
 }
 
+/** Deploys one MCP app and projects its Engine-owned transport endpoints. */
+async function deployMCPApp(context: BuilderCreationContext): Promise<void> {
+  context.setStatus("Deploying MCP server...");
+  const result = await planAndApplyApp<{ app_id: string; default_transport: string; stable: boolean; stable_version_id: string; transport_urls: McpTransportEndpointData["transport_urls"]; execution_token?: string }>("mcp", context.ownerTeamSlug, context.config);
+  await context.syncWorkspacePins(context.selections);
+  context.setMcpDeployment({
+    id: result.app_id,
+    default_transport: result.default_transport,
+    stable: result.stable,
+    stable_version_id: result.stable_version_id,
+    transport_urls: result.transport_urls,
+    token: result.execution_token || "",
+  });
+  context.setStatus("MCP server deployed");
+}
+
+/** Publishes one package-free SDK-kind app as an Engine REST API. */
+async function publishRESTApp(context: BuilderCreationContext): Promise<void> {
+  context.setStatus("Publishing REST API...");
+  const result = await planAndApplyApp<{ app_id: string; generation_status: string; execution_token?: string }>(
+    appKindForCreationMode(context.mode),
+    context.ownerTeamSlug,
+    context.config,
+  );
+  // A direct REST apply must terminate as a package-free publication, never as an unexpected Registry job.
+  if (result.generation_status !== "skipped") {
+    throw new Error("Engine returned an unexpected REST publication state");
+  }
+  await context.syncWorkspacePins(context.selections);
+  context.setSdkDeployment({
+    id: result.app_id,
+    name: context.name.trim(),
+    version: context.version.trim(),
+    token: result.execution_token || "",
+  });
+  context.setStatus("REST API ready");
+}
+
+/** Generates and downloads one typed SDK package before reporting success. */
+async function generateSDKApp(context: BuilderCreationContext): Promise<void> {
+  context.setStatus("Planning and generating SDK...");
+  const result = await planAndApplyApp<{ app_id: string; job_id: string; execution_token?: string }>("sdk", context.ownerTeamSlug, context.config);
+  await waitForSDKGeneration({
+    controller: new AbortController(),
+    appId: result.app_id,
+    jobId: result.job_id,
+    sdkName: context.name,
+    appVersion: context.version,
+    executionToken: result.execution_token || "",
+    setStatus: context.setStatus,
+    setDeployment: context.setSdkDeployment,
+  });
+  await context.syncWorkspacePins(context.selections);
+}
+
+/** Selects the adapter-specific completion path after one shared plan input is built. */
+async function completeBuilderCreation(context: BuilderCreationContext): Promise<void> {
+  // MCP owns hosted transport projection and never enters SDK-kind publication.
+  if (context.mode === "mcp") return deployMCPApp(context);
+  // REST publishes locally and must not enter the Registry package stream.
+  if (context.mode === "api") return publishRESTApp(context);
+  return generateSDKApp(context);
+}
+
 const BUILDER_RESOURCE_GQL = `
   query($resourceId: String!, $serviceId: String!, $serviceVersionId: String!, $limit: Int, $offset: Int) {
     resourceIntegrations(resourceId: $resourceId, serviceId: $serviceId, service_version_id: $serviceVersionId, limit: $limit, offset: $offset) {
@@ -375,6 +475,38 @@ function builderBootstrapRows(response: BuilderServiceBootstrap) {
     service: response.service,
     webhooks: response.service?.webhooks || [],
     versions: response.serviceVersions || [],
+  };
+}
+
+// mergeBuilderServiceBootstrap replaces only the expanded service with its lazily loaded contract metadata.
+function mergeBuilderServiceBootstrap(candidate: ServiceData, serviceId: string, bootstrap: ReturnType<typeof builderBootstrapRows>): ServiceData {
+  // Sibling services retain their existing selection and pagination state.
+  if (candidate.service.id !== serviceId) return candidate;
+  const {
+    current_service_version,
+    base_url = "",
+    servers = [],
+    resources = [],
+    endpoint_count,
+    webhook_count,
+    event_extraction_path,
+    incoming_webhook_config,
+  } = bootstrap.service ?? {};
+  return {
+    ...candidate,
+    service: {
+      ...candidate.service,
+      current_service_version,
+      base_url,
+      servers,
+      resources,
+      endpoint_count,
+      webhook_count,
+      event_extraction_path,
+      incoming_webhook_config,
+    },
+    webhooks: bootstrap.webhooks,
+    serviceVersions: bootstrap.versions,
   };
 }
 
@@ -1093,16 +1225,19 @@ function BuilderSelectionPane(props: BuilderSelectionPaneProps) {
 // BuilderPageHeader names the artifact being configured.
 function BuilderPageHeader({ generationMode }: { generationMode: GenerationMode }) {
   const isMCP = generationMode === "mcp";
+  const isAPI = generationMode === "api";
   return (
     <div className="flex items-center justify-between mb-8">
       <div>
         <h1 className="text-3xl font-bold text-slate-900 tracking-tight mb-1">
-          {isMCP ? "Create MCP server" : "Create app"}
+          {isMCP ? "Create MCP server" : isAPI ? "Create REST API" : "Create SDK"}
         </h1>
         <p className="text-slate-500">
           {isMCP
             ? "Choose the services and operations to make available through MCP."
-            : "Choose the services and operations this app can use."}
+            : isAPI
+              ? "Choose the services and operations to expose through the Engine REST API."
+              : "Choose the services and operations to include in the generated SDK."}
         </p>
       </div>
     </div>
@@ -1130,6 +1265,37 @@ function BuilderPage({ generationMode, error, loading, selection, generation }: 
           <ConsumerGenerationPanel {...generation} />
         </div>
       )}
+    </div>
+  );
+}
+
+/** Requests an explicit immutable delivery adapter when the builder URL omitted one. */
+function BuilderModeSelectionPage({ onSelect }: { onSelect: (mode: GenerationMode) => void }) {
+  return (
+    <div className="mx-auto flex h-full max-w-4xl flex-col justify-center px-4 py-10">
+      <div className="mb-8 text-center">
+        <h1 className="text-3xl font-bold tracking-tight text-slate-900">Create app</h1>
+        <p className="mt-2 text-slate-500">Choose how this app will expose its selected services and operations.</p>
+      </div>
+      <div role="group" aria-label="App type" className="grid gap-4 md:grid-cols-3">
+        {CREATE_APP_OPTIONS.map((option) => {
+          const Icon = option.icon;
+          return (
+            <button
+              key={option.mode}
+              type="button"
+              onClick={() => onSelect(option.mode)}
+              className="group rounded-2xl border border-slate-200 bg-white p-6 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-[var(--brand-violet)]/30"
+            >
+              <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-100 text-slate-600 transition-colors group-hover:bg-[var(--brand-violet-tint)] group-hover:text-[var(--brand-violet)]">
+                <Icon className="h-5 w-5" />
+              </span>
+              <span className="mt-5 block text-base font-semibold text-slate-900">{option.label}</span>
+              <span className="mt-1 block text-sm leading-5 text-slate-500">{option.description}</span>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -1210,15 +1376,30 @@ export default function SdkBuilder() {
   const [mcpTokenCopied, setMcpTokenCopied] = useState(false);
   const [isDuplicate, setIsDuplicate] = useState(false);
   const [checkingDuplicate, setCheckingDuplicate] = useState(false);
-  const [generationMode] = useState<"sdk" | "mcp">(() => {
-    const tab = searchParams.get("tab");
-    return tab === "mcp" ? "mcp" : "sdk";
-  });
+  const requestedGenerationMode = appCreationModeFromSearch(searchParams);
+  // Internal builder state stays fully typed, but the UI does not expose it until the user makes an explicit choice.
+  const generationMode: GenerationMode = requestedGenerationMode ?? "sdk";
   const [language, setLanguage] = useState<"typescript" | "python">("typescript");
 
   useEffect(() => {
-    document.title = generationMode === "mcp" ? "Create MCP server - Fused" : "Create app - Fused";
-  }, [generationMode]);
+    // The document title stays generic until an immutable adapter has been selected.
+    document.title = requestedGenerationMode === "mcp"
+      ? "Create MCP server - Fused"
+      : requestedGenerationMode === "api"
+        ? "Create REST API - Fused"
+        : requestedGenerationMode === "sdk"
+          ? "Create SDK - Fused"
+          : "Create app - Fused";
+  }, [requestedGenerationMode]);
+
+  /** Commits the chosen delivery adapter to the URL before rendering its form. */
+  const selectGenerationMode = (mode: GenerationMode) => {
+    setSearchParams((previous) => {
+      const next = new URLSearchParams(previous);
+      next.set("tab", mode);
+      return next;
+    }, { replace: true });
+  };
 
   const [searching, setSearching] = useState(false);
   const pageParam = searchParams.get("page");
@@ -1534,26 +1715,7 @@ export default function SdkBuilder() {
       `, { id: serviceId });
 
       const bootstrap = builderBootstrapRows(webhookRes);
-      setData(prev => prev.map(s =>
-        s.service.id === serviceId
-          ? {
-              ...s,
-              service: {
-                ...s.service,
-                current_service_version: bootstrap.service?.current_service_version,
-                base_url: bootstrap.service?.base_url || "",
-                servers: bootstrap.service?.servers || [],
-                resources: bootstrap.service?.resources || [],
-                endpoint_count: bootstrap.service?.endpoint_count,
-                webhook_count: bootstrap.service?.webhook_count,
-                event_extraction_path: bootstrap.service?.event_extraction_path,
-                incoming_webhook_config: bootstrap.service?.incoming_webhook_config,
-              },
-              webhooks: bootstrap.webhooks,
-              serviceVersions: bootstrap.versions,
-            }
-          : s
-      ));
+      setData((previous) => previous.map((candidate) => mergeBuilderServiceBootstrap(candidate, serviceId, bootstrap)));
       
       const serviceVersion = effectiveBuilderVersion(
         bootstrap.versions,
@@ -1802,7 +1964,7 @@ export default function SdkBuilder() {
     if (!confirmed) return;
 
     setGenerating(true);
-    setGenerateStatus("Starting generation...");
+    setGenerateStatus("Starting app creation...");
     setSdkDeployment(null);
     setMcpDeployment(null);
     setSdkTokenCopied(false);
@@ -1821,41 +1983,18 @@ export default function SdkBuilder() {
         hasWebhookSelections: validation.hasWebhookSelections,
       });
 
-      if (generationMode === "mcp") {
-        setGenerateStatus("Deploying MCP server...");
-        const result = await planAndApplyApp<{ app_id: string; default_transport: string; stable: boolean; stable_version_id: string; transport_urls: McpTransportEndpointData["transport_urls"]; execution_token?: string }>("mcp", ownerTeamSlug, config);
-        await syncWorkspacePinsAfterGenerate(selectionPayload);
-        // Engine owns promotion state and public URL projection, so the
-        // deployment result must preserve both instead of inferring either.
-        setMcpDeployment({
-          id: result.app_id,
-          default_transport: result.default_transport,
-          stable: result.stable,
-          stable_version_id: result.stable_version_id,
-          transport_urls: result.transport_urls,
-          token: result.execution_token || "",
-        });
-        setGenerateStatus("MCP server deployed");
-        return;
-      }
-
-      setGenerateStatus("Planning and generating SDK...");
-      const result = await planAndApplyApp<{ app_id: string; job_id: string; execution_token?: string }>("sdk", ownerTeamSlug, config);
-      await waitForSDKGeneration({
-        controller: new AbortController(),
-        appId: result.app_id,
-        jobId: result.job_id,
-        sdkName,
-        appVersion,
-        executionToken: result.execution_token || "",
+      await completeBuilderCreation({
+        mode: generationMode,
+        ownerTeamSlug,
+        config,
+        selections: selectionPayload,
+        name: sdkName,
+        version: appVersion,
+        syncWorkspacePins: syncWorkspacePinsAfterGenerate,
         setStatus: setGenerateStatus,
-        setDeployment: setSdkDeployment,
+        setSdkDeployment,
+        setMcpDeployment,
       });
-
-      // Reaching here means every step above resolved without throwing --
-      // generation genuinely succeeded, so this is the one place to sync
-      // workspace pins for it, regardless of which success branch got hit.
-      await syncWorkspacePinsAfterGenerate(selectionPayload);
 
     } catch (err) {
       toast.error(generationFailureMessage(generationMode, err), 0);
@@ -1943,6 +2082,11 @@ export default function SdkBuilder() {
     setMcpTokenCopied,
     AddSelectedServiceToWorkspaceButton,
   };
+
+  // An untyped entry must ask before SDK language or MCP/REST-specific fields are shown.
+  if (!requestedGenerationMode) {
+    return <BuilderModeSelectionPage onSelect={selectGenerationMode} />;
+  }
 
   return (
     <BuilderPage

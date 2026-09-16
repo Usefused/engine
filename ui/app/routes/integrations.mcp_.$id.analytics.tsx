@@ -15,7 +15,7 @@ import { api } from "~/lib/api";
 import { McpAnalyticsPanel, type McpAnalyticsData } from "~/components/mcp/McpAnalyticsPanel";
 import { McpSessionsPanel } from "~/components/mcp/McpSessionsPanel";
 import { AppRequestsPanel } from "~/components/activity/AppRequestsPanel";
-import { NestedActivityTabs } from "~/components/activity/NestedActivityTabs";
+import { AppActivityBody } from "~/components/apps/AppDetailBody";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasResourcePermission, hasWorkspacePermission } from "~/lib/current-actor-access";
 
@@ -159,23 +159,25 @@ function McpActivityContent({ id, serverName, data, activeTab, onTabChange, canR
   canReadRequests: boolean;
 }) {
   return (
-    <div className="min-w-0 max-w-full space-y-5 overflow-x-hidden animate-in fade-in slide-in-from-bottom-4 duration-500 sm:space-y-6">
-      <p className="text-sm text-slate-500">
-        Requests and sessions are scoped to this immutable server version. Execution token history is scoped to the server family because tokens remain valid across its versions.
-      </p>
-      <NestedActivityTabs
+    <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+      <AppActivityBody
         active={activeTab}
         ariaLabel="MCP server activity"
         onChange={onTabChange}
+        intro={(
+          <p className="text-sm text-slate-500">
+            Requests and sessions are scoped to this immutable server version. Execution token history is scoped to the server family because tokens remain valid across its versions.
+          </p>
+        )}
         options={[
           { value: "overview", label: "Overview", trackingId: "view_mcp_overview_tab" },
           { value: "requests", label: "Requests", trackingId: "view_mcp_requests_tab" },
           { value: "sessions", label: "Sessions", trackingId: "view_mcp_sessions_tab" },
           { value: "tokens", label: "Tokens", badge: data.token_activity?.length, trackingId: "view_mcp_tokens_tab" },
         ]}
-      />
-
-      <McpActivityTabContent activeTab={activeTab} id={id} serverName={serverName} data={data} canReadRequests={canReadRequests} />
+      >
+        <McpActivityTabContent activeTab={activeTab} id={id} serverName={serverName} data={data} canReadRequests={canReadRequests} />
+      </AppActivityBody>
     </div>
   );
 }

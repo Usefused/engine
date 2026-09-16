@@ -31,6 +31,7 @@ test("MCP Activity uses responsive cards for usage and sessions", () => {
   const analytics = source("../components/mcp/McpAnalyticsPanel.tsx");
   const route = source("../routes/integrations.mcp_.$id.analytics.tsx");
   const sessions = source("../components/mcp/McpSessionsPanel.tsx");
+  const detailBody = source("../components/apps/AppDetailBody.tsx");
 
   assertResponsivePair(analytics, "MCP usage");
   assertResponsivePair(sessions, "MCP sessions");
@@ -38,14 +39,17 @@ test("MCP Activity uses responsive cards for usage and sessions", () => {
   assert.match(sessions, /function McpSessionCard/, "Session history must expose its mobile card layout");
   assert.match(route, /function McpTokenActivityCard/, "Token history must expose its mobile card layout");
   assert.match(route, /tokenTermination\(token\)/, "Expired and revoked tokens must render retained termination evidence");
-  assert.match(route, /min-w-0 max-w-full.*overflow-x-hidden/, "The MCP Activity shell must contain narrow-width content");
+  assert.match(route, /<AppActivityBody/, "MCP Activity must use the shared app Activity shell");
+  assert.match(detailBody, /min-w-0 max-w-full.*overflow-x-hidden/, "The shared Activity shell must contain narrow-width content");
 });
 
 test("Activity tabs scroll locally without widening their page", () => {
   const tabs = source("../components/activity/NestedActivityTabs.tsx");
   const sdk = source("../routes/integrations.sdks.$id.tsx");
+  const detailBody = source("../components/apps/AppDetailBody.tsx");
 
   assert.match(tabs, /max-w-full overflow-x-auto overscroll-x-contain/, "Nested tabs must own their horizontal overflow");
   assert.match(tabs, /\[scrollbar-width:none\]/, "Touch tabs must avoid a persistent mobile scrollbar");
-  assert.match(sdk, /min-w-0 max-w-full space-y-5 overflow-x-hidden/, "App Activity must contain child overflow at the page boundary");
+  assert.match(sdk, /<AppActivityBody/, "SDK and REST Activity must use the shared app Activity shell");
+  assert.match(detailBody, /min-w-0 max-w-full space-y-5 overflow-x-hidden/, "App Activity must contain child overflow at the page boundary");
 });

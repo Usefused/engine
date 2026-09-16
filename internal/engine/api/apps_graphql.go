@@ -29,6 +29,7 @@ var appSummaryGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"description":             &graphql.Field{Type: graphql.String},
 		"version":                 &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
 		"kind":                    &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"delivery_mode":           &graphql.Field{Type: graphql.String},
 		"status":                  &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
 		"created_at":              &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
 		"target_language":         &graphql.Field{Type: graphql.String},
@@ -444,7 +445,7 @@ func appSummaryField(r *http.Request, item store.AppCatalogItem, counts map[uuid
 	fields := map[string]interface{}{
 		"app_family_id": item.AppFamilyID.String(), "app_id": item.AppID.String(),
 		"name": item.Name, "description": item.Description, "version": item.Version,
-		"kind": item.Kind, "status": item.Status, "created_at": item.CreatedAt.Format(mcpGraphQLTimeFormat),
+		"kind": item.Kind, "delivery_mode": item.DeliveryMode, "status": item.Status, "created_at": item.CreatedAt.Format(mcpGraphQLTimeFormat),
 		"target_language": item.TargetLanguage, "generator_version": item.GeneratorVersion,
 		"readme": item.Readme, "selections": appSelectionFields(item), "planned_deactivation_at": planned,
 	}

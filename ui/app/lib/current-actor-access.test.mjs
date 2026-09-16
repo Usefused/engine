@@ -55,7 +55,7 @@ test("resource permission checks honor exact bucket grants and workspace inherit
 test("credential and lifecycle surfaces gate protected queries and actions", () => {
   const buckets = source("../routes/integrations.buckets.tsx");
   const bucketQueries = source("./buckets.ts");
-  const mcp = source("../routes/integrations.mcp.tsx");
+  const apps = source("../routes/integrations.sdks._index.tsx");
   const profile = source("../components/integration-details/WorkspaceConnectionProfileSection.tsx");
   const notifications = source("../components/notifications/NotificationList.tsx");
   const notificationActions = source("../components/notifications/notificationActions.ts");
@@ -66,7 +66,7 @@ test("credential and lifecycle surfaces gate protected queries and actions", () 
   assert.match(buckets, /canCreateBucket = hasWorkspacePermission\(access, "bucket\.manage"\)/);
   assert.match(bucketQueries, /buckets: bucketSummaries/);
   assert.doesNotMatch(bucketQueries, /query \{\s*buckets \{/);
-  assert.match(mcp, /hasResourcePermission\(access, "app\.manage", "APP", server\.app_family_id\)/);
+  assert.match(apps, /hasResourcePermission\(access, "app\.manage", "APP", sdk\.app_family_id\)/);
   assert.match(profile, /if \(!canRead\)/);
   assert.match(profile, /\{canManage && \(/);
   assert.match(notifications, /canMutateNotification\(item\.source, canUpdate\) && <NotificationActions/);
@@ -97,15 +97,12 @@ test("access routes gate reads before mounting data loaders and gate management 
 test("restricted access navigation is permission-aware and direct denial is explicit", () => {
   const sidebar = source("../components/layout/IntegrationsSidebar.tsx");
   const apps = source("../routes/integrations.sdks._index.tsx");
-  const mcpServers = source("../routes/integrations.mcp.tsx");
   const gate = source("../components/access/CurrentActorAccess.tsx");
   assert.match(sidebar, /label: "Access"/);
   assert.match(sidebar, /label: "Credentials"/);
   assert.doesNotMatch(sidebar, /label: "Create app"/);
-  assert.match(apps, /to="\/integrations\/builder"/);
-  assert.match(apps, />\s*Create app\s*</);
-  assert.match(mcpServers, /to="\/integrations\/builder\?tab=mcp"/);
-  assert.match(mcpServers, />\s*Create MCP server\s*</);
+  assert.match(apps, /<CreateAppMenu/);
+  assert.doesNotMatch(apps, /createTo|createLabel/);
   assert.match(sidebar, /visible: \(access\) => hasAnyPermission\(access, "bucket\.read"\)/);
   assert.match(sidebar, /visible: \(access\) => hasWorkspacePermission\(access, "access\.read"\)/);
   assert.match(gate, /Access not available/);

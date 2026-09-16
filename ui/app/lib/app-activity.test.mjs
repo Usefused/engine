@@ -10,6 +10,7 @@ const mcpActivityPath = fileURLToPath(import.meta.resolve("../routes/integration
 const mcpDetailPath = fileURLToPath(import.meta.resolve("../routes/integrations.mcp_.$id.tsx"));
 const serviceActivityPath = fileURLToPath(import.meta.resolve("../components/AnalyticsTab.tsx"));
 const nestedTabsPath = fileURLToPath(import.meta.resolve("../components/activity/NestedActivityTabs.tsx"));
+const appDetailBodyPath = fileURLToPath(import.meta.resolve("../components/apps/AppDetailBody.tsx"));
 const appIndexPath = fileURLToPath(import.meta.resolve("../routes/integrations.sdks._index.tsx"));
 const runtimeStatusPath = fileURLToPath(import.meta.resolve("../components/apps/AppRuntimeStatus.tsx"));
 const apiPath = fileURLToPath(import.meta.resolve("./api.ts"));
@@ -30,15 +31,17 @@ test("translates a missing local app without exposing an internal store error", 
 });
 
 test("uses one subordinate underline treatment for nested activity views", async () => {
-  const [appRoute, mcpActivity, serviceActivity, nestedTabs] = await Promise.all([
+  const [appRoute, mcpActivity, serviceActivity, nestedTabs, appDetailBody] = await Promise.all([
     readFile(appRoutePath, "utf8"),
     readFile(mcpActivityPath, "utf8"),
     readFile(serviceActivityPath, "utf8"),
     readFile(nestedTabsPath, "utf8"),
+    readFile(appDetailBodyPath, "utf8"),
   ]);
 
-  assert.match(appRoute, /<NestedActivityTabs/);
-  assert.match(mcpActivity, /<NestedActivityTabs/);
+  assert.match(appRoute, /<AppActivityBody/);
+  assert.match(mcpActivity, /<AppActivityBody/);
+  assert.match(appDetailBody, /<NestedActivityTabs/);
   assert.match(serviceActivity, /<NestedActivityTabs/);
   assert.match(nestedTabs, /border-b-2/);
   assert.doesNotMatch(serviceActivity, />This Engine</);
@@ -64,13 +67,14 @@ test("reads grouped app families and exact detail versions from the Engine catal
     readFile(runtimeStatusPath, "utf8"),
   ]);
   assert.match(appIndex, /\.mcpGraphql<\{ appFamilies: SdkPage/);
-  assert.match(appIndex, /appFamilies\(kind: "sdk"/);
+  assert.match(appIndex, /appFamilies\(search: \$search/);
   assert.match(appIndex, /app_id: latest_version_id/);
   assert.match(appIndex, /app_family_id/);
+  assert.match(appIndex, /delivery_mode/);
   assert.match(appIndex, /status: latest_status/);
   assert.match(appIndex, /downloads/);
   assert.match(appIndex, /await fetchSdks\(query, page\)/);
-  assert.match(appIndex, /query SDKApplications\(\$search: String!, \$limit: Int!, \$offset: Int!\)/);
+  assert.match(appIndex, /query Applications\(\$search: String!, \$archived: Boolean!, \$limit: Int!, \$offset: Int!\)/);
   assert.doesNotMatch(appIndex, /apps\(kind: "sdk"/);
   assert.match(appIndex, /<SdkPagination page=\{page\} total=\{total\}/);
   assert.doesNotMatch(appIndex, /artifactSnapshots/);
@@ -103,6 +107,15 @@ test("uses only exact Engine app lifecycle and package routes", async () => {
 
 	assert.ok(api.includes("`${BASE}/sdks/${id}/download`"));
 	assert.ok(api.includes('deactivate: (appId: string) => req<void>(`/apps/${appId}/`'));
+	assert.ok(api.includes('archiveFamily: (appFamilyId: string) => req<void>(`/app-families/${appFamilyId}`'));
+	assert.match(appIndex, /archived: state === "archive"/);
+	assert.match(appIndex, /type="checkbox"[\s\S]*checked=\{archived\}/);
+	assert.doesNotMatch(appIndex, /aria-label="App type"|APP_CATALOGUE_TABS/);
+	assert.match(appIndex, /if \(state === "archive"\) return "Search archived apps\.\.\."/);
+	assert.match(appIndex, /placeholder=\{appSearchPlaceholder\(state\)\}/);
+	assert.doesNotMatch(appIndex, /aria-label="App lifecycle"/);
+	assert.match(appIndex, /<CreateAppMenu/);
+	assert.match(appIndex, /Its name becomes reusable and its historical identity remains in Archive/);
 	assert.doesNotMatch(api, /upgrade_from|upgradeAsync|generateAsync|\/sdk-config\/\$\{id\}/);
 	assert.doesNotMatch(appIndex, /Upgrade SDK|onUpgrade|api\.sdks\.delete/);
 	assert.doesNotMatch(appBuilder, /upgrade_from|upgradeFrom|lockedSelections|lockedWebhookSelections/);

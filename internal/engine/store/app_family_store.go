@@ -23,6 +23,7 @@ const appFamilyCollectionLimit = 500
 
 // --- AppFamily CRUD ---
 
+// CreateOrGetAppFamily reserves one live family identity without reviving archived history.
 func (s *postgresStore) CreateOrGetAppFamily(ctx context.Context, family AppFamily) (*AppFamily, bool, error) {
 	if !family.Kind.Valid() {
 		return nil, false, ErrAppKindInvalid
@@ -53,13 +54,15 @@ func createOrGetAppFamily(ctx context.Context, queryer appFamilyQueryer, family 
 		        NULLIF($7, ''),
 		        NULLIF($8, '00000000-0000-0000-0000-000000000000'::uuid),
 		        NULLIF($9, '00000000-0000-0000-0000-000000000000'::uuid))
-		ON CONFLICT (account_id, kind, canonical_name) DO UPDATE
+		ON CONFLICT (account_id, kind, canonical_name) WHERE archived_at IS NULL DO UPDATE
 		SET delivery_mode = COALESCE(family.delivery_mode, EXCLUDED.delivery_mode),
 		    updated_at = family.updated_at
 		RETURNING app_family_id, account_id, kind, canonical_name, display_name,
 		          COALESCE(target_language, ''), COALESCE(delivery_mode, ''),
 		          COALESCE(owner_subject_id, '00000000-0000-0000-0000-000000000000'::uuid),
 		          COALESCE(owner_team_id, '00000000-0000-0000-0000-000000000000'::uuid),
+		          archived_at,
+		          COALESCE(archived_by_subject_id, '00000000-0000-0000-0000-000000000000'::uuid),
 		          created_at, updated_at, (xmax = 0)
 	`, family.AppFamilyID, family.AccountID, family.Kind, family.CanonicalName,
 		family.DisplayName, family.TargetLanguage, family.DeliveryMode, family.OwnerSubjectID, family.OwnerTeamID)
@@ -68,7 +71,7 @@ func createOrGetAppFamily(ctx context.Context, queryer appFamilyQueryer, family 
 	err := row.Scan(&result.AppFamilyID, &result.AccountID, &result.Kind,
 		&result.CanonicalName, &result.DisplayName, &result.TargetLanguage,
 		&result.DeliveryMode,
-		&result.OwnerSubjectID, &result.OwnerTeamID, &result.CreatedAt,
+		&result.OwnerSubjectID, &result.OwnerTeamID, &result.ArchivedAt, &result.ArchivedBy, &result.CreatedAt,
 		&result.UpdatedAt, &created)
 	if err != nil {
 		return nil, false, fmt.Errorf("create or get app family: %w", err)
@@ -81,11 +84,14 @@ SELECT app_family_id, account_id, kind, canonical_name, display_name,
        COALESCE(target_language, ''), COALESCE(delivery_mode, ''),
        COALESCE(owner_subject_id, '00000000-0000-0000-0000-000000000000'::uuid),
        COALESCE(owner_team_id, '00000000-0000-0000-0000-000000000000'::uuid),
+	   archived_at,
+	   COALESCE(archived_by_subject_id, '00000000-0000-0000-0000-000000000000'::uuid),
        created_at, updated_at
 FROM fused_app_families`
 
+// GetAppFamily resolves only a live family so archived identities cannot regain runtime state.
 func (s *postgresStore) GetAppFamily(ctx context.Context, appFamilyID uuid.UUID) (*AppFamily, error) {
-	row := s.db.QueryRow(ctx, appFamilySelect+` WHERE app_family_id = $1`, appFamilyID)
+	row := s.db.QueryRow(ctx, appFamilySelect+` WHERE app_family_id = $1 AND archived_at IS NULL`, appFamilyID)
 	f, err := scanAppFamily(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrAppFamilyNotFound
@@ -93,9 +99,10 @@ func (s *postgresStore) GetAppFamily(ctx context.Context, appFamilyID uuid.UUID)
 	return f, err
 }
 
+// GetAppFamilyByIdentity resolves the one reusable live name and ignores retained archived identities.
 func (s *postgresStore) GetAppFamilyByIdentity(ctx context.Context, accountID uuid.UUID, kind, canonicalName string) (*AppFamily, error) {
 	row := s.db.QueryRow(ctx, appFamilySelect+`
-		WHERE account_id = $1 AND kind = $2 AND canonical_name = $3`,
+		WHERE account_id = $1 AND kind = $2 AND canonical_name = $3 AND archived_at IS NULL`,
 		accountID, kind, canonicalName)
 	f, err := scanAppFamily(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -121,15 +128,18 @@ func (s *postgresStore) AppFamilyHasHistory(ctx context.Context, appFamilyID uui
 	return exists, nil
 }
 
+// ListAppFamilies returns only live families; historical identities use the archive catalogue instead.
 func (s *postgresStore) ListAppFamilies(ctx context.Context, accountID uuid.UUID, kind string, limit, offset int) ([]AppFamily, int, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT app_family_id, account_id, kind, canonical_name, display_name,
 		       COALESCE(target_language, ''), COALESCE(delivery_mode, ''),
 		       COALESCE(owner_subject_id, '00000000-0000-0000-0000-000000000000'::uuid),
 		       COALESCE(owner_team_id, '00000000-0000-0000-0000-000000000000'::uuid),
+		       archived_at,
+		       COALESCE(archived_by_subject_id, '00000000-0000-0000-0000-000000000000'::uuid),
 		       created_at, updated_at, COUNT(*) OVER()
 		FROM fused_app_families
-		WHERE account_id = $1 AND ($2 = '' OR kind = $2)
+		WHERE account_id = $1 AND archived_at IS NULL AND ($2 = '' OR kind = $2)
 		ORDER BY kind, canonical_name
 		LIMIT $3 OFFSET $4
 	`, accountID, kind, limit, offset)
@@ -144,7 +154,7 @@ func (s *postgresStore) ListAppFamilies(ctx context.Context, accountID uuid.UUID
 		var f AppFamily
 		if err := rows.Scan(&f.AppFamilyID, &f.AccountID, &f.Kind, &f.CanonicalName,
 			&f.DisplayName, &f.TargetLanguage, &f.DeliveryMode, &f.OwnerSubjectID, &f.OwnerTeamID,
-			&f.CreatedAt, &f.UpdatedAt, &total); err != nil {
+			&f.ArchivedAt, &f.ArchivedBy, &f.CreatedAt, &f.UpdatedAt, &total); err != nil {
 			return nil, 0, fmt.Errorf("scan app family: %w", err)
 		}
 		families = append(families, f)
@@ -152,11 +162,12 @@ func (s *postgresStore) ListAppFamilies(ctx context.Context, accountID uuid.UUID
 	return families, total, rows.Err()
 }
 
+// scanAppFamily decodes the complete live-or-historical family projection in one stable column order.
 func scanAppFamily(row pgx.Row) (*AppFamily, error) {
 	var f AppFamily
 	err := row.Scan(&f.AppFamilyID, &f.AccountID, &f.Kind, &f.CanonicalName,
 		&f.DisplayName, &f.TargetLanguage, &f.DeliveryMode, &f.OwnerSubjectID, &f.OwnerTeamID,
-		&f.CreatedAt, &f.UpdatedAt)
+		&f.ArchivedAt, &f.ArchivedBy, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -184,6 +195,7 @@ func (s *postgresStore) GetAppFamilyQuotaUsage(ctx context.Context, accountID uu
 			       ) AS invokable
 			FROM fused_app_families family
 			WHERE family.account_id = $1
+			  AND family.archived_at IS NULL
 			  AND (
 			    $2 = ''
 			    OR ($2 = 'api' AND family.kind = 'sdk')
@@ -426,12 +438,13 @@ func (s *postgresStore) AssessAppCapabilityExpansion(
 	return expands, tokenCount, nil
 }
 
+// lockAppFamily serializes publication against family deletion and rejects archived identities.
 func lockAppFamily(ctx context.Context, tx pgx.Tx, app App) error {
 	var found uuid.UUID
 	var kind AppKind
 	err := tx.QueryRow(ctx, `
 		SELECT app_family_id, kind FROM fused_app_families
-		WHERE app_family_id = $1 AND account_id = $2
+		WHERE app_family_id = $1 AND account_id = $2 AND archived_at IS NULL
 		FOR UPDATE
 	`, app.AppFamilyID, app.AccountID).Scan(&found, &kind)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -931,6 +944,7 @@ func (s *postgresStore) DeactivateAppVersion(ctx context.Context, appID, deactiv
 
 // --- Family-token authorization ---
 
+// AuthorizeApp admits an exact runnable version only through a live family and active family token.
 func (s *postgresStore) AuthorizeApp(ctx context.Context, appID uuid.UUID, tokenHash string) (*AuthProjection, error) {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.store.app.authorize")
 	defer span.End()
@@ -946,6 +960,7 @@ func (s *postgresStore) AuthorizeApp(ctx context.Context, appID uuid.UUID, token
 			  ON f.app_family_id = a.app_family_id AND f.account_id = a.account_id
 			JOIN fused_app_tokens t ON t.app_family_id = f.app_family_id
 			WHERE a.app_id = $1 AND t.token_hash = $2
+			  AND f.archived_at IS NULL
 			  AND a.status IN ('active', 'deprecated')
 			  AND (t.expires_at IS NULL OR t.expires_at > NOW())
 		), touched AS (

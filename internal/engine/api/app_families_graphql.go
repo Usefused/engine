@@ -27,12 +27,14 @@ var appFamilySummaryGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"app_family_id":     &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
 		"name":              &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
 		"kind":              &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"delivery_mode":     &graphql.Field{Type: graphql.String},
 		"target_language":   &graphql.Field{Type: graphql.String},
 		"version_count":     &graphql.Field{Type: graphql.NewNonNull(graphql.Int)},
 		"latest_version":    &graphql.Field{Type: graphql.String},
 		"latest_version_id": &graphql.Field{Type: graphql.String},
 		"latest_status":     &graphql.Field{Type: graphql.String},
 		"latest_created_at": &graphql.Field{Type: graphql.String},
+		"archived_at":       &graphql.Field{Type: graphql.String},
 		"downloads":         &graphql.Field{Type: graphql.String},
 		"stable_version":    &graphql.Field{Type: graphql.String},
 		"stable_version_id": &graphql.Field{Type: graphql.String},
@@ -52,10 +54,11 @@ var appFamilyPageGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 // appFamiliesGraphQLField exposes an additive application catalogue while preserving existing version-level detail queries.
 func appFamiliesGraphQLField(s store.Store, downloadClient sandbox.SDKPackageDownloadCountClient) *graphql.Field {
 	return &graphql.Field{Type: appFamilyPageGraphQLType, Args: graphql.FieldConfigArgument{
-		"kind":   &graphql.ArgumentConfig{Type: graphql.String, DefaultValue: ""},
-		"search": &graphql.ArgumentConfig{Type: graphql.String, DefaultValue: ""},
-		"limit":  &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 20},
-		"offset": &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 0},
+		"kind":     &graphql.ArgumentConfig{Type: graphql.String, DefaultValue: ""},
+		"search":   &graphql.ArgumentConfig{Type: graphql.String, DefaultValue: ""},
+		"limit":    &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 20},
+		"offset":   &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 0},
+		"archived": &graphql.ArgumentConfig{Type: graphql.Boolean, DefaultValue: false},
 		// Reuse the same actor and authorized family scope as existing application reads.
 	}, Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 		_, actor, authorized, err := authorizedAppCatalog(p, s)
@@ -69,8 +72,9 @@ func appFamiliesGraphQLField(s store.Store, downloadClient sandbox.SDKPackageDow
 			return nil, errors.New("app family catalogue is unavailable")
 		}
 		limit, offset := boundedAppPage(p.Args)
+		archived, _ := p.Args["archived"].(bool)
 		items, total, err := repository.ListAuthorizedAppFamilies(p.Context, actor.accountID, authorized,
-			strings.TrimSpace(fmt.Sprint(p.Args["kind"])), strings.TrimSpace(fmt.Sprint(p.Args["search"])), limit, offset)
+			strings.TrimSpace(fmt.Sprint(p.Args["kind"])), strings.TrimSpace(fmt.Sprint(p.Args["search"])), archived, limit, offset)
 		// A failed or incomplete database read cannot establish a successful family page.
 		if err != nil {
 			return nil, err
@@ -88,8 +92,8 @@ func appFamiliesGraphQLField(s store.Store, downloadClient sandbox.SDKPackageDow
 func appFamilyLatestApps(items []store.AppFamilyCatalogItem) []store.AppCatalogItem {
 	apps := make([]store.AppCatalogItem, 0, len(items))
 	for _, item := range items {
-		// Retained families without live versions have no package identity to send to Registry.
-		if item.LatestAppID == uuid.Nil {
+		// Only generated SDK versions own Registry package analytics; MCP and direct REST rows stay Engine-local.
+		if item.LatestAppID == uuid.Nil || item.Kind != store.AppKindSDK || item.DeliveryMode == store.AppDeliveryModeAPI {
 			continue
 		}
 		apps = append(apps, store.AppCatalogItem{AppID: item.LatestAppID, Kind: item.Kind})
@@ -101,7 +105,11 @@ func appFamilyLatestApps(items []store.AppFamilyCatalogItem) []store.AppCatalogI
 func appFamilySummaryFields(r *http.Request, item store.AppFamilyCatalogItem, counts map[uuid.UUID]int64, countsAvailable bool) map[string]interface{} {
 	result := map[string]interface{}{
 		"app_family_id": item.AppFamilyID.String(), "name": item.Name, "kind": string(item.Kind),
-		"target_language": item.TargetLanguage, "version_count": item.VersionCount,
+		"delivery_mode": string(item.DeliveryMode), "target_language": item.TargetLanguage, "version_count": item.VersionCount,
+	}
+	// Archive timestamps expose deletion history without reintroducing archived families into live discovery.
+	if item.ArchivedAt != nil {
+		result["archived_at"] = item.ArchivedAt.Format(mcpGraphQLTimeFormat)
 	}
 	// A retained family can have no live version, so latest fields appear only with an exact immutable identity.
 	if item.LatestAppID != uuid.Nil {
@@ -112,7 +120,7 @@ func appFamilySummaryFields(r *http.Request, item store.AppFamilyCatalogItem, co
 			result["latest_created_at"] = item.LatestCreatedAt.Format(mcpGraphQLTimeFormat)
 		}
 		// Registry analytics are optional and only apply to generated SDK packages.
-		if item.Kind == store.AppKindSDK && countsAvailable {
+		if item.Kind == store.AppKindSDK && item.DeliveryMode != store.AppDeliveryModeAPI && countsAvailable {
 			result["downloads"] = strconv.FormatInt(counts[item.LatestAppID], 10)
 		}
 	}

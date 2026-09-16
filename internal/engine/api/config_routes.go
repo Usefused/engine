@@ -41,6 +41,9 @@ func MountConfigRoutes(r chi.Router, configStore store.ConfigRepository, s store
 		r.Post("/undeprecate", UndeprecateAppHandler(s))
 		r.Delete("/", DeactivateAppHandler(s, proxy))
 	})
+	// Family deletion is a separate, final lifecycle step so version tombstones
+	// are complete before the reusable name moves into the Archive view.
+	r.Delete("/app-families/{app_family_id}", authorizationRevisionSyncHandler(revisionLoader, revisionSink, ArchiveAppFamilyHandler(s)))
 
 	// MCP uses the same desired-state contract and resolver as SDK configs,
 	// but its apply executor creates an Engine runtime instead of source code.

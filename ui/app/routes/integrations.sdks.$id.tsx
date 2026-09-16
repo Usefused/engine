@@ -1,19 +1,20 @@
 import { useState, useEffect, isValidElement, type ReactNode } from "react";
 import { useParams, Link, useNavigate, useSearchParams, type MetaFunction } from "@remix-run/react";
-import { ArrowLeft, Download, Copy, Check, Database } from "lucide-react";
+import { Download, Copy, Check, Database } from "lucide-react";
 import { api, type NotificationServiceRef, type WorkspaceNotification } from "~/lib/api";
 import { useToast } from "~/components/Toast";
 import { readBucketsForSDK } from "~/lib/buckets";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { AppConnectedServices } from "~/components/apps/AppConnectedServices";
 import { NotificationBanner } from "~/components/notifications/NotificationBanner";
 import { useWorkspaceNotifications } from "~/components/notifications/useWorkspaceNotifications";
 import { isPending, matchesConfig } from "~/components/notifications/notificationHelpers";
 import { AppRequestsPanel } from "~/components/activity/AppRequestsPanel";
 import { AppActivityOverview } from "~/components/activity/AppActivityOverview";
-import { NestedActivityTabs } from "~/components/activity/NestedActivityTabs";
-import { AppRuntimeStatus } from "~/components/apps/AppRuntimeStatus";
+import { type NestedActivityTabOption } from "~/components/activity/NestedActivityTabs";
+import { AppDetailBackLink, AppDetailHeader, AppDetailPrimaryAction, AppDetailTabs, AppVersionSwitcher, type AppDetailTab } from "~/components/apps/AppDetailChrome";
+import { AppActivityBody, AppChangesBody, AppDetailBody, AppDetailSection, AppOverviewBody } from "~/components/apps/AppDetailBody";
+import { type AppVersionHistoryItem } from "~/components/apps/AppVersionHistory";
 import { type Bucket } from "~/lib/api";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasAnyPermission, hasResourcePermission, hasWorkspacePermission } from "~/lib/current-actor-access";
@@ -23,41 +24,28 @@ import type { AppSelectionPayload } from "~/lib/app-selection-v3";
 
 type SdkSelection = AppConnectedServiceSelection;
 
-type SdkPrimaryTab = "overview" | "docs" | "analytics";
-type SdkActivitySection = "overview" | "requests" | "changes";
+type SdkPrimaryTab = "overview" | "docs" | "activity" | "changes";
+type SdkActivitySection = "overview" | "requests";
 
 /** Resolves the primary detail tab from a URL value. */
 function sdkPrimaryTab(value: string | null): SdkPrimaryTab {
-  if (value === "docs" || value === "analytics") return value;
+  // Primary navigation is shared across SDK and REST details; only Docs remains package-specific.
+  if (value === "docs" || value === "activity" || value === "changes") return value;
+  // Older Activity links continue to land on execution activity without preserving the obsolete label.
+  if (value === "analytics") return "activity";
   return "overview";
 }
 
 /** Resolves the nested activity section from a URL value. */
 function sdkActivitySection(value: string | null): SdkActivitySection {
-  if (value === "requests" || value === "changes") return value;
+  // SDK and REST add only Requests beneath the shared Activity shell.
+  if (value === "requests") return value;
   return "overview";
 }
 
 /** Returns a node only when its presentation condition is satisfied. */
 function optionalNode(show: boolean, node: ReactNode): ReactNode {
   return show ? node : null;
-}
-
-/** Selects the active or inactive primary-tab class. */
-function sdkTabClass(active: boolean): string {
-  const tone = active ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700";
-  return `px-4 py-1.5 text-sm font-medium rounded-md transition-all cursor-pointer shrink-0 ${tone}`;
-}
-
-/** Selects the active or inactive version-button class. */
-function sdkVersionClass(active: boolean): string {
-  const tone = active ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700";
-  return `px-3 py-1 text-xs font-medium rounded-md transition-all cursor-pointer ${tone}`;
-}
-
-/** Formats an optional creation date without branching inside the main view. */
-function sdkCreatedDate(value?: string): string {
-  return value ? new Date(value).toLocaleDateString() : "";
 }
 
 /** Identifies apps that expose a hosted MCP sandbox URL. */
@@ -95,6 +83,30 @@ function canReadSdkActivity(access: CurrentActorAccess | null, sdk: Sdk | null):
   return hasResourcePermission(access, "app.read", "APP", sdk.app_family_id) && hasWorkspacePermission(access, "audit.read");
 }
 
+/** Checks exact family management without adding permission branches to the detail controller. */
+function canManageAppVersions(access: CurrentActorAccess | null, sdk: Sdk | null): boolean {
+  // Version deletion cannot be authorized until the loaded app establishes its family identity.
+  if (!sdk) return false;
+  return hasResourcePermission(access, "app.manage", "APP", sdk.app_family_id);
+}
+
+/** Resolves permission-safe detail tabs without mounting execution views for lifecycle-only managers. */
+function accessibleSdkDetailState(requestedTab: SdkPrimaryTab, requestedSection: SdkActivitySection, canReadActivity: boolean) {
+  // A direct Activity URL falls back unless the actor can read execution data; Changes remains a separate lifecycle surface.
+  const activeTab = requestedTab === "activity" && !canReadActivity ? "overview" : requestedTab;
+  return { activeTab, activitySection: requestedSection };
+}
+
+/** Lists only activity sections the current family permissions can safely mount. */
+function sdkActivityOptions(canReadActivity: boolean): Array<NestedActivityTabOption<SdkActivitySection>> {
+  // Denied Activity views never mount their data consumers even if stale URL state remains.
+  if (!canReadActivity) return [];
+  return [
+    { value: "overview", label: "Overview" },
+    { value: "requests", label: "Requests" },
+  ];
+}
+
 type Sdk = {
   app_id: string;
   app_family_id: string;
@@ -102,6 +114,7 @@ type Sdk = {
   description?: string;
   version: string;
   kind: string;
+  delivery_mode: string;
   target_type: string;
   target_language?: string;
   sandbox_url?: string;
@@ -112,6 +125,73 @@ type Sdk = {
   detailed_selections?: SdkSelection[];
   status: string;
 };
+
+/** Builds only the SDK detail tabs supported by the loaded version and current permissions. */
+function sdkPrimaryTabs(sdk: Sdk, canReadActivity: boolean): Array<AppDetailTab<SdkPrimaryTab>> {
+  const tabs: Array<AppDetailTab<SdkPrimaryTab>> = [{ value: "overview", label: "Overview" }];
+  // Documentation is meaningful only when this immutable version carries a README.
+  if (sdk.readme) tabs.push({ value: "docs", label: "Docs" });
+  // Execution Activity remains permission-gated independently from readable lifecycle history.
+  if (canReadActivity) tabs.push({ value: "activity", label: "Activity" });
+  tabs.push({ value: "changes", label: "Changes" });
+  return tabs;
+}
+
+interface SdkVersionDeletionOptions {
+  sdk: Sdk | null;
+  currentId?: string;
+  versions: AppVersionHistoryItem[];
+  setVersions: (versions: AppVersionHistoryItem[]) => void;
+  navigate: (path: string) => void;
+  toast: ReturnType<typeof useToast>;
+}
+
+/** Owns exact SDK/REST version deletion so the detail controller stays below the view-complexity bound. */
+function useSdkVersionDeletion({ sdk, currentId, versions, setVersions, navigate, toast }: SdkVersionDeletionOptions) {
+  const [deletingVersionId, setDeletingVersionId] = useState("");
+
+  /** Permanently removes one exact app version and keeps the family detail view on a surviving sibling when possible. */
+  const deleteVersion = async (version: AppVersionHistoryItem) => {
+    // The loaded family supplies both permission scope and delivery-specific user copy.
+    if (!sdk) return;
+    const kind = sdk.delivery_mode === "api" ? "REST API" : "SDK";
+    const confirmed = await toast.confirm(`Delete ${kind} "${sdk.name}" version "${version.version}"? This permanently removes its runtime${sdk.delivery_mode === "api" ? "" : " and package"}.`);
+    // Cancellation must leave the immutable version and current route unchanged.
+    if (!confirmed) return;
+    setDeletingVersionId(version.id);
+    try {
+      await api.sdks.deactivate(version.id);
+      const remaining = versions.filter((candidate) => candidate.id !== version.id);
+      toast.success(`${kind} version "${version.version}" deleted.`);
+      // Removing the open version requires a new exact route because its detail resource no longer exists.
+      if (version.id === currentId) {
+        // A surviving sibling keeps the operator in Changes; an empty family returns to its owning catalogue tab.
+        if (remaining.length > 0) navigate(`/integrations/sdks/${remaining[0].id}?tab=changes`);
+        else navigate(sdkCataloguePath());
+        return;
+      }
+      setVersions(remaining);
+    } catch (cause) {
+      toast.error(`Failed to delete ${kind} version: ${cause instanceof Error ? cause.message : "Unknown error"}`);
+    } finally {
+      setDeletingVersionId("");
+    }
+  };
+
+  return { deletingVersionId, deleteVersion };
+}
+
+/** Returns the unified Apps catalogue for every SDK-kind delivery mode. */
+function sdkCataloguePath(): string {
+  // Delivery affects detail actions, but no longer fragments family discovery.
+  return "/integrations/sdks";
+}
+
+/** Resolves the exact loaded version while route parameters settle during navigation. */
+function sdkCurrentVersionId(routeId: string | undefined, sdk: Sdk): string {
+  // The immutable app identity is the authoritative fallback for a transiently absent route value.
+  return routeId ?? sdk.app_id;
+}
 
 export const meta: MetaFunction = ({ matches }) => {
   const parentMeta = matches.filter((m) => m.id === "root").flatMap((m) => m.meta ?? []);
@@ -208,8 +288,9 @@ export default function SdkDetails() {
   const requestedActiveTab = sdkPrimaryTab(searchParams.get("tab"));
   const requestedActivitySection = sdkActivitySection(searchParams.get("activity"));
 
-  const [versions, setVersions] = useState<Array<{ id: string; version: string; created_at: string }>>([]);
+  const [versions, setVersions] = useState<AppVersionHistoryItem[]>([]);
   const [bucket, setBucket] = useState<Bucket | null>(null);
+  const versionDeletion = useSdkVersionDeletion({ sdk, currentId: id, versions, setVersions, navigate, toast });
 
   // Contextual notification banner: filtered to just this SDK/MCP config.
   // config_key follows the Engine's own "sdk:<name>:<version>" /
@@ -241,6 +322,7 @@ export default function SdkDetails() {
           description
           version
           kind
+          delivery_mode
           target_language
           created_at
           readme
@@ -257,7 +339,9 @@ export default function SdkDetails() {
         // identifier cannot acquire SDK download or documentation controls.
         if (res.app.kind !== "sdk") throw new Error("App not found");
         const detailedSelections = appConnectedServiceSelections(res.app.selections, res.appServices);
-        const local = { ...res.app, detailed_selections: detailedSelections, target_type: res.app.kind, is_downloadable: true };
+        // Direct REST shares SDK lifecycle storage but must not expose package-only controls.
+        const isDirectREST = res.app.delivery_mode === "api";
+        const local = { ...res.app, detailed_selections: detailedSelections, target_type: isDirectREST ? "api" : res.app.kind, is_downloadable: !isDirectREST };
         setSdk(local);
         fetchVersions(local.app_family_id);
       })
@@ -277,10 +361,8 @@ export default function SdkDetails() {
   }, [access, sdk?.app_family_id]);
 
   const canReadActivity = canReadSdkActivity(access, sdk);
-  // A direct Activity URL falls back to Overview until the complete execution
-  // read capability is available, so denied panels and queries never mount.
-  const activeTab = requestedActiveTab === "analytics" && !canReadActivity ? "overview" : requestedActiveTab;
-  const activitySection = requestedActivitySection;
+  const canManageVersions = canManageAppVersions(access, sdk);
+  const { activeTab, activitySection } = accessibleSdkDetailState(requestedActiveTab, requestedActivitySection, canReadActivity);
 
   /** Loads the readable immutable versions in one app family. */
   const fetchVersions = (appFamilyId: string) => {
@@ -317,8 +399,10 @@ export default function SdkDetails() {
     }
   }, [loading, activeTab, sdk?.readme, searchParams, setSearchParams]);
 
-  const setActiveTab = (tab: "overview" | "docs" | "analytics") => {
+  /** Stores only non-default primary app tabs in the exact-version URL. */
+  const setActiveTab = (tab: SdkPrimaryTab) => {
     const next = new URLSearchParams(searchParams);
+    // Overview is the canonical detail URL and therefore owns no explicit tab parameter.
     if (tab === "overview") {
       next.delete("tab");
     } else {
@@ -327,15 +411,18 @@ export default function SdkDetails() {
     setSearchParams(next, { replace: true });
   };
 
-  const setActivitySection = (section: "overview" | "requests" | "changes") => {
+  /** Stores the adapter-specific Activity subsection without coupling it to lifecycle Changes. */
+  const setActivitySection = (section: SdkActivitySection) => {
     const next = new URLSearchParams(searchParams);
-    next.set("tab", "analytics");
+    next.set("tab", "activity");
+    // Activity Overview is canonical beneath the primary Activity tab.
     if (section === "overview") next.delete("activity");
     else next.set("activity", section);
     setSearchParams(next, { replace: true });
   };
 
   const handleVersionSwitch = (newId: string) => {
+    // Selecting the already-open immutable version must not add redundant navigation history.
     if (newId === id) return;
     navigate(`/integrations/sdks/${newId}`);
   };
@@ -359,10 +446,7 @@ export default function SdkDetails() {
 
   if (error || !sdk) return (
     <div className="p-6">
-      <Link to="/integrations/sdks" className="inline-flex items-center text-sm text-slate-500 hover:text-slate-800 mb-6 transition-colors">
-        <ArrowLeft className="w-4 h-4 mr-2" />
-        Back to apps
-      </Link>
+      <AppDetailBackLink to={sdkCataloguePath()} className="mb-6" />
       <div className="bg-red-50 border border-red-200 text-red-600 p-4 rounded-lg">
         {error || "App not found"}
       </div>
@@ -382,8 +466,11 @@ export default function SdkDetails() {
     activeTab={activeTab}
     activitySection={activitySection}
     canReadActivity={canReadActivity}
+    canManageVersions={canManageVersions}
+    deletingVersionId={versionDeletion.deletingVersionId}
     onDownload={handleDownload}
     onVersionSwitch={handleVersionSwitch}
+    onDeleteVersion={versionDeletion.deleteVersion}
     onTabChange={setActiveTab}
     onActivityChange={setActivitySection}
     onCopySandbox={(url) => { navigator.clipboard.writeText(url); toast.success("Sandbox URL copied!"); }}
@@ -398,13 +485,16 @@ type SdkLoadedContentProps = {
   markNotificationRead: (id: string) => void;
   dismissNotification: (id: string) => void;
   canUpdateNotifications: boolean;
-  versions: Array<{ id: string; version: string; created_at: string }>;
+  versions: AppVersionHistoryItem[];
   currentId?: string;
   activeTab: SdkPrimaryTab;
   activitySection: SdkActivitySection;
   canReadActivity: boolean;
+  canManageVersions: boolean;
+  deletingVersionId: string;
   onDownload: () => void;
   onVersionSwitch: (id: string) => void;
+  onDeleteVersion: (version: AppVersionHistoryItem) => void;
   onTabChange: (tab: SdkPrimaryTab) => void;
   onActivityChange: (section: SdkActivitySection) => void;
   onCopySandbox: (url: string) => void;
@@ -424,51 +514,39 @@ function SdkLoadedContent({
   activeTab,
   activitySection,
   canReadActivity,
+  canManageVersions,
+  deletingVersionId,
   onDownload: handleDownload,
   onVersionSwitch: handleVersionSwitch,
+  onDeleteVersion: handleDeleteVersion,
   onTabChange: setActiveTab,
   onActivityChange: setActivitySection,
   onCopySandbox,
 }: SdkLoadedContentProps) {
+  const currentVersionId = sdkCurrentVersionId(id, sdk);
 
   return (
     <div className="space-y-6">
-      <Link to="/integrations/sdks" className="inline-flex items-center text-sm text-slate-500 hover:text-slate-800 transition-colors">
-        <ArrowLeft className="w-4 h-4 mr-2" />
-        Back to apps
-      </Link>
+      <AppDetailBackLink to={sdkCataloguePath()} />
 
-      {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">{sdk.name}</h1>
-          <p className="text-slate-500 mt-1">A reusable interface for the services and operations this app can use.</p>
-          <AppRuntimeStatus className="mt-1.5" status={sdk.status} />
-          <div className="flex flex-wrap items-center gap-3 mt-3 text-sm">
-            <span className="px-2.5 py-1 bg-slate-100 text-slate-700 rounded font-medium">{sdk.version}</span>
-            {optionalNode(sdk.target_type === "sdk", <LanguageBadge targetLanguage={sdk.target_language} />)}
-            <span className="text-slate-600">Created {sdkCreatedDate(sdk.created_at)}</span>
-            {optionalNode(Boolean(bucket), (
-              <span className="flex items-center gap-1.5 text-slate-600 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
-                <Database className="w-3.5 h-3.5 text-slate-400" />
-                <Link to={`/integrations/buckets?bucket=${encodeURIComponent(bucket?.id ?? "")}`} className="hover:text-blue-600 transition-colors">
-                  {bucket?.name}
-                </Link>
-              </span>
-            ))}
-          </div>
-        </div>
-
-        {optionalNode(Boolean(sdk.is_downloadable), (
-          <button
-            onClick={handleDownload}
-            className="inline-flex w-full md:w-auto items-center justify-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors shadow-sm cursor-pointer"
-          >
-            <Download className="w-4 h-4" />
-            Download package
-          </button>
+      {/* Adapter-owned metadata and actions slot into one shared app identity hierarchy. */}
+      <AppDetailHeader
+        name={sdk.name}
+        summary="A reusable interface for the services and operations this app can use."
+        status={sdk.status}
+        version={sdk.version}
+        createdAt={sdk.created_at}
+        leadingMetadata={optionalNode(sdk.target_type === "sdk", <LanguageBadge targetLanguage={sdk.target_language} />)}
+        trailingMetadata={optionalNode(Boolean(bucket), (
+          <span className="flex items-center gap-1.5 rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-slate-600">
+            <Database className="h-3.5 w-3.5 text-slate-400" />
+            <Link to={`/integrations/buckets?bucket=${encodeURIComponent(bucket?.id ?? "")}`} className="transition-colors hover:text-blue-600">
+              {bucket?.name}
+            </Link>
+          </span>
         ))}
-      </div>
+        action={optionalNode(Boolean(sdk.is_downloadable), <AppDetailPrimaryAction icon={<Download className="h-4 w-4" />} label="Download package" onClick={handleDownload} />)}
+      />
 
       {/* The immutable app key resets disclosure state when switching versions or families. */}
       {optionalNode(sdkNotifications.length > 0, (
@@ -482,87 +560,35 @@ function SdkLoadedContent({
         />
       ))}
 
-      {/* Version switcher */}
-      {optionalNode(versions.length > 1, (
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-xs font-medium text-slate-500 uppercase tracking-wider mr-1">App version</span>
-          <div className="flex p-1 bg-slate-100/80 rounded-lg gap-0.5 flex-wrap">
-            {versions.map(v => (
-              <button
-                key={v.id}
-                onClick={() => handleVersionSwitch(v.id)}
-                className={sdkVersionClass(v.id === id)}
-              >
-                {v.version}
-              </button>
-            ))}
-          </div>
-        </div>
-      ))}
+      <AppVersionSwitcher label="App version" versions={versions} currentId={currentVersionId} onSelect={handleVersionSwitch} />
 
-      {/* Pill Tabs — matches integrations.$id.tsx */}
-      <div className="flex overflow-x-auto p-1 bg-slate-100/80 rounded-lg whitespace-nowrap max-w-full [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        <button
-          onClick={() => setActiveTab("overview")}
-          className={sdkTabClass(activeTab === "overview")}
-        >
-          Overview
-        </button>
-        {optionalNode(Boolean(sdk.readme), (
-          <button
-            onClick={() => setActiveTab("docs")}
-            className={sdkTabClass(activeTab === "docs")}
-          >
-            Docs
-          </button>
-        ))}
-        {/* Execution Activity is discoverable only with the exact app and audit capability. */}
-        {optionalNode(canReadActivity, (
-          <button
-            onClick={() => setActiveTab("analytics")}
-            className={sdkTabClass(activeTab === "analytics")}
-          >
-            Activity
-          </button>
-        ))}
-      </div>
+      <AppDetailTabs label="App details" active={activeTab} tabs={sdkPrimaryTabs(sdk, canReadActivity)} onChange={setActiveTab} />
 
-      {/* Tab Content */}
-      <div className="p-1 md:p-1">
+      <AppDetailBody>
         {optionalNode(activeTab === "overview", (
-          <div className="space-y-2">
-
-            {/* Connected services — plain subsection, no card */}
-            <div>
-              <h4 className="text-sm font-semibold text-slate-700 uppercase tracking-wider mb-3">
-                Connected services
-              </h4>
-              <AppConnectedServices
-                selections={sdk.detailed_selections ?? []}
-              />
-            </div>
-
-            {/* MCP Sandbox URL */}
-            {optionalNode(hasSandboxURL(sdk), (
-              <div className="p-6 bg-slate-50 border border-slate-200 rounded-xl shadow-sm">
-                <h3 className="text-lg font-semibold text-slate-900 mb-2">Hosted Sandbox URL</h3>
-                <p className="text-sm text-slate-700 mb-4 max-w-2xl">
-                  Use this URL in your MCP client (Cursor, Claude Desktop) to connect to this server instantly without running it locally.
-                </p>
-                <div className="flex items-center gap-3">
-                  <code className="flex-1 px-4 py-3 rounded-lg border border-slate-200 bg-white text-slate-800 font-mono text-sm break-all">
-                    {sdk.sandbox_url}
-                  </code>
-                  <button
-                    onClick={() => onCopySandbox(sdk.sandbox_url ?? "")}
-                    className="p-3 bg-white border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 transition-colors shadow-sm cursor-pointer"
-                  >
-                    <Copy className="w-5 h-5" />
-                  </button>
+          <AppOverviewBody
+            selections={sdk.detailed_selections ?? []}
+            adapterDetails={optionalNode(hasSandboxURL(sdk), (
+              <AppDetailSection title="Hosted Sandbox URL">
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-6 shadow-sm">
+                  <p className="text-sm text-slate-700 mb-4 max-w-2xl">
+                    Use this URL in your MCP client (Cursor, Claude Desktop) to connect to this server instantly without running it locally.
+                  </p>
+                  <div className="flex items-center gap-3">
+                    <code className="flex-1 px-4 py-3 rounded-lg border border-slate-200 bg-white text-slate-800 font-mono text-sm break-all">
+                      {sdk.sandbox_url}
+                    </code>
+                    <button
+                      onClick={() => onCopySandbox(sdk.sandbox_url ?? "")}
+                      className="p-3 bg-white border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 transition-colors shadow-sm cursor-pointer"
+                    >
+                      <Copy className="w-5 h-5" />
+                    </button>
+                  </div>
                 </div>
-              </div>
+              </AppDetailSection>
             ))}
-          </div>
+          />
         ))}
 
         {optionalNode(showsSdkDocs(activeTab, sdk), (
@@ -646,19 +672,13 @@ function SdkLoadedContent({
           </div>
         ))}
 
-        {optionalNode(activeTab === "analytics", (
-          <div className="min-w-0 max-w-full space-y-5 overflow-x-hidden sm:space-y-6">
-            <NestedActivityTabs
-              active={activitySection}
-              ariaLabel="App activity"
-              onChange={setActivitySection}
-              options={[
-                { value: "overview", label: "Overview" },
-                { value: "requests", label: "Requests" },
-                { value: "changes", label: "Changes" },
-              ]}
-            />
-
+        {optionalNode(activeTab === "activity" && canReadActivity, (
+          <AppActivityBody
+            active={activitySection}
+            ariaLabel="App activity"
+            onChange={setActivitySection}
+            options={sdkActivityOptions(canReadActivity)}
+          >
             {optionalNode(canReadActivity && activitySection === "overview", (
               <AppActivityOverview
                 appId={sdk.app_id}
@@ -671,23 +691,20 @@ function SdkLoadedContent({
             {optionalNode(canReadActivity && activitySection === "requests", (
               <AppRequestsPanel appId={sdk.app_id} consumerName={sdk.name} transport={sdkTransport(sdk)} />
             ))}
-
-            {optionalNode(activitySection === "changes", <div className="space-y-6">
-              <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-                <div className="border-b border-slate-100 bg-slate-50 px-5 py-3"><h4 className="text-sm font-semibold text-slate-800">Version history</h4></div>
-                <div className="divide-y divide-slate-100">
-                  {versions.map((version) => (
-                    <div key={version.id} className="flex min-w-0 items-center justify-between gap-3 px-4 py-3 text-sm sm:px-5">
-                      <button type="button" onClick={() => handleVersionSwitch(version.id)} className="min-w-0 break-all text-left font-medium text-slate-800 hover:text-blue-600">{version.version}</button>
-                      <span className="shrink-0 text-xs text-slate-400">{new Date(version.created_at).toLocaleDateString()}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>)}
-          </div>
+          </AppActivityBody>
         ))}
-      </div>
+
+        {optionalNode(activeTab === "changes", (
+          <AppChangesBody
+            versions={versions}
+            currentId={currentVersionId}
+            canDelete={canManageVersions}
+            deletingVersionId={deletingVersionId}
+            onSelect={handleVersionSwitch}
+            onDelete={handleDeleteVersion}
+          />
+        ))}
+      </AppDetailBody>
     </div>
   );
 }

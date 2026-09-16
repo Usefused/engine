@@ -216,6 +216,7 @@ func TestControlActorMiddlewareExcludesRuntimeAndPublicRoutes(t *testing.T) {
 	}
 }
 
+// TestClassifyEngineRequest keeps public, runtime, control, and unknown authentication boundaries disjoint.
 func TestClassifyEngineRequest(t *testing.T) {
 	tests := []struct {
 		method string
@@ -234,6 +235,7 @@ func TestClassifyEngineRequest(t *testing.T) {
 		{method: http.MethodPost, path: "/auth/cli/approve", want: requestClassPublic},
 		{method: http.MethodGet, path: "/auth/whoami", want: requestClassControl},
 		{method: http.MethodPost, path: "/auth/cli/logout", want: requestClassControl},
+		{method: http.MethodDelete, path: "/app-families/" + uuid.NewString(), want: requestClassControl},
 		{method: http.MethodOptions, path: "/workspace/services", want: requestClassPublic},
 		{method: http.MethodPost, path: "/mcp/example", want: requestClassRuntimeExcluded},
 		{method: http.MethodPost, path: "/workspace/connect/callback", want: requestClassRuntimeExcluded},

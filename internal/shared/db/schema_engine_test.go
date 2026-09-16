@@ -209,7 +209,8 @@ func TestEngineSchemaDefinesAppTokenLifecycle(t *testing.T) {
 func TestEngineSchemaDefinesCurrentProductTablesDirectly(t *testing.T) {
 	schema := strings.Join(engineSchemaQueries(), "\n")
 	assertSchemaContainsAll(t, schema, "current Engine schema missing %q", []string{
-		"UNIQUE (account_id, kind, canonical_name)", "UNIQUE (app_family_id, version)",
+		"archived_at", "archived_by_subject_id", "uq_fused_app_families_active_identity",
+		"WHERE archived_at IS NULL", "UNIQUE (app_family_id, version)",
 		"sdk_generation_status = 'skipped'", "sdk_generation_job_id IS NULL", "chk_fused_apps_sdk_skipped_jobless",
 		"delivery_mode", "chk_fused_app_families_delivery_mode", "delivery_mode IN ('sdk', 'api')",
 		"(owner_subject_id IS NOT NULL)::int + (owner_team_id IS NOT NULL)::int = 1",

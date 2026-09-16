@@ -1267,6 +1267,8 @@ func engineSchemaQueries() []string {
 			mcp_stable_route_initialized boolean NOT NULL DEFAULT false,
 			owner_subject_id    uuid REFERENCES fused_subjects(id) ON DELETE RESTRICT,
 			owner_team_id       uuid REFERENCES fused_teams(id) ON DELETE RESTRICT,
+			archived_at          timestamptz,
+			archived_by_subject_id uuid REFERENCES fused_subjects(id) ON DELETE RESTRICT,
 			created_at          timestamptz NOT NULL DEFAULT NOW(),
 			updated_at          timestamptz NOT NULL DEFAULT NOW(),
 			CONSTRAINT chk_fused_app_families_owner CHECK (
@@ -1285,11 +1287,26 @@ func engineSchemaQueries() []string {
 				(kind = 'sdk' AND mcp_stable_app_id IS NULL AND NOT mcp_stable_route_initialized)
 				OR (kind = 'mcp' AND (mcp_stable_app_id IS NULL OR mcp_stable_route_initialized))
 			),
-			UNIQUE (account_id, kind, canonical_name),
 			UNIQUE (app_family_id, account_id)
 		);`,
+		// Archived identities retain historical foreign-key targets while the
+		// partial unique index releases their canonical names for new families.
+		`DO $$
+		BEGIN
+			-- The lock makes constraint replacement safe across concurrent Engine startups.
+			LOCK TABLE fused_app_families IN SHARE ROW EXCLUSIVE MODE;
+			ALTER TABLE fused_app_families ADD COLUMN IF NOT EXISTS archived_at timestamptz;
+			ALTER TABLE fused_app_families ADD COLUMN IF NOT EXISTS archived_by_subject_id uuid REFERENCES fused_subjects(id) ON DELETE RESTRICT;
+			ALTER TABLE fused_app_families DROP CONSTRAINT IF EXISTS fused_app_families_account_id_kind_canonical_name_key;
+			CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_app_families_active_identity
+				ON fused_app_families(account_id, kind, canonical_name)
+				WHERE archived_at IS NULL;
+		END $$;`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_app_families_account_kind
 			ON fused_app_families(account_id, kind, created_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_app_families_archive
+			ON fused_app_families(account_id, archived_at DESC, app_family_id)
+			WHERE archived_at IS NOT NULL;`,
 
 		// Each app is one immutable version and its exact execution scope.
 		// Kind and target_language are read through the family to avoid

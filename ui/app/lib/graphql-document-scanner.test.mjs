@@ -60,17 +60,17 @@ test("keeps the Registry repo-boundary manifest synchronized when present", (t) 
   }
 });
 
-// The membership-only Services query adds one Engine document without changing the Registry surface.
+// Exact UI transport totals cover the shared Apps catalogue without counting its legacy MCP redirect.
 test("accounts for every current UI GraphQL call and document variant", () => {
   const scan = scanCurrentUI();
   // Exact totals ensure every static query remains represented in schema validation.
-  assert.equal(scan.call_count, 86);
-  assert.equal(scan.calls.length, 86);
-  assert.equal(scan.document_count, 105);
-  assert.equal(scan.documents.length, 105);
+  assert.equal(scan.call_count, 84);
+  assert.equal(scan.calls.length, 84);
+  assert.equal(scan.document_count, 102);
+  assert.equal(scan.documents.length, 102);
   assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "registry").length, 19);
-  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "engine").length, 86);
-  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 105);
+  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "engine").length, 83);
+  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 102);
 });
 
 test("resolves imported fragments and expands conditional and map variants", () => {
@@ -105,13 +105,13 @@ test("models runtime scalar interpolation without accepting structural interpola
   const scan = scanCurrentUI();
   assert.ok(scan.documents.every(({ document }) => !document.includes("UI_DYNAMIC_VALUE")));
   assert.ok(scan.documents.some(({ file, document }) => (
-    file === "app/routes/integrations.mcp.tsx" && document.includes("query MCPApps($search: String!, $version: String!, $limit: Int!, $offset: Int!)")
+    file === "app/routes/integrations.sdks._index.tsx" && document.includes("query Applications($search: String!, $archived: Boolean!, $limit: Int!, $offset: Int!)")
   )));
   assert.ok(scan.documents.some(({ file, document }) => (
-    file === "app/routes/integrations.mcp.tsx" && document.includes("deprecateApp(app_id: $appId")
+    file === "app/routes/integrations.sdks._index.tsx" && document.includes("deprecateApp(app_id: $appId")
   )));
   assert.ok(scan.documents
-    .filter(({ file }) => file === "app/routes/integrations.mcp.tsx")
+    .filter(({ file }) => file === "app/routes/integrations.sdks._index.tsx")
     .every(({ document }) => !document.includes("UI_DYNAMIC_VALUE")));
 
   const scalarRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fused-ui-graphql-scalar-"));

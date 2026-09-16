@@ -1,7 +1,7 @@
 import { useState, type ComponentType } from "react";
 import { Link, useLocation, useNavigate } from "@remix-run/react";
 import { Logo } from "~/components/Logo";
-import { Layers, Boxes, Bot, KeyRound, ShieldCheck, Activity, Settings, LogOut, ChevronLeft, ChevronRight, Menu, X, LogIn, PlusCircle } from "lucide-react";
+import { Layers, Boxes, KeyRound, ShieldCheck, Activity, Settings, LogOut, ChevronLeft, ChevronRight, Menu, X, LogIn, PlusCircle } from "lucide-react";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasAnyPermission, hasWorkspacePermission, type CurrentActorAccess } from "~/lib/current-actor-access";
 import { workspaceActivityTabs } from "~/lib/activity-access";
@@ -17,8 +17,8 @@ type SidebarItem = {
   to: string;
   label: string;
   Icon: SidebarIcon;
-  // Default active-matching is a pathname prefix check. Creation routes use a
-  // custom matcher so the initiating Apps or MCP servers section stays active.
+  // Default active-matching is a pathname prefix check. Adapter detail routes
+  // use a custom matcher so the shared Apps destination stays active.
   end?: boolean;
   isActive?: (pathname: string, search: URLSearchParams) => boolean;
   visible?: (access: CurrentActorAccess | null) => boolean;
@@ -38,14 +38,8 @@ const AUTH_NAV_ITEMS: SidebarItem[] = [
     to: "/integrations/sdks",
     label: "Apps",
     Icon: Boxes,
-    isActive: (pathname) => pathname.startsWith("/integrations/sdks"),
-    visible: (access) => hasAnyPermission(access, "app.read"),
-  },
-  {
-    to: "/integrations/mcp",
-    label: "MCP servers",
-    Icon: Bot,
-    isActive: (pathname) => pathname.startsWith("/integrations/mcp"),
+    // Transport-specific detail routes still belong to the single Apps navigation destination.
+    isActive: (pathname) => pathname.startsWith("/integrations/sdks") || pathname.startsWith("/integrations/mcp"),
     visible: (access) => hasAnyPermission(access, "app.read"),
   },
   {

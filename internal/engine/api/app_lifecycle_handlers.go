@@ -32,6 +32,11 @@ type appLifecycleResponse struct {
 	AppID       string `json:"app_id"`
 }
 
+type appFamilyArchiveResponse struct {
+	Status      string `json:"status"`
+	AppFamilyID string `json:"app_family_id"`
+}
+
 func DeprecateAppHandler(s store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.app.deprecate")
@@ -97,6 +102,43 @@ func DeactivateAppHandler(s store.Store, proxy Forwarder) http.HandlerFunc {
 		cleanupDeactivatedAppRuntime(ctx, app, proxy)
 		span.SetAttributes(attribute.String("outcome", "deactivated"))
 		writeJSON(w, appLifecycleResponse{Status: "deactivated", AppFamilyID: app.AppFamilyID.String(), AppID: app.AppID.String()})
+	}
+}
+
+// ArchiveAppFamilyHandler deletes an empty logical app while retaining its historical identity for the Archive view.
+func ArchiveAppFamilyHandler(s store.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.app_family.archive")
+		defer span.End()
+
+		actor, ok := accesscontrol.ActorFromContext(ctx)
+		// Family deletion is a user mutation and must never run without an exact workspace actor.
+		if !ok || actor.AccountID == uuid.Nil || actor.SubjectID == uuid.Nil {
+			writeAppLifecycleError(w, span, workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "authenticated actor required"})
+			return
+		}
+		appFamilyID, err := uuid.Parse(chi.URLParam(r, "app_family_id"))
+		// Malformed identities must not be interpreted as a broad family mutation.
+		if err != nil {
+			writeAppLifecycleError(w, span, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "app_family_id must be a UUID"})
+			return
+		}
+		requirement := accesscontrol.Requirement{
+			Permission: accesscontrol.PermissionAppManage,
+			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: appFamilyID},
+		}
+		// The family itself is the authorization boundary even after its final version is removed.
+		if err := (accesscontrol.SnapshotAuthorizer{}).CheckAll(ctx, actor, requirement); err != nil {
+			writeAppLifecycleError(w, span, err)
+			return
+		}
+		// Persistence owns the all-or-nothing token, grant, bucket, and identity transition.
+		if err := s.ArchiveAppFamily(ctx, actor.AccountID, appFamilyID); err != nil {
+			writeAppLifecycleError(w, span, err)
+			return
+		}
+		span.SetAttributes(attribute.String("app.family_id", appFamilyID.String()), attribute.String("outcome", "archived"))
+		writeJSON(w, appFamilyArchiveResponse{Status: "archived", AppFamilyID: appFamilyID.String()})
 	}
 }
 
@@ -180,10 +222,22 @@ func deleteRegistryPackage(ctx context.Context, proxy Forwarder, appID uuid.UUID
 	return sdkProxyError{status: recorder.Code, body: recorder.Body.Bytes()}
 }
 
+// writeAppLifecycleError maps shared version and family outcomes to stable non-disclosing HTTP errors.
 func writeAppLifecycleError(w http.ResponseWriter, span trace.Span, err error) {
 	span.SetAttributes(attribute.String("outcome", "failed"))
+	// Exact-version removal retains its established not-found contract.
 	if errors.Is(err, store.ErrAppNotFound) {
 		writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusNotFound, message: "app not found"})
+		return
+	}
+	// Archived or cross-workspace family identities share the same non-disclosing response.
+	if errors.Is(err, store.ErrAppFamilyNotFound) {
+		writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusNotFound, message: "app family not found"})
+		return
+	}
+	// Every immutable version must be deactivated before the logical family can release its name.
+	if errors.Is(err, store.ErrAppFamilyNotEmpty) {
+		writeSDKConfigError(w, workspaceConfigHTTPError{status: http.StatusConflict, message: "deactivate every app version before deleting the app"})
 		return
 	}
 	writeSDKConfigError(w, err)

@@ -16,15 +16,16 @@ type appFamilyGraphQLTestStore struct {
 	family        store.AppFamilyCatalogItem
 	limit, offset int
 	kind          string
+	archived      bool
 }
 
 // ListAuthorizedAppFamilies records the paginated family query and returns one storage-owned aggregate.
-func (s *appFamilyGraphQLTestStore) ListAuthorizedAppFamilies(_ context.Context, accountID uuid.UUID, scope accesscontrol.AuthorizedScope, kind, _ string, limit, offset int) ([]store.AppFamilyCatalogItem, int, error) {
+func (s *appFamilyGraphQLTestStore) ListAuthorizedAppFamilies(_ context.Context, accountID uuid.UUID, scope accesscontrol.AuthorizedScope, kind, _ string, archived bool, limit, offset int) ([]store.AppFamilyCatalogItem, int, error) {
 	// Family discovery must retain the authenticated actor's account and app.read scope.
 	if accountID != s.accountID || !scope.All {
 		return nil, 0, fmt.Errorf("unexpected catalogue authorization scope")
 	}
-	s.kind, s.limit, s.offset = kind, limit, offset
+	s.kind, s.archived, s.limit, s.offset = kind, archived, limit, offset
 	return []store.AppFamilyCatalogItem{s.family}, 1, nil
 }
 
@@ -47,18 +48,23 @@ func TestAppFamiliesPreserveUIVersionQueries(t *testing.T) {
 		t.Run(string(kind), func(t *testing.T) {
 			account, family, oldID, newID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 			latestCreatedAt := time.Now().UTC()
+			deliveryMode := store.AppDeliveryMode("")
+			// SDK families expose package delivery while MCP families have no delivery subtype.
+			if kind == store.AppKindSDK {
+				deliveryMode = store.AppDeliveryModeSDK
+			}
 			fixture := &workspaceTestStore{accountID: account, mockScopes: map[uuid.UUID]*store.AppRuntime{
 				oldID: {AccountID: account, AppFamilyID: family, AppID: oldID, StableAppID: oldID, Kind: kind, Name: "Support:Tools", Version: "1", CreatedAt: latestCreatedAt.Add(-time.Minute)},
 				newID: {AccountID: account, AppFamilyID: family, AppID: newID, StableAppID: oldID, Kind: kind, Name: "Support:Tools", Version: "2", CreatedAt: latestCreatedAt},
 			}}
 			s := &appFamilyGraphQLTestStore{artifactReferenceGraphQLTestStore: &artifactReferenceGraphQLTestStore{workspaceTestStore: fixture}, family: store.AppFamilyCatalogItem{
-				AppFamilyID: family, Name: "Support:Tools", Kind: kind, VersionCount: 2,
+				AppFamilyID: family, Name: "Support:Tools", Kind: kind, DeliveryMode: deliveryMode, VersionCount: 2,
 				LatestAppID: newID, LatestVersion: "2", LatestStatus: store.AppStatusActive, LatestCreatedAt: &latestCreatedAt,
 				StableAppID: oldID, StableVersion: "1",
 			}}
 			h := mountMCPGraphQLTestHandler(t, s)
 			data := doMCPGraphQLRequest(t, h, fmt.Sprintf(`query {
-    appFamilies(kind:%q,limit:1,offset:0) { total items { app_family_id name version_count latest_version latest_version_id latest_status latest_created_at stable_version stable_version_id transport_urls { streamable_http sse } } }
+    appFamilies(kind:%q,limit:1,offset:0) { total items { app_family_id name kind delivery_mode version_count latest_version latest_version_id latest_status latest_created_at stable_version stable_version_id transport_urls { streamable_http sse } } }
     apps(kind:%q,limit:20,offset:0) { total items { app_id app_family_id version } }
     app(app_id:%q) { app_id version }
     appVersions(app_family_id:%q) { app_id version }
@@ -66,13 +72,17 @@ func TestAppFamiliesPreserveUIVersionQueries(t *testing.T) {
 			grouped := data["appFamilies"].(map[string]any)
 			items := grouped["items"].([]any)
 			// The GraphQL layer must forward the requested family page without changing its grouped total.
-			if grouped["total"] != float64(1) || len(items) != 1 || s.kind != string(kind) || s.limit != 1 || s.offset != 0 {
+			if grouped["total"] != float64(1) || len(items) != 1 || s.kind != string(kind) || s.archived || s.limit != 1 || s.offset != 0 {
 				t.Fatalf("grouped page: %#v", grouped)
 			}
 			item := items[0].(map[string]any)
 			// Grouping preserves logical identity and deterministic latest-version presentation without selecting execution implicitly.
 			if item["app_family_id"] != family.String() || item["version_count"] != float64(2) || item["latest_version_id"] != newID.String() || item["latest_version"] != "2" {
 				t.Fatalf("family: %#v", item)
+			}
+			// Delivery metadata lets the unified Apps catalogue label rows without a second adapter-specific query.
+			if item["kind"] != string(kind) || item["delivery_mode"] != string(deliveryMode) {
+				t.Fatalf("family delivery: %#v", item)
 			}
 			// Only the MCP adapter can advertise explicitly promoted runtime routes.
 			if kind == store.AppKindMCP {
@@ -101,6 +111,18 @@ func TestAppFamiliesPreserveUIVersionQueries(t *testing.T) {
 	}
 }
 
+// TestArchivedAppFamilyProjectsDeletionTime keeps archive identity separate from executable version metadata.
+func TestArchivedAppFamilyProjectsDeletionTime(t *testing.T) {
+	archivedAt := time.Now().UTC()
+	result := appFamilySummaryFields(nil, store.AppFamilyCatalogItem{
+		AppFamilyID: uuid.New(), Name: "retired", Kind: store.AppKindSDK, ArchivedAt: &archivedAt,
+	}, nil, false)
+	// Archive rows expose the deletion timestamp but no exact version that could be invoked or downloaded.
+	if result["archived_at"] == nil || result["latest_version_id"] != nil || result["transport_urls"] != nil {
+		t.Fatalf("archived family projection: %#v", result)
+	}
+}
+
 // TestUnpromotedAppFamilyHasNoTransport protects retained MCP identities after their promoted version is removed.
 func TestUnpromotedAppFamilyHasNoTransport(t *testing.T) {
 	result := appFamilySummaryFields(nil, store.AppFamilyCatalogItem{AppFamilyID: uuid.New(), Name: "support", Kind: store.AppKindMCP, VersionCount: 1}, nil, false)
@@ -115,11 +137,25 @@ func TestSDKAppFamilyProjectsLatestVersion(t *testing.T) {
 	appID := uuid.New()
 	createdAt := time.Now().UTC()
 	result := appFamilySummaryFields(nil, store.AppFamilyCatalogItem{
-		AppFamilyID: uuid.New(), Name: "support", Kind: store.AppKindSDK, TargetLanguage: "typescript", VersionCount: 2,
+		AppFamilyID: uuid.New(), Name: "support", Kind: store.AppKindSDK, DeliveryMode: store.AppDeliveryModeSDK, TargetLanguage: "typescript", VersionCount: 2,
 		LatestAppID: appID, LatestVersion: "2.0.0", LatestStatus: store.AppStatusActive, LatestCreatedAt: &createdAt,
 	}, map[uuid.UUID]int64{appID: 7}, true)
 	// Latest metadata must expose the same exact identity used for the optional Registry download count.
-	if result["latest_version_id"] != appID.String() || result["latest_version"] != "2.0.0" || result["downloads"] != "7" || result["latest_created_at"] == "" {
+	if result["latest_version_id"] != appID.String() || result["latest_version"] != "2.0.0" || result["delivery_mode"] != string(store.AppDeliveryModeSDK) || result["downloads"] != "7" || result["latest_created_at"] == "" {
 		t.Fatalf("latest SDK projection: %#v", result)
+	}
+}
+
+// TestDirectRESTAppFamilyOmitsPackageAnalytics keeps package state off package-free app delivery.
+func TestDirectRESTAppFamilyOmitsPackageAnalytics(t *testing.T) {
+	appID := uuid.New()
+	item := store.AppFamilyCatalogItem{
+		AppFamilyID: uuid.New(), Name: "support-api", Kind: store.AppKindSDK, DeliveryMode: store.AppDeliveryModeAPI,
+		TargetLanguage: "typescript", VersionCount: 1, LatestAppID: appID, LatestVersion: "1.0.0", LatestStatus: store.AppStatusActive,
+	}
+	result := appFamilySummaryFields(nil, item, map[uuid.UUID]int64{appID: 9}, true)
+	// Direct REST remains identifiable without implying that a generated package or download count exists.
+	if result["delivery_mode"] != string(store.AppDeliveryModeAPI) || result["downloads"] != nil || len(appFamilyLatestApps([]store.AppFamilyCatalogItem{item})) != 0 {
+		t.Fatalf("direct REST projection: %#v", result)
 	}
 }

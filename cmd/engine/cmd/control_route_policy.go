@@ -165,6 +165,10 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodPost, "/apps/{app_id}/deprecate", false, nil},
 	{http.MethodPost, "/apps/{app_id}/undeprecate", false, nil},
 	{http.MethodDelete, "/apps/{app_id}/", false, nil},
+	// Family deletion uses the stable family ID directly, so policy resolution needs no version lookup.
+	{http.MethodDelete, "/app-families/{app_family_id}", false, []routeRequirement{
+		pathRequirement(accesscontrol.PermissionAppManage, accesscontrol.ResourceApp, "app_family_id"),
+	}},
 	{http.MethodGet, "/apps/{app_id}/openapi", false, nil},
 	{http.MethodPost, "/mcp-config/plan", false, nil},
 	{http.MethodPost, "/mcp-config/apply", false, nil},
