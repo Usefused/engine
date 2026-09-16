@@ -8,6 +8,7 @@ import { mutableWorkspaceNotificationID } from "./workspace-notification.ts";
 const apiPath = fileURLToPath(import.meta.resolve("./api.ts"));
 const integrationsIndexPath = fileURLToPath(import.meta.resolve("../routes/integrations._index.tsx"));
 const integrationsListPath = fileURLToPath(import.meta.resolve("../components/IntegrationsListTab.tsx"));
+const serviceIconPath = fileURLToPath(import.meta.resolve("../components/ServiceIcon.tsx"));
 const integrationDetailPath = fileURLToPath(import.meta.resolve("../routes/integrations.$id.tsx"));
 
 // sourceSection isolates one API contract so unrelated fields cannot satisfy assertions.
@@ -19,11 +20,15 @@ function sourceSection(source, start, end) {
   return source.slice(startIndex, endIndex);
 }
 
+// Membership projections carry exact versions and the Registry metadata needed by workspace cards.
 test("workspace membership uses exact enabled versions without a false workspace field", async () => {
   const source = await readFile(apiPath, "utf8");
   const section = sourceSection(source, "getServices: () =>", "listWebhookEvents:");
 
   assert.match(section, /enabled_versions\s*\{[^}]*service_version_id/s);
+  for (const field of ["registry_slug", "description", "icon_url", "provider", "is_owner", "is_public"]) {
+    assert.match(section, new RegExp(`\\b${field}\\b`));
+  }
   assert.doesNotMatch(section, /\bworkspace_id\b/);
 });
 
@@ -65,7 +70,7 @@ test("service add actions expose bounded single-flight feedback", async () => {
     readFile(integrationDetailPath, "utf8"),
   ]);
   const apiAdd = sourceSection(apiSource, "addService: (", "removeService:");
-  const routeAdd = sourceSection(routeSource, "async function handleAddWorkspace", "async function handleRemoveWorkspace");
+  const routeAdd = sourceSection(routeSource, "async function handleAddWorkspace", "const workspaceList");
   const cardAction = sourceSection(listSource, "function IntegrationActions", "function canAddCatalogIntegration");
   const detailAction = sourceSection(detailSource, "function AddToWorkspaceButton", "// useIntegrationDetailModel");
 
@@ -82,16 +87,56 @@ test("service add actions expose bounded single-flight feedback", async () => {
 
 // Catalogue rendering must expose useful service context without introducing per-card network reads.
 test("services render as descriptive catalogue cards", async () => {
-  const [routeSource, listSource] = await Promise.all([
+  const [routeSource, listSource, iconSource, detailSource] = await Promise.all([
     readFile(integrationsIndexPath, "utf8"),
     readFile(integrationsListPath, "utf8"),
+    readFile(serviceIconPath, "utf8"),
+    readFile(integrationDetailPath, "utf8"),
   ]);
 
-  assert.match(routeSource, /id name description base_url/);
+  assert.match(routeSource, /id name description icon_url endpoint_count webhook_count base_url/);
   assert.match(listSource, /function IntegrationCard/);
-  assert.match(listSource, /grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3/);
-  assert.match(listSource, /integrationDescription\(service, viewType\)/);
+  assert.match(listSource, /grid grid-cols-1 items-start gap-4 md:grid-cols-2 xl:grid-cols-3/);
+  assert.match(listSource, /hover:border-black/);
+  assert.doesNotMatch(listSource, /min-h-56/);
+  assert.match(listSource, /<IntegrationDescription description=\{service\.description\}/);
+  assert.doesNotMatch(listSource, /line-clamp-3/);
+  assert.match(listSource, /<ServiceAnalytics endpointCount=\{service\.endpoint_count\} webhookCount=\{service\.webhook_count\}/);
+  assert.match(listSource, /title=\{apiURL\} className="mt-1 break-all font-mono/);
+  assert.doesNotMatch(listSource, /function DefaultAPIURL/);
+  assert.match(listSource, /explicitDefault \|\| production \|\| service\.servers\[0\]/);
+  assert.match(listSource, /if \(!content\) return null/);
+  assert.doesNotMatch(listSource, /No description provided\./);
+  assert.match(listSource, /service\.is_owner === false/);
+  assert.match(listSource, />@\{providerName\}<\/p>/);
+  assert.doesNotMatch(listSource, />By \{providerName\}<\/p>/);
+  assert.match(listSource, /service_slug: s\.registry_slug \|\| s\.service_slug/);
+  assert.match(listSource, /<ServiceVisibilityBadge isPublic=\{service\.is_public\}/);
+  assert.match(listSource, /<ServiceIcon name=\{service\.name\} iconURL=\{service\.icon_url\}/);
+  assert.match(iconSource, /referrerPolicy="no-referrer"/);
+  assert.match(iconSource, /onError=\{\(\) => setFailed\(true\)\}/);
+  assert.match(detailSource, /<ServiceIcon name=\{srv\.name\} iconURL=\{srv\.icon_url\}/);
+  assert.match(listSource, /className="block truncate text-sm font-semibold/);
+  assert.doesNotMatch(listSource, /Service integration/);
+  assert.doesNotMatch(listSource, /function WorkspaceIntegrationAction/);
   assert.match(listSource, /In workspace/);
+});
+
+// Workspace removal belongs on a context-rich detail page and must never delete the Registry definition.
+test("service removal is available only from service details", async () => {
+  const [listSource, detailSource] = await Promise.all([
+    readFile(integrationsListPath, "utf8"),
+    readFile(integrationDetailPath, "utf8"),
+  ]);
+
+  assert.doesNotMatch(listSource, /data-track="remove_workspace_service"/);
+  assert.match(detailSource, /data-track="remove_workspace_service"/);
+  assert.match(detailSource, /aria-label="Service actions"/);
+  assert.match(detailSource, /role="menuitem"/);
+  assert.match(detailSource, /createPortal\(<WorkspaceMembershipControl srv=\{srv\} \/>, host\)/);
+  assert.match(detailSource, /api\.workspace\.removeService\(serviceId\)/);
+  assert.match(detailSource, /setWorkspaceServiceActive\(false\)/);
+  assert.doesNotMatch(detailSource, /api\.integrations\.delete/);
 });
 
 test("execution history requests every v3 receipt diagnostic", async () => {

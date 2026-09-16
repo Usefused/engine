@@ -444,6 +444,7 @@ func TestEngineGraphQLConnectionResourcesListAndSetDefault(t *testing.T) {
 	}
 }
 
+// TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket verifies linked resources and enriched service-card metadata together.
 func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 	accountID := uuid.New()
 	workspaceID := uuid.New()
@@ -580,7 +581,10 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 	}
 	verifier := &mockVerifier{
 		visibilityOverrides: map[uuid.UUID]sandbox.ServiceVisibility{
-			serviceID: {ServiceID: serviceID, IsOwner: true, Slug: "linear"},
+			serviceID: {
+				ServiceID: serviceID, Description: "Plan and track product work.", IconURL: "https://assets.example.com/linear.svg", BaseURL: "https://api.linear.example", EndpointCount: 18, WebhookCount: 2, IsOwner: false, IsPublic: true, Slug: "linear",
+				Provider: sandbox.ServiceProviderIdentity{Name: "Linear", Handle: "linear-provider"}, CanonicalRef: "@linear-provider/linear",
+			},
 		},
 		authConfigVersions: []sandbox.ServiceVersionAuthConfigs{{
 			ServiceID: serviceID, Version: serviceVersionID.String(), ServiceVersionID: serviceVersionID,
@@ -597,12 +601,12 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 		bucketSummary(bucket_id: "` + attachedBucketID.String() + `") { id name secret_count value_count }
 		bucketSummaryPage(limit: 10, offset: 0) { total items { id name secret_count value_count } }
 		workspaceServices {
-			service_id service_name service_slug version
+			service_id service_name service_slug registry_slug description icon_url base_url endpoint_count webhook_count provider { name handle } canonical_ref is_owner is_public version
 			enabled_versions { version status }
 			auth_options { label auth_type credential_type key_name key_prefix required_fields supports_connected_users }
 		}
 		workspaceServiceIds
-		workspaceServicePage(limit: 10, offset: 0) { total page limit data { service_id service_name service_slug version } }
+		workspaceServicePage(limit: 10, offset: 0) { total page limit data { service_id service_name service_slug registry_slug description icon_url base_url endpoint_count webhook_count provider { name handle } canonical_ref is_owner is_public version } }
 		workspaceWebhooks(service_id: "` + serviceID.String() + `") { label slug created_at }
 		webhookEvents(service_id: "` + serviceID.String() + `", event_name: "repo.created", limit: 10, offset: 0) { total items { msg_id event_name delivery_status latency_ms credits_consumed created_at } }
 		webhookAnalytics(service_id: "` + serviceID.String() + `", event_name: "repo.created") { total_ingested total_delivered total_rejected total_failed }
@@ -662,14 +666,32 @@ func assertWorkspaceServiceGraphQLData(t *testing.T, data map[string]any, verifi
 	services := graphQLList(t, data["workspaceServices"], "workspaceServices")
 	assertGraphQLLen(t, services, 1, "workspaceServices")
 	service := graphQLMap(t, services[0], "workspaceServices[0]")
-	assertGraphQLField(t, service, "service_slug", "linear", "workspaceServices[0]")
+	assertGraphQLField(t, service, "service_slug", "@linear-provider/linear", "workspaceServices[0]")
+	assertGraphQLField(t, service, "registry_slug", "linear", "workspaceServices[0]")
+	assertGraphQLField(t, service, "description", "Plan and track product work.", "workspaceServices[0]")
+	assertGraphQLField(t, service, "icon_url", "https://assets.example.com/linear.svg", "workspaceServices[0]")
+	assertGraphQLField(t, service, "base_url", "https://api.linear.example", "workspaceServices[0]")
+	assertGraphQLField(t, service, "endpoint_count", float64(18), "workspaceServices[0]")
+	assertGraphQLField(t, service, "webhook_count", float64(2), "workspaceServices[0]")
+	assertGraphQLField(t, service, "is_owner", false, "workspaceServices[0]")
+	assertGraphQLField(t, service, "is_public", true, "workspaceServices[0]")
+	provider := graphQLMap(t, service["provider"], "workspaceServices[0].provider")
+	assertGraphQLField(t, provider, "name", "Linear", "workspaceServices[0].provider")
+	assertGraphQLField(t, provider, "handle", "linear-provider", "workspaceServices[0].provider")
 	workspaceSvcPage := graphQLMap(t, data["workspaceServicePage"], "workspaceServicePage")
 	assertGraphQLField(t, workspaceSvcPage, "total", float64(1), "workspaceServicePage")
 	assertGraphQLField(t, workspaceSvcPage, "page", float64(1), "workspaceServicePage")
 	assertGraphQLField(t, workspaceSvcPage, "limit", float64(10), "workspaceServicePage")
 	pageData := graphQLList(t, workspaceSvcPage["data"], "workspaceServicePage.data")
 	assertGraphQLLen(t, pageData, 1, "workspaceServicePage.data")
-	assertGraphQLField(t, graphQLMap(t, pageData[0], "workspaceServicePage.data[0]"), "service_slug", "linear", "workspaceServicePage.data[0]")
+	pageService := graphQLMap(t, pageData[0], "workspaceServicePage.data[0]")
+	assertGraphQLField(t, pageService, "service_slug", "@linear-provider/linear", "workspaceServicePage.data[0]")
+	assertGraphQLField(t, pageService, "registry_slug", "linear", "workspaceServicePage.data[0]")
+	assertGraphQLField(t, pageService, "description", "Plan and track product work.", "workspaceServicePage.data[0]")
+	assertGraphQLField(t, pageService, "icon_url", "https://assets.example.com/linear.svg", "workspaceServicePage.data[0]")
+	assertGraphQLField(t, pageService, "base_url", "https://api.linear.example", "workspaceServicePage.data[0]")
+	assertGraphQLField(t, pageService, "endpoint_count", float64(18), "workspaceServicePage.data[0]")
+	assertGraphQLField(t, pageService, "webhook_count", float64(2), "workspaceServicePage.data[0]")
 	enabledVersions := graphQLList(t, service["enabled_versions"], "workspaceServices[0].enabled_versions")
 	assertGraphQLLen(t, enabledVersions, 1, "workspaceServices[0].enabled_versions")
 	assertGraphQLField(t, graphQLMap(t, enabledVersions[0], "enabled_versions[0]"), "status", "enabled", "enabled_versions[0]")

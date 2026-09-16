@@ -7,6 +7,8 @@ import { routeTitle } from "./route-title.ts";
 test("titles every primary Engine route", () => {
   const routes = new Map([
     ["/login", "Sign in - Fused"],
+    ["/privacy-policy", "Privacy Policy - Fused"],
+    ["/terms-of-service", "Terms of Service - Fused"],
     ["/integrations", "Services - Fused"],
     ["/integrations/sdks", "Apps - Fused"],
     ["/integrations/mcp", "Apps - Fused"],

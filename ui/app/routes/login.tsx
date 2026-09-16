@@ -77,6 +77,7 @@ async function waitForManagedLogin(
   return signal.aborted ? "cancelled" : "expired";
 }
 
+// Login coordinates managed identity and API-key recovery while keeping legal terms reachable before authentication.
 export default function Login() {
   const [searchParams] = useSearchParams();
   const next = safeInternalPath(searchParams.get("next"));
@@ -221,6 +222,11 @@ export default function Login() {
               <Link to="/#access" className="text-blue-600 hover:text-blue-700 font-semibold hover:underline">Ask your administrator</Link>
             </div>
           </div>
+          <nav aria-label="Legal" className="mt-6 flex items-center justify-center gap-4 text-xs font-medium text-slate-400">
+            <a href="https://usefused.com/legal/privacy-policy" className="transition-colors hover:text-slate-700 hover:underline">Privacy Policy</a>
+            <span aria-hidden="true">·</span>
+            <a href="https://usefused.com/legal/terms-of-service" className="transition-colors hover:text-slate-700 hover:underline">Terms of Service</a>
+          </nav>
         </div>
       </main>
     </div>

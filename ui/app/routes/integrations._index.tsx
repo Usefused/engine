@@ -35,7 +35,7 @@ type CatalogLoadOptions = { knownWorkspaceServiceIds?: string[]; query?: string 
 const CATALOG_SEARCH_QUERY = `
   query($q: String!) {
     searchServices(q: $q, publicOnly: true) {
-      id name description base_url servers { url description }
+      id name description icon_url endpoint_count webhook_count base_url servers { url description }
       is_public is_owner slug provider { name handle } canonical_ref
     }
   }
@@ -556,46 +556,6 @@ export default function IntegrationsIndex() {
     }
   }
 
-  // handleRemoveWorkspace updates local membership markers after Engine confirms removal.
-  async function handleRemoveWorkspace(e: React.MouseEvent, id: string) {
-    e.preventDefault();
-    const confirmed = await toast.confirm("Are you sure you want to remove this service? It will be uninstalled from your workspace.");
-    if (confirmed) {
-      try {
-        await api.workspace.removeService(id);
-        setActiveWorkspaceServiceIds(prev => prev?.filter(serviceID => serviceID !== id) ?? []);
-        toast.success("Service removed from workspace.");
-        // Removing the final service should return to catalogue onboarding rather than retain a stale workspace card.
-        await loadWorkspaceData(1);
-      } catch (err) {
-        toast.error(err instanceof Error ? err.message : "Failed to remove service");
-      }
-    }
-  }
-
-  // handleDelete removes an owned catalogue service and its matching local activation marker.
-  async function handleDelete(e: React.MouseEvent, id: string) {
-    e.preventDefault(); // Prevent navigating to the Service detail page
-    const confirmed = await toast.confirm("Are you sure you want to permanently delete this service? This will destroy this service for everyone using it.");
-    if (confirmed) {
-      try {
-        await api.integrations.delete(id);
-        // Optimistically remove from local state immediately (avoids stale cache showing deleted item)
-        setIntegrations(prev => prev.filter(s => s.id !== id));
-        setActiveWorkspaceServiceIds(prev => prev?.filter(serviceID => serviceID !== id) ?? []);
-        if (query.trim()) {
-          // Re-run search to get fresh results from server
-          runSearch(query);
-        } else {
-          loadVisibleData();
-        }
-        toast.success("Service deleted successfully.");
-      } catch (err) {
-        toast.error(err instanceof Error ? err.message : "Failed to delete service");
-      }
-    }
-  }
-
   const workspaceList = workspaceListProjection(workspaceServicePageData);
   const showCatalog = catalogVisible(isAuth, catalogPreference, activeWorkspaceServiceIds);
   // Onboarding copy is reserved for authenticated workspaces whose membership has been authoritatively loaded as empty.
@@ -649,16 +609,16 @@ export default function IntegrationsIndex() {
         onToggleCatalog={handleCatalogToggle}
         catalog={{
           integrations: integrations.map(fromService), loading: catalogLoading, error: catalogError, query, setQuery, handleSearch, handleClear,
-          searching, handleDelete, setShowNewPanel, page: 1, onPageChange: setPage, totalPages, totalItems, isAuth,
-          viewType: "catalog", handleAddWorkspace, handleRemoveWorkspace,
+          searching, setShowNewPanel, page: 1, onPageChange: setPage, totalPages, totalItems, isAuth,
+          viewType: "catalog", handleAddWorkspace,
           activeServiceIds: activeWorkspaceServiceIds ?? [],
           pendingServiceIds: pendingWorkspaceServiceIds,
         }}
         workspace={{
           integrations: workspaceList.integrations, loading: workspaceLoading, error, query,
-          setQuery, handleSearch, handleClear, searching, handleDelete, setShowNewPanel, page, onPageChange: setPage,
+          setQuery, handleSearch, handleClear, searching, setShowNewPanel, page, onPageChange: setPage,
           totalPages: workspaceList.pages, totalItems: workspaceList.total, isAuth, viewType: "workspace",
-          handleAddWorkspace, handleRemoveWorkspace,
+          handleAddWorkspace,
         }}
       />
 

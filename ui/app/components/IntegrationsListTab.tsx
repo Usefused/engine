@@ -1,9 +1,10 @@
 import { FormEvent } from "react";
 import { Link } from "@remix-run/react";
-import { ArrowUpRight, Check, Globe2, Loader2, Search, X, ChevronLeft, ChevronRight } from "lucide-react";
+import { ArrowUpRight, Check, Loader2, Search, X, ChevronLeft, ChevronRight } from "lucide-react";
 import { Service, ActivatedService, serviceHref } from "~/lib/api";
 import { formatServiceName, formatVersion } from "~/lib/format";
 import { openServiceLink } from "~/lib/service-navigation";
+import { ServiceIcon } from "~/components/ServiceIcon";
 
 // ListableService is the minimal normalised shape that IntegrationsListTab
 // reads from. Both Service (catalog) and ActivatedService (workspace) satisfy
@@ -16,11 +17,14 @@ export type ListableService = {
   // Slug and provider used to build the detail-page href
   slug?: string;
   provider?: { name: string; handle: string } | null;
-  is_owner?: boolean;
-  is_public?: boolean;
+  is_owner?: boolean | null;
+  is_public?: boolean | null;
   description?: string;
+  icon_url?: string | null;
+  endpoint_count?: number;
+  webhook_count?: number;
   base_url?: string;
-  servers?: { url: string; description?: string }[];
+  servers?: { url: string; description?: string; is_default?: boolean }[];
   // Workspace-specific fields, only present for ActivatedService rows
   service_id?: string;
   service_slug?: string;
@@ -37,7 +41,10 @@ export function fromService(s: Service): ListableService {
     is_owner: s.is_owner,
     is_public: s.is_public,
     description: s.description,
+    icon_url: s.icon_url,
     base_url: s.base_url,
+    endpoint_count: s.endpoint_count,
+    webhook_count: s.webhook_count,
     servers: s.servers,
   };
 }
@@ -47,9 +54,18 @@ export function fromActivatedService(s: ActivatedService): ListableService {
   return {
     id: s.service_id, // Use the Registry service_id as the stable ID
     name: s.service_name,
-    slug: s.service_slug,
+    slug: s.registry_slug || s.service_slug,
+    provider: s.provider,
+    is_owner: s.is_owner,
+    is_public: s.is_public,
+    description: s.description,
+    icon_url: s.icon_url,
+    base_url: s.base_url,
+    endpoint_count: s.endpoint_count,
+    webhook_count: s.webhook_count,
     service_id: s.service_id,
-    service_slug: s.service_slug,
+    // UI links pair the bare Registry slug with provider identity; the CLI-oriented qualified slug is only a fallback.
+    service_slug: s.registry_slug || s.service_slug,
     version: s.version,
   };
 }
@@ -72,7 +88,6 @@ interface IntegrationsListTabProps {
   handleSearch: (e: FormEvent) => void;
   handleClear: () => void;
   searching: boolean;
-  handleDelete: (e: React.MouseEvent, id: string) => void;
   setShowNewPanel: (show: boolean) => void;
   page: number;
   totalPages: number;
@@ -80,7 +95,6 @@ interface IntegrationsListTabProps {
   onPageChange: (page: number) => void;
   viewType?: "workspace" | "catalog";
   handleAddWorkspace?: (e: React.MouseEvent, id: string, name: string) => void;
-  handleRemoveWorkspace?: (e: React.MouseEvent, id: string) => void;
   activeServiceIds?: string[];
   pendingServiceIds?: string[];
   isAuth?: boolean;
@@ -99,7 +113,6 @@ export default function IntegrationsListTab({
   handleSearch,
   handleClear,
   searching,
-  handleDelete,
   setShowNewPanel,
   page,
   totalPages,
@@ -108,7 +121,6 @@ export default function IntegrationsListTab({
   isAuth,
   viewType = "catalog",
   handleAddWorkspace,
-  handleRemoveWorkspace,
   activeServiceIds = [],
   pendingServiceIds = [],
   showSearch = true,
@@ -137,9 +149,7 @@ export default function IntegrationsListTab({
         setShowNewPanel={setShowNewPanel}
         viewType={viewType}
         isAuth={isAuth}
-        handleDelete={handleDelete}
         handleAddWorkspace={handleAddWorkspace}
-        handleRemoveWorkspace={handleRemoveWorkspace}
         activeServiceIds={activeServiceIds}
         pendingServiceIds={pendingServiceIds}
         hideEmptyState={hideEmptyState}
@@ -232,9 +242,7 @@ type IntegrationResultsProps = Pick<
   | "setShowNewPanel"
   | "viewType"
   | "isAuth"
-  | "handleDelete"
   | "handleAddWorkspace"
-  | "handleRemoveWorkspace"
   | "activeServiceIds"
   | "pendingServiceIds"
   | "hideEmptyState"
@@ -301,7 +309,7 @@ function IntegrationEmptyState({ query, isAuth, viewType, setShowNewPanel }: Int
 function IntegrationCollection(props: IntegrationResultsProps) {
   return (
     <div>
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <div className="grid grid-cols-1 items-start gap-4 md:grid-cols-2 xl:grid-cols-3">
         {props.integrations.map((service) => (
           <IntegrationCard key={service.id} service={service} {...props} />
         ))}
@@ -317,41 +325,48 @@ type IntegrationCardProps = IntegrationResultsProps & { service: ListableService
 function IntegrationCard(props: IntegrationCardProps) {
   const { service, viewType } = props;
   const href = detailHref(service);
-  // Provider display names are preferred while stable handles remain a useful fallback.
-  const providerName = service.provider?.name || service.provider?.handle;
-  // A globe remains legible for the rare malformed or intentionally symbol-only service name.
-  const serviceMark = service.name.trim().slice(0, 1).toUpperCase() || <Globe2 className="h-4 w-4" />;
+  // Provider attribution is meaningful only for a service owned by another Registry account.
+  const providerName = service.is_owner === false ? service.provider?.name || service.provider?.handle : "";
+  const apiURL = defaultAPIURL(service);
   return (
-    <article className="group flex min-h-56 flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md">
+    <article className="group flex flex-col overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition duration-200 hover:-translate-y-0.5 hover:border-black hover:shadow-lg hover:shadow-slate-200/70">
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-sm font-semibold text-slate-700">
-            {serviceMark}
-          </span>
+          <ServiceIcon name={service.name} iconURL={service.icon_url} />
           <div className="min-w-0">
-            <p className="truncate text-sm font-semibold text-slate-900">{formatServiceName(service.name)}</p>
-            {/* Provider attribution is shown only when Registry returned a stable provider identity. */}
-            <p className="mt-0.5 truncate text-xs text-slate-500">{providerName ? `By ${providerName}` : "Service integration"}</p>
+            <Link
+              to={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(event) => openServiceLink(event, href)}
+              className="block truncate text-sm font-semibold text-slate-900 hover:text-blue-700"
+            >
+              {formatServiceName(service.name)}
+            </Link>
+            {/* Owned services need no attribution; foreign services identify their actual provider. */}
+            {providerName && <p className="mt-0.5 truncate text-xs text-slate-500">@{providerName}</p>}
+            {/* The effective API target belongs to service identity rather than the analytics body. */}
+            {apiURL && <p title={apiURL} className="mt-1 break-all font-mono text-[11px] leading-4 text-slate-400">{apiURL}</p>}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          {/* Badges distinguish public discovery and the exact local workspace version. */}
-          {service.is_public && <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-[10px] font-semibold rounded-full tracking-wide">PUBLIC</span>}
+          {/* Visibility and exact local version remain independently readable. */}
+          <ServiceVisibilityBadge isPublic={service.is_public} />
           {viewType === "workspace" && service.version && (
             <span className="px-2 py-0.5 bg-slate-100 text-slate-600 text-[10px] font-medium rounded-md">{formatVersion(service.version)}</span>
           )}
         </div>
       </div>
-      <p className="mt-4 line-clamp-3 text-sm leading-6 text-slate-600">{integrationDescription(service, viewType)}</p>
-      <div className="mt-auto pt-5">
-        <p className="mb-3 truncate text-xs text-slate-400">{integrationSummary(service, viewType)}</p>
+      <IntegrationDescription description={service.description} />
+      <ServiceAnalytics endpointCount={service.endpoint_count} webhookCount={service.webhook_count} />
+      <div className="pt-5">
         <div className="flex items-center justify-between gap-3 border-t border-slate-100 pt-4">
           <Link
             to={href}
             target="_blank"
             rel="noopener noreferrer"
             onClick={(event) => openServiceLink(event, href)}
-            className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700 hover:text-blue-700"
+            className="inline-flex items-center gap-1 text-xs font-semibold text-blue-700 transition-colors hover:text-blue-800"
           >
             View details <ArrowUpRight className="h-3.5 w-3.5" />
           </Link>
@@ -362,30 +377,48 @@ function IntegrationCard(props: IntegrationCardProps) {
   );
 }
 
-// integrationDescription prefers catalogue prose and supplies honest workspace context when that projection is intentionally lean.
-function integrationDescription(service: ListableService, viewType: "workspace" | "catalog"): string {
-  // Registry descriptions are the richest bounded summary available without opening service details.
-  if (service.description?.trim()) return service.description.trim();
-  // Workspace rows deliberately avoid remote metadata reads, so their fallback should describe that local state.
-  if (viewType === "workspace") return "Available to apps, MCP servers, and workflows in this workspace.";
-  return "Explore this service's operations, versions, authentication, and runtime configuration.";
+/** Shows Registry visibility without presenting missing metadata as private. */
+function ServiceVisibilityBadge({ isPublic }: { isPublic?: boolean | null }) {
+  // An unavailable Registry projection is unknown, not proof of private visibility.
+  if (typeof isPublic !== "boolean") return null;
+  return isPublic
+    ? <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-blue-700">PUBLIC</span>
+    : <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-slate-600">PRIVATE</span>;
 }
 
-// integrationSummary selects the provider's preferred production server and
-// falls back to stable workspace copy when no server metadata exists.
-function integrationSummary(service: ListableService, viewType: "workspace" | "catalog"): string {
-  // Server declarations take precedence because they communicate environment choice.
+/** Renders provider-authored catalogue prose only when meaningful content exists. */
+function IntegrationDescription({ description }: { description?: string }) {
+  const content = description?.trim();
+  // Missing descriptions leave the card quiet instead of inventing catalogue copy.
+  if (!content) return null;
+  return <p className="mt-4 whitespace-pre-wrap break-words text-sm leading-6 text-slate-600">{content}</p>;
+}
+
+/** Presents compact contract breadth without implying runtime usage analytics. */
+function ServiceAnalytics({ endpointCount, webhookCount }: { endpointCount?: number; webhookCount?: number }) {
+  const hasEndpointCount = typeof endpointCount === "number";
+  const hasWebhookCount = typeof webhookCount === "number";
+  // Registry outages leave workspace counts unknown, so absent values must not be presented as zero.
+  if (!hasEndpointCount && !hasWebhookCount) return null;
+  return (
+    <div className="mt-4 flex overflow-hidden rounded-lg border border-slate-100 bg-slate-50/80 text-slate-600" aria-label="Service contract totals">
+      {/* Each total remains independently optional when Registry projections degrade. */}
+      {hasEndpointCount && <span className="flex-1 px-3 py-2"><strong className="block text-sm font-semibold text-slate-800">{endpointCount}</strong><span className="text-[10px] font-medium uppercase tracking-wide">{endpointCount === 1 ? "Endpoint" : "Endpoints"}</span></span>}
+      {hasWebhookCount && <span className={`flex-1 px-3 py-2 ${hasEndpointCount ? "border-l border-slate-200/70" : ""}`}><strong className="block text-sm font-semibold text-slate-800">{webhookCount}</strong><span className="text-[10px] font-medium uppercase tracking-wide">{webhookCount === 1 ? "Webhook" : "Webhooks"}</span></span>}
+    </div>
+  );
+}
+
+// defaultAPIURL selects the declared default or production server before the service fallback.
+function defaultAPIURL(service: ListableService): string {
+  // Server declarations take precedence because they communicate the version's executable target.
   if (service.servers && service.servers.length > 0) {
-    const productionIndex = service.servers.findIndex((server) => isProductionServer(server.description));
-    const primary = productionIndex >= 0 ? service.servers[productionIndex] : service.servers[0];
-    // Multiple servers need context that a bare primary URL would hide.
-    if (service.servers.length > 1) {
-      return `${service.servers.length} Environments (Primary: ${primary.url})`;
-    }
-    return primary.url;
+    const explicitDefault = service.servers.find((server) => server.is_default);
+    const production = service.servers.find((server) => isProductionServer(server.description));
+    return (explicitDefault || production || service.servers[0]).url;
   }
-  // A catalog row without a URL stays visually quiet, while workspace rows remain identifiable.
-  return service.base_url ?? (viewType === "workspace" ? "Connected Workspace Service" : "");
+  // Service base URLs preserve the Registry's effective execution fallback when servers are absent.
+  return service.base_url ?? "";
 }
 
 // isProductionServer centralizes the description heuristic used to pick a
@@ -398,9 +431,9 @@ function isProductionServer(description?: string): boolean {
 // IntegrationActions chooses the one action allowed by the current view and
 // service activation state.
 function IntegrationActions(props: IntegrationCardProps) {
-  // Workspace rows can be deleted by owners or merely removed by consumers.
+  // Workspace removal is intentionally reserved for the service detail page where impact is visible.
   if (props.viewType === "workspace") {
-    return <WorkspaceIntegrationAction {...props} />;
+    return null;
   }
   // Catalog additions are offered only to authenticated users for inactive services.
   if (canAddCatalogIntegration(props)) {
@@ -431,37 +464,6 @@ function IntegrationActions(props: IntegrationCardProps) {
 // presenting an action when its authenticated mutation handler is unavailable.
 function canAddCatalogIntegration(props: IntegrationCardProps): boolean {
   return Boolean(props.isAuth && props.handleAddWorkspace && !props.activeServiceIds?.includes(props.service.id));
-}
-
-// WorkspaceIntegrationAction labels and styles destructive ownership changes
-// separately from reversible workspace removal.
-function WorkspaceIntegrationAction(props: IntegrationCardProps) {
-  const owned = Boolean(props.service.is_owner);
-  return (
-    <button
-      data-track={owned ? "delete_workspace_service" : "remove_workspace_service"}
-      onClick={(event) => mutateWorkspaceIntegration(event, props)}
-      className={`px-3 py-1 text-xs font-medium bg-white border rounded-lg shadow-sm transition-all ${owned ? "text-red-600 border-red-200 hover:bg-red-50" : "text-slate-600 hover:text-red-600 border-slate-200 hover:border-red-200 hover:bg-red-50"}`}
-      title={owned ? "Delete service from Registry" : "Remove from workspace"}
-    >
-      {owned ? "Delete" : "Remove"}
-    </button>
-  );
-}
-
-// mutateWorkspaceIntegration sends owner and consumer rows to their distinct
-// mutation handlers while preserving the service's Registry identity.
-function mutateWorkspaceIntegration(event: React.MouseEvent, props: IntegrationCardProps): void {
-  const serviceID = props.service.service_id || props.service.id;
-  // Owners mutate the Registry definition rather than just workspace membership.
-  if (props.service.is_owner) {
-    props.handleDelete(event, serviceID);
-    return;
-  }
-  // Consumer rows are removable only when the workspace handler is available.
-  if (props.handleRemoveWorkspace) {
-    props.handleRemoveWorkspace(event, serviceID);
-  }
 }
 
 // IntegrationPagination hides pagination during filtered/loading states and

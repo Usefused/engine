@@ -1,4 +1,7 @@
+import { useState } from "react";
 import { stripLinks } from "~/lib/format";
+
+const ENDPOINT_DESCRIPTION_COLLAPSE_THRESHOLD = 240;
 
 interface EndpointRowData {
   id: string;
@@ -85,6 +88,51 @@ function EndpointStatusBadges({ ep }: { ep: EndpointRowData }) {
   );
 }
 
+/** Estimates visible description length without counting markup as user-facing text. */
+function descriptionTextLength(html: string): number {
+  return html
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&(?:#\d+|#x[\da-f]+|[a-z][\w-]*);/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .length;
+}
+
+/** Keeps long operation documentation compact until the reader explicitly expands it. */
+function EndpointDescription({ description }: { description: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const safeDescription = stripLinks(description);
+  const collapsible = descriptionTextLength(safeDescription) > ENDPOINT_DESCRIPTION_COLLAPSE_THRESHOLD;
+
+  /** Toggles only the documentation disclosure without opening the endpoint detail drawer. */
+  const toggleExpanded = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setExpanded((current) => !current);
+  };
+
+  return (
+    <div className="mt-1">
+      <div
+        // Short descriptions remain natural-height; only genuinely long copy receives the clamp.
+        className={`text-xs text-slate-500 [&_p]:mb-1 last:[&_p]:mb-0 [&_code]:rounded [&_code]:bg-slate-100 [&_code]:px-1 [&_code]:py-0.5 ${collapsible && !expanded ? "line-clamp-3" : ""}`}
+        dangerouslySetInnerHTML={{ __html: safeDescription }}
+      />
+      {collapsible ? (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={toggleExpanded}
+          className="mt-1 text-xs font-medium text-blue-600 hover:text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/** Renders one operation summary with bounded documentation and optional selection controls. */
 export function EndpointRow({ ep, onClick, selectable, selected, bulkMode, onSelect }: { ep: EndpointRowData; onClick?: () => void; selectable?: boolean; selected?: boolean; bulkMode?: boolean; onSelect?: (selected: boolean) => void }) {
   const method = ep.method?.toUpperCase();
   return (
@@ -98,12 +146,7 @@ export function EndpointRow({ ep, onClick, selectable, selected, bulkMode, onSel
         </div>
         {selectable && !bulkMode && <SelectButton selected={selected} onSelect={onSelect} />}
       </div>
-      {ep.description && (
-        <div 
-          className="text-xs text-slate-500 [&_p]:mb-1 last:[&_p]:mb-0 [&_code]:bg-slate-100 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded mt-1" 
-          dangerouslySetInnerHTML={{ __html: stripLinks(ep.description) }} 
-        />
-      )}
+      {ep.description ? <EndpointDescription description={ep.description} /> : null}
     </div>
   );
 }

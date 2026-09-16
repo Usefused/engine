@@ -80,7 +80,7 @@ export default function IntegrationsLayout() {
           {signOutError && <p role="alert" className="m-4 rounded-md bg-red-50 p-3 text-sm text-red-700">{signOutError}</p>}
           <div className="max-w-6xl mx-auto w-full px-4 py-5 sm:px-6 sm:py-8 lg:px-8">
             {isAuth && (
-              <div className="flex justify-end mb-3">
+              <div id="integrations-header-actions" className="mb-3 flex min-h-8 items-center justify-end gap-2">
                 <NotificationBell />
               </div>
             )}

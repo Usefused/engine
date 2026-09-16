@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { AuthNameField } from "~/components/AuthNameField";
 import {
   useParams,
@@ -101,6 +102,7 @@ import {
   ChevronDown,
   Globe2,
   Lock,
+  Trash2,
 } from "lucide-react";
 import {
   ImportWarningPanel,
@@ -111,6 +113,7 @@ import { useWorkspaceNotifications } from "~/components/notifications/useWorkspa
 import { isPending, matchesService } from "~/components/notifications/notificationHelpers";
 import { useToast } from "~/components/Toast";
 import { formatServiceName } from "~/lib/format";
+import { ServiceIcon } from "~/components/ServiceIcon";
 import { useEndpointSearch } from "~/hooks/useEndpointSearch";
 import { useResourceLoader } from "~/hooks/useResourceLoader";
 
@@ -396,7 +399,7 @@ function serviceDetailQuery(provider?: string): string {
     return `
       query($id: String!, $version: String, $provider: String) {
         service(id: $id, version: $version, provider: $provider) {
-          id name slug description base_url current_service_version servers { url description environment is_default }
+          id name slug description icon_url base_url current_service_version servers { url description environment is_default }
           is_public watch_for_drift created_at updated_at source_url import_method
           import_warnings { id endpoint_id method path operation_id reasons recommendation source created_at }
           auth_configs {
@@ -419,7 +422,7 @@ function serviceDetailQuery(provider?: string): string {
   return `
     query($id: String!, $version: String) {
       service(id: $id, version: $version) {
-        id name slug description base_url current_service_version servers { url description environment is_default }
+        id name slug description icon_url base_url current_service_version servers { url description environment is_default }
         is_public watch_for_drift created_at updated_at source_url import_method
         import_warnings { id endpoint_id method path operation_id reasons recommendation source created_at }
         auth_configs {
@@ -677,6 +680,7 @@ function useIntegrationDetailModel() {
   const [workspaceServiceActive, setWorkspaceServiceActive] = useState<
     boolean | null
   >(null);
+  const [removingWorkspaceService, setRemovingWorkspaceService] = useState(false);
 
   useEffect(() => {
     // Anonymous viewers never have a local workspace action to resolve.
@@ -708,6 +712,25 @@ function useIntegrationDetailModel() {
       cancelled = true;
     };
   }, [isAuth, serviceId]);
+
+  /** Removes only local workspace membership while preserving the Registry service definition. */
+  async function handleRemoveFromWorkspace() {
+    // Membership and identity must both be authoritative before offering a destructive workspace change.
+    if (!serviceId || workspaceServiceActive !== true || removingWorkspaceService) return;
+    const confirmed = await toast.confirm("Remove this service from the workspace? Apps using it may stop working.");
+    // Cancelling leaves membership and the current detail context untouched.
+    if (!confirmed) return;
+    setRemovingWorkspaceService(true);
+    try {
+      await api.workspace.removeService(serviceId);
+      setWorkspaceServiceActive(false);
+      toast.success("Service removed from workspace.");
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Failed to remove service from workspace");
+    } finally {
+      setRemovingWorkspaceService(false);
+    }
+  }
 
   const [drift, setDrift] = useState<DriftSnapshot[]>([]);
   const [loading, setLoading] = useState(
@@ -1279,7 +1302,7 @@ function useIntegrationDetailModel() {
     toast, loaderData, paramId, provider, id, isAuth, res, serviceId,
     access, canReadActivity,
     serviceVersions, currentVersionEntry,
-    workspaceServiceActive, setWorkspaceServiceActive, drift, loading, error,
+    workspaceServiceActive, setWorkspaceServiceActive, removingWorkspaceService, handleRemoveFromWorkspace, drift, loading, error,
     driftAction, showShareMenu, setShowShareMenu, shareMenuRef,
     showVisibilityMenu, setShowVisibilityMenu, visibilityMenuRef, savingDrift,
     selectedEndpoint, setSelectedEndpoint, version, resourceVersions,
@@ -1362,6 +1385,7 @@ function LoadedDetail() {
   );
 }
 
+// DetailHeader presents imported service identity, version state, and management controls.
 function DetailHeader({
   srv,
   overallStatus,
@@ -1373,7 +1397,7 @@ function DetailHeader({
 }) {
   const { serviceVersions, currentVersionEntry } = useDetail();
   return (
-    <div className="flex min-w-0 flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+    <div className="flex min-w-0 items-start justify-between gap-4">
       <div className="min-w-0 flex-1">
         <div className="mb-1 flex items-center gap-3">
           <Link to="/integrations" className="text-sm text-slate-400 hover:text-slate-600">
@@ -1381,6 +1405,7 @@ function DetailHeader({
           </Link>
         </div>
         <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <ServiceIcon name={srv.name} iconURL={srv.icon_url} />
           <h1 className="text-xl font-semibold text-slate-900">{formatServiceName(srv.name)}</h1>
           <VersionSelector currentVersionTag={srv.current_service_version} versions={serviceVersions} />
           <VersionStatusBadge version={currentVersionEntry} />
@@ -1390,6 +1415,10 @@ function DetailHeader({
         </div>
         <ProviderIdentity srv={srv} />
         <ServerDisplay srv={srv} isAuth={false} />
+        <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+          <VisibilityControl srv={srv} />
+          <DriftWatchControl srv={srv} />
+        </div>
       </div>
       <HeaderActions srv={srv} />
     </div>
@@ -1476,14 +1505,16 @@ function ProviderIdentity({ srv }: { srv: Service }) {
   );
 }
 
+// HeaderActions reserves the far-right header edge for contextual service commands.
 function HeaderActions({ srv }: { srv: Service }) {
-  return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 xl:justify-end">
-      <VisibilityControl srv={srv} />
-      <DriftWatchControl srv={srv} />
-      <WorkspaceAddControl srv={srv} />
-    </div>
-  );
+  const [host, setHost] = useState<HTMLElement | null>(null);
+  // The shared authenticated utility row owns notification and route-specific controls on one line.
+  useEffect(() => {
+    setHost(document.getElementById("integrations-header-actions"));
+  }, []);
+  // Server rendering and the first hydration pass have no browser-owned portal target yet.
+  if (!host) return null;
+  return createPortal(<WorkspaceMembershipControl srv={srv} />, host);
 }
 
 function VisibilityControl({ srv }: { srv: Service }) {
@@ -1578,10 +1609,93 @@ function DriftWatchControl({ srv }: { srv: Service }) {
   );
 }
 
-function WorkspaceAddControl({ srv }: { srv: Service }) {
-  const { isAuth, workspaceServiceActive, setWorkspaceServiceActive } = useDetail();
-  if (!isAuth || workspaceServiceActive !== false) return null;
-  return <AddToWorkspaceButton serviceId={srv.id} serviceName={srv.name} versionTag={srv.current_service_version} onAdded={() => setWorkspaceServiceActive(true)} />;
+/** Keeps workspace membership mutations on the service detail page where their impact has context. */
+function WorkspaceMembershipControl({ srv }: { srv: Service }) {
+  const detail = useDetail();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  // Dismissal listeners exist only while the transient actions menu is visible.
+  useEffect(() => {
+    // Closed menus must not intercept pointer or keyboard activity elsewhere on the page.
+    if (!menuOpen) return;
+    // Outside pointer activity closes the menu without invoking its destructive command.
+    function dismissOutside(event: PointerEvent) {
+      // Pointer events within the disclosure belong to its trigger or menu item.
+      if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false);
+    }
+    // Escape closes the menu and returns keyboard focus to its trigger.
+    function dismissOnEscape(event: KeyboardEvent) {
+      // Ordinary key presses remain available to the focused menu item.
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setMenuOpen(false);
+      triggerRef.current?.focus();
+    }
+    document.addEventListener("pointerdown", dismissOutside);
+    document.addEventListener("keydown", dismissOnEscape);
+    // Closing or unmounting cannot leave document-level listeners behind.
+    return () => {
+      document.removeEventListener("pointerdown", dismissOutside);
+      document.removeEventListener("keydown", dismissOnEscape);
+    };
+  }, [menuOpen]);
+
+  // Anonymous and unresolved membership states must not expose a speculative mutation.
+  if (!detail.isAuth || detail.workspaceServiceActive === null) return null;
+  // Services outside the workspace retain the existing version-pinned activation control.
+  if (detail.workspaceServiceActive === false) {
+    return <AddToWorkspaceButton serviceId={srv.id} serviceName={srv.name} versionTag={srv.current_service_version} onAdded={() => detail.setWorkspaceServiceActive(true)} />;
+  }
+  const canRemove = Boolean(detail.serviceId) && hasResourcePermission(detail.access, "service.manage", "SERVICE", detail.serviceId);
+  // Read-only users can see membership without being invited to attempt a forbidden removal.
+  if (!canRemove) return <Badge label="IN WORKSPACE" color="bg-emerald-50 text-emerald-700" />;
+
+  // The disclosure trigger changes presentation state without performing a workspace mutation.
+  function toggleActionsMenu() {
+    setMenuOpen((open) => !open);
+  }
+
+  // A selected destructive action closes the disclosure before confirmation begins.
+  function requestWorkspaceRemoval() {
+    setMenuOpen(false);
+    detail.handleRemoveFromWorkspace();
+  }
+
+  return (
+    <div ref={menuRef} className="relative">
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={toggleActionsMenu}
+        aria-label="Service actions"
+        aria-haspopup="menu"
+        aria-expanded={menuOpen}
+        className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50"
+      >
+        Actions
+        <ChevronDown className={`h-3.5 w-3.5 text-slate-400 transition-transform ${menuOpen ? "rotate-180" : ""}`} />
+      </button>
+      {/* Destructive workspace membership changes remain one explicit selection beyond opening the menu. */}
+      {menuOpen && (
+        <div role="menu" aria-label="Service actions" className="absolute right-0 top-full z-40 mt-2 w-56 rounded-lg border border-slate-200 bg-white p-1.5 shadow-xl">
+          <button
+            type="button"
+            role="menuitem"
+            data-track="remove_workspace_service"
+            onClick={requestWorkspaceRemoval}
+            disabled={detail.removingWorkspaceService}
+            aria-busy={detail.removingWorkspaceService}
+            className="flex w-full items-center gap-2 whitespace-nowrap rounded-md px-3 py-2 text-left text-sm font-medium text-red-600 hover:bg-red-50 focus:bg-red-50 disabled:cursor-wait disabled:opacity-60"
+          >
+            {detail.removingWorkspaceService ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+            {detail.removingWorkspaceService ? "Removing…" : "Remove from workspace"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function DetailNotices({ srv, importWarnings }: { srv: Service; importWarnings: NonNullable<Service["import_warnings"]> }) {

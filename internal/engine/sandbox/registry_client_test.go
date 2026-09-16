@@ -838,6 +838,7 @@ func TestVerifyServiceExists_ReturnsNameAndCurrentVersion(t *testing.T) {
 	}
 }
 
+// TestFetchServiceVisibilityUsesGraphQLBatch verifies one lookup returns ownership plus non-secret card metadata.
 func TestFetchServiceVisibilityUsesGraphQLBatch(t *testing.T) {
 	firstID := uuid.New()
 	secondID := uuid.New()
@@ -856,8 +857,8 @@ func TestFetchServiceVisibilityUsesGraphQLBatch(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"data": map[string]any{
 				"servicesByIds": []map[string]any{
-					{"id": firstID.String(), "is_owner": true, "is_public": false, "provider": map[string]any{"name": "Mine", "handle": "mine"}, "canonical_ref": "@mine/first"},
-					{"id": secondID.String(), "is_owner": false, "is_public": true, "provider": map[string]any{"name": "Acme", "handle": "acme"}, "canonical_ref": "@acme/second"},
+					{"id": firstID.String(), "description": "Private service", "icon_url": "https://assets.example.com/private.svg", "base_url": "https://private.example.com", "endpoint_count": 7, "webhook_count": 1, "is_owner": true, "is_public": false, "provider": map[string]any{"name": "Mine", "handle": "mine"}, "canonical_ref": "@mine/first"},
+					{"id": secondID.String(), "description": "Public service", "icon_url": "https://assets.example.com/public.svg", "base_url": "https://api.example.com", "endpoint_count": 12, "webhook_count": 3, "is_owner": false, "is_public": true, "provider": map[string]any{"name": "Acme", "handle": "acme"}, "canonical_ref": "@acme/second"},
 				},
 			},
 		})
@@ -873,6 +874,21 @@ func TestFetchServiceVisibilityUsesGraphQLBatch(t *testing.T) {
 	if !strings.Contains(gotQuery, "servicesByIds") {
 		t.Fatalf("expected servicesByIds query, got %s", gotQuery)
 	}
+	if !strings.Contains(gotQuery, "description") {
+		t.Fatalf("expected description in servicesByIds query, got %s", gotQuery)
+	}
+	// Card icons must remain part of the same batched Registry projection as descriptions.
+	if !strings.Contains(gotQuery, "icon_url") {
+		t.Fatalf("expected icon_url in servicesByIds query, got %s", gotQuery)
+	}
+	// Workspace cards use the effective Registry base URL rather than a stale local snapshot.
+	if !strings.Contains(gotQuery, "base_url") {
+		t.Fatalf("expected base_url in servicesByIds query, got %s", gotQuery)
+	}
+	// Contract totals travel with the same batch so workspace cards need no per-card lookup.
+	if !strings.Contains(gotQuery, "endpoint_count") || !strings.Contains(gotQuery, "webhook_count") {
+		t.Fatalf("expected contract totals in servicesByIds query, got %s", gotQuery)
+	}
 	if ids, ok := gotVariables["serviceIds"].([]interface{}); !ok || len(ids) != 2 {
 		t.Fatalf("expected batched serviceIds variable, got %#v", gotVariables["serviceIds"])
 	}
@@ -884,6 +900,19 @@ func TestFetchServiceVisibilityUsesGraphQLBatch(t *testing.T) {
 	}
 	if got[secondID].Provider.Name != "Acme" || got[secondID].Provider.Handle != "acme" || got[secondID].CanonicalRef != "@acme/second" {
 		t.Fatalf("unexpected second provider identity: %+v", got[secondID])
+	}
+	// The typed projection must retain the validated asset URL unchanged.
+	if got[secondID].IconURL != "https://assets.example.com/public.svg" {
+		t.Fatalf("unexpected second icon URL: %+v", got[secondID])
+	}
+	if got[secondID].Description != "Public service" {
+		t.Fatalf("unexpected second description: %+v", got[secondID])
+	}
+	if got[secondID].EndpointCount != 12 || got[secondID].WebhookCount != 3 {
+		t.Fatalf("unexpected second contract totals: %+v", got[secondID])
+	}
+	if got[secondID].BaseURL != "https://api.example.com" {
+		t.Fatalf("unexpected second base URL: %+v", got[secondID])
 	}
 }
 

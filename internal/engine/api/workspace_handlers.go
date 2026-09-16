@@ -483,36 +483,34 @@ var errRegistryVerificationFailed = errors.New("registry verification failed")
 
 var errVersionPinUnavailable = errors.New("version pin unavailable")
 
-// fetchServiceSlugsForListing batch-resolves every listed service's Registry
-// slug (ID -> slug; the reverse direction of resolveWorkspaceServiceSlugs
-// above, which resolves config-as-code slug -> ID) in one round trip,
+// fetchServiceCardMetadataForListing batch-resolves every listed service's
+// Registry-owned description, provider, visibility, and slug in one round trip,
 // mirroring the visibility lookups workspace_config_handlers.go already does
 // for plan/apply, rather than caching it locally: ServiceName is a one-time
 // snapshot taken at add-time (upsertWorkspaceService) and can't answer "what's
 // this service's slug today" for rows added before this field existed, so
 // it's resolved fresh here instead of adding a column that would need its own
-// backfill. A Registry failure degrades to empty slugs rather than failing
-// the whole list -- this endpoint has always been a purely local read
-// otherwise, and a missing slug in the printout is far better than workspace
-// services list becoming unavailable whenever the Registry is unreachable.
-func fetchServiceSlugsForListing(ctx context.Context, verifier ServiceVerifier, apiKey string, serviceIDs []uuid.UUID) map[uuid.UUID]string {
-	slugs := make(map[uuid.UUID]string, len(serviceIDs))
+// backfill. A Registry failure degrades to locally persisted identity rather
+// than failing a workspace list that has historically remained available
+// without Registry connectivity.
+func fetchServiceCardMetadataForListing(ctx context.Context, verifier ServiceVerifier, apiKey string, serviceIDs []uuid.UUID) map[uuid.UUID]sandbox.ServiceVisibility {
+	metadata := make(map[uuid.UUID]sandbox.ServiceVisibility, len(serviceIDs))
+	// Empty workspace pages do not need a Registry round trip.
 	if len(serviceIDs) == 0 {
-		return slugs
+		return metadata
 	}
 	visResolver, ok := verifier.(ServiceVisibilityResolver)
+	// Test or offline verifiers may intentionally omit the optional Registry listing capability.
 	if !ok {
-		return slugs
+		return metadata
 	}
 	visibility, err := visResolver.FetchServiceVisibility(ctx, serviceIDs, apiKey)
+	// Registry outages must not turn a durable local workspace into an unavailable page.
 	if err != nil {
-		slog.WarnContext(ctx, "fetchServiceSlugsForListing: FetchServiceVisibility failed", slog.Any("error", err))
-		return slugs
+		slog.WarnContext(ctx, "fetchServiceCardMetadataForListing: FetchServiceVisibility failed", slog.Any("error", err))
+		return metadata
 	}
-	for id, vis := range visibility {
-		slugs[id] = displaySlug(vis)
-	}
-	return slugs
+	return visibility
 }
 
 // displaySlug qualifies vis.Slug with its owning provider when the caller

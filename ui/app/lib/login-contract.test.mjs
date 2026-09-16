@@ -9,6 +9,7 @@ const browserRequestSource = readFileSync(new URL("./browser-request.ts", import
 const cliLoginSource = readFileSync(new URL("../routes/cli-login.tsx", import.meta.url), "utf8");
 const integrationsSource = readFileSync(new URL("../routes/integrations.tsx", import.meta.url), "utf8");
 
+// The signed-out surface must expose both supported auth paths and the canonical public policies.
 test("uses managed sign-in with API Key administrator access", () => {
   assert.match(loginSource, /await api\.auth\.startManaged\(\)/);
   assert.match(loginSource, /await api\.auth\.pollManaged/);
@@ -21,6 +22,8 @@ test("uses managed sign-in with API Key administrator access", () => {
   assert.doesNotMatch(loginSource, /"fused-managed-login"/);
   assert.doesNotMatch(loginSource, /popup,width=/);
   assert.doesNotMatch(loginSource, /setApiKey|sessionStorage/);
+  assert.match(loginSource, /href="https:\/\/usefused\.com\/legal\/privacy-policy"/);
+  assert.match(loginSource, /href="https:\/\/usefused\.com\/legal\/terms-of-service"/);
 });
 
 test("keeps managed sign-in failures generic and forces identity choice only on retry", () => {

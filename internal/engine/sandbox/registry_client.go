@@ -63,9 +63,13 @@ type SDKGenerationClient interface {
 }
 
 type CatalogueService struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	IconURL       string `json:"icon_url"`
+	BaseURL       string `json:"base_url"`
+	EndpointCount int    `json:"endpoint_count"`
+	WebhookCount  int    `json:"webhook_count"`
 }
 
 type ServiceVersionRevision struct {
@@ -419,12 +423,17 @@ type ServiceProviderIdentity struct {
 }
 
 type ServiceVisibility struct {
-	ServiceID    uuid.UUID               `json:"id"`
-	IsOwner      bool                    `json:"is_owner"`
-	IsPublic     bool                    `json:"is_public"`
-	Slug         string                  `json:"slug"`
-	Provider     ServiceProviderIdentity `json:"provider"`
-	CanonicalRef string                  `json:"canonical_ref"`
+	ServiceID     uuid.UUID               `json:"id"`
+	Description   string                  `json:"description"`
+	IconURL       string                  `json:"icon_url"`
+	BaseURL       string                  `json:"base_url"`
+	EndpointCount int                     `json:"endpoint_count"`
+	WebhookCount  int                     `json:"webhook_count"`
+	IsOwner       bool                    `json:"is_owner"`
+	IsPublic      bool                    `json:"is_public"`
+	Slug          string                  `json:"slug"`
+	Provider      ServiceProviderIdentity `json:"provider"`
+	CanonicalRef  string                  `json:"canonical_ref"`
 }
 
 // ErrServiceNotFound is returned by VerifyServiceExists when the Registry has
@@ -572,6 +581,7 @@ func currentServiceVersionContract(current string, versions []registryServiceVer
 	return uuid.Nil, fusedobject.ExecutionContractEnvelope{}
 }
 
+// FetchServiceVisibility resolves workspace-visible service presentation and publication state.
 func (c *HTTPRegistryClient) FetchServiceVisibility(ctx context.Context, serviceIDs []uuid.UUID, apiKey string) (map[uuid.UUID]ServiceVisibility, error) {
 	out := map[uuid.UUID]ServiceVisibility{}
 	if len(serviceIDs) == 0 {
@@ -583,6 +593,11 @@ func (c *HTTPRegistryClient) FetchServiceVisibility(ctx context.Context, service
 				servicesByIds(serviceIds: $serviceIds) {
 					id
 					slug
+					description
+					icon_url
+					base_url
+					endpoint_count
+					webhook_count
 					provider { name handle }
 					canonical_ref
 					is_owner
@@ -2398,6 +2413,7 @@ func (c *HTTPRegistryClient) newGraphQLRequest(ctx context.Context, reqBody grap
 	return req, nil
 }
 
+// SearchCatalogue returns Registry services and their display metadata for the Engine catalogue.
 func (c *HTTPRegistryClient) SearchCatalogue(ctx context.Context, searchQuery string, page int, limit int) ([]CatalogueService, error) {
 	query := `
 		query SearchServices($query: String!, $page: Int!, $limit: Int!) {
@@ -2405,6 +2421,10 @@ func (c *HTTPRegistryClient) SearchCatalogue(ctx context.Context, searchQuery st
 				id
 				name
 				description
+				icon_url
+				base_url
+				endpoint_count
+				webhook_count
 			}
 		}
 	`

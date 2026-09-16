@@ -168,9 +168,11 @@ function MobileDrawerHeader({ onClose }: { onClose: () => void }) {
   );
 }
 
+// MobileAuthFooter keeps account actions and public policies available inside the drawer.
 function MobileAuthFooter({ isAuth, onSignIn, onSignOut }: { isAuth: boolean; onSignIn: () => void; onSignOut: () => void }) {
   return (
-    <div className="p-4 border-t border-slate-100">
+    <div className="space-y-3 border-t border-slate-100 p-4">
+      <LegalLinks />
       {isAuth ? (
         <SignOutButton isCollapsed={false} onClick={onSignOut} />
       ) : (
@@ -226,16 +228,30 @@ function DesktopNav({ isAuth, access, isCollapsed, onSignIn }: { isAuth: boolean
   );
 }
 
+// DesktopFooter keeps legal links visible without crowding the collapsed icon rail.
 function DesktopFooter({ isAuth, isCollapsed, onExpand, onSignIn, onSignOut }: { isAuth: boolean; isCollapsed: boolean; onExpand: () => void; onSignIn: () => void; onSignOut: () => void }) {
   return (
     <div className="p-3 border-t border-slate-100 space-y-1">
       {isCollapsed && <ExpandButton onClick={onExpand} />}
+      {/* The collapsed rail stays icon-only because these text links have no unambiguous icon equivalent. */}
+      {!isCollapsed && <LegalLinks />}
       {isAuth ? (
         <SignOutButton isCollapsed={isCollapsed} onClick={onSignOut} />
       ) : (
         <SignInButton isCollapsed={isCollapsed} onClick={onSignIn} />
       )}
     </div>
+  );
+}
+
+// LegalLinks exposes the same public policies before and after workspace authentication.
+function LegalLinks() {
+  return (
+    <nav aria-label="Legal" className="flex items-center gap-2 px-3 pb-1 text-[11px] font-medium text-slate-400">
+      <a href="https://usefused.com/legal/privacy-policy" className="transition-colors hover:text-slate-700 hover:underline">Privacy</a>
+      <span aria-hidden="true">·</span>
+      <a href="https://usefused.com/legal/terms-of-service" className="transition-colors hover:text-slate-700 hover:underline">Terms</a>
+    </nav>
   );
 }
 

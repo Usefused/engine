@@ -175,6 +175,7 @@ export interface Service {
   provider?: { name: string; handle: string } | null;
   canonical_ref?: string | null;
   description: string;
+  icon_url?: string | null;
   base_url: string;
   servers?: {
     url: string;
@@ -814,6 +815,18 @@ export interface ActivatedService {
   /** Cached at add-time for offline resilience (Engine can list without Registry). */
   service_name: string;
   service_slug: string;
+  /** Bare Registry slug used with provider identity to build a detail URL. */
+  registry_slug?: string;
+  /** Registry-owned card metadata is optional when the Registry is unavailable. */
+  description?: string;
+  icon_url?: string | null;
+  base_url?: string;
+  endpoint_count?: number;
+  webhook_count?: number;
+  provider?: { name: string; handle: string } | null;
+  canonical_ref?: string | null;
+  is_owner?: boolean | null;
+  is_public?: boolean | null;
   enabled_versions?: Array<{
     id?: string;
     service_version_id?: string;
@@ -1497,6 +1510,16 @@ export const api = {
               version
               service_name
               service_slug
+              registry_slug
+              description
+              icon_url
+              base_url
+              endpoint_count
+              webhook_count
+              provider { name handle }
+              canonical_ref
+              is_owner
+              is_public
               added_by
               created_at
               enabled_versions { id service_version_id version status created_at enabled_at }
@@ -1519,6 +1542,16 @@ export const api = {
                 version
                 service_name
                 service_slug
+                registry_slug
+                description
+                icon_url
+                base_url
+                endpoint_count
+                webhook_count
+                provider { name handle }
+                canonical_ref
+                is_owner
+                is_public
                 added_by
                 created_at
                 enabled_versions { id service_version_id version status created_at enabled_at }

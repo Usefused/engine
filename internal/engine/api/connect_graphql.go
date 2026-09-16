@@ -165,6 +165,15 @@ var workspaceServiceAuthOptionGraphQLType = graphql.NewObject(graphql.ObjectConf
 	},
 })
 
+// workspaceServiceProviderGraphQLType exposes only public provider attribution needed by service cards and links.
+var workspaceServiceProviderGraphQLType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "WorkspaceServiceProvider",
+	Fields: graphql.Fields{
+		"name":   &graphql.Field{Type: graphql.String},
+		"handle": &graphql.Field{Type: graphql.String},
+	},
+})
+
 var workspaceServiceGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "WorkspaceService",
 	Fields: graphql.Fields{
@@ -173,6 +182,16 @@ var workspaceServiceGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"service_id":         &graphql.Field{Type: graphql.String},
 		"service_name":       &graphql.Field{Type: graphql.String},
 		"service_slug":       &graphql.Field{Type: graphql.String},
+		"registry_slug":      &graphql.Field{Type: graphql.String},
+		"description":        &graphql.Field{Type: graphql.String},
+		"icon_url":           &graphql.Field{Type: graphql.String},
+		"base_url":           &graphql.Field{Type: graphql.String},
+		"endpoint_count":     &graphql.Field{Type: graphql.Int},
+		"webhook_count":      &graphql.Field{Type: graphql.Int},
+		"provider":           &graphql.Field{Type: workspaceServiceProviderGraphQLType},
+		"canonical_ref":      &graphql.Field{Type: graphql.String},
+		"is_owner":           &graphql.Field{Type: graphql.Boolean},
+		"is_public":          &graphql.Field{Type: graphql.Boolean},
 		"version":            &graphql.Field{Type: graphql.String},
 		"service_version_id": &graphql.Field{Type: graphql.String},
 		"enabled_versions":   &graphql.Field{Type: graphql.NewList(workspaceServiceVersionGraphQLType)},
@@ -687,13 +706,13 @@ func workspaceServicesGraphQLField(s store.Store, verifier ServiceVerifier) *gra
 			if err != nil {
 				return nil, fmt.Errorf("list workspace service versions: %w", err)
 			}
-			slugs := fetchServiceSlugsForListing(ctx, verifier, apiKeyFromGraphQLContext(p.Context), serviceIDs)
+			metadata := fetchServiceCardMetadataForListing(ctx, verifier, apiKeyFromGraphQLContext(p.Context), serviceIDs)
 			authOptions, err := fetchWorkspaceServiceAuthOptions(ctx, verifier, apiKeyFromGraphQLContext(p.Context), services)
 			if err != nil {
 				return nil, fmt.Errorf("load workspace service auth options: %w", err)
 			}
 			span.SetAttributes(attribute.Int("service_count", len(services)))
-			return projectGraphQLWorkspaceServices(services, versions, slugs, authOptions), nil
+			return projectGraphQLWorkspaceServices(services, versions, metadata, authOptions), nil
 		},
 	}
 }
@@ -764,7 +783,7 @@ func workspaceServicePageGraphQLField(s store.Store, verifier ServiceVerifier) *
 			if err != nil {
 				return nil, fmt.Errorf("list workspace service versions: %w", err)
 			}
-			slugs := fetchServiceSlugsForListing(ctx, verifier, apiKeyFromGraphQLContext(p.Context), serviceIDs)
+			metadata := fetchServiceCardMetadataForListing(ctx, verifier, apiKeyFromGraphQLContext(p.Context), serviceIDs)
 			authOptions, err := fetchWorkspaceServiceAuthOptions(ctx, verifier, apiKeyFromGraphQLContext(p.Context), services)
 			if err != nil {
 				return nil, fmt.Errorf("load workspace service auth options: %w", err)
@@ -776,7 +795,7 @@ func workspaceServicePageGraphQLField(s store.Store, verifier ServiceVerifier) *
 				page = (offset / limit) + 1
 			}
 			return map[string]interface{}{
-				"data":  projectGraphQLWorkspaceServices(services, versions, slugs, authOptions),
+				"data":  projectGraphQLWorkspaceServices(services, versions, metadata, authOptions),
 				"total": total,
 				"page":  page,
 				"limit": limit,
@@ -2449,18 +2468,46 @@ func projectGraphQLBucketConnectSummary(summary *store.BucketConnectSummary) map
 	}
 }
 
-func projectGraphQLWorkspaceServices(services []store.WorkspaceService, versions map[uuid.UUID][]store.WorkspaceServiceVersion, slugs map[uuid.UUID]string, authOptions map[uuid.UUID][]map[string]interface{}) []map[string]interface{} {
+// projectGraphQLWorkspaceServices combines durable membership with optional Registry-owned display metadata.
+func projectGraphQLWorkspaceServices(services []store.WorkspaceService, versions map[uuid.UUID][]store.WorkspaceServiceVersion, metadata map[uuid.UUID]sandbox.ServiceVisibility, authOptions map[uuid.UUID][]map[string]interface{}) []map[string]interface{} {
 	items := make([]map[string]interface{}, 0, len(services))
 	for _, service := range services {
-		items = append(items, map[string]interface{}{
+		item := map[string]interface{}{
 			"id":         service.ID.String(),
 			"service_id": service.ServiceID.String(), "service_name": service.ServiceName,
-			"service_slug": slugs[service.ServiceID], "version": service.Version,
+			"service_slug": service.ServiceSlug, "registry_slug": service.ServiceSlug, "version": service.Version,
 			"service_version_id": service.ServiceVersionID.String(),
+			"description":        nil,
+			"icon_url":           nil,
+			"base_url":           nil,
+			"endpoint_count":     nil,
+			"webhook_count":      nil,
+			"provider":           nil,
+			"canonical_ref":      nil,
+			"is_owner":           nil,
+			"is_public":          nil,
 			"enabled_versions":   projectGraphQLWorkspaceServiceVersions(versions[service.ServiceID]),
 			"auth_options":       authOptions[service.ServiceID],
 			"added_by":           service.AddedBy.String(), "created_at": formatGraphQLTime(service.CreatedAt),
-		})
+		}
+		// Registry metadata is optional so local membership remains listable during Registry outages.
+		if registryMetadata, ok := metadata[service.ServiceID]; ok {
+			item["service_slug"] = displaySlug(registryMetadata)
+			item["registry_slug"] = registryMetadata.Slug
+			item["description"] = registryMetadata.Description
+			item["icon_url"] = registryMetadata.IconURL
+			item["base_url"] = registryMetadata.BaseURL
+			item["endpoint_count"] = registryMetadata.EndpointCount
+			item["webhook_count"] = registryMetadata.WebhookCount
+			item["canonical_ref"] = registryMetadata.CanonicalRef
+			item["is_owner"] = registryMetadata.IsOwner
+			item["is_public"] = registryMetadata.IsPublic
+			// Empty provider identities remain null instead of rendering a misleading attribution.
+			if registryMetadata.Provider.Name != "" || registryMetadata.Provider.Handle != "" {
+				item["provider"] = map[string]interface{}{"name": registryMetadata.Provider.Name, "handle": registryMetadata.Provider.Handle}
+			}
+		}
+		items = append(items, item)
 	}
 	return items
 }

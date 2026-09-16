@@ -1,6 +1,8 @@
 const TITLES: Record<string, string> = {
   "/": "Fused",
   "/login": "Sign in - Fused",
+  "/privacy-policy": "Privacy Policy - Fused",
+  "/terms-of-service": "Terms of Service - Fused",
   "/integrations": "Services - Fused",
   "/integrations/sdks": "Apps - Fused",
   "/integrations/mcp": "Apps - Fused",
