@@ -27,6 +27,11 @@ var controlPlanePrefixes = []string{
 	"/mcp-config",
 	"/webhook-config",
 	"/engine/graphql",
+	// Only /oauth/connected-apps/* actually resolves here: the protocol
+	// endpoints under the same prefix (/oauth/authorize, /oauth/token, ...)
+	// are excluded first by isRuntimeControlExclusion, which classifyEngineRequest
+	// checks before this prefix match.
+	"/oauth",
 }
 
 var publicEngineRoutes = map[string]struct{}{
@@ -40,6 +45,9 @@ var publicEngineRoutes = map[string]struct{}{
 	"/auth/cli/start":        {},
 	"/auth/cli/poll":         {},
 	"/auth/cli/approve":      {},
+	// RFC 8414 discovery metadata must be fetchable by any OAuth client
+	// library with no credential at all, like every other .well-known route.
+	"/.well-known/oauth-authorization-server": {},
 }
 
 type engineRequestClass string
@@ -183,6 +191,13 @@ func isRuntimeControlExclusion(request *http.Request) bool {
 	if path == "/workspace/connect/callback" || path == "/workspace/connect/input" {
 		return true
 	}
+	// The authorize/consent pair authenticates a browser session directly
+	// (it needs a login redirect on failure, not a JSON 401) and token/revoke
+	// authenticate a third-party client credential, never a Fused control
+	// credential -- all four are excluded from the /oauth control-plane prefix.
+	if isOAuthProviderProtocolRoute(path) {
+		return true
+	}
 	if request.Method != http.MethodPost {
 		return false
 	}
@@ -192,4 +207,13 @@ func isRuntimeControlExclusion(request *http.Request) bool {
 	}
 	parts := strings.Split(strings.TrimPrefix(path, prefix), "/")
 	return len(parts) == 2 && parts[0] != "" && parts[1] == "executions"
+}
+
+func isOAuthProviderProtocolRoute(path string) bool {
+	switch path {
+	case "/oauth/authorize", "/oauth/authorize/consent", "/oauth/token", "/oauth/revoke":
+		return true
+	default:
+		return false
+	}
 }
