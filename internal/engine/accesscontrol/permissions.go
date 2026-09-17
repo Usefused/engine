@@ -3,6 +3,7 @@ package accesscontrol
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 )
@@ -122,6 +123,26 @@ func ValidateResourceType(resourceType ResourceType) error {
 		return nil
 	}
 	return fmt.Errorf("invalid resource type: %q", resourceType)
+}
+
+// GrantableResourceTypes returns every resource type a role can bind this
+// permission at, mirroring permissionSupportsRoleScope in roles.go: every
+// permission can be granted workspace-wide, and some can additionally be
+// granted narrowly at their own resource type. Callers that need to check
+// "does this actor hold this permission anywhere" (rather than at one known
+// resource) use this to enumerate which Scope() calls are meaningful.
+func GrantableResourceTypes(permission Permission) []ResourceType {
+	prefix, _, _ := strings.Cut(string(permission), ".")
+	switch prefix {
+	case "service":
+		return []ResourceType{ResourceWorkspace, ResourceService}
+	case "bucket", "credentials", "connection":
+		return []ResourceType{ResourceWorkspace, ResourceBucket}
+	case "app":
+		return []ResourceType{ResourceWorkspace, ResourceApp}
+	default:
+		return []ResourceType{ResourceWorkspace}
+	}
 }
 
 func newPermissionSet(permissions []Permission) map[Permission]struct{} {

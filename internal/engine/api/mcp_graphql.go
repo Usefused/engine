@@ -22,6 +22,7 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/applifecycle"
+	"github.com/Usefused/engine/internal/engine/oauthprovider"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
@@ -254,6 +255,12 @@ func firstGraphQLAuthorizationResources(values []graphQLAuthorizationResources) 
 }
 
 func authorizeGraphQLPlan(ctx context.Context, actor accesscontrol.Actor, plan graphQLAuthorizationPlan) error {
+	// A delegated OAuth token's scope is drawn from the same permission
+	// catalogue as every other grant, so a permission check alone cannot
+	// exclude it from fields that must stay unreachable regardless of scope.
+	if plan.excludesDelegatedClient && oauthprovider.IsOAuthClientActor(actor) {
+		return accesscontrol.ErrPolicyDenied
+	}
 	authorizer := accesscontrol.SnapshotAuthorizer{}
 	if err := authorizer.CheckAll(ctx, actor, plan.requirements...); err != nil {
 		return err

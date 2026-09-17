@@ -3,7 +3,6 @@ package accesscontrol
 import (
 	"errors"
 	"fmt"
-	"strings"
 )
 
 const (
@@ -207,18 +206,10 @@ func validateRolePermissions(role RoleDefinition) error {
 }
 
 func permissionSupportsRoleScope(permission Permission, scope ResourceType) bool {
-	if scope == ResourceWorkspace {
-		return true
+	for _, grantable := range GrantableResourceTypes(permission) {
+		if grantable == scope {
+			return true
+		}
 	}
-	prefix, _, _ := strings.Cut(string(permission), ".")
-	switch prefix {
-	case "service":
-		return scope == ResourceService
-	case "bucket", "credentials", "connection":
-		return scope == ResourceBucket
-	case "app":
-		return scope == ResourceApp
-	default:
-		return false
-	}
+	return false
 }

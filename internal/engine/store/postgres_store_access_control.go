@@ -14,7 +14,22 @@ import (
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 )
 
+// LoadControlPrincipal resolves a control-plane credential hash to its
+// authenticated principal. It tries the fused_control_credentials table
+// first and only falls back to fused_oauth_tokens on a clean "not found",
+// so the hand-tuned query below stays untouched and every existing
+// REST/GraphQL handler keeps working against a delegated OAuth token with no
+// per-endpoint change: accesscontrol.Authenticator caches and invalidates the
+// result identically regardless of which table resolved it.
 func (s *postgresStore) LoadControlPrincipal(ctx context.Context, credentialHash string) (accesscontrol.ControlPrincipal, error) {
+	principal, err := s.loadControlCredentialPrincipal(ctx, credentialHash)
+	if err == nil || !errors.Is(err, accesscontrol.ErrAuthenticationRequired) {
+		return principal, err
+	}
+	return s.loadOAuthTokenPrincipal(ctx, credentialHash)
+}
+
+func (s *postgresStore) loadControlCredentialPrincipal(ctx context.Context, credentialHash string) (accesscontrol.ControlPrincipal, error) {
 	query := `
 		WITH candidate AS (
 			SELECT w.id AS workspace_id, w.account_id, c.id AS credential_id, c.subject_id, c.expires_at,
@@ -73,6 +88,75 @@ func (s *postgresStore) LoadControlPrincipal(ctx context.Context, credentialHash
 	rows, err := s.db.Query(ctx, query, credentialHash)
 	if err != nil {
 		return accesscontrol.ControlPrincipal{}, fmt.Errorf("load control principal: %w", err)
+	}
+	defer rows.Close()
+
+	principal, found, err := scanControlPrincipal(rows)
+	if err != nil {
+		return accesscontrol.ControlPrincipal{}, err
+	}
+	if !found {
+		return accesscontrol.ControlPrincipal{}, accesscontrol.ErrAuthenticationRequired
+	}
+	return principal, nil
+}
+
+// loadOAuthTokenPrincipal mirrors loadControlCredentialPrincipal's shape
+// exactly (same output columns, so scanControlPrincipal is reused unchanged)
+// but resolves against fused_oauth_tokens and additionally intersects
+// effective_grants with the token's own granted scope: a delegated token
+// never authorizes anything beyond what its consent covered, even if the
+// authorizing user's own permissions have since grown.
+func (s *postgresStore) loadOAuthTokenPrincipal(ctx context.Context, credentialHash string) (accesscontrol.ControlPrincipal, error) {
+	query := `
+		WITH candidate AS (
+			SELECT w.id AS workspace_id, w.account_id, t.id AS credential_id, t.subject_id, t.access_expires_at,
+				'oauth_client'::text AS source, 'oauth2'::text AS auth_method,
+				s.kind, s.display_name, COALESCE(user_row.email_display, '') AS email_display,
+				state.revision, t.scope AS token_scope
+			FROM fused_oauth_tokens t
+			JOIN fused_subjects s ON s.id = t.subject_id
+			LEFT JOIN fused_users user_row ON user_row.subject_id = s.id
+			JOIN fused_workspaces w ON w.singleton_key = 1
+			JOIN fused_authorization_state state ON state.singleton_key = 1
+			WHERE t.access_token_hash = $1
+				AND t.revoked_at IS NULL
+				AND t.access_expires_at > NOW()
+				AND s.status = 'active'
+		), principals(subject_type, subject_id) AS (
+			SELECT 'subject'::text, subject_id FROM candidate
+			UNION ALL
+			SELECT 'team'::text, membership.team_id
+			FROM candidate actor
+			JOIN fused_team_memberships membership ON membership.member_subject_id = actor.subject_id
+			JOIN fused_teams team ON team.id = membership.team_id AND team.status = 'active'
+			UNION ALL
+			SELECT 'workspace'::text, workspace_id FROM candidate
+		), effective_grants AS (
+			SELECT DISTINCT permission.permission, binding.resource_type, binding.resource_id
+			FROM principals principal
+			JOIN fused_role_bindings binding
+				ON binding.subject_type = principal.subject_type
+				AND binding.subject_id = principal.subject_id
+			JOIN fused_roles role
+				ON role.id = binding.role_id AND role.scope_type = binding.resource_type
+			JOIN fused_role_permissions permission ON permission.role_id = role.id
+			JOIN candidate ON true
+			WHERE (binding.resource_type <> 'workspace' OR binding.resource_id = candidate.workspace_id)
+				AND permission.permission = ANY(candidate.token_scope)
+		)
+		SELECT candidate.account_id, candidate.workspace_id, candidate.subject_id, candidate.display_name,
+			candidate.email_display, candidate.credential_id, candidate.kind, candidate.access_expires_at,
+			candidate.source, candidate.auth_method, candidate.revision,
+			effective.permission, effective.resource_type,
+			effective.resource_id
+		FROM candidate
+		LEFT JOIN effective_grants effective ON true
+		ORDER BY effective.permission, effective.resource_type, effective.resource_id
+	`
+	rows, err := s.db.Query(ctx, query, credentialHash)
+	if err != nil {
+		return accesscontrol.ControlPrincipal{}, fmt.Errorf("load OAuth token principal: %w", err)
 	}
 	defer rows.Close()
 
